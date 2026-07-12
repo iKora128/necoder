@@ -1,0 +1,12 @@
+# Shirushi English locale.
+# Discipline (ARCHITECTURE §6 / UI-SPEC §10): every UI string goes through t!("area.key").
+# Keep the SAME key set as ja.yml (the parity test in crates/i18n fails on drift).
+app:
+  name: Shirushi
+editor:
+  empty_hint: Pass a file path as an argument to open it (e.g. shirushi README.md)
+common:
+  untitled: Untitled
+finder:
+  files: Search files…
+  projects: Switch project…

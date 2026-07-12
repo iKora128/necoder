@@ -1,0 +1,16 @@
+[package]
+name = "editor_view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/editor_view.rs"
+
+[dependencies]
+gpui.workspace = true
+editor_core.workspace = true
+theme_core.workspace = true
+lang.workspace = true
+i18n.workspace = true

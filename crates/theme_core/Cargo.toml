@@ -1,0 +1,13 @@
+[package]
+name = "theme_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/theme_core.rs"
+
+[dependencies]
+gpui.workspace = true
+anyhow.workspace = true

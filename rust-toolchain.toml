@@ -1,0 +1,5 @@
+[toolchain]
+# zed/rust-toolchain.toml と同じチャンネルに揃える（GPUI のビルド要件）
+channel = "1.95.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

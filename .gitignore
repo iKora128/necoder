@@ -1,0 +1,8 @@
+# 参照用クローン（各自の巨大リポジトリ。git 管理しない）
+/zed/
+
+# Rust
+/target/
+
+# macOS
+.DS_Store

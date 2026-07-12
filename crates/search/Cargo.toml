@@ -1,0 +1,13 @@
+[package]
+name = "search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/search.rs"
+
+[dependencies]
+anyhow.workspace = true
+regex.workspace = true

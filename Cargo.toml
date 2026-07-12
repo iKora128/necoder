@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# zed/ は参照用クローン（独立ワークスペース）。path 依存の解決のため除外指定
+exclude = ["zed"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+# GPUI はリポジトリ内の Zed クローンを path 参照（API の正は zed/ の現行ソース）。
+# 安定フェーズで git rev 固定へ移行する（docs/DECISIONS.md 参照）
+gpui = { path = "zed/crates/gpui" }
+gpui_platform = { path = "zed/crates/gpui_platform" }
+# バージョン制約は zed/Cargo.toml に揃える（既に lock 済みの版を共有してビルドを重複させない）
+anyhow = "1.0.86"
+ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+ignore = "0.4"
+regex = "1"
+# tree-sitter（M7 ハイライト）。links=tree-sitter は 1 版のみ許容 → highlight 0.25 に揃える
+tree-sitter = "0.25"
+tree-sitter-highlight = "0.25"
+tree-sitter-rust = "0.24"
+# M4 ACP: Claude Code を ACP で包む
+agent-client-protocol = "1.2"
+blocking = "1"
+futures = "0.3"
+# 自前ヘッドレススクショ用（gpui の render_to_image が image::RgbaImage を返す）
+image = "0.25"
+
+# 自作 crate（作る順は docs/ARCHITECTURE.md §2）
+theme_core = { path = "crates/theme_core" }
+i18n = { path = "crates/i18n" }
+editor_core = { path = "crates/editor_core" }
+editor_view = { path = "crates/editor_view" }
+settings_core = { path = "crates/settings_core" }
+settings = { path = "crates/settings" }
+keymap_core = { path = "crates/keymap_core" }
+project = { path = "crates/project" }
+search = { path = "crates/search" }
+lang = { path = "crates/lang" }
+acp_client = { path = "crates/acp_client" }
+agent_panel = { path = "crates/agent_panel" }
+ui = { path = "crates/ui" }
+workspace = { path = "crates/workspace" }

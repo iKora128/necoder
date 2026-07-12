@@ -1,0 +1,13 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/ui.rs"
+
+[dependencies]
+gpui.workspace = true
+theme_core.workspace = true

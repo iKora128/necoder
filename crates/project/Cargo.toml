@@ -1,0 +1,13 @@
+[package]
+name = "project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/project.rs"
+
+[dependencies]
+anyhow.workspace = true
+ignore.workspace = true

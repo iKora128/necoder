@@ -1,0 +1,21 @@
+[package]
+name = "workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/workspace.rs"
+
+[dependencies]
+gpui.workspace = true
+editor_core.workspace = true
+editor_view.workspace = true
+theme_core.workspace = true
+project.workspace = true
+agent_panel.workspace = true
+ui.workspace = true
+i18n.workspace = true
+serde.workspace = true
+serde_json.workspace = true

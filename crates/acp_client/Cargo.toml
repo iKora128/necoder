@@ -1,0 +1,15 @@
+[package]
+name = "acp_client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/acp_client.rs"
+
+[dependencies]
+anyhow.workspace = true
+agent-client-protocol.workspace = true
+blocking.workspace = true
+futures.workspace = true

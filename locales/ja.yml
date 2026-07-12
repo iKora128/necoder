@@ -1,0 +1,13 @@
+# Shirushi 日本語ロケール（i18n の原文）。
+# 規律（ARCHITECTURE §6 / UI-SPEC §10）: UI 文字列は全て t!("領域.キー") 経由。
+# キーは英語スネークケースの領域プレフィックス。en.yml と**同じキー集合**を保つこと
+# （crates/i18n の parity テストが差分を検出する）。
+app:
+  name: しるし
+editor:
+  empty_hint: 起動引数でファイルを渡すと開きます（例 shirushi README.md）
+common:
+  untitled: 無題
+finder:
+  files: ファイルを検索…
+  projects: プロジェクトを切り替え…
