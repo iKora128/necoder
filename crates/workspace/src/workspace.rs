@@ -3190,8 +3190,8 @@ impl Workspace {
                 element.child(div().text_size(px(11.)).text_color(fg2).child("…"))
             });
 
-        // ── 変更一覧（staged / unstaged）──
-        let mut body = div().flex_1().flex().flex_col().min_h_0().overflow_hidden().pb(px(6.));
+        // ── 変更一覧（staged / unstaged）。高さを抑えて下に履歴を置く ──
+        let mut body = div().flex_none().max_h(px(240.)).flex().flex_col().overflow_hidden().pb(px(6.));
         let staged_count = changes.iter().filter(|change| change.staged.is_some()).count();
         let unstaged_count = changes.iter().filter(|change| change.unstaged.is_some()).count();
         if staged_count > 0 {
@@ -3231,6 +3231,8 @@ impl Workspace {
             .child(input_row)
             .when(!naming, |element| element.child(actions))
             .child(body)
+            .child(div().h(px(1.)).flex_none().bg(border))
+            .child(self.render_git_history(&root))
             .into_any_element()
     }
 
@@ -3381,6 +3383,142 @@ impl Workspace {
                     ),
             )
             .into_any_element()
+    }
+
+    /// git 履歴（コミットグラフ・M8）。レーン線＝矩形（railway）で描き、色はプロジェクト色
+    /// パレットに乗せる（ブランチ＝色。「色による方向感覚」）。点/線/コネクタは絶対配置の div。
+    fn render_git_history(&self, root: &Path) -> impl IntoElement {
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let commits = project::git_log_graph(root, 30);
+        // 描画幅のための最大レーン。
+        let max_lane = commits
+            .iter()
+            .map(|commit| {
+                commit
+                    .lanes_in
+                    .iter()
+                    .chain(&commit.lanes_out)
+                    .chain(&commit.connectors)
+                    .copied()
+                    .fold(commit.dot_lane, usize::max)
+            })
+            .max()
+            .unwrap_or(0);
+        let lane_w = 14.0_f32;
+        let row_h = 22.0_f32;
+        let mid = row_h / 2.0;
+        let thick = 1.5_f32;
+        let dot_r = 3.0_f32;
+        let cell_w = (max_lane as f32 + 1.0) * lane_w;
+        let lane_x = |lane: usize| lane as f32 * lane_w + lane_w / 2.0;
+
+        let mut list = div().flex().flex_col().flex_1().min_h_0().overflow_hidden().child(
+            div()
+                .flex_none()
+                .px(px(10.))
+                .py(px(3.))
+                .pt(px(6.))
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.fg2)
+                .child("履歴"),
+        );
+
+        for commit in &commits {
+            // ── グラフセル（点 + 縦レーン + 横コネクタ）──
+            let mut cell = div().relative().flex_none().h(px(row_h)).w(px(cell_w));
+            for &lane in &commit.lanes_in {
+                cell = cell.child(
+                    div()
+                        .absolute()
+                        .left(px(lane_x(lane) - thick / 2.0))
+                        .top(px(0.))
+                        .w(px(thick))
+                        .h(px(mid))
+                        .bg(project_color(lane)),
+                );
+            }
+            for &lane in &commit.lanes_out {
+                cell = cell.child(
+                    div()
+                        .absolute()
+                        .left(px(lane_x(lane) - thick / 2.0))
+                        .top(px(mid))
+                        .w(px(thick))
+                        .h(px(row_h - mid))
+                        .bg(project_color(lane)),
+                );
+            }
+            for &lane in &commit.connectors {
+                let start = lane_x(commit.dot_lane).min(lane_x(lane));
+                let end = lane_x(commit.dot_lane).max(lane_x(lane));
+                cell = cell.child(
+                    div()
+                        .absolute()
+                        .left(px(start))
+                        .top(px(mid - thick / 2.0))
+                        .w(px(end - start))
+                        .h(px(thick))
+                        .bg(project_color(commit.dot_lane)),
+                );
+            }
+            cell = cell.child(
+                div()
+                    .absolute()
+                    .left(px(lane_x(commit.dot_lane) - dot_r))
+                    .top(px(mid - dot_r))
+                    .w(px(dot_r * 2.0))
+                    .h(px(dot_r * 2.0))
+                    .rounded(px(dot_r))
+                    .bg(project_color(commit.dot_lane)),
+            );
+
+            // ── テキスト（ref チップ + 要約 + hash）──
+            let mut text =
+                div().flex_1().flex().items_center().gap(px(6.)).overflow_hidden().whitespace_nowrap();
+            for reference in &commit.refs {
+                let is_head = reference.contains("HEAD");
+                let label = reference.trim_start_matches("HEAD -> ").to_string();
+                text = text.child(
+                    div()
+                        .flex_none()
+                        .px(px(4.))
+                        .rounded(px(3.))
+                        .text_size(px(9.5))
+                        .bg(theme.bg2)
+                        .text_color(if is_head { accent } else { theme.fg2 })
+                        .child(SharedString::from(label)),
+                );
+            }
+            text = text
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(11.5))
+                        .text_color(theme.fg1)
+                        .child(SharedString::from(commit.summary.clone())),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(commit.short_hash.clone())),
+                );
+
+            list = list.child(
+                div().flex().items_center().gap(px(6.)).px(px(10.)).h(px(row_h)).child(cell).child(text),
+            );
+        }
+        if commits.is_empty() {
+            list = list.child(
+                div().px(px(12.)).py(px(6.)).text_size(px(11.)).text_color(theme.fg2).child("コミットがありません"),
+            );
+        }
+        list
     }
 
     fn render_branch_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {

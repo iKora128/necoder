@@ -533,6 +533,148 @@ fn worktree_status(y: u8) -> Option<StatusKind> {
     }
 }
 
+// ── git graph（M8: コミットグラフ。色による方向感覚＝レーン色をパレットに乗せる） ──
+
+/// git graph の 1 行（ログ + レーン割当済み）。描画は右角（railway）方式で線＝矩形に落とす。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphCommit {
+    pub short_hash: String,
+    pub summary: String,
+    /// ref ラベル（`HEAD -> main`, `origin/main`, タグ等）。
+    pub refs: Vec<String>,
+    /// コミットの点が乗るレーン。
+    pub dot_lane: usize,
+    /// この行の上半分に伸びる縦線のレーン（上の行から降りてくる線）。
+    pub lanes_in: Vec<usize>,
+    /// この行の下半分に伸びる縦線のレーン（下の行へ降りる線）。
+    pub lanes_out: Vec<usize>,
+    /// 点（dot_lane）と横で結ぶ相手レーン（分岐＝第2親 / 合流＝子の収束）。
+    pub connectors: Vec<usize>,
+}
+
+/// ログ解析前の生コミット（親・要約・ref）。レーン割当の入力。
+struct RawCommit {
+    hash: String,
+    parents: Vec<String>,
+    summary: String,
+    refs: Vec<String>,
+}
+
+/// 直近 `limit` 件のコミットグラフを返す（`git log` → レーン割当）。repo 外は空。
+pub fn git_log_graph(dir: &Path, limit: usize) -> Vec<GraphCommit> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args([
+            "--no-optional-locks",
+            "log",
+            &format!("-n{limit}"),
+            // topo 順で「子は必ず親より前」を保証（レーン割当の前提）＝ git log --graph と同じ並び。
+            "--topo-order",
+            // %h=短縮hash %p=短縮親 %s=要約 %D=ref名。0x1f 区切り・行=コミット。
+            "--pretty=format:%h%x1f%p%x1f%s%x1f%D",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut raws = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split('\u{1f}');
+        let hash = match parts.next() {
+            Some(hash) if !hash.is_empty() => hash.to_string(),
+            _ => continue,
+        };
+        let parents =
+            parts.next().unwrap_or("").split_whitespace().map(str::to_string).collect();
+        let summary = parts.next().unwrap_or("").to_string();
+        let refs = parts
+            .next()
+            .unwrap_or("")
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        raws.push(RawCommit { hash, parents, summary, refs });
+    }
+    layout_graph(&raws)
+}
+
+/// レーン割当（git log --graph 相当の縦レーン + 分岐/合流コネクタ）。テスト可能な純関数。
+fn layout_graph(raws: &[RawCommit]) -> Vec<GraphCommit> {
+    // lanes[l] = そのレーンが次に描くのを待っている commit hash（無ければ空）。
+    let mut lanes: Vec<Option<String>> = Vec::new();
+    let mut result = Vec::with_capacity(raws.len());
+
+    for raw in raws {
+        let lanes_in: Vec<usize> =
+            lanes.iter().enumerate().filter_map(|(i, lane)| lane.as_ref().map(|_| i)).collect();
+
+        // 点のレーン: このコミットを待っているレーン。無ければ空きレーン（＝ブランチ先端）。
+        let dot_lane = match lanes.iter().position(|lane| lane.as_deref() == Some(raw.hash.as_str())) {
+            Some(lane) => lane,
+            None => match lanes.iter().position(Option::is_none) {
+                Some(lane) => lane,
+                None => {
+                    lanes.push(None);
+                    lanes.len() - 1
+                }
+            },
+        };
+
+        let mut connectors = Vec::new();
+
+        // 同じ hash を待つ他レーンを dot_lane へ畳む（複数の子が合流）。
+        for (index, lane) in lanes.iter_mut().enumerate() {
+            if index != dot_lane && lane.as_deref() == Some(raw.hash.as_str()) {
+                *lane = None;
+                connectors.push(index);
+            }
+        }
+
+        // 第1親は同じレーンを継続。親が無ければ根（レーンを空ける）。
+        match raw.parents.first() {
+            Some(first) => lanes[dot_lane] = Some(first.clone()),
+            None => lanes[dot_lane] = None,
+        }
+        // 第2親以降は別レーンへ（既に待っていれば再利用・無ければ空き・無ければ新設）。
+        for parent in raw.parents.iter().skip(1) {
+            let target = lanes
+                .iter()
+                .position(|lane| lane.as_deref() == Some(parent.as_str()))
+                .or_else(|| lanes.iter().position(Option::is_none))
+                .unwrap_or_else(|| {
+                    lanes.push(None);
+                    lanes.len() - 1
+                });
+            lanes[target] = Some(parent.clone());
+            connectors.push(target);
+        }
+
+        // 末尾の空きレーンを畳む（幅を詰める。中間の空きは位置維持のため残す）。
+        while lanes.last() == Some(&None) {
+            lanes.pop();
+        }
+
+        let lanes_out: Vec<usize> =
+            lanes.iter().enumerate().filter_map(|(i, lane)| lane.as_ref().map(|_| i)).collect();
+
+        result.push(GraphCommit {
+            short_hash: raw.hash.clone(),
+            summary: raw.summary.clone(),
+            refs: raw.refs.clone(),
+            dot_lane,
+            lanes_in,
+            lanes_out,
+            connectors,
+        });
+    }
+    result
+}
+
 /// gutter diff の 1 ハンク種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HunkKind {
@@ -829,5 +971,59 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn layout_graph_diamond_merge() {
+        let raw = |hash: &str, parents: &[&str]| RawCommit {
+            hash: hash.to_string(),
+            parents: parents.iter().map(|parent| parent.to_string()).collect(),
+            summary: String::new(),
+            refs: Vec::new(),
+        };
+        // C(merge B,D) / B(A) / D(A) / A(root) → ダイヤモンド
+        let rows = layout_graph(&[
+            raw("C", &["B", "D"]),
+            raw("B", &["A"]),
+            raw("D", &["A"]),
+            raw("A", &[]),
+        ]);
+        assert_eq!(rows.len(), 4);
+        // C はレーン0、D 用にレーン1へ分岐
+        assert_eq!(rows[0].dot_lane, 0);
+        assert!(rows[0].connectors.contains(&1), "C→D の分岐コネクタ");
+        // D はレーン1
+        assert_eq!(rows[2].dot_lane, 1);
+        // A で 2 レーンが合流（レーン1→0）
+        assert_eq!(rows[3].dot_lane, 0);
+        assert!(rows[3].connectors.contains(&1), "D 側レーンが A で合流");
+        // A は根（下へ伸びる線は無い）
+        assert!(rows[3].lanes_out.is_empty());
+    }
+
+    #[test]
+    fn git_log_graph_linear_on_temp_repo() {
+        let root = scratch("gitgraph");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").current_dir(&root).args(args).output().expect("git 実行")
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "tester"]);
+        for name in ["one", "two", "three"] {
+            std::fs::write(root.join("a.txt"), format!("{name}\n")).unwrap();
+            git(&["add", "-A"]);
+            git(&["commit", "-q", "-m", name]);
+        }
+        let graph = git_log_graph(&root, 10);
+        assert_eq!(graph.len(), 3);
+        // 直線履歴 → 全部レーン0・要約は新しい順（three → two → one）
+        assert!(graph.iter().all(|commit| commit.dot_lane == 0));
+        assert_eq!(graph[0].summary, "three");
+        assert_eq!(graph[2].summary, "one");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
