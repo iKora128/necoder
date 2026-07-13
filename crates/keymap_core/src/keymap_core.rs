@@ -117,8 +117,20 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
     "bindings": {
       "cmd-p": "workspace::FileFinder",
       "cmd-o": "workspace::ProjectSwitcher",
+      "cmd-shift-f": "workspace::ProjectSearch",
+      "cmd-shift-t": "workspace::ThemeSelector",
       "cmd-w": "workspace::CloseTab",
       "cmd-shift-a": "workspace::NewThread",
+      "cmd-shift-n": "workspace::NewWindow",
+      "cmd-1": "workspace::ActivateProject1",
+      "cmd-2": "workspace::ActivateProject2",
+      "cmd-3": "workspace::ActivateProject3",
+      "cmd-4": "workspace::ActivateProject4",
+      "cmd-5": "workspace::ActivateProject5",
+      "cmd-6": "workspace::ActivateProject6",
+      "cmd-7": "workspace::ActivateProject7",
+      "cmd-8": "workspace::ActivateProject8",
+      "cmd-9": "workspace::ActivateProject9",
       "cmd-q": "shirushi::Quit"
     }
   }

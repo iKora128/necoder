@@ -291,3 +291,13 @@
 - 開発フック: `SHIRUSHI_CONTEXT_MENU=1`（ルートの右クリックメニューを開いた状態で撮る）。実機スクショで「新規ウィンドウで開く/このフォルダを開く/パスをコピー」の浮遊メニュー確認
 - 罠: 構造体リテラルはフィールド記述順に評価＝`projects,`（move）の後に `explorer_context_menu:` で `projects.first()` を使うと moved value error。リテラル前にローカルへ計算してから shorthand
 - 結果: 警告 0・test 68 passed。**M5 ファイルエクスプローラ = アイコン/3表示/上位ナビ/幅可変/右クリック 一通り完成**。新規ウィンドウ開くの round-trip は live 検証待ち（コードは main.rs と同じ open_window パターン）
+
+## 2026-07-13 — 「全部やりきる」Phase A: M3/M5/M6 残り（⌘1-9・新窓・root上ブラウズ・検索パネル・テーマセレクタ）
+- ユーザー: 「全部やりきってください。基本のエディタ機能はZedを参考に」。ROADMAP の実装可能な残り全量に着手。まず重い Zed 移植3本（git / terminal / LSP）を並行調査に出し、要点を `docs/research/porting-git-terminal-lsp.md` に永続化（git=CLI直叩き+`imara-diff` / terminal=`alacritty_terminal`（EventLoopが読取+parser）/ LSP=`lsp-types 0.97`+自前JSON-RPC封筒+ropey UTF-16変換）
+- **⌘1..9 / 新窓**: `ActivateProject1..9`（レール切替）+ `NewWindow`。新窓は **⌘⇧N**（⌘⏎ は composer 送信と衝突するため変更）。keymap 全解決を実機 stderr で確認
+- **検索パネル（M6 受入）**: `SearchState`（クエリ+大小/正規表現トグル+ファイル別結果）オーバーレイ。`⌘⇧F`。マッチは先頭空白除去してアクセント色強調（`whitespace_nowrap`・`.inline()` は gpui に無い）。クリック/Enter で `EditorView::reveal_position`（**pending_reveal**＝初回描画前でも viewport 確定後の prepaint で対象行を中央へ・one-shot で idle 0%）。offscreen で「fn」440件のファイル別結果を目視
+- **root 上ブラウズ（M5 受入）**: `project::Worktree::read_any_dir`（ルート外は gitignore 無しで列挙）。ブレッドクラムに **⤴上へ** + ルート外は **⌂プロジェクト戻る**。`enter_dir` がルート外へ出たら Tree→Columns 自動切替。offscreen で隣接 repo 一覧を目視
+- **テーマセレクタ（M3）**: `theme_core` にユーザーテーマ JSON（トークン上書き・`appearance` を土台に欠けは組み込みへ）・`available_themes`/`resolve`。`⌘⇧T` で Picker、**`PickerEvent::Highlighted` で即ライブプレビュー**、確定で settings.json へ theme 名保存・中止で戻す。`apply_theme` がクローム/エディタ/Agentパネル/Picker へ波及（`EditorView::set_theme`/`AgentPanel::set_theme`/`Picker::set_theme` 追加）。light 全体反映を offscreen で目視
+- 学び/罠: **raw 文字列に hex 色 `"#..."` を含めると `r#"..."#` が `"#` で早期終了** → `r##"..."##`。gpui に `.inline()` 無し（inline テキストは flex 行 + `whitespace_nowrap`）。`Picker` は汎用なので Highlighted を全モードで emit するが workspace 側でモード判定して無視
+- 結果: 警告 0・**test 67 passed**（workspace 全体）。M3 テーマ/⌘1-9/新窓・M5 root上ブラウズ・M6 検索ジャンプ = 受入達成
+- 次: Phase B = git status 色（ツリー/タブ）+ gutter diff（`imara-diff`）+ branch/worktree メニュー

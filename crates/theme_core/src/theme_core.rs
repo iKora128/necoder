@@ -13,7 +13,8 @@
 
 use anyhow::{Context as _, Result};
 use gpui::{Hsla, Rgba, SharedString, rgb};
-use std::path::PathBuf;
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 /// 面が明るいか暗いか。既定テーマの選択や syn-* の前提に使う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,17 +135,13 @@ impl Theme {
     }
 
     /// [`ThemeSource`] からテーマを読み込む。
-    /// ユーザーテーマ（トークン上書き JSON）の読み込みは M3 で実装するため、
-    /// 現状は未実装であることを明示的にエラーで返す（黙って握り潰さない）。
+    /// ユーザーテーマは「トークン上書き JSON」1 枚（欠けたキーは `appearance` に応じた組み込みへフォールバック）。
     pub fn load(source: &ThemeSource) -> Result<Theme> {
         match source {
             ThemeSource::BuiltIn(name) => {
                 Theme::builtin(name).with_context(|| format!("組み込みテーマが存在しない: {name}"))
             }
-            ThemeSource::User(path) => anyhow::bail!(
-                "ユーザーテーマ JSON の読み込みは未実装（M3 予定）: {}",
-                path.display()
-            ),
+            ThemeSource::User(path) => load_user_theme(path),
         }
     }
 
@@ -161,6 +158,171 @@ impl Theme {
 pub enum ThemeSource {
     BuiltIn(&'static str),
     User(PathBuf),
+}
+
+// ── ユーザーテーマ JSON（トークン上書き）──
+
+/// ユーザーテーマ JSON を読み、`appearance`（dark/light）を土台に指定トークンを上書きして返す。
+/// 欠けたキーは土台のまま＝「上書き JSON」（UI-SPEC §1.1「きせかえ契約」）。
+fn load_user_theme(path: &Path) -> Result<Theme> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("テーマ JSON を読めない: {}", path.display()))?;
+    let overrides: ThemeOverrides = serde_json::from_str(&text)
+        .with_context(|| format!("テーマ JSON の解析に失敗: {}", path.display()))?;
+    Ok(overrides.into_theme())
+}
+
+/// トークン上書き JSON（全フィールド任意）。色は `#rrggbb` / `#rrggbbaa`。
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ThemeOverrides {
+    name: Option<String>,
+    appearance: Option<String>,
+    bg0: Option<String>,
+    bg1: Option<String>,
+    bg2: Option<String>,
+    bg3: Option<String>,
+    fg0: Option<String>,
+    fg1: Option<String>,
+    fg2: Option<String>,
+    border: Option<String>,
+    ok: Option<String>,
+    warn: Option<String>,
+    err: Option<String>,
+    syntax: Option<SyntaxOverrides>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SyntaxOverrides {
+    keyword: Option<String>,
+    function: Option<String>,
+    #[serde(rename = "type")]
+    type_: Option<String>,
+    string: Option<String>,
+    number: Option<String>,
+    comment: Option<String>,
+    #[serde(rename = "macro")]
+    macro_: Option<String>,
+    punctuation: Option<String>,
+}
+
+impl ThemeOverrides {
+    fn into_theme(self) -> Theme {
+        // 土台は appearance で選ぶ（既定 dark）。
+        let mut theme = match self.appearance.as_deref() {
+            Some("light") => Theme::light(),
+            _ => Theme::dark(),
+        };
+        if let Some(name) = self.name {
+            theme.name = name.into();
+        }
+        override_color(&mut theme.bg0, self.bg0);
+        override_color(&mut theme.bg1, self.bg1);
+        override_color(&mut theme.bg2, self.bg2);
+        override_color(&mut theme.bg3, self.bg3);
+        override_color(&mut theme.fg0, self.fg0);
+        override_color(&mut theme.fg1, self.fg1);
+        override_color(&mut theme.fg2, self.fg2);
+        override_color(&mut theme.border, self.border);
+        override_color(&mut theme.ok, self.ok);
+        override_color(&mut theme.warn, self.warn);
+        override_color(&mut theme.err, self.err);
+        if let Some(syntax) = self.syntax {
+            override_color(&mut theme.syntax.keyword, syntax.keyword);
+            override_color(&mut theme.syntax.function, syntax.function);
+            override_color(&mut theme.syntax.type_, syntax.type_);
+            override_color(&mut theme.syntax.string, syntax.string);
+            override_color(&mut theme.syntax.number, syntax.number);
+            override_color(&mut theme.syntax.comment, syntax.comment);
+            override_color(&mut theme.syntax.macro_, syntax.macro_);
+            override_color(&mut theme.syntax.punctuation, syntax.punctuation);
+        }
+        theme
+    }
+}
+
+/// `value` が有効な hex なら `field` を上書き（不正・欠損は土台のまま）。
+fn override_color(field: &mut Hsla, value: Option<String>) {
+    if let Some(color) = value.as_deref().and_then(parse_hex) {
+        *field = color;
+    }
+}
+
+/// `#rrggbb` / `#rrggbbaa`（`#` 省略可）を [`Hsla`] に。不正は `None`。
+fn parse_hex(value: &str) -> Option<Hsla> {
+    let body = value.trim().trim_start_matches('#');
+    match body.len() {
+        6 => u32::from_str_radix(body, 16).ok().map(|rgb_value| rgb(rgb_value).into()),
+        8 => u32::from_str_radix(body, 16).ok().map(|rgba_value| {
+            let [red, green, blue, alpha] = rgba_value.to_be_bytes();
+            Rgba {
+                r: red as f32 / 255.0,
+                g: green as f32 / 255.0,
+                b: blue as f32 / 255.0,
+                a: alpha as f32 / 255.0,
+            }
+            .into()
+        }),
+        _ => None,
+    }
+}
+
+/// 選択肢に出すテーマ一覧（組み込み 2 種 + `themes_dir` 直下の `*.json`）。
+/// 各要素は (表示名, 出所)。表示名はユーザーテーマなら JSON の `name`、無ければファイル名。
+pub fn available_themes(themes_dir: Option<&Path>) -> Vec<(SharedString, ThemeSource)> {
+    let mut themes = vec![
+        (SharedString::from("Shirushi Dark"), ThemeSource::BuiltIn(DARK_THEME_NAME)),
+        (SharedString::from("Shirushi Light"), ThemeSource::BuiltIn(LIGHT_THEME_NAME)),
+    ];
+    if let Some(dir) = themes_dir {
+        if let Ok(read) = std::fs::read_dir(dir) {
+            let mut users: Vec<(SharedString, ThemeSource)> = Vec::new();
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                    continue;
+                }
+                let display = load_user_theme(&path)
+                    .map(|theme| theme.name.to_string())
+                    .ok()
+                    .or_else(|| path.file_stem().map(|stem| stem.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| path.display().to_string());
+                users.push((SharedString::from(display), ThemeSource::User(path)));
+            }
+            users.sort_by(|left, right| left.0.cmp(&right.0));
+            themes.extend(users);
+        }
+    }
+    themes
+}
+
+/// 設定の theme 名を [`Theme`] に解決する。組み込み名 → `themes_dir` のユーザーテーマ
+/// （`name` 一致 or ファイル名 stem 一致）→ dark、の順でフォールバック（起動時に使う）。
+pub fn resolve(name: &str, themes_dir: Option<&Path>) -> Theme {
+    if let Some(theme) = Theme::builtin(name) {
+        return theme;
+    }
+    if let Some(dir) = themes_dir {
+        if let Ok(read) = std::fs::read_dir(dir) {
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                    continue;
+                }
+                let stem_match = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy() == name)
+                    .unwrap_or(false);
+                if let Ok(theme) = load_user_theme(&path) {
+                    if stem_match || theme.name.as_ref() == name {
+                        return theme;
+                    }
+                }
+            }
+        }
+    }
+    Theme::dark()
 }
 
 /// プロジェクトの識別（レール項目・ピル左縁 等に流れる）。UI-SPEC §1.2 / §2。
@@ -341,7 +503,40 @@ mod tests {
 
         assert!(Theme::load(&ThemeSource::BuiltIn(DARK_THEME_NAME)).is_ok());
         assert!(Theme::load(&ThemeSource::BuiltIn("nope")).is_err());
-        // ユーザーテーマ JSON は M3 まで未実装 → エラー
+        // 存在しないユーザーテーマ JSON は読み込みエラー
         assert!(Theme::load(&ThemeSource::User(PathBuf::from("/x/theme.json"))).is_err());
+    }
+
+    #[test]
+    fn user_theme_overrides_base() {
+        let dir = std::env::temp_dir().join(format!("shirushi_theme_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("midnight.json");
+        // light を土台に一部トークンだけ上書き。syntax.keyword は #rrggbbaa（alpha 付き）。
+        std::fs::write(
+            &path,
+            r##"{ "name": "Midnight", "appearance": "light", "bg0": "#000000",
+                 "syntax": { "keyword": "#ff0088ff" } }"##,
+        )
+        .unwrap();
+
+        let theme = Theme::load(&ThemeSource::User(path.clone())).expect("読める");
+        assert_eq!(theme.name.as_ref(), "Midnight");
+        assert_eq!(theme.appearance, Appearance::Light); // 土台 = light
+        assert_eq!(theme.bg0, h(0x000000)); // 上書きされた
+        assert_eq!(theme.bg1, Theme::light().bg1); // 未指定 → 土台のまま
+        assert_eq!(theme.syntax.keyword, h(0xff0088)); // alpha=ff → 不透明
+        assert_eq!(theme.syntax.string, Theme::light().syntax.string); // 未指定 → 土台
+
+        // 一覧に組み込み 2 種 + ユーザー 1 種が並ぶ。
+        let list = available_themes(Some(&dir));
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].1, ThemeSource::BuiltIn(DARK_THEME_NAME));
+        // resolve は name 一致でユーザーテーマを引ける。
+        assert_eq!(resolve("Midnight", Some(&dir)).bg0, h(0x000000));
+        assert_eq!(resolve("shirushi-light", Some(&dir)).appearance, Appearance::Light);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

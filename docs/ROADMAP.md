@@ -28,14 +28,14 @@
 ## M3 — ワークスペースと方向感覚（「色で迷わなくなる」）
 
 - [x] `settings_core`: 3層マージ（default→user→`.shirushi/`）— 2026-07-12、`crates/settings_core`、深い JSON マージ・型付き Settings、6 test。保存即反映（監視）は後続
-- [ ] テーマきせかえ: light 値の実装 + テーマセレクタ（Picker 上・ライブプレビュー）+ ユーザーテーマ JSON 読み込み ← light 値は theme_core にあり・settings で theme 切替は可。**セレクタ UI / ユーザー JSON は未**
+- [x] テーマきせかえ: light 値の実装 + テーマセレクタ（Picker 上・ライブプレビュー）+ ユーザーテーマ JSON 読み込み — 2026-07-13。`theme_core` に**ユーザーテーマ JSON（トークン上書き・欠けは appearance の組み込みへフォールバック）**・`available_themes`/`resolve` を実装（unit test）。`⌘⇧T` でテーマセレクタ（Picker）＝**ハイライト移動で即ライブプレビュー**（`PickerEvent::Highlighted`）・確定で settings.json へ theme 名保存（再起動でも効く）・中止でプレビューを戻す。`apply_theme` がクローム/エディタ/Agent パネル/Picker へ波及。light 全体反映を offscreen で目視確認
 - [x] `keymap_core`: JSON keymap + コンテキスト述語 — 2026-07-12、`crates/keymap_core`、`build_action` で名前解決・`KeyBinding::load`、3 test。既定 keymap を bin で読込（全アクション解決確認）
 - [x] `ui`: Picker 基盤（1個のファジーリストを全モーダルで使い回す）— 2026-07-12、`crates/ui`、fuzzy・キー操作・イベント通知、2 test。**CommandRegistry/StatusItemRegistry は未**
 - [ ] `workspace`: タブ・単一ペイン→分割・左右下ドック・statusbar ← titlebar（信号機透過+プロジェクトピル+ドックトグル）✓・タブ列（変更ドット/上線/×）✓・パンくず ✓・左ドック(explorer 階層ヘッダ) ✓・右ドック(Agent) ✓・statusbar（⎇branch/診断/カーソル/UTF-8/言語）✓ — 2026-07-12。**分割ペイン / 下ドック(ターミナル)は未**
 - [x] `project`: worktree 走査・gitignore — 2026-07-12、`crates/project`、`ignore` crate で gitignore 準拠の遅延 read_dir + all_files、4 test。**ファイル監視は未**
 - [x] エクスプローラ（ツリーのみ先行）+ ファイル開く — 2026-07-12、workspace の左ドック。クリックで展開/ファイル open
 - [x] **レール**: プロジェクト登録・切替（窓内）・プロジェクト色（自動巡回）— 2026-07-12。**カスタムアイコン / `.shirushi` 色指定は未**（頭文字 + 巡回色）
-- [ ] **⌘O スイッチャー** + ⌘1..9 + **⌘⏎ 新窓** ← ⌘O プロジェクトスイッチャー ✓（Picker）。**⌘1..9 / ⌘⏎ 新窓は未**
+- [x] **⌘O スイッチャー** + ⌘1..9 + **新窓** — 2026-07-13。⌘O プロジェクトスイッチャー ✓（Picker）。⌘1..9 でレールのプロジェクト N 番へ切替（`ActivateProject1..9` アクション）。**新窓は ⌘⇧N**（当初案 ⌘⏎ は composer の `agent::SubmitPrompt` と衝突するため慣例的な ⌘⇧N に変更。Editor コンテキストの ⌘⏎ 送信は温存）＝アクティブプロジェクトを新ウィンドウで開く（右クリック「新規ウィンドウで開く」と同じ経路）
 - [x] 状態永続化 — 2026-07-12、`state.json` に (プロジェクト群・アクティブ・開ファイル) を保存、引数無し起動で復元
 - [x] ファイルファインダ ⌘P — 2026-07-12（Picker + `all_files`）。**コマンドパレット ⌘⇧P は未**（要 CommandRegistry）
 - [x] 受入: **2プロジェクトをレールで色区別 + 再起動で状態復元** — 2026-07-12 達成（offscreen で 2 色レール目視・state.json 往復確認）
@@ -54,13 +54,13 @@
 - [x] 上位階層ブレッドクラム — 2026-07-12、`render_explorer_header` のクリック可能パンくず（プロジェクト内 up-nav）。**プロジェクト外へ出るブラウズは未**（root 上へは行かない）
 - [x] 右クリックメニュー（新しいウィンドウでプロジェクトとして開く 含む）— 2026-07-12、全3表示のエントリに右クリック。フォルダ=新規ウィンドウで開く/開く/コピー、ファイル=開く/コピー。**ファイル操作 undo は未**
 - [x] エクスプローラ幅可変（右縁ドラッグ）— 2026-07-12
-- [ ] 受入: マウスだけで「上へ辿る→隣のリポジトリを新窓でプロジェクトとして開く」← 新窓で開く ✓・プロジェクト内 up-nav ✓。**root より上のフォルダブラウズ（隣の repo へ辿る）は未**
+- [x] 受入: マウスだけで「上へ辿る→隣のリポジトリを新窓でプロジェクトとして開く」— 2026-07-13。ブレッドクラムの **⤴（上へ）** で current の親へ辿れ、ルート直上へ出ると Finder カラム表示へ自動切替（`project::Worktree::read_any_dir` がルート外を gitignore 無しで列挙）。ルート外では **⌂プロジェクト（戻る）** + 末尾数段のパンくずを出す。隣リポジトリを右クリック→新規ウィンドウで開く（既存）。offscreen で `~/Work/experience` の隣接 repo 一覧を目視確認
 
 ## M6 — 検索
 
 - [x] バッファ内検索（regex/literal・大小トグル）— 2026-07-12、`crates/search` の `search_text`、7 test。**置換・インクリメンタル UI は未**
 - [x] プロジェクト横断検索 — 2026-07-12、`search_files`（`ignore` の走査結果を渡してインプロセス検索。ripgrep 子プロセスは未採用）
-- [ ] 受入: `TODO` をプロジェクト横断で列挙→ジャンプ ← **検索モデルは完成・テスト済**（TODO 列挙は `search_files` で可）だが、**結果パネル UI とジャンプの配線が未**
+- [x] 受入: `TODO` をプロジェクト横断で列挙→ジャンプ — 2026-07-13。`⌘⇧F` で検索パネル（オーバーレイ）＝クエリ + 大小/正規表現トグル + **ファイル別グルーピング結果**（行番号 + マッチ強調プレビュー）。クリック / Enter で**該当ファイルを開き対象行を中央へジャンプ**（`EditorView::reveal_position` = viewport 未確定でも効く pending_reveal・one-shot で idle 0%）。↑↓ 選択・Esc 閉じる。offscreen で「fn」440 件のファイル別結果を目視確認
 
 ## M7 — 言語知能
 

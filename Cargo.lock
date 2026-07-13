@@ -5509,6 +5509,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -6884,8 +6886,10 @@ dependencies = [
  "gpui",
  "i18n",
  "project",
+ "search",
  "serde",
  "serde_json",
+ "settings_core",
  "theme_core",
  "ui",
 ]

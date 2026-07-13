@@ -320,6 +320,13 @@ impl AgentPanel {
         cx.notify();
     }
 
+    /// テーマを差し替える（テーマセレクタのライブプレビュー / 切替）。composer にも波及させる。
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme.clone();
+        self.composer.update(cx, |composer, cx| composer.set_theme(theme, cx));
+        cx.notify();
+    }
+
     /// 新規スレッドを作る公開口（workspace の ⌘⇧A から呼ぶ）。
     pub fn new_thread(&mut self, cx: &mut Context<Self>) {
         self.add_thread(cx);

@@ -10,7 +10,6 @@ use gpui::{
 use gpui_platform::application;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use theme_core::Theme;
 use workspace::Workspace;
 
 actions!(shirushi, [Quit]);
@@ -148,7 +147,14 @@ fn main() {
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);
         }
-        let theme = Theme::builtin(&settings.theme).unwrap_or_else(Theme::dark);
+        // theme 名を解決（組み込み → 設定フォルダ themes/ のユーザーテーマ → dark）。
+        // 開発用: SHIRUSHI_THEME=<名> で設定を上書き（撮影確認・非破壊）。
+        let themes_dir = settings_core::user_settings_path()
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|dir| dir.join("themes"));
+        let theme_name = std::env::var("SHIRUSHI_THEME").unwrap_or_else(|_| settings.theme.clone());
+        let theme = theme_core::resolve(&theme_name, themes_dir.as_deref());
 
         match keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx) {
             Ok(bindings) => cx.bind_keys(bindings),

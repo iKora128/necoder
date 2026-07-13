@@ -87,6 +87,33 @@ impl Worktree {
         files
     }
 
+    /// 任意ディレクトリを列挙する（ルート外＝隣のリポジトリへ辿るブラウズ用）。
+    /// ルート配下なら [`Self::read_dir`]（gitignore 準拠）に委譲。ルート外は gitignore を適用せず
+    /// （ルートのマッチャは配下専用）、`.git` と隠しファイルを除いてディレクトリ優先→名前順で返す。
+    pub fn read_any_dir(&self, dir: &Path) -> Result<Vec<Entry>> {
+        if dir.starts_with(&self.root) {
+            return self.read_dir(dir);
+        }
+        let mut entries = Vec::new();
+        let read = std::fs::read_dir(dir).with_context(|| format!("読めない: {}", dir.display()))?;
+        for dir_entry in read {
+            let dir_entry = dir_entry?;
+            let name = dir_entry.file_name().to_string_lossy().to_string();
+            if name == ".git" || name.starts_with('.') {
+                continue;
+            }
+            let path = dir_entry.path();
+            let is_dir = dir_entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            entries.push(Entry { path, name, is_dir });
+        }
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        Ok(entries)
+    }
+
     /// `dir` 直下を列挙する（`.git`・gitignore 対象を除外、ディレクトリ優先→名前順）。
     pub fn read_dir(&self, dir: &Path) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();

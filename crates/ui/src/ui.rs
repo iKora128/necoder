@@ -89,8 +89,10 @@ impl PickerItem {
     }
 }
 
-/// Picker からホストへの通知。
+/// Picker からホストへの通知。id は [`PickerItem::id`]（ホストが解釈）。
 pub enum PickerEvent {
+    /// 選択がハイライトされた（矢印/入力で移動）。テーマセレクタのライブプレビュー等に使う。
+    Highlighted(usize),
     Confirmed(usize),
     Dismissed,
 }
@@ -134,6 +136,19 @@ impl Picker {
         self.focus_handle.clone()
     }
 
+    /// テーマを差し替える（ライブプレビュー中に Picker 自身も追従させる）。
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme;
+        cx.notify();
+    }
+
+    /// 現在ハイライト中の項目 id をホストへ通知（ライブプレビュー用）。
+    fn emit_highlight(&mut self, cx: &mut Context<Self>) {
+        if let Some(&item_index) = self.filtered.get(self.selected) {
+            cx.emit(PickerEvent::Highlighted(self.items[item_index].id));
+        }
+    }
+
     fn refilter(&mut self) {
         let mut scored: Vec<(usize, i32)> = self
             .items
@@ -152,6 +167,7 @@ impl Picker {
         }
         let len = self.filtered.len() as isize;
         self.selected = (self.selected as isize + delta).rem_euclid(len) as usize;
+        self.emit_highlight(cx);
         cx.notify();
     }
 
@@ -170,6 +186,7 @@ impl Picker {
             "backspace" => {
                 self.query.pop();
                 self.refilter();
+                self.emit_highlight(cx);
                 cx.notify();
             }
             _ => {
@@ -181,6 +198,7 @@ impl Picker {
                     if !text.is_empty() && !text.chars().any(char::is_control) {
                         self.query.push_str(text);
                         self.refilter();
+                        self.emit_highlight(cx);
                         cx.notify();
                     }
                 }

@@ -9,25 +9,51 @@ use editor_core::Buffer;
 use editor_view::EditorView;
 use gpui::{
     Animation, AnimationExt, App, Bounds, ClipboardItem, Context, CursorStyle, Entity, FocusHandle,
-    Focusable, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Point, SharedString, Subscription, TitlebarOptions, Window, WindowBounds,
-    WindowControlArea, WindowOptions, actions, div, point, prelude::*, pulsating_between, px, size,
+    Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Point, SharedString, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*,
+    pulsating_between, px, size,
 };
 use project::Worktree;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use theme_core::{Theme, project_color};
+use theme_core::{Theme, ThemeSource, project_color};
 use ui::Tooltip;
 use ui::{Picker, PickerEvent, PickerItem};
 
-actions!(workspace, [FileFinder, ProjectSwitcher, CloseTab, NewThread]);
+actions!(
+    workspace,
+    [
+        FileFinder,
+        ProjectSwitcher,
+        ProjectSearch,
+        ThemeSelector,
+        CloseTab,
+        NewThread,
+        // アクティブ (project, branch) を新しいウィンドウで開く（⌘⇧N。ウィンドウモデル §5）。
+        // 当初 ROADMAP は ⌘⏎ を想定したが、composer の agent::SubmitPrompt と衝突するため
+        // 慣例的な ⌘⇧N に変更（Editor コンテキストの ⌘⏎ は送信のまま温存）。
+        NewWindow,
+        // レール上のプロジェクト N 番へ切替（⌘1..9）。窓内切替＝ウィンドウモデル §5。
+        ActivateProject1,
+        ActivateProject2,
+        ActivateProject3,
+        ActivateProject4,
+        ActivateProject5,
+        ActivateProject6,
+        ActivateProject7,
+        ActivateProject8,
+        ActivateProject9,
+    ]
+);
 
 #[derive(Clone, Copy, PartialEq)]
 enum PickerMode {
     Files,
     Projects,
+    Themes,
 }
 
 const RAIL_WIDTH: f32 = 46.0;
@@ -162,6 +188,46 @@ impl ProjectSlot {
     }
 }
 
+// ── プロジェクト横断検索パネル（M6） ──
+
+/// 横断検索の走査対象ファイル上限（ファイルファインダと同じ 5000）。
+const SEARCH_FILE_LIMIT: usize = 5000;
+/// 結果パネルに描くマッチ行の上限（描画コストを抑える）。
+const SEARCH_MAX_ROWS: usize = 300;
+
+/// プロジェクト横断検索パネルの状態（オーバーレイ）。クエリ + 大小/正規表現トグル + ファイル別結果。
+struct SearchState {
+    query: String,
+    case_sensitive: bool,
+    is_regex: bool,
+    results: Vec<search::FileMatch>,
+    /// 現在の `results` を生んだクエリ。Enter を「検索実行」か「選択へジャンプ」に振り分ける。
+    results_query: Option<String>,
+    /// 平坦化した選択位置（結果全体での通し番号）。矢印キーで移動。
+    selected: usize,
+    /// 直近クエリのコンパイルエラー（正規表現の誤り等）。
+    error: Option<SharedString>,
+    focus: FocusHandle,
+}
+
+impl SearchState {
+    /// `(file_index, match_index)` の平坦列（キーボード選択と描画行の対応）。
+    fn flat(&self) -> Vec<(usize, usize)> {
+        let mut flat = Vec::new();
+        for (file_index, file) in self.results.iter().enumerate() {
+            for match_index in 0..file.matches.len() {
+                flat.push((file_index, match_index));
+            }
+        }
+        flat
+    }
+
+    /// マッチ総数（ヘッダ表示用）。
+    fn total_matches(&self) -> usize {
+        self.results.iter().map(|file| file.matches.len()).sum()
+    }
+}
+
 // ── Workspace 本体 ──
 
 pub struct Workspace {
@@ -191,11 +257,17 @@ pub struct Workspace {
     picker: Option<Entity<Picker>>,
     picker_mode: PickerMode,
     picker_files: Vec<PathBuf>,
+    // テーマセレクタの候補（表示名 + 出所）。Picker の id はこの Vec の添字。
+    picker_themes: Vec<(SharedString, ThemeSource)>,
+    // ライブプレビュー前のテーマ（Dismiss で戻す）。
+    theme_before_preview: Option<Theme>,
     _picker_observation: Option<Subscription>,
     // エクスプローラの表示モード（ツリー/カラム/アイコン）。左下で切替。
     explorer_view: ExplorerView,
     // エクスプローラの右クリックメニュー（開いていれば Some）。
     explorer_context_menu: Option<ExplorerContextMenu>,
+    // プロジェクト横断検索パネル（開いていれば Some・⌘⇧F）。
+    search_panel: Option<SearchState>,
 }
 
 impl Workspace {
@@ -227,12 +299,42 @@ impl Workspace {
                 Err(error) => eprintln!("プロジェクトを開けない（スキップ）: {error:#}"),
             }
         }
+        // 開発用: SHIRUSHI_EXPLORER_UP=1 で先頭プロジェクトをルート直上（隣リポジトリ一覧）から撮る。
+        if std::env::var_os("SHIRUSHI_EXPLORER_UP").is_some() {
+            if let Some(slot) = projects.first_mut() {
+                slot.current_dir = slot.worktree.root().parent().map(Path::to_path_buf);
+            }
+        }
         // 開発用フックの値は projects が move される前に計算しておく。
         let explorer_context_menu = std::env::var_os("SHIRUSHI_CONTEXT_MENU").and_then(|_| {
             projects.first().map(|slot| ExplorerContextMenu {
                 path: slot.worktree.root().to_path_buf(),
                 is_dir: true,
                 position: point(px(120.0), px(210.0)),
+            })
+        });
+        // 開発用: SHIRUSHI_SEARCH_PANEL=1 で「fn」を横断検索した結果パネルを開いた状態で撮る。
+        let search_panel = std::env::var_os("SHIRUSHI_SEARCH_PANEL").and_then(|_| {
+            projects.first().map(|slot| {
+                let paths: Vec<PathBuf> = slot
+                    .worktree
+                    .all_files(SEARCH_FILE_LIMIT)
+                    .into_iter()
+                    .map(|(path, _)| path)
+                    .collect();
+                let results = search::SearchQuery::new("fn", false, false)
+                    .map(|query| query.search_files(&paths))
+                    .unwrap_or_default();
+                SearchState {
+                    query: "fn".to_string(),
+                    case_sensitive: false,
+                    is_regex: false,
+                    results,
+                    results_query: Some("fn".to_string()),
+                    selected: 0,
+                    error: None,
+                    focus: cx.focus_handle(),
+                }
             })
         });
         let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
@@ -258,6 +360,8 @@ impl Workspace {
             picker: None,
             picker_mode: PickerMode::Files,
             picker_files: Vec::new(),
+            picker_themes: Vec::new(),
+            theme_before_preview: None,
             _picker_observation: None,
             // 開発用: SHIRUSHI_EXPLORER_VIEW=icons|columns で初期表示モードを指定（撮影確認用）。
             explorer_view: match std::env::var("SHIRUSHI_EXPLORER_VIEW").as_deref() {
@@ -267,6 +371,7 @@ impl Workspace {
             },
             // 開発用: SHIRUSHI_CONTEXT_MENU=1 でルートの右クリックメニューを開いた状態で撮る。
             explorer_context_menu,
+            search_panel,
         };
         workspace.update_agent_destination(cx); // 宛先チップにプロジェクト/ブランチを反映
         workspace.save_state(); // 起動時点で状態を書く（再起動復元のため）
@@ -340,6 +445,14 @@ impl Workspace {
         }
         self.agent_panel.update(cx, |panel, cx| panel.new_thread(cx));
         cx.notify();
+    }
+
+    /// アクティブプロジェクトを**新しいウィンドウ**で開く（⌘⇧N。ウィンドウモデル §5）。
+    fn new_window(&mut self, _: &NewWindow, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(slot) = self.active_slot() {
+            let root = slot.worktree.root().to_path_buf();
+            self.open_folder_as_window(root, cx);
+        }
     }
 
     // ── ドックの可変幅（縁ドラッグ）。Agent=左縁 / エクスプローラ=右縁 ──
@@ -439,11 +552,20 @@ impl Workspace {
         cx.notify();
     }
 
-    /// カラム/アイコン表示で `dir` に入る（現在フォルダを更新）。
+    /// カラム/アイコン表示で `dir` に入る（現在フォルダを更新）。ブレッドクラムの上位階層クリックでも使う。
+    /// **ルート外へ出た場合**（隣のリポジトリへ辿る）は、ツリー表示だと current_dir を反映できないので
+    /// カラム表示（Finder 風）へ自動で切り替える（M5 受入: マウスだけで上へ辿る）。
     fn enter_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let outside = self
+            .active_slot()
+            .map(|slot| !dir.starts_with(slot.worktree.root()))
+            .unwrap_or(false);
         if let Some(slot) = self.projects.get_mut(self.active) {
             slot.current_dir = Some(dir.clone());
             slot.selected = Some(dir);
+        }
+        if outside && self.explorer_view == ExplorerView::Tree {
+            self.explorer_view = ExplorerView::Columns;
         }
         cx.notify();
     }
@@ -591,6 +713,77 @@ impl Workspace {
         self.open_picker(PickerMode::Projects, i18n::t!("finder.projects"), items, window, cx);
     }
 
+    // ── テーマセレクタ（Picker・ライブプレビュー付き。⌘⇧T・M3） ──
+
+    /// テーマセレクタを開く。組み込み + ユーザーテーマを Picker に並べ、選択移動で即プレビューする。
+    fn open_theme_selector(&mut self, _: &ThemeSelector, window: &mut Window, cx: &mut Context<Self>) {
+        let themes = theme_core::available_themes(self.themes_dir().as_deref());
+        let items = themes
+            .iter()
+            .enumerate()
+            .map(|(id, (name, source))| {
+                let detail = match source {
+                    ThemeSource::BuiltIn(_) => "組み込み",
+                    ThemeSource::User(_) => "ユーザー",
+                };
+                PickerItem::new(id, name.clone()).with_detail(detail)
+            })
+            .collect();
+        self.picker_themes = themes;
+        self.theme_before_preview = Some(self.theme.clone());
+        self.open_picker(PickerMode::Themes, "テーマを選択".to_string(), items, window, cx);
+    }
+
+    /// テーマ保存ディレクトリ（`state.json` と同じ Shirushi 設定フォルダの `themes/`）。
+    fn themes_dir(&self) -> Option<PathBuf> {
+        self.state_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|dir| dir.join("themes"))
+    }
+
+    /// テーマを即時適用する（自身のクローム + エディタ + Agent パネル + Picker へ波及）。
+    fn apply_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme.clone();
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+        }
+        self.agent_panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
+        if let Some(picker) = &self.picker {
+            picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
+        }
+        cx.notify();
+    }
+
+    /// ハイライト移動でプレビュー適用する（保存しない）。
+    fn preview_theme(&mut self, id: usize, cx: &mut Context<Self>) {
+        if let Some((_, source)) = self.picker_themes.get(id) {
+            if let Ok(theme) = Theme::load(source) {
+                self.apply_theme(theme, cx);
+            }
+        }
+    }
+
+    /// テーマを確定する（適用 + 設定へ theme 名を保存＝再起動でも効く）。
+    fn commit_theme(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some((_, source)) = self.picker_themes.get(id).cloned() else {
+            return;
+        };
+        let Ok(theme) = Theme::load(&source) else {
+            return;
+        };
+        let name = theme.name.to_string();
+        self.apply_theme(theme, cx);
+        self.theme_before_preview = None;
+        if let Some(path) = settings_core::user_settings_path() {
+            if let Err(error) =
+                settings_core::persist_user_value(&path, "theme", serde_json::Value::String(name))
+            {
+                eprintln!("テーマの保存に失敗: {error:#}");
+            }
+        }
+    }
+
     fn open_picker(
         &mut self,
         mode: PickerMode,
@@ -617,6 +810,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            // テーマセレクタのみ、ハイライト移動で即プレビュー（ライブプレビュー）。
+            PickerEvent::Highlighted(id) => {
+                if self.picker_mode == PickerMode::Themes {
+                    self.preview_theme(*id, cx);
+                }
+            }
             PickerEvent::Confirmed(id) => {
                 let id = *id;
                 let mode = self.picker_mode;
@@ -628,9 +827,18 @@ impl Workspace {
                         }
                     }
                     PickerMode::Projects => self.switch_project(id, window, cx),
+                    PickerMode::Themes => self.commit_theme(id, cx),
                 }
             }
-            PickerEvent::Dismissed => self.close_picker(window, cx),
+            PickerEvent::Dismissed => {
+                // テーマセレクタを中止したらプレビューを元へ戻す。
+                if self.picker_mode == PickerMode::Themes {
+                    if let Some(theme) = self.theme_before_preview.take() {
+                        self.apply_theme(theme, cx);
+                    }
+                }
+                self.close_picker(window, cx);
+            }
         }
     }
 
@@ -645,6 +853,195 @@ impl Workspace {
             None => window.focus(&self.focus_handle, cx),
         }
         cx.notify();
+    }
+
+    // ── プロジェクト横断検索パネル（⌘⇧F・M6） ──
+
+    /// 検索パネルを開く（開いていればフォーカスを付け直すだけ＝クエリと結果は保つ）。
+    fn open_project_search(&mut self, _: &ProjectSearch, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = cx.focus_handle();
+        match &mut self.search_panel {
+            Some(state) => state.focus = focus.clone(),
+            None => {
+                self.search_panel = Some(SearchState {
+                    query: String::new(),
+                    case_sensitive: false,
+                    is_regex: false,
+                    results: Vec::new(),
+                    results_query: None,
+                    selected: 0,
+                    error: None,
+                    focus: focus.clone(),
+                })
+            }
+        }
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// 検索パネルを閉じてフォーカスをエディタ/ワークスペースへ戻す。
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_panel.take().is_none() {
+            return;
+        }
+        match &self.editor {
+            Some(editor) => {
+                let handle = editor.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+            None => window.focus(&self.focus_handle, cx),
+        }
+        cx.notify();
+    }
+
+    /// 現在のクエリ + トグルでアクティブプロジェクトを横断検索し、結果を格納する。
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let Some((query_text, is_regex, case_sensitive)) = self
+            .search_panel
+            .as_ref()
+            .map(|state| (state.query.clone(), state.is_regex, state.case_sensitive))
+        else {
+            return;
+        };
+        // 空クエリ → 結果クリア（走査しない）。
+        if query_text.trim().is_empty() {
+            if let Some(state) = self.search_panel.as_mut() {
+                state.results.clear();
+                state.results_query = Some(query_text);
+                state.error = None;
+                state.selected = 0;
+            }
+            cx.notify();
+            return;
+        }
+        // 対象ファイル（アクティブプロジェクト配下・gitignore 準拠）。
+        let paths: Vec<PathBuf> = self
+            .active_slot()
+            .map(|slot| {
+                slot.worktree
+                    .all_files(SEARCH_FILE_LIMIT)
+                    .into_iter()
+                    .map(|(path, _)| path)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let outcome =
+            search::SearchQuery::new(&query_text, is_regex, case_sensitive).map(|query| query.search_files(&paths));
+        if let Some(state) = self.search_panel.as_mut() {
+            match outcome {
+                Ok(results) => {
+                    state.results = results;
+                    state.error = None;
+                }
+                Err(error) => {
+                    state.results.clear();
+                    state.error = Some(SharedString::from(format!("{error}")));
+                }
+            }
+            state.results_query = Some(query_text);
+            state.selected = 0;
+        }
+        cx.notify();
+    }
+
+    /// 選択中マッチをキーボードで動かす（結果全体を平坦に巡回）。
+    fn move_search_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(state) = self.search_panel.as_mut() {
+            let len = state.flat().len() as isize;
+            if len == 0 {
+                return;
+            }
+            state.selected = (state.selected as isize + delta).rem_euclid(len) as usize;
+            cx.notify();
+        }
+    }
+
+    /// 検索結果の 1 マッチへジャンプ（ファイルを開いて該当行を中央へ）。
+    fn jump_to_search_match(
+        &mut self,
+        file_index: usize,
+        match_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.search_panel.as_ref().and_then(|state| {
+            state.results.get(file_index).and_then(|file| {
+                file.matches
+                    .get(match_index)
+                    .map(|found| (file.path.clone(), found.line, found.column))
+            })
+        });
+        let Some((path, line, column)) = target else {
+            return;
+        };
+        self.search_panel = None;
+        self.open_file(path, window, cx);
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |editor, cx| editor.reveal_position(line, column, cx));
+        }
+        cx.notify();
+    }
+
+    fn on_search_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "escape" => self.close_search(window, cx),
+            "enter" => {
+                // 結果が最新クエリのものなら選択項目へジャンプ、そうでなければ検索を実行する。
+                let jump = self.search_panel.as_ref().and_then(|state| {
+                    let is_fresh = state.results_query.as_deref() == Some(state.query.as_str());
+                    let flat = state.flat();
+                    if is_fresh && !flat.is_empty() {
+                        flat.get(state.selected).copied()
+                    } else {
+                        None
+                    }
+                });
+                match jump {
+                    Some((file_index, match_index)) => {
+                        self.jump_to_search_match(file_index, match_index, window, cx)
+                    }
+                    None => self.run_search(cx),
+                }
+            }
+            "up" => self.move_search_selection(-1, cx),
+            "down" => self.move_search_selection(1, cx),
+            "backspace" => {
+                if let Some(state) = self.search_panel.as_mut() {
+                    state.query.pop();
+                }
+                cx.notify();
+            }
+            _ => {
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.platform || modifiers.control || modifiers.function {
+                    return;
+                }
+                if let Some(text) = &event.keystroke.key_char {
+                    if !text.is_empty() && !text.chars().any(char::is_control) {
+                        if let Some(state) = self.search_panel.as_mut() {
+                            state.query.push_str(text);
+                        }
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
+    /// 大小区別トグル（切替後は即再検索）。
+    fn toggle_search_case(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.search_panel.as_mut() {
+            state.case_sensitive = !state.case_sensitive;
+        }
+        self.run_search(cx);
+    }
+
+    /// 正規表現トグル（切替後は即再検索）。
+    fn toggle_search_regex(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.search_panel.as_mut() {
+            state.is_regex = !state.is_regex;
+        }
+        self.run_search(cx);
     }
 
     // ── 描画 ──
@@ -839,7 +1236,7 @@ impl Workspace {
     fn render_icons(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let dir = slot.current_dir.clone().unwrap_or_else(|| slot.worktree.root().to_path_buf());
-        let entries = slot.worktree.read_dir(&dir).unwrap_or_default();
+        let entries = slot.worktree.read_any_dir(&dir).unwrap_or_default();
         let selected = slot.selected.clone();
         div()
             .flex_1()
@@ -927,7 +1324,7 @@ impl Workspace {
             .flex()
             .overflow_hidden()
             .children(chain.iter().enumerate().skip(visible_start).map(|(column_index, dir)| {
-                let entries = slot.worktree.read_dir(dir).unwrap_or_default();
+                let entries = slot.worktree.read_any_dir(dir).unwrap_or_default();
                 // このカラムで選択中（＝連鎖の次の段）のパス。
                 let selected_child = chain.get(column_index + 1).cloned();
                 div()
@@ -958,6 +1355,7 @@ impl Workspace {
                                 div()
                                     .flex_1()
                                     .overflow_hidden()
+                                    .whitespace_nowrap()
                                     .child(SharedString::from(entry.name.clone())),
                             )
                             // フォルダは中に入る合図の ›
@@ -988,27 +1386,20 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// エクスプローラ上部のブレッドクラム。プロジェクト名 → 現在フォルダまでの各段を**クリックで上へ**
-    /// たどれる（up-nav）。カラム/アイコン表示で「戻る」手段になる。
+    /// エクスプローラ上部のブレッドクラム。左の **⤴** で 1 段上へ（プロジェクトルートより上＝
+    /// 隣のリポジトリへも辿れる。M5 受入）。プロジェクト配下では「プロジェクト名 → 各段」を、
+    /// ルート外では「⌂プロジェクト（戻る） → 末尾数段」を出す。各段クリックでそのフォルダへ。
     fn render_explorer_header(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
+        let accent = slot.color;
         let root = slot.worktree.root().to_path_buf();
         let current = slot.current_dir.clone().unwrap_or_else(|| root.clone());
-        let mut crumbs: Vec<(SharedString, PathBuf)> = vec![(slot.name.clone(), root.clone())];
-        if let Ok(relative) = current.strip_prefix(&root) {
-            let mut accumulated = root.clone();
-            for segment in relative.components() {
-                accumulated = accumulated.join(segment.as_os_str());
-                crumbs.push((
-                    SharedString::from(segment.as_os_str().to_string_lossy().to_string()),
-                    accumulated.clone(),
-                ));
-            }
-        }
-        let last = crumbs.len().saturating_sub(1);
+        let in_project = current.starts_with(&root);
+
         let mut header = div()
             .flex()
             .items_center()
+            .gap(px(1.))
             .h(px(28.))
             .px(px(6.))
             .flex_none()
@@ -1017,28 +1408,136 @@ impl Workspace {
             .overflow_hidden()
             .border_b_1()
             .border_color(theme.border);
-        for (index, (label, path)) in crumbs.into_iter().enumerate() {
-            if index > 0 {
-                header = header.child(div().px(px(1.)).text_color(theme.fg2).child("›"));
-            }
-            let is_current = index == last;
+
+        // 「上へ」= current の親へ（ルート直上へ出れば enter_dir が Finder カラムへ自動切替）。
+        if let Some(parent) = current.parent().map(Path::to_path_buf) {
             header = header.child(
                 div()
-                    .id(("crumb", index))
+                    .id("crumb-up")
+                    .flex_none()
+                    .px(px(3.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    .child("⤴")
+                    .tooltip(Tooltip::text("上のフォルダへ", theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| this.enter_dir(parent.clone(), cx)),
+                    ),
+            );
+        }
+
+        if in_project {
+            // プロジェクト名（アクセント色・クリックでルートへ）→ 配下の各段。
+            let root_for_click = root.clone();
+            header = header.child(
+                div()
+                    .id(("crumb", 0usize))
                     .px(px(3.))
                     .py(px(1.))
                     .rounded(px(4.))
                     .cursor_pointer()
-                    .when(is_current, |element| {
-                        element.font_weight(FontWeight::SEMIBOLD).text_color(theme.fg0)
-                    })
-                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-                    .child(label)
+                    .text_color(accent)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .hover(|style| style.bg(theme.bg3))
+                    .child(slot.name.clone())
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| this.enter_dir(path.clone(), cx)),
+                        cx.listener(move |this, _, _window, cx| this.enter_dir(root_for_click.clone(), cx)),
                     ),
             );
+            if let Ok(relative) = current.strip_prefix(&root) {
+                let segments: Vec<_> = relative.components().collect();
+                let last = segments.len().saturating_sub(1);
+                let mut accumulated = root.clone();
+                for (index, segment) in segments.into_iter().enumerate() {
+                    accumulated = accumulated.join(segment.as_os_str());
+                    let is_current = index == last;
+                    let label = segment.as_os_str().to_string_lossy().to_string();
+                    let path = accumulated.clone();
+                    header = header
+                        .child(div().px(px(1.)).text_color(theme.fg2).child("›"))
+                        .child(
+                            div()
+                                .id(("crumb", index + 1))
+                                .px(px(3.))
+                                .py(px(1.))
+                                .rounded(px(4.))
+                                .cursor_pointer()
+                                .when(is_current, |element| {
+                                    element.text_color(theme.fg0).font_weight(FontWeight::SEMIBOLD)
+                                })
+                                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                                .child(SharedString::from(label))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| this.enter_dir(path.clone(), cx)),
+                                ),
+                        );
+                }
+            }
+        } else {
+            // ルート外ブラウズ: ⌂プロジェクト（戻る）+ current までの末尾最大 3 段。
+            let root_for_click = root.clone();
+            header = header.child(
+                div()
+                    .id("crumb-home")
+                    .flex()
+                    .items_center()
+                    .gap(px(3.))
+                    .px(px(4.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_color(accent)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .hover(|style| style.bg(theme.bg3))
+                    .child("⌂")
+                    .child(slot.name.clone())
+                    .tooltip(Tooltip::text("プロジェクトへ戻る", theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| this.enter_dir(root_for_click.clone(), cx)),
+                    ),
+            );
+            let mut chain: Vec<PathBuf> = Vec::new();
+            let mut walk = Some(current.as_path());
+            while let Some(path) = walk {
+                chain.push(path.to_path_buf());
+                walk = path.parent();
+                if chain.len() >= 3 {
+                    break;
+                }
+            }
+            chain.reverse();
+            let last = chain.len().saturating_sub(1);
+            for (index, path) in chain.into_iter().enumerate() {
+                let is_current = index == last;
+                let label = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                header = header
+                    .child(div().px(px(1.)).text_color(theme.fg2).child("›"))
+                    .child(
+                        div()
+                            .id(("crumb-out", index))
+                            .px(px(3.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .cursor_pointer()
+                            .when(is_current, |element| {
+                                element.text_color(theme.fg0).font_weight(FontWeight::SEMIBOLD)
+                            })
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                            .child(SharedString::from(label))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| this.enter_dir(path.clone(), cx)),
+                            ),
+                    );
+            }
         }
         header
     }
@@ -1167,6 +1666,265 @@ impl Workspace {
                     cx.listener(|this, _, _window, cx| this.hide_context_menu(cx)),
                 )
                 .child(menu_box)
+                .into_any_element(),
+        )
+    }
+
+    /// プロジェクト横断検索パネル（オーバーレイ・⌘⇧F）。ファイル別に結果をまとめ、クリック/Enter でジャンプ。
+    fn render_search_panel(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let state = self.search_panel.as_ref()?;
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let root = self.active_slot().map(|slot| slot.worktree.root().to_path_buf());
+
+        let query_display: SharedString = if state.query.is_empty() {
+            SharedString::from("プロジェクトを横断検索…")
+        } else {
+            SharedString::from(state.query.clone())
+        };
+        let query_color = if state.query.is_empty() { theme.fg2 } else { theme.fg0 };
+
+        // トグルチップ（Aa=大小区別 / .*=正規表現）。アクティブはアクセント面。
+        let case_active = state.case_sensitive;
+        let regex_active = state.is_regex;
+        let toggle = |id: &'static str, label: &'static str, active: bool, tip: &'static str| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(22.))
+                .rounded(px(5.))
+                .text_size(px(11.))
+                .text_color(if active { theme.fg0 } else { theme.fg2 })
+                .cursor_pointer()
+                .when(active, |element| element.bg(accent.alpha(0.16)))
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(label)
+                .tooltip(Tooltip::text(tip, theme.clone()))
+        };
+
+        // 見出し（件数 / エラー / ヒント）。
+        let summary: SharedString = match &state.error {
+            Some(error) => error.clone(),
+            None if state.results_query.is_some() => {
+                SharedString::from(format!("{} 件 / {} ファイル", state.total_matches(), state.results.len()))
+            }
+            None => SharedString::from("Enter で検索"),
+        };
+        let summary_color = if state.error.is_some() { theme.err } else { theme.fg2 };
+
+        // 結果行（ファイルヘッダ + マッチ）。平坦選択と対応させる。
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut flat_index = 0usize;
+        let mut truncated = false;
+        'outer: for (file_index, file) in state.results.iter().enumerate() {
+            let relative = root
+                .as_ref()
+                .and_then(|root| file.path.strip_prefix(root).ok())
+                .unwrap_or(file.path.as_path())
+                .to_string_lossy()
+                .to_string();
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(10.))
+                    .pt(px(7.))
+                    .pb(px(2.))
+                    .child(file_icon(&relative, false, &theme))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg1)
+                            .child(SharedString::from(relative)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(file.matches.len().to_string())),
+                    )
+                    .into_any_element(),
+            );
+            for (match_index, found) in file.matches.iter().enumerate() {
+                if flat_index >= SEARCH_MAX_ROWS {
+                    truncated = true;
+                    break 'outer;
+                }
+                let is_selected = flat_index == state.selected;
+                // 行プレビュー: 先頭空白を除いて（深いインデントでマッチが見切れないように）、
+                // マッチ部分をアクセント色で強調する。オフセットは byte 境界（regex が行内で見つけた位置）。
+                let raw = found.line_text.trim_end();
+                let lead = raw.len() - raw.trim_start().len();
+                let line = &raw[lead..];
+                let start = found.column.saturating_sub(lead).min(line.len());
+                let end = (found.column + found.byte_range.len()).saturating_sub(lead).clamp(start, line.len());
+                let (prefix, mid, suffix) = (&line[..start], &line[start..end], &line[end..]);
+                rows.push(
+                    div()
+                        .id(("search-hit", flat_index))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .h(px(20.))
+                        .pl(px(28.))
+                        .pr(px(10.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .when(is_selected, |element| element.bg(accent.alpha(0.16)))
+                        .hover(|style| style.bg(theme.bg3))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(34.))
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from((found.line + 1).to_string())),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(12.))
+                                .text_color(theme.fg1)
+                                .child(div().flex_none().child(SharedString::from(prefix.to_string())))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(accent)
+                                        .child(SharedString::from(mid.to_string())),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .overflow_hidden()
+                                        .child(SharedString::from(suffix.to_string())),
+                                ),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.jump_to_search_match(file_index, match_index, window, cx)
+                            }),
+                        )
+                        .into_any_element(),
+                );
+                flat_index += 1;
+            }
+        }
+        if truncated {
+            rows.push(
+                div()
+                    .px(px(10.))
+                    .py(px(4.))
+                    .text_size(px(10.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(format!("先頭 {SEARCH_MAX_ROWS} 件のみ表示（絞り込んでください）")))
+                    .into_any_element(),
+            );
+        }
+
+        let focus = state.focus.clone();
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .track_focus(&focus)
+                .on_key_down(cx.listener(Self::on_search_key_down))
+                // 背後クリックで閉じる（中央のボックスは stop_propagation）。
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_search(window, cx)),
+                )
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(px(96.))
+                .child(
+                    div()
+                        .w(px(720.))
+                        .flex()
+                        .flex_col()
+                        .bg(theme.bg2)
+                        .rounded(px(12.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .shadow(vec![
+                            gpui::BoxShadow::new(px(0.), px(10.), gpui::hsla(0., 0., 0., 0.45)).blur_radius(px(28.)),
+                        ])
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        // 入力行（クエリ + トグル）
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .child(div().flex_none().text_color(theme.fg2).child("⌕"))
+                                .child(div().flex_1().text_color(query_color).child(query_display))
+                                .child(toggle("search-case", "Aa", case_active, "大文字小文字を区別").on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_search_case(cx)
+                                    }),
+                                ))
+                                .child(toggle("search-regex", ".*", regex_active, "正規表現").on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_search_regex(cx)
+                                    }),
+                                )),
+                        )
+                        // 見出し（件数 / エラー / ヒント）
+                        .child(
+                            div()
+                                .px_3()
+                                .py(px(4.))
+                                .text_size(px(11.))
+                                .text_color(summary_color)
+                                .child(summary),
+                        )
+                        // 結果リスト
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .max_h(px(440.))
+                                .overflow_hidden()
+                                .pb_1()
+                                .children(rows),
+                        )
+                        // フッタのキーヒント
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(12.))
+                                .px_3()
+                                .py(px(5.))
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child("Enter 検索 / ジャンプ")
+                                .child("↑↓ 選択")
+                                .child("Esc 閉じる"),
+                        ),
+                )
                 .into_any_element(),
         )
     }
@@ -1619,8 +2377,21 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open_file_finder))
             .on_action(cx.listener(Self::open_project_switcher))
+            .on_action(cx.listener(Self::open_project_search))
+            .on_action(cx.listener(Self::open_theme_selector))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_agent_thread))
+            .on_action(cx.listener(Self::new_window))
+            // ⌘1..9 = レールのプロジェクト N 番へ切替（窓内切替・ウィンドウモデル §5）
+            .on_action(cx.listener(|this, _: &ActivateProject1, window, cx| this.switch_project(0, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateProject2, window, cx| this.switch_project(1, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateProject3, window, cx| this.switch_project(2, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateProject4, window, cx| this.switch_project(3, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateProject5, window, cx| this.switch_project(4, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateProject6, window, cx| this.switch_project(5, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateProject7, window, cx| this.switch_project(6, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateProject8, window, cx| this.switch_project(7, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateProject9, window, cx| this.switch_project(8, window, cx)))
             .on_mouse_move(cx.listener(Self::on_resize_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_resize_end))
             .flex()
@@ -1644,6 +2415,7 @@ impl Render for Workspace {
             .child(self.render_statusbar(cx))
             // オーバーレイ（最前面）
             .when_some(self.picker.clone(), |this, picker| this.child(picker))
+            .children(self.render_search_panel(cx))
             .children(self.render_explorer_context_menu(cx))
     }
 }

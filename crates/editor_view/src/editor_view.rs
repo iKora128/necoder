@@ -109,6 +109,8 @@ pub struct EditorView {
     // 構文ハイライト（対応拡張子のみ）。編集で再計算する。
     highlighter: Option<lang::Highlighter>,
     highlights: Vec<lang::HighlightSpan>,
+    /// 検索ジャンプ等の保留スクロール（byte offset）。次の prepaint で viewport 確定後に消化＝one-shot。
+    pending_reveal: Option<usize>,
 }
 
 /// バッファをハイライトする。対応言語かつ一定サイズ以下のときだけ（巨大ファイルの毎編集再解析を避ける）。
@@ -142,6 +144,7 @@ impl EditorView {
             submit_on_enter: false,
             highlighter,
             highlights,
+            pending_reveal: None,
             scroll_top: px(0.),
             marked_range: None,
             content_origin: None,
@@ -203,6 +206,25 @@ impl EditorView {
 
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
+    }
+
+    /// 指定 (行, 列)（0 始まり）へキャレットを移動し、対象行を可視域の中央へ寄せる（検索ジャンプ用）。
+    /// viewport 未確定（初回描画前）でも動くよう、実スクロールは次の prepaint が [`Self::pending_reveal`]
+    /// を消化して決める（one-shot＝settle 後は再描画しない＝idle 0%）。
+    pub fn reveal_position(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
+        let snapshot = self.buffer.snapshot();
+        let clamped_row = row.min(snapshot.line_count().saturating_sub(1));
+        let offset = snapshot.clip_offset(snapshot.point_to_byte(BufferPoint::new(clamped_row, column)));
+        self.buffer.set_selections(vec![Selection::cursor(offset)]);
+        self.blink_visible = true;
+        self.pending_reveal = Some(offset);
+        cx.notify();
+    }
+
+    /// テーマを差し替える（テーマセレクタのライブプレビュー / 切替）。次の描画で新配色になる。
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme;
+        cx.notify();
     }
 
     /// 現在のテキスト全体（composer が送信時に読む）。
@@ -759,6 +781,17 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        // 保留リビール（検索ジャンプ等）を viewport 確定後の今、消化する（対象行を中央へ寄せる）。
+        self.editor.update(cx, |view, _cx| {
+            if let Some(offset) = view.pending_reveal.take() {
+                let snapshot = view.buffer.snapshot();
+                let row = snapshot.byte_to_point(offset).row as f32;
+                let viewport = f32::from(bounds.size.height);
+                let total = snapshot.line_count() as f32 * LINE_HEIGHT;
+                let target = row * LINE_HEIGHT - viewport / 2.0 + LINE_HEIGHT / 2.0;
+                view.scroll_top = px(target.clamp(0.0, (total - viewport).max(0.0)));
+            }
+        });
         let view = self.editor.read(cx);
         let snapshot = view.buffer.snapshot();
         let theme = view.theme.clone();
