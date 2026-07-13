@@ -7018,6 +7018,7 @@ dependencies = [
  "search",
  "serde",
  "serde_json",
+ "settings",
  "settings_core",
  "terminal_view",
  "theme_core",

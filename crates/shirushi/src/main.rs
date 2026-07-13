@@ -124,6 +124,36 @@ fn load_fonts(cx: &App) {
     }
 }
 
+/// レール等のアイコン SVG（Lucide・ISC ライセンス）をバイナリに埋め込んで gpui の `svg()` に供給する。
+/// `svg().path("icons/…")` がここを引く。単色マスクとして描かれ `text_color` で着色される。
+struct Assets;
+
+impl gpui::AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        macro_rules! icon {
+            ($name:literal) => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/", $name)).as_slice()
+            };
+        }
+        let bytes: &'static [u8] = match path {
+            "icons/panel-left.svg" => icon!("panel-left.svg"),
+            "icons/search.svg" => icon!("search.svg"),
+            "icons/git-branch.svg" => icon!("git-branch.svg"),
+            "icons/sparkles.svg" => icon!("sparkles.svg"),
+            "icons/square-terminal.svg" => icon!("square-terminal.svg"),
+            "icons/folder-plus.svg" => icon!("folder-plus.svg"),
+            "icons/folder-tree.svg" => icon!("folder-tree.svg"),
+            "icons/settings.svg" => icon!("settings.svg"),
+            _ => return Ok(None),
+        };
+        Ok(Some(std::borrow::Cow::Borrowed(bytes)))
+    }
+
+    fn list(&self, _path: &str) -> anyhow::Result<Vec<gpui::SharedString>> {
+        Ok(Vec::new())
+    }
+}
+
 /// `shirushi config <get|set|list> …` サブコマンド。設定を CLI から読み書きする（settings.json が真実）。
 /// 書き込みは即 settings.json に反映＝**起動中のアプリは watcher で live 適用**、次回起動でも効く。
 /// CLI を処理したら true（GUI を開かず終了）。設定の「書き手」の一つ（UI トグル / MCP と同じ経路）。
@@ -178,7 +208,7 @@ fn main() {
         return;
     }
     let startup = Instant::now();
-    application().run(move |cx: &mut App| {
+    application().with_assets(Assets).run(move |cx: &mut App| {
         load_fonts(cx);
         i18n::init_from_os_locale();
 

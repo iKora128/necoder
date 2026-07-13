@@ -9,11 +9,11 @@ use editor_core::Buffer;
 use futures::StreamExt as _; // LSP 通知 pump の `.next()`
 use editor_view::EditorView;
 use gpui::{
-    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, CursorStyle, Entity, FocusHandle,
-    Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Point, SharedString, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*,
-    pulsating_between, px, size,
+    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, CursorStyle, Div, Entity,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Point, SharedString, Stateful, Subscription, TitlebarOptions,
+    Window, WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*,
+    pulsating_between, px, size, svg,
 };
 use host::Host;
 use project::{GitWorktree, GraphCommit, StatusKind, WorkingChange, Worktree};
@@ -683,6 +683,8 @@ impl Workspace {
             });
         }
         workspace.update_agent_destination(cx); // 宛先チップにプロジェクト/ブランチを反映
+        // 設定が変わったら再描画（レールのアイコン表示/非表示などを live 反映）。
+        cx.observe_global::<settings::SettingsGlobal>(|_, cx| cx.notify()).detach();
         workspace.save_state(); // 起動時点で状態を書く（再起動復元のため）
         workspace
     }
@@ -2405,10 +2407,33 @@ impl Workspace {
 
     // ── 描画 ──
 
+    /// レールのアクティビティアイコン 1 個（Lucide SVG・単色で theme 色に着色）。クリックは呼び出し側で付ける。
+    fn rail_icon(
+        &self,
+        id: &'static str,
+        icon: &'static str,
+        tooltip: impl Into<SharedString>,
+        color: Hsla,
+    ) -> Stateful<Div> {
+        let theme = self.theme.clone();
+        div()
+            .id(id)
+            .size(px(30.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg2))
+            .child(svg().path(icon).size(px(17.)).text_color(color))
+            .tooltip(Tooltip::text(tooltip, theme.clone()))
+    }
+
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active = self.active;
         let accent = self.accent();
+        let rail = settings::get(cx).rail; // アイコンの表示/非表示（settings 反応）
         div()
             .flex()
             .flex_col()
@@ -2471,29 +2496,53 @@ impl Workspace {
                     ),
             )
             .child(div().flex_1())
-            // AI エージェント: クリックで新規スレッドを開く（Cursor の Claude 拡張のアイコン風）。
-            .child(
-                div()
-                    .id("rail-agent")
-                    .size(px(30.))
-                    .rounded(px(8.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(15.))
-                    .text_color(accent)
-                    .bg(accent.alpha(0.12))
-                    .border_1()
-                    .border_color(accent.alpha(0.35))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(accent.alpha(0.22)).border_color(accent))
-                    .child("✳")
-                    .tooltip(Tooltip::text("AI エージェント（新規スレッド）  ⌘⇧A", theme.clone()))
-                    .on_mouse_down(
+            // ── アクティビティアイコン（settings.rail で個別に表示/非表示・Lucide SVG）──
+            .when(rail.explorer, |element| {
+                element.child(
+                    self.rail_icon("rail-explorer", "icons/panel-left.svg", "エクスプローラの表示切替", theme.fg2)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| {
+                                this.show_left = !this.show_left;
+                                cx.notify();
+                            }),
+                        ),
+                )
+            })
+            .when(rail.search, |element| {
+                element.child(
+                    self.rail_icon("rail-search", "icons/search.svg", "検索  ⌘⇧F", theme.fg2).on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.new_agent_thread(&NewThread, window, cx)),
+                        cx.listener(|this, _, window, cx| this.open_project_search(&ProjectSearch, window, cx)),
                     ),
-            )
+                )
+            })
+            .when(rail.git, |element| {
+                element.child(
+                    self.rail_icon("rail-git", "icons/git-branch.svg", "ソース管理  ⌃⇧G", theme.fg2).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.toggle_git_panel(&ToggleGitPanel, window, cx)),
+                    ),
+                )
+            })
+            .when(rail.agent, |element| {
+                element.child(
+                    self.rail_icon("rail-agent", "icons/sparkles.svg", "AI エージェント（新規スレッド）  ⌘⇧A", accent)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.new_agent_thread(&NewThread, window, cx)),
+                        ),
+                )
+            })
+            .when(rail.terminal, |element| {
+                element.child(
+                    self.rail_icon("rail-terminal", "icons/square-terminal.svg", "ターミナル  ⌘J", theme.fg2)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.toggle_terminal(&ToggleTerminal, window, cx)),
+                        ),
+                )
+            })
             .child(div().h(px(6.)))
     }
 

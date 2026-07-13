@@ -28,6 +28,24 @@ impl Density {
     }
 }
 
+/// レール（最左アクティビティバー）の各アイコンの表示。全て既定 true・settings で個別に消せる。
+/// 例: `.shirushi/settings.json` に `{ "rail": { "terminal": false } }` でターミナルアイコンを隠す。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct RailSettings {
+    pub explorer: bool,
+    pub search: bool,
+    pub git: bool,
+    pub agent: bool,
+    pub terminal: bool,
+}
+
+impl Default for RailSettings {
+    fn default() -> Self {
+        Self { explorer: true, search: true, git: true, agent: true, terminal: true }
+    }
+}
+
 /// 解決済み設定（全レイヤをマージ後に得る）。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -43,6 +61,8 @@ pub struct Settings {
     /// `false`（既定）= Enter は改行・⌘Enter で送信（日本語 IME の変換確定 Enter で誤送信しない安全側）。
     /// `true` = Enter で送信・Shift+Enter で改行（チャット風。IME 変換中は送信しない）。
     pub submit_on_enter: bool,
+    /// レールのアイコン表示（アクティビティバー）。
+    pub rail: RailSettings,
 }
 
 impl Default for Settings {
@@ -54,6 +74,7 @@ impl Default for Settings {
             tab_size: 4,
             locale: None,
             submit_on_enter: false,
+            rail: RailSettings::default(),
         }
     }
 }
@@ -64,7 +85,8 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "density": "compact",
   "font_size": 13.0,
   "tab_size": 4,
-  "submit_on_enter": false
+  "submit_on_enter": false,
+  "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true }
 }"#;
 
 /// マージ済み JSON と型付き設定を保持する。
