@@ -330,15 +330,17 @@ impl AgentPanel {
         cx.notify();
     }
 
-    /// スレッドタブを閉じる（× ボタン）。最後の 1 枚は残す（空 UI を避ける）。
+    /// スレッドタブを閉じる（× ボタン / ⌘W）。**最後の 1 枚も閉じられる**（空状態＝＋で再開）。
     /// 閉じた瞬間そのスレッドの ACP セッション（`command_tx`）も drop され読みループが畳まれる。
     fn remove_thread(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.threads.len() <= 1 || index >= self.threads.len() {
+        if index >= self.threads.len() {
             return;
         }
         self.threads.remove(index);
-        // active を有効な近傍へ寄せる（閉じたのが前なら1つ詰める／自分なら次のタブ、末尾なら前へ）。
-        if index < self.active {
+        // active を有効域へ寄せる。空になったら 0（描画は get(active)=None で空状態になる）。
+        if self.threads.is_empty() {
+            self.active = 0;
+        } else if index < self.active {
             self.active -= 1;
         } else if index == self.active {
             self.active = self.active.min(self.threads.len() - 1);
@@ -1030,7 +1032,6 @@ impl AgentPanel {
     fn render_thread_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active = self.active;
-        let count = self.threads.len(); // 最後の1枚は × を出さない
         div()
             .flex()
             .items_stretch()
@@ -1067,28 +1068,26 @@ impl AgentPanel {
                             .text_color(if is_active { theme.fg0 } else { theme.fg1 })
                             .child(pulsing_dot(("thtab-dot", index), 8.0, color, thread.running))
                             .child(thread.name.clone())
-                            // × 閉じる（最後の1枚は出さない）。クリックはタブ切替へ伝播させない。
-                            .when(count > 1, |element| {
-                                element.child(
-                                    div()
-                                        .id(("thtab-close", index))
-                                        .flex_none()
-                                        .px(px(3.))
-                                        .rounded(px(4.))
-                                        .text_color(theme.fg2)
-                                        .cursor_pointer()
-                                        .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
-                                        .child("×")
-                                        .tooltip(Tooltip::text("スレッドを閉じる  ⌘W", theme.clone()))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |this, _, _window, cx| {
-                                                cx.stop_propagation();
-                                                this.remove_thread(index, cx);
-                                            }),
-                                        ),
-                                )
-                            }),
+                            // × 閉じる（最後の1枚も閉じられる＝空状態へ）。クリックはタブ切替へ伝播させない。
+                            .child(
+                                div()
+                                    .id(("thtab-close", index))
+                                    .flex_none()
+                                    .px(px(3.))
+                                    .rounded(px(4.))
+                                    .text_color(theme.fg2)
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
+                                    .child("×")
+                                    .tooltip(Tooltip::text("スレッドを閉じる  ⌘W", theme.clone()))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.remove_thread(index, cx);
+                                        }),
+                                    ),
+                            ),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1249,6 +1248,14 @@ impl AgentPanel {
                     ),
                 );
             }
+        } else {
+            // スレッドを全部閉じた空状態。＋ / ⌘⇧A / レールの ✳ で再開できる。
+            list = list.items_center().justify_center().child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(theme.fg2)
+                    .child("スレッドはありません（＋ / ⌘⇧A で開始）"),
+            );
         }
         list
     }

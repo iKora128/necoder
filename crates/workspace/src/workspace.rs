@@ -2408,6 +2408,7 @@ impl Workspace {
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active = self.active;
+        let accent = self.accent();
         div()
             .flex()
             .flex_col()
@@ -2470,7 +2471,30 @@ impl Workspace {
                     ),
             )
             .child(div().flex_1())
-            .child(div().pb_1().text_size(px(9.)).text_color(theme.fg2).child("⌘O"))
+            // AI エージェント: クリックで新規スレッドを開く（Cursor の Claude 拡張のアイコン風）。
+            .child(
+                div()
+                    .id("rail-agent")
+                    .size(px(30.))
+                    .rounded(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(15.))
+                    .text_color(accent)
+                    .bg(accent.alpha(0.12))
+                    .border_1()
+                    .border_color(accent.alpha(0.35))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(accent.alpha(0.22)).border_color(accent))
+                    .child("✳")
+                    .tooltip(Tooltip::text("AI エージェント（新規スレッド）  ⌘⇧A", theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.new_agent_thread(&NewThread, window, cx)),
+                    ),
+            )
+            .child(div().h(px(6.)))
     }
 
     fn render_explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
