@@ -111,6 +111,12 @@ pub struct EditorView {
     highlights: Vec<lang::HighlightSpan>,
     /// 検索ジャンプ等の保留スクロール（byte offset）。次の prepaint で viewport 確定後に消化＝one-shot。
     pending_reveal: Option<usize>,
+    /// gutter diff（HEAD vs 現在バッファ・非同期計算）。plain / 無題ファイルは常に空。
+    diff_hunks: Vec<project::DiffHunk>,
+    /// diff を最後にスケジュールしたバッファ version（prepaint での重複起動防止）。
+    diff_scheduled_version: u64,
+    /// diff デバウンスの世代（古い計算を無効化＝連続編集を 1 回に畳む）。
+    diff_gen: u32,
 }
 
 /// バッファをハイライトする。対応言語かつ一定サイズ以下のときだけ（巨大ファイルの毎編集再解析を避ける）。
@@ -145,6 +151,9 @@ impl EditorView {
             highlighter,
             highlights,
             pending_reveal: None,
+            diff_hunks: Vec::new(),
+            diff_scheduled_version: u64::MAX, // 初回描画で必ず計算させる
+            diff_gen: 0,
             scroll_top: px(0.),
             marked_range: None,
             content_origin: None,
@@ -225,6 +234,44 @@ impl EditorView {
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
         cx.notify();
+    }
+
+    /// gutter diff（HEAD vs 現在バッファ）を再計算する。編集で version が変わるたび prepaint から呼ぶ。
+    /// デバウンス 250ms・git 実行は背景スレッド・連続編集は世代番号で 1 回に畳む（idle 0% を守る）。
+    /// plain / 無題ファイルは diff を持たない。
+    fn schedule_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.buffer.path().map(|path| path.to_path_buf()) else {
+            if !self.diff_hunks.is_empty() {
+                self.diff_hunks.clear();
+                cx.notify();
+            }
+            return;
+        };
+        self.diff_gen = self.diff_gen.wrapping_add(1);
+        let generation = self.diff_gen;
+        let text = self.buffer.text();
+        cx.spawn(async move |editor, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            // まだ最新の編集か（後続の編集が来ていたら破棄＝デバウンス）。
+            let latest = editor.update(cx, |editor, _| editor.diff_gen == generation).unwrap_or(false);
+            if !latest {
+                return;
+            }
+            // git 呼び出し（ブロッキング）は背景スレッドで実行。
+            let hunks = cx
+                .background_executor()
+                .spawn(async move { project::buffer_diff(&path, &text) })
+                .await;
+            let _ = editor.update(cx, |editor, cx| {
+                if editor.diff_gen == generation {
+                    editor.diff_hunks = hunks;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// 現在のテキスト全体（composer が送信時に読む）。
@@ -732,6 +779,7 @@ struct EditorPrepaint {
     selections: Vec<PaintQuad>,
     carets: Vec<PaintQuad>,
     current_line: Option<PaintQuad>,
+    diff_marks: Vec<PaintQuad>,
     content_bounds: Bounds<Pixels>,
     gutter_width: Pixels,
     viewport_height: Pixels,
@@ -782,7 +830,8 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         // 保留リビール（検索ジャンプ等）を viewport 確定後の今、消化する（対象行を中央へ寄せる）。
-        self.editor.update(cx, |view, _cx| {
+        // 併せて、バッファが変わっていれば gutter diff を（デバウンス付きで）再計算する。
+        self.editor.update(cx, |view, cx| {
             if let Some(offset) = view.pending_reveal.take() {
                 let snapshot = view.buffer.snapshot();
                 let row = snapshot.byte_to_point(offset).row as f32;
@@ -790,6 +839,10 @@ impl Element for EditorElement {
                 let total = snapshot.line_count() as f32 * LINE_HEIGHT;
                 let target = row * LINE_HEIGHT - viewport / 2.0 + LINE_HEIGHT / 2.0;
                 view.scroll_top = px(target.clamp(0.0, (total - viewport).max(0.0)));
+            }
+            if view.buffer.version() != view.diff_scheduled_version {
+                view.diff_scheduled_version = view.buffer.version();
+                view.schedule_diff(cx);
             }
         });
         let view = self.editor.read(cx);
@@ -801,6 +854,7 @@ impl Element for EditorElement {
         let focused = view.focus_handle.is_focused(window);
         let selections = view.buffer.selections().to_vec();
         let highlights = view.highlights.clone();
+        let diff_hunks = view.diff_hunks.clone();
         let plain = view.plain;
         let blink_visible = view.blink_visible;
         let text_font = window.text_style().font();
@@ -830,11 +884,46 @@ impl Element for EditorElement {
         let mut carets = Vec::new();
         let mut current_line = None;
         let mut caret_bounds = None;
+        let mut diff_marks = Vec::new();
 
         let primary_row = snapshot.byte_to_point(primary.head).row;
 
         for row in visible {
             let y = bounds.top() + line_height * (row as f32) - scroll_top;
+
+            // gutter diff マーク（左端の細いバー）。plain（composer）は gutter が無いので出さない。
+            if !plain {
+                let row32 = row as u32;
+                for hunk in &diff_hunks {
+                    match hunk.kind {
+                        project::HunkKind::Added | project::HunkKind::Modified
+                            if hunk.new_range.contains(&row32) =>
+                        {
+                            let color = if hunk.kind == project::HunkKind::Added {
+                                theme.ok
+                            } else {
+                                theme.warn
+                            };
+                            diff_marks.push(fill(
+                                Bounds::new(
+                                    point(bounds.left(), y + px(1.)),
+                                    size(px(2.5), line_height - px(2.)),
+                                ),
+                                color,
+                            ));
+                        }
+                        // 削除は行 row の上境界に小さな err マーカー。
+                        project::HunkKind::Removed if hunk.new_range.start == row32 => {
+                            diff_marks.push(fill(
+                                Bounds::new(point(bounds.left(), y - px(1.5)), size(px(6.), px(3.))),
+                                theme.err,
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             let line_text = snapshot.line_text(row);
             let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0));
             let line_end = line_start + line_text.len();
@@ -919,6 +1008,7 @@ impl Element for EditorElement {
             selections: selection_quads,
             carets,
             current_line,
+            diff_marks,
             content_bounds,
             gutter_width,
             viewport_height: bounds.size.height,
@@ -946,6 +1036,10 @@ impl Element for EditorElement {
 
         if let Some(highlight) = prepaint.current_line.take() {
             window.paint_quad(highlight);
+        }
+        // gutter diff マーク（追加=緑 / 変更=琥珀 / 削除=赤の左端バー）。
+        for mark in prepaint.diff_marks.drain(..) {
+            window.paint_quad(mark);
         }
         for quad in prepaint.selections.drain(..) {
             window.paint_quad(quad);

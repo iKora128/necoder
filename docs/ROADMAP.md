@@ -70,8 +70,8 @@
 
 ## M8 — Git とターミナル、ブランチ横断の完成
 
-- [ ] git status（ツリー/タブ色）+ gutter diff
-- [ ] branch/worktree メニュー（切替・worktree 作成）→ ⌘O を2階層化、スレッドの (project, branch) 帰属
+- [x] git status（ツリー/タブ色）+ gutter diff — 2026-07-13。`project` に **git CLI 直叩き**の `git_status`（porcelain→5分類）+ `buffer_diff`（`git show HEAD:./name` + **imara-diff** Histogram・純Rust）。ツリー行/タブ名を状態色（追加=緑/変更=琥珀/削除=赤）+ 末尾バッジ（M/A/U/D/!）、フォルダは配下変更で ●。gutter は追加/変更/削除の左端バー（editor_view・**バッファ version 変化を prepaint で検知→250msデバウンス→背景スレッドで git**＝idle 0%）。offscreen で目視（Cargo.toml=M・gutter 緑バー）
+- [x] branch/worktree メニュー（切替・worktree 作成）→ スレッドの (project, branch) 帰属 — 2026-07-13。titlebar の ⎇ クリックで開く（`project::git_branches`/`git_worktrees`/`switch_branch`/`add_worktree`）。ブランチ行クリック=in-place 切替（git switch→再読込）、**⧉=worktree として新しい窓で開く**（既存 worktree 優先・無ければ `<repo親>/<repo名>-<branch>` に作成）＝**並行ブランチ×別窓×スレッド色**の入口。worktree 一覧も別窓で開ける。宛先チップの (project, branch) は切替で追従。**⌘O 2階層化は未**（⎇ 直開きで代替）
 - [ ] 統合ターミナル（alacritty_terminal）+ パスリンク
 - [ ] 受入: **worktree で並行ブランチを開き、それぞれ別スレッドのエージェントを走らせ、色で追える**（＝当初ビジョンの完成形）
 

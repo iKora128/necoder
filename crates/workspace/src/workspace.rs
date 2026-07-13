@@ -14,9 +14,9 @@ use gpui::{
     WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*,
     pulsating_between, px, size,
 };
-use project::Worktree;
+use project::{StatusKind, Worktree};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use theme_core::{Theme, ThemeSource, project_color};
@@ -268,6 +268,10 @@ pub struct Workspace {
     explorer_context_menu: Option<ExplorerContextMenu>,
     // プロジェクト横断検索パネル（開いていれば Some・⌘⇧F）。
     search_panel: Option<SearchState>,
+    // アクティブプロジェクトの git 状態（絶対パス → 状態）。ツリー/タブの色分けに使う。
+    git_status: HashMap<PathBuf, StatusKind>,
+    // branch/worktree メニュー（titlebar の ⎇ クリックで開く。開いていれば出す位置）。
+    branch_menu: Option<Point<gpui::Pixels>>,
 }
 
 impl Workspace {
@@ -338,7 +342,7 @@ impl Workspace {
             })
         });
         let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
-        let workspace = Workspace {
+        let mut workspace = Workspace {
             projects,
             active: 0,
             editor: None,
@@ -372,7 +376,11 @@ impl Workspace {
             // 開発用: SHIRUSHI_CONTEXT_MENU=1 でルートの右クリックメニューを開いた状態で撮る。
             explorer_context_menu,
             search_panel,
+            git_status: HashMap::new(),
+            // 開発用: SHIRUSHI_BRANCH_MENU=1 で branch/worktree メニューを開いた状態で撮る。
+            branch_menu: std::env::var_os("SHIRUSHI_BRANCH_MENU").map(|_| point(px(90.), px(44.))),
         };
+        workspace.refresh_git_status(); // ツリー/タブの git 色分け用
         workspace.update_agent_destination(cx); // 宛先チップにプロジェクト/ブランチを反映
         workspace.save_state(); // 起動時点で状態を書く（再起動復元のため）
         workspace
@@ -390,6 +398,119 @@ impl Workspace {
         self.projects.get(self.active)
     }
 
+    /// アクティブプロジェクトの git 状態を読み直す（ツリー/タブの色分け）。git 無し/失敗は空。
+    /// ディスク状態を反映するので、切替・オープン時に呼ぶ（編集中の未保存差分は gutter が担う）。
+    fn refresh_git_status(&mut self) {
+        self.git_status = self
+            .active_slot()
+            .map(|slot| project::git_status(slot.worktree.root()).into_iter().collect())
+            .unwrap_or_default();
+    }
+
+    /// git 状態の色（UI-SPEC §1.3: 色は識別に集約。theme の診断/git トークンを流用）。
+    fn git_tint(theme: &Theme, status: StatusKind) -> Hsla {
+        match status {
+            StatusKind::Untracked | StatusKind::Added => theme.ok, // 緑
+            StatusKind::Modified => theme.warn,                    // 琥珀
+            StatusKind::Deleted | StatusKind::Conflicted => theme.err, // 赤
+        }
+    }
+
+    /// git 状態の 1 文字バッジ（ツリー行末に出す）。
+    fn git_letter(status: StatusKind) -> &'static str {
+        match status {
+            StatusKind::Untracked => "U",
+            StatusKind::Added => "A",
+            StatusKind::Modified => "M",
+            StatusKind::Deleted => "D",
+            StatusKind::Conflicted => "!",
+        }
+    }
+
+    // ── branch / worktree メニュー（M8: ブランチ横断の完成形） ──
+
+    /// titlebar の ⎇ クリックで branch/worktree メニューを開閉する。
+    fn toggle_branch_menu(&mut self, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.branch_menu = if self.branch_menu.is_some() { None } else { Some(position) };
+        cx.notify();
+    }
+
+    fn hide_branch_menu(&mut self, cx: &mut Context<Self>) {
+        if self.branch_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// ブランチを in-place で切り替える（git switch）→ プロジェクト再読込。dirty で失敗したらログのみ。
+    fn switch_branch_to(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.branch_menu = None;
+        let Some(root) = self.active_slot().map(|slot| slot.worktree.root().to_path_buf()) else {
+            return;
+        };
+        match project::switch_branch(&root, &branch) {
+            Ok(()) => self.reload_active_project(window, cx),
+            Err(error) => {
+                eprintln!("ブランチ切替に失敗: {error:#}");
+                cx.notify();
+            }
+        }
+    }
+
+    /// ブランチを worktree として**新しいウィンドウ**で開く（当初ビジョン: 並行ブランチ×別窓×スレッド色）。
+    /// 既存 worktree があればそれを、無ければ `<repo親>/<repo名>-<branch>` に作って開く。
+    fn open_branch_worktree(&mut self, branch: String, cx: &mut Context<Self>) {
+        self.branch_menu = None;
+        let Some(root) = self.active_slot().map(|slot| slot.worktree.root().to_path_buf()) else {
+            return;
+        };
+        if let Some(existing) = project::git_worktrees(&root)
+            .into_iter()
+            .find(|worktree| worktree.branch.as_deref() == Some(branch.as_str()))
+        {
+            self.open_folder_as_window(existing.path, cx);
+            return;
+        }
+        let repo_name = root
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "repo".to_string());
+        let sanitized = branch.replace('/', "-");
+        let Some(parent) = root.parent() else {
+            eprintln!("worktree の作成先を決められない（root に親が無い）");
+            cx.notify();
+            return;
+        };
+        let target = parent.join(format!("{repo_name}-{sanitized}"));
+        match project::add_worktree(&root, &target, &branch) {
+            Ok(()) => self.open_folder_as_window(target, cx),
+            Err(error) => {
+                eprintln!("worktree 作成に失敗: {error:#}");
+                cx.notify();
+            }
+        }
+    }
+
+    /// worktree のパスを新しいウィンドウで開く。
+    fn open_worktree_window(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.branch_menu = None;
+        self.open_folder_as_window(path, cx);
+    }
+
+    /// ブランチ切替後などにアクティブプロジェクトを再読込（ツリー再構築・開ファイル再読込・git 更新）。
+    fn reload_active_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(slot) = self.projects.get_mut(self.active) {
+            slot.refresh();
+        }
+        let open_file = self.active_slot().and_then(|slot| slot.open_file.clone());
+        match open_file {
+            Some(path) if path.exists() => self.open_file(path, window, cx),
+            Some(_) => self.close_active_editor(cx),
+            None => self.refresh_git_status(),
+        }
+        self.update_agent_destination(cx);
+        cx.notify();
+    }
+
     fn switch_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.projects.len() || index == self.active {
             return;
@@ -404,6 +525,7 @@ impl Workspace {
                 self._editor_observation = None;
             }
         }
+        self.refresh_git_status();
         self.update_agent_destination(cx);
         self.save_state();
         cx.notify();
@@ -643,6 +765,7 @@ impl Workspace {
             slot.selected = Some(path.clone());
             slot.open_file = Some(path);
         }
+        self.refresh_git_status();
         self.save_state();
         cx.notify();
     }
@@ -1172,6 +1295,7 @@ impl Workspace {
         let theme = self.theme.clone();
         let color = slot.color;
         let selected = slot.selected.clone();
+        let git_status = &self.git_status;
         div()
             .flex_1()
             .overflow_hidden()
@@ -1179,6 +1303,15 @@ impl Workspace {
                 let path = row.path.clone();
                 let is_dir = row.is_dir;
                 let is_selected = selected.as_ref() == Some(&row.path);
+                // git 色分け: ファイルは自身の状態、フォルダは配下に変更があれば ● を出す。
+                let file_status = if is_dir { None } else { git_status.get(&row.path).copied() };
+                let dir_dirty =
+                    is_dir && git_status.keys().any(|changed| changed.starts_with(&row.path));
+                let name_color = match file_status {
+                    Some(status) => Self::git_tint(&theme, status),
+                    None if is_selected => theme.fg0,
+                    None => theme.fg1,
+                };
                 let chevron = if row.is_dir {
                     if row.is_expanded { "▾" } else { "▸" }
                 } else {
@@ -1208,7 +1341,29 @@ impl Workspace {
                             .child(SharedString::from(chevron.to_string())),
                     )
                     .child(file_icon(&row.name, is_dir, &theme))
-                    .child(row.name.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_color(name_color)
+                            .child(row.name.clone()),
+                    )
+                    // git バッジ（ファイル=状態文字・フォルダ=変更あり ●）
+                    .when_some(file_status, |element, status| {
+                        element.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(Self::git_tint(&theme, status))
+                                .child(Self::git_letter(status)),
+                        )
+                    })
+                    .when(dir_dirty, |element| {
+                        element.child(
+                            div().flex_none().text_size(px(10.)).text_color(theme.warn).child("●"),
+                        )
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
@@ -1929,6 +2084,165 @@ impl Workspace {
         )
     }
 
+    /// branch/worktree メニュー（titlebar の ⎇ クリックで開く）。ブランチ切替（in-place）と、
+    /// **worktree を別ウィンドウで開く**（並行ブランチ×別窓×スレッド色＝当初ビジョン）。
+    fn render_branch_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let position = *self.branch_menu.as_ref()?;
+        let slot = self.active_slot()?;
+        let theme = self.theme.clone();
+        let accent = slot.color;
+        let root = slot.worktree.root().to_path_buf();
+        let current = project::git_current_branch(&root);
+        let branches = project::git_branches(&root);
+        let worktrees = project::git_worktrees(&root);
+
+        let (bg2, bg3, border, fg0, fg1, fg2) =
+            (theme.bg2, theme.bg3, theme.border, theme.fg0, theme.fg1, theme.fg2);
+
+        let mut menu_box = div()
+            .absolute()
+            .left(position.x)
+            .top(position.y)
+            .w(px(280.))
+            .bg(bg2)
+            .border_1()
+            .border_color(border)
+            .rounded(px(8.))
+            .p(px(4.))
+            .shadow(vec![
+                gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
+            ])
+            .child(div().px(px(8.)).py(px(4.)).text_size(px(10.5)).text_color(fg2).child("ブランチ"));
+
+        for (index, branch) in branches.into_iter().enumerate() {
+            let is_current = current.as_deref() == Some(branch.as_str());
+            let switch_branch = branch.clone();
+            let worktree_branch = branch.clone();
+            menu_box = menu_box.child(
+                div()
+                    .id(("branch", index))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(5.))
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(bg3))
+                    .child(
+                        div()
+                            .w(px(10.))
+                            .flex_none()
+                            .text_color(accent)
+                            .child(if is_current { "●" } else { "" }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_color(if is_current { fg0 } else { fg1 })
+                            .child(SharedString::from(branch.clone())),
+                    )
+                    // 行クリック = in-place 切替（現在ブランチは無効）
+                    .when(!is_current, |element| {
+                        element.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.switch_branch_to(switch_branch.clone(), window, cx)
+                            }),
+                        )
+                    })
+                    // ⧉ = worktree として新しい窓で開く（当初ビジョン）
+                    .child(
+                        div()
+                            .id(("branch-wt", index))
+                            .flex_none()
+                            .px(px(4.))
+                            .rounded(px(4.))
+                            .text_size(px(11.))
+                            .text_color(fg2)
+                            .hover(|style| style.bg(bg2).text_color(fg0))
+                            .child("⧉")
+                            .tooltip(Tooltip::text("worktree で新しい窓に開く", theme.clone()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_branch_worktree(worktree_branch.clone(), cx)
+                                }),
+                            ),
+                    ),
+            );
+        }
+
+        // worktree セクション（現在の作業ツリー以外）。
+        let others: Vec<_> = worktrees.into_iter().filter(|worktree| worktree.path != root).collect();
+        if !others.is_empty() {
+            menu_box = menu_box
+                .child(div().h(px(1.)).bg(border).my(px(3.)))
+                .child(div().px(px(8.)).py(px(4.)).text_size(px(10.5)).text_color(fg2).child("worktree"));
+            for (index, worktree) in others.into_iter().enumerate() {
+                let label = worktree.branch.clone().unwrap_or_else(|| {
+                    worktree
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                });
+                let path = worktree.path.clone();
+                menu_box = menu_box.child(
+                    div()
+                        .id(("worktree", index))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(5.))
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(bg3))
+                        .child(div().flex_none().text_color(fg2).child("⎇"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_color(fg1)
+                                .child(SharedString::from(label)),
+                        )
+                        .child(div().flex_none().text_size(px(10.)).text_color(fg2).child("窓"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _window, cx| {
+                                this.open_worktree_window(path.clone(), cx)
+                            }),
+                        ),
+                );
+            }
+        }
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.hide_branch_menu(cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _window, cx| this.hide_branch_menu(cx)),
+                )
+                .child(menu_box)
+                .into_any_element(),
+        )
+    }
+
     /// アクティブプロジェクト色（無ければパレット先頭）。titlebar ピル左縁・タブ上線に流す。
     fn accent(&self) -> Hsla {
         self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0))
@@ -2030,9 +2344,22 @@ impl Workspace {
         if let Some(branch) = branch {
             inner = inner.child(
                 div()
+                    .id("branch-pill")
                     .text_color(theme.fg1)
                     .text_size(px(11.5))
-                    .child(format!("⎇ {branch}")),
+                    .rounded(px(4.))
+                    .px(px(3.))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                    .child(format!("⎇ {branch}"))
+                    .tooltip(Tooltip::text("ブランチ / worktree", theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation(); // ピル全体（⌘O）を起こさない
+                            this.toggle_branch_menu(event.position, cx)
+                        }),
+                    ),
             );
         }
 
@@ -2116,6 +2443,9 @@ impl Workspace {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "無題".to_string());
         let dirty = view.buffer().is_dirty();
+        // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
+        let status = view.buffer().path().and_then(|path| self.git_status.get(path).copied());
+        let name_color = status.map(|status| Self::git_tint(&theme, status)).unwrap_or(theme.fg0);
         // ファイルが変わったら（キーが変わる）タブが一度だけ fade-in する。
         let tab_key = SharedString::from(format!("editor-tab-appear-{name}"));
 
@@ -2143,7 +2473,7 @@ impl Workspace {
                     .when(dirty, |element| {
                         element.child(div().size(px(7.)).rounded(px(3.5)).bg(theme.warn))
                     })
-                    .child(SharedString::from(name))
+                    .child(div().text_color(name_color).child(SharedString::from(name)))
                     .child(
                         div()
                             .id("close-tab")
@@ -2416,6 +2746,7 @@ impl Render for Workspace {
             // オーバーレイ（最前面）
             .when_some(self.picker.clone(), |this, picker| this.child(picker))
             .children(self.render_search_panel(cx))
+            .children(self.render_branch_menu(cx))
             .children(self.render_explorer_context_menu(cx))
     }
 }

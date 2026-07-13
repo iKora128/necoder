@@ -11,3 +11,4 @@ path = "src/project.rs"
 [dependencies]
 anyhow.workspace = true
 ignore.workspace = true
+imara-diff.workspace = true

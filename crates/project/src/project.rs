@@ -6,7 +6,9 @@
 
 use anyhow::{Context as _, Result};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// ディレクトリ 1 項目。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +142,287 @@ impl Worktree {
     }
 }
 
+// ── git status / gutter diff（M8） ──
+// Zed 準拠: git2/gix を使わず `git` CLI + imara-diff（純 Rust）。
+// 詳細な移植根拠は docs/research/porting-git-terminal-lsp.md。
+
+/// ファイルの git 状態（ツリー/タブの色分け用）。色は識別に集約（UI-SPEC §1.3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    Added,
+    Modified,
+    Deleted,
+    Untracked,
+    Conflicted,
+}
+
+/// `dir` を含む git リポジトリのルート（`git rev-parse --show-toplevel`）。repo 外なら `None`。
+fn git_repo_root(dir: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// `dir` を含む repo の working-tree 状態を読む。返すパスは**絶対**。
+/// git が無い / repo でない / 失敗時は空（色を出さないだけ＝安全側）。
+pub fn git_status(dir: &Path) -> Vec<(PathBuf, StatusKind)> {
+    let Some(repo) = git_repo_root(dir) else {
+        return Vec::new();
+    };
+    let output = Command::new("git")
+        .current_dir(&repo)
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--no-renames",
+            "-z",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries = Vec::new();
+    for entry in stdout.split('\0') {
+        // レイアウト: XY + ' ' + path（`-z` は path をクォートしない）。
+        if entry.len() < 4 || &entry[2..3] != " " {
+            continue;
+        }
+        let path = &entry[3..];
+        if path.ends_with('/') {
+            continue; // untracked ディレクトリ（配下ファイルで拾う）
+        }
+        let bytes = entry.as_bytes();
+        entries.push((repo.join(path), classify_status(bytes[0], bytes[1])));
+    }
+    entries
+}
+
+/// porcelain の XY（X=index, Y=worktree）を 5 分類に畳む。順序が重要
+/// （Untracked / Conflicted を先に判定してから A/D/M）。<https://git-scm.com/docs/git-status>
+fn classify_status(x: u8, y: u8) -> StatusKind {
+    match (x, y) {
+        (b'?', b'?') => StatusKind::Untracked,
+        (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D') => StatusKind::Conflicted,
+        _ if x == b'A' || y == b'A' => StatusKind::Added,
+        _ if x == b'D' || y == b'D' => StatusKind::Deleted,
+        _ => StatusKind::Modified,
+    }
+}
+
+// ── branch / worktree（M8: ブランチ横断の完成形） ──
+
+/// 現在のブランチ名（`git rev-parse --abbrev-ref HEAD`）。detached HEAD / repo 外は `None`。
+pub fn git_current_branch(dir: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!name.is_empty() && name != "HEAD").then_some(name)
+}
+
+/// ローカルブランチ名の一覧（現在ブランチを先頭に）。repo 外は空。
+pub fn git_branches(dir: &Path) -> Vec<String> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["branch", "--format=%(refname:short)"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut branches: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    if let Some(current) = git_current_branch(dir) {
+        // 現在ブランチを先頭へ（キーが false=0 で先頭）。
+        branches.sort_by_key(|branch| *branch != current);
+    }
+    branches
+}
+
+/// worktree の 1 項目（作業ツリーのパス + チェックアウト中のブランチ）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitWorktree {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+/// worktree の一覧（`git worktree list --porcelain`）。repo 外は空。
+pub fn git_worktrees(dir: &Path) -> Vec<GitWorktree> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["worktree", "list", "--porcelain"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut list = Vec::new();
+    let mut path: Option<PathBuf> = None;
+    let mut branch: Option<String> = None;
+    let flush = |path: &mut Option<PathBuf>, branch: &mut Option<String>, list: &mut Vec<GitWorktree>| {
+        if let Some(taken) = path.take() {
+            list.push(GitWorktree { path: taken, branch: branch.take() });
+        }
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            flush(&mut path, &mut branch, &mut list);
+            path = Some(PathBuf::from(rest));
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            branch = Some(rest.trim_start_matches("refs/heads/").to_string());
+        }
+    }
+    flush(&mut path, &mut branch, &mut list);
+    list
+}
+
+/// ブランチを in-place で切り替える（`git switch`）。作業ツリーが dirty だと失敗し得る。
+pub fn switch_branch(dir: &Path, branch: &str) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["switch", branch])
+        .output()
+        .context("git switch の実行に失敗")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "ブランチ切替に失敗: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
+/// 既存ブランチの worktree を作る（`git worktree add <path> <branch>`）。
+pub fn add_worktree(dir: &Path, path: &Path, branch: &str) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["worktree", "add"])
+        .arg(path)
+        .arg(branch)
+        .output()
+        .context("git worktree add の実行に失敗")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "worktree 作成に失敗: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
+/// gutter diff の 1 ハンク種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HunkKind {
+    Added,
+    Modified,
+    Removed,
+}
+
+/// gutter diff の 1 ハンク。`new_range` は**現在バッファ側の行範囲**（0 始まり半開）＝ガター描画のキー。
+/// `Removed` は `new_range` が空（`n..n`）＝行 n の境界に削除マーカーを出す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffHunk {
+    pub old_range: std::ops::Range<u32>,
+    pub new_range: std::ops::Range<u32>,
+    pub kind: HunkKind,
+}
+
+/// `file`（絶対パス）の HEAD 版テキスト。`HEAD:./<name>`（cwd 相対）で subdir でも正しく引く。
+/// HEAD に無い（新規/未追跡）or repo 外なら `None`。
+fn head_blob(dir: &Path, name: &OsStr) -> Option<String> {
+    let spec = format!("HEAD:./{}", name.to_string_lossy());
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["--no-optional-locks", "show", &spec])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `file`（絶対パス）の HEAD 版 vs 現在テキストを行単位で diff。HEAD が無ければ空
+/// （新規/未追跡は tree/tab の色で示すのでガターは静かにする）。
+pub fn buffer_diff(file: &Path, current: &str) -> Vec<DiffHunk> {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
+        return Vec::new();
+    };
+    match head_blob(dir, name) {
+        Some(head) => diff_hunks(&head, current),
+        None => Vec::new(),
+    }
+}
+
+/// HEAD テキスト vs 現在テキストの行 diff（imara-diff・Histogram）。テスト可能な純関数。
+pub fn diff_hunks(head_text: &str, current: &str) -> Vec<DiffHunk> {
+    use imara_diff::intern::InternedInput;
+    use imara_diff::sources::lines_with_terminator;
+    use imara_diff::Algorithm;
+    // CRLF を LF へ正規化（さもないと改行差だけで全行 Modified になる）。
+    let head = normalize_newlines(head_text);
+    let current = normalize_newlines(current);
+    let input = InternedInput::new(
+        lines_with_terminator(head.as_str()),
+        lines_with_terminator(current.as_str()),
+    );
+    imara_diff::diff(Algorithm::Histogram, &input, HunkCollector::default())
+}
+
+fn normalize_newlines(text: &str) -> String {
+    if text.contains('\r') {
+        text.replace("\r\n", "\n")
+    } else {
+        text.to_string()
+    }
+}
+
+#[derive(Default)]
+struct HunkCollector {
+    hunks: Vec<DiffHunk>,
+}
+
+impl imara_diff::Sink for HunkCollector {
+    type Out = Vec<DiffHunk>;
+    fn process_change(&mut self, before: std::ops::Range<u32>, after: std::ops::Range<u32>) {
+        let kind = if after.is_empty() {
+            HunkKind::Removed
+        } else if before.is_empty() {
+            HunkKind::Added
+        } else {
+            HunkKind::Modified
+        };
+        self.hunks.push(DiffHunk { old_range: before, new_range: after, kind });
+    }
+    fn finish(self) -> Self::Out {
+        self.hunks
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +487,62 @@ mod tests {
     #[test]
     fn missing_directory_errors() {
         assert!(Worktree::new("/no/such/dir/shirushi-xyz").is_err());
+    }
+
+    #[test]
+    fn diff_hunks_classifies_add_modify_remove() {
+        // 同一 → ハンク無し
+        assert!(diff_hunks("a\nb\n", "a\nb\n").is_empty());
+        // 変更（b→B）→ Modified・現在行 0..1
+        let modified = diff_hunks("a\n", "b\n");
+        assert_eq!(modified.len(), 1);
+        assert_eq!(modified[0].kind, HunkKind::Modified);
+        assert_eq!(modified[0].new_range, 0..1);
+        // 追加（b を挿入）→ Added・現在行 1..2
+        let added = diff_hunks("a\n", "a\nb\n");
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].kind, HunkKind::Added);
+        assert_eq!(added[0].new_range, 1..2);
+        // 削除（b を除去）→ Removed・現在行 1..1（境界）
+        let removed = diff_hunks("a\nb\n", "a\n");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].kind, HunkKind::Removed);
+        assert_eq!(removed[0].new_range, 1..1);
+    }
+
+    #[test]
+    fn git_status_and_buffer_diff_on_temp_repo() {
+        let root = scratch("gitstatus");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").current_dir(&root).args(args).output().expect("git 実行")
+        };
+        // git が無い環境ではスキップ（CI 等）。
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "tester"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+        // 追跡ファイルを変更 + 未追跡ファイルを追加
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        std::fs::write(root.join("new.txt"), "x\n").unwrap();
+
+        let status: std::collections::HashMap<PathBuf, StatusKind> =
+            git_status(&root).into_iter().collect();
+        // git は toplevel を realpath で返すので比較側も canonicalize（macOS の /var→/private/var）。
+        let tracked = std::fs::canonicalize(root.join("tracked.txt")).unwrap();
+        let new = std::fs::canonicalize(root.join("new.txt")).unwrap();
+        assert_eq!(status.get(&tracked), Some(&StatusKind::Modified));
+        assert_eq!(status.get(&new), Some(&StatusKind::Untracked));
+
+        // buffer_diff: HEAD="one\n" vs 現在 "two\n" → 1 行 Modified
+        let hunks = buffer_diff(&tracked, "two\n");
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].kind, HunkKind::Modified);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

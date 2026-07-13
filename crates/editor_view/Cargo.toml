@@ -14,3 +14,4 @@ editor_core.workspace = true
 theme_core.workspace = true
 lang.workspace = true
 i18n.workspace = true
+project.workspace = true

@@ -301,3 +301,12 @@
 - 学び/罠: **raw 文字列に hex 色 `"#..."` を含めると `r#"..."#` が `"#` で早期終了** → `r##"..."##`。gpui に `.inline()` 無し（inline テキストは flex 行 + `whitespace_nowrap`）。`Picker` は汎用なので Highlighted を全モードで emit するが workspace 側でモード判定して無視
 - 結果: 警告 0・**test 67 passed**（workspace 全体）。M3 テーマ/⌘1-9/新窓・M5 root上ブラウズ・M6 検索ジャンプ = 受入達成
 - 次: Phase B = git status 色（ツリー/タブ）+ gutter diff（`imara-diff`）+ branch/worktree メニュー
+
+## 2026-07-13 —（続き）Phase B: M8 git（status色・gutter diff・branch/worktree）
+- **git モデル（`project`）**: Zed 準拠で git2/gix 不使用。`git_status`（`git status --porcelain=v1 -z` → XY を Added/Modified/Deleted/Untracked/Conflicted に畳む・絶対パス）/ `buffer_diff`（`git show HEAD:./<name>`〔cwd 相対で subdir も正〕+ **imara-diff 0.1.8** Histogram）/ `git_branches`/`git_worktrees`/`switch_branch`/`add_worktree`。dep 追加は imara-diff 1つだけ。test 6（diff 分類 + 一時 repo で status/diff）
+- **ツリー/タブ色（workspace）**: `git_status: HashMap<PathBuf,StatusKind>` を switch_project/open_file/起動時に読み直す。ツリー行=ファイル名を状態色 + 末尾バッジ（M/A/U/D/!）・フォルダは配下変更で琥珀 ●（`keys().any(starts_with)` ロールアップ）。タブ名も同色貫通
+- **gutter diff（editor_view）**: `diff_hunks: Vec<project::DiffHunk>`。**編集の choke は `after_edit` だけだと IME/入力を取り逃す** → **prepaint で `buffer.version()` 変化を検知**して一様に捕捉。`schedule_diff` = 250ms デバウンス（世代番号）+ `background_executor().spawn` で git 実行＝**idle 0%**。EditorPrepaint に `diff_marks: Vec<PaintQuad>` 追加、行ループで左端バー（追加=ok/変更=warn の全高・削除=err の上境界小マーカー）を積み paint。初回は `diff_scheduled_version=u64::MAX` で必ず計算
+- **branch/worktree メニュー（workspace）**: titlebar ⎇ クリックで overlay（context menu と同型・背面クリックで閉じる）。ブランチ行=in-place 切替（`switch_branch`→`reload_active_project`＝ツリー再構築+開ファイル再読込+git更新）、**⧉=worktree で新窓**（`add_worktree` → `open_folder_as_window`＝当初ビジョンの入口）。worktree 一覧セクションも別窓で開ける。⎇ の子は `stop_propagation` でピル（⌘O）を抑止
+- 学び/罠: `imara_diff::Sink::process_change(before,after)` の after=現在バッファ行域＝gutter キー。CRLF は diff 前に LF 正規化（さもないと全行 Modified）。git `rev-parse --show-toplevel` は realpath 返す→テストは canonicalize で比較。editor_view→project 依存を追加（view→model は正方向・lang 依存と同型）
+- 結果: 警告 0・**test 全 suite ok**。offscreen で ①ツリー Cargo.toml=M 琥珀 + gutter 緑バー ②branch メニュー「● main」+ ⧉ を目視
+- 次: Phase C = 分割ペイン + 下ドック + 統合ターミナル（alacritty_terminal）
