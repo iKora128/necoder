@@ -123,6 +123,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-shift-t": "workspace::ThemeSelector",
       "cmd-j": "workspace::ToggleTerminal",
       "cmd-\\": "workspace::SplitRight",
+      "ctrl-shift-g": "workspace::ToggleGitPanel",
       "cmd-w": "workspace::CloseTab",
       "cmd-shift-a": "workspace::NewThread",
       "cmd-shift-n": "workspace::NewWindow",

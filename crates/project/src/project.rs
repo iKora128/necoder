@@ -334,6 +334,205 @@ pub fn add_worktree(dir: &Path, path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+// ── git 基礎操作（stage / commit / push / pull / branch 作成・削除） ──
+// すべて `git` CLI ラッパ。失敗は stderr（空なら stdout）を人間向けに返す。
+
+/// 失敗した git コマンドの人間向けメッセージ（stderr 優先・空なら stdout。commit の
+/// 「nothing to commit」等は stdout に出るため両対応）。
+fn git_fail_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// 変更を index に上げる（`git add -- <path>`）。
+pub fn stage_path(dir: &Path, path: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["add", "--"])
+        .arg(path)
+        .output()
+        .context("git add の実行に失敗")?;
+    anyhow::ensure!(output.status.success(), "stage に失敗: {}", git_fail_message(&output));
+    Ok(())
+}
+
+/// 全変更を index に上げる（`git add -A`）。
+pub fn stage_all(dir: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["add", "-A"])
+        .output()
+        .context("git add -A の実行に失敗")?;
+    anyhow::ensure!(output.status.success(), "stage に失敗: {}", git_fail_message(&output));
+    Ok(())
+}
+
+/// index から下ろす（`git restore --staged -- <path>`）。
+pub fn unstage_path(dir: &Path, path: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["restore", "--staged", "--"])
+        .arg(path)
+        .output()
+        .context("git restore --staged の実行に失敗")?;
+    anyhow::ensure!(output.status.success(), "unstage に失敗: {}", git_fail_message(&output));
+    Ok(())
+}
+
+/// staged 変更をコミット（`git commit -m <message>`）。message 空・staged 無しは失敗。
+pub fn commit(dir: &Path, message: &str) -> Result<()> {
+    anyhow::ensure!(!message.trim().is_empty(), "コミットメッセージが空");
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["commit", "-m", message])
+        .output()
+        .context("git commit の実行に失敗")?;
+    anyhow::ensure!(output.status.success(), "コミットに失敗: {}", git_fail_message(&output));
+    Ok(())
+}
+
+/// 新しいブランチを作って切り替え（`git switch -c <name>`）。既存名なら失敗。
+pub fn create_branch(dir: &Path, name: &str) -> Result<()> {
+    anyhow::ensure!(!name.trim().is_empty(), "ブランチ名が空");
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["switch", "-c", name])
+        .output()
+        .context("git switch -c の実行に失敗")?;
+    anyhow::ensure!(output.status.success(), "ブランチ作成に失敗: {}", git_fail_message(&output));
+    Ok(())
+}
+
+/// ブランチを削除（`git branch -d`; `force` で `-D`）。現在ブランチは git が拒否する。
+pub fn delete_branch(dir: &Path, name: &str, force: bool) -> Result<()> {
+    let flag = if force { "-D" } else { "-d" };
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["branch", flag, name])
+        .output()
+        .context("git branch -d の実行に失敗")?;
+    anyhow::ensure!(output.status.success(), "ブランチ削除に失敗: {}", git_fail_message(&output));
+    Ok(())
+}
+
+/// 現在ブランチを push（`git push`）。upstream 未設定なら `-u origin <branch>` で再試行
+/// （初回 push の定番動線）。remote が無ければ失敗を返す。
+pub fn push(dir: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["push"])
+        .output()
+        .context("git push の実行に失敗")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("has no upstream") || stderr.contains("--set-upstream") {
+        let branch =
+            git_current_branch(dir).context("push: 現在ブランチが取得できない（detached HEAD?）")?;
+        let retry = Command::new("git")
+            .current_dir(dir)
+            .args(["push", "--set-upstream", "origin", &branch])
+            .output()
+            .context("git push --set-upstream の実行に失敗")?;
+        anyhow::ensure!(retry.status.success(), "push に失敗: {}", git_fail_message(&retry));
+        return Ok(());
+    }
+    anyhow::bail!("push に失敗: {}", stderr.trim());
+}
+
+/// upstream から pull（`git pull --ff-only`）。fast-forward できなければ失敗（安全側・merge しない）。
+pub fn pull(dir: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(["pull", "--ff-only"])
+        .output()
+        .context("git pull の実行に失敗")?;
+    anyhow::ensure!(output.status.success(), "pull に失敗: {}", git_fail_message(&output));
+    Ok(())
+}
+
+/// コミットパネル用の 1 変更（staged / unstaged を分離して持つ。同一ファイルが両方に出得る）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkingChange {
+    pub path: PathBuf,
+    /// index 側（staged）の状態。変更なしは `None`。
+    pub staged: Option<StatusKind>,
+    /// worktree 側（unstaged）の状態。変更なしは `None`。
+    pub unstaged: Option<StatusKind>,
+}
+
+/// working-tree の変更を staged / unstaged 別に読む（コミットパネル用）。返すパスは**絶対**。
+/// `git_status` は色分け用に XY を 1 状態へ畳むが、こちらは index / worktree を分けて持つ。
+pub fn git_changes(dir: &Path) -> Vec<WorkingChange> {
+    let Some(repo) = git_repo_root(dir) else {
+        return Vec::new();
+    };
+    let output = Command::new("git")
+        .current_dir(&repo)
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--no-renames",
+            "-z",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut changes = Vec::new();
+    for entry in stdout.split('\0') {
+        if entry.len() < 4 || &entry[2..3] != " " {
+            continue;
+        }
+        let path = &entry[3..];
+        if path.ends_with('/') {
+            continue; // untracked ディレクトリは配下ファイルで拾う
+        }
+        let bytes = entry.as_bytes();
+        let staged = index_status(bytes[0]);
+        let unstaged = worktree_status(bytes[1]);
+        if staged.is_none() && unstaged.is_none() {
+            continue;
+        }
+        changes.push(WorkingChange { path: repo.join(path), staged, unstaged });
+    }
+    changes
+}
+
+/// index 側 1 文字を `StatusKind` へ（' ' と '?' は「index に変更なし」→ `None`）。
+fn index_status(x: u8) -> Option<StatusKind> {
+    match x {
+        b' ' | b'?' => None,
+        b'A' => Some(StatusKind::Added),
+        b'D' => Some(StatusKind::Deleted),
+        b'U' => Some(StatusKind::Conflicted),
+        _ => Some(StatusKind::Modified),
+    }
+}
+
+/// worktree 側 1 文字を `StatusKind` へ（' ' は `None`、'?' は Untracked）。
+fn worktree_status(y: u8) -> Option<StatusKind> {
+    match y {
+        b' ' => None,
+        b'?' => Some(StatusKind::Untracked),
+        b'A' => Some(StatusKind::Added),
+        b'D' => Some(StatusKind::Deleted),
+        b'U' => Some(StatusKind::Conflicted),
+        _ => Some(StatusKind::Modified),
+    }
+}
+
 /// gutter diff の 1 ハンク種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HunkKind {
@@ -544,5 +743,91 @@ mod tests {
         assert_eq!(hunks[0].kind, HunkKind::Modified);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_ops_stage_commit_branch_on_temp_repo() {
+        let root = scratch("gitops");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").current_dir(&root).args(args).output().expect("git 実行")
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return; // git 無し環境はスキップ
+        }
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "tester"]);
+
+        // 新規ファイル → stage 前は unstaged=Untracked
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let a = std::fs::canonicalize(root.join("a.txt")).unwrap();
+        let before = git_changes(&root);
+        let entry = before.iter().find(|c| c.path == a).expect("a.txt が変更に出る");
+        assert_eq!(entry.unstaged, Some(StatusKind::Untracked));
+        assert_eq!(entry.staged, None);
+
+        // stage → staged=Added
+        stage_all(&root).unwrap();
+        let staged = git_changes(&root);
+        let entry = staged.iter().find(|c| c.path == a).expect("a.txt が staged に出る");
+        assert_eq!(entry.staged, Some(StatusKind::Added));
+
+        // commit → working-tree クリーン
+        commit(&root, "add a").unwrap();
+        assert!(git_changes(&root).is_empty(), "commit 後は変更なし");
+
+        // 新規ブランチ作成 → 現在ブランチが feature
+        create_branch(&root, "feature").unwrap();
+        assert_eq!(git_current_branch(&root).as_deref(), Some("feature"));
+
+        // feature 上で編集 → stage_path → commit
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        stage_path(&root, &root.join("a.txt")).unwrap();
+        commit(&root, "edit a").unwrap();
+
+        // 既定ブランチへ戻る（名前は環境依存 main/master なので feature 以外を拾う）
+        let base = git_branches(&root)
+            .into_iter()
+            .find(|branch| branch != "feature")
+            .expect("base ブランチ");
+        switch_branch(&root, &base).unwrap();
+
+        // feature を削除（未マージなので force）
+        delete_branch(&root, "feature", true).unwrap();
+        assert!(!git_branches(&root).contains(&"feature".to_string()));
+
+        // 空メッセージ commit は失敗
+        assert!(commit(&root, "   ").is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn push_sets_upstream_to_local_bare_remote() {
+        let root = scratch("gitpush");
+        let bare = scratch("gitpush_remote");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&bare).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git").current_dir(dir).args(args).output().expect("git 実行")
+        };
+        if !git(&root, &["init", "-q"]).status.success() {
+            return; // git 無し環境はスキップ
+        }
+        git(&bare, &["init", "-q", "--bare"]);
+        git(&root, &["config", "user.email", "t@example.com"]);
+        git(&root, &["config", "user.name", "tester"]);
+        git(&root, &["remote", "add", "origin", &bare.to_string_lossy()]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+
+        // upstream 未設定 → push が set-upstream 経由で通る
+        push(&root).unwrap();
+        // 2 回目（upstream 設定済み・up-to-date）も成功
+        push(&root).unwrap();
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 }

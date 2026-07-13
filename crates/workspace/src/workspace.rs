@@ -36,6 +36,7 @@ actions!(
         GoToDefinition,
         TriggerCompletion,
         SplitRight,
+        ToggleGitPanel,
         CloseTab,
         NewThread,
         // アクティブ (project, branch) を新しいウィンドウで開く（⌘⇧N。ウィンドウモデル §5）。
@@ -392,6 +393,21 @@ pub struct Workspace {
     _lsp_pump: Option<gpui::Task<()>>,
     // 補完ポップアップ（開いていれば。Ctrl-Space で開く）。
     completion: Option<CompletionState>,
+    // ── git 操作パネル（M8: ソース管理。⌃⇧G で左カラムをエクスプローラと切替）──
+    git_panel: Option<GitPanelState>,
+    // push/pull はネットワークで遅い → 背景実行中は true（ボタン無効化・表示用）。
+    git_busy: bool,
+}
+
+/// git 操作パネルの状態（コミットメッセージ / ブランチ名の手書き入力を持つ）。
+/// 入力は検索パネルと同じ流儀（keystroke を直接 String に積む）。
+struct GitPanelState {
+    /// コミットメッセージの編集バッファ。
+    message: String,
+    /// `Some` のときは入力行が「新しいブランチ名」モード（enter で作成）。
+    branch_name: Option<String>,
+    /// キーストローク取り込み用のフォーカス。
+    focus: FocusHandle,
 }
 
 impl Workspace {
@@ -508,8 +524,15 @@ impl Workspace {
             diagnostics: HashMap::new(),
             _lsp_pump: None,
             completion: None,
+            git_panel: None,
+            git_busy: false,
         };
         workspace.refresh_git_status(); // ツリー/タブの git 色分け用
+        // 開発用: SHIRUSHI_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
+        if std::env::var_os("SHIRUSHI_GIT_PANEL").is_some() {
+            workspace.git_panel =
+                Some(GitPanelState { message: String::new(), branch_name: None, focus: cx.focus_handle() });
+        }
         // 開発用: SHIRUSHI_TERMINAL=1 で下ドックのターミナルを開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_TERMINAL").is_some() {
             workspace.show_bottom = true;
@@ -664,6 +687,261 @@ impl Workspace {
         }
         self.update_agent_destination(cx);
         cx.notify();
+    }
+
+    // ── git 操作パネル（M8: ソース管理。commit / stage / push / pull / 新規ブランチ） ──
+
+    /// アクティブプロジェクトのルート（無ければ `None`）。git 操作の共通取得。
+    fn active_root(&self) -> Option<PathBuf> {
+        self.active_slot().map(|slot| slot.worktree.root().to_path_buf())
+    }
+
+    /// git 操作パネルをエクスプローラと切り替える（⌃⇧G）。開くと左カラムを占有しフォーカスを取る。
+    fn toggle_git_panel(&mut self, _: &ToggleGitPanel, window: &mut Window, cx: &mut Context<Self>) {
+        match self.git_panel.take() {
+            Some(_) => {
+                // 閉じる → エディタがあればフォーカスを戻す。
+                if let Some(editor) = &self.editor {
+                    let handle = editor.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
+            }
+            None => {
+                self.show_left = true;
+                let state =
+                    GitPanelState { message: String::new(), branch_name: None, focus: cx.focus_handle() };
+                window.focus(&state.focus, cx);
+                self.git_panel = Some(state);
+                self.refresh_git_status();
+            }
+        }
+        cx.notify();
+    }
+
+    /// git パネルのキー入力（コミットメッセージ / ブランチ名を手書きで積む。検索パネルと同流儀）。
+    fn on_git_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                // ブランチ名モードなら入力だけ畳む。そうでなければパネルを閉じる。
+                if let Some(state) = self.git_panel.as_mut() {
+                    if state.branch_name.is_some() {
+                        state.branch_name = None;
+                        cx.notify();
+                        return;
+                    }
+                }
+                self.toggle_git_panel(&ToggleGitPanel, window, cx);
+            }
+            "enter" => {
+                let naming = self.git_panel.as_ref().is_some_and(|s| s.branch_name.is_some());
+                if naming {
+                    self.confirm_new_branch(window, cx);
+                } else if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
+                    self.git_commit(window, cx); // ⌘/⌃⏎ = コミット
+                } else if let Some(state) = self.git_panel.as_mut() {
+                    state.message.push('\n'); // 素の Enter は改行
+                    cx.notify();
+                }
+            }
+            "backspace" => {
+                if let Some(state) = self.git_panel.as_mut() {
+                    match &mut state.branch_name {
+                        Some(name) => {
+                            name.pop();
+                        }
+                        None => {
+                            state.message.pop();
+                        }
+                    }
+                    cx.notify();
+                }
+            }
+            _ => {
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.platform || modifiers.control || modifiers.function {
+                    return;
+                }
+                if let Some(text) = &event.keystroke.key_char {
+                    if !text.is_empty() && !text.chars().any(char::is_control) {
+                        if let Some(state) = self.git_panel.as_mut() {
+                            match &mut state.branch_name {
+                                Some(name) => name.push_str(text),
+                                None => state.message.push_str(text),
+                            }
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// staged 変更をコミット。staged が無ければ全変更を stage してからコミット（簡便動線）。
+    fn git_commit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let message = self.git_panel.as_ref().map(|state| state.message.clone()).unwrap_or_default();
+        if message.trim().is_empty() {
+            return;
+        }
+        let changes = project::git_changes(&root);
+        if changes.is_empty() {
+            return;
+        }
+        if !changes.iter().any(|change| change.staged.is_some()) {
+            if let Err(error) = project::stage_all(&root) {
+                eprintln!("stage に失敗: {error:#}");
+                return;
+            }
+        }
+        match project::commit(&root, &message) {
+            Ok(()) => {
+                if let Some(state) = self.git_panel.as_mut() {
+                    state.message.clear();
+                }
+                self.refresh_git_status();
+            }
+            Err(error) => eprintln!("コミットに失敗: {error:#}"),
+        }
+        cx.notify();
+    }
+
+    /// 1 ファイルを stage。
+    fn git_stage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(root) = self.active_root() {
+            if let Err(error) = project::stage_path(&root, &path) {
+                eprintln!("stage に失敗: {error:#}");
+            }
+            self.refresh_git_status();
+            cx.notify();
+        }
+    }
+
+    /// 1 ファイルを unstage。
+    fn git_unstage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(root) = self.active_root() {
+            if let Err(error) = project::unstage_path(&root, &path) {
+                eprintln!("unstage に失敗: {error:#}");
+            }
+            self.refresh_git_status();
+            cx.notify();
+        }
+    }
+
+    /// 全変更を stage。
+    fn git_stage_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(root) = self.active_root() {
+            if let Err(error) = project::stage_all(&root) {
+                eprintln!("stage に失敗: {error:#}");
+            }
+            self.refresh_git_status();
+            cx.notify();
+        }
+    }
+
+    /// push（背景実行）。UI を固めない。
+    fn git_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_git_remote(true, window, cx);
+    }
+
+    /// pull（背景実行）。完了後にプロジェクトを再読込（fast-forward でファイルが変わり得る）。
+    fn git_pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_git_remote(false, window, cx);
+    }
+
+    /// push/pull をバックグラウンドエグゼキュータで走らせ、完了後に git 状態を更新する。
+    fn run_git_remote(&mut self, is_push: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_busy {
+            return;
+        }
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
+        };
+        self.git_busy = true;
+        cx.notify();
+        cx.spawn(async move |_workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if is_push {
+                        project::push(&root)
+                    } else {
+                        project::pull(&root)
+                    }
+                })
+                .await;
+            let _ = handle.update(cx, |workspace, window, cx| {
+                workspace.git_busy = false;
+                match result {
+                    Ok(()) if !is_push => workspace.reload_active_project(window, cx),
+                    Ok(()) => workspace.refresh_git_status(),
+                    Err(error) => {
+                        eprintln!("{} に失敗: {error:#}", if is_push { "push" } else { "pull" });
+                        workspace.refresh_git_status();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// git パネルの入力行を「新しいブランチ名」モードにする（＋ボタン）。
+    fn start_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = self.git_panel.as_mut() {
+            state.branch_name = Some(String::new());
+            let focus = state.focus.clone();
+            window.focus(&focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// 入力中のブランチ名で作成＆切替 → プロジェクト再読込。
+    fn confirm_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .git_panel
+            .as_ref()
+            .and_then(|state| state.branch_name.clone())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            if let Some(state) = self.git_panel.as_mut() {
+                state.branch_name = None;
+            }
+            cx.notify();
+            return;
+        }
+        let Some(root) = self.active_root() else {
+            return;
+        };
+        match project::create_branch(&root, &name) {
+            Ok(()) => {
+                if let Some(state) = self.git_panel.as_mut() {
+                    state.branch_name = None;
+                }
+                self.reload_active_project(window, cx);
+            }
+            Err(error) => {
+                eprintln!("ブランチ作成に失敗: {error:#}");
+                cx.notify();
+            }
+        }
+    }
+
+    /// ⎇ メニューからブランチを削除（未マージは git が `-d` で拒否＝安全側）。
+    fn delete_git_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+        if let Some(root) = self.active_root() {
+            if let Err(error) = project::delete_branch(&root, &branch, false) {
+                eprintln!("ブランチ削除に失敗（未マージは別窓/worktree で対応）: {error:#}");
+            }
+            self.refresh_git_status();
+            cx.notify();
+        }
     }
 
     // ── LSP（rust-analyzer・M7） ──
@@ -2739,6 +3017,372 @@ impl Workspace {
 
     /// branch/worktree メニュー（titlebar の ⎇ クリックで開く）。ブランチ切替（in-place）と、
     /// **worktree を別ウィンドウで開く**（並行ブランチ×別窓×スレッド色＝当初ビジョン）。
+    /// git 操作パネル（ソース管理・M8）。左カラムでエクスプローラと切り替えて出す。
+    /// 変更一覧（staged/unstaged）・コミット・push/pull・新規ブランチを 1 面にまとめる。
+    fn render_git_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        let (bg0, bg1, bg2, border, fg0, fg1, fg2) =
+            (theme.bg0, theme.bg1, theme.bg2, theme.border, theme.fg0, theme.fg1, theme.fg2);
+        let Some(state) = self.git_panel.as_ref() else {
+            return div().w(px(self.explorer_width)).h_full().flex_none().bg(bg1).into_any_element();
+        };
+        let focus = state.focus.clone();
+        let Some(root) = self.active_root() else {
+            return div()
+                .w(px(self.explorer_width))
+                .h_full()
+                .flex_none()
+                .bg(bg1)
+                .border_r_1()
+                .border_color(border)
+                .track_focus(&focus)
+                .on_key_down(cx.listener(Self::on_git_key_down))
+                .child(div().p(px(12.)).text_size(px(11.5)).text_color(fg2).child("プロジェクトがありません"))
+                .into_any_element();
+        };
+        let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let branch = project::git_current_branch(&root);
+        let changes = project::git_changes(&root);
+        let naming = state.branch_name.is_some();
+
+        // ── ヘッダ（タイトル + ブランチ + ＋ + ×）──
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(34.))
+            .px(px(10.))
+            .flex_none()
+            .bg(bg0)
+            .border_b_1()
+            .border_color(border)
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg1)
+                    .child("ソース管理"),
+            )
+            .child(div().flex_1())
+            .when_some(branch.clone(), |element, branch| {
+                element.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(3.))
+                        .max_w(px(120.))
+                        .child(div().flex_none().text_size(px(10.5)).text_color(accent).child("⎇"))
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(11.))
+                                .text_color(fg2)
+                                .child(SharedString::from(branch)),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .id("git-new-branch")
+                    .flex_none()
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .text_size(px(13.))
+                    .text_color(fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(bg2).text_color(fg0))
+                    .child("＋")
+                    .tooltip(Tooltip::text("新しいブランチ", theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.start_new_branch(window, cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("git-close")
+                    .flex_none()
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .text_size(px(13.))
+                    .text_color(fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(bg2).text_color(fg0))
+                    .child("×")
+                    .tooltip(Tooltip::text("閉じる  ⌃⇧G", theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_git_panel(&ToggleGitPanel, window, cx)
+                        }),
+                    ),
+            );
+
+        // ── 入力行（コミットメッセージ / ブランチ名）──
+        let input_text = match &state.branch_name {
+            Some(name) => name.clone(),
+            None => state.message.clone(),
+        };
+        let placeholder = if naming {
+            "新しいブランチ名（⏎ で作成・Esc で取消）"
+        } else {
+            "メッセージ（⌘⏎ でコミット）"
+        };
+        let input_body = if input_text.is_empty() {
+            div().text_color(fg2).child(SharedString::from(placeholder))
+        } else {
+            div().text_color(fg0).child(SharedString::from(format!("{input_text}▍")))
+        };
+        let input_row = div()
+            .id("git-input")
+            .m(px(8.))
+            .p(px(8.))
+            .h(px(46.))
+            .bg(bg2)
+            .border_1()
+            .border_color(if naming { accent } else { border })
+            .rounded(px(6.))
+            .text_size(px(12.))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if let Some(state) = this.git_panel.as_ref() {
+                        let focus = state.focus.clone();
+                        window.focus(&focus, cx);
+                    }
+                }),
+            )
+            .child(input_body);
+
+        // ── アクション行（commit / push / pull）。ブランチ名モードでは出さない ──
+        let commit_ready = !state.message.trim().is_empty();
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .pb(px(8.))
+            .flex_none()
+            .child(
+                div()
+                    .id("git-commit")
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(26.))
+                    .rounded(px(6.))
+                    .text_size(px(12.))
+                    .when(commit_ready, |element| {
+                        element.bg(accent).text_color(theme.bg0).cursor_pointer().on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.git_commit(window, cx)),
+                        )
+                    })
+                    .when(!commit_ready, |element| element.bg(bg2).text_color(fg2))
+                    .child("✓ コミット"),
+            )
+            .child(self.git_remote_button("git-push", "↑", "push", true, cx))
+            .child(self.git_remote_button("git-pull", "↓", "pull", false, cx))
+            .when(self.git_busy, |element| {
+                element.child(div().text_size(px(11.)).text_color(fg2).child("…"))
+            });
+
+        // ── 変更一覧（staged / unstaged）──
+        let mut body = div().flex_1().flex().flex_col().min_h_0().overflow_hidden().pb(px(6.));
+        let staged_count = changes.iter().filter(|change| change.staged.is_some()).count();
+        let unstaged_count = changes.iter().filter(|change| change.unstaged.is_some()).count();
+        if staged_count > 0 {
+            body = body.child(self.git_section_header("ステージ済み", staged_count, false, cx));
+            for (index, change) in changes.iter().filter(|change| change.staged.is_some()).enumerate() {
+                if let Some(kind) = change.staged {
+                    body = body.child(self.git_change_row(change.path.clone(), kind, true, index, cx));
+                }
+            }
+        }
+        if unstaged_count > 0 {
+            body = body.child(self.git_section_header("変更", unstaged_count, true, cx));
+            for (index, change) in changes.iter().filter(|change| change.unstaged.is_some()).enumerate() {
+                if let Some(kind) = change.unstaged {
+                    body = body.child(self.git_change_row(change.path.clone(), kind, false, index, cx));
+                }
+            }
+        }
+        if staged_count == 0 && unstaged_count == 0 {
+            body = body.child(
+                div().px(px(12.)).py(px(8.)).text_size(px(11.5)).text_color(fg2).child("変更はありません"),
+            );
+        }
+
+        div()
+            .w(px(self.explorer_width))
+            .h_full()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .bg(bg1)
+            .border_r_1()
+            .border_color(border)
+            .track_focus(&focus)
+            .on_key_down(cx.listener(Self::on_git_key_down))
+            .child(header)
+            .child(input_row)
+            .when(!naming, |element| element.child(actions))
+            .child(body)
+            .into_any_element()
+    }
+
+    /// push/pull の丸ボタン（背景実行中は無効表示）。
+    fn git_remote_button(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        label: &'static str,
+        is_push: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme.clone();
+        let disabled = self.git_busy;
+        div()
+            .id(id)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(26.))
+            .h(px(26.))
+            .rounded(px(6.))
+            .bg(theme.bg2)
+            .text_size(px(13.))
+            .text_color(if disabled { theme.fg2 } else { theme.fg1 })
+            .when(!disabled, |element| {
+                element.cursor_pointer().hover(|style| style.bg(theme.bg3).text_color(theme.fg0)).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        if is_push {
+                            this.git_push(window, cx)
+                        } else {
+                            this.git_pull(window, cx)
+                        }
+                    }),
+                )
+            })
+            .child(glyph)
+            .tooltip(Tooltip::text(label, theme.clone()))
+    }
+
+    /// 変更一覧のセクション見出し（"ステージ済み"/"変更" + 件数。"変更"側は「すべてステージ」付き）。
+    fn git_section_header(
+        &self,
+        title: &'static str,
+        count: usize,
+        stage_all: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(10.))
+            .py(px(3.))
+            .pt(px(6.))
+            .flex_none()
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg2)
+                    .child(format!("{title}  {count}")),
+            )
+            .child(div().flex_1())
+            .when(stage_all, |element| {
+                element.child(
+                    div()
+                        .id("git-stage-all")
+                        .px(px(5.))
+                        .rounded(px(4.))
+                        .text_size(px(13.))
+                        .text_color(theme.fg2)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                        .child("＋")
+                        .tooltip(Tooltip::text("すべてステージ", theme.clone()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.git_stage_all(cx)),
+                        ),
+                )
+            })
+    }
+
+    /// 変更 1 行（色付きレター + ファイル名 + stage/unstage ボタン）。
+    fn git_change_row(
+        &self,
+        path: PathBuf,
+        kind: StatusKind,
+        staged: bool,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        let tint = Self::git_tint(&theme, kind);
+        let letter = Self::git_letter(kind);
+        let name =
+            path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+        let row_id = if staged { "git-staged" } else { "git-unstaged" };
+        let act_id = if staged { "git-unstage" } else { "git-stage" };
+        let action_path = path.clone();
+        div()
+            .id((row_id, index))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(10.))
+            .py(px(3.))
+            .text_size(px(12.))
+            .hover(|style| style.bg(theme.bg3))
+            .child(div().w(px(12.)).flex_none().text_size(px(11.)).text_color(tint).child(letter))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(theme.fg1)
+                    .child(SharedString::from(name)),
+            )
+            .child(
+                div()
+                    .id((act_id, index))
+                    .flex_none()
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .text_size(px(13.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                    .child(if staged { "−" } else { "＋" })
+                    .tooltip(Tooltip::text(
+                        if staged { "ステージ解除" } else { "ステージ" },
+                        theme.clone(),
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            if staged {
+                                this.git_unstage(action_path.clone(), cx)
+                            } else {
+                                this.git_stage(action_path.clone(), cx)
+                            }
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_branch_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let position = *self.branch_menu.as_ref()?;
         let slot = self.active_slot()?;
@@ -2771,6 +3415,7 @@ impl Workspace {
             let is_current = current.as_deref() == Some(branch.as_str());
             let switch_branch = branch.clone();
             let worktree_branch = branch.clone();
+            let delete_branch_name = branch.clone();
             menu_box = menu_box.child(
                 div()
                     .id(("branch", index))
@@ -2826,7 +3471,30 @@ impl Workspace {
                                     this.open_branch_worktree(worktree_branch.clone(), cx)
                                 }),
                             ),
-                    ),
+                    )
+                    // 🗑 = ブランチ削除（現在ブランチ以外。未マージは git が -d で拒否＝安全側）
+                    .when(!is_current, |element| {
+                        let delete_branch_name = delete_branch_name.clone();
+                        element.child(
+                            div()
+                                .id(("branch-del", index))
+                                .flex_none()
+                                .px(px(4.))
+                                .rounded(px(4.))
+                                .text_size(px(11.))
+                                .text_color(fg2)
+                                .hover(|style| style.bg(bg2).text_color(theme.err))
+                                .child("🗑")
+                                .tooltip(Tooltip::text("ブランチを削除", theme.clone()))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.delete_git_branch(delete_branch_name.clone(), cx)
+                                    }),
+                                ),
+                        )
+                    }),
             );
         }
 
@@ -3308,6 +3976,7 @@ impl Workspace {
     fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let branch = self.active_slot().and_then(|slot| git_branch(slot.worktree.root()));
+        let change_count = self.git_status.len();
         let (cursor, language) = match &self.editor {
             Some(editor) => {
                 let view = editor.read(cx);
@@ -3324,8 +3993,29 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_3()
+            // ⎇ ブランチ + 変更件数バッジ。クリックで git パネル（ソース管理）を開閉。
             .when_some(branch, |element, branch| {
-                element.child(SharedString::from(format!("⎇ {branch}")))
+                let label = if change_count > 0 {
+                    format!("⎇ {branch}  ●{change_count}")
+                } else {
+                    format!("⎇ {branch}")
+                };
+                element.child(
+                    div()
+                        .id("statusbar-branch")
+                        .cursor_pointer()
+                        .rounded(px(4.))
+                        .px(px(4.))
+                        .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                        .child(SharedString::from(label))
+                        .tooltip(Tooltip::text("ソース管理  ⌃⇧G", theme.clone()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.toggle_git_panel(&ToggleGitPanel, window, cx)
+                            }),
+                        ),
+                )
             })
             .child(
                 div()
@@ -3516,6 +4206,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::trigger_completion))
             .on_action(cx.listener(Self::toggle_split))
+            .on_action(cx.listener(Self::toggle_git_panel))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_agent_thread))
             .on_action(cx.listener(Self::new_window))
@@ -3545,7 +4236,15 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .child(self.render_rail(cx))
-                    .when(self.show_left, |element| element.child(self.render_explorer(cx)))
+                    .when(self.show_left, |element| {
+                        // 左カラムは git パネル（ソース管理）とエクスプローラを ⌃⇧G で切替。
+                        let column = if self.git_panel.is_some() {
+                            self.render_git_panel(cx)
+                        } else {
+                            self.render_explorer(cx).into_any_element()
+                        };
+                        element.child(column)
+                    })
                     .child(self.render_center(cx))
                     .when(self.show_right, |element| element.child(self.render_agent_dock(cx))),
             )
