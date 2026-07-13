@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>しるし — ローディング体験プロトタイプ</title>
+<style>
+:root{
+  --bg:#0f1013; --panel:#16181d; --panel2:#1b1e25; --border:#2a2d38;
+  --text:#d7dae0; --muted:#8a8f9c; --dim:#5b606d;
+  --accent:#d97757; --cyan:#5ec8d8; --ok:#7bd88f; --thr:#c9a25e;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);
+  font-family:system-ui,-apple-system,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif;
+  padding:40px;-webkit-font-smoothing:antialiased;display:flex;gap:40px;flex-wrap:wrap;align-items:flex-start}
+h1{font-size:19px;font-weight:700}
+h1 .mark{color:var(--accent)}
+.col{display:flex;flex-direction:column;gap:16px}
+.note{color:var(--muted);font-size:12px;line-height:1.7;max-width:340px}
+.note b{color:var(--text)}
+.note .k{color:var(--cyan)}
+.chk{color:var(--ok)}
+
+/* ===== 大サイズ・スピナー単体ショーケース ===== */
+.showcase{background:var(--panel);border:1px solid var(--border);border-radius:16px;
+  padding:28px;display:flex;flex-direction:column;align-items:center;gap:14px;width:300px}
+.hero{width:96px;height:96px;image-rendering:pixelated;
+  animation:bob 1.25s ease-in-out infinite, glow 1.7s ease-in-out infinite}
+.showcase .cap{color:var(--dim);font-size:11px}
+.showcase .thinking{color:var(--accent);font-size:15px;font-weight:600}
+.showcase .thinking .d::after{content:"";animation:dots 1.4s steps(4,end) infinite}
+
+/* ===== トランスクリプト（Claude Code 拡張風） ===== */
+.transcript{background:var(--panel);border:1px solid var(--border);border-radius:14px;
+  width:640px;padding:22px 24px;font-size:13.5px;line-height:1.75;
+  display:flex;flex-direction:column;gap:13px}
+.umsg{background:var(--panel2);border:1px solid var(--border);border-left:2px solid var(--thr);
+  border-radius:8px;padding:9px 13px;color:var(--text);font-size:13px}
+.tool{display:flex;gap:9px;align-items:flex-start;color:var(--text)}
+.tool .b{color:var(--accent);flex:0 0 auto}
+.tool .sub{color:var(--muted);font-size:12.5px}
+.tool .res{color:var(--dim);font-size:12.5px;padding-left:20px;display:flex;gap:8px}
+.tool .res .arm{color:var(--dim)}
+.stream{color:var(--text)}
+.stream .caret{display:inline-block;width:7px;height:15px;background:var(--accent);
+  margin-left:1px;vertical-align:-2px;animation:blink .9s steps(2,start) infinite}
+
+/* ローディング行: インライン・スピナー＋ドット＋リアルタイムtoken */
+.loading{display:flex;align-items:center;gap:10px;padding-top:4px;border-top:1px dashed var(--border);margin-top:2px}
+.loading .spin{width:26px;height:26px;image-rendering:pixelated;
+  animation:bob 1.15s ease-in-out infinite, glow 1.6s ease-in-out infinite}
+.loading .lab{color:var(--accent);font-weight:600}
+.loading .lab .d::after{content:"";animation:dots 1.4s steps(4,end) infinite}
+.loading .meta{margin-left:auto;color:var(--dim);font-size:12px;
+  font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:7px}
+.loading .meta .tok{color:var(--cyan)}
+/* トークン・ミニバー（リアルタイム加算の可視化） */
+.bar{width:74px;height:5px;background:#0c0e12;border-radius:3px;overflow:hidden}
+.bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--accent));
+  border-radius:3px;transition:width .1s linear}
+
+@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+@keyframes glow{
+  0%,100%{filter:drop-shadow(0 0 1px rgba(94,200,216,.25)) brightness(1)}
+  50%{filter:drop-shadow(0 0 7px rgba(94,200,216,.9)) brightness(1.16)}}
+@keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}100%{content:""}}
+@keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
+</style>
+</head>
+<body>
+  <div class="col">
+    <h1><span class="mark">しるし</span> — ローディング体験プロトタイプ</h1>
+    <div class="showcase">
+      <img class="hero" src="gpt-snapped/06-tachikoma.png">
+      <div class="thinking">✳ Thinking<span class="d"></span></div>
+      <div class="cap">bob（浮遊）＋ 眼のグロー明滅</div>
+    </div>
+    <div class="note">
+      <b>3つの不満をこの1画面で先取り:</b><br>
+      <span class="chk">✔</span> <b>ローディングアニメ</b> = タチコマが浮遊＋<span class="k">眼が明滅</span>（＝"今考えてる"の生命感）<br>
+      <span class="chk">✔</span> <b>ストリーミング平滑化</b> = 右の本文が<span class="k">1文字ずつ滑らか</span>に出る（カクつき無し）<br>
+      <span class="chk">✔</span> <b>トークンのリアルタイム加算</b> = 右下の数字とバーが<span class="k">積み上がる</span><br><br>
+      ※ ブラウザで開くと動きます。これは<b>目標UXの絵コンテ</b>。次段でGPUI実装。
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="transcript">
+      <div class="umsg">この関数のバグを直して、テストも追加して。</div>
+
+      <div class="tool"><span class="b">⏺</span><div><span>Read</span> <span class="sub">src/editor_core/buffer.rs</span>
+        <div class="res"><span class="arm">⎿</span> 読み込み 128 行</div></div></div>
+
+      <div class="tool"><span class="b">⏺</span><div><span>Grep</span> <span class="sub">"fn apply_edit" (3 件)</span>
+        <div class="res"><span class="arm">⎿</span> buffer.rs:52, 91, 140</div></div></div>
+
+      <div class="stream" id="stream"></div>
+
+      <div class="loading">
+        <img class="spin" src="gpt-snapped/06-tachikoma.png">
+        <span class="lab">✳ Thinking<span class="d"></span></span>
+        <span class="meta">
+          <div class="bar"><i id="bar"></i></div>
+          <span class="tok" id="tok">0</span> tokens
+          <span>· esc to interrupt</span>
+        </span>
+      </div>
+    </div>
+    <div class="note" style="max-width:640px">
+      比較用の別キャラでスピナー差し替えたい時は <span class="k">src</span> を
+      <span class="k">gpt-snapped/03-miko.png</span> 等に変えるだけ（アセットは差し替え可能）。
+    </div>
+  </div>
+
+<script>
+// --- ストリーミング平滑化（タイプライタ） ---
+const streamText = "境界条件を確認しました。apply_edit がマルチバイト境界で範囲をクランプしていないため、日本語入力時にパニックし得ます。char_indices で境界に丸める修正を入れ、回帰テストを追加します";
+const el = document.getElementById('stream');
+let i = 0;
+const caret = () => { const c = document.createElement('span'); c.className='caret'; return c; };
+function type(){
+  if (i <= streamText.length){
+    el.textContent = streamText.slice(0, i);
+    el.appendChild(caret());
+    i++;
+    setTimeout(type, 22 + Math.random()*26); // 微ジッタで自然に
+  }
+}
+type();
+
+// --- トークンのリアルタイム加算 ---
+const tok = document.getElementById('tok'), bar = document.getElementById('bar');
+let t = 0, target = 14200;
+function tick(){
+  if (t < target){
+    t += Math.floor(40 + Math.random()*160);
+    if (t > target) t = target;
+    tok.textContent = t.toLocaleString();
+    bar.style.width = Math.min(100, t/target*100) + '%';
+    setTimeout(tick, 80 + Math.random()*60);
+  } else {
+    // 到達後もゆっくり増え続ける（生成継続の表現）
+    t += Math.floor(5 + Math.random()*25);
+    tok.textContent = t.toLocaleString();
+    setTimeout(tick, 400);
+  }
+}
+tick();
+</script>
+</body>
+</html>

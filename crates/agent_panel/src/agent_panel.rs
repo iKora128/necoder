@@ -17,13 +17,14 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
     Animation, AnimationExt, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    IntoElement, MouseButton, SharedString, Window, actions, div, prelude::*, pulsating_between, px,
+    IntoElement, MouseButton, SharedString, Window, actions, div, img, prelude::*, pulsating_between,
+    px,
 };
 use std::path::PathBuf;
 use theme_core::{Theme, claude_bullet, thread_color};
 use ui::Tooltip;
 
-actions!(agent, [SubmitPrompt]);
+actions!(agent, [SubmitPrompt, CloseActiveThread]);
 
 const THREAD_TABS_HEIGHT: f32 = 34.0;
 const COMPOSER_INPUT_HEIGHT: f32 = 68.0;
@@ -92,6 +93,8 @@ struct Thread {
     name: SharedString,
     color: Hsla,
     running: bool,
+    /// このターンの開始時刻（経過秒の表示に使う。`None`＝未実行）。
+    turn_started_at: Option<std::time::Instant>,
     model: SharedString,
     permission_mode: SharedString,
     effort: SharedString,
@@ -102,6 +105,8 @@ struct Thread {
     entries: Vec<Entry>,
     tokens_used: u32,
     tokens_max: u32,
+    /// 表示用の補間値（`tokens_used` へ滑らかに追従＝カウントアップ演出）。追いついたら停止し idle 0% を保つ。
+    tokens_shown: f32,
     /// 常駐 ACP セッションへ指示（prompt / mode 変更）を送るハンドル（初回送信で遅延起動）。`None` = 未起動。
     command_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     /// エージェントが広告する権限モード `(mode_id, 表示名)` と現在の mode_id（セッション開始後に埋まる）。
@@ -120,6 +125,7 @@ impl Thread {
             name: name.into(),
             color: thread_color(index),
             running: false,
+            turn_started_at: None,
             model: "claude-fable-5".into(),
             permission_mode: "default".into(),
             effort: "high".into(),
@@ -128,6 +134,7 @@ impl Thread {
             entries: Vec::new(),
             tokens_used: 0,
             tokens_max: 200_000,
+            tokens_shown: 0.0,
             command_tx: None,
             available_modes: Vec::new(),
             current_mode_id: SharedString::default(),
@@ -155,6 +162,15 @@ pub struct AgentPanel {
     context_menu_open: bool,
     /// Enter 送信の現在値（送信ヒント表示 + トグルの状態。composer にも反映する）。
     submit_on_enter: bool,
+    /// トークン表示のカウントアップ補間タスクが稼働中か（多重起動防止。追いついたら false に戻す＝idle 0%）。
+    token_ticker: bool,
+    /// 直近の成功でマスコットがバンザイ中か（数秒で false に戻る）。世代番号で古いタイマーを無効化する。
+    celebrating: bool,
+    celebrate_gen: u32,
+    /// ストリーミング平滑化: アクティブスレッドの末尾（Agent/Thinking）を何文字まで表示したか（タイプライタ）。
+    /// チャンクは束で届くので、これを一定速度で目標長へ寄せてカクつきを消す。`usize::MAX`＝全部表示。
+    reveal: usize,
+    reveal_ticker: bool,
 }
 
 impl AgentPanel {
@@ -223,6 +239,11 @@ impl AgentPanel {
             context_files: Vec::new(),
             context_menu_open: false,
             submit_on_enter,
+            token_ticker: false,
+            celebrating: false,
+            celebrate_gen: 0,
+            reveal: usize::MAX, // 初期は全表示（seed を打ち直さない）
+            reveal_ticker: false,
         }
     }
 
@@ -267,6 +288,26 @@ impl AgentPanel {
             return;
         }
         self.active = index;
+        self.reveal = usize::MAX; // 切替先は全文表示（打ち直さない）
+        let color = self.active_color();
+        self.composer.update(cx, |composer, cx| composer.set_accent(color, cx));
+        cx.notify();
+    }
+
+    /// スレッドタブを閉じる（× ボタン）。最後の 1 枚は残す（空 UI を避ける）。
+    /// 閉じた瞬間そのスレッドの ACP セッション（`command_tx`）も drop され読みループが畳まれる。
+    fn remove_thread(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.threads.len() <= 1 || index >= self.threads.len() {
+            return;
+        }
+        self.threads.remove(index);
+        // active を有効な近傍へ寄せる（閉じたのが前なら1つ詰める／自分なら次のタブ、末尾なら前へ）。
+        if index < self.active {
+            self.active -= 1;
+        } else if index == self.active {
+            self.active = self.active.min(self.threads.len() - 1);
+        }
+        self.reveal = usize::MAX; // 実効スレッドが変わるので全文表示
         let color = self.active_color();
         self.composer.update(cx, |composer, cx| composer.set_accent(color, cx));
         cx.notify();
@@ -480,6 +521,11 @@ impl AgentPanel {
         self.submit(cx);
     }
 
+    /// ⌘W: アクティブスレッドを閉じる（× ボタンと同じ。最後の1枚は残す）。
+    fn on_close_thread(&mut self, _: &CloseActiveThread, _window: &mut Window, cx: &mut Context<Self>) {
+        self.remove_thread(self.active, cx);
+    }
+
     /// composer の内容をアクティブスレッドへ積み、**常駐 ACP セッション**へ prompt を送る（空なら無視）。
     /// 応答は `run_session` からのイベントを [`Self::on_event`] で**逐次** transcript に反映する（ストリーミング）。
     fn submit(&mut self, cx: &mut Context<Self>) {
@@ -510,6 +556,7 @@ impl AgentPanel {
         if let Some(thread) = self.threads.get_mut(thread_index) {
             thread.entries.push(Entry::User(SharedString::from(prompt.clone())));
             thread.running = true;
+            thread.turn_started_at = Some(std::time::Instant::now()); // 経過秒の起点
         }
         cx.notify();
 
@@ -597,26 +644,43 @@ impl AgentPanel {
     /// `run_session` の [`AgentEvent`] を transcript へ逐次反映する（ストリーミングの心臓部）。
     /// 増分テキストは直前の同種エントリへ連結（新ターンは先頭に User があるので自然に区切れる）。
     fn on_event(&mut self, thread_index: usize, event: AgentEvent, cx: &mut Context<Self>) {
+        let active = self.active;
+        let mut start_token_ticker = false;
+        let mut celebrate_now = false;
+        let mut ensure_reveal = false; // アクティブが Agent/Thinking をストリーム → タイプライタ稼働
+        let mut reveal_reset = false; // 新しいストリームエントリ開始 → 先頭から打つ
         let Some(thread) = self.threads.get_mut(thread_index) else {
             return;
         };
         match event {
-            AgentEvent::AgentChunk(text) => match thread.entries.last_mut() {
-                Some(Entry::Agent(existing)) => {
-                    let mut combined = existing.to_string();
-                    combined.push_str(&text);
-                    *existing = combined.into();
+            AgentEvent::AgentChunk(text) => {
+                match thread.entries.last_mut() {
+                    Some(Entry::Agent(existing)) => {
+                        let mut combined = existing.to_string();
+                        combined.push_str(&text);
+                        *existing = combined.into();
+                    }
+                    _ => {
+                        thread.entries.push(Entry::Agent(text.into()));
+                        reveal_reset = thread_index == active; // 新エントリは先頭から打つ
+                    }
                 }
-                _ => thread.entries.push(Entry::Agent(text.into())),
-            },
-            AgentEvent::ThoughtChunk(text) => match thread.entries.last_mut() {
-                Some(Entry::Thinking(existing)) => {
-                    let mut combined = existing.to_string();
-                    combined.push_str(&text);
-                    *existing = combined.into();
+                ensure_reveal = thread_index == active;
+            }
+            AgentEvent::ThoughtChunk(text) => {
+                match thread.entries.last_mut() {
+                    Some(Entry::Thinking(existing)) => {
+                        let mut combined = existing.to_string();
+                        combined.push_str(&text);
+                        *existing = combined.into();
+                    }
+                    _ => {
+                        thread.entries.push(Entry::Thinking(text.into()));
+                        reveal_reset = thread_index == active;
+                    }
                 }
-                _ => thread.entries.push(Entry::Thinking(text.into())),
-            },
+                ensure_reveal = thread_index == active;
+            }
             AgentEvent::ToolStarted(title) => thread.entries.push(Entry::Step {
                 tool: SharedString::from(title),
                 args: SharedString::default(),
@@ -626,6 +690,13 @@ impl AgentPanel {
                 thread.tokens_used = used.min(u32::MAX as u64) as u32;
                 if size > 0 {
                     thread.tokens_max = size.min(u32::MAX as u64) as u32;
+                }
+                // アクティブスレッドは表示値を目標へ滑らかに補間（カウントアップ）。
+                // 非アクティブは即時同期（見えないので演出不要＝無駄な再描画を避ける）。
+                if thread_index == active {
+                    start_token_ticker = true;
+                } else {
+                    thread.tokens_shown = thread.tokens_used as f32;
                 }
             }
             AgentEvent::Modes { modes, current } => {
@@ -685,13 +756,144 @@ impl AgentPanel {
             AgentEvent::TurnEnded => {
                 thread.running = false;
                 thread.pending_permission = None; // 念のため（通常は応答時に消える）
+                // アクティブスレッドの成功でマスコットがバンザイ（数秒だけ）。失敗（Failed）では祝わない。
+                celebrate_now = thread_index == active;
             }
             AgentEvent::Failed(error) => {
                 thread.entries.push(Entry::Agent(SharedString::from(format!("エラー: {error}"))));
                 thread.running = false;
             }
         }
+        if start_token_ticker {
+            self.ensure_token_ticker(cx);
+        }
+        if celebrate_now {
+            self.start_celebrate(cx);
+        }
+        if reveal_reset {
+            self.reveal = 0;
+        }
+        if ensure_reveal {
+            self.ensure_reveal_ticker(cx);
+        }
         cx.notify();
+    }
+
+    /// ストリーミング平滑化のタイプライタ。アクティブスレッド末尾（Agent/Thinking）の目標文字数へ
+    /// `reveal` を ~60fps で一定速度に寄せる。ターンが終わり全文字出し切ったら停止＝idle 0%。
+    fn ensure_reveal_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.reveal_ticker {
+            return;
+        }
+        self.reveal_ticker = true;
+        cx.spawn(async move |panel, cx| {
+            loop {
+                let done = panel
+                    .update(cx, |panel, cx| {
+                        let Some(thread) = panel.threads.get(panel.active) else {
+                            return true;
+                        };
+                        let running = thread.running;
+                        let target = match thread.entries.last() {
+                            Some(Entry::Agent(text)) | Some(Entry::Thinking(text)) => {
+                                text.chars().count()
+                            }
+                            // 末尾が非ストリーム（Step/User）なら出し切り扱い。
+                            _ => panel.reveal.min(usize::MAX),
+                        };
+                        if panel.reveal < target {
+                            // 残りに比例した歩幅＋最低速で、束で来ても滑らかに追従。
+                            let remaining = target - panel.reveal;
+                            let step = (remaining / 6).max(2);
+                            panel.reveal = panel.reveal.saturating_add(step).min(target);
+                            cx.notify();
+                        }
+                        // ターン継続中は回し続け、終了かつ出し切ったら停止。
+                        !running && panel.reveal >= target
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+            }
+            panel
+                .update(cx, |panel, _cx| {
+                    panel.reveal_ticker = false;
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// 成功直後にマスコットをバンザイさせる。約2.4秒で Idle に戻す（世代番号で古いタイマーを無効化）。
+    /// バンザイ中はアニメが回るが、生成直後の一過性なので idle 0% は実質保たれる。
+    fn start_celebrate(&mut self, cx: &mut Context<Self>) {
+        self.celebrating = true;
+        self.celebrate_gen = self.celebrate_gen.wrapping_add(1);
+        let generation = self.celebrate_gen;
+        cx.spawn(async move |panel, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2400))
+                .await;
+            panel
+                .update(cx, |panel, cx| {
+                    if panel.celebrate_gen == generation {
+                        panel.celebrating = false;
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// トークン表示のカウントアップ補間を回す（多重起動しない）。
+    /// アクティブスレッドの `tokens_shown` を `tokens_used` へ ~30fps で指数的に近づけ、
+    /// 追いついたら停止する（＝タスク終了で再描画も止まり idle 0% を保つ）。
+    fn ensure_token_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.token_ticker {
+            return;
+        }
+        self.token_ticker = true;
+        cx.spawn(async move |panel, cx| {
+            loop {
+                let done = panel
+                    .update(cx, |panel, cx| {
+                        let Some(thread) = panel.threads.get_mut(panel.active) else {
+                            return true;
+                        };
+                        let target = thread.tokens_used as f32;
+                        let diff = target - thread.tokens_shown;
+                        if diff.abs() < 0.75 {
+                            thread.tokens_shown = target;
+                            cx.notify();
+                            return true;
+                        }
+                        // 指数イージング（速く始まりゆっくり収束）＋最低歩幅で確実に到達。
+                        let step = diff * 0.22;
+                        let step = if step.abs() < 1.0 { diff.signum() } else { step };
+                        thread.tokens_shown += step;
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(33))
+                    .await;
+            }
+            panel
+                .update(cx, |panel, _cx| {
+                    panel.token_ticker = false;
+                })
+                .ok();
+        })
+        .detach();
     }
 
     /// 承認待ちの権限リクエストに、選んだ選択肢の**添字**で応答する（許可/拒否ボタンのクリック）。
@@ -721,6 +923,7 @@ impl AgentPanel {
     fn render_thread_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active = self.active;
+        let count = self.threads.len(); // 最後の1枚は × を出さない
         div()
             .flex()
             .items_stretch()
@@ -754,7 +957,29 @@ impl AgentPanel {
                             .text_size(px(12.))
                             .text_color(if is_active { theme.fg0 } else { theme.fg1 })
                             .child(pulsing_dot(("thtab-dot", index), 8.0, color, thread.running))
-                            .child(thread.name.clone()),
+                            .child(thread.name.clone())
+                            // × 閉じる（最後の1枚は出さない）。クリックはタブ切替へ伝播させない。
+                            .when(count > 1, |element| {
+                                element.child(
+                                    div()
+                                        .id(("thtab-close", index))
+                                        .flex_none()
+                                        .px(px(3.))
+                                        .rounded(px(4.))
+                                        .text_color(theme.fg2)
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
+                                        .child("×")
+                                        .tooltip(Tooltip::text("スレッドを閉じる  ⌘W", theme.clone()))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _window, cx| {
+                                                cx.stop_propagation();
+                                                this.remove_thread(index, cx);
+                                            }),
+                                        ),
+                                )
+                            }),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -781,12 +1006,57 @@ impl AgentPanel {
             )
     }
 
-    fn render_meta(&self) -> impl IntoElement {
+    fn render_meta(&self, active: bool) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
         let thread = self.threads.get(self.active);
-        let (used, max) = thread.map(|thread| (thread.tokens_used, thread.tokens_max)).unwrap_or((0, 0));
-        let ratio = if max == 0 { 0.0 } else { (used as f32 / max as f32).clamp(0.0, 1.0) };
+        let (shown, max) = thread.map(|thread| (thread.tokens_shown, thread.tokens_max)).unwrap_or((0.0, 0));
+        let used = shown.round().max(0.0) as u32; // 表示は補間値（カウントアップ演出）
+        let ratio = if max == 0 { 0.0 } else { (shown / max as f32).clamp(0.0, 1.0) };
+        let running = thread.map(|thread| thread.running).unwrap_or(false);
+        // 末尾が Thinking ブロック中か（ACP の実状態）＝考える中。
+        let thinking = thread
+            .and_then(|thread| thread.entries.last())
+            .map(|entry| matches!(entry, Entry::Thinking(_)))
+            .unwrap_or(false);
+        // マスコットの状態: 考え中→考える / 生成中→打鍵 / 直近成功→バンザイ / それ以外→寝落ち静止（0%）。
+        let motion = if running {
+            if thinking {
+                MascotMotion::Think
+            } else {
+                MascotMotion::Typing
+            }
+        } else if self.celebrating {
+            MascotMotion::Celebrate
+        } else {
+            MascotMotion::Idle
+        };
+        // 左のステータス行（スカスカ対策＋「何が起きてるか」）: 状態テキスト＋実行中は経過秒。
+        let elapsed = running
+            .then(|| thread.and_then(|thread| thread.turn_started_at))
+            .flatten()
+            .map(|start| start.elapsed().as_secs_f32());
+        let (status_text, status_dim) = if running {
+            (if thinking { "✳ 考え中" } else { "⏺ 生成中" }, false)
+        } else if self.celebrating {
+            ("🙌 完了", false)
+        } else {
+            ("待機中", true)
+        };
+        let status_row = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(div().text_color(if status_dim { theme.fg2 } else { color }).child(status_text))
+            .when_some(elapsed, |element, secs| {
+                element.child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .font_family("Guguru Sans Code")
+                        .child(format!("{secs:.1}s")),
+                )
+            });
 
         div()
             .flex()
@@ -800,7 +1070,11 @@ impl AgentPanel {
             .border_color(theme.border)
             .text_size(px(11.))
             .text_color(theme.fg1)
+            .child(status_row)
             .child(div().flex_1())
+            // ローディング・マスコット（考=考える/生成=打鍵/成功=バンザイ/待機=うとうと）。
+            // 非アクティブ時は静止＝再描画ゼロ（見てない間は 0%）。トークン真横に。
+            .child(render_mascot(motion, active))
             // トークンは常時可視（Zed+ACP で見えなかった痛点）
             .child(
                 div()
@@ -839,10 +1113,13 @@ impl AgentPanel {
             .bg(theme.bg1)
             .overflow_hidden();
         if let Some(entries) = entries {
+            let count = entries.len();
             for (index, entry) in entries.iter().enumerate() {
+                // 末尾エントリだけタイプライタ表示（reveal 文字まで）。他は全文。
+                let reveal = if index + 1 == count { Some(self.reveal) } else { None };
                 // 出現時に一度だけ fade in（id 固定なのでストリーミングの再描画では再発火しない）。
                 list = list.child(
-                    div().child(self.render_entry(entry, color)).with_animation(
+                    div().child(self.render_entry(entry, color, reveal)).with_animation(
                         ("transcript-entry", index),
                         Animation::new(std::time::Duration::from_millis(200)),
                         |element, delta| element.opacity(delta),
@@ -853,7 +1130,17 @@ impl AgentPanel {
         list
     }
 
-    fn render_entry(&self, entry: &Entry, color: Hsla) -> gpui::AnyElement {
+    /// タイプライタ用に文字列を `reveal` 文字で切る（`None` または末尾以外は全文）。
+    fn revealed(text: &SharedString, reveal: Option<usize>) -> SharedString {
+        match reveal {
+            Some(limit) if limit < text.chars().count() => {
+                text.chars().take(limit).collect::<String>().into()
+            }
+            _ => text.clone(),
+        }
+    }
+
+    fn render_entry(&self, entry: &Entry, color: Hsla, reveal: Option<usize>) -> gpui::AnyElement {
         let theme = &self.theme;
         match entry {
             Entry::User(text) => div()
@@ -899,7 +1186,7 @@ impl AgentPanel {
                                 .text_size(px(11.5))
                                 .italic()
                                 .text_color(theme.fg2)
-                                .child(text.clone()),
+                                .child(Self::revealed(text, reveal)),
                         ),
                 )
                 .into_any_element(),
@@ -939,7 +1226,7 @@ impl AgentPanel {
             Entry::Agent(text) => div()
                 .text_size(px(12.5))
                 .text_color(theme.fg0)
-                .child(text.clone())
+                .child(Self::revealed(text, reveal))
                 .into_any_element(),
         }
     }
@@ -1245,8 +1532,11 @@ impl Focusable for AgentPanel {
 }
 
 impl Render for AgentPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
+        // ウィンドウがアクティブ（このアプリを見ている）時だけマスコットをアニメさせる。
+        // 非アクティブへ切替時は GPUI が on_active_status_change→refresh で再描画するので自動で静止に切替わる。
+        let active = window.is_window_active();
         div()
             .relative() // モデルメニューの絶対配置の基準
             .flex()
@@ -1254,9 +1544,12 @@ impl Render for AgentPanel {
             .size_full() // 幅は workspace の可変ドックコンテナが決める
             .bg(theme.bg0)
             .text_color(theme.fg0)
+            // agent フォーカス時のキー割当（keymap の "AgentPanel" context に一致）。⌘W=スレッド閉じ。
+            .key_context("AgentPanel")
             .on_action(cx.listener(Self::on_submit))
+            .on_action(cx.listener(Self::on_close_thread))
             .child(self.render_thread_tabs(cx))
-            .child(self.render_meta())
+            .child(self.render_meta(active))
             .child(self.render_transcript())
             // 承認待ちの権限リクエスト（あれば composer の直上に常時表示）。
             .children(self.render_permission_card(cx))
@@ -1269,6 +1562,68 @@ impl Render for AgentPanel {
 }
 
 // ── 自由関数 ──
+
+/// マスコットの状態（スレッド状態から算出し [`render_mascot`] へ渡す）。
+#[derive(Clone, Copy, PartialEq)]
+enum MascotMotion {
+    /// アイドル（待機）＝寝落ちの**静止**1枚。アニメしない＝idle CPU 0% を保つ。
+    Idle,
+    /// 生成中＝打鍵ループ。
+    Typing,
+    /// 思考中（末尾が Thinking ブロック）＝考えるループ。
+    Think,
+    /// 直近の成功直後＝バンザイ（数秒だけ再生して Idle へ戻る）。
+    Celebrate,
+}
+
+/// ローディング・マスコット（猫耳コーダー娘）。生成中/祝福中はフィルムストリップを `steps()` 再生
+/// （overflow-hidden 枠を横スクロール）、アイドルは静止。アニメは実行/祝福中のみ＝idle CPU 0% を保つ
+/// （[`pulsing_dot`] と同じ設計）。
+///
+/// フレームは **image→video（Kling v3.0・start=end でループ）でキャラ固定のまま生成 → 共通窓で切り出し
+/// → 量子化** した「本物の中割り」なので、text→image を並べた時のような軸ブレ（シェイク）が無い。
+fn render_mascot(motion: MascotMotion, active: bool) -> gpui::AnyElement {
+    const N: usize = 15; // 各ストリップのコマ数
+    const H: f32 = 64.0; // 表示高さ
+    const W: f32 = H * 60.0 / 72.0; // 1 コマのアスペクト（共通 60x72）
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mascot");
+    let window = |child: gpui::AnyElement| {
+        div().w(px(W)).h(px(H)).flex_none().overflow_hidden().child(child).into_any_element()
+    };
+    // 単一フレーム画像（idle.png）を等倍表示。
+    let single = |file: &str| window(img(PathBuf::from(format!("{dir}/{file}"))).h(px(H)).w(px(W)).into_any_element());
+    // ストリップの先頭コマだけ静止表示（overflow 窓＝ml 0）。非アクティブ時の凍結用＝再描画ゼロ。
+    let frame0 =
+        |file: &str| window(img(PathBuf::from(format!("{dir}/{file}"))).h(px(H)).w(px(W * N as f32)).into_any_element());
+    // ストリップを steps 再生（横スクロール）。
+    let anim = |file: &str, id: &'static str| {
+        window(
+            img(PathBuf::from(format!("{dir}/{file}")))
+                .h(px(H))
+                .w(px(W * N as f32))
+                .with_animation(
+                    id,
+                    Animation::new(std::time::Duration::from_millis(100 * N as u64)).repeat(),
+                    |element, delta| {
+                        let index = ((delta * N as f32).floor() as usize).min(N - 1);
+                        element.ml(px(-(W * index as f32)))
+                    },
+                )
+                .into_any_element(),
+        )
+    };
+    // 非アクティブ（このウィンドウを見ていない）時は先頭コマで静止＝アニメ再描画ゼロ＝idle 0%。
+    match (motion, active) {
+        (MascotMotion::Idle, true) => anim("doze-strip.png", "mascot-doze"),
+        (MascotMotion::Idle, false) => single("idle.png"),
+        (MascotMotion::Typing, true) => anim("typing-strip.png", "mascot-typing"),
+        (MascotMotion::Typing, false) => frame0("typing-strip.png"),
+        (MascotMotion::Think, true) => anim("think-strip.png", "mascot-think"),
+        (MascotMotion::Think, false) => frame0("think-strip.png"),
+        (MascotMotion::Celebrate, true) => anim("celebrate-strip.png", "mascot-celebrate"),
+        (MascotMotion::Celebrate, false) => frame0("celebrate-strip.png"),
+    }
+}
 
 /// スレッド色のドット。実行中は breathing で pulse（mock: 1.6s）。停止中は静止。
 fn pulsing_dot(
@@ -1517,6 +1872,7 @@ fn seed_threads() -> Vec<Thread> {
         name: "rope設計".into(),
         color: thread_color(0),
         running: false,
+        turn_started_at: None,
         model: "claude-fable-5".into(),
         permission_mode: "default".into(),
         effort: "high".into(),
@@ -1524,6 +1880,7 @@ fn seed_threads() -> Vec<Thread> {
         context: Vec::new(),
         tokens_used: 23_400,
         tokens_max: 200_000,
+        tokens_shown: 23_400.0,
         command_tx: None,
         available_modes: Vec::new(),
         current_mode_id: SharedString::default(),

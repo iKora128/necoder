@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>しるし — 猫耳マスコット 状態別モーション・ライブラリ</title>
+<style>
+:root{--bg:#0f1013;--panel:#16181d;--border:#2a2d38;--text:#d7dae0;--muted:#8a8f9c;--dim:#5b606d;--accent:#d97757}
+*{box-sizing:border-box;margin:0;padding:0}img{image-rendering:pixelated}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif;padding:34px 40px 70px;-webkit-font-smoothing:antialiased}
+h1{font-size:20px;font-weight:700}h1 .mark{color:var(--accent)}
+.sub{color:var(--muted);font-size:12.5px;margin-top:7px;line-height:1.7;max-width:920px}
+.sub b{color:var(--text)} .sub .k{color:#5ec8d8}
+.grid{display:grid;grid-template-columns:repeat(6,1fr);gap:16px;margin-top:26px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px 12px 14px;
+  display:flex;flex-direction:column;align-items:center;gap:9px;border-top:3px solid var(--c)}
+.stage{height:128px;display:flex;align-items:flex-end;justify-content:center}
+.stage img{max-height:124px;max-width:150px;width:auto;height:auto}
+.nm{font-size:14px;font-weight:600}
+.state{font-size:11px;font-weight:600;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);
+  padding:2px 9px;border-radius:20px}
+.meta{color:var(--dim);font-size:10px}
+.foot{margin-top:30px;color:var(--muted);font-size:12px;line-height:1.8;max-width:920px}
+.foot b{color:var(--text)} .foot .k{color:#5ec8d8}
+</style>
+</head>
+<body>
+  <h1><span class="mark">しるし</span> — 猫耳コーダー娘 · 状態別モーション</h1>
+  <p class="sub">
+    君の6シート（各8コマ）を <b>v2パイプライン</b>（高解像スライス→<b>スケール正規化</b>→下辺そろえ→snap→透過）で全アニメ化。
+    「大きさ変わる」ドリフトは解消済み。各コマ約4KB・GIF 50〜120KB。<b>状態機械</b>で出し分ける想定 ↓
+  </p>
+  <div class="grid" id="grid"></div>
+  <div class="foot">
+    <b>状態機械（案）</b>：<span class="k">生成中</span>→打鍵 ／ <span class="k">深い生成・長い turn</span>→集中打鍵 ／
+    <span class="k">計画・長考</span>→考える ／ <span class="k">成功・テスト緑・完了</span>→バンザイ ／
+    <span class="k">待ち時間が延びる</span>→うとうと ／ <span class="k">放置・アイドル</span>→ふて寝。<br>
+    ブラウザで開くと全部動く（各 <span class="k">&lt;dir&gt;/anim.gif</span> も生成済み）。次: <b>採用モーション確定 → GPUI実装</b>（agent_panel の状態に接続＋ストリーミング平滑化＋トークン加算）。
+  </div>
+<script>
+const M = [
+ {dir:'typing4',   n:4, ms:110, nm:'打鍵',     state:'生成中',       c:'#d97757'},
+ {dir:'focustype8',n:8, ms:110, nm:'集中打鍵', state:'深い生成',     c:'#d97757'},
+ {dir:'think8',    n:8, ms:150, nm:'考える',   state:'長考・計画',   c:'#c9a25e'},
+ {dir:'celebrate8',n:8, ms:90,  nm:'バンザイ', state:'成功・完了',   c:'#7bd88f'},
+ {dir:'doze8',     n:8, ms:160, nm:'うとうと', state:'待ち疲れ',     c:'#9b8cc4'},
+ {dir:'sleep8',    n:8, ms:200, nm:'ふて寝',   state:'放置・待機',   c:'#9b8cc4'},
+];
+const grid = document.getElementById('grid');
+for (const m of M){
+  const card = document.createElement('div');
+  card.className='card'; card.style.setProperty('--c', m.c);
+  card.innerHTML = `<div class="stage"><img src="${m.dir}/frame_0.png"></div>
+    <div class="nm">${m.nm}</div><div class="state">${m.state}</div>
+    <div class="meta">${m.n}コマ · ${m.ms}ms</div>`;
+  grid.appendChild(card);
+  const img = card.querySelector('img');
+  const frames = Array.from({length:m.n}, (_,i)=>`${m.dir}/frame_${i}.png`);
+  frames.forEach(f=>{const p=new Image();p.src=f;});
+  let k=0; setInterval(()=>{k=(k+1)%m.n; img.src=frames[k];}, m.ms);
+}
+</script>
+</body>
+</html>

@@ -108,6 +108,12 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
     }
   },
   {
+    "context": "AgentPanel",
+    "bindings": {
+      "cmd-w": "agent::CloseActiveThread"
+    }
+  },
+  {
     "bindings": {
       "cmd-p": "workspace::FileFinder",
       "cmd-o": "workspace::ProjectSwitcher",
@@ -125,16 +131,22 @@ mod tests {
     #[test]
     fn parses_sections_and_bindings() {
         let sections = parse(DEFAULT_KEYMAP_JSON).expect("既定 keymap がパースできる");
-        assert_eq!(sections.len(), 2);
+        assert_eq!(sections.len(), 3);
         assert_eq!(sections[0].context, "Editor");
         assert_eq!(
             sections[0].bindings.get("cmd-s").map(String::as_str),
             Some("editor::Save")
         );
-        // 2 セクション目は全域（context 空）+ Quit
-        assert!(sections[1].context.is_empty());
+        // 2 セクション目は AgentPanel（⌘W でアクティブスレッドを閉じる）
+        assert_eq!(sections[1].context, "AgentPanel");
         assert_eq!(
-            sections[1].bindings.get("cmd-q").map(String::as_str),
+            sections[1].bindings.get("cmd-w").map(String::as_str),
+            Some("agent::CloseActiveThread")
+        );
+        // 3 セクション目は全域（context 空）+ Quit
+        assert!(sections[2].context.is_empty());
+        assert_eq!(
+            sections[2].bindings.get("cmd-q").map(String::as_str),
             Some("shirushi::Quit")
         );
     }

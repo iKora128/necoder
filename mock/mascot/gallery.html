@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>しるし — ローディング・マスコット候補</title>
+<style>
+:root{
+  --bg:#121218; --panel:#16181d; --card:#1b1b22; --border:#2a2d38;
+  --text:#e7e7ec; --muted:#868b98; --dim:#5b606d;
+  --accent:#d97757; --cyan:#5ec8d8; --moe:#e79cc2; --ok:#7bd88f;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);
+  font-family:system-ui,-apple-system,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif;
+  padding:36px 44px 90px;-webkit-font-smoothing:antialiased}
+h1{font-size:21px;font-weight:700;letter-spacing:.01em}
+h1 .mark{color:var(--accent)}
+.sub{color:var(--muted);font-size:12.5px;margin-top:7px;line-height:1.75;max-width:900px}
+.sub code{color:var(--cyan);background:#0d1014;padding:1px 6px;border-radius:5px;font-size:11.5px}
+.section{margin-top:34px;font-size:12px;letter-spacing:.08em;color:var(--dim);
+  text-transform:uppercase;font-weight:600;border-bottom:1px solid var(--border);
+  padding-bottom:8px;margin-bottom:20px}
+
+/* ===== 実使用プレビュー: Claude Code 拡張風トランスクリプトのスピナー ===== */
+.preview{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+  padding:20px 24px;display:flex;flex-direction:column;gap:14px;max-width:760px}
+.line{display:flex;align-items:center;gap:12px;font-size:13px}
+.line .spin{width:26px;height:26px;image-rendering:pixelated;flex:0 0 auto;
+  animation:bob 1.15s ease-in-out infinite}
+.line .thinking{color:var(--accent)}
+.line .dots::after{content:"";animation:dots 1.4s steps(4,end) infinite}
+.line .meta{color:var(--dim);font-size:12px;margin-left:auto;font-variant-numeric:tabular-nums}
+.line .name{color:var(--muted);font-size:11px;width:70px}
+
+/* ===== グリッド ===== */
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;
+  overflow:hidden;display:flex;flex-direction:column}
+.card .art{position:relative;aspect-ratio:1;background:#1b1b22;
+  display:flex;align-items:center;justify-content:center}
+.card .art img{width:100%;height:100%;object-fit:contain;
+  animation:bob 2.4s ease-in-out infinite}
+.card .no{position:absolute;top:10px;left:12px;font-size:11px;color:var(--dim);
+  font-variant-numeric:tabular-nums}
+.tag{position:absolute;top:10px;right:12px;font-size:10.5px;font-weight:600;
+  padding:2px 8px;border-radius:20px;letter-spacing:.03em}
+.tag.moe{color:var(--moe);background:rgba(231,156,194,.12);border:1px solid rgba(231,156,194,.3)}
+.tag.gits{color:var(--cyan);background:rgba(94,200,216,.1);border:1px solid rgba(94,200,216,.3)}
+.card .body{padding:14px 16px 16px;border-top:1px solid var(--border)}
+.card .nm{font-size:14px;font-weight:600}
+.card .nm .en{color:var(--dim);font-weight:400;font-size:11px;margin-left:6px}
+.card .desc{color:var(--muted);font-size:11.5px;line-height:1.6;margin-top:5px;min-height:34px}
+.card .brand{color:var(--accent);font-size:11px;margin-top:6px}
+/* 小サイズ（実ローディング寸法）で読めるか */
+.scales{display:flex;align-items:flex-end;gap:16px;margin-top:14px;
+  padding-top:13px;border-top:1px dashed var(--border)}
+.scales .lbl{font-size:10px;color:var(--dim);margin-right:2px;align-self:center}
+.scales .s{display:flex;flex-direction:column;align-items:center;gap:4px}
+.scales .s img{image-rendering:pixelated;animation:bob 1.15s ease-in-out infinite}
+.scales .s span{font-size:9px;color:var(--dim)}
+.scales .s.px40 img{width:40px;height:40px}
+.scales .s.px28 img{width:28px;height:28px}
+.scales .s.px20 img{width:20px;height:20px}
+
+@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+@keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}100%{content:""}}
+.foot{margin-top:40px;color:var(--dim);font-size:11.5px;line-height:1.8;max-width:900px}
+</style>
+</head>
+<body>
+  <h1><span class="mark">しるし</span> — ローディング・マスコット候補 <span style="color:var(--dim);font-weight:400;font-size:13px">6体</span></h1>
+  <p class="sub">
+    AI待ち時間の「今考えてる」フィードバック用ドット絵マスコット。<code>Recraft V4.1</code> で 8-bit ピクセルスプライト生成 →
+    次段で <code>SVG / CSS box-shadow</code> に軽量圧縮してフレームアニメ化する前提。<br>
+    見るべきは <b>①大サイズの造形</b>・<b>②小サイズ（20〜40px＝実際のスピナー寸法）で"何のキャラか読めるか"</b>・<b>③下の実使用プレビュー</b>の3点。
+  </p>
+
+  <div class="section">実使用プレビュー — Claude Code 拡張風トランスクリプトのスピナーとして</div>
+  <div class="preview">
+    <div class="line"><span class="name">巫女</span><img class="spin" src="03-miko-fuda.png"><span class="thinking">✳ Thinking</span><span class="dots"></span><span class="meta">esc to interrupt · 12.4k tokens</span></div>
+    <div class="line"><span class="name">タチコマ</span><img class="spin" src="06-tachikoma.png"><span class="thinking">✳ Thinking</span><span class="dots"></span><span class="meta">esc to interrupt · 8.1k tokens</span></div>
+    <div class="line"><span class="name">猫耳</span><img class="spin" src="01-neko-coder.png"><span class="thinking">✳ Thinking</span><span class="dots"></span><span class="meta">esc to interrupt · 3.7k tokens</span></div>
+    <div class="line"><span class="name">素子</span><img class="spin" src="04-cyborg-operator.png"><span class="thinking">✳ Thinking</span><span class="dots"></span><span class="meta">esc to interrupt · 21.0k tokens</span></div>
+  </div>
+
+  <div class="section">キャラクター一覧</div>
+  <div class="grid">
+
+    <div class="card">
+      <div class="art"><span class="no">01</span><span class="tag moe">萌え</span><img src="01-neko-coder.png"></div>
+      <div class="body">
+        <div class="nm">猫耳コーダー娘<span class="en">neko-coder</span></div>
+        <div class="desc">パーカー猫耳っ娘がミニ端末をタイプ。テラコッタ配色で本体アクセントと直結。</div>
+        <div class="scales"><span class="lbl">小サイズ→</span>
+          <div class="s px40"><img src="01-neko-coder.png"><span>40</span></div>
+          <div class="s px28"><img src="01-neko-coder.png"><span>28</span></div>
+          <div class="s px20"><img src="01-neko-coder.png"><span>20</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="art"><span class="no">02</span><span class="tag moe">萌え</span><img src="02-maid-robot.png"></div>
+      <div class="body">
+        <div class="nm">メイド助手ロボ娘<span class="en">maid-bot</span></div>
+        <div class="desc">ヘッドホン＋フロッピー。パステル＆シアン。UI助手の擬人化として素直。</div>
+        <div class="scales"><span class="lbl">小サイズ→</span>
+          <div class="s px40"><img src="02-maid-robot.png"><span>40</span></div>
+          <div class="s px28"><img src="02-maid-robot.png"><span>28</span></div>
+          <div class="s px20"><img src="02-maid-robot.png"><span>20</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="art"><span class="no">03</span><span class="tag moe">萌え</span><img src="03-miko-fuda.png"></div>
+      <div class="body">
+        <div class="nm">巫女＋お札<span class="en">miko-fuda</span></div>
+        <div class="desc">緋袴の巫女がお札（＝印）を掲げる。<b>「しるし＝印」ブランドに直結</b>する一体。</div>
+        <div class="brand">◆ ブランド直結（印／お札／封）</div>
+        <div class="scales"><span class="lbl">小サイズ→</span>
+          <div class="s px40"><img src="03-miko-fuda.png"><span>40</span></div>
+          <div class="s px28"><img src="03-miko-fuda.png"><span>28</span></div>
+          <div class="s px20"><img src="03-miko-fuda.png"><span>20</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="art"><span class="no">04</span><span class="tag gits">攻殻</span><img src="04-cyborg-operator.png"></div>
+      <div class="body">
+        <div class="nm">サイボーグ操作官<span class="en">cyborg-op</span></div>
+        <div class="desc">素子系。ボブ＋首ジャック＋光る義眼。シアン配色でクール寄り。</div>
+        <div class="scales"><span class="lbl">小サイズ→</span>
+          <div class="s px40"><img src="04-cyborg-operator.png"><span>40</span></div>
+          <div class="s px28"><img src="04-cyborg-operator.png"><span>28</span></div>
+          <div class="s px20"><img src="04-cyborg-operator.png"><span>20</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="art"><span class="no">05</span><span class="tag gits">攻殻</span><img src="05-netrunner.png"></div>
+      <div class="body">
+        <div class="nm">ネトランナー<span class="en">netrunner</span></div>
+        <div class="desc">フード＋バイザー＋ホログラム。ティール×ネオンオレンジ。攻めた雰囲気。</div>
+        <div class="scales"><span class="lbl">小サイズ→</span>
+          <div class="s px40"><img src="05-netrunner.png"><span>40</span></div>
+          <div class="s px28"><img src="05-netrunner.png"><span>28</span></div>
+          <div class="s px20"><img src="05-netrunner.png"><span>20</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="art"><span class="no">06</span><span class="tag gits">攻殻</span><img src="06-tachikoma.png"></div>
+      <div class="body">
+        <div class="nm">タチコマ的AI思考戦車<span class="en">think-tank</span></div>
+        <div class="desc">丸ポッド＋複数レンズ眼＋多脚。<b>AIそのものの擬人化</b>としては最有力。人型でない＝性別/萌えの押し付けが無い。</div>
+        <div class="brand">◆ AIマスコットとして意味的に最適</div>
+        <div class="scales"><span class="lbl">小サイズ→</span>
+          <div class="s px40"><img src="06-tachikoma.png"><span>40</span></div>
+          <div class="s px28"><img src="06-tachikoma.png"><span>28</span></div>
+          <div class="s px20"><img src="06-tachikoma.png"><span>20</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="foot">
+    次段の予定 →
+    ① 採用キャラを決める（複数可・スレッド色ごとに変える案も）<br>
+    ② 1024px 生成物を <b>32〜48px グリッドへ量子化</b>（限定パレット化）→ <b>SVG rect / CSS box-shadow</b> で軽量化（画像を持たない）<br>
+    ③ 2〜4フレーム生成（idle / thinking / typing）→ フレーム切替でループアニメ<br>
+    ④ <code>agent_panel</code> の "✳ Thinking" 行に spinner として組み込み（＋ストリーミング平滑化・トークンのリアルタイム加算も同時に）
+  </div>
+</body>
+</html>

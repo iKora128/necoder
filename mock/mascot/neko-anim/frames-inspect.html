@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>しるし — フレーム選別インスペクタ</title>
+<style>
+:root{--bg:#0f1013;--panel:#16181d;--border:#2a2d38;--text:#d7dae0;--muted:#8a8f9c;--dim:#5b606d;--accent:#d97757;--ok:#7bd88f;--err:#e06c6c}
+*{box-sizing:border-box;margin:0;padding:0}img{image-rendering:pixelated}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif;padding:28px 34px 80px}
+h1{font-size:19px;font-weight:700}h1 .mark{color:var(--accent)}
+.hint{color:var(--muted);font-size:12.5px;margin-top:6px;line-height:1.7}
+.hint b{color:var(--text)} .hint .k{color:#5ec8d8}
+.bgbtns{margin-top:12px;display:flex;gap:8px}
+.bgbtns button{background:var(--panel);color:var(--muted);border:1px solid var(--border);border-radius:7px;padding:5px 11px;font-size:11px;cursor:pointer}
+.bgbtns button:hover{color:var(--text)}
+
+.mot{margin-top:26px;border-top:1px solid var(--border);padding-top:16px}
+.mot h2{font-size:15px;font-weight:600;display:flex;align-items:baseline;gap:10px}
+.mot h2 .tag{font-size:11px;color:var(--dim)}
+.keep{font-family:ui-monospace,monospace;font-size:12px;color:var(--ok);margin-left:auto;
+  background:#0c1410;border:1px solid #1e3325;border-radius:6px;padding:3px 10px;cursor:pointer}
+.keep b{color:var(--text)}
+.strip{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px}
+.tile{position:relative;border:2px solid var(--border);border-radius:10px;overflow:hidden;cursor:pointer;
+  transition:border-color .12s,opacity .12s}
+.tile .frame{height:150px;display:flex;align-items:center;justify-content:center;padding:6px}
+.tile .frame img{max-height:138px;max-width:190px;width:auto}
+.tile .num{position:absolute;top:4px;left:6px;font-size:12px;font-weight:700;color:#fff;
+  background:rgba(0,0,0,.55);border-radius:5px;padding:1px 7px;font-variant-numeric:tabular-nums}
+.tile.keep-on{border-color:var(--ok)}
+.tile.drop{border-color:var(--err);opacity:.4}
+.tile.drop::after{content:"✕ 除外";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:var(--err);font-size:16px;font-weight:700;background:rgba(0,0,0,.35)}
+</style>
+</head>
+<body>
+  <h1><span class="mark">しるし</span> — フレーム選別インスペクタ</h1>
+  <p class="hint">
+    各コマを<b>クリックで除外/採用トグル</b>（赤=除外）。右上の <span class="k">keep=…</span> をクリックでコピー。<br>
+    背景を切替えて<b>横の余計なピクセル（隣コマの尻尾/zZ の見切れ）</b>を確認 → 悪いコマを除外して、その keep リストを俺に伝えて。<br>
+    ⚠ <b>うとうと・ふて寝</b>を重点チェック。
+  </p>
+  <div class="bgbtns">
+    <button onclick="setBg('#12121a')">暗</button>
+    <button onclick="setBg('#4a4d58')">灰（アラ見え）</button>
+    <button onclick="setBg('checker')">チェッカー</button>
+    <button onclick="setBg('#c84bd0')">マゼンタ</button>
+  </div>
+  <div id="root"></div>
+
+<script>
+const M = [
+ {dir:'doze8', n:8, tag:'うとうと（要チェック）'},
+ {dir:'sleep8', n:8, tag:'ふて寝（要チェック）'},
+ {dir:'typing8', n:8, tag:'打鍵（元8コマ）'},
+ {dir:'focustype8', n:8, tag:'集中打鍵'},
+ {dir:'think8', n:8, tag:'考える'},
+ {dir:'celebrate8', n:8, tag:'バンザイ'},
+];
+const root = document.getElementById('root');
+const dropped = {};
+function render(){
+  root.innerHTML='';
+  for(const m of M){
+    dropped[m.dir] = dropped[m.dir] || new Set();
+    const sec=document.createElement('div'); sec.className='mot';
+    const keepList = ()=>[...Array(m.n).keys()].filter(i=>!dropped[m.dir].has(i));
+    sec.innerHTML = `<h2>${m.dir} <span class="tag">${m.tag}</span>
+      <span class="keep" data-dir="${m.dir}">keep=<b>${keepList().join(',')}</b></span></h2>
+      <div class="strip"></div>`;
+    const strip=sec.querySelector('.strip');
+    for(let i=0;i<m.n;i++){
+      const t=document.createElement('div'); t.className='tile keep-on';
+      t.innerHTML=`<div class="frame"><img src="${m.dir}/frame_${i}.png"></div><span class="num">${i}</span>`;
+      t.onclick=()=>{
+        if(dropped[m.dir].has(i)){dropped[m.dir].delete(i);t.className='tile keep-on';}
+        else{dropped[m.dir].add(i);t.className='tile drop';}
+        sec.querySelector('.keep b').textContent = keepList().join(',');
+      };
+      strip.appendChild(t);
+    }
+    sec.querySelector('.keep').onclick=(e)=>{
+      const s=`--frames ${keepList().join(',')}`; navigator.clipboard&&navigator.clipboard.writeText(s);
+      e.currentTarget.style.color='#fff'; setTimeout(()=>e.currentTarget.style.color='',400);
+    };
+    root.appendChild(sec);
+  }
+}
+function setBg(v){
+  document.querySelectorAll('.tile .frame').forEach(f=>{
+    if(v==='checker'){f.style.background='conic-gradient(#666 90deg,#999 0 180deg,#666 0 270deg,#999 0) 0 0/16px 16px';}
+    else f.style.background=v;
+  });
+}
+render(); setBg('#4a4d58');
+</script>
+</body>
+</html>

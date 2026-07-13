@@ -78,9 +78,8 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   ただし外部貢献を受け始めると再ライセンスが困難 → **最初に決めて、あとは忘れる**。
 - **→ 決定（2026-07-11）: GPL-3.0**。Zed の GPL crate（`acp_thread` / `agent_servers` / `worktree` / `fs` 等）を
   移植・改変して土台にする戦略とセットの判断（Apache の GPUI / `agent-client-protocol` とは共存可）。
-- **→ 改定（2026-07-12）: AGPL-3.0-or-later**。`shirushi.ai` 取得＝将来のクラウド/サービス化の芽を踏まえ、
-  ネットワーク越し利用（SaaS）でもソース開示を要求する AGPL に変更。**AGPL-3.0 は GPL-3.0 と相互互換**（両 §13）
-  なので、移植する Zed の GPL crate はそのまま使える。デスクトップ用途では GPL と同挙動＝実害ゼロ、将来だけ効く保険。
+- **→ 改定（2026-07-12）: AGPL-3.0-or-later で "park"**。**AGPL-3.0 は GPL-3.0 と相互互換**（両 §13）。
+- **→ 戦略確定（2026-07-12・本人）: 最終的に Apache-2.0（普及第一）**。堀は**ブランド/実行力/デザインの趣味/`shirushi.ai` の運営**でありライセンス保護ではない（色×横断×AI-native はライセンスでは守れない）。**重要**: 現コードは**100% GPL フリー**（gpui/gpui_platform=Apache・acp は crates.io の agent-client-protocol=permissive・worktree/editor 全自作。Zed の GPL crate は"移植"していない）。→ **著作権者=本人 + GPL コード無し + CLA を保つ限り、いつでも Apache へ緩められる**。**今 AGPL で park＝保護しつつ全選択肢を残す最善形**。**Apache の道を閉じない鉄則: Zed の GPL crate を移植せず自作/permissive で代替・貢献は CLA**（当初の「GPL 決定=Zed GPL crate 移植前提」は移植せず自作で組んだため消滅）。「採用を最大化するモード」に入る時に Apache へ緩める。
 
 ## 6. 動機の切り分け（判断の本質）
 

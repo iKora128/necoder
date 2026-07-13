@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>しるし — マスコット比較（Recraft vs gpt_image_2 vs snapped）</title>
+<style>
+:root{
+  --bg:#121218; --panel:#16181d; --card:#1b1b22; --border:#2a2d38;
+  --text:#e7e7ec; --muted:#868b98; --dim:#5b606d;
+  --accent:#d97757; --cyan:#5ec8d8; --moe:#e79cc2; --ok:#7bd88f;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);
+  font-family:system-ui,-apple-system,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif;
+  padding:36px 40px 90px;-webkit-font-smoothing:antialiased}
+h1{font-size:21px;font-weight:700}
+h1 .mark{color:var(--accent)}
+.sub{color:var(--muted);font-size:12.5px;margin-top:7px;line-height:1.75;max-width:960px}
+.sub code{color:var(--cyan);background:#0d1014;padding:1px 6px;border-radius:5px;font-size:11.5px}
+.sub b{color:var(--ok)}
+.legend{display:flex;gap:22px;margin-top:16px;font-size:11.5px;color:var(--muted);flex-wrap:wrap}
+.legend span b{color:var(--text)}
+
+.row{display:grid;grid-template-columns:150px 1fr 1fr 1fr;gap:16px;align-items:stretch;
+  margin-top:20px;padding-top:20px;border-top:1px solid var(--border)}
+.meta{display:flex;flex-direction:column;justify-content:center;gap:8px}
+.meta .no{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
+.meta .jp{font-size:15px;font-weight:600;line-height:1.4}
+.tag{align-self:flex-start;font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px}
+.tag.moe{color:var(--moe);background:rgba(231,156,194,.12);border:1px solid rgba(231,156,194,.3)}
+.tag.gits{color:var(--cyan);background:rgba(94,200,216,.1);border:1px solid rgba(94,200,216,.3)}
+.tag.ai{color:var(--ok);background:rgba(123,216,143,.1);border:1px solid rgba(123,216,143,.3)}
+
+.panel{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;
+  display:flex;flex-direction:column}
+.panel.win{border-color:rgba(123,216,143,.45);box-shadow:0 0 0 1px rgba(123,216,143,.15)}
+.panel .cap{font-size:10.5px;color:var(--muted);padding:7px 11px;border-bottom:1px solid var(--border);
+  display:flex;justify-content:space-between;align-items:center}
+.panel .cap b{color:var(--text);font-weight:600}
+.panel .cap .sz{color:var(--dim);font-variant-numeric:tabular-nums}
+.panel.win .cap b{color:var(--ok)}
+.panel .img{aspect-ratio:1;background:#1b1b22;display:flex;align-items:center;justify-content:center}
+.panel .img img{width:100%;height:100%;object-fit:contain}
+.panel.snap .img img{image-rendering:pixelated}
+
+/* 小サイズ実寸プレビュー（snapped を実際のスピナー寸法で） */
+.scales{grid-column:2 / 5;display:flex;align-items:center;gap:20px;
+  background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 16px;margin-top:4px}
+.scales .lbl{font-size:10.5px;color:var(--dim);margin-right:4px}
+.scales .s{display:flex;flex-direction:column;align-items:center;gap:3px}
+.scales .s img{image-rendering:pixelated;animation:bob 1.15s ease-in-out infinite}
+.scales .s span{font-size:9px;color:var(--dim)}
+.scales .s.px48 img{width:48px;height:48px}
+.scales .s.px32 img{width:32px;height:32px}
+.scales .s.px24 img{width:24px;height:24px}
+.scales .s.px16 img{width:16px;height:16px}
+.scales .note{margin-left:auto;font-size:10.5px;color:var(--dim);max-width:280px;text-align:right;line-height:1.5}
+@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+</style>
+</head>
+<body>
+  <h1><span class="mark">しるし</span> — マスコット比較 <span style="color:var(--dim);font-weight:400;font-size:13px">Recraft V4.1 vs gpt_image_2 vs pixel-snapped</span></h1>
+  <p class="sub">
+    同一6キャラを <code>gpt_image_2</code>（quality=high, 1k）で再生成し、<b>spritefusion-pixel-snapper</b>（Rust/MIT）で
+    <b>グリッド整列＋24色量子化</b>した。<br>
+    各行 左→右: <b>①Recraft（前回）</b> / <b>②gpt_image_2 raw</b> / <b>③gpt→snapped</b>（＝実採用アセット候補）。
+    最下段は snapped を<b>実際のスピナー寸法（16〜48px）</b>で bob 表示。
+  </p>
+  <div class="legend">
+    <span>圧縮: raw <b>~950KB</b> → snapped <b>8〜36KB</b>（約30〜100倍）</span>
+    <span>snapped は <b>image-rendering:pixelated</b> で拡大してもドットが崩れない</span>
+    <span>次段: snapped を <b>SVG rect / CSS box-shadow</b> 化 or そのまま極小PNGとして使用</span>
+  </div>
+
+  <div id="grid"></div>
+
+<script>
+const chars = [
+ {id:'01', jp:'猫耳コーダー娘', tag:'萌え', cls:'moe', recraft:'01-neko-coder.png', raw:'gpt/01-neko.png', snap:'gpt-snapped/01-neko.png', sz:'20KB', note:''},
+ {id:'02', jp:'メイド助手ロボ娘', tag:'萌え', cls:'moe', recraft:'02-maid-robot.png', raw:'gpt/02-maid.png', snap:'gpt-snapped/02-maid.png', sz:'20KB', note:''},
+ {id:'03', jp:'巫女＋お札', tag:'萌え / 印', cls:'moe', recraft:'03-miko-fuda.png', raw:'gpt/03-miko.png', snap:'gpt-snapped/03-miko.png', sz:'8KB', note:'ブランド直結（しるし＝印）'},
+ {id:'04', jp:'サイボーグ操作官', tag:'攻殻', cls:'gits', recraft:'04-cyborg-operator.png', raw:'gpt/04-cyborg.png', snap:'gpt-snapped/04-cyborg.png', sz:'20KB', note:'全身人型＝小サイズで潰れやすい'},
+ {id:'05', jp:'ネトランナー', tag:'攻殻', cls:'gits', recraft:'05-netrunner.png', raw:'gpt/05-netrunner.png', snap:'gpt-snapped/05-netrunner.png', sz:'36KB', note:''},
+ {id:'06', jp:'タチコマ的AI思考戦車', tag:'攻殻 / AI', cls:'ai', recraft:'06-tachikoma.png', raw:'gpt/06-tachikoma.png', snap:'gpt-snapped/06-tachikoma.png', sz:'24KB', note:'AIマスコット最有力・小サイズ耐性◎'},
+];
+const grid = document.getElementById('grid');
+for (const c of chars){
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `
+    <div class="meta">
+      <div class="no">${c.id}</div>
+      <div class="jp">${c.jp}</div>
+      <span class="tag ${c.cls}">${c.tag}</span>
+      ${c.note ? `<div style="font-size:10.5px;color:var(--dim);line-height:1.5">${c.note}</div>` : ''}
+    </div>
+    <div class="panel"><div class="cap"><b>① Recraft V4.1</b><span class="sz">前回</span></div><div class="img"><img src="${c.recraft}"></div></div>
+    <div class="panel"><div class="cap"><b>② gpt_image_2</b><span class="sz">raw ~950KB</span></div><div class="img"><img src="${c.raw}"></div></div>
+    <div class="panel win snap"><div class="cap"><b>③ snapped ✨</b><span class="sz">${c.sz}</span></div><div class="img"><img src="${c.snap}"></div></div>
+    <div class="scales">
+      <span class="lbl">実寸（snapped）→</span>
+      <div class="s px48"><img src="${c.snap}"><span>48</span></div>
+      <div class="s px32"><img src="${c.snap}"><span>32</span></div>
+      <div class="s px24"><img src="${c.snap}"><span>24</span></div>
+      <div class="s px16"><img src="${c.snap}"><span>16</span></div>
+      <div class="note">${c.note || 'スピナーはこの寸法で使う。ここで読めるかが採否の決め手。'}</div>
+    </div>`;
+  grid.appendChild(row);
+}
+</script>
+</body>
+</html>
