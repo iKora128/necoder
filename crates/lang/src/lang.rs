@@ -8,6 +8,9 @@ use anyhow::{Context as _, Result};
 use std::ops::Range;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter as TsHighlighter};
 
+/// LSP クライアント（rust-analyzer）。M7。
+pub mod lsp;
+
 /// syn-* トークンに対応する種別（UI-SPEC §1.1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HighlightKind {

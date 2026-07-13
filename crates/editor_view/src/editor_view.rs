@@ -117,6 +117,8 @@ pub struct EditorView {
     diff_scheduled_version: u64,
     /// diff デバウンスの世代（古い計算を無効化＝連続編集を 1 回に畳む）。
     diff_gen: u32,
+    /// LSP 診断（行番号 + 重大度）。gutter の下線に使う。workspace が push する。
+    diagnostics: Vec<(u32, lang::lsp::Severity)>,
 }
 
 /// バッファをハイライトする。対応言語かつ一定サイズ以下のときだけ（巨大ファイルの毎編集再解析を避ける）。
@@ -154,6 +156,7 @@ impl EditorView {
             diff_hunks: Vec::new(),
             diff_scheduled_version: u64::MAX, // 初回描画で必ず計算させる
             diff_gen: 0,
+            diagnostics: Vec::new(),
             scroll_top: px(0.),
             marked_range: None,
             content_origin: None,
@@ -233,6 +236,12 @@ impl EditorView {
     /// テーマを差し替える（テーマセレクタのライブプレビュー / 切替）。次の描画で新配色になる。
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
+        cx.notify();
+    }
+
+    /// LSP 診断（行 + 重大度）を差し替える（workspace が publishDiagnostics 受信時に push）。
+    pub fn set_diagnostics(&mut self, diagnostics: Vec<(u32, lang::lsp::Severity)>, cx: &mut Context<Self>) {
+        self.diagnostics = diagnostics;
         cx.notify();
     }
 
@@ -780,6 +789,7 @@ struct EditorPrepaint {
     carets: Vec<PaintQuad>,
     current_line: Option<PaintQuad>,
     diff_marks: Vec<PaintQuad>,
+    diagnostic_marks: Vec<PaintQuad>,
     content_bounds: Bounds<Pixels>,
     gutter_width: Pixels,
     viewport_height: Pixels,
@@ -855,6 +865,7 @@ impl Element for EditorElement {
         let selections = view.buffer.selections().to_vec();
         let highlights = view.highlights.clone();
         let diff_hunks = view.diff_hunks.clone();
+        let diagnostics = view.diagnostics.clone();
         let plain = view.plain;
         let blink_visible = view.blink_visible;
         let text_font = window.text_style().font();
@@ -885,6 +896,7 @@ impl Element for EditorElement {
         let mut current_line = None;
         let mut caret_bounds = None;
         let mut diff_marks = Vec::new();
+        let mut diagnostic_marks = Vec::new();
 
         let primary_row = snapshot.byte_to_point(primary.head).row;
 
@@ -921,6 +933,25 @@ impl Element for EditorElement {
                         }
                         _ => {}
                     }
+                }
+            }
+
+            // 診断の下線（error=赤 / warn=琥珀 / info・hint=ミュート）。行のテキスト幅いっぱいに引く。
+            if !plain {
+                let row32 = row as u32;
+                if let Some((_, severity)) = diagnostics.iter().find(|(line, _)| *line == row32) {
+                    let color = match severity {
+                        lang::lsp::Severity::Error => theme.err,
+                        lang::lsp::Severity::Warning => theme.warn,
+                        _ => theme.fg2,
+                    };
+                    diagnostic_marks.push(fill(
+                        Bounds::new(
+                            point(content_origin.x, y + line_height - px(2.)),
+                            size(content_width, px(1.5)),
+                        ),
+                        color,
+                    ));
                 }
             }
 
@@ -1009,6 +1040,7 @@ impl Element for EditorElement {
             carets,
             current_line,
             diff_marks,
+            diagnostic_marks,
             content_bounds,
             gutter_width,
             viewport_height: bounds.size.height,
@@ -1054,6 +1086,10 @@ impl Element for EditorElement {
             if let Err(error) = positioned.line.paint(positioned.origin, line_height, TextAlign::Left, None, window, cx) {
                 eprintln!("text paint 失敗: {error}");
             }
+        }
+        // 診断の下線はテキストの上に重ねる（error=赤 等）。
+        for mark in prepaint.diagnostic_marks.drain(..) {
+            window.paint_quad(mark);
         }
         for caret in prepaint.carets.drain(..) {
             window.paint_quad(caret);

@@ -6,6 +6,7 @@
 
 use agent_panel::AgentPanel;
 use editor_core::Buffer;
+use futures::StreamExt as _; // LSP 通知 pump の `.next()`
 use editor_view::EditorView;
 use gpui::{
     Animation, AnimationExt, App, Bounds, ClipboardItem, Context, CursorStyle, Entity, FocusHandle,
@@ -277,6 +278,15 @@ pub struct Workspace {
     branch_menu: Option<Point<gpui::Pixels>>,
     // 下ドックの統合ターミナル（初回表示で遅延生成。show_bottom で出す）。
     terminal: Option<Entity<TerminalView>>,
+    // ── LSP（rust-analyzer・M7）──
+    lsp: Option<lang::lsp::LspClient>,
+    lsp_root: Option<PathBuf>,
+    lsp_initialized: bool,
+    // 最後に didChange で送ったバッファ version（重複送信の抑止）。
+    lsp_sent_version: u64,
+    // ファイル別診断（絶対パス → (行, 重大度)）。gutter/statusbar に使う。
+    diagnostics: HashMap<PathBuf, Vec<(u32, lang::lsp::Severity)>>,
+    _lsp_pump: Option<gpui::Task<()>>,
 }
 
 impl Workspace {
@@ -385,6 +395,12 @@ impl Workspace {
             // 開発用: SHIRUSHI_BRANCH_MENU=1 で branch/worktree メニューを開いた状態で撮る。
             branch_menu: std::env::var_os("SHIRUSHI_BRANCH_MENU").map(|_| point(px(90.), px(44.))),
             terminal: None,
+            lsp: None,
+            lsp_root: None,
+            lsp_initialized: false,
+            lsp_sent_version: u64::MAX,
+            diagnostics: HashMap::new(),
+            _lsp_pump: None,
         };
         workspace.refresh_git_status(); // ツリー/タブの git 色分け用
         // 開発用: SHIRUSHI_TERMINAL=1 で下ドックのターミナルを開いた状態で撮る。
@@ -520,6 +536,162 @@ impl Workspace {
         }
         self.update_agent_destination(cx);
         cx.notify();
+    }
+
+    // ── LSP（rust-analyzer・M7） ──
+
+    /// アクティブプロジェクト用に rust-analyzer を（必要なら）起動する。別プロジェクトなら張り替え。
+    fn ensure_lsp(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.active_slot().map(|slot| slot.worktree.root().to_path_buf()) else {
+            return;
+        };
+        if self.lsp.is_some() && self.lsp_root.as_deref() == Some(root.as_path()) {
+            return;
+        }
+        // 旧接続を畳む（Drop で kill）。
+        self.lsp = None;
+        self._lsp_pump = None;
+        self.lsp_initialized = false;
+        self.diagnostics.clear();
+        let Some(server) = lsp_server_path() else {
+            return;
+        };
+        let (client, notifications) = match lang::lsp::LspClient::new(&server, &root) {
+            Ok(pair) => pair,
+            Err(error) => {
+                eprintln!("LSP の起動に失敗: {error:#}");
+                return;
+            }
+        };
+        let init_rx = client.initialize_request(&root);
+        self.lsp = Some(client);
+        self.lsp_root = Some(root);
+        // pump: initialize 応答 → initialized + 現在ファイル didOpen → 以後 publishDiagnostics を処理。
+        self._lsp_pump = Some(cx.spawn(async move |workspace, cx| {
+            let _ = init_rx.await; // capabilities は今は使わない（起動確認のみ）
+            if workspace.update(cx, |ws, cx| ws.on_lsp_initialized(cx)).is_err() {
+                return;
+            }
+            let mut notifications = notifications;
+            while let Some((method, params)) = notifications.next().await {
+                if method == "textDocument/publishDiagnostics"
+                    && workspace.update(cx, |ws, cx| ws.on_diagnostics(params, cx)).is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// initialize 応答後: initialized 通知 + 現在の rust ファイルを didOpen。
+    fn on_lsp_initialized(&mut self, cx: &mut Context<Self>) {
+        self.lsp_initialized = true;
+        if let Some(lsp) = &self.lsp {
+            lsp.initialized();
+        }
+        self.lsp_did_open_active(cx);
+    }
+
+    /// 現在開いている rust ファイルを didOpen する。
+    fn lsp_did_open_active(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
+        let info = {
+            let view = editor.read(cx);
+            view.buffer()
+                .path()
+                .filter(|path| is_rust(path))
+                .map(|path| (path.to_path_buf(), view.buffer().version(), view.buffer().text()))
+        };
+        if let Some((path, version, text)) = info {
+            self.lsp_sent_version = version;
+            if let Some(lsp) = &self.lsp {
+                lsp.did_open(&path, "rust", version as i32, &text);
+            }
+        }
+    }
+
+    /// publishDiagnostics を受けてファイル別に格納し、アクティブファイル分をエディタへ push。
+    fn on_diagnostics(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
+        let Ok(parsed) = serde_json::from_value::<lang::lsp::PublishDiagnosticsParams>(params) else {
+            return;
+        };
+        let Some(path) = lang::lsp::uri_to_path(&parsed.uri) else {
+            return;
+        };
+        let entries: Vec<(u32, lang::lsp::Severity)> = parsed
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                (diagnostic.range.start.line, lang::lsp::Severity::from_lsp(diagnostic.severity))
+            })
+            .collect();
+        // 空 vec = そのファイルの診断を全消し（置換セマンティクス）。
+        if entries.is_empty() {
+            self.diagnostics.remove(&path);
+        } else {
+            self.diagnostics.insert(path, entries);
+        }
+        self.push_active_diagnostics(cx);
+        cx.notify();
+    }
+
+    /// アクティブファイルの診断をエディタへ渡す（gutter 下線用）。
+    fn push_active_diagnostics(&self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
+        let path = editor.read(cx).buffer().path().map(Path::to_path_buf);
+        let diagnostics = path
+            .and_then(|path| self.diagnostics.get(&path).cloned())
+            .unwrap_or_default();
+        editor.update(cx, |view, cx| view.set_diagnostics(diagnostics, cx));
+    }
+
+    /// エディタ変更時（observe）: 再描画 + LSP didChange（rust・version 変化時のみ）。
+    fn on_editor_changed(&mut self, editor: Entity<EditorView>, cx: &mut Context<Self>) {
+        cx.notify();
+        // 初期化 + didOpen 前は didChange を送らない（さもないと ra が「initialized 前」で落ちる）。
+        // observe は focus/blink 等の notify でも発火するので version 変化でのみ送る。
+        if !self.lsp_initialized {
+            return;
+        }
+        let info = {
+            let view = editor.read(cx);
+            let version = view.buffer().version();
+            if version == self.lsp_sent_version {
+                None
+            } else {
+                view.buffer()
+                    .path()
+                    .filter(|path| is_rust(path))
+                    .map(|path| (path.to_path_buf(), version, view.buffer().text()))
+            }
+        };
+        if let Some((path, version, text)) = info {
+            self.lsp_sent_version = version;
+            if let Some(lsp) = &self.lsp {
+                lsp.did_change(&path, version as i32, &text);
+            }
+        }
+    }
+
+    /// アクティブファイルの診断件数（error, warning）。statusbar 用。
+    fn active_diagnostic_counts(&self, cx: &App) -> (usize, usize) {
+        let Some(editor) = &self.editor else {
+            return (0, 0);
+        };
+        let Some(path) = editor.read(cx).buffer().path().map(Path::to_path_buf) else {
+            return (0, 0);
+        };
+        let Some(entries) = self.diagnostics.get(&path) else {
+            return (0, 0);
+        };
+        let errors = entries.iter().filter(|(_, severity)| *severity == lang::lsp::Severity::Error).count();
+        let warnings =
+            entries.iter().filter(|(_, severity)| *severity == lang::lsp::Severity::Warning).count();
+        (errors, warnings)
     }
 
     fn switch_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -794,7 +966,8 @@ impl Workspace {
 
         let handle = editor.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
-        self._editor_observation = Some(cx.observe(&editor, |_, _, cx| cx.notify()));
+        // 変更を監視（再描画 + LSP didChange）。
+        self._editor_observation = Some(cx.observe(&editor, Self::on_editor_changed));
         self.editor = Some(editor);
 
         if let Some(slot) = self.projects.get_mut(self.active) {
@@ -802,6 +975,20 @@ impl Workspace {
             slot.open_file = Some(path);
         }
         self.refresh_git_status();
+        // LSP: rust ファイルなら rust-analyzer を起動 + didOpen（初期化済みなら即 didOpen）。
+        let is_rust_file = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.read(cx).buffer().path().map(is_rust))
+            .unwrap_or(false);
+        if is_rust_file {
+            self.ensure_lsp(cx);
+            if self.lsp_initialized {
+                self.lsp_did_open_active(cx);
+            }
+            // 既知の診断があれば即反映。
+            self.push_active_diagnostics(cx);
+        }
         self.save_state();
         cx.notify();
     }
@@ -2662,6 +2849,9 @@ impl Workspace {
             None => (None, None),
         };
 
+        let (errors, warnings) = self.active_diagnostic_counts(cx);
+        let error_color = if errors > 0 { theme.err } else { theme.fg2 };
+        let warning_color = if warnings > 0 { theme.warn } else { theme.fg2 };
         let left = div()
             .flex()
             .items_center()
@@ -2674,8 +2864,8 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_color(theme.err).child("✗ 0"))
-                    .child(div().text_color(theme.warn).child("▲ 0")),
+                    .child(div().text_color(error_color).child(format!("✗ {errors}")))
+                    .child(div().text_color(warning_color).child(format!("▲ {warnings}"))),
             );
 
         let right = div()
@@ -2700,6 +2890,43 @@ impl Workspace {
             .child(div().flex_1())
             .child(right)
     }
+}
+
+/// rust ファイルか（拡張子 `.rs`）。
+fn is_rust(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+}
+
+/// rust-analyzer の実行パス。**rustup ツールチェーン内の実バイナリを優先**する
+/// （`~/.cargo/bin/rust-analyzer` は rustup プロキシで、cwd/RUSTUP_TOOLCHAIN 依存に解決が変わり
+/// GUI 起動時に "Unknown binary" で失敗するため避ける）。優先順: 環境変数 → toolchains/*/bin →
+/// cargo プロキシ → PATH。
+fn lsp_server_path() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("SHIRUSHI_RUST_ANALYZER") {
+        let path = PathBuf::from(explicit);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = &home {
+        let toolchains = home.join(".rustup/toolchains");
+        if let Ok(entries) = std::fs::read_dir(&toolchains) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join("bin/rust-analyzer");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    if let Some(home) = &home {
+        let proxy = home.join(".cargo/bin/rust-analyzer");
+        if proxy.exists() {
+            return Some(proxy);
+        }
+    }
+    Some(PathBuf::from("rust-analyzer")) // PATH 上に任せる
 }
 
 /// プロジェクトルート（またはその祖先）の `.git/HEAD` から現在ブランチ名を読む。無ければ `None`。

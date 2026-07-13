@@ -321,3 +321,12 @@
 - 学び/罠: `gpui::outline(bounds, color, BorderStyle)` は3引数。`event_loop.spawn()` の JoinHandle は detach（型名 `State` を書かずに済む）。`tty::Options { .., ..Default::default() }` でフォーク差分フィールドを吸収。struct リテラルは記述順評価＝`exited: notifier.is_none()` は `notifier,` move の前にローカルへ
 - 結果: 警告 0・**test 32 suite ok**。offscreen で **実シェル**（`Last login… / daichi@… shirushi % / ブロックカーソル`）を目視＝PTY・グリッド・cwd 全て動作
 - 次: 分割ペイン（M3 残り）→ Phase D = LSP（rust-analyzer・M7）→ MCP サーバ（#21）
+
+## 2026-07-13 —（続き）Phase D: LSP 診断（rust-analyzer・M7）
+- `lang/src/lsp.rs`（`pub mod lsp`）= 最小 LSP クライアント。**JSON-RPC 封筒は自前・型は必要分だけ手書き**（lsp-types のバージョン差異回避）。transport = `std::process` + **読取スレッド**（Content-Length フレーム parse）+ `futures::channel`（oneshot=応答相関 / unbounded=通知）で GPUI 前景へ。stdin は `Mutex<ChildStdin>`。サーバ→client 要求には -32601 を返す
+- lifecycle: `initialize_request`→（pump で応答 await）→`initialized`+`did_open`→編集で `did_change`（FULL）。**診断は行番号だけ使うので UTF-16 変換不要**
+- **editor_view**: `diagnostics: Vec<(u32, Severity)>` + `set_diagnostics`。prepaint 行ループで診断行に**下線 quad**（error=err/warn=warn/他=fg2）を積み、テキストの上に paint。**workspace**: `lsp/lsp_root/lsp_initialized/diagnostics(map)/_lsp_pump`。open_file で rust なら `ensure_lsp`（遅延起動）、pump が publishDiagnostics を受けて map 格納 + アクティブファイル分を editor へ push。statusbar の ✗N ▲N を実件数に
+- **罠1（致命）**: `~/.cargo/bin/rust-analyzer` は **rustup プロキシ**で、GUI 起動（cwd=/tmp・RUSTUP_TOOLCHAIN 無し）だと "Unknown binary in stable" で応答せず。cargo test では 1.95.0 が設定され通っていた → **`~/.rustup/toolchains/*/bin/rust-analyzer` の実体**を探して起動に修正
+- **罠2**: editor の `observe` は focus/blink の notify でも発火 → 初期 `lsp_sent_version=MAX` と version 不一致で **initialized 前に didChange** を送り ra が落ちる → `on_editor_changed` を `lsp_initialized` でゲート
+- 検証: transport の unit test 3 + **実 ra の ignored test 2**（initialize handshake で completionProvider 受領 / `/tmp/lsp-test` で診断「[2行] expected expression」を 2s で受信）。app では **行2/3 に赤下線 + statusbar ✗4** を offscreen で目視
+- 次: LSP 補完/hover/定義の UI 配線（transport 済）→ MCP サーバ（#21）→ 分割ペイン（M3）

@@ -2979,6 +2979,9 @@ name = "lang"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
+ "serde",
+ "serde_json",
  "tree-sitter",
  "tree-sitter-highlight",
  "tree-sitter-rust",
@@ -6983,8 +6986,10 @@ dependencies = [
  "agent_panel",
  "editor_core",
  "editor_view",
+ "futures",
  "gpui",
  "i18n",
+ "lang",
  "project",
  "search",
  "serde",

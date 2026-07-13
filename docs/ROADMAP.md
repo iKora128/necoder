@@ -65,8 +65,8 @@
 ## M7 — 言語知能
 
 - [x] tree-sitter ハイライト（Rust）— 2026-07-12、`crates/lang`（tree-sitter 0.25 + tree-sitter-rust）。`HighlightKind`→theme の syn-* に接続、editor_view で行ごとに色 run 生成（編集で再解析・512KB 超はスキップ）。3 test。実 .rs を無クラッシュで開ける。**色の目視は要実機**（offscreen はグリフ非表示）。インクリメンタル解析は後続
-- [ ] LSP: rust-analyzer（補完・診断・ホバー・定義ジャンプ・フォーマット）← 未（rust-analyzer プロセス統合。大）
-- [ ] 受入: この repo の Rust を補完と診断つきで書く ← ハイライトは達成、LSP は未
+- [ ] LSP: rust-analyzer（補完・診断・ホバー・定義ジャンプ・フォーマット）← **診断は達成**（2026-07-13）。`lang::lsp` に最小 LSP クライアント（JSON-RPC 封筒は自前・型は手書き・transport は std::process + 読取スレッド + futures channel）。initialize→initialized→didOpen→didChange の lifecycle。**publishDiagnostics を gutter 下線（error=赤/warn=琥珀）+ statusbar 件数（✗N ▲N）にライブ反映**。`~/.rustup/toolchains/*/bin/rust-analyzer` の実体を起動（cargo プロキシは cwd 依存で失敗）。**補完/hover/定義は transport 準備済み・UI 配線が残**（`completion`/`hover`/`definition` メソッドあり）。live 検証: `/tmp/lsp-test` の型/構文エラーで赤下線 + ✗4 を目視
+- [ ] 受入: この repo の Rust を補完と診断つきで書く ← ハイライト ✓・**診断 ✓**（live 確認）・補完は UI 残
 
 ## M8 — Git とターミナル、ブランチ横断の完成
 
