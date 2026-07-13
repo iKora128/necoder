@@ -622,6 +622,29 @@ pub fn open_pr_web_on(host: &dyn Host, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+// ── AI コミットメッセージ生成（M8: AI-agent-native。Claude Code CLI に diff を渡す） ──
+
+/// tracked 変更（`git diff HEAD`）を Claude Code CLI に渡してコミットメッセージを 1 本生成する。
+/// `claude` 未導入 / 差分なし / 失敗時は Err。host 経由なので remote でも（claude があれば）動く。
+pub fn ai_commit_message(dir: &Path) -> Result<String> {
+    ai_commit_message_on(&LocalHost, dir)
+}
+
+pub fn ai_commit_message_on(host: &dyn Host, dir: &Path) -> Result<String> {
+    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+    let instruction = "この git diff を読んで簡潔なコミットメッセージを日本語で1本だけ出力して。\
+        1行目に要約、変更が複数なら空行のあと箇条書きで本文。\
+        前置き・説明・引用符・コードブロックは付けず、メッセージ本文だけを出力して。";
+    let script = format!("git --no-pager diff HEAD | claude -p \"{instruction}\"");
+    let output = host
+        .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
+        .context("コミットメッセージ生成の実行に失敗（claude CLI 未導入？）")?;
+    anyhow::ensure!(output.success(), "生成に失敗: {}", git_fail_message(&output));
+    let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    anyhow::ensure!(!message.is_empty(), "生成結果が空（差分が無い？先に stage/編集を）");
+    Ok(message)
+}
+
 /// コミットパネル用の 1 変更（staged / unstaged を分離して持つ。同一ファイルが両方に出得る）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkingChange {

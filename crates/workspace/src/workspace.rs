@@ -1084,6 +1084,43 @@ impl Workspace {
         .detach();
     }
 
+    /// AI でコミットメッセージを生成（Claude Code CLI に diff を渡す・背景実行）。
+    /// 成功したら composer の入力欄に流し込む。AI-agent-native の git 体験。
+    fn generate_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_busy {
+            return;
+        }
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let root = worktree.root().to_path_buf();
+        let host = worktree.host().clone();
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
+        };
+        self.git_busy = true;
+        cx.notify();
+        cx.spawn(async move |_workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { project::ai_commit_message_on(host.as_ref(), &root) })
+                .await;
+            let _ = handle.update(cx, |workspace, _window, cx| {
+                workspace.git_busy = false;
+                match result {
+                    Ok(message) => {
+                        if let Some(state) = workspace.git_panel.as_mut() {
+                            state.message = message;
+                        }
+                    }
+                    Err(error) => eprintln!("コミットメッセージ生成に失敗: {error:#}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// git パネルの入力行を「新しいブランチ名」モードにする（＋ボタン）。
     fn start_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(state) = self.git_panel.as_mut() {
@@ -3583,6 +3620,29 @@ impl Workspace {
             .px(px(8.))
             .pb(px(8.))
             .flex_none()
+            // ✨ AI でコミットメッセージ生成（Claude Code CLI に diff を渡す）
+            .child(
+                div()
+                    .id("git-ai-message")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(26.))
+                    .h(px(26.))
+                    .rounded(px(6.))
+                    .bg(bg2)
+                    .text_size(px(13.))
+                    .text_color(if self.git_busy { fg2 } else { fg1 })
+                    .when(!self.git_busy, |element| {
+                        element.cursor_pointer().hover(|style| style.bg(theme.bg3).text_color(fg0)).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.generate_commit_message(window, cx)),
+                        )
+                    })
+                    .child("✨")
+                    .tooltip(Tooltip::text("AI でメッセージ生成（claude）", theme.clone())),
+            )
             .child(
                 div()
                     .id("git-commit")
