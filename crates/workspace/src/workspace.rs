@@ -33,6 +33,8 @@ actions!(
         ProjectSearch,
         ThemeSelector,
         ToggleTerminal,
+        GoToDefinition,
+        TriggerCompletion,
         CloseTab,
         NewThread,
         // アクティブ (project, branch) を新しいウィンドウで開く（⌘⇧N。ウィンドウモデル §5）。
@@ -232,6 +234,104 @@ impl SearchState {
     }
 }
 
+// ── LSP 補完ポップアップ（M7） ──
+
+/// 補完の 1 候補。
+struct CompletionItem {
+    label: SharedString,
+    /// 挿入テキスト（textEdit.newText → insertText → label）。
+    insert_text: String,
+    detail: Option<SharedString>,
+    /// 種別の短い記号（fn/struct/let 等）。
+    kind: SharedString,
+}
+
+/// 補完ポップアップ（オーバーレイ）。エディタのキャレット直下に出す。フォーカスを取り上下/確定/中止を受ける。
+struct CompletionState {
+    items: Vec<CompletionItem>,
+    selected: usize,
+    position: Point<gpui::Pixels>,
+    focus: FocusHandle,
+}
+
+/// LSP の CompletionItemKind を短い記号へ（表示用）。
+fn completion_kind_label(kind: Option<u64>) -> &'static str {
+    // https://microsoft.github.io/language-server-protocol/specifications/specification-current/#completionItemKind
+    match kind {
+        Some(2) | Some(3) => "fn",   // Method / Function
+        Some(5) => "field",          // Field
+        Some(6) => "let",            // Variable
+        Some(7) | Some(22) => "type", // Class / Struct
+        Some(8) => "trait",          // Interface
+        Some(9) => "mod",            // Module
+        Some(14) => "kw",            // Keyword
+        Some(21) => "const",         // Constant
+        _ => "•",
+    }
+}
+
+/// LSP の completion 結果（Array or List）を候補列へ。
+fn parse_completion_items(value: &serde_json::Value) -> Vec<CompletionItem> {
+    let array = if value.is_array() {
+        value.as_array()
+    } else {
+        value.get("items").and_then(|items| items.as_array())
+    };
+    let Some(array) = array else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .filter_map(|item| {
+            let label = item.get("label")?.as_str()?.to_string();
+            // 挿入テキスト: textEdit.newText → insertText → label。
+            let insert_text = item
+                .get("textEdit")
+                .and_then(|edit| edit.get("newText"))
+                .and_then(|text| text.as_str())
+                .or_else(|| item.get("insertText").and_then(|text| text.as_str()))
+                .unwrap_or(&label)
+                .to_string();
+            let detail = item
+                .get("detail")
+                .and_then(|detail| detail.as_str())
+                .map(|detail| SharedString::from(detail.to_string()));
+            let kind = SharedString::from(completion_kind_label(
+                item.get("kind").and_then(serde_json::Value::as_u64),
+            ));
+            Some(CompletionItem { label: SharedString::from(label), insert_text, detail, kind })
+        })
+        .take(60)
+        .collect()
+}
+
+/// 定義ジャンプの結果（Location / Location[] / LocationLink[]）から (パス, 行, character) を取る。
+fn parse_definition(value: &serde_json::Value) -> Option<(PathBuf, u32, u32)> {
+    let location = if value.is_array() {
+        value.as_array()?.first()?
+    } else if value.is_object() {
+        value
+    } else {
+        return None;
+    };
+    // LocationLink（targetUri）優先、無ければ Location（uri）。
+    let (uri, range) = if let Some(uri) = location.get("targetUri").and_then(|uri| uri.as_str()) {
+        let range = location
+            .get("targetSelectionRange")
+            .or_else(|| location.get("targetRange"))?;
+        (uri, range)
+    } else {
+        let uri = location.get("uri")?.as_str()?;
+        let range = location.get("range")?;
+        (uri, range)
+    };
+    let path = lang::lsp::uri_to_path(uri)?;
+    let start = range.get("start")?;
+    let line = start.get("line")?.as_u64()? as u32;
+    let character = start.get("character")?.as_u64()? as u32;
+    Some((path, line, character))
+}
+
 // ── Workspace 本体 ──
 
 pub struct Workspace {
@@ -287,6 +387,8 @@ pub struct Workspace {
     // ファイル別診断（絶対パス → (行, 重大度)）。gutter/statusbar に使う。
     diagnostics: HashMap<PathBuf, Vec<(u32, lang::lsp::Severity)>>,
     _lsp_pump: Option<gpui::Task<()>>,
+    // 補完ポップアップ（開いていれば。Ctrl-Space で開く）。
+    completion: Option<CompletionState>,
 }
 
 impl Workspace {
@@ -401,12 +503,34 @@ impl Workspace {
             lsp_sent_version: u64::MAX,
             diagnostics: HashMap::new(),
             _lsp_pump: None,
+            completion: None,
         };
         workspace.refresh_git_status(); // ツリー/タブの git 色分け用
         // 開発用: SHIRUSHI_TERMINAL=1 で下ドックのターミナルを開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_TERMINAL").is_some() {
             workspace.show_bottom = true;
             workspace.ensure_terminal(cx);
+        }
+        // 開発用: SHIRUSHI_COMPLETION=1 で補完ポップアップ（サンプル候補）を開いた状態で撮る。
+        if std::env::var_os("SHIRUSHI_COMPLETION").is_some() {
+            let sample = |label: &str, detail: &str, kind: &str| CompletionItem {
+                label: SharedString::from(label.to_string()),
+                insert_text: label.to_string(),
+                detail: Some(SharedString::from(detail.to_string())),
+                kind: SharedString::from(kind.to_string()),
+            };
+            workspace.completion = Some(CompletionState {
+                items: vec![
+                    sample("push_str", "fn(&mut self, string: &str)", "fn"),
+                    sample("push", "fn(&mut self, ch: char)", "fn"),
+                    sample("PathBuf", "struct std::path::PathBuf", "type"),
+                    sample("parse", "fn(&self) -> Result<F>", "fn"),
+                    sample("println!", "macro", "•"),
+                ],
+                selected: 1,
+                position: point(px(380.), px(210.)),
+                focus: cx.focus_handle(),
+            });
         }
         workspace.update_agent_destination(cx); // 宛先チップにプロジェクト/ブランチを反映
         workspace.save_state(); // 起動時点で状態を書く（再起動復元のため）
@@ -692,6 +816,165 @@ impl Workspace {
         let warnings =
             entries.iter().filter(|(_, severity)| *severity == lang::lsp::Severity::Warning).count();
         (errors, warnings)
+    }
+
+    /// 定義ジャンプ（F12）。カーソル位置の定義を rust-analyzer に問い合わせて着地する。
+    fn go_to_definition(&mut self, _: &GoToDefinition, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
+        };
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
+        let info = {
+            let view = editor.read(cx);
+            view.buffer().path().filter(|path| is_rust(path)).map(|path| {
+                let (line, character) = view.cursor_lsp_position();
+                (path.to_path_buf(), line, character)
+            })
+        };
+        let Some((path, line, character)) = info else {
+            return;
+        };
+        let Some(lsp) = &self.lsp else {
+            return;
+        };
+        let receiver = lsp.definition(&path, line, character);
+        cx.spawn(async move |_workspace, cx| {
+            let Ok(Ok(value)) = receiver.await else {
+                return;
+            };
+            if let Some((target, target_line, target_character)) = parse_definition(&value) {
+                let _ = handle.update(cx, |workspace, window, cx| {
+                    workspace.jump_to_location(target, target_line, target_character, window, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 定義の着地: 別ファイルなら開き、対象位置を中央へ寄せる。
+    fn jump_to_location(
+        &mut self,
+        path: PathBuf,
+        line: u32,
+        character: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.read(cx).buffer().path().map(Path::to_path_buf));
+        if current.as_deref() != Some(path.as_path()) {
+            self.open_file(path, window, cx);
+        }
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |view, cx| view.reveal_lsp_position(line, character, cx));
+        }
+        cx.notify();
+    }
+
+    /// 補完（Ctrl-Space）。カーソル位置で候補を取得しポップアップを出す。
+    fn trigger_completion(&mut self, _: &TriggerCompletion, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
+        };
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
+        let info = {
+            let view = editor.read(cx);
+            let position = view.caret_window_position();
+            view.buffer().path().filter(|path| is_rust(path)).map(|path| {
+                let (line, character) = view.cursor_lsp_position();
+                (path.to_path_buf(), line, character, position)
+            })
+        };
+        let Some((path, line, character, position)) = info else {
+            return;
+        };
+        let Some(lsp) = &self.lsp else {
+            return;
+        };
+        let receiver = lsp.completion(&path, line, character);
+        cx.spawn(async move |_workspace, cx| {
+            let Ok(Ok(value)) = receiver.await else {
+                return;
+            };
+            let _ = handle.update(cx, |workspace, window, cx| {
+                workspace.show_completion(&value, position, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn show_completion(
+        &mut self,
+        value: &serde_json::Value,
+        position: Option<Point<gpui::Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let items = parse_completion_items(value);
+        if items.is_empty() {
+            return;
+        }
+        let focus = cx.focus_handle();
+        let position = position.unwrap_or_else(|| point(px(220.), px(180.)));
+        window.focus(&focus, cx);
+        self.completion = Some(CompletionState { items, selected: 0, position, focus });
+        cx.notify();
+    }
+
+    fn close_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion.take().is_none() {
+            return;
+        }
+        if let Some(editor) = &self.editor {
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    fn move_completion_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(state) = self.completion.as_mut() {
+            let len = state.items.len() as isize;
+            if len == 0 {
+                return;
+            }
+            state.selected = (state.selected as isize + delta).rem_euclid(len) as usize;
+            cx.notify();
+        }
+    }
+
+    fn confirm_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let insert = self
+            .completion
+            .as_ref()
+            .and_then(|state| state.items.get(state.selected))
+            .map(|item| item.insert_text.clone());
+        self.completion = None;
+        if let Some(editor) = self.editor.clone() {
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            if let Some(text) = insert {
+                editor.update(cx, |view, cx| view.apply_completion(&text, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_completion_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "escape" => self.close_completion(window, cx),
+            "up" => self.move_completion_selection(-1, cx),
+            "down" => self.move_completion_selection(1, cx),
+            "enter" | "tab" => self.confirm_completion(window, cx),
+            // ナビゲーション以外はポップアップを閉じてエディタへ戻す（v1: 絞り込みは再トリガ）。
+            _ => self.close_completion(window, cx),
+        }
     }
 
     fn switch_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -2310,6 +2593,100 @@ impl Workspace {
         )
     }
 
+    /// LSP 補完ポップアップ（Ctrl-Space）。キャレット直下に候補リスト。上下/Enter・Tab/Esc で操作。
+    fn render_completion(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let state = self.completion.as_ref()?;
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let focus = state.focus.clone();
+        let selected = state.selected;
+
+        let list = div().flex().flex_col().max_h(px(260.)).overflow_hidden().children(
+            state.items.iter().take(12).enumerate().map(|(row, item)| {
+                let is_selected = row == selected;
+                div()
+                    .id(("completion", row))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .when(is_selected, |element| element.bg(accent.alpha(0.16)))
+                    .hover(|style| style.bg(theme.bg3))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(34.))
+                            .text_size(px(10.))
+                            .text_color(accent)
+                            .child(item.kind.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(12.5))
+                            .text_color(if is_selected { theme.fg0 } else { theme.fg1 })
+                            .child(item.label.clone()),
+                    )
+                    .when_some(item.detail.clone(), |element, detail| {
+                        element.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(150.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child(detail),
+                        )
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            if let Some(state) = this.completion.as_mut() {
+                                state.selected = row;
+                            }
+                            this.confirm_completion(window, cx)
+                        }),
+                    )
+            }),
+        );
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .track_focus(&focus)
+                .on_key_down(cx.listener(Self::on_completion_key_down))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_completion(window, cx)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(state.position.x)
+                        .top(state.position.y + px(2.))
+                        .w(px(360.))
+                        .bg(theme.bg2)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(px(8.))
+                        .p(px(4.))
+                        .shadow(vec![
+                            gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
+                        ])
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(list),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// branch/worktree メニュー（titlebar の ⎇ クリックで開く）。ブランチ切替（in-place）と、
     /// **worktree を別ウィンドウで開く**（並行ブランチ×別窓×スレッド色＝当初ビジョン）。
     fn render_branch_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -3045,6 +3422,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_project_search))
             .on_action(cx.listener(Self::open_theme_selector))
             .on_action(cx.listener(Self::toggle_terminal))
+            .on_action(cx.listener(Self::go_to_definition))
+            .on_action(cx.listener(Self::trigger_completion))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_agent_thread))
             .on_action(cx.listener(Self::new_window))
@@ -3082,7 +3461,54 @@ impl Render for Workspace {
             // オーバーレイ（最前面）
             .when_some(self.picker.clone(), |this, picker| this.child(picker))
             .children(self.render_search_panel(cx))
+            .children(self.render_completion(cx))
             .children(self.render_branch_menu(cx))
             .children(self.render_explorer_context_menu(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_completion_items_handles_array_and_list() {
+        // Array 形式 + textEdit/insertText/label の優先順。
+        let array = json!([
+            { "label": "push_str", "kind": 2, "detail": "fn", "textEdit": { "newText": "push_str(${0})" } },
+            { "label": "len", "kind": 2, "insertText": "len()" },
+            { "label": "Vec", "kind": 22 }
+        ]);
+        let items = parse_completion_items(&array);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].label.as_ref(), "push_str");
+        assert_eq!(items[0].insert_text, "push_str(${0})"); // textEdit 優先
+        assert_eq!(items[0].kind.as_ref(), "fn");
+        assert_eq!(items[1].insert_text, "len()"); // insertText
+        assert_eq!(items[2].insert_text, "Vec"); // label fallback
+        assert_eq!(items[2].kind.as_ref(), "type"); // kind 22 = Struct
+
+        // List 形式（items フィールド）。
+        let list = json!({ "isIncomplete": false, "items": [ { "label": "x" } ] });
+        assert_eq!(parse_completion_items(&list).len(), 1);
+    }
+
+    #[test]
+    fn parse_definition_handles_location_shapes() {
+        // 単一 Location
+        let location = json!({ "uri": "file:///x/lib.rs", "range": { "start": { "line": 10, "character": 4 }, "end": { "line": 10, "character": 9 } } });
+        assert_eq!(
+            parse_definition(&location),
+            Some((PathBuf::from("/x/lib.rs"), 10, 4))
+        );
+        // Location[]（先頭）
+        let array = json!([location.clone()]);
+        assert_eq!(parse_definition(&array), Some((PathBuf::from("/x/lib.rs"), 10, 4)));
+        // LocationLink[]（targetUri + targetSelectionRange）
+        let link = json!([{ "targetUri": "file:///y/m.rs", "targetSelectionRange": { "start": { "line": 3, "character": 0 }, "end": { "line": 3, "character": 2 } } }]);
+        assert_eq!(parse_definition(&link), Some((PathBuf::from("/y/m.rs"), 3, 0)));
+        // null
+        assert_eq!(parse_definition(&serde_json::Value::Null), None);
     }
 }

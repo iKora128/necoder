@@ -245,6 +245,56 @@ impl EditorView {
         cx.notify();
     }
 
+    /// 主キャレットの LSP 位置 `(line, character)`（character は行頭からの **UTF-16 code unit** 数）。
+    /// 補完/hover/定義の要求に渡す。
+    pub fn cursor_lsp_position(&self) -> (u32, u32) {
+        let head = self.primary().head;
+        let snapshot = self.buffer.snapshot();
+        let point = snapshot.byte_to_point(head);
+        let line_start = snapshot.point_to_byte(BufferPoint::new(point.row, 0));
+        let utf16_line_start = self.buffer.byte_to_utf16(line_start);
+        let utf16_head = self.buffer.byte_to_utf16(head);
+        (point.row as u32, (utf16_head - utf16_line_start) as u32)
+    }
+
+    /// LSP 位置 `(line, character〔UTF-16〕)` へジャンプする（定義ジャンプの着地）。
+    /// UTF-16 → byte 列に直して [`Self::reveal_position`] に委譲する。
+    pub fn reveal_lsp_position(&mut self, line: u32, character: u32, cx: &mut Context<Self>) {
+        let snapshot = self.buffer.snapshot();
+        let row = (line as usize).min(snapshot.line_count().saturating_sub(1));
+        let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0));
+        let utf16_line_start = self.buffer.byte_to_utf16(line_start);
+        let target = self.buffer.utf16_to_byte(utf16_line_start + character as usize);
+        let column = target.saturating_sub(line_start);
+        self.reveal_position(row, column, cx);
+    }
+
+    /// 主キャレットのウィンドウ座標（下端左）。補完ポップアップの表示位置に使う。直近 paint 由来。
+    pub fn caret_window_position(&self) -> Option<Point<Pixels>> {
+        self.caret_bounds.map(|bounds| point(bounds.left(), bounds.bottom()))
+    }
+
+    /// 補完を適用する（カーソル直前の識別子プレフィクスを `text` で置換）。
+    pub fn apply_completion(&mut self, text: &str, cx: &mut Context<Self>) {
+        let head = self.primary().head;
+        let all = self.buffer.text();
+        let bytes = all.as_bytes();
+        // カーソル前の識別子文字（ASCII 英数 or `_`）を遡って prefix の開始を求める。
+        let mut start = head;
+        while start > 0 {
+            let previous = bytes[start - 1];
+            if previous.is_ascii_alphanumeric() || previous == b'_' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        self.buffer.edit(&[start..head], text);
+        let new_cursor = start + text.len();
+        self.buffer.set_selections(vec![Selection::cursor(new_cursor)]);
+        self.after_edit(cx);
+    }
+
     /// gutter diff（HEAD vs 現在バッファ）を再計算する。編集で version が変わるたび prepaint から呼ぶ。
     /// デバウンス 250ms・git 実行は背景スレッド・連続編集は世代番号で 1 回に畳む（idle 0% を守る）。
     /// plain / 無題ファイルは diff を持たない。

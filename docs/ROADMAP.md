@@ -65,8 +65,8 @@
 ## M7 — 言語知能
 
 - [x] tree-sitter ハイライト（Rust）— 2026-07-12、`crates/lang`（tree-sitter 0.25 + tree-sitter-rust）。`HighlightKind`→theme の syn-* に接続、editor_view で行ごとに色 run 生成（編集で再解析・512KB 超はスキップ）。3 test。実 .rs を無クラッシュで開ける。**色の目視は要実機**（offscreen はグリフ非表示）。インクリメンタル解析は後続
-- [ ] LSP: rust-analyzer（補完・診断・ホバー・定義ジャンプ・フォーマット）← **診断は達成**（2026-07-13）。`lang::lsp` に最小 LSP クライアント（JSON-RPC 封筒は自前・型は手書き・transport は std::process + 読取スレッド + futures channel）。initialize→initialized→didOpen→didChange の lifecycle。**publishDiagnostics を gutter 下線（error=赤/warn=琥珀）+ statusbar 件数（✗N ▲N）にライブ反映**。`~/.rustup/toolchains/*/bin/rust-analyzer` の実体を起動（cargo プロキシは cwd 依存で失敗）。**補完/hover/定義は transport 準備済み・UI 配線が残**（`completion`/`hover`/`definition` メソッドあり）。live 検証: `/tmp/lsp-test` の型/構文エラーで赤下線 + ✗4 を目視
-- [ ] 受入: この repo の Rust を補完と診断つきで書く ← ハイライト ✓・**診断 ✓**（live 確認）・補完は UI 残
+- [x] LSP: rust-analyzer（**診断・補完・定義ジャンプ**。hover/format は後続）— 2026-07-13。`lang::lsp` に最小 LSP クライアント（JSON-RPC 封筒は自前・型は手書き・transport は std::process + 読取スレッド + futures channel）。initialize→initialized→didOpen→didChange の lifecycle。①**診断**=publishDiagnostics を gutter 下線（error=赤/warn=琥珀）+ statusbar 件数（✗N ▲N）にライブ反映（live 確認）。②**補完**（Ctrl-Space）=キャレット直下ポップアップ（種別バッジ+detail・上下/Enter・Tab/Esc・textEdit→insertText→label で挿入・識別子プレフィクス置換）。③**定義ジャンプ**（F12）=Location/LocationLink を解析→別ファイルなら開いて中央へ。位置は byte↔UTF-16 変換。`~/.rustup/toolchains/*/bin/rust-analyzer` 実体を起動。parser の unit test + 実 ra の handshake/診断 ignored test。offscreen で診断赤下線・補完ポップアップを目視
+- [x] 受入: この repo の Rust を補完と診断つきで書く — 2026-07-13 概ね達成。ハイライト ✓・診断 ✓（live）・補完 ✓（ポップアップ+挿入）・定義ジャンプ ✓。**補完/定義の live round-trip 体感は人の手番**（transport・parser・UI は各々検証済み）
 
 ## M8 — Git とターミナル、ブランチ横断の完成
 

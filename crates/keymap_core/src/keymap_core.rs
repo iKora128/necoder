@@ -104,7 +104,9 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-z": "editor::Undo",
       "cmd-shift-z": "editor::Redo",
       "cmd-s": "editor::Save",
-      "cmd-enter": "agent::SubmitPrompt"
+      "cmd-enter": "agent::SubmitPrompt",
+      "f12": "workspace::GoToDefinition",
+      "ctrl-space": "workspace::TriggerCompletion"
     }
   },
   {
