@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use terminal_view::TerminalView;
 use theme_core::{Theme, ThemeSource, project_color};
 use ui::Tooltip;
 use ui::{Picker, PickerEvent, PickerItem};
@@ -30,6 +31,7 @@ actions!(
         ProjectSwitcher,
         ProjectSearch,
         ThemeSelector,
+        ToggleTerminal,
         CloseTab,
         NewThread,
         // アクティブ (project, branch) を新しいウィンドウで開く（⌘⇧N。ウィンドウモデル §5）。
@@ -70,6 +72,7 @@ const TITLEBAR_HEIGHT: f32 = 38.0;
 const TABSTRIP_HEIGHT: f32 = 34.0;
 const BREADCRUMB_HEIGHT: f32 = 26.0;
 const STATUSBAR_HEIGHT: f32 = 26.0;
+const BOTTOM_DOCK_HEIGHT: f32 = 240.0; // 下ドック（ターミナル）の高さ
 /// macOS のネイティブ信号機（appears_transparent 時も残る）を避けるための左余白。
 const TRAFFIC_LIGHT_INSET: f32 = 78.0;
 
@@ -272,6 +275,8 @@ pub struct Workspace {
     git_status: HashMap<PathBuf, StatusKind>,
     // branch/worktree メニュー（titlebar の ⎇ クリックで開く。開いていれば出す位置）。
     branch_menu: Option<Point<gpui::Pixels>>,
+    // 下ドックの統合ターミナル（初回表示で遅延生成。show_bottom で出す）。
+    terminal: Option<Entity<TerminalView>>,
 }
 
 impl Workspace {
@@ -379,8 +384,14 @@ impl Workspace {
             git_status: HashMap::new(),
             // 開発用: SHIRUSHI_BRANCH_MENU=1 で branch/worktree メニューを開いた状態で撮る。
             branch_menu: std::env::var_os("SHIRUSHI_BRANCH_MENU").map(|_| point(px(90.), px(44.))),
+            terminal: None,
         };
         workspace.refresh_git_status(); // ツリー/タブの git 色分け用
+        // 開発用: SHIRUSHI_TERMINAL=1 で下ドックのターミナルを開いた状態で撮る。
+        if std::env::var_os("SHIRUSHI_TERMINAL").is_some() {
+            workspace.show_bottom = true;
+            workspace.ensure_terminal(cx);
+        }
         workspace.update_agent_destination(cx); // 宛先チップにプロジェクト/ブランチを反映
         workspace.save_state(); // 起動時点で状態を書く（再起動復元のため）
         workspace
@@ -640,6 +651,31 @@ impl Workspace {
         cx.notify();
     }
 
+    // ── 下ドックのターミナル（M8） ──
+
+    /// ターミナルを遅延生成する（初回表示時。cwd = アクティブプロジェクトルート）。
+    fn ensure_terminal(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        if let Some(terminal) = &self.terminal {
+            return terminal.clone();
+        }
+        let cwd = self.active_slot().map(|slot| slot.worktree.root().to_path_buf());
+        let theme = self.theme.clone();
+        let terminal = cx.new(|cx| TerminalView::new(cwd, theme, cx));
+        self.terminal = Some(terminal.clone());
+        terminal
+    }
+
+    /// 下ドック（ターミナル）を開閉する。開くときは生成 + フォーカス（キー入力を受ける）。
+    fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_bottom = !self.show_bottom;
+        if self.show_bottom {
+            let terminal = self.ensure_terminal(cx);
+            let handle = terminal.read(cx).focus_handle();
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
     /// アクティブタブ（＝現在のエディタ）を閉じる。
     fn close_active_editor(&mut self, cx: &mut Context<Self>) {
         self.editor = None;
@@ -874,6 +910,9 @@ impl Workspace {
         self.agent_panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
         if let Some(picker) = &self.picker {
             picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
+        }
+        if let Some(terminal) = &self.terminal {
+            terminal.update(cx, |terminal, cx| terminal.set_theme(theme.clone(), cx));
         }
         cx.notify();
     }
@@ -2423,9 +2462,14 @@ impl Workspace {
             .tooltip(Tooltip::text(label, theme.clone()))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
+                cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation(); // titlebar ドラッグを起こさない
-                    this.toggle_dock(dock, cx)
+                    // 下ドックはターミナル生成 + フォーカスを伴うので専用ハンドラへ。
+                    if dock == Dock::Bottom {
+                        this.toggle_terminal(&ToggleTerminal, window, cx);
+                    } else {
+                        this.toggle_dock(dock, cx);
+                    }
                 }),
             )
     }
@@ -2528,18 +2572,82 @@ impl Workspace {
 
     fn render_center(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let center = div().flex_1().flex().flex_col().min_w_0().bg(theme.bg1);
-        match self.editor.clone() {
-            Some(editor) => center
+        let content = match self.editor.clone() {
+            Some(editor) => div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .min_h_0()
                 .child(self.render_tabstrip(&editor, cx))
                 .child(self.render_breadcrumb(&editor, cx))
                 .child(div().flex_1().overflow_hidden().child(editor)),
-            None => center
+            None => div()
+                .flex_1()
+                .flex()
                 .items_center()
                 .justify_center()
                 .text_color(theme.fg2)
                 .child(SharedString::from(i18n::t!("editor.empty_hint"))),
-        }
+        };
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .bg(theme.bg1)
+            .child(content)
+            // 下ドック（ターミナル）はエディタ列の下に積む（サイドドックには被らない）。
+            .when(self.show_bottom, |element| element.child(self.render_bottom_dock(cx)))
+    }
+
+    /// 下ドック（統合ターミナル・M8）。ヘッダ（タブ + 閉じる）+ ターミナル本体。
+    fn render_bottom_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme.clone();
+        let header = div()
+            .flex()
+            .items_center()
+            .h(px(28.))
+            .px(px(10.))
+            .flex_none()
+            .bg(theme.bg0)
+            .border_t_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg1)
+                    .child("ターミナル"),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("term-close")
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg0))
+                    .child("×")
+                    .tooltip(Tooltip::text("ターミナルを閉じる  ⌘J", theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_terminal(&ToggleTerminal, window, cx)
+                        }),
+                    ),
+            );
+        let body = match &self.terminal {
+            Some(terminal) => div().flex_1().min_h_0().overflow_hidden().child(terminal.clone()),
+            None => div().flex_1(),
+        };
+        div()
+            .h(px(BOTTOM_DOCK_HEIGHT))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(theme.bg1)
+            .child(header)
+            .child(body)
     }
 
     fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2709,6 +2817,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_project_switcher))
             .on_action(cx.listener(Self::open_project_search))
             .on_action(cx.listener(Self::open_theme_selector))
+            .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_agent_thread))
             .on_action(cx.listener(Self::new_window))

@@ -310,3 +310,14 @@
 - 学び/罠: `imara_diff::Sink::process_change(before,after)` の after=現在バッファ行域＝gutter キー。CRLF は diff 前に LF 正規化（さもないと全行 Modified）。git `rev-parse --show-toplevel` は realpath 返す→テストは canonicalize で比較。editor_view→project 依存を追加（view→model は正方向・lang 依存と同型）
 - 結果: 警告 0・**test 全 suite ok**。offscreen で ①ツリー Cargo.toml=M 琥珀 + gutter 緑バー ②branch メニュー「● main」+ ⧉ を目視
 - 次: Phase C = 分割ペイン + 下ドック + 統合ターミナル（alacritty_terminal）
+
+## 2026-07-13 —（続き）Phase C 前半: 統合ターミナル + 下ドック（M8）
+- 新 crate **`terminal_view`**（crates.io `alacritty_terminal 0.26` = Zed fork 0.26.1-dev とほぼ同一 API）。移植ガイド通り。
+- **設計の肝**: alacritty の `EventLoop::spawn()` が**読取スレッド + vte parser**（自前で書かない）。PTY 出力→parse→`Term`(FairMutex)→`EventListener::send_event(Wakeup)`→`UnboundedSender`→**pump（`cx.spawn`）が `next().await`**→`sync`（term.lock→renderable_content スナップショット→notify）。**タイマー無し＝idle 0%**。カーソル blink は捨てた（静止ブロック）
+- **サイズ**: `TerminalSize`(impl Dimensions)。prepaint で 'M' を shape してセル幅、bounds/セル寸から行列算出→変化時のみ `term.resize` + `Msg::Resize`（PTY winsize）
+- **描画**: custom Element。①bg全面 ②非デフォ bg セルの quad ③各セル `shape_line(c,size,run,Some(cell_width))`（等幅強制）④ブロックカーソル（focus=塗り/非focus=outline・下地文字は bg 色で再描画）。色=16色 ANSI 固定パレット + 256(cube/grayscale) + truecolor、既定 fg/bg はテーマ。`Flags::INVERSE/BOLD/ITALIC/WIDE_CHAR_SPACER/HIDDEN` 対応
+- **入力**: v1 は `on_key_down` 一本化（IME 前編集は捨てた）。`keystroke_to_bytes`＝Ctrl+英字→制御バイト・Enter/BS/Tab/Esc・矢印（APP_CURSOR で `\x1bO`）・Home/End/Del/PgUp/Dn・印字は key_char。⌘系は素通し（None）
+- **workspace 配線**: `terminal: Option<Entity<TerminalView>>` 遅延生成（初回表示・cwd=プロジェクトルート）。`⌘J` / 下ドックボタン / × で開閉（`toggle_terminal`＝生成+フォーカス）。`render_center` を flex_col 化しエディタ列の下に積む（サイドドックに被らない）。`apply_theme` がターミナルにも波及。Drop で `Msg::Shutdown`
+- 学び/罠: `gpui::outline(bounds, color, BorderStyle)` は3引数。`event_loop.spawn()` の JoinHandle は detach（型名 `State` を書かずに済む）。`tty::Options { .., ..Default::default() }` でフォーク差分フィールドを吸収。struct リテラルは記述順評価＝`exited: notifier.is_none()` は `notifier,` move の前にローカルへ
+- 結果: 警告 0・**test 32 suite ok**。offscreen で **実シェル**（`Last login… / daichi@… shirushi % / ブロックカーソル`）を目視＝PTY・グリッド・cwd 全て動作
+- 次: 分割ペイン（M3 残り）→ Phase D = LSP（rust-analyzer・M7）→ MCP サーバ（#21）

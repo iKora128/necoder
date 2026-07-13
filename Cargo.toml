@@ -34,6 +34,9 @@ blocking = "1"
 futures = "0.3"
 # 自前ヘッドレススクショ用（gpui の render_to_image が image::RgbaImage を返す）
 image = "0.25"
+# M8 統合ターミナル。crates.io 0.26 は Zed fork(0.26.1-dev)とほぼ同一 API
+alacritty_terminal = "0.26"
+libc = "0.2"
 
 # 自作 crate（作る順は docs/ARCHITECTURE.md §2）
 theme_core = { path = "crates/theme_core" }
@@ -49,4 +52,5 @@ lang = { path = "crates/lang" }
 acp_client = { path = "crates/acp_client" }
 agent_panel = { path = "crates/agent_panel" }
 ui = { path = "crates/ui" }
+terminal_view = { path = "crates/terminal_view" }
 workspace = { path = "crates/workspace" }

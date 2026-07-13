@@ -119,6 +119,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-o": "workspace::ProjectSwitcher",
       "cmd-shift-f": "workspace::ProjectSearch",
       "cmd-shift-t": "workspace::ThemeSelector",
+      "cmd-j": "workspace::ToggleTerminal",
       "cmd-w": "workspace::CloseTab",
       "cmd-shift-a": "workspace::NewThread",
       "cmd-shift-n": "workspace::NewWindow",
