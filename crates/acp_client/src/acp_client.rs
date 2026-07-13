@@ -12,8 +12,10 @@ use acp::schema::ProtocolVersion;
 use anyhow::{Context as _, Result};
 use futures::StreamExt;
 use futures::channel::mpsc;
+use host::{CommandSpec, Host, LocalHost};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 /// 権限リクエストの選択肢の種類（UI のスタイル分け用。ACP `PermissionOptionKind` を簡約）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +212,37 @@ impl AgentKind {
         args.extend(extra);
         Some(AgentCommand { path: npx, args, cwd })
     }
+
+    /// 指定 host 上で agent を解決する。remote の認証情報は remote 側のものだけを使う。
+    pub fn command_on(&self, host: &dyn Host, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
+        let cwd = cwd.into();
+        if !host.is_remote() {
+            return self.command(cwd);
+        }
+        let resolve = |binary: &str| {
+            let output = host
+                .run_command(&CommandSpec::new("sh", &cwd).args([
+                    "-lc".to_string(),
+                    format!("command -v -- {}", shell_word(binary)),
+                ]))
+                .ok()?;
+            output.success().then(|| {
+                PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            })
+        };
+        let extra: Vec<String> = self.extra_args.iter().map(|arg| arg.to_string()).collect();
+        if let Some(path) = resolve(self.bin) {
+            return Some(AgentCommand { path, args: extra, cwd });
+        }
+        let npx = resolve("npx")?;
+        let mut args = vec!["-y".to_string(), self.package.to_string()];
+        args.extend(extra);
+        Some(AgentCommand { path: npx, args, cwd })
+    }
+}
+
+fn shell_word(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Zed の npx キャッシュから指定 `.bin/<name>` を探す（macOS）。node シェバングなので node が PATH に要る。
@@ -367,20 +400,26 @@ pub async fn prompt_once(command: &AgentCommand, prompt: &str) -> Result<String>
 /// （同一スレッド内は文脈が続く）。ターン境界は `StopReason` = [`AgentEvent::TurnEnded`]。
 pub async fn run_session(
     command: AgentCommand,
+    command_rx: mpsc::UnboundedReceiver<SessionCommand>,
+    event_tx: mpsc::UnboundedSender<AgentEvent>,
+) -> Result<()> {
+    run_session_on(LocalHost::shared(), command, command_rx, event_tx).await
+}
+
+/// 指定 host 上の常駐 ACP セッション。remote filesystem と agent process を同居させる。
+pub async fn run_session_on(
+    host: Arc<dyn Host>,
+    command: AgentCommand,
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
-    let mut child = Command::new(&command.path)
-        .args(&command.args)
-        .current_dir(&command.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("claude-agent-acp を起動できない: {}", command.path.display()))?;
-
-    let stdin = child.stdin.take().context("子プロセスの stdin が無い")?;
-    let stdout = child.stdout.take().context("子プロセスの stdout が無い")?;
+    let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
+        .args(command.args.clone());
+    let mut process = host
+        .spawn_process(&spec)
+        .with_context(|| format!("ACP agent を起動できない: {}", command.path.display()))?;
+    let stdin = process.take_stdin()?;
+    let stdout = process.take_stdout()?;
     let transport = acp::ByteStreams::new(blocking::Unblock::new(stdin), blocking::Unblock::new(stdout));
 
     let cwd = command.cwd.clone();
@@ -548,10 +587,7 @@ pub async fn run_session(
         .await
         .context("ACP セッションが異常終了");
 
-    let _killed = child.kill();
-    if let Err(error) = child.wait() {
-        eprintln!("claude-agent-acp の回収に失敗: {error}");
-    }
+    drop(process);
     outcome
 }
 

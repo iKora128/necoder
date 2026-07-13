@@ -309,6 +309,7 @@ impl EditorView {
         self.diff_gen = self.diff_gen.wrapping_add(1);
         let generation = self.diff_gen;
         let text = self.buffer.text();
+        let host = self.buffer.host().clone();
         cx.spawn(async move |editor, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(250))
@@ -321,7 +322,7 @@ impl EditorView {
             // git 呼び出し（ブロッキング）は背景スレッドで実行。
             let hunks = cx
                 .background_executor()
-                .spawn(async move { project::buffer_diff(&path, &text) })
+                .spawn(async move { project::buffer_diff_on(host.as_ref(), &path, &text) })
                 .await;
             let _ = editor.update(cx, |editor, cx| {
                 if editor.diff_gen == generation {

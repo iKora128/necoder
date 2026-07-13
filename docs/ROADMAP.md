@@ -78,3 +78,23 @@
 ---
 
 以降（v1 後半〜later）: FEATURES.md のタグに従う（拡張モデル ADR・minimap・multibuffer・vim・追加言語パック配布 等）。
+
+## M9 — Remote SSH（「場所が変わっても同じ Shirushi」）
+
+- [x] local の FS/process/Git/search/save を `Host` 境界へ移し、既存 unit test を維持する
+- [x] versioned length-frame RPC + raw body + frame 上限 + multiplex worker + protocol test
+- [x] `shirushi-remote-server` + system OpenSSH + project root scope + conflict-safe atomic save
+- [x] `ssh://[user@]host[:port]/path` で tree/open/edit/search/Git を remote Host へ接続する
+- [x] LSP・PTY・ACP を remote process/ControlMaster session へ移す（task 機能自体は未実装）
+- [x] ControlMaster・server version/OS/arch 検出・同一 target の versioned binary 自動配備
+- [x] daemon/proxy 再接続・5秒 heartbeat・master 再生成・非冪等 request の無条件再送禁止
+- [x] protocol/fs/process concurrency・proxy 再接続・外部編集競合の統合 test
+- [x] SSH URI の状態復元と status bar の接続先表示
+- [ ] local/remote の latency・CPU・memory benchmark と性能予算の自動検証
+- [ ] Linux x86_64/aarch64 musl artifact・署名/checksum・古い server cleanup・GUI askpass
+- [ ] dirty buffer crash backup・watch subscription/event/cancel・再接続後の LSP/PTY handle 再同期
+- [ ] sleep/VPN断/ControlMaster kill/server kill/巨大 tree の実ホスト障害注入 test
+- [ ] Remote Projects UI・SSH config picker・構造化接続ログ・retry/cancel・localhost port forwarding
+- [ ] 受入: remote Linux で編集/Git/LSP/terminal/agent を一日使い、切断復帰しても未保存変更を失わない
+
+設計と根拠: [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md)。

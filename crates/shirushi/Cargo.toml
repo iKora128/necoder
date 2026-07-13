@@ -13,6 +13,7 @@ default-run = "shirushi" # `cargo run -p shirushi` は本体を実行（hello �
 screenshot = ["dep:image", "gpui/test-support", "gpui_platform/test-support"]
 
 [dependencies]
+anyhow.workspace = true
 gpui.workspace = true
 # font-kit = macOS のグリフ（文字）ラスタライズ。**これが無いと四角は出るが文字が全く描画されない**
 # （gpui の example も font-kit 付きで動いている）。
@@ -24,6 +25,7 @@ keymap_core.workspace = true
 settings_core.workspace = true
 settings.workspace = true
 project.workspace = true
+host.workspace = true
 search.workspace = true
 serde_json.workspace = true
 image = { workspace = true, optional = true }

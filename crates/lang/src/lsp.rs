@@ -9,13 +9,15 @@
 //! - **補完/hover/定義**は要求で、位置は UTF-16 code unit（[`Position`]）。上位が byte↔UTF-16 を変換して渡す。
 
 use anyhow::{Context as _, Result};
+#[cfg(test)]
+use futures::StreamExt as _;
 use futures::channel::{mpsc, oneshot};
+use host::{CommandSpec, Host, HostProcess, LocalHost};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -26,6 +28,7 @@ pub type ServerNotification = (String, Value);
 
 type ResponseResult = Result<Value, RpcError>;
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<ResponseResult>>>>;
+type ProcessStdin = Arc<Mutex<Box<dyn Write + Send>>>;
 
 /// JSON-RPC エラー。
 #[derive(Debug, Clone, Deserialize)]
@@ -41,40 +44,57 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// 1 プロジェクトにつき 1 つの言語サーバ接続。
 pub struct LspClient {
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: ProcessStdin,
     next_id: AtomicI64,
     pending: Pending,
-    child: Child,
-}
-
-impl Drop for LspClient {
-    fn drop(&mut self) {
-        // プロセスを止める（reader スレッドは EOF で終了）。
-        let _ = self.child.kill();
-    }
+    client_process_id: Option<u32>,
+    _process: HostProcess,
 }
 
 impl LspClient {
-    /// サーバ（例: rust-analyzer）を `root` で起動する。通知の受信チャネルも返す。
-    pub fn new(server: &Path, root: &Path) -> Result<(LspClient, mpsc::UnboundedReceiver<ServerNotification>)> {
-        let mut child = Command::new(server)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null()) // ra の WARN 等でユーザーの端末を汚さない
-            .spawn()
+    /// サーバ（例: rust-analyzer / typescript-language-server --stdio）を `root` で起動する。
+    /// `args` はサーバ固有の起動引数（多くは空。stdio 系は `["--stdio"]`）。通知の受信チャネルも返す。
+    pub fn new(
+        server: &Path,
+        args: &[&str],
+        root: &Path,
+    ) -> Result<(LspClient, mpsc::UnboundedReceiver<ServerNotification>)> {
+        Self::new_on(LocalHost::shared(), server, args, root)
+    }
+
+    /// 指定 host 上で LSP を起動する。remote host は ControlMaster の別 session を使う。
+    pub fn new_on(
+        host: Arc<dyn Host>,
+        server: &Path,
+        args: &[&str],
+        root: &Path,
+    ) -> Result<(LspClient, mpsc::UnboundedReceiver<ServerNotification>)> {
+        // LSP の processId は server と同じ OS 上の client PID。remote server へ local PID を渡すと
+        // 無関係な remote process を監視し得るため null にする。
+        let client_process_id = (!host.is_remote()).then(std::process::id);
+        let spec = CommandSpec::new(server.to_string_lossy(), root).args(args.iter().copied());
+        let mut process = host
+            .spawn_process(&spec)
             .with_context(|| format!("言語サーバの起動に失敗: {}", server.display()))?;
-        let stdin = child.stdin.take().context("stdin を取得できない")?;
-        let stdout = child.stdout.take().context("stdout を取得できない")?;
+        let stdin = process.take_stdin()?;
+        let stdout = process.take_stdout()?;
         let stdin = Arc::new(Mutex::new(stdin));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (notification_tx, notification_rx) = mpsc::unbounded();
 
         let reader_pending = pending.clone();
         let reader_stdin = stdin.clone();
-        std::thread::spawn(move || reader_loop(stdout, reader_pending, notification_tx, reader_stdin));
+        std::thread::spawn(move || {
+            reader_loop(stdout, reader_pending, notification_tx, reader_stdin)
+        });
 
-        let client = LspClient { stdin, next_id: AtomicI64::new(1), pending, child };
+        let client = LspClient {
+            stdin,
+            next_id: AtomicI64::new(1),
+            pending,
+            client_process_id,
+            _process: process,
+        };
         Ok((client, notification_rx))
     }
 
@@ -86,7 +106,10 @@ impl LspClient {
         let message = json!({ "jsonrpc": JSONRPC, "id": id, "method": method, "params": params });
         if let Err(error) = self.write_message(&message) {
             if let Some(sender) = lock(&self.pending).remove(&id) {
-                let _ = sender.send(Err(RpcError { code: -1, message: format!("送信失敗: {error}") }));
+                let _ = sender.send(Err(RpcError {
+                    code: -1,
+                    message: format!("送信失敗: {error}"),
+                }));
             }
         }
         receiver
@@ -110,7 +133,10 @@ impl LspClient {
     /// initialize 要求だけ送って receiver を返す（GPUI 用: `&self` を await 跨ぎで持たない）。
     /// 応答が来たら [`Self::initialized`] を呼ぶこと。
     pub fn initialize_request(&self, root: &Path) -> oneshot::Receiver<ResponseResult> {
-        self.request("initialize", initialize_params(root))
+        self.request(
+            "initialize",
+            initialize_params(root, self.client_process_id),
+        )
     }
 
     /// initialized 通知（initialize 応答後に 1 度だけ送る）。
@@ -120,8 +146,15 @@ impl LspClient {
 
     /// initialize → capabilities 受領 → initialized 通知、まで（同期 await 版。テスト/単体用）。
     pub async fn initialize(&self, root: &Path) -> Result<Value> {
-        let outcome = self.request("initialize", initialize_params(root)).await.context("initialize の応答なし")?;
-        let result = outcome.map_err(|error| anyhow::anyhow!("initialize エラー: {}", error.message))?;
+        let outcome = self
+            .request(
+                "initialize",
+                initialize_params(root, self.client_process_id),
+            )
+            .await
+            .context("initialize の応答なし")?;
+        let result =
+            outcome.map_err(|error| anyhow::anyhow!("initialize エラー: {}", error.message))?;
         self.notify("initialized", json!({}));
         Ok(result)
     }
@@ -148,7 +181,12 @@ impl LspClient {
     }
 
     /// 補完要求（位置は UTF-16）。結果 Value は `CompletionResponse`（Array or List）。
-    pub fn completion(&self, path: &Path, line: u32, character: u32) -> oneshot::Receiver<ResponseResult> {
+    pub fn completion(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> oneshot::Receiver<ResponseResult> {
         self.request(
             "textDocument/completion",
             json!({
@@ -159,7 +197,12 @@ impl LspClient {
     }
 
     /// ホバー要求。
-    pub fn hover(&self, path: &Path, line: u32, character: u32) -> oneshot::Receiver<ResponseResult> {
+    pub fn hover(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> oneshot::Receiver<ResponseResult> {
         self.request(
             "textDocument/hover",
             json!({
@@ -170,7 +213,12 @@ impl LspClient {
     }
 
     /// 定義ジャンプ要求。結果は Location / Location[] / LocationLink[]。
-    pub fn definition(&self, path: &Path, line: u32, character: u32) -> oneshot::Receiver<ResponseResult> {
+    pub fn definition(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> oneshot::Receiver<ResponseResult> {
         self.request(
             "textDocument/definition",
             json!({
@@ -184,10 +232,10 @@ impl LspClient {
 // ── 読取スレッド（Content-Length フレーム → 相関/通知） ──
 
 fn reader_loop(
-    stdout: ChildStdout,
+    stdout: Box<dyn Read + Send>,
     pending: Pending,
     notification_tx: mpsc::UnboundedSender<ServerNotification>,
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: ProcessStdin,
 ) {
     let mut reader = BufReader::new(stdout);
     loop {
@@ -225,7 +273,7 @@ fn dispatch(
     value: Value,
     pending: &Pending,
     notification_tx: &mpsc::UnboundedSender<ServerNotification>,
-    stdin: &Arc<Mutex<ChildStdin>>,
+    stdin: &ProcessStdin,
 ) {
     let id = value.get("id").and_then(Value::as_i64);
     let has_method = value.get("method").is_some();
@@ -234,8 +282,10 @@ fn dispatch(
         (Some(id), false) => {
             if let Some(sender) = lock(pending).remove(&id) {
                 let result = if let Some(error) = value.get("error") {
-                    Err(serde_json::from_value(error.clone())
-                        .unwrap_or(RpcError { code: 0, message: "不明なエラー".to_string() }))
+                    Err(serde_json::from_value(error.clone()).unwrap_or(RpcError {
+                        code: 0,
+                        message: "不明なエラー".to_string(),
+                    }))
                 } else {
                     Ok(value.get("result").cloned().unwrap_or(Value::Null))
                 };
@@ -317,13 +367,13 @@ impl Severity {
 }
 
 /// 最小の `InitializeParams`（UTF-16 明示・補完/hover の contentFormat）。
-fn initialize_params(root: &Path) -> Value {
+fn initialize_params(root: &Path, client_process_id: Option<u32>) -> Value {
     let name = root
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
     json!({
-        "processId": std::process::id(),
+        "processId": client_process_id,
         "rootUri": path_to_uri(root),
         "capabilities": {
             // UTF-16 を明示（正しさの肝）。受信専用の診断は capability 不要。
@@ -337,14 +387,19 @@ fn initialize_params(root: &Path) -> Value {
     })
 }
 
-/// `file://…` URI → パス（v1: percent-decode はしない）。
+/// `file://…` URI → パス。LSP URI の percent encoding を正しく戻す。
 pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    uri.strip_prefix("file://").map(PathBuf::from)
+    let uri = url::Url::parse(uri).ok()?;
+    (uri.scheme() == "file")
+        .then(|| uri.to_file_path().ok())
+        .flatten()
 }
 
 /// パス → `file://…` URI。
 pub fn path_to_uri(path: &Path) -> String {
-    format!("file://{}", path.display())
+    url::Url::from_file_path(path)
+        .map(|uri| uri.to_string())
+        .unwrap_or_else(|_| format!("file://{}", path.display()))
 }
 
 #[cfg(test)]
@@ -357,6 +412,17 @@ mod tests {
         let uri = path_to_uri(path);
         assert_eq!(uri, "file:///Users/x/main.rs");
         assert_eq!(uri_to_path(&uri), Some(path.to_path_buf()));
+
+        let path_with_space = Path::new("/Users/x/project name/main.rs");
+        let uri = path_to_uri(path_with_space);
+        assert!(uri.contains("project%20name"));
+        assert_eq!(uri_to_path(&uri), Some(path_with_space.to_path_buf()));
+    }
+
+    #[test]
+    fn remote_initialize_does_not_advertise_local_pid() {
+        let params = initialize_params(Path::new("/workspace"), None);
+        assert!(params["processId"].is_null());
     }
 
     #[test]
@@ -368,7 +434,12 @@ mod tests {
         lock(&pending).insert(7, sender);
         // stdin を要さないダミー（応答分岐は stdin を触らない）。
         let fake_stdin = make_fake_stdin();
-        dispatch(json!({ "jsonrpc": "2.0", "id": 7, "result": { "ok": true } }), &pending, &tx, &fake_stdin);
+        dispatch(
+            json!({ "jsonrpc": "2.0", "id": 7, "result": { "ok": true } }),
+            &pending,
+            &tx,
+            &fake_stdin,
+        );
         let got = futures::executor::block_on(receiver).expect("応答が届く");
         let value = got.expect("result は Ok");
         assert_eq!(value["ok"].as_bool(), Some(true));
@@ -387,7 +458,8 @@ mod tests {
         );
         let (method, params) = futures::executor::block_on(rx.next()).expect("通知が届く");
         assert_eq!(method, "textDocument/publishDiagnostics");
-        let parsed: PublishDiagnosticsParams = serde_json::from_value(params).expect("パースできる");
+        let parsed: PublishDiagnosticsParams =
+            serde_json::from_value(params).expect("パースできる");
         assert_eq!(parsed.uri, "file:///a.rs");
     }
 
@@ -408,12 +480,15 @@ mod tests {
             .and_then(Path::parent)
             .expect("repo root")
             .to_path_buf();
-        let (client, _notifications) = LspClient::new(&server, &root).expect("起動");
+        let (client, _notifications) = LspClient::new(&server, &[], &root).expect("起動");
         let result = futures::executor::block_on(client.initialize(&root)).expect("initialize");
         assert!(result.get("capabilities").is_some(), "capabilities が返る");
         // 補完/hover/定義のプロバイダが広告されている。
         let capabilities = &result["capabilities"];
-        assert!(capabilities.get("completionProvider").is_some(), "補完プロバイダ");
+        assert!(
+            capabilities.get("completionProvider").is_some(),
+            "補完プロバイダ"
+        );
         eprintln!("rust-analyzer capabilities OK");
     }
 
@@ -429,7 +504,7 @@ mod tests {
             eprintln!("前提が無いのでスキップ（server or /tmp/lsp-test）");
             return;
         }
-        let (client, mut rx) = LspClient::new(&server, root).expect("起動");
+        let (client, mut rx) = LspClient::new(&server, &[], root).expect("起動");
         futures::executor::block_on(client.initialize(root)).expect("initialize");
         let main = root.join("src/main.rs");
         let text = std::fs::read_to_string(&main).expect("read main.rs");
@@ -457,18 +532,8 @@ mod tests {
         panic!("診断が来なかった（rust-analyzer の warmup 不足 or 設定）");
     }
 
-    /// テスト用のダミー ChildStdin（実際には書き込まれない分岐でのみ使う）。
-    /// 生成できない環境ではテストをスキップさせるため、`/dev/null` を開いた子で代用する。
-    fn make_fake_stdin() -> Arc<Mutex<ChildStdin>> {
-        let child = Command::new("cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("cat を起動");
-        Arc::new(Mutex::new(child.stdin.expect("stdin")))
+    /// テスト用のダミー stdin（応答/通知分岐では実際には書き込まれない）。
+    fn make_fake_stdin() -> ProcessStdin {
+        Arc::new(Mutex::new(Box::new(std::io::sink())))
     }
 }
-
-// futures::StreamExt を rx.next() で使う（テスト内）。
-#[cfg(test)]
-use futures::StreamExt as _;

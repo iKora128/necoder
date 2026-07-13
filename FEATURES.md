@@ -133,4 +133,6 @@
 - [ ] v1: 状態永続化（開いていたファイル/レイアウト復元 — Zed 方式は SQLite）
 - [ ] v1: CLI（`ne <path>` で開く）
 - [ ] later: 自動更新、セッション復元の高度化、Workspace Trust 相当
-- [ ] never: telemetry、リモート開発、notebooks、Web 版
+- [ ] v1: **Remote SSH**（2026-07-13 着手。Host/RPC/OpenSSH/daemon/files/Git/LSP/PTY/ACP は実装済み。
+  task・watch・dirty buffer backup・配布署名・askpass UI・実 Linux 長時間受入は未完了）
+- [ ] never: telemetry、notebooks、Web 版

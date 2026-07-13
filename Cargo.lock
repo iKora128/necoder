@@ -99,6 +99,7 @@ dependencies = [
  "anyhow",
  "blocking",
  "futures",
+ "host",
 ]
 
 [[package]]
@@ -184,6 +185,7 @@ dependencies = [
  "editor_view",
  "futures",
  "gpui",
+ "host",
  "i18n",
  "serde_json",
  "settings",
@@ -1531,6 +1533,7 @@ name = "editor_core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "host",
  "ropey",
 ]
 
@@ -2548,6 +2551,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ignore",
+ "regex",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2980,11 +2995,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
+ "host",
  "serde",
  "serde_json",
  "tree-sitter",
  "tree-sitter-highlight",
  "tree-sitter-rust",
+ "url",
 ]
 
 [[package]]
@@ -4184,6 +4201,7 @@ name = "project"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "host",
  "ignore",
  "imara-diff",
 ]
@@ -4851,6 +4869,7 @@ name = "search"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "host",
  "regex",
 ]
 
@@ -5084,8 +5103,10 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 name = "shirushi"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "gpui",
  "gpui_platform",
+ "host",
  "i18n",
  "image",
  "keymap_core",
@@ -6990,6 +7011,7 @@ dependencies = [
  "editor_view",
  "futures",
  "gpui",
+ "host",
  "i18n",
  "lang",
  "project",

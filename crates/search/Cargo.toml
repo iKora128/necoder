@@ -10,4 +10,5 @@ path = "src/search.rs"
 
 [dependencies]
 anyhow.workspace = true
+host.workspace = true
 regex.workspace = true

@@ -102,6 +102,16 @@ pub struct TerminalView {
 impl TerminalView {
     /// `cwd` でシェルを起動する。生成に失敗しても「死んだ端末」を返す（クラッシュさせない）。
     pub fn new(cwd: Option<PathBuf>, theme: Theme, cx: &mut Context<Self>) -> Self {
+        Self::new_with_shell(cwd, None, theme, cx)
+    }
+
+    /// shell command を明示して PTY を起動する。Remote SSH はここへ `ssh -tt ...` を渡す。
+    pub fn new_with_shell(
+        cwd: Option<PathBuf>,
+        shell: Option<(String, Vec<String>)>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (events_tx, mut events_rx) = unbounded::<AlacEvent>();
         let listener = Listener(events_tx);
         let size = TerminalSize { columns: 80, lines: 24 };
@@ -112,7 +122,7 @@ impl TerminalView {
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
         let options = tty::Options {
-            shell: None,
+            shell: shell.map(|(program, args)| tty::Shell::new(program, args)),
             working_directory: cwd,
             drain_on_exit: true,
             env,

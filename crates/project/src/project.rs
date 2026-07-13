@@ -5,10 +5,11 @@
 //! ファイル監視・インクリメンタル更新は後続（M8/性能）で追加する。
 
 use anyhow::{Context as _, Result};
+use host::{CommandOutput, CommandSpec, Host, LocalHost};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::Arc;
 
 /// ディレクトリ 1 項目。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +23,7 @@ pub struct Entry {
 
 /// 1 プロジェクトのファイルツリー（ルート + gitignore マッチャ）。
 pub struct Worktree {
+    host: Arc<dyn Host>,
     root: PathBuf,
     ignore: Gitignore,
 }
@@ -29,17 +31,31 @@ pub struct Worktree {
 impl Worktree {
     /// ルートを開く。ルート直下の `.gitignore` を読み込む。
     pub fn new(root: impl AsRef<Path>) -> Result<Worktree> {
-        let root = root.as_ref();
-        let root = std::fs::canonicalize(root)
-            .with_context(|| format!("パスを解決できない: {}", root.display()))?;
-        anyhow::ensure!(root.is_dir(), "ディレクトリではない: {}", root.display());
+        Self::with_host(LocalHost::shared(), root)
+    }
+
+    /// local/remote 共通の host 上でルートを開く。
+    pub fn with_host(host: Arc<dyn Host>, root: impl AsRef<Path>) -> Result<Worktree> {
+        let root = host.canonicalize(root.as_ref())?;
+        anyhow::ensure!(host.metadata(&root)?.is_dir, "ディレクトリではない: {}", root.display());
 
         let mut builder = GitignoreBuilder::new(&root);
-        // .gitignore が無い/壊れは正常（gitignore 無しの repo もある）ので続行
-        let _ignore_add_error = builder.add(root.join(".gitignore"));
+        let ignore_path = root.join(".gitignore");
+        // remote path を local fs へ渡さず、Host から読んだ各行を matcher に積む。
+        if let Ok(contents) = host.read_file(&ignore_path) {
+            if let Ok(contents) = String::from_utf8(contents.bytes) {
+                for line in contents.lines() {
+                    let _invalid_pattern = builder.add_line(Some(ignore_path.clone()), line);
+                }
+            }
+        }
         let ignore = builder.build().unwrap_or_else(|_| Gitignore::empty());
 
-        Ok(Worktree { root, ignore })
+        Ok(Worktree { host, root, ignore })
+    }
+
+    pub fn host(&self) -> &Arc<dyn Host> {
+        &self.host
     }
 
     pub fn root(&self) -> &Path {
@@ -63,30 +79,20 @@ impl Worktree {
     /// ルート配下の全ファイルを再帰列挙する（gitignore 準拠・`.git` 除外）。ファイルファインダ用。
     /// 各要素は (絶対パス, ルート相対の表示文字列)。上限 `limit` 件で打ち切る。
     pub fn all_files(&self, limit: usize) -> Vec<(PathBuf, String)> {
-        let mut files = Vec::new();
-        let walker = ignore::WalkBuilder::new(&self.root)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(false)
-            .require_git(false) // .git が無くても .gitignore を尊重する
-            .filter_entry(|entry| entry.file_name() != ".git")
-            .build();
-        for result in walker {
-            if files.len() >= limit {
-                break;
-            }
-            let Ok(entry) = result else { continue };
-            if entry.file_type().map(|kind| kind.is_file()) != Some(true) {
-                continue;
-            }
-            let path = entry.path().to_path_buf();
+        let mut files = self
+            .host
+            .list_files(&self.root, limit)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| {
             let relative = path
                 .strip_prefix(&self.root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .to_string();
-            files.push((path, relative));
-        }
+                (path, relative)
+            })
+            .collect::<Vec<_>>();
         files.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
         files
     }
@@ -99,15 +105,13 @@ impl Worktree {
             return self.read_dir(dir);
         }
         let mut entries = Vec::new();
-        let read = std::fs::read_dir(dir).with_context(|| format!("読めない: {}", dir.display()))?;
-        for dir_entry in read {
-            let dir_entry = dir_entry?;
-            let name = dir_entry.file_name().to_string_lossy().to_string();
+        for dir_entry in self.host.read_dir(dir)? {
+            let name = dir_entry.name;
             if name == ".git" || name.starts_with('.') {
                 continue;
             }
-            let path = dir_entry.path();
-            let is_dir = dir_entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            let path = dir_entry.path;
+            let is_dir = dir_entry.is_dir;
             entries.push(Entry { path, name, is_dir, ignored: false });
         }
         entries.sort_by(|a, b| {
@@ -122,15 +126,13 @@ impl Worktree {
     /// VSCode 同様「無視ファイルも見えるが淡い」＝ git 管理有無が一目で分かる）。ディレクトリ優先→名前順。
     pub fn read_dir(&self, dir: &Path) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
-        let read = std::fs::read_dir(dir).with_context(|| format!("読めない: {}", dir.display()))?;
-        for dir_entry in read {
-            let dir_entry = dir_entry?;
-            let name = dir_entry.file_name().to_string_lossy().to_string();
+        for dir_entry in self.host.read_dir(dir)? {
+            let name = dir_entry.name;
             if name == ".git" {
                 continue;
             }
-            let path = dir_entry.path();
-            let is_dir = dir_entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            let path = dir_entry.path;
+            let is_dir = dir_entry.is_dir;
             let ignored = self.ignore.matched(&path, is_dir).is_ignore();
             entries.push(Entry { path, name, is_dir, ignored });
         }
@@ -140,6 +142,87 @@ impl Worktree {
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         Ok(entries)
+    }
+
+    pub fn read_file(&self, path: &Path) -> Result<host::FileContent> {
+        self.host.read_file(path)
+    }
+
+    pub fn write_file(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        condition: host::WriteCondition,
+    ) -> Result<host::FileRevision> {
+        self.host.write_file(path, bytes, condition)
+    }
+
+    pub fn git_status(&self) -> Vec<(PathBuf, StatusKind)> {
+        git_status_on(self.host.as_ref(), &self.root)
+    }
+
+    pub fn git_current_branch(&self) -> Option<String> {
+        git_current_branch_on(self.host.as_ref(), &self.root)
+    }
+
+    pub fn git_branches(&self) -> Vec<String> {
+        git_branches_on(self.host.as_ref(), &self.root)
+    }
+
+    pub fn git_worktrees(&self) -> Vec<GitWorktree> {
+        git_worktrees_on(self.host.as_ref(), &self.root)
+    }
+
+    pub fn switch_branch(&self, branch: &str) -> Result<()> {
+        switch_branch_on(self.host.as_ref(), &self.root, branch)
+    }
+
+    pub fn add_worktree(&self, path: &Path, branch: &str) -> Result<()> {
+        add_worktree_on(self.host.as_ref(), &self.root, path, branch)
+    }
+
+    pub fn stage_path(&self, path: &Path) -> Result<()> {
+        stage_path_on(self.host.as_ref(), &self.root, path)
+    }
+
+    pub fn stage_all(&self) -> Result<()> {
+        stage_all_on(self.host.as_ref(), &self.root)
+    }
+
+    pub fn unstage_path(&self, path: &Path) -> Result<()> {
+        unstage_path_on(self.host.as_ref(), &self.root, path)
+    }
+
+    pub fn commit(&self, message: &str) -> Result<()> {
+        commit_on(self.host.as_ref(), &self.root, message)
+    }
+
+    pub fn create_branch(&self, name: &str) -> Result<()> {
+        create_branch_on(self.host.as_ref(), &self.root, name)
+    }
+
+    pub fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
+        delete_branch_on(self.host.as_ref(), &self.root, name, force)
+    }
+
+    pub fn push(&self) -> Result<()> {
+        push_on(self.host.as_ref(), &self.root)
+    }
+
+    pub fn pull(&self) -> Result<()> {
+        pull_on(self.host.as_ref(), &self.root)
+    }
+
+    pub fn git_changes(&self) -> Vec<WorkingChange> {
+        git_changes_on(self.host.as_ref(), &self.root)
+    }
+
+    pub fn git_log_graph(&self, limit: usize) -> Vec<GraphCommit> {
+        git_log_graph_on(self.host.as_ref(), &self.root, limit)
+    }
+
+    pub fn buffer_diff(&self, file: &Path, current: &str) -> Vec<DiffHunk> {
+        buffer_diff_on(self.host.as_ref(), file, current)
     }
 }
 
@@ -157,14 +240,18 @@ pub enum StatusKind {
     Conflicted,
 }
 
+fn run_git<I, S>(host: &dyn Host, dir: &Path, args: I) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    host.run_command(&CommandSpec::new("git", dir).args(args))
+}
+
 /// `dir` を含む git リポジトリのルート（`git rev-parse --show-toplevel`）。repo 外なら `None`。
-fn git_repo_root(dir: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+fn git_repo_root_on(host: &dyn Host, dir: &Path) -> Option<PathBuf> {
+    let output = run_git(host, dir, ["rev-parse", "--show-toplevel"]).ok()?;
+    if !output.success() {
         return None;
     }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -174,24 +261,29 @@ fn git_repo_root(dir: &Path) -> Option<PathBuf> {
 /// `dir` を含む repo の working-tree 状態を読む。返すパスは**絶対**。
 /// git が無い / repo でない / 失敗時は空（色を出さないだけ＝安全側）。
 pub fn git_status(dir: &Path) -> Vec<(PathBuf, StatusKind)> {
-    let Some(repo) = git_repo_root(dir) else {
+    git_status_on(&LocalHost, dir)
+}
+
+pub fn git_status_on(host: &dyn Host, dir: &Path) -> Vec<(PathBuf, StatusKind)> {
+    let Some(repo) = git_repo_root_on(host, dir) else {
         return Vec::new();
     };
-    let output = Command::new("git")
-        .current_dir(&repo)
-        .args([
+    let output = run_git(
+        host,
+        &repo,
+        [
             "--no-optional-locks",
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
             "--no-renames",
             "-z",
-        ])
-        .output();
+        ],
+    );
     let Ok(output) = output else {
         return Vec::new();
     };
-    if !output.status.success() {
+    if !output.success() {
         return Vec::new();
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -227,12 +319,12 @@ fn classify_status(x: u8, y: u8) -> StatusKind {
 
 /// 現在のブランチ名（`git rev-parse --abbrev-ref HEAD`）。detached HEAD / repo 外は `None`。
 pub fn git_current_branch(dir: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    git_current_branch_on(&LocalHost, dir)
+}
+
+pub fn git_current_branch_on(host: &dyn Host, dir: &Path) -> Option<String> {
+    let output = run_git(host, dir, ["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+    if !output.success() {
         return None;
     }
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -241,14 +333,15 @@ pub fn git_current_branch(dir: &Path) -> Option<String> {
 
 /// ローカルブランチ名の一覧（現在ブランチを先頭に）。repo 外は空。
 pub fn git_branches(dir: &Path) -> Vec<String> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["branch", "--format=%(refname:short)"])
-        .output();
+    git_branches_on(&LocalHost, dir)
+}
+
+pub fn git_branches_on(host: &dyn Host, dir: &Path) -> Vec<String> {
+    let output = run_git(host, dir, ["branch", "--format=%(refname:short)"]);
     let Ok(output) = output else {
         return Vec::new();
     };
-    if !output.status.success() {
+    if !output.success() {
         return Vec::new();
     }
     let mut branches: Vec<String> = String::from_utf8_lossy(&output.stdout)
@@ -256,7 +349,7 @@ pub fn git_branches(dir: &Path) -> Vec<String> {
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect();
-    if let Some(current) = git_current_branch(dir) {
+    if let Some(current) = git_current_branch_on(host, dir) {
         // 現在ブランチを先頭へ（キーが false=0 で先頭）。
         branches.sort_by_key(|branch| *branch != current);
     }
@@ -272,14 +365,15 @@ pub struct GitWorktree {
 
 /// worktree の一覧（`git worktree list --porcelain`）。repo 外は空。
 pub fn git_worktrees(dir: &Path) -> Vec<GitWorktree> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["worktree", "list", "--porcelain"])
-        .output();
+    git_worktrees_on(&LocalHost, dir)
+}
+
+pub fn git_worktrees_on(host: &dyn Host, dir: &Path) -> Vec<GitWorktree> {
+    let output = run_git(host, dir, ["worktree", "list", "--porcelain"]);
     let Ok(output) = output else {
         return Vec::new();
     };
-    if !output.status.success() {
+    if !output.success() {
         return Vec::new();
     }
     let text = String::from_utf8_lossy(&output.stdout);
@@ -305,13 +399,13 @@ pub fn git_worktrees(dir: &Path) -> Vec<GitWorktree> {
 
 /// ブランチを in-place で切り替える（`git switch`）。作業ツリーが dirty だと失敗し得る。
 pub fn switch_branch(dir: &Path, branch: &str) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["switch", branch])
-        .output()
-        .context("git switch の実行に失敗")?;
+    switch_branch_on(&LocalHost, dir, branch)
+}
+
+pub fn switch_branch_on(host: &dyn Host, dir: &Path, branch: &str) -> Result<()> {
+    let output = run_git(host, dir, ["switch", branch]).context("git switch の実行に失敗")?;
     anyhow::ensure!(
-        output.status.success(),
+        output.success(),
         "ブランチ切替に失敗: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
@@ -320,15 +414,15 @@ pub fn switch_branch(dir: &Path, branch: &str) -> Result<()> {
 
 /// 既存ブランチの worktree を作る（`git worktree add <path> <branch>`）。
 pub fn add_worktree(dir: &Path, path: &Path, branch: &str) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["worktree", "add"])
-        .arg(path)
-        .arg(branch)
-        .output()
+    add_worktree_on(&LocalHost, dir, path, branch)
+}
+
+pub fn add_worktree_on(host: &dyn Host, dir: &Path, path: &Path, branch: &str) -> Result<()> {
+    let path = path.to_string_lossy().into_owned();
+    let output = run_git(host, dir, ["worktree", "add", path.as_str(), branch])
         .context("git worktree add の実行に失敗")?;
     anyhow::ensure!(
-        output.status.success(),
+        output.success(),
         "worktree 作成に失敗: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
@@ -340,7 +434,7 @@ pub fn add_worktree(dir: &Path, path: &Path, branch: &str) -> Result<()> {
 
 /// 失敗した git コマンドの人間向けメッセージ（stderr 優先・空なら stdout。commit の
 /// 「nothing to commit」等は stdout に出るため両対応）。
-fn git_fail_message(output: &std::process::Output) -> String {
+fn git_fail_message(output: &CommandOutput) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim();
     if !stderr.is_empty() {
@@ -351,96 +445,98 @@ fn git_fail_message(output: &std::process::Output) -> String {
 
 /// 変更を index に上げる（`git add -- <path>`）。
 pub fn stage_path(dir: &Path, path: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["add", "--"])
-        .arg(path)
-        .output()
+    stage_path_on(&LocalHost, dir, path)
+}
+
+pub fn stage_path_on(host: &dyn Host, dir: &Path, path: &Path) -> Result<()> {
+    let path = path.to_string_lossy().into_owned();
+    let output = run_git(host, dir, ["add", "--", path.as_str()])
         .context("git add の実行に失敗")?;
-    anyhow::ensure!(output.status.success(), "stage に失敗: {}", git_fail_message(&output));
+    anyhow::ensure!(output.success(), "stage に失敗: {}", git_fail_message(&output));
     Ok(())
 }
 
 /// 全変更を index に上げる（`git add -A`）。
 pub fn stage_all(dir: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["add", "-A"])
-        .output()
-        .context("git add -A の実行に失敗")?;
-    anyhow::ensure!(output.status.success(), "stage に失敗: {}", git_fail_message(&output));
+    stage_all_on(&LocalHost, dir)
+}
+
+pub fn stage_all_on(host: &dyn Host, dir: &Path) -> Result<()> {
+    let output = run_git(host, dir, ["add", "-A"]).context("git add -A の実行に失敗")?;
+    anyhow::ensure!(output.success(), "stage に失敗: {}", git_fail_message(&output));
     Ok(())
 }
 
 /// index から下ろす（`git restore --staged -- <path>`）。
 pub fn unstage_path(dir: &Path, path: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["restore", "--staged", "--"])
-        .arg(path)
-        .output()
+    unstage_path_on(&LocalHost, dir, path)
+}
+
+pub fn unstage_path_on(host: &dyn Host, dir: &Path, path: &Path) -> Result<()> {
+    let path = path.to_string_lossy().into_owned();
+    let output = run_git(host, dir, ["restore", "--staged", "--", path.as_str()])
         .context("git restore --staged の実行に失敗")?;
-    anyhow::ensure!(output.status.success(), "unstage に失敗: {}", git_fail_message(&output));
+    anyhow::ensure!(output.success(), "unstage に失敗: {}", git_fail_message(&output));
     Ok(())
 }
 
 /// staged 変更をコミット（`git commit -m <message>`）。message 空・staged 無しは失敗。
 pub fn commit(dir: &Path, message: &str) -> Result<()> {
+    commit_on(&LocalHost, dir, message)
+}
+
+pub fn commit_on(host: &dyn Host, dir: &Path, message: &str) -> Result<()> {
     anyhow::ensure!(!message.trim().is_empty(), "コミットメッセージが空");
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["commit", "-m", message])
-        .output()
+    let output = run_git(host, dir, ["commit", "-m", message])
         .context("git commit の実行に失敗")?;
-    anyhow::ensure!(output.status.success(), "コミットに失敗: {}", git_fail_message(&output));
+    anyhow::ensure!(output.success(), "コミットに失敗: {}", git_fail_message(&output));
     Ok(())
 }
 
 /// 新しいブランチを作って切り替え（`git switch -c <name>`）。既存名なら失敗。
 pub fn create_branch(dir: &Path, name: &str) -> Result<()> {
+    create_branch_on(&LocalHost, dir, name)
+}
+
+pub fn create_branch_on(host: &dyn Host, dir: &Path, name: &str) -> Result<()> {
     anyhow::ensure!(!name.trim().is_empty(), "ブランチ名が空");
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["switch", "-c", name])
-        .output()
+    let output = run_git(host, dir, ["switch", "-c", name])
         .context("git switch -c の実行に失敗")?;
-    anyhow::ensure!(output.status.success(), "ブランチ作成に失敗: {}", git_fail_message(&output));
+    anyhow::ensure!(output.success(), "ブランチ作成に失敗: {}", git_fail_message(&output));
     Ok(())
 }
 
 /// ブランチを削除（`git branch -d`; `force` で `-D`）。現在ブランチは git が拒否する。
 pub fn delete_branch(dir: &Path, name: &str, force: bool) -> Result<()> {
+    delete_branch_on(&LocalHost, dir, name, force)
+}
+
+pub fn delete_branch_on(host: &dyn Host, dir: &Path, name: &str, force: bool) -> Result<()> {
     let flag = if force { "-D" } else { "-d" };
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["branch", flag, name])
-        .output()
+    let output = run_git(host, dir, ["branch", flag, name])
         .context("git branch -d の実行に失敗")?;
-    anyhow::ensure!(output.status.success(), "ブランチ削除に失敗: {}", git_fail_message(&output));
+    anyhow::ensure!(output.success(), "ブランチ削除に失敗: {}", git_fail_message(&output));
     Ok(())
 }
 
 /// 現在ブランチを push（`git push`）。upstream 未設定なら `-u origin <branch>` で再試行
 /// （初回 push の定番動線）。remote が無ければ失敗を返す。
 pub fn push(dir: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["push"])
-        .output()
-        .context("git push の実行に失敗")?;
-    if output.status.success() {
+    push_on(&LocalHost, dir)
+}
+
+pub fn push_on(host: &dyn Host, dir: &Path) -> Result<()> {
+    let output = run_git(host, dir, ["push"]).context("git push の実行に失敗")?;
+    if output.success() {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.contains("has no upstream") || stderr.contains("--set-upstream") {
         let branch =
-            git_current_branch(dir).context("push: 現在ブランチが取得できない（detached HEAD?）")?;
-        let retry = Command::new("git")
-            .current_dir(dir)
-            .args(["push", "--set-upstream", "origin", &branch])
-            .output()
+            git_current_branch_on(host, dir).context("push: 現在ブランチが取得できない（detached HEAD?）")?;
+        let retry = run_git(host, dir, ["push", "--set-upstream", "origin", branch.as_str()])
             .context("git push --set-upstream の実行に失敗")?;
-        anyhow::ensure!(retry.status.success(), "push に失敗: {}", git_fail_message(&retry));
+        anyhow::ensure!(retry.success(), "push に失敗: {}", git_fail_message(&retry));
         return Ok(());
     }
     anyhow::bail!("push に失敗: {}", stderr.trim());
@@ -448,12 +544,81 @@ pub fn push(dir: &Path) -> Result<()> {
 
 /// upstream から pull（`git pull --ff-only`）。fast-forward できなければ失敗（安全側・merge しない）。
 pub fn pull(dir: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["pull", "--ff-only"])
-        .output()
+    pull_on(&LocalHost, dir)
+}
+
+pub fn pull_on(host: &dyn Host, dir: &Path) -> Result<()> {
+    let output = run_git(host, dir, ["pull", "--ff-only"])
         .context("git pull の実行に失敗")?;
-    anyhow::ensure!(output.status.success(), "pull に失敗: {}", git_fail_message(&output));
+    anyhow::ensure!(output.success(), "pull に失敗: {}", git_fail_message(&output));
+    Ok(())
+}
+
+// ── GitHub 連携（M8: `gh` CLI 経由。git と同じ host 上で動かす＝remote repo でも同じ動線） ──
+
+/// `gh` を `dir` で実行する（git と同じく host 経由）。
+fn run_gh<I, S>(host: &dyn Host, dir: &Path, args: I) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    host.run_command(&CommandSpec::new("gh", dir).args(args))
+}
+
+/// origin リモートが GitHub なら `owner/repo` を返す（PR ボタンの表示判定に使う）。GitHub 以外は `None`。
+pub fn github_slug(dir: &Path) -> Option<String> {
+    github_slug_on(&LocalHost, dir)
+}
+
+pub fn github_slug_on(host: &dyn Host, dir: &Path) -> Option<String> {
+    let output = run_git(host, dir, ["remote", "get-url", "origin"]).ok()?;
+    if !output.success() {
+        return None;
+    }
+    parse_github_slug(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+/// GitHub の remote URL から `owner/repo` を取り出す（https / ssh 両形式）。テスト可能な純関数。
+fn parse_github_slug(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))
+        .or_else(|| url.strip_prefix("git@github.com:"))
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))?;
+    let slug = rest.trim_end_matches('/').trim_end_matches(".git");
+    let mut parts = slug.split('/');
+    let owner = parts.next().filter(|part| !part.is_empty())?;
+    let repo = parts.next().filter(|part| !part.is_empty())?;
+    // owner/repo の 2 段ちょうどだけ受ける（余分な段は弾く）。
+    parts.next().is_none().then(|| format!("{owner}/{repo}"))
+}
+
+/// 現在ブランチから PR 作成ページをブラウザで開く（`gh pr create --web`）。
+/// ブラウザ側で内容確認して作成＝安全側（in-app 入力は不要）。
+pub fn create_pr(dir: &Path) -> Result<()> {
+    create_pr_on(&LocalHost, dir)
+}
+
+pub fn create_pr_on(host: &dyn Host, dir: &Path) -> Result<()> {
+    let output =
+        run_gh(host, dir, ["pr", "create", "--web"]).context("gh pr create の実行に失敗（gh 未導入？）")?;
+    anyhow::ensure!(output.success(), "PR 作成に失敗: {}", git_fail_message(&output));
+    Ok(())
+}
+
+/// 現在ブランチの PR をブラウザで開く（無ければリポジトリのトップを開く）。
+pub fn open_pr_web(dir: &Path) -> Result<()> {
+    open_pr_web_on(&LocalHost, dir)
+}
+
+pub fn open_pr_web_on(host: &dyn Host, dir: &Path) -> Result<()> {
+    // まず現在ブランチの PR。無ければ repo トップ。
+    if run_gh(host, dir, ["pr", "view", "--web"]).map(|output| output.success()).unwrap_or(false) {
+        return Ok(());
+    }
+    let output =
+        run_gh(host, dir, ["repo", "view", "--web"]).context("gh repo view の実行に失敗（gh 未導入？）")?;
+    anyhow::ensure!(output.success(), "リポジトリを開けません: {}", git_fail_message(&output));
     Ok(())
 }
 
@@ -470,24 +635,29 @@ pub struct WorkingChange {
 /// working-tree の変更を staged / unstaged 別に読む（コミットパネル用）。返すパスは**絶対**。
 /// `git_status` は色分け用に XY を 1 状態へ畳むが、こちらは index / worktree を分けて持つ。
 pub fn git_changes(dir: &Path) -> Vec<WorkingChange> {
-    let Some(repo) = git_repo_root(dir) else {
+    git_changes_on(&LocalHost, dir)
+}
+
+pub fn git_changes_on(host: &dyn Host, dir: &Path) -> Vec<WorkingChange> {
+    let Some(repo) = git_repo_root_on(host, dir) else {
         return Vec::new();
     };
-    let output = Command::new("git")
-        .current_dir(&repo)
-        .args([
+    let output = run_git(
+        host,
+        &repo,
+        [
             "--no-optional-locks",
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
             "--no-renames",
             "-z",
-        ])
-        .output();
+        ],
+    );
     let Ok(output) = output else {
         return Vec::new();
     };
-    if !output.status.success() {
+    if !output.success() {
         return Vec::new();
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -563,22 +733,28 @@ struct RawCommit {
 
 /// 直近 `limit` 件のコミットグラフを返す（`git log` → レーン割当）。repo 外は空。
 pub fn git_log_graph(dir: &Path, limit: usize) -> Vec<GraphCommit> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args([
+    git_log_graph_on(&LocalHost, dir, limit)
+}
+
+pub fn git_log_graph_on(host: &dyn Host, dir: &Path, limit: usize) -> Vec<GraphCommit> {
+    let count = format!("-n{limit}");
+    let output = run_git(
+        host,
+        dir,
+        [
             "--no-optional-locks",
             "log",
-            &format!("-n{limit}"),
+            count.as_str(),
             // topo 順で「子は必ず親より前」を保証（レーン割当の前提）＝ git log --graph と同じ並び。
             "--topo-order",
             // %h=短縮hash %p=短縮親 %s=要約 %D=ref名。0x1f 区切り・行=コミット。
             "--pretty=format:%h%x1f%p%x1f%s%x1f%D",
-        ])
-        .output();
+        ],
+    );
     let Ok(output) = output else {
         return Vec::new();
     };
-    if !output.status.success() {
+    if !output.success() {
         return Vec::new();
     }
     let text = String::from_utf8_lossy(&output.stdout);
@@ -695,15 +871,10 @@ pub struct DiffHunk {
 
 /// `file`（絶対パス）の HEAD 版テキスト。`HEAD:./<name>`（cwd 相対）で subdir でも正しく引く。
 /// HEAD に無い（新規/未追跡）or repo 外なら `None`。
-fn head_blob(dir: &Path, name: &OsStr) -> Option<String> {
+fn head_blob_on(host: &dyn Host, dir: &Path, name: &OsStr) -> Option<String> {
     let spec = format!("HEAD:./{}", name.to_string_lossy());
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(["--no-optional-locks", "show", &spec])
-        .output()
-        .ok()?;
+    let output = run_git(host, dir, ["--no-optional-locks", "show", spec.as_str()]).ok()?;
     output
-        .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -711,10 +882,14 @@ fn head_blob(dir: &Path, name: &OsStr) -> Option<String> {
 /// `file`（絶対パス）の HEAD 版 vs 現在テキストを行単位で diff。HEAD が無ければ空
 /// （新規/未追跡は tree/tab の色で示すのでガターは静かにする）。
 pub fn buffer_diff(file: &Path, current: &str) -> Vec<DiffHunk> {
+    buffer_diff_on(&LocalHost, file, current)
+}
+
+pub fn buffer_diff_on(host: &dyn Host, file: &Path, current: &str) -> Vec<DiffHunk> {
     let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
         return Vec::new();
     };
-    match head_blob(dir, name) {
+    match head_blob_on(host, dir, name) {
         Some(head) => diff_hunks(&head, current),
         None => Vec::new(),
     }
@@ -768,6 +943,7 @@ impl imara_diff::Sink for HunkCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("shirushi_project_{}_{}", tag, std::process::id()));
@@ -1030,5 +1206,26 @@ mod tests {
         assert_eq!(graph[0].summary, "three");
         assert_eq!(graph[2].summary, "one");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_github_slug_handles_https_and_ssh() {
+        assert_eq!(
+            parse_github_slug("https://github.com/iKora128/shirushi.git").as_deref(),
+            Some("iKora128/shirushi")
+        );
+        assert_eq!(
+            parse_github_slug("git@github.com:iKora128/shirushi.git").as_deref(),
+            Some("iKora128/shirushi")
+        );
+        assert_eq!(parse_github_slug("https://github.com/owner/repo").as_deref(), Some("owner/repo"));
+        assert_eq!(
+            parse_github_slug("ssh://git@github.com/owner/repo.git").as_deref(),
+            Some("owner/repo")
+        );
+        // GitHub 以外・段数不一致は None
+        assert_eq!(parse_github_slug("https://gitlab.com/owner/repo.git"), None);
+        assert_eq!(parse_github_slug("git@github.com:owner/repo/extra.git"), None);
+        assert_eq!(parse_github_slug("git@github.com:owner"), None);
     }
 }

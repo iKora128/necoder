@@ -48,6 +48,29 @@ editor/
 3. **ビジュアル微調整**: `open mock/index.html` — 決め残しは mock/README.md 参照
 4. 以降は **`/goal`** — [`docs/ROADMAP.md`](docs/ROADMAP.md) の受入条件を上から1歩ずつ自走実装
 
+## Remote SSH v1
+
+system OpenSSH の設定、known_hosts、ssh-agent、ProxyJump をそのまま使う。開発ビルドでは先に
+remote server バイナリも作り、絶対パスを含む SSH URI を渡す。
+
+```sh
+cargo build -p host --bin shirushi-remote-server
+cargo run -p shirushi -- 'ssh://user@example.com:22/home/user/project'
+```
+
+同じ OS/CPU の接続先には `target/debug/shirushi-remote-server` を自動配備する。異なる target へは、
+その接続先向けにビルドした artifact を明示する。
+
+```sh
+SHIRUSHI_REMOTE_SERVER_BINARY=/path/to/linux-aarch64/shirushi-remote-server \
+  cargo run -p shirushi -- 'ssh://example.com/home/user/project'
+```
+
+接続先は status bar の `SSH user@host` として表示され、前回の SSH URI も password 無しで復元する。
+現在の v1 は OpenSSH の terminal prompt を使うため、GUI askpass、watch 再同期、配布 artifact の
+署名/checksum、実 Linux ホストでの長時間障害試験は未完了。詳細は
+[`docs/research/remote-ssh-2026.md`](docs/research/remote-ssh-2026.md) を参照。
+
 ## 参照リポジトリ（ローカル）
 
 | リポジトリ | 場所 | 用途 |

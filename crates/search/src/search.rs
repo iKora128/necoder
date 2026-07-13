@@ -5,6 +5,7 @@
 //! （ファイル収集は `project::Worktree::all_files` の責務。ここは検索に集中）。
 
 use anyhow::{Context as _, Result};
+use host::{Host, TextSearchSpec};
 use regex::{Regex, RegexBuilder};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -33,6 +34,9 @@ pub struct FileMatch {
 pub struct SearchQuery {
     regex: Regex,
     is_empty: bool,
+    pattern: String,
+    is_regex: bool,
+    case_sensitive: bool,
 }
 
 impl SearchQuery {
@@ -50,6 +54,9 @@ impl SearchQuery {
         Ok(SearchQuery {
             regex,
             is_empty: pattern.is_empty(),
+            pattern: pattern.to_string(),
+            is_regex,
+            case_sensitive,
         })
     }
 
@@ -80,12 +87,20 @@ impl SearchQuery {
 
     /// 複数ファイルを横断検索する。UTF-8 で読めないファイル（バイナリ等）はスキップ。
     pub fn search_files(&self, files: &[PathBuf]) -> Vec<FileMatch> {
+        self.search_files_on(host::LocalHost::shared().as_ref(), files)
+    }
+
+    /// 指定ホスト上の複数ファイルを横断検索する。UTF-8 で読めないファイルはスキップ。
+    pub fn search_files_on(&self, host: &dyn Host, files: &[PathBuf]) -> Vec<FileMatch> {
         if self.is_empty {
             return Vec::new();
         }
         let mut results = Vec::new();
         for path in files {
-            let Ok(text) = std::fs::read_to_string(path) else {
+            let Ok(content) = host.read_file(path) else {
+                continue;
+            };
+            let Ok(text) = String::from_utf8(content.bytes) else {
                 continue;
             };
             let matches = self.search_text(&text);
@@ -97,6 +112,55 @@ impl SearchQuery {
             }
         }
         results
+    }
+
+    /// project 全体を host 側で一括検索する。remote ではファイル内容を local へ全転送しない。
+    pub fn search_project_on(
+        &self,
+        host: &dyn Host,
+        root: &std::path::Path,
+        file_limit: usize,
+        max_matches: usize,
+    ) -> Vec<FileMatch> {
+        self.try_search_project_on(host, root, file_limit, max_matches)
+            .unwrap_or_default()
+    }
+
+    /// [`Self::search_project_on`] の失敗を保持する版。UI は remote disconnect を空結果と混同しない。
+    pub fn try_search_project_on(
+        &self,
+        host: &dyn Host,
+        root: &std::path::Path,
+        file_limit: usize,
+        max_matches: usize,
+    ) -> Result<Vec<FileMatch>> {
+        if self.is_empty {
+            return Ok(Vec::new());
+        }
+        let spec = TextSearchSpec {
+            pattern: self.pattern.clone(),
+            is_regex: self.is_regex,
+            case_sensitive: self.case_sensitive,
+            max_matches,
+        };
+        let hits = host.search_project(root, &spec, file_limit)?;
+        let mut results = Vec::<FileMatch>::new();
+        for hit in hits {
+            let item = Match {
+                line: hit.line,
+                column: hit.column,
+                byte_range: hit.byte_start..hit.byte_end,
+                line_text: hit.line_text,
+            };
+            match results.last_mut() {
+                Some(file) if file.path == hit.path => file.matches.push(item),
+                _ => results.push(FileMatch {
+                    path: hit.path,
+                    matches: vec![item],
+                }),
+            }
+        }
+        Ok(results)
     }
 }
 

@@ -8,10 +8,12 @@
 //! [`Transaction`] 単位。位置追従アンカーは M2 では offset ベースの簡易版（multibuffer 時に anchor 化）。
 
 use anyhow::{Context as _, Result};
+use host::{FileRevision, Host, LocalHost, WriteCondition};
 use ropey::{LineType, Rope};
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// 行の数え方。コードエディタなので LF（と CRLF）のみを改行とみなす（CR 単独は改行にしない）。
 const LINE_TYPE: LineType = LineType::LF;
@@ -104,7 +106,9 @@ pub struct Buffer {
     selections: Vec<Selection>,
     history: History,
     version: u64,
+    host: Arc<dyn Host>,
     file: Option<PathBuf>,
+    file_revision: Option<FileRevision>,
     dirty: bool,
 }
 
@@ -122,7 +126,9 @@ impl Buffer {
             selections: vec![Selection::cursor(0)],
             history: History::default(),
             version: 0,
+            host: LocalHost::shared(),
             file: None,
+            file_revision: None,
             dirty: false,
         }
     }
@@ -134,14 +140,22 @@ impl Buffer {
 
     /// ファイルを読み込んで開く。
     pub fn from_file(path: impl AsRef<Path>) -> Result<Buffer> {
+        Self::from_host(LocalHost::shared(), path)
+    }
+
+    /// local/remote 共通の Host からファイルを読み込んで開く。
+    pub fn from_host(host: Arc<dyn Host>, path: impl AsRef<Path>) -> Result<Buffer> {
         let path = path.as_ref();
-        let file = std::fs::File::open(path)
+        let content = host
+            .read_file(path)
             .with_context(|| format!("ファイルを開けない: {}", path.display()))?;
-        let rope = Rope::from_reader(io::BufReader::new(file))
+        let rope = Rope::from_reader(io::Cursor::new(&content.bytes))
             .with_context(|| format!("ファイルを読めない: {}", path.display()))?;
         Ok(Buffer {
             rope,
+            host,
             file: Some(path.to_path_buf()),
+            file_revision: Some(content.revision),
             ..Buffer::new()
         })
     }
@@ -268,17 +282,27 @@ impl Buffer {
     /// パスを指定して保存し、以後そのファイルに紐づける。
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref().to_path_buf();
-        self.save_to(&path)?;
-        self.file = Some(path);
+        let previous_file = self.file.replace(path.clone());
+        let previous_revision = self.file_revision.take();
+        if let Err(error) = self.save_to(&path) {
+            self.file = previous_file;
+            self.file_revision = previous_revision;
+            return Err(error);
+        }
         Ok(())
     }
 
     fn save_to(&mut self, path: &Path) -> Result<()> {
-        let file = std::fs::File::create(path)
-            .with_context(|| format!("保存先を作成できない: {}", path.display()))?;
-        self.rope
-            .write_to(io::BufWriter::new(file))
+        let condition = self
+            .file_revision
+            .map(WriteCondition::Matches)
+            .unwrap_or(WriteCondition::Any);
+        let text = self.rope.to_string();
+        let revision = self
+            .host
+            .write_file(path, text.as_bytes(), condition)
             .with_context(|| format!("書き込みに失敗: {}", path.display()))?;
+        self.file_revision = Some(revision);
         self.dirty = false;
         Ok(())
     }
@@ -311,6 +335,10 @@ impl Buffer {
 
     pub fn path(&self) -> Option<&Path> {
         self.file.as_deref()
+    }
+
+    pub fn host(&self) -> &Arc<dyn Host> {
+        &self.host
     }
 
     pub fn version(&self) -> u64 {
@@ -703,6 +731,37 @@ mod tests {
         assert_eq!(reloaded.text(), "保存テスト\nsecond line\n");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_rejects_external_change_without_overwriting_it() {
+        let path = temp_path("conflict");
+        std::fs::write(&path, "original").unwrap();
+        let mut buffer = Buffer::from_file(&path).unwrap();
+        buffer.set_selections(vec![Selection::new(0, buffer.len_bytes())]);
+        buffer.insert("mine");
+
+        std::fs::write(&path, "external").unwrap();
+        let error = buffer.save().unwrap_err();
+        assert!(format!("{error:#}").contains("保存競合"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+        assert!(buffer.is_dirty());
+        assert_eq!(buffer.path(), Some(path.as_path()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn failed_save_as_keeps_original_file_binding() {
+        let original = temp_path("save-as-original");
+        std::fs::write(&original, "one").unwrap();
+        let mut buffer = Buffer::from_file(&original).unwrap();
+        buffer.insert("two");
+        let invalid = original.join("child.txt");
+
+        assert!(buffer.save_as(&invalid).is_err());
+        assert_eq!(buffer.path(), Some(original.as_path()));
+        assert!(buffer.is_dirty());
+        let _ = std::fs::remove_file(&original);
     }
 
     #[test]

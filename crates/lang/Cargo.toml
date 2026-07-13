@@ -10,6 +10,7 @@ path = "src/lang.rs"
 
 [dependencies]
 anyhow.workspace = true
+host.workspace = true
 tree-sitter.workspace = true
 tree-sitter-highlight.workspace = true
 tree-sitter-rust.workspace = true
@@ -17,3 +18,4 @@ tree-sitter-rust.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
+url.workspace = true

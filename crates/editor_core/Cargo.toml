@@ -10,4 +10,5 @@ path = "src/editor_core.rs"
 
 [dependencies]
 ropey.workspace = true
+host.workspace = true
 anyhow.workspace = true

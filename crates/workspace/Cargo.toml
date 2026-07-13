@@ -10,6 +10,7 @@ path = "src/workspace.rs"
 
 [dependencies]
 gpui.workspace = true
+host.workspace = true
 editor_core.workspace = true
 editor_view.workspace = true
 theme_core.workspace = true

@@ -42,7 +42,9 @@
 | `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | zed `buffer_diff` / `terminal` 移植 | M8 |
 
 移植の作法: ファイル冒頭に `// Ported from zed crates/<name> (GPL-3.0-or-later, 2026-07 時点のソース)`。
-collab / CRDT / リモート / テレメトリの経路は移植時に**落とす**。設定キーは Shirushi の体系に改名。
+collab / CRDT / テレメトリの経路は移植時に**落とす**。Remote SSH は 2026-07-13 に方針変更し、
+Zed の GPL コードを直接移植せず [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) の
+`Host` 境界として独立実装する（将来の Apache-2.0 化の道を閉じない）。設定キーは Shirushi の体系に改名。
 
 ## 3. コア型スケッチ（M2 の契約 — 変えるならここを先に変える）
 
@@ -119,3 +121,26 @@ VSCode の contribution points / Zed の初期化結線から学んだ形。**�
 - M2 で `zed/crates/editor_benchmarks` / `input_latency_ui` を移植し、`cargo bench` + 起動時間計測を `scripts/` に置く
 - 計測は「キー入力→フレーム提示」のヒストグラム（input_latency_ui の方式）。予算超過は CI 的に検知（しきい値をスクリプトに埋める）
 - UX 優先の明示判断（DECISIONS §8）: 予算内なら速度チューニングより UI-SPEC の完成度を優先する
+
+## 9. Remote Host 境界（2026-07-13 確定）
+
+Remote SSH を UI の条件分岐として足さない。local/SSH 共通の `Host` を foundation 層へ置き、
+`project` / `search` / `lang` / `terminal` / `acp_client` は host の capability を使う。
+
+```
+workspace/view -> project model -> Host trait <- LocalHost / SshHost
+                                      |
+                         versioned RPC over system OpenSSH
+                                      |
+                           shirushi-remote-server
+```
+
+- path identity は `(HostId, RemotePath)`。remote path を local `PathBuf` として OS API に渡さない。
+- UI/tree-sitter/dirty backup/credential は local。FS/watcher/search/Git/LSP/PTY/task/ACP は remote。
+- SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。
+- server は単一 static binary、client と protocol/version を handshake、daemon + proxy で再接続可能にする。
+- wire は length-prefixed typed header + raw body。初版は request id/capability/frame limit を持ち、
+  stream/event/cancel は watch・PTY の protocol 化と同時に追加する。
+- local implementation を先に `Host` へ移し、既存機能の回帰 test 後に SSH implementation を挿す。
+- security/performance/reliability の受入条件は
+  [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) を正とする。

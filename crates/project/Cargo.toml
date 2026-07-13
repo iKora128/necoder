@@ -12,3 +12,4 @@ path = "src/project.rs"
 anyhow.workspace = true
 ignore.workspace = true
 imara-diff.workspace = true
+host.workspace = true

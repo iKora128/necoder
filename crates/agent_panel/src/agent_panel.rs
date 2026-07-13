@@ -10,7 +10,7 @@
 
 use acp_client::{
     AgentEvent, ConfigCategory, ConfigOption, PermissionChoice, PermissionDiff, PermissionKind,
-    SessionCommand, run_session,
+    SessionCommand,
 };
 use editor_view::{ComposerEvent, EditorView};
 use futures::StreamExt;
@@ -20,7 +20,9 @@ use gpui::{
     IntoElement, MouseButton, SharedString, Window, actions, div, img, prelude::*, pulsating_between,
     px,
 };
+use host::{Host, LocalHost};
 use std::path::PathBuf;
+use std::sync::Arc;
 use theme_core::{Theme, claude_bullet, thread_color};
 use ui::Tooltip;
 
@@ -154,6 +156,7 @@ pub struct AgentPanel {
     dest_branch: Option<SharedString>,
     /// ACP エージェントの起動 cwd（アクティブプロジェクトのルート）。無ければ送信できない。
     dest_cwd: Option<PathBuf>,
+    dest_host: Arc<dyn Host>,
     composer: Entity<EditorView>,
     /// composer 下部の選択ピルのうち開いているメニュー（None = 閉）。
     open_menu: Option<Selector>,
@@ -234,6 +237,7 @@ impl AgentPanel {
             dest_project: "—".into(),
             dest_branch: None,
             dest_cwd: None,
+            dest_host: LocalHost::shared(),
             composer,
             open_menu: None,
             context_files: Vec::new(),
@@ -259,14 +263,22 @@ impl AgentPanel {
         &mut self,
         project: SharedString,
         branch: Option<SharedString>,
+        host: Arc<dyn Host>,
         cwd: Option<PathBuf>,
         files: Vec<SharedString>,
         cx: &mut Context<Self>,
     ) {
+        let destination_changed = self.dest_host.id() != host.id() || self.dest_cwd != cwd;
         self.dest_project = project;
         self.dest_branch = branch;
+        self.dest_host = host;
         self.dest_cwd = cwd;
         self.context_files = files;
+        if destination_changed {
+            for thread in &mut self.threads {
+                thread.command_tx = None;
+            }
+        }
         cx.notify();
     }
 
@@ -620,14 +632,16 @@ impl AgentPanel {
             .get(thread_index)
             .map(|thread| thread.agent.clone())
             .unwrap_or_else(|| "Claude".into());
-        let command = acp_client::AgentKind::by_label(&agent_label)?.command(cwd)?;
+        let host = self.dest_host.clone();
+        let command = acp_client::AgentKind::by_label(&agent_label)?
+            .command_on(host.as_ref(), cwd)?;
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded::<AgentEvent>();
         let error_tx = event_tx.clone();
 
         cx.background_executor()
             .spawn(async move {
-                if let Err(error) = run_session(command, prompt_rx, event_tx).await {
+                if let Err(error) = acp_client::run_session_on(host, command, prompt_rx, event_tx).await {
                     error_tx.unbounded_send(AgentEvent::Failed(error.to_string())).ok();
                 }
             })

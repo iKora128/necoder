@@ -15,11 +15,13 @@ use gpui::{
     WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*,
     pulsating_between, px, size,
 };
-use project::{StatusKind, Worktree};
+use host::Host;
+use project::{GitWorktree, GraphCommit, StatusKind, WorkingChange, Worktree};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use terminal_view::TerminalView;
 use theme_core::{Theme, ThemeSource, project_color};
 use ui::Tooltip;
@@ -96,6 +98,9 @@ struct PersistedProject {
     root: PathBuf,
     #[serde(default)]
     open_file: Option<PathBuf>,
+    /// `None` は従来どおり local。password を含まない正規 `ssh://` URI のみ保存する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -120,6 +125,58 @@ pub fn load_state(path: &Path) -> Option<(Vec<PathBuf>, usize)> {
     }
     let roots = state.projects.into_iter().map(|project| project.root).collect();
     Some((roots, state.active))
+}
+
+/// 起動前の接続解決に使う、永続化済み project 記述。
+#[derive(Debug, Clone)]
+pub struct SavedProject {
+    pub root: PathBuf,
+    pub open_file: Option<PathBuf>,
+    pub remote_uri: Option<String>,
+}
+
+/// local/SSH を区別して前回状態を読む。旧 `root` だけの state.json と後方互換。
+pub fn load_saved_state(path: &Path) -> Option<(Vec<SavedProject>, usize)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let state: PersistedState = serde_json::from_str(&text).ok()?;
+    if state.projects.is_empty() {
+        return None;
+    }
+    let projects = state
+        .projects
+        .into_iter()
+        .map(|project| SavedProject {
+            root: project.root,
+            open_file: project.open_file,
+            remote_uri: project.remote_uri,
+        })
+        .collect();
+    Some((projects, state.active))
+}
+
+/// 1 project の実行先。`PathBuf` 単体に戻すと異なる host の同一パスが衝突するため常に組で扱う。
+#[derive(Clone)]
+pub struct ProjectSource {
+    host: Arc<dyn Host>,
+    root: PathBuf,
+}
+
+impl ProjectSource {
+    pub fn local(root: PathBuf) -> Self {
+        Self { host: host::LocalHost::shared(), root }
+    }
+
+    pub fn new(host: Arc<dyn Host>, root: PathBuf) -> Self {
+        Self { host, root }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.host.is_remote()
+    }
 }
 
 // ── ツリー ──
@@ -181,6 +238,8 @@ enum ExplorerView {
 struct ProjectSlot {
     worktree: Rc<Worktree>,
     name: SharedString,
+    /// 描画中に git process/RPC を起動しないための現在ブランチ cache。
+    branch: Option<String>,
     color: Hsla,
     expanded: HashSet<PathBuf>,
     rows: Vec<TreeRow>,
@@ -188,6 +247,13 @@ struct ProjectSlot {
     open_file: Option<PathBuf>,
     /// カラム/アイコン表示の「現在フォルダ」（ここの直下を見せる）。既定はルート。
     current_dir: Option<PathBuf>,
+}
+
+struct BranchMenuState {
+    position: Point<gpui::Pixels>,
+    current: Option<String>,
+    branches: Vec<String>,
+    worktrees: Vec<GitWorktree>,
 }
 
 impl ProjectSlot {
@@ -218,6 +284,8 @@ struct SearchState {
     selected: usize,
     /// 直近クエリのコンパイルエラー（正規表現の誤り等）。
     error: Option<SharedString>,
+    running: bool,
+    active_search: Option<u64>,
     focus: FocusHandle,
 }
 
@@ -379,15 +447,24 @@ pub struct Workspace {
     explorer_context_menu: Option<ExplorerContextMenu>,
     // プロジェクト横断検索パネル（開いていれば Some・⌘⇧F）。
     search_panel: Option<SearchState>,
+    next_search_id: u64,
     // アクティブプロジェクトの git 状態（絶対パス → 状態）。ツリー/タブの色分けに使う。
     git_status: HashMap<PathBuf, StatusKind>,
+    // Git パネルを描画するたびに process/RPC を起動しないための snapshot。
+    git_changes: Vec<WorkingChange>,
+    git_history: Vec<GraphCommit>,
+    // origin が GitHub なら owner/repo（PR ボタンの表示判定。M8: GitHub 連携）。
+    github_slug: Option<String>,
     // branch/worktree メニュー（titlebar の ⎇ クリックで開く。開いていれば出す位置）。
-    branch_menu: Option<Point<gpui::Pixels>>,
+    branch_menu: Option<BranchMenuState>,
     // 下ドックの統合ターミナル（初回表示で遅延生成。show_bottom で出す）。
     terminal: Option<Entity<TerminalView>>,
-    // ── LSP（rust-analyzer・M7）──
+    // ── LSP（言語サーバ・M7。拡張子→サーバの登録式で多言語対応）──
     lsp: Option<lang::lsp::LspClient>,
     lsp_root: Option<PathBuf>,
+    // 現在稼働中のサーバが担当する languageId（"rust"/"typescript"/… ）。ファイル言語が
+    // 変わったら張り替える判定に使う。
+    lsp_language: Option<&'static str>,
     lsp_initialized: bool,
     // 最後に didChange で送ったバッファ version（重複送信の抑止）。
     lsp_sent_version: u64,
@@ -421,13 +498,40 @@ impl Workspace {
         state_path: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_sources(
+            roots.into_iter().map(ProjectSource::local).collect(),
+            theme,
+            state_path,
+            cx,
+        )
+    }
+
+    /// local/remote の host と root を保ったままワークスペースを組み立てる。
+    pub fn new_sources(
+        sources: Vec<ProjectSource>,
+        theme: Theme,
+        state_path: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_sources_with_active(sources, 0, theme, state_path, cx)
+    }
+
+    /// 復元時の active index を含めてワークスペースを組み立てる。
+    pub fn new_sources_with_active(
+        sources: Vec<ProjectSource>,
+        active: usize,
+        theme: Theme,
+        state_path: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut projects = Vec::new();
-        for root in roots {
-            match Worktree::new(&root) {
+        for source in sources {
+            match Worktree::with_host(source.host, &source.root) {
                 Ok(worktree) => {
                     let index = projects.len();
                     let mut slot = ProjectSlot {
                         name: worktree.name().into(),
+                        branch: None,
                         color: project_color(index),
                         worktree: Rc::new(worktree),
                         expanded: HashSet::new(),
@@ -459,14 +563,15 @@ impl Workspace {
         // 開発用: SHIRUSHI_SEARCH_PANEL=1 で「fn」を横断検索した結果パネルを開いた状態で撮る。
         let search_panel = std::env::var_os("SHIRUSHI_SEARCH_PANEL").and_then(|_| {
             projects.first().map(|slot| {
-                let paths: Vec<PathBuf> = slot
-                    .worktree
-                    .all_files(SEARCH_FILE_LIMIT)
-                    .into_iter()
-                    .map(|(path, _)| path)
-                    .collect();
                 let results = search::SearchQuery::new("fn", false, false)
-                    .map(|query| query.search_files(&paths))
+                    .map(|query| {
+                        query.search_project_on(
+                            slot.worktree.host().as_ref(),
+                            slot.worktree.root(),
+                            SEARCH_FILE_LIMIT,
+                            SEARCH_MAX_ROWS,
+                        )
+                    })
                     .unwrap_or_default();
                 SearchState {
                     query: "fn".to_string(),
@@ -476,14 +581,17 @@ impl Workspace {
                     results_query: Some("fn".to_string()),
                     selected: 0,
                     error: None,
+                    running: false,
+                    active_search: None,
                     focus: cx.focus_handle(),
                 }
             })
         });
         let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
+        let active = active.min(projects.len().saturating_sub(1));
         let mut workspace = Workspace {
             projects,
-            active: 0,
+            active,
             editor: None,
             split_editor: None,
             agent_panel,
@@ -516,12 +624,16 @@ impl Workspace {
             // 開発用: SHIRUSHI_CONTEXT_MENU=1 でルートの右クリックメニューを開いた状態で撮る。
             explorer_context_menu,
             search_panel,
+            next_search_id: 1,
             git_status: HashMap::new(),
-            // 開発用: SHIRUSHI_BRANCH_MENU=1 で branch/worktree メニューを開いた状態で撮る。
-            branch_menu: std::env::var_os("SHIRUSHI_BRANCH_MENU").map(|_| point(px(90.), px(44.))),
+            git_changes: Vec::new(),
+            git_history: Vec::new(),
+            github_slug: None,
+            branch_menu: None,
             terminal: None,
             lsp: None,
             lsp_root: None,
+            lsp_language: None,
             lsp_initialized: false,
             lsp_sent_version: u64::MAX,
             diagnostics: HashMap::new(),
@@ -535,6 +647,11 @@ impl Workspace {
         if std::env::var_os("SHIRUSHI_GIT_PANEL").is_some() {
             workspace.git_panel =
                 Some(GitPanelState { message: String::new(), branch_name: None, focus: cx.focus_handle() });
+            workspace.refresh_git_status();
+        }
+        // 開発用: SHIRUSHI_BRANCH_MENU=1 で branch/worktree メニューを開いた状態で撮る。
+        if std::env::var_os("SHIRUSHI_BRANCH_MENU").is_some() {
+            workspace.toggle_branch_menu(point(px(90.), px(44.)), cx);
         }
         // 開発用: SHIRUSHI_TERMINAL=1 で下ドックのターミナルを開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_TERMINAL").is_some() {
@@ -579,13 +696,35 @@ impl Workspace {
         self.projects.get(self.active)
     }
 
+    fn active_worktree(&self) -> Option<Rc<Worktree>> {
+        self.active_slot().map(|slot| slot.worktree.clone())
+    }
+
     /// アクティブプロジェクトの git 状態を読み直す（ツリー/タブの色分け）。git 無し/失敗は空。
     /// ディスク状態を反映するので、切替・オープン時に呼ぶ（編集中の未保存差分は gutter が担う）。
     fn refresh_git_status(&mut self) {
-        self.git_status = self
-            .active_slot()
-            .map(|slot| project::git_status(slot.worktree.root()).into_iter().collect())
-            .unwrap_or_default();
+        let Some(worktree) = self.active_worktree() else {
+            self.git_status.clear();
+            self.git_changes.clear();
+            self.git_history.clear();
+            self.github_slug = None;
+            return;
+        };
+        self.git_status = worktree.git_status().into_iter().collect();
+        let branch = worktree.git_current_branch();
+        if let Some(slot) = self.projects.get_mut(self.active) {
+            slot.branch = branch;
+        }
+        if self.git_panel.is_some() {
+            self.git_changes = worktree.git_changes();
+            self.git_history = worktree.git_log_graph(30);
+            // origin が GitHub かは滅多に変わらないが、パネル更新時にまとめて拾う。
+            self.github_slug = project::github_slug_on(worktree.host().as_ref(), worktree.root());
+        } else {
+            self.git_changes.clear();
+            self.git_history.clear();
+            self.github_slug = None;
+        }
     }
 
     /// git 状態の色（UI-SPEC §1.3: 色は識別に集約。theme の診断/git トークンを流用）。
@@ -612,7 +751,16 @@ impl Workspace {
 
     /// titlebar の ⎇ クリックで branch/worktree メニューを開閉する。
     fn toggle_branch_menu(&mut self, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
-        self.branch_menu = if self.branch_menu.is_some() { None } else { Some(position) };
+        if self.branch_menu.take().is_none() {
+            if let Some(worktree) = self.active_worktree() {
+                self.branch_menu = Some(BranchMenuState {
+                    position,
+                    current: worktree.git_current_branch(),
+                    branches: worktree.git_branches(),
+                    worktrees: worktree.git_worktrees(),
+                });
+            }
+        }
         cx.notify();
     }
 
@@ -625,10 +773,10 @@ impl Workspace {
     /// ブランチを in-place で切り替える（git switch）→ プロジェクト再読込。dirty で失敗したらログのみ。
     fn switch_branch_to(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
         self.branch_menu = None;
-        let Some(root) = self.active_slot().map(|slot| slot.worktree.root().to_path_buf()) else {
+        let Some(worktree) = self.active_worktree() else {
             return;
         };
-        match project::switch_branch(&root, &branch) {
+        match worktree.switch_branch(&branch) {
             Ok(()) => self.reload_active_project(window, cx),
             Err(error) => {
                 eprintln!("ブランチ切替に失敗: {error:#}");
@@ -641,10 +789,12 @@ impl Workspace {
     /// 既存 worktree があればそれを、無ければ `<repo親>/<repo名>-<branch>` に作って開く。
     fn open_branch_worktree(&mut self, branch: String, cx: &mut Context<Self>) {
         self.branch_menu = None;
-        let Some(root) = self.active_slot().map(|slot| slot.worktree.root().to_path_buf()) else {
+        let Some(worktree) = self.active_worktree() else {
             return;
         };
-        if let Some(existing) = project::git_worktrees(&root)
+        let root = worktree.root().to_path_buf();
+        if let Some(existing) = worktree
+            .git_worktrees()
             .into_iter()
             .find(|worktree| worktree.branch.as_deref() == Some(branch.as_str()))
         {
@@ -662,7 +812,7 @@ impl Workspace {
             return;
         };
         let target = parent.join(format!("{repo_name}-{sanitized}"));
-        match project::add_worktree(&root, &target, &branch) {
+        match worktree.add_worktree(&target, &branch) {
             Ok(()) => self.open_folder_as_window(target, cx),
             Err(error) => {
                 eprintln!("worktree 作成に失敗: {error:#}");
@@ -683,8 +833,11 @@ impl Workspace {
             slot.refresh();
         }
         let open_file = self.active_slot().and_then(|slot| slot.open_file.clone());
+        let host = self.active_worktree().map(|worktree| worktree.host().clone());
         match open_file {
-            Some(path) if path.exists() => self.open_file(path, window, cx),
+            Some(path) if host.as_ref().is_some_and(|host| host.metadata(&path).is_ok()) => {
+                self.open_file(path, window, cx)
+            }
             Some(_) => self.close_active_editor(cx),
             None => self.refresh_git_status(),
         }
@@ -693,11 +846,6 @@ impl Workspace {
     }
 
     // ── git 操作パネル（M8: ソース管理。commit / stage / push / pull / 新規ブランチ） ──
-
-    /// アクティブプロジェクトのルート（無ければ `None`）。git 操作の共通取得。
-    fn active_root(&self) -> Option<PathBuf> {
-        self.active_slot().map(|slot| slot.worktree.root().to_path_buf())
-    }
 
     /// git 操作パネルをエクスプローラと切り替える（⌃⇧G）。開くと左カラムを占有しフォーカスを取る。
     fn toggle_git_panel(&mut self, _: &ToggleGitPanel, window: &mut Window, cx: &mut Context<Self>) {
@@ -781,24 +929,24 @@ impl Workspace {
 
     /// staged 変更をコミット。staged が無ければ全変更を stage してからコミット（簡便動線）。
     fn git_commit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.active_root() else {
+        let Some(worktree) = self.active_worktree() else {
             return;
         };
         let message = self.git_panel.as_ref().map(|state| state.message.clone()).unwrap_or_default();
         if message.trim().is_empty() {
             return;
         }
-        let changes = project::git_changes(&root);
+        let changes = worktree.git_changes();
         if changes.is_empty() {
             return;
         }
         if !changes.iter().any(|change| change.staged.is_some()) {
-            if let Err(error) = project::stage_all(&root) {
+            if let Err(error) = worktree.stage_all() {
                 eprintln!("stage に失敗: {error:#}");
                 return;
             }
         }
-        match project::commit(&root, &message) {
+        match worktree.commit(&message) {
             Ok(()) => {
                 if let Some(state) = self.git_panel.as_mut() {
                     state.message.clear();
@@ -812,8 +960,8 @@ impl Workspace {
 
     /// 1 ファイルを stage。
     fn git_stage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if let Some(root) = self.active_root() {
-            if let Err(error) = project::stage_path(&root, &path) {
+        if let Some(worktree) = self.active_worktree() {
+            if let Err(error) = worktree.stage_path(&path) {
                 eprintln!("stage に失敗: {error:#}");
             }
             self.refresh_git_status();
@@ -823,8 +971,8 @@ impl Workspace {
 
     /// 1 ファイルを unstage。
     fn git_unstage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if let Some(root) = self.active_root() {
-            if let Err(error) = project::unstage_path(&root, &path) {
+        if let Some(worktree) = self.active_worktree() {
+            if let Err(error) = worktree.unstage_path(&path) {
                 eprintln!("unstage に失敗: {error:#}");
             }
             self.refresh_git_status();
@@ -834,8 +982,8 @@ impl Workspace {
 
     /// 全変更を stage。
     fn git_stage_all(&mut self, cx: &mut Context<Self>) {
-        if let Some(root) = self.active_root() {
-            if let Err(error) = project::stage_all(&root) {
+        if let Some(worktree) = self.active_worktree() {
+            if let Err(error) = worktree.stage_all() {
                 eprintln!("stage に失敗: {error:#}");
             }
             self.refresh_git_status();
@@ -858,9 +1006,11 @@ impl Workspace {
         if self.git_busy {
             return;
         }
-        let Some(root) = self.active_root() else {
+        let Some(worktree) = self.active_worktree() else {
             return;
         };
+        let root = worktree.root().to_path_buf();
+        let host = worktree.host().clone();
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -871,9 +1021,9 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     if is_push {
-                        project::push(&root)
+                        project::push_on(host.as_ref(), &root)
                     } else {
-                        project::pull(&root)
+                        project::pull_on(host.as_ref(), &root)
                     }
                 })
                 .await;
@@ -886,6 +1036,44 @@ impl Workspace {
                         eprintln!("{} に失敗: {error:#}", if is_push { "push" } else { "pull" });
                         workspace.refresh_git_status();
                     }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// GitHub PR 操作（`gh`・背景実行）。`create=true` で PR 作成ページ、false で PR/リポジトリを開く。
+    /// git と同じ host 上で走るので remote プロジェクトでもそのまま動く（ブラウザは gh に委ねる）。
+    fn github_action(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_busy {
+            return;
+        }
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let root = worktree.root().to_path_buf();
+        let host = worktree.host().clone();
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
+        };
+        self.git_busy = true;
+        cx.notify();
+        cx.spawn(async move |_workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if create {
+                        project::create_pr_on(host.as_ref(), &root)
+                    } else {
+                        project::open_pr_web_on(host.as_ref(), &root)
+                    }
+                })
+                .await;
+            let _ = handle.update(cx, |workspace, _window, cx| {
+                workspace.git_busy = false;
+                if let Err(error) = result {
+                    eprintln!("GitHub 操作に失敗: {error:#}");
                 }
                 cx.notify();
             });
@@ -919,10 +1107,10 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(root) = self.active_root() else {
+        let Some(worktree) = self.active_worktree() else {
             return;
         };
-        match project::create_branch(&root, &name) {
+        match worktree.create_branch(&name) {
             Ok(()) => {
                 if let Some(state) = self.git_panel.as_mut() {
                     state.branch_name = None;
@@ -938,8 +1126,9 @@ impl Workspace {
 
     /// ⎇ メニューからブランチを削除（未マージは git が `-d` で拒否＝安全側）。
     fn delete_git_branch(&mut self, branch: String, cx: &mut Context<Self>) {
-        if let Some(root) = self.active_root() {
-            if let Err(error) = project::delete_branch(&root, &branch, false) {
+        self.branch_menu = None;
+        if let Some(worktree) = self.active_worktree() {
+            if let Err(error) = worktree.delete_branch(&branch, false) {
                 eprintln!("ブランチ削除に失敗（未マージは別窓/worktree で対応）: {error:#}");
             }
             self.refresh_git_status();
@@ -947,34 +1136,55 @@ impl Workspace {
         }
     }
 
-    // ── LSP（rust-analyzer・M7） ──
+    // ── LSP（言語サーバ・M7。拡張子→サーバの登録式） ──
 
-    /// アクティブプロジェクト用に rust-analyzer を（必要なら）起動する。別プロジェクトなら張り替え。
+    /// アクティブファイルの言語に合った言語サーバを（必要なら）起動する。
+    /// 別プロジェクト or 別言語に移ったら張り替える。サーバ未登録の拡張子では何もしない
+    /// （既存接続は温存＝別タブに戻れば診断が残る）。
     fn ensure_lsp(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.active_slot().map(|slot| slot.worktree.root().to_path_buf()) else {
+        let Some(worktree) = self.active_worktree() else {
             return;
         };
-        if self.lsp.is_some() && self.lsp_root.as_deref() == Some(root.as_path()) {
+        let root = worktree.root().to_path_buf();
+        let Some(path) = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.read(cx).buffer().path().map(Path::to_path_buf))
+        else {
+            return;
+        };
+        let Some(server) = language_server_for(&path, worktree.host().is_remote()) else {
+            return; // この拡張子に LSP は無い（＝静かに素通り）
+        };
+        // 同じ root × 同じ言語なら張り替え不要。
+        if self.lsp.is_some()
+            && self.lsp_root.as_deref() == Some(root.as_path())
+            && self.lsp_language == Some(server.language_id)
+        {
             return;
         }
         // 旧接続を畳む（Drop で kill）。
         self.lsp = None;
         self._lsp_pump = None;
         self.lsp_initialized = false;
+        self.lsp_sent_version = u64::MAX;
         self.diagnostics.clear();
-        let Some(server) = lsp_server_path() else {
-            return;
-        };
-        let (client, notifications) = match lang::lsp::LspClient::new(&server, &root) {
+        let (client, notifications) = match lang::lsp::LspClient::new_on(
+            worktree.host().clone(),
+            &server.command,
+            &server.args,
+            &root,
+        ) {
             Ok(pair) => pair,
             Err(error) => {
-                eprintln!("LSP の起動に失敗: {error:#}");
+                eprintln!("LSP の起動に失敗（{}）: {error:#}", server.language_id);
                 return;
             }
         };
         let init_rx = client.initialize_request(&root);
         self.lsp = Some(client);
         self.lsp_root = Some(root);
+        self.lsp_language = Some(server.language_id);
         // pump: initialize 応答 → initialized + 現在ファイル didOpen → 以後 publishDiagnostics を処理。
         self._lsp_pump = Some(cx.spawn(async move |workspace, cx| {
             let _ = init_rx.await; // capabilities は今は使わない（起動確認のみ）
@@ -1001,22 +1211,27 @@ impl Workspace {
         self.lsp_did_open_active(cx);
     }
 
-    /// 現在開いている rust ファイルを didOpen する。
+    /// 現在開いているファイルを didOpen する（稼働中サーバが担当する言語に限る）。
     fn lsp_did_open_active(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.clone() else {
             return;
         };
         let info = {
             let view = editor.read(cx);
-            view.buffer()
-                .path()
-                .filter(|path| is_rust(path))
-                .map(|path| (path.to_path_buf(), view.buffer().version(), view.buffer().text()))
+            match view.buffer().path() {
+                // 稼働中サーバが担当する言語のときだけ開く。
+                Some(path) => language_server_for(path, view.buffer().host().is_remote())
+                    .filter(|server| self.lsp_language == Some(server.language_id))
+                    .map(|server| {
+                        (path.to_path_buf(), server.language_id, view.buffer().version(), view.buffer().text())
+                    }),
+                None => None,
+            }
         };
-        if let Some((path, version, text)) = info {
+        if let Some((path, language_id, version, text)) = info {
             self.lsp_sent_version = version;
             if let Some(lsp) = &self.lsp {
-                lsp.did_open(&path, "rust", version as i32, &text);
+                lsp.did_open(&path, language_id, version as i32, &text);
             }
         }
     }
@@ -1074,7 +1289,9 @@ impl Workspace {
             } else {
                 view.buffer()
                     .path()
-                    .filter(|path| is_rust(path))
+                    .filter(|path| {
+                        language_server_for(path, view.buffer().host().is_remote()).is_some()
+                    })
                     .map(|path| (path.to_path_buf(), version, view.buffer().text()))
             }
         };
@@ -1113,7 +1330,10 @@ impl Workspace {
         };
         let info = {
             let view = editor.read(cx);
-            view.buffer().path().filter(|path| is_rust(path)).map(|path| {
+            view.buffer()
+                .path()
+                .filter(|path| language_server_for(path, view.buffer().host().is_remote()).is_some())
+                .map(|path| {
                 let (line, character) = view.cursor_lsp_position();
                 (path.to_path_buf(), line, character)
             })
@@ -1171,7 +1391,10 @@ impl Workspace {
         let info = {
             let view = editor.read(cx);
             let position = view.caret_window_position();
-            view.buffer().path().filter(|path| is_rust(path)).map(|path| {
+            view.buffer()
+                .path()
+                .filter(|path| language_server_for(path, view.buffer().host().is_remote()).is_some())
+                .map(|path| {
                 let (line, character) = view.cursor_lsp_position();
                 (path.to_path_buf(), line, character, position)
             })
@@ -1267,6 +1490,15 @@ impl Workspace {
             return;
         }
         self.active = index;
+        // process/PTY は project の host と不可分。旧 host の session を次の project へ持ち越さない。
+        self.terminal = None;
+        self.lsp = None;
+        self._lsp_pump = None;
+        self.lsp_root = None;
+        self.lsp_language = None;
+        self.lsp_initialized = false;
+        self.lsp_sent_version = u64::MAX;
+        self.diagnostics.clear();
         // 切替先プロジェクトの開ファイルを復元（無ければエディタを閉じる）
         let open_file = self.projects[index].open_file.clone();
         match open_file {
@@ -1278,13 +1510,16 @@ impl Workspace {
         }
         self.refresh_git_status();
         self.update_agent_destination(cx);
+        if self.show_bottom {
+            self.ensure_terminal(cx);
+        }
         self.save_state();
         cx.notify();
     }
 
     /// Agent パネルの宛先チップにアクティブプロジェクト名・ブランチを反映する。
     fn update_agent_destination(&self, cx: &mut Context<Self>) {
-        let (name, branch, cwd, files) = match self.active_slot() {
+        let (name, branch, host, cwd, files) = match self.active_slot() {
             Some(slot) => {
                 // Add context の候補（プロジェクト先頭 60 ファイルの相対パス）。
                 let files = slot
@@ -1295,15 +1530,22 @@ impl Workspace {
                     .collect();
                 (
                     slot.name.clone(),
-                    git_branch(slot.worktree.root()).map(SharedString::from),
+                    slot.branch.clone().map(SharedString::from),
+                    slot.worktree.host().clone(),
                     Some(slot.worktree.root().to_path_buf()),
                     files,
                 )
             }
-            None => (SharedString::from("—"), None, None, Vec::new()),
+            None => (
+                SharedString::from("—"),
+                None,
+                host::LocalHost::shared(),
+                None,
+                Vec::new(),
+            ),
         };
         self.agent_panel
-            .update(cx, |panel, cx| panel.set_destination(name, branch, cwd, files, cx));
+            .update(cx, |panel, cx| panel.set_destination(name, branch, host, cwd, files, cx));
     }
 
     // ── タブ/スレッドのショートカット（⌘W / ⌘⇧A） ──
@@ -1398,9 +1640,22 @@ impl Workspace {
         if let Some(terminal) = &self.terminal {
             return terminal.clone();
         }
-        let cwd = self.active_slot().map(|slot| slot.worktree.root().to_path_buf());
+        let (cwd, shell) = self
+            .active_slot()
+            .map(|slot| {
+                let root = slot.worktree.root().to_path_buf();
+                match slot.worktree.host().terminal_launch(&root) {
+                    Ok(Some(launch)) => (None, Some((launch.program, launch.args))),
+                    Ok(None) => (Some(root), None),
+                    Err(error) => {
+                        eprintln!("remote terminal を起動できない: {error:#}");
+                        (None, None)
+                    }
+                }
+            })
+            .unwrap_or((None, None));
         let theme = self.theme.clone();
-        let terminal = cx.new(|cx| TerminalView::new(cwd, theme, cx));
+        let terminal = cx.new(|cx| TerminalView::new_with_shell(cwd, shell, theme, cx));
         self.terminal = Some(terminal.clone());
         terminal
     }
@@ -1443,7 +1698,10 @@ impl Workspace {
         else {
             return;
         };
-        let buffer = match Buffer::from_file(&path) {
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let buffer = match Buffer::from_host(worktree.host().clone(), &path) {
             Ok(buffer) => buffer,
             Err(error) => {
                 eprintln!("分割ペインを開けない: {error:#}");
@@ -1531,6 +1789,16 @@ impl Workspace {
 
     /// フォルダを**新規ウィンドウ**でプロジェクトとして開く（ウィンドウモデルの核）。
     fn open_folder_as_window(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let source = match self.active_worktree() {
+            Some(worktree) => match worktree.host().host_for_project(&path) {
+                Ok(host) => ProjectSource::new(host, path),
+                Err(error) => {
+                    eprintln!("別 project を開けない: {error:#}");
+                    return;
+                }
+            },
+            None => ProjectSource::local(path),
+        };
         let theme = self.theme.clone();
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let opened = cx.open_window(
@@ -1545,7 +1813,14 @@ impl Workspace {
                 ..Default::default()
             },
             move |_window, cx| {
-                cx.new(|cx| Workspace::new(vec![path.clone()], theme.clone(), state_path(), cx))
+                cx.new(|cx| {
+                    Workspace::new_sources(
+                        vec![source.clone()],
+                        theme.clone(),
+                        state_path(),
+                        cx,
+                    )
+                })
             },
         );
         if let Err(error) = opened {
@@ -1563,7 +1838,10 @@ impl Workspace {
     }
 
     fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let buffer = match Buffer::from_file(&path) {
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let buffer = match Buffer::from_host(worktree.host().clone(), &path) {
             Ok(buffer) => buffer,
             Err(error) => {
                 eprintln!("ファイルを開けない: {error:#}");
@@ -1585,13 +1863,18 @@ impl Workspace {
             slot.open_file = Some(path);
         }
         self.refresh_git_status();
-        // LSP: rust ファイルなら rust-analyzer を起動 + didOpen（初期化済みなら即 didOpen）。
-        let is_rust_file = self
+        // LSP: この拡張子にサーバがあれば起動 + didOpen（初期化済みなら即 didOpen）。
+        let has_language_server = self
             .editor
             .as_ref()
-            .and_then(|editor| editor.read(cx).buffer().path().map(is_rust))
+            .and_then(|editor| {
+                let view = editor.read(cx);
+                view.buffer().path().map(|path| {
+                    language_server_for(path, view.buffer().host().is_remote()).is_some()
+                })
+            })
             .unwrap_or(false);
-        if is_rust_file {
+        if has_language_server {
             self.ensure_lsp(cx);
             if self.lsp_initialized {
                 self.lsp_did_open_active(cx);
@@ -1618,6 +1901,7 @@ impl Workspace {
                 .map(|slot| PersistedProject {
                     root: slot.worktree.root().to_path_buf(),
                     open_file: slot.open_file.clone(),
+                    remote_uri: slot.worktree.host().project_uri(slot.worktree.root()),
                 })
                 .collect(),
             active: self.active,
@@ -1834,6 +2118,8 @@ impl Workspace {
                     results_query: None,
                     selected: 0,
                     error: None,
+                    running: false,
+                    active_search: None,
                     focus: focus.clone(),
                 })
             }
@@ -1873,38 +2159,82 @@ impl Workspace {
                 state.results_query = Some(query_text);
                 state.error = None;
                 state.selected = 0;
+                state.running = false;
+                state.active_search = None;
             }
             cx.notify();
             return;
         }
-        // 対象ファイル（アクティブプロジェクト配下・gitignore 準拠）。
-        let paths: Vec<PathBuf> = self
-            .active_slot()
-            .map(|slot| {
-                slot.worktree
-                    .all_files(SEARCH_FILE_LIMIT)
-                    .into_iter()
-                    .map(|(path, _)| path)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let outcome =
-            search::SearchQuery::new(&query_text, is_regex, case_sensitive).map(|query| query.search_files(&paths));
-        if let Some(state) = self.search_panel.as_mut() {
-            match outcome {
-                Ok(results) => {
-                    state.results = results;
-                    state.error = None;
-                }
-                Err(error) => {
+        let query = match search::SearchQuery::new(&query_text, is_regex, case_sensitive) {
+            Ok(query) => query,
+            Err(error) => {
+                if let Some(state) = self.search_panel.as_mut() {
                     state.results.clear();
+                    state.results_query = Some(query_text);
                     state.error = Some(SharedString::from(format!("{error}")));
+                    state.selected = 0;
+                    state.running = false;
+                    state.active_search = None;
                 }
+                cx.notify();
+                return;
             }
-            state.results_query = Some(query_text);
-            state.selected = 0;
+        };
+        // 対象 host/root だけを background task へ渡す。UI thread では remote RPC を待たない。
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let host = worktree.host().clone();
+        let root = worktree.root().to_path_buf();
+        let search_id = self.next_search_id;
+        self.next_search_id = self.next_search_id.wrapping_add(1).max(1);
+        if let Some(state) = self.search_panel.as_mut() {
+            state.running = true;
+            state.active_search = Some(search_id);
+            state.error = None;
         }
         cx.notify();
+        cx.spawn(async move |workspace, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    query.try_search_project_on(
+                        host.as_ref(),
+                        &root,
+                        SEARCH_FILE_LIMIT,
+                        SEARCH_MAX_ROWS,
+                    )
+                })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                let Some(state) = workspace.search_panel.as_mut() else {
+                    return;
+                };
+                if state.active_search != Some(search_id)
+                    || state.query != query_text
+                    || state.is_regex != is_regex
+                    || state.case_sensitive != case_sensitive
+                {
+                    return;
+                }
+                match outcome {
+                    Ok(results) => {
+                        state.results = results;
+                        state.error = None;
+                    }
+                    Err(error) => {
+                        state.results.clear();
+                        state.error = Some(SharedString::from(format!("{error:#}")));
+                    }
+                }
+                state.results_query = Some(query_text);
+                state.selected = 0;
+                state.running = false;
+                state.active_search = None;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 選択中マッチをキーボードで動かす（結果全体を平坦に巡回）。
@@ -2707,6 +3037,7 @@ impl Workspace {
 
         // 見出し（件数 / エラー / ヒント）。
         let summary: SharedString = match &state.error {
+            _ if state.running => SharedString::from("検索中…"),
             Some(error) => error.clone(),
             None if state.results_query.is_some() => {
                 SharedString::from(format!("{} 件 / {} ファイル", state.total_matches(), state.results.len()))
@@ -3036,7 +3367,8 @@ impl Workspace {
             return div().w(px(self.explorer_width)).h_full().flex_none().bg(bg1).into_any_element();
         };
         let focus = state.focus.clone();
-        let Some(root) = self.active_root() else {
+        let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        if self.active_slot().is_none() {
             return div()
                 .w(px(self.explorer_width))
                 .h_full()
@@ -3048,10 +3380,9 @@ impl Workspace {
                 .on_key_down(cx.listener(Self::on_git_key_down))
                 .child(div().p(px(12.)).text_size(px(11.5)).text_color(fg2).child("プロジェクトがありません"))
                 .into_any_element();
-        };
-        let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
-        let branch = project::git_current_branch(&root);
-        let changes = project::git_changes(&root);
+        }
+        let branch = self.active_slot().and_then(|slot| slot.branch.clone());
+        let changes = &self.git_changes;
         let naming = state.branch_name.is_some();
 
         // ── ヘッダ（タイトル + ブランチ + ＋ + ×）──
@@ -3090,6 +3421,44 @@ impl Workspace {
                                 .child(SharedString::from(branch)),
                         ),
                 )
+            })
+            // GitHub 連携（origin が GitHub のときだけ。PR 作成 / PR・リポジトリを開く）
+            .when(self.github_slug.is_some(), |element| {
+                element
+                    .child(
+                        div()
+                            .id("git-pr-create")
+                            .flex_none()
+                            .px(px(5.))
+                            .rounded(px(4.))
+                            .text_size(px(10.5))
+                            .text_color(fg2)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(bg2).text_color(fg0))
+                            .child("PR")
+                            .tooltip(Tooltip::text("GitHub で PR を作成（gh pr create --web）", theme.clone()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| this.github_action(true, window, cx)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("git-pr-open")
+                            .flex_none()
+                            .px(px(5.))
+                            .rounded(px(4.))
+                            .text_size(px(12.))
+                            .text_color(fg2)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(bg2).text_color(fg0))
+                            .child("↗")
+                            .tooltip(Tooltip::text("GitHub で PR / リポジトリを開く", theme.clone()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| this.github_action(false, window, cx)),
+                            ),
+                    )
             })
             .child(
                 div()
@@ -3241,7 +3610,7 @@ impl Workspace {
             .when(!naming, |element| element.child(actions))
             .child(body)
             .child(div().h(px(1.)).flex_none().bg(border))
-            .child(self.render_git_history(&root))
+            .child(self.render_git_history(&self.git_history))
             .into_any_element()
     }
 
@@ -3396,10 +3765,9 @@ impl Workspace {
 
     /// git 履歴（コミットグラフ・M8）。レーン線＝矩形（railway）で描き、色はプロジェクト色
     /// パレットに乗せる（ブランチ＝色。「色による方向感覚」）。点/線/コネクタは絶対配置の div。
-    fn render_git_history(&self, root: &Path) -> impl IntoElement {
+    fn render_git_history(&self, commits: &[GraphCommit]) -> impl IntoElement {
         let theme = self.theme.clone();
         let accent = self.accent();
-        let commits = project::git_log_graph(root, 30);
         // 描画幅のための最大レーン。
         let max_lane = commits
             .iter()
@@ -3434,7 +3802,7 @@ impl Workspace {
                 .child("履歴"),
         );
 
-        for commit in &commits {
+        for commit in commits {
             // ── グラフセル（点 + 縦レーン + 横コネクタ）──
             let mut cell = div().relative().flex_none().h(px(row_h)).w(px(cell_w));
             for &lane in &commit.lanes_in {
@@ -3531,14 +3899,14 @@ impl Workspace {
     }
 
     fn render_branch_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let position = *self.branch_menu.as_ref()?;
+        let menu = self.branch_menu.as_ref()?;
+        let position = menu.position;
         let slot = self.active_slot()?;
         let theme = self.theme.clone();
         let accent = slot.color;
-        let root = slot.worktree.root().to_path_buf();
-        let current = project::git_current_branch(&root);
-        let branches = project::git_branches(&root);
-        let worktrees = project::git_worktrees(&root);
+        let current = menu.current.clone();
+        let branches = menu.branches.clone();
+        let worktrees = menu.worktrees.clone();
 
         let (bg2, bg3, border, fg0, fg1, fg2) =
             (theme.bg2, theme.bg3, theme.border, theme.fg0, theme.fg1, theme.fg2);
@@ -3646,6 +4014,7 @@ impl Workspace {
         }
 
         // worktree セクション（現在の作業ツリー以外）。
+        let root = slot.worktree.root();
         let others: Vec<_> = worktrees.into_iter().filter(|worktree| worktree.path != root).collect();
         if !others.is_empty() {
             menu_box = menu_box
@@ -3801,7 +4170,7 @@ impl Workspace {
             .active_slot()
             .map(|slot| slot.name.clone())
             .unwrap_or_else(|| SharedString::from("—"));
-        let branch = self.active_slot().and_then(|slot| git_branch(slot.worktree.root()));
+        let branch = self.active_slot().and_then(|slot| slot.branch.clone());
 
         let mut inner = div().flex().items_center().gap(px(7.)).py(px(3.)).px(px(9.)).child(
             div()
@@ -4122,7 +4491,13 @@ impl Workspace {
 
     fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let branch = self.active_slot().and_then(|slot| git_branch(slot.worktree.root()));
+        let branch = self.active_slot().and_then(|slot| slot.branch.clone());
+        let remote_host = self.active_slot().and_then(|slot| {
+            slot.worktree
+                .host()
+                .is_remote()
+                .then(|| SharedString::from(slot.worktree.host().display_name().to_string()))
+        });
         let change_count = self.git_status.len();
         let (cursor, language) = match &self.editor {
             Some(editor) => {
@@ -4140,6 +4515,23 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_3()
+            .when_some(remote_host, |element, remote_host| {
+                let tooltip = format!("Remote SSH: {remote_host}");
+                element.child(
+                    div()
+                        .id("statusbar-remote-host")
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .max_w(px(180.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_color(theme.fg0)
+                        .child(div().text_color(theme.ok).child("SSH"))
+                        .child(remote_host)
+                        .tooltip(Tooltip::text(tooltip, theme.clone())),
+                )
+            })
             // ⎇ ブランチ + 変更件数バッジ。クリックで git パネル（ソース管理）を開閉。
             .when_some(branch, |element, branch| {
                 let label = if change_count > 0 {
@@ -4197,9 +4589,76 @@ impl Workspace {
     }
 }
 
-/// rust ファイルか（拡張子 `.rs`）。
-fn is_rust(path: &Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+/// 起動する言語サーバの記述子（コマンド + 引数 + LSP の languageId）。
+struct LanguageServer {
+    language_id: &'static str,
+    command: PathBuf,
+    args: Vec<&'static str>,
+}
+
+/// ファイルの拡張子から言語サーバを引く（登録式。実行ファイルが見つからなければ `None`）。
+/// **transport（`lang::lsp`）は言語非依存**なので、ここに 1 行足すだけで言語が増える。
+/// 診断/補完/定義の配線は LSP 標準なので変更不要（＝「拡張機構なしで N 言語」）。
+fn language_server_for(path: &Path, remote: bool) -> Option<LanguageServer> {
+    let extension = path.extension().and_then(|extension| extension.to_str())?.to_ascii_lowercase();
+    let server = |language_id, command, args: &[&'static str]| LanguageServer {
+        language_id,
+        command,
+        args: args.to_vec(),
+    };
+    let executable = |binary: &str| {
+        if remote {
+            Some(PathBuf::from(binary))
+        } else {
+            which(binary)
+        }
+    };
+    match extension.as_str() {
+        "rs" => {
+            if remote {
+                Some(server("rust", PathBuf::from("rust-analyzer"), &[]))
+            } else {
+                lsp_server_path().map(|command| server("rust", command, &[]))
+            }
+        }
+        "ts" | "tsx" | "mts" | "cts" => {
+            executable("typescript-language-server")
+                .map(|command| server("typescript", command, &["--stdio"]))
+        }
+        "js" | "jsx" | "mjs" | "cjs" => {
+            executable("typescript-language-server")
+                .map(|command| server("javascript", command, &["--stdio"]))
+        }
+        "py" | "pyi" => executable("pyright-langserver")
+            .map(|command| server("python", command, &["--stdio"]))
+            .or_else(|| executable("pylsp").map(|command| server("python", command, &[]))),
+        "go" => executable("gopls").map(|command| server("go", command, &[])),
+        "c" | "h" => executable("clangd").map(|command| server("c", command, &[])),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => {
+            executable("clangd").map(|command| server("cpp", command, &[]))
+        }
+        "lua" => executable("lua-language-server").map(|command| server("lua", command, &[])),
+        "zig" => executable("zls").map(|command| server("zig", command, &[])),
+        _ => None,
+    }
+}
+
+/// PATH（＋ GUI 起動で欠けがちな共通 bin ディレクトリ）から実行ファイルを探す。
+/// rust-analyzer と同じく、Finder 起動だと PATH が痩せるため候補ディレクトリを補う。
+fn which(binary: &str) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for suffix in [".local/bin", ".volta/bin", ".bun/bin", ".npm-global/bin", ".cargo/bin", ".deno/bin"] {
+            dirs.push(home.join(suffix));
+        }
+    }
+    for base in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+        dirs.push(PathBuf::from(base));
+    }
+    dirs.into_iter().map(|dir| dir.join(binary)).find(|candidate| candidate.is_file())
 }
 
 /// rust-analyzer の実行パス。**rustup ツールチェーン内の実バイナリを優先**する
@@ -4232,21 +4691,6 @@ fn lsp_server_path() -> Option<PathBuf> {
         }
     }
     Some(PathBuf::from("rust-analyzer")) // PATH 上に任せる
-}
-
-/// プロジェクトルート（またはその祖先）の `.git/HEAD` から現在ブランチ名を読む。無ければ `None`。
-/// M8 の本格 VCS crate までの暫定（`ref: refs/heads/<branch>` の 1 行を解釈するだけ）。
-fn git_branch(root: &Path) -> Option<String> {
-    let mut dir = Some(root);
-    while let Some(current) = dir {
-        let head = current.join(".git/HEAD");
-        if let Ok(content) = std::fs::read_to_string(&head) {
-            let branch = content.trim().strip_prefix("ref: refs/heads/")?;
-            return Some(branch.to_string());
-        }
-        dir = current.parent();
-    }
-    None
 }
 
 /// パンくず文字列。ファイルがプロジェクト配下ならルート相対の各要素を ` › ` で連結。

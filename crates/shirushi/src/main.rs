@@ -8,21 +8,45 @@ use gpui::{
     prelude::*, px, size,
 };
 use gpui_platform::application;
+use host::{RemoteHost, SshProject};
 use std::path::{Path, PathBuf};
 
 /// MCP サーバ（`shirushi mcp`）。AI エージェントがプロジェクトを操作する口。
 mod mcp;
 use std::time::Instant;
-use workspace::Workspace;
+use workspace::{ProjectSource, Workspace};
 
 actions!(shirushi, [Quit]);
 
-/// コマンドライン引数（or 前回状態）から (プロジェクトルート群, 各プロジェクトの開ファイル) を決める。
-fn resolve_projects() -> (Vec<PathBuf>, Vec<Option<PathBuf>>) {
-    let mut roots = Vec::new();
-    let mut open_files = Vec::new();
+/// SSH project を接続して source にする。互換 server が無ければ bootstrap が自動配備する。
+fn connect_ssh_project(uri: &str) -> anyhow::Result<ProjectSource> {
+    let project = SshProject::parse(uri)?;
+    let server_command = std::env::var("SHIRUSHI_REMOTE_SERVER_COMMAND")
+        .unwrap_or_else(|_| "shirushi-remote-server".to_string());
+    let host = RemoteHost::connect_ssh(&project, &server_command)?;
+    let root = host.root().to_path_buf();
+    Ok(ProjectSource::new(host, root))
+}
 
-    for arg in std::env::args().skip(1) {
+/// コマンドライン引数（or 前回状態）から host 付き project と開ファイルを決める。
+fn resolve_projects() -> (Vec<ProjectSource>, Vec<Option<PathBuf>>, usize) {
+    let mut sources = Vec::new();
+    let mut open_files = Vec::new();
+    let mut active = 0;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has_explicit_args = !args.is_empty();
+
+    for arg in args {
+        if arg.starts_with("ssh://") {
+            match connect_ssh_project(&arg) {
+                Ok(source) => {
+                    sources.push(source);
+                    open_files.push(None);
+                }
+                Err(error) => eprintln!("Remote SSH 接続に失敗（スキップ）: {error:#}"),
+            }
+            continue;
+        }
         let path = PathBuf::from(&arg);
         if path.is_file() {
             let file = std::fs::canonicalize(&path).unwrap_or(path);
@@ -30,10 +54,10 @@ fn resolve_projects() -> (Vec<PathBuf>, Vec<Option<PathBuf>>) {
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."));
-            roots.push(parent);
+            sources.push(ProjectSource::local(parent));
             open_files.push(Some(file));
         } else if path.is_dir() {
-            roots.push(std::fs::canonicalize(&path).unwrap_or(path));
+            sources.push(ProjectSource::local(std::fs::canonicalize(&path).unwrap_or(path)));
             open_files.push(None);
         } else {
             eprintln!("見つからない（スキップ）: {arg}");
@@ -41,22 +65,36 @@ fn resolve_projects() -> (Vec<PathBuf>, Vec<Option<PathBuf>>) {
     }
 
     // 引数無し → 前回状態を復元
-    if roots.is_empty() {
+    if sources.is_empty() && !has_explicit_args {
         if let Some(state_path) = workspace::state_path() {
-            if let Some((saved_roots, _active)) = workspace::load_state(&state_path) {
-                let files = Workspace::persisted_open_files(&state_path);
-                return (saved_roots, files);
+            if let Some((saved_projects, saved_active)) = workspace::load_saved_state(&state_path) {
+                for (saved_index, saved) in saved_projects.into_iter().enumerate() {
+                    let source = match saved.remote_uri.as_deref() {
+                        Some(uri) => connect_ssh_project(uri),
+                        None => Ok(ProjectSource::local(saved.root)),
+                    };
+                    match source {
+                        Ok(source) => {
+                            if saved_index == saved_active {
+                                active = sources.len();
+                            }
+                            sources.push(source);
+                            open_files.push(saved.open_file);
+                        }
+                        Err(error) => eprintln!("前回の Remote SSH 接続を復元できない: {error:#}"),
+                    }
+                }
             }
         }
     }
     // 最後の砦: カレントディレクトリ
-    if roots.is_empty() {
+    if sources.is_empty() && !has_explicit_args {
         if let Ok(cwd) = std::env::current_dir() {
-            roots.push(cwd);
+            sources.push(ProjectSource::local(cwd));
             open_files.push(None);
         }
     }
-    (roots, open_files)
+    (sources, open_files, active)
 }
 
 /// 同梱フォントを読み込む。UI = IBM Plex Sans JP、コード = Guguru Sans Code（Google Sans Code +
@@ -145,11 +183,15 @@ fn main() {
         i18n::init_from_os_locale();
 
         // プロジェクトを解決（roots + 起動時に開くファイル）。先頭 root を project 設定の対象にする。
-        let (roots, open_files) = resolve_projects();
+        let (sources, open_files, active_project) = resolve_projects();
 
         // 設定（default → user → project）を **反応的 global** に載せてファイル監視を開始する。
         // 以後 UI トグル / CLI / MCP / 手編集はすべてこの 1 つの store を更新し、live で波及する。
-        settings::init(settings_core::user_settings_path(), roots.first().cloned(), cx);
+        let local_settings_root = sources
+            .first()
+            .filter(|source| !source.is_remote())
+            .map(|source| source.root().to_path_buf());
+        settings::init(settings_core::user_settings_path(), local_settings_root, cx);
         let settings = settings::get(cx);
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);
@@ -171,7 +213,7 @@ fn main() {
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
 
-        let build_roots = roots.clone();
+        let build_sources = sources.clone();
         let build_theme = theme.clone();
         let open = cx.open_window(
             WindowOptions {
@@ -191,8 +233,9 @@ fn main() {
             },
             move |_window, cx| {
                 cx.new(|cx| {
-                    Workspace::new(
-                        build_roots.clone(),
+                    Workspace::new_sources_with_active(
+                        build_sources.clone(),
+                        active_project,
                         build_theme.clone(),
                         workspace::state_path(),
                         cx,
