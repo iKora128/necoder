@@ -6,8 +6,8 @@
 
 use gpui::{
     Animation, AnimationExt, AnyView, App, BoxShadow, Context, EventEmitter, FocusHandle, Focusable,
-    Hsla, IntoElement, KeyDownEvent, Render, SharedString, Window, div, ease_out_quint, hsla,
-    prelude::*, px,
+    Hsla, IntoElement, KeyDownEvent, MouseButton, Render, SharedString, Window, div, ease_out_quint,
+    hsla, prelude::*, px,
 };
 use std::time::Duration;
 use theme_core::Theme;
@@ -233,6 +233,11 @@ impl Render for Picker {
             .pt(px(120.))
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
+            // モーダル外（背景）クリックで閉じる（ESC と同じ Dismissed）。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _event, _window, cx| cx.emit(PickerEvent::Dismissed)),
+            )
             .child(
                 div()
                     .w(px(560.))
@@ -242,6 +247,11 @@ impl Render for Picker {
                     .rounded(px(12.))
                     .border_1()
                     .border_color(theme.border)
+                    // モーダル箱の中のクリックは背景へ伝播させない（閉じない）。
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _event, _window, cx| cx.stop_propagation()),
+                    )
                     // 入力行
                     .child(
                         div()
