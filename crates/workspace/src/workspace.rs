@@ -35,6 +35,7 @@ actions!(
         ToggleTerminal,
         GoToDefinition,
         TriggerCompletion,
+        SplitRight,
         CloseTab,
         NewThread,
         // アクティブ (project, branch) を新しいウィンドウで開く（⌘⇧N。ウィンドウモデル §5）。
@@ -338,6 +339,8 @@ pub struct Workspace {
     projects: Vec<ProjectSlot>,
     active: usize,
     editor: Option<Entity<EditorView>>,
+    // 右分割ペイン（⌘\ で開閉。独立エディタ＝比較・参照用の副ビュー。LSP/統合は主ペイン=editor 側）。
+    split_editor: Option<Entity<EditorView>>,
     agent_panel: Entity<AgentPanel>,
     theme: Theme,
     focus_handle: FocusHandle,
@@ -463,6 +466,7 @@ impl Workspace {
             projects,
             active: 0,
             editor: None,
+            split_editor: None,
             agent_panel,
             theme,
             focus_handle: cx.focus_handle(),
@@ -1134,12 +1138,54 @@ impl Workspace {
     /// アクティブタブ（＝現在のエディタ）を閉じる。
     fn close_active_editor(&mut self, cx: &mut Context<Self>) {
         self.editor = None;
+        self.split_editor = None; // 主ペインを閉じたら分割も畳む
         self._editor_observation = None;
         if let Some(slot) = self.projects.get_mut(self.active) {
             slot.open_file = None;
             slot.selected = None;
         }
         self.save_state();
+        cx.notify();
+    }
+
+    /// 右分割ペインを開閉する（⌘\）。開くときは主ペインの開いているファイルを独立エディタで複製する
+    /// （比較・参照用の副ビュー。LSP/保存の統合は主ペイン=editor 側が担う）。
+    fn toggle_split(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.split_editor.is_some() {
+            self.close_split(window, cx);
+            return;
+        }
+        let Some(path) = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.read(cx).buffer().path().map(Path::to_path_buf))
+        else {
+            return;
+        };
+        let buffer = match Buffer::from_file(&path) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                eprintln!("分割ペインを開けない: {error:#}");
+                return;
+            }
+        };
+        let theme = self.theme.clone();
+        let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let split = cx.new(|cx| EditorView::new(buffer, theme, accent, cx));
+        let handle = split.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        self.split_editor = Some(split);
+        cx.notify();
+    }
+
+    fn close_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.split_editor.take().is_none() {
+            return;
+        }
+        if let Some(editor) = &self.editor {
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
         cx.notify();
     }
 
@@ -1271,6 +1317,10 @@ impl Workspace {
             }
             // 既知の診断があれば即反映。
             self.push_active_diagnostics(cx);
+        }
+        // 開発用: SHIRUSHI_SPLIT=1 で右分割ペインを開いた状態で撮る。
+        if self.split_editor.is_none() && std::env::var_os("SHIRUSHI_SPLIT").is_some() {
+            self.toggle_split(&SplitRight, window, cx);
         }
         self.save_state();
         cx.notify();
@@ -3040,9 +3090,15 @@ impl Workspace {
 
     // ── タブ列・パンくず（UI-SPEC §5） ──
 
-    fn render_tabstrip(&self, editor: &Entity<EditorView>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tabstrip(
+        &self,
+        editor: &Entity<EditorView>,
+        is_split: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = self.theme.clone();
         let accent = self.accent();
+        let pane = is_split as usize; // ElementId を主/分割で一意にする
         let view = editor.read(cx);
         let name = view
             .buffer()
@@ -3055,10 +3111,10 @@ impl Workspace {
         let status = view.buffer().path().and_then(|path| self.git_status.get(path).copied());
         let name_color = status.map(|status| Self::git_tint(&theme, status)).unwrap_or(theme.fg0);
         // ファイルが変わったら（キーが変わる）タブが一度だけ fade-in する。
-        let tab_key = SharedString::from(format!("editor-tab-appear-{name}"));
+        let tab_key = SharedString::from(format!("editor-tab-appear-{pane}-{name}"));
 
         let tab = div()
-            .id("editor-tab")
+            .id(("editor-tab", pane))
             .flex()
             .flex_col()
             .h_full()
@@ -3084,15 +3140,24 @@ impl Workspace {
                     .child(div().text_color(name_color).child(SharedString::from(name)))
                     .child(
                         div()
-                            .id("close-tab")
+                            .id(("close-tab", pane))
                             .text_color(theme.fg2)
                             .cursor_pointer()
                             .hover(|style| style.text_color(theme.fg0))
                             .child("×")
-                            .tooltip(Tooltip::text("閉じる  ⌘W", theme.clone()))
+                            .tooltip(Tooltip::text(
+                                if is_split { "分割を閉じる  ⌘\\" } else { "閉じる  ⌘W" },
+                                theme.clone(),
+                            ))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, _, _window, cx| this.close_active_editor(cx)),
+                                cx.listener(move |this, _, window, cx| {
+                                    if is_split {
+                                        this.close_split(window, cx);
+                                    } else {
+                                        this.close_active_editor(cx);
+                                    }
+                                }),
                             ),
                     ),
             );
@@ -3134,24 +3199,50 @@ impl Workspace {
             .child(SharedString::from(crumbs))
     }
 
+    /// 1 エディタペイン（タブ列 + パンくず + 本体）。分割時は左右で 2 枚並ぶ。
+    fn render_editor_pane(
+        &self,
+        editor: &Entity<EditorView>,
+        is_split: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .min_w_0()
+            .child(self.render_tabstrip(editor, is_split, cx))
+            .child(self.render_breadcrumb(editor, cx))
+            .child(div().flex_1().overflow_hidden().child(editor.clone()))
+            .into_any_element()
+    }
+
     fn render_center(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let content = match self.editor.clone() {
-            Some(editor) => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .min_h_0()
-                .child(self.render_tabstrip(&editor, cx))
-                .child(self.render_breadcrumb(&editor, cx))
-                .child(div().flex_1().overflow_hidden().child(editor)),
+            Some(editor) => {
+                let mut panes = div()
+                    .flex_1()
+                    .flex()
+                    .min_h_0()
+                    .child(self.render_editor_pane(&editor, false, cx));
+                // 右分割ペイン（あれば仕切り + 2 枚目）。
+                if let Some(split) = self.split_editor.clone() {
+                    panes = panes
+                        .child(div().w(px(1.)).flex_none().bg(theme.border))
+                        .child(self.render_editor_pane(&split, true, cx));
+                }
+                panes.into_any_element()
+            }
             None => div()
                 .flex_1()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(theme.fg2)
-                .child(SharedString::from(i18n::t!("editor.empty_hint"))),
+                .child(SharedString::from(i18n::t!("editor.empty_hint")))
+                .into_any_element(),
         };
         div()
             .flex_1()
@@ -3424,6 +3515,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::trigger_completion))
+            .on_action(cx.listener(Self::toggle_split))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_agent_thread))
             .on_action(cx.listener(Self::new_window))

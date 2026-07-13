@@ -31,7 +31,7 @@
 - [x] テーマきせかえ: light 値の実装 + テーマセレクタ（Picker 上・ライブプレビュー）+ ユーザーテーマ JSON 読み込み — 2026-07-13。`theme_core` に**ユーザーテーマ JSON（トークン上書き・欠けは appearance の組み込みへフォールバック）**・`available_themes`/`resolve` を実装（unit test）。`⌘⇧T` でテーマセレクタ（Picker）＝**ハイライト移動で即ライブプレビュー**（`PickerEvent::Highlighted`）・確定で settings.json へ theme 名保存（再起動でも効く）・中止でプレビューを戻す。`apply_theme` がクローム/エディタ/Agent パネル/Picker へ波及。light 全体反映を offscreen で目視確認
 - [x] `keymap_core`: JSON keymap + コンテキスト述語 — 2026-07-12、`crates/keymap_core`、`build_action` で名前解決・`KeyBinding::load`、3 test。既定 keymap を bin で読込（全アクション解決確認）
 - [x] `ui`: Picker 基盤（1個のファジーリストを全モーダルで使い回す）— 2026-07-12、`crates/ui`、fuzzy・キー操作・イベント通知、2 test。**CommandRegistry/StatusItemRegistry は未**
-- [ ] `workspace`: タブ・単一ペイン→分割・左右下ドック・statusbar ← titlebar（信号機透過+プロジェクトピル+ドックトグル）✓・タブ列（変更ドット/上線/×）✓・パンくず ✓・左ドック(explorer 階層ヘッダ) ✓・右ドック(Agent) ✓・statusbar（⎇branch/診断/カーソル/UTF-8/言語）✓ — 2026-07-12。**分割ペイン / 下ドック(ターミナル)は未**
+- [x] `workspace`: タブ・単一ペイン→分割・左右下ドック・statusbar — titlebar ✓・タブ列 ✓・パンくず ✓・左ドック(explorer) ✓・右ドック(Agent) ✓・statusbar ✓（2026-07-12）。**分割ペイン**（`⌘\` で右分割・独立エディタの比較ビュー・各ペインにタブ+×）✓・**下ドック**（統合ターミナル・`⌘J`）✓（2026-07-13）
 - [x] `project`: worktree 走査・gitignore — 2026-07-12、`crates/project`、`ignore` crate で gitignore 準拠の遅延 read_dir + all_files、4 test。**ファイル監視は未**
 - [x] エクスプローラ（ツリーのみ先行）+ ファイル開く — 2026-07-12、workspace の左ドック。クリックで展開/ファイル open
 - [x] **レール**: プロジェクト登録・切替（窓内）・プロジェクト色（自動巡回）— 2026-07-12。**カスタムアイコン / `.shirushi` 色指定は未**（頭文字 + 巡回色）

@@ -337,3 +337,10 @@
 - 学び/罠: 補完 popup はフォーカスを取り上下/確定/中止（typing で閉じて再トリガ＝v1）。テストの scratch dir は tag 付き（cargo test は並列で共有 dir を削除し合う）
 - 結果: 警告 0・**test 32 suite ok**。M7 受入（補完+診断）達成・MCP は AI エージェントから叩ける
 - 次: 分割ペイン（M3 の最後の残り）
+
+## 2026-07-13 —（続き）分割ペイン（M3）— 「全部やりきる」完了
+- **低リスク方針**: `self.editor`(18箇所) を全面リファクタせず、主ペイン=`editor`（LSP/保存/診断/カーソル 全機能そのまま）+ 右分割=`split_editor`（独立エディタの比較・参照ビュー）。`⌘\` でトグル（開=現ファイルを独立バッファで複製・focus / 再押下=閉じる）。主ペインを閉じると分割も畳む
+- `render_editor_pane(editor, is_split)` を主/分割で共用。`render_tabstrip` に `is_split` 追加＝ElementId を `(name, pane)` で一意化・× は分割なら `close_split`。`render_center` は `editor` があれば flex 行 `[主 | 仕切り | 分割?]`。下ドックはその下
+- 開発フック `SHIRUSHI_SPLIT=1`。offscreen で theme_core.rs の左右2枚（各タブ+×・仕切り線）を目視
+- 結果: 警告 0・**test 32 suite ok**
+- **★「全部やりきる」完了**: Phase A（⌘1-9/新窓・root上ブラウズ・検索パネル・テーマセレクタ）→ Phase B（git色・gutter diff・branch/worktree）→ ターミナル → LSP（診断+補完+定義）→ MCP サーバ → 分割ペイン。ROADMAP の実装可能な残りを全消化。**残りは人の手番の対話検証のみ**（M1 窓確認・M2 IME/編集保存の一往復・LSP 補完/定義の live 体感・worktree 並行運用の体感）
