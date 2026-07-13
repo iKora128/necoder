@@ -9,6 +9,9 @@ use gpui::{
 };
 use gpui_platform::application;
 use std::path::{Path, PathBuf};
+
+/// MCP サーバ（`shirushi mcp`）。AI エージェントがプロジェクトを操作する口。
+mod mcp;
 use std::time::Instant;
 use workspace::Workspace;
 
@@ -128,8 +131,12 @@ fn run_config_cli() -> bool {
 }
 
 fn main() {
-    // GUI を開く前に CLI サブコマンドを処理（`shirushi config …`）。
+    // GUI を開く前に CLI サブコマンドを処理（`shirushi config …` / `shirushi mcp …`）。
     if run_config_cli() {
+        return;
+    }
+    // MCP サーバ（AI エージェントがプロジェクトを操作する口）。stdio を占有するので GUI は開かない。
+    if mcp::run() {
         return;
     }
     let startup = Instant::now();

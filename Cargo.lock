@@ -5089,6 +5089,8 @@ dependencies = [
  "i18n",
  "image",
  "keymap_core",
+ "project",
+ "search",
  "serde_json",
  "settings",
  "settings_core",

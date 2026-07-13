@@ -330,3 +330,10 @@
 - **罠2**: editor の `observe` は focus/blink の notify でも発火 → 初期 `lsp_sent_version=MAX` と version 不一致で **initialized 前に didChange** を送り ra が落ちる → `on_editor_changed` を `lsp_initialized` でゲート
 - 検証: transport の unit test 3 + **実 ra の ignored test 2**（initialize handshake で completionProvider 受領 / `/tmp/lsp-test` で診断「[2行] expected expression」を 2s で受信）。app では **行2/3 に赤下線 + statusbar ✗4** を offscreen で目視
 - 次: LSP 補完/hover/定義の UI 配線（transport 済）→ MCP サーバ（#21）→ 分割ペイン（M3）
+
+## 2026-07-13 —（続き）LSP 補完+定義（M7 受入）+ MCP サーバ（#21）
+- **補完/定義（M7）**: editor_view に `cursor_lsp_position`/`reveal_lsp_position`（byte↔UTF-16）・`caret_window_position`・`apply_completion`（識別子プレフィクス置換）。workspace: `go_to_definition`(F12)＝Location/LocationLink 解析→別ファイルは開いて中央へ（**`window.window_handle().downcast::<Workspace>()` + `WindowHandle::update` で非同期タスクから window 取得**）。`trigger_completion`(Ctrl-Space)＝キャレット直下ポップアップ（種別バッジ+detail・上下/Enter・Tab/Esc・textEdit→insertText→label）。parser の unit test 2。offscreen で補完ポップアップ + 診断赤下線を目視
+- **MCP サーバ（#21・差別化の核）**: `shirushi mcp [root]`（`crates/shirushi/src/mcp.rs`・`mod mcp`）。MCP 標準の **stdio・改行区切り JSON-RPC**（Content-Length ではない）同期ループ。`initialize`/`tools/list`/`tools/call`。ツール = `list_files`/`read_file`/`write_file`/`search`/`git_status`（project/search を reuse）。config CLI と同じ「GUI を開かず処理して return」の口。unit test 2 + **実 stdio smoke**（initialize→serverInfo・list_files→ファイル列）。ライブ GUI 制御（起動中の窓へ「開く」）は IPC ソケットが要るので後続
+- 学び/罠: 補完 popup はフォーカスを取り上下/確定/中止（typing で閉じて再トリガ＝v1）。テストの scratch dir は tag 付き（cargo test は並列で共有 dir を削除し合う）
+- 結果: 警告 0・**test 32 suite ok**。M7 受入（補完+診断）達成・MCP は AI エージェントから叩ける
+- 次: 分割ペイン（M3 の最後の残り）

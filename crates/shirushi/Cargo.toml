@@ -23,5 +23,7 @@ i18n.workspace = true
 keymap_core.workspace = true
 settings_core.workspace = true
 settings.workspace = true
+project.workspace = true
+search.workspace = true
 serde_json.workspace = true
 image = { workspace = true, optional = true }
