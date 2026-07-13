@@ -16,15 +16,15 @@ use editor_view::{ComposerEvent, EditorView};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
-    Animation, AnimationExt, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    IntoElement, MouseButton, SharedString, Window, actions, div, img, prelude::*, pulsating_between,
-    px,
+    Animation, AnimationExt, App, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight,
+    Hsla, IntoElement, MouseButton, SharedString, Window, actions, div, img, prelude::*,
+    pulsating_between, px,
 };
 use host::{Host, LocalHost};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use theme_core::{Theme, claude_bullet, thread_color};
-use ui::Tooltip;
+use ui::{DraggedFile, Tooltip};
 
 actions!(agent, [SubmitPrompt, CloseActiveThread]);
 
@@ -349,6 +349,17 @@ impl AgentPanel {
         cx.notify();
     }
 
+    /// アクティブな AI スレッドタブを閉じる（⌘W）。workspace が Agent フォーカス時に呼ぶ。
+    pub fn close_active_thread(&mut self, cx: &mut Context<Self>) {
+        self.remove_thread(self.active, cx);
+    }
+
+    /// composer（入力欄）にキーボードフォーカスを移す。タブ操作時に呼び「Agent にいる」状態にする。
+    fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.composer.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    }
+
     /// 次のタブへ（Chrome ⌘⌥→ / ⌃Tab。末尾で先頭へ回る）。
     pub fn select_next_thread(&mut self, cx: &mut Context<Self>) {
         if self.threads.len() > 1 {
@@ -498,6 +509,18 @@ impl AgentPanel {
             }
         }
         cx.notify();
+    }
+
+    /// ドロップされたファイルパスを @メンションに加える（プロジェクト root 配下なら相対、外なら絶対）。
+    /// D&D（Finder / エクスプローラ）→ context 参照の受け口。
+    fn add_context_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let display = self
+            .dest_cwd
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .map(|relative| relative.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+        self.add_context(SharedString::from(display), cx);
     }
 
     /// composer 下部の選択ピル（Zed 風。クリックでドロップダウン）。
@@ -1069,7 +1092,10 @@ impl AgentPanel {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| this.switch_thread(index, cx)),
+                        cx.listener(move |this, _, window, cx| {
+                            this.switch_thread(index, cx);
+                            this.focus_composer(window, cx); // ⌘W が Agent に効くようフォーカスを寄せる
+                        }),
                     )
                     // Chrome 風ドラッグ並べ替え: タブを掴んで別タブ上で離すと順序が入れ替わる。
                     .on_drag(
@@ -1440,6 +1466,7 @@ impl AgentPanel {
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
+        let drop_glow = color.alpha(0.14); // ファイル D&D 中のハイライト
         let running = self.threads.get(self.active).map(|thread| thread.running).unwrap_or(false);
         let thread_name =
             self.threads.get(self.active).map(|thread| thread.name.clone()).unwrap_or_default();
@@ -1454,12 +1481,24 @@ impl AgentPanel {
             .unwrap_or_default();
 
         div()
+            .id("composer-drop")
             .flex_none()
             .px(px(12.))
             .py(px(10.))
             .bg(theme.bg1)
             .border_t_1()
             .border_color(theme.border)
+            // ファイル D&D → @メンション参照。Finder（ExternalPaths）とエクスプローラ（DraggedFile）両対応。
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_glow))
+            .drag_over::<DraggedFile>(move |style, _, _, _| style.bg(drop_glow))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                for path in paths.paths() {
+                    this.add_context_path(path, cx);
+                }
+            }))
+            .on_drop(cx.listener(|this, dragged: &DraggedFile, _window, cx| {
+                this.add_context(dragged.path.clone(), cx);
+            }))
             .child(
                 div()
                     .flex()

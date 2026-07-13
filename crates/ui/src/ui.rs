@@ -12,6 +12,29 @@ use gpui::{
 use std::time::Duration;
 use theme_core::Theme;
 
+/// エクスプローラからチャット composer へファイルをドラッグする際のペイロード兼ゴースト。
+/// `path` は @メンション用の表示文字列（プロジェクト相対が望ましい）。
+#[derive(Clone)]
+pub struct DraggedFile {
+    pub path: SharedString,
+    pub theme: Theme,
+}
+
+impl Render for DraggedFile {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(10.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(self.theme.bg2)
+            .border_1()
+            .border_color(self.theme.border)
+            .text_size(px(12.))
+            .text_color(self.theme.fg0)
+            .child(format!("@{}", self.path))
+    }
+}
+
 /// ホバー時に "すっと" 出る簡易ツールチップ。gpui は 500ms 遅延の後に tooltip view を作るが
 /// **アニメーションはしない**ので、ここで出現時に一度だけ opacity 0→1 の fade-in を掛ける
 /// （oneshot なので settle 後は再描画しない＝idle 0% を壊さない）。

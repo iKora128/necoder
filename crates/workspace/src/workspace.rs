@@ -25,7 +25,7 @@ use std::sync::Arc;
 use terminal_view::TerminalView;
 use theme_core::{Theme, ThemeSource, project_color};
 use ui::Tooltip;
-use ui::{Picker, PickerEvent, PickerItem};
+use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
 
 actions!(
     workspace,
@@ -1553,7 +1553,15 @@ impl Workspace {
 
     // ── タブ/スレッドのショートカット（⌘W / ⌘⇧A） ──
 
-    fn close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
+    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        // Agent パネルにフォーカスがあるなら AI スレッドタブを閉じる（Chrome 風 ⌘W）。
+        // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
+        let agent_focused =
+            self.show_right && self.agent_panel.read(cx).focus_handle(cx).contains_focused(window, cx);
+        if agent_focused {
+            self.agent_panel.update(cx, |panel, cx| panel.close_active_thread(cx));
+            return;
+        }
         self.close_active_editor(cx);
     }
 
@@ -2487,6 +2495,7 @@ impl Workspace {
         let color = slot.color;
         let selected = slot.selected.clone();
         let git_status = &self.git_status;
+        let root = slot.worktree.root().to_path_buf(); // ドラッグ時の @メンション相対パス用
         div()
             .flex_1()
             .overflow_hidden()
@@ -2525,6 +2534,16 @@ impl Workspace {
                     })
                     // gitignore 対象は淡く（git 管理外が一目で分かる）。
                     .when(row.ignored, |element| element.opacity(0.45))
+                    // ファイルはチャット composer へドラッグ → @メンション参照にできる。
+                    .when(!is_dir, |element| {
+                        let mention =
+                            row.path.strip_prefix(&root).unwrap_or(&row.path).to_string_lossy().to_string();
+                        let theme = theme.clone();
+                        element.on_drag(
+                            DraggedFile { path: mention.into(), theme },
+                            |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
+                        )
+                    })
                     .child(
                         div()
                             .flex_none()
