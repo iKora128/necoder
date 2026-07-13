@@ -28,6 +28,30 @@ use ui::Tooltip;
 
 actions!(agent, [SubmitPrompt, CloseActiveThread]);
 
+/// ドラッグ中のスレッドタブのゴースト（Chrome 風の並べ替え用。ポインタに追従する小チップ）。
+#[derive(Clone)]
+struct DraggedThreadTab {
+    index: usize,
+    name: SharedString,
+    color: Hsla,
+    theme: Theme,
+}
+
+impl Render for DraggedThreadTab {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(12.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(self.theme.bg2)
+            .border_1()
+            .border_color(self.color)
+            .text_size(px(12.))
+            .text_color(self.theme.fg0)
+            .child(self.name.clone())
+    }
+}
+
 const THREAD_TABS_HEIGHT: f32 = 34.0;
 const COMPOSER_INPUT_HEIGHT: f32 = 68.0;
 /// composer のモデルセレクタに並べる候補（クリックでアクティブスレッドに設定）。
@@ -322,6 +346,45 @@ impl AgentPanel {
         self.reveal = usize::MAX; // 実効スレッドが変わるので全文表示
         let color = self.active_color();
         self.composer.update(cx, |composer, cx| composer.set_accent(color, cx));
+        cx.notify();
+    }
+
+    /// 次のタブへ（Chrome ⌘⌥→ / ⌃Tab。末尾で先頭へ回る）。
+    pub fn select_next_thread(&mut self, cx: &mut Context<Self>) {
+        if self.threads.len() > 1 {
+            self.switch_thread((self.active + 1) % self.threads.len(), cx);
+        }
+    }
+
+    /// 前のタブへ（Chrome ⌘⌥← / ⌃⇧Tab。先頭で末尾へ回る）。
+    pub fn select_prev_thread(&mut self, cx: &mut Context<Self>) {
+        let count = self.threads.len();
+        if count > 1 {
+            self.switch_thread((self.active + count - 1) % count, cx);
+        }
+    }
+
+    /// タブを `from` から `to` へ移動する（ドラッグ並べ替え）。active は同じスレッドを指し続ける。
+    fn move_thread(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let count = self.threads.len();
+        if from >= count || to >= count || from == to {
+            return;
+        }
+        let thread = self.threads.remove(from);
+        self.threads.insert(to, thread);
+        // active が指すスレッドを追従させる（remove→insert のインデックスずれを補正）。
+        self.active = if self.active == from {
+            to
+        } else {
+            let mut active = self.active;
+            if from < active {
+                active -= 1;
+            }
+            if to <= active {
+                active += 1;
+            }
+            active
+        };
         cx.notify();
     }
 
@@ -955,6 +1018,8 @@ impl AgentPanel {
             .children(self.threads.iter().enumerate().map(|(index, thread)| {
                 let is_active = index == active;
                 let color = thread.color;
+                let drop_highlight = theme.bg2;
+                let tab_name = thread.name.clone();
                 div()
                     .id(("thread-tab", index))
                     .flex()
@@ -1006,6 +1071,17 @@ impl AgentPanel {
                         MouseButton::Left,
                         cx.listener(move |this, _, _window, cx| this.switch_thread(index, cx)),
                     )
+                    // Chrome 風ドラッグ並べ替え: タブを掴んで別タブ上で離すと順序が入れ替わる。
+                    .on_drag(
+                        DraggedThreadTab { index, name: tab_name, color, theme: theme.clone() },
+                        |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
+                    )
+                    .drag_over::<DraggedThreadTab>(move |style, _dragged, _window, _cx| {
+                        style.bg(drop_highlight)
+                    })
+                    .on_drop(cx.listener(move |this, dragged: &DraggedThreadTab, _window, cx| {
+                        this.move_thread(dragged.index, index, cx);
+                    }))
             }))
             .child(
                 div()

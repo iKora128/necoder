@@ -41,6 +41,9 @@ actions!(
         ToggleGitPanel,
         CloseTab,
         NewThread,
+        // AI スレッドタブの切替（Chrome 風。⌘⌥←→ / ⌃Tab）。
+        SelectNextThread,
+        SelectPrevThread,
         // アクティブ (project, branch) を新しいウィンドウで開く（⌘⇧N。ウィンドウモデル §5）。
         // 当初 ROADMAP は ⌘⏎ を想定したが、composer の agent::SubmitPrompt と衝突するため
         // 慣例的な ⌘⇧N に変更（Editor コンテキストの ⌘⏎ は送信のまま温存）。
@@ -1559,6 +1562,24 @@ impl Workspace {
             self.show_right = true;
         }
         self.agent_panel.update(cx, |panel, cx| panel.new_thread(cx));
+        cx.notify();
+    }
+
+    /// 次の AI スレッドタブへ（Chrome 風。⌘⌥→ / ⌃Tab）。
+    fn select_next_thread(&mut self, _: &SelectNextThread, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.show_right {
+            self.show_right = true;
+        }
+        self.agent_panel.update(cx, |panel, cx| panel.select_next_thread(cx));
+        cx.notify();
+    }
+
+    /// 前の AI スレッドタブへ（Chrome 風。⌘⌥← / ⌃⇧Tab）。
+    fn select_prev_thread(&mut self, _: &SelectPrevThread, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.show_right {
+            self.show_right = true;
+        }
+        self.agent_panel.update(cx, |panel, cx| panel.select_prev_thread(cx));
         cx.notify();
     }
 
@@ -4800,6 +4821,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_git_panel))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_agent_thread))
+            .on_action(cx.listener(Self::select_next_thread))
+            .on_action(cx.listener(Self::select_prev_thread))
             .on_action(cx.listener(Self::new_window))
             // ⌘1..9 = レールのプロジェクト N 番へ切替（窓内切替・ウィンドウモデル §5）
             .on_action(cx.listener(|this, _: &ActivateProject1, window, cx| this.switch_project(0, window, cx)))
