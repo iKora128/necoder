@@ -286,6 +286,10 @@ impl Render for TerminalView {
             )
             .size_full()
             .bg(self.theme.bg1)
+            // 端末は等幅必須。UI フォント（IBM Plex Sans JP）を継承すると 1 文字ずつ間延びして
+            // 崩れるので、エディタと同じコードフォント（等幅）を明示する。要素は text_style().font()
+            // を読むのでコンテナで指定すれば伝播する。
+            .font_family("Guguru Sans Code")
             .child(TerminalElement { terminal: cx.entity() })
     }
 }
