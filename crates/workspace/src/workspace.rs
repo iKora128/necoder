@@ -130,6 +130,8 @@ struct TreeRow {
     is_dir: bool,
     depth: usize,
     is_expanded: bool,
+    /// gitignore 対象（薄字で描く）。
+    ignored: bool,
 }
 
 fn build_rows(
@@ -150,6 +152,7 @@ fn build_rows(
             is_dir: entry.is_dir,
             depth,
             is_expanded,
+            ignored: entry.ignored,
         });
         if is_expanded {
             build_rows(worktree, &entry.path, depth + 1, expanded, rows);
@@ -2169,6 +2172,8 @@ impl Workspace {
                     .when(is_selected, |element| {
                         element.bg(theme.bg3).border_l_2().border_color(color)
                     })
+                    // gitignore 対象は淡く（git 管理外が一目で分かる）。
+                    .when(row.ignored, |element| element.opacity(0.45))
                     .child(
                         div()
                             .flex_none()
@@ -2240,6 +2245,7 @@ impl Workspace {
             .p(px(6.))
             .children(entries.into_iter().enumerate().map(|(index, entry)| {
                 let is_dir = entry.is_dir;
+                let is_ignored = entry.ignored;
                 let path = entry.path.clone();
                 let is_selected = selected.as_ref() == Some(&entry.path);
                 div()
@@ -2255,6 +2261,7 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg3))
                     .when(is_selected, |element| element.bg(theme.bg3))
+                    .when(is_ignored, |element| element.opacity(0.45))
                     // 大きめアイコン（グリッド用に 2 倍スケール）
                     .child(div().flex().items_center().justify_center().h(px(30.)).child(icon_large(&entry.name, is_dir, &theme)))
                     .child(
@@ -2328,6 +2335,7 @@ impl Workspace {
                     .border_color(theme.border)
                     .children(entries.into_iter().enumerate().map(|(row_index, entry)| {
                         let is_dir = entry.is_dir;
+                        let is_ignored = entry.ignored;
                         let path = entry.path.clone();
                         let on_path = selected_child.as_ref() == Some(&entry.path);
                         div()
@@ -2342,6 +2350,7 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
                             .when(on_path, |element| element.bg(theme.bg3))
+                            .when(is_ignored, |element| element.opacity(0.45))
                             .child(file_icon(&entry.name, is_dir, &theme))
                             .child(
                                 div()

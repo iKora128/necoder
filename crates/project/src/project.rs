@@ -16,6 +16,8 @@ pub struct Entry {
     pub path: PathBuf,
     pub name: String,
     pub is_dir: bool,
+    /// gitignore 対象か（ツリーで薄字表示にする。`.git` は列挙しないので常に false）。
+    pub ignored: bool,
 }
 
 /// 1 プロジェクトのファイルツリー（ルート + gitignore マッチャ）。
@@ -106,7 +108,7 @@ impl Worktree {
             }
             let path = dir_entry.path();
             let is_dir = dir_entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            entries.push(Entry { path, name, is_dir });
+            entries.push(Entry { path, name, is_dir, ignored: false });
         }
         entries.sort_by(|a, b| {
             b.is_dir
@@ -116,7 +118,8 @@ impl Worktree {
         Ok(entries)
     }
 
-    /// `dir` 直下を列挙する（`.git`・gitignore 対象を除外、ディレクトリ優先→名前順）。
+    /// `dir` 直下を列挙する（`.git` は除外。gitignore 対象は**除外せず** `ignored=true` で薄字表示。
+    /// VSCode 同様「無視ファイルも見えるが淡い」＝ git 管理有無が一目で分かる）。ディレクトリ優先→名前順。
     pub fn read_dir(&self, dir: &Path) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         let read = std::fs::read_dir(dir).with_context(|| format!("読めない: {}", dir.display()))?;
@@ -128,10 +131,8 @@ impl Worktree {
             }
             let path = dir_entry.path();
             let is_dir = dir_entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            if self.ignore.matched(&path, is_dir).is_ignore() {
-                continue;
-            }
-            entries.push(Entry { path, name, is_dir });
+            let ignored = self.ignore.matched(&path, is_dir).is_ignore();
+            entries.push(Entry { path, name, is_dir, ignored });
         }
         entries.sort_by(|a, b| {
             b.is_dir
@@ -775,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn scans_sorted_and_filters_git_and_gitignore() {
+    fn scans_sorted_and_marks_gitignore_dimmed() {
         let root = scratch("scan");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(root.join("target")).unwrap();
@@ -785,15 +786,19 @@ mod tests {
         std::fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
 
         let worktree = Worktree::new(&root).unwrap();
-        let names: Vec<String> = worktree.read_root().unwrap().into_iter().map(|e| e.name).collect();
+        let entries = worktree.read_root().unwrap();
+        let find = |name: &str| entries.iter().find(|entry| entry.name == name);
 
-        assert!(names.contains(&"src".to_string()));
-        assert!(names.contains(&"main.rs".to_string()));
-        assert!(!names.contains(&"target".to_string()), "gitignore の dir を除外");
-        assert!(!names.contains(&"build.log".to_string()), "gitignore の glob を除外");
-        assert!(!names.contains(&".git".to_string()), ".git を除外");
-        // ディレクトリが先頭
-        assert_eq!(names.first().map(String::as_str), Some("src"));
+        // 追跡対象は ignored=false
+        assert_eq!(find("src").map(|entry| entry.ignored), Some(false));
+        assert_eq!(find("main.rs").map(|entry| entry.ignored), Some(false));
+        // gitignore 対象は除外せず ignored=true（薄字で見える）
+        assert_eq!(find("target").map(|entry| entry.ignored), Some(true), "無視 dir も表示・薄字");
+        assert_eq!(find("build.log").map(|entry| entry.ignored), Some(true), "無視 glob も表示・薄字");
+        // .git は常に除外
+        assert!(find(".git").is_none(), ".git を除外");
+        // ディレクトリが先頭（src と target の 2 つ、名前順で src が先）
+        assert_eq!(entries.first().map(|entry| entry.name.as_str()), Some("src"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
