@@ -61,6 +61,9 @@ pub struct Settings {
     /// `false`（既定）= Enter は改行・⌘Enter で送信（日本語 IME の変換確定 Enter で誤送信しない安全側）。
     /// `true` = Enter で送信・Shift+Enter で改行（チャット風。IME 変換中は送信しない）。
     pub submit_on_enter: bool,
+    /// 新規スレッドの既定 AI エージェント（表示名。`acp_client::AGENT_LABELS` のいずれか）。
+    /// composer でエージェントを切り替えると「前回選択」としてここに保存され、次回もそれで開く。
+    pub default_agent: String,
     /// レールのアイコン表示（アクティビティバー）。
     pub rail: RailSettings,
 }
@@ -74,6 +77,7 @@ impl Default for Settings {
             tab_size: 4,
             locale: None,
             submit_on_enter: false,
+            default_agent: "Claude Code".to_string(),
             rail: RailSettings::default(),
         }
     }
@@ -86,6 +90,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "font_size": 13.0,
   "tab_size": 4,
   "submit_on_enter": false,
+  "default_agent": "Claude Code",
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true }
 }"#;
 

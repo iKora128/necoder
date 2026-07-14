@@ -254,8 +254,14 @@ impl AgentPanel {
                 .detach();
             }
         }
+        // 既定エージェント（設定 or 前回選択）を種スレッドにも適用して「そのまま開く」を実現。
+        let default_agent = default_agent_name(cx);
+        let mut threads = seed_threads();
+        for thread in &mut threads {
+            thread.agent = default_agent.clone();
+        }
         AgentPanel {
-            threads: seed_threads(),
+            threads,
             active: 0,
             theme,
             dest_project: "—".into(),
@@ -403,7 +409,9 @@ impl AgentPanel {
 
     fn add_thread(&mut self, cx: &mut Context<Self>) {
         let index = self.threads.len();
-        self.threads.push(Thread::empty(format!("スレッド{}", index + 1), index));
+        let mut thread = Thread::empty(format!("スレッド{}", index + 1), index);
+        thread.agent = default_agent_name(cx); // 新規は既定エージェントで開く
+        self.threads.push(thread);
         self.switch_thread(index, cx);
         cx.notify();
     }
@@ -458,8 +466,18 @@ impl AgentPanel {
         if let Some(thread) = self.threads.get_mut(self.active) {
             match selector {
                 Selector::Agent => {
-                    thread.agent = value;
+                    thread.agent = value.clone();
                     thread.command_tx = None; // エージェント変更 → 次の送信で新セッションを張り直す
+                    // 「前回選択」を既定として settings.json に保存 → 次回もこのエージェントで開く。
+                    if let Some(path) = settings_core::user_settings_path() {
+                        if let Err(error) = settings_core::persist_user_value(
+                            &path,
+                            "default_agent",
+                            serde_json::Value::String(value.to_string()),
+                        ) {
+                            eprintln!("既定エージェントの保存に失敗: {error:#}");
+                        }
+                    }
                 }
                 Selector::Mode => {
                     thread.permission_mode = value.clone();
@@ -2010,6 +2028,16 @@ fn human_tokens(count: u32) -> String {
 }
 
 /// 初期スレッド群。先頭は mock v0.3 の会話例を種として持つ（ACP 配線までのプレースホルダ）。
+/// 設定の既定エージェント（`AGENT_LABELS` にある表示名。無効/未設定なら "Claude Code"）。
+fn default_agent_name(cx: &App) -> SharedString {
+    let name = settings::get(cx).default_agent;
+    if acp_client::AGENT_LABELS.contains(&name.as_str()) {
+        SharedString::from(name)
+    } else {
+        SharedString::from("Claude Code")
+    }
+}
+
 fn seed_threads() -> Vec<Thread> {
     let rope = Thread {
         name: "rope設計".into(),

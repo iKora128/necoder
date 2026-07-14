@@ -189,6 +189,7 @@ dependencies = [
  "i18n",
  "serde_json",
  "settings",
+ "settings_core",
  "theme_core",
  "ui",
 ]
