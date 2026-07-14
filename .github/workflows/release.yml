@@ -1,0 +1,79 @@
+name: Release
+
+# タグ push（v1.2.3 等）で mac の署名済み .dmg を作って GitHub Release に添付する。
+# 手動実行（workflow_dispatch）ではビルド確認だけ（artifact 添付）。
+# Windows は移植途中なので best-effort（落ちても mac リリースは止めない）。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # GitHub Release への添付に必要
+
+jobs:
+  macos:
+    runs-on: macos-14 # Apple Silicon
+    env:
+      # ── 署名 secret（karui / velq と同じ名前に揃えてください。違うなら rename）──
+      # これが空なら署名/notarize をスキップして「未署名 .dmg」を出す（動線だけ先に作れる）。
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+    steps:
+      - uses: actions/checkout@v4
+      # toolchain は rust-toolchain.toml（1.95.0）で固定 → rustup が自動取得。
+      - uses: Swatinem/rust-cache@v2
+      - name: Pillow（アイコン .icns 生成に使う）
+        run: pip3 install --break-system-packages pillow
+      - name: Build + bundle（.app → .dmg）
+        # bundle-mac.sh が cargo build --release + Shirushi.app 組み立てまでやる。
+        run: |
+          bash ./scripts/bundle-mac.sh release
+          hdiutil create -volname Shirushi -srcfolder target/Shirushi.app -ov -format UDZO target/Shirushi.dmg
+      - name: Codesign + notarize + staple
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }} # base64 の Developer ID .p12
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }} # app-specific password
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/app.keychain-db"
+          security create-keychain -p actions "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p actions "$KEYCHAIN"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions "$KEYCHAIN"
+          codesign --force --deep --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" target/Shirushi.app
+          rm -f target/Shirushi.dmg
+          hdiutil create -volname Shirushi -srcfolder target/Shirushi.app -ov -format UDZO target/Shirushi.dmg
+          xcrun notarytool submit target/Shirushi.dmg \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple target/Shirushi.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Shirushi-macos
+          path: target/Shirushi.dmg
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/Shirushi.dmg
+
+  windows:
+    runs-on: windows-latest
+    continue-on-error: true # 移植途中: 失敗しても mac リリースは止めない（できるだけやる）
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build（release・best-effort）
+        run: cargo build --release -p shirushi
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: shirushi-windows
+          path: target/release/shirushi.exe
