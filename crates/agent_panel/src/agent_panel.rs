@@ -174,6 +174,8 @@ impl Thread {
 pub struct AgentPanel {
     threads: Vec<Thread>,
     active: usize,
+    // ⌘W で閉じたスレッド（⌘⇧T で復元。会話履歴ごと戻す。新しいものが末尾）。
+    closed_threads: Vec<Thread>,
     theme: Theme,
     /// 宛先（アクティブプロジェクトのコンテキスト）。workspace が [`Self::set_destination`] で更新する。
     dest_project: SharedString,
@@ -262,6 +264,7 @@ impl AgentPanel {
         }
         AgentPanel {
             threads,
+            closed_threads: Vec::new(),
             active: 0,
             theme,
             dest_project: "—".into(),
@@ -337,12 +340,16 @@ impl AgentPanel {
     }
 
     /// スレッドタブを閉じる（× ボタン / ⌘W）。**最後の 1 枚も閉じられる**（空状態＝＋で再開）。
-    /// 閉じた瞬間そのスレッドの ACP セッション（`command_tx`）も drop され読みループが畳まれる。
+    /// ACP セッション（`command_tx`）は畳むが、会話履歴ごと closed_threads に退避し ⌘⇧T で復元可能。
     fn remove_thread(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.threads.len() {
             return;
         }
-        self.threads.remove(index);
+        let mut closed = self.threads.remove(index);
+        closed.command_tx = None; // セッションは畳む（復元時に次の送信で張り直す）
+        closed.running = false;
+        closed.turn_started_at = None;
+        self.closed_threads.push(closed);
         // active を有効域へ寄せる。空になったら 0（描画は get(active)=None で空状態になる）。
         if self.threads.is_empty() {
             self.active = 0;
@@ -360,6 +367,18 @@ impl AgentPanel {
     /// アクティブな AI スレッドタブを閉じる（⌘W）。workspace が Agent フォーカス時に呼ぶ。
     pub fn close_active_thread(&mut self, cx: &mut Context<Self>) {
         self.remove_thread(self.active, cx);
+    }
+
+    /// 直近に閉じたスレッドを復元する（⌘⇧T。会話履歴ごと戻し、末尾へ追加してアクティブに）。
+    pub fn restore_closed_thread(&mut self, cx: &mut Context<Self>) {
+        if let Some(thread) = self.closed_threads.pop() {
+            self.threads.push(thread);
+            self.active = self.threads.len() - 1;
+            self.reveal = usize::MAX; // 復元スレッドは全文表示
+            let color = self.active_color();
+            self.composer.update(cx, |composer, cx| composer.set_accent(color, cx));
+            cx.notify();
+        }
     }
 
     /// composer（入力欄）にキーボードフォーカスを移す。タブ操作時に呼び「Agent にいる」状態にする。

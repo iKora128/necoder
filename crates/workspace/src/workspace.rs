@@ -40,6 +40,7 @@ actions!(
         SplitRight,
         ToggleGitPanel,
         CloseTab,
+        RestoreClosedTab,
         NewThread,
         // AI スレッドタブの切替（Chrome 風。⌘⌥←→ / ⌃Tab）。
         SelectNextThread,
@@ -466,6 +467,8 @@ pub struct Workspace {
     // 最後に触った面が Agent か（⌘W の宛先判定。true=Agent スレッド / false=エディタタブ）。
     // フォーカスに頼らずクリックで確定する（Zed の active pane 相当）。
     agent_active: bool,
+    // ⌘W で閉じたファイルの履歴（⌘⇧T で復元。Chrome 風）。新しいものが末尾。
+    recently_closed_files: Vec<PathBuf>,
     // ── LSP（言語サーバ・M7。拡張子→サーバの登録式で多言語対応）──
     lsp: Option<lang::lsp::LspClient>,
     lsp_root: Option<PathBuf>,
@@ -640,6 +643,7 @@ impl Workspace {
             terminals: Vec::new(),
             active_terminal: 0,
             agent_active: false,
+            recently_closed_files: Vec::new(),
             lsp: None,
             lsp_root: None,
             lsp_language: None,
@@ -1610,6 +1614,17 @@ impl Workspace {
         self.close_active_editor(cx);
     }
 
+    /// 直近に閉じたタブを復元する（Chrome の ⌘⇧T）。⌘W と同じく最後に触った面で振り分ける。
+    fn restore_closed_tab(&mut self, _: &RestoreClosedTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_right && self.agent_active {
+            self.agent_panel.update(cx, |panel, cx| panel.restore_closed_thread(cx));
+            return;
+        }
+        if let Some(path) = self.recently_closed_files.pop() {
+            self.open_file(path, window, cx);
+        }
+    }
+
     fn new_agent_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
         if !self.show_right {
             self.show_right = true;
@@ -1798,6 +1813,14 @@ impl Workspace {
 
     /// アクティブタブ（＝現在のエディタ）を閉じる。
     fn close_active_editor(&mut self, cx: &mut Context<Self>) {
+        // 閉じるファイルを履歴に積む（⌘⇧T で復元。Chrome 風）。
+        let closed = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.read(cx).buffer().path().map(Path::to_path_buf));
+        if let Some(path) = closed {
+            self.recently_closed_files.push(path);
+        }
         self.editor = None;
         self.split_editor = None; // 主ペインを閉じたら分割も畳む
         self._editor_observation = None;
@@ -5086,6 +5109,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_split))
             .on_action(cx.listener(Self::toggle_git_panel))
             .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::restore_closed_tab))
             .on_action(cx.listener(Self::new_agent_thread))
             .on_action(cx.listener(Self::select_next_thread))
             .on_action(cx.listener(Self::select_prev_thread))
