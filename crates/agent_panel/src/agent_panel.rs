@@ -1709,6 +1709,12 @@ impl Render for AgentPanel {
             .key_context("AgentPanel")
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_close_thread))
+            // Agent エリアのどこをクリックしても composer にフォーカス（＝⌘W がスレッドに効く）。
+            // 子（タブ/ボタン）が処理した後の bubble で拾う。既に focus 済みなら no-op。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.focus_composer(window, cx)),
+            )
             .child(self.render_thread_tabs(cx))
             .child(self.render_meta(active))
             .child(self.render_transcript())

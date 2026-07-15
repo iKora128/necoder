@@ -460,8 +460,9 @@ pub struct Workspace {
     github_slug: Option<String>,
     // branch/worktree メニュー（titlebar の ⎇ クリックで開く。開いていれば出す位置）。
     branch_menu: Option<BranchMenuState>,
-    // 下ドックの統合ターミナル（初回表示で遅延生成。show_bottom で出す）。
-    terminal: Option<Entity<TerminalView>>,
+    // 下ドックの統合ターミナル（タブ式・初回表示で遅延生成。show_bottom で出す）。
+    terminals: Vec<Entity<TerminalView>>,
+    active_terminal: usize,
     // ── LSP（言語サーバ・M7。拡張子→サーバの登録式で多言語対応）──
     lsp: Option<lang::lsp::LspClient>,
     lsp_root: Option<PathBuf>,
@@ -633,7 +634,8 @@ impl Workspace {
             git_history: Vec::new(),
             github_slug: None,
             branch_menu: None,
-            terminal: None,
+            terminals: Vec::new(),
+            active_terminal: 0,
             lsp: None,
             lsp_root: None,
             lsp_language: None,
@@ -1533,7 +1535,8 @@ impl Workspace {
         }
         self.active = index;
         // process/PTY は project の host と不可分。旧 host の session を次の project へ持ち越さない。
-        self.terminal = None;
+        self.terminals.clear();
+        self.active_terminal = 0;
         self.lsp = None;
         self._lsp_pump = None;
         self.lsp_root = None;
@@ -1704,10 +1707,8 @@ impl Workspace {
     // ── 下ドックのターミナル（M8） ──
 
     /// ターミナルを遅延生成する（初回表示時。cwd = アクティブプロジェクトルート）。
-    fn ensure_terminal(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
-        if let Some(terminal) = &self.terminal {
-            return terminal.clone();
-        }
+    /// ターミナルを1つ生成する（アクティブプロジェクトの host/cwd・remote なら SSH shell）。
+    fn create_terminal(&self, cx: &mut Context<Self>) -> Entity<TerminalView> {
         let (cwd, shell) = self
             .active_slot()
             .map(|slot| {
@@ -1723,18 +1724,69 @@ impl Workspace {
             })
             .unwrap_or((None, None));
         let theme = self.theme.clone();
-        let terminal = cx.new(|cx| TerminalView::new_with_shell(cwd, shell, theme, cx));
-        self.terminal = Some(terminal.clone());
-        terminal
+        cx.new(|cx| TerminalView::new_with_shell(cwd, shell, theme, cx))
+    }
+
+    /// 最低 1 つターミナルがある状態にして、アクティブなものを返す。
+    fn ensure_terminal(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        if self.terminals.is_empty() {
+            let terminal = self.create_terminal(cx);
+            self.terminals.push(terminal);
+            self.active_terminal = 0;
+        }
+        self.active_terminal = self.active_terminal.min(self.terminals.len() - 1);
+        self.terminals[self.active_terminal].clone()
+    }
+
+    /// アクティブなターミナルにフォーカス（キー入力を受ける）。
+    fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let terminal = self.ensure_terminal(cx);
+        let handle = terminal.read(cx).focus_handle();
+        window.focus(&handle, cx);
+    }
+
+    /// 新しいターミナルタブを追加してアクティブに（＋ボタン）。
+    fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let terminal = self.create_terminal(cx);
+        self.terminals.push(terminal);
+        self.active_terminal = self.terminals.len() - 1;
+        self.focus_active_terminal(window, cx);
+        cx.notify();
+    }
+
+    /// ターミナルタブを切り替える。
+    fn switch_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index < self.terminals.len() {
+            self.active_terminal = index;
+            self.focus_active_terminal(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// ターミナルタブを閉じる。最後の 1 つを閉じたら下ドックを畳む。
+    fn close_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.terminals.len() {
+            return;
+        }
+        self.terminals.remove(index);
+        if self.terminals.is_empty() {
+            self.show_bottom = false;
+            self.active_terminal = 0;
+        } else {
+            if index <= self.active_terminal && self.active_terminal > 0 {
+                self.active_terminal -= 1;
+            }
+            self.active_terminal = self.active_terminal.min(self.terminals.len() - 1);
+            self.focus_active_terminal(window, cx);
+        }
+        cx.notify();
     }
 
     /// 下ドック（ターミナル）を開閉する。開くときは生成 + フォーカス（キー入力を受ける）。
     fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
         self.show_bottom = !self.show_bottom;
         if self.show_bottom {
-            let terminal = self.ensure_terminal(cx);
-            let handle = terminal.read(cx).focus_handle();
-            window.focus(&handle, cx);
+            self.focus_active_terminal(window, cx);
         }
         cx.notify();
     }
@@ -2064,7 +2116,7 @@ impl Workspace {
         if let Some(picker) = &self.picker {
             picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
         }
-        if let Some(terminal) = &self.terminal {
+        for terminal in &self.terminals {
             terminal.update(cx, |terminal, cx| terminal.set_theme(theme.clone(), cx));
         }
         cx.notify();
@@ -4615,32 +4667,85 @@ impl Workspace {
     /// 下ドック（統合ターミナル・M8）。ヘッダ（タブ + 閉じる）+ ターミナル本体。
     fn render_bottom_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let header = div()
+        let active = self.active_terminal;
+        // ── タブ行: ターミナル N（× で閉じ）を並べ、末尾に ＋（追加）と ドックを閉じる × ──
+        let mut header = div()
             .flex()
             .items_center()
             .h(px(28.))
-            .px(px(10.))
             .flex_none()
             .bg(theme.bg0)
             .border_t_1()
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(theme.border);
+        for index in 0..self.terminals.len() {
+            let is_active = index == active;
+            header = header.child(
+                div()
+                    .id(("term-tab", index))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h_full()
+                    .px(px(10.))
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .text_color(if is_active { theme.fg0 } else { theme.fg2 })
+                    .when(is_active, |element| element.bg(theme.bg1))
+                    .hover(|style| style.bg(theme.bg1))
+                    .child(format!("ターミナル {}", index + 1))
+                    .child(
+                        div()
+                            .id(("term-tab-close", index))
+                            .flex_none()
+                            .text_color(theme.fg2)
+                            .hover(|style| style.text_color(theme.fg0))
+                            .child("×")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.close_terminal(index, window, cx);
+                                }),
+                            ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| this.switch_terminal(index, window, cx)),
+                    ),
+            );
+        }
+        let header = header
             .child(
                 div()
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.fg1)
-                    .child("ターミナル"),
+                    .id("term-add")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(28.))
+                    .h_full()
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg0).bg(theme.bg1))
+                    .child("＋")
+                    .tooltip(Tooltip::text("ターミナルを追加", theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.add_terminal(window, cx)),
+                    ),
             )
             .child(div().flex_1())
             .child(
                 div()
-                    .id("term-close")
+                    .id("term-close-dock")
+                    .px(px(8.))
                     .text_color(theme.fg2)
                     .cursor_pointer()
                     .hover(|style| style.text_color(theme.fg0))
                     .child("×")
-                    .tooltip(Tooltip::text("ターミナルを閉じる  ⌘J", theme.clone()))
+                    .tooltip(Tooltip::text("下ドックを閉じる  ⌘J", theme.clone()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
@@ -4648,7 +4753,7 @@ impl Workspace {
                         }),
                     ),
             );
-        let body = match &self.terminal {
+        let body = match self.terminals.get(active) {
             Some(terminal) => div().flex_1().min_h_0().overflow_hidden().child(terminal.clone()),
             None => div().flex_1(),
         };
