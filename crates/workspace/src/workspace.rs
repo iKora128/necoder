@@ -463,6 +463,9 @@ pub struct Workspace {
     // 下ドックの統合ターミナル（タブ式・初回表示で遅延生成。show_bottom で出す）。
     terminals: Vec<Entity<TerminalView>>,
     active_terminal: usize,
+    // 最後に触った面が Agent か（⌘W の宛先判定。true=Agent スレッド / false=エディタタブ）。
+    // フォーカスに頼らずクリックで確定する（Zed の active pane 相当）。
+    agent_active: bool,
     // ── LSP（言語サーバ・M7。拡張子→サーバの登録式で多言語対応）──
     lsp: Option<lang::lsp::LspClient>,
     lsp_root: Option<PathBuf>,
@@ -636,6 +639,7 @@ impl Workspace {
             branch_menu: None,
             terminals: Vec::new(),
             active_terminal: 0,
+            agent_active: false,
             lsp: None,
             lsp_root: None,
             lsp_language: None,
@@ -1595,12 +1599,11 @@ impl Workspace {
 
     // ── タブ/スレッドのショートカット（⌘W / ⌘⇧A） ──
 
-    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        // Agent パネルにフォーカスがあるなら AI スレッドタブを閉じる（Chrome 風 ⌘W）。
+    fn close_tab(&mut self, _: &CloseTab, _window: &mut Window, cx: &mut Context<Self>) {
+        // 最後に触った面が Agent なら AI スレッドタブを、そうでなければエディタタブを閉じる。
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
-        let agent_focused =
-            self.show_right && self.agent_panel.read(cx).focus_handle(cx).contains_focused(window, cx);
-        if agent_focused {
+        // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。
+        if self.show_right && self.agent_active {
             self.agent_panel.update(cx, |panel, cx| panel.close_active_thread(cx));
             return;
         }
@@ -1674,6 +1677,8 @@ impl Workspace {
             .h_full()
             .border_l_1()
             .border_color(theme.border)
+            // Agent 側を触った → ⌘W の宛先を Agent スレッドに（クリックで確定）。
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, _cx| this.agent_active = true))
             .child(
                 div()
                     .id("agent-resize")
@@ -2625,6 +2630,8 @@ impl Workspace {
             .bg(theme.bg0)
             .border_r_1()
             .border_color(theme.border)
+            // エクスプローラを触った → ⌘W の宛先はエディタタブ（Agent 判定を下げる）。
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, _cx| this.agent_active = false))
             .child(self.render_explorer_header(slot, cx))
             .child(body)
             .child(self.render_explorer_footer(cx))
@@ -4659,6 +4666,8 @@ impl Workspace {
             .flex_col()
             .min_w_0()
             .bg(theme.bg1)
+            // エディタ側を触った → ⌘W の宛先をエディタタブに（Agent 判定を下げる）。
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, _cx| this.agent_active = false))
             .child(content)
             // 下ドック（ターミナル）はエディタ列の下に積む（サイドドックには被らない）。
             .when(self.show_bottom, |element| element.child(self.render_bottom_dock(cx)))
