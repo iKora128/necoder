@@ -3,6 +3,12 @@ name: Release
 # タグ push（v1.2.3 等）で mac の署名済み .dmg を作って GitHub Release に添付する。
 # 手動実行（workflow_dispatch）ではビルド確認だけ（artifact 添付）。
 # Windows は移植途中なので best-effort（落ちても mac リリースは止めない）。
+#
+# 署名まわりは karui（Tauri）と同じ secret 名・同じ notarize 方式（App Store Connect API キー）に
+# 揃えてある。karui のリポジトリに入っている値をそのままこの repo の secret に入れれば動く。
+#   必要 secret: APPLE_SIGNING_IDENTITY / APPLE_CERTIFICATE_BASE64 / APPLE_CERTIFICATE_PASSWORD
+#               APPLE_API_KEY / APPLE_API_ISSUER / APPLE_API_KEY_BASE64
+#   （Tauri 専用の TAURI_* は Shirushi には不要）
 on:
   push:
     tags: ["v*"]
@@ -15,7 +21,6 @@ jobs:
   macos:
     runs-on: macos-14 # Apple Silicon
     env:
-      # ── 署名 secret（karui / velq と同じ名前に揃えてください。違うなら rename）──
       # これが空なら署名/notarize をスキップして「未署名 .dmg」を出す（動線だけ先に作れる）。
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
     steps:
@@ -24,36 +29,56 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Pillow（アイコン .icns 生成に使う）
         run: pip3 install --break-system-packages pillow
-      - name: Build + bundle（.app → .dmg）
-        # bundle-mac.sh が cargo build --release + Shirushi.app 組み立てまでやる。
-        run: |
-          bash ./scripts/bundle-mac.sh release
-          hdiutil create -volname Shirushi -srcfolder target/Shirushi.app -ov -format UDZO target/Shirushi.dmg
-      - name: Codesign + notarize + staple
+
+      - name: Build + bundle（.app 組み立て）
+        run: bash ./scripts/bundle-mac.sh release
+
+      # ── 署名（karui と同じ手順・同じ secret 名）──
+      - name: Import Apple certificate
         if: env.APPLE_SIGNING_IDENTITY != ''
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }} # base64 の Developer ID .p12
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }} # app-specific password
         run: |
           set -euo pipefail
-          KEYCHAIN="$RUNNER_TEMP/app.keychain-db"
-          security create-keychain -p actions "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p actions "$KEYCHAIN"
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions "$KEYCHAIN"
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          rm $RUNNER_TEMP/certificate.p12
+
+      - name: Codesign .app（hardened runtime）
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        run: |
           codesign --force --deep --options runtime --timestamp \
             --sign "$APPLE_SIGNING_IDENTITY" target/Shirushi.app
-          rm -f target/Shirushi.dmg
-          hdiutil create -volname Shirushi -srcfolder target/Shirushi.app -ov -format UDZO target/Shirushi.dmg
+
+      - name: Make .dmg
+        run: hdiutil create -volname Shirushi -srcfolder target/Shirushi.app -ov -format UDZO target/Shirushi.dmg
+
+      # ── notarize + staple（karui と同じ App Store Connect API キー方式）──
+      - name: Notarize + staple
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }} # Key ID
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }} # Issuer UUID
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }} # base64 の AuthKey_*.p8
+        run: |
+          set -euo pipefail
+          mkdir -p ~/private_keys
+          echo "$APPLE_API_KEY_BASE64" | base64 --decode > ~/private_keys/AuthKey_$APPLE_API_KEY.p8
           xcrun notarytool submit target/Shirushi.dmg \
-            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+            --key ~/private_keys/AuthKey_$APPLE_API_KEY.p8 \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
           xcrun stapler staple target/Shirushi.dmg
+
       - uses: actions/upload-artifact@v4
         with:
           name: Shirushi-macos
