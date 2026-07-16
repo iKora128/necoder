@@ -344,3 +344,34 @@
 - 開発フック `SHIRUSHI_SPLIT=1`。offscreen で theme_core.rs の左右2枚（各タブ+×・仕切り線）を目視
 - 結果: 警告 0・**test 32 suite ok**
 - **★「全部やりきる」完了**: Phase A（⌘1-9/新窓・root上ブラウズ・検索パネル・テーマセレクタ）→ Phase B（git色・gutter diff・branch/worktree）→ ターミナル → LSP（診断+補完+定義）→ MCP サーバ → 分割ペイン。ROADMAP の実装可能な残りを全消化。**残りは人の手番の対話検証のみ**（M1 窓確認・M2 IME/編集保存の一往復・LSP 補完/定義の live 体感・worktree 並行運用の体感）
+
+## 2026-07-15 — ギャップ分析 → ROADMAP M10〜M13 策定 + 文書同期
+- やったこと:
+  - **完成までのギャップ分析**: 全 18 crate（約1.8万行・test 97 本）の実装棚卸しと docs/research（feature-matrix の 13 レイヤ）を突合。結論 =「レイヤは 13/13 に点が打ってあるが“所作”の層が薄い」。実使用の五大壁: ①複数タブ無し（1ペイン=1ファイル）②⌘F/置換 UI 無し ③補完が手動トリガのみ ④ファイル監視無し ⑤hot exit 無し。quick win: hover（`lang/src/lsp.rs` 実装済み・未配線）・`.shirushi` 色（`ProjectIdentity` 型定義済み・未配線）
+  - **ROADMAP に M10〜M13 を追記**（/goal 消化用・各項目に受入条件つき）: M10 毎日使える（ドッグフーディング開始）→ M11 言語×Git parity → M12 AI の唯一無二（色×並行×信頼）→ M13 公開準備。**M9 の未チェック残件は M13 へ移動**（日常機能優先の判断）。FEATURES の later タグ一部（checkpoint/@mention/⌘K/Todos）を M12 に前倒し採用（タグ自体は不変更）
+  - **CLAUDE.md を現状と DECISIONS §5 に同期**: ①「Zed GPL crate 移植可」→「移植禁止・手法参考のみ」（旧記述は GPL-3.0 決定時代の残骸）②gpui は path 依存 → git rev 固定済みへ ③マイルストーン一覧を M13 まで更新・順序の正を ROADMAP に統一
+  - **ライセンス確定（本人判断・同日）**: **AGPL-3.0 で確定**（park→確定・「最終的に Apache」は撤回。理由: 単独コミッタ＝Apache の利得が効かない・クローズドコピーへの心理的抵抗・remote/cloud 展開に §13 が効く。DECISIONS §5 に追記）。鉄則（Zed GPL crate 移植禁止・貢献時 CLA）は「再ライセンスの自由の保全」として維持
+- 学び/罠:
+  - **7/13〜7/15 の実装が JOURNAL 未記載**（git 基礎操作+ソース管理パネル・git graph・gitignore dimming・Host 抽象+Remote SSH+多言語 LSP+GitHub 連携=M9・アプリアイコン/マスコット・スレッドタブ Chrome 風・D&D @メンション・AI コミットメッセージ・レールのアクティビティバー化・既定エージェント設定・CI 署名リリース）。詳細は git log 参照。**セッション終わりの日誌追記を忘れない**
+  - i18n は仕組み（t!/parity テスト）だけ先行し locales は 5 キーのみ = UI 文字列はほぼハードコード日本語。規律はあるが回収は M13
+  - FEATURES.md のチェックボックスは実装済み分も未チェックのまま（あれはバックログでタグはユーザー管理 = 触らない）。実装状況の正は ROADMAP+コード
+  - **Todo ボード発案（本人）→ M12 に追記**: エディタ本体に人間所有の Todo 板（`.shirushi/todos.md` が真実・▶ でスレッドへ送信・エージェントが完了時に自分でチェック→watch で板に即反映）。= /goal+ROADMAP の開発フローの製品化。エージェント内部 Todos とは別物として共存
+- 次: /goal は M10 先頭「複数タブ」から。着手時に Pane/Item の型契約（multibuffer 前提・FEATURES §1）を ARCHITECTURE に一筆入れてから実装する
+
+## 2026-07-16 — M10-1 複数タブ（1ペイン=1ファイルの撤廃）
+- やったこと（M10 先頭・ドッグフーディング最大の壁）:
+  - **データモデル**: `workspace.rs` の `editor: Option<Entity<EditorView>>`（+単一 `_editor_observation`）を **`tabs: Vec<EditorTab{path,editor,_observation}>` + `active_tab: usize`** に置換。`active_editor()`/`active_tab_path()` アクセサで従来 `self.editor` を読んでいた ~30 箇所を一様に移行（借用が素直・call-site の変更は最小）
+  - **タブ操作**: `select_tab`（クリック/⌘{⌘}）・`close_tab_at`（⌘W/×＝active を隣へ寄せる・閉じたら履歴へ積む・LSP didClose・最後の1枚で分割も畳む）・`move_tab`（ドラッグ並べ替え・index 追従）。ロジックは `agent_panel` の `remove_thread/move_thread` と同型（実績あり）。**重複オープンは既存タブへ切替**（`open_file` 冒頭で `position(|t| t.path==path)`）
+  - **UI**: `render_main_tabstrip`（全タブを loop・active 上線=プロジェクト色・dirty ドット・git 色貫通・× 閉じる・`DraggedEditorTab` でドラッグ並べ替え）。分割ペインは単一比較ビューのまま `render_split_tabstrip`。`render_center` を `tabs.is_empty()` 分岐に
+  - **LSP**: didOpen（タブ開）/ didClose（タブ閉・`lang/src/lsp.rs` に追加）追従。**`lsp_sent_version: u64` → `lsp_sent_versions: HashMap<Path,u64>`**（複数ファイルは version 番号が衝突しうる＝単一カウンタだと別ファイルの didChange を誤スキップするバグ。path 別 map で修正）
+  - **永続化**: `PersistedProject`/`SavedProject`/`ProjectSlot` の `open_file: Option` → **`open_files: Vec` + `active_file`**（旧 `open_file` は読み込み後方互換のみ・`files()` で移行）。bin は `RestoredTabs{files,active}` で復元（args 単一ファイル/dir/前回状態）。非アクティブプロジェクトのタブは slot に記録して**遅延復元**（レール切替・ブランチ切替は `open_slot_files` で開き直す）
+  - **キー**: `cmd-}`/`cmd-{`（=⌘⇧] ⌘⇧[）を `SelectNextTab`/`SelectPrevTab` に。Zed の `pane::Activate*Item` と同字面（gpui は `}`/`{` を shift 込みの key として解釈）。⌘⌥←→ は AI スレッドタブが既に使用＝衝突回避
+  - **ARCHITECTURE §3**: Pane/Item 初版の型契約を明記（`EditorTab` の Vec から始め、多態は必要時に `enum PaneItem→trait TabItem` へ育てる。multibuffer 本体は later）
+  - **検証フック**: `SHIRUSHI_OPEN_TABS=a,b,…` で起動時にアクティブプロジェクトへ複数タブを開く（offscreen 検証用・`pub fn open_paths`）
+- 検証: `cargo check --workspace` 警告0・`cargo test --workspace` 全 green（回帰なし）。offscreen で **5 タブ描画**（active=lsp.rs の下線・各タブ ×）・**state.json 往復**（open_files 5件・active_file:4）・**無引数再起動で 5 タブ復元**（active 追従）を目視（font-kit でグリフも写る）
+- 学び/罠:
+  - **単一 `lsp_sent_version` は複数タブで壊れる**: buffer version はファイル毎に 0 から増えるので別ファイルが同じ番号を持ちうる → 「送信済み version と一致＝スキップ」で他ファイルの didChange を握り潰す。**path 別 map が正**。複数タブ化で最初に踏む地雷
+  - **タブ列の Vec 化は accessor で吸収**: `editor: Option` を読む箇所が多い（~30）が、`active_editor()->Option<Entity>` を1本足せば `let Some(e)=self.active_editor() else{...}` へ機械的に移行でき、借用エラーも出ない（Entity clone は cheap）。大リファクタでも call-site を荒らさない定石
+  - **タブ操作ロジックは agent_panel と完全同型**: `close_tab_at`/`move_tab` の active-index 追従は `remove_thread`/`move_thread` のコピー。既に live 実績のあるコードを写すのが安全（Chrome 風スレッドタブが先に育っていた恩恵）
+  - **構造的状態分離**: 「状態が混ざらない」はタブ毎に独立した `Entity<EditorView>`（undo/カーソル/スクロール/診断を各自保持）で構造保証。offscreen で描画・往復・復元まで確認したので、残りは編集→保存→× の対話体感のみ（人の手番）
+- 次: M10 の 2 番目「**⌘F バッファ内検索/置換**」（インライン検索バー・`search` crate 再利用・⌥⌘F 置換・全置換は 1 Transaction）。または「補完の自動トリガ」（`.`/`::`/識別子で自動ポップアップ）。依存順では ⌘F が先

@@ -2,6 +2,7 @@
 
 運用: `/goal` はこのファイルの**未チェックの受入条件**を上から拾って実装する。
 チェックは「実際に満たすことを検証してから」入れる（CLAUDE.md の検証ループ）。順序の正はこのファイル、機能の全量は FEATURES.md。
+人の対話検証が必須の項目（M1 の窓確認・M2 の IME 対話など「人の手番」）は /goal ではスキップし、次の実装可能な項目を拾う。
 
 ## M0 — 週末テスト（ユーザー自身の関門）
 
@@ -77,8 +78,6 @@
 
 ---
 
-以降（v1 後半〜later）: FEATURES.md のタグに従う（拡張モデル ADR・minimap・multibuffer・vim・追加言語パック配布 等）。
-
 ## M9 — Remote SSH（「場所が変わっても同じ Shirushi」）
 
 - [x] local の FS/process/Git/search/save を `Host` 境界へ移し、既存 unit test を維持する
@@ -90,11 +89,82 @@
 - [x] daemon/proxy 再接続・5秒 heartbeat・master 再生成・非冪等 request の無条件再送禁止
 - [x] protocol/fs/process concurrency・proxy 再接続・外部編集競合の統合 test
 - [x] SSH URI の状態復元と status bar の接続先表示
-- [ ] local/remote の latency・CPU・memory benchmark と性能予算の自動検証
-- [ ] Linux x86_64/aarch64 musl artifact・署名/checksum・古い server cleanup・GUI askpass
-- [ ] dirty buffer crash backup・watch subscription/event/cancel・再接続後の LSP/PTY handle 再同期
-- [ ] sleep/VPN断/ControlMaster kill/server kill/巨大 tree の実ホスト障害注入 test
-- [ ] Remote Projects UI・SSH config picker・構造化接続ログ・retry/cancel・localhost port forwarding
-- [ ] 受入: remote Linux で編集/Git/LSP/terminal/agent を一日使い、切断復帰しても未保存変更を失わない
+- → **未チェック残件（ベンチ・musl 配布・dirty backup・障害注入 test・Remote Projects UI・受入）は M13 へ移動**（2026-07-15 判断: 日常機能 M10〜M12 を先に消化する）
 
 設計と根拠: [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md)。
+
+## M10 — 毎日使える（「Shirushi で Shirushi を開発する」）
+
+2026-07-15 のギャップ分析（全 crate 棚卸し × `research/feature-matrix.md` 突合）で M10〜M13 を策定。
+レイヤ自体は 13/13 に点が打ってあるが「所作」の層が薄い — ここを埋めるとドッグフーディングが始まる。
+
+- [x] **複数タブ** — 2026-07-16。`workspace.rs` の `editor: Option<Entity>` を撤廃し、`tabs: Vec<EditorTab{path,editor,_observation}>` + `active_tab` に。**タブクリック**（`select_tab`）/ **⌘{ ⌘}**（=⌘⇧[ ⌘⇧]・`SelectPrevTab/SelectNextTab`。Zed の `pane::Activate*Item` と同じ字面）切替・**⌘W で閉じて隣へ**（`close_tab_at`＝active 追従は agent スレッドタブと同ロジック）・**ドラッグ並べ替え**（`DraggedEditorTab`+`move_tab`）・**dirty ドット個別**・**同一ファイルは重複タブを作らず既存へ切替**・**LSP didOpen/didClose 追従**（+ `lsp_sent_versions` を path 別 map 化＝複数ファイルで version 番号が衝突しても誤スキップしない）。永続化は `ProjectSlot.open_files: Vec` + `active_file`（プロジェクト単位でタブ列を保存・非アクティブは切替時に遅延復元）。ARCHITECTURE §3 に Pane/Item 初版の型契約を追記。**検証**: cargo test 全 green・offscreen で 5 タブ描画（active=lsp.rs 下線）・state.json 往復（open_files 5件+active_file:4）・無引数再起動で 5 タブ復元を目視。**編集→保存→× の対話ループ体感は人の手番**（状態分離はタブ毎の独立 Entity で構造的に保証）
+- [ ] **⌘F バッファ内検索/置換**: エディタ上部にインライン検索バー（インクリメンタルにマッチ全ハイライト + 件数 n/m・Enter/⇧Enter で次/前・regex/大小トグルは `search` crate 再利用）。⌥⌘F で置換行を追加（1件置換 / 全置換・全置換は 1 Transaction で undo 一発）。Esc で閉じて元位置へ。受入: workspace.rs で「render_」を検索→ジャンプ→3件目だけ置換→undo で戻る
+- [ ] **補完の自動トリガ**: 識別子文字・`.`・`::` の入力で自動的に補完ポップアップ（現状 Ctrl-Space 手動のみ）。入力継続で再フィルタ・確定/Tab/Esc は既存流用・Esc 直後は同じ語で再表示しない。受入: `buf.` と打つだけで候補が出て Enter で挿入できる
+- [ ] **hover の配線**: `lang/src/lsp.rs` の `hover()`（実装済み・未配線）をマウスホバー ~500ms とキー操作で呼び、対象位置の上にポップアップ（markdown は当面プレーン表示で可）。受入: rust-analyzer で型シグネチャと doc がポップアップに出る
+- [ ] **ファイル監視（watch 基盤）**: `notify`（FSEvents）で worktree を監視。①開いているバッファの外部変更 → 無編集なら自動リロード / dirty なら警告バー（再読込/このまま）②ツリーへ作成/削除/リネームを反映 ③git status・gutter diff の自動更新（現状は保存時 `FileRevision` 検知のみ・`project.rs:5`）。M12「エージェント編集の生中継」の前提土台。受入: ターミナルで `echo >> file` した直後にバッファ・ツリー・git 色が追従する
+- [ ] **hot exit（クラッシュ耐性）**: dirty バッファを数秒デバウンスでローカルにスナップショットし、異常終了後の起動で復元を提案（正常終了・保存で破棄）。FEATURES 唯一の未実装 MVP タグ。受入: 未保存編集中に `kill -9` → 再起動で編集内容が戻る
+- [ ] **ツリーのファイル操作**: 右クリックに 新規ファイル / 新規フォルダ / リネーム / 削除（OS ゴミ箱）/ 複製 を追加、ツリー行のインライン入力で命名。受入: マウスだけで「フォルダ作成→ファイル作成→リネーム→ゴミ箱」が一巡できる
+- [ ] **編集の所作一式**: ⌥←→ 単語移動・⌥⌫ 単語削除・⌘↑↓ 文頭/文末・⌥↑↓ 行移動・⇧⌥↑↓ 行複製・⌘⇧K 行削除・⌘/ コメントトグル（言語別 prefix 表）・改行の自動インデント（前行継承 + ブロック開始で 1 段）・括弧/クォート自動ペア（選択を囲む対応含む）・Tab/⇧Tab と ⌘[ ⌘] のインデント増減（`tab_size` 反映）。受入: 各操作が editor_core の unit test + 実機で効く
+- [ ] **multi-cursor の UI 配線**: コア（`editor_core` の複数レンジ edit・テスト済み）に対しビュー側アクションが無い。⌘D 次の一致を追加選択・⌥⌘↑↓ 上下に追加・⌥クリック追加・Esc で単一化・全カーソルの同時入力/削除/ペーストとキャレット複数描画。受入: ⌘D×3 で同名 3 箇所を同時に書き換えられる
+- [ ] **ナビゲーション履歴**: ジャンプ級の移動（F12・⌘P・検索ジャンプ・大距離クリック）で位置を積み、⌃- 戻る / ⌃⇧- 進む（閉じたファイルは開き直す）。受入: F12 で飛んで ⌃- で元の行へ戻れる
+- [ ] **soft wrap + 行ジャンプ**: 設定 `soft_wrap` + ⌥Z トグルで折り返し描画（論理行→表示行マップを行仮想化と両立させる）。⌃G（または ⌘P 内 `:42`）で行ジャンプ。受入: 長い Markdown 行が折り返され、⌃G→100 で 100 行目へ
+- [ ] **設定の実効化**: `font_size` / `tab_size` を editor_view へ配線(現状 13px 等ハードコード・settings_core に定義のみ) + ユーザー `keymap.json` の読込（`keymap_core` はロード可能・main.rs が組み込み JSON のみ）。どちらも live-reload（settings watcher 既存）。受入: font_size 変更が再起動なしで反映・ユーザー keymap でバインドを差し替えられる
+- [ ] 受入（総合・ドッグフーディング開始）: **Shirushi で Shirushi を丸 1 日開発できる**（この日から自分の変更を自分で浴びる）
+
+## M11 — 言語知能と Git の parity（「他人のリポジトリを違和感なく直せる」）
+
+- [ ] **フォーマット**: `textDocument/formatting` + 保存時フォーマット（設定 `format_on_save`）。受入: ⌥⇧F と保存時整形が rust-analyzer で効く
+- [ ] **rename（F2）**: WorkspaceEdit を複数ファイルへ適用（未オープンはディスク書換・オープン中はバッファ反映）。受入: 構造体名の rename が定義+全使用箇所に効く
+- [ ] **code actions（⌘.）**: 診断位置の `textDocument/codeAction` → 一覧 → 適用（WorkspaceEdit 適用は rename と共通基盤）。受入: unused import を ⌘. で削除できる
+- [ ] **参照検索（⇧F12）**: `textDocument/references` → 検索パネルのファイル別グルーピング UI を再利用して一覧→ジャンプ
+- [ ] **シンボル**: ①アウトライン（tree-sitter クエリ駆動 = LSP 不要で全言語動く・⌘⇧O picker またはサイドパネル）②⌘T ワークスペースシンボル（LSP `workspace/symbol`）。受入: workspace.rs の関数一覧を ⌘⇧O で絞ってジャンプ
+- [ ] **診断一覧 + F8**: statusbar の ✗▲ クリックでファイル別一覧→ジャンプ・F8/⇧F8 で次/前の診断へ
+- [ ] **tree-sitter 多言語**: TS/TSX/JS/Python/Go/JSON/TOML/YAML/Markdown/HTML/CSS の grammar 追加（`lang.rs` `for_extension` は現状 rs のみ。コメント prefix・インデント規則も言語表へ）。LSP 側は 7 言語ルーティング済み — この非対称を解消する。受入: .ts / .py がハイライトされ ⌘/ が正しいコメント記号になる
+- [ ] **増分パース + didChange 差分化**: `Tree::edit` で再解析を編集近傍に限定（512KB スキップの緩和）・LSP didChange を FULL→incremental へ。受入: 1MB の .rs で 1 文字編集のハイライト更新に体感遅延なし
+- [ ] **diff エディタ**: HEAD vs バッファの diff をタブとして開く（unified から・side-by-side は後続可）。入口 = git パネル / gutter / M12 の承認カード。受入: 変更ファイルの diff をタブで開き hunk 間を移動できる
+- [ ] **hunk 操作**: gutter の変更バークリック→ポップオーバー（この hunk を stage / 巻き戻し / コピー）+ git パネルから hunk 単位 stage。受入: 1 ファイル内 2 hunk の片方だけ stage してコミットできる
+- [ ] **blame（インライン）**: `git blame --porcelain` を遅延+キャッシュで、現在行の行末に dim 表示（作者・日時・要旨）。受入: 行にカーソルを置くと由来が見える
+- [ ] 受入（総合）: 他人の TypeScript リポジトリを clone → 読む（アウトライン/参照/hover）→ 直す（rename/quickfix/フォーマット）→ hunk stage でコミット、まで Shirushi 内で完結
+
+## M12 — AI の唯一無二（「色と通知で、並行エージェントに迷わない」）
+
+FEATURES で later タグの checkpoint / @mention / ⌘K / Todos をここへ前倒し採用（2026-07-15 分析。タグ自体は不変更 = ユーザー管理）。
+
+- [ ] **スレッド永続化**: transcript+メタ（宛先・モデル・トークン累計）を state に保存し再起動で復元・過去スレッドのブラウズ。ACP の session/load（resume）対応可否を調査し、不可なら「履歴表示+新セッションで継続」。現状は `seed_threads` の mock が初期値 = 再起動で消える。受入: 再起動しても昨日のスレッドが色ごと残り、続きを送れる
+- [ ] **チェックポイント / 巻き戻し**: エージェントのファイル編集前にターン単位の自動スナップショット（hot exit のバックアップ基盤を流用）。スレッドの各ターンに「この時点へ戻す」。Git 非依存の信頼担保（`research/cursor-features.md` の結論）。受入: エージェントに 3 ファイル壊させて 1 操作で全部戻せる
+- [ ] **エージェント編集の生中継**: watch（M10）と接続 — エージェントが書いたファイルを開いていれば即反映し、gutter にスレッド色のマークを出す。受入: bypass モードで「コメントを足して」→ 見ているバッファに変更がスレッド色付きで現れる
+- [ ] **スレッド⇄成果物の色リンク**: スレッドが触ったファイルを Thread に記録し、タブ/ツリーの該当ファイルへスレッド色ドット・スレッド側に「触ったファイル n」チップ → クリックで diff（M11）へ。3 エディタのどれも持たない「この変更は誰の仕業か」の可視化 = 方向感覚の完成形。受入: 2 スレッド並走後、ツリーの色ドットだけでどちらの変更か判別できる
+- [ ] **ターン終了サマリー + 通知**: ターン完了/権限待ちで ①トースト（UI-SPEC §8・右下）②statusbar スレッドドット（M4 の持ち越し）③未フォーカス窓は Dock バッジ。サマリー = 触ったファイル数・±行・所要時間。受入: 裏の worktree 窓のスレッドが権限待ちで止まったら手前の窓で気づける
+- [ ] **diff レビューの本体化**: 承認カードに「エディタで開く」→ M11 の diff タブで全変更をレビューして accept/reject（compact diff は要約に格下げ）。受入: 大きな編集の承認判断を diff タブで下せる
+- [ ] **@mention の完成**: `＋context` を Picker 化（fuzzy 全ファイル検索 — 現状先頭 18 件のみ・`agent_panel.rs:1408`）+ フォルダ / 選択範囲 / ターミナル出力の mention。受入: 目当てのファイルを 3 秒で @ 参照に載せられる
+- [ ] **⌘K インライン編集**: 選択範囲+指示 → その場に diff 表示 → accept/reject（ACP 経由・チャットへ行かない最短経路）。ターミナルにも同型（自然言語→コマンド生成）。キーは keymap で最終決定（Cursor 準拠 ⌘K を暫定）。受入: 関数を選択して「Result を返すように」→ その場で差分適用できる
+- [ ] **Todos（プラン）表示**: エージェントの plan/todo 更新を transcript 上部の常設チェックリストに（VSCode Claude Code 拡張踏襲・FEATURES §12）。受入: マルチステップ指示で進行中の項目に ● が付く
+- [ ] **Todo ボード（人間の板を AI が消化・2026-07-15 発案）**: 真実は **`.shirushi/todos.md`**（markdown チェックボックス+日付見出し。settings と同じ「ファイルが真実・UI/CLI/MCP/AI は全部書き手」方式）。レール ☑ → パネル表示・チェッククリック=ファイル書き換え・普通のファイルとしても編集可。各項目 **▶ でスレッドへ prompt 送信**（末尾に「完了したら todos.md の該当項目をチェックせよ」を自動付与・実行中はスレッド色 pulse ドット・宛先チップ連動）。エージェントが完了時に自分でチェックを入れ、watch（M10）で板へ即反映＝「チェックがひとりでに入る」体験。**✨ 今日の計画** = ai_commit_message と同型（ROADMAP/git status/昨日の残りを `claude -p` へ→下書き生成）。**逐次消化モード**（TurnEnded で次の未チェックを自動送信 = /goal ループの GUI 化）は checkpoint 実装後に解禁。前項のエージェント内部 Todos とは別物として共存（板=プロジェクトの1日 / 内部 todos=1ターンの分解）。`shirushi mcp` に todos ツール追加で外部 CLI からも同じ板を操作可（任意）。受入: 朝に 3 項目書き → 2 つを AI に消化させて**チェックが自動で入るのを見届け** → 1 つを手動チェック、その一部始終が todos.md の git diff に残る
+- [ ] **`.shirushi` の色/アイコン + 色ピッカー**: `.shirushi/settings.json` の `color` / `icon`（絵文字/画像）読込（`theme_core::ProjectIdentity` は型定義済み・未配線）+ レール右クリック→色ピッカー（選択を .shirushi へ保存）。Peacock 相当の完成 = 差別化の核の未回収分。受入: プロジェクトに好きな色と絵文字を与え、再起動後もレール/ピル/キャレットへ貫通
+- [ ] **⌘O の 2 階層化 + worktree ダッシュボード**: ⌘O を project → branch/worktree の 2 階層に（UI-SPEC §7・現状 ⎇ メニューで代替中）+ 各 worktree の ahead/behind・dirty・実行中スレッド（色ドット）を一望。受入: 3 worktree 並行中に ⌘O だけで「どこで何が走っているか」を見て切り替えられる
+- [ ] **トークン台帳**: スレッド横断のトークン集計（スレッド一覧に累計・今日の合計）。受入: 今日どのスレッドが何 k 使ったか見える
+- [ ] 受入（総合・当初ビジョンの完成形）: **worktree×3 で 3 スレッドを並走させ、色と通知だけで迷子にならず、全変更を diff レビュー → 必要なら checkpoint で巻き戻せる**
+
+## M13 — 公開準備（「英語話者が DL して 10 分で使い始める」）
+
+旧 M9 の未チェック残件をここへ統合（2026-07-15 判断: 日常機能 M10〜M12 を先に）。
+
+- [ ] **コマンドパレット ⌘⇧P + CommandRegistry**: 全アクションを名前+キー併記で登録式に（M3 からの持ち越し。StatusItemRegistry も同時に切る = FEATURES §9「登録境界を最初に切る」の第一歩）。Picker 再利用。受入: ⌘⇧P から任意の機能を名前で実行できる
+- [ ] **i18n の回収**: ハードコード日本語 UI 文字列を全て `t!` 化（現状 locales は 5 キーのみ・「ソース管理」「承認が必要」等が直書き = CLAUDE.md 規律との乖離）。ja/en 両整備 + parity テスト + locale 切替の実機確認。受入: `locale=en` で全 UI が英語になる
+- [ ] **入力レイテンシベンチ**: key→frame ヒストグラム（zed `input_latency_ui` 移植・M2 からの持ち越し）+ 起動時間の release 計測を CI へ。性能予算（Zed 比 ~80%）の自動検証。受入: 予算超過で CI が fail する
+- [ ] **自動アップデート**: GitHub Releases の署名済み .dmg を起動時チェック→DL→差し替え（Sparkle 系 or 自前）。受入: 旧バージョンから 1 クリックで更新できる
+- [ ] **Linux ビルド**: GPUI Linux（Wayland/X11）で起動・CI artifact 化（フォント/パス/キー差異の吸収）。受入: Ubuntu で編集・保存・ターミナルが動く
+- [ ] **ターミナル仕上げ**: file:line のリンク化（クリックでジャンプ — AI がターミナルへ吐くパスにも効く・Zed 方式）+ IME 前編集対応。受入: cargo のエラーパスをクリックで該当行へ
+- [ ] Remote（旧 M9）: local/remote の latency・CPU・memory benchmark と性能予算の自動検証
+- [ ] Remote（旧 M9）: Linux x86_64/aarch64 musl artifact・署名/checksum・古い server cleanup・GUI askpass
+- [ ] Remote（旧 M9）: dirty buffer crash backup（M10 hot exit の remote 版）・watch subscription/event/cancel（M10 watch の remote 版）・再接続後の LSP/PTY handle 再同期
+- [ ] Remote（旧 M9）: sleep/VPN断/ControlMaster kill/server kill/巨大 tree の実ホスト障害注入 test
+- [ ] Remote（旧 M9）: Remote Projects UI・SSH config picker・構造化接続ログ・retry/cancel・localhost port forwarding
+- [ ] Remote（旧 M9）受入: remote Linux で編集/Git/LSP/terminal/agent を一日使い、切断復帰しても未保存変更を失わない
+- [ ] **初回起動体験**: 空状態の案内（プロジェクトを開く・エージェント接続の導線）+ README/スクリーンショット整備
+- [ ] 受入（総合）: 英語話者が GitHub から DL → 10 分で「開く・編集・保存・検索・AI に 1 タスク」まで到達できる
+
+---
+
+以降（later）: FEATURES.md のタグに従う（拡張モデル ADR・WASM ホスト・minimap・multibuffer 本体・vim・テーマ/言語パック配布 等）。

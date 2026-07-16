@@ -22,8 +22,8 @@ GPUI ベースの自作エディタ **Shirushi（しるし）**。ライセン�
 ## リポジトリの約束
 
 - `zed/` は参照用クローン（.gitignore 済み）。**変更禁止・勝手に `git pull` しない**（GPUI の API churn で本体が壊れるため。更新はユーザーの判断で行い、追従修正とセットにする）
-- GPUI は path 依存（`zed/crates/gpui`）。安定フェーズで git rev 固定へ移行予定
-- Zed の GPL crate（`acp_thread` / `agent_servers` / `worktree` / `fs` 等）は**移植・改変してよい**（本体も AGPL-3.0）。移植時はファイル冒頭に出典（crate 名と概ねの時点）をコメントで残す
+- GPUI は **git 依存（rev 固定）**（root Cargo.toml。CI ビルド可能化のため path 依存から移行済み・2026-07-15 現在）。ローカル `zed/` は API 調査・example 参照用。**rev 更新はユーザー判断**（`zed/` の pull と同じ扱い・追従修正とセット）
+- Zed の GPL crate（`acp_thread` / `agent_servers` / `worktree` / `fs` 等）の**コード移植・改変は禁止**（DECISIONS §5。ライセンスは AGPL-3.0 確定＝2026-07-15。それでも全コードを自作/permissive に保つのは、デュアルライセンス・商用版・将来の緩和という**再ライセンスの自由を本人の手に残すため**。外部貢献を受け始める時は CLA 必須）。**手法の参考は可** — 読み下して自作 or permissive crate で代替し、参考元（crate 名と概ねの時点）をファイル冒頭コメントに残す（実例: git=CLI+imara-diff / terminal=alacritty_terminal / LSP=封筒自作。`docs/research/porting-git-terminal-lsp.md`）
 - Apache 系の土台: `gpui`, crates.io の `agent-client-protocol`（ACP プロトコル）
 
 ## ビルド・検証ループ（変更のたびに回す）
@@ -62,5 +62,5 @@ GPUI ベースの自作エディタ **Shirushi（しるし）**。ライセン�
 
 ## マイルストーン（重い Phase 管理はしない）
 
-M0 週末テスト（ユーザー自身が GPUI example を体感）→ M1 骨組みウィンドウ+ファイル表示 → M2 編集+保存（+性能ベンチ導入）→ M3 レール+プロジェクト色 → M4 ACP+スレッド色タブ。
-順序は FEATURES.md のタグと `docs/MVP-PLAN.md` が正。完了の定義は「ユーザーが日常で触れること」。
+M0 週末テスト → M1 骨組み → M2 編集+保存 → M3 レール+プロジェクト色 → M4 ACP+スレッド色タブ → M5 エクスプローラ → M6 検索 → M7 言語知能 → M8 Git+ターミナル → M9 Remote SSH（ここまで概ね完了・2026-07-15 時点）→ **M10 毎日使える → M11 言語×Git parity → M12 AI の唯一無二 → M13 公開準備**。
+順序の正は `docs/ROADMAP.md`（機能の全量とタグは FEATURES.md）。完了の定義は「ユーザーが日常で触れること」。

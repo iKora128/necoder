@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// MCP サーバ（`shirushi mcp`）。AI エージェントがプロジェクトを操作する口。
 mod mcp;
 use std::time::Instant;
-use workspace::{ProjectSource, Workspace};
+use workspace::{ProjectSource, RestoredTabs, Workspace};
 
 actions!(shirushi, [Quit]);
 
@@ -28,10 +28,10 @@ fn connect_ssh_project(uri: &str) -> anyhow::Result<ProjectSource> {
     Ok(ProjectSource::new(host, root))
 }
 
-/// コマンドライン引数（or 前回状態）から host 付き project と開ファイルを決める。
-fn resolve_projects() -> (Vec<ProjectSource>, Vec<Option<PathBuf>>, usize) {
+/// コマンドライン引数（or 前回状態）から host 付き project と復元タブ列を決める。
+fn resolve_projects() -> (Vec<ProjectSource>, Vec<RestoredTabs>, usize) {
     let mut sources = Vec::new();
-    let mut open_files = Vec::new();
+    let mut open_files: Vec<RestoredTabs> = Vec::new();
     let mut active = 0;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has_explicit_args = !args.is_empty();
@@ -41,7 +41,7 @@ fn resolve_projects() -> (Vec<ProjectSource>, Vec<Option<PathBuf>>, usize) {
             match connect_ssh_project(&arg) {
                 Ok(source) => {
                     sources.push(source);
-                    open_files.push(None);
+                    open_files.push(RestoredTabs::default());
                 }
                 Err(error) => eprintln!("Remote SSH 接続に失敗（スキップ）: {error:#}"),
             }
@@ -55,10 +55,10 @@ fn resolve_projects() -> (Vec<ProjectSource>, Vec<Option<PathBuf>>, usize) {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."));
             sources.push(ProjectSource::local(parent));
-            open_files.push(Some(file));
+            open_files.push(RestoredTabs::single(file));
         } else if path.is_dir() {
             sources.push(ProjectSource::local(std::fs::canonicalize(&path).unwrap_or(path)));
-            open_files.push(None);
+            open_files.push(RestoredTabs::default());
         } else {
             eprintln!("見つからない（スキップ）: {arg}");
         }
@@ -79,7 +79,10 @@ fn resolve_projects() -> (Vec<ProjectSource>, Vec<Option<PathBuf>>, usize) {
                                 active = sources.len();
                             }
                             sources.push(source);
-                            open_files.push(saved.open_file);
+                            open_files.push(RestoredTabs {
+                                files: saved.open_files,
+                                active: saved.active_file,
+                            });
                         }
                         Err(error) => eprintln!("前回の Remote SSH 接続を復元できない: {error:#}"),
                     }
@@ -91,7 +94,7 @@ fn resolve_projects() -> (Vec<ProjectSource>, Vec<Option<PathBuf>>, usize) {
     if sources.is_empty() && !has_explicit_args {
         if let Ok(cwd) = std::env::current_dir() {
             sources.push(ProjectSource::local(cwd));
-            open_files.push(None);
+            open_files.push(RestoredTabs::default());
         }
     }
     (sources, open_files, active)
@@ -282,8 +285,23 @@ fn main() {
             }
         };
 
+        // 開発用: SHIRUSHI_OPEN_TABS=a.rs,b.rs,… でアクティブプロジェクトに複数タブを開く（複数タブ検証）。
+        let extra_tabs = std::env::var("SHIRUSHI_OPEN_TABS").ok().map(|value| {
+            let root = sources
+                .get(active_project)
+                .map(|source| source.root().to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            value
+                .split(',')
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| root.join(entry))
+                .collect::<Vec<_>>()
+        });
         if let Err(error) = window.update(cx, |workspace, window, cx| {
             workspace.restore_open_file(&open_files, window, cx);
+            if let Some(paths) = extra_tabs {
+                workspace.open_paths(paths, window, cx);
+            }
             let handle = workspace.focus_handle(cx);
             window.focus(&handle, cx);
         }) {

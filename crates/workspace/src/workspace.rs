@@ -42,6 +42,9 @@ actions!(
         CloseTab,
         RestoreClosedTab,
         NewThread,
+        // エディタタブの切替（⌘{ / ⌘} = ⌘⇧[ / ⌘⇧]）。M10 複数タブ。
+        SelectNextTab,
+        SelectPrevTab,
         // AI スレッドタブの切替（Chrome 風。⌘⌥←→ / ⌃Tab）。
         SelectNextThread,
         SelectPrevThread,
@@ -100,11 +103,29 @@ enum Dock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedProject {
     root: PathBuf,
-    #[serde(default)]
+    /// 旧形式（1 プロジェクト = 1 ファイル）。読み込み時の後方互換のみ・書き込みはしない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     open_file: Option<PathBuf>,
+    /// 開いているタブのファイル一覧（左から順）。M10 複数タブ。
+    #[serde(default)]
+    open_files: Vec<PathBuf>,
+    /// アクティブタブの添字（`open_files` 内）。
+    #[serde(default)]
+    active_file: usize,
     /// `None` は従来どおり local。password を含まない正規 `ssh://` URI のみ保存する。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_uri: Option<String>,
+}
+
+impl PersistedProject {
+    /// 保存済みの開ファイル一覧（旧 `open_file` からの移行込み）。
+    fn files(&self) -> Vec<PathBuf> {
+        if !self.open_files.is_empty() {
+            self.open_files.clone()
+        } else {
+            self.open_file.iter().cloned().collect()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -135,8 +156,27 @@ pub fn load_state(path: &Path) -> Option<(Vec<PathBuf>, usize)> {
 #[derive(Debug, Clone)]
 pub struct SavedProject {
     pub root: PathBuf,
-    pub open_file: Option<PathBuf>,
+    /// 前回開いていたタブのファイル一覧（左から順）。
+    pub open_files: Vec<PathBuf>,
+    /// アクティブタブの添字。
+    pub active_file: usize,
     pub remote_uri: Option<String>,
+}
+
+/// 起動時に復元するタブ列（プロジェクトごと）。bin が引数/前回状態から組み立てて渡す。
+#[derive(Debug, Clone, Default)]
+pub struct RestoredTabs {
+    /// 開くファイル一覧（左から順）。
+    pub files: Vec<PathBuf>,
+    /// アクティブにするタブの添字。
+    pub active: usize,
+}
+
+impl RestoredTabs {
+    /// 単一ファイル（コマンドライン引数で 1 ファイル指定した場合）。
+    pub fn single(file: PathBuf) -> Self {
+        Self { files: vec![file], active: 0 }
+    }
 }
 
 /// local/SSH を区別して前回状態を読む。旧 `root` だけの state.json と後方互換。
@@ -150,8 +190,9 @@ pub fn load_saved_state(path: &Path) -> Option<(Vec<SavedProject>, usize)> {
         .projects
         .into_iter()
         .map(|project| SavedProject {
-            root: project.root,
-            open_file: project.open_file,
+            root: project.root.clone(),
+            open_files: project.files(),
+            active_file: project.active_file,
             remote_uri: project.remote_uri,
         })
         .collect();
@@ -248,9 +289,46 @@ struct ProjectSlot {
     expanded: HashSet<PathBuf>,
     rows: Vec<TreeRow>,
     selected: Option<PathBuf>,
-    open_file: Option<PathBuf>,
+    /// このプロジェクトで開いているタブのファイル一覧（左から順・M10 複数タブ）。
+    /// アクティブプロジェクトでは `Workspace.tabs` が真実で、ここへは同期する（`sync_active_slot`）。
+    /// 非アクティブプロジェクトでは復元用の記録（切替時に開き直す）。
+    open_files: Vec<PathBuf>,
+    /// アクティブタブの添字（`open_files` 内）。
+    active_file: usize,
     /// カラム/アイコン表示の「現在フォルダ」（ここの直下を見せる）。既定はルート。
     current_dir: Option<PathBuf>,
+}
+
+/// ペインに載る 1 タブ（M10 複数タブ）。当面は具体型（エディタ）だけ・多態化は必要時に育てる
+/// （ARCHITECTURE §3 の Pane/Item 初版）。`path` はタブの同一判定と永続化のキー。
+struct EditorTab {
+    path: PathBuf,
+    editor: Entity<EditorView>,
+    /// このタブのバッファ変更監視（再描画 + LSP didChange）。タブごとに持つ。
+    _observation: Subscription,
+}
+
+/// ドラッグ中のエディタタブ（Chrome 風並べ替えのゴースト。`agent_panel` の DraggedThreadTab と同型）。
+#[derive(Clone)]
+struct DraggedEditorTab {
+    index: usize,
+    name: SharedString,
+    theme: Theme,
+}
+
+impl Render for DraggedEditorTab {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(12.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(self.theme.bg2)
+            .border_1()
+            .border_color(self.theme.border)
+            .text_size(px(12.))
+            .text_color(self.theme.fg0)
+            .child(self.name.clone())
+    }
 }
 
 struct BranchMenuState {
@@ -414,8 +492,11 @@ fn parse_definition(value: &serde_json::Value) -> Option<(PathBuf, u32, u32)> {
 pub struct Workspace {
     projects: Vec<ProjectSlot>,
     active: usize,
-    editor: Option<Entity<EditorView>>,
-    // 右分割ペイン（⌘\ で開閉。独立エディタ＝比較・参照用の副ビュー。LSP/統合は主ペイン=editor 側）。
+    // 主ペインの開いているタブ（左から順）。アクティブプロジェクトの分だけを持つ。M10 複数タブ。
+    tabs: Vec<EditorTab>,
+    // アクティブタブの添字（`tabs` 内）。tabs が空なら意味を持たない。
+    active_tab: usize,
+    // 右分割ペイン（⌘\ で開閉。独立エディタ＝比較・参照用の副ビュー。LSP/統合は主ペイン=tabs 側）。
     split_editor: Option<Entity<EditorView>>,
     agent_panel: Entity<AgentPanel>,
     theme: Theme,
@@ -435,7 +516,6 @@ pub struct Workspace {
     resizing_explorer: bool,
     // titlebar ドラッグ（down→move で窓移動開始。クリック/ダブルクリックと区別する）。
     should_move_window: bool,
-    _editor_observation: Option<Subscription>,
     // オーバーレイ（ファイルファインダ / プロジェクトスイッチャー）
     picker: Option<Entity<Picker>>,
     picker_mode: PickerMode,
@@ -476,8 +556,9 @@ pub struct Workspace {
     // 変わったら張り替える判定に使う。
     lsp_language: Option<&'static str>,
     lsp_initialized: bool,
-    // 最後に didChange で送ったバッファ version（重複送信の抑止）。
-    lsp_sent_version: u64,
+    // ファイル別に最後に didChange で送ったバッファ version（重複送信の抑止）。
+    // 複数タブでは version 番号がファイル間で衝突しうるので path 別に持つ（単一 u64 だと誤スキップ）。
+    lsp_sent_versions: HashMap<PathBuf, u64>,
     // ファイル別診断（絶対パス → (行, 重大度)）。gutter/statusbar に使う。
     diagnostics: HashMap<PathBuf, Vec<(u32, lang::lsp::Severity)>>,
     _lsp_pump: Option<gpui::Task<()>>,
@@ -547,7 +628,8 @@ impl Workspace {
                         expanded: HashSet::new(),
                         rows: Vec::new(),
                         selected: None,
-                        open_file: None,
+                        open_files: Vec::new(),
+                        active_file: 0,
                         current_dir: None,
                     };
                     slot.refresh();
@@ -602,7 +684,8 @@ impl Workspace {
         let mut workspace = Workspace {
             projects,
             active,
-            editor: None,
+            tabs: Vec::new(),
+            active_tab: 0,
             split_editor: None,
             agent_panel,
             theme,
@@ -618,7 +701,6 @@ impl Workspace {
             explorer_width: DOCK_WIDTH,
             resizing_explorer: false,
             should_move_window: false,
-            _editor_observation: None,
             picker: None,
             picker_mode: PickerMode::Files,
             picker_files: Vec::new(),
@@ -648,7 +730,7 @@ impl Workspace {
             lsp_root: None,
             lsp_language: None,
             lsp_initialized: false,
-            lsp_sent_version: u64::MAX,
+            lsp_sent_versions: HashMap::new(),
             diagnostics: HashMap::new(),
             _lsp_pump: None,
             completion: None,
@@ -699,16 +781,69 @@ impl Workspace {
         workspace
     }
 
-    /// 起動後に、アクティブプロジェクトの前回開ファイルがあれば開く。
-    pub fn restore_open_file(&mut self, open_files: &[Option<PathBuf>], window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Some(path)) = open_files.get(self.active) {
-            let path = path.clone();
+    /// 起動後にタブ列を復元する。各プロジェクトの記録を slot へ流し込み（非アクティブは遅延復元）、
+    /// アクティブプロジェクトのタブだけ実際に開く。
+    pub fn restore_open_file(&mut self, restored: &[RestoredTabs], window: &mut Window, cx: &mut Context<Self>) {
+        for (index, tabs) in restored.iter().enumerate() {
+            if let Some(slot) = self.projects.get_mut(index) {
+                slot.open_files = tabs.files.clone();
+                slot.active_file = tabs.active;
+            }
+        }
+        self.open_slot_files(window, cx);
+    }
+
+    /// 複数ファイルをアクティブプロジェクトのタブとして順に開く（最後がアクティブ）。
+    /// 外部起点（起動時の複数ファイル指定・開発用フック）から使う。
+    pub fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        for path in paths {
             self.open_file(path, window, cx);
         }
     }
 
     fn active_slot(&self) -> Option<&ProjectSlot> {
         self.projects.get(self.active)
+    }
+
+    /// 現在アクティブなタブのエディタ（無ければ `None`）。従来 `self.editor` を読んでいた箇所の置換。
+    fn active_editor(&self) -> Option<Entity<EditorView>> {
+        self.tabs.get(self.active_tab).map(|tab| tab.editor.clone())
+    }
+
+    /// アクティブタブのファイルパス。
+    fn active_tab_path(&self) -> Option<PathBuf> {
+        self.tabs.get(self.active_tab).map(|tab| tab.path.clone())
+    }
+
+    /// 現在のタブ列をアクティブ slot へ書き戻す（永続化・切替復元の真実源を同期）。
+    fn sync_active_slot(&mut self) {
+        let files: Vec<PathBuf> = self.tabs.iter().map(|tab| tab.path.clone()).collect();
+        let active_file = self.active_tab;
+        if let Some(slot) = self.projects.get_mut(self.active) {
+            slot.open_files = files;
+            slot.active_file = active_file;
+        }
+    }
+
+    /// アクティブ slot に記録された open_files を順に開き直す（タブ復元）。存在しないファイルは飛ばす。
+    /// レール切替・ブランチ切替・起動復元で使う。
+    fn open_slot_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (files, active_file) = match self.active_slot() {
+            Some(slot) => (slot.open_files.clone(), slot.active_file),
+            None => return,
+        };
+        let host = self.active_worktree().map(|worktree| worktree.host().clone());
+        self.tabs.clear();
+        self.active_tab = 0;
+        for path in files {
+            let exists = host.as_ref().map(|host| host.metadata(&path).is_ok()).unwrap_or(false);
+            if exists {
+                self.open_file(path, window, cx);
+            }
+        }
+        if active_file < self.tabs.len() {
+            self.select_tab(active_file, window, cx);
+        }
     }
 
     fn active_worktree(&self) -> Option<Rc<Worktree>> {
@@ -847,15 +982,10 @@ impl Workspace {
         if let Some(slot) = self.projects.get_mut(self.active) {
             slot.refresh();
         }
-        let open_file = self.active_slot().and_then(|slot| slot.open_file.clone());
-        let host = self.active_worktree().map(|worktree| worktree.host().clone());
-        match open_file {
-            Some(path) if host.as_ref().is_some_and(|host| host.metadata(&path).is_ok()) => {
-                self.open_file(path, window, cx)
-            }
-            Some(_) => self.close_active_editor(cx),
-            None => self.refresh_git_status(),
-        }
+        // 開いていたタブ列を（存在するファイルだけ）開き直す。分割は畳む（旧内容を指すため）。
+        self.split_editor = None;
+        self.open_slot_files(window, cx);
+        self.refresh_git_status();
         self.update_agent_destination(cx);
         cx.notify();
     }
@@ -867,7 +997,7 @@ impl Workspace {
         match self.git_panel.take() {
             Some(_) => {
                 // 閉じる → エディタがあればフォーカスを戻す。
-                if let Some(editor) = &self.editor {
+                if let Some(editor) = self.active_editor() {
                     let handle = editor.read(cx).focus_handle(cx);
                     window.focus(&handle, cx);
                 }
@@ -1199,8 +1329,7 @@ impl Workspace {
         };
         let root = worktree.root().to_path_buf();
         let Some(path) = self
-            .editor
-            .as_ref()
+            .active_editor()
             .and_then(|editor| editor.read(cx).buffer().path().map(Path::to_path_buf))
         else {
             return;
@@ -1219,7 +1348,7 @@ impl Workspace {
         self.lsp = None;
         self._lsp_pump = None;
         self.lsp_initialized = false;
-        self.lsp_sent_version = u64::MAX;
+        self.lsp_sent_versions.clear();
         self.diagnostics.clear();
         let (client, notifications) = match lang::lsp::LspClient::new_on(
             worktree.host().clone(),
@@ -1265,7 +1394,7 @@ impl Workspace {
 
     /// 現在開いているファイルを didOpen する（稼働中サーバが担当する言語に限る）。
     fn lsp_did_open_active(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.clone() else {
+        let Some(editor) = self.active_editor() else {
             return;
         };
         let info = {
@@ -1281,9 +1410,25 @@ impl Workspace {
             }
         };
         if let Some((path, language_id, version, text)) = info {
-            self.lsp_sent_version = version;
+            self.lsp_sent_versions.insert(path.clone(), version);
             if let Some(lsp) = &self.lsp {
                 lsp.did_open(&path, language_id, version as i32, &text);
+            }
+        }
+    }
+
+    /// タブを閉じたら didClose を送り、送信済み version 記録も外す（稼働中サーバ担当言語のみ）。
+    fn lsp_did_close(&mut self, path: &Path) {
+        self.lsp_sent_versions.remove(path);
+        if !self.lsp_initialized {
+            return;
+        }
+        let closes = language_server_for(path, self.active_worktree().map(|w| w.host().is_remote()).unwrap_or(false))
+            .map(|server| self.lsp_language == Some(server.language_id))
+            .unwrap_or(false);
+        if closes {
+            if let Some(lsp) = &self.lsp {
+                lsp.did_close(path);
             }
         }
     }
@@ -1315,7 +1460,7 @@ impl Workspace {
 
     /// アクティブファイルの診断をエディタへ渡す（gutter 下線用）。
     fn push_active_diagnostics(&self, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.clone() else {
+        let Some(editor) = self.active_editor() else {
             return;
         };
         let path = editor.read(cx).buffer().path().map(Path::to_path_buf);
@@ -1336,19 +1481,17 @@ impl Workspace {
         let info = {
             let view = editor.read(cx);
             let version = view.buffer().version();
-            if version == self.lsp_sent_version {
-                None
-            } else {
-                view.buffer()
-                    .path()
-                    .filter(|path| {
-                        language_server_for(path, view.buffer().host().is_remote()).is_some()
-                    })
-                    .map(|path| (path.to_path_buf(), version, view.buffer().text()))
-            }
+            view.buffer()
+                .path()
+                .filter(|path| {
+                    language_server_for(path, view.buffer().host().is_remote()).is_some()
+                })
+                // ファイル別に「送信済み version」と比較（複数タブで version 番号が衝突しても誤スキップしない）。
+                .filter(|path| self.lsp_sent_versions.get(*path) != Some(&version))
+                .map(|path| (path.to_path_buf(), version, view.buffer().text()))
         };
         if let Some((path, version, text)) = info {
-            self.lsp_sent_version = version;
+            self.lsp_sent_versions.insert(path.clone(), version);
             if let Some(lsp) = &self.lsp {
                 lsp.did_change(&path, version as i32, &text);
             }
@@ -1357,7 +1500,7 @@ impl Workspace {
 
     /// アクティブファイルの診断件数（error, warning）。statusbar 用。
     fn active_diagnostic_counts(&self, cx: &App) -> (usize, usize) {
-        let Some(editor) = &self.editor else {
+        let Some(editor) = self.active_editor() else {
             return (0, 0);
         };
         let Some(path) = editor.read(cx).buffer().path().map(Path::to_path_buf) else {
@@ -1377,7 +1520,7 @@ impl Workspace {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
-        let Some(editor) = self.editor.clone() else {
+        let Some(editor) = self.active_editor() else {
             return;
         };
         let info = {
@@ -1419,14 +1562,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = self
-            .editor
-            .as_ref()
-            .and_then(|editor| editor.read(cx).buffer().path().map(Path::to_path_buf));
+        let current = self.active_tab_path();
         if current.as_deref() != Some(path.as_path()) {
             self.open_file(path, window, cx);
         }
-        if let Some(editor) = &self.editor {
+        if let Some(editor) = self.active_editor() {
             editor.update(cx, |view, cx| view.reveal_lsp_position(line, character, cx));
         }
         cx.notify();
@@ -1437,7 +1577,7 @@ impl Workspace {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
-        let Some(editor) = self.editor.clone() else {
+        let Some(editor) = self.active_editor() else {
             return;
         };
         let info = {
@@ -1491,7 +1631,7 @@ impl Workspace {
         if self.completion.take().is_none() {
             return;
         }
-        if let Some(editor) = &self.editor {
+        if let Some(editor) = self.active_editor() {
             let handle = editor.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
@@ -1516,7 +1656,7 @@ impl Workspace {
             .and_then(|state| state.items.get(state.selected))
             .map(|item| item.insert_text.clone());
         self.completion = None;
-        if let Some(editor) = self.editor.clone() {
+        if let Some(editor) = self.active_editor() {
             let handle = editor.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
             if let Some(text) = insert {
@@ -1550,17 +1690,12 @@ impl Workspace {
         self.lsp_root = None;
         self.lsp_language = None;
         self.lsp_initialized = false;
-        self.lsp_sent_version = u64::MAX;
+        self.lsp_sent_versions.clear();
         self.diagnostics.clear();
-        // 切替先プロジェクトの開ファイルを復元（無ければエディタを閉じる）
-        let open_file = self.projects[index].open_file.clone();
-        match open_file {
-            Some(path) => self.open_file(path, window, cx),
-            None => {
-                self.editor = None;
-                self._editor_observation = None;
-            }
-        }
+        // 分割ペインは旧プロジェクトのファイルを指しているので畳む。
+        self.split_editor = None;
+        // 切替先プロジェクトのタブ列を復元（無ければタブ無し＝空状態）。
+        self.open_slot_files(window, cx);
         self.refresh_git_status();
         self.update_agent_destination(cx);
         if self.show_bottom {
@@ -1603,7 +1738,7 @@ impl Workspace {
 
     // ── タブ/スレッドのショートカット（⌘W / ⌘⇧A） ──
 
-    fn close_tab(&mut self, _: &CloseTab, _window: &mut Window, cx: &mut Context<Self>) {
+    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         // 最後に触った面が Agent なら AI スレッドタブを、そうでなければエディタタブを閉じる。
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
         // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。
@@ -1611,7 +1746,22 @@ impl Workspace {
             self.agent_panel.update(cx, |panel, cx| panel.close_active_thread(cx));
             return;
         }
-        self.close_active_editor(cx);
+        self.close_active_editor(window, cx);
+    }
+
+    /// 次のエディタタブへ（⌘} = ⌘⇧]。末尾で先頭へ回る）。
+    fn select_next_tab(&mut self, _: &SelectNextTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.len() > 1 {
+            self.select_tab((self.active_tab + 1) % self.tabs.len(), window, cx);
+        }
+    }
+
+    /// 前のエディタタブへ（⌘{ = ⌘⇧[。先頭で末尾へ回る）。
+    fn select_prev_tab(&mut self, _: &SelectPrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.tabs.len();
+        if count > 1 {
+            self.select_tab((self.active_tab + count - 1) % count, window, cx);
+        }
     }
 
     /// 直近に閉じたタブを復元する（Chrome の ⌘⇧T）。⌘W と同じく最後に触った面で振り分ける。
@@ -1811,23 +1961,88 @@ impl Workspace {
         cx.notify();
     }
 
-    /// アクティブタブ（＝現在のエディタ）を閉じる。
-    fn close_active_editor(&mut self, cx: &mut Context<Self>) {
-        // 閉じるファイルを履歴に積む（⌘⇧T で復元。Chrome 風）。
-        let closed = self
-            .editor
-            .as_ref()
-            .and_then(|editor| editor.read(cx).buffer().path().map(Path::to_path_buf));
-        if let Some(path) = closed {
-            self.recently_closed_files.push(path);
+    /// アクティブなエディタタブを閉じて隣へ移る（⌘W / タブの ×）。
+    fn close_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            return;
         }
-        self.editor = None;
-        self.split_editor = None; // 主ペインを閉じたら分割も畳む
-        self._editor_observation = None;
+        self.close_tab_at(self.active_tab, window, cx);
+    }
+
+    /// `index` 番目のタブを閉じ、アクティブを隣へ寄せる。閉じたファイルは ⌘⇧T 用に履歴へ積み、
+    /// LSP には didClose を送る。最後の 1 枚を閉じると空状態（分割も畳む）。
+    fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(index);
+        self.recently_closed_files.push(tab.path.clone());
+        self.lsp_did_close(&tab.path);
+        // active を有効域へ寄せる。
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.split_editor = None; // 何も無ければ分割（比較ビュー）も畳む
+        } else if index < self.active_tab {
+            self.active_tab -= 1;
+        } else if index == self.active_tab {
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        }
+        // 新しいアクティブタブへフォーカス + 診断反映。
+        if let Some(editor) = self.active_editor() {
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
         if let Some(slot) = self.projects.get_mut(self.active) {
-            slot.open_file = None;
-            slot.selected = None;
+            slot.selected = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
         }
+        self.sync_active_slot();
+        self.push_active_diagnostics(cx);
+        self.refresh_git_status();
+        self.save_state();
+        cx.notify();
+    }
+
+    /// `index` 番目のタブをアクティブにする（タブクリック・⌘{ / ⌘}・重複オープン時）。
+    fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        self.active_tab = index;
+        let editor = tab.editor.clone();
+        let path = tab.path.clone();
+        let handle = editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        if let Some(slot) = self.projects.get_mut(self.active) {
+            slot.selected = Some(path);
+            slot.active_file = index;
+        }
+        self.push_active_diagnostics(cx);
+        self.save_state();
+        cx.notify();
+    }
+
+    /// タブを `from` から `to` へ移動する（ドラッグ並べ替え。active は同じタブを指し続ける）。
+    fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let count = self.tabs.len();
+        if from >= count || to >= count || from == to {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        // active が指すタブを追従させる（remove→insert のインデックスずれを補正）。
+        self.active_tab = if self.active_tab == from {
+            to
+        } else {
+            let mut active = self.active_tab;
+            if from < active {
+                active -= 1;
+            }
+            if to <= active {
+                active += 1;
+            }
+            active
+        };
+        self.sync_active_slot();
         self.save_state();
         cx.notify();
     }
@@ -1839,11 +2054,7 @@ impl Workspace {
             self.close_split(window, cx);
             return;
         }
-        let Some(path) = self
-            .editor
-            .as_ref()
-            .and_then(|editor| editor.read(cx).buffer().path().map(Path::to_path_buf))
-        else {
+        let Some(path) = self.active_tab_path() else {
             return;
         };
         let Some(worktree) = self.active_worktree() else {
@@ -1869,7 +2080,7 @@ impl Workspace {
         if self.split_editor.take().is_none() {
             return;
         }
-        if let Some(editor) = &self.editor {
+        if let Some(editor) = self.active_editor() {
             let handle = editor.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
@@ -1986,6 +2197,11 @@ impl Workspace {
     }
 
     fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // 既に開いていれば重複タブを作らず、そのタブへ切り替える。
+        if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
+            self.select_tab(index, window, cx);
+            return;
+        }
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -2002,19 +2218,19 @@ impl Workspace {
 
         let handle = editor.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
-        // 変更を監視（再描画 + LSP didChange）。
-        self._editor_observation = Some(cx.observe(&editor, Self::on_editor_changed));
-        self.editor = Some(editor);
+        // 変更を監視（再描画 + LSP didChange）。監視はタブごとに持つ。
+        let observation = cx.observe(&editor, Self::on_editor_changed);
+        self.tabs.push(EditorTab { path: path.clone(), editor, _observation: observation });
+        self.active_tab = self.tabs.len() - 1;
 
         if let Some(slot) = self.projects.get_mut(self.active) {
             slot.selected = Some(path.clone());
-            slot.open_file = Some(path);
         }
+        self.sync_active_slot();
         self.refresh_git_status();
         // LSP: この拡張子にサーバがあれば起動 + didOpen（初期化済みなら即 didOpen）。
         let has_language_server = self
-            .editor
-            .as_ref()
+            .active_editor()
             .and_then(|editor| {
                 let view = editor.read(cx);
                 view.buffer().path().map(|path| {
@@ -2048,7 +2264,9 @@ impl Workspace {
                 .iter()
                 .map(|slot| PersistedProject {
                     root: slot.worktree.root().to_path_buf(),
-                    open_file: slot.open_file.clone(),
+                    open_file: None, // 旧形式は書かない（open_files に一本化）
+                    open_files: slot.open_files.clone(),
+                    active_file: slot.active_file,
                     remote_uri: slot.worktree.host().project_uri(slot.worktree.root()),
                 })
                 .collect(),
@@ -2063,17 +2281,6 @@ impl Workspace {
         if let Err(error) = std::fs::write(path, text) {
             eprintln!("状態の保存に失敗: {error}");
         }
-    }
-
-    /// 復元用: 各プロジェクトの前回開ファイル。
-    pub fn persisted_open_files(state_path: &Path) -> Vec<Option<PathBuf>> {
-        let Ok(text) = std::fs::read_to_string(state_path) else {
-            return Vec::new();
-        };
-        let Ok(state) = serde_json::from_str::<PersistedState>(&text) else {
-            return Vec::new();
-        };
-        state.projects.into_iter().map(|project| project.open_file).collect()
     }
 
     // ── オーバーレイ（Picker） ──
@@ -2137,8 +2344,12 @@ impl Workspace {
     /// テーマを即時適用する（自身のクローム + エディタ + Agent パネル + Picker へ波及）。
     fn apply_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
-        if let Some(editor) = &self.editor {
-            editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+        // 全タブ + 分割ペインへ波及。
+        for tab in &self.tabs {
+            tab.editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+        }
+        if let Some(split) = &self.split_editor {
+            split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
         }
         self.agent_panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
         if let Some(picker) = &self.picker {
@@ -2240,7 +2451,7 @@ impl Workspace {
     fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.picker = None;
         self._picker_observation = None;
-        match &self.editor {
+        match self.active_editor() {
             Some(editor) => {
                 let handle = editor.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
@@ -2281,7 +2492,7 @@ impl Workspace {
         if self.search_panel.take().is_none() {
             return;
         }
-        match &self.editor {
+        match self.active_editor() {
             Some(editor) => {
                 let handle = editor.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
@@ -2417,7 +2628,7 @@ impl Workspace {
         };
         self.search_panel = None;
         self.open_file(path, window, cx);
-        if let Some(editor) = &self.editor {
+        if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| editor.reveal_position(line, column, cx));
         }
         cx.notify();
@@ -4529,78 +4740,12 @@ impl Workspace {
 
     // ── タブ列・パンくず（UI-SPEC §5） ──
 
-    fn render_tabstrip(
-        &self,
-        editor: &Entity<EditorView>,
-        is_split: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// 主ペインのタブ列（全タブ。クリック切替・× 閉じる・Chrome 風ドラッグ並べ替え・dirty ドット・
+    /// git 色貫通）。M10 複数タブ。`agent_panel::render_thread_tabs` と同じ流儀。
+    fn render_main_tabstrip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let accent = self.accent();
-        let pane = is_split as usize; // ElementId を主/分割で一意にする
-        let view = editor.read(cx);
-        let name = view
-            .buffer()
-            .path()
-            .and_then(|path| path.file_name())
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "無題".to_string());
-        let dirty = view.buffer().is_dirty();
-        // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
-        let status = view.buffer().path().and_then(|path| self.git_status.get(path).copied());
-        let name_color = status.map(|status| Self::git_tint(&theme, status)).unwrap_or(theme.fg0);
-        // ファイルが変わったら（キーが変わる）タブが一度だけ fade-in する。
-        let tab_key = SharedString::from(format!("editor-tab-appear-{pane}-{name}"));
-
-        let tab = div()
-            .id(("editor-tab", pane))
-            .flex()
-            .flex_col()
-            .h_full()
-            .border_r_1()
-            .border_color(theme.border)
-            .bg(theme.bg1)
-            .cursor_pointer()
-            .hover(|style| style.bg(theme.bg2))
-            // アクティブタブ上線 = プロジェクト色（UI-SPEC §5）
-            .child(div().h(px(2.)).w_full().bg(accent))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.))
-                    .px(px(14.))
-                    .text_size(px(12.))
-                    .text_color(theme.fg0)
-                    .when(dirty, |element| {
-                        element.child(div().size(px(7.)).rounded(px(3.5)).bg(theme.warn))
-                    })
-                    .child(div().text_color(name_color).child(SharedString::from(name)))
-                    .child(
-                        div()
-                            .id(("close-tab", pane))
-                            .text_color(theme.fg2)
-                            .cursor_pointer()
-                            .hover(|style| style.text_color(theme.fg0))
-                            .child("×")
-                            .tooltip(Tooltip::text(
-                                if is_split { "分割を閉じる  ⌘\\" } else { "閉じる  ⌘W" },
-                                theme.clone(),
-                            ))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    if is_split {
-                                        this.close_split(window, cx);
-                                    } else {
-                                        this.close_active_editor(cx);
-                                    }
-                                }),
-                            ),
-                    ),
-            );
-
+        let active_tab = self.active_tab;
         div()
             .flex()
             .items_stretch()
@@ -4609,13 +4754,154 @@ impl Workspace {
             .bg(theme.bg0)
             .border_b_1()
             .border_color(theme.border)
-            // 新しいファイルを開くとタブがすっと現れる（key=ファイル名。oneshot＝idle 0% 維持）。
-            .child(tab.with_animation(
-                tab_key,
-                Animation::new(std::time::Duration::from_millis(200))
-                    .with_easing(gpui::ease_out_quint()),
-                |element, delta| element.opacity(delta),
-            ))
+            .children(self.tabs.iter().enumerate().map(|(index, tab)| {
+                let is_active = index == active_tab;
+                let name = tab
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "無題".to_string());
+                let dirty = tab.editor.read(cx).buffer().is_dirty();
+                // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
+                let status = self.git_status.get(&tab.path).copied();
+                let name_color = status.map(|status| Self::git_tint(&theme, status)).unwrap_or(theme.fg0);
+                let drop_highlight = theme.bg2;
+                let drag_name = SharedString::from(name.clone());
+                let drag_theme = theme.clone();
+                div()
+                    .id(("editor-tab", index))
+                    .flex()
+                    .flex_col()
+                    .h_full()
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    // Zed 流の即時 hover。アクティブは常時 bg1。id で hover 再描画を保証。
+                    .hover(|style| style.bg(theme.bg1))
+                    .when(is_active, |element| element.bg(theme.bg1))
+                    // アクティブタブ上線 = プロジェクト色（UI-SPEC §5）
+                    .child(div().h(px(2.)).w_full().bg(if is_active { accent } else { theme.bg0 }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .px(px(14.))
+                            .text_size(px(12.))
+                            .text_color(if is_active { theme.fg0 } else { theme.fg1 })
+                            .when(dirty, |element| {
+                                element.child(div().size(px(7.)).rounded(px(3.5)).bg(theme.warn))
+                            })
+                            .child(div().text_color(name_color).child(SharedString::from(name)))
+                            .child(
+                                div()
+                                    .id(("close-tab", index))
+                                    .flex_none()
+                                    .px(px(3.))
+                                    .rounded(px(4.))
+                                    .text_color(theme.fg2)
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
+                                    .child("×")
+                                    .tooltip(Tooltip::text("閉じる  ⌘W", theme.clone()))
+                                    // × クリックはタブ切替へ伝播させない。
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.close_tab_at(index, window, cx);
+                                        }),
+                                    ),
+                            ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.agent_active = false; // エディタ側を触った → ⌘W の宛先をタブへ
+                            this.select_tab(index, window, cx);
+                        }),
+                    )
+                    // Chrome 風ドラッグ並べ替え: タブを掴んで別タブ上で離すと順序が入れ替わる。
+                    .on_drag(
+                        DraggedEditorTab { index, name: drag_name, theme: drag_theme },
+                        |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
+                    )
+                    .drag_over::<DraggedEditorTab>(move |style, _dragged, _window, _cx| {
+                        style.bg(drop_highlight)
+                    })
+                    .on_drop(cx.listener(move |this, dragged: &DraggedEditorTab, _window, cx| {
+                        this.move_tab(dragged.index, index, cx);
+                    }))
+            }))
+            .child(div().flex_1())
+    }
+
+    /// 右分割ペインのタブ列（単一比較ビュー。× = 分割を閉じる）。
+    fn render_split_tabstrip(
+        &self,
+        editor: &Entity<EditorView>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let name = editor
+            .read(cx)
+            .buffer()
+            .path()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "無題".to_string());
+        let dirty = editor.read(cx).buffer().is_dirty();
+        div()
+            .flex()
+            .items_stretch()
+            .h(px(TABSTRIP_HEIGHT))
+            .flex_none()
+            .bg(theme.bg0)
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .id("split-tab")
+                    .flex()
+                    .flex_col()
+                    .h_full()
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg1)
+                    .child(div().h(px(2.)).w_full().bg(accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .px(px(14.))
+                            .text_size(px(12.))
+                            .text_color(theme.fg0)
+                            .when(dirty, |element| {
+                                element.child(div().size(px(7.)).rounded(px(3.5)).bg(theme.warn))
+                            })
+                            .child(SharedString::from(name))
+                            .child(
+                                div()
+                                    .id("close-split")
+                                    .flex_none()
+                                    .px(px(3.))
+                                    .rounded(px(4.))
+                                    .text_color(theme.fg2)
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
+                                    .child("×")
+                                    .tooltip(Tooltip::text("分割を閉じる  ⌘\\", theme.clone()))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, window, cx| this.close_split(window, cx)),
+                                    ),
+                            ),
+                    ),
+            )
             .child(div().flex_1())
     }
 
@@ -4638,20 +4924,32 @@ impl Workspace {
             .child(SharedString::from(crumbs))
     }
 
-    /// 1 エディタペイン（タブ列 + パンくず + 本体）。分割時は左右で 2 枚並ぶ。
-    fn render_editor_pane(
-        &self,
-        editor: &Entity<EditorView>,
-        is_split: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    /// 主ペイン（複数タブ列 + アクティブタブのパンくず + 本体）。
+    fn render_main_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(editor) = self.active_editor() else {
+            return div().flex_1().into_any_element();
+        };
         div()
             .flex_1()
             .flex()
             .flex_col()
             .min_h_0()
             .min_w_0()
-            .child(self.render_tabstrip(editor, is_split, cx))
+            .child(self.render_main_tabstrip(cx))
+            .child(self.render_breadcrumb(&editor, cx))
+            .child(div().flex_1().overflow_hidden().child(editor.clone()))
+            .into_any_element()
+    }
+
+    /// 右分割ペイン（単一タブ + パンくず + 本体）。
+    fn render_split_pane(&self, editor: &Entity<EditorView>, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .min_w_0()
+            .child(self.render_split_tabstrip(editor, cx))
             .child(self.render_breadcrumb(editor, cx))
             .child(div().flex_1().overflow_hidden().child(editor.clone()))
             .into_any_element()
@@ -4659,29 +4957,24 @@ impl Workspace {
 
     fn render_center(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let content = match self.editor.clone() {
-            Some(editor) => {
-                let mut panes = div()
-                    .flex_1()
-                    .flex()
-                    .min_h_0()
-                    .child(self.render_editor_pane(&editor, false, cx));
-                // 右分割ペイン（あれば仕切り + 2 枚目）。
-                if let Some(split) = self.split_editor.clone() {
-                    panes = panes
-                        .child(div().w(px(1.)).flex_none().bg(theme.border))
-                        .child(self.render_editor_pane(&split, true, cx));
-                }
-                panes.into_any_element()
-            }
-            None => div()
+        let content = if self.tabs.is_empty() {
+            div()
                 .flex_1()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(theme.fg2)
                 .child(SharedString::from(i18n::t!("editor.empty_hint")))
-                .into_any_element(),
+                .into_any_element()
+        } else {
+            let mut panes = div().flex_1().flex().min_h_0().child(self.render_main_pane(cx));
+            // 右分割ペイン（あれば仕切り + 2 枚目）。
+            if let Some(split) = self.split_editor.clone() {
+                panes = panes
+                    .child(div().w(px(1.)).flex_none().bg(theme.border))
+                    .child(self.render_split_pane(&split, cx));
+            }
+            panes.into_any_element()
         };
         div()
             .flex_1()
@@ -4809,7 +5102,7 @@ impl Workspace {
                 .then(|| SharedString::from(slot.worktree.host().display_name().to_string()))
         });
         let change_count = self.git_status.len();
-        let (cursor, language) = match &self.editor {
+        let (cursor, language) = match self.active_editor() {
             Some(editor) => {
                 let view = editor.read(cx);
                 let (row, column) = view.cursor_display();
@@ -5086,7 +5379,7 @@ fn icon_large(name: &str, is_dir: bool, theme: &Theme) -> impl IntoElement {
 
 impl Focusable for Workspace {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        match &self.editor {
+        match self.active_editor() {
             Some(editor) => editor.read(cx).focus_handle(cx),
             None => self.focus_handle.clone(),
         }
@@ -5110,6 +5403,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_git_panel))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::restore_closed_tab))
+            .on_action(cx.listener(Self::select_next_tab))
+            .on_action(cx.listener(Self::select_prev_tab))
             .on_action(cx.listener(Self::new_agent_thread))
             .on_action(cx.listener(Self::select_next_thread))
             .on_action(cx.listener(Self::select_prev_thread))

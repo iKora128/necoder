@@ -169,6 +169,14 @@ impl LspClient {
         );
     }
 
+    /// ファイルを閉じたことを通知（タブを閉じたら送る＝サーバの追跡から外す）。
+    pub fn did_close(&self, path: &Path) {
+        self.notify(
+            "textDocument/didClose",
+            json!({ "textDocument": { "uri": path_to_uri(path) } }),
+        );
+    }
+
     /// 変更通知（v1 は FULL テキスト）。
     pub fn did_change(&self, path: &Path, version: i32, text: &str) {
         self.notify(

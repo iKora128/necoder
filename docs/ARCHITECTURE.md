@@ -72,6 +72,13 @@ impl Buffer {
 
 - 位置追従アンカーは M2 では offset ベースの簡易版でよい（multibuffer を入れる時に anchor 化）
 - ペインに載る物は `TabItem` trait（エディタ/画像/ディレクトリビュー/設定UI を同格に扱う。multibuffer 前提の抽象だけ先に切る）
+- **Pane/Item の初版（M10・複数タブ）**: `TabItem` trait を最初から抽象化し切らず、まず `workspace` 内の
+  具体型 `EditorTab { path, editor: Entity<EditorView>, _observation }` の `Vec` + `active_tab: usize` で始める
+  （ペインは当面「主ペイン = 複数タブ」+「右分割 = 単一比較ビュー」）。多態化（画像/diff/設定 UI を同格に）が
+  必要になった時点で `enum PaneItem { Editor(..), Diff(..), .. }` → `trait TabItem` へ育てる（multibuffer 本体は later）。
+  永続化は `ProjectSlot.open_files: Vec<PathBuf>` + `active_file`（プロジェクト単位でタブ列を復元）。
+  非アクティブプロジェクトのタブは**遅延復元**（レール切替時に開く）。LSP は didOpen/didClose をタブ開閉に追従、
+  didChange は編集タブごと（`lsp_sent_versions: HashMap<Path, u64>` で誤スキップを防ぐ）。
 
 ```rust
 // theme_core — 「きせかえ」の2軸: テーマ（面の配色）× プロジェクト色（識別）
