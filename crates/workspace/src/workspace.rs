@@ -127,60 +127,12 @@ enum PickerMode {
     Symbols,
     /// ⌘T ワークスペースシンボル（LSP）。id は `picker_workspace_symbols` の添字。
     WorkspaceSymbols,
-    /// ⌘⇧P コマンドパレット（M13）。id は [`command_entries`] の添字。
+    /// ⌘⇧P コマンドパレット（M13）。id は [`CommandRegistry`] の添字。
     Commands,
     /// リモート SSH ホストピッカー（M13）。id は `picker_ssh_hosts` の添字（末尾 id = 手入力）。
     SshHosts,
     /// スレッド履歴（過去スレッド一覧・#5）。id は `picker_history` の添字。
     ThreadHistory,
-}
-
-/// コマンドパレットの登録表（M13・CommandRegistry の最小形）: (i18n キー, アクション名)。
-/// 新しい workspace アクションを足したらここにも 1 行足す（登録式 = パレットがコアを知らない）。
-fn command_entries() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("cmd.file_finder", "workspace::FileFinder"),
-        ("cmd.save_active", "workspace::SaveActive"),
-        ("cmd.close_tab", "workspace::CloseTab"),
-        ("cmd.restore_closed_tab", "workspace::RestoreClosedTab"),
-        ("cmd.project_switcher", "workspace::ProjectSwitcher"),
-        ("cmd.new_window", "workspace::NewWindow"),
-        ("cmd.buffer_search", "workspace::BufferSearch"),
-        ("cmd.buffer_replace", "workspace::BufferReplace"),
-        ("cmd.project_search", "workspace::ProjectSearch"),
-        ("cmd.find_references", "workspace::FindReferences"),
-        ("cmd.go_to_line", "workspace::GoToLine"),
-        ("cmd.go_to_definition", "workspace::GoToDefinition"),
-        ("cmd.navigate_back", "workspace::NavigateBack"),
-        ("cmd.navigate_forward", "workspace::NavigateForward"),
-        ("cmd.outline_symbols", "workspace::OutlineSymbols"),
-        ("cmd.workspace_symbols", "workspace::WorkspaceSymbols"),
-        ("cmd.next_diagnostic", "workspace::NextDiagnostic"),
-        ("cmd.prev_diagnostic", "workspace::PrevDiagnostic"),
-        ("cmd.diagnostics_panel", "workspace::DiagnosticsPanel"),
-        ("cmd.format", "workspace::Format"),
-        ("cmd.rename", "workspace::Rename"),
-        ("cmd.code_actions", "workspace::CodeActions"),
-        ("cmd.inline_edit", "workspace::InlineEdit"),
-        ("cmd.trigger_completion", "workspace::TriggerCompletion"),
-        ("cmd.show_hover", "workspace::ShowHover"),
-        ("cmd.open_diff", "workspace::OpenDiff"),
-        ("cmd.next_hunk", "workspace::NextHunk"),
-        ("cmd.prev_hunk", "workspace::PrevHunk"),
-        ("cmd.theme_selector", "workspace::ThemeSelector"),
-        ("cmd.project_color", "workspace::ProjectColor"),
-        ("cmd.toggle_terminal", "workspace::ToggleTerminal"),
-        ("cmd.toggle_git_panel", "workspace::ToggleGitPanel"),
-        ("cmd.toggle_todo_board", "workspace::ToggleTodoBoard"),
-        ("cmd.split_right", "workspace::SplitRight"),
-        ("cmd.new_thread", "workspace::NewThread"),
-        ("cmd.next_tab", "workspace::SelectNextTab"),
-        ("cmd.prev_tab", "workspace::SelectPrevTab"),
-        ("cmd.next_thread", "workspace::SelectNextThread"),
-        ("cmd.prev_thread", "workspace::SelectPrevThread"),
-        ("cmd.remote_ssh", "workspace::RemoteSsh"),
-        ("cmd.thread_history", "workspace::ThreadHistory"),
-    ]
 }
 
 const RAIL_WIDTH: f32 = 46.0;
@@ -792,6 +744,7 @@ impl DerefMut for Workspace {
 }
 
 include!("project_session.rs");
+include!("commands.rs");
 include!("git_controller.rs");
 include!("editor_area/mod.rs");
 include!("editor_area/language.rs");

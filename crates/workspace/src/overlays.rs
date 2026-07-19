@@ -29,16 +29,19 @@ impl Workspace {
         .detach();
     }
 
-    /// ⌘⇧P コマンドパレット（M13）: 登録表 [`command_entries`] を名前+キー併記で並べ、
+    /// ⌘⇧P コマンドパレット（M13）: [`CommandRegistry`] を名前+キー併記で並べ、
     /// 確定でアクションを dispatch する（閉じてから = エディタ/Workspace コンテキストで解決）。
     fn open_command_palette(&mut self, _: &CommandPalette, window: &mut Window, cx: &mut Context<Self>) {
         let sections = keymap_core::parse(keymap_core::DEFAULT_KEYMAP_JSON).unwrap_or_default();
-        let items = command_entries()
+        let items = COMMAND_REGISTRY
+            .entries()
             .iter()
             .enumerate()
-            .map(|(id, (label_key, action_name))| {
-                let mut item = PickerItem::new(id, i18n::t!(label_key));
-                if let Some(keystrokes) = keymap_core::key_for_action(&sections, action_name) {
+            .map(|(id, entry)| {
+                let mut item = PickerItem::new(id, i18n::t!(entry.label_key));
+                if let Some(keystrokes) =
+                    keymap_core::key_for_action(&sections, entry.action_name)
+                {
                     item = item.with_detail(keymap_core::pretty_keystroke(&keystrokes));
                 }
                 item
@@ -353,10 +356,13 @@ impl Workspace {
                     PickerMode::Commands => {
                         // パレットは既に閉じた（上の close_picker）ので、フォーカスは
                         // エディタへ戻っている = Editor/Workspace コンテキストで解決される。
-                        if let Some((_, action_name)) = command_entries().get(id) {
-                            match cx.build_action(action_name, None) {
+                        if let Some(entry) = COMMAND_REGISTRY.get(id) {
+                            match cx.build_action(entry.action_name, None) {
                                 Ok(action) => window.dispatch_action(action, cx),
-                                Err(error) => eprintln!("パレット: {action_name} を解決できない: {error}"),
+                                Err(error) => eprintln!(
+                                    "パレット: {} を解決できない: {error}",
+                                    entry.action_name
+                                ),
                             }
                         }
                     }
