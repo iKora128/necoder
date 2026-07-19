@@ -5,9 +5,6 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-[lib]
-path = "src/workspace.rs"
-
 [dependencies]
 anyhow.workspace = true
 gpui.workspace = true

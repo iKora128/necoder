@@ -4,9 +4,8 @@
 //! 許可リストに従い、**プロジェクト色**はレール枠/リング・ツリー選択の左バー・キャレットにのみ流す。
 //! 状態（開プロジェクト・アクティブ・開ファイル）は `state.json` に保存し、再起動で復元する。
 
-pub mod updater;
-
 use agent_panel::AgentPanel;
+use crate::updater;
 use editor_core::{Buffer, Selection};
 use futures::StreamExt as _; // LSP 通知 pump の `.next()`
 use editor_view::{ComposerEvent, EditorHoverEvent, EditorInputEvent, EditorView, PositionSnapshot};
