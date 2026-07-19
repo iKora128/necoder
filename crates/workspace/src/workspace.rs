@@ -265,7 +265,6 @@ impl Render for DraggedEditorTab {
             .child(self.name.clone())
     }
 }
-
 /// レール項目の右クリックメニュー（色スウォッチ + 新規窓 / レールから外す / worktree・ブランチ削除・M10-2）。
 struct RailMenuState {
     /// 対象プロジェクトのレール index。
@@ -742,6 +741,8 @@ struct ChromeState {
     show_right: bool,
     show_bottom: bool,
     show_settings: bool,
+    settings_view: Entity<settings::SettingsView>,
+    pending_settings_command: Option<String>,
     confetti: bool,
     agent_width: f32,
     resizing_agent: bool,
@@ -931,25 +932,11 @@ impl Focusable for Workspace {
     }
 }
 
-/// エージェントの識別マーク: (ブランドロゴ SVG パス or None, モノグラム fallback, 描画色)。
-/// ロゴは ACP が広告しない（Zed もカタログ由来の同梱で ACP 経由ではない）ため UI 側で持つ。
-/// 実ロゴは Simple Icons（CC0・商標は各社帰属・識別目的の nominative use）を同梱。SI に無い
-/// もの（OpenAI/Codex）は頭文字にフォールバック。単色マーク（copilot/opencode/kimi）は淡色で描く。
-fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
-    match id {
-        "claude" => (Some("icons/brand-claude.svg"), "C", 0xd9_77_57), // テラコッタ
-        "codex" => (None, ">_", 0x10_a3_7f),                          // OpenAI マークは CC0 に無い→中立のコード記号（商標フリー）
-        "copilot" => (Some("icons/brand-copilot.svg"), "Co", 0xd0_d5_db), // 単色→淡色
-        "qwen" => (Some("icons/brand-qwen.svg"), "Q", 0x69_50_ef),
-        "opencode" => (Some("icons/brand-opencode.svg"), "OC", 0xd0_d5_db),
-        "kimi" => (Some("icons/brand-kimi.svg"), "K", 0xd0_d5_db),
-        "grok" => (None, "G", 0x4b_55_63), // xAI マークは CC0 に無い→頭文字（公式 SVG を置けば差し替え可）
-        _ => (None, "?", 0x88_88_88),
-    }
-}
-
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(command) = self.chrome.pending_settings_command.take() {
+            self.open_command_terminal(&command, _window, cx);
+        }
         // 承認カードからの diff タブ要求を消化（イベント時点では window が無いため・M12-6）。
         if let Some((title, buffer)) = self.pending_transient_tab.take() {
             self.open_transient_tab(title, buffer, _window, cx);

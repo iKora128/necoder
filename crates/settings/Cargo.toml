@@ -9,6 +9,9 @@ publish = false
 path = "src/settings.rs"
 
 [dependencies]
+acp_client.workspace = true
 gpui.workspace = true
+i18n.workspace = true
 settings_core.workspace = true
 serde_json.workspace = true
+theme_core.workspace = true

@@ -252,6 +252,11 @@ impl Workspace {
                         MouseButton::Left,
                         cx.listener(|this, _, _window, cx| {
                             this.chrome.show_settings = !this.chrome.show_settings;
+                            if this.chrome.show_settings {
+                                this.chrome.settings_view.update(cx, |view, cx| {
+                                    view.refresh_availability(cx)
+                                });
+                            }
                             cx.notify();
                         }),
                     ),

@@ -11,13 +11,15 @@
 //! 監視は poll（mtime 差分）。真の event-driven（FSEvents/notify）へは後で差し替え可能だが、
 //! 2 回の stat / 1.2s は事実上 0% で再描画も起こさない（変化時のみ）。
 
-use gpui::{App, BorrowAppContext, Global};
+use gpui::{
+    div, prelude::*, px, svg, App, BorrowAppContext, Context, Div, EventEmitter, FontWeight,
+    Global, Hsla, IntoElement, MouseButton, Render, SharedString, Stateful, Window,
+};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use theme_core::Theme;
 
-pub use settings_core::{
-    Density, Settings, SettingsStore, persist_user_value, user_settings_path,
-};
+pub use settings_core::{persist_user_value, user_settings_path, Density, Settings, SettingsStore};
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
 const POLL_INTERVAL: Duration = Duration::from_millis(1200);
@@ -67,7 +69,9 @@ pub fn get(cx: &App) -> Settings {
 /// user 設定の 1 キーを更新して**即適用 + 永続化**する（UI トグル・in-proc MCP から）。
 /// 書き込み→再読込で observer が発火し、全ビューへ波及する。poll は待たない。
 pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) {
-    let path = cx.try_global::<SettingsGlobal>().and_then(|global| global.user_path.clone());
+    let path = cx
+        .try_global::<SettingsGlobal>()
+        .and_then(|global| global.user_path.clone());
     if let Some(path) = path {
         if let Err(error) = persist_user_value(&path, key, value) {
             eprintln!("設定の保存に失敗（実行時のみ反映）: {error:#}");
@@ -121,4 +125,334 @@ fn project_settings_path(project_dir: Option<&Path>) -> Option<PathBuf> {
 /// ファイルの最終更新時刻（無ければ `None`）。
 fn mtime(path: Option<&Path>) -> Option<SystemTime> {
     std::fs::metadata(path?).ok()?.modified().ok()
+}
+
+/// SettingsView から workspace shell へ依頼する操作。
+pub enum SettingsViewEvent {
+    RunCommand(String),
+    OnboardingCompleted,
+}
+
+/// 設定ホーム。設定値の保存は自身で行い、Window/Terminal が必要な操作だけ shell へ上げる。
+pub struct SettingsView {
+    theme: Theme,
+    accent: Hsla,
+    availability: Vec<acp_client::Availability>,
+    availability_generation: u64,
+}
+
+impl SettingsView {
+    pub fn new(theme: Theme, accent: Hsla, cx: &mut Context<Self>) -> Self {
+        let mut view = Self {
+            theme,
+            accent,
+            availability: vec![acp_client::Availability::Missing; acp_client::AGENTS.len()],
+            availability_generation: 0,
+        };
+        view.refresh_availability(cx);
+        view
+    }
+
+    pub fn set_visuals(&mut self, theme: Theme, accent: Hsla) {
+        self.theme = theme;
+        self.accent = accent;
+    }
+
+    /// PATH / Zed cache の走査は Render から分離し、最新世代だけを反映する。
+    pub fn refresh_availability(&mut self, cx: &mut Context<Self>) {
+        self.availability_generation = self.availability_generation.wrapping_add(1);
+        let generation = self.availability_generation;
+        cx.spawn(async move |view, cx| {
+            let availability = cx
+                .background_executor()
+                .spawn(async move {
+                    acp_client::AGENTS
+                        .iter()
+                        .map(acp_client::AgentKind::availability)
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                if view.availability_generation == generation {
+                    view.availability = availability;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn set_default_agent(&mut self, label: &str, cx: &mut Context<Self>) {
+        set_user_value(
+            cx,
+            "default_agent",
+            serde_json::Value::String(label.to_string()),
+        );
+        cx.notify();
+    }
+
+    fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
+        set_user_value(cx, "onboarded", serde_json::Value::Bool(true));
+        cx.emit(SettingsViewEvent::OnboardingCompleted);
+        cx.notify();
+    }
+
+    fn agent_action_button(
+        &self,
+        id: (&'static str, usize),
+        text: String,
+        command: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = self.theme.clone();
+        div()
+            .id(id)
+            .px(px(8.))
+            .py(px(3.))
+            .rounded(px(5.))
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(11.))
+            .text_color(theme.fg1)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+            .child(SharedString::from(text))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, _window, cx| {
+                    cx.emit(SettingsViewEvent::RunCommand(command.to_string()))
+                }),
+            )
+    }
+}
+
+impl EventEmitter<SettingsViewEvent> for SettingsView {}
+
+impl Render for SettingsView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let settings = get(cx);
+        let default_agent = settings.default_agent;
+        let onboarding = !settings.onboarded;
+        let mut rows = div().flex().flex_col().gap(px(6.));
+        for (index, agent) in acp_client::AGENTS.iter().enumerate() {
+            let is_default = agent.label == default_agent;
+            let availability = self
+                .availability
+                .get(index)
+                .copied()
+                .unwrap_or(acp_client::Availability::Missing);
+            let (dot_color, status_text) = match availability {
+                acp_client::Availability::Installed => (theme.ok, i18n::t!("settings.installed")),
+                acp_client::Availability::Npx => (theme.warn, i18n::t!("settings.available_npx")),
+                acp_client::Availability::Missing => {
+                    (theme.fg2, i18n::t!("settings.not_installed"))
+                }
+            };
+            let default_control = if is_default {
+                div()
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .bg(accent.alpha(0.16))
+                    .text_size(px(11.))
+                    .text_color(accent)
+                    .child(SharedString::from(i18n::t!("settings.is_default")))
+                    .into_any_element()
+            } else {
+                let label = agent.label;
+                div()
+                    .id(("set-default", index))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    .child(SharedString::from(i18n::t!("settings.make_default")))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| view.set_default_agent(label, cx)),
+                    )
+                    .into_any_element()
+            };
+            let (logo, mono, brand) = agent_brand(agent.id);
+            let logo = match logo {
+                Some(path) => div()
+                    .flex_none()
+                    .size(px(26.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(svg().path(path).size(px(20.)).text_color(gpui::rgb(brand)))
+                    .into_any_element(),
+                None => div()
+                    .flex_none()
+                    .size(px(26.))
+                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui::rgb(brand))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(gpui::white())
+                    .child(mono)
+                    .into_any_element(),
+            };
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(12.))
+                    .py(px(9.))
+                    .rounded(px(8.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(if is_default {
+                        accent.alpha(0.5)
+                    } else {
+                        theme.border
+                    })
+                    .child(logo)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.fg0)
+                                    .child(agent.label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(dot_color)
+                                    .child(SharedString::from(status_text)),
+                            ),
+                    )
+                    .child(div().flex_1())
+                    .child(default_control)
+                    .child(self.agent_action_button(
+                        ("agent-login", index),
+                        i18n::t!("settings.login"),
+                        agent.login_cmd,
+                        cx,
+                    ))
+                    .child(self.agent_action_button(
+                        ("agent-install", index),
+                        i18n::t!("settings.install"),
+                        agent.install_cmd,
+                        cx,
+                    )),
+            );
+        }
+
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .w_full()
+            .max_w(px(680.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg0)
+                            .child(SharedString::from(if onboarding {
+                                i18n::t!("settings.welcome_title")
+                            } else {
+                                i18n::t!("settings.title")
+                            })),
+                    )
+                    .when(onboarding, |element| {
+                        element.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(i18n::t!("settings.welcome_sub"))),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg1)
+                            .child(SharedString::from(i18n::t!("settings.agents_heading"))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(i18n::t!("settings.agents_sub"))),
+                    ),
+            )
+            .child(rows)
+            .when(onboarding, |element| {
+                element.child(
+                    div()
+                        .id("onboarding-start")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(38.))
+                        .rounded(px(8.))
+                        .bg(accent)
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.bg0)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(accent.alpha(0.85)))
+                        .child(SharedString::from(i18n::t!("settings.get_started")))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _, _window, cx| view.finish_onboarding(cx)),
+                        ),
+                )
+            });
+
+        div()
+            .id("settings-scroll")
+            .size_full()
+            .overflow_y_scroll()
+            .bg(theme.bg1)
+            .child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .px(px(28.))
+                    .py(px(24.))
+                    .child(body),
+            )
+    }
+}
+
+fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
+    match id {
+        "claude" => (Some("icons/brand-claude.svg"), "C", 0xd9_77_57),
+        "codex" => (None, ">_", 0x10_a3_7f),
+        "copilot" => (Some("icons/brand-copilot.svg"), "Co", 0xd0_d5_db),
+        "qwen" => (Some("icons/brand-qwen.svg"), "Q", 0x69_50_ef),
+        "opencode" => (Some("icons/brand-opencode.svg"), "OC", 0xd0_d5_db),
+        "kimi" => (Some("icons/brand-kimi.svg"), "K", 0xd0_d5_db),
+        "grok" => (None, "G", 0x4b_55_63),
+        _ => (None, "?", 0x88_88_88),
+    }
 }

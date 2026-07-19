@@ -299,6 +299,9 @@ impl Workspace {
                 _watch_pump: None,
             });
         }
+        let accent = projects.get(active).map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let settings_view = cx.new(|cx| settings::SettingsView::new(theme.clone(), accent, cx));
+        cx.subscribe(&settings_view, Self::on_settings_view_event).detach();
         let mut workspace = Workspace {
             projects,
             active,
@@ -311,6 +314,8 @@ impl Workspace {
                 show_bottom: false,
                 show_settings: std::env::var_os("SHIRUSHI_SETTINGS").is_some()
                     || !settings::get(cx).onboarded,
+                settings_view,
+                pending_settings_command: None,
                 confetti: std::env::var_os("SHIRUSHI_CONFETTI").is_some(),
                 agent_width: AGENT_DOCK_WIDTH,
                 resizing_agent: false,

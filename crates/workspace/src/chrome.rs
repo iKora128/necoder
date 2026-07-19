@@ -1,4 +1,22 @@
 impl Workspace {
+    fn on_settings_view_event(
+        &mut self,
+        _view: Entity<settings::SettingsView>,
+        event: &settings::SettingsViewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            settings::SettingsViewEvent::RunCommand(command) => {
+                self.chrome.pending_settings_command = Some(command.clone());
+                cx.notify();
+            }
+            settings::SettingsViewEvent::OnboardingCompleted => {
+                self.chrome.show_settings = false;
+                self.celebrate_confetti(cx);
+            }
+        }
+    }
+
     fn accent(&self) -> Hsla {
         self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0))
     }
@@ -731,216 +749,6 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 設定ホーム（中央領域）。第1セクション = Agents セットアップ（M12）。
-    /// 「ファイルが真実」: ここは settings.json への書き手にすぎない（既定選択＝persist）。
-    /// 認証は各 CLI 側に委譲（ログイン/入れ方はターミナルで vendor コマンドを走らせるだけ・鍵は持たない）。
-    fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = self.theme.clone();
-        let accent = self.accent();
-        let default_agent = settings::get(cx).default_agent;
-        let onboarding = !settings::get(cx).onboarded; // 初回はようこそ枠＋「これで始める」ボタン
-        let mut rows = div().flex().flex_col().gap(px(6.));
-        for (index, agent) in acp_client::AGENTS.iter().enumerate() {
-            let is_default = agent.label == default_agent;
-            // 3値ステータス（導入済み / npx 初回取得 / 未導入）。認証状態は見ない＝CLI 任せ。
-            let (dot_color, status_text) = match agent.availability() {
-                acp_client::Availability::Installed => (theme.ok, i18n::t!("settings.installed")),
-                acp_client::Availability::Npx => (theme.warn, i18n::t!("settings.available_npx")),
-                acp_client::Availability::Missing => (theme.fg2, i18n::t!("settings.not_installed")),
-            };
-            let default_control = if is_default {
-                div()
-                    .px(px(8.))
-                    .py(px(3.))
-                    .rounded(px(5.))
-                    .bg(accent.alpha(0.16))
-                    .text_size(px(11.))
-                    .text_color(accent)
-                    .child(SharedString::from(i18n::t!("settings.is_default")))
-                    .into_any_element()
-            } else {
-                let label = agent.label;
-                div()
-                    .id(("set-default", index))
-                    .px(px(8.))
-                    .py(px(3.))
-                    .rounded(px(5.))
-                    .text_size(px(11.))
-                    .text_color(theme.fg2)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-                    .child(SharedString::from(i18n::t!("settings.make_default")))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| this.set_default_agent(label, cx)),
-                    )
-                    .into_any_element()
-            };
-            let row = div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .px(px(12.))
-                .py(px(9.))
-                .rounded(px(8.))
-                .bg(theme.bg2)
-                .border_1()
-                .border_color(if is_default { accent.alpha(0.5) } else { theme.border })
-                .child({
-                    // 実ブランドロゴ（Simple Icons/CC0・同梱）を text_color で着色。
-                    // SI に無い Codex だけブランド色の頭文字モノグラムにフォールバック。
-                    let (logo, mono, brand) = agent_brand(agent.id);
-                    match logo {
-                        Some(path) => div()
-                            .flex_none()
-                            .size(px(26.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(svg().path(path).size(px(20.)).text_color(gpui::rgb(brand)))
-                            .into_any_element(),
-                        None => div()
-                            .flex_none()
-                            .size(px(26.))
-                            .rounded(px(7.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(gpui::rgb(brand))
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(gpui::white())
-                            .child(mono)
-                            .into_any_element(),
-                    }
-                })
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.fg0)
-                                .child(agent.label),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(dot_color) // 導入状況の色（緑/琥珀/淡）
-                                .child(SharedString::from(status_text)),
-                        ),
-                )
-                .child(div().flex_1())
-                .child(default_control)
-                .child(self.agent_action_button(
-                    ("agent-login", index),
-                    i18n::t!("settings.login"),
-                    agent.login_cmd,
-                    cx,
-                ))
-                .child(self.agent_action_button(
-                    ("agent-install", index),
-                    i18n::t!("settings.install"),
-                    agent.install_cmd,
-                    cx,
-                ));
-            rows = rows.child(row);
-        }
-
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(14.))
-            .w_full()
-            .max_w(px(680.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(18.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg0)
-                            .child(SharedString::from(if onboarding {
-                                i18n::t!("settings.welcome_title")
-                            } else {
-                                i18n::t!("settings.title")
-                            })),
-                    )
-                    .when(onboarding, |element| {
-                        element.child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(theme.fg2)
-                                .child(SharedString::from(i18n::t!("settings.welcome_sub"))),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg1)
-                            .child(SharedString::from(i18n::t!("settings.agents_heading"))),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(theme.fg2)
-                            .child(SharedString::from(i18n::t!("settings.agents_sub"))),
-                    ),
-            )
-            .child(rows)
-            .when(onboarding, |element| {
-                // 初回の締め: 押すと onboarded=true・設定を閉じて紙吹雪。
-                element.child(
-                    div()
-                        .id("onboarding-start")
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(38.))
-                        .rounded(px(8.))
-                        .bg(accent)
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.bg0)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(accent.alpha(0.85)))
-                        .child(SharedString::from(i18n::t!("settings.get_started")))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _window, cx| this.finish_onboarding(cx)),
-                        ),
-                )
-            });
-
-        div()
-            .id("settings-scroll")
-            .flex_1()
-            .overflow_y_scroll()
-            .bg(theme.bg1)
-            .child(div().flex().justify_center().px(px(28.)).py(px(24.)).child(body))
-            .into_any_element()
-    }
-
-    /// オンボーディング完了: 既定はもう選べているので `onboarded=true` にして設定を閉じ、紙吹雪で祝う。
-    fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
-        settings::set_user_value(cx, "onboarded", serde_json::Value::Bool(true));
-        self.chrome.show_settings = false;
-        self.celebrate_confetti(cx);
-    }
-
     /// 祝いの紙吹雪を降らせる（~2.2s で自動的に止める）。
     fn celebrate_confetti(&mut self, cx: &mut Context<Self>) {
         self.chrome.confetti = true;
@@ -1004,40 +812,6 @@ impl Workspace {
         Some(overlay.into_any_element())
     }
 
-    /// 設定画面のアクションボタン（ログイン/入れ方）。押すと vendor コマンドをターミナルで実行。
-    fn agent_action_button(
-        &self,
-        id: (&'static str, usize),
-        text: String,
-        command: &'static str,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let theme = self.theme.clone();
-        div()
-            .id(id)
-            .px(px(8.))
-            .py(px(3.))
-            .rounded(px(5.))
-            .border_1()
-            .border_color(theme.border)
-            .text_size(px(11.))
-            .text_color(theme.fg1)
-            .cursor_pointer()
-            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-            .child(SharedString::from(text))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| this.open_command_terminal(command, window, cx)),
-            )
-    }
-
-    /// 既定エージェントを保存＋グローバル即更新（`set_user_value` が persist と in-memory 反映を両方やる）。
-    /// **既定はここ（Settings）でしか変えない** — 哲学「自分で決めた既定は意図しない限り変わらない」。
-    fn set_default_agent(&mut self, label: &str, cx: &mut Context<Self>) {
-        settings::set_user_value(cx, "default_agent", serde_json::Value::String(label.to_string()));
-        cx.notify();
-    }
-
     /// 指定コマンドを新しいターミナルタブで実行し、終わったらログインシェルに落ちる（ログイン/導入用）。
     /// 各 CLI の認証はローカルで行う想定なので **ローカルシェル**で走らせる（remote 時も cwd は外す）。
     fn open_command_terminal(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1060,7 +834,10 @@ impl Workspace {
         let theme = self.theme.clone();
         let content = if self.chrome.show_settings {
             // 設定ホーム（中央領域を占有・レール ⚙ で開閉）。第1セクション=Agents。
-            self.render_settings(cx)
+            let view = self.chrome.settings_view.clone();
+            let accent = self.accent();
+            view.update(cx, |view, _| view.set_visuals(self.theme.clone(), accent));
+            view.into_any_element()
         } else if self.tabs.is_empty() {
             // 初回起動の案内（M13）: 最初の 4 手をキーバッジ付きで。10 分で使い始める導線。
             let hint = |key: &'static str, text: String| {
