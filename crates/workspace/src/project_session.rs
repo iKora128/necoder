@@ -61,6 +61,20 @@ struct RepositoryController {
     refresh_generation: u32,
 }
 
+impl Deref for ProjectSessions {
+    type Target = ProjectSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sessions[self.active]
+    }
+}
+
+impl DerefMut for ProjectSessions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.sessions[self.active]
+    }
+}
+
 impl Workspace {
     fn create_project_session(
         slot: Option<&ProjectSlot>,

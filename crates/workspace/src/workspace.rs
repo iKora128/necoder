@@ -596,6 +596,12 @@ fn active_index_after_removal(active: usize, removed: usize, new_len: usize) -> 
     }
 }
 
+/// 通常の rail 切替で変更してよいのは active index だけ。
+/// 同じ index と範囲外は no-op とし、session 配列には触れない。
+fn active_index_after_switch(active: usize, requested: usize, project_count: usize) -> Option<usize> {
+    (requested < project_count && requested != active).then_some(requested)
+}
+
 // ── Workspace 本体 ──
 
 struct ChromeState {
@@ -987,6 +993,14 @@ mod tests {
         assert_eq!(active_index_after_removal(0, 0, 3), 0);
         // 2 枚から active(1) を消す → 0。
         assert_eq!(active_index_after_removal(1, 1, 1), 0);
+    }
+
+    #[test]
+    fn project_switch_only_selects_an_existing_different_session() {
+        assert_eq!(active_index_after_switch(0, 1, 2), Some(1));
+        assert_eq!(active_index_after_switch(1, 0, 2), Some(0));
+        assert_eq!(active_index_after_switch(1, 1, 2), None);
+        assert_eq!(active_index_after_switch(0, 2, 2), None);
     }
 
     #[test]

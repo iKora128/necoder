@@ -1,7 +1,8 @@
 /// 1 ProjectSession の編集面。tab / pane / language / diff / navigation の状態を一括所有する。
 ///
-/// 現段階では Workspace の既存 command routing を保つため ProjectSession から Deref する。
-/// feature controller の移動後、この境界を child Entity の公開 API / typed event に置き換える。
+/// `EditorArea` 自身は長寿命 aggregate とし、実際に描画・入力を持つ各 `EditorView` を Entity として
+/// 所有する。aggregate まで Entity で二重に包むと session 内の同期的な編集 command がすべて
+/// cross-entity update になるため、ProjectSession からの委譲境界を意図的に残している。
 pub struct EditorArea {
     loaded: bool,
     tabs: Vec<EditorTab>,
@@ -93,20 +94,6 @@ impl Deref for ProjectSession {
 
     fn deref(&self) -> &Self::Target {
         &self.editor_area
-    }
-}
-
-impl Deref for ProjectSessions {
-    type Target = ProjectSession;
-
-    fn deref(&self) -> &Self::Target {
-        &self.sessions[self.active]
-    }
-}
-
-impl DerefMut for ProjectSessions {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.sessions[self.active]
     }
 }
 
