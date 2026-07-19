@@ -680,58 +680,23 @@ fn active_index_after_removal(active: usize, removed: usize, new_len: usize) -> 
 
 /// 1 project の長寿命 UI / controller 群。非アクティブ時も Entity と process を保持する。
 pub struct ProjectSession {
-    loaded: bool,
-    tabs: Vec<EditorTab>,
-    active_tab: usize,
-    split_editor: Option<Entity<EditorView>>,
+    editor_area: EditorArea,
     agent_panel: Entity<AgentPanel>,
     explorer: Entity<Explorer>,
     search_panel: Option<Entity<SearchPanel>>,
-    buffer_search: Option<BufferSearchState>,
     git_status: HashMap<PathBuf, StatusKind>,
     git_panel: Entity<GitPanel>,
     terminal_dock: Entity<TerminalDock>,
     agent_active: bool,
-    recently_closed_files: Vec<PathBuf>,
-    lsp: Option<lang::lsp::LspClient>,
-    lsp_root: Option<PathBuf>,
-    lsp_language: Option<&'static str>,
-    lsp_initialized: bool,
-    lsp_incremental_sync: bool,
-    lsp_sent_versions: HashMap<PathBuf, u64>,
-    diagnostics: HashMap<PathBuf, Vec<(u32, lang::lsp::Severity)>>,
-    raw_diagnostics: HashMap<PathBuf, serde_json::Value>,
-    _lsp_pump: Option<gpui::Task<()>>,
-    completion: Option<CompletionState>,
-    completion_generation: u64,
-    completion_suppressed_word: Option<usize>,
-    hover: Option<HoverState>,
-    hover_generation: u64,
     git_refresh_gen: u32,
-    goto_line: Option<(String, FocusHandle)>,
-    picker_symbol_rows: Vec<usize>,
-    picker_workspace_symbols: Vec<(PathBuf, u32, u32)>,
     picker_worktree_rows: Vec<PathBuf>,
     picker_ssh_hosts: Vec<host::SshConfigHost>,
     picker_ssh_recent: Vec<String>,
     picker_history: Vec<(String, String, i64)>,
-    rename_input: Option<(String, FocusHandle)>,
-    inline_edit: Option<InlineEditState>,
     todo_panel: Entity<TodoPanel>,
-    code_actions: Option<CodeActionsState>,
-    hunk_menu: Option<(project::DiffHunk, Point<gpui::Pixels>)>,
-    pending_transient_tab: Option<(PathBuf, Buffer)>,
     pending_open_history: bool,
-    pending_navigation: Option<(PathBuf, usize, usize)>,
     agent_touched: HashMap<PathBuf, Hsla>,
     waiting_thread: Option<(SharedString, Hsla)>,
-    blame_gen: u32,
-    last_blame_target: Option<(PathBuf, usize)>,
-    nav_back: Vec<(PathBuf, usize)>,
-    nav_forward: Vec<(PathBuf, usize)>,
-    hot_exit_gen: u32,
-    hot_exit_versions: HashMap<PathBuf, u64>,
-    hot_exit_pending: Option<Vec<(PathBuf, String)>>,
     _watch: Option<project::Watch>,
     _watch_pump: Option<gpui::Task<()>>,
 }
@@ -824,6 +789,7 @@ impl DerefMut for Workspace {
 
 include!("project_session.rs");
 include!("git_controller.rs");
+include!("editor_area/mod.rs");
 include!("editor_area/language.rs");
 include!("editor_area/inline_edit.rs");
 include!("todo_panel.rs");
