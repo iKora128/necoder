@@ -23,6 +23,107 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 const JSONRPC: &str = "2.0";
 
+/// Executable, arguments and protocol language id for one language server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageServerSpec {
+    pub language_id: &'static str,
+    pub command: PathBuf,
+    pub args: Vec<&'static str>,
+}
+
+/// Resolve a language server from a file extension. Remote hosts resolve executable names
+/// remotely; local hosts also search GUI-launch fallback directories.
+pub fn language_server_for(path: &Path, remote: bool) -> Option<LanguageServerSpec> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    let server = |language_id, command, args: &[&'static str]| LanguageServerSpec {
+        language_id,
+        command,
+        args: args.to_vec(),
+    };
+    let executable = |binary: &str| {
+        if remote {
+            Some(PathBuf::from(binary))
+        } else {
+            find_executable(binary)
+        }
+    };
+    match extension.as_str() {
+        "rs" => {
+            if remote {
+                Some(server("rust", PathBuf::from("rust-analyzer"), &[]))
+            } else {
+                rust_analyzer_path().map(|command| server("rust", command, &[]))
+            }
+        }
+        "ts" | "tsx" | "mts" | "cts" => executable("typescript-language-server")
+            .map(|command| server("typescript", command, &["--stdio"])),
+        "js" | "jsx" | "mjs" | "cjs" => executable("typescript-language-server")
+            .map(|command| server("javascript", command, &["--stdio"])),
+        "py" | "pyi" => executable("pyright-langserver")
+            .map(|command| server("python", command, &["--stdio"]))
+            .or_else(|| executable("pylsp").map(|command| server("python", command, &[]))),
+        "go" => executable("gopls").map(|command| server("go", command, &[])),
+        "c" | "h" => executable("clangd").map(|command| server("c", command, &[])),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => {
+            executable("clangd").map(|command| server("cpp", command, &[]))
+        }
+        "lua" => executable("lua-language-server").map(|command| server("lua", command, &[])),
+        "zig" => executable("zls").map(|command| server("zig", command, &[])),
+        _ => None,
+    }
+}
+
+fn find_executable(binary: &str) -> Option<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for suffix in [
+            ".local/bin",
+            ".volta/bin",
+            ".bun/bin",
+            ".npm-global/bin",
+            ".cargo/bin",
+            ".deno/bin",
+        ] {
+            dirs.push(home.join(suffix));
+        }
+    }
+    for base in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+        dirs.push(PathBuf::from(base));
+    }
+    dirs.into_iter()
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
+}
+
+fn rust_analyzer_path() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("SHIRUSHI_RUST_ANALYZER") {
+        let path = PathBuf::from(explicit);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = &home {
+        let toolchains = home.join(".rustup/toolchains");
+        if let Ok(entries) = std::fs::read_dir(toolchains) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join("bin/rust-analyzer");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+        let proxy = home.join(".cargo/bin/rust-analyzer");
+        if proxy.exists() {
+            return Some(proxy);
+        }
+    }
+    Some(PathBuf::from("rust-analyzer"))
+}
+
 /// サーバからの通知（method, params）。`publishDiagnostics` 等が流れる。
 pub type ServerNotification = (String, Value);
 
@@ -528,6 +629,18 @@ pub fn path_to_uri(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_registry_maps_extensions_and_remote_commands() {
+        let rust = language_server_for(Path::new("src/main.rs"), true).unwrap();
+        assert_eq!(rust.language_id, "rust");
+        assert_eq!(rust.command, PathBuf::from("rust-analyzer"));
+
+        let typescript = language_server_for(Path::new("web/app.tsx"), true).unwrap();
+        assert_eq!(typescript.language_id, "typescript");
+        assert_eq!(typescript.args, vec!["--stdio"]);
+        assert!(language_server_for(Path::new("README.md"), true).is_none());
+    }
 
     #[test]
     fn uri_roundtrip() {

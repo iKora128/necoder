@@ -18,6 +18,7 @@ use gpui::{
     pulsating_between, px, size, svg,
 };
 use host::Host;
+use lang::lsp::language_server_for;
 use project::{GitWorktree, GraphCommit, ProjectSource, StatusKind, WorkingChange, Worktree};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -12546,110 +12547,6 @@ impl Workspace {
             .child(div().flex_1())
             .child(right)
     }
-}
-
-/// 起動する言語サーバの記述子（コマンド + 引数 + LSP の languageId）。
-struct LanguageServer {
-    language_id: &'static str,
-    command: PathBuf,
-    args: Vec<&'static str>,
-}
-
-/// ファイルの拡張子から言語サーバを引く（登録式。実行ファイルが見つからなければ `None`）。
-/// **transport（`lang::lsp`）は言語非依存**なので、ここに 1 行足すだけで言語が増える。
-/// 診断/補完/定義の配線は LSP 標準なので変更不要（＝「拡張機構なしで N 言語」）。
-fn language_server_for(path: &Path, remote: bool) -> Option<LanguageServer> {
-    let extension = path.extension().and_then(|extension| extension.to_str())?.to_ascii_lowercase();
-    let server = |language_id, command, args: &[&'static str]| LanguageServer {
-        language_id,
-        command,
-        args: args.to_vec(),
-    };
-    let executable = |binary: &str| {
-        if remote {
-            Some(PathBuf::from(binary))
-        } else {
-            which(binary)
-        }
-    };
-    match extension.as_str() {
-        "rs" => {
-            if remote {
-                Some(server("rust", PathBuf::from("rust-analyzer"), &[]))
-            } else {
-                lsp_server_path().map(|command| server("rust", command, &[]))
-            }
-        }
-        "ts" | "tsx" | "mts" | "cts" => {
-            executable("typescript-language-server")
-                .map(|command| server("typescript", command, &["--stdio"]))
-        }
-        "js" | "jsx" | "mjs" | "cjs" => {
-            executable("typescript-language-server")
-                .map(|command| server("javascript", command, &["--stdio"]))
-        }
-        "py" | "pyi" => executable("pyright-langserver")
-            .map(|command| server("python", command, &["--stdio"]))
-            .or_else(|| executable("pylsp").map(|command| server("python", command, &[]))),
-        "go" => executable("gopls").map(|command| server("go", command, &[])),
-        "c" | "h" => executable("clangd").map(|command| server("c", command, &[])),
-        "cpp" | "cc" | "cxx" | "hpp" | "hh" => {
-            executable("clangd").map(|command| server("cpp", command, &[]))
-        }
-        "lua" => executable("lua-language-server").map(|command| server("lua", command, &[])),
-        "zig" => executable("zls").map(|command| server("zig", command, &[])),
-        _ => None,
-    }
-}
-
-/// PATH（＋ GUI 起動で欠けがちな共通 bin ディレクトリ）から実行ファイルを探す。
-/// rust-analyzer と同じく、Finder 起動だと PATH が痩せるため候補ディレクトリを補う。
-fn which(binary: &str) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(path) = std::env::var_os("PATH") {
-        dirs.extend(std::env::split_paths(&path));
-    }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        for suffix in [".local/bin", ".volta/bin", ".bun/bin", ".npm-global/bin", ".cargo/bin", ".deno/bin"] {
-            dirs.push(home.join(suffix));
-        }
-    }
-    for base in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-        dirs.push(PathBuf::from(base));
-    }
-    dirs.into_iter().map(|dir| dir.join(binary)).find(|candidate| candidate.is_file())
-}
-
-/// rust-analyzer の実行パス。**rustup ツールチェーン内の実バイナリを優先**する
-/// （`~/.cargo/bin/rust-analyzer` は rustup プロキシで、cwd/RUSTUP_TOOLCHAIN 依存に解決が変わり
-/// GUI 起動時に "Unknown binary" で失敗するため避ける）。優先順: 環境変数 → toolchains/*/bin →
-/// cargo プロキシ → PATH。
-fn lsp_server_path() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("SHIRUSHI_RUST_ANALYZER") {
-        let path = PathBuf::from(explicit);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    if let Some(home) = &home {
-        let toolchains = home.join(".rustup/toolchains");
-        if let Ok(entries) = std::fs::read_dir(&toolchains) {
-            for entry in entries.flatten() {
-                let candidate = entry.path().join("bin/rust-analyzer");
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-    if let Some(home) = &home {
-        let proxy = home.join(".cargo/bin/rust-analyzer");
-        if proxy.exists() {
-            return Some(proxy);
-        }
-    }
-    Some(PathBuf::from("rust-analyzer")) // PATH 上に任せる
 }
 
 /// パンくず文字列。ファイルがプロジェクト配下ならルート相対の各要素を ` › ` で連結。
