@@ -23,6 +23,7 @@ use lang::lsp::{
     parse_text_edits, parse_workspace_edit,
 };
 use project::{GitWorktree, GraphCommit, ProjectSource, StatusKind, WorkingChange, Worktree};
+use search_ui::{SearchPanel, SearchPanelEvent};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -384,48 +385,6 @@ impl ProjectSlot {
         let entries = self.worktree.read_any_dir(dir).unwrap_or_default();
         self.dir_listings.borrow_mut().insert(dir.to_path_buf(), entries.clone());
         entries
-    }
-}
-
-// ── プロジェクト横断検索パネル（M6） ──
-
-/// 横断検索の走査対象ファイル上限（ファイルファインダと同じ 5000）。
-const SEARCH_FILE_LIMIT: usize = 5000;
-/// 結果パネルに描くマッチ行の上限（描画コストを抑える）。
-const SEARCH_MAX_ROWS: usize = 300;
-
-/// プロジェクト横断検索パネルの状態（オーバーレイ）。クエリ + 大小/正規表現トグル + ファイル別結果。
-struct SearchState {
-    query: String,
-    case_sensitive: bool,
-    is_regex: bool,
-    results: Vec<search::FileMatch>,
-    /// 現在の `results` を生んだクエリ。Enter を「検索実行」か「選択へジャンプ」に振り分ける。
-    results_query: Option<String>,
-    /// 平坦化した選択位置（結果全体での通し番号）。矢印キーで移動。
-    selected: usize,
-    /// 直近クエリのコンパイルエラー（正規表現の誤り等）。
-    error: Option<SharedString>,
-    running: bool,
-    active_search: Option<u64>,
-    focus: FocusHandle,
-}
-
-impl SearchState {
-    /// `(file_index, match_index)` の平坦列（キーボード選択と描画行の対応）。
-    fn flat(&self) -> Vec<(usize, usize)> {
-        let mut flat = Vec::new();
-        for (file_index, file) in self.results.iter().enumerate() {
-            for match_index in 0..file.matches.len() {
-                flat.push((file_index, match_index));
-            }
-        }
-        flat
-    }
-
-    /// マッチ総数（ヘッダ表示用）。
-    fn total_matches(&self) -> usize {
-        self.results.iter().map(|file| file.matches.len()).sum()
     }
 }
 
@@ -869,8 +828,7 @@ pub struct Workspace {
     // ツリーのインライン命名（新規/リネーム・M10）。Some の間は入力行を描く。
     explorer_naming: Option<ExplorerNaming>,
     // プロジェクト横断検索パネル（開いていれば Some・⌘⇧F）。
-    search_panel: Option<SearchState>,
-    next_search_id: u64,
+    search_panel: Option<Entity<SearchPanel>>,
     // ⌘F バッファ内検索/置換バー（開いていれば Some。アクティブタブのエディタが対象）。
     buffer_search: Option<BufferSearchState>,
     // アクティブプロジェクトの git 状態（絶対パス → 状態）。ツリー/タブの色分けに使う。
@@ -950,8 +908,8 @@ pub struct Workspace {
     pending_transient_tab: Option<(PathBuf, Buffer)>,
     /// スレッド履歴を開く要求（Agent パネルのボタン → window が要るので次の render で消化・#5）。
     pending_open_history: bool,
-    // ターミナル file:line リンクの保留ジャンプ（同上の window 制約・M13）。(パス, 0-based 行)。
-    pending_terminal_jump: Option<(PathBuf, u32)>,
+    // child Entity から届いた保留ジャンプ（subscribe には window が無いため次の render で消化）。
+    pending_navigation: Option<(PathBuf, usize, usize)>,
     // 自動アップデート（M13）。Some = statusbar にチップを出す。
     update_status: Option<(updater::UpdateInfo, UpdateState)>,
     // SSH 接続の入力バー（titlebar の SSH ボタン・M13）。Some = オーバーレイ表示中。
@@ -1126,30 +1084,19 @@ impl Workspace {
             })
         });
         // 開発用: SHIRUSHI_SEARCH_PANEL=1 で「fn」を横断検索した結果パネルを開いた状態で撮る。
-        let search_panel = std::env::var_os("SHIRUSHI_SEARCH_PANEL").and_then(|_| {
+        let search_probe = std::env::var_os("SHIRUSHI_SEARCH_PANEL").and_then(|_| {
             projects.first().map(|slot| {
                 let results = search::SearchQuery::new("fn", false, false)
                     .map(|query| {
                         query.search_project_on(
                             slot.worktree.host().as_ref(),
                             slot.worktree.root(),
-                            SEARCH_FILE_LIMIT,
-                            SEARCH_MAX_ROWS,
+                            5_000,
+                            300,
                         )
                     })
                     .unwrap_or_default();
-                SearchState {
-                    query: "fn".to_string(),
-                    case_sensitive: false,
-                    is_regex: false,
-                    results,
-                    results_query: Some("fn".to_string()),
-                    selected: 0,
-                    error: None,
-                    running: false,
-                    active_search: None,
-                    focus: cx.focus_handle(),
-                }
+                results
             })
         });
         let active = active.min(projects.len().saturating_sub(1));
@@ -1157,6 +1104,24 @@ impl Workspace {
         let terminal_launch = Self::terminal_launch_for(projects.get(active));
         let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
         cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
+        let focus_handle = cx.focus_handle();
+        let search_panel = search_probe.and_then(|results| {
+            let slot = projects.get(active)?;
+            let panel = cx.new(|cx| {
+                SearchPanel::with_results(
+                    slot.worktree.host().clone(),
+                    slot.worktree.root().to_path_buf(),
+                    "fn".to_string(),
+                    results,
+                    theme.clone(),
+                    slot.color,
+                    focus_handle.clone(),
+                    cx,
+                )
+            });
+            cx.subscribe(&panel, Self::on_search_panel_event).detach();
+            Some(panel)
+        });
         let mut workspace = Workspace {
             projects,
             active,
@@ -1165,7 +1130,7 @@ impl Workspace {
             split_editor: None,
             agent_panel,
             theme,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             state_path,
             show_left: true,
             show_right: true, // Agent パネル（差別化の本丸）は既定で表示
@@ -1198,7 +1163,6 @@ impl Workspace {
             // 開発用: SHIRUSHI_CONTEXT_MENU=1 でルートの右クリックメニューを開いた状態で撮る。
             explorer_context_menu,
             search_panel,
-            next_search_id: 1,
             buffer_search: None,
             git_status: HashMap::new(),
             git_changes: Vec::new(),
@@ -1239,7 +1203,7 @@ impl Workspace {
             rail_menu: None,
             pending_transient_tab: None,
             pending_open_history: false,
-            pending_terminal_jump: None,
+            pending_navigation: None,
             update_status: None,
             ssh_input: None,
             ssh_connecting: false,
@@ -2205,6 +2169,7 @@ impl Workspace {
         self.lsp_initialized = false;
         self.lsp_sent_versions.clear();
         self.diagnostics.clear();
+        self.search_panel = None;
         let (client, notifications) = match lang::lsp::LspClient::new_on(
             worktree.host().clone(),
             &server.command,
@@ -4306,21 +4271,7 @@ impl Workspace {
             return;
         }
         let query = i18n::t!("diagnostics.title");
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        self.search_panel = Some(SearchState {
-            query: query.clone(),
-            case_sensitive: true,
-            is_regex: false,
-            results,
-            results_query: Some(query),
-            selected: 0,
-            error: None,
-            running: false,
-            active_search: None,
-            focus,
-        });
-        cx.notify();
+        self.show_search_results(query, results, window, cx);
     }
 
     // ── code actions（⌘.・M11） ──
@@ -4607,21 +4558,7 @@ impl Workspace {
                 .await;
             let _ = handle.update(cx, |workspace, window, cx| {
                 let query = i18n::t!("searchpanel.reference_query", "word" => word);
-                let focus = cx.focus_handle();
-                window.focus(&focus, cx);
-                workspace.search_panel = Some(SearchState {
-                    query: query.clone(),
-                    case_sensitive: true,
-                    is_regex: false,
-                    results,
-                    results_query: Some(query),
-                    selected: 0,
-                    error: None,
-                    running: false,
-                    active_search: None,
-                    focus,
-                });
-                cx.notify();
+                workspace.show_search_results(query, results, window, cx);
             });
         })
         .detach();
@@ -7190,6 +7127,10 @@ impl Workspace {
         if let Some(picker) = &self.picker {
             picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
         }
+        if let Some(panel) = &self.search_panel {
+            let accent = self.accent();
+            panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), accent, cx));
+        }
         self.terminal_dock
             .update(cx, |dock, cx| dock.set_theme(theme.clone(), cx));
         cx.notify();
@@ -7385,237 +7326,86 @@ impl Workspace {
 
     // ── プロジェクト横断検索パネル（⌘⇧F・M6） ──
 
-    /// 検索パネルを開く（開いていればフォーカスを付け直すだけ＝クエリと結果は保つ）。
-    fn open_project_search(&mut self, _: &ProjectSearch, window: &mut Window, cx: &mut Context<Self>) {
-        let focus = cx.focus_handle();
-        match &mut self.search_panel {
-            Some(state) => state.focus = focus.clone(),
-            None => {
-                self.search_panel = Some(SearchState {
-                    query: String::new(),
-                    case_sensitive: false,
-                    is_regex: false,
-                    results: Vec::new(),
-                    results_query: None,
-                    selected: 0,
-                    error: None,
-                    running: false,
-                    active_search: None,
-                    focus: focus.clone(),
-                })
-            }
-        }
+    fn search_return_focus(&self, cx: &App) -> FocusHandle {
+        self.active_editor()
+            .map(|editor| editor.read(cx).focus_handle(cx))
+            .unwrap_or_else(|| self.focus_handle.clone())
+    }
+
+    fn install_search_panel(
+        &mut self,
+        panel: Entity<SearchPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe(&panel, Self::on_search_panel_event).detach();
+        let focus = panel.read(cx).focus_handle();
+        self.search_panel = Some(panel);
         window.focus(&focus, cx);
         cx.notify();
     }
 
-    /// 検索パネルを閉じてフォーカスをエディタ/ワークスペースへ戻す。
-    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search_panel.take().is_none() {
-            return;
-        }
-        match self.active_editor() {
-            Some(editor) => {
-                let handle = editor.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            }
-            None => window.focus(&self.focus_handle, cx),
-        }
-        cx.notify();
-    }
-
-    /// 現在のクエリ + トグルでアクティブプロジェクトを横断検索し、結果を格納する。
-    fn run_search(&mut self, cx: &mut Context<Self>) {
-        let Some((query_text, is_regex, case_sensitive)) = self
-            .search_panel
-            .as_ref()
-            .map(|state| (state.query.clone(), state.is_regex, state.case_sensitive))
-        else {
-            return;
-        };
-        // 空クエリ → 結果クリア（走査しない）。
-        if query_text.trim().is_empty() {
-            if let Some(state) = self.search_panel.as_mut() {
-                state.results.clear();
-                state.results_query = Some(query_text);
-                state.error = None;
-                state.selected = 0;
-                state.running = false;
-                state.active_search = None;
-            }
-            cx.notify();
-            return;
-        }
-        let query = match search::SearchQuery::new(&query_text, is_regex, case_sensitive) {
-            Ok(query) => query,
-            Err(error) => {
-                if let Some(state) = self.search_panel.as_mut() {
-                    state.results.clear();
-                    state.results_query = Some(query_text);
-                    state.error = Some(SharedString::from(format!("{error}")));
-                    state.selected = 0;
-                    state.running = false;
-                    state.active_search = None;
-                }
-                cx.notify();
-                return;
-            }
-        };
-        // 対象 host/root だけを background task へ渡す。UI thread では remote RPC を待たない。
-        let Some(worktree) = self.active_worktree() else {
-            return;
-        };
-        let host = worktree.host().clone();
-        let root = worktree.root().to_path_buf();
-        let search_id = self.next_search_id;
-        self.next_search_id = self.next_search_id.wrapping_add(1).max(1);
-        if let Some(state) = self.search_panel.as_mut() {
-            state.running = true;
-            state.active_search = Some(search_id);
-            state.error = None;
-        }
-        cx.notify();
-        cx.spawn(async move |workspace, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async move {
-                    query.try_search_project_on(
-                        host.as_ref(),
-                        &root,
-                        SEARCH_FILE_LIMIT,
-                        SEARCH_MAX_ROWS,
-                    )
-                })
-                .await;
-            let _ = workspace.update(cx, |workspace, cx| {
-                let Some(state) = workspace.search_panel.as_mut() else {
-                    return;
-                };
-                if state.active_search != Some(search_id)
-                    || state.query != query_text
-                    || state.is_regex != is_regex
-                    || state.case_sensitive != case_sensitive
-                {
-                    return;
-                }
-                match outcome {
-                    Ok(results) => {
-                        state.results = results;
-                        state.error = None;
-                    }
-                    Err(error) => {
-                        state.results.clear();
-                        state.error = Some(SharedString::from(format!("{error:#}")));
-                    }
-                }
-                state.results_query = Some(query_text);
-                state.selected = 0;
-                state.running = false;
-                state.active_search = None;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 選択中マッチをキーボードで動かす（結果全体を平坦に巡回）。
-    fn move_search_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if let Some(state) = self.search_panel.as_mut() {
-            let len = state.flat().len() as isize;
-            if len == 0 {
-                return;
-            }
-            state.selected = (state.selected as isize + delta).rem_euclid(len) as usize;
-            cx.notify();
-        }
-    }
-
-    /// 検索結果の 1 マッチへジャンプ（ファイルを開いて該当行を中央へ）。
-    fn jump_to_search_match(
+    fn show_search_results(
         &mut self,
-        file_index: usize,
-        match_index: usize,
+        query: String,
+        results: Vec<search::FileMatch>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = self.search_panel.as_ref().and_then(|state| {
-            state.results.get(file_index).and_then(|file| {
-                file.matches
-                    .get(match_index)
-                    .map(|found| (file.path.clone(), found.line, found.column))
-            })
-        });
-        let Some((path, line, column)) = target else {
+        let Some(slot) = self.active_slot() else {
             return;
         };
-        self.record_nav_position(cx); // 検索ジャンプはナビ履歴へ（⌃- で戻れる）
-        self.search_panel = None;
-        self.open_file_then(path, window, cx, move |editor, cx| {
-            editor.reveal_position(line, column, cx)
+        let host = slot.worktree.host().clone();
+        let root = slot.worktree.root().to_path_buf();
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let return_focus = self.search_return_focus(cx);
+        let panel = cx.new(|cx| {
+            SearchPanel::with_results(
+                host,
+                root,
+                query,
+                results,
+                theme,
+                accent,
+                return_focus,
+                cx,
+            )
         });
+        self.install_search_panel(panel, window, cx);
+    }
+
+    fn on_search_panel_event(
+        &mut self,
+        _: Entity<SearchPanel>,
+        event: &SearchPanelEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SearchPanelEvent::OpenMatch { path, line, column } => {
+                self.pending_navigation = Some((path.clone(), *line, *column));
+                self.search_panel = None;
+            }
+            SearchPanelEvent::Dismissed => self.search_panel = None,
+        }
         cx.notify();
     }
 
-    fn on_search_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "escape" => self.close_search(window, cx),
-            "enter" => {
-                // 結果が最新クエリのものなら選択項目へジャンプ、そうでなければ検索を実行する。
-                let jump = self.search_panel.as_ref().and_then(|state| {
-                    let is_fresh = state.results_query.as_deref() == Some(state.query.as_str());
-                    let flat = state.flat();
-                    if is_fresh && !flat.is_empty() {
-                        flat.get(state.selected).copied()
-                    } else {
-                        None
-                    }
-                });
-                match jump {
-                    Some((file_index, match_index)) => {
-                        self.jump_to_search_match(file_index, match_index, window, cx)
-                    }
-                    None => self.run_search(cx),
-                }
-            }
-            "up" => self.move_search_selection(-1, cx),
-            "down" => self.move_search_selection(1, cx),
-            "backspace" => {
-                if let Some(state) = self.search_panel.as_mut() {
-                    state.query.pop();
-                }
-                cx.notify();
-            }
-            _ => {
-                let modifiers = event.keystroke.modifiers;
-                if modifiers.platform || modifiers.control || modifiers.function {
-                    return;
-                }
-                if let Some(text) = &event.keystroke.key_char {
-                    if !text.is_empty() && !text.chars().any(char::is_control) {
-                        if let Some(state) = self.search_panel.as_mut() {
-                            state.query.push_str(text);
-                        }
-                        cx.notify();
-                    }
-                }
-            }
+    fn open_project_search(&mut self, _: &ProjectSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = &self.search_panel {
+            window.focus(&panel.read(cx).focus_handle(), cx);
+            return;
         }
-    }
-
-    /// 大小区別トグル（切替後は即再検索）。
-    fn toggle_search_case(&mut self, cx: &mut Context<Self>) {
-        if let Some(state) = self.search_panel.as_mut() {
-            state.case_sensitive = !state.case_sensitive;
-        }
-        self.run_search(cx);
-    }
-
-    /// 正規表現トグル（切替後は即再検索）。
-    fn toggle_search_regex(&mut self, cx: &mut Context<Self>) {
-        if let Some(state) = self.search_panel.as_mut() {
-            state.is_regex = !state.is_regex;
-        }
-        self.run_search(cx);
+        let Some(slot) = self.active_slot() else {
+            return;
+        };
+        let host = slot.worktree.host().clone();
+        let root = slot.worktree.root().to_path_buf();
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let return_focus = self.search_return_focus(cx);
+        let panel = cx.new(|cx| SearchPanel::new(host, root, theme, accent, return_focus, cx));
+        self.install_search_panel(panel, window, cx);
     }
 
     // ── ⌘F バッファ内検索/置換（M10） ──
@@ -8044,7 +7834,7 @@ impl Workspace {
                     };
                     worktree.root().join(path)
                 };
-                self.pending_terminal_jump = Some((resolved, line.saturating_sub(1)));
+                self.pending_navigation = Some((resolved, line.saturating_sub(1) as usize, 0));
             }
             TerminalDockEvent::Dismissed => self.show_bottom = false,
         }
@@ -9661,263 +9451,10 @@ impl Workspace {
     }
 
     /// プロジェクト横断検索パネル（オーバーレイ・⌘⇧F）。ファイル別に結果をまとめ、クリック/Enter でジャンプ。
-    fn render_search_panel(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let state = self.search_panel.as_ref()?;
-        let theme = self.theme.clone();
-        let accent = self.accent();
-        let root = self.active_slot().map(|slot| slot.worktree.root().to_path_buf());
-
-        let query_display: SharedString = if state.query.is_empty() {
-            SharedString::from(i18n::t!("searchpanel.placeholder"))
-        } else {
-            SharedString::from(state.query.clone())
-        };
-        let query_color = if state.query.is_empty() { theme.fg2 } else { theme.fg0 };
-
-        // トグルチップ（Aa=大小区別 / .*=正規表現）。アクティブはアクセント面。
-        let case_active = state.case_sensitive;
-        let regex_active = state.is_regex;
-        let toggle = |id: &'static str, label: &'static str, active: bool, tip: String| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(22.))
-                .rounded(px(5.))
-                .text_size(px(11.))
-                .text_color(if active { theme.fg0 } else { theme.fg2 })
-                .cursor_pointer()
-                .when(active, |element| element.bg(accent.alpha(0.16)))
-                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-                .child(label)
-                .tooltip(Tooltip::text(tip, theme.clone()))
-        };
-
-        // 見出し（件数 / エラー / ヒント）。
-        let summary: SharedString = match &state.error {
-            _ if state.running => SharedString::from(i18n::t!("searchpanel.searching")),
-            Some(error) => error.clone(),
-            None if state.results_query.is_some() => {
-                SharedString::from(i18n::t!("searchpanel.results", "n" => state.total_matches(), "files" => state.results.len()))
-            }
-            None => SharedString::from(i18n::t!("searchpanel.hint_enter")),
-        };
-        let summary_color = if state.error.is_some() { theme.err } else { theme.fg2 };
-
-        // 結果行（ファイルヘッダ + マッチ）。平坦選択と対応させる。
-        let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        let mut flat_index = 0usize;
-        let mut truncated = false;
-        'outer: for (file_index, file) in state.results.iter().enumerate() {
-            let relative = root
-                .as_ref()
-                .and_then(|root| file.path.strip_prefix(root).ok())
-                .unwrap_or(file.path.as_path())
-                .to_string_lossy()
-                .to_string();
-            rows.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(10.))
-                    .pt(px(7.))
-                    .pb(px(2.))
-                    .child(file_icon(&relative, false, &theme))
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_size(px(11.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg1)
-                            .child(SharedString::from(relative)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(10.5))
-                            .text_color(theme.fg2)
-                            .child(SharedString::from(file.matches.len().to_string())),
-                    )
-                    .into_any_element(),
-            );
-            for (match_index, found) in file.matches.iter().enumerate() {
-                if flat_index >= SEARCH_MAX_ROWS {
-                    truncated = true;
-                    break 'outer;
-                }
-                let is_selected = flat_index == state.selected;
-                // 行プレビュー: 先頭空白を除いて（深いインデントでマッチが見切れないように）、
-                // マッチ部分をアクセント色で強調する。オフセットは byte 境界（regex が行内で見つけた位置）。
-                let raw = found.line_text.trim_end();
-                let lead = raw.len() - raw.trim_start().len();
-                let line = &raw[lead..];
-                let start = found.column.saturating_sub(lead).min(line.len());
-                let end = (found.column + found.byte_range.len()).saturating_sub(lead).clamp(start, line.len());
-                let (prefix, mid, suffix) = (&line[..start], &line[start..end], &line[end..]);
-                rows.push(
-                    div()
-                        .id(("search-hit", flat_index))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .h(px(20.))
-                        .pl(px(28.))
-                        .pr(px(10.))
-                        .rounded(px(4.))
-                        .cursor_pointer()
-                        .when(is_selected, |element| element.bg(accent.alpha(0.16)))
-                        .hover(|style| style.bg(theme.bg3))
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(34.))
-                                .text_size(px(10.5))
-                                .text_color(theme.fg2)
-                                .child(SharedString::from((found.line + 1).to_string())),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_size(px(12.))
-                                .text_color(theme.fg1)
-                                .child(div().flex_none().child(SharedString::from(prefix.to_string())))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(accent)
-                                        .child(SharedString::from(mid.to_string())),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .overflow_hidden()
-                                        .child(SharedString::from(suffix.to_string())),
-                                ),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                this.jump_to_search_match(file_index, match_index, window, cx)
-                            }),
-                        )
-                        .into_any_element(),
-                );
-                flat_index += 1;
-            }
-        }
-        if truncated {
-            rows.push(
-                div()
-                    .px(px(10.))
-                    .py(px(4.))
-                    .text_size(px(10.5))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(i18n::t!("searchpanel.truncated", "n" => SEARCH_MAX_ROWS)))
-                    .into_any_element(),
-            );
-        }
-
-        let focus = state.focus.clone();
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .track_focus(&focus)
-                .on_key_down(cx.listener(Self::on_search_key_down))
-                // 背後クリックで閉じる（中央のボックスは stop_propagation）。
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| this.close_search(window, cx)),
-                )
-                .flex()
-                .flex_col()
-                .items_center()
-                .pt(px(96.))
-                .child(
-                    div()
-                        .w(px(720.))
-                        .flex()
-                        .flex_col()
-                        .bg(theme.bg2)
-                        .rounded(px(12.))
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow(vec![
-                            gpui::BoxShadow::new(px(0.), px(10.), gpui::hsla(0., 0., 0., 0.45)).blur_radius(px(28.)),
-                        ])
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        // 入力行（クエリ + トグル）
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .px_3()
-                                .py_2()
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .child(div().flex_none().text_color(theme.fg2).child("⌕"))
-                                .child(div().flex_1().text_color(query_color).child(query_display))
-                                .child(toggle("search-case", "Aa", case_active, i18n::t!("searchpanel.case_tip")).on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.toggle_search_case(cx)
-                                    }),
-                                ))
-                                .child(toggle("search-regex", ".*", regex_active, i18n::t!("searchpanel.regex_tip")).on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.toggle_search_regex(cx)
-                                    }),
-                                )),
-                        )
-                        // 見出し（件数 / エラー / ヒント）
-                        .child(
-                            div()
-                                .px_3()
-                                .py(px(4.))
-                                .text_size(px(11.))
-                                .text_color(summary_color)
-                                .child(summary),
-                        )
-                        // 結果リスト
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .max_h(px(440.))
-                                .overflow_hidden()
-                                .pb_1()
-                                .children(rows),
-                        )
-                        // フッタのキーヒント
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(12.))
-                                .px_3()
-                                .py(px(5.))
-                                .border_t_1()
-                                .border_color(theme.border)
-                                .text_size(px(10.5))
-                                .text_color(theme.fg2)
-                                .child(SharedString::from(i18n::t!("searchpanel.hint_search")))
-                                .child(SharedString::from(i18n::t!("searchpanel.hint_select")))
-                                .child(SharedString::from(i18n::t!("searchpanel.hint_close"))),
-                        ),
-                )
-                .into_any_element(),
-        )
+    fn render_search_panel(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        self.search_panel
+            .as_ref()
+            .map(|panel| panel.clone().into_any_element())
     }
 
     /// hot exit の復元/破棄バー（起動時に前回の未保存スナップショットが見つかったとき・M10）。
@@ -12372,11 +11909,11 @@ impl Render for Workspace {
         if let Some(index) = self.pending_project_switch.take() {
             self.switch_project(index, _window, cx);
         }
-        // ターミナル file:line リンクのジャンプを消化（M13）。
-        if let Some((path, line)) = self.pending_terminal_jump.take() {
+        // child Entity からの file:line ジャンプを消化。
+        if let Some((path, line, column)) = self.pending_navigation.take() {
             self.record_nav_position(cx);
             self.open_file_then(path, _window, cx, move |editor, cx| {
-                editor.reveal_position(line as usize, 0, cx);
+                editor.reveal_position(line, column, cx);
             });
         }
         let theme = self.theme.clone();

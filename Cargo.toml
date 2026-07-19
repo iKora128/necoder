@@ -71,6 +71,7 @@ keymap_core = { path = "crates/keymap_core" }
 project = { path = "crates/project" }
 host = { path = "crates/host" }
 search = { path = "crates/search" }
+search_ui = { path = "crates/search_ui" }
 storage = { path = "crates/storage" }
 lang = { path = "crates/lang" }
 acp_client = { path = "crates/acp_client" }

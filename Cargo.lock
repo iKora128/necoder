@@ -5691,6 +5691,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "search_ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "host",
+ "i18n",
+ "search",
+ "theme_core",
+ "ui",
+]
+
+[[package]]
 name = "self_cell"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8531,6 +8543,7 @@ dependencies = [
  "lang",
  "project",
  "search",
+ "search_ui",
  "serde",
  "serde_json",
  "settings",
