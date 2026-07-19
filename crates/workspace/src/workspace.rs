@@ -18,7 +18,10 @@ use gpui::{
     pulsating_between, px, size, svg,
 };
 use host::Host;
-use lang::lsp::language_server_for;
+use lang::lsp::{
+    apply_text_edits_to_string, language_server_for, parse_definition, parse_hover_lines,
+    parse_text_edits, parse_workspace_edit,
+};
 use project::{GitWorktree, GraphCommit, ProjectSource, StatusKind, WorkingChange, Worktree};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -610,49 +613,6 @@ struct HoverState {
     position: Point<gpui::Pixels>,
 }
 
-/// LSP Hover 結果の contents（MarkupContent / MarkedString / MarkedString[]）をプレーン行に落とす。
-/// markdown はコードフェンス（``` 行）だけ除いた素通し。長すぎる結果は呼び出し側で切る。
-fn parse_hover_lines(value: &serde_json::Value) -> Vec<String> {
-    fn push_text(text: &str, lines: &mut Vec<String>) {
-        for line in text.lines() {
-            if line.trim_start().starts_with("```") {
-                continue; // コードフェンスは表示しない（中身は残す）
-            }
-            lines.push(line.to_string());
-        }
-    }
-    fn push_marked(item: &serde_json::Value, lines: &mut Vec<String>) {
-        if let Some(text) = item.as_str() {
-            push_text(text, lines);
-        } else if let Some(text) = item.get("value").and_then(|value| value.as_str()) {
-            push_text(text, lines);
-        }
-    }
-    let mut lines = Vec::new();
-    let Some(contents) = value.get("contents") else {
-        return lines;
-    };
-    if let Some(array) = contents.as_array() {
-        for item in array {
-            push_marked(item, &mut lines);
-        }
-    } else {
-        push_marked(contents, &mut lines);
-    }
-    // 先頭・末尾の空行を落とす（連続空行は 1 行に畳む）。
-    let mut compact: Vec<String> = Vec::new();
-    for line in lines {
-        if line.trim().is_empty() && compact.last().map(|last: &String| last.trim().is_empty()).unwrap_or(true) {
-            continue;
-        }
-        compact.push(line);
-    }
-    while compact.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
-        compact.pop();
-    }
-    compact
-}
-
 fn classify_completion_trigger(typed: &str, before: &str) -> CompletionTrigger {
     let Some(last) = typed.chars().last() else {
         return CompletionTrigger::None;
@@ -718,28 +678,6 @@ fn parse_completion_items(value: &serde_json::Value) -> Vec<CompletionItem> {
             Some(CompletionItem { label: SharedString::from(label), insert_text, detail, kind })
         })
         .take(60)
-        .collect()
-}
-
-/// LSP TextEdit[] を `(start_line, start_char, end_line, end_char, new_text)` 列へ。
-fn parse_text_edits(value: &serde_json::Value) -> Vec<(u32, u32, u32, u32, String)> {
-    let Some(array) = value.as_array() else {
-        return Vec::new();
-    };
-    array
-        .iter()
-        .filter_map(|edit| {
-            let range = edit.get("range")?;
-            let start = range.get("start")?;
-            let end = range.get("end")?;
-            Some((
-                start.get("line")?.as_u64()? as u32,
-                start.get("character")?.as_u64()? as u32,
-                end.get("line")?.as_u64()? as u32,
-                end.get("character")?.as_u64()? as u32,
-                edit.get("newText")?.as_str()?.to_string(),
-            ))
-        })
         .collect()
 }
 
@@ -881,108 +819,6 @@ fn active_index_after_removal(active: usize, removed: usize, new_len: usize) -> 
     } else {
         active
     }
-}
-
-/// WorkspaceEdit を「パス → TextEdit 列」に畳む（changes / documentChanges 両対応）。
-fn parse_workspace_edit(value: &serde_json::Value) -> Vec<(PathBuf, Vec<(u32, u32, u32, u32, String)>)> {
-    let mut result: Vec<(PathBuf, Vec<(u32, u32, u32, u32, String)>)> = Vec::new();
-    let mut push = |uri: &str, edits: &serde_json::Value| {
-        let Some(path) = lang::lsp::uri_to_path(uri) else {
-            return;
-        };
-        let edits = parse_text_edits(edits);
-        if !edits.is_empty() {
-            result.push((path, edits));
-        }
-    };
-    if let Some(changes) = value.get("changes").and_then(|changes| changes.as_object()) {
-        for (uri, edits) in changes {
-            push(uri, edits);
-        }
-    }
-    if let Some(document_changes) = value.get("documentChanges").and_then(|list| list.as_array()) {
-        for change in document_changes {
-            // TextDocumentEdit のみ対応（create/rename/delete ファイル操作は v1 スキップ）。
-            let Some(uri) = change
-                .pointer("/textDocument/uri")
-                .and_then(|uri| uri.as_str())
-            else {
-                continue;
-            };
-            if let Some(edits) = change.get("edits") {
-                push(uri, edits);
-            }
-        }
-    }
-    result
-}
-
-/// 未オープンのファイル内容（文字列）へ TextEdit 群を適用する（UTF-16 line/char → byte）。
-/// rename の「ディスク直書き」経路。行は LF 前提（CRLF は行内 \r を保つ）。
-fn apply_text_edits_to_string(text: &str, edits: &[(u32, u32, u32, u32, String)]) -> String {
-    // 行頭 byte の索引（UTF-16 変換は行内だけで済ませる）。
-    let mut line_starts = vec![0usize];
-    for (index, byte) in text.bytes().enumerate() {
-        if byte == b'\n' {
-            line_starts.push(index + 1);
-        }
-    }
-    let to_byte = |line: u32, character: u32| -> usize {
-        let line = (line as usize).min(line_starts.len() - 1);
-        let start = line_starts[line];
-        let end = line_starts.get(line + 1).copied().unwrap_or(text.len());
-        let slice = &text[start..end];
-        let mut utf16 = 0usize;
-        for (offset, c) in slice.char_indices() {
-            if utf16 >= character as usize {
-                return start + offset;
-            }
-            utf16 += c.len_utf16();
-        }
-        end
-    };
-    let mut byte_edits: Vec<(usize, usize, &str)> = edits
-        .iter()
-        .map(|(sl, sc, el, ec, new_text)| {
-            let start = to_byte(*sl, *sc);
-            let end = to_byte(*el, *ec).max(start);
-            (start, end, new_text.as_str())
-        })
-        .collect();
-    byte_edits.sort_by_key(|(start, _, _)| *start);
-    // 後ろから適用（オフセットがずれない）。
-    let mut result = text.to_string();
-    for (start, end, new_text) in byte_edits.into_iter().rev() {
-        result.replace_range(start..end, new_text);
-    }
-    result
-}
-
-/// 定義ジャンプの結果（Location / Location[] / LocationLink[]）から (パス, 行, character) を取る。
-fn parse_definition(value: &serde_json::Value) -> Option<(PathBuf, u32, u32)> {
-    let location = if value.is_array() {
-        value.as_array()?.first()?
-    } else if value.is_object() {
-        value
-    } else {
-        return None;
-    };
-    // LocationLink（targetUri）優先、無ければ Location（uri）。
-    let (uri, range) = if let Some(uri) = location.get("targetUri").and_then(|uri| uri.as_str()) {
-        let range = location
-            .get("targetSelectionRange")
-            .or_else(|| location.get("targetRange"))?;
-        (uri, range)
-    } else {
-        let uri = location.get("uri")?.as_str()?;
-        let range = location.get("range")?;
-        (uri, range)
-    };
-    let path = lang::lsp::uri_to_path(uri)?;
-    let start = range.get("start")?;
-    let line = start.get("line")?.as_u64()? as u32;
-    let character = start.get("character")?.as_u64()? as u32;
-    Some((path, line, character))
 }
 
 // ── Workspace 本体 ──
@@ -2649,10 +2485,16 @@ impl Workspace {
             let Ok(Ok(value)) = receiver.await else {
                 return;
             };
-            if let Some((target, target_line, target_character)) = parse_definition(&value) {
+            if let Some(location) = parse_definition(&value) {
                 let _ = handle.update(cx, |workspace, window, cx| {
                     workspace.record_nav_position(cx); // F12 はナビ履歴へ（⌃- で戻れる）
-                    workspace.jump_to_location(target, target_line, target_character, window, cx)
+                    workspace.jump_to_location(
+                        location.path,
+                        location.position.line,
+                        location.position.character,
+                        window,
+                        cx,
+                    )
                 });
             }
         })
@@ -2907,8 +2749,16 @@ impl Workspace {
                         editor.update(cx, |view, cx| {
                             let byte_edits = edits
                                 .iter()
-                                .map(|(sl, sc, el, ec, text)| {
-                                    (view.lsp_range_to_bytes(*sl, *sc, *el, *ec), text.clone())
+                                .map(|edit| {
+                                    (
+                                        view.lsp_range_to_bytes(
+                                            edit.range.start.line,
+                                            edit.range.start.character,
+                                            edit.range.end.line,
+                                            edit.range.end.character,
+                                        ),
+                                        edit.new_text.clone(),
+                                    )
                                 })
                                 .collect();
                             view.apply_lsp_edits(byte_edits, cx);
@@ -3059,14 +2909,24 @@ impl Workspace {
         let mut buffers = 0usize;
         let mut disk_files = 0usize;
         let mut failed = 0usize;
-        for (path, edits) in by_file {
+        for file_edits in by_file {
+            let path = file_edits.path;
+            let edits = file_edits.edits;
             if let Some(tab) = self.tabs.iter().find(|tab| tab.path == path) {
                 let editor = tab.editor.clone();
                 editor.update(cx, |view, cx| {
                     let byte_edits = edits
                         .iter()
-                        .map(|(sl, sc, el, ec, text)| {
-                            (view.lsp_range_to_bytes(*sl, *sc, *el, *ec), text.clone())
+                        .map(|edit| {
+                            (
+                                view.lsp_range_to_bytes(
+                                    edit.range.start.line,
+                                    edit.range.start.character,
+                                    edit.range.end.line,
+                                    edit.range.end.character,
+                                ),
+                                edit.new_text.clone(),
+                            )
                         })
                         .collect();
                     view.apply_lsp_edits(byte_edits, cx);
@@ -12861,24 +12721,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_definition_handles_location_shapes() {
-        // 単一 Location
-        let location = json!({ "uri": "file:///x/lib.rs", "range": { "start": { "line": 10, "character": 4 }, "end": { "line": 10, "character": 9 } } });
-        assert_eq!(
-            parse_definition(&location),
-            Some((PathBuf::from("/x/lib.rs"), 10, 4))
-        );
-        // Location[]（先頭）
-        let array = json!([location.clone()]);
-        assert_eq!(parse_definition(&array), Some((PathBuf::from("/x/lib.rs"), 10, 4)));
-        // LocationLink[]（targetUri + targetSelectionRange）
-        let link = json!([{ "targetUri": "file:///y/m.rs", "targetSelectionRange": { "start": { "line": 3, "character": 0 }, "end": { "line": 3, "character": 2 } } }]);
-        assert_eq!(parse_definition(&link), Some((PathBuf::from("/y/m.rs"), 3, 0)));
-        // null
-        assert_eq!(parse_definition(&serde_json::Value::Null), None);
-    }
-
-    #[test]
     fn locations_group_by_file_with_preview_lines() {
         let dir = std::env::temp_dir().join(format!("shirushi_refs_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -12898,50 +12740,6 @@ mod tests {
         assert_eq!(results[0].matches[1].column, 13);
         assert_eq!(results[0].matches[1].byte_range.len(), 5); // "Thing"
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn apply_text_edits_to_string_handles_utf16_and_multiline() {
-        // "あ" は UTF-16 で 1・byte で 3。行 0 の char 1..2 を置換。
-        let text = "あxい\nsecond line\n";
-        let edits = vec![(0u32, 1u32, 0u32, 2u32, "YY".to_string())];
-        assert_eq!(apply_text_edits_to_string(text, &edits), "あYYい\nsecond line\n");
-        // 複数編集（順不同で渡しても後ろから適用で正しく）
-        let text = "one two three";
-        let edits = vec![
-            (0, 8, 0, 13, "3".to_string()),
-            (0, 0, 0, 3, "1".to_string()),
-        ];
-        assert_eq!(apply_text_edits_to_string(text, &edits), "1 two 3");
-        // 行跨ぎ削除
-        let text = "aaa\nbbb\nccc";
-        let edits = vec![(0, 1, 2, 1, "".to_string())];
-        assert_eq!(apply_text_edits_to_string(text, &edits), "acc");
-    }
-
-    #[test]
-    fn parse_workspace_edit_supports_changes_and_document_changes() {
-        let value = json!({
-            "changes": {
-                "file:///a.rs": [
-                    { "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3} }, "newText": "new" }
-                ]
-            }
-        });
-        let parsed = parse_workspace_edit(&value);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].0, PathBuf::from("/a.rs"));
-        assert_eq!(parsed[0].1.len(), 1);
-
-        let value = json!({
-            "documentChanges": [
-                { "textDocument": { "uri": "file:///b.rs", "version": 3 },
-                  "edits": [ { "range": { "start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1} }, "newText": "x" } ] }
-            ]
-        });
-        let parsed = parse_workspace_edit(&value);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].0, PathBuf::from("/b.rs"));
     }
 
     #[test]

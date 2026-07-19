@@ -542,16 +542,197 @@ pub struct Diagnostic {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct Range {
     pub start: Position,
     pub end: Position,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct Position {
     pub line: u32,
     pub character: u32,
+}
+
+/// LSP `TextEdit`。位置は UTF-16 code unit。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TextEdit {
+    pub range: Range,
+    #[serde(rename = "newText")]
+    pub new_text: String,
+}
+
+/// 1 ファイル分の `WorkspaceEdit`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileTextEdits {
+    pub path: PathBuf,
+    pub edits: Vec<TextEdit>,
+}
+
+/// 定義ジャンプの着地点。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionLocation {
+    pub path: PathBuf,
+    pub position: Position,
+}
+
+/// LSP Hover の contents（MarkupContent / MarkedString / MarkedString[]）をプレーン行に落とす。
+pub fn parse_hover_lines(value: &Value) -> Vec<String> {
+    fn push_text(text: &str, lines: &mut Vec<String>) {
+        for line in text.lines() {
+            if !line.trim_start().starts_with("```") {
+                lines.push(line.to_string());
+            }
+        }
+    }
+
+    fn push_marked(item: &Value, lines: &mut Vec<String>) {
+        if let Some(text) = item.as_str() {
+            push_text(text, lines);
+        } else if let Some(text) = item.get("value").and_then(Value::as_str) {
+            push_text(text, lines);
+        }
+    }
+
+    let mut lines = Vec::new();
+    let Some(contents) = value.get("contents") else {
+        return lines;
+    };
+    if let Some(array) = contents.as_array() {
+        for item in array {
+            push_marked(item, &mut lines);
+        }
+    } else {
+        push_marked(contents, &mut lines);
+    }
+
+    let mut compact = Vec::new();
+    for line in lines {
+        if line.trim().is_empty()
+            && compact
+                .last()
+                .map(|last: &String| last.trim().is_empty())
+                .unwrap_or(true)
+        {
+            continue;
+        }
+        compact.push(line);
+    }
+    while compact
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
+        compact.pop();
+    }
+    compact
+}
+
+/// LSP `TextEdit[]` を型付きの編集列へ変換する。不正な要素だけを読み飛ばす。
+pub fn parse_text_edits(value: &Value) -> Vec<TextEdit> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|edit| serde_json::from_value(edit.clone()).ok())
+        .collect()
+}
+
+/// `WorkspaceEdit` をファイル単位に畳む（`changes` / `documentChanges` 両対応）。
+pub fn parse_workspace_edit(value: &Value) -> Vec<FileTextEdits> {
+    let mut result = Vec::new();
+    let mut push = |uri: &str, edits: &Value| {
+        let Some(path) = uri_to_path(uri) else {
+            return;
+        };
+        let edits = parse_text_edits(edits);
+        if !edits.is_empty() {
+            result.push(FileTextEdits { path, edits });
+        }
+    };
+
+    if let Some(changes) = value.get("changes").and_then(Value::as_object) {
+        for (uri, edits) in changes {
+            push(uri, edits);
+        }
+    }
+    if let Some(document_changes) = value.get("documentChanges").and_then(Value::as_array) {
+        for change in document_changes {
+            let Some(uri) = change
+                .pointer("/textDocument/uri")
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if let Some(edits) = change.get("edits") {
+                push(uri, edits);
+            }
+        }
+    }
+    result
+}
+
+/// 未オープンのファイル内容へ `TextEdit` 群を適用する。
+pub fn apply_text_edits_to_string(text: &str, edits: &[TextEdit]) -> String {
+    let mut line_starts = vec![0usize];
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            line_starts.push(index + 1);
+        }
+    }
+    let to_byte = |position: Position| -> usize {
+        let line = (position.line as usize).min(line_starts.len() - 1);
+        let start = line_starts[line];
+        let end = line_starts.get(line + 1).copied().unwrap_or(text.len());
+        let slice = &text[start..end];
+        let mut utf16 = 0usize;
+        for (offset, character) in slice.char_indices() {
+            if utf16 >= position.character as usize {
+                return start + offset;
+            }
+            utf16 += character.len_utf16();
+        }
+        end
+    };
+    let mut byte_edits: Vec<_> = edits
+        .iter()
+        .map(|edit| {
+            let start = to_byte(edit.range.start);
+            let end = to_byte(edit.range.end).max(start);
+            (start, end, edit.new_text.as_str())
+        })
+        .collect();
+    byte_edits.sort_by_key(|(start, _, _)| *start);
+
+    let mut result = text.to_string();
+    for (start, end, new_text) in byte_edits.into_iter().rev() {
+        result.replace_range(start..end, new_text);
+    }
+    result
+}
+
+/// 定義ジャンプ結果（Location / Location[] / LocationLink[]）の先頭を返す。
+pub fn parse_definition(value: &Value) -> Option<DefinitionLocation> {
+    let location = if value.is_array() {
+        value.as_array()?.first()?
+    } else if value.is_object() {
+        value
+    } else {
+        return None;
+    };
+    let (uri, range) = if let Some(uri) = location.get("targetUri").and_then(Value::as_str) {
+        let range = location
+            .get("targetSelectionRange")
+            .or_else(|| location.get("targetRange"))?;
+        (uri, range)
+    } else {
+        (location.get("uri")?.as_str()?, location.get("range")?)
+    };
+    let position = serde_json::from_value(range.get("start")?.clone()).ok()?;
+    Some(DefinitionLocation {
+        path: uri_to_path(uri)?,
+        position,
+    })
 }
 
 /// 診断の重大度（1=Error 2=Warning 3=Information 4=Hint。既定は Error）。
@@ -640,6 +821,89 @@ mod tests {
         assert_eq!(typescript.language_id, "typescript");
         assert_eq!(typescript.args, vec!["--stdio"]);
         assert!(language_server_for(Path::new("README.md"), true).is_none());
+    }
+
+    #[test]
+    fn hover_contents_are_normalized_to_plain_lines() {
+        let hover = json!({
+            "contents": [
+                { "language": "rust", "value": "```rust\nfn main()\n```" },
+                "\nextra\n\n"
+            ]
+        });
+        assert_eq!(parse_hover_lines(&hover), vec!["fn main()", "", "extra"]);
+        assert!(parse_hover_lines(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn parse_definition_handles_location_shapes() {
+        let location = json!({ "uri": "file:///x/lib.rs", "range": { "start": { "line": 10, "character": 4 }, "end": { "line": 10, "character": 9 } } });
+        assert_eq!(
+            parse_definition(&location),
+            Some(DefinitionLocation {
+                path: PathBuf::from("/x/lib.rs"),
+                position: Position { line: 10, character: 4 },
+            })
+        );
+        assert_eq!(parse_definition(&json!([location.clone()])), parse_definition(&location));
+
+        let link = json!([{ "targetUri": "file:///y/m.rs", "targetSelectionRange": { "start": { "line": 3, "character": 0 }, "end": { "line": 3, "character": 2 } } }]);
+        assert_eq!(
+            parse_definition(&link),
+            Some(DefinitionLocation {
+                path: PathBuf::from("/y/m.rs"),
+                position: Position { line: 3, character: 0 },
+            })
+        );
+        assert_eq!(parse_definition(&Value::Null), None);
+    }
+
+    #[test]
+    fn apply_text_edits_handles_utf16_multiline_and_unsorted_input() {
+        let parse = |value| parse_text_edits(&value);
+        let edits = parse(json!([
+            { "range": { "start": {"line": 0, "character": 1}, "end": {"line": 0, "character": 2} }, "newText": "YY" }
+        ]));
+        assert_eq!(
+            apply_text_edits_to_string("あxい\nsecond line\n", &edits),
+            "あYYい\nsecond line\n"
+        );
+
+        let edits = parse(json!([
+            { "range": { "start": {"line": 0, "character": 8}, "end": {"line": 0, "character": 13} }, "newText": "3" },
+            { "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3} }, "newText": "1" }
+        ]));
+        assert_eq!(apply_text_edits_to_string("one two three", &edits), "1 two 3");
+
+        let edits = parse(json!([
+            { "range": { "start": {"line": 0, "character": 1}, "end": {"line": 2, "character": 1} }, "newText": "" }
+        ]));
+        assert_eq!(apply_text_edits_to_string("aaa\nbbb\nccc", &edits), "acc");
+    }
+
+    #[test]
+    fn parse_workspace_edit_supports_changes_and_document_changes() {
+        let value = json!({
+            "changes": {
+                "file:///a.rs": [
+                    { "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3} }, "newText": "new" }
+                ]
+            }
+        });
+        let parsed = parse_workspace_edit(&value);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].path, PathBuf::from("/a.rs"));
+        assert_eq!(parsed[0].edits.len(), 1);
+
+        let value = json!({
+            "documentChanges": [
+                { "textDocument": { "uri": "file:///b.rs", "version": 3 },
+                  "edits": [ { "range": { "start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1} }, "newText": "x" } ] }
+            ]
+        });
+        let parsed = parse_workspace_edit(&value);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].path, PathBuf::from("/b.rs"));
     }
 
     #[test]
