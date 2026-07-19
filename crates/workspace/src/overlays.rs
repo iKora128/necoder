@@ -457,7 +457,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        cx.subscribe(&panel, Self::on_search_panel_event).detach();
+        PanelRegistry::bind_search(&panel, cx);
         let focus = panel.read(cx).focus_handle();
         self.search_panel = Some(panel);
         window.focus(&focus, cx);

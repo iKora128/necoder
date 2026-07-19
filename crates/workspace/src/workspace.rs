@@ -745,6 +745,7 @@ impl DerefMut for Workspace {
 
 include!("project_session.rs");
 include!("commands.rs");
+include!("panels.rs");
 include!("git_controller.rs");
 include!("editor_area/mod.rs");
 include!("editor_area/language.rs");
@@ -879,6 +880,12 @@ impl Render for Workspace {
             self.open_file_then(path, _window, cx, move |editor, cx| {
                 editor.reveal_position(line, column, cx);
             });
+        }
+        if let Some(path) = self.pending_open_git_diff.take() {
+            self.open_diff_tab_for(path, None, _window, cx);
+        }
+        if let Some(hunk) = self.pending_stage_hunk.take() {
+            self.stage_hunk(hunk, cx);
         }
         let theme = self.theme.clone();
         // 窓縁のプロジェクト色枠（方向感覚・Peacock 相当。面は塗らず縁の 2px 線のみ = UI-SPEC §1.3）。

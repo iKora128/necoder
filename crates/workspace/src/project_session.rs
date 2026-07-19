@@ -10,15 +10,20 @@ impl Workspace {
         if let Some(storage) = storage {
             agent_panel.update(cx, |panel, cx| panel.set_storage(storage, cx));
         }
-        cx.subscribe(&agent_panel, Self::on_panel_event).detach();
         let terminal_launch = Self::terminal_launch_for(slot);
         let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-        cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
         let explorer = cx.new(|_| Explorer::new(explorer_view));
         let git_panel = cx.new(GitPanel::new);
         let accent = slot.map(|slot| slot.color).unwrap_or_else(|| project_color(0));
         let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
-        cx.subscribe(&todo_panel, Self::on_todo_panel_event).detach();
+        PanelRegistry::bind_session(
+            &agent_panel,
+            &explorer,
+            &git_panel,
+            &terminal_dock,
+            &todo_panel,
+            cx,
+        );
         ProjectSession {
             editor_area: EditorArea::new(),
             agent_panel,
@@ -171,15 +176,20 @@ impl Workspace {
         let mut sessions = Vec::with_capacity(projects.len().max(1));
         for index in 0..projects.len().max(1) {
             let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
-            cx.subscribe(&agent_panel, Self::on_panel_event).detach();
             let terminal_launch = Self::terminal_launch_for(projects.get(index));
             let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-            cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
             let explorer = cx.new(|_| Explorer::new(explorer_view));
             let git_panel = cx.new(GitPanel::new);
             let accent = projects.get(index).map(|slot| slot.color).unwrap_or_else(|| project_color(0));
             let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
-            cx.subscribe(&todo_panel, Self::on_todo_panel_event).detach();
+            PanelRegistry::bind_session(
+                &agent_panel,
+                &explorer,
+                &git_panel,
+                &terminal_dock,
+                &todo_panel,
+                cx,
+            );
             if index == active {
                 if let Some(menu) = explorer_context_menu.take() {
                     explorer.update(cx, |explorer, cx| explorer.show_context_menu(menu, cx));
@@ -200,7 +210,7 @@ impl Workspace {
                             cx,
                         )
                     });
-                    cx.subscribe(&panel, Self::on_search_panel_event).detach();
+                    PanelRegistry::bind_search(&panel, cx);
                     Some(panel)
                 })
             } else {
@@ -229,7 +239,7 @@ impl Workspace {
         }
         let accent = projects.get(active).map(|slot| slot.color).unwrap_or_else(|| project_color(0));
         let settings_view = cx.new(|cx| settings::SettingsView::new(theme.clone(), accent, cx));
-        cx.subscribe(&settings_view, Self::on_settings_view_event).detach();
+        PanelRegistry::bind_settings(&settings_view, cx);
         let mut workspace = Workspace {
             projects,
             active,
