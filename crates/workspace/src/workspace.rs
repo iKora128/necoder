@@ -9,7 +9,7 @@ pub mod updater;
 use agent_panel::AgentPanel;
 use editor_core::{Buffer, Selection};
 use futures::StreamExt as _; // LSP 通知 pump の `.next()`
-use editor_view::{EditorHoverEvent, EditorInputEvent, EditorView, PositionSnapshot};
+use editor_view::{ComposerEvent, EditorHoverEvent, EditorInputEvent, EditorView, PositionSnapshot};
 use gpui::{
     Animation, AnimationExt, App, Bounds, ClipboardItem, Context, CursorStyle, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -715,6 +715,8 @@ struct TodoBoardState {
     plan_busy: bool,
     /// ▶ で AI に送った実行中項目（行番号 → スレッド色）。TurnEnded で解除。
     running: HashMap<usize, Hsla>,
+    /// ＋ で追加中のタスク入力（IME 正しい EditorView::plain）。None = 追加してない。
+    add_input: Option<Entity<EditorView>>,
 }
 
 /// ⌘. code actions のポップアップ（M11）。補完と同型（フォーカスを取り上下/Enter/Esc）。
@@ -1218,6 +1220,8 @@ pub struct Workspace {
     picker_worktree_rows: Vec<PathBuf>,
     /// SSH ホストピッカー（M13）の裏付け。id → config ホスト（範囲外 id = 末尾「手入力」）。
     picker_ssh_hosts: Vec<host::SshConfigHost>,
+    /// SSH ピッカーの「最近のリモートプロジェクト」行の接続 uri（id 前半・#5）。
+    picker_ssh_recent: Vec<String>,
     /// スレッド履歴 Picker の (id, name, color_index)。id は表示添字（#5）。
     picker_history: Vec<(String, String, i64)>,
     // F2 rename の入力（Some = ミニオーバーレイ表示中。値は新しい名前）。
@@ -1511,6 +1515,7 @@ impl Workspace {
             goto_line: None,
             picker_symbol_rows: Vec::new(),
             picker_ssh_hosts: Vec::new(),
+            picker_ssh_recent: Vec::new(),
             picker_history: Vec::new(),
             picker_workspace_symbols: Vec::new(),
             picker_worktree_rows: Vec::new(),
@@ -3679,8 +3684,12 @@ impl Workspace {
         }
         self.git_panel = None;
         self.show_left = true;
-        self.todo_board =
-            Some(TodoBoardState { items: Vec::new(), plan_busy: false, running: HashMap::new() });
+        self.todo_board = Some(TodoBoardState {
+            items: Vec::new(),
+            plan_busy: false,
+            running: HashMap::new(),
+            add_input: None,
+        });
         self.reload_todo_board(cx);
         cx.notify();
     }
@@ -3791,6 +3800,75 @@ impl Workspace {
         .detach();
     }
 
+    /// ＋ でタスク追加の入力を開く（IME 正しい EditorView::plain・Enter 確定 / Esc 取消）。
+    fn start_add_todo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.todo_board.is_none() {
+            return;
+        }
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let editor = cx.new(|cx| EditorView::plain(theme, accent, true, cx));
+        cx.subscribe(&editor, |workspace, _editor, event, cx| match event {
+            ComposerEvent::Submit => workspace.confirm_add_todo(cx),
+        })
+        .detach();
+        let handle = editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        if let Some(board) = self.todo_board.as_mut() {
+            board.add_input = Some(editor);
+        }
+        cx.notify();
+    }
+
+    /// タスク追加を確定（Enter）。空白は無視。今日の見出し下へ `add_todo_on` で追記し板を読み直す。
+    fn confirm_add_todo(&mut self, cx: &mut Context<Self>) {
+        let text = self
+            .todo_board
+            .as_ref()
+            .and_then(|board| board.add_input.as_ref())
+            .map(|editor| editor.read(cx).plain_text().trim().to_string())
+            .unwrap_or_default();
+        if let Some(board) = self.todo_board.as_mut() {
+            board.add_input = None; // 追記中は閉じる（連続追加は再度 ＋）
+        }
+        if text.is_empty() {
+            cx.notify();
+            return;
+        }
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let root = worktree.root().to_path_buf();
+        let host = worktree.host().clone();
+        cx.notify();
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { project::todos::add_todo_on(host.as_ref(), &root, &text) })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                if let Err(error) = result {
+                    workspace.push_toast(
+                        SharedString::from(format!("{error:#}")),
+                        workspace.accent(),
+                        cx,
+                    );
+                }
+                workspace.reload_todo_board(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// タスク追加を取り消す（Esc）。入力内容は破棄する。
+    fn cancel_add_todo(&mut self, cx: &mut Context<Self>) {
+        if let Some(board) = self.todo_board.as_mut() {
+            if board.add_input.take().is_some() {
+                cx.notify();
+            }
+        }
+    }
+
     /// 左カラムの Todo ボード（explorer/git と同じ幅・M12-10）。
     fn render_todo_board(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
@@ -3835,6 +3913,24 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _window, cx| this.run_daily_plan(cx)),
+                    ),
+            )
+            // ＋ タスクを追加（インライン入力・#todo-add）。
+            .child(
+                div()
+                    .id("todos-add")
+                    .px(px(7.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(13.))
+                    .text_color(accent)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg2))
+                    .child("＋")
+                    .tooltip(Tooltip::text(i18n::t!("todos.add_tip"), theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.start_add_todo(window, cx)),
                     ),
             );
         let mut list = div().flex_1().flex().flex_col().overflow_hidden().py(px(4.));
@@ -3937,6 +4033,25 @@ impl Workspace {
             .border_r_1()
             .border_color(theme.border)
             .child(header)
+            // ＋ の追加入力（IME 正しい EditorView・Enter 確定 / Esc 取消）。
+            .children(board.add_input.clone().map(|editor| {
+                div()
+                    .flex_none()
+                    .mx(px(8.))
+                    .my(px(4.))
+                    .px(px(6.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(accent)
+                    .bg(theme.bg1)
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
+                        if event.keystroke.key.as_str() == "escape" {
+                            this.cancel_add_todo(cx);
+                        }
+                    }))
+                    .child(editor)
+            }))
             .child(list)
             .child(self.left_dock_resize_handle(cx))
             .into_any_element()
@@ -7516,25 +7631,37 @@ impl Workspace {
                             }
                         }
                     }
-                    PickerMode::SshHosts => match self.picker_ssh_hosts.get(id) {
-                        Some(host) => {
-                            let alias = host.alias.clone();
-                            // 前回このホストで開いたパスがあれば即接続（#2d・打たずに繋がる）。無ければパス入力へ。
-                            let last_path = self
-                                .storage
-                                .as_ref()
-                                .and_then(|storage| storage.host_last_path(&alias).ok().flatten());
-                            match last_path {
-                                Some(path) => {
-                                    self.connect_ssh_and_open(format!("ssh://{alias}{path}"), cx)
+                    PickerMode::SshHosts => {
+                        // 前半 id = 最近のリモートプロジェクト（履歴・直接接続・#5）。
+                        if let Some(uri) = self.picker_ssh_recent.get(id).cloned() {
+                            self.connect_ssh_and_open(uri, cx);
+                        } else {
+                            // 後半 id = config ホスト（recent 分ずらす）+ 末尾の手入力。
+                            let host_id = id - self.picker_ssh_recent.len();
+                            match self.picker_ssh_hosts.get(host_id) {
+                                Some(host) => {
+                                    let alias = host.alias.clone();
+                                    // 前回パスがあれば即接続（#2d・打たずに繋がる）。無ければパス入力へ。
+                                    let last_path = self.storage.as_ref().and_then(|storage| {
+                                        storage.host_last_path(&alias).ok().flatten()
+                                    });
+                                    match last_path {
+                                        Some(path) => self
+                                            .connect_ssh_and_open(format!("ssh://{alias}{path}"), cx),
+                                        None => self.open_ssh_input_seeded(
+                                            format!("ssh://{alias}/"),
+                                            window,
+                                            cx,
+                                        ),
+                                    }
                                 }
-                                None => self
-                                    .open_ssh_input_seeded(format!("ssh://{alias}/"), window, cx),
+                                // 末尾の「手入力」= 空の ssh:// 入力バー。
+                                None => {
+                                    self.open_ssh_input_seeded("ssh://".to_string(), window, cx)
+                                }
                             }
                         }
-                        // 末尾の「手入力」= 空の ssh:// 入力バー。
-                        None => self.open_ssh_input_seeded("ssh://".to_string(), window, cx),
-                    },
+                    }
                     PickerMode::ThreadHistory => {
                         if let Some((thread_id, name, color_index)) =
                             self.picker_history.get(id).cloned()
@@ -8335,38 +8462,55 @@ impl Workspace {
 
     fn open_ssh_host_picker(&mut self, _: &RemoteSsh, window: &mut Window, cx: &mut Context<Self>) {
         let hosts = host::ssh_config_hosts();
-        let mut items: Vec<PickerItem> = hosts
-            .iter()
-            .enumerate()
-            .map(|(id, host)| {
-                let mut item = PickerItem::new(id, host.alias.clone());
-                let base = match (&host.user, &host.hostname) {
-                    (Some(user), Some(hostname)) => Some(format!("{user}@{hostname}")),
-                    (None, Some(hostname)) => Some(hostname.clone()),
-                    (Some(user), None) => Some(format!("{user}@{}", host.alias)),
-                    (None, None) => None,
-                };
-                // 前回パスがあれば併記（→ が即接続先・#2d）。
-                let last_path = self
-                    .storage
-                    .as_ref()
-                    .and_then(|storage| storage.host_last_path(&host.alias).ok().flatten());
-                let detail = match (base, last_path) {
-                    (Some(base), Some(path)) => Some(format!("{base}  →{path}")),
-                    (Some(base), None) => Some(base),
-                    (None, Some(path)) => Some(format!("→{path}")),
-                    (None, None) => None,
-                };
-                if let Some(detail) = detail {
-                    item = item.with_detail(detail);
-                }
-                item
-            })
-            .collect();
+        // 2階層: 上=最近のリモートプロジェクト（履歴・直接接続・#5）、下=config ホスト、末尾=手入力。
+        let recent = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.recent_remote_projects().ok())
+            .unwrap_or_default();
+        let mut items: Vec<PickerItem> = Vec::new();
+        let mut recent_uris: Vec<String> = Vec::new();
+        for (host_key, path, name, _opened_at) in recent.iter().take(20) {
+            let id = recent_uris.len();
+            items.push(
+                PickerItem::new(id, name.clone())
+                    .with_accent(self.accent()) // 行頭●= 最近のプロジェクトの目印
+                    .with_detail(format!("{host_key}:{path}")),
+            );
+            recent_uris.push(format!("ssh://{host_key}{path}"));
+        }
+        let recent_count = recent_uris.len();
+        // config ホスト（id = recent_count + index。選ぶと前回パス即接続 or パス入力）。
+        for (offset, host) in hosts.iter().enumerate() {
+            let mut item = PickerItem::new(recent_count + offset, host.alias.clone());
+            let base = match (&host.user, &host.hostname) {
+                (Some(user), Some(hostname)) => Some(format!("{user}@{hostname}")),
+                (None, Some(hostname)) => Some(hostname.clone()),
+                (Some(user), None) => Some(format!("{user}@{}", host.alias)),
+                (None, None) => None,
+            };
+            // 前回パスがあれば併記（→ が即接続先・#2d）。
+            let last_path = self
+                .storage
+                .as_ref()
+                .and_then(|storage| storage.host_last_path(&host.alias).ok().flatten());
+            let detail = match (base, last_path) {
+                (Some(base), Some(path)) => Some(format!("{base}  →{path}")),
+                (Some(base), None) => Some(base),
+                (None, Some(path)) => Some(format!("→{path}")),
+                (None, None) => None,
+            };
+            if let Some(detail) = detail {
+                item = item.with_detail(detail);
+            }
+            items.push(item);
+        }
         // 末尾は「手入力」= 生の ssh:// 入力バー（config に無いホストへの逃げ道）。
         items.push(
-            PickerItem::new(hosts.len(), i18n::t!("ssh.manual_entry")).with_detail("ssh://user@host/path"),
+            PickerItem::new(recent_count + hosts.len(), i18n::t!("ssh.manual_entry"))
+                .with_detail("ssh://user@host/path"),
         );
+        self.picker_ssh_recent = recent_uris;
         self.picker_ssh_hosts = hosts;
         self.open_picker(
             PickerMode::SshHosts,
@@ -8460,6 +8604,14 @@ impl Workspace {
                     Ok(source) => {
                         if let (Some(storage), Some((host_key, path))) = (&storage, &last_path) {
                             let _ = storage.set_host_last_path(host_key, path);
+                            // 履歴（最近のリモートプロジェクト）にも記録（#5・2階層ピッカー）。
+                            // name = パス末尾のフォルダ名（無ければホスト名）。
+                            let name = std::path::Path::new(path)
+                                .file_name()
+                                .map(|component| component.to_string_lossy().to_string())
+                                .filter(|component| !component.is_empty())
+                                .unwrap_or_else(|| host_key.clone());
+                            let _ = storage.record_remote_project(host_key, path, &name);
                         }
                         workspace.open_source_as_window(source, cx);
                     }
@@ -12724,11 +12876,11 @@ fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
     match id {
         "claude" => (Some("icons/brand-claude.svg"), "C", 0xd9_77_57), // テラコッタ
         "codex" => (None, ">_", 0x10_a3_7f),                          // OpenAI マークは CC0 に無い→中立のコード記号（商標フリー）
-        "gemini" => (Some("icons/brand-gemini.svg"), "G", 0x8e_75_b2),
         "copilot" => (Some("icons/brand-copilot.svg"), "Co", 0xd0_d5_db), // 単色→淡色
         "qwen" => (Some("icons/brand-qwen.svg"), "Q", 0x69_50_ef),
         "opencode" => (Some("icons/brand-opencode.svg"), "OC", 0xd0_d5_db),
         "kimi" => (Some("icons/brand-kimi.svg"), "K", 0xd0_d5_db),
+        "grok" => (None, "G", 0x4b_55_63), // xAI マークは CC0 に無い→頭文字（公式 SVG を置けば差し替え可）
         _ => (None, "?", 0x88_88_88),
     }
 }

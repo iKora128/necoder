@@ -246,11 +246,22 @@ pub const AGENTS: &[AgentKind] = &[
         install_cmd: "uv tool install kimi-cli",
         login_cmd: "kimi",
     },
+    // Grok Build（xAI・Rust TUI）: curl 導入・初回はブラウザ認証。ACP は `grok acp`
+    // （opencode/kimi と同じ Rust 系の慣例。README 未記載のため要実機確認）。
+    AgentKind {
+        id: "grok",
+        label: "Grok Build",
+        bin: "grok",
+        package: None,
+        extra_args: &["acp"],
+        install_cmd: "curl -fsSL https://x.ai/cli/install.sh | bash",
+        login_cmd: "grok",
+    },
 ];
 
 /// UI のエージェントセレクタに出すラベル一覧（[`AGENTS`] と 1:1 対応・Zed の registry 表示名準拠）。
 pub const AGENT_LABELS: &[&str] =
-    &["Claude Code", "Codex", "GitHub Copilot", "Qwen Code", "OpenCode", "Kimi CLI"];
+    &["Claude Code", "Codex", "GitHub Copilot", "Qwen Code", "OpenCode", "Kimi CLI", "Grok Build"];
 
 impl AgentKind {
     /// ラベル（例 "Claude"）から引く。

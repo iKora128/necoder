@@ -529,7 +529,7 @@ impl AgentPanel {
             renaming: None,
             transcript_scroll,
             tabs_scroll: ScrollHandle::new(),
-            tabs_view: initial_tabs_view(),
+            tabs_view: initial_tabs_view(&settings::get(cx).agent_tabs_view),
             thread_list_scroll: ScrollHandle::new(),
             transcript_regions: Rc::new(RefCell::new(Vec::new())),
             transcript_selection: None,
@@ -2328,10 +2328,21 @@ impl AgentPanel {
             .child(self.render_tabs_view_switcher(cx))
     }
 
-    /// スレッド表示モードを切り替える（Bar ⇄ List）。
+    /// スレッド表示モードを切り替える（Bar ⇄ List）。選択は **user settings.json へ保存**して
+    /// 次の起動でも保つ（`default_agent` と同経路。設定画面のトグル化は後続）。
     fn set_tabs_view(&mut self, view: AgentTabsView, cx: &mut Context<Self>) {
         if self.tabs_view != view {
             self.tabs_view = view;
+            if let Some(path) = settings_core::user_settings_path() {
+                let value = if matches!(view, AgentTabsView::List) { "list" } else { "bar" };
+                if let Err(error) = settings_core::persist_user_value(
+                    &path,
+                    "agent_tabs_view",
+                    serde_json::Value::String(value.to_string()),
+                ) {
+                    eprintln!("タブ表示モードの保存に失敗: {error:#}");
+                }
+            }
             cx.notify();
         }
     }
@@ -3752,10 +3763,13 @@ fn render_mascot(motion: MascotMotion, active: bool) -> gpui::AnyElement {
 }
 
 /// スレッド色のドット。実行中は breathing で pulse（mock: 1.6s）。停止中は静止。
-/// スレッド表示の初期モード。開発用 `SHIRUSHI_TABS_VIEW=list` で List 起動（スクショ/検証用）。
-fn initial_tabs_view() -> AgentTabsView {
+/// スレッド表示の初期モード。**開発用 `SHIRUSHI_TABS_VIEW` を最優先**（list/bar・スクショ検証用）、
+/// 無ければ**保存値**（settings.json の `agent_tabs_view`）、それも無ければ Bar。
+fn initial_tabs_view(setting: &str) -> AgentTabsView {
     match std::env::var("SHIRUSHI_TABS_VIEW").ok().as_deref() {
         Some("list") => AgentTabsView::List,
+        Some("bar") => AgentTabsView::Bar,
+        _ if setting == "list" => AgentTabsView::List,
         _ => AgentTabsView::Bar,
     }
 }

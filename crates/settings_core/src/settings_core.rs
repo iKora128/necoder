@@ -83,6 +83,9 @@ pub struct Settings {
     /// エージェントのターン完了時に通知音を鳴らすか（macOS system sound・既定 on）。
     /// 裏の窓で走らせた作業の完了にも気づける（`docs/BACKGROUND.md` の原点痛点）。独自チャイム同梱は後続。
     pub completion_sound: bool,
+    /// スレッドタブの見せ方（"bar" 横タブ / "list" 縦リスト）。Agent パネルのスイッチャがここへ保存し、
+    /// 次の起動でも保つ。設定画面のトグル化は後続（真実はこの値・画面はこれを操作するだけ）。
+    pub agent_tabs_view: String,
     /// 新規スレッドの既定 AI エージェント（表示名。`acp_client::AGENT_LABELS` のいずれか）。
     /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
     /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
@@ -107,6 +110,7 @@ impl Default for Settings {
             submit_on_enter: false,
             agent_auto_name: true,
             completion_sound: true,
+            agent_tabs_view: "bar".to_string(),
             default_agent: "Claude Code".to_string(),
             rail: RailSettings::default(),
             onboarded: false,
@@ -123,6 +127,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "submit_on_enter": false,
   "agent_auto_name": true,
   "completion_sound": true,
+  "agent_tabs_view": "bar",
   "default_agent": "Claude Code",
   "onboarded": false,
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }

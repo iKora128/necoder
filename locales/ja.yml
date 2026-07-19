@@ -78,6 +78,7 @@ todos:
   plan: ✨ 今日の計画
   plan_busy: 生成中…
   plan_tip: ROADMAP と git status から今日のタスク下書きを生成（claude -p）
+  add_tip: タスクを追加
   plan_added: 今日の計画を %{count} 件追加しました
   send_tip: このタスクをアクティブスレッドへ送る（完了時に自動チェック）
   send_prompt: "%{text}\n\n完了したら .shirushi/todos.md のこの項目「%{text}」のチェックボックスを [x] に書き換えて。"

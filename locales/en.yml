@@ -77,6 +77,7 @@ todos:
   plan: ✨ Plan today
   plan_busy: Generating…
   plan_tip: Draft today's tasks from ROADMAP and git status (claude -p)
+  add_tip: Add a task
   plan_added: Added %{count} items for today
   send_tip: Send this task to the active thread (auto-checks when done)
   send_prompt: "%{text}\n\nWhen done, flip this item's checkbox in .shirushi/todos.md to [x]: %{text}"

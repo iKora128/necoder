@@ -167,6 +167,13 @@ FEATURES で later タグの checkpoint / @mention / ⌘K / Todos をここへ�
 - [ ] Remote（旧 M9）: Remote Projects UI・SSH config picker・構造化接続ログ・retry/cancel・localhost port forwarding
 - [ ] Remote（旧 M9）受入: remote Linux で編集/Git/LSP/terminal/agent を一日使い、切断復帰しても未保存変更を失わない
 - [x] **初回起動体験** — 2026-07-17。空状態 = 「Shirushi — 色による方向感覚」+ **最初の 4 手のキーバッジ**（⌘O 開く / ⌘P ファイル / ⌘⇧A AI スレッド / ⌘⇧P 全コマンド・i18n 両対応・offscreen 目視）。README に **英語 Quick start** + hero スクリーンショット（docs/images/）+ 古い記述の修正（GPUI git 依存・ライセンス戦略）
+- [ ] **設定画面（`render_settings`）の完成** — 現状はエージェント選択（既定/導入/ログイン + アイコン）のみで**全然未完成**。真実は settings.json、画面はそれを操作するだけ。段階的にトグル/UI 化する:
+  - `completion_sound`（完了音 on/off・既定 on・**実装済み** 2026-07-19 → 画面トグルだけ未）
+  - `agent_tabs_view`（Bar/List・**永続化は実装済み** 2026-07-19 → 画面トグルは任意）
+  - `submit_on_enter` / `soft_wrap` / `format_on_save` / `agent_auto_name` / `density` / `font_size` / `theme` / `locale` / `rail.*`（既存設定の UI 化）
+  - **エージェントアイコンの出所**: repo にロゴを同梱せず **ACP レジストリから実行時取得**（Zed 方式・未知は sparkles フォールバック）＝ DECISIONS の「再ライセンス自由」と両立。手描き monochrome 同梱が保守的な代替
+- [ ] **完了音の磨き**（後続・優先度低）: ①**window 非フォーカス時のみ**鳴らす（見てる最中は鳴らさない）②**独自チャイム同梱**（macOS `Glass.aiff` → 自前 wav + `rodio` でクロスプラットフォーム）。**やるのはクロスプラットフォーム化 or 公開ブランディングのタイミングで十分**（今は system sound で機能する）
+- [ ] **エージェントタブ Grouped ビュー**（要設計判断）: List の第3案 = プロジェクト⎇ブランチで束ねる縦リスト。**現モデルは「1 パネル=1 プロジェクト」**で同一パネル内スレッドは同一 dest のため、①**全ウィンドウ横断集約**（`RunningRegistry`・⌘O ダッシュボードの右ドック常設化）か ②**スレッドが別ブランチ dest を持てるモデル拡張**、のどちらを取るか決めてから着手
 - [ ] 受入（総合・**人の手番**）: 英語話者が GitHub から DL → 10 分で「開く・編集・保存・検索・AI に 1 タスク」まで到達できる。**ソフト側の導線は完備**（署名 dmg CI・自動更新・EN UI・welcome・⌘⇧P）— 残るは初回リリースを切って実際に通しで試すこと
 
 ---

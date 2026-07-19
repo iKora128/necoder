@@ -18,7 +18,7 @@ copyright notice and this permission notice appear in all copies.
 
 ## ブランドロゴ（`brand-*.svg`）
 
-AI エージェント識別用のブランドマーク（`brand-claude` / `brand-gemini` / `brand-copilot` /
+AI エージェント識別用のブランドマーク（`brand-claude` / `brand-copilot` /
 `brand-qwen` / `brand-opencode` / `brand-kimi`）は **Simple Icons**（https://simpleicons.org）由来。
 Simple Icons の SVG は **CC0 1.0（パブリックドメイン）**。単色マスクとして描くため `fill` は
 `currentColor` に正規化済み。
