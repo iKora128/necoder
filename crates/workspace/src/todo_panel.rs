@@ -1,204 +1,110 @@
-impl Workspace {
-    fn toggle_todo_board(&mut self, _: &ToggleTodoBoard, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.todo_board.take().is_some() {
-            cx.notify();
-            return;
-        }
-        self.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
-        self.chrome.show_left = true;
-        self.todo_board = Some(TodoBoardState {
+/// Todo panel から shell へ上げる操作。FS・Agent・Toast は panel から直接触らない。
+enum TodoPanelEvent {
+    ToggleItem { line: usize },
+    SendToAgent { line: usize, text: String },
+    DailyPlan,
+    AddItem { text: String },
+}
+
+/// 1 ProjectSession に属する Todo UI。真実は `.shirushi/todos.md`。
+struct TodoPanel {
+    open: bool,
+    items: Vec<project::todos::TodoItem>,
+    plan_busy: bool,
+    running: HashMap<usize, Hsla>,
+    add_input: Option<Entity<EditorView>>,
+    theme: Theme,
+    accent: Hsla,
+}
+
+impl TodoPanel {
+    fn new(theme: Theme, accent: Hsla) -> Self {
+        Self {
+            open: false,
             items: Vec::new(),
             plan_busy: false,
             running: HashMap::new(),
             add_input: None,
-        });
-        self.reload_todo_board(cx);
-        cx.notify();
-    }
-
-    /// 板を `.shirushi/todos.md` から読み直す（背景・最新勝ち）。
-    /// 開いた時・チェック書換後・watch 検知・TurnEnded で呼ぶ＝どの書き手の変更も追従する。
-    fn reload_todo_board(&mut self, cx: &mut Context<Self>) {
-        if self.todo_board.is_none() {
-            return;
+            theme,
+            accent,
         }
-        let Some(worktree) = self.active_worktree() else {
-            return;
-        };
-        let root = worktree.root().to_path_buf();
-        let host = worktree.host().clone();
-        cx.spawn(async move |workspace, cx| {
-            let items = cx
-                .background_executor()
-                .spawn(async move { project::todos::read_todos_on(host.as_ref(), &root) })
-                .await;
-            let _ = workspace.update(cx, |workspace, cx| {
-                if let Some(board) = workspace.todo_board.as_mut() {
-                    board.items = items;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
-    /// チェッククリック: 該当行の `[ ]`↔`[x]` をファイル書き換え（他の書き手と同じ経路）。
-    fn toggle_todo_item(&mut self, line: usize, cx: &mut Context<Self>) {
-        let Some(worktree) = self.active_worktree() else {
-            return;
-        };
-        let root = worktree.root().to_path_buf();
-        let host = worktree.host().clone();
-        cx.spawn(async move |workspace, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { project::todos::toggle_todo_on(host.as_ref(), &root, line) })
-                .await;
-            let _ = workspace.update(cx, |workspace, cx| {
-                if let Err(error) = result {
-                    workspace.push_toast(
-                        SharedString::from(format!("{error:#}")),
-                        workspace.accent(),
-                        cx,
-                    );
-                }
-                workspace.reload_todo_board(cx);
-            });
-        })
-        .detach();
-    }
-
-    /// ▶: 項目をアクティブスレッドへ送る。末尾に「完了したら板をチェックせよ」を自動付与し、
-    /// エージェント自身が todos.md を書き換える → watch が板へ反映（= チェックがひとりでに入る）。
-    fn send_todo_to_agent(&mut self, line: usize, text: String, cx: &mut Context<Self>) {
-        let prompt = i18n::t!("todos.send_prompt", "text" => text);
-        let color = self.agent_panel.read(cx).active_color();
-        self.agent_panel.update(cx, |panel, cx| panel.send_prompt_text(prompt, cx));
-        self.chrome.show_right = true;
-        if let Some(board) = self.todo_board.as_mut() {
-            board.running.insert(line, color);
+    fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.open = open;
+        if !open {
+            self.add_input = None;
         }
         cx.notify();
     }
 
-    /// ✨今日の計画: ROADMAP/git status/未消化を `claude -p` に渡して下書きを板へ追記（M12-10）。
-    fn run_daily_plan(&mut self, cx: &mut Context<Self>) {
-        let Some(worktree) = self.active_worktree() else {
-            return;
-        };
-        if self.todo_board.as_ref().is_some_and(|board| board.plan_busy) {
-            return;
-        }
-        let root = worktree.root().to_path_buf();
-        let host = worktree.host().clone();
-        if let Some(board) = self.todo_board.as_mut() {
-            board.plan_busy = true;
-        }
-        cx.notify();
-        cx.spawn(async move |workspace, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { project::todos::daily_plan_on(host.as_ref(), &root) })
-                .await;
-            let _ = workspace.update(cx, |workspace, cx| {
-                if let Some(board) = workspace.todo_board.as_mut() {
-                    board.plan_busy = false;
-                }
-                match result {
-                    Ok(count) => workspace.push_toast(
-                        SharedString::from(i18n::t!("todos.plan_added", "count" => count)),
-                        workspace.accent(),
-                        cx,
-                    ),
-                    Err(error) => workspace.push_toast(
-                        SharedString::from(format!("{error:#}")),
-                        workspace.accent(),
-                        cx,
-                    ),
-                }
-                workspace.reload_todo_board(cx);
-            });
-        })
-        .detach();
+    fn set_visuals(&mut self, theme: Theme, accent: Hsla) {
+        self.theme = theme;
+        self.accent = accent;
     }
 
-    /// ＋ でタスク追加の入力を開く（IME 正しい EditorView::plain・Enter 確定 / Esc 取消）。
-    fn start_add_todo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.todo_board.is_none() {
+    fn set_items(&mut self, items: Vec<project::todos::TodoItem>, cx: &mut Context<Self>) {
+        self.items = items;
+        cx.notify();
+    }
+
+    fn set_plan_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
+        self.plan_busy = busy;
+        cx.notify();
+    }
+
+    fn mark_running(&mut self, line: usize, color: Hsla, cx: &mut Context<Self>) {
+        self.running.insert(line, color);
+        cx.notify();
+    }
+
+    fn clear_running_color(&mut self, color: Hsla, cx: &mut Context<Self>) {
+        self.running.retain(|_, running_color| *running_color != color);
+        cx.notify();
+    }
+
+    fn start_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.open {
             return;
         }
-        let theme = self.theme.clone();
-        let accent = self.accent();
-        let editor = cx.new(|cx| EditorView::plain(theme, accent, true, cx));
-        cx.subscribe(&editor, |workspace, _editor, event, cx| match event {
-            ComposerEvent::Submit => workspace.confirm_add_todo(cx),
+        let editor = cx.new(|cx| EditorView::plain(self.theme.clone(), self.accent, true, cx));
+        cx.subscribe(&editor, |panel, _editor, event, cx| match event {
+            ComposerEvent::Submit => panel.submit_add(cx),
         })
         .detach();
         let handle = editor.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
-        if let Some(board) = self.todo_board.as_mut() {
-            board.add_input = Some(editor);
-        }
+        self.add_input = Some(editor);
         cx.notify();
     }
 
-    /// タスク追加を確定（Enter）。空白は無視。今日の見出し下へ `add_todo_on` で追記し板を読み直す。
-    fn confirm_add_todo(&mut self, cx: &mut Context<Self>) {
+    fn submit_add(&mut self, cx: &mut Context<Self>) {
         let text = self
-            .todo_board
+            .add_input
             .as_ref()
-            .and_then(|board| board.add_input.as_ref())
             .map(|editor| editor.read(cx).plain_text().trim().to_string())
             .unwrap_or_default();
-        if let Some(board) = self.todo_board.as_mut() {
-            board.add_input = None; // 追記中は閉じる（連続追加は再度 ＋）
+        self.add_input = None;
+        if !text.is_empty() {
+            cx.emit(TodoPanelEvent::AddItem { text });
         }
-        if text.is_empty() {
-            cx.notify();
-            return;
-        }
-        let Some(worktree) = self.active_worktree() else {
-            return;
-        };
-        let root = worktree.root().to_path_buf();
-        let host = worktree.host().clone();
         cx.notify();
-        cx.spawn(async move |workspace, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { project::todos::add_todo_on(host.as_ref(), &root, &text) })
-                .await;
-            let _ = workspace.update(cx, |workspace, cx| {
-                if let Err(error) = result {
-                    workspace.push_toast(
-                        SharedString::from(format!("{error:#}")),
-                        workspace.accent(),
-                        cx,
-                    );
-                }
-                workspace.reload_todo_board(cx);
-            });
-        })
-        .detach();
     }
 
-    /// タスク追加を取り消す（Esc）。入力内容は破棄する。
-    fn cancel_add_todo(&mut self, cx: &mut Context<Self>) {
-        if let Some(board) = self.todo_board.as_mut() {
-            if board.add_input.take().is_some() {
-                cx.notify();
-            }
+    fn cancel_add(&mut self, cx: &mut Context<Self>) {
+        if self.add_input.take().is_some() {
+            cx.notify();
         }
     }
+}
 
-    /// 左カラムの Todo ボード（explorer/git と同じ幅・M12-10）。
-    fn render_todo_board(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+impl EventEmitter<TodoPanelEvent> for TodoPanel {}
+
+impl Render for TodoPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let accent = self.accent();
-        let Some(board) = self.todo_board.as_ref() else {
-            return div().into_any_element();
-        };
-        let open_count = board.items.iter().filter(|item| !item.done).count();
+        let accent = self.accent;
+        let open_count = self.items.iter().filter(|item| !item.done).count();
         let header = div()
             .flex()
             .items_center()
@@ -215,7 +121,6 @@ impl Workspace {
             )
             .child(div().text_size(px(10.5)).text_color(theme.fg2).child(format!("{open_count}")))
             .child(div().flex_1())
-            // ✨ 今日の計画（claude -p）。
             .child(
                 div()
                     .id("todos-plan")
@@ -223,21 +128,22 @@ impl Workspace {
                     .py(px(3.))
                     .rounded(px(5.))
                     .text_size(px(11.))
-                    .text_color(if board.plan_busy { theme.fg2 } else { accent })
+                    .text_color(if self.plan_busy { theme.fg2 } else { accent })
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg2))
-                    .child(if board.plan_busy {
+                    .child(if self.plan_busy {
                         SharedString::from(i18n::t!("todos.plan_busy"))
                     } else {
                         SharedString::from(i18n::t!("todos.plan"))
                     })
                     .tooltip(Tooltip::text(i18n::t!("todos.plan_tip"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| this.run_daily_plan(cx)),
-                    ),
+                    .when(!self.plan_busy, |element| {
+                        element.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _window, cx| cx.emit(TodoPanelEvent::DailyPlan)),
+                        )
+                    }),
             )
-            // ＋ タスクを追加（インライン入力・#todo-add）。
             .child(
                 div()
                     .id("todos-add")
@@ -252,11 +158,12 @@ impl Workspace {
                     .tooltip(Tooltip::text(i18n::t!("todos.add_tip"), theme.clone()))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.start_add_todo(window, cx)),
+                        cx.listener(|panel, _, window, cx| panel.start_add(window, cx)),
                     ),
             );
+
         let mut list = div().flex_1().flex().flex_col().overflow_hidden().py(px(4.));
-        if board.items.is_empty() {
+        if self.items.is_empty() {
             list = list.child(
                 div()
                     .px(px(10.))
@@ -267,8 +174,7 @@ impl Workspace {
             );
         }
         let mut last_section: Option<String> = None;
-        for item in &board.items {
-            // 見出し（日付）はセクションが変わった時だけ描く。
+        for item in &self.items {
             if item.section != last_section {
                 if let Some(section) = &item.section {
                     list = list.child(
@@ -286,7 +192,7 @@ impl Workspace {
             let line = item.line;
             let text = item.text.clone();
             let done = item.done;
-            let running_color = board.running.get(&line).copied();
+            let running_color = self.running.get(&line).copied();
             let mark = if done { "☑" } else { "☐" };
             let mut row = div()
                 .id(("todo-item", line))
@@ -298,7 +204,6 @@ impl Workspace {
                 .py(px(3.))
                 .text_size(px(12.))
                 .hover(|style| style.bg(theme.bg2))
-                // ☐/☑（クリック = ファイル書き換え）。
                 .child(
                     div()
                         .id(("todo-check", line))
@@ -308,7 +213,9 @@ impl Workspace {
                         .child(mark)
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, _window, cx| this.toggle_todo_item(line, cx)),
+                            cx.listener(move |_, _, _window, cx| {
+                                cx.emit(TodoPanelEvent::ToggleItem { line })
+                            }),
                         ),
                 )
                 .child(
@@ -319,7 +226,6 @@ impl Workspace {
                         .text_color(if done { theme.fg2 } else { theme.fg0 })
                         .child(SharedString::from(item.text.clone())),
                 );
-            // 実行中はスレッド色 pulse・そうでなければ hover で ▶。
             if let Some(color) = running_color {
                 row = row.child(beacon_dot(("todo-running", line), color, true));
             } else if !done {
@@ -336,27 +242,27 @@ impl Workspace {
                         .tooltip(Tooltip::text(i18n::t!("todos.send_tip"), theme.clone()))
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, _window, cx| {
-                                this.send_todo_to_agent(line, text.clone(), cx)
+                            cx.listener(move |_, _, _window, cx| {
+                                cx.emit(TodoPanelEvent::SendToAgent {
+                                    line,
+                                    text: text.clone(),
+                                })
                             }),
                         ),
                 );
             }
             list = list.child(row);
         }
+
         div()
-            .w(px(self.chrome.explorer_width))
-            .h_full()
-            .flex_none()
-            .relative() // リサイズハンドルの絶対配置基準
+            .size_full()
             .flex()
             .flex_col()
             .bg(theme.bg0)
             .border_r_1()
             .border_color(theme.border)
             .child(header)
-            // ＋ の追加入力（IME 正しい EditorView・Enter 確定 / Esc 取消）。
-            .children(board.add_input.clone().map(|editor| {
+            .children(self.add_input.clone().map(|editor| {
                 div()
                     .flex_none()
                     .mx(px(8.))
@@ -367,19 +273,205 @@ impl Workspace {
                     .border_1()
                     .border_color(accent)
                     .bg(theme.bg1)
-                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
-                        if event.keystroke.key.as_str() == "escape" {
-                            this.cancel_add_todo(cx);
-                        }
-                    }))
+                    .on_key_down(cx.listener(
+                        |panel, event: &gpui::KeyDownEvent, _window, cx| {
+                            if event.keystroke.key.as_str() == "escape" {
+                                panel.cancel_add(cx);
+                            }
+                        },
+                    ))
                     .child(editor)
             }))
             .child(list)
+    }
+}
+
+impl Workspace {
+    fn todo_session_index(&self, panel: &Entity<TodoPanel>) -> Option<usize> {
+        self.sessions.iter().position(|session| session.todo_panel == *panel)
+    }
+
+    fn on_todo_panel_event(
+        &mut self,
+        panel: Entity<TodoPanel>,
+        event: &TodoPanelEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_index) = self.todo_session_index(&panel) else {
+            return;
+        };
+        match event {
+            TodoPanelEvent::ToggleItem { line } => {
+                self.toggle_todo_item_for(session_index, *line, cx)
+            }
+            TodoPanelEvent::SendToAgent { line, text } => {
+                self.send_todo_to_agent_for(session_index, *line, text.clone(), cx)
+            }
+            TodoPanelEvent::DailyPlan => self.run_daily_plan_for(session_index, cx),
+            TodoPanelEvent::AddItem { text } => {
+                self.add_todo_for(session_index, text.clone(), cx)
+            }
+        }
+    }
+
+    fn toggle_todo_board(
+        &mut self,
+        _: &ToggleTodoBoard,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = self.todo_panel.clone();
+        let was_open = panel.read(cx).open;
+        panel.update(cx, |panel, cx| panel.set_open(!was_open, cx));
+        if !was_open {
+            self.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
+            self.chrome.show_left = true;
+            self.reload_todo_board_for(self.active, cx);
+        }
+        cx.notify();
+    }
+
+    fn reload_todo_board_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
+        let Some(panel) = self.sessions.get(session_index).map(|session| session.todo_panel.clone())
+        else {
+            return;
+        };
+        if !panel.read(cx).open {
+            return;
+        }
+        let Some(worktree) = self.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+            return;
+        };
+        let root = worktree.root().to_path_buf();
+        let host = worktree.host().clone();
+        cx.spawn(async move |_workspace, cx| {
+            let items = cx
+                .background_executor()
+                .spawn(async move { project::todos::read_todos_on(host.as_ref(), &root) })
+                .await;
+            panel.update(cx, |panel, cx| panel.set_items(items, cx));
+        })
+        .detach();
+    }
+
+    fn toggle_todo_item_for(&mut self, session_index: usize, line: usize, cx: &mut Context<Self>) {
+        let Some(worktree) = self.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+            return;
+        };
+        let panel = self.sessions[session_index].todo_panel.clone();
+        let accent = self.projects[session_index].color;
+        let root = worktree.root().to_path_buf();
+        let host = worktree.host().clone();
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { project::todos::toggle_todo_on(host.as_ref(), &root, line) })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                if let Err(error) = result {
+                    workspace.push_toast(SharedString::from(format!("{error:#}")), accent, cx);
+                }
+                if let Some(index) = workspace.todo_session_index(&panel) {
+                    workspace.reload_todo_board_for(index, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn send_todo_to_agent_for(
+        &mut self,
+        session_index: usize,
+        line: usize,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(session_index) else {
+            return;
+        };
+        let prompt = i18n::t!("todos.send_prompt", "text" => text);
+        let color = session.agent_panel.read(cx).active_color();
+        session.agent_panel.update(cx, |panel, cx| panel.send_prompt_text(prompt, cx));
+        session.todo_panel.update(cx, |panel, cx| panel.mark_running(line, color, cx));
+        self.chrome.show_right = true;
+        cx.notify();
+    }
+
+    fn run_daily_plan_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
+        let Some(worktree) = self.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+            return;
+        };
+        let panel = self.sessions[session_index].todo_panel.clone();
+        if panel.read(cx).plan_busy {
+            return;
+        }
+        panel.update(cx, |panel, cx| panel.set_plan_busy(true, cx));
+        let accent = self.projects[session_index].color;
+        let root = worktree.root().to_path_buf();
+        let host = worktree.host().clone();
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { project::todos::daily_plan_on(host.as_ref(), &root) })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                panel.update(cx, |panel, cx| panel.set_plan_busy(false, cx));
+                match result {
+                    Ok(count) => workspace.push_toast(
+                        SharedString::from(i18n::t!("todos.plan_added", "count" => count)),
+                        accent,
+                        cx,
+                    ),
+                    Err(error) => workspace.push_toast(
+                        SharedString::from(format!("{error:#}")),
+                        accent,
+                        cx,
+                    ),
+                }
+                if let Some(index) = workspace.todo_session_index(&panel) {
+                    workspace.reload_todo_board_for(index, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn add_todo_for(&mut self, session_index: usize, text: String, cx: &mut Context<Self>) {
+        let Some(worktree) = self.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+            return;
+        };
+        let panel = self.sessions[session_index].todo_panel.clone();
+        let accent = self.projects[session_index].color;
+        let root = worktree.root().to_path_buf();
+        let host = worktree.host().clone();
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { project::todos::add_todo_on(host.as_ref(), &root, &text) })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                if let Err(error) = result {
+                    workspace.push_toast(SharedString::from(format!("{error:#}")), accent, cx);
+                }
+                if let Some(index) = workspace.todo_session_index(&panel) {
+                    workspace.reload_todo_board_for(index, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn render_todo_board(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let panel = self.todo_panel.clone();
+        let accent = self.accent();
+        panel.update(cx, |panel, _| panel.set_visuals(self.theme.clone(), accent));
+        div()
+            .w(px(self.chrome.explorer_width))
+            .h_full()
+            .flex_none()
+            .relative()
+            .child(panel)
             .child(self.left_dock_resize_handle(cx))
             .into_any_element()
     }
-
-    // ── diff タブ（M11-9）と hunk 操作（M11-10） ──
-
-    // アクティブファイルの HEAD vs バッファ unified diff を一時タブで開く。
 }

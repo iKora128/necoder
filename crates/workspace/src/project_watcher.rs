@@ -126,9 +126,7 @@ impl Workspace {
             .iter()
             .any(|path| path.ends_with(std::path::Path::new(".shirushi/todos.md")))
         {
-            if session_index == self.active {
-                self.reload_todo_board(cx);
-            }
+            self.reload_todo_board_for(session_index, cx);
         }
         if tree_changed || git_changed {
             cx.notify();

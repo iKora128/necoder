@@ -12,10 +12,13 @@ impl Workspace {
         }
         cx.subscribe(&agent_panel, Self::on_panel_event).detach();
         let terminal_launch = Self::terminal_launch_for(slot);
-        let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme));
+        let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
         cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
         let explorer = cx.new(|_| Explorer::new(explorer_view));
         let git_panel = cx.new(GitPanel::new);
+        let accent = slot.map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
+        cx.subscribe(&todo_panel, Self::on_todo_panel_event).detach();
         ProjectSession {
             loaded: false,
             tabs: Vec::new(),
@@ -54,7 +57,7 @@ impl Workspace {
             picker_history: Vec::new(),
             rename_input: None,
             inline_edit: None,
-            todo_board: None,
+            todo_panel,
             code_actions: None,
             hunk_menu: None,
             pending_transient_tab: None,
@@ -210,6 +213,9 @@ impl Workspace {
             cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
             let explorer = cx.new(|_| Explorer::new(explorer_view));
             let git_panel = cx.new(GitPanel::new);
+            let accent = projects.get(index).map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+            let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
+            cx.subscribe(&todo_panel, Self::on_todo_panel_event).detach();
             if index == active {
                 if let Some(menu) = explorer_context_menu.take() {
                     explorer.update(cx, |explorer, cx| explorer.show_context_menu(menu, cx));
@@ -274,7 +280,7 @@ impl Workspace {
                 picker_history: Vec::new(),
                 rename_input: None,
                 inline_edit: None,
-                todo_board: None,
+                todo_panel,
                 code_actions: None,
                 hunk_menu: None,
                 pending_transient_tab: None,

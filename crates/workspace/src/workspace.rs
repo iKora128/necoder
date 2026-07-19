@@ -16,6 +16,7 @@ use explorer::{
 };
 use gpui::{
     Animation, AnimationExt, App, Bounds, ClipboardItem, Context, CursorStyle, Div, Entity,
+    EventEmitter,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Point, SharedString, Stateful, Subscription, TitlebarOptions,
     Window, WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*,
@@ -451,17 +452,6 @@ enum UpdateState {
     Ready,
 }
 
-/// Todo ボード（M12-10）。真実は `.shirushi/todos.md` — UI はただの書き手のひとつ。
-struct TodoBoardState {
-    items: Vec<project::todos::TodoItem>,
-    /// ✨今日の計画（`claude -p`）の実行中。
-    plan_busy: bool,
-    /// ▶ で AI に送った実行中項目（行番号 → スレッド色）。TurnEnded で解除。
-    running: HashMap<usize, Hsla>,
-    /// ＋ で追加中のタスク入力（IME 正しい EditorView::plain）。None = 追加してない。
-    add_input: Option<Entity<EditorView>>,
-}
-
 /// ⌘. code actions のポップアップ（M11）。補完と同型（フォーカスを取り上下/Enter/Esc）。
 struct CodeActionsState {
     /// (タイトル, アクションの生 JSON)。
@@ -728,7 +718,7 @@ pub struct ProjectSession {
     picker_history: Vec<(String, String, i64)>,
     rename_input: Option<(String, FocusHandle)>,
     inline_edit: Option<InlineEditState>,
-    todo_board: Option<TodoBoardState>,
+    todo_panel: Entity<TodoPanel>,
     code_actions: Option<CodeActionsState>,
     hunk_menu: Option<(project::DiffHunk, Point<gpui::Pixels>)>,
     pending_transient_tab: Option<(PathBuf, Buffer)>,
@@ -1061,7 +1051,7 @@ impl Render for Workspace {
                     .child(self.render_rail(cx))
                     .when(self.chrome.show_left, |element| {
                         // 左カラムは Todo ボード / git パネル / エクスプローラを切替（排他）。
-                        let column = if self.todo_board.is_some() {
+                        let column = if self.todo_panel.read(cx).open {
                             self.render_todo_board(cx)
                         } else if self.git_panel_open(cx) {
                             self.render_git_panel(cx)

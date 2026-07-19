@@ -2422,7 +2422,6 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "project",
- "theme_core",
 ]
 
 [[package]]

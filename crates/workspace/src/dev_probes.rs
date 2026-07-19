@@ -452,11 +452,11 @@ impl Workspace {
     /// `SHIRUSHI_TODOS_PLAN=1` なら ✨今日の計画も発火、`SHIRUSHI_TODOS_SEND=<line>` なら
     /// その行を ▶ で AI へ送る（受入「チェックがひとりでに入る」の自動 round trip）。
     pub fn debug_open_todo_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.todo_board.is_none() {
+        if !self.todo_panel.read(cx).open {
             self.toggle_todo_board(&ToggleTodoBoard, window, cx);
         }
         if std::env::var("SHIRUSHI_TODOS_PLAN").is_ok_and(|value| value == "1") {
-            self.run_daily_plan(cx);
+            self.run_daily_plan_for(self.active, cx);
         }
         if let Ok(line) = std::env::var("SHIRUSHI_TODOS_SEND") {
             if let Ok(line) = line.parse::<usize>() {
@@ -469,17 +469,17 @@ impl Workspace {
                         .timer(std::time::Duration::from_millis(1500))
                         .await;
                     let _ = handle.update(cx, |workspace, _window, cx| {
-                        let text = workspace.todo_board.as_ref().and_then(|board| {
-                            board
-                                .items
-                                .iter()
-                                .find(|item| item.line == line)
-                                .map(|item| item.text.clone())
-                        });
+                        let text = workspace
+                            .todo_panel
+                            .read(cx)
+                            .items
+                            .iter()
+                            .find(|item| item.line == line)
+                            .map(|item| item.text.clone());
                         match text {
                             Some(text) => {
                                 eprintln!("TODOS_PROBE: ▶ 送信 line={line} text={text}");
-                                workspace.send_todo_to_agent(line, text, cx);
+                                workspace.send_todo_to_agent_for(workspace.active, line, text, cx);
                             }
                             None => eprintln!("TODOS_PROBE: line={line} が見つからない"),
                         }

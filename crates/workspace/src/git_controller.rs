@@ -208,7 +208,7 @@ impl Workspace {
             }
         } else {
             self.chrome.show_left = true;
-            self.todo_board = None; // 左カラムは排他（M12-10）
+            self.todo_panel.update(cx, |panel, cx| panel.set_open(false, cx));
             let focus = self.git_panel.read(cx).focus.clone();
             window.focus(&focus, cx);
             self.refresh_git_status(cx);

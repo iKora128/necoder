@@ -16,12 +16,10 @@ impl Workspace {
                 self.push_toast(SharedString::from(format!("● {thread} — {summary}")), *color, cx);
                 // Todo ボード: そのスレッドに送った項目の pulse を解除し、板を読み直す
                 // （エージェントが todos.md をチェックしたら watch より先に即反映・M12-10）。
-                if let Some(board) = self.sessions[session_index].todo_board.as_mut() {
-                    board.running.retain(|_, running_color| running_color != color);
-                    if session_index == self.active {
-                        self.reload_todo_board(cx);
-                    }
-                }
+                self.sessions[session_index]
+                    .todo_panel
+                    .update(cx, |panel, cx| panel.clear_running_color(*color, cx));
+                self.reload_todo_board_for(session_index, cx);
             }
             agent_panel::PanelEvent::PermissionWaiting { thread, color } => {
                 self.sessions[session_index].waiting_thread = Some((thread.clone(), *color));

@@ -123,7 +123,7 @@ impl Workspace {
                         i18n::t!("rail.explorer"),
                         // アクティブ（左ドックがエクスプローラ表示）ならプロジェクト色・でなければ淡色（VSCode 風）。
                         if self.chrome.show_left
-                            && self.todo_board.is_none()
+                            && !self.todo_panel.read(cx).open
                             && !self.git_panel_open(cx)
                         {
                             accent
@@ -138,8 +138,8 @@ impl Workspace {
                                 // Todo/git が出ていれば**それをクリアして**エクスプローラへ戻す
                                 // （旧: show_left トグルのみ → Todo が居座り「開くと Todo」問題）。
                                 // 既にエクスプローラなら従来どおり表示トグル。
-                                if this.todo_board.is_some() || this.git_panel_open(cx) {
-                                    this.todo_board = None;
+                                if this.todo_panel.read(cx).open || this.git_panel_open(cx) {
+                                    this.todo_panel.update(cx, |panel, cx| panel.set_open(false, cx));
                                     this.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
                                     this.chrome.show_left = true;
                                 } else {
@@ -178,7 +178,7 @@ impl Workspace {
             })
             .when(rail.todos, |element| {
                 // Todo ボード（.shirushi/todos.md・M12-10）。表示中（アクティブ）はプロジェクト色。
-                let color = if self.todo_board.is_some() { accent } else { theme.fg2 };
+                let color = if self.todo_panel.read(cx).open { accent } else { theme.fg2 };
                 element.child(
                     self.rail_icon("rail-todos", "icons/square-check.svg", i18n::t!("rail.todos"), color)
                         .on_mouse_down(
