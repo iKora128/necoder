@@ -9013,9 +9013,10 @@ impl Workspace {
                         // AI ドック（右）表示中はプロジェクト色・畳んでいれば淡色。
                         if self.show_right { accent } else { theme.fg2 },
                     )
+                        // 新規スレッドではなく Agent パネルの開閉トグル（他のアクティビティアイコンと同じ所作）。
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, _, window, cx| this.new_agent_thread(&NewThread, window, cx)),
+                            cx.listener(|this, _, _window, cx| this.toggle_dock(Dock::Right, cx)),
                         ),
                 )
             })
@@ -11884,13 +11885,34 @@ impl Workspace {
                 .bg(theme.bg2)
                 .border_1()
                 .border_color(if is_default { accent.alpha(0.5) } else { theme.border })
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(8.))
-                        .rounded_full()
-                        .bg(dot_color),
-                )
+                .child({
+                    // 実ブランドロゴ（Simple Icons/CC0・同梱）を text_color で着色。
+                    // SI に無い Codex だけブランド色の頭文字モノグラムにフォールバック。
+                    let (logo, mono, brand) = agent_brand(agent.id);
+                    match logo {
+                        Some(path) => div()
+                            .flex_none()
+                            .size(px(26.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(svg().path(path).size(px(20.)).text_color(gpui::rgb(brand)))
+                            .into_any_element(),
+                        None => div()
+                            .flex_none()
+                            .size(px(26.))
+                            .rounded(px(7.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui::rgb(brand))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(gpui::white())
+                            .child(mono)
+                            .into_any_element(),
+                    }
+                })
                 .child(
                     div()
                         .flex()
@@ -11906,7 +11928,7 @@ impl Workspace {
                         .child(
                             div()
                                 .text_size(px(10.5))
-                                .text_color(theme.fg2)
+                                .text_color(dot_color) // 導入状況の色（緑/琥珀/淡）
                                 .child(SharedString::from(status_text)),
                         ),
                 )
@@ -12691,6 +12713,23 @@ impl Focusable for Workspace {
             Some(editor) => editor.read(cx).focus_handle(cx),
             None => self.focus_handle.clone(),
         }
+    }
+}
+
+/// エージェントの識別マーク: (ブランドロゴ SVG パス or None, モノグラム fallback, 描画色)。
+/// ロゴは ACP が広告しない（Zed もカタログ由来の同梱で ACP 経由ではない）ため UI 側で持つ。
+/// 実ロゴは Simple Icons（CC0・商標は各社帰属・識別目的の nominative use）を同梱。SI に無い
+/// もの（OpenAI/Codex）は頭文字にフォールバック。単色マーク（copilot/opencode/kimi）は淡色で描く。
+fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
+    match id {
+        "claude" => (Some("icons/brand-claude.svg"), "C", 0xd9_77_57), // テラコッタ
+        "codex" => (None, ">_", 0x10_a3_7f),                          // OpenAI マークは CC0 に無い→中立のコード記号（商標フリー）
+        "gemini" => (Some("icons/brand-gemini.svg"), "G", 0x8e_75_b2),
+        "copilot" => (Some("icons/brand-copilot.svg"), "Co", 0xd0_d5_db), // 単色→淡色
+        "qwen" => (Some("icons/brand-qwen.svg"), "Q", 0x69_50_ef),
+        "opencode" => (Some("icons/brand-opencode.svg"), "OC", 0xd0_d5_db),
+        "kimi" => (Some("icons/brand-kimi.svg"), "K", 0xd0_d5_db),
+        _ => (None, "?", 0x88_88_88),
     }
 }
 

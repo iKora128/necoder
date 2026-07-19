@@ -30,6 +30,8 @@ agent:
   history_tip: Thread history
   history_placeholder: Open a past thread…
   new_thread_tip: New thread  ⌘⇧A
+  view_list: List view
+  view_bar: Tab view
   thinking: ✳ Thinking
   generating: ⏺ Generating
   celebrate: 🙌 Done
@@ -137,7 +139,7 @@ rail:
   search: Search  ⌘⇧F
   git: Source control  ⌃⇧G
   todos: Todo board
-  agent: AI agent (new thread)  ⌘⇧A
+  agent: Toggle AI agent panel
   terminal: Terminal  ⌘J
   remote: Remote SSH
   settings: Settings

@@ -31,6 +31,8 @@ agent:
   history_tip: スレッド履歴
   history_placeholder: 過去のスレッドを開く…
   new_thread_tip: 新規スレッド  ⌘⇧A
+  view_list: 縦リストで表示
+  view_bar: タブで表示
   thinking: ✳ 考え中
   generating: ⏺ 生成中
   celebrate: 🙌 完了
@@ -138,7 +140,7 @@ rail:
   search: 検索  ⌘⇧F
   git: ソース管理  ⌃⇧G
   todos: Todo ボード
-  agent: AI エージェント（新規スレッド）  ⌘⇧A
+  agent: AI エージェントの表示切替
   terminal: ターミナル  ⌘J
   remote: リモート SSH
   settings: 設定

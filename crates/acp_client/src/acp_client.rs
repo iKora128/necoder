@@ -205,18 +205,9 @@ pub const AGENTS: &[AgentKind] = &[
         install_cmd: "npm i -g @openai/codex",
         login_cmd: "codex",
     },
-    // gemini-cli は agy CLI に改称（2026・ユーザー環境で確認）。~/.local/bin へ vendor 導線で入る（npm 外）。
-    // **ACP 会話モードは未確認**（agy に --acp/mcp-server が見当たらない）→ extra_args/install_cmd は暫定・要検証。
-    // タイトル等の utility（oneshot）は `agy -p` で実機検証済み。
-    AgentKind {
-        id: "gemini",
-        label: "agy",
-        bin: "agy",
-        package: None,
-        extra_args: &["--acp"],
-        install_cmd: "agy install",
-        login_cmd: "agy",
-    },
+    // 旧 Gemini CLI は 2026-06-18 に廃止 → 後継 Antigravity CLI（`agy`）はクローズド Go 書き直しで **ACP 非対応**
+    // （`--acp`/acp サブコマンド無し・実機 + ドキュメント確認済み）。よって会話エージェント一覧から除外。
+    // Antigravity が ACP を出したら再追加する（`agy -p` の title 生成自体は動くが、会話に選べない＝utility も使われない）。
     AgentKind {
         id: "copilot",
         label: "GitHub Copilot",
@@ -259,7 +250,7 @@ pub const AGENTS: &[AgentKind] = &[
 
 /// UI のエージェントセレクタに出すラベル一覧（[`AGENTS`] と 1:1 対応・Zed の registry 表示名準拠）。
 pub const AGENT_LABELS: &[&str] =
-    &["Claude Code", "Codex", "agy", "GitHub Copilot", "Qwen Code", "OpenCode", "Kimi CLI"];
+    &["Claude Code", "Codex", "GitHub Copilot", "Qwen Code", "OpenCode", "Kimi CLI"];
 
 impl AgentKind {
     /// ラベル（例 "Claude"）から引く。
@@ -272,14 +263,11 @@ impl AgentKind {
     /// stdout にクリーンなタイトルが載るよう各 CLI 差を吸収する（claude -p は素で stdout・codex exec は
     /// agent 実行で stdout が汚いため `--output-last-message`+`cat` で拾う）。`--model` は付けない
     /// ＝各 CLI の既定モデル（＝ユーザーが使い込む既定）をそのまま使う。
-    /// **claude/codex/agy は実機検証済み**。未対応（None）は utility スキップ＝
+    /// **claude/codex は実機検証済み**。未対応（None）は utility スキップ＝
     /// タイトルは既定名のまま（壊れない・Claude 決め打ちもしない）。
     pub fn oneshot(&self) -> Option<&'static str> {
         match self.id {
             "claude" => Some(r#"claude -p "{prompt}" < {excerpt}"#),
-            // agy(旧 gemini-cli) は stdin を読まない（読もうとするとツール権限が headless で拒否）→
-            // 会話を $(cat) で引数に入れる。二重引用符内なので中身は再展開されず injection 安全。実機検証済み。
-            "gemini" => Some("agy -p \"{prompt}\n\n$(cat {excerpt})\""),
             "codex" => Some(
                 r#"codex exec --sandbox read-only --color never --output-last-message {out} "{prompt}" < {excerpt} >/dev/null 2>&1 && cat {out}"#,
             ),
@@ -803,9 +791,7 @@ mod tests {
         // codex は agent 実行で stdout が汚いため --output-last-message + cat でクリーンに拾う。
         let codex = AgentKind::by_label("Codex").and_then(|k| k.oneshot()).unwrap();
         assert!(codex.contains("codex exec") && codex.contains("--output-last-message") && codex.contains("{out}"));
-        // gemini-cli → agy に改称。agy は stdin 非対応なので会話を $(cat) で引数に入れる（実機検証済み）。
-        let agy = AgentKind::by_label("agy").and_then(|k| k.oneshot()).unwrap();
-        assert!(agy.contains("agy -p") && agy.contains("$(cat {excerpt})"));
+        // 旧 Gemini CLI(→Antigravity/agy) は ACP 非対応で agent 一覧から除外済み。utility 対応は claude/codex のみ。
         // 非対応 agent は None＝タイトルは既定名フォールバック（Claude へ勝手に流さない）。
         assert_eq!(AgentKind::by_label("GitHub Copilot").and_then(|k| k.oneshot()), None);
         assert_eq!(AgentKind::by_label("Kimi CLI").and_then(|k| k.oneshot()), None);
