@@ -58,7 +58,6 @@ impl Render for DraggedThreadTab {
             .child(self.name.clone())
     }
 }
-
 const THREAD_TABS_HEIGHT: f32 = 34.0;
 const COMPOSER_INPUT_HEIGHT: f32 = 68.0;
 /// composer のモデルセレクタに並べる候補（クリックでアクティブスレッドに設定）。
@@ -1214,6 +1213,7 @@ impl AgentPanel {
     }
 
     /// 開発用: フォーカス無しで改名入力を開く（offscreen スクショ検証・#4）。
+    #[cfg(debug_assertions)]
     pub fn debug_start_rename(&mut self, cx: &mut Context<Self>) {
         let index = self.active;
         if index >= self.threads.len() {

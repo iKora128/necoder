@@ -365,6 +365,17 @@ fn main() {
             cx.quit();
         });
 
+        if let Err(error) = window.update(cx, |workspace, window, cx| {
+            workspace.restore_open_file(&open_files, window, cx);
+            workspace.check_hot_exit_restore(cx);
+            let handle = workspace.focus_handle(cx);
+            window.focus(&handle, cx);
+        }) {
+            eprintln!("初期化に失敗: {error}");
+        }
+
+        #[cfg(debug_assertions)]
+        {
         // 開発用: SHIRUSHI_OPEN_TABS=a.rs,b.rs,… でアクティブプロジェクトに複数タブを開く（複数タブ検証）。
         let extra_tabs = std::env::var("SHIRUSHI_OPEN_TABS").ok().map(|value| {
             let root = sources
@@ -378,8 +389,6 @@ fn main() {
                 .collect::<Vec<_>>()
         });
         if let Err(error) = window.update(cx, |workspace, window, cx| {
-            workspace.restore_open_file(&open_files, window, cx);
-            workspace.check_hot_exit_restore(cx); // 前回の未保存スナップショットがあれば復元バーを出す
             // 開発用: SHIRUSHI_NAMING_CONFIRM=1 で命名入力を 1s 後に Enter 確定する（ファイル生成の検証）。
             if std::env::var_os("SHIRUSHI_NAMING_CONFIRM").is_some() {
                 if let Some(handle) = window.window_handle().downcast::<Workspace>() {
@@ -767,6 +776,7 @@ fn main() {
                 }
             })
             .detach();
+        }
         }
         if std::env::var_os("SHIRUSHI_STARTUP_LOG").is_some() {
             println!("startup_ms={:.1}", startup.elapsed().as_secs_f64() * 1000.0);

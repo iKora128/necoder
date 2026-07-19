@@ -40,6 +40,7 @@ impl Workspace {
 
     /// titlebar の SSH ボタン: `ssh://user@host/path` の入力バーを開く（goto/rename と同型）。
     /// seed は「アクティブが remote ならその URI・そうでなければ ssh://」。
+    #[cfg(debug_assertions)]
     fn open_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seed = self
             .active_slot()
@@ -72,6 +73,7 @@ impl Workspace {
     /// 選択で `ssh://<alias>/` を種に入力バーへ（パスだけ足して Enter で接続）。
     /// system OpenSSH に委ねるので User/HostName/鍵/ProxyJump は config のものがそのまま効く。
     /// 開発用: Agent タブの改名入力を開く（offscreen 検証・#4）。
+    #[cfg(debug_assertions)]
     pub fn debug_tab_rename(&mut self, cx: &mut Context<Self>) {
         if !self.chrome.show_right {
             self.chrome.show_right = true;
@@ -81,6 +83,7 @@ impl Workspace {
     }
 
     /// 開発用: スレッド履歴 Picker を開く（offscreen 検証・#5）。
+    #[cfg(debug_assertions)]
     pub fn debug_open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_thread_history(&ThreadHistory, window, cx);
     }
@@ -196,9 +199,8 @@ impl Workspace {
                 window.focus(&handle, cx);
             }
             cx.notify();
-        }
     }
-
+}
     fn on_ssh_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_ssh_input(window, cx),
@@ -404,16 +406,19 @@ impl Workspace {
     }
 
     /// 開発用: SSH 入力バーを開く（M13 の描画検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_open_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_ssh_input(window, cx);
     }
 
     /// 開発用: SSH ホストピッカーを開く（SHIRUSHI_SSH_HOST_PROBE の描画検証・M13）。
+    #[cfg(debug_assertions)]
     pub fn debug_open_ssh_host_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_ssh_host_picker(&RemoteSsh, window, cx);
     }
 
     /// 開発用: ターミナルを開いて file:line リンクのクリック相当イベントを発火（M13 の結線検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_terminal_link(&mut self, path: String, line: u32, window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_terminal(&ToggleTerminal, window, cx);
         self.terminal_dock
@@ -421,12 +426,14 @@ impl Workspace {
     }
 
     /// 開発用: ⌘O スイッチャーを開く（M12-12 のオフスクリーン検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_project_switcher(&ProjectSwitcher, window, cx);
     }
 
     /// 開発用: ⌘⇧P を開き、query で絞り込む（M13 のオフスクリーン検証）。
     /// `confirm` なら先頭候補を確定 = 実際にアクションが dispatch されるところまで通す。
+    #[cfg(debug_assertions)]
     pub fn debug_palette_probe(
         &mut self,
         query: String,
@@ -451,6 +458,7 @@ impl Workspace {
     /// 開発用: Todo ボードを開く（M12-10 のオフスクリーン検証）。
     /// `SHIRUSHI_TODOS_PLAN=1` なら ✨今日の計画も発火、`SHIRUSHI_TODOS_SEND=<line>` なら
     /// その行を ▶ で AI へ送る（受入「チェックがひとりでに入る」の自動 round trip）。
+    #[cfg(debug_assertions)]
     pub fn debug_open_todo_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.todo_panel.read(cx).open {
             self.toggle_todo_board(&ToggleTodoBoard, window, cx);
@@ -492,6 +500,7 @@ impl Workspace {
 
     /// 開発用: 全選択 → ⌘I → 指示を流し込んで実行（M12-8 のオフスクリーン検証）。
     /// `accept` なら提案到着をポーリングして適用 + 保存まで行う（受入の自動 round trip）。
+    #[cfg(debug_assertions)]
     pub fn debug_inline_probe(
         &mut self,
         instruction: String,
@@ -552,21 +561,25 @@ impl Workspace {
     }
 
     /// 開発用: アクティブファイルの diff タブを開く（オフスクリーン検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_open_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_diff_tab(&OpenDiff, window, cx);
     }
 
     /// 開発用: ⌘⇧O アウトラインを開く（オフスクリーン検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_outline_probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_outline(&OutlineSymbols, window, cx);
     }
 
     /// 開発用: ⌥⇧F 相当のフォーマット→保存を実行する（オフスクリーン検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_format_probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.request_format(true, window, cx);
     }
 
     /// 開発用: 復元バーの「復元」を押す（オフスクリーン検証。pending が無ければ何もしない）。
+    #[cfg(debug_assertions)]
     pub fn debug_restore_hot_exit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.hot_exit_pending.is_some() {
             if std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some() {
@@ -578,6 +591,7 @@ impl Workspace {
 
     /// 開発用: (row, col) にキャレットを置いて ⌘K ⌘I 相当の hover を出す（オフスクリーン検証）。
     /// キャレット矩形は直近 paint 由来なので、移動後 1 拍おいてから hover を出す。
+    #[cfg(debug_assertions)]
     pub fn debug_hover_probe(
         &mut self,
         row: usize,
@@ -606,6 +620,7 @@ impl Workspace {
     /// 開発用: レール関連フローを実コードで駆動しオフスクリーン検証する（M10-2）。
     /// `open-branch:<name>` = ブランチを worktree としてレールに開く（新窓でなくレール）。
     /// `remove-active` = アクティブスロットをレールから外す（隣へビュー張り替えの確認）。
+    #[cfg(debug_assertions)]
     pub fn debug_rail_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(branch) = command.strip_prefix("open-branch:") {
             self.open_branch_worktree(branch.to_string(), cx);
@@ -615,6 +630,7 @@ impl Workspace {
     }
 
     /// 開発用: ⌘F バーをクエリ入りで開く（オフスクリーン検証）。`replace` があれば置換行も開く。
+    #[cfg(debug_assertions)]
     pub fn debug_open_buffer_search(
         &mut self,
         query: String,

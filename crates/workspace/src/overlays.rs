@@ -258,9 +258,8 @@ impl Workspace {
             if let Ok(theme) = Theme::load(source) {
                 self.apply_theme(theme, cx);
             }
-        }
     }
-
+}
     /// テーマを確定する（適用 + 設定へ theme 名を保存＝再起動でも効く）。
     fn commit_theme(&mut self, id: usize, cx: &mut Context<Self>) {
         let Some((_, source)) = self.overlays.picker_themes.get(id).cloned() else {
@@ -870,6 +869,7 @@ impl Workspace {
 
     /// 開発用: アクティブエディタの (row, col)（0 始まり）へキャレットを置き `text` をタイプする。
     /// [`EditorInputEvent::Typed`] が発火する＝補完の自動トリガをオフスクリーンで検証する用。
+    #[cfg(debug_assertions)]
     pub fn debug_type_probe(
         &mut self,
         row: usize,
@@ -890,6 +890,7 @@ impl Workspace {
     }
 
     /// 開発用: インライン命名を Enter 確定する（オフスクリーン検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_confirm_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.explorer_naming(cx).is_some() {
             self.confirm_naming(window, cx);
@@ -897,6 +898,7 @@ impl Workspace {
     }
 
     /// 開発用: (row,col) にキャレットを置いて rename を実行する（オフスクリーン検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_rename_probe(
         &mut self,
         row: usize,
@@ -912,6 +914,7 @@ impl Workspace {
     }
 
     /// 開発用: (row,col) で ⌘. を開く（オフスクリーン検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_code_actions_probe(&mut self, row: usize, column: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |view, cx| view.reveal_position(row, column, cx));
@@ -920,6 +923,7 @@ impl Workspace {
     }
 
     /// 開発用: ⌘. ポップアップの選択中アクションを確定して保存する（オフスクリーン検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_confirm_code_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.code_actions.is_some() {
             self.confirm_code_action(window, cx);
@@ -930,6 +934,7 @@ impl Workspace {
     }
 
     // 開発用: (row,col) で ⇧F12 参照検索を実行する（オフスクリーン検証）。
+    #[cfg(debug_assertions)]
     pub fn debug_references_probe(&mut self, row: usize, column: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |view, cx| view.reveal_position(row, column, cx));
