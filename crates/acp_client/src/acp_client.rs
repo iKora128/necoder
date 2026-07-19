@@ -264,16 +264,20 @@ impl AgentKind {
         AGENTS.iter().find(|agent| agent.label == label)
     }
 
-    /// utility（スレッドタイトル等の一発生成）に使う vendor CLI の非対話コマンド。
-    /// プロンプト=引数・文脈=stdin で渡す想定（`<oneshot> "<prompt>" < file`）。`--model` は付けない
-    /// ＝各 CLI の既定モデル（＝ユーザーが使い込んでる既定）をそのまま使う。
-    /// Claude は検証済み。codex/gemini は非対話モードに基づく best-effort（stdin/引数の扱い次第で要調整）。
-    /// 未対応（None）の agent では utility はスキップ＝タイトルは既定名のまま（壊れない・Claude 決め打ちもしない）。
+    /// utility（スレッドタイトル等の一発生成）に使う、既定 Agent ごとの **shell テンプレート**。
+    /// プレースホルダ: `{prompt}`=指示・`{excerpt}`=会話冒頭ファイル・`{out}`=最終メッセージ出力先。
+    /// stdout にクリーンなタイトルが載るよう各 CLI 差を吸収する（claude -p は素で stdout・codex exec は
+    /// agent 実行で stdout が汚いため `--output-last-message`+`cat` で拾う）。`--model` は付けない
+    /// ＝各 CLI の既定モデル（＝ユーザーが使い込む既定）をそのまま使う。
+    /// **claude/codex は実機検証済み**。gemini は best-effort。未対応（None）は utility スキップ＝
+    /// タイトルは既定名のまま（壊れない・Claude 決め打ちもしない）。
     pub fn oneshot(&self) -> Option<&'static str> {
         match self.id {
-            "claude" => Some("claude -p"),
-            "codex" => Some("codex exec"),
-            "gemini" => Some("gemini -p"),
+            "claude" => Some(r#"claude -p "{prompt}" < {excerpt}"#),
+            "gemini" => Some(r#"gemini -p "{prompt}" < {excerpt}"#),
+            "codex" => Some(
+                r#"codex exec --sandbox read-only --color never --output-last-message {out} "{prompt}" < {excerpt} >/dev/null 2>&1 && cat {out}"#,
+            ),
             _ => None,
         }
     }
@@ -788,14 +792,18 @@ mod tests {
 
     #[test]
     fn oneshot_maps_default_agent_to_its_cli() {
-        // タイトル生成は「既定 Agent の vendor CLI」を使う（Claude 決め打ちをやめた）。
-        assert_eq!(AgentKind::by_label("Claude Code").and_then(|k| k.oneshot()), Some("claude -p"));
-        assert_eq!(AgentKind::by_label("Codex").and_then(|k| k.oneshot()), Some("codex exec"));
-        assert_eq!(AgentKind::by_label("Gemini CLI").and_then(|k| k.oneshot()), Some("gemini -p"));
-        // 非対話構文が未検証の agent は None＝タイトルは既定名フォールバック（Claude へ勝手に流さない）。
+        // タイトル生成は「既定 Agent の CLI テンプレート」を使う（Claude 決め打ちをやめた）。
+        let claude = AgentKind::by_label("Claude Code").and_then(|k| k.oneshot()).unwrap();
+        assert!(claude.contains("claude -p") && claude.contains("{prompt}") && claude.contains("{excerpt}"));
+        // codex は agent 実行で stdout が汚いため --output-last-message + cat でクリーンに拾う。
+        let codex = AgentKind::by_label("Codex").and_then(|k| k.oneshot()).unwrap();
+        assert!(codex.contains("codex exec") && codex.contains("--output-last-message") && codex.contains("{out}"));
+        assert!(
+            AgentKind::by_label("Gemini CLI").and_then(|k| k.oneshot()).is_some_and(|t| t.contains("gemini -p"))
+        );
+        // 非対応 agent は None＝タイトルは既定名フォールバック（Claude へ勝手に流さない）。
         assert_eq!(AgentKind::by_label("GitHub Copilot").and_then(|k| k.oneshot()), None);
         assert_eq!(AgentKind::by_label("Kimi CLI").and_then(|k| k.oneshot()), None);
-        // 未知ラベルも None。
         assert_eq!(AgentKind::by_label("Nonexistent").and_then(|k| k.oneshot()), None);
     }
 
