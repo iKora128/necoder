@@ -684,11 +684,10 @@ pub struct ProjectSession {
     agent_panel: Entity<AgentPanel>,
     explorer: Entity<Explorer>,
     search_panel: Option<Entity<SearchPanel>>,
-    git_status: HashMap<PathBuf, StatusKind>,
+    repository: RepositoryController,
     git_panel: Entity<GitPanel>,
     terminal_dock: Entity<TerminalDock>,
     agent_active: bool,
-    git_refresh_gen: u32,
     picker_worktree_rows: Vec<PathBuf>,
     picker_ssh_hosts: Vec<host::SshConfigHost>,
     picker_ssh_recent: Vec<String>,
@@ -699,6 +698,11 @@ pub struct ProjectSession {
     waiting_thread: Option<(SharedString, Hsla)>,
     _watch: Option<project::Watch>,
     _watch_pump: Option<gpui::Task<()>>,
+}
+
+struct RepositoryController {
+    status: HashMap<PathBuf, StatusKind>,
+    refresh_generation: u32,
 }
 
 struct ChromeState {

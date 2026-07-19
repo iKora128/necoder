@@ -24,11 +24,10 @@ impl Workspace {
             agent_panel,
             explorer,
             search_panel: None,
-            git_status: HashMap::new(),
+            repository: RepositoryController { status: HashMap::new(), refresh_generation: 0 },
             git_panel,
             terminal_dock,
             agent_active: false,
-            git_refresh_gen: 0,
             picker_worktree_rows: Vec::new(),
             picker_ssh_hosts: Vec::new(),
             picker_ssh_recent: Vec::new(),
@@ -212,11 +211,10 @@ impl Workspace {
                 agent_panel,
                 explorer,
                 search_panel,
-                git_status: HashMap::new(),
+                repository: RepositoryController { status: HashMap::new(), refresh_generation: 0 },
                 git_panel,
                 terminal_dock,
                 agent_active: false,
-                git_refresh_gen: 0,
                 picker_worktree_rows: Vec::new(),
                 picker_ssh_hosts: Vec::new(),
                 picker_ssh_recent: Vec::new(),
@@ -530,7 +528,7 @@ impl Workspace {
             .map(|slot| slot.worktree.clone())
         else {
             if let Some(session) = self.sessions.get_mut(session_index) {
-                session.git_status.clear();
+                session.repository.status.clear();
                 let git_panel = session.git_panel.clone();
                 git_panel.update(cx, |panel, cx| panel.clear_snapshot(cx));
             }
@@ -541,24 +539,18 @@ impl Workspace {
         let Some(session) = self.sessions.get_mut(session_index) else {
             return;
         };
-        let panel_open = session.git_panel.read(cx).open;
-        session.git_refresh_gen = session.git_refresh_gen.wrapping_add(1);
-        let generation = session.git_refresh_gen;
+        session.repository.refresh_generation =
+            session.repository.refresh_generation.wrapping_add(1);
+        let generation = session.repository.refresh_generation;
         cx.spawn(async move |workspace, cx| {
             let snapshot = cx
                 .background_executor()
                 .spawn(async move {
                     let status = project::git_status_on(host.as_ref(), &root);
                     let branch = project::git_current_branch_on(host.as_ref(), &root);
-                    let (changes, history, slug) = if panel_open {
-                        (
-                            project::git_changes_on(host.as_ref(), &root),
-                            project::git_log_graph_on(host.as_ref(), &root, 30),
-                            project::github_slug_on(host.as_ref(), &root),
-                        )
-                    } else {
-                        (Vec::new(), Vec::new(), None)
-                    };
+                    let changes = project::git_changes_on(host.as_ref(), &root);
+                    let history = project::git_log_graph_on(host.as_ref(), &root, 30);
+                    let slug = project::github_slug_on(host.as_ref(), &root);
                     (status, branch, changes, history, slug)
                 })
                 .await;
@@ -566,11 +558,11 @@ impl Workspace {
                 let Some(session) = workspace.sessions.get_mut(session_index) else {
                     return;
                 };
-                if session.git_refresh_gen != generation {
+                if session.repository.refresh_generation != generation {
                     return; // 古い結果（その後に別の refresh が走った）
                 }
                 let (status, branch, changes, history, slug) = snapshot;
-                session.git_status = status.into_iter().collect();
+                session.repository.status = status.into_iter().collect();
                 let git_panel = session.git_panel.clone();
                 git_panel.update(cx, |panel, cx| {
                     panel.set_snapshot(

@@ -107,7 +107,7 @@ impl Workspace {
         let theme = self.theme.clone();
         let color = slot.color;
         let selected = slot.explorer.selected.clone();
-        let git_status = &self.git_status;
+        let git_status = &self.repository.status;
         let root = slot.worktree.root().to_path_buf(); // ドラッグ時の @メンション相対パス用
         // インライン命名（M10）: rename は対象行を入力行に置き換え、New* は親フォルダ行の直後
         // （親がルートなら先頭）に入力行を挿す。

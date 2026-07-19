@@ -258,7 +258,7 @@ impl Workspace {
                     .unwrap_or_else(|| i18n::t!("tabs.untitled"));
                 let dirty = tab.editor.read(cx).buffer().is_dirty();
                 // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
-                let status = self.git_status.get(&tab.path).copied();
+                let status = self.repository.status.get(&tab.path).copied();
                 let name_color = status.map(|status| Self::git_tint(&theme, status)).unwrap_or(theme.fg0);
                 let drop_highlight = theme.bg2;
                 let drag_name = SharedString::from(name.clone());
@@ -920,7 +920,7 @@ impl Workspace {
                 .is_remote()
                 .then(|| SharedString::from(slot.worktree.host().display_name().to_string()))
         });
-        let change_count = self.git_status.len();
+        let change_count = self.repository.status.len();
         let (cursor, language) = match self.active_editor() {
             Some(editor) => {
                 let view = editor.read(cx);
