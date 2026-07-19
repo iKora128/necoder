@@ -76,6 +76,62 @@ pub fn load_bindings(json: &str, cx: &App) -> Result<Vec<KeyBinding>> {
     Ok(bindings)
 }
 
+/// アクション名からキーストローク表記を逆引きする（コマンドパレットのキー併記・M13）。
+/// 複数バインドがあれば最初のセクション順で 1 つ。
+pub fn key_for_action(sections: &[KeymapSection], action: &str) -> Option<String> {
+    for section in sections {
+        for (keystrokes, bound_action) in &section.bindings {
+            if bound_action == action {
+                return Some(keystrokes.clone());
+            }
+        }
+    }
+    None
+}
+
+/// キーストロークを macOS 慣例の記号表記へ（`cmd-shift-p` → `⌘⇧P`、`cmd-k cmd-t` → `⌘K ⌘T`）。
+pub fn pretty_keystroke(keystrokes: &str) -> String {
+    keystrokes
+        .split_whitespace()
+        .map(|chord| {
+            let mut out = String::new();
+            let mut key = "";
+            for part in chord.split('-') {
+                match part {
+                    "cmd" => out.push('⌘'),
+                    "ctrl" => out.push('⌃'),
+                    "alt" => out.push('⌥'),
+                    "shift" => out.push('⇧'),
+                    "fn" => out.push_str("fn"),
+                    other => key = other,
+                }
+            }
+            let key = match key {
+                "enter" => "⏎".to_string(),
+                "escape" => "esc".to_string(),
+                "space" => "Space".to_string(),
+                "backspace" => "⌫".to_string(),
+                "tab" => "Tab".to_string(),
+                "left" => "←".to_string(),
+                "right" => "→".to_string(),
+                "up" => "↑".to_string(),
+                "down" => "↓".to_string(),
+                other if other.len() == 1 => other.to_uppercase(),
+                other => {
+                    // f2 → F2、それ以外（{ } - 等の記号）はそのまま。
+                    if other.starts_with('f') && other[1..].chars().all(|c| c.is_ascii_digit()) {
+                        other.to_uppercase()
+                    } else {
+                        other.to_string()
+                    }
+                }
+            };
+            format!("{out}{key}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// 組み込み既定 keymap（macOS・Zed 互換ベース）。編集アクションは `editor` 名前空間、終了は `shirushi`。
 pub const DEFAULT_KEYMAP_JSON: &str = r#"[
   {
@@ -103,10 +159,44 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-v": "editor::Paste",
       "cmd-z": "editor::Undo",
       "cmd-shift-z": "editor::Redo",
-      "cmd-s": "editor::Save",
+      "cmd-s": "workspace::SaveActive",
+      "alt-shift-f": "workspace::Format",
       "cmd-enter": "agent::SubmitPrompt",
       "f12": "workspace::GoToDefinition",
-      "ctrl-space": "workspace::TriggerCompletion"
+      "f2": "workspace::Rename",
+      "cmd-.": "workspace::CodeActions",
+      "shift-f12": "workspace::FindReferences",
+      "cmd-shift-o": "workspace::OutlineSymbols",
+      "cmd-t": "workspace::WorkspaceSymbols",
+      "f8": "workspace::NextDiagnostic",
+      "shift-f8": "workspace::PrevDiagnostic",
+      "f7": "workspace::NextHunk",
+      "shift-f7": "workspace::PrevHunk",
+      "ctrl-space": "workspace::TriggerCompletion",
+      "cmd-k cmd-i": "workspace::ShowHover",
+      "alt-left": "editor::MoveWordLeft",
+      "alt-right": "editor::MoveWordRight",
+      "shift-alt-left": "editor::SelectWordLeft",
+      "shift-alt-right": "editor::SelectWordRight",
+      "alt-backspace": "editor::DeleteWordBackward",
+      "cmd-up": "editor::MoveToStart",
+      "cmd-down": "editor::MoveToEnd",
+      "alt-up": "editor::MoveLineUp",
+      "alt-down": "editor::MoveLineDown",
+      "shift-alt-up": "editor::DuplicateLineUp",
+      "shift-alt-down": "editor::DuplicateLineDown",
+      "cmd-shift-k": "editor::DeleteLine",
+      "cmd-/": "editor::ToggleComment",
+      "tab": "editor::TabIndent",
+      "shift-tab": "editor::Outdent",
+      "cmd-]": "editor::Indent",
+      "cmd-[": "editor::Outdent",
+      "cmd-d": "editor::SelectNext",
+      "alt-z": "editor::ToggleSoftWrap",
+      "ctrl-g": "workspace::GoToLine",
+      "alt-cmd-up": "editor::AddCursorAbove",
+      "alt-cmd-down": "editor::AddCursorBelow",
+      "escape": "editor::Cancel"
     }
   },
   {
@@ -118,17 +208,23 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
   {
     "bindings": {
       "cmd-p": "workspace::FileFinder",
+      "cmd-shift-p": "workspace::CommandPalette",
       "cmd-o": "workspace::ProjectSwitcher",
+      "cmd-f": "workspace::BufferSearch",
+      "cmd-alt-f": "workspace::BufferReplace",
       "cmd-shift-f": "workspace::ProjectSearch",
       "cmd-shift-t": "workspace::RestoreClosedTab",
       "cmd-k cmd-t": "workspace::ThemeSelector",
+      "cmd-k cmd-c": "workspace::ProjectColor",
       "cmd-j": "workspace::ToggleTerminal",
+      "cmd-i": "workspace::InlineEdit",
       "cmd-\\": "workspace::SplitRight",
       "ctrl-shift-g": "workspace::ToggleGitPanel",
       "cmd-w": "workspace::CloseTab",
       "cmd-}": "workspace::SelectNextTab",
       "cmd-{": "workspace::SelectPrevTab",
       "cmd-shift-a": "workspace::NewThread",
+      "cmd-shift-h": "workspace::ThreadHistory",
       "cmd-alt-right": "workspace::SelectNextThread",
       "cmd-alt-left": "workspace::SelectPrevThread",
       "ctrl-tab": "workspace::SelectNextThread",
@@ -143,6 +239,8 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-7": "workspace::ActivateProject7",
       "cmd-8": "workspace::ActivateProject8",
       "cmd-9": "workspace::ActivateProject9",
+      "ctrl--": "workspace::NavigateBack",
+      "ctrl-shift--": "workspace::NavigateForward",
       "cmd-q": "shirushi::Quit"
     }
   }
@@ -153,13 +251,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reverse_lookup_and_pretty_print() {
+        let sections = parse(DEFAULT_KEYMAP_JSON).expect("既定 keymap がパースできる");
+        // 逆引き（コマンドパレットのキー併記・M13）。
+        let key = key_for_action(&sections, "workspace::FileFinder").expect("⌘P がある");
+        assert_eq!(key, "cmd-p");
+        assert!(key_for_action(&sections, "workspace::存在しない").is_none());
+        // 記号表記。
+        assert_eq!(pretty_keystroke("cmd-shift-p"), "⌘⇧P");
+        assert_eq!(pretty_keystroke("cmd-k cmd-t"), "⌘K ⌘T");
+        assert_eq!(pretty_keystroke("ctrl-shift-g"), "⌃⇧G");
+        assert_eq!(pretty_keystroke("f2"), "F2");
+        assert_eq!(pretty_keystroke("alt-enter"), "⌥⏎");
+        assert_eq!(pretty_keystroke("cmd-}"), "⌘}");
+    }
+
+    #[test]
     fn parses_sections_and_bindings() {
         let sections = parse(DEFAULT_KEYMAP_JSON).expect("既定 keymap がパースできる");
         assert_eq!(sections.len(), 3);
         assert_eq!(sections[0].context, "Editor");
+        // ⌘S は保存時フォーマットのフックのため workspace 側（M11）。
         assert_eq!(
             sections[0].bindings.get("cmd-s").map(String::as_str),
-            Some("editor::Save")
+            Some("workspace::SaveActive")
         );
         // 2 セクション目は AgentPanel（⌘W でアクティブスレッドを閉じる）
         assert_eq!(sections[1].context, "AgentPanel");

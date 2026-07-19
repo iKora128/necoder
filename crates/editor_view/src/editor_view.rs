@@ -16,10 +16,12 @@ use gpui::{
 use std::ops::Range;
 use theme_core::{SyntaxColors, Theme};
 
-const FONT_SIZE: f32 = 13.0; // code 13px
-const LINE_HEIGHT: f32 = 23.0; // compact 行高 23
+const FONT_SIZE: f32 = 13.0; // code 13px（既定。settings の font_size で上書き・M10-13）
+const LINE_HEIGHT: f32 = 23.0; // compact 行高 23（font_size に比例して伸縮）
 const GUTTER_PADDING: f32 = 10.0; // 行番号の左右余白
 const GUTTER_MIN_WIDTH: f32 = 46.0; // UI-SPEC §1.4 行番号ガター 46
+/// 既定タブ幅（空白換算）。settings の `tab_size` 配線（M10-13）までの暫定値。
+const DEFAULT_TAB_SIZE: usize = 4;
 
 actions!(
     editor,
@@ -28,6 +30,30 @@ actions!(
         Delete,
         Newline,
         InsertNewline,
+        // ── 編集の所作（M10-9） ──
+        MoveWordLeft,
+        MoveWordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        DeleteWordBackward,
+        MoveToStart,
+        MoveToEnd,
+        MoveLineUp,
+        MoveLineDown,
+        DuplicateLineUp,
+        DuplicateLineDown,
+        DeleteLine,
+        ToggleComment,
+        TabIndent,
+        Indent,
+        Outdent,
+        // ── multi-cursor（M10-10） ──
+        SelectNext,
+        AddCursorAbove,
+        AddCursorBelow,
+        Cancel,
+        // ── soft wrap（M10-12・⌥Z） ──
+        ToggleSoftWrap,
         MoveLeft,
         MoveRight,
         MoveUp,
@@ -55,6 +81,34 @@ pub enum ComposerEvent {
     /// Enter 送信が有効かつ IME 変換中でない Enter が押された（＝親が送信すべき）。
     Submit,
 }
+
+/// キーボード入力の確定テキスト通知（補完の自動トリガ用・M10）。
+/// **入力ハンドラ経由の確定入力のみ** emit する（IME 変換中・paste・undo・補完適用では出さない）。
+/// workspace がタブ毎に subscribe し、識別子/`.`/`::` で補完を自動トリガする。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditorInputEvent {
+    /// 確定テキストが挿入された（通常タイプは 1 文字・IME 確定は複数文字）。
+    Typed(String),
+    /// クリックでキャレットが大きく飛んだ（ナビ履歴に積む・M10-11）。値は移動**前**の byte offset。
+    CaretJumped { from: usize },
+    /// gutter の diff バーがクリックされた（hunk 操作ポップオーバー・M11-10）。
+    HunkClicked { hunk: project::DiffHunk, position: Point<Pixels> },
+}
+
+/// マウスが同じ位置に ~500ms 留まった通知（LSP hover の配線用・M10）。
+/// workspace が subscribe して `textDocument/hover` を要求する。
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditorHoverEvent {
+    /// 留まった位置。`line`/`character` は LSP 位置（UTF-16）・`anchor` はウィンドウ座標。
+    Dwell { line: u32, character: u32, anchor: Point<Pixels> },
+    /// hover を消すべき操作（クリック・スクロール・dwell 位置から大きく離れた）。
+    Cancel,
+}
+
+/// hover の dwell 判定時間。
+const HOVER_DWELL_MS: u64 = 500;
+/// dwell 位置からこの距離（Manhattan）を超えて動いたら hover を消す。
+const HOVER_CANCEL_DISTANCE: f32 = 30.0;
 
 /// 既定キーマップを登録する（bin から起動時に呼ぶ）。コンテキストは "Editor"。
 pub fn bind_default_keys(cx: &mut App) {
@@ -106,9 +160,11 @@ pub struct EditorView {
     // キャレット点滅。focus 中のみ動かし、blur で止める（idle CPU 0% を守る）。
     blink_visible: bool,
     _blink_task: Option<gpui::Task<()>>,
-    // 構文ハイライト（対応拡張子のみ）。編集で再計算する。
-    highlighter: Option<lang::Highlighter>,
-    highlights: Vec<lang::HighlightSpan>,
+    // 構文ハイライト（対応拡張子のみ・増分パース M11-8）。編集は Tree::edit + 差分パース、
+    // span は prepaint が可視範囲だけ問い合わせる（512KB 上限は撤廃）。
+    highlighter: Option<lang::IncrementalHighlighter>,
+    /// ハイライト済みの buffer version（prepaint での増分/全文パースの判定）。
+    highlight_version: u64,
     /// 検索ジャンプ等の保留スクロール（byte offset）。次の prepaint で viewport 確定後に消化＝one-shot。
     pending_reveal: Option<usize>,
     /// gutter diff（HEAD vs 現在バッファ・非同期計算）。plain / 無題ファイルは常に空。
@@ -119,30 +175,51 @@ pub struct EditorView {
     diff_gen: u32,
     /// LSP 診断（行番号 + 重大度）。gutter の下線に使う。workspace が push する。
     diagnostics: Vec<(u32, lang::lsp::Severity)>,
+    /// ⌘F の全マッチ（byte レンジ・start 昇順・非重複）。warn の面で選択面より下に塗る。
+    /// workspace の検索バーが差し込む（このビューは検索自体を知らない）。
+    search_ranges: Vec<Range<usize>>,
+    /// blame 注釈（行, テキスト）。キャレット行の行末に dim 表示（M11-11）。workspace が差し込む。
+    line_annotation: Option<(usize, SharedString)>,
+    /// エージェント編集のスレッド色（M12-3 生中継）。Some の間、gutter diff バーをこの色で塗る。
+    agent_mark_color: Option<gpui::Hsla>,
+    /// 外部変更が来たが dirty のため自動リロードしなかった（警告バー表示中）。
+    external_changed: bool,
+    /// soft wrap（折り返し表示・⌥Z / 設定 `soft_wrap`）。plain（composer）では未使用。
+    soft_wrap: bool,
+    /// コードのフォントサイズ（settings の `font_size`・live 反映）。行高は 23/13 比で追従。
+    font_size: f32,
+    /// Tab 幅（settings の `tab_size`・live 反映）。
+    tab_size: usize,
+    /// 論理行↔表示行マップ（prepaint が (version, columns, on/off) 変化時に再構築）。
+    wrap_map: WrapMap,
+    /// hover dwell の世代（マウスが動くたび増える＝進行中の dwell タイマーを無効化）。
+    hover_generation: u32,
+    /// 直近 Dwell を emit した位置（ここから離れたら Cancel を emit）。
+    last_dwell_anchor: Option<Point<Pixels>>,
+    /// 進行中の dwell タイマー（差し替えで旧タスクは drop ＝キャンセル）。
+    _hover_task: Option<gpui::Task<()>>,
 }
 
-/// バッファをハイライトする。対応言語かつ一定サイズ以下のときだけ（巨大ファイルの毎編集再解析を避ける）。
-fn compute_highlights(
-    highlighter: &Option<lang::Highlighter>,
-    buffer: &Buffer,
-) -> Vec<lang::HighlightSpan> {
-    const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
-    match highlighter {
-        Some(highlighter) if buffer.len_bytes() <= MAX_HIGHLIGHT_BYTES => {
-            highlighter.highlight(&buffer.text())
-        }
-        _ => Vec::new(),
-    }
+/// ⌘F の Esc 復帰用に保存する位置（選択 + スクロール）。中身は編集で無効になりうるため
+/// 復元時にバッファ長へクリップされる。[`EditorView::position_snapshot`] で採取する。
+pub struct PositionSnapshot {
+    selections: Vec<Selection>,
+    scroll_top: Pixels,
 }
+
+
 
 impl EditorView {
     pub fn new(buffer: Buffer, theme: Theme, accent: gpui::Hsla, cx: &mut Context<Self>) -> Self {
-        let highlighter = buffer
+        let mut highlighter = buffer
             .path()
             .and_then(|path| path.extension())
             .and_then(|extension| extension.to_str())
-            .and_then(lang::Highlighter::for_extension);
-        let highlights = compute_highlights(&highlighter, &buffer);
+            .and_then(lang::IncrementalHighlighter::for_extension);
+        if let Some(highlighter) = highlighter.as_mut() {
+            highlighter.reparse_full(&buffer.text()); // 開いた直後の全文パース（以後は増分）
+        }
+        let highlight_version = buffer.version();
         Self {
             buffer,
             focus_handle: cx.focus_handle(),
@@ -151,12 +228,23 @@ impl EditorView {
             plain: false,
             submit_on_enter: false,
             highlighter,
-            highlights,
+            highlight_version,
             pending_reveal: None,
             diff_hunks: Vec::new(),
             diff_scheduled_version: u64::MAX, // 初回描画で必ず計算させる
             diff_gen: 0,
             diagnostics: Vec::new(),
+            search_ranges: Vec::new(),
+            line_annotation: None,
+            agent_mark_color: None,
+            external_changed: false,
+            soft_wrap: false,
+            font_size: FONT_SIZE,
+            tab_size: DEFAULT_TAB_SIZE,
+            wrap_map: WrapMap::identity(1, (u64::MAX, 0, false)),
+            hover_generation: 0,
+            last_dwell_anchor: None,
+            _hover_task: None,
             scroll_top: px(0.),
             marked_range: None,
             content_origin: None,
@@ -233,6 +321,144 @@ impl EditorView {
         cx.notify();
     }
 
+    /// エージェント編集のスレッド色（gutter の diff バー色を差し替える・M12-3）。None で通常色へ。
+    pub fn set_agent_mark_color(&mut self, color: Option<gpui::Hsla>, cx: &mut Context<Self>) {
+        if self.agent_mark_color != color {
+            self.agent_mark_color = color;
+            cx.notify();
+        }
+    }
+
+    /// blame 注釈を差し替える（workspace が計算して呼ぶ・M11-11）。None でクリア。
+    pub fn set_line_annotation(&mut self, annotation: Option<(usize, SharedString)>, cx: &mut Context<Self>) {
+        if self.line_annotation != annotation {
+            self.line_annotation = annotation;
+            cx.notify();
+        }
+    }
+
+    /// バッファを読み取り専用にする（diff タブ・M11-9）。
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.buffer.set_read_only(read_only);
+    }
+
+    /// ⌘F の全マッチハイライトを差し替える（workspace の検索バーが呼ぶ）。空 Vec でクリア。
+    /// 同じ内容なら何もしない（observe 再入で無駄な再描画をしないため）。
+    pub fn set_search_ranges(&mut self, ranges: Vec<Range<usize>>, cx: &mut Context<Self>) {
+        if self.search_ranges == ranges {
+            return;
+        }
+        self.search_ranges = ranges;
+        cx.notify();
+    }
+
+    /// byte レンジを選択して見せる（⌘F の現在マッチ）。行が可視域の外なら中央へスクロール。
+    pub fn select_byte_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let snapshot = self.buffer.snapshot();
+        let start = snapshot.clip_offset(range.start);
+        let end = snapshot.clip_offset(range.end);
+        self.buffer.set_selections(vec![Selection::new(start, end)]);
+        self.blink_visible = true;
+        self.pending_reveal = Some(start);
+        cx.notify();
+    }
+
+    /// 現在の位置（選択 + スクロール）を保存する（⌘F を開く時に採取 → Esc で戻す）。
+    pub fn position_snapshot(&self) -> PositionSnapshot {
+        PositionSnapshot {
+            selections: self.buffer.selections().to_vec(),
+            scroll_top: self.scroll_top,
+        }
+    }
+
+    /// [`Self::position_snapshot`] の位置へ戻す（⌘F の Esc）。編集で無効になった分はクリップ。
+    pub fn restore_position(&mut self, snapshot: &PositionSnapshot, cx: &mut Context<Self>) {
+        self.buffer.set_selections(snapshot.selections.clone());
+        self.scroll_top = snapshot.scroll_top.max(px(0.)).min(self.max_scroll_top());
+        self.pending_reveal = None;
+        self.blink_visible = true;
+        cx.notify();
+    }
+
+    /// レンジ群を同一テキストで置換する（⌘F の置換。複数レンジでも 1 Transaction ＝ undo 一発）。
+    pub fn replace_ranges(&mut self, ranges: &[Range<usize>], text: &str, cx: &mut Context<Self>) {
+        if ranges.is_empty() {
+            return;
+        }
+        self.buffer.edit(ranges, text);
+        self.after_edit(cx);
+    }
+
+    /// settings の font_size / tab_size を適用する（live 反映・M10-13）。
+    pub fn set_typography(&mut self, font_size: f32, tab_size: usize, cx: &mut Context<Self>) {
+        let font_size = font_size.clamp(8.0, 32.0);
+        let tab_size = tab_size.clamp(1, 16);
+        if (self.font_size - font_size).abs() > f32::EPSILON || self.tab_size != tab_size {
+            self.font_size = font_size;
+            self.tab_size = tab_size;
+            // 行高が変わる＝折返し列数は同じでも wrap マップの再構築は不要（列はセル数基準）。
+            cx.notify();
+        }
+    }
+
+    /// soft wrap の on/off（設定の適用）。次の prepaint でマップが作り直される。
+    pub fn set_soft_wrap(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.soft_wrap != enabled {
+            self.soft_wrap = enabled;
+            cx.notify();
+        }
+    }
+
+    /// ⌥Z トグル。
+    fn toggle_soft_wrap(&mut self, _: &ToggleSoftWrap, _: &mut Window, cx: &mut Context<Self>) {
+        self.soft_wrap = !self.soft_wrap;
+        cx.notify();
+    }
+
+    /// offset の**表示行**（wrap 有効時）。マップが古い（直後の prepaint 前）は論理行へフォールバック。
+    fn display_row_for_offset(&self, snapshot: &BufferSnapshot, offset: usize) -> usize {
+        let point = snapshot.byte_to_point(offset);
+        if self.wrap_map.key.0 == snapshot.version() {
+            self.wrap_map.logical_to_display(point.row, point.column)
+        } else {
+            point.row
+        }
+    }
+
+    /// 総表示行数（マップが古ければ論理行数）。
+    fn total_display_rows(&self, snapshot: &BufferSnapshot) -> usize {
+        if self.wrap_map.key.0 == snapshot.version() {
+            self.wrap_map.total_display_rows()
+        } else {
+            snapshot.line_count()
+        }
+    }
+
+    /// 表示行単位の縦移動先 byte（wrap 中の行内移動）。マップが古ければ論理行移動。
+    fn vertical_display_target(&self, snapshot: &BufferSnapshot, head: usize, delta: isize) -> usize {
+        if self.wrap_map.key.0 != snapshot.version() {
+            return vertical(snapshot, head, delta);
+        }
+        let point = snapshot.byte_to_point(head);
+        let display = self.wrap_map.logical_to_display(point.row, point.column);
+        let total = self.wrap_map.total_display_rows();
+        let target = (display as isize + delta).clamp(0, total.saturating_sub(1) as isize) as usize;
+        if target == display {
+            return head;
+        }
+        let (line, segment) = self.wrap_map.display_to_logical(target);
+        let line_len = snapshot.line_len_bytes(line);
+        let target_range = self.wrap_map.segment_range(line, segment, line_len);
+        // 現セグメント内の相対 byte を維持（等幅近似・行末クリップ）。
+        let current_range = {
+            let (c_line, c_segment) = self.wrap_map.display_to_logical(display);
+            self.wrap_map.segment_range(c_line, c_segment, snapshot.line_len_bytes(c_line))
+        };
+        let relative = point.column.saturating_sub(current_range.start);
+        let column = (target_range.start + relative).min(target_range.end);
+        snapshot.clip_offset(snapshot.point_to_byte(BufferPoint::new(line, column)))
+    }
+
     /// テーマを差し替える（テーマセレクタのライブプレビュー / 切替）。次の描画で新配色になる。
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
@@ -248,13 +474,18 @@ impl EditorView {
     /// 主キャレットの LSP 位置 `(line, character)`（character は行頭からの **UTF-16 code unit** 数）。
     /// 補完/hover/定義の要求に渡す。
     pub fn cursor_lsp_position(&self) -> (u32, u32) {
-        let head = self.primary().head;
+        self.lsp_position_for_offset(self.primary().head)
+    }
+
+    /// 任意の byte offset の LSP 位置 `(line, character〔UTF-16〕)`（hover のマウス位置用）。
+    pub fn lsp_position_for_offset(&self, offset: usize) -> (u32, u32) {
         let snapshot = self.buffer.snapshot();
-        let point = snapshot.byte_to_point(head);
+        let offset = snapshot.clip_offset(offset);
+        let point = snapshot.byte_to_point(offset);
         let line_start = snapshot.point_to_byte(BufferPoint::new(point.row, 0));
         let utf16_line_start = self.buffer.byte_to_utf16(line_start);
-        let utf16_head = self.buffer.byte_to_utf16(head);
-        (point.row as u32, (utf16_head - utf16_line_start) as u32)
+        let utf16_offset = self.buffer.byte_to_utf16(offset);
+        (point.row as u32, (utf16_offset - utf16_line_start) as u32)
     }
 
     /// LSP 位置 `(line, character〔UTF-16〕)` へジャンプする（定義ジャンプの着地）。
@@ -274,12 +505,13 @@ impl EditorView {
         self.caret_bounds.map(|bounds| point(bounds.left(), bounds.bottom()))
     }
 
-    /// 補完を適用する（カーソル直前の識別子プレフィクスを `text` で置換）。
-    pub fn apply_completion(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// カーソル直前の識別子プレフィクス（ASCII 英数 or `_` の連なり）。
+    /// 戻り値は `(語頭の byte offset, プレフィクス文字列)`。語の途中でなければ `(caret, "")`。
+    /// 補完の適用・自動トリガの絞り込み・Esc 抑止の語判定に共通で使う。
+    pub fn identifier_prefix_at_caret(&self) -> (usize, String) {
         let head = self.primary().head;
         let all = self.buffer.text();
         let bytes = all.as_bytes();
-        // カーソル前の識別子文字（ASCII 英数 or `_`）を遡って prefix の開始を求める。
         let mut start = head;
         while start > 0 {
             let previous = bytes[start - 1];
@@ -289,10 +521,148 @@ impl EditorView {
                 break;
             }
         }
+        (start, all[start..head].to_string())
+    }
+
+    /// カーソル直前の最大 `max_bytes` バイトのテキスト（`::` などのトリガ文字判定用）。
+    pub fn text_before_caret(&self, max_bytes: usize) -> String {
+        let head = self.primary().head;
+        self.buffer.text_range(head.saturating_sub(max_bytes)..head)
+    }
+
+    /// バッファ全文を置き換える（hot exit の復元）。1 Transaction ＝ undo で復元前に戻れる。
+    pub fn replace_all_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let len = self.buffer.len_bytes();
+        self.buffer.edit(&[0..len], text);
+        self.after_edit(cx);
+    }
+
+    /// Backspace 1 回分（補完ポップアップの type-through 用。アクション経由と同じ後処理）。
+    pub fn delete_backward_char(&mut self, cx: &mut Context<Self>) {
+        self.buffer.delete_backward();
+        self.after_edit(cx);
+    }
+
+    /// テキストをキャレット位置へ挿入する（補完ポップアップの type-through 用）。
+    /// 通常タイプと同じ後処理 + [`EditorInputEvent::Typed`] を emit する（自動トリガが再絞り込みに使う）。
+    pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        self.buffer.insert(text);
+        self.after_edit(cx);
+        cx.emit(EditorInputEvent::Typed(text.to_string()));
+    }
+
+    /// LSP 位置レンジ（UTF-16 line/char）を byte レンジへ（フォーマット/rename の TextEdit 適用用）。
+    pub fn lsp_range_to_bytes(
+        &self,
+        start_line: u32,
+        start_character: u32,
+        end_line: u32,
+        end_character: u32,
+    ) -> Range<usize> {
+        let snapshot = self.buffer.snapshot();
+        let to_byte = |line: u32, character: u32| -> usize {
+            let row = (line as usize).min(snapshot.line_count().saturating_sub(1));
+            let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0));
+            let utf16_line_start = self.buffer.byte_to_utf16(line_start);
+            self.buffer.utf16_to_byte(utf16_line_start + character as usize)
+        };
+        let start = to_byte(start_line, start_character);
+        let end = to_byte(end_line, end_character).max(start);
+        start..end
+    }
+
+    /// LSP TextEdit 群（byte レンジ変換済み）を 1 Transaction で適用し、キャレット位置を概ね保つ。
+    pub fn apply_lsp_edits(&mut self, edits: Vec<(Range<usize>, String)>, cx: &mut Context<Self>) {
+        if edits.is_empty() {
+            return;
+        }
+        // 編集前のキャレット (行, 列) を保存 → 適用後に同じ座標へクランプして戻す。
+        let snapshot = self.buffer.snapshot();
+        let caret_point = snapshot.byte_to_point(self.primary().head);
+        let scroll_top = self.scroll_top;
+        self.buffer.edit_batch(&edits);
+        let snapshot = self.buffer.snapshot();
+        let restored = snapshot.point_to_byte(BufferPoint::new(
+            caret_point.row.min(snapshot.line_count().saturating_sub(1)),
+            caret_point.column,
+        ));
+        self.buffer.set_selections(vec![Selection::cursor(restored)]);
+        self.after_edit(cx);
+        // フォーマットで画面が飛ばないようスクロールは維持（クランプのみ）。
+        self.scroll_top = scroll_top.max(px(0.)).min(self.max_scroll_top());
+    }
+
+    /// 補完を適用する（カーソル直前の識別子プレフィクスを `text` で置換）。
+    pub fn apply_completion(&mut self, text: &str, cx: &mut Context<Self>) {
+        let head = self.primary().head;
+        let (start, _) = self.identifier_prefix_at_caret();
         self.buffer.edit(&[start..head], text);
         let new_cursor = start + text.len();
         self.buffer.set_selections(vec![Selection::cursor(new_cursor)]);
         self.after_edit(cx);
+    }
+
+    // ── 外部変更の追従（watch 基盤・M10） ──
+
+    /// watch イベント（このファイルに何かが起きた）を処理する。
+    /// 自分の保存によるイベント（revision 一致）は無視。無編集なら自動リロード、
+    /// dirty なら警告バー用のフラグを立てる（上書きは絶対にしない）。
+    pub fn handle_external_change(&mut self, cx: &mut Context<Self>) {
+        match self.buffer.disk_probably_unchanged() {
+            Some(true) => {
+                // 自分の保存 or 既に同期済み。
+                if self.external_changed {
+                    self.external_changed = false;
+                    cx.notify();
+                }
+            }
+            Some(false) if !self.buffer.is_dirty() => self.reload_from_disk(cx),
+            Some(false) => {
+                self.external_changed = true;
+                cx.notify();
+            }
+            // 削除・アクセス不能: dirty なら警告（保存し直せる）、無編集なら何もしない（v1）。
+            None => {
+                if self.buffer.is_dirty() && self.buffer.path().is_some() {
+                    self.external_changed = true;
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// ディスクから読み直す（自動リロード / 警告バーの「再読込」）。スクロールは維持しつつクランプ。
+    pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.buffer.reload() {
+            eprintln!("再読込に失敗: {error:#}");
+            return;
+        }
+        self.external_changed = false;
+        self.marked_range = None;
+        self.refresh_highlights();
+        self.scroll_top = self.scroll_top.max(px(0.)).min(self.max_scroll_top());
+        cx.notify();
+    }
+
+    /// 警告バーの「このまま」= 警告だけ畳む（保存時の競合検知が最後の砦として残る）。
+    pub fn dismiss_external_change(&mut self, cx: &mut Context<Self>) {
+        if self.external_changed {
+            self.external_changed = false;
+            cx.notify();
+        }
+    }
+
+    /// 外部変更の警告バーを出すべきか。
+    pub fn is_externally_changed(&self) -> bool {
+        self.external_changed
+    }
+
+    /// gutter diff を明示的に再計算する（watch が git 状態の変化を検知したとき等）。
+    pub fn refresh_diff(&mut self, cx: &mut Context<Self>) {
+        self.schedule_diff(cx);
     }
 
     /// gutter diff（HEAD vs 現在バッファ）を再計算する。編集で version が変わるたび prepaint から呼ぶ。
@@ -339,11 +709,23 @@ impl EditorView {
         self.buffer.text()
     }
 
+    /// テキストを差し替える（composer の下書き流し込み・開発プローブ用）。
+    pub fn set_plain_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.buffer = Buffer::from_str(text);
+        self.buffer.set_selections(vec![Selection::cursor(text.len())]);
+        self.marked_range = None;
+        self.highlight_version = self.buffer.version();
+        cx.notify();
+    }
+
     /// テキストを空に戻す（composer 送信後）。
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.buffer = Buffer::new();
         self.marked_range = None;
-        self.highlights = Vec::new();
+        self.highlight_version = self.buffer.version();
+        if let Some(highlighter) = self.highlighter.as_mut() {
+            highlighter.reparse_full("");
+        }
         self.scroll_top = px(0.);
         cx.notify();
     }
@@ -392,7 +774,12 @@ impl EditorView {
     }
 
     fn line_height(&self) -> Pixels {
-        px(LINE_HEIGHT)
+        px(self.line_height_value())
+    }
+
+    /// 行高の実値（font_size × 23/13 比）。prepaint・ヒットテスト・スクロール計算はこれを使う。
+    fn line_height_value(&self) -> f32 {
+        self.font_size * (LINE_HEIGHT / FONT_SIZE)
     }
 
     fn primary(&self) -> Selection {
@@ -455,11 +842,34 @@ impl EditorView {
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(false, |snapshot, selection| vertical(snapshot, selection.head, -1), cx);
+        self.move_vertical(-1, false, cx);
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(false, |snapshot, selection| vertical(snapshot, selection.head, 1), cx);
+        self.move_vertical(1, false, cx);
+    }
+
+    /// 表示行単位の縦移動（soft wrap 対応・M10-12）。off なら論理行と一致する。
+    fn move_vertical(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+        let snapshot = self.buffer.snapshot();
+        let moved: Vec<Selection> = self
+            .buffer
+            .selections()
+            .iter()
+            .map(|selection| {
+                let head = self.vertical_display_target(&snapshot, selection.head, delta);
+                if extend {
+                    Selection::new(selection.anchor, head)
+                } else {
+                    Selection::cursor(head)
+                }
+            })
+            .collect();
+        self.buffer.set_selections(moved);
+        self.marked_range = None;
+        self.blink_visible = true;
+        self.scroll_caret_into_view();
+        cx.notify();
     }
 
     fn move_to_line_start(&mut self, _: &MoveToLineStart, _: &mut Window, cx: &mut Context<Self>) {
@@ -479,11 +889,11 @@ impl EditorView {
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(true, |snapshot, selection| vertical(snapshot, selection.head, -1), cx);
+        self.move_vertical(-1, true, cx);
     }
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(true, |snapshot, selection| vertical(snapshot, selection.head, 1), cx);
+        self.move_vertical(1, true, cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -532,6 +942,135 @@ impl EditorView {
         self.after_edit(cx);
     }
 
+    // ── 編集の所作（M10-9）: 単語移動/削除・行操作・コメント・インデント ──
+
+    fn move_word_left(&mut self, _: &MoveWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_cursor(false, |snapshot, selection| snapshot.prev_word_boundary(selection.head), cx);
+    }
+
+    fn move_word_right(&mut self, _: &MoveWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_cursor(false, |snapshot, selection| snapshot.next_word_boundary(selection.head), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_cursor(true, |snapshot, selection| snapshot.prev_word_boundary(selection.head), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_cursor(true, |snapshot, selection| snapshot.next_word_boundary(selection.head), cx);
+    }
+
+    fn delete_word_backward(&mut self, _: &DeleteWordBackward, _: &mut Window, cx: &mut Context<Self>) {
+        self.buffer.delete_word_backward();
+        self.after_edit(cx);
+    }
+
+    fn move_to_start(&mut self, _: &MoveToStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_cursor(false, |_, _| 0, cx);
+    }
+
+    fn move_to_end(&mut self, _: &MoveToEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_cursor(false, |snapshot, _| snapshot.len_bytes(), cx);
+    }
+
+    fn move_line_up(&mut self, _: &MoveLineUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.buffer.move_lines(false).is_some() {
+            self.after_edit(cx);
+        }
+    }
+
+    fn move_line_down(&mut self, _: &MoveLineDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.buffer.move_lines(true).is_some() {
+            self.after_edit(cx);
+        }
+    }
+
+    fn duplicate_line_up(&mut self, _: &DuplicateLineUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.buffer.duplicate_lines(false);
+        self.after_edit(cx);
+    }
+
+    fn duplicate_line_down(&mut self, _: &DuplicateLineDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.buffer.duplicate_lines(true);
+        self.after_edit(cx);
+    }
+
+    fn delete_line(&mut self, _: &DeleteLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.buffer.delete_lines();
+        self.after_edit(cx);
+    }
+
+    /// ⌘/ コメントトグル（言語別 prefix・対応言語のみ）。
+    fn toggle_comment(&mut self, _: &ToggleComment, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(prefix) = self
+            .buffer
+            .path()
+            .and_then(|path| path.extension())
+            .and_then(|extension| extension.to_str())
+            .and_then(lang::comment_prefix)
+        else {
+            return;
+        };
+        self.buffer.toggle_comment(prefix);
+        self.after_edit(cx);
+    }
+
+    /// Tab: 選択があれば行インデント・なければ空白挿入（`DEFAULT_TAB_SIZE`。設定配線は M10-13）。
+    fn tab_indent(&mut self, _: &TabIndent, _: &mut Window, cx: &mut Context<Self>) {
+        let any_selection = self.buffer.selections().iter().any(|selection| !selection.is_empty());
+        if any_selection {
+            self.buffer.indent_lines(self.tab_size);
+        } else {
+            self.buffer.insert(&" ".repeat(self.tab_size));
+        }
+        self.after_edit(cx);
+    }
+
+    fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
+        self.buffer.indent_lines(self.tab_size);
+        self.after_edit(cx);
+    }
+
+    fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
+        self.buffer.outdent_lines(self.tab_size);
+        self.after_edit(cx);
+    }
+
+    // ── multi-cursor（M10-10） ──
+
+    /// ⌘D。単語選択 → 次の一致を追加選択。新しい選択が見えるようにスクロール。
+    fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        if self.buffer.select_next_occurrence() {
+            if let Some(last) = self.buffer.selections().iter().map(|s| s.end()).max() {
+                self.pending_reveal = Some(last);
+            }
+            self.blink_visible = true;
+            cx.notify();
+        }
+    }
+
+    fn add_cursor_above(&mut self, _: &AddCursorAbove, _: &mut Window, cx: &mut Context<Self>) {
+        if self.buffer.add_cursor_vertically(false) {
+            self.blink_visible = true;
+            cx.notify();
+        }
+    }
+
+    fn add_cursor_below(&mut self, _: &AddCursorBelow, _: &mut Window, cx: &mut Context<Self>) {
+        if self.buffer.add_cursor_vertically(true) {
+            self.blink_visible = true;
+            cx.notify();
+        }
+    }
+
+    /// Esc。複数選択を 1 個へ畳む（単一なら何もしない＝他のオーバーレイの Esc を邪魔しない）。
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        if self.buffer.collapse_to_primary() {
+            self.blink_visible = true;
+            cx.notify();
+        }
+    }
+
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
         // Enter 送信が有効なら、送信を親へ委ねる。ただし **IME 変換中（marked_range あり）は送信しない**
         // ＝日本語の変換確定 Enter で誤送信しないための肝（`docs/JOURNAL.md` の痛点）。
@@ -539,7 +1078,12 @@ impl EditorView {
             cx.emit(ComposerEvent::Submit);
             return;
         }
-        self.buffer.insert("\n");
+        if self.plain {
+            self.buffer.insert("\n");
+        } else {
+            // 自動インデント（前行継承 + ブロック開始で 1 段。M10-9）。
+            self.buffer.insert_newline_indented(self.tab_size);
+        }
         self.after_edit(cx);
     }
 
@@ -559,10 +1103,37 @@ impl EditorView {
         self.after_edit(cx);
     }
 
+    /// ⌘S 保存。書き込みは背景スレッド（remote は 30s ブロックしうる — ARCHITECTURE §9）。
+    /// 保存中に編集された場合は dirty のまま残る（`complete_save` の version 比較）。
+    /// 保存（背景書き込み）。workspace の SaveActive / 保存時フォーマットから呼ぶ公開版。
+    pub fn save_now(&mut self, cx: &mut Context<Self>) {
+        self.save_impl(cx);
+    }
+
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
-        if let Err(error) = self.buffer.save() {
-            eprintln!("保存に失敗: {error:#}");
-        }
+        self.save_impl(cx);
+    }
+
+    fn save_impl(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.buffer.prepare_save() else {
+            eprintln!("保存先が未設定（無題バッファ）");
+            return;
+        };
+        let saved_version = pending.version;
+        cx.spawn(async move |editor, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { pending.write() })
+                .await;
+            let _ = editor.update(cx, |editor, cx| {
+                match result {
+                    Ok(revision) => editor.buffer.complete_save(revision, saved_version),
+                    Err(error) => eprintln!("保存に失敗: {error:#}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -574,8 +1145,30 @@ impl EditorView {
         cx.notify();
     }
 
+    /// ハイライトの追従は prepaint が行う（増分パース・M11-8）。version 比較で必要時のみ。
     fn refresh_highlights(&mut self) {
-        self.highlights = compute_highlights(&self.highlighter, &self.buffer);
+        // 何もしない（互換のため残置。パースは prepaint の sync_highlight_tree で）。
+    }
+
+    /// prepaint 冒頭で呼ぶ: buffer version が進んでいたら Tree を追従させる。
+    /// 単一編集は増分（Tree::edit + 差分パース）・それ以外（複数編集/undo/redo/reload）は全文。
+    fn sync_highlight_tree(&mut self) {
+        let version = self.buffer.version();
+        if version == self.highlight_version {
+            return;
+        }
+        self.highlight_version = version;
+        let Some(highlighter) = self.highlighter.as_mut() else {
+            return;
+        };
+        let text = self.buffer.text();
+        match self.buffer.last_change() {
+            Some(edits) if edits.len() == 1 => {
+                let (start, old, new) = (&edits[0].0, &edits[0].1, &edits[0].2);
+                highlighter.apply_edit(&text, *start, old, new);
+            }
+            _ => highlighter.reparse_full(&text),
+        }
     }
 
     // ── スクロール ──
@@ -583,11 +1176,13 @@ impl EditorView {
     fn on_scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let delta_y = event.delta.pixel_delta(self.line_height()).y;
         self.scroll_top = (self.scroll_top - delta_y).max(px(0.)).min(self.max_scroll_top());
+        self.cancel_hover(cx); // スクロールでアンカーがずれる → hover は消す
         cx.notify();
     }
 
     fn max_scroll_top(&self) -> Pixels {
-        let total = self.line_height() * self.buffer.snapshot().line_count() as f32;
+        let snapshot = self.buffer.snapshot();
+        let total = self.line_height() * self.total_display_rows(&snapshot) as f32;
         (total - self.viewport_height).max(px(0.))
     }
 
@@ -595,7 +1190,8 @@ impl EditorView {
         if self.viewport_height <= px(0.) {
             return;
         }
-        let row = self.buffer.snapshot().byte_to_point(self.primary().head).row;
+        let snapshot = self.buffer.snapshot();
+        let row = self.display_row_for_offset(&snapshot, self.primary().head);
         let line_height = self.line_height();
         let caret_top = line_height * row as f32;
         let caret_bottom = caret_top + line_height;
@@ -610,13 +1206,55 @@ impl EditorView {
     // ── マウス ──
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.is_selecting = true;
         self.blink_visible = true; // クリックでキャレットを置いた直後は実体化
+        self.cancel_hover(cx);
         let offset = self.offset_for_position(event.position, window);
+        // gutter の diff バー領域（左端 ~10px）をクリック → hunk 操作ポップオーバー（M11-10）。
+        if !self.plain {
+            if let Some(origin) = self.content_origin {
+                let gutter_left = origin.x - self.gutter_width;
+                if event.position.x >= gutter_left && event.position.x < gutter_left + px(10.) {
+                    let snapshot = self.buffer.snapshot();
+                    let relative_y = (event.position.y - origin.y + self.scroll_top).max(px(0.));
+                    let display_row = (f32::from(relative_y) / self.line_height_value()).floor() as usize;
+                    let (row, _) = if self.wrap_map.key.0 == snapshot.version() {
+                        self.wrap_map.display_to_logical(display_row)
+                    } else {
+                        (display_row.min(snapshot.line_count().saturating_sub(1)), 0)
+                    };
+                    let row32 = row as u32;
+                    if let Some(hunk) = self
+                        .diff_hunks
+                        .iter()
+                        .find(|hunk| hunk.new_range.contains(&row32) || hunk.new_range.start == row32)
+                        .cloned()
+                    {
+                        cx.emit(EditorInputEvent::HunkClicked { hunk, position: event.position });
+                        return;
+                    }
+                }
+            }
+        }
+        // ⌥クリック = キャレット追加（multi-cursor・M10-10）。ドラッグ選択は開始しない。
+        if event.modifiers.alt {
+            self.buffer.add_cursor_at(offset);
+            self.marked_range = None;
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+            return;
+        }
+        self.is_selecting = true;
         if event.modifiers.shift {
             let anchor = self.primary().anchor;
             self.buffer.set_selections(vec![Selection::new(anchor, offset)]);
         } else {
+            // 50 行以上のジャンプはナビ履歴へ（⌃- で戻れる・M10-11）。
+            let snapshot = self.buffer.snapshot();
+            let previous = self.primary().head;
+            let distance = snapshot.byte_to_point(previous).row.abs_diff(snapshot.byte_to_point(offset).row);
+            if distance >= 50 {
+                cx.emit(EditorInputEvent::CaretJumped { from: previous });
+            }
             self.buffer.set_selections(vec![Selection::cursor(offset)]);
         }
         self.marked_range = None;
@@ -629,13 +1267,51 @@ impl EditorView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.is_selecting {
+        if self.is_selecting {
+            let offset = self.offset_for_position(event.position, window);
+            let anchor = self.primary().anchor;
+            self.buffer.set_selections(vec![Selection::new(anchor, offset)]);
+            cx.notify();
             return;
         }
+        // hover dwell: 同じ位置に HOVER_DWELL_MS 留まったら Dwell を emit（動くたび世代で無効化）。
+        // plain（composer）と無題ファイルは対象外。
+        if self.plain || self.buffer.path().is_none() {
+            return;
+        }
+        // 表示中 hover の位置から大きく離れたら Cancel（ポップアップ上は occlude でここへ来ない）。
+        if let Some(anchor) = self.last_dwell_anchor {
+            let distance =
+                f32::from((event.position.x - anchor.x).abs() + (event.position.y - anchor.y).abs());
+            if distance > HOVER_CANCEL_DISTANCE {
+                self.last_dwell_anchor = None;
+                cx.emit(EditorHoverEvent::Cancel);
+            }
+        }
+        self.hover_generation = self.hover_generation.wrapping_add(1);
+        let generation = self.hover_generation;
         let offset = self.offset_for_position(event.position, window);
-        let anchor = self.primary().anchor;
-        self.buffer.set_selections(vec![Selection::new(anchor, offset)]);
-        cx.notify();
+        let anchor = event.position;
+        self._hover_task = Some(cx.spawn(async move |editor, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(HOVER_DWELL_MS))
+                .await;
+            let _ = editor.update(cx, |editor, cx| {
+                if editor.hover_generation == generation {
+                    let (line, character) = editor.lsp_position_for_offset(offset);
+                    editor.last_dwell_anchor = Some(anchor);
+                    cx.emit(EditorHoverEvent::Dwell { line, character, anchor });
+                }
+            });
+        }));
+    }
+
+    /// hover の dwell/表示を無効化して Cancel を通知する（クリック・スクロールから呼ぶ）。
+    fn cancel_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_generation = self.hover_generation.wrapping_add(1);
+        if self.last_dwell_anchor.take().is_some() {
+            cx.emit(EditorHoverEvent::Cancel);
+        }
     }
 
     fn offset_for_position(&self, position: Point<Pixels>, window: &mut Window) -> usize {
@@ -644,13 +1320,78 @@ impl EditorView {
         };
         let snapshot = self.buffer.snapshot();
         let relative_y = (position.y - origin.y + self.scroll_top).max(px(0.));
-        let row = ((f32::from(relative_y) / LINE_HEIGHT).floor() as usize)
-            .min(snapshot.line_count().saturating_sub(1));
+        let display_row = ((f32::from(relative_y) / self.line_height_value()).floor() as usize)
+            .min(self.total_display_rows(&snapshot).saturating_sub(1));
+        // 表示行 → (論理行, セグメント)。マップが古ければ論理行として扱う（次 frame で直る）。
+        let (row, segment_range) = if self.wrap_map.key.0 == snapshot.version() {
+            let (row, segment) = self.wrap_map.display_to_logical(display_row);
+            let line_len = snapshot.line_len_bytes(row);
+            (row, self.wrap_map.segment_range(row, segment, line_len))
+        } else {
+            let row = display_row.min(snapshot.line_count().saturating_sub(1));
+            (row, 0..snapshot.line_len_bytes(row))
+        };
         let line_text = snapshot.line_text(row);
-        let shaped = shape_plain(&line_text, self.theme.fg0, window);
+        let segment_text = line_text
+            .get(segment_range.clone())
+            .unwrap_or(line_text.as_str())
+            .to_string();
+        let shaped = shape_plain(&segment_text, self.theme.fg0, self.font_size, window);
         let local_x = (position.x - origin.x).max(px(0.));
-        let column = shaped.closest_index_for_x(local_x);
+        let column = segment_range.start + shaped.closest_index_for_x(local_x);
         snapshot.point_to_byte(BufferPoint::new(row, column))
+    }
+
+    /// 括弧/クォートの自動ペア処理。介入したら true（呼び出し側は通常挿入をスキップ）。
+    fn handle_pair_input(&mut self, typed: char, cx: &mut Context<Self>) -> bool {
+        let selection = self.primary();
+        let snapshot = self.buffer.snapshot();
+        let previous = if selection.start() > 0 {
+            self.buffer
+                .text_range(snapshot.prev_char_boundary(selection.start())..selection.start())
+                .chars()
+                .next()
+        } else {
+            None
+        };
+        let next = self
+            .buffer
+            .text_range(selection.end()..snapshot.next_char_boundary(selection.end()))
+            .chars()
+            .next();
+        match editor_core::classify_pair_input(typed, selection.is_empty(), previous, next) {
+            editor_core::PairAction::Insert => false,
+            editor_core::PairAction::Pair(close) => {
+                let text = format!("{typed}{close}");
+                self.buffer.edit(&[selection.range()], &text);
+                let cursor = selection.start() + typed.len_utf8();
+                self.buffer.set_selections(vec![Selection::cursor(cursor)]);
+                self.after_edit(cx);
+                cx.emit(EditorInputEvent::Typed(typed.to_string()));
+                true
+            }
+            editor_core::PairAction::Wrap(close) => {
+                let inner = self.buffer.text_range(selection.range());
+                let text = format!("{typed}{inner}{close}");
+                let start = selection.start();
+                self.buffer.edit(&[selection.range()], &text);
+                // 内側テキストを選択し直す（続けて操作できるように）。
+                self.buffer.set_selections(vec![Selection::new(
+                    start + typed.len_utf8(),
+                    start + typed.len_utf8() + inner.len(),
+                )]);
+                self.after_edit(cx);
+                true
+            }
+            editor_core::PairAction::SkipOver => {
+                let cursor = snapshot.next_char_boundary(selection.end());
+                self.buffer.set_selections(vec![Selection::cursor(cursor)]);
+                self.blink_visible = true;
+                cx.emit(EditorInputEvent::Typed(typed.to_string()));
+                cx.notify();
+                true
+            }
+        }
     }
 
     /// 入力ハンドラの範囲解決: 明示レンジ → marked → 現在選択、の順（すべて byte）。
@@ -674,6 +1415,12 @@ impl Focusable for EditorView {
 /// composer は親（agent_panel）へ [`ComposerEvent`] を通知できる（Enter 送信の委譲）。
 impl EventEmitter<ComposerEvent> for EditorView {}
 
+/// 確定入力の通知（workspace が補完の自動トリガに使う）。
+impl EventEmitter<EditorInputEvent> for EditorView {}
+
+/// hover dwell の通知（workspace が LSP hover 要求に使う）。
+impl EventEmitter<EditorHoverEvent> for EditorView {}
+
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -684,11 +1431,32 @@ impl Render for EditorView {
             .text_color(self.theme.fg0)
             // コード = Guguru Sans Code（等幅・bin で bundle 済み）/ composer(plain) = IBM Plex Sans JP（UI）
             .font_family(if self.plain { "IBM Plex Sans JP" } else { "Guguru Sans Code" })
-            .text_size(px(FONT_SIZE))
-            .line_height(px(LINE_HEIGHT))
+            .text_size(px(self.font_size))
+            .line_height(px(self.line_height_value()))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::move_word_left))
+            .on_action(cx.listener(Self::move_word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::move_to_start))
+            .on_action(cx.listener(Self::move_to_end))
+            .on_action(cx.listener(Self::move_line_up))
+            .on_action(cx.listener(Self::move_line_down))
+            .on_action(cx.listener(Self::duplicate_line_up))
+            .on_action(cx.listener(Self::duplicate_line_down))
+            .on_action(cx.listener(Self::delete_line))
+            .on_action(cx.listener(Self::toggle_comment))
+            .on_action(cx.listener(Self::tab_indent))
+            .on_action(cx.listener(Self::indent))
+            .on_action(cx.listener(Self::outdent))
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::add_cursor_above))
+            .on_action(cx.listener(Self::add_cursor_below))
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::toggle_soft_wrap))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::move_left))
@@ -761,11 +1529,24 @@ impl EntityInputHandler for EditorView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 括弧/クォートの自動ペア（M10-9）。通常タイプ（明示レンジ無し・非 IME・コードのみ）だけ介入する。
+        if !self.plain && range_utf16.is_none() && self.marked_range.is_none() {
+            let mut chars = new_text.chars();
+            if let (Some(typed), None) = (chars.next(), chars.next()) {
+                if self.handle_pair_input(typed, cx) {
+                    return;
+                }
+            }
+        }
         let range = self.resolve_range(range_utf16);
         self.buffer.edit(&[range], new_text);
         self.marked_range = None;
         self.refresh_highlights();
         self.scroll_caret_into_view();
+        // 確定入力を親へ通知（補完の自動トリガ）。IME 変換中（replace_and_mark）は通らない経路。
+        if !new_text.is_empty() {
+            cx.emit(EditorInputEvent::Typed(new_text.to_string()));
+        }
         cx.notify();
     }
 
@@ -841,6 +1622,7 @@ struct EditorPrepaint {
     current_line: Option<PaintQuad>,
     diff_marks: Vec<PaintQuad>,
     diagnostic_marks: Vec<PaintQuad>,
+    search_marks: Vec<PaintQuad>,
     content_bounds: Bounds<Pixels>,
     gutter_width: Pixels,
     viewport_height: Pixels,
@@ -890,21 +1672,62 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        // wrap 列数の材料（'M' のセル幅・ガター概算）を先に測る（soft wrap・M10-12）。
+        let editor_font_size = self.editor.read(cx).font_size;
+        let cell_width_estimate =
+            f32::from(shape_plain("M", gpui::black(), editor_font_size, window).width).max(1.0);
         // 保留リビール（検索ジャンプ等）を viewport 確定後の今、消化する（対象行を中央へ寄せる）。
-        // 併せて、バッファが変わっていれば gutter diff を（デバウンス付きで）再計算する。
+        // 併せて wrap マップの再構築・gutter diff の再計算（いずれも変化時のみ）。
         self.editor.update(cx, |view, cx| {
+            let snapshot = view.buffer.snapshot();
+            // wrap マップ: (version, columns, on/off) が変わった時だけ作り直す。
+            // plain（composer）は**常に折り返し**（長文が右へはみ出さない・横スクロールは無い）。
+            let wrap_on = view.soft_wrap || view.plain;
+            let columns = if wrap_on {
+                if view.plain {
+                    // composer はガター無し。フォントが Sans（プロポーショナル）なので等幅見積もりは
+                    // ややズレる — はみ出しより早折れの方が無害なので、そのまま 'M' 幅で安全側に振る。
+                    ((f32::from(bounds.size.width) / cell_width_estimate).floor() as usize).max(10)
+                } else {
+                    let digits = snapshot.line_count().to_string().len() as f32;
+                    let gutter =
+                        (digits * cell_width_estimate + GUTTER_PADDING * 2.0).max(GUTTER_MIN_WIDTH);
+                    (((f32::from(bounds.size.width) - gutter) / cell_width_estimate).floor() as usize)
+                        .max(10)
+                }
+            } else {
+                0
+            };
+            let key = (snapshot.version(), columns, wrap_on);
+            if view.wrap_map.key != key {
+                view.wrap_map = if key.2 {
+                    WrapMap::build(&snapshot, columns, key)
+                } else {
+                    WrapMap::identity(snapshot.line_count(), key)
+                };
+            }
             if let Some(offset) = view.pending_reveal.take() {
-                let snapshot = view.buffer.snapshot();
-                let row = snapshot.byte_to_point(offset).row as f32;
+                let line_height = view.line_height_value();
+                let row = view.display_row_for_offset(&snapshot, offset) as f32;
                 let viewport = f32::from(bounds.size.height);
-                let total = snapshot.line_count() as f32 * LINE_HEIGHT;
-                let target = row * LINE_HEIGHT - viewport / 2.0 + LINE_HEIGHT / 2.0;
-                view.scroll_top = px(target.clamp(0.0, (total - viewport).max(0.0)));
+                let row_top = row * line_height;
+                let current_top = f32::from(view.scroll_top);
+                // 既に丸ごと見えている行へは動かさない（⌘F のインクリメンタル巡回で画面が跳ねない）。
+                // 見えていなければ中央へ。
+                let fully_visible =
+                    row_top >= current_top && row_top + line_height <= current_top + viewport;
+                if !fully_visible {
+                    let total = view.total_display_rows(&snapshot) as f32 * line_height;
+                    let target = row_top - viewport / 2.0 + line_height / 2.0;
+                    view.scroll_top = px(target.clamp(0.0, (total - viewport).max(0.0)));
+                }
             }
             if view.buffer.version() != view.diff_scheduled_version {
                 view.diff_scheduled_version = view.buffer.version();
                 view.schedule_diff(cx);
             }
+            // ハイライト Tree の追従（増分 or 全文・M11-8）。
+            view.sync_highlight_tree();
         });
         let view = self.editor.read(cx);
         let snapshot = view.buffer.snapshot();
@@ -914,23 +1737,28 @@ impl Element for EditorElement {
         let marked = view.marked_range.clone();
         let focused = view.focus_handle.is_focused(window);
         let selections = view.buffer.selections().to_vec();
-        let highlights = view.highlights.clone();
+
         let diff_hunks = view.diff_hunks.clone();
         let diagnostics = view.diagnostics.clone();
+        let search_ranges = view.search_ranges.clone();
+        let line_annotation = view.line_annotation.clone();
+        let agent_mark_color = view.agent_mark_color;
         let plain = view.plain;
         let blink_visible = view.blink_visible;
         let text_font = window.text_style().font();
         let primary = selections.first().copied().unwrap_or(Selection::cursor(0));
 
         let line_count = snapshot.line_count();
-        let line_height = px(LINE_HEIGHT);
+        let font_size = view.font_size;
+        let line_height_value = view.line_height_value();
+        let line_height = px(line_height_value);
 
         // ガター幅: 最大行番号を shape して測る（平坦モードはガター無し）。
         let gutter_width = if plain {
             px(0.)
         } else {
             let widest_number = line_count.to_string();
-            let sample = shape_plain(&widest_number, theme.fg2, window);
+            let sample = shape_plain(&widest_number, theme.fg2, font_size, window);
             px((f32::from(sample.width) + GUTTER_PADDING * 2.0).max(GUTTER_MIN_WIDTH))
         };
 
@@ -938,7 +1766,30 @@ impl Element for EditorElement {
         let content_width = (bounds.size.width - gutter_width).max(px(0.));
         let content_bounds = Bounds::new(content_origin, size(content_width, bounds.size.height));
 
-        let visible = visible_rows(f32::from(scroll_top), f32::from(bounds.size.height), LINE_HEIGHT, line_count);
+        // 仮想化は**表示行**で回す（wrap off は恒等マップ = 従来と同一・M10-12）。
+        let wrap_map = &self.editor.read(cx).wrap_map;
+        let total_display = wrap_map.total_display_rows();
+        let visible = visible_rows(f32::from(scroll_top), f32::from(bounds.size.height), line_height_value, total_display);
+
+        // 可視表示行のセグメントが跨る byte 範囲だけハイライトを問い合わせる（M11-8）。
+        let highlights: Vec<lang::HighlightSpan> = if visible.is_empty() {
+            Vec::new()
+        } else {
+            let (first_line, first_segment) = wrap_map.display_to_logical(visible.start);
+            let (last_line, last_segment) = wrap_map.display_to_logical(visible.end.saturating_sub(1));
+            let start_byte = snapshot.point_to_byte(BufferPoint::new(first_line, 0))
+                + wrap_map
+                    .segment_range(first_line, first_segment, snapshot.line_len_bytes(first_line))
+                    .start;
+            let end_byte = snapshot.point_to_byte(BufferPoint::new(last_line, 0))
+                + wrap_map
+                    .segment_range(last_line, last_segment, snapshot.line_len_bytes(last_line))
+                    .end;
+            view.highlighter
+                .as_ref()
+                .map(|highlighter| highlighter.spans(&snapshot.text(), start_byte..end_byte.max(start_byte)))
+                .unwrap_or_default()
+        };
 
         let mut line_numbers = Vec::new();
         let mut text_lines = Vec::new();
@@ -948,25 +1799,31 @@ impl Element for EditorElement {
         let mut caret_bounds = None;
         let mut diff_marks = Vec::new();
         let mut diagnostic_marks = Vec::new();
+        let mut search_marks = Vec::new();
 
-        let primary_row = snapshot.byte_to_point(primary.head).row;
+        let primary_point = snapshot.byte_to_point(primary.head);
+        let primary_display_row = wrap_map.logical_to_display(primary_point.row, primary_point.column);
 
-        for row in visible {
-            let y = bounds.top() + line_height * (row as f32) - scroll_top;
+        for display_row in visible {
+            let (row, segment) = wrap_map.display_to_logical(display_row);
+            let y = bounds.top() + line_height * (display_row as f32) - scroll_top;
+            let is_first_segment = segment == 0;
 
             // gutter diff マーク（左端の細いバー）。plain（composer）は gutter が無いので出さない。
-            if !plain {
+            // wrap 中は論理行の先頭セグメントのみ。
+            if !plain && is_first_segment {
                 let row32 = row as u32;
                 for hunk in &diff_hunks {
                     match hunk.kind {
                         project::HunkKind::Added | project::HunkKind::Modified
                             if hunk.new_range.contains(&row32) =>
                         {
-                            let color = if hunk.kind == project::HunkKind::Added {
+                            // エージェント編集のファイルはスレッド色で（生中継の帰属表示・M12-3）。
+                            let color = agent_mark_color.unwrap_or(if hunk.kind == project::HunkKind::Added {
                                 theme.ok
                             } else {
                                 theme.warn
-                            };
+                            });
                             diff_marks.push(fill(
                                 Bounds::new(
                                     point(bounds.left(), y + px(1.)),
@@ -988,7 +1845,7 @@ impl Element for EditorElement {
             }
 
             // 診断の下線（error=赤 / warn=琥珀 / info・hint=ミュート）。行のテキスト幅いっぱいに引く。
-            if !plain {
+            if !plain && is_first_segment {
                 let row32 = row as u32;
                 if let Some((_, severity)) = diagnostics.iter().find(|(line, _)| *line == row32) {
                     let color = match severity {
@@ -1006,21 +1863,27 @@ impl Element for EditorElement {
                 }
             }
 
-            let line_text = snapshot.line_text(row);
-            let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0));
+            let full_line_text = snapshot.line_text(row);
+            let segment_range = wrap_map.segment_range(row, segment, full_line_text.len());
+            let line_start =
+                snapshot.point_to_byte(BufferPoint::new(row, 0)) + segment_range.start;
+            let line_text = full_line_text[segment_range.clone()].to_string();
             let line_end = line_start + line_text.len();
+            // キャレットがこのセグメントに乗るか（セグメント境界の offset は次セグメント側。
+            // 論理行末だけは最終セグメントに乗せる）。
+            let is_last_segment = segment_range.end == full_line_text.len();
 
-            if !plain && row == primary_row {
+            if !plain && display_row == primary_display_row {
                 current_line = Some(fill(
                     Bounds::new(point(content_origin.x, y), size(content_width, line_height)),
                     hsla(0., 0., 1., 0.045),
                 ));
             }
 
-            // 行番号（右寄せ・平坦モードは無し）
-            if !plain {
+            // 行番号（右寄せ・平坦モードは無し・wrap 中は先頭セグメントのみ）
+            if !plain && is_first_segment {
                 let number_text = (row + 1).to_string();
-                let number_line = shape_plain(&number_text, theme.fg2, window);
+                let number_line = shape_plain(&number_text, theme.fg2, font_size, window);
                 let number_x = bounds.left() + gutter_width - px(GUTTER_PADDING) - number_line.width;
                 line_numbers.push(PositionedLine { line: number_line, origin: point(number_x, y) });
             }
@@ -1038,10 +1901,30 @@ impl Element for EditorElement {
             );
             let shaped = window.text_system().shape_line(
                 SharedString::from(line_text.clone()),
-                px(FONT_SIZE),
+                px(font_size),
                 &runs,
                 None,
             );
+
+            // 検索ハイライト（⌘F の全マッチ）。選択面より先に paint する＝下に敷く。
+            for range in ranges_overlapping_line(&search_ranges, line_start, line_end) {
+                if range.start == range.end {
+                    continue; // 零幅（正規表現の空マッチ）は塗らない
+                }
+                let visible_start = range.start.max(line_start) - line_start;
+                let x_start = content_origin.x + shaped.x_for_index(visible_start);
+                let x_end = if range.end > line_end {
+                    content_origin.x + content_width
+                } else {
+                    content_origin.x + shaped.x_for_index(range.end - line_start)
+                };
+                if x_end > x_start {
+                    search_marks.push(fill(
+                        Bounds::from_corners(point(x_start, y), point(x_end, y + line_height)),
+                        theme.warn.alpha(0.16),
+                    ));
+                }
+            }
 
             // 選択面
             for selection in &selections {
@@ -1063,9 +1946,12 @@ impl Element for EditorElement {
                 }
             }
 
-            // キャレット（空選択）
+            // キャレット（空選択）。境界 offset は次セグメント側・論理行末は最終セグメント。
             for (index, selection) in selections.iter().enumerate() {
-                if !selection.is_empty() || snapshot.byte_to_point(selection.head).row != row {
+                let head = selection.head;
+                let on_segment = head >= line_start
+                    && (head < line_end || (head == line_end && is_last_segment));
+                if !selection.is_empty() || !on_segment {
                     continue;
                 }
                 let caret_x = content_origin.x + shaped.x_for_index(selection.head - line_start);
@@ -1073,6 +1959,17 @@ impl Element for EditorElement {
                 carets.push(fill(caret_rect, accent));
                 if index == 0 {
                     caret_bounds = Some(caret_rect);
+                }
+            }
+
+            // blame 注釈（キャレット行の行末に dim・最終セグメントのみ・M11-11）。
+            if let Some((annotation_row, annotation_text)) = &line_annotation {
+                if *annotation_row == row && is_last_segment && !plain {
+                    let annotation = shape_plain(annotation_text, theme.fg2.alpha(0.7), font_size * 0.9, window);
+                    let x = content_origin.x + shaped.width + px(32.);
+                    if x + annotation.width < content_origin.x + content_width {
+                        text_lines.push(PositionedLine { line: annotation, origin: point(x, y) });
+                    }
                 }
             }
 
@@ -1092,6 +1989,7 @@ impl Element for EditorElement {
             current_line,
             diff_marks,
             diagnostic_marks,
+            search_marks,
             content_bounds,
             gutter_width,
             viewport_height: bounds.size.height,
@@ -1124,10 +2022,14 @@ impl Element for EditorElement {
         for mark in prepaint.diff_marks.drain(..) {
             window.paint_quad(mark);
         }
+        // 検索ハイライト（⌘F 全マッチ）は選択面の下に敷く。
+        for mark in prepaint.search_marks.drain(..) {
+            window.paint_quad(mark);
+        }
         for quad in prepaint.selections.drain(..) {
             window.paint_quad(quad);
         }
-        let line_height = px(LINE_HEIGHT);
+        let line_height = px(self.editor.read(cx).line_height_value());
         for positioned in prepaint.line_numbers.drain(..) {
             if let Err(error) = positioned.line.paint(positioned.origin, line_height, TextAlign::Left, None, window, cx) {
                 eprintln!("gutter paint 失敗: {error}");
@@ -1179,6 +2081,17 @@ fn visible_rows(scroll_top: f32, viewport_height: f32, line_height: f32, line_co
     let first = (scroll_top / line_height).floor().max(0.0) as usize;
     let last = ((scroll_top + viewport_height) / line_height).ceil() as usize;
     first.min(line_count)..last.min(line_count)
+}
+
+/// `ranges`（start 昇順・非重複）のうち `start..=end` に重なる部分列を二分探索で切り出す。
+/// 行ごとの検索ハイライト描画で使う（マッチが多くても可視行分しか見ない）。
+fn ranges_overlapping_line(ranges: &[Range<usize>], start: usize, end: usize) -> &[Range<usize>] {
+    let first = ranges.partition_point(|range| range.end < start);
+    let mut last = first;
+    while last < ranges.len() && ranges[last].start <= end {
+        last += 1;
+    }
+    &ranges[first..last]
 }
 
 /// 縦移動（row ± delta、列は据え置き。行末を超えたら行末にクリップ）。
@@ -1256,8 +2169,112 @@ fn syntax_color(kind: lang::HighlightKind, syntax: &SyntaxColors) -> gpui::Hsla 
     }
 }
 
+// ── soft wrap（M10-12）: 論理行→表示行マップ。設計は docs/JOURNAL.md 2026-07-16 ──
+
+/// 1 論理行をセル幅 `columns` で折り返したときの**セグメント開始 byte 列**（先頭は必ず 0）。
+/// 等幅前提: ASCII=1 セル・東アジア全角=2 セル（unicode-width）。単語境界（空白の直後）優先で切り、
+/// 1 語が幅を超えるときは文字で切る。columns==0 は折返し無し扱い。
+fn compute_wrap_segments(line: &str, columns: usize) -> Vec<usize> {
+    use unicode_width::UnicodeWidthChar as _;
+    let mut starts = vec![0usize];
+    if columns == 0 {
+        return starts;
+    }
+    let mut cells = 0usize;
+    let mut last_break: Option<usize> = None; // 直近の折返し候補（空白の直後の byte）
+    let mut segment_start = 0usize;
+    let mut byte = 0usize;
+    for c in line.chars() {
+        let width = c.width().unwrap_or(1).max(1);
+        if cells + width > columns && byte > segment_start {
+            // 単語境界があればそこで、無ければ現在位置（文字境界）で折る。
+            let break_at = match last_break {
+                Some(candidate) if candidate > segment_start => candidate,
+                _ => byte,
+            };
+            starts.push(break_at);
+            segment_start = break_at;
+            // 折返し後のセル数を数え直す（break_at..byte+この文字）。
+            cells = line[break_at..byte].chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
+            last_break = None;
+        }
+        cells += width;
+        byte += c.len_utf8();
+        if c == ' ' || c == '\t' {
+            last_break = Some(byte);
+        }
+    }
+    starts
+}
+
+/// 論理行↔表示行のマップ。(buffer version, columns, 有効) が変わったら作り直す（prepaint）。
+struct WrapMap {
+    /// 論理行ごとのセグメント開始 byte 列。無効時や短い行は `[0]`。
+    segments: Vec<Vec<usize>>,
+    /// 論理行 i の先頭表示行（累積）。len = 行数 + 1・末尾 = 総表示行数。
+    prefix_rows: Vec<usize>,
+    /// このマップを計算した (buffer version, columns, enabled)。
+    key: (u64, usize, bool),
+}
+
+impl WrapMap {
+    fn identity(line_count: usize, key: (u64, usize, bool)) -> WrapMap {
+        WrapMap {
+            segments: vec![vec![0]; line_count],
+            prefix_rows: (0..=line_count).collect(),
+            key,
+        }
+    }
+
+    fn build(snapshot: &BufferSnapshot, columns: usize, key: (u64, usize, bool)) -> WrapMap {
+        let line_count = snapshot.line_count();
+        let mut segments = Vec::with_capacity(line_count);
+        let mut prefix_rows = Vec::with_capacity(line_count + 1);
+        let mut total = 0usize;
+        for row in 0..line_count {
+            prefix_rows.push(total);
+            let starts = compute_wrap_segments(&snapshot.line_text(row), columns);
+            total += starts.len();
+            segments.push(starts);
+        }
+        prefix_rows.push(total);
+        WrapMap { segments, prefix_rows, key }
+    }
+
+    fn total_display_rows(&self) -> usize {
+        self.prefix_rows.last().copied().unwrap_or(0).max(1)
+    }
+
+    /// 表示行 → (論理行, セグメント番号)。
+    fn display_to_logical(&self, display_row: usize) -> (usize, usize) {
+        let line = self
+            .prefix_rows
+            .partition_point(|&first| first <= display_row)
+            .saturating_sub(1)
+            .min(self.segments.len().saturating_sub(1));
+        let segment = display_row.saturating_sub(self.prefix_rows[line]);
+        (line, segment.min(self.segments[line].len().saturating_sub(1)))
+    }
+
+    /// (論理行, 行内 byte 列) → 表示行。
+    fn logical_to_display(&self, line: usize, column: usize) -> usize {
+        let line = line.min(self.segments.len().saturating_sub(1));
+        let starts = &self.segments[line];
+        let segment = starts.partition_point(|&start| start <= column).saturating_sub(1);
+        self.prefix_rows[line] + segment
+    }
+
+    /// 表示行のセグメント byte 範囲（行内相対）。end は行 byte 長（呼び出し側が渡す）でクリップ。
+    fn segment_range(&self, line: usize, segment: usize, line_len: usize) -> Range<usize> {
+        let starts = &self.segments[line.min(self.segments.len().saturating_sub(1))];
+        let start = starts.get(segment).copied().unwrap_or(0);
+        let end = starts.get(segment + 1).copied().unwrap_or(line_len);
+        start..end.max(start)
+    }
+}
+
 /// 単色 1 行を shape する（行番号・ヒットテスト用）。フォントはウィンドウの解決済みフォントを使う。
-fn shape_plain(text: &str, color: gpui::Hsla, window: &mut Window) -> ShapedLine {
+fn shape_plain(text: &str, color: gpui::Hsla, font_size: f32, window: &mut Window) -> ShapedLine {
     let text_font = window.text_style().font();
     let run = TextRun {
         len: text.len(),
@@ -1269,7 +2286,7 @@ fn shape_plain(text: &str, color: gpui::Hsla, window: &mut Window) -> ShapedLine
     };
     window
         .text_system()
-        .shape_line(SharedString::from(text.to_string()), px(FONT_SIZE), &[run], None)
+        .shape_line(SharedString::from(text.to_string()), px(font_size), &[run], None)
 }
 
 /// new_text 内の UTF-16 offset を byte offset に変換する（変換中選択の解決）。
@@ -1300,6 +2317,63 @@ mod tests {
         assert_eq!(visible_rows(230.0, 230.0, 23.0, 100), 10..20);
         // 行数を超えない（末尾クランプ）
         assert_eq!(visible_rows(0.0, 230.0, 23.0, 3), 0..3);
+    }
+
+    #[test]
+    fn ranges_overlapping_line_slices_by_binary_search() {
+        let ranges = vec![0..3, 5..8, 10..20, 25..26];
+        // 行 [4, 9]: 5..8 のみ（10..20 は次の行から始まる）
+        assert_eq!(ranges_overlapping_line(&ranges, 4, 9), &[5..8]);
+        // 行 [12, 15]: 跨いでいる 10..20 のみ
+        assert_eq!(ranges_overlapping_line(&ranges, 12, 15), &[10..20]);
+        // 行 [21, 24]: どれとも重ならない
+        assert!(ranges_overlapping_line(&ranges, 21, 24).is_empty());
+        // 端の一致（end == 行頭 / start == 行末）も含む
+        assert_eq!(ranges_overlapping_line(&ranges, 3, 5), &[0..3, 5..8]);
+        // 空列
+        assert!(ranges_overlapping_line(&[], 0, 100).is_empty());
+    }
+
+    #[test]
+    fn wrap_segments_break_at_word_boundaries_and_cjk_cells() {
+        // 10 セル幅・"hello world foo" → "hello " / "world foo"（語境界優先・後半 9 セルは収まる）
+        assert_eq!(compute_wrap_segments("hello world foo", 10), vec![0, 6]);
+        // 8 セル幅なら 3 段: "hello " / "world " / "foo"
+        assert_eq!(compute_wrap_segments("hello world foo", 8), vec![0, 6, 12]);
+        // 単語が幅を超える → 文字で切る
+        assert_eq!(compute_wrap_segments("aaaaaaaaaaaa", 5), vec![0, 5, 10]);
+        // 全角は 2 セル: 4 セル幅に「ああah」→「ああ」(4) / 「ah」
+        assert_eq!(compute_wrap_segments("ああah", 4), vec![0, 6]);
+        // 幅内は折り返さない・columns=0 は無効
+        assert_eq!(compute_wrap_segments("short", 80), vec![0]);
+        assert_eq!(compute_wrap_segments("anything at all", 0), vec![0]);
+        // 空行
+        assert_eq!(compute_wrap_segments("", 8), vec![0]);
+    }
+
+    #[test]
+    fn wrap_map_round_trips_display_and_logical_rows() {
+        let buffer = Buffer::from_str("short\naaaaaaaaaaaa\nx");
+        let snapshot = buffer.snapshot();
+        let map = WrapMap::build(&snapshot, 5, (0, 5, true));
+        // 行0=1seg・行1=3seg(12 文字/5)・行2=1seg → 計 5 表示行
+        assert_eq!(map.total_display_rows(), 5);
+        assert_eq!(map.display_to_logical(0), (0, 0));
+        assert_eq!(map.display_to_logical(1), (1, 0));
+        assert_eq!(map.display_to_logical(2), (1, 1));
+        assert_eq!(map.display_to_logical(3), (1, 2));
+        assert_eq!(map.display_to_logical(4), (2, 0));
+        // 逆写像
+        assert_eq!(map.logical_to_display(1, 0), 1);
+        assert_eq!(map.logical_to_display(1, 5), 2);
+        assert_eq!(map.logical_to_display(1, 11), 3);
+        // セグメント範囲
+        assert_eq!(map.segment_range(1, 1, 12), 5..10);
+        assert_eq!(map.segment_range(1, 2, 12), 10..12);
+        // 恒等マップ
+        let identity = WrapMap::identity(3, (0, 0, false));
+        assert_eq!(identity.total_display_rows(), 3);
+        assert_eq!(identity.display_to_logical(2), (2, 0));
     }
 
     #[test]

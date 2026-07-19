@@ -72,6 +72,25 @@ pub struct PermissionDiff {
     pub new_text: String,
 }
 
+/// プラン 1 項目の状態（ACP `PlanEntryStatus` の写し）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanStatus {
+    /// 未着手。
+    Pending,
+    /// 進行中（UI では ● スレッド色）。
+    InProgress,
+    /// 完了。
+    Completed,
+}
+
+/// エージェントの実行プラン 1 項目（ACP `SessionUpdate::Plan` の写し・M12-9）。
+/// プランは毎回**全量置換**で届く（差分ではない）。
+#[derive(Debug, Clone)]
+pub struct PlanItem {
+    pub content: String,
+    pub status: PlanStatus,
+}
+
 /// UI へ流すストリーミングイベント（ACP の `SessionUpdate` を UI 非依存に簡約したもの）。
 /// agent_panel はこれを受けて transcript を逐次更新する。
 #[derive(Debug, Clone)]
@@ -103,6 +122,8 @@ pub enum AgentEvent {
         options: Vec<PermissionChoice>,
         respond: mpsc::UnboundedSender<usize>,
     },
+    /// エージェントの実行プラン全量（`SessionUpdate::Plan`）。UI は常設チェックリストへ置換反映する。
+    Plan(Vec<PlanItem>),
     /// 1 ターン（prompt→応答）が完了した（`StopReason`）。
     TurnEnded,
     /// エラー（接続断・プロトコル異常・起動失敗など）。
@@ -141,51 +162,101 @@ pub struct AgentKind {
     pub id: &'static str,
     pub label: &'static str,
     bin: &'static str,
-    package: &'static str,
+    /// npx フォールバック用の npm パッケージ。**npm 外（kimi=PyPI 等）は None**。
+    package: Option<&'static str>,
     extra_args: &'static [&'static str],
+    /// セットアップ画面の「入れ方」でターミナルに流す導入コマンド（vendor の CLI 本体を入れる）。
+    pub install_cmd: &'static str,
+    /// セットアップ画面の「ログイン」でターミナルに流す認証コマンド（vendor 自身のログイン導線）。
+    /// Shirushi は鍵を持たず、CLI 側の認証にそのまま乗る（Zed の ACP と同じ流儀）。
+    pub login_cmd: &'static str,
 }
 
-/// 対応エージェント一覧。先頭（Claude）が既定。Claude 以外は初回 npx ダウンロード + 各サービス認証が要る。
+/// エージェントのローカル導入状況（設定画面のステータス表示）。認証状態は見ない（CLI 任せ）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    /// bin がローカルにある（PATH / Zed の npx キャッシュ）。すぐ使える。
+    Installed,
+    /// bin は無いが npm パッケージがあり npx で初回取得できる。
+    Npx,
+    /// bin も無く npm 外＝手動導入が要る（例: Kimi=uv/pip）。
+    Missing,
+}
+
+/// 対応エージェント一覧。先頭（Claude）が既定。Claude 以外は初回 npx/導入 + 各サービス認証が要る。
+/// `package` は npx フォールバック用（npm 外＝Kimi は None＝PATH の bin を使う）。`install_cmd`/
+/// `login_cmd` はセットアップ画面がターミナルに流す人間向けコマンド（vendor 自身の導線に委譲）。
 pub const AGENTS: &[AgentKind] = &[
     AgentKind {
         id: "claude",
         label: "Claude Code",
         bin: "claude-agent-acp",
-        package: "@agentclientprotocol/claude-agent-acp@0.58.1",
+        package: Some("@agentclientprotocol/claude-agent-acp@0.58.1"),
         extra_args: &[],
+        install_cmd: "npm i -g @anthropic-ai/claude-code",
+        login_cmd: "claude",
     },
     AgentKind {
         id: "codex",
         label: "Codex",
         bin: "codex-acp",
-        package: "@agentclientprotocol/codex-acp@1.1.2",
+        package: Some("@agentclientprotocol/codex-acp@1.1.2"),
         extra_args: &[],
+        install_cmd: "npm i -g @openai/codex",
+        login_cmd: "codex",
     },
     AgentKind {
         id: "gemini",
         label: "Gemini CLI",
         bin: "gemini",
-        package: "@google/gemini-cli@0.50.0",
+        package: Some("@google/gemini-cli@0.50.0"),
         extra_args: &["--acp"],
+        install_cmd: "npm i -g @google/gemini-cli",
+        login_cmd: "gemini",
     },
     AgentKind {
         id: "copilot",
         label: "GitHub Copilot",
         bin: "copilot",
-        package: "@github/copilot@1.0.70",
+        package: Some("@github/copilot@1.0.70"),
         extra_args: &["--acp"],
+        install_cmd: "npm i -g @github/copilot",
+        login_cmd: "copilot",
     },
     AgentKind {
         id: "qwen",
         label: "Qwen Code",
         bin: "qwen",
-        package: "@qwen-code/qwen-code@0.19.9",
+        package: Some("@qwen-code/qwen-code@0.19.9"),
         extra_args: &["--acp", "--experimental-skills"],
+        install_cmd: "npm i -g @qwen-code/qwen-code",
+        login_cmd: "qwen",
+    },
+    // OpenCode（sst）: ACP は `opencode acp` サブコマンド。npm `opencode-ai`。
+    AgentKind {
+        id: "opencode",
+        label: "OpenCode",
+        bin: "opencode",
+        package: Some("opencode-ai"),
+        extra_args: &["acp"],
+        install_cmd: "npm i -g opencode-ai",
+        login_cmd: "opencode",
+    },
+    // Kimi Code CLI（Moonshot）: ACP は `kimi acp`。PyPI `kimi-cli`（npm 外＝package None）。
+    AgentKind {
+        id: "kimi",
+        label: "Kimi CLI",
+        bin: "kimi",
+        package: None,
+        extra_args: &["acp"],
+        install_cmd: "uv tool install kimi-cli",
+        login_cmd: "kimi",
     },
 ];
 
 /// UI のエージェントセレクタに出すラベル一覧（[`AGENTS`] と 1:1 対応・Zed の registry 表示名準拠）。
-pub const AGENT_LABELS: &[&str] = &["Claude Code", "Codex", "Gemini CLI", "GitHub Copilot", "Qwen Code"];
+pub const AGENT_LABELS: &[&str] =
+    &["Claude Code", "Codex", "Gemini CLI", "GitHub Copilot", "Qwen Code", "OpenCode", "Kimi CLI"];
 
 impl AgentKind {
     /// ラベル（例 "Claude"）から引く。
@@ -206,11 +277,23 @@ impl AgentKind {
         if let Some(bin) = zed_cached_agent(self.bin) {
             return Some(AgentCommand { path: bin, args: extra, cwd });
         }
-        // 3) npx フォールバック（node/npx が PATH に要る。初回はダウンロード）
+        // 3) npx フォールバック（npm パッケージがある agent のみ。node/npx が PATH に要る）
+        let package = self.package?;
         let npx = find_in_path("npx")?;
-        let mut args = vec!["-y".to_string(), self.package.to_string()];
+        let mut args = vec!["-y".to_string(), package.to_string()];
         args.extend(extra);
         Some(AgentCommand { path: npx, args, cwd })
+    }
+
+    /// ローカルでの導入状況（設定画面のステータス表示用）。認証状態までは見ない（＝CLI 任せ）。
+    pub fn availability(&self) -> Availability {
+        if find_in_path(self.bin).is_some() || zed_cached_agent(self.bin).is_some() {
+            Availability::Installed
+        } else if self.package.is_some() && find_in_path("npx").is_some() {
+            Availability::Npx // bin は無いが npx で初回取得できる
+        } else {
+            Availability::Missing // bin も無く npm 外（要手動導入。例: Kimi=uv）
+        }
     }
 
     /// 指定 host 上で agent を解決する。remote の認証情報は remote 側のものだけを使う。
@@ -234,8 +317,9 @@ impl AgentKind {
         if let Some(path) = resolve(self.bin) {
             return Some(AgentCommand { path, args: extra, cwd });
         }
+        let package = self.package?;
         let npx = resolve("npx")?;
-        let mut args = vec!["-y".to_string(), self.package.to_string()];
+        let mut args = vec!["-y".to_string(), package.to_string()];
         args.extend(extra);
         Some(AgentCommand { path: npx, args, cwd })
     }
@@ -554,6 +638,26 @@ pub async fn run_session_on(
                                                 ))
                                                 .ok();
                                         }
+                                        v1::SessionUpdate::Plan(plan) => {
+                                            let items = plan
+                                                .entries
+                                                .iter()
+                                                .map(|entry| PlanItem {
+                                                    content: entry.content.clone(),
+                                                    status: match entry.status {
+                                                        v1::PlanEntryStatus::InProgress => {
+                                                            PlanStatus::InProgress
+                                                        }
+                                                        v1::PlanEntryStatus::Completed => {
+                                                            PlanStatus::Completed
+                                                        }
+                                                        // Pending + 将来の未知値は未着手扱い（non_exhaustive）。
+                                                        _ => PlanStatus::Pending,
+                                                    },
+                                                })
+                                                .collect();
+                                            event_tx.unbounded_send(AgentEvent::Plan(items)).ok();
+                                        }
                                         _ => {}
                                     }
                                     Ok(())
@@ -742,6 +846,7 @@ mod tests {
                                 options.iter().map(|o| &o.label).collect::<Vec<_>>());
                             respond.unbounded_send(0).ok(); // テストでは先頭を選んで進める
                         }
+                        AgentEvent::Plan(items) => eprintln!("[plan] {} items", items.len()),
                         AgentEvent::TurnEnded => eprintln!("\n[turn ended]"),
                         AgentEvent::Failed(error) => eprintln!("[failed] {error}"),
                     }

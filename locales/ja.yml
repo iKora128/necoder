@@ -11,3 +11,267 @@ common:
 finder:
   files: ファイルを検索…
   projects: プロジェクトを切り替え…
+agent:
+  open_diff_tab: エディタで開く（diff タブ）
+  waiting_permission: 承認待ちで停止中
+  todos: Todos
+  copy_tip: このエントリをコピー
+  pill_agent: エージェント（どの AI で話すか）
+  pill_mode: 権限モード（編集・実行の許可レベル）
+  pill_model: モデル
+  pill_effort: 推論の深さ（effort）
+  err_no_project: プロジェクトが未確定のため送れません
+  err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
+  err_session_lost: セッションが切れました。もう一度送信してください
+  permission_files: "%{title}（%{n} ファイル）"
+  done: 完了 %{elapsed}
+  done_touched: 完了 %{elapsed}・触ったファイル %{n}
+  close_thread_tip: スレッドを閉じる  ⌘W
+  rename_thread_tip: 名前を変更（ダブルクリック）
+  history_tip: スレッド履歴
+  history_placeholder: 過去のスレッドを開く…
+  new_thread_tip: 新規スレッド  ⌘⇧A
+  thinking: ✳ 考え中
+  generating: ⏺ 生成中
+  celebrate: 🙌 完了
+  idle: 待機中
+  empty: スレッドはありません（＋ / ⌘⇧A で開始）
+  checkpoint_row: checkpoint — %{label}（クリックでこの時点へ戻す）
+  context_filter: ファイル名で絞り込み…
+  permission_needed: ● 承認が必要
+  attach_tip: ファイルを文脈に添付
+  hint_submit_enter: ⏎ 送信 / ⇧⏎ 改行
+  hint_submit_cmd: ⏎ 改行 / ⌘⏎ 送信
+  ime_tip: Enter の挙動を切替（送信 ⇄ 改行）。日本語 IME の変換確定では送信しません
+  send_enter: 送信 ⏎
+  send_cmd: 送信 ⌘⏎
+  more_lines: … （他 %{n} 行）
+hunk:
+  stage: この hunk を stage
+  revert: この hunk を巻き戻す
+  copy: hunk をコピー
+  open_diff: diff をタブで開く
+symbols:
+  outline: シンボルへ移動…
+  workspace: ワークスペースのシンボル…
+diagnostics:
+  title: 診断一覧
+rename:
+  label: 新しい名前
+color:
+  hex_placeholder: rrggbb
+inline:
+  title: ⌘I 編集
+  title_terminal: ⌘I コマンド生成
+  instruction_placeholder: 編集指示（Enter=生成 / Esc=閉じる）
+  busy: 生成中…（claude -p）
+  accept: 適用 ⏎
+  reject: 破棄 esc
+  no_change: （変更なし）
+  empty_target: 編集対象が空です（コードを選択して ⌘I）
+  buffer_changed: バッファが変わったため提案を破棄しました
+todos:
+  title: Todo ボード
+  empty: .shirushi/todos.md がありません（✨で今日の計画を作れます）
+  plan: ✨ 今日の計画
+  plan_busy: 生成中…
+  plan_tip: ROADMAP と git status から今日のタスク下書きを生成（claude -p）
+  plan_added: 今日の計画を %{count} 件追加しました
+  send_tip: このタスクをアクティブスレッドへ送る（完了時に自動チェック）
+  send_prompt: "%{text}\n\n完了したら .shirushi/todos.md のこの項目「%{text}」のチェックボックスを [x] に書き換えて。"
+palette:
+  placeholder: コマンドを検索…
+cmd:
+  file_finder: "ファイル: 開く…"
+  save_active: "ファイル: 保存"
+  close_tab: "ファイル: タブを閉じる"
+  restore_closed_tab: "ファイル: 閉じたタブを復元"
+  project_switcher: "プロジェクト: 切り替え / worktree…"
+  new_window: "プロジェクト: 新しいウィンドウで開く"
+  buffer_search: "検索: このファイル"
+  buffer_replace: "検索: 置換つき"
+  project_search: "検索: プロジェクト全体"
+  find_references: "検索: 参照を探す"
+  go_to_line: "移動: 行番号へ"
+  go_to_definition: "移動: 定義へ"
+  navigate_back: "移動: 戻る"
+  navigate_forward: "移動: 進む"
+  outline_symbols: "移動: シンボルへ（このファイル）"
+  workspace_symbols: "移動: シンボルへ（ワークスペース）"
+  next_diagnostic: "移動: 次の診断"
+  prev_diagnostic: "移動: 前の診断"
+  diagnostics_panel: "表示: 診断一覧"
+  format: "編集: フォーマット"
+  rename: "編集: シンボル名を変更"
+  code_actions: "編集: コードアクション"
+  inline_edit: "編集: AI インライン編集"
+  trigger_completion: "編集: 補完を出す"
+  show_hover: "編集: ホバー情報"
+  open_diff: "Git: diff タブを開く"
+  next_hunk: "Git: 次の変更へ"
+  prev_hunk: "Git: 前の変更へ"
+  theme_selector: "表示: テーマ切り替え"
+  project_color: "表示: プロジェクトの色を変更"
+  toggle_terminal: "表示: ターミナル"
+  toggle_git_panel: "表示: ソース管理"
+  toggle_todo_board: "表示: Todo ボード"
+  split_right: "表示: 右に分割"
+  new_thread: "AI: 新しいスレッド"
+  next_tab: "タブ: 次へ"
+  prev_tab: "タブ: 前へ"
+  next_thread: "AI: 次のスレッド"
+  prev_thread: "AI: 前のスレッド"
+  remote_ssh: "リモート: SSH ホストに接続"
+  thread_history: "AI: スレッド履歴"
+rail:
+  add_tip: フォルダをプロジェクトとして追加（⌘O は切替）
+  add_prompt: 開く
+  menu_new_window: 新しいウィンドウで開く
+  menu_remove: レールから外す
+  menu_remove_worktree: worktree を削除
+  menu_delete_branch: worktree ごとブランチを削除
+  menu_more_colors: その他の色…
+  menu_confirm_delete: ⚠ もう一度で削除
+  cannot_remove_last: 最後のプロジェクトはレールから外せません
+  open_project: プロジェクトを開く  ⌘O
+  explorer: エクスプローラの表示切替
+  search: 検索  ⌘⇧F
+  git: ソース管理  ⌃⇧G
+  todos: Todo ボード
+  agent: AI エージェント（新規スレッド）  ⌘⇧A
+  terminal: ターミナル  ⌘J
+  remote: リモート SSH
+  settings: 設定
+settings:
+  title: 設定
+  agents_heading: AI エージェント
+  agents_sub: 既定を選ぶと新しいスレッドがそれで開きます。認証は各 CLI 側（Shirushi は鍵を持ちません）。
+  installed: 導入済み
+  available_npx: 初回に取得（npx）
+  not_installed: 未導入
+  make_default: 既定にする
+  is_default: ★ 既定
+  login: ログイン
+  install: 入れ方
+  welcome_title: ようこそ 🎨
+  welcome_sub: 使うエージェントを選んで始めましょう。あとから ⚙ でいつでも変えられます。
+  get_started: これで始める →
+explorer:
+  up_folder: 上のフォルダへ
+  back_to_project: プロジェクトへ戻る
+  view_tree: ツリー表示
+  view_columns: カラム表示（Finder 風）
+  view_icons: アイコン表示
+  ctx_open_window: 新規ウィンドウで開く
+  ctx_open: 開く
+  ctx_open_default: 既定のアプリで開く
+  ctx_reveal: Finder で表示
+  ctx_new_file: 新規ファイル
+  ctx_new_dir: 新規フォルダ
+  ctx_rename: 名前を変更…
+  ctx_duplicate: 複製
+  ctx_trash: ゴミ箱に入れる
+  ctx_copy_path: パスをコピー
+searchpanel:
+  placeholder: プロジェクトを横断検索…
+  searching: 検索中…
+  results: "%{n} 件 / %{files} ファイル"
+  hint_enter: Enter で検索
+  truncated: 先頭 %{n} 件のみ表示（絞り込んでください）
+  case_tip: 大文字小文字を区別
+  regex_tip: 正規表現
+  hint_search: Enter 検索 / ジャンプ
+  hint_select: ↑↓ 選択
+  hint_close: Esc 閉じる
+  reference_query: "参照: %{word}"
+git:
+  no_project: プロジェクトがありません
+  title: ソース管理
+  no_commit_changes: コミット対象の変更が無い
+  pr_create_tip: GitHub で PR を作成（gh pr create --web）
+  pr_open_tip: GitHub で PR / リポジトリを開く
+  new_branch_tip: 新しいブランチ
+  close_tip: 閉じる  ⌃⇧G
+  branch_placeholder: 新しいブランチ名（⏎ で作成・Esc で取消）
+  message_placeholder: メッセージ（⌘⏎ でコミット）
+  ai_message_tip: AI でメッセージ生成（claude）
+  commit: ✓ コミット
+  staged: ステージ済み
+  changes: 変更
+  no_changes: 変更はありません
+  stage_all_tip: すべてステージ
+  stage: ステージ
+  unstage: ステージ解除
+  history: 履歴
+  no_commits: コミットがありません
+  branches: ブランチ
+  worktree_open_tip: worktree でレールに開く
+  delete_branch_tip: ブランチを削除
+  delete_branch_confirm: ブランチ削除（未マージは別窓/worktree で対応）
+  window_chip: 開く
+  branch_used_by_worktree: "ブランチ '%{branch}' は worktree で使用中。レールでそのタブを右クリック→「worktree を削除」してから消してください"
+  branch_deleted: "ブランチ '%{branch}' を削除しました"
+  worktree_removed: worktree を削除しました
+  running: 実行中
+  idle: 待機中
+  branch_menu_tip: ブランチ / worktree
+  switcher_tip: プロジェクト / ブランチを切替  ⌘O
+dock:
+  left: 左パネル（エクスプローラ）を表示/隠す
+  bottom: 下パネル（ターミナル等）を表示/隠す
+  right: 右パネル（エージェント）を表示/隠す
+tabs:
+  untitled: 無題
+  close_tip: 閉じる  ⌘W
+  close_split_tip: 分割を閉じる  ⌘\\
+terminal:
+  tab_title: ターミナル %{n}
+  add_tip: ターミナルを追加
+  close_dock_tip: 下ドックを閉じる  ⌘J
+  git_tip: ソース管理  ⌃⇧G
+theme:
+  builtin: 組み込み
+  user: ユーザー
+  picker_placeholder: テーマを選択
+difftab:
+  proposal_title: "%{title} ⇄ 提案"
+update:
+  available: ⬆ v%{version} に更新
+  installing: ⬇ 更新中…
+  ready: ⟳ 再起動で新バージョンに切り替わります
+welcome:
+  title: Shirushi — 色による方向感覚
+  open_project: プロジェクト / worktree を開く
+  open_file: ファイルを開く
+  new_thread: AI スレッドを開始（Claude Code）
+  palette: すべてのコマンド
+ssh:
+  label: リモート SSH
+  button_tip: リモート SSH で開く（~/.ssh/config のエイリアスも可）
+  connecting: "%{uri} へ接続中…（初回は server 配備で数秒かかります）"
+  picker_placeholder: SSH ホストを選択（~/.ssh/config）
+  manual_entry: URI を手入力…
+goto:
+  placeholder: 行番号…
+hotexit:
+  pending: 前回終了時の未保存の変更があります
+  restore: 復元
+  discard: 破棄
+watch:
+  external_changed: ディスク上で変更されました（未保存の編集があります）
+  reload: 再読込
+  keep: このまま
+search:
+  find_placeholder: 検索
+  replace_placeholder: 置換
+  no_results: 一致なし
+  replace_one: 置換
+  replace_one_tip: 現在のマッチを置換（置換欄で Enter）
+  replace_all: 全置換
+  replace_all_tip: 全マッチを置換（⌘Enter・undo 一回で全部戻る）
+  case_sensitive: 大文字小文字を区別
+  use_regex: 正規表現
+  previous: 前のマッチ（⇧Enter）
+  next: 次のマッチ（Enter）
+  close: 閉じる（Esc は開いた位置へ戻って閉じる）
+  toggle_replace: 置換欄の表示切替（⌥⌘F）

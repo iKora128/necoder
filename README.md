@@ -3,9 +3,19 @@
 自作エディタ。**「色による方向感覚」×「プロジェクト/ブランチ横断」×「AI エージェントネイティブ」** の交点を狙う。
 目標は **Agent 時代の最高のエディタ**。
 
+![Shirushi — Todo board consumed by the AI agent, with color-coded threads](docs/images/hero-todo-board.png)
+
+## Quick start (English)
+
+Shirushi is a GPUI-based code editor built for the agent era: **orient by color** (per-project colors that run through rails, tabs, carets and AI threads), **work across projects/branches** (worktree-first windows, ⌘O dashboard shows what's running where), and **AI-agent-native** (Claude Code over ACP — colored threads, always-visible token meter, checkpoints, a todo board the agent checks off by itself).
+
+1. Install Rust (the pinned toolchain in `rust-toolchain.toml` is picked up automatically) and run `cargo run -p shirushi`.
+2. First keys: `⌘O` open a project / worktree · `⌘P` open a file · `⇧⌘A` start an AI thread (needs the `claude` CLI) · `⇧⌘P` all commands.
+3. The UI follows your locale (Japanese / English). Everything AI runs through your existing Claude Code subscription via ACP — no extra API key.
+
 - 名前: **Shirushi**（しるし・印。暫定確定 — ドメイン `shirushi.ai` 取得済み）
-- 土台: **GPUI**（Apache-2.0, `./zed/crates/gpui` を path 参照）/ Rust 1.95 / まず macOS
-- ライセンス: **AGPL-3.0**（2026-07-11 決定 — Zed の GPL 資産 `acp_thread`/`agent_servers`/`worktree`/`fs` を移植して使う戦略とセット）
+- 土台: **GPUI**（Apache-2.0・**git 依存 rev 固定**。ローカル `./zed` は API 調査用の参照クローン）/ Rust 1.95 / まず macOS
+- ライセンス: **AGPL-3.0**（確定 2026-07-15。ただし**全コードは自作/permissive 依存**で構成 — Zed の GPL crate はコード移植せず手法のみ参考。再ライセンスの自由を保持・DECISIONS §5）
 - AI: 自前エージェントは作らず **ACP クライアント**（`agent-client-protocol` crate + `claude-agent-acp` で Claude Code サブスクがそのまま動く）
 - 性能予算: 入力レイテンシ・起動 **Zed 比 ~80% を下限目標**（UX 優先の明示的判断）
 

@@ -1,0 +1,62 @@
+name: CI
+
+# push/PR ごとの検証（M13）:
+#  - mac: cargo test 全 crate + 編集コアの性能予算ガード（examples/bench_editor）
+#  - linux: ビルドのみ（GPUI Linux の依存を入れて `cargo check`。安定するまで best-effort）
+# 起動時間（scripts/startup-time.sh）と入力レイテンシ（key→frame）は GUI 実機が要るため
+# CI では回さない（ROADMAP M13 残件参照・ローカル計測用スクリプトはある）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      # toolchain は rust-toolchain.toml（1.95.0）で固定 → rustup が自動取得。
+      - uses: Swatinem/rust-cache@v2
+      - name: Test（全 crate）
+        run: cargo test --workspace
+      - name: 性能予算ガード（編集コア・release）
+        run: cargo run --release -p editor_core --example bench_editor
+
+  check-linux:
+    runs-on: ubuntu-latest
+    # GPUI Linux（Wayland/X11）の追従は M13 残件 — 落ちても mac の検証は止めない。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: GPUI Linux の依存
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libxcb1-dev libzstd-dev libasound2-dev libfontconfig1-dev libssl-dev
+      - name: Check（ビルド可否のみ）
+        run: cargo check -p shirushi
+
+  build-remote-server:
+    runs-on: ubuntu-latest
+    # remote SSH 用の Linux musl サーバーバイナリ（#1・旧 M9 / M13 残件）。
+    # static-musl = glibc 依存なしでどの Linux でも動く。cargo-zigbuild は zig を linker に使い
+    # x86_64/aarch64 の musl クロスを追加ツール無しで通す。host crate は GPUI 非依存なので軽い。
+    # 初回 CI 実行で追従修正の可能性あり（check-linux と同じ扱い）。将来 GitHub Release へ添付予定。
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Zig + cargo-zigbuild + target
+        run: |
+          pip install ziglang cargo-zigbuild
+          rustup target add ${{ matrix.target }}
+      - name: Build shirushi-remote-server
+        run: cargo zigbuild -p host --bin shirushi-remote-server --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shirushi-remote-server-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/shirushi-remote-server

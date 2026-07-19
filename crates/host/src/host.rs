@@ -1380,6 +1380,103 @@ impl SshProject {
     }
 }
 
+/// `~/.ssh/config` の 1 エントリ（Remote SSH ホストピッカー用・M13）。
+/// alias は `ssh <alias>` / `ssh://<alias>/path` でそのまま使える（system OpenSSH が解決）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshConfigHost {
+    /// `Host` 行のエイリアス。
+    pub alias: String,
+    /// `HostName`（実ホスト/IP）。表示用・無ければ None。
+    pub hostname: Option<String>,
+    /// `User`。表示用・無ければ None。
+    pub user: Option<String>,
+}
+
+/// `~/.ssh/config` を読んで接続可能なホスト一覧を返す（読めなければ空）。
+pub fn ssh_config_hosts() -> Vec<SshConfigHost> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let path = Path::new(&home).join(".ssh/config");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_ssh_config(&text),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// ssh_config テキストを Host 単位で列挙する（IO 無し = テスト可能）。
+/// v1 の割り切り: ワイルドカード/否定パターン(`*` `?` `!`)は接続先にならないので除外・
+/// `Include` は展開しない・オプションは各ブロック内のみ見る（ssh の first-match 累積は未実装）。
+fn parse_ssh_config(text: &str) -> Vec<SshConfigHost> {
+    let mut hosts: Vec<SshConfigHost> = Vec::new();
+    // 直近の Host 行で確定した alias 群の hosts 内インデックス（後続の HostName/User を貼る先）。
+    let mut current: Vec<usize> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((keyword, value)) = split_ssh_config_line(line) else {
+            continue;
+        };
+        match keyword.to_ascii_lowercase().as_str() {
+            "host" => {
+                current.clear();
+                for alias in value.split_whitespace() {
+                    if alias.contains('*') || alias.contains('?') || alias.starts_with('!') {
+                        continue; // パターンは接続先ではない
+                    }
+                    match hosts.iter().position(|host| host.alias == alias) {
+                        Some(index) => current.push(index), // 既出 alias は重複させない
+                        None => {
+                            current.push(hosts.len());
+                            hosts.push(SshConfigHost {
+                                alias: alias.to_string(),
+                                hostname: None,
+                                user: None,
+                            });
+                        }
+                    }
+                }
+            }
+            "hostname" => {
+                for &index in &current {
+                    if hosts[index].hostname.is_none() && !value.is_empty() {
+                        hosts[index].hostname = Some(value.to_string());
+                    }
+                }
+            }
+            "user" => {
+                for &index in &current {
+                    if hosts[index].user.is_none() && !value.is_empty() {
+                        hosts[index].user = Some(value.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    hosts
+}
+
+/// ssh_config の 1 行を (keyword, value) に割る。区切りは空白 or `=`（前後空白可・値の囲み `"` は外す）。
+fn split_ssh_config_line(line: &str) -> Option<(&str, &str)> {
+    let bytes = line.as_bytes();
+    let mut end = 0;
+    while end < bytes.len() && !bytes[end].is_ascii_whitespace() && bytes[end] != b'=' {
+        end += 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let keyword = &line[..end];
+    let mut rest = line[end..].trim_start();
+    if let Some(stripped) = rest.strip_prefix('=') {
+        rest = stripped.trim_start();
+    }
+    Some((keyword, rest.trim().trim_matches('"')))
+}
+
 fn percent_decode_path(path: &str) -> Result<PathBuf> {
     let mut decoded = Vec::with_capacity(path.len());
     let bytes = path.as_bytes();
@@ -1534,25 +1631,7 @@ impl SshTransport {
             return Ok(preferred_command.to_string());
         }
 
-        let explicit_artifact =
-            std::env::var_os("SHIRUSHI_REMOTE_SERVER_BINARY").map(PathBuf::from);
-        let artifact = explicit_artifact
-            .clone()
-            .or_else(find_local_remote_server)
-            .with_context(|| {
-                concat!(
-                    "互換 remote server が無く、配備用バイナリも見つからない。",
-                    "`cargo build -p host --bin shirushi-remote-server` または ",
-                    "SHIRUSHI_REMOTE_SERVER_BINARY=<remote向けartifact> を指定してください"
-                )
-            })?;
-        if !artifact.is_file() {
-            bail!(
-                "remote server artifact がファイルではない: {}",
-                artifact.display()
-            );
-        }
-
+        // remote の platform を先に検出（配備バイナリを remote target に合わせて選ぶため・#1）。
         let platform =
             self.output("printf '%s\\n%s\\n%s\\n' \"$HOME\" \"$(uname -s)\" \"$(uname -m)\"")?;
         if !platform.success() {
@@ -1570,11 +1649,25 @@ impl SshTransport {
             .context("remote HOME が空")?;
         let remote_os = lines.next().context("remote OS 応答が無い")?;
         let remote_arch = lines.next().context("remote arch 応答が無い")?;
-        if explicit_artifact.is_none() && !same_platform(remote_os, remote_arch) {
+
+        // 配備バイナリ: 明示指定（同一プラットフォーム検査を飛ばす）→ remote target 用の自動発見
+        // （per-target キャッシュ / .app 同梱 / same-platform の dev ビルド・#1）。
+        let explicit_artifact =
+            std::env::var_os("SHIRUSHI_REMOTE_SERVER_BINARY").map(PathBuf::from);
+        let artifact = explicit_artifact
+            .clone()
+            .or_else(|| find_remote_server_for(remote_os, remote_arch))
+            .with_context(|| {
+                format!(
+                    "remote ({remote_os}/{remote_arch}) 用の shirushi-remote-server が見つからない。\
+                     CI 生成物を ~/.local/share/shirushi/remote/artifacts/<target>/ に置くか、\
+                     SHIRUSHI_REMOTE_SERVER_BINARY=<remote向けartifact> を指定してください"
+                )
+            })?;
+        if !artifact.is_file() {
             bail!(
-                "remote は {remote_os}/{remote_arch}、local artifact は {}/{}。remote target のバイナリを SHIRUSHI_REMOTE_SERVER_BINARY へ指定してください",
-                std::env::consts::OS,
-                std::env::consts::ARCH
+                "remote server artifact がファイルではない: {}",
+                artifact.display()
             );
         }
 
@@ -1633,6 +1726,55 @@ fn find_local_remote_server() -> Option<PathBuf> {
     let development =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/shirushi-remote-server");
     development.is_file().then_some(development)
+}
+
+/// remote の uname (os, arch) を Rust target triple へ（配備バイナリの探索キー・#1）。
+/// Linux は static-musl（glibc 依存なし）、macOS は apple-darwin。未知は None。
+fn remote_target_triple(remote_os: &str, remote_arch: &str) -> Option<String> {
+    let os = match remote_os.to_ascii_lowercase().as_str() {
+        "linux" => "unknown-linux-musl",
+        "darwin" => "apple-darwin",
+        _ => return None,
+    };
+    let arch = match remote_arch.to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        _ => return None,
+    };
+    Some(format!("{arch}-{os}"))
+}
+
+/// remote target 用の配備バイナリを探す（#1 の自動発見・env 指定なしで mac→Linux を通す）:
+/// 1) per-target キャッシュ `~/.local/share/shirushi/remote/artifacts/<triple>/shirushi-remote-server`
+/// 2) .app 同梱 `<exe>/../Resources/remote/<triple>/shirushi-remote-server`（インストール版）
+/// 3) same-platform なら従来の sibling / dev ビルド（[`find_local_remote_server`]）
+fn find_remote_server_for(remote_os: &str, remote_arch: &str) -> Option<PathBuf> {
+    if let Some(triple) = remote_target_triple(remote_os, remote_arch) {
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let cached = home
+                .join(".local/share/shirushi/remote/artifacts")
+                .join(&triple)
+                .join("shirushi-remote-server");
+            if cached.is_file() {
+                return Some(cached);
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let bundled = dir
+                    .join("../Resources/remote")
+                    .join(&triple)
+                    .join("shirushi-remote-server");
+                if bundled.is_file() {
+                    return Some(bundled);
+                }
+            }
+        }
+    }
+    if same_platform(remote_os, remote_arch) {
+        return find_local_remote_server();
+    }
+    None
 }
 
 fn same_platform(remote_os: &str, remote_arch: &str) -> bool {
@@ -2332,6 +2474,61 @@ mod tests {
     }
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn parses_ssh_config_hosts() {
+        let text = "\
+# コメント行
+Host web1 web2
+    HostName 10.0.0.1
+    User deploy
+
+Host *
+    ForwardAgent yes
+
+Host gpu
+  HostName=gpu.example.com
+  User = alice
+";
+        let hosts = parse_ssh_config(text);
+        assert_eq!(hosts.len(), 3, "web1/web2/gpu の 3 件（* は除外）");
+        assert_eq!(hosts[0].alias, "web1");
+        assert_eq!(hosts[0].hostname.as_deref(), Some("10.0.0.1"));
+        assert_eq!(hosts[0].user.as_deref(), Some("deploy"));
+        // 複数 alias は同ブロックの HostName/User を共有。
+        assert_eq!(hosts[1].alias, "web2");
+        assert_eq!(hosts[1].user.as_deref(), Some("deploy"));
+        // `=` 区切り・前後空白を許容。
+        assert_eq!(hosts[2].alias, "gpu");
+        assert_eq!(hosts[2].hostname.as_deref(), Some("gpu.example.com"));
+        assert_eq!(hosts[2].user.as_deref(), Some("alice"));
+        // ワイルドカードは一覧に出さない。
+        assert!(hosts.iter().all(|host| host.alias != "*"));
+    }
+
+    #[test]
+    fn remote_target_triple_maps_uname_to_musl() {
+        // Linux は static-musl・arch 別名（amd64/arm64）も吸収する（#1 の自動発見キー）。
+        assert_eq!(
+            remote_target_triple("Linux", "x86_64").as_deref(),
+            Some("x86_64-unknown-linux-musl")
+        );
+        assert_eq!(
+            remote_target_triple("linux", "aarch64").as_deref(),
+            Some("aarch64-unknown-linux-musl")
+        );
+        assert_eq!(
+            remote_target_triple("Linux", "arm64").as_deref(),
+            Some("aarch64-unknown-linux-musl")
+        );
+        assert_eq!(
+            remote_target_triple("Darwin", "arm64").as_deref(),
+            Some("aarch64-apple-darwin")
+        );
+        // 未知の OS/arch は None（＝自動発見せず明示指定を促す）。
+        assert_eq!(remote_target_triple("Windows", "x86_64"), None);
+        assert_eq!(remote_target_triple("Linux", "riscv64"), None);
+    }
 
     #[test]
     fn frame_round_trip_and_limits() {

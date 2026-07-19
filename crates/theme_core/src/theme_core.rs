@@ -362,14 +362,33 @@ pub fn claude_bullet() -> Hsla {
 
 // ── アイデンティティ色の巡回パレット（UI-SPEC §1.2）。テーマと独立の 2 軸目 ──
 
-/// プロジェクト色パレット（自動巡回）: indigo → teal → amber → rose → green。
-pub const PROJECT_COLOR_HEXES: [u32; 5] = [0x7c8cf8, 0x34d3b6, 0xf0a24b, 0xef7d9b, 0x85c46c];
+/// プロジェクト色パレット（自動巡回）: 原色寄りの 5 色 red → green → blue → orange → violet。
+/// M13 で titlebar/statusbar 淡塗り（Peacock）に合わせ低彩度→原色へ（面で映える。線より面が主用途）。
+pub const PROJECT_COLOR_HEXES: [u32; 5] = [0xef4444, 0x22c55e, 0x3b82f6, 0xf97316, 0xa855f7];
 /// スレッド色パレット（自動巡回）。プロジェクト色と独立。
 pub const THREAD_COLOR_HEXES: [u32; 3] = [0x61afef, 0xe5c07b, 0xc678dd];
+
+/// 色ピッカーが提示するアイデンティティ色（UI-SPEC §1.2）。M13 で**原色寄り**へ差し替え（塗り面で映える）。
+/// 先頭 5 つは [`PROJECT_COLOR_HEXES`]（自動巡回色）と一致 = 巡回色もピッカーから選べる。
+/// トレードオフ: 原色化でスレッド色（`#61afef`/`#e5c07b`/`#c678dd`）と近づく——2px 線でなく面で使う前提の判断。
+/// 任意 hex 入力はこの外の色も許すエスケープハッチ（UI-SPEC §1.2）。
+pub const IDENTITY_PALETTE_HEXES: [u32; 10] = [
+    0xef4444, 0x22c55e, 0x3b82f6, 0xf97316, 0xa855f7, // 巡回 5 色（red/green/blue/orange/violet）
+    0x06b6d4, // cyan
+    0xec4899, // pink
+    0xeab308, // yellow
+    0x14b8a6, // teal
+    0xd946ef, // fuchsia
+];
 
 /// `index` 番目のプロジェクト色（パレットを巡回）。色優先順の最下段（自動巡回）に当たる。
 pub fn project_color(index: usize) -> Hsla {
     hex(PROJECT_COLOR_HEXES[index % PROJECT_COLOR_HEXES.len()])
+}
+
+/// 0xRRGGBB を Hsla へ（リモートのホスト別色を storage が u32 で持つため・M13 #3b）。
+pub fn color_from_hex(value: u32) -> Hsla {
+    hex(value)
 }
 
 /// `index` 番目のスレッド色（パレットを巡回）。
@@ -447,8 +466,8 @@ mod tests {
 
     #[test]
     fn project_palette_cycles() {
-        assert_eq!(project_color(0), h(0x7c8cf8));
-        assert_eq!(project_color(4), h(0x85c46c));
+        assert_eq!(project_color(0), h(0xef4444));
+        assert_eq!(project_color(4), h(0xa855f7));
         // 5 個で 1 周
         assert_eq!(project_color(5), project_color(0));
         assert_eq!(project_color(11), project_color(1));

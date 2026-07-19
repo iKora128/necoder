@@ -38,11 +38,23 @@ pub struct RailSettings {
     pub git: bool,
     pub agent: bool,
     pub terminal: bool,
+    /// Todo ボード（.shirushi/todos.md・M12-10）。
+    pub todos: bool,
+    /// リモート SSH（~/.ssh/config のホストへ接続・#2）。
+    pub remote: bool,
 }
 
 impl Default for RailSettings {
     fn default() -> Self {
-        Self { explorer: true, search: true, git: true, agent: true, terminal: true }
+        Self {
+            explorer: true,
+            search: true,
+            git: true,
+            agent: true,
+            terminal: true,
+            todos: true,
+            remote: true,
+        }
     }
 }
 
@@ -55,17 +67,28 @@ pub struct Settings {
     pub density: Density,
     pub font_size: f32,
     pub tab_size: usize,
+    /// soft wrap（折り返し表示）。⌥Z で一時トグルもできる。
+    pub soft_wrap: bool,
+    /// 保存時に LSP フォーマットをかける（対応言語のみ・M11）。
+    pub format_on_save: bool,
     /// UI ロケール。`None` = OS 追従。
     pub locale: Option<String>,
     /// エージェント composer で **Enter を送信に使うか**。
     /// `false`（既定）= Enter は改行・⌘Enter で送信（日本語 IME の変換確定 Enter で誤送信しない安全側）。
     /// `true` = Enter で送信・Shift+Enter で改行（チャット風。IME 変換中は送信しない）。
     pub submit_on_enter: bool,
+    /// エージェントの新規スレッドに、最初のやり取りから AI が自動でタイトルを付けるか（#6・既定 on）。
+    /// 既定名（"スレッドN"）のまま・手動改名していないスレッドだけが対象。無効なら既定名のまま。
+    pub agent_auto_name: bool,
     /// 新規スレッドの既定 AI エージェント（表示名。`acp_client::AGENT_LABELS` のいずれか）。
-    /// composer でエージェントを切り替えると「前回選択」としてここに保存され、次回もそれで開く。
+    /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
+    /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
     pub default_agent: String,
     /// レールのアイコン表示（アクティビティバー）。
     pub rail: RailSettings,
+    /// 初回オンボーディングを済ませたか（`false`＝初回で設定ホームが自動オープン・M12）。
+    /// 「これで始める」で `true` に。以後は自動では開かない（レール ⚙ からいつでも開ける）。
+    pub onboarded: bool,
 }
 
 impl Default for Settings {
@@ -75,10 +98,14 @@ impl Default for Settings {
             density: Density::Compact,
             font_size: 13.0,
             tab_size: 4,
+            soft_wrap: false,
+            format_on_save: false,
             locale: None,
             submit_on_enter: false,
+            agent_auto_name: true,
             default_agent: "Claude Code".to_string(),
             rail: RailSettings::default(),
+            onboarded: false,
         }
     }
 }
@@ -90,8 +117,10 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "font_size": 13.0,
   "tab_size": 4,
   "submit_on_enter": false,
+  "agent_auto_name": true,
   "default_agent": "Claude Code",
-  "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true }
+  "onboarded": false,
+  "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }
 }"#;
 
 /// マージ済み JSON と型付き設定を保持する。

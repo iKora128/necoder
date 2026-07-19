@@ -32,6 +32,27 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/shirushi"
 cp "$ICON_DIR/Shirushi.icns" "$APP/Contents/Resources/Shirushi.icns"
 
+# 3b) remote SSH サーバーバイナリを同梱（#1・旧 M9）。インストール版でも配備できるように。
+#  - 同 OS 用（mac→mac / ssh://localhost）: MacOS/ の隣に置く（find_local_remote_server の sibling 探索先）。
+#  - 別 OS 用（mac→Linux）: CI 生成の musl artifact が target/<triple>/release/ にあれば
+#    Resources/remote/<triple>/ へ（find_remote_server_for の .app 同梱探索先）。
+if [ "$PROFILE" = "debug" ]; then
+    cargo build -p host --bin shirushi-remote-server
+    SERVER_BIN="target/debug/shirushi-remote-server"
+else
+    cargo build --release -p host --bin shirushi-remote-server
+    SERVER_BIN="target/release/shirushi-remote-server"
+fi
+cp "$SERVER_BIN" "$APP/Contents/MacOS/shirushi-remote-server"
+for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+    artifact="target/$triple/release/shirushi-remote-server"
+    if [ -f "$artifact" ]; then
+        mkdir -p "$APP/Contents/Resources/remote/$triple"
+        cp "$artifact" "$APP/Contents/Resources/remote/$triple/shirushi-remote-server"
+        echo "  remote server 同梱: $triple"
+    fi
+done
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

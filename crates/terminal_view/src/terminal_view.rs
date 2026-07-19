@@ -25,11 +25,95 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 
 use gpui::{
-    App, Bounds, Context, Element, ElementId, Entity, FocusHandle, Focusable, GlobalElementId,
-    Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton, Pixels, Rgba,
-    SharedString, Style, TextRun, Window, div, fill, point, prelude::*, px, size,
+    App, Bounds, Context, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
+    InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, Pixels,
+    Rgba, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, point,
+    prelude::*, px, size,
 };
+use std::ops::Range;
 use theme_core::Theme;
+
+/// ターミナル → ホスト（workspace）への通知（M13: file:line リンク）。
+pub enum TerminalEvent {
+    /// `path:line` リンクのクリック。パスは端末出力のまま（相対は cwd 基準で解決してもらう）。
+    OpenPath { path: String, line: u32 },
+}
+
+/// 1 行のテキストから `path:line(:col)` を探す（cargo/rustc/grep の出力形式）。
+/// 戻りは (char 添字の範囲, パス, 行番号)。範囲は `:col` まで含める（クリック域を広く）。
+fn find_path_links(text: &str) -> Vec<(Range<usize>, String, u32)> {
+    let chars: Vec<char> = text.chars().collect();
+    let is_path_char =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '~' | '-');
+    let mut links = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if !is_path_char(chars[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && is_path_char(chars[index]) {
+            index += 1;
+        }
+        // `:数字` が続き、トークンがパスらしい（/ か . を含む）ならリンク。
+        if index < chars.len() && chars[index] == ':' {
+            let mut digits_end = index + 1;
+            while digits_end < chars.len() && chars[digits_end].is_ascii_digit() {
+                digits_end += 1;
+            }
+            if digits_end > index + 1 {
+                let path: String = chars[start..index].iter().collect();
+                if path.contains('/') || path.contains('.') {
+                    let line: u32 = chars[index + 1..digits_end]
+                        .iter()
+                        .collect::<String>()
+                        .parse()
+                        .unwrap_or(1);
+                    let mut end = digits_end;
+                    if end < chars.len() && chars[end] == ':' {
+                        let mut column_end = end + 1;
+                        while column_end < chars.len() && chars[column_end].is_ascii_digit() {
+                            column_end += 1;
+                        }
+                        if column_end > end + 1 {
+                            end = column_end;
+                        }
+                    }
+                    links.push((start..end, path, line));
+                    index = end;
+                    continue;
+                }
+            }
+        }
+    }
+    links
+}
+
+/// 表示セルから行を再構成してリンクを検出する。戻りは (表示行, セル列範囲, パス, 行番号)。
+fn detect_links(cells: &[RenderCell]) -> Vec<(i32, Range<usize>, String, u32)> {
+    let mut rows: std::collections::BTreeMap<i32, Vec<(usize, char)>> =
+        std::collections::BTreeMap::new();
+    for cell in cells {
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        rows.entry(cell.point.line.0)
+            .or_default()
+            .push((cell.point.column.0 as usize, cell.character));
+    }
+    let mut links = Vec::new();
+    for (line, row) in rows {
+        let text: String = row.iter().map(|(_, character)| *character).collect();
+        for (char_range, path, line_number) in find_path_links(&text) {
+            let start_column = row[char_range.start].0;
+            let end_column = row[char_range.end - 1].0 + 1;
+            links.push((line, start_column..end_column, path, line_number));
+        }
+    }
+    links
+}
 
 /// ターミナルのセル寸法。フォントメトリクスと矛盾しないよう prepaint で決める。
 const FONT_SIZE: f32 = 12.5;
@@ -226,6 +310,15 @@ impl TerminalView {
         }
     }
 
+    /// 外部（⌘I コマンド生成・M12-8）からテキストをタイプ入力として PTY へ送る。
+    /// 改行は落とす＝**実行はしない**（実行はユーザーの Enter に委ねる）。
+    pub fn insert_text(&self, text: &str) {
+        let sanitized: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+        if !sanitized.is_empty() {
+            self.write_bytes(sanitized.into_bytes());
+        }
+    }
+
     /// 行列サイズが変わったら term と PTY をリサイズする（prepaint から）。
     fn resize(&mut self, columns: usize, lines: usize) {
         let new_size = TerminalSize { columns: columns.max(2), lines: lines.max(1) };
@@ -252,6 +345,90 @@ impl TerminalView {
             self.write_bytes(bytes);
             cx.stop_propagation();
         }
+    }
+}
+
+impl EventEmitter<TerminalEvent> for TerminalView {}
+
+/// IME 対応の最小実装（M13）: 確定文字列を PTY へ流す。変換中（marked）の
+/// インライン表示は持たない＝候補ウィンドウはシステム側で出る。確定時のみ書き込む。
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        // 空選択（カーソル位置相当）。これが Some でないと IME セッションが始まらない。
+        Some(UTF16Selection { range: 0..0, reversed: false })
+    }
+
+    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+        None
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
+    fn replace_text_in_range(
+        &mut self,
+        _range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // IME 確定・ディクテーション等の文字列を PTY へ（ASCII 打鍵は on_key_down 経由）。
+        if !new_text.is_empty() {
+            self.write_bytes(new_text.as_bytes().to_vec());
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range_utf16: Option<Range<usize>>,
+        _new_text: &str,
+        _new_selected_range_utf16: Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // 変換中はインライン表示しない（確定時に replace_text_in_range が来る）。
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // IME 候補ウィンドウの位置 = カーソルセルの位置（セル幅は概算で十分）。
+        let cursor = self.content.cursor?;
+        let cell_width = px(FONT_SIZE * 0.6);
+        let origin = element_bounds.origin
+            + point(
+                cell_width * (cursor.column.0 as f32),
+                px(LINE_HEIGHT) * (cursor.line.0 as f32),
+            );
+        Some(Bounds::new(origin, size(cell_width, px(LINE_HEIGHT))))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
     }
 }
 
@@ -477,6 +654,8 @@ struct TerminalPrepaint {
     origin: gpui::Point<Pixels>,
     focused: bool,
     theme: Theme,
+    /// file:line リンク（表示行, セル列範囲, パス, 行番号・M13）。
+    links: Vec<(i32, Range<usize>, String, u32)>,
 }
 
 impl IntoElement for TerminalElement {
@@ -554,6 +733,7 @@ impl Element for TerminalElement {
             })
         };
 
+        let links = detect_links(&cells);
         TerminalPrepaint {
             cells,
             cursor,
@@ -562,6 +742,7 @@ impl Element for TerminalElement {
             origin: bounds.origin,
             focused,
             theme,
+            links,
         }
     }
 
@@ -644,12 +825,20 @@ impl Element for TerminalElement {
             if cell.flags.contains(Flags::ITALIC) {
                 cell_font.style = gpui::FontStyle::Italic;
             }
+            // file:line リンク範囲は薄い下線でクリック可能を示す（M13）。
+            let linked = prepaint.links.iter().any(|(line, columns, _, _)| {
+                *line == cell.point.line.0 && columns.contains(&(cell.point.column.0 as usize))
+            });
             let run = TextRun {
                 len: cell.character.len_utf8(),
                 font: cell_font,
                 color,
                 background_color: None,
-                underline: None,
+                underline: linked.then(|| UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(theme.fg2),
+                    wavy: false,
+                }),
                 strikethrough: None,
             };
             let position = point(
@@ -668,5 +857,64 @@ impl Element for TerminalElement {
                 eprintln!("ターミナル文字描画に失敗: {error}");
             }
         }
+
+        // ④ file:line リンクのクリック（M13）。paint 毎に登録＝このフレームの座標で判定。
+        if !prepaint.links.is_empty() {
+            let links = prepaint.links.clone();
+            let terminal = self.terminal.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || !bounds.contains(&event.position)
+                {
+                    return;
+                }
+                let column =
+                    (f32::from(event.position.x - origin.x) / f32::from(cell_width)) as usize;
+                let row = (f32::from(event.position.y - origin.y) / f32::from(line_height)) as i32;
+                for (line, columns, path, line_number) in &links {
+                    if *line == row && columns.contains(&column) {
+                        let (path, line_number) = (path.clone(), *line_number);
+                        terminal.update(cx, |_, cx| {
+                            cx.emit(TerminalEvent::OpenPath { path, line: line_number });
+                        });
+                        break;
+                    }
+                }
+            });
+        }
+
+        // ⑤ IME 入力ハンドラ（M13）: 日本語などの確定文字列を PTY へ流せるようにする。
+        window.handle_input(
+            &self.terminal.read(cx).focus_handle,
+            ElementInputHandler::new(bounds, self.terminal.clone()),
+            cx,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_links_match_cargo_and_grep_output() {
+        // cargo/rustc 形式（--> path:line:col）。範囲は :col まで含む。
+        let cargo = "  --> src/main.rs:10:5";
+        let links = find_path_links(cargo);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].1, "src/main.rs");
+        assert_eq!(links[0].2, 10);
+        let range = &links[0].0;
+        assert_eq!(&cargo[range.start..range.end], "src/main.rs:10:5");
+
+        // grep -n 形式（path:line）と絶対パス・~。
+        assert_eq!(find_path_links("lib.rs:42 に一致")[0].2, 42);
+        assert_eq!(find_path_links("/tmp/a.log:7")[0].1, "/tmp/a.log");
+        assert_eq!(find_path_links("~/notes/todo.md:3")[0].1, "~/notes/todo.md");
+
+        // 時刻や単語:数字はパスらしさ（/ か .）が無いので拾わない。
+        assert!(find_path_links("12:30 に会議").is_empty());
+        assert!(find_path_links("error:42").is_empty());
     }
 }

@@ -10,3 +10,267 @@ common:
 finder:
   files: Search files…
   projects: Switch project…
+agent:
+  open_diff_tab: Open in editor (diff tab)
+  waiting_permission: Waiting for permission
+  todos: Todos
+  copy_tip: Copy this entry
+  pill_agent: Agent (which AI to talk to)
+  pill_mode: Permission mode (edit/run approval level)
+  pill_model: Model
+  pill_effort: Reasoning effort
+  err_no_project: Can't send — no project selected
+  err_no_acp: claude-agent-acp not found (check node/npx)
+  err_session_lost: Session ended. Send again to reconnect
+  permission_files: "%{title} (%{n} files)"
+  done: Done %{elapsed}
+  done_touched: Done %{elapsed} · touched %{n} files
+  close_thread_tip: Close thread  ⌘W
+  rename_thread_tip: Rename (double-click)
+  history_tip: Thread history
+  history_placeholder: Open a past thread…
+  new_thread_tip: New thread  ⌘⇧A
+  thinking: ✳ Thinking
+  generating: ⏺ Generating
+  celebrate: 🙌 Done
+  idle: Idle
+  empty: No threads (＋ / ⌘⇧A to start)
+  checkpoint_row: checkpoint — %{label} (click to restore this point)
+  context_filter: Filter by file name…
+  permission_needed: ● Approval needed
+  attach_tip: Attach file as context
+  hint_submit_enter: ⏎ send / ⇧⏎ newline
+  hint_submit_cmd: ⏎ newline / ⌘⏎ send
+  ime_tip: Toggle Enter behavior (send ⇄ newline). IME confirm never sends
+  send_enter: Send ⏎
+  send_cmd: Send ⌘⏎
+  more_lines: "… (+%{n} lines)"
+hunk:
+  stage: Stage this hunk
+  revert: Revert this hunk
+  copy: Copy hunk
+  open_diff: Open diff in tab
+symbols:
+  outline: Go to symbol…
+  workspace: Workspace symbols…
+diagnostics:
+  title: Diagnostics
+rename:
+  label: New name
+color:
+  hex_placeholder: rrggbb
+inline:
+  title: ⌘I edit
+  title_terminal: ⌘I command
+  instruction_placeholder: Instruction (Enter=generate / Esc=close)
+  busy: Generating… (claude -p)
+  accept: Apply ⏎
+  reject: Discard esc
+  no_change: (no changes)
+  empty_target: Nothing to edit (select code, then ⌘I)
+  buffer_changed: Buffer changed — proposal discarded
+todos:
+  title: Todo board
+  empty: No .shirushi/todos.md yet (✨ drafts today's plan)
+  plan: ✨ Plan today
+  plan_busy: Generating…
+  plan_tip: Draft today's tasks from ROADMAP and git status (claude -p)
+  plan_added: Added %{count} items for today
+  send_tip: Send this task to the active thread (auto-checks when done)
+  send_prompt: "%{text}\n\nWhen done, flip this item's checkbox in .shirushi/todos.md to [x]: %{text}"
+palette:
+  placeholder: Search commands…
+cmd:
+  file_finder: "File: Open…"
+  save_active: "File: Save"
+  close_tab: "File: Close tab"
+  restore_closed_tab: "File: Reopen closed tab"
+  project_switcher: "Project: Switch / worktrees…"
+  new_window: "Project: Open in new window"
+  buffer_search: "Search: This file"
+  buffer_replace: "Search: With replace"
+  project_search: "Search: Whole project"
+  find_references: "Search: Find references"
+  go_to_line: "Go: To line"
+  go_to_definition: "Go: To definition"
+  navigate_back: "Go: Back"
+  navigate_forward: "Go: Forward"
+  outline_symbols: "Go: To symbol (this file)"
+  workspace_symbols: "Go: To symbol (workspace)"
+  next_diagnostic: "Go: Next diagnostic"
+  prev_diagnostic: "Go: Previous diagnostic"
+  diagnostics_panel: "View: Diagnostics"
+  format: "Edit: Format document"
+  rename: "Edit: Rename symbol"
+  code_actions: "Edit: Code actions"
+  inline_edit: "Edit: AI inline edit"
+  trigger_completion: "Edit: Trigger completion"
+  show_hover: "Edit: Show hover"
+  open_diff: "Git: Open diff tab"
+  next_hunk: "Git: Next change"
+  prev_hunk: "Git: Previous change"
+  theme_selector: "View: Switch theme"
+  project_color: "View: Change project color"
+  toggle_terminal: "View: Terminal"
+  toggle_git_panel: "View: Source control"
+  toggle_todo_board: "View: Todo board"
+  split_right: "View: Split right"
+  new_thread: "AI: New thread"
+  next_tab: "Tabs: Next"
+  prev_tab: "Tabs: Previous"
+  next_thread: "AI: Next thread"
+  prev_thread: "AI: Previous thread"
+  remote_ssh: "Remote: Connect to SSH Host"
+  thread_history: "AI: Thread history"
+rail:
+  add_tip: Add a folder as a project (⌘O switches)
+  add_prompt: Open
+  menu_new_window: Open in new window
+  menu_remove: Remove from rail
+  menu_remove_worktree: Remove worktree
+  menu_delete_branch: Delete branch + worktree
+  menu_more_colors: More colors…
+  menu_confirm_delete: ⚠ Click again to delete
+  cannot_remove_last: Can't remove the last project from the rail
+  open_project: Open project  ⌘O
+  explorer: Toggle explorer
+  search: Search  ⌘⇧F
+  git: Source control  ⌃⇧G
+  todos: Todo board
+  agent: AI agent (new thread)  ⌘⇧A
+  terminal: Terminal  ⌘J
+  remote: Remote SSH
+  settings: Settings
+settings:
+  title: Settings
+  agents_heading: AI Agents
+  agents_sub: The default opens new threads. Auth stays in each CLI (Shirushi never stores keys).
+  installed: Installed
+  available_npx: Fetch on first use (npx)
+  not_installed: Not installed
+  make_default: Set as default
+  is_default: ★ Default
+  login: Log in
+  install: Install
+  welcome_title: Welcome 🎨
+  welcome_sub: Pick your agent and get started. You can change it anytime from ⚙.
+  get_started: Get started →
+explorer:
+  up_folder: Up one folder
+  back_to_project: Back to project
+  view_tree: Tree view
+  view_columns: Column view (Finder-like)
+  view_icons: Icon view
+  ctx_open_window: Open in new window
+  ctx_open: Open
+  ctx_open_default: Open with default app
+  ctx_reveal: Reveal in Finder
+  ctx_new_file: New file
+  ctx_new_dir: New folder
+  ctx_rename: Rename…
+  ctx_duplicate: Duplicate
+  ctx_trash: Move to trash
+  ctx_copy_path: Copy path
+searchpanel:
+  placeholder: Search across project…
+  searching: Searching…
+  results: "%{n} matches / %{files} files"
+  hint_enter: Press Enter to search
+  truncated: Showing first %{n} only (narrow the query)
+  case_tip: Match case
+  regex_tip: Regular expression
+  hint_search: Enter to search / jump
+  hint_select: ↑↓ select
+  hint_close: Esc to close
+  reference_query: "References: %{word}"
+git:
+  no_project: No project
+  title: Source control
+  no_commit_changes: Nothing to commit
+  pr_create_tip: Create PR on GitHub (gh pr create --web)
+  pr_open_tip: Open PR / repository on GitHub
+  new_branch_tip: New branch
+  close_tip: Close  ⌃⇧G
+  branch_placeholder: New branch name (⏎ create / Esc cancel)
+  message_placeholder: Message (⌘⏎ to commit)
+  ai_message_tip: Generate message with AI (claude)
+  commit: ✓ Commit
+  staged: Staged
+  changes: Changes
+  no_changes: No changes
+  stage_all_tip: Stage all
+  stage: Stage
+  unstage: Unstage
+  history: History
+  no_commits: No commits
+  branches: Branches
+  worktree_open_tip: Open worktree in the rail
+  delete_branch_tip: Delete branch
+  delete_branch_confirm: Delete branch (unmerged? use another window/worktree)
+  window_chip: open
+  branch_used_by_worktree: "Branch '%{branch}' is in use by a worktree. Right-click its rail tab → \"Remove worktree\" first, then delete."
+  branch_deleted: "Deleted branch '%{branch}'"
+  worktree_removed: Worktree removed
+  running: running
+  idle: idle
+  branch_menu_tip: Branch / worktree
+  switcher_tip: Switch project / branch  ⌘O
+dock:
+  left: Show/hide left panel (explorer)
+  bottom: Show/hide bottom panel (terminal)
+  right: Show/hide right panel (agent)
+tabs:
+  untitled: Untitled
+  close_tip: Close  ⌘W
+  close_split_tip: Close split  ⌘\\
+terminal:
+  tab_title: Terminal %{n}
+  add_tip: New terminal
+  close_dock_tip: Close bottom dock  ⌘J
+  git_tip: Source control  ⌃⇧G
+theme:
+  builtin: Built-in
+  user: User
+  picker_placeholder: Select theme
+difftab:
+  proposal_title: "%{title} ⇄ proposal"
+update:
+  available: ⬆ Update to v%{version}
+  installing: ⬇ Updating…
+  ready: ⟳ Restart to finish updating
+welcome:
+  title: Shirushi — orient by color
+  open_project: Open a project / worktree
+  open_file: Open a file
+  new_thread: Start an AI thread (Claude Code)
+  palette: All commands
+ssh:
+  label: Remote SSH
+  button_tip: Open over SSH (~/.ssh/config aliases work)
+  connecting: "Connecting to %{uri}… (first run deploys the server)"
+  picker_placeholder: Select SSH host (~/.ssh/config)
+  manual_entry: Enter URI manually…
+goto:
+  placeholder: Line number…
+hotexit:
+  pending: Unsaved changes from your last session
+  restore: Restore
+  discard: Discard
+watch:
+  external_changed: Changed on disk (you have unsaved edits)
+  reload: Reload
+  keep: Keep mine
+search:
+  find_placeholder: Find
+  replace_placeholder: Replace
+  no_results: No results
+  replace_one: Replace
+  replace_one_tip: Replace current match (Enter in the replace field)
+  replace_all: Replace all
+  replace_all_tip: Replace all matches (⌘Enter, one undo restores everything)
+  case_sensitive: Match case
+  use_regex: Regular expression
+  previous: Previous match (⇧Enter)
+  next: Next match (Enter)
+  close: Close (Esc returns to where you started)
+  toggle_replace: Toggle replace field (⌥⌘F)

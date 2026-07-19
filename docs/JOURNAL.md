@@ -375,3 +375,269 @@
   - **タブ操作ロジックは agent_panel と完全同型**: `close_tab_at`/`move_tab` の active-index 追従は `remove_thread`/`move_thread` のコピー。既に live 実績のあるコードを写すのが安全（Chrome 風スレッドタブが先に育っていた恩恵）
   - **構造的状態分離**: 「状態が混ざらない」はタブ毎に独立した `Entity<EditorView>`（undo/カーソル/スクロール/診断を各自保持）で構造保証。offscreen で描画・往復・復元まで確認したので、残りは編集→保存→× の対話体感のみ（人の手番）
 - 次: M10 の 2 番目「**⌘F バッファ内検索/置換**」（インライン検索バー・`search` crate 再利用・⌥⌘F 置換・全置換は 1 Transaction）。または「補完の自動トリガ」（`.`/`::`/識別子で自動ポップアップ）。依存順では ⌘F が先
+
+## 2026-07-16 —（続き）M10-2 ⌘F バッファ内検索/置換
+- やったこと（M10 の 2 番目・エディタの「所作」の核）:
+  - **search crate**: `SearchQuery::find_in(text, max)` 新設 = テキスト全体を `find_iter` して byte レンジだけ返す（`search_text` と違い**行分割しない**＝改行跨ぎの literal も見つかる。上限打ち切り付き）。既存の regex/大小トグル基盤をそのまま再利用
+  - **editor_view**: ①`search_ranges: Vec<Range>` + `set_search_ranges`（同値なら no-op = observe 再入で notify しない）②prepaint の行ループで **`ranges_overlapping_line`（二分探索・unit test 付き）** から warn 16% 面の quad を積み、**選択面の下**に paint ③`select_byte_range` = 範囲選択 + pending_reveal ④**pending_reveal を賢く**: 対象行が可視域に丸ごと入っていればスクロールしない（インクリメンタル巡回で画面が跳ねない。F12/検索ジャンプにも効く改善）⑤`PositionSnapshot`（選択+scroll_top の不透明型）= `position_snapshot`/`restore_position` ⑥`replace_ranges` = `Buffer::edit` 複数レンジ（**1 Transaction = undo 一発**）
+  - **workspace**: `BufferSearchState` + エディタ右上のフローティングバー `render_buffer_search_bar`（▸/▾ 置換行開閉・クエリ/置換欄・n/m・Aa・`.*`・‹›・×。アクティブ欄 = アクセント枠 + 末尾キャレットバー）。キー処理は検索パネル/git パネルと同じ手書き流儀（escape/enter/⇧enter/⌘enter/tab/backspace/⌘V/印字）。`refresh_buffer_search` は **(バッファ version, クエリ, 大小, 正規表現) タプルで再計算ガード**（editor observe は blink でも発火する = M10-1 の地雷の応用）。現在マッチは「anchor 以降で最初」= partition_point（末尾で先頭へ回る）。**1件置換は挿入末尾+1 を anchor に再計算**（置換文字列がパターンに再マッチしても足踏みしない）。全置換は表示上限(20k)と独立に `find_in(usize::MAX)` で全件。タブ/プロジェクト切替・タブ閉じでは `dismiss_buffer_search`（マッチはエディタ毎の状態なので持ち越さない）
+  - **配線**: keymap に `cmd-f`/`cmd-alt-f`（global 節）。locales に search.* 13 キー（ja/en 両方・parity green）。開発フック `SHIRUSHI_BUFFER_SEARCH=<query>`（+`SHIRUSHI_BUFFER_REPLACE`）で offscreen 撮影可。UI-SPEC §5 にバー仕様・§9 キー表に ⌘F/⌥⌘F/⌘⇧F を追記（文書が先）
+- 検証: `cargo check --workspace` 警告0・`cargo test --workspace` 全 green。offscreen: 「render_」で **1/54 + 置換行**（クエリ種込み・アクセント枠・Replace/Replace all ボタン）、「resizing」で **1/12 + 他マッチの琥珀ハイライト + 現在マッチ選択が中央 + statusbar 545:13 追従**を目視。**置換→undo の対話一往復は人の手番**（複数レンジ edit + undo は editor_core の既存 test が保証）
+- 学び/罠:
+  - **ハイライトの再入ループは「同値 no-op」と「キー付きガード」の 2 段で切る**: refresh → set_search_ranges → notify → observe → refresh… は (version,query,トグル) ガードで止まるが、set_search_ranges 側も同値 no-op にしないと無駄描画が残る
+  - **`ranges_overlapping_line` の境界**: start 昇順・非重複なら end も昇順 = partition_point が使える。「range.end == 行頭」は含まれるが零幅 quad ガード（x_end > x_start）で無害。テストの期待値を書き間違えて 1 回落とした（10..20 は end=9 の行に重ならない）
+  - **1件置換の anchor は「挿入末尾+1」でなく「挿入末尾」**: `range.start + replacement.len()` を anchor にすれば、置換結果がパターンに再マッチしても partition_point が次のマッチを拾う（同位置で足踏みしない）
+  - **クロージャに `&replacement` で渡せば move されず後段で使える**（`editor.update(|e,cx| e.replace_ranges(&[..], &replacement, cx))` → 直後に `replacement.len()`）。String をうっかり move すると借用エラー
+  - **バーの t! はこのシェルだと英語で出る**（LANG が en → init_from_os_locale が en 解決）= i18n 配線が効いている証拠。既存 UI のハードコード日本語との混在が可視化された（M13 回収の実感）
+  - IME 変換はバー入力欄では不可（key_char 手書き方式 = ⌘⇧F/git パネルと同じ制約）。日本語クエリは ⌘V 貼り付けで可。入力欄の EditorView(plain) 化は後続の共通課題
+- 次: M10 の 3 番目「**補完の自動トリガ**」（識別子/`.`/`::` で自動ポップアップ・Esc 直後は同語で再表示しない）。その次は hover 配線（`lang/src/lsp.rs` 実装済み・未配線）
+
+## 2026-07-16 —（続き）同期ブロッキング監査 + ローカル DB 方針決定（実装なし・調査と文書化のみ）
+- **ローカル DB = Turso 採用（本人指定）**: hot exit / スレッド永続化 / トークン台帳 / checkpoint メタに限定。薄い `storage` crate に隔離・rusqlite 退避可能に。ARCHITECTURE §7 / DECISIONS 決定ログ / ROADMAP 該当4項目に反映済み。自動アップデートも自前（GitHub Releases + 署名検証・velq/karui 同型）で確定
+- **同期ブロッキング監査（本人依頼「詰まりやすいので見て」）**: Host trait は完全同期・remote は 1 呼び出し最大 REQUEST_TIMEOUT=30s ブロック。UI スレッドから直接呼んでいる箇所を棚卸し:
+  - **済（確立パターン）**: git push/pull・PR・AI コミットメッセージ（bg + git_busy）/ LSP 全経路（読取スレッド+channel）/ 横断検索 / gutter diff（250ms デバウンス+bg）/ ターミナル / ACP。パターン = `host.clone()` → `background_executor().spawn` → 前景反映
+  - **S1（render 内 FS/RPC・最悪）**: エクスプローラの**アイコン表示・カラム表示が render のたび `read_any_dir`**（`workspace.rs:3421` / `:3511`）。ツリー表示は `slot.rows` キャッシュ済みなのに非対称。remote だと描画毎 RPC（切断時 30s×カラム数）。→ enter_dir/切替時に読んで slot にキャッシュ（tree と同型）
+  - **S2（操作時ブロック・remote 重大）**: ①⌘S 保存 = `buffer.save()` 同期 write（`editor_view.rs` save アクション。remote 切断で 30s フリーズ）②`open_file`/分割 = `Buffer::from_host` 同期 read（`workspace.rs:2120,2267`）③**`refresh_git_status()` 同期 git CLI/RPC を約15箇所から**（タブ切替・タブ閉じ・open_file・stage/commit 後…大リポジトリで 50-200ms が体感に直結）④⌘P = `all_files(5000)` 同期 walk/RPC（`:2351`）⑤ブランチメニュー開 = `git_branches`+`git_worktrees` 同期（`:948`）・`switch_branch`（checkout は秒単位ありうる）・`add_worktree`・`git_commit/stage`（フックで長引く）
+  - **S3（軽微・当面放置可）**: `save_state()` 同期小 JSON 書き（タブ操作毎・ms 未満）/ `update_agent_destination` の all_files(60) / explorer クリック展開の read_dir（1回きり・local は可）
+  - **規律化**: 「UI スレッドで Host を呼ばない・render 内で FS/RPC 列挙しない」を ARCHITECTURE §9 に明記
+- 学び: 非同期化は「性能改善」でなく **remote では正しさ**（切断 = 30s フリーズは事実上のハング）。local だけ見ていると refresh_git_status の 50ms に気づかない
+- 次: /goal は M10-3「補完の自動トリガ」から再開。**S1+S2 の async 化を M10 に 1 項目足すか提案中**（ユーザー承認待ち。hot exit の前に消化するのが筋が良い — 保存/open の async 化は hot exit のスナップショット経路と同じ形になるため）
+
+## 2026-07-16 —（続き）M10-3 補完の自動トリガ（type-through + クライアント側絞り込み）
+- やったこと: `EditorInputEvent::Typed`（editor_view・確定入力のみ emit）→ workspace がタブ毎 subscribe → `classify_completion_trigger`（識別子/`.`/`::`）で自動 `request_completion`。ポップアップは type-through 化（印字キー=エディタへ挿入+絞り込み継続・backspace=prefix 縮小・非印字=閉じる）。絞り込みは `filter_completion_indices`（大小無視前方一致・クライアント側=LSP 再要求なし）。Esc 抑止（語頭 offset 記憶）・世代番号で古い応答破棄・prefix/位置は応答時点のキャレットで確定
+- 検証: 全 test green（+trigger 分類 9 ケース・filter 4 ケース）。**実 ra で `t.the` → theme/thermal のみの自動ポップアップをキャレット直下に offscreen 目視**（`SHIRUSHI_TYPE_PROBE="row:col:text"` フック新設・LSP 初期化待ちの delay 付き）
+- 学び/罠:
+  - **ポップアップ位置は要求時点でなく応答時点のキャレットで**: caret_bounds は直近 paint 由来なので、要求と同フレームだと 1 文字（プローブでは数行）ズレる。応答時に active editor から取り直すと自然（要求時点の値は fallback）
+  - **type-through は「ポップアップが挿入を代行」でなく「エディタに挿入させて Typed イベントに委ねる」**と一本道になる（挿入経路が popup 経由/直接タイプの 2 本あっても後段は同じ subscription が処理）
+  - **`::` の 1 個目で出さない**: classify は挿入後のキャレット前 2 文字（`text_before_caret(4)`）で判定。`:` 単発は None
+  - FocusHandle を要するステート構造体のテストは**ロジックを自由関数に切り出す**（zeroed FocusHandle は UB。一度書きかけて捨てた）
+- 次: M10-4 hover の配線（`lang/src/lsp.rs` の hover() 実装済み・未配線 = quick win）
+
+## 2026-07-16 —（続き）M10-4 hover の配線（dwell + ⌘K ⌘I）
+- やったこと: editor_view に **dwell 検知**（mouse_move → 500ms タイマー・世代番号・`EditorHoverEvent::Dwell/Cancel`。Cancel = クリック/スクロール/30px 超離脱）。workspace がタブ毎 subscribe → `lang::lsp::hover()`（実装済みを配線）→ `parse_hover_lines`（コードフェンス行のみ除去のプレーン表示・24 行 truncate）→ アンカー直上のコード字カード（occlude・フォーカス取らない）。⌘K ⌘I（`workspace::ShowHover`）でキャレット位置にも。補完表示中は hover 抑止・タイプ/タブ切替で消す
+- 検証: 全 test green。**実 ra で `Thing` の struct シグネチャがポップアップ表示されるのを offscreen 目視**（`SHIRUSHI_HOVER_PROBE="row:col"` フック。キャレット矩形は paint 由来なので移動後 300ms おいて発火）
+- 学び/罠: **hover の生存管理は「editor が Cancel を emit」に寄せる**と workspace 側の条件分岐が消える（on_editor_changed は blink でも発火するので「変更で閉じる」には使えない — 補完と同じ地雷）。occlude でポップアップ上のマウスは editor に届かない＝ポップアップに乗っている間は消えない、が 1 行で手に入る
+- 次: M10-5 ファイル監視（notify/FSEvents・watch 基盤）
+
+## 2026-07-16 —（続き）M10-5 ファイル監視（watch 基盤）
+- やったこと: `project::watch_root`（notify 6.1/FSEvents・opaque `Watch` で型を封じ M13 remote 差し替え面を確保）→ workspace pump（200ms 合流）→ ①開バッファ: `disk_probably_unchanged`（len+mtime 比較で**自分の保存は無視**）→ クリーンなら `Buffer::reload`（選択クランプ・undo 履歴リセット）/ dirty なら**警告バー**（再読込/このまま）②ツリー slot 再構築 ③git 色 + `EditorView::refresh_diff`。`.git/` は index/HEAD/refs だけ合図。gitignore はノイズ除去。切替で張り替え・remote は張らない
+- 検証: unit（reload 追従・クランプ・履歴リセット・無題/削除は None）+ live offscreen ×2（クリーン: echo 追記 4 行が自動反映 + newfile.rs が U でツリー出現 + 緑 gutter / dirty: ⚠バー表示・外部行の混入なし・ユーザー編集温存）
+- 学び/罠:
+  - **「動かない」の犯人は自分の古いバイナリ**: cargo check だけして build せず `./target/debug/shirushi` を実行 → watch 実装が入っていない旧バイナリで 2 回無駄撮り。**スクショ検証の前は必ず build**（check≠build）。デバッグ用 `SHIRUSHI_WATCH_DEBUG` は今後も有用なので常設化
+  - **外部変更判定は content_hash 抜きの len+mtime で足りる**（FileRevision の hash は読まないと出ない。自分の保存を外部変更と誤認しない、が目的なので安価比較が正）
+  - **undo 履歴は reload でリセット**が正（外部変更を跨ぐ undo は嘘の状態を作る。VSCode は保持するが v1 はリセットを選択）
+  - futures の `try_next` は deprecated → `try_recv`（返り値は `Result<T, TryRecvError>` で `Option` が剥がれてる）
+- 次: M10-6 = ROADMAP に追加した「UI スレッド非ブロッキング化」（監査 S1+S2・承認済み）
+
+## 2026-07-16 —（続き）M10-6 UI スレッド非ブロッキング化（監査 S1+S2 の回収）
+- やったこと（承認済み・ROADMAP 化した監査項目の実装）:
+  - **S1**: render 内 `read_any_dir`（アイコン/カラム表示・毎フレーム FS/RPC）→ `ProjectSlot::listed_dir` = RefCell<HashMap> キャッシュ。初回 render だけ読み、watch の `refresh()` で無効化（= FS 変化で取り直し）
+  - **S2 保存**: `Buffer::prepare_save`（host/path/全文/競合条件/version の snapshot）→ 背景 `PendingSave::write` → `complete_save`（**保存開始時 version と一致した時だけ dirty を下ろす** = 書き込み中の編集を失わない）。editor_view の ⌘S ハンドラを spawn 化
+  - **S2 open**: `open_file` = 背景 read → `open_loaded_file` 合流（読み込み中の重複 open は再 dedup）。**起動復元は `open_file_sync` を温存**（背景だと完了順でタブ順が崩れる）
+  - **S2 git**: `refresh_git_status` = 背景 + 世代番号（status・branch・パネル用 changes/log/slug を一括）。ブランチメニュー列挙・switch（busy）・worktree add（busy）・commit（busy・stage 込み）・stage/unstage/branch 作成/削除（`run_git_index_op` 共通化）を全部背景へ。⌘P は新設 `project::all_files_on` で背景化
+- 学び/罠:
+  - **Rc<Worktree> は Send できない** → 背景へは `host.clone() + root.to_path_buf()` を渡し `*_on` 自由関数を呼ぶ（この形にするために M9 で全 git fn に `_on` 版が既にあったのが効いた）
+  - **保存の非同期化は「version 比較で dirty を残す」が肝**（無条件に dirty=false にすると保存中のタイプが「保存済み」の顔をする）
+  - **復元経路まで非同期化すると順序が壊れる**（タブ列 = Vec push 順）。対話経路だけ async、復元は同期のまま、が正しい切り分け
+  - futures `try_next` → `try_recv`（deprecated 対応・Option が剥がれる）
+- 検証: `cargo check --workspace` 警告 0・`cargo test --workspace` 全 green。offscreen（複数タブ + icons ビュー + git 色）撮影済み — 目視は Read ツール復旧待ち（インフラ断・Bash は生存）
+- 次: M10-7 hot exit（Turso `storage` crate 新設）
+
+## 2026-07-16 —（続き）M10-7 hot exit（Turso 初導入・crates/storage 新設）
+- やったこと: **`crates/storage`** = Turso 0.7（決定どおり）。async API を**専用ワーカースレッド + チャネル + block_on** で包み、外へはブロッキング API（GPUI に runtime を持ち込まない・呼び出しは background executor から）。Turso 型は crate 外に出さない（rusqlite 退避面）。hot_exit テーブル（path PK・全文・saved_at）。workspace: 2s デバウンス背景スナップショット・復元/破棄バー・⌘Q でクリア・`SHIRUSHI_DB`/`SHIRUSHI_HOTEXIT_DEBUG`/`SHIRUSHI_HOTEXIT_AUTORESTORE` フック
+- 検証: storage unit ×2（turso 0.7 が**初回コンパイルで API 一致**・round trip・drop→再オープン残存）。**sqlite3 CLI で .tables が読めた** = SQLite 互換フォーマット実証。live: タイプ→tick→**kill -9**→dump で全文残存→再起動「復元候補 1 件」→自動復元→dirty 再スナップショット、をログで一部始終確認
+- 学び/罠（3 連発・全部「検証で見つけて直した」）:
+  - **blink の notify がデバウンス世代を永遠に流す**: 2s デバウンスは「2s の静寂」が前提だが、focus 中は blink が 530ms 毎に notify → 世代が無限に進んで tick が一度も発火しない。**バッファ version ガード**（lsp_sent_versions と同型）が必須。M10-1 の地雷の再演
+  - **再起動直後の tick が復元候補を消す**: クリーンなバッファ → 「clean=行削除」で、ユーザーが復元を決める前に候補行を消してしまう。**hot_exit_pending が Some の間は tick を丸ごと止める**
+  - **テストハーネスの kill が早すぎた**: `$SECONDS` がビルド時間込みで、アプリ生存 3 秒で kill していた（2 回「書かれない！」と空騒ぎ）。**プロセス起動直後に SECONDS=0 リセット**。watch の「古いバイナリ」に続き、検証スクリプト自体を疑う教訓 2 個目
+- 次: M10-8 ツリーのファイル操作（新規/リネーム/削除/複製）
+
+## 2026-07-16 —（続き）M10-8 ツリーのファイル操作
+- やったこと: project に local ファイル操作 5 種（create/create_dir/rename〔上書き拒否〕/duplicate〔name copy.ext・再帰〕/trash〔/usr/bin/trash→Finder fallback〕）+ unit test。workspace は右クリックメニュー 5 項目（local のみ表示）+ **インライン命名行**（rename=行置換・New*=親の直後に挿入・手書きキー入力流儀）。開いてるタブの rename/trash は先にタブを閉じる（旧パス保存の復活事故防止）。render_tree の行クロージャを `render_tree_row` 関数に切り出して入力行と共存
+- 検証: unit green + live で命名→Enter→実ファイル生成をエンドツーエンド確認（SHIRUSHI_NAMING/SHIRUSHI_NAMING_CONFIRM）。スクショ 3 枚（メニュー/命名行/生成後）撮影済・目視は Read ツール復旧後
+- 学び/罠: ゴミ箱は macOS 14+ の `/usr/bin/trash` が素直（無い環境は Finder AppleScript）。「開いてるファイルの rename」はタブ/バッファ/LSP の張り替えが必要で v1 は close-first が安全（VSCode 同等は後続）
+- 次: M10-9 編集の所作一式（⌥←→・行操作・⌘/・自動インデント・括弧ペア・Tab インデント）
+
+## 2026-07-16 —（続き）M10-9 編集の所作一式
+- やったこと: editor_core に単語境界（2 クラス・256B 窓）/行移動・複製・削除/コメントトグル（1 Transaction）/自動インデント改行/インデント増減/**ペア分類 `classify_pair_input`**（Pair/Wrap/SkipOver/Insert）を実装 + unit test 8 群。editor_view はアクション 16 本 + `handle_pair_input`（入力ハンドラ介入・IME/明示レンジ/composer は素通し）。lang に `comment_prefix` 最小表。keymap 17 本追加
+- 学び/罠: **ペアの誤爆防止 2 則**（クォートは単語隣接で無効 = `don't`/lifetime `'a` 事故防止・開き括弧は直後が識別子なら素通し）はロジック層でテストしておくと UI 層が何も考えなくてよい。行移動は「最終行に改行が無い」ケースの改行付け替えが唯一の罠（test が最初に落とした）。gpui の keystroke 表記は `cmd-/`・`cmd-]` がそのまま通る
+- 次: M10-10 multi-cursor の UI 配線（⌘D・⌥⌘↑↓・⌥クリック・Esc 単一化）
+
+## 2026-07-16 —（続き）M10-10 multi-cursor の UI 配線
+- やったこと: editor_core に select_next_occurrence（⌘D）/add_cursor_vertically（⌥⌘↑↓）/add_cursor_at（⌥クリック）/collapse_to_primary（Esc）+ test 3 群（受入「⌘D×3 で 3 箇所同時書き換え」をそのままテスト化）。view はアクション 4 本・⌥クリック分岐・⌘D 後の reveal。描画/同時編集は M2 から全選択対応済みだったので**配線だけで完成**
+- 学び/罠: Esc は「複数→1 個」だけにする（単一選択で no-op）と、検索バー/補完ポップアップの Esc と衝突しない。⌥クリックは is_selecting を立てない（直後のドラッグで選択を上書きしない）
+- 次: M10-11 ナビゲーション履歴（⌃- / ⌃⇧-）
+
+## 2026-07-16 —（続き）M10-11 ナビゲーション履歴
+- やったこと: back/forward スタック（(path, offset)・上限 100）。記録 = F12 着地直前・⌘P 確定・検索ジャンプ・50 行以上のクリック（editor が CaretJumped を emit）。⌃-/⌃⇧- で往復・閉じたファイルは背景読みで開き直し。EditorInputEvent が 2 variant になったので on_editor_typed の irrefutable let を match 化
+- 学び/罠: gpui の keystroke 表記は `ctrl--`（ハイフンキー）と `ctrl-shift--` がそのまま通る（起動時の全アクション解決で警告なしを確認）。「大距離クリック」は editor 側で検知して emit する方が、workspace がクリックを盗み見るより素直
+- 次: M10-12 soft wrap + 行ジャンプ（着手前に設計を書く — 論理行↔表示行マップ×行仮想化）
+
+## 2026-07-16 —（続き）M10-12 soft wrap 設計（実装前・約束の設計先行）
+- **方式**: 論理行→表示行の **WrapMap** を editor_view に持つ（コアは無知のまま = 依存方向不変）
+  - `segments: Vec<Vec<usize>>` = 論理行ごとの「セグメント開始 byte 列」（折返し無し行は `[0]`）
+  - `prefix_rows: Vec<usize>` = 論理行 i の先頭**表示行**番号の累積（len = 行数+1・末尾 = 総表示行数）→ 表示行→論理行は partition_point・逆は prefix + セグメント内 partition_point。O(log n)
+  - 再計算 = (buffer version, 折返し列数, on/off) が変わった prepaint で全行 O(総文字数)。1.6MB でも数 ms（増分化は M11 の増分パースと同輪郭で後続）
+- **折返し計算は等幅前提のセル数**: ASCII=1・東アジア全角=2（`unicode-width`・既に依存木にある）。列数 = content_width / 'M' 幅（ターミナルと同じ）。**単語境界優先**（直近の空白で切る・1 語が幅超過なら文字で切る）。バンドルフォント（Guguru Sans Code）は等幅 CJK=2 セル設計なのでピクセル shaping なしで正確
+- **描画**: 仮想化は**表示行**で回す。可視表示行 → (論理行, セグメント byte 範囲) を解決し、セグメント部分文字列だけ shape。行番号/診断/diff マークは**先頭セグメントのみ**。選択/検索/キャレットの x はセグメント相対 offset
+- **キャレット移動**: ↑↓ は表示行単位（wrap 中の行内移動）。offset↔表示行のヘルパを EditorView に生やし、scroll/reveal/クリック位置も表示行系に統一
+- **トグル**: 設定 `soft_wrap`（settings_core に追加・既定 false）+ ⌥Z（editor::ToggleSoftWrap）。off は恒等マップ（挙動不変を構造で保証）
+- **⌃G 行ジャンプ**: workspace の小オーバーレイ入力（手書きキー流儀）→ Enter で reveal_position(n-1, 0)（論理行番号のまま）
+
+## 2026-07-16 —（続き）M10-12 soft wrap + ⌃G 実装
+- 設計どおり実装（上のエントリ参照）。要点: **仮想化ループを表示行で回し、セグメントの絶対 byte 範囲（line_start/line_end）を既存ロジックにそのまま流す**と、選択・検索ハイライト・IME 下線・キャレット x が無改修で正しく動く（範囲交差で書いてあったものは折り返しに強い）
+- 罠: キャレットのセグメント帰属（境界 offset は次セグメント側・論理行末だけ最終セグメント）を決めておかないと折返し点でキャレットが二重描画/消失する。マップ再構築前の 1 フレーム（after_edit → prepaint 間）は version ガードで論理行フォールバック
+- ⌃G はミニオーバーレイ（数字のみ受理）。ジャンプはナビ履歴（M10-11）にも積む
+- 次: M10-13 設定の実効化（font_size/tab_size 配線 + ユーザー keymap.json + live reload）
+
+## 2026-07-16 —（続き）M10-13 設定の実効化 — ★M10 の実装可能項目を全消化
+- やったこと: font_size/tab_size を editor_view のフィールド化（行高 23/13 比・shape/ヒットテスト/wrap 列数まで可変）+ `apply_editor_settings` を observe_global に接続（全タブ+分割へ live 配布）。ユーザー keymap.json = 既定の後に bind（後勝ち）+ 専用 watcher で live reload（200ms 合流・再 bind）
+- 検証: live で `shirushi config set font_size 19` → 起動中アプリに反映（settings watcher→observe_global→set_typography の全経路）。ユーザー keymap「1 束」適用ログ確認。全 suite green・警告 0
+- **★M10 総括**: 3〜13 の実装項目を全消化（複数タブ・⌘F・補完自動・hover・watch・非ブロッキング化・hot exit/Turso・ツリー操作・所作一式・multi-cursor・ナビ履歴・soft wrap・設定実効化）。**残りは受入（総合）「Shirushi で Shirushi を丸 1 日開発」= 人の手番のみ**
+- 次: PNG 目視の消化（Read ツール復旧待ちの 9 枚）→ M11 へ（フォーマット/rename/code actions/参照検索/シンボル/診断一覧/tree-sitter 多言語/増分パース/diff エディタ/hunk 操作/blame）
+
+## 2026-07-17 — M11-1 フォーマット（⌥⇧F + 保存時）
+- `Buffer::edit_batch`（異テキスト一括・1 Transaction）を新設し、LSP TextEdit 適用の共通基盤に（rename/code actions も同じ道を通る）。⌘S は workspace::SaveActive へ移し format_on_save のフック地点に。キャレットは (行,列) で復元・スクロール維持
+- live: 崩れた .rs がプローブ（フォーマット→保存）でディスクごと rustfmt 品質に。応答中のタブ切替ガード付き
+- 次: M11-2 rename（F2・WorkspaceEdit 複数ファイル）
+
+## 2026-07-17 —（続き）M11-2 rename（F2）
+- `apply_workspace_edit` を共通経路として整備（rename と code actions で共用）。開タブ=バッファ反映・未オープン=ディスク直書き（revision 条件付き = 競合安全）。live で 2 ファイル rename（バッファ+ディスク）を実 ra 確認
+- 罠: dev フックの `cx.spawn` は Context<Workspace> だと 2 引数クロージャ（3 回目の同じ地雷 — window.update 内の cx を素の App と勘違いする）。**ビルド成功を確認してから実行**（旧バイナリ実行、これも 2 回目）
+- 次: M11-3 code actions（⌘.）+ M11-4 参照検索（⇧F12）
+
+## 2026-07-17 —（続き）M11-3 code actions（⌘.）+ M11-4 参照検索（⇧F12）
+- ⌘. = 生診断（新設 raw_diagnostics）を context に渡す → 一覧ポップアップ → edit or resolve → apply_workspace_edit（rename と共通）。⇧F12 = Location[] → ファイル別集約（背景でプレビュー行読み）→ ⌘⇧F パネル再利用
+- **最大の学び: ra は client capabilities を見て機能を黙って無効化する**。codeActionLiteralSupport/resolveSupport/dataSupport 無しだと codeAction は**無応答**（エラーですらない）。LSP 機能を足すときは initialize の capability 宣言をセットで疑う
+- live: unused import が ⌘.（resolve 経由）→ 保存でディスクから消滅。locations_to_file_matches は unit test
+- 次: M11-5 シンボル（⌘⇧O アウトライン = tree-sitter / ⌘T = workspace/symbol）+ M11-6 診断一覧 + F8
+
+## 2026-07-17 —（続き）M11-5 シンボル + M11-6 診断一覧/F8 + 回帰修正
+- ⌘⇧O = lang::outline（tree-sitter クエリ・LSP 不要）→ Picker。⌘T = workspace/symbol → Picker（空クエリ 200 件 + ローカル fuzzy）。診断一覧 = statusbar ✗▲ クリック → 検索パネル UI 再利用（メッセージがプレビュー）。F8/⇧F8 = 次/前の診断行
+- **回帰発見・修正**: open_file 非同期化（M10-6）で「開いてからジャンプ」が未オープンファイルで旧バッファに誤 reveal（検索ジャンプ/F12/⌘T）。`open_file_then`（背景読み完了後にエディタへ FnOnce 適用）へ 3 箇所を統一。**async 化の追跡調査は「その後に書かれたコード」も対象**という教訓
+- 次: M11-7 tree-sitter 多言語（TS/JS/Python/Go/JSON/TOML/YAML 等）
+
+## 2026-07-17 —（続き）M11-9/10/11（diff タブ・hunk 操作・blame）— ★M11 実装項目を全消化
+- diff タブ = transient タブ基盤（永続化/⌘⇧T/LSP 除外）+ Buffer::set_read_only（コアでガード）+ unified_diff_on（imara-diff UnifiedDiffBuilder）+ F7 で @@ 間移動。hunk = gutter クリック検知 → ポップオーバー（stage/巻き戻し/コピー/diff）。stage は 1 hunk パッチ生成 → `git apply --cached`（一時ファイル経由 = host 汎用）。blame = `-L n,n` porcelain + 400ms デバウンス + 行末 dim
+- **受入をテストにする**流儀を継続: 「2 hunk の片方だけ stage」round trip・blame の実履歴合成・diff round trip、全部 unit/integration test 化
+- ★M11: 11/11 実装完了（総合受入の通し体感のみ人の手番）。積み残しメモ: アウトラインの tree-sitter クエリは Rust のみ（他言語は ⌘T で代替）・diff タブは +/- の色なし（unified テキスト素通し）
+- 次: M12。最初に **checkpoint 比較表**（約束）を出してから実装に入る
+
+## 2026-07-17 —（続き）M12-1〜5（永続化・checkpoint・生中継・色リンク・通知）
+- **実 Claude Code で end-to-end 検証**: ①送信 → turns テーブルに user/agent/step が追記・トークン実測が threads へ ②「元の内容です」のファイルをエージェントが「工業」に書換 → **checkpoint blob に変更前内容が保存** → restore → **ディスクが元に戻る**（受入の完全往復）
+- 設計の勘所:
+  - **checkpoint は PermissionRequest 受信時（応答前）に切る** — 手動承認と AUTO_ALLOW の一本道。answer_permission（クリック）に置くと自動許可経路が素通りする（1 回踏んだ）
+  - **Claude の Write は diff に old_text を含まない** → ディスクの現内容を「書かれる前」に背景で読む。**自動許可の応答をスナップショット完了後に遅延** = エージェントの書き込みとのレースを構造的に防ぐ
+  - PanelEvent（TurnEnded/PermissionWaiting/FilesTouched）で workspace 疎結合（トースト・statusbar pulse・ツリー色ドット・gutter スレッド色）
+- 既知の限界（注記）: bypass モードは権限リクエストが来ない = checkpoint/色リンク対象外（リロードのみ）。Dock バッジ・タブ側ドット・±行サマリーは後続
+- 次: M12-6 diff レビュー本体化 → 7 @mention Picker 化 → 8 ⌘K（キーは ⌘I 採用予定・⌘K はチョードプレフィクスと衝突）→ 9 Todos → 10 Todo ボード → 11 .shirushi 色 → 12 ⌘O 2 階層 → 13 台帳 UI
+## 2026-07-17 —（続き）M12-6/7/11/13（diff タブ本体化・@mention fuzzy・.shirushi 色・Σ台帳）
+- 承認カード「エディタで開く」= `PanelEvent::OpenDiffRequest` → `pending_transient_tab`（subscribe に window が無い GPUI 制約は「次の render 冒頭で消化」で迂回）。＋context は fuzzy 絞り込み（all_files 60→2000）。レール右クリック色ピッカー（12 色 → `.shirushi/settings.json` へ persist）。Σ 累計チップ = turns 集計クエリ
+- 次: M12-9 Todos（プラン）→ M12-8 ⌘I → M12-10 板 → M12-12 ⌘O
+
+## 2026-07-17 —（続き）M12-9 Todos（プラン）常設チェックリスト
+- ACP schema crate（agent-client-protocol-schema 1.4.0）に `SessionUpdate::Plan(Plan)` あり（本体 crate を grep しても出ない — **v1 の型は別 crate re-export**。探すときは `agent-client-protocol-schema` を見る）。PlanEntry{content, priority, status} を UI 非依存の `PlanItem` に写して `AgentEvent::Plan`
+- プランは**毎回全量置換**（ACP 仕様）→ Thread.plan を置換するだけで常設チェックリストが追従。● 進行中はスレッド色（UI-SPEC の Todos 節を「ステップ内」→「常設」へ文書先行で更新）
+- 検証は `SHIRUSHI_PLAN_PROBE`（実 ACP 不要の直接注入）で offscreen 目視。status は non_exhaustive なので未知値は Pending 扱い
+- 次: M12-8 ⌘I インライン編集
+
+## 2026-07-17 —（続き）M12-8 ⌘I インライン編集（claude -p 型・live 全往復）
+- **キー確定 ⌘I**（⌘K はコードプレフィクス衝突）・グローバル bind でターミナルにも効く。**方式は ACP でなく `claude -p`**（ai_commit_message と同型）: セッション起動ゼロ・権限フロー不要で「チャットへ行かない最短経路」が最短で立つ。ROADMAP の文言も方式変更を明記（文書を直す方が先）
+- **shell 引用問題はファイルで殺す**: 指示+コードを一時ファイルに書いて `claude -p "固定プロンプト" < tmp`（ユーザー入力を sh に埋めない）。出力はコードフェンス剥がし+末尾改行を元コードへ正規化（LLM は末尾改行を付けがち = diff ノイズ）
+- InlineEditTarget::{Editor{range,old,version}, Terminal} の 2 相。適用は apply_lsp_edits = 1 Transaction（⌘Z 一発）・version 不一致は安全側破棄。ターミナルは insert_text（改行を落とす = 実行しない）
+- live: 「Result<u16, String> を返すように」→ busy 表示 → **-/+ diff プレビュー**（unified からヘッダ落とし・@@→···・中央省略）→ 適用+保存 → ディスク書換を確認（`SHIRUSHI_INLINE_PROBE`/`SHIRUSHI_INLINE_ACCEPT`）
+- 謎が 1 件: 初回走行のみ「提案が承諾前に適用されたように見えた」（ディスク不変・以後 3 走で再現せず）。監視中
+- 次: M12-10 Todo ボード
+
+## 2026-07-17 —（続き）M12-10 Todo ボード（板の一部始終を live 実証）★AI の唯一無二の本丸
+- `project::todos`: 行番号保持パース + 「該当行の [ ]↔[x] だけ書き換え」（他は 1 バイトも動かさない）。設計は settings と同じ「**ファイルが真実・UI/CLI/AI は全部ただの書き手**」— 反映は watch 任せにすることで書き手が何人いても板が正しい
+- **live 実証（全部実 Claude）**: ▶ 送信（「完了したら [x] にせよ」自動付与）→ Claude が parse_port を 92 行改善 → **自分で todos.md をチェック** → watch → **板のチェックがひとりでに入る**（4→3・pulse 解除）→ git diff に `- [ ]`→`- [x]` の一部始終。外部プロセス追記の watch 反映・✨今日の計画（claude -p → 今日見出しへ追記）も live
+- ✨の学び: `claude -p` は agentic にファイルを読みに行き前置き+注記を混ぜてくる → プロンプトで「ファイルは開かない・タスク行のみ」+ `parse_plan_lines`（。終わり/※/60字超を捨てる）の**二段防御**。実測出力をそのまま unit test に
+- 権限待ちで 1 回目 110s では足りず（Model fallback: fable-5 が cyber 判定で decline → opus-4-8 再試行という珍事も観測）。2 回目 280s で完走
+- 残: 逐次消化モード（checkpoint 済で解禁条件は満たす・UI トグルは次スレッド）・手動チェックの対話確認は人の手番
+- 次: M12-12 ⌘O 2 階層
+
+## 2026-07-17 —（続き）M12-12 ⌘O 2階層 + worktree ダッシュボード — ★M12 全消化
+- UI-SPEC §7 の解釈: 「2 階層」= 画面遷移でなく**1 リストにプロジェクト行+配下 ⎇ 行をインデントで並べる**（一望が受入の本質なので遷移させない）
+- 「どこで何が走っているか」の実体 = **`RunningRegistry`（GPUI Global）**: 各窓の AgentPanel が dest_cwd（= その窓の worktree root）キーで (名前,色,running) を上書き。全窓横断の台帳を ⌘O が読む。書き手は窓ごとに排他なので lock 不要
+- 開く速さを守る 2 段構え: 即プロジェクト行のみで開く → bg で全 project の `git worktree list`+`git status --short --branch` → `Picker::set_items` 差し込み（Picker に set_items/accent/dots を追加）
+- live: 実 Claude 実行中に ⌘O → `⎇ main ✓●` に実行中スレッド色ドット・`⎇ feature ●`(dirty) を offscreen 目視
+- **M12 これで全項目チェック**（総合受入は機構完成・3 worktree 並走の体感は人の手番）。次: M13（⌘⇧P・i18n 回収・ベンチ・自動更新・Linux・初回体験）
+## 2026-07-17 —（続き）M13-1/2（⌘⇧P パレット・i18n 全回収）
+- パレット = `command_entries()` 登録表 + Picker 再利用。**確定は「閉じてから dispatch」**（フォーカスがエディタへ戻った後に `build_action`→`window.dispatch_action` = keymap と同じ解決経路）。live で Terminal コマンド確定 → 実シェルが開くのを実証
+- キー併記は `key_for_action` 逆引き + `pretty_keystroke`（⌘⇧P 記号化・unit test）。ユーザー keymap の上書き反映は既定 keymap 固定（軽微な乖離・残件）
+- i18n 回収は **98 箇所を Python 一括置換**（完全一致ペア + 一意性 assert）→ 型エラーだけ手直し（&'static str 前提のクロージャ/タプルを String 化）。**教訓: リテラル→t! の一括置換は「取り違え」より「型」で落ちる**ので、コンパイラを検証器に使うのが速い
+- ロケール依存になったテスト 1 本（「他 16 行」）は数字ベースの検証へ。en 実機スクショで Source control / Send ⌘⏎ / Terminal 1 を確認
+- 次: M13-3 ターミナルリンク
+
+## 2026-07-17 —（続き）M13-3/4/5（ターミナルリンク・自動更新・welcome/ベンチ/CI）— ★M13 実装分を全消化
+- **ターミナル file:line**: リンク検出は prepaint（セル→行再構成 + 手書きパーサ）・クリックは **paint 内 `window.on_mouse_event` 登録**（TerminalView への layout 書き戻し不要 = 再入の心配なし）。`--> sample.rs:28:9` 下線 + 28 行目着地を offscreen 実証。IME は `EntityInputHandler` 最小（確定→PTY・selected_text_range が Some でないと IME セッションが始まらない点に注意）
+- **自動更新**: Apple 公証済み dmg なので**署名検証は `spctl --assess` に委ねる**（自前 ed25519 鍵の配布・管理が丸ごと消える）。差し替えは hdiutil+ditto（実行中 .app 置換可）。GitHub API は curl 委任 = 依存ゼロ。実 Release での E2E は初回リリース時
+- **ベンチ**: criterion を入れず examples + Instant 直測（**予算超過 exit 1 を CI ジョブに**）。編集コアは全項目 ~1µs。key→frame は GUI 実機が要るので CI 外（残件）
+- **CI**: ci.yml 新設（mac test + コアベンチ・linux check は continue-on-error で追従待ち）
+- **M10〜M13 の実装項目をこれで全消化**。残 = 実環境必須群（Remote 障害注入/実機受入/Linux 実行/実 Release E2E/key→frame）と対話確認（⌘I ターミナル・板の手動チェック・3 worktree 並走の体感）
+## 2026-07-17 —（続き）terminal-stack 文書の §4 消化 + titlebar ピル余白
+- **⌘P 実測**（bench_fuzzy 新設）: zed 4,194 件 ~0.85ms・50k 合成 ~10ms/refilter = 1 フレーム内 → **in-process 続行を確定**し、列挙上限 5,000→50,000 へ（fuzzy がボトルネックでなく列挙 limit がボトルネックだった）。CI には載せない（ui は GPUI 依存でビルドが重い — editor_core ガードのみ CI）
+- **メモリ実測**（memory-usage.sh 新設）: idle RSS 122MB・起動 ~215ms → CLAUDE.md の性能予算に数字として記録（terminal-stack 層への武器）
+- titlebar のプロジェクトピル: gap 7→11 / px 9→11・ブランチ側に px7/py2・⎇ を fg2 で分離 = 詰まり解消（ユーザー指摘）
+## 2026-07-17 —（続き）UX 直し（transcript スクロール・titlebar・SSH の GUI 導線）
+- **transcript がスクロール不能だった**（overflow_hidden のまま）→ `overflow_y_scroll` + ScrollHandle。追従は「**底に居る時だけ** scroll_to_bottom」（遡り読み中は動かさない・offset.y は下スクロールで負）。初期表示/復元/スレッド切替も末尾へ
+- テキストのドラッグ選択は GPUI の素のテキストでは不可（zed は独自選択実装）→ **エントリ hover の ⧉ コピー**で代替・本文選択は残件
+- **アイコンが出ない罠**: `Assets::load` は明示 match 表 — SVG を assets/ に置くだけでは**出ない**（square-check も登録漏れで、レールの ☑ は空ボタンだった）。「SVG 追加 = match に 1 行」をセットで
+- titlebar: ピル左縁の 3px 色チップ廃止（色はレール等の許可箇所に集約）・信号機との間 78→92px・dock ボタン gap 2→6
+- **SSH の GUI 導線**: titlebar 右に server アイコン → 入力バー（ssh://…）→ 背景で ControlMaster+server 配備 → **新窓で開く**。失敗はトースト。system OpenSSH 委任なので ~/.ssh/config（エイリアス/鍵/ProxyJump/agent）がそのまま効く
+## 2026-07-17 —（続き）composer の折り返し（plain = 常時 wrap へ）
+- **composer で長文が右へはみ出す**: WrapMap の構築条件が `soft_wrap && !plain` — plain（composer）は M10-8 時点で意図的に対象外だった。**plain は常時 wrap** に変更（`soft_wrap || plain`・ガター無し幅で columns 計算）。描画/座標変換（offset_for_position）は元から wrap_map 経由なので条件 1 箇所の修正で全部整合
+- composer のフォントは Sans（プロポーショナル）なので 'M' 幅の等幅見積もりはややズレる → はみ出しより**早折れ**の安全側で許容（目視 OK）
+- ドラッグ複数行選択: エディタ/composer は is_selecting 機構で実装済み（wrap 対応も確認）。**transcript は GPUI に選択プリミティブが無く**（InteractiveText はクリック/ホバーのみ・Zed の markdown 選択は GPL 独自実装）自前実装が要る = 残件。当面は各エントリ hover の ⧉ コピー
+- `SHIRUSHI_COMPOSER_PROBE` 新設（composer へ下書き流し込み → offscreen 目視）
+## 2026-07-17 —（続き）transcript ドラッグ選択（自前実装）+ ブランチ切替 fallback + レール＋
+- **transcript のドラッグ選択をやりきった**（GPL 移植なしの自前）: 素材は GPUI の `StyledText`（`with_highlights` = 親スタイル継承で範囲背景だけ変えられる）と `TextLayout`（`index_for_position` が**絶対座標→byte** のヒットテスト・`bounds()` 付き・Rc 共有で render 後も引ける）
+- 構造: render 毎に `SelectableRegion { entry, text, layout }` を registry へ再構築 → コンテナ 1 箇所の mouse down/move/up で **エントリ跨ぎ選択**（隙間は直前リージョン末尾へ丸め）→ 選択は各エントリの highlight 背景（**スレッド色 30%**）→ **⌘C** はパネルルートの on_key_down で「選択がある時だけ」composer より先に拾って stop_propagation。Esc/外クリックで解除
+- 対象は User/Thinking/Agent の本文（Step の result はラベル混在のため対象外 = ⧉ コピーで代替）。offset は index_for_position 由来なので char 境界保証（プローブ注入時だけ boundary に注意）
+- 検証: `SHIRUSHI_TRANSCRIPT_SEL_PROBE` で entry0:3〜entry4:9 を注入 → **327 bytes のエントリ跨ぎコピー**（Step スキップ・空行区切り）と**行単位のハイライト描画**を offscreen 実証
+- **ブランチ切替の git 仕様バグ**: 他 worktree にチェックアウト済みのブランチへの `git switch` は fatal（'feature' is already used by worktree）→ 事前に worktree 一覧を見て、**あればその worktree を開く**（レールに居れば切替・無ければ新窓 = ⌘O と同経路）へ倒した。エラーは eprintln → トーストへ格上げ
+- **レール ＋ をネイティブのフォルダ選択ダイアログに**（`cx.prompt_for_paths`）: 選んだフォルダを現在窓のレールへ slot 追加（既存なら切替）。ダイアログ経由は window が無いので pending_project_switch → render 消化パターン（3 例目）
+
+## 2026-07-18 — LP 制作（lp/）+ スクショ連写モード
+- やったこと: `lp/index.html` 新設（Cursor 風・日本語・実機素材のみで構成）。screenshot 機能に連写を追加（`SHIRUSHI_SCREENSHOT_FRAMES` / `SHIRUSHI_SCREENSHOT_INTERVAL_MS` + 保存ログに経過 ms・main.rs）。ACP 実ストリーミングは **release ビルドで 60ms 間隔 ×1100 コマ（≒12fps・92 秒）連写 → 実時間タイムスタンプで mp4 に組んで → GIF 化**（思考区間のみ 16 倍速編集。`lp/assets/gif/stream.{mp4,gif}`）。マスコットは確立パイプライン通り `mock/mascot/neko-anim/video/*.mp4`（Kling: tl/thk/cel/doze）から GIF 化 — `*8/` ディレクトリの 8 コマ版は旧世代なので宣材に使わない。素材採取は `~/Library/Application Support/Shirushi` をバックアップ → デモ用 state.json / shirushi.db（threads・turns を手組み）を配備 → プローブ撮影 → byte 一致で復元、の手順。リポジトリ直下の一時 `.shirushi/todos.md` も削除済み
+- 学び/罠: main.rs の「オフスクリーンはグリフが写らない」コメントは古かった（font-kit で写る・修正済み）。連写は debug ビルドだと PNG エンコードが ~700ms/コマで律速 — release なら ~85ms/コマ。⌘F プローブ（SHIRUSHI_BUFFER_SEARCH）は SHIRUSHI_OPEN_TABS だと非同期オープンに先行して不発 — state.json の open_files に事前投入すれば効く。スレッドのタブ順は `updated_at DESC`、ACP_PROBE は index 1 に送る。zsh は `"$VAR[x]"` を添字展開する — ffmpeg のフィルタ変数は `${VAR}` で書く。この端末シェルには画面収録権限が無く screencapture は不可（オフスクリーン連写で代替）
+- 次: LP の公開（GitHub Pages 等・todos の「LP を公開する」）。README のヒーロー画像を新素材へ差し替え検討
+
+## 2026-07-19 — LP を操作アニメ化 + necoder へリブランド（LP のみ）
+- やったこと: LP の静止スクショを「操作 → 出現」の CSS アニメに置換。整合した 1 セッション（state-tabs.json）から base（オーバーレイ無し）+ 各機能の操作後（todos/palette/switcher/diff/search）を撮り、`lp/assets/demo/*.png` に配置。`.player` コンポーネント = base/active の 2 レイヤをスクロールインで crossfade（active フェードイン＝オーバーレイだけ出現して見える）+ キーキャップ（⌘⇧P 等）or カーソル+波紋（Todo/diff のクリック）。IntersectionObserver で可視時のみ `.run` 付与＝画面外は停止。prefers-reduced-motion では active を静止表示。エディタ節の 4 枚カードを大きな showcase 3 本（palette/search/diff）+ LSP テキスト帯へ再構成。**公開ブランドを Shirushi → necoder（necoder.com）にリネーム**（title/meta/og/nav/hero/footer）。favicon とブランドマークを白髪アイコンから相棒の茶髪ネコ（`mock/mascot/gpt/01-neko.png` の顔クロップ）へ差し替え。未参照になった旧 GIF/PNG を削除（lp 13MB）。
+- 学び/罠: リネームは**表示ブランドのみ** — repo/crate/`.shirushi/` 設定 dir/clone コマンドは実体が shirushi なので据え置き（LP のスクショ titlebar の "shirushi" はデモで開いているプロジェクト名なので不整合ではない）。screenshot 連写は debug ビルドで大 PNG 保存が ~700ms/コマ・kill で 0 バイト truncate する → **アプリは保存後に自分で quit する**ので kill せず自然終了を待つのが正。ユーザーが main.rs に同梱フォント（IBM Plex Sans JP / Guguru Sans Code・OFL）を追加済み＝日本語グリフがオフスクリーンでも綺麗に出るようになった。
+- 次: necoder への本体リネーム（crate 名・ウィンドウタイトル・`~/Library/Application Support/Shirushi` の設定パス）は未着手＝別途本人判断。マスコットの固有名は未定（候補提示済み）。LP 公開。
+
+## 2026-07-19 — プロジェクト色を Peacock 相当に（パレット一本化 + 任意 hex + ⌘K⌘C）
+- やったこと: 既存の色ピッカー（M12-11・レール右クリック）を Peacock 水準へ。①`theme_core::IDENTITY_PALETTE_HEXES` 新設（巡回5色 + 予約色非衝突の厳選5色 cyan/chartreuse/violet/magenta/graphite）→ ピッカーの寄せ集め12色（Claude バレット `#d97757`・スレッド色 `#61afef`/`#c678dd`・選択面 `#7d9bd8` と衝突していた）を撤去し出所を1本化。②ピッカーに任意 hex 入力行（rename 式の生 `on_key_down` + 16進フィルタ・`parse_hex_color`→`apply_project_color`）。③`ProjectColor` アクション + ⌘K⌘C（⌘K⌘T に並置）+ `command_entries` に1行（コマンドパレット自動化）。キーボード起動は `open_project_color` がアクティブなレール項目（`RAIL_WIDTH` + index*38）にアンカー。④`apply_project_color` の波及をアクティブ1枚→全ペイン（`tabs`+`split_editor`・`apply_editor_settings` と同じ集約）へ。i18n ja/en に `cmd.project_color`/`color.hex_placeholder`。検証用 `SHIRUSHI_COLOR_PICKER` プローブ追加。変更: theme_core / workspace / keymap_core / locales。
+- 学び/罠: **ユーザーが並行で workspace.rs（窓縁 2px 枠 L11599・UI-SPEC §1.3）を同時実装していた** — Edit の text-match のおかげで無衝突だったが、大ファイルの同時編集は line 番号が飛ぶ（apply_project_color が 4809→4835 と移動）ので「編集直前に再 Read して exact 一致で当てる」のが安全。私の色ピッカー変更（`apply_project_color`→`cx.notify()`）は窓縁ボーダー（`self.accent()` 参照）も自動追従 = 合流できた。**remote 別色は入れない**判断（project=slot が固有色・窓縁が「どのマシンか」を担う）。パレットの厳選は offscreen スウォッチ目視で確定（magenta が rose とやや近いが識別可で据え置き＝本人確認済み）。
+- 次: ライブの ⌘K⌘C / コマンドパレット / hex 確定の対話確認は人の手番。ユーザー実装の窓縁 2px 枠との統合の体感確認も。
+
+## 2026-07-19 — M10-2 ブランチ/worktree を既定でレールに開く + レール右クリックメニュー
+- やったこと: ユーザー報告2件（①delete branch が効かない ②別ブランチが新窓で開くのを止めてレール＋右クリックメニューに）に対応。**ウィンドウモデルを転換**（DECISIONS/ARCHITECTURE §5 改訂）: 1窓=1worktree・新窓に開く → **1窓に複数 project×branch のレール・既定はレール内**。
+  - `open_folder_in_rail(host, path, branch)` 新設（既存なら切替・無ければスロット追加）。`open_branch_worktree`(⧉) / `open_worktree_target`(⌘O・switch_branch_to フォールバック) / `open_worktree_window`(⎇ worktree 行) の3経路を `open_folder_as_window`→レールへ差し替え。新窓は右クリック明示 + ⌘⇧N のみ残す。
+  - `ProjectSlot.worktree_branch: Option<String>` 追加（Some=リンク worktree タブ）。同一リポジトリ別ブランチの identity 色衝突を `next_free_color`/`color_in_use`/`colors_close` で回避（同色2枚を防ぐ）。
+  - **レール右クリック = コンテキストメニュー**（`render_rail_menu` + `RailMenuState`）: 色スウォッチ＋「その他の色…」（→ユーザー実装のフル hex ピッカー `open_color_picker` を再利用）／新しいウィンドウで開く／レールから外す／(worktree のみ) worktree を削除・worktree ごとブランチを削除。破壊的操作は二段確認（`arm_rail_confirm`→`confirm` armed で実行）。旧「右クリック=色ピッカー直開き」はメニュー最上段に吸収。
+  - `remove_project_slot`（active index 詰め + 最後の1枚ガード + `load_active_slot` へ張り替え。`switch_project` からロード部を抽出して共有）。`remove_slot_worktree`/`delete_slot_branch` は背景で `git worktree remove`（メイン作業ツリーの dir から実行）→ 任意で `git branch -D` → スロット外し。
+  - **delete branch のバグ**: `git branch -d/-D` は「他 worktree に checkout 中のブランチ」を拒否する仕様（report の `asdfa` は scratchpad の `inline_probe` worktree が握っていた）。旧実装は失敗が `eprintln` に消えていた → 事前に `git_worktrees_on` で検知し**分かるトースト**（`git.branch_used_by_worktree`）+ 成否とも `push_toast` で可視化。
+  - project に `remove_worktree_on`。i18n ja/en に rail メニュー7語 + git 3語。検証プローブ `SHIRUSHI_RAIL_MENU`。変更: project / workspace / locales / docs。
+- 学び/罠: **また別セッションが並行で workspace.rs（直前の色ピッカー Peacock 化）を編集中**だった（`find -mmin -5` / `ps` で複数 claude + cargo の file lock で確認）。Edit の exact-match と「編集直前に再 Read」で無衝突。line 番号は 200 行超ずれる。`asdfa`/`inline_probe` は別セッション(925098de・稼働中)の scratchpad worktree 由来で、このリポジトリには既に無い（`git worktree list`=main のみ）ので再現不可＝コード側のハンドリングを直す方針にした。`git worktree remove` は**対象ツリーの中からは実行不可** → 一覧先頭（対象以外）のメイン作業ツリー dir で叩く。
+- 追記（同セッション・ユーザー指摘）: **レール下部のアクティビティアイコンをアクティブ＝プロジェクト色・非アクティブ＝fg2 に**（VSCode の Activity Bar 準拠）。explorer/search/git/todos/agent/terminal の6つ、それぞれ表示中のビュー/ドックだけ accent（`rail_icon` の color 引数を条件式に）。todos の旧「running だけ accent」は「板を開いていれば accent」に一般化（running は板が開いている前提なので損失なし）。UI-SPEC §1.3 許可リスト + §2 に明記。スクショ目視で explorer+agent が accent・他 gray を確認。
+- 追記（同セッション・実コード駆動の検証）: クリックできない代わりに**起動時プローブで実コードパスを叩き結果をオフスクリーン撮影**して4挙動を全確認。①`active_index_after_removal` を純関数化し6ケース単体テスト（末尾/先頭/自身/前後）②右クリックメニュー描画＋二段確認 armed（`SHIRUSHI_RAIL_MENU=confirm-worktree` → 「⚠ Click again to delete」赤）③**ブランチ→レール**（temp git repo に feature ブランチ→`SHIRUSHI_RAIL_PROBE=open-branch:feature` → 実 `git worktree add` が走り `ProbeRepo-feature` が**別色(cyan)のレールタブ**として追加・新窓ではない・親と color 衝突回避も確認）④**アクティブ slot をレールから外す→隣へ張り替え**（2スロット起動→`remove-active` → AltProject がアクティブになりツリー/ピル/宛先チップ全更新）。新プローブ `SHIRUSHI_RAIL_PROBE`（open-branch:/remove-active）+ `debug_rail_probe` は他の SHIRUSHI_* プローブと同じく dev ツールとして残置。
+- 次: remote(SSH) worktree のレール追加の実地確認（ローカルは検証済み）。コミットは作業ツリーが多セッション混在のためユーザーがステージ範囲を決めて実施。
+
+## 2026-07-19 — Finder 多重ガード + SSH config ピッカー + 窓縁色枠 + リモートのホスト別色（別セッション）
+- やったこと: ユーザー依頼を上から消化。①**Finder 多重**: レール＋の `add_project_via_dialog`（`cx.prompt_for_paths` は全体で1箇所）に多重起動ガード `add_project_dialog_open`（`ssh_connecting` と同型・`await` の全経路で false へ戻す）。②**SSH config ピッカー**（ROADMAP M13「SSH config picker」実質達成）: `host::ssh_config_hosts()`/`parse_ssh_config`（`~/.ssh/config` の Host 列挙・`*?!` 除外・`=`区切り・複数 alias・unit test）→ `PickerMode::SshHosts`（既存 Picker 再利用）+ titlebar server アイコン/⌘⇧P「Remote: Connect to SSH Host」→ 選択で `ssh://alias/` seed → 既存 `connect_ssh_and_open`(M9) で新窓。行に **user@実IP** 併記（VSCode 超え）。i18n ja/en。③**窓縁 2px プロジェクト色枠**（ルート render・`self.accent()`）= Peacock 相当の「窓ごと識別」。UI-SPEC §1.3 許可リストに追記（面塗りは禁止のまま＝縁の線）。④**リモートのホスト別色(#3b)**: `.shirushi` はリモート側で使えないので `storage` に `host_colors`(host→0xRRGGBB) 新設（round-trip test）+ `theme_core::color_from_hex` + `apply_remote_host_colors`（storage セット後・`display_name` キー・初回は IDENTITY パレットからハッシュで焼付け＝開き順で色が変わらない）。⑤**footer にプロジェクト色●スウォッチ**（statusbar 左端・クリックで `open_project_color`＝ユーザー実装の色ピッカーを開くだけ）。⑥**#2d SSH 磨き**: `host_last_path`(host→前回パス) を storage 追加 → ピッカー選択で前回パスがあれば即接続（打たない）・行に `→path` 併記・接続成功で記録。⑦**手動 override**: `apply_project_color` のリモート分岐で `.shirushi` の無駄書きを止め `set_host_color` へ。変更: host / storage / theme_core / workspace / locales / docs。cargo check 全 green・storage/workspace test green・footer スウォッチ と SSH ピッカーは offscreen 目視。
+- 学び/罠: **ユーザーが複数の並行セッションで workspace.rs（色ピッカー Peacock 化・レールメニュー等）を同時編集中**（mtime が数分ごとに進む）。Edit の exact-match ＋「編集直前に再 Read」で無衝突を維持（line 番号は数百行ずれる）。色ロジックは別 crate（storage/theme_core）中心に置き、workspace.rs は「新メソッド + 呼び出し1点」に留めてユーザーの色割当行を避けた。**要すり合わせ**: ユーザーの色ピッカー JOURNAL（本日2件目）は「**remote 別色は入れない**（窓縁が『どのマシンか』を担う）」判断だが、本会話で明示的に #3b を依頼された → 「窓縁色を機械ごとに安定させる」方向として実装（矛盾ではなく補完だが、方針は本人のセッション間で統一が要る）。#3b の色キーは `display_name`、#2d の前回パスキーは config alias（別テーブル・別用途で不整合なし）。
+- 次: **live 検証（実 SSH 接続が要る・人の手番）**: リモート窓にホスト色枠が出るか / 再接続で同色 / ピッカーの前回パス即接続 / 手動 override（リモートで色選択→`host_colors` に残る）。ROADMAP M13「SSH config picker」はコード達成・実機受入待ち。remote 色を入れるか否かの最終方針はユーザーの色ピッカー方針と統一する。
+
+## 2026-07-19 — スレッド改名/AI命名 + 履歴ビュー + レール SSH 導線 + Linux musl 配布（別セッション）
+- やったこと: ユーザー4件（SSH機能不全・レール導線 / タブ改名 / 履歴 / AI命名）を4フェーズで消化。
+  **#4 タブ改名**: `Thread.name_is_custom` 追加・タブ ダブルクリック（`on_click` の `click_count()==2`、既存 `on_mouse_down` 切替と共存）→ `EditorView::plain`（IME正しい）のインライン入力（アクセント枠）→ Enter 確定 / Esc 取消 → `persist_thread`。改名中は on_mouse_down ガードで切替/フォーカス移動を止める（入力を邪魔しない）。offscreen 目視（タブがアクセント枠入力に差替）。
+  **#6 AI自動命名**: `project::name_thread_on`（`inline_command_on` 同型 = `claude -p` 一時ファイル経由・shell 引用回避）→ 初回 `TurnEnded` 後、既定名（"スレッドN"）かつ未手動改名なら会話冒頭（最初の user + agent 応答先頭）から18字タイトルを背景生成→差替。`settings.agent_auto_name`（既定 on）。`is_placeholder_name` で再命名防止・手動改名尊重。
+  **#5 履歴**: `storage::load_all_threads`（archived 含む・unit test）+ `entry_from_turn`/`thread_from_storage`（set_storage から切出）+ `AgentPanel::open_thread_from_history`。導線 = Agent タブ列の 🕘 ボタン → `PanelEvent::OpenHistoryRequest` → workspace が pending で消化（subscribe に window 無し迂回・OpenDiffRequest 同型）→ `PickerMode::ThreadHistory`（`open_picker` 再利用・行頭●スレッド色 + Σトークン detail）。⌘⇧H / パレット「AI: スレッド履歴」も。offscreen 目視（3スレッドが色付きで一覧）。
+  **#1/#2/#3 SSH**: 診断 = コードは M9 で完全だが mac→Linux で Linux musl バイナリ未生成/未同梱 → `ensure_remote_server` が bail が実体（バグでなく配布の穴）。①レール `server.svg` アイコン（`RailSettings.remote`）→ 既存 `open_ssh_host_picker`（~/.ssh/config ワンクリック・#2d 前回パス即接続は既存）。②リモート slot に server バッジ（`is_remote()` 分岐・絶対配置）。③**CI に `build-remote-server` ジョブ**（cargo-zigbuild で x86_64/aarch64 musl → upload-artifact）。④`ensure_remote_server` を **platform 先検出 + per-target 自動発見**（`find_remote_server_for`: `~/.local/share/shirushi/remote/artifacts/<triple>/` → .app 同梱 `Resources/remote/<triple>/` → same-platform dev の順。env 指定と same-platform は不変＝厳密な superset。`remote_target_triple` unit test）。⑤`bundle-mac.sh` が server バイナリ（同OS=MacOS隣・別OS musl=Resources/remote/）を同梱。**Docker で x86_64 musl バイナリ生成済み**（3.9MB static-pie ELF）。
+  変更: settings_core / project / agent_panel(+Cargo project 依存) / storage / workspace / keymap_core / host / main.rs(検証プローブ 3本) / ci.yml / bundle-mac.sh / locales。cargo test --workspace 全 green・i18n parity green。新UI 5点 offscreen 目視（レール SSH アイコン / 履歴🕘 / タブ改名入力 / SSH ホストピッカー / 履歴 Picker）。
+- 学び/罠: **offscreen で storage 依存状態（履歴 Picker）はユーザーの起動中アプリが DB をロックしていると開けない**（`Locking error` → `storage=None` → seed スレッド表示）→ `SHIRUSHI_DB=<一時>` で回避（初回起動で seed が永続化され load_all_threads が拾う）。**cargo test を `-p A -p B` 複数指定すると feature 統合で `Availability` 未解決の偽エラー**（`--workspace` や単独 -p では出ない＝CI 無害）。musl クロスは `rust-toolchain.toml`(1.95.0) が messense image 既定を上書き → `rustup target add` を挟む必要。ユーザーが workspace.rs/agent_panel.rs を並行編集中（rustfmt hook も走る）＝ 編集直前 Read で追従。
+- 次: **人の手番**: ①実 Linux 接続（`~/.ssh/config` に ubuntu@AWS / azureuser@Azure = x86_64 濃厚 → ビルド済み musl を `SHIRUSHI_REMOTE_SERVER_BINARY` 指定 or `~/.local/share/shirushi/remote/artifacts/x86_64-unknown-linux-musl/shirushi-remote-server` に配置で開通確認）②ダブルクリック改名の IME 実操作 ③実 claude での自動命名 live ④リモート slot バッジの実接続確認。askpass（パスワード認証）は鍵/agent 運用なら不要のため後続。CI の musl ジョブは初回実行で追従修正あり得。

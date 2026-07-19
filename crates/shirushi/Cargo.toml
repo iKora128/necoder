@@ -25,6 +25,7 @@ keymap_core.workspace = true
 settings_core.workspace = true
 settings.workspace = true
 project.workspace = true
+futures.workspace = true
 host.workspace = true
 search.workspace = true
 serde_json.workspace = true

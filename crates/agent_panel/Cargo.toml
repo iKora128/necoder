@@ -9,6 +9,8 @@ publish = false
 path = "src/agent_panel.rs"
 
 [dependencies]
+anyhow.workspace = true
+storage.workspace = true
 gpui.workspace = true
 theme_core.workspace = true
 editor_view.workspace = true
@@ -20,3 +22,5 @@ serde_json.workspace = true
 futures.workspace = true
 i18n.workspace = true
 host.workspace = true
+project.workspace = true
+pulldown-cmark.workspace = true

@@ -28,10 +28,24 @@ regex = "1"
 url = "2"
 # git gutter diff（HEAD vs バッファの行差分）。Zed も同じ（純 Rust・libgit2 不使用）
 imara-diff = "0.1.8"
+# チャット本文の markdown 解析（M4）。純 Rust・MIT・CommonMark+GFM。イベント列を自作レンダラで
+# GPUI 要素へ落とす（Zed の markdown crate は GPL のため移植せず手法のみ参考・DECISIONS §5）。
+# default-features off で CLI 用の getopts を外す（Zed と同じ）。
+pulldown-cmark = { version = "0.13", default-features = false }
 # tree-sitter（M7 ハイライト）。links=tree-sitter は 1 版のみ許容 → highlight 0.25 に揃える
 tree-sitter = "0.25"
 tree-sitter-highlight = "0.25"
 tree-sitter-rust = "0.24"
+# M11 多言語ハイライト（grammar crate は tree-sitter-language shim 経由で core 版と疎結合）
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.23"
 # M4 ACP: Claude Code を ACP で包む
 agent-client-protocol = "1.2"
 blocking = "1"
@@ -41,6 +55,10 @@ image = "0.25"
 # M8 統合ターミナル。crates.io 0.26 は Zed fork(0.26.1-dev)とほぼ同一 API
 alacritty_terminal = "0.26"
 libc = "0.2"
+# M10 ファイル監視（macOS は FSEvents バックエンド）。remote watch は M13 で Host 経由に
+notify = "6.1"
+# ローカル永続化 DB（hot exit / スレッド / 台帳。DECISIONS 決定ログ 2026-07-16・pure-Rust SQLite）
+turso = "0.7"
 
 # 自作 crate（作る順は docs/ARCHITECTURE.md §2）
 theme_core = { path = "crates/theme_core" }
@@ -53,6 +71,7 @@ keymap_core = { path = "crates/keymap_core" }
 project = { path = "crates/project" }
 host = { path = "crates/host" }
 search = { path = "crates/search" }
+storage = { path = "crates/storage" }
 lang = { path = "crates/lang" }
 acp_client = { path = "crates/acp_client" }
 agent_panel = { path = "crates/agent_panel" }

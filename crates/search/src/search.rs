@@ -85,6 +85,20 @@ impl SearchQuery {
         matches
     }
 
+    /// テキスト全体を先頭から検索し、byte レンジだけを返す（⌘F バッファ内検索用）。
+    /// [`Self::search_text`] と違い行に分割しない＝改行を含む literal も見つかる。
+    /// レンジは start 昇順・非重複。`max` 件で打ち切る（呼び出し側が「n 件以上」表示に使う）。
+    pub fn find_in(&self, text: &str, max: usize) -> Vec<Range<usize>> {
+        if self.is_empty {
+            return Vec::new();
+        }
+        self.regex
+            .find_iter(text)
+            .take(max)
+            .map(|found| found.start()..found.end())
+            .collect()
+    }
+
     /// 複数ファイルを横断検索する。UTF-8 で読めないファイル（バイナリ等）はスキップ。
     pub fn search_files(&self, files: &[PathBuf]) -> Vec<FileMatch> {
         self.search_files_on(host::LocalHost::shared().as_ref(), files)
@@ -217,6 +231,27 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].line, 1);
         assert_eq!(&text[matches[0].byte_range.clone()], "TODO");
+    }
+
+    #[test]
+    fn find_in_returns_ranges_in_order_with_cap() {
+        let query = SearchQuery::new("todo", false, false).unwrap();
+        let ranges = query.find_in(SAMPLE, usize::MAX);
+        assert_eq!(ranges.len(), 2); // "TODO" と "todo"
+        assert_eq!(&SAMPLE[ranges[0].clone()], "TODO");
+        assert_eq!(&SAMPLE[ranges[1].clone()], "todo");
+        assert!(ranges[0].start < ranges[1].start);
+        // 上限で打ち切る
+        assert_eq!(query.find_in(SAMPLE, 1).len(), 1);
+    }
+
+    #[test]
+    fn find_in_matches_across_newlines() {
+        // 行分割しないので改行を含む literal も見つかる（search_text では不可能）
+        let query = SearchQuery::new("() {\n    //", false, true).unwrap();
+        let ranges = query.find_in(SAMPLE, usize::MAX);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(&SAMPLE[ranges[0].clone()], "() {\n    //");
     }
 
     #[test]

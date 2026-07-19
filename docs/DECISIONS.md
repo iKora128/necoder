@@ -108,9 +108,40 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
 - **重い Phase 管理はしない**: M0〜M4 の軽量マイルストーン + FEATURES.md のタグで運用（CLAUDE.md 参照）
 - **ビルド前提の罠**: macOS 26 / Xcode 26 は Metal Toolchain が別コンポーネント
   → `xcodebuild -downloadComponent MetalToolchain` が必要（GPUI ビルド全般の前提）
-- **ウィンドウモデル: レール＝窓内切替、⌘⏎／右クリック＝新窓**（1窓 = アクティブな project×branch。
+- **ウィンドウモデル（改訂 2026-07-19・M10-2）: 1窓 = 複数 project×branch を持つレール。既定はレール内で開く**
+  — レール＝窓内の切替器（複数スロット）。**ブランチ/worktree を開くと既定で新スロットとしてレールに載る**
+  （旧: 1窓=1worktree で新窓に開く。新窓が散らばると色による方向感覚が窓境界で途切れるため転換）。
+  **新窓は「レール項目を右クリック→新しいウィンドウで開く」の明示操作**に格下げ（⌘⇧N も新窓のまま）。
+  レール右クリック＝コンテキストメニュー（色スウォッチ＋新窓／レールから外す／worktree・ブランチ削除。
+  破壊的操作は二段確認）。旧「右クリック＝色ピッカー」はメニュー最上段のスウォッチ＋「その他の色…」へ吸収。
+  「削除」の3階層を分離: **レールから外す=表示のみ（安全）／worktree を削除=`git worktree remove`／
+  ブランチを削除=worktree ごと `git branch -D`**。worktree タブ（`worktree_branch=Some`）だけ後2者を出す。
+  同一リポジトリの別ブランチは identity 色が親と衝突しがち → 未使用パレット色に倒して同色2枚を避ける。
   状態は (project, branch) 単位で保存復元。ARCHITECTURE §5）
 - **i18n: 初日から内蔵**（rust-i18n・`t!` 規律・ja/en 同梱・追加言語は YAML 1枚＝言語パック。
   根拠: 後付けは地獄 — Zed は i18n 無しで後発が入れられない実例、VSCode は language pack 方式。ARCHITECTURE §6）
 - **ドキュメント駆動開発へ移行**: ROADMAP（受入条件）/ ARCHITECTURE（設計図）/ UI-SPEC（見た目仕様）/
   JOURNAL（日誌）の4枚 + mock を正とし、`/goal` コマンドが未チェックの受入条件を上から自走で消化する
+- **ローカル永続化 DB: Turso 採用（2026-07-16・本人指定）** — SQLite の pure-Rust 再実装（MIT・async ネイティブ）。
+  用途は hot exit / スレッド永続化 / トークン台帳 / checkpoint メタに**限定**（設定・todos.md・keymap は
+  「ファイルが真実」のまま。検索索引は持たない＝ regex 走査が正）。薄い `storage` crate に隔離し、
+  成熟度の問題が出たら rusqlite へ 1 crate 差し替えで退避できる面を保つ（ARCHITECTURE §7）
+- **自動アップデート: 自前で確定（2026-07-16・本人）** — GitHub Releases + 署名検証。velq / karui と同型の
+  確立パターンがあるため Sparkle は不採用（M13 で実装）
+- **checkpoint の方式: content-addressed ブロブストア自作で確定（2026-07-17・比較表提示済み）** —
+  (a) content-addressed（採用）: Turso に checkpoint→file→hash のメタ・blob は
+  `~/Library/Application Support/Shirushi/blobs/<hh>/<hash>` のファイル・重複排除が自然・GC は SQL で列挙。
+  (b) ターン毎全コピー: 実装最小だが turn×ファイルで線形膨張（エージェントは同じファイルを何度も触る = 最悪ケース）。
+  (c) shadow git: delta 圧縮は魅力だが git 依存・ユーザー .git との干渉・turn 毎 commit コスト —
+  research/cursor-features.md の「Git 非依存の信頼担保」と不整合。
+- **「UI スレッドで Host を呼ばない」を規律化（2026-07-16 監査）** — Host は同期 trait で remote は
+  1 呼び出し最大 30s ブロックしうる。詳細と確立パターンは ARCHITECTURE §9、監査結果は JOURNAL 2026-07-16
+- **「自分で決めた既定はドリフトしない」を UX 原則として確定（2026-07-19・本人）** — ユーザーが明示的に
+  設定した既定（既定エージェント・既定モデル・effort 等）は、**意図的に変更しない限り変わらない**。
+  last-used 記憶で新規スレッドが「前回選んだもの」に引きずられる方式（Claude Code 拡張・Zed もこれ）は**不採用**。
+  根拠: 1 回の気まぐれ選択が恒久既定を汚す不快さ（例: 一度 Fable／高コストモデルを選ぶと以後の新スレが
+  それに固定され、無意識にトークンを溶かす）を UX の芯として避ける＝「色による方向感覚＝迷わない」と同系の判断。
+  **実装規律: per-thread のピル操作はそのスレッドだけに効き、グローバル既定 (`default_agent` 等) を書き換えない。
+  既定の変更は Settings 画面（明示操作）でのみ**。監査（2026-07-19）で唯一の違反＝Agent ピルの `default_agent`
+  巻き添え保存を除去済み（`agent_panel::select_option`）。モデル既定も「Settings で各エージェントに ★ で決める」
+  方式に寄せる（当面は agent 自身の既定＝安定なのでドリフトは無い）。設定画面は M12・`Workspace.show_settings`。

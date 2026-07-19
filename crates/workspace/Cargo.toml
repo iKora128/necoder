@@ -9,6 +9,7 @@ publish = false
 path = "src/workspace.rs"
 
 [dependencies]
+anyhow.workspace = true
 gpui.workspace = true
 host.workspace = true
 editor_core.workspace = true
@@ -16,10 +17,13 @@ editor_view.workspace = true
 theme_core.workspace = true
 project.workspace = true
 search.workspace = true
+storage.workspace = true
 lang.workspace = true
 agent_panel.workspace = true
+acp_client.workspace = true
 ui.workspace = true
 i18n.workspace = true
+keymap_core.workspace = true
 settings_core.workspace = true
 settings.workspace = true
 terminal_view.workspace = true

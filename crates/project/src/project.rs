@@ -4,6 +4,8 @@
 //! `.git` と gitignore 対象を除外する（ripgrep の `ignore` crate を使用）。
 //! ファイル監視・インクリメンタル更新は後続（M8/性能）で追加する。
 
+pub mod todos;
+
 use anyhow::{Context as _, Result};
 use host::{CommandOutput, CommandSpec, Host, LocalHost};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -79,22 +81,7 @@ impl Worktree {
     /// ルート配下の全ファイルを再帰列挙する（gitignore 準拠・`.git` 除外）。ファイルファインダ用。
     /// 各要素は (絶対パス, ルート相対の表示文字列)。上限 `limit` 件で打ち切る。
     pub fn all_files(&self, limit: usize) -> Vec<(PathBuf, String)> {
-        let mut files = self
-            .host
-            .list_files(&self.root, limit)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|path| {
-            let relative = path
-                .strip_prefix(&self.root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-                (path, relative)
-            })
-            .collect::<Vec<_>>();
-        files.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
-        files
+        all_files_on(self.host.as_ref(), &self.root, limit)
     }
 
     /// 任意ディレクトリを列挙する（ルート外＝隣のリポジトリへ辿るブラウズ用）。
@@ -120,6 +107,12 @@ impl Worktree {
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         Ok(entries)
+    }
+
+    /// パスが gitignore 対象か（watch イベントのノイズ除去用。ディレクトリ判定不能なら false 扱いで問い合わせる）。
+    pub fn is_ignored(&self, path: &Path) -> bool {
+        self.ignore.matched(path, false).is_ignore()
+            || self.ignore.matched(path, true).is_ignore()
     }
 
     /// `dir` 直下を列挙する（`.git` は除外。gitignore 対象は**除外せず** `ignored=true` で薄字表示。
@@ -429,6 +422,29 @@ pub fn add_worktree_on(host: &dyn Host, dir: &Path, path: &Path, branch: &str) -
     Ok(())
 }
 
+/// worktree を削除（`git worktree remove [--force] <path>`）。dirty だと非 force で git が拒否＝安全側。
+/// メインの作業ツリーは git が拒否する（呼び手はレールから外すへ倒す）。
+pub fn remove_worktree(dir: &Path, path: &Path, force: bool) -> Result<()> {
+    remove_worktree_on(&LocalHost, dir, path, force)
+}
+
+pub fn remove_worktree_on(host: &dyn Host, dir: &Path, path: &Path, force: bool) -> Result<()> {
+    let path = path.to_string_lossy().into_owned();
+    let args: &[&str] = if force {
+        &["worktree", "remove", "--force", path.as_str()]
+    } else {
+        &["worktree", "remove", path.as_str()]
+    };
+    let output =
+        run_git(host, dir, args.iter().copied()).context("git worktree remove の実行に失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "worktree 削除に失敗: {}",
+        git_fail_message(&output)
+    );
+    Ok(())
+}
+
 // ── git 基礎操作（stage / commit / push / pull / branch 作成・削除） ──
 // すべて `git` CLI ラッパ。失敗は stderr（空なら stdout）を人間向けに返す。
 
@@ -643,6 +659,182 @@ pub fn ai_commit_message_on(host: &dyn Host, dir: &Path) -> Result<String> {
     let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
     anyhow::ensure!(!message.is_empty(), "生成結果が空（差分が無い？先に stage/編集を）");
     Ok(message)
+}
+
+/// worktree の一望情報（⌘O ダッシュボード・M12-12）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorktreeStatus {
+    /// upstream より進んでいるコミット数。
+    pub ahead: usize,
+    /// upstream より遅れているコミット数。
+    pub behind: usize,
+    /// 未コミットの変更があるか。
+    pub dirty: bool,
+}
+
+/// worktree の ahead/behind と dirty を 1 コマンドで取る（`git status --short --branch`）。
+pub fn worktree_status_on(host: &dyn Host, dir: &Path) -> Result<WorktreeStatus> {
+    let output = host
+        .run_command(&CommandSpec::new("git", dir).args(["status", "--short", "--branch"]))
+        .context("git status を実行できません")?;
+    anyhow::ensure!(output.success(), "git status に失敗: {}", git_fail_message(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    Ok(parse_status_branch(&stdout))
+}
+
+/// `git status --short --branch` の出力をパースする（pure・テスト用に分離）。
+/// 先頭行 `## main...origin/main [ahead 1, behind 2]` + 残り行数 = dirty。
+fn parse_status_branch(stdout: &str) -> WorktreeStatus {
+    let mut status = WorktreeStatus::default();
+    let mut lines = stdout.lines();
+    if let Some(first) = lines.next() {
+        if let Some(bracket) = first.find('[') {
+            let inside = first[bracket + 1..].trim_end_matches(']');
+            for part in inside.split(',') {
+                let part = part.trim();
+                if let Some(count) = part.strip_prefix("ahead ") {
+                    status.ahead = count.trim().parse().unwrap_or(0);
+                } else if let Some(count) = part.strip_prefix("behind ") {
+                    status.behind = count.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+    }
+    status.dirty = lines.any(|line| !line.trim().is_empty());
+    status
+}
+
+/// 選択コードを自然言語の指示で書き換える（⌘I インライン編集・M12-8）。
+/// `claude -p` に「指示 + 対象コード」を**一時ファイル経由**で渡し、書き換え後の
+/// コードだけを受け取る。指示・コードはファイル経由なので shell 引用の心配が無い。
+/// host 経由なので remote でも（claude があれば）動く。
+pub fn inline_rewrite_on(
+    host: &dyn Host,
+    dir: &Path,
+    instruction: &str,
+    code: &str,
+) -> Result<String> {
+    // 指示は 1 行に正規化（ペイロードの構造を単純に保つ）。
+    let instruction = instruction.replace(['\n', '\r'], " ");
+    let payload = format!("指示: {instruction}\n--- 対象コード ---\n{code}");
+    let unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let temp = PathBuf::from(format!("/tmp/shirushi-inline-{unix_ms}.txt"));
+    host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
+        .context("インライン編集の一時ファイル作成に失敗")?;
+    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+    let prompt = "入力の最初の行にある指示に従って、対象コードの区切り行より後のコードを書き換えて。\
+        出力は書き換え後のコード全体だけ。前置き・説明・コードフェンスは出力しない。\
+        インデントと空行は元のスタイルを保つ。";
+    let script = format!(
+        "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
+        temp = temp.display()
+    );
+    let output = host
+        .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
+        .context("インライン編集の実行に失敗（claude CLI 未導入？）")?;
+    anyhow::ensure!(output.success(), "生成に失敗: {}", git_fail_message(&output));
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let text = strip_code_fence(&raw);
+    // 末尾改行は元コードに合わせる（LLM は末尾改行を付けがち → 差分ノイズを消す）。
+    let text = if code.ends_with('\n') {
+        format!("{}\n", text.trim_end_matches('\n'))
+    } else {
+        text.trim_end_matches('\n').to_string()
+    };
+    anyhow::ensure!(!text.trim().is_empty(), "生成結果が空");
+    Ok(text)
+}
+
+/// 自然言語からシェルコマンドを 1 行生成する（⌘I ターミナル同型・M12-8）。
+/// 生成コマンドは**挿入のみ**（実行は呼び出し側でユーザーの Enter に委ねる）。
+pub fn inline_command_on(host: &dyn Host, dir: &Path, instruction: &str) -> Result<String> {
+    let instruction = instruction.replace(['\n', '\r'], " ");
+    let payload = format!("やりたいこと: {instruction}");
+    let unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let temp = PathBuf::from(format!("/tmp/shirushi-inline-cmd-{unix_ms}.txt"));
+    host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
+        .context("コマンド生成の一時ファイル作成に失敗")?;
+    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+    let prompt = "入力のやりたいことを実現するシェルコマンドを1行だけ出力して。\
+        対象は macOS の zsh。説明・前置き・コードフェンスは出力しない。";
+    let script = format!(
+        "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
+        temp = temp.display()
+    );
+    let output = host
+        .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
+        .context("コマンド生成の実行に失敗（claude CLI 未導入？）")?;
+    anyhow::ensure!(output.success(), "生成に失敗: {}", git_fail_message(&output));
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let text = strip_code_fence(&raw);
+    // 最初の非空行だけ（複数行で返ってきても 1 コマンドに絞る）。
+    let command = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    anyhow::ensure!(!command.is_empty(), "生成結果が空");
+    Ok(command)
+}
+
+/// 会話の冒頭から簡潔なスレッドタイトルを1行もらう（AI 自動命名・#6）。
+/// `inline_command_on` と同型（一時ファイル経由で shell 引用を回避・host 経由なので remote でも動く）。
+/// 失敗（claude 未導入・空応答）は `Err`。呼び出し側は静かに既定名のままにする。
+pub fn name_thread_on(host: &dyn Host, dir: &Path, excerpt: &str) -> Result<String> {
+    let unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let temp = PathBuf::from(format!("/tmp/shirushi-threadname-{unix_ms}.txt"));
+    host.write_file(&temp, excerpt.as_bytes(), host::WriteCondition::Any)
+        .context("スレッド命名の一時ファイル作成に失敗")?;
+    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+    let prompt = "入力はエージェントとの会話の冒頭です。この会話に短いタイトルを付けて。\
+        日本語・18文字以内・体言止め・記号や引用符や句読点や番号は付けない・タイトルだけを1行で出力して。";
+    let script = format!(
+        "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
+        temp = temp.display()
+    );
+    let output = host
+        .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
+        .context("スレッド命名の実行に失敗（claude CLI 未導入？）")?;
+    anyhow::ensure!(output.success(), "命名に失敗: {}", git_fail_message(&output));
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let text = strip_code_fence(&raw);
+    // 最初の非空行・前後の引用符/括弧/空白を除去・24 字で clamp（LLM の饒舌さ対策）。
+    let name: String = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '「' | '」' | '『' | '』' | '　' | ' '))
+        .chars()
+        .take(24)
+        .collect();
+    anyhow::ensure!(!name.trim().is_empty(), "命名結果が空");
+    Ok(name.trim().to_string())
+}
+
+/// 出力が ``` フェンスで包まれていたら中身だけ取り出す（そのままなら素通し）。
+fn strip_code_fence(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed.to_string();
+    }
+    let mut lines: Vec<&str> = trimmed.lines().collect();
+    if lines.len() >= 2 && lines.last().is_some_and(|line| line.trim() == "```") {
+        lines.pop();
+        lines.remove(0);
+        return lines.join("\n");
+    }
+    trimmed.to_string()
 }
 
 /// コミットパネル用の 1 変更（staged / unstaged を分離して持つ。同一ファイルが両方に出得る）。
@@ -941,6 +1133,315 @@ fn normalize_newlines(text: &str) -> String {
     }
 }
 
+/// [`Worktree::all_files`] の host 直呼び版（背景スレッド用・Worktree は Rc なので Send できない）。
+pub fn all_files_on(host: &dyn Host, root: &Path, limit: usize) -> Vec<(PathBuf, String)> {
+    let mut files = host
+        .list_files(root, limit)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+            (path, relative)
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    files
+}
+
+/// HEAD のファイル内容（テキスト）。無ければ None（新規ファイル等）。M11 diff タブ/hunk 操作用。
+pub fn head_text_on(host: &dyn Host, file: &Path) -> Option<String> {
+    let (dir, name) = (file.parent()?, file.file_name()?);
+    head_blob_on(host, dir, name)
+}
+
+/// HEAD vs 現在テキストの **unified diff 文字列**（M11-9 diff タブ）。差分なしは None。
+pub fn unified_diff_on(host: &dyn Host, file: &Path, current: &str) -> Option<String> {
+    use imara_diff::intern::InternedInput;
+    use imara_diff::sources::lines_with_terminator;
+    use imara_diff::{Algorithm, UnifiedDiffBuilder};
+    let head = head_text_on(host, file).unwrap_or_default();
+    if head == current {
+        return None;
+    }
+    let head_normalized = normalize_newlines(&head);
+    let current_normalized = normalize_newlines(current);
+    let input = InternedInput::new(
+        lines_with_terminator(head_normalized.as_str()),
+        lines_with_terminator(current_normalized.as_str()),
+    );
+    let body = imara_diff::diff(Algorithm::Histogram, &input, UnifiedDiffBuilder::new(&input));
+    if body.is_empty() {
+        return None;
+    }
+    let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    Some(format!("--- a/{name}（HEAD）\n+++ b/{name}（バッファ）\n{body}"))
+}
+
+/// 任意テキスト同士の unified diff（エージェント承認カードの「エディタで開く」・M12-6）。
+/// 差分なしは None。
+pub fn unified_diff_texts(old_text: &str, new_text: &str, name: &str) -> Option<String> {
+    use imara_diff::intern::InternedInput;
+    use imara_diff::sources::lines_with_terminator;
+    use imara_diff::{Algorithm, UnifiedDiffBuilder};
+    if old_text == new_text {
+        return None;
+    }
+    let old_normalized = normalize_newlines(old_text);
+    let new_normalized = normalize_newlines(new_text);
+    let input = InternedInput::new(
+        lines_with_terminator(old_normalized.as_str()),
+        lines_with_terminator(new_normalized.as_str()),
+    );
+    let body = imara_diff::diff(Algorithm::Histogram, &input, UnifiedDiffBuilder::new(&input));
+    if body.is_empty() {
+        return None;
+    }
+    Some(format!("--- a/{name}（現在）\n+++ b/{name}（提案）\n{body}"))
+}
+
+/// 1 hunk 分の unified diff（`git apply --cached` に食わせる形・M11-10 hunk stage）。
+/// パスはリポジトリルート相対で書く。
+pub fn hunk_patch_text(
+    relative_path: &str,
+    head_lines: &[&str],
+    current_lines: &[&str],
+    hunk: &DiffHunk,
+) -> String {
+    let old_start = hunk.old_range.start as usize;
+    let old_len = hunk.old_range.len();
+    let new_start = hunk.new_range.start as usize;
+    let new_len = hunk.new_range.len();
+    let mut body = String::new();
+    for line in head_lines.iter().skip(old_start).take(old_len) {
+        body.push('-');
+        body.push_str(line);
+        body.push('\n');
+    }
+    for line in current_lines.iter().skip(new_start).take(new_len) {
+        body.push('+');
+        body.push_str(line);
+        body.push('\n');
+    }
+    format!(
+        "--- a/{relative_path}\n+++ b/{relative_path}\n@@ -{},{} +{},{} @@\n{body}",
+        old_start + 1,
+        old_len,
+        new_start + 1,
+        new_len,
+    )
+}
+
+/// パッチを index へ適用する（hunk 単位 stage・M11-10）。パッチは一時ファイル経由（host 汎用）。
+pub fn apply_patch_to_index_on(host: &dyn Host, repo_root: &Path, patch: &str) -> Result<()> {
+    let temp = repo_root.join(".git/shirushi-hunk.patch");
+    host.write_file(&temp, patch.as_bytes(), host::WriteCondition::Any)
+        .context("パッチの書き込みに失敗")?;
+    let temp_arg = temp.to_string_lossy().to_string();
+    let result = run_git(host, repo_root, ["apply", "--cached", "--unidiff-zero", temp_arg.as_str()]);
+    // 一時ファイルは成否に関わらず消す（remove_file は local のみ有効・失敗は無視）。
+    let _ = std::fs::remove_file(&temp);
+    result.map(|_| ()).context("git apply --cached に失敗")
+}
+
+/// 1 行の blame（作者・日付・要旨・M11-11）。`line` は 1 始まり。未コミット行は「未コミット」。
+/// dirty バッファでは行ずれの近似になる（HEAD 基準）。失敗は None（表示しない）。
+pub fn blame_line_on(host: &dyn Host, file: &Path, line: u32) -> Option<String> {
+    let dir = file.parent()?;
+    let repo = git_repo_root_on(host, dir)?;
+    let file_arg = file.to_string_lossy().to_string();
+    let range = format!("{line},{line}");
+    let output = run_git(
+        host,
+        &repo,
+        ["blame", "--porcelain", "-L", range.as_str(), "--", file_arg.as_str()],
+    )
+    .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    if text.starts_with("0000000") {
+        return Some("未コミット".to_string());
+    }
+    let mut author = None;
+    let mut time = None;
+    let mut summary = None;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("author ") {
+            author = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("author-time ") {
+            time = value.parse::<i64>().ok();
+        } else if let Some(value) = line.strip_prefix("summary ") {
+            summary = Some(value.to_string());
+        }
+    }
+    let (author, summary) = (author?, summary?);
+    let date = time.map(format_unix_date).unwrap_or_default();
+    Some(format!("{author}, {date} • {summary}"))
+}
+
+/// unix 秒 → "YYYY-MM-DD"（依存なしの civil 変換・Howard Hinnant のアルゴリズム）。
+fn format_unix_date(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+// ── ツリーのファイル操作（M10・local のみ。remote 版は M13 の Host 拡張と一緒に） ──
+
+/// 空ファイルを作る（既存ならエラー＝上書きしない）。
+pub fn create_file_local(path: &Path) -> Result<()> {
+    anyhow::ensure!(!path.exists(), "既に存在する: {}", path.display());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("親フォルダを作れない: {}", parent.display()))?;
+    }
+    std::fs::write(path, b"").with_context(|| format!("作成に失敗: {}", path.display()))
+}
+
+/// フォルダを作る（既存ならエラー）。
+pub fn create_dir_local(path: &Path) -> Result<()> {
+    anyhow::ensure!(!path.exists(), "既に存在する: {}", path.display());
+    std::fs::create_dir_all(path).with_context(|| format!("作成に失敗: {}", path.display()))
+}
+
+/// リネーム/移動（移動先が既存ならエラー＝上書きしない）。
+pub fn rename_local(from: &Path, to: &Path) -> Result<()> {
+    anyhow::ensure!(!to.exists(), "移動先が既に存在する: {}", to.display());
+    std::fs::rename(from, to)
+        .with_context(|| format!("リネームに失敗: {} → {}", from.display(), to.display()))
+}
+
+/// 複製する。`name.ext` → `name copy.ext`（衝突したら `name copy 2.ext`…）。フォルダは再帰コピー。
+pub fn duplicate_local(path: &Path) -> Result<PathBuf> {
+    let parent = path.parent().context("親フォルダが無い")?;
+    let stem = path.file_stem().and_then(OsStr::to_str).unwrap_or("copy");
+    let extension = path.extension().and_then(OsStr::to_str);
+    let mut candidate = None;
+    for index in 0..100 {
+        let name = match (index, extension) {
+            (0, Some(ext)) => format!("{stem} copy.{ext}"),
+            (0, None) => format!("{stem} copy"),
+            (n, Some(ext)) => format!("{stem} copy {}.{ext}", n + 1),
+            (n, None) => format!("{stem} copy {}", n + 1),
+        };
+        let target = parent.join(name);
+        if !target.exists() {
+            candidate = Some(target);
+            break;
+        }
+    }
+    let target = candidate.context("複製先の名前を決められない（copy が多すぎる）")?;
+    if path.is_dir() {
+        copy_dir_recursive(path, &target)?;
+    } else {
+        std::fs::copy(path, &target)
+            .with_context(|| format!("複製に失敗: {}", path.display()))?;
+    }
+    Ok(target)
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// OS のゴミ箱へ入れる（macOS: `/usr/bin/trash`、無ければ Finder 経由）。完全削除はしない。
+pub fn trash_local(path: &Path) -> Result<()> {
+    anyhow::ensure!(path.exists(), "存在しない: {}", path.display());
+    if Path::new("/usr/bin/trash").exists() {
+        let status = std::process::Command::new("/usr/bin/trash")
+            .arg(path)
+            .status()
+            .context("trash コマンドの起動に失敗")?;
+        anyhow::ensure!(status.success(), "trash が失敗: {}", path.display());
+        return Ok(());
+    }
+    // フォールバック: Finder に頼む（AppleScript）。
+    let script = format!(
+        "tell application \"Finder\" to delete POSIX file \"{}\"",
+        path.display()
+    );
+    let status = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .status()
+        .context("osascript の起動に失敗")?;
+    anyhow::ensure!(status.success(), "Finder でのゴミ箱移動が失敗: {}", path.display());
+    Ok(())
+}
+
+/// Finder で対象を表示（親フォルダを開いて選択状態にする）。macOS の `open -R`。
+pub fn reveal_in_finder_local(path: &Path) -> Result<()> {
+    anyhow::ensure!(path.exists(), "存在しない: {}", path.display());
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .status()
+        .context("open の起動に失敗")?;
+    anyhow::ensure!(status.success(), "Finder 表示が失敗: {}", path.display());
+    Ok(())
+}
+
+/// OS の既定アプリで開く（ファイル=関連付けアプリ / フォルダ=Finder）。macOS の `open`。
+pub fn open_with_default_app_local(path: &Path) -> Result<()> {
+    anyhow::ensure!(path.exists(), "存在しない: {}", path.display());
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg(path)
+        .status()
+        .context("open の起動に失敗")?;
+    anyhow::ensure!(status.success(), "既定アプリでの起動が失敗: {}", path.display());
+    Ok(())
+}
+
+// ── ファイル監視（watch 基盤・M10） ──
+
+/// ローカル worktree の再帰監視（notify・macOS は FSEvents）。ハンドルを drop すると監視停止。
+/// notify の型は外に漏らさない（remote watch を M13 で Host 経由に足すときの差し替え面）。
+pub struct Watch {
+    _watcher: notify::RecommendedWatcher,
+}
+
+/// `root` 以下を再帰監視し、変化したパス群をコールバックへ渡す（呼び出しは **watcher スレッド**。
+/// UI 側は channel で受けて自分の executor へ運ぶこと）。イベント種別は使わない＝「そのパスで
+/// 何かが起きた」の粒度（リロード判定などは受け手がメタデータで行う）。
+pub fn watch_root(
+    root: &Path,
+    on_paths: impl Fn(Vec<PathBuf>) + Send + 'static,
+) -> Result<Watch> {
+    use notify::Watcher as _;
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if let Ok(event) = result {
+            if !event.paths.is_empty() {
+                on_paths(event.paths);
+            }
+        }
+    })
+    .context("ファイル監視の初期化に失敗")?;
+    watcher
+        .watch(root, notify::RecursiveMode::Recursive)
+        .with_context(|| format!("ファイル監視を開始できない: {}", root.display()))?;
+    Ok(Watch { _watcher: watcher })
+}
+
 #[derive(Default)]
 struct HunkCollector {
     hunks: Vec<DiffHunk>,
@@ -966,6 +1467,119 @@ impl imara_diff::Sink for HunkCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_branch_parses_ahead_behind_dirty() {
+        // ahead/behind + dirty。
+        let both = "## main...origin/main [ahead 3, behind 1]\n M src/a.rs\n?? new.txt\n";
+        assert_eq!(
+            parse_status_branch(both),
+            WorktreeStatus { ahead: 3, behind: 1, dirty: true }
+        );
+        // upstream 無し・クリーン。
+        assert_eq!(parse_status_branch("## feature\n"), WorktreeStatus::default());
+        // ahead のみ。
+        let ahead = "## main...origin/main [ahead 2]\n";
+        assert_eq!(parse_status_branch(ahead), WorktreeStatus { ahead: 2, behind: 0, dirty: false });
+    }
+
+    #[test]
+    fn strip_code_fence_unwraps_and_passes_through() {
+        // フェンス付き（言語タグあり）→ 中身だけ。
+        assert_eq!(strip_code_fence("```rust\nfn a() {}\n```"), "fn a() {}");
+        // フェンス無し → trim だけして素通し。
+        assert_eq!(strip_code_fence("  fn a() {}\n"), "fn a() {}");
+        // 閉じフェンスが無い壊れた出力 → 素通し（安全側）。
+        assert_eq!(strip_code_fence("```\nfn a() {}"), "```\nfn a() {}");
+    }
+
+    #[test]
+    fn blame_line_reads_real_history() {
+        // この repo 自身の committed ファイルで実 blame（作者・日付・要旨の合成を検証）。
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+        let readme = repo.join("README.md");
+        if !readme.exists() {
+            return; // 環境依存の保険
+        }
+        let result = blame_line_on(host::LocalHost::shared().as_ref(), &readme, 1);
+        let Some(text) = result else {
+            return; // shallow clone 等では blame が引けないことがある
+        };
+        // "作者, YYYY-MM-DD • 要旨" か「未コミット」のどちらか。
+        assert!(text == "未コミット" || (text.contains(" • ") && text.contains("-")), "{text}");
+    }
+
+    #[test]
+    fn unix_date_formats_known_values() {
+        assert_eq!(format_unix_date(0), "1970-01-01");
+        assert_eq!(format_unix_date(86_400), "1970-01-02");
+        assert_eq!(format_unix_date(1_752_710_400), "2025-07-17"); // 2025-07-17T00:00:00Z
+    }
+
+    #[test]
+    fn hunk_stage_round_trip_on_temp_repo() {
+        let dir = std::env::temp_dir().join(format!("shirushi_hunk_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(&dir).args(args).output().unwrap()
+        };
+        run(&["init", "-q"]);
+        run(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base"]);
+        // 2 hunk 作る: 先頭に追記 + 末尾を変更
+        let current = "zero\none\ntwo\nTHREE\n";
+        std::fs::write(&file, current).unwrap();
+        let host = host::LocalHost::shared();
+        let hunks = buffer_diff_on(host.as_ref(), &file, current);
+        assert_eq!(hunks.len(), 2, "hunks: {hunks:?}");
+        // 1 個目（zero 追加）だけ stage
+        let head = head_text_on(host.as_ref(), &file).unwrap();
+        let head_lines: Vec<&str> = head.lines().collect();
+        let current_lines: Vec<&str> = current.lines().collect();
+        let patch = hunk_patch_text("a.txt", &head_lines, &current_lines, &hunks[0]);
+        apply_patch_to_index_on(host.as_ref(), &dir, &patch).expect("stage できる");
+        // index には zero 追加のみ・THREE は未 stage のはず
+        let staged = String::from_utf8(run(&["diff", "--cached"]).stdout).unwrap();
+        assert!(staged.contains("+zero"), "staged: {staged}");
+        assert!(!staged.contains("+THREE"), "staged: {staged}");
+        let unstaged = String::from_utf8(run(&["diff"]).stdout).unwrap();
+        assert!(unstaged.contains("+THREE"), "unstaged: {unstaged}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_operations_create_rename_duplicate() {
+        let dir = std::env::temp_dir().join(format!("shirushi_fileops_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let folder = dir.join("sub");
+        create_dir_local(&folder).unwrap();
+        assert!(folder.is_dir());
+        assert!(create_dir_local(&folder).is_err()); // 既存はエラー
+
+        let file = folder.join("a.rs");
+        create_file_local(&file).unwrap();
+        assert!(file.is_file());
+        assert!(create_file_local(&file).is_err());
+
+        let renamed = folder.join("b.rs");
+        rename_local(&file, &renamed).unwrap();
+        assert!(renamed.exists() && !file.exists());
+        std::fs::write(&renamed, "x").unwrap();
+        let copy1 = duplicate_local(&renamed).unwrap();
+        assert_eq!(copy1.file_name().unwrap().to_str().unwrap(), "b copy.rs");
+        let copy2 = duplicate_local(&renamed).unwrap();
+        assert_eq!(copy2.file_name().unwrap().to_str().unwrap(), "b copy 2.rs");
+        // 上書き拒否
+        assert!(rename_local(&copy1, &copy2).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use std::process::Command;
 
     fn scratch(tag: &str) -> PathBuf {
@@ -1146,6 +1760,60 @@ mod tests {
         assert!(commit(&root, "   ").is_err());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktree_add_remove_and_branch_delete_guard() {
+        let root = scratch("worktree");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git").current_dir(&root).args(args).output().expect("git 実行")
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return; // git 無し環境はスキップ
+        }
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "tester"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "init").unwrap();
+
+        // feature ブランチを作って base に戻る（feature は未チェックアウト状態にする）。
+        create_branch(&root, "feature").unwrap();
+        let base = git_branches(&root)
+            .into_iter()
+            .find(|branch| branch != "feature")
+            .expect("base ブランチ");
+        switch_branch(&root, &base).unwrap();
+
+        // feature を worktree として隣に開く。
+        let wt = root.parent().unwrap().join(format!("wt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt);
+        add_worktree(&root, &wt, "feature").unwrap();
+        assert!(
+            git_worktrees(&root).iter().any(|worktree| worktree.branch.as_deref() == Some("feature")),
+            "worktree 一覧に feature が出る"
+        );
+
+        // worktree に checkout 中のブランチは削除できない（git が拒否＝バグ報告の状況）。
+        assert!(
+            delete_branch(&root, "feature", true).is_err(),
+            "worktree 使用中のブランチ削除は失敗する"
+        );
+
+        // worktree を削除 → 一覧から消える。
+        remove_worktree(&root, &wt, true).unwrap();
+        assert!(
+            !git_worktrees(&root).iter().any(|worktree| worktree.branch.as_deref() == Some("feature")),
+            "remove 後は feature worktree が消える"
+        );
+
+        // worktree が無くなればブランチ削除は通る。
+        delete_branch(&root, "feature", true).unwrap();
+        assert!(!git_branches(&root).contains(&"feature".to_string()));
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&wt);
     }
 
     #[test]

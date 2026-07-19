@@ -9,6 +9,7 @@ publish = false
 path = "src/editor_view.rs"
 
 [dependencies]
+unicode-width = "0.1"
 gpui.workspace = true
 editor_core.workspace = true
 theme_core.workspace = true

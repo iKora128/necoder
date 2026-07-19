@@ -45,7 +45,7 @@ GPUI ベースの自作エディタ **Shirushi（しるし）**。ライセン�
 - **色は識別に集約**: レール / タブ下線 / キャレット / スレッド色 / 選択の左バーのみ。グラデ・選択面の色塗りなど装飾には使わない
 - スレッド = 色付きタブ。宛先チップ（スレッド名 + プロジェクト ⎇ ブランチ）とトークン常時表示は必須要件（`docs/BACKGROUND.md` の痛点が原点）
 - チャットの見た目は VSCode の Claude Code 拡張風（⏺/⎿ トランスクリプト、✳ Thinking、テラコッタ #d97757 はバレットのみ）
-- **性能予算**: 入力レイテンシ・起動時間は **Zed 比 ~80% を下限目標**（UX 優先の明示的判断）。ベンチは `zed/crates/editor_benchmarks` / `input_latency_ui` を参考に M2 までに導入
+- **性能予算**: 入力レイテンシ・起動時間は **Zed 比 ~80% を下限目標**（UX 優先の明示的判断）+ **idle メモリも予算対象**（terminal-stack 層への武器・2026-07-17 実測: idle RSS 122MB / 起動 ~215ms / ⌘P refilter 50k 件 ~10ms）。計測: `scripts/startup-time.sh` / `scripts/memory-usage.sh` / `cargo run --release -p ui --example bench_fuzzy`。編集コアの予算ガードは CI（`editor_core --example bench_editor`）
 
 ## コーディング規約
 

@@ -99,15 +99,29 @@ pub struct PickerItem {
     pub id: usize,
     pub label: SharedString,
     pub detail: Option<SharedString>,
+    /// 行頭の●（プロジェクト色・M12-12）。None なら出さない。
+    pub accent: Option<Hsla>,
+    /// 右端の小ドット列（実行中スレッド色・M12-12 の「どこで何が走っているか」）。
+    pub dots: Vec<Hsla>,
 }
 
 impl PickerItem {
     pub fn new(id: usize, label: impl Into<SharedString>) -> Self {
-        Self { id, label: label.into(), detail: None }
+        Self { id, label: label.into(), detail: None, accent: None, dots: Vec::new() }
     }
 
     pub fn with_detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    pub fn with_accent(mut self, color: Hsla) -> Self {
+        self.accent = Some(color);
+        self
+    }
+
+    pub fn with_dots(mut self, dots: Vec<Hsla>) -> Self {
+        self.dots = dots;
         self
     }
 }
@@ -163,6 +177,28 @@ impl Picker {
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
         cx.notify();
+    }
+
+    /// 項目を差し替える（背景で集めた行を後から流し込む・M12-12 ⌘O ダッシュボード）。
+    /// 現在のクエリで再フィルタし、選択位置は範囲内へクランプする。
+    pub fn set_items(&mut self, items: Vec<PickerItem>, cx: &mut Context<Self>) {
+        let selected = self.selected;
+        self.items = items;
+        self.refilter();
+        self.selected = selected.min(self.filtered.len().saturating_sub(1));
+        cx.notify();
+    }
+
+    /// クエリを直接セットして再フィルタ（開発プローブ / プログラム操作用）。
+    pub fn set_query(&mut self, query: impl Into<String>, cx: &mut Context<Self>) {
+        self.query = query.into();
+        self.refilter();
+        cx.notify();
+    }
+
+    /// 現在の選択を確定する（Enter と同じ。開発プローブ / プログラム操作用）。
+    pub fn confirm_selected(&mut self, cx: &mut Context<Self>) {
+        self.confirm(cx);
     }
 
     /// 現在ハイライト中の項目 id をホストへ通知（ライブプレビュー用）。
@@ -301,6 +337,12 @@ impl Render for Picker {
                                     .text_size(px(12.5))
                                     .text_color(if is_selected { theme.fg0 } else { theme.fg1 })
                                     .when(is_selected, |element| element.bg(accent.alpha(0.16)))
+                                    // 行頭●（プロジェクト色・M12-12）。
+                                    .when_some(item.accent, |element, color| {
+                                        element.child(
+                                            div().size(px(7.)).rounded(px(3.5)).flex_none().bg(color),
+                                        )
+                                    })
                                     .child(item.label.clone())
                                     .when_some(item.detail.clone(), |element, detail| {
                                         element.child(
@@ -311,11 +353,31 @@ impl Render for Picker {
                                                 .child(detail),
                                         )
                                     })
+                                    // 右端の実行中スレッドドット列（M12-12）。
+                                    .when(!item.dots.is_empty(), |element| {
+                                        element.child(
+                                            div().flex().items_center().gap(px(3.)).flex_none().children(
+                                                item.dots.iter().map(|color| {
+                                                    div()
+                                                        .size(px(6.))
+                                                        .rounded(px(3.))
+                                                        .flex_none()
+                                                        .bg(*color)
+                                                }),
+                                            ),
+                                        )
+                                    })
                             }),
                         ),
                     ),
             )
     }
+}
+
+/// ベンチ専用の公開ラッパ（examples/bench_fuzzy が ⌘P の refilter 負荷を実測する用）。
+#[doc(hidden)]
+pub fn fuzzy_score_for_bench(query: &str, text: &str) -> Option<i32> {
+    fuzzy_score(query, text)
 }
 
 /// 素朴なサブシーケンス fuzzy スコア。query の各文字が text に順に現れれば `Some(score)`。

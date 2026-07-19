@@ -99,10 +99,12 @@ VSCode の contribution points / Zed の初期化結線から学んだ形。**�
 - `KeymapContext` 述語（`"Editor && mode == full"` — gpui の KeyContext をそのまま使う）
 - 将来の拡張 API（WASM）は同じ Registry へ別経路で流し込むだけ、が狙い（FEATURES 9 の ADR 対象）
 
-## 5. ウィンドウモデル（2026-07-11 確定）
+## 5. ウィンドウモデル（2026-07-11 確定 → 2026-07-19・M10-2 改訂）
 
-- **1窓 = アクティブな (project, branch/worktree)**。レール = 窓内切替。切替時は workspace の中身（タブ・ドック状態）を差し替え、状態は (project, branch) 単位で保存・復元
-- **⌘⏎ / 右クリック「新しいウィンドウで開く」 = 新窓**（gpui はマルチウィンドウ対応。プロセスは1つ）
+- **1窓 = 複数 (project, branch/worktree) を持つレール**。レール = 窓内切替器（`projects: Vec<ProjectSlot>`）。アクティブ切替時は workspace の中身（タブ・ドック状態）を差し替え、状態は (project, branch) 単位で保存・復元
+- **ブランチ/worktree は既定でレールに開く**（`open_folder_in_rail`）。⎇ メニューの行クリック=in-place 切替、⧉=worktree をレールに、⎇ worktree セクション/⌘O worktree 行=レールに。**新窓は明示操作のみ**（レール右クリック→「新しいウィンドウで開く」・⌘⇧N）。旧「1窓=1worktree・新窓に開く」から転換（色による方向感覚を窓境界で切らないため）
+- **レール項目の右クリック = コンテキストメニュー**（`render_rail_menu`）: 色スウォッチ＋「その他の色…」（フル hex ピッカー）／新しいウィンドウで開く／レールから外す／(worktree タブのみ) worktree を削除・worktree ごとブランチを削除。破壊的操作は**二段確認**（`RailMenuState.confirm`）。「削除」は3階層に分離 — 外す=表示のみ・worktree 削除=`git worktree remove`・ブランチ削除=worktree ごと `git branch -D`
+- 同一リポジトリの別ブランチをレールに載せると identity 色が親と衝突する → `next_free_color` で未使用パレット色に倒し、同色スロット2枚を防ぐ
 - titlebar ピル: プロジェクト名（クリック→⌘O スイッチャー）+ ⎇ ブランチ（クリック→branch/worktree メニュー）
 - エージェントスレッドは (project, branch) に属する。titlebar beacon はアクティブ project 分、レールのドットが他 project 分を担う
 
@@ -117,11 +119,18 @@ VSCode の contribution points / Zed の初期化結線から学んだ形。**�
 - **追加言語 = `locales/xx.yml` 1枚**（= 言語パック。later: 拡張として配布・コミュニティ翻訳）
 - 複数形など高度要件が出たら fluent-rs へ移行（`t!` 境界を守っていればライブラリは差し替え可能）
 
-## 7. 永続化
+## 7. 永続化（2026-07-16 更新: ローカル DB = Turso 採用）
 
-- 設定: `~/Library/Application Support/Shirushi/settings.json`（user）+ `.shirushi/settings.json`（project）
-- UI 状態（開タブ・レイアウト・(project,branch) ごとの復元情報）: 同ディレクトリ `state.json`。M3 は JSON で開始、肥大したら SQLite（zed `db` 参考）へ
-- 未保存バッファのバックアップ（クラッシュ対策）: `backups/` に定期書き出し（FEATURES 13 の MVP 項目）
+**二本立て**: 「人が読む/編集するものはファイル」「機械が高頻度に読み書きするものは DB」。
+
+- **ファイルが真実（DB に入れない）**: settings.json（user/project）・`.shirushi/todos.md`（M12 Todo ボード — ファイルであること自体が要件）・keymap.json・テーマ JSON。git が真実のもの（status/diff/blame）も入れない。検索索引も持たない（regex 走査が正 — DECISIONS §8）
+- **ローカル DB（`~/Library/Application Support/Shirushi/shirushi.db`）**: [Turso](https://github.com/tursodatabase/turso)（SQLite の pure-Rust 再実装・MIT・async ネイティブ）を採用。用途は
+  ①**hot exit**（dirty バッファ全文 + path/version/カーソル。WAL で kill -9 耐性）
+  ②**スレッド永続化**（threads/turns テーブル。turn 毎 INSERT 追記 = JSON 全書き換えを避ける。ブラウズはページング）
+  ③**トークン台帳**（turns の集計ビューでほぼ無料）
+  ④**checkpoint のメタデータ**（turn→file→blob hash。blob 本体は content-addressed ファイル or DB — M12 着手時に比較）
+- **隔離**: DB アクセスは薄い `storage` crate に閉じ込める（SQL を UI 層に漏らさない）。Turso はまだ若いので、問題が出たら rusqlite へ 1 crate の差し替えで退避できる面を保つ。書き込みは全て background executor（async API がそのまま「UI スレッドで塞がない」規律に合う）
+- `state.json`（開タブ・レイアウト）は当面 JSON のまま。肥大したら shirushi.db へ統合
 
 ## 8. 性能予算の測り方（目標: Zed 比 ~80%）
 
@@ -144,6 +153,10 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
 
 - path identity は `(HostId, RemotePath)`。remote path を local `PathBuf` として OS API に渡さない。
 - UI/tree-sitter/dirty backup/credential は local。FS/watcher/search/Git/LSP/PTY/task/ACP は remote。
+- **Host は同期 trait ＝ UI スレッド（render・アクションハンドラ）から直接呼ばない**（2026-07-16 監査で規律化）。
+  remote は 1 呼び出しが最大 `REQUEST_TIMEOUT`（30s）ブロックしうる。確立パターン
+  （push/pull・gutter diff・横断検索と同じ `host.clone()` → `background_executor().spawn` → 前景で反映）に寄せる。
+  render 内での FS/RPC 列挙は禁止 — ツリーが `slot.rows` にキャッシュするのと同型で、表示時に読んでキャッシュする。
 - SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。
 - server は単一 static binary、client と protocol/version を handshake、daemon + proxy で再接続可能にする。
 - wire は length-prefixed typed header + raw body。初版は request id/capability/frame limit を持ち、

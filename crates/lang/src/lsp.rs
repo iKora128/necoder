@@ -188,6 +188,33 @@ impl LspClient {
         );
     }
 
+    /// 増分 didChange（M11-8）。サーバが Incremental sync を広告している時だけ使うこと。
+    #[allow(clippy::too_many_arguments)]
+    pub fn did_change_incremental(
+        &self,
+        path: &Path,
+        version: i32,
+        start_line: u32,
+        start_character: u32,
+        end_line: u32,
+        end_character: u32,
+        text: &str,
+    ) {
+        self.notify(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": path_to_uri(path), "version": version },
+                "contentChanges": [ {
+                    "range": {
+                        "start": { "line": start_line, "character": start_character },
+                        "end": { "line": end_line, "character": end_character }
+                    },
+                    "text": text
+                } ]
+            }),
+        );
+    }
+
     /// 補完要求（位置は UTF-16）。結果 Value は `CompletionResponse`（Array or List）。
     pub fn completion(
         &self,
@@ -218,6 +245,78 @@ impl LspClient {
                 "position": { "line": line, "character": character }
             }),
         )
+    }
+
+    /// ドキュメント整形要求（⌥⇧F / 保存時フォーマット・M11）。結果は TextEdit[]。
+    pub fn formatting(&self, path: &Path, tab_size: u32) -> oneshot::Receiver<ResponseResult> {
+        self.request(
+            "textDocument/formatting",
+            json!({
+                "textDocument": { "uri": path_to_uri(path) },
+                "options": { "tabSize": tab_size, "insertSpaces": true }
+            }),
+        )
+    }
+
+    /// rename 要求（F2・M11）。結果は WorkspaceEdit（changes / documentChanges）。
+    pub fn rename(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> oneshot::Receiver<ResponseResult> {
+        self.request(
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": path_to_uri(path) },
+                "position": { "line": line, "character": character },
+                "newName": new_name
+            }),
+        )
+    }
+
+    /// 参照検索要求（⇧F12・M11）。結果は Location[]。
+    pub fn references(&self, path: &Path, line: u32, character: u32) -> oneshot::Receiver<ResponseResult> {
+        self.request(
+            "textDocument/references",
+            json!({
+                "textDocument": { "uri": path_to_uri(path) },
+                "position": { "line": line, "character": character },
+                "context": { "includeDeclaration": true }
+            }),
+        )
+    }
+
+    /// code actions 要求（⌘.・M11）。`diagnostics` は該当位置の診断（LSP 生 JSON）を渡す。
+    pub fn code_actions(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+        diagnostics: serde_json::Value,
+    ) -> oneshot::Receiver<ResponseResult> {
+        self.request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": path_to_uri(path) },
+                "range": {
+                    "start": { "line": line, "character": character },
+                    "end": { "line": line, "character": character }
+                },
+                "context": { "diagnostics": diagnostics }
+            }),
+        )
+    }
+
+    /// codeAction/resolve（edit が遅延解決のアクション用・M11）。
+    pub fn resolve_code_action(&self, action: serde_json::Value) -> oneshot::Receiver<ResponseResult> {
+        self.request("codeAction/resolve", action)
+    }
+
+    /// ワークスペースシンボル要求（⌘T・M11）。結果は SymbolInformation[] / WorkspaceSymbol[]。
+    pub fn workspace_symbols(&self, query: &str) -> oneshot::Receiver<ResponseResult> {
+        self.request("workspace/symbol", json!({ "query": query }))
     }
 
     /// 定義ジャンプ要求。結果は Location / Location[] / LocationLink[]。
@@ -388,8 +487,24 @@ fn initialize_params(root: &Path, client_process_id: Option<u32>) -> Value {
             "general": { "positionEncodings": ["utf-16"] },
             "textDocument": {
                 "completion": { "completionItem": { "snippetSupport": false } },
-                "hover": { "contentFormat": ["markdown", "plaintext"] }
-            }
+                "hover": { "contentFormat": ["markdown", "plaintext"] },
+                // ⌘. code actions（M11）: literal 対応が無いと ra はアクションを返さない。
+                "codeAction": {
+                    "codeActionLiteralSupport": {
+                        "codeActionKind": { "valueSet": [
+                            "", "quickfix", "refactor", "refactor.extract", "refactor.inline",
+                            "refactor.rewrite", "source", "source.organizeImports"
+                        ] }
+                    },
+                    "resolveSupport": { "properties": ["edit"] },
+                    "dataSupport": true
+                },
+                "rename": {},
+                "formatting": {},
+                "references": {}
+            },
+            // rename/code actions は documentChanges 形式で返ってくることがある。
+            "workspace": { "workspaceEdit": { "documentChanges": true } }
         },
         "workspaceFolders": [ { "uri": path_to_uri(root), "name": name } ],
     })
