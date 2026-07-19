@@ -25,7 +25,7 @@ use lang::lsp::{
 use project::{GitWorktree, GraphCommit, ProjectSource, StatusKind, WorkingChange, Worktree};
 use search_ui::{SearchPanel, SearchPanelEvent};
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -781,173 +781,106 @@ fn active_index_after_removal(active: usize, removed: usize, new_len: usize) -> 
 
 // ── Workspace 本体 ──
 
+/// 1 project の長寿命 UI / controller 群。非アクティブ時も Entity と process を保持する。
+pub struct ProjectSession {
+    loaded: bool,
+    tabs: Vec<EditorTab>,
+    active_tab: usize,
+    split_editor: Option<Entity<EditorView>>,
+    agent_panel: Entity<AgentPanel>,
+    explorer_view: ExplorerView,
+    explorer_context_menu: Option<ExplorerContextMenu>,
+    explorer_naming: Option<ExplorerNaming>,
+    search_panel: Option<Entity<SearchPanel>>,
+    buffer_search: Option<BufferSearchState>,
+    git_status: HashMap<PathBuf, StatusKind>,
+    git_changes: Vec<WorkingChange>,
+    git_history: Vec<GraphCommit>,
+    github_slug: Option<String>,
+    branch_menu: Option<BranchMenuState>,
+    terminal_dock: Entity<TerminalDock>,
+    agent_active: bool,
+    recently_closed_files: Vec<PathBuf>,
+    lsp: Option<lang::lsp::LspClient>,
+    lsp_root: Option<PathBuf>,
+    lsp_language: Option<&'static str>,
+    lsp_initialized: bool,
+    lsp_incremental_sync: bool,
+    lsp_sent_versions: HashMap<PathBuf, u64>,
+    diagnostics: HashMap<PathBuf, Vec<(u32, lang::lsp::Severity)>>,
+    raw_diagnostics: HashMap<PathBuf, serde_json::Value>,
+    _lsp_pump: Option<gpui::Task<()>>,
+    completion: Option<CompletionState>,
+    completion_generation: u64,
+    completion_suppressed_word: Option<usize>,
+    hover: Option<HoverState>,
+    hover_generation: u64,
+    git_refresh_gen: u32,
+    goto_line: Option<(String, FocusHandle)>,
+    picker_symbol_rows: Vec<usize>,
+    picker_workspace_symbols: Vec<(PathBuf, u32, u32)>,
+    picker_worktree_rows: Vec<PathBuf>,
+    picker_ssh_hosts: Vec<host::SshConfigHost>,
+    picker_ssh_recent: Vec<String>,
+    picker_history: Vec<(String, String, i64)>,
+    rename_input: Option<(String, FocusHandle)>,
+    inline_edit: Option<InlineEditState>,
+    todo_board: Option<TodoBoardState>,
+    code_actions: Option<CodeActionsState>,
+    hunk_menu: Option<(project::DiffHunk, Point<gpui::Pixels>)>,
+    pending_transient_tab: Option<(PathBuf, Buffer)>,
+    pending_open_history: bool,
+    pending_navigation: Option<(PathBuf, usize, usize)>,
+    agent_touched: HashMap<PathBuf, Hsla>,
+    waiting_thread: Option<(SharedString, Hsla)>,
+    blame_gen: u32,
+    last_blame_target: Option<(PathBuf, usize)>,
+    nav_back: Vec<(PathBuf, usize)>,
+    nav_forward: Vec<(PathBuf, usize)>,
+    hot_exit_gen: u32,
+    hot_exit_versions: HashMap<PathBuf, u64>,
+    hot_exit_pending: Option<Vec<(PathBuf, String)>>,
+    _watch: Option<project::Watch>,
+    _watch_pump: Option<gpui::Task<()>>,
+    git_panel: Option<GitPanelState>,
+    git_busy: bool,
+}
+
 pub struct Workspace {
     projects: Vec<ProjectSlot>,
     active: usize,
-    // 主ペインの開いているタブ（左から順）。アクティブプロジェクトの分だけを持つ。M10 複数タブ。
-    tabs: Vec<EditorTab>,
-    // アクティブタブの添字（`tabs` 内）。tabs が空なら意味を持たない。
-    active_tab: usize,
-    // 右分割ペイン（⌘\ で開閉。独立エディタ＝比較・参照用の副ビュー。LSP/統合は主ペイン=tabs 側）。
-    split_editor: Option<Entity<EditorView>>,
-    agent_panel: Entity<AgentPanel>,
+    sessions: Vec<ProjectSession>,
     theme: Theme,
     focus_handle: FocusHandle,
     state_path: Option<PathBuf>,
-    // ドックの表示状態（titlebar のアイコンでトグル）。右=Agent パネル・下=ターミナルは M4/M8。
     show_left: bool,
     show_right: bool,
     show_bottom: bool,
-    // 設定ホーム（中央領域・レール ⚙ で開く。第1セクション=Agents セットアップ・M12）。
     show_settings: bool,
-    // オンボーディング完了の祝い紙吹雪（true の間だけルートに降らせる。~2.2s で自動オフ）。
     confetti: bool,
-    // Agent パネルの可変幅（左縁ドラッグで調整）。
     agent_width: f32,
     resizing_agent: bool,
     resize_start_x: f32,
     resize_start_width: f32,
-    // 左ドック（エクスプローラ）の可変幅（右縁ドラッグで調整）。
     explorer_width: f32,
     resizing_explorer: bool,
-    // titlebar ドラッグ（down→move で窓移動開始。クリック/ダブルクリックと区別する）。
     should_move_window: bool,
-    // オーバーレイ（ファイルファインダ / プロジェクトスイッチャー）
     picker: Option<Entity<Picker>>,
     picker_mode: PickerMode,
     picker_files: Vec<PathBuf>,
-    // テーマセレクタの候補（表示名 + 出所）。Picker の id はこの Vec の添字。
     picker_themes: Vec<(SharedString, ThemeSource)>,
-    // ライブプレビュー前のテーマ（Dismiss で戻す）。
     theme_before_preview: Option<Theme>,
     _picker_observation: Option<Subscription>,
-    // エクスプローラの表示モード（ツリー/カラム/アイコン）。左下で切替。
-    explorer_view: ExplorerView,
-    // エクスプローラの右クリックメニュー（開いていれば Some）。
-    explorer_context_menu: Option<ExplorerContextMenu>,
-    // ツリーのインライン命名（新規/リネーム・M10）。Some の間は入力行を描く。
-    explorer_naming: Option<ExplorerNaming>,
-    // プロジェクト横断検索パネル（開いていれば Some・⌘⇧F）。
-    search_panel: Option<Entity<SearchPanel>>,
-    // ⌘F バッファ内検索/置換バー（開いていれば Some。アクティブタブのエディタが対象）。
-    buffer_search: Option<BufferSearchState>,
-    // アクティブプロジェクトの git 状態（絶対パス → 状態）。ツリー/タブの色分けに使う。
-    git_status: HashMap<PathBuf, StatusKind>,
-    // Git パネルを描画するたびに process/RPC を起動しないための snapshot。
-    git_changes: Vec<WorkingChange>,
-    git_history: Vec<GraphCommit>,
-    // origin が GitHub なら owner/repo（PR ボタンの表示判定。M8: GitHub 連携）。
-    github_slug: Option<String>,
-    // branch/worktree メニュー（titlebar の ⎇ クリックで開く。開いていれば出す位置）。
-    branch_menu: Option<BranchMenuState>,
-    // 下ドックの統合ターミナル。タブ・PTY の所有権は terminal_view 側に閉じる。
-    terminal_dock: Entity<TerminalDock>,
-    // 最後に触った面が Agent か（⌘W の宛先判定。true=Agent スレッド / false=エディタタブ）。
-    // フォーカスに頼らずクリックで確定する（Zed の active pane 相当）。
-    agent_active: bool,
-    // ⌘W で閉じたファイルの履歴（⌘⇧T で復元。Chrome 風）。新しいものが末尾。
-    recently_closed_files: Vec<PathBuf>,
-    // ── LSP（言語サーバ・M7。拡張子→サーバの登録式で多言語対応）──
-    lsp: Option<lang::lsp::LspClient>,
-    lsp_root: Option<PathBuf>,
-    // 現在稼働中のサーバが担当する languageId（"rust"/"typescript"/… ）。ファイル言語が
-    // 変わったら張り替える判定に使う。
-    lsp_language: Option<&'static str>,
-    lsp_initialized: bool,
-    // サーバが Incremental didChange を広告したか（initialize 応答の textDocumentSync・M11-8）。
-    lsp_incremental_sync: bool,
-    // ファイル別に最後に didChange で送ったバッファ version（重複送信の抑止）。
-    // 複数タブでは version 番号がファイル間で衝突しうるので path 別に持つ（単一 u64 だと誤スキップ）。
-    lsp_sent_versions: HashMap<PathBuf, u64>,
-    // ファイル別診断（絶対パス → (行, 重大度)）。gutter/statusbar に使う。
-    diagnostics: HashMap<PathBuf, Vec<(u32, lang::lsp::Severity)>>,
-    // 生の LSP Diagnostic[]（⌘. の codeAction context に渡す・M11）。
-    raw_diagnostics: HashMap<PathBuf, serde_json::Value>,
-    _lsp_pump: Option<gpui::Task<()>>,
-    // 補完ポップアップ（開いていれば。Ctrl-Space / 自動トリガで開く）。
-    completion: Option<CompletionState>,
-    // 補完要求の世代番号（連打時に古い応答でポップアップを出さない）。
-    completion_generation: u64,
-    // Esc で閉じた語の語頭 offset（同じ語の入力継続では自動再表示しない）。
-    completion_suppressed_word: Option<usize>,
-    // hover ポップアップ（マウス dwell / ⌘K ⌘I で開く。フォーカスは取らない）。
-    hover: Option<HoverState>,
-    // hover 要求の世代番号（古い応答・マウス移動後の応答を捨てる）。
-    hover_generation: u64,
-    // git 状態リフレッシュの世代（背景実行の古い結果を捨てる）。
-    git_refresh_gen: u32,
-    // ⌃G 行ジャンプの入力（Some = ミニオーバーレイ表示中）。
-    goto_line: Option<(String, FocusHandle)>,
-    // ⌘⇧O アウトラインの行番号（Picker id → 行）。
-    picker_symbol_rows: Vec<usize>,
-    // ⌘T ワークスペースシンボルの着地先（Picker id → (パス, 行, 文字)）。
-    picker_workspace_symbols: Vec<(PathBuf, u32, u32)>,
-    // ⌘O の worktree 行（Picker id-1000 → worktree パス・M12-12）。
-    picker_worktree_rows: Vec<PathBuf>,
-    /// SSH ホストピッカー（M13）の裏付け。id → config ホスト（範囲外 id = 末尾「手入力」）。
-    picker_ssh_hosts: Vec<host::SshConfigHost>,
-    /// SSH ピッカーの「最近のリモートプロジェクト」行の接続 uri（id 前半・#5）。
-    picker_ssh_recent: Vec<String>,
-    /// スレッド履歴 Picker の (id, name, color_index)。id は表示添字（#5）。
-    picker_history: Vec<(String, String, i64)>,
-    // F2 rename の入力（Some = ミニオーバーレイ表示中。値は新しい名前）。
-    rename_input: Option<(String, FocusHandle)>,
-    // ⌘I インライン編集（Some = オーバーレイ表示中・M12-8）。
-    inline_edit: Option<InlineEditState>,
-    // Todo ボード（Some = 左カラムが板・M12-10。真実は .shirushi/todos.md）。
-    todo_board: Option<TodoBoardState>,
-    // ⌘. code actions のポップアップ。
-    code_actions: Option<CodeActionsState>,
-    // hunk 操作ポップオーバー（gutter の diff バークリック・M11-10）。
-    hunk_menu: Option<(project::DiffHunk, Point<gpui::Pixels>)>,
-    // レール右クリック / ⌘K⌘C の色ピッカー（プロジェクト index + 表示位置 + 任意 hex 入力・M12-11 / Peacock 拡張）。
     color_picker: Option<ColorPickerState>,
-    // レール項目の右クリックメニュー（色 + 新規窓 / 外す / worktree・ブランチ削除・M10-2）。
     rail_menu: Option<RailMenuState>,
-    // 承認カード「エディタで開く」の保留タブ（subscribe に window が無いため次の描画で開く・M12-6）。
-    pending_transient_tab: Option<(PathBuf, Buffer)>,
-    /// スレッド履歴を開く要求（Agent パネルのボタン → window が要るので次の render で消化・#5）。
-    pending_open_history: bool,
-    // child Entity から届いた保留ジャンプ（subscribe には window が無いため次の render で消化）。
-    pending_navigation: Option<(PathBuf, usize, usize)>,
-    // 自動アップデート（M13）。Some = statusbar にチップを出す。
     update_status: Option<(updater::UpdateInfo, UpdateState)>,
-    // SSH 接続の入力バー（titlebar の SSH ボタン・M13）。Some = オーバーレイ表示中。
     ssh_input: Option<(String, FocusHandle)>,
-    // SSH 接続の実行中（多重接続防止 + ボタンの busy 表示）。
     ssh_connecting: bool,
-    // レール＋のフォルダ選択ダイアログ表示中（＋連打で Finder を多重に開かないためのガード・ssh_connecting と同型）。
     add_project_dialog_open: bool,
-    // ＋で追加したプロジェクトへの切替待ち（ダイアログ経由は window が無い → render で消化）。
     pending_project_switch: Option<usize>,
-    // トースト（右下・5 秒で消える・M12-5）。(本文, 色, 世代)。
     toasts: Vec<(SharedString, Hsla, u32)>,
     toast_gen: u32,
-    // エージェントが触ったファイル → スレッド色（色リンク・M12-4。ツリー/タブのドットと gutter 色）。
-    agent_touched: HashMap<PathBuf, Hsla>,
-    // 権限待ちスレッドの色（statusbar ドット・M12-5。TurnEnded で消える）。
-    waiting_thread: Option<(SharedString, Hsla)>,
-    // blame の世代（デバウンス・古い結果破棄）と直近対象（キャレット行が変わった時だけ再計算・M11-11）。
-    blame_gen: u32,
-    last_blame_target: Option<(PathBuf, usize)>,
-    // ナビゲーション履歴（ジャンプ級の移動の戻る/進む・M10-11）。
-    nav_back: Vec<(PathBuf, usize)>,
-    nav_forward: Vec<(PathBuf, usize)>,
-    // ローカル永続化 DB（hot exit。開けなければ None = 機能は静かに無効）。
     storage: Option<storage::Storage>,
-    // hot exit スナップショットのデバウンス世代。
-    hot_exit_gen: u32,
-    // hot exit を予約済みのバッファ version（blink の notify で再予約しない — LSP didChange と同型）。
-    hot_exit_versions: HashMap<PathBuf, u64>,
-    // 起動時に見つかった前回の未保存スナップショット（Some = 復元/破棄バーを出す）。
-    hot_exit_pending: Option<Vec<(PathBuf, String)>>,
-    // ファイル監視（アクティブプロジェクトの worktree・M10）。プロジェクト切替で張り直す。
-    _watch: Option<project::Watch>,
-    _watch_pump: Option<gpui::Task<()>>,
-    // ── git 操作パネル（M8: ソース管理。⌃⇧G で左カラムをエクスプローラと切替）──
-    git_panel: Option<GitPanelState>,
-    // push/pull はネットワークで遅い → 背景実行中は true（ボタン無効化・表示用）。
-    git_busy: bool,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -974,7 +907,101 @@ struct GitPanelState {
     focus: FocusHandle,
 }
 
+impl Deref for Workspace {
+    type Target = ProjectSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sessions[self.active]
+    }
+}
+
+impl DerefMut for Workspace {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.sessions[self.active]
+    }
+}
+
 impl Workspace {
+    fn create_project_session(
+        slot: Option<&ProjectSlot>,
+        theme: Theme,
+        explorer_view: ExplorerView,
+        storage: Option<storage::Storage>,
+        cx: &mut Context<Self>,
+    ) -> ProjectSession {
+        let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
+        if let Some(storage) = storage {
+            agent_panel.update(cx, |panel, cx| panel.set_storage(storage, cx));
+        }
+        cx.subscribe(&agent_panel, Self::on_panel_event).detach();
+        let terminal_launch = Self::terminal_launch_for(slot);
+        let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme));
+        cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
+        ProjectSession {
+            loaded: false,
+            tabs: Vec::new(),
+            active_tab: 0,
+            split_editor: None,
+            agent_panel,
+            explorer_view,
+            explorer_context_menu: None,
+            explorer_naming: None,
+            search_panel: None,
+            buffer_search: None,
+            git_status: HashMap::new(),
+            git_changes: Vec::new(),
+            git_history: Vec::new(),
+            github_slug: None,
+            branch_menu: None,
+            terminal_dock,
+            agent_active: false,
+            recently_closed_files: Vec::new(),
+            lsp: None,
+            lsp_root: None,
+            lsp_language: None,
+            lsp_initialized: false,
+            lsp_incremental_sync: false,
+            lsp_sent_versions: HashMap::new(),
+            diagnostics: HashMap::new(),
+            raw_diagnostics: HashMap::new(),
+            _lsp_pump: None,
+            completion: None,
+            completion_generation: 0,
+            completion_suppressed_word: None,
+            hover: None,
+            hover_generation: 0,
+            git_refresh_gen: 0,
+            goto_line: None,
+            picker_symbol_rows: Vec::new(),
+            picker_workspace_symbols: Vec::new(),
+            picker_worktree_rows: Vec::new(),
+            picker_ssh_hosts: Vec::new(),
+            picker_ssh_recent: Vec::new(),
+            picker_history: Vec::new(),
+            rename_input: None,
+            inline_edit: None,
+            todo_board: None,
+            code_actions: None,
+            hunk_menu: None,
+            pending_transient_tab: None,
+            pending_open_history: false,
+            pending_navigation: None,
+            agent_touched: HashMap::new(),
+            waiting_thread: None,
+            blame_gen: 0,
+            last_blame_target: None,
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
+            hot_exit_gen: 0,
+            hot_exit_versions: HashMap::new(),
+            hot_exit_pending: None,
+            _watch: None,
+            _watch_pump: None,
+            git_panel: None,
+            git_busy: false,
+        }
+    }
+
     /// プロジェクトのルート群からワークスペースを組み立てる。開けないルートはスキップ。
     pub fn new(
         roots: Vec<PathBuf>,
@@ -1076,7 +1103,7 @@ impl Workspace {
             }
         }
         // 開発用フックの値は projects が move される前に計算しておく。
-        let explorer_context_menu = std::env::var_os("SHIRUSHI_CONTEXT_MENU").and_then(|_| {
+        let mut explorer_context_menu = std::env::var_os("SHIRUSHI_CONTEXT_MENU").and_then(|_| {
             projects.first().map(|slot| ExplorerContextMenu {
                 path: slot.worktree.root().to_path_buf(),
                 is_dir: true,
@@ -1084,7 +1111,7 @@ impl Workspace {
             })
         });
         // 開発用: SHIRUSHI_SEARCH_PANEL=1 で「fn」を横断検索した結果パネルを開いた状態で撮る。
-        let search_probe = std::env::var_os("SHIRUSHI_SEARCH_PANEL").and_then(|_| {
+        let mut search_probe = std::env::var_os("SHIRUSHI_SEARCH_PANEL").and_then(|_| {
             projects.first().map(|slot| {
                 let results = search::SearchQuery::new("fn", false, false)
                     .map(|query| {
@@ -1100,45 +1127,118 @@ impl Workspace {
             })
         });
         let active = active.min(projects.len().saturating_sub(1));
-        let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
-        let terminal_launch = Self::terminal_launch_for(projects.get(active));
-        let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-        cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
         let focus_handle = cx.focus_handle();
-        let search_panel = search_probe.and_then(|results| {
-            let slot = projects.get(active)?;
-            let panel = cx.new(|cx| {
-                SearchPanel::with_results(
-                    slot.worktree.host().clone(),
-                    slot.worktree.root().to_path_buf(),
-                    "fn".to_string(),
-                    results,
-                    theme.clone(),
-                    slot.color,
-                    focus_handle.clone(),
-                    cx,
-                )
+        let explorer_view = match std::env::var("SHIRUSHI_EXPLORER_VIEW").as_deref() {
+            Ok("icons") => ExplorerView::Icons,
+            Ok("columns") => ExplorerView::Columns,
+            _ => ExplorerView::Tree,
+        };
+        let mut sessions = Vec::with_capacity(projects.len().max(1));
+        for index in 0..projects.len().max(1) {
+            let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
+            cx.subscribe(&agent_panel, Self::on_panel_event).detach();
+            let terminal_launch = Self::terminal_launch_for(projects.get(index));
+            let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
+            cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
+            let search_panel = if index == active {
+                search_probe.take().and_then(|results| {
+                    let slot = projects.get(index)?;
+                    let panel = cx.new(|cx| {
+                        SearchPanel::with_results(
+                            slot.worktree.host().clone(),
+                            slot.worktree.root().to_path_buf(),
+                            "fn".to_string(),
+                            results,
+                            theme.clone(),
+                            slot.color,
+                            focus_handle.clone(),
+                            cx,
+                        )
+                    });
+                    cx.subscribe(&panel, Self::on_search_panel_event).detach();
+                    Some(panel)
+                })
+            } else {
+                None
+            };
+            sessions.push(ProjectSession {
+                loaded: false,
+                tabs: Vec::new(),
+                active_tab: 0,
+                split_editor: None,
+                agent_panel,
+                explorer_view,
+                explorer_context_menu: (index == active)
+                    .then(|| explorer_context_menu.take())
+                    .flatten(),
+                explorer_naming: None,
+                search_panel,
+                buffer_search: None,
+                git_status: HashMap::new(),
+                git_changes: Vec::new(),
+                git_history: Vec::new(),
+                github_slug: None,
+                branch_menu: None,
+                terminal_dock,
+                agent_active: false,
+                recently_closed_files: Vec::new(),
+                lsp: None,
+                lsp_root: None,
+                lsp_language: None,
+                lsp_initialized: false,
+                lsp_incremental_sync: false,
+                lsp_sent_versions: HashMap::new(),
+                diagnostics: HashMap::new(),
+                raw_diagnostics: HashMap::new(),
+                _lsp_pump: None,
+                completion: None,
+                completion_generation: 0,
+                completion_suppressed_word: None,
+                hover: None,
+                hover_generation: 0,
+                git_refresh_gen: 0,
+                goto_line: None,
+                picker_symbol_rows: Vec::new(),
+                picker_workspace_symbols: Vec::new(),
+                picker_worktree_rows: Vec::new(),
+                picker_ssh_hosts: Vec::new(),
+                picker_ssh_recent: Vec::new(),
+                picker_history: Vec::new(),
+                rename_input: None,
+                inline_edit: None,
+                todo_board: None,
+                code_actions: None,
+                hunk_menu: None,
+                pending_transient_tab: None,
+                pending_open_history: false,
+                pending_navigation: None,
+                agent_touched: HashMap::new(),
+                waiting_thread: None,
+                blame_gen: 0,
+                last_blame_target: None,
+                nav_back: Vec::new(),
+                nav_forward: Vec::new(),
+                hot_exit_gen: 0,
+                hot_exit_versions: HashMap::new(),
+                hot_exit_pending: None,
+                _watch: None,
+                _watch_pump: None,
+                git_panel: None,
+                git_busy: false,
             });
-            cx.subscribe(&panel, Self::on_search_panel_event).detach();
-            Some(panel)
-        });
+        }
         let mut workspace = Workspace {
             projects,
             active,
-            tabs: Vec::new(),
-            active_tab: 0,
-            split_editor: None,
-            agent_panel,
+            sessions,
             theme,
             focus_handle,
             state_path,
             show_left: true,
-            show_right: true, // Agent パネル（差別化の本丸）は既定で表示
+            show_right: true,
             show_bottom: false,
-            // 初回（未オンボード）は設定ホームを自動で開く。SHIRUSHI_SETTINGS=1 でも開く（撮影用）。
             show_settings: std::env::var_os("SHIRUSHI_SETTINGS").is_some()
                 || !settings::get(cx).onboarded,
-            // オンボーディング完了の祝い（紙吹雪）。SHIRUSHI_CONFETTI=1 で撮影用に出す。
             confetti: std::env::var_os("SHIRUSHI_CONFETTI").is_some(),
             agent_width: AGENT_DOCK_WIDTH,
             resizing_agent: false,
@@ -1153,57 +1253,8 @@ impl Workspace {
             picker_themes: Vec::new(),
             theme_before_preview: None,
             _picker_observation: None,
-            explorer_naming: None,
-            // 開発用: SHIRUSHI_EXPLORER_VIEW=icons|columns で初期表示モードを指定（撮影確認用）。
-            explorer_view: match std::env::var("SHIRUSHI_EXPLORER_VIEW").as_deref() {
-                Ok("icons") => ExplorerView::Icons,
-                Ok("columns") => ExplorerView::Columns,
-                _ => ExplorerView::Tree,
-            },
-            // 開発用: SHIRUSHI_CONTEXT_MENU=1 でルートの右クリックメニューを開いた状態で撮る。
-            explorer_context_menu,
-            search_panel,
-            buffer_search: None,
-            git_status: HashMap::new(),
-            git_changes: Vec::new(),
-            git_history: Vec::new(),
-            github_slug: None,
-            branch_menu: None,
-            terminal_dock,
-            agent_active: false,
-            recently_closed_files: Vec::new(),
-            lsp: None,
-            lsp_root: None,
-            lsp_language: None,
-            lsp_initialized: false,
-            lsp_incremental_sync: false,
-            lsp_sent_versions: HashMap::new(),
-            diagnostics: HashMap::new(),
-            raw_diagnostics: HashMap::new(),
-            _lsp_pump: None,
-            completion: None,
-            completion_generation: 0,
-            completion_suppressed_word: None,
-            hover: None,
-            hover_generation: 0,
-            git_refresh_gen: 0,
-            goto_line: None,
-            picker_symbol_rows: Vec::new(),
-            picker_ssh_hosts: Vec::new(),
-            picker_ssh_recent: Vec::new(),
-            picker_history: Vec::new(),
-            picker_workspace_symbols: Vec::new(),
-            picker_worktree_rows: Vec::new(),
-            rename_input: None,
-            inline_edit: None,
-            todo_board: None,
-            code_actions: None,
-            hunk_menu: None,
             color_picker: None,
             rail_menu: None,
-            pending_transient_tab: None,
-            pending_open_history: false,
-            pending_navigation: None,
             update_status: None,
             ssh_input: None,
             ssh_connecting: false,
@@ -1211,20 +1262,7 @@ impl Workspace {
             pending_project_switch: None,
             toasts: Vec::new(),
             toast_gen: 0,
-            agent_touched: HashMap::new(),
-            waiting_thread: None,
-            blame_gen: 0,
-            last_blame_target: None,
-            nav_back: Vec::new(),
-            nav_forward: Vec::new(),
             storage: None,
-            hot_exit_gen: 0,
-            hot_exit_versions: HashMap::new(),
-            hot_exit_pending: None,
-            _watch: None,
-            _watch_pump: None,
-            git_panel: None,
-            git_busy: false,
         };
         workspace.refresh_git_status(cx); // ツリー/タブの git 色分け用
         // 開発用: SHIRUSHI_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
@@ -1308,6 +1346,7 @@ impl Workspace {
         }
         workspace.update_agent_destination(cx); // 宛先チップにプロジェクト/ブランチを反映
         workspace.start_watcher(cx); // アクティブプロジェクトのファイル監視（M10 watch 基盤）
+        workspace.loaded = true;
         workspace.schedule_update_check(cx); // 自動アップデートの確認（M13・90s 後に背景で）
         // 開発用: SHIRUSHI_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
         if let Ok(version) = std::env::var("SHIRUSHI_UPDATE_PROBE") {
@@ -1327,9 +1366,11 @@ impl Workspace {
             match storage::Storage::open(&db_path) {
                 Ok(handle) => {
                     // Agent パネルへも同じハンドルを渡す（スレッド永続化・M12-1。ワーカー 1 本を共有）。
-                    workspace
-                        .agent_panel
-                        .update(cx, |panel, cx| panel.set_storage(handle.clone(), cx));
+                    for session in &workspace.sessions {
+                        session
+                            .agent_panel
+                            .update(cx, |panel, cx| panel.set_storage(handle.clone(), cx));
+                    }
                     workspace.storage = Some(handle);
                     // リモートプロジェクトの窓色をローカル DB から解決（M13 #3b）。
                     workspace.apply_remote_host_colors();
@@ -1337,10 +1378,6 @@ impl Workspace {
                 Err(error) => eprintln!("ローカル DB を開けない（hot exit 無効）: {error:#}"),
             }
         }
-        // Agent パネルの通知（トースト・色リンク・statusbar ドット・M12-4/5）。
-        // （window 付き subscribe は new() では張れないため、イベントは window 不要の形で処理し、
-        //   タブ生成だけ pending に積んで次の描画パスで消化する）
-        cx.subscribe(&workspace.agent_panel.clone(), Self::on_panel_event).detach();
         // 設定が変わったら全エディタへ実効値を配り直す + 再描画（font_size/tab_size/soft_wrap の live 反映）。
         cx.observe_global::<settings::SettingsGlobal>(|workspace, cx| {
             workspace.apply_editor_settings(cx);
@@ -1361,6 +1398,7 @@ impl Workspace {
             }
         }
         self.open_slot_files(window, cx);
+        self.loaded = true;
     }
 
     /// 複数ファイルをアクティブプロジェクトのタブとして順に開く（最後がアクティブ）。
@@ -1469,18 +1507,31 @@ impl Workspace {
     /// git 状態（ツリー/タブ色・ブランチ・パネル用スナップショット）を**背景で**集めて反映する。
     /// 世代番号で古い結果を捨てる（gutter diff と同型）。UI スレッドで git を叩かない（ARCHITECTURE §9）。
     fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
-        let Some(worktree) = self.active_worktree() else {
-            self.git_status.clear();
-            self.git_changes.clear();
-            self.git_history.clear();
-            self.github_slug = None;
+        self.refresh_git_status_for(self.active, cx);
+    }
+
+    fn refresh_git_status_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
+        let Some(worktree) = self
+            .projects
+            .get(session_index)
+            .map(|slot| slot.worktree.clone())
+        else {
+            if let Some(session) = self.sessions.get_mut(session_index) {
+                session.git_status.clear();
+                session.git_changes.clear();
+                session.git_history.clear();
+                session.github_slug = None;
+            }
             return;
         };
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
-        let panel_open = self.git_panel.is_some();
-        self.git_refresh_gen = self.git_refresh_gen.wrapping_add(1);
-        let generation = self.git_refresh_gen;
+        let Some(session) = self.sessions.get_mut(session_index) else {
+            return;
+        };
+        let panel_open = session.git_panel.is_some();
+        session.git_refresh_gen = session.git_refresh_gen.wrapping_add(1);
+        let generation = session.git_refresh_gen;
         cx.spawn(async move |workspace, cx| {
             let snapshot = cx
                 .background_executor()
@@ -1500,17 +1551,20 @@ impl Workspace {
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
-                if workspace.git_refresh_gen != generation {
+                let Some(session) = workspace.sessions.get_mut(session_index) else {
+                    return;
+                };
+                if session.git_refresh_gen != generation {
                     return; // 古い結果（その後に別の refresh が走った）
                 }
                 let (status, branch, changes, history, slug) = snapshot;
-                workspace.git_status = status.into_iter().collect();
-                if let Some(slot) = workspace.projects.get_mut(workspace.active) {
+                session.git_status = status.into_iter().collect();
+                session.git_changes = changes;
+                session.git_history = history;
+                session.github_slug = slug;
+                if let Some(slot) = workspace.projects.get_mut(session_index) {
                     slot.branch = branch;
                 }
-                workspace.git_changes = changes;
-                workspace.git_history = history;
-                workspace.github_slug = slug;
                 cx.notify();
             });
         })
@@ -2519,11 +2573,11 @@ impl Workspace {
         let Some((path, line, character, position)) = info else {
             return;
         };
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        let generation = self.completion_generation;
         let Some(lsp) = &self.lsp else {
             return;
         };
-        self.completion_generation = self.completion_generation.wrapping_add(1);
-        let generation = self.completion_generation;
         let receiver = lsp.completion(&path, line, character);
         cx.spawn(async move |_workspace, cx| {
             let Ok(Ok(value)) = receiver.await else {
@@ -4633,11 +4687,11 @@ impl Workspace {
         if !self.lsp_initialized {
             return;
         }
+        self.hover_generation = self.hover_generation.wrapping_add(1);
+        let generation = self.hover_generation;
         let Some(lsp) = &self.lsp else {
             return;
         };
-        self.hover_generation = self.hover_generation.wrapping_add(1);
-        let generation = self.hover_generation;
         let receiver = lsp.hover(&path, line, character);
         cx.spawn(async move |_workspace, cx| {
             let Ok(Ok(value)) = receiver.await else {
@@ -4673,6 +4727,7 @@ impl Workspace {
     /// アクティブプロジェクトの worktree 監視を開始する（既存の監視は破棄して張り替え）。
     /// local のみ（remote の watch subscription は M13）。イベントは 200ms 合流してから反映する。
     fn start_watcher(&mut self, cx: &mut Context<Self>) {
+        let session_index = self.active;
         self._watch = None;
         self._watch_pump = None;
         let Some(worktree) = self.active_worktree() else {
@@ -4720,7 +4775,9 @@ impl Workspace {
                     eprintln!("watch: 合流 {} paths", paths.len());
                 }
                 let updated = workspace
-                    .update(cx, |workspace, cx| workspace.handle_watch_events(paths, cx));
+                    .update(cx, |workspace, cx| {
+                        workspace.handle_watch_events(session_index, paths, cx)
+                    });
                 if debug {
                     eprintln!("watch: update {:?}", updated.as_ref().map(|_| "ok").map_err(|e| format!("{e}")));
                 }
@@ -4734,8 +4791,17 @@ impl Workspace {
     /// watch イベント（合流済みパス群）を反映する:
     /// ①開いているバッファの外部変更（自動リロード / dirty なら警告バー）
     /// ②ツリー再構築 ③git 色 + gutter diff の更新。gitignore 対象（target/ 等）はノイズとして落とす。
-    fn handle_watch_events(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(worktree) = self.active_worktree() else {
+    fn handle_watch_events(
+        &mut self,
+        session_index: usize,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = self
+            .projects
+            .get(session_index)
+            .map(|slot| slot.worktree.clone())
+        else {
             return;
         };
         let mut tree_changed = false;
@@ -4751,7 +4817,11 @@ impl Workspace {
                 continue;
             }
             // 開いているバッファへ配送（gitignore に関係なく）。
-            if let Some(tab) = self.tabs.iter().find(|tab| &tab.path == path) {
+            if let Some(tab) = self.sessions[session_index]
+                .tabs
+                .iter()
+                .find(|tab| &tab.path == path)
+            {
                 let editor = tab.editor.clone();
                 editor.update(cx, |view, cx| view.handle_external_change(cx));
                 git_changed = true;
@@ -4763,13 +4833,18 @@ impl Workspace {
             }
         }
         if tree_changed {
-            if let Some(slot) = self.projects.get_mut(self.active) {
+            if let Some(slot) = self.projects.get_mut(session_index) {
                 slot.refresh();
             }
         }
         if git_changed {
-            self.refresh_git_status(cx);
-            if let Some(editor) = self.active_editor() {
+            self.refresh_git_status_for(session_index, cx);
+            let session = &self.sessions[session_index];
+            if let Some(editor) = session
+                .tabs
+                .get(session.active_tab)
+                .map(|tab| tab.editor.clone())
+            {
                 editor.update(cx, |view, cx| view.refresh_diff(cx));
             }
         }
@@ -4778,7 +4853,9 @@ impl Workspace {
             .iter()
             .any(|path| path.ends_with(std::path::Path::new(".shirushi/todos.md")))
         {
-            self.reload_todo_board(cx);
+            if session_index == self.active {
+                self.reload_todo_board(cx);
+            }
         }
         if tree_changed || git_changed {
             cx.notify();
@@ -4791,10 +4868,15 @@ impl Workspace {
         let soft_wrap = current.soft_wrap || std::env::var_os("SHIRUSHI_SOFT_WRAP").is_some();
         let (font_size, tab_size) = (current.font_size, current.tab_size);
         let editors: Vec<Entity<EditorView>> = self
-            .tabs
+            .sessions
             .iter()
-            .map(|tab| tab.editor.clone())
-            .chain(self.split_editor.clone())
+            .flat_map(|session| {
+                session
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.editor.clone())
+                    .chain(session.split_editor.clone())
+            })
             .collect();
         for editor in editors {
             editor.update(cx, |view, cx| {
@@ -5222,25 +5304,32 @@ impl Workspace {
 
     // ── Agent パネル連携（トースト・色リンク・生中継・M12-3/4/5） ──
 
-    fn on_panel_event(&mut self, _panel: Entity<AgentPanel>, event: &agent_panel::PanelEvent, cx: &mut Context<Self>) {
+    fn on_panel_event(&mut self, panel: Entity<AgentPanel>, event: &agent_panel::PanelEvent, cx: &mut Context<Self>) {
+        let session_index = self
+            .sessions
+            .iter()
+            .position(|session| session.agent_panel == panel)
+            .unwrap_or(self.active);
         match event {
             agent_panel::PanelEvent::OpenHistoryRequest => {
                 // window が無いので次の render で消化する（pending_transient_tab と同じ迂回・#5）。
-                self.pending_open_history = true;
+                self.sessions[session_index].pending_open_history = true;
                 cx.notify();
             }
             agent_panel::PanelEvent::TurnEnded { thread, color, summary } => {
-                self.waiting_thread = None;
+                self.sessions[session_index].waiting_thread = None;
                 self.push_toast(SharedString::from(format!("● {thread} — {summary}")), *color, cx);
                 // Todo ボード: そのスレッドに送った項目の pulse を解除し、板を読み直す
                 // （エージェントが todos.md をチェックしたら watch より先に即反映・M12-10）。
-                if let Some(board) = self.todo_board.as_mut() {
+                if let Some(board) = self.sessions[session_index].todo_board.as_mut() {
                     board.running.retain(|_, running_color| running_color != color);
-                    self.reload_todo_board(cx);
+                    if session_index == self.active {
+                        self.reload_todo_board(cx);
+                    }
                 }
             }
             agent_panel::PanelEvent::PermissionWaiting { thread, color } => {
-                self.waiting_thread = Some((thread.clone(), *color));
+                self.sessions[session_index].waiting_thread = Some((thread.clone(), *color));
                 self.push_toast(
                     SharedString::from(format!("● {thread} — {}", i18n::t!("agent.waiting_permission"))),
                     *color,
@@ -5253,16 +5342,20 @@ impl Workspace {
                 if let Some(diff_text) = project::unified_diff_texts(old_text, new_text, title) {
                     let mut buffer = Buffer::from_str(&diff_text);
                     buffer.set_read_only(true);
-                    self.pending_transient_tab =
+                    self.sessions[session_index].pending_transient_tab =
                         Some((PathBuf::from(i18n::t!("difftab.proposal_title", "title" => title)), buffer));
                     cx.notify();
                 }
             }
             agent_panel::PanelEvent::FilesTouched { files, color } => {
                 for file in files {
-                    self.agent_touched.insert(file.clone(), *color);
+                    self.sessions[session_index].agent_touched.insert(file.clone(), *color);
                     // 開いていれば gutter をスレッド色に（生中継の帰属・M12-3）。
-                    if let Some(tab) = self.tabs.iter().find(|tab| &tab.path == file) {
+                    if let Some(tab) = self.sessions[session_index]
+                        .tabs
+                        .iter()
+                        .find(|tab| &tab.path == file)
+                    {
                         let editor = tab.editor.clone();
                         let color = *color;
                         editor.update(cx, |view, cx| view.set_agent_mark_color(Some(color), cx));
@@ -5762,27 +5855,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 現在の `self.active` スロットに合わせてビュー（LSP/端末/タブ/git/監視）を張り替える。
-    /// プロジェクト切替（switch_project）と、アクティブスロットをレールから外した後（remove_project_slot）で共有。
+    /// active session を表示対象にする。既存 Entity / process は破棄せず、初回だけタブを復元する。
     fn load_active_slot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // process/PTY は project の host と不可分。旧 host の session を次の project へ持ち越さない。
-        let terminal_launch = Self::terminal_launch_for(self.active_slot());
-        self.terminal_dock
-            .update(cx, |dock, cx| dock.reset_launch(terminal_launch, cx));
-        self.lsp = None;
-        self._lsp_pump = None;
-        self.lsp_root = None;
-        self.lsp_language = None;
-        self.lsp_initialized = false;
-        self.lsp_sent_versions.clear();
-        self.diagnostics.clear();
-        // 分割ペインは旧プロジェクトのファイルを指しているので畳む。
-        self.split_editor = None;
-        // 切替先プロジェクトのタブ列を復元（無ければタブ無し＝空状態）。
-        self.open_slot_files(window, cx);
+        if !self.loaded {
+            self.open_slot_files(window, cx);
+            self.loaded = true;
+        }
         self.refresh_git_status(cx);
         self.update_agent_destination(cx);
-        self.start_watcher(cx); // 監視対象を新しい worktree に張り替える
+        if self._watch.is_none() {
+            self.start_watcher(cx);
+        }
         if self.show_bottom {
             self.terminal_dock.update(cx, |dock, cx| {
                 dock.ensure_active(cx);
@@ -6049,8 +6132,9 @@ impl Workspace {
             let handle = editor.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
+        let selected = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
         if let Some(slot) = self.projects.get_mut(self.active) {
-            slot.selected = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
+            slot.selected = selected;
         }
         self.sync_active_slot();
         self.push_active_diagnostics(cx);
@@ -6069,12 +6153,14 @@ impl Workspace {
             self.dismiss_buffer_search(cx);
             self.close_hover(cx);
         }
-        let Some(tab) = self.tabs.get(index) else {
+        let Some((editor, path)) = self
+            .tabs
+            .get(index)
+            .map(|tab| (tab.editor.clone(), tab.path.clone()))
+        else {
             return;
         };
         self.active_tab = index;
-        let editor = tab.editor.clone();
-        let path = tab.path.clone();
         let handle = editor.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         if let Some(slot) = self.projects.get_mut(self.active) {
@@ -6455,8 +6541,20 @@ impl Workspace {
             dir_listings: std::cell::RefCell::new(HashMap::new()),
         };
         slot.refresh();
+        let session = Self::create_project_session(
+            Some(&slot),
+            self.theme.clone(),
+            self.explorer_view,
+            self.storage.clone(),
+            cx,
+        );
         let index = self.projects.len();
         self.projects.push(slot);
+        if index == 0 {
+            self.sessions[0] = session;
+        } else {
+            self.sessions.push(session);
+        }
         // switch_project は window が要る（subscribe 経由に無い）ため、次の render で消化する。
         self.pending_project_switch = Some(index);
         cx.notify();
@@ -6508,6 +6606,7 @@ impl Workspace {
         }
         let was_active = index == self.active;
         self.projects.remove(index);
+        self.sessions.remove(index);
         // active index を詰める（後ろの要素が 1 つ前へずれる。ロジックは純関数でテスト済み）。
         self.active = active_index_after_removal(self.active, index, self.projects.len());
         if was_active {
@@ -7116,23 +7215,31 @@ impl Workspace {
     /// テーマを即時適用する（自身のクローム + エディタ + Agent パネル + Picker へ波及）。
     fn apply_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
-        // 全タブ + 分割ペインへ波及。
-        for tab in &self.tabs {
-            tab.editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+        for (index, session) in self.sessions.iter().enumerate() {
+            for tab in &session.tabs {
+                tab.editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+            }
+            if let Some(split) = &session.split_editor {
+                split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+            }
+            session
+                .agent_panel
+                .update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
+            if let Some(panel) = &session.search_panel {
+                let accent = self
+                    .projects
+                    .get(index)
+                    .map(|slot| slot.color)
+                    .unwrap_or_else(|| project_color(index));
+                panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), accent, cx));
+            }
+            session
+                .terminal_dock
+                .update(cx, |dock, cx| dock.set_theme(theme.clone(), cx));
         }
-        if let Some(split) = &self.split_editor {
-            split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
-        }
-        self.agent_panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
         if let Some(picker) = &self.picker {
             picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
         }
-        if let Some(panel) = &self.search_panel {
-            let accent = self.accent();
-            panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), accent, cx));
-        }
-        self.terminal_dock
-            .update(cx, |dock, cx| dock.set_theme(theme.clone(), cx));
         cx.notify();
     }
 
@@ -7377,16 +7484,22 @@ impl Workspace {
 
     fn on_search_panel_event(
         &mut self,
-        _: Entity<SearchPanel>,
+        panel: Entity<SearchPanel>,
         event: &SearchPanelEvent,
         cx: &mut Context<Self>,
     ) {
+        let session_index = self
+            .sessions
+            .iter()
+            .position(|session| session.search_panel.as_ref() == Some(&panel))
+            .unwrap_or(self.active);
         match event {
             SearchPanelEvent::OpenMatch { path, line, column } => {
-                self.pending_navigation = Some((path.clone(), *line, *column));
-                self.search_panel = None;
+                self.sessions[session_index].pending_navigation =
+                    Some((path.clone(), *line, *column));
+                self.sessions[session_index].search_panel = None;
             }
-            SearchPanelEvent::Dismissed => self.search_panel = None,
+            SearchPanelEvent::Dismissed => self.sessions[session_index].search_panel = None,
         }
         cx.notify();
     }
@@ -7816,10 +7929,15 @@ impl Workspace {
     /// subscribe に window が無いので pending_transient_tab と同様「次の render で消化」する。
     fn on_terminal_dock_event(
         &mut self,
-        _dock: Entity<TerminalDock>,
+        dock: Entity<TerminalDock>,
         event: &TerminalDockEvent,
         cx: &mut Context<Self>,
     ) {
+        let session_index = self
+            .sessions
+            .iter()
+            .position(|session| session.terminal_dock == dock)
+            .unwrap_or(self.active);
         match event {
             TerminalDockEvent::OpenPath { path, line } => {
                 let resolved = if std::path::Path::new(path).is_absolute() {
@@ -7829,14 +7947,19 @@ impl Workspace {
                         .map(|home| home.join(stripped))
                         .unwrap_or_else(|| PathBuf::from(path))
                 } else {
-                    let Some(worktree) = self.active_worktree() else {
+                    let Some(worktree) = self.projects.get(session_index).map(|slot| &slot.worktree)
+                    else {
                         return;
                     };
                     worktree.root().join(path)
                 };
-                self.pending_navigation = Some((resolved, line.saturating_sub(1) as usize, 0));
+                self.sessions[session_index].pending_navigation =
+                    Some((resolved, line.saturating_sub(1) as usize, 0));
             }
-            TerminalDockEvent::Dismissed => self.show_bottom = false,
+            TerminalDockEvent::Dismissed if session_index == self.active => {
+                self.show_bottom = false
+            }
+            TerminalDockEvent::Dismissed => {}
         }
         cx.notify();
     }
