@@ -5,6 +5,7 @@
 //! 状態（開プロジェクト・アクティブ・開ファイル）は `state.json` に保存し、再起動で復元する。
 
 use agent_panel::AgentPanel;
+use crate::persistence::{PersistedProject, PersistedState, RestoredTabs, state_path};
 use crate::updater;
 use editor_core::{Buffer, Selection};
 use futures::StreamExt as _; // LSP 通知 pump の `.next()`
@@ -18,7 +19,6 @@ use gpui::{
 };
 use host::Host;
 use project::{GitWorktree, GraphCommit, StatusKind, WorkingChange, Worktree};
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -196,107 +196,6 @@ enum Dock {
     Left,
     Right,
     Bottom,
-}
-
-// ── 状態永続化 ──
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedProject {
-    root: PathBuf,
-    /// 旧形式（1 プロジェクト = 1 ファイル）。読み込み時の後方互換のみ・書き込みはしない。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    open_file: Option<PathBuf>,
-    /// 開いているタブのファイル一覧（左から順）。M10 複数タブ。
-    #[serde(default)]
-    open_files: Vec<PathBuf>,
-    /// アクティブタブの添字（`open_files` 内）。
-    #[serde(default)]
-    active_file: usize,
-    /// `None` は従来どおり local。password を含まない正規 `ssh://` URI のみ保存する。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    remote_uri: Option<String>,
-}
-
-impl PersistedProject {
-    /// 保存済みの開ファイル一覧（旧 `open_file` からの移行込み）。
-    fn files(&self) -> Vec<PathBuf> {
-        if !self.open_files.is_empty() {
-            self.open_files.clone()
-        } else {
-            self.open_file.iter().cloned().collect()
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct PersistedState {
-    projects: Vec<PersistedProject>,
-    #[serde(default)]
-    active: usize,
-}
-
-/// `state.json` の標準パス（macOS）。
-pub fn state_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/Shirushi/state.json"))
-}
-
-/// 前回の (プロジェクト群, アクティブ) を読む。無ければ `None`。
-pub fn load_state(path: &Path) -> Option<(Vec<PathBuf>, usize)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let state: PersistedState = serde_json::from_str(&text).ok()?;
-    if state.projects.is_empty() {
-        return None;
-    }
-    let roots = state.projects.into_iter().map(|project| project.root).collect();
-    Some((roots, state.active))
-}
-
-/// 起動前の接続解決に使う、永続化済み project 記述。
-#[derive(Debug, Clone)]
-pub struct SavedProject {
-    pub root: PathBuf,
-    /// 前回開いていたタブのファイル一覧（左から順）。
-    pub open_files: Vec<PathBuf>,
-    /// アクティブタブの添字。
-    pub active_file: usize,
-    pub remote_uri: Option<String>,
-}
-
-/// 起動時に復元するタブ列（プロジェクトごと）。bin が引数/前回状態から組み立てて渡す。
-#[derive(Debug, Clone, Default)]
-pub struct RestoredTabs {
-    /// 開くファイル一覧（左から順）。
-    pub files: Vec<PathBuf>,
-    /// アクティブにするタブの添字。
-    pub active: usize,
-}
-
-impl RestoredTabs {
-    /// 単一ファイル（コマンドライン引数で 1 ファイル指定した場合）。
-    pub fn single(file: PathBuf) -> Self {
-        Self { files: vec![file], active: 0 }
-    }
-}
-
-/// local/SSH を区別して前回状態を読む。旧 `root` だけの state.json と後方互換。
-pub fn load_saved_state(path: &Path) -> Option<(Vec<SavedProject>, usize)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let state: PersistedState = serde_json::from_str(&text).ok()?;
-    if state.projects.is_empty() {
-        return None;
-    }
-    let projects = state
-        .projects
-        .into_iter()
-        .map(|project| SavedProject {
-            root: project.root.clone(),
-            open_files: project.files(),
-            active_file: project.active_file,
-            remote_uri: project.remote_uri,
-        })
-        .collect();
-    Some((projects, state.active))
 }
 
 /// 1 project の実行先。`PathBuf` 単体に戻すと異なる host の同一パスが衝突するため常に組で扱う。
