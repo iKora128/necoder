@@ -4,6 +4,8 @@ struct ProjectSlot {
     name: SharedString,
     /// 描画中に git process/RPC を起動しないための現在ブランチ cache。
     branch: Option<String>,
+    /// Render が Host trait を呼ばず接続先を表示するための cache。local は None。
+    remote_host: Option<SharedString>,
     color: Hsla,
     explorer: ExplorerProject,
     /// このプロジェクトで開いているタブのファイル一覧（左から順・M10 複数タブ）。
@@ -194,11 +196,15 @@ impl Workspace {
             match Worktree::with_host(host, &root) {
                 Ok(worktree) => {
                     let index = projects.len();
+                    let remote_host = worktree.host().is_remote().then(|| {
+                        SharedString::from(worktree.host().display_name().to_string())
+                    });
                     // `.shirushi/settings.json` の color(#hex)/icon(絵文字) を反映（M12-11）。
                     let identity = read_project_identity(worktree.root());
                     let mut slot = ProjectSlot {
                         name: worktree.name().into(),
                         branch: None,
+                        remote_host,
                         color: identity.0.unwrap_or_else(|| project_color(index)),
                         worktree: Rc::new(worktree),
                         explorer: ExplorerProject::default(),

@@ -317,9 +317,14 @@ impl Workspace {
             Some(color) if !self.color_in_use(color) => color,
             _ => self.next_free_color(),
         };
+        let remote_host = worktree
+            .host()
+            .is_remote()
+            .then(|| SharedString::from(worktree.host().display_name().to_string()));
         let mut slot = ProjectSlot {
             name: worktree.name().into(),
             branch: None,
+            remote_host,
             color,
             worktree: Rc::new(worktree),
             explorer: ExplorerProject::default(),

@@ -664,8 +664,8 @@ impl Workspace {
             ]);
 
         let is_local = self
-            .active_worktree()
-            .map(|worktree| !worktree.host().is_remote())
+            .active_slot()
+            .map(|slot| slot.remote_host.is_none())
             .unwrap_or(false);
         if is_dir {
             let open_path = path.clone();

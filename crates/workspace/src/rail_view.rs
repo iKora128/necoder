@@ -68,7 +68,7 @@ impl Workspace {
                     // 非アクティブは hover で色が濃くなる＝クリックできる合図（Zed の気持ちよさ）
                     .hover(|style| style.bg(color.alpha(0.24)).border_color(color))
                     .child(monogram)
-                    .when(slot.worktree.host().is_remote(), |element| {
+                    .when(slot.remote_host.is_some(), |element| {
                         // リモート slot の見分け（#2）: 右下に server バッジ（SSH 接続先の目印）。
                         element.child(
                             div()
@@ -223,7 +223,7 @@ impl Workspace {
                 // リモート SSH（~/.ssh/config → ワンクリック接続・#2）。アクティブがリモートなら色付き。
                 let is_remote_active = self
                     .active_slot()
-                    .map(|slot| slot.worktree.host().is_remote())
+                    .map(|slot| slot.remote_host.is_some())
                     .unwrap_or(false);
                 element.child(
                     self.rail_icon(

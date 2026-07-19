@@ -817,7 +817,7 @@ impl Workspace {
     fn open_command_terminal(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let cwd = self
             .active_slot()
-            .filter(|slot| !slot.worktree.host().is_remote())
+            .filter(|slot| slot.remote_host.is_none())
             .map(|slot| slot.worktree.root().to_path_buf());
         let shell = Some((
             "/bin/sh".to_string(),
@@ -914,12 +914,7 @@ impl Workspace {
         let accent = self.accent();
         let tint = gpui::Hsla { s: (accent.s + 0.12).min(1.0), a: 0.26, ..accent };
         let branch = self.active_slot().and_then(|slot| slot.branch.clone());
-        let remote_host = self.active_slot().and_then(|slot| {
-            slot.worktree
-                .host()
-                .is_remote()
-                .then(|| SharedString::from(slot.worktree.host().display_name().to_string()))
-        });
+        let remote_host = self.active_slot().and_then(|slot| slot.remote_host.clone());
         let change_count = self.repository.status.len();
         let (cursor, language) = match self.active_editor() {
             Some(editor) => {
