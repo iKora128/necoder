@@ -7,9 +7,9 @@
 
 ```
 [shell]      shirushi(bin) ─ 結線・起動・メニュー
-[shell]      workspace ─ レール / ドック / ペイン / タブ / statusbar / 永続化
-[view]       editor_view / explorer / agent_panel / (v1: terminal_view, git_ui)
-[model]      editor_core / project / acp_client / (v1: search, lang)
+[shell]      workspace ─ レール / chrome / active ProjectSession の合成・event routing
+[view]       editor_view / explorer / git_ui / search_ui / agent_panel / terminal_view / settings
+[model]      editor_core / project / acp_client / search / lang / storage
 [foundation] ui(部品+Registry) / theme_core / settings_core / keymap_core / i18n
 [外部]       gpui(path=zed/) / agent-client-protocol(crates.io) / ropey / alacritty_terminal
 ```
@@ -19,6 +19,9 @@
 - view 層は `workspace` を知らない（workspace が view を「載せる」。逆はない）
 - `ui` は `theme_core` / `i18n` のみに依存
 - AI・Git・ターミナルを editor_core が import したら誤り（Zed の editor が vim/collab/agent を知らないのと同型）
+
+`workspace` の具体的な ownership と source 境界は
+[`REFACTOR-WORKSPACE.md`](./REFACTOR-WORKSPACE.md) を正とする。
 
 ## 2. crate 対応表（作る順・移植元・ライセンス備考）
 
@@ -94,19 +97,37 @@ pub enum IconSource { Monogram(char), Emoji(String), Image(PathBuf) }
 
 VSCode の contribution points / Zed の初期化結線から学んだ形。**本体機能も最初の「拡張」としてこの口から登録する**:
 
-- `CommandRegistry::register(id, i18n_key, handler)` → パレットとキーマップはここから引く
-- `StatusItemRegistry` / `PanelRegistry`（dock 位置・アイコン・ビュー工場）
+- `CommandRegistry` → palette action の id / i18n key を一意な一覧から引く
+- `PanelRegistry` → child Entity の typed event subscription を一箇所で結線する
+- `StatusItemRegistry`（未導入。statusbar の拡張点が必要になった時点で追加）
 - `KeymapContext` 述語（`"Editor && mode == full"` — gpui の KeyContext をそのまま使う）
 - 将来の拡張 API（WASM）は同じ Registry へ別経路で流し込むだけ、が狙い（FEATURES 9 の ADR 対象）
 
-## 5. ウィンドウモデル（2026-07-11 確定 → 2026-07-19・M10-2 改訂）
+## 5. ウィンドウモデル（2026-07-11 確定 → 2026-07-20 ownership 改訂）
 
-- **1窓 = 複数 (project, branch/worktree) を持つレール**。レール = 窓内切替器（`projects: Vec<ProjectSlot>`）。アクティブ切替時は workspace の中身（タブ・ドック状態）を差し替え、状態は (project, branch) 単位で保存・復元
+- **1窓 = 複数 (project, branch/worktree) を持つレール**。`ProjectSessions` が
+  `projects: Vec<ProjectSlot>` / `active` / `sessions: Vec<ProjectSession>` を同じ添字で所有する。
+  通常切替は `active` だけを変え、既に開いた Editor Entity、dirty/undo、Agent session、Terminal process、
+  watcher を破棄しない。未表示 session のタブだけ初回に遅延復元する。
 - **ブランチ/worktree は既定でレールに開く**（`open_folder_in_rail`）。⎇ メニューの行クリック=in-place 切替、⧉=worktree をレールに、⎇ worktree セクション/⌘O worktree 行=レールに。**新窓は明示操作のみ**（レール右クリック→「新しいウィンドウで開く」・⌘⇧N）。旧「1窓=1worktree・新窓に開く」から転換（色による方向感覚を窓境界で切らないため）
 - **レール項目の右クリック = コンテキストメニュー**（`render_rail_menu`）: 色スウォッチ＋「その他の色…」（フル hex ピッカー）／新しいウィンドウで開く／レールから外す／(worktree タブのみ) worktree を削除・worktree ごとブランチを削除。破壊的操作は**二段確認**（`RailMenuState.confirm`）。「削除」は3階層に分離 — 外す=表示のみ・worktree 削除=`git worktree remove`・ブランチ削除=worktree ごと `git branch -D`
 - 同一リポジトリの別ブランチをレールに載せると identity 色が親と衝突する → `next_free_color` で未使用パレット色に倒し、同色スロット2枚を防ぐ
 - titlebar ピル: プロジェクト名（クリック→⌘O スイッチャー）+ ⎇ ブランチ（クリック→branch/worktree メニュー）
 - エージェントスレッドは (project, branch) に属する。titlebar beacon はアクティブ project 分、レールのドットが他 project 分を担う
+
+### 5.1 Workspace shell の責務
+
+`Workspace` の直接フィールドは `ProjectSessions`、theme/focus、chrome、overlays、notifications、
+persistence、updater の 8 個。feature state は `ProjectSession` / `EditorArea` / child Entity に置く。
+
+- `ProjectSession`: `EditorArea`、Explorer、Git、Search、Agent、Terminal、Todo、repository snapshot、watcher
+- `EditorArea`: tabs/pane、LSP/diagnostics/completion、navigation、diff/inline edit、hot exit
+- `CommandRegistry`: command palette の登録境界
+- `PanelRegistry`: child → shell の typed event 登録境界
+- root `Render`: chrome / rail / active session / overlay の合成。Host / FS / Git / DB は呼ばない
+
+Window を必要とする child event は pending value として受け、effect-cycle 末尾で処理する。Render
+中にファイルを開く、project を切り替える、Git 操作を開始する、といった状態変更は行わない。
 
 ## 6. i18n（2026-07-11 決定 — 言語パック内蔵）
 
