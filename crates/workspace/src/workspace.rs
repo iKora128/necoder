@@ -18,7 +18,7 @@ use gpui::{
     pulsating_between, px, size, svg,
 };
 use host::Host;
-use project::{GitWorktree, GraphCommit, StatusKind, WorkingChange, Worktree};
+use project::{GitWorktree, GraphCommit, ProjectSource, StatusKind, WorkingChange, Worktree};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -196,31 +196,6 @@ enum Dock {
     Left,
     Right,
     Bottom,
-}
-
-/// 1 project の実行先。`PathBuf` 単体に戻すと異なる host の同一パスが衝突するため常に組で扱う。
-#[derive(Clone)]
-pub struct ProjectSource {
-    host: Arc<dyn Host>,
-    root: PathBuf,
-}
-
-impl ProjectSource {
-    pub fn local(root: PathBuf) -> Self {
-        Self { host: host::LocalHost::shared(), root }
-    }
-
-    pub fn new(host: Arc<dyn Host>, root: PathBuf) -> Self {
-        Self { host, root }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn is_remote(&self) -> bool {
-        self.host.is_remote()
-    }
 }
 
 // ── ツリー ──
@@ -1274,7 +1249,8 @@ impl Workspace {
     ) -> Self {
         let mut projects = Vec::new();
         for source in sources {
-            match Worktree::with_host(source.host, &source.root) {
+            let (host, root) = source.into_parts();
+            match Worktree::with_host(host, &root) {
                 Ok(worktree) => {
                     let index = projects.len();
                     // `.shirushi/settings.json` の color(#hex)/icon(絵文字) を反映（M12-11）。

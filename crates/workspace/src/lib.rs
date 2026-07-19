@@ -10,4 +10,5 @@ mod workspace;
 pub mod updater;
 
 pub use persistence::{RestoredTabs, SavedProject, load_saved_state, load_state, state_path};
+pub use project::ProjectSource;
 pub use workspace::*;

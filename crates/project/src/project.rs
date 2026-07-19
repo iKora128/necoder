@@ -13,6 +13,43 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// A project execution source. Host and root must stay paired so identical remote/local
+/// paths cannot be confused by the workspace shell.
+#[derive(Clone)]
+pub struct ProjectSource {
+    host: Arc<dyn Host>,
+    root: PathBuf,
+}
+
+impl ProjectSource {
+    pub fn local(root: PathBuf) -> Self {
+        Self {
+            host: LocalHost::shared(),
+            root,
+        }
+    }
+
+    pub fn new(host: Arc<dyn Host>, root: PathBuf) -> Self {
+        Self { host, root }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn host(&self) -> &Arc<dyn Host> {
+        &self.host
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.host.is_remote()
+    }
+
+    pub fn into_parts(self) -> (Arc<dyn Host>, PathBuf) {
+        (self.host, self.root)
+    }
+}
+
 /// ディレクトリ 1 項目。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
