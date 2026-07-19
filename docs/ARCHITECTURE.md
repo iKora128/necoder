@@ -129,6 +129,13 @@ persistence、updater の 8 個。feature state は `ProjectSession` / `EditorAr
 Window を必要とする child event は pending value として受け、effect-cycle 末尾で処理する。Render
 中にファイルを開く、project を切り替える、Git 操作を開始する、といった状態変更は行わない。
 
+Explorer / Git は feature crate が project model、interaction state、repository snapshot、typed event
+契約を所有する一方、active `ProjectSlot` と rail / picker / notification / window を横断する実描画
+callback は `workspace` の shell adapter が所有する。これを子 Render に移すと project state の複製か
+巨大な往復 event protocol が必要になるためである。Search / Agent / Terminal / Settings / Todo など、
+実際に child Entity から shell へ上がる通信は `PanelRegistry` の typed event を使う。Explorer / Git の
+event enum は将来共通 Dock API へ adapter を移すための契約で、現在の操作は shell adapter 内で完結する。
+
 ## 6. i18n（2026-07-11 決定 — 言語パック内蔵）
 
 - 方式: **薄い自作 `i18n` crate**（ロケール YAML を `include_str!` で埋め込み、`i18n::t!("tab.close")`）。

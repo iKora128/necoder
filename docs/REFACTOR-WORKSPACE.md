@@ -1,7 +1,7 @@
 # Workspace architecture refactor
 
 作成 2026-07-20、完了 2026-07-20。対象は `crates/workspace` と、そこから本来の
-所有者へ移した周辺機能。開始 checkpoint は `ca46f40`、最終監査の基準は `7fe7f64` 以降。
+所有者へ移した周辺機能。開始 checkpoint は `ca46f40`、最終監査は `d83578a` で固定した。
 
 ステータス: **完了**。
 
@@ -10,7 +10,7 @@
 開始時の `crates/workspace/src/workspace.rs` は約 13,000 行、`Workspace` は約 95 個の
 直接フィールド、単一 `impl Workspace` は 300 メソッド超だった。完了時点では次の形になった。
 
-- `workspace.rs`: 1,108 行
+- `workspace.rs`: 1,399 行（production body は 975 行、残りは完了条件を固定する test）
 - `Workspace`: 8 直接フィールド
 - `ProjectSessions`: project metadata、active index、長寿命 session の単一 owner
 - `ProjectSession`: EditorArea と project 単位の child Entity / process / controller の owner
@@ -107,24 +107,31 @@ LSP の JSON 応答型と server registry は `lang` にあり、EditorArea は 
 
 | Entity / owner | 所有するもの | shell への主イベント |
 |---|---|---|
-| `explorer::Explorer` | view mode、命名、context menu、選択 interaction | `OpenPath`, `FilesChanged`, `Focus` |
-| `git_ui::GitPanel` | panel input、branch menu、repository snapshot、busy state | `RepositoryChanged`, `OpenDiff`, `OpenWorktree`, `Toast`, `StageHunk` |
+| `explorer::ExplorerProject` / `Explorer` | tree cache、view mode、命名、context menu、選択 interaction | `OpenPath`, `FilesChanged`, `Focus` 契約 |
+| `git_ui::GitPanel` | panel input、branch menu、repository snapshot、busy state | `RepositoryChanged`, `OpenDiff`, `OpenWorktree`, `Toast`, `StageHunk` 契約 |
 | `search_ui::SearchPanel` | project search state / render / keyboard | `OpenMatch`, `Dismissed` |
 | `terminal_view::TerminalDock` | terminal tabs、header、active process | `OpenPath`, `Dismissed` |
 | `settings::SettingsView` | settings / agent setup / onboarding | `RunCommand`, `OnboardingCompleted` |
 | `workspace::TodoPanel` | Todo board state / render | `SendToAgent`, `FilesChanged`, `Toast` |
 
-Explorer と Git のウィンドウ操作を伴う描画 callback は `explorer_view.rs` / `git_view.rs` の shell
-adapter に残した。child crate から `workspace` への逆依存を作らず、Entity が state と typed event、
-shell が window/chrome composition を担当する境界である。Git snapshot と watcher は panel の開閉に
-依存せず、ProjectSession controller が一度読み各 consumer へ配る。
+当初案の「Explorer / Git の Render と操作をすべて feature crate へ移す」は監査時に改めた。
+これらの callback は active `ProjectSlot`、rail、picker、通知、window を同時に操作するため、子 Render
+へ押し込むと project model の複製か巨大な往復 event protocol が必要になる。そこで project 固有の
+model / interaction state / typed event 契約は `explorer` / `git_ui`、ウィンドウと chrome を伴う実描画
+callback は `explorer_view.rs` / `git_view.rs` の shell adapter、とするのを最終境界にした。
+
+実際に child Entity から shell へ上がる Search / Agent / Terminal / Settings / Todo の通信はすべて
+typed event である。Explorer / Git の現在の操作は shell adapter 内で完結するため child → shell 通信
+ではなく、両 crate の event enum は将来 adapter を Dock API へ移す際の契約として定義・購読している。
+Git snapshot と watcher は panel の開閉に依存せず、ProjectSession controller が一度読み各 consumer
+へ配る。
 
 ### 2.4 Typed event と登録境界
 
 ```text
 ProjectWatcher -> ProjectSession -> Explorer / RepositoryController / EditorArea
-ExplorerEvent  -> PanelRegistry  -> Workspace -> EditorArea
-GitPanelEvent  -> PanelRegistry  -> Workspace -> EditorArea / notifications
+ExplorerEvent  -> PanelRegistry  -> Workspace -> EditorArea（adapter 移行用契約）
+GitPanelEvent  -> PanelRegistry  -> Workspace -> EditorArea / notifications（同上）
 AgentPanelEvent-> PanelRegistry  -> Workspace -> EditorArea / notifications
 TerminalEvent  -> PanelRegistry  -> Workspace -> EditorArea
 SettingsEvent  -> PanelRegistry  -> Workspace -> TerminalDock / chrome
@@ -186,6 +193,7 @@ crates/search_ui/src/lib.rs
 - `32249c5`: shell effect を Render 外へ遅延
 - `f47d63f`〜`7fe7f64`: session 型配置と切替不変条件を確定
 - `3676ce3`: Render 用の remote host 表示情報を session metadata へ cache
+- `d83578a`: 公開互換、session 往復、Render I/O、release、画面 QA の完了条件を test / probe 化
 
 ## 5. 検証
 
@@ -198,19 +206,31 @@ cargo check -p shirushi --release
 git diff --check
 ```
 
-構造監査:
+完了条件の実証:
 
-- `workspace.rs` の行数と `Workspace` 直接フィールド数
-- feature crate の Cargo.toml に `workspace` 依存がないこと
-- 通常 project switch が active index だけを変更する unit test
-- `tabs.clear()` が初回/明示 reload 経路にだけ存在すること
-- root Render に Host / FS / Git / DB 呼び出しがないこと
-- 全 `pub fn debug_*` が `#[cfg(debug_assertions)]` 配下であること
-- i18n ja/en parity test
+- 開始 checkpoint `ca46f40` と rustdoc の公開項目一覧を比較し、公開 top-level item と `Workspace` method の
+  削除が 0 件であることを確認した。`actions!` 定義も byte-for-byte 同一。
+- `locales/ja.yml` / `locales/en.yml` は開始時から不変で、i18n unit / doc / parity test が通る。
+- 旧 schema と現 schema の `state.json` を一時ファイルへ書き、公開 `load_state` /
+  `load_saved_state` から復元する test が通る。
+- 2 project を A → B → A と切り替え、A の dirty text と undo 履歴、および Agent / Explorer /
+  Git / Todo / TerminalDock / TerminalView の Entity ID が保持され、B では別 ID になる GPUI test が通る。
+  Terminal は deterministic test executor の制約から PTY-free fixture を使うが、実際の
+  `TerminalDock` tab と `TerminalView` Entity の所有経路を検証する。
+- local / remote の両 source で root を実際に `window.draw` し、全 `Host` method を数える audit host が
+  Render 中 0 call である GPUI test が通る。
+- `cargo tree -i workspace --edges normal` で `workspace` の consumer は composition crate `shirushi`
+  だけ。feature crate からの逆依存はない。
+- `tabs.clear()` は初回復元 / 明示 reload のみ。通常 switch は loaded session を再生成しない。
+- release の実 cfg に `debug_assertions` がなく、生成 `.rlib` に debug probe symbol がないことを確認した。
+- screenshot build を隔離 DB / state で起動し、default、Explorer 3 view、Git、Search、Settings、Todo、
+  Picker の 9 状態を 2560×1600 offscreen image で目視した。各起動ログに error はない。
+- `workspace.rs` は 1,399 行、`Workspace` は 8 直接フィールド。production body は 975 行で、
+  976 行目以降は上記の完了条件を固定する test module。
 
 ## 6. 完了条件
 
-- [x] `crates/workspace/src/workspace.rs` は 1,500 行以下（1,108 行）
+- [x] `crates/workspace/src/workspace.rs` は 1,500 行以下（1,399 行、production body 975 行）
 - [x] `Workspace` の直接フィールドは 20 以下（8 個）
 - [x] Workspace の直接フィールドに Git / LSP / Search / Terminal / Explorer 固有 state がない
 - [x] project 切替で dirty buffer または child Entity を破棄しない
