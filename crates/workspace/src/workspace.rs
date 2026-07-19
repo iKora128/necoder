@@ -846,13 +846,7 @@ pub struct ProjectSession {
     git_busy: bool,
 }
 
-pub struct Workspace {
-    projects: Vec<ProjectSlot>,
-    active: usize,
-    sessions: Vec<ProjectSession>,
-    theme: Theme,
-    focus_handle: FocusHandle,
-    state_path: Option<PathBuf>,
+struct ChromeState {
     show_left: bool,
     show_right: bool,
     show_bottom: bool,
@@ -865,22 +859,48 @@ pub struct Workspace {
     explorer_width: f32,
     resizing_explorer: bool,
     should_move_window: bool,
+}
+
+struct WorkspaceOverlays {
     picker: Option<Entity<Picker>>,
     picker_mode: PickerMode,
     picker_files: Vec<PathBuf>,
     picker_themes: Vec<(SharedString, ThemeSource)>,
     theme_before_preview: Option<Theme>,
-    _picker_observation: Option<Subscription>,
+    picker_observation: Option<Subscription>,
     color_picker: Option<ColorPickerState>,
     rail_menu: Option<RailMenuState>,
-    update_status: Option<(updater::UpdateInfo, UpdateState)>,
     ssh_input: Option<(String, FocusHandle)>,
     ssh_connecting: bool,
     add_project_dialog_open: bool,
     pending_project_switch: Option<usize>,
+}
+
+struct NotificationCenter {
     toasts: Vec<(SharedString, Hsla, u32)>,
     toast_gen: u32,
+}
+
+struct WorkspacePersistence {
+    state_path: Option<PathBuf>,
     storage: Option<storage::Storage>,
+}
+
+struct UpdateController {
+    status: Option<(updater::UpdateInfo, UpdateState)>,
+}
+
+pub struct Workspace {
+    projects: Vec<ProjectSlot>,
+    active: usize,
+    sessions: Vec<ProjectSession>,
+    theme: Theme,
+    focus_handle: FocusHandle,
+    chrome: ChromeState,
+    overlays: WorkspaceOverlays,
+    notifications: NotificationCenter,
+    persistence: WorkspacePersistence,
+    updater: UpdateController,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -1032,7 +1052,7 @@ impl Workspace {
     /// `.shirushi` はリモート側にあり identity に使えないため、ホスト識別子 → 色をローカルに持つ。
     /// 初回は識別子から安定に 1 色を焼き付け、以後は同じ色（開き直し・レール並び順が変わっても不変）。
     fn apply_remote_host_colors(&mut self) {
-        let Some(storage) = self.storage.clone() else {
+        let Some(storage) = self.persistence.storage.clone() else {
             return;
         };
         for slot in &mut self.projects {
@@ -1233,36 +1253,38 @@ impl Workspace {
             sessions,
             theme,
             focus_handle,
-            state_path,
-            show_left: true,
-            show_right: true,
-            show_bottom: false,
-            show_settings: std::env::var_os("SHIRUSHI_SETTINGS").is_some()
-                || !settings::get(cx).onboarded,
-            confetti: std::env::var_os("SHIRUSHI_CONFETTI").is_some(),
-            agent_width: AGENT_DOCK_WIDTH,
-            resizing_agent: false,
-            resize_start_x: 0.0,
-            resize_start_width: 0.0,
-            explorer_width: DOCK_WIDTH,
-            resizing_explorer: false,
-            should_move_window: false,
-            picker: None,
-            picker_mode: PickerMode::Files,
-            picker_files: Vec::new(),
-            picker_themes: Vec::new(),
-            theme_before_preview: None,
-            _picker_observation: None,
-            color_picker: None,
-            rail_menu: None,
-            update_status: None,
-            ssh_input: None,
-            ssh_connecting: false,
-            add_project_dialog_open: false,
-            pending_project_switch: None,
-            toasts: Vec::new(),
-            toast_gen: 0,
-            storage: None,
+            chrome: ChromeState {
+                show_left: true,
+                show_right: true,
+                show_bottom: false,
+                show_settings: std::env::var_os("SHIRUSHI_SETTINGS").is_some()
+                    || !settings::get(cx).onboarded,
+                confetti: std::env::var_os("SHIRUSHI_CONFETTI").is_some(),
+                agent_width: AGENT_DOCK_WIDTH,
+                resizing_agent: false,
+                resize_start_x: 0.0,
+                resize_start_width: 0.0,
+                explorer_width: DOCK_WIDTH,
+                resizing_explorer: false,
+                should_move_window: false,
+            },
+            overlays: WorkspaceOverlays {
+                picker: None,
+                picker_mode: PickerMode::Files,
+                picker_files: Vec::new(),
+                picker_themes: Vec::new(),
+                theme_before_preview: None,
+                picker_observation: None,
+                color_picker: None,
+                rail_menu: None,
+                ssh_input: None,
+                ssh_connecting: false,
+                add_project_dialog_open: false,
+                pending_project_switch: None,
+            },
+            notifications: NotificationCenter { toasts: Vec::new(), toast_gen: 0 },
+            persistence: WorkspacePersistence { state_path, storage: None },
+            updater: UpdateController { status: None },
         };
         workspace.refresh_git_status(cx); // ツリー/タブの git 色分け用
         // 開発用: SHIRUSHI_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
@@ -1277,7 +1299,7 @@ impl Workspace {
         }
         // 開発用: SHIRUSHI_TERMINAL=1 で下ドックのターミナルを開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_TERMINAL").is_some() {
-            workspace.show_bottom = true;
+            workspace.chrome.show_bottom = true;
             workspace.terminal_dock.update(cx, |dock, cx| {
                 dock.ensure_active(cx);
             });
@@ -1285,7 +1307,7 @@ impl Workspace {
         // 開発用: SHIRUSHI_COLOR_PICKER=1（or hex 文字列）で色ピッカーを開いた状態で撮る（Peacock 拡張の検証）。
         if let Ok(probe) = std::env::var("SHIRUSHI_COLOR_PICKER") {
             let hex = if probe == "1" { String::new() } else { probe.trim_start_matches('#').to_string() };
-            workspace.color_picker = Some(ColorPickerState {
+            workspace.overlays.color_picker = Some(ColorPickerState {
                 project_index: workspace.active,
                 position: point(px(RAIL_WIDTH), px(12.)),
                 hex,
@@ -1304,7 +1326,7 @@ impl Workspace {
                 "confirm-branch" => Some(RailMenuAction::DeleteBranch),
                 _ => None,
             };
-            workspace.rail_menu = Some(RailMenuState {
+            workspace.overlays.rail_menu = Some(RailMenuState {
                 project_index: workspace.active,
                 position: point(px(RAIL_WIDTH), px(12.)),
                 confirm,
@@ -1351,7 +1373,7 @@ impl Workspace {
         // 開発用: SHIRUSHI_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
         if let Ok(version) = std::env::var("SHIRUSHI_UPDATE_PROBE") {
             if !version.is_empty() {
-                workspace.update_status = Some((
+                workspace.updater.status = Some((
                     updater::UpdateInfo { version, dmg_url: String::new() },
                     UpdateState::Available,
                 ));
@@ -1371,7 +1393,7 @@ impl Workspace {
                             .agent_panel
                             .update(cx, |panel, cx| panel.set_storage(handle.clone(), cx));
                     }
-                    workspace.storage = Some(handle);
+                    workspace.persistence.storage = Some(handle);
                     // リモートプロジェクトの窓色をローカル DB から解決（M13 #3b）。
                     workspace.apply_remote_host_colors();
                 }
@@ -1781,7 +1803,7 @@ impl Workspace {
                 }
             }
             None => {
-                self.show_left = true;
+                self.chrome.show_left = true;
                 self.todo_board = None; // 左カラムは排他（M12-10）
                 let state =
                     GitPanelState { message: String::new(), branch_name: None, focus: cx.focus_handle() };
@@ -3431,7 +3453,7 @@ impl Workspace {
             return;
         }
         self.git_panel = None;
-        self.show_left = true;
+        self.chrome.show_left = true;
         self.todo_board = Some(TodoBoardState {
             items: Vec::new(),
             plan_busy: false,
@@ -3500,7 +3522,7 @@ impl Workspace {
         let prompt = i18n::t!("todos.send_prompt", "text" => text);
         let color = self.agent_panel.read(cx).active_color();
         self.agent_panel.update(cx, |panel, cx| panel.send_prompt_text(prompt, cx));
-        self.show_right = true;
+        self.chrome.show_right = true;
         if let Some(board) = self.todo_board.as_mut() {
             board.running.insert(line, color);
         }
@@ -3771,7 +3793,7 @@ impl Workspace {
             list = list.child(row);
         }
         div()
-            .w(px(self.explorer_width))
+            .w(px(self.chrome.explorer_width))
             .h_full()
             .flex_none()
             .relative() // リサイズハンドルの絶対配置基準
@@ -4922,7 +4944,7 @@ impl Workspace {
             // リモートは `.shirushi` がリモート側にあり使えないので、手動色をローカル DB に焼く（M13 #3b・再接続で復元）。
             Some(key) => {
                 if let (Some(storage), Ok(value)) = (
-                    self.storage.clone(),
+                    self.persistence.storage.clone(),
                     u32::from_str_radix(hex.trim_start_matches('#'), 16),
                 ) {
                     let _ = storage.set_host_color(key, value);
@@ -4955,13 +4977,13 @@ impl Workspace {
     ) {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.color_picker = Some(ColorPickerState { project_index, position, hex: String::new(), focus });
+        self.overlays.color_picker = Some(ColorPickerState { project_index, position, hex: String::new(), focus });
         cx.notify();
     }
 
     /// 色ピッカーを閉じ、フォーカスをアクティブエディタへ戻す（rename と同型）。
     fn close_color_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.color_picker.take().is_some() {
+        if self.overlays.color_picker.take().is_some() {
             if let Some(editor) = self.active_editor() {
                 let handle = editor.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
@@ -4982,7 +5004,7 @@ impl Workspace {
         match event.keystroke.key.as_str() {
             "escape" => self.close_color_picker(window, cx),
             "enter" => {
-                let Some(state) = self.color_picker.as_ref() else {
+                let Some(state) = self.overlays.color_picker.as_ref() else {
                     return;
                 };
                 let project_index = state.project_index;
@@ -4993,7 +5015,7 @@ impl Workspace {
                 }
             }
             "backspace" => {
-                if let Some(state) = self.color_picker.as_mut() {
+                if let Some(state) = self.overlays.color_picker.as_mut() {
                     state.hex.pop();
                     cx.notify();
                 }
@@ -5006,7 +5028,7 @@ impl Workspace {
                 let Some(text) = &event.keystroke.key_char else {
                     return;
                 };
-                if let Some(state) = self.color_picker.as_mut() {
+                if let Some(state) = self.overlays.color_picker.as_mut() {
                     // 16 進 6 桁まで（`#` はラベルで出すので取り込まない）。
                     for ch in text.chars().filter(|ch| ch.is_ascii_hexdigit()) {
                         if state.hex.len() >= 6 {
@@ -5022,7 +5044,7 @@ impl Workspace {
 
     /// 色ピッカー（識別用の厳選スウォッチ + 任意 hex 入力・M12-11 / Peacock 拡張）。
     fn render_color_picker(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let state = self.color_picker.as_ref()?;
+        let state = self.overlays.color_picker.as_ref()?;
         let project_index = state.project_index;
         let position = state.position;
         let theme = self.theme.clone();
@@ -5123,7 +5145,7 @@ impl Workspace {
     /// レール項目の右クリックメニュー（M10-2）。色スウォッチ + 新規窓 / レールから外す /
     /// （worktree タブなら）worktree・ブランチ削除。破壊的操作は二段確認。
     fn render_rail_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let menu = self.rail_menu.as_ref()?;
+        let menu = self.overlays.rail_menu.as_ref()?;
         let index = menu.project_index;
         let position = menu.position;
         let confirm = menu.confirm;
@@ -5296,7 +5318,7 @@ impl Workspace {
 
     /// レールメニューの破壊的操作を二段確認の「1 段目」にする（もう一度クリックで実行）。
     fn arm_rail_confirm(&mut self, action: RailMenuAction, cx: &mut Context<Self>) {
-        if let Some(menu) = self.rail_menu.as_mut() {
+        if let Some(menu) = self.overlays.rail_menu.as_mut() {
             menu.confirm = Some(action);
             cx.notify();
         }
@@ -5368,11 +5390,11 @@ impl Workspace {
 
     /// トーストを積む（右下・5 秒で自動で消える・UI-SPEC §8）。
     fn push_toast(&mut self, text: SharedString, color: Hsla, cx: &mut Context<Self>) {
-        self.toast_gen = self.toast_gen.wrapping_add(1);
-        let generation = self.toast_gen;
-        self.toasts.push((text, color, generation));
-        if self.toasts.len() > 4 {
-            self.toasts.remove(0);
+        self.notifications.toast_gen = self.notifications.toast_gen.wrapping_add(1);
+        let generation = self.notifications.toast_gen;
+        self.notifications.toasts.push((text, color, generation));
+        if self.notifications.toasts.len() > 4 {
+            self.notifications.toasts.remove(0);
         }
         cx.notify();
         cx.spawn(async move |workspace, cx| {
@@ -5380,7 +5402,7 @@ impl Workspace {
                 .timer(std::time::Duration::from_secs(5))
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.toasts.retain(|(_, _, gen)| *gen != generation);
+                workspace.notifications.toasts.retain(|(_, _, gen)| *gen != generation);
                 cx.notify();
             });
         })
@@ -5389,7 +5411,7 @@ impl Workspace {
 
     /// トースト描画（右下スタック・M12-5）。
     fn render_toasts(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.toasts.is_empty() {
+        if self.notifications.toasts.is_empty() {
             return None;
         }
         let theme = self.theme.clone();
@@ -5401,7 +5423,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .children(self.toasts.iter().map(|(text, color, generation)| {
+                .children(self.notifications.toasts.iter().map(|(text, color, generation)| {
                     div()
                         .id(("toast", *generation as usize))
                         .flex()
@@ -5430,7 +5452,7 @@ impl Workspace {
     /// 編集の notify 毎に呼ばれるが、世代番号で最後の 1 回だけ実行される。書き込みは背景。
     fn schedule_hot_exit_snapshot(&mut self, cx: &mut Context<Self>) {
         let debug = std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some();
-        let Some(storage) = self.storage.clone() else {
+        let Some(storage) = self.persistence.storage.clone() else {
             if debug {
                 eprintln!("hotexit: storage=None でスキップ");
             }
@@ -5493,7 +5515,7 @@ impl Workspace {
 
     /// 起動時に前回の未保存スナップショットを探し、あれば復元/破棄バーを出す（main から呼ぶ）。
     pub fn check_hot_exit_restore(&mut self, cx: &mut Context<Self>) {
-        let Some(storage) = self.storage.clone() else {
+        let Some(storage) = self.persistence.storage.clone() else {
             return;
         };
         cx.spawn(async move |workspace, cx| {
@@ -5539,7 +5561,7 @@ impl Workspace {
     /// 復元バーの「破棄」: スナップショットを消してバーを閉じる。
     fn discard_hot_exit(&mut self, cx: &mut Context<Self>) {
         self.hot_exit_pending = None;
-        if let Some(storage) = self.storage.clone() {
+        if let Some(storage) = self.persistence.storage.clone() {
             cx.background_executor()
                 .spawn(async move {
                     if let Err(error) = storage.clear_hot_exit() {
@@ -5553,7 +5575,7 @@ impl Workspace {
 
     /// 正常終了時の後始末（Quit アクションから）。スナップショットは破棄する（仕様: 正常終了で破棄）。
     pub fn prepare_quit(&mut self) {
-        if let Some(storage) = &self.storage {
+        if let Some(storage) = &self.persistence.storage {
             if let Err(error) = storage.clear_hot_exit() {
                 eprintln!("hot exit のクリアに失敗: {error:#}");
             }
@@ -5866,7 +5888,7 @@ impl Workspace {
         if self._watch.is_none() {
             self.start_watcher(cx);
         }
-        if self.show_bottom {
+        if self.chrome.show_bottom {
             self.terminal_dock.update(cx, |dock, cx| {
                 dock.ensure_active(cx);
             });
@@ -5910,7 +5932,7 @@ impl Workspace {
         // 最後に触った面が Agent なら AI スレッドタブを、そうでなければエディタタブを閉じる。
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
         // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。
-        if self.show_right && self.agent_active {
+        if self.chrome.show_right && self.agent_active {
             self.agent_panel.update(cx, |panel, cx| panel.close_active_thread(cx));
             return;
         }
@@ -5934,7 +5956,7 @@ impl Workspace {
 
     /// 直近に閉じたタブを復元する（Chrome の ⌘⇧T）。⌘W と同じく最後に触った面で振り分ける。
     fn restore_closed_tab(&mut self, _: &RestoreClosedTab, window: &mut Window, cx: &mut Context<Self>) {
-        if self.show_right && self.agent_active {
+        if self.chrome.show_right && self.agent_active {
             self.agent_panel.update(cx, |panel, cx| panel.restore_closed_thread(cx));
             return;
         }
@@ -5944,8 +5966,8 @@ impl Workspace {
     }
 
     fn new_agent_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.show_right {
-            self.show_right = true;
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
         }
         self.agent_panel.update(cx, |panel, cx| panel.new_thread(cx));
         cx.notify();
@@ -5953,8 +5975,8 @@ impl Workspace {
 
     /// 次の AI スレッドタブへ（Chrome 風。⌘⌥→ / ⌃Tab）。
     fn select_next_thread(&mut self, _: &SelectNextThread, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.show_right {
-            self.show_right = true;
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
         }
         self.agent_panel.update(cx, |panel, cx| panel.select_next_thread(cx));
         cx.notify();
@@ -5962,8 +5984,8 @@ impl Workspace {
 
     /// 前の AI スレッドタブへ（Chrome 風。⌘⌥← / ⌃⇧Tab）。
     fn select_prev_thread(&mut self, _: &SelectPrevThread, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.show_right {
-            self.show_right = true;
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
         }
         self.agent_panel.update(cx, |panel, cx| panel.select_prev_thread(cx));
         cx.notify();
@@ -5980,22 +6002,22 @@ impl Workspace {
     // ── ドックの可変幅（縁ドラッグ）。Agent=左縁 / エクスプローラ=右縁 ──
 
     fn on_resize_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let dx = f32::from(event.position.x) - self.resize_start_x;
-        if self.resizing_agent {
+        let dx = f32::from(event.position.x) - self.chrome.resize_start_x;
+        if self.chrome.resizing_agent {
             // 左縁を左へ動かすと広がる（dx 負 → 幅増）。
-            self.agent_width = (self.resize_start_width - dx).clamp(AGENT_DOCK_MIN, AGENT_DOCK_MAX);
+            self.chrome.agent_width = (self.chrome.resize_start_width - dx).clamp(AGENT_DOCK_MIN, AGENT_DOCK_MAX);
             cx.notify();
-        } else if self.resizing_explorer {
+        } else if self.chrome.resizing_explorer {
             // 右縁を右へ動かすと広がる（dx 正 → 幅増）。
-            self.explorer_width = (self.resize_start_width + dx).clamp(DOCK_MIN, DOCK_MAX);
+            self.chrome.explorer_width = (self.chrome.resize_start_width + dx).clamp(DOCK_MIN, DOCK_MAX);
             cx.notify();
         }
     }
 
     fn on_resize_end(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.resizing_agent || self.resizing_explorer {
-            self.resizing_agent = false;
-            self.resizing_explorer = false;
+        if self.chrome.resizing_agent || self.chrome.resizing_explorer {
+            self.chrome.resizing_agent = false;
+            self.chrome.resizing_explorer = false;
             cx.notify();
         }
     }
@@ -6006,7 +6028,7 @@ impl Workspace {
         div()
             .flex()
             .flex_none()
-            .w(px(self.agent_width))
+            .w(px(self.chrome.agent_width))
             .h_full()
             .border_l_1()
             .border_color(theme.border)
@@ -6023,9 +6045,9 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                            this.resizing_agent = true;
-                            this.resize_start_x = f32::from(event.position.x);
-                            this.resize_start_width = this.agent_width;
+                            this.chrome.resizing_agent = true;
+                            this.chrome.resize_start_x = f32::from(event.position.x);
+                            this.chrome.resize_start_width = this.chrome.agent_width;
                             cx.notify();
                         }),
                     ),
@@ -6035,9 +6057,9 @@ impl Workspace {
 
     fn toggle_dock(&mut self, dock: Dock, cx: &mut Context<Self>) {
         match dock {
-            Dock::Left => self.show_left = !self.show_left,
-            Dock::Right => self.show_right = !self.show_right,
-            Dock::Bottom => self.show_bottom = !self.show_bottom,
+            Dock::Left => self.chrome.show_left = !self.chrome.show_left,
+            Dock::Right => self.chrome.show_right = !self.chrome.show_right,
+            Dock::Bottom => self.chrome.show_bottom = !self.chrome.show_bottom,
         }
         cx.notify();
     }
@@ -6078,8 +6100,8 @@ impl Workspace {
 
     /// 下ドック（ターミナル）を開閉する。開くときは生成 + フォーカス（キー入力を受ける）。
     fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_bottom = !self.show_bottom;
-        if self.show_bottom {
+        self.chrome.show_bottom = !self.chrome.show_bottom;
+        if self.chrome.show_bottom {
             self.focus_active_terminal(window, cx);
         }
         cx.notify();
@@ -6110,7 +6132,7 @@ impl Workspace {
             self.lsp_did_close(&tab.path);
         }
         // hot exit: タブを閉じる＝未保存編集の破棄（現仕様）なのでスナップショットも消す。
-        if let Some(storage) = self.storage.clone() {
+        if let Some(storage) = self.persistence.storage.clone() {
             let path = tab.path.clone();
             cx.background_executor()
                 .spawn(async move {
@@ -6254,8 +6276,8 @@ impl Workspace {
     /// カラム表示は幅が要るので、狭ければ広げる（以後ユーザーがドラッグで調整）。
     fn set_explorer_view(&mut self, view: ExplorerView, cx: &mut Context<Self>) {
         self.explorer_view = view;
-        if view == ExplorerView::Columns && self.explorer_width < 440.0 {
-            self.explorer_width = 440.0;
+        if view == ExplorerView::Columns && self.chrome.explorer_width < 440.0 {
+            self.chrome.explorer_width = 440.0;
         }
         cx.notify();
     }
@@ -6463,10 +6485,10 @@ impl Workspace {
     /// レール ＋: ネイティブのフォルダ選択ダイアログ → 選んだフォルダを**このウィンドウのレールへ追加**。
     fn add_project_via_dialog(&mut self, cx: &mut Context<Self>) {
         // 多重起動ガード: 既にダイアログが出ていれば無視（＋連打で Finder を何枚も開かない）。
-        if self.add_project_dialog_open {
+        if self.overlays.add_project_dialog_open {
             return;
         }
-        self.add_project_dialog_open = true;
+        self.overlays.add_project_dialog_open = true;
         let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,
@@ -6477,7 +6499,7 @@ impl Workspace {
             let result = receiver.await;
             // 成功・キャンセル・失敗の全経路でフラグを戻す（早期 return で戻し忘れない）。
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.add_project_dialog_open = false;
+                workspace.overlays.add_project_dialog_open = false;
                 if let Ok(Ok(Some(paths))) = result {
                     if let Some(path) = paths.into_iter().next() {
                         workspace.add_project_slot(path, cx);
@@ -6508,7 +6530,7 @@ impl Workspace {
         if let Some(index) =
             self.projects.iter().position(|slot| slot.worktree.root() == path.as_path())
         {
-            self.pending_project_switch = Some(index);
+            self.overlays.pending_project_switch = Some(index);
             cx.notify();
             return;
         }
@@ -6545,7 +6567,7 @@ impl Workspace {
             Some(&slot),
             self.theme.clone(),
             self.explorer_view,
-            self.storage.clone(),
+            self.persistence.storage.clone(),
             cx,
         );
         let index = self.projects.len();
@@ -6556,7 +6578,7 @@ impl Workspace {
             self.sessions.push(session);
         }
         // switch_project は window が要る（subscribe 経由に無い）ため、次の render で消化する。
-        self.pending_project_switch = Some(index);
+        self.overlays.pending_project_switch = Some(index);
         cx.notify();
     }
 
@@ -6577,13 +6599,13 @@ impl Workspace {
 
     /// レール項目の右クリックメニューを開く（色スウォッチ + 新規窓 / 外す / worktree・ブランチ削除）。
     fn open_rail_menu(&mut self, index: usize, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
-        self.color_picker = None;
-        self.rail_menu = Some(RailMenuState { project_index: index, position, confirm: None });
+        self.overlays.color_picker = None;
+        self.overlays.rail_menu = Some(RailMenuState { project_index: index, position, confirm: None });
         cx.notify();
     }
 
     fn close_rail_menu(&mut self, cx: &mut Context<Self>) {
-        if self.rail_menu.take().is_some() {
+        if self.overlays.rail_menu.take().is_some() {
             cx.notify();
         }
     }
@@ -6591,7 +6613,7 @@ impl Workspace {
     /// スロットを**レールから外す**（表示のみ。ディスク・ブランチ・worktree は無傷＝安全側）。
     /// アクティブを外したら隣のスロットへビューを張り替える。最後の1枚は残す。
     fn remove_project_slot(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.rail_menu = None;
+        self.overlays.rail_menu = None;
         if self.projects.len() <= 1 {
             self.push_toast(
                 SharedString::from(i18n::t!("rail.cannot_remove_last")),
@@ -6636,7 +6658,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.rail_menu = None;
+        self.overlays.rail_menu = None;
         // レール最後の1枚の worktree を消すと空レール＋ディスク破壊になる → 事前に断る（安全側）。
         if self.projects.len() <= 1 {
             self.push_toast(
@@ -6962,7 +6984,7 @@ impl Workspace {
     }
 
     fn save_state(&self) {
-        let Some(path) = self.state_path.as_ref() else {
+        let Some(path) = self.persistence.state_path.as_ref() else {
             return;
         };
         let state = PersistedState {
@@ -7016,7 +7038,7 @@ impl Workspace {
                     .enumerate()
                     .map(|(id, (_, relative))| PickerItem::new(id, relative.clone()))
                     .collect();
-                workspace.picker_files = files.into_iter().map(|(path, _)| path).collect();
+                workspace.overlays.picker_files = files.into_iter().map(|(path, _)| path).collect();
                 workspace.open_picker(PickerMode::Files, i18n::t!("finder.files"), items, window, cx);
             });
         })
@@ -7083,10 +7105,10 @@ impl Workspace {
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
                 // ⌘O がまだ Projects モードで開いている時だけ差し込む。
-                if workspace.picker_mode != PickerMode::Projects {
+                if workspace.overlays.picker_mode != PickerMode::Projects {
                     return;
                 }
-                let Some(picker) = workspace.picker.clone() else {
+                let Some(picker) = workspace.overlays.picker.clone() else {
                     return;
                 };
                 let (items, rows) = workspace.build_switcher_items(&collected, cx);
@@ -7199,14 +7221,14 @@ impl Workspace {
                 PickerItem::new(id, name.clone()).with_detail(detail)
             })
             .collect();
-        self.picker_themes = themes;
-        self.theme_before_preview = Some(self.theme.clone());
+        self.overlays.picker_themes = themes;
+        self.overlays.theme_before_preview = Some(self.theme.clone());
         self.open_picker(PickerMode::Themes, i18n::t!("theme.picker_placeholder"), items, window, cx);
     }
 
     /// テーマ保存ディレクトリ（`state.json` と同じ Shirushi 設定フォルダの `themes/`）。
     fn themes_dir(&self) -> Option<PathBuf> {
-        self.state_path
+        self.persistence.state_path
             .as_ref()
             .and_then(|path| path.parent())
             .map(|dir| dir.join("themes"))
@@ -7237,7 +7259,7 @@ impl Workspace {
                 .terminal_dock
                 .update(cx, |dock, cx| dock.set_theme(theme.clone(), cx));
         }
-        if let Some(picker) = &self.picker {
+        if let Some(picker) = &self.overlays.picker {
             picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
         }
         cx.notify();
@@ -7245,7 +7267,7 @@ impl Workspace {
 
     /// ハイライト移動でプレビュー適用する（保存しない）。
     fn preview_theme(&mut self, id: usize, cx: &mut Context<Self>) {
-        if let Some((_, source)) = self.picker_themes.get(id) {
+        if let Some((_, source)) = self.overlays.picker_themes.get(id) {
             if let Ok(theme) = Theme::load(source) {
                 self.apply_theme(theme, cx);
             }
@@ -7254,7 +7276,7 @@ impl Workspace {
 
     /// テーマを確定する（適用 + 設定へ theme 名を保存＝再起動でも効く）。
     fn commit_theme(&mut self, id: usize, cx: &mut Context<Self>) {
-        let Some((_, source)) = self.picker_themes.get(id).cloned() else {
+        let Some((_, source)) = self.overlays.picker_themes.get(id).cloned() else {
             return;
         };
         let Ok(theme) = Theme::load(&source) else {
@@ -7262,7 +7284,7 @@ impl Workspace {
         };
         let name = theme.name.to_string();
         self.apply_theme(theme, cx);
-        self.theme_before_preview = None;
+        self.overlays.theme_before_preview = None;
         if let Some(path) = settings_core::user_settings_path() {
             if let Err(error) =
                 settings_core::persist_user_value(&path, "theme", serde_json::Value::String(name))
@@ -7284,9 +7306,9 @@ impl Workspace {
         let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
         let picker = cx.new(|cx| Picker::new(placeholder, items, theme, accent, cx));
         window.focus(&picker.read(cx).focus_handle(), cx);
-        self._picker_observation = Some(cx.subscribe_in(&picker, window, Self::on_picker_event));
-        self.picker_mode = mode;
-        self.picker = Some(picker);
+        self.overlays.picker_observation = Some(cx.subscribe_in(&picker, window, Self::on_picker_event));
+        self.overlays.picker_mode = mode;
+        self.overlays.picker = Some(picker);
         cx.notify();
     }
 
@@ -7300,17 +7322,17 @@ impl Workspace {
         match event {
             // テーマセレクタのみ、ハイライト移動で即プレビュー（ライブプレビュー）。
             PickerEvent::Highlighted(id) => {
-                if self.picker_mode == PickerMode::Themes {
+                if self.overlays.picker_mode == PickerMode::Themes {
                     self.preview_theme(*id, cx);
                 }
             }
             PickerEvent::Confirmed(id) => {
                 let id = *id;
-                let mode = self.picker_mode;
+                let mode = self.overlays.picker_mode;
                 self.close_picker(window, cx);
                 match mode {
                     PickerMode::Files => {
-                        if let Some(path) = self.picker_files.get(id).cloned() {
+                        if let Some(path) = self.overlays.picker_files.get(id).cloned() {
                             self.record_nav_position(cx); // ⌘P もナビ履歴へ
                             self.open_file(path, window, cx);
                         }
@@ -7365,7 +7387,7 @@ impl Workspace {
                                 Some(host) => {
                                     let alias = host.alias.clone();
                                     // 前回パスがあれば即接続（#2d・打たずに繋がる）。無ければパス入力へ。
-                                    let last_path = self.storage.as_ref().and_then(|storage| {
+                                    let last_path = self.persistence.storage.as_ref().and_then(|storage| {
                                         storage.host_last_path(&alias).ok().flatten()
                                     });
                                     match last_path {
@@ -7389,8 +7411,8 @@ impl Workspace {
                         if let Some((thread_id, name, color_index)) =
                             self.picker_history.get(id).cloned()
                         {
-                            if !self.show_right {
-                                self.show_right = true; // Agent ドックを開く
+                            if !self.chrome.show_right {
+                                self.chrome.show_right = true; // Agent ドックを開く
                             }
                             let panel = self.agent_panel.clone();
                             panel.update(cx, |panel, cx| {
@@ -7408,8 +7430,8 @@ impl Workspace {
             }
             PickerEvent::Dismissed => {
                 // テーマセレクタを中止したらプレビューを元へ戻す。
-                if self.picker_mode == PickerMode::Themes {
-                    if let Some(theme) = self.theme_before_preview.take() {
+                if self.overlays.picker_mode == PickerMode::Themes {
+                    if let Some(theme) = self.overlays.theme_before_preview.take() {
                         self.apply_theme(theme, cx);
                     }
                 }
@@ -7419,8 +7441,8 @@ impl Workspace {
     }
 
     fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.picker = None;
-        self._picker_observation = None;
+        self.overlays.picker = None;
+        self.overlays.picker_observation = None;
         match self.active_editor() {
             Some(editor) => {
                 let handle = editor.read(cx).focus_handle(cx);
@@ -7957,7 +7979,7 @@ impl Workspace {
                     Some((resolved, line.saturating_sub(1) as usize, 0));
             }
             TerminalDockEvent::Dismissed if session_index == self.active => {
-                self.show_bottom = false
+                self.chrome.show_bottom = false
             }
             TerminalDockEvent::Dismissed => {}
         }
@@ -7987,12 +8009,12 @@ impl Workspace {
 
     /// SSH 入力バーを種文字列付きで開く（ホストピッカーからの遷移でも使う）。
     fn open_ssh_input_seeded(&mut self, seed: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ssh_connecting {
+        if self.overlays.ssh_connecting {
             return;
         }
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.ssh_input = Some((seed, focus));
+        self.overlays.ssh_input = Some((seed, focus));
         cx.notify();
     }
 
@@ -8001,8 +8023,8 @@ impl Workspace {
     /// system OpenSSH に委ねるので User/HostName/鍵/ProxyJump は config のものがそのまま効く。
     /// 開発用: Agent タブの改名入力を開く（offscreen 検証・#4）。
     pub fn debug_tab_rename(&mut self, cx: &mut Context<Self>) {
-        if !self.show_right {
-            self.show_right = true;
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
         }
         self.agent_panel.update(cx, |panel, cx| panel.debug_start_rename(cx));
         cx.notify();
@@ -8016,7 +8038,7 @@ impl Workspace {
     /// スレッド履歴を開く（#5）。DB の全スレッド（アーカイブ含む・updated_at 降順）を Picker に出す。
     /// 行頭●= スレッド色・detail = プロジェクト / ⎇ branch / トークン累計。確定で復元してアクティブに。
     fn open_thread_history(&mut self, _: &ThreadHistory, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(storage) = self.storage.clone() else {
+        let Some(storage) = self.persistence.storage.clone() else {
             return;
         };
         let threads = storage.load_all_threads().unwrap_or_default();
@@ -8058,6 +8080,7 @@ impl Workspace {
         let hosts = host::ssh_config_hosts();
         // 2階層: 上=最近のリモートプロジェクト（履歴・直接接続・#5）、下=config ホスト、末尾=手入力。
         let recent = self
+            .persistence
             .storage
             .as_ref()
             .and_then(|storage| storage.recent_remote_projects().ok())
@@ -8085,6 +8108,7 @@ impl Workspace {
             };
             // 前回パスがあれば併記（→ が即接続先・#2d）。
             let last_path = self
+                .persistence
                 .storage
                 .as_ref()
                 .and_then(|storage| storage.host_last_path(&host.alias).ok().flatten());
@@ -8116,7 +8140,7 @@ impl Workspace {
     }
 
     fn close_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ssh_input.take().is_some() {
+        if self.overlays.ssh_input.take().is_some() {
             if let Some(editor) = self.active_editor() {
                 let handle = editor.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
@@ -8130,6 +8154,7 @@ impl Workspace {
             "escape" => self.close_ssh_input(window, cx),
             "enter" => {
                 let uri = self
+                    .overlays
                     .ssh_input
                     .as_ref()
                     .map(|(value, _)| value.trim().to_string())
@@ -8140,7 +8165,7 @@ impl Workspace {
                 }
             }
             "backspace" => {
-                if let Some((value, _)) = self.ssh_input.as_mut() {
+                if let Some((value, _)) = self.overlays.ssh_input.as_mut() {
                     value.pop();
                     cx.notify();
                 }
@@ -8156,7 +8181,7 @@ impl Workspace {
                 if text.is_empty() || text.chars().any(char::is_control) {
                     return;
                 }
-                if let Some((value, _)) = self.ssh_input.as_mut() {
+                if let Some((value, _)) = self.overlays.ssh_input.as_mut() {
                     value.push_str(text);
                     cx.notify();
                 }
@@ -8168,7 +8193,7 @@ impl Workspace {
     /// 数秒〜かかるため背景で行い、失敗はトーストで返す。system OpenSSH に委ねるので
     /// ~/.ssh/config の Host エイリアス・鍵・ProxyJump・agent がそのまま効く。
     fn connect_ssh_and_open(&mut self, uri: String, cx: &mut Context<Self>) {
-        self.ssh_connecting = true;
+        self.overlays.ssh_connecting = true;
         self.push_toast(
             SharedString::from(i18n::t!("ssh.connecting", "uri" => uri.clone())),
             self.accent(),
@@ -8179,7 +8204,7 @@ impl Workspace {
         let last_path = host::SshProject::parse(&uri)
             .ok()
             .map(|project| (project.host, project.path.to_string_lossy().to_string()));
-        let storage = self.storage.clone();
+        let storage = self.persistence.storage.clone();
         cx.spawn(async move |workspace, cx| {
             let source = cx
                 .background_executor()
@@ -8193,7 +8218,7 @@ impl Workspace {
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.ssh_connecting = false;
+                workspace.overlays.ssh_connecting = false;
                 match source {
                     Ok(source) => {
                         if let (Some(storage), Some((host_key, path))) = (&storage, &last_path) {
@@ -8223,7 +8248,7 @@ impl Workspace {
 
     /// SSH 入力バー（rename/goto と同型の中央上オーバーレイ）。
     fn render_ssh_input(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let (value, focus) = self.ssh_input.as_ref()?;
+        let (value, focus) = self.overlays.ssh_input.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent();
         let display: SharedString = SharedString::from(value.clone());
@@ -8287,7 +8312,7 @@ impl Workspace {
                 .await;
             if let Some(info) = found {
                 let _ = workspace.update(cx, |workspace, cx| {
-                    workspace.update_status = Some((info, UpdateState::Available));
+                    workspace.updater.status = Some((info, UpdateState::Available));
                     cx.notify();
                 });
             }
@@ -8297,13 +8322,13 @@ impl Workspace {
 
     /// statusbar チップのクリック: ダウンロード → 署名検証 → 差し替え（背景）。
     fn install_update(&mut self, cx: &mut Context<Self>) {
-        let Some((info, state)) = self.update_status.clone() else {
+        let Some((info, state)) = self.updater.status.clone() else {
             return;
         };
         if state != UpdateState::Available {
             return;
         }
-        self.update_status = Some((info.clone(), UpdateState::Installing));
+        self.updater.status = Some((info.clone(), UpdateState::Installing));
         cx.notify();
         cx.spawn(async move |workspace, cx| {
             let result = cx
@@ -8312,11 +8337,11 @@ impl Workspace {
                 .await;
             let _ = workspace.update(cx, |workspace, cx| match result {
                 Ok(info) => {
-                    workspace.update_status = Some((info, UpdateState::Ready));
+                    workspace.updater.status = Some((info, UpdateState::Ready));
                     cx.notify();
                 }
                 Err(error) => {
-                    workspace.update_status = None;
+                    workspace.updater.status = None;
                     workspace.push_toast(
                         SharedString::from(format!("{error:#}")),
                         workspace.accent(),
@@ -8360,7 +8385,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.open_command_palette(&CommandPalette, window, cx);
-        let Some(picker) = self.picker.clone() else {
+        let Some(picker) = self.overlays.picker.clone() else {
             return;
         };
         picker.update(cx, |picker, cx| {
@@ -8683,7 +8708,7 @@ impl Workspace {
                         "icons/panel-left.svg",
                         i18n::t!("rail.explorer"),
                         // アクティブ（左ドックがエクスプローラ表示）ならプロジェクト色・でなければ淡色（VSCode 風）。
-                        if self.show_left && self.todo_board.is_none() && self.git_panel.is_none() {
+                        if self.chrome.show_left && self.todo_board.is_none() && self.git_panel.is_none() {
                             accent
                         } else {
                             theme.fg2
@@ -8699,9 +8724,9 @@ impl Workspace {
                                 if this.todo_board.is_some() || this.git_panel.is_some() {
                                     this.todo_board = None;
                                     this.git_panel = None;
-                                    this.show_left = true;
+                                    this.chrome.show_left = true;
                                 } else {
-                                    this.show_left = !this.show_left;
+                                    this.chrome.show_left = !this.chrome.show_left;
                                 }
                                 cx.notify();
                             }),
@@ -8754,7 +8779,7 @@ impl Workspace {
                         "icons/sparkles.svg",
                         i18n::t!("rail.agent"),
                         // AI ドック（右）表示中はプロジェクト色・畳んでいれば淡色。
-                        if self.show_right { accent } else { theme.fg2 },
+                        if self.chrome.show_right { accent } else { theme.fg2 },
                     )
                         // 新規スレッドではなく Agent パネルの開閉トグル（他のアクティビティアイコンと同じ所作）。
                         .on_mouse_down(
@@ -8769,7 +8794,7 @@ impl Workspace {
                         "rail-terminal",
                         "icons/square-terminal.svg",
                         i18n::t!("rail.terminal"),
-                        if self.show_bottom { accent } else { theme.fg2 },
+                        if self.chrome.show_bottom { accent } else { theme.fg2 },
                     )
                         .on_mouse_down(
                             MouseButton::Left,
@@ -8804,12 +8829,12 @@ impl Workspace {
                     "rail-settings",
                     "icons/settings.svg",
                     i18n::t!("rail.settings"),
-                    if self.show_settings { accent } else { theme.fg2 },
+                    if self.chrome.show_settings { accent } else { theme.fg2 },
                 )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _window, cx| {
-                            this.show_settings = !this.show_settings;
+                            this.chrome.show_settings = !this.chrome.show_settings;
                             cx.notify();
                         }),
                     ),
@@ -8835,7 +8860,7 @@ impl Workspace {
             ExplorerView::Icons => self.render_icons(slot, cx),
         };
         div()
-            .w(px(self.explorer_width))
+            .w(px(self.chrome.explorer_width))
             .h_full()
             .flex_none()
             .relative() // リサイズハンドルの絶対配置基準
@@ -8869,9 +8894,9 @@ impl Workspace {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.resizing_explorer = true;
-                    this.resize_start_x = f32::from(event.position.x);
-                    this.resize_start_width = this.explorer_width;
+                    this.chrome.resizing_explorer = true;
+                    this.chrome.resize_start_x = f32::from(event.position.x);
+                    this.chrome.resize_start_width = this.chrome.explorer_width;
                     cx.notify();
                 }),
             )
@@ -9845,13 +9870,13 @@ impl Workspace {
         let (bg0, bg1, bg2, border, fg0, fg1, fg2) =
             (theme.bg0, theme.bg1, theme.bg2, theme.border, theme.fg0, theme.fg1, theme.fg2);
         let Some(state) = self.git_panel.as_ref() else {
-            return div().w(px(self.explorer_width)).h_full().flex_none().bg(bg1).into_any_element();
+            return div().w(px(self.chrome.explorer_width)).h_full().flex_none().bg(bg1).into_any_element();
         };
         let focus = state.focus.clone();
         let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
         if self.active_slot().is_none() {
             return div()
-                .w(px(self.explorer_width))
+                .w(px(self.chrome.explorer_width))
                 .h_full()
                 .flex_none()
                 .bg(bg1)
@@ -10099,7 +10124,7 @@ impl Workspace {
         }
 
         div()
-            .w(px(self.explorer_width))
+            .w(px(self.chrome.explorer_width))
             .h_full()
             .flex()
             .flex_col()
@@ -10615,16 +10640,16 @@ impl Workspace {
             // 窓ドラッグ: down→move で開始（クリックと区別）。ダブルクリックで zoom（Zed 準拠）。
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, _cx| this.should_move_window = true),
+                cx.listener(|this, _, _window, _cx| this.chrome.should_move_window = true),
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, _cx| this.should_move_window = false),
+                cx.listener(|this, _, _window, _cx| this.chrome.should_move_window = false),
             )
-            .on_mouse_down_out(cx.listener(|this, _, _window, _cx| this.should_move_window = false))
+            .on_mouse_down_out(cx.listener(|this, _, _window, _cx| this.chrome.should_move_window = false))
             .on_mouse_move(cx.listener(|this, _, window, _cx| {
-                if this.should_move_window {
-                    this.should_move_window = false;
+                if this.chrome.should_move_window {
+                    this.chrome.should_move_window = false;
                     window.start_window_move();
                 }
             }))
@@ -10643,7 +10668,7 @@ impl Workspace {
                     "titlebar-ssh",
                     "icons/server.svg",
                     i18n::t!("ssh.button_tip"),
-                    if self.ssh_connecting { self.accent() } else { theme.fg2 },
+                    if self.overlays.ssh_connecting { self.accent() } else { theme.fg2 },
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -10659,9 +10684,9 @@ impl Workspace {
                     .items_center()
                     .gap(px(6.))
                     .pr(px(4.))
-                    .child(self.dock_button(Dock::Left, self.show_left, cx))
-                    .child(self.dock_button(Dock::Bottom, self.show_bottom, cx))
-                    .child(self.dock_button(Dock::Right, self.show_right, cx)),
+                    .child(self.dock_button(Dock::Left, self.chrome.show_left, cx))
+                    .child(self.dock_button(Dock::Bottom, self.chrome.show_bottom, cx))
+                    .child(self.dock_button(Dock::Right, self.chrome.show_right, cx)),
             )
     }
 
@@ -11526,18 +11551,18 @@ impl Workspace {
     /// オンボーディング完了: 既定はもう選べているので `onboarded=true` にして設定を閉じ、紙吹雪で祝う。
     fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
         settings::set_user_value(cx, "onboarded", serde_json::Value::Bool(true));
-        self.show_settings = false;
+        self.chrome.show_settings = false;
         self.celebrate_confetti(cx);
     }
 
     /// 祝いの紙吹雪を降らせる（~2.2s で自動的に止める）。
     fn celebrate_confetti(&mut self, cx: &mut Context<Self>) {
-        self.confetti = true;
+        self.chrome.confetti = true;
         cx.notify();
         cx.spawn(async move |workspace, cx| {
             cx.background_executor().timer(std::time::Duration::from_millis(2200)).await;
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.confetti = false;
+                workspace.chrome.confetti = false;
                 cx.notify();
             });
         })
@@ -11547,7 +11572,7 @@ impl Workspace {
     /// 祝いの紙吹雪オーバーレイ（`confetti` が true の間だけ全面に色紙が降る）。
     /// 各粒子は同尺の with_animation で落下（delta² の重力）＋末尾フェード。位置は relative で窓非依存。
     fn render_confetti(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.confetti {
+        if !self.chrome.confetti {
             return None;
         }
         let palette = [
@@ -11638,7 +11663,7 @@ impl Workspace {
             "/bin/sh".to_string(),
             vec!["-lc".to_string(), format!("{command}; exec \"${{SHELL:-/bin/zsh}}\" -l")],
         ));
-        self.show_bottom = true;
+        self.chrome.show_bottom = true;
         self.terminal_dock.update(cx, |dock, cx| {
             dock.open_command(TerminalLaunch { cwd, shell }, window, cx)
         });
@@ -11647,7 +11672,7 @@ impl Workspace {
 
     fn render_center(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let content = if self.show_settings {
+        let content = if self.chrome.show_settings {
             // 設定ホーム（中央領域を占有・レール ⚙ で開閉）。第1セクション=Agents。
             self.render_settings(cx)
         } else if self.tabs.is_empty() {
@@ -11713,7 +11738,7 @@ impl Workspace {
             .children(self.render_hot_exit_bar(cx))
             .child(content)
             // 下ドック（ターミナル）はエディタ列の下に積む（サイドドックには被らない）。
-            .when(self.show_bottom, |element| element.child(self.render_bottom_dock(cx)))
+            .when(self.chrome.show_bottom, |element| element.child(self.render_bottom_dock(cx)))
     }
 
     fn render_bottom_dock(&self, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -11830,7 +11855,7 @@ impl Workspace {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _window, cx| {
-                                this.show_right = true;
+                                this.chrome.show_right = true;
                                 this.agent_active = true;
                                 cx.notify();
                             }),
@@ -11863,7 +11888,7 @@ impl Workspace {
             .items_center()
             .gap_3()
             // 自動アップデートのチップ（M13）: 新版あり → クリックで更新 → 再起動案内。
-            .when_some(self.update_status.clone(), |element, (info, state)| {
+            .when_some(self.updater.status.clone(), |element, (info, state)| {
                 let (label, clickable) = match state {
                     UpdateState::Available => {
                         (i18n::t!("update.available", "version" => info.version.clone()), true)
@@ -12029,7 +12054,7 @@ impl Render for Workspace {
             self.open_thread_history(&ThreadHistory, _window, cx);
         }
         // ＋で追加したプロジェクトへの切替を消化（ダイアログ経由は window が無い）。
-        if let Some(index) = self.pending_project_switch.take() {
+        if let Some(index) = self.overlays.pending_project_switch.take() {
             self.switch_project(index, _window, cx);
         }
         // child Entity からの file:line ジャンプを消化。
@@ -12118,7 +12143,7 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .child(self.render_rail(cx))
-                    .when(self.show_left, |element| {
+                    .when(self.chrome.show_left, |element| {
                         // 左カラムは Todo ボード / git パネル / エクスプローラを切替（排他）。
                         let column = if self.todo_board.is_some() {
                             self.render_todo_board(cx)
@@ -12130,11 +12155,11 @@ impl Render for Workspace {
                         element.child(column)
                     })
                     .child(self.render_center(cx))
-                    .when(self.show_right, |element| element.child(self.render_agent_dock(cx))),
+                    .when(self.chrome.show_right, |element| element.child(self.render_agent_dock(cx))),
             )
             .child(self.render_statusbar(cx))
             // オーバーレイ（最前面）
-            .when_some(self.picker.clone(), |this, picker| this.child(picker))
+            .when_some(self.overlays.picker.clone(), |this, picker| this.child(picker))
             .children(self.render_search_panel(cx))
             .children(self.render_completion(cx))
             .children(self.render_hover(cx))
