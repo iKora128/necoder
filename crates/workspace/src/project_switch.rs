@@ -90,10 +90,10 @@ impl Workspace {
     }
 
     fn switch_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.projects.len() || index == self.active {
+        if index >= self.project_sessions.projects.len() || index == self.project_sessions.active {
             return;
         }
-        self.active = index;
+        self.project_sessions.active = index;
         self.load_active_slot(window, cx);
         self.save_state();
         cx.notify();

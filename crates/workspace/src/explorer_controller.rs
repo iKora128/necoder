@@ -12,7 +12,8 @@ impl Workspace {
     }
 
     fn toggle_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if let Some(slot) = self.projects.get_mut(self.active) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             if slot.explorer.expanded.contains(&path) {
                 slot.explorer.expanded.remove(&path);
             } else {
@@ -41,7 +42,8 @@ impl Workspace {
             .active_slot()
             .map(|slot| !dir.starts_with(slot.worktree.root()))
             .unwrap_or(false);
-        if let Some(slot) = self.projects.get_mut(self.active) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.explorer.current_dir = Some(dir.clone());
             slot.explorer.selected = Some(dir);
             slot.refresh();
@@ -88,7 +90,8 @@ impl Workspace {
             }
         };
         // 親フォルダを展開しておく（入力行が見えるように）。
-        if let Some(slot) = self.projects.get_mut(self.active) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.explorer.expanded.insert(parent.clone());
             slot.refresh();
         }
@@ -138,7 +141,8 @@ impl Workspace {
                 if naming.kind == NamingKind::NewFile {
                     self.open_file(destination.clone(), window, cx);
                 }
-                if let Some(slot) = self.projects.get_mut(self.active) {
+                let active = self.project_sessions.active;
+                if let Some(slot) = self.project_sessions.projects.get_mut(active) {
                     slot.explorer.selected = Some(destination);
                     slot.refresh();
                 }
@@ -208,7 +212,8 @@ impl Workspace {
         self.hide_context_menu(cx);
         match project::duplicate_local(&path) {
             Ok(copy) => {
-                if let Some(slot) = self.projects.get_mut(self.active) {
+                let active = self.project_sessions.active;
+                if let Some(slot) = self.project_sessions.projects.get_mut(active) {
                     slot.explorer.selected = Some(copy);
                     slot.refresh();
                 }
@@ -227,7 +232,8 @@ impl Workspace {
         }
         match project::trash_local(&path) {
             Ok(()) => {
-                if let Some(slot) = self.projects.get_mut(self.active) {
+                let active = self.project_sessions.active;
+                if let Some(slot) = self.project_sessions.projects.get_mut(active) {
                     if slot.explorer.selected.as_ref() == Some(&path) {
                         slot.explorer.selected = None;
                     }
@@ -292,7 +298,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(index) =
-            self.projects.iter().position(|slot| slot.worktree.root() == path.as_path())
+            self.project_sessions.projects.iter().position(|slot| slot.worktree.root() == path.as_path())
         {
             self.overlays.pending_project_switch = Some(index);
             cx.notify();
@@ -330,12 +336,12 @@ impl Workspace {
             self.persistence.storage.clone(),
             cx,
         );
-        let index = self.projects.len();
-        self.projects.push(slot);
+        let index = self.project_sessions.projects.len();
+        self.project_sessions.projects.push(slot);
         if index == 0 {
-            self.sessions[0] = session;
+            self.project_sessions.sessions[0] = session;
         } else {
-            self.sessions.push(session);
+            self.project_sessions.sessions.push(session);
         }
         // switch_project は window が要る（subscribe 経由に無い）ため、次の render で消化する。
         self.overlays.pending_project_switch = Some(index);
@@ -344,7 +350,7 @@ impl Workspace {
 
     /// この色が既にレールのどれかのスロットで使われているか（色衝突の判定・小さな誤差を許容）。
     fn color_in_use(&self, color: Hsla) -> bool {
-        self.projects.iter().any(|slot| colors_close(slot.color, color))
+        self.project_sessions.projects.iter().any(|slot| colors_close(slot.color, color))
     }
 
     /// レールで未使用のパレット色（無ければスロット数で回す）。同色 2 枚を避けて方向感覚を保つ。
@@ -352,7 +358,7 @@ impl Workspace {
         (0..theme_core::IDENTITY_PALETTE_HEXES.len())
             .map(project_color)
             .find(|color| !self.color_in_use(*color))
-            .unwrap_or_else(|| project_color(self.projects.len()))
+            .unwrap_or_else(|| project_color(self.project_sessions.projects.len()))
     }
 
     // ── レール項目の右クリックメニュー（M10-2） ──
@@ -374,7 +380,7 @@ impl Workspace {
     /// アクティブを外したら隣のスロットへビューを張り替える。最後の1枚は残す。
     fn remove_project_slot(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.overlays.rail_menu = None;
-        if self.projects.len() <= 1 {
+        if self.project_sessions.projects.len() <= 1 {
             self.push_toast(
                 SharedString::from(i18n::t!("rail.cannot_remove_last")),
                 self.accent(),
@@ -383,14 +389,14 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if index >= self.projects.len() {
+        if index >= self.project_sessions.projects.len() {
             return;
         }
-        let was_active = index == self.active;
-        self.projects.remove(index);
-        self.sessions.remove(index);
+        let was_active = index == self.project_sessions.active;
+        self.project_sessions.projects.remove(index);
+        self.project_sessions.sessions.remove(index);
         // active index を詰める（後ろの要素が 1 つ前へずれる。ロジックは純関数でテスト済み）。
-        self.active = active_index_after_removal(self.active, index, self.projects.len());
+        self.project_sessions.active = active_index_after_removal(self.project_sessions.active, index, self.project_sessions.projects.len());
         if was_active {
             // アクティブを外した → 新しいアクティブスロットのビュー（タブ/LSP/端末/git/監視）へ張り替える。
             self.load_active_slot(window, cx);
@@ -420,7 +426,7 @@ impl Workspace {
     ) {
         self.overlays.rail_menu = None;
         // レール最後の1枚の worktree を消すと空レール＋ディスク破壊になる → 事前に断る（安全側）。
-        if self.projects.len() <= 1 {
+        if self.project_sessions.projects.len() <= 1 {
             self.push_toast(
                 SharedString::from(i18n::t!("rail.cannot_remove_last")),
                 self.accent(),
@@ -429,7 +435,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(slot) = self.projects.get(index) else {
+        let Some(slot) = self.project_sessions.projects.get(index) else {
             return;
         };
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
@@ -438,7 +444,7 @@ impl Workspace {
         let host = slot.worktree.host().clone();
         let target = slot.worktree.root().to_path_buf();
         let branch = slot.worktree_branch.clone();
-        let Some(git_panel) = self.sessions.get(index).map(|session| session.git_panel.clone()) else {
+        let Some(git_panel) = self.project_sessions.sessions.get(index).map(|session| session.git_panel.clone()) else {
             return;
         };
         git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
@@ -477,6 +483,7 @@ impl Workspace {
                         };
                         workspace.push_toast(SharedString::from(message), workspace.accent(), cx);
                         if let Some(index) = workspace
+                            .project_sessions
                             .projects
                             .iter()
                             .position(|slot| slot.worktree.root() == target_for_id.as_path())
@@ -714,7 +721,8 @@ impl Workspace {
         });
         self.active_tab = self.tabs.len() - 1;
 
-        if let Some(slot) = self.projects.get_mut(self.active) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.explorer.selected = Some(path.clone());
         }
         self.sync_active_slot();
@@ -751,6 +759,7 @@ impl Workspace {
         };
         let state = PersistedState {
             projects: self
+                .project_sessions
                 .projects
                 .iter()
                 .map(|slot| PersistedProject {
@@ -761,7 +770,7 @@ impl Workspace {
                     remote_uri: slot.worktree.host().project_uri(slot.worktree.root()),
                 })
                 .collect(),
-            active: self.active,
+            active: self.project_sessions.active,
         };
         let Ok(text) = serde_json::to_string_pretty(&state) else {
             return;

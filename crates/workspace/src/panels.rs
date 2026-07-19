@@ -34,21 +34,21 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(session_index) =
-            self.sessions.iter().position(|session| session.explorer == explorer)
+            self.project_sessions.sessions.iter().position(|session| session.explorer == explorer)
         else {
             return;
         };
         match event {
             explorer::ExplorerEvent::OpenPath(path) => {
-                self.sessions[session_index].pending_navigation = Some((path.clone(), 0, 0));
+                self.project_sessions.sessions[session_index].pending_navigation = Some((path.clone(), 0, 0));
             }
             explorer::ExplorerEvent::FilesChanged => {
-                if let Some(slot) = self.projects.get_mut(session_index) {
+                if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
                     slot.refresh();
                 }
                 self.refresh_git_status_for(session_index, cx);
             }
-            explorer::ExplorerEvent::Focus if session_index == self.active => {
+            explorer::ExplorerEvent::Focus if session_index == self.project_sessions.active => {
                 self.chrome.show_left = true;
             }
             explorer::ExplorerEvent::Focus => {}
@@ -63,7 +63,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(session_index) =
-            self.sessions.iter().position(|session| session.git_panel == panel)
+            self.project_sessions.sessions.iter().position(|session| session.git_panel == panel)
         else {
             return;
         };
@@ -72,10 +72,11 @@ impl Workspace {
                 self.refresh_git_status_for(session_index, cx)
             }
             git_ui::GitPanelEvent::OpenDiff(path) => {
-                self.sessions[session_index].pending_open_git_diff = Some(path.clone());
+                self.project_sessions.sessions[session_index].pending_open_git_diff = Some(path.clone());
             }
             git_ui::GitPanelEvent::OpenWorktree { path, branch } => {
                 let host = self
+                    .project_sessions
                     .projects
                     .get(session_index)
                     .map(|slot| slot.worktree.host().clone())
@@ -84,6 +85,7 @@ impl Workspace {
             }
             git_ui::GitPanelEvent::Toast { message } => {
                 let color = self
+                    .project_sessions
                     .projects
                     .get(session_index)
                     .map(|slot| slot.color)
@@ -91,7 +93,7 @@ impl Workspace {
                 self.push_toast(message.clone(), color, cx);
             }
             git_ui::GitPanelEvent::StageHunk(hunk) => {
-                self.sessions[session_index].pending_stage_hunk = Some(hunk.clone());
+                self.project_sessions.sessions[session_index].pending_stage_hunk = Some(hunk.clone());
             }
         }
         cx.notify();

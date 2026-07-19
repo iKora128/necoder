@@ -652,6 +652,13 @@ pub struct ProjectSession {
     _watch_pump: Option<gpui::Task<()>>,
 }
 
+/// Rail の project metadata と長寿命 session を同じ添字で管理する。
+struct ProjectSessions {
+    projects: Vec<ProjectSlot>,
+    active: usize,
+    sessions: Vec<ProjectSession>,
+}
+
 struct RepositoryController {
     status: HashMap<PathBuf, StatusKind>,
     refresh_generation: u32,
@@ -704,9 +711,7 @@ struct UpdateController {
 }
 
 pub struct Workspace {
-    projects: Vec<ProjectSlot>,
-    active: usize,
-    sessions: Vec<ProjectSession>,
+    project_sessions: ProjectSessions,
     theme: Theme,
     focus_handle: FocusHandle,
     chrome: ChromeState,
@@ -733,13 +738,13 @@ impl Deref for Workspace {
     type Target = ProjectSession;
 
     fn deref(&self) -> &Self::Target {
-        &self.sessions[self.active]
+        &self.project_sessions
     }
 }
 
 impl DerefMut for Workspace {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.sessions[self.active]
+        &mut self.project_sessions
     }
 }
 

@@ -1,28 +1,29 @@
 impl Workspace {
     fn on_panel_event(&mut self, panel: Entity<AgentPanel>, event: &agent_panel::PanelEvent, cx: &mut Context<Self>) {
         let session_index = self
+            .project_sessions
             .sessions
             .iter()
             .position(|session| session.agent_panel == panel)
-            .unwrap_or(self.active);
+            .unwrap_or(self.project_sessions.active);
         match event {
             agent_panel::PanelEvent::OpenHistoryRequest => {
                 // window が無いので次の render で消化する（pending_transient_tab と同じ迂回・#5）。
-                self.sessions[session_index].pending_open_history = true;
+                self.project_sessions.sessions[session_index].pending_open_history = true;
                 cx.notify();
             }
             agent_panel::PanelEvent::TurnEnded { thread, color, summary } => {
-                self.sessions[session_index].waiting_thread = None;
+                self.project_sessions.sessions[session_index].waiting_thread = None;
                 self.push_toast(SharedString::from(format!("● {thread} — {summary}")), *color, cx);
                 // Todo ボード: そのスレッドに送った項目の pulse を解除し、板を読み直す
                 // （エージェントが todos.md をチェックしたら watch より先に即反映・M12-10）。
-                self.sessions[session_index]
+                self.project_sessions.sessions[session_index]
                     .todo_panel
                     .update(cx, |panel, cx| panel.clear_running_color(*color, cx));
                 self.reload_todo_board_for(session_index, cx);
             }
             agent_panel::PanelEvent::PermissionWaiting { thread, color } => {
-                self.sessions[session_index].waiting_thread = Some((thread.clone(), *color));
+                self.project_sessions.sessions[session_index].waiting_thread = Some((thread.clone(), *color));
                 self.push_toast(
                     SharedString::from(format!("● {thread} — {}", i18n::t!("agent.waiting_permission"))),
                     *color,
@@ -35,16 +36,16 @@ impl Workspace {
                 if let Some(diff_text) = project::unified_diff_texts(old_text, new_text, title) {
                     let mut buffer = Buffer::from_str(&diff_text);
                     buffer.set_read_only(true);
-                    self.sessions[session_index].pending_transient_tab =
+                    self.project_sessions.sessions[session_index].pending_transient_tab =
                         Some((PathBuf::from(i18n::t!("difftab.proposal_title", "title" => title)), buffer));
                     cx.notify();
                 }
             }
             agent_panel::PanelEvent::FilesTouched { files, color } => {
                 for file in files {
-                    self.sessions[session_index].agent_touched.insert(file.clone(), *color);
+                    self.project_sessions.sessions[session_index].agent_touched.insert(file.clone(), *color);
                     // 開いていれば gutter をスレッド色に（生中継の帰属・M12-3）。
-                    if let Some(tab) = self.sessions[session_index]
+                    if let Some(tab) = self.project_sessions.sessions[session_index]
                         .tabs
                         .iter()
                         .find(|tab| &tab.path == file)

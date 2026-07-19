@@ -96,6 +96,20 @@ impl Deref for ProjectSession {
     }
 }
 
+impl Deref for ProjectSessions {
+    type Target = ProjectSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sessions[self.active]
+    }
+}
+
+impl DerefMut for ProjectSessions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.sessions[self.active]
+    }
+}
+
 impl DerefMut for ProjectSession {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.editor_area

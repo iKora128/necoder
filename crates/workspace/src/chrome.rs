@@ -956,7 +956,12 @@ impl Workspace {
                             // クリック位置の真上にピッカーを出す（footer から開くので左上へ飛ばさない）。
                             let anchor =
                                 gpui::point(event.position.x, event.position.y - px(176.));
-                            this.open_color_picker(this.active, anchor, window, cx)
+                            this.open_color_picker(
+                                this.project_sessions.active,
+                                anchor,
+                                window,
+                                cx,
+                            )
                         }),
                     ),
             )

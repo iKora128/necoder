@@ -288,7 +288,7 @@ impl Render for TodoPanel {
 
 impl Workspace {
     fn todo_session_index(&self, panel: &Entity<TodoPanel>) -> Option<usize> {
-        self.sessions.iter().position(|session| session.todo_panel == *panel)
+        self.project_sessions.sessions.iter().position(|session| session.todo_panel == *panel)
     }
 
     fn on_todo_panel_event(
@@ -326,20 +326,20 @@ impl Workspace {
         if !was_open {
             self.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
             self.chrome.show_left = true;
-            self.reload_todo_board_for(self.active, cx);
+            self.reload_todo_board_for(self.project_sessions.active, cx);
         }
         cx.notify();
     }
 
     fn reload_todo_board_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
-        let Some(panel) = self.sessions.get(session_index).map(|session| session.todo_panel.clone())
+        let Some(panel) = self.project_sessions.sessions.get(session_index).map(|session| session.todo_panel.clone())
         else {
             return;
         };
         if !panel.read(cx).open {
             return;
         }
-        let Some(worktree) = self.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+        let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
             return;
         };
         let root = worktree.root().to_path_buf();
@@ -355,11 +355,11 @@ impl Workspace {
     }
 
     fn toggle_todo_item_for(&mut self, session_index: usize, line: usize, cx: &mut Context<Self>) {
-        let Some(worktree) = self.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+        let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
             return;
         };
-        let panel = self.sessions[session_index].todo_panel.clone();
-        let accent = self.projects[session_index].color;
+        let panel = self.project_sessions.sessions[session_index].todo_panel.clone();
+        let accent = self.project_sessions.projects[session_index].color;
         let root = worktree.root().to_path_buf();
         let host = worktree.host().clone();
         cx.spawn(async move |workspace, cx| {
@@ -386,7 +386,7 @@ impl Workspace {
         text: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.sessions.get(session_index) else {
+        let Some(session) = self.project_sessions.sessions.get(session_index) else {
             return;
         };
         let prompt = i18n::t!("todos.send_prompt", "text" => text);
@@ -398,15 +398,15 @@ impl Workspace {
     }
 
     fn run_daily_plan_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
-        let Some(worktree) = self.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+        let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
             return;
         };
-        let panel = self.sessions[session_index].todo_panel.clone();
+        let panel = self.project_sessions.sessions[session_index].todo_panel.clone();
         if panel.read(cx).plan_busy {
             return;
         }
         panel.update(cx, |panel, cx| panel.set_plan_busy(true, cx));
-        let accent = self.projects[session_index].color;
+        let accent = self.project_sessions.projects[session_index].color;
         let root = worktree.root().to_path_buf();
         let host = worktree.host().clone();
         cx.spawn(async move |workspace, cx| {
@@ -437,11 +437,11 @@ impl Workspace {
     }
 
     fn add_todo_for(&mut self, session_index: usize, text: String, cx: &mut Context<Self>) {
-        let Some(worktree) = self.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+        let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
             return;
         };
-        let panel = self.sessions[session_index].todo_panel.clone();
-        let accent = self.projects[session_index].color;
+        let panel = self.project_sessions.sessions[session_index].todo_panel.clone();
+        let accent = self.project_sessions.projects[session_index].color;
         let root = worktree.root().to_path_buf();
         let host = worktree.host().clone();
         cx.spawn(async move |workspace, cx| {

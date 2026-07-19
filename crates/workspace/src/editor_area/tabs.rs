@@ -226,7 +226,8 @@ impl Workspace {
             window.focus(&handle, cx);
         }
         let selected = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
-        if let Some(slot) = self.projects.get_mut(self.active) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.explorer.selected = selected;
         }
         self.sync_active_slot();
@@ -256,7 +257,8 @@ impl Workspace {
         self.active_tab = index;
         let handle = editor.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
-        if let Some(slot) = self.projects.get_mut(self.active) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.explorer.selected = Some(path);
             slot.active_file = index;
         }

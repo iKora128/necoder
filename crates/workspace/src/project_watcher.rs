@@ -1,6 +1,6 @@
 impl Workspace {
     fn start_watcher(&mut self, cx: &mut Context<Self>) {
-        let session_index = self.active;
+        let session_index = self.project_sessions.active;
         self._watch = None;
         self._watch_pump = None;
         let Some(worktree) = self.active_worktree() else {
@@ -71,6 +71,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(worktree) = self
+            .project_sessions
             .projects
             .get(session_index)
             .map(|slot| slot.worktree.clone())
@@ -90,7 +91,7 @@ impl Workspace {
                 continue;
             }
             // 開いているバッファへ配送（gitignore に関係なく）。
-            if let Some(tab) = self.sessions[session_index]
+            if let Some(tab) = self.project_sessions.sessions[session_index]
                 .tabs
                 .iter()
                 .find(|tab| &tab.path == path)
@@ -106,13 +107,13 @@ impl Workspace {
             }
         }
         if tree_changed {
-            if let Some(slot) = self.projects.get_mut(session_index) {
+            if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
                 slot.refresh();
             }
         }
         if git_changed {
             self.refresh_git_status_for(session_index, cx);
-            let session = &self.sessions[session_index];
+            let session = &self.project_sessions.sessions[session_index];
             if let Some(editor) = session
                 .tabs
                 .get(session.active_tab)
@@ -139,6 +140,7 @@ impl Workspace {
         let soft_wrap = current.soft_wrap || std::env::var_os("SHIRUSHI_SOFT_WRAP").is_some();
         let (font_size, tab_size) = (current.font_size, current.tab_size);
         let editors: Vec<Entity<EditorView>> = self
+            .project_sessions
             .sessions
             .iter()
             .flat_map(|session| {

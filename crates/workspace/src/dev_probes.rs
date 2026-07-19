@@ -6,10 +6,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let session_index = self
+            .project_sessions
             .sessions
             .iter()
             .position(|session| session.terminal_dock == dock)
-            .unwrap_or(self.active);
+            .unwrap_or(self.project_sessions.active);
         match event {
             TerminalDockEvent::OpenPath { path, line } => {
                 let resolved = if std::path::Path::new(path).is_absolute() {
@@ -19,16 +20,16 @@ impl Workspace {
                         .map(|home| home.join(stripped))
                         .unwrap_or_else(|| PathBuf::from(path))
                 } else {
-                    let Some(worktree) = self.projects.get(session_index).map(|slot| &slot.worktree)
+                    let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| &slot.worktree)
                     else {
                         return;
                     };
                     worktree.root().join(path)
                 };
-                self.sessions[session_index].pending_navigation =
+                self.project_sessions.sessions[session_index].pending_navigation =
                     Some((resolved, line.saturating_sub(1) as usize, 0));
             }
-            TerminalDockEvent::Dismissed if session_index == self.active => {
+            TerminalDockEvent::Dismissed if session_index == self.project_sessions.active => {
                 self.chrome.show_bottom = false
             }
             TerminalDockEvent::Dismissed => {}
@@ -464,7 +465,7 @@ impl Workspace {
             self.toggle_todo_board(&ToggleTodoBoard, window, cx);
         }
         if std::env::var("SHIRUSHI_TODOS_PLAN").is_ok_and(|value| value == "1") {
-            self.run_daily_plan_for(self.active, cx);
+            self.run_daily_plan_for(self.project_sessions.active, cx);
         }
         if let Ok(line) = std::env::var("SHIRUSHI_TODOS_SEND") {
             if let Ok(line) = line.parse::<usize>() {
@@ -487,7 +488,7 @@ impl Workspace {
                         match text {
                             Some(text) => {
                                 eprintln!("TODOS_PROBE: ▶ 送信 line={line} text={text}");
-                                workspace.send_todo_to_agent_for(workspace.active, line, text, cx);
+                                workspace.send_todo_to_agent_for(workspace.project_sessions.active, line, text, cx);
                             }
                             None => eprintln!("TODOS_PROBE: line={line} が見つからない"),
                         }
@@ -625,7 +626,7 @@ impl Workspace {
         if let Some(branch) = command.strip_prefix("open-branch:") {
             self.open_branch_worktree(branch.to_string(), cx);
         } else if command == "remove-active" {
-            self.remove_project_slot(self.active, window, cx);
+            self.remove_project_slot(self.project_sessions.active, window, cx);
         }
     }
 

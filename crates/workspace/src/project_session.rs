@@ -79,7 +79,7 @@ impl Workspace {
         let Some(storage) = self.persistence.storage.clone() else {
             return;
         };
-        for slot in &mut self.projects {
+        for slot in &mut self.project_sessions.projects {
             if !slot.worktree.host().is_remote() {
                 continue;
             }
@@ -241,9 +241,7 @@ impl Workspace {
         let settings_view = cx.new(|cx| settings::SettingsView::new(theme.clone(), accent, cx));
         PanelRegistry::bind_settings(&settings_view, cx);
         let mut workspace = Workspace {
-            projects,
-            active,
-            sessions,
+            project_sessions: ProjectSessions { projects, active, sessions },
             theme,
             focus_handle,
             chrome: ChromeState {
@@ -302,7 +300,7 @@ impl Workspace {
         if let Ok(probe) = std::env::var("SHIRUSHI_COLOR_PICKER") {
             let hex = if probe == "1" { String::new() } else { probe.trim_start_matches('#').to_string() };
             workspace.overlays.color_picker = Some(ColorPickerState {
-                project_index: workspace.active,
+                project_index: workspace.project_sessions.active,
                 position: point(px(RAIL_WIDTH), px(12.)),
                 hex,
                 focus: cx.focus_handle(),
@@ -312,7 +310,8 @@ impl Workspace {
         // 値: 1=通常 / confirm-worktree / confirm-branch=破壊的操作の二段確認 armed 状態。
         // worktree/ブランチ削除行も見せるため、アクティブスロットを worktree タブ扱いにする。
         if let Ok(mode) = std::env::var("SHIRUSHI_RAIL_MENU") {
-            if let Some(slot) = workspace.projects.get_mut(workspace.active) {
+            let active = workspace.project_sessions.active;
+            if let Some(slot) = workspace.project_sessions.projects.get_mut(active) {
                 slot.worktree_branch = Some("feature/login".to_string());
             }
             let confirm = match mode.as_str() {
@@ -321,7 +320,7 @@ impl Workspace {
                 _ => None,
             };
             workspace.overlays.rail_menu = Some(RailMenuState {
-                project_index: workspace.active,
+                project_index: workspace.project_sessions.active,
                 position: point(px(RAIL_WIDTH), px(12.)),
                 confirm,
             });
@@ -387,7 +386,7 @@ impl Workspace {
             match storage::Storage::open(&db_path) {
                 Ok(handle) => {
                     // Agent パネルへも同じハンドルを渡す（スレッド永続化・M12-1。ワーカー 1 本を共有）。
-                    for session in &workspace.sessions {
+                    for session in &workspace.project_sessions.sessions {
                         session
                             .agent_panel
                             .update(cx, |panel, cx| panel.set_storage(handle.clone(), cx));
@@ -413,7 +412,7 @@ impl Workspace {
     /// アクティブプロジェクトのタブだけ実際に開く。
     pub fn restore_open_file(&mut self, restored: &[RestoredTabs], window: &mut Window, cx: &mut Context<Self>) {
         for (index, tabs) in restored.iter().enumerate() {
-            if let Some(slot) = self.projects.get_mut(index) {
+            if let Some(slot) = self.project_sessions.projects.get_mut(index) {
                 slot.open_files = tabs.files.clone();
                 slot.active_file = tabs.active;
             }
@@ -431,7 +430,7 @@ impl Workspace {
     }
 
     fn active_slot(&self) -> Option<&ProjectSlot> {
-        self.projects.get(self.active)
+        self.project_sessions.projects.get(self.project_sessions.active)
     }
 
     /// 現在アクティブなタブのエディタ（無ければ `None`）。従来 `self.editor` を読んでいた箇所の置換。
@@ -454,7 +453,8 @@ impl Workspace {
             .map(|tab| tab.path.clone())
             .collect();
         let active_file = self.active_tab.min(files.len().saturating_sub(1));
-        if let Some(slot) = self.projects.get_mut(self.active) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.open_files = files;
             slot.active_file = active_file;
         }
@@ -528,16 +528,17 @@ impl Workspace {
     /// git 状態（ツリー/タブ色・ブランチ・パネル用スナップショット）を**背景で**集めて反映する。
     /// 世代番号で古い結果を捨てる（gutter diff と同型）。UI スレッドで git を叩かない（ARCHITECTURE §9）。
     fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
-        self.refresh_git_status_for(self.active, cx);
+        self.refresh_git_status_for(self.project_sessions.active, cx);
     }
 
     fn refresh_git_status_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
         let Some(worktree) = self
+            .project_sessions
             .projects
             .get(session_index)
             .map(|slot| slot.worktree.clone())
         else {
-            if let Some(session) = self.sessions.get_mut(session_index) {
+            if let Some(session) = self.project_sessions.sessions.get_mut(session_index) {
                 session.repository.status.clear();
                 let git_panel = session.git_panel.clone();
                 git_panel.update(cx, |panel, cx| panel.clear_snapshot(cx));
@@ -546,7 +547,7 @@ impl Workspace {
         };
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
-        let Some(session) = self.sessions.get_mut(session_index) else {
+        let Some(session) = self.project_sessions.sessions.get_mut(session_index) else {
             return;
         };
         session.repository.refresh_generation =
@@ -565,7 +566,7 @@ impl Workspace {
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
-                let Some(session) = workspace.sessions.get_mut(session_index) else {
+                let Some(session) = workspace.project_sessions.sessions.get_mut(session_index) else {
                     return;
                 };
                 if session.repository.refresh_generation != generation {
@@ -580,7 +581,7 @@ impl Workspace {
                         cx,
                     );
                 });
-                if let Some(slot) = workspace.projects.get_mut(session_index) {
+                if let Some(slot) = workspace.project_sessions.projects.get_mut(session_index) {
                     slot.branch = branch;
                 }
                 cx.notify();

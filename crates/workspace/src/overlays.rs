@@ -59,6 +59,7 @@ impl Workspace {
         self.open_picker(PickerMode::Projects, i18n::t!("finder.projects"), items, window, cx);
         // 背景収集: 各プロジェクトの worktree 一覧 + それぞれの status（git 2 コマンド/worktree）。
         let sources: Vec<(usize, Arc<dyn Host>, PathBuf)> = self
+            .project_sessions
             .projects
             .iter()
             .enumerate()
@@ -127,7 +128,7 @@ impl Workspace {
         };
         let mut items = Vec::new();
         let mut rows: Vec<PathBuf> = Vec::new();
-        for (index, slot) in self.projects.iter().enumerate() {
+        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
             let root = slot.worktree.root();
             items.push(
                 PickerItem::new(index, slot.name.clone())
@@ -180,7 +181,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(index) =
-            self.projects.iter().position(|slot| slot.worktree.root() == path.as_path())
+            self.project_sessions.projects.iter().position(|slot| slot.worktree.root() == path.as_path())
         {
             self.switch_project(index, window, cx);
             return;
@@ -224,7 +225,7 @@ impl Workspace {
     /// テーマを即時適用する（自身のクローム + エディタ + Agent パネル + Picker へ波及）。
     fn apply_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
-        for (index, session) in self.sessions.iter().enumerate() {
+        for (index, session) in self.project_sessions.sessions.iter().enumerate() {
             for tab in &session.tabs {
                 tab.editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
             }
@@ -236,6 +237,7 @@ impl Workspace {
                 .update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
             if let Some(panel) = &session.search_panel {
                 let accent = self
+                    .project_sessions
                     .projects
                     .get(index)
                     .map(|slot| slot.color)
@@ -500,17 +502,18 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let session_index = self
+            .project_sessions
             .sessions
             .iter()
             .position(|session| session.search_panel.as_ref() == Some(&panel))
-            .unwrap_or(self.active);
+            .unwrap_or(self.project_sessions.active);
         match event {
             SearchPanelEvent::OpenMatch { path, line, column } => {
-                self.sessions[session_index].pending_navigation =
+                self.project_sessions.sessions[session_index].pending_navigation =
                     Some((path.clone(), *line, *column));
-                self.sessions[session_index].search_panel = None;
+                self.project_sessions.sessions[session_index].search_panel = None;
             }
-            SearchPanelEvent::Dismissed => self.sessions[session_index].search_panel = None,
+            SearchPanelEvent::Dismissed => self.project_sessions.sessions[session_index].search_panel = None,
         }
         cx.notify();
     }

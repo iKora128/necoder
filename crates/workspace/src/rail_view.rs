@@ -22,7 +22,7 @@ impl Workspace {
 
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let active = self.active;
+        let active = self.project_sessions.active;
         let accent = self.accent();
         let rail = settings::get(cx).rail; // アイコンの表示/非表示（settings 反応）
         div()
@@ -37,7 +37,7 @@ impl Workspace {
             .border_r_1()
             .border_color(theme.border)
             .pt_2()
-            .children(self.projects.iter().enumerate().map(|(index, slot)| {
+            .children(self.project_sessions.projects.iter().enumerate().map(|(index, slot)| {
                 let color = slot.color;
                 let is_active = index == active;
                 let monogram = slot

@@ -183,7 +183,8 @@ impl Workspace {
 
     /// ブランチ切替後などにアクティブプロジェクトを再読込（ツリー再構築・開ファイル再読込・git 更新）。
     fn reload_active_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(slot) = self.projects.get_mut(self.active) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.refresh();
         }
         // 開いていたタブ列を（存在するファイルだけ）開き直す。分割は畳む（旧内容を指すため）。

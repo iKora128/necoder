@@ -8,7 +8,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.close_color_picker(window, cx);
-        let Some(slot) = self.projects.get_mut(project_index) else {
+        let Some(slot) = self.project_sessions.projects.get_mut(project_index) else {
             return;
         };
         slot.color = color;
@@ -41,7 +41,7 @@ impl Workspace {
         }
         // アクティブなら全ペイン（タブ + 分割）のキャレット等アクセントへ波及。
         // レール/タブは render 時に slot.color を読むので notify で追従する（明示波及が要るのはキャレットだけ）。
-        if project_index == self.active {
+        if project_index == self.project_sessions.active {
             let editors: Vec<Entity<EditorView>> = self
                 .tabs
                 .iter()
@@ -83,8 +83,8 @@ impl Workspace {
     /// ⌘K⌘C / コマンドパレットからアクティブプロジェクトの色ピッカーを開く。
     /// マウス位置が無いので、アクティブなレール項目の位置（pt_2 8px + index*38）にアンカーする。
     fn open_project_color(&mut self, _: &ProjectColor, window: &mut Window, cx: &mut Context<Self>) {
-        let anchor = gpui::point(px(RAIL_WIDTH), px(8. + self.active as f32 * 38. + 4.));
-        self.open_color_picker(self.active, anchor, window, cx);
+        let anchor = gpui::point(px(RAIL_WIDTH), px(8. + self.project_sessions.active as f32 * 38. + 4.));
+        self.open_color_picker(self.project_sessions.active, anchor, window, cx);
     }
 
     /// 色ピッカーの hex 入力キー処理（rename と同型 + 16 進フィルタ）。
@@ -138,6 +138,7 @@ impl Workspace {
         let theme = self.theme.clone();
         // 対象プロジェクトの現在色を hex 入力のキャレット色に使う（文脈のヒント）。
         let anchor_color = self
+            .project_sessions
             .projects
             .get(project_index)
             .map(|slot| slot.color)
@@ -238,7 +239,7 @@ impl Workspace {
         let position = menu.position;
         let confirm = menu.confirm;
         let theme = self.theme.clone();
-        let slot = self.projects.get(index)?;
+        let slot = self.project_sessions.projects.get(index)?;
         let is_worktree = slot.worktree_branch.is_some();
         let slot_root = slot.worktree.root().to_path_buf();
         let (bg2, bg3, border, fg0, fg1, fg2, err) =
