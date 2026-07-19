@@ -160,26 +160,6 @@ enum Dock {
     Bottom,
 }
 
-struct ProjectSlot {
-    worktree: Rc<Worktree>,
-    name: SharedString,
-    /// 描画中に git process/RPC を起動しないための現在ブランチ cache。
-    branch: Option<String>,
-    color: Hsla,
-    explorer: ExplorerProject,
-    /// このプロジェクトで開いているタブのファイル一覧（左から順・M10 複数タブ）。
-    /// アクティブプロジェクトでは `Workspace.tabs` が真実で、ここへは同期する（`sync_active_slot`）。
-    /// 非アクティブプロジェクトでは復元用の記録（切替時に開き直す）。
-    open_files: Vec<PathBuf>,
-    /// アクティブタブの添字（`open_files` 内）。
-    active_file: usize,
-    /// `.shirushi/settings.json` の絵文字アイコン（M12-11。None = 頭文字モノグラム）。
-    icon: Option<SharedString>,
-    /// リンク worktree として開いたスロットのブランチ名（Some = worktree タブ・M10-2）。
-    /// レール右クリックの「worktree を削除 / ブランチを削除」を出す判定に使う。通常/メインは None。
-    worktree_branch: Option<String>,
-}
-
 /// ペインに載る 1 タブ（M10 複数タブ）。当面は具体型（エディタ）だけ・多態化は必要時に育てる
 /// （ARCHITECTURE §3 の Pane/Item 初版）。`path` はタブの同一判定と永続化のキー。
 struct EditorTab {
@@ -234,18 +214,6 @@ enum RailMenuAction {
     RemoveWorktree,
     /// worktree ごとブランチを削除（worktree remove → git branch -D）。スロットも外す。
     DeleteBranch,
-}
-
-impl ProjectSlot {
-    fn refresh(&mut self) {
-        self.explorer.refresh(&self.worktree);
-    }
-
-    /// アイコン/カラム表示用のディレクトリ列挙（キャッシュ付き）。初回だけ FS/RPC を読み、
-    /// 以後の render はキャッシュを返す（無効化は [`Self::refresh`]）。
-    fn listed_dir(&self, dir: &Path) -> Vec<project::Entry> {
-        self.explorer.listed_dir(dir)
-    }
 }
 
 /// ⌘F バッファ内検索の表示上限。これを超えるマッチは n/m に「+」を付けて数えない
@@ -629,40 +597,6 @@ fn active_index_after_removal(active: usize, removed: usize, new_len: usize) -> 
 }
 
 // ── Workspace 本体 ──
-
-/// 1 project の長寿命 UI / controller 群。非アクティブ時も Entity と process を保持する。
-pub struct ProjectSession {
-    editor_area: EditorArea,
-    agent_panel: Entity<AgentPanel>,
-    explorer: Entity<Explorer>,
-    search_panel: Option<Entity<SearchPanel>>,
-    repository: RepositoryController,
-    git_panel: Entity<GitPanel>,
-    terminal_dock: Entity<TerminalDock>,
-    agent_active: bool,
-    picker_worktree_rows: Vec<PathBuf>,
-    picker_ssh_hosts: Vec<host::SshConfigHost>,
-    picker_ssh_recent: Vec<String>,
-    picker_history: Vec<(String, String, i64)>,
-    todo_panel: Entity<TodoPanel>,
-    pending_open_history: bool,
-    agent_touched: HashMap<PathBuf, Hsla>,
-    waiting_thread: Option<(SharedString, Hsla)>,
-    _watch: Option<project::Watch>,
-    _watch_pump: Option<gpui::Task<()>>,
-}
-
-/// Rail の project metadata と長寿命 session を同じ添字で管理する。
-struct ProjectSessions {
-    projects: Vec<ProjectSlot>,
-    active: usize,
-    sessions: Vec<ProjectSession>,
-}
-
-struct RepositoryController {
-    status: HashMap<PathBuf, StatusKind>,
-    refresh_generation: u32,
-}
 
 struct ChromeState {
     show_left: bool,
