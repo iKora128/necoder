@@ -787,7 +787,7 @@ pub fn inline_command_on(host: &dyn Host, dir: &Path, instruction: &str) -> Resu
 /// 会話の冒頭から簡潔なスレッドタイトルを1行もらう（AI 自動命名・#6）。
 /// `inline_command_on` と同型（一時ファイル経由で shell 引用を回避・host 経由なので remote でも動く）。
 /// 失敗（claude 未導入・空応答）は `Err`。呼び出し側は静かに既定名のままにする。
-pub fn name_thread_on(host: &dyn Host, dir: &Path, excerpt: &str) -> Result<String> {
+pub fn name_thread_on(host: &dyn Host, dir: &Path, excerpt: &str, oneshot: &str) -> Result<String> {
     let unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -798,13 +798,14 @@ pub fn name_thread_on(host: &dyn Host, dir: &Path, excerpt: &str) -> Result<Stri
     // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
     let prompt = "入力はエージェントとの会話の冒頭です。この会話に短いタイトルを付けて。\
         日本語・18文字以内・体言止め・記号や引用符や句読点や番号は付けない・タイトルだけを1行で出力して。";
+    // `oneshot` = 既定 Agent の vendor CLI 非対話コマンド（例 "claude -p" / "codex exec"）。Claude 決め打ちをやめた。
     let script = format!(
-        "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
+        "{oneshot} \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
         temp = temp.display()
     );
     let output = host
         .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
-        .context("スレッド命名の実行に失敗（claude CLI 未導入？）")?;
+        .context("スレッド命名の実行に失敗（既定 Agent の CLI 未導入？）")?;
     anyhow::ensure!(output.success(), "命名に失敗: {}", git_fail_message(&output));
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
     let text = strip_code_fence(&raw);

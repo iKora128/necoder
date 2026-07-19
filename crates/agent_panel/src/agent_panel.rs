@@ -497,8 +497,11 @@ impl AgentPanel {
             }
         }
         // 初期表示は末尾（最新）を見せる（スクロール化 M13 での回帰防止）。
+        // 開発用: SHIRUSHI_SCROLL_TOP で先頭のまま（transcript 上部＝Thinking 等の目視撮影用）。
         let transcript_scroll = ScrollHandle::new();
-        transcript_scroll.scroll_to_bottom();
+        if std::env::var_os("SHIRUSHI_SCROLL_TOP").is_none() {
+            transcript_scroll.scroll_to_bottom();
+        }
         AgentPanel {
             threads,
             storage: None,
@@ -601,7 +604,9 @@ impl AgentPanel {
             }
         }
         self.storage = Some(storage);
-        self.transcript_scroll.scroll_to_bottom(); // 復元直後も末尾（最新）を見せる
+        if std::env::var_os("SHIRUSHI_SCROLL_TOP").is_none() {
+            self.transcript_scroll.scroll_to_bottom(); // 復元直後も末尾（最新）を見せる
+        }
         cx.notify();
     }
 
@@ -677,11 +682,19 @@ impl AgentPanel {
             return;
         };
         let host = self.dest_host.clone();
+        // タイトル生成はユーザーの既定 Agent の vendor CLI で（Claude 決め打ちをやめる・#6）。
+        // 既定 agent に一発生成 CLI が無ければタイトルは既定名のまま（壊さない）。
+        let agent_label = settings::get(cx).default_agent.clone();
+        let Some(oneshot) =
+            acp_client::AgentKind::by_label(&agent_label).and_then(|kind| kind.oneshot())
+        else {
+            return;
+        };
         let thread_id = thread.id.clone();
         cx.spawn(async move |panel, cx| {
             let generated = cx
                 .background_executor()
-                .spawn(async move { project::name_thread_on(host.as_ref(), &cwd, &excerpt) })
+                .spawn(async move { project::name_thread_on(host.as_ref(), &cwd, &excerpt, oneshot) })
                 .await;
             let Ok(name) = generated else {
                 return; // claude 未導入等 → 既定名のまま（静かに諦める）

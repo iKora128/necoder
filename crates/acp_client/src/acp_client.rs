@@ -264,6 +264,20 @@ impl AgentKind {
         AGENTS.iter().find(|agent| agent.label == label)
     }
 
+    /// utility（スレッドタイトル等の一発生成）に使う vendor CLI の非対話コマンド。
+    /// プロンプト=引数・文脈=stdin で渡す想定（`<oneshot> "<prompt>" < file`）。`--model` は付けない
+    /// ＝各 CLI の既定モデル（＝ユーザーが使い込んでる既定）をそのまま使う。
+    /// Claude は検証済み。codex/gemini は非対話モードに基づく best-effort（stdin/引数の扱い次第で要調整）。
+    /// 未対応（None）の agent では utility はスキップ＝タイトルは既定名のまま（壊れない・Claude 決め打ちもしない）。
+    pub fn oneshot(&self) -> Option<&'static str> {
+        match self.id {
+            "claude" => Some("claude -p"),
+            "codex" => Some("codex exec"),
+            "gemini" => Some("gemini -p"),
+            _ => None,
+        }
+    }
+
     /// このエージェントの起動コマンドを解決する。
     /// 探索順: (1) PATH の単体バイナリ → (2) Zed の npx キャッシュ(.bin) → (3) `npx <package> <args>`。
     pub fn command(&self, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
@@ -770,6 +784,19 @@ mod tests {
         // PATH に無い環境でも None を返すだけ（パニックしない）
         let _ = AgentCommand::claude(".");
         assert!(find_in_path("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn oneshot_maps_default_agent_to_its_cli() {
+        // タイトル生成は「既定 Agent の vendor CLI」を使う（Claude 決め打ちをやめた）。
+        assert_eq!(AgentKind::by_label("Claude Code").and_then(|k| k.oneshot()), Some("claude -p"));
+        assert_eq!(AgentKind::by_label("Codex").and_then(|k| k.oneshot()), Some("codex exec"));
+        assert_eq!(AgentKind::by_label("Gemini CLI").and_then(|k| k.oneshot()), Some("gemini -p"));
+        // 非対話構文が未検証の agent は None＝タイトルは既定名フォールバック（Claude へ勝手に流さない）。
+        assert_eq!(AgentKind::by_label("GitHub Copilot").and_then(|k| k.oneshot()), None);
+        assert_eq!(AgentKind::by_label("Kimi CLI").and_then(|k| k.oneshot()), None);
+        // 未知ラベルも None。
+        assert_eq!(AgentKind::by_label("Nonexistent").and_then(|k| k.oneshot()), None);
     }
 
     /// 実プロセス検証: claude-agent-acp を起動して initialize が返るか。
