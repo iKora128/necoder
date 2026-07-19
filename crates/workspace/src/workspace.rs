@@ -861,36 +861,63 @@ impl Focusable for Workspace {
     }
 }
 
-impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl Workspace {
+    /// Window を必要とする child event の後処理が残っているか。
+    ///
+    /// child の subscription は `Window` を受け取らないため、描画中に実行せず、現在の
+    /// effect cycle の末尾へまとめて送る。これにより root Render は状態変更や I/O を行わない。
+    fn has_pending_shell_effects(&self) -> bool {
+        self.chrome.pending_settings_command.is_some()
+            || self.pending_transient_tab.is_some()
+            || self.pending_open_history
+            || self.overlays.pending_project_switch.is_some()
+            || self.pending_navigation.is_some()
+            || self.pending_open_git_diff.is_some()
+            || self.pending_stage_hunk.is_some()
+    }
+
+    fn process_pending_shell_effects(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(command) = self.chrome.pending_settings_command.take() {
-            self.open_command_terminal(&command, _window, cx);
+            self.open_command_terminal(&command, window, cx);
         }
-        // 承認カードからの diff タブ要求を消化（イベント時点では window が無いため・M12-6）。
         if let Some((title, buffer)) = self.pending_transient_tab.take() {
-            self.open_transient_tab(title, buffer, _window, cx);
+            self.open_transient_tab(title, buffer, window, cx);
         }
-        // スレッド履歴を開く要求を消化（Agent パネルの履歴ボタン → window が要る・#5）。
         if self.pending_open_history {
             self.pending_open_history = false;
-            self.open_thread_history(&ThreadHistory, _window, cx);
+            self.open_thread_history(&ThreadHistory, window, cx);
         }
-        // ＋で追加したプロジェクトへの切替を消化（ダイアログ経由は window が無い）。
         if let Some(index) = self.overlays.pending_project_switch.take() {
-            self.switch_project(index, _window, cx);
+            self.switch_project(index, window, cx);
         }
-        // child Entity からの file:line ジャンプを消化。
         if let Some((path, line, column)) = self.pending_navigation.take() {
             self.record_nav_position(cx);
-            self.open_file_then(path, _window, cx, move |editor, cx| {
+            self.open_file_then(path, window, cx, move |editor, cx| {
                 editor.reveal_position(line, column, cx);
             });
         }
         if let Some(path) = self.pending_open_git_diff.take() {
-            self.open_diff_tab_for(path, None, _window, cx);
+            self.open_diff_tab_for(path, None, window, cx);
         }
         if let Some(hunk) = self.pending_stage_hunk.take() {
             self.stage_hunk(hunk, cx);
+        }
+    }
+}
+
+impl Render for Workspace {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.has_pending_shell_effects() {
+            let workspace = cx.entity();
+            window.defer(cx, move |window, cx| {
+                let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.process_pending_shell_effects(window, cx);
+                });
+            });
         }
         let theme = self.theme.clone();
         // 窓縁のプロジェクト色枠（方向感覚・Peacock 相当。面は塗らず縁の 2px 線のみ = UI-SPEC §1.3）。
