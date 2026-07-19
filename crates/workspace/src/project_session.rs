@@ -15,6 +15,7 @@ impl Workspace {
         let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme));
         cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
         let explorer = cx.new(|_| Explorer::new(explorer_view));
+        let git_panel = cx.new(GitPanel::new);
         ProjectSession {
             loaded: false,
             tabs: Vec::new(),
@@ -25,10 +26,7 @@ impl Workspace {
             search_panel: None,
             buffer_search: None,
             git_status: HashMap::new(),
-            git_changes: Vec::new(),
-            git_history: Vec::new(),
-            github_slug: None,
-            branch_menu: None,
+            git_panel,
             terminal_dock,
             agent_active: false,
             recently_closed_files: Vec::new(),
@@ -73,8 +71,6 @@ impl Workspace {
             hot_exit_pending: None,
             _watch: None,
             _watch_pump: None,
-            git_panel: None,
-            git_busy: false,
         }
     }
 
@@ -213,6 +209,7 @@ impl Workspace {
             let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
             cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
             let explorer = cx.new(|_| Explorer::new(explorer_view));
+            let git_panel = cx.new(GitPanel::new);
             if index == active {
                 if let Some(menu) = explorer_context_menu.take() {
                     explorer.update(cx, |explorer, cx| explorer.show_context_menu(menu, cx));
@@ -249,10 +246,7 @@ impl Workspace {
                 search_panel,
                 buffer_search: None,
                 git_status: HashMap::new(),
-                git_changes: Vec::new(),
-                git_history: Vec::new(),
-                github_slug: None,
-                branch_menu: None,
+                git_panel,
                 terminal_dock,
                 agent_active: false,
                 recently_closed_files: Vec::new(),
@@ -297,8 +291,6 @@ impl Workspace {
                 hot_exit_pending: None,
                 _watch: None,
                 _watch_pump: None,
-                git_panel: None,
-                git_busy: false,
             });
         }
         let mut workspace = Workspace {
@@ -343,8 +335,7 @@ impl Workspace {
         workspace.refresh_git_status(cx); // ツリー/タブの git 色分け用
         // 開発用: SHIRUSHI_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_GIT_PANEL").is_some() {
-            workspace.git_panel =
-                Some(GitPanelState { message: String::new(), branch_name: None, focus: cx.focus_handle() });
+            workspace.git_panel.update(cx, |panel, cx| panel.set_open(true, cx));
             workspace.refresh_git_status(cx);
         }
         // 開発用: SHIRUSHI_BRANCH_MENU=1 で branch/worktree メニューを開いた状態で撮る。
@@ -599,9 +590,8 @@ impl Workspace {
         else {
             if let Some(session) = self.sessions.get_mut(session_index) {
                 session.git_status.clear();
-                session.git_changes.clear();
-                session.git_history.clear();
-                session.github_slug = None;
+                let git_panel = session.git_panel.clone();
+                git_panel.update(cx, |panel, cx| panel.clear_snapshot(cx));
             }
             return;
         };
@@ -610,7 +600,7 @@ impl Workspace {
         let Some(session) = self.sessions.get_mut(session_index) else {
             return;
         };
-        let panel_open = session.git_panel.is_some();
+        let panel_open = session.git_panel.read(cx).open;
         session.git_refresh_gen = session.git_refresh_gen.wrapping_add(1);
         let generation = session.git_refresh_gen;
         cx.spawn(async move |workspace, cx| {
@@ -640,9 +630,13 @@ impl Workspace {
                 }
                 let (status, branch, changes, history, slug) = snapshot;
                 session.git_status = status.into_iter().collect();
-                session.git_changes = changes;
-                session.git_history = history;
-                session.github_slug = slug;
+                let git_panel = session.git_panel.clone();
+                git_panel.update(cx, |panel, cx| {
+                    panel.set_snapshot(
+                        RepositorySnapshot { changes, history, github_slug: slug },
+                        cx,
+                    );
+                });
                 if let Some(slot) = workspace.projects.get_mut(session_index) {
                     slot.branch = branch;
                 }

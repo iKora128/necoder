@@ -2417,6 +2417,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
+name = "git_ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "project",
+ "theme_core",
+]
+
+[[package]]
 name = "gl_generator"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8545,6 +8554,7 @@ dependencies = [
  "editor_view",
  "explorer",
  "futures",
+ "git_ui",
  "gpui",
  "host",
  "i18n",

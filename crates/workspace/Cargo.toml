@@ -12,6 +12,7 @@ host.workspace = true
 editor_core.workspace = true
 editor_view.workspace = true
 explorer.workspace = true
+git_ui.workspace = true
 theme_core.workspace = true
 project.workspace = true
 search.workspace = true

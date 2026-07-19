@@ -21,12 +21,13 @@ use gpui::{
     Window, WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*,
     pulsating_between, px, size, svg,
 };
+use git_ui::{BranchMenu as BranchMenuState, GitPanel, RepositorySnapshot};
 use host::Host;
 use lang::lsp::{
     apply_text_edits_to_string, language_server_for, parse_definition, parse_hover_lines,
     parse_text_edits, parse_workspace_edit,
 };
-use project::{GitWorktree, GraphCommit, ProjectSource, StatusKind, WorkingChange, Worktree};
+use project::{GraphCommit, ProjectSource, StatusKind, Worktree};
 use search_ui::{SearchPanel, SearchPanelEvent};
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut, Range};
@@ -262,13 +263,6 @@ impl Render for DraggedEditorTab {
             .text_color(self.theme.fg0)
             .child(self.name.clone())
     }
-}
-
-struct BranchMenuState {
-    position: Point<gpui::Pixels>,
-    current: Option<String>,
-    branches: Vec<String>,
-    worktrees: Vec<GitWorktree>,
 }
 
 /// レール項目の右クリックメニュー（色スウォッチ + 新規窓 / レールから外す / worktree・ブランチ削除・M10-2）。
@@ -706,10 +700,7 @@ pub struct ProjectSession {
     search_panel: Option<Entity<SearchPanel>>,
     buffer_search: Option<BufferSearchState>,
     git_status: HashMap<PathBuf, StatusKind>,
-    git_changes: Vec<WorkingChange>,
-    git_history: Vec<GraphCommit>,
-    github_slug: Option<String>,
-    branch_menu: Option<BranchMenuState>,
+    git_panel: Entity<GitPanel>,
     terminal_dock: Entity<TerminalDock>,
     agent_active: bool,
     recently_closed_files: Vec<PathBuf>,
@@ -754,8 +745,6 @@ pub struct ProjectSession {
     hot_exit_pending: Option<Vec<(PathBuf, String)>>,
     _watch: Option<project::Watch>,
     _watch_pump: Option<gpui::Task<()>>,
-    git_panel: Option<GitPanelState>,
-    git_busy: bool,
 }
 
 struct ChromeState {
@@ -825,17 +814,6 @@ struct ColorPickerState {
     /// 任意 hex 入力の編集中文字列（`#` 抜き・0-9a-fA-F 最大 6 桁）。
     hex: String,
     /// キーストローク取り込み用フォーカス。
-    focus: FocusHandle,
-}
-
-/// git 操作パネルの状態（コミットメッセージ / ブランチ名の手書き入力を持つ）。
-/// 入力は検索パネルと同じ流儀（keystroke を直接 String に積む）。
-struct GitPanelState {
-    /// コミットメッセージの編集バッファ。
-    message: String,
-    /// `Some` のときは入力行が「新しいブランチ名」モード（enter で作成）。
-    branch_name: Option<String>,
-    /// キーストローク取り込み用のフォーカス。
     focus: FocusHandle,
 }
 
@@ -1085,7 +1063,7 @@ impl Render for Workspace {
                         // 左カラムは Todo ボード / git パネル / エクスプローラを切替（排他）。
                         let column = if self.todo_board.is_some() {
                             self.render_todo_board(cx)
-                        } else if self.git_panel.is_some() {
+                        } else if self.git_panel_open(cx) {
                             self.render_git_panel(cx)
                         } else {
                             self.render_explorer(cx).into_any_element()

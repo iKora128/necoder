@@ -122,7 +122,10 @@ impl Workspace {
                         "icons/panel-left.svg",
                         i18n::t!("rail.explorer"),
                         // アクティブ（左ドックがエクスプローラ表示）ならプロジェクト色・でなければ淡色（VSCode 風）。
-                        if self.chrome.show_left && self.todo_board.is_none() && self.git_panel.is_none() {
+                        if self.chrome.show_left
+                            && self.todo_board.is_none()
+                            && !self.git_panel_open(cx)
+                        {
                             accent
                         } else {
                             theme.fg2
@@ -135,9 +138,9 @@ impl Workspace {
                                 // Todo/git が出ていれば**それをクリアして**エクスプローラへ戻す
                                 // （旧: show_left トグルのみ → Todo が居座り「開くと Todo」問題）。
                                 // 既にエクスプローラなら従来どおり表示トグル。
-                                if this.todo_board.is_some() || this.git_panel.is_some() {
+                                if this.todo_board.is_some() || this.git_panel_open(cx) {
                                     this.todo_board = None;
-                                    this.git_panel = None;
+                                    this.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
                                     this.chrome.show_left = true;
                                 } else {
                                     this.chrome.show_left = !this.chrome.show_left;
@@ -166,7 +169,7 @@ impl Workspace {
                         "rail-git",
                         "icons/git-branch.svg",
                         i18n::t!("rail.git"),
-                        if self.git_panel.is_some() { accent } else { theme.fg2 },
+                        if self.git_panel_open(cx) { accent } else { theme.fg2 },
                     ).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.toggle_git_panel(&ToggleGitPanel, window, cx)),

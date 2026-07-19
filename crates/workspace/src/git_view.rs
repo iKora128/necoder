@@ -3,10 +3,19 @@ impl Workspace {
         let theme = self.theme.clone();
         let (bg0, bg1, bg2, border, fg0, fg1, fg2) =
             (theme.bg0, theme.bg1, theme.bg2, theme.border, theme.fg0, theme.fg1, theme.fg2);
-        let Some(state) = self.git_panel.as_ref() else {
+        if !self.git_panel.read(cx).open {
             return div().w(px(self.chrome.explorer_width)).h_full().flex_none().bg(bg1).into_any_element();
+        }
+        let (focus, message, branch_name, busy, snapshot) = {
+            let panel = self.git_panel.read(cx);
+            (
+                panel.focus.clone(),
+                panel.message.clone(),
+                panel.branch_name.clone(),
+                panel.busy,
+                panel.snapshot(),
+            )
         };
-        let focus = state.focus.clone();
         let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
         if self.active_slot().is_none() {
             return div()
@@ -22,8 +31,8 @@ impl Workspace {
                 .into_any_element();
         }
         let branch = self.active_slot().and_then(|slot| slot.branch.clone());
-        let changes = &self.git_changes;
-        let naming = state.branch_name.is_some();
+        let changes = &snapshot.changes;
+        let naming = branch_name.is_some();
 
         // ── ヘッダ（タイトル + ブランチ + ＋ + ×）──
         let header = div()
@@ -63,7 +72,7 @@ impl Workspace {
                 )
             })
             // GitHub 連携（origin が GitHub のときだけ。PR 作成 / PR・リポジトリを開く）
-            .when(self.github_slug.is_some(), |element| {
+            .when(snapshot.github_slug.is_some(), |element| {
                 element
                     .child(
                         div()
@@ -138,9 +147,9 @@ impl Workspace {
             );
 
         // ── 入力行（コミットメッセージ / ブランチ名）──
-        let input_text = match &state.branch_name {
+        let input_text = match &branch_name {
             Some(name) => name.clone(),
-            None => state.message.clone(),
+            None => message.clone(),
         };
         let placeholder = if naming {
             i18n::t!("git.branch_placeholder")
@@ -166,16 +175,14 @@ impl Workspace {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    if let Some(state) = this.git_panel.as_ref() {
-                        let focus = state.focus.clone();
-                        window.focus(&focus, cx);
-                    }
+                    let focus = this.git_panel.read(cx).focus.clone();
+                    window.focus(&focus, cx);
                 }),
             )
             .child(input_body);
 
         // ── アクション行（commit / push / pull）。ブランチ名モードでは出さない ──
-        let commit_ready = !state.message.trim().is_empty();
+        let commit_ready = !message.trim().is_empty();
         let actions = div()
             .flex()
             .items_center()
@@ -196,8 +203,8 @@ impl Workspace {
                     .rounded(px(6.))
                     .bg(bg2)
                     .text_size(px(13.))
-                    .text_color(if self.git_busy { fg2 } else { fg1 })
-                    .when(!self.git_busy, |element| {
+                    .text_color(if busy { fg2 } else { fg1 })
+                    .when(!busy, |element| {
                         element.cursor_pointer().hover(|style| style.bg(theme.bg3).text_color(fg0)).on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, window, cx| this.generate_commit_message(window, cx)),
@@ -227,7 +234,7 @@ impl Workspace {
             )
             .child(self.git_remote_button("git-push", "↑", "push", true, cx))
             .child(self.git_remote_button("git-pull", "↓", "pull", false, cx))
-            .when(self.git_busy, |element| {
+            .when(busy, |element| {
                 element.child(div().text_size(px(11.)).text_color(fg2).child("…"))
             });
 
@@ -274,7 +281,7 @@ impl Workspace {
             .when(!naming, |element| element.child(actions))
             .child(body)
             .child(div().h(px(1.)).flex_none().bg(border))
-            .child(self.render_git_history(&self.git_history))
+            .child(self.render_git_history(&snapshot.history))
             .child(self.left_dock_resize_handle(cx))
             .into_any_element()
     }
@@ -289,7 +296,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = self.theme.clone();
-        let disabled = self.git_busy;
+        let disabled = self.git_is_busy(cx);
         div()
             .id(id)
             .flex_none()
@@ -564,7 +571,7 @@ impl Workspace {
     }
 
     fn render_branch_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let menu = self.branch_menu.as_ref()?;
+        let menu = self.git_panel.read(cx).branch_menu.clone()?;
         let position = menu.position;
         let slot = self.active_slot()?;
         let theme = self.theme.clone();

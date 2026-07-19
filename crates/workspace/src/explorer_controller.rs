@@ -438,8 +438,10 @@ impl Workspace {
         let host = slot.worktree.host().clone();
         let target = slot.worktree.root().to_path_buf();
         let branch = slot.worktree_branch.clone();
-        self.git_busy = true;
-        cx.notify();
+        let Some(git_panel) = self.sessions.get(index).map(|session| session.git_panel.clone()) else {
+            return;
+        };
+        git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
         let target_for_id = target.clone();
         cx.spawn(async move |_workspace, cx| {
             let result = cx
@@ -465,7 +467,7 @@ impl Workspace {
                 })
                 .await;
             let _ = handle.update(cx, |workspace, window, cx| {
-                workspace.git_busy = false;
+                git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match result {
                     Ok((branch, also_branch)) => {
                         let message = if also_branch {

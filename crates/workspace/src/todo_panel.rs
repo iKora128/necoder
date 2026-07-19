@@ -4,7 +4,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.git_panel = None;
+        self.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
         self.chrome.show_left = true;
         self.todo_board = Some(TodoBoardState {
             items: Vec::new(),

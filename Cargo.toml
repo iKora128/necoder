@@ -66,6 +66,7 @@ i18n = { path = "crates/i18n" }
 editor_core = { path = "crates/editor_core" }
 editor_view = { path = "crates/editor_view" }
 explorer = { path = "crates/explorer" }
+git_ui = { path = "crates/git_ui" }
 settings_core = { path = "crates/settings_core" }
 settings = { path = "crates/settings" }
 keymap_core = { path = "crates/keymap_core" }

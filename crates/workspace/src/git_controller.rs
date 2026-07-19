@@ -1,7 +1,24 @@
 impl Workspace {
+    fn git_panel_open(&self, cx: &App) -> bool {
+        self.git_panel.read(cx).open
+    }
+
+    fn git_is_busy(&self, cx: &App) -> bool {
+        self.git_panel.read(cx).busy
+    }
+
+    fn close_branch_menu(&self, cx: &mut Context<Self>) -> bool {
+        self.git_panel.update(cx, |panel, cx| {
+            let was_open = panel.branch_menu.take().is_some();
+            if was_open {
+                cx.notify();
+            }
+            was_open
+        })
+    }
+
     fn toggle_branch_menu(&mut self, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
-        if self.branch_menu.take().is_some() {
-            cx.notify();
+        if self.close_branch_menu(cx) {
             return;
         }
         let Some(worktree) = self.active_worktree() else {
@@ -9,6 +26,7 @@ impl Workspace {
         };
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
+        let git_panel = self.git_panel.clone();
         cx.spawn(async move |workspace, cx| {
             let (current, branches, worktrees) = cx
                 .background_executor()
@@ -20,8 +38,12 @@ impl Workspace {
                     )
                 })
                 .await;
-            let _ = workspace.update(cx, |workspace, cx| {
-                workspace.branch_menu = Some(BranchMenuState { position, current, branches, worktrees });
+            let _ = workspace.update(cx, |_workspace, cx| {
+                git_panel.update(cx, |panel, cx| {
+                    panel.branch_menu =
+                        Some(BranchMenuState { position, current, branches, worktrees });
+                    cx.notify();
+                });
                 cx.notify();
             });
         })
@@ -29,14 +51,14 @@ impl Workspace {
     }
 
     fn hide_branch_menu(&mut self, cx: &mut Context<Self>) {
-        if self.branch_menu.take().is_some() {
+        if self.close_branch_menu(cx) {
             cx.notify();
         }
     }
 
     /// ブランチを in-place で切り替える（git switch）→ プロジェクト再読込。dirty で失敗したらログのみ。
     fn switch_branch_to(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.branch_menu = None;
+        self.close_branch_menu(cx);
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -44,8 +66,8 @@ impl Workspace {
             return;
         };
         // checkout は大きいリポジトリで秒単位になりうる → 背景 + busy 表示。
-        self.git_busy = true;
-        cx.notify();
+        let git_panel = self.git_panel.clone();
+        git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
         let branch_for_open = branch.clone(); // 背景クロージャに move される前に控える（開くとき worktree の branch として使う）
@@ -68,7 +90,7 @@ impl Workspace {
                 })
                 .await;
             let _ = handle.update(cx, |workspace, window, cx| {
-                workspace.git_busy = false;
+                git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match result {
                     Ok(Some(worktree_path)) => {
                         // レールに居れば切替・無ければレールに開く（⌘O の worktree 行と同じ経路）。
@@ -95,7 +117,7 @@ impl Workspace {
     /// ブランチを worktree として**このウィンドウのレール**に開く（並行ブランチ×色付きタブ・M10-2）。
     /// 既存 worktree があればそれを、無ければ `<repo親>/<repo名>-<branch>` に作って開く。新窓は右クリック明示。
     fn open_branch_worktree(&mut self, branch: String, cx: &mut Context<Self>) {
-        self.branch_menu = None;
+        self.close_branch_menu(cx);
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -110,8 +132,8 @@ impl Workspace {
             return;
         };
         // 列挙も `git worktree add`（checkout 相当で重い）も背景で。busy 表示付き。
-        self.git_busy = true;
-        cx.notify();
+        let git_panel = self.git_panel.clone();
+        git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
         let host = worktree.host().clone();
         let host_for_open = host.clone(); // 開く側（update クロージャ）用。背景 spawn に host が move される前に控える
         let branch_for_open = branch.clone();
@@ -132,7 +154,7 @@ impl Workspace {
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.git_busy = false;
+                git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match target {
                     Ok(target) => {
                         workspace.open_folder_in_rail(host_for_open, target, Some(branch_for_open), cx)
@@ -151,7 +173,7 @@ impl Workspace {
 
     /// worktree のパスをこのウィンドウのレールに開く（⎇ メニューの worktree 行）。
     fn open_worktree_window(&mut self, path: PathBuf, branch: Option<String>, cx: &mut Context<Self>) {
-        self.branch_menu = None;
+        self.close_branch_menu(cx);
         let host = match self.active_worktree() {
             Some(worktree) => worktree.host().clone(),
             None => host::LocalHost::shared(),
@@ -176,23 +198,20 @@ impl Workspace {
 
     /// git 操作パネルをエクスプローラと切り替える（⌃⇧G）。開くと左カラムを占有しフォーカスを取る。
     fn toggle_git_panel(&mut self, _: &ToggleGitPanel, window: &mut Window, cx: &mut Context<Self>) {
-        match self.git_panel.take() {
-            Some(_) => {
-                // 閉じる → エディタがあればフォーカスを戻す。
-                if let Some(editor) = self.active_editor() {
-                    let handle = editor.read(cx).focus_handle(cx);
-                    window.focus(&handle, cx);
-                }
+        let was_open = self.git_panel_open(cx);
+        self.git_panel.update(cx, |panel, cx| panel.set_open(!was_open, cx));
+        if was_open {
+            // 閉じる → エディタがあればフォーカスを戻す。
+            if let Some(editor) = self.active_editor() {
+                let handle = editor.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
             }
-            None => {
-                self.chrome.show_left = true;
-                self.todo_board = None; // 左カラムは排他（M12-10）
-                let state =
-                    GitPanelState { message: String::new(), branch_name: None, focus: cx.focus_handle() };
-                window.focus(&state.focus, cx);
-                self.git_panel = Some(state);
-                self.refresh_git_status(cx);
-            }
+        } else {
+            self.chrome.show_left = true;
+            self.todo_board = None; // 左カラムは排他（M12-10）
+            let focus = self.git_panel.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            self.refresh_git_status(cx);
         }
         cx.notify();
     }
@@ -202,38 +221,43 @@ impl Workspace {
         match event.keystroke.key.as_str() {
             "escape" => {
                 // ブランチ名モードなら入力だけ畳む。そうでなければパネルを閉じる。
-                if let Some(state) = self.git_panel.as_mut() {
-                    if state.branch_name.is_some() {
-                        state.branch_name = None;
+                let was_naming = self.git_panel.update(cx, |panel, cx| {
+                    let was_naming = panel.branch_name.take().is_some();
+                    if was_naming {
                         cx.notify();
-                        return;
                     }
+                    was_naming
+                });
+                if was_naming {
+                    return;
                 }
                 self.toggle_git_panel(&ToggleGitPanel, window, cx);
             }
             "enter" => {
-                let naming = self.git_panel.as_ref().is_some_and(|s| s.branch_name.is_some());
+                let naming = self.git_panel.read(cx).branch_name.is_some();
                 if naming {
                     self.confirm_new_branch(window, cx);
                 } else if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
                     self.git_commit(window, cx); // ⌘/⌃⏎ = コミット
-                } else if let Some(state) = self.git_panel.as_mut() {
-                    state.message.push('\n'); // 素の Enter は改行
-                    cx.notify();
+                } else {
+                    self.git_panel.update(cx, |panel, cx| {
+                        panel.message.push('\n'); // 素の Enter は改行
+                        cx.notify();
+                    });
                 }
             }
             "backspace" => {
-                if let Some(state) = self.git_panel.as_mut() {
-                    match &mut state.branch_name {
+                self.git_panel.update(cx, |panel, cx| {
+                    match &mut panel.branch_name {
                         Some(name) => {
                             name.pop();
                         }
                         None => {
-                            state.message.pop();
+                            panel.message.pop();
                         }
                     }
                     cx.notify();
-                }
+                });
             }
             _ => {
                 let modifiers = event.keystroke.modifiers;
@@ -242,13 +266,13 @@ impl Workspace {
                 }
                 if let Some(text) = &event.keystroke.key_char {
                     if !text.is_empty() && !text.chars().any(char::is_control) {
-                        if let Some(state) = self.git_panel.as_mut() {
-                            match &mut state.branch_name {
+                        self.git_panel.update(cx, |panel, cx| {
+                            match &mut panel.branch_name {
                                 Some(name) => name.push_str(text),
-                                None => state.message.push_str(text),
+                                None => panel.message.push_str(text),
                             }
                             cx.notify();
-                        }
+                        });
                     }
                 }
             }
@@ -258,18 +282,18 @@ impl Workspace {
     /// staged 変更をコミット。staged が無ければ全変更を stage してからコミット（簡便動線）。
     /// コミット（何も staged でなければ全部 stage してから）。git はフックで長引きうる → 背景 + busy。
     fn git_commit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.git_busy {
+        if self.git_is_busy(cx) {
             return;
         }
         let Some(worktree) = self.active_worktree() else {
             return;
         };
-        let message = self.git_panel.as_ref().map(|state| state.message.clone()).unwrap_or_default();
+        let message = self.git_panel.read(cx).message.clone();
         if message.trim().is_empty() {
             return;
         }
-        self.git_busy = true;
-        cx.notify();
+        let git_panel = self.git_panel.clone();
+        git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
         cx.spawn(async move |workspace, cx| {
@@ -287,12 +311,13 @@ impl Workspace {
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.git_busy = false;
+                git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match result {
                     Ok(()) => {
-                        if let Some(state) = workspace.git_panel.as_mut() {
-                            state.message.clear();
-                        }
+                        git_panel.update(cx, |panel, cx| {
+                            panel.message.clear();
+                            cx.notify();
+                        });
                     }
                     Err(error) => eprintln!("コミットに失敗: {error:#}"),
                 }
@@ -370,7 +395,7 @@ impl Workspace {
 
     /// push/pull をバックグラウンドエグゼキュータで走らせ、完了後に git 状態を更新する。
     fn run_git_remote(&mut self, is_push: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.git_busy {
+        if self.git_is_busy(cx) {
             return;
         }
         let Some(worktree) = self.active_worktree() else {
@@ -381,8 +406,8 @@ impl Workspace {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
-        self.git_busy = true;
-        cx.notify();
+        let git_panel = self.git_panel.clone();
+        git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
         cx.spawn(async move |_workspace, cx| {
             let result = cx
                 .background_executor()
@@ -395,7 +420,7 @@ impl Workspace {
                 })
                 .await;
             let _ = handle.update(cx, |workspace, window, cx| {
-                workspace.git_busy = false;
+                git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match result {
                     Ok(()) if !is_push => workspace.reload_active_project(window, cx),
                     Ok(()) => workspace.refresh_git_status(cx),
@@ -413,7 +438,7 @@ impl Workspace {
     /// GitHub PR 操作（`gh`・背景実行）。`create=true` で PR 作成ページ、false で PR/リポジトリを開く。
     /// git と同じ host 上で走るので remote プロジェクトでもそのまま動く（ブラウザは gh に委ねる）。
     fn github_action(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.git_busy {
+        if self.git_is_busy(cx) {
             return;
         }
         let Some(worktree) = self.active_worktree() else {
@@ -424,8 +449,8 @@ impl Workspace {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
-        self.git_busy = true;
-        cx.notify();
+        let git_panel = self.git_panel.clone();
+        git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
         cx.spawn(async move |_workspace, cx| {
             let result = cx
                 .background_executor()
@@ -437,8 +462,8 @@ impl Workspace {
                     }
                 })
                 .await;
-            let _ = handle.update(cx, |workspace, _window, cx| {
-                workspace.git_busy = false;
+            let _ = handle.update(cx, |_workspace, _window, cx| {
+                git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 if let Err(error) = result {
                     eprintln!("GitHub 操作に失敗: {error:#}");
                 }
@@ -451,7 +476,7 @@ impl Workspace {
     /// AI でコミットメッセージを生成（Claude Code CLI に diff を渡す・背景実行）。
     /// 成功したら composer の入力欄に流し込む。AI-agent-native の git 体験。
     fn generate_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.git_busy {
+        if self.git_is_busy(cx) {
             return;
         }
         let Some(worktree) = self.active_worktree() else {
@@ -462,20 +487,21 @@ impl Workspace {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
-        self.git_busy = true;
-        cx.notify();
+        let git_panel = self.git_panel.clone();
+        git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
         cx.spawn(async move |_workspace, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { project::ai_commit_message_on(host.as_ref(), &root) })
                 .await;
-            let _ = handle.update(cx, |workspace, _window, cx| {
-                workspace.git_busy = false;
+            let _ = handle.update(cx, |_workspace, _window, cx| {
+                git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match result {
                     Ok(message) => {
-                        if let Some(state) = workspace.git_panel.as_mut() {
-                            state.message = message;
-                        }
+                        git_panel.update(cx, |panel, cx| {
+                            panel.message = message;
+                            cx.notify();
+                        });
                     }
                     Err(error) => eprintln!("コミットメッセージ生成に失敗: {error:#}"),
                 }
@@ -487,28 +513,29 @@ impl Workspace {
 
     /// git パネルの入力行を「新しいブランチ名」モードにする（＋ボタン）。
     fn start_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(state) = self.git_panel.as_mut() {
-            state.branch_name = Some(String::new());
-            let focus = state.focus.clone();
-            window.focus(&focus, cx);
+        let focus = self.git_panel.update(cx, |panel, cx| {
+            panel.branch_name = Some(String::new());
             cx.notify();
-        }
+            panel.focus.clone()
+        });
+        window.focus(&focus, cx);
     }
 
     /// 入力中のブランチ名で作成＆切替 → プロジェクト再読込。
     fn confirm_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self
             .git_panel
-            .as_ref()
-            .and_then(|state| state.branch_name.clone())
+            .read(cx)
+            .branch_name
+            .clone()
             .unwrap_or_default()
             .trim()
             .to_string();
         if name.is_empty() {
-            if let Some(state) = self.git_panel.as_mut() {
-                state.branch_name = None;
-            }
-            cx.notify();
+            self.git_panel.update(cx, |panel, cx| {
+                panel.branch_name = None;
+                cx.notify();
+            });
             return;
         }
         let Some(worktree) = self.active_worktree() else {
@@ -527,9 +554,10 @@ impl Workspace {
             let _ = handle.update(cx, |workspace, window, cx| {
                 match result {
                     Ok(()) => {
-                        if let Some(state) = workspace.git_panel.as_mut() {
-                            state.branch_name = None;
-                        }
+                        workspace.git_panel.update(cx, |panel, cx| {
+                            panel.branch_name = None;
+                            cx.notify();
+                        });
                         workspace.reload_active_project(window, cx);
                     }
                     Err(error) => eprintln!("ブランチ作成に失敗: {error:#}"),
@@ -544,15 +572,15 @@ impl Workspace {
     /// 他 worktree に checkout 中だと git は拒否する → 事前検知して**分かるトースト**で案内する
     /// （旧実装は失敗が eprintln に消えていた）。成否とも push_toast で可視化。
     fn delete_git_branch(&mut self, branch: String, cx: &mut Context<Self>) {
-        self.branch_menu = None;
+        self.close_branch_menu(cx);
         let Some(worktree) = self.active_worktree() else {
             return;
         };
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
         let branch_for_msg = branch.clone();
-        self.git_busy = true;
-        cx.notify();
+        let git_panel = self.git_panel.clone();
+        git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
         cx.spawn(async move |workspace, cx| {
             let result = cx
                 .background_executor()
@@ -571,7 +599,7 @@ impl Workspace {
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.git_busy = false;
+                git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match result {
                     Ok(()) => {
                         workspace.push_toast(
