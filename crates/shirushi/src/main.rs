@@ -322,6 +322,15 @@ fn main() {
 
         let build_sources = sources.clone();
         let build_theme = theme.clone();
+        // Offscreen QA はユーザーの通常セッションを汚さない。CLI で渡した project を描画するだけで、
+        // ~/Library/Application Support/Shirushi/state.json へは保存しない。
+        let persistence_path = if cfg!(feature = "screenshot")
+            && std::env::var_os("SHIRUSHI_SCREENSHOT").is_some()
+        {
+            None
+        } else {
+            workspace::state_path()
+        };
         let open = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -344,7 +353,7 @@ fn main() {
                         build_sources.clone(),
                         active_project,
                         build_theme.clone(),
-                        workspace::state_path(),
+                        persistence_path.clone(),
                         cx,
                     )
                 })

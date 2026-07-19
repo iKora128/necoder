@@ -350,7 +350,8 @@ impl Workspace {
     /// 起動しばらく後に GitHub Releases を確認する（背景・失敗は静かに無視）。
     /// スクショ/プローブ実行時と `SHIRUSHI_NO_UPDATE_CHECK` ではネットへ出ない。
     fn schedule_update_check(&self, cx: &mut Context<Self>) {
-        if std::env::var_os("SHIRUSHI_NO_UPDATE_CHECK").is_some()
+        if cfg!(test)
+            || std::env::var_os("SHIRUSHI_NO_UPDATE_CHECK").is_some()
             || std::env::var_os("SHIRUSHI_SCREENSHOT").is_some()
         {
             return;

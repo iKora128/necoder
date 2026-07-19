@@ -977,6 +977,132 @@ impl Render for Workspace {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Render 中の Host trait 呼び出しを local / remote の両方で検出する wrapper。
+    struct RenderAuditHost {
+        inner: Arc<dyn Host>,
+        remote: bool,
+        armed: AtomicBool,
+        calls: AtomicUsize,
+    }
+
+    impl RenderAuditHost {
+        fn new(remote: bool) -> Self {
+            Self {
+                inner: host::LocalHost::shared(),
+                remote,
+                armed: AtomicBool::new(false),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn arm(&self) {
+            self.calls.store(0, Ordering::SeqCst);
+            self.armed.store(true, Ordering::SeqCst);
+        }
+
+        fn disarm(&self) {
+            self.armed.store(false, Ordering::SeqCst);
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn record(&self) {
+            if self.armed.load(Ordering::SeqCst) {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    impl Host for RenderAuditHost {
+        fn id(&self) -> &str {
+            self.record();
+            if self.remote { "render-audit-remote" } else { "render-audit-local" }
+        }
+
+        fn display_name(&self) -> &str {
+            self.record();
+            if self.remote { "Render Audit Remote" } else { "Render Audit Local" }
+        }
+
+        fn is_remote(&self) -> bool {
+            self.record();
+            self.remote
+        }
+
+        fn project_uri(&self, path: &Path) -> Option<String> {
+            self.record();
+            self.remote.then(|| format!("ssh://render-audit{}", path.display()))
+        }
+
+        fn host_for_project(&self, path: &Path) -> anyhow::Result<Arc<dyn Host>> {
+            self.record();
+            self.inner.host_for_project(path)
+        }
+
+        fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
+            self.record();
+            self.inner.canonicalize(path)
+        }
+
+        fn metadata(&self, path: &Path) -> anyhow::Result<host::HostMetadata> {
+            self.record();
+            self.inner.metadata(path)
+        }
+
+        fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<host::HostEntry>> {
+            self.record();
+            self.inner.read_dir(path)
+        }
+
+        fn read_file(&self, path: &Path) -> anyhow::Result<host::FileContent> {
+            self.record();
+            self.inner.read_file(path)
+        }
+
+        fn write_file(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+            condition: host::WriteCondition,
+        ) -> anyhow::Result<host::FileRevision> {
+            self.record();
+            self.inner.write_file(path, bytes, condition)
+        }
+
+        fn list_files(&self, root: &Path, limit: usize) -> anyhow::Result<Vec<PathBuf>> {
+            self.record();
+            self.inner.list_files(root, limit)
+        }
+
+        fn search_project(
+            &self,
+            root: &Path,
+            spec: &host::TextSearchSpec,
+            file_limit: usize,
+        ) -> anyhow::Result<Vec<host::TextSearchHit>> {
+            self.record();
+            self.inner.search_project(root, spec, file_limit)
+        }
+
+        fn run_command(&self, spec: &host::CommandSpec) -> anyhow::Result<host::CommandOutput> {
+            self.record();
+            self.inner.run_command(spec)
+        }
+
+        fn spawn_process(&self, spec: &host::CommandSpec) -> anyhow::Result<host::HostProcess> {
+            self.record();
+            self.inner.spawn_process(spec)
+        }
+
+        fn terminal_launch(&self, cwd: &Path) -> anyhow::Result<Option<host::TerminalLaunch>> {
+            self.record();
+            self.inner.terminal_launch(cwd)
+        }
+    }
 
     #[test]
     fn active_index_after_removal_shifts_correctly() {
@@ -1001,6 +1127,171 @@ mod tests {
         assert_eq!(active_index_after_switch(1, 0, 2), Some(0));
         assert_eq!(active_index_after_switch(1, 1, 2), None);
         assert_eq!(active_index_after_switch(0, 2, 2), None);
+    }
+
+    #[gpui::test]
+    fn project_switch_preserves_dirty_undo_and_child_entities(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "shirushi_workspace_switch_{}",
+            std::process::id()
+        ));
+        let project_a = root.join("a");
+        let project_b = root.join("b");
+        let file_a = project_a.join("a.txt");
+        let file_b = project_b.join("b.txt");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        std::fs::write(&file_a, "fn a() {}\n").unwrap();
+        std::fs::write(&file_b, "fn b() {}\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(
+                vec![project_a.clone(), project_b.clone()],
+                Theme::dark(),
+                None,
+                cx,
+            )
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.restore_open_file(
+                &[
+                    RestoredTabs::single(file_a.clone()),
+                    RestoredTabs::single(file_b.clone()),
+                ],
+                window,
+                cx,
+            );
+        });
+
+        let editor_a = workspace.read_with(cx, |workspace, _cx| {
+            workspace.active_editor().expect("project A editor")
+        });
+        editor_a.update(cx, |editor, cx| editor.insert_text("dirty_", cx));
+        assert!(editor_a.read_with(cx, |editor, _| editor.buffer().is_dirty()));
+        assert!(editor_a.read_with(cx, |editor, _| editor.buffer().text().starts_with("dirty_")));
+
+        let entities_a = workspace.update_in(cx, |workspace, _window, cx| {
+            let session = &workspace.project_sessions.sessions[0];
+            let terminal_dock = session.terminal_dock.clone();
+            let terminal = terminal_dock.update(cx, |dock, cx| dock.ensure_active_test(cx));
+            (
+                session.agent_panel.entity_id(),
+                session.explorer.entity_id(),
+                session.git_panel.entity_id(),
+                session.todo_panel.entity_id(),
+                terminal_dock.entity_id(),
+                terminal.entity_id(),
+            )
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.switch_project(1, window, cx);
+        });
+        let entities_b = workspace.update_in(cx, |workspace, _window, cx| {
+            let session = &workspace.project_sessions.sessions[1];
+            let terminal_dock = session.terminal_dock.clone();
+            let terminal = terminal_dock.update(cx, |dock, cx| dock.ensure_active_test(cx));
+            (
+                session.agent_panel.entity_id(),
+                session.explorer.entity_id(),
+                session.git_panel.entity_id(),
+                session.todo_panel.entity_id(),
+                terminal_dock.entity_id(),
+                terminal.entity_id(),
+            )
+        });
+        assert_ne!(entities_a, entities_b, "projects must not share child entities");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.switch_project(0, window, cx);
+        });
+        let (returned_editor, returned_entities) = workspace.update_in(
+            cx,
+            |workspace, _window, cx| {
+                let session = &workspace.project_sessions.sessions[0];
+                let terminal_dock = session.terminal_dock.clone();
+                let terminal = terminal_dock.update(cx, |dock, cx| dock.ensure_active_test(cx));
+                (
+                    workspace.active_editor().expect("returned project A editor"),
+                    (
+                        session.agent_panel.entity_id(),
+                        session.explorer.entity_id(),
+                        session.git_panel.entity_id(),
+                        session.todo_panel.entity_id(),
+                        terminal_dock.entity_id(),
+                        terminal.entity_id(),
+                    ),
+                )
+            },
+        );
+        assert_eq!(returned_editor.entity_id(), editor_a.entity_id());
+        assert_eq!(returned_entities, entities_a);
+        assert!(returned_editor.read_with(cx, |editor, _| editor.buffer().text().starts_with("dirty_")));
+
+        let editor_focus = returned_editor.read_with(cx, |editor, cx| editor.focus_handle(cx));
+        cx.update(|window, cx| {
+            window.focus(&editor_focus, cx);
+            editor_focus.dispatch_action(&editor_view::Undo, window, cx);
+        });
+        assert_eq!(
+            returned_editor.read_with(cx, |editor, _| editor.buffer().text()),
+            "fn a() {}\n",
+            "undo history must survive A → B → A",
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn local_and_remote_root_render_never_call_host(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "shirushi_workspace_render_audit_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("audit.txt"), "render audit\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let local = Arc::new(RenderAuditHost::new(false));
+        let remote = Arc::new(RenderAuditHost::new(true));
+        let sources = vec![
+            ProjectSource::new(local.clone(), root.clone()),
+            ProjectSource::new(remote.clone(), root.clone()),
+        ];
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources(sources, Theme::dark(), None, cx)
+        });
+
+        local.arm();
+        remote.arm();
+        cx.update(|window, cx| window.draw(cx).clear());
+        local.disarm();
+        remote.disarm();
+        assert_eq!(local.calls(), 0, "local Render must use cached data only");
+        assert_eq!(remote.calls(), 0, "inactive remote session must not be queried");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.switch_project(1, window, cx);
+        });
+        cx.run_until_parked();
+        local.arm();
+        remote.arm();
+        cx.update(|window, cx| window.draw(cx).clear());
+        local.disarm();
+        remote.disarm();
+        assert_eq!(local.calls(), 0, "inactive local session must not be queried");
+        assert_eq!(remote.calls(), 0, "remote Render must use cached data only");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

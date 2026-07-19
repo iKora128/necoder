@@ -116,4 +116,53 @@ mod tests {
         assert_eq!(project.files(), vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
         assert_eq!(project.active_file, 1);
     }
+
+    #[test]
+    fn legacy_and_current_state_json_round_trip() {
+        let path = std::env::temp_dir().join(format!(
+            "shirushi_state_compatibility_{}.json",
+            std::process::id()
+        ));
+        let legacy = r#"{
+            "projects": [
+                {"root":"/tmp/one","open_file":"/tmp/one/a.rs"},
+                {"root":"/tmp/two"}
+            ],
+            "active": 1
+        }"#;
+        let legacy_state: PersistedState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(legacy_state.active, 1);
+        assert_eq!(legacy_state.projects[0].files(), vec![PathBuf::from("/tmp/one/a.rs")]);
+        std::fs::write(&path, legacy).unwrap();
+        let (legacy_projects, legacy_active) = load_saved_state(&path).unwrap();
+        assert_eq!(legacy_active, 1);
+        assert_eq!(legacy_projects[0].open_files, vec![PathBuf::from("/tmp/one/a.rs")]);
+        assert_eq!(
+            load_state(&path).unwrap(),
+            (vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")], 1)
+        );
+
+        let current = PersistedState {
+            projects: vec![PersistedProject {
+                root: PathBuf::from("/tmp/remote"),
+                open_file: None,
+                open_files: vec![PathBuf::from("/tmp/remote/a.rs"), PathBuf::from("/tmp/remote/b.rs")],
+                active_file: 1,
+                remote_uri: Some("ssh://host/tmp/remote".to_string()),
+            }],
+            active: 0,
+        };
+        let encoded = serde_json::to_string(&current).unwrap();
+        let decoded: PersistedState = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.projects[0].files(), current.projects[0].open_files);
+        assert_eq!(decoded.projects[0].active_file, 1);
+        assert_eq!(decoded.projects[0].remote_uri.as_deref(), Some("ssh://host/tmp/remote"));
+        std::fs::write(&path, encoded).unwrap();
+        let (current_projects, current_active) = load_saved_state(&path).unwrap();
+        assert_eq!(current_active, 0);
+        assert_eq!(current_projects[0].open_files, current.projects[0].open_files);
+        assert_eq!(current_projects[0].active_file, 1);
+        assert_eq!(current_projects[0].remote_uri.as_deref(), Some("ssh://host/tmp/remote"));
+        std::fs::remove_file(path).unwrap();
+    }
 }

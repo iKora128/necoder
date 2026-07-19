@@ -267,7 +267,8 @@ impl Workspace {
     fn render_icons(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let dir = slot.explorer.current_dir.clone().unwrap_or_else(|| slot.worktree.root().to_path_buf());
-        let entries = slot.listed_dir(&dir); // キャッシュ付き（render 中の FS/RPC は初回のみ）
+        // controller refresh が事前構築した cache だけを読む。cache miss は空表示で、I/O はしない。
+        let entries = slot.listed_dir(&dir);
         let selected = slot.explorer.selected.clone();
         div()
             .flex_1()
@@ -357,7 +358,8 @@ impl Workspace {
             .flex()
             .overflow_hidden()
             .children(chain.iter().enumerate().skip(visible_start).map(|(column_index, dir)| {
-                let entries = slot.listed_dir(dir); // キャッシュ付き（render 中の FS/RPC は初回のみ）
+                // controller refresh が事前構築した cache だけを読む。cache miss は空表示で、I/O はしない。
+                let entries = slot.listed_dir(dir);
                 // このカラムで選択中（＝連鎖の次の段）のパス。
                 let selected_child = chain.get(column_index + 1).cloned();
                 div()

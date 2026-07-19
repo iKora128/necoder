@@ -29,3 +29,7 @@ terminal_view.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+terminal_view = { workspace = true, features = ["test-support"] }

@@ -261,6 +261,31 @@ impl TerminalView {
         }
     }
 
+    /// PTY スレッドを起動せず、Dock のライフサイクルを決定論的に検証するための端末。
+    ///
+    /// `gpui::test` のスケジューラは外部スレッドからの Wakeup を禁止するため、
+    /// test-support feature でだけ公開する。本番の生成経路には入らない。
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn new_test(theme: Theme, cx: &mut Context<Self>) -> Self {
+        let (events_tx, _events_rx) = unbounded::<AlacEvent>();
+        let listener = Listener(events_tx);
+        let size = TerminalSize { columns: 80, lines: 24 };
+        let config = Config { scrolling_history: 10_000, ..Config::default() };
+        let term = Arc::new(FairMutex::new(Term::new(config, &size, listener)));
+        Self {
+            term,
+            notifier: None,
+            content: TerminalContent::default(),
+            size,
+            app_cursor: false,
+            exited: false,
+            theme,
+            focus_handle: cx.focus_handle(),
+            _pump: None,
+        }
+    }
+
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }

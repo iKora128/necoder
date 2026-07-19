@@ -8,6 +8,9 @@ publish = false
 [lib]
 path = "src/terminal_view.rs"
 
+[features]
+test-support = []
+
 [dependencies]
 gpui.workspace = true
 theme_core.workspace = true

@@ -69,6 +69,21 @@ impl TerminalDock {
         self.terminals[self.active].clone()
     }
 
+    /// PTY を起動せず、実際の terminal tab vector と active index を使うテスト用経路。
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn ensure_active_test(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        if self.terminals.is_empty() {
+            let theme = self.theme.clone();
+            let terminal = cx.new(|cx| TerminalView::new_test(theme, cx));
+            cx.subscribe(&terminal, Self::on_terminal_event).detach();
+            self.terminals.push(terminal);
+            self.active = 0;
+        }
+        self.active = self.active.min(self.terminals.len() - 1);
+        self.terminals[self.active].clone()
+    }
+
     pub fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = self.ensure_active(cx);
         window.focus(&terminal.read(cx).focus_handle(), cx);

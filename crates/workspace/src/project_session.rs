@@ -332,7 +332,9 @@ impl Workspace {
                 show_right: true,
                 show_bottom: false,
                 show_settings: std::env::var_os("SHIRUSHI_SETTINGS").is_some()
-                    || !settings::get(cx).onboarded,
+                    || (!settings::get(cx).onboarded
+                        && !(cfg!(debug_assertions)
+                            && std::env::var_os("SHIRUSHI_SCREENSHOT").is_some())),
                 settings_view,
                 pending_settings_command: None,
                 confetti: std::env::var_os("SHIRUSHI_CONFETTI").is_some(),
@@ -464,7 +466,7 @@ impl Workspace {
         let db_path = std::env::var("SHIRUSHI_DB")
             .map(PathBuf::from)
             .ok()
-            .or_else(storage::default_db_path);
+            .or_else(|| (!cfg!(test)).then(storage::default_db_path).flatten());
         if let Some(db_path) = db_path {
             match storage::Storage::open(&db_path) {
                 Ok(handle) => {
