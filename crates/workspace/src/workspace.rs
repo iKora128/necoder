@@ -10,6 +10,10 @@ use crate::updater;
 use editor_core::{Buffer, Selection};
 use futures::StreamExt as _; // LSP 通知 pump の `.next()`
 use editor_view::{ComposerEvent, EditorHoverEvent, EditorInputEvent, EditorView, PositionSnapshot};
+use explorer::{
+    ContextMenu as ExplorerContextMenu, Explorer, ExplorerProject, Naming as ExplorerNaming,
+    NamingKind, TreeRow, ViewMode as ExplorerView,
+};
 use gpui::{
     Animation, AnimationExt, App, Bounds, ClipboardItem, Context, CursorStyle, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -24,7 +28,7 @@ use lang::lsp::{
 };
 use project::{GitWorktree, GraphCommit, ProjectSource, StatusKind, WorkingChange, Worktree};
 use search_ui::{SearchPanel, SearchPanelEvent};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -202,105 +206,24 @@ enum Dock {
     Bottom,
 }
 
-// ── ツリー ──
-
-struct TreeRow {
-    path: PathBuf,
-    name: SharedString,
-    is_dir: bool,
-    depth: usize,
-    is_expanded: bool,
-    /// gitignore 対象（薄字で描く）。
-    ignored: bool,
-}
-
-fn build_rows(
-    worktree: &Worktree,
-    dir: &Path,
-    depth: usize,
-    expanded: &HashSet<PathBuf>,
-    rows: &mut Vec<TreeRow>,
-) {
-    let Ok(entries) = worktree.read_dir(dir) else {
-        return;
-    };
-    for entry in entries {
-        let is_expanded = entry.is_dir && expanded.contains(&entry.path);
-        rows.push(TreeRow {
-            path: entry.path.clone(),
-            name: entry.name.into(),
-            is_dir: entry.is_dir,
-            depth,
-            is_expanded,
-            ignored: entry.ignored,
-        });
-        if is_expanded {
-            build_rows(worktree, &entry.path, depth + 1, expanded, rows);
-        }
-    }
-}
-
-/// エクスプローラの右クリックメニュー（対象パス + 種別 + 出す位置）。
-struct ExplorerContextMenu {
-    path: PathBuf,
-    is_dir: bool,
-    position: Point<gpui::Pixels>,
-}
-
-/// ツリーのインライン命名（新規ファイル/フォルダ・リネーム・M10）。
-struct ExplorerNaming {
-    kind: NamingKind,
-    /// 作成先の親フォルダ（rename では対象の親）。
-    parent: PathBuf,
-    /// rename の対象（New* では None）。
-    target: Option<PathBuf>,
-    value: String,
-    focus: FocusHandle,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NamingKind {
-    NewFile,
-    NewDir,
-    Rename,
-}
-
-/// エクスプローラの表示モード（Finder 風の 3 種。左下で切替）。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ExplorerView {
-    /// 縦ツリー（従来）。
-    Tree,
-    /// Finder のカラム（Miller columns）。
-    Columns,
-    /// アイコングリッド。
-    Icons,
-}
-
 struct ProjectSlot {
     worktree: Rc<Worktree>,
     name: SharedString,
     /// 描画中に git process/RPC を起動しないための現在ブランチ cache。
     branch: Option<String>,
     color: Hsla,
-    expanded: HashSet<PathBuf>,
-    rows: Vec<TreeRow>,
-    selected: Option<PathBuf>,
+    explorer: ExplorerProject,
     /// このプロジェクトで開いているタブのファイル一覧（左から順・M10 複数タブ）。
     /// アクティブプロジェクトでは `Workspace.tabs` が真実で、ここへは同期する（`sync_active_slot`）。
     /// 非アクティブプロジェクトでは復元用の記録（切替時に開き直す）。
     open_files: Vec<PathBuf>,
     /// アクティブタブの添字（`open_files` 内）。
     active_file: usize,
-    /// カラム/アイコン表示の「現在フォルダ」（ここの直下を見せる）。既定はルート。
-    current_dir: Option<PathBuf>,
     /// `.shirushi/settings.json` の絵文字アイコン（M12-11。None = 頭文字モノグラム）。
     icon: Option<SharedString>,
     /// リンク worktree として開いたスロットのブランチ名（Some = worktree タブ・M10-2）。
     /// レール右クリックの「worktree を削除 / ブランチを削除」を出す判定に使う。通常/メインは None。
     worktree_branch: Option<String>,
-    /// アイコン/カラム表示のディレクトリ列挙キャッシュ。**render 中の FS/RPC を初回 1 回に抑える**
-    /// （ARCHITECTURE §9）。watch の refresh / プロジェクト再読込で無効化。RefCell は render(&self) から埋めるため。
-    dir_listings: std::cell::RefCell<HashMap<PathBuf, Vec<project::Entry>>>,
 }
 
 /// ペインに載る 1 タブ（M10 複数タブ）。当面は具体型（エディタ）だけ・多態化は必要時に育てる
@@ -369,22 +292,13 @@ enum RailMenuAction {
 
 impl ProjectSlot {
     fn refresh(&mut self) {
-        let mut rows = Vec::new();
-        let root = self.worktree.root().to_path_buf();
-        build_rows(&self.worktree, &root, 0, &self.expanded, &mut rows);
-        self.rows = rows;
-        self.dir_listings.borrow_mut().clear(); // FS が変わった合図 → アイコン/カラムの列挙も取り直す
+        self.explorer.refresh(&self.worktree);
     }
 
     /// アイコン/カラム表示用のディレクトリ列挙（キャッシュ付き）。初回だけ FS/RPC を読み、
     /// 以後の render はキャッシュを返す（無効化は [`Self::refresh`]）。
     fn listed_dir(&self, dir: &Path) -> Vec<project::Entry> {
-        if let Some(cached) = self.dir_listings.borrow().get(dir) {
-            return cached.clone();
-        }
-        let entries = self.worktree.read_any_dir(dir).unwrap_or_default();
-        self.dir_listings.borrow_mut().insert(dir.to_path_buf(), entries.clone());
-        entries
+        self.explorer.listed_dir(dir)
     }
 }
 
@@ -788,9 +702,7 @@ pub struct ProjectSession {
     active_tab: usize,
     split_editor: Option<Entity<EditorView>>,
     agent_panel: Entity<AgentPanel>,
-    explorer_view: ExplorerView,
-    explorer_context_menu: Option<ExplorerContextMenu>,
-    explorer_naming: Option<ExplorerNaming>,
+    explorer: Entity<Explorer>,
     search_panel: Option<Entity<SearchPanel>>,
     buffer_search: Option<BufferSearchState>,
     git_status: HashMap<PathBuf, StatusKind>,

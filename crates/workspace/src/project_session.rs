@@ -14,15 +14,14 @@ impl Workspace {
         let terminal_launch = Self::terminal_launch_for(slot);
         let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme));
         cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
+        let explorer = cx.new(|_| Explorer::new(explorer_view));
         ProjectSession {
             loaded: false,
             tabs: Vec::new(),
             active_tab: 0,
             split_editor: None,
             agent_panel,
-            explorer_view,
-            explorer_context_menu: None,
-            explorer_naming: None,
+            explorer,
             search_panel: None,
             buffer_search: None,
             git_status: HashMap::new(),
@@ -157,15 +156,11 @@ impl Workspace {
                         branch: None,
                         color: identity.0.unwrap_or_else(|| project_color(index)),
                         worktree: Rc::new(worktree),
-                        expanded: HashSet::new(),
-                        rows: Vec::new(),
-                        selected: None,
+                        explorer: ExplorerProject::default(),
                         open_files: Vec::new(),
                         active_file: 0,
-                        current_dir: None,
                         icon: identity.1,
                         worktree_branch: None,
-                        dir_listings: std::cell::RefCell::new(HashMap::new()),
                     };
                     slot.refresh();
                     projects.push(slot);
@@ -176,7 +171,7 @@ impl Workspace {
         // 開発用: SHIRUSHI_EXPLORER_UP=1 で先頭プロジェクトをルート直上（隣リポジトリ一覧）から撮る。
         if std::env::var_os("SHIRUSHI_EXPLORER_UP").is_some() {
             if let Some(slot) = projects.first_mut() {
-                slot.current_dir = slot.worktree.root().parent().map(Path::to_path_buf);
+                slot.explorer.current_dir = slot.worktree.root().parent().map(Path::to_path_buf);
             }
         }
         // 開発用フックの値は projects が move される前に計算しておく。
@@ -217,6 +212,12 @@ impl Workspace {
             let terminal_launch = Self::terminal_launch_for(projects.get(index));
             let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
             cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
+            let explorer = cx.new(|_| Explorer::new(explorer_view));
+            if index == active {
+                if let Some(menu) = explorer_context_menu.take() {
+                    explorer.update(cx, |explorer, cx| explorer.show_context_menu(menu, cx));
+                }
+            }
             let search_panel = if index == active {
                 search_probe.take().and_then(|results| {
                     let slot = projects.get(index)?;
@@ -244,11 +245,7 @@ impl Workspace {
                 active_tab: 0,
                 split_editor: None,
                 agent_panel,
-                explorer_view,
-                explorer_context_menu: (index == active)
-                    .then(|| explorer_context_menu.take())
-                    .flatten(),
-                explorer_naming: None,
+                explorer,
                 search_panel,
                 buffer_search: None,
                 git_status: HashMap::new(),
@@ -414,12 +411,17 @@ impl Workspace {
         // 開発用: SHIRUSHI_NAMING=1 でルートへの新規ファイル命名入力を開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_NAMING").is_some() {
             if let Some(root) = workspace.active_worktree().map(|worktree| worktree.root().to_path_buf()) {
-                workspace.explorer_naming = Some(ExplorerNaming {
-                    kind: NamingKind::NewFile,
-                    parent: root,
-                    target: None,
-                    value: "new_file.rs".to_string(),
-                    focus: cx.focus_handle(),
+                workspace.explorer.update(cx, |explorer, cx| {
+                    explorer.set_naming(
+                        ExplorerNaming {
+                            kind: NamingKind::NewFile,
+                            parent: root,
+                            target: None,
+                            value: "new_file.rs".to_string(),
+                            focus: cx.focus_handle(),
+                        },
+                        cx,
+                    )
                 });
             }
         }

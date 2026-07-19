@@ -885,7 +885,7 @@ impl Workspace {
 
     /// 開発用: インライン命名を Enter 確定する（オフスクリーン検証）。
     pub fn debug_confirm_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.explorer_naming.is_some() {
+        if self.explorer_naming(cx).is_some() {
             self.confirm_naming(window, cx);
         }
     }

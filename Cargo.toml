@@ -65,6 +65,7 @@ theme_core = { path = "crates/theme_core" }
 i18n = { path = "crates/i18n" }
 editor_core = { path = "crates/editor_core" }
 editor_view = { path = "crates/editor_view" }
+explorer = { path = "crates/explorer" }
 settings_core = { path = "crates/settings_core" }
 settings = { path = "crates/settings" }
 keymap_core = { path = "crates/keymap_core" }

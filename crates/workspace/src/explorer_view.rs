@@ -11,7 +11,7 @@ impl Workspace {
                 .border_color(theme.border);
         };
         // 表示モードで本体を切り替える。カラム表示は複数カラム分だけ横幅を広げる（Finder 風）。
-        let body = match self.explorer_view {
+        let body = match self.explorer_mode(cx) {
             ExplorerView::Tree => self.render_tree(slot, cx),
             ExplorerView::Columns => self.render_columns(slot, cx),
             ExplorerView::Icons => self.render_icons(slot, cx),
@@ -62,7 +62,7 @@ impl Workspace {
     /// ツリー表示（縦。従来）。行 = chevron + アイコン + 名前。
     /// インライン命名の入力行（ツリー内に splice する・M10 ファイル操作）。
     fn render_naming_row(&self, depth: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(naming) = self.explorer_naming.as_ref() else {
+        let Some(naming) = self.explorer_naming(cx) else {
             return div().into_any_element();
         };
         let theme = self.theme.clone();
@@ -106,14 +106,15 @@ impl Workspace {
     fn render_tree(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let color = slot.color;
-        let selected = slot.selected.clone();
+        let selected = slot.explorer.selected.clone();
         let git_status = &self.git_status;
         let root = slot.worktree.root().to_path_buf(); // ドラッグ時の @メンション相対パス用
         // インライン命名（M10）: rename は対象行を入力行に置き換え、New* は親フォルダ行の直後
         // （親がルートなら先頭）に入力行を挿す。
-        let naming_kind = self.explorer_naming.as_ref().map(|naming| naming.kind);
-        let naming_parent = self.explorer_naming.as_ref().map(|naming| naming.parent.clone());
-        let naming_target = self.explorer_naming.as_ref().and_then(|naming| naming.target.clone());
+        let naming = self.explorer_naming(cx);
+        let naming_kind = naming.as_ref().map(|naming| naming.kind);
+        let naming_parent = naming.as_ref().map(|naming| naming.parent.clone());
+        let naming_target = naming.as_ref().and_then(|naming| naming.target.clone());
         let naming_at_root = naming_kind.is_some()
             && naming_kind != Some(NamingKind::Rename)
             && naming_parent.as_deref() == Some(root.as_path());
@@ -121,7 +122,7 @@ impl Workspace {
         if naming_at_root {
             elements.push(self.render_naming_row(0, cx));
         }
-        for (index, row) in slot.rows.iter().enumerate() {
+        for (index, row) in slot.explorer.rows.iter().enumerate() {
             if naming_kind == Some(NamingKind::Rename) && naming_target.as_ref() == Some(&row.path) {
                 elements.push(self.render_naming_row(row.depth, cx));
                 continue;
@@ -265,9 +266,9 @@ impl Workspace {
     /// アイコングリッド表示（現在フォルダの直下。フォルダはクリックで中に入る・ファイルは開く）。
     fn render_icons(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
-        let dir = slot.current_dir.clone().unwrap_or_else(|| slot.worktree.root().to_path_buf());
+        let dir = slot.explorer.current_dir.clone().unwrap_or_else(|| slot.worktree.root().to_path_buf());
         let entries = slot.listed_dir(&dir); // キャッシュ付き（render 中の FS/RPC は初回のみ）
-        let selected = slot.selected.clone();
+        let selected = slot.explorer.selected.clone();
         div()
             .flex_1()
             .overflow_hidden()
@@ -333,7 +334,7 @@ impl Workspace {
     fn render_columns(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let root = slot.worktree.root().to_path_buf();
-        let current = slot.current_dir.clone().unwrap_or_else(|| root.clone());
+        let current = slot.explorer.current_dir.clone().unwrap_or_else(|| root.clone());
         // ルート → current の連鎖（各段がカラムになる）。
         let mut chain: Vec<PathBuf> = Vec::new();
         let mut walk = current.as_path();
@@ -427,7 +428,7 @@ impl Workspace {
         let theme = self.theme.clone();
         let accent = slot.color;
         let root = slot.worktree.root().to_path_buf();
-        let current = slot.current_dir.clone().unwrap_or_else(|| root.clone());
+        let current = slot.explorer.current_dir.clone().unwrap_or_else(|| root.clone());
         let in_project = current.starts_with(&root);
 
         let mut header = div()
@@ -579,7 +580,7 @@ impl Workspace {
     /// エクスプローラ下部の表示モード切替（ツリー / カラム / アイコン）。
     fn render_explorer_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let current = self.explorer_view;
+        let current = self.explorer_mode(cx);
         // アイコンは Lucide SVG。svg は親の text_color を継承しない（自分の style.text.color のみ参照）
         // ため、色は svg へ直接指定。ホバー時の明るさ変化は group_hover で id 単位に効かせる。
         let button = |view: ExplorerView, id: &'static str, icon: &'static str, tip: String| {
@@ -626,7 +627,7 @@ impl Workspace {
     /// エクスプローラの右クリックメニュー（開いていれば）。フォルダ=新規ウィンドウで開く 等。
     /// 背後に透明バックドロップを敷き、外側クリックで閉じる。
     fn render_explorer_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let menu = self.explorer_context_menu.as_ref()?;
+        let menu = self.explorer_context_menu(cx)?;
         let (bg2, bg3, border, fg1, fg0) =
             (self.theme.bg2, self.theme.bg3, self.theme.border, self.theme.fg1, self.theme.fg0);
         let path = menu.path.clone();

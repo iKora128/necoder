@@ -1,10 +1,22 @@
 impl Workspace {
+    fn explorer_mode(&self, cx: &App) -> ExplorerView {
+        self.explorer.read(cx).view()
+    }
+
+    fn explorer_naming(&self, cx: &App) -> Option<ExplorerNaming> {
+        self.explorer.read(cx).naming()
+    }
+
+    fn explorer_context_menu(&self, cx: &App) -> Option<ExplorerContextMenu> {
+        self.explorer.read(cx).context_menu()
+    }
+
     fn toggle_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if let Some(slot) = self.projects.get_mut(self.active) {
-            if slot.expanded.contains(&path) {
-                slot.expanded.remove(&path);
+            if slot.explorer.expanded.contains(&path) {
+                slot.explorer.expanded.remove(&path);
             } else {
-                slot.expanded.insert(path);
+                slot.explorer.expanded.insert(path);
             }
             slot.refresh();
             cx.notify();
@@ -14,7 +26,7 @@ impl Workspace {
     /// エクスプローラの表示モードを切り替える（左下スイッチャー）。
     /// カラム表示は幅が要るので、狭ければ広げる（以後ユーザーがドラッグで調整）。
     fn set_explorer_view(&mut self, view: ExplorerView, cx: &mut Context<Self>) {
-        self.explorer_view = view;
+        self.explorer.update(cx, |explorer, cx| explorer.set_view(view, cx));
         if view == ExplorerView::Columns && self.chrome.explorer_width < 440.0 {
             self.chrome.explorer_width = 440.0;
         }
@@ -30,11 +42,13 @@ impl Workspace {
             .map(|slot| !dir.starts_with(slot.worktree.root()))
             .unwrap_or(false);
         if let Some(slot) = self.projects.get_mut(self.active) {
-            slot.current_dir = Some(dir.clone());
-            slot.selected = Some(dir);
+            slot.explorer.current_dir = Some(dir.clone());
+            slot.explorer.selected = Some(dir);
+            slot.refresh();
         }
-        if outside && self.explorer_view == ExplorerView::Tree {
-            self.explorer_view = ExplorerView::Columns;
+        if outside && self.explorer_mode(cx) == ExplorerView::Tree {
+            self.explorer
+                .update(cx, |explorer, cx| explorer.set_view(ExplorerView::Columns, cx));
         }
         cx.notify();
     }
@@ -47,7 +61,9 @@ impl Workspace {
         position: Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.explorer_context_menu = Some(ExplorerContextMenu { path, is_dir, position });
+        self.explorer.update(cx, |explorer, cx| {
+            explorer.show_context_menu(ExplorerContextMenu { path, is_dir, position }, cx)
+        });
         cx.notify();
     }
 
@@ -73,19 +89,27 @@ impl Workspace {
         };
         // 親フォルダを展開しておく（入力行が見えるように）。
         if let Some(slot) = self.projects.get_mut(self.active) {
-            slot.expanded.insert(parent.clone());
+            slot.explorer.expanded.insert(parent.clone());
             slot.refresh();
         }
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.explorer_naming = Some(ExplorerNaming { kind, parent, target, value: initial, focus });
+        self.explorer.update(cx, |explorer, cx| {
+            explorer.set_naming(
+                ExplorerNaming { kind, parent, target, value: initial, focus },
+                cx,
+            )
+        });
         self.hide_context_menu(cx);
         cx.notify();
     }
 
     /// インライン命名の確定（Enter）。作成/リネームを実行してツリーを更新する。
     fn confirm_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(naming) = self.explorer_naming.take() else {
+        let Some(naming) = self
+            .explorer
+            .update(cx, |explorer, cx| explorer.take_naming(cx))
+        else {
             return;
         };
         let name = naming.value.trim();
@@ -115,7 +139,7 @@ impl Workspace {
                     self.open_file(destination.clone(), window, cx);
                 }
                 if let Some(slot) = self.projects.get_mut(self.active) {
-                    slot.selected = Some(destination);
+                    slot.explorer.selected = Some(destination);
                     slot.refresh();
                 }
                 self.refresh_git_status(cx);
@@ -127,7 +151,10 @@ impl Workspace {
 
     /// インライン命名の中止（Esc・外側クリック）。
     fn cancel_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.explorer_naming.take().is_some() {
+        let naming = self
+            .explorer
+            .update(cx, |explorer, cx| explorer.take_naming(cx));
+        if naming.is_some() {
             match self.active_editor() {
                 Some(editor) => {
                     let handle = editor.read(cx).focus_handle(cx);
@@ -145,17 +172,17 @@ impl Workspace {
             "escape" => self.cancel_naming(window, cx),
             "enter" => self.confirm_naming(window, cx),
             "backspace" => {
-                if let Some(naming) = self.explorer_naming.as_mut() {
-                    naming.value.pop();
-                    cx.notify();
-                }
+                self.explorer.update(cx, |explorer, cx| {
+                    explorer.update_naming(|naming| {
+                        naming.value.pop();
+                    }, cx)
+                });
             }
             "v" if event.keystroke.modifiers.platform => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    if let Some(naming) = self.explorer_naming.as_mut() {
-                        naming.value.push_str(text.trim());
-                        cx.notify();
-                    }
+                    self.explorer.update(cx, |explorer, cx| {
+                        explorer.update_naming(|naming| naming.value.push_str(text.trim()), cx)
+                    });
                 }
             }
             _ => {
@@ -169,10 +196,9 @@ impl Workspace {
                 if text.is_empty() || text.chars().any(char::is_control) {
                     return;
                 }
-                if let Some(naming) = self.explorer_naming.as_mut() {
-                    naming.value.push_str(text);
-                    cx.notify();
-                }
+                self.explorer.update(cx, |explorer, cx| {
+                    explorer.update_naming(|naming| naming.value.push_str(text), cx)
+                });
             }
         }
     }
@@ -183,7 +209,7 @@ impl Workspace {
         match project::duplicate_local(&path) {
             Ok(copy) => {
                 if let Some(slot) = self.projects.get_mut(self.active) {
-                    slot.selected = Some(copy);
+                    slot.explorer.selected = Some(copy);
                     slot.refresh();
                 }
                 self.refresh_git_status(cx);
@@ -202,8 +228,8 @@ impl Workspace {
         match project::trash_local(&path) {
             Ok(()) => {
                 if let Some(slot) = self.projects.get_mut(self.active) {
-                    if slot.selected.as_ref() == Some(&path) {
-                        slot.selected = None;
+                    if slot.explorer.selected.as_ref() == Some(&path) {
+                        slot.explorer.selected = None;
                     }
                     slot.refresh();
                 }
@@ -215,9 +241,8 @@ impl Workspace {
     }
 
     fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
-        if self.explorer_context_menu.take().is_some() {
-            cx.notify();
-        }
+        self.explorer
+            .update(cx, |explorer, cx| explorer.hide_context_menu(cx));
     }
 
     /// フォルダを**新規ウィンドウ**でプロジェクトとして開く（ウィンドウモデルの核）。
@@ -291,21 +316,17 @@ impl Workspace {
             branch: None,
             color,
             worktree: Rc::new(worktree),
-            expanded: HashSet::new(),
-            rows: Vec::new(),
-            selected: None,
+            explorer: ExplorerProject::default(),
             open_files: Vec::new(),
             active_file: 0,
-            current_dir: None,
             icon: identity.1,
             worktree_branch: branch,
-            dir_listings: std::cell::RefCell::new(HashMap::new()),
         };
         slot.refresh();
         let session = Self::create_project_session(
             Some(&slot),
             self.theme.clone(),
-            self.explorer_view,
+            self.explorer_mode(cx),
             self.persistence.storage.clone(),
             cx,
         );
@@ -485,7 +506,7 @@ impl Workspace {
             None => ProjectSource::local(path),
         };
         self.open_source_as_window(source, cx);
-        self.explorer_context_menu = None;
+        self.hide_context_menu(cx);
         cx.notify();
     }
 
@@ -523,7 +544,7 @@ impl Workspace {
     /// パスをクリップボードへコピー。
     fn copy_path(&mut self, path: &Path, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
-        self.explorer_context_menu = None;
+        self.hide_context_menu(cx);
         cx.notify();
     }
 
@@ -692,7 +713,7 @@ impl Workspace {
         self.active_tab = self.tabs.len() - 1;
 
         if let Some(slot) = self.projects.get_mut(self.active) {
-            slot.selected = Some(path.clone());
+            slot.explorer.selected = Some(path.clone());
         }
         self.sync_active_slot();
         self.refresh_git_status(cx);
