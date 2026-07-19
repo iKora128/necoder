@@ -6665,8 +6665,10 @@ dependencies = [
  "alacritty_terminal",
  "futures",
  "gpui",
+ "i18n",
  "libc",
  "theme_core",
+ "ui",
 ]
 
 [[package]]

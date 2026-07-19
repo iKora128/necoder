@@ -7,6 +7,9 @@
 //! - 入力は v1 では `on_key_down` 一本化（印字も特殊キーも bytes 化）。IME 前編集は非対応（後続）。
 //! - 出典: zed `terminal` / `terminal_view`（GPL-3.0-or-later の設計を参考に新規実装。2026-07 時点）。
 
+mod dock;
+pub use dock::{TerminalDock, TerminalDockEvent, TerminalLaunch};
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

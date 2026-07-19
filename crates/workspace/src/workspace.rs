@@ -28,7 +28,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use terminal_view::TerminalView;
+use terminal_view::{TerminalDock, TerminalDockEvent, TerminalLaunch};
 use theme_core::{Theme, ThemeSource, project_color};
 use ui::Tooltip;
 use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
@@ -190,7 +190,6 @@ const TITLEBAR_HEIGHT: f32 = 38.0;
 const TABSTRIP_HEIGHT: f32 = 34.0;
 const BREADCRUMB_HEIGHT: f32 = 26.0;
 const STATUSBAR_HEIGHT: f32 = 26.0;
-const BOTTOM_DOCK_HEIGHT: f32 = 240.0; // 下ドック（ターミナル）の高さ
 /// macOS のネイティブ信号機（appears_transparent 時も残る）を避けるための左余白。
 const TRAFFIC_LIGHT_INSET: f32 = 92.0; // ネイティブ信号機とプロジェクトピルの間に余白を持たせる
 
@@ -883,9 +882,8 @@ pub struct Workspace {
     github_slug: Option<String>,
     // branch/worktree メニュー（titlebar の ⎇ クリックで開く。開いていれば出す位置）。
     branch_menu: Option<BranchMenuState>,
-    // 下ドックの統合ターミナル（タブ式・初回表示で遅延生成。show_bottom で出す）。
-    terminals: Vec<Entity<TerminalView>>,
-    active_terminal: usize,
+    // 下ドックの統合ターミナル。タブ・PTY の所有権は terminal_view 側に閉じる。
+    terminal_dock: Entity<TerminalDock>,
     // 最後に触った面が Agent か（⌘W の宛先判定。true=Agent スレッド / false=エディタタブ）。
     // フォーカスに頼らずクリックで確定する（Zed の active pane 相当）。
     agent_active: bool,
@@ -1154,8 +1152,11 @@ impl Workspace {
                 }
             })
         });
-        let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
         let active = active.min(projects.len().saturating_sub(1));
+        let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
+        let terminal_launch = Self::terminal_launch_for(projects.get(active));
+        let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
+        cx.subscribe(&terminal_dock, Self::on_terminal_dock_event).detach();
         let mut workspace = Workspace {
             projects,
             active,
@@ -1204,8 +1205,7 @@ impl Workspace {
             git_history: Vec::new(),
             github_slug: None,
             branch_menu: None,
-            terminals: Vec::new(),
-            active_terminal: 0,
+            terminal_dock,
             agent_active: false,
             recently_closed_files: Vec::new(),
             lsp: None,
@@ -1276,7 +1276,9 @@ impl Workspace {
         // 開発用: SHIRUSHI_TERMINAL=1 で下ドックのターミナルを開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_TERMINAL").is_some() {
             workspace.show_bottom = true;
-            workspace.ensure_terminal(cx);
+            workspace.terminal_dock.update(cx, |dock, cx| {
+                dock.ensure_active(cx);
+            });
         }
         // 開発用: SHIRUSHI_COLOR_PICKER=1（or hex 文字列）で色ピッカーを開いた状態で撮る（Peacock 拡張の検証）。
         if let Ok(probe) = std::env::var("SHIRUSHI_COLOR_PICKER") {
@@ -3015,10 +3017,7 @@ impl Workspace {
     /// 選択+指示 → `claude -p` で書き換え → その場 diff → accept/reject（チャットへ行かない最短経路）。
     /// ターミナルにフォーカスがあれば同型の「自然言語 → コマンド生成」になる。
     fn open_inline_edit(&mut self, _: &InlineEdit, window: &mut Window, cx: &mut Context<Self>) {
-        let terminal_focused = self
-            .terminals
-            .iter()
-            .any(|terminal| terminal.read(cx).focus_handle().is_focused(window));
+        let terminal_focused = self.terminal_dock.read(cx).is_any_focused(window, cx);
         let target = if terminal_focused {
             InlineEditTarget::Terminal
         } else {
@@ -3085,10 +3084,8 @@ impl Workspace {
                 }
             }
             InlineEditTarget::Terminal => {
-                if let Some(terminal) = self.terminals.get(self.active_terminal) {
-                    let handle = terminal.read(cx).focus_handle();
-                    window.focus(&handle, cx);
-                }
+                self.terminal_dock
+                    .update(cx, |dock, cx| dock.focus_active_if_present(window, cx));
             }
         }
         cx.notify();
@@ -3192,11 +3189,8 @@ impl Workspace {
                 }
             }
             InlineEditTarget::Terminal => {
-                if let Some(terminal) = self.terminals.get(self.active_terminal) {
-                    terminal.read(cx).insert_text(&proposal);
-                    let handle = terminal.read(cx).focus_handle();
-                    window.focus(&handle, cx);
-                }
+                self.terminal_dock
+                    .update(cx, |dock, cx| dock.insert_text(&proposal, window, cx));
             }
         }
         cx.notify();
@@ -5835,8 +5829,9 @@ impl Workspace {
     /// プロジェクト切替（switch_project）と、アクティブスロットをレールから外した後（remove_project_slot）で共有。
     fn load_active_slot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // process/PTY は project の host と不可分。旧 host の session を次の project へ持ち越さない。
-        self.terminals.clear();
-        self.active_terminal = 0;
+        let terminal_launch = Self::terminal_launch_for(self.active_slot());
+        self.terminal_dock
+            .update(cx, |dock, cx| dock.reset_launch(terminal_launch, cx));
         self.lsp = None;
         self._lsp_pump = None;
         self.lsp_root = None;
@@ -5852,7 +5847,9 @@ impl Workspace {
         self.update_agent_destination(cx);
         self.start_watcher(cx); // 監視対象を新しい worktree に張り替える
         if self.show_bottom {
-            self.ensure_terminal(cx);
+            self.terminal_dock.update(cx, |dock, cx| {
+                dock.ensure_active(cx);
+            });
         }
     }
 
@@ -6027,11 +6024,9 @@ impl Workspace {
 
     // ── 下ドックのターミナル（M8） ──
 
-    /// ターミナルを遅延生成する（初回表示時。cwd = アクティブプロジェクトルート）。
-    /// ターミナルを1つ生成する（アクティブプロジェクトの host/cwd・remote なら SSH shell）。
-    fn create_terminal(&self, cx: &mut Context<Self>) -> Entity<TerminalView> {
-        let (cwd, shell) = self
-            .active_slot()
+    /// project の Host 設定を TerminalDock が扱える launch spec に解決する。
+    fn terminal_launch_for(slot: Option<&ProjectSlot>) -> TerminalLaunch {
+        let (cwd, shell) = slot
             .map(|slot| {
                 let root = slot.worktree.root().to_path_buf();
                 match slot.worktree.host().terminal_launch(&root) {
@@ -6044,7 +6039,6 @@ impl Workspace {
                 }
             })
             .unwrap_or((None, None));
-        let theme = self.theme.clone();
         // 開発用: SHIRUSHI_TERM_ECHO="text" で起動時に text を表示してから shell へ
         // （file:line リンクの下線描画をオフスクリーン検証するためのフック・M13）。
         let shell = match std::env::var("SHIRUSHI_TERM_ECHO") {
@@ -6054,65 +6048,12 @@ impl Workspace {
             )),
             _ => shell,
         };
-        let terminal = cx.new(|cx| TerminalView::new_with_shell(cwd, shell, theme, cx));
-        // file:line リンク（M13）: クリックで該当行へ（cargo/rustc/grep の出力パス）。
-        cx.subscribe(&terminal, Self::on_terminal_event).detach();
-        terminal
-    }
-
-    /// 最低 1 つターミナルがある状態にして、アクティブなものを返す。
-    fn ensure_terminal(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
-        if self.terminals.is_empty() {
-            let terminal = self.create_terminal(cx);
-            self.terminals.push(terminal);
-            self.active_terminal = 0;
-        }
-        self.active_terminal = self.active_terminal.min(self.terminals.len() - 1);
-        self.terminals[self.active_terminal].clone()
+        TerminalLaunch { cwd, shell }
     }
 
     /// アクティブなターミナルにフォーカス（キー入力を受ける）。
     fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let terminal = self.ensure_terminal(cx);
-        let handle = terminal.read(cx).focus_handle();
-        window.focus(&handle, cx);
-    }
-
-    /// 新しいターミナルタブを追加してアクティブに（＋ボタン）。
-    fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let terminal = self.create_terminal(cx);
-        self.terminals.push(terminal);
-        self.active_terminal = self.terminals.len() - 1;
-        self.focus_active_terminal(window, cx);
-        cx.notify();
-    }
-
-    /// ターミナルタブを切り替える。
-    fn switch_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index < self.terminals.len() {
-            self.active_terminal = index;
-            self.focus_active_terminal(window, cx);
-            cx.notify();
-        }
-    }
-
-    /// ターミナルタブを閉じる。最後の 1 つを閉じたら下ドックを畳む。
-    fn close_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.terminals.len() {
-            return;
-        }
-        self.terminals.remove(index);
-        if self.terminals.is_empty() {
-            self.show_bottom = false;
-            self.active_terminal = 0;
-        } else {
-            if index <= self.active_terminal && self.active_terminal > 0 {
-                self.active_terminal -= 1;
-            }
-            self.active_terminal = self.active_terminal.min(self.terminals.len() - 1);
-            self.focus_active_terminal(window, cx);
-        }
-        cx.notify();
+        self.terminal_dock.update(cx, |dock, cx| dock.focus_active(window, cx));
     }
 
     /// 下ドック（ターミナル）を開閉する。開くときは生成 + フォーカス（キー入力を受ける）。
@@ -7249,9 +7190,8 @@ impl Workspace {
         if let Some(picker) = &self.picker {
             picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
         }
-        for terminal in &self.terminals {
-            terminal.update(cx, |terminal, cx| terminal.set_theme(theme.clone(), cx));
-        }
+        self.terminal_dock
+            .update(cx, |dock, cx| dock.set_theme(theme.clone(), cx));
         cx.notify();
     }
 
@@ -8084,24 +8024,30 @@ impl Workspace {
 
     /// ターミナルの file:line リンク（M13）。相対パスはアクティブプロジェクトの root 基準。
     /// subscribe に window が無いので pending_transient_tab と同様「次の render で消化」する。
-    fn on_terminal_event(
+    fn on_terminal_dock_event(
         &mut self,
-        _terminal: Entity<TerminalView>,
-        event: &terminal_view::TerminalEvent,
+        _dock: Entity<TerminalDock>,
+        event: &TerminalDockEvent,
         cx: &mut Context<Self>,
     ) {
-        let terminal_view::TerminalEvent::OpenPath { path, line } = event;
-        let resolved = if std::path::Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else if let Some(stripped) = path.strip_prefix("~/") {
-            std::env::home_dir().map(|home| home.join(stripped)).unwrap_or_else(|| PathBuf::from(path))
-        } else {
-            let Some(worktree) = self.active_worktree() else {
-                return;
-            };
-            worktree.root().join(path)
-        };
-        self.pending_terminal_jump = Some((resolved, line.saturating_sub(1)));
+        match event {
+            TerminalDockEvent::OpenPath { path, line } => {
+                let resolved = if std::path::Path::new(path).is_absolute() {
+                    PathBuf::from(path)
+                } else if let Some(stripped) = path.strip_prefix("~/") {
+                    std::env::home_dir()
+                        .map(|home| home.join(stripped))
+                        .unwrap_or_else(|| PathBuf::from(path))
+                } else {
+                    let Some(worktree) = self.active_worktree() else {
+                        return;
+                    };
+                    worktree.root().join(path)
+                };
+                self.pending_terminal_jump = Some((resolved, line.saturating_sub(1)));
+            }
+            TerminalDockEvent::Dismissed => self.show_bottom = false,
+        }
         cx.notify();
     }
 
@@ -8482,11 +8428,8 @@ impl Workspace {
     /// 開発用: ターミナルを開いて file:line リンクのクリック相当イベントを発火（M13 の結線検証）。
     pub fn debug_terminal_link(&mut self, path: String, line: u32, window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_terminal(&ToggleTerminal, window, cx);
-        if let Some(terminal) = self.terminals.get(self.active_terminal) {
-            terminal.update(cx, |_, cx| {
-                cx.emit(terminal_view::TerminalEvent::OpenPath { path, line });
-            });
-        }
+        self.terminal_dock
+            .update(cx, |dock, cx| dock.emit_open_path(path, line, cx));
     }
 
     /// 開発用: ⌘O スイッチャーを開く（M12-12 のオフスクリーン検証）。
@@ -12031,17 +11974,14 @@ impl Workspace {
             .active_slot()
             .filter(|slot| !slot.worktree.host().is_remote())
             .map(|slot| slot.worktree.root().to_path_buf());
-        let theme = self.theme.clone();
         let shell = Some((
             "/bin/sh".to_string(),
             vec!["-lc".to_string(), format!("{command}; exec \"${{SHELL:-/bin/zsh}}\" -l")],
         ));
-        let terminal = cx.new(|cx| TerminalView::new_with_shell(cwd, shell, theme, cx));
-        cx.subscribe(&terminal, Self::on_terminal_event).detach();
-        self.terminals.push(terminal);
-        self.active_terminal = self.terminals.len() - 1;
         self.show_bottom = true;
-        self.focus_active_terminal(window, cx);
+        self.terminal_dock.update(cx, |dock, cx| {
+            dock.open_command(TerminalLaunch { cwd, shell }, window, cx)
+        });
         cx.notify();
     }
 
@@ -12116,107 +12056,8 @@ impl Workspace {
             .when(self.show_bottom, |element| element.child(self.render_bottom_dock(cx)))
     }
 
-    /// 下ドック（統合ターミナル・M8）。ヘッダ（タブ + 閉じる）+ ターミナル本体。
-    fn render_bottom_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme.clone();
-        let active = self.active_terminal;
-        // ── タブ行: ターミナル N（× で閉じ）を並べ、末尾に ＋（追加）と ドックを閉じる × ──
-        let mut header = div()
-            .flex()
-            .items_center()
-            .h(px(28.))
-            .flex_none()
-            .bg(theme.bg0)
-            .border_t_1()
-            .border_b_1()
-            .border_color(theme.border);
-        for index in 0..self.terminals.len() {
-            let is_active = index == active;
-            header = header.child(
-                div()
-                    .id(("term-tab", index))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .h_full()
-                    .px(px(10.))
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .cursor_pointer()
-                    .text_size(px(11.5))
-                    .text_color(if is_active { theme.fg0 } else { theme.fg2 })
-                    .when(is_active, |element| element.bg(theme.bg1))
-                    .hover(|style| style.bg(theme.bg1))
-                    .child(i18n::t!("terminal.tab_title", "n" => index + 1))
-                    .child(
-                        div()
-                            .id(("term-tab-close", index))
-                            .flex_none()
-                            .text_color(theme.fg2)
-                            .hover(|style| style.text_color(theme.fg0))
-                            .child("×")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.close_terminal(index, window, cx);
-                                }),
-                            ),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| this.switch_terminal(index, window, cx)),
-                    ),
-            );
-        }
-        let header = header
-            .child(
-                div()
-                    .id("term-add")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(28.))
-                    .h_full()
-                    .text_color(theme.fg2)
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(theme.fg0).bg(theme.bg1))
-                    .child("＋")
-                    .tooltip(Tooltip::text(i18n::t!("terminal.add_tip"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.add_terminal(window, cx)),
-                    ),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("term-close-dock")
-                    .px(px(8.))
-                    .text_color(theme.fg2)
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(theme.fg0))
-                    .child("×")
-                    .tooltip(Tooltip::text(i18n::t!("terminal.close_dock_tip"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.toggle_terminal(&ToggleTerminal, window, cx)
-                        }),
-                    ),
-            );
-        let body = match self.terminals.get(active) {
-            Some(terminal) => div().flex_1().min_h_0().overflow_hidden().child(terminal.clone()),
-            None => div().flex_1(),
-        };
-        div()
-            .h(px(BOTTOM_DOCK_HEIGHT))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .bg(theme.bg1)
-            .child(header)
-            .child(body)
+    fn render_bottom_dock(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.terminal_dock.clone()
     }
 
     fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
