@@ -6,12 +6,12 @@
 
 use editor_core::{Buffer, BufferSnapshot, Point as BufferPoint, Selection};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
-    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Style, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla, point, prelude::*, px,
-    relative, size,
+    actions, div, fill, hsla, point, prelude::*, px, relative, size, App, Bounds, Context,
+    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ScrollWheelEvent, ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window,
 };
 use std::ops::Range;
 use theme_core::{SyntaxColors, Theme};
@@ -92,7 +92,10 @@ pub enum EditorInputEvent {
     /// クリックでキャレットが大きく飛んだ（ナビ履歴に積む・M10-11）。値は移動**前**の byte offset。
     CaretJumped { from: usize },
     /// gutter の diff バーがクリックされた（hunk 操作ポップオーバー・M11-10）。
-    HunkClicked { hunk: project::DiffHunk, position: Point<Pixels> },
+    HunkClicked {
+        hunk: project::DiffHunk,
+        position: Point<Pixels>,
+    },
 }
 
 /// マウスが同じ位置に ~500ms 留まった通知（LSP hover の配線用・M10）。
@@ -100,7 +103,11 @@ pub enum EditorInputEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditorHoverEvent {
     /// 留まった位置。`line`/`character` は LSP 位置（UTF-16）・`anchor` はウィンドウ座標。
-    Dwell { line: u32, character: u32, anchor: Point<Pixels> },
+    Dwell {
+        line: u32,
+        character: u32,
+        anchor: Point<Pixels>,
+    },
     /// hover を消すべき操作（クリック・スクロール・dwell 位置から大きく離れた）。
     Cancel,
 }
@@ -167,6 +174,10 @@ pub struct EditorView {
     highlight_version: u64,
     /// 検索ジャンプ等の保留スクロール（byte offset）。次の prepaint で viewport 確定後に消化＝one-shot。
     pending_reveal: Option<usize>,
+    /// 編集/カーソル移動で要求された caret 可視化を、次の prepaint（wrap_map 再構築後）で消化する。
+    /// 編集ハンドラ時点では wrap_map が旧 version で `display_row_for_offset` が論理行へフォールバックし、
+    /// 折り返した長い行のキャレット表示行を誤る（＝画面外のまま）ため、reveal を prepaint へ遅延する。
+    pending_caret_reveal: bool,
     /// gutter diff（HEAD vs 現在バッファ・非同期計算）。plain / 無題ファイルは常に空。
     diff_hunks: Vec<project::DiffHunk>,
     /// diff を最後にスケジュールしたバッファ version（prepaint での重複起動防止）。
@@ -207,8 +218,6 @@ pub struct PositionSnapshot {
     scroll_top: Pixels,
 }
 
-
-
 impl EditorView {
     pub fn new(buffer: Buffer, theme: Theme, accent: gpui::Hsla, cx: &mut Context<Self>) -> Self {
         let mut highlighter = buffer
@@ -230,6 +239,7 @@ impl EditorView {
             highlighter,
             highlight_version,
             pending_reveal: None,
+            pending_caret_reveal: false,
             diff_hunks: Vec::new(),
             diff_scheduled_version: u64::MAX, // 初回描画で必ず計算させる
             diff_gen: 0,
@@ -261,20 +271,18 @@ impl EditorView {
     /// `_blink_task` を差し替える＝古いタスクは drop されて止まる。blur 時は `_blink_task=None`。
     fn start_blinking(&mut self, cx: &mut Context<Self>) {
         self.blink_visible = true;
-        self._blink_task = Some(cx.spawn(async move |editor, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(530))
-                    .await;
-                let alive = editor
-                    .update(cx, |editor, cx| {
-                        editor.blink_visible = !editor.blink_visible;
-                        cx.notify();
-                    })
-                    .is_ok();
-                if !alive {
-                    break;
-                }
+        self._blink_task = Some(cx.spawn(async move |editor, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(530))
+                .await;
+            let alive = editor
+                .update(cx, |editor, cx| {
+                    editor.blink_visible = !editor.blink_visible;
+                    cx.notify();
+                })
+                .is_ok();
+            if !alive {
+                break;
             }
         }));
     }
@@ -314,7 +322,8 @@ impl EditorView {
     pub fn reveal_position(&mut self, row: usize, column: usize, cx: &mut Context<Self>) {
         let snapshot = self.buffer.snapshot();
         let clamped_row = row.min(snapshot.line_count().saturating_sub(1));
-        let offset = snapshot.clip_offset(snapshot.point_to_byte(BufferPoint::new(clamped_row, column)));
+        let offset =
+            snapshot.clip_offset(snapshot.point_to_byte(BufferPoint::new(clamped_row, column)));
         self.buffer.set_selections(vec![Selection::cursor(offset)]);
         self.blink_visible = true;
         self.pending_reveal = Some(offset);
@@ -330,7 +339,11 @@ impl EditorView {
     }
 
     /// blame 注釈を差し替える（workspace が計算して呼ぶ・M11-11）。None でクリア。
-    pub fn set_line_annotation(&mut self, annotation: Option<(usize, SharedString)>, cx: &mut Context<Self>) {
+    pub fn set_line_annotation(
+        &mut self,
+        annotation: Option<(usize, SharedString)>,
+        cx: &mut Context<Self>,
+    ) {
         if self.line_annotation != annotation {
             self.line_annotation = annotation;
             cx.notify();
@@ -435,7 +448,12 @@ impl EditorView {
     }
 
     /// 表示行単位の縦移動先 byte（wrap 中の行内移動）。マップが古ければ論理行移動。
-    fn vertical_display_target(&self, snapshot: &BufferSnapshot, head: usize, delta: isize) -> usize {
+    fn vertical_display_target(
+        &self,
+        snapshot: &BufferSnapshot,
+        head: usize,
+        delta: isize,
+    ) -> usize {
         if self.wrap_map.key.0 != snapshot.version() {
             return vertical(snapshot, head, delta);
         }
@@ -452,7 +470,8 @@ impl EditorView {
         // 現セグメント内の相対 byte を維持（等幅近似・行末クリップ）。
         let current_range = {
             let (c_line, c_segment) = self.wrap_map.display_to_logical(display);
-            self.wrap_map.segment_range(c_line, c_segment, snapshot.line_len_bytes(c_line))
+            self.wrap_map
+                .segment_range(c_line, c_segment, snapshot.line_len_bytes(c_line))
         };
         let relative = point.column.saturating_sub(current_range.start);
         let column = (target_range.start + relative).min(target_range.end);
@@ -466,7 +485,11 @@ impl EditorView {
     }
 
     /// LSP 診断（行 + 重大度）を差し替える（workspace が publishDiagnostics 受信時に push）。
-    pub fn set_diagnostics(&mut self, diagnostics: Vec<(u32, lang::lsp::Severity)>, cx: &mut Context<Self>) {
+    pub fn set_diagnostics(
+        &mut self,
+        diagnostics: Vec<(u32, lang::lsp::Severity)>,
+        cx: &mut Context<Self>,
+    ) {
         self.diagnostics = diagnostics;
         cx.notify();
     }
@@ -495,14 +518,17 @@ impl EditorView {
         let row = (line as usize).min(snapshot.line_count().saturating_sub(1));
         let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0));
         let utf16_line_start = self.buffer.byte_to_utf16(line_start);
-        let target = self.buffer.utf16_to_byte(utf16_line_start + character as usize);
+        let target = self
+            .buffer
+            .utf16_to_byte(utf16_line_start + character as usize);
         let column = target.saturating_sub(line_start);
         self.reveal_position(row, column, cx);
     }
 
     /// 主キャレットのウィンドウ座標（下端左）。補完ポップアップの表示位置に使う。直近 paint 由来。
     pub fn caret_window_position(&self) -> Option<Point<Pixels>> {
-        self.caret_bounds.map(|bounds| point(bounds.left(), bounds.bottom()))
+        self.caret_bounds
+            .map(|bounds| point(bounds.left(), bounds.bottom()))
     }
 
     /// カーソル直前の識別子プレフィクス（ASCII 英数 or `_` の連なり）。
@@ -567,7 +593,8 @@ impl EditorView {
             let row = (line as usize).min(snapshot.line_count().saturating_sub(1));
             let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0));
             let utf16_line_start = self.buffer.byte_to_utf16(line_start);
-            self.buffer.utf16_to_byte(utf16_line_start + character as usize)
+            self.buffer
+                .utf16_to_byte(utf16_line_start + character as usize)
         };
         let start = to_byte(start_line, start_character);
         let end = to_byte(end_line, end_character).max(start);
@@ -589,7 +616,8 @@ impl EditorView {
             caret_point.row.min(snapshot.line_count().saturating_sub(1)),
             caret_point.column,
         ));
-        self.buffer.set_selections(vec![Selection::cursor(restored)]);
+        self.buffer
+            .set_selections(vec![Selection::cursor(restored)]);
         self.after_edit(cx);
         // フォーマットで画面が飛ばないようスクロールは維持（クランプのみ）。
         self.scroll_top = scroll_top.max(px(0.)).min(self.max_scroll_top());
@@ -601,7 +629,8 @@ impl EditorView {
         let (start, _) = self.identifier_prefix_at_caret();
         self.buffer.edit(&[start..head], text);
         let new_cursor = start + text.len();
-        self.buffer.set_selections(vec![Selection::cursor(new_cursor)]);
+        self.buffer
+            .set_selections(vec![Selection::cursor(new_cursor)]);
         self.after_edit(cx);
     }
 
@@ -685,7 +714,9 @@ impl EditorView {
                 .timer(std::time::Duration::from_millis(250))
                 .await;
             // まだ最新の編集か（後続の編集が来ていたら破棄＝デバウンス）。
-            let latest = editor.update(cx, |editor, _| editor.diff_gen == generation).unwrap_or(false);
+            let latest = editor
+                .update(cx, |editor, _| editor.diff_gen == generation)
+                .unwrap_or(false);
             if !latest {
                 return;
             }
@@ -712,9 +743,11 @@ impl EditorView {
     /// テキストを差し替える（composer の下書き流し込み・開発プローブ用）。
     pub fn set_plain_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.buffer = Buffer::from_str(text);
-        self.buffer.set_selections(vec![Selection::cursor(text.len())]);
+        self.buffer
+            .set_selections(vec![Selection::cursor(text.len())]);
         self.marked_range = None;
         self.highlight_version = self.buffer.version();
+        self.pending_caret_reveal = true; // 末尾キャレットを可視域へ（折り返し時も）
         cx.notify();
     }
 
@@ -783,7 +816,11 @@ impl EditorView {
     }
 
     fn primary(&self) -> Selection {
-        self.buffer.selections().first().copied().unwrap_or(Selection::cursor(0))
+        self.buffer
+            .selections()
+            .first()
+            .copied()
+            .unwrap_or(Selection::cursor(0))
     }
 
     // ── カーソル移動 ──
@@ -809,7 +846,7 @@ impl EditorView {
         self.buffer.set_selections(moved);
         self.marked_range = None;
         self.blink_visible = true; // カーソル移動直後はキャレットを実体化
-        self.scroll_caret_into_view();
+        self.pending_caret_reveal = true;
         cx.notify();
     }
 
@@ -868,24 +905,40 @@ impl EditorView {
         self.buffer.set_selections(moved);
         self.marked_range = None;
         self.blink_visible = true;
-        self.scroll_caret_into_view();
+        self.pending_caret_reveal = true;
         cx.notify();
     }
 
     fn move_to_line_start(&mut self, _: &MoveToLineStart, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(false, |snapshot, selection| line_edge(snapshot, selection.head, false), cx);
+        self.apply_cursor(
+            false,
+            |snapshot, selection| line_edge(snapshot, selection.head, false),
+            cx,
+        );
     }
 
     fn move_to_line_end(&mut self, _: &MoveToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(false, |snapshot, selection| line_edge(snapshot, selection.head, true), cx);
+        self.apply_cursor(
+            false,
+            |snapshot, selection| line_edge(snapshot, selection.head, true),
+            cx,
+        );
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(true, |snapshot, selection| snapshot.prev_char_boundary(selection.head), cx);
+        self.apply_cursor(
+            true,
+            |snapshot, selection| snapshot.prev_char_boundary(selection.head),
+            cx,
+        );
     }
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(true, |snapshot, selection| snapshot.next_char_boundary(selection.head), cx);
+        self.apply_cursor(
+            true,
+            |snapshot, selection| snapshot.next_char_boundary(selection.head),
+            cx,
+        );
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -945,22 +998,43 @@ impl EditorView {
     // ── 編集の所作（M10-9）: 単語移動/削除・行操作・コメント・インデント ──
 
     fn move_word_left(&mut self, _: &MoveWordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(false, |snapshot, selection| snapshot.prev_word_boundary(selection.head), cx);
+        self.apply_cursor(
+            false,
+            |snapshot, selection| snapshot.prev_word_boundary(selection.head),
+            cx,
+        );
     }
 
     fn move_word_right(&mut self, _: &MoveWordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(false, |snapshot, selection| snapshot.next_word_boundary(selection.head), cx);
+        self.apply_cursor(
+            false,
+            |snapshot, selection| snapshot.next_word_boundary(selection.head),
+            cx,
+        );
     }
 
     fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(true, |snapshot, selection| snapshot.prev_word_boundary(selection.head), cx);
+        self.apply_cursor(
+            true,
+            |snapshot, selection| snapshot.prev_word_boundary(selection.head),
+            cx,
+        );
     }
 
     fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_cursor(true, |snapshot, selection| snapshot.next_word_boundary(selection.head), cx);
+        self.apply_cursor(
+            true,
+            |snapshot, selection| snapshot.next_word_boundary(selection.head),
+            cx,
+        );
     }
 
-    fn delete_word_backward(&mut self, _: &DeleteWordBackward, _: &mut Window, cx: &mut Context<Self>) {
+    fn delete_word_backward(
+        &mut self,
+        _: &DeleteWordBackward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.buffer.delete_word_backward();
         self.after_edit(cx);
     }
@@ -990,7 +1064,12 @@ impl EditorView {
         self.after_edit(cx);
     }
 
-    fn duplicate_line_down(&mut self, _: &DuplicateLineDown, _: &mut Window, cx: &mut Context<Self>) {
+    fn duplicate_line_down(
+        &mut self,
+        _: &DuplicateLineDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.buffer.duplicate_lines(true);
         self.after_edit(cx);
     }
@@ -1017,7 +1096,11 @@ impl EditorView {
 
     /// Tab: 選択があれば行インデント・なければ空白挿入（`DEFAULT_TAB_SIZE`。設定配線は M10-13）。
     fn tab_indent(&mut self, _: &TabIndent, _: &mut Window, cx: &mut Context<Self>) {
-        let any_selection = self.buffer.selections().iter().any(|selection| !selection.is_empty());
+        let any_selection = self
+            .buffer
+            .selections()
+            .iter()
+            .any(|selection| !selection.is_empty());
         if any_selection {
             self.buffer.indent_lines(self.tab_size);
         } else {
@@ -1141,7 +1224,7 @@ impl EditorView {
         self.marked_range = None;
         self.blink_visible = true; // 編集直後はキャレットを実体化（点滅 OFF で消えないよう）
         self.refresh_highlights();
-        self.scroll_caret_into_view();
+        self.pending_caret_reveal = true;
         cx.notify();
     }
 
@@ -1173,9 +1256,16 @@ impl EditorView {
 
     // ── スクロール ──
 
-    fn on_scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let delta_y = event.delta.pixel_delta(self.line_height()).y;
-        self.scroll_top = (self.scroll_top - delta_y).max(px(0.)).min(self.max_scroll_top());
+        self.scroll_top = (self.scroll_top - delta_y)
+            .max(px(0.))
+            .min(self.max_scroll_top());
         self.cancel_hover(cx); // スクロールでアンカーがずれる → hover は消す
         cx.notify();
     }
@@ -1205,7 +1295,12 @@ impl EditorView {
 
     // ── マウス ──
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.blink_visible = true; // クリックでキャレットを置いた直後は実体化
         self.cancel_hover(cx);
         let offset = self.offset_for_position(event.position, window);
@@ -1216,7 +1311,8 @@ impl EditorView {
                 if event.position.x >= gutter_left && event.position.x < gutter_left + px(10.) {
                     let snapshot = self.buffer.snapshot();
                     let relative_y = (event.position.y - origin.y + self.scroll_top).max(px(0.));
-                    let display_row = (f32::from(relative_y) / self.line_height_value()).floor() as usize;
+                    let display_row =
+                        (f32::from(relative_y) / self.line_height_value()).floor() as usize;
                     let (row, _) = if self.wrap_map.key.0 == snapshot.version() {
                         self.wrap_map.display_to_logical(display_row)
                     } else {
@@ -1226,10 +1322,15 @@ impl EditorView {
                     if let Some(hunk) = self
                         .diff_hunks
                         .iter()
-                        .find(|hunk| hunk.new_range.contains(&row32) || hunk.new_range.start == row32)
+                        .find(|hunk| {
+                            hunk.new_range.contains(&row32) || hunk.new_range.start == row32
+                        })
                         .cloned()
                     {
-                        cx.emit(EditorInputEvent::HunkClicked { hunk, position: event.position });
+                        cx.emit(EditorInputEvent::HunkClicked {
+                            hunk,
+                            position: event.position,
+                        });
                         return;
                     }
                 }
@@ -1246,12 +1347,16 @@ impl EditorView {
         self.is_selecting = true;
         if event.modifiers.shift {
             let anchor = self.primary().anchor;
-            self.buffer.set_selections(vec![Selection::new(anchor, offset)]);
+            self.buffer
+                .set_selections(vec![Selection::new(anchor, offset)]);
         } else {
             // 50 行以上のジャンプはナビ履歴へ（⌃- で戻れる・M10-11）。
             let snapshot = self.buffer.snapshot();
             let previous = self.primary().head;
-            let distance = snapshot.byte_to_point(previous).row.abs_diff(snapshot.byte_to_point(offset).row);
+            let distance = snapshot
+                .byte_to_point(previous)
+                .row
+                .abs_diff(snapshot.byte_to_point(offset).row);
             if distance >= 50 {
                 cx.emit(EditorInputEvent::CaretJumped { from: previous });
             }
@@ -1266,11 +1371,17 @@ impl EditorView {
         self.is_selecting = false;
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_selecting {
             let offset = self.offset_for_position(event.position, window);
             let anchor = self.primary().anchor;
-            self.buffer.set_selections(vec![Selection::new(anchor, offset)]);
+            self.buffer
+                .set_selections(vec![Selection::new(anchor, offset)]);
             cx.notify();
             return;
         }
@@ -1281,8 +1392,9 @@ impl EditorView {
         }
         // 表示中 hover の位置から大きく離れたら Cancel（ポップアップ上は occlude でここへ来ない）。
         if let Some(anchor) = self.last_dwell_anchor {
-            let distance =
-                f32::from((event.position.x - anchor.x).abs() + (event.position.y - anchor.y).abs());
+            let distance = f32::from(
+                (event.position.x - anchor.x).abs() + (event.position.y - anchor.y).abs(),
+            );
             if distance > HOVER_CANCEL_DISTANCE {
                 self.last_dwell_anchor = None;
                 cx.emit(EditorHoverEvent::Cancel);
@@ -1300,7 +1412,11 @@ impl EditorView {
                 if editor.hover_generation == generation {
                     let (line, character) = editor.lsp_position_for_offset(offset);
                     editor.last_dwell_anchor = Some(anchor);
-                    cx.emit(EditorHoverEvent::Dwell { line, character, anchor });
+                    cx.emit(EditorHoverEvent::Dwell {
+                        line,
+                        character,
+                        anchor,
+                    });
                 }
             });
         }));
@@ -1430,7 +1546,11 @@ impl Render for EditorView {
             .when(!self.plain, |element| element.bg(self.theme.bg1))
             .text_color(self.theme.fg0)
             // コード = Guguru Sans Code（等幅・bin で bundle 済み）/ composer(plain) = IBM Plex Sans JP（UI）
-            .font_family(if self.plain { "IBM Plex Sans JP" } else { "Guguru Sans Code" })
+            .font_family(if self.plain {
+                "IBM Plex Sans JP"
+            } else {
+                "Guguru Sans Code"
+            })
             .text_size(px(self.font_size))
             .line_height(px(self.line_height_value()))
             .cursor(CursorStyle::IBeam)
@@ -1481,7 +1601,9 @@ impl Render for EditorView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .child(EditorElement { editor: cx.entity() })
+            .child(EditorElement {
+                editor: cx.entity(),
+            })
     }
 }
 
@@ -1507,12 +1629,17 @@ impl EntityInputHandler for EditorView {
     ) -> Option<UTF16Selection> {
         let selection = self.primary();
         Some(UTF16Selection {
-            range: self.buffer.byte_to_utf16(selection.start())..self.buffer.byte_to_utf16(selection.end()),
+            range: self.buffer.byte_to_utf16(selection.start())
+                ..self.buffer.byte_to_utf16(selection.end()),
             reversed: selection.head < selection.anchor,
         })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         let marked = self.marked_range.as_ref()?;
         Some(self.buffer.byte_to_utf16(marked.start)..self.buffer.byte_to_utf16(marked.end))
     }
@@ -1542,7 +1669,7 @@ impl EntityInputHandler for EditorView {
         self.buffer.edit(&[range], new_text);
         self.marked_range = None;
         self.refresh_highlights();
-        self.scroll_caret_into_view();
+        self.pending_caret_reveal = true;
         // 確定入力を親へ通知（補完の自動トリガ）。IME 変換中（replace_and_mark）は通らない経路。
         if !new_text.is_empty() {
             cx.emit(EditorInputEvent::Typed(new_text.to_string()));
@@ -1577,7 +1704,7 @@ impl EntityInputHandler for EditorView {
         };
         self.buffer.set_selections(vec![selection]);
         self.refresh_highlights();
-        self.scroll_caret_into_view();
+        self.pending_caret_reveal = true;
         cx.notify();
     }
 
@@ -1692,7 +1819,8 @@ impl Element for EditorElement {
                     let digits = snapshot.line_count().to_string().len() as f32;
                     let gutter =
                         (digits * cell_width_estimate + GUTTER_PADDING * 2.0).max(GUTTER_MIN_WIDTH);
-                    (((f32::from(bounds.size.width) - gutter) / cell_width_estimate).floor() as usize)
+                    (((f32::from(bounds.size.width) - gutter) / cell_width_estimate).floor()
+                        as usize)
                         .max(10)
                 }
             } else {
@@ -1721,6 +1849,11 @@ impl Element for EditorElement {
                     let target = row_top - viewport / 2.0 + line_height / 2.0;
                     view.scroll_top = px(target.clamp(0.0, (total - viewport).max(0.0)));
                 }
+            }
+            // 編集/カーソル移動が要求した caret 可視化を**今**（wrap_map 再構築後）に消化する。
+            // viewport 未確定（初回描画前）の間は短絡でフラグを保持し、確定後の frame で reveal する。
+            if view.viewport_height > px(0.) && std::mem::take(&mut view.pending_caret_reveal) {
+                view.scroll_caret_into_view();
             }
             if view.buffer.version() != view.diff_scheduled_version {
                 view.diff_scheduled_version = view.buffer.version();
@@ -1769,17 +1902,27 @@ impl Element for EditorElement {
         // 仮想化は**表示行**で回す（wrap off は恒等マップ = 従来と同一・M10-12）。
         let wrap_map = &self.editor.read(cx).wrap_map;
         let total_display = wrap_map.total_display_rows();
-        let visible = visible_rows(f32::from(scroll_top), f32::from(bounds.size.height), line_height_value, total_display);
+        let visible = visible_rows(
+            f32::from(scroll_top),
+            f32::from(bounds.size.height),
+            line_height_value,
+            total_display,
+        );
 
         // 可視表示行のセグメントが跨る byte 範囲だけハイライトを問い合わせる（M11-8）。
         let highlights: Vec<lang::HighlightSpan> = if visible.is_empty() {
             Vec::new()
         } else {
             let (first_line, first_segment) = wrap_map.display_to_logical(visible.start);
-            let (last_line, last_segment) = wrap_map.display_to_logical(visible.end.saturating_sub(1));
+            let (last_line, last_segment) =
+                wrap_map.display_to_logical(visible.end.saturating_sub(1));
             let start_byte = snapshot.point_to_byte(BufferPoint::new(first_line, 0))
                 + wrap_map
-                    .segment_range(first_line, first_segment, snapshot.line_len_bytes(first_line))
+                    .segment_range(
+                        first_line,
+                        first_segment,
+                        snapshot.line_len_bytes(first_line),
+                    )
                     .start;
             let end_byte = snapshot.point_to_byte(BufferPoint::new(last_line, 0))
                 + wrap_map
@@ -1787,7 +1930,9 @@ impl Element for EditorElement {
                     .end;
             view.highlighter
                 .as_ref()
-                .map(|highlighter| highlighter.spans(&snapshot.text(), start_byte..end_byte.max(start_byte)))
+                .map(|highlighter| {
+                    highlighter.spans(&snapshot.text(), start_byte..end_byte.max(start_byte))
+                })
                 .unwrap_or_default()
         };
 
@@ -1802,7 +1947,8 @@ impl Element for EditorElement {
         let mut search_marks = Vec::new();
 
         let primary_point = snapshot.byte_to_point(primary.head);
-        let primary_display_row = wrap_map.logical_to_display(primary_point.row, primary_point.column);
+        let primary_display_row =
+            wrap_map.logical_to_display(primary_point.row, primary_point.column);
 
         for display_row in visible {
             let (row, segment) = wrap_map.display_to_logical(display_row);
@@ -1819,11 +1965,13 @@ impl Element for EditorElement {
                             if hunk.new_range.contains(&row32) =>
                         {
                             // エージェント編集のファイルはスレッド色で（生中継の帰属表示・M12-3）。
-                            let color = agent_mark_color.unwrap_or(if hunk.kind == project::HunkKind::Added {
-                                theme.ok
-                            } else {
-                                theme.warn
-                            });
+                            let color = agent_mark_color.unwrap_or(
+                                if hunk.kind == project::HunkKind::Added {
+                                    theme.ok
+                                } else {
+                                    theme.warn
+                                },
+                            );
                             diff_marks.push(fill(
                                 Bounds::new(
                                     point(bounds.left(), y + px(1.)),
@@ -1835,7 +1983,10 @@ impl Element for EditorElement {
                         // 削除は行 row の上境界に小さな err マーカー。
                         project::HunkKind::Removed if hunk.new_range.start == row32 => {
                             diff_marks.push(fill(
-                                Bounds::new(point(bounds.left(), y - px(1.5)), size(px(6.), px(3.))),
+                                Bounds::new(
+                                    point(bounds.left(), y - px(1.5)),
+                                    size(px(6.), px(3.)),
+                                ),
                                 theme.err,
                             ));
                         }
@@ -1865,8 +2016,7 @@ impl Element for EditorElement {
 
             let full_line_text = snapshot.line_text(row);
             let segment_range = wrap_map.segment_range(row, segment, full_line_text.len());
-            let line_start =
-                snapshot.point_to_byte(BufferPoint::new(row, 0)) + segment_range.start;
+            let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0)) + segment_range.start;
             let line_text = full_line_text[segment_range.clone()].to_string();
             let line_end = line_start + line_text.len();
             // キャレットがこのセグメントに乗るか（セグメント境界の offset は次セグメント側。
@@ -1884,8 +2034,12 @@ impl Element for EditorElement {
             if !plain && is_first_segment {
                 let number_text = (row + 1).to_string();
                 let number_line = shape_plain(&number_text, theme.fg2, font_size, window);
-                let number_x = bounds.left() + gutter_width - px(GUTTER_PADDING) - number_line.width;
-                line_numbers.push(PositionedLine { line: number_line, origin: point(number_x, y) });
+                let number_x =
+                    bounds.left() + gutter_width - px(GUTTER_PADDING) - number_line.width;
+                line_numbers.push(PositionedLine {
+                    line: number_line,
+                    origin: point(number_x, y),
+                });
             }
 
             // 本文（構文ハイライト + IME 変換中の下線）
@@ -1928,7 +2082,10 @@ impl Element for EditorElement {
 
             // 選択面
             for selection in &selections {
-                if selection.is_empty() || selection.end() <= line_start || selection.start() > line_end {
+                if selection.is_empty()
+                    || selection.end() <= line_start
+                    || selection.start() > line_end
+                {
                     continue;
                 }
                 let visible_start = selection.start().max(line_start) - line_start;
@@ -1965,15 +2122,26 @@ impl Element for EditorElement {
             // blame 注釈（キャレット行の行末に dim・最終セグメントのみ・M11-11）。
             if let Some((annotation_row, annotation_text)) = &line_annotation {
                 if *annotation_row == row && is_last_segment && !plain {
-                    let annotation = shape_plain(annotation_text, theme.fg2.alpha(0.7), font_size * 0.9, window);
+                    let annotation = shape_plain(
+                        annotation_text,
+                        theme.fg2.alpha(0.7),
+                        font_size * 0.9,
+                        window,
+                    );
                     let x = content_origin.x + shaped.width + px(32.);
                     if x + annotation.width < content_origin.x + content_width {
-                        text_lines.push(PositionedLine { line: annotation, origin: point(x, y) });
+                        text_lines.push(PositionedLine {
+                            line: annotation,
+                            origin: point(x, y),
+                        });
                     }
                 }
             }
 
-            text_lines.push(PositionedLine { line: shaped, origin: point(content_origin.x, y) });
+            text_lines.push(PositionedLine {
+                line: shaped,
+                origin: point(content_origin.x, y),
+            });
         }
 
         // focus 中かつ点滅 ON のフレームだけキャレットを出す。
@@ -2031,12 +2199,26 @@ impl Element for EditorElement {
         }
         let line_height = px(self.editor.read(cx).line_height_value());
         for positioned in prepaint.line_numbers.drain(..) {
-            if let Err(error) = positioned.line.paint(positioned.origin, line_height, TextAlign::Left, None, window, cx) {
+            if let Err(error) = positioned.line.paint(
+                positioned.origin,
+                line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            ) {
                 eprintln!("gutter paint 失敗: {error}");
             }
         }
         for positioned in prepaint.text_lines.drain(..) {
-            if let Err(error) = positioned.line.paint(positioned.origin, line_height, TextAlign::Left, None, window, cx) {
+            if let Err(error) = positioned.line.paint(
+                positioned.origin,
+                line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            ) {
                 eprintln!("text paint 失敗: {error}");
             }
         }
@@ -2074,7 +2256,12 @@ impl Element for EditorElement {
 // ── 自由関数 ──
 
 /// 表示すべき行レンジ（仮想化）。scroll_top と viewport から見える行だけを返す。
-fn visible_rows(scroll_top: f32, viewport_height: f32, line_height: f32, line_count: usize) -> Range<usize> {
+fn visible_rows(
+    scroll_top: f32,
+    viewport_height: f32,
+    line_height: f32,
+    line_count: usize,
+) -> Range<usize> {
     if line_height <= 0.0 {
         return 0..line_count;
     }
@@ -2195,7 +2382,10 @@ fn compute_wrap_segments(line: &str, columns: usize) -> Vec<usize> {
             starts.push(break_at);
             segment_start = break_at;
             // 折返し後のセル数を数え直す（break_at..byte+この文字）。
-            cells = line[break_at..byte].chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
+            cells = line[break_at..byte]
+                .chars()
+                .map(|c| c.width().unwrap_or(1).max(1))
+                .sum();
             last_break = None;
         }
         cells += width;
@@ -2238,7 +2428,11 @@ impl WrapMap {
             segments.push(starts);
         }
         prefix_rows.push(total);
-        WrapMap { segments, prefix_rows, key }
+        WrapMap {
+            segments,
+            prefix_rows,
+            key,
+        }
     }
 
     fn total_display_rows(&self) -> usize {
@@ -2253,14 +2447,19 @@ impl WrapMap {
             .saturating_sub(1)
             .min(self.segments.len().saturating_sub(1));
         let segment = display_row.saturating_sub(self.prefix_rows[line]);
-        (line, segment.min(self.segments[line].len().saturating_sub(1)))
+        (
+            line,
+            segment.min(self.segments[line].len().saturating_sub(1)),
+        )
     }
 
     /// (論理行, 行内 byte 列) → 表示行。
     fn logical_to_display(&self, line: usize, column: usize) -> usize {
         let line = line.min(self.segments.len().saturating_sub(1));
         let starts = &self.segments[line];
-        let segment = starts.partition_point(|&start| start <= column).saturating_sub(1);
+        let segment = starts
+            .partition_point(|&start| start <= column)
+            .saturating_sub(1);
         self.prefix_rows[line] + segment
     }
 
@@ -2284,9 +2483,12 @@ fn shape_plain(text: &str, color: gpui::Hsla, font_size: f32, window: &mut Windo
         underline: None,
         strikethrough: None,
     };
-    window
-        .text_system()
-        .shape_line(SharedString::from(text.to_string()), px(font_size), &[run], None)
+    window.text_system().shape_line(
+        SharedString::from(text.to_string()),
+        px(font_size),
+        &[run],
+        None,
+    )
 }
 
 /// new_text 内の UTF-16 offset を byte offset に変換する（変換中選択の解決）。

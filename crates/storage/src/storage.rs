@@ -624,6 +624,54 @@ impl Storage {
             })
         })
     }
+
+    /// リモートで開いたプロジェクトを記録する（host+path で upsert・opened_at 更新・SSH 履歴）。
+    /// ルート = remote $HOME の「ブラウズ接続」は呼び出し側で除外する（プロジェクトだけ残す）。
+    pub fn record_remote_project(&self, host: &str, path: &str, name: &str) -> Result<()> {
+        let host = host.to_string();
+        let path = path.to_string();
+        let name = name.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO remote_projects (host, path, name, opened_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(host, path) DO UPDATE SET name = ?3, opened_at = ?4",
+                    (host.as_str(), path.as_str(), name.as_str(), now),
+                )
+                .await
+                .context("remote_projects の書き込みに失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 最近開いたリモートプロジェクト（opened_at 降順）。SSH ピッカーの2階層目に出す。
+    /// 戻り値: (host, path, name, opened_at)。UI は host で束ねて表示する。
+    #[allow(clippy::type_complexity)]
+    pub fn recent_remote_projects(&self) -> Result<Vec<(String, String, String, i64)>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT host, path, name, opened_at FROM remote_projects ORDER BY opened_at DESC",
+                        (),
+                    )
+                    .await
+                    .context("remote_projects の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("remote_projects 行の取得に失敗")? {
+                    result.push((
+                        row.get_value(0)?.as_text().context("host")?.clone(),
+                        row.get_value(1)?.as_text().context("path")?.clone(),
+                        row.get_value(2)?.as_text().context("name")?.clone(),
+                        *row.get_value(3)?.as_integer().context("opened_at")?,
+                    ));
+                }
+                Ok(result)
+            })
+        })
+    }
 }
 
 /// スキーマ初期化（冪等）。将来のマイグレーションは schema_version を見て足す。
@@ -724,6 +772,19 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("host_last_path 作成に失敗")?;
+    // リモートで開いたプロジェクトの履歴（SSH ピッカーの2階層目・host+path でユニーク）。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS remote_projects (
+            host TEXT NOT NULL,
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            opened_at INTEGER NOT NULL,
+            PRIMARY KEY (host, path)
+        )",
+        (),
+    )
+    .await
+    .context("remote_projects 作成に失敗")?;
     Ok(())
 }
 
@@ -797,6 +858,30 @@ mod tests {
             storage.host_last_path("azure_h100").unwrap(),
             Some("/home/daichi/other".to_string())
         );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn remote_projects_round_trip() {
+        let path = temp_db("remote_projects");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+
+        // 未登録は空。
+        assert!(storage.recent_remote_projects().unwrap().is_empty());
+        storage.record_remote_project("azure_h100", "/home/daichi/proj", "proj").unwrap();
+        storage.record_remote_project("aws_web", "/srv/app", "app").unwrap();
+        let recent = storage.recent_remote_projects().unwrap();
+        assert_eq!(recent.len(), 2);
+        assert!(recent
+            .iter()
+            .any(|row| row.0 == "azure_h100" && row.1 == "/home/daichi/proj" && row.2 == "proj"));
+        // 同じ host+path を再記録 → 件数は増えず name だけ更新（upsert）。
+        storage.record_remote_project("azure_h100", "/home/daichi/proj", "proj改名").unwrap();
+        let recent2 = storage.recent_remote_projects().unwrap();
+        assert_eq!(recent2.len(), 2);
+        assert!(recent2.iter().any(|row| row.1 == "/home/daichi/proj" && row.2 == "proj改名"));
 
         let _ = std::fs::remove_file(&path);
     }

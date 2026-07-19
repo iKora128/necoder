@@ -16,7 +16,7 @@ use editor_view::{ComposerEvent, EditorView};
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    actions, div, img, prelude::*, pulsating_between, px, Animation, AnimationExt, App,
+    actions, div, img, prelude::*, pulsating_between, px, svg, Animation, AnimationExt, App,
     ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight,
     HighlightStyle, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ScrollHandle, SharedString, StyledText, TextLayout, Window,
@@ -73,6 +73,15 @@ const MODELS: &[&str] = &[
 const PERMISSION_MODES: &[&str] = &["default", "accept edits", "bypass permissions", "plan"];
 /// 推論の effort（Zed 下部コントロール相当）。
 const EFFORTS: &[&str] = &["low", "medium", "high", "max"];
+
+/// スレッドの見せ方（explorer の Tree/Columns/Icons と同じ「登録式ビュー」。Bar と List は排他）。
+/// Bar = 色付き横タブ（既定）。List = 縦リスト（「チャットのスペース履歴」風・多数でも一望）。
+/// プロジェクト⎇ブランチで束ねる Grouped は後続。
+#[derive(Clone, Copy, PartialEq)]
+enum AgentTabsView {
+    Bar,
+    List,
+}
 
 /// composer 下部の選択ピル種別（Zed のエージェント下部コントロールに倣う）。
 #[derive(Clone, Copy, PartialEq)]
@@ -324,6 +333,10 @@ pub struct AgentPanel {
     transcript_scroll: ScrollHandle,
     /// スレッドタブ列の横スクロール（タブが増えても潰さず左右へ送れる。縦ホイールも横送りにマップ）。
     tabs_scroll: ScrollHandle,
+    /// スレッドの見せ方（Bar 横タブ / List 縦リスト。登録式・スイッチャで切替）。
+    tabs_view: AgentTabsView,
+    /// List ビューの縦スクロール（スレッドが多いときリスト内で送る）。
+    thread_list_scroll: ScrollHandle,
     /// transcript の選択可能リージョン（render で clear→push・mouse イベントが読む）。
     transcript_regions: Rc<RefCell<Vec<SelectableRegion>>>,
     /// transcript のドラッグ選択（None = 選択なし）。⌘C でコピー・Esc/外クリックで解除。
@@ -516,6 +529,8 @@ impl AgentPanel {
             renaming: None,
             transcript_scroll,
             tabs_scroll: ScrollHandle::new(),
+            tabs_view: initial_tabs_view(),
+            thread_list_scroll: ScrollHandle::new(),
             transcript_regions: Rc::new(RefCell::new(Vec::new())),
             transcript_selection: None,
             open_menu: None,
@@ -694,7 +709,9 @@ impl AgentPanel {
         cx.spawn(async move |panel, cx| {
             let generated = cx
                 .background_executor()
-                .spawn(async move { project::name_thread_on(host.as_ref(), &cwd, &excerpt, oneshot) })
+                .spawn(
+                    async move { project::name_thread_on(host.as_ref(), &cwd, &excerpt, oneshot) },
+                )
                 .await;
             let Ok(name) = generated else {
                 return; // claude 未導入等 → 既定名のまま（静かに諦める）
@@ -1630,6 +1647,7 @@ impl AgentPanel {
             return;
         };
         let turn_finished = matches!(event, AgentEvent::TurnEnded | AgentEvent::Failed(_));
+        let turn_succeeded = matches!(event, AgentEvent::TurnEnded); // 完了音は成功時のみ（失敗では鳴らさない）
         let permission_waiting = matches!(event, AgentEvent::PermissionRequest { .. });
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
         match event {
@@ -1841,6 +1859,10 @@ impl AgentPanel {
             cx.emit(PanelEvent::FilesTouched { files, color });
         }
         if turn_finished {
+            // 完了音（設定 on・成功時のみ）。裏の窓の完了にも気づける。
+            if turn_succeeded && settings::get(cx).completion_sound {
+                play_completion_sound();
+            }
             self.sync_running_registry(cx); // 実行中 → 完了をダッシュボードへ（M12-12）
             self.persist_thread(thread_index); // turn 確定分を DB へ（M12-1）
             self.maybe_auto_name(thread_index, cx); // 初回ターン後、既定名なら AI がタイトルを付ける（#6）
@@ -2303,6 +2325,205 @@ impl AgentPanel {
                         cx.listener(|this, _, _window, cx| this.add_thread(cx)),
                     ),
             )
+            .child(self.render_tabs_view_switcher(cx))
+    }
+
+    /// スレッド表示モードを切り替える（Bar ⇄ List）。
+    fn set_tabs_view(&mut self, view: AgentTabsView, cx: &mut Context<Self>) {
+        if self.tabs_view != view {
+            self.tabs_view = view;
+            cx.notify();
+        }
+    }
+
+    /// Bar/List を切り替える小さなトグル（explorer のビュー切替 idiom。svg は色を直接指定）。
+    /// 押すと**もう一方の**モードへ（アイコンは遷移先を示す）。
+    fn render_tabs_view_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme.clone();
+        let (icon, tip, target) = match self.tabs_view {
+            AgentTabsView::Bar => (
+                "icons/list.svg",
+                i18n::t!("agent.view_list"),
+                AgentTabsView::List,
+            ),
+            AgentTabsView::List => (
+                "icons/columns-3.svg",
+                i18n::t!("agent.view_bar"),
+                AgentTabsView::Bar,
+            ),
+        };
+        div()
+            .id("tabs-view-switch")
+            .group("tabs-view-switch")
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_none()
+            .w(px(28.))
+            .h_full()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg1))
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(14.))
+                    .text_color(theme.fg2)
+                    .group_hover("tabs-view-switch", |style| style.text_color(theme.fg0)),
+            )
+            .tooltip(Tooltip::text(tip, theme.clone()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| this.set_tabs_view(target, cx)),
+            )
+    }
+
+    /// スレッドを縦リストで見せる（List ビュー・「チャットのスペース履歴」風）。Bar と排他。
+    /// ヘッダ（Σ トークン + view 切替 + ＋）＋ 色ドット/名前/トークンの行。多数ならリスト内で縦スクロール。
+    /// 行クリックでアクティブ切替（下の meta/transcript が追従）。
+    fn render_thread_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        let active = self.active;
+        let total: u64 = self
+            .threads
+            .iter()
+            .map(|thread| thread.tokens_used as u64)
+            .sum();
+        let header = div()
+            .flex()
+            .items_center()
+            .h(px(THREAD_TABS_HEIGHT))
+            .flex_none()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex_1()
+                    .px(px(10.))
+                    .text_size(px(10.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(format!(
+                        "Σ {:.1}k",
+                        total as f32 / 1000.0
+                    ))),
+            )
+            .child(self.render_tabs_view_switcher(cx))
+            .child(
+                div()
+                    .id("list-add-thread")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_none()
+                    .w(px(32.))
+                    .h_full()
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg0).bg(theme.bg1))
+                    .child("＋")
+                    .tooltip(Tooltip::text(
+                        i18n::t!("agent.new_thread_tip"),
+                        theme.clone(),
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| this.add_thread(cx)),
+                    ),
+            );
+        let rows = self.threads.iter().enumerate().map(|(index, thread)| {
+            let is_active = index == active;
+            let color = thread.color;
+            let group_name = SharedString::from(format!("thread-row-{index}"));
+            div()
+                .id(("thread-row", index))
+                .group(group_name.clone())
+                .flex()
+                .items_center()
+                .h(px(30.))
+                .cursor_pointer()
+                .when(is_active, |element| element.bg(theme.bg1))
+                .hover(|style| style.bg(theme.bg1))
+                // 左 2px 色バー（active のみ・UI-SPEC の選択左バー準拠）。
+                .child(div().w(px(2.)).h_full().flex_none().bg(if is_active {
+                    color
+                } else {
+                    theme.bg0
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(8.))
+                        .child(pulsing_dot(("row-dot", index), 8.0, color, thread.running))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(12.5))
+                                .text_color(if is_active { theme.fg0 } else { theme.fg1 })
+                                .child(thread.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(format!(
+                                    "{:.1}k",
+                                    thread.tokens_used as f32 / 1000.0
+                                ))),
+                        )
+                        .child(
+                            div()
+                                .id(("row-close", index))
+                                .flex_none()
+                                .px(px(3.))
+                                .rounded(px(4.))
+                                .text_color(theme.fg2)
+                                .invisible()
+                                .group_hover(group_name.clone(), |style| style.visible())
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
+                                .child("×")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.remove_thread(index, cx);
+                                    }),
+                                ),
+                        ),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.switch_thread(index, cx);
+                        this.focus_composer(window, cx);
+                    }),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .max_h(px(220.))
+            .bg(theme.bg0)
+            .child(header)
+            .child(
+                div()
+                    .id("thread-list-scroll")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.thread_list_scroll)
+                    .children(rows),
+            )
+            .into_any_element()
     }
 
     fn render_meta(&self, active: bool) -> impl IntoElement {
@@ -3429,7 +3650,10 @@ impl Render for AgentPanel {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.focus_composer(window, cx)),
             )
-            .child(self.render_thread_tabs(cx))
+            .child(match self.tabs_view {
+                AgentTabsView::Bar => self.render_thread_tabs(cx).into_any_element(),
+                AgentTabsView::List => self.render_thread_list(cx),
+            })
             .child(self.render_meta(active))
             // エージェントの実行プラン（あれば transcript 上部に常設・M12-9）。
             .children(self.render_plan())
@@ -3528,6 +3752,34 @@ fn render_mascot(motion: MascotMotion, active: bool) -> gpui::AnyElement {
 }
 
 /// スレッド色のドット。実行中は breathing で pulse（mock: 1.6s）。停止中は静止。
+/// スレッド表示の初期モード。開発用 `SHIRUSHI_TABS_VIEW=list` で List 起動（スクショ/検証用）。
+fn initial_tabs_view() -> AgentTabsView {
+    match std::env::var("SHIRUSHI_TABS_VIEW").ok().as_deref() {
+        Some("list") => AgentTabsView::List,
+        _ => AgentTabsView::Bar,
+    }
+}
+
+/// ターン完了の通知音（macOS の system sound を `afplay` で鳴らす・設定 `completion_sound`）。
+/// 既存の shell-out（open/osascript/trash と同じ）で**依存ゼロ**。独自チャイム同梱は後続。
+/// **短命スレッドで `status()` まで待って子を刈る**（zombie を残さない）ので UI スレッドは即戻る。
+/// イベント駆動（完了時のみ）＝idle 予算に影響しない。
+fn play_completion_sound() {
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(|| {
+        use std::process::{Command, Stdio};
+        let result = Command::new("/usr/bin/afplay")
+            .arg("/System/Library/Sounds/Glass.aiff")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Err(error) = result {
+            eprintln!("完了音の再生に失敗: {error}");
+        }
+    });
+}
+
 /// 折り畳んだ Thinking の 1 行プレビュー（先頭行を ~64 文字で切る。続きがあれば … を付す）。
 fn thought_preview(text: &str) -> SharedString {
     let first_line = text.lines().next().unwrap_or("").trim();

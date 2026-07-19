@@ -80,6 +80,9 @@ pub struct Settings {
     /// エージェントの新規スレッドに、最初のやり取りから AI が自動でタイトルを付けるか（#6・既定 on）。
     /// 既定名（"スレッドN"）のまま・手動改名していないスレッドだけが対象。無効なら既定名のまま。
     pub agent_auto_name: bool,
+    /// エージェントのターン完了時に通知音を鳴らすか（macOS system sound・既定 on）。
+    /// 裏の窓で走らせた作業の完了にも気づける（`docs/BACKGROUND.md` の原点痛点）。独自チャイム同梱は後続。
+    pub completion_sound: bool,
     /// 新規スレッドの既定 AI エージェント（表示名。`acp_client::AGENT_LABELS` のいずれか）。
     /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
     /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
@@ -103,6 +106,7 @@ impl Default for Settings {
             locale: None,
             submit_on_enter: false,
             agent_auto_name: true,
+            completion_sound: true,
             default_agent: "Claude Code".to_string(),
             rail: RailSettings::default(),
             onboarded: false,
@@ -118,6 +122,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "tab_size": 4,
   "submit_on_enter": false,
   "agent_auto_name": true,
+  "completion_sound": true,
   "default_agent": "Claude Code",
   "onboarded": false,
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }
@@ -303,7 +308,8 @@ mod tests {
 
     #[test]
     fn persist_user_value_sets_one_key_and_keeps_others() {
-        let dir = std::env::temp_dir().join(format!("shirushi-settings-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("shirushi-settings-test-{}", std::process::id()));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         // 既存にユーザー値がある状態を作る

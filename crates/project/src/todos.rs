@@ -103,6 +103,20 @@ pub fn add_todos_on(host: &dyn Host, root: &Path, texts: &[String], today: &str)
     Ok(())
 }
 
+/// 板に 1 項目を今日の見出し下へ追記する（ボードの ＋ / インライン入力から・Todo 追加）。
+/// 日付はそのマシンの `date +%F`（remote ならそのマシンの今日＝作業場所の時間が真実）。
+/// 空文字は追加しない。反映は watch 任せ（既存の書き手と同じ経路）。
+pub fn add_todo_on(host: &dyn Host, root: &Path, text: &str) -> Result<()> {
+    let text = text.trim();
+    anyhow::ensure!(!text.is_empty(), "空の項目は追加しない");
+    let output = host
+        .run_command(&host::CommandSpec::new("date", root).args(["+%F"]))
+        .context("日付の取得に失敗")?;
+    let today = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    anyhow::ensure!(!today.is_empty(), "日付が空");
+    add_todos_on(host, root, &[text.to_string()], &today)
+}
+
 /// 追記の pure 部分: `# today` 見出しがあればその節の末尾へ、無ければ**先頭**に節を作って足す
 /// （日付は新しい順＝上に積む方が板として読みやすい）。
 pub fn append_todos(current: &str, texts: &[String], today: &str) -> String {

@@ -205,6 +205,13 @@ impl gpui::AssetSource for Assets {
             "icons/list.svg" => icon!("list.svg"),
             "icons/columns-3.svg" => icon!("columns-3.svg"),
             "icons/layout-grid.svg" => icon!("layout-grid.svg"),
+            // AI エージェントのブランドロゴ（Simple Icons・CC0・設定画面の識別用）。
+            "icons/brand-claude.svg" => icon!("brand-claude.svg"),
+            "icons/brand-gemini.svg" => icon!("brand-gemini.svg"),
+            "icons/brand-copilot.svg" => icon!("brand-copilot.svg"),
+            "icons/brand-qwen.svg" => icon!("brand-qwen.svg"),
+            "icons/brand-opencode.svg" => icon!("brand-opencode.svg"),
+            "icons/brand-kimi.svg" => icon!("brand-kimi.svg"),
             _ => return Ok(None),
         };
         Ok(Some(std::borrow::Cow::Borrowed(bytes)))

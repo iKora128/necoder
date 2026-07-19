@@ -334,6 +334,17 @@ impl Render for Picker {
                                     .px_2()
                                     .py_1()
                                     .rounded(px(5.))
+                                    .cursor_pointer()
+                                    // マウスクリックで選択＋確定（キーボード ↑↓/Enter に加えて・全 Picker 共通）。
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _event, _window, cx| {
+                                            cx.stop_propagation(); // 背景/箱の handler へ伝播させない
+                                            this.selected = row;
+                                            this.confirm(cx);
+                                        }),
+                                    )
+                                    .hover(|style| style.bg(theme.bg1))
                                     .text_size(px(12.5))
                                     .text_color(if is_selected { theme.fg0 } else { theme.fg1 })
                                     .when(is_selected, |element| element.bg(accent.alpha(0.16)))
