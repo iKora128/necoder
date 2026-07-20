@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn render_explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let Some(slot) = self.active_slot() else {
             return div()
@@ -37,7 +39,7 @@ impl Workspace {
     /// 左ドックの右縁リサイズハンドル（explorer / todo / git 共通・幅は `explorer_width` を共有）。
     /// 置く先のコンテナは `.relative()`（絶対配置の基準）であること。3 ビューは排他表示なので
     /// 同 id が同時に 2 つ出ることはない。
-    fn left_dock_resize_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn left_dock_resize_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         div()
             .id("left-dock-resize")
@@ -61,7 +63,7 @@ impl Workspace {
 
     /// ツリー表示（縦。従来）。行 = chevron + アイコン + 名前。
     /// インライン命名の入力行（ツリー内に splice する・M10 ファイル操作）。
-    fn render_naming_row(&self, depth: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_naming_row(&self, depth: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(naming) = self.explorer_naming(cx) else {
             return div().into_any_element();
         };
@@ -103,7 +105,7 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_tree(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_tree(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let color = slot.color;
         let selected = slot.explorer.selected.clone();
@@ -141,7 +143,7 @@ impl Workspace {
 
     /// ツリーの 1 行（従来 render_tree のクロージャ本体を関数化・M10 ファイル操作で入力行と共存させるため）。
     #[allow(clippy::too_many_arguments)]
-    fn render_tree_row(
+    pub(crate) fn render_tree_row(
         &self,
         _slot: &ProjectSlot,
         index: usize,
@@ -264,7 +266,7 @@ impl Workspace {
     }
 
     /// アイコングリッド表示（現在フォルダの直下。フォルダはクリックで中に入る・ファイルは開く）。
-    fn render_icons(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_icons(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let dir = slot.explorer.current_dir.clone().unwrap_or_else(|| slot.worktree.root().to_path_buf());
         // controller refresh が事前構築した cache だけを読む。cache miss は空表示で、I/O はしない。
@@ -332,7 +334,7 @@ impl Workspace {
     }
 
     /// Finder のカラム表示（Miller columns）。ルート→現在フォルダの各段をカラムで並べる。
-    fn render_columns(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_columns(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let root = slot.worktree.root().to_path_buf();
         let current = slot.explorer.current_dir.clone().unwrap_or_else(|| root.clone());
@@ -426,7 +428,7 @@ impl Workspace {
     /// エクスプローラ上部のブレッドクラム。左の **⤴** で 1 段上へ（プロジェクトルートより上＝
     /// 隣のリポジトリへも辿れる。M5 受入）。プロジェクト配下では「プロジェクト名 → 各段」を、
     /// ルート外では「⌂プロジェクト（戻る） → 末尾数段」を出す。各段クリックでそのフォルダへ。
-    fn render_explorer_header(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_explorer_header(&self, slot: &ProjectSlot, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let accent = slot.color;
         let root = slot.worktree.root().to_path_buf();
@@ -580,7 +582,7 @@ impl Workspace {
     }
 
     /// エクスプローラ下部の表示モード切替（ツリー / カラム / アイコン）。
-    fn render_explorer_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_explorer_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let current = self.explorer_mode(cx);
         // アイコンは Lucide SVG。svg は親の text_color を継承しない（自分の style.text.color のみ参照）
@@ -628,7 +630,7 @@ impl Workspace {
 
     /// エクスプローラの右クリックメニュー（開いていれば）。フォルダ=新規ウィンドウで開く 等。
     /// 背後に透明バックドロップを敷き、外側クリックで閉じる。
-    fn render_explorer_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_explorer_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let menu = self.explorer_context_menu(cx)?;
         let (bg2, bg3, border, fg1, fg0) =
             (self.theme.bg2, self.theme.bg3, self.theme.border, self.theme.fg1, self.theme.fg0);
@@ -759,7 +761,7 @@ impl Workspace {
     }
 
     // プロジェクト横断検索パネル（オーバーレイ・⌘⇧F）。ファイル別に結果をまとめ、クリック/Enter でジャンプ。
-    fn render_search_panel(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_search_panel(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         self.search_panel
             .as_ref()
             .map(|panel| panel.clone().into_any_element())

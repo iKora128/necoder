@@ -1,13 +1,15 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn git_panel_open(&self, cx: &App) -> bool {
+    pub(crate) fn git_panel_open(&self, cx: &App) -> bool {
         self.git_panel.read(cx).open
     }
 
-    fn git_is_busy(&self, cx: &App) -> bool {
+    pub(crate) fn git_is_busy(&self, cx: &App) -> bool {
         self.git_panel.read(cx).busy
     }
 
-    fn close_branch_menu(&self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn close_branch_menu(&self, cx: &mut Context<Self>) -> bool {
         self.git_panel.update(cx, |panel, cx| {
             let was_open = panel.branch_menu.take().is_some();
             if was_open {
@@ -17,7 +19,7 @@ impl Workspace {
         })
     }
 
-    fn toggle_branch_menu(&mut self, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_branch_menu(&mut self, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
         if self.close_branch_menu(cx) {
             return;
         }
@@ -50,14 +52,14 @@ impl Workspace {
         .detach();
     }
 
-    fn hide_branch_menu(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn hide_branch_menu(&mut self, cx: &mut Context<Self>) {
         if self.close_branch_menu(cx) {
             cx.notify();
         }
     }
 
     /// ブランチを in-place で切り替える（git switch）→ プロジェクト再読込。dirty で失敗したらログのみ。
-    fn switch_branch_to(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn switch_branch_to(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
         self.close_branch_menu(cx);
         let Some(worktree) = self.active_worktree() else {
             return;
@@ -116,7 +118,7 @@ impl Workspace {
 
     /// ブランチを worktree として**このウィンドウのレール**に開く（並行ブランチ×色付きタブ・M10-2）。
     /// 既存 worktree があればそれを、無ければ `<repo親>/<repo名>-<branch>` に作って開く。新窓は右クリック明示。
-    fn open_branch_worktree(&mut self, branch: String, cx: &mut Context<Self>) {
+    pub(crate) fn open_branch_worktree(&mut self, branch: String, cx: &mut Context<Self>) {
         self.close_branch_menu(cx);
         let Some(worktree) = self.active_worktree() else {
             return;
@@ -172,7 +174,7 @@ impl Workspace {
     }
 
     /// worktree のパスをこのウィンドウのレールに開く（⎇ メニューの worktree 行）。
-    fn open_worktree_window(&mut self, path: PathBuf, branch: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn open_worktree_window(&mut self, path: PathBuf, branch: Option<String>, cx: &mut Context<Self>) {
         self.close_branch_menu(cx);
         let host = match self.active_worktree() {
             Some(worktree) => worktree.host().clone(),
@@ -182,7 +184,7 @@ impl Workspace {
     }
 
     /// ブランチ切替後などにアクティブプロジェクトを再読込（ツリー再構築・開ファイル再読込・git 更新）。
-    fn reload_active_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn reload_active_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.refresh();
@@ -198,7 +200,7 @@ impl Workspace {
     // ── git 操作パネル（M8: ソース管理。commit / stage / push / pull / 新規ブランチ） ──
 
     /// git 操作パネルをエクスプローラと切り替える（⌃⇧G）。開くと左カラムを占有しフォーカスを取る。
-    fn toggle_git_panel(&mut self, _: &ToggleGitPanel, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_git_panel(&mut self, _: &ToggleGitPanel, window: &mut Window, cx: &mut Context<Self>) {
         let was_open = self.git_panel_open(cx);
         self.git_panel.update(cx, |panel, cx| panel.set_open(!was_open, cx));
         if was_open {
@@ -218,7 +220,7 @@ impl Workspace {
     }
 
     /// git パネルのキー入力（コミットメッセージ / ブランチ名を手書きで積む。検索パネルと同流儀）。
-    fn on_git_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_git_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => {
                 // ブランチ名モードなら入力だけ畳む。そうでなければパネルを閉じる。
@@ -282,7 +284,7 @@ impl Workspace {
 
     /// staged 変更をコミット。staged が無ければ全変更を stage してからコミット（簡便動線）。
     /// コミット（何も staged でなければ全部 stage してから）。git はフックで長引きうる → 背景 + busy。
-    fn git_commit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn git_commit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.git_is_busy(cx) {
             return;
         }
@@ -330,7 +332,7 @@ impl Workspace {
     }
 
     /// stage/unstage 系を背景で実行し、完了後に git 状態を更新する共通ヘルパ。
-    fn run_git_index_op(
+    pub(crate) fn run_git_index_op(
         &mut self,
         describe: String,
         operation: impl FnOnce(Arc<dyn Host>, PathBuf) -> anyhow::Result<()> + Send + 'static,
@@ -358,7 +360,7 @@ impl Workspace {
     }
 
     /// 1 ファイルを stage。
-    fn git_stage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn git_stage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.run_git_index_op(
             "stage".to_string(),
             move |host, root| project::stage_path_on(host.as_ref(), &root, &path),
@@ -367,7 +369,7 @@ impl Workspace {
     }
 
     /// 1 ファイルを unstage。
-    fn git_unstage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn git_unstage(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.run_git_index_op(
             "unstage".to_string(),
             move |host, root| project::unstage_path_on(host.as_ref(), &root, &path),
@@ -376,7 +378,7 @@ impl Workspace {
     }
 
     /// 全変更を stage。
-    fn git_stage_all(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn git_stage_all(&mut self, cx: &mut Context<Self>) {
         self.run_git_index_op(
             "stage".to_string(),
             |host, root| project::stage_all_on(host.as_ref(), &root),
@@ -385,17 +387,17 @@ impl Workspace {
     }
 
     /// push（背景実行）。UI を固めない。
-    fn git_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn git_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.run_git_remote(true, window, cx);
     }
 
     /// pull（背景実行）。完了後にプロジェクトを再読込（fast-forward でファイルが変わり得る）。
-    fn git_pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn git_pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.run_git_remote(false, window, cx);
     }
 
     /// push/pull をバックグラウンドエグゼキュータで走らせ、完了後に git 状態を更新する。
-    fn run_git_remote(&mut self, is_push: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_git_remote(&mut self, is_push: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.git_is_busy(cx) {
             return;
         }
@@ -438,7 +440,7 @@ impl Workspace {
 
     /// GitHub PR 操作（`gh`・背景実行）。`create=true` で PR 作成ページ、false で PR/リポジトリを開く。
     /// git と同じ host 上で走るので remote プロジェクトでもそのまま動く（ブラウザは gh に委ねる）。
-    fn github_action(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn github_action(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.git_is_busy(cx) {
             return;
         }
@@ -476,7 +478,7 @@ impl Workspace {
 
     /// AI でコミットメッセージを生成（Claude Code CLI に diff を渡す・背景実行）。
     /// 成功したら composer の入力欄に流し込む。AI-agent-native の git 体験。
-    fn generate_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn generate_commit_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.git_is_busy(cx) {
             return;
         }
@@ -513,7 +515,7 @@ impl Workspace {
     }
 
     /// git パネルの入力行を「新しいブランチ名」モードにする（＋ボタン）。
-    fn start_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focus = self.git_panel.update(cx, |panel, cx| {
             panel.branch_name = Some(String::new());
             cx.notify();
@@ -523,7 +525,7 @@ impl Workspace {
     }
 
     /// 入力中のブランチ名で作成＆切替 → プロジェクト再読込。
-    fn confirm_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self
             .git_panel
             .read(cx)
@@ -572,7 +574,7 @@ impl Workspace {
     /// ⎇ メニューからブランチを削除（未マージは git が `-d` で拒否＝安全側）。
     /// 他 worktree に checkout 中だと git は拒否する → 事前検知して**分かるトースト**で案内する
     /// （旧実装は失敗が eprintln に消えていた）。成否とも push_toast で可視化。
-    fn delete_git_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+    pub(crate) fn delete_git_branch(&mut self, branch: String, cx: &mut Context<Self>) {
         self.close_branch_menu(cx);
         let Some(worktree) = self.active_worktree() else {
             return;

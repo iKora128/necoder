@@ -1,17 +1,19 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn explorer_mode(&self, cx: &App) -> ExplorerView {
+    pub(crate) fn explorer_mode(&self, cx: &App) -> ExplorerView {
         self.explorer.read(cx).view()
     }
 
-    fn explorer_naming(&self, cx: &App) -> Option<ExplorerNaming> {
+    pub(crate) fn explorer_naming(&self, cx: &App) -> Option<ExplorerNaming> {
         self.explorer.read(cx).naming()
     }
 
-    fn explorer_context_menu(&self, cx: &App) -> Option<ExplorerContextMenu> {
+    pub(crate) fn explorer_context_menu(&self, cx: &App) -> Option<ExplorerContextMenu> {
         self.explorer.read(cx).context_menu()
     }
 
-    fn toggle_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             if slot.explorer.expanded.contains(&path) {
@@ -26,7 +28,7 @@ impl Workspace {
 
     /// エクスプローラの表示モードを切り替える（左下スイッチャー）。
     /// カラム表示は幅が要るので、狭ければ広げる（以後ユーザーがドラッグで調整）。
-    fn set_explorer_view(&mut self, view: ExplorerView, cx: &mut Context<Self>) {
+    pub(crate) fn set_explorer_view(&mut self, view: ExplorerView, cx: &mut Context<Self>) {
         self.explorer.update(cx, |explorer, cx| explorer.set_view(view, cx));
         if view == ExplorerView::Columns && self.chrome.explorer_width < 440.0 {
             self.chrome.explorer_width = 440.0;
@@ -37,7 +39,7 @@ impl Workspace {
     /// カラム/アイコン表示で `dir` に入る（現在フォルダを更新）。ブレッドクラムの上位階層クリックでも使う。
     /// **ルート外へ出た場合**（隣のリポジトリへ辿る）は、ツリー表示だと current_dir を反映できないので
     /// カラム表示（Finder 風）へ自動で切り替える（M5 受入: マウスだけで上へ辿る）。
-    fn enter_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn enter_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         let outside = self
             .active_slot()
             .map(|slot| !dir.starts_with(slot.worktree.root()))
@@ -56,7 +58,7 @@ impl Workspace {
     }
 
     /// エクスプローラの右クリックメニューを出す（対象と位置を記録）。
-    fn show_context_menu(
+    pub(crate) fn show_context_menu(
         &mut self,
         path: PathBuf,
         is_dir: bool,
@@ -73,7 +75,7 @@ impl Workspace {
     // ── ツリーのファイル操作（M10。local のみ・remote は M13 の Host 拡張と一緒に） ──
 
     /// インライン命名を開始する（新規ファイル/フォルダ = base の中 or 横・リネーム = target の名前）。
-    fn start_naming(&mut self, kind: NamingKind, base: PathBuf, is_dir: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_naming(&mut self, kind: NamingKind, base: PathBuf, is_dir: bool, window: &mut Window, cx: &mut Context<Self>) {
         let (parent, target, initial) = match kind {
             NamingKind::Rename => {
                 let parent = base.parent().map(Path::to_path_buf).unwrap_or_else(|| base.clone());
@@ -108,7 +110,7 @@ impl Workspace {
     }
 
     /// インライン命名の確定（Enter）。作成/リネームを実行してツリーを更新する。
-    fn confirm_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(naming) = self
             .explorer
             .update(cx, |explorer, cx| explorer.take_naming(cx))
@@ -154,7 +156,7 @@ impl Workspace {
     }
 
     /// インライン命名の中止（Esc・外側クリック）。
-    fn cancel_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let naming = self
             .explorer
             .update(cx, |explorer, cx| explorer.take_naming(cx));
@@ -171,7 +173,7 @@ impl Workspace {
     }
 
     /// 命名入力のキー処理（検索パネルと同じ手書き流儀）。
-    fn on_naming_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_naming_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.cancel_naming(window, cx),
             "enter" => self.confirm_naming(window, cx),
@@ -208,7 +210,7 @@ impl Workspace {
     }
 
     /// 複製（`name copy.ext`）→ ツリー更新。
-    fn duplicate_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn duplicate_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.hide_context_menu(cx);
         match project::duplicate_local(&path) {
             Ok(copy) => {
@@ -225,7 +227,7 @@ impl Workspace {
     }
 
     /// OS のゴミ箱へ（完全削除はしない）。開いているタブは先に閉じる。
-    fn trash_entry(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn trash_entry(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_context_menu(cx);
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.close_tab_at(index, window, cx);
@@ -246,14 +248,14 @@ impl Workspace {
         cx.notify();
     }
 
-    fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
         self.explorer
             .update(cx, |explorer, cx| explorer.hide_context_menu(cx));
     }
 
     /// フォルダを**新規ウィンドウ**でプロジェクトとして開く（ウィンドウモデルの核）。
     /// レール ＋: ネイティブのフォルダ選択ダイアログ → 選んだフォルダを**このウィンドウのレールへ追加**。
-    fn add_project_via_dialog(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn add_project_via_dialog(&mut self, cx: &mut Context<Self>) {
         // 多重起動ガード: 既にダイアログが出ていれば無視（＋連打で Finder を何枚も開かない）。
         if self.overlays.add_project_dialog_open {
             return;
@@ -282,7 +284,7 @@ impl Workspace {
 
     /// フォルダをレールの新しいプロジェクト slot として足す（既にあれば切替のみ）。
     /// ＋ ダイアログ経由: ローカルフォルダをレールへ追加（既にあれば切替のみ）。
-    fn add_project_slot(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn add_project_slot(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.open_folder_in_rail(host::LocalHost::shared(), path, None, cx);
     }
 
@@ -290,7 +292,7 @@ impl Workspace {
     /// — ブランチ/worktree の既定導線（新窓はレール右クリック→「新しいウィンドウで開く」の明示操作・M10-2）。
     /// `branch` を渡すと「リンク worktree タブ」として記録し、右クリックの worktree/ブランチ削除を出す。
     /// 同じリポジトリの別ブランチは identity 色が親と衝突しがち → 使用中でない色に倒して方向感覚を保つ。
-    fn open_folder_in_rail(
+    pub(crate) fn open_folder_in_rail(
         &mut self,
         host: Arc<dyn Host>,
         path: PathBuf,
@@ -354,12 +356,12 @@ impl Workspace {
     }
 
     /// この色が既にレールのどれかのスロットで使われているか（色衝突の判定・小さな誤差を許容）。
-    fn color_in_use(&self, color: Hsla) -> bool {
+    pub(crate) fn color_in_use(&self, color: Hsla) -> bool {
         self.project_sessions.projects.iter().any(|slot| colors_close(slot.color, color))
     }
 
     /// レールで未使用のパレット色（無ければスロット数で回す）。同色 2 枚を避けて方向感覚を保つ。
-    fn next_free_color(&self) -> Hsla {
+    pub(crate) fn next_free_color(&self) -> Hsla {
         (0..theme_core::IDENTITY_PALETTE_HEXES.len())
             .map(project_color)
             .find(|color| !self.color_in_use(*color))
@@ -369,13 +371,13 @@ impl Workspace {
     // ── レール項目の右クリックメニュー（M10-2） ──
 
     /// レール項目の右クリックメニューを開く（色スウォッチ + 新規窓 / 外す / worktree・ブランチ削除）。
-    fn open_rail_menu(&mut self, index: usize, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn open_rail_menu(&mut self, index: usize, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
         self.overlays.color_picker = None;
         self.overlays.rail_menu = Some(RailMenuState { project_index: index, position, confirm: None });
         cx.notify();
     }
 
-    fn close_rail_menu(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_rail_menu(&mut self, cx: &mut Context<Self>) {
         if self.overlays.rail_menu.take().is_some() {
             cx.notify();
         }
@@ -383,7 +385,7 @@ impl Workspace {
 
     /// スロットを**レールから外す**（表示のみ。ディスク・ブランチ・worktree は無傷＝安全側）。
     /// アクティブを外したら隣のスロットへビューを張り替える。最後の1枚は残す。
-    fn remove_project_slot(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn remove_project_slot(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.overlays.rail_menu = None;
         if self.project_sessions.projects.len() <= 1 {
             self.push_toast(
@@ -411,18 +413,18 @@ impl Workspace {
     }
 
     /// レール右クリック「worktree を削除」: `git worktree remove`（強制）→ スロットも外す。
-    fn remove_slot_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn remove_slot_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_slot_worktree_impl(index, false, window, cx);
     }
 
     /// レール右クリック「worktree ごとブランチを削除」: worktree remove → `git branch -D` → スロットも外す。
-    fn delete_slot_branch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn delete_slot_branch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_slot_worktree_impl(index, true, window, cx);
     }
 
     /// worktree（+任意でブランチ）を消してレールから外す共通経路。背景で git を叩き完了後にスロットを外す。
     /// `git worktree remove` は対象ツリーの中からは実行できないため、メイン作業ツリーの dir で叩く。
-    fn delete_slot_worktree_impl(
+    pub(crate) fn delete_slot_worktree_impl(
         &mut self,
         index: usize,
         also_branch: bool,
@@ -508,7 +510,7 @@ impl Workspace {
         .detach();
     }
 
-    fn open_folder_as_window(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub(crate) fn open_folder_as_window(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let source = match self.active_worktree() {
             Some(worktree) => match worktree.host().host_for_project(&path) {
                 Ok(host) => ProjectSource::new(host, path),
@@ -525,7 +527,7 @@ impl Workspace {
     }
 
     /// ProjectSource を新しいウィンドウで開く（ローカル folder / SSH の共通経路）。
-    fn open_source_as_window(&mut self, source: ProjectSource, cx: &mut Context<Self>) {
+    pub(crate) fn open_source_as_window(&mut self, source: ProjectSource, cx: &mut Context<Self>) {
         let theme = self.theme.clone();
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let opened = cx.open_window(
@@ -556,14 +558,14 @@ impl Workspace {
     }
 
     /// パスをクリップボードへコピー。
-    fn copy_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+    pub(crate) fn copy_path(&mut self, path: &Path, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
         self.hide_context_menu(cx);
         cx.notify();
     }
 
     /// Finder で表示（親フォルダを開いて選択・ローカルのみ）。
-    fn reveal_in_finder(&mut self, path: &Path, cx: &mut Context<Self>) {
+    pub(crate) fn reveal_in_finder(&mut self, path: &Path, cx: &mut Context<Self>) {
         if let Err(error) = project::reveal_in_finder_local(path) {
             eprintln!("Finder 表示に失敗: {error:#}");
         }
@@ -571,7 +573,7 @@ impl Workspace {
     }
 
     /// OS の既定アプリで開く（ファイル=関連付けアプリ / フォルダ=Finder・ローカルのみ）。
-    fn open_with_default_app(&mut self, path: &Path, cx: &mut Context<Self>) {
+    pub(crate) fn open_with_default_app(&mut self, path: &Path, cx: &mut Context<Self>) {
         if let Err(error) = project::open_with_default_app_local(path) {
             eprintln!("既定アプリで開けない: {error:#}");
         }
@@ -580,7 +582,7 @@ impl Workspace {
 
     /// ファイルを開く（⌘P・ツリークリック・検索ジャンプ・F12 等の対話経路）。
     /// **読み込みは背景スレッド**（remote は 30s ブロックしうる — ARCHITECTURE §9）。
-    fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // 既に開いていれば重複タブを作らず、そのタブへ切り替える。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
@@ -609,7 +611,7 @@ impl Workspace {
 
     /// ファイルを**同期で**開く（起動復元・レール/ブランチ切替の `open_slot_files` 専用）。
     /// 対話経路は [`Self::open_file`]（背景読み込み）。同期版はタブの並び順を保つために残す。
-    fn open_file_sync(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_file_sync(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
             return;
@@ -629,7 +631,7 @@ impl Workspace {
 
     /// ファイルを開いて（既に開いていれば切替えて）、**開き終わったエディタ**へ `apply` を実行する。
     /// open_file は背景読みなので「開いてからジャンプ」はこの合流点を使う（旧バッファへの誤 reveal 防止）。
-    fn open_file_then(
+    pub(crate) fn open_file_then(
         &mut self,
         path: PathBuf,
         window: &mut Window,
@@ -670,7 +672,7 @@ impl Workspace {
     }
 
     /// 読み込み済み内容からタブを開く（open_file / open_file_sync の合流点）。
-    fn open_loaded_file(
+    pub(crate) fn open_loaded_file(
         &mut self,
         path: PathBuf,
         content: host::FileContent,
@@ -758,7 +760,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn save_state(&self) {
+    pub(crate) fn save_state(&self) {
         let Some(path) = self.persistence.state_path.as_ref() else {
             return;
         };

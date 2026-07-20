@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn render_git_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_git_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let (bg0, bg1, bg2, border, fg0, fg1, fg2) =
             (theme.bg0, theme.bg1, theme.bg2, theme.border, theme.fg0, theme.fg1, theme.fg2);
@@ -287,7 +289,7 @@ impl Workspace {
     }
 
     /// push/pull の丸ボタン（背景実行中は無効表示）。
-    fn git_remote_button(
+    pub(crate) fn git_remote_button(
         &self,
         id: &'static str,
         glyph: &'static str,
@@ -326,7 +328,7 @@ impl Workspace {
     }
 
     /// 変更一覧のセクション見出し（"ステージ済み"/"変更" + 件数。"変更"側は「すべてステージ」付き）。
-    fn git_section_header(
+    pub(crate) fn git_section_header(
         &self,
         title: &str,
         count: usize,
@@ -371,7 +373,7 @@ impl Workspace {
     }
 
     /// 変更 1 行（色付きレター + ファイル名 + stage/unstage ボタン）。
-    fn git_change_row(
+    pub(crate) fn git_change_row(
         &self,
         path: PathBuf,
         kind: StatusKind,
@@ -437,7 +439,7 @@ impl Workspace {
 
     /// git 履歴（コミットグラフ・M8）。レーン線＝矩形（railway）で描き、色はプロジェクト色
     /// パレットに乗せる（ブランチ＝色。「色による方向感覚」）。点/線/コネクタは絶対配置の div。
-    fn render_git_history(&self, commits: &[GraphCommit]) -> impl IntoElement {
+    pub(crate) fn render_git_history(&self, commits: &[GraphCommit]) -> impl IntoElement {
         let theme = self.theme.clone();
         let accent = self.accent();
         // 描画幅のための最大レーン。
@@ -570,7 +572,7 @@ impl Workspace {
         list
     }
 
-    fn render_branch_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_branch_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let menu = self.git_panel.read(cx).branch_menu.clone()?;
         let position = menu.position;
         let slot = self.active_slot()?;

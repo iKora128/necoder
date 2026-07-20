@@ -1,3 +1,5 @@
+use crate::workspace::*;
+
 /// Todo panel から shell へ上げる操作。FS・Agent・Toast は panel から直接触らない。
 pub(crate) enum TodoPanelEvent {
     ToggleItem { line: usize },
@@ -18,7 +20,7 @@ pub(crate) struct TodoPanel {
 }
 
 impl TodoPanel {
-    fn new(theme: Theme, accent: Hsla) -> Self {
+    pub(crate) fn new(theme: Theme, accent: Hsla) -> Self {
         Self {
             open: false,
             items: Vec::new(),
@@ -30,7 +32,7 @@ impl TodoPanel {
         }
     }
 
-    fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
         self.open = open;
         if !open {
             self.add_input = None;
@@ -38,32 +40,32 @@ impl TodoPanel {
         cx.notify();
     }
 
-    fn set_visuals(&mut self, theme: Theme, accent: Hsla) {
+    pub(crate) fn set_visuals(&mut self, theme: Theme, accent: Hsla) {
         self.theme = theme;
         self.accent = accent;
     }
 
-    fn set_items(&mut self, items: Vec<project::todos::TodoItem>, cx: &mut Context<Self>) {
+    pub(crate) fn set_items(&mut self, items: Vec<project::todos::TodoItem>, cx: &mut Context<Self>) {
         self.items = items;
         cx.notify();
     }
 
-    fn set_plan_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_plan_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
         self.plan_busy = busy;
         cx.notify();
     }
 
-    fn mark_running(&mut self, line: usize, color: Hsla, cx: &mut Context<Self>) {
+    pub(crate) fn mark_running(&mut self, line: usize, color: Hsla, cx: &mut Context<Self>) {
         self.running.insert(line, color);
         cx.notify();
     }
 
-    fn clear_running_color(&mut self, color: Hsla, cx: &mut Context<Self>) {
+    pub(crate) fn clear_running_color(&mut self, color: Hsla, cx: &mut Context<Self>) {
         self.running.retain(|_, running_color| *running_color != color);
         cx.notify();
     }
 
-    fn start_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open {
             return;
         }
@@ -78,7 +80,7 @@ impl TodoPanel {
         cx.notify();
     }
 
-    fn submit_add(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit_add(&mut self, cx: &mut Context<Self>) {
         let text = self
             .add_input
             .as_ref()
@@ -91,7 +93,7 @@ impl TodoPanel {
         cx.notify();
     }
 
-    fn cancel_add(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_add(&mut self, cx: &mut Context<Self>) {
         if self.add_input.take().is_some() {
             cx.notify();
         }
@@ -287,11 +289,11 @@ impl Render for TodoPanel {
 }
 
 impl Workspace {
-    fn todo_session_index(&self, panel: &Entity<TodoPanel>) -> Option<usize> {
+    pub(crate) fn todo_session_index(&self, panel: &Entity<TodoPanel>) -> Option<usize> {
         self.project_sessions.sessions.iter().position(|session| session.todo_panel == *panel)
     }
 
-    fn on_todo_panel_event(
+    pub(crate) fn on_todo_panel_event(
         &mut self,
         panel: Entity<TodoPanel>,
         event: &TodoPanelEvent,
@@ -314,7 +316,7 @@ impl Workspace {
         }
     }
 
-    fn toggle_todo_board(
+    pub(crate) fn toggle_todo_board(
         &mut self,
         _: &ToggleTodoBoard,
         _window: &mut Window,
@@ -331,7 +333,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn reload_todo_board_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn reload_todo_board_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
         let Some(panel) = self.project_sessions.sessions.get(session_index).map(|session| session.todo_panel.clone())
         else {
             return;
@@ -354,7 +356,7 @@ impl Workspace {
         .detach();
     }
 
-    fn toggle_todo_item_for(&mut self, session_index: usize, line: usize, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_todo_item_for(&mut self, session_index: usize, line: usize, cx: &mut Context<Self>) {
         let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
             return;
         };
@@ -379,7 +381,7 @@ impl Workspace {
         .detach();
     }
 
-    fn send_todo_to_agent_for(
+    pub(crate) fn send_todo_to_agent_for(
         &mut self,
         session_index: usize,
         line: usize,
@@ -397,7 +399,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn run_daily_plan_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn run_daily_plan_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
         let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
             return;
         };
@@ -436,7 +438,7 @@ impl Workspace {
         .detach();
     }
 
-    fn add_todo_for(&mut self, session_index: usize, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn add_todo_for(&mut self, session_index: usize, text: String, cx: &mut Context<Self>) {
         let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
             return;
         };
@@ -461,7 +463,7 @@ impl Workspace {
         .detach();
     }
 
-    fn render_todo_board(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_todo_board(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let panel = self.todo_panel.clone();
         let accent = self.accent();
         panel.update(cx, |panel, _| panel.set_visuals(self.theme.clone(), accent));
