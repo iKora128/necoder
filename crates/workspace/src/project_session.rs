@@ -1,21 +1,21 @@
 /// Rail 上の project metadata と、遅延復元に必要なファイル一覧。
 struct ProjectSlot {
-    worktree: Rc<Worktree>,
-    name: SharedString,
+    pub(crate) worktree: Rc<Worktree>,
+    pub(crate) name: SharedString,
     /// 描画中に git process/RPC を起動しないための現在ブランチ cache。
-    branch: Option<String>,
+    pub(crate) branch: Option<String>,
     /// Render が Host trait を呼ばず接続先を表示するための cache。local は None。
-    remote_host: Option<SharedString>,
-    color: Hsla,
-    explorer: ExplorerProject,
+    pub(crate) remote_host: Option<SharedString>,
+    pub(crate) color: Hsla,
+    pub(crate) explorer: ExplorerProject,
     /// このプロジェクトで開いているタブのファイル一覧（左から順・M10 複数タブ）。
     /// アクティブ session の `EditorArea.tabs` から [`Workspace::sync_active_slot`] で同期する。
-    open_files: Vec<PathBuf>,
-    active_file: usize,
+    pub(crate) open_files: Vec<PathBuf>,
+    pub(crate) active_file: usize,
     /// `.shirushi/settings.json` の絵文字アイコン（None = 頭文字モノグラム）。
-    icon: Option<SharedString>,
+    pub(crate) icon: Option<SharedString>,
     /// リンク worktree ならブランチ名。通常/メイン slot は None。
-    worktree_branch: Option<String>,
+    pub(crate) worktree_branch: Option<String>,
 }
 
 impl ProjectSlot {
@@ -31,36 +31,36 @@ impl ProjectSlot {
 
 /// 1 project の長寿命 UI / controller 群。非アクティブ時も Entity と process を保持する。
 pub struct ProjectSession {
-    editor_area: EditorArea,
-    agent_panel: Entity<AgentPanel>,
-    explorer: Entity<Explorer>,
-    search_panel: Option<Entity<SearchPanel>>,
-    repository: RepositoryController,
-    git_panel: Entity<GitPanel>,
-    terminal_dock: Entity<TerminalDock>,
-    agent_active: bool,
-    picker_worktree_rows: Vec<PathBuf>,
-    picker_ssh_hosts: Vec<host::SshConfigHost>,
-    picker_ssh_recent: Vec<String>,
-    picker_history: Vec<(String, String, i64)>,
-    todo_panel: Entity<TodoPanel>,
-    pending_open_history: bool,
-    agent_touched: HashMap<PathBuf, Hsla>,
-    waiting_thread: Option<(SharedString, Hsla)>,
-    _watch: Option<project::Watch>,
-    _watch_pump: Option<gpui::Task<()>>,
+    pub(crate) editor_area: EditorArea,
+    pub(crate) agent_panel: Entity<AgentPanel>,
+    pub(crate) explorer: Entity<Explorer>,
+    pub(crate) search_panel: Option<Entity<SearchPanel>>,
+    pub(crate) repository: RepositoryController,
+    pub(crate) git_panel: Entity<GitPanel>,
+    pub(crate) terminal_dock: Entity<TerminalDock>,
+    pub(crate) agent_active: bool,
+    pub(crate) picker_worktree_rows: Vec<PathBuf>,
+    pub(crate) picker_ssh_hosts: Vec<host::SshConfigHost>,
+    pub(crate) picker_ssh_recent: Vec<String>,
+    pub(crate) picker_history: Vec<(String, String, i64)>,
+    pub(crate) todo_panel: Entity<TodoPanel>,
+    pub(crate) pending_open_history: bool,
+    pub(crate) agent_touched: HashMap<PathBuf, Hsla>,
+    pub(crate) waiting_thread: Option<(SharedString, Hsla)>,
+    pub(crate) _watch: Option<project::Watch>,
+    pub(crate) _watch_pump: Option<gpui::Task<()>>,
 }
 
 /// Rail metadata と長寿命 session を同じ添字で管理する非公開 owner。
 struct ProjectSessions {
-    projects: Vec<ProjectSlot>,
-    active: usize,
-    sessions: Vec<ProjectSession>,
+    pub(crate) projects: Vec<ProjectSlot>,
+    pub(crate) active: usize,
+    pub(crate) sessions: Vec<ProjectSession>,
 }
 
 struct RepositoryController {
-    status: HashMap<PathBuf, StatusKind>,
-    refresh_generation: u32,
+    pub(crate) status: HashMap<PathBuf, StatusKind>,
+    pub(crate) refresh_generation: u32,
 }
 
 impl Deref for ProjectSessions {

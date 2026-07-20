@@ -1,11 +1,11 @@
 #[derive(Clone, Copy)]
-struct CommandEntry {
-    label_key: &'static str,
-    action_name: &'static str,
+pub(crate) struct CommandEntry {
+    pub(crate) label_key: &'static str,
+    pub(crate) action_name: &'static str,
 }
 
 /// Command palette の登録境界。action id と表示キーの対応を shell 本体から分離する。
-struct CommandRegistry;
+pub(crate) struct CommandRegistry;
 
 impl CommandRegistry {
     fn entries(&self) -> &'static [CommandEntry] {

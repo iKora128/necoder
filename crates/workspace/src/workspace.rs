@@ -4,17 +4,17 @@
 //! 許可リストに従い、**プロジェクト色**はレール枠/リング・ツリー選択の左バー・キャレットにのみ流す。
 //! 状態（開プロジェクト・アクティブ・開ファイル）は `state.json` に保存し、再起動で復元する。
 
-use agent_panel::AgentPanel;
-use crate::persistence::{PersistedProject, PersistedState, RestoredTabs, state_path};
-use crate::updater;
-use editor_core::{Buffer, Selection};
-use futures::StreamExt as _; // LSP 通知 pump の `.next()`
-use editor_view::{ComposerEvent, EditorHoverEvent, EditorInputEvent, EditorView, PositionSnapshot};
-use explorer::{
+pub(crate) use agent_panel::AgentPanel;
+pub(crate) use crate::persistence::{PersistedProject, PersistedState, RestoredTabs, state_path};
+pub(crate) use crate::updater;
+pub(crate) use editor_core::{Buffer, Selection};
+pub(crate) use futures::StreamExt as _; // LSP 通知 pump の `.next()`
+pub(crate) use editor_view::{ComposerEvent, EditorHoverEvent, EditorInputEvent, EditorView, PositionSnapshot};
+pub(crate) use explorer::{
     ContextMenu as ExplorerContextMenu, Explorer, ExplorerProject, Naming as ExplorerNaming,
     NamingKind, TreeRow, ViewMode as ExplorerView,
 };
-use gpui::{
+pub(crate) use gpui::{
     Animation, AnimationExt, App, Bounds, ClipboardItem, Context, CursorStyle, Div, Entity,
     EventEmitter,
     FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -22,23 +22,23 @@ use gpui::{
     Window, WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*,
     pulsating_between, px, size, svg,
 };
-use git_ui::{BranchMenu as BranchMenuState, GitPanel, RepositorySnapshot};
-use host::Host;
-use lang::lsp::{
+pub(crate) use git_ui::{BranchMenu as BranchMenuState, GitPanel, RepositorySnapshot};
+pub(crate) use host::Host;
+pub(crate) use lang::lsp::{
     apply_text_edits_to_string, language_server_for, parse_definition, parse_hover_lines,
     parse_text_edits, parse_workspace_edit,
 };
-use project::{GraphCommit, ProjectSource, StatusKind, Worktree};
-use search_ui::{SearchPanel, SearchPanelEvent};
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut, Range};
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::sync::Arc;
-use terminal_view::{TerminalDock, TerminalDockEvent, TerminalLaunch};
-use theme_core::{Theme, ThemeSource, project_color};
-use ui::Tooltip;
-use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
+pub(crate) use project::{GraphCommit, ProjectSource, StatusKind, Worktree};
+pub(crate) use search_ui::{SearchPanel, SearchPanelEvent};
+pub(crate) use std::collections::HashMap;
+pub(crate) use std::ops::{Deref, DerefMut, Range};
+pub(crate) use std::path::{Path, PathBuf};
+pub(crate) use std::rc::Rc;
+pub(crate) use std::sync::Arc;
+pub(crate) use terminal_view::{TerminalDock, TerminalDockEvent, TerminalLaunch};
+pub(crate) use theme_core::{Theme, ThemeSource, project_color};
+pub(crate) use ui::Tooltip;
+pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
 
 actions!(
     workspace,

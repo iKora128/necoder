@@ -1,5 +1,5 @@
 /// Todo panel から shell へ上げる操作。FS・Agent・Toast は panel から直接触らない。
-enum TodoPanelEvent {
+pub(crate) enum TodoPanelEvent {
     ToggleItem { line: usize },
     SendToAgent { line: usize, text: String },
     DailyPlan,
@@ -7,14 +7,14 @@ enum TodoPanelEvent {
 }
 
 /// 1 ProjectSession に属する Todo UI。真実は `.shirushi/todos.md`。
-struct TodoPanel {
-    open: bool,
-    items: Vec<project::todos::TodoItem>,
-    plan_busy: bool,
-    running: HashMap<usize, Hsla>,
-    add_input: Option<Entity<EditorView>>,
-    theme: Theme,
-    accent: Hsla,
+pub(crate) struct TodoPanel {
+    pub(crate) open: bool,
+    pub(crate) items: Vec<project::todos::TodoItem>,
+    pub(crate) plan_busy: bool,
+    pub(crate) running: HashMap<usize, Hsla>,
+    pub(crate) add_input: Option<Entity<EditorView>>,
+    pub(crate) theme: Theme,
+    pub(crate) accent: Hsla,
 }
 
 impl TodoPanel {

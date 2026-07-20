@@ -1,5 +1,5 @@
 /// child panel の typed event を Workspace shell へ接続する唯一の登録点。
-struct PanelRegistry;
+pub(crate) struct PanelRegistry;
 
 impl PanelRegistry {
     fn bind_session(
