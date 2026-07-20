@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         // 最後に触った面が Agent なら AI スレッドタブを、そうでなければエディタタブを閉じる。
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
         // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。
@@ -11,14 +13,14 @@ impl Workspace {
     }
 
     /// 次のエディタタブへ（⌘} = ⌘⇧]。末尾で先頭へ回る）。
-    fn select_next_tab(&mut self, _: &SelectNextTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_next_tab(&mut self, _: &SelectNextTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() > 1 {
             self.select_tab((self.active_tab + 1) % self.tabs.len(), window, cx);
         }
     }
 
     /// 前のエディタタブへ（⌘{ = ⌘⇧[。先頭で末尾へ回る）。
-    fn select_prev_tab(&mut self, _: &SelectPrevTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_prev_tab(&mut self, _: &SelectPrevTab, window: &mut Window, cx: &mut Context<Self>) {
         let count = self.tabs.len();
         if count > 1 {
             self.select_tab((self.active_tab + count - 1) % count, window, cx);
@@ -26,7 +28,7 @@ impl Workspace {
     }
 
     /// 直近に閉じたタブを復元する（Chrome の ⌘⇧T）。⌘W と同じく最後に触った面で振り分ける。
-    fn restore_closed_tab(&mut self, _: &RestoreClosedTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn restore_closed_tab(&mut self, _: &RestoreClosedTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.chrome.show_right && self.agent_active {
             self.agent_panel.update(cx, |panel, cx| panel.restore_closed_thread(cx));
             return;
@@ -36,7 +38,7 @@ impl Workspace {
         }
     }
 
-    fn new_agent_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_agent_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
         if !self.chrome.show_right {
             self.chrome.show_right = true;
         }
@@ -45,7 +47,7 @@ impl Workspace {
     }
 
     /// 次の AI スレッドタブへ（Chrome 風。⌘⌥→ / ⌃Tab）。
-    fn select_next_thread(&mut self, _: &SelectNextThread, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_next_thread(&mut self, _: &SelectNextThread, _: &mut Window, cx: &mut Context<Self>) {
         if !self.chrome.show_right {
             self.chrome.show_right = true;
         }
@@ -54,7 +56,7 @@ impl Workspace {
     }
 
     /// 前の AI スレッドタブへ（Chrome 風。⌘⌥← / ⌃⇧Tab）。
-    fn select_prev_thread(&mut self, _: &SelectPrevThread, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_prev_thread(&mut self, _: &SelectPrevThread, _: &mut Window, cx: &mut Context<Self>) {
         if !self.chrome.show_right {
             self.chrome.show_right = true;
         }
@@ -63,7 +65,7 @@ impl Workspace {
     }
 
     /// アクティブプロジェクトを**新しいウィンドウ**で開く（⌘⇧N。ウィンドウモデル §5）。
-    fn new_window(&mut self, _: &NewWindow, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_window(&mut self, _: &NewWindow, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(slot) = self.active_slot() {
             let root = slot.worktree.root().to_path_buf();
             self.open_folder_as_window(root, cx);
@@ -72,7 +74,7 @@ impl Workspace {
 
     // ── ドックの可変幅（縁ドラッグ）。Agent=左縁 / エクスプローラ=右縁 ──
 
-    fn on_resize_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_resize_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let dx = f32::from(event.position.x) - self.chrome.resize_start_x;
         if self.chrome.resizing_agent {
             // 左縁を左へ動かすと広がる（dx 負 → 幅増）。
@@ -85,7 +87,7 @@ impl Workspace {
         }
     }
 
-    fn on_resize_end(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_resize_end(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.chrome.resizing_agent || self.chrome.resizing_explorer {
             self.chrome.resizing_agent = false;
             self.chrome.resizing_explorer = false;
@@ -94,7 +96,7 @@ impl Workspace {
     }
 
     /// Agent パネルを可変幅コンテナに入れて描く（左縁にリサイズハンドル）。
-    fn render_agent_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_agent_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         div()
             .flex()
@@ -126,7 +128,7 @@ impl Workspace {
             .child(div().flex_1().min_w_0().h_full().child(self.agent_panel.clone()))
     }
 
-    fn toggle_dock(&mut self, dock: Dock, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_dock(&mut self, dock: Dock, cx: &mut Context<Self>) {
         match dock {
             Dock::Left => self.chrome.show_left = !self.chrome.show_left,
             Dock::Right => self.chrome.show_right = !self.chrome.show_right,
@@ -138,7 +140,7 @@ impl Workspace {
     // ── 下ドックのターミナル（M8） ──
 
     /// project の Host 設定を TerminalDock が扱える launch spec に解決する。
-    fn terminal_launch_for(slot: Option<&ProjectSlot>) -> TerminalLaunch {
+    pub(crate) fn terminal_launch_for(slot: Option<&ProjectSlot>) -> TerminalLaunch {
         let (cwd, shell) = slot
             .map(|slot| {
                 let root = slot.worktree.root().to_path_buf();
@@ -165,12 +167,12 @@ impl Workspace {
     }
 
     /// アクティブなターミナルにフォーカス（キー入力を受ける）。
-    fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.terminal_dock.update(cx, |dock, cx| dock.focus_active(window, cx));
     }
 
     /// 下ドック（ターミナル）を開閉する。開くときは生成 + フォーカス（キー入力を受ける）。
-    fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
         self.chrome.show_bottom = !self.chrome.show_bottom;
         if self.chrome.show_bottom {
             self.focus_active_terminal(window, cx);
@@ -179,7 +181,7 @@ impl Workspace {
     }
 
     /// アクティブなエディタタブを閉じて隣へ移る（⌘W / タブの ×）。
-    fn close_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
             return;
         }
@@ -188,7 +190,7 @@ impl Workspace {
 
     /// `index` 番目のタブを閉じ、アクティブを隣へ寄せる。閉じたファイルは ⌘⇧T 用に履歴へ積み、
     /// LSP には didClose を送る。最後の 1 枚を閉じると空状態（分割も畳む）。
-    fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
@@ -238,7 +240,7 @@ impl Workspace {
     }
 
     /// `index` 番目のタブをアクティブにする（タブクリック・⌘{ / ⌘}・重複オープン時）。
-    fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
@@ -268,7 +270,7 @@ impl Workspace {
     }
 
     /// タブを `from` から `to` へ移動する（ドラッグ並べ替え。active は同じタブを指し続ける）。
-    fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+    pub(crate) fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let count = self.tabs.len();
         if from >= count || to >= count || from == to {
             return;
@@ -295,7 +297,7 @@ impl Workspace {
 
     /// 右分割ペインを開閉する（⌘\）。開くときは主ペインの開いているファイルを独立エディタで複製する
     /// （比較・参照用の副ビュー。LSP/保存の統合は主ペイン=editor 側が担う）。
-    fn toggle_split(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_split(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
         if self.split_editor.is_some() {
             self.close_split(window, cx);
             return;
@@ -322,7 +324,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn close_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.split_editor.take().is_none() {
             return;
         }

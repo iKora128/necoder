@@ -42,6 +42,8 @@ pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
 
 // ── 子モジュール（Rust の descendant 可視性で hub の private にアクセス可能）──
 mod commands;
+mod editor_area;
+pub(crate) use editor_area::*;
 mod panels;
 mod project_session;
 mod project_switch;
@@ -699,23 +701,15 @@ impl DerefMut for Workspace {
 }
 
 include!("git_controller.rs");
-include!("editor_area.rs");
-include!("editor_area/language.rs");
-include!("editor_area/inline_edit.rs");
 include!("todo_panel.rs");
-include!("editor_area/diff.rs");
-include!("editor_area/diagnostics.rs");
 include!("rail.rs");
 include!("notifications.rs");
-include!("editor_area/hot_exit.rs");
-include!("editor_area/tabs.rs");
 include!("explorer_controller.rs");
 include!("overlays.rs");
 include!("dev_probes.rs");
 include!("remote_ssh.rs");
 include!("rail_view.rs");
 include!("explorer_view.rs");
-include!("editor_area/overlays.rs");
 include!("git_view.rs");
 include!("chrome.rs");
 

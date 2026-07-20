@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn ensure_lsp(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_lsp(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -77,7 +79,7 @@ impl Workspace {
     }
 
     /// initialize 応答後: initialized 通知 + 現在の rust ファイルを didOpen。
-    fn on_lsp_initialized(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn on_lsp_initialized(&mut self, cx: &mut Context<Self>) {
         self.lsp_initialized = true;
         if let Some(lsp) = &self.lsp {
             lsp.initialized();
@@ -86,7 +88,7 @@ impl Workspace {
     }
 
     /// 現在開いているファイルを didOpen する（稼働中サーバが担当する言語に限る）。
-    fn lsp_did_open_active(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn lsp_did_open_active(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -111,7 +113,7 @@ impl Workspace {
     }
 
     /// タブを閉じたら didClose を送り、送信済み version 記録も外す（稼働中サーバ担当言語のみ）。
-    fn lsp_did_close(&mut self, path: &Path) {
+    pub(crate) fn lsp_did_close(&mut self, path: &Path) {
         self.lsp_sent_versions.remove(path);
         if !self.lsp_initialized {
             return;
@@ -127,7 +129,7 @@ impl Workspace {
     }
 
     /// publishDiagnostics を受けてファイル別に格納し、アクティブファイル分をエディタへ push。
-    fn on_diagnostics(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
+    pub(crate) fn on_diagnostics(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         // 生 JSON（Diagnostic[]）も保持する（⌘. の codeAction context 用・M11）。
         let raw = params.get("diagnostics").cloned().unwrap_or(serde_json::Value::Array(Vec::new()));
         let raw_uri = params.get("uri").and_then(|uri| uri.as_str()).map(str::to_string);
@@ -162,7 +164,7 @@ impl Workspace {
     }
 
     /// アクティブファイルの診断をエディタへ渡す（gutter 下線用）。
-    fn push_active_diagnostics(&self, cx: &mut Context<Self>) {
+    pub(crate) fn push_active_diagnostics(&self, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -174,7 +176,7 @@ impl Workspace {
     }
 
     /// エディタ変更時（observe）: 再描画 + LSP didChange（rust・version 変化時のみ）。
-    fn on_editor_changed(&mut self, editor: Entity<EditorView>, cx: &mut Context<Self>) {
+    pub(crate) fn on_editor_changed(&mut self, editor: Entity<EditorView>, cx: &mut Context<Self>) {
         cx.notify();
         // hot exit: **バッファ version が変わった時だけ**スナップショットを予約する。
         // observe は blink（530ms 毎）でも発火するので、無ガードだと 2s デバウンスが永遠に流れる。
@@ -264,7 +266,7 @@ impl Workspace {
     }
 
     /// アクティブファイルの診断件数（error, warning）。statusbar 用。
-    fn active_diagnostic_counts(&self, cx: &App) -> (usize, usize) {
+    pub(crate) fn active_diagnostic_counts(&self, cx: &App) -> (usize, usize) {
         let Some(editor) = self.active_editor() else {
             return (0, 0);
         };
@@ -281,7 +283,7 @@ impl Workspace {
     }
 
     /// 定義ジャンプ（F12）。カーソル位置の定義を rust-analyzer に問い合わせて着地する。
-    fn go_to_definition(&mut self, _: &GoToDefinition, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_to_definition(&mut self, _: &GoToDefinition, window: &mut Window, cx: &mut Context<Self>) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -326,7 +328,7 @@ impl Workspace {
     }
 
     /// 定義の着地: 別ファイルなら開き、対象位置を中央へ寄せる。
-    fn jump_to_location(
+    pub(crate) fn jump_to_location(
         &mut self,
         path: PathBuf,
         line: u32,
@@ -348,14 +350,14 @@ impl Workspace {
 
     /// 補完（Ctrl-Space）。カーソル位置で候補を取得しポップアップを出す。
     /// Ctrl-Space（手動トリガ）。Esc 抑止を解除して要求する。
-    fn trigger_completion(&mut self, _: &TriggerCompletion, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn trigger_completion(&mut self, _: &TriggerCompletion, window: &mut Window, cx: &mut Context<Self>) {
         self.completion_suppressed_word = None;
         self.request_completion(window, cx);
     }
 
     /// LSP へ補完を要求し、応答でポップアップを出す（手動 Ctrl-Space / 自動トリガ共通）。
     /// 世代番号で連打時の古い応答を捨てる。
-    fn request_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -395,7 +397,7 @@ impl Workspace {
         .detach();
     }
 
-    fn show_completion(
+    pub(crate) fn show_completion(
         &mut self,
         value: &serde_json::Value,
         position: Option<Point<gpui::Pixels>>,
@@ -429,7 +431,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn close_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.completion.take().is_none() {
             return;
         }
@@ -440,7 +442,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn move_completion_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(crate) fn move_completion_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
         if let Some(state) = self.completion.as_mut() {
             let len = state.filtered().len() as isize;
             if len == 0 {
@@ -451,7 +453,7 @@ impl Workspace {
         }
     }
 
-    fn confirm_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let insert = self.completion.as_ref().and_then(|state| {
             let filtered = state.filtered();
             filtered
@@ -470,7 +472,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn on_completion_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_completion_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => {
                 // Esc = 同じ語の入力継続では自動再表示しない（語頭 offset を記憶）。
@@ -523,13 +525,13 @@ impl Workspace {
 
     // ── フォーマット（⌥⇧F / 保存時・M11） ──
 
-    fn format_document(&mut self, _: &Format, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn format_document(&mut self, _: &Format, window: &mut Window, cx: &mut Context<Self>) {
         self.request_format(false, window, cx);
     }
 
     /// LSP フォーマットを要求して適用する。`save_after` = 適用後に保存（保存時フォーマット経路）。
     /// LSP が使えない/対応外のときは、`save_after` なら素の保存だけ行う。
-    fn request_format(&mut self, save_after: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_format(&mut self, save_after: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -598,7 +600,7 @@ impl Workspace {
     }
 
     /// ⌘S。`format_on_save` が有効ならフォーマット → 保存、無効なら即保存（どちらも背景書き込み）。
-    fn save_active(&mut self, _: &SaveActive, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_active(&mut self, _: &SaveActive, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -611,7 +613,7 @@ impl Workspace {
 
     // ── rename（F2・M11） ──
 
-    fn open_rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -643,7 +645,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn close_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rename_input.take().is_some() {
             if let Some(editor) = self.active_editor() {
                 let handle = editor.read(cx).focus_handle(cx);
@@ -653,7 +655,7 @@ impl Workspace {
         }
     }
 
-    fn on_rename_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_rename_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_rename(window, cx),
             "enter" => {
@@ -694,7 +696,7 @@ impl Workspace {
 
     /// rename を LSP へ要求し、WorkspaceEdit を全ファイルへ適用する。
     /// 開いているタブはバッファへ（dirty のまま）・未オープンはディスクへ直書き。
-    fn perform_rename(&mut self, new_name: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn perform_rename(&mut self, new_name: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -725,7 +727,7 @@ impl Workspace {
     }
 
     /// WorkspaceEdit を適用する共通経路（rename / code actions・M11）。
-    fn apply_workspace_edit(&mut self, value: &serde_json::Value, cx: &mut Context<Self>) {
+    pub(crate) fn apply_workspace_edit(&mut self, value: &serde_json::Value, cx: &mut Context<Self>) {
         let by_file = parse_workspace_edit(value);
         if by_file.is_empty() {
             return;
@@ -794,7 +796,7 @@ impl Workspace {
     }
 
     /// F2 のミニ入力（キャレット近く…は座標が要るので v1 は中央上・⌃G と同型）。
-    fn render_rename_input(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_rename_input(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (value, focus) = self.rename_input.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent();

@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn open_diff_tab(&mut self, _: &OpenDiff, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_diff_tab(&mut self, _: &OpenDiff, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -14,7 +16,7 @@ impl Workspace {
     }
 
     /// 指定ファイルの diff タブを開く（git パネル行から）。`current` が None ならディスクの内容を使う。
-    fn open_diff_tab_for(
+    pub(crate) fn open_diff_tab_for(
         &mut self,
         path: PathBuf,
         current: Option<String>,
@@ -62,7 +64,7 @@ impl Workspace {
     }
 
     /// diff タブ内で次/前の hunk ヘッダ（@@ 行）へ移動する（F7/⇧F7）。
-    fn step_hunk_header(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(crate) fn step_hunk_header(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -87,7 +89,7 @@ impl Workspace {
     }
 
     /// gutter の diff バークリック（hunk ポップオーバー）。
-    fn on_hunk_clicked(
+    pub(crate) fn on_hunk_clicked(
         &mut self,
         hunk: project::DiffHunk,
         position: Point<gpui::Pixels>,
@@ -98,7 +100,7 @@ impl Workspace {
     }
 
     /// hunk を stage する（この hunk だけ index へ）。
-    fn stage_hunk(&mut self, hunk: project::DiffHunk, cx: &mut Context<Self>) {
+    pub(crate) fn stage_hunk(&mut self, hunk: project::DiffHunk, cx: &mut Context<Self>) {
         self.hunk_menu = None;
         let Some(editor) = self.active_editor() else {
             return;
@@ -149,7 +151,7 @@ impl Workspace {
     }
 
     /// hunk を巻き戻す（バッファ上で HEAD の内容に戻す・undo 可）。
-    fn revert_hunk(&mut self, hunk: project::DiffHunk, cx: &mut Context<Self>) {
+    pub(crate) fn revert_hunk(&mut self, hunk: project::DiffHunk, cx: &mut Context<Self>) {
         self.hunk_menu = None;
         let Some(editor) = self.active_editor() else {
             return;
@@ -186,7 +188,7 @@ impl Workspace {
     }
 
     /// hunk のバッファ側テキストをコピーする。
-    fn copy_hunk(&mut self, hunk: project::DiffHunk, cx: &mut Context<Self>) {
+    pub(crate) fn copy_hunk(&mut self, hunk: project::DiffHunk, cx: &mut Context<Self>) {
         self.hunk_menu = None;
         let Some(editor) = self.active_editor() else {
             return;
@@ -204,7 +206,7 @@ impl Workspace {
     }
 
     /// hunk 操作ポップオーバー（gutter クリックで開く・M11-10）。
-    fn render_hunk_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_hunk_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (hunk, position) = self.hunk_menu.clone()?;
         let theme = self.theme.clone();
         let item = |id: &'static str, label: String| {
@@ -280,7 +282,7 @@ impl Workspace {
 
     /// キャレット行が変わっていたら 400ms デバウンスで `git blame -L` を背景実行し、
     /// 行末注釈へ反映する。dirty バッファでは HEAD 基準の近似（行ずれ許容）。
-    fn schedule_blame(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_blame(&mut self, editor: &Entity<EditorView>, cx: &mut Context<Self>) {
         if self.active_editor().as_ref() != Some(editor) {
             return;
         }

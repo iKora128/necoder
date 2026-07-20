@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn open_outline(&mut self, _: &OutlineSymbols, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_outline(&mut self, _: &OutlineSymbols, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -31,7 +33,7 @@ impl Workspace {
     }
 
     /// ⌘T: LSP workspace/symbol を Picker で（空クエリの初期一覧 → Picker の fuzzy で絞る）。
-    fn open_workspace_symbols(&mut self, _: &WorkspaceSymbols, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_workspace_symbols(&mut self, _: &WorkspaceSymbols, window: &mut Window, cx: &mut Context<Self>) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -104,7 +106,7 @@ impl Workspace {
     // ── 診断一覧 + F8（M11） ──
 
     /// F8/⇧F8: アクティブファイルの次/前の診断行へ。
-    fn step_diagnostic(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(crate) fn step_diagnostic(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -133,16 +135,16 @@ impl Workspace {
         editor.update(cx, |view, cx| view.reveal_position(target as usize, 0, cx));
     }
 
-    fn next_diagnostic(&mut self, _: &NextDiagnostic, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn next_diagnostic(&mut self, _: &NextDiagnostic, _: &mut Window, cx: &mut Context<Self>) {
         self.step_diagnostic(1, cx);
     }
 
-    fn prev_diagnostic(&mut self, _: &PrevDiagnostic, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn prev_diagnostic(&mut self, _: &PrevDiagnostic, _: &mut Window, cx: &mut Context<Self>) {
         self.step_diagnostic(-1, cx);
     }
 
     /// statusbar の ✗▲ クリック: 全ファイルの診断を検索パネル UI で一覧（メッセージがプレビュー行）。
-    fn open_diagnostics_panel(&mut self, _: &DiagnosticsPanel, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_diagnostics_panel(&mut self, _: &DiagnosticsPanel, window: &mut Window, cx: &mut Context<Self>) {
         let mut results: Vec<search::FileMatch> = Vec::new();
         let mut files: Vec<&PathBuf> = self.raw_diagnostics.keys().collect();
         files.sort();
@@ -184,7 +186,7 @@ impl Workspace {
 
     // ── code actions（⌘.・M11） ──
 
-    fn open_code_actions(&mut self, _: &CodeActions, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_code_actions(&mut self, _: &CodeActions, window: &mut Window, cx: &mut Context<Self>) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -272,7 +274,7 @@ impl Workspace {
         .detach();
     }
 
-    fn close_code_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_code_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.code_actions.take().is_none() {
             return;
         }
@@ -284,7 +286,7 @@ impl Workspace {
     }
 
     /// 選択中アクションを適用する。edit が無ければ codeAction/resolve で解決してから。
-    fn confirm_code_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_code_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let action = self
             .code_actions
             .as_ref()
@@ -323,7 +325,7 @@ impl Workspace {
         .detach();
     }
 
-    fn on_code_actions_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_code_actions_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_code_actions(window, cx),
             "up" => {
@@ -346,7 +348,7 @@ impl Workspace {
     }
 
     /// ⌘. のポップアップ（補完と同じ見た目・キャレット直下）。
-    fn render_code_actions(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_code_actions(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.code_actions.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent();
@@ -421,7 +423,7 @@ impl Workspace {
     // ── 参照検索（⇧F12・M11） ──
 
     /// 参照を検索して ⌘⇧F の結果パネル（ファイル別グルーピング UI）で見せる。
-    fn find_references(&mut self, _: &FindReferences, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn find_references(&mut self, _: &FindReferences, window: &mut Window, cx: &mut Context<Self>) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -473,7 +475,7 @@ impl Workspace {
     }
 
     /// hover をキーで出す（⌘K ⌘I）。キャレット位置で要求し、キャレット直上に出す。
-    fn show_hover_at_caret(&mut self, _: &ShowHover, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_hover_at_caret(&mut self, _: &ShowHover, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -489,7 +491,7 @@ impl Workspace {
     }
 
     /// エディタの hover dwell（[`EditorHoverEvent::Dwell`]）→ LSP hover 要求（M10）。
-    fn on_editor_hover(
+    pub(crate) fn on_editor_hover(
         &mut self,
         editor: &Entity<EditorView>,
         event: &EditorHoverEvent,
@@ -514,7 +516,7 @@ impl Workspace {
     }
 
     /// LSP へ hover を要求し、応答があればポップアップを出す（dwell / ⌘K ⌘I 共通）。
-    fn request_hover(
+    pub(crate) fn request_hover(
         &mut self,
         line: u32,
         character: u32,

@@ -2604,6 +2604,26 @@ Host gpu
         assert!(SshProject::parse("ssh://example.com/code?proxy=bad").is_err());
     }
 
+    #[test]
+    fn ssh_uri_without_path_means_home() {
+        // path 未指定は「空」= home マーカー（接続時に remote の $HOME へ解決・#5）。もう bail しない。
+        for uri in ["ssh://example.com", "ssh://example.com/", "ssh://user@example.com/~"] {
+            let project =
+                SshProject::parse(uri).unwrap_or_else(|error| panic!("{uri}: {error:#}"));
+            assert!(
+                project.path.as_os_str().is_empty(),
+                "{uri} は home（空パス）のはず: {:?}",
+                project.path
+            );
+            assert_eq!(project.host, "example.com");
+        }
+        // 具体パスは従来どおり保持する。
+        assert_eq!(
+            SshProject::parse("ssh://example.com/srv/app").unwrap().path,
+            Path::new("/srv/app")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn remote_protocol_reads_writes_lists_and_runs_processes() {

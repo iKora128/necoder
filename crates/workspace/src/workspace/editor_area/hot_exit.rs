@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn schedule_hot_exit_snapshot(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_hot_exit_snapshot(&mut self, cx: &mut Context<Self>) {
         let debug = std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some();
         let Some(storage) = self.persistence.storage.clone() else {
             if debug {
@@ -89,7 +91,7 @@ impl Workspace {
 
     /// 復元バーの「復元」: スナップショットを各バッファへ流し込む（開いていなければ開く）。
     /// 置換は 1 Transaction なので undo で復元前に戻れる。復元後は dirty ＝次の tick で再スナップショット。
-    fn restore_hot_exit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn restore_hot_exit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rows) = self.hot_exit_pending.take() else {
             return;
         };
@@ -108,7 +110,7 @@ impl Workspace {
     }
 
     /// 復元バーの「破棄」: スナップショットを消してバーを閉じる。
-    fn discard_hot_exit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn discard_hot_exit(&mut self, cx: &mut Context<Self>) {
         self.hot_exit_pending = None;
         if let Some(storage) = self.persistence.storage.clone() {
             cx.background_executor()
@@ -133,7 +135,7 @@ impl Workspace {
 
     // ── ⌃G 行ジャンプ（M10-12） ──
 
-    fn open_goto_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_goto_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_editor().is_none() {
             return;
         }
@@ -143,7 +145,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn close_goto_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_goto_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.goto_line.take().is_some() {
             if let Some(editor) = self.active_editor() {
                 let handle = editor.read(cx).focus_handle(cx);
@@ -153,7 +155,7 @@ impl Workspace {
         }
     }
 
-    fn on_goto_line_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_goto_line_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_goto_line(window, cx),
             "enter" => {
@@ -192,7 +194,7 @@ impl Workspace {
     }
 
     /// ⌃G のミニ入力（中央上の小さな箱）。
-    fn render_goto_line(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_goto_line(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (value, focus) = self.goto_line.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent();
@@ -239,7 +241,7 @@ impl Workspace {
     // ── ナビゲーション履歴（M10-11: ⌃- 戻る / ⌃⇧- 進む） ──
 
     /// 現在位置（アクティブタブのパス + キャレット byte offset）。
-    fn current_nav_position(&self, cx: &App) -> Option<(PathBuf, usize)> {
+    pub(crate) fn current_nav_position(&self, cx: &App) -> Option<(PathBuf, usize)> {
         let editor = self.active_editor()?;
         let path = self.active_tab_path()?;
         let offset = editor.read(cx).buffer().selections().first().map(|s| s.head).unwrap_or(0);
@@ -247,7 +249,7 @@ impl Workspace {
     }
 
     /// ジャンプ級の移動の**直前**に呼ぶ: 現在位置を「戻る」へ積み、「進む」を捨てる。
-    fn record_nav_position(&mut self, cx: &App) {
+    pub(crate) fn record_nav_position(&mut self, cx: &App) {
         let Some(position) = self.current_nav_position(cx) else {
             return;
         };
@@ -261,7 +263,7 @@ impl Workspace {
         self.nav_forward.clear();
     }
 
-    fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.nav_back.pop() else {
             return;
         };
@@ -271,7 +273,7 @@ impl Workspace {
         self.navigate_to(target, window, cx);
     }
 
-    fn navigate_forward(&mut self, _: &NavigateForward, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn navigate_forward(&mut self, _: &NavigateForward, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.nav_forward.pop() else {
             return;
         };
@@ -282,7 +284,7 @@ impl Workspace {
     }
 
     /// 履歴の 1 点へ移動する（閉じたファイルは開き直す）。
-    fn navigate_to(&mut self, target: (PathBuf, usize), window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn navigate_to(&mut self, target: (PathBuf, usize), window: &mut Window, cx: &mut Context<Self>) {
         let (path, offset) = target;
         if self.active_tab_path().as_ref() == Some(&path) {
             if let Some(editor) = self.active_editor() {

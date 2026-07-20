@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn render_hot_exit_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_hot_exit_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let pending = self.hot_exit_pending.as_ref()?;
         let theme = self.theme.clone();
         let count = pending.len();
@@ -52,7 +54,7 @@ impl Workspace {
 
     /// 外部変更の警告バー（dirty バッファにディスク変更が来たとき・M10 watch）。
     /// 上書きは絶対にせず、ユーザーに「再読込 / このまま」を選ばせる。
-    fn render_external_change_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_external_change_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let editor = self.active_editor()?;
         if !editor.read(cx).is_externally_changed() {
             return None;
@@ -112,7 +114,7 @@ impl Workspace {
 
     /// hover ポップアップ（LSP hover 結果・M10）。アンカーの上（入らなければ下）にコード字で出す。
     /// フォーカスは取らない。occlude なのでポップアップ上にマウスがある間は消えない。
-    fn render_hover(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_hover(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.hover.as_ref()?;
         let theme = self.theme.clone();
         const HOVER_LINE_HEIGHT: f32 = 17.0;
@@ -159,7 +161,7 @@ impl Workspace {
 
     /// LSP 補完ポップアップ（Ctrl-Space / 自動トリガ）。キャレット直下に prefix 絞り込み済み候補。
     /// 上下/Enter・Tab/Esc・印字キーは type-through で絞り込み継続。
-    fn render_completion(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_completion(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.completion.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent();

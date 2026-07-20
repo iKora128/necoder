@@ -1,3 +1,14 @@
+use crate::workspace::*;
+
+mod diagnostics;
+mod diff;
+mod hot_exit;
+mod inline_edit;
+mod language;
+mod overlays;
+mod tabs;
+pub(crate) use tabs::*;
+
 /// 1 ProjectSession の編集面。tab / pane / language / diff / navigation の状態を一括所有する。
 ///
 /// `EditorArea` 自身は長寿命 aggregate とし、実際に描画・入力を持つ各 `EditorView` を Entity として
@@ -45,7 +56,7 @@ pub struct EditorArea {
 }
 
 impl EditorArea {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             loaded: false,
             tabs: Vec::new(),

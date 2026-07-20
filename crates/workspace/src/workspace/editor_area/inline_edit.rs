@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn open_inline_edit(&mut self, _: &InlineEdit, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_inline_edit(&mut self, _: &InlineEdit, window: &mut Window, cx: &mut Context<Self>) {
         let terminal_focused = self.terminal_dock.read(cx).is_any_focused(window, cx);
         let target = if terminal_focused {
             InlineEditTarget::Terminal
@@ -54,7 +56,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn close_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.inline_edit.take() else {
             return;
         };
@@ -75,7 +77,7 @@ impl Workspace {
     }
 
     /// Enter: 指示を `claude -p` へ（背景実行・世代ガード付き）。
-    fn execute_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn execute_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -139,7 +141,7 @@ impl Workspace {
 
     /// 提案を適用。エディタ = 1 Transaction 置換（⌘Z 一発で戻る・version 不一致は安全側で破棄）。
     /// ターミナル = 生成コマンドを入力行へ挿入（実行はユーザーの Enter に委ねる）。
-    fn accept_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn accept_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.inline_edit.take() else {
             return;
         };
@@ -179,7 +181,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn on_inline_edit_key_down(
+    pub(crate) fn on_inline_edit_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
@@ -231,7 +233,7 @@ impl Workspace {
     }
 
     /// ⌘I のオーバーレイ（入力バー + 状態行 + diff プレビュー）。rename と同じ中央上配置。
-    fn render_inline_edit(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_inline_edit(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.inline_edit.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent();
