@@ -2,9 +2,10 @@ use crate::workspace::*;
 
 impl Workspace {
     pub(crate) fn close_hover(&mut self, cx: &mut Context<Self>) {
-        if self.hover.take().is_some() {
+        if self.session_mut().hover.take().is_some() {
             // 進行中の応答も無効化する。
-            self.hover_generation = self.hover_generation.wrapping_add(1);
+            let generation = &mut self.session_mut().hover_generation;
+            *generation = generation.wrapping_add(1);
             cx.notify();
         }
     }
@@ -32,12 +33,13 @@ impl Workspace {
                 if self.active_editor().as_ref() == Some(editor) {
                     if let Some(path) = self.active_tab_path() {
                         let position = (path, *from);
-                        if self.nav_back.last() != Some(&position) {
-                            self.nav_back.push(position);
-                            if self.nav_back.len() > 100 {
-                                self.nav_back.remove(0);
+                        let area = self.session_mut();
+                        if area.nav_back.last() != Some(&position) {
+                            area.nav_back.push(position);
+                            if area.nav_back.len() > 100 {
+                                area.nav_back.remove(0);
                             }
-                            self.nav_forward.clear();
+                            area.nav_forward.clear();
                         }
                     }
                 }
@@ -56,7 +58,7 @@ impl Workspace {
         };
         match classify_completion_trigger(text, &before) {
             CompletionTrigger::Identifier => {
-                if let Some(state) = self.completion.as_mut() {
+                if let Some(state) = self.session_mut().completion.as_mut() {
                     // 開いている → クライアント側絞り込み（LSP 再要求なし）。
                     if let Some(last) = text.chars().last() {
                         state.prefix.push(last);
@@ -69,22 +71,22 @@ impl Workspace {
                     return;
                 }
                 // 閉じている → Esc した語でなければ自動ポップアップ。
-                if self.completion_suppressed_word == Some(word_start) {
+                if self.session().completion_suppressed_word == Some(word_start) {
                     return;
                 }
-                self.completion_suppressed_word = None;
+                self.session_mut().completion_suppressed_word = None;
                 self.request_completion(window, cx);
             }
             CompletionTrigger::Fresh => {
                 // `.` / `::` はメンバ/パス補完を新規要求（Esc 抑止も解除）。
-                self.completion_suppressed_word = None;
-                if self.completion.is_some() {
+                self.session_mut().completion_suppressed_word = None;
+                if self.session().completion.is_some() {
                     self.close_completion(window, cx);
                 }
                 self.request_completion(window, cx);
             }
             CompletionTrigger::None => {
-                if self.completion.is_some() {
+                if self.session().completion.is_some() {
                     self.close_completion(window, cx);
                 }
             }
@@ -107,17 +109,17 @@ impl Workspace {
 
     /// active session を表示対象にする。既存 Entity / process は破棄せず、初回だけタブを復元する。
     pub(crate) fn load_active_slot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.loaded {
+        if !self.session().loaded {
             self.open_slot_files(window, cx);
-            self.loaded = true;
+            self.session_mut().loaded = true;
         }
         self.refresh_git_status(cx);
         self.update_agent_destination(cx);
-        if self._watch.is_none() {
+        if self.session()._watch.is_none() {
             self.start_watcher(cx);
         }
         if self.chrome.show_bottom {
-            self.terminal_dock.update(cx, |dock, cx| {
+            self.session().terminal_dock.update(cx, |dock, cx| {
                 dock.ensure_active(cx);
             });
         }

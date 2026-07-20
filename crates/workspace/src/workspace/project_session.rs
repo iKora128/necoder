@@ -702,3 +702,26 @@ impl Workspace {
     // titlebar の ⎇ クリックで branch/worktree メニューを開閉する。
     // ⎇ メニューの開閉。ブランチ/worktree の列挙は背景で集め、揃ってから開く（UI は止めない）。
 }
+
+impl ProjectSessions {
+    /// アクティブ session の明示アクセサ（Deref の暗黙形に対する明示形）。
+    pub(crate) fn active_session(&self) -> &ProjectSession {
+        &self.sessions[self.active]
+    }
+
+    pub(crate) fn active_session_mut(&mut self) -> &mut ProjectSession {
+        &mut self.sessions[self.active]
+    }
+}
+
+impl Workspace {
+    /// アクティブ session（明示形）。**新規コードは Deref 経由の `self.<session フィールド>` でなく
+    /// こちらを使う**（アクセス時点の active に依存することをコード上で見えるようにする・§7.5-5）。
+    pub(crate) fn session(&self) -> &ProjectSession {
+        self.project_sessions.active_session()
+    }
+
+    pub(crate) fn session_mut(&mut self) -> &mut ProjectSession {
+        self.project_sessions.active_session_mut()
+    }
+}

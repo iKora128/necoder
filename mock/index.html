@@ -598,6 +598,115 @@ body.explorer-icons .tree-icons { display: flex; }
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg2) 35%, transparent); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   編隊モード（マルチエージェント）— herdr の状態一覧 + 系譜グラフ + N分割グリッド + ニュース
+   色の2軸を「位置と形」で分離: スレッド色=帰属（左バー/上線/ドット）/ 状態色=herdr の5状態（先頭グリフ）
+   ※ 状態色は許可リスト(UI-SPEC §1.3)への追加提案 — 編隊サイドバー・グラフノード・セル上線のみに限定
+   ============================================================ */
+:root {
+  --st-work:  #e5c07b;  /* 🟡 Working  作業中 */
+  --st-block: #e06c75;  /* 🔴 Blocked  承認/入力待ち */
+  --st-done:  #56b6c2;  /* 🔵 Done     完了・未確認 */
+  --st-idle:  #7bc96f;  /* 🟢 Idle     プロンプト待機 */
+  --st-unk:   #646b7a;  /* ⚪ Unknown  非エージェント */
+}
+.fleet-left, .fleet-center { display: none; }
+body.mode-fleet .dock-left > :not(.fleet-left) { display: none; }
+body.mode-fleet .dock-left { width: 216px; }
+body.mode-fleet .fleet-left { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+body.mode-fleet .center-col, body.mode-fleet .dock-right { display: none; }
+body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+
+/* 状態グリフ: 色＋形で識別（色だけに依存しない） */
+.stg { flex: none; width: 13px; text-align: center; font-size: 11px; line-height: 1; }
+.stg.work { color: var(--st-work); } .stg.block { color: var(--st-block); }
+.stg.done { color: var(--st-done); } .stg.idle { color: var(--st-idle); } .stg.unk { color: var(--st-unk); }
+.stg.work, .stg.block { animation: pulse 1.6s ease-in-out infinite; }
+
+/* --- Herd: 各エージェントの状態一覧（herdr の核・常設） --- */
+.herd { flex: 1 1 56%; display: flex; flex-direction: column; overflow: hidden auto; min-height: 0; }
+.ghead { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; flex: none;
+  font-size: 10px; font-weight: 700; letter-spacing: .08em; color: var(--fg2); text-transform: uppercase; }
+.ghead .pc { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.ghead .mini { margin-left: auto; font-weight: 400; letter-spacing: 0; text-transform: none; }
+.herd-row { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 4px 8px 4px 6px;
+  border-left: 2px solid var(--tc); cursor: default; }
+.herd-row:hover { background: var(--bg3); }
+.herd-row.focus { background: var(--bg3); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tc) 45%, transparent); }
+.herd-row .c2 { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.herd-row .nm { font-size: 12px; color: var(--fg0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.herd-row .sub { font-size: 10px; color: var(--fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.herd-row .sub b { color: var(--fg1); font-weight: 500; }
+.herd-row .tok { margin-left: auto; flex: none; font-size: 10px; color: var(--fg2); font-variant-numeric: tabular-nums; }
+.herd-legend { flex: none; display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 8px 10px;
+  border-top: 1px solid var(--border); font-size: 10px; color: var(--fg1); }
+.herd-legend span { display: flex; align-items: center; gap: 5px; }
+
+/* --- focus 中エージェントの worktree ファイル（focus-follows-agent） --- */
+.fleet-files { flex: 1 1 44%; display: flex; flex-direction: column; border-top: 1px solid var(--border); min-height: 0; }
+.fleet-files .fhead { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; flex: none; font-size: 10.5px; color: var(--fg2); }
+.fleet-files .fhead i { width: 8px; height: 8px; border-radius: 50%; background: var(--tc-focus, var(--th1)); flex: none; }
+.fleet-files .fhead b { color: var(--fg1); font-weight: 600; }
+
+/* --- 系譜グラフ（最重要ビジュアル・mermaid gitgraph 風をネイティブ描画で） --- */
+.lineage { flex: 0 0 41%; min-height: 208px; display: flex; flex-direction: column;
+  border-bottom: 1px solid var(--border); background: var(--bg1); }
+.lineage .lg-head { display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 12px; flex: none;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .07em; color: var(--fg2); text-transform: uppercase; }
+.lineage .lg-head .mini { margin-left: auto; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--fg2); }
+.lineage .lg-wrap { flex: 1; min-height: 0; overflow: auto; }
+.lg-svg { width: 100%; height: 100%; min-width: 700px; display: block; }
+.lane { fill: none; stroke-width: 2.5; }
+.lane.main { stroke: color-mix(in srgb, var(--fg2) 85%, transparent); }
+.lane.th1 { stroke: var(--th1); } .lane.th2 { stroke: var(--th2); } .lane.th3 { stroke: var(--th3); } .lane.th4 { stroke: #34d3b6; }
+.lane.dashed { stroke-dasharray: 2 6; stroke-linecap: round; opacity: .7; }
+.cm { stroke-width: 2.5; fill: var(--bg1); }
+.cm.main { stroke: var(--fg2); } .cm.th1 { stroke: var(--th1); } .cm.th2 { stroke: var(--th2); } .cm.th3 { stroke: var(--th3); }
+.tip { stroke-width: 0; } .tip.work { fill: var(--st-work); } .tip.block { fill: var(--st-block); } .tip.done { fill: var(--st-done); }
+.tipring { fill: none; stroke-width: 2; }
+.tipring.work { stroke: var(--st-work); animation: ringpulse 1.6s ease-out infinite; }
+.tipring.block { stroke: var(--st-block); animation: ringpulse 1.6s ease-out infinite; }
+@keyframes ringpulse { 0% { transform: scale(.7); opacity: .9; } 70% { transform: scale(1.6); opacity: 0; } 100% { opacity: 0; } }
+.lgl { fill: var(--fg0); font: 600 12px -apple-system, "Hiragino Sans", sans-serif; }
+.lgs { fill: var(--fg2); font: 10px ui-monospace, "SF Mono", monospace; }
+
+/* --- N分割エージェントグリッド（2·4·6·8） --- */
+.agent-grid { flex: 1; display: grid; gap: 8px; padding: 10px; min-height: 0;
+  grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); grid-auto-rows: 1fr; }
+.split-2 .agent-grid { --cols: 2; } .split-4 .agent-grid { --cols: 2; }
+.split-6 .agent-grid { --cols: 3; } .split-8 .agent-grid { --cols: 4; }
+.split-2 .acell:nth-child(n+3), .split-4 .acell:nth-child(n+5), .split-6 .acell:nth-child(n+7) { display: none; }
+.acell { display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  background: var(--bg1); border: 1px solid var(--border);
+  border-top: 2px solid color-mix(in srgb, var(--tc) 55%, var(--border)); border-radius: 8px; }
+.acell.focus { border-color: color-mix(in srgb, var(--tc) 70%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--tc) 45%, transparent); }
+.acell .ah { display: flex; align-items: center; gap: 7px; padding: 6px 9px; flex: none; border-bottom: 1px solid var(--border); }
+.acell .ah .cdot { width: 8px; height: 8px; border-radius: 50%; background: var(--tc); flex: none; }
+.acell .ah .nm { font-size: 12px; font-weight: 600; color: var(--fg0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acell .ah .br { font-size: 10px; color: var(--fg2); flex: none; }
+.acell .ah .tok { margin-left: auto; font-size: 10px; color: var(--fg2); flex: none; font-variant-numeric: tabular-nums; }
+.acell .aone { display: flex; align-items: center; gap: 6px; padding: 5px 9px; flex: none;
+  font-size: 11px; color: var(--fg1); border-bottom: 1px solid var(--border); }
+.acell .aone .lbl { color: var(--fg2); }
+.acell .abody { flex: 1; overflow: hidden auto; padding: 8px 9px; display: flex; flex-direction: column; gap: 7px; min-height: 0; }
+.split-6 .acell .abody, .split-8 .acell .abody { display: none; }
+.acell .approve { display: flex; align-items: center; gap: 6px; margin: 8px 9px; padding: 6px 8px; flex: none;
+  border: 1px solid color-mix(in srgb, var(--st-block) 45%, var(--border)); border-radius: 7px;
+  background: color-mix(in srgb, var(--st-block) 8%, transparent); font-size: 11px; color: var(--fg1); }
+.acell .approve .btn { padding: 2px 9px; border-radius: 5px; font-size: 10.5px; font-weight: 600; cursor: pointer; }
+.acell .approve .allow { background: var(--st-idle); color: #10131a; }
+.acell .approve .deny { border: 1px solid var(--border); color: var(--fg1); }
+.acell .approve .allow { margin-left: auto; }
+
+/* --- ニュースフィード（下・思想はトーストと同じ／時系列で常設） --- */
+.newsfeed { flex: none; height: 34px; display: flex; align-items: center; gap: 14px; padding: 0 12px;
+  border-top: 1px solid var(--border); background: var(--bg0); overflow: hidden; }
+.newsfeed .nlabel { flex: none; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--fg2); }
+.news-item { display: flex; align-items: center; gap: 6px; flex: none; font-size: 11px; color: var(--fg1); white-space: nowrap; }
+.news-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.news-item .tm { color: var(--fg2); font-size: 10px; }
 </style>
 </head>
 <body>
@@ -634,6 +743,18 @@ body.explorer-icons .tree-icons { display: flex; }
     <button id="tg-left" class="on" onclick="togglePane('left')">左</button>
     <button id="tg-right" class="on" onclick="togglePane('right')">右</button>
     <button id="tg-bottom" class="on" onclick="togglePane('bottom')">下</button>
+  </div>
+  <div class="group">
+    <span>ビュー</span>
+    <button id="mode-normal" class="on" onclick="setMode('normal')">通常</button>
+    <button id="mode-fleet-btn" onclick="setMode('fleet')">編隊</button>
+  </div>
+  <div class="group">
+    <span>分割</span>
+    <button id="sp-2" onclick="setSplit(2)">2</button>
+    <button id="sp-4" class="on" onclick="setSplit(4)">4</button>
+    <button id="sp-6" onclick="setSplit(6)">6</button>
+    <button id="sp-8" onclick="setSplit(8)">8</button>
   </div>
   <span class="hint"><kbd>⌘O</kbd> プロジェクト / <kbd>⌘⇧P</kbd> パレット / <kbd>esc</kbd> 閉じる</span>
 </div>
@@ -761,6 +882,58 @@ body.explorer-icons .tree-icons { display: flex; }
         <button class="vbtn" id="vb-icons" onclick="setExplorer('icons')" title="アイコン表示（Finder風）"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg></button>
         <span class="flabel">表示モード</span>
       </div>
+
+      <!-- ===== 編隊モードの左ドック: 上=状態一覧(herd) / 下=focus中エージェントのworktreeファイル ===== -->
+      <div class="fleet-left">
+        <div class="herd">
+          <div class="ghead"><span class="pc" style="background:#7c8cf8"></span>shirushi<span class="mini">3 稼働</span></div>
+          <div class="herd-row focus" data-th="th1" style="--tc:var(--th1)" onclick="focusAgent('th1')">
+            <span class="stg work">●</span>
+            <div class="c2"><span class="nm">rope設計</span><span class="sub">⎇ <b>rope</b> ・ 作業中 — buffer.rs</span></div>
+            <span class="tok">23.4k</span>
+          </div>
+          <div class="herd-row" data-th="th2" style="--tc:var(--th2)" onclick="focusAgent('th2')">
+            <span class="stg block">◐</span>
+            <div class="c2"><span class="nm">tab色分け</span><span class="sub">⎇ <b>tabs</b> ・ 承認待ち — Write</span></div>
+            <span class="tok">8.1k</span>
+          </div>
+          <div class="herd-row" data-th="th3" style="--tc:var(--th3)" onclick="focusAgent('th3')">
+            <span class="stg done">✓</span>
+            <div class="c2"><span class="nm">gpui起動</span><span class="sub">⎇ <b>gpui</b> ・ 完了・未確認 — 5 files</span></div>
+            <span class="tok">12.0k</span>
+          </div>
+          <div class="ghead"><span class="pc" style="background:#f0a24b"></span>genshiai<span class="mini">1 待機</span></div>
+          <div class="herd-row" data-th="th4" style="--tc:#34d3b6" onclick="focusAgent('th4')">
+            <span class="stg idle">○</span>
+            <div class="c2"><span class="nm">LSP補完</span><span class="sub">⎇ <b>dev</b> ・ 待機中 — プロンプト</span></div>
+            <span class="tok">—</span>
+          </div>
+          <div class="herd-row" data-th="sh" style="--tc:var(--fg2)">
+            <span class="stg unk">·</span>
+            <div class="c2"><span class="nm">zsh</span><span class="sub">~/Work ・ 通常シェル</span></div>
+            <span class="tok"></span>
+          </div>
+        </div>
+        <div class="herd-legend">
+          <span><span class="stg work">●</span>作業中</span>
+          <span><span class="stg block">◐</span>承認待ち</span>
+          <span><span class="stg done">✓</span>完了</span>
+          <span><span class="stg idle">○</span>待機</span>
+          <span><span class="stg unk">·</span>その他</span>
+        </div>
+        <div class="fleet-files">
+          <div class="fhead"><i></i>ファイル · <b id="ff-name">rope設計</b> <span style="color:var(--fg2)">の worktree</span></div>
+          <div class="tree">
+            <div class="row dir"><span class="chev">▾</span><span class="name">crates</span></div>
+            <div class="row dir i1"><span class="chev">▾</span><span class="name">editor_core</span></div>
+            <div class="row active i2"><span class="chev"></span><span class="name">buffer.rs</span><span class="gitdot mod">●</span></div>
+            <div class="row i2"><span class="chev"></span><span class="name">rope.rs</span><span class="gitdot add">●</span></div>
+            <div class="row i2"><span class="chev"></span><span class="name">history.rs</span><span class="gitdot mod">●</span></div>
+            <div class="row dir i1"><span class="chev">▸</span><span class="name">editor_view</span></div>
+            <div class="row i1"><span class="chev"></span><span class="name">Cargo.toml</span></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ============ 中央: エディタ ============ -->
@@ -828,6 +1001,103 @@ body.explorer-icons .tree-icons { display: flex; }
     Finished dev [unoptimized + debuginfo] target(s) in 42.18s
      Running `target/debug/examples/hello_world`</span>
 <span class="prompt">➜ shirushi</span> <span class="caret" style="background: var(--fg1)"></span></pre>
+      </div>
+    </div>
+
+    <!-- ============ 中央(編隊): 系譜グラフ + N分割グリッド + ニュース ============ -->
+    <div class="fleet-center">
+      <div class="lineage">
+        <div class="lg-head">系譜グラフ<span class="mini">base <b style="color:var(--fg1)">a3f9c1</b> から 4 エージェントが並走 ・ ⎇ = worktree ・ 先端色 = 状態</span></div>
+        <div class="lg-wrap">
+          <svg class="lg-svg" viewBox="0 0 900 300" preserveAspectRatio="xMinYMid meet">
+            <!-- lanes -->
+            <path class="lane main" d="M60 46 H210"/>
+            <path class="lane main dashed" d="M210 46 H650"/>
+            <path class="lane th1" d="M210 46 C255 46, 262 104, 305 104 H470"/>
+            <path class="lane th2" d="M210 46 C255 46, 262 160, 305 160 H430"/>
+            <path class="lane th3" d="M210 46 C255 46, 262 216, 305 216 H520"/>
+            <path class="lane th3" d="M520 216 C585 216, 595 46, 650 46"/>
+            <path class="lane th4 dashed" d="M150 46 C232 46, 285 268, 330 268 H360"/>
+            <!-- base commits -->
+            <circle class="cm main" cx="90" cy="46" r="5"/>
+            <circle class="cm main" cx="150" cy="46" r="5"/>
+            <circle class="cm main" cx="210" cy="46" r="5"/>
+            <!-- th1 working -->
+            <circle class="cm th1" cx="340" cy="104" r="5"/>
+            <circle class="cm th1" cx="405" cy="104" r="5"/>
+            <circle class="tipring work" cx="470" cy="104" r="6.5" style="transform-origin:470px 104px"/>
+            <circle class="tip work" cx="470" cy="104" r="6.5"/>
+            <!-- th2 blocked -->
+            <circle class="cm th2" cx="340" cy="160" r="5"/>
+            <circle class="tipring block" cx="430" cy="160" r="6.5" style="transform-origin:430px 160px"/>
+            <circle class="tip block" cx="430" cy="160" r="6.5"/>
+            <!-- th3 done → merge -->
+            <circle class="cm th3" cx="340" cy="216" r="5"/>
+            <circle class="cm th3" cx="405" cy="216" r="5"/>
+            <circle class="tip done" cx="520" cy="216" r="6.5"/>
+            <!-- th4 idle -->
+            <circle class="tip idle" cx="330" cy="268" r="6" style="fill:none; stroke:var(--st-idle); stroke-width:2"/>
+            <!-- labels -->
+            <text class="lgl" x="668" y="42">main</text><text class="lgs" x="668" y="57">統合待ち</text>
+            <text class="lgl" x="500" y="100">rope設計</text><text class="lgs" x="500" y="115">⎇ rope ・ 作業中</text>
+            <text class="lgl" x="460" y="156">tab色分け</text><text class="lgs" x="460" y="171">⎇ tabs ・ 承認待ち</text>
+            <text class="lgl" x="550" y="212">gpui起動</text><text class="lgs" x="550" y="227">⎇ gpui ・ 完了→統合</text>
+            <text class="lgl" x="392" y="264">LSP補完</text><text class="lgs" x="392" y="279">⎇ dev ・ 待機</text>
+          </svg>
+        </div>
+      </div>
+
+      <div class="agent-grid">
+        <div class="acell focus" data-th="th1" style="--tc:var(--th1)" onclick="focusAgent('th1')">
+          <div class="ah"><span class="cdot"></span><span class="nm">rope設計</span><span class="br">⎇ rope</span><span class="tok">23.4k/200k</span></div>
+          <div class="aone"><span class="stg work">●</span><span>buffer.rs を編集中… <span class="lbl">esc で中断</span></span></div>
+          <div class="abody">
+            <div class="step"><span class="bullet">⏺</span><div class="body"><b>Edit</b> <span class="arg">(buffer.rs)</span><div class="result">⎿ edit() を Transaction 単位へ（+18 −4）</div></div></div>
+            <div class="step"><span class="bullet">⏺</span><div class="body"><b>Read</b> <span class="arg">(history.rs)</span><div class="result">⎿ 210 行 — UndoHistory を確認</div></div></div>
+          </div>
+        </div>
+        <div class="acell" data-th="th2" style="--tc:var(--th2)" onclick="focusAgent('th2')">
+          <div class="ah"><span class="cdot"></span><span class="nm">tab色分け</span><span class="br">⎇ tabs</span><span class="tok">8.1k/200k</span></div>
+          <div class="aone"><span class="stg block">◐</span><span>承認待ち — ファイル書き込み</span></div>
+          <div class="approve"><span>Write <code style="font-size:10px">settings.rs</code> を許可しますか？</span><span class="btn allow">許可</span><span class="btn deny">拒否</span></div>
+        </div>
+        <div class="acell" data-th="th3" style="--tc:var(--th3)" onclick="focusAgent('th3')">
+          <div class="ah"><span class="cdot"></span><span class="nm">gpui起動</span><span class="br">⎇ gpui</span><span class="tok">12.0k/200k</span></div>
+          <div class="aone"><span class="stg done">✓</span><span>完了・未確認 — 5 files <span class="lbl">レビューして統合</span></span></div>
+          <div class="abody">
+            <div class="step"><span class="bullet">⏺</span><div class="body msg-ai"><span class="rec">完了。</span> window/app/main の起動経路を通した。系譜の <b>⎇ gpui</b> を main へ統合できます。</div></div>
+          </div>
+        </div>
+        <div class="acell" data-th="th4" style="--tc:#34d3b6" onclick="focusAgent('th4')">
+          <div class="ah"><span class="cdot"></span><span class="nm">LSP補完</span><span class="br">⎇ dev</span><span class="tok">—</span></div>
+          <div class="aone"><span class="stg idle">○</span><span>待機中 — 次の指示を入力</span></div>
+          <div class="abody"><div class="msg-ai" style="color:var(--fg2)">プロンプトで待機しています。</div></div>
+        </div>
+        <!-- 6/8分割で現れる追加セル（別プロジェクト/別エージェント/シェル） -->
+        <div class="acell" data-th="th5" style="--tc:var(--th2)">
+          <div class="ah"><span class="cdot"></span><span class="nm">型エラー修正</span><span class="br">⎇ fix</span><span class="tok">4.2k</span></div>
+          <div class="aone"><span class="stg work">●</span><span>codex — cargo check 実行中</span></div>
+        </div>
+        <div class="acell" data-th="th6" style="--tc:var(--th1)">
+          <div class="ah"><span class="cdot"></span><span class="nm">docs更新</span><span class="br">⎇ docs</span><span class="tok">6.8k</span></div>
+          <div class="aone"><span class="stg idle">○</span><span>opencode — 待機中</span></div>
+        </div>
+        <div class="acell" data-th="th7" style="--tc:var(--th3)">
+          <div class="ah"><span class="cdot"></span><span class="nm">bench計測</span><span class="br">⎇ bench</span><span class="tok">9.1k</span></div>
+          <div class="aone"><span class="stg work">●</span><span>grok — criterion 実行中</span></div>
+        </div>
+        <div class="acell" data-th="th8" style="--tc:var(--fg2)">
+          <div class="ah"><span class="cdot"></span><span class="nm">zsh</span><span class="br">~/Work</span><span class="tok"></span></div>
+          <div class="aone"><span class="stg unk">·</span><span>通常シェル（エージェント以外）</span></div>
+        </div>
+      </div>
+
+      <div class="newsfeed">
+        <span class="nlabel">動き</span>
+        <span class="news-item"><span class="dot" style="background:var(--st-block)"></span>tab色分け が承認待ち<span class="tm">now</span></span>
+        <span class="news-item"><span class="dot" style="background:var(--st-done)"></span>gpui起動 が完了（5 files）<span class="tm">1m</span></span>
+        <span class="news-item"><span class="dot" style="background:var(--th1)"></span>rope設計 が buffer.rs を編集 (+18 −4)<span class="tm">2m</span></span>
+        <span class="news-item"><span class="dot" style="background:var(--st-done)"></span>型エラー修正 が check 通過<span class="tm">4m</span></span>
       </div>
     </div>
 
@@ -1068,6 +1338,38 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
   t.classList.add('active');
 }));
+
+// 編隊モード: 通常⇄マルチエージェント。左のファイルブラウザは残し、focus中エージェントのworktreeを映す
+function setMode(m) {
+  const fleet = m === 'fleet';
+  document.body.classList.toggle('mode-fleet', fleet);
+  if (fleet && !['split-2','split-4','split-6','split-8'].some(c => document.body.classList.contains(c))) {
+    document.body.classList.add('split-4');
+  }
+  const mn = document.getElementById('mode-normal'), mf = document.getElementById('mode-fleet-btn');
+  if (mn) mn.classList.toggle('on', !fleet);
+  if (mf) mf.classList.toggle('on', fleet);
+}
+function setSplit(n) {
+  ['split-2','split-4','split-6','split-8'].forEach(c => document.body.classList.remove(c));
+  document.body.classList.add('split-' + n);
+  ['2','4','6','8'].forEach(k => { const b = document.getElementById('sp-' + k); if (b) b.classList.toggle('on', k === String(n)); });
+}
+// focus-follows-agent: herd行/セルのクリックで、左ファイル・グリッド枠・宛先が一斉に追従（＝ファイルブラウザの真を一意化）
+const AGENT_NAMES = { th1: 'rope設計', th2: 'tab色分け', th3: 'gpui起動', th4: 'LSP補完' };
+const AGENT_COLOR = { th1: 'var(--th1)', th2: 'var(--th2)', th3: 'var(--th3)', th4: '#34d3b6' };
+function focusAgent(th) {
+  document.querySelectorAll('.herd-row, .acell').forEach(el => el.classList.toggle('focus', el.dataset.th === th));
+  const ffn = document.getElementById('ff-name');
+  if (ffn && AGENT_NAMES[th]) ffn.textContent = AGENT_NAMES[th];
+  const ff = document.querySelector('.fleet-files');
+  if (ff && AGENT_COLOR[th]) ff.style.setProperty('--tc-focus', AGENT_COLOR[th]);
+}
+// スクショ/デモ用: file://…/index.html#fleet または #fleet8 で編隊モードを直接開く
+(function () {
+  const h = location.hash.replace('#', '');
+  if (h.indexOf('fleet') === 0) { setMode('fleet'); const m = h.match(/fleet(\d)/); if (m) setSplit(+m[1]); }
+})();
 </script>
 </body>
 </html>

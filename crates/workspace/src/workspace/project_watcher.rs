@@ -3,8 +3,9 @@ use crate::workspace::*;
 impl Workspace {
     pub(crate) fn start_watcher(&mut self, cx: &mut Context<Self>) {
         let session_index = self.project_sessions.active;
-        self._watch = None;
-        self._watch_pump = None;
+        let session = self.session_mut();
+        session._watch = None;
+        session._watch_pump = None;
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -24,14 +25,14 @@ impl Workspace {
                 if debug {
                     eprintln!("watch: 監視開始 {}", root.display());
                 }
-                self._watch = Some(watch);
+                self.session_mut()._watch = Some(watch);
             }
             Err(error) => {
                 eprintln!("{error:#}");
                 return;
             }
         }
-        self._watch_pump = Some(cx.spawn(async move |workspace, cx| {
+        self.session_mut()._watch_pump = Some(cx.spawn(async move |workspace, cx| {
             if debug {
                 eprintln!("watch: pump 稼働");
             }
