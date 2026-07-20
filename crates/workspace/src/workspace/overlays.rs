@@ -386,11 +386,10 @@ impl Workspace {
                                     match last_path {
                                         Some(path) => self
                                             .connect_ssh_and_open(format!("ssh://{alias}{path}"), cx),
-                                        None => self.open_ssh_input_seeded(
-                                            format!("ssh://{alias}/"),
-                                            window,
-                                            cx,
-                                        ),
+                                        // 前回パスが無ければ home に直接接続（標準 SSH と同じ「ホスト選ぶ→home」・#5）。
+                                        None => {
+                                            self.connect_ssh_and_open(format!("ssh://{alias}"), cx)
+                                        }
                                     }
                                 }
                                 // 末尾の「手入力」= 空の ssh:// 入力バー。

@@ -56,7 +56,7 @@ image = "0.25"
 alacritty_terminal = "0.26"
 libc = "0.2"
 # M10 ファイル監視（macOS は FSEvents バックエンド）。remote watch は M13 で Host 経由に
-notify = "6.1"
+notify = "8"
 # ローカル永続化 DB（hot exit / スレッド / 台帳。DECISIONS 決定ログ 2026-07-16・pure-Rust SQLite）
 turso = "0.7"
 

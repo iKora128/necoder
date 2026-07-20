@@ -185,15 +185,17 @@ impl Workspace {
                 match source {
                     Ok(source) => {
                         if let (Some(storage), Some((host_key, path))) = (&storage, &last_path) {
-                            let _ = storage.set_host_last_path(host_key, path);
-                            // 履歴（最近のリモートプロジェクト）にも記録（#5・2階層ピッカー）。
-                            // name = パス末尾のフォルダ名（無ければホスト名）。
-                            let name = std::path::Path::new(path)
-                                .file_name()
-                                .map(|component| component.to_string_lossy().to_string())
-                                .filter(|component| !component.is_empty())
-                                .unwrap_or_else(|| host_key.clone());
-                            let _ = storage.record_remote_project(host_key, path, &name);
+                            // home（path 未指定＝ブラウズ入口）は履歴/前回パスに残さない。
+                            // 「開いたプロジェクト」（具体パス）だけ記録する（#5・home≠プロジェクト）。
+                            if !path.is_empty() && path != "/" {
+                                let _ = storage.set_host_last_path(host_key, path);
+                                let name = std::path::Path::new(path)
+                                    .file_name()
+                                    .map(|component| component.to_string_lossy().to_string())
+                                    .filter(|component| !component.is_empty())
+                                    .unwrap_or_else(|| host_key.clone());
+                                let _ = storage.record_remote_project(host_key, path, &name);
+                            }
                         }
                         workspace.open_source_as_window(source, cx);
                     }
