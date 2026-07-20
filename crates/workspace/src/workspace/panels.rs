@@ -1,8 +1,10 @@
+use crate::workspace::*;
+
 /// child panel の typed event を Workspace shell へ接続する唯一の登録点。
 pub(crate) struct PanelRegistry;
 
 impl PanelRegistry {
-    fn bind_session(
+    pub(crate) fn bind_session(
         agent: &Entity<AgentPanel>,
         explorer: &Entity<Explorer>,
         git: &Entity<GitPanel>,
@@ -17,17 +19,17 @@ impl PanelRegistry {
         cx.subscribe(todo, Workspace::on_todo_panel_event).detach();
     }
 
-    fn bind_search(panel: &Entity<SearchPanel>, cx: &mut Context<Workspace>) {
+    pub(crate) fn bind_search(panel: &Entity<SearchPanel>, cx: &mut Context<Workspace>) {
         cx.subscribe(panel, Workspace::on_search_panel_event).detach();
     }
 
-    fn bind_settings(view: &Entity<settings::SettingsView>, cx: &mut Context<Workspace>) {
+    pub(crate) fn bind_settings(view: &Entity<settings::SettingsView>, cx: &mut Context<Workspace>) {
         cx.subscribe(view, Workspace::on_settings_view_event).detach();
     }
 }
 
 impl Workspace {
-    fn on_explorer_event(
+    pub(crate) fn on_explorer_event(
         &mut self,
         explorer: Entity<Explorer>,
         event: &explorer::ExplorerEvent,
@@ -56,7 +58,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn on_git_panel_event(
+    pub(crate) fn on_git_panel_event(
         &mut self,
         panel: Entity<GitPanel>,
         event: &git_ui::GitPanelEvent,
@@ -99,7 +101,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn on_terminal_dock_event(
+    pub(crate) fn on_terminal_dock_event(
         &mut self,
         dock: Entity<TerminalDock>,
         event: &TerminalDockEvent,

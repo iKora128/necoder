@@ -1343,9 +1343,17 @@ impl SshProject {
             .to_string();
         let username = (!parsed.username().is_empty()).then(|| parsed.username().to_string());
         let path = percent_decode_path(parsed.path())?;
-        if path.as_os_str().is_empty() || path == Path::new("/") {
-            bail!("SSH URI に project path が必要");
-        }
+        // path 未指定（ssh://host / ssh://host/ / ~）は「空」= home マーカー。接続時に remote の
+        // $HOME をルートにする（標準 SSH と同じ「ログインで home に入る」・VSCode Remote 風・#5）。
+        let path = if path.as_os_str().is_empty()
+            || path == Path::new("/")
+            || path == Path::new("/~")
+            || path == Path::new("~")
+        {
+            PathBuf::new()
+        } else {
+            path
+        };
         Ok(Self {
             host,
             username,
@@ -1958,6 +1966,21 @@ impl RemoteHost {
         }
         let transport = SshTransport::connect(project)?;
         let server_command = transport.ensure_remote_server(server_command)?;
+        // path 未指定（空）= 標準 SSH と同じく remote の $HOME をルートにする（#5・「ホスト選ぶ→home」）。
+        let project = if project.path.as_os_str().is_empty() {
+            let home = transport.output("printf %s \"$HOME\"")?;
+            anyhow::ensure!(
+                home.success(),
+                "remote の $HOME を取得できない: {}",
+                String::from_utf8_lossy(&home.stderr).trim()
+            );
+            let home = String::from_utf8_lossy(&home.stdout).trim().to_string();
+            anyhow::ensure!(!home.is_empty(), "remote の $HOME が空");
+            SshProject { path: PathBuf::from(home), ..project.clone() }
+        } else {
+            project.clone()
+        };
+        let project = &project;
         let session = random_session_id()?;
         let connector = Arc::new(SshConnector {
             transport: transport.clone(),

@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn close_hover(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_hover(&mut self, cx: &mut Context<Self>) {
         if self.hover.take().is_some() {
             // 進行中の応答も無効化する。
             self.hover_generation = self.hover_generation.wrapping_add(1);
@@ -10,7 +12,7 @@ impl Workspace {
     /// エディタの確定入力（[`EditorInputEvent::Typed`]）→ 補完の自動トリガ（M10）。
     /// 識別子文字 = 開いていれば絞り込み・閉じていれば新語でポップアップ。`.`/`::` = 新規要求。
     /// その他 = 閉じる。Esc で閉じた語は語頭が変わるまで再表示しない。
-    fn on_editor_typed(
+    pub(crate) fn on_editor_typed(
         &mut self,
         editor: &Entity<EditorView>,
         event: &EditorInputEvent,
@@ -89,7 +91,7 @@ impl Workspace {
         }
     }
 
-    fn switch_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn switch_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(active) = active_index_after_switch(
             self.project_sessions.active,
             index,
@@ -104,7 +106,7 @@ impl Workspace {
     }
 
     /// active session を表示対象にする。既存 Entity / process は破棄せず、初回だけタブを復元する。
-    fn load_active_slot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn load_active_slot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.loaded {
             self.open_slot_files(window, cx);
             self.loaded = true;
@@ -122,7 +124,7 @@ impl Workspace {
     }
 
     /// Agent パネルの宛先チップにアクティブプロジェクト名・ブランチを反映する。
-    fn update_agent_destination(&self, cx: &mut Context<Self>) {
+    pub(crate) fn update_agent_destination(&self, cx: &mut Context<Self>) {
         let (name, branch, host, cwd, files) = match self.active_slot() {
             Some(slot) => {
                 // Add context の候補（プロジェクト先頭 60 ファイルの相対パス）。

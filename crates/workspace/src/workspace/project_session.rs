@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 /// Rail 上の project metadata と、遅延復元に必要なファイル一覧。
-struct ProjectSlot {
+pub(crate) struct ProjectSlot {
     pub(crate) worktree: Rc<Worktree>,
     pub(crate) name: SharedString,
     /// 描画中に git process/RPC を起動しないための現在ブランチ cache。
@@ -19,12 +21,12 @@ struct ProjectSlot {
 }
 
 impl ProjectSlot {
-    fn refresh(&mut self) {
+    pub(crate) fn refresh(&mut self) {
         self.explorer.refresh(&self.worktree);
     }
 
     /// Explorer の Render はこのキャッシュだけを読み、FS/RPC を呼ばない。
-    fn listed_dir(&self, dir: &Path) -> Vec<project::Entry> {
+    pub(crate) fn listed_dir(&self, dir: &Path) -> Vec<project::Entry> {
         self.explorer.listed_dir(dir)
     }
 }
@@ -52,13 +54,13 @@ pub struct ProjectSession {
 }
 
 /// Rail metadata と長寿命 session を同じ添字で管理する非公開 owner。
-struct ProjectSessions {
+pub(crate) struct ProjectSessions {
     pub(crate) projects: Vec<ProjectSlot>,
     pub(crate) active: usize,
     pub(crate) sessions: Vec<ProjectSession>,
 }
 
-struct RepositoryController {
+pub(crate) struct RepositoryController {
     pub(crate) status: HashMap<PathBuf, StatusKind>,
     pub(crate) refresh_generation: u32,
 }
@@ -78,7 +80,7 @@ impl DerefMut for ProjectSessions {
 }
 
 impl Workspace {
-    fn create_project_session(
+    pub(crate) fn create_project_session(
         slot: Option<&ProjectSlot>,
         theme: Theme,
         explorer_view: ExplorerView,
@@ -154,7 +156,7 @@ impl Workspace {
     /// リモートプロジェクトの窓色をローカル DB（storage）から解決する（M13 #3b）。
     /// `.shirushi` はリモート側にあり identity に使えないため、ホスト識別子 → 色をローカルに持つ。
     /// 初回は識別子から安定に 1 色を焼き付け、以後は同じ色（開き直し・レール並び順が変わっても不変）。
-    fn apply_remote_host_colors(&mut self) {
+    pub(crate) fn apply_remote_host_colors(&mut self) {
         let Some(storage) = self.persistence.storage.clone() else {
             return;
         };
@@ -514,22 +516,22 @@ impl Workspace {
         }
     }
 
-    fn active_slot(&self) -> Option<&ProjectSlot> {
+    pub(crate) fn active_slot(&self) -> Option<&ProjectSlot> {
         self.project_sessions.projects.get(self.project_sessions.active)
     }
 
     /// 現在アクティブなタブのエディタ（無ければ `None`）。従来 `self.editor` を読んでいた箇所の置換。
-    fn active_editor(&self) -> Option<Entity<EditorView>> {
+    pub(crate) fn active_editor(&self) -> Option<Entity<EditorView>> {
         self.tabs.get(self.active_tab).map(|tab| tab.editor.clone())
     }
 
     /// アクティブタブのファイルパス。
-    fn active_tab_path(&self) -> Option<PathBuf> {
+    pub(crate) fn active_tab_path(&self) -> Option<PathBuf> {
         self.tabs.get(self.active_tab).map(|tab| tab.path.clone())
     }
 
     /// 現在のタブ列をアクティブ slot へ書き戻す（永続化・切替復元の真実源を同期）。
-    fn sync_active_slot(&mut self) {
+    pub(crate) fn sync_active_slot(&mut self) {
         // 一時タブ（diff 等）は永続化しない。
         let files: Vec<PathBuf> = self
             .tabs
@@ -546,7 +548,7 @@ impl Workspace {
     }
 
     /// diff などの一時タブを開く（永続化されない・読み取り専用は呼び出し側で設定済みの buffer を渡す）。
-    fn open_transient_tab(
+    pub(crate) fn open_transient_tab(
         &mut self,
         title_path: PathBuf,
         buffer: Buffer,
@@ -581,7 +583,7 @@ impl Workspace {
 
     /// アクティブ slot に記録された open_files を順に開き直す（タブ復元）。存在しないファイルは飛ばす。
     /// レール切替・ブランチ切替・起動復元で使う。
-    fn open_slot_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_slot_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // タブ列ごと入れ替わる（レール/ブランチ切替）ので ⌘F バー・hover は畳む。
         self.dismiss_buffer_search(cx);
         self.close_hover(cx);
@@ -604,7 +606,7 @@ impl Workspace {
         }
     }
 
-    fn active_worktree(&self) -> Option<Rc<Worktree>> {
+    pub(crate) fn active_worktree(&self) -> Option<Rc<Worktree>> {
         self.active_slot().map(|slot| slot.worktree.clone())
     }
 
@@ -612,11 +614,11 @@ impl Workspace {
     /// ディスク状態を反映するので、切替・オープン時に呼ぶ（編集中の未保存差分は gutter が担う）。
     /// git 状態（ツリー/タブ色・ブランチ・パネル用スナップショット）を**背景で**集めて反映する。
     /// 世代番号で古い結果を捨てる（gutter diff と同型）。UI スレッドで git を叩かない（ARCHITECTURE §9）。
-    fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
         self.refresh_git_status_for(self.project_sessions.active, cx);
     }
 
-    fn refresh_git_status_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_git_status_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
         let Some(worktree) = self
             .project_sessions
             .projects
@@ -676,7 +678,7 @@ impl Workspace {
     }
 
     /// git 状態の色（UI-SPEC §1.3: 色は識別に集約。theme の診断/git トークンを流用）。
-    fn git_tint(theme: &Theme, status: StatusKind) -> Hsla {
+    pub(crate) fn git_tint(theme: &Theme, status: StatusKind) -> Hsla {
         match status {
             StatusKind::Untracked | StatusKind::Added => theme.ok, // 緑
             StatusKind::Modified => theme.warn,                    // 琥珀
@@ -685,7 +687,7 @@ impl Workspace {
     }
 
     // git 状態の 1 文字バッジ（ツリー行末に出す）。
-    fn git_letter(status: StatusKind) -> &'static str {
+    pub(crate) fn git_letter(status: StatusKind) -> &'static str {
         match status {
             StatusKind::Untracked => "U",
             StatusKind::Added => "A",

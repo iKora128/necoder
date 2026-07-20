@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn start_watcher(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_watcher(&mut self, cx: &mut Context<Self>) {
         let session_index = self.project_sessions.active;
         self._watch = None;
         self._watch_pump = None;
@@ -64,7 +66,7 @@ impl Workspace {
     /// watch イベント（合流済みパス群）を反映する:
     /// ①開いているバッファの外部変更（自動リロード / dirty なら警告バー）
     /// ②ツリー再構築 ③git 色 + gutter diff の更新。gitignore 対象（target/ 等）はノイズとして落とす。
-    fn handle_watch_events(
+    pub(crate) fn handle_watch_events(
         &mut self,
         session_index: usize,
         paths: Vec<PathBuf>,
@@ -135,7 +137,7 @@ impl Workspace {
     }
 
     /// settings の実効値（font_size/tab_size/soft_wrap）を全エディタへ配る（live 反映・M10-13）。
-    fn apply_editor_settings(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn apply_editor_settings(&mut self, cx: &mut Context<Self>) {
         let current = settings::get(cx);
         let soft_wrap = current.soft_wrap || std::env::var_os("SHIRUSHI_SOFT_WRAP").is_some();
         let (font_size, tab_size) = (current.font_size, current.tab_size);

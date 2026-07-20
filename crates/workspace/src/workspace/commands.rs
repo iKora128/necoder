@@ -1,3 +1,5 @@
+use crate::workspace::*;
+
 #[derive(Clone, Copy)]
 pub(crate) struct CommandEntry {
     pub(crate) label_key: &'static str,
@@ -8,7 +10,7 @@ pub(crate) struct CommandEntry {
 pub(crate) struct CommandRegistry;
 
 impl CommandRegistry {
-    fn entries(&self) -> &'static [CommandEntry] {
+    pub(crate) fn entries(&self) -> &'static [CommandEntry] {
         &[
             CommandEntry { label_key: "cmd.file_finder", action_name: "workspace::FileFinder" },
             CommandEntry { label_key: "cmd.save_active", action_name: "workspace::SaveActive" },
@@ -54,19 +56,19 @@ impl CommandRegistry {
         ]
     }
 
-    fn get(&self, index: usize) -> Option<CommandEntry> {
+    pub(crate) fn get(&self, index: usize) -> Option<CommandEntry> {
         self.entries().get(index).copied()
     }
 }
 
-static COMMAND_REGISTRY: CommandRegistry = CommandRegistry;
+pub(crate) static COMMAND_REGISTRY: CommandRegistry = CommandRegistry;
 
 #[cfg(test)]
 mod command_registry_tests {
     use super::*;
 
     #[test]
-    fn action_names_are_unique() {
+    pub(crate) fn action_names_are_unique() {
         let entries = COMMAND_REGISTRY.entries();
         for (index, entry) in entries.iter().enumerate() {
             assert!(entries[..index].iter().all(|other| other.action_name != entry.action_name));

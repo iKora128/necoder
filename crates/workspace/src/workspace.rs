@@ -40,6 +40,16 @@ pub(crate) use theme_core::{Theme, ThemeSource, project_color};
 pub(crate) use ui::Tooltip;
 pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
 
+// ── 子モジュール（Rust の descendant 可視性で hub の private にアクセス可能）──
+mod commands;
+mod panels;
+mod project_session;
+mod project_switch;
+mod project_watcher;
+pub(crate) use commands::*;
+pub(crate) use panels::*;
+pub(crate) use project_session::*;
+
 actions!(
     workspace,
     [
@@ -688,9 +698,6 @@ impl DerefMut for Workspace {
     }
 }
 
-include!("project_session.rs");
-include!("commands.rs");
-include!("panels.rs");
 include!("git_controller.rs");
 include!("editor_area.rs");
 include!("editor_area/language.rs");
@@ -698,11 +705,9 @@ include!("editor_area/inline_edit.rs");
 include!("todo_panel.rs");
 include!("editor_area/diff.rs");
 include!("editor_area/diagnostics.rs");
-include!("project_watcher.rs");
 include!("rail.rs");
 include!("notifications.rs");
 include!("editor_area/hot_exit.rs");
-include!("project_switch.rs");
 include!("editor_area/tabs.rs");
 include!("explorer_controller.rs");
 include!("overlays.rs");
