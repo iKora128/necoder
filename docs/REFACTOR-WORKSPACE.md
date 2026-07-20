@@ -288,10 +288,60 @@ notify は 6.1.1 のまま。上流の teardown 修正の取り込み（バー�
 titlebar ピル / レール / explorer / タブ下線 / エディタ / Agent ドック（スレッド色・トークン・マスコット・
 composer 宛先チップ）/ statusbar とも崩れなし。
 
-### 7.5 フォローアップ候補（軽い順）
+### 7.5 フォローアップ候補（軽い順）— **全 5 項目実施済み（2026-07-20・§8）**
 
-1. `editor_area/mod.rs` → `editor_area.rs` 改名（規約回復・機械的）
-2. `dev_probes.rs` の本番コード（SSH / TerminalDock イベント / updater）を然るべきファイルへ移動
-3. include! → 真の `mod` 化（`pub(crate)` 可視性と per-file `use` の整備。挙動不変で機械的に可能・rustfmt / RA の恩恵回復）
-4. notify 6.1.1 の更新検討（fsevents teardown の上流修正取り込み）
-5. Deref 連鎖の段階的な明示化（新規コードは active session 取得を明示メソッド経由に）
+1. ~~`editor_area/mod.rs` → `editor_area.rs` 改名~~ ✓
+2. ~~`dev_probes.rs` の本番コード移動~~ ✓
+3. ~~include! → 真の `mod` 化~~ ✓
+4. ~~notify 6.1.1 の更新~~ ✓（8.2.0）
+5. ~~Deref 連鎖の段階的な明示化~~ ✓（アクセサ導入 + 代表 2 モジュール移行。全面移行は「触った機能から」継続）
+
+## 8. §7.5 の実施記録（2026-07-20・独立検証と同セッション）
+
+§7.3 の乖離を実装側から解消した。挙動不変・公開 API 不変（`lib.rs` facade / `workspace::{Workspace,
+ProjectSource, RestoredTabs, state_path, load_state, load_saved_state}` は据え置き）。
+
+### 8.1 include! 全廃 — 真のモジュールツリー
+
+```text
+crates/workspace/src/
+  lib.rs                 mod persistence / mod workspace / pub mod updater（facade 不変）
+  persistence.rs         （従来から真のモジュール）
+  updater.rs             （同上）
+  workspace.rs           hub: pub(crate) use 束・actions!・共有語彙型・Workspace/ChromeState 等・
+                         new/初期化・Render・監査 test（1,416 行）
+  workspace/             子モジュール 18 + editor_area/ 孫 7
+    chrome.rs / commands.rs / dev_probes.rs / explorer_controller.rs / explorer_view.rs /
+    git_controller.rs / git_view.rs / notifications.rs / overlays.rs / panels.rs /
+    project_session.rs / project_switch.rs / project_watcher.rs / rail.rs / rail_view.rs /
+    remote_ssh.rs / todo_panel.rs
+    editor_area.rs + editor_area/{tabs,language,diagnostics,diff,inline_edit,hot_exit,overlays}.rs
+```
+
+- 仕組み: 子は `use crate::workspace::*;` 1 行で hub の名前空間を継承（hub の import 束を
+  `pub(crate) use` 化 + **Rust の descendant 可視性**＝子は親 hub の private 型に触れる）。
+  hub は `pub(crate) use 子::*;` で共有型を再フラット化。cross-module になるメソッドは一括
+  `pub(crate)`（従来の単一モジュールと同じ crate 内可視・絞り込みは触った機能から）
+- 効果: rustfmt / rust-analyzer が全ファイルを first-class に扱える。`private_interfaces` 警告 0
+- `remote_ssh.rs` 新設（SSH 導線一式）。`on_terminal_dock_event` は panels.rs（購読ハンドラ集約先）、
+  `open_thread_history` は overlays.rs、updater 2 本は chrome.rs（statusbar 持ち）へ。
+  dev_probes.rs は**全 item `#[cfg(debug_assertions)]` の `debug_*` のみ**になり §1 の看板が実態と一致
+- `editor_area/mod.rs` は消滅（`editor_area.rs` + 子ディレクトリ・mod.rs 禁止規約に復帰）
+
+### 8.2 notify 8.2.0
+
+`notify = "6.1"` → `"8"`（8.2.0）。使用面（`recommended_watcher` / `watch` / `Event.paths`）は
+API 互換でコード変更なし。§7.2 の teardown 防御（test 側で watcher を root 削除より先に落とす）は
+上流修正と独立に維持する。
+
+### 8.3 Deref 明示化の入口
+
+`ProjectSessions::active_session(_mut)` と `Workspace::session(_mut)` を追加。
+**新規コードの規約: アクティブ session の状態は `self.session()` / `self.session_mut()` 経由**
+（Deref の暗黙 `self.<field>` は「アクセス時点の active に依存する」ことが見えないため）。
+project_watcher / project_switch は移行済み。残りは触った機能から漸進（big-bang しない）。
+
+### 8.4 検証
+
+`cargo check --workspace` / `cargo test --workspace` ×2 / `cargo check -p shirushi --release` /
+オフスクリーン UI 目視。checkpoint は「1 バッチ = 1 コミット」（6335f78 〜）。
