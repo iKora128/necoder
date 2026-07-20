@@ -98,4 +98,42 @@ impl Workspace {
         }
         cx.notify();
     }
+
+    fn on_terminal_dock_event(
+        &mut self,
+        dock: Entity<TerminalDock>,
+        event: &TerminalDockEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let session_index = self
+            .project_sessions
+            .sessions
+            .iter()
+            .position(|session| session.terminal_dock == dock)
+            .unwrap_or(self.project_sessions.active);
+        match event {
+            TerminalDockEvent::OpenPath { path, line } => {
+                let resolved = if std::path::Path::new(path).is_absolute() {
+                    PathBuf::from(path)
+                } else if let Some(stripped) = path.strip_prefix("~/") {
+                    std::env::home_dir()
+                        .map(|home| home.join(stripped))
+                        .unwrap_or_else(|| PathBuf::from(path))
+                } else {
+                    let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| &slot.worktree)
+                    else {
+                        return;
+                    };
+                    worktree.root().join(path)
+                };
+                self.project_sessions.sessions[session_index].pending_navigation =
+                    Some((resolved, line.saturating_sub(1) as usize, 0));
+            }
+            TerminalDockEvent::Dismissed if session_index == self.project_sessions.active => {
+                self.chrome.show_bottom = false
+            }
+            TerminalDockEvent::Dismissed => {}
+        }
+        cx.notify();
+    }
 }

@@ -1096,4 +1096,66 @@ impl Workspace {
             .child(div().flex_1())
             .child(right)
     }
+
+    // ── 自動アップデート（M13）: statusbar チップの中身 ──
+
+    /// 起動しばらく後に GitHub Releases を確認する（背景・失敗は静かに無視）。
+    /// スクショ/プローブ実行時と `SHIRUSHI_NO_UPDATE_CHECK` ではネットへ出ない。
+    fn schedule_update_check(&self, cx: &mut Context<Self>) {
+        if cfg!(test)
+            || std::env::var_os("SHIRUSHI_NO_UPDATE_CHECK").is_some()
+            || std::env::var_os("SHIRUSHI_SCREENSHOT").is_some()
+        {
+            return;
+        }
+        cx.spawn(async move |workspace, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(90))
+                .await;
+            let found = cx
+                .background_executor()
+                .spawn(async move { updater::check_for_update(env!("CARGO_PKG_VERSION")) })
+                .await;
+            if let Some(info) = found {
+                let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.updater.status = Some((info, UpdateState::Available));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// statusbar チップのクリック: ダウンロード → 署名検証 → 差し替え（背景）。
+    fn install_update(&mut self, cx: &mut Context<Self>) {
+        let Some((info, state)) = self.updater.status.clone() else {
+            return;
+        };
+        if state != UpdateState::Available {
+            return;
+        }
+        self.updater.status = Some((info.clone(), UpdateState::Installing));
+        cx.notify();
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { updater::download_and_install(&info).map(|_| info) })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| match result {
+                Ok(info) => {
+                    workspace.updater.status = Some((info, UpdateState::Ready));
+                    cx.notify();
+                }
+                Err(error) => {
+                    workspace.updater.status = None;
+                    workspace.push_toast(
+                        SharedString::from(format!("{error:#}")),
+                        workspace.accent(),
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
 }

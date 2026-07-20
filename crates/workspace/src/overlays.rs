@@ -947,4 +947,45 @@ impl Workspace {
 
     // ターミナルの file:line リンク（M13）。相対パスはアクティブプロジェクトの root 基準。
     // subscribe に window が無いので pending_transient_tab と同様「次の render で消化」する。
+
+    /// スレッド履歴を開く（#5）。DB の全スレッド（アーカイブ含む・updated_at 降順）を Picker に出す。
+    /// 行頭●= スレッド色・detail = プロジェクト / ⎇ branch / トークン累計。確定で復元してアクティブに。
+    fn open_thread_history(&mut self, _: &ThreadHistory, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(storage) = self.persistence.storage.clone() else {
+            return;
+        };
+        let threads = storage.load_all_threads().unwrap_or_default();
+        let mut history = Vec::new();
+        let mut items = Vec::new();
+        for (id, name, color_index, project, branch, tokens_used, archived) in threads {
+            let mut detail = String::new();
+            if !project.is_empty() {
+                detail.push_str(&project);
+            }
+            if let Some(branch) = &branch {
+                detail.push_str(&format!("  ⎇ {branch}"));
+            }
+            if tokens_used > 0 {
+                detail.push_str(&format!("  Σ {:.1}k", tokens_used as f32 / 1000.0));
+            }
+            if archived {
+                detail.push_str("  ·閉");
+            }
+            let mut item = PickerItem::new(history.len(), name.clone())
+                .with_accent(theme_core::thread_color(color_index as usize));
+            if !detail.is_empty() {
+                item = item.with_detail(detail);
+            }
+            items.push(item);
+            history.push((id, name, color_index));
+        }
+        self.picker_history = history;
+        self.open_picker(
+            PickerMode::ThreadHistory,
+            i18n::t!("agent.history_placeholder"),
+            items,
+            window,
+            cx,
+        );
+    }
 }
