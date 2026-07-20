@@ -144,7 +144,7 @@ actions!(
 );
 
 #[derive(Clone, Copy, PartialEq)]
-enum PickerMode {
+pub(crate) enum PickerMode {
     Files,
     Projects,
     Themes,
@@ -179,7 +179,7 @@ const TRAFFIC_LIGHT_INSET: f32 = 92.0; // ネイティブ信号機とプロジ�
 
 /// titlebar / statusbar のドックトグルが指すドック。
 #[derive(Clone, Copy, PartialEq)]
-enum Dock {
+pub(crate) enum Dock {
     Left,
     Right,
     Bottom,
@@ -187,7 +187,7 @@ enum Dock {
 
 /// ペインに載る 1 タブ（M10 複数タブ）。当面は具体型（エディタ）だけ・多態化は必要時に育てる
 /// （ARCHITECTURE §3 の Pane/Item 初版）。`path` はタブの同一判定と永続化のキー。
-struct EditorTab {
+pub(crate) struct EditorTab {
     path: PathBuf,
     editor: Entity<EditorView>,
     /// 一時タブ（diff タブ等・M11-9）。永続化・⌘⇧T 復元・LSP から除外する。
@@ -234,7 +234,7 @@ struct RailMenuState {
 
 /// レールメニューの破壊的操作（二段確認の対象）。
 #[derive(Clone, Copy, PartialEq)]
-enum RailMenuAction {
+pub(crate) enum RailMenuAction {
     /// worktree を削除（git worktree remove）。スロットも外す。
     RemoveWorktree,
     /// worktree ごとブランチを削除（worktree remove → git branch -D）。スロットも外す。
@@ -247,7 +247,7 @@ const BUFFER_SEARCH_MAX: usize = 20_000;
 
 /// ⌘F バッファ内検索/置換バーの状態（アクティブタブのエディタに対して働く・M10）。
 /// マッチ列はエディタ毎の状態なので、タブ/プロジェクト切替では畳む（持ち越さない）。
-struct BufferSearchState {
+pub(crate) struct BufferSearchState {
     query: String,
     replace: String,
     case_sensitive: bool,
@@ -286,7 +286,7 @@ struct CompletionItem {
 
 /// 補完ポップアップ（オーバーレイ）。エディタのキャレット直下に出す。フォーカスを取り上下/確定/中止を受ける。
 /// 印字キーは type-through（エディタへ挿入 → prefix で**クライアント側絞り込み**・LSP 再要求なし）。
-struct CompletionState {
+pub(crate) struct CompletionState {
     /// LSP が返した全候補（絞り込み前）。
     items: Vec<CompletionItem>,
     /// 現在の絞り込みプレフィクス（キャレット前の識別子。タイプで伸びる）。
@@ -329,7 +329,7 @@ enum CompletionTrigger {
 
 /// ⌘I インライン編集（M12-8）。選択+指示 → `claude -p` で書き換え → その場 diff → accept/reject。
 /// チャット（スレッド）へ行かない最短経路。ai_commit_message と同じ「CLI に流す」型。
-struct InlineEditState {
+pub(crate) struct InlineEditState {
     /// 指示の入力値。
     instruction: String,
     focus: FocusHandle,
@@ -397,7 +397,7 @@ enum UpdateState {
 }
 
 /// ⌘. code actions のポップアップ（M11）。補完と同型（フォーカスを取り上下/Enter/Esc）。
-struct CodeActionsState {
+pub(crate) struct CodeActionsState {
     /// (タイトル, アクションの生 JSON)。
     items: Vec<(SharedString, serde_json::Value)>,
     selected: usize,
@@ -406,7 +406,7 @@ struct CodeActionsState {
 }
 
 /// hover ポップアップ（LSP `textDocument/hover` の結果・M10）。フォーカスは取らない。
-struct HoverState {
+pub(crate) struct HoverState {
     /// プレーン表示する行（markdown はコードフェンス行だけ落とした素通し）。
     lines: Vec<SharedString>,
     /// 表示アンカー（dwell したマウス位置 / キャレット位置）。

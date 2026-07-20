@@ -7,7 +7,6 @@ mod inline_edit;
 mod language;
 mod overlays;
 mod tabs;
-pub(crate) use tabs::*;
 
 /// 1 ProjectSession の編集面。tab / pane / language / diff / navigation の状態を一括所有する。
 ///
