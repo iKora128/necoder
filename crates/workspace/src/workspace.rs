@@ -1245,6 +1245,15 @@ mod tests {
             "undo history must survive A → B → A",
         );
 
+        // 監視先を消す前に notify watcher を全セッション分落とす。監視中の root を
+        // 削除したまま process teardown に入ると、fsevents スレッドのデストラクタが
+        // panic → SIGABRT する race がある（フルスイート並列実行時のみ顕在化）。
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1291,6 +1300,13 @@ mod tests {
         assert_eq!(local.calls(), 0, "inactive local session must not be queried");
         assert_eq!(remote.calls(), 0, "remote Render must use cached data only");
 
+        // 上のテストと同じ teardown race 回避（watcher を root 削除より先に落とす）。
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 

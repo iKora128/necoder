@@ -241,3 +241,57 @@ git diff --check
 - [x] 公開 API と `state.json` 後方互換を維持する
 - [x] workspace test と構造条件を確認済み
 - [x] ARCHITECTURE / ROADMAP / JOURNAL を更新済み
+
+## 7. 独立検証（2026-07-20・別セッション）
+
+完了報告を受けて第三者視点で再検証した結果と、その場で直した問題の記録。
+
+### 7.1 追認できた主張
+
+- `cargo check --workspace` green。`cargo tree -i workspace` の consumer は `shirushi` のみ（feature crate の逆依存なし）
+- `Workspace` は 8 直接フィールド、`workspace.rs` は 1,399 行、§3 のファイル構成は実在
+- 監査 test は実体がある（A→B→A の dirty/undo/child Entity 保持、RenderAuditHost による draw 中 Host call 0 など）
+- ROADMAP / JOURNAL / ARCHITECTURE の更新も確認
+
+### 7.2 発見して修正した問題: テストの flaky SIGABRT
+
+検証初回の `cargo test --workspace` で workspace lib の test process が **SIGABRT**
+（`notify-rs fsevents loop` スレッドの「panic in a destructor during cleanup」）。
+両 gpui 監査 test が**監視中の temp root を `remove_dir_all` してから** process teardown に入る構造で、
+per-session に生き残る notify watcher（A→B→A 後は 2 本）の fsevents stream 破棄と race する。
+隔離実行 32 回では再現せず、フルスイート並列時のみ顕在化する低頻度 race。
+
+**修正**: 両 test の teardown で全 session の `_watch` / `_watch_pump` を root 削除より先に落とす。
+修正後 `cargo test --workspace` 連続 2 回 green（exit code はパイプを介さず直接捕捉）。
+notify は 6.1.1 のまま。上流の teardown 修正の取り込み（バージョン更新）は将来候補として記録する。
+
+### 7.3 実態の註記（文書の表現と実装の距離）
+
+- **「モジュールへ分割」の実装は `include!`**（テキスト結合）。真のモジュールは `persistence` / `updater` のみで、
+  残り 24 ファイルは単一モジュールへ合成される（JOURNAL の学び欄にも記載あり）。名前空間・可視性の境界は無く、
+  `cargo fmt` は include 対象ファイルを整形せず、rust-analyzer の include! 対応も限定的。
+  commit `884bfdc` の「責務別モジュールへ分割」という表現は実装と一致しない
+- **「8 直接フィールド」は Deref 連鎖と併読が必要**: `Workspace` →（`ProjectSessions` 経由）→ `sessions[active]` の
+  `Deref/DerefMut` があり、既存メソッドは `self.tabs` 等で**アクティブ session の状態へ暗黙アクセス**する。
+  所有権の移動は本物だが、アクセス境界は Deref で迂回されている（smart pointer 以外の Deref は
+  Rust API guidelines が避けるパターン。アクセス時点の active に依存する点も含め、明示化はフォローアップ）
+- **`dev_probes.rs` は看板と中身が不一致**: `debug_*` は item 単位で `#[cfg(debug_assertions)]` gate 済みだが、
+  同居する SSH 入力・TerminalDock イベント・updater（~350 行）は常駐の本番コード。
+  「debug build only API」はファイル単位では成立していない
+- **`editor_area/mod.rs`**: リポ規約（mod.rs 禁止）に反する命名。include! なので実際にはモジュールですらない
+- **crate 化の実態**: `explorer` 209 行 / `git_ui` 104 行は typed event 契約 + project state の薄い crate で、
+  実装の大半（shell adapter の controller/view 計 ~2,950 行）は workspace 側に残る（§2.3 の判断どおり。規模感をここに固定）
+
+### 7.4 UI 目視
+
+オフスクリーン（`SHIRUSHI_SCREENSHOT` + `--features screenshot`）で default 状態を 2560×1600 撮影。
+titlebar ピル / レール / explorer / タブ下線 / エディタ / Agent ドック（スレッド色・トークン・マスコット・
+composer 宛先チップ）/ statusbar とも崩れなし。
+
+### 7.5 フォローアップ候補（軽い順）
+
+1. `editor_area/mod.rs` → `editor_area.rs` 改名（規約回復・機械的）
+2. `dev_probes.rs` の本番コード（SSH / TerminalDock イベント / updater）を然るべきファイルへ移動
+3. include! → 真の `mod` 化（`pub(crate)` 可視性と per-file `use` の整備。挙動不変で機械的に可能・rustfmt / RA の恩恵回復）
+4. notify 6.1.1 の更新検討（fsevents teardown の上流修正取り込み）
+5. Deref 連鎖の段階的な明示化（新規コードは active session 取得を明示メソッド経由に）
