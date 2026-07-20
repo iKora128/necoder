@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn open_file_finder(&mut self, _: &FileFinder, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_file_finder(&mut self, _: &FileFinder, window: &mut Window, cx: &mut Context<Self>) {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -31,7 +33,7 @@ impl Workspace {
 
     /// ⌘⇧P コマンドパレット（M13）: [`CommandRegistry`] を名前+キー併記で並べ、
     /// 確定でアクションを dispatch する（閉じてから = エディタ/Workspace コンテキストで解決）。
-    fn open_command_palette(&mut self, _: &CommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_command_palette(&mut self, _: &CommandPalette, window: &mut Window, cx: &mut Context<Self>) {
         let sections = keymap_core::parse(keymap_core::DEFAULT_KEYMAP_JSON).unwrap_or_default();
         let items = COMMAND_REGISTRY
             .entries()
@@ -53,7 +55,7 @@ impl Workspace {
     /// ⌘O スイッチャー（2 階層・M12-12）: プロジェクト行 + 配下の branch/worktree 行を
     /// 1 リストに並べる（UI-SPEC §7）。まずプロジェクト行だけで即開き、worktree 一覧と
     /// ahead/behind/dirty は背景で集めて後から差し込む（開く速さを守る）。
-    fn open_project_switcher(&mut self, _: &ProjectSwitcher, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_project_switcher(&mut self, _: &ProjectSwitcher, window: &mut Window, cx: &mut Context<Self>) {
         self.picker_worktree_rows = Vec::new();
         let items = self.build_switcher_items(&[], cx).0;
         self.open_picker(PickerMode::Projects, i18n::t!("finder.projects"), items, window, cx);
@@ -109,7 +111,7 @@ impl Workspace {
 
     /// ⌘O の行を組む: プロジェクト行（●色 + 名前 + パス + 実行中ドット）+ 配下の
     /// worktree 行（⎇ branch + ↑↓/dirty + 実行中ドット）。戻りは (items, id-1000 → path 表)。
-    fn build_switcher_items(
+    pub(crate) fn build_switcher_items(
         &self,
         collected: &[(usize, Vec<(project::GitWorktree, project::WorktreeStatus)>)],
         cx: &App,
@@ -173,7 +175,7 @@ impl Workspace {
 
     /// ⌘O の worktree 行を確定: 現プロジェクトなら何もしない・レールに居れば切替・
     /// 居なければ**このウィンドウのレールに開く**（M10-2 でウィンドウモデルを更新。新窓は右クリック明示）。
-    fn open_worktree_target(
+    pub(crate) fn open_worktree_target(
         &mut self,
         path: PathBuf,
         branch: Option<String>,
@@ -196,7 +198,7 @@ impl Workspace {
     // ── テーマセレクタ（Picker・ライブプレビュー付き。⌘⇧T・M3） ──
 
     /// テーマセレクタを開く。組み込み + ユーザーテーマを Picker に並べ、選択移動で即プレビューする。
-    fn open_theme_selector(&mut self, _: &ThemeSelector, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_theme_selector(&mut self, _: &ThemeSelector, window: &mut Window, cx: &mut Context<Self>) {
         let themes = theme_core::available_themes(self.themes_dir().as_deref());
         let items = themes
             .iter()
@@ -215,7 +217,7 @@ impl Workspace {
     }
 
     /// テーマ保存ディレクトリ（`state.json` と同じ Shirushi 設定フォルダの `themes/`）。
-    fn themes_dir(&self) -> Option<PathBuf> {
+    pub(crate) fn themes_dir(&self) -> Option<PathBuf> {
         self.persistence.state_path
             .as_ref()
             .and_then(|path| path.parent())
@@ -223,7 +225,7 @@ impl Workspace {
     }
 
     /// テーマを即時適用する（自身のクローム + エディタ + Agent パネル + Picker へ波及）。
-    fn apply_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+    pub(crate) fn apply_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
         for (index, session) in self.project_sessions.sessions.iter().enumerate() {
             for tab in &session.tabs {
@@ -255,7 +257,7 @@ impl Workspace {
     }
 
     /// ハイライト移動でプレビュー適用する（保存しない）。
-    fn preview_theme(&mut self, id: usize, cx: &mut Context<Self>) {
+    pub(crate) fn preview_theme(&mut self, id: usize, cx: &mut Context<Self>) {
         if let Some((_, source)) = self.overlays.picker_themes.get(id) {
             if let Ok(theme) = Theme::load(source) {
                 self.apply_theme(theme, cx);
@@ -263,7 +265,7 @@ impl Workspace {
     }
 }
     /// テーマを確定する（適用 + 設定へ theme 名を保存＝再起動でも効く）。
-    fn commit_theme(&mut self, id: usize, cx: &mut Context<Self>) {
+    pub(crate) fn commit_theme(&mut self, id: usize, cx: &mut Context<Self>) {
         let Some((_, source)) = self.overlays.picker_themes.get(id).cloned() else {
             return;
         };
@@ -282,7 +284,7 @@ impl Workspace {
         }
     }
 
-    fn open_picker(
+    pub(crate) fn open_picker(
         &mut self,
         mode: PickerMode,
         placeholder: String,
@@ -300,7 +302,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn on_picker_event(
+    pub(crate) fn on_picker_event(
         &mut self,
         _picker: &Entity<Picker>,
         event: &PickerEvent,
@@ -431,7 +433,7 @@ impl Workspace {
         }
     }
 
-    fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.overlays.picker = None;
         self.overlays.picker_observation = None;
         match self.active_editor() {
@@ -446,13 +448,13 @@ impl Workspace {
 
     // ── プロジェクト横断検索パネル（⌘⇧F・M6） ──
 
-    fn search_return_focus(&self, cx: &App) -> FocusHandle {
+    pub(crate) fn search_return_focus(&self, cx: &App) -> FocusHandle {
         self.active_editor()
             .map(|editor| editor.read(cx).focus_handle(cx))
             .unwrap_or_else(|| self.focus_handle.clone())
     }
 
-    fn install_search_panel(
+    pub(crate) fn install_search_panel(
         &mut self,
         panel: Entity<SearchPanel>,
         window: &mut Window,
@@ -465,7 +467,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn show_search_results(
+    pub(crate) fn show_search_results(
         &mut self,
         query: String,
         results: Vec<search::FileMatch>,
@@ -495,7 +497,7 @@ impl Workspace {
         self.install_search_panel(panel, window, cx);
     }
 
-    fn on_search_panel_event(
+    pub(crate) fn on_search_panel_event(
         &mut self,
         panel: Entity<SearchPanel>,
         event: &SearchPanelEvent,
@@ -518,7 +520,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_project_search(&mut self, _: &ProjectSearch, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_project_search(&mut self, _: &ProjectSearch, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = &self.search_panel {
             window.focus(&panel.read(cx).focus_handle(), cx);
             return;
@@ -537,17 +539,17 @@ impl Workspace {
 
     // ── ⌘F バッファ内検索/置換（M10） ──
 
-    fn open_buffer_search(&mut self, _: &BufferSearch, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_buffer_search(&mut self, _: &BufferSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.open_buffer_search_impl(false, window, cx);
     }
 
-    fn open_buffer_replace(&mut self, _: &BufferReplace, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_buffer_replace(&mut self, _: &BufferReplace, window: &mut Window, cx: &mut Context<Self>) {
         self.open_buffer_search_impl(true, window, cx);
     }
 
     /// ⌘F / ⌥⌘F。閉じていれば現在位置を保存して開く（単一行の選択があればクエリ初期値に）。
     /// 開いていればフォーカスを付け直すだけ（⌥⌘F は置換行も出す）。
-    fn open_buffer_search_impl(&mut self, with_replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_buffer_search_impl(&mut self, with_replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -595,7 +597,7 @@ impl Workspace {
     }
 
     /// ⌘F バーを閉じる。`restore` = 開いた時の位置へ戻す（Esc）。×クリックは現在位置のまま閉じる。
-    fn close_buffer_search(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_buffer_search(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.buffer_search.take() else {
             return;
         };
@@ -616,7 +618,7 @@ impl Workspace {
 
     /// アクティブエディタが変わる操作（タブ切替・タブ閉じ・プロジェクト切替/再読込）では
     /// ⌘F バーを畳む（マッチはエディタ毎の状態なので持ち越さない。位置復帰もしない）。
-    fn dismiss_buffer_search(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn dismiss_buffer_search(&mut self, cx: &mut Context<Self>) {
         if self.buffer_search.take().is_some() {
             for tab in &self.tabs {
                 tab.editor.update(cx, |editor, cx| editor.set_search_ranges(Vec::new(), cx));
@@ -627,13 +629,13 @@ impl Workspace {
 
     /// ⌘F の検索を再計算する。(バッファ version, クエリ, トグル) が前回と同じならスキップ
     /// （エディタの observe は blink でも発火するため）。`reveal` = 現在マッチを選択して画面内へ。
-    fn refresh_buffer_search(&mut self, reveal: bool, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_buffer_search(&mut self, reveal: bool, cx: &mut Context<Self>) {
         self.refresh_buffer_search_from(None, reveal, cx);
     }
 
     /// [`Self::refresh_buffer_search`] の anchor 指定版。`anchor` 以降で最初のマッチを現在マッチに
     /// する（None = 前回の現在マッチの開始位置 → 無ければエディタのキャレット位置）。
-    fn refresh_buffer_search_from(
+    pub(crate) fn refresh_buffer_search_from(
         &mut self,
         anchor_override: Option<usize>,
         reveal: bool,
@@ -690,7 +692,7 @@ impl Workspace {
     }
 
     /// 現在マッチを選択して画面内へ（可視域外なら中央へスクロール）。
-    fn reveal_current_buffer_match(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reveal_current_buffer_match(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -705,7 +707,7 @@ impl Workspace {
     }
 
     /// 次/前のマッチへ（Enter / ⇧Enter・‹ ›。端で回る）。
-    fn step_buffer_match(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(crate) fn step_buffer_match(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.refresh_buffer_search(false, cx);
         let Some(state) = self.buffer_search.as_mut() else {
             return;
@@ -720,7 +722,7 @@ impl Workspace {
     }
 
     /// 現在マッチ 1 件を置換して次のマッチへ進む。
-    fn replace_current_buffer_match(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn replace_current_buffer_match(&mut self, cx: &mut Context<Self>) {
         self.refresh_buffer_search(false, cx);
         let Some(editor) = self.active_editor() else {
             return;
@@ -742,7 +744,7 @@ impl Workspace {
     }
 
     /// 全マッチを 1 Transaction で置換する（undo 一発で全部戻る）。表示上限より多くても全件対象。
-    fn replace_all_buffer_matches(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn replace_all_buffer_matches(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -771,7 +773,7 @@ impl Workspace {
     }
 
     /// 大小区別トグル（⌘F バー。切替後は即再検索）。
-    fn toggle_buffer_search_case(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_buffer_search_case(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.buffer_search.as_mut() {
             state.case_sensitive = !state.case_sensitive;
         }
@@ -779,7 +781,7 @@ impl Workspace {
     }
 
     /// 正規表現トグル（⌘F バー。切替後は即再検索）。
-    fn toggle_buffer_search_regex(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_buffer_search_regex(&mut self, cx: &mut Context<Self>) {
         if let Some(state) = self.buffer_search.as_mut() {
             state.is_regex = !state.is_regex;
         }
@@ -787,7 +789,7 @@ impl Workspace {
     }
 
     /// ⌘F バーのキー入力（検索パネル・git パネルと同じ手書き入力の流儀）。
-    fn on_buffer_search_key_down(
+    pub(crate) fn on_buffer_search_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
@@ -950,7 +952,7 @@ impl Workspace {
 
     /// スレッド履歴を開く（#5）。DB の全スレッド（アーカイブ含む・updated_at 降順）を Picker に出す。
     /// 行頭●= スレッド色・detail = プロジェクト / ⎇ branch / トークン累計。確定で復元してアクティブに。
-    fn open_thread_history(&mut self, _: &ThreadHistory, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_thread_history(&mut self, _: &ThreadHistory, window: &mut Window, cx: &mut Context<Self>) {
         let Some(storage) = self.persistence.storage.clone() else {
             return;
         };

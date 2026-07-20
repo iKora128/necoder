@@ -1,5 +1,3 @@
-use crate::workspace::*;
-
 #[derive(Clone, Copy)]
 pub(crate) struct CommandEntry {
     pub(crate) label_key: &'static str,

@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn rail_icon(
+    pub(crate) fn rail_icon(
         &self,
         id: &'static str,
         icon: &'static str,
@@ -20,7 +22,7 @@ impl Workspace {
             .tooltip(Tooltip::text(tooltip, theme.clone()))
     }
 
-    fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active = self.project_sessions.active;
         let accent = self.accent();

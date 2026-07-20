@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn apply_project_color(
+    pub(crate) fn apply_project_color(
         &mut self,
         project_index: usize,
         color: Hsla,
@@ -56,7 +58,7 @@ impl Workspace {
     }
 
     /// 色ピッカーを開く（右クリック位置 or キーボード起動時のアンカー位置）。hex 入力へフォーカス。
-    fn open_color_picker(
+    pub(crate) fn open_color_picker(
         &mut self,
         project_index: usize,
         position: Point<gpui::Pixels>,
@@ -70,7 +72,7 @@ impl Workspace {
     }
 
     /// 色ピッカーを閉じ、フォーカスをアクティブエディタへ戻す（rename と同型）。
-    fn close_color_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_color_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.overlays.color_picker.take().is_some() {
             if let Some(editor) = self.active_editor() {
                 let handle = editor.read(cx).focus_handle(cx);
@@ -82,13 +84,13 @@ impl Workspace {
 
     /// ⌘K⌘C / コマンドパレットからアクティブプロジェクトの色ピッカーを開く。
     /// マウス位置が無いので、アクティブなレール項目の位置（pt_2 8px + index*38）にアンカーする。
-    fn open_project_color(&mut self, _: &ProjectColor, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_project_color(&mut self, _: &ProjectColor, window: &mut Window, cx: &mut Context<Self>) {
         let anchor = gpui::point(px(RAIL_WIDTH), px(8. + self.project_sessions.active as f32 * 38. + 4.));
         self.open_color_picker(self.project_sessions.active, anchor, window, cx);
     }
 
     /// 色ピッカーの hex 入力キー処理（rename と同型 + 16 進フィルタ）。
-    fn on_color_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_color_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_color_picker(window, cx),
             "enter" => {
@@ -131,7 +133,7 @@ impl Workspace {
     }
 
     /// 色ピッカー（識別用の厳選スウォッチ + 任意 hex 入力・M12-11 / Peacock 拡張）。
-    fn render_color_picker(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_color_picker(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.overlays.color_picker.as_ref()?;
         let project_index = state.project_index;
         let position = state.position;
@@ -233,7 +235,7 @@ impl Workspace {
 
     /// レール項目の右クリックメニュー（M10-2）。色スウォッチ + 新規窓 / レールから外す /
     /// （worktree タブなら）worktree・ブランチ削除。破壊的操作は二段確認。
-    fn render_rail_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_rail_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let menu = self.overlays.rail_menu.as_ref()?;
         let index = menu.project_index;
         let position = menu.position;
@@ -406,7 +408,7 @@ impl Workspace {
     }
 
     // レールメニューの破壊的操作を二段確認の「1 段目」にする（もう一度クリックで実行）。
-    fn arm_rail_confirm(&mut self, action: RailMenuAction, cx: &mut Context<Self>) {
+    pub(crate) fn arm_rail_confirm(&mut self, action: RailMenuAction, cx: &mut Context<Self>) {
         if let Some(menu) = self.overlays.rail_menu.as_mut() {
             menu.confirm = Some(action);
             cx.notify();

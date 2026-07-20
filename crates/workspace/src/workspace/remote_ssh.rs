@@ -1,3 +1,5 @@
+use crate::workspace::*;
+
 // ── リモート SSH の GUI 導線（M13） ──
 // ssh:// 入力バー・~/.ssh/config ホストピッカー・接続と履歴記録。接続は system OpenSSH に
 // 委ねる（鍵・ProxyJump・agent は config のまま効く）。
@@ -6,7 +8,7 @@ impl Workspace {
     /// titlebar の SSH ボタン: `ssh://user@host/path` の入力バーを開く（goto/rename と同型）。
     /// seed は「アクティブが remote ならその URI・そうでなければ ssh://」。
     #[cfg(debug_assertions)]
-    fn open_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seed = self
             .active_slot()
             .and_then(|slot| {
@@ -24,7 +26,7 @@ impl Workspace {
     }
 
     /// SSH 入力バーを種文字列付きで開く（ホストピッカーからの遷移でも使う）。
-    fn open_ssh_input_seeded(&mut self, seed: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_ssh_input_seeded(&mut self, seed: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.overlays.ssh_connecting {
             return;
         }
@@ -37,7 +39,7 @@ impl Workspace {
     /// リモート SSH ホストピッカー（M13）: `~/.ssh/config` の Host 一覧 + 末尾に「手入力」。
     /// 選択で `ssh://<alias>/` を種に入力バーへ（パスだけ足して Enter で接続）。
     /// system OpenSSH に委ねるので User/HostName/鍵/ProxyJump は config のものがそのまま効く。
-    fn open_ssh_host_picker(&mut self, _: &RemoteSsh, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_ssh_host_picker(&mut self, _: &RemoteSsh, window: &mut Window, cx: &mut Context<Self>) {
         let hosts = host::ssh_config_hosts();
         // 2階層: 上=最近のリモートプロジェクト（履歴・直接接続・#5）、下=config ホスト、末尾=手入力。
         let recent = self
@@ -100,7 +102,7 @@ impl Workspace {
         );
     }
 
-    fn close_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.overlays.ssh_input.take().is_some() {
             if let Some(editor) = self.active_editor() {
                 let handle = editor.read(cx).focus_handle(cx);
@@ -110,7 +112,7 @@ impl Workspace {
         }
     }
 
-    fn on_ssh_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_ssh_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_ssh_input(window, cx),
             "enter" => {
@@ -153,7 +155,7 @@ impl Workspace {
     /// SSH 接続 →（成功したら）新しいウィンドウで開く。接続は ControlMaster + server 配備で
     /// 数秒〜かかるため背景で行い、失敗はトーストで返す。system OpenSSH に委ねるので
     /// ~/.ssh/config の Host エイリアス・鍵・ProxyJump・agent がそのまま効く。
-    fn connect_ssh_and_open(&mut self, uri: String, cx: &mut Context<Self>) {
+    pub(crate) fn connect_ssh_and_open(&mut self, uri: String, cx: &mut Context<Self>) {
         self.overlays.ssh_connecting = true;
         self.push_toast(
             SharedString::from(i18n::t!("ssh.connecting", "uri" => uri.clone())),
@@ -208,7 +210,7 @@ impl Workspace {
     }
 
     /// SSH 入力バー（rename/goto と同型の中央上オーバーレイ）。
-    fn render_ssh_input(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_ssh_input(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (value, focus) = self.overlays.ssh_input.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent();

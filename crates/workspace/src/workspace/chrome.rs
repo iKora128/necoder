@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn on_settings_view_event(
+    pub(crate) fn on_settings_view_event(
         &mut self,
         _view: Entity<settings::SettingsView>,
         event: &settings::SettingsViewEvent,
@@ -17,13 +19,13 @@ impl Workspace {
         }
     }
 
-    fn accent(&self) -> Hsla {
+    pub(crate) fn accent(&self) -> Hsla {
         self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0))
     }
 
     // ── titlebar（UI-SPEC §3） ──
 
-    fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         // Peacock 相当: titlebar をアクティブプロジェクト色で淡く塗る（窓ごと識別・M13）。
         let accent = self.accent();
@@ -95,7 +97,7 @@ impl Workspace {
     }
 
     /// titlebar の beacon 列（アクティブプロジェクトのスレッド。実行中は色濃く・停止中は淡く）。
-    fn render_beacons(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_beacons(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let beacons = self.agent_panel.read(cx).beacons();
         div()
@@ -121,7 +123,7 @@ impl Workspace {
 
     /// プロジェクトピル: 枠 + 「名前 ▾」+「⎇ branch」。名前クリックで ⌘O。
     /// プロジェクト色はレール/キャレット等の許可箇所に集約（左縁チップは廃止・2026-07-17）。
-    fn render_project_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_project_pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let name = self
             .active_slot()
@@ -185,7 +187,7 @@ impl Workspace {
     }
 
     /// ドックトグルの小アイコン（枠 + 位置ストリップで左/右/下を示す）。
-    fn dock_button(&self, dock: Dock, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn dock_button(&self, dock: Dock, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let strip = || div().bg(theme.fg1);
         let frame = div()
@@ -237,7 +239,7 @@ impl Workspace {
 
     /// 主ペインのタブ列（全タブ。クリック切替・× 閉じる・Chrome 風ドラッグ並べ替え・dirty ドット・
     /// git 色貫通）。M10 複数タブ。`agent_panel::render_thread_tabs` と同じ流儀。
-    fn render_main_tabstrip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_main_tabstrip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let accent = self.accent();
         let active_tab = self.active_tab;
@@ -333,7 +335,7 @@ impl Workspace {
     }
 
     /// 右分割ペインのタブ列（単一比較ビュー。× = 分割を閉じる）。
-    fn render_split_tabstrip(
+    pub(crate) fn render_split_tabstrip(
         &self,
         editor: &Entity<EditorView>,
         cx: &mut Context<Self>,
@@ -400,7 +402,7 @@ impl Workspace {
             .child(div().flex_1())
     }
 
-    fn render_breadcrumb(&self, editor: &Entity<EditorView>, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_breadcrumb(&self, editor: &Entity<EditorView>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let path = editor.read(cx).buffer().path().map(Path::to_path_buf);
         let root = self.active_slot().map(|slot| slot.worktree.root().to_path_buf());
@@ -421,7 +423,7 @@ impl Workspace {
 
     /// ⌘F インライン検索/置換バー（エディタ右上に浮かせる・M10）。
     /// 行1 = [▸/▾] [クエリ] [n/m] [Aa] [.*] [‹] [›] [×]、行2（置換表示時）= [置換入力] [置換] [全置換]。
-    fn render_buffer_search_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_buffer_search_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.buffer_search.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent();
@@ -711,7 +713,7 @@ impl Workspace {
     }
 
     /// 主ペイン（複数タブ列 + アクティブタブのパンくず + 本体）。⌘F バーは本体右上に浮かせる。
-    fn render_main_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_main_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(editor) = self.active_editor() else {
             return div().flex_1().into_any_element();
         };
@@ -736,7 +738,7 @@ impl Workspace {
     }
 
     /// 右分割ペイン（単一タブ + パンくず + 本体）。
-    fn render_split_pane(&self, editor: &Entity<EditorView>, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_split_pane(&self, editor: &Entity<EditorView>, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .flex_1()
             .flex()
@@ -750,7 +752,7 @@ impl Workspace {
     }
 
     /// 祝いの紙吹雪を降らせる（~2.2s で自動的に止める）。
-    fn celebrate_confetti(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn celebrate_confetti(&mut self, cx: &mut Context<Self>) {
         self.chrome.confetti = true;
         cx.notify();
         cx.spawn(async move |workspace, cx| {
@@ -765,7 +767,7 @@ impl Workspace {
 
     /// 祝いの紙吹雪オーバーレイ（`confetti` が true の間だけ全面に色紙が降る）。
     /// 各粒子は同尺の with_animation で落下（delta² の重力）＋末尾フェード。位置は relative で窓非依存。
-    fn render_confetti(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_confetti(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if !self.chrome.confetti {
             return None;
         }
@@ -814,7 +816,7 @@ impl Workspace {
 
     /// 指定コマンドを新しいターミナルタブで実行し、終わったらログインシェルに落ちる（ログイン/導入用）。
     /// 各 CLI の認証はローカルで行う想定なので **ローカルシェル**で走らせる（remote 時も cwd は外す）。
-    fn open_command_terminal(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_command_terminal(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let cwd = self
             .active_slot()
             .filter(|slot| slot.remote_host.is_none())
@@ -830,7 +832,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn render_center(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_center(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let content = if self.chrome.show_settings {
             // 設定ホーム（中央領域を占有・レール ⚙ で開閉）。第1セクション=Agents。
@@ -904,11 +906,11 @@ impl Workspace {
             .when(self.chrome.show_bottom, |element| element.child(self.render_bottom_dock(cx)))
     }
 
-    fn render_bottom_dock(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_bottom_dock(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         self.terminal_dock.clone()
     }
 
-    fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         // Peacock 相当: statusbar をアクティブプロジェクト色で淡く塗る（窓ごと識別・M13）。
         let accent = self.accent();
@@ -1101,7 +1103,7 @@ impl Workspace {
 
     /// 起動しばらく後に GitHub Releases を確認する（背景・失敗は静かに無視）。
     /// スクショ/プローブ実行時と `SHIRUSHI_NO_UPDATE_CHECK` ではネットへ出ない。
-    fn schedule_update_check(&self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_update_check(&self, cx: &mut Context<Self>) {
         if cfg!(test)
             || std::env::var_os("SHIRUSHI_NO_UPDATE_CHECK").is_some()
             || std::env::var_os("SHIRUSHI_SCREENSHOT").is_some()
@@ -1127,7 +1129,7 @@ impl Workspace {
     }
 
     /// statusbar チップのクリック: ダウンロード → 署名検証 → 差し替え（背景）。
-    fn install_update(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn install_update(&mut self, cx: &mut Context<Self>) {
         let Some((info, state)) = self.updater.status.clone() else {
             return;
         };

@@ -1,3 +1,5 @@
+use crate::workspace::*;
+
 // ── 開発用プローブ API（debug build 限定） ──
 // SHIRUSHI_* 環境変数からオフスクリーン検証を駆動するための入口だけを置く。
 // 全 item が `#[cfg(debug_assertions)]`。本番コードをここに置かない（release に混ざる）。

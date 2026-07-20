@@ -41,7 +41,14 @@ pub(crate) use ui::Tooltip;
 pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
 
 // ── 子モジュール（Rust の descendant 可視性で hub の private にアクセス可能）──
+mod chrome;
 mod commands;
+mod dev_probes;
+mod notifications;
+mod overlays;
+mod rail;
+mod rail_view;
+mod remote_ssh;
 mod explorer_controller;
 mod explorer_view;
 mod git_controller;
@@ -706,13 +713,6 @@ impl DerefMut for Workspace {
     }
 }
 
-include!("rail.rs");
-include!("notifications.rs");
-include!("overlays.rs");
-include!("dev_probes.rs");
-include!("remote_ssh.rs");
-include!("rail_view.rs");
-include!("chrome.rs");
 
 fn breadcrumb_text(root: Option<&Path>, path: Option<&Path>) -> String {
     let Some(path) = path else {

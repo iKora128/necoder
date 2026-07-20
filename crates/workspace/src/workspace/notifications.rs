@@ -1,5 +1,7 @@
+use crate::workspace::*;
+
 impl Workspace {
-    fn on_panel_event(&mut self, panel: Entity<AgentPanel>, event: &agent_panel::PanelEvent, cx: &mut Context<Self>) {
+    pub(crate) fn on_panel_event(&mut self, panel: Entity<AgentPanel>, event: &agent_panel::PanelEvent, cx: &mut Context<Self>) {
         let session_index = self
             .project_sessions
             .sessions
@@ -61,7 +63,7 @@ impl Workspace {
     }
 
     /// トーストを積む（右下・5 秒で自動で消える・UI-SPEC §8）。
-    fn push_toast(&mut self, text: SharedString, color: Hsla, cx: &mut Context<Self>) {
+    pub(crate) fn push_toast(&mut self, text: SharedString, color: Hsla, cx: &mut Context<Self>) {
         self.notifications.toast_gen = self.notifications.toast_gen.wrapping_add(1);
         let generation = self.notifications.toast_gen;
         self.notifications.toasts.push((text, color, generation));
@@ -82,7 +84,7 @@ impl Workspace {
     }
 
     /// トースト描画（右下スタック・M12-5）。
-    fn render_toasts(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_toasts(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.notifications.toasts.is_empty() {
             return None;
         }
