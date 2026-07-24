@@ -10,6 +10,7 @@ GPUI ベースの自作エディタ **Shirushi（しるし）**。ライセン�
 | **何を次に作るか（受入条件）** | `docs/ROADMAP.md` — `/goal` コマンドはこれを上から消化する |
 | **どう作るか（設計図）** | `docs/ARCHITECTURE.md` — crate 配置・依存方向・型契約・移植作法 |
 | **どう見せるか（UI仕様）** | `docs/UI-SPEC.md` — トークン表・色の許可リスト・領域別仕様・キー表 |
+| **何をどう呼ぶか（用語の正）** | `docs/GLOSSARY.md` — 機能・場所の正規名（code/日/英）と廃止語。UI 文字列/識別子はここに寄せる |
 | 直近の文脈・罠 | `docs/JOURNAL.md` — セッションごとの実装日誌 |
 | 経緯・ビジョン | `docs/BACKGROUND.md` |
 | 設計判断と根拠 | `docs/DECISIONS.md`（AGPL-3.0・ウィンドウモデル・i18n などの決定ログ含む） |

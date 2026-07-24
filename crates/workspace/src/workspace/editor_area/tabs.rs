@@ -206,10 +206,11 @@ impl Workspace {
         }
         // hot exit: タブを閉じる＝未保存編集の破棄（現仕様）なのでスナップショットも消す。
         if let Some(storage) = self.persistence.storage.clone() {
+            let scope = self.active_hot_exit_scope();
             let path = tab.path.clone();
             cx.background_executor()
                 .spawn(async move {
-                    let _ = storage.remove_hot_exit(&path);
+                    let _ = storage.remove_hot_exit(&scope, &path);
                 })
                 .detach();
         }

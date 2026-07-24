@@ -1,0 +1,33 @@
+# バグ報告フォーム。アプリ内「ヘルプ: バグを報告」/ クラッシュチップは ?title&body の
+# 事前記入 URL で plain issue を開く（このフォームは手動で /issues/new/choose から来た人用）。
+name: Bug report / バグ報告
+description: Something broke or crashed / 動作がおかしい・落ちた
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened / 何が起きたか
+      description: Also tell us what you expected to happen. / 期待した動作もあわせて。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / 再現手順
+      placeholder: |
+        1.
+        2.
+        3.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 環境
+      description: The in-app "Help: Report a Bug" command fills this automatically. / アプリ内「バグを報告」なら自動で入ります。
+      placeholder: "Shirushi v0.1.0 / macos aarch64 (macOS 15.x) / locale: ja"
+  - type: textarea
+    id: crash-log
+    attributes:
+      label: Crash log / クラッシュログ
+      description: If it crashed, paste the newest log from `~/Library/Application Support/Shirushi/crashes/`. / クラッシュした場合は crashes/ の最新ログを貼ってください。
+      render: text

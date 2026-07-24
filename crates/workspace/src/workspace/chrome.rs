@@ -66,6 +66,8 @@ impl Workspace {
             })
             .child(self.render_project_pill(cx))
             .child(div().flex_1().h_full()) // 空き＝ドラッグ領域（titlebar 全体で処理）
+            // Multi Agent（編隊）モードのトグル（右上・UI-SPEC §11）。通常 ⇄ 編隊ビューを切替。
+            .child(self.render_fleet_toggle(cx))
             // 実行中スレッドの beacon（窓上部から常に見える＝方向感覚の核・UI-SPEC §3）
             .child(self.render_beacons(cx))
             // リモート SSH で開く（M13・GUI 導線。~/.ssh/config のエイリアス/鍵/ProxyJump がそのまま効く）
@@ -96,6 +98,44 @@ impl Workspace {
             )
     }
 
+    /// Multi Agent（編隊）モードのトグル（titlebar 右上・M14）。ON で全画面が編隊ビュー
+    /// （herd + 系譜グラフ + N分割グリッド + ニュース）に。ON の間はプロジェクト色でハイライト。
+    pub(crate) fn render_fleet_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme.clone();
+        let on = self.chrome.fleet_mode;
+        let accent = self.accent();
+        div()
+            .id("titlebar-fleet")
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .h(px(24.))
+            .px(px(9.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(if on { accent } else { theme.border })
+            .when(on, |element| element.bg(accent.alpha(0.16)))
+            .text_color(if on { theme.fg0 } else { theme.fg2 })
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg2).text_color(theme.fg1))
+            .child(
+                svg()
+                    .path("icons/layout-grid.svg")
+                    .size(px(13.))
+                    .flex_none()
+                    .text_color(if on { accent } else { theme.fg2 }),
+            )
+            .child(div().text_size(px(11.)).child(i18n::t!("titlebar.fleet")))
+            .tooltip(Tooltip::text(i18n::t!("rail.fleet"), theme.clone()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.toggle_fleet_mode(&ToggleFleet, window, cx)
+                }),
+            )
+    }
+
     /// titlebar の beacon 列（アクティブプロジェクトのスレッド。実行中は色濃く・停止中は淡く）。
     pub(crate) fn render_beacons(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
@@ -105,17 +145,16 @@ impl Workspace {
             .items_center()
             .gap_3()
             .mr_2()
-            .children(beacons.into_iter().enumerate().map(|(index, (name, color, running))| {
-                let status = if running { i18n::t!("git.running") } else { i18n::t!("git.idle") };
-                let label = format!("{name} — {status}");
+            .children(beacons.into_iter().enumerate().map(|(index, (name, color, activity))| {
+                let label = format!("{name} — {}", activity_label(activity));
                 div()
                     .id(("beacon-item", index))
                     .flex()
                     .items_center()
                     .gap(px(5.))
                     .text_size(px(11.))
-                    .text_color(if running { theme.fg1 } else { theme.fg2 })
-                    .child(beacon_dot(("beacon", index), color, running))
+                    .text_color(if activity.is_signal() { theme.fg1 } else { theme.fg2 })
+                    .child(agent_panel::activity_dot(("beacon", index), 8.0, color, activity))
                     .child(name)
                     .tooltip(Tooltip::text(label, theme.clone()))
             }))
@@ -910,6 +949,91 @@ impl Workspace {
         self.terminal_dock.clone()
     }
 
+    /// フッター中央の**常設ロールアップ**（herdr の状態集約・#）。ウィンドウのレールに載る全プロジェクトの
+    /// スレッド状態を `RunningRegistry` から集計し「N 実行 · M 承認待ち · K 完了」を常時表示。最重要
+    /// （Blocked>Working>Done）の代表スレッドを状態ドット＋名前で出し、click で該当プロジェクト＋Agent へ。
+    /// ニュースティッカーではない（今どうなっているかの一覧性を優先）。0 件なら空スペーサー。
+    fn render_activity_rollup(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use agent_panel::ThreadActivity;
+        let theme = self.theme.clone();
+        let registry = cx.try_global::<agent_panel::RunningRegistry>();
+        let mut signals: Vec<(usize, SharedString, Hsla, ThreadActivity)> = Vec::new();
+        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
+            if let Some(rows) = registry.and_then(|reg| reg.0.get(slot.worktree.root())) {
+                for (name, color, activity) in rows {
+                    if activity.is_signal() {
+                        signals.push((index, name.clone(), *color, *activity));
+                    }
+                }
+            }
+        }
+        let container = div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h_full();
+        if signals.is_empty() {
+            return container.into_any_element(); // 空＝ただのスペーサー（従来と同じ）
+        }
+        let count = |want: ThreadActivity| {
+            signals
+                .iter()
+                .filter(|signal| std::mem::discriminant(&signal.3) == std::mem::discriminant(&want))
+                .count()
+        };
+        let blocked = count(ThreadActivity::Blocked);
+        let working = count(ThreadActivity::Working);
+        let done = count(ThreadActivity::Done { interrupted: false });
+        let mut segments: Vec<String> = Vec::new();
+        if blocked > 0 {
+            segments.push(i18n::t!("agent.rollup_blocked", "n" => blocked));
+        }
+        if working > 0 {
+            segments.push(i18n::t!("agent.rollup_working", "n" => working));
+        }
+        if done > 0 {
+            segments.push(i18n::t!("agent.rollup_done", "n" => done));
+        }
+        let summary = SharedString::from(segments.join("  ·  "));
+        // 最重要（Blocked>Working>Done）の代表。click でそのプロジェクト＋Agent パネルへ飛ぶ。
+        let rep = signals
+            .into_iter()
+            .max_by_key(|signal| signal.3.urgency());
+        container.child(
+            div()
+                .id("statusbar-activity-rollup")
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg2))
+                .when_some(rep, |element, (index, name, color, activity)| {
+                    element
+                        .child(agent_panel::activity_dot("rollup-rep", 8.0, color, activity))
+                        .child(div().text_color(theme.fg1).child(name))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.switch_project(index, window, cx);
+                                this.chrome.show_right = true;
+                                this.agent_active = true;
+                                cx.notify();
+                            }),
+                        )
+                })
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(summary),
+                ),
+        )
+        .into_any_element()
+    }
+
     pub(crate) fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         // Peacock 相当: statusbar をアクティブプロジェクト色で淡く塗る（窓ごと識別・M13）。
@@ -1052,6 +1176,25 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_3()
+            // 前回クラッシュの通知チップ（M13）: クリックでログ抜粋つきのバグ報告 Issue を開く。
+            // 色は theme.warn（診断 ▲ と同じ警告色 = 識別色は使わない）。
+            .when_some(self.notifications.crash_notice.clone(), |element, _log| {
+                element.child(
+                    div()
+                        .id("crash-chip")
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded(px(5.))
+                        .text_color(theme.warn)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg2))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.report_crash(cx)),
+                        )
+                        .child(SharedString::from(i18n::t!("crash.notice"))),
+                )
+            })
             // 自動アップデートのチップ（M13）: 新版あり → クリックで更新 → 再起動案内。
             .when_some(self.updater.status.clone(), |element, (info, state)| {
                 let (label, clickable) = match state {
@@ -1095,7 +1238,7 @@ impl Workspace {
             .text_size(px(11.))
             .text_color(theme.fg1)
             .child(left)
-            .child(div().flex_1())
+            .child(self.render_activity_rollup(cx)) // 中央＝状態の常設ロールアップ（herdr 本来の形）
             .child(right)
     }
 
@@ -1122,6 +1265,93 @@ impl Workspace {
                 let _ = workspace.update(cx, |workspace, cx| {
                     workspace.updater.status = Some((info, UpdateState::Available));
                     cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    // ── メニューバー連携（M13: 設定を開く / About） ──
+
+    /// ⌘, / メニュー「設定…」。rail の ⚙ トグルと違い、常に「開く」（メニューの意味論）。
+    pub(crate) fn open_settings_action(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {
+        self.chrome.show_settings = true;
+        self.chrome.settings_view.update(cx, |view, cx| view.refresh_availability(cx));
+        cx.notify();
+    }
+
+    /// メニュー「Shirushi について」。バージョン表記のトースト（About パネルの最小版）。
+    pub(crate) fn about_action(&mut self, _: &About, _window: &mut Window, cx: &mut Context<Self>) {
+        let accent = self.accent();
+        self.push_toast(
+            SharedString::from(format!("Shirushi v{} — AGPL-3.0 · shirushi.ai", env!("CARGO_PKG_VERSION"))),
+            accent,
+            cx,
+        );
+    }
+
+    // ── クラッシュ通知 + バグ報告（M13: panic hook → ログ → GitHub Issue） ──
+
+    /// 起動時に前回クラッシュの pending マーカーを 1 回だけ消費してチップを出す（背景）。
+    /// offscreen 撮影ではユーザーの実マーカーを消費しない（SHIRUSHI_CRASH_DIR 指定時のみ読む）。
+    pub(crate) fn check_crash_notice(&mut self, cx: &mut Context<Self>) {
+        // プローブ: チップ描画の offscreen 検証用（debug のみ・実ログ不要）。
+        #[cfg(debug_assertions)]
+        if std::env::var_os("SHIRUSHI_CRASH_PROBE").is_some() {
+            self.notifications.crash_notice =
+                Some(PathBuf::from("/tmp/shirushi-crash-probe.log"));
+            cx.notify();
+            return;
+        }
+        if cfg!(test)
+            || (std::env::var_os("SHIRUSHI_SCREENSHOT").is_some()
+                && std::env::var_os("SHIRUSHI_CRASH_DIR").is_none())
+        {
+            return;
+        }
+        cx.spawn(async move |workspace, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { crate::crash::take_pending_crash() })
+                .await;
+            if let Some(log_path) = found {
+                let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.notifications.crash_notice = Some(log_path);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// クラッシュチップのクリック: ログ抜粋つきのバグ報告 Issue を開き、チップを消す。
+    pub(crate) fn report_crash(&mut self, cx: &mut Context<Self>) {
+        let Some(log_path) = self.notifications.crash_notice.take() else {
+            return;
+        };
+        cx.notify();
+        self.open_bug_report(Some(log_path), cx);
+    }
+
+    /// ⌘⇧P「ヘルプ: バグを報告」: 環境情報だけ事前記入した Issue を開く。
+    pub(crate) fn report_bug_action(&mut self, _: &ReportBug, _window: &mut Window, cx: &mut Context<Self>) {
+        self.open_bug_report(None, cx);
+    }
+
+    /// new issue URL を組んでブラウザで開く（sw_vers・ログ読みがあるので背景で）。
+    fn open_bug_report(&mut self, crash_log: Option<PathBuf>, cx: &mut Context<Self>) {
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let url = crate::crash::bug_report_url(crash_log.as_deref());
+                    crate::crash::open_url(&url)
+                })
+                .await;
+            if let Err(error) = result {
+                let _ = workspace.update(cx, |workspace, cx| {
+                    let accent = workspace.accent();
+                    workspace.push_toast(SharedString::from(format!("{error:#}")), accent, cx);
                 });
             }
         })

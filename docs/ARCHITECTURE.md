@@ -8,7 +8,7 @@
 ```
 [shell]      shirushi(bin) ─ 結線・起動・メニュー
 [shell]      workspace ─ レール / chrome / active ProjectSession の合成・event routing
-[view]       editor_view / explorer / git_ui / search_ui / agent_panel / terminal_view / settings
+[view]       editor_view / explorer / git_ui / search_ui / agent_panel / terminal_view / settings / graph_view(M14)
 [model]      editor_core / project / acp_client / search / lang / storage
 [foundation] ui(部品+Registry) / theme_core / settings_core / keymap_core / i18n
 [外部]       gpui(path=zed/) / agent-client-protocol(crates.io) / ropey / alacritty_terminal
@@ -43,6 +43,7 @@
 | `search` | バッファ内 / ripgrep 横断 | zed `search` 参考 | M6 |
 | `lang` | tree-sitter ハイライト・LSP クライアント | zed `language`/`lsp` を削って移植 | M7 |
 | `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | zed `buffer_diff` / `terminal` 移植 | M8 |
+| `graph_view` | 系譜グラフ（worktree×commit の DAG・custom Element・4表示） | 新規（editor_view と同型・データは `project` の git log・webview 不使用） | M14 |
 
 移植の作法: ファイル冒頭に `// Ported from zed crates/<name> (GPL-3.0-or-later, 2026-07 時点のソース)`。
 collab / CRDT / テレメトリの経路は移植時に**落とす**。Remote SSH は 2026-07-13 に方針変更し、
@@ -114,6 +115,8 @@ VSCode の contribution points / Zed の初期化結線から学んだ形。**�
 - 同一リポジトリの別ブランチをレールに載せると identity 色が親と衝突する → `next_free_color` で未使用パレット色に倒し、同色スロット2枚を防ぐ
 - titlebar ピル: プロジェクト名（クリック→⌘O スイッチャー）+ ⎇ ブランチ（クリック→branch/worktree メニュー）
 - エージェントスレッドは (project, branch) に属する。titlebar beacon はアクティブ project 分、レールのドットが他 project 分を担う
+
+**Fleet モード（M14・UI-SPEC §11）**: 主単位は thread ではなく `TaskSpace`（1 task = 1 branch = 1 linked worktree = 1 `ProjectSession`）。各 Task cell は通常 View と同じ完全な `Entity<AgentPanel>` を埋め込み、同一 Task の複数 Agent は panel 内 thread として所有する。既定 `+ Task` は常に worktree を隔離し、main は protected `IntegrationSpace`。Task lifecycle / Agent runtime / Git health は別軸で、永続 event ledger、read-only merge preview、明示 integration gate を通す。詳細と clean-room 境界は [FLEET-ARCHITECTURE.md](FLEET-ARCHITECTURE.md)。
 
 ### 5.1 Workspace shell の責務
 

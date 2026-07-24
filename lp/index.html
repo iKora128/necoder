@@ -399,6 +399,35 @@
   .showcase .sc-txt .feature-list { margin-top: 18px; }
   .player-wide { max-width: 1000px; margin: 56px auto 0; }
 
+  /* ───────── fleet（編隊）───────── */
+  /* 系譜グラフのスイッチャー（アプリの実 UI を模す） */
+  .gsw { margin-top: 22px; }
+  .gsw-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+  .gsw-tabs button {
+    font-family: var(--mono); font-size: 13px; color: var(--fg1); cursor: pointer;
+    padding: 8px 15px; border-radius: 99px; border: 1px solid var(--border); background: var(--bg1);
+    transition: background .18s, border-color .18s, color .18s;
+  }
+  .gsw-tabs button:hover { background: var(--bg3); color: var(--fg0); }
+  .gsw-tabs button[aria-selected="true"] {
+    background: var(--bg3); color: var(--fg0);
+    border-color: color-mix(in srgb, var(--th-purple) 55%, var(--border));
+  }
+  .gsw-stage { margin-top: 18px; }
+  .gsw-img { display: none; width: 100%; height: auto; }
+  .gsw-img.on { display: block; }
+  .gsw-cap { margin-top: 14px; font-size: 14.5px; color: var(--fg1); }
+  .gsw-cap b { color: var(--fg0); font-weight: 600; }
+  /* 状態ドット（色でなく形で状態を示す・アプリの activity_dot と同じ思想） */
+  .sd-row { display: flex; gap: 20px; flex-wrap: wrap; margin: 18px 0 16px; }
+  .sd-item { display: inline-flex; align-items: center; gap: 9px; font-size: 13px; color: var(--fg1); font-family: var(--mono); }
+  .sdot { --c: var(--fg1); flex-shrink: 0; }
+  .sdot.work { width: 18px; height: 18px; border-radius: 50%; background: var(--c); }
+  .sdot.wait { width: 18px; height: 9px; overflow: hidden; }               /* 半円＝フル円を高さ半分で clip */
+  .sdot.wait::after { content: ""; display: block; width: 18px; height: 18px; border-radius: 50%; background: var(--c); }
+  .sdot.done { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--c); }
+  .sdot.idle { width: 18px; height: 18px; border-radius: 50%; background: var(--c); opacity: .32; }
+
   /* reveal */
   .rv { opacity: 0; transform: translateY(26px); transition: opacity .8s cubic-bezier(.2,.7,.2,1), transform .8s cubic-bezier(.2,.7,.2,1); }
   .rv.in { opacity: 1; transform: none; }
@@ -438,6 +467,7 @@
     <div class="nav-links">
       <a href="#iro">色</a>
       <a href="#ai">AI</a>
+      <a href="#fleet">編隊</a>
       <a href="#oudan">横断</a>
       <a href="#editor">エディタ</a>
       <a href="#mascot">マスコット</a>
@@ -585,6 +615,102 @@
           <svg class="cursor" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 2 L4 20 L9 15 L12.5 21.5 L15.5 20 L12 13.5 L18.5 13 Z" fill="#fff" stroke="#111" stroke-width="1.3" stroke-linejoin="round"/></svg>
           <span class="badge">Todo ボードを開く</span>
         </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 編隊 ═══════════ -->
+<section id="fleet">
+  <div class="wrap">
+    <div class="sec-head rv" style="--tag-c: var(--th-purple)">
+      <p class="tag">MULTI-AGENT FLEET</p>
+      <h2>並走が増えたら、編隊で指揮する。</h2>
+      <p class="sec-lead">
+        2 体、4 体、8 体 — エージェントが増えても迷わない。タイトルバーの <b>Multi Agent</b> で全画面が編隊モードになる。
+        <b>色で「誰か」、形で「何をしているか」</b>、系譜グラフで全体の流れが、目の端でわかる。
+      </p>
+    </div>
+
+    <div class="rv" style="margin-top: 56px">
+      <div class="shot"><img src="assets/img/fleet.png" alt="編隊モードの全景。左に色分けされたエージェント一覧、中央に系譜グラフ、下に N 分割のセルグリッド。" loading="lazy" width="1280" height="800"></div>
+      <p class="cap">
+        <span class="live">実機キャプチャ</span>
+        <span>左=エージェント一覧（色=識別）· 中央=系譜グラフ + N 分割グリッド</span>
+      </p>
+    </div>
+
+    <div class="rv" style="margin-top: 72px">
+      <h3 style="font-size: 22px; font-weight: 700">系譜グラフは、4 つの視点で。</h3>
+      <p style="margin-top: 12px; color: var(--fg1); font-size: 15px; max-width: 640px">
+        最重要ビジュアル。<b style="color: var(--fg0)">すべてネイティブ描画</b>（webview なし）。base から分岐し、完了は main へ統合。
+        レーンとノードは識別色、先端は状態の形。切り替えて、畳める。
+      </p>
+      <div class="gsw" data-gsw>
+        <div class="gsw-tabs" role="tablist" aria-label="系譜グラフの表示切替">
+          <button role="tab" aria-selected="true"  data-v="fan">扇形 Fan</button>
+          <button role="tab" aria-selected="false" data-v="tree">ツリー Tree</button>
+          <button role="tab" aria-selected="false" data-v="card">カード Card</button>
+          <button role="tab" aria-selected="false" data-v="hub">ハブ Hub</button>
+        </div>
+        <div class="gsw-stage">
+          <div class="shot">
+            <img class="gsw-img on" data-v="fan"  src="assets/demo/fleet-fan.png"  alt="扇形の系譜グラフ。main の幹から色付きの点線が放射状に各エージェントへ分岐。" loading="lazy">
+            <img class="gsw-img"    data-v="tree" src="assets/demo/fleet-tree.png" alt="縦ツリーの系譜グラフ。上の base から下へ枝分かれ。" loading="lazy">
+            <img class="gsw-img"    data-v="card" src="assets/demo/fleet-card.png" alt="カード型の系譜グラフ。左の main から曲線が右の読めるカードへ。" loading="lazy">
+            <img class="gsw-img"    data-v="hub"  src="assets/demo/fleet-hub.png"  alt="ハブ＆スポークの系譜グラフ。中央=リポジトリ、スポークが各エージェントへ。" loading="lazy">
+          </div>
+        </div>
+        <p class="gsw-cap" data-v="fan"><b>扇形</b> — base から放射状に分岐。並走の"広がり"が一目でわかる既定表示。</p>
+        <p class="gsw-cap" data-v="tree" hidden><b>縦ツリー</b> — 上から下への枝分かれ。分岐の"深さ"を辿るのに向く。</p>
+        <p class="gsw-cap" data-v="card" hidden><b>カード</b> — 曲線の先が読めるカードに。名前・状態・トークンまで一望。</p>
+        <p class="gsw-cap" data-v="hub" hidden><b>ハブ</b> — 中央=リポジトリ、スポークが各エージェントへ。歯車のように全体を俯瞰。</p>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card text-card rv">
+        <div class="body">
+          <span class="cap-badge">STATE = SHAPE</span>
+          <h3>状態は、色じゃなく形で。</h3>
+          <div class="sd-row">
+            <span class="sd-item"><span class="sdot work"></span>作業中</span>
+            <span class="sd-item"><span class="sdot wait"></span>承認待ち</span>
+            <span class="sd-item"><span class="sdot done"></span>完了</span>
+            <span class="sd-item"><span class="sdot idle"></span>待機</span>
+          </div>
+          <p>
+            状態に色相は使わない。● 作業 / ◐ 承認待ち / ✓ 完了 / ○ 待機 を<b>形と動き</b>で示す。
+            色は最後まで「誰か」の識別色のまま、状態と衝突しない。<b>承認待ちは半円</b>で、速く脈打つ。
+          </p>
+        </div>
+      </div>
+      <div class="card rv">
+        <div class="media"><img src="assets/img/fleet-add.png" alt="セル追加タイル。Agent（ここ）/ Agent + ⎇worktree（隔離）/ Terminal の 3 ボタン。" loading="lazy"></div>
+        <div class="body">
+          <span class="cap-badge">WORKTREE = SPACE</span>
+          <h3>＋Agent は、作業空間ごと。</h3>
+          <p>
+            ＋ から <b>Agent＋⎇worktree</b> を選べば、その場に隔離ブランチ
+            <code style="font-family: var(--mono); font-size: .9em">agent/N</code> を切り、独立した作業空間（space）ごとエージェントを起動。
+            worktree の生成はアプリが所有する。左レールに並び、切り替えれば端末・エディタごと追従する。
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="showcase flip">
+      <div class="rv">
+        <div class="shot"><img src="assets/img/fleet-max.png" alt="1 つのセルを最大化した画面。上に他セルのサムネイル列、中央に本物のトランスクリプト（コードブロック付き）。" loading="lazy" width="1280" height="800"></div>
+      </div>
+      <div class="sc-txt rv">
+        <h3>どのセルも、プレースホルダじゃない。</h3>
+        <p>エージェントセルは<b>本物のトランスクリプト</b>、ターミナルセルは<b>本物の端末</b>。編隊は別ビューではなく、同じ編集コアの上に立つ。</p>
+        <ul class="feature-list">
+          <li><span><b>⤢ 最大化</b> — 1 体に集中。系譜グラフが退き、他はサムネイル列へ畳まれる</span></li>
+          <li><span><b>色 = 識別を継承</b> — セルの上線・ドット・グラフのレーンまで同じスレッド色</span></li>
+          <li><span><b>最大 8 セル</b> — ＋ で自動レイアウト（4→2×2 / 6→3列 / 8→4列）</span></li>
+        </ul>
       </div>
     </div>
   </div>
@@ -828,6 +954,17 @@
     for (const e of entries) e.target.classList.toggle('run', e.isIntersecting);
   }, { threshold: 0.35 });
   document.querySelectorAll('[data-player]').forEach(el => playerIO.observe(el));
+
+  // 編隊: 系譜グラフの表示スイッチャー（扇形 / ツリー / カード / ハブ）
+  document.querySelectorAll('[data-gsw]').forEach(gsw => {
+    const tabs = gsw.querySelectorAll('.gsw-tabs button');
+    tabs.forEach(btn => btn.addEventListener('click', () => {
+      const v = btn.dataset.v;
+      tabs.forEach(b => b.setAttribute('aria-selected', String(b === btn)));
+      gsw.querySelectorAll('.gsw-img').forEach(im => im.classList.toggle('on', im.dataset.v === v));
+      gsw.querySelectorAll('.gsw-cap').forEach(c => { c.hidden = (c.dataset.v !== v); });
+    }));
+  });
 </script>
 </body>
 </html>

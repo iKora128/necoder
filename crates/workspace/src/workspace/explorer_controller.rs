@@ -282,10 +282,37 @@ impl Workspace {
         .detach();
     }
 
+    /// 「最近のプロジェクト」に記録する（「＋」統一オープンの「最近」用）。home（ブラウズ入口）は
+    /// 残さない。local と remote で別テーブル（remote の host key は display_name から復元し、
+    /// `connect_ssh_and_open` が記録するキー "user@host"/alias と一致させる）。
+    fn record_recent_project(&self, host: &dyn Host, path: &Path) {
+        let Some(storage) = self.persistence.storage.as_ref() else {
+            return;
+        };
+        let path_str = path.to_string_lossy().to_string();
+        if path_str.is_empty() || path_str == "/" {
+            return; // home/ブラウズ入口は「最近」に残さない（home≠プロジェクト）
+        }
+        let name = path
+            .file_name()
+            .map(|component| component.to_string_lossy().to_string())
+            .filter(|component| !component.is_empty())
+            .unwrap_or_else(|| path_str.clone());
+        if host.is_remote() {
+            let display = host.display_name();
+            let host_key = display.strip_prefix("SSH ").unwrap_or(display).replace(' ', "");
+            let _ = storage.record_remote_project(&host_key, &path_str, &name);
+        } else {
+            let _ = storage.record_local_project(&path_str, &name);
+        }
+    }
+
     /// フォルダをレールの新しいプロジェクト slot として足す（既にあれば切替のみ）。
-    /// ＋ ダイアログ経由: ローカルフォルダをレールへ追加（既にあれば切替のみ）。
+    /// ＋ ダイアログ経由: ローカルフォルダをレールへ追加（既にあれば切替のみ）。「最近」にも記録。
     pub(crate) fn add_project_slot(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.open_folder_in_rail(host::LocalHost::shared(), path, None, cx);
+        let host: Arc<dyn Host> = host::LocalHost::shared();
+        self.record_recent_project(host.as_ref(), &path);
+        self.open_folder_in_rail(host, path, None, cx);
     }
 
     /// フォルダを**このウィンドウのレール**に開く（既にあれば切替のみ）。新窓は作らない
@@ -314,16 +341,31 @@ impl Workspace {
             }
         };
         let identity = read_project_identity(worktree.root());
-        // identity 色があっても既にレールで使われていれば、未使用のパレット色へ倒す。
-        let color = match identity.0 {
+        let task_space_preview = TaskSpace::for_worktree(&worktree, branch.as_deref());
+        // 色モデル（2026-07-24 ユーザー確定）: **workspace（リポジトリ）で 1 色・スレッド（ACP）で 1 色**。
+        // Task worktree は親リポジトリの色を継承する（worktree ごとに色を変えない＝方向感覚を守る）。
+        let inherited = (!task_space_preview.is_integration())
+            .then(|| {
+                self.project_sessions
+                    .projects
+                    .iter()
+                    .find(|slot| {
+                        slot.task_space.repository_id == task_space_preview.repository_id
+                            && slot.task_space.is_integration()
+                    })
+                    .map(|slot| slot.color)
+            })
+            .flatten();
+        let color = inherited.unwrap_or(match identity.0 {
             Some(color) if !self.color_in_use(color) => color,
             _ => self.next_free_color(),
-        };
+        });
         let remote_host = worktree
             .host()
             .is_remote()
             .then(|| SharedString::from(worktree.host().display_name().to_string()));
         let mut slot = ProjectSlot {
+            task_space: task_space_preview,
             name: worktree.name().into(),
             branch: None,
             remote_host,
@@ -350,6 +392,7 @@ impl Workspace {
         } else {
             self.project_sessions.sessions.push(session);
         }
+        self.update_agent_destination_for(index, cx);
         // switch_project は window が要る（subscribe 経由に無い）ため、次の render で消化する。
         self.overlays.pending_project_switch = Some(index);
         cx.notify();
@@ -522,6 +565,27 @@ impl Workspace {
             None => ProjectSource::local(path),
         };
         self.open_source_as_window(source, cx);
+        self.hide_context_menu(cx);
+        cx.notify();
+    }
+
+    /// ディレクトリを**現在のウィンドウのレール**にプロジェクトとして開く（browse 中の「ここを開く」）。
+    /// remote の worktree から呼べば同じ SSH 接続を再利用（`host_for_project`・再接続なし）＝
+    /// home に繋いで → ツリーを辿って → このフォルダを開く、の最後の一歩。新窓は作らない
+    /// （新窓が要るなら「新しいウィンドウで開く」・open_folder_as_window との対）。「最近」にも記録。
+    pub(crate) fn open_dir_in_rail(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let host = match self.active_worktree() {
+            Some(worktree) => match worktree.host().host_for_project(&path) {
+                Ok(host) => host,
+                Err(error) => {
+                    self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
+                    return;
+                }
+            },
+            None => host::LocalHost::shared(),
+        };
+        self.record_recent_project(host.as_ref(), &path);
+        self.open_folder_in_rail(host, path, None, cx);
         self.hide_context_menu(cx);
         cx.notify();
     }

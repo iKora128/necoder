@@ -676,3 +676,284 @@
 - やったこと: ① `editor_area/mod.rs` → `editor_area.rs`（mod.rs 禁止規約に復帰）。② dev_probes の本番コード移設（SSH 一式→`remote_ssh.rs` 新設 / `on_terminal_dock_event`→panels.rs / `open_thread_history`→overlays.rs / updater 2 本→chrome.rs）＝ dev_probes は全 item cfg(debug_assertions) の `debug_*` のみに。③ **include! 24 ファイルを実モジュール化**: `src/workspace/` 配下の子モジュール 18 + editor_area 孫 7。鍵は (a) hub の import 束を `pub(crate) use` 化 → 子は `use crate::workspace::*;` 1 行、(b) **descendant 可視性**（子は親 hub の private 型に触れる）で hub 側の型変更ほぼ不要、(c) hub が `pub(crate) use 子::*` で共有型を再フラット化、(d) cross-module メソッドは一括 pub(crate)。B1〜B4 の 4 バッチ・各バッチ check+test green でコミット。④ notify 6.1.1 → **8.2.0**（API 互換・コード変更なし）。⑤ `session()`/`session_mut()` 明示アクセサ + project_watcher/project_switch を明示形へ。
 - 学び/罠: sed の一括 `pub(crate) fn` 化は **trait impl の fn に当たると E0449**（Deref×2・Render×1 を個別復旧）＝先に trait impl の位置を洗ってから。子→親は private でも見えるが、**親→子・兄弟→兄弟は pub(crate) が要る**＝「共有語彙型は hub に置く」が最小 churn。`private_interfaces` 警告（private 型が pub(crate) シグネチャに露出）は hub 型を pub(crate) に揃えて解消。include! 時代のファイルは rustfmt 未整形なので、mod 化直後の一括 fmt は diff 爆発する → 整形は別 PR に分離（今回はしない）。
 - 次: pub(crate) の絞り込みと残モジュールの session() 明示化は「触った機能から」。fmt 一括適用は独立コミットで判断。
+
+## 2026-07-20 — Agent タブ3件: 改名バグ / エージェントアイコン / herdr風 状態可視化（別セッション）
+- やったこと: ユーザー3件を消化。**①ダブルクリック改名バグ**: 根因はタブ同居の並べ替え `on_drag` の 2px 閾値がクリック合成を握り潰し `on_click` の `click_count==2` が発火しないこと + **List モードに改名配線が無い**こと。両モードとも判定を押下即発火の `on_mouse_down` の `event.click_count`（メソッドでなくフィールド）へ移し、List 行にも `renaming` 差替え描画を展開。**②タブにエージェントアイコン**: `settings.rs` private の `agent_brand` を **`acp_client::AgentKind` のフィールド**（`icon`/`brand_color`/`monogram`）へ昇格＝カタログが単一の出所（settings/agent_panel 両方が acp_client 依存で逆依存を作らない）。`agent_badge(label,size)` を `Thread.agent`（ラベル）→`by_label`→`brand()` で引き、タブ/List に描画（Claude=brand-claude.svg のテラコッタ sunburst が実機で出た）。**③herdr風 5状態**（**ACP ネイティブ＝ヒューリスティック不要**が肝）: `ThreadActivity{Idle,Working,Blocked,Done{interrupted}}` を新設し `render_meta` の導出を `Thread::activity()` に formalize（Blocked=`pending_permission`・これまで `running:bool` に埋もれていた「待ち」を分離）。Done は `done: Option<TurnEnd>` ラッチ（TurnEnded で立て・裏スレッドのみ・`switch_thread`/submit でクリア）。`acp_client` の `StopReason(_)` 破棄をやめ `AgentEvent::TurnEnded{reason:TurnEnd}` 化（Refusal/Cancelled=中断）。横断台帳 `RunningRegistry` のタプルと `beacons()` を `bool`→`ThreadActivity` に拡張。
+- 見せ方の決定（ユーザー確認）: **色は識別に集約（§1.3）を守り、状態は色相でなく「リング×動き」**。共有部品 `activity_dot`（Idle=淡静止 / Working=満脈動 / Done=リング静止・中断=中空 / Blocked=リング＋速い脈動）。フッターは**常設ロールアップ**（herdr 本来＝ニュースティッカーではない・中央スペーサーに「N 実行·M 承認待ち·K 完了」+代表スレッド・click で該当 project+Agent）。**レールの他プロジェクト状態ドット**（ARCHITECTURE §5 設計済みを実装・右上絶対配置・リモートバッジ右下と非衝突）。beacon/⌘O も状態化。表示範囲は「既存サーフェスに溶け込ませる」（専用パネルは作らない＝将来 `RunningRegistry` の上に安く足せる）。
+- 検証: 全 crate `cargo test --workspace` green（i18n parity 含む）・`cargo check -p shirushi` 警告0。offscreen 3枚を目視（`SHIRUSHI_ACTIVITY_PROBE` 新設で各状態注入）: **(a) Bar**=タブに Claude アイコン+3状態ドット・titlebar beacon 状態化・レール右上ドット・フッター「1 waiting·1 working·1 done」、**(b) List**=行に アイコン+状態ドット、**(c) rename**=List/Bar とも入力欄がアクセント枠で差替わる。**改名トリガの実挙動（実ダブルクリック→IME 入力→Enter/Esc）はユーザーの手番**（offscreen はクリック合成を再現できない）。
+- 学び/罠: **`MouseDownEvent.click_count` はフィールド**（`ClickEvent` はメソッド `click_count()`）。gpui のクリックは `on_drag` 同居 + 2px 移動 + `pending_mouse_down` クリアで合成が飛ぶ → 確実な二重クリックは `on_mouse_down` 側で見る。`ThreadActivity` は agent_panel に置き workspace が読む（workspace→agent_panel 依存は既存）。ブランドアイコンは Claude ロゴがそもそも sunburst＝「✳ っぽい」が実 svg（fallback の ✳ ではない）。offscreen は probe 2s 発火 → `SHIRUSHI_SCREENSHOT_DELAY_MS=3200` で撮る。DB ロック回避に `SHIRUSHI_DB=<一時>`。
+- 次: **人の手番**: ①実ダブルクリック改名（Bar/List・日本語 IME）②実 claude で送信→Working→（承認カード）Blocked→完了 Done の遷移が beacon/フッター/レールで一斉に動くか③中断（Cancel）で Done が注意表示か。**後続**: フッター左 `waiting_thread` ドットとロールアップの重複を整理するか（現状は左=アクティブの承認待ちアフォーダンス/中央=集計で併存）・⌘O やレールドットに状態形（今は色ドットのみ）を持たせるか・専用「全エージェント一覧」パネル（②案）を足すか。
+
+## 2026-07-20 — マルチエージェント編隊を設計（mock ＋ UI-SPEC §11 ＋ ROADMAP M14・実装は次）
+- やったこと: 「herdr を参考にした編隊モード」をユーザーと対話設計（実装はせず /goal に拾わせる前提）。①**mock 編隊モード**を新設（`mock/index.html`・`#fleet` で開く）: herd 状態サイドバー ＋ 系譜グラフ ＋ N セルグリッド ＋ ニュースフィード ＋ focus-follows。グラフは **4 表示（リバー既定・扇形・縦ツリー・カード）**をアイコン＋語スイッチャーで切替・⌄ で折り畳み。セル数 1..8 の自動レイアウト・＋タイルで Agent/Terminal/Editor 追加・× で閉じる。プロバイダバッジ（monogram・実機は `AgentKind.icon`）。②別セッションが同日入れた「**状態に色相を使わない**（色=識別・状態=形と動き）」決定に mock を**全整合**（herd グリフ・グラフ先端・approve カード・news を全部スレッド色化 ＋ `activity_dot` 相当の形/脈動へ。承認待ち=速い脈動リング）。③**herdr 記事を分析**（zenn・AIエージェント multiplexer）→ 検知/状態一覧/会話復元は ACP で既にカバー・**唯一の実質ギャップ = エージェントが編隊を操作する API（#3-4・`wait agent-status`）**と判断。④**UI-SPEC §11 編隊** ＋ **ROADMAP M14**（6 フェーズ）＋ **DECISIONS**（採否ログ）＋ **ARCHITECTURE**（`graph_view` crate・§5 編隊注記）を追記。M13-7「Grouped ビュー」は②モデル拡張で決着。
+- 学び/罠: **状態に色を足すと「色=識別」の掟が崩れる** — herdr の 🔴🟡🔵🟢 は不採用、状態は `activity_dot` の形と動きで（別セッションが同日 §1.3/§6/§8 に明文化＋実装済み。ACP ネイティブ＝ヒューリスティック不要）。**mock の CSS クラス衝突**: `.rail` がプロジェクトレール既存クラスと衝突 → スイムレーンの線が 46px ブロック化 ＝ 新クラスは既存 grep してから（`.lrail` に改名で解決）。**SVG の `transform-origin` 既定は svg 原点** → 脈動リングがズレる（`transform-box:fill-box; transform-origin:center` で解決）。ヘッドレス Chrome の連続起動はプロファイルロックで稀に 1 枚落ちる。
+- 次: **/goal で M14 を上から消化**（実装はユーザーが走らせる）。Phase 1 の ACP 状態基盤は 2026-07-20 別セッションで実装済み ＝ 残 = **herd サイドバー（状態一覧の常設パネル・`RunningRegistry` の上に）**。整合の残: mock 通常ビューの statusbar を中央ロールアップ表示へ（§3・任意）。
+
+## 2026-07-20 — M14 #1 herd サイドバー（状態一覧の常設パネル）
+- やったこと: M14 の 1 歩目。状態基盤（`ThreadActivity`/`activity_dot`/`RunningRegistry`・別セッション実装済み）を**左ドックの専用ボード**として常設。
+  - **`crates/workspace/src/workspace/herd_view.rs` 新設**（`mod herd_view;`）: `render_herd_sidebar` ＋ `toggle_herd_sidebar`。左カラムの排他チェーン（`show_herd` → todo → git → explorer）に最優先で差し込み。開閉は git パネルと同流儀（開くと他ボードを畳み `show_left=true`・閉じるとエディタへフォーカス復帰）。
+  - **プロジェクト別グループ**: `self.project_sessions.{projects,sessions}` を同添字で走査し、各 `ProjectSession.agent_panel.read(cx).statuses()` を集約（**非アクティブ project も含む**・read はメモリ参照のみ＝描画中に Host 呼ばない規約を守る）。行 = 左 2px スレッド色バー ＋ `activity_dot`（形と動き）＋ `agent_badge`（エージェント種別アイコン）＋ 名前 / `⎇ branch · 状態` ＋ トークン（`human_tokens`・0 は「—」）。ヘッダに実行中/承認待ち/完了ロールアップ、末尾に中立色（fg2）の 4 状態凡例（**形の説明**）。
+  - **クリック = focus-follows の入口**: 行クリックで `switch_project` → 当該 `agent_panel.focus_thread(index)` → Agent ドックを開く（M14 #3 で左ファイル/下ターミナル追従へ拡張予定）。
+  - **下段 = focus 中 worktree ツリー**（mock `.fleet-files`・当初先送り→**同セッションでやりきり**）: `render_tree(active_slot)` を再利用（git 色つき・行クリックで開く/展開も既存経路）＋ ヘッダ「● Files · <スレッド名>'s worktree」（`active_thread_name()`/`active_color()` 追加）。herd は explorer と**排他**なので herd ビュー中はここが唯一のファイルツリー＝重複しない。行クリックの `switch_project` でツリーがフォーカス追従する（＝現モデルでの focus-follows）。上下 2 段は 50/50（`flex_1`・flex-basis % は当 crate 未使用のため）。
+
+  - **agent_panel の公開 API 追加**: `AgentStatus`（name/color/activity/agent/tokens）＋ `statuses()`（`beacons()` のリッチ版）＋ `focus_thread()`。既存 `human_tokens`/`agent_badge` を `pub` 化（workspace から再利用）。`activity_label` を `pub(crate)` に。
+  - **導線**: レール ⚡ アイコン（新規 `icons/activity.svg` = Lucide activity・脈動＝状態の隠喩・main.rs へ AssetSource 登録）＋ `RailSettings.herd`（既定 on）＋ アクション `ToggleHerdSidebar` ＋ コマンドパレット「表示: 編隊」＋ `SHIRUSHI_HERD` プローブ。i18n: `herd.title`/`herd.empty`/`rail.herd`/`cmd.toggle_herd`（ja/en・parity green）。行状態は既存 `agent.state_*` を再利用。
+- 学び/罠: **左ドックの排他は「散らばったフラグ」パターン**（todo=Entity.open / git=Entity.open / herd=`chrome.show_herd` / explorer=フォールバック）。4 つ目を足すには開く側で他 3 を畳み、explorer のアクティブ色判定に `!show_herd` を足すのを忘れない（1 箇所でも漏れると 2 ボード同時アクティブ表示になる）。**`RunningRegistry` は他窓分も持つがリッチ情報（agent/branch/token）は無い**（(name,color,activity) のみ）→ herd の詳細はこの窓の `agent_panel` から引く設計に（他窓分はレールドット/⌘O/statusbar が担う既存分担のまま）。**グループ見出しに集約状態語を出すと誤解を生む**（初版「3 Waiting」＝ 1 件しか待っていないのに）→ 件数だけに。offscreen は `SHIRUSHI_HERD=1`＋`SHIRUSHI_ACTIVITY_PROBE=1`＋`SHIRUSHI_SCREENSHOT_DELAY_MS=2700`（probe 2s より後）＋一時 `SHIRUSHI_DB` で撮る。
+- 次: **M14 #3（編隊グリッド＋worktree 帰属・focus-follows の完全版）** — herd 行/セルのフォーカスで**左エクスプローラ/エディタタブ/下ターミナル**まで別 worktree へ張り替える（本項の herd 下段ツリーは現モデル＝アクティブ project 追従で先取り済み・#3 は別ブランチ dest への拡張）。その前提の**スレッド↔worktree 帰属モデル拡張**（M13-7 ②）が #3/#4 の土台。**残の軽い磨き**: herd 行のアクティブ強調（現在 focus 中スレッドの枠）・凡例に中断 Done（中空）を足すか・行に最終触りファイル名（mock の「— buffer.rs」）を出すか。**人の手番**: 実 claude 送信で Working→Blocked→Done が herd/beacon/statusbar で一斉に動くか、レール ⚡ クリックの開閉体感、下段ツリーの実クリックで開く。
+
+## 2026-07-20 — M14: herd を「worktree spaces 一覧」へ（ユーザー指摘 → ① 採用）
+- 経緯: #1 完了報告後、ユーザーが「herdr の**worktree を spaces として一覧**（worktree ごとに terminal 開かなくて済む）が良い、これは達成された？」と指摘。**#1 は達成していなかった** — herd は「プロジェクト別グループ」で、同一プロジェクトの全スレッドが同じブランチを共有＝worktree ごとに並んでいなかった（私はそれを「やり切った」と誤って報告していた。判断ミスを謝罪）。**方式を対話決定 = ①「worktree = 切替 space」**（worktree を同ウィンドウのレール/herd に space として並べ、切替でファイル/エディタ/**下ターミナル**が丸ごと追従。②スレッド帰属拡張は見送り）。
+- **大きな発見**: ①の**機構は既に存在**していた。`open_worktree_window`（⎇ メニューの worktree 行）は名前と裏腹に `open_folder_in_rail` を呼び、**worktree を新窓でなくこのウィンドウのレール slot（＝独立 `ProjectSession`＝独立 terminal/editor/explorer）として追加**し、`worktree_branch` も記録していた。`switch_project` で space 丸ごと切替＝ファイル/エディタ/下ターミナル（`self.terminal_dock` は active session を Deref）が追従。つまり「worktree ごとに terminal 開かなくて済む」は機構としては成立済み。**足りなかったのは herd がそれを「ブランチ = worktree」として見せていなかったこと**。
+- やったこと（legibility ＋ 正確さ）: ①**herd グループ見出しに ⎇ ブランチ**（`slot.branch` ∥ `worktree_branch`）を出し「プロジェクト一覧」→「**worktree space 一覧**」に読めるように。行の重複 ⎇ は落とし状態のみに（ブランチは space が持つ）。②**`refresh_all_git_status`** 新設 = 起動時に**全 slot**の現在ブランチを背景で埋める（従来 `refresh_git_status` は active のみ＝非アクティブ space のブランチが空だった）。
+- 検証（offscreen・**実 git worktree**で）: scratchpad に `git worktree add … -b feat/auth` → `shirushi(main)` と `shirushi-authwork(feat/auth)` の**2 worktree を2 space として起動** → herd に **`● shirushi ⎇ main` / `● shirushi-authwork ⎇ feat/auth`** の2グループ（レールも2色 slot）が出るのを目視。各 space は独立 `ProjectSession`＝独立ターミナル（構造保証・`terminal_dock` は per-session）。worktree は後始末（remove + branch -D、main 1本へ復帰）。`cargo test` 38 green・警告0。
+- 学び/罠: **「受入(項目)を満たす」と「ユーザーの目的を満たす」は別物**。#1 の受入「状態一覧が形と動きで左に出る」は満たしたが、ユーザーの目的（worktree spaces）は #3 側で、そこを見ずに「やり切った」と言ったのが失敗。`open_worktree_window` の命名が「window」で実体は「rail に追加」＝**名前に騙されず実体を追う**（危うく「新窓だから未達」と二重に誤診しかけた）。`refresh_git_status` が active-only なのは idle 0% のための設計だが、横断表示（herd/⌘O）には全 slot 版が要る。
+- 次: **#3 の残り** = (a) herd/レールから「**＋ worktree を space として開く**」導線（今は ⎇ メニュー経由のみ・mock fleet の ＋ タイル相当）、(b) **編隊グリッド**（複数 space を同時に並べる N セル・今は1 space ずつ切替）、(c) space 切替で下ターミナルが実際に別 cwd になる**可視デモ**（構造は保証済み・offscreen で2枚撮る）。**人の手番**: ⎇ メニュー→worktree を space 化→レール/herd 切替でファイル＋ターミナルが追従する体感。
+
+## 2026-07-21 — 編隊モードを実装（mock の「編隊」ビュー・ネイティブ系譜グラフ）
+- 経緯: ユーザーの真の要件が判明 — **mock の「編隊」ビュー（herdr 風＝herd + 系譜グラフ + N分割グリッド + ニュース）にモードで切り替えたい。今ない**。私は #1 で左 herd 板だけ作って的外れだった（要件取り違えを謝罪）。「graph rag／歯車っぽいグラフ」＝ mock の系譜グラフ（扇形）のこと。
+- やったこと: **編隊モード**（`chrome.fleet_mode` + レール ⚡ トグル〔`toggle_herd_sidebar`→`toggle_fleet_mode` に転用〕 + `ToggleFleet` アクション + コマンドパレット + `SHIRUSHI_FLEET` プローブ）。ON で root render が通常の center/right dock を `render_fleet` に置換: レール | herd サイドバー（既存 `render_herd_sidebar` 流用）| 中央（系譜グラフ + グリッド + ニュース）。**新モジュール `fleet_view.rs`**。
+  - **系譜グラフ（ネイティブ描画・最重要ビジュアル）**: `gpui::canvas` + `PathBuilder`（cubic bezier）で main 幹 + 各レーン（枝）を base から扇状に描く（スレッド色・Idle は破線 `dash_array`）。ノード（`activity_dot`）とラベルは overlay の絶対配置で重ね、canvas の px 座標と `relative(FRAC)` を揃えて一致させる。データは全 space × スレッド（`fleet_lanes`・上限 8）。
+  - グリッド = エージェント状態カード（色×状態×トークン・`agent_badge`・`relative(0.485)` の2列）。ニュース = 現在シグナルのティッカー。
+- 検証: offscreen（`SHIRUSHI_FLEET=1`+`SHIRUSHI_ACTIVITY_PROBE`）で **main 幹から青/琥珀/紫の3曲線が扇状に分岐 → rope設計(Working)/tab色分け(Waiting)/gpui起動(Done) のノードに着地**するのを目視。左 herd・グリッド・下 Activity・レール ⚡ 点灯も一致。`cargo test` 21 green（i18n parity 含む）・警告 0。
+- 学び/罠: **`Pixels.0` は private → `f32::from(pixels)`**。canvas の paint 座標は `bounds.origin` 基準・overlay は container 基準なので、canvas を `.absolute().top_0().left_0().size_full()` で container に重ねると px が一致。overlay の x は `relative(frac)`、canvas 側は `width*frac` で幅未知でも一致する。`PathBuilder::stroke().dash_array()` は Self を返す（`move_to`/`cubic_bezier_to` は `&mut self`）→ `let mut b = PathBuilder::stroke(..); if dashed { b = b.dash_array(..) }; b.move_to(..)`。
+- 次（編隊モードの残り）: (a) グラフ表示スイッチャー（リバー/縦ツリー/カード — 今は扇形のみ）(b) グラフのデータを `git log --all --parents` のレーン計算へ（今はスレッド由来＝全 main）(c) グリッドを実ペイン（Agent/Terminal/Editor の実体）に（今は状態カード）(d) ニュースを時系列イベントログに（`PanelEvent` 追記）(e) グラフノード click → focus-follows。**人の手番**: レール ⚡ で通常⇄編隊の切替体感・脈動・実 worktree で枝が別ブランチに分かれる様子。
+
+## 2026-07-21 — M13 remote SSH を Docker で「実環境ブロッカーごと」消化（別セッション・M14 とは非干渉）
+- 経緯: ユーザー「M13 やりきって（SSH 系）」+「リモート環境くらい Docker で立てられないのか」。ROADMAP の remote 残件は多くが「実環境必須」で棚上げされていたが、**Docker に sshd + git のコンテナを立てれば end-to-end がローカルで回る**と判明 → 検証ブロッカーごと消化した。M14（herd/fleet）は別 Agent が担当中のため `workspace.rs`/chrome/herd/fleet には触れず、変更は **host / settings / locales / main.rs / docs** に限定。
+- Docker ハーネス: `ubuntu:24.04`（arm64 native）+ openssh-server + git + サンプル git repo。テスト鍵と隔離 `ssh_config`/`known_hosts` は scratchpad（ユーザーの `~/.ssh` は汚さない）。
+- **配布**: `cargo-zigbuild`（pip の ziglang 同梱 zig をリンカに）で **aarch64-unknown-linux-musl** の `shirushi-remote-server` を建てた（**2.4MB static-pie ELF・15s**）。CI と同じ経路＝配布アーティファクトの実証も兼ねる。配備は `ensure_remote_server` が `~/.local/share/shirushi/remote/artifacts/<triple>/` から自動アップロード。
+- **host の変更**（`crates/host/src/host.rs`）:
+  - `ssh_command()` ヘルパ + **`SHIRUSHI_SSH_CONFIG`（`-F` 透過）** = ssh 呼び出し 4 箇所（start_master/ensure_master/command/Drop）を集約。CI/サンドボックスで ~/.ssh を汚さず remote テストを回す seam。
+  - `start_master` に **`ConnectTimeout=10`** = 死んだ/到達不能ホストの無限ハングを断つ（既定は OS の TCP タイムアウト任せ＝分単位。sleep/VPN 断の復帰性）。
+  - **checksum 検証** = 配備後に両端 `sha256sum`/`shasum` でハッシュ突合（crypto 依存を足さず CLI 委譲・不一致は bad binary を消して bail・`parse_sha256_hex` unit test）。
+  - **古い server cleanup** = `cleanup_old_servers`（`servers/` 直下の現行 version 以外を rm・容量肥大防止）。
+  - **構造化接続ログ** = `ssh_log` で `connect_ssh` の各フェーズを stderr へ所要 ms 付き（`[ssh dest] ControlMaster 確立 (63ms)` …）+ 各フェーズに `.context()`＝失敗時にどの段かがトーストの `{:#}` に出る。
+  - `RemoteHost::debug_stop_master`（`#[doc(hidden)]`・障害注入テスト用）。
+- **統合テスト**（新規 `crates/host/tests/remote_ssh_live.rs`・`SHIRUSHI_REMOTE_TEST_URI` 未設定なら skip＝CI 無害）: ①**CRUD/検索/command**（list/read_dir/read/write〔revision 一致更新 + stale 拒否〕/search TODO/uname）②**ControlMaster kill → 再接続回復** ③**server kill → 新 daemon + project 開き直しで回復** ④**巨大 tree**（5000 ファイル → `list_files(limit=500)` が **1.3ms** で打ち切り）⑤**benchmark**（round-trip read avg **0.352ms** / remote server 常駐 **RSS 6.5MB** / **idle CPU 0.00%**・localhost 予算で assert）。**全 5 green**。checksum/cleanup は「偽 `0.0.0-p0` を仕込む→再配備で消え現行だけ残る・remote/local sha256 完全一致」を Docker で実証。
+- **設定画面**（`crates/settings/src/settings.rs`・非SSH・M13「render_settings 完成」）: エージェント選択に **「動作とエディタ」セクション**を追加＝settings.json を唯一の真実に UI から直接操作（`set_user_value`→永続化 + observe_global 波及）。**トグル5**（submit_on_enter/soft_wrap/format_on_save/agent_auto_name/completion_sound・スライドスイッチ）+ **ステッパー2**（font_size 8–32 / tab_size 1–16）+ **セグメント**（agent_tabs_view）+ テーマ hint。i18n ja/en 追加（parity green）。**検証: offscreen で全コントロールが seed 値を正しく反映**（ON/OFF/16/2/List 選択）を目視（隔離 HOME + `SHIRUSHI_SETTINGS=1` + 新 env `SHIRUSHI_WINDOW_SIZE` で縦長パネル全体を撮影）。
+- ドリフト解消: SSH config ピッカー（2026-07-19）・最近のリモートプロジェクト履歴（2026-07-20）は既に done だったが ROADMAP は `[ ]` のままだった → チェック + 実績を追記。
+- 学び/罠: **`cargo run` は rustup 解決に実 HOME が要る** → HOME 差し替えのスクショは「先に実 HOME でビルド → ビルド済みバイナリを隔離 HOME で直接実行」。**pkill の out-of-band ssh は exit 255**（自分の ssh セッションも切るため）だが `|| true` + 目的（server kill）は達成＝テストの assert（再接続回復）が真。ヘッドレス Chrome ならぬ Docker sshd で「実環境必須」は多くが**近似 or 実証可能**（sleep/VPN 断だけは実マシン）。同マシンで別プロジェクトの `cargo-tauri tauri dev`（apps/desktop）が並走しビルドが CPU 競合で遅くなる場面あり＝他プロジェクトの cargo は殺さない。
+- 残（**honest**・GUI/session 層の深い機能で今回は未実装。ただし「実環境必須」の検証ブロッカーは Docker ハーネスで解消済み）: **remote hot exit（未保存 remote バッファの crash backup・reconnect-on-restore が要る）** / **remote watch push（protocol Event frame 配線 + daemon inotify + subscription/cancel）** / **再接続後の LSP/PTY handle 再同期** / retry-cancel ボタン・port forwarding / GUI askpass（鍵運用なら不要寄り）。総合受入「remote Linux で一日運用」は実マシン長時間が前提。
+- 次: 上記 remote 深堀り 3 件（hot exit/watch/handle 再同期）は `remote_ssh_live.rs` の土台の上に載せられる。実 GitHub Release での自動更新 E2E は初回リリース時。
+
+## 2026-07-21 —（続き）編隊: ヘッダートグル + 「増やせる」グリッド（＋/×・自動レイアウト）
+- ユーザー指摘（3点）: ①グリッドで「増やせない」（mock には ＋ で Agent/Terminal/Editor を最大8追加がある）②「mock 作りきってるのに実装が空」③入口はレール ⚡ でなく **titlebar 右上に「Multi Agent mode」**。全部対応。
+- やったこと:
+  - **入口を titlebar 右上へ**: `render_fleet_toggle`（`layout-grid` アイコン + "Multi Agent" ラベル・ON でプロジェクト色ハイライト・`i18n titlebar.multi_agent`）。レールの ⚡ は廃止（前回の「⚡ が見当たらない」も解消）。
+  - **編隊グリッドを対話化**（mock `.acell`・M14 #3）: `chrome.fleet_cells: Vec<FleetPane{Agent(lane)|Terminal|Editor}>`。**＋ タイルで Agent/Terminal/Editor を追加・× で閉じる**（上限 8）。列数はセル数で自動（1→1 / 2→2 / 3→3 / 4→2×2 / 5-6→3列 / 7-8→4列）。初回（起動プローブ含む）は lanes で自動配置（`seed_fleet_cells`）。Agent セルはクリックで `switch_project`+`focus_thread`（focus-follows 入口）。セル上線 = 帰属色（Agent=スレッド色 / Terminal・Editor=中立 fg2＝§1.3）。
+- 検証: offscreen（`SHIRUSHI_FLEET=1`+`SHIRUSHI_ACTIVITY_PROBE`）で **titlebar 右上 "Multi Agent" トグル点灯 + 3 Agent セル（各 × 付き・上線がスレッド色）+ ＋タイル（Agent/Terminal/Editor + "Add a panel (max 8)"）が 2×2 自動レイアウト**を目視。`cargo test` 21 green・警告0。
+- 学び/罠: **ElementId タプルは `(&str, usize)`**（`i32` 不可 → id インデックスは `0usize` 等）。gpui の border 色は全辺共通 → セル上線は先頭子 `div().h(px(2.)).bg(color)` で表現（`border_t_2()` + `border_color()` は全辺を上書きしてしまう）。`border_dashed()` は存在（styled.rs）。
+- 次（編隊グリッドの残り）: Terminal/Editor セルに**実ペイン**（`terminal_dock`/editor の実体）を埋める・Agent セルに transcript 数行・フォーカス強調・グラフ表示スイッチャー（リバー/縦ツリー/カード）。**人の手番**: 実機で ＋→セル追加→× で減る→列数が変わる体感。
+
+## 2026-07-21 —（続き・/loop 自走）編隊の作り込み: 4 グラフ表示 / 実端末 / フル画面セル / Editor 削除
+- ユーザー指摘（/loop で「最後までやれ」）: ①Editor セルは不要 ②Terminal のプレースホルダは不可＝実体化 ③配置が小さい＝フル画面を使え・セル大きく ④色味/状態管理 ⑤＋ を見た目良く ⑥グラフ4表示（扇形/リバー/ツリー/カード）を全実装 + ON/OFF。全部対応。
+- やったこと（`fleet_view.rs` 大改修）:
+  - **系譜グラフ 4 表示をネイティブ実装 + スイッチャー**（`GraphView{Fan,River,Tree,Card}` + `graph_collapsed`）。ヘッダに 4 ボタン（扇形/リバー/ツリー/カード）+ ⌄ 折り畳み。`graph_layout()` が view 別にノード（割合座標）と枝（cubic bezier 制御点）を生成 → 共通 canvas paint + overlay。**Fan**=base から扇状 / **River**=同形で太帯（5.5px）/ **Tree**=main 上・枝が下へ扇 / **Card**=base 左・曲線で右のノードへ + 幹を HEAD まで。`SHIRUSHI_GRAPH=river|tree|card` で初期表示指定（撮影用）。
+  - **Editor セル削除**（`FleetPane{Agent|Terminal}` の 2 種に）。
+  - **Terminal セルに実端末を埋め込み**（`self.terminal_dock.clone()` を flex_1 で・プレースホルダではない）。offscreen で `⎇ main zsh` ヘッダ + 実端末ウィジェットを確認。
+  - **フル画面セル**: グリッドを「行×列の flex」に（各セル `flex_1` で幅・高さとも均等に伸びる・列数はセル数で自動）。従来の固定 148px から画面全体を使う大セルへ。
+  - **Agent セルに実 transcript**: `agent_panel::transcript_lines(thread_index, 6)`（▸user/✳thinking/⏺step/⟲checkpoint）を追加し、セル本文にスクロール表示（本物の会話・rope設計 が ropey/sum-tree の検討を表示）。
+  - **＋ タイル磨き**: 円形 ＋ + Agent/Terminal ボタン + 「パネルを追加（最大 8）」。
+- 検証: offscreen で **Fan/River/Tree/Card の 4 表示**（スイッチャー点灯）・**実端末セル**・**フル画面の大セル + 実 transcript** を目視。`cargo test` 30 green・警告 0。
+- 学び/罠: canvas を割合座標（0..1）で統一すると 4 view を 1 つの paint で描ける（overlay は `relative(frac)`+`px(yf*body_h)` で一致）。`gpui::canvas` の `Styled` で `.absolute().size_full()` 可。同一 `terminal_dock` Entity を編隊セルに描くのは通常ビューの下ドックが非表示なので競合しない。
+- 次: グラフのデータを `git log --all --parents` の実レーンへ（今はスレッド由来＝全 main・worktree を切れば別ブランチ枝に）・複数 Terminal セルの独立端末化・完了ノードの main 統合アニメ。
+
+## 2026-07-21 —（続き）編隊: ＋Agent の複製バグ修正（herdr 式=新エージェント）+ セル拡大表示
+- ユーザー指摘: ①「＋Agent で tab色分けがどんどん複製される」＝バグ（モックではない）②「herdr をよく調べてほぼ同じ挙動に」③「あるセルを拡大＝他は小さく避ける・拡大中は系譜グラフを消してそこに出す」。
+- 原因（①）: `FleetPane::Agent(lane_index)` が**既存レーンの添字**を指し、スレッドが 3 本しかないので 4 個目以降が既存を複製していた。
+- 直したこと:
+  - **`FleetPane::Agent { space, thread }`（安定参照）**へ変更（レーンの並び替え/追加で添字がズレない）。ルックアップは `lanes.iter().find(space,thread)`。
+  - **＋Agent = 新しいエージェントを起動**（herdr 式）: `agent_panel::new_thread_index()` を追加し、アクティブ space に**新スレッドを作って**セルを足す（複製ではない）。offscreen で `SHIRUSHI_FLEET_ADD=2` → **スレッド4/スレッド5 が新規に増える**（tab色分け の複製でない）ことを実証（herd/グラフ/グリッド/beacon すべて 5 本に）。
+  - **セル拡大表示**（ユーザー案どおり）: 各セル頭に ⤢（maximize.svg）/ ⤡（minimize.svg）。拡大中は **`fleet_maximized: Option<usize>`** で ①**系譜グラフを隠し**②拡大セルをそこに大きく出し③**他セルは上のサムネイル列**（クリックで拡大先を切替・アクティブは accent 枠）へ「避ける」。閉じ/範囲外は自動解除。`SHIRUSHI_FLEET_MAX=i` で撮影。offscreen で rope設計 を拡大＝全 transcript が大画面 + 上に 3 サムネイルを実証。
+- herdr 整合（クリーンルーム・記事/挙動から）: 「エージェント＝各セッション（worktree/スレッド）、＋で新エージェント、状態一覧、切替」。今回 ＋Agent を新エージェント化してこの中核挙動に一致。worktree ごとの space は既存（M14 #3 の①）。
+- 検証: `cargo test`（実行中）・警告0（my crates）。offscreen 2 枚（＋Agent 複製なし / 拡大表示）を目視。
+- 次: ＋Agent 起動時に worktree も切る選択（herdr の worktree=space に寄せる）・拡大中のサムネイルに状態ドット追加・複数 Terminal の独立端末。
+
+## 2026-07-21 — M13 remote SSH の深掘り3機能（remote watch push / hot exit host-scoped / handle 再同期・別セッション続き）
+- 経緯: 前段（Docker で remote 受入・障害注入・checksum/cleanup/benchmark を消化）に続き、ユーザー「GUI/session 層の深い3機能もしっかり」。M14（herd/fleet）は別 Agent が並行編集中のため、変更は **host / project / storage / main.rs** 中心に置き、workspace は `project_watcher.rs`（remote skip 撤去）と `editor_area/hot_exit.rs`・`tabs.rs`（scope 配線）のみ。途中 M14 の `fleet_view.rs:584`（`i18n::t!` 構文ミス）で workspace が一時ビルド不能 → 触らず待ち、直った後に自分の変更を確認（＝並行編集の作法どおり）。
+- **① remote watch push**（最重要・protocol 変更）: `PROTOCOL_VERSION 1→2`。protocol に `Request::Watch/Unwatch` + `WatchEvent`（`FrameKind::Event` の meta）。**daemon**: `serve_stream_with_state` の接続スコープに watch マネージャ thread — 無 watch 時は `recv()` で完全ブロック（idle 0%）、使用中のみ 700ms で `watch_snapshot`（ignore 走査で mtime/len map）→ `watch_diff` → Event frame を**共有 writer** へ push。proxy は**バイト透過**（`io::copy`）なので Event はそのまま client へ流れる。**client**: `RpcClient` reader が `matches!(kind, Event)` を `WatchEventSink` へ demux（id ルーティングと分離）。sink は `ReconnectingClient` が Arc で保持＝**RpcClient を再接続で差し替えても購読が生き続ける**。`RemoteHost::watch()`→`HostWatch`（recv_timeout）、keeper thread が `generation`（再接続で ++）の変化を見て**自動再購読**（`send_watch` は scoped_request 経由で daemon 再起動の project_id 再マップも吸収）。**workspace**: `project::watch_root` を `(host, root, on_paths)` に host 対応化（`Watch` を enum 化: Local=notify / Remote=pump スレッドが HostWatch 所有・drop で stop）。remote は相対→絶対化して既存 pump へ流す＝`handle_watch_events`（host 非依存）をそのまま流用。`project_watcher.rs` の `if is_remote { return }` を撤去。**live 実証**: out-of-band 編集→`["README.md"]` 通知 / ControlMaster kill→再接続→再購読→`["docs/notes.md"]` 通知。
+- **② remote hot exit（host-scoped）**: storage `hot_exit` に **`scope` 列**（PK=(scope,path)）+ 旧スキーマからの作り直しマイグレーション（`SELECT scope` の成否で検知・transient なので安全）。`save/remove_hot_exit(scope, path, ...)`・`load_hot_exit_all()→(scope,path,content)`。workspace: `active_hot_exit_scope()`（host.id()）で snapshot/close を scope 付き保存、restore は**アクティブ host の scope に一致する候補だけ**適用（local と remote の同一絶対パスの取り違え＝データ破壊を防ぐ）。**unit test: 同一パス×別 scope が別レコード・片方消しても他方残る**。
+- **③ LSP/PTY handle 再同期**: `spawn_process`/`terminal_launch` は元から `ensure_master` を呼ぶ＝再接続後の再 spawn は成立していた。`HostProcess::is_alive()`（`child.try_wait()`）を追加＝consumer が死を検知して再 spawn する土台。**live 実証: spawn(echo;sleep)→stdout 受領→ControlMaster kill→再 spawn で stdio が通る**。
+- テスト: `remote_ssh_live.rs` に watch×2 + process 再spawn を追加＝**実 SSH live 8本 green**（CRUD/ControlMaster kill/server kill/巨大tree/bench/watch×2/process）。storage 9・host unit 8・workspace/shirushi ビルド green。
+- 学び/罠: **daemon の writer は元から `Arc<Mutex<&mut>>` 共有**＝watcher thread から Event push が自然に載る（設計の勝ち）。**proxy がバイト透過**なので Event frame 用の proxy 変更ゼロ。**event sink は ReconnectingClient に置く**のが肝（RpcClient に置くと再接続で購読が切れる）。keeper の再購読は `generation` 監視で「再接続が起きた時だけ」＝poll 毎の baseline リセット spam を避ける。`Arc<Self>` receiver の trait メソッド（`fn watch(self: Arc<Self>)`）は object-safe＝`Arc<dyn Host>` から呼べる。**PROTOCOL_VERSION を上げると socket path と install dir が変わり p1/p2 が自然分離**（旧 daemon と衝突しない・cleanup で旧 server 消える）。並行 M14 のビルド破損は「待って触らない」。
+- 残（honest・consumer/GUI 層）: LSP の死亡→自動再 initialize（didOpen 再送）・terminal の自動再起動・remote 未保存の**起動時 reconnect 復元**（scope 衝突は解消済み＝あとは「起動時に該当 remote へ自動再接続して書き戻す」フロー）。いずれも今回の host 土台（watch/is_alive/scope）の上に載る。
+
+## 2026-07-21 —（続き）編隊: ＋Agent に worktree 選択（ハイブリッド B ＋ 設定で A 化）+ herd 追従の穴修正
+- ユーザー議論の決着: 「＋Agent 起動時に worktree を切るか」を **③ハイブリッド = 自分で選ぶ**、その上で **B（明示オプトイン）＋ 設定で A 化**（既定=素の ＋Agent は同 space・設定 on で常に worktree）を採用（「ハイお願いします！」）。worktree 生成は **ACP エージェントに切らせず、アプリが所有**（herdr 式の worktree=space に寄せつつ、どのエージェントでも成立させる）。
+- やったこと:
+  - **＋タイルを 3 ボタン化**: `Agent（ここ）` / `Agent＋⎇worktree（隔離）` / `Terminal`（`fleet.add_agent`/`add_agent_worktree` i18n・ja/en parity）。
+  - **`add_worktree_agent`**: アクティブ worktree の親に `git worktree add <repo>-agent-<n>`（branch `agent/<n>`・既存 space のブランチ集合と衝突しない番号）を **background_executor で作成** → `open_folder_in_rail(host, target, Some(branch))` で **space（`ProjectSession`）として開き** → その space の `agent_panel.new_thread_index()` で**新エージェント起動** → セル追加。失敗はトースト（`{error:#}`・`push_toast`）。既存機構（`project::add_worktree_on` / `open_folder_in_rail`）の再利用＝移植なし。
+  - **設定 `fleet_agent_worktree`（既定 off）**: on で **素の ＋Agent（`add_fleet_agent_default`）も worktree を切る**＝herdr 純度 A に寄せられる（`settings::get(cx).fleet_agent_worktree` を見て分岐）。`settings_core` に bool 追加・`settings.json` 唯一の真実。
+  - **穴①「Fleet 列タップで無反応（× で消すと戻せない）」修正**: 編隊モードでは herd 行クリック = `reveal_agent_in_fleet(space, thread)` = **該当エージェントのセルが無ければ追加し、あれば最大化**（通常モードは従来どおり `switch_project`+`focus_thread`+`show_right`）。閉じたセルもここから復帰可。
+  - **穴②「新規エージェントの ー 表示」修正**: トークン 0 のセルも `0/200k` メーター表示（旧 `—`）。
+- 検証: host.rs（M13 remote-watch の並行 WIP）が `handle_request` の `Request::Watch/Unwatch` 非網羅で一時ビルド不能 → **触らずユーザーに修正を委ね**、直った後にビルド。`cargo build -p shirushi --features screenshot` green（8.9s・警告0）。**offscreen（`SHIRUSHI_FLEET=1 SHIRUSHI_FLEET_ADD=2`）で目視**: titlebar「Multi Agent」点灯・**＋タイル 3 ボタン（Agent（ここ）/Agent＋⎇worktree/Terminal・max 8）**・＋Agent が **スレッド4/5 を新規生成（複製なし）**・全セル `0/200k` メーター・Fan グラフ ＋ 5 ノード・rope設計 セルに実 transcript・左 Fleet 一覧 ＋「スレッド5's worktree」フォーカスツリー。`cargo test -p i18n -p workspace -p agent_panel` green（workspace 15 / i18n parity 5 ＋ doctest 1 / 0 failed）。
+- 学び/罠: worktree 生成は **同期 API を `cx.background_executor().spawn` に逃がして UI をブロックしない**（`add_worktree_on` は fs/git を叩く）。`open_folder_in_rail` は名前に反して**新窓でなく現ウィンドウのレールに space 追加**＝そのまま編隊 space の追加口に使える（`open_worktree_window` は誤称）。**並行編集中の他 crate（host.rs）が壊れても自分の crate は触らず待つ**の作法をまた実践（前回の `fleet_view.rs:584` 破損の逆の立場）。
+- 次: worktree エージェント完了時の `main` への merge 導線（#3-4 の「完了を待って merge」）・拡大中サムネイルに状態ドット・系譜グラフを `git log --all --parents` の実レーンへ（worktree を切ったので**別ブランチ枝**が出せる素地ができた）。
+
+## 2026-07-22 — 編隊: 承認待ち＝半円（mock ◐ 準拠）+ herd 行からエージェント削除
+- ユーザー指摘: ①「waiting を半円にして」②「セル（スレッド）を作って × 押しても左のリストから消えない＝どう消す？」③「Fleet って書き方合ってる？この波アイコンも意味不明（看板みたい）」。①②を実装、③は下記の判断待ち。
+- ① **承認待ち（Blocked）= 半円**（`activity_dot`）: mock `index.html:622` が `glyph 形 = ● 作業 / ◐ 承認待ち / ✓ 完了 / ○ 待機` と定義済み＝**実装がモックに追従**。状態を「色」でなく「形」で見せる原則（§1.3）に、Blocked が今までリング（Done と枠が同形で紛らわしい）だったのを**独立の形**に。**罠**: 高さ=直径/2・上角を半径 直径/2 で丸める素朴な実装は、7px（凡例）で角丸半径が高さでクランプされ**横カプセル（▬）に潰れる**。→ **フル円を高さ半分の箱で `overflow_hidden` clip** して上半分＝ドームにする方式へ（どの径でもくっきり半円）。offscreen で凡例 4 状態（満/半円/リング/淡）を 4 倍拡大目視。`activity_dot` は全所（タブ/List/beacon/レール/フッター/⌘O/herd/グラフノード/セル上線）共用なので一括で半円化＝一貫。
+- ② **herd 行からエージェント削除**: 「セルの × ＝グリッド表示から外すだけ（エージェントは生存）」と「エージェント自体の削除」を分離。**左 herd 一覧の各行にホバー × を追加**＝これが本当の削除（herdr の「エージェントを閉じる」）。`agent_panel::close_thread(index)`（アーカイブ＋`remove_thread`・`close_active_thread` もこれを呼ぶ形に集約）を公開し、workspace `close_agent(space, thread)` が呼ぶ。**罠（重要）**: `fleet_cells` は**絶対 thread 添字**を持つので、スレッド削除で `threads.remove` が 1 つ詰まる → 削除後に ①該当セルを落とし ②同 space の thread>削除位置 のセルを 1 つデクリメント（前回の「Agent(lane_index) 複製バグ」と同じ添字ズレの罠）。アーカイブなので ⌘⇧T で復元可。ホバー × は agent_panel タブと同じ `group("herd-row")`+`group_hover(..visible())` パターン・`cx.stop_propagation()` で行本体（reveal/switch）へ伝播させない。offscreen で ×（一時常時表示）が各行右端に出るのを目視 → ホバー限定に戻す。
+- ③ **「Fleet」見出し＋波アイコンを削除（ユーザー選定＝モック準拠）**: mock の herd パネルには「Fleet」見出しも波アイコン（`activity.svg`）も**無い**（`.ghead`＝プロジェクト群見出しに直行）＝あの見出しは実装の過剰追加だった。加えて語彙も不整合（titlebar トグル ja「編隊」/en「Multi Agent」・左パネル ja「編隊」/en「Fleet」＝ja で二重・en で不一致）。→ `render_herd_sidebar` の見出し（総計計算＋`header` div）を撤去し、パネルは**群見出しから直開始**。モード名はタイトルバー「Multi Agent」トグル、稼働数ロールアップは下ステータスバー中央が既に担うので情報損失なし。未使用になった i18n `herd.title` を ja/en 両方から除去（parity 維持）。`activity.svg` の登録（main.rs）は無害な死アセットとして残置（並行編集中の main.rs は触らない）。offscreen で「● AltProject 2」群見出しから直行するのを目視。
+- 検証: `cargo build -p shirushi --features screenshot` green（警告0）。`cargo test -p i18n -p workspace -p agent_panel` green（agent_panel 9 / workspace 15 / i18n parity 5 ＋ doctest 1 / 0 failed）。
+- 学び/罠: gpui の角丸は**小径で min 寸法にクランプ**＝ドーム/半円は clip で作る（角丸ではなく）。`overflow_hidden` は子を矩形 scissor で切る＝フル円の上半分＝きれいなドーム。`fleet_cells` の絶対添字はスレッド増減のたびに補正が要る（追加＝新添字・削除＝後続デクリメント）。**「mock に無い＝作らない」**を徹底（見出しは実装が勝手に足したもの＝ユーザーの違和感が正しかった）。
+- 次: 拡大中サムネイルに状態ドット。系譜グラフを実 git レーンへ。完了エージェントの main merge 導線（#3-4）。
+
+## 2026-07-22 — M13 ベータ前の信頼性: panic hook→バグ報告導線 + editor_core ファズ + データ完全性
+- やったこと:
+  - **panic hook + クラッシュログ + バグ報告導線**（`workspace::crash` 新設・ROADMAP M13 に記録）: main() 冒頭で hook → `crashes/crash-<unix秒>-<pid>.log`（backtrace 付き・20 本保持）+ `pending` マーカー → 次回起動で 1 回だけ statusbar ⚠ チップ（`theme.warn`）→ クリックで GitHub new issue（環境+ログ抜粋を事前記入・自動送信なし = telemetry never 維持）。⌘⇧P「ヘルプ: バグを報告」（`ReportBug`）と `.github/ISSUE_TEMPLATE/bug_report.yml` も。**実 E2E 検証** = `SHIRUSHI_PANIC_PROBE` で背景スレッドを panic → ログ生成 → 再起動チップを offscreen 目視 → マーカー 1 回消費まで確認
+  - **editor_core ランダム操作ファズ**（`tests/random_edits.rs`・依存ゼロ SplitMix64）: 厳密系（insert/delete/undo/redo × 参照実装 String+状態スタックと毎手突合）+ 全部系（18 操作乱打 × 大域不変条件）。`SHIRUSHI_FUZZ_SEED/ITERS` で再現・強化。**初回実行で実バグ 1 件検出** → `move_lines`/`duplicate_lines`/`indent_lines` の手動選択シフトを `set_selections`（クランプ）経由に修正
+  - **データ完全性テスト**: prepare/write 間競合・削除後 reload・save_as の競合束縛を追加、既存 round-trip に自己保存の `disk_probably_unchanged`=true と 2 周目保存を追記。**保存意味論を 1 点改善** = 外部削除は競合にせず ⌘S で作り直し（作業救出・`write_file_local` 一箇所 = local/remote 共通・VSCode 同挙動）
+- 学び/罠:
+  - **ファズは書いた直後に元が取れる**: 全部系の初回実行で選択シフト系の boundary バグを即検出（multi-cursor × マルチバイト × 行操作の交差 = 手書きテストでは書かない組合せ）。失敗メッセージにシードを埋めておくと再現が 1 コマンドになる
+  - ファズの「redo 全進め = 最終文」は**ウォークが undo で終わると偽陽性**（redo スタックに未来が残る）→ undo した回数だけ redo する
+  - テスト追加前に**既存テストの重複チェック**（今回 prepare/complete round-trip・reload 系が既存にあり、temp_path のタグ衝突で並列実行が踏み合う事故も）。同タグの temp ファイルは pid が同じ = 衝突する
+  - `WriteCondition::Matches` の削除判定は「読めない」でひとまとめだった → `path.exists()` で「消えた（作り直し可）」と「読めない（判定不能 = 拒否）」を分ける
+- 次: RELEASE-CHECKLIST.md（ROADMAP の「人の手番」21 箇所の回収リスト）→ ドッグフーディング週間 → v0.0.1 タグ（repo public 化 + Apple secrets が前提・前セッションの整理どおり）
+
+## 2026-07-22 — 編隊: 履歴からの会話復元 + 開始/最終入力時刻の常時表示（ユーザー要望 2 件）
+- 要望: ①セル/エージェントを消せるようになった今、Agent パネル同様に**履歴（セッション管理）で前の会話を復元**できるべき ②**いつスタートして最終いつ入力したか**をサクッと見たい（multimode で）。
+- ① 履歴復元を編隊に配線: ＋タイルに「**履歴から復元**」ボタン（既存 ThreadHistory Picker をそのまま開く — overlay は編隊モードでも root render の最前面に乗る構造だったので追加コストほぼゼロ）。`agent_panel::open_thread_from_history` が**開いた thread index を返す**ようにし、編隊モード中の確定は `reveal_agent_in_fleet(active space, index)` で**復元した会話をセルとして前面（拡大）に出す**（通常モードは従来どおり右ドック）。herd 行 × の削除はアーカイブなので、履歴（·閉 表示）からいつでも戻せる＝セッション管理が閉じた。
+- ② 時刻: `Thread.created_at_ms / last_input_at_ms`（送信時に更新）を新設し `AgentStatus` → `FleetLane` へ露出。**DB 往復はスキーマ変更なし** — `threads.created_at` と `MAX(turns.created_at WHERE role='user')` のサブクエリで導出（`load_threads` / `load_all_threads` に列追加・末尾追加なので既存タプル添字は不変）。表示 3 箇所: 編隊セル状態行の右肩「開始 6分前 · 入力 5分前」/ herd 行は幅が狭いので**最新の 1 つ**（入力があれば入力・なければ開始）＋ホバー tooltip で両方 / 履歴 Picker の detail。整形は `agent_panel::relative_time_label`（i18n `time.*`）。
+- 鮮度: 相対時刻は描画時評価なので、編隊/herd 表示中だけ回る **30 秒時計**（`ensure_fleet_clock`・両モード閉じたら次 tick で自停止＝idle 0% 予算を守る。多重起動は `chrome.fleet_clock` ガード）。
+- 検証: storage round-trip テスト拡張（created_at>0・user turn の有無で last_input Some/None）・i18n parity 含む全対象 crate green・警告 0。offscreen 3 枚目視（en/ja/`SHIRUSHI_HISTORY_PROBE`）: セル右肩の時刻・herd 行「実行中 · 開始 6分前」・＋タイル 4 ボタン・Picker detail「Σ 23.4k / started 5m」。**再起動往復も実証**: probe DB の 2 回目起動で「started 4m ago」が DB から復元された。
+- 学び/罠: herd 行の 2 行目に**両時刻を並べると en で確実に溢れる**（"Working · started 2h ago · last input 5m ago"）→ 行は最新 1 つ＋tooltip に逃がし、en の相対語も「4m ago→4m」へ短縮（ja「4分前」は元々短い）。種スレッドは**メタのみ永続**（mock 会話は turns に書かない既存設計）なので復元後の last_input=None は正しい挙動。`fetch_add(1)` を 0 と書き間違える凡ミスをリファクタ中にやった（id 連番が全部 0 になる）— 抽出リファクタでも定数は目視確認。
+- 残/人の手番: グリッド満杯（8 セル）時は履歴から復元してもセルは出ない（スレッドは開くので herd 行から reveal 可・toast 通知は未）。実クリックで「履歴から復元」→ 拡大表示・herd 行ホバーの tooltip・30 秒での時刻更新の体感。
+
+## 2026-07-23 — 「＋」統一オープン + リモート browse-first（現レールに開く）
+
+- 経緯: ユーザー「＋ で履歴/ファイルを選べるように・remote は新フォルダをどう開く・**プロジェクトでない接続は単なるファイルブラウザーで開いて『ここで開く』させたい**（cd 連打→開き直しを消す）」。承認済み mock（Artifact）を実装しきる方針。
+- やったこと:
+  - **「＋」統一オープン**（`PickerMode::OpenLauncher`）: 狭い popover に履歴を詰めず、⌘O と同じ広い `.palette` に **固定アクション（フォルダ/ファイル/リモート）＋ 最近（local + remote を opened_at 降順でマージ・上位 20）** を 1 枚で。最近行は **●識別色 ＋ 実行中スレッドのドット**（色による方向感覚）、リモートは `host:path` で識別。⏎ = 現レールに開く。`storage` に **`local_projects`**（path PK・`record_local_project`/`recent_local_projects`/`forget_recent_project` + round-trip test）を新設し remote 側 `remote_projects` と混ぜる。「＋」は従来のローカル native ダイアログ限定から統一ランチャーへ（tooltip `rail.add_tip` も更新）。
+  - **リモート接続の既定を「現レールに開く」へ**: `connect_ssh_and_open` の成功を `open_source_as_window`（新窓）→ **`open_folder_in_rail`（現ウィンドウのレール・SSH 接続を再利用）** に。ユーザー要件「勝手に窓を開かない」。新窓は explorer 右クリック「新しいウィンドウで開く」で明示。
+  - **remote browse-first**: home（path 未指定）接続は「ブラウズ入口」＝履歴に残さず、接続後に **hint toast**（`ssh.browse_hint`）「フォルダを右クリック→『ここをプロジェクトとして開く』」。explorer のフォルダ右クリックに **「ここをプロジェクトとして開く」（`open_dir_in_rail`）** を新設 = 現レールに再ルート・`host_for_project` で**同じ SSH 接続を再利用（再接続なし）**。= home に繋ぐ→ツリーを辿る→このフォルダを開く、の最後の一歩。local/remote の「開いた」を `record_recent_project`（remote host key は display_name から復元し `connect_ssh_and_open` の記録キーと一致）で最近に記録。
+- 学び/罠: **別セッション（ユーザー手動 or 別 Agent）が同じ launcher を同時にライブ実装**していて衝突した。私と相手が**互いに自分の `open_launcher` を削除**（相手の版が残ると仮定）＝一時ビルド不能、メソッド名も私の 2 回の読み取りの数秒間に `open_file_via_dialog`→`open_file_from_launcher` へ変化。**収束点 = 私の `open_launcher`（●/ドット付き）＋ 相手の `open_file_from_launcher`/dispatch/＋配線 ＋ 私の storage 土台**。教訓どおり「編集直前 re-read・exact match」で着地したが、**ライブ churn を検知したら盲目編集を止めユーザーに分担を確認**するのが正解（duplicate method は soft でなく hard conflict）。`open_folder_in_rail` は M14 の `fleet_view` も呼ぶのでシグネチャは変えず、browse は struct フラグでなく hint toast で非侵襲に。
+- 検証: `storage` 11 / `workspace` 21 test green・i18n parity（ja/en 322 = 322・diff 0）・`cargo check` 警告 0。**残/人の手番**: ライブの「＋→最近→現レールに開く」体感・Docker 実 SSH での「home 接続→右クリック『ここで開く』→接続再利用でレールに出る」実地・mock 反映。
+
+## 2026-07-23 — M13 macOS ネイティブメニューバー（メニュー非連動の解消）
+- やったこと:
+  - **メニューバー全体を実装**（ROADMAP M13 に記録）: `shirushi/src/menus.rs`（Zed と同じ bin crate 置き場）に 8 メニュー（Shirushi/File/Edit/View/Go/AI/Window/Help・計 84 項目）+ Dock メニュー。全部**既存アクションの参照**で、keymap/パレットと同じ dispatch 系＝キー表記も gpui が keymap から自動付与。Cut/Copy/Paste/Undo/Redo/SelectAll は `OsAction` 対応付き
+  - **新設アクション 7 + バインド 4**: `OpenSettings`（⌘,）/ `About` / `Hide`（⌘H）/ `HideOthers`（⌥⌘H）/ `ShowAll` / `Minimize`（⌘M）/ `Zoom`。handlers は workspace root の on_action 鎖（cx は App へ deref するので cx.hide() 系がそのまま呼べる・Minimize/Zoom は window メソッド）
+  - i18n `menu.*` 72 キーを ja/en 両方に（parity green）。ユーザー keymap live reload 時に `set_menus` を呼び直してキー表記を追従
+- 学び/罠:
+  - **メニューバーは offscreen スクショに写らない**（OS 側の描画・render_to_image はウィンドウのみ）。screencapture / AppleScript(System Events) はこのセッション文脈では画面収録・補助アクセス権限で不可 → **`cx.get_menus()` 読み戻しが機械的証拠になる**（gpui_macos の set_menus は `setMainMenu_` と同時に owned copy を保持）。`SHIRUSHI_MENU_PROBE=1` として恒久化
+  - `cx.set_menus` は**呼び出し時点の keymap スナップショット**でキー等価を解決 → 既定+ユーザー keymap の bind より後に呼ぶ・live reload 後は再設定が要る
+  - gpui の git rev（5f8a741）はプラットフォーム実装が `gpui_macos`/`gpui_platform` に分離済み（ローカル zed/ クローンとはレイアウトが違う）— API 調査は `~/.cargo/git/checkouts/` の実 rev を見るのが確実
+  - 新設アクションの dispatch 検証は**パレット実駆動**（SHIRUSHI_PALETTE_PROBE + CONFIRM）が使える＝メニュークリックと同じ `dispatch_action` 経路
+- 次: 実メニューのクリック一巡（人の手番・1 分）。RELEASE-CHECKLIST.md → ドッグフーディング → v0.0.1
+
+## 2026-07-23 — 承認待ちマスコット 2 種（祈る / 頬に手）を生成 → agent panel に配線（M14・別セッションの mascot 続き）
+- 経緯: 編隊モードに猫が居ない → 「各セルに猫は散る」ので不採用、代わりに**承認待ちの気分マスコット**を作る流れ。既存 4 モーション（打鍵/考える/バンザイ/うとうと）に無い「承認待ち」用を、確立パイプライン（基準絵 `gpt/01-neko.png` → Higgsfield `kling3_0` image→video・start=end ループ → `video_to_sprite.py` 共通窓切り出し＋K=32量子化＋透過 → 60×72 strip）で追加。
+- **モーション設計の学び（ユーザー FB）**: 初回「微動作の worried squint」は**他の座りモーションと被る**と却下 → **万歳級の大きな動き**へ。さらに Higgsfield は別アカウント接続で残高 97→1186 に増えたので、被らない 4 種（頭を抱える/PC覗き込み/祈る/いやいや）を各 2 テイク生成して見比べ。**PC覗き込み・祈るは座り姿勢に近く地味／頭を抱える・いやいや・頬に手はダイナミック**。
+- **採用＝2 種（ユーザー選定）**: **祈る（plead・手を組んで頼む）** ＋ **頬に手（worry・あわあわ）**。頬に手は初回テイクに上端アーティファクトが出たので、プロンプトに「手は頬の高さまで・上端に余白・浮遊物なし」を足して 4 テイク作り直し→クリーンな 1 本（D）を採用。
+- **配線（`crates/agent_panel/src/agent_panel.rs`）**: `MascotMotion::{Plead,Worry}` 追加 ＋ `render_mascot` に `plead/worry-strip.png` の anim/frame0 アーム。`PendingPermission` に **`since: Instant`** を足し、motion 決定を **承認待ち（`pending_permission.is_some()`）→ 祈る、`since.elapsed() >= 15s` → 頬に手であわあわ**の段階変化へ（`render_meta` は active 中アニメで毎フレーム再評価されるので閾値跨ぎで自然切替）。status 行も Blocked 時「承認待ち」表示に（従来は誤って「待機中」）。**検証 env `SHIRUSHI_MASCOT=plead|worry|…`**（`cfg!(debug_assertions)` ゲート＝release 未評価）でモーション固定してスクショ可。
+- 検証: `cargo build -p shirushi --features screenshot` green（警告0）。`cargo test -p agent_panel -p i18n` green（9 / parity 5+1）。offscreen で agent panel のマスコットが崩れず描画（承認待ちの**半円ドット◐**も thread list に出る）。**罠: オフスクリーンは window 非アクティブ＝`frame0`(rest ポーズ)固定**＝祈る/頬に手の中割り（見せ場）は静止スクショに写らない → gif（アーティファクト公開済み）と実機で確認。
+- 素材: strip 2 本 ＋ ソース `mock/mascot/neko-anim/{video/{worry,plead}.mp4, vid-worry, vid-plead}`。プレビュー artifact 3 枚（編隊ムード / バリエ5案 / 頬に手クリーン4案）。
+- 次: 編隊の集約"気分"1 匹（Activity 隅・誰か承認待ち→祈る/長引き→頬に手）＋ maximized セル内の 1 体表示（今回の panel 配線が土台）。名前（necoder/shirushi）は保留中でも nyaco は残す方針。
+
+## 2026-07-23 — 管制 P0: 縫い目の一本化（TaskPhase 単一定義・遷移コードパス統一）
+- やったこと（`FLEET-CONTROL-PLAN.md` P0 完了・UI 変更なし）:
+  - **`TaskPhase`/`SpaceKind` を storage crate へ単一定義**（10 phase・`ALL`/`as_str`/厳密 `from_str`）。`fleet.rs::PHASES`（文字列配列）と `workspace::TaskPhase`（11 値 enum）の二重定義を解消。workspace は `pub use storage::{SpaceKind, TaskPhase}` の再輸出（子モジュールは `use crate::workspace::*` なので無修正で追従）
+  - **Integration を phase から分離**: `TaskSpace`/`TaskSpaceRecord` に `kind: SpaceKind` を追加し `phase` は Task lifecycle 専用に。DB は phase 列に `integration` sentinel を書く互換表現（migration 不要・storage 内に封じ、`parse_phase_column` で復元）
+  - **遷移の唯一の入口 `Storage::commit_task_transition`**: snapshot upsert + `task_events` への `phase_changed` 追記を同一 transaction で行い、IntegrationSpace の遷移は ensure で拒否。GUI `transition_task_space`（payload source="gui"）と CLI/MCP `update_task`（source="orchestration_api"）の両方がここを通る＝受入条件「同一コードパス」達成。旧 `transition_task`（UPDATE のみ・upsert と別 job）は廃止
+  - 境界の文字列 parse は `fleet::parse_phase`（不正値は有効値一覧つきエラー）に集約。MCP の `fleet_update_task`/`fleet_wait_task` inputSchema に `"enum"` として `TaskPhase::ALL` を埋め込み（エージェントが正しい値を選べる）
+  - 検証: `cargo check` 警告 0・storage 11 / workspace 21 / shirushi 2 test 全 green（storage テストに Integration 拒否 + sentinel 復元の 2 ケース追加）。CLI 実地: scratch repo で `fleet create`→`status working`→不正 phase 拒否 を確認
+- 学び/罠:
+  - `cargo run --manifest-path` を**リポジトリ外の cwd から叩くと rustup がその cwd でツールチェインを解決**し、rust-toolchain.toml（1.95.0）が効かず gpui_util の `slice_as_array` で落ちる。リポジトリ内から実行するのが正
+  - restore 時の真実の分担を明文化: **lifecycle（phase）は台帳が正・kind は worktree の現実（branch が task/ か）が正**。台帳の kind を盲信すると branch 付け替え後に鮮度が逆転する
+- 次: P1 遷移スナップショット Tier 1（digest・LLM なし）— `Thread.digest` + `AgentStatus` 拡張 + herd 行/編隊セルへの表示
+
+## 2026-07-23 — 管制 P1: 遷移スナップショット Tier 1（digest・LLM なし）
+- やったこと（`FLEET-CONTROL-PLAN.md` P1 完了）:
+  - **`Thread.digest`**: 状態遷移時のみ更新する決定論スナップショット。素材の優先順位は計画どおり — ① Blocked=`PermissionRequest.title`（承認カード表示と同時に記録）② Done=最終 `Entry::Agent` の末尾 1〜2 文（`digest_tail`・素材なしターンは直前値を保持）③ Failed=エラー文（`fail_turn` と `AgentEvent::Failed` の両経路）
+  - **`digest_tail`（純関数）**: 最終段落 → 文区切り（。．!?！？ + 「. 」）→ 末尾 2 文 → 空白畳み → 140 字超は先頭 … 切り。パス中の `.`（src/main.rs）で切らない。単体テスト 5 ケース
+  - **Working はライブ素材** `live_digest()`: 最新 `Entry::Step` のツール説明 + plan の in_progress 項目を「tool · step」で合成。保存せず `statuses()` で毎回組む＝「今なにをしているか」が常に生きた値
+  - **表示**: herd 行の sub を digest に差し替え（無ければ従来の「状態 · 時刻」・時刻はツールチップに退避済み）。編隊 Task セルはヘッダ直下に digest 帯 + `plan_meter`（▰▰▰▱▱ 3/5・色相を使わず文字グリフ＝規律どおり）
+  - **永続化**: `PanelEvent::TurnEnded{digest}` / `PermissionWaiting{title}` を追加 → `transition_task_space(…, digest)` が task_events の payload に digest を載せる。TurnEnded の `result_summary` は digest を優先（従来の「経過秒 · N files」は fallback）＝ review_ready 遷移時に確定値が record へ載る
+  - 検証: 全 test green（agent_panel 10 / workspace 21 / storage 11）。offscreen（`SHIRUSHI_HERD=1 SHIRUSHI_ACTIVITY_PROBE=1`）で 3 状態の digest が herd 行に出るのを目視。probe（`debug_set_activities`）にも digest 素材を仕込んで実経路と同じ見え方を再現可能にした
+- 学び/罠:
+  - digest は**遷移時に書く**のが肝（poll しない・Working だけはライブ合成でコストゼロ）。`statuses()` は描画パスから呼ばれるのでメモリ参照のみを厳守
+  - herd の sub 行は幅が狭い＝digest は 1 行 nowrap + overflow_hidden で自然に切れる。全文はセル/カード側で読む設計（P3 の管制キューが本席）
+- 次: P2 ニュース常設（task_events ソースの時系列フィード・下ドック・ミュート）
+
+## 2026-07-23 — 管制 P2: ニュース常設（task_events の鏡・ミュート・通知音の非フォーカス限定）
+- やったこと（`FLEET-CONTROL-PLAN.md` P2 完了 = ROADMAP M14「ニュースフィード ＋ 通知の細部」）:
+  - **ニュース = 台帳の鏡**という一本化: `NotificationCenter.news`（上限 100・新しい順）へ、`transition_task_space` が task_events へ書くのと**同じ場所**で 1 行積む（`news_text_for_phase` 写像: Blocked→「承認待ち — 内容」/ Failed→「失敗 — detail」/ 他→「→ phase — digest」）。起動時は新設 `Storage::load_recent_task_events(60)` で backfill（閉じた Task は中立色チップ＝不明に色を発明しない）。イベント種別語彙 `NewsKind { PhaseChange, Permission, Digest, Integration, Coordinator }` — **監督（P6）の采配も同じログに載る**前提を先に確保
+  - **フィード UI**: 編隊下ドックの旧「動き」ストリップ（lane 現在値の横並び）を、mock `fleet-dashboard.html` 下段の時系列フィードへ置換（h118・col-head「ニュース」+ hint・行 = 相対時刻 + 7px 角丸チップ（coordinator は丸）+ 太字名 + イベント文・スクロール・30 行上限表示）
+  - **エージェント別ミュート**: `Thread.muted` + `toggle_thread_mute` + herd 行の 🔔（ホバー）/🔕（muted 中常時表示）。muted 中はトースト・完了音を抑止、**ニュースには載る**（見えるが鳴らない）。`PanelEvent::{TurnEnded,TurnFailed,PermissionWaiting}` に muted を載せ workspace 側でトースト分岐
+  - **通知音は window 非アクティブ時のみ**: `AgentPanel.window_active` を render で更新（GPUI は activation 変化で再描画するので追従）し、完了音の条件に `!window_active` を追加（見ている画面に音は要らない）
+  - 検証: 全 test green（i18n parity 含む）。offscreen（FLEET+ACTIVITY_PROBE・probe に `news_text_for_phase` 経由のデモ行を追加）で「承認待ち/review_ready/failed/working」4 行が時系列で下フィードに出るのを目視
+- 学び/罠:
+  - ニュースの時刻は mock の絶対 HH:MM でなく**アプリ既存の相対時刻**（`relative_time_label`・30 秒 fleet clock で更新・i18n 済み）を採用。ローカル TZ の HH:MM は std だけでは組めず、フィードの鮮度感には相対の方が合う。mock 側をあとで寄せるか要ユーザー判断
+  - GUI 外（CLI/MCP）の遷移は live には映らない（DB を watch しない設計・poll 禁止）— 再起動 backfill では映る。GUI 起動中の CLI 遷移の反映は P5 の IPC（fleet_events）で解消する
+- 次: P3 管制タブ（`FleetCenterView { Control, Graph }`・mock/fleet-dashboard.html 本体・要対応キュー + 稼働カード + 統合パイプライン + ⏎）
+
+## 2026-07-23 — 管制 P3: 管制タブ本体（編隊統括ダッシュボード・mock 準拠）
+- やったこと（`FLEET-CONTROL-PLAN.md` P3 完了・新規 `crates/workspace/src/workspace/control_view.rs`）:
+  - **中央タブ 2 面**: `FleetCenterView { Graph, Control }` + タブ帯（管制/グラフ）。既定 Graph（計画どおり・ドッグフーディング後に再判断）。`ToggleControl`（パレット「表示: 管制」）・`SHIRUSHI_CONTROL=1` で管制起動
+  - **6 部構成**（mock/fleet-dashboard.html の書式に一致・全て render 内 memory 読みのみ）: ヘッダ（stat チップ ◐要対応は >0 で err ボーダー・Σトークン+メーター）/ 監督バー（`fleet_mood_mascot` 集約気分 1 匹 = render_mascot をサイズ可変化 `render_mascot_sized`・anim id は tag 名前空間化で panel の 1 匹と共存。総括は**事実文**＝✳ は Tier2 の印なのでまだ出さない）/ 要対応キュー（Blocked 経過順→Failed→Review→Done 未確認）/ 稼働カード / 統合パイプライン 7 列 / ニュース（P2 常設をそのまま下段に）
+  - **インライン操作が主役**: 許可/常に許可/拒否 = `AgentPanel::respond_permission(thread, option)`（既存 `answer_permission` を任意スレッド化・同一の一本道）+ 応答直後に台帳を Working へ（turn end が最終確定）。Radar=`review_task_for_merge` / `Integrate`=`integrate_task` / **確認 = `mark_done_seen`（Done→Idle の確認済み遷移・P3 の新設・herdr の done/idle 区別の採用）** / 破棄=Archived。カード本体クリック / ⏎ = 没入（`reveal_agent_in_fleet` + Graph 面へ）
+  - **⏎ キー**: keymap に `FleetControl` context（enter → `workspace::ControlNext`）。`ChromeState.control_focus` を管制 root が track_focus し、開いた時/クリックでフォーカス
+  - **受入プローブ** `SHIRUSHI_CONTROL_PROBE=1`: 5 擬似 TaskSpace（Working/Blocked 45s/MergeReady/Failed/Planned）を現 root の worktree 共有で合成（SpaceId は probe 専用・storage は渡さない＝**Git/DB に一切書かない**）。panel 側は `debug_set_state`（plan 3/5・実行中ツール・承認カード 3 択・digest）
+  - 検証: offscreen で mock 同等の 1 画面を目視（キュー 3 カードのボタン列・稼働カードの「Bash(cargo test…) · テスト修正 ▰▰▱▱▱ 2/5 · 42.1k · 12m」・パイプラインのチップ配置・ニュース連動・herd/レールも 6 project で整合）。全 test green（keymap 4 セクション化・i18n parity 含む）
+- 学び/罠:
+  - YAML の値に「: 」を含む日本語（`目標: 未設定`）は**必ず引用符**（i18n parity テストが即検出してくれた）
+  - `.id()` 後の Div は `Stateful<Div>` — ボタンビルダーの戻り型注釈に注意
+  - keymap の既定にセクションを足したら `parses_sections_and_bindings` の位置 assert を必ず追従（4 セクション目 = 全域）
+  - GPUI の `with_animation` id はグローバル衝突しうる＝同じ部品を 2 箇所で使うなら id を tag で名前空間化（マスコット panel/管制）
+- 次: P4（Tier 2 ✳ 要約 = oneshot 1 行・監督バー総括のデバウンス生成）→ P5 fleet API 拡張（spawn 断絶解消・IPC）
+
+## 2026-07-23 — 管制 P4: Tier 2（✳ 1 行要約）+ 監督バー総括のデバウンス生成
+- やったこと（`FLEET-CONTROL-PLAN.md` P4 完了）:
+  - **`project::oneshot_line_on` 切り出し**: `name_thread_on` の共通実体（テンプレ埋め・一時ファイル・fence 剥がし・先頭非空行・clamp）を汎用化し、スレッド命名と Tier 2 要約が同じ機構を共有。プロンプトは sh -c 二重引用符埋めなので**引用符/$/バッククォート禁止**の約束をドキュメント化
+  - **タスクレベル ✳**（`maybe_tier2_summary`）: turn_finished（Done/Failed）で最後の指示 + 最終応答末尾 1200 字を素材に oneshot → `Thread.tier2` + `PanelEvent::SummaryReady` → workspace が task_events（kind `tier2`）へキャッシュ。管制キューカードの digest 下に ✳ テラコッタ + イタリック行。新ターン送信でクリア・生成完了時に running なら破棄（古い要約を出さない）
+  - **編隊レベル ✳**（`schedule_control_summary`）: `transition_task_space` と SummaryReady から蹴り、5s デバウンス（`control_summary_gen` 世代比較）→ `control_summary_facts`（稼働/要対応/完了未確認の数字 + キュー先頭 4 件の事実だけ・**フル transcript は渡さない**）→ oneshot 60 字 → 監督バーの ✳ イタリック文。生成前・失敗時は従来の決定論事実文のまま＝ UI が欠けない
+  - **規律の実装**: ✳=LLM 生成の印はここで初めて出す（Tier 1 には付けない）。要約は状態を上書きしない（AttentionKind/stats は常に事実層から別導出）。設定 `tier2_summaries` 既定 on・oneshot 非対応エージェントは自然フォールバック
+  - 検証: 全 62 test green・offscreen（CONTROL_PROBE に tier2 素材追加）で監督バー + Failed/MergeReady カードの ✳ 行を目視
+- 学び/罠:
+  - oneshot の宛先は**既定 Agent の CLI**（Claude 決め打ちしない・auto-name と同じ判断）。編隊総括の実行 cwd は IntegrationSpace root（無ければ先頭 slot）
+  - デバウンスは「sleep 後に世代比較 → 最新だけ生成」が最小構成。facts 収集は sleep **後**に main thread で行う（5 秒間の変化を織り込む）
+- 次: P5 fleet API 拡張 — GUI ライブ制御 IPC（Unix socket 0600）+ `fleet_spawn_agent / fleet_send / fleet_digest / fleet_events`（spawn 断絶の解消・監督の道具）
+
+## 2026-07-24 — 管制 P5: fleet API 拡張（GUI ライブ制御 IPC・spawn 断絶解消・単一 writer の確立）
+- やったこと（`FLEET-CONTROL-PLAN.md` P5 完了・新規 `crates/workspace/src/workspace/control_ipc.rs`）:
+  - **IPC**: `~/.shirushi/gui.sock`（0600）・1 接続 1 リクエスト・1 行 JSON。accept は std スレッド（I/O なし・解析のみ）→ futures channel → GUI 主スレッドで memory 解決 → 足りない時だけ background executor + **GUI の storage ハンドル**で読む（UI スレッドで Host/DB を呼ばない規律を維持）
+  - **新 CLI/MCP 4 種**（MCP 15 tools に）: `spawn-agent`（record 解決 → `open_folder_in_rail` → `acquire_thread`（空スレッド使い回し）→ prompt 送信 → Task セル追加）/ `send` / `digest`（事実層+Tier1+Tier2 キャッシュのみ・**transcript は返さない**）/ `events`（`load_task_events_since` の差分・GUI 不在は DB 直読み）
+  - **【重要発見】Turso は排他ロック** — GUI 稼働中は headless プロセスが DB を開けない（`Locking error`）。従来の「別プロセスが DB を poll」前提が GUI 併走で成立しないことが e2e で発覚 → **単一 writer アーキテクチャに確立**: `is_lock_error` 検出で create/status/wait/list/events を IPC へフォールバック（GUI method: `task/tasks/update_task/record_task/events`）。update_task は開いている slot なら GUI の遷移入口（`transition_task_space`）を通す＝ニュース/総括デバウンスにも自然に載る
+  - **受入 e2e（実運転）**: scratch repo + scratch DB + `SHIRUSHI_GUI_SOCK` で GUI 起動 → headless `fleet spawn-agent <id> "Claude Code" "1行で ok と返答"` → **実 claude ターンが GUI 内で実行** → `fleet wait <id> review_ready 90` 成功（result_summary = "ok" = エージェントの返答が digest 経由で確定値に）→ `fleet digest` が GUI メモリの live thread（activity/digest/tokens 24.4k）を返す＝「GUI に thread が現れる」をデータで実証
+- 学び/罠:
+  - **Unix socket パスは SUN_LEN（macOS ~104B）制限** — 深い scratch パスは bind できない。既定 `~/.shirushi/gui.sock` は安全・テストは `/tmp` の短パスで
+  - window 構築クロージャ内の即時 `handle.update` は届かない — probe 群と同じく **spawn + 短 delay で defer** が正解
+  - `--features screenshot` 無しビルドでは SHIRUSHI_SCREENSHOT が無効（e2e で PNG が出ず数分悩んだ）。ビジュアル証拠が要る時は feature を忘れない
+  - Turso の WAL（`e2e.db-wal` 350KB）はプロセス kill でも残って正常（次回 open で追いつく）
+- 次: P6 監督席（任命制 pinned thread + fleet ツールセット + イベント駆動 wake + `depends_on`）＝ M14 総合受入「B の完了を待って merge」の自走
+
+## 2026-07-24 — 管制 P6: 監督席 + 依存待ち（「B の完了を待って merge」の自走を実運転で実証）
+- やったこと（`FLEET-CONTROL-PLAN.md` P6 完了・新規 `crates/workspace/src/workspace/coordinator.rs`）:
+  - **depends_on**: `task_deps` 別テーブル（列追加せず既存 DB 無 migration）+ record + `set_task_depends`。CLI `fleet depend` / `wait-deps <id> <phase>`（全依存が揃うまで）/ `fleet wait` は phase と **activity（GUI live）** の両対応。IPC `set_depends`（単一 writer 経由）
+  - **監督席**: settings `coordinator_agent`（None=未任命・**プロジェクト設定 `.shirushi/settings.json` でも任命可**＝scratch 検証で発見した綺麗な道）。IntegrationSpace の panel に pinned thread「監督」（`ensure_named_thread` = 名前で再利用・`name_is_custom` で自動命名から保護）。wake は Done/Failed 即時・Blocked 15s 閾値（`wake_coordinator_for_blocked` が 15 秒後に「まだ Blocked か」を確認）・`thread_busy` なら重ねない（次のイベントで最新状態ごと読む）。管制の監督バーは任命済みエージェント名を表示
+  - **プロンプトテンプレート**: 役割・規律（自分でコードを書かない・**integrate の最終承認は人間**）・fleet CLI 全道具（`std::env::current_exe()` の実パス埋め込み＝dev の target/debug でもそのまま動く）・「静観」も明示的な選択肢に
+  - **采配の監査**: 監督ターン完了（TurnEnded・integration slot・thread 名一致）→ `record_coordinator_decision` = ニュース（NewsKind::Coordinator・丸チップ）+ task_events（task_id="coordinator", kind="coordinator"）
+  - **受入 e2e（実運転・自動化済み）**: scratch repo の `.shirushi/settings.json` に coordinator_agent を書いて GUI 起動 → `fleet spawn-agent` で task A に実 claude ターン → A が review_ready → **監督が wake され、実際に fleet CLI で現況を調べ、A と B の両方を review（radar clean）→ merge_ready へ進め、「あとは統合を人間が承認する段階」と采配を台帳に残して停止**。task list で両タスク merge_ready + integration 無傷を確認＝ M14 総合受入の自走部分を実挙動で達成
+- 学び/罠:
+  - `cargo check` 通過ではバイナリは古いまま — CLI サブコマンド追加後の実地テストは `cargo build` を忘れない（旧 usage が出て数分迷った）
+  - 監督の自己 wake ループは「integration slot のイベントでは wake しない」の 1 条件で消える（監督は integration に住むので、自分のターン完了は Task 遷移を起こさない）
+  - プロジェクト設定のマージ（`.shirushi/settings.json`）は検証にもプロダクトにも効く: リポジトリごとに監督を変える運用が自然に可能
+- 次: P7 Herdr sidecar（AgentRuntime trait・常駐ランタイム・再起動を跨ぐ AgentRun）— 常駐の最重要価値。P8 observer / P9 リモート管制が残り
+
+## 2026-07-24 — 管制実装ループの区切り（P0〜P6 完了・P7 は herdr 導入待ち）
+- やったこと: P3 残件の**編隊 goal** を回収 — settings `fleet_goal`（プロジェクト設定 `.shirushi/settings.json` でリポジトリごと・**ファイルが真実**の原則に寄せ、計画の「ledger に持つ」は settings で満たすと判断）→ 管制ヘッダに「目標: …」表示（未設定時は設定方法つきプレースホルダ）
+- **ループ全体の到達点**（このセッション連鎖・全 P0〜P6）:
+  - P0 縫い目一本化 / P1 digest Tier1 / P2 ニュース常設 / P3 管制タブ / P4 ✳ Tier2 / P5 IPC + 単一 writer / P6 監督席 + 依存待ち — 各フェーズ受入実証つき（offscreen 目視 or 実運転 e2e）
+  - M14 総合受入の自走部分（「B の完了を待って merge」）を**実 claude の監督で実挙動達成**
+- **P7（Herdr sidecar）が着手ブロック**: `herdr` バイナリが未導入。計画 §P7 は「Apache 2.0 の正式リリースを version 固定・checksum 固定」＝**導入方法とバージョンはユーザー判断**（zed/ の pull と同じ扱い）。API も実物の `herdr api schema --json` から取る設計のため、目隠し実装はしない。P8（observer）も Herdr 前提・P9 は「M14 完了後・設計から」
+- 次（ユーザーの手番）: ① herdr の導入（バージョン選定・`--session shirushi` 運用の確認）→ P7 着手 ② 日常ドッグフーディング（管制タブ・監督任命・ニュース/ミュート）→ M14 総合受入のチェック ③ 未コミットの作業ツリー（P0〜P6 全部 + 前セッション分）のコミット方針
+
+## 2026-07-24 — UX 是正（ユーザーレビュー C 対応・4 点）
+- 経緯: 7/22〜の未コミット設計（TaskSpace-first）+ 管制ループ実装をユーザーがレビューし、4 点の UX 逸脱を指摘。方針 C（コードは残して UX を直す）で対応
+- **① solo の横タブ消失** — 原因はコードでなく **ユーザー settings.json に `agent_tabs_view: "list"` が保存されていた**（7/20 の検証時ドリフト）。`"bar"` へ戻して復旧。教訓: 検証でスイッチャを触ると保存される＝「自分で決めた既定はドリフトしない」原則は検証手順にも適用すべき
+- **② レールに Task を載せない** — レール = プロジェクト（リポジトリ）単位に戻した。**同じリポジトリが色違いで並ぶのは「色による方向感覚」の自己破壊**（ユーザー指摘・正しい）。`render_rail` が Task slot を除外し、アクティブが Task の時は同リポジトリの Integration 枠を点灯。Task worktree は編隊モード（herd/セル）の中だけに住む。7/22 の「Task = worktree = レール 1 枠」設計判断は**取り消し**
+- **③ ＋ を 1 択に** — 編隊の＋タイルを「＋ エージェント（新しい worktree で並走）」の単一ボタンへ（7 ボタン → 1）。Terminal/Editor/Diff/Tests セルと履歴復元は機能として保持（dead_code 許可・入口は後日控えめに再接続）
+- **④ 「IntegrationSpace は保護されています」トースト撤廃** — main もセルに出せるように。守るべきは Git 側（radar + 人間 gate・台帳の遷移拒否）であって**画面の取り締まりではない**
+- 検証: 警告 0・test green・offscreen で solo（横タブ復活）と編隊（レール 1 枠・管制正常）を目視
+- 次: 動作確認いただき OK なら退避 or 本コミットで確定（未コミットの全量が消えない状態を早く作る）

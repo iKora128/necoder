@@ -406,10 +406,13 @@ impl Buffer {
             let selections = self.selections.clone();
             let delta = next_text.len();
             let id = self.edit(&[span.start..next.end], &format!("{next_text}{span_text}"));
-            self.selections = selections
-                .into_iter()
-                .map(|s| Selection::new(s.anchor + delta, s.head + delta))
-                .collect();
+            // set_selections 経由 = 長さ・char 境界へクランプ（移動行の外のカーソルは近似追従）。
+            self.set_selections(
+                selections
+                    .into_iter()
+                    .map(|s| Selection::new(s.anchor + delta, s.head + delta))
+                    .collect(),
+            );
             Some(id)
         } else {
             if first == 0 {
@@ -426,15 +429,17 @@ impl Buffer {
             let selections = self.selections.clone();
             let delta = previous_text.len().min(previous.end - previous.start) as isize;
             let id = self.edit(&[previous.start..span.end], &format!("{span_text}{previous_text}"));
-            self.selections = selections
-                .into_iter()
-                .map(|s| {
-                    Selection::new(
-                        (s.anchor as isize - delta).max(0) as usize,
-                        (s.head as isize - delta).max(0) as usize,
-                    )
-                })
-                .collect();
+            self.set_selections(
+                selections
+                    .into_iter()
+                    .map(|s| {
+                        Selection::new(
+                            (s.anchor as isize - delta).max(0) as usize,
+                            (s.head as isize - delta).max(0) as usize,
+                        )
+                    })
+                    .collect(),
+            );
             Some(id)
         }
     }
@@ -453,12 +458,15 @@ impl Buffer {
         // 挿入は span 先頭 = 元テキストは text.len() 分だけ下へ。
         // down（下に複製）= キャレットを元の位置（上側コピー）へ戻す。up = 下側（移動後）に留まる。
         if down {
-            self.selections = selections;
+            // 挿入点より後ろのカーソルは内容がずれるため位置は近似（クランプだけ保証する）。
+            self.set_selections(selections);
         } else {
-            self.selections = selections
-                .into_iter()
-                .map(|s| Selection::new(s.anchor + text.len(), s.head + text.len()))
-                .collect();
+            self.set_selections(
+                selections
+                    .into_iter()
+                    .map(|s| Selection::new(s.anchor + text.len(), s.head + text.len()))
+                    .collect(),
+            );
         }
         id
     }
@@ -555,12 +563,14 @@ impl Buffer {
         let selections = self.selections.clone();
         let id = self.edit(&ranges, &" ".repeat(tab_size));
         // キャレットを（行数 × tab_size ぶん）追従させる代わりに、単純に各選択を右へずらす。
+        // set_selections 経由 = 長さ・char 境界へクランプ（対象行の外のカーソルは近似追従）。
         let shift = tab_size;
-        self.selections = selections
-            .into_iter()
-            .map(|s| Selection::new(s.anchor + shift, s.head + shift))
-            .collect();
-        let _ = &id;
+        self.set_selections(
+            selections
+                .into_iter()
+                .map(|s| Selection::new(s.anchor + shift, s.head + shift))
+                .collect(),
+        );
         id
     }
 
@@ -1480,6 +1490,8 @@ mod tests {
         buffer.complete_save(revision, pending.version);
         assert!(!buffer.is_dirty());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
+        // 自分の保存 = 外部変更ではない（watch の「自分の保存イベントは無視」判定が成立する）。
+        assert_eq!(buffer.disk_probably_unchanged(), Some(true));
         // 保存開始後に編集が入った場合は dirty が残る
         buffer.insert("!");
         let pending = buffer.prepare_save().unwrap();
@@ -1487,6 +1499,12 @@ mod tests {
         buffer.insert("?"); // 書き込み中の編集を模す
         buffer.complete_save(revision, pending.version);
         assert!(buffer.is_dirty());
+        // 2 周目の保存で書き込み中の編集も載ってクリーンになる（自分の revision = 競合しない）。
+        let pending = buffer.prepare_save().unwrap();
+        let revision = pending.write().expect("自分の保存の続き = 競合ではない");
+        buffer.complete_save(revision, pending.version);
+        assert!(!buffer.is_dirty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after!?");
         // 無題は None
         assert!(Buffer::new().prepare_save().is_none());
         let _ = std::fs::remove_file(&path);
@@ -1745,6 +1763,74 @@ mod tests {
         let mut buffer = Buffer::new();
         buffer.insert("x");
         assert!(buffer.save().is_err());
+    }
+
+    // ── データ完全性（M13 公開準備: 「作業が消える」系だけはベータでも許されない） ──
+
+    #[test]
+    fn async_save_rejects_external_change_between_prepare_and_write() {
+        let path = temp_path("async-conflict");
+        std::fs::write(&path, "original").unwrap();
+        let mut buffer = Buffer::from_file(&path).unwrap();
+        buffer.set_selections(vec![Selection::new(0, buffer.len_bytes())]);
+        buffer.insert("mine");
+
+        let pending = buffer.prepare_save().unwrap();
+        // prepare と write の間に外部変更（長さも変える = revision 確実に不一致）。
+        std::fs::write(&path, "external change!").unwrap();
+
+        let error = pending.write().unwrap_err();
+        assert!(format!("{error:#}").contains("保存競合"), "競合エラーであること: {error:#}");
+        // 外部の内容は上書きされず、バッファは dirty のまま = どちらの作業も消えていない。
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external change!");
+        assert!(buffer.is_dirty());
+        assert_eq!(buffer.text(), "mine");
+        // 警告バーの「再読込」相当 → 以後は普通に保存できる。
+        buffer.reload().unwrap();
+        assert_eq!(buffer.text(), "external change!");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_on_deleted_file_errors_and_keeps_buffer() {
+        let path = temp_path("reload-deleted");
+        std::fs::write(&path, "keep me").unwrap();
+        let mut buffer = Buffer::from_file(&path).unwrap();
+        buffer.set_selections(vec![Selection::cursor(buffer.len_bytes())]);
+        buffer.insert("!");
+        std::fs::remove_file(&path).unwrap();
+
+        // 再読込は失敗するが、未保存の編集は失われない（dirty のまま保持）。
+        assert!(buffer.reload().is_err());
+        assert_eq!(buffer.text(), "keep me!");
+        assert!(buffer.is_dirty());
+        // save は消えたパスへ書き戻せる（新規作成扱い）= 作業を救出できる。
+        buffer.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me!");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_as_binds_conflict_detection_to_new_file() {
+        let original = temp_path("save-as-bind-a");
+        let target = temp_path("save-as-bind-b");
+        std::fs::write(&original, "one").unwrap();
+        let mut buffer = Buffer::from_file(&original).unwrap();
+        buffer.set_selections(vec![Selection::cursor(3)]);
+        buffer.insert(" two");
+        buffer.save_as(&target).unwrap();
+        assert!(!buffer.is_dirty());
+
+        // 以後の競合検知は新しいファイル（target）に対して働く。
+        buffer.insert(" three");
+        std::fs::write(&target, "external on target!!").unwrap();
+        let error = buffer.save().unwrap_err();
+        assert!(format!("{error:#}").contains("保存競合"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "external on target!!");
+        // 元ファイルは save_as 以降ノータッチ。
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), "one");
+        let _ = std::fs::remove_file(&original);
+        let _ = std::fs::remove_file(&target);
     }
 
     // ── 性能計測（通常テストでは ignore。`cargo test -p editor_core --release -- --ignored --nocapture`）──

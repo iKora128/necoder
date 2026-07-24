@@ -117,12 +117,13 @@ impl Workspace {
         cx: &App,
     ) -> (Vec<PickerItem>, Vec<PathBuf>) {
         let registry = cx.try_global::<agent_panel::RunningRegistry>();
+        // ambient に出す状態（実行中/承認待ち/完了・未確認）のスレッド色をドットに。Idle は出さない。
         let running_dots = |path: &Path| -> Vec<Hsla> {
             registry
                 .and_then(|registry| registry.0.get(path))
                 .map(|rows| {
                     rows.iter()
-                        .filter(|(_, _, running)| *running)
+                        .filter(|(_, _, activity)| activity.is_signal())
                         .map(|(_, color, _)| *color)
                         .collect()
                 })
@@ -195,6 +196,107 @@ impl Workspace {
         self.open_folder_in_rail(host, path, branch, cx);
     }
 
+    // ── 「＋」統一オープン（開く系アクション + 最近・local/remote 混在） ──
+
+    /// レール `＋` の統一 launcher。フォルダ/ファイル/リモートの固定操作 + 最近（local + remote を
+    /// opened_at 降順でマージ）を ⌘O と同じ広い `.palette` に 1 枚で出す。最近行は●識別色 +
+    /// 実行中スレッドのドットを付ける（色による方向感覚）。⏎ = 現レールに開く。id は `picker_open_rows` の添字。
+    pub(crate) fn open_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut rows: Vec<OpenRow> =
+            vec![OpenRow::OpenFolder, OpenRow::OpenFile, OpenRow::ConnectRemote];
+        let mut items = vec![
+            PickerItem::new(0, i18n::t!("launcher.open_folder")),
+            PickerItem::new(1, i18n::t!("launcher.open_file")),
+            PickerItem::new(2, i18n::t!("launcher.connect_remote")),
+        ];
+
+        // 最近（local + remote を opened_at 降順でマージ・上位 20）。
+        enum Recent {
+            Local { path: PathBuf, name: String, at: i64 },
+            Remote { host: String, path: String, name: String, at: i64 },
+        }
+        let mut recents: Vec<Recent> = Vec::new();
+        if let Some(storage) = self.persistence.storage.as_ref() {
+            for (path, name, at) in storage.recent_local_projects().unwrap_or_default() {
+                recents.push(Recent::Local { path: PathBuf::from(path), name, at });
+            }
+            for (host, path, name, at) in storage.recent_remote_projects().unwrap_or_default() {
+                recents.push(Recent::Remote { host, path, name, at });
+            }
+        }
+        let opened_at = |recent: &Recent| match recent {
+            Recent::Local { at, .. } => *at,
+            Recent::Remote { at, .. } => *at,
+        };
+        recents.sort_by(|a, b| opened_at(b).cmp(&opened_at(a)));
+        recents.truncate(20);
+
+        let registry = cx.try_global::<agent_panel::RunningRegistry>();
+        let running_dots = |root: &Path| -> Vec<Hsla> {
+            registry
+                .and_then(|registry| registry.0.get(root))
+                .map(|threads| {
+                    threads
+                        .iter()
+                        .filter(|(_, _, activity)| activity.is_signal())
+                        .map(|(_, color, _)| *color)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        for recent in recents {
+            let id = rows.len();
+            match recent {
+                Recent::Local { path, name, .. } => {
+                    let accent = self.recent_accent(Some(&path), &path.to_string_lossy());
+                    let dots = running_dots(&path);
+                    items.push(
+                        PickerItem::new(id, name)
+                            .with_detail(path.display().to_string())
+                            .with_accent(accent)
+                            .with_dots(dots),
+                    );
+                    rows.push(OpenRow::RecentLocal(path));
+                }
+                Recent::Remote { host, path, name, .. } => {
+                    let uri = format!("ssh://{host}{path}");
+                    let accent = self.recent_accent(None, &uri);
+                    items.push(
+                        PickerItem::new(id, name)
+                            .with_detail(format!("{host}:{path}"))
+                            .with_accent(accent),
+                    );
+                    rows.push(OpenRow::RecentRemote(uri));
+                }
+            }
+        }
+
+        self.picker_open_rows = rows;
+        self.open_picker(
+            PickerMode::OpenLauncher,
+            i18n::t!("launcher.placeholder"),
+            items,
+            window,
+            cx,
+        );
+    }
+
+    /// 「最近」行の●色。レールで開いていればその slot 色（方向感覚の連続）、無ければキー
+    /// （path/uri）から安定なパレット色を焼き付ける（開き直しても不変・disk を読まない）。
+    fn recent_accent(&self, open_root: Option<&Path>, key: &str) -> Hsla {
+        if let Some(root) = open_root {
+            if let Some(slot) =
+                self.project_sessions.projects.iter().find(|slot| slot.worktree.root() == root)
+            {
+                return slot.color;
+            }
+        }
+        let hash =
+            key.bytes().fold(0usize, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte as usize));
+        project_color(hash % theme_core::IDENTITY_PALETTE_HEXES.len())
+    }
+
     // ── テーマセレクタ（Picker・ライブプレビュー付き。⌘⇧T・M3） ──
 
     /// テーマセレクタを開く。組み込み + ユーザーテーマを Picker に並べ、選択移動で即プレビューする。
@@ -248,6 +350,9 @@ impl Workspace {
             }
             session
                 .terminal_dock
+                .update(cx, |dock, cx| dock.set_theme(theme.clone(), cx));
+            session
+                .tests_dock
                 .update(cx, |dock, cx| dock.set_theme(theme.clone(), cx));
         }
         if let Some(picker) = &self.overlays.picker {
@@ -400,22 +505,43 @@ impl Workspace {
                         }
                     }
                     PickerMode::ThreadHistory => {
-                        if let Some((thread_id, name, color_index)) =
+                        if let Some((thread_id, name, color_index, created_at, last_input_at)) =
                             self.picker_history.get(id).cloned()
                         {
-                            if !self.chrome.show_right {
-                                self.chrome.show_right = true; // Agent ドックを開く
-                            }
                             let panel = self.agent_panel.clone();
-                            panel.update(cx, |panel, cx| {
+                            let thread_index = panel.update(cx, |panel, cx| {
                                 panel.open_thread_from_history(
                                     &thread_id,
                                     &name,
                                     color_index as usize,
+                                    created_at,
+                                    last_input_at,
                                     cx,
                                 )
                             });
+                            if self.chrome.fleet_mode {
+                                // 編隊モード: 復元した会話をグリッドのセルとして前面へ
+                                // （Agent ドックは編隊では出ないので show_right は触らない・M14）。
+                                if let Some(thread_index) = thread_index {
+                                    let space = self.project_sessions.active;
+                                    self.reveal_agent_in_fleet(space, thread_index, window, cx);
+                                }
+                            } else if !self.chrome.show_right {
+                                self.chrome.show_right = true; // Agent ドックを開く
+                            }
                             cx.notify();
+                        }
+                    }
+                    PickerMode::OpenLauncher => {
+                        match self.picker_open_rows.get(id).cloned() {
+                            Some(OpenRow::OpenFolder) => self.add_project_via_dialog(cx),
+                            Some(OpenRow::OpenFile) => self.open_file_from_launcher(cx),
+                            Some(OpenRow::ConnectRemote) => {
+                                self.open_ssh_host_picker(&RemoteSsh, window, cx)
+                            }
+                            Some(OpenRow::RecentLocal(path)) => self.add_project_slot(path, cx),
+                            Some(OpenRow::RecentRemote(uri)) => self.connect_ssh_and_open(uri, cx),
+                            None => {}
                         }
                     }
                 }
@@ -950,7 +1076,8 @@ impl Workspace {
     // subscribe に window が無いので pending_transient_tab と同様「次の render で消化」する。
 
     /// スレッド履歴を開く（#5）。DB の全スレッド（アーカイブ含む・updated_at 降順）を Picker に出す。
-    /// 行頭●= スレッド色・detail = プロジェクト / ⎇ branch / トークン累計。確定で復元してアクティブに。
+    /// 行頭●= スレッド色・detail = プロジェクト / ⎇ branch / トークン累計 / 開始・最終入力の相対時刻。
+    /// 確定で復元してアクティブに（編隊モードでは復元セルとして前面へ・M14）。
     pub(crate) fn open_thread_history(&mut self, _: &ThreadHistory, window: &mut Window, cx: &mut Context<Self>) {
         let Some(storage) = self.persistence.storage.clone() else {
             return;
@@ -958,7 +1085,7 @@ impl Workspace {
         let threads = storage.load_all_threads().unwrap_or_default();
         let mut history = Vec::new();
         let mut items = Vec::new();
-        for (id, name, color_index, project, branch, tokens_used, archived) in threads {
+        for (id, name, color_index, project, branch, tokens_used, archived, created_at, last_input_at) in threads {
             let mut detail = String::new();
             if !project.is_empty() {
                 detail.push_str(&project);
@@ -969,6 +1096,17 @@ impl Workspace {
             if tokens_used > 0 {
                 detail.push_str(&format!("  Σ {:.1}k", tokens_used as f32 / 1000.0));
             }
+            // いつスタートして最終いつ入力したか（サクッと見える相対時刻・M14）。
+            detail.push_str(&format!(
+                "  {}",
+                i18n::t!("time.started", "when" => agent_panel::relative_time_label(created_at))
+            ));
+            if let Some(last_input_at) = last_input_at {
+                detail.push_str(&format!(
+                    " · {}",
+                    i18n::t!("time.last_input", "when" => agent_panel::relative_time_label(last_input_at))
+                ));
+            }
             if archived {
                 detail.push_str("  ·閉");
             }
@@ -978,7 +1116,7 @@ impl Workspace {
                 item = item.with_detail(detail);
             }
             items.push(item);
-            history.push((id, name, color_index));
+            history.push((id, name, color_index, created_at, last_input_at));
         }
         self.picker_history = history;
         self.open_picker(

@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 
 /// MCP サーバ（`shirushi mcp`）。AI エージェントがプロジェクトを操作する口。
 mod mcp;
+mod fleet;
+/// macOS ネイティブメニューバー（M13）。
+mod menus;
 use std::time::Instant;
 use workspace::{ProjectSource, RestoredTabs, Workspace};
 
@@ -125,7 +128,9 @@ fn watch_user_keymap(path: PathBuf, cx: &mut App) {
     };
     let (sender, mut receiver) = futures::channel::mpsc::unbounded::<()>();
     let target = path.clone();
-    let watch = project::watch_root(&parent, move |paths| {
+    // keymap.json はローカル設定ディレクトリ。local host で監視する。
+    let local_host = host::LocalHost::shared();
+    let watch = project::watch_root(&local_host, &parent, move |paths| {
         if paths.iter().any(|changed| changed == &target) {
             let _ = sender.unbounded_send(());
         }
@@ -147,7 +152,11 @@ fn watch_user_keymap(path: PathBuf, cx: &mut App) {
                 .await;
             while receiver.try_recv().is_ok() {}
             let path = path.clone();
-            cx.update(|cx| load_user_keymap(&path, cx));
+            cx.update(|cx| {
+                load_user_keymap(&path, cx);
+                // メニューのキー表記は set_menus 時のスナップショット → 再設定で追従。
+                cx.set_menus(menus::app_menus());
+            });
         }
     })
     .detach();
@@ -205,6 +214,11 @@ impl gpui::AssetSource for Assets {
             "icons/list.svg" => icon!("list.svg"),
             "icons/columns-3.svg" => icon!("columns-3.svg"),
             "icons/layout-grid.svg" => icon!("layout-grid.svg"),
+            "icons/activity.svg" => icon!("activity.svg"),
+            "icons/maximize.svg" => icon!("maximize.svg"),
+            "icons/minimize.svg" => icon!("minimize.svg"),
+            "icons/bell.svg" => icon!("bell.svg"),
+            "icons/bell-off.svg" => icon!("bell-off.svg"),
             // AI エージェントのブランドロゴ（Simple Icons・CC0・設定画面の識別用）。
             "icons/brand-claude.svg" => icon!("brand-claude.svg"),
             "icons/brand-copilot.svg" => icon!("brand-copilot.svg"),
@@ -266,8 +280,23 @@ fn run_config_cli() -> bool {
 }
 
 fn main() {
+    // panic hook（M13 公開準備）: どのスレッドで落ちてもクラッシュログを書き、次回起動で
+    // statusbar チップ → バグ報告 Issue に繋ぐ。GPUI 起動前・最初に仕込む。
+    workspace::install_panic_hook();
+    // 開発用: SHIRUSHI_PANIC_PROBE=1 で起動 1.5s 後に背景スレッドを panic させる
+    // （hook → crashes/ ログ + pending マーカー → 次回起動チップ、の E2E 検証）。
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SHIRUSHI_PANIC_PROBE").is_some() {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            panic!("SHIRUSHI_PANIC_PROBE: クラッシュフック検証用の意図的 panic");
+        });
+    }
     // GUI を開く前に CLI サブコマンドを処理（`shirushi config …` / `shirushi mcp …`）。
     if run_config_cli() {
+        return;
+    }
+    if fleet::run_cli() {
         return;
     }
     // MCP サーバ（AI エージェントがプロジェクトを操作する口）。stdio を占有するので GUI は開かない。
@@ -316,9 +345,35 @@ fn main() {
             load_user_keymap(&keymap_path, cx);
             watch_user_keymap(keymap_path, cx);
         }
+        // macOS ネイティブメニューバー + Dock メニュー（M13）。キー表記は keymap のスナップ
+        // ショットから解決されるため、keymap の bind（既定 + ユーザー）より**後**に設定する。
+        cx.set_menus(menus::app_menus());
+        cx.set_dock_menu(menus::dock_menu());
+        // 開発用: SHIRUSHI_MENU_PROBE=1 で OS へ登録したメニューバーを読み戻して表示
+        // （mac 実装は setMainMenu_ と同時に owned copy を保持 = 登録済みの機械的証拠）。
+        #[cfg(debug_assertions)]
+        if std::env::var_os("SHIRUSHI_MENU_PROBE").is_some() {
+            match cx.get_menus() {
+                Some(menus) => {
+                    for menu in &menus {
+                        println!("menu: {}（{} 項目）", menu.name, menu.items.len());
+                    }
+                }
+                None => println!("menu: (未登録)"),
+            }
+        }
         // Quit の後始末（hot exit のクリア）は window 生成後に登録する（下方）。
 
-        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        // 既定 1280×800。スクショ検証で縦長パネル全体を写したいときは
+        // `SHIRUSHI_WINDOW_SIZE=1280x1500` で上書きできる（開発補助・env 未指定なら不変）。
+        let window_size = std::env::var("SHIRUSHI_WINDOW_SIZE")
+            .ok()
+            .and_then(|spec| {
+                let (width, height) = spec.split_once('x')?;
+                Some(size(px(width.trim().parse().ok()?), px(height.trim().parse().ok()?)))
+            })
+            .unwrap_or_else(|| size(px(1280.0), px(800.0)));
+        let bounds = Bounds::centered(None, window_size, cx);
 
         let build_sources = sources.clone();
         let build_theme = theme.clone();
@@ -486,6 +541,20 @@ fn main() {
                     .detach();
                 }
             }
+            // 管制 IPC（P5・常時）: headless CLI/MCP が起動中 GUI を制御する Unix socket（0600）。
+            // 二重起動（別窓が先に bind 済み）は内部で静かにスキップ。window 構築完了後に開始する
+            // （このクロージャ内の即時 update は届かない＝probe 群と同じく defer する）。
+            if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                cx.spawn(async move |_workspace, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
+                    let _ = handle.update(cx, |workspace, _window, cx| {
+                        workspace.start_control_ipc(cx);
+                    });
+                })
+                .detach();
+            }
             // 開発用: SHIRUSHI_SSH_HOST_PROBE=1 で SSH ホストピッカーを開く（2s 後・M13 の描画検証）。
             if std::env::var("SHIRUSHI_SSH_HOST_PROBE").is_ok_and(|value| value == "1") {
                 if let Some(handle) = window.window_handle().downcast::<Workspace>() {
@@ -509,6 +578,34 @@ fn main() {
                             .await;
                         let _ = handle.update(cx, |workspace, _window, cx| {
                             workspace.debug_tab_rename(cx);
+                        });
+                    })
+                    .detach();
+                }
+            }
+            // 開発用: SHIRUSHI_ACTIVITY_PROBE=1 で各スレッドに状態を仕込む（2s 後・状態表示の描画検証・#）。
+            if std::env::var("SHIRUSHI_ACTIVITY_PROBE").is_ok_and(|value| value == "1") {
+                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                    cx.spawn(async move |_workspace, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(2000))
+                            .await;
+                        let _ = handle.update(cx, |workspace, _window, cx| {
+                            workspace.debug_set_activities(cx);
+                        });
+                    })
+                    .detach();
+                }
+            }
+            // 開発用: SHIRUSHI_CONTROL_PROBE=1 で管制タブの受入シナリオ（5 擬似 TaskSpace・P3）を合成。
+            if std::env::var("SHIRUSHI_CONTROL_PROBE").is_ok_and(|value| value == "1") {
+                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                    cx.spawn(async move |_workspace, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(2000))
+                            .await;
+                        let _ = handle.update(cx, |workspace, _window, cx| {
+                            workspace.debug_seed_control(cx);
                         });
                     })
                     .detach();

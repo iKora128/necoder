@@ -361,6 +361,47 @@ pub fn git_current_branch_on(host: &dyn Host, dir: &Path) -> Option<String> {
     (!name.is_empty() && name != "HEAD").then_some(name)
 }
 
+/// linked worktree 間で共通な Git directory。Fleet の Repository ID は worktree root
+/// ではなくこれを使い、同じ repository から切った TaskSpace を確実に束ねる。
+pub fn git_common_dir_on(host: &dyn Host, dir: &Path) -> Option<PathBuf> {
+    let output = run_git(host, dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .ok()
+        .or_else(|| run_git(host, dir, ["rev-parse", "--git-common-dir"]).ok())?;
+    if !output.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(value);
+    Some(if path.is_absolute() { path } else { dir.join(path) })
+}
+
+/// UI / CLI / MCP が同じ TaskSpace ID を生成するための共有実装。
+pub fn stable_worktree_id_on(host: &dyn Host, root: &Path) -> String {
+    let identity = format!("{}\0{}", host.id(), root.display());
+    let hash = identity.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("space-{hash:016x}")
+}
+
+pub fn repository_id_on(host: &dyn Host, root: &Path) -> String {
+    let repository_root = git_common_dir_on(host, root).unwrap_or_else(|| root.to_path_buf());
+    format!("{}:{}", host.id(), repository_root.display())
+}
+
+/// 現在の HEAD commit。Task 作成時の base と review 時の head を別に保持するために使う。
+pub fn git_head_oid_on(host: &dyn Host, dir: &Path) -> Option<String> {
+    let output = run_git(host, dir, ["rev-parse", "HEAD"]).ok()?;
+    if !output.success() {
+        return None;
+    }
+    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!oid.is_empty()).then_some(oid)
+}
+
 /// ローカルブランチ名の一覧（現在ブランチを先頭に）。repo 外は空。
 pub fn git_branches(dir: &Path) -> Vec<String> {
     git_branches_on(&LocalHost, dir)
@@ -457,6 +498,80 @@ pub fn add_worktree_on(host: &dyn Host, dir: &Path, path: &Path, branch: &str) -
         String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(())
+}
+
+/// Fleet の `+ Task` 用: 現在の HEAD から新規 branch と linked worktree を一度に作る。
+/// 通常の「既存 branch を開く」[`add_worktree_on`] と混ぜず、既定操作が必ず隔離されるようにする。
+pub fn create_task_worktree_on(
+    host: &dyn Host,
+    dir: &Path,
+    path: &Path,
+    branch: &str,
+) -> Result<()> {
+    let path = path.to_string_lossy().into_owned();
+    let output = run_git(
+        host,
+        dir,
+        ["worktree", "add", "-b", branch, path.as_str(), "HEAD"],
+    )
+    .context("Task worktree の作成に失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "Task worktree の作成に失敗: {}",
+        git_fail_message(&output)
+    );
+    Ok(())
+}
+
+/// IntegrationSpace から見た Task branch の merge 可否。`git merge-tree` なので index / worktree を
+/// 一切変更せず、Conflict Radar から安全に呼べる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergePreview {
+    pub clean: bool,
+    pub detail: String,
+}
+
+pub fn preview_merge_on(host: &dyn Host, integration_dir: &Path, branch: &str) -> Result<MergePreview> {
+    let output = run_git(
+        host,
+        integration_dir,
+        ["merge-tree", "--write-tree", "HEAD", branch],
+    )
+    .context("merge preview の実行に失敗")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok(MergePreview {
+        clean: output.success(),
+        detail: if stderr.is_empty() { stdout } else { stderr },
+    })
+}
+
+/// 明示的に merge-ready となった Task を IntegrationSpace へ統合する。
+/// dirty integration / preview conflict は拒否し、merge 自体が失敗した場合も自動 abort して戻す。
+pub fn integrate_branch_on(
+    host: &dyn Host,
+    integration_dir: &Path,
+    branch: &str,
+) -> Result<String> {
+    anyhow::ensure!(
+        git_status_on(host, integration_dir).is_empty(),
+        "IntegrationSpace に未コミット変更があります。統合前に clean にしてください"
+    );
+    let preview = preview_merge_on(host, integration_dir, branch)?;
+    anyhow::ensure!(preview.clean, "競合のため統合できません: {}", preview.detail);
+    let message = format!("Integrate {branch}");
+    let output = run_git(
+        host,
+        integration_dir,
+        ["merge", "--no-ff", branch, "-m", message.as_str()],
+    )
+    .context("git merge の実行に失敗")?;
+    if !output.success() {
+        let detail = git_fail_message(&output);
+        let _ = run_git(host, integration_dir, ["merge", "--abort"]);
+        anyhow::bail!("統合に失敗したため merge を中止しました: {detail}");
+    }
+    git_head_oid_on(host, integration_dir).context("統合後の HEAD を取得できない")
 }
 
 /// worktree を削除（`git worktree remove [--force] <path>`）。dirty だと非 force で git が拒否＝安全側。
@@ -825,21 +940,33 @@ pub fn inline_command_on(host: &dyn Host, dir: &Path, instruction: &str) -> Resu
 /// `inline_command_on` と同型（一時ファイル経由で shell 引用を回避・host 経由なので remote でも動く）。
 /// 失敗（claude 未導入・空応答）は `Err`。呼び出し側は静かに既定名のままにする。
 pub fn name_thread_on(host: &dyn Host, dir: &Path, excerpt: &str, template: &str) -> Result<String> {
+    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+    let prompt = "入力はエージェントとの会話の冒頭です。この会話に短いタイトルを付けて。\
+        日本語・18文字以内・体言止め・記号や引用符や句読点や番号は付けない・タイトルだけを1行で出力して。";
+    oneshot_line_on(host, dir, excerpt, template, prompt, 24)
+}
+
+/// 汎用の 1 行生成（スレッド命名・Tier 2 遷移スナップショット要約が共用・FLEET-CONTROL-PLAN P4）。
+/// `template` = 既定 Agent ごとの shell テンプレート（{prompt}=指示・{excerpt}=入力ファイル・
+/// {out}=最終メッセージ出力先）。stdout にクリーンな 1 行が載るよう各 CLI 差を吸収する
+/// （claude -p は素で stdout・codex exec は agent 実行で stdout が汚いため --output-last-message + cat）。
+/// `prompt` に引用符 / $ / バッククォートを含めないこと（sh -c の二重引用符に素で埋める）。
+pub fn oneshot_line_on(
+    host: &dyn Host,
+    dir: &Path,
+    input: &str,
+    template: &str,
+    prompt: &str,
+    max_chars: usize,
+) -> Result<String> {
     let unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
-    let temp = PathBuf::from(format!("/tmp/shirushi-threadname-{unix_ms}.txt"));
-    let out = PathBuf::from(format!("/tmp/shirushi-threadname-{unix_ms}.out"));
-    host.write_file(&temp, excerpt.as_bytes(), host::WriteCondition::Any)
-        .context("スレッド命名の一時ファイル作成に失敗")?;
-    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
-    let prompt = "入力はエージェントとの会話の冒頭です。この会話に短いタイトルを付けて。\
-        日本語・18文字以内・体言止め・記号や引用符や句読点や番号は付けない・タイトルだけを1行で出力して。";
-    // `template` = 既定 Agent ごとの shell テンプレート（{prompt}=指示・{excerpt}=会話冒頭ファイル・
-    // {out}=最終メッセージ出力先）。stdout にクリーンなタイトルが載るよう各 CLI 差を吸収する
-    // （claude -p は素で stdout・codex exec は agent 実行で stdout が汚いため --output-last-message + cat）。
-    // Claude 決め打ちをやめた。
+    let temp = PathBuf::from(format!("/tmp/shirushi-oneshot-{unix_ms}.txt"));
+    let out = PathBuf::from(format!("/tmp/shirushi-oneshot-{unix_ms}.out"));
+    host.write_file(&temp, input.as_bytes(), host::WriteCondition::Any)
+        .context("oneshot の一時ファイル作成に失敗")?;
     let body = template
         .replace("{prompt}", prompt)
         .replace("{excerpt}", &temp.display().to_string())
@@ -851,22 +978,22 @@ pub fn name_thread_on(host: &dyn Host, dir: &Path, excerpt: &str, template: &str
     );
     let output = host
         .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
-        .context("スレッド命名の実行に失敗（既定 Agent の CLI 未導入？）")?;
-    anyhow::ensure!(output.success(), "命名に失敗: {}", git_fail_message(&output));
+        .context("oneshot の実行に失敗（既定 Agent の CLI 未導入？）")?;
+    anyhow::ensure!(output.success(), "oneshot に失敗: {}", git_fail_message(&output));
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
     let text = strip_code_fence(&raw);
-    // 最初の非空行・前後の引用符/括弧/空白を除去・24 字で clamp（LLM の饒舌さ対策）。
-    let name: String = text
+    // 最初の非空行・前後の引用符/括弧/空白を除去・max_chars で clamp（LLM の饒舌さ対策）。
+    let line: String = text
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or_default()
         .trim_matches(|c: char| matches!(c, '"' | '\'' | '「' | '」' | '『' | '』' | '　' | ' '))
         .chars()
-        .take(24)
+        .take(max_chars)
         .collect();
-    anyhow::ensure!(!name.trim().is_empty(), "命名結果が空");
-    Ok(name.trim().to_string())
+    anyhow::ensure!(!line.trim().is_empty(), "oneshot の結果が空");
+    Ok(line.trim().to_string())
 }
 
 /// 出力が ``` フェンスで包まれていたら中身だけ取り出す（そのままなら素通し）。
@@ -1461,19 +1588,72 @@ pub fn open_with_default_app_local(path: &Path) -> Result<()> {
 
 // ── ファイル監視（watch 基盤・M10） ──
 
-/// ローカル worktree の再帰監視（notify・macOS は FSEvents）。ハンドルを drop すると監視停止。
-/// notify の型は外に漏らさない（remote watch を M13 で Host 経由に足すときの差し替え面）。
+/// worktree の再帰監視ハンドル。drop すると監視停止。
+/// local は notify（FSEvents）、remote は Host 経由の poll（daemon push）。型は外に漏らさない。
 pub struct Watch {
-    _watcher: notify::RecommendedWatcher,
+    _inner: WatchInner,
 }
 
-/// `root` 以下を再帰監視し、変化したパス群をコールバックへ渡す（呼び出しは **watcher スレッド**。
-/// UI 側は channel で受けて自分の executor へ運ぶこと）。イベント種別は使わない＝「そのパスで
-/// 何かが起きた」の粒度（リロード判定などは受け手がメタデータで行う）。
+enum WatchInner {
+    /// notify watcher は drop で監視停止するため保持のみ（read しない）。
+    #[allow(dead_code)]
+    Local(notify::RecommendedWatcher),
+    /// remote: pump スレッドが HostWatch を所有。drop で stop を立てるとスレッドが抜け、
+    /// HostWatch も drop されて daemon 側の監視も止まる。
+    Remote {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if let WatchInner::Remote { stop } = &self._inner {
+            stop.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// `root` 以下を再帰監視し、変化したパス群（**絶対パス**）をコールバックへ渡す。
+/// - local: notify（macOS は FSEvents）。呼び出しは watcher スレッド。
+/// - remote: Host の watch（M13・daemon poll → Event push）。相対パスを `root` 基準で絶対化して
+///   渡す＝local と同じく開バッファのパスと突き合わせられる。
+/// イベント種別は使わない（「そのパスで何かが起きた」の粒度）。UI 側は channel で受けて executor へ。
 pub fn watch_root(
+    host: &std::sync::Arc<dyn Host>,
     root: &Path,
     on_paths: impl Fn(Vec<PathBuf>) + Send + 'static,
 ) -> Result<Watch> {
+    if host.is_remote() {
+        let host_watch = host
+            .clone()
+            .watch()
+            .context("remote watch の開始に失敗")?
+            .context("remote host が watch を返さない")?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pump_stop = stop.clone();
+        let root = root.to_path_buf();
+        std::thread::Builder::new()
+            .name("shirushi-remote-watch-pump".to_string())
+            .spawn(move || {
+                use std::sync::atomic::Ordering::Acquire;
+                while !pump_stop.load(Acquire) {
+                    if let Some(relative) =
+                        host_watch.recv_timeout(std::time::Duration::from_millis(500))
+                    {
+                        let absolute: Vec<PathBuf> =
+                            relative.into_iter().map(|path| root.join(path)).collect();
+                        if !absolute.is_empty() {
+                            on_paths(absolute);
+                        }
+                    }
+                }
+            })
+            .context("remote watch pump thread spawn")?;
+        return Ok(Watch {
+            _inner: WatchInner::Remote { stop },
+        });
+    }
+
     use notify::Watcher as _;
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
         if let Ok(event) = result {
@@ -1486,7 +1666,9 @@ pub fn watch_root(
     watcher
         .watch(root, notify::RecursiveMode::Recursive)
         .with_context(|| format!("ファイル監視を開始できない: {}", root.display()))?;
-    Ok(Watch { _watcher: watcher })
+    Ok(Watch {
+        _inner: WatchInner::Local(watcher),
+    })
 }
 
 #[derive(Default)]
@@ -1859,6 +2041,42 @@ mod tests {
         delete_branch(&root, "feature", true).unwrap();
         assert!(!git_branches(&root).contains(&"feature".to_string()));
 
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn task_worktree_preview_and_explicit_integration() {
+        let root = scratch("task_integration");
+        let wt = scratch("task_integration_wt");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git").current_dir(dir).args(args).output().expect("git 実行")
+        };
+        if !git(&root, &["init", "-q"]).status.success() {
+            return;
+        }
+        git(&root, &["config", "user.email", "t@example.com"]);
+        git(&root, &["config", "user.name", "tester"]);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+
+        create_task_worktree_on(&LocalHost, &root, &wt, "task/preview").unwrap();
+        std::fs::write(wt.join("task.txt"), "done\n").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["commit", "-q", "-m", "task result"]);
+
+        let preview = preview_merge_on(&LocalHost, &root, "task/preview").unwrap();
+        assert!(preview.clean, "独立変更は conflict radar を通る: {}", preview.detail);
+        let before = git_head_oid_on(&LocalHost, &root).unwrap();
+        let after = integrate_branch_on(&LocalHost, &root, "task/preview").unwrap();
+        assert_ne!(before, after);
+        assert_eq!(std::fs::read_to_string(root.join("task.txt")).unwrap(), "done\n");
+
+        remove_worktree(&root, &wt, true).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&wt);
     }

@@ -3,6 +3,8 @@ use crate::workspace::*;
 /// Rail 上の project metadata と、遅延復元に必要なファイル一覧。
 pub(crate) struct ProjectSlot {
     pub(crate) worktree: Rc<Worktree>,
+    /// Fleet ではこの stable ID / lifecycle を参照し、rail の添字を identity にしない。
+    pub(crate) task_space: TaskSpace,
     pub(crate) name: SharedString,
     /// 描画中に git process/RPC を起動しないための現在ブランチ cache。
     pub(crate) branch: Option<String>,
@@ -31,6 +33,22 @@ impl ProjectSlot {
     }
 }
 
+/// 「＋」統一オープン（[`PickerMode::OpenLauncher`]）の 1 行 → 確定時の動作。
+/// id は [`ProjectSession::picker_open_rows`] の添字。固定アクション + 最近（local/remote 混在）。
+#[derive(Clone)]
+pub(crate) enum OpenRow {
+    /// フォルダを開く（ネイティブのディレクトリダイアログ → 現レールに追加）。
+    OpenFolder,
+    /// ファイルを開く（ネイティブのファイルダイアログ → タブで開く）。
+    OpenFile,
+    /// リモートに接続（SSH ホストピッカーへ遷移）。
+    ConnectRemote,
+    /// 最近のローカルプロジェクト（このパスを現レールに開く）。
+    RecentLocal(PathBuf),
+    /// 最近のリモートプロジェクト（この `ssh://` URI へ接続して現レールに開く）。
+    RecentRemote(String),
+}
+
 /// 1 project の長寿命 UI / controller 群。非アクティブ時も Entity と process を保持する。
 pub struct ProjectSession {
     pub(crate) editor_area: EditorArea,
@@ -40,11 +58,17 @@ pub struct ProjectSession {
     pub(crate) repository: RepositoryController,
     pub(crate) git_panel: Entity<GitPanel>,
     pub(crate) terminal_dock: Entity<TerminalDock>,
+    /// Fleet の Tests surface 専用。通常 Terminal と同じ Entity を二箇所へ描画しない。
+    pub(crate) tests_dock: Entity<TerminalDock>,
     pub(crate) agent_active: bool,
     pub(crate) picker_worktree_rows: Vec<PathBuf>,
     pub(crate) picker_ssh_hosts: Vec<host::SshConfigHost>,
     pub(crate) picker_ssh_recent: Vec<String>,
-    pub(crate) picker_history: Vec<(String, String, i64)>,
+    /// スレッド履歴 Picker の行データ (id, name, color_index, created_at_ms, last_input_at_ms)。
+    /// 時刻は復元時に Thread へ引き継ぐ（「いつスタート/最終入力」表示・M14）。
+    pub(crate) picker_history: Vec<(String, String, i64, i64, Option<i64>)>,
+    /// 「＋」統一オープンの行データ（id → 動作）。[`OpenRow`] を参照。
+    pub(crate) picker_open_rows: Vec<OpenRow>,
     pub(crate) todo_panel: Entity<TodoPanel>,
     pub(crate) pending_open_history: bool,
     pub(crate) agent_touched: HashMap<PathBuf, Hsla>,
@@ -87,12 +111,26 @@ impl Workspace {
         storage: Option<storage::Storage>,
         cx: &mut Context<Self>,
     ) -> ProjectSession {
-        let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
+        let task_panel = slot.is_some_and(|slot| !slot.task_space.is_integration());
+        let agent_panel = if task_panel {
+            cx.new(|cx| AgentPanel::new_task(theme.clone(), cx))
+        } else {
+            cx.new(|cx| AgentPanel::new(theme.clone(), cx))
+        };
         if let Some(storage) = storage {
-            agent_panel.update(cx, |panel, cx| panel.set_storage(storage, cx));
+            if let Some(slot) = slot {
+                let scope = slot.task_space.id.0.clone();
+                let legacy = slot.name.to_string();
+                agent_panel.update(cx, |panel, cx| {
+                    panel.set_storage_for_scope(storage, scope, &legacy, cx)
+                });
+            } else {
+                agent_panel.update(cx, |panel, cx| panel.set_storage(storage, cx));
+            }
         }
         let terminal_launch = Self::terminal_launch_for(slot);
         let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
+        let tests_dock = cx.new(|_| TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()));
         let explorer = cx.new(|_| Explorer::new(explorer_view));
         let git_panel = cx.new(GitPanel::new);
         let accent = slot.map(|slot| slot.color).unwrap_or_else(|| project_color(0));
@@ -102,6 +140,7 @@ impl Workspace {
             &explorer,
             &git_panel,
             &terminal_dock,
+            &tests_dock,
             &todo_panel,
             cx,
         );
@@ -113,11 +152,13 @@ impl Workspace {
             repository: RepositoryController { status: HashMap::new(), refresh_generation: 0 },
             git_panel,
             terminal_dock,
+            tests_dock,
             agent_active: false,
             picker_worktree_rows: Vec::new(),
             picker_ssh_hosts: Vec::new(),
             picker_ssh_recent: Vec::new(),
             picker_history: Vec::new(),
+            picker_open_rows: Vec::new(),
             todo_panel,
             pending_open_history: false,
             agent_touched: HashMap::new(),
@@ -185,6 +226,184 @@ impl Workspace {
         }
     }
 
+    /// DB の TaskSpace 台帳を、現在開いている worktree へ stable ID で重ねる。
+    /// rail 順・active index・表示セルの有無には依存しない。未登録 worktree はこの場で台帳へ加える。
+    pub(crate) fn restore_task_spaces(&mut self, cx: &mut Context<Self>) {
+        let Some(storage) = self.persistence.storage.clone() else {
+            return;
+        };
+        cx.spawn(async move |workspace, cx| {
+            let storage_for_load = storage.clone();
+            let loaded = cx
+                .background_executor()
+                .spawn(async move {
+                    let records = storage_for_load.load_task_spaces();
+                    // ニュースの backfill（P2）: 直近イベントを新しい順で 60 件（描画スレッド外で読む）。
+                    let events = storage_for_load.load_recent_task_events(60).unwrap_or_default();
+                    records.map(|records| (records, events))
+                })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                let (records, events) = match loaded {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        eprintln!("TaskSpace 台帳を復元できない: {error:#}");
+                        return;
+                    }
+                };
+                let by_id: HashMap<_, _> = records
+                    .into_iter()
+                    .map(|record| (record.id.clone(), record))
+                    .collect();
+                let mut missing = Vec::new();
+                for slot in &mut workspace.project_sessions.projects {
+                    if let Some(record) = by_id.get(slot.task_space.id.as_str()) {
+                        // lifecycle は台帳が正・kind は worktree の現実（branch 接頭辞）が正。
+                        slot.task_space.repository_id = record.repository_id.clone();
+                        slot.task_space.title = SharedString::from(record.title.clone());
+                        slot.task_space.phase = record.phase;
+                        slot.task_space.base_oid = record.base_oid.clone();
+                        slot.task_space.head_oid = record.head_oid.clone();
+                        slot.task_space.result_summary =
+                            record.result_summary.clone().map(SharedString::from);
+                        slot.task_space.created_at_ms = record.created_at;
+                    } else {
+                        missing.push(slot.task_space.to_record(slot));
+                    }
+                }
+                if !missing.is_empty() {
+                    let storage = storage.clone();
+                    cx.background_executor()
+                        .spawn(async move {
+                            for record in missing {
+                                if let Err(error) = storage.upsert_task_space(&record) {
+                                    eprintln!("TaskSpace を永続化できない: {error:#}");
+                                }
+                            }
+                        })
+                        .detach();
+                }
+                // ニュースの backfill（P2）: live 行が既にあれば触らない（再起動直後だけ埋める）。
+                // 帰属色は開いている slot から・閉じた Task は中立色（色=識別の規律: 不明に色を発明しない）。
+                if workspace.notifications.news.is_empty() {
+                    let neutral = workspace.theme.fg2;
+                    let color_by_id: HashMap<String, Hsla> = workspace
+                        .project_sessions
+                        .projects
+                        .iter()
+                        .map(|slot| (slot.task_space.id.as_str().to_string(), slot.color))
+                        .collect();
+                    let mut backfill = Vec::new();
+                    for event in &events {
+                        let Some(record) = by_id.get(&event.task_id) else {
+                            continue;
+                        };
+                        let payload: serde_json::Value =
+                            serde_json::from_str(&event.payload).unwrap_or_default();
+                        let digest = payload
+                            .get("digest")
+                            .and_then(serde_json::Value::as_str)
+                            .or_else(|| payload.get("summary").and_then(serde_json::Value::as_str));
+                        let (kind, text) = match event.kind.as_str() {
+                            "phase_changed" => {
+                                let phase = payload
+                                    .get("phase")
+                                    .and_then(serde_json::Value::as_str)
+                                    .and_then(TaskPhase::from_str)
+                                    .unwrap_or(record.phase);
+                                Self::news_text_for_phase(phase, digest)
+                            }
+                            "task_created" => {
+                                (NewsKind::PhaseChange, SharedString::from("→ planned"))
+                            }
+                            _ => continue,
+                        };
+                        backfill.push(NewsItem {
+                            at_ms: event.created_at,
+                            color: color_by_id
+                                .get(&event.task_id)
+                                .copied()
+                                .unwrap_or(neutral),
+                            title: SharedString::from(record.title.clone()),
+                            text,
+                            kind,
+                        });
+                    }
+                    workspace.notifications.news = backfill; // 既に新しい順（id DESC）
+                }
+                // 復元前に seed された index ベースの旧セルを残さない。
+                if workspace.chrome.fleet_mode {
+                    workspace.seed_fleet_cells(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn persist_task_space(&self, session_index: usize, cx: &mut Context<Self>) {
+        let (Some(storage), Some(slot)) = (
+            self.persistence.storage.clone(),
+            self.project_sessions.projects.get(session_index),
+        ) else {
+            return;
+        };
+        let record = slot.task_space.to_record(slot);
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = storage.upsert_task_space(&record) {
+                    eprintln!("TaskSpace を永続化できない: {error:#}");
+                }
+            })
+            .detach();
+    }
+
+    /// Task lifecycle と event log を同時に進める。Agent runtime の状態とは別軸だが、
+    /// permission wait / turn end の確定イベントを lifecycle へ写像する入口はここに集約する。
+    /// `digest` = 遷移スナップショット（Tier 1・P1）。task_events の payload に載せて再起動後も残す。
+    pub(crate) fn transition_task_space(
+        &mut self,
+        session_index: usize,
+        phase: TaskPhase,
+        reason: &str,
+        digest: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.project_sessions.projects.get_mut(session_index) else {
+            return;
+        };
+        if slot.task_space.is_integration() {
+            return;
+        }
+        slot.task_space.phase = phase;
+        slot.task_space.head_oid =
+            project::git_head_oid_on(slot.worktree.host().as_ref(), slot.worktree.root());
+        let record = slot.task_space.to_record(slot);
+        let news_color = slot.color;
+        let news_title = slot.task_space.title.clone();
+        let payload = serde_json::json!({
+            "phase": phase.as_str(),
+            "source": "gui",
+            "reason": reason,
+            "digest": digest,
+            "head_oid": record.head_oid,
+        })
+        .to_string();
+        // ニュース = task_events の鏡（P2）。台帳へ書く遷移と同じ場所で 1 行積む。
+        let (news_kind, news_text) = Self::news_text_for_phase(phase, digest);
+        self.push_news(news_kind, news_color, news_title, news_text);
+        // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
+        self.schedule_control_summary(cx);
+        let Some(storage) = self.persistence.storage.clone() else {
+            cx.notify();
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move { storage.commit_task_transition(&record, &payload) })
+            .detach();
+        cx.notify();
+    }
+
     pub fn new_sources_with_active(
         sources: Vec<ProjectSource>,
         active: usize,
@@ -204,6 +423,7 @@ impl Workspace {
                     // `.shirushi/settings.json` の color(#hex)/icon(絵文字) を反映（M12-11）。
                     let identity = read_project_identity(worktree.root());
                     let mut slot = ProjectSlot {
+                        task_space: TaskSpace::for_worktree(&worktree, None),
                         name: worktree.name().into(),
                         branch: None,
                         remote_host,
@@ -260,9 +480,19 @@ impl Workspace {
         };
         let mut sessions = Vec::with_capacity(projects.len().max(1));
         for index in 0..projects.len().max(1) {
-            let agent_panel = cx.new(|cx| AgentPanel::new(theme.clone(), cx));
+            let task_panel = projects
+                .get(index)
+                .is_some_and(|slot| !slot.task_space.is_integration());
+            let agent_panel = if task_panel {
+                cx.new(|cx| AgentPanel::new_task(theme.clone(), cx))
+            } else {
+                cx.new(|cx| AgentPanel::new(theme.clone(), cx))
+            };
             let terminal_launch = Self::terminal_launch_for(projects.get(index));
             let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
+            let tests_dock = cx.new(|_| {
+                TerminalDock::new(Self::terminal_launch_for(projects.get(index)), theme.clone())
+            });
             let explorer = cx.new(|_| Explorer::new(explorer_view));
             let git_panel = cx.new(GitPanel::new);
             let accent = projects.get(index).map(|slot| slot.color).unwrap_or_else(|| project_color(0));
@@ -272,6 +502,7 @@ impl Workspace {
                 &explorer,
                 &git_panel,
                 &terminal_dock,
+                &tests_dock,
                 &todo_panel,
                 cx,
             );
@@ -309,11 +540,13 @@ impl Workspace {
                 repository: RepositoryController { status: HashMap::new(), refresh_generation: 0 },
                 git_panel,
                 terminal_dock,
+                tests_dock,
                 agent_active: false,
                 picker_worktree_rows: Vec::new(),
                 picker_ssh_hosts: Vec::new(),
                 picker_ssh_recent: Vec::new(),
                 picker_history: Vec::new(),
+                picker_open_rows: Vec::new(),
                 todo_panel,
                 pending_open_history: false,
                 agent_touched: HashMap::new(),
@@ -333,6 +566,27 @@ impl Workspace {
                 show_left: true,
                 show_right: true,
                 show_bottom: false,
+                show_herd: std::env::var_os("SHIRUSHI_HERD").is_some(),
+                fleet_mode: std::env::var_os("SHIRUSHI_FLEET").is_some()
+                    || std::env::var_os("SHIRUSHI_CONTROL").is_some(),
+                fleet_cells: Vec::new(),
+                // 管制タブ（P3）。既定は当面 Graph（計画 §P3・ドッグフーディング後に再判断）。
+                fleet_center_view: if std::env::var_os("SHIRUSHI_CONTROL").is_some() {
+                    FleetCenterView::Control
+                } else {
+                    FleetCenterView::Graph
+                },
+                graph_view: match std::env::var("SHIRUSHI_GRAPH").as_deref() {
+                    Ok("hub") => GraphView::Hub,
+                    Ok("tree") => GraphView::Tree,
+                    Ok("card") => GraphView::Card,
+                    _ => GraphView::Fan,
+                },
+                graph_collapsed: false,
+                fleet_maximized: std::env::var("SHIRUSHI_FLEET_MAX")
+                    .ok()
+                    .and_then(|value| value.parse().ok()),
+                fleet_clock: false,
                 show_settings: std::env::var_os("SHIRUSHI_SETTINGS").is_some()
                     || (!settings::get(cx).onboarded
                         && !(cfg!(debug_assertions)
@@ -347,6 +601,8 @@ impl Workspace {
                 explorer_width: DOCK_WIDTH,
                 resizing_explorer: false,
                 should_move_window: false,
+                control_focus: cx.focus_handle(),
+                herd_solo_expanded: false,
             },
             overlays: WorkspaceOverlays {
                 picker: None,
@@ -362,11 +618,19 @@ impl Workspace {
                 add_project_dialog_open: false,
                 pending_project_switch: None,
             },
-            notifications: NotificationCenter { toasts: Vec::new(), toast_gen: 0 },
+            notifications: NotificationCenter {
+                toasts: Vec::new(),
+                toast_gen: 0,
+                crash_notice: None,
+                news: Vec::new(),
+            },
             persistence: WorkspacePersistence { state_path, storage: None },
             updater: UpdateController { status: None },
+            window_active: true,
+            control_summary: None,
+            control_summary_gen: 0,
         };
-        workspace.refresh_git_status(cx); // ツリー/タブの git 色分け用
+        workspace.refresh_all_git_status(cx); // ツリー/タブの git 色分け + herd の各 space のブランチ（M14 ①）
         // 開発用: SHIRUSHI_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_GIT_PANEL").is_some() {
             workspace.git_panel.update(cx, |panel, cx| panel.set_open(true, cx));
@@ -451,10 +715,14 @@ impl Workspace {
                 });
             }
         }
-        workspace.update_agent_destination(cx); // 宛先チップにプロジェクト/ブランチを反映
+        // Fleet は全 Task の composer を同時に操作できるので、active だけでなく全 session の宛先を設定。
+        for index in 0..workspace.project_sessions.projects.len() {
+            workspace.update_agent_destination_for(index, cx);
+        }
         workspace.start_watcher(cx); // アクティブプロジェクトのファイル監視（M10 watch 基盤）
         workspace.loaded = true;
         workspace.schedule_update_check(cx); // 自動アップデートの確認（M13・90s 後に背景で）
+        workspace.check_crash_notice(cx); // 前回クラッシュの通知（M13・pending マーカーを 1 回だけ消費）
         // 開発用: SHIRUSHI_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
         if let Ok(version) = std::env::var("SHIRUSHI_UPDATE_PROBE") {
             if !version.is_empty() {
@@ -473,14 +741,33 @@ impl Workspace {
             match storage::Storage::open(&db_path) {
                 Ok(handle) => {
                     // Agent パネルへも同じハンドルを渡す（スレッド永続化・M12-1。ワーカー 1 本を共有）。
-                    for session in &workspace.project_sessions.sessions {
-                        session
-                            .agent_panel
-                            .update(cx, |panel, cx| panel.set_storage(handle.clone(), cx));
+                    for (index, session) in workspace.project_sessions.sessions.iter().enumerate() {
+                        if let Some(slot) = workspace.project_sessions.projects.get(index) {
+                            let scope = slot.task_space.id.0.clone();
+                            let legacy = slot.name.to_string();
+                            session.agent_panel.update(cx, |panel, cx| {
+                                panel.set_storage_for_scope(handle.clone(), scope, &legacy, cx)
+                            });
+                        } else {
+                            session
+                                .agent_panel
+                                .update(cx, |panel, cx| panel.set_storage(handle.clone(), cx));
+                        }
                     }
                     workspace.persistence.storage = Some(handle);
                     // リモートプロジェクトの窓色をローカル DB から解決（M13 #3b）。
                     workspace.apply_remote_host_colors();
+                    workspace.restore_task_spaces(cx);
+                    if let Some(storage) = &workspace.persistence.storage {
+                        for slot in &workspace.project_sessions.projects {
+                            if !slot.worktree.host().is_remote() {
+                                let _ = storage.record_local_project(
+                                    &slot.worktree.root().to_string_lossy(),
+                                    slot.name.as_ref(),
+                                );
+                            }
+                        }
+                    }
                 }
                 Err(error) => eprintln!("ローカル DB を開けない（hot exit 無効）: {error:#}"),
             }
@@ -616,6 +903,15 @@ impl Workspace {
     /// 世代番号で古い結果を捨てる（gutter diff と同型）。UI スレッドで git を叩かない（ARCHITECTURE §9）。
     pub(crate) fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
         self.refresh_git_status_for(self.project_sessions.active, cx);
+    }
+
+    /// 全 slot の git 状態（＝各 worktree space の**現在ブランチ**）を背景で埋める。herd/⌘O が
+    /// 非アクティブ space のブランチも出せるようにする（`refresh_git_status` は active のみ・M14 ①）。
+    /// 起動時とレール増減時に回す。各 slot 独立の背景 spawn（世代番号で古い結果は破棄）。
+    pub(crate) fn refresh_all_git_status(&mut self, cx: &mut Context<Self>) {
+        for index in 0..self.project_sessions.sessions.len() {
+            self.refresh_git_status_for(index, cx);
+        }
     }
 
     pub(crate) fn refresh_git_status_for(&mut self, session_index: usize, cx: &mut Context<Self>) {

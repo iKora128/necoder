@@ -327,6 +327,7 @@ impl Workspace {
         panel.update(cx, |panel, cx| panel.set_open(!was_open, cx));
         if !was_open {
             self.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
+            self.chrome.show_herd = false;
             self.chrome.show_left = true;
             self.reload_todo_board_for(self.project_sessions.active, cx);
         }

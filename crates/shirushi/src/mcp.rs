@@ -120,6 +120,89 @@ fn tool_schemas() -> Value {
             "name": "git_status",
             "description": "git の作業ツリー状態（変更/追加/削除/未追跡ファイル）。",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "fleet_create_task",
+            "description": "IntegrationSpace から隔離 branch/worktree を作成し、永続 Task ledger に登録する。",
+            "inputSchema": { "type": "object", "required": ["title"], "properties": {
+                "title": { "type": "string" }
+            } }
+        },
+        {
+            "name": "fleet_list_tasks",
+            "description": "この repository の TaskSpace と lifecycle を一覧する。",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "fleet_update_task",
+            "description": "Agent が Task の phase と構造化された結果 summary を報告する。",
+            "inputSchema": { "type": "object", "required": ["task_id", "phase"], "properties": {
+                "task_id": { "type": "string" },
+                "phase": { "type": "string", "enum": storage::TaskPhase::ALL.map(storage::TaskPhase::as_str) },
+                "summary": { "type": "string" }
+            } }
+        },
+        {
+            "name": "fleet_wait_task",
+            "description": "別 Task が指定 phase になるまで永続 ledger を待つ（GUI 再起動に依存しない）。",
+            "inputSchema": { "type": "object", "required": ["task_id", "phase"], "properties": {
+                "task_id": { "type": "string" },
+                "phase": { "type": "string", "enum": storage::TaskPhase::ALL.map(storage::TaskPhase::as_str) },
+                "timeout_seconds": { "type": "integer" }
+            } }
+        },
+        {
+            "name": "fleet_review_task",
+            "description": "read-only merge preview (Conflict Radar) を実行し merge_ready / changes_requested へ進める。",
+            "inputSchema": { "type": "object", "required": ["task_id"], "properties": {
+                "task_id": { "type": "string" }
+            } }
+        },
+        {
+            "name": "fleet_integrate_task",
+            "description": "merge_ready Task を clean な IntegrationSpace へ明示統合する。失敗時は merge abort。",
+            "inputSchema": { "type": "object", "required": ["task_id"], "properties": {
+                "task_id": { "type": "string" }
+            } }
+        },
+        {
+            "name": "fleet_spawn_agent",
+            "description": "Task の worktree に AgentPanel/thread を起こし、必要なら初回 prompt を送る（要 GUI 起動・P5）。",
+            "inputSchema": { "type": "object", "required": ["task_id"], "properties": {
+                "task_id": { "type": "string" },
+                "agent": { "type": "string", "description": "エージェント表示名（省略 = 既定）" },
+                "prompt": { "type": "string" }
+            } }
+        },
+        {
+            "name": "fleet_send",
+            "description": "起動中 Task のアクティブスレッドへ追撃 prompt を送る（要 GUI 起動・P5）。",
+            "inputSchema": { "type": "object", "required": ["task_id", "message"], "properties": {
+                "task_id": { "type": "string" },
+                "message": { "type": "string" }
+            } }
+        },
+        {
+            "name": "fleet_digest",
+            "description": "Task の事実層 + Tier1 digest（phase/plan/digest/tokens）。フル transcript は返さない（3 段圧縮）。",
+            "inputSchema": { "type": "object", "required": ["task_id"], "properties": {
+                "task_id": { "type": "string" }
+            } }
+        },
+        {
+            "name": "fleet_set_depends",
+            "description": "Task の依存（depends_on）を全量置換する。wait-deps と組で「B の完了を待って merge」を組む。",
+            "inputSchema": { "type": "object", "required": ["task_id", "depends_on"], "properties": {
+                "task_id": { "type": "string" },
+                "depends_on": { "type": "array", "items": { "type": "string" } }
+            } }
+        },
+        {
+            "name": "fleet_events",
+            "description": "全 Task 横断の task_events 差分（since_id より新しいものを古い順・最大 200 件）。",
+            "inputSchema": { "type": "object", "properties": {
+                "since_id": { "type": "integer" }
+            } }
         }
     ])
 }
@@ -134,6 +217,17 @@ fn handle_tool_call(id: Option<Value>, request: &Value, root: &Path) -> Value {
         "write_file" => tool_write_file(&arguments, root),
         "search" => tool_search(&arguments, root),
         "git_status" => tool_git_status(root),
+        "fleet_create_task" => tool_fleet_create(&arguments, root),
+        "fleet_list_tasks" => tool_fleet_list(root),
+        "fleet_update_task" => tool_fleet_update(&arguments),
+        "fleet_wait_task" => tool_fleet_wait(&arguments),
+        "fleet_review_task" => tool_fleet_review(&arguments, root),
+        "fleet_integrate_task" => tool_fleet_integrate(&arguments, root),
+        "fleet_spawn_agent" => tool_fleet_spawn(&arguments),
+        "fleet_send" => tool_fleet_send(&arguments),
+        "fleet_digest" => tool_fleet_digest(&arguments),
+        "fleet_set_depends" => tool_fleet_set_depends(&arguments),
+        "fleet_events" => tool_fleet_events(&arguments),
         other => Err(format!("未知のツール: {other}")),
     };
     match outcome {
@@ -224,6 +318,126 @@ fn tool_git_status(root: &Path) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
+fn task_json(task: &storage::TaskSpaceRecord) -> String {
+    serde_json::to_string_pretty(&json!({
+        "id": task.id,
+        "root": task.root,
+        "branch": task.branch,
+        "title": task.title,
+        "kind": task.kind.as_str(),
+        "phase": task.phase.as_str(),
+        "base_oid": task.base_oid,
+        "head_oid": task.head_oid,
+        "result_summary": task.result_summary,
+    }))
+    .unwrap_or_default()
+}
+
+fn tool_fleet_create(arguments: &Value, root: &Path) -> Result<String, String> {
+    let title = arguments.get("title").and_then(Value::as_str).ok_or("title が必要")?;
+    super::fleet::create_task(root, title)
+        .map(|task| task_json(&task))
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_list(root: &Path) -> Result<String, String> {
+    super::fleet::list_tasks(root)
+        .map(|tasks| tasks.iter().map(task_json).collect::<Vec<_>>().join("\n"))
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_update(arguments: &Value) -> Result<String, String> {
+    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    let phase = arguments.get("phase").and_then(Value::as_str).ok_or("phase が必要")?;
+    let phase = super::fleet::parse_phase(phase).map_err(|error| format!("{error:#}"))?;
+    let summary = arguments.get("summary").and_then(Value::as_str);
+    super::fleet::update_task(task_id, phase, summary)
+        .map(|task| task_json(&task))
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_wait(arguments: &Value) -> Result<String, String> {
+    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    let phase = arguments.get("phase").and_then(Value::as_str).ok_or("phase が必要")?;
+    let phase = super::fleet::parse_phase(phase).map_err(|error| format!("{error:#}"))?;
+    let seconds = arguments
+        .get("timeout_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(600)
+        .min(3600);
+    super::fleet::wait_task(task_id, phase, std::time::Duration::from_secs(seconds))
+        .map(|task| task_json(&task))
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_review(arguments: &Value, root: &Path) -> Result<String, String> {
+    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    super::fleet::review_task(task_id, root)
+        .map(|task| task_json(&task))
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_integrate(arguments: &Value, root: &Path) -> Result<String, String> {
+    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    super::fleet::integrate_task(task_id, root)
+        .map(|task| task_json(&task))
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_spawn(arguments: &Value) -> Result<String, String> {
+    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    super::fleet::gui_request(
+        "spawn_agent",
+        json!({
+            "task_id": task_id,
+            "agent": arguments.get("agent").and_then(Value::as_str),
+            "prompt": arguments.get("prompt").and_then(Value::as_str),
+        }),
+    )
+    .map(|result| result.to_string())
+    .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_send(arguments: &Value) -> Result<String, String> {
+    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    let message = arguments.get("message").and_then(Value::as_str).ok_or("message が必要")?;
+    super::fleet::gui_request("send", json!({ "task_id": task_id, "message": message }))
+        .map(|result| result.to_string())
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_digest(arguments: &Value) -> Result<String, String> {
+    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    super::fleet::gui_request("digest", json!({ "task_id": task_id }))
+        .map(|result| result.to_string())
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_set_depends(arguments: &Value) -> Result<String, String> {
+    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    let depends_on: Vec<String> = arguments
+        .get("depends_on")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .ok_or("depends_on（配列）が必要")?;
+    super::fleet::set_depends(task_id, &depends_on)
+        .map(|task| task_json(&task))
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn tool_fleet_events(arguments: &Value) -> Result<String, String> {
+    let since = arguments.get("since_id").and_then(Value::as_i64).unwrap_or(0);
+    super::fleet::events_since(since)
+        .map(|result| result.to_string())
+        .map_err(|error| format!("{error:#}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,7 +457,7 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["name"], "shirushi");
         let list = handle(&json!({ "jsonrpc":"2.0","id":2,"method":"tools/list" }), &root).unwrap();
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 16);
         // 通知は応答なし。
         assert!(handle(&json!({ "jsonrpc":"2.0","method":"notifications/initialized" }), &root).is_none());
         let _ = std::fs::remove_dir_all(&root);

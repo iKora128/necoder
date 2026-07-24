@@ -36,6 +36,14 @@ agent:
   generating: ⏺ Generating
   celebrate: 🙌 Done
   idle: Idle
+  state_working: Working
+  state_blocked: Waiting
+  state_done: Done
+  state_done_interrupted: Interrupted
+  state_idle: Idle
+  rollup_working: "%{n} working"
+  rollup_blocked: "%{n} waiting"
+  rollup_done: "%{n} done"
   empty: No threads (＋ / ⌘⇧A to start)
   checkpoint_row: checkpoint — %{label} (click to restore this point)
   context_filter: Filter by file name…
@@ -117,6 +125,9 @@ cmd:
   toggle_terminal: "View: Terminal"
   toggle_git_panel: "View: Source control"
   toggle_todo_board: "View: Todo board"
+  toggle_herd: "View: Fleet sidebar"
+  toggle_control: "View: Control"
+  toggle_fleet: "View: Fleet mode"
   split_right: "View: Split right"
   new_thread: "AI: New thread"
   next_tab: "Tabs: Next"
@@ -125,8 +136,102 @@ cmd:
   prev_thread: "AI: Previous thread"
   remote_ssh: "Remote: Connect to SSH Host"
   thread_history: "AI: Thread history"
+  report_bug: "Help: Report a Bug"
+  open_settings: "View: Open Settings"
+herd:
+  empty: No agents running
+  files_of: "Files · %{name}'s worktree"
+  mute: Mute this agent (no toasts / no completion sound)
+  unmute: Unmute
+control:
+  title: Control
+  tab_graph: Graph
+  worktrees: "+ %{n} worktrees"
+  goal: "Goal: %{goal}"
+  goal_unset: "Goal: unset (set fleet_goal in .shirushi/settings.json)"
+  chip_attention: attention
+  chip_done_unread: done·unread
+  chip_working: running
+  chip_integrated: merged
+  coordinator: Coordinator
+  coordinator_none: unassigned — appoint in Settings (P6)
+  summary_attention: "%{title} is at the head%{waited} — %{n} items need you"
+  summary_calm: "calm — nothing needs you (%{n} running)"
+  updated: "updated %{when}"
+  next: "next: %{what}"
+  next_badge: "next ⏎"
+  next_permission: permission decision
+  next_failed: handle failure
+  next_review: review
+  next_confirm: confirm done
+  queue: Attention
+  queue_done: "· done unread"
+  queue_empty: Nothing needs you — everyone is working / calm
+  enter_hint: ⏎ jumps to head
+  waiting: waited
+  files: "%{n} files"
+  open: Open
+  confirm: Confirm
+  discard: Discard
+  integrate: Integrate
+  review: Run radar
+  fix_instruct: Instruct fix
+  active: Running
+  immersion_hint: click to immerse (cell/thread)
+  add_task: "+ Task (start on a fresh worktree)"
+  free_cells: "free cells %{n}/8"
+  pipeline: Integration pipeline
+  pipeline_hint: WORKTREE → MAIN flow · chip=TASKSPACE
+news:
+  waiting: "waiting for approval — %{title}"
+  failed: "failed — %{detail}"
+fleet:
+  add_agent_simple: "+ Agent (parallel on a fresh worktree)"
+  lineage: Lineage
+  graph_fan: Fan
+  graph_tree: Tree
+  graph_card: Card
+  graph_hub: Hub
+  graph_collapse: Toggle graph
+  graph_main: main
+  graph_main_sub: IntegrationSpace
+  graph_tree_caption: "base ・ %{count} agents running"
+  graph_card_base: base
+  graph_card_head: main merge
+  graph_hub_agents: "%{count} agents"
+  news: News
+  news_idle: No activity
+  news_hint: task_events — coordinator decisions land in the same log (auditable)
+  cell_agent: Agent
+  cell_terminal: Terminal
+  cell_editor: Editor
+  cell_diff: Diff / Review
+  cell_tests: Tests
+  cell_terminal_hint: Shell (cwd = worktree)
+  cell_editor_hint: Editor (worktree)
+  closed: Closed thread
+  add_hint: Tasks are isolated in worktrees · max 8 surfaces
+  maximize: Maximize (tuck the rest away)
+  restore: Back to grid
+  add_agent: Agent (here)
+  add_agent_worktree: Agent + ⎇worktree
+  add_task: ＋ Task
+  add_agent_to_task: ＋ Agent to this Task
+  add_history: Restore from history
+launcher:
+  placeholder: Open or choose a recent project…
+  open_folder: Open Folder…
+  open_file: Open File…
+  connect_remote: Connect to Remote SSH…
+time:
+  just_now: just now
+  minutes_ago: "%{count}m"
+  hours_ago: "%{count}h"
+  days_ago: "%{count}d"
+  started: "started %{when}"
+  last_input: "input %{when}"
 rail:
-  add_tip: Add a folder as a project (⌘O switches)
+  add_tip: Open — folder / file / remote / recent (⌘O switches)
   add_prompt: Open
   menu_new_window: Open in new window
   menu_remove: Remove from rail
@@ -138,12 +243,16 @@ rail:
   open_project: Open project  ⌘O
   explorer: Toggle explorer
   search: Search  ⌘⇧F
+  herd: Fleet mode (lineage graph + status)
+  fleet: Fleet mode
   git: Source control  ⌃⇧G
   todos: Todo board
   agent: Toggle AI agent panel
   terminal: Terminal  ⌘J
   remote: Remote SSH
   settings: Settings
+titlebar:
+  fleet: Fleet
 settings:
   title: Settings
   agents_heading: AI Agents
@@ -158,12 +267,31 @@ settings:
   welcome_title: Welcome 🎨
   welcome_sub: Pick your agent and get started. You can change it anytime from ⚙.
   get_started: Get started →
+  prefs_heading: Behavior & editor
+  prefs_sub: settings.json is the source of truth; this just edits it.
+  pref_submit_on_enter: Submit on Enter
+  pref_submit_on_enter_sub: "Off = ⌘Enter to send (IME-safe)"
+  pref_soft_wrap: Soft wrap
+  pref_soft_wrap_sub: Can also toggle temporarily with ⌥Z
+  pref_format_on_save: Format on save
+  pref_format_on_save_sub: Supported languages only; ⌘S formats then saves
+  pref_agent_auto_name: Auto-name threads
+  pref_agent_auto_name_sub: AI titles new threads from the first exchange
+  pref_completion_sound: Completion sound
+  pref_completion_sound_sub: Plays when an agent turn finishes
+  pref_font_size: Font size
+  pref_tab_size: Tab width
+  pref_tabs_view: Thread tabs
+  tabs_view_bar: Bar
+  tabs_view_list: List
+  theme_hint: "Theme: %{name} (⌘⇧T to change)"
 explorer:
   up_folder: Up one folder
   back_to_project: Back to project
   view_tree: Tree view
   view_columns: Column view (Finder-like)
   view_icons: Icon view
+  ctx_open_here: Open as project here
   ctx_open_window: Open in new window
   ctx_open: Open
   ctx_open_default: Open with default app
@@ -241,6 +369,82 @@ update:
   available: ⬆ Update to v%{version}
   installing: ⬇ Updating…
   ready: ⟳ Restart to finish updating
+crash:
+  notice: ⚠ Crashed last time — click to report
+menu:
+  about: About Shirushi
+  settings: Settings…
+  services: Services
+  hide: Hide Shirushi
+  hide_others: Hide Others
+  show_all: Show All
+  quit: Quit Shirushi
+  file: File
+  open_project: Open / Switch Project…
+  open_file: Open File…
+  open_remote: Connect to SSH Host…
+  new_window: New Window
+  save: Save
+  close_tab: Close Tab
+  restore_tab: Reopen Closed Tab
+  edit: Edit
+  undo: Undo
+  redo: Redo
+  cut: Cut
+  copy: Copy
+  paste: Paste
+  select_all: Select All
+  select_next: Select Next Occurrence
+  add_cursor_above: Add Cursor Above
+  add_cursor_below: Add Cursor Below
+  move_line_up: Move Line Up
+  move_line_down: Move Line Down
+  duplicate_line: Duplicate Line
+  delete_line: Delete Line
+  toggle_comment: Toggle Comment
+  find: Find…
+  replace: Find and Replace…
+  find_project: Find in Project…
+  references: Find References
+  format: Format Document
+  rename_symbol: Rename Symbol…
+  code_actions: Code Actions…
+  inline_edit: AI Inline Edit…
+  view: View
+  command_palette: Command Palette…
+  terminal: Terminal
+  git_panel: Source Control
+  todo_board: Todo Board
+  herd: Fleet Sidebar
+  fleet: Fleet Mode
+  diagnostics: Diagnostics
+  split_right: Split Right
+  soft_wrap: Toggle Soft Wrap
+  theme: Switch Theme…
+  project_color: Project Color…
+  go: Go
+  back: Back
+  forward: Forward
+  goto_line: Go to Line…
+  outline: Go to Symbol in File…
+  workspace_symbols: Go to Symbol in Workspace…
+  definition: Go to Definition
+  next_diagnostic: Next Diagnostic
+  prev_diagnostic: Previous Diagnostic
+  next_hunk: Next Change
+  prev_hunk: Previous Change
+  next_tab: Next Tab
+  prev_tab: Previous Tab
+  ai: AI
+  new_thread: New Thread
+  thread_history: Thread History…
+  next_thread: Next Thread
+  prev_thread: Previous Thread
+  window: Window
+  minimize: Minimize
+  zoom: Zoom
+  help: Help
+  report_bug: Report a Bug…
 welcome:
   title: Shirushi — orient by color
   open_project: Open a project / worktree
@@ -251,6 +455,7 @@ ssh:
   label: Remote SSH
   button_tip: Open over SSH (~/.ssh/config aliases work)
   connecting: "Connecting to %{uri}… (first run deploys the server)"
+  browse_hint: "Connected. Right-click a folder → \"Open as project here\" to open it"
   picker_placeholder: Select SSH host (~/.ssh/config)
   manual_entry: Enter URI manually…
 goto:

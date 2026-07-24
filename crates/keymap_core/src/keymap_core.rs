@@ -206,6 +206,12 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
     }
   },
   {
+    "context": "FleetControl",
+    "bindings": {
+      "enter": "workspace::ControlNext"
+    }
+  },
+  {
     "bindings": {
       "cmd-p": "workspace::FileFinder",
       "cmd-shift-p": "workspace::CommandPalette",
@@ -241,6 +247,10 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-9": "workspace::ActivateProject9",
       "ctrl--": "workspace::NavigateBack",
       "ctrl-shift--": "workspace::NavigateForward",
+      "cmd-,": "workspace::OpenSettings",
+      "cmd-m": "workspace::Minimize",
+      "cmd-h": "workspace::Hide",
+      "cmd-alt-h": "workspace::HideOthers",
       "cmd-q": "shirushi::Quit"
     }
   }
@@ -269,7 +279,7 @@ mod tests {
     #[test]
     fn parses_sections_and_bindings() {
         let sections = parse(DEFAULT_KEYMAP_JSON).expect("既定 keymap がパースできる");
-        assert_eq!(sections.len(), 3);
+        assert_eq!(sections.len(), 4);
         assert_eq!(sections[0].context, "Editor");
         // ⌘S は保存時フォーマットのフックのため workspace 側（M11）。
         assert_eq!(
@@ -282,10 +292,16 @@ mod tests {
             sections[1].bindings.get("cmd-w").map(String::as_str),
             Some("agent::CloseActiveThread")
         );
-        // 3 セクション目は全域（context 空）+ Quit
-        assert!(sections[2].context.is_empty());
+        // 3 セクション目は管制（⏎ = 要対応キューの先頭へ・P3）
+        assert_eq!(sections[2].context, "FleetControl");
         assert_eq!(
-            sections[2].bindings.get("cmd-q").map(String::as_str),
+            sections[2].bindings.get("enter").map(String::as_str),
+            Some("workspace::ControlNext")
+        );
+        // 末尾は全域（context 空）+ Quit
+        assert!(sections[3].context.is_empty());
+        assert_eq!(
+            sections[3].bindings.get("cmd-q").map(String::as_str),
             Some("shirushi::Quit")
         );
     }

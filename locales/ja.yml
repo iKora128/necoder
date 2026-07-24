@@ -37,6 +37,14 @@ agent:
   generating: ⏺ 生成中
   celebrate: 🙌 完了
   idle: 待機中
+  state_working: 実行中
+  state_blocked: 承認待ち
+  state_done: 完了
+  state_done_interrupted: 中断
+  state_idle: 待機
+  rollup_working: "%{n} 実行中"
+  rollup_blocked: "%{n} 承認待ち"
+  rollup_done: "%{n} 完了"
   empty: スレッドはありません（＋ / ⌘⇧A で開始）
   checkpoint_row: checkpoint — %{label}（クリックでこの時点へ戻す）
   context_filter: ファイル名で絞り込み…
@@ -118,6 +126,9 @@ cmd:
   toggle_terminal: "表示: ターミナル"
   toggle_git_panel: "表示: ソース管理"
   toggle_todo_board: "表示: Todo ボード"
+  toggle_herd: "表示: 編隊サイドバー"
+  toggle_control: "表示: 管制"
+  toggle_fleet: "表示: 編隊モード"
   split_right: "表示: 右に分割"
   new_thread: "AI: 新しいスレッド"
   next_tab: "タブ: 次へ"
@@ -126,8 +137,102 @@ cmd:
   prev_thread: "AI: 前のスレッド"
   remote_ssh: "リモート: SSH ホストに接続"
   thread_history: "AI: スレッド履歴"
+  report_bug: "ヘルプ: バグを報告"
+  open_settings: "表示: 設定を開く"
+herd:
+  empty: 実行中のエージェントはいません
+  files_of: "ファイル · %{name} の worktree"
+  mute: このエージェントをミュート（トースト/完了音を止める）
+  unmute: ミュート解除
+control:
+  title: 管制
+  tab_graph: グラフ
+  worktrees: "+ %{n} worktrees"
+  goal: "目標: %{goal}"
+  goal_unset: "目標: 未設定（.shirushi/settings.json の fleet_goal で設定）"
+  chip_attention: 要対応
+  chip_done_unread: 完了未確認
+  chip_working: 稼働
+  chip_integrated: 統合
+  coordinator: 監督
+  coordinator_none: 未任命 — Settings で任命（P6）
+  summary_attention: "%{title} が先頭%{waited} — 要対応/未確認 %{n} 件"
+  summary_calm: "静穏 — 要対応はありません（稼働 %{n}）"
+  updated: "%{when}更新"
+  next: "次: %{what}"
+  next_badge: "次 ⏎"
+  next_permission: 許可判断
+  next_failed: 失敗の対処
+  next_review: レビュー
+  next_confirm: 完了の確認
+  queue: 要対応
+  queue_done: ・完了未確認
+  queue_empty: 要対応はありません — 全員稼働中/静穏です
+  enter_hint: ⏎ で先頭へ
+  waiting: 待ち
+  files: "%{n} files"
+  open: 開く
+  confirm: 確認
+  discard: 破棄
+  integrate: Integrate
+  review: Radar 実行
+  fix_instruct: 修正を指示
+  active: 稼働中
+  immersion_hint: クリックで没入（セル/スレッドへ）
+  add_task: "+ Task（worktree を切って開始）"
+  free_cells: "空きセル %{n}/8"
+  pipeline: 統合パイプライン
+  pipeline_hint: WORKTREE → MAIN への流れ・チップ=TASKSPACE
+news:
+  waiting: "承認待ち — %{title}"
+  failed: "失敗 — %{detail}"
+fleet:
+  add_agent_simple: ＋ エージェント（新しい worktree で並走）
+  lineage: 系譜グラフ
+  graph_fan: 扇形
+  graph_tree: ツリー
+  graph_card: カード
+  graph_hub: ハブ
+  graph_collapse: グラフの表示/非表示
+  graph_main: main
+  graph_main_sub: IntegrationSpace
+  graph_tree_caption: "base ・ %{count} エージェント並走"
+  graph_card_base: base
+  graph_card_head: main 統合
+  graph_hub_agents: "%{count} エージェント"
+  news: ニュース
+  news_idle: 動きなし
+  news_hint: task_events — 監督の采配も同じログ（監査可能）
+  cell_agent: Agent
+  cell_terminal: ターミナル
+  cell_editor: エディタ
+  cell_diff: Diff / Review
+  cell_tests: Tests
+  cell_terminal_hint: シェル（cwd = worktree）
+  cell_editor_hint: エディタ（worktree）
+  closed: 閉じたスレッド
+  add_hint: Task は worktree に隔離・surface は最大 8
+  maximize: 拡大表示（他は畳む）
+  restore: 元のレイアウトへ戻す
+  add_agent: Agent（ここ）
+  add_agent_worktree: Agent＋⎇worktree
+  add_task: ＋ Task
+  add_agent_to_task: ＋ Agent to this Task
+  add_history: 履歴から復元
+launcher:
+  placeholder: 開く、または最近のプロジェクトを選択…
+  open_folder: フォルダを開く…
+  open_file: ファイルを開く…
+  connect_remote: Remote SSH に接続…
+time:
+  just_now: たった今
+  minutes_ago: "%{count}分前"
+  hours_ago: "%{count}時間前"
+  days_ago: "%{count}日前"
+  started: "開始 %{when}"
+  last_input: "入力 %{when}"
 rail:
-  add_tip: フォルダをプロジェクトとして追加（⌘O は切替）
+  add_tip: 開く — フォルダ / ファイル / リモート / 最近（⌘O は切替）
   add_prompt: 開く
   menu_new_window: 新しいウィンドウで開く
   menu_remove: レールから外す
@@ -139,12 +244,16 @@ rail:
   open_project: プロジェクトを開く  ⌘O
   explorer: エクスプローラの表示切替
   search: 検索  ⌘⇧F
+  herd: 編隊モード（系譜グラフ + 状態一覧）
+  fleet: 編隊モード
   git: ソース管理  ⌃⇧G
   todos: Todo ボード
   agent: AI エージェントの表示切替
   terminal: ターミナル  ⌘J
   remote: リモート SSH
   settings: 設定
+titlebar:
+  fleet: Fleet
 settings:
   title: 設定
   agents_heading: AI エージェント
@@ -159,12 +268,31 @@ settings:
   welcome_title: ようこそ 🎨
   welcome_sub: 使うエージェントを選んで始めましょう。あとから ⚙ でいつでも変えられます。
   get_started: これで始める →
+  prefs_heading: 動作とエディタ
+  prefs_sub: 真実は settings.json。ここはそれを操作するだけです。
+  pref_submit_on_enter: Enter で送信
+  pref_submit_on_enter_sub: オフ=⌘Enter 送信（日本語 IME で誤送信しない安全側）
+  pref_soft_wrap: ソフトラップ（折り返し）
+  pref_soft_wrap_sub: ⌥Z で一時トグルもできます
+  pref_format_on_save: 保存時にフォーマット
+  pref_format_on_save_sub: 対応言語のみ・⌘S で整形→保存
+  pref_agent_auto_name: スレッドの自動命名
+  pref_agent_auto_name_sub: 最初のやり取りから AI が題名を付けます
+  pref_completion_sound: 完了音
+  pref_completion_sound_sub: エージェントのターン完了で鳴らします
+  pref_font_size: フォントサイズ
+  pref_tab_size: タブ幅
+  pref_tabs_view: スレッドタブの表示
+  tabs_view_bar: 横タブ
+  tabs_view_list: 縦リスト
+  theme_hint: "テーマ: %{name}（⌘⇧T で変更）"
 explorer:
   up_folder: 上のフォルダへ
   back_to_project: プロジェクトへ戻る
   view_tree: ツリー表示
   view_columns: カラム表示（Finder 風）
   view_icons: アイコン表示
+  ctx_open_here: ここをプロジェクトとして開く
   ctx_open_window: 新規ウィンドウで開く
   ctx_open: 開く
   ctx_open_default: 既定のアプリで開く
@@ -242,6 +370,82 @@ update:
   available: ⬆ v%{version} に更新
   installing: ⬇ 更新中…
   ready: ⟳ 再起動で新バージョンに切り替わります
+crash:
+  notice: ⚠ 前回終了時にクラッシュ — クリックで報告
+menu:
+  about: Shirushi について
+  settings: 設定…
+  services: サービス
+  hide: Shirushi を隠す
+  hide_others: ほかを隠す
+  show_all: すべてを表示
+  quit: Shirushi を終了
+  file: ファイル
+  open_project: プロジェクトを開く / 切替…
+  open_file: ファイルを開く…
+  open_remote: リモート SSH で開く…
+  new_window: 新しいウィンドウ
+  save: 保存
+  close_tab: タブを閉じる
+  restore_tab: 閉じたタブを復元
+  edit: 編集
+  undo: 取り消す
+  redo: やり直す
+  cut: カット
+  copy: コピー
+  paste: ペースト
+  select_all: すべてを選択
+  select_next: 次の一致を選択
+  add_cursor_above: 上にカーソルを追加
+  add_cursor_below: 下にカーソルを追加
+  move_line_up: 行を上へ移動
+  move_line_down: 行を下へ移動
+  duplicate_line: 行を複製
+  delete_line: 行を削除
+  toggle_comment: コメントをトグル
+  find: 検索…
+  replace: 置換…
+  find_project: プロジェクトを検索…
+  references: 参照を探す
+  format: フォーマット
+  rename_symbol: シンボル名を変更…
+  code_actions: コードアクション…
+  inline_edit: AI インライン編集…
+  view: 表示
+  command_palette: コマンドパレット…
+  terminal: ターミナル
+  git_panel: ソース管理
+  todo_board: Todo ボード
+  herd: 編隊サイドバー
+  fleet: 編隊モード
+  diagnostics: 診断一覧
+  split_right: 右に分割
+  soft_wrap: ソフトラップを切替
+  theme: テーマを切り替え…
+  project_color: プロジェクトの色…
+  go: 移動
+  back: 戻る
+  forward: 進む
+  goto_line: 行へ移動…
+  outline: シンボルへ移動（このファイル）…
+  workspace_symbols: シンボルへ移動（ワークスペース）…
+  definition: 定義へ移動
+  next_diagnostic: 次の診断
+  prev_diagnostic: 前の診断
+  next_hunk: 次の変更
+  prev_hunk: 前の変更
+  next_tab: 次のタブ
+  prev_tab: 前のタブ
+  ai: AI
+  new_thread: 新しいスレッド
+  thread_history: スレッド履歴…
+  next_thread: 次のスレッド
+  prev_thread: 前のスレッド
+  window: ウィンドウ
+  minimize: しまう
+  zoom: 拡大/縮小
+  help: ヘルプ
+  report_bug: バグを報告…
 welcome:
   title: Shirushi — 色による方向感覚
   open_project: プロジェクト / worktree を開く
@@ -252,6 +456,7 @@ ssh:
   label: リモート SSH
   button_tip: リモート SSH で開く（~/.ssh/config のエイリアスも可）
   connecting: "%{uri} へ接続中…（初回は server 配備で数秒かかります）"
+  browse_hint: "接続しました。フォルダを右クリック →「ここをプロジェクトとして開く」で開けます"
   picker_placeholder: SSH ホストを選択（~/.ssh/config）
   manual_entry: URI を手入力…
 goto:

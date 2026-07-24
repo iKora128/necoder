@@ -42,6 +42,8 @@ pub struct RailSettings {
     pub todos: bool,
     /// リモート SSH（~/.ssh/config のホストへ接続・#2）。
     pub remote: bool,
+    /// 編隊（herd サイドバー・状態一覧・M14）。
+    pub herd: bool,
 }
 
 impl Default for RailSettings {
@@ -54,6 +56,7 @@ impl Default for RailSettings {
             terminal: true,
             todos: true,
             remote: true,
+            herd: true,
         }
     }
 }
@@ -83,6 +86,16 @@ pub struct Settings {
     /// エージェントのターン完了時に通知音を鳴らすか（macOS system sound・既定 on）。
     /// 裏の窓で走らせた作業の完了にも気づける（`docs/BACKGROUND.md` の原点痛点）。独自チャイム同梱は後続。
     pub completion_sound: bool,
+    /// Tier 2 遷移スナップショット（✳ 1 行要約・FLEET-CONTROL-PLAN P4・既定 on）。
+    /// Done/Failed 遷移時に既定 Agent の oneshot CLI で 1 行生成する。オフでも Tier 1（決定論）は出続ける。
+    pub tier2_summaries: bool,
+    /// 監督（coordinator）に任命するエージェント表示名（P6・None = 未任命）。
+    /// 任命は settings.json の明示編集（既定ドリフト禁止の原則・DECISIONS §8）。
+    /// 任命すると Blocked(15s)/Done/Failed 遷移で IntegrationSpace の「監督」スレッドが 1 ターン起きる。
+    pub coordinator_agent: Option<String>,
+    /// 編隊の目標文（管制ヘッダに常時表示・P3）。プロジェクト設定 `.shirushi/settings.json` に
+    /// 書けばリポジトリごとの目標になる（ファイルが真実の原則＝計画の「ledger」は settings で満たす）。
+    pub fleet_goal: Option<String>,
     /// スレッドタブの見せ方（"bar" 横タブ / "list" 縦リスト）。Agent パネルのスイッチャがここへ保存し、
     /// 次の起動でも保つ。設定画面のトグル化は後続（真実はこの値・画面はこれを操作するだけ）。
     pub agent_tabs_view: String,
@@ -90,6 +103,9 @@ pub struct Settings {
     /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
     /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
     pub default_agent: String,
+    /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
+    /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
+    pub fleet_agent_worktree: bool,
     /// レールのアイコン表示（アクティビティバー）。
     pub rail: RailSettings,
     /// 初回オンボーディングを済ませたか（`false`＝初回で設定ホームが自動オープン・M12）。
@@ -110,8 +126,12 @@ impl Default for Settings {
             submit_on_enter: false,
             agent_auto_name: true,
             completion_sound: true,
+            tier2_summaries: true,
+            coordinator_agent: None,
+            fleet_goal: None,
             agent_tabs_view: "bar".to_string(),
             default_agent: "Claude Code".to_string(),
+            fleet_agent_worktree: false,
             rail: RailSettings::default(),
             onboarded: false,
         }
@@ -127,6 +147,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "submit_on_enter": false,
   "agent_auto_name": true,
   "completion_sound": true,
+  "tier2_summaries": true,
   "agent_tabs_view": "bar",
   "default_agent": "Claude Code",
   "onboarded": false,

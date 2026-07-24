@@ -592,6 +592,12 @@ body.explorer-icons .tree-icons { display: flex; }
 .palette .item.sel { background: var(--accent-dim); color: var(--fg0); }
 .palette .item.sel .cat { color: var(--accent); }
 .palette .item .cat { color: var(--fg2); font-size: 11px; min-width: 64px; }
+/* ＋ 統一オープン: セクション見出し + リモートの host バッジ（色は識別＝●に集約） */
+.olabel { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--fg2); padding: 8px 11px 3px; }
+.palette .item .host {
+  margin-left: 10px; font-family: ui-monospace, Menlo, monospace; font-size: 10px;
+  color: var(--fg1); background: var(--bg3); border-radius: 5px; padding: 1px 6px;
+}
 
 .window { position: relative; }
 
@@ -618,11 +624,23 @@ body.mode-fleet .fleet-left { display: flex; flex-direction: column; flex: 1; mi
 body.mode-fleet .center-col, body.mode-fleet .dock-right { display: none; }
 body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 
-/* 状態グリフ: 色＋形で識別（色だけに依存しない） */
-.stg { flex: none; width: 13px; text-align: center; font-size: 11px; line-height: 1; }
-.stg.work { color: var(--st-work); } .stg.block { color: var(--st-block); }
-.stg.done { color: var(--st-done); } .stg.idle { color: var(--st-idle); } .stg.unk { color: var(--st-unk); }
-.stg.work, .stg.block { animation: pulse 1.6s ease-in-out infinite; }
+/* 状態表示は色相を持たない（色=スレッド識別 / 状態=形と動き・§1.3）。
+   glyph 形 = ● 作業 / ◐ 承認待ち / ✓ 完了 / ○ 待機 / · その他。色は親の --tc（スレッド色）を継承 */
+.stg { flex: none; width: 13px; text-align: center; font-size: 11px; line-height: 1; color: var(--tc, var(--fg2)); }
+.stg.idle { opacity: .5; }                                  /* 待機 = 淡 */
+.stg.unk { color: var(--fg2); opacity: 1; }                 /* その他 = 非該当 */
+.stg.work { animation: pulse 1.6s ease-in-out infinite; }   /* 作業 = 脈動 */
+.stg.block { animation: pulse .8s ease-in-out infinite; }   /* 承認待ち = 速い脈動 */
+/* SVG グラフの状態ノード（塗り=スレッド色 / 状態=形と動き） */
+.snode { stroke-width: 0; }
+.snode.th1 { fill: var(--th1); } .snode.th2 { fill: var(--th2); } .snode.th3 { fill: var(--th3); } .snode.th4 { fill: #34d3b6; }
+.snode.done { fill: var(--bg1); stroke-width: 2.5; }
+.snode.done.th1 { stroke: var(--th1); } .snode.done.th2 { stroke: var(--th2); } .snode.done.th3 { stroke: var(--th3); } .snode.done.th4 { stroke: #34d3b6; }
+.snode.idle { opacity: .45; }
+.sring { fill: none; stroke-width: 2; transform-box: fill-box; transform-origin: center; }
+.sring.th1 { stroke: var(--th1); } .sring.th2 { stroke: var(--th2); } .sring.th3 { stroke: var(--th3); } .sring.th4 { stroke: #34d3b6; }
+.sring.pulse { animation: ringpulse 1.6s ease-out infinite; }   /* 作業 = 脈動リング */
+.sring.fast { animation: ringpulse .8s ease-out infinite; }     /* 承認待ち = 速い脈動リング */
 
 /* --- Herd: 各エージェントの状態一覧（herdr の核・常設） --- */
 .herd { flex: 1 1 56%; display: flex; flex-direction: column; overflow: hidden auto; min-height: 0; }
@@ -674,9 +692,27 @@ body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; 
 /* --- N分割エージェントグリッド（2·4·6·8） --- */
 .agent-grid { flex: 1; display: grid; gap: 8px; padding: 10px; min-height: 0;
   grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); grid-auto-rows: 1fr; }
-.split-2 .agent-grid { --cols: 2; } .split-4 .agent-grid { --cols: 2; }
-.split-6 .agent-grid { --cols: 3; } .split-8 .agent-grid { --cols: 4; }
-.split-2 .acell:nth-child(n+3), .split-4 .acell:nth-child(n+5), .split-6 .acell:nth-child(n+7) { display: none; }
+/* セル数で自動レイアウト（1→全画面 / 2→横2 / 3→横3 / 4→2×2 / 5-6→3列 / 7-8→4列・上限8） */
+.cells-1 .agent-grid { --cols: 1; } .cells-2 .agent-grid { --cols: 2; } .cells-3 .agent-grid { --cols: 3; }
+.cells-4 .agent-grid { --cols: 2; } .cells-5 .agent-grid, .cells-6 .agent-grid { --cols: 3; }
+.cells-7 .agent-grid, .cells-8 .agent-grid { --cols: 4; }
+.cells-1 .acell:nth-child(n+2):not(.add), .cells-2 .acell:nth-child(n+3):not(.add),
+.cells-3 .acell:nth-child(n+4):not(.add), .cells-4 .acell:nth-child(n+5):not(.add),
+.cells-5 .acell:nth-child(n+6):not(.add), .cells-6 .acell:nth-child(n+7):not(.add),
+.cells-7 .acell:nth-child(n+8):not(.add) { display: none; }
+.cells-8 .acell.add { display: none; }
+/* ＋タイル（パネル追加・タイプ選択） */
+.acell.add { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  border: 1px dashed var(--border); background: transparent; cursor: pointer; color: var(--fg2); }
+.acell.add:hover { border-color: var(--fg2); color: var(--fg1); }
+.acell.add .plus { font-size: 22px; font-weight: 300; line-height: 1; }
+.acell.add .types { display: flex; gap: 6px; }
+.acell.add .types span { font-size: 10.5px; padding: 2px 9px; border-radius: 6px; border: 1px solid var(--border); color: var(--fg1); }
+.acell.add .types span:hover { background: var(--bg3); color: var(--fg0); }
+.acell.add .addhint { font-size: 10px; }
+/* セルを閉じる × */
+.acell .ah .cx { margin-left: 6px; color: var(--fg2); font-size: 12px; cursor: pointer; flex: none; }
+.acell .ah .cx:hover { color: var(--fg0); }
 .acell { display: flex; flex-direction: column; min-height: 0; overflow: hidden;
   background: var(--bg1); border: 1px solid var(--border);
   border-top: 2px solid color-mix(in srgb, var(--tc) 55%, var(--border)); border-radius: 8px; }
@@ -691,12 +727,12 @@ body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; 
   font-size: 11px; color: var(--fg1); border-bottom: 1px solid var(--border); }
 .acell .aone .lbl { color: var(--fg2); }
 .acell .abody { flex: 1; overflow: hidden auto; padding: 8px 9px; display: flex; flex-direction: column; gap: 7px; min-height: 0; }
-.split-6 .acell .abody, .split-8 .acell .abody { display: none; }
+.cells-5 .acell .abody, .cells-6 .acell .abody, .cells-7 .acell .abody, .cells-8 .acell .abody { display: none; }
 .acell .approve { display: flex; align-items: center; gap: 6px; margin: 8px 9px; padding: 6px 8px; flex: none;
-  border: 1px solid color-mix(in srgb, var(--st-block) 45%, var(--border)); border-radius: 7px;
-  background: color-mix(in srgb, var(--st-block) 8%, transparent); font-size: 11px; color: var(--fg1); }
+  border: 1px solid color-mix(in srgb, var(--tc) 45%, var(--border)); border-radius: 7px;
+  background: color-mix(in srgb, var(--tc) 8%, transparent); font-size: 11px; color: var(--fg1); }
 .acell .approve .btn { padding: 2px 9px; border-radius: 5px; font-size: 10.5px; font-weight: 600; cursor: pointer; }
-.acell .approve .allow { background: var(--st-idle); color: #10131a; }
+.acell .approve .allow { background: var(--ok); color: #10131a; }
 .acell .approve .deny { border: 1px solid var(--border); color: var(--fg1); }
 .acell .approve .allow { margin-left: auto; }
 
@@ -707,9 +743,128 @@ body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; 
 .news-item { display: flex; align-items: center; gap: 6px; flex: none; font-size: 11px; color: var(--fg1); white-space: nowrap; }
 .news-item .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .news-item .tm { color: var(--fg2); font-size: 10px; }
+
+/* --- プロバイダ・バッジ（どの ACP エージェントで動いているか） --- */
+/* 実機は ACP レジストリからロゴを実行時取得（Zed方式・未知は sparkles）。ここは monogram プレースホルダ */
+.prov { flex: none; width: 17px; height: 17px; border-radius: 5px; display: inline-grid; place-items: center;
+  font: 700 8.5px/1 ui-monospace, "SF Mono", monospace; letter-spacing: .3px;
+  background: var(--bg3); color: var(--fg1); border: 1px solid var(--border); }
+
+/* --- 系譜グラフの3表示を切替（扇形 / レーン / 縦ログ） --- */
+.g-fan, .g-lane, .g-log { display: none; height: 100%; }
+body.graph-fan .g-fan { display: block; }
+body.graph-lane .g-lane { display: flex; }
+body.graph-log .g-log { display: block; }
+
+/* B: レーン（スイムレーン／サブウェイマップ）＝各エージェントを平行な横レーンに。最も見やすい候補 */
+.g-lane { flex-direction: column; padding: 6px 14px 10px; overflow: auto; }
+.swim-axis { position: relative; height: 18px; margin-left: 184px; border-bottom: 1px dashed var(--border); font-size: 9.5px; color: var(--fg2); }
+.swim-axis span { position: absolute; top: 2px; transform: translateX(-50%); }
+.lane-row { display: flex; align-items: center; min-height: 46px; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.lane-row:last-child { border-bottom: 0; }
+.lane-head { width: 184px; flex: none; padding-right: 12px; display: flex; flex-direction: column; gap: 3px; }
+.lane-head .l1 { display: flex; align-items: center; gap: 6px; }
+.lane-head .l1 .nm { font-size: 12px; font-weight: 600; color: var(--fg0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lane-head .cdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.lane-head .l2 { display: flex; align-items: center; gap: 4px; padding-left: 23px; font-size: 10px; color: var(--fg2); }
+.lane-track { flex: 1; position: relative; height: 46px; }
+.lane-track .lrail { position: absolute; left: 4px; right: 52px; top: 50%; height: 2.5px; border-radius: 2px; background: var(--tc); transform: translateY(-50%); }
+.lane-track.dashed .lrail { background: transparent; height: 0; border-top: 2.5px dashed var(--tc); opacity: .7; }
+.station { position: absolute; top: 50%; width: 11px; height: 11px; border-radius: 50%; box-sizing: border-box; transform: translate(-50%, -50%); background: var(--bg1); border: 2.5px solid var(--tc); }
+.station.tip { width: 15px; height: 15px; border-width: 0; box-shadow: 0 0 0 3px var(--bg1); }
+.station.tip.work { background: var(--st-work); } .station.tip.block { background: var(--st-block); } .station.tip.done { background: var(--st-done); }
+.station.tip.idle { background: var(--bg1); border: 2.5px solid var(--st-idle); box-shadow: none; }
+.station.pulse::after { content: ""; position: absolute; inset: -7px; border-radius: 50%; border: 2px solid currentColor; opacity: .55; animation: ringpulse 1.6s ease-out infinite; }
+.station.tip.work.pulse { color: var(--st-work); } .station.tip.block.pulse { color: var(--st-block); }
+.lane-track .merge { position: absolute; top: 50%; transform: translateY(-50%); font-size: 10px; }
+.lane-track .nowline { position: absolute; right: 40px; top: 4px; bottom: 4px; border-left: 1px dashed color-mix(in srgb, var(--fg2) 55%, transparent); }
+
+/* C: 縦ログ（gitk 風の DAG）＝左に色付きレール、右にコミット行。dev に馴染む別案 */
+.g-log { position: relative; padding: 6px 12px 12px 0; overflow: auto; }
+.vlog-rail { position: absolute; left: 14px; top: 6px; }
+.vr { fill: none; stroke-width: 2.5; }
+.vr.main { stroke: color-mix(in srgb, var(--fg2) 85%, transparent); } .vr.rope { stroke: var(--th1); } .vr.gpui { stroke: var(--th3); } .vr.tab { stroke: var(--th2); }
+.vn { stroke-width: 2.5; fill: var(--bg1); } .vn.main { stroke: var(--fg2); } .vn.rope { stroke: var(--th1); } .vn.gpui { stroke: var(--th3); } .vn.tab { stroke: var(--th2); }
+.vn.tipwork { fill: var(--st-work); stroke: var(--st-work); }
+.vrows { margin-left: 128px; }
+.vrow { height: 37px; display: flex; align-items: center; gap: 9px; padding: 0 8px; border-radius: 6px; }
+.vrow:hover { background: var(--bg3); }
+.vrow.merge .vmsg { color: var(--fg1); }
+.vrow .hash { flex: none; width: 50px; font: 10px ui-monospace, "SF Mono", monospace; color: var(--fg2); }
+.vrow .vmsg { flex: 1; min-width: 0; font-size: 11.5px; color: var(--fg0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vrow .rt { display: flex; align-items: center; gap: 8px; flex: none; }
+.vrow .bchip { font-size: 10px; color: var(--fg1); background: var(--bg3); border-radius: 9px; padding: 1px 7px; }
+.vrow .tm { width: 30px; text-align: right; font-size: 10px; color: var(--fg2); }
+
+/* ===== 追加グラフ案（扇形の“見やすい別案”）: リバー / 縦ツリー / カードフロー ===== */
+.g-river, .g-tree, .g-card { display: none; height: 100%; }
+body.graph-river .g-river { display: block; }
+body.graph-tree .g-tree { display: block; }
+body.graph-card .g-card { display: flex; align-items: center; justify-content: center; }
+.g-river svg, .g-tree svg { width: 100%; height: 100%; display: block; min-width: 720px; }
+.glabel { fill: var(--fg0); font: 600 13px -apple-system, "Hiragino Sans", sans-serif; }
+.gsub { fill: var(--fg2); font: 10.5px ui-monospace, "SF Mono", monospace; }
+.gprov { fill: var(--fg1); font: 700 8.5px ui-monospace, monospace; }
+.gprov-bg { fill: var(--bg3); stroke: var(--border); }
+
+/* リバー: 本流から太い色帯が分岐して流れる（Sankey 風・扇形の上位） */
+.rvband { fill: none; stroke-width: 11; stroke-linecap: round; stroke-linejoin: round; }
+.rvband.main { stroke: color-mix(in srgb, var(--fg2) 70%, transparent); opacity: .5; }
+.rvband.th1 { stroke: var(--th1); } .rvband.th2 { stroke: var(--th2); } .rvband.th3 { stroke: var(--th3); } .rvband.th4 { stroke: #34d3b6; }
+.rvband.dashed { stroke-dasharray: 0.5 15; opacity: .6; }
+.rvbead { fill: var(--bg1); stroke-width: 2.5; }
+.rvbead.th1 { stroke: var(--th1); } .rvbead.th2 { stroke: var(--th2); } .rvbead.th3 { stroke: var(--th3); }
+.rvtip { stroke-width: 0; } .rvtip.work { fill: var(--st-work); } .rvtip.block { fill: var(--st-block); } .rvtip.done { fill: var(--st-done); }
+.rvtip.idle { fill: var(--bg1); stroke: var(--st-idle); stroke-width: 2.5; }
+.rvring { fill: none; stroke-width: 2; transform-box: fill-box; transform-origin: center; animation: ringpulse 1.6s ease-out infinite; }
+.rvring.work { stroke: var(--st-work); } .rvring.block { stroke: var(--st-block); }
+
+/* 縦ツリー: base を上に、下へ枝分かれ（デルタ／樹形） */
+.tbranch { fill: none; stroke-width: 3; }
+.tbranch.main { stroke: color-mix(in srgb, var(--fg2) 75%, transparent); }
+.tbranch.th1 { stroke: var(--th1); } .tbranch.th2 { stroke: var(--th2); } .tbranch.th3 { stroke: var(--th3); } .tbranch.th4 { stroke: #34d3b6; }
+.tbranch.dashed { stroke-dasharray: 2 6; opacity: .75; }
+.tbead { fill: var(--bg1); stroke-width: 2.5; }
+.tbead.th1 { stroke: var(--th1); } .tbead.th2 { stroke: var(--th2); } .tbead.th3 { stroke: var(--th3); }
+.tnode { stroke-width: 0; } .tnode.work { fill: var(--st-work); } .tnode.block { fill: var(--st-block); } .tnode.done { fill: var(--st-done); }
+.tnode.idle { fill: var(--bg1); stroke: var(--st-idle); stroke-width: 2.5; }
+.troot { fill: var(--bg1); stroke: var(--fg2); stroke-width: 2.5; }
+
+/* カードフロー: base ノード → 色の曲線 → 読めるエージェントカード（Cursor 風・最読みやすい別案） */
+.card-stage { position: relative; width: 1000px; height: 280px; }
+.card-edges { position: absolute; inset: 0; width: 100%; height: 100%; }
+.ce { fill: none; stroke-width: 2.5; opacity: .9; }
+.ce.th1 { stroke: var(--th1); } .ce.th2 { stroke: var(--th2); } .ce.th3 { stroke: var(--th3); } .ce.th4 { stroke: #34d3b6; }
+.ce.dashed { stroke-dasharray: 3 5; opacity: .7; }
+.cnode { position: absolute; width: 92px; padding: 8px 10px; border-radius: 8px; background: var(--bg2); border: 1px solid var(--border); font-size: 10.5px; color: var(--fg2); text-align: center; line-height: 1.4; }
+.cnode b { color: var(--fg0); font-size: 12px; }
+.ccard { position: absolute; width: 226px; padding: 8px 11px; border-radius: 9px; background: var(--bg2); border: 1px solid var(--border); border-left: 3px solid var(--tc); }
+.ccard .cc-h { display: flex; align-items: center; gap: 7px; }
+.ccard .cc-h .cdot { width: 8px; height: 8px; border-radius: 50%; background: var(--tc); flex: none; }
+.ccard .cc-h .nm { font-size: 12.5px; font-weight: 600; color: var(--fg0); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ccard .cc-s { margin-top: 4px; font-size: 10.5px; color: var(--fg2); display: flex; align-items: center; gap: 6px; }
+.ccard .cc-s .cc-r { margin-left: auto; font-family: ui-monospace, monospace; color: var(--fg1); }
+
+/* 系譜グラフ内のモード切替スイッチャー（実機UI・アイコン式／微妙なら data-label のテキストに切替可） */
+.graph-switch { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+.graph-switch .gs { all: unset; cursor: pointer; height: 22px; min-width: 27px; padding: 0 5px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 5px; color: var(--fg2); }
+.graph-switch .gs:hover { background: var(--bg3); color: var(--fg1); }
+.graph-switch .gs.on { background: var(--bg3); color: var(--fg0); }
+.graph-switch .gs svg { width: 15px; height: 15px; }
+.graph-switch .gs .lbl { font-size: 11px; font-weight: 500; letter-spacing: 0; text-transform: none; display: none; }
+/* テキスト併記/切替したい時は body に .gs-text を付ける（アイコンが微妙なら日英ラベルへ） */
+body.gs-text .graph-switch .gs .lbl { display: inline; }
+body.gs-textonly .graph-switch .gs svg { display: none; }
+/* グラフの折り畳み（表示/非表示） */
+.lg-collapse { all: unset; cursor: pointer; width: 24px; height: 22px; margin-left: 6px; display: grid; place-items: center; border-radius: 5px; color: var(--fg2); }
+.lg-collapse:hover { background: var(--bg3); color: var(--fg0); }
+.lg-collapse svg { width: 14px; height: 14px; transition: transform .15s; }
+.lineage.collapsed { flex: none; height: 30px; min-height: 0; }
+.lineage.collapsed .lg-wrap { display: none; }
+.lineage.collapsed .lg-collapse svg { transform: rotate(-90deg); }
 </style>
 </head>
-<body>
+<body class="gs-text">
 
 <!-- ================= モック操作（デザイン決定用） ================= -->
 <div class="mockbar">
@@ -750,11 +905,18 @@ body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; 
     <button id="mode-fleet-btn" onclick="setMode('fleet')">編隊</button>
   </div>
   <div class="group">
-    <span>分割</span>
-    <button id="sp-2" onclick="setSplit(2)">2</button>
-    <button id="sp-4" class="on" onclick="setSplit(4)">4</button>
-    <button id="sp-6" onclick="setSplit(6)">6</button>
-    <button id="sp-8" onclick="setSplit(8)">8</button>
+    <span>セル数</span>
+    <button id="sp-2" onclick="setCells(2)">2</button>
+    <button id="sp-4" class="on" onclick="setCells(4)">4</button>
+    <button id="sp-6" onclick="setCells(6)">6</button>
+    <button id="sp-8" onclick="setCells(8)">8</button>
+  </div>
+  <div class="group">
+    <span>グラフ</span>
+    <button id="g-fan-btn" class="on" onclick="setGraph('fan')">扇形</button>
+    <button id="g-river-btn" onclick="setGraph('river')">リバー</button>
+    <button id="g-tree-btn" onclick="setGraph('tree')">ツリー</button>
+    <button id="g-card-btn" onclick="setGraph('card')">カード</button>
   </div>
   <span class="hint"><kbd>⌘O</kbd> プロジェクト / <kbd>⌘⇧P</kbd> パレット / <kbd>esc</kbd> 閉じる</span>
 </div>
@@ -798,7 +960,7 @@ body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; 
         <span style="font-size:15px">🧬</span>
         <div class="agents"><i class="run" style="background:#f0a24b"></i></div>
       </div>
-      <div class="rail-add" title="プロジェクトを追加 (⌘O)" onclick="showSwitcher()">＋</div>
+      <div class="rail-add" title="開く — フォルダ / ファイル / リモート / 最近" onclick="showOpenPicker()">＋</div>
       <div class="rail-foot">⌘O</div>
     </div>
 
@@ -1007,9 +1169,32 @@ body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; 
     <!-- ============ 中央(編隊): 系譜グラフ + N分割グリッド + ニュース ============ -->
     <div class="fleet-center">
       <div class="lineage">
-        <div class="lg-head">系譜グラフ<span class="mini">base <b style="color:var(--fg1)">a3f9c1</b> から 4 エージェントが並走 ・ ⎇ = worktree ・ 先端色 = 状態</span></div>
+        <div class="lg-head">系譜グラフ
+          <div class="graph-switch">
+            <button class="gs on" data-g="fan" onclick="setGraph('fan')" title="扇形 — 分岐を扇状に">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="2.6" cy="8" r="1.1" fill="currentColor" stroke="none"/><path d="M2.6 8 Q9 5.5 14 3.5"/><path d="M2.6 8 H14"/><path d="M2.6 8 Q9 10.5 14 12.5"/></svg>
+              <span class="lbl">扇形</span>
+            </button>
+            <button class="gs" data-g="river" onclick="setGraph('river')" title="リバー — 太い色帯の流れ">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 8 H4.5"/><path d="M4.5 8 C8 8 8 4 11 4 H14"/><path d="M4.5 8 H14"/><path d="M4.5 8 C8 8 8 12 11 12 H14"/></svg>
+              <span class="lbl">リバー</span>
+            </button>
+            <button class="gs" data-g="tree" onclick="setGraph('tree')" title="縦ツリー — 上から枝分かれ">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="3" r="1.6"/><path d="M8 4.6 V6.8 M3.5 6.8 H12.5 M3.5 6.8 V8.8 M8 6.8 V8.8 M12.5 6.8 V8.8"/><circle cx="3.5" cy="10.4" r="1.5"/><circle cx="8" cy="10.4" r="1.5"/><circle cx="12.5" cy="10.4" r="1.5"/></svg>
+              <span class="lbl">ツリー</span>
+            </button>
+            <button class="gs" data-g="card" onclick="setGraph('card')" title="カード — ノードカードの流れ">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="1.3" y="6" width="4" height="4" rx="1"/><path d="M5.3 8 H7.5 M7.5 8 V3.4 M7.5 3.4 H9.6 M7.5 8 V12.6 M7.5 12.6 H9.6"/><rect x="9.6" y="1.7" width="5" height="3.4" rx="1"/><rect x="9.6" y="10.9" width="5" height="3.4" rx="1"/></svg>
+              <span class="lbl">カード</span>
+            </button>
+          </div>
+          <button class="lg-collapse" onclick="toggleGraph()" title="グラフの表示/非表示">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6 L8 10 L12 6"/></svg>
+          </button>
+        </div>
         <div class="lg-wrap">
-          <svg class="lg-svg" viewBox="0 0 900 300" preserveAspectRatio="xMinYMid meet">
+          <!-- === A: 扇形（mermaid gitgraph 風） === -->
+          <div class="g-fan"><svg class="lg-svg" viewBox="0 0 900 300" preserveAspectRatio="xMinYMid meet">
             <!-- lanes -->
             <path class="lane main" d="M60 46 H210"/>
             <path class="lane main dashed" d="M210 46 H650"/>
@@ -1025,25 +1210,189 @@ body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; 
             <!-- th1 working -->
             <circle class="cm th1" cx="340" cy="104" r="5"/>
             <circle class="cm th1" cx="405" cy="104" r="5"/>
-            <circle class="tipring work" cx="470" cy="104" r="6.5" style="transform-origin:470px 104px"/>
-            <circle class="tip work" cx="470" cy="104" r="6.5"/>
+            <circle class="sring th1 pulse" cx="470" cy="104" r="11"/>
+            <circle class="snode th1" cx="470" cy="104" r="7"/>
             <!-- th2 blocked -->
             <circle class="cm th2" cx="340" cy="160" r="5"/>
-            <circle class="tipring block" cx="430" cy="160" r="6.5" style="transform-origin:430px 160px"/>
-            <circle class="tip block" cx="430" cy="160" r="6.5"/>
+            <circle class="sring th2" cx="430" cy="160" r="11"/>
+            <circle class="sring th2 fast" cx="430" cy="160" r="11"/>
+            <circle class="snode th2" cx="430" cy="160" r="6"/>
             <!-- th3 done → merge -->
             <circle class="cm th3" cx="340" cy="216" r="5"/>
             <circle class="cm th3" cx="405" cy="216" r="5"/>
-            <circle class="tip done" cx="520" cy="216" r="6.5"/>
+            <circle class="snode done th3" cx="520" cy="216" r="7"/>
             <!-- th4 idle -->
-            <circle class="tip idle" cx="330" cy="268" r="6" style="fill:none; stroke:var(--st-idle); stroke-width:2"/>
+            <circle class="snode idle th4" cx="330" cy="268" r="6.5"/>
             <!-- labels -->
             <text class="lgl" x="668" y="42">main</text><text class="lgs" x="668" y="57">統合待ち</text>
             <text class="lgl" x="500" y="100">rope設計</text><text class="lgs" x="500" y="115">⎇ rope ・ 作業中</text>
             <text class="lgl" x="460" y="156">tab色分け</text><text class="lgs" x="460" y="171">⎇ tabs ・ 承認待ち</text>
             <text class="lgl" x="550" y="212">gpui起動</text><text class="lgs" x="550" y="227">⎇ gpui ・ 完了→統合</text>
             <text class="lgl" x="392" y="264">LSP補完</text><text class="lgs" x="392" y="279">⎇ dev ・ 待機</text>
-          </svg>
+          </svg></div>
+
+          <!-- === B: レーン（スイムレーン・平行な横レーン＝最も見やすい候補） === -->
+          <div class="g-lane">
+            <div class="swim-axis"><span style="left:6%">10:02</span><span style="left:30%">10:09</span><span style="left:54%">10:14</span><span style="left:calc(100% - 46px)">now</span></div>
+            <div class="lane-row" data-th="main">
+              <div class="lane-head"><div class="l1"><span class="branch-ico">⎇</span><span class="nm">main</span></div><div class="l2">統合待ち</div></div>
+              <div class="lane-track" style="--tc:var(--fg2)">
+                <span class="lrail"></span>
+                <span class="station" style="left:6%"></span><span class="station" style="left:14%"></span><span class="station" style="left:22%"></span>
+                <span class="station" style="left:57%; border-color:var(--th3)"></span><span class="merge" style="left:60%; color:var(--th3)">⤳</span>
+                <span class="nowline"></span>
+              </div>
+            </div>
+            <div class="lane-row" data-th="th1" onclick="focusAgent('th1')">
+              <div class="lane-head"><div class="l1"><span class="prov" title="Claude Code">CL</span><span class="cdot" style="background:var(--th1)"></span><span class="nm">rope設計</span></div><div class="l2">⎇ rope <span class="stg work">●</span> 作業中</div></div>
+              <div class="lane-track" style="--tc:var(--th1)">
+                <span class="lrail"></span>
+                <span class="station" style="left:30%"></span><span class="station" style="left:44%"></span>
+                <span class="station tip work pulse" style="left:60%"></span>
+                <span class="nowline"></span>
+              </div>
+            </div>
+            <div class="lane-row" data-th="th2" onclick="focusAgent('th2')">
+              <div class="lane-head"><div class="l1"><span class="prov" title="Codex">CX</span><span class="cdot" style="background:var(--th2)"></span><span class="nm">tab色分け</span></div><div class="l2">⎇ tabs <span class="stg block">◐</span> 承認待ち</div></div>
+              <div class="lane-track" style="--tc:var(--th2)">
+                <span class="lrail"></span>
+                <span class="station" style="left:30%"></span>
+                <span class="station tip block pulse" style="left:48%"></span>
+                <span class="nowline"></span>
+              </div>
+            </div>
+            <div class="lane-row" data-th="th3" onclick="focusAgent('th3')">
+              <div class="lane-head"><div class="l1"><span class="prov" title="Copilot">CP</span><span class="cdot" style="background:var(--th3)"></span><span class="nm">gpui起動</span></div><div class="l2">⎇ gpui <span class="stg done">✓</span> 完了→統合</div></div>
+              <div class="lane-track" style="--tc:var(--th3)">
+                <span class="lrail"></span>
+                <span class="station" style="left:30%"></span><span class="station" style="left:42%"></span><span class="station" style="left:54%"></span>
+                <span class="station tip done" style="left:57%"></span><span class="merge" style="left:61%; color:var(--th3)">⤳ main</span>
+                <span class="nowline"></span>
+              </div>
+            </div>
+            <div class="lane-row" data-th="th4" onclick="focusAgent('th4')">
+              <div class="lane-head"><div class="l1"><span class="prov" title="Qwen Code">QW</span><span class="cdot" style="background:#34d3b6"></span><span class="nm">LSP補完</span></div><div class="l2">⎇ dev <span class="stg idle">○</span> 待機</div></div>
+              <div class="lane-track dashed" style="--tc:#34d3b6">
+                <span class="lrail"></span>
+                <span class="station tip idle" style="left:22%"></span>
+                <span class="nowline"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- === C: 縦ログ（gitk 風の DAG・dev 馴染み） === -->
+          <div class="g-log">
+            <svg class="vlog-rail" width="116" height="340" viewBox="0 0 116 340">
+              <path class="vr main" d="M18 0 V340"/>
+              <path class="vr rope" d="M70 18.5 V203.5"/>
+              <path class="vr gpui" d="M44 92.5 V203.5"/>
+              <path class="vr tab" d="M96 92.5 V203.5"/>
+              <path class="vr rope" d="M18 240.5 C46 224, 70 226, 70 203.5"/>
+              <path class="vr gpui" d="M18 240.5 C30 224, 44 226, 44 203.5"/>
+              <path class="vr tab" d="M18 240.5 C60 224, 96 226, 96 203.5"/>
+              <path class="vr gpui" d="M44 92.5 C44 72, 18 74, 18 55.5"/>
+              <circle class="vn rope tipwork" cx="70" cy="18.5" r="5.5"/>
+              <circle class="vn main" cx="18" cy="55.5" r="5"/>
+              <circle class="vn tab" cx="96" cy="92.5" r="5"/>
+              <circle class="vn rope" cx="70" cy="129.5" r="5"/>
+              <circle class="vn gpui" cx="44" cy="166.5" r="5"/>
+              <circle class="vn tab" cx="96" cy="203.5" r="5"/>
+              <circle class="vn main" cx="18" cy="240.5" r="5"/>
+              <circle class="vn main" cx="18" cy="277.5" r="4.5"/>
+              <circle class="vn main" cx="18" cy="314.5" r="4.5"/>
+            </svg>
+            <div class="vrows">
+              <div class="vrow" onclick="focusAgent('th1')"><span class="hash">e1a72f</span><span class="vmsg">buffer.rs を Transaction 単位へ</span><span class="rt"><span class="prov" title="Claude Code">CL</span><span class="bchip">⎇ rope</span><span class="stg work">●</span><span class="tm">now</span></span></div>
+              <div class="vrow merge"><span class="hash">9c40ab</span><span class="vmsg">Merge: gpui起動 を main へ統合 ✓</span><span class="rt"><span class="bchip">⎇ main</span><span class="tm">1m</span></span></div>
+              <div class="vrow" onclick="focusAgent('th2')"><span class="hash">7fb1e0</span><span class="vmsg">settings.rs を追加（承認待ち）</span><span class="rt"><span class="prov" title="Codex">CX</span><span class="bchip">⎇ tabs</span><span class="stg block">◐</span><span class="tm">3m</span></span></div>
+              <div class="vrow" onclick="focusAgent('th1')"><span class="hash">4d0c19</span><span class="vmsg">UndoHistory の粒度を調整</span><span class="rt"><span class="prov" title="Claude Code">CL</span><span class="bchip">⎇ rope</span><span class="tm">6m</span></span></div>
+              <div class="vrow" onclick="focusAgent('th3')"><span class="hash">a71b8c</span><span class="vmsg">window/app/main の起動経路</span><span class="rt"><span class="prov" title="Copilot">CP</span><span class="bchip">⎇ gpui</span><span class="tm">9m</span></span></div>
+              <div class="vrow" onclick="focusAgent('th2')"><span class="hash">2be5f1</span><span class="vmsg">タブ色の巡回パレット</span><span class="rt"><span class="prov" title="Codex">CX</span><span class="bchip">⎇ tabs</span><span class="tm">12m</span></span></div>
+              <div class="vrow"><span class="hash">c0433d</span><span class="vmsg">⑂ rope / tabs / gpui を worktree で分岐</span><span class="rt"><span class="bchip">base</span><span class="tm">14m</span></span></div>
+              <div class="vrow"><span class="hash">a3f9c1</span><span class="vmsg">エディタコアの骨組み</span><span class="rt"><span class="bchip">⎇ main</span><span class="tm">20m</span></span></div>
+              <div class="vrow"><span class="hash">7c1d24</span><span class="vmsg">初期化</span><span class="rt"><span class="bchip">⎇ main</span><span class="tm">32m</span></span></div>
+            </div>
+          </div>
+
+          <!-- === D: リバー（太い色帯が本流から分岐） === -->
+          <div class="g-river">
+            <svg viewBox="0 0 1200 300" preserveAspectRatio="xMidYMid meet">
+              <path class="rvband main" d="M20 46 H1180"/>
+              <path class="rvband th1" d="M300 46 C 360 46, 360 108, 424 108 H 812"/>
+              <circle class="rvbead th1" cx="520" cy="108" r="5"/><circle class="rvbead th1" cx="620" cy="108" r="5"/><circle class="rvbead th1" cx="720" cy="108" r="5"/>
+              <circle class="sring th1 pulse" cx="812" cy="108" r="13"/><circle class="snode th1" cx="812" cy="108" r="8.5"/>
+              <rect class="gprov-bg" x="844" y="99" width="17" height="17" rx="4"/><text class="gprov" x="852.5" y="110.5" text-anchor="middle">CL</text>
+              <text class="glabel" x="870" y="105">rope設計</text><text class="gsub" x="870" y="121">⎇ rope ・作業中</text>
+              <path class="rvband th2" d="M300 46 C 360 46, 360 168, 424 168 H 700"/>
+              <circle class="rvbead th2" cx="520" cy="168" r="5"/><circle class="rvbead th2" cx="620" cy="168" r="5"/>
+              <circle class="sring th2" cx="700" cy="168" r="13"/><circle class="sring th2 fast" cx="700" cy="168" r="13"/><circle class="snode th2" cx="700" cy="168" r="7"/>
+              <rect class="gprov-bg" x="732" y="159" width="17" height="17" rx="4"/><text class="gprov" x="740.5" y="170.5" text-anchor="middle">CX</text>
+              <text class="glabel" x="758" y="165">tab色分け</text><text class="gsub" x="758" y="181">⎇ tabs ・承認待ち</text>
+              <path class="rvband th3" d="M300 46 C 360 46, 360 228, 424 228 H 892"/>
+              <circle class="rvbead th3" cx="520" cy="228" r="5"/><circle class="rvbead th3" cx="640" cy="228" r="5"/><circle class="rvbead th3" cx="760" cy="228" r="5"/>
+              <circle class="snode done th3" cx="892" cy="228" r="8.5"/>
+              <rect class="gprov-bg" x="924" y="219" width="17" height="17" rx="4"/><text class="gprov" x="932.5" y="230.5" text-anchor="middle">CP</text>
+              <text class="glabel" x="950" y="225">gpui起動</text><text class="gsub" x="950" y="241">⎇ gpui ・完了→統合</text>
+              <path class="rvband th4 dashed" d="M180 46 C 260 46, 300 272, 360 272 H 470"/>
+              <circle class="snode idle th4" cx="470" cy="272" r="7"/>
+              <rect class="gprov-bg" x="500" y="263" width="17" height="17" rx="4"/><text class="gprov" x="508.5" y="274.5" text-anchor="middle">QW</text>
+              <text class="glabel" x="526" y="269">LSP補完</text><text class="gsub" x="526" y="285">⎇ dev ・待機</text>
+            </svg>
+          </div>
+
+          <!-- === E: 縦ツリー（base を上に、下へ枝分かれ） === -->
+          <div class="g-tree">
+            <svg viewBox="0 0 1200 300" preserveAspectRatio="xMidYMid meet">
+              <text class="gsub" x="600" y="22" text-anchor="middle">base a3f9c1 ・ 4 エージェントが並走</text>
+              <circle class="troot" cx="600" cy="42" r="6.5"/>
+              <path class="tbranch main" d="M600 48 V86"/>
+              <path class="tbranch th1" d="M600 86 C 430 120, 250 150, 250 208"/>
+              <path class="tbranch th2" d="M600 86 C 540 128, 480 150, 480 208"/>
+              <path class="tbranch th3" d="M600 86 C 668 128, 760 150, 760 208"/>
+              <path class="tbranch th4 dashed" d="M600 86 C 800 120, 995 150, 995 208"/>
+              <circle class="tbead th1" cx="250" cy="182" r="4.5"/><circle class="tbead th2" cx="480" cy="182" r="4.5"/><circle class="tbead th3" cx="760" cy="182" r="4.5"/>
+              <circle class="sring th1 pulse" cx="250" cy="210" r="12"/><circle class="snode th1" cx="250" cy="210" r="8"/><circle class="sring th2" cx="480" cy="210" r="12"/><circle class="sring th2 fast" cx="480" cy="210" r="12"/><circle class="snode th2" cx="480" cy="210" r="6.5"/><circle class="snode done th3" cx="760" cy="210" r="8"/><circle class="snode idle th4" cx="995" cy="210" r="7"/>
+              <rect class="gprov-bg" x="200" y="230" width="17" height="17" rx="4"/><text class="gprov" x="208.5" y="241.5" text-anchor="middle">CL</text>
+              <text class="glabel" x="224" y="238">rope設計</text><text class="gsub" x="224" y="253">⎇ rope ・作業中</text>
+              <rect class="gprov-bg" x="430" y="230" width="17" height="17" rx="4"/><text class="gprov" x="438.5" y="241.5" text-anchor="middle">CX</text>
+              <text class="glabel" x="454" y="238">tab色分け</text><text class="gsub" x="454" y="253">⎇ tabs ・承認待ち</text>
+              <rect class="gprov-bg" x="710" y="230" width="17" height="17" rx="4"/><text class="gprov" x="718.5" y="241.5" text-anchor="middle">CP</text>
+              <text class="glabel" x="734" y="238">gpui起動</text><text class="gsub" x="734" y="253">⎇ gpui ・完了→統合</text>
+              <rect class="gprov-bg" x="945" y="230" width="17" height="17" rx="4"/><text class="gprov" x="953.5" y="241.5" text-anchor="middle">QW</text>
+              <text class="glabel" x="969" y="238">LSP補完</text><text class="gsub" x="969" y="253">⎇ dev ・待機</text>
+            </svg>
+          </div>
+
+          <!-- === F: カードフロー（base → 色曲線 → 読めるエージェントカード・Cursor 風） === -->
+          <div class="g-card">
+            <div class="card-stage">
+              <svg class="card-edges" viewBox="0 0 1000 280" preserveAspectRatio="none">
+                <path class="ce th1" d="M104 140 C 250 140, 250 50, 360 50"/>
+                <path class="ce th2" d="M104 140 C 250 140, 250 140, 360 140"/>
+                <path class="ce th3" d="M104 140 C 250 140, 250 230, 360 230"/>
+                <path class="ce th4 dashed" d="M104 140 C 330 206, 500 174, 636 140"/>
+                <path class="ce th3" d="M586 230 C 760 230, 800 140, 900 140"/>
+              </svg>
+              <div class="cnode" style="left:8px; top:116px"><b>⎇ main</b><br>a3f9c1 base</div>
+              <div class="ccard" style="left:360px; top:20px; --tc:var(--th1)" onclick="focusAgent('th1')">
+                <div class="cc-h"><span class="prov" title="Claude Code">CL</span><span class="cdot"></span><span class="nm">rope設計</span><span class="stg work">●</span></div>
+                <div class="cc-s">⎇ rope ・ 作業中 <span class="cc-r">+18 −4</span></div>
+              </div>
+              <div class="ccard" style="left:360px; top:110px; --tc:var(--th2)" onclick="focusAgent('th2')">
+                <div class="cc-h"><span class="prov" title="Codex">CX</span><span class="cdot"></span><span class="nm">tab色分け</span><span class="stg block">◐</span></div>
+                <div class="cc-s">⎇ tabs ・ 承認待ち <span class="cc-r">Write</span></div>
+              </div>
+              <div class="ccard" style="left:360px; top:200px; --tc:var(--th3)" onclick="focusAgent('th3')">
+                <div class="cc-h"><span class="prov" title="Copilot">CP</span><span class="cdot"></span><span class="nm">gpui起動</span><span class="stg done">✓</span></div>
+                <div class="cc-s">⎇ gpui ・ 完了 <span class="cc-r">5 files</span></div>
+              </div>
+              <div class="ccard" style="left:626px; top:110px; --tc:#34d3b6" onclick="focusAgent('th4')">
+                <div class="cc-h"><span class="prov" title="Qwen Code">QW</span><span class="cdot"></span><span class="nm">LSP補完</span><span class="stg idle">○</span></div>
+                <div class="cc-s">⎇ dev ・ 待機</div>
+              </div>
+              <div class="cnode" style="left:900px; top:116px"><b>HEAD</b><br>main 統合</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1082,22 +1431,30 @@ body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; 
           <div class="ah"><span class="cdot"></span><span class="nm">docs更新</span><span class="br">⎇ docs</span><span class="tok">6.8k</span></div>
           <div class="aone"><span class="stg idle">○</span><span>opencode — 待機中</span></div>
         </div>
-        <div class="acell" data-th="th7" style="--tc:var(--th3)">
-          <div class="ah"><span class="cdot"></span><span class="nm">bench計測</span><span class="br">⎇ bench</span><span class="tok">9.1k</span></div>
-          <div class="aone"><span class="stg work">●</span><span>grok — criterion 実行中</span></div>
+        <div class="acell" data-th="term1" style="--tc:var(--ok)">
+          <div class="ah"><span class="cdot"></span><span class="nm">ターミナル</span><span class="br">⎇ rope</span><span class="tok">zsh</span><span class="cx" onclick="event.stopPropagation();removeCell()">×</span></div>
+          <div class="aone"><span class="stg work">●</span><span>cargo watch — 実行中</span></div>
+          <div class="abody"><div class="result">⎿ Compiling shirushi v0.1.0
+   Finished dev [unoptimized] in 3.24s</div></div>
         </div>
-        <div class="acell" data-th="th8" style="--tc:var(--fg2)">
-          <div class="ah"><span class="cdot"></span><span class="nm">zsh</span><span class="br">~/Work</span><span class="tok"></span></div>
-          <div class="aone"><span class="stg unk">·</span><span>通常シェル（エージェント以外）</span></div>
+        <div class="acell" data-th="ed1" style="--tc:var(--syn-fn)">
+          <div class="ah"><span class="cdot"></span><span class="nm">buffer.rs</span><span class="br">⎇ rope</span><span class="tok">42:18</span><span class="cx" onclick="event.stopPropagation();removeCell()">×</span></div>
+          <div class="aone"><span class="stg idle" style="color:var(--syn-fn)">◧</span><span>エディタ — 編集中</span></div>
+          <div class="abody"><div class="result" style="color:var(--fg1)">pub fn edit(&amp;mut self, r: Range, s: &amp;str) { … }</div></div>
+        </div>
+        <div class="acell add" onclick="addCell()">
+          <div class="plus">＋</div>
+          <div class="types"><span onclick="event.stopPropagation();addCell('agent')">Agent</span><span onclick="event.stopPropagation();addCell('terminal')">Terminal</span><span onclick="event.stopPropagation();addCell('editor')">Editor</span></div>
+          <div class="addhint">パネルを追加（最大 8）</div>
         </div>
       </div>
 
       <div class="newsfeed">
         <span class="nlabel">動き</span>
-        <span class="news-item"><span class="dot" style="background:var(--st-block)"></span>tab色分け が承認待ち<span class="tm">now</span></span>
-        <span class="news-item"><span class="dot" style="background:var(--st-done)"></span>gpui起動 が完了（5 files）<span class="tm">1m</span></span>
+        <span class="news-item"><span class="dot" style="background:var(--th2)"></span>tab色分け が承認待ち<span class="tm">now</span></span>
+        <span class="news-item"><span class="dot" style="background:var(--th3)"></span>gpui起動 が完了（5 files）<span class="tm">1m</span></span>
         <span class="news-item"><span class="dot" style="background:var(--th1)"></span>rope設計 が buffer.rs を編集 (+18 −4)<span class="tm">2m</span></span>
-        <span class="news-item"><span class="dot" style="background:var(--st-done)"></span>型エラー修正 が check 通過<span class="tm">4m</span></span>
+        <span class="news-item"><span class="dot" style="background:var(--th2)"></span>型エラー修正 が check 通過<span class="tm">4m</span></span>
       </div>
     </div>
 
@@ -1227,6 +1584,25 @@ body.mode-fleet .fleet-center { display: flex; flex-direction: column; flex: 1; 
     </div>
   </div>
 
+  <!-- ============ ＋ 統一オープン（フォルダ/ファイル/リモート + 最近・local/remote 混在） ============ -->
+  <div class="overlay" id="openpicker" onclick="if(event.target===this)hideOverlays()">
+    <div class="palette">
+      <input placeholder="開く、または最近のプロジェクトを選択…" autocomplete="off">
+      <div class="list">
+        <div class="olabel">開く</div>
+        <div class="item">フォルダを開く…<span class="kbd">⌘O</span></div>
+        <div class="item">ファイルを開く…<span class="kbd">⌘P</span></div>
+        <div class="item">リモート SSH に接続…<span class="kbd">⌘⇧R</span></div>
+        <div class="olabel">最近</div>
+        <div class="item sel"><span class="pdot" style="background:#7c8cf8"></span>shirushi<span class="meta">~/Work/experience/shirushi ⎇ main</span><span class="kbd">⌘1</span></div>
+        <div class="item"><span class="pdot" style="background:#f0a24b"></span>genshiai<span class="agdots"><i class="run" style="background:#f0a24b"></i></span><span class="meta">~/Work/genshiai ⎇ dev</span><span class="kbd">⌘2</span></div>
+        <div class="item"><span class="pdot" style="background:#56b6c2"></span>api<span class="host">◍ dev@prod-01</span><span class="meta">/srv/api ⎇ main</span></div>
+        <div class="item"><span class="pdot" style="background:#34d3b6"></span>blog<span class="meta">~/Work/blog ⎇ main</span></div>
+        <div class="item"><span class="pdot" style="background:#c678dd"></span>ml-train<span class="host">◍ gpu@10.0.0.4</span><span class="agdots"><i class="run" style="background:#c678dd"></i></span><span class="meta">/home/dev/train</span></div>
+      </div>
+    </div>
+  </div>
+
   <!-- ============ ブランチ / worktree メニュー（titlebar の ⎇ から） ============ -->
   <div class="overlay" id="branchmenu" onclick="if(event.target===this)hideOverlays()">
     <div class="palette narrow">
@@ -1265,7 +1641,7 @@ function togglePane(which) {
   const btn = document.getElementById('tg-' + which);
   if (btn) btn.classList.toggle('on', !document.body.classList.contains(cls));
 }
-const overlayIds = ['overlay', 'switcher', 'branchmenu'];
+const overlayIds = ['overlay', 'switcher', 'branchmenu', 'openpicker'];
 function hideOverlays() { overlayIds.forEach(id => document.getElementById(id).classList.remove('show')); }
 function showOv(id) {
   hideOverlays();
@@ -1277,6 +1653,7 @@ function showOv(id) {
 function showPalette() { showOv('overlay'); }
 function hidePalette() { hideOverlays(); }
 function showSwitcher() { showOv('switcher'); }
+function showOpenPicker() { showOv('openpicker'); }
 function showBranches() { showOv('branchmenu'); }
 document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
@@ -1343,17 +1720,32 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
 function setMode(m) {
   const fleet = m === 'fleet';
   document.body.classList.toggle('mode-fleet', fleet);
-  if (fleet && !['split-2','split-4','split-6','split-8'].some(c => document.body.classList.contains(c))) {
-    document.body.classList.add('split-4');
+  if (fleet && !['cells-1','cells-2','cells-3','cells-4','cells-5','cells-6','cells-7','cells-8'].some(c => document.body.classList.contains(c))) {
+    setCells(4);
   }
+  if (fleet && !['graph-fan','graph-river','graph-tree','graph-card','graph-lane','graph-log'].some(c => document.body.classList.contains(c))) setGraph('river');
   const mn = document.getElementById('mode-normal'), mf = document.getElementById('mode-fleet-btn');
   if (mn) mn.classList.toggle('on', !fleet);
   if (mf) mf.classList.toggle('on', fleet);
 }
-function setSplit(n) {
-  ['split-2','split-4','split-6','split-8'].forEach(c => document.body.classList.remove(c));
-  document.body.classList.add('split-' + n);
+// セル数で自動レイアウト（1..8）。＋で増やす・×で減らす・上限8
+function setCells(n) {
+  n = Math.max(1, Math.min(8, n));
+  for (let i = 1; i <= 8; i++) document.body.classList.remove('cells-' + i);
+  document.body.classList.add('cells-' + n);
   ['2','4','6','8'].forEach(k => { const b = document.getElementById('sp-' + k); if (b) b.classList.toggle('on', k === String(n)); });
+}
+function cellCount() { for (let i = 8; i >= 1; i--) if (document.body.classList.contains('cells-' + i)) return i; return 4; }
+function addCell(type) { setCells(cellCount() + 1); }
+function removeCell() { setCells(cellCount() - 1); }
+function toggleGraph() { const l = document.querySelector('.lineage'); if (l) l.classList.toggle('collapsed'); }
+function setSplit(n) { setCells(n); }   // 旧名の別名（#fleet8 等のハッシュ互換）
+function setGraph(mode) {
+  ['fan','river','tree','card','lane','log'].forEach(m => {
+    document.body.classList.toggle('graph-' + m, m === mode);
+    const b = document.getElementById('g-' + m + '-btn'); if (b) b.classList.toggle('on', m === mode);
+  });
+  document.querySelectorAll('.graph-switch .gs').forEach(b => b.classList.toggle('on', b.dataset.g === mode));
 }
 // focus-follows-agent: herd行/セルのクリックで、左ファイル・グリッド枠・宛先が一斉に追従（＝ファイルブラウザの真を一意化）
 const AGENT_NAMES = { th1: 'rope設計', th2: 'tab色分け', th3: 'gpui起動', th4: 'LSP補完' };
@@ -1365,10 +1757,19 @@ function focusAgent(th) {
   const ff = document.querySelector('.fleet-files');
   if (ff && AGENT_COLOR[th]) ff.style.setProperty('--tc-focus', AGENT_COLOR[th]);
 }
-// スクショ/デモ用: file://…/index.html#fleet または #fleet8 で編隊モードを直接開く
+// スクショ/デモ用: #fleet / #fleetlane / #fleetlog / #fleetfan / #fleet8 で編隊を直接開く
 (function () {
   const h = location.hash.replace('#', '');
-  if (h.indexOf('fleet') === 0) { setMode('fleet'); const m = h.match(/fleet(\d)/); if (m) setSplit(+m[1]); }
+  if (h.indexOf('fleet') !== 0) return;
+  setMode('fleet');
+  if (h.indexOf('river') >= 0) setGraph('river');
+  else if (h.indexOf('tree') >= 0) setGraph('tree');
+  else if (h.indexOf('card') >= 0) setGraph('card');
+  else if (h.indexOf('lane') >= 0) setGraph('lane');
+  else if (h.indexOf('log') >= 0) setGraph('log');
+  else if (h.indexOf('fan') >= 0) setGraph('fan');
+  const m = h.match(/(\d)/); if (m) setSplit(+m[1]);
+  if (h.indexOf('hide') >= 0) { const l = document.querySelector('.lineage'); if (l) l.classList.add('collapsed'); }
 })();
 </script>
 </body>

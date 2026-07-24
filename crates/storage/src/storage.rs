@@ -22,6 +22,133 @@ pub struct Storage {
     sender: mpsc::Sender<Job>,
 }
 
+/// Task lifecycle の単一定義（FLEET-CONTROL-PLAN P0）。GUI / CLI / MCP はこの enum を共有し、
+/// 文字列は DB とプロセス境界（CLI 引数・MCP 引数）だけに現れる。
+/// IntegrationSpace は phase ではなく [`SpaceKind::Integration`]（space の種別・別軸）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskPhase {
+    Planned,
+    Working,
+    Blocked,
+    ReviewReady,
+    ChangesRequested,
+    MergeReady,
+    Integrating,
+    Integrated,
+    Failed,
+    Archived,
+}
+
+impl TaskPhase {
+    /// 遷移パイプライン等での列挙用（宣言順 = lifecycle の概ねの進行順）。
+    pub const ALL: [TaskPhase; 10] = [
+        TaskPhase::Planned,
+        TaskPhase::Working,
+        TaskPhase::Blocked,
+        TaskPhase::ReviewReady,
+        TaskPhase::ChangesRequested,
+        TaskPhase::MergeReady,
+        TaskPhase::Integrating,
+        TaskPhase::Integrated,
+        TaskPhase::Failed,
+        TaskPhase::Archived,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::ReviewReady => "review_ready",
+            Self::ChangesRequested => "changes_requested",
+            Self::MergeReady => "merge_ready",
+            Self::Integrating => "integrating",
+            Self::Integrated => "integrated",
+            Self::Failed => "failed",
+            Self::Archived => "archived",
+        }
+    }
+
+    /// 厳密 parse。境界（CLI/MCP）では None を「不正な phase」エラーにし、
+    /// DB 復元では `unwrap_or(TaskPhase::Planned)` で寛容に読む。
+    pub fn from_str(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|phase| phase.as_str() == value)
+    }
+}
+
+/// Space の種別。IntegrationSpace（統合先の本流 worktree）は Task lifecycle を持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceKind {
+    Integration,
+    Task,
+}
+
+impl SpaceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Integration => "integration",
+            Self::Task => "task",
+        }
+    }
+}
+
+/// Fleet mode の永続的な作業単位。UI のセル位置ではなく stable `id` を主キーにし、
+/// worktree を閉じたりレール順を変えても Task の同一性を保つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSpaceRecord {
+    pub id: String,
+    /// 同一 Git repository（remote host を含む）を束ねるキー。
+    pub repository_id: String,
+    pub root: PathBuf,
+    pub branch: Option<String>,
+    pub title: String,
+    /// Integration か Task か。DB 上は phase 列に `integration` を書く互換表現
+    /// （既存 DB を migration なしで読めるようにするため・storage 内に閉じる）。
+    pub kind: SpaceKind,
+    pub phase: TaskPhase,
+    pub base_oid: Option<String>,
+    pub head_oid: Option<String>,
+    pub result_summary: Option<String>,
+    /// この Task が待つ他 Task の id（P6・依存待ち）。DB は追加テーブル `task_deps`
+    /// （既存 DB を migration なしで拡張するため列追加はしない）。
+    pub depends_on: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl TaskSpaceRecord {
+    /// DB の phase 列に書く値（kind=Integration は sentinel `integration`）。
+    fn phase_column(&self) -> &'static str {
+        match self.kind {
+            SpaceKind::Integration => "integration",
+            SpaceKind::Task => self.phase.as_str(),
+        }
+    }
+
+    /// DB の phase 列から (kind, phase) を復元する。未知の値は Task/Planned に落とす。
+    fn parse_phase_column(value: &str) -> (SpaceKind, TaskPhase) {
+        if value == "integration" {
+            (SpaceKind::Integration, TaskPhase::Planned)
+        } else {
+            (
+                SpaceKind::Task,
+                TaskPhase::from_str(value).unwrap_or(TaskPhase::Planned),
+            )
+        }
+    }
+}
+
+/// Task lifecycle の追記イベント。wait/orchestration は transient な UI state ではなく
+/// このログと `task_spaces.phase` を読む。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskEventRecord {
+    pub id: i64,
+    pub task_id: String,
+    pub kind: String,
+    pub payload: String,
+    pub created_at: i64,
+}
+
 /// 既定の DB パス（macOS）。state.json と同じディレクトリ。
 pub fn default_db_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -188,17 +315,19 @@ impl Storage {
 
     // ── hot exit（M10・dirty バッファのスナップショット） ──
 
-    /// dirty バッファのスナップショットを upsert する。
-    pub fn save_hot_exit(&self, path: &Path, content: &str) -> Result<()> {
+    /// dirty バッファのスナップショットを upsert する。`scope` は host 識別子
+    /// （local = "local" / remote = SSH URI 等）。local と remote の同一絶対パスを分ける（M13）。
+    pub fn save_hot_exit(&self, scope: &str, path: &Path, content: &str) -> Result<()> {
+        let scope = scope.to_string();
         let path = path.to_string_lossy().to_string();
         let content = content.to_string();
         let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
                 conn.execute(
-                    "INSERT INTO hot_exit (path, content, saved_at) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(path) DO UPDATE SET content = ?2, saved_at = ?3",
-                    (path.as_str(), content.as_str(), now),
+                    "INSERT INTO hot_exit (scope, path, content, saved_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(scope, path) DO UPDATE SET content = ?3, saved_at = ?4",
+                    (scope.as_str(), path.as_str(), content.as_str(), now),
                 )
                 .await
                 .context("hot_exit の書き込みに失敗")?;
@@ -208,32 +337,41 @@ impl Storage {
     }
 
     /// スナップショットを 1 件消す（保存された・タブを閉じた・clean になった）。
-    pub fn remove_hot_exit(&self, path: &Path) -> Result<()> {
+    pub fn remove_hot_exit(&self, scope: &str, path: &Path) -> Result<()> {
+        let scope = scope.to_string();
         let path = path.to_string_lossy().to_string();
         self.run(move |conn| {
             futures::executor::block_on(async {
-                conn.execute("DELETE FROM hot_exit WHERE path = ?1", (path.as_str(),))
-                    .await
-                    .context("hot_exit の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM hot_exit WHERE scope = ?1 AND path = ?2",
+                    (scope.as_str(), path.as_str()),
+                )
+                .await
+                .context("hot_exit の削除に失敗")?;
                 Ok(())
             })
         })
     }
 
-    /// 全スナップショットを読む（起動時の復元提案用）。
-    pub fn load_hot_exit_all(&self) -> Result<Vec<(PathBuf, String)>> {
+    /// 全スナップショットを読む（起動時の復元提案用）。`(scope, path, content)` を返す。
+    pub fn load_hot_exit_all(&self) -> Result<Vec<(String, PathBuf, String)>> {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
-                    .query("SELECT path, content FROM hot_exit ORDER BY path", ())
+                    .query(
+                        "SELECT scope, path, content FROM hot_exit ORDER BY scope, path",
+                        (),
+                    )
                     .await
                     .context("hot_exit の読み出しに失敗")?;
                 let mut result = Vec::new();
                 while let Some(row) = rows.next().await.context("hot_exit の行取得に失敗")? {
-                    let path: String = row.get_value(0)?.as_text().context("path が文字列でない")?.clone();
+                    let scope: String =
+                        row.get_value(0)?.as_text().context("scope が文字列でない")?.clone();
+                    let path: String = row.get_value(1)?.as_text().context("path が文字列でない")?.clone();
                     let content: String =
-                        row.get_value(1)?.as_text().context("content が文字列でない")?.clone();
-                    result.push((PathBuf::from(path), content));
+                        row.get_value(2)?.as_text().context("content が文字列でない")?.clone();
+                    result.push((scope, PathBuf::from(path), content));
                 }
                 Ok(result)
             })
@@ -248,6 +386,244 @@ impl Storage {
                     .await
                     .context("hot_exit のクリアに失敗")?;
                 Ok(())
+            })
+        })
+    }
+
+    // ── Fleet TaskSpace（M14・worktree-native orchestration） ──
+
+    /// TaskSpace を作成または更新する。`created_at` は初回値を保持し、それ以外は最新 snapshot へ置換する。
+    pub fn upsert_task_space(&self, task: &TaskSpaceRecord) -> Result<()> {
+        let task = task.clone();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                upsert_task_space_on(conn, &task, now).await
+            })
+        })
+    }
+
+    /// 全 TaskSpace を更新時刻順で返す。workspace が開いていない Task も orchestration 台帳には残る。
+    pub fn load_task_spaces(&self) -> Result<Vec<TaskSpaceRecord>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, repository_id, root, branch, title, phase, base_oid, head_oid,
+                                result_summary, created_at, updated_at
+                         FROM task_spaces ORDER BY updated_at DESC",
+                        (),
+                    )
+                    .await
+                    .context("task_spaces の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("task_spaces 行の取得に失敗")? {
+                    let (kind, phase) = TaskSpaceRecord::parse_phase_column(
+                        row.get_value(5)?.as_text().context("task phase")?,
+                    );
+                    result.push(TaskSpaceRecord {
+                        id: row.get_value(0)?.as_text().context("task id")?.clone(),
+                        repository_id: row
+                            .get_value(1)?
+                            .as_text()
+                            .context("repository id")?
+                            .clone(),
+                        root: PathBuf::from(row.get_value(2)?.as_text().context("task root")?),
+                        branch: row.get_value(3)?.as_text().cloned(),
+                        title: row.get_value(4)?.as_text().context("task title")?.clone(),
+                        kind,
+                        phase,
+                        base_oid: row.get_value(6)?.as_text().cloned(),
+                        head_oid: row.get_value(7)?.as_text().cloned(),
+                        result_summary: row.get_value(8)?.as_text().cloned(),
+                        depends_on: Vec::new(),
+                        created_at: *row.get_value(9)?.as_integer().context("task created_at")?,
+                        updated_at: *row.get_value(10)?.as_integer().context("task updated_at")?,
+                    });
+                }
+                // 依存（task_deps）をメモリで結合（P6）。
+                let mut deps = conn
+                    .query("SELECT task_id, depends_on FROM task_deps ORDER BY task_id", ())
+                    .await
+                    .context("task_deps の読み出しに失敗")?;
+                while let Some(row) = deps.next().await.context("task_deps 行の取得に失敗")? {
+                    let task_id = row.get_value(0)?.as_text().context("dep task")?.clone();
+                    let depends_on = row.get_value(1)?.as_text().context("dep on")?.clone();
+                    if let Some(record) = result.iter_mut().find(|record| record.id == task_id) {
+                        record.depends_on.push(depends_on);
+                    }
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// Task の phase 遷移を確定する**唯一の**入口（FLEET-CONTROL-PLAN P0）。
+    /// GUI の `transition_task_space` も CLI/MCP の `update_task` もここを通る。
+    /// snapshot 置換（upsert）と `task_events` への `phase_changed` 追記を同一 transaction で行う。
+    pub fn commit_task_transition(&self, task: &TaskSpaceRecord, payload: &str) -> Result<()> {
+        anyhow::ensure!(
+            task.kind == SpaceKind::Task,
+            "IntegrationSpace は phase 遷移しない: {}",
+            task.id
+        );
+        let task = task.clone();
+        let payload = payload.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute("BEGIN", ()).await.context("task transition begin")?;
+                let outcome = async {
+                    upsert_task_space_on(conn, &task, now).await?;
+                    conn.execute(
+                        "INSERT INTO task_events (task_id, kind, payload, created_at)
+                         VALUES (?1, 'phase_changed', ?2, ?3)",
+                        (task.id.as_str(), payload.as_str(), now),
+                    )
+                    .await
+                    .context("task event の追記に失敗")?;
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await;
+                match outcome {
+                    Ok(()) => {
+                        conn.execute("COMMIT", ()).await.context("task transition commit")?;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let _ = conn.execute("ROLLBACK", ()).await;
+                        Err(error)
+                    }
+                }
+            })
+        })
+    }
+
+    /// Task の依存を全量置換する（P6）。空 Vec = 依存なし。
+    pub fn set_task_depends(&self, task_id: &str, depends_on: &[String]) -> Result<()> {
+        let task_id = task_id.to_string();
+        let depends_on = depends_on.to_vec();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute("DELETE FROM task_deps WHERE task_id = ?1", (task_id.as_str(),))
+                    .await
+                    .context("task_deps の削除に失敗")?;
+                for dep in &depends_on {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO task_deps (task_id, depends_on) VALUES (?1, ?2)",
+                        (task_id.as_str(), dep.as_str()),
+                    )
+                    .await
+                    .context("task_deps の追加に失敗")?;
+                }
+                Ok(())
+            })
+        })
+    }
+
+    pub fn append_task_event(&self, task_id: &str, kind: &str, payload: &str) -> Result<i64> {
+        let (task_id, kind, payload) =
+            (task_id.to_string(), kind.to_string(), payload.to_string());
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO task_events (task_id, kind, payload, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    (task_id.as_str(), kind.as_str(), payload.as_str(), now),
+                )
+                .await
+                .context("task event の追記に失敗")?;
+                let mut rows = conn
+                    .query("SELECT last_insert_rowid()", ())
+                    .await
+                    .context("task event id の取得に失敗")?;
+                match rows.next().await.context("task event id 行の取得に失敗")? {
+                    Some(row) => Ok(*row.get_value(0)?.as_integer().context("task event id")?),
+                    None => anyhow::bail!("task event id が返らない"),
+                }
+            })
+        })
+    }
+
+    /// 全 Task 横断で `since_id` より新しいイベントを古い順に返す（`fleet events` の差分読み・P5）。
+    /// 監督や CLI が「前回どこまで読んだか」を id で覚えて差分だけ受け取る。
+    pub fn load_task_events_since(&self, since_id: i64, limit: i64) -> Result<Vec<TaskEventRecord>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, task_id, kind, payload, created_at
+                         FROM task_events WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+                        (since_id, limit),
+                    )
+                    .await
+                    .context("task_events（差分）の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")? {
+                    result.push(TaskEventRecord {
+                        id: *row.get_value(0)?.as_integer().context("event id")?,
+                        task_id: row.get_value(1)?.as_text().context("event task")?.clone(),
+                        kind: row.get_value(2)?.as_text().context("event kind")?.clone(),
+                        payload: row.get_value(3)?.as_text().context("event payload")?.clone(),
+                        created_at: *row.get_value(4)?.as_integer().context("event created_at")?,
+                    });
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// 全 Task 横断の直近イベント（新しい順・ニュースフィードの起動時 backfill・P2）。
+    pub fn load_recent_task_events(&self, limit: i64) -> Result<Vec<TaskEventRecord>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, task_id, kind, payload, created_at
+                         FROM task_events ORDER BY id DESC LIMIT ?1",
+                        (limit,),
+                    )
+                    .await
+                    .context("task_events（横断）の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")? {
+                    result.push(TaskEventRecord {
+                        id: *row.get_value(0)?.as_integer().context("event id")?,
+                        task_id: row.get_value(1)?.as_text().context("event task")?.clone(),
+                        kind: row.get_value(2)?.as_text().context("event kind")?.clone(),
+                        payload: row.get_value(3)?.as_text().context("event payload")?.clone(),
+                        created_at: *row.get_value(4)?.as_integer().context("event created_at")?,
+                    });
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    pub fn load_task_events(&self, task_id: &str) -> Result<Vec<TaskEventRecord>> {
+        let task_id = task_id.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, task_id, kind, payload, created_at
+                         FROM task_events WHERE task_id = ?1 ORDER BY id ASC",
+                        (task_id.as_str(),),
+                    )
+                    .await
+                    .context("task_events の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")? {
+                    result.push(TaskEventRecord {
+                        id: *row.get_value(0)?.as_integer().context("event id")?,
+                        task_id: row.get_value(1)?.as_text().context("event task")?.clone(),
+                        kind: row.get_value(2)?.as_text().context("event kind")?.clone(),
+                        payload: row.get_value(3)?.as_text().context("event payload")?.clone(),
+                        created_at: *row.get_value(4)?.as_integer().context("event created_at")?,
+                    });
+                }
+                Ok(result)
             })
         })
     }
@@ -316,16 +692,22 @@ impl Storage {
     }
 
     /// 全スレッドのメタ（updated_at 降順）。
-    /// 戻り値: (id, name, color_index, project, branch, model, tokens_used, tokens_limit)。
+    /// 戻り値: (id, name, color_index, project, branch, model, tokens_used, tokens_limit,
+    ///          created_at, last_input_at)。
+    /// last_input_at = 最後の user turn の時刻（unix ms・入力が無ければ None）。スキーマは
+    /// 変えず turns から導出する（「いつスタートして最終いつ入力したか」の表示用・M14）。
     #[allow(clippy::type_complexity)]
     pub fn load_threads(
         &self,
-    ) -> Result<Vec<(String, String, i64, String, Option<String>, Option<String>, i64, i64)>> {
+    ) -> Result<Vec<(String, String, i64, String, Option<String>, Option<String>, i64, i64, i64, Option<i64>)>> {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
                     .query(
-                        "SELECT id, name, color_index, project, branch, model, tokens_used, tokens_limit
+                        "SELECT id, name, color_index, project, branch, model, tokens_used, tokens_limit,
+                                created_at,
+                                (SELECT MAX(created_at) FROM turns
+                                  WHERE turns.thread_id = threads.id AND turns.role = 'user')
                          FROM threads WHERE archived = 0 ORDER BY updated_at DESC",
                         (),
                     )
@@ -342,6 +724,8 @@ impl Storage {
                         row.get_value(5)?.as_text().cloned(),
                         *row.get_value(6)?.as_integer().context("used")?,
                         *row.get_value(7)?.as_integer().context("limit")?,
+                        *row.get_value(8)?.as_integer().context("created")?,
+                        row.get_value(9)?.as_integer().copied(),
                     ));
                 }
                 Ok(result)
@@ -350,16 +734,20 @@ impl Storage {
     }
 
     /// 履歴ビュー用: 全スレッドのメタ（**アーカイブ済みも含む**・updated_at 降順・#5）。
-    /// 戻り値: (id, name, color_index, project, branch, tokens_used, archived)。
+    /// 戻り値: (id, name, color_index, project, branch, tokens_used, archived,
+    ///          created_at, last_input_at)。last_input_at は [`Self::load_threads`] と同じ導出。
     #[allow(clippy::type_complexity)]
     pub fn load_all_threads(
         &self,
-    ) -> Result<Vec<(String, String, i64, String, Option<String>, i64, bool)>> {
+    ) -> Result<Vec<(String, String, i64, String, Option<String>, i64, bool, i64, Option<i64>)>> {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
                     .query(
-                        "SELECT id, name, color_index, project, branch, tokens_used, archived
+                        "SELECT id, name, color_index, project, branch, tokens_used, archived,
+                                created_at,
+                                (SELECT MAX(created_at) FROM turns
+                                  WHERE turns.thread_id = threads.id AND turns.role = 'user')
                          FROM threads ORDER BY updated_at DESC",
                         (),
                     )
@@ -375,6 +763,8 @@ impl Storage {
                         row.get_value(4)?.as_text().cloned(),
                         *row.get_value(5)?.as_integer().context("used")?,
                         *row.get_value(6)?.as_integer().context("archived")? != 0,
+                        *row.get_value(7)?.as_integer().context("created")?,
+                        row.get_value(8)?.as_integer().copied(),
                     ));
                 }
                 Ok(result)
@@ -672,6 +1062,75 @@ impl Storage {
             })
         })
     }
+
+    /// ローカルで開いたプロジェクトを記録する（path で upsert・opened_at 更新）。
+    /// 「＋」統一オープンの「最近」に remote と混ぜて出す（ローカルの閉じたプロジェクトも辿れる）。
+    pub fn record_local_project(&self, path: &str, name: &str) -> Result<()> {
+        let path = path.to_string();
+        let name = name.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO local_projects (path, name, opened_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(path) DO UPDATE SET name = ?2, opened_at = ?3",
+                    (path.as_str(), name.as_str(), now),
+                )
+                .await
+                .context("local_projects の書き込みに失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 最近開いたローカルプロジェクト（opened_at 降順）。戻り値: (path, name, opened_at)。
+    /// 「＋」統一オープンが recent_remote_projects と opened_at でマージして並べる。
+    pub fn recent_local_projects(&self) -> Result<Vec<(String, String, i64)>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT path, name, opened_at FROM local_projects ORDER BY opened_at DESC",
+                        (),
+                    )
+                    .await
+                    .context("local_projects の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("local_projects 行の取得に失敗")? {
+                    result.push((
+                        row.get_value(0)?.as_text().context("path")?.clone(),
+                        row.get_value(1)?.as_text().context("name")?.clone(),
+                        *row.get_value(2)?.as_integer().context("opened_at")?,
+                    ));
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// 「最近のプロジェクト」を削除する（履歴から外す・スコープ "local" or SSH host key）。
+    /// scope が "local" ならローカル履歴、それ以外は remote 履歴（host+path）から消す。
+    pub fn forget_recent_project(&self, scope: &str, path: &str) -> Result<()> {
+        let scope = scope.to_string();
+        let path = path.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                if scope == "local" {
+                    conn.execute("DELETE FROM local_projects WHERE path = ?1", (path.as_str(),))
+                        .await
+                        .context("local_projects の削除に失敗")?;
+                } else {
+                    conn.execute(
+                        "DELETE FROM remote_projects WHERE host = ?1 AND path = ?2",
+                        (scope.as_str(), path.as_str()),
+                    )
+                    .await
+                    .context("remote_projects の削除に失敗")?;
+                }
+                Ok(())
+            })
+        })
+    }
 }
 
 /// スキーマ初期化（冪等）。将来のマイグレーションは schema_version を見て足す。
@@ -684,14 +1143,37 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     .context("schema_version 作成に失敗")?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS hot_exit (
-            path TEXT PRIMARY KEY,
+            scope TEXT NOT NULL DEFAULT 'local',
+            path TEXT NOT NULL,
             content TEXT NOT NULL,
-            saved_at INTEGER NOT NULL
+            saved_at INTEGER NOT NULL,
+            PRIMARY KEY (scope, path)
         )",
         (),
     )
     .await
     .context("hot_exit 作成に失敗")?;
+    // 旧スキーマ（path 単独 PK・scope 列なし）からの移行（M13）。hot_exit は transient
+    // なので、scope 列が無ければ作り直す（1 度だけ・冪等）。local と remote の同一絶対パスが
+    // 衝突して復元先を取り違える事故を防ぐ。
+    let has_scope = conn.query("SELECT scope FROM hot_exit LIMIT 0", ()).await.is_ok();
+    if !has_scope {
+        conn.execute("DROP TABLE IF EXISTS hot_exit", ())
+            .await
+            .context("旧 hot_exit の削除に失敗")?;
+        conn.execute(
+            "CREATE TABLE hot_exit (
+                scope TEXT NOT NULL DEFAULT 'local',
+                path TEXT NOT NULL,
+                content TEXT NOT NULL,
+                saved_at INTEGER NOT NULL,
+                PRIMARY KEY (scope, path)
+            )",
+            (),
+        )
+        .await
+        .context("hot_exit 作り直しに失敗")?;
+    }
     // スレッド永続化（M12-1）。turn 毎 INSERT の追記型。
     conn.execute(
         "CREATE TABLE IF NOT EXISTS threads (
@@ -785,6 +1267,105 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("remote_projects 作成に失敗")?;
+    // ローカルで開いたプロジェクトの履歴（「＋」統一オープンの「最近」・path でユニーク）。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS local_projects (
+            path TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            opened_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("local_projects 作成に失敗")?;
+    // Fleet TaskSpace。UI のセル配置とは分離し、再起動・ウィンドウ close 後も task graph の真実を残す。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS task_spaces (
+            id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL,
+            root TEXT NOT NULL,
+            branch TEXT,
+            title TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            base_oid TEXT,
+            head_oid TEXT,
+            result_summary TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("task_spaces 作成に失敗")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS task_spaces_repository
+         ON task_spaces (repository_id, updated_at)",
+        (),
+    )
+    .await
+    .context("task_spaces repository index 作成に失敗")?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS task_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("task_events 作成に失敗")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS task_events_task ON task_events (task_id, id)",
+        (),
+    )
+    .await
+    .context("task_events index 作成に失敗")?;
+    // Task の依存関係（P6・「B の完了を待って merge」）。列追加でなく別テーブル＝既存 DB 無 migration。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS task_deps (
+            task_id TEXT NOT NULL,
+            depends_on TEXT NOT NULL,
+            PRIMARY KEY (task_id, depends_on)
+        )",
+        (),
+    )
+    .await
+    .context("task_deps 作成に失敗")?;
+    Ok(())
+}
+
+/// task_spaces への snapshot 置換。単発 upsert と transition（transaction 内）の共通実体。
+async fn upsert_task_space_on(
+    conn: &turso::Connection,
+    task: &TaskSpaceRecord,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO task_spaces
+            (id, repository_id, root, branch, title, phase, base_oid, head_oid,
+             result_summary, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(id) DO UPDATE SET
+            repository_id = ?2, root = ?3, branch = ?4, title = ?5, phase = ?6,
+            base_oid = ?7, head_oid = ?8, result_summary = ?9, updated_at = ?11",
+        (
+            task.id.as_str(),
+            task.repository_id.as_str(),
+            task.root.to_string_lossy().as_ref(),
+            task.branch.as_deref(),
+            task.title.as_str(),
+            task.phase_column(),
+            task.base_oid.as_deref(),
+            task.head_oid.as_deref(),
+            task.result_summary.as_deref(),
+            if task.created_at > 0 { task.created_at } else { now },
+            now,
+        ),
+    )
+    .await
+    .context("task_spaces の upsert に失敗")?;
     Ok(())
 }
 
@@ -811,21 +1392,56 @@ mod tests {
 
         let file_a = PathBuf::from("/tmp/a.rs");
         let file_b = PathBuf::from("/tmp/b.rs");
-        storage.save_hot_exit(&file_a, "content A").unwrap();
-        storage.save_hot_exit(&file_b, "内容 B（日本語）").unwrap();
-        // upsert（同じ path へ上書き）
-        storage.save_hot_exit(&file_a, "content A v2").unwrap();
+        storage.save_hot_exit("local", &file_a, "content A").unwrap();
+        storage.save_hot_exit("local", &file_b, "内容 B（日本語）").unwrap();
+        // upsert（同じ scope+path へ上書き）
+        storage.save_hot_exit("local", &file_a, "content A v2").unwrap();
 
         let all = storage.load_hot_exit_all().unwrap();
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0], (file_a.clone(), "content A v2".to_string()));
-        assert_eq!(all[1], (file_b.clone(), "内容 B（日本語）".to_string()));
+        assert_eq!(
+            all[0],
+            ("local".to_string(), file_a.clone(), "content A v2".to_string())
+        );
+        assert_eq!(
+            all[1],
+            ("local".to_string(), file_b.clone(), "内容 B（日本語）".to_string())
+        );
 
-        storage.remove_hot_exit(&file_a).unwrap();
+        storage.remove_hot_exit("local", &file_a).unwrap();
         assert_eq!(storage.load_hot_exit_all().unwrap().len(), 1);
 
         storage.clear_hot_exit().unwrap();
         assert!(storage.load_hot_exit_all().unwrap().is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hot_exit_scope_isolates_local_and_remote() {
+        // 受入（M13）: local と remote の「同じ絶対パス」が衝突せず別々に復元される。
+        let path = temp_db("hotexit-scope");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).expect("DB を開ける");
+
+        let same = PathBuf::from("/home/dev/work/sample/src/lib.rs");
+        storage.save_hot_exit("local", &same, "ローカルの未保存").unwrap();
+        storage
+            .save_hot_exit("ssh://host/home/dev/work/sample", &same, "リモートの未保存")
+            .unwrap();
+
+        let all = storage.load_hot_exit_all().unwrap();
+        assert_eq!(all.len(), 2, "同一パスでも scope が違えば別レコード");
+        let local = all.iter().find(|(scope, ..)| scope == "local").unwrap();
+        let remote = all.iter().find(|(scope, ..)| scope.starts_with("ssh://")).unwrap();
+        assert_eq!(local.2, "ローカルの未保存");
+        assert_eq!(remote.2, "リモートの未保存");
+
+        // 片方（local）だけ消しても remote は残る
+        storage.remove_hot_exit("local", &same).unwrap();
+        let after = storage.load_hot_exit_all().unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(after[0].0.starts_with("ssh://"));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -887,6 +1503,39 @@ mod tests {
     }
 
     #[test]
+    fn local_projects_round_trip_and_forget() {
+        let path = temp_db("local_projects");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+
+        // 未登録は空。
+        assert!(storage.recent_local_projects().unwrap().is_empty());
+        storage.record_local_project("/Users/d/Work/shirushi", "shirushi").unwrap();
+        storage.record_local_project("/Users/d/Work/blog", "blog").unwrap();
+        let recent = storage.recent_local_projects().unwrap();
+        assert_eq!(recent.len(), 2);
+        assert!(recent.iter().any(|row| row.0 == "/Users/d/Work/shirushi" && row.1 == "shirushi"));
+        // 同じ path を再記録 → 件数は増えず name/opened_at だけ更新（upsert）。
+        storage.record_local_project("/Users/d/Work/shirushi", "しるし").unwrap();
+        let recent2 = storage.recent_local_projects().unwrap();
+        assert_eq!(recent2.len(), 2);
+        assert!(recent2.iter().any(|row| row.0 == "/Users/d/Work/shirushi" && row.1 == "しるし"));
+
+        // forget: local スコープは local_projects から消え、remote には触れない。
+        storage.record_remote_project("dev@box", "/srv/app", "app").unwrap();
+        storage.forget_recent_project("local", "/Users/d/Work/blog").unwrap();
+        let after = storage.recent_local_projects().unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(!after.iter().any(|row| row.0 == "/Users/d/Work/blog"));
+        assert_eq!(storage.recent_remote_projects().unwrap().len(), 1);
+        // forget: remote スコープ（host key）は remote_projects から消える。
+        storage.forget_recent_project("dev@box", "/srv/app").unwrap();
+        assert!(storage.recent_remote_projects().unwrap().is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn threads_and_turns_round_trip() {
         let path = temp_db("threads");
         let _ = std::fs::remove_file(&path);
@@ -905,6 +1554,12 @@ mod tests {
         assert_eq!(threads.len(), 2);
         // updated_at 降順 = 直近更新の t2 or t1（同時刻あり得るので集合で確認）
         assert!(threads.iter().any(|t| t.0 == "t1" && t.1 == "rope設計（改名）" && t.6 == 2400));
+        // 時刻の導出（M14）: created_at は正の unix ms・last_input_at は user turn がある t1 だけ Some。
+        let t1 = threads.iter().find(|t| t.0 == "t1").unwrap();
+        assert!(t1.8 > 0, "created_at が入る");
+        assert!(t1.9.is_some(), "user turn があるので last_input_at は Some");
+        let t2 = threads.iter().find(|t| t.0 == "t2").unwrap();
+        assert!(t2.9.is_none(), "入力の無いスレッドの last_input_at は None");
         let turns = storage.load_recent_turns("t1", 10).unwrap();
         assert_eq!(turns, vec![
             ("user".to_string(), "1+1は？".to_string()),
@@ -921,6 +1576,64 @@ mod tests {
         // 台帳
         let ledger = storage.token_ledger().unwrap();
         assert_eq!(ledger[0].2, 2400);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn task_spaces_and_events_round_trip() {
+        let path = temp_db("task_spaces");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        let mut task = TaskSpaceRecord {
+            id: "space-auth".into(),
+            repository_id: "local:/repo/.git".into(),
+            root: PathBuf::from("/repo-worktrees/auth"),
+            branch: Some("task/auth".into()),
+            title: "認証 API".into(),
+            kind: SpaceKind::Task,
+            phase: TaskPhase::Planned,
+            base_oid: Some("abc123".into()),
+            head_oid: None,
+            result_summary: None,
+            depends_on: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        storage.upsert_task_space(&task).unwrap();
+        let tasks = storage.load_task_spaces().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, task.id);
+        assert_eq!(tasks[0].root, task.root);
+        assert_eq!(tasks[0].kind, SpaceKind::Task);
+
+        storage
+            .append_task_event("space-auth", "agent_spawned", r#"{"agent":"codex"}"#)
+            .unwrap();
+        task.phase = TaskPhase::Working;
+        storage
+            .commit_task_transition(&task, r#"{"from":"planned","to":"working"}"#)
+            .unwrap();
+        let updated = storage.load_task_spaces().unwrap();
+        assert_eq!(updated[0].phase, TaskPhase::Working);
+        let events = storage.load_task_events("space-auth").unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "agent_spawned");
+        assert_eq!(events[1].kind, "phase_changed");
+
+        // IntegrationSpace は遷移の唯一の入口で拒否される（P0 の domain 規則）。
+        let integration = TaskSpaceRecord {
+            id: "space-main".into(),
+            kind: SpaceKind::Integration,
+            branch: None,
+            ..task.clone()
+        };
+        assert!(storage.commit_task_transition(&integration, "{}").is_err());
+
+        // 既存 DB の phase 列 `integration` は kind へ復元される（互換読み出し）。
+        storage.upsert_task_space(&integration).unwrap();
+        let all = storage.load_task_spaces().unwrap();
+        let restored = all.iter().find(|record| record.id == "space-main").unwrap();
+        assert_eq!(restored.kind, SpaceKind::Integration);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1024,12 +1737,14 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         {
             let storage = Storage::open(&path).expect("DB を開ける");
-            storage.save_hot_exit(&PathBuf::from("/tmp/x.rs"), "unsaved!").unwrap();
+            storage
+                .save_hot_exit("local", &PathBuf::from("/tmp/x.rs"), "unsaved!")
+                .unwrap();
         } // drop = プロセス死の代わり（flush されていること）
         let storage = Storage::open(&path).expect("再オープンできる");
         let all = storage.load_hot_exit_all().unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].1, "unsaved!");
+        assert_eq!(all[0].2, "unsaved!");
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -43,6 +43,9 @@ impl CommandRegistry {
             CommandEntry { label_key: "cmd.toggle_terminal", action_name: "workspace::ToggleTerminal" },
             CommandEntry { label_key: "cmd.toggle_git_panel", action_name: "workspace::ToggleGitPanel" },
             CommandEntry { label_key: "cmd.toggle_todo_board", action_name: "workspace::ToggleTodoBoard" },
+            CommandEntry { label_key: "cmd.toggle_herd", action_name: "workspace::ToggleHerdSidebar" },
+            CommandEntry { label_key: "cmd.toggle_fleet", action_name: "workspace::ToggleFleet" },
+            CommandEntry { label_key: "cmd.toggle_control", action_name: "workspace::ToggleControl" },
             CommandEntry { label_key: "cmd.split_right", action_name: "workspace::SplitRight" },
             CommandEntry { label_key: "cmd.new_thread", action_name: "workspace::NewThread" },
             CommandEntry { label_key: "cmd.next_tab", action_name: "workspace::SelectNextTab" },
@@ -51,6 +54,8 @@ impl CommandRegistry {
             CommandEntry { label_key: "cmd.prev_thread", action_name: "workspace::SelectPrevThread" },
             CommandEntry { label_key: "cmd.remote_ssh", action_name: "workspace::RemoteSsh" },
             CommandEntry { label_key: "cmd.thread_history", action_name: "workspace::ThreadHistory" },
+            CommandEntry { label_key: "cmd.report_bug", action_name: "workspace::ReportBug" },
+            CommandEntry { label_key: "cmd.open_settings", action_name: "workspace::OpenSettings" },
         ]
     }
 

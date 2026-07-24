@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>管制ダッシュボード — 編隊の統括1画面（検討用・正は index.html）</title>
+<style>
+/* ============================================================
+   管制ダッシュボード（編隊モード中央面の新タブ案）
+   1画面で答える4つの質問（上から読む順）:
+   ① 全体は今どうなってる？（ヘッダ数字 + 監督の総括）
+   ② 私は次に何をすべき？（要対応キュー）
+   ③ 各エージェントは何をしてる？（稼働カード）
+   ④ 全体はどこへ向かってる？（統合パイプライン + タイムライン）
+   規律: 色=スレッド識別 / 状態=形と動き / ✳=LLM生成 / 破線=画面推定
+   ============================================================ */
+:root {
+  --desktop: #0c0d11;
+  --bg0: #16181e; --bg1: #1b1e25; --bg2: #232733; --bg3: #2b3040;
+  --fg0: #d7dae3; --fg1: #9aa1b2; --fg2: #646b7a;
+  --border: #262b36;
+  --ok: #7bc96f; --warn: #e5c07b; --err: #e06c75;
+  --accent: #7c8cf8; --terra: #d97757;
+  --th1: #61afef; --th2: #e5c07b; --th3: #c678dd; --th4: #34d3b6; --th5: #98c379;
+}
+* { box-sizing: border-box; margin: 0; }
+body { background: var(--desktop); color: var(--fg0);
+  font: 12.5px/1.5 -apple-system, "Hiragino Sans", sans-serif;
+  height: 100vh; display: flex; flex-direction: column; padding: 14px; gap: 10px; }
+
+.stg { flex: none; width: 14px; text-align: center; font-size: 11px; line-height: 1; color: var(--tc, var(--fg2)); }
+.stg.work { animation: pulse 1.6s ease-in-out infinite; }
+.stg.block { animation: pulse .8s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* ---- ① ヘッダ: 編隊サマリ（左=正体 / 右=状態の数とグリフ+予算） ---- */
+.top { flex: none; display: flex; align-items: center; gap: 16px; padding: 9px 14px;
+  background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; }
+.top .mark { flex: none; display: flex; align-items: baseline; gap: 9px; }
+.top .mark .k { font-size: 10px; font-weight: 700; letter-spacing: .16em; color: var(--fg2); }
+.top .mark .name { font-size: 13.5px; font-weight: 700; }
+.top .mark .dest { font-size: 10.5px; color: var(--fg2); }
+.top .goal { font-size: 11px; color: var(--fg1); border-left: 1px solid var(--border); padding-left: 16px;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top .goal b { color: var(--fg0); font-weight: 500; }
+.stats { display: flex; gap: 6px; margin-left: auto; flex: none; }
+.stat { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px;
+  background: var(--bg1); border: 1px solid var(--border); }
+.stat .g { font-size: 10px; color: var(--fg1); width: 12px; text-align: center; }
+.stat .n { font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat .l { font-size: 10px; color: var(--fg2); }
+.stat.alert { border-color: color-mix(in srgb, var(--err) 40%, var(--border)); }
+.stat.alert .n { color: var(--err); }
+.stat.alert .g { color: var(--err); animation: pulse .8s ease-in-out infinite; }
+.top .budget { flex: none; display: flex; align-items: center; gap: 7px; border-left: 1px solid var(--border);
+  padding-left: 16px; font-size: 10.5px; color: var(--fg1); font-variant-numeric: tabular-nums; }
+.top .budget .bar { width: 64px; height: 4px; border-radius: 2px; background: var(--bg3); overflow: hidden; }
+.top .budget .bar i { display: block; height: 100%; width: 19%; background: var(--fg1); }
+
+/* ---- ① 監督の総括バー（顔=集約気分・マスコットの席） ---- */
+.coord { flex: none; display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; }
+.coord .face { flex: none; width: 30px; height: 30px; border-radius: 7px; background: var(--bg3);
+  border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 17px; }
+.coord .who { flex: none; line-height: 1.3; }
+.coord .who b { display: block; font-size: 11px; color: var(--fg0); font-weight: 600; }
+.coord .who span { font-size: 9.5px; color: var(--fg2); }
+.coord .sep { flex: none; width: 1px; align-self: stretch; background: var(--border); }
+.coord .say { font-size: 12.5px; color: var(--fg0); font-style: italic; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coord .say::before { content: "✳ "; color: var(--terra); font-style: normal; }
+.coord .at { flex: none; font-size: 9.5px; color: var(--fg2); margin-left: auto; }
+.coord .jump { flex: none; font-size: 11px; color: var(--fg0);
+  background: var(--bg3); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 6px; padding: 5px 12px; white-space: nowrap; }
+
+/* ---- ②③ メイン2カラム ---- */
+.main { flex: 1; display: flex; gap: 10px; min-height: 0; }
+.col-head { flex: none; display: flex; align-items: baseline; gap: 8px; padding: 8px 12px 6px;
+  font-size: 10px; font-weight: 700; letter-spacing: .08em; color: var(--fg2); text-transform: uppercase; }
+.col-head .cnt { color: var(--fg0); }
+.col-head .hint { margin-left: auto; font-weight: 400; letter-spacing: 0; }
+
+.queue { flex: none; width: 336px; display: flex; flex-direction: column;
+  background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; overflow: hidden auto; }
+.qcard { margin: 0 10px 8px; background: var(--bg1); border: 1px solid var(--border); border-radius: 6px;
+  border-left: 2px solid var(--tc); padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.qcard.next { background: var(--bg2); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tc) 45%, transparent); }
+.l1 { display: flex; gap: 7px; align-items: center; min-width: 0; }
+.nm { font-size: 12px; color: var(--fg0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dest { flex: none; font-size: 10px; color: var(--fg2); }
+.badge { flex: none; margin-left: auto; font-size: 9px; padding: 1px 7px; border-radius: 7px;
+  background: var(--bg3); border: 1px solid var(--border); color: var(--fg0); }
+.digest { font-size: 11px; color: var(--fg1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.digest.quote::before { content: "「"; color: var(--fg2); }
+.digest.quote::after { content: "」"; color: var(--fg2); }
+.tier2 { font-size: 10.5px; color: var(--fg1); font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tier2::before { content: "✳ "; color: var(--terra); font-style: normal; }
+.meta { display: flex; gap: 8px; font-size: 9.5px; color: var(--fg2); align-items: center; font-variant-numeric: tabular-nums; }
+.meta .plan { letter-spacing: 1px; color: var(--fg1); }
+.meta .add { color: var(--ok); } .meta .del { color: var(--err); }
+.meta .rok { color: var(--ok); }
+.meta .wait { color: var(--err); }
+.acts { display: flex; gap: 6px; margin-top: 2px; }
+.acts button { font: 10.5px/1 -apple-system, "Hiragino Sans", sans-serif; color: var(--fg0);
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; padding: 4px 10px; }
+.acts button.primary { border-color: color-mix(in srgb, var(--tc) 55%, transparent); }
+
+.live { flex: 1; display: flex; flex-direction: column; background: var(--bg0);
+  border: 1px solid var(--border); border-radius: 8px; min-width: 0; overflow: hidden auto; }
+.cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 0 10px 10px; }
+.card { background: var(--bg1); border: 1px solid var(--border); border-radius: 6px;
+  border-left: 2px solid var(--tc); padding: 9px 11px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.card.ghost { border-style: dashed; border-left-width: 1px; align-items: center; justify-content: center;
+  color: var(--fg2); font-size: 11px; min-height: 86px; }
+.card .agent { flex: none; font-size: 9.5px; color: var(--fg2); }
+.src { flex: none; font-size: 9px; color: var(--fg2); border: 1px dashed var(--fg2); border-radius: 3px; padding: 0 4px; }
+
+/* ---- ④ 統合パイプライン ---- */
+.pipe { flex: none; background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; padding-bottom: 8px; }
+.pipe-cols { display: flex; gap: 6px; padding: 0 12px; }
+.pcol { flex: 1; min-width: 0; }
+.pcol .ph { font-size: 9px; letter-spacing: .06em; color: var(--fg2); text-transform: uppercase;
+  padding: 2px 2px 5px; display: flex; gap: 5px; align-items: baseline; }
+.pcol .ph b { color: var(--fg1); font-weight: 600; }
+.pcol .well { min-height: 30px; border-radius: 5px; background: var(--bg1); border: 1px dashed var(--border);
+  display: flex; flex-direction: column; gap: 4px; padding: 4px; }
+.chip { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--fg0);
+  background: var(--bg2); border-left: 2px solid var(--tc); border-radius: 4px; padding: 3px 7px;
+  white-space: nowrap; overflow: hidden; }
+.chip.dim { opacity: .55; }
+.pcol.fail .ph b { color: var(--err); }
+.arrow { align-self: center; color: var(--fg2); font-size: 10px; padding-top: 14px; }
+
+/* ---- ④ タイムライン ---- */
+.feed { flex: none; height: 118px; background: var(--bg0); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+.ev { display: flex; gap: 8px; padding: 2.5px 12px; font-size: 10.5px; color: var(--fg1); align-items: baseline; }
+.ev .t { flex: none; width: 32px; color: var(--fg2); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+.ev .chip2 { flex: none; width: 7px; height: 7px; border-radius: 2px; background: var(--tc); align-self: center; }
+.ev.coord2 .chip2 { border-radius: 50%; }
+.ev b { color: var(--fg0); font-weight: 500; }
+.foot { flex: none; display: flex; gap: 14px; padding: 0 4px; font-size: 9.5px; color: var(--fg2); }
+</style>
+</head>
+<body>
+
+  <!-- ① 編隊サマリ -->
+  <div class="top">
+    <div class="mark"><span class="k">管制</span><span class="name">shirushi</span><span class="dest">⎇ main + 5 worktrees</span></div>
+    <span class="goal">目標: <b>M14 残項目の消化 — 通知とニュースを今週で閉じる</b></span>
+    <div class="stats">
+      <div class="stat alert"><span class="g">◐</span><span class="n">2</span><span class="l">要対応</span></div>
+      <div class="stat"><span class="g">✓</span><span class="n" style="color:var(--fg0)">1</span><span class="l">完了未確認</span></div>
+      <div class="stat"><span class="g stg work" style="width:12px">●</span><span class="n" style="color:var(--fg0)">2</span><span class="l">稼働</span></div>
+      <div class="stat"><span class="g">⇡</span><span class="n" style="color:var(--fg1)">1</span><span class="l">統合/今日</span></div>
+    </div>
+    <div class="budget">Σ 75.6k<span class="bar"><i></i></span>400k</div>
+  </div>
+
+  <!-- ① 監督の総括（Tier 2・編隊レベル・顔=集約気分でマスコットが座る） -->
+  <div class="coord">
+    <div class="face" title="集約気分（最悪状態に追従・実装はマスコット filmstrip）">😟</div>
+    <div class="who"><b>監督 · Claude Code</b><span>宛先 shirushi ⎇ main</span></div>
+    <div class="sep"></div>
+    <span class="say">fix-412 が cargo publish の許可を 45 秒待っています。deps の失敗は notify 8.2 の API 変更が原因で auth とは独立。LP 文言は radar ✓ なので確認だけで統合できます。</span>
+    <span class="at">14:07 更新</span>
+    <span class="jump">⏎ 次: バグ #412 の許可判断</span>
+  </div>
+
+  <div class="main">
+    <!-- ② 要対応キュー -->
+    <div class="queue">
+      <div class="col-head">要対応 <span class="cnt">2</span> · 完了未確認 <span class="cnt">1</span><span class="hint">⏎ で先頭へ</span></div>
+      <div class="qcard next" style="--tc:var(--th2)">
+        <div class="l1"><span class="stg block">◐</span><span class="nm">バグ #412</span><span class="dest">⎇ task/fix-412</span><span class="badge">次 ⏎</span></div>
+        <div class="digest quote">shell: cargo publish を実行してよいですか</div>
+        <div class="meta"><span class="wait">待ち 45s</span><span class="plan">▰▰▰▰▱</span><span>4/5</span><span class="add">+38</span><span class="del">−6</span></div>
+        <div class="acts"><button class="primary">許可</button><button>常に許可</button><button>拒否</button><button>開く</button></div>
+      </div>
+      <div class="qcard" style="--tc:var(--th4)">
+        <div class="l1"><span class="stg">✗</span><span class="nm">依存更新</span><span class="dest">⎇ task/deps</span></div>
+        <div class="digest">cargo check 失敗 (2) — notify 8.2 の API 変更</div>
+        <div class="tier2">fsevents 系の破壊的変更。watcher 初期化 2 箇所の修正で通る見込み</div>
+        <div class="acts"><button class="primary">修正を指示</button><button>開く</button><button>破棄</button></div>
+      </div>
+      <div class="qcard" style="--tc:var(--th3)">
+        <div class="l1"><span class="stg">✓</span><span class="nm">LP 文言</span><span class="dest">⎇ task/lp-copy</span><span class="badge">merge_ready</span></div>
+        <div class="digest quote">ヒーロー節を ja/en 両方書き換え、スクショ検証まで完了しました</div>
+        <div class="meta"><span class="add">+12</span><span class="del">−9</span><span class="rok">radar ✓</span><span>12.0k</span></div>
+        <div class="acts"><button class="primary">diff を確認</button><button>Integrate</button></div>
+      </div>
+    </div>
+
+    <!-- ③ 稼働カード -->
+    <div class="live">
+      <div class="col-head">稼働中 <span class="cnt">2</span><span class="hint">クリックで没入（セル/スレッドへ）</span></div>
+      <div class="cards">
+        <div class="card" style="--tc:var(--th1)">
+          <div class="l1"><span class="stg work">●</span><span class="nm">認証リファクタ</span><span class="dest">⎇ task/auth</span><span class="agent" style="margin-left:auto">Claude Code</span></div>
+          <div class="digest">Bash(cargo test -p shirushi) 実行中 — session.rs のテスト修正</div>
+          <div class="meta"><span class="plan">▰▰▰▱▱</span><span>3/5 · テスト修正</span><span class="add">+214</span><span class="del">−87</span><span>42.1k</span><span>12m</span></div>
+        </div>
+        <div class="card" style="--tc:var(--th5)">
+          <div class="l1"><span class="stg work" style="border:1px dashed var(--fg2);border-radius:50%">●</span><span class="nm">リサーチ</span><span class="dest">⎇ task/research</span><span class="src" style="margin-left:auto">Herdr·推定</span></div>
+          <div class="digest">Fetching docs.rs/tokio…（画面末尾より）</div>
+          <div class="meta"><span>OpenCode CLI</span><span>tok —</span><span>7m</span></div>
+        </div>
+        <div class="card ghost">＋ Task（worktree を切って開始）</div>
+        <div class="card ghost" style="opacity:.5">空きセル 5/8</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ④ 統合パイプライン -->
+  <div class="pipe">
+    <div class="col-head">統合パイプライン<span class="hint">worktree → main への流れ・チップ=TaskSpace</span></div>
+    <div class="pipe-cols">
+      <div class="pcol"><div class="ph"><b>planned</b>0</div><div class="well"></div></div>
+      <span class="arrow">→</span>
+      <div class="pcol"><div class="ph"><b>working</b>2</div><div class="well">
+        <div class="chip" style="--tc:var(--th1)">● 認証リファクタ</div>
+        <div class="chip" style="--tc:var(--th5);border-left-style:dashed">● リサーチ</div>
+      </div></div>
+      <span class="arrow">→</span>
+      <div class="pcol"><div class="ph"><b>blocked</b>1</div><div class="well">
+        <div class="chip" style="--tc:var(--th2)">◐ バグ #412</div>
+      </div></div>
+      <span class="arrow">→</span>
+      <div class="pcol"><div class="ph"><b>review_ready</b>0</div><div class="well"></div></div>
+      <span class="arrow">→</span>
+      <div class="pcol"><div class="ph"><b>merge_ready</b>1</div><div class="well">
+        <div class="chip" style="--tc:var(--th3)">✓ LP 文言</div>
+      </div></div>
+      <span class="arrow">→</span>
+      <div class="pcol"><div class="ph"><b>integrated</b>1</div><div class="well">
+        <div class="chip dim" style="--tc:var(--accent)">✓ アイコン差替</div>
+      </div></div>
+      <div class="pcol fail" style="flex:.8"><div class="ph"><b>failed</b>1</div><div class="well">
+        <div class="chip" style="--tc:var(--th4)">✗ 依存更新</div>
+      </div></div>
+    </div>
+  </div>
+
+  <!-- ④ タイムライン -->
+  <div class="feed">
+    <div class="col-head">ニュース<span class="hint">task_events — 監督の采配も同じログ（監査可能）</span></div>
+    <div class="ev" style="--tc:var(--th2)"><span class="t">14:07</span><span class="chip2"></span><span><b>バグ #412</b> が承認待ち — cargo publish 実行の許可</span></div>
+    <div class="ev coord2" style="--tc:var(--accent)"><span class="t">14:06</span><span class="chip2"></span><span><b>監督</b>: deps の失敗は auth と独立 — 修正案を添えて再指示、優先度を fix-412 へ</span></div>
+    <div class="ev" style="--tc:var(--th4)"><span class="t">14:05</span><span class="chip2"></span><span><b>依存更新</b> が失敗 — cargo check 2 エラー（notify 8.2 API 変更）</span></div>
+    <div class="ev" style="--tc:var(--th3)"><span class="t">14:02</span><span class="chip2"></span><span><b>LP 文言</b> が review_ready → radar ✓ で <b>merge_ready</b></span></div>
+    <div class="ev" style="--tc:var(--th1)"><span class="t">13:55</span><span class="chip2"></span><span><b>認証リファクタ</b> plan 2/5 → 3/5 — テスト修正へ</span></div>
+  </div>
+
+  <div class="foot">
+    <span>●作業(脈動) ◐承認待ち ✓完了 ✗失敗</span><span>色=スレッド識別のみ</span><span>✳=LLM 生成（Tier 2）</span><span>破線=Herdr 画面推定</span><span>没入はカードクリック / 全体像はこの画面 — ズーム4段（グリフ→文→カード→スレッド）</span>
+  </div>
+
+</body>
+</html>

@@ -4,8 +4,8 @@ fn main() {
     let storage = storage::Storage::open(std::path::Path::new(&path)).expect("DB を開けない");
     let rows = storage.load_hot_exit_all().expect("読めない");
     println!("{} 行", rows.len());
-    for (path, content) in rows {
+    for (scope, path, content) in rows {
         let head: String = content.chars().take(60).collect();
-        println!("{} :: {head}", path.display());
+        println!("[{scope}] {} :: {head}", path.display());
     }
 }

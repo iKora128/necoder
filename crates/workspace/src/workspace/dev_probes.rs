@@ -15,10 +15,124 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: スレッドに各状態を仕込んで開く（タブ/beacon/フッター/レールの状態表示を offscreen で検証・#）。
+    #[cfg(debug_assertions)]
+    pub fn debug_set_activities(&mut self, cx: &mut Context<Self>) {
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
+        }
+        self.agent_panel.update(cx, |panel, cx| panel.debug_set_activities(cx));
+        // ニュースフィード（P2）の描画検証: 実遷移が積むのと同じ写像（news_text_for_phase）でデモ行を積む。
+        if self.notifications.news.is_empty() {
+            let statuses = self.agent_panel.read(cx).statuses();
+            let demo = [
+                (TaskPhase::Blocked, Some("workspace.rs への書き込みを許可しますか")),
+                (TaskPhase::ReviewReady, Some("全 21 test green。次は P2 へ。")),
+                (TaskPhase::Failed, Some("cargo check 2 エラー（notify 8.2 API 変更）")),
+                (TaskPhase::Working, None),
+            ];
+            for (index, (phase, digest)) in demo.into_iter().enumerate() {
+                let (kind, text) = Self::news_text_for_phase(phase, digest);
+                let (color, title) = statuses
+                    .get(index % statuses.len().max(1))
+                    .map(|status| (status.color, status.name.clone()))
+                    .unwrap_or((self.theme.fg2, SharedString::from("Task")));
+                self.push_news(kind, color, title, text);
+            }
+        }
+        cx.notify();
+    }
+
     /// 開発用: スレッド履歴 Picker を開く（offscreen 検証・#5）。
     #[cfg(debug_assertions)]
     pub fn debug_open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_thread_history(&ThreadHistory, window, cx);
+    }
+
+    /// 開発用: 管制タブの受入検証（P3・`SHIRUSHI_CONTROL_PROBE`）。5 つの擬似 TaskSpace
+    /// （Working/Blocked/MergeReady/Failed/Planned）を合成する。worktree 実体は現 root を共有
+    /// （描画検証専用）・SpaceId は probe 専用値・storage は渡さない＝**Git/DB へ一切書かない**。
+    #[cfg(debug_assertions)]
+    pub fn debug_seed_control(&mut self, cx: &mut Context<Self>) {
+        let Some(base) = self.project_sessions.projects.first() else {
+            return;
+        };
+        let host = base.worktree.host().clone();
+        let root = base.worktree.root().to_path_buf();
+        let base_color = base.color;
+        let scenarios: [(&str, &str, TaskPhase, u8, Option<&str>); 5] = [
+            ("認証リファクタ", "task/auth", TaskPhase::Working, 0, None),
+            ("バグ #412", "task/fix-412", TaskPhase::Blocked, 1, None),
+            (
+                "LP 文言",
+                "task/lp-copy",
+                TaskPhase::MergeReady,
+                2,
+                Some("Conflict Radar: clean — ヒーロー節 ja/en"),
+            ),
+            (
+                "依存更新",
+                "task/deps",
+                TaskPhase::Failed,
+                3,
+                Some("cargo check 失敗 (2) — notify 8.2 の API 変更"),
+            ),
+            ("リサーチ", "task/research", TaskPhase::Planned, 4, None),
+        ];
+        for (title, branch, phase, style, summary) in scenarios {
+            let Ok(worktree) = Worktree::with_host(host.clone(), &root) else {
+                continue;
+            };
+            let color = base_color; // 色モデル: Task はリポジトリ色を継承（スレッド色が ACP を識別）
+            let mut slot = ProjectSlot {
+                task_space: TaskSpace::for_worktree(&worktree, Some(branch)),
+                name: SharedString::from(title.to_string()),
+                branch: Some(branch.to_string()),
+                remote_host: None,
+                color,
+                worktree: Rc::new(worktree),
+                explorer: ExplorerProject::default(),
+                open_files: Vec::new(),
+                active_file: 0,
+                icon: None,
+                worktree_branch: Some(branch.to_string()),
+            };
+            slot.task_space.id = SpaceId(format!("probe-{branch}"));
+            slot.task_space.title = SharedString::from(title.to_string());
+            slot.task_space.phase = phase;
+            slot.task_space.result_summary = summary.map(SharedString::from);
+            let session = Self::create_project_session(
+                Some(&slot),
+                self.theme.clone(),
+                self.explorer_mode(cx),
+                None,
+                cx,
+            );
+            let news_color = slot.color;
+            self.project_sessions.projects.push(slot);
+            self.project_sessions.sessions.push(session);
+            let index = self.project_sessions.projects.len() - 1;
+            self.project_sessions.sessions[index]
+                .agent_panel
+                .update(cx, |panel, cx| panel.debug_set_state(style, cx));
+            // ニュースにも実遷移と同じ写像でデモ行を積む（Planned/Working は静かに）。
+            if matches!(phase, TaskPhase::Blocked | TaskPhase::MergeReady | TaskPhase::Failed) {
+                let digest = match style {
+                    1 => Some("shell: cargo publish を実行してよいですか"),
+                    _ => summary,
+                };
+                let (kind, text) = Self::news_text_for_phase(phase, digest);
+                self.push_news(kind, news_color, SharedString::from(title.to_string()), text);
+            }
+        }
+        self.chrome.fleet_mode = true;
+        self.chrome.fleet_center_view = FleetCenterView::Control;
+        // 監督バーの ✳ 総括の描画検証（実生成は oneshot・ここは見た目の確認用）。
+        self.control_summary = Some(SharedString::from(
+            "バグ #412 の publish 許可が最優先 — deps の失敗は独立、LP 文言は radar clean で統合可能",
+        ));
+        self.ensure_fleet_clock(cx);
+        cx.notify();
     }
 
     /// 開発用: SSH 入力バーを開く（M13 の描画検証）。

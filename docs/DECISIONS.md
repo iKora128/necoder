@@ -145,3 +145,17 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   既定の変更は Settings 画面（明示操作）でのみ**。監査（2026-07-19）で唯一の違反＝Agent ピルの `default_agent`
   巻き添え保存を除去済み（`agent_panel::select_option`）。モデル既定も「Settings で各エージェントに ★ で決める」
   方式に寄せる（当面は agent 自身の既定＝安定なのでドリフトは無い）。設定画面は M12・`Workspace.show_settings`。
+- **M14 マルチエージェント編隊 = herdr から取るのは #3-4 のみ（2026-07-20・本人）** — herdr（AGPL・クリーンルーム参照）分析の結論: 状態検知・状態一覧・会話復元は ACP ネイティブで既にカバー/上回る（`ThreadActivity`/`activity_dot`/状態つき `RunningRegistry`・スレッド永続化。基盤は 2026-07-20 別セッションで実装済み）。**取り込むのは「エージェント自身が編隊を操作する API」（herdr の #3-4）のみ** — `shirushi` CLI ＋ ACP ツール/MCP で worktree 追加・ペイン追加・`wait agent-status`（他エージェントの完了待ち）を**クリーンルーム自作**（ソースを読まず挙動から・§5 の鉄則どおり）。**プラグイン市場（#5）は不採用**（登録式境界は既存・エコシステムは later）。トースト個別ミュート（#7）は既存通知の小改善に合流。**編隊ビュー = 専用だが軽量**（既存 `ProjectSession` を再利用し、左ファイルブラウザは残して **focus-follows-agent**＝フォーカス中エージェントの worktree を映す＝「ファイルブラウザの真」を一意化）。**系譜グラフ = 扇形（Fan）既定**（＋ツリー/カード/ハブ切替・ネイティブ描画・webview 不使用。River は廃止・Hub 追加＝2026-07-22）。**状態は色相を持たない**（既決・§1.3/JOURNAL 2026-07-20）を編隊でも貫く。M13 末尾「エージェントタブ Grouped ビュー」は**②スレッドが worktree dest を持つモデル拡張**で決着。正は UI-SPEC §11・ROADMAP M14・mock 編隊モード。
+- **M14 Fleet を TaskSpace-first へ確定（2026-07-22・前項を更新）** — 既定は `+ Task` = branch + linked worktree + ProjectSession + AgentPanel。Fleet cell は Agent thread でなく TaskSpace を表し、既存 AgentPanel を完全再利用する。同じ Task への Agent 追加だけを明示操作にする。main は protected IntegrationSpace、永続 lifecycle/event ledger と Conflict Radar / explicit Integrate を Orchestration Engine が所有する。CLI/MCP の create/list/status/wait/review/integrate も同じ ledger を使う。正は `FLEET-ARCHITECTURE.md`。
+- **管制（Control）の設計判断 9 点を確定（2026-07-23・本人承認。実装計画=`FLEET-CONTROL-PLAN.md`・その §0 の転記）** —
+  ① 監視役は 3 分解: 決定論の事実層（プロトコル/Git 由来・LLM なし）/ 任命制の監督（ただの ACP スレッド）/ 人間への注意ルーティング（UI）。**台帳が記憶・監督は状態を持たない**（交代・再起動が自由）。
+  ② 名称「管制」（英 `Control`）。編隊モード中央面の新タブ。
+  ③ 規律: 色=スレッド識別のみ / 状態=形と動き / ✳ テラコッタ=LLM 生成テキストの印 / 破線=画面推定（Herdr 由来）。`TaskPhase`・`ThreadActivity`・Git health を 1 enum に潰さない。
+  ④ 遷移スナップショット（digest）は状態遷移時のみ生成・ポーリング無し。Tier1=決定論テンプレ合成 / Tier2=`oneshot()` 1 行要約（Done/Failed のみ・ledger キャッシュ）。**要約は状態を上書きしない**。
+  ⑤ Herdr は sidecar（別プロセス・socket API）。頭脳は Shirushi・PTY とプロセス生存だけ Herdr。worktree 操作は Shirushi 所有。
+  ⑥ ACP 優先の起動形態選択: ACP 対応エージェントの既定は ACP。常駐（Herdr・CLI 形態）は明示選択時のみ・推定監視であることを破線で明示。
+  ⑦ Herdr の観測値は業務上の正にしない: `TurnId`/`generation` で照合し前ターン完了の誤認を防ぐ。
+  ⑧ 守るべき操作（spawn/遷移/integrate/send）は Shirushi の MCP/CLI にだけ置く（Herdr socket 直叩きは台帳と permission の迂回路＝監督のツールセットに含めない）。
+  ⑨ リモート管制（QR・スマホ）は最後（P9・構想枠）。
+  **P0 実装補足（2026-07-23）**: phase 遷移の唯一の入口は `Storage::commit_task_transition`（snapshot+event 同一 transaction）。`TaskPhase`/`SpaceKind` の単一定義は storage crate（GUI/CLI/MCP が共有・文字列は DB とプロセス境界のみ）。IntegrationSpace は phase でなく `SpaceKind`（DB は既存互換の sentinel 表現・storage 内に封じる）。
+- **Task ledger は「GUI 稼働中 = 単一 writer」で確定（2026-07-24・P5 実装中の発見）** — Turso は**プロセス排他ロック**で、GUI と headless CLI/MCP が同じ DB を同時に開けない（`Locking error` を e2e で確認）。対応: GUI が生きている間の台帳読み書きは**すべて GUI の storage ハンドル（単一ワーカースレッド）へ IPC（`~/.shirushi/gui.sock`・0600・1 行 JSON）で集約**し、headless 直開きはロック検出（`is_lock_error`）で自動フォールバック。GUI 不在時は従来どおり直接 DB。副次効果: 遷移が常に GUI の入口（`transition_task_space`）を通るためニュース/総括/管制が headless 操作でも即時に追従する。守るべき操作（spawn/send/遷移）を Shirushi の CLI/MCP にだけ置く原則（FLEET-CONTROL-PLAN §0-8）とも整合。rusqlite へ退避する場合もこの単一 writer 構造は維持する（多 writer に戻さない）。

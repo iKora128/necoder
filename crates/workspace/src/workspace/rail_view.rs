@@ -1,6 +1,27 @@
 use crate::workspace::*;
 
 impl Workspace {
+    pub(crate) fn open_file_from_launcher(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(SharedString::from(i18n::t!("launcher.open_file"))),
+        });
+        cx.spawn(async move |workspace, cx| {
+            let result = receiver.await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                if let Ok(Ok(Some(paths))) = result {
+                    if let Some(path) = paths.into_iter().next() {
+                        workspace.pending_navigation = Some((path, 0, 0));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn rail_icon(
         &self,
         id: &'static str,
@@ -27,6 +48,27 @@ impl Workspace {
         let active = self.project_sessions.active;
         let accent = self.accent();
         let rail = settings::get(cx).rail; // アイコンの表示/非表示（settings 反応）
+        // 他プロジェクトの状態に気づけるよう、各スロットへ最重要スレッドの状態ドットを出す
+        // （ARCHITECTURE §5「レールのドットが他 project 分を担う」・#）。cx を跨いで借用しないよう
+        // root → (スレッド色, 状態) を先に所有データへ畳んでおく。
+        let rail_signals: std::collections::HashMap<
+            std::path::PathBuf,
+            (Hsla, agent_panel::ThreadActivity),
+        > = cx
+            .try_global::<agent_panel::RunningRegistry>()
+            .map(|registry| {
+                registry
+                    .0
+                    .iter()
+                    .filter_map(|(root, rows)| {
+                        rows.iter()
+                            .filter(|row| row.2.is_signal())
+                            .max_by_key(|row| row.2.urgency())
+                            .map(|(_, color, activity)| (root.clone(), (*color, *activity)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         div()
             .flex()
             .flex_col()
@@ -39,9 +81,33 @@ impl Workspace {
             .border_r_1()
             .border_color(theme.border)
             .pt_2()
-            .children(self.project_sessions.projects.iter().enumerate().map(|(index, slot)| {
+            .children({
+                // レール = プロジェクト（リポジトリ）単位。**Task worktree はレールに載せない**
+                // （同じリポジトリが色違いで並ぶと「色による方向感覚」が壊れる・2026-07-24 ユーザー指摘）。
+                // Task はレールでなく編隊モード（セル/herd）に住む。アクティブが Task slot の時は
+                // 同じリポジトリの Integration 枠を点灯させる（今どのプロジェクトに居るかは保つ）。
+                let active_slot_is_task = self
+                    .project_sessions
+                    .projects
+                    .get(active)
+                    .is_some_and(|slot| !slot.task_space.is_integration());
+                let active_repository = self
+                    .project_sessions
+                    .projects
+                    .get(active)
+                    .map(|slot| slot.task_space.repository_id.clone());
+                self.project_sessions
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| slot.task_space.is_integration())
+                    .map(move |(index, slot)| (index, slot, active_slot_is_task, active_repository.clone()))
+            }.map(|(index, slot, active_slot_is_task, active_repository)| {
                 let color = slot.color;
-                let is_active = index == active;
+                let is_active = index == active
+                    || (active_slot_is_task
+                        && active_repository.as_deref()
+                            == Some(slot.task_space.repository_id.as_str()));
                 let monogram = slot
                     .icon
                     .as_ref()
@@ -88,13 +154,30 @@ impl Workspace {
                                 .child(svg().path("icons/server.svg").size(px(8.)).text_color(color)),
                         )
                     })
+                    // 状態ドット（右上・絶対配置）。他プロジェクトが承認待ち/実行中/完了(未確認)なら灯る
+                    // （リモートバッジは右下なので衝突しない）。色はスレッド識別色・状態は形と動きで（§1.3）。
+                    .when_some(
+                        rail_signals.get(slot.worktree.root()).copied(),
+                        |element, (dot_color, activity)| {
+                            element.child(
+                                div().absolute().top(px(-2.)).right(px(-2.)).child(
+                                    agent_panel::activity_dot(
+                                        ("rail-activity", index),
+                                        7.0,
+                                        dot_color,
+                                        activity,
+                                    ),
+                                ),
+                            )
+                        },
+                    )
                     .tooltip(Tooltip::text(name, theme.clone()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| this.switch_project(index, window, cx)),
                     )
             }))
-            // ＋ = フォルダ選択ダイアログ → このウィンドウのレールへ追加（多重起動はガード済み）
+            // ＋ = 統一オープン（フォルダ/ファイル/リモート + 最近を1枚のファジー面に・open_launcher）
             .child(
                 div()
                     .id("rail-add")
@@ -110,10 +193,9 @@ impl Workspace {
                     .child("＋")
                     .hover(|style| style.text_color(theme.fg0).border_color(theme.fg2).bg(theme.bg2))
                     .tooltip(Tooltip::text(i18n::t!("rail.add_tip"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| this.add_project_via_dialog(cx)),
-                    ),
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        this.open_launcher(window, cx)
+                    })),
             )
             .child(div().flex_1())
             // ── アクティビティアイコン（settings.rail で個別に表示/非表示・Lucide SVG）──
@@ -125,6 +207,7 @@ impl Workspace {
                         i18n::t!("rail.explorer"),
                         // アクティブ（左ドックがエクスプローラ表示）ならプロジェクト色・でなければ淡色（VSCode 風）。
                         if self.chrome.show_left
+                            && !self.chrome.show_herd
                             && !self.todo_panel.read(cx).open
                             && !self.git_panel_open(cx)
                         {
@@ -140,9 +223,13 @@ impl Workspace {
                                 // Todo/git が出ていれば**それをクリアして**エクスプローラへ戻す
                                 // （旧: show_left トグルのみ → Todo が居座り「開くと Todo」問題）。
                                 // 既にエクスプローラなら従来どおり表示トグル。
-                                if this.todo_panel.read(cx).open || this.git_panel_open(cx) {
+                                if this.todo_panel.read(cx).open
+                                    || this.git_panel_open(cx)
+                                    || this.chrome.show_herd
+                                {
                                     this.todo_panel.update(cx, |panel, cx| panel.set_open(false, cx));
                                     this.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
+                                    this.chrome.show_herd = false;
                                     this.chrome.show_left = true;
                                 } else {
                                     this.chrome.show_left = !this.chrome.show_left;
@@ -165,6 +252,7 @@ impl Workspace {
                     ),
                 )
             })
+            // 編隊モードの入口は titlebar 右上の「Multi Agent」トグルへ移設（レール ⚡ は廃止・M14）。
             .when(rail.git, |element| {
                 element.child(
                     self.rail_icon(

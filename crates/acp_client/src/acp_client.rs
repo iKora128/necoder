@@ -124,10 +124,19 @@ pub enum AgentEvent {
     },
     /// エージェントの実行プラン全量（`SessionUpdate::Plan`）。UI は常設チェックリストへ置換反映する。
     Plan(Vec<PlanItem>),
-    /// 1 ターン（prompt→応答）が完了した（`StopReason`）。
-    TurnEnded,
+    /// 1 ターン（prompt→応答）が完了した（`StopReason`）。`reason` で正常完了/中断を区別する。
+    TurnEnded { reason: TurnEnd },
     /// エラー（接続断・プロトコル異常・起動失敗など）。
     Failed(String),
+}
+
+/// ターンの終わり方（ACP `StopReason` の簡約）。UI の「完了/中断」の出し分けに使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnEnd {
+    /// 正常完了 or 上限到達（`EndTurn` / `MaxTokens` / `MaxTurnRequests`）。
+    Completed,
+    /// 中断（`Refusal` / `Cancelled`）＝ユーザーの注意を要する終わり方。完了音は鳴らさない。
+    Interrupted,
 }
 
 /// UI → 常駐セッションへの指示（[`run_session`] が単一チャネルで受ける）。
@@ -170,6 +179,13 @@ pub struct AgentKind {
     /// セットアップ画面の「ログイン」でターミナルに流す認証コマンド（vendor 自身のログイン導線）。
     /// Shirushi は鍵を持たず、CLI 側の認証にそのまま乗る（Zed の ACP と同じ流儀）。
     pub login_cmd: &'static str,
+    /// ブランドアイコンの svg パス（設定画面・スレッドタブで共用）。在庫が無いものは `None`＝モノグラム表示。
+    /// カタログ＝アイコンの単一の出所（settings/agent_panel が共に acp_client を依存に持つため）。
+    pub icon: Option<&'static str>,
+    /// ブランド色（アイコン tint・モノグラム背景）。0xRRGGBB。
+    pub brand_color: u32,
+    /// アイコンが無い時に出す短いモノグラム（例 codex=">_"）。
+    pub monogram: &'static str,
 }
 
 /// エージェントのローカル導入状況（設定画面のステータス表示）。認証状態は見ない（CLI 任せ）。
@@ -195,6 +211,9 @@ pub const AGENTS: &[AgentKind] = &[
         extra_args: &[],
         install_cmd: "npm i -g @anthropic-ai/claude-code",
         login_cmd: "claude",
+        icon: Some("icons/brand-claude.svg"),
+        brand_color: 0xd9_77_57,
+        monogram: "C",
     },
     AgentKind {
         id: "codex",
@@ -204,6 +223,9 @@ pub const AGENTS: &[AgentKind] = &[
         extra_args: &[],
         install_cmd: "npm i -g @openai/codex",
         login_cmd: "codex",
+        icon: None,
+        brand_color: 0x10_a3_7f,
+        monogram: ">_",
     },
     // 旧 Gemini CLI は 2026-06-18 に廃止 → 後継 Antigravity CLI（`agy`）はクローズド Go 書き直しで **ACP 非対応**
     // （`--acp`/acp サブコマンド無し・実機 + ドキュメント確認済み）。よって会話エージェント一覧から除外。
@@ -216,6 +238,9 @@ pub const AGENTS: &[AgentKind] = &[
         extra_args: &["--acp"],
         install_cmd: "npm i -g @github/copilot",
         login_cmd: "copilot",
+        icon: Some("icons/brand-copilot.svg"),
+        brand_color: 0xd0_d5_db,
+        monogram: "Co",
     },
     AgentKind {
         id: "qwen",
@@ -225,6 +250,9 @@ pub const AGENTS: &[AgentKind] = &[
         extra_args: &["--acp", "--experimental-skills"],
         install_cmd: "npm i -g @qwen-code/qwen-code",
         login_cmd: "qwen",
+        icon: Some("icons/brand-qwen.svg"),
+        brand_color: 0x69_50_ef,
+        monogram: "Q",
     },
     // OpenCode（sst）: ACP は `opencode acp` サブコマンド。npm `opencode-ai`。
     AgentKind {
@@ -235,6 +263,9 @@ pub const AGENTS: &[AgentKind] = &[
         extra_args: &["acp"],
         install_cmd: "npm i -g opencode-ai",
         login_cmd: "opencode",
+        icon: Some("icons/brand-opencode.svg"),
+        brand_color: 0xd0_d5_db,
+        monogram: "OC",
     },
     // Kimi Code CLI（Moonshot）: ACP は `kimi acp`。PyPI `kimi-cli`（npm 外＝package None）。
     AgentKind {
@@ -245,6 +276,9 @@ pub const AGENTS: &[AgentKind] = &[
         extra_args: &["acp"],
         install_cmd: "uv tool install kimi-cli",
         login_cmd: "kimi",
+        icon: Some("icons/brand-kimi.svg"),
+        brand_color: 0xd0_d5_db,
+        monogram: "K",
     },
     // Grok Build（xAI・Rust TUI）: curl 導入・初回はブラウザ認証。ACP は `grok acp`
     // （opencode/kimi と同じ Rust 系の慣例。README 未記載のため要実機確認）。
@@ -256,6 +290,9 @@ pub const AGENTS: &[AgentKind] = &[
         extra_args: &["acp"],
         install_cmd: "curl -fsSL https://x.ai/cli/install.sh | bash",
         login_cmd: "grok",
+        icon: None,
+        brand_color: 0x4b_55_63,
+        monogram: "G",
     },
 ];
 
@@ -267,6 +304,11 @@ impl AgentKind {
     /// ラベル（例 "Claude"）から引く。
     pub fn by_label(label: &str) -> Option<&'static AgentKind> {
         AGENTS.iter().find(|agent| agent.label == label)
+    }
+
+    /// ブランド表示 `(svg パス, モノグラム, ブランド色 0xRRGGBB)`。設定画面・タブで共用。
+    pub fn brand(&self) -> (Option<&'static str>, &'static str, u32) {
+        (self.icon, self.monogram, self.brand_color)
     }
 
     /// utility（スレッドタイトル等の一発生成）に使う、既定 Agent ごとの **shell テンプレート**。
@@ -699,8 +741,18 @@ pub async fn run_session_on(
                                 .await
                                 .otherwise_ignore()?;
                         }
-                        acp::SessionMessage::StopReason(_) => {
-                            event_tx.unbounded_send(AgentEvent::TurnEnded).ok();
+                        acp::SessionMessage::StopReason(reason) => {
+                            // 中断（拒否/キャンセル）は「注意を要する終わり方」として区別する。
+                            // 上限到達・未知バリアントは完了扱い（会話は続けられる）。
+                            let end = match reason {
+                                v1::StopReason::Refusal | v1::StopReason::Cancelled => {
+                                    TurnEnd::Interrupted
+                                }
+                                _ => TurnEnd::Completed,
+                            };
+                            event_tx
+                                .unbounded_send(AgentEvent::TurnEnded { reason: end })
+                                .ok();
                             break;
                         }
                         // 将来のバリアント（enum は #[non_exhaustive]）は無視して読み続ける。
@@ -884,7 +936,9 @@ mod tests {
                             respond.unbounded_send(0).ok(); // テストでは先頭を選んで進める
                         }
                         AgentEvent::Plan(items) => eprintln!("[plan] {} items", items.len()),
-                        AgentEvent::TurnEnded => eprintln!("\n[turn ended]"),
+                        AgentEvent::TurnEnded { reason } => {
+                            eprintln!("\n[turn ended: {reason:?}]")
+                        }
                         AgentEvent::Failed(error) => eprintln!("[failed] {error}"),
                     }
                 }

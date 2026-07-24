@@ -1,6 +1,14 @@
 use crate::workspace::*;
 
 impl Workspace {
+    /// hot exit の scope キー = アクティブ worktree の host 識別子（local="local" / remote=SSH URI）。
+    /// local と remote の同一絶対パスが衝突して復元先を取り違える事故を防ぐ（M13）。
+    pub(crate) fn active_hot_exit_scope(&self) -> String {
+        self.active_worktree()
+            .map(|worktree| worktree.host().id().to_string())
+            .unwrap_or_else(|| "local".to_string())
+    }
+
     pub(crate) fn schedule_hot_exit_snapshot(&mut self, cx: &mut Context<Self>) {
         let debug = std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some();
         let Some(storage) = self.persistence.storage.clone() else {
@@ -18,28 +26,33 @@ impl Workspace {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(2))
                 .await;
-            let snapshot: Vec<(PathBuf, String, bool)> = match workspace.update(cx, |workspace, cx| {
-                if workspace.hot_exit_gen != generation {
-                    return Vec::new(); // 後続の編集が来ている＝その回に任せる
-                }
-                if workspace.hot_exit_pending.is_some() {
-                    // 復元/破棄が未決の間は書きも消しもしない（クリーン扱いで候補行を消してしまう）。
-                    return Vec::new();
-                }
-                workspace
-                    .tabs
-                    .iter()
-                    .map(|tab| {
-                        let view = tab.editor.read(cx);
-                        let dirty = view.buffer().is_dirty();
-                        let text = if dirty { view.buffer().text() } else { String::new() };
-                        (tab.path.clone(), text, dirty)
-                    })
-                    .collect()
-            }) {
-                Ok(snapshot) => snapshot,
-                Err(_) => return,
-            };
+            // scope = アクティブ host の識別子（local="local" / remote=SSH URI）。
+            // local と remote の同一絶対パスを分けて保存する（M13）。
+            let (scope, snapshot): (String, Vec<(PathBuf, String, bool)>) =
+                match workspace.update(cx, |workspace, cx| {
+                    if workspace.hot_exit_gen != generation {
+                        return (String::new(), Vec::new()); // 後続の編集が来ている＝その回に任せる
+                    }
+                    if workspace.hot_exit_pending.is_some() {
+                        // 復元/破棄が未決の間は書きも消しもしない（候補行を消してしまう）。
+                        return (String::new(), Vec::new());
+                    }
+                    let scope = workspace.active_hot_exit_scope();
+                    let snapshot = workspace
+                        .tabs
+                        .iter()
+                        .map(|tab| {
+                            let view = tab.editor.read(cx);
+                            let dirty = view.buffer().is_dirty();
+                            let text = if dirty { view.buffer().text() } else { String::new() };
+                            (tab.path.clone(), text, dirty)
+                        })
+                        .collect();
+                    (scope, snapshot)
+                }) {
+                    Ok(result) => result,
+                    Err(_) => return,
+                };
             if std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some() {
                 eprintln!("hotexit: tick gen={generation} snapshot={} 件", snapshot.len());
             }
@@ -50,9 +63,9 @@ impl Workspace {
                 .spawn(async move {
                     for (path, text, dirty) in snapshot {
                         let result = if dirty {
-                            storage.save_hot_exit(&path, &text)
+                            storage.save_hot_exit(&scope, &path, &text)
                         } else {
-                            storage.remove_hot_exit(&path)
+                            storage.remove_hot_exit(&scope, &path)
                         };
                         if let Err(error) = result {
                             eprintln!("hot exit スナップショットに失敗: {error:#}");
@@ -78,11 +91,22 @@ impl Workspace {
             if rows.is_empty() {
                 return;
             }
-            if std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some() {
-                eprintln!("hotexit: 復元候補 {} 件（バー表示）", rows.len());
-            }
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.hot_exit_pending = Some(rows);
+                // アクティブ host の scope に一致する候補だけ復元する（local と remote を取り違えない・M13）。
+                // remote の未保存は、その host に接続していないと安全に戻せないため今は対象外（reconnect 復元は後続）。
+                let scope = workspace.active_hot_exit_scope();
+                let mine: Vec<(PathBuf, String)> = rows
+                    .into_iter()
+                    .filter(|(row_scope, _, _)| row_scope == &scope)
+                    .map(|(_, path, content)| (path, content))
+                    .collect();
+                if mine.is_empty() {
+                    return;
+                }
+                if std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some() {
+                    eprintln!("hotexit: 復元候補 {} 件（scope={scope}・バー表示）", mine.len());
+                }
+                workspace.hot_exit_pending = Some(mine);
                 cx.notify();
             });
         })

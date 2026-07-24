@@ -9,14 +9,61 @@ impl Workspace {
             .position(|session| session.agent_panel == panel)
             .unwrap_or(self.project_sessions.active);
         match event {
+            agent_panel::PanelEvent::TurnStarted { .. } => {
+                self.transition_task_space(session_index, TaskPhase::Working, "agent_turn_started", None, cx);
+            }
             agent_panel::PanelEvent::OpenHistoryRequest => {
                 // window が無いので次の render で消化する（pending_transient_tab と同じ迂回・#5）。
                 self.project_sessions.sessions[session_index].pending_open_history = true;
                 cx.notify();
             }
-            agent_panel::PanelEvent::TurnEnded { thread, color, summary } => {
+            agent_panel::PanelEvent::TurnEnded { thread, color, summary, digest, muted } => {
                 self.project_sessions.sessions[session_index].waiting_thread = None;
-                self.push_toast(SharedString::from(format!("● {thread} — {summary}")), *color, cx);
+                let is_integration_slot = self
+                    .project_sessions
+                    .projects
+                    .get(session_index)
+                    .is_some_and(|slot| slot.task_space.is_integration());
+                // 監督の采配は coordinator イベントとして監査（P6・ニュースは丸チップ）。
+                if is_integration_slot && thread.as_ref() == COORDINATOR_THREAD_NAME {
+                    self.record_coordinator_decision(*color, digest.as_ref(), summary, cx);
+                }
+                if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
+                    if !slot.task_space.is_integration() {
+                        // 確定値は digest（最後の発言の末尾・P1）。無ければ従来の経過 summary。
+                        slot.task_space.result_summary =
+                            Some(digest.clone().unwrap_or_else(|| summary.clone()));
+                    }
+                }
+                let remaining = panel
+                    .read(cx)
+                    .statuses()
+                    .into_iter()
+                    .map(|status| status.activity)
+                    .max_by_key(|activity| activity.urgency());
+                let (phase, reason) = match remaining {
+                    Some(agent_panel::ThreadActivity::Blocked) => {
+                        (TaskPhase::Blocked, "another_agent_blocked")
+                    }
+                    Some(agent_panel::ThreadActivity::Working) => {
+                        (TaskPhase::Working, "another_agent_working")
+                    }
+                    _ => (TaskPhase::ReviewReady, "all_agent_turns_ended"),
+                };
+                self.transition_task_space(session_index, phase, reason, digest.as_deref(), cx);
+                // 監督 wake（P6・Task の Done 遷移で即時・自分自身=integration は起こさない）。
+                if !is_integration_slot {
+                    let title = self
+                        .project_sessions
+                        .projects
+                        .get(session_index)
+                        .map(|slot| slot.task_space.title.clone())
+                        .unwrap_or_else(|| thread.clone());
+                    self.wake_coordinator("done", title, digest.clone(), cx);
+                }
+                if !muted {
+                    self.push_toast(SharedString::from(format!("● {thread} — {summary}")), *color, cx);
+                }
                 // Todo ボード: そのスレッドに送った項目の pulse を解除し、板を読み直す
                 // （エージェントが todos.md をチェックしたら watch より先に即反映・M12-10）。
                 self.project_sessions.sessions[session_index]
@@ -24,13 +71,95 @@ impl Workspace {
                     .update(cx, |panel, cx| panel.clear_running_color(*color, cx));
                 self.reload_todo_board_for(session_index, cx);
             }
-            agent_panel::PanelEvent::PermissionWaiting { thread, color } => {
-                self.project_sessions.sessions[session_index].waiting_thread = Some((thread.clone(), *color));
-                self.push_toast(
-                    SharedString::from(format!("● {thread} — {}", i18n::t!("agent.waiting_permission"))),
-                    *color,
+            agent_panel::PanelEvent::TurnFailed { thread, color, message, muted } => {
+                self.project_sessions.sessions[session_index].waiting_thread = None;
+                let another_running = panel
+                    .read(cx)
+                    .statuses()
+                    .into_iter()
+                    .any(|status| status.activity == agent_panel::ThreadActivity::Working);
+                self.transition_task_space(
+                    session_index,
+                    if another_running { TaskPhase::Working } else { TaskPhase::Failed },
+                    "agent_turn_failed",
+                    Some(message),
                     cx,
                 );
+                // 監督 wake（P6・Failed 遷移で即時）。
+                let failed_slot = self.project_sessions.projects.get(session_index);
+                if failed_slot.is_some_and(|slot| !slot.task_space.is_integration()) {
+                    let title = failed_slot
+                        .map(|slot| slot.task_space.title.clone())
+                        .unwrap_or_else(|| thread.clone());
+                    self.wake_coordinator(
+                        "failed",
+                        title,
+                        Some(message.clone()),
+                        cx,
+                    );
+                }
+                if !muted {
+                    self.push_toast(
+                        SharedString::from(format!("● {thread} — {message}")),
+                        *color,
+                        cx,
+                    );
+                }
+            }
+            agent_panel::PanelEvent::PermissionWaiting { thread, color, title, muted } => {
+                self.project_sessions.sessions[session_index].waiting_thread = Some((thread.clone(), *color));
+                self.transition_task_space(
+                    session_index,
+                    TaskPhase::Blocked,
+                    "permission_waiting",
+                    (!title.is_empty()).then(|| title.as_ref()),
+                    cx,
+                );
+                // 監督 wake（P6・Blocked は 15s 閾値 = すぐ人間が許可したら起こさない）。
+                let blocked_slot = self.project_sessions.projects.get(session_index);
+                if blocked_slot.is_some_and(|slot| !slot.task_space.is_integration()) {
+                    let task_title = blocked_slot
+                        .map(|slot| slot.task_space.title.clone())
+                        .unwrap_or_else(|| thread.clone());
+                    self.wake_coordinator_for_blocked(
+                        session_index,
+                        task_title,
+                        (!title.is_empty()).then(|| title.clone()),
+                        cx,
+                    );
+                }
+                if !muted {
+                    self.push_toast(
+                        SharedString::from(format!("● {thread} — {}", i18n::t!("agent.waiting_permission"))),
+                        *color,
+                        cx,
+                    );
+                }
+            }
+            agent_panel::PanelEvent::SummaryReady { thread, tier2 } => {
+                // Tier 2 要約（P4）を ledger にキャッシュ（再起動後も残る）。状態は運ばない＝上書きしない。
+                let _ = thread;
+                if let Some(slot) = self.project_sessions.projects.get(session_index) {
+                    if !slot.task_space.is_integration() {
+                        if let Some(storage) = self.persistence.storage.clone() {
+                            let task_id = slot.task_space.id.as_str().to_string();
+                            let payload =
+                                serde_json::json!({ "tier2": tier2.as_ref() }).to_string();
+                            cx.background_executor()
+                                .spawn(async move {
+                                    if let Err(error) =
+                                        storage.append_task_event(&task_id, "tier2", &payload)
+                                    {
+                                        eprintln!("tier2 要約の記録に失敗: {error:#}");
+                                    }
+                                })
+                                .detach();
+                        }
+                    }
+                }
+                // 監督バーの総括（編隊レベル）もこの遷移でデバウンス生成を蹴る。
+                self.schedule_control_summary(cx);
+                cx.notify();
             }
             agent_panel::PanelEvent::OpenDiffRequest { title, old_text, new_text } => {
                 // 提案 diff を transient タブでレビュー（M12-6）。window が要るのでイベントから取得不可 →
@@ -60,6 +189,42 @@ impl Workspace {
                 cx.notify();
             }
         }
+    }
+
+    /// ニュースを積む（管制 P2・新しいものが先頭・上限 100）。
+    /// **task_events へ書くのと同じ場所からだけ呼ぶ**（ニュース = 台帳の鏡。将来の監督の采配も同じ道）。
+    pub(crate) fn push_news(
+        &mut self,
+        kind: NewsKind,
+        color: Hsla,
+        title: SharedString,
+        text: SharedString,
+    ) {
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        self.notifications.news.insert(0, NewsItem { at_ms, color, title, text, kind });
+        self.notifications.news.truncate(100);
+    }
+
+    /// phase 遷移 1 件をニュース行の文へ写像する（mock の書式: 「承認待ち — 内容」「→ merge_ready — radar ✓」）。
+    pub(crate) fn news_text_for_phase(phase: TaskPhase, digest: Option<&str>) -> (NewsKind, SharedString) {
+        let text = match phase {
+            TaskPhase::Blocked => i18n::t!("news.waiting", "title" => digest.unwrap_or("…")),
+            TaskPhase::Failed => i18n::t!("news.failed", "detail" => digest.unwrap_or("")),
+            _ => match digest {
+                Some(digest) => format!("→ {} — {digest}", phase.as_str()),
+                None => format!("→ {}", phase.as_str()),
+            },
+        };
+        let kind = match phase {
+            TaskPhase::Blocked => NewsKind::Permission,
+            TaskPhase::Integrating | TaskPhase::Integrated => NewsKind::Integration,
+            TaskPhase::ReviewReady => NewsKind::Digest,
+            _ => NewsKind::PhaseChange,
+        };
+        (kind, SharedString::from(text))
     }
 
     /// トーストを積む（右下・5 秒で自動で消える・UI-SPEC §8）。

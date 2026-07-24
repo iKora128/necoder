@@ -9,6 +9,7 @@ impl PanelRegistry {
         explorer: &Entity<Explorer>,
         git: &Entity<GitPanel>,
         terminal: &Entity<TerminalDock>,
+        tests: &Entity<TerminalDock>,
         todo: &Entity<TodoPanel>,
         cx: &mut Context<Workspace>,
     ) {
@@ -16,6 +17,7 @@ impl PanelRegistry {
         cx.subscribe(explorer, Workspace::on_explorer_event).detach();
         cx.subscribe(git, Workspace::on_git_panel_event).detach();
         cx.subscribe(terminal, Workspace::on_terminal_dock_event).detach();
+        cx.subscribe(tests, Workspace::on_terminal_dock_event).detach();
         cx.subscribe(todo, Workspace::on_todo_panel_event).detach();
     }
 
@@ -111,7 +113,7 @@ impl Workspace {
             .project_sessions
             .sessions
             .iter()
-            .position(|session| session.terminal_dock == dock)
+            .position(|session| session.terminal_dock == dock || session.tests_dock == dock)
             .unwrap_or(self.project_sessions.active);
         match event {
             TerminalDockEvent::OpenPath { path, line } => {

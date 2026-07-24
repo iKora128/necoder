@@ -9,13 +9,12 @@ impl Workspace {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
-        if worktree.host().is_remote() {
-            return;
-        }
+        // remote も張る（M13）: local=notify / remote=Host 経由の poll。差し替えは project::watch_root 内。
+        let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
         let (sender, mut receiver) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
         let debug = std::env::var_os("SHIRUSHI_WATCH_DEBUG").is_some();
-        match project::watch_root(&root, move |paths| {
+        match project::watch_root(&host, &root, move |paths| {
             if debug {
                 eprintln!("watch: raw event {paths:?}");
             }

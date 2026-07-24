@@ -5950,6 +5950,7 @@ name = "shirushi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "editor_view",
  "futures",
  "gpui",
  "gpui_platform",
@@ -5962,6 +5963,7 @@ dependencies = [
  "serde_json",
  "settings",
  "settings_core",
+ "storage",
  "theme_core",
  "workspace",
 ]

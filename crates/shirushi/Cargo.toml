@@ -19,6 +19,7 @@ gpui.workspace = true
 # （gpui の example も font-kit 付きで動いている）。
 gpui_platform = { workspace = true, features = ["font-kit"] }
 workspace.workspace = true
+editor_view.workspace = true
 theme_core.workspace = true
 i18n.workspace = true
 keymap_core.workspace = true
@@ -28,5 +29,6 @@ project.workspace = true
 futures.workspace = true
 host.workspace = true
 search.workspace = true
+storage.workspace = true
 serde_json.workspace = true
 image = { workspace = true, optional = true }

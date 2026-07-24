@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>遷移スナップショット表示 — 検討用パターン集（正は index.html）</title>
+<style>
+/* ============================================================
+   検討用パターン集 — herd 行 / 注意キュー / ニュースの表示案比較
+   トークンは mock/index.html から複製（採用案のみ本体へ移植する）
+   共通データ: 同じ5エージェントを全パターンで表示して比較する
+   ============================================================ */
+:root {
+  --desktop: #0c0d11;
+  --bg0: #16181e; --bg1: #1b1e25; --bg2: #232733; --bg3: #2b3040;
+  --fg0: #d7dae3; --fg1: #9aa1b2; --fg2: #646b7a;
+  --border: #262b36;
+  --ok: #7bc96f; --warn: #e5c07b; --err: #e06c75;
+  --accent: #7c8cf8;
+  --terra: #d97757; /* ⏺/✳ バレット許可色 */
+  --th1: #61afef; --th2: #e5c07b; --th3: #c678dd; --th4: #34d3b6; --th5: #98c379;
+}
+* { box-sizing: border-box; margin: 0; }
+body { background: var(--desktop); color: var(--fg0); font: 12.5px/1.5 -apple-system, "Hiragino Sans", sans-serif;
+  padding: 18px; }
+h1 { font-size: 13px; color: var(--fg1); font-weight: 600; margin-bottom: 4px; }
+.note { font-size: 11px; color: var(--fg2); margin-bottom: 14px; }
+.board { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+.panel { background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; flex: none; }
+.panel .phead { padding: 7px 10px 6px; border-bottom: 1px solid var(--border); }
+.panel .phead b { font-size: 11.5px; color: var(--fg0); }
+.panel .phead span { display: block; font-size: 10px; color: var(--fg2); margin-top: 1px; }
+.w-herd { width: 218px; }  /* 編隊モード左ドック実寸 216px 相当 */
+.w-mid  { width: 300px; }
+.w-wide { width: 380px; }
+
+/* ---- 状態グリフ（形と動き・色はスレッド色を継承 = 現行実装と同じ） ---- */
+.stg { flex: none; width: 14px; text-align: center; font-size: 11px; line-height: 1; color: var(--tc, var(--fg2)); }
+.stg.idle { opacity: .5; }
+.stg.work { animation: pulse 1.6s ease-in-out infinite; }
+.stg.block { animation: pulse .8s ease-in-out infinite; }
+.stg.fail { }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* ---- 共通行パーツ ---- */
+.rowbase { display: flex; gap: 8px; padding: 5px 8px 5px 6px; border-left: 2px solid var(--tc); }
+.rowbase:hover { background: var(--bg3); }
+.nm { font-size: 12px; color: var(--fg0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sub { font-size: 10px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sub b { color: var(--fg1); font-weight: 500; }
+.tok { margin-left: auto; flex: none; font-size: 10px; color: var(--fg2); font-variant-numeric: tabular-nums; }
+.age { flex: none; font-size: 10px; color: var(--fg2); font-variant-numeric: tabular-nums; }
+.digest { font-size: 10.5px; color: var(--fg1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.digest.quote { color: var(--fg1); }
+.digest.quote::before { content: "「"; color: var(--fg2); }
+.digest.quote::after { content: "」"; color: var(--fg2); }
+.meta { display: flex; gap: 8px; font-size: 9.5px; color: var(--fg2); font-variant-numeric: tabular-nums; align-items: center; }
+.meta .plan { letter-spacing: 1px; color: var(--fg1); }
+.meta .add { color: var(--ok); } .meta .del { color: var(--err); }
+.meta .radar-ok { color: var(--ok); } .meta .radar-ng { color: var(--err); }
+.tier2 { font-size: 10.5px; color: var(--fg1); font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tier2::before { content: "✳ "; color: var(--terra); font-style: normal; }
+.pill { flex: none; font-size: 9px; padding: 1px 6px; border-radius: 7px; border: 1px solid var(--border); color: var(--fg1); background: var(--bg2); }
+.src { flex: none; font-size: 9px; color: var(--fg2); border: 1px dashed var(--fg2); border-radius: 3px; padding: 0 3px; }
+
+/* ---- A/B/C/E: herd 幅パターン ---- */
+.c2 { min-width: 0; display: flex; flex-direction: column; gap: 1px; flex: 1; }
+.legend { padding: 7px 10px; border-top: 1px solid var(--border); font-size: 9.5px; color: var(--fg1);
+  display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.legend span { display: flex; gap: 4px; align-items: center; }
+
+/* C: トランスクリプト風 */
+.tr { padding: 6px 10px 6px 8px; border-left: 2px solid var(--tc); }
+.tr:hover { background: var(--bg3); }
+.tr .l1 { display: flex; gap: 6px; align-items: baseline; }
+.tr .bullet { color: var(--tc); font-size: 10px; }
+.tr .l2 { display: flex; gap: 6px; padding-left: 1px; }
+.tr .elbow { color: var(--fg2); font-size: 10px; flex: none; }
+
+/* E: マスコット行 */
+.masc { width: 26px; height: 26px; flex: none; display: flex; align-items: center; justify-content: center;
+  font-size: 17px; background: var(--bg2); border-radius: 6px; }
+
+/* D: 注意キュー */
+.qsec { padding: 6px 10px 3px; font-size: 9.5px; font-weight: 700; letter-spacing: .08em; color: var(--fg2); }
+.qcard { margin: 0 8px 8px; background: var(--bg1); border: 1px solid var(--border); border-radius: 6px;
+  border-left: 2px solid var(--tc); padding: 7px 9px; display: flex; flex-direction: column; gap: 3px; }
+.qcard.next { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tc) 45%, transparent); background: var(--bg2); }
+.qcard .l1 { display: flex; gap: 7px; align-items: center; }
+.qcard .nextb { margin-left: auto; flex: none; font-size: 9px; color: var(--fg0); background: var(--bg3);
+  border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
+.qhead { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border);
+  font-size: 10.5px; color: var(--fg1); }
+.qhead .cnt { color: var(--fg0); font-weight: 600; }
+
+/* F: ニュース */
+.ev { display: flex; gap: 7px; padding: 4px 10px; font-size: 10.5px; color: var(--fg1); align-items: baseline; }
+.ev:hover { background: var(--bg3); }
+.ev .t { flex: none; width: 34px; color: var(--fg2); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+.ev .chip { flex: none; width: 7px; height: 7px; border-radius: 2px; background: var(--tc); align-self: center; }
+.ev b { color: var(--fg0); font-weight: 500; }
+.ev.coord .chip { border-radius: 50%; }
+</style>
+</head>
+<body>
+<h1>遷移スナップショット（Tier 1/2 digest）表示パターン集</h1>
+<div class="note">検討用。正は index.html — 採用案のみ本体へ移植。全パターン同一データ（5 TaskSpace・状態は形と動き・色はスレッド識別のみ）。⑤リサーチ行は Herdr Runtime 経由＝画面推定の例（グリフ破線囲み）。</div>
+<div class="board">
+
+  <!-- ============ A: 現行 2 行 + digest 差し替え ============ -->
+  <div class="panel w-herd">
+    <div class="phead"><b>A · 現行 2 行のまま digest 強化</b><span>sub 行を遷移スナップショット文に置換・右端に経過時間</span></div>
+    <div class="rowbase" style="--tc:var(--th1)">
+      <span class="stg work">●</span>
+      <div class="c2"><span class="nm">認証リファクタ</span><span class="sub">⎇ <b>task/auth</b> ・ cargo test 実行中 (3/5)</span></div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:1px"><span class="tok">42.1k</span><span class="age">12m</span></div>
+    </div>
+    <div class="rowbase" style="--tc:var(--th2)">
+      <span class="stg block">◐</span>
+      <div class="c2"><span class="nm">バグ #412</span><span class="sub">⎇ <b>task/fix-412</b> ・ 許可待ち: shell cargo publish</span></div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:1px"><span class="tok">8.1k</span><span class="age">45s</span></div>
+    </div>
+    <div class="rowbase" style="--tc:var(--th3)">
+      <span class="stg done">✓</span>
+      <div class="c2"><span class="nm">LP 文言</span><span class="sub">⎇ <b>task/lp-copy</b> ・ 完了: ja/en 更新・スクショ検証済</span></div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:1px"><span class="tok">12.0k</span><span class="age">3m</span></div>
+    </div>
+    <div class="rowbase" style="--tc:var(--th4)">
+      <span class="stg fail">✗</span>
+      <div class="c2"><span class="nm">依存更新</span><span class="sub">⎇ <b>task/deps</b> ・ 失敗: cargo check 2 エラー</span></div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:1px"><span class="tok">5.4k</span><span class="age">1m</span></div>
+    </div>
+    <div class="rowbase" style="--tc:var(--th5)">
+      <span class="stg work" style="border:1px dashed var(--fg2);border-radius:50%">●</span>
+      <div class="c2"><span class="nm">リサーチ</span><span class="sub">⎇ <b>task/research</b> ・ Fetching docs.rs/tokio…</span></div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:1px"><span class="src">Herdr·推定</span><span class="age">7m</span></div>
+    </div>
+    <div class="legend"><span>●作業(脈動)</span><span>◐承認待ち(速い脈動)</span><span>✓完了未確認</span><span>✗失敗</span><span>○待機</span><span><i class="src" style="font-style:normal">破線</i>=画面推定</span></div>
+  </div>
+
+  <!-- ============ B: 3 行リッチ ============ -->
+  <div class="panel w-herd">
+    <div class="phead"><b>B · 3 行リッチ（推し）</b><span>名前 / スナップショット文 / 計測メタ（plan・diff・radar・tok）</span></div>
+    <div class="rowbase" style="--tc:var(--th1)">
+      <span class="stg work">●</span>
+      <div class="c2">
+        <span class="nm">認証リファクタ <span style="color:var(--fg2);font-size:10px">⎇ task/auth</span></span>
+        <span class="digest">cargo test 実行中 — session.rs のテスト修正</span>
+        <div class="meta"><span class="plan">▰▰▰▱▱</span><span>3/5</span><span class="add">+214</span><span class="del">−87</span><span>42.1k</span><span class="age">12m</span></div>
+      </div>
+    </div>
+    <div class="rowbase" style="--tc:var(--th2)">
+      <span class="stg block">◐</span>
+      <div class="c2">
+        <span class="nm">バグ #412 <span style="color:var(--fg2);font-size:10px">⎇ task/fix-412</span></span>
+        <span class="digest quote">shell: cargo publish を実行してよいですか</span>
+        <div class="meta"><span class="plan">▰▰▰▰▱</span><span>4/5</span><span class="add">+38</span><span class="del">−6</span><span>8.1k</span><span class="age" style="color:var(--err)">待ち 45s</span></div>
+      </div>
+    </div>
+    <div class="rowbase" style="--tc:var(--th3)">
+      <span class="stg done">✓</span>
+      <div class="c2">
+        <span class="nm">LP 文言 <span style="color:var(--fg2);font-size:10px">⎇ task/lp-copy</span></span>
+        <span class="digest quote">ヒーロー節を ja/en 両方書き換え、スクショ検証まで完了しました</span>
+        <div class="meta"><span class="plan">▰▰▰▰▰</span><span>5/5</span><span class="add">+12</span><span class="del">−9</span><span class="radar-ok">radar ✓</span><span>12.0k</span></div>
+      </div>
+    </div>
+    <div class="rowbase" style="--tc:var(--th4)">
+      <span class="stg fail">✗</span>
+      <div class="c2">
+        <span class="nm">依存更新 <span style="color:var(--fg2);font-size:10px">⎇ task/deps</span></span>
+        <span class="digest">cargo check 失敗 (2) — notify 8.2 の API 変更</span>
+        <div class="meta"><span class="plan">▰▱▱▱▱</span><span>1/4</span><span class="add">+3</span><span class="del">−3</span><span>5.4k</span><span class="age">1m</span></div>
+      </div>
+    </div>
+    <div class="rowbase" style="--tc:var(--th5)">
+      <span class="stg work" style="border:1px dashed var(--fg2);border-radius:50%">●</span>
+      <div class="c2">
+        <span class="nm">リサーチ <span style="color:var(--fg2);font-size:10px">⎇ task/research</span></span>
+        <span class="digest">Fetching docs.rs/tokio…（画面末尾）</span>
+        <div class="meta"><span class="src">Herdr·推定</span><span class="age">7m</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ C: トランスクリプト風 ⏺/⎿ ============ -->
+  <div class="panel w-herd">
+    <div class="phead"><b>C · トランスクリプト風 ⏺/⎿</b><span>チャット面と同じ文法。herd = 編隊全体の会話ログという見立て</span></div>
+    <div class="tr" style="--tc:var(--th1)">
+      <div class="l1"><span class="bullet">⏺</span><span class="nm">認証リファクタ</span><span class="age" style="margin-left:auto">12m</span></div>
+      <div class="l2"><span class="elbow">⎿</span><span class="digest">Bash(cargo test -p shirushi) 実行中 · plan 3/5</span></div>
+    </div>
+    <div class="tr" style="--tc:var(--th2)">
+      <div class="l1"><span class="bullet stg block" style="width:auto">⏺</span><span class="nm">バグ #412</span><span class="age" style="margin-left:auto;color:var(--err)">45s</span></div>
+      <div class="l2"><span class="elbow">⎿</span><span class="digest quote">cargo publish を実行してよいですか</span></div>
+    </div>
+    <div class="tr" style="--tc:var(--th3)">
+      <div class="l1"><span class="bullet">⏺</span><span class="nm">LP 文言</span><span class="pill" style="margin-left:auto">review_ready</span></div>
+      <div class="l2"><span class="elbow">⎿</span><span class="digest quote">ja/en 両方書き換え、スクショ検証まで完了</span></div>
+    </div>
+    <div class="tr" style="--tc:var(--th4)">
+      <div class="l1"><span class="bullet">⏺</span><span class="nm">依存更新</span><span class="pill" style="margin-left:auto;color:var(--err)">failed</span></div>
+      <div class="l2"><span class="elbow">⎿</span><span class="digest">cargo check 2 エラー — notify 8.2 API 変更</span></div>
+    </div>
+    <div class="tr" style="--tc:var(--th5)">
+      <div class="l1"><span class="bullet">⏺</span><span class="nm">リサーチ</span><span class="src" style="margin-left:auto">Herdr</span></div>
+      <div class="l2"><span class="elbow">⎿</span><span class="digest">Fetching docs.rs/tokio…</span></div>
+    </div>
+  </div>
+
+  <!-- ============ E: マスコット感情行 ============ -->
+  <div class="panel w-herd">
+    <div class="phead"><b>E · マスコット感情行</b><span>絵文字は実装済フィルムストリップの代役（typing/plead/worry/celebrate…）</span></div>
+    <div class="rowbase" style="--tc:var(--th1);align-items:center">
+      <div class="masc">⌨️</div>
+      <div class="c2"><span class="nm">認証リファクタ</span><span class="digest">cargo test 実行中 (3/5)</span></div>
+      <span class="age">12m</span>
+    </div>
+    <div class="rowbase" style="--tc:var(--th2);align-items:center">
+      <div class="masc">🙏</div>
+      <div class="c2"><span class="nm">バグ #412</span><span class="digest quote">cargo publish 実行していい？</span></div>
+      <span class="age" style="color:var(--err)">45s</span>
+    </div>
+    <div class="rowbase" style="--tc:var(--th3);align-items:center">
+      <div class="masc">🎉</div>
+      <div class="c2"><span class="nm">LP 文言</span><span class="digest">ja/en 更新完了・radar ✓</span></div>
+      <span class="age">3m</span>
+    </div>
+    <div class="rowbase" style="--tc:var(--th4);align-items:center">
+      <div class="masc">😿</div>
+      <div class="c2"><span class="nm">依存更新</span><span class="digest">cargo check 2 エラー</span></div>
+      <span class="age">1m</span>
+    </div>
+    <div class="rowbase" style="--tc:var(--th5);align-items:center">
+      <div class="masc" style="border:1px dashed var(--fg2)">🔎</div>
+      <div class="c2"><span class="nm">リサーチ</span><span class="digest">Fetching docs.rs/tokio…</span></div>
+      <span class="age">7m</span>
+    </div>
+    <div class="legend"><span>15 秒放置で 🙏→😟 に変化（実装済の閾値を再利用）</span></div>
+  </div>
+
+  <!-- ============ D: 注意キュー（中央面・幅広） ============ -->
+  <div class="panel w-mid">
+    <div class="phead"><b>D · 注意キュー（中央ボード / ⌘⇧A）</b><span>「次に見るべき順」に整列。⏎ で先頭へジャンプ・確認で消化</span></div>
+    <div class="qhead">要対応 <span class="cnt">2</span> · 完了未確認 <span class="cnt">1</span> · 稼働 <span class="cnt">2</span><span style="margin-left:auto;color:var(--fg2);font-size:9.5px">⏎ 次へ</span></div>
+    <div class="qsec">要対応</div>
+    <div class="qcard next" style="--tc:var(--th2)">
+      <div class="l1"><span class="stg block">◐</span><span class="nm">バグ #412</span><span class="sub">⎇ <b>task/fix-412</b></span><span class="nextb">次 ⏎</span></div>
+      <div class="digest quote">shell: cargo publish を実行してよいですか</div>
+      <div class="meta"><span class="age" style="color:var(--err)">待ち 45s</span><span>選択肢: 許可 / 常に / 拒否</span></div>
+    </div>
+    <div class="qcard" style="--tc:var(--th4)">
+      <div class="l1"><span class="stg fail">✗</span><span class="nm">依存更新</span><span class="sub">⎇ <b>task/deps</b></span></div>
+      <div class="digest">cargo check 失敗 (2) — notify 8.2 の API 変更</div>
+      <div class="tier2">fsevents 系 API の破壊的変更が原因。watcher 初期化 2 箇所の修正が必要</div>
+    </div>
+    <div class="qsec">完了・未確認</div>
+    <div class="qcard" style="--tc:var(--th3)">
+      <div class="l1"><span class="stg done">✓</span><span class="nm">LP 文言</span><span class="sub">⎇ <b>task/lp-copy</b></span><span class="pill" style="margin-left:auto">merge_ready</span></div>
+      <div class="digest quote">ヒーロー節を ja/en 両方書き換え、スクショ検証まで完了しました</div>
+      <div class="tier2">LP ヒーロー文言を刷新。+12 −9・radar ✓・確認後 Integrate 可</div>
+    </div>
+  </div>
+
+  <!-- ============ F: ニュースフィード（下ドック） ============ -->
+  <div class="panel w-wide">
+    <div class="phead"><b>F · ニュース（task_events の可視化）</b><span>遷移スナップショットは全部ここに堆積 — 監督の采配も同じログに載る（監査可能）</span></div>
+    <div class="ev" style="--tc:var(--th2)"><span class="t">14:07</span><span class="chip"></span><span><b>バグ #412</b> が承認待ち — <span class="digest quote" style="display:inline">cargo publish 実行の許可</span></span></div>
+    <div class="ev coord" style="--tc:var(--accent)"><span class="t">14:06</span><span class="chip"></span><span><b>監督</b>: deps の失敗は auth と独立 — 再指示を送信、fix-412 の完了待ちに変更</span></div>
+    <div class="ev" style="--tc:var(--th4)"><span class="t">14:05</span><span class="chip"></span><span><b>依存更新</b> が失敗 — cargo check 2 エラー（notify 8.2 API 変更）</span></div>
+    <div class="ev" style="--tc:var(--th3)"><span class="t">14:02</span><span class="chip"></span><span><b>LP 文言</b> が review_ready → radar ✓ で <b>merge_ready</b></span></div>
+    <div class="ev" style="--tc:var(--th3)"><span class="t">14:02</span><span class="chip"></span><span style="font-style:italic">✳ LP ヒーロー文言を刷新。両言語スクショ検証済（oneshot 要約）</span></div>
+    <div class="ev" style="--tc:var(--th1)"><span class="t">13:55</span><span class="chip"></span><span><b>認証リファクタ</b> plan 2/5 → 3/5 — テスト修正へ</span></div>
+    <div class="ev" style="--tc:var(--th5)"><span class="t">13:51</span><span class="chip"></span><span><b>リサーチ</b> を Herdr Runtime で起動（OpenCode CLI・画面推定）</span></div>
+    <div class="legend"><span>行頭チップ=スレッド色（帰属）</span><span>丸チップ=監督の采配</span><span>✳=LLM 生成（Tier 2）</span></div>
+  </div>
+
+</div>
+</body>
+</html>

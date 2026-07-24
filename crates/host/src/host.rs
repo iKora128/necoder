@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const FRAME_MAGIC: [u8; 4] = *b"SHRS";
@@ -117,12 +117,43 @@ impl HostProcess {
     pub fn take_stdout(&mut self) -> Result<Box<dyn Read + Send>> {
         self.stdout.take().context("process stdout は既に取得済み")
     }
+
+    /// プロセスがまだ生きているか。再接続後の handle 再同期で「死んでいたら再 spawn」の判定に使う
+    /// （remote では ControlMaster が落ちると子 ssh セッションが終了する＝ここで検知できる・M13）。
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
 }
 
 impl Drop for HostProcess {
     fn drop(&mut self) {
         let _kill = self.child.kill();
         let _wait = self.child.wait();
+    }
+}
+
+/// remote watch の購読ハンドル（M13）。`recv_*` で「変更のあった project 相対パス列」を受ける。
+/// drop すると監視が止まり keeper スレッドが終了する。local host では使わない（notify watch を使う）。
+pub struct HostWatch {
+    receiver: mpsc::Receiver<Vec<PathBuf>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HostWatch {
+    /// 変更通知を timeout 付きで待つ（daemon の poll 差分・相対パス列）。無ければ `None`。
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<Vec<PathBuf>> {
+        self.receiver.recv_timeout(timeout).ok()
+    }
+
+    /// 非ブロッキングで溜まった通知を 1 つ取る。
+    pub fn try_recv(&self) -> Option<Vec<PathBuf>> {
+        self.receiver.try_recv().ok()
+    }
+}
+
+impl Drop for HostWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -188,6 +219,11 @@ pub trait Host: Send + Sync {
     fn run_command(&self, spec: &CommandSpec) -> Result<CommandOutput>;
     fn spawn_process(&self, spec: &CommandSpec) -> Result<HostProcess>;
     fn terminal_launch(&self, cwd: &Path) -> Result<Option<TerminalLaunch>>;
+    /// project root の変更監視を開始する（remote SSH のみ実装・M13）。local は `None` を返し、
+    /// workspace 側の notify watch を使う。返した [`HostWatch`] を drop すると監視は止まる。
+    fn watch(self: Arc<Self>) -> Result<Option<HostWatch>> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -344,10 +380,15 @@ fn write_file_local(path: &Path, bytes: &[u8], condition: WriteCondition) -> Res
             }
         }
         WriteCondition::Matches(expected) => {
-            let current = read_file_local(path)
-                .with_context(|| format!("保存競合: 読み込み後に削除された: {}", path.display()))?;
-            if current.revision != expected {
-                bail!("保存競合: 外部で変更されている: {}", path.display());
+            // 外部削除は競合にしない（上書きで壊す相手が居ない）: ⌘S で作り直し = 未保存の
+            // 作業を救出できる（git checkout がファイルを消した最中の保存など。VSCode 同挙動）。
+            // 読めない（権限等・存在はする）場合は判定不能 → 上書きしない側に倒す。
+            if path.exists() {
+                let current = read_file_local(path)
+                    .with_context(|| format!("保存競合の判定に失敗: {}", path.display()))?;
+                if current.revision != expected {
+                    bail!("保存競合: 外部で変更されている: {}", path.display());
+                }
             }
         }
     }
@@ -408,6 +449,68 @@ fn list_files_local(root: &Path, limit: usize) -> Result<Vec<PathBuf>> {
     }
     files.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
     Ok(files)
+}
+
+/// remote watch のスナップショット: gitignore 準拠でファイルの (mtime_ns, len) を集める（`.git` は除外）。
+/// list_files_local と同じ走査で、差分検出のために mtime/len を持つ点だけ違う。
+fn watch_snapshot(root: &Path) -> HashMap<PathBuf, (u128, u64)> {
+    let mut snapshot = HashMap::new();
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(false)
+        .require_git(false)
+        .filter_entry(|entry| entry.file_name() != ".git")
+        .build();
+    for result in walker {
+        if snapshot.len() >= WATCH_SNAPSHOT_LIMIT {
+            break;
+        }
+        let Ok(entry) = result else { continue };
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|delta| delta.as_nanos())
+            .unwrap_or(0);
+        snapshot.insert(entry.into_path(), (mtime, meta.len()));
+    }
+    snapshot
+}
+
+/// 2 スナップショットの差分（追加/変更/削除）を root 相対パスで返す（上限内）。
+fn watch_diff(
+    old: &HashMap<PathBuf, (u128, u64)>,
+    new: &HashMap<PathBuf, (u128, u64)>,
+    root: &Path,
+) -> Vec<PathBuf> {
+    let mut changed = Vec::new();
+    for (path, stamp) in new {
+        if old.get(path) != Some(stamp) {
+            if let Ok(relative) = path.strip_prefix(root) {
+                changed.push(relative.to_path_buf());
+            }
+        }
+    }
+    for path in old.keys() {
+        if !new.contains_key(path) {
+            if let Ok(relative) = path.strip_prefix(root) {
+                changed.push(relative.to_path_buf());
+            }
+        }
+    }
+    changed.truncate(WATCH_EVENT_PATH_LIMIT);
+    changed
+}
+
+/// daemon 側の watch マネージャへの制御メッセージ（接続スコープ内で 1 スレッドが受ける）。
+enum WatchControl {
+    Start { root: PathBuf },
+    Stop,
 }
 
 fn search_project_local(
@@ -565,6 +668,16 @@ enum Request {
         project_id: u64,
         spec: CommandSpec,
     },
+    /// project root の変更監視を開始する。daemon は以後 [`FrameKind::Event`] frame を push する
+    /// （remote watch・M13）。接続が切れると監視も自然終了し、再接続後にクライアントが再送する。
+    Watch {
+        project_id: u64,
+        root: PathBuf,
+    },
+    /// 変更監視を止める。
+    Unwatch {
+        project_id: u64,
+    },
     Ping,
     Shutdown,
 }
@@ -617,6 +730,20 @@ struct WireError {
     code: String,
     message: String,
 }
+
+/// daemon → client の push イベント（[`FrameKind::Event`] frame の meta）。remote watch の変更通知。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WatchEvent {
+    /// 変更/追加/削除のあった project 相対パス（1 イベントの上限内に収める）。
+    paths: Vec<PathBuf>,
+}
+
+/// remote watch が 1 イベントで運ぶ相対パスの上限（frame を肥大させない）。
+const WATCH_EVENT_PATH_LIMIT: usize = 512;
+/// remote watch のポーリング間隔（daemon 側・SSH 越しなので数百 ms で十分）。
+const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(700);
+/// remote watch が 1 周でスナップショットするファイル数の上限（巨大 tree の暴走防止）。
+const WATCH_SNAPSHOT_LIMIT: usize = 50_000;
 
 #[derive(Debug)]
 struct RemoteRequestError {
@@ -927,6 +1054,11 @@ fn handle_request(
                 body,
             ))
         }
+        // Watch/Unwatch は serve ループが watch マネージャへ回すのでここには来ない（handle_request は
+        // 無状態でこの接続の watch チャネルを持たない）。万一直接届いても panic させず拒否する。
+        Request::Watch { .. } | Request::Unwatch { .. } => {
+            bail!("watch/unwatch は接続スコープで処理する（handle_request では未対応）")
+        }
         Request::Ping => Ok((Response::Pong, Vec::new())),
         Request::Shutdown => {
             state
@@ -954,10 +1086,64 @@ fn serve_stream_with_state(
         let (request_tx, request_rx) = mpsc::sync_channel::<Frame>(REQUEST_QUEUE);
         let request_rx = Arc::new(Mutex::new(request_rx));
         let writer = Arc::new(Mutex::new(&mut writer));
+        // remote watch（M13）: この接続スコープに 1 本の poll マネージャ。workers が Watch/Unwatch を
+        // 制御チャネルで送り、マネージャが差分を [`FrameKind::Event`] frame として共有 writer へ push する。
+        // 接続が切れて workers が終わると watch_tx が全て drop → マネージャも Disconnected で終了する。
+        // watch 未使用の間は recv() で完全ブロック＝idle 0%。使用中だけ POLL 間隔で起きる。
+        let (watch_tx, watch_rx) = mpsc::channel::<WatchControl>();
+        {
+            let writer = writer.clone();
+            scope.spawn(move || {
+                let mut watching: Option<(PathBuf, HashMap<PathBuf, (u128, u64)>)> = None;
+                loop {
+                    let control = if watching.is_some() {
+                        match watch_rx.recv_timeout(WATCH_POLL_INTERVAL) {
+                            Ok(control) => Some(control),
+                            Err(mpsc::RecvTimeoutError::Timeout) => None, // → poll 1 周
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    } else {
+                        match watch_rx.recv() {
+                            Ok(control) => Some(control),
+                            Err(_) => break, // 接続終了
+                        }
+                    };
+                    match control {
+                        Some(WatchControl::Start { root }) => {
+                            watching = Some((root.clone(), watch_snapshot(&root)));
+                        }
+                        Some(WatchControl::Stop) => watching = None,
+                        None => {
+                            if let Some((root, previous)) = watching.as_mut() {
+                                let fresh = watch_snapshot(root);
+                                let changed = watch_diff(previous, &fresh, root);
+                                *previous = fresh;
+                                if !changed.is_empty() {
+                                    if let Ok(meta) =
+                                        serde_json::to_vec(&WatchEvent { paths: changed })
+                                    {
+                                        let frame = Frame {
+                                            kind: FrameKind::Event,
+                                            id: 0,
+                                            meta,
+                                            body: Vec::new(),
+                                        };
+                                        if let Ok(mut writer) = writer.lock() {
+                                            let _written = write_frame(&mut **writer, &frame);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
         for worker in 0..SERVER_WORKERS {
             let request_rx = request_rx.clone();
             let writer = writer.clone();
             let state = state.clone();
+            let watch_tx = watch_tx.clone();
             scope.spawn(move || {
                 loop {
                     let frame = match request_rx.lock() {
@@ -967,9 +1153,27 @@ fn serve_stream_with_state(
                     let Ok(frame) = frame else {
                         return;
                     };
-                    let response = serde_json::from_slice::<Request>(&frame.meta)
-                        .context("invalid request metadata")
-                        .and_then(|request| handle_request(&state, request, frame.body));
+                    let parsed = serde_json::from_slice::<Request>(&frame.meta)
+                        .context("invalid request metadata");
+                    let response = match parsed {
+                        // Watch/Unwatch は watch マネージャへ回して Ack（handle_request は無状態のため）。
+                        Ok(Request::Watch { project_id, root }) => {
+                            match server_resolve_existing(&state, project_id, &root) {
+                                Ok(absolute) => {
+                                    let _sent =
+                                        watch_tx.send(WatchControl::Start { root: absolute });
+                                    Ok((Response::Ack, Vec::new()))
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Ok(Request::Unwatch { .. }) => {
+                            let _sent = watch_tx.send(WatchControl::Stop);
+                            Ok((Response::Ack, Vec::new()))
+                        }
+                        Ok(request) => handle_request(&state, request, frame.body),
+                        Err(error) => Err(error),
+                    };
                     let response = match response {
                         Ok((response, body)) => Frame::response(frame.id, &response, body),
                         Err(error) => Frame::error(frame.id, "request_failed", &error),
@@ -989,6 +1193,8 @@ fn serve_stream_with_state(
                 }
             });
         }
+        // 親（read ループ）は watch を送らない。workers の clone だけが manager を生かす。
+        drop(watch_tx);
 
         loop {
             remote_trace("server: waiting frame");
@@ -1204,6 +1410,30 @@ impl Drop for ProcessOwner {
 
 type PendingResponses = Arc<Mutex<HashMap<u64, mpsc::SyncSender<Result<Frame, String>>>>>;
 
+/// remote watch の [`FrameKind::Event`] frame を現在の購読者へ配る共有シンク。RpcClient を跨いで
+/// （再接続でも）生き続けるよう [`ReconnectingClient`] が Arc で保持し、各 RpcClient の reader が
+/// Event をここへ流す。購読が無ければ捨てる。
+#[derive(Default)]
+struct WatchEventSink {
+    sender: Mutex<Option<mpsc::Sender<Vec<PathBuf>>>>,
+}
+
+impl WatchEventSink {
+    fn set(&self, sender: Option<mpsc::Sender<Vec<PathBuf>>>) {
+        if let Ok(mut slot) = self.sender.lock() {
+            *slot = sender;
+        }
+    }
+
+    fn dispatch(&self, event: WatchEvent) {
+        if let Ok(slot) = self.sender.lock() {
+            if let Some(sender) = slot.as_ref() {
+                let _sent = sender.send(event.paths);
+            }
+        }
+    }
+}
+
 struct RpcClient {
     writer: Mutex<Box<dyn Write + Send>>,
     pending: PendingResponses,
@@ -1211,7 +1441,10 @@ struct RpcClient {
     _owner: Option<Arc<ProcessOwner>>,
 }
 
-fn rpc_client_from_command(mut command: Command) -> Result<Arc<RpcClient>> {
+fn rpc_client_from_command(
+    mut command: Command,
+    event_sink: Arc<WatchEventSink>,
+) -> Result<Arc<RpcClient>> {
     command.stdin(Stdio::piped()).stdout(Stdio::piped());
     let mut child = command
         .spawn()
@@ -1223,6 +1456,7 @@ fn rpc_client_from_command(mut command: Command) -> Result<Arc<RpcClient>> {
         Box::new(stdout),
         Box::new(stdin),
         Some(owner),
+        event_sink,
     ))
 }
 
@@ -1231,6 +1465,7 @@ impl RpcClient {
         mut reader: Box<dyn Read + Send>,
         writer: Box<dyn Write + Send>,
         owner: Option<Arc<ProcessOwner>>,
+        event_sink: Arc<WatchEventSink>,
     ) -> Arc<Self> {
         let pending = Arc::new(Mutex::new(HashMap::<
             u64,
@@ -1243,6 +1478,14 @@ impl RpcClient {
                 let failure = loop {
                     match read_frame(reader.as_mut()) {
                         Ok(frame) => {
+                            // Event frame（id を持たない push 通知）は watch シンクへ振り分ける。
+                            if matches!(frame.kind, FrameKind::Event) {
+                                if let Ok(event) = serde_json::from_slice::<WatchEvent>(&frame.meta)
+                                {
+                                    event_sink.dispatch(event);
+                                }
+                                continue;
+                            }
                             let sender = reader_pending
                                 .lock()
                                 .ok()
@@ -1546,12 +1789,16 @@ impl SshTransport {
     }
 
     fn start_master(&self) -> Result<()> {
-        let mut master = Command::new("ssh");
+        let mut master = ssh_command();
         master
             .args(["-M", "-N", "-f"])
             .arg("-o")
             .arg(format!("ControlPath={}", self.control_path.display()))
             .args([
+                "-o",
+                // 死んだ/到達不能なホストで GUI が無限にハングしないよう接続打ち切りを入れる
+                // （既定は OS の TCP タイムアウト任せ＝分単位。sleep/VPN 断からの復帰性に効く）。
+                "ConnectTimeout=10",
                 "-o",
                 "ControlPersist=600",
                 "-o",
@@ -1575,7 +1822,7 @@ impl SshTransport {
     }
 
     fn ensure_master(&self) -> Result<()> {
-        let status = Command::new("ssh")
+        let status = ssh_command()
             .args(["-S", &self.control_path.to_string_lossy(), "-O", "check"])
             .arg(self.project.destination())
             .stdin(Stdio::null())
@@ -1607,7 +1854,7 @@ impl SshTransport {
     }
 
     fn command(&self, tty: bool, remote_command: &str) -> Command {
-        let mut command = Command::new("ssh");
+        let mut command = ssh_command();
         command.args(self.session_args(tty, remote_command));
         command
     }
@@ -1717,11 +1964,54 @@ impl SshTransport {
         if !status.success() {
             bail!("remote server upload に失敗: {status}");
         }
+
+        // checksum: 転送破損/改竄を検出する（version 文字列一致より厳密）。両端でハッシュツール
+        // （sha256sum / shasum）が使えるときだけ突合し、片方でも欠ければ version/protocol 検査に委ねる。
+        if let Some(expected) = local_file_sha256(&artifact) {
+            let probe = format!(
+                "sha256sum {path} 2>/dev/null || shasum -a 256 {path} 2>/dev/null || true",
+                path = quote_posix(&installed.to_string_lossy())
+            );
+            if let Ok(output) = self.output(&probe) {
+                if let Some(actual) = parse_sha256_hex(&output.stdout) {
+                    if actual != expected {
+                        // 壊れたバイナリを残さない（次回は再アップロードからやり直せる）。
+                        let _rm = self
+                            .output(&format!("rm -f {}", quote_posix(&installed.to_string_lossy())));
+                        bail!(
+                            "配備した remote server の checksum 不一致（転送破損の可能性）: \
+                             expected {expected}, actual {actual}"
+                        );
+                    }
+                }
+            }
+        }
+
         let installed = installed.to_string_lossy().to_string();
         if !self.compatible_server(&installed) {
             bail!("配備した remote server の version/protocol 検証に失敗");
         }
+        // 検証に通ってから、現行 version 以外の古い server を掃除する（best-effort）。
+        self.cleanup_old_servers(&install_dir);
         Ok(installed)
+    }
+
+    /// `~/.local/share/shirushi/remote/servers/` 配下の、現行 version 以外の server ディレクトリを
+    /// 削除する（best-effort）。version が上がるたびに旧バイナリが溜まって容量を食うのを防ぐ。
+    fn cleanup_old_servers(&self, install_dir: &Path) {
+        let Some(servers_dir) = install_dir.parent() else {
+            return;
+        };
+        let Some(current) = install_dir.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        let sweep = format!(
+            "cd {dir} 2>/dev/null || exit 0; for entry in */; do [ -d \"$entry\" ] || continue; \
+             name=\"${{entry%/}}\"; [ \"$name\" = {cur} ] && continue; rm -rf -- \"$name\"; done",
+            dir = quote_posix(&servers_dir.to_string_lossy()),
+            cur = quote_posix(current),
+        );
+        let _swept = self.output(&sweep);
     }
 }
 
@@ -1734,6 +2024,61 @@ fn find_local_remote_server() -> Option<PathBuf> {
     let development =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/shirushi-remote-server");
     development.is_file().then_some(development)
+}
+
+/// `ssh` サブプロセスの土台。`SHIRUSHI_SSH_CONFIG` が指定されていれば `-F <config>` を先頭に
+/// 前置きする。テスト（Docker の隔離ホスト）やサンドボックス運用で、ユーザーの `~/.ssh/config`
+/// や `known_hosts` を汚さずに remote を検証するための seam。未指定なら system ssh の既定どおり。
+fn ssh_command() -> Command {
+    let mut command = Command::new("ssh");
+    if let Some(config) = std::env::var_os("SHIRUSHI_SSH_CONFIG") {
+        command.arg("-F").arg(config);
+    }
+    command
+}
+
+/// ローカルのハッシュツール（`sha256sum` か BSD/macOS の `shasum -a 256`）で SHA-256 hex を計算する。
+/// どちらも無ければ `None`（checksum 検証は best-effort でスキップし、version/protocol 検査に委ねる）。
+fn local_file_sha256(path: &Path) -> Option<String> {
+    let path = path.to_string_lossy().to_string();
+    let candidates: [(&str, Vec<String>); 2] = [
+        ("sha256sum", vec![path.clone()]),
+        ("shasum", vec!["-a".to_string(), "256".to_string(), path]),
+    ];
+    for (program, args) in candidates {
+        if let Ok(output) = Command::new(program).args(&args).output() {
+            if output.status.success() {
+                if let Some(hex) = parse_sha256_hex(&output.stdout) {
+                    return Some(hex);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `sha256sum` / `shasum -a 256` の出力（`<hex>  <path>`）から先頭の 64 桁 hex を取り出す。
+fn parse_sha256_hex(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let token = text.split_whitespace().next()?;
+    // GNU coreutils は filename に特殊文字があると `\<hash>` と行頭 `\` を付ける。
+    let token = token.trim_start_matches('\\');
+    (token.len() == 64 && token.chars().all(|character| character.is_ascii_hexdigit()))
+        .then(|| token.to_ascii_lowercase())
+}
+
+/// 構造化接続ログ（1 行 = 1 フェーズ・stderr）。接続は低頻度イベントなので常時出す。
+/// 失敗診断（どの段で・どれだけ掛かったか）を残すのが目的。
+fn ssh_log(destination: &str, phase: &str, elapsed_from: Option<std::time::Instant>) {
+    match elapsed_from {
+        Some(started) => {
+            eprintln!(
+                "[ssh {destination}] {phase} ({}ms)",
+                started.elapsed().as_millis()
+            );
+        }
+        None => eprintln!("[ssh {destination}] {phase}"),
+    }
 }
 
 /// remote の uname (os, arch) を Rust target triple へ（配備バイナリの探索キー・#1）。
@@ -1801,9 +2146,11 @@ fn same_platform(remote_os: &str, remote_arch: &str) -> bool {
     os == std::env::consts::OS && arch == std::env::consts::ARCH
 }
 
-impl Drop for SshTransport {
-    fn drop(&mut self) {
-        let mut command = Command::new("ssh");
+impl SshTransport {
+    /// ControlMaster を明示終了する（多重化された全 session が同時に落ちる）。通常の Drop と、
+    /// 障害注入テストの「ControlMaster kill → 次 request が再接続で回復」検証の両方で使う。
+    fn exit_master(&self) {
+        let mut command = ssh_command();
         command
             .args(["-S", &self.control_path.to_string_lossy(), "-O", "exit"])
             .arg(self.project.destination())
@@ -1811,6 +2158,12 @@ impl Drop for SshTransport {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let _status = command.status();
+    }
+}
+
+impl Drop for SshTransport {
+    fn drop(&mut self) {
+        self.exit_master();
         let _cleanup = std::fs::remove_dir_all(&self.control_dir);
     }
 }
@@ -1833,9 +2186,9 @@ impl SshConnector {
         command
     }
 
-    fn connect(&self) -> Result<Arc<RpcClient>> {
+    fn connect(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
         self.transport.ensure_master()?;
-        let client = rpc_client_from_command(self.command())?;
+        let client = rpc_client_from_command(self.command(), event_sink)?;
         let (hello, _) = client.request(
             &Request::Hello {
                 client_version: SERVER_VERSION.to_string(),
@@ -1859,14 +2212,22 @@ struct ReconnectingClient {
     current: Mutex<Arc<RpcClient>>,
     connector: Option<Arc<SshConnector>>,
     reconnect_lock: Mutex<()>,
+    event_sink: Arc<WatchEventSink>,
+    generation: AtomicU64,
 }
 
 impl ReconnectingClient {
-    fn new(current: Arc<RpcClient>, connector: Option<Arc<SshConnector>>) -> Arc<Self> {
+    fn new(
+        current: Arc<RpcClient>,
+        connector: Option<Arc<SshConnector>>,
+        event_sink: Arc<WatchEventSink>,
+    ) -> Arc<Self> {
         let client = Arc::new(Self {
             current: Mutex::new(current),
             connector,
             reconnect_lock: Mutex::new(()),
+            event_sink,
+            generation: AtomicU64::new(0),
         });
         if client.connector.is_some() {
             let weak = Arc::downgrade(&client);
@@ -1884,6 +2245,15 @@ impl ReconnectingClient {
                 .expect("remote heartbeat thread spawn");
         }
         client
+    }
+
+    fn event_sink(&self) -> Arc<WatchEventSink> {
+        self.event_sink.clone()
+    }
+
+    /// 再接続のたびに増える世代番号。watch keeper が「監視を張り直す」判定に使う。
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     fn request(&self, request: &Request, body: Vec<u8>) -> Result<(Response, Vec<u8>)> {
@@ -1925,12 +2295,16 @@ impl ReconnectingClient {
                         .map_err(|_| anyhow!("remote client lock poisoned"))?
                         .clone();
                     if Arc::ptr_eq(&latest, &current) {
-                        let replacement = connector.connect().context("Remote SSH 再接続に失敗")?;
+                        let replacement = connector
+                            .connect(self.event_sink.clone())
+                            .context("Remote SSH 再接続に失敗")?;
                         *self
                             .current
                             .lock()
                             .map_err(|_| anyhow!("remote client lock poisoned"))? =
                             replacement.clone();
+                        // 世代を進める → watch keeper が新接続で監視を張り直す。
+                        self.generation.fetch_add(1, Ordering::Relaxed);
                         replacement
                     } else {
                         latest
@@ -1964,11 +2338,27 @@ impl RemoteHost {
         if server_command.is_empty() || server_command.contains(['\n', '\r', '\0']) {
             bail!("invalid remote server command");
         }
-        let transport = SshTransport::connect(project)?;
-        let server_command = transport.ensure_remote_server(server_command)?;
+        // 構造化接続ログ: フェーズごとの所要を stderr に出し、失敗はどの段で落ちたかを
+        // エラー文脈（context）に載せる → トーストの `{:#}` に段名がそのまま出る。
+        let destination = project.destination();
+        ssh_log(&destination, "接続開始", None);
+
+        let phase = std::time::Instant::now();
+        let transport =
+            SshTransport::connect(project).context("SSH ControlMaster の確立に失敗")?;
+        ssh_log(&destination, "ControlMaster 確立", Some(phase));
+
+        let phase = std::time::Instant::now();
+        let server_command = transport
+            .ensure_remote_server(server_command)
+            .context("remote-server の配備に失敗")?;
+        ssh_log(&destination, "remote-server 配備", Some(phase));
+
         // path 未指定（空）= 標準 SSH と同じく remote の $HOME をルートにする（#5・「ホスト選ぶ→home」）。
         let project = if project.path.as_os_str().is_empty() {
-            let home = transport.output("printf %s \"$HOME\"")?;
+            let home = transport
+                .output("printf %s \"$HOME\"")
+                .context("remote $HOME の解決に失敗")?;
             anyhow::ensure!(
                 home.success(),
                 "remote の $HOME を取得できない: {}",
@@ -1989,7 +2379,8 @@ impl RemoteHost {
         });
         let command = connector.command();
         let display_name = project.destination();
-        Self::connect_process_inner(
+        let phase = std::time::Instant::now();
+        let host = Self::connect_process_inner(
             command,
             project.identity(),
             display_name,
@@ -1998,6 +2389,9 @@ impl RemoteHost {
             Some(transport),
             Some(connector),
         )
+        .context("session proxy 接続 / protocol handshake に失敗")?;
+        ssh_log(&destination, "session 確立（接続完了）", Some(phase));
+        Ok(host)
     }
 
     /// test/development 用。指定 process の stdio を同じ protocol として使う。
@@ -2019,7 +2413,8 @@ impl RemoteHost {
         transport: Option<Arc<SshTransport>>,
         connector: Option<Arc<SshConnector>>,
     ) -> Result<Arc<Self>> {
-        let client = rpc_client_from_command(command)?;
+        let event_sink = Arc::new(WatchEventSink::default());
+        let client = rpc_client_from_command(command, event_sink.clone())?;
         Self::connect_client(
             client,
             id,
@@ -2028,6 +2423,7 @@ impl RemoteHost {
             ssh_project,
             transport,
             connector,
+            event_sink,
         )
     }
 
@@ -2041,7 +2437,8 @@ impl RemoteHost {
         ssh_project: Option<SshProject>,
         transport: Option<Arc<SshTransport>>,
     ) -> Result<Arc<Self>> {
-        let client = RpcClient::new(reader, writer, None);
+        let event_sink = Arc::new(WatchEventSink::default());
+        let client = RpcClient::new(reader, writer, None, event_sink.clone());
         Self::connect_client(
             client,
             id,
@@ -2050,6 +2447,7 @@ impl RemoteHost {
             ssh_project,
             transport,
             None,
+            event_sink,
         )
     }
 
@@ -2061,8 +2459,9 @@ impl RemoteHost {
         ssh_project: Option<SshProject>,
         transport: Option<Arc<SshTransport>>,
         connector: Option<Arc<SshConnector>>,
+        event_sink: Arc<WatchEventSink>,
     ) -> Result<Arc<Self>> {
-        let client = ReconnectingClient::new(client, connector);
+        let client = ReconnectingClient::new(client, connector, event_sink);
         let (hello, _) = client.request(
             &Request::Hello {
                 client_version: SERVER_VERSION.to_string(),
@@ -2100,6 +2499,15 @@ impl RemoteHost {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// 障害注入テスト用: ControlMaster を落とす。SSH host のときだけ効く（local proxy は no-op）。
+    /// 落とした後の request は [`ReconnectingClient`] が master 再生成 + 再接続で回復するはず。
+    #[doc(hidden)]
+    pub fn debug_stop_master(&self) {
+        if let Some(transport) = &self.transport {
+            transport.exit_master();
+        }
     }
 
     /// 明示的な接続削除・テスト用。通常の Drop では daemon を残して再接続可能にする。
@@ -2187,6 +2595,62 @@ impl RemoteHost {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// project 全体（相対 root = 空）の変更監視を daemon へ要求する。冪等（Start は張り直し）。
+    fn send_watch(&self) -> Result<()> {
+        let (response, _) = self.scoped_request(
+            |project_id| Request::Watch {
+                project_id,
+                root: PathBuf::new(),
+            },
+            Vec::new(),
+            true,
+        )?;
+        if matches!(response, Response::Ack) {
+            Ok(())
+        } else {
+            bail!("remote watch が不正な応答を返した");
+        }
+    }
+
+    /// remote watch を開始する: event_sink に配送チャネルを繋ぎ、初回 Watch を送り、
+    /// 再接続（generation 変化）で自動的に張り直す keeper を立てる。返した [`HostWatch`] を
+    /// drop すると keeper が Unwatch を送って終了する。
+    fn start_watch(self: &Arc<Self>) -> Result<HostWatch> {
+        use std::sync::atomic::{AtomicBool, Ordering::Acquire};
+        let (sender, receiver) = mpsc::channel::<Vec<PathBuf>>();
+        self.client.event_sink().set(Some(sender));
+        self.send_watch()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let keeper_stop = stop.clone();
+        let keeper = self.clone();
+        thread::Builder::new()
+            .name("shirushi-remote-watch-keeper".to_string())
+            .spawn(move || {
+                let mut seen = keeper.client.generation();
+                while !keeper_stop.load(Acquire) {
+                    thread::sleep(Duration::from_millis(1500));
+                    if keeper_stop.load(Acquire) {
+                        break;
+                    }
+                    let generation = keeper.client.generation();
+                    if generation != seen {
+                        // 再接続が起きた → 新しい接続で監視を張り直す（失敗しても次周で再試行）。
+                        seen = generation;
+                        let _resubscribed = keeper.send_watch();
+                    }
+                }
+                // best-effort で監視停止 + シンクを外す。
+                let _unwatched = keeper.scoped_request(
+                    |project_id| Request::Unwatch { project_id },
+                    Vec::new(),
+                    true,
+                );
+                keeper.client.event_sink().set(None);
+            })
+            .context("remote watch keeper thread spawn")?;
+        Ok(HostWatch { receiver, stop })
     }
 }
 
@@ -2451,6 +2915,10 @@ impl Host for RemoteHost {
             args: transport.session_args(true, &remote_command),
         }))
     }
+
+    fn watch(self: Arc<Self>) -> Result<Option<HostWatch>> {
+        Ok(Some(self.start_watch()?))
+    }
 }
 
 fn valid_env_key(key: &str) -> bool {
@@ -2554,6 +3022,31 @@ Host gpu
     }
 
     #[test]
+    fn parse_sha256_hex_reads_both_gnu_and_bsd_output() {
+        let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        // GNU sha256sum: `<hex>  <path>`
+        assert_eq!(
+            parse_sha256_hex(format!("{hash}  server\n").as_bytes()).as_deref(),
+            Some(hash)
+        );
+        // BSD/macOS shasum -a 256: 同形式・大文字も吸収
+        assert_eq!(
+            parse_sha256_hex(format!("{}  ./server", hash.to_ascii_uppercase()).as_bytes())
+                .as_deref(),
+            Some(hash)
+        );
+        // GNU の filename エスケープ（行頭 `\`）を剥がす
+        assert_eq!(
+            parse_sha256_hex(format!("\\{hash}  weird\\nname").as_bytes()).as_deref(),
+            Some(hash)
+        );
+        // ツール不在などで空/非 hex のときは None
+        assert_eq!(parse_sha256_hex(b""), None);
+        assert_eq!(parse_sha256_hex(b"sha256sum: not found"), None);
+        assert_eq!(parse_sha256_hex(b"abc123  short"), None);
+    }
+
+    #[test]
     fn frame_round_trip_and_limits() {
         let request = Request::Ping;
         let frame = Frame::request(42, &request, b"body".to_vec()).unwrap();
@@ -2584,6 +3077,24 @@ Host gpu
             write_file_local(&path, b"mine", WriteCondition::Matches(first.revision)).unwrap_err();
         assert!(error.to_string().contains("保存競合"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        let _removed = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_atomic_write_recreates_externally_deleted_file() {
+        // 外部削除は競合にしない（上書きで壊す相手が居ない）= 未保存の作業を ⌘S で救出できる。
+        let root = scratch("recreate");
+        let path = root.join("file.txt");
+        std::fs::write(&path, "one").unwrap();
+        let first = read_file_local(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let revision =
+            write_file_local(&path, b"rescued", WriteCondition::Matches(first.revision)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "rescued");
+        // 作り直し後の revision で続きの保存も通る（普通の編集ループに復帰）。
+        write_file_local(&path, b"rescued again", WriteCondition::Matches(revision)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "rescued again");
         let _removed = std::fs::remove_dir_all(root);
     }
 

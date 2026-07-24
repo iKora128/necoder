@@ -152,7 +152,8 @@ impl Workspace {
         }
     }
 
-    /// SSH 接続 →（成功したら）新しいウィンドウで開く。接続は ControlMaster + server 配備で
+    /// SSH 接続 →（成功したら）**現在のウィンドウのレールに開く**（ウィンドウモデル: 新窓は
+    /// 明示操作のときだけ・ユーザー要件「勝手に窓を開かない」）。接続は ControlMaster + server 配備で
     /// 数秒〜かかるため背景で行い、失敗はトーストで返す。system OpenSSH に委ねるので
     /// ~/.ssh/config の Host エイリアス・鍵・ProxyJump・agent がそのまま効く。
     pub(crate) fn connect_ssh_and_open(&mut self, uri: String, cx: &mut Context<Self>) {
@@ -184,10 +185,14 @@ impl Workspace {
                 workspace.overlays.ssh_connecting = false;
                 match source {
                     Ok(source) => {
+                        // path 未指定（home）= ブラウズ入口。具体パス = 開いたプロジェクト。
+                        let browse = last_path
+                            .as_ref()
+                            .map(|(_, path)| path.is_empty() || path == "/")
+                            .unwrap_or(true);
                         if let (Some(storage), Some((host_key, path))) = (&storage, &last_path) {
-                            // home（path 未指定＝ブラウズ入口）は履歴/前回パスに残さない。
-                            // 「開いたプロジェクト」（具体パス）だけ記録する（#5・home≠プロジェクト）。
-                            if !path.is_empty() && path != "/" {
+                            // home はブラウズ入口なので履歴/前回パスに残さない（#5・home≠プロジェクト）。
+                            if !browse {
                                 let _ = storage.set_host_last_path(host_key, path);
                                 let name = std::path::Path::new(path)
                                     .file_name()
@@ -197,7 +202,23 @@ impl Workspace {
                                 let _ = storage.record_remote_project(host_key, path, &name);
                             }
                         }
-                        workspace.open_source_as_window(source, cx);
+                        // 新窓ではなく現在のウィンドウのレールに開く（remote host 接続を再利用・
+                        // 再接続なし）。新窓が要るときは explorer 右クリック「新しいウィンドウで開く」で明示。
+                        workspace.open_folder_in_rail(
+                            source.host().clone(),
+                            source.root().to_path_buf(),
+                            None,
+                            cx,
+                        );
+                        // home に繋いだ = ブラウズ。ツリーを辿って右クリック→プロジェクト化、を促す
+                        // （「cd 連打→開き直し」を消す browse-first 導線の入口）。
+                        if browse {
+                            workspace.push_toast(
+                                SharedString::from(i18n::t!("ssh.browse_hint")),
+                                workspace.accent(),
+                                cx,
+                            );
+                        }
                     }
                     Err(error) => workspace.push_toast(
                         SharedString::from(format!("{error:#}")),

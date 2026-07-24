@@ -53,6 +53,13 @@ mod explorer_controller;
 mod explorer_view;
 mod git_controller;
 mod git_view;
+mod herd_view;
+mod fleet_view;
+mod control_view;
+mod control_ipc;
+pub use control_ipc::control_socket_path;
+mod coordinator;
+pub(crate) use coordinator::COORDINATOR_THREAD_NAME;
 mod todo_panel;
 pub(crate) use todo_panel::*;
 mod editor_area;
@@ -96,8 +103,28 @@ actions!(
         InlineEdit,
         // Todo ボード（.shirushi/todos.md・M12-10）。
         ToggleTodoBoard,
+        // 編隊 herd サイドバー（状態一覧・M14）。
+        ToggleHerdSidebar,
+        // 編隊モード（全画面 = herd + 系譜グラフ + グリッド + ニュース・M14）。
+        ToggleFleet,
+        // 管制タブ（編隊中央のダッシュボード・FLEET-CONTROL-PLAN P3）。編隊モードごと開く。
+        ToggleControl,
+        // 管制: 要対応キューの先頭へ没入（⏎・P3）。
+        ControlNext,
         // ⌘⇧P コマンドパレット（M13）。
         CommandPalette,
+        // バグ報告（GitHub new issue を環境情報つきで開く・M13 公開準備）。
+        ReportBug,
+        // 設定画面を開く（⌘, / メニュー「設定…」・M13 メニューバー）。
+        OpenSettings,
+        // バージョン表記のトースト（メニュー「Shirushi について」・M13 メニューバー）。
+        About,
+        // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
+        Hide,
+        HideOthers,
+        ShowAll,
+        Minimize,
+        Zoom,
         // リモート SSH ホストピッカー（~/.ssh/config・M13）。
         RemoteSsh,
         // スレッド履歴（過去スレッド一覧 → 復元・#5）。
@@ -158,6 +185,8 @@ pub(crate) enum PickerMode {
     SshHosts,
     /// スレッド履歴（過去スレッド一覧・#5）。id は `picker_history` の添字。
     ThreadHistory,
+    /// 「＋」統一オープン: 開く系アクション + 最近（local/remote 混在）。id は `picker_open_rows` の添字。
+    OpenLauncher,
 }
 
 const RAIL_WIDTH: f32 = 46.0;
@@ -629,11 +658,162 @@ fn active_index_after_switch(active: usize, requested: usize, project_count: usi
 
 // ── Workspace 本体 ──
 
+/// worktree / TaskSpace の安定 ID。レール添字や画面上のセル位置を永続 ID に使わない。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SpaceId(String);
+
+impl SpaceId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn for_worktree(worktree: &Worktree) -> Self {
+        Self(project::stable_worktree_id_on(worktree.host().as_ref(), worktree.root()))
+    }
+}
+
+/// Task lifecycle と space 種別の単一定義は storage crate（FLEET-CONTROL-PLAN P0）。
+/// GUI / CLI / MCP が同じ enum を共有し、ここでは再輸出だけする。
+pub use storage::{SpaceKind, TaskPhase};
+
+/// 1 worktree に紐づく Fleet の作業単位。通常 View では単なる project session として使え、
+/// Fleet では task / review / integration の状態を持つ。
+#[derive(Clone, Debug)]
+pub struct TaskSpace {
+    pub id: SpaceId,
+    pub repository_id: String,
+    pub title: SharedString,
+    /// Integration（統合先の本流）か Task（隔離 worktree）か。phase とは別軸。
+    pub kind: SpaceKind,
+    pub phase: TaskPhase,
+    pub base_oid: Option<String>,
+    pub head_oid: Option<String>,
+    pub result_summary: Option<SharedString>,
+    pub created_at_ms: i64,
+}
+
+impl TaskSpace {
+    fn is_integration(&self) -> bool {
+        self.kind == SpaceKind::Integration
+    }
+
+    fn for_worktree(worktree: &Worktree, branch: Option<&str>) -> Self {
+        let repository_id = project::repository_id_on(worktree.host().as_ref(), worktree.root());
+        let head = project::git_head_oid_on(worktree.host().as_ref(), worktree.root());
+        let detected_branch = branch.map(str::to_string).or_else(|| {
+            project::git_current_branch_on(worktree.host().as_ref(), worktree.root())
+                .filter(|branch| branch.starts_with("task/"))
+        });
+        let is_task = detected_branch.is_some();
+        let title = detected_branch
+            .as_deref()
+            .map(|branch| {
+                let title = branch
+                    .strip_prefix("task/")
+                    .unwrap_or(branch)
+                    .replace(['-', '_'], " ");
+                if title.chars().all(|character| character.is_ascii_digit()) {
+                    format!("Task {title}")
+                } else {
+                    title
+                }
+            })
+            .unwrap_or_else(|| worktree.name());
+        Self {
+            id: SpaceId::for_worktree(worktree),
+            repository_id,
+            title: SharedString::from(title),
+            kind: if is_task { SpaceKind::Task } else { SpaceKind::Integration },
+            phase: TaskPhase::Planned,
+            base_oid: is_task.then(|| head.clone()).flatten(),
+            head_oid: head,
+            result_summary: None,
+            created_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or(0),
+        }
+    }
+
+    fn to_record(&self, slot: &ProjectSlot) -> storage::TaskSpaceRecord {
+        storage::TaskSpaceRecord {
+            id: self.id.0.clone(),
+            repository_id: self.repository_id.clone(),
+            root: slot.worktree.root().to_path_buf(),
+            branch: slot.branch.clone().or_else(|| slot.worktree_branch.clone()),
+            title: self.title.to_string(),
+            kind: self.kind,
+            phase: self.phase,
+            base_oid: self.base_oid.clone(),
+            head_oid: self.head_oid.clone(),
+            result_summary: self.result_summary.as_ref().map(ToString::to_string),
+            depends_on: Vec::new(), // 依存の正は台帳（task_deps）。GUI メモリ側は持たない（P6）
+            created_at: self.created_at_ms,
+            updated_at: self.created_at_ms,
+        }
+    }
+}
+
+/// 編隊グリッドの 1 surface。Task セルは worktree ごとの完整 AgentPanel を表示する。
+/// 同じ Task へ Agent を追加するとセルを増やさず、パネル内の thread tab が増える。
+/// Editor/Diff/Tests は 2026-07-24 に ＋ タイルの入口から外した（＋ = エージェント 1 択へ単純化）。
+/// 機能は残す（後で控えめな入口から再接続する）ため dead_code を許す。
+#[derive(Clone, PartialEq)]
+#[allow(dead_code)]
+pub(crate) enum FleetPane {
+    Task { space: SpaceId },
+    Terminal { space: SpaceId },
+    Editor { space: SpaceId },
+    Diff { space: SpaceId },
+    Tests { space: SpaceId },
+}
+
+/// 系譜グラフの表示（M14 #4）。扇形＝base から放射状に分岐 / ツリー＝上から下へ枝分かれ /
+/// カード＝base→曲線→読めるカード / ハブ＝中央=リポジトリのハブ&スポーク。ヘッダのスイッチャーで切替。
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum GraphView {
+    Fan,
+    Tree,
+    Card,
+    Hub,
+}
+
+/// 編隊中央面のタブ（FLEET-CONTROL-PLAN P3）。Graph=系譜グラフ+グリッド / Control=管制ダッシュボード。
+/// 既定は当面 Graph（ドッグフーディング後に再判断・計画 §P3）。
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FleetCenterView {
+    Graph,
+    Control,
+}
+
 struct ChromeState {
     show_left: bool,
     show_right: bool,
     show_bottom: bool,
     show_settings: bool,
+    /// 左ドックを herd サイドバー（編隊・状態一覧・M14）に切替中か。todo/git と排他（explorer が既定）。
+    show_herd: bool,
+    /// 編隊モード（全画面 = herd + 系譜グラフ + グリッド + ニュース・M14）。通常ビューを置き換える。
+    fleet_mode: bool,
+    /// 編隊グリッドのセル（mock の `.acell`・＋/× で増減・上限 8・M14 #3）。空 = 初回に lanes で自動配置。
+    fleet_cells: Vec<FleetPane>,
+    /// 編隊中央のタブ（管制 / グラフ・P3）。
+    fleet_center_view: FleetCenterView,
+    /// 管制タブのフォーカス（⏎ = キュー先頭へ・keymap context "FleetControl" の足場）。
+    control_focus: FocusHandle,
+    /// 編隊モードの herd で solo（Integration リポジトリ）のスレッド群を展開しているか。
+    /// **既定 false = 畳む**（編隊では Task が主役・2026-07-24 ユーザー指摘）。見出しクリックで切替。
+    herd_solo_expanded: bool,
+    /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
+    graph_view: GraphView,
+    /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。
+    graph_collapsed: bool,
+    /// 拡大表示中のセル（mock の focus・M14）。Some のとき系譜グラフを隠し、そのセルを大きく・
+    /// 他セルはサムネイル列に避ける。index は `fleet_cells` の添字（範囲外は None 扱い）。
+    fleet_maximized: Option<usize>,
+    /// 相対時刻（開始/最終入力の「N分前」）を編隊・herd 表示中だけ更新する 30 秒時計が稼働中か
+    /// （多重起動防止。両方閉じたら次 tick で自停止＝idle 予算を守る・M14）。
+    fleet_clock: bool,
     settings_view: Entity<settings::SettingsView>,
     pending_settings_command: Option<String>,
     confetti: bool,
@@ -664,6 +844,36 @@ struct WorkspaceOverlays {
 struct NotificationCenter {
     toasts: Vec<(SharedString, Hsla, u32)>,
     toast_gen: u32,
+    /// 前回クラッシュのログパス（起動時に pending マーカーから 1 回だけ拾う・M13）。
+    /// Some の間 statusbar に ⚠ チップ → クリックでバグ報告 Issue を開いて消える。
+    crash_notice: Option<PathBuf>,
+    /// ニュースフィード（管制 P2）: `task_events` と同型の時系列ログ（新しいものが先頭）。
+    /// 起動時に DB から backfill し、以後は task_events へ書くのと同じ場所で live に積む。
+    /// **将来の監督（coordinator）の采配も同じ形でここへ載る**（監査可能なニュース）。
+    news: Vec<NewsItem>,
+}
+
+/// ニュース 1 行（mock `fleet-dashboard.html` 下段の書式）: 時刻 + 帰属チップ + **太字名** + イベント文。
+#[derive(Clone)]
+pub(crate) struct NewsItem {
+    pub at_ms: i64,
+    /// 帰属チップの色（スレッド色 / TaskSpace 色）。**色は識別・種別は形**（coordinator は丸チップ）。
+    pub color: Hsla,
+    /// 太字部（タスク名 / スレッド名 / 「監督」）。
+    pub title: SharedString,
+    pub text: SharedString,
+    pub kind: NewsKind,
+}
+
+/// ニュースのイベント種別（task_events の kind と同じ語彙・監督の采配も同じログに載る前提の設計）。
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum NewsKind {
+    PhaseChange,
+    Permission,
+    Digest,
+    Integration,
+    #[allow(dead_code)] // P6（監督席）が載せる。ニュースの語彙として先に確保する。
+    Coordinator,
 }
 
 struct WorkspacePersistence {
@@ -684,6 +894,13 @@ pub struct Workspace {
     notifications: NotificationCenter,
     persistence: WorkspacePersistence,
     updater: UpdateController,
+    /// この窓がアクティブか（render で更新）。管制のマスコット等が「動き」を止める判定に使う。
+    window_active: bool,
+    /// 編隊レベルの ✳ 総括（Tier 2・P4）。キューに影響する遷移から 5s デバウンスで oneshot 生成。
+    /// **状態を上書きしない**（数字とキューは事実層・これは監督バーに添える文）。
+    control_summary: Option<SharedString>,
+    /// 総括のデバウンス世代（最新の遷移だけが生成を走らせる）。
+    control_summary_gen: u32,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -750,6 +967,34 @@ fn beacon_dot(id: impl Into<gpui::ElementId>, color: Hsla, running: bool) -> gpu
         .into_any_element()
     } else {
         dot.into_any_element()
+    }
+}
+
+/// スレッド状態 → 表示ラベル（beacon / フッターロールアップ / ⌘O / herd で共用・i18n）。
+pub(crate) fn activity_label(activity: agent_panel::ThreadActivity) -> SharedString {
+    use agent_panel::ThreadActivity;
+    match activity {
+        ThreadActivity::Working => i18n::t!("agent.state_working").into(),
+        ThreadActivity::Blocked => i18n::t!("agent.state_blocked").into(),
+        ThreadActivity::Done { interrupted: false } => i18n::t!("agent.state_done").into(),
+        ThreadActivity::Done {
+            interrupted: true,
+        } => i18n::t!("agent.state_done_interrupted").into(),
+        ThreadActivity::Idle => i18n::t!("agent.state_idle").into(),
+    }
+}
+
+/// 「開始 N分前 · 入力 N分前」の 1 行（herd 行 / 編隊セル状態行で共用・M14）。
+/// いつスタートして最終いつ入力したかをサクッと見せる。入力がまだ無ければ「開始 …」だけ。
+pub(crate) fn thread_times_label(created_at_ms: i64, last_input_at_ms: Option<i64>) -> SharedString {
+    let started =
+        i18n::t!("time.started", "when" => agent_panel::relative_time_label(created_at_ms));
+    match last_input_at_ms {
+        Some(last_input_at_ms) => SharedString::from(format!(
+            "{started} · {}",
+            i18n::t!("time.last_input", "when" => agent_panel::relative_time_label(last_input_at_ms))
+        )),
+        None => SharedString::from(started),
     }
 }
 
@@ -852,6 +1097,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_active = window.is_window_active(); // 管制マスコット等の「動き」判定（P3）
         if self.has_pending_shell_effects() {
             let workspace = cx.entity();
             window.defer(cx, move |window, cx| {
@@ -886,7 +1132,20 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_rename))
             .on_action(cx.listener(Self::open_inline_edit))
             .on_action(cx.listener(Self::toggle_todo_board))
+            .on_action(cx.listener(Self::toggle_herd_sidebar))
+            .on_action(cx.listener(Self::toggle_fleet_mode))
+            .on_action(cx.listener(Self::toggle_control_center))
+            .on_action(cx.listener(Self::control_next))
             .on_action(cx.listener(Self::open_command_palette))
+            .on_action(cx.listener(Self::report_bug_action))
+            .on_action(cx.listener(Self::open_settings_action))
+            .on_action(cx.listener(Self::about_action))
+            // macOS 標準のアプリ/ウィンドウ操作（メニューバー・M13）。cx は App へ deref。
+            .on_action(cx.listener(|_, _: &Hide, _window, cx| cx.hide()))
+            .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
+            .on_action(cx.listener(|_, _: &ShowAll, _window, cx| cx.unhide_other_apps()))
+            .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
+            .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
             .on_action(cx.listener(Self::open_ssh_host_picker))
             .on_action(cx.listener(Self::open_thread_history))
             .on_action(cx.listener(Self::open_code_actions))
@@ -933,15 +1192,29 @@ impl Render for Workspace {
             .font_family("IBM Plex Sans JP") // UI = IBM Plex Sans JP（bin で bundle 済み）
             .text_size(px(12.5))
             .child(self.render_titlebar(cx))
-            .child(
+            .child(if self.chrome.fleet_mode {
+                // 編隊モード（mock の「編隊」ビュー・M14）: 通常の center/right dock を丸ごと置換。
+                if self.chrome.fleet_cells.is_empty() {
+                    self.seed_fleet_cells(cx); // 初回（起動プローブ含む）は lanes で自動配置
+                    // 開発用: SHIRUSHI_FLEET_ADD=n で ＋Agent を n 回（新スレッド起動が複製しない検証）。
+                    if let Ok(n) = std::env::var("SHIRUSHI_FLEET_ADD").unwrap_or_default().parse::<usize>() {
+                        for _ in 0..n {
+                            self.add_fleet_agent(cx);
+                        }
+                    }
+                }
+                self.render_fleet(cx)
+            } else {
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .child(self.render_rail(cx))
                     .when(self.chrome.show_left, |element| {
-                        // 左カラムは Todo ボード / git パネル / エクスプローラを切替（排他）。
-                        let column = if self.todo_panel.read(cx).open {
+                        // 左カラムは herd / Todo ボード / git パネル / エクスプローラを切替（排他）。
+                        let column = if self.chrome.show_herd {
+                            self.render_herd_sidebar(cx)
+                        } else if self.todo_panel.read(cx).open {
                             self.render_todo_board(cx)
                         } else if self.git_panel_open(cx) {
                             self.render_git_panel(cx)
@@ -951,8 +1224,9 @@ impl Render for Workspace {
                         element.child(column)
                     })
                     .child(self.render_center(cx))
-                    .when(self.chrome.show_right, |element| element.child(self.render_agent_dock(cx))),
-            )
+                    .when(self.chrome.show_right, |element| element.child(self.render_agent_dock(cx)))
+                    .into_any_element()
+            })
             .child(self.render_statusbar(cx))
             // オーバーレイ（最前面）
             .when_some(self.overlays.picker.clone(), |this, picker| this.child(picker))
@@ -1186,6 +1460,7 @@ mod tests {
                 session.explorer.entity_id(),
                 session.git_panel.entity_id(),
                 session.todo_panel.entity_id(),
+                session.tests_dock.entity_id(),
                 terminal_dock.entity_id(),
                 terminal.entity_id(),
             )
@@ -1203,6 +1478,7 @@ mod tests {
                 session.explorer.entity_id(),
                 session.git_panel.entity_id(),
                 session.todo_panel.entity_id(),
+                session.tests_dock.entity_id(),
                 terminal_dock.entity_id(),
                 terminal.entity_id(),
             )
@@ -1225,6 +1501,7 @@ mod tests {
                         session.explorer.entity_id(),
                         session.git_panel.entity_id(),
                         session.todo_panel.entity_id(),
+                        session.tests_dock.entity_id(),
                         terminal_dock.entity_id(),
                         terminal.entity_id(),
                     ),

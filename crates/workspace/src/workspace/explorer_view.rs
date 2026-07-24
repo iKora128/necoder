@@ -672,6 +672,13 @@ impl Workspace {
             .map(|slot| slot.remote_host.is_none())
             .unwrap_or(false);
         if is_dir {
+            // 「ここをプロジェクトとして開く」= 現在のレールに再ルート（remote は同じ接続を再利用）。
+            // browse（home 接続）で辿ったフォルダを「開く」の主導線。新窓は下の項目で明示。
+            let here_path = path.clone();
+            menu_box = menu_box.child(item("ctx-open-here", i18n::t!("explorer.ctx_open_here")).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| this.open_dir_in_rail(here_path.clone(), cx)),
+            ));
             let open_path = path.clone();
             menu_box = menu_box.child(item("ctx-open-window", i18n::t!("explorer.ctx_open_window")).on_mouse_down(
                 MouseButton::Left,

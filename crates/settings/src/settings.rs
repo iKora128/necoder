@@ -224,6 +224,321 @@ impl SettingsView {
                 }),
             )
     }
+
+    // ── Preferences（設定の実効化・M13）──────────────────────────────────────────
+    // settings.json を唯一の真実に、UI から各値を直接トグル/調整する。set_user_value が
+    // 永続化 + observe_global 波及を担うので、変更は全ビューへ即反映される。
+
+    fn set_pref_bool(&mut self, key: &'static str, value: bool, cx: &mut Context<Self>) {
+        set_user_value(cx, key, serde_json::Value::Bool(value));
+        cx.notify();
+    }
+
+    fn set_pref_int(&mut self, key: &'static str, value: i64, cx: &mut Context<Self>) {
+        set_user_value(cx, key, serde_json::json!(value));
+        cx.notify();
+    }
+
+    fn set_pref_float(&mut self, key: &'static str, value: f64, cx: &mut Context<Self>) {
+        set_user_value(cx, key, serde_json::json!(value));
+        cx.notify();
+    }
+
+    fn set_pref_string(&mut self, key: &'static str, value: &'static str, cx: &mut Context<Self>) {
+        set_user_value(cx, key, serde_json::Value::String(value.to_string()));
+        cx.notify();
+    }
+
+    /// on/off スイッチ（つまみが左右にスライド・on=accent）。
+    fn switch(&self, id: (&'static str, usize), on: bool) -> Stateful<Div> {
+        let track = if on { self.accent } else { self.theme.bg3 };
+        div()
+            .id(id)
+            .w(px(34.))
+            .h(px(18.))
+            .rounded(px(9.))
+            .bg(track)
+            .flex()
+            .items_center()
+            .px(px(2.))
+            .cursor_pointer()
+            .when(on, |element| element.justify_end())
+            .child(div().size(px(14.)).rounded(px(7.)).bg(gpui::white()))
+    }
+
+    /// 設定行の器（左=ラベル+副題 / 右=コントロール）。
+    fn pref_row(&self, label: String, sub: Option<String>, control: gpui::AnyElement) -> Div {
+        let theme = self.theme.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(12.))
+            .py(px(9.))
+            .rounded(px(8.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .flex_1()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(theme.fg0)
+                            .child(SharedString::from(label)),
+                    )
+                    .when_some(sub, |element, sub| {
+                        element.child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(sub)),
+                        )
+                    }),
+            )
+            .child(control)
+    }
+
+    fn toggle_row(
+        &self,
+        key: &'static str,
+        idx: usize,
+        label: String,
+        sub: Option<String>,
+        value: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let control = self
+            .switch((key, idx), value)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, _, _window, cx| view.set_pref_bool(key, !value, cx)),
+            )
+            .into_any_element();
+        self.pref_row(label, sub, control)
+    }
+
+    fn stepper_button(
+        &self,
+        key: &'static str,
+        id: (&'static str, usize),
+        glyph: &'static str,
+        target: f64,
+        is_int: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = self.theme.clone();
+        div()
+            .id(id)
+            .size(px(22.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(13.))
+            .text_color(theme.fg1)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+            .child(glyph)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, _, _window, cx| {
+                    if is_int {
+                        view.set_pref_int(key, target as i64, cx)
+                    } else {
+                        view.set_pref_float(key, target, cx)
+                    }
+                }),
+            )
+    }
+
+    /// 数値ステッパー（[−] 値 [+]・min/max でクランプ）。int/float 兼用。
+    fn stepper_row(
+        &self,
+        key: &'static str,
+        label: String,
+        value: f64,
+        min: f64,
+        max: f64,
+        step: f64,
+        is_int: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let dec = (value - step).max(min);
+        let inc = (value + step).min(max);
+        let display = format!("{}", value as i64);
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(self.stepper_button(key, (key, 0), "−", dec, is_int, cx))
+            .child(
+                div()
+                    .min_w(px(28.))
+                    .text_size(px(12.5))
+                    .text_color(self.theme.fg0)
+                    .child(SharedString::from(display)),
+            )
+            .child(self.stepper_button(key, (key, 1), "+", inc, is_int, cx))
+            .into_any_element();
+        self.pref_row(label, None, control)
+    }
+
+    /// セグメント選択（複数値からひとつ・選択中は accent）。
+    fn segmented_row(
+        &self,
+        key: &'static str,
+        label: String,
+        options: &[(&'static str, String)],
+        current: &str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let mut segments = div().flex().items_center().gap(px(4.));
+        for (idx, (value, display)) in options.iter().enumerate() {
+            let selected = *value == current;
+            let value = *value;
+            segments = segments.child(
+                div()
+                    .id((key, idx))
+                    .px(px(9.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(11.5))
+                    .when(selected, |element| {
+                        element.bg(accent.alpha(0.16)).text_color(accent)
+                    })
+                    .when(!selected, |element| {
+                        element
+                            .text_color(theme.fg2)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    })
+                    .child(SharedString::from(display.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| {
+                            view.set_pref_string(key, value, cx)
+                        }),
+                    ),
+            );
+        }
+        self.pref_row(label, None, segments.into_any_element())
+    }
+
+    /// 「動作とエディタ」セクション（真実は settings.json・ここは操作面）。
+    fn preferences_section(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg1)
+                            .child(SharedString::from(i18n::t!("settings.prefs_heading"))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(i18n::t!("settings.prefs_sub"))),
+                    ),
+            )
+            .child(self.toggle_row(
+                "submit_on_enter",
+                0,
+                i18n::t!("settings.pref_submit_on_enter"),
+                Some(i18n::t!("settings.pref_submit_on_enter_sub")),
+                settings.submit_on_enter,
+                cx,
+            ))
+            .child(self.toggle_row(
+                "soft_wrap",
+                1,
+                i18n::t!("settings.pref_soft_wrap"),
+                Some(i18n::t!("settings.pref_soft_wrap_sub")),
+                settings.soft_wrap,
+                cx,
+            ))
+            .child(self.toggle_row(
+                "format_on_save",
+                2,
+                i18n::t!("settings.pref_format_on_save"),
+                Some(i18n::t!("settings.pref_format_on_save_sub")),
+                settings.format_on_save,
+                cx,
+            ))
+            .child(self.toggle_row(
+                "agent_auto_name",
+                3,
+                i18n::t!("settings.pref_agent_auto_name"),
+                Some(i18n::t!("settings.pref_agent_auto_name_sub")),
+                settings.agent_auto_name,
+                cx,
+            ))
+            .child(self.toggle_row(
+                "completion_sound",
+                4,
+                i18n::t!("settings.pref_completion_sound"),
+                Some(i18n::t!("settings.pref_completion_sound_sub")),
+                settings.completion_sound,
+                cx,
+            ))
+            .child(self.stepper_row(
+                "font_size",
+                i18n::t!("settings.pref_font_size"),
+                settings.font_size as f64,
+                8.0,
+                32.0,
+                1.0,
+                false,
+                cx,
+            ))
+            .child(self.stepper_row(
+                "tab_size",
+                i18n::t!("settings.pref_tab_size"),
+                settings.tab_size as f64,
+                1.0,
+                16.0,
+                1.0,
+                true,
+                cx,
+            ))
+            .child(self.segmented_row(
+                "agent_tabs_view",
+                i18n::t!("settings.pref_tabs_view"),
+                &[
+                    ("bar", i18n::t!("settings.tabs_view_bar")),
+                    ("list", i18n::t!("settings.tabs_view_list")),
+                ],
+                &settings.agent_tabs_view,
+                cx,
+            ))
+            .child(
+                div()
+                    .px(px(2.))
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(
+                        i18n::t!("settings.theme_hint", "name" => settings.theme.clone()),
+                    )),
+            )
+    }
 }
 
 impl EventEmitter<SettingsViewEvent> for SettingsView {}
@@ -233,7 +548,7 @@ impl Render for SettingsView {
         let theme = self.theme.clone();
         let accent = self.accent;
         let settings = get(cx);
-        let default_agent = settings.default_agent;
+        let default_agent = settings.default_agent.clone();
         let onboarding = !settings.onboarded;
         let mut rows = div().flex().flex_col().gap(px(6.));
         for (index, agent) in acp_client::AGENTS.iter().enumerate() {
@@ -405,6 +720,9 @@ impl Render for SettingsView {
                     ),
             )
             .child(rows)
+            .when(!onboarding, |element| {
+                element.child(self.preferences_section(&settings, cx))
+            })
             .when(onboarding, |element| {
                 element.child(
                     div()
@@ -444,15 +762,11 @@ impl Render for SettingsView {
     }
 }
 
+/// ブランド表示はカタログ（`acp_client::AgentKind`）が単一の出所。設定画面もタブも同じ値を引く。
 fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
-    match id {
-        "claude" => (Some("icons/brand-claude.svg"), "C", 0xd9_77_57),
-        "codex" => (None, ">_", 0x10_a3_7f),
-        "copilot" => (Some("icons/brand-copilot.svg"), "Co", 0xd0_d5_db),
-        "qwen" => (Some("icons/brand-qwen.svg"), "Q", 0x69_50_ef),
-        "opencode" => (Some("icons/brand-opencode.svg"), "OC", 0xd0_d5_db),
-        "kimi" => (Some("icons/brand-kimi.svg"), "K", 0xd0_d5_db),
-        "grok" => (None, "G", 0x4b_55_63),
-        _ => (None, "?", 0x88_88_88),
-    }
+    acp_client::AGENTS
+        .iter()
+        .find(|agent| agent.id == id)
+        .map(|agent| agent.brand())
+        .unwrap_or((None, "?", 0x88_88_88))
 }

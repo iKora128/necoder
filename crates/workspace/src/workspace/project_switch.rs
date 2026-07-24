@@ -127,7 +127,13 @@ impl Workspace {
 
     /// Agent パネルの宛先チップにアクティブプロジェクト名・ブランチを反映する。
     pub(crate) fn update_agent_destination(&self, cx: &mut Context<Self>) {
-        let (name, branch, host, cwd, files) = match self.active_slot() {
+        self.update_agent_destination_for(self.project_sessions.active, cx);
+    }
+
+    /// Fleet では非 active な TaskSpace の composer も同時に操作できるため、各 AgentPanel に
+    /// それぞれの host/cwd/context を焼き付ける。active session の暗黙 Deref は使わない。
+    pub(crate) fn update_agent_destination_for(&self, index: usize, cx: &mut Context<Self>) {
+        let (name, branch, host, cwd, files) = match self.project_sessions.projects.get(index) {
             Some(slot) => {
                 // Add context の候補（プロジェクト先頭 60 ファイルの相対パス）。
                 let files = slot
@@ -138,7 +144,10 @@ impl Workspace {
                     .collect();
                 (
                     slot.name.clone(),
-                    slot.branch.clone().map(SharedString::from),
+                    slot.branch
+                        .clone()
+                        .or_else(|| slot.worktree_branch.clone())
+                        .map(SharedString::from),
                     slot.worktree.host().clone(),
                     Some(slot.worktree.root().to_path_buf()),
                     files,
@@ -152,8 +161,11 @@ impl Workspace {
                 Vec::new(),
             ),
         };
-        self.agent_panel
-            .update(cx, |panel, cx| panel.set_destination(name, branch, host, cwd, files, cx));
+        if let Some(session) = self.project_sessions.sessions.get(index) {
+            session
+                .agent_panel
+                .update(cx, |panel, cx| panel.set_destination(name, branch, host, cwd, files, cx));
+        }
     }
 
     // ── タブ/スレッドのショートカット（⌘W / ⌘⇧A） ──

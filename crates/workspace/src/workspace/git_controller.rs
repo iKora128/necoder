@@ -211,6 +211,7 @@ impl Workspace {
             }
         } else {
             self.chrome.show_left = true;
+            self.chrome.show_herd = false;
             self.todo_panel.update(cx, |panel, cx| panel.set_open(false, cx));
             let focus = self.git_panel.read(cx).focus.clone();
             window.focus(&focus, cx);
