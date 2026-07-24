@@ -4705,6 +4705,11 @@ pub fn activity_dot(
     color: Hsla,
     activity: ThreadActivity,
 ) -> gpui::AnyElement {
+    // Working = 点字スピナー（herdr 由来の「形と動き」・色はスレッド識別色のまま＝§1.3 維持・2026-07-25）。
+    // 満円脈動よりも「進行中」が一瞬で読める。パターン比較は mock/working-anim-patterns.html。
+    if matches!(activity, ThreadActivity::Working) {
+        return working_spinner(id, diameter, color);
+    }
     let ringed = matches!(activity, ThreadActivity::Done { .. });
     let half = matches!(activity, ThreadActivity::Blocked); // 承認待ち = 半円（mock ◐）
     let pulse = matches!(activity, ThreadActivity::Working | ThreadActivity::Blocked);
@@ -4763,6 +4768,56 @@ pub fn activity_dot(
     } else {
         framed.into_any_element()
     }
+}
+
+/// Working の点字スピナー（⠋⠙⠹…・herdr の表現を規律に翻訳: **色はスレッド識別色のまま**動きだけ借りる）。
+/// GPUI はアニメでテキストを差し替えられないため、グリフ列を 1 コマ幅の窓でスライドさせる
+/// （マスコットのフィルムストリップと同じ手法）。外枠は `activity_dot` の frame と同寸＝置換してもレイアウト不変。
+pub fn working_spinner(
+    id: impl Into<gpui::ElementId>,
+    diameter: f32,
+    color: Hsla,
+) -> gpui::AnyElement {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let outer = diameter + 6.0; // activity_dot と同じリング枠寸
+    let slot = diameter + 4.0; // 1 コマの箱（グリフを中央寄せ）
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(outer))
+        .child(
+            div().w(px(slot)).h(px(slot)).overflow_hidden().flex_none().child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .w(px(slot * FRAMES.len() as f32))
+                    .h(px(slot))
+                    .children(FRAMES.iter().map(|frame| {
+                        div()
+                            .w(px(slot))
+                            .h(px(slot))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(slot))
+                            .line_height(px(slot))
+                            .text_color(color)
+                            .child(*frame)
+                    }))
+                    .with_animation(
+                        id,
+                        Animation::new(std::time::Duration::from_millis(1200)).repeat(),
+                        move |element, delta| {
+                            let index = ((delta * FRAMES.len() as f32).floor() as usize)
+                                .min(FRAMES.len() - 1);
+                            element.ml(px(-(slot * index as f32)))
+                        },
+                    ),
+            ),
+        )
+        .into_any_element()
 }
 
 /// スレッドが話すエージェントのブランドアイコン（タブ / List 行用）。ブランド在庫が無いものは

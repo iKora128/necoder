@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Working アニメーション 10 案 — Shirushi 部品カタログ</title>
+<style>
+  /* Shirushi dark トークン近似（mock/index.html と同系）。色=識別（スレッド色）・状態=形と動きの規律で、
+     全案「スレッド色のまま動きだけが違う」。ブラウザで開いて動きを比較する。 */
+  :root {
+    --bg0:#0f1216; --bg1:#151a21; --bg2:#1c232c; --bg3:#242d38;
+    --fg0:#e8edf4; --fg1:#b7c2cf; --fg2:#77828f; --border:#2a3340;
+    --th:#6ea8fe; /* サンプルのスレッド色（青） */
+    --th2:#e3b341; /* 比較用 2 本目（黄） */
+  }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg1); color:var(--fg0);
+    font:13px/1.6 "IBM Plex Sans JP","Hiragino Sans",sans-serif; padding:28px 32px 60px; }
+  h1 { font-size:16px; margin-bottom:4px; }
+  .note { color:var(--fg2); font-size:11px; margin-bottom:20px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; max-width:1160px; }
+  .card { background:var(--bg0); border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+  .card h2 { font-size:12.5px; display:flex; align-items:baseline; gap:8px; }
+  .card h2 .no { color:var(--fg2); font-weight:400; font-size:10.5px; }
+  .card p { color:var(--fg2); font-size:10.5px; margin:2px 0 10px; }
+  /* herd 行の実寸コンテキスト（10px 相当）と拡大（18px） */
+  .row { display:flex; align-items:center; gap:8px; background:var(--bg1);
+    border-radius:6px; padding:6px 10px; margin-top:6px; }
+  .bar { width:2.5px; height:24px; border-radius:2px; background:var(--th); }
+  .who { min-width:0; flex:1; }
+  .who b { font-size:12px; display:block; font-weight:600; }
+  .who span { font-size:10px; color:var(--fg2); white-space:nowrap; }
+  .big { transform:scale(1.8); transform-origin:left center; margin:10px 0 4px 4px; display:inline-block; }
+  .slot { width:16px; height:16px; display:inline-flex; align-items:center; justify-content:center; flex:none; }
+
+  /* ── 1. 点字スピナー（herdr 型・現在実装済み） ── */
+  .braille::after { content:"⠋"; color:var(--th); font-size:14px;
+    animation:braille 1.2s steps(1) infinite; }
+  @keyframes braille { 0%{content:"⠋"} 10%{content:"⠙"} 20%{content:"⠹"} 30%{content:"⠸"}
+    40%{content:"⠼"} 50%{content:"⠴"} 60%{content:"⠦"} 70%{content:"⠧"} 80%{content:"⠇"} 90%{content:"⠏"} }
+
+  /* ── 2. 満円の脈動（従来） ── */
+  .pulse { width:9px; height:9px; border-radius:50%; background:var(--th);
+    animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  /* ── 3. 月相ローテーション ◐◓◑◒（Blocked の ◐ と同族） ── */
+  .moon::after { content:"◐"; color:var(--th); font-size:12px;
+    animation:moon 1.1s steps(1) infinite; }
+  @keyframes moon { 0%{content:"◐"} 25%{content:"◓"} 50%{content:"◑"} 75%{content:"◒"} }
+
+  /* ── 4. アークリング回転（クラシック） ── */
+  .arc { width:10px; height:10px; border-radius:50%; border:2px solid color-mix(in srgb,var(--th) 25%,transparent);
+    border-top-color:var(--th); animation:rot 0.9s linear infinite; }
+  @keyframes rot { to{transform:rotate(360deg)} }
+
+  /* ── 5. コメットリング（尾を引く円弧） ── */
+  .comet { width:11px; height:11px; border-radius:50%;
+    background:conic-gradient(from 0deg, transparent 0 40%, var(--th) 100%);
+    -webkit-mask:radial-gradient(farthest-side, transparent 55%, #000 56%);
+    mask:radial-gradient(farthest-side, transparent 55%, #000 56%);
+    animation:rot 1.0s linear infinite; }
+
+  /* ── 6. 軌道ドット（衛星） ── */
+  .orbit { position:relative; width:13px; height:13px; animation:rot 1.4s linear infinite; }
+  .orbit i { position:absolute; left:50%; top:50%; width:5px; height:5px; margin:-2.5px;
+    border-radius:50%; background:var(--th); opacity:.45; }
+  .orbit b { position:absolute; left:50%; top:0; width:4px; height:4px; margin-left:-2px;
+    border-radius:50%; background:var(--th); }
+
+  /* ── 7. 3 点タイピング（チャット風） ── */
+  .typing { display:flex; gap:2.5px; }
+  .typing i { width:3.5px; height:3.5px; border-radius:50%; background:var(--th);
+    animation:typ 1.2s ease-in-out infinite; }
+  .typing i:nth-child(2){ animation-delay:.15s } .typing i:nth-child(3){ animation-delay:.3s }
+  @keyframes typ { 0%,60%,100%{opacity:.25; transform:translateY(0)} 30%{opacity:1; transform:translateY(-2.5px)} }
+
+  /* ── 8. イコライザ（3 本バー） ── */
+  .eq { display:flex; gap:2px; align-items:flex-end; height:11px; }
+  .eq i { width:2.5px; background:var(--th); border-radius:1px; animation:eq 1.0s ease-in-out infinite; }
+  .eq i:nth-child(1){ height:5px } .eq i:nth-child(2){ height:10px; animation-delay:.2s }
+  .eq i:nth-child(3){ height:7px; animation-delay:.4s }
+  @keyframes eq { 0%,100%{transform:scaleY(.4)} 50%{transform:scaleY(1)} }
+
+  /* ── 9. リップル（満円 + 波紋） ── */
+  .ripple { position:relative; width:9px; height:9px; }
+  .ripple b { position:absolute; inset:0; border-radius:50%; background:var(--th); }
+  .ripple i { position:absolute; inset:0; border-radius:50%; border:1.5px solid var(--th);
+    animation:rip 1.5s ease-out infinite; }
+  @keyframes rip { 0%{transform:scale(1); opacity:.8} 100%{transform:scale(2.4); opacity:0} }
+
+  /* ── 10. シマー digest（ドットは静止・文が流れる） ── */
+  .shimmer-dot { width:9px; height:9px; border-radius:50%; background:var(--th); }
+  .shimmer-text { background:linear-gradient(90deg, var(--fg2) 40%, var(--fg0) 50%, var(--fg2) 60%);
+    background-size:200% 100%; -webkit-background-clip:text; background-clip:text; color:transparent;
+    animation:shim 1.8s linear infinite; }
+  @keyframes shim { from{background-position:180% 0} to{background-position:-20% 0} }
+
+  /* ── 11. 回転カンマ ◜◝◞◟（細字・上品） ── */
+  .quad::after { content:"◜"; color:var(--th); font-size:12px; animation:quad .8s steps(1) infinite; }
+  @keyframes quad { 0%{content:"◜"} 25%{content:"◝"} 50%{content:"◞"} 75%{content:"◟"} }
+</style>
+</head>
+<body>
+  <h1>Working アニメーション比較（10+1 案）</h1>
+  <p class="note">規律: 色は常に<b>スレッド識別色</b>（ここでは青）・状態は形と動きだけで示す。各カードの下段は herd 行の実寸（≒10px）＋拡大。①点字スピナーが現在実装済み — ブラウザでこのファイルを開いて動きで選ぶ。</p>
+  <div class="grid">
+
+    <div class="card"><h2><span class="no">①</span>点字スピナー（herdr 型・実装済み）</h2>
+      <p>⠋⠙⠹… 10 コマ・約 8fps。CLI 文化の「動いてる」記号。小サイズでも読める。</p>
+      <span class="big slot braille"></span>
+      <div class="row"><div class="bar"></div><span class="slot braille"></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">②</span>満円の脈動（従来）</h2>
+      <p>opacity 1.6s 往復。穏やかだが「Idle の淡色」と一瞬迷う・動きが遅く見落としやすい。</p>
+      <span class="big slot"><span class="pulse"></span></span>
+      <div class="row"><div class="bar"></div><span class="slot"><span class="pulse"></span></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">③</span>月相ローテーション ◐◓◑◒</h2>
+      <p>Blocked の ◐ と同じ語族で「回っている=進行中」。グリフ 4 コマなのでカクつき感あり。</p>
+      <span class="big slot moon"></span>
+      <div class="row"><div class="bar"></div><span class="slot moon"></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">④</span>アークリング回転</h2>
+      <p>王道スピナー。GPUI では SVG 回転で実装容易。ただし「読み込み中」の既視感が強い。</p>
+      <span class="big slot"><span class="arc"></span></span>
+      <div class="row"><div class="bar"></div><span class="slot"><span class="arc"></span></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">⑤</span>コメットリング（尾を引く）</h2>
+      <p>④の上質版。滑らかで存在感があるが、小径だと潰れやすい。</p>
+      <span class="big slot"><span class="comet"></span></span>
+      <div class="row"><div class="bar"></div><span class="slot"><span class="comet"></span></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">⑥</span>軌道ドット（衛星）</h2>
+      <p>中心=スレッド・衛星=作業、の比喩。可愛いが 10px ではほぼ判別不能。</p>
+      <span class="big slot"><span class="orbit"><i></i><b></b></span></span>
+      <div class="row"><div class="bar"></div><span class="slot"><span class="orbit"><i></i><b></b></span></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">⑦</span>3 点タイピング</h2>
+      <p>チャットの「入力中…」の文法＝エージェントが喋っている感。横幅を取る。</p>
+      <span class="big slot"><span class="typing"><i></i><i></i><i></i></span></span>
+      <div class="row"><div class="bar"></div><span class="slot"><span class="typing"><i></i><i></i><i></i></span></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">⑧</span>イコライザ（3 本バー）</h2>
+      <p>「処理が流れてる」感が強い。ドット枠と形が違いすぎて列が揃わないのが難。</p>
+      <span class="big slot"><span class="eq"><i></i><i></i><i></i></span></span>
+      <div class="row"><div class="bar"></div><span class="slot"><span class="eq"><i></i><i></i><i></i></span></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">⑨</span>リップル（満円 + 波紋）</h2>
+      <p>満円を保ったまま波紋で「生きてる」。ビーコンの比喩が編隊と相性◎。波紋の残像が行間に滲む点は注意。</p>
+      <span class="big slot"><span class="ripple"><b></b><i></i></span></span>
+      <div class="row"><div class="bar"></div><span class="slot"><span class="ripple"><b></b><i></i></span></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">⑩</span>シマー digest（ドット静止・文が光る）</h2>
+      <p>動きをドットでなく digest 文に置く逆転案。視線が「何をしているか」に誘導される。派手すぎる懸念。</p>
+      <span class="big slot"><span class="shimmer-dot"></span></span>
+      <div class="row"><div class="bar"></div><span class="slot"><span class="shimmer-dot"></span></span><div class="who"><b>認証リファクタ</b><span class="shimmer-text">Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">⑪</span>回転カンマ ◜◝◞◟（おまけ）</h2>
+      <p>細線 4 コマ。上品で控えめ・和文組版にも馴染む。コマが少なくやや粗い。</p>
+      <span class="big slot quad"></span>
+      <div class="row"><div class="bar"></div><span class="slot quad"></span><div class="who"><b>認証リファクタ</b><span>Bash(cargo test) · テスト修正 ▰▰▱▱▱ 2/5</span></div></div>
+    </div>
+
+    <div class="card"><h2><span class="no">参考</span>2 色並走（識別の確認）</h2>
+      <p>どの案でも「色=スレッド識別」が保てるかの確認用。①を青/黄の 2 スレッドで。</p>
+      <div class="row"><div class="bar"></div><span class="slot braille"></span><div class="who"><b>認証リファクタ</b><span>working…</span></div></div>
+      <div class="row"><div class="bar" style="background:var(--th2)"></div><span class="slot braille" style="--th:var(--th2)"></span><div class="who"><b>LP 文言</b><span>working…</span></div></div>
+    </div>
+
+  </div>
+</body>
+</html>
