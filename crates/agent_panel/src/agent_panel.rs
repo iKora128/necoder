@@ -196,6 +196,9 @@ pub enum PanelEvent {
     /// Tier 2 の ✳ 1 行要約が生成できた（P4）。workspace が task_events へキャッシュし
     /// 管制の総括デバウンスを蹴る。**状態は運ばない**（文だけ・状態は事実層が別で流れている）。
     SummaryReady { thread: SharedString, tier2: SharedString },
+    /// 初回ターン後に AI がスレッド名を付けた（#6）。Task 名がプレースホルダのままなら
+    /// workspace が Task 名にも引き継ぐ（2026-07-24・タスク命名）。
+    ThreadAutoNamed { name: SharedString },
     /// エージェントの編集を承認した（色リンク用・M12-4）。
     FilesTouched {
         files: Vec<std::path::PathBuf>,
@@ -1032,7 +1035,9 @@ impl AgentPanel {
                         let thread = &mut panel.threads[index];
                         // 生成待ちの間にユーザーが手動改名していたら尊重する。
                         if !thread.name_is_custom && is_placeholder_name(&thread.name) {
-                            thread.name = SharedString::from(name);
+                            let name = SharedString::from(name);
+                            thread.name = name.clone();
+                            cx.emit(PanelEvent::ThreadAutoNamed { name });
                             panel.persist_thread(index);
                             cx.notify();
                         }

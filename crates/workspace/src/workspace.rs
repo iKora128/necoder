@@ -804,6 +804,8 @@ struct ChromeState {
     /// 編隊モードの herd で solo（Integration リポジトリ）のスレッド群を展開しているか。
     /// **既定 false = 畳む**（編隊では Task が主役・2026-07-24 ユーザー指摘）。見出しクリックで切替。
     herd_solo_expanded: bool,
+    /// herd の Task 見出しをダブルクリックで改名中 (project_index, 入力欄)。スレッドタブの改名と同型。
+    herd_renaming: Option<(usize, Entity<EditorView>)>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
     graph_view: GraphView,
     /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。
@@ -949,6 +951,14 @@ fn breadcrumb_text(root: Option<&Path>, path: Option<&Path>) -> String {
         .map(|component| component.as_os_str().to_string_lossy().to_string())
         .collect::<Vec<_>>()
         .join(" › ")
+}
+
+/// Task 名がプレースホルダ（"Task" / "Task <数字>"）のままか。AI 命名の引き継ぎ判定（2026-07-24）。
+pub(crate) fn is_placeholder_task_title(title: &str) -> bool {
+    title == "Task"
+        || title
+            .strip_prefix("Task ")
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// パスの末尾 `max` 階層のフォルダ名（ルート `/` は除く）。エクスプローラの上位階層ブレッドクラム用。

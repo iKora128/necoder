@@ -136,6 +136,20 @@ impl Workspace {
                     );
                 }
             }
+            agent_panel::PanelEvent::ThreadAutoNamed { name } => {
+                // AI 命名の引き継ぎ（2026-07-24）: Task 名がプレースホルダ（"Task N"）のままなら
+                // 最初のスレッド名を Task 名にする。手動改名済み（プレースホルダでない）は触らない。
+                if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
+                    if !slot.task_space.is_integration()
+                        && is_placeholder_task_title(&slot.task_space.title)
+                    {
+                        slot.task_space.title = name.clone();
+                        slot.name = name.clone();
+                        self.persist_task_space(session_index, cx);
+                        cx.notify();
+                    }
+                }
+            }
             agent_panel::PanelEvent::SummaryReady { thread, tier2 } => {
                 // Tier 2 要約（P4）を ledger にキャッシュ（再起動後も残る）。状態は運ばない＝上書きしない。
                 let _ = thread;

@@ -603,6 +603,7 @@ impl Workspace {
                 should_move_window: false,
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: false,
+                herd_renaming: None,
             },
             overlays: WorkspaceOverlays {
                 picker: None,

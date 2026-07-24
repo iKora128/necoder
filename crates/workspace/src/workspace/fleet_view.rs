@@ -590,6 +590,9 @@ impl Workspace {
             if slot.task_space.is_integration() {
                 continue;
             }
+            if slot.task_space.phase == TaskPhase::Archived {
+                continue; // アーカイブ済みはグラフ/セルにも出さない（3 層の中段・2026-07-24）
+            }
             let Some(session) = self.project_sessions.sessions.get(index) else {
                 continue;
             };

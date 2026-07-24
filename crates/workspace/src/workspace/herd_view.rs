@@ -27,6 +27,50 @@ impl Workspace {
         cx.notify();
     }
 
+    /// herd の Task 見出しダブルクリック → 改名（スレッドタブと同じ EditorView・IME 対応・2026-07-24）。
+    pub(crate) fn start_task_rename(
+        &mut self,
+        project_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.project_sessions.projects.get(project_index) else {
+            return;
+        };
+        let color = slot.color;
+        let title = slot.task_space.title.clone();
+        let editor = cx.new(|cx| {
+            let mut view = EditorView::plain(self.theme.clone(), color, true, cx);
+            view.set_plain_text(title.as_ref(), cx);
+            view
+        });
+        cx.subscribe(&editor, |workspace, _editor, event, cx| match event {
+            ComposerEvent::Submit => workspace.confirm_task_rename(cx),
+        })
+        .detach();
+        let handle = editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        self.chrome.herd_renaming = Some((project_index, editor));
+        cx.notify();
+    }
+
+    /// Task 改名の確定（Enter・空白のみは無視）。title と slot 名を揃えて台帳へ永続化。
+    fn confirm_task_rename(&mut self, cx: &mut Context<Self>) {
+        let Some((index, editor)) = self.chrome.herd_renaming.take() else {
+            return;
+        };
+        let text = editor.read(cx).plain_text();
+        let name = text.trim();
+        if !name.is_empty() {
+            if let Some(slot) = self.project_sessions.projects.get_mut(index) {
+                slot.task_space.title = SharedString::from(name.to_string());
+                slot.name = SharedString::from(name.to_string());
+            }
+            self.persist_task_space(index, cx);
+        }
+        cx.notify();
+    }
+
     /// herd サイドバー本体（M14 #1・herdr の「設定不要の状態一覧」を ACP ネイティブで）。
     /// ウィンドウのレールに載る全プロジェクトのスレッド状態を**プロジェクト別グループ**で一覧する。
     /// 行 = 左 2px スレッド色バー ＋ `activity_dot`（形と動き）＋ エージェントアイコン ＋
@@ -53,6 +97,10 @@ impl Workspace {
             };
             let statuses = session.agent_panel.read(cx).statuses();
             if statuses.is_empty() {
+                continue;
+            }
+            // アーカイブ済み Task は一覧から消す（完全削除は見出し右クリックのメニューから・3 層の中段）。
+            if !slot.task_space.is_integration() && slot.task_space.phase == TaskPhase::Archived {
                 continue;
             }
             groups.push(HerdGroup {
@@ -90,6 +138,14 @@ impl Workspace {
             // 誤解を生む集約語を出さず件数だけ）。全体の実行中/承認待ち内訳はパネルヘッダのロールアップに。
             let mini = group.statuses.len().to_string();
             let solo_toggle = self.chrome.fleet_mode && group.is_integration;
+            let is_task_group = !group.is_integration;
+            let project_index = group.project_index;
+            let renaming_editor = self
+                .chrome
+                .herd_renaming
+                .as_ref()
+                .filter(|(index, _)| *index == project_index)
+                .map(|(_, editor)| editor.clone());
             list = list.child(
                 div()
                     .id(("herd-group", group.project_index))
@@ -102,6 +158,25 @@ impl Workspace {
                             }),
                         )
                     })
+                    // Task 見出し: ダブルクリック=改名 / 右クリック=メニュー（アーカイブ・worktree/
+                    // ブランチ削除の完全削除まで。レールから外れた Task の削除入口・2026-07-24）。
+                    .when(is_task_group, |element| {
+                        element
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    if event.click_count == 2 {
+                                        this.start_task_rename(project_index, window, cx);
+                                    }
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                    this.open_rail_menu(project_index, event.position, cx);
+                                }),
+                            )
+                    })
                     .flex()
                     .items_center()
                     .gap(px(6.))
@@ -109,15 +184,22 @@ impl Workspace {
                     .pt(px(8.))
                     .pb(px(3.))
                     .child(div().size(px(7.)).rounded_full().bg(group.color).flex_none())
-                    .child(
-                        div()
+                    .child(match renaming_editor {
+                        Some(editor) => div()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(20.))
+                            .child(editor)
+                            .into_any_element(),
+                        None => div()
                             .flex_none()
                             .whitespace_nowrap()
                             .text_size(px(11.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.fg1)
-                            .child(group.name.clone()),
-                    )
+                            .child(group.name.clone())
+                            .into_any_element(),
+                    })
                     // ⎇ ブランチ = この space が「どの worktree か」の識別（①の核）。
                     // これが出ることで herd が「プロジェクト一覧」でなく「worktree space 一覧」に読める。
                     .child(
