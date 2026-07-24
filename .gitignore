@@ -10,3 +10,4 @@
 # マスコット動画パイプラインの重い中間物（mp4・抽出フレーム。再生成可能なので追跡しない）
 # 最終スプライトは crates/agent_panel/assets/mascot/ に、参照用の縮小スプライトは vid-*/ に残す
 /mock/mascot/neko-anim/video/
+herdr/
