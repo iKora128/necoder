@@ -69,8 +69,11 @@ impl Render for DraggedThreadTab {
 const THREAD_TABS_HEIGHT: f32 = 34.0;
 const COMPOSER_INPUT_HEIGHT: f32 = 68.0;
 /// composer のモデルセレクタに並べる候補（クリックでアクティブスレッドに設定）。
-/// 表示ラベルの切替まで（ACP エージェントへの実反映は継続課題）。
+/// **これはフォールバック** — ACP エージェントが `session/set_config_option` で広告してきた
+/// 一覧があればそちらが優先される（`selector_options`）。広告しないエージェント用の既定リスト。
+/// 選択は `send_set_config` で実際にエージェントへ送る（表示だけではない）。
 const MODELS: &[&str] = &[
+    "claude-opus-5",
     "claude-opus-4-8",
     "claude-sonnet-5",
     "claude-haiku-4-5",
@@ -78,8 +81,9 @@ const MODELS: &[&str] = &[
 ];
 /// 権限モード（Claude Code 相当。実配線は ACP の SessionMode／set_mode 経由で継続課題）。
 const PERMISSION_MODES: &[&str] = &["default", "accept edits", "bypass permissions", "plan"];
-/// 推論の effort（Zed 下部コントロール相当）。
-const EFFORTS: &[&str] = &["low", "medium", "high", "max"];
+/// 推論の effort（Zed 下部コントロール相当）。MODELS と同じくエージェントの広告が優先。
+/// `xhigh` は high と max の間（Opus 5 / Opus 4.8 / Sonnet 5 等。コーディング/エージェント用途の推奨値）。
+const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 /// スレッドの見せ方（explorer の Tree/Columns/Icons と同じ「登録式ビュー」。Bar と List は排他）。
 /// Bar = 色付き横タブ（既定）。List = 縦リスト（「チャットのスペース履歴」風・多数でも一望）。

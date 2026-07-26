@@ -10,7 +10,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROFILE="${1:-release}"
-ICON_SRC="mock/mascot/01-neko-coder.png"
+# アイコン原画 = necoder（pixel art・2026-07-27 に 01-neko-coder.png から差し替え）。
+# 小サイズで読めるバストアップ。全身の neko-art.png は 32px で潰れるため不採用。
+ICON_SRC="lp/assets/img/necoder-mark.png"
 ICON_DIR="crates/shirushi/assets/icon"
 APP="target/Shirushi.app"
 
@@ -73,7 +75,19 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Finder のアイコンキャッシュを更新させる（mtime を進める）。
-touch "$APP"
+# 4) ad-hoc 署名（2026-07-27 追加）。cargo が吐くバイナリにはリンカの ad-hoc 署名が付いており、
+#    その Identifier は `shirushi-<hash>` で Info.plist の CFBundleIdentifier と食い違う。
+#    macOS 13+ はこの不一致でアイコン解決/Launch Services の登録がおかしくなる（Dock に
+#    マスコットが出ない実例）。組み立て後に bundle 全体を署名し直して identifier を揃える。
+codesign --force --sign - --identifier dev.shirushi.editor "$APP"
+
+# 5) Finder / Dock のアイコンキャッシュを更新させる。
+#    バンドル dir だけ touch しても効かないことがあるので Info.plist も進め、
+#    Launch Services へ明示的に再登録する（同一 bundle ID の別コピーがあると特に必要）。
+touch "$APP/Contents/Info.plist" "$APP"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+[ -x "$LSREGISTER" ] && "$LSREGISTER" -f -R "$PWD/$APP"
+
 echo "組み立て完了: $APP"
 echo "→ open \"$APP\" で起動（Dock にマスコットが出る）"
+echo "   アイコンが古いままなら: killall Dock"
