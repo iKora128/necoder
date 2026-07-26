@@ -22,6 +22,8 @@ agent:
   err_no_project: Can't send — no project selected
   err_no_acp: claude-agent-acp not found (check node/npx)
   err_session_lost: Session ended. Send again to reconnect
+  err_session_ended: The agent session ended (treated as interrupted)
+  err_cancel_session_lost: Interrupted — the session stopped responding
   permission_files: "%{title} (%{n} files)"
   done: Done %{elapsed}
   done_touched: Done %{elapsed} · touched %{n} files
@@ -54,6 +56,9 @@ agent:
   ime_tip: Toggle Enter behavior (send ⇄ newline). IME confirm never sends
   send_enter: Send ⏎
   send_cmd: Send ⌘⏎
+  stop: Stop esc
+  running_hint: esc to interrupt
+  running_thinking: Thinking
   more_lines: "… (+%{n} lines)"
 hunk:
   stage: Stage this hunk

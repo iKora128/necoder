@@ -144,10 +144,21 @@ pub enum TurnEnd {
 pub enum SessionCommand {
     /// prompt を送る。
     Prompt(String),
+    /// 実行中のターンを中断する（`session/cancel` 通知）。エージェントは
+    /// `StopReason::Cancelled` でターンを畳むので、UI には `TurnEnded { Interrupted }` が届く。
+    /// **ターン中に受け取れる**必要があるため、ターンループが `read_update` と同時に待つ。
+    Cancel,
     /// 権限モードを変更する（`session/set_mode`。引数は mode_id）。
     SetMode(String),
     /// 設定オプション（モデル・思考レベル等）を変更する（`session/set_config_option`）。
     SetConfig { config_id: String, value_id: String },
+}
+
+/// ターンループが待つ 2 系統（エージェントからの更新 / UI からのコマンド）。
+/// `select!` の戻り値を所有型にして、`session` と `command_rx` の借用をブロック内で閉じる。
+enum TurnEvent {
+    Update(Result<acp::SessionMessage, acp::Error>),
+    Command(Option<SessionCommand>),
 }
 
 /// ACP エージェント（claude-agent-acp）の起動設定。
@@ -608,10 +619,28 @@ pub async fn run_session_on(
                     .ok();
             }
 
+            // ターン中に `session/cancel` を送るための ID（`session` はターン中
+            // `read_update` で可変借用されるので、先に控えておく）。
+            let session_id = session.session_id().clone();
+            // ターン中に届いた非 Cancel コマンド（モデル変更等）を落とさないための待ち行列。
+            // ターンが畳まれてから順に処理する。
+            let mut deferred: std::collections::VecDeque<SessionCommand> =
+                std::collections::VecDeque::new();
+
             // UI からの指示（prompt / モード変更）を単一チャネルで捌く。
-            while let Some(session_command) = command_rx.next().await {
+            loop {
+                let session_command = match deferred.pop_front() {
+                    Some(command) => command,
+                    None => match command_rx.next().await {
+                        Some(command) => command,
+                        // UI が送信ハンドルを drop した＝このセッションは終わり。
+                        None => break,
+                    },
+                };
                 let prompt = match session_command {
                     SessionCommand::Prompt(prompt) => prompt,
+                    // ターン外の cancel は畳む対象が無いので黙って捨てる。
+                    SessionCommand::Cancel => continue,
                     SessionCommand::SetMode(mode_id) => {
                         connection
                             .send_request(v1::SetSessionModeRequest::new(
@@ -644,12 +673,47 @@ pub async fn run_session_on(
                     }
                 };
                 if session.send_prompt(prompt).is_err() {
+                    // 送信路が死んだ＝以降このセッションは使えない。**終端イベントを必ず出す**
+                    // （出さないと UI 側の `running` が落ちず「稼働中」に取り残される）。
+                    event_tx
+                        .unbounded_send(AgentEvent::Failed(
+                            "prompt を送信できませんでした（セッションが閉じています）".into(),
+                        ))
+                        .ok();
                     break;
                 }
                 loop {
-                    let update = match session.read_update().await {
-                        Ok(update) => update,
-                        Err(error) => {
+                    // エージェントの更新と UI のコマンドを**同時に**待つ。こうしないと
+                    // ターン中（`read_update` で待っている間）に cancel を受け取れない。
+                    // `read_update` はチャネル受信なので途中で future を捨てても取りこぼさない。
+                    let turn_event = {
+                        use futures::future::FutureExt as _;
+                        let update = session.read_update().fuse();
+                        let command = command_rx.next().fuse();
+                        futures::pin_mut!(update, command);
+                        futures::select! {
+                            update = update => TurnEvent::Update(update),
+                            command = command => TurnEvent::Command(command),
+                        }
+                    };
+                    let update = match turn_event {
+                        TurnEvent::Command(Some(SessionCommand::Cancel)) => {
+                            // 通知なので応答は無い。エージェントが `StopReason::Cancelled` を
+                            // 返してターンを畳む → 下の StopReason 分岐で TurnEnded が流れる。
+                            connection
+                                .send_notification(v1::CancelNotification::new(session_id.clone()))
+                                .ok();
+                            continue;
+                        }
+                        // ターン中のモデル変更等は畳んでから処理する（取りこぼさない）。
+                        TurnEvent::Command(Some(other)) => {
+                            deferred.push_back(other);
+                            continue;
+                        }
+                        // UI が drop した。ターンを畳んで外側も抜ける。
+                        TurnEvent::Command(None) => break,
+                        TurnEvent::Update(Ok(update)) => update,
+                        TurnEvent::Update(Err(error)) => {
                             event_tx.unbounded_send(AgentEvent::Failed(error.to_string())).ok();
                             break;
                         }

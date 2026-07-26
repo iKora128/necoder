@@ -1447,9 +1447,80 @@ impl AgentPanel {
                 return;
             }
         }
-        if keystroke.key == "escape" && self.transcript_selection.take().is_some() {
-            cx.notify();
+        if keystroke.key == "escape" {
+            // 選択の解除が先（transcript を読んでいる最中の Esc でターンを止めない）。
+            if self.transcript_selection.take().is_some() {
+                cx.notify();
+                return;
+            }
+            // 実行中なら Esc = 中断（Claude Code / Zed と同じ体感）。
+            if self
+                .threads
+                .get(self.active)
+                .is_some_and(|thread| thread.running)
+            {
+                self.cancel_turn(self.active, cx);
+                cx.stop_propagation();
+            }
         }
+    }
+
+    /// 実行中のターンを中断する。ACP の `session/cancel` を送り、エージェントが
+    /// `StopReason::Cancelled` を返すのを待つ（＝`TurnEnded { Interrupted }` で畳まれる）。
+    ///
+    /// **送信できなかったときはローカルで畳む**のが肝。セッションが既に死んでいると通知は
+    /// どこにも届かず、待っても終端イベントは来ない＝「稼働中」に取り残される（M14 の実バグ）。
+    pub fn cancel_turn(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        let sent = self
+            .threads
+            .get(thread_index)
+            .filter(|thread| thread.running)
+            .and_then(|thread| thread.command_tx.as_ref())
+            .is_some_and(|command_tx| {
+                command_tx
+                    .unbounded_send(acp_client::SessionCommand::Cancel)
+                    .is_ok()
+            });
+        if sent {
+            // 応答（Cancelled）を待つ。UI は稼働中のまま＝二重押しは無害。
+            return;
+        }
+        self.abandon_turn(
+            thread_index,
+            &i18n::t!("agent.err_cancel_session_lost"),
+            cx,
+        );
+    }
+
+    /// 終端イベントが期待できないターンを**ローカルで**畳む（セッション断・強制中断の後始末）。
+    /// `running` を落として「中断で終わった」ラッチを立て、送信路も捨てる（次の送信で貼り直す）。
+    fn abandon_turn(&mut self, thread_index: usize, message: &str, cx: &mut Context<Self>) {
+        let abandoned = if let Some(thread) = self.threads.get_mut(thread_index) {
+            if !thread.running {
+                return; // 既に畳まれている（終端イベントが先に来た等）
+            }
+            thread.running = false;
+            thread.pending_permission = None;
+            thread.command_tx = None; // 死んだ送信路は捨てる（次の prompt で再起動）
+            thread.done = Some(TurnEnd::Interrupted);
+            thread.digest = digest_tail(message).or(thread.digest.take());
+            thread
+                .entries
+                .push(Entry::Agent(SharedString::from(message.to_string())));
+            Some((thread.name.clone(), thread.color, thread.muted))
+        } else {
+            None
+        };
+        if let Some((thread, color, muted)) = abandoned {
+            cx.emit(PanelEvent::TurnFailed {
+                thread,
+                color,
+                message: SharedString::from(message.to_string()),
+                muted,
+            });
+        }
+        self.sync_running_registry(cx);
+        cx.notify();
     }
 
     /// ストリーミング追従: **底に居る時だけ**最下部へ張り付く（遡って読んでいる間は動かさない）。
@@ -2278,9 +2349,22 @@ impl AgentPanel {
                     .update(cx, |panel, cx| panel.on_event(thread_index, event, cx))
                     .is_err()
                 {
-                    break; // パネル破棄済み（ウィンドウを閉じた等）
+                    return; // パネル破棄済み（ウィンドウを閉じた等）＝後始末も不要
                 }
             }
+            // **安全網**: チャネルが閉じた＝セッションが終わった。終端イベント（TurnEnded/Failed）
+            // が来ないまま終わる経路（エージェントのプロセスが正常終了・stdout が閉じた 等）が
+            // あり、そのままだと `running` が落ちず永久に「稼働中」になる（M14 の実バグ）。
+            // 終端が来ていれば `abandon_turn` は running=false を見て何もしない。
+            panel
+                .update(cx, |panel, cx| {
+                    panel.abandon_turn(
+                        thread_index,
+                        &i18n::t!("agent.err_session_ended"),
+                        cx,
+                    );
+                })
+                .ok();
         })
         .detach();
 
@@ -4288,6 +4372,14 @@ impl AgentPanel {
             .get(self.active)
             .map(|thread| thread.context.clone())
             .unwrap_or_default();
+        // 稼働中ラインの素材（実行中のみ描く）。digest は P1 の live 合成をそのまま使う。
+        let running = matches!(activity, ThreadActivity::Working);
+        let active_thread = self.threads.get(self.active);
+        let running_elapsed = active_thread
+            .and_then(|thread| thread.turn_started_at)
+            .map(|started| started.elapsed().as_secs());
+        let running_tokens = active_thread.map(|thread| thread.tokens_used).unwrap_or(0);
+        let running_digest = active_thread.and_then(|thread| thread.live_digest());
 
         div()
             .id("composer-drop")
@@ -4453,7 +4545,29 @@ impl AgentPanel {
                                     ),
                             )
                             .child(div().flex_1())
-                            .child(
+                            .child(if running {
+                                // 実行中は送信ボタンを**停止**に差し替える（Esc と同じ動作）。
+                                // 中立の警告色ではなく縁取りにして、識別色の意味を汚さない（§1.3）。
+                                div()
+                                    .id("stop-button")
+                                    .px(px(12.))
+                                    .py(px(2.))
+                                    .rounded(px(6.))
+                                    .border_1()
+                                    .border_color(theme.fg2)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.fg1)
+                                    .child(SharedString::from(i18n::t!("agent.stop")))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _window, cx| {
+                                            this.cancel_turn(this.active, cx)
+                                        }),
+                                    )
+                            } else {
                                 // Zed 流の即時 hover（可逆トランジションはしない＝キビキビ・idle 0%）。
                                 div()
                                     .id("send-button")
@@ -4474,9 +4588,45 @@ impl AgentPanel {
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _, _window, cx| this.submit(cx)),
-                                    ),
-                            ),
-                    ),
+                                    )
+                            }),
+                    )
+                    // 稼働中ライン: 点字スピナー + 経過秒 + トークン + live digest + 「esc で中断」。
+                    // Claude Code のくるくるに相当するが、**気の利いた動詞は置かない** — 同じ場所に
+                    // live digest（実際に走っているツール + plan の進行中項目）を出す方が情報量が上。
+                    // 人格はマスコットが担う（出口を 2 つに割らない）。DECISIONS / UI-SPEC §11。
+                    .when(running, |parent| {
+                        parent.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .pt(px(6.))
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child(working_spinner("composer-working", 9.0, color))
+                                .child(SharedString::from(match running_elapsed {
+                                    Some(secs) => format!("{secs}s"),
+                                    None => String::new(),
+                                }))
+                                // トークンは 0 のときは出さない（ターン開始直後の「0」は情報ゼロ）。
+                                // 上部 render_meta には used/max のメーターがあるのでそちらが正。
+                                .children((running_tokens > 0).then(|| {
+                                    SharedString::from(human_tokens(running_tokens))
+                                }))
+                                .child(
+                                    // digest が無いターン（起動直後・思考のみ）は中立語で埋める。
+                                    div()
+                                        .flex_1()
+                                        .truncate()
+                                        .text_color(theme.fg1)
+                                        .child(running_digest.unwrap_or_else(|| {
+                                            SharedString::from(i18n::t!("agent.running_thinking"))
+                                        })),
+                                )
+                                .child(SharedString::from(i18n::t!("agent.running_hint"))),
+                        )
+                    }),
             )
     }
 }

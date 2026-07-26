@@ -989,3 +989,25 @@
 - **P5 の資産がそのまま効く**: `control_ipc` の 9 メソッド（spawn_agent/send/digest/task/tasks/update_task/record_task/set_depends/events）+ `fleet events [since]` のカーソル差分 + ロック検出→IPC fallback（GUI 稼働中でも不在でも動く）。**足りないのは permission の list/respond だけ**。`fleet digest` の 3 段圧縮は、携帯画面の都合とセキュリティ（**リポジトリの内容が構造上リレーを通らない**）と課金の 3 つに同時に効いていた
 - 順序: **P9 を P7/P8 より前に繰り上げ**（ユーザー判断・P9a/b は P7 に非依存）。P9c まで済んだら P7 へ戻る
 - 次: P9a の実装（`shirushi serve --control` + QR + 読み取りビュー + permission IPC）。実機（iPhone での通知受信・Face ID・モバイル回線）は人の手番で、**初回の実機テストで修正が 1 周発生する前提**
+
+## 2026-07-26 — 中断（session/cancel）の実装 + 稼働中ライン — 「ずっと稼働中で止められない」の根治
+- 症状（ユーザー報告）: Fleet で Claude Code が**ずっと稼働中のまま終わらない**、しかも**停止ボタンも Esc も効かない**
+- **原因は 2 つあり、片方がもう片方を救えなくしていた**:
+  - ① **終端イベントが出ない経路がある**: `start_session` の背景タスクは `run_session_on` が `Err` を返したときだけ `AgentEvent::Failed` を出す。`Ok(())` で終わる経路（エージェントのプロセスが正常終了 / stdout が閉じた / `send_prompt` 失敗で break / `command_rx` が閉じた）では**イベントが 1 つも出ず**、受信ループが黙って抜けて `thread.running = true` が永久に残る。`running` を落とすのは TurnEnded / Failed / fail_turn の 3 経路だけなので、ここに落ちると復帰不能
+  - ② **中断機能が存在しなかった**: `SessionCommand` は Prompt/SetMode/SetConfig の 3 つだけで `Cancel` が無く、ACP の `session/cancel` はどこからも送っていなかった。`TurnEnd::Interrupted` を立てているのは全て `debug_set_activities` 等の**開発用プローブ**。停止ボタンも Esc も「効かない」のではなく**未実装**だった
+- **設計上の山**: 元のコードは外側ループで `command_rx.next()` を待ち、ターンが始まると内側の `read_update()` にブロックされる ＝ **ターン中はコマンドを受け取れない**。cancel を送っても「ターンが終わるまで読まれない」＝止めたいときに限って届かない。内側ループを `futures::select!` で「エージェントの更新」と「UI のコマンド」の同時待ちへ変更した
+  - 安全性の根拠 2 点: `read_update()` の実体は `update_rx.next().await`（チャネル受信）なので **future を途中で捨てても取りこぼさない** / ターン中に届いた非 Cancel コマンド（モデル変更等）は `deferred` キューに積み、ターンが畳まれてから処理する（**取りこぼさない**）
+  - `session/cancel` は**通知**（応答なし）。エージェントが `StopReason::Cancelled` を返してターンを畳む → 既存の StopReason 分岐が `TurnEnded { Interrupted }` を流す＝**新しい終端経路を足さずに済んだ**
+- **実装**:
+  - `acp_client`: `SessionCommand::Cancel` + `TurnEvent` enum（select! の戻りを所有型にして `session`/`command_rx` の借用をブロック内で閉じる）。`send_prompt` 失敗時にも `Failed` を必ず出す
+  - `agent_panel::cancel_turn`: `Cancel` を送る。**送信できなかったら `abandon_turn` でローカルに畳む** — セッションが死んでいると通知はどこにも届かず、待っても終端は来ない（これが無いと同じバグが再発する）
+  - `agent_panel::abandon_turn`: `running=false` / `pending_permission=None` / `command_tx=None`（次の送信で貼り直す）/ `done=Interrupted` / digest 更新 / `TurnFailed` emit。**冪等**（既に畳まれていたら何もしない）
+  - **安全網**: 受信ループが終端イベント無しで抜けたら `abandon_turn` を呼ぶ ＝ ①の全経路（プロセス死を含む）をカバー
+  - Esc: `on_panel_key_down` で **transcript 選択の解除を先に**判定（読んでいる最中の Esc でターンを止めない）→ running なら中断
+  - 停止ボタン: 実行中は送信ボタンを「停止 esc」に差し替え。**識別色を使わず縁取り**（§1.3 の色＝識別を汚さない）
+- **稼働中ライン（ユーザー承認済みの方針）**: composer 下に 点字スピナー + 経過秒 + トークン + **live digest** + 「esc で中断」。
+  **Claude Code の気の利いた動詞（Scheming/Pontificating/…）は入れない**判断: あの単語は情報量ゼロで、同じ場所に `live_digest()`（実際に走っているツール + plan の進行中項目）を出す方が上。加えて Shirushi は人格をマスコットに割り当て済みで、出口を 2 つに割らない。あの行で最も価値のある `esc to interrupt` は、機能（中断）を先に作ってから出した
+  - トークンは 0 のとき出さない（開始直後の「0」は情報ゼロ）。上部 `render_meta` に used/max メーターがあるのでそちらが正
+- 検証: `cargo check` 警告 0 / 全 test green（agent_panel 10・workspace 21・i18n parity 含む）+ **offscreen 目視**（`SHIRUSHI_ACTIVITY_PROBE=1`）で「Stop esc」ボタンと `⡿ 1s  Bash cargo test -p shirushi · テストを直す   esc to interrupt` が出るのを確認
+- **残（実機の手番）**: 実際に走っている Claude Code を Esc / 停止ボタンで止めて `TurnEnded{Interrupted}` が届くこと・セッションを kill して自動で稼働中から抜けること
+- 学び: **「効かない」と「無い」は症状が同じ**。停止が効かないと報告されたとき、実装を疑う前に「そもそも実装されているか」を先に見るべきだった（`SessionCommand` の enum を見れば 10 秒で判る）

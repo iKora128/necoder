@@ -23,6 +23,8 @@ agent:
   err_no_project: プロジェクトが未確定のため送れません
   err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
   err_session_lost: セッションが切れました。もう一度送信してください
+  err_session_ended: エージェントのセッションが終了しました（中断扱い）
+  err_cancel_session_lost: セッションが応答しないため中断しました
   permission_files: "%{title}（%{n} ファイル）"
   done: 完了 %{elapsed}
   done_touched: 完了 %{elapsed}・触ったファイル %{n}
@@ -55,6 +57,9 @@ agent:
   ime_tip: Enter の挙動を切替（送信 ⇄ 改行）。日本語 IME の変換確定では送信しません
   send_enter: 送信 ⏎
   send_cmd: 送信 ⌘⏎
+  stop: 停止 esc
+  running_hint: esc で中断
+  running_thinking: 考えています
   more_lines: … （他 %{n} 行）
 hunk:
   stage: この hunk を stage
