@@ -17,6 +17,16 @@ impl Workspace {
 
     /// 開発用: スレッドに各状態を仕込んで開く（タブ/beacon/フッター/レールの状態表示を offscreen で検証・#）。
     #[cfg(debug_assertions)]
+    /// 開発用: 擬似 tear-off を直接駆動（枠外ドロップ相当の座標 → 新窓生成まで・M13）。
+    /// 実マウスの枠外リリースは自動化できないため、tear_off_rail_item の経路を機械検証する。
+    #[cfg(debug_assertions)]
+    pub fn debug_tear_off(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let before = cx.windows().len();
+        let index = self.project_sessions.active;
+        self.tear_off_rail_item(index, point(px(-120.), px(200.)), window, cx);
+        println!("tearoff: windows {} -> {}", before, cx.windows().len());
+    }
+
     pub fn debug_set_activities(&mut self, cx: &mut Context<Self>) {
         if !self.chrome.show_right {
             self.chrome.show_right = true;

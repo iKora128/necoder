@@ -117,6 +117,10 @@ actions!(
         ReportBug,
         // 設定画面を開く（⌘, / メニュー「設定…」・M13 メニューバー）。
         OpenSettings,
+        // 最近使った項目を開く…（ランチャー起動。Enter=レール / ⌘⏎=新窓・M13 メニューバー）。
+        OpenRecent,
+        // 開く…（ネイティブのフォルダ選択ダイアログ・M13 メニューバー）。
+        OpenDialog,
         // バージョン表記のトースト（メニュー「Shirushi について」・M13 メニューバー）。
         About,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
@@ -826,6 +830,9 @@ struct ChromeState {
     explorer_width: f32,
     resizing_explorer: bool,
     should_move_window: bool,
+    /// レール項目のドラッグ状態（index・押下位置・閾値超えフラグ）。窓の外で離すと
+    /// 擬似 tear-off = その位置に新窓（M13。本物の tear-off は gpui 未対応・DECISIONS）。
+    rail_drag: Option<(usize, Point<gpui::Pixels>, bool)>,
 }
 
 struct WorkspaceOverlays {
@@ -1150,6 +1157,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::report_bug_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::about_action))
+            .on_action(cx.listener(Self::open_recent_action))
+            .on_action(cx.listener(Self::open_dialog_action))
             // macOS 標準のアプリ/ウィンドウ操作（メニューバー・M13）。cx は App へ deref。
             .on_action(cx.listener(|_, _: &Hide, _window, cx| cx.hide()))
             .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
@@ -1190,6 +1199,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ActivateProject9, window, cx| this.switch_project(8, window, cx)))
             .on_mouse_move(cx.listener(Self::on_resize_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_resize_end))
+            // レール項目の擬似 tear-off（枠外ドロップ → 新窓・M13）。resize と独立のリスナー。
+            .on_mouse_move(cx.listener(Self::on_rail_drag_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_rail_drag_end))
             .flex()
             .flex_col()
             .size_full()

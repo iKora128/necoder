@@ -1,6 +1,65 @@
 use crate::workspace::*;
 
 impl Workspace {
+    // ── 擬似 tear-off（M13）: レール項目を窓の外へドラッグ&ドロップ → その位置に新窓 ──
+    //
+    // 本物の tear-off（ドラッグ中に窓がついてくる Chrome 式）は gpui にクロスウィンドウ
+    // ドラッグが無く fork 級のため不採用。押下したウィンドウはドラッグ中もマウスを
+    // キャプチャし続ける = 枠外で離した mouse-up はこの窓に届く、を利用する。
+
+    /// root の on_mouse_move。閾値（24px）を超えたら「意図あるドラッグ」に昇格。
+    pub(crate) fn on_rail_drag_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _cx: &mut Context<Self>) {
+        if let Some((_, start, moved)) = &mut self.chrome.rail_drag {
+            if !*moved {
+                let dx = f32::from(event.position.x - start.x).abs();
+                let dy = f32::from(event.position.y - start.y).abs();
+                if dx > 24.0 || dy > 24.0 {
+                    *moved = true;
+                }
+            }
+        }
+    }
+
+    /// root の on_mouse_up。ドラッグ済み + ビューポート外で離した → tear-off。
+    pub(crate) fn on_rail_drag_end(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((index, _start, moved)) = self.chrome.rail_drag.take() else {
+            return;
+        };
+        let viewport = window.viewport_size();
+        let outside = event.position.x < px(0.)
+            || event.position.y < px(0.)
+            || event.position.x > viewport.width
+            || event.position.y > viewport.height;
+        if moved && outside {
+            self.tear_off_rail_item(index, event.position, window, cx);
+        }
+    }
+
+    /// 該当プロジェクトをドロップ位置の新窓で開き、レールから外す（最後の 1 個なら外さない）。
+    pub(crate) fn tear_off_rail_item(
+        &mut self,
+        index: usize,
+        release: Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.project_sessions.projects.get(index) else {
+            return;
+        };
+        let path = slot.worktree.root().to_path_buf();
+        let host = slot.worktree.host().clone();
+        // スクリーン座標 = 窓の origin + 窓内座標（新窓の titlebar が掴んだ位置に来るよう少し戻す）。
+        let frame = window.bounds();
+        let origin = point(
+            frame.origin.x + release.x - px(80.),
+            frame.origin.y + release.y - px(20.),
+        );
+        self.open_source_as_window_at(ProjectSource::new(host, path), Some(origin), cx);
+        if self.project_sessions.projects.len() > 1 {
+            self.remove_project_slot(index, window, cx);
+        }
+    }
+
     pub(crate) fn apply_project_color(
         &mut self,
         project_index: usize,

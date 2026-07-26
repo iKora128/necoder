@@ -285,7 +285,11 @@ impl Workspace {
     /// 「最近のプロジェクト」に記録する（「＋」統一オープンの「最近」用）。home（ブラウズ入口）は
     /// 残さない。local と remote で別テーブル（remote の host key は display_name から復元し、
     /// `connect_ssh_and_open` が記録するキー "user@host"/alias と一致させる）。
-    fn record_recent_project(&self, host: &dyn Host, path: &Path) {
+    pub(crate) fn record_recent_project(&self, host: &dyn Host, path: &Path, cx: &App) {
+        // ローカルは OS の最近リストにも載せる（Dock 右クリック等・M13 メニューバー連携）。
+        if !host.is_remote() {
+            cx.add_recent_document(path);
+        }
         let Some(storage) = self.persistence.storage.as_ref() else {
             return;
         };
@@ -311,7 +315,7 @@ impl Workspace {
     /// ＋ ダイアログ経由: ローカルフォルダをレールへ追加（既にあれば切替のみ）。「最近」にも記録。
     pub(crate) fn add_project_slot(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let host: Arc<dyn Host> = host::LocalHost::shared();
-        self.record_recent_project(host.as_ref(), &path);
+        self.record_recent_project(host.as_ref(), &path, cx);
         self.open_folder_in_rail(host, path, None, cx);
     }
 
@@ -584,7 +588,7 @@ impl Workspace {
             },
             None => host::LocalHost::shared(),
         };
-        self.record_recent_project(host.as_ref(), &path);
+        self.record_recent_project(host.as_ref(), &path, cx);
         self.open_folder_in_rail(host, path, None, cx);
         self.hide_context_menu(cx);
         cx.notify();
@@ -592,8 +596,21 @@ impl Workspace {
 
     /// ProjectSource を新しいウィンドウで開く（ローカル folder / SSH の共通経路）。
     pub(crate) fn open_source_as_window(&mut self, source: ProjectSource, cx: &mut Context<Self>) {
+        self.open_source_as_window_at(source, None, cx);
+    }
+
+    /// `origin` = 新窓のスクリーン座標（擬似 tear-off のドロップ位置・M13）。None は中央。
+    pub(crate) fn open_source_as_window_at(
+        &mut self,
+        source: ProjectSource,
+        origin: Option<gpui::Point<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
         let theme = self.theme.clone();
-        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        let bounds = match origin {
+            Some(origin) => Bounds::new(origin, size(px(1280.0), px(800.0))),
+            None => Bounds::centered(None, size(px(1280.0), px(800.0)), cx),
+        };
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

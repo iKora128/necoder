@@ -583,6 +583,20 @@ fn main() {
                     .detach();
                 }
             }
+            // 開発用: SHIRUSHI_TEAROFF_PROBE=1 で擬似 tear-off を直接駆動（2s 後・新窓生成の機械検証）。
+            if std::env::var("SHIRUSHI_TEAROFF_PROBE").is_ok_and(|value| value == "1") {
+                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                    cx.spawn(async move |_workspace, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(2000))
+                            .await;
+                        let _ = handle.update(cx, |workspace, window, cx| {
+                            workspace.debug_tear_off(window, cx);
+                        });
+                    })
+                    .detach();
+                }
+            }
             // 開発用: SHIRUSHI_ACTIVITY_PROBE=1 で各スレッドに状態を仕込む（2s 後・状態表示の描画検証・#）。
             if std::env::var("SHIRUSHI_ACTIVITY_PROBE").is_ok_and(|value| value == "1") {
                 if let Some(handle) = window.window_handle().downcast::<Workspace>() {

@@ -138,6 +138,8 @@ cmd:
   thread_history: "AI: Thread history"
   report_bug: "Help: Report a Bug"
   open_settings: "View: Open Settings"
+  open_recent: "File: Open Recent…"
+  open_dialog: "File: Open Folder…"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -381,6 +383,8 @@ menu:
   quit: Quit Shirushi
   file: File
   open_project: Open / Switch Project…
+  open_dialog: Open…
+  open_recent: Open Recent…
   open_file: Open File…
   open_remote: Connect to SSH Host…
   new_window: New Window

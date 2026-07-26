@@ -139,6 +139,8 @@ cmd:
   thread_history: "AI: スレッド履歴"
   report_bug: "ヘルプ: バグを報告"
   open_settings: "表示: 設定を開く"
+  open_recent: "ファイル: 最近使った項目を開く…"
+  open_dialog: "ファイル: フォルダを開く…"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -382,6 +384,8 @@ menu:
   quit: Shirushi を終了
   file: ファイル
   open_project: プロジェクトを開く / 切替…
+  open_dialog: 開く…
+  open_recent: 最近使った項目を開く…
   open_file: ファイルを開く…
   open_remote: リモート SSH で開く…
   new_window: 新しいウィンドウ

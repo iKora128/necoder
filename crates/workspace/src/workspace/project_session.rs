@@ -601,6 +601,7 @@ impl Workspace {
                 explorer_width: DOCK_WIDTH,
                 resizing_explorer: false,
                 should_move_window: false,
+                rail_drag: None,
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: false,
                 herd_renaming: None,

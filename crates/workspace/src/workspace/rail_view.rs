@@ -174,7 +174,12 @@ impl Workspace {
                     .tooltip(Tooltip::text(name, theme.clone()))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| this.switch_project(index, window, cx)),
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            // クリック = 切替（従来どおり down で確定）。同時にドラッグ追跡を開始し、
+                            // 窓の外で離せば擬似 tear-off = その位置に新窓（rail.rs）。
+                            this.chrome.rail_drag = Some((index, event.position, false));
+                            this.switch_project(index, window, cx)
+                        }),
                     )
             }))
             // ＋ = 統一オープン（フォルダ/ファイル/リモート + 最近を1枚のファジー面に・open_launcher）

@@ -201,6 +201,17 @@ impl Workspace {
     /// レール `＋` の統一 launcher。フォルダ/ファイル/リモートの固定操作 + 最近（local + remote を
     /// opened_at 降順でマージ）を ⌘O と同じ広い `.palette` に 1 枚で出す。最近行は●識別色 +
     /// 実行中スレッドのドットを付ける（色による方向感覚）。⏎ = 現レールに開く。id は `picker_open_rows` の添字。
+    /// メニュー「最近使った項目を開く…」/ パレット。ランチャー（最近 + 開く導線）を開く。
+    /// Enter = レールに追加して切替 / ⌘⏎ = 新しいウィンドウ（VSCode の Open Recent 互換）。
+    pub(crate) fn open_recent_action(&mut self, _: &OpenRecent, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_launcher(window, cx);
+    }
+
+    /// メニュー「開く…」。ネイティブのフォルダ選択ダイアログ → レールに追加。
+    pub(crate) fn open_dialog_action(&mut self, _: &OpenDialog, _window: &mut Window, cx: &mut Context<Self>) {
+        self.add_project_via_dialog(cx);
+    }
+
     pub(crate) fn open_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut rows: Vec<OpenRow> =
             vec![OpenRow::OpenFolder, OpenRow::OpenFile, OpenRow::ConnectRemote];
@@ -420,6 +431,21 @@ impl Workspace {
                 if self.overlays.picker_mode == PickerMode::Themes {
                     self.preview_theme(*id, cx);
                 }
+            }
+            // ⌘⏎ = 新しいウィンドウで開く（VSCode の Open Recent 互換）。対応する行は
+            // ランチャーの「最近（ローカル）」のみ。他は通常確定と同じ扱いに落とす。
+            PickerEvent::ConfirmedSecondary(id) => {
+                let id = *id;
+                if self.overlays.picker_mode == PickerMode::OpenLauncher {
+                    if let Some(OpenRow::RecentLocal(path)) = self.picker_open_rows.get(id).cloned() {
+                        self.close_picker(window, cx);
+                        let host: Arc<dyn Host> = host::LocalHost::shared();
+                        self.record_recent_project(host.as_ref(), &path, cx);
+                        self.open_source_as_window(ProjectSource::local(path), cx);
+                        return;
+                    }
+                }
+                self.on_picker_event(_picker, &PickerEvent::Confirmed(id), window, cx);
             }
             PickerEvent::Confirmed(id) => {
                 let id = *id;

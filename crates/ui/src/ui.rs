@@ -131,6 +131,9 @@ pub enum PickerEvent {
     /// 選択がハイライトされた（矢印/入力で移動）。テーマセレクタのライブプレビュー等に使う。
     Highlighted(usize),
     Confirmed(usize),
+    /// ⌘⏎ の確定（VSCode の Open Recent 互換 = 「新しいウィンドウで開く」等の副意味論）。
+    /// 対応しないモードのホストは通常の Confirmed と同じに扱ってよい。
+    ConfirmedSecondary(usize),
     Dismissed,
 }
 
@@ -236,9 +239,17 @@ impl Picker {
         }
     }
 
+    fn confirm_secondary(&mut self, cx: &mut Context<Self>) {
+        if let Some(&item_index) = self.filtered.get(self.selected) {
+            cx.emit(PickerEvent::ConfirmedSecondary(self.items[item_index].id));
+        }
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" => cx.emit(PickerEvent::Dismissed),
+            // ⌘⏎ = 副確定（新しいウィンドウで開く等）。無修飾 ⏎ = 通常確定。
+            "enter" if event.keystroke.modifiers.platform => self.confirm_secondary(cx),
             "enter" => self.confirm(cx),
             "up" => self.move_selection(-1, cx),
             "down" => self.move_selection(1, cx),

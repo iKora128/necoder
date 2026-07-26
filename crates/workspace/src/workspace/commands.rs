@@ -56,6 +56,8 @@ impl CommandRegistry {
             CommandEntry { label_key: "cmd.thread_history", action_name: "workspace::ThreadHistory" },
             CommandEntry { label_key: "cmd.report_bug", action_name: "workspace::ReportBug" },
             CommandEntry { label_key: "cmd.open_settings", action_name: "workspace::OpenSettings" },
+            CommandEntry { label_key: "cmd.open_recent", action_name: "workspace::OpenRecent" },
+            CommandEntry { label_key: "cmd.open_dialog", action_name: "workspace::OpenDialog" },
         ]
     }
 
