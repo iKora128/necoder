@@ -81,3 +81,27 @@ agent_panel = { path = "crates/agent_panel" }
 ui = { path = "crates/ui" }
 terminal_view = { path = "crates/terminal_view" }
 workspace = { path = "crates/workspace" }
+
+# ビルド成果物の容量対策（2026-07-25）。cargo 既定の debug = 2（フルデバッグ情報）だと
+# GPUI 級の依存ツリーで target/debug が 95GB まで膨らんだ（deps 50GB + incremental 43GB の実測）。
+# 設定は zed/Cargo.toml に揃える（あちらは最初からこの構成）。
+# debug = "limited" でも行番号付きバックトレースは残る。変数の値まで追う時だけ --profile dbg を使う。
+[profile.dev]
+split-debuginfo = "unpacked"
+incremental = true
+codegen-units = 16
+debug = "limited"
+
+# ビルドスクリプト/proc-macro 側も同じ設定に揃える。揃えないと同一 crate を 2 回コンパイルする
+[profile.dev.build-override]
+split-debuginfo = "unpacked"
+codegen-units = 16
+debug = "limited"
+
+# "debug" は cargo の予約名なので dbg。本格デバッグ用: cargo run --profile dbg -p shirushi
+[profile.dbg]
+inherits = "dev"
+debug = "full"
+
+[profile.dbg.build-override]
+debug = "full"
