@@ -156,7 +156,29 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   ⑥ ACP 優先の起動形態選択: ACP 対応エージェントの既定は ACP。常駐（Herdr・CLI 形態）は明示選択時のみ・推定監視であることを破線で明示。
   ⑦ Herdr の観測値は業務上の正にしない: `TurnId`/`generation` で照合し前ターン完了の誤認を防ぐ。
   ⑧ 守るべき操作（spawn/遷移/integrate/send）は Shirushi の MCP/CLI にだけ置く（Herdr socket 直叩きは台帳と permission の迂回路＝監督のツールセットに含めない）。
-  ⑨ リモート管制（QR・スマホ）は最後（P9・構想枠）。
+  ⑨ リモート管制（QR・スマホ）は最後（P9・構想枠）。→ **2026-07-25 に更新**（構成確定 + P7/P8 より前へ繰り上げ。本ログの次項を正とする）。
   **P0 実装補足（2026-07-23）**: phase 遷移の唯一の入口は `Storage::commit_task_transition`（snapshot+event 同一 transaction）。`TaskPhase`/`SpaceKind` の単一定義は storage crate（GUI/CLI/MCP が共有・文字列は DB とプロセス境界のみ）。IntegrationSpace は phase でなく `SpaceKind`（DB は既存互換の sentinel 表現・storage 内に封じる）。
 - **Task ledger は「GUI 稼働中 = 単一 writer」で確定（2026-07-24・P5 実装中の発見）** — Turso は**プロセス排他ロック**で、GUI と headless CLI/MCP が同じ DB を同時に開けない（`Locking error` を e2e で確認）。対応: GUI が生きている間の台帳読み書きは**すべて GUI の storage ハンドル（単一ワーカースレッド）へ IPC（`~/.shirushi/gui.sock`・0600・1 行 JSON）で集約**し、headless 直開きはロック検出（`is_lock_error`）で自動フォールバック。GUI 不在時は従来どおり直接 DB。副次効果: 遷移が常に GUI の入口（`transition_task_space`）を通るためニュース/総括/管制が headless 操作でも即時に追従する。守るべき操作（spawn/send/遷移）を Shirushi の CLI/MCP にだけ置く原則（FLEET-CONTROL-PLAN §0-8）とも整合。rusqlite へ退避する場合もこの単一 writer 構造は維持する（多 writer に戻さない）。
+- **リモート管制（スマホ）の構成を確定（2026-07-25・本人。実装計画=`FLEET-CONTROL-PLAN.md` §2 P9・その転記）** —
+  外出先のスマホのブラウザから Fleet を見て裁く。**Tailscale/VPN は使わない**（ユーザーに設定させないことが出発点）。
+  **前提3点が構成を強制する**: ① Mac は NAT の内側＝公開された待ち合わせ場所（リレー）が 1 つ要る（VPN を使わない以上、回避不能）
+  ② iOS の Web Push はホーム画面に追加した PWA だけが受け取れ、Service Worker は安全なオリジンを要求する＝**固定 HTTPS ドメインが要る**（`http://192.168.x.x` は不可・URL が変わる quick tunnel 系も購読が壊れる）
+  ③ 他人に配る＝「各自ドメインを買え」は成立しないので**既定のリレーは本人が用意する**。
+  **経路を 3 つに割ると運用が要るのは 1 つだけ**: PWA 配信=ドメイン + Cloudflare Pages（静的・ユーザーデータ 0）/ 通知=Mac から Apple の push endpoint へ**直接** POST（**リレー不経由・サーバ不要**）/ データ経路=リレーのみ。
+  **リレー = Cloudflare Workers + Durable Objects**。VPS 案（月$5 定額）は Workers Paid と基本料が同額で運用だけ増えるため破棄。
+  **費用**: ドメイン年 2,000 円 + 月 $5。WebSocket 受信は 20:1 計上で、1 日 2,000 メッセージのユーザーなら込み枠に約 330 人・**1 万人で約 $9**。
+  **唯一の落とし穴 = Hibernation API**（`state.acceptWebSocket()` + `webSocketMessage()` メソッド。クロージャに状態を持たせると hibernate せず 100 ユーザーで**月 $400**）＝
+  「リレーが何も覚えない交換機であること」がそのまま課金条件になっている。
+  **認証: QR がそのまま資格情報＝アカウント不要**（サインアップ / OAuth / ユーザーレコードが存在しない。MulmoTerminal は Google サインイン必須＝ここが差別化）。
+  QR は `room_id`(128bit) + 鍵(256bit) を **URL フラグメント（`#`）** に載せる（サーバにもリレーにも送信されない）。**QR は光学的な secure channel なので ECDH は不要**。
+  **デバイストークンは JWT でなく不透明ランダム + サーバ側 allowlist**（発行者=検証者=Mac 1 台なのでステートレス検証の利点が無く、失効の即時性が勝る。
+  例外: **VAPID は仕様上 ES256 JWT が必須**＝不特定の push サービスに名乗る用途なのでそこはステートレスが正しい）。**認証の権威は Mac 側**（デバイス表は `storage`・リレーは何も判断しない）。
+  **封をするレイヤーは transport 非依存**（LAN でもリレーでも中身は読めない）。**3 段圧縮を remote でも守る**＝transcript もリポジトリの内容も構造上この経路を通らない。
+  **LAN 高速経路は作らない**（HTTPS→`http://LAN-IP` は mixed content で、回避には鍵同梱の証明書細工が要る。管制はテキストなので経路は 1 本に）。
+  **リレーは本体と同じ repo の `relay/`・AGPL**（`mock/` `lp/` と同じ同居。permissive に分ける案は破棄 — 100 行の交換機は AGPL で弾かれた側が自分で書けるので、
+  copyleft で守るものも permissive で得るものも無く、リポジトリ/ライセンス/説明だけ増える。**§13 の義務は改変版をサービスとして走らせる人が自分の利用者に改変ソースを渡すことだけで、
+  Shirushi のユーザーにも Shirushi で書いたコードにも一切及ばない**。対応は PWA にソースへのリンクを 1 つ置く）。
+  **不採用**: Tailscale/VPN・ngrok/Cloudflare Tunnel（URL 不安定 or 各自ドメイン必須で配布に向かない）・Firebase（Google 依存 + 従量）・Google/OAuth ログイン・WebRTC（TURN が結局リレー）・VPS。
+  **順序**: P7/P8 より前に繰り上げ（P9a/b は P7 に非依存）。着想は zenn「自作ターミナルで 500 コミット」（MulmoTerminal）の分析 — 同記事から取るのは
+  ①自分のプロンプトを digest の隣に残す ②Web Push ③（セルズームは実装済みで不要）で、状態一覧/色分け/サマリーによる認知天井の突破は P1-P3 が既にカバー。
 - **herdr は Apache 2.0 化 → クリーンルーム制約を解除（2026-07-24・本人確認）** — 従来の「AGPL・クリーンルーム参照（挙動のみ・ソース不可視）」は失効。`herdr/`（.gitignore 済み・zed/ と同じ参照クローン方式）でソース参照可・必要なら手法の移植も可（Apache 2.0 の帰属表記を守る）。M14 の「herdr から取るのは #3-4 のみ」の採否判断自体は変えない（取り込み済み概念: 状態一覧 / done・idle ラッチ / 編隊操作 API）。

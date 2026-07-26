@@ -960,3 +960,32 @@
 
 ## 2026-07-25 — Working 表現 = 点字スピナーで確定（ユーザー選定）
 - mock/working-anim-patterns.html の 10+1 案比較から **① 点字スピナー（herdr 型）** をユーザーが選定。実装は前日に `working_spinner`（activity_dot の Working アーム差し替え・フィルムストリップ手法・スレッド色維持）で導入済みのため変更なし。UI-SPEC §6/§11 の記述を実装に同期（満・脈動 → 点字スピナー）。カタログは今後の再検討用に残す（差し替えは working_spinner 1 箇所）
+
+## 2026-07-23 — M13 Open Recent の意味論 + 擬似 tear-off（「原則 workspace・外に投げたら新窓」）
+- やったこと（ROADMAP M13 に詳細）: File メニュー VSCode 並び（開く…/最近使った項目を開く…）・Enter=レール追加/⌘⏎=新窓（Picker `ConfirmedSecondary` 新設・非対応モードは通常確定へフォールバック）・`add_recent_document` で Dock 右クリック連携・**擬似 tear-off**（レール項目を窓の外へドラッグ&ドロップ → その位置に新窓・レールから外す）
+- 学び/罠:
+  - **本物の tear-off は作らない判断**: gpui はドラッグ中のネイティブ窓昇格/クロスウィンドウドラッグ未対応（Zed も未実装）。fork は rev 固定方針と衝突。**押下した窓がドラッグ中もマウスをキャプチャし続ける**（AppKit 標準）ので、「枠外 mouse-up を検知 → その座標に新窓」だけで体験の 9 割が出る
+  - スクリーン座標 = `window.bounds().origin + 窓内座標`。新窓は `Bounds::new(origin, size)`（`Bounds::centered` の代わり）
+  - レール項目のクリック（down で切替）は温存し、ドラッグ追跡を**重ねる**だけにした = 既存操作の regression ゼロ
+  - workspace crate のプレリュードに `Pixels` が無い（`px()` はあるのに）→ `gpui::Pixels` で修飾
+  - 検証: メニューは `SHIRUSHI_MENU_PROBE`、tear-off は `SHIRUSHI_TEAROFF_PROBE`（windows 1→2 を stdout で機械確認）。実マウスの枠外ドロップは自動化不可 = 人の手番
+- 次: 実マウスでドラッグアウト一巡・⌘⏎ 対話確認（人の手番）。RELEASE-CHECKLIST → ドッグフーディング → v0.0.1
+
+## 2026-07-25 — リモート管制（P9）の設計確定 — 「Tailscale 無しでスマホから」の構成を決める
+- 発端: zenn「自作ターミナルで 500 コミット」（MulmoTerminal / Vue + xterm.js + node-pty + tmux）の分析依頼 + ユーザーの構想「ブラウザからサクッと、QR で認証、外出先で状況確認と指示出し」
+- **記事の分析結論**: マルチセッション管理・色分け・ステータス表示・AI サマリー・トークン可視化は **P1-P3 が既に同等以上**。記事の核心「5〜6 セッションの認知天井をサマリーで突破する」＝ Tier1 digest そのもので、**別の人が 1 日 500 コミットで同じ結論に到達しているのは digest の賭けの裏付け**。取れたのは 3 点だけ:
+  - (a) **自分のプロンプトを digest の隣に残す** — 唯一の実質ギャップ。ROADMAP M14「P1 続き」として起票
+  - (b) **Web Push（スマホ/ウォッチ通知）** — Shirushi の通知は Mac の中で止まっていた → P9b へ
+  - (c) セルズームは**既に実装済み**（`fleet_maximized` + `maximize_fleet_cell` + サムネイル列・グラフノードから拡大へ飛ぶ経路まで）。残はキーボード導線だけ = 記事より上
+- **不採用**: ブラウザにフル端末を載せる方向（`never: Web 版` と衝突。あちらがそうなのは元が Web アプリだからで設計判断ではない）
+- **設計の学び/罠（P9 の全文は FLEET-CONTROL-PLAN §2 P9・決定ログは DECISIONS）**:
+  - **前提 3 点が構成を強制する**（NAT / iOS の PWA 要件 / 配布前提）。ここを飛ばすと選択肢が無限に見えるが、順に効かせると答えは 1 つに絞られる
+  - **経路を 3 つに割ると運用が要るのは 1 つだけ**（PWA 配信=静的 / 通知=Mac から Apple へ直・**リレー不経由** / データ経路=リレー）。「サーバ運用が要る」に見えていたのは 3 つを束ねて考えていたから
+  - **通知ペイロード（約 4KB）に digest が載る** → **「知る・読む」はリレー無しで完成する**（P9b で止めても価値が出る）。リレーが要るのは**戻りの経路**だけ
+  - **QR は光学的な secure channel** → 鍵をそのまま載せれば ECDH は不要・**アカウントも不要**。ここに気づくまで X25519 を前提に組んでいた
+  - **費用の全部が Hibernation API に乗る**: 正しく使えば 1 万ユーザーで月 $9、素朴に書くと 100 ユーザーで月 $400（`state.acceptWebSocket()` + `webSocketMessage()` メソッド。**クロージャに状態を持たせた瞬間に hibernate できない**）＝「リレーが何も覚えない交換機であること」がゼロ知識の要件であると同時に課金条件でもある
+  - **VPS 案を出して撤回した**: 実単価（WebSocket 受信 20:1・Paid 込み枠 100 万 req/月）を取る前に「従量は青天井」で判断していた。基本料は VPS と同額の $5 で、DO は運用対象ゼロ。**数字を取る前に構成を決めない**
+  - **リレーを permissive に分ける案も撤回**: 「100 行だから copyleft で守るものが無い」は正しいが、**同じ理由で permissive にする利益も無い**（弾かれた側は自分で書ける）。どちらでも実害が無いなら本体と揃える方が説明が減る。AGPL §13 は Shirushi のユーザーにも成果物にも及ばない
+- **P5 の資産がそのまま効く**: `control_ipc` の 9 メソッド（spawn_agent/send/digest/task/tasks/update_task/record_task/set_depends/events）+ `fleet events [since]` のカーソル差分 + ロック検出→IPC fallback（GUI 稼働中でも不在でも動く）。**足りないのは permission の list/respond だけ**。`fleet digest` の 3 段圧縮は、携帯画面の都合とセキュリティ（**リポジトリの内容が構造上リレーを通らない**）と課金の 3 つに同時に効いていた
+- 順序: **P9 を P7/P8 より前に繰り上げ**（ユーザー判断・P9a/b は P7 に非依存）。P9c まで済んだら P7 へ戻る
+- 次: P9a の実装（`shirushi serve --control` + QR + 読み取りビュー + permission IPC）。実機（iPhone での通知受信・Face ID・モバイル回線）は人の手番で、**初回の実機テストで修正が 1 周発生する前提**
