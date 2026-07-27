@@ -32,6 +32,7 @@ agent:
   history_tip: Thread history
   history_placeholder: Open a past thread…
   new_thread_tip: New thread  ⌘⇧A
+  full_screen_tip: AI full screen (hide the editor)  ⌘⇧⏎
   view_list: List view
   view_bar: Tab view
   thinking: ✳ Thinking
@@ -133,6 +134,7 @@ cmd:
   toggle_herd: "View: Fleet sidebar"
   toggle_control: "View: Control"
   toggle_fleet: "View: Fleet mode"
+  toggle_agent_full_screen: "View: AI full screen (hide the editor)"
   split_right: "View: Split right"
   new_thread: "AI: New thread"
   next_tab: "Tabs: Next"
@@ -215,6 +217,8 @@ fleet:
   cell_diff: Diff / Review
   cell_tests: Tests
   cell_terminal_hint: Shell (cwd = worktree)
+  terminal_hint: "Running in the worktree of %{name}"
+  bottom_collapse: Collapse / expand the bottom pane
   cell_editor_hint: Editor (worktree)
   closed: Closed thread
   add_hint: Tasks are isolated in worktrees · max 8 surfaces
@@ -225,6 +229,23 @@ fleet:
   add_task: ＋ Task
   add_agent_to_task: ＋ Agent to this Task
   add_history: Restore from history
+  close_cell_tip: Hide this cell (the Task and its worktree stay)
+  cleanup_tip: Clean up — close / stop / finish / delete
+  cleanup_title: How do you want to clean up this Task?
+  cleanup_close: Close cell
+  cleanup_close_sub: Hides it only. The agent keeps running
+  cleanup_stop: Stop the agent
+  cleanup_stop_sub: Interrupt the running turn (same as esc). The Task stays
+  cleanup_archive: Finish Task
+  cleanup_archive_sub: Removes it from fleet and herd. The worktree stays on disk
+  cleanup_remove_worktree: Delete worktree
+  cleanup_remove_worktree_sub: ⚠ Erases it from disk. Uncommitted changes are lost
+  cleanup_delete_branch: Delete worktree and branch
+  cleanup_delete_branch_sub: ⚠ Erases both the working tree and the branch. No way back
+  closed_still_running: Cell closed. The agent is still running (bring it back from herd)
+  stopped_agents: "Interrupted %{n} agent(s)"
+  no_running_agent: No agent is running
+  task_archived: Task finished (the worktree is still on disk)
 launcher:
   placeholder: Open or choose a recent project…
   open_folder: Open Folder…
@@ -426,6 +447,7 @@ menu:
   todo_board: Todo Board
   herd: Fleet Sidebar
   fleet: Fleet Mode
+  agent_full_screen: AI Full Screen  ⌘⇧⏎
   diagnostics: Diagnostics
   split_right: Split Right
   soft_wrap: Toggle Soft Wrap

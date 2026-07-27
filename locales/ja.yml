@@ -33,6 +33,7 @@ agent:
   history_tip: スレッド履歴
   history_placeholder: 過去のスレッドを開く…
   new_thread_tip: 新規スレッド  ⌘⇧A
+  full_screen_tip: AI を全画面（エディタを畳む）  ⌘⇧⏎
   view_list: 縦リストで表示
   view_bar: タブで表示
   thinking: ✳ 考え中
@@ -134,6 +135,7 @@ cmd:
   toggle_herd: "表示: 編隊サイドバー"
   toggle_control: "表示: 管制"
   toggle_fleet: "表示: 編隊モード"
+  toggle_agent_full_screen: "表示: AI を全画面（エディタを畳む）"
   split_right: "表示: 右に分割"
   new_thread: "AI: 新しいスレッド"
   next_tab: "タブ: 次へ"
@@ -216,6 +218,8 @@ fleet:
   cell_diff: Diff / Review
   cell_tests: Tests
   cell_terminal_hint: シェル（cwd = worktree）
+  terminal_hint: "%{name} の worktree で開いています"
+  bottom_collapse: 下段を畳む / 開く
   cell_editor_hint: エディタ（worktree）
   closed: 閉じたスレッド
   add_hint: Task は worktree に隔離・surface は最大 8
@@ -226,6 +230,23 @@ fleet:
   add_task: ＋ Task
   add_agent_to_task: ＋ Agent to this Task
   add_history: 履歴から復元
+  close_cell_tip: このセルを画面から外す（Task も worktree も残る）
+  cleanup_tip: 片付け — 閉じる / 止める / 終了 / 削除
+  cleanup_title: この Task をどう片付ける？
+  cleanup_close: セルを閉じる
+  cleanup_close_sub: 画面から外すだけ。エージェントは動き続ける
+  cleanup_stop: エージェントを止める
+  cleanup_stop_sub: 実行中のターンを中断（esc と同じ）。Task は残る
+  cleanup_archive: Task を終了
+  cleanup_archive_sub: 編隊と herd から消す。worktree はディスクに残る
+  cleanup_remove_worktree: worktree を削除
+  cleanup_remove_worktree_sub: ⚠ ディスクから消す。未コミットの変更は失われる
+  cleanup_delete_branch: worktree ごとブランチを削除
+  cleanup_delete_branch_sub: ⚠ 作業ツリーとブランチの両方を消す。復帰できない
+  closed_still_running: セルを閉じました。エージェントは動いたままです（herd から戻せます）
+  stopped_agents: "エージェント %{n} 本を中断しました"
+  no_running_agent: 動いているエージェントはありません
+  task_archived: Task を終了しました（worktree はディスクに残っています）
 launcher:
   placeholder: 開く、または最近のプロジェクトを選択…
   open_folder: フォルダを開く…
@@ -427,6 +448,7 @@ menu:
   todo_board: Todo ボード
   herd: 編隊サイドバー
   fleet: 編隊モード
+  agent_full_screen: AI を全画面  ⌘⇧⏎
   diagnostics: 診断一覧
   split_right: 右に分割
   soft_wrap: ソフトラップを切替

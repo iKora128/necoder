@@ -306,7 +306,16 @@ impl Workspace {
                         "rail-terminal",
                         "icons/square-terminal.svg",
                         i18n::t!("rail.terminal"),
-                        if self.chrome.show_bottom { accent } else { theme.fg2 },
+                        // 編隊では下段のタブが「ターミナル」なら点灯（solo は下ドックの開閉）。
+                        if if self.chrome.fleet_mode {
+                            self.chrome.fleet_bottom_view == FleetBottomView::Terminal
+                        } else {
+                            self.chrome.show_bottom
+                        } {
+                            accent
+                        } else {
+                            theme.fg2
+                        },
                     )
                         .on_mouse_down(
                             MouseButton::Left,

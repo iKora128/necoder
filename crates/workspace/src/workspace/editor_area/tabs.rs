@@ -64,6 +64,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// AI パネルだけの全画面を切り替える（⌃⌘⏎ / パレット「表示: AI を全画面」・2026-07-27）。
+    /// 編隊モードとは排他 — どちらも「窓を丸ごと使う」面なので、AI 全画面にしたら編隊は畳む。
+    pub(crate) fn toggle_agent_full_screen(
+        &mut self,
+        _: &ToggleAgentFullScreen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chrome.agent_full_screen = !self.chrome.agent_full_screen;
+        if self.chrome.agent_full_screen {
+            self.chrome.fleet_mode = false;
+            self.chrome.show_right = true; // 全画面から抜けた時に AI が消えていない
+            self.agent_active = true; // ⌘W の宛先を AI スレッドに
+            let handle = self.agent_panel.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
     /// アクティブプロジェクトを**新しいウィンドウ**で開く（⌘⇧N。ウィンドウモデル §5）。
     pub(crate) fn new_window(&mut self, _: &NewWindow, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(slot) = self.active_slot() {
@@ -84,15 +103,43 @@ impl Workspace {
             // 右縁を右へ動かすと広がる（dx 正 → 幅増）。
             self.chrome.explorer_width = (self.chrome.resize_start_width + dx).clamp(DOCK_MIN, DOCK_MAX);
             cx.notify();
+        } else if self.chrome.resizing_bottom {
+            // 上縁を上へ動かすと高くなる（dy 負 → 高さ増）。
+            let dy = f32::from(event.position.y) - self.chrome.resize_start_y;
+            self.chrome.bottom_height =
+                (self.chrome.resize_start_height - dy).clamp(BOTTOM_DOCK_MIN, BOTTOM_DOCK_MAX);
+            cx.notify();
         }
     }
 
     pub(crate) fn on_resize_end(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.chrome.resizing_agent || self.chrome.resizing_explorer {
+        if self.chrome.resizing_agent || self.chrome.resizing_explorer || self.chrome.resizing_bottom {
             self.chrome.resizing_agent = false;
             self.chrome.resizing_explorer = false;
+            self.chrome.resizing_bottom = false;
             cx.notify();
         }
+    }
+
+    /// 下段ドックの上縁ハンドル（高さドラッグ）。編隊の下段と solo のターミナルで共有する。
+    pub(crate) fn render_bottom_resize_handle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme.clone();
+        div()
+            .id("bottom-resize")
+            .h(px(RESIZE_HANDLE_WIDTH))
+            .w_full()
+            .flex_none()
+            .cursor(CursorStyle::ResizeUpDown)
+            .hover(|style| style.bg(theme.border))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.chrome.resizing_bottom = true;
+                    this.chrome.resize_start_y = f32::from(event.position.y);
+                    this.chrome.resize_start_height = this.chrome.bottom_height;
+                    cx.notify();
+                }),
+            )
     }
 
     /// Agent パネルを可変幅コンテナに入れて描く（左縁にリサイズハンドル）。
@@ -173,6 +220,20 @@ impl Workspace {
 
     /// 下ドック（ターミナル）を開閉する。開くときは生成 + フォーカス（キー入力を受ける）。
     pub(crate) fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        // 編隊では下ドックを別に持たず、常設の下段（ニュース/ターミナル）のタブを切り替える。
+        // レールの ⌘ ターミナルアイコンが両モードで同じ意味になるように（2026-07-27）。
+        if self.chrome.fleet_mode {
+            let view = if self.chrome.fleet_bottom_view == FleetBottomView::Terminal {
+                FleetBottomView::News
+            } else {
+                FleetBottomView::Terminal
+            };
+            self.set_fleet_bottom_view(view, cx);
+            if view == FleetBottomView::Terminal {
+                self.focus_active_terminal(window, cx);
+            }
+            return;
+        }
         self.chrome.show_bottom = !self.chrome.show_bottom;
         if self.chrome.show_bottom {
             self.focus_active_terminal(window, cx);

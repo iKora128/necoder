@@ -625,6 +625,35 @@ fn main() {
                     .detach();
                 }
             }
+            // 開発用: SHIRUSHI_FLEET_PROBE=<menu|menu-armed|terminal|tall|close-all> で編隊の
+            // 片付け UI / 下段ドックを駆動する（2026-07-27 の受入検証）。CONTROL_PROBE の後に流す。
+            if let Ok(probe) = std::env::var("SHIRUSHI_FLEET_PROBE") {
+                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                    cx.spawn(async move |_workspace, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(2600))
+                            .await;
+                        let _ = handle.update(cx, |workspace, _window, cx| {
+                            workspace.debug_fleet_probe(&probe, cx);
+                        });
+                    })
+                    .detach();
+                }
+            }
+            // 開発用: SHIRUSHI_AGENT_FULLSCREEN_PROBE=1 で AI 全画面（⌘⇧⏎）を駆動する。
+            if std::env::var("SHIRUSHI_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1") {
+                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                    cx.spawn(async move |_workspace, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(2600))
+                            .await;
+                        let _ = handle.update(cx, |workspace, window, cx| {
+                            workspace.debug_agent_full_screen(window, cx);
+                        });
+                    })
+                    .detach();
+                }
+            }
             // 開発用: SHIRUSHI_HISTORY_PROBE=1 でスレッド履歴 Picker を開く（2s 後・#5 の描画検証）。
             if std::env::var("SHIRUSHI_HISTORY_PROBE").is_ok_and(|value| value == "1") {
                 if let Some(handle) = window.window_handle().downcast::<Workspace>() {

@@ -103,6 +103,12 @@ pub struct Settings {
     /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
     /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
     pub default_agent: String,
+    /// 新規スレッドの既定モデル / 思考量。**composer のピルで選ぶとここへ書き戻る**（2026-07-27）。
+    /// `default_agent` と違い意図的に sticky にしてある — どのエージェントを使うかは「環境の選択」で
+    /// 滅多に変えないが、モデル/思考量は「作業のたびに選び直したくない設定」だから（ユーザー要望）。
+    /// エージェントが実選択肢を広告していればそちらが優先され、ここは候補が無いときの土台になる。
+    pub default_model: String,
+    pub default_effort: String,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
@@ -131,6 +137,8 @@ impl Default for Settings {
             fleet_goal: None,
             agent_tabs_view: "bar".to_string(),
             default_agent: "Claude Code".to_string(),
+            default_model: "claude-opus-5".to_string(),
+            default_effort: "high".to_string(),
             fleet_agent_worktree: false,
             rail: RailSettings::default(),
             onboarded: false,
@@ -150,6 +158,8 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "tier2_summaries": true,
   "agent_tabs_view": "bar",
   "default_agent": "Claude Code",
+  "default_model": "claude-opus-5",
+  "default_effort": "high",
   "onboarded": false,
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }
 }"#;

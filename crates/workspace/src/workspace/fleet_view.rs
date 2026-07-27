@@ -111,8 +111,11 @@ impl Workspace {
     ) {
         self.chrome.fleet_mode = !self.chrome.fleet_mode;
         if self.chrome.fleet_mode {
-            if self.chrome.fleet_cells.is_empty() {
-                self.seed_fleet_cells(cx);
+            self.seed_fleet_cells(cx);
+            // 編隊の左カラム既定は herd。以後はレールの エクスプローラ/git/Todo で切り替わる。
+            self.chrome.show_left = true;
+            if !self.todo_panel.read(cx).open && !self.git_panel_open(cx) {
+                self.chrome.show_herd = true;
             }
             self.ensure_fleet_clock(cx); // 相対時刻（開始/入力）を古びさせない
         }
@@ -148,9 +151,14 @@ impl Workspace {
         .detach();
     }
 
-    /// 編隊グリッドを TaskSpace（= linked worktree）単位で配置する。
+    /// 編隊グリッドを TaskSpace（= linked worktree）単位で**初回だけ**自動配置する。
     /// IntegrationSpace は保護された統合先なので Agent セルにはせず、herd / lineage にだけ残す。
+    /// 2 回目以降は何もしない — グリッドの中身はユーザーの操作（＋ / ×）が正になる。
     pub(crate) fn seed_fleet_cells(&mut self, cx: &App) {
+        if self.chrome.fleet_seeded {
+            return;
+        }
+        self.chrome.fleet_seeded = true;
         self.chrome.fleet_cells = self
             .project_sessions
             .projects
@@ -500,17 +508,346 @@ impl Workspace {
         .detach();
     }
 
-    fn close_fleet_cell(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.chrome.fleet_cells.len() {
-            self.chrome.fleet_cells.remove(index);
-            // 拡大中のセルを閉じたら拡大解除・後ろを閉じたら添字を詰める。
-            match self.chrome.fleet_maximized {
-                Some(max) if max == index => self.chrome.fleet_maximized = None,
-                Some(max) if max > index => self.chrome.fleet_maximized = Some(max - 1),
-                _ => {}
-            }
+    pub(crate) fn close_fleet_cell(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.chrome.fleet_cells.len() {
+            return;
+        }
+        // 「閉じた ＝ 止まった」と誤解させない（ユーザー報告「ずっと背景で動いたまま」）。
+        // 走ったまま画面から消すのは正しい挙動なので、消さずに**そう言う**。
+        let still_running = self
+            .space_of_cell(index)
+            .and_then(|space| self.session_index_for_space(&space))
+            .and_then(|session_index| self.project_sessions.sessions.get(session_index))
+            .is_some_and(|session| session.agent_panel.read(cx).has_running_thread());
+        self.chrome.fleet_cells.remove(index);
+        self.chrome.fleet_cell_menu = None;
+        // 拡大中のセルを閉じたら拡大解除・後ろを閉じたら添字を詰める。
+        match self.chrome.fleet_maximized {
+            Some(max) if max == index => self.chrome.fleet_maximized = None,
+            Some(max) if max > index => self.chrome.fleet_maximized = Some(max - 1),
+            _ => {}
+        }
+        if still_running {
+            let accent = self.accent();
+            self.push_toast(SharedString::from(i18n::t!("fleet.closed_still_running")), accent, cx);
+        }
+        cx.notify();
+    }
+
+    /// セル → その TaskSpace（全 surface が同じ形なので 1 か所に畳む）。
+    pub(crate) fn space_of_cell(&self, index: usize) -> Option<SpaceId> {
+        self.chrome.fleet_cells.get(index).map(|pane| match pane {
+            FleetPane::Task { space }
+            | FleetPane::Terminal { space }
+            | FleetPane::Editor { space }
+            | FleetPane::Diff { space }
+            | FleetPane::Tests { space } => space.clone(),
+        })
+    }
+
+    pub(crate) fn open_fleet_cell_menu(
+        &mut self,
+        cell: usize,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.chrome.fleet_cell_menu = Some(FleetCellMenuState { cell, position, confirm: None });
+        cx.notify();
+    }
+
+    pub(crate) fn close_fleet_cell_menu(&mut self, cx: &mut Context<Self>) {
+        if self.chrome.fleet_cell_menu.take().is_some() {
             cx.notify();
         }
+    }
+
+    pub(crate) fn arm_fleet_cell_confirm(&mut self, action: FleetCellAction, cx: &mut Context<Self>) {
+        if let Some(menu) = self.chrome.fleet_cell_menu.as_mut() {
+            menu.confirm = Some(action);
+            cx.notify();
+        }
+    }
+
+    /// 走っているエージェントを止める（編隊セルの ⋯ から）。中断は Agent パネルの esc と同じ経路。
+    fn stop_fleet_cell_agents(&mut self, cell: usize, cx: &mut Context<Self>) {
+        let session_index = self
+            .space_of_cell(cell)
+            .and_then(|space| self.session_index_for_space(&space));
+        let Some(session_index) = session_index else {
+            return;
+        };
+        let panel = self.project_sessions.sessions[session_index].agent_panel.clone();
+        let stopped = panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
+        let accent = self.accent();
+        let message = if stopped > 0 {
+            i18n::t!("fleet.stopped_agents", "n" => stopped)
+        } else {
+            i18n::t!("fleet.no_running_agent")
+        };
+        self.push_toast(SharedString::from(message), accent, cx);
+        self.chrome.fleet_cell_menu = None;
+        cx.notify();
+    }
+
+    /// Task を終了する（片付けの中段）。エージェントを止めて台帳を `archived` へ落とし、セルも外す。
+    /// **ディスクの worktree はそのまま** — 後から履歴・ブランチをたどって戻れる。
+    fn archive_fleet_cell_task(&mut self, cell: usize, cx: &mut Context<Self>) {
+        let session_index = self
+            .space_of_cell(cell)
+            .and_then(|space| self.session_index_for_space(&space));
+        let Some(session_index) = session_index else {
+            return;
+        };
+        let panel = self.project_sessions.sessions[session_index].agent_panel.clone();
+        panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
+        self.transition_task_space(session_index, TaskPhase::Archived, "task_archived", None, cx);
+        self.chrome.fleet_cell_menu = None;
+        self.close_fleet_cell(cell, cx);
+        let accent = self.accent();
+        self.push_toast(SharedString::from(i18n::t!("fleet.task_archived")), accent, cx);
+    }
+
+    /// worktree（+任意でブランチ）を消す（片付けの最下段）。レールメニューと同じ実装へ委譲するので、
+    /// 「どこから消しても同じことが起きる」ことが保証される。
+    fn delete_fleet_cell_worktree(
+        &mut self,
+        cell: usize,
+        also_branch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session_index = self
+            .space_of_cell(cell)
+            .and_then(|space| self.session_index_for_space(&space));
+        let Some(session_index) = session_index else {
+            return;
+        };
+        let panel = self.project_sessions.sessions[session_index].agent_panel.clone();
+        panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
+        self.chrome.fleet_cell_menu = None;
+        self.close_fleet_cell(cell, cx);
+        self.delete_slot_worktree_impl(session_index, also_branch, window, cx);
+    }
+
+    /// 編隊セルの片付けメニュー（⋯）。**この 1 枚が「× は何をするのか」への回答**。
+    /// 各行に副題で「何が残るか」を書き、上から下へ残るものが減る順に並べる。破壊的な下 2 段は二段確認。
+    pub(crate) fn render_fleet_cell_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.chrome.fleet_cell_menu.as_ref()?;
+        let cell = menu.cell;
+        if cell >= self.chrome.fleet_cells.len() {
+            return None;
+        }
+        let position = menu.position;
+        let confirm = menu.confirm;
+        let theme = self.theme.clone();
+        let session_index = self
+            .space_of_cell(cell)
+            .and_then(|space| self.session_index_for_space(&space));
+        let running = session_index
+            .and_then(|index| self.project_sessions.sessions.get(index))
+            .is_some_and(|session| session.agent_panel.read(cx).has_running_thread());
+        // worktree（linked）でなければ削除段は出さない — main を消させない安全側。
+        let is_worktree = session_index
+            .and_then(|index| self.project_sessions.projects.get(index))
+            .is_some_and(|slot| slot.worktree_branch.is_some());
+        let (bg2, bg3, border, fg0, fg1, fg2, err) =
+            (theme.bg2, theme.bg3, theme.border, theme.fg0, theme.fg1, theme.fg2, theme.err);
+
+        // 1 行 = アイコン + タイトル + **副題（何が残るか）**。danger は hover で赤・armed で確認文言。
+        let make_row = move |row_id: &'static str,
+                             icon: &'static str,
+                             title: SharedString,
+                             subtitle: SharedString,
+                             danger: bool,
+                             armed: bool| {
+            let base = if armed { err } else { fg1 };
+            div()
+                .id(row_id)
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .px(px(8.))
+                .py(px(6.))
+                .rounded(px(5.))
+                .text_color(base)
+                .cursor_pointer()
+                .hover(move |style| {
+                    if danger {
+                        style.bg(bg3).text_color(err)
+                    } else {
+                        style.bg(bg3).text_color(fg0)
+                    }
+                })
+                .child(
+                    div()
+                        .w(px(14.))
+                        .flex_none()
+                        .text_size(px(12.))
+                        .text_color(if armed { err } else { fg2 })
+                        .child(icon),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .child(div().text_size(px(12.)).child(title))
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(if armed { err } else { fg2 })
+                                .child(subtitle),
+                        ),
+                )
+        };
+
+        let mut menu_box = div()
+            .absolute()
+            .left(position.x - px(240.))
+            .top(position.y + px(6.))
+            .w(px(276.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .p(px(4.))
+            .bg(bg2)
+            .border_1()
+            .border_color(border)
+            .rounded(px(8.))
+            .shadow(vec![
+                gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
+            ])
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px(px(8.))
+                    .pt(px(4.))
+                    .pb(px(2.))
+                    .text_size(px(9.5))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(fg2)
+                    .child(SharedString::from(i18n::t!("fleet.cleanup_title"))),
+            )
+            .child(
+                make_row(
+                    "fleet-menu-close",
+                    "✕",
+                    SharedString::from(i18n::t!("fleet.cleanup_close")),
+                    SharedString::from(i18n::t!("fleet.cleanup_close_sub")),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| this.close_fleet_cell(cell, cx)),
+                ),
+            );
+
+        if running {
+            menu_box = menu_box.child(
+                make_row(
+                    "fleet-menu-stop",
+                    "■",
+                    SharedString::from(i18n::t!("fleet.cleanup_stop")),
+                    SharedString::from(i18n::t!("fleet.cleanup_stop_sub")),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| this.stop_fleet_cell_agents(cell, cx)),
+                ),
+            );
+        }
+
+        menu_box = menu_box.child(div().h(px(1.)).bg(border).my(px(2.))).child(
+            make_row(
+                "fleet-menu-archive",
+                "🗄",
+                SharedString::from(i18n::t!("fleet.cleanup_archive")),
+                SharedString::from(i18n::t!("fleet.cleanup_archive_sub")),
+                false,
+                false,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| this.archive_fleet_cell_task(cell, cx)),
+            ),
+        );
+
+        if is_worktree {
+            let wt_armed = confirm == Some(FleetCellAction::RemoveWorktree);
+            menu_box = menu_box.child(
+                make_row(
+                    "fleet-menu-remove-worktree",
+                    "🗂",
+                    SharedString::from(if wt_armed {
+                        i18n::t!("rail.menu_confirm_delete")
+                    } else {
+                        i18n::t!("fleet.cleanup_remove_worktree")
+                    }),
+                    SharedString::from(i18n::t!("fleet.cleanup_remove_worktree_sub")),
+                    true,
+                    wt_armed,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        if wt_armed {
+                            this.delete_fleet_cell_worktree(cell, false, window, cx);
+                        } else {
+                            this.arm_fleet_cell_confirm(FleetCellAction::RemoveWorktree, cx);
+                        }
+                    }),
+                ),
+            );
+            let br_armed = confirm == Some(FleetCellAction::DeleteBranch);
+            menu_box = menu_box.child(
+                make_row(
+                    "fleet-menu-delete-branch",
+                    "🗑",
+                    SharedString::from(if br_armed {
+                        i18n::t!("rail.menu_confirm_delete")
+                    } else {
+                        i18n::t!("fleet.cleanup_delete_branch")
+                    }),
+                    SharedString::from(i18n::t!("fleet.cleanup_delete_branch_sub")),
+                    true,
+                    br_armed,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        if br_armed {
+                            this.delete_fleet_cell_worktree(cell, true, window, cx);
+                        } else {
+                            this.arm_fleet_cell_confirm(FleetCellAction::DeleteBranch, cx);
+                        }
+                    }),
+                ),
+            );
+        }
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.close_fleet_cell_menu(cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _window, cx| this.close_fleet_cell_menu(cx)),
+                )
+                .child(menu_box)
+                .into_any_element(),
+        )
     }
 
     /// エージェント（スレッド）を閉じる。Task cell は worktree の surface なので維持する。
@@ -537,8 +874,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 左 Fleet 列のエージェントをグリッドに出す（無ければセル追加）→ 拡大表示（M14）。
+    /// 左 Fleet 列のエージェントをグリッドに出す（無ければセル追加）→ そのセルへ寄せる（M14）。
     /// ＝タップで必ず反応し、× で閉じたセルもここから復帰できる。
+    ///
+    /// **拡大はしない**（2026-07-27）。以前は必ず `fleet_maximized` を立てていたので、herd を
+    /// タップしただけで全画面になり「勝手に全画面になる」状態だった。拡大は ⤢ の明示操作にだけ属する。
+    /// ただし既に拡大表示中なら、拡大の枠のまま対象を差し替える（没入モードから勝手に抜けない）。
     pub(crate) fn reveal_agent_in_fleet(
         &mut self,
         space: usize,
@@ -567,7 +908,9 @@ impl Workspace {
                 self.chrome.fleet_cells.len() - 1
             }
         };
-        self.chrome.fleet_maximized = Some(index);
+        if self.chrome.fleet_maximized.is_some() {
+            self.chrome.fleet_maximized = Some(index);
+        }
         cx.notify();
     }
 
@@ -647,8 +990,12 @@ impl Workspace {
         lanes
     }
 
-    /// 編隊ビュー本体（mock の編隊モード）: レール | herd サイドバー | 中央（系譜グラフ + グリッド + ニュース）。
+    /// 編隊ビュー本体（mock の編隊モード）: レール | 左カラム | 中央（系譜グラフ + グリッド + 下段）。
     /// セル拡大中（`fleet_maximized`）は系譜グラフを隠し、拡大セル + サムネイル列に切替（ユーザー案）。
+    ///
+    /// 左カラムは **solo と同じ排他規則**で選ぶ（2026-07-27）。以前は herd 決め打ちだったので、
+    /// 編隊中はレールの エクスプローラ / git / Todo / ⚙ を押しても状態が変わるだけで何も出ず、
+    /// 「左のメニュー系が全然使えない」状態だった。編隊での既定ビューだけ herd に寄せてある。
     pub(crate) fn render_fleet(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let maximized = self
@@ -656,46 +1003,70 @@ impl Workspace {
             .fleet_maximized
             .filter(|index| *index < self.chrome.fleet_cells.len());
         let mut center = div().flex_1().flex().flex_col().min_w_0().bg(theme.bg1);
-        // 中央タブ帯（P3）: 管制 / グラフ。セル拡大中は没入を優先してタブ帯を出さない。
-        if maximized.is_none() {
-            center = center.child(self.render_center_tabs(cx));
-        }
-        center = match maximized {
-            Some(index) => {
-                // 拡大: 上にサムネイル列（他セルが避ける）+ 大きい拡大セル（グラフの場所に出る）。
-                let lanes = self.fleet_lanes(cx);
-                center
-                    .child(self.render_fleet_thumbnails(index, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .p(px(10.))
-                            .child(self.render_fleet_cell(
-                                index,
-                                self.chrome.fleet_cells[index].clone(),
-                                &lanes,
-                                true,
-                                cx,
-                            )),
-                    )
+        if self.chrome.show_settings {
+            // ⚙ は編隊でも中央を占有する（solo の render_center と同じ扱い）。
+            let view = self.chrome.settings_view.clone();
+            let accent = self.accent();
+            view.update(cx, |view, _| view.set_visuals(self.theme.clone(), accent));
+            center = center.child(div().flex_1().min_h_0().child(view));
+        } else {
+            // 中央タブ帯（P3）: 管制 / グラフ。セル拡大中は没入を優先してタブ帯を出さない。
+            if maximized.is_none() {
+                center = center.child(self.render_center_tabs(cx));
             }
-            None => match self.chrome.fleet_center_view {
-                FleetCenterView::Control => center.child(self.render_control(cx)),
-                FleetCenterView::Graph => center
-                    .child(self.render_lineage_graph(cx))
-                    .child(self.render_fleet_grid(cx)),
-            },
-        };
-        center = center.child(self.render_newsfeed(cx));
+            center = match maximized {
+                Some(index) => {
+                    // 拡大: 上にサムネイル列（他セルが避ける）+ 大きい拡大セル（グラフの場所に出る）。
+                    let lanes = self.fleet_lanes(cx);
+                    center
+                        .child(self.render_fleet_thumbnails(index, cx))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .p(px(10.))
+                                .child(self.render_fleet_cell(
+                                    index,
+                                    self.chrome.fleet_cells[index].clone(),
+                                    &lanes,
+                                    true,
+                                    cx,
+                                )),
+                        )
+                }
+                None => match self.chrome.fleet_center_view {
+                    FleetCenterView::Control => center.child(self.render_control(cx)),
+                    FleetCenterView::Graph => center
+                        .child(self.render_lineage_graph(cx))
+                        .child(self.render_fleet_grid(cx)),
+                },
+            };
+        }
+        center = center.child(self.render_fleet_bottom(cx));
         div()
             .flex()
             .flex_1()
             .min_h_0()
             .child(self.render_rail(cx))
-            .child(self.render_herd_sidebar(cx))
+            .when(self.chrome.show_left, |element| {
+                element.child(self.render_fleet_left_column(cx))
+            })
             .child(center)
             .into_any_element()
+    }
+
+    /// 編隊の左カラム。todo / git / エクスプローラを開いていればそれ、無ければ herd（編隊の既定）。
+    /// solo の `render_center` 側と同じ優先順なので、レールのアイコンが両モードで同じ意味を持つ。
+    fn render_fleet_left_column(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.todo_panel.read(cx).open {
+            self.render_todo_board(cx)
+        } else if self.git_panel_open(cx) {
+            self.render_git_panel(cx)
+        } else if !self.chrome.show_herd {
+            self.render_explorer(cx).into_any_element()
+        } else {
+            self.render_herd_sidebar(cx)
+        }
     }
 
     /// 拡大表示中のサムネイル列（mock focus 時の他セル）。全セルを小さく横並びに・クリックで拡大先を切替。
@@ -1983,6 +2354,31 @@ impl Workspace {
                         }),
                     ),
             )
+            // ⋯ = 片付けメニュー（閉じる / 止める / 終了 / worktree 削除を 1 枚に・2026-07-27）。
+            // × だけだと「消したのに消えない」に見えるので、全段をここに集めて言葉で説明する。
+            .child(
+                div()
+                    .id(("fleet-cell-menu", index))
+                    .flex_none()
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .text_size(px(13.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                    .child("⋯")
+                    .tooltip(Tooltip::text(i18n::t!("fleet.cleanup_tip"), theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.open_fleet_cell_menu(index, event.position, cx);
+                        }),
+                    ),
+            )
             .child(
                 div()
                     .id(("fleet-cell-close", index))
@@ -1997,6 +2393,8 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
                     .child("×")
+                    // 「× で何が起きるのか」をその場で言う（ユーザー報告「違いが分からない」）。
+                    .tooltip(Tooltip::text(i18n::t!("fleet.close_cell_tip"), theme.clone()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _window, cx| {
@@ -2196,6 +2594,157 @@ impl Workspace {
             .into_any_element()
     }
 
+    // ── 下段ドック（ニュース / ターミナル・2026-07-27） ──
+
+    /// 編隊の下段。上縁ドラッグで高さ可変・タブでニュース ⇄ ターミナルを切り替える。
+    /// ターミナルは**アクティブ Task の実シェル**（cwd = その worktree）＝セルの Terminal surface と同じ実体。
+    fn render_fleet_bottom(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        let view = self.chrome.fleet_bottom_view;
+        let tab = |id: &'static str, label: SharedString, target: FleetBottomView, theme: &Theme| {
+            let active = view == target;
+            div()
+                .id(id)
+                .px(px(9.))
+                .py(px(2.))
+                .rounded(px(5.))
+                .text_size(px(9.5))
+                .font_weight(if active { FontWeight::BOLD } else { FontWeight::NORMAL })
+                .text_color(if active { theme.fg0 } else { theme.fg2 })
+                .when(active, |element| element.bg(theme.bg2))
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.fg0))
+                .child(label)
+        };
+        let head = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(10.))
+            .pt(px(5.))
+            .pb(px(3.))
+            .child(
+                tab("fleet-bottom-news", SharedString::from(i18n::t!("fleet.news")), FleetBottomView::News, &theme)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            this.set_fleet_bottom_view(FleetBottomView::News, cx)
+                        }),
+                    ),
+            )
+            .child(
+                tab(
+                    "fleet-bottom-terminal",
+                    SharedString::from(i18n::t!("fleet.cell_terminal")),
+                    FleetBottomView::Terminal,
+                    &theme,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        this.set_fleet_bottom_view(FleetBottomView::Terminal, cx)
+                    }),
+                ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(9.))
+                    .text_color(theme.fg2.alpha(0.7))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(match view {
+                        FleetBottomView::News => SharedString::from(i18n::t!("fleet.news_hint")),
+                        FleetBottomView::Terminal => self
+                            .active_slot()
+                            .map(|slot| {
+                                SharedString::from(i18n::t!(
+                                    "fleet.terminal_hint",
+                                    "name" => slot.task_space.title.clone()
+                                ))
+                            })
+                            .unwrap_or_default(),
+                    }),
+            )
+            .child(
+                div()
+                    .id("fleet-bottom-hide")
+                    .flex_none()
+                    .px(px(6.))
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg0))
+                    .child("▾")
+                    .tooltip(Tooltip::text(i18n::t!("fleet.bottom_collapse"), theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| this.toggle_fleet_bottom_collapsed(cx)),
+                    ),
+            );
+        // 畳んである（高さが最小以下）ときは見出し帯だけ残す＝いつでも戻せる。
+        let collapsed = self.chrome.bottom_height <= BOTTOM_DOCK_MIN;
+        let body = if collapsed {
+            div().flex_none().into_any_element()
+        } else {
+            match view {
+                FleetBottomView::News => self.render_newsfeed(cx),
+                FleetBottomView::Terminal => self
+                    .project_sessions
+                    .sessions
+                    .get(self.project_sessions.active)
+                    .map(|session| {
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(session.terminal_dock.clone())
+                            .into_any_element()
+                    })
+                    .unwrap_or_else(|| div().flex_1().into_any_element()),
+            }
+        };
+        div()
+            .flex_none()
+            .h(px(if collapsed { 26. } else { self.chrome.bottom_height }))
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.bg0)
+            .child(self.render_bottom_resize_handle(cx))
+            .child(head)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// 下段のタブを切り替える。ターミナル側は選んだ瞬間に**実プロセスを確保**する（空タブを見せない）。
+    pub(crate) fn set_fleet_bottom_view(&mut self, view: FleetBottomView, cx: &mut Context<Self>) {
+        self.chrome.fleet_bottom_view = view;
+        if self.chrome.bottom_height <= BOTTOM_DOCK_MIN {
+            self.chrome.bottom_height = BOTTOM_DOCK_HEIGHT; // 畳んだ状態でタブを押したら開く
+        }
+        if view == FleetBottomView::Terminal {
+            if let Some(session) = self.project_sessions.sessions.get(self.project_sessions.active) {
+                session
+                    .terminal_dock
+                    .clone()
+                    .update(cx, |dock, cx| dock.ensure_active(cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_fleet_bottom_collapsed(&mut self, cx: &mut Context<Self>) {
+        self.chrome.bottom_height = if self.chrome.bottom_height <= BOTTOM_DOCK_MIN {
+            BOTTOM_DOCK_HEIGHT
+        } else {
+            BOTTOM_DOCK_MIN
+        };
+        cx.notify();
+    }
+
     // ── ニュースフィード（mock 下段） ──
 
     /// ニュース常設（管制 P2・mock `fleet-dashboard.html` 下段の書式）。ソースは task_events の鏡
@@ -2203,27 +2752,6 @@ impl Workspace {
     /// （スレッド/Task 色・coordinator は丸）+ **太字名** + イベント文。新しいものが上。
     fn render_newsfeed(&self, _cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
-        let head = div()
-            .flex_none()
-            .flex()
-            .items_baseline()
-            .gap(px(8.))
-            .px(px(12.))
-            .pt(px(8.))
-            .pb(px(4.))
-            .child(
-                div()
-                    .text_size(px(9.5))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(theme.fg2)
-                    .child(i18n::t!("fleet.news")),
-            )
-            .child(
-                div()
-                    .text_size(px(9.))
-                    .text_color(theme.fg2.alpha(0.7))
-                    .child(i18n::t!("fleet.news_hint")),
-            );
         let mut list = div()
             .id("fleet-news")
             .flex_1()
@@ -2298,16 +2826,7 @@ impl Workspace {
                     ),
             );
         }
-        div()
-            .flex_none()
-            .h(px(118.))
-            .flex()
-            .flex_col()
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(theme.bg0)
-            .child(head)
-            .child(list)
-            .into_any_element()
+        // 高さは下段ドック（`render_fleet_bottom`）が持つ。ここは中身として器を満たすだけ。
+        list.into_any_element()
     }
 }

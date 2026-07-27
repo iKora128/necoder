@@ -107,6 +107,9 @@ actions!(
         ToggleHerdSidebar,
         // 編隊モード（全画面 = herd + 系譜グラフ + グリッド + ニュース・M14）。
         ToggleFleet,
+        // solo で AI パネルだけを全画面に（2026-07-27）。エディタもエクスプローラも畳んで
+        // チャット 1 枚にする＝「ファイルを開かずに全部 AI に任せる」使い方のための面。
+        ToggleAgentFullScreen,
         // 管制タブ（編隊中央のダッシュボード・FLEET-CONTROL-PLAN P3）。編隊モードごと開く。
         ToggleControl,
         // 管制: 要対応キューの先頭へ没入（⏎・P3）。
@@ -203,6 +206,11 @@ const AGENT_DOCK_WIDTH: f32 = 440.0; // Agent パネル既定幅（ドラッグ�
 const AGENT_DOCK_MIN: f32 = 320.0;
 const AGENT_DOCK_MAX: f32 = 900.0;
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
+/// 下段ドック（編隊のニュース/ターミナル・solo のターミナル）の既定と可動域。
+/// 既定 = ニュース 5〜6 行分。上縁ドラッグで画面のほぼ全部まで伸ばせる（ターミナル用途）。
+const BOTTOM_DOCK_HEIGHT: f32 = 132.0;
+const BOTTOM_DOCK_MIN: f32 = 60.0;
+const BOTTOM_DOCK_MAX: f32 = 900.0;
 const TITLEBAR_HEIGHT: f32 = 38.0;
 const TABSTRIP_HEIGHT: f32 = 34.0;
 const BREADCRUMB_HEIGHT: f32 = 26.0;
@@ -271,6 +279,26 @@ pub(crate) enum RailMenuAction {
     /// worktree を削除（git worktree remove）。スロットも外す。
     RemoveWorktree,
     /// worktree ごとブランチを削除（worktree remove → git branch -D）。スロットも外す。
+    DeleteBranch,
+}
+
+/// 編隊セルの ⋯ メニュー（2026-07-27）。「× を押しても消えない」「消すのと画面から外すの違いが
+/// 分からない」への回答 — **同じ場所に全段を並べ、各行に「何が残るか」を書く**。
+struct FleetCellMenuState {
+    /// 対象セルの `fleet_cells` 添字。
+    cell: usize,
+    position: Point<gpui::Pixels>,
+    /// 破壊的操作の二段確認（レールメニューと同じ所作）。
+    confirm: Option<FleetCellAction>,
+}
+
+/// 編隊セルの片付けメニューのうち**二段確認を要する**もの（＝取り返しがつかない下 2 段）。
+/// 上段（閉じる / 止める / 終了）は元に戻せるので確認を挟まない。
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FleetCellAction {
+    /// worktree をディスクから削除（未コミットの変更は失われる）。ブランチは残す。
+    RemoveWorktree,
+    /// worktree + ブランチを削除。
     DeleteBranch,
 }
 
@@ -790,6 +818,15 @@ pub(crate) enum FleetCenterView {
     Control,
 }
 
+/// 編隊下段のタブ（2026-07-27）。ニュース＝task_events の鏡 / ターミナル＝アクティブ Task の実シェル。
+/// 「ニュースは良いが、そこでターミナルも開きたい」というユーザー要望に対する最小の形 —
+/// 面を増やさず、同じ 1 枚の高さを 2 つの用途で共有する（VSCode の下ドックと同じ考え方）。
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FleetBottomView {
+    News,
+    Terminal,
+}
+
 struct ChromeState {
     show_left: bool,
     show_right: bool,
@@ -799,8 +836,12 @@ struct ChromeState {
     show_herd: bool,
     /// 編隊モード（全画面 = herd + 系譜グラフ + グリッド + ニュース・M14）。通常ビューを置き換える。
     fleet_mode: bool,
-    /// 編隊グリッドのセル（mock の `.acell`・＋/× で増減・上限 8・M14 #3）。空 = 初回に lanes で自動配置。
+    /// 編隊グリッドのセル（mock の `.acell`・＋/× で増減・上限 8・M14 #3）。
     fleet_cells: Vec<FleetPane>,
+    /// lanes からの自動配置を**もう済ませたか**（2026-07-27）。旧実装は「空なら seed」だったので、
+    /// 最後の 1 枚を × で閉じた次のフレームに全セルが復活していた（ユーザー報告「罰おしても消えない」）。
+    /// 空はユーザーが選んだ状態でもありうる ＝ 空かどうかで判断してはいけない。
+    fleet_seeded: bool,
     /// 編隊中央のタブ（管制 / グラフ・P3）。
     fleet_center_view: FleetCenterView,
     /// 管制タブのフォーカス（⏎ = キュー先頭へ・keymap context "FleetControl" の足場）。
@@ -817,6 +858,18 @@ struct ChromeState {
     /// 拡大表示中のセル（mock の focus・M14）。Some のとき系譜グラフを隠し、そのセルを大きく・
     /// 他セルはサムネイル列に避ける。index は `fleet_cells` の添字（範囲外は None 扱い）。
     fleet_maximized: Option<usize>,
+    /// 編隊セルの ⋯ メニュー（片付けの 4 段を 1 枚に並べる・2026-07-27）。
+    fleet_cell_menu: Option<FleetCellMenuState>,
+    /// 編隊下段のタブ（ニュース / ターミナル・2026-07-27）。
+    fleet_bottom_view: FleetBottomView,
+    /// solo で AI パネルだけを全画面にしているか（2026-07-27）。レールは残す（プロジェクト切替と
+    /// 復帰の導線を失わないため）。エディタ列・エクスプローラ・下ドックは畳む。
+    agent_full_screen: bool,
+    /// 下段の高さ（px）。上縁ドラッグで変わる。ニュース/ターミナルで共有する（同じ 1 枚だから）。
+    bottom_height: f32,
+    resizing_bottom: bool,
+    resize_start_y: f32,
+    resize_start_height: f32,
     /// 相対時刻（開始/最終入力の「N分前」）を編隊・herd 表示中だけ更新する 30 秒時計が稼働中か
     /// （多重起動防止。両方閉じたら次 tick で自停止＝idle 予算を守る・M14）。
     fleet_clock: bool,
@@ -1151,6 +1204,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_todo_board))
             .on_action(cx.listener(Self::toggle_herd_sidebar))
             .on_action(cx.listener(Self::toggle_fleet_mode))
+            .on_action(cx.listener(Self::toggle_agent_full_screen))
             .on_action(cx.listener(Self::toggle_control_center))
             .on_action(cx.listener(Self::control_next))
             .on_action(cx.listener(Self::open_command_palette))
@@ -1216,7 +1270,7 @@ impl Render for Workspace {
             .child(self.render_titlebar(cx))
             .child(if self.chrome.fleet_mode {
                 // 編隊モード（mock の「編隊」ビュー・M14）: 通常の center/right dock を丸ごと置換。
-                if self.chrome.fleet_cells.is_empty() {
+                if !self.chrome.fleet_seeded {
                     self.seed_fleet_cells(cx); // 初回（起動プローブ含む）は lanes で自動配置
                     // 開発用: SHIRUSHI_FLEET_ADD=n で ＋Agent を n 回（新スレッド起動が複製しない検証）。
                     if let Ok(n) = std::env::var("SHIRUSHI_FLEET_ADD").unwrap_or_default().parse::<usize>() {
@@ -1226,6 +1280,16 @@ impl Render for Workspace {
                     }
                 }
                 self.render_fleet(cx)
+            } else if self.chrome.agent_full_screen {
+                // AI 全画面（2026-07-27）: レール + AI パネルだけ。ファイルを一切開かずに
+                // チャットだけで進める使い方のための面。レールは残す＝戻れなくならない。
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.render_rail(cx))
+                    .child(div().flex_1().min_w_0().h_full().child(self.agent_panel.clone()))
+                    .into_any_element()
             } else {
                 div()
                     .flex()
@@ -1264,6 +1328,7 @@ impl Render for Workspace {
             .children(self.render_toasts(cx))
             .children(self.render_color_picker(cx))
             .children(self.render_rail_menu(cx))
+            .children(self.render_fleet_cell_menu(cx))
             .children(self.render_branch_menu(cx))
             .children(self.render_explorer_context_menu(cx))
             .children(self.render_confetti(cx)) // 最前面（祝いの紙吹雪）

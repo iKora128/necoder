@@ -216,6 +216,9 @@ pub enum PanelEvent {
     },
     /// スレッド履歴を開く（ヘッダの履歴ボタン・#5。window が要るので workspace が pending で消化）。
     OpenHistoryRequest,
+    /// AI パネルの全画面表示を切り替えたい（ヘッダの ⤢・2026-07-27）。
+    /// パネル自身はレイアウトの持ち主ではないので、判断は workspace に委ねる（依存方向を守る）。
+    ToggleFullScreenRequest,
 }
 
 /// エージェントスレッドの状態（herdr の 5 状態を Shirushi 流にマップ・#）。**色相は状態に使わない**
@@ -741,11 +744,10 @@ impl AgentPanel {
             })
             .detach();
         }
-        // 既定エージェント（設定 or 前回選択）を種スレッドにも適用して「そのまま開く」を実現。
-        let default_agent = default_agent_name(cx);
+        // 既定エージェント + 前回のモデル/思考量を種スレッドにも適用して「そのまま開く」を実現。
         let mut threads = seed_threads();
         for thread in &mut threads {
-            thread.agent = default_agent.clone();
+            apply_thread_defaults(thread, cx);
         }
         // 開発用: SHIRUSHI_TABS_PROBE=<n> でタブを n 枚まで水増しし、横スクロール（溢れ挙動）を検証する。
         if let Ok(count) = std::env::var("SHIRUSHI_TABS_PROBE") {
@@ -753,7 +755,7 @@ impl AgentPanel {
                 while threads.len() < count {
                     let index = threads.len();
                     let mut thread = Thread::empty(format!("スレッド{}", index + 1), index);
-                    thread.agent = default_agent.clone();
+                    apply_thread_defaults(&mut thread, cx);
                     threads.push(thread);
                 }
             }
@@ -808,7 +810,7 @@ impl AgentPanel {
         let seed = TASK_THREAD_COLOR_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut panel = Self::new(theme, cx);
         let mut thread = Thread::empty("Task", seed);
-        thread.agent = default_agent_name(cx);
+        apply_thread_defaults(&mut thread, cx);
         panel.threads = vec![thread];
         panel.active = 0;
         panel
@@ -1492,6 +1494,27 @@ impl AgentPanel {
         );
     }
 
+    /// このパネルで走っている全スレッドを中断する（編隊セルの「エージェントを止める」・2026-07-27）。
+    /// 止めた本数を返す（0 = 走っていなかった）。
+    pub fn cancel_all_turns(&mut self, cx: &mut Context<Self>) -> usize {
+        let running: Vec<usize> = self
+            .threads
+            .iter()
+            .enumerate()
+            .filter(|(_, thread)| thread.running)
+            .map(|(index, _)| index)
+            .collect();
+        for index in &running {
+            self.cancel_turn(*index, cx);
+        }
+        running.len()
+    }
+
+    /// このパネルに実行中のスレッドがあるか（編隊セルの片付けメニューが「止める」を出すかの判定）。
+    pub fn has_running_thread(&self) -> bool {
+        self.threads.iter().any(|thread| thread.running)
+    }
+
     /// 終端イベントが期待できないターンを**ローカルで**畳む（セッション断・強制中断の後始末）。
     /// `running` を落として「中断で終わった」ラッチを立て、送信路も捨てる（次の送信で貼り直す）。
     fn abandon_turn(&mut self, thread_index: usize, message: &str, cx: &mut Context<Self>) {
@@ -1621,7 +1644,7 @@ impl AgentPanel {
             return Some(index);
         }
         let storage = self.storage.clone()?;
-        let mut thread = thread_from_storage(&storage, id, name, color_index);
+        let mut thread = thread_from_storage(&storage, id, name, color_index, cx);
         thread.created_at_ms = created_at_ms;
         thread.last_input_at_ms = last_input_at_ms;
         self.threads.push(thread);
@@ -1684,7 +1707,7 @@ impl AgentPanel {
     fn add_thread(&mut self, cx: &mut Context<Self>) {
         let index = self.threads.len();
         let mut thread = Thread::empty(format!("スレッド{}", index + 1), index);
-        thread.agent = default_agent_name(cx); // 新規は既定エージェントで開く
+        apply_thread_defaults(&mut thread, cx); // 既定エージェント + 前回のモデル/思考量で開く
         self.threads.push(thread);
         self.switch_thread(index, cx);
         cx.notify();
@@ -2004,11 +2027,28 @@ impl AgentPanel {
             .unwrap_or_default()
     }
 
-    /// 選択ピルの値を**このスレッドだけ**に反映（Model/Effort は `session/set_config_option`、
-    /// Mode は `session/set_mode` を実際に送る）。**グローバル既定（`default_agent` 等）は触らない**
-    /// — 既定は Settings 画面でだけ変える。哲学「自分で決めた既定は意図しない限り変わらない」
-    /// （DECISIONS §・ドリフト禁止）。
+    /// 選択ピルの値を**このスレッドに**反映（Model/Effort は `session/set_config_option`、
+    /// Mode は `session/set_mode` を実際に送る）。
+    ///
+    /// Agent だけは**グローバル既定（`default_agent`）を触らない** — どのエージェントを使うかは
+    /// 環境の選択で、1 スレッドの都合で全体が動くと事故になる（ドリフト禁止・DECISIONS §8）。
+    /// 一方 **Model / Effort は sticky**（2026-07-27 ユーザー要望）: 作業のたびに選び直す種類の
+    /// 設定なので、選んだ値を `default_model` / `default_effort` へ書き戻し、次の新規スレッドが
+    /// それで開く。既定を「動かさない」ことと「覚える」ことの線をここで引いている。
     fn select_option(&mut self, selector: Selector, value: SharedString, cx: &mut Context<Self>) {
+        match selector {
+            Selector::Model => settings::set_user_value(
+                cx,
+                "default_model",
+                serde_json::Value::String(value.to_string()),
+            ),
+            Selector::Effort => settings::set_user_value(
+                cx,
+                "default_effort",
+                serde_json::Value::String(value.to_string()),
+            ),
+            Selector::Agent | Selector::Mode => {}
+        }
         if let Some(thread) = self.threads.get_mut(self.active) {
             match selector {
                 Selector::Agent => {
@@ -3196,6 +3236,36 @@ impl AgentPanel {
                     ),
             )
             .child(self.render_tabs_view_switcher(cx))
+            .child(self.render_full_screen_toggle(cx))
+    }
+
+    /// ⤢ = AI パネルの全画面（⌘⇧⏎ と同じ）。「ファイルを見ずに vibe coding」する人のための入口を
+    /// キーバインドだけに隠さない。実際の切替は workspace（レイアウトの持ち主）が行う。
+    fn render_full_screen_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme.clone();
+        div()
+            .id("agent-fullscreen")
+            .group("agent-fullscreen")
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_none()
+            .w(px(28.))
+            .h_full()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg1))
+            .child(
+                svg()
+                    .path("icons/maximize.svg")
+                    .size(px(14.))
+                    .text_color(theme.fg2)
+                    .group_hover("agent-fullscreen", |style| style.text_color(theme.fg0)),
+            )
+            .tooltip(Tooltip::text(i18n::t!("agent.full_screen_tip"), theme.clone()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _, _window, cx| cx.emit(PanelEvent::ToggleFullScreenRequest)),
+            )
     }
 
     /// スレッド表示モードを切り替える（Bar ⇄ List）。選択は **user settings.json へ保存**して
@@ -5249,6 +5319,20 @@ fn default_agent_name(cx: &App) -> SharedString {
     }
 }
 
+/// 新規スレッドへ「前回選んだ状態」を載せる（2026-07-27 ユーザー要望「前に設定した状態を保持して」）。
+/// エージェント＝グローバル既定（Settings 画面でだけ変わる）・モデル/思考量＝**ピルで選んだ最後の値**
+/// （`select_option` が settings へ書き戻す）。毎回 fable-5/high に戻る挙動をここで断つ。
+fn apply_thread_defaults(thread: &mut Thread, cx: &App) {
+    let settings = settings::get(cx);
+    thread.agent = default_agent_name(cx);
+    if !settings.default_model.is_empty() {
+        thread.model = SharedString::from(settings.default_model);
+    }
+    if !settings.default_effort.is_empty() {
+        thread.effort = SharedString::from(settings.default_effort);
+    }
+}
+
 /// storage の1 turn 行 (role, content) を [`Entry`] へ（復元・#5。set_storage と同じ対応）。
 fn entry_from_turn((role, content): (String, String)) -> Entry {
     match role.as_str() {
@@ -5276,8 +5360,11 @@ fn thread_from_storage(
     id: &str,
     name: &str,
     color_index: usize,
+    cx: &App,
 ) -> Thread {
     let mut thread = Thread::empty(name.to_string(), color_index);
+    // 復元スレッドも「前回選んだモデル/思考量」で開く（毎回 fable-5/high に戻らない）。
+    apply_thread_defaults(&mut thread, cx);
     thread.id = id.to_string();
     let turns = storage.load_recent_turns(id, 200).unwrap_or_default();
     thread.entries = turns.into_iter().map(entry_from_turn).collect();

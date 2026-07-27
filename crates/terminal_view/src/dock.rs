@@ -270,9 +270,11 @@ impl Render for TerminalDock {
             Some(terminal) => div().flex_1().min_h_0().overflow_hidden().child(terminal.clone()),
             None => div().flex_1(),
         };
+        // 高さは**置いた側**（workspace の下段ドック / 編隊セル）が決める。ここで固定高を持つと
+        // 高さドラッグも、セルいっぱいに広がることもできない（2026-07-27 に固定 240px を撤去）。
         div()
-            .h(px(240.))
-            .flex_none()
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
             .bg(theme.bg1)

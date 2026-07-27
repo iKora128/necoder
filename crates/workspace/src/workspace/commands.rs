@@ -45,6 +45,10 @@ impl CommandRegistry {
             CommandEntry { label_key: "cmd.toggle_todo_board", action_name: "workspace::ToggleTodoBoard" },
             CommandEntry { label_key: "cmd.toggle_herd", action_name: "workspace::ToggleHerdSidebar" },
             CommandEntry { label_key: "cmd.toggle_fleet", action_name: "workspace::ToggleFleet" },
+            CommandEntry {
+                label_key: "cmd.toggle_agent_full_screen",
+                action_name: "workspace::ToggleAgentFullScreen",
+            },
             CommandEntry { label_key: "cmd.toggle_control", action_name: "workspace::ToggleControl" },
             CommandEntry { label_key: "cmd.split_right", action_name: "workspace::SplitRight" },
             CommandEntry { label_key: "cmd.new_thread", action_name: "workspace::NewThread" },

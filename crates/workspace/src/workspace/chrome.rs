@@ -945,8 +945,16 @@ impl Workspace {
             .when(self.chrome.show_bottom, |element| element.child(self.render_bottom_dock(cx)))
     }
 
-    pub(crate) fn render_bottom_dock(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.terminal_dock.clone()
+    /// solo の下ドック（ターミナル）。編隊の下段と同じ `bottom_height` を上縁ドラッグで共有する
+    /// （2026-07-27。以前は TerminalDock 側の固定 240px で、伸ばせなかった）。
+    pub(crate) fn render_bottom_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_none()
+            .h(px(self.chrome.bottom_height))
+            .flex()
+            .flex_col()
+            .child(self.render_bottom_resize_handle(cx))
+            .child(self.terminal_dock.clone())
     }
 
     /// フッター中央の**常設ロールアップ**（herdr の状態集約・#）。ウィンドウのレールに載る全プロジェクトの

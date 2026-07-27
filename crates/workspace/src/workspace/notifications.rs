@@ -17,6 +17,16 @@ impl Workspace {
                 self.project_sessions.sessions[session_index].pending_open_history = true;
                 cx.notify();
             }
+            agent_panel::PanelEvent::ToggleFullScreenRequest => {
+                // レイアウトの持ち主は workspace。編隊とは排他（どちらも窓を丸ごと使う面）。
+                self.chrome.agent_full_screen = !self.chrome.agent_full_screen;
+                if self.chrome.agent_full_screen {
+                    self.chrome.fleet_mode = false;
+                    self.chrome.show_right = true;
+                    self.agent_active = true;
+                }
+                cx.notify();
+            }
             agent_panel::PanelEvent::TurnEnded { thread, color, summary, digest, muted } => {
                 self.project_sessions.sessions[session_index].waiting_thread = None;
                 let is_integration_slot = self

@@ -82,6 +82,7 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action(t!("menu.todo_board"), workspace::ToggleTodoBoard),
             MenuItem::action(t!("menu.herd"), workspace::ToggleHerdSidebar),
             MenuItem::action(t!("menu.fleet"), workspace::ToggleFleet),
+            MenuItem::action(t!("menu.agent_full_screen"), workspace::ToggleAgentFullScreen),
             MenuItem::action(t!("menu.diagnostics"), workspace::DiagnosticsPanel),
             MenuItem::separator(),
             MenuItem::action(t!("menu.split_right"), workspace::SplitRight),

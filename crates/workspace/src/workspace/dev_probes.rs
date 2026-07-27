@@ -145,6 +145,41 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: 編隊の片付け UI を offscreen で検証する（2026-07-27）。
+    /// `menu` = セル 0 の ⋯ メニューを開く / `menu-armed` = さらに worktree 削除を確認待ちにする /
+    /// `terminal` = 下段をターミナルタブへ / `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）。
+    /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → confirm → 実行）まで機械検証できる。
+    #[cfg(debug_assertions)]
+    pub fn debug_fleet_probe(&mut self, command: &str, cx: &mut Context<Self>) {
+        match command {
+            "menu" | "menu-armed" => {
+                self.open_fleet_cell_menu(0, point(px(760.), px(210.)), cx);
+                if command == "menu-armed" {
+                    self.arm_fleet_cell_confirm(FleetCellAction::RemoveWorktree, cx);
+                }
+            }
+            "terminal" => self.set_fleet_bottom_view(FleetBottomView::Terminal, cx),
+            "tall" => {
+                self.chrome.bottom_height = 320.0;
+                cx.notify();
+            }
+            // × を押した後にセルが復活しないこと（再シードの根治）を機械で確かめる。
+            "close-all" => {
+                while !self.chrome.fleet_cells.is_empty() {
+                    self.close_fleet_cell(0, cx);
+                }
+                println!("fleet: cells after close-all = {}", self.chrome.fleet_cells.len());
+            }
+            other => eprintln!("FLEET_PROBE: 未知のコマンド {other}"),
+        }
+    }
+
+    /// 開発用: AI 全画面（⌘⇧⏎）を駆動する。
+    #[cfg(debug_assertions)]
+    pub fn debug_agent_full_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_agent_full_screen(&ToggleAgentFullScreen, window, cx);
+    }
+
     /// 開発用: SSH 入力バーを開く（M13 の描画検証）。
     #[cfg(debug_assertions)]
     pub fn debug_open_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {

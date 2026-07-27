@@ -97,9 +97,7 @@ impl Workspace {
             self.chrome.fleet_center_view = FleetCenterView::Graph;
         } else {
             self.chrome.fleet_mode = true;
-            if self.chrome.fleet_cells.is_empty() {
-                self.seed_fleet_cells(cx);
-            }
+            self.seed_fleet_cells(cx);
             self.ensure_fleet_clock(cx);
             self.chrome.fleet_center_view = FleetCenterView::Control;
             window.focus(&self.chrome.control_focus, cx); // ⏎（FleetControl context）を効かせる

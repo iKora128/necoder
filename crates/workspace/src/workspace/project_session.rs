@@ -566,10 +566,21 @@ impl Workspace {
                 show_left: true,
                 show_right: true,
                 show_bottom: false,
-                show_herd: std::env::var_os("SHIRUSHI_HERD").is_some(),
+                // 編隊で起動したら左カラムの既定は herd（編隊の主役は Task 一覧）。
+                show_herd: std::env::var_os("SHIRUSHI_HERD").is_some()
+                    || std::env::var_os("SHIRUSHI_FLEET").is_some()
+                    || std::env::var_os("SHIRUSHI_CONTROL").is_some(),
                 fleet_mode: std::env::var_os("SHIRUSHI_FLEET").is_some()
                     || std::env::var_os("SHIRUSHI_CONTROL").is_some(),
                 fleet_cells: Vec::new(),
+                fleet_seeded: false,
+                fleet_cell_menu: None,
+                fleet_bottom_view: FleetBottomView::News,
+                agent_full_screen: std::env::var_os("SHIRUSHI_AGENT_FULLSCREEN").is_some(),
+                bottom_height: BOTTOM_DOCK_HEIGHT,
+                resizing_bottom: false,
+                resize_start_y: 0.0,
+                resize_start_height: 0.0,
                 // 管制タブ（P3）。既定は当面 Graph（計画 §P3・ドッグフーディング後に再判断）。
                 fleet_center_view: if std::env::var_os("SHIRUSHI_CONTROL").is_some() {
                     FleetCenterView::Control
@@ -947,7 +958,24 @@ impl Workspace {
                     let changes = project::git_changes_on(host.as_ref(), &root);
                     let history = project::git_log_graph_on(host.as_ref(), &root, 30);
                     let slug = project::github_slug_on(host.as_ref(), &root);
-                    (status, branch, changes, history, slug)
+                    // linked worktree か（＝削除できる作業ツリーか）を **git に聞く**（2026-07-27）。
+                    // 以前は「このセッションで worktree として開いたか」の記憶だけが根拠だったので、
+                    // 再起動すると worktree なのに削除メニューが消え、消す手段が無くなっていた。
+                    // 一覧の先頭 = メイン作業ツリー。それ以外に自分が居れば linked。
+                    let linked = {
+                        let worktrees = project::git_worktrees_on(host.as_ref(), &root);
+                        let canonical = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+                        worktrees
+                            .iter()
+                            .skip(1)
+                            .find(|worktree| {
+                                let path = std::fs::canonicalize(&worktree.path)
+                                    .unwrap_or_else(|_| worktree.path.clone());
+                                path == canonical
+                            })
+                            .map(|worktree| worktree.branch.clone())
+                    };
+                    (status, branch, changes, history, slug, linked)
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
@@ -957,7 +985,7 @@ impl Workspace {
                 if session.repository.refresh_generation != generation {
                     return; // 古い結果（その後に別の refresh が走った）
                 }
-                let (status, branch, changes, history, slug) = snapshot;
+                let (status, branch, changes, history, slug, linked) = snapshot;
                 session.repository.status = status.into_iter().collect();
                 let git_panel = session.git_panel.clone();
                 git_panel.update(cx, |panel, cx| {
@@ -967,7 +995,10 @@ impl Workspace {
                     );
                 });
                 if let Some(slot) = workspace.project_sessions.projects.get_mut(session_index) {
-                    slot.branch = branch;
+                    slot.branch = branch.clone();
+                    // git が「linked worktree だ」と言うなら常にそれが正（起動経路に依存しない）。
+                    // メイン作業ツリーだった場合は None に戻す＝main を消せる導線を作らない。
+                    slot.worktree_branch = linked.map(|linked| linked.or(branch).unwrap_or_default());
                 }
                 cx.notify();
             });

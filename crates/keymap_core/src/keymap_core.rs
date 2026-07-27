@@ -230,6 +230,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-}": "workspace::SelectNextTab",
       "cmd-{": "workspace::SelectPrevTab",
       "cmd-shift-a": "workspace::NewThread",
+      "cmd-shift-enter": "workspace::ToggleAgentFullScreen",
       "cmd-shift-h": "workspace::ThreadHistory",
       "cmd-alt-right": "workspace::SelectNextThread",
       "cmd-alt-left": "workspace::SelectPrevThread",
