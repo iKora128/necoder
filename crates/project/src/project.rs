@@ -546,6 +546,17 @@ pub fn preview_merge_on(host: &dyn Host, integration_dir: &Path, branch: &str) -
     })
 }
 
+/// `base` に取り込まれていない HEAD 側のコミット数（`git rev-list --count base..HEAD`）。
+/// worktree 削除の確認で「消したら**どこにも残らない**コミットが何件あるか」を示すために使う。
+/// base が解決できない（未 push の孤立ブランチ等）場合は 0 を返さず None ＝「数えられない」を区別する。
+pub fn git_unmerged_count_on(host: &dyn Host, dir: &Path, base: &str) -> Option<usize> {
+    let output = run_git(host, dir, ["rev-list", "--count", &format!("{base}..HEAD")]).ok()?;
+    if !output.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 /// 明示的に merge-ready となった Task を IntegrationSpace へ統合する。
 /// dirty integration / preview conflict は拒否し、merge 自体が失敗した場合も自動 abort して戻す。
 pub fn integrate_branch_on(

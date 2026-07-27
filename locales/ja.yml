@@ -247,6 +247,18 @@ fleet:
   stopped_agents: "エージェント %{n} 本を中断しました"
   no_running_agent: 動いているエージェントはありません
   task_archived: Task を終了しました（worktree はディスクに残っています）
+worktree_delete:
+  title: この worktree を削除しますか？
+  title_branch: worktree とブランチを削除しますか？
+  counting: 失うものを調べています…
+  dirty: "未コミットの変更 %{n} ファイル — git にも残らず、元に戻せません"
+  unmerged: "統合先に入っていないコミット %{n} 件 — 削除するとこの作業は失われます"
+  unknown_base: 統合先と比較できませんでした（未統合のコミットがあるかもしれません）
+  branch_too: "ブランチ %{branch} も削除します"
+  safe: 失うものはありません（同じブランチから作り直せます）
+  skip_next: 次回から確認しない（失うものが無いときだけ省略します）
+  cancel: キャンセル
+  confirm: 削除する
 launcher:
   placeholder: 開く、または最近のプロジェクトを選択…
   open_folder: フォルダを開く…

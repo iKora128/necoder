@@ -246,6 +246,18 @@ fleet:
   stopped_agents: "Interrupted %{n} agent(s)"
   no_running_agent: No agent is running
   task_archived: Task finished (the worktree is still on disk)
+worktree_delete:
+  title: Delete this worktree?
+  title_branch: Delete the worktree and its branch?
+  counting: Checking what you would lose…
+  dirty: "%{n} uncommitted file(s) — not in git either, and not recoverable"
+  unmerged: "%{n} commit(s) not in the integration branch — this work is lost if you delete"
+  unknown_base: Couldn't compare against the integration branch (there may be unmerged commits)
+  branch_too: "The branch %{branch} is deleted too"
+  safe: Nothing to lose (you can recreate it from the same branch)
+  skip_next: Don't ask again (skipped only when there is nothing to lose)
+  cancel: Cancel
+  confirm: Delete
 launcher:
   placeholder: Open or choose a recent project…
   open_folder: Open Folder…

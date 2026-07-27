@@ -640,6 +640,20 @@ fn main() {
                     .detach();
                 }
             }
+            // 開発用: SHIRUSHI_WORKTREE_DELETE_PROBE=worktree|branch で削除確認ダイアログを出す。
+            if let Ok(mode) = std::env::var("SHIRUSHI_WORKTREE_DELETE_PROBE") {
+                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                    cx.spawn(async move |_workspace, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(2600))
+                            .await;
+                        let _ = handle.update(cx, |workspace, window, cx| {
+                            workspace.debug_worktree_delete(&mode, window, cx);
+                        });
+                    })
+                    .detach();
+                }
+            }
             // 開発用: SHIRUSHI_AGENT_FULLSCREEN_PROBE=1 で AI 全画面（⌘⇧⏎）を駆動する。
             if std::env::var("SHIRUSHI_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1") {
                 if let Some(handle) = window.window_handle().downcast::<Workspace>() {

@@ -420,7 +420,7 @@ impl Workspace {
     /// レール項目の右クリックメニューを開く（色スウォッチ + 新規窓 / 外す / worktree・ブランチ削除）。
     pub(crate) fn open_rail_menu(&mut self, index: usize, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
         self.overlays.color_picker = None;
-        self.overlays.rail_menu = Some(RailMenuState { project_index: index, position, confirm: None });
+        self.overlays.rail_menu = Some(RailMenuState { project_index: index, position });
         cx.notify();
     }
 
@@ -459,16 +459,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// レール右クリック「worktree を削除」: `git worktree remove`（強制）→ スロットも外す。
-    pub(crate) fn remove_slot_worktree(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.delete_slot_worktree_impl(index, false, window, cx);
-    }
-
-    /// レール右クリック「worktree ごとブランチを削除」: worktree remove → `git branch -D` → スロットも外す。
-    pub(crate) fn delete_slot_branch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.delete_slot_worktree_impl(index, true, window, cx);
-    }
-
     /// worktree（+任意でブランチ）を消してレールから外す共通経路。背景で git を叩き完了後にスロットを外す。
     /// `git worktree remove` は対象ツリーの中からは実行できないため、メイン作業ツリーの dir で叩く。
     pub(crate) fn delete_slot_worktree_impl(
@@ -479,6 +469,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.overlays.rail_menu = None;
+        self.chrome.fleet_cell_menu = None;
+        // 消す前にそこで走っているエージェントを止める（削除中に worktree へ書かれるのを防ぐ）。
+        if let Some(session) = self.project_sessions.sessions.get(index) {
+            session
+                .agent_panel
+                .clone()
+                .update(cx, |panel, cx| panel.cancel_all_turns(cx));
+        }
         // レール最後の1枚の worktree を消すと空レール＋ディスク破壊になる → 事前に断る（安全側）。
         if self.project_sessions.projects.len() <= 1 {
             self.push_toast(
@@ -542,6 +540,9 @@ impl Workspace {
                             .iter()
                             .position(|slot| slot.worktree.root() == target_for_id.as_path())
                         {
+                            // 消えた TaskSpace のセルは編隊グリッドからも外す（幽霊セルを残さない）。
+                            let space = workspace.project_sessions.projects[index].task_space.id.clone();
+                            workspace.remove_fleet_cells_for(&space);
                             workspace.remove_project_slot(index, window, cx);
                         }
                     }

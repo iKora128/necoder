@@ -298,7 +298,6 @@ impl Workspace {
         let menu = self.overlays.rail_menu.as_ref()?;
         let index = menu.project_index;
         let position = menu.position;
-        let confirm = menu.confirm;
         let theme = self.theme.clone();
         let slot = self.project_sessions.projects.get(index)?;
         let is_worktree = slot.worktree_branch.is_some();
@@ -411,45 +410,39 @@ impl Workspace {
                     ),
             );
 
-        // worktree タブだけ: worktree 削除 / worktree ごとブランチ削除（二段確認）。
+        // worktree タブだけ: worktree 削除 / worktree ごとブランチ削除。
+        // 確認は**「何を失うか」を数えて見せるダイアログ**へ一本化した（2026-07-27）。
+        // 旧: 同じ行をもう一度押させる二段確認 — 意味のある情報を何も足さないので廃止。
         if is_worktree {
-            let wt_armed = confirm == Some(RailMenuAction::RemoveWorktree);
-            let wt_label = if wt_armed {
-                i18n::t!("rail.menu_confirm_delete")
-            } else {
-                i18n::t!("rail.menu_remove_worktree")
-            };
             menu_box = menu_box.child(
-                make_row("rail-remove-worktree", "🗂", SharedString::from(wt_label), true, wt_armed)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            if wt_armed {
-                                this.remove_slot_worktree(index, window, cx);
-                            } else {
-                                this.arm_rail_confirm(RailMenuAction::RemoveWorktree, cx);
-                            }
-                        }),
-                    ),
+                make_row(
+                    "rail-remove-worktree",
+                    "🗂",
+                    SharedString::from(i18n::t!("rail.menu_remove_worktree")),
+                    true,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.request_worktree_delete(index, false, window, cx);
+                    }),
+                ),
             );
-            let br_armed = confirm == Some(RailMenuAction::DeleteBranch);
-            let br_label = if br_armed {
-                i18n::t!("rail.menu_confirm_delete")
-            } else {
-                i18n::t!("rail.menu_delete_branch")
-            };
             menu_box = menu_box.child(
-                make_row("rail-delete-branch", "🗑", SharedString::from(br_label), true, br_armed)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            if br_armed {
-                                this.delete_slot_branch(index, window, cx);
-                            } else {
-                                this.arm_rail_confirm(RailMenuAction::DeleteBranch, cx);
-                            }
-                        }),
-                    ),
+                make_row(
+                    "rail-delete-branch",
+                    "🗑",
+                    SharedString::from(i18n::t!("rail.menu_delete_branch")),
+                    true,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.request_worktree_delete(index, true, window, cx);
+                    }),
+                ),
             );
         }
 
@@ -464,14 +457,6 @@ impl Workspace {
                 .child(menu_box)
                 .into_any_element(),
         )
-    }
-
-    // レールメニューの破壊的操作を二段確認の「1 段目」にする（もう一度クリックで実行）。
-    pub(crate) fn arm_rail_confirm(&mut self, action: RailMenuAction, cx: &mut Context<Self>) {
-        if let Some(menu) = self.overlays.rail_menu.as_mut() {
-            menu.confirm = Some(action);
-            cx.notify();
-        }
     }
 
     // ── Agent パネル連携（トースト・色リンク・生中継・M12-3/4/5） ──

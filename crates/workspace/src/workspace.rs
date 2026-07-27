@@ -55,6 +55,7 @@ mod git_controller;
 mod git_view;
 mod herd_view;
 mod fleet_view;
+mod worktree_delete;
 mod control_view;
 mod control_ipc;
 pub use control_ipc::control_socket_path;
@@ -269,17 +270,6 @@ struct RailMenuState {
     project_index: usize,
     /// ポップオーバー表示位置（右クリック位置）。
     position: Point<gpui::Pixels>,
-    /// 破壊的操作の二段確認（Some = この操作が確認待ち。別項目クリックや再オープンで解除）。
-    confirm: Option<RailMenuAction>,
-}
-
-/// レールメニューの破壊的操作（二段確認の対象）。
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum RailMenuAction {
-    /// worktree を削除（git worktree remove）。スロットも外す。
-    RemoveWorktree,
-    /// worktree ごとブランチを削除（worktree remove → git branch -D）。スロットも外す。
-    DeleteBranch,
 }
 
 /// 編隊セルの ⋯ メニュー（2026-07-27）。「× を押しても消えない」「消すのと画面から外すの違いが
@@ -288,19 +278,8 @@ struct FleetCellMenuState {
     /// 対象セルの `fleet_cells` 添字。
     cell: usize,
     position: Point<gpui::Pixels>,
-    /// 破壊的操作の二段確認（レールメニューと同じ所作）。
-    confirm: Option<FleetCellAction>,
 }
 
-/// 編隊セルの片付けメニューのうち**二段確認を要する**もの（＝取り返しがつかない下 2 段）。
-/// 上段（閉じる / 止める / 終了）は元に戻せるので確認を挟まない。
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum FleetCellAction {
-    /// worktree をディスクから削除（未コミットの変更は失われる）。ブランチは残す。
-    RemoveWorktree,
-    /// worktree + ブランチを削除。
-    DeleteBranch,
-}
 
 /// ⌘F バッファ内検索の表示上限。これを超えるマッチは n/m に「+」を付けて数えない
 /// （全置換は打ち切らず全件を対象にする）。
@@ -897,6 +876,8 @@ struct WorkspaceOverlays {
     picker_observation: Option<Subscription>,
     color_picker: Option<ColorPickerState>,
     rail_menu: Option<RailMenuState>,
+    /// worktree 削除の確認ダイアログ（2026-07-27）。何を失うかを git に聞いて見せる。
+    worktree_delete: Option<worktree_delete::WorktreeDeleteConfirm>,
     ssh_input: Option<(String, FocusHandle)>,
     ssh_connecting: bool,
     add_project_dialog_open: bool,
@@ -1329,6 +1310,7 @@ impl Render for Workspace {
             .children(self.render_color_picker(cx))
             .children(self.render_rail_menu(cx))
             .children(self.render_fleet_cell_menu(cx))
+            .children(self.render_worktree_delete_dialog(cx))
             .children(self.render_branch_menu(cx))
             .children(self.render_explorer_context_menu(cx))
             .children(self.render_confetti(cx)) // 最前面（祝いの紙吹雪）

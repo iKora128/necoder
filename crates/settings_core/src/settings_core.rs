@@ -109,6 +109,10 @@ pub struct Settings {
     /// エージェントが実選択肢を広告していればそちらが優先され、ここは候補が無いときの土台になる。
     pub default_model: String,
     pub default_effort: String,
+    /// worktree 削除の前に確認ダイアログを出すか（既定 on・2026-07-27）。
+    /// **off にしても「失うものがある」ときは必ず確認する** — 未コミットの変更は git にも残らないので、
+    /// 「二度と聞くな」の対象は *取り返しがつく* 削除に限る（DECISIONS の該当項）。
+    pub confirm_worktree_delete: bool,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
@@ -139,6 +143,7 @@ impl Default for Settings {
             default_agent: "Claude Code".to_string(),
             default_model: "claude-opus-5".to_string(),
             default_effort: "high".to_string(),
+            confirm_worktree_delete: true,
             fleet_agent_worktree: false,
             rail: RailSettings::default(),
             onboarded: false,
@@ -160,6 +165,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "default_agent": "Claude Code",
   "default_model": "claude-opus-5",
   "default_effort": "high",
+  "confirm_worktree_delete": true,
   "onboarded": false,
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }
 }"#;

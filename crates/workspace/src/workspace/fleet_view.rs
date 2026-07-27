@@ -534,6 +534,24 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 消えた TaskSpace のセルをグリッドから外す（worktree 削除後の後始末）。
+    /// 拡大中の添字も畳み直すので、`close_fleet_cell` と同じ規律で安全に詰まる。
+    pub(crate) fn remove_fleet_cells_for(&mut self, space: &SpaceId) {
+        let mut index = 0;
+        while index < self.chrome.fleet_cells.len() {
+            if self.space_of_cell(index).as_ref() == Some(space) {
+                self.chrome.fleet_cells.remove(index);
+                match self.chrome.fleet_maximized {
+                    Some(max) if max == index => self.chrome.fleet_maximized = None,
+                    Some(max) if max > index => self.chrome.fleet_maximized = Some(max - 1),
+                    _ => {}
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
+
     /// セル → その TaskSpace（全 surface が同じ形なので 1 か所に畳む）。
     pub(crate) fn space_of_cell(&self, index: usize) -> Option<SpaceId> {
         self.chrome.fleet_cells.get(index).map(|pane| match pane {
@@ -551,19 +569,12 @@ impl Workspace {
         position: Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.chrome.fleet_cell_menu = Some(FleetCellMenuState { cell, position, confirm: None });
+        self.chrome.fleet_cell_menu = Some(FleetCellMenuState { cell, position });
         cx.notify();
     }
 
     pub(crate) fn close_fleet_cell_menu(&mut self, cx: &mut Context<Self>) {
         if self.chrome.fleet_cell_menu.take().is_some() {
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn arm_fleet_cell_confirm(&mut self, action: FleetCellAction, cx: &mut Context<Self>) {
-        if let Some(menu) = self.chrome.fleet_cell_menu.as_mut() {
-            menu.confirm = Some(action);
             cx.notify();
         }
     }
@@ -607,8 +618,11 @@ impl Workspace {
         self.push_toast(SharedString::from(i18n::t!("fleet.task_archived")), accent, cx);
     }
 
-    /// worktree（+任意でブランチ）を消す（片付けの最下段）。レールメニューと同じ実装へ委譲するので、
-    /// 「どこから消しても同じことが起きる」ことが保証される。
+    /// worktree（+任意でブランチ）を消す（片付けの最下段）。レールメニューと同じ確認ダイアログ →
+    /// 同じ削除実装へ委譲するので、「どこから消しても同じことが起きる」ことが保証される。
+    /// **セルはここでは閉じない** — ダイアログでキャンセルされたのにセルだけ消えるのを避ける。
+    /// 実際に消えた slot は `delete_slot_worktree_impl` → `remove_project_slot` 経由で
+    /// lanes から外れ、セルも「TaskSpace は閉じられています」に落ちる。
     fn delete_fleet_cell_worktree(
         &mut self,
         cell: usize,
@@ -622,11 +636,8 @@ impl Workspace {
         let Some(session_index) = session_index else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index].agent_panel.clone();
-        panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
         self.chrome.fleet_cell_menu = None;
-        self.close_fleet_cell(cell, cx);
-        self.delete_slot_worktree_impl(session_index, also_branch, window, cx);
+        self.request_worktree_delete(session_index, also_branch, window, cx);
     }
 
     /// 編隊セルの片付けメニュー（⋯）。**この 1 枚が「× は何をするのか」への回答**。
@@ -638,7 +649,6 @@ impl Workspace {
             return None;
         }
         let position = menu.position;
-        let confirm = menu.confirm;
         let theme = self.theme.clone();
         let session_index = self
             .space_of_cell(cell)
@@ -778,54 +788,37 @@ impl Workspace {
             ),
         );
 
+        // 削除の 2 段は**確認ダイアログ**（何を失うかを git に数えさせて見せる）へ渡す。
         if is_worktree {
-            let wt_armed = confirm == Some(FleetCellAction::RemoveWorktree);
             menu_box = menu_box.child(
                 make_row(
                     "fleet-menu-remove-worktree",
                     "🗂",
-                    SharedString::from(if wt_armed {
-                        i18n::t!("rail.menu_confirm_delete")
-                    } else {
-                        i18n::t!("fleet.cleanup_remove_worktree")
-                    }),
+                    SharedString::from(i18n::t!("fleet.cleanup_remove_worktree")),
                     SharedString::from(i18n::t!("fleet.cleanup_remove_worktree_sub")),
                     true,
-                    wt_armed,
+                    false,
                 )
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
-                        if wt_armed {
-                            this.delete_fleet_cell_worktree(cell, false, window, cx);
-                        } else {
-                            this.arm_fleet_cell_confirm(FleetCellAction::RemoveWorktree, cx);
-                        }
+                        this.delete_fleet_cell_worktree(cell, false, window, cx);
                     }),
                 ),
             );
-            let br_armed = confirm == Some(FleetCellAction::DeleteBranch);
             menu_box = menu_box.child(
                 make_row(
                     "fleet-menu-delete-branch",
                     "🗑",
-                    SharedString::from(if br_armed {
-                        i18n::t!("rail.menu_confirm_delete")
-                    } else {
-                        i18n::t!("fleet.cleanup_delete_branch")
-                    }),
+                    SharedString::from(i18n::t!("fleet.cleanup_delete_branch")),
                     SharedString::from(i18n::t!("fleet.cleanup_delete_branch_sub")),
                     true,
-                    br_armed,
+                    false,
                 )
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
-                        if br_armed {
-                            this.delete_fleet_cell_worktree(cell, true, window, cx);
-                        } else {
-                            this.arm_fleet_cell_confirm(FleetCellAction::DeleteBranch, cx);
-                        }
+                        this.delete_fleet_cell_worktree(cell, true, window, cx);
                     }),
                 ),
             );

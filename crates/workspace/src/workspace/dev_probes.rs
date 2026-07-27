@@ -145,19 +145,34 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: worktree 削除の確認ダイアログを出す（2026-07-27）。**実際に git を数えさせる**ので、
+    /// 「未コミット N ファイル / 未統合 N 件」がその場のリポジトリの真値で描かれる。
+    /// `branch` を渡すとブランチごと削除の見た目になる。削除自体は実行しない（人が押すまで）。
+    #[cfg(debug_assertions)]
+    pub fn debug_worktree_delete(&mut self, mode: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // `worktree:2` のようにレール index を指定できる（未指定はアクティブ）。
+        // dirty / 未統合コミットがある slot を狙って「失うものがある」表示を撮るため。
+        let (mode, index) = match mode.split_once(':') {
+            Some((mode, index)) => (mode, index.parse().unwrap_or(self.project_sessions.active)),
+            None => (mode, self.project_sessions.active),
+        };
+        // 対象が linked worktree でなくても導線を撮れるように、削除行の出現条件だけ満たしておく。
+        if let Some(slot) = self.project_sessions.projects.get_mut(index) {
+            if slot.worktree_branch.is_none() {
+                slot.worktree_branch = Some("task/probe".to_string());
+            }
+        }
+        self.request_worktree_delete(index, mode == "branch", window, cx);
+    }
+
     /// 開発用: 編隊の片付け UI を offscreen で検証する（2026-07-27）。
-    /// `menu` = セル 0 の ⋯ メニューを開く / `menu-armed` = さらに worktree 削除を確認待ちにする /
-    /// `terminal` = 下段をターミナルタブへ / `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）。
-    /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → confirm → 実行）まで機械検証できる。
+    /// `menu` = セル 0 の ⋯ メニューを開く / `terminal` = 下段をターミナルタブへ /
+    /// `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）/ `close-all` = 全セルを × して残数を出す。
+    /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(&mut self, command: &str, cx: &mut Context<Self>) {
         match command {
-            "menu" | "menu-armed" => {
-                self.open_fleet_cell_menu(0, point(px(760.), px(210.)), cx);
-                if command == "menu-armed" {
-                    self.arm_fleet_cell_confirm(FleetCellAction::RemoveWorktree, cx);
-                }
-            }
+            "menu" => self.open_fleet_cell_menu(0, point(px(760.), px(210.)), cx),
             "terminal" => self.set_fleet_bottom_view(FleetBottomView::Terminal, cx),
             "tall" => {
                 self.chrome.bottom_height = 320.0;

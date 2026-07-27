@@ -47,6 +47,7 @@
 | ↳ セルを閉じる（画面から外すだけ） | `close_fleet_cell` | セルを閉じる | Close cell |
 | ↳ Task を終了（台帳を archived に） | `archive_fleet_cell_task` | Task を終了 | Finish Task |
 | ↳ worktree を削除（ディスクから消す） | `delete_fleet_cell_worktree` | worktree を削除 | Delete worktree |
+| ↳ 削除の確認（失うものを数えて見せる） | `WorktreeDeleteConfirm` / `WorktreeStakes` | — | — |
 | **下段ドック**（Fleet 下の可変高タブ面） | `FleetBottomView` / `bottom_height` | 下段 | Bottom pane |
 | **AI 全画面**（solo で Agent パネルだけにする） | `agent_full_screen` / `ToggleAgentFullScreen` | AI を全画面 | AI full screen |
 

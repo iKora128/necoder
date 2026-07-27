@@ -626,6 +626,7 @@ impl Workspace {
                 picker_observation: None,
                 color_picker: None,
                 rail_menu: None,
+                worktree_delete: None,
                 ssh_input: None,
                 ssh_connecting: false,
                 add_project_dialog_open: false,
@@ -670,23 +671,17 @@ impl Workspace {
                 focus: cx.focus_handle(),
             });
         }
-        // 開発用: SHIRUSHI_RAIL_MENU でレール項目の右クリックメニューを開いた状態で撮る（M10-2）。
-        // 値: 1=通常 / confirm-worktree / confirm-branch=破壊的操作の二段確認 armed 状態。
+        // 開発用: SHIRUSHI_RAIL_MENU=1 でレール項目の右クリックメニューを開いた状態で撮る（M10-2）。
         // worktree/ブランチ削除行も見せるため、アクティブスロットを worktree タブ扱いにする。
-        if let Ok(mode) = std::env::var("SHIRUSHI_RAIL_MENU") {
+        // （二段確認は 2026-07-27 に確認ダイアログへ一本化＝`SHIRUSHI_WORKTREE_DELETE_PROBE` を使う）
+        if std::env::var_os("SHIRUSHI_RAIL_MENU").is_some() {
             let active = workspace.project_sessions.active;
             if let Some(slot) = workspace.project_sessions.projects.get_mut(active) {
                 slot.worktree_branch = Some("feature/login".to_string());
             }
-            let confirm = match mode.as_str() {
-                "confirm-worktree" => Some(RailMenuAction::RemoveWorktree),
-                "confirm-branch" => Some(RailMenuAction::DeleteBranch),
-                _ => None,
-            };
             workspace.overlays.rail_menu = Some(RailMenuState {
                 project_index: workspace.project_sessions.active,
                 position: point(px(RAIL_WIDTH), px(12.)),
-                confirm,
             });
         }
         // 開発用: SHIRUSHI_COMPLETION=1 で補完ポップアップ（サンプル候補）を開いた状態で撮る。
