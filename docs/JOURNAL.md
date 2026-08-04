@@ -1067,3 +1067,23 @@
   （dirty な slot を狙って「12 uncommitted file(s)」が出るのを確認）。`:index` を付けたのは「失うものがある」状態を作らずに撮るため
 - 学び: 確認ダイアログの価値は「止めること」ではなく「**知らせること**」。止めたいだけなら二段クリックで足りるが、
   それは何も教えないので、ユーザーは考えずに 2 回押すようになる
+
+## 2026-08-04 — ACP transcript の ⌘C が効かない（Copy が composer に奪われていた）を根治
+
+「ACP で出た Claude の出力がコピペできない」。ドラッグ選択・⌘C・コピーの部品（`push_selectable` /
+`TranscriptSelection` / `transcript_selected_text`）は既にあったのに、⌘C が transcript に**届いていなかった**。
+
+- **原因は GPUI のキー配送順**。`window.rs::dispatch_key_event` は **action を key_down リスナーより先に**
+  解決・配送し、途中で `propagate_event=false` になれば key_down は**一切呼ばれない**。⌘C は macOS の
+  `OsAction::Copy` 経由で `editor_view::Copy` に解決され、フォーカスを持つ composer(EditorView) へ leaf→root で
+  先に届く。composer は空選択でも `Copy` を**消費して return** ＝ 何もコピーされず、root の `on_panel_key_down`
+  （生キーで `key=="c"` を見ていた）には来ない。`capture_key_down` に変えても action の方が先なので無駄。
+- **直し**: composer は空選択の `Copy` を `cx.propagate()` で**譲る**。root(AgentPanel) に
+  `on_action(editor_view::Copy)` を足し、transcript を選択中ならそこがコピー、無ければ更に上へ譲る。⌘C の生キー
+  分岐は撤去して Copy アクションに一本化（Esc の選択解除/中断だけ `on_panel_key_down` に残す）。keymap もフォーカス
+  移動も要らない最小修正。副作用確認: `Copy` を `on_action` するのは editor_view だけ ＝ 空選択の伝播は無害。
+- **検証**: `cargo check -p agent_panel` green / `cargo test -p agent_panel -p editor_view` 全 pass。ただし GUI
+  バイナリは**この環境に full Xcode が無く metal シェーダをコンパイルできず**起動不可（CLT のみ・私の変更とは無関係）
+  ＝ ドラッグ選択→⌘C→貼付の実機目視は未。最終確認は metal のある環境で。
+- 学び: 「実装はあるのに効かない」時、GPUI は **action > key_down**・**leaf→root** を疑う。生キーで拾う設計は
+  同じキーが action にバインドされていると届かない。フォーカスを持つ子が消費する前提で「空なら親に譲る」を入れる。

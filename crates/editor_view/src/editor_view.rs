@@ -959,6 +959,9 @@ impl EditorView {
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         let selection = self.primary();
         if selection.is_empty() {
+            // 空選択のコピーは消費せず親へ譲る。GPUI の action は leaf→root で流れるので、
+            // 譲ることで agent_panel が transcript のドラッグ選択コピーを拾える（M13）。
+            cx.propagate();
             return;
         }
         let text = self.buffer.text_range(selection.range());
@@ -1799,10 +1802,18 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        // wrap 列数の材料（'M' のセル幅・ガター概算）を先に測る（soft wrap・M10-12）。
+        // wrap 列数の材料（等幅セル幅・ガター概算）を先に測る（soft wrap・M10-12）。
+        // コード（等幅 Guguru Sans Code）は 'M' の advance が全グリフ共通なのでそれがセル幅。
         let editor_font_size = self.editor.read(cx).font_size;
         let cell_width_estimate =
             f32::from(shape_plain("M", gpui::black(), editor_font_size, window).width).max(1.0);
+        // composer（プロポーショナルな Sans）は「等幅セル」が無い。折返しは半角=1 / 全角=2 セルで
+        // 数える（compute_wrap_segments）ので、セル幅の単位 = 全角グリフ幅 ÷2（＝半角1個分）に採る。
+        // これで全角の折返しは画素ぴったり・半角も平均字幅に近く、右端まで使い切る。
+        // （旧: 'M' 幅を単位 → Sans では過大評価で ~3 割手前の早折れ・右に余白が残っていた）
+        let composer_cell_estimate =
+            (f32::from(shape_plain("永", gpui::black(), editor_font_size, window).width) / 2.0)
+                .max(1.0);
         // 保留リビール（検索ジャンプ等）を viewport 確定後の今、消化する（対象行を中央へ寄せる）。
         // 併せて wrap マップの再構築・gutter diff の再計算（いずれも変化時のみ）。
         self.editor.update(cx, |view, cx| {
@@ -1812,9 +1823,9 @@ impl Element for EditorElement {
             let wrap_on = view.soft_wrap || view.plain;
             let columns = if wrap_on {
                 if view.plain {
-                    // composer はガター無し。フォントが Sans（プロポーショナル）なので等幅見積もりは
-                    // ややズレる — はみ出しより早折れの方が無害なので、そのまま 'M' 幅で安全側に振る。
-                    ((f32::from(bounds.size.width) / cell_width_estimate).floor() as usize).max(10)
+                    // composer はガター無し。半角セル幅（全角÷2）を単位に折返し桁数を出す。
+                    ((f32::from(bounds.size.width) / composer_cell_estimate).floor() as usize)
+                        .max(10)
                 } else {
                     let digits = snapshot.line_count().to_string().len() as f32;
                     let gutter =

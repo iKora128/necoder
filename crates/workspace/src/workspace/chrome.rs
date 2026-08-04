@@ -355,6 +355,7 @@ impl Workspace {
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
                             this.agent_active = false; // エディタ側を触った → ⌘W の宛先をタブへ
+                            this.chrome.show_settings = false; // タブを押したら設定ホームは退く
                             this.select_tab(index, window, cx);
                         }),
                     )
@@ -874,11 +875,26 @@ impl Workspace {
     pub(crate) fn render_center(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let content = if self.chrome.show_settings {
-            // 設定ホーム（中央領域を占有・レール ⚙ で開閉）。第1セクション=Agents。
+            // 設定ホーム（レール ⚙ で開閉）。第1セクション=Agents。
             let view = self.chrome.settings_view.clone();
             let accent = self.accent();
             view.update(cx, |view, _| view.set_visuals(self.theme.clone(), accent));
-            view.into_any_element()
+            let body = div().flex_1().min_h_0().child(view);
+            if self.tabs.is_empty() {
+                body.into_any_element()
+            } else {
+                // 設定を開いても**開いているファイルタブは残す**（タブを押せば設定が退いてそのファイルへ戻る）。
+                // 以前は中央を丸ごと settings に差し替えていて「開いた瞬間ファイルが消える」体感だった（UX 修正）。
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(self.render_main_tabstrip(cx))
+                    .child(body)
+                    .into_any_element()
+            }
         } else if self.tabs.is_empty() {
             // 初回起動の案内（M13）: 最初の 4 手をキーバッジ付きで。10 分で使い始める導線。
             let hint = |key: &'static str, text: String| {

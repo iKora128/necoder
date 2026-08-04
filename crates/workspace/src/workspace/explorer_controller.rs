@@ -665,6 +665,9 @@ impl Workspace {
     /// ファイルを開く（⌘P・ツリークリック・検索ジャンプ・F12 等の対話経路）。
     /// **読み込みは背景スレッド**（remote は 30s ブロックしうる — ARCHITECTURE §9）。
     pub(crate) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // 対話でファイルを開いたら設定ホームは退く（起動復元の open_file_sync には入れない＝
+        // 未オンボーディング時に settings を出しっぱなしにするゲートを壊さないため）。
+        self.chrome.show_settings = false;
         // 既に開いていれば重複タブを作らず、そのタブへ切り替える。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);

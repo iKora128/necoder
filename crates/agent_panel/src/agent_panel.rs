@@ -1081,11 +1081,7 @@ impl AgentPanel {
             };
             panel
                 .update(cx, |panel, cx| {
-                    if let Some(index) = panel
-                        .threads
-                        .iter()
-                        .position(|thread| thread.id == thread_id)
-                    {
+                    if let Some(index) = panel.thread_index_by_id(&thread_id) {
                         let thread = &mut panel.threads[index];
                         // 生成待ちの間にユーザーが手動改名していたら尊重する。
                         if !thread.name_is_custom && is_placeholder_name(&thread.name) {
@@ -1478,7 +1474,24 @@ impl AgentPanel {
         }
     }
 
-    /// パネル全域のキー: transcript 選択中の ⌘C はそれをコピー（composer より優先）。Esc で解除。
+    /// transcript 選択の ⌘C（M13）。⌘C は keymap で `editor_view::Copy` に解決され、フォーカスを
+    /// 持つ composer に**先に**届く（GPUI の action ディスパッチは leaf→root・action は key_down より前）。
+    /// composer は空選択なら `cx.propagate()` で譲るので、transcript を選択中なら root の此処が受けて
+    /// コピーする。選択が無ければ更に上位へ譲る（他の Copy 利用者を邪魔しない）。
+    fn on_copy_selection(
+        &mut self,
+        _: &editor_view::Copy,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(text) = self.transcript_selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        } else {
+            cx.propagate();
+        }
+    }
+
+    /// パネル全域のキー: Esc で transcript 選択解除／実行中なら中断（⌘C は `on_copy_selection` 側）。
     fn on_panel_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -1486,17 +1499,6 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         let keystroke = &event.keystroke;
-        if keystroke.modifiers.platform
-            && !keystroke.modifiers.shift
-            && !keystroke.modifiers.alt
-            && keystroke.key == "c"
-        {
-            if let Some(text) = self.transcript_selected_text() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                cx.stop_propagation();
-                return;
-            }
-        }
         if keystroke.key == "escape" {
             // 選択の解除が先（transcript を読んでいる最中の Esc でターンを止めない）。
             if self.transcript_selection.take().is_some() {
@@ -2414,6 +2416,14 @@ impl AgentPanel {
         }
     }
 
+    /// スレッドの**安定 id** から現在の位置（index）を引く。タブは D&D 並べ替え（[`Self::move_thread`]）
+    /// や クローズ（[`Self::remove_thread`]）で index が動くので、生成時の index を握る長寿命の非同期
+    /// コールバック（セッションのイベントポンプ・生成物の書き戻し）は index を保持せず**毎回ここで引き直す**。
+    /// 閉じられたスレッドには `None`＝そのイベントは捨てる（別タブへ誤配送しない）。
+    fn thread_index_by_id(&self, id: &str) -> Option<usize> {
+        self.threads.iter().position(|thread| thread.id == id)
+    }
+
     /// スレッド用の常駐 ACP セッションを起動する。バックグラウンドで `run_session` を回し、
     /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドルを返す。
     /// claude-agent-acp が見つからなければ `None`。
@@ -2430,6 +2440,14 @@ impl AgentPanel {
             .map(|thread| thread.agent.clone())
             // 既定は AgentKind の label と完全一致させる（"Claude" だと by_label が None＝解決不能）。
             .unwrap_or_else(|| "Claude Code".into());
+        // このセッションの配送先は**位置ではなく安定 id で追う**。タブは並べ替え/クローズで index が
+        // 動くので、生成時の thread_index を握ると走行中セッションのイベント（特に `TurnEnded {
+        // Interrupted }`）が今その位置に居る別タブへ着弾する（＝「他を中断したら別タブも中断」の正体）。
+        let thread_id = self
+            .threads
+            .get(thread_index)
+            .map(|thread| thread.id.clone())
+            .unwrap_or_default();
         let host = self.dest_host.clone();
         let command =
             acp_client::AgentKind::by_label(&agent_label)?.command_on(host.as_ref(), cwd)?;
@@ -2451,10 +2469,14 @@ impl AgentPanel {
 
         cx.spawn(async move |panel, cx| {
             while let Some(event) = event_rx.next().await {
-                if panel
-                    .update(cx, |panel, cx| panel.on_event(thread_index, event, cx))
-                    .is_err()
-                {
+                // 生成時の index ではなく、id で**現在位置**を引き直して配送する（並べ替え/クローズ耐性）。
+                // スレッドが閉じられていればイベントは捨てる（誤ったタブへ書かない）。
+                let delivered = panel.update(cx, |panel, cx| {
+                    if let Some(index) = panel.thread_index_by_id(&thread_id) {
+                        panel.on_event(index, event, cx);
+                    }
+                });
+                if delivered.is_err() {
                     return; // パネル破棄済み（ウィンドウを閉じた等）＝後始末も不要
                 }
             }
@@ -2464,11 +2486,9 @@ impl AgentPanel {
             // 終端が来ていれば `abandon_turn` は running=false を見て何もしない。
             panel
                 .update(cx, |panel, cx| {
-                    panel.abandon_turn(
-                        thread_index,
-                        &i18n::t!("agent.err_session_ended"),
-                        cx,
-                    );
+                    if let Some(index) = panel.thread_index_by_id(&thread_id) {
+                        panel.abandon_turn(index, &i18n::t!("agent.err_session_ended"), cx);
+                    }
                 })
                 .ok();
         })
@@ -3001,11 +3021,7 @@ impl AgentPanel {
                 return; // CLI 未導入・失敗 → Tier 1 表示のまま（静かに諦める）
             };
             let _ = panel.update(cx, |panel, cx| {
-                if let Some(index) = panel
-                    .threads
-                    .iter()
-                    .position(|thread| thread.id == thread_id)
-                {
+                if let Some(index) = panel.thread_index_by_id(&thread_id) {
                     let thread = &mut panel.threads[index];
                     if thread.running {
                         return; // 生成待ちの間に次ターンが始まった＝古い要約は捨てる
@@ -4919,7 +4935,9 @@ impl Render for AgentPanel {
             .key_context("AgentPanel")
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_close_thread))
-            // transcript 選択の ⌘C / Esc（選択がある時だけ composer より優先・M13）。
+            // transcript 選択の ⌘C（composer が空選択で譲った Copy を root で受ける・M13）。
+            .on_action(cx.listener(Self::on_copy_selection))
+            // Esc = transcript 選択解除／実行中の中断。
             .on_key_down(cx.listener(Self::on_panel_key_down))
             // Agent エリアのどこをクリックしても composer にフォーカス（＝⌘W がスレッドに効く）。
             // 子（タブ/ボタン）が処理した後の bubble で拾う。既に focus 済みなら no-op。
@@ -5056,8 +5074,11 @@ fn render_mascot_sized(
         )
     };
     // 非アクティブ（このウィンドウを見ていない）時は先頭コマで静止＝アニメ再描画ゼロ＝idle 0%。
+    // idle（何のエージェントも動いていない）時も静止画にする。以前は「居眠り」アニメを .repeat() で
+    // 回していたが、ウィンドウを見ている間ずっと全画面が毎フレーム再描画され続け、入力レイテンシの
+    // 常時タックスになっていた（性能予算 idle 0% にも反する）。動く演出は稼働中(Typing/Plead/Worry)だけで足りる。
     match (motion, active) {
-        (MascotMotion::Idle, true) => anim("doze-strip.png", "mascot-doze"),
+        (MascotMotion::Idle, true) => single("idle.png"),
         (MascotMotion::Idle, false) => single("idle.png"),
         (MascotMotion::Typing, true) => anim("typing-strip.png", "mascot-typing"),
         (MascotMotion::Typing, false) => frame0("typing-strip.png"),
