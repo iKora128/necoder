@@ -10,7 +10,7 @@
 
 use acp_client::{
     AgentEvent, AgentKind, ConfigCategory, ConfigOption, PermissionChoice, PermissionDiff,
-    PermissionKind, PlanItem, PlanStatus, SessionCommand, TurnEnd,
+    PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
 };
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
 pub use acp_client::PermissionKind as AgentPermissionKind;
@@ -25,7 +25,7 @@ use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
     actions, div, img, prelude::*, pulsating_between, px, svg, Animation, AnimationExt, App,
-    ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight,
+    ClipboardItem, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight,
     HighlightStyle, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ScrollHandle, SharedString, StyledText, TextLayout, Window,
 };
@@ -67,7 +67,11 @@ impl Render for DraggedThreadTab {
     }
 }
 const THREAD_TABS_HEIGHT: f32 = 34.0;
-const COMPOSER_INPUT_HEIGHT: f32 = 68.0;
+/// composer 入力欄の高さ。上縁ハンドルのドラッグで [MIN, MAX] にリサイズできる。
+/// 既定は ~4 行（以前は固定 68px ＝ ~2 行で「狭すぎ・伸ばせない」痛点だった・2026-08-04）。
+const COMPOSER_INPUT_DEFAULT: f32 = 104.0;
+const COMPOSER_INPUT_MIN: f32 = 46.0;
+const COMPOSER_INPUT_MAX: f32 = 420.0;
 /// composer のモデルセレクタに並べる候補（クリックでアクティブスレッドに設定）。
 /// **これはフォールバック** — ACP エージェントが `session/set_config_option` で広告してきた
 /// 一覧があればそちらが優先される（`selector_options`）。広告しないエージェント用の既定リスト。
@@ -120,11 +124,15 @@ enum Entry {
     User(SharedString),
     /// 思考（常時展開・斜体）。
     Thinking(SharedString),
-    /// ステップ（⏺ ツール名 + 引数 → ⎿ 結果）。
+    /// ステップ（⏺ ツール名 + 引数 → ⎿ 結果）。Edit は before/after 差分、Bash 等は出力を持てる。
     Step {
+        /// ACP の相関 ID（`ToolCallUpdate` で出力/差分を後追い反映するため）。復元/デモでは None。
+        id: Option<SharedString>,
         tool: SharedString,
         args: SharedString,
         result: Option<SharedString>,
+        /// ファイル編集の before/after（Edit 系。空なら差分表示なし）。
+        diffs: Vec<PermissionDiff>,
     },
     /// エージェントの本文（結論など）。
     Agent(SharedString),
@@ -498,10 +506,37 @@ pub fn digest_tail(text: &str) -> Option<SharedString> {
 
 /// エントリのコピー用プレーンテキスト（GPUI の素のテキストは選択ドラッグ不可のため、
 /// hover の ⧉ でエントリ単位コピーを提供する・M13 UX。本文のドラッグ選択は残件）。
+/// `ToolCallInfo`（開始）から Step エントリを組む。args=主なパス / result=出力 / diffs=差分。
+fn build_step_entry(info: ToolCallInfo) -> Entry {
+    let args = info.locations.first().cloned().unwrap_or_default();
+    Entry::Step {
+        id: (!info.id.is_empty()).then(|| SharedString::from(info.id)),
+        tool: SharedString::from(info.title.unwrap_or_default()),
+        args: SharedString::from(args),
+        result: info
+            .output
+            .map(|output| SharedString::from(cap_output(&output))),
+        diffs: info.diffs,
+    }
+}
+
+/// ツール出力を transcript 用に丸める（末尾を優先し 24 行まで。溢れは先頭で省略表示）。
+fn cap_output(text: &str) -> String {
+    const MAX: usize = 24;
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= MAX {
+        text.trim_end().to_string()
+    } else {
+        let hidden = lines.len() - MAX;
+        let shown = lines[hidden..].join("\n");
+        format!("{}\n{shown}", i18n::t!("agent.output_truncated", "n" => hidden))
+    }
+}
+
 fn entry_plain_text(entry: &Entry) -> String {
     match entry {
         Entry::User(text) | Entry::Thinking(text) | Entry::Agent(text) => text.to_string(),
-        Entry::Step { tool, args, result } => match result {
+        Entry::Step { tool, args, result, .. } => match result {
             Some(result) => format!("{tool} {args}\n{result}"),
             None => format!("{tool} {args}"),
         },
@@ -616,6 +651,13 @@ pub struct AgentPanel {
     /// この panel の window がアクティブか（render で更新・GPUI が activation 変化で再描画するので追従する）。
     /// 完了音は**非アクティブ時のみ**鳴らす（見ている画面に音は要らない・P2）。
     window_active: bool,
+    /// composer 入力欄の高さ（px）。上縁ハンドルのドラッグで [MIN, MAX] に変える。
+    composer_height: f32,
+    /// composer 入力欄を上縁ドラッグでリサイズ中か（root の on_mouse_move が読む）。
+    resizing_composer: bool,
+    /// リサイズ開始時のマウス Y と高さ（ドラッグ量の基準）。
+    composer_resize_start_y: f32,
+    composer_resize_start_height: f32,
 }
 
 impl gpui::EventEmitter<PanelEvent> for AgentPanel {}
@@ -798,6 +840,10 @@ impl AgentPanel {
             reveal_ticker: false,
             expanded_thoughts: std::collections::HashSet::new(),
             window_active: true,
+            composer_height: COMPOSER_INPUT_DEFAULT,
+            resizing_composer: false,
+            composer_resize_start_y: 0.0,
+            composer_resize_start_height: 0.0,
         }
     }
 
@@ -893,9 +939,11 @@ impl AgentPanel {
                         "user" => Entry::User(content.into()),
                         "thinking" => Entry::Thinking(content.into()),
                         "step" => Entry::Step {
+                            id: None,
                             tool: content.into(),
                             args: SharedString::default(),
                             result: None,
+                            diffs: Vec::new(),
                         },
                         "checkpoint" => {
                             let (id, label) =
@@ -1804,9 +1852,11 @@ impl AgentPanel {
                 thread.tokens_used = 42_100;
                 thread.tokens_shown = 42_100.0;
                 thread.entries.push(Entry::Step {
+                    id: None,
                     tool: "Bash(cargo test -p shirushi)".into(),
                     args: SharedString::default(),
                     result: None,
+                    diffs: Vec::new(),
                 });
                 thread.plan = vec![
                     PlanItem { content: "設計を確認".into(), status: PlanStatus::Completed },
@@ -1874,9 +1924,11 @@ impl AgentPanel {
                     thread.running = true;
                     thread.turn_started_at = Some(std::time::Instant::now());
                     thread.entries.push(Entry::Step {
+                        id: None,
                         tool: "Bash cargo test -p shirushi".into(),
                         args: SharedString::default(),
                         result: None,
+                        diffs: Vec::new(),
                     });
                     thread.plan = vec![
                         PlanItem { content: "設計を確認".into(), status: PlanStatus::Completed },
@@ -2266,6 +2318,20 @@ impl AgentPanel {
         self.send_prompt_text(prompt, cx);
     }
 
+    /// 文脈の圧縮（`/compact`）をエージェントへ依頼する（Claude Code の slash コマンドを turn として送る）。
+    /// 実行中は無視（ターンの最中には送らない）。トークンメーター横のボタンから呼ぶ。
+    fn compact_context(&mut self, cx: &mut Context<Self>) {
+        let running = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.running)
+            .unwrap_or(false);
+        if running {
+            return;
+        }
+        self.send_prompt_text("/compact".to_string(), cx);
+    }
+
     /// prompt テキストをアクティブスレッドへ積み、常駐 ACP セッションへ送る（composer 非依存）。
     /// 開発時の自動プローブ（`SHIRUSHI_ACP_PROBE`）からも使う。
     pub fn send_prompt_text(&mut self, prompt: String, cx: &mut Context<Self>) {
@@ -2461,11 +2527,33 @@ impl AgentPanel {
                 }
                 ensure_reveal = thread_index == active;
             }
-            AgentEvent::ToolStarted(title) => thread.entries.push(Entry::Step {
-                tool: SharedString::from(title),
-                args: SharedString::default(),
-                result: None,
-            }),
+            AgentEvent::ToolStarted(info) => thread.entries.push(build_step_entry(info)),
+            AgentEvent::ToolUpdated(info) => {
+                // 同 ID の直近 Step に、後追いの出力・差分・パスを反映する（Bash 出力や完了差分）。
+                for entry in thread.entries.iter_mut().rev() {
+                    if let Entry::Step { id: Some(id), tool, args, result, diffs } = entry {
+                        if id.as_ref() == info.id.as_str() {
+                            if let Some(title) = &info.title {
+                                if !title.is_empty() {
+                                    *tool = SharedString::from(title.clone());
+                                }
+                            }
+                            if args.is_empty() {
+                                if let Some(path) = info.locations.first() {
+                                    *args = SharedString::from(path.clone());
+                                }
+                            }
+                            if !info.diffs.is_empty() {
+                                *diffs = info.diffs.clone();
+                            }
+                            if let Some(output) = &info.output {
+                                *result = Some(SharedString::from(cap_output(output)));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             AgentEvent::Usage { used, size } => {
                 thread.tokens_used = used.min(u32::MAX as u64) as u32;
                 if size > 0 {
@@ -3512,7 +3600,7 @@ impl AgentPanel {
             .into_any_element()
     }
 
-    fn render_meta(&self, active: bool) -> impl IntoElement {
+    fn render_meta(&self, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
         let thread = self.threads.get(self.active);
@@ -3520,6 +3608,8 @@ impl AgentPanel {
             .map(|thread| (thread.tokens_shown, thread.tokens_max))
             .unwrap_or((0.0, 0));
         let used = shown.round().max(0.0) as u32; // 表示は補間値（カウントアップ演出）
+        // コンパクト（/compact）: セッションがあり文脈が溜まっていて、実行中でない時だけ出す。
+        let has_session = thread.map(|thread| thread.command_tx.is_some()).unwrap_or(false);
         let ratio = if max == 0 {
             0.0
         } else {
@@ -3648,7 +3738,41 @@ impl AgentPanel {
                             .text_size(px(10.5))
                             .text_color(theme.fg2)
                             .child(format!("{}/{}", human_tokens(used), human_tokens(max))),
-                    ),
+                    )
+                    // コンパクト（/compact）ボタン: トークンの真横。文脈が溜まっていて実行中でない時だけ。
+                    .when(has_session && !running && used > 0, |element| {
+                        let theme = theme.clone();
+                        element.child(
+                            div()
+                                .id("compact-context")
+                                .group("compact-context")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .flex_none()
+                                .size(px(18.))
+                                .rounded(px(4.))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.bg3))
+                                .child(
+                                    svg()
+                                        .path("icons/minimize.svg")
+                                        .size(px(12.))
+                                        .text_color(theme.fg2)
+                                        .group_hover("compact-context", |style| {
+                                            style.text_color(theme.fg0)
+                                        }),
+                                )
+                                .tooltip(Tooltip::text(
+                                    i18n::t!("agent.compact_tip"),
+                                    theme.clone(),
+                                ))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| this.compact_context(cx)),
+                                ),
+                        )
+                    }),
             )
     }
 
@@ -3973,8 +4097,8 @@ impl AgentPanel {
                     .child(column)
                     .into_any_element()
             }
-            Entry::Step { tool, args, result } => {
-                let mut body = div().flex().flex_col().min_w_0().child(
+            Entry::Step { tool, args, result, diffs, .. } => {
+                let mut body = div().flex().flex_col().min_w_0().gap(px(4.)).child(
                     div()
                         .flex()
                         .items_center()
@@ -3995,6 +4119,11 @@ impl AgentPanel {
                             )
                         }),
                 );
+                // Edit 系: before/after 差分を transcript にインライン表示（権限カードと同じ描画を再利用）。
+                for diff in diffs {
+                    body = body.child(render_diff(diff, &theme));
+                }
+                // Bash 等: 出力を ⎿ 行で（cap_output で末尾 24 行に丸め済み）。
                 if let Some(result) = result {
                     body = body.child(render_result(result, theme.fg2));
                 }
@@ -4419,6 +4548,42 @@ impl AgentPanel {
         Some(card.into_any_element())
     }
 
+    /// composer 高さのドラッグ中に呼ばれる（root の on_mouse_move）。上へ動かすと高くなる。
+    fn on_composer_resize_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.resizing_composer {
+            return;
+        }
+        // 左ボタンを離した状態で来た move（枠外 up 等）は終了扱いにする。
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.resizing_composer = false;
+            cx.notify();
+            return;
+        }
+        let dy = f32::from(event.position.y) - self.composer_resize_start_y;
+        // 上縁ハンドルを上へ（dy 負）動かすと高くなる。
+        self.composer_height =
+            (self.composer_resize_start_height - dy).clamp(COMPOSER_INPUT_MIN, COMPOSER_INPUT_MAX);
+        cx.notify();
+    }
+
+    /// composer 高さのドラッグ終了（root の on_mouse_up）。
+    fn on_composer_resize_end(
+        &mut self,
+        _event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.resizing_composer {
+            self.resizing_composer = false;
+            cx.notify();
+        }
+    }
+
     fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
@@ -4480,6 +4645,34 @@ impl AgentPanel {
                     .border_color(color.alpha(0.5))
                     .px(px(11.))
                     .py(px(8.))
+                    // 上縁リサイズハンドル: 掴んで上下ドラッグで入力欄の高さを変える（固定 68px の解消）。
+                    .child(
+                        div()
+                            .id("composer-resize")
+                            .w_full()
+                            .h(px(7.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor(CursorStyle::ResizeUpDown)
+                            .child(
+                                div()
+                                    .w(px(26.))
+                                    .h(px(2.))
+                                    .rounded_full()
+                                    .bg(theme.fg2.alpha(0.45)),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                                    this.resizing_composer = true;
+                                    this.composer_resize_start_y = f32::from(event.position.y);
+                                    this.composer_resize_start_height = this.composer_height;
+                                    cx.notify();
+                                }),
+                            ),
+                    )
                     // 宛先チップ: どのスレッド/PJ・ブランチに送るかを常に明示（混戦対策）
                     .child(
                         div()
@@ -4559,9 +4752,10 @@ impl AgentPanel {
                             })),
                     )
                     // composer 本体（平坦 EditorView。Enter=改行 / ⌘Enter=送信 / IME 確定 Enter は送信にしない）
+                    // 高さは上縁ハンドルで可変（composer_height）。長文入力は内部スクロールする。
                     .child(
                         div()
-                            .h(px(COMPOSER_INPUT_HEIGHT))
+                            .h(px(self.composer_height))
                             .child(self.composer.clone()),
                     )
                     // Zed 風の下部コントロール列: エージェント / 権限モード / モデル / effort
@@ -4733,11 +4927,14 @@ impl Render for AgentPanel {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.focus_composer(window, cx)),
             )
+            // composer 上縁ハンドルのドラッグ（root で move/up を拾い、枠外まで追従させる）。
+            .on_mouse_move(cx.listener(Self::on_composer_resize_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_composer_resize_end))
             .child(match self.tabs_view {
                 AgentTabsView::Bar => self.render_thread_tabs(cx).into_any_element(),
                 AgentTabsView::List => self.render_thread_list(cx),
             })
-            .child(self.render_meta(active))
+            .child(self.render_meta(active, cx))
             // エージェントの実行プラン（あれば transcript 上部に常設・M12-9）。
             .children(self.render_plan())
             .child(self.render_transcript(cx))
@@ -5339,9 +5536,11 @@ fn entry_from_turn((role, content): (String, String)) -> Entry {
         "user" => Entry::User(content.into()),
         "thinking" => Entry::Thinking(content.into()),
         "step" => Entry::Step {
+            id: None,
             tool: content.into(),
             args: SharedString::default(),
             result: None,
+            diffs: Vec::new(),
         },
         "checkpoint" => {
             let (id, label) = content.split_once('\t').unwrap_or(("0", "checkpoint"));
@@ -5412,14 +5611,18 @@ fn seed_threads() -> Vec<Thread> {
                     .into(),
             ),
             Entry::Step {
+                id: None,
                 tool: "Read".into(),
                 args: "(zed/crates/text/src/text.rs)".into(),
                 result: Some("1,842 行 — SumTree<Chunk> / anchor / clock::Global を確認".into()),
+                diffs: Vec::new(),
             },
             Entry::Step {
+                id: None,
                 tool: "Update Todos".into(),
                 args: "".into(),
                 result: Some("☒ text crate の設計を調査\n☐ Buffer trait の切り方を決める".into()),
+                diffs: Vec::new(),
             },
             Entry::Agent(
                 r#"## 結論: MVP は **ropey**

@@ -52,6 +52,8 @@ agent:
   context_filter: Filter by file name…
   permission_needed: ● Approval needed
   attach_tip: Attach file as context
+  compact_tip: Summarize and compact the context (/compact)
+  output_truncated: "… (%{n} lines hidden)"
   hint_submit_enter: ⏎ send / ⇧⏎ newline
   hint_submit_cmd: ⏎ newline / ⌘⏎ send
   ime_tip: Toggle Enter behavior (send ⇄ newline). IME confirm never sends

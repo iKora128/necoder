@@ -20,11 +20,19 @@ APP="target/Shirushi.app"
 python3 scripts/make-icon.py "$ICON_SRC" "$ICON_DIR"
 
 # 2) バイナリをビルド。
+# フル Xcode の無い環境（Command Line Tools のみ = `metal` コンパイラ不在）では、gpui の
+# シェーダを実行時コンパイルに切替える（`runtime-shaders` feature）。Xcode があれば従来どおり
+# 事前コンパイル（起動が僅かに速い）。CI/出荷は Xcode 前提なので影響しない。
+SHADER_FEATURES=""
+if ! xcrun -f metal >/dev/null 2>&1; then
+    SHADER_FEATURES="--features runtime-shaders"
+    echo "  metal コンパイラ無し → 実行時シェーダ（runtime-shaders）でビルド"
+fi
 if [ "$PROFILE" = "debug" ]; then
-    cargo build -p shirushi
+    cargo build -p shirushi $SHADER_FEATURES
     BIN="target/debug/shirushi"
 else
-    cargo build --release -p shirushi
+    cargo build --release -p shirushi $SHADER_FEATURES
     BIN="target/release/shirushi"
 fi
 

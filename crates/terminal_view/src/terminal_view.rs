@@ -17,7 +17,8 @@ use std::sync::Arc;
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, Notify, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::Point as AlacPoint;
+use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Side};
+use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
@@ -28,11 +29,11 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 
 use gpui::{
-    App, Bounds, Context, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, Pixels,
-    Rgba, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, div, fill, point,
-    prelude::*, px, size,
+    App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, SharedString, Style, TextRun,
+    UTF16Selection, UnderlineStyle, Window, div, fill, point, prelude::*, px, size,
 };
 use std::ops::Range;
 use theme_core::Theme;
@@ -167,6 +168,8 @@ struct RenderCell {
 struct TerminalContent {
     cells: Vec<RenderCell>,
     cursor: Option<AlacPoint>,
+    /// マウス選択の範囲（グリッド座標）。ハイライト描画と ⌘C コピーに使う。
+    selection: Option<SelectionRange>,
 }
 
 /// 統合ターミナル（モデル + ビューを兼ねる 1 エンティティ）。
@@ -178,6 +181,8 @@ pub struct TerminalView {
     size: TerminalSize,
     /// アプリケーションカーソルモード（矢印キーのエスケープが変わる）。
     app_cursor: bool,
+    /// マウス左ボタンを押してドラッグ選択中か（move で範囲を延ばす判定）。
+    selecting: bool,
     exited: bool,
     theme: Theme,
     focus_handle: FocusHandle,
@@ -254,6 +259,7 @@ impl TerminalView {
             content: TerminalContent::default(),
             size,
             app_cursor: false,
+            selecting: false,
             exited,
             theme,
             focus_handle: cx.focus_handle(),
@@ -279,6 +285,7 @@ impl TerminalView {
             content: TerminalContent::default(),
             size,
             app_cursor: false,
+            selecting: false,
             exited: false,
             theme,
             focus_handle: cx.focus_handle(),
@@ -326,8 +333,10 @@ impl TerminalView {
             .collect();
         let cursor = Some(content.cursor.point);
         self.app_cursor = term.mode().contains(TermMode::APP_CURSOR);
+        // 選択範囲もスナップショットに含める（前景でロック無しにハイライトを描くため）。
+        let selection = term.selection.as_ref().and_then(|selection| selection.to_range(&term));
         drop(term);
-        self.content = TerminalContent { cells, cursor };
+        self.content = TerminalContent { cells, cursor, selection };
         cx.notify();
     }
 
@@ -369,11 +378,153 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        // ⌘C = 選択コピー / ⌘V = 貼り付け。macOS 系のみ（⌃C は SIGINT のまま）。
+        if keystroke.modifiers.platform && !keystroke.modifiers.control {
+            match keystroke.key.as_str() {
+                "c" => {
+                    self.copy_selection(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "v" => {
+                    self.paste_from_clipboard(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if let Some(bytes) = keystroke_to_bytes(&event.keystroke, self.app_cursor) {
             self.write_bytes(bytes);
+            // 入力したら選択は解除（出力でスクロールしても古いハイライトを残さない）。
+            self.clear_selection(cx);
             cx.stop_propagation();
         }
     }
+
+    /// 選択テキストをクリップボードへ（選択が空なら何もしない＝⌘C の空打ちは無害）。
+    fn copy_selection(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self.term.lock().selection_to_string() {
+            if !text.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+        }
+    }
+
+    /// クリップボードを PTY へ貼り付ける。bracketed paste モードなら囲み列を付ける
+    /// （zsh 等が貼り付けを 1 塊として扱えるように）。
+    fn paste_from_clipboard(&self, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        if self.term.lock().mode().contains(TermMode::BRACKETED_PASTE) {
+            let mut bytes = b"\x1b[200~".to_vec();
+            bytes.extend_from_slice(text.as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+            self.write_bytes(bytes);
+        } else {
+            self.write_bytes(text.into_bytes());
+        }
+    }
+
+    /// 選択を解除してハイライトを消す（入力時など）。
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        let mut term = self.term.lock();
+        if term.selection.take().is_some() {
+            drop(term);
+            self.content.selection = None;
+            cx.notify();
+        }
+    }
+
+    /// ドラッグ選択の開始（左ボタン押下時）。押した位置をアンカーにする。
+    fn begin_selection(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        origin: gpui::Point<Pixels>,
+        cell_width: Pixels,
+        line_height: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let (row, column, side) = viewport_cell(position, origin, cell_width, line_height, self.size);
+        self.selecting = true;
+        let mut term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let point = AlacPoint::new(Line(row - offset), Column(column));
+        term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+        let range = term.selection.as_ref().and_then(|selection| selection.to_range(&term));
+        drop(term);
+        self.content.selection = range;
+        cx.notify();
+    }
+
+    /// ドラッグ選択の延長（左ボタン保持で move したとき）。
+    fn update_selection(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        origin: gpui::Point<Pixels>,
+        cell_width: Pixels,
+        line_height: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selecting {
+            return;
+        }
+        let (row, column, side) = viewport_cell(position, origin, cell_width, line_height, self.size);
+        let mut term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let point = AlacPoint::new(Line(row - offset), Column(column));
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, side);
+        }
+        let range = term.selection.as_ref().and_then(|selection| selection.to_range(&term));
+        drop(term);
+        self.content.selection = range;
+        cx.notify();
+    }
+
+    /// ドラッグ選択の確定（左ボタン離し）。ドラッグ無し＝空選択は解除する。
+    fn end_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.selecting {
+            return;
+        }
+        self.selecting = false;
+        let mut term = self.term.lock();
+        let empty = term.selection.as_ref().is_none_or(|selection| selection.is_empty());
+        if empty {
+            term.selection = None;
+        }
+        let range = term.selection.as_ref().and_then(|selection| selection.to_range(&term));
+        drop(term);
+        self.content.selection = range;
+        cx.notify();
+    }
+}
+
+/// ピクセル位置 → (グリッド行 i32, 列 usize, セル内の左右)。表示座標（display_offset 未適用）。
+fn viewport_cell(
+    position: gpui::Point<Pixels>,
+    origin: gpui::Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
+    size: TerminalSize,
+) -> (i32, usize, Side) {
+    let cell_w = f32::from(cell_width).max(1.0);
+    let relative_x = f32::from(position.x - origin.x).max(0.0);
+    let relative_y = f32::from(position.y - origin.y).max(0.0);
+    let column = ((relative_x / cell_w) as usize).min(size.columns.saturating_sub(1));
+    let row = ((relative_y / f32::from(line_height).max(1.0)) as usize).min(size.lines.saturating_sub(1));
+    // セル内で左半分なら Left（選択端の丸め。alacritty の選択境界の作法に合わせる）。
+    let side = if relative_x - (column as f32) * cell_w < cell_w / 2.0 {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    (row as i32, column, side)
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -481,6 +632,8 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
+            // テキストを選択できることを示す I ビーム。
+            .cursor(CursorStyle::IBeam)
             // クリックでフォーカス（キー入力を受けるように）。
             .on_mouse_down(
                 MouseButton::Left,
@@ -677,6 +830,8 @@ struct TerminalElement {
 struct TerminalPrepaint {
     cells: Vec<RenderCell>,
     cursor: Option<AlacPoint>,
+    /// マウス選択の範囲（グリッド座標）。ハイライトの矩形塗りに使う。
+    selection: Option<SelectionRange>,
     cell_width: Pixels,
     line_height: Pixels,
     origin: gpui::Point<Pixels>,
@@ -753,11 +908,16 @@ impl Element for TerminalElement {
         let columns = (f32::from(bounds.size.width) / f32::from(cell_width)).floor().max(2.0) as usize;
         let lines = (f32::from(bounds.size.height) / f32::from(line_height)).floor().max(1.0) as usize;
         let theme = self.terminal.read(cx).theme.clone();
-        let (cells, cursor, focused) = {
+        let (cells, cursor, selection, focused) = {
             let focused = self.terminal.read(cx).focus_handle.is_focused(window);
             self.terminal.update(cx, |terminal, _cx| {
                 terminal.resize(columns, lines);
-                (terminal.content.cells.clone(), terminal.content.cursor, focused)
+                (
+                    terminal.content.cells.clone(),
+                    terminal.content.cursor,
+                    terminal.content.selection,
+                    focused,
+                )
             })
         };
 
@@ -765,6 +925,7 @@ impl Element for TerminalElement {
         TerminalPrepaint {
             cells,
             cursor,
+            selection,
             cell_width,
             line_height,
             origin: bounds.origin,
@@ -792,6 +953,22 @@ impl Element for TerminalElement {
 
         // 面全体の背景。
         window.paint_quad(fill(bounds, theme.bg1));
+
+        // ⓪ 選択ハイライト（エディタと同じ選択面色）。背景セルより下に敷く。
+        if let Some(range) = prepaint.selection {
+            for cell in &prepaint.cells {
+                if range.contains(cell.point) {
+                    let position = point(
+                        origin.x + cell_width * (cell.point.column.0 as f32),
+                        origin.y + line_height * (cell.point.line.0 as f32),
+                    );
+                    window.paint_quad(fill(
+                        Bounds::new(position, size(cell_width, line_height)),
+                        theme_core::editor_selection(),
+                    ));
+                }
+            }
+        }
 
         // ① 既定でない背景セルの矩形。
         for cell in &prepaint.cells {
@@ -909,6 +1086,45 @@ impl Element for TerminalElement {
                         break;
                     }
                 }
+            });
+        }
+
+        // ④.5 マウスによるテキスト選択（down=アンカー / move=延長 / up=確定 → ⌘C でコピー）。
+        // 座標は file:line リンクと同じ origin/cell_width/line_height を使う。
+        {
+            let terminal = self.terminal.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || !bounds.contains(&event.position)
+                {
+                    return;
+                }
+                terminal.update(cx, |terminal, cx| {
+                    terminal.begin_selection(event.position, origin, cell_width, line_height, cx);
+                });
+            });
+        }
+        {
+            let terminal = self.terminal.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || event.pressed_button != Some(MouseButton::Left)
+                {
+                    return;
+                }
+                terminal.update(cx, |terminal, cx| {
+                    terminal.update_selection(event.position, origin, cell_width, line_height, cx);
+                });
+            });
+        }
+        {
+            let terminal = self.terminal.clone();
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                    return;
+                }
+                terminal.update(cx, |terminal, cx| terminal.end_selection(cx));
             });
         }
 

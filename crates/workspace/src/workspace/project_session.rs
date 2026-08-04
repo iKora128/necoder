@@ -598,6 +598,8 @@ impl Workspace {
                     .ok()
                     .and_then(|value| value.parse().ok()),
                 fleet_clock: false,
+                rollup_index: 0,
+                rollup_ticker: false,
                 show_settings: std::env::var_os("SHIRUSHI_SETTINGS").is_some()
                     || (!settings::get(cx).onboarded
                         && !(cfg!(debug_assertions)

@@ -961,11 +961,15 @@ impl Workspace {
     /// スレッド状態を `RunningRegistry` から集計し「N 実行 · M 承認待ち · K 完了」を常時表示。最重要
     /// （Blocked>Working>Done）の代表スレッドを状態ドット＋名前で出し、click で該当プロジェクト＋Agent へ。
     /// ニュースティッカーではない（今どうなっているかの一覧性を優先）。0 件なら空スペーサー。
-    fn render_activity_rollup(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use agent_panel::ThreadActivity;
-        let theme = self.theme.clone();
+    /// フッターのニュース欄に出す稼働シグナル（実行中/承認待ち/完了未確認）を全プロジェクトから集める。
+    /// 緊急度（Blocked>Working>Done）降順で安定ソート＝順送りの並びと先頭（初期代表）を決める。
+    /// render（表示）と回転ティッカー（自停止判定）の両方が使う。
+    fn activity_signals(
+        &self,
+        cx: &App,
+    ) -> Vec<(usize, SharedString, Hsla, agent_panel::ThreadActivity)> {
         let registry = cx.try_global::<agent_panel::RunningRegistry>();
-        let mut signals: Vec<(usize, SharedString, Hsla, ThreadActivity)> = Vec::new();
+        let mut signals: Vec<(usize, SharedString, Hsla, agent_panel::ThreadActivity)> = Vec::new();
         for (index, slot) in self.project_sessions.projects.iter().enumerate() {
             if let Some(rows) = registry.and_then(|reg| reg.0.get(slot.worktree.root())) {
                 for (name, color, activity) in rows {
@@ -975,6 +979,46 @@ impl Workspace {
                 }
             }
         }
+        signals.sort_by_key(|signal| std::cmp::Reverse(signal.3.urgency()));
+        signals
+    }
+
+    /// ニュース欄の順送りを回す（稼働シグナルが 2 件以上ある間だけ ~3.2 秒ごとに `rollup_index` を進める）。
+    /// 多重起動は `rollup_ticker` で防ぎ、2 件未満になったら次 tick で自停止する（idle 予算を守る＝
+    /// `fleet_clock` と同型）。トップの `render` から毎フレーム呼ばれるが、稼働中は即 return する。
+    pub(crate) fn ensure_rollup_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.chrome.rollup_ticker || self.activity_signals(cx).len() < 2 {
+            return;
+        }
+        self.chrome.rollup_ticker = true;
+        cx.spawn(async move |workspace, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(3200))
+                    .await;
+                let keep_running = workspace.update(cx, |workspace, cx| {
+                    if workspace.activity_signals(cx).len() >= 2 {
+                        workspace.chrome.rollup_index =
+                            workspace.chrome.rollup_index.wrapping_add(1);
+                        cx.notify();
+                        true
+                    } else {
+                        workspace.chrome.rollup_ticker = false;
+                        false
+                    }
+                });
+                if !matches!(keep_running, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn render_activity_rollup(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use agent_panel::ThreadActivity;
+        let theme = self.theme.clone();
+        let signals = self.activity_signals(cx);
         let container = div()
             .flex_1()
             .flex()
@@ -984,6 +1028,7 @@ impl Workspace {
         if signals.is_empty() {
             return container.into_any_element(); // 空＝ただのスペーサー（従来と同じ）
         }
+        // 右側の集計サマリ（従来どおり「N 実行 · M 承認待ち · K 完了」）。
         let count = |want: ThreadActivity| {
             signals
                 .iter()
@@ -1004,42 +1049,73 @@ impl Workspace {
             segments.push(i18n::t!("agent.rollup_done", "n" => done));
         }
         let summary = SharedString::from(segments.join("  ·  "));
-        // 最重要（Blocked>Working>Done）の代表。click でそのプロジェクト＋Agent パネルへ飛ぶ。
-        let rep = signals
-            .into_iter()
-            .max_by_key(|signal| signal.3.urgency());
-        container.child(
-            div()
-                .id("statusbar-activity-rollup")
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .px(px(8.))
-                .rounded(px(4.))
-                .cursor_pointer()
-                .hover(|style| style.bg(theme.bg2))
-                .when_some(rep, |element, (index, name, color, activity)| {
-                    element
-                        .child(agent_panel::activity_dot("rollup-rep", 8.0, color, activity))
-                        .child(div().text_color(theme.fg1).child(name))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                this.switch_project(index, window, cx);
-                                this.chrome.show_right = true;
-                                this.agent_active = true;
-                                cx.notify();
-                            }),
-                        )
-                })
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(theme.fg2)
-                        .child(summary),
-                ),
-        )
-        .into_any_element()
+
+        // 順送りで今見せる 1 件（`rollup_index` を件数で mod。ティッカーが 3.2 秒ごとに進める）。
+        let total = signals.len();
+        let position = self.chrome.rollup_index % total;
+        let (index, name, color, activity) = signals[position].clone();
+        // 中身（●名前）は切替のたびに淡くフェードイン（id が rollup_index で変わる＝新アニメ）。
+        // 1回限りなので切替の 280ms 以外は再描画ゼロ（idle 予算を守る）。クリック判定は包まない
+        // 外側 div に持たせ、アニメは内容だけに掛ける（インタラクションを壊さない）。
+        let content = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(agent_panel::activity_dot("rollup-rep", 8.0, color, activity))
+            .child(div().text_color(theme.fg1).child(name))
+            .with_animation(
+                ("rollup-fade", self.chrome.rollup_index),
+                Animation::new(std::time::Duration::from_millis(280)),
+                |element, delta| element.opacity(0.25 + 0.75 * delta),
+            );
+        let current = div()
+            .id("statusbar-activity-rollup")
+            .flex()
+            .items_center()
+            .px(px(8.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg2))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.switch_project(index, window, cx);
+                    this.chrome.show_right = true;
+                    this.agent_active = true;
+                    cx.notify();
+                }),
+            )
+            .child(content);
+
+        container
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(current)
+                    // 2 件以上なら位置ドット（●=今 / ·=他）で「順送り中・全部で N 件」を示す。
+                    .when(total >= 2, |element| {
+                        let mut dots = div().flex().items_center().gap(px(3.));
+                        for slot in 0..total {
+                            let on = slot == position;
+                            dots = dots.child(
+                                div()
+                                    .size(px(if on { 5. } else { 4. }))
+                                    .rounded_full()
+                                    .bg(if on { theme.fg1 } else { theme.fg2.alpha(0.4) }),
+                            );
+                        }
+                        element.child(dots)
+                    })
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.fg2)
+                            .child(summary),
+                    ),
+            )
+            .into_any_element()
     }
 
     pub(crate) fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {

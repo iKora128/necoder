@@ -72,6 +72,40 @@ pub struct PermissionDiff {
     pub new_text: String,
 }
 
+/// ツール呼び出しの種別（ACP `ToolKind` の UI 非依存な写し）。表示の分岐に使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallKind {
+    Read,
+    Edit,
+    Delete,
+    Move,
+    Search,
+    Execute,
+    Think,
+    Fetch,
+    Other,
+}
+
+/// 1 ツール呼び出しの情報（`ToolCall` = 開始 / `ToolCallUpdate` = 更新 を UI 非依存に簡約）。
+/// transcript に「何をした・どのファイル・before/after・出力」を出すための素材。
+/// 更新では未変更フィールドは None / 空（＝据え置き）で届く。
+#[derive(Debug, Clone)]
+pub struct ToolCallInfo {
+    /// 相関 ID（開始と更新を結ぶ）。
+    pub id: String,
+    /// 人間可読タイトル（例「Edit src/main.rs」）。更新では None のことがある。
+    pub title: Option<String>,
+    pub kind: Option<ToolCallKind>,
+    /// 触ったファイル（パス）。
+    pub locations: Vec<String>,
+    /// ファイル編集の差分（Edit 系。before/after）。
+    pub diffs: Vec<PermissionDiff>,
+    /// 実行出力など本文テキスト（Bash 出力・要約等）。
+    pub output: Option<String>,
+    /// 完了したか（Some(true)=成功 / Some(false)=失敗 / None=進行中・不明）。
+    pub completed: Option<bool>,
+}
+
 /// プラン 1 項目の状態（ACP `PlanEntryStatus` の写し）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanStatus {
@@ -99,8 +133,11 @@ pub enum AgentEvent {
     AgentChunk(String),
     /// 思考の増分テキスト（`AgentThoughtChunk`）。
     ThoughtChunk(String),
-    /// ツール呼び出しの開始（`ToolCall`）。`title` は人間可読の説明（例「Read src/main.rs」）。
-    ToolStarted(String),
+    /// ツール呼び出しの開始（`ToolCall`）。タイトル・種別・触ったファイル・差分・出力を含む。
+    ToolStarted(ToolCallInfo),
+    /// ツール呼び出しの更新（`ToolCallUpdate`）。実行後の出力・差分・完了状態が後追いで届く。
+    /// `id` で開始時のエントリに紐づける。
+    ToolUpdated(ToolCallInfo),
     /// コンテキスト使用量の更新（`UsageUpdate`）。`used`/`size` はトークン数。
     Usage { used: u64, size: u64 },
     /// エージェントが広告する権限モード一覧 + 現在モード（セッション開始時）。`(mode_id, 表示名)`。
@@ -741,7 +778,38 @@ pub async fn run_session_on(
                                         }
                                         v1::SessionUpdate::ToolCall(tool_call) => {
                                             event_tx
-                                                .unbounded_send(AgentEvent::ToolStarted(tool_call.title))
+                                                .unbounded_send(AgentEvent::ToolStarted(ToolCallInfo {
+                                                    id: tool_call.tool_call_id.0.to_string(),
+                                                    title: Some(tool_call.title),
+                                                    kind: Some(map_tool_kind(tool_call.kind)),
+                                                    locations: tool_locations(&tool_call.locations),
+                                                    diffs: tool_diffs(&tool_call.content),
+                                                    output: tool_output(&tool_call.content),
+                                                    completed: tool_completed(tool_call.status),
+                                                }))
+                                                .ok();
+                                        }
+                                        v1::SessionUpdate::ToolCallUpdate(update) => {
+                                            let content =
+                                                update.fields.content.as_deref().unwrap_or(&[]);
+                                            event_tx
+                                                .unbounded_send(AgentEvent::ToolUpdated(ToolCallInfo {
+                                                    id: update.tool_call_id.0.to_string(),
+                                                    title: update.fields.title.clone(),
+                                                    kind: update.fields.kind.map(map_tool_kind),
+                                                    locations: update
+                                                        .fields
+                                                        .locations
+                                                        .as_deref()
+                                                        .map(tool_locations)
+                                                        .unwrap_or_default(),
+                                                    diffs: tool_diffs(content),
+                                                    output: tool_output(content),
+                                                    completed: update
+                                                        .fields
+                                                        .status
+                                                        .and_then(tool_completed),
+                                                }))
                                                 .ok();
                                         }
                                         v1::SessionUpdate::UsageUpdate(usage) => {
@@ -836,6 +904,69 @@ pub async fn run_session_on(
 /// `session/request_permission` を UI へ橋渡しして応答する。
 /// タイトル・編集差分・選択肢を [`AgentEvent::PermissionRequest`] で流し、UI が選んだ**添字**を
 /// `respond` 経由で受け取って `Selected(option_id)` を返す。UI が sender を drop したら `Cancelled`。
+/// ACP の `ToolKind` を UI 非依存な [`ToolCallKind`] へ写す（未知値は Other）。
+fn map_tool_kind(kind: v1::ToolKind) -> ToolCallKind {
+    match kind {
+        v1::ToolKind::Read => ToolCallKind::Read,
+        v1::ToolKind::Edit => ToolCallKind::Edit,
+        v1::ToolKind::Delete => ToolCallKind::Delete,
+        v1::ToolKind::Move => ToolCallKind::Move,
+        v1::ToolKind::Search => ToolCallKind::Search,
+        v1::ToolKind::Execute => ToolCallKind::Execute,
+        v1::ToolKind::Think => ToolCallKind::Think,
+        v1::ToolKind::Fetch => ToolCallKind::Fetch,
+        _ => ToolCallKind::Other,
+    }
+}
+
+/// ツール内容からファイル編集差分（before/after）を取り出す（権限カードと同じ抽出）。
+fn tool_diffs(content: &[v1::ToolCallContent]) -> Vec<PermissionDiff> {
+    content
+        .iter()
+        .filter_map(|item| match item {
+            v1::ToolCallContent::Diff(diff) => Some(PermissionDiff {
+                path: diff.path.display().to_string(),
+                old_text: diff.old_text.clone(),
+                new_text: diff.new_text.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// ツール内容から本文テキスト（Bash 出力・Read 概要など）を連結して取り出す。
+fn tool_output(content: &[v1::ToolCallContent]) -> Option<String> {
+    let mut text = String::new();
+    for item in content {
+        if let v1::ToolCallContent::Content(block) = item {
+            if let v1::ContentBlock::Text(chunk) = &block.content {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&chunk.text);
+            }
+        }
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+/// ツールが触ったファイルのパス一覧を取り出す。
+fn tool_locations(locations: &[v1::ToolCallLocation]) -> Vec<String> {
+    locations
+        .iter()
+        .map(|location| location.path.display().to_string())
+        .collect()
+}
+
+/// ツールの完了状態を bool へ（成功=Some(true) / 失敗=Some(false) / 進行中=None）。
+fn tool_completed(status: v1::ToolCallStatus) -> Option<bool> {
+    match status {
+        v1::ToolCallStatus::Completed => Some(true),
+        v1::ToolCallStatus::Failed => Some(false),
+        _ => None,
+    }
+}
+
 async fn handle_permission_request(
     request: v1::RequestPermissionRequest,
     responder: acp::Responder<v1::RequestPermissionResponse>,
@@ -977,7 +1108,16 @@ mod tests {
                             chunks.push(text);
                         }
                         AgentEvent::ThoughtChunk(text) => eprintln!("[think] {text}"),
-                        AgentEvent::ToolStarted(title) => eprintln!("[tool] {title}"),
+                        AgentEvent::ToolStarted(info) => {
+                            eprintln!("[tool] {}", info.title.unwrap_or_default())
+                        }
+                        AgentEvent::ToolUpdated(info) => eprintln!(
+                            "[tool update] id={} completed={:?} diffs={} output={}",
+                            info.id,
+                            info.completed,
+                            info.diffs.len(),
+                            info.output.map(|text| text.lines().count()).unwrap_or(0)
+                        ),
                         AgentEvent::Usage { used, size } => eprintln!("[usage] {used}/{size}"),
                         AgentEvent::Modes { modes, current } => {
                             eprintln!("[modes] current={current} available={modes:?}")

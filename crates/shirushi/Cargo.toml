@@ -11,6 +11,11 @@ default-run = "shirushi" # `cargo run -p shirushi` は本体を実行（hello �
 # gpui の render_to_image を test-support 経由で有効化し、Metal 描画結果を PNG 化する
 # （screencapture 権限不要）。**通常ビルドには含めない**＝出荷バイナリに test-support を混ぜない。
 screenshot = ["dep:image", "gpui/test-support", "gpui_platform/test-support"]
+# フル Xcode の無い環境（Command Line Tools のみ）でローカルビルドするための逃げ道。
+# gpui のシェーダを**実行時コンパイル**に切替え、ビルド時の `metal` コンパイラ（Xcode 同梱）を
+# 不要にする。既定 off＝出荷/CI は従来どおり事前コンパイル（起動が僅かに速い）。
+# `bundle-mac.sh` が `metal` 不在を検知した時だけ自動で付ける（手動なら --features runtime-shaders）。
+runtime-shaders = ["gpui_platform/runtime_shaders"]
 
 [dependencies]
 anyhow.workspace = true

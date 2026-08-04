@@ -53,6 +53,8 @@ agent:
   context_filter: ファイル名で絞り込み…
   permission_needed: ● 承認が必要
   attach_tip: ファイルを文脈に添付
+  compact_tip: 文脈を要約して圧縮する（/compact）
+  output_truncated: "… (%{n} 行省略)"
   hint_submit_enter: ⏎ 送信 / ⇧⏎ 改行
   hint_submit_cmd: ⏎ 改行 / ⌘⏎ 送信
   ime_tip: Enter の挙動を切替（送信 ⇄ 改行）。日本語 IME の変換確定では送信しません
