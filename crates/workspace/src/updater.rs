@@ -53,8 +53,14 @@ fn version_newer(latest: &str, current: &str) -> bool {
 /// 新しくない・dmg が無い・draft/prerelease は None。
 pub fn parse_latest_release(json: &str, current_version: &str) -> Option<UpdateInfo> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    if value.get("draft").and_then(|v| v.as_bool()).unwrap_or(false)
-        || value.get("prerelease").and_then(|v| v.as_bool()).unwrap_or(false)
+    if value
+        .get("draft")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || value
+            .get("prerelease")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     {
         return None;
     }
@@ -66,18 +72,31 @@ pub fn parse_latest_release(json: &str, current_version: &str) -> Option<UpdateI
     let dmg_url = assets.iter().find_map(|asset| {
         let name = asset.get("name")?.as_str()?;
         if name.ends_with(".dmg") {
-            asset.get("browser_download_url")?.as_str().map(str::to_string)
+            asset
+                .get("browser_download_url")?
+                .as_str()
+                .map(str::to_string)
         } else {
             None
         }
     })?;
-    Some(UpdateInfo { version: tag.trim_start_matches('v').to_string(), dmg_url })
+    Some(UpdateInfo {
+        version: tag.trim_start_matches('v').to_string(),
+        dmg_url,
+    })
 }
 
 /// latest リリースを確認する（背景スレッドで呼ぶ）。ネット断・API 制限は静かに None。
 pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
     let output = Command::new("curl")
-        .args(["-fsSL", "--max-time", "10", "-H", "User-Agent: shirushi-updater", RELEASES_URL])
+        .args([
+            "-fsSL",
+            "--max-time",
+            "10",
+            "-H",
+            "User-Agent: shirushi-updater",
+            RELEASES_URL,
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -89,52 +108,82 @@ pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
 /// .dmg をダウンロード → Apple 署名/公証を検証 → 実行中の .app を差し替える（背景で呼ぶ）。
 /// 成功したら Ok(()) = 「再起動で反映」を UI が案内する。
 pub fn download_and_install(info: &UpdateInfo) -> Result<()> {
-    let bundle = running_app_bundle()
-        .context("実行中の .app が見つかりません（開発ビルドでは更新できません）")?;
-    let staging = PathBuf::from(format!("/tmp/shirushi-update-{}.dmg", info.version));
+    let bundle = running_app_bundle().context(i18n::t!("update.err_no_bundle"))?;
+    // 予測不能な 0700 の作業ディレクトリに落とす（旧: /tmp の固定名 = spctl 検証→マウントの間に
+    // 差し替えられる理屈上の隙。sticky /tmp で他ユーザーの unlink は防げるが、名前も読めなくする）。
+    let staging_dir = unique_staging_dir()?;
+    let staging = staging_dir.join("Shirushi.dmg");
     // 1) ダウンロード。
     let status = Command::new("curl")
         .args(["-fSL", "--max-time", "300", "-o"])
         .arg(&staging)
         .arg(&info.dmg_url)
         .status()
-        .context("curl を実行できません")?;
-    anyhow::ensure!(status.success(), "ダウンロードに失敗");
+        .context(i18n::t!("update.err_curl"))?;
+    anyhow::ensure!(status.success(), i18n::t!("update.err_download"));
     // 2) Apple 署名/公証の検証（改ざん・未署名はここで弾く）。
     let assess = Command::new("spctl")
-        .args(["--assess", "--type", "open", "--context", "context:primary-signature", "-v"])
+        .args([
+            "--assess",
+            "--type",
+            "open",
+            "--context",
+            "context:primary-signature",
+            "-v",
+        ])
         .arg(&staging)
         .output()
-        .context("spctl を実行できません")?;
+        .context(i18n::t!("update.err_spctl"))?;
     anyhow::ensure!(
         assess.status.success(),
-        "署名検証に失敗（未署名または改ざんの疑い）: {}",
-        String::from_utf8_lossy(&assess.stderr)
+        i18n::t!("update.err_signature", "detail" => String::from_utf8_lossy(&assess.stderr))
     );
     // 3) マウント → .app を差し替え → アンマウント。
-    let mount_point = PathBuf::from(format!("/tmp/shirushi-update-mount-{}", info.version));
+    let mount_point = staging_dir.join("mount");
     let attach = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
         .arg(&mount_point)
         .arg(&staging)
         .output()
-        .context("hdiutil attach に失敗")?;
-    anyhow::ensure!(attach.status.success(), "dmg のマウントに失敗");
+        .context(i18n::t!("update.err_attach"))?;
+    anyhow::ensure!(attach.status.success(), i18n::t!("update.err_mount"));
     let result = (|| -> Result<()> {
         let new_app = mount_point.join("Shirushi.app");
-        anyhow::ensure!(new_app.exists(), "dmg に Shirushi.app が見つかりません");
+        anyhow::ensure!(new_app.exists(), i18n::t!("update.err_no_app"));
         // ditto は bundle を安全に複製する（メタデータ/署名を保つ）。実行中でも置換可能。
         let copy = Command::new("ditto")
             .arg(&new_app)
             .arg(&bundle)
             .status()
-            .context("ditto に失敗")?;
-        anyhow::ensure!(copy.success(), ".app の差し替えに失敗");
+            .context(i18n::t!("update.err_ditto"))?;
+        anyhow::ensure!(copy.success(), i18n::t!("update.err_replace"));
         Ok(())
     })();
-    let _detach = Command::new("hdiutil").args(["detach"]).arg(&mount_point).status();
-    let _cleanup = std::fs::remove_file(&staging);
+    let _detach = Command::new("hdiutil")
+        .args(["detach"])
+        .arg(&mount_point)
+        .status();
+    let _cleanup = std::fs::remove_dir_all(&staging_dir);
     result
+}
+
+/// 更新作業用の一意なディレクトリ（unix は 0700）を作る。既存衝突は fail-closed（作り直さない）。
+fn unique_staging_dir() -> Result<PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("shirushi-update-{}-{nanos}", std::process::id()));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&dir)
+        .context(i18n::t!("update.err_staging"))?;
+    Ok(dir)
 }
 
 /// 実行中バイナリの .app バンドル（`…/Shirushi.app/Contents/MacOS/shirushi` → `…/Shirushi.app`）。

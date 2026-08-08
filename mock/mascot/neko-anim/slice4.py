@@ -9,7 +9,8 @@ from collections import deque
 from PIL import Image
 import numpy as np
 
-SNAP = "/Users/daichi/Work/experience/spritefusion-pixel-snapper/target/release/spritefusion-pixel-snapper"
+# pixel-snap ツール（別リポジトリのバイナリ）。PATH か SPRITEFUSION_SNAP で指す。
+SNAP = os.environ.get("SPRITEFUSION_SNAP", "spritefusion-pixel-snapper")
 BGC = (27, 27, 34)
 a = sys.argv[1:]
 SHEET, OUT = a[0], a[1]

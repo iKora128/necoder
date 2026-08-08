@@ -4,14 +4,14 @@
 //! プロンプト送信/更新受信までを担い、UI（agent_panel）はチャネル越しに駆動する。
 //! まずは **起動 + initialize ハンドシェイク**（＝「繋がる」ことの土台）。session/prompt は継続。
 //!
-//! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（daichi さんの環境で動作確認）。
+//! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
-use agent_client_protocol as acp;
 use acp::schema::v1;
 use acp::schema::ProtocolVersion;
+use agent_client_protocol as acp;
 use anyhow::{Context as _, Result};
-use futures::StreamExt;
 use futures::channel::mpsc;
+use futures::StreamExt;
 use host::{CommandSpec, Host, LocalHost};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -345,8 +345,15 @@ pub const AGENTS: &[AgentKind] = &[
 ];
 
 /// UI のエージェントセレクタに出すラベル一覧（[`AGENTS`] と 1:1 対応・Zed の registry 表示名準拠）。
-pub const AGENT_LABELS: &[&str] =
-    &["Claude Code", "Codex", "GitHub Copilot", "Qwen Code", "OpenCode", "Kimi CLI", "Grok Build"];
+pub const AGENT_LABELS: &[&str] = &[
+    "Claude Code",
+    "Codex",
+    "GitHub Copilot",
+    "Qwen Code",
+    "OpenCode",
+    "Kimi CLI",
+    "Grok Build",
+];
 
 impl AgentKind {
     /// ラベル（例 "Claude"）から引く。
@@ -383,18 +390,30 @@ impl AgentKind {
         let extra: Vec<String> = self.extra_args.iter().map(|arg| arg.to_string()).collect();
         // 1) PATH の単体バイナリ
         if let Some(path) = find_in_path(self.bin) {
-            return Some(AgentCommand { path, args: extra, cwd });
+            return Some(AgentCommand {
+                path,
+                args: extra,
+                cwd,
+            });
         }
         // 2) Zed が展開済みの npx キャッシュ（ネット不要）
         if let Some(bin) = zed_cached_agent(self.bin) {
-            return Some(AgentCommand { path: bin, args: extra, cwd });
+            return Some(AgentCommand {
+                path: bin,
+                args: extra,
+                cwd,
+            });
         }
         // 3) npx フォールバック（npm パッケージがある agent のみ。node/npx が PATH に要る）
         let package = self.package?;
         let npx = find_in_path("npx")?;
         let mut args = vec!["-y".to_string(), package.to_string()];
         args.extend(extra);
-        Some(AgentCommand { path: npx, args, cwd })
+        Some(AgentCommand {
+            path: npx,
+            args,
+            cwd,
+        })
     }
 
     /// ローカルでの導入状況（設定画面のステータス表示用）。認証状態までは見ない（＝CLI 任せ）。
@@ -421,19 +440,27 @@ impl AgentKind {
                     format!("command -v -- {}", shell_word(binary)),
                 ]))
                 .ok()?;
-            output.success().then(|| {
-                PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())
-            })
+            output
+                .success()
+                .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string()))
         };
         let extra: Vec<String> = self.extra_args.iter().map(|arg| arg.to_string()).collect();
         if let Some(path) = resolve(self.bin) {
-            return Some(AgentCommand { path, args: extra, cwd });
+            return Some(AgentCommand {
+                path,
+                args: extra,
+                cwd,
+            });
         }
         let package = self.package?;
         let npx = resolve("npx")?;
         let mut args = vec!["-y".to_string(), package.to_string()];
         args.extend(extra);
-        Some(AgentCommand { path: npx, args, cwd })
+        Some(AgentCommand {
+            path: npx,
+            args,
+            cwd,
+        })
     }
 }
 
@@ -527,12 +554,20 @@ pub async fn connect_and_initialize(command: &AgentCommand) -> Result<v1::Initia
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit()) // エージェントのログは我々の stderr へ（検証しやすく）
         .spawn()
-        .with_context(|| format!("claude-agent-acp を起動できない: {}", command.path.display()))?;
+        .with_context(|| {
+            format!(
+                "claude-agent-acp を起動できない: {}",
+                command.path.display()
+            )
+        })?;
 
     let stdin = child.stdin.take().context("子プロセスの stdin が無い")?;
     let stdout = child.stdout.take().context("子プロセスの stdout が無い")?;
     // 同期パイプを futures の AsyncWrite / AsyncRead へ（ACP crate 自身の stdio と同じ blocking::Unblock 手法）
-    let transport = acp::ByteStreams::new(blocking::Unblock::new(stdin), blocking::Unblock::new(stdout));
+    let transport = acp::ByteStreams::new(
+        blocking::Unblock::new(stdin),
+        blocking::Unblock::new(stdout),
+    );
 
     let response = acp::Client
         .builder()
@@ -559,11 +594,19 @@ pub async fn prompt_once(command: &AgentCommand, prompt: &str) -> Result<String>
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .with_context(|| format!("claude-agent-acp を起動できない: {}", command.path.display()))?;
+        .with_context(|| {
+            format!(
+                "claude-agent-acp を起動できない: {}",
+                command.path.display()
+            )
+        })?;
 
     let stdin = child.stdin.take().context("子プロセスの stdin が無い")?;
     let stdout = child.stdout.take().context("子プロセスの stdout が無い")?;
-    let transport = acp::ByteStreams::new(blocking::Unblock::new(stdin), blocking::Unblock::new(stdout));
+    let transport = acp::ByteStreams::new(
+        blocking::Unblock::new(stdin),
+        blocking::Unblock::new(stdout),
+    );
 
     // クロージャは 'static になり得るよう所有データを move する（借用を持ち込まない）。
     let prompt = prompt.to_string();
@@ -575,7 +618,11 @@ pub async fn prompt_once(command: &AgentCommand, prompt: &str) -> Result<String>
                 .send_request(initialize_request())
                 .block_task()
                 .await?;
-            let mut session = connection.build_session(&cwd).block_task().start_session().await?;
+            let mut session = connection
+                .build_session(&cwd)
+                .block_task()
+                .start_session()
+                .await?;
             session.send_prompt(prompt)?;
             session.read_to_string().await
         })
@@ -609,14 +656,17 @@ pub async fn run_session_on(
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
-    let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
-        .args(command.args.clone());
+    let spec =
+        CommandSpec::new(command.path.to_string_lossy(), &command.cwd).args(command.args.clone());
     let mut process = host
         .spawn_process(&spec)
         .with_context(|| format!("ACP agent を起動できない: {}", command.path.display()))?;
     let stdin = process.take_stdin()?;
     let stdout = process.take_stdout()?;
-    let transport = acp::ByteStreams::new(blocking::Unblock::new(stdin), blocking::Unblock::new(stdout));
+    let transport = acp::ByteStreams::new(
+        blocking::Unblock::new(stdin),
+        blocking::Unblock::new(stdout),
+    );
 
     let cwd = command.cwd.clone();
     let outcome = acp::Client
@@ -689,7 +739,10 @@ pub async fn run_session_on(
                             .ok();
                         continue;
                     }
-                    SessionCommand::SetConfig { config_id, value_id } => {
+                    SessionCommand::SetConfig {
+                        config_id,
+                        value_id,
+                    } => {
                         // モデル/思考レベル等を変更。応答は更新後の一覧なので UI へ反映する。
                         if let Ok(response) = connection
                             .send_request(v1::SetSessionConfigOptionRequest::new(
@@ -751,7 +804,9 @@ pub async fn run_session_on(
                         TurnEvent::Command(None) => break,
                         TurnEvent::Update(Ok(update)) => update,
                         TurnEvent::Update(Err(error)) => {
-                            event_tx.unbounded_send(AgentEvent::Failed(error.to_string())).ok();
+                            event_tx
+                                .unbounded_send(AgentEvent::Failed(error.to_string()))
+                                .ok();
                             break;
                         }
                     };
@@ -760,56 +815,66 @@ pub async fn run_session_on(
                             acp::util::MatchDispatch::new(dispatch)
                                 .if_notification(async |notification: v1::SessionNotification| {
                                     match notification.update {
-                                        v1::SessionUpdate::AgentMessageChunk(v1::ContentChunk {
-                                            content: v1::ContentBlock::Text(text),
-                                            ..
-                                        }) => {
+                                        v1::SessionUpdate::AgentMessageChunk(
+                                            v1::ContentChunk {
+                                                content: v1::ContentBlock::Text(text),
+                                                ..
+                                            },
+                                        ) => {
                                             event_tx
                                                 .unbounded_send(AgentEvent::AgentChunk(text.text))
                                                 .ok();
                                         }
-                                        v1::SessionUpdate::AgentThoughtChunk(v1::ContentChunk {
-                                            content: v1::ContentBlock::Text(text),
-                                            ..
-                                        }) => {
+                                        v1::SessionUpdate::AgentThoughtChunk(
+                                            v1::ContentChunk {
+                                                content: v1::ContentBlock::Text(text),
+                                                ..
+                                            },
+                                        ) => {
                                             event_tx
                                                 .unbounded_send(AgentEvent::ThoughtChunk(text.text))
                                                 .ok();
                                         }
                                         v1::SessionUpdate::ToolCall(tool_call) => {
                                             event_tx
-                                                .unbounded_send(AgentEvent::ToolStarted(ToolCallInfo {
-                                                    id: tool_call.tool_call_id.0.to_string(),
-                                                    title: Some(tool_call.title),
-                                                    kind: Some(map_tool_kind(tool_call.kind)),
-                                                    locations: tool_locations(&tool_call.locations),
-                                                    diffs: tool_diffs(&tool_call.content),
-                                                    output: tool_output(&tool_call.content),
-                                                    completed: tool_completed(tool_call.status),
-                                                }))
+                                                .unbounded_send(AgentEvent::ToolStarted(
+                                                    ToolCallInfo {
+                                                        id: tool_call.tool_call_id.0.to_string(),
+                                                        title: Some(tool_call.title),
+                                                        kind: Some(map_tool_kind(tool_call.kind)),
+                                                        locations: tool_locations(
+                                                            &tool_call.locations,
+                                                        ),
+                                                        diffs: tool_diffs(&tool_call.content),
+                                                        output: tool_output(&tool_call.content),
+                                                        completed: tool_completed(tool_call.status),
+                                                    },
+                                                ))
                                                 .ok();
                                         }
                                         v1::SessionUpdate::ToolCallUpdate(update) => {
                                             let content =
                                                 update.fields.content.as_deref().unwrap_or(&[]);
                                             event_tx
-                                                .unbounded_send(AgentEvent::ToolUpdated(ToolCallInfo {
-                                                    id: update.tool_call_id.0.to_string(),
-                                                    title: update.fields.title.clone(),
-                                                    kind: update.fields.kind.map(map_tool_kind),
-                                                    locations: update
-                                                        .fields
-                                                        .locations
-                                                        .as_deref()
-                                                        .map(tool_locations)
-                                                        .unwrap_or_default(),
-                                                    diffs: tool_diffs(content),
-                                                    output: tool_output(content),
-                                                    completed: update
-                                                        .fields
-                                                        .status
-                                                        .and_then(tool_completed),
-                                                }))
+                                                .unbounded_send(AgentEvent::ToolUpdated(
+                                                    ToolCallInfo {
+                                                        id: update.tool_call_id.0.to_string(),
+                                                        title: update.fields.title.clone(),
+                                                        kind: update.fields.kind.map(map_tool_kind),
+                                                        locations: update
+                                                            .fields
+                                                            .locations
+                                                            .as_deref()
+                                                            .map(tool_locations)
+                                                            .unwrap_or_default(),
+                                                        diffs: tool_diffs(content),
+                                                        output: tool_output(content),
+                                                        completed: update
+                                                            .fields
+                                                            .status
+                                                            .and_then(tool_completed),
+                                                    },
+                                                ))
                                                 .ok();
                                         }
                                         v1::SessionUpdate::UsageUpdate(usage) => {
@@ -1022,9 +1087,9 @@ async fn handle_permission_request(
     // ユーザーの決定（選択肢の添字）を待つ。sender を drop されたら None＝キャンセル。
     let chosen = respond_rx.next().await;
     let outcome = match chosen.and_then(|index| request.options.get(index)) {
-        Some(option) => v1::RequestPermissionOutcome::Selected(
-            v1::SelectedPermissionOutcome::new(option.option_id.clone()),
-        ),
+        Some(option) => v1::RequestPermissionOutcome::Selected(v1::SelectedPermissionOutcome::new(
+            option.option_id.clone(),
+        )),
         None => v1::RequestPermissionOutcome::Cancelled,
     };
     responder.respond(v1::RequestPermissionResponse::new(outcome))
@@ -1044,16 +1109,37 @@ mod tests {
     #[test]
     fn oneshot_maps_default_agent_to_its_cli() {
         // タイトル生成は「既定 Agent の CLI テンプレート」を使う（Claude 決め打ちをやめた）。
-        let claude = AgentKind::by_label("Claude Code").and_then(|k| k.oneshot()).unwrap();
-        assert!(claude.contains("claude -p") && claude.contains("{prompt}") && claude.contains("{excerpt}"));
+        let claude = AgentKind::by_label("Claude Code")
+            .and_then(|k| k.oneshot())
+            .unwrap();
+        assert!(
+            claude.contains("claude -p")
+                && claude.contains("{prompt}")
+                && claude.contains("{excerpt}")
+        );
         // codex は agent 実行で stdout が汚いため --output-last-message + cat でクリーンに拾う。
-        let codex = AgentKind::by_label("Codex").and_then(|k| k.oneshot()).unwrap();
-        assert!(codex.contains("codex exec") && codex.contains("--output-last-message") && codex.contains("{out}"));
+        let codex = AgentKind::by_label("Codex")
+            .and_then(|k| k.oneshot())
+            .unwrap();
+        assert!(
+            codex.contains("codex exec")
+                && codex.contains("--output-last-message")
+                && codex.contains("{out}")
+        );
         // 旧 Gemini CLI(→Antigravity/agy) は ACP 非対応で agent 一覧から除外済み。utility 対応は claude/codex のみ。
         // 非対応 agent は None＝タイトルは既定名フォールバック（Claude へ勝手に流さない）。
-        assert_eq!(AgentKind::by_label("GitHub Copilot").and_then(|k| k.oneshot()), None);
-        assert_eq!(AgentKind::by_label("Kimi CLI").and_then(|k| k.oneshot()), None);
-        assert_eq!(AgentKind::by_label("Nonexistent").and_then(|k| k.oneshot()), None);
+        assert_eq!(
+            AgentKind::by_label("GitHub Copilot").and_then(|k| k.oneshot()),
+            None
+        );
+        assert_eq!(
+            AgentKind::by_label("Kimi CLI").and_then(|k| k.oneshot()),
+            None
+        );
+        assert_eq!(
+            AgentKind::by_label("Nonexistent").and_then(|k| k.oneshot()),
+            None
+        );
     }
 
     /// 実プロセス検証: claude-agent-acp を起動して initialize が返るか。
@@ -1075,7 +1161,8 @@ mod tests {
     fn live_prompt() {
         let cwd = std::env::current_dir().expect("cwd");
         let command = AgentCommand::claude(&cwd).expect("claude-agent-acp が PATH に無い");
-        let result = futures::executor::block_on(prompt_once(&command, "1+1は？ 数字だけで答えて。"));
+        let result =
+            futures::executor::block_on(prompt_once(&command, "1+1は？ 数字だけで答えて。"));
         println!("prompt 応答: {result:?}");
         let text = result.expect("prompt が成功する");
         assert!(!text.trim().is_empty(), "応答が空でない");
@@ -1130,13 +1217,24 @@ mod tests {
                                     config.config_id,
                                     config.category,
                                     config.current,
-                                    config.choices.iter().map(|(_, name)| name).collect::<Vec<_>>()
+                                    config
+                                        .choices
+                                        .iter()
+                                        .map(|(_, name)| name)
+                                        .collect::<Vec<_>>()
                                 );
                             }
                         }
-                        AgentEvent::PermissionRequest { title, options, respond, .. } => {
-                            eprintln!("[permission] {title} options={:?}",
-                                options.iter().map(|o| &o.label).collect::<Vec<_>>());
+                        AgentEvent::PermissionRequest {
+                            title,
+                            options,
+                            respond,
+                            ..
+                        } => {
+                            eprintln!(
+                                "[permission] {title} options={:?}",
+                                options.iter().map(|o| &o.label).collect::<Vec<_>>()
+                            );
                             respond.unbounded_send(0).ok(); // テストでは先頭を選んで進める
                         }
                         AgentEvent::Plan(items) => eprintln!("[plan] {} items", items.len()),

@@ -197,6 +197,8 @@ news:
   waiting: "waiting for approval — %{title}"
   failed: "failed — %{detail}"
 fleet:
+  editor_surface_hint: Open a file in this Task to show it in the Editor surface
+  space_closed: This TaskSpace is closed
   add_agent_simple: "+ Agent (parallel on a fresh worktree)"
   lineage: Lineage
   graph_fan: Fan
@@ -411,6 +413,30 @@ update:
   available: ⬆ Update to v%{version}
   installing: ⬇ Updating…
   ready: ⟳ Restart to finish updating
+  err_no_bundle: Running .app not found (a dev build can't self-update)
+  err_curl: Failed to run curl
+  err_download: Download failed
+  err_staging: Can't create the update staging directory
+  err_spctl: Failed to run spctl
+  err_signature: "Signature verification failed (unsigned or tampered): %{detail}"
+  err_attach: hdiutil attach failed
+  err_mount: Failed to mount the dmg
+  err_no_app: Shirushi.app not found in the dmg
+  err_ditto: Failed to run ditto
+  err_replace: Failed to replace the .app
+ipc:
+  err_no_storage: Ledger storage is unavailable
+  err_open_worktree: "Can't open the worktree: %{path}"
+  err_gui_gone: The GUI has exited
+  err_task_not_found: "Task not found: %{id}"
+  err_message_required: message is required
+  err_task_not_open_spawn: Task is not open in the GUI (run spawn-agent first)
+  err_task_not_open: Task is not open in the GUI
+  err_bad_phase: Invalid phase
+  err_record_id_required: record id is required
+  err_unknown_method: "Unknown method: %{name}"
+  err_bad_json: "Can't parse JSON: %{detail}"
+  err_gui_timeout: GUI response timed out
 crash:
   notice: ⚠ Crashed last time — click to report
 menu:

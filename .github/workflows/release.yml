@@ -25,6 +25,19 @@ jobs:
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
     steps:
       - uses: actions/checkout@v4
+      # タグと Cargo.toml の不一致は「更新チップが無限に出る」実害になる（updater は
+      # CARGO_PKG_VERSION と比較）ので、ビルド前に落とす。
+      - name: タグと Cargo.toml のバージョン一致を検証
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="$(awk -F '"' '/^\[workspace\.package\]/{flag=1; next} /^\[/{flag=0} flag && /^version = /{print $2; exit}' Cargo.toml)"
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::タグ v${TAG_VERSION} と Cargo.toml の version = ${CARGO_VERSION} が一致しません。リリース前に Cargo.toml の [workspace.package] version を上げてください。"
+            exit 1
+          fi
+          echo "version OK: v${CARGO_VERSION}"
       # toolchain は rust-toolchain.toml（1.95.0）で固定 → rustup が自動取得。
       - uses: Swatinem/rust-cache@v2
       - name: Pillow（アイコン .icns 生成に使う）
@@ -52,14 +65,30 @@ jobs:
           security list-keychain -d user -s $KEYCHAIN_PATH
           rm $RUNNER_TEMP/certificate.p12
 
-      - name: Codesign .app（hardened runtime）
+      - name: Codesign .app（hardened runtime + entitlements）
         if: env.APPLE_SIGNING_IDENTITY != ''
         run: |
-          codesign --force --deep --options runtime --timestamp \
+          set -euo pipefail
+          # --deep は使わない（Apple 非推奨・entitlements が内包バイナリへ意図どおり載らない）。
+          # 内包の Mach-O（mac 用 remote server）→ bundle 本体の順で個別署名する。
+          # Resources/remote/ の musl バイナリは Linux ELF ＝署名対象外（notarize では data 扱い）。
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            target/Shirushi.app/Contents/MacOS/shirushi-remote-server
+          codesign --force --options runtime --timestamp \
+            --entitlements crates/shirushi/resources/shirushi.entitlements \
             --sign "$APPLE_SIGNING_IDENTITY" target/Shirushi.app
+          codesign --verify --deep --strict target/Shirushi.app
 
-      - name: Make .dmg
-        run: hdiutil create -volname Shirushi -srcfolder target/Shirushi.app -ov -format UDZO target/Shirushi.dmg
+      - name: Make .dmg（/Applications リンク入り）
+        run: |
+          set -euo pipefail
+          # ボリューム直下 = Shirushi.app + Applications リンク（ドラッグ導線）。
+          # updater はマウント直下の Shirushi.app を探すのでレイアウトは互換のまま。
+          rm -rf target/dmg-staging && mkdir -p target/dmg-staging
+          ditto target/Shirushi.app target/dmg-staging/Shirushi.app
+          ln -s /Applications target/dmg-staging/Applications
+          hdiutil create -volname Shirushi -srcfolder target/dmg-staging -ov -format UDZO target/Shirushi.dmg
 
       # ── notarize + staple（karui と同じ App Store Connect API キー方式）──
       - name: Notarize + staple

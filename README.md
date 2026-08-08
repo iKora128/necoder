@@ -1,90 +1,96 @@
 # Shirushi（印）
 
-自作エディタ。**「色による方向感覚」×「プロジェクト/ブランチ横断」×「AI エージェントネイティブ」** の交点を狙う。
-目標は **Agent 時代の最高のエディタ**。
+**Orient by color.** A GPUI-native code editor for the agent era.
+
+Every project and branch carries an identity color that runs through the rail, tabs, caret and AI threads — so when you juggle many repositories, worktrees and parallel agents, you always know *where you are* and *what is running where*.
 
 ![Shirushi — Todo board consumed by the AI agent, with color-coded threads](docs/images/hero-todo-board.png)
 
-## Quick start (English)
+## Highlights
 
-Shirushi is a GPUI-based code editor built for the agent era: **orient by color** (per-project colors that run through rails, tabs, carets and AI threads), **work across projects/branches** (worktree-first windows, ⌘O dashboard shows what's running where), and **AI-agent-native** (Claude Code over ACP — colored threads, always-visible token meter, checkpoints, a todo board the agent checks off by itself).
+- **Color as a sense of direction** — per-project colors (auto-assigned or picked, `.shirushi/settings.json`) flow through the rail, tab underline, caret and thread chips. Color is used for *identity only*, never decoration.
+- **Across projects and branches** — worktree-first windows, `⌘O` dashboard listing every project, `⎇ branch`, dirty state and running agents at a glance; tear a rail item off into its own window.
+- **AI-agent native (ACP)** — Claude Code and other [ACP](https://agentclientprotocol.com) agents run inside: colored threads with destination chips, an always-visible token meter, streaming transcripts (⏺/⎿, ✳ thinking), diff review with accept/reject, checkpoints/rewind, a todo board the agent checks off by itself, and a fleet view for parallel agents with a coordinator. Uses your existing Claude Code subscription via the `claude` CLI — **no separate API key**.
+- **Fast and small** — native GPUI (no Electron, no webview). Dev measurements: cold start ~215ms, idle RSS ~120MB, editor-core ops ~1µs (guarded in CI).
+- **Remote SSH** — the same editor over `ssh://`, backed by a ~2.4MB static musl server (idle RSS 6.5MB, no node on either side). Uses your system OpenSSH config, keys and ProxyJump as-is.
+- **Editor table stakes** — LSP (diagnostics, completion, hover, rename, code actions, references, formatting), tree-sitter highlighting for Rust/TS/TSX/JS/Python/Go/JSON/YAML/TOML/HTML/CSS with incremental parsing, Git (status colors, gutter diff, hunk stage/revert, blame, diff tabs, branch/worktree menu), integrated terminal with file:line links, project-wide search, multi-cursor, soft wrap, Japanese IME, hot exit.
+- **Japanese / English UI** (follows your OS locale), theme skinning with live preview, **no telemetry — ever**. The only network calls are the ones you initiate (your agents, your SSH hosts) plus a version check against GitHub Releases.
 
-1. Install Rust (the pinned toolchain in `rust-toolchain.toml` is picked up automatically) and run `cargo run -p shirushi`.
-2. First keys: `⌘O` open a project / worktree · `⌘P` open a file · `⇧⌘A` start an AI thread (needs the `claude` CLI) · `⇧⌘P` all commands.
-3. The UI follows your locale (Japanese / English). Everything AI runs through your existing Claude Code subscription via ACP — no extra API key.
+## Install (macOS)
 
-- 名前: **Shirushi**（しるし・印。暫定確定 — ドメイン `shirushi.ai` 取得済み）
-- 土台: **GPUI**（Apache-2.0・**git 依存 rev 固定**。ローカル `./zed` は API 調査用の参照クローン）/ Rust 1.95 / まず macOS
-- ライセンス: **AGPL-3.0**（確定 2026-07-15。ただし**全コードは自作/permissive 依存**で構成 — Zed の GPL crate はコード移植せず手法のみ参考。再ライセンスの自由を保持・DECISIONS §5）
-- AI: 自前エージェントは作らず **ACP クライアント**（`agent-client-protocol` crate + `claude-agent-acp` で Claude Code サブスクがそのまま動く）
-- 性能予算: 入力レイテンシ・起動 **Zed 比 ~80% を下限目標**（UX 優先の明示的判断）
+1. Download the latest `Shirushi.dmg` from [Releases](https://github.com/iKora128/shirushi/releases) and drag **Shirushi** into **Applications**.
+2. Requires **macOS 13+ (Apple Silicon)**. Builds are codesigned and notarized; the app self-updates from Releases (verifying the Apple signature before installing).
+3. For AI features, install and log in to the [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) — Shirushi talks to it over ACP.
 
-## リポジトリ構成
+Something broke? In-app **Help → Report a Bug** pre-fills an issue. Logs live in `~/Library/Application Support/Shirushi/logs/` (written when launched from Finder/Dock) and crash reports in `…/Shirushi/crashes/`.
 
-```
-editor/
-├── README.md            ← このファイル（ハブ）
-├── CLAUDE.md            ← エージェント作業ガイド（規約・検証ループ・一次資料の場所）
-├── FEATURES.md          ← 生きた機能バックログ（MVP / v1 / later / never）
-├── LICENSE              ← AGPL-3.0
-├── Cargo.toml           ← workspace（crates/* / zed は exclude）
-├── rust-toolchain.toml  ← 1.95.0（zed と同一チャンネル）
-├── crates/
-│   └── shirushi/        ← 本体 bin crate（M1 の骨組みウィンドウ）
-├── scripts/
-│   └── screenshot-app.sh ← UI 検証用スクショ
-├── .claude/commands/
-│   └── goal.md          ← /goal コマンド（ROADMAP を1歩ずつ自走実装）
-├── docs/
-│   ├── ROADMAP.md       ← 受入条件つきマイルストーン（/goal が消化する）
-│   ├── ARCHITECTURE.md  ← 実装設計図（crate 配置・型契約・移植作法・i18n）
-│   ├── UI-SPEC.md       ← UI 実装仕様（トークン表・色の許可リスト・領域別）
-│   ├── JOURNAL.md       ← 実装日誌（セッションごとの学び）
-│   ├── BACKGROUND.md    ← 検討の経緯・Zed探索の記録
-│   ├── DECISIONS.md     ← 設計判断と根拠 + 決定ログ
-│   ├── MVP-PLAN.md      ← 週末テスト〜MVPの実行計画（原案）
-│   └── research/        ← 3エディタ機能全列挙 + 横断マトリクス
-├── mock/
-│   ├── index.html       ← ビジュアルモック v0.3（ブラウザで開くだけ）
-│   └── README.md        ← モックで何を決めるか
-└── zed/                 ← Zed ソース一式（参照用クローン、git 管理外・変更禁止）
-```
-
-## いま何をするか（順番）
-
-1. **M0 週末テスト**: `cd zed && cargo run -p gpui --example hello_world`
-   （Metal Toolchain は導入済み 2026-07-11）
-2. **本体の起動確認**: `cargo run -p shirushi`（骨組みウィンドウ）
-3. **ビジュアル微調整**: `open mock/index.html` — 決め残しは mock/README.md 参照
-4. 以降は **`/goal`** — [`docs/ROADMAP.md`](docs/ROADMAP.md) の受入条件を上から1歩ずつ自走実装
-
-## Remote SSH v1
-
-system OpenSSH の設定、known_hosts、ssh-agent、ProxyJump をそのまま使う。開発ビルドでは先に
-remote server バイナリも作り、絶対パスを含む SSH URI を渡す。
+## Build from source
 
 ```sh
-cargo build -p host --bin shirushi-remote-server
+git clone https://github.com/iKora128/shirushi.git && cd shirushi
+cargo run -p shirushi          # toolchain pinned by rust-toolchain.toml (rustup fetches it)
+./scripts/bundle-mac.sh        # optional: assemble Shirushi.app with the app icon
+```
+
+The first build compiles GPUI and takes a while. Without full Xcode (Command Line Tools only), `bundle-mac.sh` automatically falls back to runtime shader compilation.
+
+## First 10 minutes
+
+| Key | Action |
+|---|---|
+| `⌘O` | Open a project / worktree (dashboard) |
+| `⌘P` / `⇧⌘P` | File finder / command palette |
+| `⇧⌘A` | New AI thread (needs `claude` CLI) |
+| `⌘J` | Integrated terminal |
+| `⇧⌘F` | Project-wide search |
+| `⌘⇧T` | Theme selector (live preview) |
+
+## Remote SSH
+
+Uses system OpenSSH (config, known_hosts, ssh-agent, ProxyJump) as-is. Point Shirushi at an SSH URI, or browse from the launcher (`＋` → SSH):
+
+```sh
+cargo build -p host --bin shirushi-remote-server   # dev builds: build the server first
 cargo run -p shirushi -- 'ssh://user@example.com:22/home/user/project'
 ```
 
-同じ OS/CPU の接続先には `target/debug/shirushi-remote-server` を自動配備する。異なる target へは、
-その接続先向けにビルドした artifact を明示する。
+The matching server binary is deployed automatically (same-target sibling binary, or a bundled musl artifact; checksum-verified, old versions cleaned up). Reconnection re-subscribes watches and re-spawns LSP/PTY handles; unsaved-buffer backups are host-scoped. Remaining gaps: GUI askpass (key/agent auth is assumed) and long-haul testing on a physical Linux host — see [`docs/research/remote-ssh-2026.md`](docs/research/remote-ssh-2026.md).
 
-```sh
-SHIRUSHI_REMOTE_SERVER_BINARY=/path/to/linux-aarch64/shirushi-remote-server \
-  cargo run -p shirushi -- 'ssh://example.com/home/user/project'
-```
+## Documentation
 
-接続先は status bar の `SSH user@host` として表示され、前回の SSH URI も password 無しで復元する。
-現在の v1 は OpenSSH の terminal prompt を使うため、GUI askpass、watch 再同期、配布 artifact の
-署名/checksum、実 Linux ホストでの長時間障害試験は未完了。詳細は
-[`docs/research/remote-ssh-2026.md`](docs/research/remote-ssh-2026.md) を参照。
+| What | Where |
+|---|---|
+| Milestones & acceptance criteria | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| Architecture (crates, contracts) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| UI spec (tokens, color rules, keys) | [`docs/UI-SPEC.md`](docs/UI-SPEC.md) |
+| Decision log (license, window model…) | [`docs/DECISIONS.md`](docs/DECISIONS.md) |
+| Feature backlog | [`FEATURES.md`](FEATURES.md) |
+| Editor research (VSCode/Zed/Cursor) | [`docs/research/`](docs/research/) |
+| Agent working guide (this repo is built with agents) | [`CLAUDE.md`](CLAUDE.md) |
 
-## 参照リポジトリ（ローカル）
+Development docs are primarily in Japanese; the UI is fully bilingual (ja/en).
 
-| リポジトリ | 場所 | 用途 |
-|---|---|---|
-| Zed | `./zed`（リポジトリ内・git管理外） | GPUI の生きた教科書・GPL 資産の移植元・機能の仕様書 |
-| VSCode | `~/Work/vscode` | 機能一覧の正典（contrib構造）・UI拡張APIの参考 |
-| Cursor | （ソース非公開） | AI層の仕様は `docs/research/cursor-features.md` 参照 |
+## License & contributing
+
+- **AGPL-3.0-or-later** ([LICENSE](LICENSE)). All code is original or built on permissive dependencies (GPUI is Apache-2.0). **No GPL code is ported from other editors** — techniques are studied, implementations are our own, and CI enforces a dependency license audit ([cargo-deny](deny.toml)). Rationale and history: [`docs/DECISIONS.md`](docs/DECISIONS.md) §5.
+- Contributions are welcome — read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. **All contributions require signing the [CLA](CLA.md)** (a bot guides you on your first PR); this keeps future licensing options (including dual licensing) with the maintainer.
+- Bundled fonts are OFL-1.1 ([`assets/fonts/`](assets/fonts/README.md)); icons are Lucide (ISC) and Simple Icons (CC0) ([`crates/shirushi/assets/icons/LICENSE.md`](crates/shirushi/assets/icons/LICENSE.md)).
+
+---
+
+## 日本語
+
+自作エディタ **Shirushi（しるし・印）**。「**色による方向感覚**」×「**プロジェクト/ブランチ横断**」×「**AI エージェントネイティブ（ACP）**」の交点を狙う、GPUI ネイティブのコードエディタです。
+
+- プロジェクト/ブランチごとの識別色がレール・タブ・キャレット・AI スレッドまで貫通し、並行作業でも「今どこで・何が走っているか」を見失わない
+- Claude Code が中で動く（既存サブスクのまま・API キー不要）: 色付きスレッド、トークン常時表示、diff レビュー、チェックポイント、Todo ボード、複数エージェントの編隊ビュー
+- Remote SSH・LSP・tree-sitter 多言語・Git（hunk stage / blame / worktree）・統合ターミナル・日本語 IME・hot exit
+- **テレメトリなし**。通信は自分で起動するもの（エージェント・SSH）と GitHub Releases への更新チェックのみ
+
+**インストール**: [Releases](https://github.com/iKora128/shirushi/releases) から `Shirushi.dmg` を取得して Applications へ（macOS 13+ / Apple Silicon・署名/公証済み・アプリ内自動更新）。AI 機能には `claude` CLI のログインが必要です。
+
+**ソースから**: `cargo run -p shirushi`（toolchain は `rust-toolchain.toml` で固定）。`./scripts/bundle-mac.sh` で .app を組み立て。
+
+**開発に参加する**: [`CONTRIBUTING.md`](CONTRIBUTING.md) を参照。全てのコントリビュートに [CLA](CLA.md) への署名が必要です（初回 PR で bot が案内）。Zed の GPL crate からのコード移植は禁止（手法の参考のみ・[`docs/DECISIONS.md`](docs/DECISIONS.md) §5）。
+
+リポジトリ構成の詳細は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照（`crates/` に約 20 crate・`zed/` は git 管理外の参照用クローン・`mock/` はビジュアルモック）。

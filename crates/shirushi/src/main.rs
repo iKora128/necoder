@@ -4,16 +4,16 @@
 //! プロジェクト、その file をエディタに開く。引数無しは前回状態（`state.json`）を復元する。
 
 use gpui::{
-    App, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, actions, point,
-    prelude::*, px, size,
+    actions, point, prelude::*, px, size, App, Bounds, Focusable, TitlebarOptions, WindowBounds,
+    WindowOptions,
 };
 use gpui_platform::application;
 use host::{RemoteHost, SshProject};
 use std::path::{Path, PathBuf};
 
+mod fleet;
 /// MCP サーバ（`shirushi mcp`）。AI エージェントがプロジェクトを操作する口。
 mod mcp;
-mod fleet;
 /// macOS ネイティブメニューバー（M13）。
 mod menus;
 use std::time::Instant;
@@ -60,7 +60,9 @@ fn resolve_projects() -> (Vec<ProjectSource>, Vec<RestoredTabs>, usize) {
             sources.push(ProjectSource::local(parent));
             open_files.push(RestoredTabs::single(file));
         } else if path.is_dir() {
-            sources.push(ProjectSource::local(std::fs::canonicalize(&path).unwrap_or(path)));
+            sources.push(ProjectSource::local(
+                std::fs::canonicalize(&path).unwrap_or(path),
+            ));
             open_files.push(RestoredTabs::default());
         } else {
             eprintln!("見つからない（スキップ）: {arg}");
@@ -112,7 +114,11 @@ fn load_user_keymap(path: &Path, cx: &mut App) {
     match keymap_core::load_bindings(&json, cx) {
         Ok(bindings) => {
             if !bindings.is_empty() {
-                println!("ユーザー keymap を適用: {}（{} 束）", path.display(), bindings.len());
+                println!(
+                    "ユーザー keymap を適用: {}（{} 束）",
+                    path.display(),
+                    bindings.len()
+                );
                 cx.bind_keys(bindings);
             }
         }
@@ -197,7 +203,8 @@ impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         macro_rules! icon {
             ($name:literal) => {
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/", $name)).as_slice()
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/", $name))
+                    .as_slice()
             };
         }
         let bytes: &'static [u8] = match path {
@@ -280,6 +287,10 @@ fn run_config_cli() -> bool {
 }
 
 fn main() {
+    // Finder/Dock 起動は stderr が /dev/null に落ちる — 最初にログファイルへ付け替える
+    // （panic hook より前 = クラッシュのバックトレースも同じログに残る）。ターミナル/パイプ/
+    // MCP の stdio は素通し（workspace::logging 参照）。
+    workspace::redirect_output_for_gui_launch();
     // panic hook（M13 公開準備）: どのスレッドで落ちてもクラッシュログを書き、次回起動で
     // statusbar チップ → バグ報告 Issue に繋ぐ。GPUI 起動前・最初に仕込む。
     workspace::install_panic_hook();
@@ -304,7 +315,15 @@ fn main() {
         return;
     }
     let startup = Instant::now();
-    application().with_assets(Assets).run(move |cx: &mut App| {
+    // Finder/Dock「このアプリケーションで開く」等で届く file:// URL（mac は application:openURLs:）。
+    // コールバックは Application 側にしか生えておらず cx も持たないため、run の**前**に登録して
+    // チャネル →（run 内の）前景 spawn で窓へ届ける（CFBundleDocumentTypes とセット・M13）。
+    let (open_urls_tx, open_urls_rx) = futures::channel::mpsc::unbounded::<Vec<String>>();
+    let app = application().with_assets(Assets);
+    app.on_open_urls(move |urls| {
+        let _ = open_urls_tx.unbounded_send(urls);
+    });
+    app.run(move |cx: &mut App| {
         load_fonts(cx);
         i18n::init_from_os_locale();
 
@@ -370,7 +389,10 @@ fn main() {
             .ok()
             .and_then(|spec| {
                 let (width, height) = spec.split_once('x')?;
-                Some(size(px(width.trim().parse().ok()?), px(height.trim().parse().ok()?)))
+                Some(size(
+                    px(width.trim().parse().ok()?),
+                    px(height.trim().parse().ok()?),
+                ))
             })
             .unwrap_or_else(|| size(px(1280.0), px(800.0)));
         let bounds = Bounds::centered(None, window_size, cx);
@@ -379,13 +401,12 @@ fn main() {
         let build_theme = theme.clone();
         // Offscreen QA はユーザーの通常セッションを汚さない。CLI で渡した project を描画するだけで、
         // ~/Library/Application Support/Shirushi/state.json へは保存しない。
-        let persistence_path = if cfg!(feature = "screenshot")
-            && std::env::var_os("SHIRUSHI_SCREENSHOT").is_some()
-        {
-            None
-        } else {
-            workspace::state_path()
-        };
+        let persistence_path =
+            if cfg!(feature = "screenshot") && std::env::var_os("SHIRUSHI_SCREENSHOT").is_some() {
+                None
+            } else {
+                workspace::state_path()
+            };
         let open = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -440,39 +461,333 @@ fn main() {
 
         #[cfg(debug_assertions)]
         {
-        // 開発用: SHIRUSHI_OPEN_TABS=a.rs,b.rs,… でアクティブプロジェクトに複数タブを開く（複数タブ検証）。
-        let extra_tabs = std::env::var("SHIRUSHI_OPEN_TABS").ok().map(|value| {
-            let root = sources
-                .get(active_project)
-                .map(|source| source.root().to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."));
-            value
-                .split(',')
-                .filter(|entry| !entry.is_empty())
-                .map(|entry| root.join(entry))
-                .collect::<Vec<_>>()
-        });
-        if let Err(error) = window.update(cx, |workspace, window, cx| {
-            // 開発用: SHIRUSHI_NAMING_CONFIRM=1 で命名入力を 1s 後に Enter 確定する（ファイル生成の検証）。
-            if std::env::var_os("SHIRUSHI_NAMING_CONFIRM").is_some() {
+            // 開発用: SHIRUSHI_OPEN_TABS=a.rs,b.rs,… でアクティブプロジェクトに複数タブを開く（複数タブ検証）。
+            let extra_tabs = std::env::var("SHIRUSHI_OPEN_TABS").ok().map(|value| {
+                let root = sources
+                    .get(active_project)
+                    .map(|source| source.root().to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                value
+                    .split(',')
+                    .filter(|entry| !entry.is_empty())
+                    .map(|entry| root.join(entry))
+                    .collect::<Vec<_>>()
+            });
+            if let Err(error) = window.update(cx, |workspace, window, cx| {
+                // 開発用: SHIRUSHI_NAMING_CONFIRM=1 で命名入力を 1s 後に Enter 確定する（ファイル生成の検証）。
+                if std::env::var_os("SHIRUSHI_NAMING_CONFIRM").is_some() {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(1000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_confirm_naming(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_RENAME_PROBE="row:col:newname" で rename を実行（既定 8s 後）。
+                if let Ok(probe) = std::env::var("SHIRUSHI_RENAME_PROBE") {
+                    let parts: Vec<&str> = probe.splitn(3, ':').collect();
+                    if let [row, column, name] = parts[..] {
+                        if let (Ok(row), Ok(column)) =
+                            (row.parse::<usize>(), column.parse::<usize>())
+                        {
+                            let name = name.to_string();
+                            if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                                let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
+                                    .ok()
+                                    .and_then(|value| value.parse::<u64>().ok())
+                                    .unwrap_or(8000);
+                                cx.spawn(async move |_workspace, cx| {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(delay_ms))
+                                        .await;
+                                    let _ = handle.update(cx, |workspace, window, cx| {
+                                        workspace.debug_rename_probe(row, column, name, window, cx);
+                                    });
+                                })
+                                .detach();
+                            }
+                        }
+                    }
+                }
+                // 開発用: SHIRUSHI_INLINE_PROBE="<指示>" で全選択 → ⌘I → 実行（2s 後・M12-8）。
+                // SHIRUSHI_INLINE_ACCEPT=1 なら提案到着を待って適用+保存まで（受入の round trip）。
+                if let Ok(instruction) = std::env::var("SHIRUSHI_INLINE_PROBE") {
+                    if !instruction.trim().is_empty() {
+                        let accept =
+                            std::env::var("SHIRUSHI_INLINE_ACCEPT").is_ok_and(|value| value == "1");
+                        if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                            cx.spawn(async move |_workspace, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(2000))
+                                    .await;
+                                let _ = handle.update(cx, |workspace, window, cx| {
+                                    workspace.debug_inline_probe(instruction, accept, window, cx);
+                                });
+                            })
+                            .detach();
+                        }
+                    }
+                }
+                // 開発用: SHIRUSHI_SWITCHER_PROBE=<ms> で ⌘O スイッチャーを開く（M12-12 の描画検証。
+                // ACP_PROBE と併用すると実行中ドットも写る）。
+                if let Ok(delay) = std::env::var("SHIRUSHI_SWITCHER_PROBE") {
+                    if let Ok(delay_ms) = delay.parse::<u64>() {
+                        if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                            cx.spawn(async move |_workspace, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                                let _ = handle.update(cx, |workspace, window, cx| {
+                                    workspace.debug_open_switcher(window, cx);
+                                });
+                            })
+                            .detach();
+                        }
+                    }
+                }
+                // 開発用: SHIRUSHI_SSH_PROBE=1 で SSH 入力バーを開く（2s 後・M13 の描画検証）。
+                if std::env::var("SHIRUSHI_SSH_PROBE").is_ok_and(|value| value == "1") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_open_ssh_input(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 管制 IPC（P5・常時）: headless CLI/MCP が起動中 GUI を制御する Unix socket（0600）。
+                // 二重起動（別窓が先に bind 済み）は内部で静かにスキップ。window 構築完了後に開始する
+                // （このクロージャ内の即時 update は届かない＝probe 群と同じく defer する）。
                 if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                     cx.spawn(async move |_workspace, cx| {
                         cx.background_executor()
-                            .timer(std::time::Duration::from_millis(1000))
+                            .timer(std::time::Duration::from_millis(500))
                             .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_confirm_naming(window, cx);
+                        let _ = handle.update(cx, |workspace, _window, cx| {
+                            workspace.start_control_ipc(cx);
                         });
                     })
                     .detach();
                 }
-            }
-                // 開発用: SHIRUSHI_RENAME_PROBE="row:col:newname" で rename を実行（既定 8s 後）。
-            if let Ok(probe) = std::env::var("SHIRUSHI_RENAME_PROBE") {
-                let parts: Vec<&str> = probe.splitn(3, ':').collect();
-                if let [row, column, name] = parts[..] {
-                    if let (Ok(row), Ok(column)) = (row.parse::<usize>(), column.parse::<usize>()) {
-                        let name = name.to_string();
+                // 開発用: SHIRUSHI_SSH_HOST_PROBE=1 で SSH ホストピッカーを開く（2s 後・M13 の描画検証）。
+                if std::env::var("SHIRUSHI_SSH_HOST_PROBE").is_ok_and(|value| value == "1") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_open_ssh_host_picker(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_TAB_RENAME_PROBE=1 で Agent タブの改名入力を開く（2s 後・#4 の描画検証）。
+                if std::env::var("SHIRUSHI_TAB_RENAME_PROBE").is_ok_and(|value| value == "1") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, _window, cx| {
+                                workspace.debug_tab_rename(cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_TEAROFF_PROBE=1 で擬似 tear-off を直接駆動（2s 後・新窓生成の機械検証）。
+                if std::env::var("SHIRUSHI_TEAROFF_PROBE").is_ok_and(|value| value == "1") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_tear_off(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_ACTIVITY_PROBE=1 で各スレッドに状態を仕込む（2s 後・状態表示の描画検証・#）。
+                if std::env::var("SHIRUSHI_ACTIVITY_PROBE").is_ok_and(|value| value == "1") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, _window, cx| {
+                                workspace.debug_set_activities(cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_CONTROL_PROBE=1 で管制タブの受入シナリオ（5 擬似 TaskSpace・P3）を合成。
+                if std::env::var("SHIRUSHI_CONTROL_PROBE").is_ok_and(|value| value == "1") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, _window, cx| {
+                                workspace.debug_seed_control(cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_FLEET_PROBE=<menu|menu-armed|terminal|tall|close-all> で編隊の
+                // 片付け UI / 下段ドックを駆動する（2026-07-27 の受入検証）。CONTROL_PROBE の後に流す。
+                if let Ok(probe) = std::env::var("SHIRUSHI_FLEET_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2600))
+                                .await;
+                            let _ = handle.update(cx, |workspace, _window, cx| {
+                                workspace.debug_fleet_probe(&probe, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_WORKTREE_DELETE_PROBE=worktree|branch で削除確認ダイアログを出す。
+                if let Ok(mode) = std::env::var("SHIRUSHI_WORKTREE_DELETE_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2600))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_worktree_delete(&mode, window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_AGENT_FULLSCREEN_PROBE=1 で AI 全画面（⌘⇧⏎）を駆動する。
+                if std::env::var("SHIRUSHI_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1")
+                {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2600))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_agent_full_screen(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_HISTORY_PROBE=1 でスレッド履歴 Picker を開く（2s 後・#5 の描画検証）。
+                if std::env::var("SHIRUSHI_HISTORY_PROBE").is_ok_and(|value| value == "1") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_open_history(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_TERM_LINK_PROBE="path:line" でターミナルを開き、リンククリック相当の
+                // イベントを直接発火（emit → ジャンプの結線検証・M13。座標→リンクの hit 判定は人の手番）。
+                if let Ok(probe) = std::env::var("SHIRUSHI_TERM_LINK_PROBE") {
+                    if let Some((path, line)) = probe.rsplit_once(':') {
+                        if let (path, Ok(line)) = (path.to_string(), line.parse::<u32>()) {
+                            if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                                cx.spawn(async move |_workspace, cx| {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(2500))
+                                        .await;
+                                    let _ = handle.update(cx, |workspace, window, cx| {
+                                        workspace.debug_terminal_link(path, line, window, cx);
+                                    });
+                                })
+                                .detach();
+                            }
+                        }
+                    }
+                }
+                // 開発用: SHIRUSHI_PALETTE_PROBE="<query>" で ⌘⇧P を開く（2s 後・M13 の描画検証）。
+                // SHIRUSHI_PALETTE_CONFIRM=1 で先頭候補を確定（dispatch まで通す）。
+                if let Ok(query) = std::env::var("SHIRUSHI_PALETTE_PROBE") {
+                    let confirm = std::env::var("SHIRUSHI_PALETTE_CONFIRM").is_ok_and(|v| v == "1");
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_palette_probe(query, confirm, window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_TODOS_PROBE=1 で Todo ボードを開く（2s 後・M12-10 の描画検証）。
+                if std::env::var_os("SHIRUSHI_TODOS_PROBE").is_some() {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_open_todo_board(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_DIFF_PROBE=1 でアクティブファイルの diff タブを開く（2s 後）。
+                if std::env::var_os("SHIRUSHI_DIFF_PROBE").is_some() {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_open_diff(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_OUTLINE_PROBE=1 で ⌘⇧O アウトラインを開く（2s 後・LSP 不要）。
+                if std::env::var_os("SHIRUSHI_OUTLINE_PROBE").is_some() {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_outline_probe(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: SHIRUSHI_REFERENCES_PROBE="row:col" で ⇧F12 参照検索（既定 8s 後）。
+                if let Ok(probe) = std::env::var("SHIRUSHI_REFERENCES_PROBE") {
+                    if let Some((row, column)) = probe.split_once(':').and_then(|(r, c)| {
+                        Some((r.parse::<usize>().ok()?, c.parse::<usize>().ok()?))
+                    }) {
                         if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                             let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
                                 .ok()
@@ -483,288 +798,53 @@ fn main() {
                                     .timer(std::time::Duration::from_millis(delay_ms))
                                     .await;
                                 let _ = handle.update(cx, |workspace, window, cx| {
-                                    workspace.debug_rename_probe(row, column, name, window, cx);
+                                    workspace.debug_references_probe(row, column, window, cx);
                                 });
                             })
                             .detach();
                         }
                     }
                 }
-            }
-            // 開発用: SHIRUSHI_INLINE_PROBE="<指示>" で全選択 → ⌘I → 実行（2s 後・M12-8）。
-            // SHIRUSHI_INLINE_ACCEPT=1 なら提案到着を待って適用+保存まで（受入の round trip）。
-            if let Ok(instruction) = std::env::var("SHIRUSHI_INLINE_PROBE") {
-                if !instruction.trim().is_empty() {
-                    let accept = std::env::var("SHIRUSHI_INLINE_ACCEPT")
-                        .is_ok_and(|value| value == "1");
-                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                        cx.spawn(async move |_workspace, cx| {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(2000))
-                                .await;
-                            let _ = handle.update(cx, |workspace, window, cx| {
-                                workspace.debug_inline_probe(instruction, accept, window, cx);
-                            });
-                        })
-                        .detach();
-                    }
-                }
-            }
-            // 開発用: SHIRUSHI_SWITCHER_PROBE=<ms> で ⌘O スイッチャーを開く（M12-12 の描画検証。
-            // ACP_PROBE と併用すると実行中ドットも写る）。
-            if let Ok(delay) = std::env::var("SHIRUSHI_SWITCHER_PROBE") {
-                if let Ok(delay_ms) = delay.parse::<u64>() {
-                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                        cx.spawn(async move |_workspace, cx| {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(delay_ms))
-                                .await;
-                            let _ = handle.update(cx, |workspace, window, cx| {
-                                workspace.debug_open_switcher(window, cx);
-                            });
-                        })
-                        .detach();
-                    }
-                }
-            }
-            // 開発用: SHIRUSHI_SSH_PROBE=1 で SSH 入力バーを開く（2s 後・M13 の描画検証）。
-            if std::env::var("SHIRUSHI_SSH_PROBE").is_ok_and(|value| value == "1") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_open_ssh_input(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 管制 IPC（P5・常時）: headless CLI/MCP が起動中 GUI を制御する Unix socket（0600）。
-            // 二重起動（別窓が先に bind 済み）は内部で静かにスキップ。window 構築完了後に開始する
-            // （このクロージャ内の即時 update は届かない＝probe 群と同じく defer する）。
-            if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                cx.spawn(async move |_workspace, cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(500))
-                        .await;
-                    let _ = handle.update(cx, |workspace, _window, cx| {
-                        workspace.start_control_ipc(cx);
-                    });
-                })
-                .detach();
-            }
-            // 開発用: SHIRUSHI_SSH_HOST_PROBE=1 で SSH ホストピッカーを開く（2s 後・M13 の描画検証）。
-            if std::env::var("SHIRUSHI_SSH_HOST_PROBE").is_ok_and(|value| value == "1") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_open_ssh_host_picker(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_TAB_RENAME_PROBE=1 で Agent タブの改名入力を開く（2s 後・#4 の描画検証）。
-            if std::env::var("SHIRUSHI_TAB_RENAME_PROBE").is_ok_and(|value| value == "1") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, _window, cx| {
-                            workspace.debug_tab_rename(cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_TEAROFF_PROBE=1 で擬似 tear-off を直接駆動（2s 後・新窓生成の機械検証）。
-            if std::env::var("SHIRUSHI_TEAROFF_PROBE").is_ok_and(|value| value == "1") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_tear_off(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_ACTIVITY_PROBE=1 で各スレッドに状態を仕込む（2s 後・状態表示の描画検証・#）。
-            if std::env::var("SHIRUSHI_ACTIVITY_PROBE").is_ok_and(|value| value == "1") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, _window, cx| {
-                            workspace.debug_set_activities(cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_CONTROL_PROBE=1 で管制タブの受入シナリオ（5 擬似 TaskSpace・P3）を合成。
-            if std::env::var("SHIRUSHI_CONTROL_PROBE").is_ok_and(|value| value == "1") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, _window, cx| {
-                            workspace.debug_seed_control(cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_FLEET_PROBE=<menu|menu-armed|terminal|tall|close-all> で編隊の
-            // 片付け UI / 下段ドックを駆動する（2026-07-27 の受入検証）。CONTROL_PROBE の後に流す。
-            if let Ok(probe) = std::env::var("SHIRUSHI_FLEET_PROBE") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2600))
-                            .await;
-                        let _ = handle.update(cx, |workspace, _window, cx| {
-                            workspace.debug_fleet_probe(&probe, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_WORKTREE_DELETE_PROBE=worktree|branch で削除確認ダイアログを出す。
-            if let Ok(mode) = std::env::var("SHIRUSHI_WORKTREE_DELETE_PROBE") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2600))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_worktree_delete(&mode, window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_AGENT_FULLSCREEN_PROBE=1 で AI 全画面（⌘⇧⏎）を駆動する。
-            if std::env::var("SHIRUSHI_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2600))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_agent_full_screen(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_HISTORY_PROBE=1 でスレッド履歴 Picker を開く（2s 後・#5 の描画検証）。
-            if std::env::var("SHIRUSHI_HISTORY_PROBE").is_ok_and(|value| value == "1") {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_open_history(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_TERM_LINK_PROBE="path:line" でターミナルを開き、リンククリック相当の
-            // イベントを直接発火（emit → ジャンプの結線検証・M13。座標→リンクの hit 判定は人の手番）。
-            if let Ok(probe) = std::env::var("SHIRUSHI_TERM_LINK_PROBE") {
-                if let Some((path, line)) = probe.rsplit_once(':') {
-                    if let (path, Ok(line)) = (path.to_string(), line.parse::<u32>()) {
+                // 開発用: SHIRUSHI_CODEACTION_PROBE="row:col" で ⌘. を開く（既定 8s 後）。
+                if let Ok(probe) = std::env::var("SHIRUSHI_CODEACTION_PROBE") {
+                    if let Some((row, column)) = probe.split_once(':').and_then(|(r, c)| {
+                        Some((r.parse::<usize>().ok()?, c.parse::<usize>().ok()?))
+                    }) {
                         if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                            let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
+                                .ok()
+                                .and_then(|value| value.parse::<u64>().ok())
+                                .unwrap_or(8000);
+                            let confirm = std::env::var_os("SHIRUSHI_CODEACTION_CONFIRM").is_some();
                             cx.spawn(async move |_workspace, cx| {
                                 cx.background_executor()
-                                    .timer(std::time::Duration::from_millis(2500))
+                                    .timer(std::time::Duration::from_millis(delay_ms))
                                     .await;
                                 let _ = handle.update(cx, |workspace, window, cx| {
-                                    workspace.debug_terminal_link(path, line, window, cx);
+                                    workspace.debug_code_actions_probe(row, column, window, cx);
                                 });
+                                if confirm {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(2500))
+                                        .await;
+                                    let _ = handle.update(cx, |workspace, window, cx| {
+                                        workspace.debug_confirm_code_action(window, cx);
+                                    });
+                                    // resolve → 適用 → 保存の余韻。
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(1500))
+                                        .await;
+                                    let _ = handle.update(cx, |workspace, window, cx| {
+                                        workspace.debug_confirm_code_action(window, cx);
+                                    });
+                                }
                             })
                             .detach();
                         }
                     }
                 }
-            }
-            // 開発用: SHIRUSHI_PALETTE_PROBE="<query>" で ⌘⇧P を開く（2s 後・M13 の描画検証）。
-            // SHIRUSHI_PALETTE_CONFIRM=1 で先頭候補を確定（dispatch まで通す）。
-            if let Ok(query) = std::env::var("SHIRUSHI_PALETTE_PROBE") {
-                let confirm = std::env::var("SHIRUSHI_PALETTE_CONFIRM").is_ok_and(|v| v == "1");
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_palette_probe(query, confirm, window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_TODOS_PROBE=1 で Todo ボードを開く（2s 後・M12-10 の描画検証）。
-            if std::env::var_os("SHIRUSHI_TODOS_PROBE").is_some() {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_open_todo_board(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_DIFF_PROBE=1 でアクティブファイルの diff タブを開く（2s 後）。
-            if std::env::var_os("SHIRUSHI_DIFF_PROBE").is_some() {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_open_diff(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_OUTLINE_PROBE=1 で ⌘⇧O アウトラインを開く（2s 後・LSP 不要）。
-            if std::env::var_os("SHIRUSHI_OUTLINE_PROBE").is_some() {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(2000))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_outline_probe(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            // 開発用: SHIRUSHI_REFERENCES_PROBE="row:col" で ⇧F12 参照検索（既定 8s 後）。
-            if let Ok(probe) = std::env::var("SHIRUSHI_REFERENCES_PROBE") {
-                if let Some((row, column)) = probe
-                    .split_once(':')
-                    .and_then(|(r, c)| Some((r.parse::<usize>().ok()?, c.parse::<usize>().ok()?)))
-                {
+                // 開発用: SHIRUSHI_FORMAT_PROBE=1 で LSP 初期化後にフォーマット→保存を実行（既定 8s 後）。
+                if std::env::var_os("SHIRUSHI_FORMAT_PROBE").is_some() {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
                             .ok()
@@ -775,106 +855,73 @@ fn main() {
                                 .timer(std::time::Duration::from_millis(delay_ms))
                                 .await;
                             let _ = handle.update(cx, |workspace, window, cx| {
-                                workspace.debug_references_probe(row, column, window, cx);
+                                workspace.debug_format_probe(window, cx);
                             });
                         })
                         .detach();
                     }
                 }
-            }
-            // 開発用: SHIRUSHI_CODEACTION_PROBE="row:col" で ⌘. を開く（既定 8s 後）。
-            if let Ok(probe) = std::env::var("SHIRUSHI_CODEACTION_PROBE") {
-                if let Some((row, column)) = probe
-                    .split_once(':')
-                    .and_then(|(r, c)| Some((r.parse::<usize>().ok()?, c.parse::<usize>().ok()?)))
-                {
+                // 開発用: SHIRUSHI_HOTEXIT_AUTORESTORE=1 で復元バーの「復元」を自動で押す（1.5s 後）。
+                if std::env::var_os("SHIRUSHI_HOTEXIT_AUTORESTORE").is_some() {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(1500))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_restore_hot_exit(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                if let Some(paths) = extra_tabs {
+                    workspace.open_paths(paths, window, cx);
+                }
+                // 開発用: SHIRUSHI_BUFFER_SEARCH=<query> で ⌘F バーを開いた状態で撮る
+                // （SHIRUSHI_BUFFER_REPLACE=<text> があれば置換行も開く）。
+                if let Ok(query) = std::env::var("SHIRUSHI_BUFFER_SEARCH") {
+                    let replace = std::env::var("SHIRUSHI_BUFFER_REPLACE").ok();
+                    workspace.debug_open_buffer_search(query, replace, window, cx);
+                } else {
+                    let handle = workspace.focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
+            }) {
+                eprintln!("初期化に失敗: {error}");
+            }
+            // 開発用: SHIRUSHI_TYPE_PROBE="row:col:text"（0 始まり）で起動後にタイプを注入する
+            // （補完の自動トリガ検証。LSP の初期化を待つため SHIRUSHI_TYPE_PROBE_DELAY_MS 後・既定 5000）。
+            if let Ok(probe) = std::env::var("SHIRUSHI_TYPE_PROBE") {
+                let parts: Vec<&str> = probe.splitn(3, ':').collect();
+                if let [row, column, text] = parts[..] {
+                    if let (Ok(row), Ok(column)) = (row.parse::<usize>(), column.parse::<usize>()) {
+                        let text = text.to_string();
                         let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
                             .ok()
                             .and_then(|value| value.parse::<u64>().ok())
-                            .unwrap_or(8000);
-                        let confirm = std::env::var_os("SHIRUSHI_CODEACTION_CONFIRM").is_some();
-                        cx.spawn(async move |_workspace, cx| {
+                            .unwrap_or(5000);
+                        let probe_window = window;
+                        cx.spawn(async move |cx| {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_millis(delay_ms))
                                 .await;
-                            let _ = handle.update(cx, |workspace, window, cx| {
-                                workspace.debug_code_actions_probe(row, column, window, cx);
+                            let result = probe_window.update(cx, |workspace, window, cx| {
+                                workspace.debug_type_probe(row, column, text, window, cx);
                             });
-                            if confirm {
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_millis(2500))
-                                    .await;
-                                let _ = handle.update(cx, |workspace, window, cx| {
-                                    workspace.debug_confirm_code_action(window, cx);
-                                });
-                                // resolve → 適用 → 保存の余韻。
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_millis(1500))
-                                    .await;
-                                let _ = handle.update(cx, |workspace, window, cx| {
-                                    workspace.debug_confirm_code_action(window, cx);
-                                });
+                            if let Err(error) = result {
+                                eprintln!("type probe 失敗: {error:?}");
                             }
                         })
                         .detach();
                     }
                 }
             }
-            // 開発用: SHIRUSHI_FORMAT_PROBE=1 で LSP 初期化後にフォーマット→保存を実行（既定 8s 後）。
-            if std::env::var_os("SHIRUSHI_FORMAT_PROBE").is_some() {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
-                        .ok()
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .unwrap_or(8000);
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(delay_ms))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_format_probe(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-        // 開発用: SHIRUSHI_HOTEXIT_AUTORESTORE=1 で復元バーの「復元」を自動で押す（1.5s 後）。
-            if std::env::var_os("SHIRUSHI_HOTEXIT_AUTORESTORE").is_some() {
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(1500))
-                            .await;
-                        let _ = handle.update(cx, |workspace, window, cx| {
-                            workspace.debug_restore_hot_exit(window, cx);
-                        });
-                    })
-                    .detach();
-                }
-            }
-            if let Some(paths) = extra_tabs {
-                workspace.open_paths(paths, window, cx);
-            }
-            // 開発用: SHIRUSHI_BUFFER_SEARCH=<query> で ⌘F バーを開いた状態で撮る
-            // （SHIRUSHI_BUFFER_REPLACE=<text> があれば置換行も開く）。
-            if let Ok(query) = std::env::var("SHIRUSHI_BUFFER_SEARCH") {
-                let replace = std::env::var("SHIRUSHI_BUFFER_REPLACE").ok();
-                workspace.debug_open_buffer_search(query, replace, window, cx);
-            } else {
-                let handle = workspace.focus_handle(cx);
-                window.focus(&handle, cx);
-            }
-        }) {
-            eprintln!("初期化に失敗: {error}");
-        }
-        // 開発用: SHIRUSHI_TYPE_PROBE="row:col:text"（0 始まり）で起動後にタイプを注入する
-        // （補完の自動トリガ検証。LSP の初期化を待つため SHIRUSHI_TYPE_PROBE_DELAY_MS 後・既定 5000）。
-        if let Ok(probe) = std::env::var("SHIRUSHI_TYPE_PROBE") {
-            let parts: Vec<&str> = probe.splitn(3, ':').collect();
-            if let [row, column, text] = parts[..] {
-                if let (Ok(row), Ok(column)) = (row.parse::<usize>(), column.parse::<usize>()) {
-                    let text = text.to_string();
+            // 開発用: SHIRUSHI_HOVER_PROBE="row:col"（0 始まり）でキャレットを置き ⌘K ⌘I 相当の hover を出す。
+            if let Ok(probe) = std::env::var("SHIRUSHI_HOVER_PROBE") {
+                if let Some((row, column)) = probe.split_once(':').and_then(|(row, column)| {
+                    Some((row.parse::<usize>().ok()?, column.parse::<usize>().ok()?))
+                }) {
                     let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
                         .ok()
                         .and_then(|value| value.parse::<u64>().ok())
@@ -885,62 +932,60 @@ fn main() {
                             .timer(std::time::Duration::from_millis(delay_ms))
                             .await;
                         let result = probe_window.update(cx, |workspace, window, cx| {
-                            workspace.debug_type_probe(row, column, text, window, cx);
+                            workspace.debug_hover_probe(row, column, window, cx);
                         });
                         if let Err(error) = result {
-                            eprintln!("type probe 失敗: {error:?}");
+                            eprintln!("hover probe 失敗: {error:?}");
                         }
                     })
                     .detach();
                 }
             }
-        }
-        // 開発用: SHIRUSHI_HOVER_PROBE="row:col"（0 始まり）でキャレットを置き ⌘K ⌘I 相当の hover を出す。
-        if let Ok(probe) = std::env::var("SHIRUSHI_HOVER_PROBE") {
-            if let Some((row, column)) = probe
-                .split_once(':')
-                .and_then(|(row, column)| Some((row.parse::<usize>().ok()?, column.parse::<usize>().ok()?)))
-            {
-                let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
+            // 開発用: SHIRUSHI_RAIL_PROBE=open-branch:<name>|remove-active でレールのフローを実駆動（M10-2 検証）。
+            if let Ok(probe) = std::env::var("SHIRUSHI_RAIL_PROBE") {
+                let delay_ms = std::env::var("SHIRUSHI_RAIL_PROBE_DELAY_MS")
                     .ok()
                     .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(5000);
+                    .unwrap_or(400);
                 let probe_window = window;
                 cx.spawn(async move |cx| {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(delay_ms))
                         .await;
                     let result = probe_window.update(cx, |workspace, window, cx| {
-                        workspace.debug_hover_probe(row, column, window, cx);
+                        workspace.debug_rail_probe(&probe, window, cx);
                     });
                     if let Err(error) = result {
-                        eprintln!("hover probe 失敗: {error:?}");
+                        eprintln!("rail probe 失敗: {error:?}");
                     }
                 })
                 .detach();
             }
         }
-        // 開発用: SHIRUSHI_RAIL_PROBE=open-branch:<name>|remove-active でレールのフローを実駆動（M10-2 検証）。
-        if let Ok(probe) = std::env::var("SHIRUSHI_RAIL_PROBE") {
-            let delay_ms = std::env::var("SHIRUSHI_RAIL_PROBE_DELAY_MS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(400);
-            let probe_window = window;
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(delay_ms))
-                    .await;
-                let result = probe_window.update(cx, |workspace, window, cx| {
-                    workspace.debug_rail_probe(&probe, window, cx);
-                });
-                if let Err(error) = result {
-                    eprintln!("rail probe 失敗: {error:?}");
+        // Finder/Dock から届いた file:// URL を workspace へ流す（登録は run 前・main 冒頭）。
+        let mut open_urls_rx = open_urls_rx;
+        let open_urls_window = window;
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            while let Some(urls) = open_urls_rx.next().await {
+                let paths: Vec<std::path::PathBuf> = urls
+                    .iter()
+                    .filter_map(|raw| url::Url::parse(raw).ok())
+                    .filter(|parsed| parsed.scheme() == "file")
+                    .filter_map(|parsed| parsed.to_file_path().ok())
+                    .collect();
+                if paths.is_empty() {
+                    continue;
                 }
-            })
-            .detach();
-        }
-        }
+                let delivered = open_urls_window.update(cx, |workspace, window, cx| {
+                    workspace.open_external_paths(paths, window, cx);
+                });
+                if delivered.is_err() {
+                    break; // 窓が閉じられた
+                }
+            }
+        })
+        .detach();
         if std::env::var_os("SHIRUSHI_STARTUP_LOG").is_some() {
             println!("startup_ms={:.1}", startup.elapsed().as_secs_f64() * 1000.0);
         }
@@ -976,20 +1021,30 @@ fn maybe_capture_screenshot(window: gpui::WindowHandle<Workspace>, cx: &mut App)
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(500);
-        cx.background_executor().timer(Duration::from_millis(delay_ms)).await;
+        cx.background_executor()
+            .timer(Duration::from_millis(delay_ms))
+            .await;
         let capture_started = std::time::Instant::now();
         for frame in 0..frames {
             if frame > 0 {
-                cx.background_executor().timer(Duration::from_millis(interval_ms)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(interval_ms))
+                    .await;
             }
             // 連写時は `shot.png` → `shot-007.png` の形で連番を差し込む。
             let frame_path = if frames == 1 {
                 screenshot_path.clone()
             } else {
                 let path = std::path::Path::new(&screenshot_path);
-                let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("shot");
+                let stem = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("shot");
                 let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-                parent.join(format!("{stem}-{frame:03}.png")).to_string_lossy().into_owned()
+                parent
+                    .join(format!("{stem}-{frame:03}.png"))
+                    .to_string_lossy()
+                    .into_owned()
             };
             let captured =
                 cx.update(|cx| window.update(cx, |_root, window, _cx| window.render_to_image()));

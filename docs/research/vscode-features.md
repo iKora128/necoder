@@ -1,6 +1,6 @@
 # VSCode 機能全列挙
 
-調査対象は /Users/daichi/Work/vscode（main ブランチの shallow clone、commit 6479c9a、2026-07-11 時点、version 1.129.0 開発版）。ディレクトリ構造と実ファイルを直接読んで作成した一次情報ベースの列挙。安定版に未搭載の実験機能（vs/sessions、browserView、onboarding 実験系など）も含まれる点に注意。
+調査対象は microsoft/vscode のローカル shallow clone（main ブランチ、commit 6479c9a、2026-07-11 時点、version 1.129.0 開発版）。ディレクトリ構造と実ファイルを直接読んで作成した一次情報ベースの列挙。安定版に未搭載の実験機能（vs/sessions、browserView、onboarding 実験系など）も含まれる点に注意。
 
 ## 概要
 

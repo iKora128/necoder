@@ -29,7 +29,8 @@ impl Workspace {
     /// エクスプローラの表示モードを切り替える（左下スイッチャー）。
     /// カラム表示は幅が要るので、狭ければ広げる（以後ユーザーがドラッグで調整）。
     pub(crate) fn set_explorer_view(&mut self, view: ExplorerView, cx: &mut Context<Self>) {
-        self.explorer.update(cx, |explorer, cx| explorer.set_view(view, cx));
+        self.explorer
+            .update(cx, |explorer, cx| explorer.set_view(view, cx));
         if view == ExplorerView::Columns && self.chrome.explorer_width < 440.0 {
             self.chrome.explorer_width = 440.0;
         }
@@ -51,8 +52,9 @@ impl Workspace {
             slot.refresh();
         }
         if outside && self.explorer_mode(cx) == ExplorerView::Tree {
-            self.explorer
-                .update(cx, |explorer, cx| explorer.set_view(ExplorerView::Columns, cx));
+            self.explorer.update(cx, |explorer, cx| {
+                explorer.set_view(ExplorerView::Columns, cx)
+            });
         }
         cx.notify();
     }
@@ -66,7 +68,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.explorer.update(cx, |explorer, cx| {
-            explorer.show_context_menu(ExplorerContextMenu { path, is_dir, position }, cx)
+            explorer.show_context_menu(
+                ExplorerContextMenu {
+                    path,
+                    is_dir,
+                    position,
+                },
+                cx,
+            )
         });
         cx.notify();
     }
@@ -75,11 +84,24 @@ impl Workspace {
     // ── ツリーのファイル操作（M10。local のみ・remote は M13 の Host 拡張と一緒に） ──
 
     /// インライン命名を開始する（新規ファイル/フォルダ = base の中 or 横・リネーム = target の名前）。
-    pub(crate) fn start_naming(&mut self, kind: NamingKind, base: PathBuf, is_dir: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_naming(
+        &mut self,
+        kind: NamingKind,
+        base: PathBuf,
+        is_dir: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (parent, target, initial) = match kind {
             NamingKind::Rename => {
-                let parent = base.parent().map(Path::to_path_buf).unwrap_or_else(|| base.clone());
-                let name = base.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+                let parent = base
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| base.clone());
+                let name = base
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 (parent, Some(base), name)
             }
             _ => {
@@ -101,7 +123,13 @@ impl Workspace {
         window.focus(&focus, cx);
         self.explorer.update(cx, |explorer, cx| {
             explorer.set_naming(
-                ExplorerNaming { kind, parent, target, value: initial, focus },
+                ExplorerNaming {
+                    kind,
+                    parent,
+                    target,
+                    value: initial,
+                    focus,
+                },
                 cx,
             )
         });
@@ -173,15 +201,23 @@ impl Workspace {
     }
 
     /// 命名入力のキー処理（検索パネルと同じ手書き流儀）。
-    pub(crate) fn on_naming_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_naming_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event.keystroke.key.as_str() {
             "escape" => self.cancel_naming(window, cx),
             "enter" => self.confirm_naming(window, cx),
             "backspace" => {
                 self.explorer.update(cx, |explorer, cx| {
-                    explorer.update_naming(|naming| {
-                        naming.value.pop();
-                    }, cx)
+                    explorer.update_naming(
+                        |naming| {
+                            naming.value.pop();
+                        },
+                        cx,
+                    )
                 });
             }
             "v" if event.keystroke.modifiers.platform => {
@@ -227,7 +263,12 @@ impl Workspace {
     }
 
     /// OS のゴミ箱へ（完全削除はしない）。開いているタブは先に閉じる。
-    pub(crate) fn trash_entry(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn trash_entry(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.hide_context_menu(cx);
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.close_tab_at(index, window, cx);
@@ -304,7 +345,10 @@ impl Workspace {
             .unwrap_or_else(|| path_str.clone());
         if host.is_remote() {
             let display = host.display_name();
-            let host_key = display.strip_prefix("SSH ").unwrap_or(display).replace(' ', "");
+            let host_key = display
+                .strip_prefix("SSH ")
+                .unwrap_or(display)
+                .replace(' ', "");
             let _ = storage.record_remote_project(&host_key, &path_str, &name);
         } else {
             let _ = storage.record_local_project(&path_str, &name);
@@ -319,6 +363,30 @@ impl Workspace {
         self.open_folder_in_rail(host, path, None, cx);
     }
 
+    /// Finder「このアプリケーションで開く」/ Dock の最近リスト / Dock アイコンへの D&D から
+    /// 届いたパスを開く（main の `cx.on_open_urls` → チャネル経由。CFBundleDocumentTypes とセット・M13）。
+    /// フォルダ = レールへ追加して切替（`add_project_slot`）・ファイル = アクティブプロジェクトで開く。
+    /// プロジェクト未オープンで単一ファイルが来たら、親フォルダをプロジェクトとして開いてから開く。
+    pub fn open_external_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for path in paths {
+            if path.is_dir() {
+                self.add_project_slot(path, cx);
+                continue;
+            }
+            if self.project_sessions.projects.is_empty() {
+                if let Some(parent) = path.parent() {
+                    self.add_project_slot(parent.to_path_buf(), cx);
+                }
+            }
+            self.open_file_then(path, window, cx, |_, _| {});
+        }
+    }
+
     /// フォルダを**このウィンドウのレール**に開く（既にあれば切替のみ）。新窓は作らない
     /// — ブランチ/worktree の既定導線（新窓はレール右クリック→「新しいウィンドウで開く」の明示操作・M10-2）。
     /// `branch` を渡すと「リンク worktree タブ」として記録し、右クリックの worktree/ブランチ削除を出す。
@@ -330,8 +398,11 @@ impl Workspace {
         branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) =
-            self.project_sessions.projects.iter().position(|slot| slot.worktree.root() == path.as_path())
+        if let Some(index) = self
+            .project_sessions
+            .projects
+            .iter()
+            .position(|slot| slot.worktree.root() == path.as_path())
         {
             self.overlays.pending_project_switch = Some(index);
             cx.notify();
@@ -404,7 +475,10 @@ impl Workspace {
 
     /// この色が既にレールのどれかのスロットで使われているか（色衝突の判定・小さな誤差を許容）。
     pub(crate) fn color_in_use(&self, color: Hsla) -> bool {
-        self.project_sessions.projects.iter().any(|slot| colors_close(slot.color, color))
+        self.project_sessions
+            .projects
+            .iter()
+            .any(|slot| colors_close(slot.color, color))
     }
 
     /// レールで未使用のパレット色（無ければスロット数で回す）。同色 2 枚を避けて方向感覚を保つ。
@@ -418,9 +492,17 @@ impl Workspace {
     // ── レール項目の右クリックメニュー（M10-2） ──
 
     /// レール項目の右クリックメニューを開く（色スウォッチ + 新規窓 / 外す / worktree・ブランチ削除）。
-    pub(crate) fn open_rail_menu(&mut self, index: usize, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn open_rail_menu(
+        &mut self,
+        index: usize,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         self.overlays.color_picker = None;
-        self.overlays.rail_menu = Some(RailMenuState { project_index: index, position });
+        self.overlays.rail_menu = Some(RailMenuState {
+            project_index: index,
+            position,
+        });
         cx.notify();
     }
 
@@ -432,7 +514,12 @@ impl Workspace {
 
     /// スロットを**レールから外す**（表示のみ。ディスク・ブランチ・worktree は無傷＝安全側）。
     /// アクティブを外したら隣のスロットへビューを張り替える。最後の1枚は残す。
-    pub(crate) fn remove_project_slot(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn remove_project_slot(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.overlays.rail_menu = None;
         if self.project_sessions.projects.len() <= 1 {
             self.push_toast(
@@ -450,7 +537,11 @@ impl Workspace {
         self.project_sessions.projects.remove(index);
         self.project_sessions.sessions.remove(index);
         // active index を詰める（後ろの要素が 1 つ前へずれる。ロジックは純関数でテスト済み）。
-        self.project_sessions.active = active_index_after_removal(self.project_sessions.active, index, self.project_sessions.projects.len());
+        self.project_sessions.active = active_index_after_removal(
+            self.project_sessions.active,
+            index,
+            self.project_sessions.projects.len(),
+        );
         if was_active {
             // アクティブを外した → 新しいアクティブスロットのビュー（タブ/LSP/端末/git/監視）へ張り替える。
             self.load_active_slot(window, cx);
@@ -496,7 +587,12 @@ impl Workspace {
         let host = slot.worktree.host().clone();
         let target = slot.worktree.root().to_path_buf();
         let branch = slot.worktree_branch.clone();
-        let Some(git_panel) = self.project_sessions.sessions.get(index).map(|session| session.git_panel.clone()) else {
+        let Some(git_panel) = self
+            .project_sessions
+            .sessions
+            .get(index)
+            .map(|session| session.git_panel.clone())
+        else {
             return;
         };
         git_panel.update(cx, |panel, cx| panel.set_busy(true, cx));
@@ -625,12 +721,7 @@ impl Workspace {
             },
             move |_window, cx| {
                 cx.new(|cx| {
-                    Workspace::new_sources(
-                        vec![source.clone()],
-                        theme.clone(),
-                        state_path(),
-                        cx,
-                    )
+                    Workspace::new_sources(vec![source.clone()], theme.clone(), state_path(), cx)
                 })
             },
         );
@@ -696,7 +787,12 @@ impl Workspace {
 
     /// ファイルを**同期で**開く（起動復元・レール/ブランチ切替の `open_slot_files` 専用）。
     /// 対話経路は [`Self::open_file`]（背景読み込み）。同期版はタブの並び順を保つために残す。
-    pub(crate) fn open_file_sync(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_file_sync(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
             return;
@@ -783,13 +879,15 @@ impl Workspace {
             }
         };
         let theme = self.theme.clone();
-        let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let accent = self
+            .active_slot()
+            .map(|slot| slot.color)
+            .unwrap_or_else(|| project_color(0));
         let editor = cx.new(|cx| EditorView::new(buffer, theme, accent, cx));
         // settings の実効化（M10-13）: font_size/tab_size/soft_wrap を適用（live 変更は observe_global）。
         {
             let current = settings::get(cx);
-            let soft_wrap =
-                current.soft_wrap || std::env::var_os("SHIRUSHI_SOFT_WRAP").is_some();
+            let soft_wrap = current.soft_wrap || std::env::var_os("SHIRUSHI_SOFT_WRAP").is_some();
             let (font_size, tab_size) = (current.font_size, current.tab_size);
             editor.update(cx, |view, cx| {
                 view.set_typography(font_size, tab_size, cx);

@@ -92,10 +92,7 @@ impl Workspace {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(
-                &socket_path,
-                std::fs::Permissions::from_mode(0o600),
-            );
+            let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
         }
         let (job_tx, mut job_rx) = futures::channel::mpsc::unbounded::<ControlJob>();
         // accept ループ（std スレッド）: 解析だけしてジョブ化。I/O はしない。
@@ -124,7 +121,11 @@ impl Workspace {
     /// UI スレッドでの 1 仕事。メモリで済むものは即応答・DB が要るものは background へ
     /// （GUI のストレージハンドル = 単一ワーカーを使うので headless とロック衝突しない）。
     fn handle_control_job(&mut self, job: ControlJob, cx: &mut Context<Self>) {
-        let ControlJob { method, params, respond } = job;
+        let ControlJob {
+            method,
+            params,
+            respond,
+        } = job;
         let task_id = params
             .get("task_id")
             .and_then(serde_json::Value::as_str)
@@ -147,7 +148,7 @@ impl Workspace {
                     return;
                 }
                 let Some(storage) = self.persistence.storage.clone() else {
-                    let _ = respond.send(err("台帳ストレージが無効です"));
+                    let _ = respond.send(err(i18n::t!("ipc.err_no_storage")));
                     return;
                 };
                 cx.spawn(async move |workspace, cx| {
@@ -175,14 +176,14 @@ impl Workspace {
                                     Some(index) => {
                                         ok(workspace.ipc_spawn_into(index, agent, prompt, cx))
                                     }
-                                    None => err(format!(
-                                        "worktree を開けません: {}",
-                                        record.root.display()
+                                    None => err(i18n::t!(
+                                        "ipc.err_open_worktree",
+                                        "path" => record.root.display()
                                     )),
                                 }
                             })
-                            .unwrap_or_else(|_| err("GUI が終了しました")),
-                        Ok(None) => err(format!("Task が見つかりません: {task_id}")),
+                            .unwrap_or_else(|_| err(i18n::t!("ipc.err_gui_gone"))),
+                        Ok(None) => err(i18n::t!("ipc.err_task_not_found", "id" => task_id)),
                         Err(error) => err(format!("{error:#}")),
                     };
                     let _ = respond.send(response);
@@ -195,11 +196,11 @@ impl Workspace {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string)
                 else {
-                    let _ = respond.send(err("message が必要"));
+                    let _ = respond.send(err(i18n::t!("ipc.err_message_required")));
                     return;
                 };
                 let Some(index) = self.session_index_by_task(&task_id) else {
-                    let _ = respond.send(err("Task が GUI に開かれていません（先に spawn-agent）"));
+                    let _ = respond.send(err(i18n::t!("ipc.err_task_not_open_spawn")));
                     return;
                 };
                 let panel = self.project_sessions.sessions[index].agent_panel.clone();
@@ -210,7 +211,7 @@ impl Workspace {
             "digest" => {
                 let response = match self.session_index_by_task(&task_id) {
                     Some(index) => ok(self.ipc_digest(index, cx)),
-                    None => err("Task が GUI に開かれていません"),
+                    None => err(i18n::t!("ipc.err_task_not_open")),
                 };
                 let _ = respond.send(response);
             }
@@ -222,25 +223,35 @@ impl Workspace {
                     let _ = respond.send(ok(record_json(&record)));
                     return;
                 }
-                self.respond_from_storage(respond, move |storage| {
-                    let record = storage
-                        .load_task_spaces()?
-                        .into_iter()
-                        .find(|record| record.id == task_id)
-                        .ok_or_else(|| anyhow::anyhow!("Task が見つかりません: {task_id}"))?;
-                    Ok(record_json(&record))
-                }, cx);
-            }
-            "tasks" => {
-                self.respond_from_storage(respond, move |storage| {
-                    Ok(serde_json::Value::Array(
-                        storage
+                self.respond_from_storage(
+                    respond,
+                    move |storage| {
+                        let record = storage
                             .load_task_spaces()?
                             .into_iter()
-                            .map(|record| record_json(&record))
-                            .collect(),
-                    ))
-                }, cx);
+                            .find(|record| record.id == task_id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(i18n::t!("ipc.err_task_not_found", "id" => task_id))
+                            })?;
+                        Ok(record_json(&record))
+                    },
+                    cx,
+                );
+            }
+            "tasks" => {
+                self.respond_from_storage(
+                    respond,
+                    move |storage| {
+                        Ok(serde_json::Value::Array(
+                            storage
+                                .load_task_spaces()?
+                                .into_iter()
+                                .map(|record| record_json(&record))
+                                .collect(),
+                        ))
+                    },
+                    cx,
+                );
             }
             "update_task" => {
                 let Some(phase) = params
@@ -248,7 +259,7 @@ impl Workspace {
                     .and_then(serde_json::Value::as_str)
                     .and_then(TaskPhase::from_str)
                 else {
-                    let _ = respond.send(err("不正な phase"));
+                    let _ = respond.send(err(i18n::t!("ipc.err_bad_phase")));
                     return;
                 };
                 let summary = params
@@ -276,23 +287,29 @@ impl Workspace {
                     return;
                 }
                 // 開いていない Task は台帳だけ進める（headless update と同じ内容を GUI の handle で）。
-                self.respond_from_storage(respond, move |storage| {
-                    let mut record = storage
-                        .load_task_spaces()?
-                        .into_iter()
-                        .find(|record| record.id == task_id)
-                        .ok_or_else(|| anyhow::anyhow!("Task が見つかりません: {task_id}"))?;
-                    record.phase = phase;
-                    record.result_summary = summary.clone().or(record.result_summary);
-                    let payload = serde_json::json!({
-                        "phase": phase.as_str(),
-                        "source": "orchestration_api_via_gui",
-                        "summary": summary,
-                    })
-                    .to_string();
-                    storage.commit_task_transition(&record, &payload)?;
-                    Ok(record_json(&record))
-                }, cx);
+                self.respond_from_storage(
+                    respond,
+                    move |storage| {
+                        let mut record = storage
+                            .load_task_spaces()?
+                            .into_iter()
+                            .find(|record| record.id == task_id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(i18n::t!("ipc.err_task_not_found", "id" => task_id))
+                            })?;
+                        record.phase = phase;
+                        record.result_summary = summary.clone().or(record.result_summary);
+                        let payload = serde_json::json!({
+                            "phase": phase.as_str(),
+                            "source": "orchestration_api_via_gui",
+                            "summary": summary,
+                        })
+                        .to_string();
+                        storage.commit_task_transition(&record, &payload)?;
+                        Ok(record_json(&record))
+                    },
+                    cx,
+                );
             }
             "record_task" => {
                 // headless `fleet create` の台帳登録（worktree は CLI 側で作成済み・GUI = 単一 writer）。
@@ -309,7 +326,10 @@ impl Workspace {
                         .unwrap_or_default()
                         .to_string(),
                     root: PathBuf::from(
-                        params.get("root").and_then(serde_json::Value::as_str).unwrap_or_default(),
+                        params
+                            .get("root")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default(),
                     ),
                     branch: params
                         .get("branch")
@@ -342,11 +362,17 @@ impl Workspace {
                         .map(str::to_string),
                     result_summary: None,
                     depends_on: Vec::new(),
-                    created_at: params.get("created_at").and_then(serde_json::Value::as_i64).unwrap_or(0),
-                    updated_at: params.get("updated_at").and_then(serde_json::Value::as_i64).unwrap_or(0),
+                    created_at: params
+                        .get("created_at")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0),
+                    updated_at: params
+                        .get("updated_at")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0),
                 };
                 if record.id.is_empty() {
-                    let _ = respond.send(err("record の id が必要"));
+                    let _ = respond.send(err(i18n::t!("ipc.err_record_id_required")));
                     return;
                 }
                 self.respond_from_storage(respond, move |storage| {
@@ -372,10 +398,14 @@ impl Workspace {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.respond_from_storage(respond, move |storage| {
-                    storage.set_task_depends(&task_id, &depends_on)?;
-                    Ok(serde_json::json!({ "task_id": task_id, "depends_on": depends_on }))
-                }, cx);
+                self.respond_from_storage(
+                    respond,
+                    move |storage| {
+                        storage.set_task_depends(&task_id, &depends_on)?;
+                        Ok(serde_json::json!({ "task_id": task_id, "depends_on": depends_on }))
+                    },
+                    cx,
+                );
             }
             "events" => {
                 let since = params
@@ -402,7 +432,7 @@ impl Workspace {
                 }, cx);
             }
             other => {
-                let _ = respond.send(err(format!("未知の method: {other}")));
+                let _ = respond.send(err(i18n::t!("ipc.err_unknown_method", "name" => other)));
             }
         }
     }
@@ -411,13 +441,11 @@ impl Workspace {
     fn respond_from_storage(
         &self,
         respond: std::sync::mpsc::Sender<serde_json::Value>,
-        operation: impl FnOnce(&storage::Storage) -> anyhow::Result<serde_json::Value>
-            + Send
-            + 'static,
+        operation: impl FnOnce(&storage::Storage) -> anyhow::Result<serde_json::Value> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         let Some(storage) = self.persistence.storage.clone() else {
-            let _ = respond.send(err("台帳ストレージが無効です"));
+            let _ = respond.send(err(i18n::t!("ipc.err_no_storage")));
             return;
         };
         cx.background_executor()
@@ -455,7 +483,9 @@ impl Workspace {
                 .iter()
                 .any(|pane| matches!(pane, FleetPane::Task { space } if *space == space_id))
         {
-            self.chrome.fleet_cells.push(FleetPane::Task { space: space_id });
+            self.chrome
+                .fleet_cells
+                .push(FleetPane::Task { space: space_id });
         }
         let panel = self.project_sessions.sessions[index].agent_panel.clone();
         let thread_index = panel.update(cx, |panel, cx| {
@@ -472,7 +502,10 @@ impl Workspace {
     /// 事実層 + Tier1（+キャッシュ済み Tier2）。**フル transcript は返さない**（3 段圧縮・計画 §P5）。
     fn ipc_digest(&self, index: usize, cx: &mut Context<Self>) -> serde_json::Value {
         let slot = &self.project_sessions.projects[index];
-        let statuses = self.project_sessions.sessions[index].agent_panel.read(cx).statuses();
+        let statuses = self.project_sessions.sessions[index]
+            .agent_panel
+            .read(cx)
+            .statuses();
         let threads: Vec<serde_json::Value> = statuses
             .iter()
             .map(|status| {
@@ -509,7 +542,10 @@ impl Workspace {
 }
 
 /// 1 接続 = 1 リクエスト（I/O なし・解析してジョブ化するだけ）。
-fn serve_connection(stream: UnixStream, job_tx: futures::channel::mpsc::UnboundedSender<ControlJob>) {
+fn serve_connection(
+    stream: UnixStream,
+    job_tx: futures::channel::mpsc::UnboundedSender<ControlJob>,
+) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
     let mut reader = BufReader::new(match stream.try_clone() {
@@ -527,7 +563,10 @@ fn serve_connection(stream: UnixStream, job_tx: futures::channel::mpsc::Unbounde
     let request: serde_json::Value = match serde_json::from_str(&line) {
         Ok(value) => value,
         Err(error) => {
-            respond_line(&stream, err(format!("JSON が読めない: {error}")));
+            respond_line(
+                &stream,
+                err(i18n::t!("ipc.err_bad_json", "detail" => error)),
+            );
             return;
         }
     };
@@ -536,18 +575,25 @@ fn serve_connection(stream: UnixStream, job_tx: futures::channel::mpsc::Unbounde
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string();
-    let params = request.get("params").cloned().unwrap_or(serde_json::json!({}));
+    let params = request
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let (respond_tx, respond_rx) = std::sync::mpsc::channel();
     if job_tx
-        .unbounded_send(ControlJob { method, params, respond: respond_tx })
+        .unbounded_send(ControlJob {
+            method,
+            params,
+            respond: respond_tx,
+        })
         .is_err()
     {
-        respond_line(&stream, err("GUI が終了しました"));
+        respond_line(&stream, err(i18n::t!("ipc.err_gui_gone")));
         return;
     }
     // spawn は worktree オープンを含む＝少し待つ（UI スレッドの 1 job・通常は瞬時）。
     match respond_rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(response) => respond_line(&stream, response),
-        Err(_) => respond_line(&stream, err("GUI の応答が timeout")),
+        Err(_) => respond_line(&stream, err(i18n::t!("ipc.err_gui_timeout"))),
     }
 }

@@ -23,7 +23,7 @@
   1. docs 内の絶対パス一括置換（`~/Work/experience/editor` → 新パス。対象: MVP-PLAN.md・BACKGROUND.md・JOURNAL.md・memory）
   2. mock/index.html のターミナル表示パス修正
   3. `cargo check -p shirushi` で再ビルド確認（キャッシュ再構築で数分かかるのは正常）
-  4. Claude Code メモリの移行: `cp -r ~/.claude/projects/-Users-daichi-Work-experience-editor/memory ~/.claude/projects/<新パスのスラッグ>/`（新フォルダで一度セッションを開くとスラッグが分かる）
+  4. Claude Code メモリの移行: `cp -r ~/.claude/projects/<旧パスのスラッグ>/memory ~/.claude/projects/<新パスのスラッグ>/`（新フォルダで一度セッションを開くとスラッグが分かる）
 
 ## 2026-07-11 — M2 theme_core（デザイントークン）＋ リネーム後始末
 - やったこと:
@@ -1087,3 +1087,49 @@
   ＝ ドラッグ選択→⌘C→貼付の実機目視は未。最終確認は metal のある環境で。
 - 学び: 「実装はあるのに効かない」時、GPUI は **action > key_down**・**leaf→root** を疑う。生キーで拾う設計は
   同じキーが action にバインドされていると届かない。フォーカスを持つ子が消費する前提で「空なら親に譲る」を入れる。
+
+## 2026-08-06 — 公開準備の総仕上げ（阻害バグ根治・掃除・受け入れ設備・cargo-deny・ログ基盤）
+
+「ぼちぼち公開していきたい」を受け、公開レビュー（ROADMAP 突合 + リポジトリ全数スキャン）の指摘を全部消化した回。
+一覧は ROADMAP M13「公開整備一式」・手順の正は新設の `docs/RELEASE.md`。ここには判断と罠だけ残す。
+
+- **リリース阻害バグ = バージョン三重同期**: Cargo.toml / bundle-mac.sh の Info.plist ベタ書き / タグ が手動同期で、
+  Cargo.toml を上げ忘れてタグを切ると **updater（CARGO_PKG_VERSION 比較）が全ユーザーに更新チップを無限表示**する。
+  → bundle-mac.sh が `[workspace.package]` から awk で注入・release.yml がタグ⇔Cargo.toml 一致検証（不一致 fail）
+- **署名は --deep をやめ個別署名**（Apple 非推奨・entitlements が内包バイナリへ意図どおり載らない）: 内包 Mach-O
+  （mac 用 remote server）→ bundle 本体の順。musl の ELF は署名対象外（notarize では data 扱い）。
+  `crates/shirushi/resources/shirushi.entitlements` 新設 = **apple-events のみ**（Finder ゴミ箱 fallback 用。
+  子プロセス起動は hardened runtime の制約外＝宣言不要）。ad-hoc（ローカル）にも同じものを付けて挙動を揃えた
+- **Finder/Dock から開く**: Info.plist に CFBundleDocumentTypes（LSHandlerRank=Alternate＝既定ハンドラを奪わない・
+  フォルダは Dock D&D 用）+ gpui `on_open_urls`（mac 実装は application:openURLs: を確認）→ unbounded チャネル →
+  `Workspace::open_external_paths` 新設（フォルダ=add_project_slot / ファイル=open_file_then / 無プロジェクトなら
+  親フォルダを開いてから）。**on_open_urls のコールバックは cx を持たない** → チャネル + 前景 spawn が定石
+- **GUI 起動ログ（配布アプリの最弱点だった）**: `workspace::logging` 新設。**stderr の行き先が /dev/null のときだけ**
+  dup2 でログへ（判定 = isatty 除外 → S_IFCHR → /dev/null と st_rdev 一致）。tty=ターミナル起動・pipe=SHIRUSHI_*
+  プローブ/MCP の stdio は素通し＝開発フローとプロトコルを壊さない。stdout は「stdout も null のとき」だけ差し替え
+  （MCP 事故防止）。`logs/shirushi-<unix>-<pid>.log`・20 本保持・main() の**最初**（panic hook より前）＝クラッシュの
+  backtrace も同じログに残る。bug_report.yml に App log 欄を追加
+- **cargo-deny CI 常設**（868 crate 無監査の解消）: allow は permissive + MPL-2.0 + bzip2-1.0.6。自作 crate は
+  `private.ignore`（全 crate publish=false が前提 → storage だけ逸脱していたのを workspace 継承に修正）。
+  git 出所は zed / zed font-kit fork / proptest の 3 つを明示 allow。**unmaintained は "workspace"（直接依存のみ）**
+  にしないと gpui 級のツリーでは推移依存（paste/rustybuzz/ttf-parser…）で常時赤になる。cfg_block は license
+  フィールド欠落 → LICENSE 実物（Apache-2.0）を確認して clarify。結果 = licenses/sources/advisories/bans 全 green
+- **i18n 回収の残り**: updater 10 + 管制 IPC 12 + fleet_view 2 を t! 化（ja/en +26 キー）。EN ロケールに
+  「署名検証に失敗」等の日本語エラーが出ていた。IPC のエラーは fleet CLI にも届く＝人間向け文字列として扱う
+- **文書の危険文を根治**: README の「Zed = GPL 資産の移植元」（DECISIONS §5 の「移植していない」と正面矛盾・
+  公開時に最初に引用される一文）を削除し EN ユーザー向けに全面改稿。DECISIONS §5 冒頭に現状サマリ注記
+  （2026-07-11 の移植戦略は**実行されないまま撤回済み**・Cargo.lock に GPL crate 不存在・CI が機械検証）
+- **CLA を「最初の 1 件から」の宣言どおり用意**: CLA.md（ICLA 型 + **再ライセンス権の明示**＝DECISIONS の
+  戦略と貢献者への透明性を両立）+ contributor-assistant（署名は cla-signatures ブランチ）。
+  CoC の連絡先は**個人メールを新規露出させず** GitHub 経由（コミットは noreply メール運用と確認済み）
+- **M11 ドリフト解消**: tree-sitter 多言語 + 増分パースは 07-17 に実装済み（当日 JOURNAL「★全消化」）なのに
+  ROADMAP が `[ ]` のまま → `cargo test -p lang` green と didChange incremental の配線
+  （`editor_area/language.rs`）を確認してチェック。残は Markdown grammar のみ（inline/block 二重 grammar で別枠）
+- **掃除**: chatgpt-images/ 6 枚（10MB・未参照）削除・タチコマ画像 3 枚 + モック参照 4 箇所削除（版権 NG 判断の実行・
+  gallery の「素子」表記も中立化）・slice*.py の別プロジェクト絶対パス・research 2 本と mock のローカルパス・
+  storage fixture の実ホスト名らしき別名（→ gpu_box 等）・acp_client の個人名コメントを中立化
+- 学び/罠: (1) **配布物のバージョン出所は 1 箇所 + CI で一致検証** — 「タグからバージョンを取らない release CI」は
+  初回リリース前に必ず踏む地雷。(2) `gh secret list` が空 = Apple 署名 secrets 未設定を機械確認できる（未署名 dmg は
+  updater の spctl 検証を通らない＝初回から署名必須）。(3) リリース確認は未認証 GitHub API なので **private のうちは
+  404 → 更新 E2E は public 化後にしかできない**。(4) 並行セッションの未コミット変更（agent_panel 等 357 行）がある
+  状態での作業は、触るファイルを直前 Read + 完全一致 Edit（07-19 と同じ流儀）で無衝突

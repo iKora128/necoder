@@ -210,7 +210,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
     for chunk in message.chunks(64) {
         let mut w = [0u32; 64];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes([chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3]]);
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -366,11 +371,21 @@ impl Storage {
                     .context("hot_exit の読み出しに失敗")?;
                 let mut result = Vec::new();
                 while let Some(row) = rows.next().await.context("hot_exit の行取得に失敗")? {
-                    let scope: String =
-                        row.get_value(0)?.as_text().context("scope が文字列でない")?.clone();
-                    let path: String = row.get_value(1)?.as_text().context("path が文字列でない")?.clone();
-                    let content: String =
-                        row.get_value(2)?.as_text().context("content が文字列でない")?.clone();
+                    let scope: String = row
+                        .get_value(0)?
+                        .as_text()
+                        .context("scope が文字列でない")?
+                        .clone();
+                    let path: String = row
+                        .get_value(1)?
+                        .as_text()
+                        .context("path が文字列でない")?
+                        .clone();
+                    let content: String = row
+                        .get_value(2)?
+                        .as_text()
+                        .context("content が文字列でない")?
+                        .clone();
                     result.push((scope, PathBuf::from(path), content));
                 }
                 Ok(result)
@@ -397,9 +412,7 @@ impl Storage {
         let task = task.clone();
         let now = unix_ms();
         self.run(move |conn| {
-            futures::executor::block_on(async {
-                upsert_task_space_on(conn, &task, now).await
-            })
+            futures::executor::block_on(async { upsert_task_space_on(conn, &task, now).await })
         })
     }
 
@@ -417,7 +430,8 @@ impl Storage {
                     .await
                     .context("task_spaces の読み出しに失敗")?;
                 let mut result = Vec::new();
-                while let Some(row) = rows.next().await.context("task_spaces 行の取得に失敗")? {
+                while let Some(row) = rows.next().await.context("task_spaces 行の取得に失敗")?
+                {
                     let (kind, phase) = TaskSpaceRecord::parse_phase_column(
                         row.get_value(5)?.as_text().context("task phase")?,
                     );
@@ -443,10 +457,14 @@ impl Storage {
                 }
                 // 依存（task_deps）をメモリで結合（P6）。
                 let mut deps = conn
-                    .query("SELECT task_id, depends_on FROM task_deps ORDER BY task_id", ())
+                    .query(
+                        "SELECT task_id, depends_on FROM task_deps ORDER BY task_id",
+                        (),
+                    )
                     .await
                     .context("task_deps の読み出しに失敗")?;
-                while let Some(row) = deps.next().await.context("task_deps 行の取得に失敗")? {
+                while let Some(row) = deps.next().await.context("task_deps 行の取得に失敗")?
+                {
                     let task_id = row.get_value(0)?.as_text().context("dep task")?.clone();
                     let depends_on = row.get_value(1)?.as_text().context("dep on")?.clone();
                     if let Some(record) = result.iter_mut().find(|record| record.id == task_id) {
@@ -472,7 +490,9 @@ impl Storage {
         let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
-                conn.execute("BEGIN", ()).await.context("task transition begin")?;
+                conn.execute("BEGIN", ())
+                    .await
+                    .context("task transition begin")?;
                 let outcome = async {
                     upsert_task_space_on(conn, &task, now).await?;
                     conn.execute(
@@ -487,7 +507,9 @@ impl Storage {
                 .await;
                 match outcome {
                     Ok(()) => {
-                        conn.execute("COMMIT", ()).await.context("task transition commit")?;
+                        conn.execute("COMMIT", ())
+                            .await
+                            .context("task transition commit")?;
                         Ok(())
                     }
                     Err(error) => {
@@ -505,9 +527,12 @@ impl Storage {
         let depends_on = depends_on.to_vec();
         self.run(move |conn| {
             futures::executor::block_on(async {
-                conn.execute("DELETE FROM task_deps WHERE task_id = ?1", (task_id.as_str(),))
-                    .await
-                    .context("task_deps の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM task_deps WHERE task_id = ?1",
+                    (task_id.as_str(),),
+                )
+                .await
+                .context("task_deps の削除に失敗")?;
                 for dep in &depends_on {
                     conn.execute(
                         "INSERT OR IGNORE INTO task_deps (task_id, depends_on) VALUES (?1, ?2)",
@@ -522,8 +547,7 @@ impl Storage {
     }
 
     pub fn append_task_event(&self, task_id: &str, kind: &str, payload: &str) -> Result<i64> {
-        let (task_id, kind, payload) =
-            (task_id.to_string(), kind.to_string(), payload.to_string());
+        let (task_id, kind, payload) = (task_id.to_string(), kind.to_string(), payload.to_string());
         let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
@@ -548,7 +572,11 @@ impl Storage {
 
     /// 全 Task 横断で `since_id` より新しいイベントを古い順に返す（`fleet events` の差分読み・P5）。
     /// 監督や CLI が「前回どこまで読んだか」を id で覚えて差分だけ受け取る。
-    pub fn load_task_events_since(&self, since_id: i64, limit: i64) -> Result<Vec<TaskEventRecord>> {
+    pub fn load_task_events_since(
+        &self,
+        since_id: i64,
+        limit: i64,
+    ) -> Result<Vec<TaskEventRecord>> {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
@@ -560,12 +588,17 @@ impl Storage {
                     .await
                     .context("task_events（差分）の読み出しに失敗")?;
                 let mut result = Vec::new();
-                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")? {
+                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")?
+                {
                     result.push(TaskEventRecord {
                         id: *row.get_value(0)?.as_integer().context("event id")?,
                         task_id: row.get_value(1)?.as_text().context("event task")?.clone(),
                         kind: row.get_value(2)?.as_text().context("event kind")?.clone(),
-                        payload: row.get_value(3)?.as_text().context("event payload")?.clone(),
+                        payload: row
+                            .get_value(3)?
+                            .as_text()
+                            .context("event payload")?
+                            .clone(),
                         created_at: *row.get_value(4)?.as_integer().context("event created_at")?,
                     });
                 }
@@ -587,12 +620,17 @@ impl Storage {
                     .await
                     .context("task_events（横断）の読み出しに失敗")?;
                 let mut result = Vec::new();
-                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")? {
+                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")?
+                {
                     result.push(TaskEventRecord {
                         id: *row.get_value(0)?.as_integer().context("event id")?,
                         task_id: row.get_value(1)?.as_text().context("event task")?.clone(),
                         kind: row.get_value(2)?.as_text().context("event kind")?.clone(),
-                        payload: row.get_value(3)?.as_text().context("event payload")?.clone(),
+                        payload: row
+                            .get_value(3)?
+                            .as_text()
+                            .context("event payload")?
+                            .clone(),
                         created_at: *row.get_value(4)?.as_integer().context("event created_at")?,
                     });
                 }
@@ -614,12 +652,17 @@ impl Storage {
                     .await
                     .context("task_events の読み出しに失敗")?;
                 let mut result = Vec::new();
-                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")? {
+                while let Some(row) = rows.next().await.context("task_events 行の取得に失敗")?
+                {
                     result.push(TaskEventRecord {
                         id: *row.get_value(0)?.as_integer().context("event id")?,
                         task_id: row.get_value(1)?.as_text().context("event task")?.clone(),
                         kind: row.get_value(2)?.as_text().context("event kind")?.clone(),
-                        payload: row.get_value(3)?.as_text().context("event payload")?.clone(),
+                        payload: row
+                            .get_value(3)?
+                            .as_text()
+                            .context("event payload")?
+                            .clone(),
                         created_at: *row.get_value(4)?.as_integer().context("event created_at")?,
                     });
                 }
@@ -676,7 +719,8 @@ impl Storage {
 
     /// turn を 1 行追記する（ストリーミング確定後に呼ぶ）。
     pub fn insert_turn(&self, thread_id: &str, role: &str, content: &str) -> Result<()> {
-        let (thread_id, role, content) = (thread_id.to_string(), role.to_string(), content.to_string());
+        let (thread_id, role, content) =
+            (thread_id.to_string(), role.to_string(), content.to_string());
         let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
@@ -699,7 +743,20 @@ impl Storage {
     #[allow(clippy::type_complexity)]
     pub fn load_threads(
         &self,
-    ) -> Result<Vec<(String, String, i64, String, Option<String>, Option<String>, i64, i64, i64, Option<i64>)>> {
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            Option<i64>,
+        )>,
+    > {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
@@ -739,7 +796,19 @@ impl Storage {
     #[allow(clippy::type_complexity)]
     pub fn load_all_threads(
         &self,
-    ) -> Result<Vec<(String, String, i64, String, Option<String>, i64, bool, i64, Option<i64>)>> {
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            i64,
+            bool,
+            i64,
+            Option<i64>,
+        )>,
+    > {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
@@ -804,9 +873,12 @@ impl Storage {
         let thread_id = thread_id.to_string();
         self.run(move |conn| {
             futures::executor::block_on(async {
-                conn.execute("UPDATE threads SET archived = 1 WHERE id = ?1", (thread_id.as_str(),))
-                    .await
-                    .context("threads のアーカイブに失敗")?;
+                conn.execute(
+                    "UPDATE threads SET archived = 1 WHERE id = ?1",
+                    (thread_id.as_str(),),
+                )
+                .await
+                .context("threads のアーカイブに失敗")?;
                 Ok(())
             })
         })
@@ -876,7 +948,8 @@ impl Storage {
                     .await
                     .context("checkpoint_files の読み出しに失敗")?;
                 let mut result = Vec::new();
-                while let Some(row) = rows.next().await.context("checkpoint 行の取得に失敗")? {
+                while let Some(row) = rows.next().await.context("checkpoint 行の取得に失敗")?
+                {
                     let path = PathBuf::from(row.get_value(0)?.as_text().context("path")?.clone());
                     let content = match row.get_value(1)? {
                         turso::Value::Text(hash) => Some(read_blob(&blobs_dir, &hash)?),
@@ -947,12 +1020,18 @@ impl Storage {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
-                    .query("SELECT color FROM host_colors WHERE host = ?1", (host.as_str(),))
+                    .query(
+                        "SELECT color FROM host_colors WHERE host = ?1",
+                        (host.as_str(),),
+                    )
                     .await
                     .context("host_colors の読み出しに失敗")?;
                 match rows.next().await.context("host_colors 行の取得に失敗")? {
                     Some(row) => {
-                        let color = *row.get_value(0)?.as_integer().context("color が整数でない")?;
+                        let color = *row
+                            .get_value(0)?
+                            .as_integer()
+                            .context("color が整数でない")?;
                         Ok(Some(color as u32))
                     }
                     None => Ok(None),
@@ -984,13 +1063,19 @@ impl Storage {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
-                    .query("SELECT path FROM host_last_path WHERE host = ?1", (host.as_str(),))
+                    .query(
+                        "SELECT path FROM host_last_path WHERE host = ?1",
+                        (host.as_str(),),
+                    )
                     .await
                     .context("host_last_path の読み出しに失敗")?;
                 match rows.next().await.context("host_last_path 行の取得に失敗")? {
-                    Some(row) => {
-                        Ok(Some(row.get_value(0)?.as_text().context("path が文字列でない")?.clone()))
-                    }
+                    Some(row) => Ok(Some(
+                        row.get_value(0)?
+                            .as_text()
+                            .context("path が文字列でない")?
+                            .clone(),
+                    )),
                     None => Ok(None),
                 }
             })
@@ -1096,7 +1181,8 @@ impl Storage {
                     .await
                     .context("local_projects の読み出しに失敗")?;
                 let mut result = Vec::new();
-                while let Some(row) = rows.next().await.context("local_projects 行の取得に失敗")? {
+                while let Some(row) = rows.next().await.context("local_projects 行の取得に失敗")?
+                {
                     result.push((
                         row.get_value(0)?.as_text().context("path")?.clone(),
                         row.get_value(1)?.as_text().context("name")?.clone(),
@@ -1116,9 +1202,12 @@ impl Storage {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 if scope == "local" {
-                    conn.execute("DELETE FROM local_projects WHERE path = ?1", (path.as_str(),))
-                        .await
-                        .context("local_projects の削除に失敗")?;
+                    conn.execute(
+                        "DELETE FROM local_projects WHERE path = ?1",
+                        (path.as_str(),),
+                    )
+                    .await
+                    .context("local_projects の削除に失敗")?;
                 } else {
                     conn.execute(
                         "DELETE FROM remote_projects WHERE host = ?1 AND path = ?2",
@@ -1156,7 +1245,10 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     // 旧スキーマ（path 単独 PK・scope 列なし）からの移行（M13）。hot_exit は transient
     // なので、scope 列が無ければ作り直す（1 度だけ・冪等）。local と remote の同一絶対パスが
     // 衝突して復元先を取り違える事故を防ぐ。
-    let has_scope = conn.query("SELECT scope FROM hot_exit LIMIT 0", ()).await.is_ok();
+    let has_scope = conn
+        .query("SELECT scope FROM hot_exit LIMIT 0", ())
+        .await
+        .is_ok();
     if !has_scope {
         conn.execute("DROP TABLE IF EXISTS hot_exit", ())
             .await
@@ -1360,7 +1452,11 @@ async fn upsert_task_space_on(
             task.base_oid.as_deref(),
             task.head_oid.as_deref(),
             task.result_summary.as_deref(),
-            if task.created_at > 0 { task.created_at } else { now },
+            if task.created_at > 0 {
+                task.created_at
+            } else {
+                now
+            },
             now,
         ),
     )
@@ -1381,7 +1477,11 @@ mod tests {
     use super::*;
 
     fn temp_db(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("shirushi_storage_{}_{}.db", tag, std::process::id()))
+        std::env::temp_dir().join(format!(
+            "shirushi_storage_{}_{}.db",
+            tag,
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -1392,20 +1492,34 @@ mod tests {
 
         let file_a = PathBuf::from("/tmp/a.rs");
         let file_b = PathBuf::from("/tmp/b.rs");
-        storage.save_hot_exit("local", &file_a, "content A").unwrap();
-        storage.save_hot_exit("local", &file_b, "内容 B（日本語）").unwrap();
+        storage
+            .save_hot_exit("local", &file_a, "content A")
+            .unwrap();
+        storage
+            .save_hot_exit("local", &file_b, "内容 B（日本語）")
+            .unwrap();
         // upsert（同じ scope+path へ上書き）
-        storage.save_hot_exit("local", &file_a, "content A v2").unwrap();
+        storage
+            .save_hot_exit("local", &file_a, "content A v2")
+            .unwrap();
 
         let all = storage.load_hot_exit_all().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(
             all[0],
-            ("local".to_string(), file_a.clone(), "content A v2".to_string())
+            (
+                "local".to_string(),
+                file_a.clone(),
+                "content A v2".to_string()
+            )
         );
         assert_eq!(
             all[1],
-            ("local".to_string(), file_b.clone(), "内容 B（日本語）".to_string())
+            (
+                "local".to_string(),
+                file_b.clone(),
+                "内容 B（日本語）".to_string()
+            )
         );
 
         storage.remove_hot_exit("local", &file_a).unwrap();
@@ -1425,7 +1539,9 @@ mod tests {
         let storage = Storage::open(&path).expect("DB を開ける");
 
         let same = PathBuf::from("/home/dev/work/sample/src/lib.rs");
-        storage.save_hot_exit("local", &same, "ローカルの未保存").unwrap();
+        storage
+            .save_hot_exit("local", &same, "ローカルの未保存")
+            .unwrap();
         storage
             .save_hot_exit("ssh://host/home/dev/work/sample", &same, "リモートの未保存")
             .unwrap();
@@ -1433,7 +1549,10 @@ mod tests {
         let all = storage.load_hot_exit_all().unwrap();
         assert_eq!(all.len(), 2, "同一パスでも scope が違えば別レコード");
         let local = all.iter().find(|(scope, ..)| scope == "local").unwrap();
-        let remote = all.iter().find(|(scope, ..)| scope.starts_with("ssh://")).unwrap();
+        let remote = all
+            .iter()
+            .find(|(scope, ..)| scope.starts_with("ssh://"))
+            .unwrap();
         assert_eq!(local.2, "ローカルの未保存");
         assert_eq!(remote.2, "リモートの未保存");
 
@@ -1453,26 +1572,30 @@ mod tests {
         let storage = Storage::open(&path).unwrap();
 
         // 未登録は None。
-        assert_eq!(storage.host_color("azure_h100").unwrap(), None);
-        storage.set_host_color("azure_h100", 0xef7d9b).unwrap();
-        storage.set_host_color("azure_a10", 0x61afef).unwrap();
-        assert_eq!(storage.host_color("azure_h100").unwrap(), Some(0xef7d9b));
-        assert_eq!(storage.host_color("azure_a10").unwrap(), Some(0x61afef));
+        assert_eq!(storage.host_color("gpu_box").unwrap(), None);
+        storage.set_host_color("gpu_box", 0xef7d9b).unwrap();
+        storage.set_host_color("gpu_spare", 0x61afef).unwrap();
+        assert_eq!(storage.host_color("gpu_box").unwrap(), Some(0xef7d9b));
+        assert_eq!(storage.host_color("gpu_spare").unwrap(), Some(0x61afef));
         // upsert（同じ host へ上書き）。
-        storage.set_host_color("azure_h100", 0x85c46c).unwrap();
-        assert_eq!(storage.host_color("azure_h100").unwrap(), Some(0x85c46c));
+        storage.set_host_color("gpu_box", 0x85c46c).unwrap();
+        assert_eq!(storage.host_color("gpu_box").unwrap(), Some(0x85c46c));
 
         // 前回パス（#2d）も同じ DB に持てる（別テーブル・upsert）。
-        assert_eq!(storage.host_last_path("azure_h100").unwrap(), None);
-        storage.set_host_last_path("azure_h100", "/home/daichi/proj").unwrap();
+        assert_eq!(storage.host_last_path("gpu_box").unwrap(), None);
+        storage
+            .set_host_last_path("gpu_box", "/home/dev/proj")
+            .unwrap();
         assert_eq!(
-            storage.host_last_path("azure_h100").unwrap(),
-            Some("/home/daichi/proj".to_string())
+            storage.host_last_path("gpu_box").unwrap(),
+            Some("/home/dev/proj".to_string())
         );
-        storage.set_host_last_path("azure_h100", "/home/daichi/other").unwrap();
+        storage
+            .set_host_last_path("gpu_box", "/home/dev/other")
+            .unwrap();
         assert_eq!(
-            storage.host_last_path("azure_h100").unwrap(),
-            Some("/home/daichi/other".to_string())
+            storage.host_last_path("gpu_box").unwrap(),
+            Some("/home/dev/other".to_string())
         );
 
         let _ = std::fs::remove_file(&path);
@@ -1486,18 +1609,26 @@ mod tests {
 
         // 未登録は空。
         assert!(storage.recent_remote_projects().unwrap().is_empty());
-        storage.record_remote_project("azure_h100", "/home/daichi/proj", "proj").unwrap();
-        storage.record_remote_project("aws_web", "/srv/app", "app").unwrap();
+        storage
+            .record_remote_project("gpu_box", "/home/dev/proj", "proj")
+            .unwrap();
+        storage
+            .record_remote_project("web_box", "/srv/app", "app")
+            .unwrap();
         let recent = storage.recent_remote_projects().unwrap();
         assert_eq!(recent.len(), 2);
         assert!(recent
             .iter()
-            .any(|row| row.0 == "azure_h100" && row.1 == "/home/daichi/proj" && row.2 == "proj"));
+            .any(|row| row.0 == "gpu_box" && row.1 == "/home/dev/proj" && row.2 == "proj"));
         // 同じ host+path を再記録 → 件数は増えず name だけ更新（upsert）。
-        storage.record_remote_project("azure_h100", "/home/daichi/proj", "proj改名").unwrap();
+        storage
+            .record_remote_project("gpu_box", "/home/dev/proj", "proj改名")
+            .unwrap();
         let recent2 = storage.recent_remote_projects().unwrap();
         assert_eq!(recent2.len(), 2);
-        assert!(recent2.iter().any(|row| row.1 == "/home/daichi/proj" && row.2 == "proj改名"));
+        assert!(recent2
+            .iter()
+            .any(|row| row.1 == "/home/dev/proj" && row.2 == "proj改名"));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -1510,26 +1641,42 @@ mod tests {
 
         // 未登録は空。
         assert!(storage.recent_local_projects().unwrap().is_empty());
-        storage.record_local_project("/Users/d/Work/shirushi", "shirushi").unwrap();
-        storage.record_local_project("/Users/d/Work/blog", "blog").unwrap();
+        storage
+            .record_local_project("/Users/d/Work/shirushi", "shirushi")
+            .unwrap();
+        storage
+            .record_local_project("/Users/d/Work/blog", "blog")
+            .unwrap();
         let recent = storage.recent_local_projects().unwrap();
         assert_eq!(recent.len(), 2);
-        assert!(recent.iter().any(|row| row.0 == "/Users/d/Work/shirushi" && row.1 == "shirushi"));
+        assert!(recent
+            .iter()
+            .any(|row| row.0 == "/Users/d/Work/shirushi" && row.1 == "shirushi"));
         // 同じ path を再記録 → 件数は増えず name/opened_at だけ更新（upsert）。
-        storage.record_local_project("/Users/d/Work/shirushi", "しるし").unwrap();
+        storage
+            .record_local_project("/Users/d/Work/shirushi", "しるし")
+            .unwrap();
         let recent2 = storage.recent_local_projects().unwrap();
         assert_eq!(recent2.len(), 2);
-        assert!(recent2.iter().any(|row| row.0 == "/Users/d/Work/shirushi" && row.1 == "しるし"));
+        assert!(recent2
+            .iter()
+            .any(|row| row.0 == "/Users/d/Work/shirushi" && row.1 == "しるし"));
 
         // forget: local スコープは local_projects から消え、remote には触れない。
-        storage.record_remote_project("dev@box", "/srv/app", "app").unwrap();
-        storage.forget_recent_project("local", "/Users/d/Work/blog").unwrap();
+        storage
+            .record_remote_project("dev@box", "/srv/app", "app")
+            .unwrap();
+        storage
+            .forget_recent_project("local", "/Users/d/Work/blog")
+            .unwrap();
         let after = storage.recent_local_projects().unwrap();
         assert_eq!(after.len(), 1);
         assert!(!after.iter().any(|row| row.0 == "/Users/d/Work/blog"));
         assert_eq!(storage.recent_remote_projects().unwrap().len(), 1);
         // forget: remote スコープ（host key）は remote_projects から消える。
-        storage.forget_recent_project("dev@box", "/srv/app").unwrap();
+        storage
+            .forget_recent_project("dev@box", "/srv/app")
+            .unwrap();
         assert!(storage.recent_remote_projects().unwrap().is_empty());
 
         let _ = std::fs::remove_file(&path);
@@ -1541,19 +1688,41 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let storage = Storage::open(&path).unwrap();
         storage
-            .upsert_thread("t1", "rope設計", 0, "shirushi", Some("main"), Some("claude"), 1200, 200_000)
+            .upsert_thread(
+                "t1",
+                "rope設計",
+                0,
+                "shirushi",
+                Some("main"),
+                Some("claude"),
+                1200,
+                200_000,
+            )
             .unwrap();
         storage.insert_turn("t1", "user", "1+1は？").unwrap();
         storage.insert_turn("t1", "agent", "2").unwrap();
         storage
-            .upsert_thread("t1", "rope設計（改名）", 0, "shirushi", Some("main"), Some("claude"), 2400, 200_000)
+            .upsert_thread(
+                "t1",
+                "rope設計（改名）",
+                0,
+                "shirushi",
+                Some("main"),
+                Some("claude"),
+                2400,
+                200_000,
+            )
             .unwrap();
-        storage.upsert_thread("t2", "別スレッド", 1, "probe", None, None, 0, 0).unwrap();
+        storage
+            .upsert_thread("t2", "別スレッド", 1, "probe", None, None, 0, 0)
+            .unwrap();
 
         let threads = storage.load_threads().unwrap();
         assert_eq!(threads.len(), 2);
         // updated_at 降順 = 直近更新の t2 or t1（同時刻あり得るので集合で確認）
-        assert!(threads.iter().any(|t| t.0 == "t1" && t.1 == "rope設計（改名）" && t.6 == 2400));
+        assert!(threads
+            .iter()
+            .any(|t| t.0 == "t1" && t.1 == "rope設計（改名）" && t.6 == 2400));
         // 時刻の導出（M14）: created_at は正の unix ms・last_input_at は user turn がある t1 だけ Some。
         let t1 = threads.iter().find(|t| t.0 == "t1").unwrap();
         assert!(t1.8 > 0, "created_at が入る");
@@ -1561,10 +1730,13 @@ mod tests {
         let t2 = threads.iter().find(|t| t.0 == "t2").unwrap();
         assert!(t2.9.is_none(), "入力の無いスレッドの last_input_at は None");
         let turns = storage.load_recent_turns("t1", 10).unwrap();
-        assert_eq!(turns, vec![
-            ("user".to_string(), "1+1は？".to_string()),
-            ("agent".to_string(), "2".to_string()),
-        ]);
+        assert_eq!(
+            turns,
+            vec![
+                ("user".to_string(), "1+1は？".to_string()),
+                ("agent".to_string(), "2".to_string()),
+            ]
+        );
         // limit が効く（直近だけ・古い順）
         storage.insert_turn("t1", "user", "3つ目").unwrap();
         let last_two = storage.load_recent_turns("t1", 2).unwrap();
@@ -1643,9 +1815,20 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let storage = Storage::open(&path).unwrap();
         storage
-            .upsert_thread("t1", "生きてる", 0, "shirushi", Some("main"), Some("claude"), 1200, 200_000)
+            .upsert_thread(
+                "t1",
+                "生きてる",
+                0,
+                "shirushi",
+                Some("main"),
+                Some("claude"),
+                1200,
+                200_000,
+            )
             .unwrap();
-        storage.upsert_thread("t2", "閉じた", 1, "probe", None, None, 500, 0).unwrap();
+        storage
+            .upsert_thread("t2", "閉じた", 1, "probe", None, None, 500, 0)
+            .unwrap();
         storage.archive_thread("t2").unwrap();
         // load_threads は archived を除外（1 件）。
         assert_eq!(storage.load_threads().unwrap().len(), 1);
@@ -1698,7 +1881,12 @@ mod tests {
             .unwrap();
         // 同一内容の再記録 = blob は増えない（重複排除）
         let id2 = storage
-            .save_checkpoint("t1", "ターン 2 の前", vec![(a.clone(), Some("A v1".to_string()))], &blobs)
+            .save_checkpoint(
+                "t1",
+                "ターン 2 の前",
+                vec![(a.clone(), Some("A v1".to_string()))],
+                &blobs,
+            )
             .unwrap();
         assert!(id2 > id1);
         let blob_count = walkdir_count(&blobs);
@@ -1706,8 +1894,12 @@ mod tests {
 
         let restored = storage.load_checkpoint(id1, &blobs).unwrap();
         assert_eq!(restored.len(), 3);
-        assert!(restored.iter().any(|(p, content)| p == &a && content.as_deref() == Some("A v1")));
-        assert!(restored.iter().any(|(p, content)| p == &c && content.is_none()));
+        assert!(restored
+            .iter()
+            .any(|(p, content)| p == &a && content.as_deref() == Some("A v1")));
+        assert!(restored
+            .iter()
+            .any(|(p, content)| p == &c && content.is_none()));
 
         let list = storage.list_checkpoints("t1").unwrap();
         assert_eq!(list.len(), 2);

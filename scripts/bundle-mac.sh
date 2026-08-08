@@ -10,6 +10,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROFILE="${1:-release}"
+# バージョンの唯一の出所 = workspace の Cargo.toml（[workspace.package] version）。
+# updater は CARGO_PKG_VERSION（= 同じ値）と比較し、タグとの一致は release.yml が検証する
+# ＝「Cargo.toml / Info.plist / タグ」三重手動同期の廃止（不一致だと更新チップが無限に出る）。
+APP_VERSION="$(awk -F '"' '/^\[workspace\.package\]/{flag=1; next} /^\[/{flag=0} flag && /^version = /{print $2; exit}' Cargo.toml)"
+if [ -z "$APP_VERSION" ]; then
+    echo "Cargo.toml から version を読めない（[workspace.package] の version 行を確認）" >&2
+    exit 1
+fi
 # アイコン原画 = necoder（pixel art・2026-07-27 に 01-neko-coder.png から差し替え）。
 # 小サイズで読めるバストアップ。全身の neko-art.png は 32px で潰れるため不採用。
 ICON_SRC="lp/assets/img/necoder-mark.png"
@@ -63,7 +71,10 @@ for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
     fi
 done
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# LSMinimumSystemVersion は 13.0（Ventura）。10.15 は未検証の空約束だった — §4 のアイコン挙動
+# はじめ動作確認は macOS 13+ のみ。CFBundleDocumentTypes で「このアプリケーションで開く」に出る
+# （LSHandlerRank=Alternate = 既定ハンドラは奪わない）。フォルダは Dock アイコンへの D&D 用。
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -71,14 +82,41 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Shirushi</string>
   <key>CFBundleDisplayName</key><string>Shirushi</string>
   <key>CFBundleIdentifier</key><string>dev.shirushi.editor</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>${APP_VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>shirushi</string>
   <key>CFBundleIconFile</key><string>Shirushi</string>
-  <key>LSMinimumSystemVersion</key><string>10.15</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © Shirushi contributors. AGPL-3.0-or-later.</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>NSAppleEventsUsageDescription</key><string>Finder 経由でファイルをゴミ箱へ移動するために使います。/ Used to move files to the Trash via Finder.</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Text / Source Code</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.text</string>
+        <string>public.plain-text</string>
+        <string>public.utf8-plain-text</string>
+        <string>public.source-code</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>Folder</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.folder</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST
@@ -87,7 +125,8 @@ PLIST
 #    その Identifier は `shirushi-<hash>` で Info.plist の CFBundleIdentifier と食い違う。
 #    macOS 13+ はこの不一致でアイコン解決/Launch Services の登録がおかしくなる（Dock に
 #    マスコットが出ない実例）。組み立て後に bundle 全体を署名し直して identifier を揃える。
-codesign --force --sign - --identifier dev.shirushi.editor "$APP"
+codesign --force --sign - --identifier dev.shirushi.editor \
+    --entitlements crates/shirushi/resources/shirushi.entitlements "$APP"
 
 # 5) Finder / Dock のアイコンキャッシュを更新させる。
 #    バンドル dir だけ touch しても効かないことがあるので Info.plist も進め、

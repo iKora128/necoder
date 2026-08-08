@@ -1,0 +1,66 @@
+# cargo-deny — 依存の「ライセンス互換 / 出所 / 勧告」を機械監査する（M13 公開準備）。
+# AGPL-3.0 の配布物として、依存は permissive（+ 弱コピレフト MPL-2.0 / OFL フォント）だけを許可。
+# 自作 crate は全て publish = false ＝ private.ignore で対象外（AGPL を allow に足さない）。
+# 実行: cargo deny check   （CI: ci.yml の audit-deps ジョブ）
+
+[graph]
+# 出荷ターゲットだけ解決する（余計なプラットフォーム専用依存で誤検知しない）
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+
+[licenses]
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "0BSD",
+    "Unicode-3.0",
+    "MPL-2.0",
+    # libbz2-rs-sys（bzip2 の Rust 移植・BSD 系 permissive。SPDX id そのまま）
+    "bzip2-1.0.6",
+]
+confidence-threshold = 0.8
+
+# license フィールド未記載 crate の明示（LICENSE ファイル実物で確認済み）
+[[licenses.clarify]]
+name = "cfg_block"
+expression = "Apache-2.0"
+license-files = [{ path = "LICENSE", hash = 0 }]
+
+[bans]
+# GPUI 級の依存ツリーで重複版禁止は非現実（容量は dev profile 側で対処済み）
+multiple-versions = "allow"
+wildcards = "allow"
+
+[advisories]
+yanked = "warn"
+# unmaintained は**直接依存のみ**エラーにする。推移側（paste / rustybuzz / ttf-parser 等）は
+# gpui・image の上流問題でこちらから差し替えられない＝ CI を赤くしても行動に繋がらない。
+# 脆弱性（vulnerability）は推移含め常に fail する（既定）。
+unmaintained = "workspace"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    # gpui / gpui_platform（rev 固定・Apache-2.0。ローカル zed/ クローンと同 rev）
+    "https://github.com/zed-industries/zed",
+    # gpui_macos の推移依存（zed の font-kit fork・rev 固定）
+    "https://github.com/zed-industries/font-kit",
+    # workspace の dev-dependency（rev 固定・テスト専用）
+    "https://github.com/proptest-rs/proptest",
+]

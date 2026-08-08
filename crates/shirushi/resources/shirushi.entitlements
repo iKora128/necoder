@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Finder 経由の「ゴミ箱に入れる」fallback（project::trash_local の AppleScript）に必要。
+       hardened runtime（release.yml の codesign - -options runtime）では未宣言だと Apple Events が
+       拒否される。ローカルの ad-hoc 署名（bundle-mac.sh）にも同じものを付けて挙動を揃える。
+       子プロセス起動（claude / node / ssh / PTY）は hardened runtime の制約外なので宣言不要。 -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

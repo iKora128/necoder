@@ -198,6 +198,8 @@ news:
   waiting: "承認待ち — %{title}"
   failed: "失敗 — %{detail}"
 fleet:
+  editor_surface_hint: この Task でファイルを開くと Editor surface に表示されます
+  space_closed: TaskSpace は閉じられています
   add_agent_simple: ＋ エージェント（新しい worktree で並走）
   lineage: 系譜グラフ
   graph_fan: 扇形
@@ -412,6 +414,30 @@ update:
   available: ⬆ v%{version} に更新
   installing: ⬇ 更新中…
   ready: ⟳ 再起動で新バージョンに切り替わります
+  err_no_bundle: 実行中の .app が見つかりません（開発ビルドでは更新できません）
+  err_curl: curl を実行できません
+  err_download: ダウンロードに失敗しました
+  err_staging: 更新用の作業ディレクトリを作れません
+  err_spctl: spctl を実行できません
+  err_signature: "署名検証に失敗（未署名または改ざんの疑い）: %{detail}"
+  err_attach: hdiutil attach に失敗しました
+  err_mount: dmg のマウントに失敗しました
+  err_no_app: dmg に Shirushi.app が見つかりません
+  err_ditto: ditto を実行できません
+  err_replace: .app の差し替えに失敗しました
+ipc:
+  err_no_storage: 台帳ストレージが無効です
+  err_open_worktree: "worktree を開けません: %{path}"
+  err_gui_gone: GUI が終了しました
+  err_task_not_found: "Task が見つかりません: %{id}"
+  err_message_required: message が必要です
+  err_task_not_open_spawn: Task が GUI に開かれていません（先に spawn-agent）
+  err_task_not_open: Task が GUI に開かれていません
+  err_bad_phase: 不正な phase です
+  err_record_id_required: record の id が必要です
+  err_unknown_method: "未知の method: %{name}"
+  err_bad_json: "JSON が読めない: %{detail}"
+  err_gui_timeout: GUI の応答が timeout しました
 crash:
   notice: ⚠ 前回終了時にクラッシュ — クリックで報告
 menu:

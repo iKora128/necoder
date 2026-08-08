@@ -1,6 +1,6 @@
 # Zed 機能全列挙
 
-調査日: 2026-07-11。ソース: `/Users/daichi/Work/experience/shirushi/zed`（2026-07-10 時点のクローン。調査開始時は `/Users/daichi/Work/zed` にあったものと同一）。一次情報は crates/ 配下 237 crate のソース、`docs/src/`、`assets/settings/default.json`（2792 行）、`assets/keymaps/default-macos.json`（1683 行）。推測で書いた箇所には「とみられる」と付けた。
+調査日: 2026-07-11。ソース: リポジトリ内の参照クローン `./zed`（2026-07-10 時点。git 管理外・CLAUDE.md 参照）。一次情報は crates/ 配下 237 crate のソース、`docs/src/`、`assets/settings/default.json`（2792 行）、`assets/keymaps/default-macos.json`（1683 行）。推測で書いた箇所には「とみられる」と付けた。
 
 ## 概要
 

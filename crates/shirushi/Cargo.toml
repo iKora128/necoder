@@ -36,4 +36,6 @@ host.workspace = true
 search.workspace = true
 storage.workspace = true
 serde_json.workspace = true
+# Finder/Dock から届く file:// URL の解釈（on_open_urls → パス化。percent-decode 込み）
+url.workspace = true
 image = { workspace = true, optional = true }
