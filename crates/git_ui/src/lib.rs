@@ -1,8 +1,8 @@
 //! Workspace-independent Git panel state and typed shell events.
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, IntoElement, Pixels, Point, Render, SharedString, Window,
-    div,
+    div, Context, EventEmitter, FocusHandle, IntoElement, Pixels, Point, Render, SharedString,
+    Window,
 };
 use project::{DiffHunk, GitWorktree, GraphCommit, WorkingChange};
 use std::path::PathBuf;
@@ -25,8 +25,13 @@ pub struct RepositorySnapshot {
 pub enum GitPanelEvent {
     RepositoryChanged,
     OpenDiff(PathBuf),
-    OpenWorktree { path: PathBuf, branch: Option<String> },
-    Toast { message: SharedString },
+    OpenWorktree {
+        path: PathBuf,
+        branch: Option<String>,
+    },
+    Toast {
+        message: SharedString,
+    },
     StageHunk(DiffHunk),
 }
 

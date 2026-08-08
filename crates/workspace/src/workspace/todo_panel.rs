@@ -45,7 +45,11 @@ impl TodoPanel {
         self.accent = accent;
     }
 
-    pub(crate) fn set_items(&mut self, items: Vec<project::todos::TodoItem>, cx: &mut Context<Self>) {
+    pub(crate) fn set_items(
+        &mut self,
+        items: Vec<project::todos::TodoItem>,
+        cx: &mut Context<Self>,
+    ) {
         self.items = items;
         cx.notify();
     }
@@ -61,7 +65,8 @@ impl TodoPanel {
     }
 
     pub(crate) fn clear_running_color(&mut self, color: Hsla, cx: &mut Context<Self>) {
-        self.running.retain(|_, running_color| *running_color != color);
+        self.running
+            .retain(|_, running_color| *running_color != color);
         cx.notify();
     }
 
@@ -121,7 +126,12 @@ impl Render for TodoPanel {
                     .text_color(theme.fg1)
                     .child(SharedString::from(i18n::t!("todos.title"))),
             )
-            .child(div().text_size(px(10.5)).text_color(theme.fg2).child(format!("{open_count}")))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.fg2)
+                    .child(format!("{open_count}")),
+            )
             .child(div().flex_1())
             .child(
                 div()
@@ -164,7 +174,12 @@ impl Render for TodoPanel {
                     ),
             );
 
-        let mut list = div().flex_1().flex().flex_col().overflow_hidden().py(px(4.));
+        let mut list = div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .py(px(4.));
         if self.items.is_empty() {
             list = list.child(
                 div()
@@ -275,13 +290,13 @@ impl Render for TodoPanel {
                     .border_1()
                     .border_color(accent)
                     .bg(theme.bg1)
-                    .on_key_down(cx.listener(
-                        |panel, event: &gpui::KeyDownEvent, _window, cx| {
+                    .on_key_down(
+                        cx.listener(|panel, event: &gpui::KeyDownEvent, _window, cx| {
                             if event.keystroke.key.as_str() == "escape" {
                                 panel.cancel_add(cx);
                             }
-                        },
-                    ))
+                        }),
+                    )
                     .child(editor)
             }))
             .child(list)
@@ -290,7 +305,10 @@ impl Render for TodoPanel {
 
 impl Workspace {
     pub(crate) fn todo_session_index(&self, panel: &Entity<TodoPanel>) -> Option<usize> {
-        self.project_sessions.sessions.iter().position(|session| session.todo_panel == *panel)
+        self.project_sessions
+            .sessions
+            .iter()
+            .position(|session| session.todo_panel == *panel)
     }
 
     pub(crate) fn on_todo_panel_event(
@@ -310,9 +328,7 @@ impl Workspace {
                 self.send_todo_to_agent_for(session_index, *line, text.clone(), cx)
             }
             TodoPanelEvent::DailyPlan => self.run_daily_plan_for(session_index, cx),
-            TodoPanelEvent::AddItem { text } => {
-                self.add_todo_for(session_index, text.clone(), cx)
-            }
+            TodoPanelEvent::AddItem { text } => self.add_todo_for(session_index, text.clone(), cx),
         }
     }
 
@@ -326,7 +342,8 @@ impl Workspace {
         let was_open = panel.read(cx).open;
         panel.update(cx, |panel, cx| panel.set_open(!was_open, cx));
         if !was_open {
-            self.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
+            self.git_panel
+                .update(cx, |panel, cx| panel.set_open(false, cx));
             self.chrome.show_herd = false;
             self.chrome.show_left = true;
             self.reload_todo_board_for(self.project_sessions.active, cx);
@@ -335,14 +352,23 @@ impl Workspace {
     }
 
     pub(crate) fn reload_todo_board_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
-        let Some(panel) = self.project_sessions.sessions.get(session_index).map(|session| session.todo_panel.clone())
+        let Some(panel) = self
+            .project_sessions
+            .sessions
+            .get(session_index)
+            .map(|session| session.todo_panel.clone())
         else {
             return;
         };
         if !panel.read(cx).open {
             return;
         }
-        let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+        let Some(worktree) = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| slot.worktree.clone())
+        else {
             return;
         };
         let root = worktree.root().to_path_buf();
@@ -357,11 +383,23 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn toggle_todo_item_for(&mut self, session_index: usize, line: usize, cx: &mut Context<Self>) {
-        let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+    pub(crate) fn toggle_todo_item_for(
+        &mut self,
+        session_index: usize,
+        line: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| slot.worktree.clone())
+        else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index].todo_panel.clone();
+        let panel = self.project_sessions.sessions[session_index]
+            .todo_panel
+            .clone();
         let accent = self.project_sessions.projects[session_index].color;
         let root = worktree.root().to_path_buf();
         let host = worktree.host().clone();
@@ -394,17 +432,28 @@ impl Workspace {
         };
         let prompt = i18n::t!("todos.send_prompt", "text" => text);
         let color = session.agent_panel.read(cx).active_color();
-        session.agent_panel.update(cx, |panel, cx| panel.send_prompt_text(prompt, cx));
-        session.todo_panel.update(cx, |panel, cx| panel.mark_running(line, color, cx));
+        session
+            .agent_panel
+            .update(cx, |panel, cx| panel.send_prompt_text(prompt, cx));
+        session
+            .todo_panel
+            .update(cx, |panel, cx| panel.mark_running(line, color, cx));
         self.chrome.show_right = true;
         cx.notify();
     }
 
     pub(crate) fn run_daily_plan_for(&mut self, session_index: usize, cx: &mut Context<Self>) {
-        let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+        let Some(worktree) = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| slot.worktree.clone())
+        else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index].todo_panel.clone();
+        let panel = self.project_sessions.sessions[session_index]
+            .todo_panel
+            .clone();
         if panel.read(cx).plan_busy {
             return;
         }
@@ -425,11 +474,9 @@ impl Workspace {
                         accent,
                         cx,
                     ),
-                    Err(error) => workspace.push_toast(
-                        SharedString::from(format!("{error:#}")),
-                        accent,
-                        cx,
-                    ),
+                    Err(error) => {
+                        workspace.push_toast(SharedString::from(format!("{error:#}")), accent, cx)
+                    }
                 }
                 if let Some(index) = workspace.todo_session_index(&panel) {
                     workspace.reload_todo_board_for(index, cx);
@@ -439,11 +486,23 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn add_todo_for(&mut self, session_index: usize, text: String, cx: &mut Context<Self>) {
-        let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| slot.worktree.clone()) else {
+    pub(crate) fn add_todo_for(
+        &mut self,
+        session_index: usize,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| slot.worktree.clone())
+        else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index].todo_panel.clone();
+        let panel = self.project_sessions.sessions[session_index]
+            .todo_panel
+            .clone();
         let accent = self.project_sessions.projects[session_index].color;
         let root = worktree.root().to_path_buf();
         let host = worktree.host().clone();

@@ -1,13 +1,17 @@
 //! 切り分け用の最小テキストウィンドウ（shirushi と同じビルドの gpui を使う）。
 //! `cargo run -p shirushi --bin hello` で「Hello world! 日本語も」が出れば gpui の文字描画は生きている。
 
-use gpui::{App, Bounds, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size};
+use gpui::{div, prelude::*, px, rgb, size, App, Bounds, WindowBounds, WindowOptions};
 use gpui_platform::application;
 
 struct Hello;
 
 impl gpui::Render for Hello {
-    fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
         div()
             .flex()
             .size_full()

@@ -12,7 +12,7 @@
 //! 依存方向（ARCHITECTURE §1）: foundation 層。gpui（外部）にのみ依存し、上位 crate から参照される。
 
 use anyhow::{Context as _, Result};
-use gpui::{Hsla, Rgba, SharedString, rgb};
+use gpui::{rgb, Hsla, Rgba, SharedString};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -253,7 +253,9 @@ fn override_color(field: &mut Hsla, value: Option<String>) {
 fn parse_hex(value: &str) -> Option<Hsla> {
     let body = value.trim().trim_start_matches('#');
     match body.len() {
-        6 => u32::from_str_radix(body, 16).ok().map(|rgb_value| rgb(rgb_value).into()),
+        6 => u32::from_str_radix(body, 16)
+            .ok()
+            .map(|rgb_value| rgb(rgb_value).into()),
         8 => u32::from_str_radix(body, 16).ok().map(|rgba_value| {
             let [red, green, blue, alpha] = rgba_value.to_be_bytes();
             Rgba {
@@ -272,8 +274,14 @@ fn parse_hex(value: &str) -> Option<Hsla> {
 /// 各要素は (表示名, 出所)。表示名はユーザーテーマなら JSON の `name`、無ければファイル名。
 pub fn available_themes(themes_dir: Option<&Path>) -> Vec<(SharedString, ThemeSource)> {
     let mut themes = vec![
-        (SharedString::from("Shirushi Dark"), ThemeSource::BuiltIn(DARK_THEME_NAME)),
-        (SharedString::from("Shirushi Light"), ThemeSource::BuiltIn(LIGHT_THEME_NAME)),
+        (
+            SharedString::from("Shirushi Dark"),
+            ThemeSource::BuiltIn(DARK_THEME_NAME),
+        ),
+        (
+            SharedString::from("Shirushi Light"),
+            ThemeSource::BuiltIn(LIGHT_THEME_NAME),
+        ),
     ];
     if let Some(dir) = themes_dir {
         if let Ok(read) = std::fs::read_dir(dir) {
@@ -286,7 +294,10 @@ pub fn available_themes(themes_dir: Option<&Path>) -> Vec<(SharedString, ThemeSo
                 let display = load_user_theme(&path)
                     .map(|theme| theme.name.to_string())
                     .ok()
-                    .or_else(|| path.file_stem().map(|stem| stem.to_string_lossy().to_string()))
+                    .or_else(|| {
+                        path.file_stem()
+                            .map(|stem| stem.to_string_lossy().to_string())
+                    })
                     .unwrap_or_else(|| path.display().to_string());
                 users.push((SharedString::from(display), ThemeSource::User(path)));
             }
@@ -373,7 +384,8 @@ pub const THREAD_COLOR_HEXES: [u32; 3] = [0x61afef, 0xe5c07b, 0xc678dd];
 /// トレードオフ: 原色化でスレッド色（`#61afef`/`#e5c07b`/`#c678dd`）と近づく——2px 線でなく面で使う前提の判断。
 /// 任意 hex 入力はこの外の色も許すエスケープハッチ（UI-SPEC §1.2）。
 pub const IDENTITY_PALETTE_HEXES: [u32; 10] = [
-    0xef4444, 0x22c55e, 0x3b82f6, 0xf97316, 0xa855f7, // 巡回 5 色（red/green/blue/orange/violet）
+    0xef4444, 0x22c55e, 0x3b82f6, 0xf97316,
+    0xa855f7, // 巡回 5 色（red/green/blue/orange/violet）
     0x06b6d4, // cyan
     0xec4899, // pink
     0xeab308, // yellow
@@ -554,7 +566,10 @@ mod tests {
         assert_eq!(list[0].1, ThemeSource::BuiltIn(DARK_THEME_NAME));
         // resolve は name 一致でユーザーテーマを引ける。
         assert_eq!(resolve("Midnight", Some(&dir)).bg0, h(0x000000));
-        assert_eq!(resolve("shirushi-light", Some(&dir)).appearance, Appearance::Light);
+        assert_eq!(
+            resolve("shirushi-light", Some(&dir)).appearance,
+            Appearance::Light
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

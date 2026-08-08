@@ -59,7 +59,11 @@ impl Workspace {
         // 最後の 1 枚は削除自体を断る（従来どおり）。ダイアログを出す前にここで弾く。
         if self.project_sessions.projects.len() <= 1 {
             let accent = self.accent();
-            self.push_toast(SharedString::from(i18n::t!("rail.cannot_remove_last")), accent, cx);
+            self.push_toast(
+                SharedString::from(i18n::t!("rail.cannot_remove_last")),
+                accent,
+                cx,
+            );
             return;
         }
         let host = slot.worktree.host().clone();
@@ -105,7 +109,10 @@ impl Workspace {
                     let unmerged_commits = base_candidates.iter().find_map(|base| {
                         project::git_unmerged_count_on(host.as_ref(), &root, base)
                     });
-                    WorktreeStakes { dirty_files, unmerged_commits }
+                    WorktreeStakes {
+                        dirty_files,
+                        unmerged_commits,
+                    }
                 })
                 .await;
             handle
@@ -142,7 +149,11 @@ impl Workspace {
             return;
         };
         if confirm.skip_next {
-            settings::set_user_value(cx, "confirm_worktree_delete", serde_json::Value::Bool(false));
+            settings::set_user_value(
+                cx,
+                "confirm_worktree_delete",
+                serde_json::Value::Bool(false),
+            );
         }
         self.delete_slot_worktree_impl(confirm.index, confirm.also_branch, window, cx);
     }
@@ -176,16 +187,17 @@ impl Workspace {
                 );
             }
             Some(stakes) => {
-                let loss_row = |icon: &'static str, text: SharedString, danger: bool, theme: &Theme| {
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(7.))
-                        .text_size(px(11.5))
-                        .text_color(if danger { theme.err } else { theme.fg1 })
-                        .child(div().flex_none().w(px(12.)).child(icon))
-                        .child(div().flex_1().min_w_0().child(text))
-                };
+                let loss_row =
+                    |icon: &'static str, text: SharedString, danger: bool, theme: &Theme| {
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap(px(7.))
+                            .text_size(px(11.5))
+                            .text_color(if danger { theme.err } else { theme.fg1 })
+                            .child(div().flex_none().w(px(12.)).child(icon))
+                            .child(div().flex_1().min_w_0().child(text))
+                    };
                 if stakes.dirty_files > 0 {
                     losses = losses.child(loss_row(
                         "⚠",
@@ -277,7 +289,11 @@ impl Workspace {
                     .size(px(13.))
                     .rounded(px(3.))
                     .border_1()
-                    .border_color(if confirm.skip_next { self.accent() } else { theme.border })
+                    .border_color(if confirm.skip_next {
+                        self.accent()
+                    } else {
+                        theme.border
+                    })
                     .flex()
                     .items_center()
                     .justify_center()
@@ -301,8 +317,12 @@ impl Workspace {
             .bg(theme.bg2)
             .border_1()
             .border_color(theme.border)
-            .shadow(vec![gpui::BoxShadow::new(px(0.), px(12.), gpui::hsla(0., 0., 0., 0.5))
-                .blur_radius(px(28.))])
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(12.),
+                gpui::hsla(0., 0., 0., 0.5),
+            )
+            .blur_radius(px(28.))])
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
@@ -360,20 +380,30 @@ impl Workspace {
                     .justify_end()
                     .gap(px(8.))
                     .child(
-                        button("worktree-delete-cancel", SharedString::from(i18n::t!("worktree_delete.cancel")), false, &theme)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _window, cx| this.dismiss_worktree_delete(cx)),
-                            ),
+                        button(
+                            "worktree-delete-cancel",
+                            SharedString::from(i18n::t!("worktree_delete.cancel")),
+                            false,
+                            &theme,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.dismiss_worktree_delete(cx)),
+                        ),
                     )
                     .child(
-                        button("worktree-delete-go", SharedString::from(i18n::t!("worktree_delete.confirm")), true, &theme)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, window, cx| {
-                                    this.confirm_worktree_delete(window, cx)
-                                }),
-                            ),
+                        button(
+                            "worktree-delete-go",
+                            SharedString::from(i18n::t!("worktree_delete.confirm")),
+                            true,
+                            &theme,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.confirm_worktree_delete(window, cx)
+                            }),
+                        ),
                     ),
             );
 

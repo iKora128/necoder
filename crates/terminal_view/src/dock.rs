@@ -1,7 +1,7 @@
 use crate::{TerminalEvent, TerminalView};
 use gpui::{
-    App, Context, Entity, EventEmitter, IntoElement, MouseButton, Render, Window, div, prelude::*,
-    px,
+    div, prelude::*, px, App, Context, Entity, EventEmitter, IntoElement, MouseButton, Render,
+    Window,
 };
 use std::path::PathBuf;
 use theme_core::Theme;
@@ -30,7 +30,12 @@ pub struct TerminalDock {
 
 impl TerminalDock {
     pub fn new(launch: TerminalLaunch, theme: Theme) -> Self {
-        Self { terminals: Vec::new(), active: 0, launch, theme }
+        Self {
+            terminals: Vec::new(),
+            active: 0,
+            launch,
+            theme,
+        }
     }
 
     fn create_terminal(
@@ -39,9 +44,8 @@ impl TerminalDock {
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
         let theme = self.theme.clone();
-        let terminal = cx.new(|cx| {
-            TerminalView::new_with_shell(launch.cwd, launch.shell, theme, cx)
-        });
+        let terminal =
+            cx.new(|cx| TerminalView::new_with_shell(launch.cwd, launch.shell, theme, cx));
         cx.subscribe(&terminal, Self::on_terminal_event).detach();
         terminal
     }
@@ -54,7 +58,10 @@ impl TerminalDock {
     ) {
         match event {
             TerminalEvent::OpenPath { path, line } => {
-                cx.emit(TerminalDockEvent::OpenPath { path: path.clone(), line: *line });
+                cx.emit(TerminalDockEvent::OpenPath {
+                    path: path.clone(),
+                    line: *line,
+                });
             }
         }
     }
@@ -258,16 +265,21 @@ impl Render for TerminalDock {
                     .cursor_pointer()
                     .hover(|style| style.text_color(theme.fg0))
                     .child("×")
-                    .tooltip(Tooltip::text(i18n::t!("terminal.close_dock_tip"), theme.clone()))
+                    .tooltip(Tooltip::text(
+                        i18n::t!("terminal.close_dock_tip"),
+                        theme.clone(),
+                    ))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|_this, _, _window, cx| {
-                            cx.emit(TerminalDockEvent::Dismissed)
-                        }),
+                        cx.listener(|_this, _, _window, cx| cx.emit(TerminalDockEvent::Dismissed)),
                     ),
             );
         let body = match self.terminals.get(active) {
-            Some(terminal) => div().flex_1().min_h_0().overflow_hidden().child(terminal.clone()),
+            Some(terminal) => div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(terminal.clone()),
             None => div().flex_1(),
         };
         // 高さは**置いた側**（workspace の下段ドック / 編隊セル）が決める。ここで固定高を持つと

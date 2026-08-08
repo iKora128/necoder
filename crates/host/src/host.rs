@@ -4,7 +4,7 @@
 //! SSH 上の `shirushi-remote-server` へ向ける。設計根拠は
 //! `docs/research/remote-ssh-2026.md`。Zed の GPL 実装は移植せず、公開仕様を基に独立実装する。
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context as _, Result};
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -1976,8 +1976,10 @@ impl SshTransport {
                 if let Some(actual) = parse_sha256_hex(&output.stdout) {
                     if actual != expected {
                         // 壊れたバイナリを残さない（次回は再アップロードからやり直せる）。
-                        let _rm = self
-                            .output(&format!("rm -f {}", quote_posix(&installed.to_string_lossy())));
+                        let _rm = self.output(&format!(
+                            "rm -f {}",
+                            quote_posix(&installed.to_string_lossy())
+                        ));
                         bail!(
                             "配備した remote server の checksum 不一致（転送破損の可能性）: \
                              expected {expected}, actual {actual}"
@@ -2233,14 +2235,12 @@ impl ReconnectingClient {
             let weak = Arc::downgrade(&client);
             thread::Builder::new()
                 .name("shirushi-remote-heartbeat".to_string())
-                .spawn(move || {
-                    loop {
-                        thread::sleep(Duration::from_secs(5));
-                        let Some(client) = weak.upgrade() else {
-                            break;
-                        };
-                        let _heartbeat = client.request(&Request::Ping, Vec::new());
-                    }
+                .spawn(move || loop {
+                    thread::sleep(Duration::from_secs(5));
+                    let Some(client) = weak.upgrade() else {
+                        break;
+                    };
+                    let _heartbeat = client.request(&Request::Ping, Vec::new());
                 })
                 .expect("remote heartbeat thread spawn");
         }
@@ -2344,8 +2344,7 @@ impl RemoteHost {
         ssh_log(&destination, "接続開始", None);
 
         let phase = std::time::Instant::now();
-        let transport =
-            SshTransport::connect(project).context("SSH ControlMaster の確立に失敗")?;
+        let transport = SshTransport::connect(project).context("SSH ControlMaster の確立に失敗")?;
         ssh_log(&destination, "ControlMaster 確立", Some(phase));
 
         let phase = std::time::Instant::now();
@@ -2366,7 +2365,10 @@ impl RemoteHost {
             );
             let home = String::from_utf8_lossy(&home.stdout).trim().to_string();
             anyhow::ensure!(!home.is_empty(), "remote の $HOME が空");
-            SshProject { path: PathBuf::from(home), ..project.clone() }
+            SshProject {
+                path: PathBuf::from(home),
+                ..project.clone()
+            }
         } else {
             project.clone()
         };
@@ -3118,9 +3120,12 @@ Host gpu
     #[test]
     fn ssh_uri_without_path_means_home() {
         // path 未指定は「空」= home マーカー（接続時に remote の $HOME へ解決・#5）。もう bail しない。
-        for uri in ["ssh://example.com", "ssh://example.com/", "ssh://user@example.com/~"] {
-            let project =
-                SshProject::parse(uri).unwrap_or_else(|error| panic!("{uri}: {error:#}"));
+        for uri in [
+            "ssh://example.com",
+            "ssh://example.com/",
+            "ssh://user@example.com/~",
+        ] {
+            let project = SshProject::parse(uri).unwrap_or_else(|error| panic!("{uri}: {error:#}"));
             assert!(
                 project.path.as_os_str().is_empty(),
                 "{uri} は home（空パス）のはず: {:?}",
@@ -3211,13 +3216,11 @@ Host gpu
 
         // 長い process request 中でも metadata/heartbeat が詰まらないことを実 wire で検証する。
         let gate = root.join("gate.fifo");
-        assert!(
-            Command::new("mkfifo")
-                .arg(&gate)
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(Command::new("mkfifo")
+            .arg(&gate)
+            .status()
+            .unwrap()
+            .success());
         let started = root.join("process-started");
         let process_remote = remote.clone();
         let process_root = root.clone();

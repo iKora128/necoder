@@ -1,7 +1,12 @@
 use crate::workspace::*;
 
 impl Workspace {
-    pub(crate) fn open_file_finder(&mut self, _: &FileFinder, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_file_finder(
+        &mut self,
+        _: &FileFinder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -25,7 +30,13 @@ impl Workspace {
                     .map(|(id, (_, relative))| PickerItem::new(id, relative.clone()))
                     .collect();
                 workspace.overlays.picker_files = files.into_iter().map(|(path, _)| path).collect();
-                workspace.open_picker(PickerMode::Files, i18n::t!("finder.files"), items, window, cx);
+                workspace.open_picker(
+                    PickerMode::Files,
+                    i18n::t!("finder.files"),
+                    items,
+                    window,
+                    cx,
+                );
             });
         })
         .detach();
@@ -33,7 +44,12 @@ impl Workspace {
 
     /// ⌘⇧P コマンドパレット（M13）: [`CommandRegistry`] を名前+キー併記で並べ、
     /// 確定でアクションを dispatch する（閉じてから = エディタ/Workspace コンテキストで解決）。
-    pub(crate) fn open_command_palette(&mut self, _: &CommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_command_palette(
+        &mut self,
+        _: &CommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let sections = keymap_core::parse(keymap_core::DEFAULT_KEYMAP_JSON).unwrap_or_default();
         let items = COMMAND_REGISTRY
             .entries()
@@ -41,24 +57,40 @@ impl Workspace {
             .enumerate()
             .map(|(id, entry)| {
                 let mut item = PickerItem::new(id, i18n::t!(entry.label_key));
-                if let Some(keystrokes) =
-                    keymap_core::key_for_action(&sections, entry.action_name)
+                if let Some(keystrokes) = keymap_core::key_for_action(&sections, entry.action_name)
                 {
                     item = item.with_detail(keymap_core::pretty_keystroke(&keystrokes));
                 }
                 item
             })
             .collect();
-        self.open_picker(PickerMode::Commands, i18n::t!("palette.placeholder"), items, window, cx);
+        self.open_picker(
+            PickerMode::Commands,
+            i18n::t!("palette.placeholder"),
+            items,
+            window,
+            cx,
+        );
     }
 
     /// ⌘O スイッチャー（2 階層・M12-12）: プロジェクト行 + 配下の branch/worktree 行を
     /// 1 リストに並べる（UI-SPEC §7）。まずプロジェクト行だけで即開き、worktree 一覧と
     /// ahead/behind/dirty は背景で集めて後から差し込む（開く速さを守る）。
-    pub(crate) fn open_project_switcher(&mut self, _: &ProjectSwitcher, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_project_switcher(
+        &mut self,
+        _: &ProjectSwitcher,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.picker_worktree_rows = Vec::new();
         let items = self.build_switcher_items(&[], cx).0;
-        self.open_picker(PickerMode::Projects, i18n::t!("finder.projects"), items, window, cx);
+        self.open_picker(
+            PickerMode::Projects,
+            i18n::t!("finder.projects"),
+            items,
+            window,
+            cx,
+        );
         // 背景収集: 各プロジェクトの worktree 一覧 + それぞれの status（git 2 コマンド/worktree）。
         let sources: Vec<(usize, Arc<dyn Host>, PathBuf)> = self
             .project_sessions
@@ -66,7 +98,11 @@ impl Workspace {
             .iter()
             .enumerate()
             .map(|(index, slot)| {
-                (index, slot.worktree.host().clone(), slot.worktree.root().to_path_buf())
+                (
+                    index,
+                    slot.worktree.host().clone(),
+                    slot.worktree.root().to_path_buf(),
+                )
             })
             .collect();
         cx.spawn(async move |workspace, cx| {
@@ -143,7 +179,10 @@ impl Workspace {
                 continue;
             };
             for (worktree, status) in worktrees {
-                let branch = worktree.branch.clone().unwrap_or_else(|| "(detached)".to_string());
+                let branch = worktree
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| "(detached)".to_string());
                 let mut meta = String::new();
                 if worktree.path == root {
                     meta.push_str("✓ ");
@@ -162,7 +201,9 @@ impl Workspace {
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_default();
-                let detail = format!("{name}  {}", meta.trim_end()).trim_end().to_string();
+                let detail = format!("{name}  {}", meta.trim_end())
+                    .trim_end()
+                    .to_string();
                 items.push(
                     PickerItem::new(1000 + rows.len(), format!("    ⎇ {branch}"))
                         .with_detail(detail)
@@ -183,8 +224,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) =
-            self.project_sessions.projects.iter().position(|slot| slot.worktree.root() == path.as_path())
+        if let Some(index) = self
+            .project_sessions
+            .projects
+            .iter()
+            .position(|slot| slot.worktree.root() == path.as_path())
         {
             self.switch_project(index, window, cx);
             return;
@@ -203,18 +247,31 @@ impl Workspace {
     /// 実行中スレッドのドットを付ける（色による方向感覚）。⏎ = 現レールに開く。id は `picker_open_rows` の添字。
     /// メニュー「最近使った項目を開く…」/ パレット。ランチャー（最近 + 開く導線）を開く。
     /// Enter = レールに追加して切替 / ⌘⏎ = 新しいウィンドウ（VSCode の Open Recent 互換）。
-    pub(crate) fn open_recent_action(&mut self, _: &OpenRecent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_recent_action(
+        &mut self,
+        _: &OpenRecent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_launcher(window, cx);
     }
 
     /// メニュー「開く…」。ネイティブのフォルダ選択ダイアログ → レールに追加。
-    pub(crate) fn open_dialog_action(&mut self, _: &OpenDialog, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_dialog_action(
+        &mut self,
+        _: &OpenDialog,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_project_via_dialog(cx);
     }
 
     pub(crate) fn open_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut rows: Vec<OpenRow> =
-            vec![OpenRow::OpenFolder, OpenRow::OpenFile, OpenRow::ConnectRemote];
+        let mut rows: Vec<OpenRow> = vec![
+            OpenRow::OpenFolder,
+            OpenRow::OpenFile,
+            OpenRow::ConnectRemote,
+        ];
         let mut items = vec![
             PickerItem::new(0, i18n::t!("launcher.open_folder")),
             PickerItem::new(1, i18n::t!("launcher.open_file")),
@@ -223,16 +280,34 @@ impl Workspace {
 
         // 最近（local + remote を opened_at 降順でマージ・上位 20）。
         enum Recent {
-            Local { path: PathBuf, name: String, at: i64 },
-            Remote { host: String, path: String, name: String, at: i64 },
+            Local {
+                path: PathBuf,
+                name: String,
+                at: i64,
+            },
+            Remote {
+                host: String,
+                path: String,
+                name: String,
+                at: i64,
+            },
         }
         let mut recents: Vec<Recent> = Vec::new();
         if let Some(storage) = self.persistence.storage.as_ref() {
             for (path, name, at) in storage.recent_local_projects().unwrap_or_default() {
-                recents.push(Recent::Local { path: PathBuf::from(path), name, at });
+                recents.push(Recent::Local {
+                    path: PathBuf::from(path),
+                    name,
+                    at,
+                });
             }
             for (host, path, name, at) in storage.recent_remote_projects().unwrap_or_default() {
-                recents.push(Recent::Remote { host, path, name, at });
+                recents.push(Recent::Remote {
+                    host,
+                    path,
+                    name,
+                    at,
+                });
             }
         }
         let opened_at = |recent: &Recent| match recent {
@@ -270,7 +345,9 @@ impl Workspace {
                     );
                     rows.push(OpenRow::RecentLocal(path));
                 }
-                Recent::Remote { host, path, name, .. } => {
+                Recent::Remote {
+                    host, path, name, ..
+                } => {
                     let uri = format!("ssh://{host}{path}");
                     let accent = self.recent_accent(None, &uri);
                     items.push(
@@ -297,21 +374,30 @@ impl Workspace {
     /// （path/uri）から安定なパレット色を焼き付ける（開き直しても不変・disk を読まない）。
     fn recent_accent(&self, open_root: Option<&Path>, key: &str) -> Hsla {
         if let Some(root) = open_root {
-            if let Some(slot) =
-                self.project_sessions.projects.iter().find(|slot| slot.worktree.root() == root)
+            if let Some(slot) = self
+                .project_sessions
+                .projects
+                .iter()
+                .find(|slot| slot.worktree.root() == root)
             {
                 return slot.color;
             }
         }
-        let hash =
-            key.bytes().fold(0usize, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte as usize));
+        let hash = key.bytes().fold(0usize, |acc, byte| {
+            acc.wrapping_mul(31).wrapping_add(byte as usize)
+        });
         project_color(hash % theme_core::IDENTITY_PALETTE_HEXES.len())
     }
 
     // ── テーマセレクタ（Picker・ライブプレビュー付き。⌘⇧T・M3） ──
 
     /// テーマセレクタを開く。組み込み + ユーザーテーマを Picker に並べ、選択移動で即プレビューする。
-    pub(crate) fn open_theme_selector(&mut self, _: &ThemeSelector, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_theme_selector(
+        &mut self,
+        _: &ThemeSelector,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let themes = theme_core::available_themes(self.themes_dir().as_deref());
         let items = themes
             .iter()
@@ -326,12 +412,19 @@ impl Workspace {
             .collect();
         self.overlays.picker_themes = themes;
         self.overlays.theme_before_preview = Some(self.theme.clone());
-        self.open_picker(PickerMode::Themes, i18n::t!("theme.picker_placeholder"), items, window, cx);
+        self.open_picker(
+            PickerMode::Themes,
+            i18n::t!("theme.picker_placeholder"),
+            items,
+            window,
+            cx,
+        );
     }
 
     /// テーマ保存ディレクトリ（`state.json` と同じ Shirushi 設定フォルダの `themes/`）。
     pub(crate) fn themes_dir(&self) -> Option<PathBuf> {
-        self.persistence.state_path
+        self.persistence
+            .state_path
             .as_ref()
             .and_then(|path| path.parent())
             .map(|dir| dir.join("themes"))
@@ -342,7 +435,8 @@ impl Workspace {
         self.theme = theme.clone();
         for (index, session) in self.project_sessions.sessions.iter().enumerate() {
             for tab in &session.tabs {
-                tab.editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+                tab.editor
+                    .update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
             }
             if let Some(split) = &session.split_editor {
                 split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
@@ -378,8 +472,8 @@ impl Workspace {
             if let Ok(theme) = Theme::load(source) {
                 self.apply_theme(theme, cx);
             }
+        }
     }
-}
     /// テーマを確定する（適用 + 設定へ theme 名を保存＝再起動でも効く）。
     pub(crate) fn commit_theme(&mut self, id: usize, cx: &mut Context<Self>) {
         let Some((_, source)) = self.overlays.picker_themes.get(id).cloned() else {
@@ -409,10 +503,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let theme = self.theme.clone();
-        let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let accent = self
+            .active_slot()
+            .map(|slot| slot.color)
+            .unwrap_or_else(|| project_color(0));
         let picker = cx.new(|cx| Picker::new(placeholder, items, theme, accent, cx));
         window.focus(&picker.read(cx).focus_handle(), cx);
-        self.overlays.picker_observation = Some(cx.subscribe_in(&picker, window, Self::on_picker_event));
+        self.overlays.picker_observation =
+            Some(cx.subscribe_in(&picker, window, Self::on_picker_event));
         self.overlays.picker_mode = mode;
         self.overlays.picker = Some(picker);
         cx.notify();
@@ -437,7 +535,8 @@ impl Workspace {
             PickerEvent::ConfirmedSecondary(id) => {
                 let id = *id;
                 if self.overlays.picker_mode == PickerMode::OpenLauncher {
-                    if let Some(OpenRow::RecentLocal(path)) = self.picker_open_rows.get(id).cloned() {
+                    if let Some(OpenRow::RecentLocal(path)) = self.picker_open_rows.get(id).cloned()
+                    {
                         self.close_picker(window, cx);
                         let host: Arc<dyn Host> = host::LocalHost::shared();
                         self.record_recent_project(host.as_ref(), &path, cx);
@@ -470,9 +569,10 @@ impl Workspace {
                     }
                     PickerMode::Themes => self.commit_theme(id, cx),
                     PickerMode::Symbols => {
-                        if let (Some(row), Some(editor)) =
-                            (self.picker_symbol_rows.get(id).copied(), self.active_editor())
-                        {
+                        if let (Some(row), Some(editor)) = (
+                            self.picker_symbol_rows.get(id).copied(),
+                            self.active_editor(),
+                        ) {
                             self.record_nav_position(cx);
                             editor.update(cx, |view, cx| view.reveal_position(row, 0, cx));
                         }
@@ -511,12 +611,15 @@ impl Workspace {
                                 Some(host) => {
                                     let alias = host.alias.clone();
                                     // 前回パスがあれば即接続（#2d・打たずに繋がる）。無ければパス入力へ。
-                                    let last_path = self.persistence.storage.as_ref().and_then(|storage| {
-                                        storage.host_last_path(&alias).ok().flatten()
-                                    });
+                                    let last_path =
+                                        self.persistence.storage.as_ref().and_then(|storage| {
+                                            storage.host_last_path(&alias).ok().flatten()
+                                        });
                                     match last_path {
-                                        Some(path) => self
-                                            .connect_ssh_and_open(format!("ssh://{alias}{path}"), cx),
+                                        Some(path) => self.connect_ssh_and_open(
+                                            format!("ssh://{alias}{path}"),
+                                            cx,
+                                        ),
                                         // 前回パスが無ければ home に直接接続（標準 SSH と同じ「ホスト選ぶ→home」・#5）。
                                         None => {
                                             self.connect_ssh_and_open(format!("ssh://{alias}"), cx)
@@ -558,18 +661,16 @@ impl Workspace {
                             cx.notify();
                         }
                     }
-                    PickerMode::OpenLauncher => {
-                        match self.picker_open_rows.get(id).cloned() {
-                            Some(OpenRow::OpenFolder) => self.add_project_via_dialog(cx),
-                            Some(OpenRow::OpenFile) => self.open_file_from_launcher(cx),
-                            Some(OpenRow::ConnectRemote) => {
-                                self.open_ssh_host_picker(&RemoteSsh, window, cx)
-                            }
-                            Some(OpenRow::RecentLocal(path)) => self.add_project_slot(path, cx),
-                            Some(OpenRow::RecentRemote(uri)) => self.connect_ssh_and_open(uri, cx),
-                            None => {}
+                    PickerMode::OpenLauncher => match self.picker_open_rows.get(id).cloned() {
+                        Some(OpenRow::OpenFolder) => self.add_project_via_dialog(cx),
+                        Some(OpenRow::OpenFile) => self.open_file_from_launcher(cx),
+                        Some(OpenRow::ConnectRemote) => {
+                            self.open_ssh_host_picker(&RemoteSsh, window, cx)
                         }
-                    }
+                        Some(OpenRow::RecentLocal(path)) => self.add_project_slot(path, cx),
+                        Some(OpenRow::RecentRemote(uri)) => self.connect_ssh_and_open(uri, cx),
+                        None => {}
+                    },
                 }
             }
             PickerEvent::Dismissed => {
@@ -634,16 +735,7 @@ impl Workspace {
         let accent = self.accent();
         let return_focus = self.search_return_focus(cx);
         let panel = cx.new(|cx| {
-            SearchPanel::with_results(
-                host,
-                root,
-                query,
-                results,
-                theme,
-                accent,
-                return_focus,
-                cx,
-            )
+            SearchPanel::with_results(host, root, query, results, theme, accent, return_focus, cx)
         });
         self.install_search_panel(panel, window, cx);
     }
@@ -666,12 +758,19 @@ impl Workspace {
                     Some((path.clone(), *line, *column));
                 self.project_sessions.sessions[session_index].search_panel = None;
             }
-            SearchPanelEvent::Dismissed => self.project_sessions.sessions[session_index].search_panel = None,
+            SearchPanelEvent::Dismissed => {
+                self.project_sessions.sessions[session_index].search_panel = None
+            }
         }
         cx.notify();
     }
 
-    pub(crate) fn open_project_search(&mut self, _: &ProjectSearch, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_project_search(
+        &mut self,
+        _: &ProjectSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(panel) = &self.search_panel {
             window.focus(&panel.read(cx).focus_handle(), cx);
             return;
@@ -690,17 +789,32 @@ impl Workspace {
 
     // ── ⌘F バッファ内検索/置換（M10） ──
 
-    pub(crate) fn open_buffer_search(&mut self, _: &BufferSearch, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_buffer_search(
+        &mut self,
+        _: &BufferSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_buffer_search_impl(false, window, cx);
     }
 
-    pub(crate) fn open_buffer_replace(&mut self, _: &BufferReplace, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_buffer_replace(
+        &mut self,
+        _: &BufferReplace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_buffer_search_impl(true, window, cx);
     }
 
     /// ⌘F / ⌥⌘F。閉じていれば現在位置を保存して開く（単一行の選択があればクエリ初期値に）。
     /// 開いていればフォーカスを付け直すだけ（⌥⌘F は置換行も出す）。
-    pub(crate) fn open_buffer_search_impl(&mut self, with_replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_buffer_search_impl(
+        &mut self,
+        with_replace: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -748,7 +862,12 @@ impl Workspace {
     }
 
     /// ⌘F バーを閉じる。`restore` = 開いた時の位置へ戻す（Esc）。×クリックは現在位置のまま閉じる。
-    pub(crate) fn close_buffer_search(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_buffer_search(
+        &mut self,
+        restore: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.buffer_search.take() else {
             return;
         };
@@ -772,7 +891,8 @@ impl Workspace {
     pub(crate) fn dismiss_buffer_search(&mut self, cx: &mut Context<Self>) {
         if self.buffer_search.take().is_some() {
             for tab in &self.tabs {
-                tab.editor.update(cx, |editor, cx| editor.set_search_ranges(Vec::new(), cx));
+                tab.editor
+                    .update(cx, |editor, cx| editor.set_search_ranges(Vec::new(), cx));
             }
             cx.notify();
         }
@@ -800,10 +920,20 @@ impl Workspace {
         };
         let (version, caret, text) = {
             let view = editor.read(cx);
-            let caret = view.buffer().selections().first().map(|s| s.start()).unwrap_or(0);
+            let caret = view
+                .buffer()
+                .selections()
+                .first()
+                .map(|s| s.start())
+                .unwrap_or(0);
             (view.buffer().version(), caret, view.buffer().text())
         };
-        let key = (version, state.query.clone(), state.case_sensitive, state.is_regex);
+        let key = (
+            version,
+            state.query.clone(),
+            state.case_sensitive,
+            state.is_regex,
+        );
         if state.computed_for.as_ref() == Some(&key) {
             if reveal {
                 self.reveal_current_buffer_match(cx);
@@ -821,12 +951,20 @@ impl Workspace {
                     ranges.truncate(BUFFER_SEARCH_MAX);
                     (ranges, truncated, None)
                 }
-                Err(error) => (Vec::new(), false, Some(SharedString::from(format!("{error:#}")))),
+                Err(error) => (
+                    Vec::new(),
+                    false,
+                    Some(SharedString::from(format!("{error:#}"))),
+                ),
             };
         // anchor 以降で最初のマッチを現在に（末尾を越えたら先頭へ回る）。
         let current = {
             let position = ranges.partition_point(|range| range.start < anchor);
-            if position >= ranges.len() { 0 } else { position }
+            if position >= ranges.len() {
+                0
+            } else {
+                position
+            }
         };
         if let Some(state) = self.buffer_search.as_mut() {
             state.matches = ranges.clone();
@@ -901,7 +1039,12 @@ impl Workspace {
         };
         let Some((query_text, is_regex, case_sensitive, replacement)) =
             self.buffer_search.as_ref().map(|state| {
-                (state.query.clone(), state.is_regex, state.case_sensitive, state.replace.clone())
+                (
+                    state.query.clone(),
+                    state.is_regex,
+                    state.case_sensitive,
+                    state.replace.clone(),
+                )
             })
         else {
             return;
@@ -1071,7 +1214,13 @@ impl Workspace {
 
     /// 開発用: (row,col) で ⌘. を開く（オフスクリーン検証）。
     #[cfg(debug_assertions)]
-    pub fn debug_code_actions_probe(&mut self, row: usize, column: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn debug_code_actions_probe(
+        &mut self,
+        row: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |view, cx| view.reveal_position(row, column, cx));
         }
@@ -1091,7 +1240,13 @@ impl Workspace {
 
     // 開発用: (row,col) で ⇧F12 参照検索を実行する（オフスクリーン検証）。
     #[cfg(debug_assertions)]
-    pub fn debug_references_probe(&mut self, row: usize, column: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn debug_references_probe(
+        &mut self,
+        row: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |view, cx| view.reveal_position(row, column, cx));
         }
@@ -1104,14 +1259,30 @@ impl Workspace {
     /// スレッド履歴を開く（#5）。DB の全スレッド（アーカイブ含む・updated_at 降順）を Picker に出す。
     /// 行頭●= スレッド色・detail = プロジェクト / ⎇ branch / トークン累計 / 開始・最終入力の相対時刻。
     /// 確定で復元してアクティブに（編隊モードでは復元セルとして前面へ・M14）。
-    pub(crate) fn open_thread_history(&mut self, _: &ThreadHistory, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_thread_history(
+        &mut self,
+        _: &ThreadHistory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(storage) = self.persistence.storage.clone() else {
             return;
         };
         let threads = storage.load_all_threads().unwrap_or_default();
         let mut history = Vec::new();
         let mut items = Vec::new();
-        for (id, name, color_index, project, branch, tokens_used, archived, created_at, last_input_at) in threads {
+        for (
+            id,
+            name,
+            color_index,
+            project,
+            branch,
+            tokens_used,
+            archived,
+            created_at,
+            last_input_at,
+        ) in threads
+        {
             let mut detail = String::new();
             if !project.is_empty() {
                 detail.push_str(&project);

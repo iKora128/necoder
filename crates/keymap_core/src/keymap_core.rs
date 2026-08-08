@@ -46,7 +46,10 @@ pub fn load_bindings(json: &str, cx: &App) -> Result<Vec<KeyBinding>> {
             match KeyBindingContextPredicate::parse(&section.context) {
                 Ok(predicate) => Some(Rc::new(predicate)),
                 Err(error) => {
-                    eprintln!("keymap: context `{}` の述語が不正: {error}", section.context);
+                    eprintln!(
+                        "keymap: context `{}` の述語が不正: {error}",
+                        section.context
+                    );
                     continue;
                 }
             }
@@ -202,7 +205,9 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
   {
     "context": "AgentPanel",
     "bindings": {
-      "cmd-w": "agent::CloseActiveThread"
+      "cmd-w": "agent::CloseActiveThread",
+      "cmd-a": "editor::SelectAll",
+      "cmd-c": "editor::Copy"
     }
   },
   {
@@ -287,11 +292,20 @@ mod tests {
             sections[0].bindings.get("cmd-s").map(String::as_str),
             Some("workspace::SaveActive")
         );
-        // 2 セクション目は AgentPanel（⌘W でアクティブスレッドを閉じる）
+        // 2 セクション目は AgentPanel（⌘W でアクティブスレッドを閉じる、
+        // transcript にフォーカスがある時は ⌘A / ⌘C で出力を選択・コピーする）。
         assert_eq!(sections[1].context, "AgentPanel");
         assert_eq!(
             sections[1].bindings.get("cmd-w").map(String::as_str),
             Some("agent::CloseActiveThread")
+        );
+        assert_eq!(
+            sections[1].bindings.get("cmd-a").map(String::as_str),
+            Some("editor::SelectAll")
+        );
+        assert_eq!(
+            sections[1].bindings.get("cmd-c").map(String::as_str),
+            Some("editor::Copy")
         );
         // 3 セクション目は管制（⏎ = 要対応キューの先頭へ・P3）
         assert_eq!(sections[2].context, "FleetControl");

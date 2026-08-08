@@ -48,7 +48,12 @@ pub fn parse_todos(text: &str) -> Vec<TodoItem> {
             "x" | "X" => true,
             _ => continue, // "- [?]" 等は項目扱いしない
         };
-        items.push(TodoItem { line, text: body.trim().to_string(), done, section: section.clone() });
+        items.push(TodoItem {
+            line,
+            text: body.trim().to_string(),
+            done,
+            section: section.clone(),
+        });
     }
     items
 }
@@ -58,9 +63,15 @@ pub fn toggle_todo_line(text: &str, line: usize) -> Option<(String, bool)> {
     let mut lines: Vec<&str> = text.split('\n').collect();
     let target = lines.get(line)?;
     let (new_line, now_done) = if let Some(position) = target.find("- [ ]") {
-        (format!("{}- [x]{}", &target[..position], &target[position + 5..]), true)
+        (
+            format!("{}- [x]{}", &target[..position], &target[position + 5..]),
+            true,
+        )
     } else if let Some(position) = target.find("- [x]").or_else(|| target.find("- [X]")) {
-        (format!("{}- [ ]{}", &target[..position], &target[position + 5..]), false)
+        (
+            format!("{}- [ ]{}", &target[..position], &target[position + 5..]),
+            false,
+        )
     } else {
         return None;
     };
@@ -120,8 +131,10 @@ pub fn add_todo_on(host: &dyn Host, root: &Path, text: &str) -> Result<()> {
 /// 追記の pure 部分: `# today` 見出しがあればその節の末尾へ、無ければ**先頭**に節を作って足す
 /// （日付は新しい順＝上に積む方が板として読みやすい）。
 pub fn append_todos(current: &str, texts: &[String], today: &str) -> String {
-    let entry_lines: Vec<String> =
-        texts.iter().map(|text| format!("- [ ] {}", text.trim())).collect();
+    let entry_lines: Vec<String> = texts
+        .iter()
+        .map(|text| format!("- [ ] {}", text.trim()))
+        .collect();
     let heading = format!("# {today}");
     let mut lines: Vec<String> = if current.is_empty() {
         Vec::new()
@@ -157,7 +170,11 @@ pub fn append_todos(current: &str, texts: &[String], today: &str) -> String {
         }
     }
     let joined = lines.join("\n");
-    if joined.ends_with('\n') { joined } else { format!("{joined}\n") }
+    if joined.ends_with('\n') {
+        joined
+    } else {
+        format!("{joined}\n")
+    }
 }
 
 /// ✨今日の計画を生成して板へ追記する（件数を返す）。日付はそのマシンの `date +%F`
@@ -205,7 +222,12 @@ pub fn draft_daily_plan_on(host: &dyn Host, root: &Path) -> Result<Vec<String>> 
 fn parse_plan_lines(stdout: &str) -> Vec<String> {
     stdout
         .lines()
-        .map(|line| line.trim().trim_start_matches("- ").trim_start_matches("[ ]").trim())
+        .map(|line| {
+            line.trim()
+                .trim_start_matches("- ")
+                .trim_start_matches("[ ]")
+                .trim()
+        })
         .filter(|line| {
             !line.is_empty()
                 && !line.starts_with("--")
@@ -223,7 +245,8 @@ fn parse_plan_lines(stdout: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    const BOARD: &str = "# 2026-07-17\n- [ ] レビュー対応\n- [x] 朝会\n\n# 2026-07-16\n- [ ] 積み残し\n";
+    const BOARD: &str =
+        "# 2026-07-17\n- [ ] レビュー対応\n- [x] 朝会\n\n# 2026-07-16\n- [ ] 積み残し\n";
 
     #[test]
     fn parse_reads_items_with_sections_and_lines() {

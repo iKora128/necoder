@@ -14,19 +14,27 @@ impl PanelRegistry {
         cx: &mut Context<Workspace>,
     ) {
         cx.subscribe(agent, Workspace::on_panel_event).detach();
-        cx.subscribe(explorer, Workspace::on_explorer_event).detach();
+        cx.subscribe(explorer, Workspace::on_explorer_event)
+            .detach();
         cx.subscribe(git, Workspace::on_git_panel_event).detach();
-        cx.subscribe(terminal, Workspace::on_terminal_dock_event).detach();
-        cx.subscribe(tests, Workspace::on_terminal_dock_event).detach();
+        cx.subscribe(terminal, Workspace::on_terminal_dock_event)
+            .detach();
+        cx.subscribe(tests, Workspace::on_terminal_dock_event)
+            .detach();
         cx.subscribe(todo, Workspace::on_todo_panel_event).detach();
     }
 
     pub(crate) fn bind_search(panel: &Entity<SearchPanel>, cx: &mut Context<Workspace>) {
-        cx.subscribe(panel, Workspace::on_search_panel_event).detach();
+        cx.subscribe(panel, Workspace::on_search_panel_event)
+            .detach();
     }
 
-    pub(crate) fn bind_settings(view: &Entity<settings::SettingsView>, cx: &mut Context<Workspace>) {
-        cx.subscribe(view, Workspace::on_settings_view_event).detach();
+    pub(crate) fn bind_settings(
+        view: &Entity<settings::SettingsView>,
+        cx: &mut Context<Workspace>,
+    ) {
+        cx.subscribe(view, Workspace::on_settings_view_event)
+            .detach();
     }
 }
 
@@ -37,14 +45,18 @@ impl Workspace {
         event: &explorer::ExplorerEvent,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_index) =
-            self.project_sessions.sessions.iter().position(|session| session.explorer == explorer)
+        let Some(session_index) = self
+            .project_sessions
+            .sessions
+            .iter()
+            .position(|session| session.explorer == explorer)
         else {
             return;
         };
         match event {
             explorer::ExplorerEvent::OpenPath(path) => {
-                self.project_sessions.sessions[session_index].pending_navigation = Some((path.clone(), 0, 0));
+                self.project_sessions.sessions[session_index].pending_navigation =
+                    Some((path.clone(), 0, 0));
             }
             explorer::ExplorerEvent::FilesChanged => {
                 if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
@@ -66,8 +78,11 @@ impl Workspace {
         event: &git_ui::GitPanelEvent,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_index) =
-            self.project_sessions.sessions.iter().position(|session| session.git_panel == panel)
+        let Some(session_index) = self
+            .project_sessions
+            .sessions
+            .iter()
+            .position(|session| session.git_panel == panel)
         else {
             return;
         };
@@ -76,7 +91,8 @@ impl Workspace {
                 self.refresh_git_status_for(session_index, cx)
             }
             git_ui::GitPanelEvent::OpenDiff(path) => {
-                self.project_sessions.sessions[session_index].pending_open_git_diff = Some(path.clone());
+                self.project_sessions.sessions[session_index].pending_open_git_diff =
+                    Some(path.clone());
             }
             git_ui::GitPanelEvent::OpenWorktree { path, branch } => {
                 let host = self
@@ -97,7 +113,8 @@ impl Workspace {
                 self.push_toast(message.clone(), color, cx);
             }
             git_ui::GitPanelEvent::StageHunk(hunk) => {
-                self.project_sessions.sessions[session_index].pending_stage_hunk = Some(hunk.clone());
+                self.project_sessions.sessions[session_index].pending_stage_hunk =
+                    Some(hunk.clone());
             }
         }
         cx.notify();
@@ -124,7 +141,11 @@ impl Workspace {
                         .map(|home| home.join(stripped))
                         .unwrap_or_else(|| PathBuf::from(path))
                 } else {
-                    let Some(worktree) = self.project_sessions.projects.get(session_index).map(|slot| &slot.worktree)
+                    let Some(worktree) = self
+                        .project_sessions
+                        .projects
+                        .get(session_index)
+                        .map(|slot| &slot.worktree)
                     else {
                         return;
                     };

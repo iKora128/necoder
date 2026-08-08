@@ -14,7 +14,9 @@ fn main() {
     let mut rows = Vec::new();
 
     // 10k 行のバッファへの 1 文字挿入（キー入力 1 回分のコア処理）。
-    let base: String = (0..10_000).map(|i| format!("line {i} — こんにちは world\n")).collect();
+    let base: String = (0..10_000)
+        .map(|i| format!("line {i} — こんにちは world\n"))
+        .collect();
     let mut buffer = Buffer::from_str(&base);
     let middle = base.len() / 2;
     buffer.set_selections(vec![Selection::cursor(middle)]);
@@ -22,7 +24,11 @@ fn main() {
     for _ in 0..100 {
         buffer.insert("x");
     }
-    rows.push(Row("insert×100 (10k行)", started.elapsed().as_micros() / 100, 1_000));
+    rows.push(Row(
+        "insert×100 (10k行)",
+        started.elapsed().as_micros() / 100,
+        1_000,
+    ));
 
     // undo/redo 100 回。
     let started = Instant::now();
@@ -32,7 +38,11 @@ fn main() {
     for _ in 0..100 {
         buffer.redo();
     }
-    rows.push(Row("undo+redo×100", started.elapsed().as_micros() / 200, 1_000));
+    rows.push(Row(
+        "undo+redo×100",
+        started.elapsed().as_micros() / 200,
+        1_000,
+    ));
 
     // snapshot（描画毎に呼ばれる想定の複製コスト）。
     let started = Instant::now();
@@ -40,7 +50,11 @@ fn main() {
         let snapshot = buffer.snapshot();
         std::hint::black_box(snapshot.line_count());
     }
-    rows.push(Row("snapshot×20 (10k行)", started.elapsed().as_micros() / 20, 5_000));
+    rows.push(Row(
+        "snapshot×20 (10k行)",
+        started.elapsed().as_micros() / 20,
+        5_000,
+    ));
 
     // byte→point 変換 1000 回（gutter/wrap の座標計算）。
     let snapshot = buffer.snapshot();
@@ -49,7 +63,11 @@ fn main() {
         let byte = (index * 37) % snapshot.len_bytes();
         std::hint::black_box(snapshot.byte_to_point(snapshot.clip_offset(byte)));
     }
-    rows.push(Row("byte_to_point×1000", started.elapsed().as_micros() / 1_000, 500));
+    rows.push(Row(
+        "byte_to_point×1000",
+        started.elapsed().as_micros() / 1_000,
+        500,
+    ));
 
     let mut failed = false;
     println!("editor_core bench（予算 = CI ガード・µs/op）");

@@ -7,7 +7,9 @@
 use std::time::Instant;
 
 fn main() {
-    let dir = std::env::args().nth(1).unwrap_or_else(|| "./zed".to_string());
+    let dir = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "./zed".to_string());
     let started = Instant::now();
     let files: Vec<String> = walk(&std::path::PathBuf::from(&dir));
     let listed_ms = started.elapsed().as_millis();
@@ -46,12 +48,19 @@ fn main() {
                 }
             }
             let micros = started.elapsed().as_micros();
-            let mark = if micros > 16_000 { failed = true; "FAIL" } else { "ok" };
+            let mark = if micros > 16_000 {
+                failed = true;
+                "FAIL"
+            } else {
+                "ok"
+            };
             println!("  {mark:4} query={query:14} {matched:>6} 件一致  {micros:>7} µs / refilter");
         }
     }
     if failed {
-        eprintln!("⌘P の refilter が 1 フレーム（16ms）を超過 — 子プロセス化（rg/fzf 方式）の検討ライン");
+        eprintln!(
+            "⌘P の refilter が 1 フレーム（16ms）を超過 — 子プロセス化（rg/fzf 方式）の検討ライン"
+        );
         std::process::exit(1);
     }
 }
@@ -61,7 +70,9 @@ fn walk(root: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name();

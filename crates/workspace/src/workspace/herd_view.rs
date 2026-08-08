@@ -20,8 +20,10 @@ impl Workspace {
             self.chrome.show_herd = true;
             self.chrome.show_left = true;
             // 排他: 他の左ドックボード（todo/git）は畳む。
-            self.todo_panel.update(cx, |panel, cx| panel.set_open(false, cx));
-            self.git_panel.update(cx, |panel, cx| panel.set_open(false, cx));
+            self.todo_panel
+                .update(cx, |panel, cx| panel.set_open(false, cx));
+            self.git_panel
+                .update(cx, |panel, cx| panel.set_open(false, cx));
             self.ensure_fleet_clock(cx); // 行の相対時刻（開始/入力）を古びさせない
         }
         cx.notify();
@@ -183,7 +185,13 @@ impl Workspace {
                     .px(px(10.))
                     .pt(px(8.))
                     .pb(px(3.))
-                    .child(div().size(px(7.)).rounded_full().bg(group.color).flex_none())
+                    .child(
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(group.color)
+                            .flex_none(),
+                    )
                     .child(match renaming_editor {
                         Some(editor) => div()
                             .flex_1()
@@ -254,10 +262,9 @@ impl Workspace {
                 // digest が無いスレッド（未実行等）は従来の「状態 · 時刻」。
                 let sub = match &status.digest {
                     Some(digest) => digest.clone(),
-                    None => SharedString::from(format!(
-                        "{} · {latest_time}",
-                        activity_label(activity)
-                    )),
+                    None => {
+                        SharedString::from(format!("{} · {latest_time}", activity_label(activity)))
+                    }
                 };
                 let times_tooltip =
                     thread_times_label(status.created_at_ms, status.last_input_at_ms);
@@ -284,9 +291,21 @@ impl Workspace {
                         // 開始/最終入力の両方はホバーで（行内は幅の都合で最新の 1 つだけ・M14）。
                         .tooltip(Tooltip::text(times_tooltip, theme.clone()))
                         // 左 2px スレッド色バー（帰属＝どのスレッドか・UI-SPEC §11）。
-                        .child(div().w(px(2.5)).h(px(24.)).rounded_full().bg(color).flex_none())
+                        .child(
+                            div()
+                                .w(px(2.5))
+                                .h(px(24.))
+                                .rounded_full()
+                                .bg(color)
+                                .flex_none(),
+                        )
                         // 状態ドット（形と動き・色相は識別色のまま・§1.3）。
-                        .child(agent_panel::activity_dot(("herd-dot", seq), 9.0, color, activity))
+                        .child(agent_panel::activity_dot(
+                            ("herd-dot", seq),
+                            9.0,
+                            color,
+                            activity,
+                        ))
                         // エージェント種別アイコン（どのエージェントか＝スレッド色とは別軸・§6）。
                         .child(agent_panel::agent_badge(status.agent.as_ref(), 15.0))
                         .child(
@@ -362,14 +381,16 @@ impl Workspace {
                                 ))
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.project_sessions.sessions[project_index]
-                                            .agent_panel
-                                            .update(cx, |panel, cx| {
-                                                panel.toggle_thread_mute(thread_index, cx)
-                                            });
-                                    }),
+                                    cx.listener(
+                                        move |this, _event: &MouseDownEvent, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.project_sessions.sessions[project_index]
+                                                .agent_panel
+                                                .update(cx, |panel, cx| {
+                                                    panel.toggle_thread_mute(thread_index, cx)
+                                                });
+                                        },
+                                    ),
                                 )
                         })
                         // 削除 ×（ホバーで出現）。エージェント（スレッド）をアーカイブして一覧から消す
@@ -391,10 +412,12 @@ impl Workspace {
                                 .child("×")
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                                        cx.stop_propagation(); // 行本体（reveal/switch）へ伝播させない
-                                        this.close_agent(project_index, thread_index, cx);
-                                    }),
+                                    cx.listener(
+                                        move |this, _event: &MouseDownEvent, _window, cx| {
+                                            cx.stop_propagation(); // 行本体（reveal/switch）へ伝播させない
+                                            this.close_agent(project_index, thread_index, cx);
+                                        },
+                                    ),
                                 ),
                         )
                         .on_mouse_down(
@@ -403,13 +426,21 @@ impl Workspace {
                                 if this.chrome.fleet_mode {
                                     // 編隊モード: そのエージェントをグリッドに出す（無ければセル追加）→拡大。
                                     // ＝閉じたセルもここから戻せる（Agent ドックは編隊では非表示なので開かない）。
-                                    this.reveal_agent_in_fleet(project_index, thread_index, window, cx);
+                                    this.reveal_agent_in_fleet(
+                                        project_index,
+                                        thread_index,
+                                        window,
+                                        cx,
+                                    );
                                 } else {
                                     // 通常: そのプロジェクトへ切替 → スレッド前面 → Agent ドックを開く。
                                     this.switch_project(project_index, window, cx);
-                                    let panel =
-                                        this.project_sessions.sessions[project_index].agent_panel.clone();
-                                    panel.update(cx, |panel, cx| panel.focus_thread(thread_index, cx));
+                                    let panel = this.project_sessions.sessions[project_index]
+                                        .agent_panel
+                                        .clone();
+                                    panel.update(cx, |panel, cx| {
+                                        panel.focus_thread(thread_index, cx)
+                                    });
                                     this.chrome.show_right = true;
                                     this.agent_active = true;
                                     cx.notify();
@@ -459,7 +490,12 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(px(4.))
-                    .child(agent_panel::activity_dot(("herd-legend", index), 7.0, neutral, activity))
+                    .child(agent_panel::activity_dot(
+                        ("herd-legend", index),
+                        7.0,
+                        neutral,
+                        activity,
+                    ))
                     .child(
                         div()
                             .text_size(px(9.5))
@@ -476,7 +512,9 @@ impl Workspace {
         // （左エクスプローラ/エディタ/下ターミナルまで張り替える完全な focus-follows は M14 #3）。
         let files = self.active_slot().map(|slot| {
             let panel = self.agent_panel.read(cx);
-            let focus_name = panel.active_thread_name().unwrap_or_else(|| slot.name.clone());
+            let focus_name = panel
+                .active_thread_name()
+                .unwrap_or_else(|| slot.name.clone());
             let focus_color = panel.active_color();
             div()
                 .flex_1()
@@ -494,7 +532,13 @@ impl Workspace {
                         .h(px(28.))
                         .px(px(10.))
                         // focus 中スレッドの色ドット（どのエージェントの worktree かの手がかり）。
-                        .child(div().size(px(7.)).rounded_full().bg(focus_color).flex_none())
+                        .child(
+                            div()
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(focus_color)
+                                .flex_none(),
+                        )
                         .child(
                             div()
                                 .flex_1()

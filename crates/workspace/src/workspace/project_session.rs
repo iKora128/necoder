@@ -130,10 +130,13 @@ impl Workspace {
         }
         let terminal_launch = Self::terminal_launch_for(slot);
         let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-        let tests_dock = cx.new(|_| TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()));
+        let tests_dock =
+            cx.new(|_| TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()));
         let explorer = cx.new(|_| Explorer::new(explorer_view));
         let git_panel = cx.new(GitPanel::new);
-        let accent = slot.map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let accent = slot
+            .map(|slot| slot.color)
+            .unwrap_or_else(|| project_color(0));
         let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
         PanelRegistry::bind_session(
             &agent_panel,
@@ -149,7 +152,10 @@ impl Workspace {
             agent_panel,
             explorer,
             search_panel: None,
-            repository: RepositoryController { status: HashMap::new(), refresh_generation: 0 },
+            repository: RepositoryController {
+                status: HashMap::new(),
+                refresh_generation: 0,
+            },
             git_panel,
             terminal_dock,
             tests_dock,
@@ -211,10 +217,9 @@ impl Workspace {
                 Ok(None) => {
                     // 初回: 識別子のハッシュで IDENTITY パレットから安定に 1 色選び、焼き付ける。
                     let palette = theme_core::IDENTITY_PALETTE_HEXES;
-                    let index = key
-                        .bytes()
-                        .fold(0u32, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte as u32))
-                        as usize
+                    let index = key.bytes().fold(0u32, |acc, byte| {
+                        acc.wrapping_mul(31).wrapping_add(byte as u32)
+                    }) as usize
                         % palette.len();
                     let color = palette[index];
                     let _ = storage.set_host_color(&key, color);
@@ -239,7 +244,9 @@ impl Workspace {
                 .spawn(async move {
                     let records = storage_for_load.load_task_spaces();
                     // ニュースの backfill（P2）: 直近イベントを新しい順で 60 件（描画スレッド外で読む）。
-                    let events = storage_for_load.load_recent_task_events(60).unwrap_or_default();
+                    let events = storage_for_load
+                        .load_recent_task_events(60)
+                        .unwrap_or_default();
                     records.map(|records| (records, events))
                 })
                 .await;
@@ -320,10 +327,7 @@ impl Workspace {
                         };
                         backfill.push(NewsItem {
                             at_ms: event.created_at,
-                            color: color_by_id
-                                .get(&event.task_id)
-                                .copied()
-                                .unwrap_or(neutral),
+                            color: color_by_id.get(&event.task_id).copied().unwrap_or(neutral),
                             title: SharedString::from(record.title.clone()),
                             text,
                             kind,
@@ -417,9 +421,10 @@ impl Workspace {
             match Worktree::with_host(host, &root) {
                 Ok(worktree) => {
                     let index = projects.len();
-                    let remote_host = worktree.host().is_remote().then(|| {
-                        SharedString::from(worktree.host().display_name().to_string())
-                    });
+                    let remote_host = worktree
+                        .host()
+                        .is_remote()
+                        .then(|| SharedString::from(worktree.host().display_name().to_string()));
                     // `.shirushi/settings.json` の color(#hex)/icon(絵文字) を反映（M12-11）。
                     let identity = read_project_identity(worktree.root());
                     let mut slot = ProjectSlot {
@@ -491,11 +496,17 @@ impl Workspace {
             let terminal_launch = Self::terminal_launch_for(projects.get(index));
             let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
             let tests_dock = cx.new(|_| {
-                TerminalDock::new(Self::terminal_launch_for(projects.get(index)), theme.clone())
+                TerminalDock::new(
+                    Self::terminal_launch_for(projects.get(index)),
+                    theme.clone(),
+                )
             });
             let explorer = cx.new(|_| Explorer::new(explorer_view));
             let git_panel = cx.new(GitPanel::new);
-            let accent = projects.get(index).map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+            let accent = projects
+                .get(index)
+                .map(|slot| slot.color)
+                .unwrap_or_else(|| project_color(0));
             let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
             PanelRegistry::bind_session(
                 &agent_panel,
@@ -537,7 +548,10 @@ impl Workspace {
                 agent_panel,
                 explorer,
                 search_panel,
-                repository: RepositoryController { status: HashMap::new(), refresh_generation: 0 },
+                repository: RepositoryController {
+                    status: HashMap::new(),
+                    refresh_generation: 0,
+                },
                 git_panel,
                 terminal_dock,
                 tests_dock,
@@ -555,11 +569,18 @@ impl Workspace {
                 _watch_pump: None,
             });
         }
-        let accent = projects.get(active).map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let accent = projects
+            .get(active)
+            .map(|slot| slot.color)
+            .unwrap_or_else(|| project_color(0));
         let settings_view = cx.new(|cx| settings::SettingsView::new(theme.clone(), accent, cx));
         PanelRegistry::bind_settings(&settings_view, cx);
         let mut workspace = Workspace {
-            project_sessions: ProjectSessions { projects, active, sessions },
+            project_sessions: ProjectSessions {
+                projects,
+                active,
+                sessions,
+            },
             theme,
             focus_handle,
             chrome: ChromeState {
@@ -640,16 +661,23 @@ impl Workspace {
                 crash_notice: None,
                 news: Vec::new(),
             },
-            persistence: WorkspacePersistence { state_path, storage: None },
+            persistence: WorkspacePersistence {
+                state_path,
+                storage: None,
+            },
             updater: UpdateController { status: None },
             window_active: true,
+            visual_tick: 0,
+            visual_ticker: false,
             control_summary: None,
             control_summary_gen: 0,
         };
         workspace.refresh_all_git_status(cx); // ツリー/タブの git 色分け + herd の各 space のブランチ（M14 ①）
-        // 開発用: SHIRUSHI_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
+                                              // 開発用: SHIRUSHI_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_GIT_PANEL").is_some() {
-            workspace.git_panel.update(cx, |panel, cx| panel.set_open(true, cx));
+            workspace
+                .git_panel
+                .update(cx, |panel, cx| panel.set_open(true, cx));
             workspace.refresh_git_status(cx);
         }
         // 開発用: SHIRUSHI_BRANCH_MENU=1 で branch/worktree メニューを開いた状態で撮る。
@@ -665,7 +693,11 @@ impl Workspace {
         }
         // 開発用: SHIRUSHI_COLOR_PICKER=1（or hex 文字列）で色ピッカーを開いた状態で撮る（Peacock 拡張の検証）。
         if let Ok(probe) = std::env::var("SHIRUSHI_COLOR_PICKER") {
-            let hex = if probe == "1" { String::new() } else { probe.trim_start_matches('#').to_string() };
+            let hex = if probe == "1" {
+                String::new()
+            } else {
+                probe.trim_start_matches('#').to_string()
+            };
             workspace.overlays.color_picker = Some(ColorPickerState {
                 project_index: workspace.project_sessions.active,
                 position: point(px(RAIL_WIDTH), px(12.)),
@@ -710,7 +742,10 @@ impl Workspace {
         }
         // 開発用: SHIRUSHI_NAMING=1 でルートへの新規ファイル命名入力を開いた状態で撮る。
         if std::env::var_os("SHIRUSHI_NAMING").is_some() {
-            if let Some(root) = workspace.active_worktree().map(|worktree| worktree.root().to_path_buf()) {
+            if let Some(root) = workspace
+                .active_worktree()
+                .map(|worktree| worktree.root().to_path_buf())
+            {
                 workspace.explorer.update(cx, |explorer, cx| {
                     explorer.set_naming(
                         ExplorerNaming {
@@ -733,11 +768,14 @@ impl Workspace {
         workspace.loaded = true;
         workspace.schedule_update_check(cx); // 自動アップデートの確認（M13・90s 後に背景で）
         workspace.check_crash_notice(cx); // 前回クラッシュの通知（M13・pending マーカーを 1 回だけ消費）
-        // 開発用: SHIRUSHI_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
+                                          // 開発用: SHIRUSHI_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
         if let Ok(version) = std::env::var("SHIRUSHI_UPDATE_PROBE") {
             if !version.is_empty() {
                 workspace.updater.status = Some((
-                    updater::UpdateInfo { version, dmg_url: String::new() },
+                    updater::UpdateInfo {
+                        version,
+                        dmg_url: String::new(),
+                    },
                     UpdateState::Available,
                 ));
             }
@@ -794,7 +832,12 @@ impl Workspace {
 
     /// 起動後にタブ列を復元する。各プロジェクトの記録を slot へ流し込み（非アクティブは遅延復元）、
     /// アクティブプロジェクトのタブだけ実際に開く。
-    pub fn restore_open_file(&mut self, restored: &[RestoredTabs], window: &mut Window, cx: &mut Context<Self>) {
+    pub fn restore_open_file(
+        &mut self,
+        restored: &[RestoredTabs],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for (index, tabs) in restored.iter().enumerate() {
             if let Some(slot) = self.project_sessions.projects.get_mut(index) {
                 slot.open_files = tabs.files.clone();
@@ -814,7 +857,9 @@ impl Workspace {
     }
 
     pub(crate) fn active_slot(&self) -> Option<&ProjectSlot> {
-        self.project_sessions.projects.get(self.project_sessions.active)
+        self.project_sessions
+            .projects
+            .get(self.project_sessions.active)
     }
 
     /// 現在アクティブなタブのエディタ（無ければ `None`）。従来 `self.editor` を読んでいた箇所の置換。
@@ -859,7 +904,10 @@ impl Workspace {
         self.dismiss_buffer_search(cx);
         self.close_hover(cx);
         let theme = self.theme.clone();
-        let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let accent = self
+            .active_slot()
+            .map(|slot| slot.color)
+            .unwrap_or_else(|| project_color(0));
         let editor = cx.new(|cx| EditorView::new(buffer, theme, accent, cx));
         let handle = editor.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
@@ -888,11 +936,16 @@ impl Workspace {
             Some(slot) => (slot.open_files.clone(), slot.active_file),
             None => return,
         };
-        let host = self.active_worktree().map(|worktree| worktree.host().clone());
+        let host = self
+            .active_worktree()
+            .map(|worktree| worktree.host().clone());
         self.tabs.clear();
         self.active_tab = 0;
         for path in files {
-            let exists = host.as_ref().map(|host| host.metadata(&path).is_ok()).unwrap_or(false);
+            let exists = host
+                .as_ref()
+                .map(|host| host.metadata(&path).is_ok())
+                .unwrap_or(false);
             if exists {
                 // 背景読み込みだと完了順でタブ順が崩れるため、復元だけは同期で開く。
                 self.open_file_sync(path, window, cx);
@@ -961,7 +1014,8 @@ impl Workspace {
                     // 一覧の先頭 = メイン作業ツリー。それ以外に自分が居れば linked。
                     let linked = {
                         let worktrees = project::git_worktrees_on(host.as_ref(), &root);
-                        let canonical = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+                        let canonical =
+                            std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
                         worktrees
                             .iter()
                             .skip(1)
@@ -976,7 +1030,8 @@ impl Workspace {
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
-                let Some(session) = workspace.project_sessions.sessions.get_mut(session_index) else {
+                let Some(session) = workspace.project_sessions.sessions.get_mut(session_index)
+                else {
                     return;
                 };
                 if session.repository.refresh_generation != generation {
@@ -987,7 +1042,11 @@ impl Workspace {
                 let git_panel = session.git_panel.clone();
                 git_panel.update(cx, |panel, cx| {
                     panel.set_snapshot(
-                        RepositorySnapshot { changes, history, github_slug: slug },
+                        RepositorySnapshot {
+                            changes,
+                            history,
+                            github_slug: slug,
+                        },
                         cx,
                     );
                 });
@@ -995,7 +1054,8 @@ impl Workspace {
                     slot.branch = branch.clone();
                     // git が「linked worktree だ」と言うなら常にそれが正（起動経路に依存しない）。
                     // メイン作業ツリーだった場合は None に戻す＝main を消せる導線を作らない。
-                    slot.worktree_branch = linked.map(|linked| linked.or(branch).unwrap_or_default());
+                    slot.worktree_branch =
+                        linked.map(|linked| linked.or(branch).unwrap_or_default());
                 }
                 cx.notify();
             });

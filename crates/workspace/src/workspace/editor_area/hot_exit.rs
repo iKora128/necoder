@@ -44,7 +44,11 @@ impl Workspace {
                         .map(|tab| {
                             let view = tab.editor.read(cx);
                             let dirty = view.buffer().is_dirty();
-                            let text = if dirty { view.buffer().text() } else { String::new() };
+                            let text = if dirty {
+                                view.buffer().text()
+                            } else {
+                                String::new()
+                            };
                             (tab.path.clone(), text, dirty)
                         })
                         .collect();
@@ -54,7 +58,10 @@ impl Workspace {
                     Err(_) => return,
                 };
             if std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some() {
-                eprintln!("hotexit: tick gen={generation} snapshot={} 件", snapshot.len());
+                eprintln!(
+                    "hotexit: tick gen={generation} snapshot={} 件",
+                    snapshot.len()
+                );
             }
             if snapshot.is_empty() {
                 return;
@@ -104,7 +111,10 @@ impl Workspace {
                     return;
                 }
                 if std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some() {
-                    eprintln!("hotexit: 復元候補 {} 件（scope={scope}・バー表示）", mine.len());
+                    eprintln!(
+                        "hotexit: 復元候補 {} 件（scope={scope}・バー表示）",
+                        mine.len()
+                    );
                 }
                 workspace.hot_exit_pending = Some(mine);
                 cx.notify();
@@ -159,7 +169,12 @@ impl Workspace {
 
     // ── ⌃G 行ジャンプ（M10-12） ──
 
-    pub(crate) fn open_goto_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_goto_line(
+        &mut self,
+        _: &GoToLine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_editor().is_none() {
             return;
         }
@@ -179,7 +194,12 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn on_goto_line_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_goto_line_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_goto_line(window, cx),
             "enter" => {
@@ -227,7 +247,11 @@ impl Workspace {
         } else {
             SharedString::from(value.clone())
         };
-        let color = if value.is_empty() { theme.fg2 } else { theme.fg0 };
+        let color = if value.is_empty() {
+            theme.fg2
+        } else {
+            theme.fg0
+        };
         Some(
             div()
                 .absolute()
@@ -248,14 +272,24 @@ impl Workspace {
                         .border_1()
                         .border_color(accent)
                         .rounded(px(8.))
-                        .shadow(vec![gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4))
-                            .blur_radius(px(16.))])
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(6.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(16.))])
                         .track_focus(focus)
                         .on_key_down(cx.listener(Self::on_goto_line_key_down))
                         .text_size(px(12.5))
                         .text_color(color)
                         .child(div().flex_none().text_color(theme.fg2).child(":"))
-                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(display))
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(display),
+                        )
                         .child(div().flex_none().w(px(1.5)).h(px(14.)).bg(accent)),
                 )
                 .into_any_element(),
@@ -268,7 +302,13 @@ impl Workspace {
     pub(crate) fn current_nav_position(&self, cx: &App) -> Option<(PathBuf, usize)> {
         let editor = self.active_editor()?;
         let path = self.active_tab_path()?;
-        let offset = editor.read(cx).buffer().selections().first().map(|s| s.head).unwrap_or(0);
+        let offset = editor
+            .read(cx)
+            .buffer()
+            .selections()
+            .first()
+            .map(|s| s.head)
+            .unwrap_or(0);
         Some((path, offset))
     }
 
@@ -287,7 +327,12 @@ impl Workspace {
         self.nav_forward.clear();
     }
 
-    pub(crate) fn navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn navigate_back(
+        &mut self,
+        _: &NavigateBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.nav_back.pop() else {
             return;
         };
@@ -297,7 +342,12 @@ impl Workspace {
         self.navigate_to(target, window, cx);
     }
 
-    pub(crate) fn navigate_forward(&mut self, _: &NavigateForward, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn navigate_forward(
+        &mut self,
+        _: &NavigateForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.nav_forward.pop() else {
             return;
         };
@@ -308,7 +358,12 @@ impl Workspace {
     }
 
     /// 履歴の 1 点へ移動する（閉じたファイルは開き直す）。
-    pub(crate) fn navigate_to(&mut self, target: (PathBuf, usize), window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn navigate_to(
+        &mut self,
+        target: (PathBuf, usize),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (path, offset) = target;
         if self.active_tab_path().as_ref() == Some(&path) {
             if let Some(editor) = self.active_editor() {

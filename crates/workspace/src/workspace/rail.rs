@@ -8,7 +8,12 @@ impl Workspace {
     // キャプチャし続ける = 枠外で離した mouse-up はこの窓に届く、を利用する。
 
     /// root の on_mouse_move。閾値（24px）を超えたら「意図あるドラッグ」に昇格。
-    pub(crate) fn on_rail_drag_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _cx: &mut Context<Self>) {
+    pub(crate) fn on_rail_drag_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         if let Some((_, start, moved)) = &mut self.chrome.rail_drag {
             if !*moved {
                 let dx = f32::from(event.position.x - start.x).abs();
@@ -21,7 +26,12 @@ impl Workspace {
     }
 
     /// root の on_mouse_up。ドラッグ済み + ビューポート外で離した → tear-off。
-    pub(crate) fn on_rail_drag_end(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_rail_drag_end(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((index, _start, moved)) = self.chrome.rail_drag.take() else {
             return;
         };
@@ -126,7 +136,12 @@ impl Workspace {
     ) {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.overlays.color_picker = Some(ColorPickerState { project_index, position, hex: String::new(), focus });
+        self.overlays.color_picker = Some(ColorPickerState {
+            project_index,
+            position,
+            hex: String::new(),
+            focus,
+        });
         cx.notify();
     }
 
@@ -143,13 +158,26 @@ impl Workspace {
 
     /// ⌘K⌘C / コマンドパレットからアクティブプロジェクトの色ピッカーを開く。
     /// マウス位置が無いので、アクティブなレール項目の位置（pt_2 8px + index*38）にアンカーする。
-    pub(crate) fn open_project_color(&mut self, _: &ProjectColor, window: &mut Window, cx: &mut Context<Self>) {
-        let anchor = gpui::point(px(RAIL_WIDTH), px(8. + self.project_sessions.active as f32 * 38. + 4.));
+    pub(crate) fn open_project_color(
+        &mut self,
+        _: &ProjectColor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor = gpui::point(
+            px(RAIL_WIDTH),
+            px(8. + self.project_sessions.active as f32 * 38. + 4.),
+        );
         self.open_color_picker(self.project_sessions.active, anchor, window, cx);
     }
 
     /// 色ピッカーの hex 入力キー処理（rename と同型 + 16 進フィルタ）。
-    pub(crate) fn on_color_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_color_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_color_picker(window, cx),
             "enter" => {
@@ -228,36 +256,43 @@ impl Workspace {
                         .border_1()
                         .border_color(theme.border)
                         .rounded(px(8.))
-                        .shadow(vec![
-                            gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
-                        ])
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(6.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(16.))])
                         .track_focus(&state.focus)
                         .on_key_down(cx.listener(Self::on_color_key_down))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div().flex().flex_wrap().gap(px(6.)).children(
-                                theme_core::IDENTITY_PALETTE_HEXES.iter().enumerate().map(
-                                    |(swatch_index, &value)| {
-                                        let hex = format!("#{value:06x}");
-                                        let color = parse_hex_color(&hex)
-                                            .unwrap_or_else(|| project_color(swatch_index));
-                                        div()
-                                            .id(("color-swatch", swatch_index))
-                                            .size(px(22.))
-                                            .rounded(px(6.))
-                                            .bg(color)
-                                            .cursor_pointer()
-                                            .hover(|style| style.border_2().border_color(gpui::white()))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |this, _, window, cx| {
-                                                    this.apply_project_color(project_index, color, &hex, window, cx)
-                                                }),
-                                            )
-                                    },
-                                ),
+                        .child(div().flex().flex_wrap().gap(px(6.)).children(
+                            theme_core::IDENTITY_PALETTE_HEXES.iter().enumerate().map(
+                                |(swatch_index, &value)| {
+                                    let hex = format!("#{value:06x}");
+                                    let color = parse_hex_color(&hex)
+                                        .unwrap_or_else(|| project_color(swatch_index));
+                                    div()
+                                        .id(("color-swatch", swatch_index))
+                                        .size(px(22.))
+                                        .rounded(px(6.))
+                                        .bg(color)
+                                        .cursor_pointer()
+                                        .hover(|style| style.border_2().border_color(gpui::white()))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.apply_project_color(
+                                                    project_index,
+                                                    color,
+                                                    &hex,
+                                                    window,
+                                                    cx,
+                                                )
+                                            }),
+                                        )
+                                },
                             ),
-                        )
+                        ))
                         .child(
                             // 任意 hex 入力行（許可リスト外の色も許すエスケープハッチ・UI-SPEC §1.2）。
                             div()
@@ -272,7 +307,12 @@ impl Workspace {
                                 .rounded(px(6.))
                                 .text_size(px(12.))
                                 .text_color(theme.fg0)
-                                .child(div().flex_none().text_color(theme.fg2).child(SharedString::from("#")))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(theme.fg2)
+                                        .child(SharedString::from("#")),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -302,8 +342,15 @@ impl Workspace {
         let slot = self.project_sessions.projects.get(index)?;
         let is_worktree = slot.worktree_branch.is_some();
         let slot_root = slot.worktree.root().to_path_buf();
-        let (bg2, bg3, border, fg0, fg1, fg2, err) =
-            (theme.bg2, theme.bg3, theme.border, theme.fg0, theme.fg1, theme.fg2, theme.err);
+        let (bg2, bg3, border, fg0, fg1, fg2, err) = (
+            theme.bg2,
+            theme.bg3,
+            theme.border,
+            theme.fg0,
+            theme.fg1,
+            theme.fg2,
+            theme.err,
+        );
 
         // 通常のメニュー行（アイコン + ラベル）。danger=true は削除系（hover で赤・armed で確認文言）。
         let make_row = move |row_id: &'static str,
@@ -330,8 +377,20 @@ impl Workspace {
                         style.bg(bg3).text_color(fg0)
                     }
                 })
-                .child(div().w(px(14.)).flex_none().text_color(if armed { err } else { fg2 }).child(icon))
-                .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(label))
+                .child(
+                    div()
+                        .w(px(14.))
+                        .flex_none()
+                        .text_color(if armed { err } else { fg2 })
+                        .child(icon),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(label),
+                )
         };
 
         let mut menu_box = div()
@@ -347,18 +406,22 @@ impl Workspace {
             .border_1()
             .border_color(border)
             .rounded(px(8.))
-            .shadow(vec![
-                gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
-            ])
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(6.),
+                gpui::hsla(0., 0., 0., 0.4),
+            )
+            .blur_radius(px(16.))])
             // メニュー内クリックは背後の backdrop へ伝えない（閉じ・誤爆防止）。
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             // 色スウォッチ列（速い色変更。許可リスト外の hex は「その他の色…」へ）。
-            .child(
-                div().flex().flex_wrap().gap(px(5.)).p(px(4.)).children(
-                    theme_core::IDENTITY_PALETTE_HEXES.iter().enumerate().map(|(swatch_index, &value)| {
+            .child(div().flex().flex_wrap().gap(px(5.)).p(px(4.)).children(
+                theme_core::IDENTITY_PALETTE_HEXES.iter().enumerate().map(
+                    |(swatch_index, &value)| {
                         let hex = format!("#{value:06x}");
-                        let color = parse_hex_color(&hex).unwrap_or_else(|| project_color(swatch_index));
+                        let color =
+                            parse_hex_color(&hex).unwrap_or_else(|| project_color(swatch_index));
                         div()
                             .id(("rail-swatch", swatch_index))
                             .size(px(20.))
@@ -373,41 +436,61 @@ impl Workspace {
                                     this.close_rail_menu(cx);
                                 }),
                             )
-                    }),
+                    },
                 ),
-            )
+            ))
             // 「その他の色…」= hex 入力つきフル色ピッカーへ（エスケープハッチ）。
             .child(
-                make_row("rail-more-colors", "🎨", SharedString::from(i18n::t!("rail.menu_more_colors")), false, false)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            this.close_rail_menu(cx);
-                            this.open_color_picker(index, position, window, cx);
-                        }),
-                    ),
+                make_row(
+                    "rail-more-colors",
+                    "🎨",
+                    SharedString::from(i18n::t!("rail.menu_more_colors")),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.close_rail_menu(cx);
+                        this.open_color_picker(index, position, window, cx);
+                    }),
+                ),
             )
             .child(div().h(px(1.)).bg(border).my(px(2.)))
             // 新しいウィンドウで開く（旧・既定挙動を明示操作に格下げ）。
             .child({
                 let path = slot_root.clone();
-                make_row("rail-new-window", "⧉", SharedString::from(i18n::t!("rail.menu_new_window")), false, false)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.close_rail_menu(cx);
-                            this.open_folder_as_window(path.clone(), cx);
-                        }),
-                    )
+                make_row(
+                    "rail-new-window",
+                    "⧉",
+                    SharedString::from(i18n::t!("rail.menu_new_window")),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.close_rail_menu(cx);
+                        this.open_folder_as_window(path.clone(), cx);
+                    }),
+                )
             })
             .child(div().h(px(1.)).bg(border).my(px(2.)))
             // レールから外す（安全＝ディスク無傷。表示だけ消す）。
             .child(
-                make_row("rail-remove", "✕", SharedString::from(i18n::t!("rail.menu_remove")), false, false)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| this.remove_project_slot(index, window, cx)),
-                    ),
+                make_row(
+                    "rail-remove",
+                    "✕",
+                    SharedString::from(i18n::t!("rail.menu_remove")),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.remove_project_slot(index, window, cx)
+                    }),
+                ),
             );
 
         // worktree タブだけ: worktree 削除 / worktree ごとブランチ削除。
@@ -452,8 +535,14 @@ impl Workspace {
                 .top_0()
                 .left_0()
                 .size_full()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| this.close_rail_menu(cx)))
-                .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| this.close_rail_menu(cx)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.close_rail_menu(cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _window, cx| this.close_rail_menu(cx)),
+                )
                 .child(menu_box)
                 .into_any_element(),
         )

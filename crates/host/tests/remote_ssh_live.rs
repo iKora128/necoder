@@ -93,7 +93,9 @@ fn remote_ssh_crud_search_command() {
     );
     let entries = remote.read_dir(&root).expect("read_dir");
     assert!(
-        entries.iter().any(|entry| entry.name == "src" && entry.is_dir),
+        entries
+            .iter()
+            .any(|entry| entry.name == "src" && entry.is_dir),
         "src ディレクトリが read_dir に出る"
     );
 
@@ -120,7 +122,8 @@ fn remote_ssh_crud_search_command() {
     let stale = remote.write_file(&probe, b"three", WriteCondition::Matches(first));
     assert!(stale.is_err(), "stale revision の write は拒否される");
     // 後始末
-    let _rm = remote.run_command(&CommandSpec::new("rm", &root).args(["-f", ".remote_edit_probe.txt"]));
+    let _rm =
+        remote.run_command(&CommandSpec::new("rm", &root).args(["-f", ".remote_edit_probe.txt"]));
 
     // ④ search: TODO をプロジェクト横断で拾う
     let hits = remote
@@ -136,7 +139,10 @@ fn remote_ssh_crud_search_command() {
         )
         .expect("search_project");
     println!("search TODO: {} hits", hits.len());
-    assert!(hits.len() >= 3, "サンプルの TODO が複数ヒットする: {hits:?}");
+    assert!(
+        hits.len() >= 3,
+        "サンプルの TODO が複数ヒットする: {hits:?}"
+    );
 
     // ⑤ command: run_command が remote で実行され stdout を返す
     let output = remote
@@ -190,24 +196,27 @@ fn remote_ssh_huge_tree_respects_limit() {
     // 巨大 tree を作る（5000 ファイル・1 コマンドで）。gitignore されない素の階層。
     let big = root.join(".bigtree");
     let make = remote
-        .run_command(
-            &CommandSpec::new("sh", &root).args([
-                "-c",
-                "mkdir -p .bigtree && cd .bigtree && \
+        .run_command(&CommandSpec::new("sh", &root).args([
+            "-c",
+            "mkdir -p .bigtree && cd .bigtree && \
                  for i in $(seq 1 5000); do : > f$i.txt; done && echo made",
-            ]),
-        )
+        ]))
         .expect("巨大 tree 作成");
     assert!(make.success(), "巨大 tree を作れる: {make:?}");
 
     // limit 付き list_files は limit で打ち切り、ハングも爆発もしない
     let limit = 500;
     let started = Instant::now();
-    let files = remote.list_files(&big, limit).expect("巨大 tree の list_files");
+    let files = remote
+        .list_files(&big, limit)
+        .expect("巨大 tree の list_files");
     let elapsed = started.elapsed();
     println!("huge tree list_files: {} 件 / {:?}", files.len(), elapsed);
     assert!(files.len() <= limit, "limit を超えない");
-    assert!(files.len() >= limit / 2, "十分な数を拾う（打ち切りが効いている）");
+    assert!(
+        files.len() >= limit / 2,
+        "十分な数を拾う（打ち切りが効いている）"
+    );
     assert!(elapsed < Duration::from_secs(20), "限度時間内に返る");
 
     // 後始末
@@ -236,10 +245,7 @@ fn remote_ssh_bench_latency_and_memory() {
     }
     let total = started.elapsed();
     let avg = total / iterations;
-    println!(
-        "── remote benchmark ({}) ──",
-        remote.display_name()
-    );
+    println!("── remote benchmark ({}) ──", remote.display_name());
     println!(
         "round-trip read_file  x{iterations}: avg {:.3}ms / max {:.3}ms",
         avg.as_secs_f64() * 1e3,
@@ -247,9 +253,15 @@ fn remote_ssh_bench_latency_and_memory() {
     );
 
     // ② メモリ: リモート常駐 server の合計 RSS（KB）
-    let rss_kb = remote_metric(&remote, &root,
-        "ps -o rss= -C shirushi-remote-server 2>/dev/null | awk '{s+=$1} END{print s+0}'");
-    println!("remote server RSS 合計: {rss_kb} KB (= {:.1} MB)", rss_kb as f64 / 1024.0);
+    let rss_kb = remote_metric(
+        &remote,
+        &root,
+        "ps -o rss= -C shirushi-remote-server 2>/dev/null | awk '{s+=$1} END{print s+0}'",
+    );
+    println!(
+        "remote server RSS 合計: {rss_kb} KB (= {:.1} MB)",
+        rss_kb as f64 / 1024.0
+    );
 
     // ③ idle CPU: 2 秒間アイドルさせて server の CPU jiffies 差分から % を出す
     let cpu0 = remote_metric(&remote, &root, &proc_jiffies_script());
@@ -269,7 +281,10 @@ fn remote_ssh_bench_latency_and_memory() {
         avg < Duration::from_millis(200),
         "localhost の round-trip が遅すぎる: {avg:?}"
     );
-    assert!(idle_cpu_percent < 10.0, "idle CPU が高すぎる: {idle_cpu_percent:.2}%");
+    assert!(
+        idle_cpu_percent < 10.0,
+        "idle CPU が高すぎる: {idle_cpu_percent:.2}%"
+    );
 }
 
 /// リモートで整数を1つ返すコマンドを実行し、その値を読む（ベンチ計測用）。
@@ -298,7 +313,10 @@ fn remote_ssh_watch_pushes_external_edits() {
     std::thread::sleep(Duration::from_millis(400));
 
     // out-of-band（別 ssh）で project 内のファイルを編集
-    out_of_band_ssh(&uri, "echo 'watched change' >> /home/dev/work/sample/README.md");
+    out_of_band_ssh(
+        &uri,
+        "echo 'watched change' >> /home/dev/work/sample/README.md",
+    );
 
     // poll 間隔（700ms）内に変更イベントが push される
     let event = watch
@@ -311,9 +329,11 @@ fn remote_ssh_watch_pushes_external_edits() {
     );
 
     // 後始末（README を元に戻す）
-    let _reset = remote.run_command(
-        &CommandSpec::new("git", remote.root()).args(["checkout", "--", "README.md"]),
-    );
+    let _reset = remote.run_command(&CommandSpec::new("git", remote.root()).args([
+        "checkout",
+        "--",
+        "README.md",
+    ]));
 }
 
 #[test]
@@ -347,9 +367,11 @@ fn remote_ssh_watch_resubscribes_after_reconnect() {
         event.iter().any(|path| path.ends_with("notes.md")),
         "再購読後に notes.md の変更が通知される: {event:?}"
     );
-    let _reset = remote.run_command(
-        &CommandSpec::new("git", remote.root()).args(["checkout", "--", "docs/notes.md"]),
-    );
+    let _reset = remote.run_command(&CommandSpec::new("git", remote.root()).args([
+        "checkout",
+        "--",
+        "docs/notes.md",
+    ]));
 }
 
 #[test]

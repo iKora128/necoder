@@ -5,9 +5,9 @@
 //! （ホスト側が id を解釈する）。色は UI-SPEC §1.3 の許可位置のみ（選択面 = accent-dim）。
 
 use gpui::{
-    Animation, AnimationExt, AnyView, App, BoxShadow, Context, EventEmitter, FocusHandle, Focusable,
-    Hsla, IntoElement, KeyDownEvent, MouseButton, Render, SharedString, Window, div, ease_out_quint,
-    hsla, prelude::*, px,
+    div, ease_out_quint, hsla, prelude::*, px, Animation, AnimationExt, AnyView, App, BoxShadow,
+    Context, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton,
+    Render, SharedString, Window,
 };
 use std::time::Duration;
 use theme_core::Theme;
@@ -52,7 +52,10 @@ impl Tooltip {
     ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
         let text = text.into();
         move |_window, cx| {
-            let tooltip = Tooltip { text: text.clone(), theme: theme.clone() };
+            let tooltip = Tooltip {
+                text: text.clone(),
+                theme: theme.clone(),
+            };
             cx.new(|_cx| tooltip).into()
         }
     }
@@ -75,7 +78,9 @@ fn tooltip_box(text: SharedString, theme: &Theme) -> impl IntoElement {
         .text_size(px(11.5))
         .text_color(theme.fg0)
         // 浮遊感の影（暗色 UI 用にやや濃いめ）。
-        .shadow(vec![BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., 0.36)).blur_radius(px(12.))])
+        .shadow(vec![
+            BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., 0.36)).blur_radius(px(12.))
+        ])
         .child(text)
 }
 
@@ -107,7 +112,13 @@ pub struct PickerItem {
 
 impl PickerItem {
     pub fn new(id: usize, label: impl Into<SharedString>) -> Self {
-        Self { id, label: label.into(), detail: None, accent: None, dots: Vec::new() }
+        Self {
+            id,
+            label: label.into(),
+            detail: None,
+            accent: None,
+            dots: Vec::new(),
+        }
     }
 
     pub fn with_detail(mut self, detail: impl Into<SharedString>) -> Self {
@@ -216,7 +227,9 @@ impl Picker {
             .items
             .iter()
             .enumerate()
-            .filter_map(|(index, item)| fuzzy_score(&self.query, &item.label).map(|score| (index, score)))
+            .filter_map(|(index, item)| {
+                fuzzy_score(&self.query, &item.label).map(|score| (index, score))
+            })
             .collect();
         scored.sort_by(|a, b| b.1.cmp(&a.1));
         self.filtered = scored.into_iter().map(|(index, _)| index).collect();
@@ -292,7 +305,11 @@ impl Render for Picker {
         } else {
             self.query.clone().into()
         };
-        let query_color = if self.query.is_empty() { theme.fg2 } else { theme.fg0 };
+        let query_color = if self.query.is_empty() {
+            theme.fg2
+        } else {
+            theme.fg0
+        };
 
         div()
             .absolute()
@@ -334,63 +351,76 @@ impl Render for Picker {
                     )
                     // リスト（最大 50 件）
                     .child(
-                        div().flex().flex_col().p_1().max_h(px(340.)).overflow_hidden().children(
-                            self.filtered.iter().take(50).enumerate().map(|(row, &item_index)| {
-                                let item = &self.items[item_index];
-                                let is_selected = row == self.selected;
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded(px(5.))
-                                    .cursor_pointer()
-                                    // マウスクリックで選択＋確定（キーボード ↑↓/Enter に加えて・全 Picker 共通）。
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _event, _window, cx| {
-                                            cx.stop_propagation(); // 背景/箱の handler へ伝播させない
-                                            this.selected = row;
-                                            this.confirm(cx);
-                                        }),
-                                    )
-                                    .hover(|style| style.bg(theme.bg1))
-                                    .text_size(px(12.5))
-                                    .text_color(if is_selected { theme.fg0 } else { theme.fg1 })
-                                    .when(is_selected, |element| element.bg(accent.alpha(0.16)))
-                                    // 行頭●（プロジェクト色・M12-12）。
-                                    .when_some(item.accent, |element, color| {
-                                        element.child(
-                                            div().size(px(7.)).rounded(px(3.5)).flex_none().bg(color),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .p_1()
+                            .max_h(px(340.))
+                            .overflow_hidden()
+                            .children(self.filtered.iter().take(50).enumerate().map(
+                                |(row, &item_index)| {
+                                    let item = &self.items[item_index];
+                                    let is_selected = row == self.selected;
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(px(5.))
+                                        .cursor_pointer()
+                                        // マウスクリックで選択＋確定（キーボード ↑↓/Enter に加えて・全 Picker 共通）。
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _event, _window, cx| {
+                                                cx.stop_propagation(); // 背景/箱の handler へ伝播させない
+                                                this.selected = row;
+                                                this.confirm(cx);
+                                            }),
                                         )
-                                    })
-                                    .child(item.label.clone())
-                                    .when_some(item.detail.clone(), |element, detail| {
-                                        element.child(
-                                            div()
-                                                .ml_auto()
-                                                .text_color(theme.fg2)
-                                                .text_size(px(11.))
-                                                .child(detail),
-                                        )
-                                    })
-                                    // 右端の実行中スレッドドット列（M12-12）。
-                                    .when(!item.dots.is_empty(), |element| {
-                                        element.child(
-                                            div().flex().items_center().gap(px(3.)).flex_none().children(
-                                                item.dots.iter().map(|color| {
-                                                    div()
-                                                        .size(px(6.))
-                                                        .rounded(px(3.))
-                                                        .flex_none()
-                                                        .bg(*color)
-                                                }),
-                                            ),
-                                        )
-                                    })
-                            }),
-                        ),
+                                        .hover(|style| style.bg(theme.bg1))
+                                        .text_size(px(12.5))
+                                        .text_color(if is_selected { theme.fg0 } else { theme.fg1 })
+                                        .when(is_selected, |element| element.bg(accent.alpha(0.16)))
+                                        // 行頭●（プロジェクト色・M12-12）。
+                                        .when_some(item.accent, |element, color| {
+                                            element.child(
+                                                div()
+                                                    .size(px(7.))
+                                                    .rounded(px(3.5))
+                                                    .flex_none()
+                                                    .bg(color),
+                                            )
+                                        })
+                                        .child(item.label.clone())
+                                        .when_some(item.detail.clone(), |element, detail| {
+                                            element.child(
+                                                div()
+                                                    .ml_auto()
+                                                    .text_color(theme.fg2)
+                                                    .text_size(px(11.))
+                                                    .child(detail),
+                                            )
+                                        })
+                                        // 右端の実行中スレッドドット列（M12-12）。
+                                        .when(!item.dots.is_empty(), |element| {
+                                            element.child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(3.))
+                                                    .flex_none()
+                                                    .children(item.dots.iter().map(|color| {
+                                                        div()
+                                                            .size(px(6.))
+                                                            .rounded(px(3.))
+                                                            .flex_none()
+                                                            .bg(*color)
+                                                    })),
+                                            )
+                                        })
+                                },
+                            )),
                     ),
             )
     }

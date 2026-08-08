@@ -9,12 +9,12 @@
 //! - **補完/hover/定義**は要求で、位置は UTF-16 code unit（[`Position`]）。上位が byte↔UTF-16 を変換して渡す。
 
 use anyhow::{Context as _, Result};
+use futures::channel::{mpsc, oneshot};
 #[cfg(test)]
 use futures::StreamExt as _;
-use futures::channel::{mpsc, oneshot};
 use host::{CommandSpec, Host, HostProcess, LocalHost};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -378,7 +378,12 @@ impl LspClient {
     }
 
     /// 参照検索要求（⇧F12・M11）。結果は Location[]。
-    pub fn references(&self, path: &Path, line: u32, character: u32) -> oneshot::Receiver<ResponseResult> {
+    pub fn references(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> oneshot::Receiver<ResponseResult> {
         self.request(
             "textDocument/references",
             json!({
@@ -411,7 +416,10 @@ impl LspClient {
     }
 
     /// codeAction/resolve（edit が遅延解決のアクション用・M11）。
-    pub fn resolve_code_action(&self, action: serde_json::Value) -> oneshot::Receiver<ResponseResult> {
+    pub fn resolve_code_action(
+        &self,
+        action: serde_json::Value,
+    ) -> oneshot::Receiver<ResponseResult> {
         self.request("codeAction/resolve", action)
     }
 
@@ -658,10 +666,7 @@ pub fn parse_workspace_edit(value: &Value) -> Vec<FileTextEdits> {
     }
     if let Some(document_changes) = value.get("documentChanges").and_then(Value::as_array) {
         for change in document_changes {
-            let Some(uri) = change
-                .pointer("/textDocument/uri")
-                .and_then(Value::as_str)
-            else {
+            let Some(uri) = change.pointer("/textDocument/uri").and_then(Value::as_str) else {
                 continue;
             };
             if let Some(edits) = change.get("edits") {
@@ -842,17 +847,26 @@ mod tests {
             parse_definition(&location),
             Some(DefinitionLocation {
                 path: PathBuf::from("/x/lib.rs"),
-                position: Position { line: 10, character: 4 },
+                position: Position {
+                    line: 10,
+                    character: 4
+                },
             })
         );
-        assert_eq!(parse_definition(&json!([location.clone()])), parse_definition(&location));
+        assert_eq!(
+            parse_definition(&json!([location.clone()])),
+            parse_definition(&location)
+        );
 
         let link = json!([{ "targetUri": "file:///y/m.rs", "targetSelectionRange": { "start": { "line": 3, "character": 0 }, "end": { "line": 3, "character": 2 } } }]);
         assert_eq!(
             parse_definition(&link),
             Some(DefinitionLocation {
                 path: PathBuf::from("/y/m.rs"),
-                position: Position { line: 3, character: 0 },
+                position: Position {
+                    line: 3,
+                    character: 0
+                },
             })
         );
         assert_eq!(parse_definition(&Value::Null), None);
@@ -873,7 +887,10 @@ mod tests {
             { "range": { "start": {"line": 0, "character": 8}, "end": {"line": 0, "character": 13} }, "newText": "3" },
             { "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3} }, "newText": "1" }
         ]));
-        assert_eq!(apply_text_edits_to_string("one two three", &edits), "1 two 3");
+        assert_eq!(
+            apply_text_edits_to_string("one two three", &edits),
+            "1 two 3"
+        );
 
         let edits = parse(json!([
             { "range": { "start": {"line": 0, "character": 1}, "end": {"line": 2, "character": 1} }, "newText": "" }

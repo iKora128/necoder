@@ -46,6 +46,12 @@ tree-sitter-yaml = "0.7"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.23"
+tree-sitter-bash = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+# Markdown は block/inline の 2 grammar 構成。0.5.1 は LanguageFn 経由で tree-sitter 0.25 と共存する。
+# `parser` feature は tree-sitter 0.24 を直接引くため有効にせず、薄い統合層を lang 側に置く。
+tree-sitter-md = "=0.5.1"
 # M4 ACP: Claude Code を ACP で包む
 agent-client-protocol = "1.2"
 blocking = "1"

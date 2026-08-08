@@ -18,8 +18,14 @@ pub const FALLBACK_LOCALE: &str = "en";
 /// 同梱ロケール（`領域.キー` → 文字列 に平坦化済み）。YAML はコンパイル時に埋め込む。
 static LOCALES: LazyLock<HashMap<&'static str, HashMap<String, String>>> = LazyLock::new(|| {
     let mut all = HashMap::new();
-    all.insert("ja", parse_or_empty(include_str!("../../../locales/ja.yml")));
-    all.insert("en", parse_or_empty(include_str!("../../../locales/en.yml")));
+    all.insert(
+        "ja",
+        parse_or_empty(include_str!("../../../locales/ja.yml")),
+    );
+    all.insert(
+        "en",
+        parse_or_empty(include_str!("../../../locales/en.yml")),
+    );
     all
 });
 
@@ -168,8 +174,10 @@ mod tests {
 
     #[test]
     fn ja_and_en_have_identical_keys() {
-        let ja = parse_locale(include_str!("../../../locales/ja.yml")).expect("ja.yml が解析できる");
-        let en = parse_locale(include_str!("../../../locales/en.yml")).expect("en.yml が解析できる");
+        let ja =
+            parse_locale(include_str!("../../../locales/ja.yml")).expect("ja.yml が解析できる");
+        let en =
+            parse_locale(include_str!("../../../locales/en.yml")).expect("en.yml が解析できる");
         let mut ja_keys: Vec<&String> = ja.keys().collect();
         let mut en_keys: Vec<&String> = en.keys().collect();
         ja_keys.sort();
@@ -184,7 +192,10 @@ mod tests {
     fn nested_keys_flatten_to_dotted() {
         let text = "explorer:\n  context:\n    open: ひらく\n";
         let map = parse_locale(text).expect("解析できる");
-        assert_eq!(map.get("explorer.context.open").map(String::as_str), Some("ひらく"));
+        assert_eq!(
+            map.get("explorer.context.open").map(String::as_str),
+            Some("ひらく")
+        );
     }
 
     #[test]

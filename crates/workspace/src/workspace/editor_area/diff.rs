@@ -1,7 +1,12 @@
 use crate::workspace::*;
 
 impl Workspace {
-    pub(crate) fn open_diff_tab(&mut self, _: &OpenDiff, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_diff_tab(
+        &mut self,
+        _: &OpenDiff,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -39,9 +44,9 @@ impl Workspace {
                             .ok()
                             .and_then(|content| String::from_utf8(content.bytes).ok())
                     });
-                    let diff = current
-                        .as_deref()
-                        .and_then(|current| project::unified_diff_on(host.as_ref(), &path, current));
+                    let diff = current.as_deref().and_then(|current| {
+                        project::unified_diff_on(host.as_ref(), &path, current)
+                    });
                     (diff, path)
                 })
                 .await;
@@ -71,7 +76,13 @@ impl Workspace {
         editor.update(cx, |view, cx| {
             let snapshot = view.buffer().snapshot();
             let current_row = snapshot
-                .byte_to_point(view.buffer().selections().first().map(|s| s.head).unwrap_or(0))
+                .byte_to_point(
+                    view.buffer()
+                        .selections()
+                        .first()
+                        .map(|s| s.head)
+                        .unwrap_or(0),
+                )
                 .row;
             let rows: Vec<usize> = (0..snapshot.line_count())
                 .filter(|row| snapshot.line_text(*row).starts_with("@@"))
@@ -80,9 +91,16 @@ impl Workspace {
                 return;
             }
             let target = if delta > 0 {
-                rows.iter().copied().find(|row| *row > current_row).unwrap_or(rows[0])
+                rows.iter()
+                    .copied()
+                    .find(|row| *row > current_row)
+                    .unwrap_or(rows[0])
             } else {
-                rows.iter().rev().copied().find(|row| *row < current_row).unwrap_or(*rows.last().unwrap())
+                rows.iter()
+                    .rev()
+                    .copied()
+                    .find(|row| *row < current_row)
+                    .unwrap_or(*rows.last().unwrap())
             };
             view.reveal_position(target, 0, cx);
         });
@@ -175,7 +193,10 @@ impl Workspace {
             let snapshot = view.buffer().snapshot();
             let start_row = hunk.new_range.start as usize;
             let end_row = hunk.new_range.end as usize;
-            let start = snapshot.point_to_byte(editor_core::Point::new(start_row.min(snapshot.line_count().saturating_sub(1)), 0));
+            let start = snapshot.point_to_byte(editor_core::Point::new(
+                start_row.min(snapshot.line_count().saturating_sub(1)),
+                0,
+            ));
             let end = if hunk.new_range.is_empty() {
                 start // 削除 hunk: その位置に HEAD の行を挿入
             } else if end_row < snapshot.line_count() {
@@ -248,13 +269,18 @@ impl Workspace {
                         .border_color(theme.border)
                         .rounded(px(8.))
                         .p(px(4.))
-                        .shadow(vec![
-                            gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
-                        ])
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(6.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(16.))])
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(item("hunk-stage", i18n::t!("hunk.stage")).on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, _window, cx| this.stage_hunk(stage_hunk.clone(), cx)),
+                            cx.listener(move |this, _, _window, cx| {
+                                this.stage_hunk(stage_hunk.clone(), cx)
+                            }),
                         ))
                         .child(item("hunk-revert", i18n::t!("hunk.revert")).on_mouse_down(
                             MouseButton::Left,
@@ -264,7 +290,9 @@ impl Workspace {
                         ))
                         .child(item("hunk-copy", i18n::t!("hunk.copy")).on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, _window, cx| this.copy_hunk(copy_hunk_data.clone(), cx)),
+                            cx.listener(move |this, _, _window, cx| {
+                                this.copy_hunk(copy_hunk_data.clone(), cx)
+                            }),
                         ))
                         .child(item("hunk-diff", i18n::t!("hunk.open_diff")).on_mouse_down(
                             MouseButton::Left,
@@ -295,7 +323,12 @@ impl Workspace {
                 // 無題/一時タブは注釈なし。
                 return;
             };
-            let head = view.buffer().selections().first().map(|s| s.head).unwrap_or(0);
+            let head = view
+                .buffer()
+                .selections()
+                .first()
+                .map(|s| s.head)
+                .unwrap_or(0);
             let row = view.buffer().snapshot().byte_to_point(head).row;
             (path, row)
         };
@@ -329,7 +362,10 @@ impl Workspace {
                 return;
             }
             let _ = editor.update(cx, |view, cx| {
-                view.set_line_annotation(annotation.map(|text| (row, SharedString::from(text))), cx);
+                view.set_line_annotation(
+                    annotation.map(|text| (row, SharedString::from(text))),
+                    cx,
+                );
             });
         })
         .detach();

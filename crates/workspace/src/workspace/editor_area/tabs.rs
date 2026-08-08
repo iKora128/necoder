@@ -6,21 +6,32 @@ impl Workspace {
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
         // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。
         if self.chrome.show_right && self.agent_active {
-            self.agent_panel.update(cx, |panel, cx| panel.close_active_thread(cx));
+            self.agent_panel
+                .update(cx, |panel, cx| panel.close_active_thread(cx));
             return;
         }
         self.close_active_editor(window, cx);
     }
 
     /// 次のエディタタブへ（⌘} = ⌘⇧]。末尾で先頭へ回る）。
-    pub(crate) fn select_next_tab(&mut self, _: &SelectNextTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_next_tab(
+        &mut self,
+        _: &SelectNextTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.tabs.len() > 1 {
             self.select_tab((self.active_tab + 1) % self.tabs.len(), window, cx);
         }
     }
 
     /// 前のエディタタブへ（⌘{ = ⌘⇧[。先頭で末尾へ回る）。
-    pub(crate) fn select_prev_tab(&mut self, _: &SelectPrevTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_prev_tab(
+        &mut self,
+        _: &SelectPrevTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let count = self.tabs.len();
         if count > 1 {
             self.select_tab((self.active_tab + count - 1) % count, window, cx);
@@ -28,9 +39,15 @@ impl Workspace {
     }
 
     /// 直近に閉じたタブを復元する（Chrome の ⌘⇧T）。⌘W と同じく最後に触った面で振り分ける。
-    pub(crate) fn restore_closed_tab(&mut self, _: &RestoreClosedTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn restore_closed_tab(
+        &mut self,
+        _: &RestoreClosedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.chrome.show_right && self.agent_active {
-            self.agent_panel.update(cx, |panel, cx| panel.restore_closed_thread(cx));
+            self.agent_panel
+                .update(cx, |panel, cx| panel.restore_closed_thread(cx));
             return;
         }
         if let Some(path) = self.recently_closed_files.pop() {
@@ -38,29 +55,47 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn new_agent_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_agent_thread(
+        &mut self,
+        _: &NewThread,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.chrome.show_right {
             self.chrome.show_right = true;
         }
-        self.agent_panel.update(cx, |panel, cx| panel.new_thread(cx));
+        self.agent_panel
+            .update(cx, |panel, cx| panel.new_thread(cx));
         cx.notify();
     }
 
     /// 次の AI スレッドタブへ（Chrome 風。⌘⌥→ / ⌃Tab）。
-    pub(crate) fn select_next_thread(&mut self, _: &SelectNextThread, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_next_thread(
+        &mut self,
+        _: &SelectNextThread,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.chrome.show_right {
             self.chrome.show_right = true;
         }
-        self.agent_panel.update(cx, |panel, cx| panel.select_next_thread(cx));
+        self.agent_panel
+            .update(cx, |panel, cx| panel.select_next_thread(cx));
         cx.notify();
     }
 
     /// 前の AI スレッドタブへ（Chrome 風。⌘⌥← / ⌃⇧Tab）。
-    pub(crate) fn select_prev_thread(&mut self, _: &SelectPrevThread, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_prev_thread(
+        &mut self,
+        _: &SelectPrevThread,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.chrome.show_right {
             self.chrome.show_right = true;
         }
-        self.agent_panel.update(cx, |panel, cx| panel.select_prev_thread(cx));
+        self.agent_panel
+            .update(cx, |panel, cx| panel.select_prev_thread(cx));
         cx.notify();
     }
 
@@ -80,6 +115,8 @@ impl Workspace {
             let handle = self.agent_panel.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
+        self.agent_panel
+            .update(cx, |panel, cx| panel.parent_width_changed(cx));
         cx.notify();
     }
 
@@ -93,15 +130,24 @@ impl Workspace {
 
     // ── ドックの可変幅（縁ドラッグ）。Agent=左縁 / エクスプローラ=右縁 ──
 
-    pub(crate) fn on_resize_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_resize_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let dx = f32::from(event.position.x) - self.chrome.resize_start_x;
         if self.chrome.resizing_agent {
             // 左縁を左へ動かすと広がる（dx 負 → 幅増）。
-            self.chrome.agent_width = (self.chrome.resize_start_width - dx).clamp(AGENT_DOCK_MIN, AGENT_DOCK_MAX);
+            self.chrome.agent_width =
+                (self.chrome.resize_start_width - dx).clamp(AGENT_DOCK_MIN, AGENT_DOCK_MAX);
+            self.agent_panel
+                .update(cx, |panel, cx| panel.parent_width_changed(cx));
             cx.notify();
         } else if self.chrome.resizing_explorer {
             // 右縁を右へ動かすと広がる（dx 正 → 幅増）。
-            self.chrome.explorer_width = (self.chrome.resize_start_width + dx).clamp(DOCK_MIN, DOCK_MAX);
+            self.chrome.explorer_width =
+                (self.chrome.resize_start_width + dx).clamp(DOCK_MIN, DOCK_MAX);
             cx.notify();
         } else if self.chrome.resizing_bottom {
             // 上縁を上へ動かすと高くなる（dy 負 → 高さ増）。
@@ -112,8 +158,16 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn on_resize_end(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.chrome.resizing_agent || self.chrome.resizing_explorer || self.chrome.resizing_bottom {
+    pub(crate) fn on_resize_end(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chrome.resizing_agent
+            || self.chrome.resizing_explorer
+            || self.chrome.resizing_bottom
+        {
             self.chrome.resizing_agent = false;
             self.chrome.resizing_explorer = false;
             self.chrome.resizing_bottom = false;
@@ -153,7 +207,10 @@ impl Workspace {
             .border_l_1()
             .border_color(theme.border)
             // Agent 側を触った → ⌘W の宛先を Agent スレッドに（クリックで確定）。
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, _cx| this.agent_active = true))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, _cx| this.agent_active = true),
+            )
             .child(
                 div()
                     .id("agent-resize")
@@ -172,7 +229,13 @@ impl Workspace {
                         }),
                     ),
             )
-            .child(div().flex_1().min_w_0().h_full().child(self.agent_panel.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(self.agent_panel.clone()),
+            )
     }
 
     pub(crate) fn toggle_dock(&mut self, dock: Dock, cx: &mut Context<Self>) {
@@ -215,11 +278,17 @@ impl Workspace {
 
     /// アクティブなターミナルにフォーカス（キー入力を受ける）。
     pub(crate) fn focus_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.terminal_dock.update(cx, |dock, cx| dock.focus_active(window, cx));
+        self.terminal_dock
+            .update(cx, |dock, cx| dock.focus_active(window, cx));
     }
 
     /// 下ドック（ターミナル）を開閉する。開くときは生成 + フォーカス（キー入力を受ける）。
-    pub(crate) fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_terminal(
+        &mut self,
+        _: &ToggleTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // 編隊では下ドックを別に持たず、常設の下段（ニュース/ターミナル）のタブを切り替える。
         // レールの ⌘ ターミナルアイコンが両モードで同じ意味になるように（2026-07-27）。
         if self.chrome.fleet_mode {
@@ -251,7 +320,12 @@ impl Workspace {
 
     /// `index` 番目のタブを閉じ、アクティブを隣へ寄せる。閉じたファイルは ⌘⇧T 用に履歴へ積み、
     /// LSP には didClose を送る。最後の 1 枚を閉じると空状態（分割も畳む）。
-    pub(crate) fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if index >= self.tabs.len() {
             return;
         }
@@ -359,7 +433,12 @@ impl Workspace {
 
     /// 右分割ペインを開閉する（⌘\）。開くときは主ペインの開いているファイルを独立エディタで複製する
     /// （比較・参照用の副ビュー。LSP/保存の統合は主ペイン=editor 側が担う）。
-    pub(crate) fn toggle_split(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_split(
+        &mut self,
+        _: &SplitRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.split_editor.is_some() {
             self.close_split(window, cx);
             return;
@@ -378,7 +457,10 @@ impl Workspace {
             }
         };
         let theme = self.theme.clone();
-        let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let accent = self
+            .active_slot()
+            .map(|slot| slot.color)
+            .unwrap_or_else(|| project_color(0));
         let split = cx.new(|cx| EditorView::new(buffer, theme, accent, cx));
         let handle = split.read(cx).focus_handle(cx);
         window.focus(&handle, cx);

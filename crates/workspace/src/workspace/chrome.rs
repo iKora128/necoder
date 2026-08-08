@@ -20,7 +20,9 @@ impl Workspace {
     }
 
     pub(crate) fn accent(&self) -> Hsla {
-        self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0))
+        self.active_slot()
+            .map(|slot| slot.color)
+            .unwrap_or_else(|| project_color(0))
     }
 
     // ── titlebar（UI-SPEC §3） ──
@@ -29,7 +31,11 @@ impl Workspace {
         let theme = self.theme.clone();
         // Peacock 相当: titlebar をアクティブプロジェクト色で淡く塗る（窓ごと識別・M13）。
         let accent = self.accent();
-        let tint = gpui::Hsla { s: (accent.s + 0.12).min(1.0), a: 0.26, ..accent };
+        let tint = gpui::Hsla {
+            s: (accent.s + 0.12).min(1.0),
+            a: 0.26,
+            ..accent
+        };
         div()
             .id("titlebar")
             .bg(tint)
@@ -52,7 +58,9 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(|this, _, _window, _cx| this.chrome.should_move_window = false),
             )
-            .on_mouse_down_out(cx.listener(|this, _, _window, _cx| this.chrome.should_move_window = false))
+            .on_mouse_down_out(
+                cx.listener(|this, _, _window, _cx| this.chrome.should_move_window = false),
+            )
             .on_mouse_move(cx.listener(|this, _, window, _cx| {
                 if this.chrome.should_move_window {
                     this.chrome.should_move_window = false;
@@ -76,7 +84,11 @@ impl Workspace {
                     "titlebar-ssh",
                     "icons/server.svg",
                     i18n::t!("ssh.button_tip"),
-                    if self.overlays.ssh_connecting { self.accent() } else { theme.fg2 },
+                    if self.overlays.ssh_connecting {
+                        self.accent()
+                    } else {
+                        theme.fg2
+                    },
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -145,19 +157,33 @@ impl Workspace {
             .items_center()
             .gap_3()
             .mr_2()
-            .children(beacons.into_iter().enumerate().map(|(index, (name, color, activity))| {
-                let label = format!("{name} — {}", activity_label(activity));
-                div()
-                    .id(("beacon-item", index))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .text_size(px(11.))
-                    .text_color(if activity.is_signal() { theme.fg1 } else { theme.fg2 })
-                    .child(agent_panel::activity_dot(("beacon", index), 8.0, color, activity))
-                    .child(name)
-                    .tooltip(Tooltip::text(label, theme.clone()))
-            }))
+            .children(
+                beacons
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (name, color, activity))| {
+                        let label = format!("{name} — {}", activity_label(activity));
+                        div()
+                            .id(("beacon-item", index))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .text_size(px(11.))
+                            .text_color(if activity.is_signal() {
+                                theme.fg1
+                            } else {
+                                theme.fg2
+                            })
+                            .child(agent_panel::activity_dot(
+                                ("beacon", index),
+                                8.0,
+                                color,
+                                activity,
+                            ))
+                            .child(name)
+                            .tooltip(Tooltip::text(label, theme.clone()))
+                    }),
+            )
     }
 
     /// プロジェクトピル: 枠 + 「名前 ▾」+「⎇ branch」。名前クリックで ⌘O。
@@ -170,12 +196,18 @@ impl Workspace {
             .unwrap_or_else(|| SharedString::from("—"));
         let branch = self.active_slot().and_then(|slot| slot.branch.clone());
 
-        let mut inner = div().flex().items_center().gap(px(11.)).py(px(4.)).px(px(11.)).child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.fg0)
-                .child(format!("{name} ▾")),
-        );
+        let mut inner = div()
+            .flex()
+            .items_center()
+            .gap(px(11.))
+            .py(px(4.))
+            .px(px(11.))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(format!("{name} ▾")),
+            );
         if let Some(branch) = branch {
             inner = inner.child(
                 div()
@@ -192,7 +224,10 @@ impl Workspace {
                     .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
                     .child(div().text_color(theme.fg2).child("⎇"))
                     .child(SharedString::from(branch.to_string()))
-                    .tooltip(Tooltip::text(i18n::t!("git.branch_menu_tip"), theme.clone()))
+                    .tooltip(Tooltip::text(
+                        i18n::t!("git.branch_menu_tip"),
+                        theme.clone(),
+                    ))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _window, cx| {
@@ -226,7 +261,12 @@ impl Workspace {
     }
 
     /// ドックトグルの小アイコン（枠 + 位置ストリップで左/右/下を示す）。
-    pub(crate) fn dock_button(&self, dock: Dock, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn dock_button(
+        &self,
+        dock: Dock,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = self.theme.clone();
         let strip = || div().bg(theme.fg1);
         let frame = div()
@@ -240,7 +280,10 @@ impl Workspace {
         let icon = match dock {
             Dock::Left => frame.child(strip().w(px(4.)).h_full()),
             Dock::Right => frame.justify_end().child(strip().w(px(4.)).h_full()),
-            Dock::Bottom => frame.flex_col().justify_end().child(strip().h(px(3.5)).w_full()),
+            Dock::Bottom => frame
+                .flex_col()
+                .justify_end()
+                .child(strip().h(px(3.5)).w_full()),
         };
         let (id, label): (&'static str, String) = match dock {
             Dock::Left => ("dock-left", i18n::t!("dock.left")),
@@ -264,7 +307,7 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation(); // titlebar ドラッグを起こさない
-                    // 下ドックはターミナル生成 + フォーカスを伴うので専用ハンドラへ。
+                                           // 下ドックはターミナル生成 + フォーカスを伴うので専用ハンドラへ。
                     if dock == Dock::Bottom {
                         this.toggle_terminal(&ToggleTerminal, window, cx);
                     } else {
@@ -300,7 +343,9 @@ impl Workspace {
                 let dirty = tab.editor.read(cx).buffer().is_dirty();
                 // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
                 let status = self.repository.status.get(&tab.path).copied();
-                let name_color = status.map(|status| Self::git_tint(&theme, status)).unwrap_or(theme.fg0);
+                let name_color = status
+                    .map(|status| Self::git_tint(&theme, status))
+                    .unwrap_or(theme.fg0);
                 let drop_highlight = theme.bg2;
                 let drag_name = SharedString::from(name.clone());
                 let drag_theme = theme.clone();
@@ -316,7 +361,12 @@ impl Workspace {
                     .hover(|style| style.bg(theme.bg1))
                     .when(is_active, |element| element.bg(theme.bg1))
                     // アクティブタブ上線 = プロジェクト色（UI-SPEC §5）
-                    .child(div().h(px(2.)).w_full().bg(if is_active { accent } else { theme.bg0 }))
+                    .child(
+                        div()
+                            .h(px(2.))
+                            .w_full()
+                            .bg(if is_active { accent } else { theme.bg0 }),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -340,7 +390,10 @@ impl Workspace {
                                     .cursor_pointer()
                                     .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
                                     .child("×")
-                                    .tooltip(Tooltip::text(i18n::t!("tabs.close_tip"), theme.clone()))
+                                    .tooltip(Tooltip::text(
+                                        i18n::t!("tabs.close_tip"),
+                                        theme.clone(),
+                                    ))
                                     // × クリックはタブ切替へ伝播させない。
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -361,15 +414,21 @@ impl Workspace {
                     )
                     // Chrome 風ドラッグ並べ替え: タブを掴んで別タブ上で離すと順序が入れ替わる。
                     .on_drag(
-                        DraggedEditorTab { index, name: drag_name, theme: drag_theme },
+                        DraggedEditorTab {
+                            index,
+                            name: drag_name,
+                            theme: drag_theme,
+                        },
                         |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
                     )
                     .drag_over::<DraggedEditorTab>(move |style, _dragged, _window, _cx| {
                         style.bg(drop_highlight)
                     })
-                    .on_drop(cx.listener(move |this, dragged: &DraggedEditorTab, _window, cx| {
-                        this.move_tab(dragged.index, index, cx);
-                    }))
+                    .on_drop(
+                        cx.listener(move |this, dragged: &DraggedEditorTab, _window, cx| {
+                            this.move_tab(dragged.index, index, cx);
+                        }),
+                    )
             }))
             .child(div().flex_1())
     }
@@ -431,10 +490,15 @@ impl Workspace {
                                     .cursor_pointer()
                                     .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
                                     .child("×")
-                                    .tooltip(Tooltip::text(i18n::t!("tabs.close_split_tip"), theme.clone()))
+                                    .tooltip(Tooltip::text(
+                                        i18n::t!("tabs.close_split_tip"),
+                                        theme.clone(),
+                                    ))
                                     .on_mouse_down(
                                         MouseButton::Left,
-                                        cx.listener(|this, _, window, cx| this.close_split(window, cx)),
+                                        cx.listener(|this, _, window, cx| {
+                                            this.close_split(window, cx)
+                                        }),
                                     ),
                             ),
                     ),
@@ -442,10 +506,16 @@ impl Workspace {
             .child(div().flex_1())
     }
 
-    pub(crate) fn render_breadcrumb(&self, editor: &Entity<EditorView>, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_breadcrumb(
+        &self,
+        editor: &Entity<EditorView>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = self.theme.clone();
         let path = editor.read(cx).buffer().path().map(Path::to_path_buf);
-        let root = self.active_slot().map(|slot| slot.worktree.root().to_path_buf());
+        let root = self
+            .active_slot()
+            .map(|slot| slot.worktree.root().to_path_buf());
         let crumbs = breadcrumb_text(root.as_deref(), path.as_deref());
         div()
             .flex()
@@ -463,7 +533,10 @@ impl Workspace {
 
     /// ⌘F インライン検索/置換バー（エディタ右上に浮かせる・M10）。
     /// 行1 = [▸/▾] [クエリ] [n/m] [Aa] [.*] [‹] [›] [×]、行2（置換表示時）= [置換入力] [置換] [全置換]。
-    pub(crate) fn render_buffer_search_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_buffer_search_bar(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let state = self.buffer_search.as_ref()?;
         let theme = self.theme.clone();
         let accent = self.accent();
@@ -497,7 +570,11 @@ impl Workspace {
             } else {
                 SharedString::from(text.to_string())
             };
-            let text_color = if text.is_empty() { theme.fg2 } else { theme.fg0 };
+            let text_color = if text.is_empty() {
+                theme.fg2
+            } else {
+                theme.fg0
+            };
             div()
                 .id(id)
                 .flex_1()
@@ -578,7 +655,10 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
                     .child(if show_replace { "▾" } else { "▸" })
-                    .tooltip(Tooltip::text(i18n::t!("search.toggle_replace"), theme.clone()))
+                    .tooltip(Tooltip::text(
+                        i18n::t!("search.toggle_replace"),
+                        theme.clone(),
+                    ))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _window, cx| {
@@ -644,25 +724,40 @@ impl Workspace {
                 ),
             )
             .child(
-                chip("bsearch-prev", "‹", false, SharedString::from(i18n::t!("search.previous")))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| this.step_buffer_match(-1, cx)),
-                    ),
+                chip(
+                    "bsearch-prev",
+                    "‹",
+                    false,
+                    SharedString::from(i18n::t!("search.previous")),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.step_buffer_match(-1, cx)),
+                ),
             )
             .child(
-                chip("bsearch-next", "›", false, SharedString::from(i18n::t!("search.next")))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| this.step_buffer_match(1, cx)),
-                    ),
+                chip(
+                    "bsearch-next",
+                    "›",
+                    false,
+                    SharedString::from(i18n::t!("search.next")),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.step_buffer_match(1, cx)),
+                ),
             )
             .child(
-                chip("bsearch-close", "×", false, SharedString::from(i18n::t!("search.close")))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.close_buffer_search(false, window, cx)),
-                    ),
+                chip(
+                    "bsearch-close",
+                    "×",
+                    false,
+                    SharedString::from(i18n::t!("search.close")),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_buffer_search(false, window, cx)),
+                ),
             );
 
         let replace_row = show_replace.then(|| {
@@ -728,10 +823,12 @@ impl Workspace {
                 .rounded(px(8.))
                 .border_1()
                 .border_color(theme.border)
-                .shadow(vec![
-                    gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.35))
-                        .blur_radius(px(18.)),
-                ])
+                .shadow(vec![gpui::BoxShadow::new(
+                    px(0.),
+                    px(6.),
+                    gpui::hsla(0., 0., 0., 0.35),
+                )
+                .blur_radius(px(18.))])
                 .track_focus(&focus)
                 .on_key_down(cx.listener(Self::on_buffer_search_key_down))
                 // バー内クリックはエディタへ通さない + フォーカスを付け直す（⌘W の宛先もエディタ側へ）。
@@ -778,7 +875,11 @@ impl Workspace {
     }
 
     /// 右分割ペイン（単一タブ + パンくず + 本体）。
-    pub(crate) fn render_split_pane(&self, editor: &Entity<EditorView>, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_split_pane(
+        &self,
+        editor: &Entity<EditorView>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         div()
             .flex_1()
             .flex()
@@ -796,7 +897,9 @@ impl Workspace {
         self.chrome.confetti = true;
         cx.notify();
         cx.spawn(async move |workspace, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(2200)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2200))
+                .await;
             let _ = workspace.update(cx, |workspace, cx| {
                 workspace.chrome.confetti = false;
                 cx.notify();
@@ -856,14 +959,22 @@ impl Workspace {
 
     /// 指定コマンドを新しいターミナルタブで実行し、終わったらログインシェルに落ちる（ログイン/導入用）。
     /// 各 CLI の認証はローカルで行う想定なので **ローカルシェル**で走らせる（remote 時も cwd は外す）。
-    pub(crate) fn open_command_terminal(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_command_terminal(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let cwd = self
             .active_slot()
             .filter(|slot| slot.remote_host.is_none())
             .map(|slot| slot.worktree.root().to_path_buf());
         let shell = Some((
             "/bin/sh".to_string(),
-            vec!["-lc".to_string(), format!("{command}; exec \"${{SHELL:-/bin/zsh}}\" -l")],
+            vec![
+                "-lc".to_string(),
+                format!("{command}; exec \"${{SHELL:-/bin/zsh}}\" -l"),
+            ],
         ));
         self.chrome.show_bottom = true;
         self.terminal_dock.update(cx, |dock, cx| {
@@ -916,7 +1027,12 @@ impl Workspace {
                             .text_color(theme.fg1)
                             .child(key),
                     )
-                    .child(div().text_size(px(12.5)).text_color(theme.fg2).child(SharedString::from(text)))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(text)),
+                    )
             };
             div()
                 .flex_1()
@@ -938,7 +1054,11 @@ impl Workspace {
                 .child(hint("⌘⇧P", i18n::t!("welcome.palette")))
                 .into_any_element()
         } else {
-            let mut panes = div().flex_1().flex().min_h_0().child(self.render_main_pane(cx));
+            let mut panes = div()
+                .flex_1()
+                .flex()
+                .min_h_0()
+                .child(self.render_main_pane(cx));
             // 右分割ペイン（あれば仕切り + 2 枚目）。
             if let Some(split) = self.split_editor.clone() {
                 panes = panes
@@ -954,11 +1074,16 @@ impl Workspace {
             .min_w_0()
             .bg(theme.bg1)
             // エディタ側を触った → ⌘W の宛先をエディタタブに（Agent 判定を下げる）。
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, _cx| this.agent_active = false))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, _cx| this.agent_active = false),
+            )
             .children(self.render_hot_exit_bar(cx))
             .child(content)
             // 下ドック（ターミナル）はエディタ列の下に積む（サイドドックには被らない）。
-            .when(self.chrome.show_bottom, |element| element.child(self.render_bottom_dock(cx)))
+            .when(self.chrome.show_bottom, |element| {
+                element.child(self.render_bottom_dock(cx))
+            })
     }
 
     /// solo の下ドック（ターミナル）。編隊の下段と同じ `bottom_height` を上縁ドラッグで共有する
@@ -1003,29 +1128,26 @@ impl Workspace {
     /// 多重起動は `rollup_ticker` で防ぎ、2 件未満になったら次 tick で自停止する（idle 予算を守る＝
     /// `fleet_clock` と同型）。トップの `render` から毎フレーム呼ばれるが、稼働中は即 return する。
     pub(crate) fn ensure_rollup_ticker(&mut self, cx: &mut Context<Self>) {
-        if self.chrome.rollup_ticker || self.activity_signals(cx).len() < 2 {
+        if self.chrome.rollup_ticker || !self.window_active || self.activity_signals(cx).len() < 2 {
             return;
         }
         self.chrome.rollup_ticker = true;
-        cx.spawn(async move |workspace, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(3200))
-                    .await;
-                let keep_running = workspace.update(cx, |workspace, cx| {
-                    if workspace.activity_signals(cx).len() >= 2 {
-                        workspace.chrome.rollup_index =
-                            workspace.chrome.rollup_index.wrapping_add(1);
-                        cx.notify();
-                        true
-                    } else {
-                        workspace.chrome.rollup_ticker = false;
-                        false
-                    }
-                });
-                if !matches!(keep_running, Ok(true)) {
-                    break;
+        cx.spawn(async move |workspace, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(3200))
+                .await;
+            let keep_running = workspace.update(cx, |workspace, cx| {
+                if workspace.window_active && workspace.activity_signals(cx).len() >= 2 {
+                    workspace.chrome.rollup_index = workspace.chrome.rollup_index.wrapping_add(1);
+                    cx.notify();
+                    true
+                } else {
+                    workspace.chrome.rollup_ticker = false;
+                    false
                 }
+            });
+            if !matches!(keep_running, Ok(true)) {
+                break;
             }
         })
         .detach();
@@ -1077,7 +1199,12 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(agent_panel::activity_dot("rollup-rep", 8.0, color, activity))
+            .child(agent_panel::activity_dot(
+                "rollup-rep",
+                8.0,
+                color,
+                activity,
+            ))
             .child(div().text_color(theme.fg1).child(name))
             .with_animation(
                 ("rollup-fade", self.chrome.rollup_index),
@@ -1138,7 +1265,11 @@ impl Workspace {
         let theme = self.theme.clone();
         // Peacock 相当: statusbar をアクティブプロジェクト色で淡く塗る（窓ごと識別・M13）。
         let accent = self.accent();
-        let tint = gpui::Hsla { s: (accent.s + 0.12).min(1.0), a: 0.26, ..accent };
+        let tint = gpui::Hsla {
+            s: (accent.s + 0.12).min(1.0),
+            a: 0.26,
+            ..accent
+        };
         let branch = self.active_slot().and_then(|slot| slot.branch.clone());
         let remote_host = self.active_slot().and_then(|slot| slot.remote_host.clone());
         let change_count = self.repository.status.len();
@@ -1154,6 +1285,15 @@ impl Workspace {
         let (errors, warnings) = self.active_diagnostic_counts(cx);
         let error_color = if errors > 0 { theme.err } else { theme.fg2 };
         let warning_color = if warnings > 0 { theme.warn } else { theme.fg2 };
+        // 管制マスコット表示中は 10fps 時計の 5 tick、通常画面では 2fps 時計の 1 tick ごとに反転。
+        // どちらも GPUI の 60fps Animation を使わない低頻度の承認待ち signal。
+        let control_clock =
+            self.chrome.fleet_mode && self.chrome.fleet_center_view == FleetCenterView::Control;
+        let attention_bright = if control_clock {
+            (self.visual_tick / 5) % 2 == 0
+        } else {
+            self.visual_tick % 2 == 0
+        };
         let left = div()
             .flex()
             .items_center()
@@ -1175,14 +1315,8 @@ impl Workspace {
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             // クリック位置の真上にピッカーを出す（footer から開くので左上へ飛ばさない）。
-                            let anchor =
-                                gpui::point(event.position.x, event.position.y - px(176.));
-                            this.open_color_picker(
-                                this.project_sessions.active,
-                                anchor,
-                                window,
-                                cx,
-                            )
+                            let anchor = gpui::point(event.position.x, event.position.y - px(176.));
+                            this.open_color_picker(this.project_sessions.active, anchor, window, cx)
                         }),
                     ),
             )
@@ -1239,7 +1373,7 @@ impl Workspace {
                         .rounded(px(4.))
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.bg2))
-                        .child(beacon_dot("waiting-pulse", color, true))
+                        .child(beacon_dot("waiting-pulse", color, attention_bright))
                         .child(div().text_color(theme.fg1).child(name))
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1262,7 +1396,11 @@ impl Workspace {
                     .rounded(px(4.))
                     .px(px(4.))
                     .child(div().text_color(error_color).child(format!("✗ {errors}")))
-                    .child(div().text_color(warning_color).child(format!("▲ {warnings}")))
+                    .child(
+                        div()
+                            .text_color(warning_color)
+                            .child(format!("▲ {warnings}")),
+                    )
                     // クリックで診断一覧（ファイル別・M11）。
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1298,9 +1436,10 @@ impl Workspace {
             // 自動アップデートのチップ（M13）: 新版あり → クリックで更新 → 再起動案内。
             .when_some(self.updater.status.clone(), |element, (info, state)| {
                 let (label, clickable) = match state {
-                    UpdateState::Available => {
-                        (i18n::t!("update.available", "version" => info.version.clone()), true)
-                    }
+                    UpdateState::Available => (
+                        i18n::t!("update.available", "version" => info.version.clone()),
+                        true,
+                    ),
                     UpdateState::Installing => (i18n::t!("update.installing"), false),
                     UpdateState::Ready => (i18n::t!("update.ready"), false),
                 };
@@ -1322,7 +1461,9 @@ impl Workspace {
                         .child(SharedString::from(label)),
                 )
             })
-            .when_some(cursor, |element, cursor| element.child(SharedString::from(cursor)))
+            .when_some(cursor, |element, cursor| {
+                element.child(SharedString::from(cursor))
+            })
             .child(SharedString::from("UTF-8"))
             .when_some(language, |element, language| element.child(language));
 
@@ -1374,9 +1515,16 @@ impl Workspace {
     // ── メニューバー連携（M13: 設定を開く / About） ──
 
     /// ⌘, / メニュー「設定…」。rail の ⚙ トグルと違い、常に「開く」（メニューの意味論）。
-    pub(crate) fn open_settings_action(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings_action(
+        &mut self,
+        _: &OpenSettings,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.chrome.show_settings = true;
-        self.chrome.settings_view.update(cx, |view, cx| view.refresh_availability(cx));
+        self.chrome
+            .settings_view
+            .update(cx, |view, cx| view.refresh_availability(cx));
         cx.notify();
     }
 
@@ -1384,7 +1532,10 @@ impl Workspace {
     pub(crate) fn about_action(&mut self, _: &About, _window: &mut Window, cx: &mut Context<Self>) {
         let accent = self.accent();
         self.push_toast(
-            SharedString::from(format!("Shirushi v{} — AGPL-3.0 · shirushi.ai", env!("CARGO_PKG_VERSION"))),
+            SharedString::from(format!(
+                "Shirushi v{} — AGPL-3.0 · shirushi.ai",
+                env!("CARGO_PKG_VERSION")
+            )),
             accent,
             cx,
         );
@@ -1398,8 +1549,7 @@ impl Workspace {
         // プローブ: チップ描画の offscreen 検証用（debug のみ・実ログ不要）。
         #[cfg(debug_assertions)]
         if std::env::var_os("SHIRUSHI_CRASH_PROBE").is_some() {
-            self.notifications.crash_notice =
-                Some(PathBuf::from("/tmp/shirushi-crash-probe.log"));
+            self.notifications.crash_notice = Some(PathBuf::from("/tmp/shirushi-crash-probe.log"));
             cx.notify();
             return;
         }
@@ -1434,7 +1584,12 @@ impl Workspace {
     }
 
     /// ⌘⇧P「ヘルプ: バグを報告」: 環境情報だけ事前記入した Issue を開く。
-    pub(crate) fn report_bug_action(&mut self, _: &ReportBug, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn report_bug_action(
+        &mut self,
+        _: &ReportBug,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_bug_report(None, cx);
     }
 

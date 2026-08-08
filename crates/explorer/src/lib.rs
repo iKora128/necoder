@@ -1,8 +1,8 @@
 //! Workspace-independent Explorer model and interaction Entity.
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, IntoElement, Pixels, Point, Render, SharedString, Window,
-    div,
+    div, Context, EventEmitter, FocusHandle, IntoElement, Pixels, Point, Render, SharedString,
+    Window,
 };
 use project::Worktree;
 use std::cell::RefCell;
@@ -95,7 +95,11 @@ impl ExplorerProject {
 
     /// Render-safe cache lookup. Missing directories are empty until the controller refreshes.
     pub fn listed_dir(&self, dir: &Path) -> Vec<project::Entry> {
-        self.dir_listings.borrow().get(dir).cloned().unwrap_or_default()
+        self.dir_listings
+            .borrow()
+            .get(dir)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -140,7 +144,11 @@ pub struct Explorer {
 
 impl Explorer {
     pub fn new(view: ViewMode) -> Self {
-        Self { view, context_menu: None, naming: None }
+        Self {
+            view,
+            context_menu: None,
+            naming: None,
+        }
     }
 
     pub fn view(&self) -> ViewMode {

@@ -108,9 +108,7 @@ impl Workspace {
                             .read(cx)
                             .statuses()
                             .iter()
-                            .any(|status| {
-                                status.activity == agent_panel::ThreadActivity::Blocked
-                            })
+                            .any(|status| status.activity == agent_panel::ThreadActivity::Blocked)
                     });
                 if still_blocked {
                     workspace.wake_coordinator("blocked", title, digest, cx);

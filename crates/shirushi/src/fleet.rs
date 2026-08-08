@@ -113,13 +113,14 @@ pub(crate) fn gui_request(method: &str, params: Value) -> Result<Value> {
 /// `fleet events [since_id]`: 全 Task 横断の task_events 差分（古い順・最大 200 件）。
 /// GUI 不在なら DB 直読み・稼働中（ロック）は IPC（P5）。監督/CLI は最後の id を覚えて差分だけ読む。
 pub(crate) fn events_since(since_id: i64) -> Result<Value> {
-    let events = match open_storage().and_then(|storage| storage.load_task_events_since(since_id, 200)) {
-        Ok(events) => events,
-        Err(error) if is_lock_error(&error) => {
-            return gui_request("events", json!({ "since_id": since_id }));
-        }
-        Err(error) => return Err(error),
-    };
+    let events =
+        match open_storage().and_then(|storage| storage.load_task_events_since(since_id, 200)) {
+            Ok(events) => events,
+            Err(error) if is_lock_error(&error) => {
+                return gui_request("events", json!({ "since_id": since_id }));
+            }
+            Err(error) => return Err(error),
+        };
     Ok(Value::Array(
         events
             .into_iter()
@@ -209,15 +210,31 @@ fn is_lock_error(error: &anyhow::Error) -> bool {
 /// IPC 応答の record JSON → `TaskSpaceRecord`（GUI 経由読み書きの復路・P5）。
 fn record_from_json(value: &Value) -> Result<TaskSpaceRecord> {
     Ok(TaskSpaceRecord {
-        id: value.get("id").and_then(Value::as_str).context("record id")?.to_string(),
+        id: value
+            .get("id")
+            .and_then(Value::as_str)
+            .context("record id")?
+            .to_string(),
         repository_id: value
             .get("repository_id")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        root: PathBuf::from(value.get("root").and_then(Value::as_str).unwrap_or_default()),
-        branch: value.get("branch").and_then(Value::as_str).map(str::to_string),
-        title: value.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
+        root: PathBuf::from(
+            value
+                .get("root")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        branch: value
+            .get("branch")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        title: value
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         kind: if value.get("kind").and_then(Value::as_str) == Some("integration") {
             SpaceKind::Integration
         } else {
@@ -228,8 +245,14 @@ fn record_from_json(value: &Value) -> Result<TaskSpaceRecord> {
             .and_then(Value::as_str)
             .and_then(TaskPhase::from_str)
             .unwrap_or(TaskPhase::Planned),
-        base_oid: value.get("base_oid").and_then(Value::as_str).map(str::to_string),
-        head_oid: value.get("head_oid").and_then(Value::as_str).map(str::to_string),
+        base_oid: value
+            .get("base_oid")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        head_oid: value
+            .get("head_oid")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         result_summary: value
             .get("result_summary")
             .and_then(Value::as_str)
@@ -435,7 +458,11 @@ pub(crate) fn review_task(task_id: &str, integration_root: &Path) -> Result<Task
     let branch = task.branch.as_deref().context("Task branch がありません")?;
     let preview = project::preview_merge_on(&LocalHost, integration_root, branch)?;
     if preview.clean {
-        update_task(task_id, TaskPhase::MergeReady, Some("Conflict Radar: clean"))
+        update_task(
+            task_id,
+            TaskPhase::MergeReady,
+            Some("Conflict Radar: clean"),
+        )
     } else {
         update_task(task_id, TaskPhase::ChangesRequested, Some(&preview.detail))
     }

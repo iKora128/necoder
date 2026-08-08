@@ -27,7 +27,10 @@ pub struct Selection {
 
 impl Selection {
     pub fn cursor(offset: usize) -> Self {
-        Self { anchor: offset, head: offset }
+        Self {
+            anchor: offset,
+            head: offset,
+        }
     }
 
     pub fn new(anchor: usize, head: usize) -> Self {
@@ -142,7 +145,10 @@ impl Buffer {
 
     /// 文字列から無題バッファを作る（主にテスト用）。
     pub fn from_str(text: &str) -> Buffer {
-        Buffer { rope: Rope::from_str(text), ..Buffer::new() }
+        Buffer {
+            rope: Rope::from_str(text),
+            ..Buffer::new()
+        }
     }
 
     /// ファイルを読み込んで開く。
@@ -205,8 +211,12 @@ impl Buffer {
         let after: Vec<Selection> = cursors.into_iter().map(Selection::cursor).collect();
 
         let id = self.history.allocate_id();
-        self.last_change =
-            Some(edits.iter().map(|edit| (edit.start, edit.old.clone(), edit.new.clone())).collect());
+        self.last_change = Some(
+            edits
+                .iter()
+                .map(|edit| (edit.start, edit.old.clone(), edit.new.clone()))
+                .collect(),
+        );
         self.history.undo.push(Transaction {
             id,
             edits,
@@ -257,9 +267,18 @@ impl Buffer {
         let cursors = Self::apply_forward(&mut self.rope, &applied);
         let after: Vec<Selection> = cursors.into_iter().map(Selection::cursor).collect();
         let id = self.history.allocate_id();
-        self.last_change =
-            Some(applied.iter().map(|edit| (edit.start, edit.old.clone(), edit.new.clone())).collect());
-        self.history.undo.push(Transaction { id, edits: applied, before, after: after.clone() });
+        self.last_change = Some(
+            applied
+                .iter()
+                .map(|edit| (edit.start, edit.old.clone(), edit.new.clone()))
+                .collect(),
+        );
+        self.history.undo.push(Transaction {
+            id,
+            edits: applied,
+            before,
+            after: after.clone(),
+        });
         self.history.redo.clear();
         self.selections = after;
         self.version += 1;
@@ -372,7 +391,11 @@ impl Buffer {
     /// 主選択の行域を返す `(first_row, last_row)`。
     fn primary_rows(&self) -> (usize, usize) {
         let snapshot = self.snapshot();
-        let primary = self.selections.first().copied().unwrap_or(Selection::cursor(0));
+        let primary = self
+            .selections
+            .first()
+            .copied()
+            .unwrap_or(Selection::cursor(0));
         let first = snapshot.byte_to_point(primary.start()).row;
         // 範囲末尾が行頭ちょうどのときはその行を含めない（VSCode 同等）。
         let end_point = snapshot.byte_to_point(primary.end());
@@ -428,7 +451,10 @@ impl Buffer {
             }
             let selections = self.selections.clone();
             let delta = previous_text.len().min(previous.end - previous.start) as isize;
-            let id = self.edit(&[previous.start..span.end], &format!("{span_text}{previous_text}"));
+            let id = self.edit(
+                &[previous.start..span.end],
+                &format!("{span_text}{previous_text}"),
+            );
             self.set_selections(
                 selections
                     .into_iter()
@@ -537,12 +563,20 @@ impl Buffer {
     /// 改行 + 自動インデント（前行の字下げ継承 + ブロック開始 `{([:` の直後は 1 段深く）。
     pub fn insert_newline_indented(&mut self, tab_size: usize) -> TransactionId {
         let snapshot = self.snapshot();
-        let head = self.selections.first().copied().unwrap_or(Selection::cursor(0)).start();
+        let head = self
+            .selections
+            .first()
+            .copied()
+            .unwrap_or(Selection::cursor(0))
+            .start();
         let row = snapshot.byte_to_point(head).row;
         let line = snapshot.line_text(row);
         let column = head - snapshot.point_to_byte(Point::new(row, 0));
         let before_caret = &line[..column.min(line.len())];
-        let indent: String = before_caret.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        let indent: String = before_caret
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
         let extra = if before_caret.trim_end().ends_with(['{', '(', '[', ':']) {
             " ".repeat(tab_size)
         } else {
@@ -585,7 +619,10 @@ impl Buffer {
             let remove = if line.starts_with('\t') {
                 1
             } else {
-                line.chars().take(tab_size).take_while(|c| *c == ' ').count()
+                line.chars()
+                    .take(tab_size)
+                    .take_while(|c| *c == ' ')
+                    .count()
             };
             if remove > 0 {
                 ranges.push(line_start..line_start + remove);
@@ -611,7 +648,11 @@ impl Buffer {
             }
             return false;
         }
-        let primary = self.selections.first().copied().unwrap_or(Selection::cursor(0));
+        let primary = self
+            .selections
+            .first()
+            .copied()
+            .unwrap_or(Selection::cursor(0));
         if primary.is_empty() {
             return false;
         }
@@ -620,7 +661,12 @@ impl Buffer {
             return false;
         }
         let text = self.text();
-        let search_from = self.selections.iter().map(Selection::end).max().unwrap_or(0);
+        let search_from = self
+            .selections
+            .iter()
+            .map(Selection::end)
+            .max()
+            .unwrap_or(0);
         let already: Vec<Range<usize>> = self.selections.iter().map(Selection::range).collect();
         // search_from 以降 → 先頭から search_from まで、の順で探す（wrap）。
         let find_next = |from: usize| -> Option<usize> {
@@ -682,7 +728,11 @@ impl Buffer {
             point.row - 1
         };
         let offset = snapshot.point_to_byte(Point::new(target_row, point.column));
-        if self.selections.iter().any(|s| s.head == offset && s.is_empty()) {
+        if self
+            .selections
+            .iter()
+            .any(|s| s.head == offset && s.is_empty())
+        {
             return false;
         }
         let mut selections = self.selections.clone();
@@ -696,7 +746,11 @@ impl Buffer {
     pub fn add_cursor_at(&mut self, offset: usize) {
         let snapshot = self.snapshot();
         let offset = snapshot.clip_offset(offset);
-        if self.selections.iter().any(|s| s.is_empty() && s.head == offset) {
+        if self
+            .selections
+            .iter()
+            .any(|s| s.is_empty() && s.head == offset)
+        {
             return;
         }
         let mut selections = self.selections.clone();
@@ -720,7 +774,10 @@ impl Buffer {
     /// **UI スレッドから直接呼ばない**（remote は 30s ブロックしうる）。UI 経路は
     /// [`Buffer::prepare_save`] → 背景で `PendingSave::write` → [`Buffer::complete_save`]。
     pub fn save(&mut self) -> Result<()> {
-        let path = self.file.clone().context("保存先が未設定（無題バッファ）")?;
+        let path = self
+            .file
+            .clone()
+            .context("保存先が未設定（無題バッファ）")?;
         self.save_to(&path)
     }
 
@@ -793,7 +850,10 @@ impl Buffer {
     /// ディスクから読み直す（外部変更の追従）。選択はバッファ長へクランプ、dirty は解除。
     /// undo 履歴はリセットする（外部変更を跨ぐ undo は嘘の状態を作るため）。
     pub fn reload(&mut self) -> Result<()> {
-        let path = self.file.clone().context("再読込先が未設定（無題バッファ）")?;
+        let path = self
+            .file
+            .clone()
+            .context("再読込先が未設定（無題バッファ）")?;
         let content = self
             .host
             .read_file(&path)
@@ -885,7 +945,9 @@ impl Buffer {
 
     /// byte レンジのテキスト（char 境界・バッファ長にクリップ）。入力ハンドラの範囲取得に使う。
     pub fn text_range(&self, range: Range<usize>) -> String {
-        let start = self.rope.floor_char_boundary(range.start.min(self.rope.len()));
+        let start = self
+            .rope
+            .floor_char_boundary(range.start.min(self.rope.len()));
         let end = self.rope.ceil_char_boundary(range.end.min(self.rope.len()));
         self.rope.slice(start.min(end)..start.max(end)).to_string()
     }
@@ -1024,7 +1086,9 @@ pub fn classify_pair_input(
     }
     // クォートは単語の途中（前後が識別子）ではペアにしない（アポストロフィ・lifetime 対策）。
     if matches!(typed, '"' | '\'' | '`') {
-        let word_adjacent = previous.map(|c| char_class(c) == 1 && !c.is_whitespace()).unwrap_or(false)
+        let word_adjacent = previous
+            .map(|c| char_class(c) == 1 && !c.is_whitespace())
+            .unwrap_or(false)
             || next.map(|c| c.is_alphanumeric()).unwrap_or(false);
         if word_adjacent {
             return PairAction::Insert;
@@ -1032,7 +1096,10 @@ pub fn classify_pair_input(
     }
     // 開き括弧: 直後が識別子ならペアにしない（既存コードの前に挿す時の邪魔防止）。
     if matches!(typed, '(' | '[' | '{') {
-        if next.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+        if next
+            .map(|c| c.is_alphanumeric() || c == '_')
+            .unwrap_or(false)
+        {
             return PairAction::Insert;
         }
     }
@@ -1243,7 +1310,11 @@ mod tests {
     use super::*;
 
     fn temp_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("shirushi_editor_core_{}_{}.txt", tag, std::process::id()))
+        std::env::temp_dir().join(format!(
+            "shirushi_editor_core_{}_{}.txt",
+            tag,
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -1318,7 +1389,11 @@ mod tests {
         // 各キャレットが挿入分ぶんずれる
         assert_eq!(
             buffer.selections(),
-            &[Selection::cursor(2), Selection::cursor(5), Selection::cursor(8)]
+            &[
+                Selection::cursor(2),
+                Selection::cursor(5),
+                Selection::cursor(8)
+            ]
         );
         buffer.undo();
         assert_eq!(buffer.text(), "a.b.c");
@@ -1517,12 +1592,12 @@ mod tests {
         assert_eq!(snapshot.prev_word_boundary(20), 17); // "();" の頭
         assert_eq!(snapshot.prev_word_boundary(17), 14); // "baz" の頭
         assert_eq!(snapshot.prev_word_boundary(14), 12); // "= " → "=" の頭
-        assert_eq!(snapshot.prev_word_boundary(4), 0);   // "let" の頭
-        // ⌥→
-        assert_eq!(snapshot.next_word_boundary(0), 3);   // "let" の後
-        assert_eq!(snapshot.next_word_boundary(3), 11);  // " foo_bar" の後
+        assert_eq!(snapshot.prev_word_boundary(4), 0); // "let" の頭
+                                                       // ⌥→
+        assert_eq!(snapshot.next_word_boundary(0), 3); // "let" の後
+        assert_eq!(snapshot.next_word_boundary(3), 11); // " foo_bar" の後
         assert_eq!(snapshot.next_word_boundary(11), 13); // " =" の後
-        // 日本語（識別子クラス）も 1 語で跨ぐ
+                                                         // 日本語（識別子クラス）も 1 語で跨ぐ
         let jp = Buffer::from_str("こんにちは world").snapshot();
         assert_eq!(jp.next_word_boundary(0), 15); // こんにちは = 3byte×5
         assert_eq!(jp.prev_word_boundary(15), 0);
@@ -1629,16 +1704,28 @@ mod tests {
         use PairAction::*;
         // 開き括弧 → ペア（直後が識別子なら素通し）
         assert_eq!(classify_pair_input('(', true, None, None), Pair(')'));
-        assert_eq!(classify_pair_input('(', true, Some('a'), Some(' ')), Pair(')'));
+        assert_eq!(
+            classify_pair_input('(', true, Some('a'), Some(' ')),
+            Pair(')')
+        );
         assert_eq!(classify_pair_input('(', true, None, Some('x')), Insert);
         // 打ち抜け
-        assert_eq!(classify_pair_input(')', true, Some('('), Some(')')), SkipOver);
-        assert_eq!(classify_pair_input('"', true, Some('"'), Some('"')), SkipOver);
+        assert_eq!(
+            classify_pair_input(')', true, Some('('), Some(')')),
+            SkipOver
+        );
+        assert_eq!(
+            classify_pair_input('"', true, Some('"'), Some('"')),
+            SkipOver
+        );
         // 選択があれば囲む
         assert_eq!(classify_pair_input('(', false, None, None), Wrap(')'));
         assert_eq!(classify_pair_input('"', false, None, None), Wrap('"'));
         // クォートは単語の途中でペアにしない（don't → don''t 事故防止）
-        assert_eq!(classify_pair_input('\'', true, Some('n'), Some('t')), Insert);
+        assert_eq!(
+            classify_pair_input('\'', true, Some('n'), Some('t')),
+            Insert
+        );
         assert_eq!(classify_pair_input('"', true, Some(' '), None), Pair('"'));
         // 非ペア文字
         assert_eq!(classify_pair_input('a', true, None, None), Insert);
@@ -1655,7 +1742,7 @@ mod tests {
         assert!(buffer.select_next_occurrence()); // 3 個目
         assert_eq!(buffer.selections().len(), 3);
         assert!(!buffer.select_next_occurrence()); // 全部選択済み → false
-        // 3 箇所同時書き換え（受入: ⌘D×3 で同名 3 箇所を書き換えられる）
+                                                   // 3 箇所同時書き換え（受入: ⌘D×3 で同名 3 箇所を書き換えられる）
         buffer.insert("qux");
         assert_eq!(buffer.text(), "qux bar qux baz qux");
         // undo 一発で戻る
@@ -1673,7 +1760,7 @@ mod tests {
         assert!(buffer.add_cursor_vertically(true)); // 3 行目 col10... 最下から
         assert_eq!(buffer.selections().len(), 3);
         assert!(!buffer.add_cursor_vertically(true)); // 最終行 → false
-        // 同時タイプが 3 箇所に入る
+                                                      // 同時タイプが 3 箇所に入る
         buffer.insert("X");
         assert_eq!(buffer.text().matches('X').count(), 3);
     }
@@ -1696,8 +1783,8 @@ mod tests {
         let mut buffer = Buffer::from_str("fn main(){let x=1;}");
         // フォーマット風: 2 箇所に異なるテキスト
         buffer.edit_batch(&[
-            (9..10, " {\n    ".to_string()),   // "{" → " {\n    "
-            (18..19, "\n}".to_string()),        // 末尾 "}" 置換
+            (9..10, " {\n    ".to_string()), // "{" → " {\n    "
+            (18..19, "\n}".to_string()),     // 末尾 "}" 置換
         ]);
         assert_eq!(buffer.text(), "fn main() {\n    let x=1;\n}");
         // undo 一発で全部戻る
@@ -1751,7 +1838,7 @@ mod tests {
         assert_eq!(buffer.byte_to_utf16(1), 1); // "a" の後
         assert_eq!(buffer.byte_to_utf16(4), 2); // "あ" の後
         assert_eq!(buffer.byte_to_utf16(8), 4); // "𝔸"(2 UTF-16) の後
-        // 逆変換
+                                                // 逆変換
         assert_eq!(buffer.utf16_to_byte(2), 4);
         assert_eq!(buffer.utf16_to_byte(4), 8);
         // 範囲外はクリップ
@@ -1780,7 +1867,10 @@ mod tests {
         std::fs::write(&path, "external change!").unwrap();
 
         let error = pending.write().unwrap_err();
-        assert!(format!("{error:#}").contains("保存競合"), "競合エラーであること: {error:#}");
+        assert!(
+            format!("{error:#}").contains("保存競合"),
+            "競合エラーであること: {error:#}"
+        );
         // 外部の内容は上書きされず、バッファは dirty のまま = どちらの作業も消えていない。
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "external change!");
         assert!(buffer.is_dirty());
@@ -1826,7 +1916,10 @@ mod tests {
         std::fs::write(&target, "external on target!!").unwrap();
         let error = buffer.save().unwrap_err();
         assert!(format!("{error:#}").contains("保存競合"));
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "external on target!!");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "external on target!!"
+        );
         // 元ファイルは save_as 以降ノータッチ。
         assert_eq!(std::fs::read_to_string(&original).unwrap(), "one");
         let _ = std::fs::remove_file(&original);

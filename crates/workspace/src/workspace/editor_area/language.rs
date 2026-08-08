@@ -51,9 +51,10 @@ impl Workspace {
             let incremental = match init_rx.await {
                 Ok(Ok(value)) => {
                     let sync = value.pointer("/capabilities/textDocumentSync");
-                    let kind = sync
-                        .and_then(|sync| sync.as_u64())
-                        .or_else(|| sync.and_then(|sync| sync.pointer("/change")).and_then(|c| c.as_u64()));
+                    let kind = sync.and_then(|sync| sync.as_u64()).or_else(|| {
+                        sync.and_then(|sync| sync.pointer("/change"))
+                            .and_then(|c| c.as_u64())
+                    });
                     kind == Some(2)
                 }
                 _ => false,
@@ -70,7 +71,9 @@ impl Workspace {
             let mut notifications = notifications;
             while let Some((method, params)) = notifications.next().await {
                 if method == "textDocument/publishDiagnostics"
-                    && workspace.update(cx, |ws, cx| ws.on_diagnostics(params, cx)).is_err()
+                    && workspace
+                        .update(cx, |ws, cx| ws.on_diagnostics(params, cx))
+                        .is_err()
                 {
                     break;
                 }
@@ -99,7 +102,12 @@ impl Workspace {
                 Some(path) => language_server_for(path, view.buffer().host().is_remote())
                     .filter(|server| self.lsp_language == Some(server.language_id))
                     .map(|server| {
-                        (path.to_path_buf(), server.language_id, view.buffer().version(), view.buffer().text())
+                        (
+                            path.to_path_buf(),
+                            server.language_id,
+                            view.buffer().version(),
+                            view.buffer().text(),
+                        )
                     }),
                 None => None,
             }
@@ -118,9 +126,14 @@ impl Workspace {
         if !self.lsp_initialized {
             return;
         }
-        let closes = language_server_for(path, self.active_worktree().map(|w| w.host().is_remote()).unwrap_or(false))
-            .map(|server| self.lsp_language == Some(server.language_id))
-            .unwrap_or(false);
+        let closes = language_server_for(
+            path,
+            self.active_worktree()
+                .map(|w| w.host().is_remote())
+                .unwrap_or(false),
+        )
+        .map(|server| self.lsp_language == Some(server.language_id))
+        .unwrap_or(false);
         if closes {
             if let Some(lsp) = &self.lsp {
                 lsp.did_close(path);
@@ -131,9 +144,16 @@ impl Workspace {
     /// publishDiagnostics を受けてファイル別に格納し、アクティブファイル分をエディタへ push。
     pub(crate) fn on_diagnostics(&mut self, params: serde_json::Value, cx: &mut Context<Self>) {
         // 生 JSON（Diagnostic[]）も保持する（⌘. の codeAction context 用・M11）。
-        let raw = params.get("diagnostics").cloned().unwrap_or(serde_json::Value::Array(Vec::new()));
-        let raw_uri = params.get("uri").and_then(|uri| uri.as_str()).map(str::to_string);
-        let Ok(parsed) = serde_json::from_value::<lang::lsp::PublishDiagnosticsParams>(params) else {
+        let raw = params
+            .get("diagnostics")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(Vec::new()));
+        let raw_uri = params
+            .get("uri")
+            .and_then(|uri| uri.as_str())
+            .map(str::to_string);
+        let Ok(parsed) = serde_json::from_value::<lang::lsp::PublishDiagnosticsParams>(params)
+        else {
             return;
         };
         let Some(path) = lang::lsp::uri_to_path(&parsed.uri) else {
@@ -150,7 +170,10 @@ impl Workspace {
             .diagnostics
             .iter()
             .map(|diagnostic| {
-                (diagnostic.range.start.line, lang::lsp::Severity::from_lsp(diagnostic.severity))
+                (
+                    diagnostic.range.start.line,
+                    lang::lsp::Severity::from_lsp(diagnostic.severity),
+                )
             })
             .collect();
         // 空 vec = そのファイルの診断を全消し（置換セマンティクス）。
@@ -183,7 +206,10 @@ impl Workspace {
         {
             let (path, version) = {
                 let view = editor.read(cx);
-                (view.buffer().path().map(Path::to_path_buf), view.buffer().version())
+                (
+                    view.buffer().path().map(Path::to_path_buf),
+                    view.buffer().version(),
+                )
             };
             if let Some(path) = path {
                 if self.hot_exit_versions.get(&path) != Some(&version) {
@@ -209,7 +235,11 @@ impl Workspace {
         // 単一編集 + サーバが Incremental 広告 → range 差分で送る（M11-8）。
         // それ以外（複数編集/undo/redo/reload・Full サーバ）は全文。
         enum Change {
-            Incremental { start: (u32, u32), end: (u32, u32), text: String },
+            Incremental {
+                start: (u32, u32),
+                end: (u32, u32),
+                text: String,
+            },
             Full(String),
         }
         let info = {
@@ -227,10 +257,14 @@ impl Workspace {
                         Some(edits) if edits.len() == 1 && self.lsp_incremental_sync => {
                             let (start, old, new) = (&edits[0].0, &edits[0].1, &edits[0].2);
                             // start までは編集前後で同一 → 現バッファから UTF-16 位置が取れる。
-                            let (start_line, start_character) = view.lsp_position_for_offset(*start);
+                            let (start_line, start_character) =
+                                view.lsp_position_for_offset(*start);
                             let newlines = old.matches('\n').count() as u32;
                             let end = if newlines == 0 {
-                                (start_line, start_character + old.encode_utf16().count() as u32)
+                                (
+                                    start_line,
+                                    start_character + old.encode_utf16().count() as u32,
+                                )
                             } else {
                                 let tail = &old[old.rfind('\n').map(|i| i + 1).unwrap_or(0)..];
                                 (start_line + newlines, tail.encode_utf16().count() as u32)
@@ -276,14 +310,24 @@ impl Workspace {
         let Some(entries) = self.diagnostics.get(&path) else {
             return (0, 0);
         };
-        let errors = entries.iter().filter(|(_, severity)| *severity == lang::lsp::Severity::Error).count();
-        let warnings =
-            entries.iter().filter(|(_, severity)| *severity == lang::lsp::Severity::Warning).count();
+        let errors = entries
+            .iter()
+            .filter(|(_, severity)| *severity == lang::lsp::Severity::Error)
+            .count();
+        let warnings = entries
+            .iter()
+            .filter(|(_, severity)| *severity == lang::lsp::Severity::Warning)
+            .count();
         (errors, warnings)
     }
 
     /// 定義ジャンプ（F12）。カーソル位置の定義を rust-analyzer に問い合わせて着地する。
-    pub(crate) fn go_to_definition(&mut self, _: &GoToDefinition, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_to_definition(
+        &mut self,
+        _: &GoToDefinition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -294,11 +338,13 @@ impl Workspace {
             let view = editor.read(cx);
             view.buffer()
                 .path()
-                .filter(|path| language_server_for(path, view.buffer().host().is_remote()).is_some())
+                .filter(|path| {
+                    language_server_for(path, view.buffer().host().is_remote()).is_some()
+                })
                 .map(|path| {
-                let (line, character) = view.cursor_lsp_position();
-                (path.to_path_buf(), line, character)
-            })
+                    let (line, character) = view.cursor_lsp_position();
+                    (path.to_path_buf(), line, character)
+                })
         };
         let Some((path, line, character)) = info else {
             return;
@@ -350,7 +396,12 @@ impl Workspace {
 
     /// 補完（Ctrl-Space）。カーソル位置で候補を取得しポップアップを出す。
     /// Ctrl-Space（手動トリガ）。Esc 抑止を解除して要求する。
-    pub(crate) fn trigger_completion(&mut self, _: &TriggerCompletion, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn trigger_completion(
+        &mut self,
+        _: &TriggerCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.completion_suppressed_word = None;
         self.request_completion(window, cx);
     }
@@ -369,11 +420,13 @@ impl Workspace {
             let position = view.caret_window_position();
             view.buffer()
                 .path()
-                .filter(|path| language_server_for(path, view.buffer().host().is_remote()).is_some())
+                .filter(|path| {
+                    language_server_for(path, view.buffer().host().is_remote()).is_some()
+                })
                 .map(|path| {
-                let (line, character) = view.cursor_lsp_position();
-                (path.to_path_buf(), line, character, position)
-            })
+                    let (line, character) = view.cursor_lsp_position();
+                    (path.to_path_buf(), line, character, position)
+                })
         };
         let Some((path, line, character, position)) = info else {
             return;
@@ -414,14 +467,23 @@ impl Workspace {
             .active_editor()
             .map(|editor| {
                 let view = editor.read(cx);
-                (view.identifier_prefix_at_caret().1, view.caret_window_position())
+                (
+                    view.identifier_prefix_at_caret().1,
+                    view.caret_window_position(),
+                )
             })
             .unwrap_or_default();
         let focus = cx.focus_handle();
         let position = fresh_position
             .or(position)
             .unwrap_or_else(|| point(px(220.), px(180.)));
-        let state = CompletionState { items, prefix, selected: 0, position, focus };
+        let state = CompletionState {
+            items,
+            prefix,
+            selected: 0,
+            position,
+            focus,
+        };
         // 応答時点のプレフィクスで 1 件も残らなければ出さない。
         if state.filtered().is_empty() {
             return;
@@ -472,7 +534,12 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn on_completion_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_completion_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event.keystroke.key.as_str() {
             "escape" => {
                 // Esc = 同じ語の入力継続では自動再表示しない（語頭 offset を記憶）。
@@ -507,11 +574,9 @@ impl Workspace {
                 // 絞り込み継続 / 新規トリガ / クローズが決まる（on_editor_typed）。
                 let modifiers = event.keystroke.modifiers;
                 let printable = !(modifiers.platform || modifiers.control || modifiers.function);
-                let text = event
-                    .keystroke
-                    .key_char
-                    .clone()
-                    .filter(|text| printable && !text.is_empty() && !text.chars().any(char::is_control));
+                let text = event.keystroke.key_char.clone().filter(|text| {
+                    printable && !text.is_empty() && !text.chars().any(char::is_control)
+                });
                 match (text, self.active_editor()) {
                     (Some(text), Some(editor)) => {
                         editor.update(cx, |view, cx| view.insert_text(&text, cx));
@@ -525,13 +590,23 @@ impl Workspace {
 
     // ── フォーマット（⌥⇧F / 保存時・M11） ──
 
-    pub(crate) fn format_document(&mut self, _: &Format, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn format_document(
+        &mut self,
+        _: &Format,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.request_format(false, window, cx);
     }
 
     /// LSP フォーマットを要求して適用する。`save_after` = 適用後に保存（保存時フォーマット経路）。
     /// LSP が使えない/対応外のときは、`save_after` なら素の保存だけ行う。
-    pub(crate) fn request_format(&mut self, save_after: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_format(
+        &mut self,
+        save_after: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -542,7 +617,9 @@ impl Workspace {
             let view = editor.read(cx);
             view.buffer()
                 .path()
-                .filter(|path| language_server_for(path, view.buffer().host().is_remote()).is_some())
+                .filter(|path| {
+                    language_server_for(path, view.buffer().host().is_remote()).is_some()
+                })
                 .map(Path::to_path_buf)
         };
         let (Some(path), true) = (formattable, self.lsp_initialized) else {
@@ -600,7 +677,12 @@ impl Workspace {
     }
 
     /// ⌘S。`format_on_save` が有効ならフォーマット → 保存、無効なら即保存（どちらも背景書き込み）。
-    pub(crate) fn save_active(&mut self, _: &SaveActive, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_active(
+        &mut self,
+        _: &SaveActive,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -623,14 +705,21 @@ impl Workspace {
             if view
                 .buffer()
                 .path()
-                .filter(|path| language_server_for(path, view.buffer().host().is_remote()).is_some())
+                .filter(|path| {
+                    language_server_for(path, view.buffer().host().is_remote()).is_some()
+                })
                 .is_none()
                 || !self.lsp_initialized
             {
                 return;
             }
             let snapshot = view.buffer().snapshot();
-            let head = view.buffer().selections().first().map(|s| s.head).unwrap_or(0);
+            let head = view
+                .buffer()
+                .selections()
+                .first()
+                .map(|s| s.head)
+                .unwrap_or(0);
             snapshot
                 .word_range_at(head)
                 .map(|range| view.buffer().text_range(range))
@@ -655,7 +744,12 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn on_rename_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_rename_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_rename(window, cx),
             "enter" => {
@@ -696,7 +790,12 @@ impl Workspace {
 
     /// rename を LSP へ要求し、WorkspaceEdit を全ファイルへ適用する。
     /// 開いているタブはバッファへ（dirty のまま）・未オープンはディスクへ直書き。
-    pub(crate) fn perform_rename(&mut self, new_name: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn perform_rename(
+        &mut self,
+        new_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -727,7 +826,11 @@ impl Workspace {
     }
 
     /// WorkspaceEdit を適用する共通経路（rename / code actions・M11）。
-    pub(crate) fn apply_workspace_edit(&mut self, value: &serde_json::Value, cx: &mut Context<Self>) {
+    pub(crate) fn apply_workspace_edit(
+        &mut self,
+        value: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
         let by_file = parse_workspace_edit(value);
         if by_file.is_empty() {
             return;
@@ -821,14 +924,30 @@ impl Workspace {
                         .border_1()
                         .border_color(accent)
                         .rounded(px(8.))
-                        .shadow(vec![gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4))
-                            .blur_radius(px(16.))])
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(6.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(16.))])
                         .track_focus(focus)
                         .on_key_down(cx.listener(Self::on_rename_key_down))
                         .text_size(px(12.5))
                         .text_color(theme.fg0)
-                        .child(div().flex_none().text_size(px(11.)).text_color(theme.fg2).child(SharedString::from(i18n::t!("rename.label"))))
-                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(display))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(i18n::t!("rename.label"))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(display),
+                        )
                         .child(div().flex_none().w(px(1.5)).h(px(14.)).bg(accent)),
                 )
                 .into_any_element(),

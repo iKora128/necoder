@@ -23,4 +23,8 @@ futures.workspace = true
 i18n.workspace = true
 host.workspace = true
 project.workspace = true
+lang.workspace = true
 pulldown-cmark.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

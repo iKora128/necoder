@@ -25,15 +25,15 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 
+use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
-use futures::channel::mpsc::{UnboundedSender, unbounded};
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, SharedString, Style, TextRun,
-    UTF16Selection, UnderlineStyle, Window, div, fill, point, prelude::*, px, size,
+    div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, CursorStyle,
+    DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId, IntoElement,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Rgba, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use std::ops::Range;
 use theme_core::Theme;
@@ -206,8 +206,14 @@ impl TerminalView {
     ) -> Self {
         let (events_tx, mut events_rx) = unbounded::<AlacEvent>();
         let listener = Listener(events_tx);
-        let size = TerminalSize { columns: 80, lines: 24 };
-        let config = Config { scrolling_history: 10_000, ..Config::default() };
+        let size = TerminalSize {
+            columns: 80,
+            lines: 24,
+        };
+        let config = Config {
+            scrolling_history: 10_000,
+            ..Config::default()
+        };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
 
         let mut env = HashMap::new();
@@ -276,8 +282,14 @@ impl TerminalView {
     pub fn new_test(theme: Theme, cx: &mut Context<Self>) -> Self {
         let (events_tx, _events_rx) = unbounded::<AlacEvent>();
         let listener = Listener(events_tx);
-        let size = TerminalSize { columns: 80, lines: 24 };
-        let config = Config { scrolling_history: 10_000, ..Config::default() };
+        let size = TerminalSize {
+            columns: 80,
+            lines: 24,
+        };
+        let config = Config {
+            scrolling_history: 10_000,
+            ..Config::default()
+        };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener)));
         Self {
             term,
@@ -334,9 +346,16 @@ impl TerminalView {
         let cursor = Some(content.cursor.point);
         self.app_cursor = term.mode().contains(TermMode::APP_CURSOR);
         // 選択範囲もスナップショットに含める（前景でロック無しにハイライトを描くため）。
-        let selection = term.selection.as_ref().and_then(|selection| selection.to_range(&term));
+        let selection = term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&term));
         drop(term);
-        self.content = TerminalContent { cells, cursor, selection };
+        self.content = TerminalContent {
+            cells,
+            cursor,
+            selection,
+        };
         cx.notify();
     }
 
@@ -358,7 +377,10 @@ impl TerminalView {
 
     /// 行列サイズが変わったら term と PTY をリサイズする（prepaint から）。
     fn resize(&mut self, columns: usize, lines: usize) {
-        let new_size = TerminalSize { columns: columns.max(2), lines: lines.max(1) };
+        let new_size = TerminalSize {
+            columns: columns.max(2),
+            lines: lines.max(1),
+        };
         if new_size == self.size {
             return;
         }
@@ -450,13 +472,17 @@ impl TerminalView {
         line_height: Pixels,
         cx: &mut Context<Self>,
     ) {
-        let (row, column, side) = viewport_cell(position, origin, cell_width, line_height, self.size);
+        let (row, column, side) =
+            viewport_cell(position, origin, cell_width, line_height, self.size);
         self.selecting = true;
         let mut term = self.term.lock();
         let offset = term.grid().display_offset() as i32;
         let point = AlacPoint::new(Line(row - offset), Column(column));
         term.selection = Some(Selection::new(SelectionType::Simple, point, side));
-        let range = term.selection.as_ref().and_then(|selection| selection.to_range(&term));
+        let range = term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&term));
         drop(term);
         self.content.selection = range;
         cx.notify();
@@ -474,14 +500,18 @@ impl TerminalView {
         if !self.selecting {
             return;
         }
-        let (row, column, side) = viewport_cell(position, origin, cell_width, line_height, self.size);
+        let (row, column, side) =
+            viewport_cell(position, origin, cell_width, line_height, self.size);
         let mut term = self.term.lock();
         let offset = term.grid().display_offset() as i32;
         let point = AlacPoint::new(Line(row - offset), Column(column));
         if let Some(selection) = term.selection.as_mut() {
             selection.update(point, side);
         }
-        let range = term.selection.as_ref().and_then(|selection| selection.to_range(&term));
+        let range = term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&term));
         drop(term);
         self.content.selection = range;
         cx.notify();
@@ -494,11 +524,17 @@ impl TerminalView {
         }
         self.selecting = false;
         let mut term = self.term.lock();
-        let empty = term.selection.as_ref().is_none_or(|selection| selection.is_empty());
+        let empty = term
+            .selection
+            .as_ref()
+            .is_none_or(|selection| selection.is_empty());
         if empty {
             term.selection = None;
         }
-        let range = term.selection.as_ref().and_then(|selection| selection.to_range(&term));
+        let range = term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&term));
         drop(term);
         self.content.selection = range;
         cx.notify();
@@ -517,7 +553,8 @@ fn viewport_cell(
     let relative_x = f32::from(position.x - origin.x).max(0.0);
     let relative_y = f32::from(position.y - origin.y).max(0.0);
     let column = ((relative_x / cell_w) as usize).min(size.columns.saturating_sub(1));
-    let row = ((relative_y / f32::from(line_height).max(1.0)) as usize).min(size.lines.saturating_sub(1));
+    let row =
+        ((relative_y / f32::from(line_height).max(1.0)) as usize).min(size.lines.saturating_sub(1));
     // セル内で左半分なら Left（選択端の丸め。alacritty の選択境界の作法に合わせる）。
     let side = if relative_x - (column as f32) * cell_w < cell_w / 2.0 {
         Side::Left
@@ -549,10 +586,17 @@ impl EntityInputHandler for TerminalView {
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         // 空選択（カーソル位置相当）。これが Some でないと IME セッションが始まらない。
-        Some(UTF16Selection { range: 0..0, reversed: false })
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         None
     }
 
@@ -648,7 +692,9 @@ impl Render for TerminalView {
             // 崩れるので、エディタと同じコードフォント（等幅）を明示する。要素は text_style().font()
             // を読むのでコンテナで指定すれば伝播する。
             .font_family("Guguru Sans Code")
-            .child(TerminalElement { terminal: cx.entity() })
+            .child(TerminalElement {
+                terminal: cx.entity(),
+            })
     }
 }
 
@@ -799,7 +845,11 @@ fn indexed_to_hsla(index: u8) -> Hsla {
                     component * 40 + 55
                 }
             };
-            rgb_hsla(convert(value / 36), convert((value / 6) % 6), convert(value % 6))
+            rgb_hsla(
+                convert(value / 36),
+                convert((value / 6) % 6),
+                convert(value % 6),
+            )
         }
         _ => {
             // グレースケール（232..255）。
@@ -905,8 +955,12 @@ impl Element for TerminalElement {
         let line_height = px(LINE_HEIGHT);
 
         // 行列サイズを算出して term をリサイズ。
-        let columns = (f32::from(bounds.size.width) / f32::from(cell_width)).floor().max(2.0) as usize;
-        let lines = (f32::from(bounds.size.height) / f32::from(line_height)).floor().max(1.0) as usize;
+        let columns = (f32::from(bounds.size.width) / f32::from(cell_width))
+            .floor()
+            .max(2.0) as usize;
+        let lines = (f32::from(bounds.size.height) / f32::from(line_height))
+            .floor()
+            .max(1.0) as usize;
         let theme = self.terminal.read(cx).theme.clone();
         let (cells, cursor, selection, focused) = {
             let focused = self.terminal.read(cx).focus_handle.is_focused(window);
@@ -1008,7 +1062,10 @@ impl Element for TerminalElement {
 
         // ③ セル文字（1 セル 1 shape。v1 はバッチ無し）。
         for cell in &prepaint.cells {
-            if cell.character == ' ' || cell.flags.contains(Flags::WIDE_CHAR_SPACER) || cell.flags.contains(Flags::HIDDEN) {
+            if cell.character == ' '
+                || cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                || cell.flags.contains(Flags::HIDDEN)
+            {
                 continue;
             }
             let (mut foreground, mut background) = (cell.fg, cell.bg);
@@ -1016,8 +1073,8 @@ impl Element for TerminalElement {
                 std::mem::swap(&mut foreground, &mut background);
             }
             // カーソル下の文字は視認性のため背景色で描く。
-            let on_cursor = prepaint.focused
-                && prepaint.cursor.is_some_and(|cursor| cursor == cell.point);
+            let on_cursor =
+                prepaint.focused && prepaint.cursor.is_some_and(|cursor| cursor == cell.point);
             let color = if on_cursor {
                 theme.bg1
             } else {
@@ -1056,9 +1113,14 @@ impl Element for TerminalElement {
                 &[run],
                 Some(cell_width),
             );
-            if let Err(error) =
-                shaped.paint(position, line_height, gpui::TextAlign::Left, None, window, cx)
-            {
+            if let Err(error) = shaped.paint(
+                position,
+                line_height,
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            ) {
                 eprintln!("ターミナル文字描画に失敗: {error}");
             }
         }
@@ -1081,7 +1143,10 @@ impl Element for TerminalElement {
                     if *line == row && columns.contains(&column) {
                         let (path, line_number) = (path.clone(), *line_number);
                         terminal.update(cx, |_, cx| {
-                            cx.emit(TerminalEvent::OpenPath { path, line: line_number });
+                            cx.emit(TerminalEvent::OpenPath {
+                                path,
+                                line: line_number,
+                            });
                         });
                         break;
                     }
@@ -1108,8 +1173,7 @@ impl Element for TerminalElement {
         {
             let terminal = self.terminal.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
-                if phase != DispatchPhase::Bubble
-                    || event.pressed_button != Some(MouseButton::Left)
+                if phase != DispatchPhase::Bubble || event.pressed_button != Some(MouseButton::Left)
                 {
                     return;
                 }

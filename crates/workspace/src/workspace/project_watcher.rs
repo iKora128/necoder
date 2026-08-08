@@ -49,12 +49,14 @@ impl Workspace {
                 if debug {
                     eprintln!("watch: 合流 {} paths", paths.len());
                 }
-                let updated = workspace
-                    .update(cx, |workspace, cx| {
-                        workspace.handle_watch_events(session_index, paths, cx)
-                    });
+                let updated = workspace.update(cx, |workspace, cx| {
+                    workspace.handle_watch_events(session_index, paths, cx)
+                });
                 if debug {
-                    eprintln!("watch: update {:?}", updated.as_ref().map(|_| "ok").map_err(|e| format!("{e}")));
+                    eprintln!(
+                        "watch: update {:?}",
+                        updated.as_ref().map(|_| "ok").map_err(|e| format!("{e}"))
+                    );
                 }
                 if updated.is_err() {
                     break;
@@ -84,9 +86,17 @@ impl Workspace {
         let mut git_changed = false;
         for path in &paths {
             // .git 配下は index/HEAD/refs だけ git 更新の合図に使う（objects 等の湧きは無視）。
-            if path.components().any(|component| component.as_os_str() == ".git") {
-                let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-                let in_refs = path.components().any(|component| component.as_os_str() == "refs");
+            if path
+                .components()
+                .any(|component| component.as_os_str() == ".git")
+            {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                let in_refs = path
+                    .components()
+                    .any(|component| component.as_os_str() == "refs");
                 if in_refs || matches!(name, "index" | "HEAD" | "ORIG_HEAD" | "packed-refs") {
                     git_changed = true;
                 }

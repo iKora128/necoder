@@ -26,7 +26,11 @@ impl Rng {
     }
 
     fn below(&mut self, bound: usize) -> usize {
-        if bound == 0 { 0 } else { (self.next() % bound as u64) as usize }
+        if bound == 0 {
+            0
+        } else {
+            (self.next() % bound as u64) as usize
+        }
     }
 
     fn chance(&mut self, percent: usize) -> bool {
@@ -43,7 +47,9 @@ const FRAGMENTS: &[&str] = &[
 
 fn random_text(rng: &mut Rng, max_pieces: usize) -> String {
     let count = rng.below(max_pieces + 1);
-    (0..count).map(|_| FRAGMENTS[rng.below(FRAGMENTS.len())]).collect()
+    (0..count)
+        .map(|_| FRAGMENTS[rng.below(FRAGMENTS.len())])
+        .collect()
 }
 
 /// model の char 境界一覧（0 と len を含む）。
@@ -59,7 +65,9 @@ fn boundaries(model: &str) -> Vec<usize> {
 fn random_ranges(rng: &mut Rng, model: &str) -> Vec<Range<usize>> {
     let bounds = boundaries(model);
     let count = 1 + rng.below(3);
-    let mut picks: Vec<usize> = (0..count * 2).map(|_| bounds[rng.below(bounds.len())]).collect();
+    let mut picks: Vec<usize> = (0..count * 2)
+        .map(|_| bounds[rng.below(bounds.len())])
+        .collect();
     picks.sort_unstable();
     picks.dedup();
     // 隣り合わせでペアにする = 非重複が保証される。足りなければ零幅で埋める。
@@ -82,7 +90,9 @@ fn random_ranges(rng: &mut Rng, model: &str) -> Vec<Range<usize>> {
 fn random_cursors(rng: &mut Rng, model: &str) -> Vec<usize> {
     let bounds = boundaries(model);
     let count = 1 + rng.below(3);
-    let mut picks: Vec<usize> = (0..count).map(|_| bounds[rng.below(bounds.len())]).collect();
+    let mut picks: Vec<usize> = (0..count)
+        .map(|_| bounds[rng.below(bounds.len())])
+        .collect();
     picks.sort_unstable();
     picks.dedup();
     picks
@@ -116,23 +126,39 @@ fn expected_cursors(ranges: &[Range<usize>], new_len: usize) -> Vec<Selection> {
 
 /// c の直前の char 開始位置（c==0 は 0）。
 fn prev_char_start(model: &str, offset: usize) -> usize {
-    model[..offset].chars().next_back().map(|c| offset - c.len_utf8()).unwrap_or(0)
+    model[..offset]
+        .chars()
+        .next_back()
+        .map(|c| offset - c.len_utf8())
+        .unwrap_or(0)
 }
 
 /// c の直後の char 終了位置（末尾は据え置き）。
 fn next_char_end(model: &str, offset: usize) -> usize {
-    model[offset..].chars().next().map(|c| offset + c.len_utf8()).unwrap_or(offset)
+    model[offset..]
+        .chars()
+        .next()
+        .map(|c| offset + c.len_utf8())
+        .unwrap_or(offset)
 }
 
 fn iterations(default_count: usize) -> usize {
-    std::env::var("SHIRUSHI_FUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(default_count)
+    std::env::var("SHIRUSHI_FUZZ_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default_count)
 }
 
 fn seeds(default_count: usize, base: u64) -> Vec<u64> {
-    if let Some(seed) = std::env::var("SHIRUSHI_FUZZ_SEED").ok().and_then(|v| v.parse().ok()) {
+    if let Some(seed) = std::env::var("SHIRUSHI_FUZZ_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         return vec![seed];
     }
-    (0..iterations(default_count)).map(|index| base ^ (index as u64).wrapping_mul(0x9E37_79B9)).collect()
+    (0..iterations(default_count))
+        .map(|index| base ^ (index as u64).wrapping_mul(0x9E37_79B9))
+        .collect()
 }
 
 // ── 厳密系: insert / delete / undo / redo を参照実装と毎手突合 ──
@@ -154,13 +180,16 @@ fn strict_ops_match_reference_model() {
 
         let steps = 150;
         for step in 0..steps {
-            let context = || format!("seed={seed} step={step}（SHIRUSHI_FUZZ_SEED={seed} で単発再現）");
+            let context =
+                || format!("seed={seed} step={step}（SHIRUSHI_FUZZ_SEED={seed} で単発再現）");
             match rng.below(6) {
                 // insert（複数レンジ同時置換）
                 0 | 1 => {
                     let ranges = random_ranges(&mut rng, &model);
-                    let selections: Vec<Selection> =
-                        ranges.iter().map(|r| Selection::new(r.start, r.end)).collect();
+                    let selections: Vec<Selection> = ranges
+                        .iter()
+                        .map(|r| Selection::new(r.start, r.end))
+                        .collect();
                     buffer.set_selections(selections.clone());
                     let text = random_text(&mut rng, 6);
                     buffer.insert(&text);
@@ -175,8 +204,18 @@ fn strict_ops_match_reference_model() {
                     after_selections.push(after.clone());
                     cursor += 1;
 
-                    assert_eq!(buffer.text(), model, "insert 後のテキスト不一致: {}", context());
-                    assert_eq!(buffer.selections(), &after[..], "insert 後の選択不一致: {}", context());
+                    assert_eq!(
+                        buffer.text(),
+                        model,
+                        "insert 後のテキスト不一致: {}",
+                        context()
+                    );
+                    assert_eq!(
+                        buffer.selections(),
+                        &after[..],
+                        "insert 後の選択不一致: {}",
+                        context()
+                    );
                 }
                 // delete_backward（キャレット群）
                 2 => {
@@ -184,8 +223,10 @@ fn strict_ops_match_reference_model() {
                     buffer.set_selections(cursors.iter().map(|&c| Selection::cursor(c)).collect());
                     buffer.delete_backward();
 
-                    let ranges: Vec<Range<usize>> =
-                        cursors.iter().map(|&c| prev_char_start(&model, c)..c).collect();
+                    let ranges: Vec<Range<usize>> = cursors
+                        .iter()
+                        .map(|&c| prev_char_start(&model, c)..c)
+                        .collect();
                     model = apply_ranges(&model, &ranges, "");
                     let after = expected_cursors(&ranges, 0);
                     states.truncate(cursor + 1);
@@ -196,8 +237,18 @@ fn strict_ops_match_reference_model() {
                     after_selections.push(after.clone());
                     cursor += 1;
 
-                    assert_eq!(buffer.text(), model, "backspace 後のテキスト不一致: {}", context());
-                    assert_eq!(buffer.selections(), &after[..], "backspace 後の選択不一致: {}", context());
+                    assert_eq!(
+                        buffer.text(),
+                        model,
+                        "backspace 後のテキスト不一致: {}",
+                        context()
+                    );
+                    assert_eq!(
+                        buffer.selections(),
+                        &after[..],
+                        "backspace 後の選択不一致: {}",
+                        context()
+                    );
                 }
                 // delete_forward（キャレット群）
                 3 => {
@@ -205,8 +256,10 @@ fn strict_ops_match_reference_model() {
                     buffer.set_selections(cursors.iter().map(|&c| Selection::cursor(c)).collect());
                     buffer.delete_forward();
 
-                    let ranges: Vec<Range<usize>> =
-                        cursors.iter().map(|&c| c..next_char_end(&model, c)).collect();
+                    let ranges: Vec<Range<usize>> = cursors
+                        .iter()
+                        .map(|&c| c..next_char_end(&model, c))
+                        .collect();
                     model = apply_ranges(&model, &ranges, "");
                     let after = expected_cursors(&ranges, 0);
                     states.truncate(cursor + 1);
@@ -217,8 +270,18 @@ fn strict_ops_match_reference_model() {
                     after_selections.push(after.clone());
                     cursor += 1;
 
-                    assert_eq!(buffer.text(), model, "delete 後のテキスト不一致: {}", context());
-                    assert_eq!(buffer.selections(), &after[..], "delete 後の選択不一致: {}", context());
+                    assert_eq!(
+                        buffer.text(),
+                        model,
+                        "delete 後のテキスト不一致: {}",
+                        context()
+                    );
+                    assert_eq!(
+                        buffer.selections(),
+                        &after[..],
+                        "delete 後の選択不一致: {}",
+                        context()
+                    );
                 }
                 // undo
                 4 => {
@@ -227,7 +290,12 @@ fn strict_ops_match_reference_model() {
                         assert!(result.is_some(), "undo が Some のはず: {}", context());
                         cursor -= 1;
                         model = states[cursor].clone();
-                        assert_eq!(buffer.text(), model, "undo 後のテキスト不一致: {}", context());
+                        assert_eq!(
+                            buffer.text(),
+                            model,
+                            "undo 後のテキスト不一致: {}",
+                            context()
+                        );
                         assert_eq!(
                             buffer.selections(),
                             &before_selections[cursor][..],
@@ -235,7 +303,11 @@ fn strict_ops_match_reference_model() {
                             context()
                         );
                     } else {
-                        assert!(result.is_none(), "空履歴の undo は None のはず: {}", context());
+                        assert!(
+                            result.is_none(),
+                            "空履歴の undo は None のはず: {}",
+                            context()
+                        );
                     }
                 }
                 // redo
@@ -244,7 +316,12 @@ fn strict_ops_match_reference_model() {
                     if cursor < before_selections.len() {
                         assert!(result.is_some(), "redo が Some のはず: {}", context());
                         model = states[cursor + 1].clone();
-                        assert_eq!(buffer.text(), model, "redo 後のテキスト不一致: {}", context());
+                        assert_eq!(
+                            buffer.text(),
+                            model,
+                            "redo 後のテキスト不一致: {}",
+                            context()
+                        );
                         assert_eq!(
                             buffer.selections(),
                             &after_selections[cursor][..],
@@ -253,7 +330,11 @@ fn strict_ops_match_reference_model() {
                         );
                         cursor += 1;
                     } else {
-                        assert!(result.is_none(), "先端での redo は None のはず: {}", context());
+                        assert!(
+                            result.is_none(),
+                            "先端での redo は None のはず: {}",
+                            context()
+                        );
                     }
                 }
             }
@@ -284,18 +365,39 @@ fn assert_global_invariants(buffer: &Buffer, rng: &mut Rng, context: &dyn Fn() -
     }
 
     let snapshot = buffer.snapshot();
-    assert_eq!(snapshot.text(), text, "snapshot とバッファの不一致: {}", context());
-    assert_eq!(snapshot.len_bytes(), text.len(), "len_bytes 不一致: {}", context());
+    assert_eq!(
+        snapshot.text(),
+        text,
+        "snapshot とバッファの不一致: {}",
+        context()
+    );
+    assert_eq!(
+        snapshot.len_bytes(),
+        text.len(),
+        "len_bytes 不一致: {}",
+        context()
+    );
 
     // 行の再構成 = 全文（\r を生成しない前提の LF 再結合）。
-    let rebuilt: Vec<String> = (0..snapshot.line_count()).map(|row| snapshot.line_text(row)).collect();
-    assert_eq!(rebuilt.join("\n"), text, "line_text の再構成が全文と不一致: {}", context());
+    let rebuilt: Vec<String> = (0..snapshot.line_count())
+        .map(|row| snapshot.line_text(row))
+        .collect();
+    assert_eq!(
+        rebuilt.join("\n"),
+        text,
+        "line_text の再構成が全文と不一致: {}",
+        context()
+    );
 
     // 座標変換の往復と char 境界系（ランダムな 3 点）。
     for _ in 0..3 {
         let raw = rng.below(text.len() + 8);
         let clipped = snapshot.clip_offset(raw);
-        assert!(text.is_char_boundary(clipped), "clip_offset が境界でない: {}", context());
+        assert!(
+            text.is_char_boundary(clipped),
+            "clip_offset が境界でない: {}",
+            context()
+        );
         let point = snapshot.byte_to_point(clipped);
         assert_eq!(
             snapshot.point_to_byte(point),
@@ -305,8 +407,16 @@ fn assert_global_invariants(buffer: &Buffer, rng: &mut Rng, context: &dyn Fn() -
         );
         let previous_word = snapshot.prev_word_boundary(clipped);
         let next_word = snapshot.next_word_boundary(clipped);
-        assert!(previous_word <= clipped && text.is_char_boundary(previous_word), "prev_word_boundary 異常: {}", context());
-        assert!(next_word >= clipped && next_word <= text.len() && text.is_char_boundary(next_word), "next_word_boundary 異常: {}", context());
+        assert!(
+            previous_word <= clipped && text.is_char_boundary(previous_word),
+            "prev_word_boundary 異常: {}",
+            context()
+        );
+        assert!(
+            next_word >= clipped && next_word <= text.len() && text.is_char_boundary(next_word),
+            "next_word_boundary 異常: {}",
+            context()
+        );
     }
 }
 
@@ -319,13 +429,24 @@ fn all_ops_hold_global_invariants() {
         let steps = 120;
 
         for step in 0..steps {
-            let op = if buffer.len_bytes() > 4000 { 8 } else { rng.below(18) };
-            let context = || format!("seed={seed} step={step} op={op}（SHIRUSHI_FUZZ_SEED={seed} で単発再現）");
+            let op = if buffer.len_bytes() > 4000 {
+                8
+            } else {
+                rng.below(18)
+            };
+            let context = || {
+                format!("seed={seed} step={step} op={op}（SHIRUSHI_FUZZ_SEED={seed} で単発再現）")
+            };
             match op {
                 0 | 1 => {
                     let model = buffer.text();
                     let ranges = random_ranges(&mut rng, &model);
-                    buffer.set_selections(ranges.iter().map(|r| Selection::new(r.start, r.end)).collect());
+                    buffer.set_selections(
+                        ranges
+                            .iter()
+                            .map(|r| Selection::new(r.start, r.end))
+                            .collect(),
+                    );
                     let text = random_text(&mut rng, 6);
                     buffer.insert(&text);
                 }
@@ -413,7 +534,10 @@ fn all_ops_hold_global_invariants() {
         let mut undo_count = 0;
         while buffer.undo().is_some() {
             undo_count += 1;
-            assert!(undo_count <= steps + 4, "undo が {steps} 手を超えて止まらない: seed={seed}");
+            assert!(
+                undo_count <= steps + 4,
+                "undo が {steps} 手を超えて止まらない: seed={seed}"
+            );
         }
         assert_eq!(
             buffer.text(),
@@ -421,7 +545,10 @@ fn all_ops_hold_global_invariants() {
             "undo 全巻き戻しが初期テキストへ戻らない: seed={seed}（SHIRUSHI_FUZZ_SEED={seed}）"
         );
         for _ in 0..undo_count {
-            assert!(buffer.redo().is_some(), "undo した回数の redo が尽きた: seed={seed}");
+            assert!(
+                buffer.redo().is_some(),
+                "undo した回数の redo が尽きた: seed={seed}"
+            );
         }
         assert_eq!(
             buffer.text(),

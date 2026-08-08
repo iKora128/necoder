@@ -4,25 +4,26 @@
 //! 許可リストに従い、**プロジェクト色**はレール枠/リング・ツリー選択の左バー・キャレットにのみ流す。
 //! 状態（開プロジェクト・アクティブ・開ファイル）は `state.json` に保存し、再起動で復元する。
 
-pub(crate) use agent_panel::AgentPanel;
-pub(crate) use crate::persistence::{PersistedProject, PersistedState, RestoredTabs, state_path};
+pub(crate) use crate::persistence::{state_path, PersistedProject, PersistedState, RestoredTabs};
 pub(crate) use crate::updater;
+pub(crate) use agent_panel::AgentPanel;
 pub(crate) use editor_core::{Buffer, Selection};
-pub(crate) use futures::StreamExt as _; // LSP 通知 pump の `.next()`
-pub(crate) use editor_view::{ComposerEvent, EditorHoverEvent, EditorInputEvent, EditorView, PositionSnapshot};
+pub(crate) use editor_view::{
+    ComposerEvent, EditorHoverEvent, EditorInputEvent, EditorView, PositionSnapshot,
+};
 pub(crate) use explorer::{
     ContextMenu as ExplorerContextMenu, Explorer, ExplorerProject, Naming as ExplorerNaming,
     NamingKind, TreeRow, ViewMode as ExplorerView,
 };
-pub(crate) use gpui::{
-    Animation, AnimationExt, App, Bounds, ClipboardItem, Context, CursorStyle, Div, Entity,
-    EventEmitter,
-    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Point, SharedString, Stateful, Subscription, TitlebarOptions,
-    Window, WindowBounds, WindowControlArea, WindowOptions, actions, div, point, prelude::*,
-    pulsating_between, px, size, svg,
-};
+pub(crate) use futures::StreamExt as _; // LSP 通知 pump の `.next()`
 pub(crate) use git_ui::{BranchMenu as BranchMenuState, GitPanel, RepositorySnapshot};
+pub(crate) use gpui::{
+    actions, div, point, prelude::*, px, size, svg, Animation, AnimationExt, App, Bounds,
+    ClipboardItem, Context, CursorStyle, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Point, SharedString, Stateful, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowControlArea, WindowOptions,
+};
 pub(crate) use host::Host;
 pub(crate) use lang::lsp::{
     apply_text_edits_to_string, language_server_for, parse_definition, parse_hover_lines,
@@ -36,28 +37,28 @@ pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::rc::Rc;
 pub(crate) use std::sync::Arc;
 pub(crate) use terminal_view::{TerminalDock, TerminalDockEvent, TerminalLaunch};
-pub(crate) use theme_core::{Theme, ThemeSource, project_color};
+pub(crate) use theme_core::{project_color, Theme, ThemeSource};
 pub(crate) use ui::Tooltip;
 pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
 
 // ── 子モジュール（Rust の descendant 可視性で hub の private にアクセス可能）──
 mod chrome;
 mod commands;
+mod control_ipc;
+mod control_view;
 mod dev_probes;
+mod explorer_controller;
+mod explorer_view;
+mod fleet_view;
+mod git_controller;
+mod git_view;
+mod herd_view;
 mod notifications;
 mod overlays;
 mod rail;
 mod rail_view;
 mod remote_ssh;
-mod explorer_controller;
-mod explorer_view;
-mod git_controller;
-mod git_view;
-mod herd_view;
-mod fleet_view;
 mod worktree_delete;
-mod control_view;
-mod control_ipc;
 pub use control_ipc::control_socket_path;
 mod coordinator;
 pub(crate) use coordinator::COORDINATOR_THREAD_NAME;
@@ -280,7 +281,6 @@ struct FleetCellMenuState {
     position: Point<gpui::Pixels>,
 }
 
-
 /// ⌘F バッファ内検索の表示上限。これを超えるマッチは n/m に「+」を付けて数えない
 /// （全置換は打ち切らず全件を対象にする）。
 const BUFFER_SEARCH_MAX: usize = 20_000;
@@ -409,7 +409,13 @@ fn inline_edit_diff_lines(old_text: &str, new_text: &str, max_lines: usize) -> V
     let lines: Vec<String> = diff
         .lines()
         .filter(|line| !(line.starts_with("---") || line.starts_with("+++")))
-        .map(|line| if line.starts_with("@@") { "···".to_string() } else { line.to_string() })
+        .map(|line| {
+            if line.starts_with("@@") {
+                "···".to_string()
+            } else {
+                line.to_string()
+            }
+        })
         .collect();
     if lines.is_empty() {
         return vec![i18n::t!("inline.no_change").to_string()];
@@ -474,14 +480,14 @@ fn classify_completion_trigger(typed: &str, before: &str) -> CompletionTrigger {
 fn completion_kind_label(kind: Option<u64>) -> &'static str {
     // https://microsoft.github.io/language-server-protocol/specifications/specification-current/#completionItemKind
     match kind {
-        Some(2) | Some(3) => "fn",   // Method / Function
-        Some(5) => "field",          // Field
-        Some(6) => "let",            // Variable
+        Some(2) | Some(3) => "fn",    // Method / Function
+        Some(5) => "field",           // Field
+        Some(6) => "let",             // Variable
         Some(7) | Some(22) => "type", // Class / Struct
-        Some(8) => "trait",          // Interface
-        Some(9) => "mod",            // Module
-        Some(14) => "kw",            // Keyword
-        Some(21) => "const",         // Constant
+        Some(8) => "trait",           // Interface
+        Some(9) => "mod",             // Module
+        Some(14) => "kw",             // Keyword
+        Some(21) => "const",          // Constant
         _ => "•",
     }
 }
@@ -515,7 +521,12 @@ fn parse_completion_items(value: &serde_json::Value) -> Vec<CompletionItem> {
             let kind = SharedString::from(completion_kind_label(
                 item.get("kind").and_then(serde_json::Value::as_u64),
             ));
-            Some(CompletionItem { label: SharedString::from(label), insert_text, detail, kind })
+            Some(CompletionItem {
+                label: SharedString::from(label),
+                insert_text,
+                detail,
+                kind,
+            })
         })
         .take(60)
         .collect()
@@ -536,15 +547,24 @@ fn locations_to_file_matches(host: &dyn Host, value: &serde_json::Value) -> Vec<
             continue;
         };
         let (Some(line), Some(start_char), Some(end_char)) = (
-            location.pointer("/range/start/line").and_then(|v| v.as_u64()),
-            location.pointer("/range/start/character").and_then(|v| v.as_u64()),
-            location.pointer("/range/end/character").and_then(|v| v.as_u64()),
+            location
+                .pointer("/range/start/line")
+                .and_then(|v| v.as_u64()),
+            location
+                .pointer("/range/start/character")
+                .and_then(|v| v.as_u64()),
+            location
+                .pointer("/range/end/character")
+                .and_then(|v| v.as_u64()),
         ) else {
             continue;
         };
         match by_file.iter_mut().find(|(existing, _)| existing == &path) {
             Some((_, hits)) => hits.push((line as u32, start_char as u32, end_char as u32)),
-            None => by_file.push((path, vec![(line as u32, start_char as u32, end_char as u32)])),
+            None => by_file.push((
+                path,
+                vec![(line as u32, start_char as u32, end_char as u32)],
+            )),
         }
     }
     let mut results = Vec::new();
@@ -663,7 +683,11 @@ fn active_index_after_removal(active: usize, removed: usize, new_len: usize) -> 
 
 /// 通常の rail 切替で変更してよいのは active index だけ。
 /// 同じ index と範囲外は no-op とし、session 配列には触れない。
-fn active_index_after_switch(active: usize, requested: usize, project_count: usize) -> Option<usize> {
+fn active_index_after_switch(
+    active: usize,
+    requested: usize,
+    project_count: usize,
+) -> Option<usize> {
     (requested < project_count && requested != active).then_some(requested)
 }
 
@@ -679,7 +703,10 @@ impl SpaceId {
     }
 
     fn for_worktree(worktree: &Worktree) -> Self {
-        Self(project::stable_worktree_id_on(worktree.host().as_ref(), worktree.root()))
+        Self(project::stable_worktree_id_on(
+            worktree.host().as_ref(),
+            worktree.root(),
+        ))
     }
 }
 
@@ -734,7 +761,11 @@ impl TaskSpace {
             id: SpaceId::for_worktree(worktree),
             repository_id,
             title: SharedString::from(title),
-            kind: if is_task { SpaceKind::Task } else { SpaceKind::Integration },
+            kind: if is_task {
+                SpaceKind::Task
+            } else {
+                SpaceKind::Integration
+            },
             phase: TaskPhase::Planned,
             base_oid: is_task.then(|| head.clone()).flatten(),
             head_oid: head,
@@ -944,6 +975,10 @@ pub struct Workspace {
     updater: UpdateController,
     /// この窓がアクティブか（render で更新）。管制のマスコット等が「動き」を止める判定に使う。
     window_active: bool,
+    /// 管制マスコット（10fps）と承認待ち表示（2fps）の共有離散時計。GPUI の連続 Animation は
+    /// 使わず、見た目が変わる境界だけ redraw する。
+    visual_tick: u64,
+    visual_ticker: bool,
     /// 編隊レベルの ✳ 総括（Tier 2・P4）。キューに影響する遷移から 5s デバウンスで oneshot 生成。
     /// **状態を上書きしない**（数字とキューは事実層・これは監督バーに添える文）。
     control_summary: Option<SharedString>,
@@ -978,7 +1013,6 @@ impl DerefMut for Workspace {
     }
 }
 
-
 fn breadcrumb_text(root: Option<&Path>, path: Option<&Path>) -> String {
     let Some(path) = path else {
         return String::new();
@@ -1008,22 +1042,15 @@ pub(crate) fn is_placeholder_task_title(title: &str) -> bool {
 }
 
 /// パスの末尾 `max` 階層のフォルダ名（ルート `/` は除く）。エクスプローラの上位階層ブレッドクラム用。
-/// titlebar beacon のドット。実行中は breathing で pulse（停止中は淡色・静止）。
-fn beacon_dot(id: impl Into<gpui::ElementId>, color: Hsla, running: bool) -> gpui::AnyElement {
+/// titlebar beacon のドット。状態の反復アニメーションはマスコットへ一本化し、ここは静止表示。
+fn beacon_dot(_id: impl Into<gpui::ElementId>, color: Hsla, running: bool) -> gpui::AnyElement {
     let base = if running { color } else { color.alpha(0.5) };
-    let dot = div().size(px(8.)).rounded(px(4.)).flex_none().bg(base);
-    if running {
-        dot.with_animation(
-            id,
-            Animation::new(std::time::Duration::from_millis(1600))
-                .repeat()
-                .with_easing(pulsating_between(0.35, 1.0)),
-            |element, delta| element.opacity(delta),
-        )
+    div()
+        .size(px(8.))
+        .rounded(px(4.))
+        .flex_none()
+        .bg(base)
         .into_any_element()
-    } else {
-        dot.into_any_element()
-    }
 }
 
 /// スレッド状態 → 表示ラベル（beacon / フッターロールアップ / ⌘O / herd で共用・i18n）。
@@ -1033,16 +1060,19 @@ pub(crate) fn activity_label(activity: agent_panel::ThreadActivity) -> SharedStr
         ThreadActivity::Working => i18n::t!("agent.state_working").into(),
         ThreadActivity::Blocked => i18n::t!("agent.state_blocked").into(),
         ThreadActivity::Done { interrupted: false } => i18n::t!("agent.state_done").into(),
-        ThreadActivity::Done {
-            interrupted: true,
-        } => i18n::t!("agent.state_done_interrupted").into(),
+        ThreadActivity::Done { interrupted: true } => {
+            i18n::t!("agent.state_done_interrupted").into()
+        }
         ThreadActivity::Idle => i18n::t!("agent.state_idle").into(),
     }
 }
 
 /// 「開始 N分前 · 入力 N分前」の 1 行（herd 行 / 編隊セル状態行で共用・M14）。
 /// いつスタートして最終いつ入力したかをサクッと見せる。入力がまだ無ければ「開始 …」だけ。
-pub(crate) fn thread_times_label(created_at_ms: i64, last_input_at_ms: Option<i64>) -> SharedString {
+pub(crate) fn thread_times_label(
+    created_at_ms: i64,
+    last_input_at_ms: Option<i64>,
+) -> SharedString {
     let started =
         i18n::t!("time.started", "when" => agent_panel::relative_time_label(created_at_ms));
     match last_input_at_ms {
@@ -1058,15 +1088,29 @@ pub(crate) fn thread_times_label(created_at_ms: i64, last_input_at_ms: Option<i6
 fn file_type_color(name: &str, theme: &Theme) -> Hsla {
     let extension = name.rsplit('.').next().unwrap_or("").to_lowercase();
     let syntax = &theme.syntax;
-    match extension.as_str() {
-        "rs" => syntax.number,                                          // オレンジ
-        "toml" | "yaml" | "yml" | "json" | "lock" | "ini" => syntax.function, // 青
-        "md" | "markdown" | "txt" | "log" => theme.fg2,                 // ミュート
-        "ts" | "tsx" | "js" | "mjs" | "cjs" | "jsx" => syntax.type_,    // 黄
-        "py" | "rb" | "go" | "sh" | "zsh" | "bash" => syntax.string,    // 緑
-        "html" | "htm" | "css" | "scss" | "vue" => syntax.keyword,      // 紫
-        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" => syntax.macro_, // シアン
-        _ => theme.fg1,
+    match lang::language_for_name(name) {
+        Some(lang::LanguageId::Rust) => syntax.number,
+        Some(lang::LanguageId::Toml | lang::LanguageId::Yaml | lang::LanguageId::Json) => {
+            syntax.function
+        }
+        Some(lang::LanguageId::Markdown) => theme.fg2,
+        Some(
+            lang::LanguageId::TypeScript | lang::LanguageId::Tsx | lang::LanguageId::JavaScript,
+        ) => syntax.type_,
+        Some(lang::LanguageId::Python | lang::LanguageId::Go | lang::LanguageId::Bash) => {
+            syntax.string
+        }
+        Some(lang::LanguageId::Html | lang::LanguageId::Css) => syntax.keyword,
+        Some(lang::LanguageId::C | lang::LanguageId::Cpp) => syntax.type_,
+        None if matches!(
+            extension.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico"
+        ) =>
+        {
+            syntax.macro_
+        }
+        None if matches!(extension.as_str(), "txt" | "log") => theme.fg2,
+        None => theme.fg1,
     }
 }
 
@@ -1078,18 +1122,36 @@ fn file_icon(name: &str, is_dir: bool, theme: &Theme) -> impl IntoElement {
         div().w(px(13.)).h(px(10.)).rounded(px(2.5)).bg(color)
     } else {
         let color = file_type_color(name, theme);
-        div().w(px(10.)).h(px(13.)).rounded(px(2.)).bg(color.alpha(0.9))
+        div()
+            .w(px(10.))
+            .h(px(13.))
+            .rounded(px(2.))
+            .bg(color.alpha(0.9))
     };
-    div().flex_none().w(px(16.)).flex().items_center().justify_center().child(shape)
+    div()
+        .flex_none()
+        .w(px(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(shape)
 }
 
 /// アイコングリッド用の大きめアイコン（[`file_icon`] の 2 倍強）。
 fn icon_large(name: &str, is_dir: bool, theme: &Theme) -> impl IntoElement {
     let shape = if is_dir {
-        div().w(px(30.)).h(px(23.)).rounded(px(4.)).bg(theme.folder_icon())
+        div()
+            .w(px(30.))
+            .h(px(23.))
+            .rounded(px(4.))
+            .bg(theme.folder_icon())
     } else {
         let color = file_type_color(name, theme);
-        div().w(px(22.)).h(px(28.)).rounded(px(3.5)).bg(color.alpha(0.9))
+        div()
+            .w(px(22.))
+            .h(px(28.))
+            .rounded(px(3.5))
+            .bg(color.alpha(0.9))
     };
     div().flex().items_center().justify_center().child(shape)
 }
@@ -1104,6 +1166,57 @@ impl Focusable for Workspace {
 }
 
 impl Workspace {
+    /// 管制マスコットの 10fps と、承認待ちの低頻度 pulse（単独時2fps）を束ねる時計。
+    /// 対象が見えない時や窓の非アクティブ化で次の tick に自停止する。
+    fn ensure_visual_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.visual_ticker {
+            return;
+        }
+        self.visual_ticker = true;
+        cx.spawn(async move |workspace, cx| loop {
+            let next_delay = workspace.update(cx, |workspace, cx| {
+                let control_visible = workspace.chrome.fleet_mode
+                    && workspace.chrome.fleet_center_view == FleetCenterView::Control;
+                let attention_visible = workspace.waiting_thread.is_some();
+                if !workspace.window_active || (!control_visible && !attention_visible) {
+                    workspace.visual_ticker = false;
+                    return None;
+                }
+                let active_mascot = control_visible
+                    && workspace.project_sessions.sessions.iter().any(|session| {
+                        session
+                            .agent_panel
+                            .read(cx)
+                            .statuses()
+                            .iter()
+                            .any(|status| {
+                                matches!(
+                                    status.activity,
+                                    agent_panel::ThreadActivity::Working
+                                        | agent_panel::ThreadActivity::Blocked
+                                )
+                            })
+                    });
+                workspace.visual_tick = workspace.visual_tick.wrapping_add(1);
+                cx.notify();
+                Some(std::time::Duration::from_millis(if control_visible {
+                    if active_mascot {
+                        100
+                    } else {
+                        200
+                    }
+                } else {
+                    500
+                }))
+            });
+            let Ok(Some(delay)) = next_delay else {
+                break;
+            };
+            cx.background_executor().timer(delay).await;
+        })
+        .detach();
+    }
+
     /// Window を必要とする child event の後処理が残っているか。
     ///
     /// child の subscription は `Window` を受け取らないため、描画中に実行せず、現在の
@@ -1118,11 +1231,7 @@ impl Workspace {
             || self.pending_stage_hunk.is_some()
     }
 
-    fn process_pending_shell_effects(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn process_pending_shell_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(command) = self.chrome.pending_settings_command.take() {
             self.open_command_terminal(&command, window, cx);
         }
@@ -1154,6 +1263,14 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.window_active = window.is_window_active(); // 管制マスコット等の「動き」判定（P3）
+        let control_mascot_visible =
+            self.chrome.fleet_mode && self.chrome.fleet_center_view == FleetCenterView::Control;
+        if self.window_active && (control_mascot_visible || self.waiting_thread.is_some()) {
+            self.ensure_visual_ticker(cx);
+        }
+        if self.window_active && (self.chrome.fleet_mode || self.chrome.show_herd) {
+            self.ensure_fleet_clock(cx);
+        }
         self.ensure_rollup_ticker(cx); // フッターのニュース欄を複数稼働時に順送りする（自停止）
 
         if self.has_pending_shell_effects() {
@@ -1230,15 +1347,33 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::select_prev_thread))
             .on_action(cx.listener(Self::new_window))
             // ⌘1..9 = レールのプロジェクト N 番へ切替（窓内切替・ウィンドウモデル §5）
-            .on_action(cx.listener(|this, _: &ActivateProject1, window, cx| this.switch_project(0, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateProject2, window, cx| this.switch_project(1, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateProject3, window, cx| this.switch_project(2, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateProject4, window, cx| this.switch_project(3, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateProject5, window, cx| this.switch_project(4, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateProject6, window, cx| this.switch_project(5, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateProject7, window, cx| this.switch_project(6, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateProject8, window, cx| this.switch_project(7, window, cx)))
-            .on_action(cx.listener(|this, _: &ActivateProject9, window, cx| this.switch_project(8, window, cx)))
+            .on_action(cx.listener(|this, _: &ActivateProject1, window, cx| {
+                this.switch_project(0, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ActivateProject2, window, cx| {
+                this.switch_project(1, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ActivateProject3, window, cx| {
+                this.switch_project(2, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ActivateProject4, window, cx| {
+                this.switch_project(3, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ActivateProject5, window, cx| {
+                this.switch_project(4, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ActivateProject6, window, cx| {
+                this.switch_project(5, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ActivateProject7, window, cx| {
+                this.switch_project(6, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ActivateProject8, window, cx| {
+                this.switch_project(7, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ActivateProject9, window, cx| {
+                this.switch_project(8, window, cx)
+            }))
             .on_mouse_move(cx.listener(Self::on_resize_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_resize_end))
             // レール項目の擬似 tear-off（枠外ドロップ → 新窓・M13）。resize と独立のリスナー。
@@ -1260,8 +1395,11 @@ impl Render for Workspace {
                 // 編隊モード（mock の「編隊」ビュー・M14）: 通常の center/right dock を丸ごと置換。
                 if !self.chrome.fleet_seeded {
                     self.seed_fleet_cells(cx); // 初回（起動プローブ含む）は lanes で自動配置
-                    // 開発用: SHIRUSHI_FLEET_ADD=n で ＋Agent を n 回（新スレッド起動が複製しない検証）。
-                    if let Ok(n) = std::env::var("SHIRUSHI_FLEET_ADD").unwrap_or_default().parse::<usize>() {
+                                               // 開発用: SHIRUSHI_FLEET_ADD=n で ＋Agent を n 回（新スレッド起動が複製しない検証）。
+                    if let Ok(n) = std::env::var("SHIRUSHI_FLEET_ADD")
+                        .unwrap_or_default()
+                        .parse::<usize>()
+                    {
                         for _ in 0..n {
                             self.add_fleet_agent(cx);
                         }
@@ -1276,7 +1414,13 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .child(self.render_rail(cx))
-                    .child(div().flex_1().min_w_0().h_full().child(self.agent_panel.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(self.agent_panel.clone()),
+                    )
                     .into_any_element()
             } else {
                 div()
@@ -1298,12 +1442,16 @@ impl Render for Workspace {
                         element.child(column)
                     })
                     .child(self.render_center(cx))
-                    .when(self.chrome.show_right, |element| element.child(self.render_agent_dock(cx)))
+                    .when(self.chrome.show_right, |element| {
+                        element.child(self.render_agent_dock(cx))
+                    })
                     .into_any_element()
             })
             .child(self.render_statusbar(cx))
             // オーバーレイ（最前面）
-            .when_some(self.overlays.picker.clone(), |this, picker| this.child(picker))
+            .when_some(self.overlays.picker.clone(), |this, picker| {
+                this.child(picker)
+            })
             .children(self.render_search_panel(cx))
             .children(self.render_completion(cx))
             .children(self.render_hover(cx))
@@ -1371,12 +1519,20 @@ mod tests {
     impl Host for RenderAuditHost {
         fn id(&self) -> &str {
             self.record();
-            if self.remote { "render-audit-remote" } else { "render-audit-local" }
+            if self.remote {
+                "render-audit-remote"
+            } else {
+                "render-audit-local"
+            }
         }
 
         fn display_name(&self) -> &str {
             self.record();
-            if self.remote { "Render Audit Remote" } else { "Render Audit Local" }
+            if self.remote {
+                "Render Audit Remote"
+            } else {
+                "Render Audit Local"
+            }
         }
 
         fn is_remote(&self) -> bool {
@@ -1386,7 +1542,8 @@ mod tests {
 
         fn project_uri(&self, path: &Path) -> Option<String> {
             self.record();
-            self.remote.then(|| format!("ssh://render-audit{}", path.display()))
+            self.remote
+                .then(|| format!("ssh://render-audit{}", path.display()))
         }
 
         fn host_for_project(&self, path: &Path) -> anyhow::Result<Arc<dyn Host>> {
@@ -1481,13 +1638,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn project_switch_preserves_dirty_undo_and_child_entities(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let root = std::env::temp_dir().join(format!(
-            "shirushi_workspace_switch_{}",
-            std::process::id()
-        ));
+    fn project_switch_preserves_dirty_undo_and_child_entities(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("shirushi_workspace_switch_{}", std::process::id()));
         let project_a = root.join("a");
         let project_b = root.join("b");
         let file_a = project_a.join("a.txt");
@@ -1559,19 +1712,23 @@ mod tests {
                 terminal.entity_id(),
             )
         });
-        assert_ne!(entities_a, entities_b, "projects must not share child entities");
+        assert_ne!(
+            entities_a, entities_b,
+            "projects must not share child entities"
+        );
 
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.switch_project(0, window, cx);
         });
-        let (returned_editor, returned_entities) = workspace.update_in(
-            cx,
-            |workspace, _window, cx| {
+        let (returned_editor, returned_entities) =
+            workspace.update_in(cx, |workspace, _window, cx| {
                 let session = &workspace.project_sessions.sessions[0];
                 let terminal_dock = session.terminal_dock.clone();
                 let terminal = terminal_dock.update(cx, |dock, cx| dock.ensure_active_test(cx));
                 (
-                    workspace.active_editor().expect("returned project A editor"),
+                    workspace
+                        .active_editor()
+                        .expect("returned project A editor"),
                     (
                         session.agent_panel.entity_id(),
                         session.explorer.entity_id(),
@@ -1582,11 +1739,12 @@ mod tests {
                         terminal.entity_id(),
                     ),
                 )
-            },
-        );
+            });
         assert_eq!(returned_editor.entity_id(), editor_a.entity_id());
         assert_eq!(returned_entities, entities_a);
-        assert!(returned_editor.read_with(cx, |editor, _| editor.buffer().text().starts_with("dirty_")));
+        assert!(
+            returned_editor.read_with(cx, |editor, _| editor.buffer().text().starts_with("dirty_"))
+        );
 
         let editor_focus = returned_editor.read_with(cx, |editor, cx| editor.focus_handle(cx));
         cx.update(|window, cx| {
@@ -1640,7 +1798,11 @@ mod tests {
         local.disarm();
         remote.disarm();
         assert_eq!(local.calls(), 0, "local Render must use cached data only");
-        assert_eq!(remote.calls(), 0, "inactive remote session must not be queried");
+        assert_eq!(
+            remote.calls(),
+            0,
+            "inactive remote session must not be queried"
+        );
 
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.switch_project(1, window, cx);
@@ -1651,7 +1813,11 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear());
         local.disarm();
         remote.disarm();
-        assert_eq!(local.calls(), 0, "inactive local session must not be queried");
+        assert_eq!(
+            local.calls(),
+            0,
+            "inactive local session must not be queried"
+        );
         assert_eq!(remote.calls(), 0, "remote Render must use cached data only");
 
         // 上のテストと同じ teardown race 回避（watcher を root 削除より先に落とす）。
@@ -1670,10 +1836,16 @@ mod tests {
         let old_text = "fn get() -> u32 {\n    42\n}\n";
         let new_text = "fn get() -> Result<u32, Error> {\n    Ok(42)\n}\n";
         let lines = inline_edit_diff_lines(old_text, new_text, 14);
-        assert!(lines.iter().any(|line| line.starts_with("-fn get() -> u32")));
-        assert!(lines.iter().any(|line| line.starts_with("+fn get() -> Result")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("-fn get() -> u32")));
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with("+fn get() -> Result")));
         // ファイルヘッダ（---/+++）は出さない。@@ は ··· に置換。
-        assert!(!lines.iter().any(|line| line.starts_with("---") || line.starts_with("+++")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.starts_with("---") || line.starts_with("+++")));
         assert!(!lines.iter().any(|line| line.starts_with("@@")));
 
         // 同一テキストは「変更なし」。

@@ -222,9 +222,7 @@ impl EditorView {
     pub fn new(buffer: Buffer, theme: Theme, accent: gpui::Hsla, cx: &mut Context<Self>) -> Self {
         let mut highlighter = buffer
             .path()
-            .and_then(|path| path.extension())
-            .and_then(|extension| extension.to_str())
-            .and_then(lang::IncrementalHighlighter::for_extension);
+            .and_then(lang::IncrementalHighlighter::for_path);
         if let Some(highlighter) = highlighter.as_mut() {
             highlighter.reparse_full(&buffer.text()); // 開いた直後の全文パース（以後は増分）
         }
@@ -778,24 +776,15 @@ impl EditorView {
 
     /// statusbar 用の言語ラベル（拡張子から。未知の拡張子は大文字化、拡張子無しは `None`）。
     pub fn language_label(&self) -> Option<SharedString> {
-        let extension = self.buffer.path()?.extension()?.to_str()?;
-        let name = match extension {
-            "rs" => "Rust",
-            "toml" => "TOML",
-            "md" | "markdown" => "Markdown",
-            "json" => "JSON",
-            "js" | "mjs" | "cjs" => "JavaScript",
-            "ts" | "tsx" => "TypeScript",
-            "py" => "Python",
-            "html" | "htm" => "HTML",
-            "css" => "CSS",
-            "yml" | "yaml" => "YAML",
-            "sh" | "zsh" | "bash" => "Shell",
-            "c" | "h" => "C",
-            "cpp" | "cc" | "cxx" | "hpp" => "C++",
-            "go" => "Go",
-            "txt" => "Text",
-            other => return Some(SharedString::from(other.to_uppercase())),
+        let path = self.buffer.path()?;
+        if let Some(language) = lang::language_for_path(path) {
+            return Some(SharedString::from(language.label()));
+        }
+        let extension = path.extension()?.to_str()?;
+        let name = if extension.eq_ignore_ascii_case("txt") {
+            "Text".to_string()
+        } else {
+            extension.to_uppercase()
         };
         Some(SharedString::from(name))
     }
@@ -2322,29 +2311,59 @@ fn build_line_runs(
     let mut byte = 0usize;
     for character in text.chars() {
         let absolute = line_start + byte;
-        let color = line_spans
+        let kind = line_spans
             .iter()
             .find(|span| span.range.start <= absolute && absolute < span.range.end)
-            .map(|span| syntax_color(span.kind, syntax))
+            .map(|span| span.kind);
+        let color = kind
+            .map(|kind| syntax_color(kind, syntax))
             .unwrap_or(default_color);
+        let mut font = text_font.clone();
+        match kind {
+            Some(lang::HighlightKind::Heading | lang::HighlightKind::Strong) => {
+                font.weight = gpui::FontWeight::BOLD;
+            }
+            Some(lang::HighlightKind::Emphasis) => {
+                font.style = gpui::FontStyle::Italic;
+            }
+            _ => {}
+        }
+        let background_color =
+            matches!(kind, Some(lang::HighlightKind::Code)).then(|| syntax.string.alpha(0.10));
         let underlined = marked
             .as_ref()
             .is_some_and(|range| absolute >= range.start && absolute < range.end);
+        let underline = if underlined {
+            Some(UnderlineStyle {
+                color: Some(color),
+                thickness: px(1.0),
+                wavy: false,
+            })
+        } else if matches!(kind, Some(lang::HighlightKind::Link)) {
+            Some(UnderlineStyle {
+                color: Some(color),
+                thickness: px(1.0),
+                wavy: false,
+            })
+        } else {
+            None
+        };
         let char_len = character.len_utf8();
         match runs.last_mut() {
-            Some(run) if run.color == color && run.underline.is_some() == underlined => {
+            Some(run)
+                if run.color == color
+                    && run.font == font
+                    && run.background_color == background_color
+                    && run.underline == underline =>
+            {
                 run.len += char_len;
             }
             _ => runs.push(TextRun {
                 len: char_len,
-                font: text_font.clone(),
+                font,
                 color,
-                background_color: None,
-                underline: underlined.then(|| UnderlineStyle {
-                    color: Some(color),
-                    thickness: px(1.0),
-                    wavy: false,
-                }),
+                background_color,
+                underline,
                 strikethrough: None,
             }),
         }
@@ -2364,6 +2383,11 @@ fn syntax_color(kind: lang::HighlightKind, syntax: &SyntaxColors) -> gpui::Hsla 
         lang::HighlightKind::Comment => syntax.comment,
         lang::HighlightKind::Macro => syntax.macro_,
         lang::HighlightKind::Punctuation => syntax.punctuation,
+        lang::HighlightKind::Heading => syntax.keyword,
+        lang::HighlightKind::Link => syntax.function,
+        lang::HighlightKind::Strong => syntax.type_,
+        lang::HighlightKind::Emphasis => syntax.macro_,
+        lang::HighlightKind::Code => syntax.string,
     }
 }
 

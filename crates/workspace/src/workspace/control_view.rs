@@ -26,11 +26,21 @@ enum AttentionKind {
     /// 承認待ち（インライン許可/拒否。選択肢ラベルは ACP がエージェントから広告されたものをそのまま使う）。
     Permission(agent_panel::PermissionCard),
     /// Task が failed（没入して修正指示 / 破棄）。
-    Failed { digest: Option<SharedString>, tier2: Option<SharedString> },
+    Failed {
+        digest: Option<SharedString>,
+        tier2: Option<SharedString>,
+    },
     /// review_ready / changes_requested / merge_ready（Radar・Integrate の人間 gate）。
-    Review { phase: TaskPhase, digest: Option<SharedString>, tier2: Option<SharedString> },
+    Review {
+        phase: TaskPhase,
+        digest: Option<SharedString>,
+        tier2: Option<SharedString>,
+    },
     /// スレッドの Done 未確認ラッチ（「確認」で Done→Idle の確認済み遷移・herdr の done/idle 区別）。
-    DoneUnread { digest: Option<SharedString>, tier2: Option<SharedString> },
+    DoneUnread {
+        digest: Option<SharedString>,
+        tier2: Option<SharedString>,
+    },
 }
 
 /// ヘッダの stat チップとトークン計の素材（キュー収集と同じ 1 パスで数える）。
@@ -126,9 +136,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !(self.chrome.fleet_mode
-            && self.chrome.fleet_center_view == FleetCenterView::Control)
-        {
+        if !(self.chrome.fleet_mode && self.chrome.fleet_center_view == FleetCenterView::Control) {
             return;
         }
         let Some(head) = self.control_attention_queue(cx).into_iter().next() else {
@@ -144,8 +152,7 @@ impl Workspace {
         if !settings::get(cx).tier2_summaries || !self.chrome.fleet_mode {
             return;
         }
-        let Some(template) = agent_panel::oneshot_template(&settings::get(cx).default_agent)
-        else {
+        let Some(template) = agent_panel::oneshot_template(&settings::get(cx).default_agent) else {
             return; // oneshot 対応外の既定 Agent → 事実文のまま（自然フォールバック）
         };
         let Some(slot) = self
@@ -375,14 +382,15 @@ impl Workspace {
                     .enumerate()
                     .max_by_key(|(_, status)| status.activity.urgency())
                     .map(|(thread_index, status)| {
-                        (thread_index, status.color, status.digest.clone(), status.tier2.clone())
+                        (
+                            thread_index,
+                            status.color,
+                            status.digest.clone(),
+                            status.tier2.clone(),
+                        )
                     })
                     .unwrap_or((0, slot.color, None, None));
-                let digest = slot
-                    .task_space
-                    .result_summary
-                    .clone()
-                    .or(representative.2);
+                let digest = slot.task_space.result_summary.clone().or(representative.2);
                 let tier2 = representative.3;
                 match slot.task_space.phase {
                     TaskPhase::Failed => failed.push(AttentionItem {
@@ -413,8 +421,7 @@ impl Workspace {
         }
         // Blocked は待ち時間の長い順（mock: 経過時間順）。
         blocked.sort_by(|a, b| b.0.cmp(&a.0));
-        let mut queue: Vec<AttentionItem> =
-            blocked.into_iter().map(|(_, item)| item).collect();
+        let mut queue: Vec<AttentionItem> = blocked.into_iter().map(|(_, item)| item).collect();
         queue.extend(failed);
         queue.extend(review);
         queue.extend(done);
@@ -448,9 +455,7 @@ impl Workspace {
             }
         }
         for (index, slot) in self.project_sessions.projects.iter().enumerate() {
-            if slot.task_space.phase == TaskPhase::Integrated
-                && !slot.task_space.is_integration()
-            {
+            if slot.task_space.phase == TaskPhase::Integrated && !slot.task_space.is_integration() {
                 stats.integrated += 1;
             }
             let Some(session) = self.project_sessions.sessions.get(index) else {
@@ -619,9 +624,7 @@ impl Workspace {
                     .text_size(px(10.5))
                     .text_color(theme.fg2)
                     .child(match settings::get(_cx).fleet_goal.clone() {
-                        Some(goal) => {
-                            SharedString::from(i18n::t!("control.goal", "goal" => goal))
-                        }
+                        Some(goal) => SharedString::from(i18n::t!("control.goal", "goal" => goal)),
                         None => SharedString::from(i18n::t!("control.goal_unset")),
                     }),
             )
@@ -739,6 +742,7 @@ impl Workspace {
                 stats.any_working,
                 self.window_active,
                 34.0,
+                self.visual_tick,
             ))
             .child(
                 div()
@@ -832,7 +836,9 @@ impl Workspace {
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.bg3))
                         .child("⏎")
-                        .child(SharedString::from(i18n::t!("control.next", "what" => label)))
+                        .child(SharedString::from(
+                            i18n::t!("control.next", "what" => label),
+                        ))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, window, cx| {
@@ -938,9 +944,7 @@ impl Workspace {
         let urgent = matches!(item.kind, AttentionKind::Permission(_));
         let activity = match &item.kind {
             AttentionKind::Permission(_) => agent_panel::ThreadActivity::Blocked,
-            AttentionKind::Failed { .. } => {
-                agent_panel::ThreadActivity::Done { interrupted: true }
-            }
+            AttentionKind::Failed { .. } => agent_panel::ThreadActivity::Done { interrupted: true },
             AttentionKind::Review { .. } | AttentionKind::DoneUnread { .. } => {
                 agent_panel::ThreadActivity::Done { interrupted: false }
             }
@@ -1037,8 +1041,9 @@ impl Workspace {
                 let mut buttons = div().flex().flex_wrap().gap(px(5.));
                 for (option_index, _kind, label) in &permission.options {
                     let option_index = *option_index;
-                    let panel =
-                        self.project_sessions.sessions[session_index].agent_panel.clone();
+                    let panel = self.project_sessions.sessions[session_index]
+                        .agent_panel
+                        .clone();
                     buttons = buttons.child(
                         button(
                             ("control-perm", position * 8 + option_index),
@@ -1145,160 +1150,164 @@ impl Workspace {
                             ),
                         ),
                 ),
-            AttentionKind::Review { phase, digest, tier2 } => {
+            AttentionKind::Review {
+                phase,
+                digest,
+                tier2,
+            } => {
                 let phase = *phase;
-                let space = self.project_sessions.projects[session_index].task_space.id.clone();
+                let space = self.project_sessions.projects[session_index]
+                    .task_space
+                    .id
+                    .clone();
                 let space_for_integrate = space.clone();
-                card
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .px(px(5.))
-                                    .py(px(1.))
-                                    .rounded(px(4.))
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .text_size(px(9.))
-                                    .text_color(theme.fg2)
-                                    .child(SharedString::from(phase.as_str())),
-                            )
-                            .when_some(digest.clone(), |element, digest| {
-                                element.child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_size(px(10.5))
-                                        .text_color(theme.fg1)
-                                        .child(digest),
-                                )
-                            }),
-                    )
-                    .children(tier2_line(tier2, &theme))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(5.))
-                            .when(phase == TaskPhase::MergeReady, |element| {
-                                element.child(
-                                    button(
-                                        ("control-integrate", position),
-                                        SharedString::from(i18n::t!("control.integrate")),
-                                        true,
-                                        &theme,
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.integrate_task(
-                                                space_for_integrate.clone(),
-                                                cx,
-                                            );
-                                        }),
-                                    ),
-                                )
-                            })
-                            .when(phase != TaskPhase::MergeReady, |element| {
-                                element.child(
-                                    button(
-                                        ("control-radar", position),
-                                        SharedString::from(i18n::t!("control.review")),
-                                        true,
-                                        &theme,
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.review_task_for_merge(space.clone(), cx);
-                                        }),
-                                    ),
-                                )
-                            })
-                            .child(
-                                button(
-                                    ("control-open", position),
-                                    SharedString::from(i18n::t!("control.open")),
-                                    false,
-                                    &theme,
-                                )
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.immerse_from_control(
-                                            session_index,
-                                            thread_index,
-                                            window,
-                                            cx,
-                                        );
-                                    }),
-                                ),
-                            ),
-                    )
-            }
-            AttentionKind::DoneUnread { digest, tier2 } => {
-                let panel = self.project_sessions.sessions[session_index].agent_panel.clone();
-                card
-                    .when_some(digest.clone(), |element, digest| {
-                        element.child(
+                card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
                             div()
-                                .text_size(px(10.5))
-                                .text_color(theme.fg1)
-                                .overflow_hidden()
-                                .child(digest),
+                                .px(px(5.))
+                                .py(px(1.))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(theme.border)
+                                .text_size(px(9.))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(phase.as_str())),
                         )
-                    })
-                    .children(tier2_line(tier2, &theme))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(5.))
-                            .child(
+                        .when_some(digest.clone(), |element, digest| {
+                            element.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.fg1)
+                                    .child(digest),
+                            )
+                        }),
+                )
+                .children(tier2_line(tier2, &theme))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(5.))
+                        .when(phase == TaskPhase::MergeReady, |element| {
+                            element.child(
                                 button(
-                                    ("control-ack", position),
-                                    SharedString::from(i18n::t!("control.confirm")),
+                                    ("control-integrate", position),
+                                    SharedString::from(i18n::t!("control.integrate")),
                                     true,
                                     &theme,
                                 )
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |_this, _, _window, cx| {
+                                    cx.listener(move |this, _, _window, cx| {
                                         cx.stop_propagation();
-                                        // Done→Idle の確認済み遷移（P3・herdr の done/idle 区別）。
-                                        panel.update(cx, |panel, cx| {
-                                            panel.mark_done_seen(thread_index, cx);
-                                        });
+                                        this.integrate_task(space_for_integrate.clone(), cx);
                                     }),
                                 ),
                             )
-                            .child(
+                        })
+                        .when(phase != TaskPhase::MergeReady, |element| {
+                            element.child(
                                 button(
-                                    ("control-open-done", position),
-                                    SharedString::from(i18n::t!("control.open")),
-                                    false,
+                                    ("control-radar", position),
+                                    SharedString::from(i18n::t!("control.review")),
+                                    true,
                                     &theme,
                                 )
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |this, _, window, cx| {
+                                    cx.listener(move |this, _, _window, cx| {
                                         cx.stop_propagation();
-                                        this.immerse_from_control(
-                                            session_index,
-                                            thread_index,
-                                            window,
-                                            cx,
-                                        );
+                                        this.review_task_for_merge(space.clone(), cx);
                                     }),
                                 ),
+                            )
+                        })
+                        .child(
+                            button(
+                                ("control-open", position),
+                                SharedString::from(i18n::t!("control.open")),
+                                false,
+                                &theme,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.immerse_from_control(
+                                        session_index,
+                                        thread_index,
+                                        window,
+                                        cx,
+                                    );
+                                }),
                             ),
+                        ),
+                )
+            }
+            AttentionKind::DoneUnread { digest, tier2 } => {
+                let panel = self.project_sessions.sessions[session_index]
+                    .agent_panel
+                    .clone();
+                card.when_some(digest.clone(), |element, digest| {
+                    element.child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.fg1)
+                            .overflow_hidden()
+                            .child(digest),
                     )
+                })
+                .children(tier2_line(tier2, &theme))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(5.))
+                        .child(
+                            button(
+                                ("control-ack", position),
+                                SharedString::from(i18n::t!("control.confirm")),
+                                true,
+                                &theme,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    // Done→Idle の確認済み遷移（P3・herdr の done/idle 区別）。
+                                    panel.update(cx, |panel, cx| {
+                                        panel.mark_done_seen(thread_index, cx);
+                                    });
+                                }),
+                            ),
+                        )
+                        .child(
+                            button(
+                                ("control-open-done", position),
+                                SharedString::from(i18n::t!("control.open")),
+                                false,
+                                &theme,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.immerse_from_control(
+                                        session_index,
+                                        thread_index,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            ),
+                        ),
+                )
             }
         };
         card.into_any_element()
@@ -1542,7 +1551,9 @@ impl Workspace {
                 continue;
             };
             if let Some(entry) = columns.iter_mut().find(|(phase, _)| *phase == column) {
-                entry.1.push((index, slot.color, slot.task_space.title.clone()));
+                entry
+                    .1
+                    .push((index, slot.color, slot.task_space.title.clone()));
             }
         }
         let mut row = div()
@@ -1598,7 +1609,14 @@ impl Workspace {
                         .when(clickable, |element| {
                             element.cursor_pointer().hover(|style| style.bg(theme.bg2))
                         })
-                        .child(div().w(px(2.5)).h(px(12.)).rounded_full().bg(color).flex_none())
+                        .child(
+                            div()
+                                .w(px(2.5))
+                                .h(px(12.))
+                                .rounded_full()
+                                .bg(color)
+                                .flex_none(),
+                        )
                         .child(
                             div()
                                 .min_w_0()

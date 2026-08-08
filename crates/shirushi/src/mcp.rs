@@ -8,7 +8,7 @@
 //! 注: 起動中の GUI 窓へ「開く」指示を送るライブ制御は IPC ソケットが要る（後続）。v1 は
 //! プロジェクト（ファイル）レベルの操作に集中する。設定 CLI（`shirushi config`）と同じ「書き手」の一つ。
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -209,8 +209,14 @@ fn tool_schemas() -> Value {
 
 fn handle_tool_call(id: Option<Value>, request: &Value, root: &Path) -> Value {
     let params = request.get("params");
-    let name = params.and_then(|params| params.get("name")).and_then(Value::as_str).unwrap_or("");
-    let arguments = params.and_then(|params| params.get("arguments")).cloned().unwrap_or(json!({}));
+    let name = params
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let arguments = params
+        .and_then(|params| params.get("arguments"))
+        .cloned()
+        .unwrap_or(json!({}));
     let outcome = match name {
         "list_files" => tool_list_files(&arguments, root),
         "read_file" => tool_read_file(&arguments, root),
@@ -253,46 +259,91 @@ fn resolve_path(root: &Path, raw: &str) -> PathBuf {
 }
 
 fn tool_list_files(arguments: &Value, root: &Path) -> Result<String, String> {
-    let limit = arguments.get("limit").and_then(Value::as_u64).unwrap_or(2000) as usize;
+    let limit = arguments
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(2000) as usize;
     let worktree = project::Worktree::new(root).map_err(|error| format!("{error:#}"))?;
-    let files: Vec<String> = worktree.all_files(limit).into_iter().map(|(_, relative)| relative).collect();
+    let files: Vec<String> = worktree
+        .all_files(limit)
+        .into_iter()
+        .map(|(_, relative)| relative)
+        .collect();
     Ok(files.join("\n"))
 }
 
 fn tool_read_file(arguments: &Value, root: &Path) -> Result<String, String> {
-    let path = arguments.get("path").and_then(Value::as_str).ok_or("path が必要")?;
+    let path = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("path が必要")?;
     let full = resolve_path(root, path);
-    std::fs::read_to_string(&full).map_err(|error| format!("読めない ({}): {error}", full.display()))
+    std::fs::read_to_string(&full)
+        .map_err(|error| format!("読めない ({}): {error}", full.display()))
 }
 
 fn tool_write_file(arguments: &Value, root: &Path) -> Result<String, String> {
-    let path = arguments.get("path").and_then(Value::as_str).ok_or("path が必要")?;
-    let content = arguments.get("content").and_then(Value::as_str).ok_or("content が必要")?;
+    let path = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("path が必要")?;
+    let content = arguments
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or("content が必要")?;
     let full = resolve_path(root, path);
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent).map_err(|error| format!("親作成に失敗: {error}"))?;
     }
-    std::fs::write(&full, content).map_err(|error| format!("書けない ({}): {error}", full.display()))?;
-    Ok(format!("書き込み完了: {} ({} バイト)", full.display(), content.len()))
+    std::fs::write(&full, content)
+        .map_err(|error| format!("書けない ({}): {error}", full.display()))?;
+    Ok(format!(
+        "書き込み完了: {} ({} バイト)",
+        full.display(),
+        content.len()
+    ))
 }
 
 fn tool_search(arguments: &Value, root: &Path) -> Result<String, String> {
-    let query = arguments.get("query").and_then(Value::as_str).ok_or("query が必要")?;
-    let is_regex = arguments.get("regex").and_then(Value::as_bool).unwrap_or(false);
-    let case_sensitive = arguments.get("case_sensitive").and_then(Value::as_bool).unwrap_or(false);
+    let query = arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .ok_or("query が必要")?;
+    let is_regex = arguments
+        .get("regex")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let case_sensitive = arguments
+        .get("case_sensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let worktree = project::Worktree::new(root).map_err(|error| format!("{error:#}"))?;
-    let files: Vec<PathBuf> = worktree.all_files(5000).into_iter().map(|(path, _)| path).collect();
+    let files: Vec<PathBuf> = worktree
+        .all_files(5000)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
     let search_query = search::SearchQuery::new(query, is_regex, case_sensitive)
         .map_err(|error| format!("検索パターン不正: {error}"))?;
     let results = search_query.search_files(&files);
     let mut lines = Vec::new();
     let mut total = 0;
     for file in &results {
-        let relative = file.path.strip_prefix(root).unwrap_or(&file.path).display().to_string();
+        let relative = file
+            .path
+            .strip_prefix(root)
+            .unwrap_or(&file.path)
+            .display()
+            .to_string();
         for found in &file.matches {
             total += 1;
             if lines.len() < 200 {
-                lines.push(format!("{}:{}: {}", relative, found.line + 1, found.line_text.trim()));
+                lines.push(format!(
+                    "{}:{}: {}",
+                    relative,
+                    found.line + 1,
+                    found.line_text.trim()
+                ));
             }
         }
     }
@@ -311,7 +362,11 @@ fn tool_git_status(root: &Path) -> Result<String, String> {
     let lines: Vec<String> = entries
         .iter()
         .map(|(path, status)| {
-            let relative = path.strip_prefix(root).unwrap_or(path).display().to_string();
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string();
             format!("{:?}\t{}", status, relative)
         })
         .collect();
@@ -334,7 +389,10 @@ fn task_json(task: &storage::TaskSpaceRecord) -> String {
 }
 
 fn tool_fleet_create(arguments: &Value, root: &Path) -> Result<String, String> {
-    let title = arguments.get("title").and_then(Value::as_str).ok_or("title が必要")?;
+    let title = arguments
+        .get("title")
+        .and_then(Value::as_str)
+        .ok_or("title が必要")?;
     super::fleet::create_task(root, title)
         .map(|task| task_json(&task))
         .map_err(|error| format!("{error:#}"))
@@ -347,8 +405,14 @@ fn tool_fleet_list(root: &Path) -> Result<String, String> {
 }
 
 fn tool_fleet_update(arguments: &Value) -> Result<String, String> {
-    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
-    let phase = arguments.get("phase").and_then(Value::as_str).ok_or("phase が必要")?;
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or("task_id が必要")?;
+    let phase = arguments
+        .get("phase")
+        .and_then(Value::as_str)
+        .ok_or("phase が必要")?;
     let phase = super::fleet::parse_phase(phase).map_err(|error| format!("{error:#}"))?;
     let summary = arguments.get("summary").and_then(Value::as_str);
     super::fleet::update_task(task_id, phase, summary)
@@ -357,8 +421,14 @@ fn tool_fleet_update(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_fleet_wait(arguments: &Value) -> Result<String, String> {
-    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
-    let phase = arguments.get("phase").and_then(Value::as_str).ok_or("phase が必要")?;
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or("task_id が必要")?;
+    let phase = arguments
+        .get("phase")
+        .and_then(Value::as_str)
+        .ok_or("phase が必要")?;
     let phase = super::fleet::parse_phase(phase).map_err(|error| format!("{error:#}"))?;
     let seconds = arguments
         .get("timeout_seconds")
@@ -371,21 +441,30 @@ fn tool_fleet_wait(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_fleet_review(arguments: &Value, root: &Path) -> Result<String, String> {
-    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or("task_id が必要")?;
     super::fleet::review_task(task_id, root)
         .map(|task| task_json(&task))
         .map_err(|error| format!("{error:#}"))
 }
 
 fn tool_fleet_integrate(arguments: &Value, root: &Path) -> Result<String, String> {
-    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or("task_id が必要")?;
     super::fleet::integrate_task(task_id, root)
         .map(|task| task_json(&task))
         .map_err(|error| format!("{error:#}"))
 }
 
 fn tool_fleet_spawn(arguments: &Value) -> Result<String, String> {
-    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or("task_id が必要")?;
     super::fleet::gui_request(
         "spawn_agent",
         json!({
@@ -399,22 +478,34 @@ fn tool_fleet_spawn(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_fleet_send(arguments: &Value) -> Result<String, String> {
-    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
-    let message = arguments.get("message").and_then(Value::as_str).ok_or("message が必要")?;
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or("task_id が必要")?;
+    let message = arguments
+        .get("message")
+        .and_then(Value::as_str)
+        .ok_or("message が必要")?;
     super::fleet::gui_request("send", json!({ "task_id": task_id, "message": message }))
         .map(|result| result.to_string())
         .map_err(|error| format!("{error:#}"))
 }
 
 fn tool_fleet_digest(arguments: &Value) -> Result<String, String> {
-    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or("task_id が必要")?;
     super::fleet::gui_request("digest", json!({ "task_id": task_id }))
         .map(|result| result.to_string())
         .map_err(|error| format!("{error:#}"))
 }
 
 fn tool_fleet_set_depends(arguments: &Value) -> Result<String, String> {
-    let task_id = arguments.get("task_id").and_then(Value::as_str).ok_or("task_id が必要")?;
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or("task_id が必要")?;
     let depends_on: Vec<String> = arguments
         .get("depends_on")
         .and_then(Value::as_array)
@@ -432,7 +523,10 @@ fn tool_fleet_set_depends(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_fleet_events(arguments: &Value) -> Result<String, String> {
-    let since = arguments.get("since_id").and_then(Value::as_i64).unwrap_or(0);
+    let since = arguments
+        .get("since_id")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     super::fleet::events_since(since)
         .map(|result| result.to_string())
         .map_err(|error| format!("{error:#}"))
@@ -453,13 +547,25 @@ mod tests {
     #[test]
     fn initialize_and_tools_list() {
         let root = scratch("init");
-        let init = handle(&json!({ "jsonrpc":"2.0","id":1,"method":"initialize" }), &root).unwrap();
+        let init = handle(
+            &json!({ "jsonrpc":"2.0","id":1,"method":"initialize" }),
+            &root,
+        )
+        .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "shirushi");
-        let list = handle(&json!({ "jsonrpc":"2.0","id":2,"method":"tools/list" }), &root).unwrap();
+        let list = handle(
+            &json!({ "jsonrpc":"2.0","id":2,"method":"tools/list" }),
+            &root,
+        )
+        .unwrap();
         let tools = list["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 16);
         // 通知は応答なし。
-        assert!(handle(&json!({ "jsonrpc":"2.0","method":"notifications/initialized" }), &root).is_none());
+        assert!(handle(
+            &json!({ "jsonrpc":"2.0","method":"notifications/initialized" }),
+            &root
+        )
+        .is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -474,7 +580,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(write["result"]["isError"], Value::Null); // 成功（isError 無し）
-        // read_file
+                                                             // read_file
         let read = handle(
             &json!({ "jsonrpc":"2.0","id":2,"method":"tools/call",
                 "params": { "name": "read_file", "arguments": { "path": "a.rs" } } }),

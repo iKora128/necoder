@@ -53,7 +53,11 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::os_action(t!("menu.copy"), editor_view::Copy, OsAction::Copy),
             MenuItem::os_action(t!("menu.paste"), editor_view::Paste, OsAction::Paste),
             MenuItem::separator(),
-            MenuItem::os_action(t!("menu.select_all"), editor_view::SelectAll, OsAction::SelectAll),
+            MenuItem::os_action(
+                t!("menu.select_all"),
+                editor_view::SelectAll,
+                OsAction::SelectAll,
+            ),
             MenuItem::action(t!("menu.select_next"), editor_view::SelectNext),
             MenuItem::action(t!("menu.add_cursor_above"), editor_view::AddCursorAbove),
             MenuItem::action(t!("menu.add_cursor_below"), editor_view::AddCursorBelow),
@@ -82,7 +86,10 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action(t!("menu.todo_board"), workspace::ToggleTodoBoard),
             MenuItem::action(t!("menu.herd"), workspace::ToggleHerdSidebar),
             MenuItem::action(t!("menu.fleet"), workspace::ToggleFleet),
-            MenuItem::action(t!("menu.agent_full_screen"), workspace::ToggleAgentFullScreen),
+            MenuItem::action(
+                t!("menu.agent_full_screen"),
+                workspace::ToggleAgentFullScreen,
+            ),
             MenuItem::action(t!("menu.diagnostics"), workspace::DiagnosticsPanel),
             MenuItem::separator(),
             MenuItem::action(t!("menu.split_right"), workspace::SplitRight),
@@ -119,13 +126,17 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action(t!("menu.minimize"), workspace::Minimize),
             MenuItem::action(t!("menu.zoom"), workspace::Zoom),
         ]),
-        Menu::new(t!("menu.help")).items(vec![
-            MenuItem::action(t!("menu.report_bug"), workspace::ReportBug),
-        ]),
+        Menu::new(t!("menu.help")).items(vec![MenuItem::action(
+            t!("menu.report_bug"),
+            workspace::ReportBug,
+        )]),
     ]
 }
 
 /// Dock アイコン右クリックのメニュー。
 pub fn dock_menu() -> Vec<MenuItem> {
-    vec![MenuItem::action(t!("menu.new_window"), workspace::NewWindow)]
+    vec![MenuItem::action(
+        t!("menu.new_window"),
+        workspace::NewWindow,
+    )]
 }

@@ -62,7 +62,10 @@ fn write_crash_log(dir: &Path, info: &std::panic::PanicHookInfo<'_>) -> std::io:
         .location()
         .map(|location| location.to_string())
         .unwrap_or_else(|| "(場所不明)".to_string());
-    let thread = std::thread::current().name().unwrap_or("(無名スレッド)").to_string();
+    let thread = std::thread::current()
+        .name()
+        .unwrap_or("(無名スレッド)")
+        .to_string();
     let backtrace = std::backtrace::Backtrace::force_capture();
     let body = format!(
         "Shirushi v{version}\nos: {os} {arch}\ntime(unix): {unix_seconds}\nthread: {thread}\nlocation: {location}\npanic: {payload}\n\n{backtrace}\n",
@@ -115,9 +118,15 @@ fn take_pending_crash_in(dir: &Path) -> Option<PathBuf> {
 /// GitHub new issue の URL を組み立てる（title + 本文に環境とログ抜粋を事前記入）。
 /// crash_log があれば末尾抜粋を fenced block で貼る。ネット送信はしない（URL を返すだけ）。
 pub fn bug_report_url(crash_log: Option<&Path>) -> String {
-    let title = if crash_log.is_some() { "Crash report" } else { "Bug report" };
+    let title = if crash_log.is_some() {
+        "Crash report"
+    } else {
+        "Bug report"
+    };
     let mut body = String::new();
-    body.push_str("## What happened / 何が起きたか\n\n\n\n## Steps to reproduce / 再現手順\n\n1. \n\n");
+    body.push_str(
+        "## What happened / 何が起きたか\n\n\n\n## Steps to reproduce / 再現手順\n\n1. \n\n",
+    );
     body.push_str(&format!(
         "## Environment / 環境\n\n- Shirushi v{}\n- {} {}{}\n- locale: {}\n",
         env!("CARGO_PKG_VERSION"),
@@ -196,7 +205,11 @@ fn percent_encode(text: &str) -> String {
 
 /// URL を既定ブラウザで開く（macOS: `open` / それ以外: `xdg-open`）。
 pub fn open_url(url: &str) -> anyhow::Result<()> {
-    let command = if std::env::consts::OS == "macos" { "open" } else { "xdg-open" };
+    let command = if std::env::consts::OS == "macos" {
+        "open"
+    } else {
+        "xdg-open"
+    };
     let status = std::process::Command::new(command)
         .arg(url)
         .status()
@@ -210,7 +223,8 @@ mod tests {
     use super::*;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("shirushi_crash_{}_{}", tag, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("shirushi_crash_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -257,7 +271,9 @@ mod tests {
         assert!(dir.join("pending").exists());
         // 消えたのは古い方（0000〜0004）。
         assert!(!dir.join("crash-0000-1.log").exists());
-        assert!(dir.join(format!("crash-{:04}-1.log", KEEP_LOGS + 4)).exists());
+        assert!(dir
+            .join(format!("crash-{:04}-1.log", KEEP_LOGS + 4))
+            .exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -265,12 +281,21 @@ mod tests {
     fn bug_report_url_embeds_environment_and_excerpt() {
         let dir = temp_dir("url");
         let log = dir.join("crash-1-1.log");
-        std::fs::write(&log, "Shirushi v0.1.0\npanic: boom at src/x.rs:1\nbacktrace line\n").unwrap();
+        std::fs::write(
+            &log,
+            "Shirushi v0.1.0\npanic: boom at src/x.rs:1\nbacktrace line\n",
+        )
+        .unwrap();
 
         let url = bug_report_url(Some(&log));
-        assert!(url.starts_with("https://github.com/iKora128/shirushi/issues/new?title=Crash%20report&body="));
+        assert!(url.starts_with(
+            "https://github.com/iKora128/shirushi/issues/new?title=Crash%20report&body="
+        ));
         // 本文（URL エンコード済み）にバージョンと panic 行が含まれる。
-        assert!(url.contains(&percent_encode(&format!("Shirushi v{}", env!("CARGO_PKG_VERSION")))));
+        assert!(url.contains(&percent_encode(&format!(
+            "Shirushi v{}",
+            env!("CARGO_PKG_VERSION")
+        ))));
         assert!(url.contains(&percent_encode("panic: boom at src/x.rs:1")));
 
         // ログ無し = Bug report タイトルで、Crash log 節が無い。

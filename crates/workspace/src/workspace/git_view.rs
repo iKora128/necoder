@@ -3,10 +3,22 @@ use crate::workspace::*;
 impl Workspace {
     pub(crate) fn render_git_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
-        let (bg0, bg1, bg2, border, fg0, fg1, fg2) =
-            (theme.bg0, theme.bg1, theme.bg2, theme.border, theme.fg0, theme.fg1, theme.fg2);
+        let (bg0, bg1, bg2, border, fg0, fg1, fg2) = (
+            theme.bg0,
+            theme.bg1,
+            theme.bg2,
+            theme.border,
+            theme.fg0,
+            theme.fg1,
+            theme.fg2,
+        );
         if !self.git_panel.read(cx).open {
-            return div().w(px(self.chrome.explorer_width)).h_full().flex_none().bg(bg1).into_any_element();
+            return div()
+                .w(px(self.chrome.explorer_width))
+                .h_full()
+                .flex_none()
+                .bg(bg1)
+                .into_any_element();
         }
         let (focus, message, branch_name, busy, snapshot) = {
             let panel = self.git_panel.read(cx);
@@ -18,7 +30,10 @@ impl Workspace {
                 panel.snapshot(),
             )
         };
-        let accent = self.active_slot().map(|slot| slot.color).unwrap_or_else(|| project_color(0));
+        let accent = self
+            .active_slot()
+            .map(|slot| slot.color)
+            .unwrap_or_else(|| project_color(0));
         if self.active_slot().is_none() {
             return div()
                 .w(px(self.chrome.explorer_width))
@@ -29,7 +44,13 @@ impl Workspace {
                 .border_color(border)
                 .track_focus(&focus)
                 .on_key_down(cx.listener(Self::on_git_key_down))
-                .child(div().p(px(12.)).text_size(px(11.5)).text_color(fg2).child(SharedString::from(i18n::t!("git.no_project"))))
+                .child(
+                    div()
+                        .p(px(12.))
+                        .text_size(px(11.5))
+                        .text_color(fg2)
+                        .child(SharedString::from(i18n::t!("git.no_project"))),
+                )
                 .into_any_element();
         }
         let branch = self.active_slot().and_then(|slot| slot.branch.clone());
@@ -62,7 +83,13 @@ impl Workspace {
                         .items_center()
                         .gap(px(3.))
                         .max_w(px(120.))
-                        .child(div().flex_none().text_size(px(10.5)).text_color(accent).child("⎇"))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.5))
+                                .text_color(accent)
+                                .child("⎇"),
+                        )
                         .child(
                             div()
                                 .overflow_hidden()
@@ -90,7 +117,9 @@ impl Workspace {
                             .tooltip(Tooltip::text(i18n::t!("git.pr_create_tip"), theme.clone()))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, _, window, cx| this.github_action(true, window, cx)),
+                                cx.listener(|this, _, window, cx| {
+                                    this.github_action(true, window, cx)
+                                }),
                             ),
                     )
                     .child(
@@ -107,7 +136,9 @@ impl Workspace {
                             .tooltip(Tooltip::text(i18n::t!("git.pr_open_tip"), theme.clone()))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(|this, _, window, cx| this.github_action(false, window, cx)),
+                                cx.listener(|this, _, window, cx| {
+                                    this.github_action(false, window, cx)
+                                }),
                             ),
                     )
             })
@@ -161,7 +192,9 @@ impl Workspace {
         let input_body = if input_text.is_empty() {
             div().text_color(fg2).child(SharedString::from(placeholder))
         } else {
-            div().text_color(fg0).child(SharedString::from(format!("{input_text}▍")))
+            div()
+                .text_color(fg0)
+                .child(SharedString::from(format!("{input_text}▍")))
         };
         let input_row = div()
             .id("git-input")
@@ -207,10 +240,15 @@ impl Workspace {
                     .text_size(px(13.))
                     .text_color(if busy { fg2 } else { fg1 })
                     .when(!busy, |element| {
-                        element.cursor_pointer().hover(|style| style.bg(theme.bg3).text_color(fg0)).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| this.generate_commit_message(window, cx)),
-                        )
+                        element
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3).text_color(fg0))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.generate_commit_message(window, cx)
+                                }),
+                            )
                     })
                     .child("✨")
                     .tooltip(Tooltip::text(i18n::t!("git.ai_message_tip"), theme.clone())),
@@ -226,10 +264,14 @@ impl Workspace {
                     .rounded(px(6.))
                     .text_size(px(12.))
                     .when(commit_ready, |element| {
-                        element.bg(accent).text_color(theme.bg0).cursor_pointer().on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| this.git_commit(window, cx)),
-                        )
+                        element
+                            .bg(accent)
+                            .text_color(theme.bg0)
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| this.git_commit(window, cx)),
+                            )
                     })
                     .when(!commit_ready, |element| element.bg(bg2).text_color(fg2))
                     .child(SharedString::from(i18n::t!("git.commit"))),
@@ -241,28 +283,70 @@ impl Workspace {
             });
 
         // ── 変更一覧（staged / unstaged）。高さを抑えて下に履歴を置く ──
-        let mut body = div().flex_none().max_h(px(240.)).flex().flex_col().overflow_hidden().pb(px(6.));
-        let staged_count = changes.iter().filter(|change| change.staged.is_some()).count();
-        let unstaged_count = changes.iter().filter(|change| change.unstaged.is_some()).count();
+        let mut body = div()
+            .flex_none()
+            .max_h(px(240.))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .pb(px(6.));
+        let staged_count = changes
+            .iter()
+            .filter(|change| change.staged.is_some())
+            .count();
+        let unstaged_count = changes
+            .iter()
+            .filter(|change| change.unstaged.is_some())
+            .count();
         if staged_count > 0 {
-            body = body.child(self.git_section_header(&i18n::t!("git.staged"), staged_count, false, cx));
-            for (index, change) in changes.iter().filter(|change| change.staged.is_some()).enumerate() {
+            body = body.child(self.git_section_header(
+                &i18n::t!("git.staged"),
+                staged_count,
+                false,
+                cx,
+            ));
+            for (index, change) in changes
+                .iter()
+                .filter(|change| change.staged.is_some())
+                .enumerate()
+            {
                 if let Some(kind) = change.staged {
-                    body = body.child(self.git_change_row(change.path.clone(), kind, true, index, cx));
+                    body =
+                        body.child(self.git_change_row(change.path.clone(), kind, true, index, cx));
                 }
             }
         }
         if unstaged_count > 0 {
-            body = body.child(self.git_section_header(&i18n::t!("git.changes"), unstaged_count, true, cx));
-            for (index, change) in changes.iter().filter(|change| change.unstaged.is_some()).enumerate() {
+            body = body.child(self.git_section_header(
+                &i18n::t!("git.changes"),
+                unstaged_count,
+                true,
+                cx,
+            ));
+            for (index, change) in changes
+                .iter()
+                .filter(|change| change.unstaged.is_some())
+                .enumerate()
+            {
                 if let Some(kind) = change.unstaged {
-                    body = body.child(self.git_change_row(change.path.clone(), kind, false, index, cx));
+                    body = body.child(self.git_change_row(
+                        change.path.clone(),
+                        kind,
+                        false,
+                        index,
+                        cx,
+                    ));
                 }
             }
         }
         if staged_count == 0 && unstaged_count == 0 {
             body = body.child(
-                div().px(px(12.)).py(px(8.)).text_size(px(11.5)).text_color(fg2).child(SharedString::from(i18n::t!("git.no_changes"))),
+                div()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .text_size(px(11.5))
+                    .text_color(fg2)
+                    .child(SharedString::from(i18n::t!("git.no_changes"))),
             );
         }
 
@@ -312,16 +396,19 @@ impl Workspace {
             .text_size(px(13.))
             .text_color(if disabled { theme.fg2 } else { theme.fg1 })
             .when(!disabled, |element| {
-                element.cursor_pointer().hover(|style| style.bg(theme.bg3).text_color(theme.fg0)).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                        if is_push {
-                            this.git_push(window, cx)
-                        } else {
-                            this.git_pull(window, cx)
-                        }
-                    }),
-                )
+                element
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            if is_push {
+                                this.git_push(window, cx)
+                            } else {
+                                this.git_pull(window, cx)
+                            }
+                        }),
+                    )
             })
             .child(glyph)
             .tooltip(Tooltip::text(label, theme.clone()))
@@ -384,8 +471,10 @@ impl Workspace {
         let theme = self.theme.clone();
         let tint = Self::git_tint(&theme, kind);
         let letter = Self::git_letter(kind);
-        let name =
-            path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
         let row_id = if staged { "git-staged" } else { "git-unstaged" };
         let act_id = if staged { "git-unstage" } else { "git-stage" };
         let action_path = path.clone();
@@ -398,7 +487,14 @@ impl Workspace {
             .py(px(3.))
             .text_size(px(12.))
             .hover(|style| style.bg(theme.bg3))
-            .child(div().w(px(12.)).flex_none().text_size(px(11.)).text_color(tint).child(letter))
+            .child(
+                div()
+                    .w(px(12.))
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(tint)
+                    .child(letter),
+            )
             .child(
                 div()
                     .flex_1()
@@ -419,7 +515,11 @@ impl Workspace {
                     .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
                     .child(if staged { "−" } else { "＋" })
                     .tooltip(Tooltip::text(
-                        SharedString::from(if staged { i18n::t!("git.unstage") } else { i18n::t!("git.stage") }),
+                        SharedString::from(if staged {
+                            i18n::t!("git.unstage")
+                        } else {
+                            i18n::t!("git.stage")
+                        }),
                         theme.clone(),
                     ))
                     .on_mouse_down(
@@ -464,17 +564,23 @@ impl Workspace {
         let cell_w = (max_lane as f32 + 1.0) * lane_w;
         let lane_x = |lane: usize| lane as f32 * lane_w + lane_w / 2.0;
 
-        let mut list = div().flex().flex_col().flex_1().min_h_0().overflow_hidden().child(
-            div()
-                .flex_none()
-                .px(px(10.))
-                .py(px(3.))
-                .pt(px(6.))
-                .text_size(px(10.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.fg2)
-                .child(SharedString::from(i18n::t!("git.history"))),
-        );
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(10.))
+                    .py(px(3.))
+                    .pt(px(6.))
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("git.history"))),
+            );
 
         for commit in commits {
             // ── グラフセル（点 + 縦レーン + 横コネクタ）──
@@ -526,8 +632,13 @@ impl Workspace {
             );
 
             // ── テキスト（ref チップ + 要約 + hash）──
-            let mut text =
-                div().flex_1().flex().items_center().gap(px(6.)).overflow_hidden().whitespace_nowrap();
+            let mut text = div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .overflow_hidden()
+                .whitespace_nowrap();
             for reference in &commit.refs {
                 let is_head = reference.contains("HEAD");
                 let label = reference.trim_start_matches("HEAD -> ").to_string();
@@ -561,12 +672,24 @@ impl Workspace {
                 );
 
             list = list.child(
-                div().flex().items_center().gap(px(6.)).px(px(10.)).h(px(row_h)).child(cell).child(text),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(10.))
+                    .h(px(row_h))
+                    .child(cell)
+                    .child(text),
             );
         }
         if commits.is_empty() {
             list = list.child(
-                div().px(px(12.)).py(px(6.)).text_size(px(11.)).text_color(theme.fg2).child(SharedString::from(i18n::t!("git.no_commits"))),
+                div()
+                    .px(px(12.))
+                    .py(px(6.))
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("git.no_commits"))),
             );
         }
         list
@@ -582,8 +705,14 @@ impl Workspace {
         let branches = menu.branches.clone();
         let worktrees = menu.worktrees.clone();
 
-        let (bg2, bg3, border, fg0, fg1, fg2) =
-            (theme.bg2, theme.bg3, theme.border, theme.fg0, theme.fg1, theme.fg2);
+        let (bg2, bg3, border, fg0, fg1, fg2) = (
+            theme.bg2,
+            theme.bg3,
+            theme.border,
+            theme.fg0,
+            theme.fg1,
+            theme.fg2,
+        );
 
         let mut menu_box = div()
             .absolute()
@@ -595,10 +724,20 @@ impl Workspace {
             .border_color(border)
             .rounded(px(8.))
             .p(px(4.))
-            .shadow(vec![
-                gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
-            ])
-            .child(div().px(px(8.)).py(px(4.)).text_size(px(10.5)).text_color(fg2).child(SharedString::from(i18n::t!("git.branches"))));
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(6.),
+                gpui::hsla(0., 0., 0., 0.4),
+            )
+            .blur_radius(px(16.))])
+            .child(
+                div()
+                    .px(px(8.))
+                    .py(px(4.))
+                    .text_size(px(10.5))
+                    .text_color(fg2)
+                    .child(SharedString::from(i18n::t!("git.branches"))),
+            );
 
         for (index, branch) in branches.into_iter().enumerate() {
             let is_current = current.as_deref() == Some(branch.as_str());
@@ -652,7 +791,10 @@ impl Workspace {
                             .text_color(fg2)
                             .hover(|style| style.bg(bg2).text_color(fg0))
                             .child("⧉")
-                            .tooltip(Tooltip::text(i18n::t!("git.worktree_open_tip"), theme.clone()))
+                            .tooltip(Tooltip::text(
+                                i18n::t!("git.worktree_open_tip"),
+                                theme.clone(),
+                            ))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _window, cx| {
@@ -674,7 +816,10 @@ impl Workspace {
                                 .text_color(fg2)
                                 .hover(|style| style.bg(bg2).text_color(theme.err))
                                 .child("🗑")
-                                .tooltip(Tooltip::text(i18n::t!("git.delete_branch_tip"), theme.clone()))
+                                .tooltip(Tooltip::text(
+                                    i18n::t!("git.delete_branch_tip"),
+                                    theme.clone(),
+                                ))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, _, _window, cx| {
@@ -689,11 +834,19 @@ impl Workspace {
 
         // worktree セクション（現在の作業ツリー以外）。
         let root = slot.worktree.root();
-        let others: Vec<_> = worktrees.into_iter().filter(|worktree| worktree.path != root).collect();
+        let others: Vec<_> = worktrees
+            .into_iter()
+            .filter(|worktree| worktree.path != root)
+            .collect();
         if !others.is_empty() {
-            menu_box = menu_box
-                .child(div().h(px(1.)).bg(border).my(px(3.)))
-                .child(div().px(px(8.)).py(px(4.)).text_size(px(10.5)).text_color(fg2).child("worktree"));
+            menu_box = menu_box.child(div().h(px(1.)).bg(border).my(px(3.))).child(
+                div()
+                    .px(px(8.))
+                    .py(px(4.))
+                    .text_size(px(10.5))
+                    .text_color(fg2)
+                    .child("worktree"),
+            );
             for (index, worktree) in others.into_iter().enumerate() {
                 let label = worktree.branch.clone().unwrap_or_else(|| {
                     worktree
@@ -725,7 +878,13 @@ impl Workspace {
                                 .text_color(fg1)
                                 .child(SharedString::from(label)),
                         )
-                        .child(div().flex_none().text_size(px(10.)).text_color(fg2).child(SharedString::from(i18n::t!("git.window_chip"))))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(fg2)
+                                .child(SharedString::from(i18n::t!("git.window_chip"))),
+                        )
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, _window, cx| {

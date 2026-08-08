@@ -1,7 +1,12 @@
 use crate::workspace::*;
 
 impl Workspace {
-    pub(crate) fn open_outline(&mut self, _: &OutlineSymbols, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_outline(
+        &mut self,
+        _: &OutlineSymbols,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -29,11 +34,22 @@ impl Workspace {
                     .with_detail(format!("{}", item.row + 1))
             })
             .collect();
-        self.open_picker(PickerMode::Symbols, i18n::t!("symbols.outline"), picker_items, window, cx);
+        self.open_picker(
+            PickerMode::Symbols,
+            i18n::t!("symbols.outline"),
+            picker_items,
+            window,
+            cx,
+        );
     }
 
     /// ⌘T: LSP workspace/symbol を Picker で（空クエリの初期一覧 → Picker の fuzzy で絞る）。
-    pub(crate) fn open_workspace_symbols(&mut self, _: &WorkspaceSymbols, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_workspace_symbols(
+        &mut self,
+        _: &WorkspaceSymbols,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -82,10 +98,13 @@ impl Workspace {
                         .file_name()
                         .map(|name| name.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    items.push(
-                        PickerItem::new(id, name.to_string())
-                            .with_detail(if container.is_empty() { file } else { format!("{container} — {file}") }),
-                    );
+                    items.push(PickerItem::new(id, name.to_string()).with_detail(
+                        if container.is_empty() {
+                            file
+                        } else {
+                            format!("{container} — {file}")
+                        },
+                    ));
                 }
                 if items.is_empty() {
                     return;
@@ -124,32 +143,62 @@ impl Workspace {
         }
         let current_row = {
             let view = editor.read(cx);
-            let head = view.buffer().selections().first().map(|s| s.head).unwrap_or(0);
+            let head = view
+                .buffer()
+                .selections()
+                .first()
+                .map(|s| s.head)
+                .unwrap_or(0);
             view.buffer().snapshot().byte_to_point(head).row as u32
         };
         let target = if delta > 0 {
-            rows.iter().copied().find(|row| *row > current_row).unwrap_or(rows[0])
+            rows.iter()
+                .copied()
+                .find(|row| *row > current_row)
+                .unwrap_or(rows[0])
         } else {
-            rows.iter().rev().copied().find(|row| *row < current_row).unwrap_or(*rows.last().unwrap())
+            rows.iter()
+                .rev()
+                .copied()
+                .find(|row| *row < current_row)
+                .unwrap_or(*rows.last().unwrap())
         };
         editor.update(cx, |view, cx| view.reveal_position(target as usize, 0, cx));
     }
 
-    pub(crate) fn next_diagnostic(&mut self, _: &NextDiagnostic, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn next_diagnostic(
+        &mut self,
+        _: &NextDiagnostic,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.step_diagnostic(1, cx);
     }
 
-    pub(crate) fn prev_diagnostic(&mut self, _: &PrevDiagnostic, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn prev_diagnostic(
+        &mut self,
+        _: &PrevDiagnostic,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.step_diagnostic(-1, cx);
     }
 
     /// statusbar の ✗▲ クリック: 全ファイルの診断を検索パネル UI で一覧（メッセージがプレビュー行）。
-    pub(crate) fn open_diagnostics_panel(&mut self, _: &DiagnosticsPanel, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_diagnostics_panel(
+        &mut self,
+        _: &DiagnosticsPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut results: Vec<search::FileMatch> = Vec::new();
         let mut files: Vec<&PathBuf> = self.raw_diagnostics.keys().collect();
         files.sort();
         for path in files {
-            let Some(array) = self.raw_diagnostics.get(path).and_then(|value| value.as_array())
+            let Some(array) = self
+                .raw_diagnostics
+                .get(path)
+                .and_then(|value| value.as_array())
             else {
                 continue;
             };
@@ -175,7 +224,10 @@ impl Workspace {
                 continue;
             }
             matches.sort_by_key(|found| found.line);
-            results.push(search::FileMatch { path: path.clone(), matches });
+            results.push(search::FileMatch {
+                path: path.clone(),
+                matches,
+            });
         }
         if results.is_empty() {
             return;
@@ -186,7 +238,12 @@ impl Workspace {
 
     // ── code actions（⌘.・M11） ──
 
-    pub(crate) fn open_code_actions(&mut self, _: &CodeActions, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_code_actions(
+        &mut self,
+        _: &CodeActions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -198,7 +255,9 @@ impl Workspace {
             let position = view.caret_window_position();
             view.buffer()
                 .path()
-                .filter(|path| language_server_for(path, view.buffer().host().is_remote()).is_some())
+                .filter(|path| {
+                    language_server_for(path, view.buffer().host().is_remote()).is_some()
+                })
                 .map(|path| {
                     let (line, character) = view.cursor_lsp_position();
                     (path.to_path_buf(), line, character, position)
@@ -236,7 +295,12 @@ impl Workspace {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let receiver = lsp.code_actions(&path, line, character, serde_json::Value::Array(diagnostics));
+        let receiver = lsp.code_actions(
+            &path,
+            line,
+            character,
+            serde_json::Value::Array(diagnostics),
+        );
         cx.spawn(async move |_workspace, cx| {
             let response = receiver.await;
             if std::env::var_os("SHIRUSHI_LSP_DEBUG").is_some() {
@@ -267,7 +331,12 @@ impl Workspace {
                     .and_then(|editor| editor.read(cx).caret_window_position())
                     .or(position)
                     .unwrap_or_else(|| point(px(220.), px(180.)));
-                workspace.code_actions = Some(CodeActionsState { items, selected: 0, position, focus });
+                workspace.code_actions = Some(CodeActionsState {
+                    items,
+                    selected: 0,
+                    position,
+                    focus,
+                });
                 cx.notify();
             });
         })
@@ -325,7 +394,12 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn on_code_actions_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_code_actions_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_code_actions(window, cx),
             "up" => {
@@ -354,8 +428,12 @@ impl Workspace {
         let accent = self.accent();
         let focus = state.focus.clone();
         let selected = state.selected;
-        let list = div().flex().flex_col().max_h(px(280.)).overflow_hidden().children(
-            state.items.iter().enumerate().map(|(row, (title, _))| {
+        let list = div()
+            .flex()
+            .flex_col()
+            .max_h(px(280.))
+            .overflow_hidden()
+            .children(state.items.iter().enumerate().map(|(row, (title, _))| {
                 let is_selected = row == selected;
                 div()
                     .id(("code-action", row))
@@ -368,7 +446,13 @@ impl Workspace {
                     .cursor_pointer()
                     .when(is_selected, |element| element.bg(accent.alpha(0.16)))
                     .hover(|style| style.bg(theme.bg3))
-                    .child(div().flex_none().text_size(px(10.)).text_color(accent).child("✦"))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.))
+                            .text_color(accent)
+                            .child("✦"),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -387,8 +471,7 @@ impl Workspace {
                             this.confirm_code_action(window, cx)
                         }),
                     )
-            }),
-        );
+            }));
         Some(
             div()
                 .absolute()
@@ -410,9 +493,12 @@ impl Workspace {
                         .border_color(theme.border)
                         .rounded(px(8.))
                         .p(px(4.))
-                        .shadow(vec![
-                            gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
-                        ])
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(6.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(16.))])
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(list),
                 )
@@ -423,7 +509,12 @@ impl Workspace {
     // ── 参照検索（⇧F12・M11） ──
 
     /// 参照を検索して ⌘⇧F の結果パネル（ファイル別グルーピング UI）で見せる。
-    pub(crate) fn find_references(&mut self, _: &FindReferences, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn find_references(
+        &mut self,
+        _: &FindReferences,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
@@ -434,11 +525,18 @@ impl Workspace {
             let view = editor.read(cx);
             view.buffer()
                 .path()
-                .filter(|path| language_server_for(path, view.buffer().host().is_remote()).is_some())
+                .filter(|path| {
+                    language_server_for(path, view.buffer().host().is_remote()).is_some()
+                })
                 .map(|path| {
                     let (line, character) = view.cursor_lsp_position();
                     let snapshot = view.buffer().snapshot();
-                    let head = view.buffer().selections().first().map(|s| s.head).unwrap_or(0);
+                    let head = view
+                        .buffer()
+                        .selections()
+                        .first()
+                        .map(|s| s.head)
+                        .unwrap_or(0);
                     let word = snapshot
                         .word_range_at(head)
                         .map(|range| view.buffer().text_range(range))
@@ -475,7 +573,12 @@ impl Workspace {
     }
 
     /// hover をキーで出す（⌘K ⌘I）。キャレット位置で要求し、キャレット直上に出す。
-    pub(crate) fn show_hover_at_caret(&mut self, _: &ShowHover, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_hover_at_caret(
+        &mut self,
+        _: &ShowHover,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = self.active_editor() else {
             return;
         };
@@ -499,7 +602,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let (line, character, anchor) = match *event {
-            EditorHoverEvent::Dwell { line, character, anchor } => (line, character, anchor),
+            EditorHoverEvent::Dwell {
+                line,
+                character,
+                anchor,
+            } => (line, character, anchor),
             EditorHoverEvent::Cancel => {
                 self.close_hover(cx);
                 return;
@@ -534,7 +641,9 @@ impl Workspace {
             let view = editor.read(cx);
             view.buffer()
                 .path()
-                .filter(|path| language_server_for(path, view.buffer().host().is_remote()).is_some())
+                .filter(|path| {
+                    language_server_for(path, view.buffer().host().is_remote()).is_some()
+                })
                 .map(Path::to_path_buf)
         };
         let Some(path) = path else {
@@ -571,7 +680,10 @@ impl Workspace {
                     lines.truncate(MAX_HOVER_LINES);
                     lines.push(SharedString::from("…"));
                 }
-                workspace.hover = Some(HoverState { lines, position: anchor });
+                workspace.hover = Some(HoverState {
+                    lines,
+                    position: anchor,
+                });
                 cx.notify();
             });
         })

@@ -23,6 +23,10 @@ tree-sitter-yaml.workspace = true
 tree-sitter-toml-ng.workspace = true
 tree-sitter-html.workspace = true
 tree-sitter-css.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-md.workspace = true
 # M7 LSP（rust-analyzer）。JSON-RPC 封筒は自前・型は必要分だけ手書き
 serde.workspace = true
 serde_json.workspace = true

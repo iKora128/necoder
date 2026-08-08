@@ -13,9 +13,8 @@ impl Workspace {
             .active_slot()
             .and_then(|slot| {
                 let host = slot.worktree.host();
-                host.is_remote().then(|| {
-                    format!("{}{}", host.display_name(), slot.worktree.root().display())
-                })
+                host.is_remote()
+                    .then(|| format!("{}{}", host.display_name(), slot.worktree.root().display()))
             })
             .map(|identity| {
                 // display_name は "SSH user@host" 形式 → ssh://user@host に直す。
@@ -26,7 +25,12 @@ impl Workspace {
     }
 
     /// SSH 入力バーを種文字列付きで開く（ホストピッカーからの遷移でも使う）。
-    pub(crate) fn open_ssh_input_seeded(&mut self, seed: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_ssh_input_seeded(
+        &mut self,
+        seed: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.overlays.ssh_connecting {
             return;
         }
@@ -39,7 +43,12 @@ impl Workspace {
     /// リモート SSH ホストピッカー（M13）: `~/.ssh/config` の Host 一覧 + 末尾に「手入力」。
     /// 選択で `ssh://<alias>/` を種に入力バーへ（パスだけ足して Enter で接続）。
     /// system OpenSSH に委ねるので User/HostName/鍵/ProxyJump は config のものがそのまま効く。
-    pub(crate) fn open_ssh_host_picker(&mut self, _: &RemoteSsh, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_ssh_host_picker(
+        &mut self,
+        _: &RemoteSsh,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let hosts = host::ssh_config_hosts();
         // 2階層: 上=最近のリモートプロジェクト（履歴・直接接続・#5）、下=config ホスト、末尾=手入力。
         let recent = self
@@ -112,7 +121,12 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn on_ssh_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_ssh_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_ssh_input(window, cx),
             "enter" => {
@@ -258,8 +272,12 @@ impl Workspace {
                         .border_1()
                         .border_color(accent)
                         .rounded(px(8.))
-                        .shadow(vec![gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4))
-                            .blur_radius(px(16.))])
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(6.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(16.))])
                         .track_focus(focus)
                         .on_key_down(cx.listener(Self::on_ssh_key_down))
                         .text_size(px(12.5))
@@ -271,7 +289,13 @@ impl Workspace {
                                 .text_color(theme.fg2)
                                 .child(SharedString::from(i18n::t!("ssh.label"))),
                         )
-                        .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(display))
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(display),
+                        )
                         .child(div().flex_none().w(px(1.5)).h(px(14.)).bg(accent)),
                 )
                 .into_any_element(),

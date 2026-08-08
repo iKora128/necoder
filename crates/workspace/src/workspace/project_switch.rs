@@ -54,7 +54,10 @@ impl Workspace {
         self.close_hover(cx);
         let (before, word_start) = {
             let view = editor.read(cx);
-            (view.text_before_caret(4), view.identifier_prefix_at_caret().0)
+            (
+                view.text_before_caret(4),
+                view.identifier_prefix_at_caret().0,
+            )
         };
         match classify_completion_trigger(text, &before) {
             CompletionTrigger::Identifier => {
@@ -93,7 +96,12 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn switch_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn switch_project(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(active) = active_index_after_switch(
             self.project_sessions.active,
             index,
@@ -162,9 +170,9 @@ impl Workspace {
             ),
         };
         if let Some(session) = self.project_sessions.sessions.get(index) {
-            session
-                .agent_panel
-                .update(cx, |panel, cx| panel.set_destination(name, branch, host, cwd, files, cx));
+            session.agent_panel.update(cx, |panel, cx| {
+                panel.set_destination(name, branch, host, cwd, files, cx)
+            });
         }
     }
 

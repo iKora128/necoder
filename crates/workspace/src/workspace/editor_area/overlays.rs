@@ -40,21 +40,28 @@ impl Workspace {
                     i18n::t!("hotexit.pending")
                 )))
                 .child(div().flex_1())
-                .child(button("hotexit-restore", i18n::t!("hotexit.restore")).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| this.restore_hot_exit(window, cx)),
-                ))
-                .child(button("hotexit-discard", i18n::t!("hotexit.discard")).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| this.discard_hot_exit(cx)),
-                ))
+                .child(
+                    button("hotexit-restore", i18n::t!("hotexit.restore")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.restore_hot_exit(window, cx)),
+                    ),
+                )
+                .child(
+                    button("hotexit-discard", i18n::t!("hotexit.discard")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| this.discard_hot_exit(cx)),
+                    ),
+                )
                 .into_any_element(),
         )
     }
 
     /// 外部変更の警告バー（dirty バッファにディスク変更が来たとき・M10 watch）。
     /// 上書きは絶対にせず、ユーザーに「再読込 / このまま」を選ばせる。
-    pub(crate) fn render_external_change_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_external_change_bar(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let editor = self.active_editor()?;
         if !editor.read(cx).is_externally_changed() {
             return None;
@@ -90,24 +97,31 @@ impl Workspace {
                 .border_color(theme.warn.alpha(0.4))
                 .text_size(px(11.5))
                 .text_color(theme.fg0)
-                .child(SharedString::from(format!("⚠ {}", i18n::t!("watch.external_changed"))))
+                .child(SharedString::from(format!(
+                    "⚠ {}",
+                    i18n::t!("watch.external_changed")
+                )))
                 .child(div().flex_1())
-                .child(button("external-reload", i18n::t!("watch.reload")).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| {
-                        if let Some(editor) = this.active_editor() {
-                            editor.update(cx, |view, cx| view.reload_from_disk(cx));
-                        }
-                    }),
-                ))
-                .child(button("external-keep", i18n::t!("watch.keep")).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| {
-                        if let Some(editor) = this.active_editor() {
-                            editor.update(cx, |view, cx| view.dismiss_external_change(cx));
-                        }
-                    }),
-                ))
+                .child(
+                    button("external-reload", i18n::t!("watch.reload")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            if let Some(editor) = this.active_editor() {
+                                editor.update(cx, |view, cx| view.reload_from_disk(cx));
+                            }
+                        }),
+                    ),
+                )
+                .child(
+                    button("external-keep", i18n::t!("watch.keep")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            if let Some(editor) = this.active_editor() {
+                                editor.update(cx, |view, cx| view.dismiss_external_change(cx));
+                            }
+                        }),
+                    ),
+                )
                 .into_any_element(),
         )
     }
@@ -139,16 +153,23 @@ impl Workspace {
                 .rounded(px(8.))
                 .px(px(10.))
                 .py(px(7.))
-                .shadow(vec![
-                    gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
-                ])
+                .shadow(vec![gpui::BoxShadow::new(
+                    px(0.),
+                    px(6.),
+                    gpui::hsla(0., 0., 0., 0.4),
+                )
+                .blur_radius(px(16.))])
                 .flex()
                 .flex_col()
                 .font_family("Guguru Sans Code")
                 .text_size(px(11.5))
                 .text_color(theme.fg1)
                 .children(state.lines.iter().map(|line| {
-                    let display = if line.is_empty() { SharedString::from(" ") } else { line.clone() };
+                    let display = if line.is_empty() {
+                        SharedString::from(" ")
+                    } else {
+                        line.clone()
+                    };
                     div()
                         .h(px(HOVER_LINE_HEIGHT))
                         .whitespace_nowrap()
@@ -169,8 +190,12 @@ impl Workspace {
         let selected = state.selected;
         let filtered = state.filtered();
 
-        let list = div().flex().flex_col().max_h(px(260.)).overflow_hidden().children(
-            filtered.iter().take(12).enumerate().map(|(row, &index)| {
+        let list = div()
+            .flex()
+            .flex_col()
+            .max_h(px(260.))
+            .overflow_hidden()
+            .children(filtered.iter().take(12).enumerate().map(|(row, &index)| {
                 let item = &state.items[index];
                 let is_selected = row == selected;
                 div()
@@ -222,8 +247,7 @@ impl Workspace {
                             this.confirm_completion(window, cx)
                         }),
                     )
-            }),
-        );
+            }));
 
         Some(
             div()
@@ -246,9 +270,12 @@ impl Workspace {
                         .border_color(theme.border)
                         .rounded(px(8.))
                         .p(px(4.))
-                        .shadow(vec![
-                            gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
-                        ])
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(6.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(16.))])
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(list),
                 )

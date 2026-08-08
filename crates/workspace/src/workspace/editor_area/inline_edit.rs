@@ -1,7 +1,12 @@
 use crate::workspace::*;
 
 impl Workspace {
-    pub(crate) fn open_inline_edit(&mut self, _: &InlineEdit, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_inline_edit(
+        &mut self,
+        _: &InlineEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let terminal_focused = self.terminal_dock.read(cx).is_any_focused(window, cx);
         let target = if terminal_focused {
             InlineEditTarget::Terminal
@@ -15,8 +20,11 @@ impl Workspace {
                 if buffer.is_read_only() {
                     return; // diff タブ等は対象外
                 }
-                let selection =
-                    buffer.selections().first().copied().unwrap_or(Selection::cursor(0));
+                let selection = buffer
+                    .selections()
+                    .first()
+                    .copied()
+                    .unwrap_or(Selection::cursor(0));
                 let mut range = selection.range();
                 let snapshot = buffer.snapshot();
                 if range.is_empty() {
@@ -40,7 +48,11 @@ impl Workspace {
                 );
                 return;
             }
-            InlineEditTarget::Editor { range, old_text, buffer_version }
+            InlineEditTarget::Editor {
+                range,
+                old_text,
+                buffer_version,
+            }
         };
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -150,7 +162,11 @@ impl Workspace {
             return;
         };
         match &state.target {
-            InlineEditTarget::Editor { range, buffer_version, .. } => {
+            InlineEditTarget::Editor {
+                range,
+                buffer_version,
+                ..
+            } => {
                 let Some(editor) = self.active_editor() else {
                     return;
                 };
@@ -248,12 +264,14 @@ impl Workspace {
             .text_size(px(12.5))
             .text_color(theme.fg0)
             .child(
-                div().flex_none().text_size(px(11.)).text_color(accent).child(
-                    SharedString::from(match &state.target {
+                div()
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(accent)
+                    .child(SharedString::from(match &state.target {
                         InlineEditTarget::Editor { .. } => i18n::t!("inline.title"),
                         InlineEditTarget::Terminal => i18n::t!("inline.title_terminal"),
-                    }),
-                ),
+                    })),
             )
             .child(
                 div()
@@ -261,9 +279,11 @@ impl Workspace {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .when(placeholder, |element| {
-                        element.text_color(theme.fg2).child(SharedString::from(i18n::t!(
-                            "inline.instruction_placeholder"
-                        )))
+                        element
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(i18n::t!(
+                                "inline.instruction_placeholder"
+                            )))
                     })
                     .when(!placeholder, |element| element.child(display)),
             )
@@ -276,8 +296,12 @@ impl Workspace {
             .border_1()
             .border_color(accent)
             .rounded(px(8.))
-            .shadow(vec![gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4))
-                .blur_radius(px(16.))])
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(6.),
+                gpui::hsla(0., 0., 0., 0.4),
+            )
+            .blur_radius(px(16.))])
             .track_focus(&state.focus)
             .on_key_down(cx.listener(Self::on_inline_edit_key_down))
             .child(input_row);
@@ -328,7 +352,10 @@ impl Workspace {
                     _ => theme.fg2,
                 };
                 body = body.child(
-                    div().whitespace_nowrap().text_color(color).child(SharedString::from(line)),
+                    div()
+                        .whitespace_nowrap()
+                        .text_color(color)
+                        .child(SharedString::from(line)),
                 );
             }
             let actions = div()

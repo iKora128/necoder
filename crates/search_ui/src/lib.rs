@@ -1,8 +1,8 @@
 //! Project search panel. This crate is intentionally independent from the workspace shell.
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton,
-    Render, SharedString, Window, div, prelude::*, px,
+    div, prelude::*, px, Context, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement,
+    KeyDownEvent, MouseButton, Render, SharedString, Window,
 };
 use host::Host;
 use search::FileMatch;
@@ -16,7 +16,11 @@ const MAX_ROWS: usize = 300;
 
 /// SearchPanel から shell への通知。
 pub enum SearchPanelEvent {
-    OpenMatch { path: PathBuf, line: usize, column: usize },
+    OpenMatch {
+        path: PathBuf,
+        line: usize,
+        column: usize,
+    },
     Dismissed,
 }
 
@@ -267,7 +271,11 @@ impl Render for SearchPanel {
         } else {
             SharedString::from(self.query.clone())
         };
-        let query_color = if self.query.is_empty() { theme.fg2 } else { theme.fg0 };
+        let query_color = if self.query.is_empty() {
+            theme.fg2
+        } else {
+            theme.fg0
+        };
         let toggle = |id, label, active, tip| {
             div()
                 .id(id)
@@ -294,7 +302,11 @@ impl Render for SearchPanel {
             )),
             None => SharedString::from(i18n::t!("searchpanel.hint_enter")),
         };
-        let summary_color = if self.error.is_some() { theme.err } else { theme.fg2 };
+        let summary_color = if self.error.is_some() {
+            theme.err
+        } else {
+            theme.fg2
+        };
 
         let mut rows = Vec::new();
         let mut flat_index = 0usize;
@@ -415,7 +427,9 @@ impl Render for SearchPanel {
                     .py(px(4.))
                     .text_size(px(10.5))
                     .text_color(theme.fg2)
-                    .child(SharedString::from(i18n::t!("searchpanel.truncated", "n" => MAX_ROWS)))
+                    .child(SharedString::from(
+                        i18n::t!("searchpanel.truncated", "n" => MAX_ROWS),
+                    ))
                     .into_any_element(),
             );
         }
@@ -461,32 +475,36 @@ impl Render for SearchPanel {
                             .border_color(theme.border)
                             .child(div().flex_none().text_color(theme.fg2).child("⌕"))
                             .child(div().flex_1().text_color(query_color).child(query_display))
-                            .child(toggle(
-                                "search-case",
-                                "Aa",
-                                self.case_sensitive,
-                                i18n::t!("searchpanel.case_tip"),
+                            .child(
+                                toggle(
+                                    "search-case",
+                                    "Aa",
+                                    self.case_sensitive,
+                                    i18n::t!("searchpanel.case_tip"),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_case(cx);
+                                    }),
+                                ),
                             )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_case(cx);
-                                }),
-                            ))
-                            .child(toggle(
-                                "search-regex",
-                                ".*",
-                                self.is_regex,
-                                i18n::t!("searchpanel.regex_tip"),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_regex(cx);
-                                }),
-                            )),
+                            .child(
+                                toggle(
+                                    "search-regex",
+                                    ".*",
+                                    self.is_regex,
+                                    i18n::t!("searchpanel.regex_tip"),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_regex(cx);
+                                    }),
+                                ),
+                            ),
                     )
                     .child(
                         div()

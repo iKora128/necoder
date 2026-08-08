@@ -1,7 +1,12 @@
 use crate::workspace::*;
 
 impl Workspace {
-    pub(crate) fn on_panel_event(&mut self, panel: Entity<AgentPanel>, event: &agent_panel::PanelEvent, cx: &mut Context<Self>) {
+    pub(crate) fn on_panel_event(
+        &mut self,
+        panel: Entity<AgentPanel>,
+        event: &agent_panel::PanelEvent,
+        cx: &mut Context<Self>,
+    ) {
         let session_index = self
             .project_sessions
             .sessions
@@ -10,7 +15,13 @@ impl Workspace {
             .unwrap_or(self.project_sessions.active);
         match event {
             agent_panel::PanelEvent::TurnStarted { .. } => {
-                self.transition_task_space(session_index, TaskPhase::Working, "agent_turn_started", None, cx);
+                self.transition_task_space(
+                    session_index,
+                    TaskPhase::Working,
+                    "agent_turn_started",
+                    None,
+                    cx,
+                );
             }
             agent_panel::PanelEvent::OpenHistoryRequest => {
                 // window が無いので次の render で消化する（pending_transient_tab と同じ迂回・#5）。
@@ -27,7 +38,13 @@ impl Workspace {
                 }
                 cx.notify();
             }
-            agent_panel::PanelEvent::TurnEnded { thread, color, summary, digest, muted } => {
+            agent_panel::PanelEvent::TurnEnded {
+                thread,
+                color,
+                summary,
+                digest,
+                muted,
+            } => {
                 self.project_sessions.sessions[session_index].waiting_thread = None;
                 let is_integration_slot = self
                     .project_sessions
@@ -72,16 +89,25 @@ impl Workspace {
                     self.wake_coordinator("done", title, digest.clone(), cx);
                 }
                 if !muted {
-                    self.push_toast(SharedString::from(format!("● {thread} — {summary}")), *color, cx);
+                    self.push_toast(
+                        SharedString::from(format!("● {thread} — {summary}")),
+                        *color,
+                        cx,
+                    );
                 }
-                // Todo ボード: そのスレッドに送った項目の pulse を解除し、板を読み直す
+                // Todo ボード: そのスレッドの実行中マーカーを解除し、板を読み直す
                 // （エージェントが todos.md をチェックしたら watch より先に即反映・M12-10）。
                 self.project_sessions.sessions[session_index]
                     .todo_panel
                     .update(cx, |panel, cx| panel.clear_running_color(*color, cx));
                 self.reload_todo_board_for(session_index, cx);
             }
-            agent_panel::PanelEvent::TurnFailed { thread, color, message, muted } => {
+            agent_panel::PanelEvent::TurnFailed {
+                thread,
+                color,
+                message,
+                muted,
+            } => {
                 self.project_sessions.sessions[session_index].waiting_thread = None;
                 let another_running = panel
                     .read(cx)
@@ -90,7 +116,11 @@ impl Workspace {
                     .any(|status| status.activity == agent_panel::ThreadActivity::Working);
                 self.transition_task_space(
                     session_index,
-                    if another_running { TaskPhase::Working } else { TaskPhase::Failed },
+                    if another_running {
+                        TaskPhase::Working
+                    } else {
+                        TaskPhase::Failed
+                    },
                     "agent_turn_failed",
                     Some(message),
                     cx,
@@ -101,12 +131,7 @@ impl Workspace {
                     let title = failed_slot
                         .map(|slot| slot.task_space.title.clone())
                         .unwrap_or_else(|| thread.clone());
-                    self.wake_coordinator(
-                        "failed",
-                        title,
-                        Some(message.clone()),
-                        cx,
-                    );
+                    self.wake_coordinator("failed", title, Some(message.clone()), cx);
                 }
                 if !muted {
                     self.push_toast(
@@ -116,8 +141,15 @@ impl Workspace {
                     );
                 }
             }
-            agent_panel::PanelEvent::PermissionWaiting { thread, color, title, muted } => {
-                self.project_sessions.sessions[session_index].waiting_thread = Some((thread.clone(), *color));
+            agent_panel::PanelEvent::PermissionWaiting {
+                thread,
+                color,
+                title,
+                muted,
+            } => {
+                self.project_sessions.sessions[session_index].waiting_thread =
+                    Some((thread.clone(), *color));
+                cx.notify(); // 低頻度の承認待ち時計を root render から開始する（muted でも必要）。
                 self.transition_task_space(
                     session_index,
                     TaskPhase::Blocked,
@@ -140,7 +172,10 @@ impl Workspace {
                 }
                 if !muted {
                     self.push_toast(
-                        SharedString::from(format!("● {thread} — {}", i18n::t!("agent.waiting_permission"))),
+                        SharedString::from(format!(
+                            "● {thread} — {}",
+                            i18n::t!("agent.waiting_permission")
+                        )),
                         *color,
                         cx,
                     );
@@ -185,20 +220,28 @@ impl Workspace {
                 self.schedule_control_summary(cx);
                 cx.notify();
             }
-            agent_panel::PanelEvent::OpenDiffRequest { title, old_text, new_text } => {
+            agent_panel::PanelEvent::OpenDiffRequest {
+                title,
+                old_text,
+                new_text,
+            } => {
                 // 提案 diff を transient タブでレビュー（M12-6）。window が要るのでイベントから取得不可 →
                 // 承認カードはアクティブ窓でしか押せないため、直近 focus の window handle を使う。
                 if let Some(diff_text) = project::unified_diff_texts(old_text, new_text, title) {
                     let mut buffer = Buffer::from_str(&diff_text);
                     buffer.set_read_only(true);
-                    self.project_sessions.sessions[session_index].pending_transient_tab =
-                        Some((PathBuf::from(i18n::t!("difftab.proposal_title", "title" => title)), buffer));
+                    self.project_sessions.sessions[session_index].pending_transient_tab = Some((
+                        PathBuf::from(i18n::t!("difftab.proposal_title", "title" => title)),
+                        buffer,
+                    ));
                     cx.notify();
                 }
             }
             agent_panel::PanelEvent::FilesTouched { files, color } => {
                 for file in files {
-                    self.project_sessions.sessions[session_index].agent_touched.insert(file.clone(), *color);
+                    self.project_sessions.sessions[session_index]
+                        .agent_touched
+                        .insert(file.clone(), *color);
                     // 開いていれば gutter をスレッド色に（生中継の帰属・M12-3）。
                     if let Some(tab) = self.project_sessions.sessions[session_index]
                         .tabs
@@ -228,12 +271,24 @@ impl Workspace {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or(0);
-        self.notifications.news.insert(0, NewsItem { at_ms, color, title, text, kind });
+        self.notifications.news.insert(
+            0,
+            NewsItem {
+                at_ms,
+                color,
+                title,
+                text,
+                kind,
+            },
+        );
         self.notifications.news.truncate(100);
     }
 
     /// phase 遷移 1 件をニュース行の文へ写像する（mock の書式: 「承認待ち — 内容」「→ merge_ready — radar ✓」）。
-    pub(crate) fn news_text_for_phase(phase: TaskPhase, digest: Option<&str>) -> (NewsKind, SharedString) {
+    pub(crate) fn news_text_for_phase(
+        phase: TaskPhase,
+        digest: Option<&str>,
+    ) -> (NewsKind, SharedString) {
         let text = match phase {
             TaskPhase::Blocked => i18n::t!("news.waiting", "title" => digest.unwrap_or("…")),
             TaskPhase::Failed => i18n::t!("news.failed", "detail" => digest.unwrap_or("")),
@@ -265,7 +320,10 @@ impl Workspace {
                 .timer(std::time::Duration::from_secs(5))
                 .await;
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.notifications.toasts.retain(|(_, _, gen)| *gen != generation);
+                workspace
+                    .notifications
+                    .toasts
+                    .retain(|(_, _, gen)| *gen != generation);
                 cx.notify();
             });
         })
@@ -286,25 +344,33 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .children(self.notifications.toasts.iter().map(|(text, color, generation)| {
-                    div()
-                        .id(("toast", *generation as usize))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .px(px(12.))
-                        .py(px(8.))
-                        .bg(theme.bg2)
-                        .border_1()
-                        .border_color(color.alpha(0.5))
-                        .rounded(px(8.))
-                        .shadow(vec![
-                            gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
-                        ])
-                        .text_size(px(12.))
-                        .text_color(theme.fg0)
-                        .child(text.clone())
-                }))
+                .children(
+                    self.notifications
+                        .toasts
+                        .iter()
+                        .map(|(text, color, generation)| {
+                            div()
+                                .id(("toast", *generation as usize))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .px(px(12.))
+                                .py(px(8.))
+                                .bg(theme.bg2)
+                                .border_1()
+                                .border_color(color.alpha(0.5))
+                                .rounded(px(8.))
+                                .shadow(vec![gpui::BoxShadow::new(
+                                    px(0.),
+                                    px(6.),
+                                    gpui::hsla(0., 0., 0., 0.4),
+                                )
+                                .blur_radius(px(16.))])
+                                .text_size(px(12.))
+                                .text_color(theme.fg0)
+                                .child(text.clone())
+                        }),
+                )
                 .into_any_element(),
         )
     }

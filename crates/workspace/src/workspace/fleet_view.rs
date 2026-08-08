@@ -129,23 +129,23 @@ impl Workspace {
             return;
         }
         self.chrome.fleet_clock = true;
-        cx.spawn(async move |workspace, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(30))
-                    .await;
-                let keep_running = workspace.update(cx, |workspace, cx| {
-                    if workspace.chrome.fleet_mode || workspace.chrome.show_herd {
-                        cx.notify();
-                        true
-                    } else {
-                        workspace.chrome.fleet_clock = false;
-                        false
-                    }
-                });
-                if !matches!(keep_running, Ok(true)) {
-                    break;
+        cx.spawn(async move |workspace, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(30))
+                .await;
+            let keep_running = workspace.update(cx, |workspace, cx| {
+                if workspace.window_active
+                    && (workspace.chrome.fleet_mode || workspace.chrome.show_herd)
+                {
+                    cx.notify();
+                    true
+                } else {
+                    workspace.chrome.fleet_clock = false;
+                    false
                 }
+            });
+            if !matches!(keep_running, Ok(true)) {
+                break;
             }
         })
         .detach();
@@ -165,7 +165,9 @@ impl Workspace {
             .iter()
             .filter(|slot| !slot.task_space.is_integration())
             .take(8)
-            .map(|slot| FleetPane::Task { space: slot.task_space.id.clone() })
+            .map(|slot| FleetPane::Task {
+                space: slot.task_space.id.clone(),
+            })
             .collect();
         // 開発用: 最初の Task の実端末 surface を 1 枚仕込む。
         if std::env::var_os("SHIRUSHI_FLEET_TERM").is_some() && self.chrome.fleet_cells.len() < 8 {
@@ -181,7 +183,12 @@ impl Workspace {
 
     #[allow(dead_code)] // 2026-07-24 の 1 択化で入口を外した（機能は保持）
     fn add_fleet_cell(&mut self, pane: FleetPane, cx: &mut Context<Self>) {
-        if let Some(index) = self.chrome.fleet_cells.iter().position(|current| current == &pane) {
+        if let Some(index) = self
+            .chrome
+            .fleet_cells
+            .iter()
+            .position(|current| current == &pane)
+        {
             self.chrome.fleet_maximized = Some(index);
         } else if self.chrome.fleet_cells.len() < 8 {
             self.chrome.fleet_cells.push(pane);
@@ -249,7 +256,11 @@ impl Workspace {
         let Some(integration) = self.project_sessions.projects.iter().find(|slot| {
             slot.task_space.repository_id == repository_id && slot.task_space.is_integration()
         }) else {
-            self.push_toast("IntegrationSpace が開かれていません".into(), self.accent(), cx);
+            self.push_toast(
+                "IntegrationSpace が開かれていません".into(),
+                self.accent(),
+                cx,
+            );
             return;
         };
         let host = integration.worktree.host().clone();
@@ -268,7 +279,11 @@ impl Workspace {
                         Some("Conflict Radar: clean"),
                         cx,
                     );
-                    workspace.push_toast("Conflict Radar: 統合可能です".into(), workspace.accent(), cx);
+                    workspace.push_toast(
+                        "Conflict Radar: 統合可能です".into(),
+                        workspace.accent(),
+                        cx,
+                    );
                 }
                 Ok(preview) => {
                     workspace.transition_task_space(
@@ -315,7 +330,13 @@ impl Workspace {
         let integration = &self.project_sessions.projects[integration_index];
         let host = integration.worktree.host().clone();
         let root = integration.worktree.root().to_path_buf();
-        self.transition_task_space(task_index, TaskPhase::Integrating, "integration_started", None, cx);
+        self.transition_task_space(
+            task_index,
+            TaskPhase::Integrating,
+            "integration_started",
+            None,
+            cx,
+        );
         cx.spawn(async move |workspace, cx| {
             let result = cx
                 .background_executor()
@@ -323,7 +344,11 @@ impl Workspace {
                 .await;
             let _ = workspace.update(cx, |workspace, cx| match result {
                 Ok(head_oid) => {
-                    if let Some(slot) = workspace.project_sessions.projects.get_mut(integration_index) {
+                    if let Some(slot) = workspace
+                        .project_sessions
+                        .projects
+                        .get_mut(integration_index)
+                    {
                         slot.task_space.head_oid = Some(head_oid);
                     }
                     workspace.persist_task_space(integration_index, cx);
@@ -335,7 +360,11 @@ impl Workspace {
                         cx,
                     );
                     workspace.refresh_git_status_for(integration_index, cx);
-                    workspace.push_toast("Task を IntegrationSpace へ統合しました".into(), workspace.accent(), cx);
+                    workspace.push_toast(
+                        "Task を IntegrationSpace へ統合しました".into(),
+                        workspace.accent(),
+                        cx,
+                    );
                 }
                 Err(error) => {
                     workspace.transition_task_space(
@@ -403,7 +432,9 @@ impl Workspace {
         let Some(session_index) = self.session_index_for_space(&space) else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index].agent_panel.clone();
+        let panel = self.project_sessions.sessions[session_index]
+            .agent_panel
+            .clone();
         panel.update(cx, |panel, cx| panel.new_thread(cx));
         cx.notify();
     }
@@ -419,12 +450,15 @@ impl Workspace {
         if self.chrome.fleet_cells.len() >= 8 {
             return;
         }
-        let active_repository = self.active_slot().map(|slot| slot.task_space.repository_id.clone());
+        let active_repository = self
+            .active_slot()
+            .map(|slot| slot.task_space.repository_id.clone());
         let integration_index = active_repository
             .as_ref()
             .and_then(|repository_id| {
                 self.project_sessions.projects.iter().position(|slot| {
-                    slot.task_space.repository_id == *repository_id && slot.task_space.is_integration()
+                    slot.task_space.repository_id == *repository_id
+                        && slot.task_space.is_integration()
                 })
             })
             .unwrap_or(self.project_sessions.active);
@@ -484,9 +518,15 @@ impl Workspace {
                         .iter()
                         .position(|slot| slot.worktree.root() == target.as_path())
                     {
-                        let space_id = workspace.project_sessions.projects[space].task_space.id.clone();
+                        let space_id = workspace.project_sessions.projects[space]
+                            .task_space
+                            .id
+                            .clone();
                         if workspace.chrome.fleet_cells.len() < 8 {
-                            workspace.chrome.fleet_cells.push(FleetPane::Task { space: space_id });
+                            workspace
+                                .chrome
+                                .fleet_cells
+                                .push(FleetPane::Task { space: space_id });
                         }
                         workspace.persist_task_space(space, cx);
                         workspace.transition_task_space(
@@ -529,7 +569,11 @@ impl Workspace {
         }
         if still_running {
             let accent = self.accent();
-            self.push_toast(SharedString::from(i18n::t!("fleet.closed_still_running")), accent, cx);
+            self.push_toast(
+                SharedString::from(i18n::t!("fleet.closed_still_running")),
+                accent,
+                cx,
+            );
         }
         cx.notify();
     }
@@ -587,7 +631,9 @@ impl Workspace {
         let Some(session_index) = session_index else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index].agent_panel.clone();
+        let panel = self.project_sessions.sessions[session_index]
+            .agent_panel
+            .clone();
         let stopped = panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
         let accent = self.accent();
         let message = if stopped > 0 {
@@ -609,13 +655,25 @@ impl Workspace {
         let Some(session_index) = session_index else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index].agent_panel.clone();
+        let panel = self.project_sessions.sessions[session_index]
+            .agent_panel
+            .clone();
         panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
-        self.transition_task_space(session_index, TaskPhase::Archived, "task_archived", None, cx);
+        self.transition_task_space(
+            session_index,
+            TaskPhase::Archived,
+            "task_archived",
+            None,
+            cx,
+        );
         self.chrome.fleet_cell_menu = None;
         self.close_fleet_cell(cell, cx);
         let accent = self.accent();
-        self.push_toast(SharedString::from(i18n::t!("fleet.task_archived")), accent, cx);
+        self.push_toast(
+            SharedString::from(i18n::t!("fleet.task_archived")),
+            accent,
+            cx,
+        );
     }
 
     /// worktree（+任意でブランチ）を消す（片付けの最下段）。レールメニューと同じ確認ダイアログ →
@@ -642,7 +700,10 @@ impl Workspace {
 
     /// 編隊セルの片付けメニュー（⋯）。**この 1 枚が「× は何をするのか」への回答**。
     /// 各行に副題で「何が残るか」を書き、上から下へ残るものが減る順に並べる。破壊的な下 2 段は二段確認。
-    pub(crate) fn render_fleet_cell_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_fleet_cell_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let menu = self.chrome.fleet_cell_menu.as_ref()?;
         let cell = menu.cell;
         if cell >= self.chrome.fleet_cells.len() {
@@ -660,8 +721,15 @@ impl Workspace {
         let is_worktree = session_index
             .and_then(|index| self.project_sessions.projects.get(index))
             .is_some_and(|slot| slot.worktree_branch.is_some());
-        let (bg2, bg3, border, fg0, fg1, fg2, err) =
-            (theme.bg2, theme.bg3, theme.border, theme.fg0, theme.fg1, theme.fg2, theme.err);
+        let (bg2, bg3, border, fg0, fg1, fg2, err) = (
+            theme.bg2,
+            theme.bg3,
+            theme.border,
+            theme.fg0,
+            theme.fg1,
+            theme.fg2,
+            theme.err,
+        );
 
         // 1 行 = アイコン + タイトル + **副題（何が残るか）**。danger は hover で赤・armed で確認文言。
         let make_row = move |row_id: &'static str,
@@ -726,9 +794,12 @@ impl Workspace {
             .border_1()
             .border_color(border)
             .rounded(px(8.))
-            .shadow(vec![
-                gpui::BoxShadow::new(px(0.), px(6.), gpui::hsla(0., 0., 0., 0.4)).blur_radius(px(16.)),
-            ])
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(6.),
+                gpui::hsla(0., 0., 0., 0.4),
+            )
+            .blur_radius(px(16.))])
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .child(
@@ -886,12 +957,21 @@ impl Workspace {
         // IntegrationSpace（main）もセルに出せる（2026-07-24 ユーザー指摘で「保護」トーストを撤廃。
         // 本当に守るべきは Git 側 = 統合の radar + 人間 gate と台帳の遷移拒否で、画面の取り締まりではない）。
         let space_id = slot.task_space.id.clone();
-        let target = FleetPane::Task { space: space_id.clone() };
+        let target = FleetPane::Task {
+            space: space_id.clone(),
+        };
         if let Some(session) = self.project_sessions.sessions.get(space) {
-            session.agent_panel.update(cx, |panel, cx| panel.focus_thread(thread, cx));
+            session
+                .agent_panel
+                .update(cx, |panel, cx| panel.focus_thread(thread, cx));
         }
         self.switch_project(space, window, cx);
-        let index = match self.chrome.fleet_cells.iter().position(|pane| pane == &target) {
+        let index = match self
+            .chrome
+            .fleet_cells
+            .iter()
+            .position(|pane| pane == &target)
+        {
             Some(index) => index,
             None => {
                 if self.chrome.fleet_cells.len() >= 8 {
@@ -1011,21 +1091,19 @@ impl Workspace {
                 Some(index) => {
                     // 拡大: 上にサムネイル列（他セルが避ける）+ 大きい拡大セル（グラフの場所に出る）。
                     let lanes = self.fleet_lanes(cx);
-                    center
-                        .child(self.render_fleet_thumbnails(index, cx))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h_0()
-                                .p(px(10.))
-                                .child(self.render_fleet_cell(
-                                    index,
-                                    self.chrome.fleet_cells[index].clone(),
-                                    &lanes,
-                                    true,
-                                    cx,
-                                )),
-                        )
+                    center.child(self.render_fleet_thumbnails(index, cx)).child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .p(px(10.))
+                            .child(self.render_fleet_cell(
+                                index,
+                                self.chrome.fleet_cells[index].clone(),
+                                &lanes,
+                                true,
+                                cx,
+                            )),
+                    )
                 }
                 None => match self.chrome.fleet_center_view {
                     FleetCenterView::Control => center.child(self.render_control(cx)),
@@ -1063,7 +1141,11 @@ impl Workspace {
     }
 
     /// 拡大表示中のサムネイル列（mock focus 時の他セル）。全セルを小さく横並びに・クリックで拡大先を切替。
-    fn render_fleet_thumbnails(&self, max_index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_fleet_thumbnails(
+        &self,
+        max_index: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let accent = self.accent();
         let cells = self.chrome.fleet_cells.clone();
@@ -1144,7 +1226,12 @@ impl Workspace {
                             .gap(px(6.))
                             .child(div().size(px(7.)).rounded_full().bg(color).flex_none())
                             .when_some(activity, |element, activity| {
-                                element.child(agent_panel::activity_dot(("thumb-dot", index), 8.0, color, activity))
+                                element.child(agent_panel::activity_dot(
+                                    ("thumb-dot", index),
+                                    8.0,
+                                    color,
+                                    activity,
+                                ))
                             })
                             .child(
                                 div()
@@ -1168,7 +1255,9 @@ impl Workspace {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| this.maximize_fleet_cell(index, cx)),
+                        cx.listener(move |this, _, _window, cx| {
+                            this.maximize_fleet_cell(index, cx)
+                        }),
                     ),
             );
         }
@@ -1240,7 +1329,10 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg2).text_color(theme.fg1))
                     .child(SharedString::from(if collapsed { "▸" } else { "⌄" }))
-                    .tooltip(Tooltip::text(i18n::t!("fleet.graph_collapse"), theme.clone()))
+                    .tooltip(Tooltip::text(
+                        i18n::t!("fleet.graph_collapse"),
+                        theme.clone(),
+                    ))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _window, cx| this.toggle_graph_collapse(cx)),
@@ -1248,7 +1340,11 @@ impl Workspace {
             )
             // スイッチャーがプロジェクト色に馴染むよう、アクティブ表示だけ僅かに accent 寄せ（下線）。
             .border_b_1()
-            .border_color(if collapsed { theme.border } else { accent.alpha(0.0) })
+            .border_color(if collapsed {
+                theme.border
+            } else {
+                accent.alpha(0.0)
+            })
     }
 
     /// 扇形（系譜）の版面。本流の分岐点から枝が出て、肘で水平化し、コミット bead を経て先端に至る。
@@ -1273,7 +1369,11 @@ impl Workspace {
                 vec![((lane_left + tip_x) / 2.0, yf)]
             };
             // 完了枝は本流へ戻る合流カーブを引く（mock の「⤳ main」）。ラベル帯より右で合流。
-            let merge = if lane.integrated { Some((0.80_f32, main_y)) } else { None };
+            let merge = if lane.integrated {
+                Some((0.80_f32, main_y))
+            } else {
+                None
+            };
             branches.push(GraphBranch {
                 split: (split_x, main_y),
                 control1: (split_x + 0.06, main_y),
@@ -1392,7 +1492,13 @@ impl Workspace {
 
     /// 系譜グラフのノード/カードをクリックした時: その space へ切り替え、スレッドを focus する
     /// （mock の focus-follows-agent）。カード・扇形/リバー/ツリーの先端が共通で呼ぶ。
-    fn focus_fleet_agent(&mut self, space: usize, thread: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_fleet_agent(
+        &mut self,
+        space: usize,
+        thread: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.switch_project(space, window, cx);
         if let Some(session) = self.project_sessions.sessions.get(space) {
             let panel = session.agent_panel.clone();
@@ -1443,7 +1549,8 @@ impl Workspace {
                 let height = f32::from(bounds.size.height);
                 let origin_x = f32::from(bounds.origin.x);
                 let origin_y = f32::from(bounds.origin.y);
-                let at = |xf: f32, yf: f32| point(px(origin_x + xf * width), px(origin_y + yf * height));
+                let at =
+                    |xf: f32, yf: f32| point(px(origin_x + xf * width), px(origin_y + yf * height));
                 // ── 本流 ──
                 if let Some(root_pt) = root {
                     // ツリー: root → split の短い縦幹（全枝が split を共有）。
@@ -1569,7 +1676,12 @@ impl Workspace {
                         .w(px(260.))
                         .flex()
                         .justify_center()
-                        .child(div().text_size(px(10.)).text_color(theme.fg2).child(caption)),
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(theme.fg2)
+                                .child(caption),
+                        ),
                 );
             }
         }
@@ -1605,14 +1717,18 @@ impl Workspace {
                     ))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| this.focus_fleet_agent(space, thread, window, cx)),
+                        cx.listener(move |this, _, window, cx| {
+                            this.focus_fleet_agent(space, thread, window, cx)
+                        }),
                     ),
             );
 
             let sub = match &branch.branch {
-                Some(name) => {
-                    SharedString::from(format!("⎇ {}  ·  {}", name, activity_label(branch.activity)))
-                }
+                Some(name) => SharedString::from(format!(
+                    "⎇ {}  ·  {}",
+                    name,
+                    activity_label(branch.activity)
+                )),
                 None => activity_label(branch.activity),
             };
             if scene.labels_below {
@@ -1654,7 +1770,9 @@ impl Workspace {
                         )
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| this.focus_fleet_agent(space, thread, window, cx)),
+                            cx.listener(move |this, _, window, cx| {
+                                this.focus_fleet_agent(space, thread, window, cx)
+                            }),
                         ),
                 );
             } else {
@@ -1693,7 +1811,9 @@ impl Workspace {
                         )
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| this.focus_fleet_agent(space, thread, window, cx)),
+                            cx.listener(move |this, _, window, cx| {
+                                this.focus_fleet_agent(space, thread, window, cx)
+                            }),
                         ),
                 );
             }
@@ -1715,14 +1835,19 @@ impl Workspace {
         let (rx, ry) = (0.19_f32, 0.38_f32);
         let repo = self
             .active_worktree()
-            .and_then(|worktree| worktree.root().file_name().map(|name| name.to_string_lossy().to_string()))
+            .and_then(|worktree| {
+                worktree
+                    .root()
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
             .unwrap_or_else(|| i18n::t!("fleet.graph_main"));
 
         // 各エージェントの配置（真上から時計回り）。canvas と overlay で共有する owned 座標。
         let nodes: Vec<(f32, f32)> = (0..count)
             .map(|index| {
-                let theta =
-                    -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * index as f32 / count as f32;
+                let theta = -std::f32::consts::FRAC_PI_2
+                    + std::f32::consts::TAU * index as f32 / count as f32;
                 (center.0 + rx * theta.cos(), center.1 + ry * theta.sin())
             })
             .collect();
@@ -1730,7 +1855,11 @@ impl Workspace {
             .iter()
             .enumerate()
             .map(|(index, lane)| {
-                (nodes[index], lane.color, matches!(lane.activity, agent_panel::ThreadActivity::Idle))
+                (
+                    nodes[index],
+                    lane.color,
+                    matches!(lane.activity, agent_panel::ThreadActivity::Idle),
+                )
             })
             .collect();
 
@@ -1742,7 +1871,8 @@ impl Workspace {
                 let height = f32::from(bounds.size.height);
                 let origin_x = f32::from(bounds.origin.x);
                 let origin_y = f32::from(bounds.origin.y);
-                let at = |xf: f32, yf: f32| point(px(origin_x + xf * width), px(origin_y + yf * height));
+                let at =
+                    |xf: f32, yf: f32| point(px(origin_x + xf * width), px(origin_y + yf * height));
                 for (pos, color, dashed) in &spokes {
                     let mut spoke = PathBuilder::stroke(px(2.0));
                     if *dashed {
@@ -1782,10 +1912,17 @@ impl Workspace {
                     .ml(px(-outer / 2.0))
                     .top(px(ny * body_h - outer / 2.0))
                     .cursor_pointer()
-                    .child(agent_panel::activity_dot(("hub-dot", index), tip_d, lane.color, lane.activity))
+                    .child(agent_panel::activity_dot(
+                        ("hub-dot", index),
+                        tip_d,
+                        lane.color,
+                        lane.activity,
+                    ))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| this.focus_fleet_agent(space, thread, window, cx)),
+                        cx.listener(move |this, _, window, cx| {
+                            this.focus_fleet_agent(space, thread, window, cx)
+                        }),
                     ),
             );
 
@@ -1801,8 +1938,11 @@ impl Workspace {
                 .text_color(theme.fg0)
                 .whitespace_nowrap()
                 .child(lane.name.clone());
-            let sub_line =
-                div().text_size(px(9.5)).text_color(theme.fg2).whitespace_nowrap().child(sub);
+            let sub_line = div()
+                .text_size(px(9.5))
+                .text_color(theme.fg2)
+                .whitespace_nowrap()
+                .child(sub);
             // 中心より右のノードはラベルを右へ・左のノードは左へ（中央ハブと重ならないように）。
             let label = if nx >= center.0 {
                 div()
@@ -1830,50 +1970,57 @@ impl Workspace {
                     .justify_end()
                     .gap(px(7.))
                     .cursor_pointer()
-                    .child(div().flex().flex_col().items_end().child(name).child(sub_line))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .child(name)
+                            .child(sub_line),
+                    )
                     .child(agent_panel::agent_badge(lane.agent.as_ref(), 14.0))
             };
             body = body.child(label.on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| this.focus_fleet_agent(space, thread, window, cx)),
+                cx.listener(move |this, _, window, cx| {
+                    this.focus_fleet_agent(space, thread, window, cx)
+                }),
             ));
         }
 
         // 中央ハブ（リポジトリ）。スポークの上に重ねるため最後に child する。枠はプロジェクト色。
-        body = body.child(
-            div()
-                .absolute()
-                .left(relative(center.0))
-                .ml(px(-66.))
-                .top(px(center.1 * body_h - 28.0))
-                .w(px(132.))
-                .h(px(56.))
-                .flex()
-                .flex_col()
-                .justify_center()
-                .items_center()
-                .gap(px(2.))
-                .rounded(px(12.))
-                .bg(theme.bg2)
-                .border_1()
-                .border_color(accent)
-                .child(
-                    div()
-                        .max_w(px(116.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.fg0)
-                        .child(SharedString::from(format!("⎇ {repo}"))),
-                )
-                .child(
-                    div()
-                        .text_size(px(9.5))
-                        .text_color(theme.fg2)
-                        .child(SharedString::from(i18n::t!("fleet.graph_hub_agents", "count" => count))),
-                ),
-        );
+        body =
+            body.child(
+                div()
+                    .absolute()
+                    .left(relative(center.0))
+                    .ml(px(-66.))
+                    .top(px(center.1 * body_h - 28.0))
+                    .w(px(132.))
+                    .h(px(56.))
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .items_center()
+                    .gap(px(2.))
+                    .rounded(px(12.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(accent)
+                    .child(
+                        div()
+                            .max_w(px(116.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg0)
+                            .child(SharedString::from(format!("⎇ {repo}"))),
+                    )
+                    .child(div().text_size(px(9.5)).text_color(theme.fg2).child(
+                        SharedString::from(i18n::t!("fleet.graph_hub_agents", "count" => count)),
+                    )),
+            );
 
         body.into_any_element()
     }
@@ -1892,11 +2039,14 @@ impl Workspace {
         let card_left = 0.30_f32;
         let head_left = 0.86_f32;
         let (top_pad, gap) = (12.0_f32, 12.0_f32);
-        let card_h = (((body_h - 2.0 * top_pad) - (count as f32 - 1.0) * gap) / count as f32).clamp(46.0, 76.0);
+        let card_h = (((body_h - 2.0 * top_pad) - (count as f32 - 1.0) * gap) / count as f32)
+            .clamp(46.0, 76.0);
         let any_done = lanes.iter().any(|lane| lane.integrated);
 
         // 各カードの矩形（top）と中心 yf（曲線の接続点）を先に確定させる。
-        let tops: Vec<f32> = (0..count).map(|i| top_pad + i as f32 * (card_h + gap)).collect();
+        let tops: Vec<f32> = (0..count)
+            .map(|i| top_pad + i as f32 * (card_h + gap))
+            .collect();
         // canvas に渡す owned な辺（center_yf, 色, 破線か, 完了か）。
         let edges: Vec<(f32, Hsla, bool, bool)> = lanes
             .iter()
@@ -1918,7 +2068,8 @@ impl Workspace {
                 let height = f32::from(bounds.size.height);
                 let origin_x = f32::from(bounds.origin.x);
                 let origin_y = f32::from(bounds.origin.y);
-                let at = |xf: f32, yf: f32| point(px(origin_x + xf * width), px(origin_y + yf * height));
+                let at =
+                    |xf: f32, yf: f32| point(px(origin_x + xf * width), px(origin_y + yf * height));
                 let base_right = base_left + base_w / width;
                 let card_right = card_left + card_w / width;
                 for (center_yf, color, dashed, done) in &edges {
@@ -1928,7 +2079,11 @@ impl Workspace {
                     }
                     let mid = (base_right + card_left) / 2.0;
                     builder.move_to(at(base_right, 0.5));
-                    builder.cubic_bezier_to(at(card_left, *center_yf), at(mid, 0.5), at(mid, *center_yf));
+                    builder.cubic_bezier_to(
+                        at(card_left, *center_yf),
+                        at(mid, 0.5),
+                        at(mid, *center_yf),
+                    );
                     if let Ok(path) = builder.build() {
                         window.paint_path(path, *color);
                     }
@@ -1936,7 +2091,11 @@ impl Workspace {
                         let mut merge = PathBuilder::stroke(px(2.5));
                         let mid2 = (card_right + head_left) / 2.0;
                         merge.move_to(at(card_right, *center_yf));
-                        merge.cubic_bezier_to(at(head_left, 0.5), at(mid2, *center_yf), at(mid2, 0.5));
+                        merge.cubic_bezier_to(
+                            at(head_left, 0.5),
+                            at(mid2, *center_yf),
+                            at(mid2, 0.5),
+                        );
                         if let Ok(path) = merge.build() {
                             window.paint_path(path, *color);
                         }
@@ -1977,7 +2136,10 @@ impl Workspace {
                         .text_size(px(11.5))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.fg0)
-                        .child(SharedString::from(format!("⎇ {}", i18n::t!("fleet.graph_main")))),
+                        .child(SharedString::from(format!(
+                            "⎇ {}",
+                            i18n::t!("fleet.graph_main")
+                        ))),
                 )
                 .child(
                     div()
@@ -2112,7 +2274,9 @@ impl Workspace {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| this.focus_fleet_agent(space, thread, window, cx)),
+                        cx.listener(move |this, _, window, cx| {
+                            this.focus_fleet_agent(space, thread, window, cx)
+                        }),
                     ),
             );
         }
@@ -2161,7 +2325,9 @@ impl Workspace {
             let mut row_element = div().flex_1().min_h_0().flex().gap(px(8.));
             for item in row {
                 row_element = row_element.child(match item {
-                    Some((index, pane)) => self.render_fleet_cell(*index, pane.clone(), &lanes, false, cx),
+                    Some((index, pane)) => {
+                        self.render_fleet_cell(*index, pane.clone(), &lanes, false, cx)
+                    }
                     None => self.render_fleet_add_tile(cx),
                 });
             }
@@ -2240,9 +2406,10 @@ impl Workspace {
             .map(|slot| SharedString::from(slot.task_space.phase.as_str()))
             .unwrap_or_else(|| SharedString::from("closed"));
         let task_action = match (&pane, slot.map(|slot| slot.task_space.phase)) {
-            (FleetPane::Task { space }, Some(TaskPhase::ReviewReady | TaskPhase::ChangesRequested)) => {
-                Some((space.clone(), TaskPhase::ReviewReady))
-            }
+            (
+                FleetPane::Task { space },
+                Some(TaskPhase::ReviewReady | TaskPhase::ChangesRequested),
+            ) => Some((space.clone(), TaskPhase::ReviewReady)),
             (FleetPane::Task { space }, Some(TaskPhase::MergeReady)) => {
                 Some((space.clone(), TaskPhase::MergeReady))
             }
@@ -2279,7 +2446,13 @@ impl Workspace {
                         .child(SharedString::from(format!("⎇ {branch}"))),
                 )
             })
-            .child(div().flex_none().text_size(px(10.)).text_color(theme.fg2).child(phase))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.))
+                    .text_color(theme.fg2)
+                    .child(phase),
+            )
             .when_some(task_action, |element, (space, action)| {
                 let label = if action == TaskPhase::MergeReady {
                     "Integrate"
@@ -2327,12 +2500,20 @@ impl Workspace {
                     .hover(|style| style.bg(theme.bg2))
                     .child(
                         svg()
-                            .path(if maximized { "icons/minimize.svg" } else { "icons/maximize.svg" })
+                            .path(if maximized {
+                                "icons/minimize.svg"
+                            } else {
+                                "icons/maximize.svg"
+                            })
                             .size(px(11.))
                             .text_color(theme.fg2),
                     )
                     .tooltip(Tooltip::text(
-                        i18n::t!(if maximized { "fleet.restore" } else { "fleet.maximize" }),
+                        i18n::t!(if maximized {
+                            "fleet.restore"
+                        } else {
+                            "fleet.maximize"
+                        }),
                         theme.clone(),
                     ))
                     .on_mouse_down(
@@ -2387,7 +2568,10 @@ impl Workspace {
                     .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
                     .child("×")
                     // 「× で何が起きるのか」をその場で言う（ユーザー報告「違いが分からない」）。
-                    .tooltip(Tooltip::text(i18n::t!("fleet.close_cell_tip"), theme.clone()))
+                    .tooltip(Tooltip::text(
+                        i18n::t!("fleet.close_cell_tip"),
+                        theme.clone(),
+                    ))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _window, cx| {
@@ -2494,7 +2678,7 @@ impl Workspace {
                             .items_center()
                             .justify_center()
                             .text_color(theme.fg2)
-                            .child("この Task でファイルを開くと Editor surface に表示されます")
+                            .child(i18n::t!("fleet.editor_surface_hint"))
                             .into_any_element()
                     }),
                 FleetPane::Diff { .. } => self.project_sessions.sessions[session_index]
@@ -2513,7 +2697,7 @@ impl Workspace {
                     .items_center()
                     .justify_center()
                     .text_color(theme.fg2)
-                    .child("TaskSpace は閉じられています")
+                    .child(i18n::t!("fleet.space_closed"))
                     .into_any_element()
             });
         cell = cell.child(div().flex_1().min_h_0().overflow_hidden().child(body));
@@ -2535,25 +2719,31 @@ impl Workspace {
                 .text_size(px(11.5))
                 .text_color(theme.fg1)
                 .cursor_pointer()
-                .hover(|style| style.bg(theme.bg2).text_color(theme.fg0).border_color(theme.fg2))
+                .hover(|style| {
+                    style
+                        .bg(theme.bg2)
+                        .text_color(theme.fg0)
+                        .border_color(theme.fg2)
+                })
                 .child(label)
         };
         // ＋ は 1 択（2026-07-24 ユーザー指摘で単純化）: エージェントを新しい worktree で並走させる。
         // Terminal/Editor/Diff/Tests セルや履歴復元の機能自体は残っている（パレット/コード経路）が、
         // 入口の顔からは外す — 「＋ = 並走エージェントを増やす」だけにする。
-        let buttons = div()
-            .flex()
-            .justify_center()
-            .child(
-                add_button(0, SharedString::from(i18n::t!("fleet.add_agent_simple")), &theme)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| {
-                            cx.stop_propagation();
-                            this.add_fleet_agent_default(cx);
-                        }),
-                    ),
-            );
+        let buttons = div().flex().justify_center().child(
+            add_button(
+                0,
+                SharedString::from(i18n::t!("fleet.add_agent_simple")),
+                &theme,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    cx.stop_propagation();
+                    this.add_fleet_agent_default(cx);
+                }),
+            ),
+        );
         div()
             .id("fleet-add")
             .flex_1()
@@ -2583,7 +2773,11 @@ impl Workspace {
                     .child(SharedString::from("＋")),
             )
             .child(buttons)
-            .child(div().text_size(px(10.5)).child(SharedString::from(i18n::t!("fleet.add_hint"))))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .child(SharedString::from(i18n::t!("fleet.add_hint"))),
+            )
             .into_any_element()
     }
 
@@ -2594,21 +2788,26 @@ impl Workspace {
     fn render_fleet_bottom(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let view = self.chrome.fleet_bottom_view;
-        let tab = |id: &'static str, label: SharedString, target: FleetBottomView, theme: &Theme| {
-            let active = view == target;
-            div()
-                .id(id)
-                .px(px(9.))
-                .py(px(2.))
-                .rounded(px(5.))
-                .text_size(px(9.5))
-                .font_weight(if active { FontWeight::BOLD } else { FontWeight::NORMAL })
-                .text_color(if active { theme.fg0 } else { theme.fg2 })
-                .when(active, |element| element.bg(theme.bg2))
-                .cursor_pointer()
-                .hover(|style| style.text_color(theme.fg0))
-                .child(label)
-        };
+        let tab =
+            |id: &'static str, label: SharedString, target: FleetBottomView, theme: &Theme| {
+                let active = view == target;
+                div()
+                    .id(id)
+                    .px(px(9.))
+                    .py(px(2.))
+                    .rounded(px(5.))
+                    .text_size(px(9.5))
+                    .font_weight(if active {
+                        FontWeight::BOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(if active { theme.fg0 } else { theme.fg2 })
+                    .when(active, |element| element.bg(theme.bg2))
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg0))
+                    .child(label)
+            };
         let head = div()
             .flex_none()
             .flex()
@@ -2618,13 +2817,18 @@ impl Workspace {
             .pt(px(5.))
             .pb(px(3.))
             .child(
-                tab("fleet-bottom-news", SharedString::from(i18n::t!("fleet.news")), FleetBottomView::News, &theme)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| {
-                            this.set_fleet_bottom_view(FleetBottomView::News, cx)
-                        }),
-                    ),
+                tab(
+                    "fleet-bottom-news",
+                    SharedString::from(i18n::t!("fleet.news")),
+                    FleetBottomView::News,
+                    &theme,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        this.set_fleet_bottom_view(FleetBottomView::News, cx)
+                    }),
+                ),
             )
             .child(
                 tab(
@@ -2670,7 +2874,10 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|style| style.text_color(theme.fg0))
                     .child("▾")
-                    .tooltip(Tooltip::text(i18n::t!("fleet.bottom_collapse"), theme.clone()))
+                    .tooltip(Tooltip::text(
+                        i18n::t!("fleet.bottom_collapse"),
+                        theme.clone(),
+                    ))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _window, cx| this.toggle_fleet_bottom_collapsed(cx)),
@@ -2700,7 +2907,11 @@ impl Workspace {
         };
         div()
             .flex_none()
-            .h(px(if collapsed { 26. } else { self.chrome.bottom_height }))
+            .h(px(if collapsed {
+                26.
+            } else {
+                self.chrome.bottom_height
+            }))
             .flex()
             .flex_col()
             .border_t_1()
@@ -2719,7 +2930,11 @@ impl Workspace {
             self.chrome.bottom_height = BOTTOM_DOCK_HEIGHT; // 畳んだ状態でタブを押したら開く
         }
         if view == FleetBottomView::Terminal {
-            if let Some(session) = self.project_sessions.sessions.get(self.project_sessions.active) {
+            if let Some(session) = self
+                .project_sessions
+                .sessions
+                .get(self.project_sessions.active)
+            {
                 session
                     .terminal_dock
                     .clone()

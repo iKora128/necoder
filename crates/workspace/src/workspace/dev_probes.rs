@@ -11,7 +11,8 @@ impl Workspace {
         if !self.chrome.show_right {
             self.chrome.show_right = true;
         }
-        self.agent_panel.update(cx, |panel, cx| panel.debug_start_rename(cx));
+        self.agent_panel
+            .update(cx, |panel, cx| panel.debug_start_rename(cx));
         cx.notify();
     }
 
@@ -31,14 +32,24 @@ impl Workspace {
         if !self.chrome.show_right {
             self.chrome.show_right = true;
         }
-        self.agent_panel.update(cx, |panel, cx| panel.debug_set_activities(cx));
+        self.agent_panel
+            .update(cx, |panel, cx| panel.debug_set_activities(cx));
         // ニュースフィード（P2）の描画検証: 実遷移が積むのと同じ写像（news_text_for_phase）でデモ行を積む。
         if self.notifications.news.is_empty() {
             let statuses = self.agent_panel.read(cx).statuses();
             let demo = [
-                (TaskPhase::Blocked, Some("workspace.rs への書き込みを許可しますか")),
-                (TaskPhase::ReviewReady, Some("全 21 test green。次は P2 へ。")),
-                (TaskPhase::Failed, Some("cargo check 2 エラー（notify 8.2 API 変更）")),
+                (
+                    TaskPhase::Blocked,
+                    Some("workspace.rs への書き込みを許可しますか"),
+                ),
+                (
+                    TaskPhase::ReviewReady,
+                    Some("全 21 test green。次は P2 へ。"),
+                ),
+                (
+                    TaskPhase::Failed,
+                    Some("cargo check 2 エラー（notify 8.2 API 変更）"),
+                ),
                 (TaskPhase::Working, None),
             ];
             for (index, (phase, digest)) in demo.into_iter().enumerate() {
@@ -126,13 +137,21 @@ impl Workspace {
                 .agent_panel
                 .update(cx, |panel, cx| panel.debug_set_state(style, cx));
             // ニュースにも実遷移と同じ写像でデモ行を積む（Planned/Working は静かに）。
-            if matches!(phase, TaskPhase::Blocked | TaskPhase::MergeReady | TaskPhase::Failed) {
+            if matches!(
+                phase,
+                TaskPhase::Blocked | TaskPhase::MergeReady | TaskPhase::Failed
+            ) {
                 let digest = match style {
                     1 => Some("shell: cargo publish を実行してよいですか"),
                     _ => summary,
                 };
                 let (kind, text) = Self::news_text_for_phase(phase, digest);
-                self.push_news(kind, news_color, SharedString::from(title.to_string()), text);
+                self.push_news(
+                    kind,
+                    news_color,
+                    SharedString::from(title.to_string()),
+                    text,
+                );
             }
         }
         self.chrome.fleet_mode = true;
@@ -149,7 +168,12 @@ impl Workspace {
     /// 「未コミット N ファイル / 未統合 N 件」がその場のリポジトリの真値で描かれる。
     /// `branch` を渡すとブランチごと削除の見た目になる。削除自体は実行しない（人が押すまで）。
     #[cfg(debug_assertions)]
-    pub fn debug_worktree_delete(&mut self, mode: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn debug_worktree_delete(
+        &mut self,
+        mode: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // `worktree:2` のようにレール index を指定できる（未指定はアクティブ）。
         // dirty / 未統合コミットがある slot を狙って「失うものがある」表示を撮るため。
         let (mode, index) = match mode.split_once(':') {
@@ -183,7 +207,10 @@ impl Workspace {
                 while !self.chrome.fleet_cells.is_empty() {
                     self.close_fleet_cell(0, cx);
                 }
-                println!("fleet: cells after close-all = {}", self.chrome.fleet_cells.len());
+                println!(
+                    "fleet: cells after close-all = {}",
+                    self.chrome.fleet_cells.len()
+                );
             }
             other => eprintln!("FLEET_PROBE: 未知のコマンド {other}"),
         }
@@ -209,7 +236,13 @@ impl Workspace {
 
     /// 開発用: ターミナルを開いて file:line リンクのクリック相当イベントを発火（M13 の結線検証）。
     #[cfg(debug_assertions)]
-    pub fn debug_terminal_link(&mut self, path: String, line: u32, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn debug_terminal_link(
+        &mut self,
+        path: String,
+        line: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.toggle_terminal(&ToggleTerminal, window, cx);
         self.terminal_dock
             .update(cx, |dock, cx| dock.emit_open_path(path, line, cx));
@@ -277,7 +310,12 @@ impl Workspace {
                         match text {
                             Some(text) => {
                                 eprintln!("TODOS_PROBE: ▶ 送信 line={line} text={text}");
-                                workspace.send_todo_to_agent_for(workspace.project_sessions.active, line, text, cx);
+                                workspace.send_todo_to_agent_for(
+                                    workspace.project_sessions.active,
+                                    line,
+                                    text,
+                                    cx,
+                                );
                             }
                             None => eprintln!("TODOS_PROBE: line={line} が見つからない"),
                         }

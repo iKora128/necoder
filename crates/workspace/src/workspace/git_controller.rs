@@ -19,7 +19,11 @@ impl Workspace {
         })
     }
 
-    pub(crate) fn toggle_branch_menu(&mut self, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_branch_menu(
+        &mut self,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         if self.close_branch_menu(cx) {
             return;
         }
@@ -42,8 +46,12 @@ impl Workspace {
                 .await;
             let _ = workspace.update(cx, |_workspace, cx| {
                 git_panel.update(cx, |panel, cx| {
-                    panel.branch_menu =
-                        Some(BranchMenuState { position, current, branches, worktrees });
+                    panel.branch_menu = Some(BranchMenuState {
+                        position,
+                        current,
+                        branches,
+                        worktrees,
+                    });
                     cx.notify();
                 });
                 cx.notify();
@@ -59,7 +67,12 @@ impl Workspace {
     }
 
     /// ブランチを in-place で切り替える（git switch）→ プロジェクト再読込。dirty で失敗したらログのみ。
-    pub(crate) fn switch_branch_to(&mut self, branch: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn switch_branch_to(
+        &mut self,
+        branch: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_branch_menu(cx);
         let Some(worktree) = self.active_worktree() else {
             return;
@@ -158,9 +171,12 @@ impl Workspace {
             let _ = workspace.update(cx, |workspace, cx| {
                 git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match target {
-                    Ok(target) => {
-                        workspace.open_folder_in_rail(host_for_open, target, Some(branch_for_open), cx)
-                    }
+                    Ok(target) => workspace.open_folder_in_rail(
+                        host_for_open,
+                        target,
+                        Some(branch_for_open),
+                        cx,
+                    ),
                     Err(error) => workspace.push_toast(
                         SharedString::from(format!("{error:#}")),
                         workspace.accent(),
@@ -174,7 +190,12 @@ impl Workspace {
     }
 
     /// worktree のパスをこのウィンドウのレールに開く（⎇ メニューの worktree 行）。
-    pub(crate) fn open_worktree_window(&mut self, path: PathBuf, branch: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn open_worktree_window(
+        &mut self,
+        path: PathBuf,
+        branch: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.close_branch_menu(cx);
         let host = match self.active_worktree() {
             Some(worktree) => worktree.host().clone(),
@@ -200,9 +221,15 @@ impl Workspace {
     // ── git 操作パネル（M8: ソース管理。commit / stage / push / pull / 新規ブランチ） ──
 
     /// git 操作パネルをエクスプローラと切り替える（⌃⇧G）。開くと左カラムを占有しフォーカスを取る。
-    pub(crate) fn toggle_git_panel(&mut self, _: &ToggleGitPanel, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_git_panel(
+        &mut self,
+        _: &ToggleGitPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let was_open = self.git_panel_open(cx);
-        self.git_panel.update(cx, |panel, cx| panel.set_open(!was_open, cx));
+        self.git_panel
+            .update(cx, |panel, cx| panel.set_open(!was_open, cx));
         if was_open {
             // 閉じる → エディタがあればフォーカスを戻す。
             if let Some(editor) = self.active_editor() {
@@ -212,7 +239,8 @@ impl Workspace {
         } else {
             self.chrome.show_left = true;
             self.chrome.show_herd = false;
-            self.todo_panel.update(cx, |panel, cx| panel.set_open(false, cx));
+            self.todo_panel
+                .update(cx, |panel, cx| panel.set_open(false, cx));
             let focus = self.git_panel.read(cx).focus.clone();
             window.focus(&focus, cx);
             self.refresh_git_status(cx);
@@ -221,7 +249,12 @@ impl Workspace {
     }
 
     /// git パネルのキー入力（コミットメッセージ / ブランチ名を手書きで積む。検索パネルと同流儀）。
-    pub(crate) fn on_git_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_git_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event.keystroke.key.as_str() {
             "escape" => {
                 // ブランチ名モードなら入力だけ畳む。そうでなければパネルを閉じる。
@@ -398,7 +431,12 @@ impl Workspace {
     }
 
     /// push/pull をバックグラウンドエグゼキュータで走らせ、完了後に git 状態を更新する。
-    pub(crate) fn run_git_remote(&mut self, is_push: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_git_remote(
+        &mut self,
+        is_push: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.git_is_busy(cx) {
             return;
         }
@@ -429,7 +467,10 @@ impl Workspace {
                     Ok(()) if !is_push => workspace.reload_active_project(window, cx),
                     Ok(()) => workspace.refresh_git_status(cx),
                     Err(error) => {
-                        eprintln!("{} に失敗: {error:#}", if is_push { "push" } else { "pull" });
+                        eprintln!(
+                            "{} に失敗: {error:#}",
+                            if is_push { "push" } else { "pull" }
+                        );
                         workspace.refresh_git_status(cx);
                     }
                 }
@@ -441,7 +482,12 @@ impl Workspace {
 
     /// GitHub PR 操作（`gh`・背景実行）。`create=true` で PR 作成ページ、false で PR/リポジトリを開く。
     /// git と同じ host 上で走るので remote プロジェクトでもそのまま動く（ブラウザは gh に委ねる）。
-    pub(crate) fn github_action(&mut self, create: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn github_action(
+        &mut self,
+        create: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.git_is_busy(cx) {
             return;
         }
