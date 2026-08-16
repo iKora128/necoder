@@ -232,11 +232,11 @@ impl Workspace {
                     ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(self.agent_panel.clone()),
+                div().flex_1().min_w_0().h_full().child(
+                    self.agent_panel
+                        .clone()
+                        .cached(StyleRefinement::default().flex().flex_col().size_full()),
+                ),
             )
     }
 

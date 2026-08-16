@@ -868,7 +868,11 @@ impl Workspace {
                     .flex_1()
                     .overflow_hidden()
                     .relative()
-                    .child(editor.clone())
+                    .child(
+                        editor
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    )
                     .children(self.render_buffer_search_bar(cx)),
             )
             .into_any_element()
@@ -888,7 +892,13 @@ impl Workspace {
             .min_w_0()
             .child(self.render_split_tabstrip(editor, cx))
             .child(self.render_breadcrumb(editor, cx))
-            .child(div().flex_1().overflow_hidden().child(editor.clone()))
+            .child(
+                div().flex_1().overflow_hidden().child(
+                    editor
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                ),
+            )
             .into_any_element()
     }
 
@@ -1098,11 +1108,11 @@ impl Workspace {
             .min_w_0()
             .bg(theme.bg1)
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .child(self.agent_panel.clone()),
+                div().flex_1().min_h_0().min_w_0().child(
+                    self.agent_panel
+                        .clone()
+                        .cached(StyleRefinement::default().flex().flex_col().size_full()),
+                ),
             )
             .when(self.chrome.show_bottom, |element| {
                 element.child(self.render_bottom_dock(cx))
@@ -1118,7 +1128,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .child(self.render_bottom_resize_handle(cx))
-            .child(self.terminal_dock.clone())
+            .child(
+                self.terminal_dock
+                    .clone()
+                    .cached(StyleRefinement::default().flex().flex_col().size_full()),
+            )
     }
 
     /// フッター中央の**常設ロールアップ**（herdr の状態集約・#）。ウィンドウのレールに載る全プロジェクトの

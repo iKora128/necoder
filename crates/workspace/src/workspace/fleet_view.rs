@@ -2662,15 +2662,22 @@ impl Workspace {
                 FleetPane::Task { .. } => self.project_sessions.sessions[session_index]
                     .agent_panel
                     .clone()
+                    .cached(StyleRefinement::default().flex().flex_col().size_full())
                     .into_any_element(),
                 FleetPane::Terminal { .. } => self.project_sessions.sessions[session_index]
                     .terminal_dock
                     .clone()
+                    .cached(StyleRefinement::default().flex().flex_col().size_full())
                     .into_any_element(),
                 FleetPane::Editor { .. } => self.project_sessions.sessions[session_index]
                     .tabs
                     .get(self.project_sessions.sessions[session_index].active_tab)
-                    .map(|tab| tab.editor.clone().into_any_element())
+                    .map(|tab| {
+                        tab.editor
+                            .clone()
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element()
+                    })
                     .unwrap_or_else(|| {
                         div()
                             .flex_1()
@@ -2688,6 +2695,7 @@ impl Workspace {
                 FleetPane::Tests { .. } => self.project_sessions.sessions[session_index]
                     .tests_dock
                     .clone()
+                    .cached(StyleRefinement::default().flex().flex_col().size_full())
                     .into_any_element(),
             })
             .unwrap_or_else(|| {
@@ -2890,19 +2898,22 @@ impl Workspace {
         } else {
             match view {
                 FleetBottomView::News => self.render_newsfeed(cx),
-                FleetBottomView::Terminal => self
-                    .project_sessions
-                    .sessions
-                    .get(self.project_sessions.active)
-                    .map(|session| {
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .child(session.terminal_dock.clone())
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| div().flex_1().into_any_element()),
+                FleetBottomView::Terminal => {
+                    self.project_sessions
+                        .sessions
+                        .get(self.project_sessions.active)
+                        .map(|session| {
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .child(session.terminal_dock.clone().cached(
+                                    StyleRefinement::default().flex().flex_col().size_full(),
+                                ))
+                                .into_any_element()
+                        })
+                        .unwrap_or_else(|| div().flex_1().into_any_element())
+                }
             }
         };
         div()

@@ -337,6 +337,8 @@ settings:
   pref_agent_auto_name_sub: AI titles new threads from the first exchange
   pref_completion_sound: Completion sound
   pref_completion_sound_sub: Plays when an agent turn finishes
+  pref_reduce_motion: Reduce motion
+  pref_reduce_motion_sub: Freezes decorative animation such as Braille spinners and the mascot
   pref_font_size: Font size
   pref_tab_size: Tab width
   pref_tabs_view: Thread tabs

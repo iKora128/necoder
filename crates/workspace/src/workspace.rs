@@ -21,8 +21,8 @@ pub(crate) use gpui::{
     actions, div, point, prelude::*, px, size, svg, Animation, AnimationExt, App, Bounds,
     ClipboardItem, Context, CursorStyle, Div, Entity, EventEmitter, FocusHandle, Focusable,
     FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Point, SharedString, Stateful, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowControlArea, WindowOptions,
+    MouseUpEvent, Point, SharedString, Stateful, StyleRefinement, Subscription, TitlebarOptions,
+    Window, WindowBounds, WindowControlArea, WindowOptions,
 };
 pub(crate) use host::Host;
 pub(crate) use lang::lsp::{
@@ -1826,7 +1826,7 @@ mod tests {
 
         local.arm();
         remote.arm();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         local.disarm();
         remote.disarm();
         assert_eq!(local.calls(), 0, "local Render must use cached data only");
@@ -1842,7 +1842,7 @@ mod tests {
         cx.run_until_parked();
         local.arm();
         remote.arm();
-        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         local.disarm();
         remote.disarm();
         assert_eq!(

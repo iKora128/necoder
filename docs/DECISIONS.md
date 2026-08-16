@@ -209,6 +209,15 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   1 transcript に別 AI の文脈が混ざり、「この thread は誰か」が一意でなくなる。選択は未送信 thread に限定し、
   開始後に別 Agent を使う時は新規 thread を作る。thread 固有 Agent は DB に永続化する（旧版は未保存だったため
   復元時に全件 `Claude Code` へ戻るバグがあった）。グローバル `default_agent` は従来どおり Settings だけが変更する。
+- **sticky は「agent ごと」に持つ（2026-08-17・07-27／08-08 を精緻化・§8 は維持）** — model/思考量を単一の
+  `default_model`/`default_effort` に書き戻すと、Claude で Opus を選んだ値が Codex にも current として持ち込まれ、
+  「どの agent か」（§8＝`default_agent`・Settings だけが変える）と「その agent の設定」が 1 本の値に混線していた。
+  分離: sticky は `agent_defaults[表示名] = {model, effort, mode}` の**マップ**に持ち、ピルはアクティブ thread の
+  agent にだけ書き戻す（`settings::set_agent_default`・user ファイルへ nested 書き込みで他 agent/他キーを潰さない）。
+  新規/切替スレッドは `apply_agent_sticky` でその agent の最後の選択で開く（無ければ vendor フォールバック）。
+  **§8 は不変** — ピル操作は `default_agent` を触らない・既定変更は Settings 画面のみ。08-08 の「mode は前タブ引き継ぎ
+  （session-local）」も残す＝per-agent sticky が復元時の土台、前タブ引き継ぎが同一セッション内の追従（`add_thread`
+  で sticky 適用の後に上書き）。旧 `default_model`/`default_effort` は後方互換の土台として読むだけに降格。
 - **削除は「残るものが減る 4 段」として 1 枚に並べる（2026-07-27・本人要望）** —
   「× を押しても消えない・worktree を消す方法がない・完全に消すのと見た目から排除するの違いが分からない」への回答。
   段を減らすのではなく、**段を隠すのをやめる**: セルの ⋯ に 閉じる / 止める / Task を終了 / worktree 削除 / ブランチごと削除 を

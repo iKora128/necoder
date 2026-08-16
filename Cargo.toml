@@ -15,8 +15,8 @@ license = "AGPL-3.0-or-later"
 # GPUI は zed リポジトリ内に住む（単体 crates.io 版は無い）ので、git 依存で rev 固定。
 # path 依存（gitignore 済みの ./zed）だと CI が clone してもビルド不能なため。rev はローカル
 # zed clone と一致必須（GPUI は API churn が激しい）。更新はユーザー判断で追従修正とセット。
-gpui = { git = "https://github.com/zed-industries/zed", rev = "5f8a7413a31769e0882357f90dc424b3962ac72d", package = "gpui" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "5f8a7413a31769e0882357f90dc424b3962ac72d", package = "gpui_platform" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "b2d9c2e122fbc408d42276b4456243ba4f90f181", package = "gpui" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "b2d9c2e122fbc408d42276b4456243ba4f90f181", package = "gpui_platform" }
 # バージョン制約は zed/Cargo.toml に揃える（既に lock 済みの版を共有してビルドを重複させない）
 anyhow = "1.0.86"
 ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }

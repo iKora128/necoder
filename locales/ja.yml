@@ -338,6 +338,8 @@ settings:
   pref_agent_auto_name_sub: 最初のやり取りから AI が題名を付けます
   pref_completion_sound: 完了音
   pref_completion_sound_sub: エージェントのターン完了で鳴らします
+  pref_reduce_motion: 動きを減らす
+  pref_reduce_motion_sub: 点字スピナーや猫などの装飾アニメーションを静止します
   pref_font_size: フォントサイズ
   pref_tab_size: タブ幅
   pref_tabs_view: スレッドタブの表示

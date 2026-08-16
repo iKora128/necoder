@@ -7,6 +7,7 @@
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// 密度（UI-SPEC §1.4）。行高・パディングの基準。
@@ -61,6 +62,19 @@ impl Default for RailSettings {
     }
 }
 
+/// エージェントごとの sticky 既定（モデル / 思考量 / 権限モード）。
+/// **どのエージェントを使うか**（`default_agent`・§8）とは別レイヤ — こちらは「作業のたびに選び直したくない」
+/// 設定を **agent ごとに** 覚える（Claude を Opus、Codex を GPT-5 のように混ぜても各々が保たれる）。
+/// composer のピルで選ぶとここへ書き戻り、その agent の次スレッドが同じ値で開く（2026-08-17）。
+/// 各値は `None`＝未選択（フォールバックへ委ねる）。JSON では欠けたキーが `None` になる。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct AgentDefaults {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub mode: Option<String>,
+}
+
 /// 解決済み設定（全レイヤをマージ後に得る）。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -86,6 +100,9 @@ pub struct Settings {
     /// エージェントのターン完了時に通知音を鳴らすか（macOS system sound・既定 on）。
     /// 裏の窓で走らせた作業の完了にも気づける（`docs/BACKGROUND.md` の原点痛点）。独自チャイム同梱は後続。
     pub completion_sound: bool,
+    /// 装飾的な動きを静止するアクセシビリティ設定。GPUI の `reduce_motion` へ接続し、
+    /// スピナー・fade・マスコットなどの継続アニメーションを静止画として描く。
+    pub reduce_motion: bool,
     /// Tier 2 遷移スナップショット（✳ 1 行要約・FLEET-CONTROL-PLAN P4・既定 on）。
     /// Done/Failed 遷移時に既定 Agent の oneshot CLI で 1 行生成する。オフでも Tier 1（決定論）は出続ける。
     pub tier2_summaries: bool,
@@ -109,6 +126,10 @@ pub struct Settings {
     /// エージェントが実選択肢を広告していればそちらが優先され、ここは候補が無いときの土台になる。
     pub default_model: String,
     pub default_effort: String,
+    /// エージェントごとの sticky 既定（表示名 → モデル/思考量/モード）。**ピルで選ぶとここへ書き戻る**。
+    /// `default_model`/`default_effort`（グローバルな土台）より優先し、agent を跨いでも各々を保つ（2026-08-17）。
+    /// `default_agent` は §8 のまま Settings 画面だけが変える — 「どの agent か」と「その agent の設定」を分離する。
+    pub agent_defaults: BTreeMap<String, AgentDefaults>,
     /// worktree 削除の前に確認ダイアログを出すか（既定 on・2026-07-27）。
     /// **off にしても「失うものがある」ときは必ず確認する** — 未コミットの変更は git にも残らないので、
     /// 「二度と聞くな」の対象は *取り返しがつく* 削除に限る（DECISIONS の該当項）。
@@ -136,6 +157,7 @@ impl Default for Settings {
             submit_on_enter: false,
             agent_auto_name: true,
             completion_sound: true,
+            reduce_motion: false,
             tier2_summaries: true,
             coordinator_agent: None,
             fleet_goal: None,
@@ -143,6 +165,7 @@ impl Default for Settings {
             default_agent: "Claude Code".to_string(),
             default_model: "claude-opus-5".to_string(),
             default_effort: "high".to_string(),
+            agent_defaults: BTreeMap::new(),
             confirm_worktree_delete: true,
             fleet_agent_worktree: false,
             rail: RailSettings::default(),
@@ -160,6 +183,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "submit_on_enter": false,
   "agent_auto_name": true,
   "completion_sound": true,
+  "reduce_motion": false,
   "tier2_summaries": true,
   "agent_tabs_view": "bar",
   "default_agent": "Claude Code",
@@ -261,6 +285,42 @@ pub fn persist_user_value(path: &Path, key: &str, value: Value) -> Result<()> {
     Ok(())
 }
 
+/// `agent_defaults.<agent>.<field>` の 1 点だけを user 設定ファイルへ書き込む（ピルの sticky 保存用）。
+/// **user ファイル自身の値だけ**を読んで nested に更新する（マージ済み解決値を書き戻すと project 層の値を
+/// user へ焼き込んでしまうため）。既存の他 agent・他 field・他キーは保つ。親ディレクトリが無ければ作る。
+pub fn persist_agent_default(path: &Path, agent: &str, field: &str, value: &str) -> Result<()> {
+    let mut root: Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    let map = root.as_object_mut().expect("上で object を保証");
+    let defaults = map
+        .entry("agent_defaults")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !defaults.is_object() {
+        *defaults = Value::Object(serde_json::Map::new());
+    }
+    let agents = defaults.as_object_mut().expect("直前で object を保証");
+    let entry = agents
+        .entry(agent)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = Value::Object(serde_json::Map::new());
+    }
+    entry
+        .as_object_mut()
+        .expect("直前で object を保証")
+        .insert(field.to_string(), Value::String(value.to_string()));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("設定ディレクトリを作れない: {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&root).context("設定の JSON 化に失敗")?;
+    std::fs::write(path, text).with_context(|| format!("設定を書けない: {}", path.display()))?;
+    Ok(())
+}
+
 /// `overlay` を `base` に深くマージする。オブジェクトは再帰、それ以外は置換。
 fn merge_value(base: &mut Value, overlay: &Value) {
     match (base, overlay) {
@@ -349,6 +409,17 @@ mod tests {
     }
 
     #[test]
+    fn reduce_motion_defaults_off_and_overrides() {
+        assert!(!SettingsStore::default().settings().reduce_motion);
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{ "reduce_motion": true }"#,
+        ])
+        .expect("マージできる");
+        assert!(store.settings().reduce_motion);
+    }
+
+    #[test]
     fn persist_user_value_sets_one_key_and_keeps_others() {
         let dir =
             std::env::temp_dir().join(format!("shirushi-settings-test-{}", std::process::id()));
@@ -366,6 +437,39 @@ mod tests {
         .expect("マージできる");
         assert!(store.settings().submit_on_enter); // 書いたキー
         assert_eq!(store.settings().theme, "shirushi-light"); // 既存キーは保たれる
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_agent_default_is_nested_and_isolated() {
+        let dir = std::env::temp_dir().join(format!(
+            "shirushi-agent-defaults-test-{}",
+            std::process::id()
+        ));
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(&path, r#"{ "theme": "shirushi-light" }"#).expect("seed");
+
+        // 別 agent・別 field を順に書いても、互いを潰さず nested にマージされる。
+        persist_agent_default(&path, "Claude Code", "model", "claude-opus-5").expect("書ける");
+        persist_agent_default(&path, "Claude Code", "effort", "xhigh").expect("書ける");
+        persist_agent_default(&path, "Codex", "model", "GPT-5.6-Sol").expect("書ける");
+
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            &std::fs::read_to_string(&path).expect("read"),
+        ])
+        .expect("マージできる");
+        let defaults = &store.settings().agent_defaults;
+        assert_eq!(
+            defaults["Claude Code"].model.as_deref(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(defaults["Claude Code"].effort.as_deref(), Some("xhigh"));
+        assert_eq!(defaults["Codex"].model.as_deref(), Some("GPT-5.6-Sol"));
+        assert_eq!(defaults["Codex"].effort, None); // 書いていない field は None
+        assert_eq!(store.settings().theme, "shirushi-light"); // 無関係キーは保たれる
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

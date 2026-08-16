@@ -481,6 +481,58 @@ mod tests {
     }
 
     #[test]
+    fn highlight_span_boundaries_are_char_boundaries() {
+        // 全角文字（日本語コメント・記号）を含むコードでも span 境界が UTF-8 文字境界に
+        // 乗ること。乗らないと gpui の layout_line が `split_at` で abort する（クラッシュ再現）。
+        let languages = [
+            LanguageId::Rust,
+            LanguageId::JavaScript,
+            LanguageId::TypeScript,
+            LanguageId::Tsx,
+            LanguageId::Python,
+            LanguageId::Go,
+            LanguageId::Json,
+            LanguageId::Yaml,
+            LanguageId::Toml,
+            LanguageId::Html,
+            LanguageId::Css,
+            LanguageId::Markdown,
+            LanguageId::Bash,
+            LanguageId::C,
+            LanguageId::Cpp,
+        ];
+        // 全角文字（コメント・文字列・記号）が識別子/記号に隣接する断片。クラッシュログの
+        // ` TextRun（=` / `のまま）` を含め、境界が全角の内側へ落ちやすい形を各言語へ通す。
+        let sources = [
+            "let run; // TextRun（=フォントラン境界）\nname = \"のまま）\"\n",
+            "// name,color_index,project,branch,model,... のまま）\nx = 1\n",
+            "x = '（全角）'  # のまま）\n",
+            "{\"キー\": \"のまま）\", \"a\": 1}\n",
+            "key: \"のまま）\"  # コメント（＝末尾）\n",
+            "<div>のまま）</div>\n",
+            ".c { color: red } /* のまま）*/\n",
+            "# 見出し（＝）\n\n本文 `TextRun（=` のまま）\n",
+            "echo \"のまま）\"  # フォントラン（=境界）\n",
+        ];
+        for language in languages {
+            let Some(highlighter) = Highlighter::for_language(language) else {
+                continue;
+            };
+            for source in sources {
+                for span in highlighter.highlight(source) {
+                    assert!(
+                        span.range.end <= source.len()
+                            && source.is_char_boundary(span.range.start)
+                            && source.is_char_boundary(span.range.end),
+                        "{language:?}: span {:?} が文字境界に乗らない（source={source:?}）",
+                        span.range,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn for_extension_selects_rust_only() {
         assert!(Highlighter::for_extension("rs").is_some());
         assert!(Highlighter::for_extension("txt").is_none());

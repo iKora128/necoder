@@ -299,6 +299,43 @@ fn heading_level(level: pulldown_cmark::HeadingLevel) -> u8 {
 mod tests {
     use super::*;
 
+    /// 全ブロックについて span の byte 範囲が block.text の文字境界に乗り、範囲外でないこと。
+    /// 乗らないと StyledText → gpui layout_line が `split_at` で abort する（クラッシュ再現）。
+    fn assert_spans_valid(source: &str) {
+        for block in parse(source) {
+            let (text, spans) = match &block {
+                Block::Heading { text, spans, .. }
+                | Block::Paragraph { text, spans }
+                | Block::ListItem { text, spans, .. } => (text.as_str(), spans),
+                Block::Code { .. } | Block::Rule => continue,
+            };
+            for span in spans {
+                assert!(
+                    span.range.end <= text.len(),
+                    "span {:?} が範囲外（text len {}, source={source:?})",
+                    span.range,
+                    text.len(),
+                );
+                assert!(
+                    text.is_char_boundary(span.range.start)
+                        && text.is_char_boundary(span.range.end),
+                    "span {:?} が文字境界に乗らない（text={text:?}, source={source:?})",
+                    span.range,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn span_ranges_stay_on_char_boundaries() {
+        // 末尾装飾 + 末尾に全角/空白 → flush の trim_end で span が範囲外/非境界化しないか。
+        assert_spans_valid("これは **強調（＝末尾）** \n");
+        assert_spans_valid("末尾コード `TextRun（=フォントラン）`   \n");
+        assert_spans_valid("- 項目 **太字（＝）**　\n- 次の項目");
+        assert_spans_valid("# 見出し **（末尾）**\u{3000}\n");
+        assert_spans_valid("name,color_index,project,branch,model のまま） `key` \n");
+    }
+
     #[test]
     fn heading_and_inline_strong() {
         let blocks = parse("# タイトル\n\nHello **world**");

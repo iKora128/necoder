@@ -19,7 +19,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use theme_core::Theme;
 
-pub use settings_core::{persist_user_value, user_settings_path, Density, Settings, SettingsStore};
+pub use settings_core::{
+    persist_agent_default, persist_user_value, user_settings_path, AgentDefaults, Density,
+    Settings, SettingsStore,
+};
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
 const POLL_INTERVAL: Duration = Duration::from_millis(1200);
@@ -55,6 +58,14 @@ pub fn init(user_path: Option<PathBuf>, project_dir: Option<PathBuf>, cx: &mut A
         user_path: user_path.clone(),
         project_dir: project_dir.clone(),
     });
+    // GPUI のアニメーション要素と自前 ticker が同じアクセシビリティ設定を見る。
+    // global の live reload にも追従するため、設定画面／CLI／手編集のどれでも即座に静止・再開する。
+    let apply_reduce_motion = |cx: &mut App| {
+        cx.set_reduce_motion(get(cx).reduce_motion);
+    };
+    apply_reduce_motion(cx);
+    cx.observe_global::<SettingsGlobal>(apply_reduce_motion)
+        .detach();
     spawn_watcher(user_path, project_dir, cx);
 }
 
@@ -75,6 +86,23 @@ pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) {
     if let Some(path) = path {
         if let Err(error) = persist_user_value(&path, key, value) {
             eprintln!("設定の保存に失敗（実行時のみ反映）: {error:#}");
+        }
+    }
+    if cx.has_global::<SettingsGlobal>() {
+        cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
+    }
+}
+
+/// `agent_defaults.<agent>.<field>` の 1 点を更新して**即適用 + 永続化**する（composer ピルの sticky）。
+/// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。agent ごとに保つので Model/Effort/Mode の
+/// 値が別 agent へ漏れない。`field` は `"model"` / `"effort"` / `"mode"`。
+pub fn set_agent_default(cx: &mut App, agent: &str, field: &str, value: &str) {
+    let path = cx
+        .try_global::<SettingsGlobal>()
+        .and_then(|global| global.user_path.clone());
+    if let Some(path) = path {
+        if let Err(error) = persist_agent_default(&path, agent, field, value) {
+            eprintln!("エージェント既定の保存に失敗（実行時のみ反映）: {error:#}");
         }
     }
     if cx.has_global::<SettingsGlobal>() {
@@ -508,6 +536,14 @@ impl SettingsView {
                 i18n::t!("settings.pref_completion_sound"),
                 Some(i18n::t!("settings.pref_completion_sound_sub")),
                 settings.completion_sound,
+                cx,
+            ))
+            .child(self.toggle_row(
+                "reduce_motion",
+                5,
+                i18n::t!("settings.pref_reduce_motion"),
+                Some(i18n::t!("settings.pref_reduce_motion_sub")),
+                settings.reduce_motion,
                 cx,
             ))
             .child(self.stepper_row(

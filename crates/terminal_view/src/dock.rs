@@ -1,7 +1,7 @@
 use crate::{TerminalEvent, TerminalView};
 use gpui::{
     div, prelude::*, px, App, Context, Entity, EventEmitter, IntoElement, MouseButton, Render,
-    Window,
+    StyleRefinement, Window,
 };
 use std::path::PathBuf;
 use theme_core::Theme;
@@ -64,6 +64,22 @@ impl TerminalDock {
                 });
             }
         }
+    }
+
+    /// アクティブ端末（未生成なら None）。プロジェクト切替のフォーカス追従が使う読み取り専用アクセサ
+    /// （[`Self::ensure_active`] と違い PTY を起動しない）。
+    pub fn active_terminal(&self) -> Option<Entity<TerminalView>> {
+        self.terminals.get(self.active).cloned()
+    }
+
+    /// dock 内のいずれかの端末にキーボードフォーカスがあるか（プロジェクト切替のフォーカス追従判定）。
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.terminals.iter().any(|terminal| {
+            terminal
+                .read(cx)
+                .focus_handle()
+                .contains_focused(window, cx)
+        })
     }
 
     pub fn ensure_active(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
@@ -275,11 +291,11 @@ impl Render for TerminalDock {
                     ),
             );
         let body = match self.terminals.get(active) {
-            Some(terminal) => div()
-                .flex_1()
-                .min_h_0()
-                .overflow_hidden()
-                .child(terminal.clone()),
+            Some(terminal) => div().flex_1().min_h_0().overflow_hidden().child(
+                terminal
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            ),
             None => div().flex_1(),
         };
         // 高さは**置いた側**（workspace の下段ドック / 編隊セル）が決める。ここで固定高を持つと

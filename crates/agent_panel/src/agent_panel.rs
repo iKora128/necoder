@@ -36,10 +36,11 @@ use editor_view::{ComposerEvent, EditorView};
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    actions, canvas, div, prelude::*, px, svg, Animation, AnimationExt, App, ClipboardItem,
-    Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight,
-    HighlightStyle, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, RenderImage, ScrollHandle, SharedString, StyledText, TextLayout, Window,
+    actions, canvas, div, list, prelude::*, px, svg, Animation, AnimationExt, App, ClipboardItem,
+    Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, FollowMode,
+    FontWeight, HighlightStyle, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, RenderImage,
+    ScrollHandle, SharedString, StyleRefinement, StyledText, TextLayout, Window,
 };
 use host::{Host, LocalHost};
 use std::cell::RefCell;
@@ -89,16 +90,28 @@ const COMPOSER_INPUT_MAX: f32 = 420.0;
 /// **これはフォールバック** — ACP エージェントが `session/set_config_option` で広告してきた
 /// 一覧があればそちらが優先される（`selector_options`）。広告しないエージェント用の既定リスト。
 /// 選択は `send_set_config` で実際にエージェントへ送る（表示だけではない）。
-const MODELS: &[&str] = &[
+const CLAUDE_MODELS: &[&str] = &[
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-sonnet-5",
     "claude-haiku-4-5",
     "claude-fable-5",
 ];
+/// Codex のセッション広告を受け取る前だけ使う候補。接続後は `config_options` の動的一覧に置き換わる。
+/// 表示名は codex-acp の Model config（Codex `model/list` の `displayName`）に合わせる。
+const CODEX_MODELS: &[&str] = &[
+    "GPT-5.6-Sol",
+    "GPT-5.6-Terra",
+    "GPT-5.6-Luna",
+    "GPT-5.5",
+    "GPT-5.4",
+    "GPT-5.4-Mini",
+];
+/// モデル在庫を静的に持てないエージェントは、ACP 広告が届くまで vendor の既定を使う。
+const AUTO_MODELS: &[&str] = &["auto"];
 /// 権限モード（Claude Code 相当。実配線は ACP の SessionMode／set_mode 経由で継続課題）。
 const PERMISSION_MODES: &[&str] = &["default", "accept edits", "bypass permissions", "plan"];
-/// 推論の effort（Zed 下部コントロール相当）。MODELS と同じくエージェントの広告が優先。
+/// 推論の effort（Zed 下部コントロール相当）。モデル候補と同じくエージェントの広告が優先。
 /// `xhigh` は high と max の間（Opus 5 / Opus 4.8 / Sonnet 5 等。コーディング/エージェント用途の推奨値）。
 const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
@@ -125,7 +138,7 @@ impl Selector {
         match self {
             Selector::Agent => &[],
             Selector::Mode => PERMISSION_MODES,
-            Selector::Model => MODELS,
+            Selector::Model => CLAUDE_MODELS,
             Selector::Effort => EFFORTS,
         }
     }
@@ -261,9 +274,11 @@ impl CachedStyledTextView {
 
 impl Render for CachedStyledTextView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let highlights: Vec<_> =
+        let highlights = snap_highlights_to_char_boundaries(
+            &self.text,
             gpui::combine_highlights(self.base_highlights.clone(), self.selection.clone())
-                .collect();
+                .collect(),
+        );
         let mut styled = StyledText::new(self.text.clone());
         if !highlights.is_empty() {
             styled = styled.with_highlights(highlights);
@@ -307,7 +322,7 @@ struct StreamingTextView {
     ticker: bool,
     last_rendered_at: Option<std::time::Instant>,
     theme: Theme,
-    scroll: ScrollHandle,
+    scroll: ListState,
     markdown_cache: Rc<RefCell<MarkdownBlockCache>>,
     syntax_cache: Rc<RefCell<SyntaxHighlightCache>>,
 }
@@ -315,7 +330,7 @@ struct StreamingTextView {
 impl StreamingTextView {
     fn new(
         theme: Theme,
-        scroll: ScrollHandle,
+        scroll: ListState,
         markdown_cache: Rc<RefCell<MarkdownBlockCache>>,
         syntax_cache: Rc<RefCell<SyntaxHighlightCache>>,
     ) -> Self {
@@ -398,10 +413,8 @@ impl StreamingTextView {
                             // 遅れない（旧: /6・最低 2 で末尾が 50 字/秒まで落ち「遅く感じる」原因だった）。
                             let step = (remaining / 3).max(16);
                             body.reveal = body.reveal.saturating_add(step).min(target);
-                            let offset = body.scroll.offset();
-                            let max = body.scroll.max_offset();
-                            if max.y <= px(0.) || offset.y <= -(max.y - px(60.)) {
-                                body.scroll.scroll_to_bottom();
+                            if body.scroll.is_scrolled_to_end().unwrap_or(true) {
+                                body.scroll.scroll_to_end();
                             }
                             cx.notify();
                         }
@@ -442,7 +455,11 @@ impl StreamingTextView {
 
 impl Render for StreamingTextView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.active = self.active && window.is_window_active();
+        // タイプライタは装飾なので reduce motion では到着済み本文を即時表示する。
+        self.active = self.active && window.is_window_active() && !cx.reduce_motion();
+        if !self.active {
+            self.reveal = self.text.chars().count();
+        }
         self.last_rendered_at = Some(std::time::Instant::now());
         if self.active {
             self.ensure_ticker(cx);
@@ -473,10 +490,55 @@ impl Render for StreamingTextView {
     }
 }
 
+/// `index` 以下で最も近い UTF-8 文字境界（内側へ丸める）。
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// `index` 以上で最も近い UTF-8 文字境界（内側へ丸める）。
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    let len = text.len();
+    if index >= len {
+        return len;
+    }
+    while index < len && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+/// gpui の `compute_runs`→`layout_line` は run 境界が本文の UTF-8 文字境界に乗らない/範囲外だと
+/// `split_at` でプロセスごと abort する（release では `compute_runs` の `debug_assert` が効かない）。
+/// ハイライトの由来（tree-sitter / markdown / 描画をまたいで再利用される選択オフセット）が本文と
+/// 完全一致する保証を全経路で持てないため、gpui へ渡す直前にここで各 run の端点を内側の文字境界へ
+/// 丸め（start は次境界・end は前境界へ）、潰れた/範囲外の run は捨てる。gpui は AGPL 対象外の
+/// pinned 依存で改変できないため、防御はこの seam に置く。
+fn snap_highlights_to_char_boundaries(
+    text: &str,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let len = text.len();
+    highlights
+        .into_iter()
+        .filter_map(|(range, style)| {
+            let start = ceil_char_boundary(text, range.start.min(len));
+            let end = floor_char_boundary(text, range.end.min(len));
+            (start < end).then_some((start..end, style))
+        })
+        .collect()
+}
+
 fn streaming_styled_text(
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
 ) -> gpui::AnyElement {
+    let highlights = snap_highlights_to_char_boundaries(&text, highlights);
     let mut styled = StyledText::new(SharedString::from(text));
     if !highlights.is_empty() {
         styled = styled.with_highlights(highlights);
@@ -1248,12 +1310,15 @@ pub struct AgentPanel {
     composer: Entity<EditorView>,
     /// 固定レイアウトのマスコット。フレーム時計と paint invalidation を親 transcript から分離する。
     mascot: Entity<MascotView>,
+    /// 主点字スピナー。10fps時計と invalidation を親 AgentPanel から分離する。
+    composer_spinner: Entity<BrailleSpinnerView>,
+    transcript_spinner: Entity<BrailleSpinnerView>,
     /// 実行中の末尾本文。25fpsのタイプライタ通知を親 transcript から分離する。
     streaming_text: Entity<StreamingTextView>,
     /// タブ改名中の (対象 index, 入力欄)。ダブルクリックで開く・IME 正しい EditorView::plain（#4）。
     renaming: Option<(usize, Entity<EditorView>)>,
     /// transcript のスクロール（M13 UX: ホイールで遡れる。ストリーミング中は底に居る時だけ追従）。
-    transcript_scroll: ScrollHandle,
+    transcript_list: ListState,
     /// transcript 専用フォーカス。出力をドラッグした後の ⌘A / ⌘C を composer の選択状態から
     /// 独立させる（出力は read-only なのでテキスト入力先にはしない）。
     transcript_focus: FocusHandle,
@@ -1329,6 +1394,8 @@ impl AgentPanel {
         let composer =
             cx.new(|cx| EditorView::plain(theme.clone(), thread_color(0), submit_on_enter, cx));
         let mascot = cx.new(|_cx| MascotView::new(64.0));
+        let composer_spinner = cx.new(|_cx| BrailleSpinnerView::new(9.0, thread_color(0)));
+        let transcript_spinner = cx.new(|_cx| BrailleSpinnerView::new(8.0, thread_color(0)));
         // composer の Enter 送信要求（IME 変換中は来ない）を受けて submit する。
         cx.subscribe(&composer, |panel, _composer, event, cx| match event {
             ComposerEvent::Submit => panel.submit(cx),
@@ -1471,16 +1538,18 @@ impl AgentPanel {
         }
         // 初期表示は末尾（最新）を見せる（スクロール化 M13 での回帰防止）。
         // 開発用: SHIRUSHI_SCROLL_TOP で先頭のまま（transcript 上部＝Thinking 等の目視撮影用）。
-        let transcript_scroll = ScrollHandle::new();
+        let initial_item_count = threads.first().map_or(1, |thread| thread.entries.len());
+        let transcript_list = ListState::new(initial_item_count, ListAlignment::Top, px(800.));
+        transcript_list.set_follow_mode(FollowMode::Tail);
         if std::env::var_os("SHIRUSHI_SCROLL_TOP").is_none() {
-            transcript_scroll.scroll_to_bottom();
+            transcript_list.scroll_to_end();
         }
         let syntax_cache = Rc::new(RefCell::new(SyntaxHighlightCache::default()));
         let markdown_cache = Rc::new(RefCell::new(MarkdownBlockCache::default()));
         let styled_text_cache = Rc::new(RefCell::new(StyledTextEntityCache::default()));
         let streaming_text = {
             let theme = theme.clone();
-            let scroll = transcript_scroll.clone();
+            let scroll = transcript_list.clone();
             let markdown_cache = markdown_cache.clone();
             let syntax_cache = syntax_cache.clone();
             cx.new(move |_cx| StreamingTextView::new(theme, scroll, markdown_cache, syntax_cache))
@@ -1498,9 +1567,11 @@ impl AgentPanel {
             dest_host: LocalHost::shared(),
             composer,
             mascot,
+            composer_spinner,
+            transcript_spinner,
             streaming_text,
             renaming: None,
-            transcript_scroll,
+            transcript_list,
             transcript_focus: cx.focus_handle(),
             tabs_scroll: ScrollHandle::new(),
             tabs_view: initial_tabs_view(&settings::get(cx).agent_tabs_view),
@@ -1685,7 +1756,7 @@ impl AgentPanel {
         self.storage = Some(storage);
         self.storage_scope = scope;
         if std::env::var_os("SHIRUSHI_SCROLL_TOP").is_none() {
-            self.transcript_scroll.scroll_to_bottom(); // 復元直後も末尾（最新）を見せる
+            self.reset_transcript_list(true); // 復元直後も末尾（最新）を見せる
         }
         cx.notify();
     }
@@ -2386,25 +2457,46 @@ impl AgentPanel {
     }
 
     /// ストリーミング追従: **底に居る時だけ**最下部へ張り付く（遡って読んでいる間は動かさない）。
-    /// offset.y は下へスクロールするほど負（GPUI）。底からの残りが 1 行分程度なら「底に居る」。
+    /// `FollowMode::Tail` と同じ状態を読み、ユーザーが上へ戻った後は追従を再開しない。
     fn follow_transcript_if_at_bottom(&self) {
-        let offset = self.transcript_scroll.offset();
-        let max = self.transcript_scroll.max_offset();
-        if max.y <= px(0.) || offset.y <= -(max.y - px(60.)) {
-            self.transcript_scroll.scroll_to_bottom();
+        if self.transcript_list.is_scrolled_to_end().unwrap_or(true) {
+            self.transcript_list.scroll_to_end();
+        }
+    }
+
+    /// transcript の仮想リスト項目数。Entry に加え、送信直後など本文がまだ無い間だけ
+    /// generating 行を末尾の仮想項目として数える。スレッドが無い空状態も 1 項目で描く。
+    fn transcript_item_count(&self) -> usize {
+        let Some(thread) = self.threads.get(self.active) else {
+            return 1;
+        };
+        let tail_is_streaming = thread
+            .entries
+            .last()
+            .is_some_and(|entry| matches!(entry, Entry::Agent(_) | Entry::Thinking(_)));
+        thread.entries.len() + usize::from(thread.running && !tail_is_streaming)
+    }
+
+    fn reset_transcript_list(&self, scroll_to_end: bool) {
+        self.transcript_list.reset(self.transcript_item_count());
+        if scroll_to_end {
+            self.transcript_list.scroll_to_end();
         }
     }
 
     /// 現在見えている位置から、ひとつ前のユーザー指示をビューポート先頭へ揃える。
     /// ボタンを繰り返し押せば、指示単位で会話を遡れる。
     fn jump_to_previous_user_entry(&mut self, cx: &mut Context<Self>) {
-        let top_item = self.transcript_scroll.top_item();
+        let top_item = self.transcript_list.logical_scroll_top().item_ix;
         let target = self
             .threads
             .get(self.active)
             .and_then(|thread| previous_user_entry_index(&thread.entries, top_item));
         if let Some(index) = target {
-            self.transcript_scroll.scroll_to_top_of_item(index);
+            self.transcript_list.scroll_to(ListOffset {
+                item_ix: index,
+                offset_in_item: px(0.),
+            });
         }
         // scroll_to_top_of_item は prepaint で反映されるため、次の描画でボタンの遡り先も更新する。
         cx.notify();
@@ -2420,7 +2512,7 @@ impl AgentPanel {
         if let Some(thread) = self.threads.get_mut(index) {
             thread.done = None; // 見た＝herdr の Done ラッチ（完了・未確認）を解除
         }
-        self.transcript_scroll.scroll_to_bottom(); // 切替先は最新（末尾）を見せる
+        self.reset_transcript_list(true); // 切替先は最新（末尾）を見せる
         let color = self.active_color();
         let draft = self.threads[index].draft.clone();
         self.composer.update(cx, |composer, cx| {
@@ -2523,15 +2615,36 @@ impl AgentPanel {
             composer.set_plain_text("", cx);
             composer.set_accent(color, cx);
         });
-        self.transcript_scroll.scroll_to_bottom();
+        self.reset_transcript_list(true);
         cx.notify();
         Some(self.active)
     }
 
     /// composer（入力欄）にキーボードフォーカスを移す。タブ操作時に呼び「Agent にいる」状態にする。
-    fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.composer.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    /// パネル内のいずれかの面（composer / transcript / ＋context / タブ改名）にフォーカスがあるか。
+    /// プロジェクト切替が「Agent に居た」ことを覚え、切替先の composer へフォーカスを追従させるのに使う
+    /// （旧 session のパネルは切替でツリーから外れ、フォーカスが迷子になると全キーが死ぬため）。
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.composer
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx)
+            || self.transcript_focus.contains_focused(window, cx)
+            || self
+                .context_focus
+                .as_ref()
+                .is_some_and(|focus| focus.contains_focused(window, cx))
+            || self.renaming.as_ref().is_some_and(|(_, editor)| {
+                editor
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx)
+            })
     }
 
     fn save_active_draft(&mut self, cx: &App) {
@@ -2953,8 +3066,15 @@ impl AgentPanel {
                 _ => None,
             });
         advertised.unwrap_or_else(|| {
-            selector
-                .options()
+            let fallback = if selector == Selector::Model {
+                self.threads
+                    .get(self.active)
+                    .map(|thread| fallback_models(thread.agent.as_ref()))
+                    .unwrap_or(CLAUDE_MODELS)
+            } else {
+                selector.options()
+            };
+            fallback
                 .iter()
                 .map(|option| SharedString::from(*option))
                 .collect()
@@ -2978,27 +3098,28 @@ impl AgentPanel {
     ///
     /// Agent だけは**グローバル既定（`default_agent`）を触らない** — どのエージェントを使うかは
     /// 環境の選択で、1 スレッドの都合で全体が動くと事故になる（ドリフト禁止・DECISIONS §8）。
-    /// 一方 **Model / Effort は sticky**（2026-07-27 ユーザー要望）: 作業のたびに選び直す種類の
-    /// 設定なので、選んだ値を `default_model` / `default_effort` へ書き戻し、次の新規スレッドが
-    /// それで開く。既定を「動かさない」ことと「覚える」ことの線をここで引いている。
+    /// 一方 **Model / Effort / Mode は agent ごとに sticky**（2026-08-17）: 作業のたびに選び直す種類の
+    /// 設定なので、選んだ値を `agent_defaults[今の agent]` へ書き戻し、その agent の次スレッドが
+    /// それで開く。agent を跨いでも値が混ざらない（Claude=Opus / Codex=GPT を各々保つ）。
+    /// 既定を「動かさない」（§8＝default_agent）ことと「覚える」（per-agent sticky）の線をここで引いている。
     fn select_option(&mut self, selector: Selector, value: SharedString, cx: &mut Context<Self>) {
         if selector == Selector::Agent && self.agent_selector_locked() {
             self.open_menu = None;
             cx.notify();
             return;
         }
-        match selector {
-            Selector::Model => settings::set_user_value(
-                cx,
-                "default_model",
-                serde_json::Value::String(value.to_string()),
-            ),
-            Selector::Effort => settings::set_user_value(
-                cx,
-                "default_effort",
-                serde_json::Value::String(value.to_string()),
-            ),
-            Selector::Agent | Selector::Mode => {}
+        // sticky の宛先は「今アクティブなスレッドの agent」。選んだ値をその agent にだけ紐づける。
+        let active_agent = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.agent.clone());
+        if let Some(agent) = active_agent {
+            match selector {
+                Selector::Model => settings::set_agent_default(cx, &agent, "model", &value),
+                Selector::Effort => settings::set_agent_default(cx, &agent, "effort", &value),
+                Selector::Mode => settings::set_agent_default(cx, &agent, "mode", &value),
+                Selector::Agent => {}
+            }
         }
         if let Some(thread) = self.threads.get_mut(self.active) {
             match selector {
@@ -3006,6 +3127,9 @@ impl AgentPanel {
                     // 未送信スレッドのエージェントだけ差し替える。会話開始後は上の guard で固定。
                     // default_agent は巻き添え保存しない（グローバル既定のドリフト防止）。
                     thread.agent = value.clone();
+                    // 切り替え先 agent の sticky（モデル/思考量/モード）で開き直す。無ければ vendor
+                    // フォールバック — Claude の sticky を Codex へ持ち込むとメニューが Claude 一色になる。
+                    apply_agent_sticky(thread, cx);
                 }
                 Selector::Mode => {
                     thread.permission_mode = value.clone();
@@ -3918,7 +4042,7 @@ impl AgentPanel {
             loop {
                 let done = panel
                     .update(cx, |panel, cx| {
-                        if !panel.is_visibly_active() {
+                        if !panel.is_visibly_active() || cx.reduce_motion() {
                             if let Some(thread) = panel.threads.get_mut(panel.active) {
                                 thread.tokens_shown = thread.tokens_used as f32;
                             }
@@ -4675,6 +4799,10 @@ impl AgentPanel {
     fn render_meta(&self, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
+        self.transcript_spinner
+            .update(cx, |spinner, cx| spinner.set_color(color, cx));
+        self.composer_spinner
+            .update(cx, |spinner, cx| spinner.set_color(color, cx));
         let thread = self.threads.get(self.active);
         let (shown, max) = thread
             .map(|thread| (thread.tokens_shown, thread.tokens_max))
@@ -4764,13 +4892,23 @@ impl AgentPanel {
             .child(div().flex_1())
             // ローディング・マスコット（考=考える/生成=打鍵/成功=バンザイ/待機=うとうと）。
             // 非アクティブ時は静止＝再描画ゼロ（見てない間は 0%）。トークン真横に。
-            .child(self.mascot.clone())
+            .child(
+                self.mascot.clone().cached(
+                    StyleRefinement::default()
+                        .w(px(64.0 * 60.0 / 72.0))
+                        .h(px(64.)),
+                ),
+            )
             // トークンは常時可視（Zed+ACP で見えなかった痛点）
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(7.))
+                    // 右側クラスタを固定幅にする。値の桁数や compact ボタンの出没で、左隣の猫が
+                    // 一瞬横へ跳ねると親 surface 全体の再配置を招くため、全スロットを常時確保する。
+                    .w(px(174.))
+                    .flex_none()
                     .child(
                         div()
                             .w(px(64.))
@@ -4782,43 +4920,45 @@ impl AgentPanel {
                     )
                     .child(
                         div()
+                            .w(px(72.))
+                            .flex_none()
                             .text_size(px(10.5))
                             .text_color(theme.fg2)
+                            .font_family("Guguru Sans Code")
                             .child(format!("{}/{}", human_tokens(used), human_tokens(max))),
                     )
                     // コンパクト（/compact）ボタン: トークンの真横。文脈が溜まっていて実行中でない時だけ。
-                    .when(has_session && !running && used > 0, |element| {
+                    .child(if has_session && !running && used > 0 {
                         let theme = theme.clone();
-                        element.child(
-                            div()
-                                .id("compact-context")
-                                .group("compact-context")
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .flex_none()
-                                .size(px(18.))
-                                .rounded(px(4.))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(theme.bg3))
-                                .child(
-                                    svg()
-                                        .path("icons/minimize.svg")
-                                        .size(px(12.))
-                                        .text_color(theme.fg2)
-                                        .group_hover("compact-context", |style| {
-                                            style.text_color(theme.fg0)
-                                        }),
-                                )
-                                .tooltip(Tooltip::text(
-                                    i18n::t!("agent.compact_tip"),
-                                    theme.clone(),
-                                ))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _window, cx| this.compact_context(cx)),
-                                ),
-                        )
+                        div()
+                            .id("compact-context")
+                            .group("compact-context")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_none()
+                            .size(px(18.))
+                            .rounded(px(4.))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3))
+                            .child(
+                                svg()
+                                    .path("icons/minimize.svg")
+                                    .size(px(12.))
+                                    .text_color(theme.fg2)
+                                    .group_hover("compact-context", |style| {
+                                        style.text_color(theme.fg0)
+                                    }),
+                            )
+                            .tooltip(Tooltip::text(i18n::t!("agent.compact_tip"), theme.clone()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _window, cx| this.compact_context(cx)),
+                            )
+                            .into_any_element()
+                    } else {
+                        // 非表示でも同じ 18px を占有し、猫とメーターの位置を不変にする。
+                        div().size(px(18.)).flex_none().into_any_element()
                     }),
             )
     }
@@ -4890,11 +5030,9 @@ impl AgentPanel {
     /// 判定は `follow_transcript_if_at_bottom` と同系（offset.y は下ほど負・GPUI）。閾はヒステリシスのため広め。
     fn render_jump_to_latest(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         // 底から十分離れている閾（follow の 60px より広め＝ヒステリシスで出没のチラつきを防ぐ）。
-        let scrolled_up_threshold = px(140.);
-        let offset = self.transcript_scroll.offset();
-        let max = self.transcript_scroll.max_offset();
-        // スクロール可能な中身があり、底から十分離れている時だけ出す。
-        let scrolled_up = max.y > px(0.) && offset.y > -(max.y - scrolled_up_threshold);
+        let _scrolled_up_threshold = px(140.);
+        // ListState は可変高項目の tail-follow 状態を保持する。ユーザーが底から離れた時だけ出す。
+        let scrolled_up = self.transcript_list.is_scrolled_to_end() == Some(false);
         if !scrolled_up {
             return None;
         }
@@ -4903,12 +5041,13 @@ impl AgentPanel {
             div()
                 .absolute()
                 .bottom(px(12.))
-                .right(px(14.))
+                // 上（前の指示へ）ボタンの左隣の固定スロット。上ボタンが端で不動なので、
+                // このボタンが出没しても上ボタンは動かない。
+                .right(px(50.))
                 .child(
                     // 色は識別に集約する規律に従い、ボタン自体は中立色（bg2/border/fg1）。ホバーで少し持ち上げる。
                     div()
                         .id("jump-to-latest")
-                        .group("jump-to-latest")
                         .size(px(30.))
                         .flex()
                         .items_center()
@@ -4924,15 +5063,13 @@ impl AgentPanel {
                         )
                         .blur_radius(px(10.))])
                         .cursor_pointer()
-                        .hover(|style| style.bg(theme.bg3))
-                        .child(
-                            svg()
-                                .path("icons/arrow-down-to-line.svg")
-                                .size(px(15.))
-                                // svg は親の text_color を継承しない → 直接指定 + group_hover で明るく。
-                                .text_color(theme.fg1)
-                                .group_hover("jump-to-latest", |style| style.text_color(theme.fg0)),
-                        )
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                        // 上ボタンの「↑」と対にした素の下矢印。DL アイコン（arrow-down-to-line）は
+                        // ダウンロードに見えて紛らわしいため、テキスト矢印で最新へ戻る意味を素直に表す。
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.fg1)
+                        .child("↓")
                         .tooltip(Tooltip::text(
                             i18n::t!("agent.jump_to_latest"),
                             theme.clone(),
@@ -4941,7 +5078,7 @@ impl AgentPanel {
                             MouseButton::Left,
                             cx.listener(|this, _, _window, cx| {
                                 cx.stop_propagation(); // transcript のドラッグ選択開始と二重発火しない
-                                this.transcript_scroll.scroll_to_bottom();
+                                this.transcript_list.scroll_to_end();
                                 cx.notify();
                             }),
                         ),
@@ -4963,19 +5100,18 @@ impl AgentPanel {
     /// 「前の指示へ」ボタン。長いツール出力や回答を、ユーザー発話単位で一気に遡る。
     fn render_jump_to_previous_user(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let entries = &self.threads.get(self.active)?.entries;
-        let target = previous_user_entry_index(entries, self.transcript_scroll.top_item());
+        let target =
+            previous_user_entry_index(entries, self.transcript_list.logical_scroll_top().item_ix);
         target?;
 
-        let offset = self.transcript_scroll.offset();
-        let max = self.transcript_scroll.max_offset();
-        let scrolled_up = max.y > px(0.) && offset.y > -(max.y - px(140.));
-        let right = if scrolled_up { 50.0 } else { 14.0 };
+        // 常に右端（14px）固定。連打で前の指示へ遡る間、下ボタンの出没でこのボタンが
+        // 横にずれてカーソルから逃げないようにする（下ボタンは左隣の 50px スロットへ出す）。
         let theme = self.theme.clone();
         Some(
             div()
                 .absolute()
                 .bottom(px(12.))
-                .right(px(right))
+                .right(px(14.))
                 .child(
                     div()
                         .id("jump-to-previous-user")
@@ -5015,127 +5151,149 @@ impl AgentPanel {
         )
     }
 
-    fn render_transcript(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_transcript(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let color = self.active_color();
-        let entries = self.threads.get(self.active).map(|thread| &thread.entries);
         if self.active_thread_running() {
             self.sync_streaming_text(false, self.window_active, cx);
         }
-        // 選択リージョンはフレーム毎に作り直す（このあと render_entry 経由で push される）。
+        // 可変高 ListState は可視範囲だけ request_layout/prepaint/paint する。件数の差分だけ splice し、
+        // 既に測った過去 Entry の高さとスクロール位置は保持する。
+        let item_count = self.transcript_item_count();
+        let previous_count = self.transcript_list.item_count();
+        if item_count > previous_count {
+            self.transcript_list
+                .splice(previous_count..previous_count, item_count - previous_count);
+        } else if item_count < previous_count {
+            self.transcript_list.splice(item_count..previous_count, 0);
+        }
+        if self.active_thread_running() {
+            let last = item_count.saturating_sub(1);
+            self.transcript_list.remeasure_items(last..item_count);
+        }
+        // 選択リージョンは可視 Entry だけをフレーム毎に作り直す。巨大 transcript でも offscreen の
+        // StyledText/TextLayout を構築しない（ドラッグ選択は現在のビューポート内を対象にする）。
         self.transcript_regions.borrow_mut().clear();
-        let mut list = div()
+        div()
             .id("agent-transcript")
             .track_focus(&self.transcript_focus)
             .flex_1()
             .flex()
             .flex_col()
-            .gap(px(13.))
-            .px(px(12.))
-            .py(px(12.))
+            .min_h_0()
             .bg(theme.bg1)
             .cursor(CursorStyle::IBeam)
-            // ホイール/トラックパッドで遡れる（M13 UX）。ストリーミング追従は on_event 側。
-            .overflow_y_scroll()
-            .track_scroll(&self.transcript_scroll)
-            // 手動スクロールで「最新へ」ボタンの出没を更新する（実行中は on_event が notify する）。
-            // scroll はそのまま起きる（stop_propagation しない）。
+            // List が wheel を処理し、親は浮遊ボタンの出没だけ再評価する。
             .on_scroll_wheel(cx.listener(|_, _: &gpui::ScrollWheelEvent, _, cx| cx.notify()))
-            // ドラッグ選択（M13）: down で開始・move で拡張・up で確定（クリックのみは解除）。
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(Self::on_transcript_mouse_down),
             )
             .on_mouse_move(cx.listener(Self::on_transcript_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up));
-        if let Some(entries) = entries {
-            let count = entries.len();
-            for (index, entry) in entries.iter().enumerate() {
-                // 実行中の末尾本文だけ独立 Entity。25fps tick で親 transcript は再構築しない。
-                let live_stream = index + 1 == count
-                    && self.active_thread_running()
-                    && matches!(entry, Entry::Agent(_) | Entry::Thinking(_));
-                // 出現時に一度だけ fade in（id 固定なのでストリーミングの再描画では再発火しない）。
-                let copy_button = div()
-                    .id(("entry-copy", index))
-                    .absolute()
-                    .top(px(0.))
-                    .right(px(0.))
-                    .invisible()
-                    .group_hover("transcript-entry", |style| style.visible())
-                    .px(px(5.))
-                    .py(px(1.))
-                    .rounded(px(4.))
-                    .bg(theme.bg2)
-                    .text_size(px(10.5))
-                    .text_color(theme.fg2)
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(theme.fg0))
-                    .child("⧉")
-                    .tooltip(Tooltip::text(i18n::t!("agent.copy_tip"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            // transcript の drag 開始としても扱われないよう、ボタンでイベントを完結する。
-                            cx.stop_propagation();
-                            let entry = this
-                                .threads
-                                .get(this.active)
-                                .and_then(|thread| thread.entries.get(index));
-                            if let Some(entry) = entry {
-                                cx.write_to_clipboard(ClipboardItem::new_string(entry_plain_text(
-                                    entry,
-                                )));
-                            }
-                        }),
-                    );
-                list = list.child(
-                    div()
-                        .relative()
-                        .group("transcript-entry")
-                        .child(self.render_entry(index, entry, color, live_stream, cx))
-                        .child(copy_button)
-                        .with_animation(
-                            ("transcript-entry", index),
-                            Animation::new(std::time::Duration::from_millis(200)),
-                            |element, delta| element.opacity(delta),
-                        ),
-                );
-            }
-            // 実行中で末尾がまだ本文/思考をストリームしていない時（送信直後・ツール実行中・思考の
-            // 折り畳み中）は、視線の中心に「回るスピナー + いま何をしているか」を出して無反応を消す。
-            // 末尾が Agent/Thinking をストリーム中なら streaming_text が動いているので二重に出さない。
-            let tail_is_streaming = entries
-                .last()
-                .is_some_and(|entry| matches!(entry, Entry::Agent(_) | Entry::Thinking(_)));
-            if self.active_thread_running() && !tail_is_streaming {
-                let digest = self
-                    .threads
-                    .get(self.active)
-                    .and_then(|thread| thread.live_digest())
-                    .unwrap_or_else(|| SharedString::from(i18n::t!("agent.running_thinking")));
-                list = list.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .text_size(px(12.5))
-                        .text_color(theme.fg2)
-                        .child(working_spinner("transcript-working", 8.0, color))
-                        .child(digest),
-                );
-            }
-        } else {
-            // スレッドを全部閉じた空状態。＋ / ⌘⇧A / レールの ✳ で再開できる。
-            list = list.items_center().justify_center().child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(i18n::t!("agent.empty"))),
-            );
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up))
+            .child(
+                list(
+                    self.transcript_list.clone(),
+                    cx.processor(Self::render_transcript_item),
+                )
+                .flex_1(),
+            )
+    }
+
+    fn render_transcript_item(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        let color = self.active_color();
+        let Some(thread) = self.threads.get(self.active) else {
+            return div()
+                .h(px(180.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.5))
+                .text_color(theme.fg2)
+                .child(SharedString::from(i18n::t!("agent.empty")))
+                .into_any_element();
+        };
+        let entry_count = thread.entries.len();
+        if index >= entry_count {
+            let digest = thread
+                .live_digest()
+                .unwrap_or_else(|| SharedString::from(i18n::t!("agent.running_thinking")));
+            return div()
+                .px(px(12.))
+                .pt(px(6.))
+                .pb(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .text_size(px(12.5))
+                .text_color(theme.fg2)
+                .child(
+                    self.transcript_spinner
+                        .clone()
+                        .cached(StyleRefinement::default().size(px(14.))),
+                )
+                .child(digest)
+                .into_any_element();
         }
-        list
+
+        let live_stream = index + 1 == entry_count
+            && thread.running
+            && matches!(thread.entries[index], Entry::Agent(_) | Entry::Thinking(_));
+        let entry = &thread.entries[index];
+        let rendered_entry = self.render_entry(index, entry, color, live_stream, cx);
+        let copy_button = div()
+            .id(("entry-copy", index))
+            .absolute()
+            .top(px(0.))
+            .right(px(0.))
+            .invisible()
+            .group_hover("transcript-entry", |style| style.visible())
+            .px(px(5.))
+            .py(px(1.))
+            .rounded(px(4.))
+            .bg(theme.bg2)
+            .text_size(px(10.5))
+            .text_color(theme.fg2)
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.fg0))
+            .child("⧉")
+            .tooltip(Tooltip::text(i18n::t!("agent.copy_tip"), theme))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    cx.stop_propagation();
+                    if let Some(entry) = this
+                        .threads
+                        .get(this.active)
+                        .and_then(|thread| thread.entries.get(index))
+                    {
+                        cx.write_to_clipboard(ClipboardItem::new_string(entry_plain_text(entry)));
+                    }
+                }),
+            );
+        div()
+            .px(px(12.))
+            .pt(if index == 0 { px(12.) } else { px(0.) })
+            .pb(px(13.))
+            .child(
+                div()
+                    .relative()
+                    .group("transcript-entry")
+                    .child(rendered_entry)
+                    .child(copy_button)
+                    .with_animation(
+                        ("transcript-entry", index),
+                        Animation::new(std::time::Duration::from_millis(200)),
+                        |element, delta| element.opacity(delta),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_entry(
@@ -6253,7 +6411,11 @@ impl AgentPanel {
                                 .pt(px(6.))
                                 .text_size(px(10.5))
                                 .text_color(theme.fg2)
-                                .child(working_spinner("composer-working", 9.0, color))
+                                .child(
+                                    self.composer_spinner
+                                        .clone()
+                                        .cached(StyleRefinement::default().size(px(15.))),
+                                )
                                 .child(SharedString::from(match running_elapsed {
                                     Some(secs) => format!("{secs}s"),
                                     None => String::new(),
@@ -6460,12 +6622,105 @@ fn mascot_canvas(motion: MascotMotion, active: bool, height: f32, tick: u64) -> 
             canvas(
                 |_bounds, _window, _cx| (),
                 move |bounds, (), window, _cx| {
-                    let _ = window.paint_image(bounds, Corners::default(), image, frame, false);
+                    let _ =
+                        window.paint_image(bounds, bounds, Corners::default(), image, frame, false);
                 },
             )
             .size_full(),
         )
         .into_any_element()
+}
+
+/// 固定サイズの点字スピナー。タイマーが通知するのはこの Entity だけで、親 AgentPanel や
+/// transcript の可視 Entry を再構築しない。reduce motion と非アクティブ窓では先頭コマで静止する。
+struct BrailleSpinnerView {
+    diameter: f32,
+    color: Hsla,
+    tick: usize,
+    ticker: bool,
+    last_rendered_at: Option<std::time::Instant>,
+}
+
+impl BrailleSpinnerView {
+    const FRAMES: [&'static str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+    fn new(diameter: f32, color: Hsla) -> Self {
+        Self {
+            diameter,
+            color,
+            tick: 0,
+            ticker: false,
+            last_rendered_at: None,
+        }
+    }
+
+    fn set_color(&mut self, color: Hsla, cx: &mut Context<Self>) {
+        if self.color != color {
+            self.color = color;
+            cx.notify();
+        }
+    }
+
+    fn ensure_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.ticker || cx.reduce_motion() {
+            return;
+        }
+        self.ticker = true;
+        cx.spawn(async move |spinner, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+            let next = spinner.update(cx, |spinner, cx| {
+                let visible = !cx.reduce_motion()
+                    && spinner
+                        .last_rendered_at
+                        .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(350));
+                if !visible {
+                    spinner.tick = 0;
+                    spinner.ticker = false;
+                    return false;
+                }
+                spinner.tick = (spinner.tick + 1) % Self::FRAMES.len();
+                cx.notify();
+                true
+            });
+            let Ok(true) = next else {
+                break;
+            };
+        })
+        .detach();
+    }
+}
+
+impl Render for BrailleSpinnerView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = window.is_window_active() && !cx.reduce_motion();
+        self.last_rendered_at = Some(std::time::Instant::now());
+        if active {
+            self.ensure_ticker(cx);
+        } else {
+            self.tick = 0;
+        }
+        let outer = self.diameter + 6.0;
+        let slot = self.diameter + 4.0;
+        div()
+            .size(px(outer))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .size(px(slot))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(slot))
+                    .line_height(px(slot))
+                    .text_color(self.color)
+                    .child(Self::FRAMES[self.tick]),
+            )
+    }
 }
 
 /// 固定サイズ・独立 invalidation 境界のマスコット。親 AgentPanel / Workspace を通知せず、
@@ -6492,6 +6747,7 @@ impl MascotView {
     }
 
     fn set_state(&mut self, motion: MascotMotion, active: bool, cx: &mut Context<Self>) {
+        let active = active && !cx.reduce_motion();
         let needs_restart = active && !self.ticker;
         if active {
             // 親がこの Entity を実際の View tree に差し込んだ印。非表示中は set_state 自体が来ない。
@@ -6564,7 +6820,7 @@ impl MascotView {
 
 impl Render for MascotView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = window.is_window_active() && self.active;
+        let active = window.is_window_active() && self.active && !cx.reduce_motion();
         if active != self.active {
             self.active = active;
         }
@@ -6717,7 +6973,9 @@ pub fn working_spinner(
                 .text_color(color)
                 .with_animation(
                     id.into(),
-                    Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                    Animation::new(std::time::Duration::from_millis(900))
+                        .repeat()
+                        .with_max_fps(10.0),
                     |element, delta| {
                         let frame = ((delta * FRAMES.len() as f32) as usize).min(FRAMES.len() - 1);
                         element.child(FRAMES[frame])
@@ -7011,18 +7269,81 @@ fn default_agent_name(cx: &App) -> SharedString {
     }
 }
 
-/// 新規スレッドへ「前回選んだ状態」を載せる（2026-07-27 ユーザー要望「前に設定した状態を保持して」）。
-/// エージェント＝グローバル既定（Settings 画面でだけ変わる）・モデル/思考量＝**ピルで選んだ最後の値**
-/// （`select_option` が settings へ書き戻す）。毎回 fable-5/high に戻る挙動をここで断つ。
-fn apply_thread_defaults(thread: &mut Thread, cx: &App) {
+/// ACP が `config_options` を返す前に見せるモデル候補。モデル一覧を持つ二つだけ vendor 別にし、
+/// provider が任意のエージェントは一時的に `auto`（接続後に広告 current へ置換）とする。
+fn fallback_models(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "Claude Code" => CLAUDE_MODELS,
+        "Codex" => CODEX_MODELS,
+        _ => AUTO_MODELS,
+    }
+}
+
+/// モデル文字列が指定エージェントの vendor に属するか。sticky やグローバル土台が別 vendor の値なら
+/// 捨ててフォールバック先頭へ戻すための判定。同じ vendor なら静的一覧に無い新モデルでも保ち、
+/// 接続後の ACP 広告で検証する。
+fn model_belongs_to_agent(agent: &str, model: &str) -> bool {
+    match agent {
+        "Claude Code" => model.starts_with("claude-"),
+        "Codex" => !model.is_empty() && !model.starts_with("claude-"),
+        _ => model == "auto",
+    }
+}
+
+/// エージェントの sticky 既定を settings から引く（`agent_defaults[agent]` を最優先）。
+/// モデルは per-agent → グローバル `default_model`（土台）→ vendor フォールバック先頭の順。
+/// 思考量は per-agent → グローバル `default_effort` → `None`（＝Thread の初期値を保つ）。
+/// モードは per-agent → `None`（広告 or 前タブ引き継ぎに委ねる）。
+fn agent_sticky_defaults(
+    agent: &str,
+    cx: &App,
+) -> (SharedString, Option<SharedString>, Option<SharedString>) {
     let settings = settings::get(cx);
+    let per_agent = settings.agent_defaults.get(agent);
+
+    let model_candidate = per_agent
+        .and_then(|defaults| defaults.model.clone())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| settings.default_model.clone());
+    let model = if model_belongs_to_agent(agent, &model_candidate) {
+        SharedString::from(model_candidate)
+    } else {
+        SharedString::from(fallback_models(agent).first().copied().unwrap_or("auto"))
+    };
+
+    let effort = per_agent
+        .and_then(|defaults| defaults.effort.clone())
+        .or_else(|| Some(settings.default_effort.clone()))
+        .filter(|effort| !effort.is_empty())
+        .map(SharedString::from);
+
+    let mode = per_agent
+        .and_then(|defaults| defaults.mode.clone())
+        .filter(|mode| !mode.is_empty())
+        .map(SharedString::from);
+
+    (model, effort, mode)
+}
+
+/// 指定 agent の sticky（モデル/思考量/モード）をスレッドへ載せる。Agent ピル切替と新規スレッド生成が
+/// 共有する。`thread.agent` は呼び出し側で確定済みにしておく（この関数は agent を変えない）。
+fn apply_agent_sticky(thread: &mut Thread, cx: &App) {
+    let (model, effort, mode) = agent_sticky_defaults(thread.agent.as_ref(), cx);
+    thread.model = model;
+    if let Some(effort) = effort {
+        thread.effort = effort;
+    }
+    if let Some(mode) = mode {
+        thread.permission_mode = mode;
+    }
+}
+
+/// 新規スレッドへ「前回選んだ状態」を載せる（2026-07-27 ユーザー要望「前に設定した状態を保持して」）。
+/// エージェント＝グローバル既定（Settings 画面でだけ変わる・§8）。モデル/思考量/モード＝**その agent で
+/// ピルで選んだ最後の値**（`select_option` が `agent_defaults` へ書き戻す）。毎回 fable-5/high に戻る挙動を断つ。
+fn apply_thread_defaults(thread: &mut Thread, cx: &App) {
     thread.agent = default_agent_name(cx);
-    if !settings.default_model.is_empty() {
-        thread.model = SharedString::from(settings.default_model);
-    }
-    if !settings.default_effort.is_empty() {
-        thread.effort = SharedString::from(settings.default_effort);
-    }
+    apply_agent_sticky(thread, cx);
 }
 
 /// storage の1 turn 行 (role, content) を [`Entry`] へ（復元・#5。set_storage と同じ対応）。
@@ -7176,6 +7497,30 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn snap_highlights_never_splits_multibyte_chars() {
+        // クラッシュ再現: 全角 '（'(bytes 8..11) の内側 byte 9 を跨ぐ run。gpui の layout_line は
+        // この run を `split_at(9)` して abort する。サニタイズ後は全端点が文字境界に乗ること。
+        let text = " TextRun（=フォントラン）のまま）";
+        let style = HighlightStyle::default();
+        let dirty = vec![
+            (0..9, style),              // '（' の途中で終わる（mid-char）
+            (9..text.len() + 5, style), // mid-char 始まり + 範囲外終わり
+            (3..3, style),              // 空（捨てる）
+        ];
+        let snapped = snap_highlights_to_char_boundaries(text, dirty);
+        for (range, _) in &snapped {
+            assert!(
+                text.is_char_boundary(range.start) && text.is_char_boundary(range.end),
+                "run {range:?} が文字境界に乗らない",
+            );
+            assert!(range.start < range.end, "空 run が残っている");
+            assert!(range.end <= text.len(), "範囲外");
+        }
+        // 先頭 run は '（' の手前（byte 8）へ縮む。
+        assert_eq!(snapped[0].0, 0..8);
     }
 
     #[test]
@@ -7452,6 +7797,24 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// 未接続スレッドでも、Model メニューは選択中 Agent の vendor に合う候補だけを出す。
+    #[gpui::test]
+    fn model_fallback_follows_selected_agent(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "agent-model-fallback");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.select_option(Selector::Agent, "Codex".into(), cx);
+
+            let thread = &panel.threads[panel.active];
+            assert_eq!(thread.model.as_ref(), CODEX_MODELS[0]);
+            let options = panel.selector_options(Selector::Model);
+            assert_eq!(options.len(), CODEX_MODELS.len());
+            assert!(options.iter().all(|model| !model.starts_with("claude-")));
+            assert!(options.iter().any(|model| model.as_ref() == "GPT-5.6-Sol"));
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
     /// Modes 広告も同じ規律。加えて新規タブは直前タブの権限モードを引き継ぐ（default に戻らない）。
     #[gpui::test]
     fn mode_persists_and_new_tab_inherits(cx: &mut gpui::TestAppContext) {
@@ -7508,6 +7871,50 @@ mod tests {
                 "Always Ask",
                 "提供されないモードは広告 current へフォールバック"
             );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Model/Effort/Mode は **agent ごとに** sticky（DEFAULT §8 の default_agent とは別レイヤ）。
+    /// ある agent で選んだ値は別 agent へ漏れず、agent を切り替えると各自の最後の選択で開き直す。
+    #[gpui::test]
+    fn sticky_defaults_are_per_agent(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "per-agent-sticky");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            // 既定 agent（Claude Code）でモデル・思考量を選ぶ → その agent にだけ紐づいて永続化。
+            panel.select_option(Selector::Model, "claude-opus-5".into(), cx);
+            panel.select_option(Selector::Effort, "xhigh".into(), cx);
+            let defaults = settings::get(cx).agent_defaults;
+            assert_eq!(
+                defaults["Claude Code"].model.as_deref(),
+                Some("claude-opus-5")
+            );
+            assert_eq!(defaults["Claude Code"].effort.as_deref(), Some("xhigh"));
+            assert!(!defaults.contains_key("Codex"), "他 agent には書かない");
+
+            // Codex へ切替 → Claude の sticky を持ち込まず vendor フォールバックで開く。
+            panel.select_option(Selector::Agent, "Codex".into(), cx);
+            assert_eq!(panel.threads[panel.active].agent.as_ref(), "Codex");
+            assert_eq!(panel.threads[panel.active].model.as_ref(), CODEX_MODELS[0]);
+
+            // Codex で別モデルを選ぶ → Codex にだけ紐づき、Claude 側は不変。
+            panel.select_option(Selector::Model, CODEX_MODELS[1].into(), cx);
+            let defaults = settings::get(cx).agent_defaults;
+            assert_eq!(defaults["Codex"].model.as_deref(), Some(CODEX_MODELS[1]));
+            assert_eq!(
+                defaults["Claude Code"].model.as_deref(),
+                Some("claude-opus-5"),
+                "Codex の選択は Claude の sticky を汚さない"
+            );
+
+            // Claude へ戻す → Claude の sticky（opus / xhigh）で開き直す。
+            panel.select_option(Selector::Agent, "Claude Code".into(), cx);
+            assert_eq!(panel.threads[panel.active].model.as_ref(), "claude-opus-5");
+            assert_eq!(panel.threads[panel.active].effort.as_ref(), "xhigh");
+
+            // §8: グローバル既定 default_agent はピル操作で動かない。
+            assert_eq!(settings::get(cx).default_agent, "Claude Code");
         });
         let _ = std::fs::remove_file(path);
     }

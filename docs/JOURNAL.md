@@ -1279,3 +1279,58 @@
 - **遅延根治**: 初回 composer 描画から `claude auth status` / `codex login status`（各最大2秒）を同期実行していた。
   キャッシュ初期化は env/資格情報ファイルの存在だけにし、status + ACP probe は Settings の背景 refresh に限定。
   明示 `default_agent` は認証確認の一時状態で別 Agent へフォールバックしない。
+
+## 2026-08-17 — transcript の全角文字でプロセスごと abort する crash を根治
+- **症状**: ACP パネルの表示中に SIGABRT。クラッシュログのパニック文言は
+  `end byte index 9 is not a char boundary; it is inside '（' ... of ` TextRun（=`` /
+  `... inside 'ま' of `...のまま）``。バックトレースは
+  `shape_text → LineLayoutCache → gpui_macos::MacTextSystem::layout_line`。
+- **原因**: gpui `layout_line` は font run を `text.split_at(run.len)` で切る。`run.len` は最終的に
+  我々が `StyledText::with_highlights` へ渡すハイライト範囲の境界に由来する。境界が UTF-8 文字境界に
+  乗らない/範囲外だと split_at で panic → `compute_runs` の境界チェックは **release では `debug_assert`
+  なので効かず**、そのまま abort（プロセス全体が落ちる）。
+- **切り分け**: 個々のハイライト由来（tree-sitter 構文=全15言語、markdown span、選択オフセット
+  =`index_for_position` は char 境界保証）はいずれも単体では文字境界に乗ることをテストで確認
+  （`lang::highlight_span_boundaries_are_char_boundaries` / `markdown::span_ranges_stay_on_char_boundaries`）。
+  それでも現場ログは mid-char run が gpui に届いた動かぬ証拠。由来（構文/markdown/描画をまたいで再利用
+  される選択 byte オフセット）が本文と完全一致する保証を全経路で持てないと判断。
+- **修正**: gpui へ渡す直前の 1 点で丸める防御を追加（`snap_highlights_to_char_boundaries`）。start は
+  次の・end は前の文字境界へ内側スナップし、潰れた/範囲外の run は捨てる。`with_highlights` を呼ぶ 2 経路
+  （streaming の `streaming_styled_text` / 確定 transcript の `CachedStyledTextView::render`＝combine 後）に集約。
+  gpui は AGPL 対象外の pinned 依存で改変できないため、防御はこちら側の seam に置く。
+- **学び/罠**: gpui の `compute_runs` はハイライト境界を **release では検証しない**（`debug_assert` のみ）。
+  外部由来の byte オフセットを `with_highlights` へ渡す時は、本文と一致する保証が無い限り必ず文字境界へ
+  丸めてから渡す。editor_view など他の `with_highlights` 経路も同種のリスクがある（今回は crash 実績のある
+  ACP パネルに限定して修正）。
+- 検証: `cargo fmt` / `cargo check -p agent_panel` clean・`agent_panel` 21 / `lang` 21 green。
+
+## 2026-08-17 — transcript ジャンプボタンの位置固定 + 下矢印を素の記号へ
+- ユーザー指摘: (1) 「最新へ」ボタンが DL アイコン（arrow-down-to-line）でダウンロードに見える、
+  (2) 「前の指示へ」を連打中に「最新へ」が出た瞬間、前者が右→左（14px→50px）へ逃げて連打できない。
+- 修正: **上（前の指示へ・↑）を常に right:14（右端）固定**にし、**下（最新へ・↓）を常に right:50（左隣）固定**。
+  位置をスクロール状態依存の条件分岐からコンパイル時定数へ変えたので、両方出ても重ならず上ボタンは不動。
+  下ボタンのアイコンは `arrow-down-to-line.svg` → 上の `↑` と対のテキスト `↓` に統一（DL 連想を排除）。
+- 罠: 上ボタンの横位置を「下ボタンの有無」で動かすと連打時にカーソルから逃げる。**連打する側は端で不動**が原則。
+- 検証: `cargo check -p agent_panel` clean。offscreen（SHIRUSHI_DEMO_THREADS + SCROLL_TOP 有/無）で
+  ↓＝左スロット・↑＝右端を目視確認。`arrow-down-to-line.svg` の登録は当面残置（未参照・無害）。
+
+## 2026-08-17 — sticky（model/思考量/mode）を agent ごとに持つ（§8 は維持）
+- **決定**: 残る 1 問「新規タブがどの agent で開くか」は §8 のまま（`default_agent`＝Settings だけが変える）に据え置き、
+  model/思考量/mode の sticky だけ **agent ごと**にする（選択肢 A・(B) の §8 緩和は不採用）。
+- **なぜ**: 従来は単一の `default_model`/`default_effort` に書き戻していたため、Claude で選んだ Opus が Codex にも
+  current として持ち込まれ、「どの agent か」と「その agent の設定」が 1 本の値に混線していた。
+- **実装**:
+  - `settings_core`: `AgentDefaults { model, effort, mode }`（すべて `Option`）と `agent_defaults: BTreeMap<表示名, _>`
+    を追加。`persist_agent_default(path, agent, field, value)` は **user ファイルだけ**を読んで nested に 1 点書く
+    （マージ済み解決値を書き戻すと project 層を user へ焼き込むため）。他 agent/他 field/他キーは保つ。
+  - `settings`（反応層）: `set_agent_default(cx, agent, field, value)` を追加（`set_user_value` と同じ 書込→reload→observe）。
+  - `agent_panel`: `select_option` は Model/Effort/**Mode** をアクティブ thread の agent に紐づけて保存。読みは
+    `agent_sticky_defaults`（per-agent → グローバル土台 → vendor フォールバックの順）＋ `apply_agent_sticky` に集約し、
+    新規スレッド（`apply_thread_defaults`）と Agent ピル切替の両方が共有する。旧 `default_model_for_agent` は廃止。
+  - 旧 `default_model`/`default_effort` は**後方互換の土台**として読むだけに降格（既存 settings.json を壊さない）。
+  - 08-08 の「mode は前タブ引き継ぎ（session-local）」は残置＝per-agent sticky が復元時の土台、前タブ引き継ぎが
+    同一セッション内の追従（`add_thread` は sticky 適用の後に前タブ mode で上書き）。
+- **検証**: `cargo fmt` / `cargo check -p shirushi` clean。`settings_core` 10（新規 `persist_agent_default_is_nested_and_isolated`）・
+  `agent_panel` 22（新規 `sticky_defaults_are_per_agent`＝Claude↔Codex で値が漏れず各自の最後の選択で開き直す・
+  §8 の `default_agent` 不変を確認）green。既存 sticky テスト（configs/mode 広告・model フォールバック）も無改修で緑。
+- **文書**: DECISIONS に「sticky は agent ごとに持つ（2026-08-17）」を追記（§8 は不変と明記）。
