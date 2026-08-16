@@ -15,7 +15,10 @@ agent:
   waiting_permission: Waiting for permission
   todos: Todos
   copy_tip: Copy this entry
+  jump_to_previous_user: Previous instruction
+  jump_to_latest: Jump to latest
   pill_agent: Agent (which AI to talk to)
+  pill_agent_locked: The agent can't be changed after the conversation starts. Create a new thread to use another AI
   pill_mode: Permission mode (edit/run approval level)
   pill_model: Model
   pill_effort: Reasoning effort
@@ -54,6 +57,7 @@ agent:
   attach_tip: Attach file as context
   compact_tip: Summarize and compact the context (/compact)
   output_truncated: "… (%{n} lines hidden)"
+  result_lines: "%{n} lines"
   hint_submit_enter: ⏎ send / ⇧⏎ newline
   hint_submit_cmd: ⏎ newline / ⌘⏎ send
   ime_tip: Toggle Enter behavior (send ⇄ newline). IME confirm never sends
@@ -105,6 +109,8 @@ cmd:
   close_tab: "File: Close tab"
   restore_closed_tab: "File: Reopen closed tab"
   project_switcher: "Project: Switch / worktrees…"
+  next_project: "Project: Next (down the rail)"
+  prev_project: "Project: Previous (up the rail)"
   new_window: "Project: Open in new window"
   buffer_search: "Search: This file"
   buffer_replace: "Search: With replace"
@@ -300,13 +306,21 @@ titlebar:
 settings:
   title: Settings
   agents_heading: AI Agents
-  agents_sub: The default opens new threads. Auth stays in each CLI (Shirushi never stores keys).
+  agents_sub: Shirushi checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
   installed: Installed
   available_npx: Fetch on first use (npx)
   not_installed: Not installed
+  agent_checking: Checking…
+  agent_available: Available
+  agent_configured: Configured · unverified
+  agent_signed_out: Signed out
+  logged_in: Logged in
+  login_required: Login required
+  login_status_unknown: Check login status in the CLI
   make_default: Set as default
   is_default: ★ Default
   login: Log in
+  open_cli: Open CLI
   install: Install
   welcome_title: Welcome 🎨
   welcome_sub: Pick your agent and get started. You can change it anytime from ⚙.

@@ -575,6 +575,7 @@ impl Workspace {
             .unwrap_or_else(|| project_color(0));
         let settings_view = cx.new(|cx| settings::SettingsView::new(theme.clone(), accent, cx));
         PanelRegistry::bind_settings(&settings_view, cx);
+        let fleet_mascot = cx.new(|_cx| agent_panel::MascotView::new(34.0));
         let mut workspace = Workspace {
             project_sessions: ProjectSessions {
                 projects,
@@ -666,6 +667,7 @@ impl Workspace {
                 storage: None,
             },
             updater: UpdateController { status: None },
+            fleet_mascot,
             window_active: true,
             visual_tick: 0,
             visual_ticker: false,

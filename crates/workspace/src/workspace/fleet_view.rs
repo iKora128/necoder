@@ -3026,6 +3026,7 @@ impl Workspace {
                             )
                             .child(
                                 div()
+                                    .flex_1() // min_w_0 は flex_1 とセット（単独だと幅 0 に潰れて消える）
                                     .min_w_0()
                                     .overflow_hidden()
                                     .whitespace_nowrap()

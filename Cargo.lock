@@ -97,6 +97,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "async-io",
  "blocking",
  "futures",
  "host",
@@ -222,6 +223,7 @@ dependencies = [
  "gpui",
  "host",
  "i18n",
+ "image",
  "lang",
  "project",
  "pulldown-cmark",

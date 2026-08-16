@@ -23,6 +23,15 @@ const GUTTER_MIN_WIDTH: f32 = 46.0; // UI-SPEC §1.4 行番号ガター 46
 /// 既定タブ幅（空白換算）。settings の `tab_size` 配線（M10-13）までの暫定値。
 const DEFAULT_TAB_SIZE: usize = 4;
 
+/// クリック起点のドラッグ選択粒度（単=文字 / ダブル=単語 / トリプル以上=行。macOS 慣例）。
+/// mouse down で決まり、mouse move の拡張も同じ粒度で行う（起点の単語/行を必ず含める）。
+#[derive(Clone)]
+enum DragSelectMode {
+    Char,
+    Word { origin: Range<usize> },
+    Line { origin_row: usize },
+}
+
 actions!(
     editor,
     [
@@ -132,6 +141,8 @@ pub fn bind_default_keys(cx: &mut App) {
         KeyBinding::new("end", MoveToLineEnd, Some("Editor")),
         KeyBinding::new("cmd-left", MoveToLineStart, Some("Editor")),
         KeyBinding::new("cmd-right", MoveToLineEnd, Some("Editor")),
+        KeyBinding::new("ctrl-a", MoveToLineStart, Some("Editor")),
+        KeyBinding::new("ctrl-e", MoveToLineEnd, Some("Editor")),
         KeyBinding::new("shift-left", SelectLeft, Some("Editor")),
         KeyBinding::new("shift-right", SelectRight, Some("Editor")),
         KeyBinding::new("shift-up", SelectUp, Some("Editor")),
@@ -164,8 +175,13 @@ pub struct EditorView {
     gutter_width: Pixels,
     caret_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// ドラッグ選択の粒度（mouse down で決まり mouse move が読む）。
+    drag_select: DragSelectMode,
     // キャレット点滅。focus 中のみ動かし、blur で止める（idle CPU 0% を守る）。
     blink_visible: bool,
+    /// 親ビューが点滅を許可しているか。ACP の生成中など、入力先ではあっても視覚更新を
+    /// 増やしたくない状態では false にする。非アクティブ窓は paint 側でも必ず停止する。
+    caret_blink_enabled: bool,
     _blink_task: Option<gpui::Task<()>>,
     // 構文ハイライト（対応拡張子のみ・増分パース M11-8）。編集は Tree::edit + 差分パース、
     // span は prepaint が可視範囲だけ問い合わせる（512KB 上限は撤廃）。
@@ -260,7 +276,9 @@ impl EditorView {
             gutter_width: px(0.),
             caret_bounds: None,
             is_selecting: false,
+            drag_select: DragSelectMode::Char,
             blink_visible: true,
+            caret_blink_enabled: true,
             _blink_task: None,
         }
     }
@@ -308,6 +326,24 @@ impl EditorView {
     /// 現在 Enter 送信が有効か（親が送信ボタンのヒント表示に使う）。
     pub fn submit_on_enter(&self) -> bool {
         self.submit_on_enter
+    }
+
+    /// キャレットの無限点滅だけを有効／無効にする。無効中もキャレット自体は常時表示する。
+    /// ACP composer は生成中に false を渡し、入力・選択などの Editor 機能はそのまま保つ。
+    pub fn set_caret_blink_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.caret_blink_enabled == enabled {
+            return;
+        }
+        self.caret_blink_enabled = enabled;
+        self.blink_visible = true;
+        if !enabled {
+            self._blink_task = None;
+        }
+        cx.notify();
+    }
+
+    pub fn caret_blink_enabled(&self) -> bool {
+        self.caret_blink_enabled
     }
 
     pub fn buffer(&self) -> &Buffer {
@@ -878,12 +914,19 @@ impl EditorView {
     /// 表示行単位の縦移動（soft wrap 対応・M10-12）。off なら論理行と一致する。
     fn move_vertical(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
         let snapshot = self.buffer.snapshot();
+        let len = self.buffer.len_bytes();
         let moved: Vec<Selection> = self
             .buffer
             .selections()
             .iter()
             .map(|selection| {
-                let head = self.vertical_display_target(&snapshot, selection.head, delta);
+                let mut head = self.vertical_display_target(&snapshot, selection.head, delta);
+                // 平坦入力（composer 等）では、先頭行での↑・末尾行での↓を文書の頭/末へ寄せる
+                // ＝チャット入力の定番。縦移動できなかった（＝端に達した）ときだけ効かせるので、
+                // 途中行では通常の行移動のまま。
+                if self.plain && head == selection.head {
+                    head = if delta < 0 { 0 } else { len };
+                }
                 if extend {
                     Selection::new(selection.anchor, head)
                 } else {
@@ -1337,26 +1380,66 @@ impl EditorView {
             return;
         }
         self.is_selecting = true;
-        if event.modifiers.shift {
-            let anchor = self.primary().anchor;
-            self.buffer
-                .set_selections(vec![Selection::new(anchor, offset)]);
-        } else {
-            // 50 行以上のジャンプはナビ履歴へ（⌃- で戻れる・M10-11）。
-            let snapshot = self.buffer.snapshot();
-            let previous = self.primary().head;
-            let distance = snapshot
-                .byte_to_point(previous)
-                .row
-                .abs_diff(snapshot.byte_to_point(offset).row);
-            if distance >= 50 {
-                cx.emit(EditorInputEvent::CaretJumped { from: previous });
+        // クリック回数で選択粒度を決める（単=キャレット / ダブル=単語 / トリプル以上=行）。
+        // ドラッグ拡張（on_mouse_move）も同じ粒度で行うため mode を保持する。
+        self.drag_select = if event.modifiers.shift || event.click_count < 2 {
+            DragSelectMode::Char
+        } else if event.click_count == 2 {
+            match self.buffer.snapshot().word_range_at(offset) {
+                Some(origin) => DragSelectMode::Word { origin },
+                // 単語外（空白・記号）は通常のキャレット配置に流す。
+                None => DragSelectMode::Char,
             }
-            self.buffer.set_selections(vec![Selection::cursor(offset)]);
+        } else {
+            let origin_row = self.buffer.snapshot().byte_to_point(offset).row;
+            DragSelectMode::Line { origin_row }
+        };
+        match self.drag_select.clone() {
+            DragSelectMode::Char => {
+                if event.modifiers.shift {
+                    let anchor = self.primary().anchor;
+                    self.buffer
+                        .set_selections(vec![Selection::new(anchor, offset)]);
+                } else {
+                    // 50 行以上のジャンプはナビ履歴へ（⌃- で戻れる・M10-11）。
+                    let snapshot = self.buffer.snapshot();
+                    let previous = self.primary().head;
+                    let distance = snapshot
+                        .byte_to_point(previous)
+                        .row
+                        .abs_diff(snapshot.byte_to_point(offset).row);
+                    if distance >= 50 {
+                        cx.emit(EditorInputEvent::CaretJumped { from: previous });
+                    }
+                    self.buffer.set_selections(vec![Selection::cursor(offset)]);
+                }
+            }
+            DragSelectMode::Word { origin } => {
+                self.buffer
+                    .set_selections(vec![Selection::new(origin.start, origin.end)]);
+            }
+            DragSelectMode::Line { origin_row } => {
+                let range = self.line_selection_range(origin_row);
+                self.buffer
+                    .set_selections(vec![Selection::new(range.start, range.end)]);
+            }
         }
         self.marked_range = None;
         self.focus_handle.focus(window, cx);
         cx.notify();
+    }
+
+    /// `row` 行の選択レンジ（末尾の改行を含む。最終行はバッファ末尾まで）。
+    /// トリプルクリックとそのドラッグ拡張が使う。
+    fn line_selection_range(&self, row: usize) -> Range<usize> {
+        let snapshot = self.buffer.snapshot();
+        let start = snapshot.point_to_byte(BufferPoint::new(row, 0));
+        let end = if row + 1 < snapshot.line_count() {
+            snapshot.point_to_byte(BufferPoint::new(row + 1, 0))
+        } else {
+            snapshot.len_bytes()
+        };
+        start..end
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -1371,9 +1454,39 @@ impl EditorView {
     ) {
         if self.is_selecting {
             let offset = self.offset_for_position(event.position, window);
-            let anchor = self.primary().anchor;
-            self.buffer
-                .set_selections(vec![Selection::new(anchor, offset)]);
+            match self.drag_select.clone() {
+                DragSelectMode::Char => {
+                    let anchor = self.primary().anchor;
+                    self.buffer
+                        .set_selections(vec![Selection::new(anchor, offset)]);
+                }
+                // 単語/行モードはカーソル側も同じ粒度に丸め、起点の単語/行を必ず含める
+                // （前方ドラッグは起点 start を anchor に、後方ドラッグは起点 end を anchor に）。
+                DragSelectMode::Word { origin } => {
+                    let at = self
+                        .buffer
+                        .snapshot()
+                        .word_range_at(offset)
+                        .unwrap_or(offset..offset);
+                    let selection = if at.start < origin.start {
+                        Selection::new(origin.end, at.start)
+                    } else {
+                        Selection::new(origin.start, at.end.max(origin.end))
+                    };
+                    self.buffer.set_selections(vec![selection]);
+                }
+                DragSelectMode::Line { origin_row } => {
+                    let row = self.buffer.snapshot().byte_to_point(offset).row;
+                    let origin = self.line_selection_range(origin_row);
+                    let at = self.line_selection_range(row);
+                    let selection = if at.start < origin.start {
+                        Selection::new(origin.end, at.start)
+                    } else {
+                        Selection::new(origin.start, at.end.max(origin.end))
+                    };
+                    self.buffer.set_selections(vec![selection]);
+                }
+            }
             cx.notify();
             return;
         }
@@ -1878,6 +1991,7 @@ impl Element for EditorElement {
         let agent_mark_color = view.agent_mark_color;
         let plain = view.plain;
         let blink_visible = view.blink_visible;
+        let caret_blink_enabled = view.caret_blink_enabled;
         let text_font = window.text_style().font();
         let primary = selections.first().copied().unwrap_or(Selection::cursor(0));
 
@@ -2145,7 +2259,7 @@ impl Element for EditorElement {
         }
 
         // focus 中かつ点滅 ON のフレームだけキャレットを出す。
-        if !focused || !blink_visible {
+        if !focused || (caret_blink_enabled && !blink_visible) {
             carets.clear();
         }
 
@@ -2240,8 +2354,10 @@ impl Element for EditorElement {
             view.viewport_height = viewport_height;
             view.gutter_width = gutter_width;
             view.caret_bounds = caret_bounds;
-            // 点滅の start/stop を focus に連動させる（blur 中は止めて idle 0% を守る）。
-            if focused {
+            // 点滅の start/stop を focus・window activation・親の許可へ連動させる。
+            // 停止時は blink_visible=true に戻し、キャレットを静止表示する。
+            let should_blink = focused && window.is_window_active() && view.caret_blink_enabled;
+            if should_blink {
                 if view._blink_task.is_none() {
                     view.start_blinking(cx);
                 }

@@ -114,7 +114,7 @@ VSCode の contribution points / Zed の初期化結線から学んだ形。**�
 - **レール項目の右クリック = コンテキストメニュー**（`render_rail_menu`）: 色スウォッチ＋「その他の色…」（フル hex ピッカー）／新しいウィンドウで開く／レールから外す／(worktree タブのみ) worktree を削除・worktree ごとブランチを削除。破壊的操作は**二段確認**（`RailMenuState.confirm`）。「削除」は3階層に分離 — 外す=表示のみ・worktree 削除=`git worktree remove`・ブランチ削除=worktree ごと `git branch -D`
 - 同一リポジトリの別ブランチをレールに載せると identity 色が親と衝突する → `next_free_color` で未使用パレット色に倒し、同色スロット2枚を防ぐ
 - titlebar ピル: プロジェクト名（クリック→⌘O スイッチャー）+ ⎇ ブランチ（クリック→branch/worktree メニュー）
-- エージェントスレッドは (project, branch) に属する。titlebar beacon はアクティブ project 分、レールのドットが他 project 分を担う
+- エージェントスレッドは (project, branch) に属する。titlebar beacon はアクティブ project 分、レールの静止ドットは他 project の Blocked/Done を担う（Working は herd/statusbar へ集約）
 
 **Fleet モード（M14・UI-SPEC §11）**: 主単位は thread ではなく `TaskSpace`（1 task = 1 branch = 1 linked worktree = 1 `ProjectSession`）。各 Task cell は通常 View と同じ完全な `Entity<AgentPanel>` を埋め込み、同一 Task の複数 Agent は panel 内 thread として所有する。既定 `+ Task` は常に worktree を隔離し、main は protected `IntegrationSpace`。Task lifecycle / Agent runtime / Git health は別軸で、永続 event ledger、read-only merge preview、明示 integration gate を通す。詳細と clean-room 境界は [FLEET-ARCHITECTURE.md](FLEET-ARCHITECTURE.md)。
 

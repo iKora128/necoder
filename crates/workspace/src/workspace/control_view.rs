@@ -72,6 +72,7 @@ fn tier2_line(tier2: &Option<SharedString>, theme: &Theme) -> Option<gpui::AnyEl
             )
             .child(
                 div()
+                    .flex_1() // min_w_0 は flex_1 とセット（単独だと幅 0 に潰れて消える）
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -725,6 +726,15 @@ impl Workspace {
             .news
             .first()
             .map(|item| agent_panel::relative_time_label(item.at_ms));
+        self.fleet_mascot.update(cx, |mascot, cx| {
+            mascot.set_fleet_state(
+                stats.any_blocked,
+                stats.blocked_long,
+                stats.any_working,
+                self.window_active,
+                cx,
+            );
+        });
         div()
             .flex_none()
             .flex()
@@ -736,14 +746,7 @@ impl Workspace {
             .border_color(theme.border)
             .bg(theme.bg0)
             // 集約気分 1 匹（JOURNAL 2026-07-23 の回収）: 編隊の最悪状態に追従。
-            .child(agent_panel::fleet_mood_mascot(
-                stats.any_blocked,
-                stats.blocked_long,
-                stats.any_working,
-                self.window_active,
-                34.0,
-                self.visual_tick,
-            ))
+            .child(self.fleet_mascot.clone())
             .child(
                 div()
                     .flex_none()
@@ -787,6 +790,7 @@ impl Workspace {
                     )
                     .child(
                         div()
+                            .flex_1() // min_w_0 は flex_1 とセット（単独だと幅 0 に潰れて消える）
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
@@ -1619,6 +1623,7 @@ impl Workspace {
                         )
                         .child(
                             div()
+                                .flex_1() // min_w_0 は flex_1 とセット（単独だと幅 0 に潰れて消える）
                                 .min_w_0()
                                 .overflow_hidden()
                                 .whitespace_nowrap()

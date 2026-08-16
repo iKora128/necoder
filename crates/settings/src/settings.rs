@@ -137,7 +137,9 @@ pub enum SettingsViewEvent {
 pub struct SettingsView {
     theme: Theme,
     accent: Hsla,
-    availability: Vec<acp_client::Availability>,
+    cli_installed: Vec<bool>,
+    auth_states: Vec<acp_client::AgentAuthState>,
+    checking_agents: bool,
     availability_generation: u64,
 }
 
@@ -146,7 +148,9 @@ impl SettingsView {
         let mut view = Self {
             theme,
             accent,
-            availability: vec![acp_client::Availability::Missing; acp_client::AGENTS.len()],
+            cli_installed: vec![false; acp_client::AGENTS.len()],
+            auth_states: vec![acp_client::AgentAuthState::SignedOut; acp_client::AGENTS.len()],
+            checking_agents: true,
             availability_generation: 0,
         };
         view.refresh_availability(cx);
@@ -158,23 +162,30 @@ impl SettingsView {
         self.accent = accent;
     }
 
-    /// PATH / Zed cache の走査は Render から分離し、最新世代だけを反映する。
+    /// vendor CLI の導入・認証確認は Render から分離し、最新世代だけを反映する。
     pub fn refresh_availability(&mut self, cx: &mut Context<Self>) {
         self.availability_generation = self.availability_generation.wrapping_add(1);
+        self.checking_agents = true;
         let generation = self.availability_generation;
         cx.spawn(async move |view, cx| {
-            let availability = cx
+            let agent_states = cx
                 .background_executor()
                 .spawn(async move {
-                    acp_client::AGENTS
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let auth_states = acp_client::refresh_agent_auth_states(cwd).await;
+                    let installed = acp_client::AGENTS
                         .iter()
-                        .map(acp_client::AgentKind::availability)
-                        .collect::<Vec<_>>()
+                        .map(acp_client::AgentKind::cli_installed)
+                        .collect::<Vec<_>>();
+                    (installed, auth_states)
                 })
                 .await;
             let _ = view.update(cx, |view, cx| {
                 if view.availability_generation == generation {
-                    view.availability = availability;
+                    view.cli_installed = agent_states.0;
+                    view.auth_states = agent_states.1;
+                    view.checking_agents = false;
                     cx.notify();
                 }
             });
@@ -553,19 +564,30 @@ impl Render for SettingsView {
         let mut rows = div().flex().flex_col().gap(px(6.));
         for (index, agent) in acp_client::AGENTS.iter().enumerate() {
             let is_default = agent.label == default_agent;
-            let availability = self
-                .availability
+            let cli_installed = self.cli_installed.get(index).copied().unwrap_or(false);
+            let auth_state = self
+                .auth_states
                 .get(index)
                 .copied()
-                .unwrap_or(acp_client::Availability::Missing);
-            let (dot_color, status_text) = match availability {
-                acp_client::Availability::Installed => (theme.ok, i18n::t!("settings.installed")),
-                acp_client::Availability::Npx => (theme.warn, i18n::t!("settings.available_npx")),
-                acp_client::Availability::Missing => {
-                    (theme.fg2, i18n::t!("settings.not_installed"))
+                .unwrap_or(acp_client::AgentAuthState::SignedOut);
+            let available = auth_state == acp_client::AgentAuthState::Available;
+            let (dot_color, status_text) = if self.checking_agents {
+                (theme.fg2, i18n::t!("settings.agent_checking"))
+            } else {
+                match (cli_installed, auth_state) {
+                    (_, acp_client::AgentAuthState::Available) => {
+                        (theme.ok, i18n::t!("settings.agent_available"))
+                    }
+                    (true, acp_client::AgentAuthState::Configured) => {
+                        (theme.warn, i18n::t!("settings.agent_configured"))
+                    }
+                    (true, acp_client::AgentAuthState::SignedOut) => {
+                        (theme.fg2, i18n::t!("settings.agent_signed_out"))
+                    }
+                    (false, _) => (theme.fg2, i18n::t!("settings.not_installed")),
                 }
             };
-            let default_control = if is_default {
+            let default_control = if is_default && available {
                 div()
                     .px(px(8.))
                     .py(px(3.))
@@ -575,7 +597,7 @@ impl Render for SettingsView {
                     .text_color(accent)
                     .child(SharedString::from(i18n::t!("settings.is_default")))
                     .into_any_element()
-            } else {
+            } else if available {
                 let label = agent.label;
                 div()
                     .id(("set-default", index))
@@ -592,6 +614,8 @@ impl Render for SettingsView {
                         cx.listener(move |view, _, _window, cx| view.set_default_agent(label, cx)),
                     )
                     .into_any_element()
+            } else {
+                div().into_any_element()
             };
             let (logo, mono, brand) = agent_brand(agent.id);
             let logo = match logo {
@@ -627,7 +651,7 @@ impl Render for SettingsView {
                     .rounded(px(8.))
                     .bg(theme.bg2)
                     .border_1()
-                    .border_color(if is_default {
+                    .border_color(if is_default && available {
                         accent.alpha(0.5)
                     } else {
                         theme.border
@@ -654,18 +678,34 @@ impl Render for SettingsView {
                     )
                     .child(div().flex_1())
                     .child(default_control)
-                    .child(self.agent_action_button(
-                        ("agent-login", index),
-                        i18n::t!("settings.login"),
-                        agent.login_cmd,
-                        cx,
-                    ))
-                    .child(self.agent_action_button(
-                        ("agent-install", index),
-                        i18n::t!("settings.install"),
-                        agent.install_cmd,
-                        cx,
-                    )),
+                    .child(if self.checking_agents || available {
+                        div().into_any_element()
+                    } else if cli_installed {
+                        self.agent_action_button(
+                            ("agent-login", index),
+                            if auth_state == acp_client::AgentAuthState::Configured {
+                                i18n::t!("settings.open_cli")
+                            } else {
+                                i18n::t!("settings.login")
+                            },
+                            agent.login_cmd,
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
+                    .when(
+                        !self.checking_agents && !cli_installed && !available,
+                        |row| {
+                            row.child(self.agent_action_button(
+                                ("agent-install", index),
+                                i18n::t!("settings.install"),
+                                agent.install_cmd,
+                                cx,
+                            ))
+                        },
+                    ),
             );
         }
 

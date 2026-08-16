@@ -48,7 +48,9 @@ impl Workspace {
         let active = self.project_sessions.active;
         let accent = self.accent();
         let rail = settings::get(cx).rail; // アイコンの表示/非表示（settings 反応）
-                                           // 他プロジェクトの状態に気づけるよう、各スロットへ最重要スレッドの状態ドットを出す
+                                           // 他プロジェクトの承認待ち・完了に気づけるよう、各スロットへ最重要スレッドの状態ドットを出す。
+                                           // Working は左レールでは表示しない（動かない小さな loading 表示に見えるため）。実行中は
+                                           // herd / titlebar beacon / statusbar の情報量がある面へ集約する。
                                            // （ARCHITECTURE §5「レールのドットが他 project 分を担う」・#）。cx を跨いで借用しないよう
                                            // root → (スレッド色, 状態) を先に所有データへ畳んでおく。
         let rail_signals: std::collections::HashMap<
@@ -62,7 +64,10 @@ impl Workspace {
                     .iter()
                     .filter_map(|(root, rows)| {
                         rows.iter()
-                            .filter(|row| row.2.is_signal())
+                            .filter(|row| {
+                                row.2.is_signal()
+                                    && !matches!(row.2, agent_panel::ThreadActivity::Working)
+                            })
                             .max_by_key(|row| row.2.urgency())
                             .map(|(_, color, activity)| (root.clone(), (*color, *activity)))
                     })
@@ -163,7 +168,8 @@ impl Workspace {
                                     ),
                             )
                         })
-                        // 状態ドット（右上・絶対配置）。他プロジェクトが承認待ち/実行中/完了(未確認)なら灯る
+                        // 状態ドット（右上・絶対配置）。他プロジェクトが承認待ち/完了(未確認)なら灯る。
+                        // Working の loading 表示は左レールには重複させない。
                         // （リモートバッジは右下なので衝突しない）。色はスレッド識別色・状態は形と動きで（§1.3）。
                         .when_some(
                             rail_signals.get(slot.worktree.root()).copied(),

@@ -56,6 +56,7 @@ tree-sitter-md = "=0.5.1"
 agent-client-protocol = "1.2"
 blocking = "1"
 futures = "0.3"
+async-io = "2"
 # 自前ヘッドレススクショ用（gpui の render_to_image が image::RgbaImage を返す）
 image = "0.25"
 # M8 統合ターミナル。crates.io 0.26 は Zed fork(0.26.1-dev)とほぼ同一 API

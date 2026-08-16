@@ -224,6 +224,7 @@ impl gpui::AssetSource for Assets {
             "icons/activity.svg" => icon!("activity.svg"),
             "icons/maximize.svg" => icon!("maximize.svg"),
             "icons/minimize.svg" => icon!("minimize.svg"),
+            "icons/arrow-down-to-line.svg" => icon!("arrow-down-to-line.svg"),
             "icons/bell.svg" => icon!("bell.svg"),
             "icons/bell-off.svg" => icon!("bell-off.svg"),
             // AI エージェントのブランドロゴ（Simple Icons・CC0・設定画面の識別用）。
@@ -232,6 +233,30 @@ impl gpui::AssetSource for Assets {
             "icons/brand-qwen.svg" => icon!("brand-qwen.svg"),
             "icons/brand-opencode.svg" => icon!("brand-opencode.svg"),
             "icons/brand-kimi.svg" => icon!("brand-kimi.svg"),
+            // ファイルタイプ別アイコン。言語ロゴ = Simple Icons（CC0）、フォルダ/汎用 = Lucide（ISC）。
+            // すべて単色マスクとして描き、色は `file_type_color` で薄く付ける（形で見分ける・色は識別に集約）。
+            "icons/file-rust.svg" => icon!("file-rust.svg"),
+            "icons/file-javascript.svg" => icon!("file-javascript.svg"),
+            "icons/file-typescript.svg" => icon!("file-typescript.svg"),
+            "icons/file-tsx.svg" => icon!("file-tsx.svg"),
+            "icons/file-python.svg" => icon!("file-python.svg"),
+            "icons/file-go.svg" => icon!("file-go.svg"),
+            "icons/file-json.svg" => icon!("file-json.svg"),
+            "icons/file-yaml.svg" => icon!("file-yaml.svg"),
+            "icons/file-toml.svg" => icon!("file-toml.svg"),
+            "icons/file-html.svg" => icon!("file-html.svg"),
+            "icons/file-css.svg" => icon!("file-css.svg"),
+            "icons/file-markdown.svg" => icon!("file-markdown.svg"),
+            "icons/file-shell.svg" => icon!("file-shell.svg"),
+            "icons/file-c.svg" => icon!("file-c.svg"),
+            "icons/file-cpp.svg" => icon!("file-cpp.svg"),
+            "icons/file-git.svg" => icon!("file-git.svg"),
+            "icons/file-docker.svg" => icon!("file-docker.svg"),
+            "icons/file-text.svg" => icon!("file-text.svg"),
+            "icons/file-image.svg" => icon!("file-image.svg"),
+            "icons/file-generic.svg" => icon!("file-generic.svg"),
+            "icons/folder.svg" => icon!("folder.svg"),
+            "icons/folder-open.svg" => icon!("folder-open.svg"),
             _ => return Ok(None),
         };
         Ok(Some(std::borrow::Cow::Borrowed(bytes)))
@@ -291,6 +316,10 @@ fn main() {
     // （panic hook より前 = クラッシュのバックトレースも同じログに残る）。ターミナル/パイプ/
     // MCP の stdio は素通し（workspace::logging 参照）。
     workspace::redirect_output_for_gui_launch();
+    // Finder/Dock 起動は PATH も launchd 既定の 4 つだけ = nvm の node も ~/.local/bin の CLI も
+    // 見えない（ACP エージェントは `#!/usr/bin/env node` なので node 不在＝即死する）。
+    // ログインシェルの PATH をここで取り込む。窓が開く前＝まだシングルスレッドのうちに済ませる。
+    workspace::inherit_login_shell_path();
     // panic hook（M13 公開準備）: どのスレッドで落ちてもクラッシュログを書き、次回起動で
     // statusbar チップ → バグ報告 Issue に繋ぐ。GPUI 起動前・最初に仕込む。
     workspace::install_panic_hook();

@@ -11,11 +11,13 @@ use acp::schema::ProtocolVersion;
 use agent_client_protocol as acp;
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use host::{CommandSpec, Host, LocalHost};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::{OnceLock, RwLock};
+use std::time::Duration;
 
 /// 権限リクエストの選択肢の種類（UI のスタイル分け用。ACP `PermissionOptionKind` を簡約）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +220,8 @@ impl AgentCommand {
 pub struct AgentKind {
     pub id: &'static str,
     pub label: &'static str,
+    /// vendor CLI 本体。ACP adapter の `bin` とは別（Claude/Codex は特に別 package）。
+    cli_bin: &'static str,
     bin: &'static str,
     /// npx フォールバック用の npm パッケージ。**npm 外（kimi=PyPI 等）は None**。
     package: Option<&'static str>,
@@ -254,11 +258,12 @@ pub const AGENTS: &[AgentKind] = &[
     AgentKind {
         id: "claude",
         label: "Claude Code",
+        cli_bin: "claude",
         bin: "claude-agent-acp",
         package: Some("@agentclientprotocol/claude-agent-acp@0.58.1"),
         extra_args: &[],
         install_cmd: "npm i -g @anthropic-ai/claude-code",
-        login_cmd: "claude",
+        login_cmd: "claude auth login",
         icon: Some("icons/brand-claude.svg"),
         brand_color: 0xd9_77_57,
         monogram: "C",
@@ -266,11 +271,12 @@ pub const AGENTS: &[AgentKind] = &[
     AgentKind {
         id: "codex",
         label: "Codex",
+        cli_bin: "codex",
         bin: "codex-acp",
         package: Some("@agentclientprotocol/codex-acp@1.1.2"),
         extra_args: &[],
         install_cmd: "npm i -g @openai/codex",
-        login_cmd: "codex",
+        login_cmd: "codex login",
         icon: None,
         brand_color: 0x10_a3_7f,
         monogram: ">_",
@@ -281,11 +287,12 @@ pub const AGENTS: &[AgentKind] = &[
     AgentKind {
         id: "copilot",
         label: "GitHub Copilot",
+        cli_bin: "copilot",
         bin: "copilot",
         package: Some("@github/copilot@1.0.70"),
         extra_args: &["--acp"],
         install_cmd: "npm i -g @github/copilot",
-        login_cmd: "copilot",
+        login_cmd: "copilot login",
         icon: Some("icons/brand-copilot.svg"),
         brand_color: 0xd0_d5_db,
         monogram: "Co",
@@ -293,6 +300,7 @@ pub const AGENTS: &[AgentKind] = &[
     AgentKind {
         id: "qwen",
         label: "Qwen Code",
+        cli_bin: "qwen",
         bin: "qwen",
         package: Some("@qwen-code/qwen-code@0.19.9"),
         extra_args: &["--acp", "--experimental-skills"],
@@ -306,11 +314,12 @@ pub const AGENTS: &[AgentKind] = &[
     AgentKind {
         id: "opencode",
         label: "OpenCode",
+        cli_bin: "opencode",
         bin: "opencode",
         package: Some("opencode-ai"),
         extra_args: &["acp"],
         install_cmd: "npm i -g opencode-ai",
-        login_cmd: "opencode",
+        login_cmd: "opencode auth login",
         icon: Some("icons/brand-opencode.svg"),
         brand_color: 0xd0_d5_db,
         monogram: "OC",
@@ -319,11 +328,12 @@ pub const AGENTS: &[AgentKind] = &[
     AgentKind {
         id: "kimi",
         label: "Kimi CLI",
+        cli_bin: "kimi",
         bin: "kimi",
         package: None,
         extra_args: &["acp"],
         install_cmd: "uv tool install kimi-cli",
-        login_cmd: "kimi",
+        login_cmd: "kimi login",
         icon: Some("icons/brand-kimi.svg"),
         brand_color: 0xd0_d5_db,
         monogram: "K",
@@ -333,11 +343,12 @@ pub const AGENTS: &[AgentKind] = &[
     AgentKind {
         id: "grok",
         label: "Grok Build",
+        cli_bin: "grok",
         bin: "grok",
         package: None,
         extra_args: &["acp"],
         install_cmd: "curl -fsSL https://x.ai/cli/install.sh | bash",
-        login_cmd: "grok",
+        login_cmd: "grok login",
         icon: None,
         brand_color: 0x4b_55_63,
         monogram: "G",
@@ -354,6 +365,87 @@ pub const AGENT_LABELS: &[&str] = &[
     "Kimi CLI",
     "Grok Build",
 ];
+
+/// 設定画面が表示する Agent の利用状態。資格情報そのものは読み出さず、CLI の status、
+/// 設定ファイルの存在、またはプロンプト無しの ACP session probe だけで判定する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentAuthState {
+    /// 認証済み status、または ACP initialize → session/new に成功。選択可能。
+    Available,
+    /// 資格情報・provider 設定は見つかったが、オンラインでの有効性は未確認。
+    Configured,
+    /// CLI は未導入、または確認できる認証情報が無い。
+    SignedOut,
+}
+
+static AGENT_AUTH_STATES: OnceLock<RwLock<Vec<AgentAuthState>>> = OnceLock::new();
+
+/// 利用可能、または資格情報の存在まで確認できた Agent。composer はこの一覧を選択肢へ出す。
+/// `Configured` は Settings の背景 refresh で session 成功後に `Available` へ昇格する。
+pub fn authenticated_agent_labels() -> Vec<&'static str> {
+    let states = cached_agent_auth_states();
+    AGENTS
+        .iter()
+        .zip(states)
+        .filter_map(|(agent, state)| (state != AgentAuthState::SignedOut).then_some(agent.label))
+        .collect()
+}
+
+/// 最後に確認した全 Agent の状態。初回はローカルの軽い CLI/config 判定だけを行う。
+pub fn cached_agent_auth_states() -> Vec<AgentAuthState> {
+    AGENT_AUTH_STATES
+        .get_or_init(|| RwLock::new(detect_configured_agent_states()))
+        .read()
+        .map(|states| states.clone())
+        .unwrap_or_else(|_| vec![AgentAuthState::SignedOut; AGENTS.len()])
+}
+
+/// CLI/config 判定に加え、必要な Agent はプロンプト無しの ACP session を短時間だけ開く。
+/// probe は並列・タイムアウト付きで、終了時に子プロセスを必ず kill/wait する。
+pub async fn refresh_agent_auth_states(cwd: impl Into<PathBuf>) -> Vec<AgentAuthState> {
+    let cwd = cwd.into();
+    let initial = detect_configured_agent_states();
+    let probes = AGENTS
+        .iter()
+        .zip(initial.iter().copied())
+        .map(|(agent, state)| {
+            let cwd = cwd.clone();
+            async move {
+                if !agent.cli_installed() {
+                    return state;
+                }
+                // status コマンドは最大 2 秒掛かり得るので、この明示 refresh の背景処理にだけ置く。
+                // cached_agent_auth_states()/composer render からは絶対に呼ばない（起動遅延の根治）。
+                let status_available = match agent.id {
+                    "claude" => command_succeeds("claude", &["auth", "status"]),
+                    "codex" => command_succeeds("codex", &["login", "status"]),
+                    "copilot" => command_succeeds("gh", &["auth", "status"]),
+                    _ => false,
+                };
+                if status_available || state == AgentAuthState::Available {
+                    return AgentAuthState::Available;
+                }
+                if agent.probe_acp_session(cwd).await {
+                    AgentAuthState::Available
+                } else {
+                    state
+                }
+            }
+        });
+    let states = futures::future::join_all(probes).await;
+    let shared = AGENT_AUTH_STATES.get_or_init(|| RwLock::new(Vec::new()));
+    if let Ok(mut current) = shared.write() {
+        *current = states.clone();
+    }
+    states
+}
+
+fn detect_configured_agent_states() -> Vec<AgentAuthState> {
+    AGENTS
+        .iter()
+        .map(AgentKind::configured_auth_state)
+        .collect()
+}
 
 impl AgentKind {
     /// ラベル（例 "Claude"）から引く。
@@ -427,6 +519,94 @@ impl AgentKind {
         }
     }
 
+    /// vendor CLI 本体が PATH にあるか。ACP adapter の導入状態とは混同しない。
+    pub fn cli_installed(&self) -> bool {
+        find_in_path(self.cli_bin).is_some()
+    }
+
+    /// 対話も子プロセス起動もしない軽量判定。composer の初回 render から呼ばれるため、
+    /// ファイル存在と環境変数だけを見る。status/probe は明示的な背景 refresh に分離する。
+    fn configured_auth_state(&self) -> AgentAuthState {
+        if !self.cli_installed() {
+            return AgentAuthState::SignedOut;
+        }
+        let available = match self.id {
+            "claude" => env_has_any(&["ANTHROPIC_API_KEY"]),
+            "codex" => env_has_any(&["OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"]),
+            _ => false,
+        };
+        if available {
+            return AgentAuthState::Available;
+        }
+
+        let configured = match self.id {
+            "claude" => home_path_exists(".claude/.credentials.json"),
+            "codex" => home_path_exists(".codex/auth.json"),
+            "copilot" => {
+                env_has_any(&[
+                    "COPILOT_GITHUB_TOKEN",
+                    "GH_TOKEN",
+                    "GITHUB_TOKEN",
+                    "COPILOT_PROVIDER_API_KEY",
+                ]) || home_path_exists(".copilot/config.json")
+                    || home_path_exists(".config/gh/hosts.yml")
+            }
+            "qwen" => {
+                env_has_any(&[
+                    "DASHSCOPE_API_KEY",
+                    "OPENAI_API_KEY",
+                    "ANTHROPIC_API_KEY",
+                    "GEMINI_API_KEY",
+                ]) || home_path_exists(".qwen/settings.json")
+                    || home_path_exists(".qwen/.env")
+            }
+            "opencode" => {
+                env_has_any(&["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"])
+                    || opencode_auth_exists()
+            }
+            "kimi" => {
+                env_has_any(&["KIMI_API_KEY"])
+                    || home_path_exists(".kimi-code/config.toml")
+                    || home_path_exists(".kimi-code/credentials.json")
+            }
+            "grok" => {
+                env_has_any(&["XAI_API_KEY"])
+                    || home_path_exists(".grok/config.toml")
+                    || home_path_exists(".grok/credentials.json")
+            }
+            _ => false,
+        };
+        if configured {
+            AgentAuthState::Configured
+        } else {
+            AgentAuthState::SignedOut
+        }
+    }
+
+    /// ネット取得を発生させず、既にある ACP adapter だけを解決する。
+    fn installed_command(&self, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
+        let cwd = cwd.into();
+        let path = find_in_path(self.bin).or_else(|| zed_cached_agent(self.bin))?;
+        Some(AgentCommand {
+            path,
+            args: self
+                .extra_args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect(),
+            cwd,
+        })
+    }
+
+    /// initialize → session/new までを短時間だけ実行する。prompt は送らないため利用料は発生せず、
+    /// タイムアウト・完了のどちらでも [`host::HostProcess`] の Drop が子を kill/wait する。
+    async fn probe_acp_session(&self, cwd: impl Into<PathBuf>) -> bool {
+        let Some(command) = self.installed_command(cwd) else {
+            return false;
+        };
+        probe_session(&command, Duration::from_secs(4)).await
+    }
+
     /// 指定 host 上で agent を解決する。remote の認証情報は remote 側のものだけを使う。
     pub fn command_on(&self, host: &dyn Host, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
         let cwd = cwd.into();
@@ -461,6 +641,99 @@ impl AgentKind {
             args,
             cwd,
         })
+    }
+}
+
+async fn probe_session(command: &AgentCommand, timeout: Duration) -> bool {
+    let spec =
+        CommandSpec::new(command.path.to_string_lossy(), &command.cwd).args(command.args.clone());
+    let mut process = match LocalHost::shared().spawn_process(&spec) {
+        Ok(process) => process,
+        Err(_) => return false,
+    };
+    let stdin = match process.take_stdin() {
+        Ok(stdin) => stdin,
+        Err(_) => return false,
+    };
+    let stdout = match process.take_stdout() {
+        Ok(stdout) => stdout,
+        Err(_) => return false,
+    };
+    let transport = acp::ByteStreams::new(
+        blocking::Unblock::new(stdin),
+        blocking::Unblock::new(stdout),
+    );
+    let cwd = command.cwd.clone();
+    let probe = FutureExt::fuse(acp::Client.builder().connect_with(
+        transport,
+        async move |connection| {
+            connection
+                .send_request(initialize_request())
+                .block_task()
+                .await?;
+            connection
+                .send_request(v1::NewSessionRequest::new(&cwd))
+                .block_task()
+                .await?;
+            Ok::<(), acp::Error>(())
+        },
+    ));
+    let deadline = FutureExt::fuse(async_io::Timer::after(timeout));
+    futures::pin_mut!(probe, deadline);
+    futures::select! {
+        result = probe => result.is_ok(),
+        _ = deadline => false,
+    }
+}
+
+fn env_has_any(names: &[&str]) -> bool {
+    names
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
+
+fn home_path_exists(relative: impl AsRef<Path>) -> bool {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .is_some_and(|home| home.join(relative).exists())
+}
+
+fn opencode_auth_exists() -> bool {
+    let path = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .map(|root| root.join("opencode/auth.json"));
+    path.and_then(|path| std::fs::metadata(path).ok())
+        .is_some_and(|metadata| metadata.is_file() && metadata.len() > 2)
+}
+
+fn command_succeeds(binary: &str, args: &[&str]) -> bool {
+    let Some(path) = find_in_path(binary) else {
+        return false;
+    };
+    let mut child = match Command::new(path)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => {
+                let _kill = child.kill();
+                let _wait = child.wait();
+                return false;
+            }
+        }
     }
 }
 
@@ -672,10 +945,29 @@ pub async fn run_session_on(
     let outcome = acp::Client
         .builder()
         .connect_with(transport, async move |connection| {
-            connection
-                .send_request(initialize_request())
-                .block_task()
-                .await?;
+            // initialize が無言で返らない（node 不在・PATH 不備など）と永久に「稼働中」に取り残される
+            // ため、ハンドシェイクにだけ deadline を張る（この後の read ループは長時間が正常なので
+            // 囲まない）。probe_session と同じ Timer + select 形。90 秒（npx 初回取得も見込む）。
+            {
+                let init =
+                    FutureExt::fuse(connection.send_request(initialize_request()).block_task());
+                let deadline = FutureExt::fuse(async_io::Timer::after(Duration::from_secs(90)));
+                futures::pin_mut!(init, deadline);
+                futures::select! {
+                    result = init => {
+                        result?;
+                    }
+                    _ = deadline => {
+                        event_tx
+                            .unbounded_send(AgentEvent::Failed(
+                                "ACP エージェントが initialize に応答しません（node/PATH を確認してください）"
+                                    .to_string(),
+                            ))
+                            .ok();
+                        return Ok(());
+                    }
+                }
+            }
             // セッションを手動生成する（`start_session` は応答の `config_options` を捨てるため）。
             // NewSessionResponse から config_options を取り出してから attach する。
             let response = connection
@@ -1152,6 +1444,18 @@ mod tests {
         let result = futures::executor::block_on(connect_and_initialize(&command));
         println!("initialize 結果: {result:?}");
         assert!(result.is_ok(), "initialize が成功する: {result:?}");
+    }
+
+    /// 実環境の CLI status + ACP session probe を一覧確認する。
+    /// `cargo test -p acp_client -- --ignored --nocapture live_auth_states`
+    #[test]
+    #[ignore = "ローカルの vendor CLI / 資格情報を調べる"]
+    fn live_auth_states() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let states = futures::executor::block_on(refresh_agent_auth_states(cwd));
+        for (agent, state) in AGENTS.iter().zip(states) {
+            println!("{}: {state:?}", agent.label);
+        }
     }
 
     /// 実プロセス検証: 1 プロンプトを送って応答テキストが返るか。

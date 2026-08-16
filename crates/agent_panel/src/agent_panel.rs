@@ -7,6 +7,18 @@
 //!
 //! composer は [`editor_view::EditorView`] の平坦モードを再利用する（IME・複数カーソル・undo を共通化）。
 //! ACP との実接続（session/prompt/stream）は次段（B2）。現状はスレッド構造 + 送信でのユーザー発話追加まで。
+//!
+//! ## 伸縮テキストの作法（GPUI/taffy の罠・2026-08-09）
+//!
+//! flex **行**の中で折り返させたい本文には `flex_1()` と `min_w_0()` を**必ずセットで**付ける。
+//! ACP のツール名・パス・承認タイトルはエージェント任せで長さの上限が無いため、ここを外すと崩れる。
+//!
+//! - `min_w_0()` だけ … 幅 0 に潰れて**1 文字ずつ改行**される（行が広い AI 全画面ほど出やすい）
+//! - どちらも無し … GPUI のテキストは min-content を max-content と同値で返す＝縮まないので、
+//!   パネルの外へはみ出して切れる
+//!
+//! 実測（AI 全画面・行幅 1364px・同一本文で style だけ変えた比較）:
+//! `min_w_0` のみ → **0px × 2540px** / `flex_1` + `min_w_0` → 1260px × 20px / 無指定 → 826px × 20px。
 
 use acp_client::{
     AgentEvent, AgentKind, ConfigCategory, ConfigOption, PermissionChoice, PermissionDiff,
@@ -24,10 +36,10 @@ use editor_view::{ComposerEvent, EditorView};
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    actions, div, img, prelude::*, px, svg, Animation, AnimationExt, App, ClipboardItem, Context,
-    CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ScrollHandle, SharedString, StyledText, TextLayout, Window,
+    actions, canvas, div, prelude::*, px, svg, Animation, AnimationExt, App, ClipboardItem,
+    Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight,
+    HighlightStyle, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, RenderImage, ScrollHandle, SharedString, StyledText, TextLayout, Window,
 };
 use host::{Host, LocalHost};
 use std::cell::RefCell;
@@ -111,7 +123,7 @@ enum Selector {
 impl Selector {
     fn options(self) -> &'static [&'static str] {
         match self {
-            Selector::Agent => acp_client::AGENT_LABELS,
+            Selector::Agent => &[],
             Selector::Mode => PERMISSION_MODES,
             Selector::Model => MODELS,
             Selector::Effort => EFFORTS,
@@ -141,6 +153,15 @@ enum Entry {
     Checkpoint { id: i64, label: SharedString },
 }
 
+/// 現在ビューポートの先頭より前にある、もっとも近いユーザー発話を返す。
+/// transcript の直下は `Entry` と同じ順なので、返した index をそのまま `ScrollHandle` に渡せる。
+fn previous_user_entry_index(entries: &[Entry], top_item: usize) -> Option<usize> {
+    entries
+        .iter()
+        .take(top_item.min(entries.len()))
+        .rposition(|entry| matches!(entry, Entry::User(_)))
+}
+
 /// transcript の選択可能リージョン（毎フレーム再構築・M13）。`layout` は同フレームの
 /// paint 後に有効になる（transcript は全リージョン描画 = 登録したものは必ず paint される）。
 /// リージョンの同一性は**登録順のインデックス**（= このベクタ内の位置）。1 エントリが markdown で
@@ -149,7 +170,8 @@ enum Entry {
 struct SelectableRegion {
     /// 表示テキストそのもの（コピーはここから切る。offset はこのテキスト基準）。
     text: SharedString,
-    layout: TextLayout,
+    /// hash cache 上の永続 View。hit test 時に最新の TextLayout を読む。
+    styled: Entity<CachedStyledTextView>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -157,6 +179,470 @@ struct SyntaxCacheKey {
     language: lang::LanguageId,
     content_hash: u64,
     len: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct ContentCacheKey {
+    content_hash: u64,
+    len: usize,
+}
+
+fn content_cache_key(text: &str) -> ContentCacheKey {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    ContentCacheKey {
+        content_hash: hasher.finish(),
+        len: text.len(),
+    }
+}
+
+/// CommonMark の解析結果を本文 hash で再利用する小さな LRU。ストリーム途中の断片も上限で
+/// 古いものから捨てるため、長いターンでもキャッシュが無制限に増えない。
+#[derive(Default)]
+struct MarkdownBlockCache {
+    blocks: HashMap<ContentCacheKey, (SharedString, Arc<Vec<markdown::Block>>)>,
+    order: VecDeque<ContentCacheKey>,
+}
+
+impl MarkdownBlockCache {
+    const CAPACITY: usize = 192;
+
+    fn parse(&mut self, text: &str) -> Arc<Vec<markdown::Block>> {
+        let key = content_cache_key(text);
+        if let Some((source, blocks)) = self.blocks.get(&key) {
+            if source.as_ref() == text {
+                return blocks.clone();
+            }
+        }
+        let blocks = Arc::new(markdown::parse(text));
+        while self.order.len() >= Self::CAPACITY {
+            if let Some(expired) = self.order.pop_front() {
+                self.blocks.remove(&expired);
+            }
+        }
+        self.order.push_back(key);
+        self.blocks
+            .insert(key, (SharedString::from(text.to_owned()), blocks.clone()));
+        blocks
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct StyledTextCacheKey {
+    content: ContentCacheKey,
+    styles_hash: u64,
+    styles_len: usize,
+    /// 同じ本文が複数箇所にある場合も bounds を共有しないための描画順スロット。
+    region: usize,
+}
+
+/// 本文 hash ごとの独立 View。Entity の Render cache に `StyledText` と shape/wrap 済み layout が
+/// 残るため、親 transcript が1Hz表示などで再描画されても本文 Entity は再構築されない。
+struct CachedStyledTextView {
+    text: SharedString,
+    base_highlights: Vec<(Range<usize>, HighlightStyle)>,
+    selection: Option<(Range<usize>, HighlightStyle)>,
+    layout: TextLayout,
+}
+
+impl CachedStyledTextView {
+    fn set_selection(
+        &mut self,
+        selection: Option<(Range<usize>, HighlightStyle)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selection == selection {
+            return;
+        }
+        self.selection = selection;
+        cx.notify();
+    }
+}
+
+impl Render for CachedStyledTextView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let highlights: Vec<_> =
+            gpui::combine_highlights(self.base_highlights.clone(), self.selection.clone())
+                .collect();
+        let mut styled = StyledText::new(self.text.clone());
+        if !highlights.is_empty() {
+            styled = styled.with_highlights(highlights);
+        }
+        self.layout = styled.layout().clone();
+        styled
+    }
+}
+
+#[derive(Default)]
+struct StyledTextEntityCache {
+    items: HashMap<
+        StyledTextCacheKey,
+        (
+            SharedString,
+            Vec<(Range<usize>, HighlightStyle)>,
+            Entity<CachedStyledTextView>,
+        ),
+    >,
+    order: VecDeque<StyledTextCacheKey>,
+}
+
+impl StyledTextEntityCache {
+    const CAPACITY: usize = 512;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamingTextKind {
+    Agent,
+    Thinking,
+}
+
+/// タイプライタ本文だけの invalidation 境界。40ms時計が通知するのはこの Entity だけで、
+/// AgentPanel のタブ・meta・過去 transcript・composer は再構築しない。
+struct StreamingTextView {
+    key: Option<SharedString>,
+    text: SharedString,
+    kind: StreamingTextKind,
+    reveal: usize,
+    active: bool,
+    ticker: bool,
+    last_rendered_at: Option<std::time::Instant>,
+    theme: Theme,
+    scroll: ScrollHandle,
+    markdown_cache: Rc<RefCell<MarkdownBlockCache>>,
+    syntax_cache: Rc<RefCell<SyntaxHighlightCache>>,
+}
+
+impl StreamingTextView {
+    fn new(
+        theme: Theme,
+        scroll: ScrollHandle,
+        markdown_cache: Rc<RefCell<MarkdownBlockCache>>,
+        syntax_cache: Rc<RefCell<SyntaxHighlightCache>>,
+    ) -> Self {
+        Self {
+            key: None,
+            text: SharedString::default(),
+            kind: StreamingTextKind::Agent,
+            reveal: usize::MAX,
+            active: true,
+            ticker: false,
+            last_rendered_at: None,
+            theme,
+            scroll,
+            markdown_cache,
+            syntax_cache,
+        }
+    }
+
+    fn set_content(
+        &mut self,
+        key: SharedString,
+        text: SharedString,
+        kind: StreamingTextKind,
+        active: bool,
+        reset: bool,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) {
+        let new_stream = self.key.as_ref() != Some(&key) || self.kind != kind;
+        let target = text.chars().count();
+        let needs_restart = active && !self.ticker && self.reveal < target;
+        let changed = new_stream
+            || self.text != text
+            || self.active != active
+            || self.theme != theme
+            || reset
+            || needs_restart;
+        self.key = Some(key);
+        self.text = text;
+        self.kind = kind;
+        self.theme = theme;
+        self.active = active;
+        if !active {
+            self.reveal = target;
+        } else if reset {
+            self.reveal = 0;
+        } else if new_stream {
+            // 既に長い本文へタブを切り替えた時は打ち直さず、最初の小チャンクだけ0から始める。
+            self.reveal = if target <= 256 { 0 } else { target };
+        } else {
+            self.reveal = self.reveal.min(target);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn ensure_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.ticker || !self.active || self.reveal >= self.text.chars().count() {
+            return;
+        }
+        self.ticker = true;
+        cx.spawn(async move |body, cx| {
+            loop {
+                let done = body
+                    .update(cx, |body, cx| {
+                        let visible = body.active
+                            && body.last_rendered_at.is_some_and(|at| {
+                                at.elapsed() < std::time::Duration::from_millis(750)
+                            });
+                        if !visible {
+                            body.reveal = body.text.chars().count();
+                            return true;
+                        }
+                        let target = body.text.chars().count();
+                        if body.reveal < target {
+                            let remaining = target - body.reveal;
+                            // タイプライタは「今書いている」感の演出であって遅延源にはしない。初速を
+                            // 上げ、末尾でも 16 文字/40ms（＝400 字/秒）で送る＝ ACP の到着に UI が
+                            // 遅れない（旧: /6・最低 2 で末尾が 50 字/秒まで落ち「遅く感じる」原因だった）。
+                            let step = (remaining / 3).max(16);
+                            body.reveal = body.reveal.saturating_add(step).min(target);
+                            let offset = body.scroll.offset();
+                            let max = body.scroll.max_offset();
+                            if max.y <= px(0.) || offset.y <= -(max.y - px(60.)) {
+                                body.scroll.scroll_to_bottom();
+                            }
+                            cx.notify();
+                        }
+                        body.reveal >= target
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(40))
+                    .await;
+            }
+            body.update(cx, |body, cx| {
+                body.ticker = false;
+                if body.active && body.reveal < body.text.chars().count() {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn visible_text(&self) -> SharedString {
+        let target = self.text.chars().count();
+        if self.reveal >= target {
+            self.text.clone()
+        } else {
+            self.text
+                .chars()
+                .take(self.reveal)
+                .collect::<String>()
+                .into()
+        }
+    }
+}
+
+impl Render for StreamingTextView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.active = self.active && window.is_window_active();
+        self.last_rendered_at = Some(std::time::Instant::now());
+        if self.active {
+            self.ensure_ticker(cx);
+        }
+        let text = self.visible_text();
+        match self.kind {
+            StreamingTextKind::Thinking => div()
+                .text_size(px(11.5))
+                .italic()
+                .text_color(self.theme.fg2)
+                .child(text)
+                .into_any_element(),
+            StreamingTextKind::Agent => div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .gap(px(6.))
+                .text_size(px(12.5))
+                .text_color(self.theme.fg0)
+                .children(render_streaming_markdown(
+                    text.as_ref(),
+                    &self.theme,
+                    &self.markdown_cache,
+                    &self.syntax_cache,
+                ))
+                .into_any_element(),
+        }
+    }
+}
+
+fn streaming_styled_text(
+    text: String,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+) -> gpui::AnyElement {
+    let mut styled = StyledText::new(SharedString::from(text));
+    if !highlights.is_empty() {
+        styled = styled.with_highlights(highlights);
+    }
+    styled.into_any_element()
+}
+
+fn streaming_md_highlights(
+    theme: &Theme,
+    spans: &[markdown::Span],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    spans
+        .iter()
+        .map(|span| {
+            let style = match span.kind {
+                markdown::SpanKind::Strong => HighlightStyle {
+                    font_weight: Some(FontWeight::BOLD),
+                    ..Default::default()
+                },
+                markdown::SpanKind::Emphasis => HighlightStyle {
+                    font_style: Some(gpui::FontStyle::Italic),
+                    ..Default::default()
+                },
+                markdown::SpanKind::Strikethrough => HighlightStyle {
+                    strikethrough: Some(gpui::StrikethroughStyle {
+                        thickness: px(1.),
+                        color: Some(theme.fg2),
+                    }),
+                    ..Default::default()
+                },
+                markdown::SpanKind::Code => HighlightStyle {
+                    color: Some(theme.syntax.macro_),
+                    background_color: Some(theme.bg3),
+                    ..Default::default()
+                },
+                markdown::SpanKind::Link => HighlightStyle {
+                    color: Some(theme.syntax.function),
+                    underline: Some(gpui::UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(theme.syntax.function),
+                        wavy: false,
+                    }),
+                    ..Default::default()
+                },
+            };
+            (span.range.clone(), style)
+        })
+        .collect()
+}
+
+fn streaming_syntax_highlights(
+    theme: &Theme,
+    cache: &Rc<RefCell<SyntaxHighlightCache>>,
+    language: Option<lang::LanguageId>,
+    text: &str,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(language) = language else {
+        return Vec::new();
+    };
+    cache
+        .borrow_mut()
+        .highlight(language, text)
+        .into_iter()
+        .map(|span| {
+            let color = match span.kind {
+                lang::HighlightKind::Keyword | lang::HighlightKind::Heading => theme.syntax.keyword,
+                lang::HighlightKind::Function | lang::HighlightKind::Link => theme.syntax.function,
+                lang::HighlightKind::Type | lang::HighlightKind::Strong => theme.syntax.type_,
+                lang::HighlightKind::String | lang::HighlightKind::Code => theme.syntax.string,
+                lang::HighlightKind::Number => theme.syntax.number,
+                lang::HighlightKind::Comment => theme.syntax.comment,
+                lang::HighlightKind::Macro | lang::HighlightKind::Emphasis => theme.syntax.macro_,
+                lang::HighlightKind::Punctuation => theme.syntax.punctuation,
+            };
+            (
+                span.range,
+                HighlightStyle {
+                    color: Some(color),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect()
+}
+
+fn render_streaming_markdown(
+    text: &str,
+    theme: &Theme,
+    markdown_cache: &Rc<RefCell<MarkdownBlockCache>>,
+    syntax_cache: &Rc<RefCell<SyntaxHighlightCache>>,
+) -> Vec<gpui::AnyElement> {
+    let blocks = markdown_cache.borrow_mut().parse(text);
+    blocks
+        .iter()
+        .cloned()
+        .map(|block| match block {
+            markdown::Block::Heading { level, text, spans } => {
+                let size = match level {
+                    1 => 16.0,
+                    2 => 14.5,
+                    3 => 13.5,
+                    _ => 12.5,
+                };
+                div()
+                    .pt(px(2.))
+                    .text_size(px(size))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(streaming_styled_text(
+                        text,
+                        streaming_md_highlights(theme, &spans),
+                    ))
+                    .into_any_element()
+            }
+            markdown::Block::Paragraph { text, spans } => div()
+                .child(streaming_styled_text(
+                    text,
+                    streaming_md_highlights(theme, &spans),
+                ))
+                .into_any_element(),
+            markdown::Block::Code { lang, text } => {
+                let language = lang.as_deref().and_then(lang::LanguageId::from_name);
+                let highlights = streaming_syntax_highlights(theme, syntax_cache, language, &text);
+                div()
+                    .rounded(px(6.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .px(px(9.))
+                    .py(px(7.))
+                    .font_family("Guguru Sans Code")
+                    .text_size(px(11.5))
+                    .text_color(theme.fg0)
+                    .child(streaming_styled_text(text, highlights))
+                    .into_any_element()
+            }
+            markdown::Block::ListItem {
+                depth,
+                marker,
+                text,
+                spans,
+            } => {
+                let bullet: SharedString = match marker {
+                    markdown::ListMarker::Bullet => "•".into(),
+                    markdown::ListMarker::Ordered(number) => format!("{number}.").into(),
+                    markdown::ListMarker::Task(true) => "☑".into(),
+                    markdown::ListMarker::Task(false) => "☐".into(),
+                };
+                div()
+                    .flex()
+                    .gap(px(7.))
+                    .pl(px(2.0 + depth as f32 * 16.0))
+                    .child(div().flex_none().text_color(theme.fg2).child(bullet))
+                    .child(div().flex_1().min_w_0().child(streaming_styled_text(
+                        text,
+                        streaming_md_highlights(theme, &spans),
+                    )))
+                    .into_any_element()
+            }
+            markdown::Block::Rule => div()
+                .my(px(2.))
+                .h(px(1.))
+                .bg(theme.border)
+                .into_any_element(),
+        })
+        .collect()
 }
 
 /// ACP の再描画（ストリーム・マスコット時計）で同じコードを再解析しないための小さな LRU。
@@ -426,6 +912,8 @@ struct Thread {
     agent: SharedString,
     /// 添付コンテキスト（プロジェクト相対パス）。送信時に `@path` として prompt 先頭へ付ける。
     context: Vec<SharedString>,
+    /// 未送信の composer 本文。タブは独立した作業面なので、切替時にスレッドごとに退避する。
+    draft: String,
     entries: Vec<Entry>,
     tokens_used: u32,
     tokens_max: u32,
@@ -494,6 +982,7 @@ impl Thread {
             effort: "high".into(),
             agent: "Claude Code".into(),
             context: Vec::new(),
+            draft: String::new(),
             entries: Vec::new(),
             tokens_used: 0,
             tokens_max: 200_000,
@@ -636,6 +1125,30 @@ fn infer_language_from_tool_argument(value: &str) -> Option<lang::LanguageId> {
 }
 
 /// ツール出力を transcript 用に丸める（末尾を優先し 24 行まで。溢れは先頭で省略表示）。
+/// この行数（または [`STEP_COLLAPSE_MIN_BYTES`] バイト）を超えるツール結果は既定で折り畳む。
+/// 短い出力（コマンドの成否・数行）は畳む価値がないのでそのまま見せる。
+const STEP_COLLAPSE_MIN_LINES: usize = 6;
+const STEP_COLLAPSE_MIN_BYTES: usize = 400;
+
+/// ステップ見出しでツール名とパスを 1 行に並べる上限（これを超えるとパスは次行へ）。
+/// `Read README.md` + パスのような短い名前だけを同じ行に置き、長いタイトルは折返しに専念させる。
+const STEP_TITLE_INLINE_MAX_CHARS: usize = 48;
+
+/// 折り畳んだツール結果（⎿）のヘッダ要約。複数行は「N 行」、1 行なら中身を短く切って見せる。
+fn step_result_summary(result: &str, line_count: usize) -> SharedString {
+    if line_count > 1 {
+        SharedString::from(i18n::t!("agent.result_lines", "n" => line_count))
+    } else {
+        let line = result.trim();
+        if line.chars().count() > 72 {
+            let head: String = line.chars().take(72).collect();
+            SharedString::from(format!("{head}…"))
+        } else {
+            SharedString::from(line.to_string())
+        }
+    }
+}
+
 fn cap_output(text: &str) -> String {
     const MAX: usize = 24;
     let lines: Vec<&str> = text.lines().collect();
@@ -733,6 +1246,10 @@ pub struct AgentPanel {
     dest_cwd: Option<PathBuf>,
     dest_host: Arc<dyn Host>,
     composer: Entity<EditorView>,
+    /// 固定レイアウトのマスコット。フレーム時計と paint invalidation を親 transcript から分離する。
+    mascot: Entity<MascotView>,
+    /// 実行中の末尾本文。25fpsのタイプライタ通知を親 transcript から分離する。
+    streaming_text: Entity<StreamingTextView>,
     /// タブ改名中の (対象 index, 入力欄)。ダブルクリックで開く・IME 正しい EditorView::plain（#4）。
     renaming: Option<(usize, Entity<EditorView>)>,
     /// transcript のスクロール（M13 UX: ホイールで遡れる。ストリーミング中は底に居る時だけ追従）。
@@ -751,7 +1268,11 @@ pub struct AgentPanel {
     /// transcript のドラッグ選択（None = 選択なし）。⌘C でコピー・Esc/外クリックで解除。
     transcript_selection: Option<TranscriptSelection>,
     /// ACP のコードフェンス／ファイル出力用 tree-sitter 結果。描画ごとの再パースを避ける。
-    syntax_cache: RefCell<SyntaxHighlightCache>,
+    syntax_cache: Rc<RefCell<SyntaxHighlightCache>>,
+    /// Agent 本文の CommonMark 解析結果。マスコットや時計の再描画で再解析しない。
+    markdown_cache: Rc<RefCell<MarkdownBlockCache>>,
+    /// 選択されていない本文の `StyledText`（shape/wrap 済み TextLayout を含む）。
+    styled_text_cache: Rc<RefCell<StyledTextEntityCache>>,
     /// composer 下部の選択ピルのうち開いているメニュー（None = 閉）。
     open_menu: Option<Selector>,
     /// Add context の候補（プロジェクトのファイル相対パス。workspace が渡す）と開閉。
@@ -771,19 +1292,15 @@ pub struct AgentPanel {
     /// 直近の成功でマスコットがバンザイ中か（数秒で false に戻る）。世代番号で古いタイマーを無効化する。
     celebrating: bool,
     celebrate_gen: u32,
-    /// ストリーミング平滑化: アクティブスレッドの末尾（Agent/Thinking）を何文字まで表示したか（タイプライタ）。
-    /// チャンクは束で届くので、これを一定速度で目標長へ寄せてカクつきを消す。`usize::MAX`＝全部表示。
-    reveal: usize,
-    reveal_ticker: bool,
-    /// マスコットの離散フレーム時計。GPUI の `Animation::repeat()` は steps 表示でも 60fps で
-    /// render を要求するため使わず、表示コマが変わる時だけ進める（作業100ms・居眠り200ms）。
-    mascot_tick: u64,
-    mascot_ticker: bool,
-    /// 最後に実際の View tree へ描画された時刻。Entity が非表示になって notify が render へ届かなく
-    /// なったら ticker を自停止する（非アクティブな TaskSpace の常時更新を防ぐ）。
-    mascot_last_rendered_at: Option<std::time::Instant>,
+    /// 最後に親パネルが View tree へ描画された時刻。非表示 TaskSpace の本文・1Hz時計を止める。
+    last_rendered_at: Option<std::time::Instant>,
+    /// 経過秒・承認待ち段階だけを更新する1Hz時計。マスコット/本文の高頻度時計とは独立。
+    second_ticker: bool,
     /// 折り畳んだ Thinking のうちユーザーが開いたもの（thread.id, entry index）。実行中の最終ブロックは常に展開。
     expanded_thoughts: std::collections::HashSet<(String, usize)>,
+    /// 展開したツール結果（⎿）。既定は折り畳み＝長いコード読み込みで transcript が流れないように
+    /// （`expanded_thoughts` と同じく `(thread.id, entry index)` を外部集合で保持し Entry は軽量に保つ）。
+    expanded_steps: std::collections::HashSet<(String, usize)>,
     /// この panel の window がアクティブか（render で更新・GPUI が activation 変化で再描画するので追従する）。
     /// 完了音は**非アクティブ時のみ**鳴らす（見ている画面に音は要らない・P2）。
     window_active: bool,
@@ -802,8 +1319,8 @@ impl AgentPanel {
     fn is_visibly_active(&self) -> bool {
         self.window_active
             && self
-                .mascot_last_rendered_at
-                .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(750))
+                .last_rendered_at
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1500))
     }
 
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
@@ -811,6 +1328,7 @@ impl AgentPanel {
         let submit_on_enter = settings::get(cx).submit_on_enter;
         let composer =
             cx.new(|cx| EditorView::plain(theme.clone(), thread_color(0), submit_on_enter, cx));
+        let mascot = cx.new(|_cx| MascotView::new(64.0));
         // composer の Enter 送信要求（IME 変換中は来ない）を受けて submit する。
         cx.subscribe(&composer, |panel, _composer, event, cx| match event {
             ComposerEvent::Submit => panel.submit(cx),
@@ -929,8 +1447,14 @@ impl AgentPanel {
             })
             .detach();
         }
-        // 既定エージェント + 前回のモデル/思考量を種スレッドにも適用して「そのまま開く」を実現。
-        let mut threads = seed_threads();
+        // 通常起動は空スレッド 1 本から始める（デモ transcript を新プロジェクトごとに種付けしない）。
+        // offscreen 検証プローブはモック内容・複数タブが前提なので、その時だけ M4 由来の種を使う。
+        // 既定エージェント + 前回のモデル/思考量を適用して「そのまま開く」を実現。
+        let mut threads = if demo_threads_requested() {
+            seed_threads()
+        } else {
+            vec![Thread::empty("スレッド1", 0)]
+        };
         for thread in &mut threads {
             apply_thread_defaults(thread, cx);
         }
@@ -951,6 +1475,16 @@ impl AgentPanel {
         if std::env::var_os("SHIRUSHI_SCROLL_TOP").is_none() {
             transcript_scroll.scroll_to_bottom();
         }
+        let syntax_cache = Rc::new(RefCell::new(SyntaxHighlightCache::default()));
+        let markdown_cache = Rc::new(RefCell::new(MarkdownBlockCache::default()));
+        let styled_text_cache = Rc::new(RefCell::new(StyledTextEntityCache::default()));
+        let streaming_text = {
+            let theme = theme.clone();
+            let scroll = transcript_scroll.clone();
+            let markdown_cache = markdown_cache.clone();
+            let syntax_cache = syntax_cache.clone();
+            cx.new(move |_cx| StreamingTextView::new(theme, scroll, markdown_cache, syntax_cache))
+        };
         AgentPanel {
             threads,
             storage: None,
@@ -963,6 +1497,8 @@ impl AgentPanel {
             dest_cwd: None,
             dest_host: LocalHost::shared(),
             composer,
+            mascot,
+            streaming_text,
             renaming: None,
             transcript_scroll,
             transcript_focus: cx.focus_handle(),
@@ -971,7 +1507,9 @@ impl AgentPanel {
             thread_list_scroll: ScrollHandle::new(),
             transcript_regions: Rc::new(RefCell::new(Vec::new())),
             transcript_selection: None,
-            syntax_cache: RefCell::new(SyntaxHighlightCache::default()),
+            syntax_cache,
+            markdown_cache,
+            styled_text_cache,
             open_menu: None,
             context_files: Vec::new(),
             context_menu_open: false,
@@ -981,12 +1519,10 @@ impl AgentPanel {
             token_ticker: false,
             celebrating: false,
             celebrate_gen: 0,
-            reveal: usize::MAX, // 初期は全表示（seed を打ち直さない）
-            reveal_ticker: false,
-            mascot_tick: 0,
-            mascot_ticker: false,
-            mascot_last_rendered_at: None,
+            last_rendered_at: None,
+            second_ticker: false,
             expanded_thoughts: std::collections::HashSet::new(),
+            expanded_steps: std::collections::HashSet::new(),
             window_active: true,
             composer_height: COMPOSER_INPUT_DEFAULT,
             resizing_composer: false,
@@ -1053,6 +1589,19 @@ impl AgentPanel {
                 })
             })
             .collect::<Vec<_>>();
+        // 過去バージョンが新プロジェクトへ種付けしたデモスレッドの残骸を掃除する（2026-08-17）。
+        // 対象は「seed 名そのまま + 会話 0 件」だけ＝一度でも送信した/改名したスレッドは消さない。
+        let (seed_leftovers, restored): (Vec<_>, Vec<_>) = restored.into_iter().partition(|row| {
+            matches!(row.1.as_str(), "rope設計" | "tab色分け" | "gpui起動")
+                && storage
+                    .load_recent_turns(&row.0, 1)
+                    .is_ok_and(|turns| turns.is_empty())
+        });
+        for row in &seed_leftovers {
+            if let Err(error) = storage.delete_thread(&row.0) {
+                eprintln!("デモスレッドの掃除に失敗（次回起動で再試行）: {error:#}");
+            }
+        }
         if !restored.is_empty() {
             let mut threads = Vec::new();
             for (
@@ -1061,6 +1610,7 @@ impl AgentPanel {
                 color_index,
                 _project,
                 _branch,
+                agent,
                 model,
                 tokens_used,
                 tokens_limit,
@@ -1072,6 +1622,12 @@ impl AgentPanel {
                 thread.id = id.clone();
                 thread.created_at_ms = created_at_ms;
                 thread.last_input_at_ms = last_input_at_ms;
+                // 旧 DB 行（agent=NULL）は保存当時の Agent を知り得ないため現在の明示既定へ。
+                // 新しい行は thread 固有の Agent を復元し、Claude Code へ勝手に戻さない。
+                thread.agent = agent
+                    .filter(|agent| acp_client::AgentKind::by_label(agent).is_some())
+                    .map(SharedString::from)
+                    .unwrap_or_else(|| default_agent_name(cx));
                 if let Some(model) = model {
                     thread.model = model.into();
                 }
@@ -1119,6 +1675,7 @@ impl AgentPanel {
                     index as i64,
                     scope.as_deref().unwrap_or(""),
                     None,
+                    Some(thread.agent.as_ref()),
                     Some(thread.model.as_ref()),
                     thread.tokens_used as i64,
                     thread.tokens_max as i64,
@@ -1169,6 +1726,7 @@ impl AgentPanel {
             color_index,
             &project,
             branch.as_ref().map(|branch| branch.as_ref()),
+            Some(thread.agent.as_ref()),
             Some(thread.model.as_ref()),
             thread.tokens_used as i64,
             thread.tokens_max as i64,
@@ -1465,6 +2023,7 @@ impl AgentPanel {
         &self,
         text: SharedString,
         base_highlights: Vec<(Range<usize>, HighlightStyle)>,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let region_index = self.transcript_regions.borrow().len();
         let selection = self
@@ -1478,21 +2037,60 @@ impl AgentPanel {
                     },
                 )
             });
-        let highlights: Vec<_> = gpui::combine_highlights(base_highlights, selection).collect();
-        let mut styled = StyledText::new(text.clone());
-        if !highlights.is_empty() {
-            styled = styled.with_highlights(highlights);
-        }
-        let layout = styled.layout().clone();
-        self.transcript_regions
-            .borrow_mut()
-            .push(SelectableRegion { text, layout });
+        let mut style_hasher = DefaultHasher::new();
+        base_highlights.hash(&mut style_hasher);
+        let key = StyledTextCacheKey {
+            content: content_cache_key(text.as_ref()),
+            styles_hash: style_hasher.finish(),
+            styles_len: base_highlights.len(),
+            region: region_index,
+        };
+        let cached = {
+            let cache = self.styled_text_cache.borrow();
+            if let Some((cached_text, cached_highlights, styled)) = cache.items.get(&key) {
+                if cached_text == &text && cached_highlights == &base_highlights {
+                    Some(styled.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        let styled = cached.unwrap_or_else(|| {
+            let styled_text = text.clone();
+            let styled_highlights = base_highlights.clone();
+            let styled = cx.new(move |_cx| CachedStyledTextView {
+                text: styled_text,
+                base_highlights: styled_highlights,
+                selection: None,
+                layout: TextLayout::default(),
+            });
+            let mut cache = self.styled_text_cache.borrow_mut();
+            while cache.order.len() >= StyledTextEntityCache::CAPACITY {
+                if let Some(expired) = cache.order.pop_front() {
+                    cache.items.remove(&expired);
+                }
+            }
+            cache.order.push_back(key);
+            cache
+                .items
+                .insert(key, (text.clone(), base_highlights, styled.clone()));
+            styled
+        });
+        styled.update(cx, |styled, cx| {
+            styled.set_selection(selection, cx);
+        });
+        self.transcript_regions.borrow_mut().push(SelectableRegion {
+            text,
+            styled: styled.clone(),
+        });
         styled.into_any_element()
     }
 
     /// 装飾なしの選択可能テキスト（プレーンなエントリ用）。
-    fn selectable_text(&self, text: SharedString) -> gpui::AnyElement {
-        self.push_selectable(text, Vec::new())
+    fn selectable_text(&self, text: SharedString, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.push_selectable(text, Vec::new(), cx)
     }
 
     /// リージョンに掛かる選択 byte range（無ければ None。offset はヒットテスト由来 = char 境界保証）。
@@ -1500,7 +2098,7 @@ impl AgentPanel {
         let (start, end) = self.transcript_selection.as_ref()?.normalized();
         if region < start.region || region > end.region {
             return None;
-        }
+        };
         let from = if region == start.region {
             start.offset.min(len)
         } else {
@@ -1515,11 +2113,17 @@ impl AgentPanel {
     }
 
     /// マウス位置 → transcript 上の選択点。リージョンの隙間は直前リージョンの末尾へ丸める。
-    fn transcript_point_at(&self, position: gpui::Point<gpui::Pixels>) -> Option<TranscriptPoint> {
+    fn transcript_point_at(
+        &self,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &App,
+    ) -> Option<TranscriptPoint> {
         let regions = self.transcript_regions.borrow();
         let mut previous_end: Option<TranscriptPoint> = None;
         for (region_index, region) in regions.iter().enumerate() {
-            let bounds = region.layout.bounds();
+            let styled = region.styled.read(cx);
+            let layout = &styled.layout;
+            let bounds = layout.bounds();
             if position.y < bounds.top() {
                 // このリージョンより上 = 直前の末尾（最上部より上なら先頭）。
                 return Some(previous_end.unwrap_or(TranscriptPoint {
@@ -1528,7 +2132,7 @@ impl AgentPanel {
                 }));
             }
             if position.y <= bounds.bottom() {
-                let offset = match region.layout.index_for_position(position) {
+                let offset = match layout.index_for_position(position) {
                     Ok(index) | Err(index) => index.min(region.text.len()),
                 };
                 return Some(TranscriptPoint {
@@ -1587,7 +2191,7 @@ impl AgentPanel {
         // 出力欄自身へフォーカスを置く。以前は bubble 先の root が composer を focus し、
         // ⌘C の成否が composer 側の選択状態に左右されていた。
         self.transcript_focus.focus(window, cx);
-        let point = self.transcript_point_at(event.position);
+        let point = self.transcript_point_at(event.position, cx);
         self.transcript_selection = point.map(|point| TranscriptSelection {
             start: point,
             end: point,
@@ -1611,7 +2215,7 @@ impl AgentPanel {
         {
             return;
         }
-        let point = self.transcript_point_at(event.position);
+        let point = self.transcript_point_at(event.position, cx);
         if let (Some(selection), Some(point)) = (self.transcript_selection.as_mut(), point) {
             if selection.end != point {
                 selection.end = point;
@@ -1791,20 +2395,38 @@ impl AgentPanel {
         }
     }
 
+    /// 現在見えている位置から、ひとつ前のユーザー指示をビューポート先頭へ揃える。
+    /// ボタンを繰り返し押せば、指示単位で会話を遡れる。
+    fn jump_to_previous_user_entry(&mut self, cx: &mut Context<Self>) {
+        let top_item = self.transcript_scroll.top_item();
+        let target = self
+            .threads
+            .get(self.active)
+            .and_then(|thread| previous_user_entry_index(&thread.entries, top_item));
+        if let Some(index) = target {
+            self.transcript_scroll.scroll_to_top_of_item(index);
+        }
+        // scroll_to_top_of_item は prepaint で反映されるため、次の描画でボタンの遡り先も更新する。
+        cx.notify();
+    }
+
     fn switch_thread(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.threads.len() || index == self.active {
             return;
         }
+        self.save_active_draft(cx);
         self.renaming = None; // 別タブへ切替えたら編集中の改名は破棄する
         self.active = index;
         if let Some(thread) = self.threads.get_mut(index) {
             thread.done = None; // 見た＝herdr の Done ラッチ（完了・未確認）を解除
         }
-        self.reveal = usize::MAX; // 切替先は全文表示（打ち直さない）
         self.transcript_scroll.scroll_to_bottom(); // 切替先は最新（末尾）を見せる
         let color = self.active_color();
-        self.composer
-            .update(cx, |composer, cx| composer.set_accent(color, cx));
+        let draft = self.threads[index].draft.clone();
+        self.composer.update(cx, |composer, cx| {
+            composer.set_plain_text(&draft, cx);
+            composer.set_accent(color, cx);
+        });
         self.sync_running_registry(cx); // Done 解除をロールアップ（フッター/レール/⌘O）へ反映
         cx.notify();
     }
@@ -1815,6 +2437,7 @@ impl AgentPanel {
         if index >= self.threads.len() {
             return;
         }
+        self.save_active_draft(cx);
         let mut closed = self.threads.remove(index);
         closed.command_tx = None; // セッションは畳む（復元時に次の送信で張り直す）
         closed.running = false;
@@ -1828,10 +2451,16 @@ impl AgentPanel {
         } else if index == self.active {
             self.active = self.active.min(self.threads.len() - 1);
         }
-        self.reveal = usize::MAX; // 実効スレッドが変わるので全文表示
         let color = self.active_color();
-        self.composer
-            .update(cx, |composer, cx| composer.set_accent(color, cx));
+        let draft = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.draft.clone())
+            .unwrap_or_default();
+        self.composer.update(cx, |composer, cx| {
+            composer.set_plain_text(&draft, cx);
+            composer.set_accent(color, cx);
+        });
         cx.notify();
     }
 
@@ -1853,12 +2482,15 @@ impl AgentPanel {
     /// 直近に閉じたスレッドを復元する（⌘⇧T。会話履歴ごと戻し、末尾へ追加してアクティブに）。
     pub fn restore_closed_thread(&mut self, cx: &mut Context<Self>) {
         if let Some(thread) = self.closed_threads.pop() {
+            self.save_active_draft(cx);
             self.threads.push(thread);
             self.active = self.threads.len() - 1;
-            self.reveal = usize::MAX; // 復元スレッドは全文表示
             let color = self.active_color();
-            self.composer
-                .update(cx, |composer, cx| composer.set_accent(color, cx));
+            let draft = self.threads[self.active].draft.clone();
+            self.composer.update(cx, |composer, cx| {
+                composer.set_plain_text(&draft, cx);
+                composer.set_accent(color, cx);
+            });
             cx.notify();
         }
     }
@@ -1879,16 +2511,18 @@ impl AgentPanel {
             return Some(index);
         }
         let storage = self.storage.clone()?;
+        self.save_active_draft(cx);
         let mut thread = thread_from_storage(&storage, id, name, color_index, cx);
         thread.created_at_ms = created_at_ms;
         thread.last_input_at_ms = last_input_at_ms;
         self.threads.push(thread);
         self.active = self.threads.len() - 1;
         self.renaming = None;
-        self.reveal = usize::MAX; // 復元スレッドは全文表示
         let color = self.active_color();
-        self.composer
-            .update(cx, |composer, cx| composer.set_accent(color, cx));
+        self.composer.update(cx, |composer, cx| {
+            composer.set_plain_text("", cx);
+            composer.set_accent(color, cx);
+        });
         self.transcript_scroll.scroll_to_bottom();
         cx.notify();
         Some(self.active)
@@ -1898,6 +2532,12 @@ impl AgentPanel {
     fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.composer.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+    }
+
+    fn save_active_draft(&mut self, cx: &App) {
+        if let Some(thread) = self.threads.get_mut(self.active) {
+            thread.draft = self.composer.read(cx).plain_text();
+        }
     }
 
     /// 次のタブへ（Chrome ⌘⌥→ / ⌃Tab。末尾で先頭へ回る）。
@@ -1942,7 +2582,13 @@ impl AgentPanel {
     fn add_thread(&mut self, cx: &mut Context<Self>) {
         let index = self.threads.len();
         let mut thread = Thread::empty(format!("スレッド{}", index + 1), index);
-        apply_thread_defaults(&mut thread, cx); // 既定エージェント + 前回のモデル/思考量で開く
+        // 既定エージェント + 前回のモデル/思考量（§8 の sticky）で開く。
+        apply_thread_defaults(&mut thread, cx);
+        // 権限モードは agent 広告依存で settings に sticky を持たないため、直前まで見ていたタブから
+        // 引き継ぐ（「タブを開くたびに mode が default に戻る」を断つ）。
+        if let Some(previous) = self.threads.get(self.active) {
+            thread.permission_mode = previous.permission_mode.clone();
+        }
         self.threads.push(thread);
         self.switch_thread(index, cx);
         cx.notify();
@@ -2183,6 +2829,7 @@ impl AgentPanel {
     /// テーマを差し替える（テーマセレクタのライブプレビュー / 切替）。composer にも波及させる。
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
+        *self.styled_text_cache.borrow_mut() = StyledTextEntityCache::default();
         self.composer
             .update(cx, |composer, cx| composer.set_theme(theme, cx));
         cx.notify();
@@ -2254,6 +2901,11 @@ impl AgentPanel {
     }
 
     fn toggle_menu(&mut self, selector: Selector, cx: &mut Context<Self>) {
+        if selector == Selector::Agent && self.agent_selector_locked() {
+            self.open_menu = None;
+            cx.notify();
+            return;
+        }
         self.open_menu = if self.open_menu == Some(selector) {
             None
         } else {
@@ -2262,9 +2914,29 @@ impl AgentPanel {
         cx.notify();
     }
 
+    /// Agent は会話の送り先そのもの。1 発でも会話した後に差し替えると、同じ transcript に
+    /// 別 AI の文脈が混ざり、復元時にも「このスレッドは誰か」を一意にできないため固定する。
+    fn agent_selector_locked(&self) -> bool {
+        self.threads.get(self.active).is_some_and(|thread| {
+            !thread.entries.is_empty() || thread.command_tx.is_some() || thread.running
+        })
+    }
+
     /// セレクタのドロップダウンに出す選択肢。エージェントが広告した実選択肢（モード/モデル/effort）が
     /// あればそれを、無ければ静的な既定ラベルを返す。
     fn selector_options(&self, selector: Selector) -> Vec<SharedString> {
+        if selector == Selector::Agent {
+            let current = self.selector_value(Selector::Agent);
+            let mut options: Vec<SharedString> = acp_client::authenticated_agent_labels()
+                .into_iter()
+                .map(SharedString::from)
+                .collect();
+            // 明示既定/復元値は、起動直後の背景認証確認より強い。現在値を選択肢から消さない。
+            if !options.contains(&current) {
+                options.insert(0, current);
+            }
+            return options;
+        }
         let advertised = self
             .threads
             .get(self.active)
@@ -2310,6 +2982,11 @@ impl AgentPanel {
     /// 設定なので、選んだ値を `default_model` / `default_effort` へ書き戻し、次の新規スレッドが
     /// それで開く。既定を「動かさない」ことと「覚える」ことの線をここで引いている。
     fn select_option(&mut self, selector: Selector, value: SharedString, cx: &mut Context<Self>) {
+        if selector == Selector::Agent && self.agent_selector_locked() {
+            self.open_menu = None;
+            cx.notify();
+            return;
+        }
         match selector {
             Selector::Model => settings::set_user_value(
                 cx,
@@ -2326,10 +3003,9 @@ impl AgentPanel {
         if let Some(thread) = self.threads.get_mut(self.active) {
             match selector {
                 Selector::Agent => {
-                    // このスレッドのエージェントだけ差し替え（次の送信で新セッションを張り直す）。
-                    // 以前はここで default_agent を巻き添え保存していたが、ドリフトの原因なので廃止。
+                    // 未送信スレッドのエージェントだけ差し替える。会話開始後は上の guard で固定。
+                    // default_agent は巻き添え保存しない（グローバル既定のドリフト防止）。
                     thread.agent = value.clone();
-                    thread.command_tx = None;
                 }
                 Selector::Mode => {
                     thread.permission_mode = value.clone();
@@ -2406,15 +3082,19 @@ impl AgentPanel {
         let theme = self.theme.clone();
         let value = self.selector_value(selector);
         let is_open = self.open_menu == Some(selector);
+        let locked = selector == Selector::Agent && self.agent_selector_locked();
         let accent = self.active_color();
-        let (id, tip): (&'static str, String) = match selector {
+        let (id, mut tip): (&'static str, String) = match selector {
             Selector::Agent => ("pill-agent", i18n::t!("agent.pill_agent")),
             Selector::Mode => ("pill-mode", i18n::t!("agent.pill_mode")),
             Selector::Model => ("pill-model", i18n::t!("agent.pill_model")),
             Selector::Effort => ("pill-effort", i18n::t!("agent.pill_effort")),
         };
+        if locked {
+            tip = i18n::t!("agent.pill_agent_locked");
+        }
         let label_color = if is_open { accent } else { theme.fg1 };
-        div()
+        let mut pill = div()
             .id(id)
             .relative() // ドロップダウンをこのピル基準で絶対配置する（位置ズレを防ぐ）
             .flex()
@@ -2425,25 +3105,36 @@ impl AgentPanel {
             .rounded(px(4.))
             .text_size(px(11.))
             .text_color(label_color)
-            .cursor_pointer()
-            // 塗りは hover と open の時だけ薄く。テキストは hover で少し明るく。
-            .hover(|style| {
-                style
-                    .bg(theme.bg2)
-                    .text_color(if is_open { accent } else { theme.fg0 })
-            })
             .when(is_open, |element| element.bg(theme.bg2))
             .child(value)
-            .child(div().text_size(px(8.)).text_color(theme.fg2).child("▾"))
-            .tooltip(Tooltip::text(tip, theme.clone()))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| this.toggle_menu(selector, cx)),
-            )
-            // 開いている時、このピルの真上にドロップダウンを出す（ピル基準なのでズレない）。
-            .when(is_open, |element| {
-                element.child(self.render_selector_menu(selector, cx))
-            })
+            .tooltip(Tooltip::text(tip, theme.clone()));
+        if !locked {
+            pill = pill
+                .cursor_pointer()
+                // 塗りは hover と open の時だけ薄く。テキストは hover で少し明るく。
+                .hover(|style| {
+                    style
+                        .bg(theme.bg2)
+                        .text_color(if is_open { accent } else { theme.fg0 })
+                })
+                .child(div().text_size(px(8.)).text_color(theme.fg2).child("▾"))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        // menu の mouse-down-out が先に閉じても、開いていたピルの再 open を防ぐ。
+                        if is_open {
+                            this.open_menu = None;
+                            cx.notify();
+                        } else {
+                            this.toggle_menu(selector, cx);
+                        }
+                    }),
+                );
+        }
+        // 開いている時、このピルの真上にドロップダウンを出す（ピル基準なのでズレない）。
+        pill.when(is_open, |element| {
+            element.child(self.render_selector_menu(selector, cx))
+        })
     }
 
     /// 開いている選択ピルのドロップダウン（アクティブスレッドに値を設定）。ピルの子として絶対配置し、
@@ -2472,6 +3163,11 @@ impl AgentPanel {
             )
             .blur_radius(px(16.))])
             .p(px(4.))
+            // タブ、transcript、別のピル、パネル外を含め、どこか他を押したら閉じる。
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.open_menu = None;
+                cx.notify();
+            }))
             .children(
                 options
                     .into_iter()
@@ -2537,6 +3233,9 @@ impl AgentPanel {
             return;
         }
         self.composer.update(cx, |composer, cx| composer.clear(cx));
+        if let Some(thread) = self.threads.get_mut(self.active) {
+            thread.draft.clear();
+        }
         self.send_prompt_text(prompt, cx);
     }
 
@@ -2811,9 +3510,10 @@ impl AgentPanel {
                 if size > 0 {
                     thread.tokens_max = size.min(u32::MAX as u64) as u32;
                 }
-                // 生成中は実値へ直接同期する。ストリーム、マスコット、数値補間を同時に走らせず、
-                // 補間は生成後に値が訂正された場合だけの短い演出に限定する。
-                if !thread.running && thread_index == active && panel_visibly_active {
+                // アクティブ表示中のスレッドは生成中もカウントアップ補間で寄せる（UsageUpdate が
+                // まばらでも数字が滑らかに増える）。非表示スレッド・非アクティブ窓は演出不要なので
+                // 即時同期し idle 0% を保つ。
+                if thread_index == active && panel_visibly_active {
                     start_token_ticker = true;
                 } else {
                     thread.tokens_shown = thread.tokens_used as f32;
@@ -2824,13 +3524,38 @@ impl AgentPanel {
                     .into_iter()
                     .map(|(id, name)| (SharedString::from(id), SharedString::from(name)))
                     .collect();
-                let current = SharedString::from(current);
-                if let Some((_, name)) =
-                    thread.available_modes.iter().find(|(id, _)| *id == current)
-                {
-                    thread.permission_mode = name.clone();
+                let advertised_current = SharedString::from(current);
+                // Configs と同じく、スレッドが望むモード（前タブから引き継いだ `permission_mode`）を正とする。
+                // 広告に在れば `set_mode` でエージェントを合わせ、無ければ広告 current を採用する。
+                let desired = thread.permission_mode.clone();
+                let desired_id = thread
+                    .available_modes
+                    .iter()
+                    .find(|(_, name)| *name == desired)
+                    .map(|(id, _)| id.clone());
+                match desired_id {
+                    Some(mode_id) => {
+                        if mode_id != advertised_current {
+                            if let Some(command_tx) = &thread.command_tx {
+                                command_tx
+                                    .unbounded_send(SessionCommand::SetMode(mode_id.to_string()))
+                                    .ok();
+                            }
+                        }
+                        thread.current_mode_id = mode_id; // permission_mode（表示名）は desired のまま
+                    }
+                    None => {
+                        // desired を提供しないエージェント → 広告 current を採用（フォールバック）。
+                        if let Some((_, name)) = thread
+                            .available_modes
+                            .iter()
+                            .find(|(id, _)| *id == advertised_current)
+                        {
+                            thread.permission_mode = name.clone();
+                        }
+                        thread.current_mode_id = advertised_current;
+                    }
                 }
-                thread.current_mode_id = current;
             }
             AgentEvent::ModeChanged(id) => {
                 let id = SharedString::from(id);
@@ -2840,20 +3565,54 @@ impl AgentPanel {
                 thread.current_mode_id = id;
             }
             AgentEvent::Configs(configs) => {
-                // 現在値の表示名を Model / Effort ピルへ反映（mode は modes() 側で扱う）。
-                for config in &configs {
-                    let current_name = config
-                        .choices
+                // 新セッションは**自分の既定**を current として広告してくる。これを鵜呑みにすると
+                // apply_thread_defaults が載せた sticky（前回選んだモデル/思考量）が毎回上書きされる＝
+                // 「タブを開くたびに設定が戻る」の正体。スレッド側の選択を正とし、広告に在れば
+                // `set_config` でエージェントを合わせ、**無いときだけ**広告 current を採用する。
+                thread.configs = configs;
+                for category in [ConfigCategory::Model, ConfigCategory::ThoughtLevel] {
+                    let desired = match category {
+                        ConfigCategory::Model => thread.model.clone(),
+                        ConfigCategory::ThoughtLevel => thread.effort.clone(),
+                        ConfigCategory::Other => continue,
+                    };
+                    // 広告に desired があるか / エージェントの current 表示名は何か、を借用を残さず取り出す。
+                    let Some((desired_offered, current_name)) = thread
+                        .configs
                         .iter()
-                        .find(|(id, _)| *id == config.current)
-                        .map(|(_, name)| SharedString::from(name.clone()));
-                    match (config.category, current_name) {
-                        (ConfigCategory::Model, Some(name)) => thread.model = name,
-                        (ConfigCategory::ThoughtLevel, Some(name)) => thread.effort = name,
-                        _ => {}
+                        .find(|config| config.category == category)
+                        .map(|config| {
+                            let offered = config
+                                .choices
+                                .iter()
+                                .any(|(_, name)| name.as_str() == desired.as_ref());
+                            let current_name = config
+                                .choices
+                                .iter()
+                                .find(|(id, _)| *id == config.current)
+                                .map(|(_, name)| SharedString::from(name.clone()));
+                            (offered, current_name)
+                        })
+                    else {
+                        continue;
+                    };
+                    if desired_offered {
+                        // エージェントの current がまだ違えば合わせに行く（一致していれば無送信）。
+                        let already = current_name
+                            .as_ref()
+                            .is_some_and(|name| name.as_ref() == desired.as_ref());
+                        if !already {
+                            send_set_config(thread, category, &desired);
+                        }
+                    } else if let Some(name) = current_name {
+                        // このエージェントが提供しない選択 → 広告 current を採用（フォールバック）。
+                        match category {
+                            ConfigCategory::Model => thread.model = name,
+                            ConfigCategory::ThoughtLevel => thread.effort = name,
+                            ConfigCategory::Other => {}
+                        }
                     }
                 }
-                thread.configs = configs;
             }
             AgentEvent::Plan(items) => {
                 // プランは毎回全量で届く（ACP 仕様）ので**置換**。常設チェックリストが追従する。
@@ -3003,10 +3762,6 @@ impl AgentPanel {
         if let Some((files, color)) = files_touched {
             cx.emit(PanelEvent::FilesTouched { files, color });
         }
-        if stream_updated && !animate_visible_stream {
-            // 非アクティブ窓・非表示スレッドではタイプライタを回さず、次に見た時は最新全文を出す。
-            self.reveal = usize::MAX;
-        }
         if turn_finished {
             // 完了音（設定 on・成功時のみ）。**window 非アクティブ時のみ**鳴らす（見ている画面に
             // 音は要らない・裏の窓/他アプリ作業中の完了に気づくための音・P2）。ミュート中スレッドは鳴らさない。
@@ -3067,99 +3822,64 @@ impl AgentPanel {
         if celebrate_now {
             self.start_celebrate(cx);
         }
-        if reveal_reset {
-            self.reveal = 0;
-        }
-        if ensure_reveal {
-            self.follow_transcript_if_at_bottom();
-            self.ensure_reveal_ticker(cx);
+        if stream_updated && thread_index == active {
+            self.sync_streaming_text(reveal_reset, ensure_reveal, cx);
+            if ensure_reveal {
+                self.follow_transcript_if_at_bottom();
+            }
         }
         cx.notify();
     }
 
-    /// ストリーミング平滑化のタイプライタ。アクティブスレッド末尾（Agent/Thinking）の目標文字数へ
-    /// `reveal` を 25fps で一定速度に寄せる。文字表示に 60fps は不要なので、入力とスクロールへ
-    /// メインスレッドを譲る。ターンが終わり全文字出し切ったら停止＝idle 0%。
-    fn ensure_reveal_ticker(&mut self, cx: &mut Context<Self>) {
-        if self.reveal_ticker {
+    fn sync_streaming_text(&self, reset: bool, animate: bool, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get(self.active) else {
             return;
-        }
-        self.reveal_ticker = true;
-        cx.spawn(async move |panel, cx| {
-            loop {
-                let done = panel
-                    .update(cx, |panel, cx| {
-                        if !panel.is_visibly_active() {
-                            // 見ていない間は補間を続けず、次に開いた時は最新全文を表示する。
-                            panel.reveal = usize::MAX;
-                            return true;
-                        }
-                        let Some(thread) = panel.threads.get(panel.active) else {
-                            return true;
-                        };
-                        let running = thread.running;
-                        let target = match thread.entries.last() {
-                            Some(Entry::Agent(text)) | Some(Entry::Thinking(text)) => {
-                                text.chars().count()
-                            }
-                            // 末尾が非ストリーム（Step/User）なら出し切り扱い。
-                            _ => panel.reveal.min(usize::MAX),
-                        };
-                        if panel.reveal < target {
-                            // 残りに比例した歩幅＋最低速で、束で来ても滑らかに追従。
-                            let remaining = target - panel.reveal;
-                            let step = (remaining / 6).max(2);
-                            panel.reveal = panel.reveal.saturating_add(step).min(target);
-                            cx.notify();
-                        }
-                        // ターン継続中は回し続け、終了かつ出し切ったら停止。
-                        !running && panel.reveal >= target
-                    })
-                    .unwrap_or(true);
-                if done {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(40))
-                    .await;
-            }
-            panel
-                .update(cx, |panel, _cx| {
-                    panel.reveal_ticker = false;
-                })
-                .ok();
-        })
-        .detach();
+        };
+        let Some((text, kind)) = thread.entries.last().and_then(|entry| match entry {
+            Entry::Agent(text) => Some((text.clone(), StreamingTextKind::Agent)),
+            Entry::Thinking(text) => Some((text.clone(), StreamingTextKind::Thinking)),
+            _ => None,
+        }) else {
+            return;
+        };
+        let kind_tag = match kind {
+            StreamingTextKind::Agent => "agent",
+            StreamingTextKind::Thinking => "thinking",
+        };
+        let key = SharedString::from(format!(
+            "{}:{}:{kind_tag}",
+            thread.id,
+            thread.entries.len().saturating_sub(1)
+        ));
+        let theme = self.theme.clone();
+        self.streaming_text.update(cx, |body, cx| {
+            body.set_content(key, text, kind, animate, reset, theme, cx);
+        });
     }
 
-    /// マスコットの共有 10fps 時計。全 motion はこの 1 本だけを使い、実際にコマが変わる時だけ
-    /// `notify` する。非アクティブ窓、または View tree から外れて render されなくなった panel は停止する。
-    fn ensure_mascot_ticker(&mut self, cx: &mut Context<Self>) {
-        if self.mascot_ticker || !self.window_active {
+    fn ensure_second_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.second_ticker || !self.active_thread_running() || !self.window_active {
             return;
         }
-        self.mascot_ticker = true;
+        self.second_ticker = true;
         cx.spawn(async move |panel, cx| loop {
-            let next_delay = panel.update(cx, |panel, cx| {
-                let visible = panel.is_visibly_active();
-                if !visible {
-                    panel.mascot_ticker = false;
-                    return None;
-                }
-                panel.mascot_tick = panel.mascot_tick.wrapping_add(1);
-                cx.notify();
-                Some(std::time::Duration::from_millis(
-                    if matches!(panel.current_mascot_motion(), MascotMotion::Idle) {
-                        200
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let keep_running = panel
+                .update(cx, |panel, cx| {
+                    let keep_running = panel.is_visibly_active() && panel.active_thread_running();
+                    if keep_running {
+                        cx.notify();
                     } else {
-                        100
-                    },
-                ))
-            });
-            let Ok(Some(delay)) = next_delay else {
+                        panel.second_ticker = false;
+                    }
+                    keep_running
+                })
+                .unwrap_or(false);
+            if !keep_running {
                 break;
-            };
-            cx.background_executor().timer(delay).await;
+            }
         })
         .detach();
     }
@@ -3186,9 +3906,9 @@ impl AgentPanel {
         .detach();
     }
 
-    /// トークン表示のカウントアップ補間を回す（多重起動しない）。
-    /// 生成完了後に値が訂正された場合だけ、`tokens_shown` を `tokens_used` へ 20fps で短く寄せる。
-    /// 追いついたら停止する（生成中はこの ticker を使わず即時同期）。
+    /// トークン表示のカウントアップ補間を回す（多重起動しない）。アクティブ表示中は生成中も含め、
+    /// `tokens_shown` を `tokens_used` へ 20fps で寄せる（UsageUpdate がまばらでも滑らかに増える）。
+    /// 追いついたら停止し、次の UsageUpdate で再起動する（非表示・非アクティブ時は即時同期）。
     fn ensure_token_ticker(&mut self, cx: &mut Context<Self>) {
         if self.token_ticker {
             return;
@@ -3985,11 +4705,14 @@ impl AgentPanel {
         // マスコットの状態: 承認待ち→祈る（15s 以上待たされたら頬に手であわあわへ段階変化）/ 考え中→考える /
         // 生成中→打鍵 / 直近成功→バンザイ / それ以外→低頻度の居眠り。
         let motion = self.current_mascot_motion();
+        self.mascot.update(cx, |mascot, cx| {
+            mascot.set_state(motion, active, cx);
+        });
         // 左のステータス行（スカスカ対策＋「何が起きてるか」）: 状態テキスト＋実行中は経過秒。
         let elapsed = running
             .then(|| thread.and_then(|thread| thread.turn_started_at))
             .flatten()
-            .map(|start| start.elapsed().as_secs_f32());
+            .map(|start| start.elapsed().as_secs());
         let (status_text, status_dim) = if blocked_since.is_some() {
             (i18n::t!("agent.state_blocked"), false)
         } else if running {
@@ -4021,7 +4744,7 @@ impl AgentPanel {
                         .text_size(px(10.5))
                         .text_color(theme.fg2)
                         .font_family("Guguru Sans Code")
-                        .child(format!("{secs:.1}s")),
+                        .child(format!("{secs}s")),
                 )
             });
 
@@ -4041,7 +4764,7 @@ impl AgentPanel {
             .child(div().flex_1())
             // ローディング・マスコット（考=考える/生成=打鍵/成功=バンザイ/待機=うとうと）。
             // 非アクティブ時は静止＝再描画ゼロ（見てない間は 0%）。トークン真横に。
-            .child(render_mascot(motion, active, self.mascot_tick))
+            .child(self.mascot.clone())
             // トークンは常時可視（Zed+ACP で見えなかった痛点）
             .child(
                 div()
@@ -4162,10 +4885,143 @@ impl AgentPanel {
         Some(list.into_any_element())
     }
 
+    /// 「最新へ」ボタン（transcript を遡って読んでいる間だけ右下に浮かべる・出現時フェード＋せり上がり）。
+    /// エージェントがどんどん進んで下に新着が溜まった時に、1 タップで最下部（最新）へ戻す。底に居る時は出さない。
+    /// 判定は `follow_transcript_if_at_bottom` と同系（offset.y は下ほど負・GPUI）。閾はヒステリシスのため広め。
+    fn render_jump_to_latest(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        // 底から十分離れている閾（follow の 60px より広め＝ヒステリシスで出没のチラつきを防ぐ）。
+        let scrolled_up_threshold = px(140.);
+        let offset = self.transcript_scroll.offset();
+        let max = self.transcript_scroll.max_offset();
+        // スクロール可能な中身があり、底から十分離れている時だけ出す。
+        let scrolled_up = max.y > px(0.) && offset.y > -(max.y - scrolled_up_threshold);
+        if !scrolled_up {
+            return None;
+        }
+        let theme = self.theme.clone();
+        Some(
+            div()
+                .absolute()
+                .bottom(px(12.))
+                .right(px(14.))
+                .child(
+                    // 色は識別に集約する規律に従い、ボタン自体は中立色（bg2/border/fg1）。ホバーで少し持ち上げる。
+                    div()
+                        .id("jump-to-latest")
+                        .group("jump-to-latest")
+                        .size(px(30.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme.bg2)
+                        .border_1()
+                        .border_color(theme.border)
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(3.),
+                            gpui::hsla(0., 0., 0., 0.35),
+                        )
+                        .blur_radius(px(10.))])
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3))
+                        .child(
+                            svg()
+                                .path("icons/arrow-down-to-line.svg")
+                                .size(px(15.))
+                                // svg は親の text_color を継承しない → 直接指定 + group_hover で明るく。
+                                .text_color(theme.fg1)
+                                .group_hover("jump-to-latest", |style| style.text_color(theme.fg0)),
+                        )
+                        .tooltip(Tooltip::text(
+                            i18n::t!("agent.jump_to_latest"),
+                            theme.clone(),
+                        ))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| {
+                                cx.stop_propagation(); // transcript のドラッグ選択開始と二重発火しない
+                                this.transcript_scroll.scroll_to_bottom();
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .with_animation(
+                    "jump-to-latest-in",
+                    Animation::new(std::time::Duration::from_millis(140))
+                        .with_easing(gpui::ease_out_quint()),
+                    |element, delta| {
+                        element
+                            .opacity(delta)
+                            .bottom(px(12.0 - 6.0 * (1.0 - delta)))
+                    },
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 「前の指示へ」ボタン。長いツール出力や回答を、ユーザー発話単位で一気に遡る。
+    fn render_jump_to_previous_user(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let entries = &self.threads.get(self.active)?.entries;
+        let target = previous_user_entry_index(entries, self.transcript_scroll.top_item());
+        target?;
+
+        let offset = self.transcript_scroll.offset();
+        let max = self.transcript_scroll.max_offset();
+        let scrolled_up = max.y > px(0.) && offset.y > -(max.y - px(140.));
+        let right = if scrolled_up { 50.0 } else { 14.0 };
+        let theme = self.theme.clone();
+        Some(
+            div()
+                .absolute()
+                .bottom(px(12.))
+                .right(px(right))
+                .child(
+                    div()
+                        .id("jump-to-previous-user")
+                        .size(px(30.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme.bg2)
+                        .border_1()
+                        .border_color(theme.border)
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(3.),
+                            gpui::hsla(0., 0., 0., 0.35),
+                        )
+                        .blur_radius(px(10.))])
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.fg1)
+                        .child("↑")
+                        .tooltip(Tooltip::text(
+                            i18n::t!("agent.jump_to_previous_user"),
+                            theme,
+                        ))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| {
+                                cx.stop_propagation();
+                                this.jump_to_previous_user_entry(cx);
+                            }),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_transcript(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
         let entries = self.threads.get(self.active).map(|thread| &thread.entries);
+        if self.active_thread_running() {
+            self.sync_streaming_text(false, self.window_active, cx);
+        }
         // 選択リージョンはフレーム毎に作り直す（このあと render_entry 経由で push される）。
         self.transcript_regions.borrow_mut().clear();
         let mut list = div()
@@ -4182,6 +5038,9 @@ impl AgentPanel {
             // ホイール/トラックパッドで遡れる（M13 UX）。ストリーミング追従は on_event 側。
             .overflow_y_scroll()
             .track_scroll(&self.transcript_scroll)
+            // 手動スクロールで「最新へ」ボタンの出没を更新する（実行中は on_event が notify する）。
+            // scroll はそのまま起きる（stop_propagation しない）。
+            .on_scroll_wheel(cx.listener(|_, _: &gpui::ScrollWheelEvent, _, cx| cx.notify()))
             // ドラッグ選択（M13）: down で開始・move で拡張・up で確定（クリックのみは解除）。
             .on_mouse_down(
                 MouseButton::Left,
@@ -4193,12 +5052,10 @@ impl AgentPanel {
         if let Some(entries) = entries {
             let count = entries.len();
             for (index, entry) in entries.iter().enumerate() {
-                // 末尾エントリだけタイプライタ表示（reveal 文字まで）。他は全文。
-                let reveal = if index + 1 == count {
-                    Some(self.reveal)
-                } else {
-                    None
-                };
+                // 実行中の末尾本文だけ独立 Entity。25fps tick で親 transcript は再構築しない。
+                let live_stream = index + 1 == count
+                    && self.active_thread_running()
+                    && matches!(entry, Entry::Agent(_) | Entry::Thinking(_));
                 // 出現時に一度だけ fade in（id 固定なのでストリーミングの再描画では再発火しない）。
                 let copy_button = div()
                     .id(("entry-copy", index))
@@ -4237,13 +5094,36 @@ impl AgentPanel {
                     div()
                         .relative()
                         .group("transcript-entry")
-                        .child(self.render_entry(index, entry, color, reveal, cx))
+                        .child(self.render_entry(index, entry, color, live_stream, cx))
                         .child(copy_button)
                         .with_animation(
                             ("transcript-entry", index),
                             Animation::new(std::time::Duration::from_millis(200)),
                             |element, delta| element.opacity(delta),
                         ),
+                );
+            }
+            // 実行中で末尾がまだ本文/思考をストリームしていない時（送信直後・ツール実行中・思考の
+            // 折り畳み中）は、視線の中心に「回るスピナー + いま何をしているか」を出して無反応を消す。
+            // 末尾が Agent/Thinking をストリーム中なら streaming_text が動いているので二重に出さない。
+            let tail_is_streaming = entries
+                .last()
+                .is_some_and(|entry| matches!(entry, Entry::Agent(_) | Entry::Thinking(_)));
+            if self.active_thread_running() && !tail_is_streaming {
+                let digest = self
+                    .threads
+                    .get(self.active)
+                    .and_then(|thread| thread.live_digest())
+                    .unwrap_or_else(|| SharedString::from(i18n::t!("agent.running_thinking")));
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(12.5))
+                        .text_color(theme.fg2)
+                        .child(working_spinner("transcript-working", 8.0, color))
+                        .child(digest),
                 );
             }
         } else {
@@ -4258,22 +5138,12 @@ impl AgentPanel {
         list
     }
 
-    /// タイプライタ用に文字列を `reveal` 文字で切る（`None` または末尾以外は全文）。
-    fn revealed(text: &SharedString, reveal: Option<usize>) -> SharedString {
-        match reveal {
-            Some(limit) if limit < text.chars().count() => {
-                text.chars().take(limit).collect::<String>().into()
-            }
-            _ => text.clone(),
-        }
-    }
-
     fn render_entry(
         &self,
         index: usize,
         entry: &Entry,
         color: Hsla,
-        reveal: Option<usize>,
+        live_stream: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
@@ -4334,16 +5204,17 @@ impl AgentPanel {
                         .min_w_0() // flex 子の折り返しを許可（はみ出し防止）
                         .px(px(11.))
                         .py(px(8.))
-                        .text_size(px(12.5))
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.fg0)
-                        .child(self.selectable_text(text.clone())),
+                        .child(self.selectable_text(text.clone(), cx)),
                 )
                 .into_any_element(),
             // 思考ブロック（Claude Code 風・印っぽく）: 既定は折り畳み（✳ Thought + 1 行プレビュー）で
             // クリックでいつでも全文展開。実行中の最終ブロックは自動展開し、状態文とマスコットで
             // 「動いている」を示す。ここでは独立した無限 pulse を増やさない。
             Entry::Thinking(text) => {
-                let live = reveal.is_some() && self.active_thread_running();
+                let live = live_stream;
                 let expanded = live || self.is_thought_expanded(index);
                 let star = if live {
                     div()
@@ -4383,6 +5254,7 @@ impl AgentPanel {
                         }),
                     );
                 let mut column = div()
+                    .flex_1()
                     .flex()
                     .flex_col()
                     .min_w_0()
@@ -4391,16 +5263,16 @@ impl AgentPanel {
                     .child(header);
                 if expanded {
                     let body = if live {
-                        Self::revealed(text, reveal)
+                        self.streaming_text.clone().into_any_element()
                     } else {
-                        text.clone()
+                        self.push_selectable(text.clone(), Vec::new(), cx)
                     };
                     column = column.child(
                         div()
                             .text_size(px(11.5))
                             .italic()
                             .text_color(theme.fg2)
-                            .child(self.push_selectable(body, Vec::new())),
+                            .child(body),
                     );
                 } else {
                     column = column.child(
@@ -4428,49 +5300,134 @@ impl AgentPanel {
                 ..
             } => {
                 let result_language = infer_language_from_tool_argument(args.as_ref());
-                let mut body = div().flex().flex_col().min_w_0().gap(px(4.)).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.fg0)
-                                .child(self.selectable_text(tool.clone())),
-                        )
-                        .when(!args.is_empty(), |element| {
-                            element.child(
-                                div()
-                                    .font_family("Guguru Sans Code")
-                                    .text_size(px(11.))
-                                    .text_color(theme.fg2)
-                                    .child(self.selectable_text(args.clone())),
+                // Claude の Write/Edit はタイトル自体にパスを載せる（`Write /very/long/path`）ので、
+                // 同じパスを args としてもう一度出さない（同じ文字列が 1 行に 2 回並ぶのを防ぐ）。
+                let show_args = !args.is_empty() && !tool.contains(args.as_ref());
+                // ツール名もパスも長さの上限が無い（エージェント任せ）。**必ずパネル内に収める**ため、
+                // 「残りを取って折返す」役を 1 行にちょうど 1 つだけ置く（= `flex_1` + `min_w_0`。
+                // モジュール冒頭「伸縮テキストの作法」）。短いツール名の時だけパスをその直後に並べる。
+                let inline_args = show_args && tool.chars().count() <= STEP_TITLE_INLINE_MAX_CHARS;
+                let title = if inline_args {
+                    div().flex_none() // 自然幅＝パスがタイトルの直後に来る
+                } else {
+                    div().flex_1().min_w_0() // 残り全幅を取って折返す
+                };
+                let mut body = div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .flex()
+                            // baseline 揃えだとパスが折返した時にツール名が 1 行ぶん沈む（⏺ とズレる）。
+                            .items_start()
+                            .gap(px(6.))
+                            .child(
+                                title
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.fg0)
+                                    .child(self.selectable_text(tool.clone(), cx)),
                             )
-                        }),
-                );
+                            .when(inline_args, |element| {
+                                element.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .font_family("Guguru Sans Code")
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(self.selectable_text(args.clone(), cx)),
+                                )
+                            }),
+                    );
+                // 長いツール名 + 別のパス＝1 行に収まらない。パスは次の行へ落とす（横に切らない）。
+                if show_args && !inline_args {
+                    body = body.child(
+                        div().flex().child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .font_family("Guguru Sans Code")
+                                .text_size(px(11.))
+                                .text_color(theme.fg2)
+                                .child(self.selectable_text(args.clone(), cx)),
+                        ),
+                    );
+                }
                 // Edit 系: before/after 差分を transcript にインライン表示（権限カードと同じ描画を再利用）。
                 for diff in diffs {
                     body = body.child(render_diff(diff, &theme));
                 }
-                // Bash 等: 出力を ⎿ 行で（cap_output で末尾 24 行に丸め済み）。
+                // Bash/Read 等: 出力を ⎿ 行で（cap_output で末尾 24 行に丸め済み）。長い出力は
+                // 既定で折り畳み、要約行クリックで全文展開する（コード読み込みの結果で transcript が
+                // 流れないように・Thinking と同じ流儀）。
                 if let Some(result) = result {
-                    body = body.child(
-                        div()
+                    let line_count = result.lines().count().max(1);
+                    let collapsible = line_count > STEP_COLLAPSE_MIN_LINES
+                        || result.len() > STEP_COLLAPSE_MIN_BYTES;
+                    let expanded = self.is_step_expanded(index);
+                    // result 全体を 1 region に保ち、複数行コピー時の改行を原文どおりにする。
+                    let mut row = div()
+                        .flex()
+                        .items_start()
+                        .gap(px(4.))
+                        .pt(px(3.))
+                        .font_family("Guguru Sans Code")
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .child(div().flex_none().child("⎿"));
+                    if collapsible {
+                        let header = div()
+                            .id(("step-result", index))
                             .flex()
-                            .items_start()
+                            .items_center()
                             .gap(px(4.))
-                            .pt(px(3.))
-                            .font_family("Guguru Sans Code")
-                            .text_size(px(11.))
-                            .text_color(theme.fg2)
-                            .child(div().flex_none().child("⎿"))
-                            // result 全体を 1 region に保ち、複数行コピー時の改行を原文どおりにする。
-                            .child(div().flex_1().min_w_0().child(self.push_selectable(
+                            .cursor_pointer()
+                            .child(div().flex_none().text_size(px(8.)).child(if expanded {
+                                "▾"
+                            } else {
+                                "▸"
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(step_result_summary(result.as_ref(), line_count)),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_step(index, cx);
+                                }),
+                            );
+                        let mut column = div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .gap(px(3.))
+                            .child(header);
+                        if expanded {
+                            column = column.child(div().min_w_0().child(self.push_selectable(
                                 result.clone(),
                                 self.syntax_highlights(result_language, result.as_ref()),
-                            ))),
-                    );
+                                cx,
+                            )));
+                        }
+                        row = row.child(column);
+                    } else {
+                        row = row.child(div().flex_1().min_w_0().child(self.push_selectable(
+                            result.clone(),
+                            self.syntax_highlights(result_language, result.as_ref()),
+                            cx,
+                        )));
+                    }
+                    body = body.child(row);
                 }
                 div()
                     .flex()
@@ -4480,8 +5437,9 @@ impl AgentPanel {
                     .child(body)
                     .into_any_element()
             }
-            // エージェント本文は markdown を解析してリッチ描画（VSCode Claude Code 拡張踏襲）。
-            // タイプライタ（reveal）は解析前に文字数で切る（部分 markdown も pulldown-cmark は許容）。
+            // 実行中だけ本文 Entity を差し込み、その25fps時計では親 transcript を触らない。
+            // 完了後は通常の選択可能 Markdown 表示へ戻る。
+            Entry::Agent(text) if live_stream => self.streaming_text.clone().into_any_element(),
             Entry::Agent(text) => div()
                 .flex()
                 .flex_col()
@@ -4489,7 +5447,7 @@ impl AgentPanel {
                 .gap(px(6.))
                 .text_size(px(12.5))
                 .text_color(theme.fg0)
-                .children(self.render_markdown(&Self::revealed(text, reveal)))
+                .children(self.render_markdown(text, cx))
                 .into_any_element(),
         }
     }
@@ -4497,10 +5455,12 @@ impl AgentPanel {
     /// markdown テキストをブロック列（GPUI 要素）へ描く。各ブロック = 1 選択リージョン（M13）で、
     /// 装飾は `combine_highlights` で選択背景と安全に合成される。インラインコードは mono 不可
     /// （`HighlightStyle` に font-family が無い）ため syn-mac 色 + 薄背景で表す。表・引用装飾は後続。
-    fn render_markdown(&self, text: &str) -> Vec<gpui::AnyElement> {
+    fn render_markdown(&self, text: &str, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
-        markdown::parse(text)
-            .into_iter()
+        let blocks = self.markdown_cache.borrow_mut().parse(text);
+        blocks
+            .iter()
+            .cloned()
             .map(|block| match block {
                 markdown::Block::Heading { level, text, spans } => {
                     let size = match level {
@@ -4514,11 +5474,11 @@ impl AgentPanel {
                         .text_size(px(size))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.fg0)
-                        .child(self.push_selectable(text.into(), self.md_highlights(&spans)))
+                        .child(self.push_selectable(text.into(), self.md_highlights(&spans), cx))
                         .into_any_element()
                 }
                 markdown::Block::Paragraph { text, spans } => div()
-                    .child(self.push_selectable(text.into(), self.md_highlights(&spans)))
+                    .child(self.push_selectable(text.into(), self.md_highlights(&spans), cx))
                     .into_any_element(),
                 markdown::Block::Code { lang, text } => {
                     let language = lang.as_deref().and_then(lang::LanguageId::from_name);
@@ -4533,7 +5493,7 @@ impl AgentPanel {
                         .font_family("Guguru Sans Code")
                         .text_size(px(11.5))
                         .text_color(theme.fg0)
-                        .child(self.push_selectable(text.into(), highlights))
+                        .child(self.push_selectable(text.into(), highlights, cx))
                         .into_any_element()
                 }
                 markdown::Block::ListItem {
@@ -4553,11 +5513,11 @@ impl AgentPanel {
                         .gap(px(7.))
                         .pl(px(2.0 + depth as f32 * 16.0))
                         .child(div().flex_none().text_color(theme.fg2).child(bullet))
-                        .child(
-                            div().flex_1().min_w_0().child(
-                                self.push_selectable(text.into(), self.md_highlights(&spans)),
-                            ),
-                        )
+                        .child(div().flex_1().min_w_0().child(self.push_selectable(
+                            text.into(),
+                            self.md_highlights(&spans),
+                            cx,
+                        )))
                         .into_any_element()
                 }
                 markdown::Block::Rule => div()
@@ -4673,6 +5633,28 @@ impl AgentPanel {
         let key = (id, index);
         if !self.expanded_thoughts.remove(&key) {
             self.expanded_thoughts.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn is_step_expanded(&self, index: usize) -> bool {
+        self.threads
+            .get(self.active)
+            .is_some_and(|thread| self.expanded_steps.contains(&(thread.id.clone(), index)))
+    }
+
+    /// ツール結果（⎿）の折り畳み/展開をトグルする（要約行クリック）。
+    fn toggle_step(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.id.clone())
+        else {
+            return;
+        };
+        let key = (id, index);
+        if !self.expanded_steps.remove(&key) {
+            self.expanded_steps.insert(key);
         }
         cx.notify();
     }
@@ -4889,13 +5871,15 @@ impl AgentPanel {
                 )
             })
             // ヘッダ: 「承認が必要」+ ツールタイトル
+            // 折返す側（タイトル）は `flex_1` + `min_w_0` のセット（モジュール冒頭「伸縮テキストの作法」）。
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .gap(px(7.))
                     .child(
                         div()
+                            .flex_none()
                             .text_size(px(10.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(color)
@@ -4903,6 +5887,7 @@ impl AgentPanel {
                     )
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .text_size(px(12.5))
                             .text_color(theme.fg0)
@@ -5307,9 +6292,13 @@ impl Render for AgentPanel {
         // 非アクティブへ切替時は GPUI が on_active_status_change→refresh で再描画するので自動で静止に切替わる。
         let active = window.is_window_active();
         self.window_active = active; // 完了音の「非アクティブ時のみ」判定が読む（P2）
-        self.mascot_last_rendered_at = Some(std::time::Instant::now());
-        if active {
-            self.ensure_mascot_ticker(cx);
+        self.last_rendered_at = Some(std::time::Instant::now());
+        let caret_blink_enabled = !self.active_thread_running();
+        self.composer.update(cx, |composer, cx| {
+            composer.set_caret_blink_enabled(caret_blink_enabled, cx);
+        });
+        if active && self.active_thread_running() {
+            self.ensure_second_ticker(cx);
         }
         div()
             .relative() // モデルメニューの絶対配置の基準
@@ -5345,7 +6334,19 @@ impl Render for AgentPanel {
             .child(self.render_meta(active, cx))
             // エージェントの実行プラン（あれば transcript 上部に常設・M12-9）。
             .children(self.render_plan())
-            .child(self.render_transcript(cx))
+            // transcript は relative コンテナに入れ、右下へ「最新へ」ボタンを浮かべる（scroll 面の外＝
+            // ビューポート右下に固定される。中身と一緒にスクロールしない）。
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .min_h_0()
+                    .child(self.render_transcript(cx))
+                    .children(self.render_jump_to_previous_user(cx))
+                    .children(self.render_jump_to_latest(cx)),
+            )
             // 承認待ちの権限リクエスト（あれば composer の直上に常時表示）。
             .children(self.render_permission_card(cx))
             .child(self.render_composer(cx))
@@ -5359,7 +6360,7 @@ impl Render for AgentPanel {
 // ── 自由関数 ──
 
 /// マスコットの状態（スレッド状態から算出し [`render_mascot`] へ渡す）。
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum MascotMotion {
     /// アイドル（待機）＝低頻度（5fps）の居眠りループ。
     Idle,
@@ -5375,88 +6376,203 @@ enum MascotMotion {
     Worry,
 }
 
-/// ローディング・マスコット（猫耳コーダー娘）。フィルムストリップの表示コマを共有 10fps 時計で
-/// 離散的に切り替える。`Animation::repeat()` を使わないため、同じコマの間に 60fps 再描画されない。
-///
-/// フレームは **image→video（Kling v3.0・start=end でループ）でキャラ固定のまま生成 → 共通窓で切り出し
-/// → 量子化** した「本物の中割り」なので、text→image を並べた時のような軸ブレ（シェイク）が無い。
-fn render_mascot(motion: MascotMotion, active: bool, tick: u64) -> gpui::AnyElement {
-    render_mascot_sized(motion, active, 64.0, tick)
+struct MascotAtlases {
+    idle: Arc<RenderImage>,
+    doze: Arc<RenderImage>,
+    typing: Arc<RenderImage>,
+    think: Arc<RenderImage>,
+    celebrate: Arc<RenderImage>,
+    plead: Arc<RenderImage>,
+    worry: Arc<RenderImage>,
 }
 
-/// 編隊の集約気分マスコット（管制の監督バー・P3。JOURNAL 2026-07-23「集約気分 1 匹」の回収）。
-/// 編隊の**最悪状態**に追従: 承認待ちあり→祈る（15s 超→頬に手であわあわ）/ 実行中→打鍵 / 静穏→うとうと。
-pub fn fleet_mood_mascot(
-    any_blocked: bool,
-    blocked_long: bool,
-    any_working: bool,
-    active: bool,
-    height: f32,
-    tick: u64,
-) -> gpui::AnyElement {
-    let motion = if blocked_long {
-        MascotMotion::Worry
-    } else if any_blocked {
-        MascotMotion::Plead
-    } else if any_working {
-        MascotMotion::Typing
+impl MascotAtlases {
+    fn load() -> Self {
+        Self {
+            idle: load_mascot_atlas("idle.png", 1),
+            doze: load_mascot_atlas("doze-strip.png", 15),
+            typing: load_mascot_atlas("typing-strip.png", 15),
+            think: load_mascot_atlas("think-strip.png", 15),
+            celebrate: load_mascot_atlas("celebrate-strip.png", 15),
+            plead: load_mascot_atlas("plead-strip.png", 15),
+            worry: load_mascot_atlas("worry-strip.png", 15),
+        }
+    }
+
+    fn image(&self, motion: MascotMotion, active: bool) -> &Arc<RenderImage> {
+        match (motion, active) {
+            (MascotMotion::Idle, false) => &self.idle,
+            (MascotMotion::Idle, true) => &self.doze,
+            (MascotMotion::Typing, _) => &self.typing,
+            (MascotMotion::Think, _) => &self.think,
+            (MascotMotion::Celebrate, _) => &self.celebrate,
+            (MascotMotion::Plead, _) => &self.plead,
+            (MascotMotion::Worry, _) => &self.worry,
+        }
+    }
+}
+
+fn mascot_atlases() -> &'static MascotAtlases {
+    static ATLASES: std::sync::OnceLock<MascotAtlases> = std::sync::OnceLock::new();
+    ATLASES.get_or_init(MascotAtlases::load)
+}
+
+fn load_mascot_atlas(file: &str, frame_count: usize) -> Arc<RenderImage> {
+    let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mascot")).join(file);
+    let mut source = image::open(&path)
+        .unwrap_or_else(|error| panic!("mascot asset {}: {error}", path.display()))
+        .into_rgba8();
+    // GPUI の RenderImage は BGRA バイト順を期待するため、image が返す RGBA を入れ替える
+    // （怠ると R と B が反転して暖色マスコットが青く写る）。参考: gpui elements/img.rs
+    for pixel in source.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let frame_width = source.width() / frame_count as u32;
+    let mut frames = Vec::with_capacity(frame_count);
+    for frame in 0..frame_count {
+        let image = image::imageops::crop_imm(
+            &source,
+            frame as u32 * frame_width,
+            0,
+            frame_width,
+            source.height(),
+        )
+        .to_image();
+        frames.push(image::Frame::new(image));
+    }
+    Arc::new(RenderImage::new(frames))
+}
+
+fn mascot_canvas(motion: MascotMotion, active: bool, height: f32, tick: u64) -> gpui::AnyElement {
+    const FRAME_COUNT: usize = 15;
+    let width = height * 60.0 / 72.0;
+    let image = mascot_atlases().image(motion, active).clone();
+    let frame = if active {
+        tick as usize % FRAME_COUNT
     } else {
-        MascotMotion::Idle
+        0
     };
-    render_mascot_sized(motion, active, height, tick)
+    div()
+        .w(px(width))
+        .h(px(height))
+        .flex_none()
+        .child(
+            canvas(
+                |_bounds, _window, _cx| (),
+                move |bounds, (), window, _cx| {
+                    let _ = window.paint_image(bounds, Corners::default(), image, frame, false);
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
-fn render_mascot_sized(
+/// 固定サイズ・独立 invalidation 境界のマスコット。親 AgentPanel / Workspace を通知せず、
+/// 自分の atlas frame だけを居眠り5fps・作業10fpsで再 paint する。
+pub struct MascotView {
     motion: MascotMotion,
     active: bool,
     height: f32,
     tick: u64,
-) -> gpui::AnyElement {
-    const N: usize = 15; // 各ストリップのコマ数
-    #[allow(non_snake_case)]
-    let H: f32 = height; // 表示高さ
-    #[allow(non_snake_case)]
-    let W: f32 = H * 60.0 / 72.0; // 1 コマのアスペクト（共通 60x72）
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mascot");
-    let window = |child: gpui::AnyElement| {
-        div()
-            .w(px(W))
-            .h(px(H))
-            .flex_none()
-            .overflow_hidden()
-            .child(child)
-            .into_any_element()
-    };
-    // 単一フレーム画像（idle.png）を等倍表示。
-    let single = |file: &str| {
-        window(
-            img(PathBuf::from(format!("{dir}/{file}")))
-                .h(px(H))
-                .w(px(W))
-                .into_any_element(),
-        )
-    };
-    // ストリップの指定コマだけ表示。margin は render 時に一度決まる静的な値で、次の tick まで
-    // callback も再描画要求も発生しない。
-    let strip_frame = |file: &str, frame: usize| {
-        window(
-            img(PathBuf::from(format!("{dir}/{file}")))
-                .h(px(H))
-                .w(px(W * N as f32))
-                .ml(px(-(W * frame.min(N - 1) as f32)))
-                .into_any_element(),
-        )
-    };
-    // 時計側が居眠りを 5fps、その他を素材どおり 10fps で進める。非アクティブ時は先頭コマで停止。
-    let frame = if active { tick as usize % N } else { 0 };
-    match (motion, active) {
-        (MascotMotion::Idle, true) => strip_frame("doze-strip.png", frame),
-        (MascotMotion::Idle, false) => single("idle.png"),
-        (MascotMotion::Typing, _) => strip_frame("typing-strip.png", frame),
-        (MascotMotion::Think, _) => strip_frame("think-strip.png", frame),
-        (MascotMotion::Celebrate, _) => strip_frame("celebrate-strip.png", frame),
-        (MascotMotion::Plead, _) => strip_frame("plead-strip.png", frame),
-        (MascotMotion::Worry, _) => strip_frame("worry-strip.png", frame),
+    ticker: bool,
+    last_rendered_at: Option<std::time::Instant>,
+}
+
+impl MascotView {
+    pub fn new(height: f32) -> Self {
+        Self {
+            motion: MascotMotion::Idle,
+            active: true,
+            height,
+            tick: 0,
+            ticker: false,
+            last_rendered_at: None,
+        }
+    }
+
+    fn set_state(&mut self, motion: MascotMotion, active: bool, cx: &mut Context<Self>) {
+        let needs_restart = active && !self.ticker;
+        if active {
+            // 親がこの Entity を実際の View tree に差し込んだ印。非表示中は set_state 自体が来ない。
+            self.last_rendered_at = Some(std::time::Instant::now());
+        }
+        if self.motion == motion && self.active == active && !needs_restart {
+            return;
+        }
+        self.motion = motion;
+        self.active = active;
+        if !active {
+            self.tick = 0;
+        }
+        cx.notify();
+    }
+
+    pub fn set_fleet_state(
+        &mut self,
+        any_blocked: bool,
+        blocked_long: bool,
+        any_working: bool,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let motion = if blocked_long {
+            MascotMotion::Worry
+        } else if any_blocked {
+            MascotMotion::Plead
+        } else if any_working {
+            MascotMotion::Typing
+        } else {
+            MascotMotion::Idle
+        };
+        self.set_state(motion, active, cx);
+    }
+
+    fn ensure_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.ticker || !self.active {
+            return;
+        }
+        self.ticker = true;
+        cx.spawn(async move |mascot, cx| loop {
+            let next_delay = mascot.update(cx, |mascot, cx| {
+                let visible = mascot.active
+                    && mascot
+                        .last_rendered_at
+                        .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(750));
+                if !visible {
+                    mascot.ticker = false;
+                    return None;
+                }
+                mascot.tick = mascot.tick.wrapping_add(1);
+                cx.notify();
+                Some(std::time::Duration::from_millis(
+                    if mascot.motion == MascotMotion::Idle {
+                        200
+                    } else {
+                        100
+                    },
+                ))
+            });
+            let Ok(Some(delay)) = next_delay else {
+                break;
+            };
+            cx.background_executor().timer(delay).await;
+        })
+        .detach();
+    }
+}
+
+impl Render for MascotView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = window.is_window_active() && self.active;
+        if active != self.active {
+            self.active = active;
+        }
+        self.last_rendered_at = Some(std::time::Instant::now());
+        if active {
+            self.ensure_ticker(cx);
+        }
+        mascot_canvas(self.motion, active, self.height, self.tick)
     }
 }
 
@@ -5505,8 +6621,8 @@ fn thought_preview(text: &str) -> SharedString {
 
 /// スレッド状態ドット（タブ / List / beacon / レール / フッター / ⌘O で共用・#）。**色相は常にスレッド
 /// 識別色**（UI-SPEC §1.3）で、状態は形で見せる（色を状態に使わない・mock のグリフに準拠）:
-/// Idle=淡（○）/ Working=点字（⠋）/ Done=リング（✓）/ Blocked=**半円**（◐・中断 Done は中空）。
-/// 動きはマスコットへ一本化し、この小さな表示はすべて静止する。
+/// Idle=淡（○）/ Working=**回る点字**（⠋・生成中の可視化）/ Done=リング（✓）/ Blocked=**半円**（◐・中断 Done は中空）。
+/// 動きは Working スピナーとマスコットに限り、他状態のドットは静止する。
 /// リング枠のスペースは常に確保し、状態が変わってもレイアウトが揺れないようにする。
 pub fn activity_dot(
     id: impl Into<gpui::ElementId>,
@@ -5514,7 +6630,7 @@ pub fn activity_dot(
     color: Hsla,
     activity: ThreadActivity,
 ) -> gpui::AnyElement {
-    // Working = 静止点字（herdr 由来の形・色はスレッド識別色のまま＝§1.3 維持）。
+    // Working = 回る点字スピナー（herdr 由来の形・色はスレッド識別色のまま＝§1.3 維持）。
     if matches!(activity, ThreadActivity::Working) {
         return working_spinner(id, diameter, color);
     }
@@ -5569,13 +6685,17 @@ pub fn activity_dot(
     }
 }
 
-/// Working の点字マーカー。動きの主役はマスコットへ一本化し、一覧・タブ・composer に複製される
-/// 小さな状態表示は静止させる。外枠は `activity_dot` と同寸なので状態遷移でもレイアウト不変。
+/// Working の点字スピナー。「生成中」の主表示なので**回す**（他状態のドットは静止・動きの主役は
+/// マスコット）。`with_animation` の repeat で、この要素が描かれている間だけ回る＝Idle へ遷移して
+/// activity_dot が別グリフに変わればアニメも止まり idle 0% を保つ。外枠は `activity_dot` と同寸で
+/// 状態遷移してもレイアウト不変。`id` はドット毎に一意（複数スピナーを独立に回すため）。
 pub fn working_spinner(
-    _id: impl Into<gpui::ElementId>,
+    id: impl Into<gpui::ElementId>,
     diameter: f32,
     color: Hsla,
 ) -> gpui::AnyElement {
+    // 点字 10 コマ（U+280B 系）を一定周期で送る。delta 0→1 の repeat をコマ番号へ量子化する。
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let outer = diameter + 6.0; // activity_dot と同じリング枠寸
     let slot = diameter + 4.0; // 1 コマの箱（グリフを中央寄せ）
     div()
@@ -5595,7 +6715,14 @@ pub fn working_spinner(
                 .text_size(px(slot))
                 .line_height(px(slot))
                 .text_color(color)
-                .child("⠋"),
+                .with_animation(
+                    id.into(),
+                    Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                    |element, delta| {
+                        let frame = ((delta * FRAMES.len() as f32) as usize).min(FRAMES.len() - 1);
+                        element.child(FRAMES[frame])
+                    },
+                ),
         )
         .into_any_element()
 }
@@ -5677,6 +6804,25 @@ fn send_set_config(thread: &Thread, category: ConfigCategory, value_name: &Share
 
 /// 権限リクエストの 1 選択肢ボタン。種類でスタイルを変える（許可=スレッド色 / 拒否=中立）。
 /// クリックで [`AgentPanel::answer_permission`] に添字を渡す。
+/// 長いラベルを中央省略で丸める（`Always Allow access to /very/long/path` 等）。
+/// パスは頭も尻も意味を持つので中央を落とす。全文は tooltip で見せる。
+fn ellipsize_middle(text: &str, max_chars: usize) -> SharedString {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return SharedString::from(text.to_string());
+    }
+    let head = max_chars / 2;
+    let tail = max_chars - head - 1;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(chars[chars.len() - tail..].iter());
+    SharedString::from(out)
+}
+
+/// 承認ボタン 1 個。ラベルは ACP エージェントが決める（長さの上限が無い）ため、
+/// ドック幅でもカードからはみ出さないよう中央省略する。
+const PERMISSION_LABEL_MAX_CHARS: usize = 42;
+
 fn permission_button(
     index: usize,
     option: &PermissionChoice,
@@ -5684,9 +6830,12 @@ fn permission_button(
     theme: &Theme,
     cx: &mut Context<AgentPanel>,
 ) -> gpui::AnyElement {
+    let label = ellipsize_middle(&option.label, PERMISSION_LABEL_MAX_CHARS);
+    let truncated = label.as_ref() != option.label;
     let base = div()
         .id(("permission-option", index))
         .flex()
+        .flex_none()
         .items_center()
         .px(px(11.))
         .py(px(3.))
@@ -5694,7 +6843,10 @@ fn permission_button(
         .text_size(px(11.5))
         .font_weight(FontWeight::SEMIBOLD)
         .cursor_pointer()
-        .child(SharedString::from(option.label.clone()))
+        .child(label)
+        .when(truncated, |element| {
+            element.tooltip(Tooltip::text(option.label.clone(), theme.clone()))
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _, _window, cx| this.answer_permission(index, cx)),
@@ -5914,6 +7066,19 @@ fn thread_from_storage(
     thread
 }
 
+/// offscreen 検証プローブはモック transcript（markdown/Step 描画）や複数タブ（ACP_PROBE は添字 1 の
+/// 空スレへ送信・ACTIVITY_PROBE は状態一覧）を前提にする。通常起動では種付けしない（新プロジェクトが
+/// デモ 3 タブで始まる混乱を断つ・2026-08-17）。単独でモックが欲しい時は SHIRUSHI_DEMO_THREADS=1。
+fn demo_threads_requested() -> bool {
+    [
+        "SHIRUSHI_DEMO_THREADS",
+        "SHIRUSHI_ACP_PROBE",
+        "SHIRUSHI_ACTIVITY_PROBE",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
+
 fn seed_threads() -> Vec<Thread> {
     let rope = Thread {
         id: new_thread_id(),
@@ -5934,6 +7099,7 @@ fn seed_threads() -> Vec<Thread> {
         effort: "high".into(),
         agent: "Claude Code".into(),
         context: Vec::new(),
+        draft: String::new(),
         tokens_used: 23_400,
         tokens_max: 200_000,
         tokens_shown: 23_400.0,
@@ -6113,6 +7279,36 @@ mod tests {
         assert!(cache.spans.len() <= SyntaxHighlightCache::CAPACITY);
     }
 
+    #[test]
+    fn markdown_block_cache_reuses_and_bounds_entries() {
+        let mut cache = MarkdownBlockCache::default();
+        let source = "# Result\n\nA **cached** paragraph.\n";
+        let first = cache.parse(source);
+        let second = cache.parse(source);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.blocks.len(), 1);
+
+        for index in 0..(MarkdownBlockCache::CAPACITY + 8) {
+            cache.parse(&format!("## Generated {index}\n"));
+        }
+        assert!(cache.blocks.len() <= MarkdownBlockCache::CAPACITY);
+    }
+
+    #[test]
+    fn previous_user_entry_follows_prompt_boundaries() {
+        let entries = vec![
+            Entry::User("first".into()),
+            Entry::Agent("answer".into()),
+            Entry::User("second".into()),
+            Entry::Agent("long answer".into()),
+        ];
+
+        assert_eq!(previous_user_entry_index(&entries, 4), Some(2));
+        assert_eq!(previous_user_entry_index(&entries, 2), Some(0));
+        assert_eq!(previous_user_entry_index(&entries, 0), None);
+        assert_eq!(previous_user_entry_index(&entries, usize::MAX), Some(2));
+    }
+
     #[gpui::test]
     fn transcript_focus_dispatches_copy_to_panel(cx: &mut gpui::TestAppContext) {
         let settings_path = std::env::temp_dir().join(format!(
@@ -6123,12 +7319,18 @@ mod tests {
         std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
         cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
 
-        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        // 通常起動の transcript は空（デモ種の廃止・2026-08-17）なので、コピー対象の本文は
+        // テストが自前で積む（初回描画前に入れれば transcript_regions に載る）。
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            let mut panel = AgentPanel::new(Theme::dark(), cx);
+            if let Some(thread) = panel.threads.get_mut(panel.active) {
+                thread.entries.push(Entry::Agent("コピー検証の本文".into()));
+            }
+            panel
+        });
         let expected = panel.update(cx, |panel, _cx| {
             let regions = panel.transcript_regions.borrow();
-            let first = regions
-                .first()
-                .expect("seed transcript has selectable text");
+            let first = regions.first().expect("transcript に選択可能な本文がある");
             let text = first.text.to_string();
             panel.transcript_selection = Some(TranscriptSelection {
                 start: TranscriptPoint {
@@ -6154,5 +7356,159 @@ mod tests {
             Some(expected)
         );
         let _ = std::fs::remove_file(settings_path);
+    }
+
+    fn init_test_settings(cx: &mut gpui::TestAppContext, label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "shirushi_agent_{label}_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(&path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        path
+    }
+
+    fn config(category: ConfigCategory, current: &str, choices: &[(&str, &str)]) -> ConfigOption {
+        ConfigOption {
+            config_id: format!("{category:?}"),
+            category,
+            current: current.to_string(),
+            choices: choices
+                .iter()
+                .map(|(id, name)| (id.to_string(), name.to_string()))
+                .collect(),
+        }
+    }
+
+    /// 新セッションの Configs 広告（＝エージェント既定）が、スレッドが選んでいる sticky を上書きしない。
+    /// 広告に在る限り選択を保ち（＝タブを開くたびに戻らない）、無い時だけ広告 current にフォールバックする。
+    #[gpui::test]
+    fn configs_advertisement_keeps_thread_selection(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "configs");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let thread = &mut panel.threads[active];
+            thread.model = "Opus".into();
+            thread.effort = "xhigh".into();
+            // エージェントは自分の既定（Sonnet / high）を current として広告してくる。
+            let configs = vec![
+                config(
+                    ConfigCategory::Model,
+                    "sonnet-id",
+                    &[("opus-id", "Opus"), ("sonnet-id", "Sonnet")],
+                ),
+                config(
+                    ConfigCategory::ThoughtLevel,
+                    "high-id",
+                    &[("high-id", "high"), ("xhigh-id", "xhigh")],
+                ),
+            ];
+            panel.on_event(active, AgentEvent::Configs(configs), cx);
+            let thread = &panel.threads[active];
+            assert_eq!(thread.model.as_ref(), "Opus", "選択したモデルを保つ");
+            assert_eq!(thread.effort.as_ref(), "xhigh", "選択した思考量を保つ");
+            assert_eq!(thread.configs.len(), 2, "広告は取り込む");
+
+            // フォールバック: 広告に無い選択は広告 current の表示名を採用する。
+            panel.threads[active].model = "Haiku".into();
+            let configs = vec![config(
+                ConfigCategory::Model,
+                "sonnet-id",
+                &[("opus-id", "Opus"), ("sonnet-id", "Sonnet")],
+            )];
+            panel.on_event(active, AgentEvent::Configs(configs), cx);
+            assert_eq!(
+                panel.threads[active].model.as_ref(),
+                "Sonnet",
+                "提供されない選択は広告 current へフォールバック"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Agent は未送信スレッドでだけ選べる。会話開始後に別 AI へ差し替えて transcript を混ぜない。
+    #[gpui::test]
+    fn agent_is_locked_after_conversation_starts(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "agent-lock");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.select_option(Selector::Agent, "Codex".into(), cx);
+            assert_eq!(panel.threads[panel.active].agent.as_ref(), "Codex");
+
+            panel.threads[panel.active]
+                .entries
+                .push(Entry::User("開始済み".into()));
+            panel.select_option(Selector::Agent, "Claude Code".into(), cx);
+            assert_eq!(
+                panel.threads[panel.active].agent.as_ref(),
+                "Codex",
+                "開始済みスレッドの Agent は変わらない"
+            );
+            panel.toggle_menu(Selector::Agent, cx);
+            assert!(panel.open_menu.is_none(), "開始後は Agent menu も開かない");
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Modes 広告も同じ規律。加えて新規タブは直前タブの権限モードを引き継ぐ（default に戻らない）。
+    #[gpui::test]
+    fn mode_persists_and_new_tab_inherits(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "modes");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].permission_mode = "Accept Edits".into();
+            let modes = vec![
+                ("ask".to_string(), "Always Ask".to_string()),
+                ("accept".to_string(), "Accept Edits".to_string()),
+            ];
+            panel.on_event(
+                active,
+                AgentEvent::Modes {
+                    modes,
+                    current: "ask".to_string(),
+                },
+                cx,
+            );
+            let thread = &panel.threads[active];
+            assert_eq!(
+                thread.permission_mode.as_ref(),
+                "Accept Edits",
+                "選択したモードを保つ（広告 current では上書きしない）"
+            );
+            assert_eq!(thread.current_mode_id.as_ref(), "accept");
+
+            // 新規タブは直前タブのモードを引き継ぐ。
+            panel.add_thread(cx);
+            assert_eq!(
+                panel.threads[panel.active].permission_mode.as_ref(),
+                "Accept Edits",
+                "新規タブは前タブの権限モードを引き継ぐ"
+            );
+
+            // フォールバック: 提供されないモードは広告 current の表示名を採用する。
+            let active = panel.active;
+            panel.threads[active].permission_mode = "Plan".into();
+            let modes = vec![
+                ("ask".to_string(), "Always Ask".to_string()),
+                ("accept".to_string(), "Accept Edits".to_string()),
+            ];
+            panel.on_event(
+                active,
+                AgentEvent::Modes {
+                    modes,
+                    current: "ask".to_string(),
+                },
+                cx,
+            );
+            assert_eq!(
+                panel.threads[active].permission_mode.as_ref(),
+                "Always Ask",
+                "提供されないモードは広告 current へフォールバック"
+            );
+        });
+        let _ = std::fs::remove_file(path);
     }
 }

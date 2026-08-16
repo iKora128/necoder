@@ -176,6 +176,8 @@ actions!(
         ActivateProject7,
         ActivateProject8,
         ActivateProject9,
+        NextProject,
+        PrevProject,
     ]
 );
 
@@ -209,8 +211,9 @@ const AGENT_DOCK_MIN: f32 = 320.0;
 const AGENT_DOCK_MAX: f32 = 900.0;
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 /// 下段ドック（編隊のニュース/ターミナル・solo のターミナル）の既定と可動域。
-/// 既定 = ニュース 5〜6 行分。上縁ドラッグで画面のほぼ全部まで伸ばせる（ターミナル用途）。
-const BOTTOM_DOCK_HEIGHT: f32 = 132.0;
+/// 既定 = ターミナルが最初から使える高さ（旧・固定 240px を踏襲）。ニュース 5〜6 行に寄せた 132px は
+/// ターミナルには浅すぎた（実測 ~8 行・ヘッダ込みで実質 6 行）ため引き上げた。上縁ドラッグで可変。
+const BOTTOM_DOCK_HEIGHT: f32 = 240.0;
 const BOTTOM_DOCK_MIN: f32 = 60.0;
 const BOTTOM_DOCK_MAX: f32 = 900.0;
 const TITLEBAR_HEIGHT: f32 = 38.0;
@@ -973,10 +976,11 @@ pub struct Workspace {
     notifications: NotificationCenter,
     persistence: WorkspacePersistence,
     updater: UpdateController,
+    /// 管制バーの固定サイズマスコット。atlas時計はWorkspace全体をinvalidにしない。
+    fleet_mascot: Entity<agent_panel::MascotView>,
     /// この窓がアクティブか（render で更新）。管制のマスコット等が「動き」を止める判定に使う。
     window_active: bool,
-    /// 管制マスコット（10fps）と承認待ち表示（2fps）の共有離散時計。GPUI の連続 Animation は
-    /// 使わず、見た目が変わる境界だけ redraw する。
+    /// 経過秒・承認待ち表示だけの1Hz時計。マスコットの5/10fps時計は子Entityに分離済み。
     visual_tick: u64,
     visual_ticker: bool,
     /// 編隊レベルの ✳ 総括（Tier 2・P4）。キューに影響する遷移から 5s デバウンスで oneshot 生成。
@@ -1114,19 +1118,61 @@ fn file_type_color(name: &str, theme: &Theme) -> Hsla {
     }
 }
 
-/// エクスプローラのファイル/フォルダアイコン。フォルダ＝横長（folder 色）・ファイル＝縦長（型色）の
-/// シルエットで一目で見分く。固定幅スロットに入れて名前を揃える。
-fn file_icon(name: &str, is_dir: bool, theme: &Theme) -> impl IntoElement {
-    let shape = if is_dir {
-        let color = theme.folder_icon();
-        div().w(px(13.)).h(px(10.)).rounded(px(2.5)).bg(color)
+/// ファイル名（とディレクトリか否か）から SVG アイコンのパスを引く。言語ロゴ = Simple Icons（CC0）、
+/// フォルダ/汎用 = Lucide（ISC）。拡張子判定は `lang` の言語表に寄せ、名前でしか判らないもの
+/// （Dockerfile・.git*）だけ先に拾う。未知の拡張子は汎用ファイルにフォールバック。
+fn file_icon_path(name: &str, is_dir: bool, is_expanded: bool) -> &'static str {
+    if is_dir {
+        return if is_expanded {
+            "icons/folder-open.svg"
+        } else {
+            "icons/folder.svg"
+        };
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower == "dockerfile" || lower.starts_with("dockerfile.") || lower.ends_with(".dockerfile") {
+        return "icons/file-docker.svg";
+    }
+    if lower.starts_with(".git") {
+        // .gitignore / .gitattributes / .gitmodules など（拡張子を持たない git 系）。
+        return "icons/file-git.svg";
+    }
+    let extension = lower.rsplit('.').next().unwrap_or("");
+    match lang::language_for_name(name) {
+        Some(lang::LanguageId::Rust) => "icons/file-rust.svg",
+        Some(lang::LanguageId::JavaScript) => "icons/file-javascript.svg",
+        Some(lang::LanguageId::TypeScript) => "icons/file-typescript.svg",
+        Some(lang::LanguageId::Tsx) => "icons/file-tsx.svg",
+        Some(lang::LanguageId::Python) => "icons/file-python.svg",
+        Some(lang::LanguageId::Go) => "icons/file-go.svg",
+        Some(lang::LanguageId::Json) => "icons/file-json.svg",
+        Some(lang::LanguageId::Yaml) => "icons/file-yaml.svg",
+        Some(lang::LanguageId::Toml) => "icons/file-toml.svg",
+        Some(lang::LanguageId::Html) => "icons/file-html.svg",
+        Some(lang::LanguageId::Css) => "icons/file-css.svg",
+        Some(lang::LanguageId::Markdown) => "icons/file-markdown.svg",
+        Some(lang::LanguageId::Bash) => "icons/file-shell.svg",
+        Some(lang::LanguageId::C) => "icons/file-c.svg",
+        Some(lang::LanguageId::Cpp) => "icons/file-cpp.svg",
+        None if matches!(
+            extension,
+            "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "bmp" | "avif"
+        ) =>
+        {
+            "icons/file-image.svg"
+        }
+        None if matches!(extension, "txt" | "log" | "text") => "icons/file-text.svg",
+        None => "icons/file-generic.svg",
+    }
+}
+
+/// エクスプローラのファイル/フォルダアイコン（SVG・単色マスク）。形で型を見分け、色は
+/// `file_type_color` で薄く付ける（フォルダは folder 色）。固定幅スロットに入れて名前を揃える。
+fn file_icon(name: &str, is_dir: bool, is_expanded: bool, theme: &Theme) -> impl IntoElement {
+    let color = if is_dir {
+        theme.folder_icon()
     } else {
-        let color = file_type_color(name, theme);
-        div()
-            .w(px(10.))
-            .h(px(13.))
-            .rounded(px(2.))
-            .bg(color.alpha(0.9))
+        file_type_color(name, theme)
     };
     div()
         .flex_none()
@@ -1134,26 +1180,27 @@ fn file_icon(name: &str, is_dir: bool, theme: &Theme) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .child(shape)
+        .child(
+            svg()
+                .path(file_icon_path(name, is_dir, is_expanded))
+                .size(px(14.))
+                .text_color(color),
+        )
 }
 
-/// アイコングリッド用の大きめアイコン（[`file_icon`] の 2 倍強）。
+/// アイコングリッド用の大きめアイコン（[`file_icon`] の約 2 倍）。
 fn icon_large(name: &str, is_dir: bool, theme: &Theme) -> impl IntoElement {
-    let shape = if is_dir {
-        div()
-            .w(px(30.))
-            .h(px(23.))
-            .rounded(px(4.))
-            .bg(theme.folder_icon())
+    let color = if is_dir {
+        theme.folder_icon()
     } else {
-        let color = file_type_color(name, theme);
-        div()
-            .w(px(22.))
-            .h(px(28.))
-            .rounded(px(3.5))
-            .bg(color.alpha(0.9))
+        file_type_color(name, theme)
     };
-    div().flex().items_center().justify_center().child(shape)
+    div().flex().items_center().justify_center().child(
+        svg()
+            .path(file_icon_path(name, is_dir, false))
+            .size(px(30.))
+            .text_color(color),
+    )
 }
 
 impl Focusable for Workspace {
@@ -1182,32 +1229,9 @@ impl Workspace {
                     workspace.visual_ticker = false;
                     return None;
                 }
-                let active_mascot = control_visible
-                    && workspace.project_sessions.sessions.iter().any(|session| {
-                        session
-                            .agent_panel
-                            .read(cx)
-                            .statuses()
-                            .iter()
-                            .any(|status| {
-                                matches!(
-                                    status.activity,
-                                    agent_panel::ThreadActivity::Working
-                                        | agent_panel::ThreadActivity::Blocked
-                                )
-                            })
-                    });
                 workspace.visual_tick = workspace.visual_tick.wrapping_add(1);
                 cx.notify();
-                Some(std::time::Duration::from_millis(if control_visible {
-                    if active_mascot {
-                        100
-                    } else {
-                        200
-                    }
-                } else {
-                    500
-                }))
+                Some(std::time::Duration::from_secs(1))
             });
             let Ok(Some(delay)) = next_delay else {
                 break;
@@ -1374,6 +1398,21 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ActivateProject9, window, cx| {
                 this.switch_project(8, window, cx)
             }))
+            // レール上下への循環切替（⌃⌘↑↓）。番号（⌘1..9）を覚えずに隣へ流せる。
+            .on_action(cx.listener(|this, _: &NextProject, window, cx| {
+                let count = this.project_sessions.projects.len();
+                if count > 1 {
+                    let next = (this.project_sessions.active + 1) % count;
+                    this.switch_project(next, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PrevProject, window, cx| {
+                let count = this.project_sessions.projects.len();
+                if count > 1 {
+                    let previous = (this.project_sessions.active + count - 1) % count;
+                    this.switch_project(previous, window, cx);
+                }
+            }))
             .on_mouse_move(cx.listener(Self::on_resize_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_resize_end))
             // レール項目の擬似 tear-off（枠外ドロップ → 新窓・M13）。resize と独立のリスナー。
@@ -1406,23 +1445,11 @@ impl Render for Workspace {
                     }
                 }
                 self.render_fleet(cx)
-            } else if self.chrome.agent_full_screen {
-                // AI 全画面（2026-07-27）: レール + AI パネルだけ。ファイルを一切開かずに
-                // チャットだけで進める使い方のための面。レールは残す＝戻れなくならない。
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.render_rail(cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(self.agent_panel.clone()),
-                    )
-                    .into_any_element()
             } else {
+                // 通常レイアウト。**AI 全画面（`agent_full_screen`）は中央のエディタを Agent に差し替える**
+                // だけの面へ変更（2026-08-08 本人要望）。左ドック（ファイルブラウザ）と下ドック（ターミナル）は
+                // 各自の ON/OFF に従わせ、冗長になる右の Agent ドックだけ畳む＝「全画面が全部を消す」のをやめる。
+                // 純チャット（ファイルを見ない）にしたければ左ドックを OFF にすれば良い（明示操作に寄せる）。
                 div()
                     .flex()
                     .flex_1()
@@ -1441,10 +1468,15 @@ impl Render for Workspace {
                         };
                         element.child(column)
                     })
-                    .child(self.render_center(cx))
-                    .when(self.chrome.show_right, |element| {
-                        element.child(self.render_agent_dock(cx))
+                    .child(if self.chrome.agent_full_screen {
+                        self.render_agent_full_center(cx).into_any_element()
+                    } else {
+                        self.render_center(cx).into_any_element()
                     })
+                    .when(
+                        self.chrome.show_right && !self.chrome.agent_full_screen,
+                        |element| element.child(self.render_agent_dock(cx)),
+                    )
                     .into_any_element()
             })
             .child(self.render_statusbar(cx))

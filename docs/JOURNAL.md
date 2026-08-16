@@ -1133,3 +1133,149 @@
   updater の spctl 検証を通らない＝初回から署名必須）。(3) リリース確認は未認証 GitHub API なので **private のうちは
   404 → 更新 E2E は public 化後にしかできない**。(4) 並行セッションの未コミット変更（agent_panel 等 357 行）がある
   状態での作業は、触るファイルを直前 Read + 完全一致 Edit（07-19 と同じ流儀）で無衝突
+
+## 2026-08-08 — GUI 起動の .app で ACP が固まる（PATH が launchd 既定しか無い）
+- やったこと: `crates/workspace/src/shell_env.rs` 新設 + `main.rs` 冒頭で `inherit_login_shell_path()`。
+  Finder/Dock/`open -a` 起動のプロセスは launchd から環境を継ぐため PATH が
+  `/usr/bin:/bin:/usr/sbin:/sbin` の 4 つだけ（実測: `ps eww -p <pid>` で確認）。
+  `claude-agent-acp` は `#!/usr/bin/env node` なので **node 不在 = exec 失敗**、しかし
+  「バイナリは在る」ので解決段階は成功して見え、**initialize 応答待ちで無限に固まる**
+  （実測: launchd PATH で `live_initialize` が 3 分経っても返らない / 取り込み後は 0.15s で Ok）。
+  ログインシェル（`$SHELL -l -i -c`）から PATH を 1 回取って `set_var`。~0.5s かかるので
+  `~/Library/Application Support/Shirushi/shell-path` にキャッシュし 2 回目以降は即読み + 裏で更新（実測 0.01s）。
+- 学び/罠: (1) **GUI 起動と `cargo run` は PATH が別物** — ターミナルで動く子プロセス機能が .app で
+  死ぬ類（ACP・LSP・`claude -p` の title 生成）は、まずこれを疑う。再現は
+  `env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin <bin>`。(2) nvm は **interactive でしか
+  読まれない** ので `-l` だけでは node が出ない（`-i` が要る）。(3) rc は PATH に**前置**するので、
+  取り込み済み PATH を子に渡すと起動のたび dir が積み増される → 子には launchd 既定を明示的に渡す。
+  (4) 子プロセスの stderr は `Stdio::inherit()` で GUI ログ（`logs/shirushi-*.log`）に出る想定だが、
+  **固まる系は何も出ない** ＝ ログが空でも「起動できている」証拠にはならない
+- 次: ACP ハンドシェイクにタイムアウトを入れて、この手の無言ハングを「エラー: …」で可視化する
+
+## 2026-08-08 — マスコット青反転 + タブごとに composer 設定が戻る
+- やったこと:
+  - **マスコットの RGB 反転を根治**（`agent_panel::load_mascot_atlas`）。`image` の `into_rgba8()` は
+    **RGBA** だが GPUI `RenderImage` は **BGRA** を期待 → デコード直後に `pixel.swap(0, 2)` を 1 回。
+    参考: `gpui elements/img.rs`。`RenderImage` へ画像を流す箇所は grep で全 crate 1 箇所のみ（通常
+    アイコンは SVG で gpui 側が内部変換するため無傷）。`SHIRUSHI_MASCOT=celebrate` + screenshot で目視確認。
+  - **「タブを開くたびに composer 設定が戻る」を根治**。原因は 2 つ: (1) 新セッションが自分の既定を
+    `Configs`/`Modes` の current として広告し、`on_event` がそれを**鵜呑みで thread に上書き**していた
+    ＝ `apply_thread_defaults` が載せた sticky（§8 の model/思考量）が毎回消えていた。→ **スレッド側の
+    選択を正**とし、広告に在れば `set_config`/`set_mode` でエージェントを合わせ、無いときだけ広告 current へ
+    フォールバック。(2) 権限モードは settings に sticky を持たず毎回 `default` に戻っていた。→ `add_thread` で
+    **直前タブの `permission_mode` を引き継ぐ**（session-local。bypass 等を持続グローバル既定にはしない）。
+  - 回帰テスト 2 本（`configs_advertisement_keeps_thread_selection` / `mode_persists_and_new_tab_inherits`）。
+    `on_event` は command_tx 無しでも上書きせず値を保つので、実 ACP 無しで単体検証できる。全 16 test 緑。
+- 学び/罠: (1) **「表示は正しいが送信で戻る」系は session-start の広告取り込みを疑う** — apply_thread_defaults
+  はタブ生成時に効くが、`Configs`/`Modes` は初回送信の後に届いて上書きしうる。表示と実適用の二段で見る。
+  (2) §8 の sticky 境界は「何を選ぶ操作か」で引かれている（agent=環境／model・effort=毎回選び直す）。
+  mode は安全側の選択なので**持続グローバルにはせず前タブ引き継ぎ**に留めた（可視ピルが黙って bypass に
+  ならないため）。agent は §8 どおり非 sticky のまま。
+- 次: ACP ハンドシェイクのタイムアウト可視化（前エントリの持ち越し）
+
+## 2026-08-08 — ターミナル初期高さ + AI 全画面が左/下ドックを消す問題
+- やったこと:
+  - **下ドック既定を 132 → 240px**（`workspace.rs::BOTTOM_DOCK_HEIGHT`）。132 は編隊ニュース 5〜6 行に
+    合わせた値だが、下ドックは**ターミナルと共有**なので浅すぎた（実質 ~6 行）。旧・固定 240px を復元。
+    高さは永続化しないので毎回この既定から始まる＝「最初から小さい」の正体。UI-SPEC/mock も 240 に同期。
+  - **AI 全画面が左ドック（ファイルブラウザ）と下ドック（ターミナル）まで消す問題を根治**。原因は
+    `Workspace::render` の全画面分岐が **rail + Agent パネルだけ**を描き、`show_left`/`show_bottom` を
+    無視していたこと（トグル state 自体は触っていない）。全画面を**「中央エディタを Agent に差し替える」**
+    へ再定義し、通常レイアウトへ**一本化** — 左ドックと下ドックは各自の ON/OFF、右 Agent ドックだけ
+    `!agent_full_screen` で畳む。中央列は `render_agent_full_center`（`render_center` と同形・ターミナルを下に積む）。
+    `SHIRUSHI_AGENT_FULLSCREEN=1 SHIRUSHI_TERMINAL=1` のスクショで左explorer + 中央Agent + 下Terminal を目視確認。
+- 学び/罠: (1) **「消える」の切り分けは state か render か**を先に見る — 今回トグルは `show_left`/`show_bottom` を
+  保っていて、消していたのは描画分岐だった。専用分岐が通常系を丸ごとバイパスしていると、ドック/オーバーレイの
+  ON/OFF が黙って効かなくなる → **特殊レイアウトも通常系に寄せる**（差分は「中央の中身」と「畳むドック」だけ）。
+  (2) 共有寸法（`bottom_height`）は**使う側で意味が違う**（ニュース vs ターミナル）＝既定は重い側（ターミナル）に合わせる。
+- 次: ACP ハンドシェイクのタイムアウト可視化（持ち越し）
+
+## 2026-08-08 — transcript「最新へ」ボタン（遡り読み中に出る FAB）
+- やったこと:
+  - **transcript の右下に「最新へ」丸ボタン**（`agent_panel::render_jump_to_latest`）。エージェントが進んで下に
+    新着が溜まった時、1 タップで最下部（`scroll_to_bottom`）へ戻す。出現は fade-in + せり上がり（既存
+    `render_selector_menu` と同じ `with_animation` oneshot＝完了後は再描画を要求せず idle 0% を保つ）。
+  - 判定は `follow_transcript_if_at_bottom` と同系（offset.y は下ほど負）。**閾は 140px**（follow の 60px より
+    広め＝ヒステリシスで底付近の出没チラつきを防ぐ）。`max_offset.y <= 0`（スクロール不要）では出さない。
+  - 手動スクロールで出没を更新するため transcript に `on_scroll_wheel → cx.notify()`（stop_propagation しないので
+    スクロール自体はそのまま。実行中は on_event が毎チャンク notify するので追加コストは遡り読み時のみ）。
+  - アイコンは Lucide `arrow-down-to-line`（新 SVG＝`main.rs` の AssetSource match に登録必須の罠を踏まないよう
+    1 行追加）。色は中立（§1.3 の識別色規律に従い accent は使わない）。i18n `agent.jump_to_latest` を ja/en 両方に。
+  - `SHIRUSHI_SCROLL_TOP=1` で遡り状態を作りスクショ → ボタン出現を確認。既定（底）では出ないことも確認。
+- 学び/罠: (1) **scroll 面の外に置く** — `overflow_y_scroll` の中に absolute で置くと中身と一緒にスクロールする。
+  transcript を relative コンテナで包み、ボタンはその sibling にして**ビューポート右下に固定**。
+  (2) `with_animation` の第1引数が ElementId＝毎フレーム再構築でも id が一定なら状態が持続し、アニメは 1 回だけ走って
+  完了後は止まる（毎フレーム再スタートしない）。(3) `px()` は const fn でないので `const … : Pixels = px(..)` は不可＝`let` で持つ。
+- 次: ACP ハンドシェイクのタイムアウト可視化（持ち越し）
+
+## 2026-08-08 — ファイルタイプアイコン + composer テキスト移動 + ツール結果の折り畳み（3件）
+- やったこと:
+  - **① ファイルタイプ別アイコン**: 色付き四角のシルエット（`file_icon`）を **SVG 単色マスク**へ刷新。
+    `workspace::file_icon_path(name, is_dir, is_expanded)` を新設し拡張子/名前 → アイコンパスを引く。素材は
+    **Simple Icons（CC0）＝言語ロゴ 17**（rust/js/ts/tsx/py/go/json/yaml/toml/html/css/md/shell/c/cpp/git/docker・
+    `fill="currentColor"` 正規化）＋ **Lucide（ISC）＝汎用 5**（folder/folder-open/file/text/image）。色は既存
+    `file_type_color`（syntax パレット）で薄く付け、**形で見分け・色は識別に集約**を守る（多色ロゴにしない）。
+    フォルダは開閉で folder/folder-open 切替（ツリー=`row.is_expanded`・カラム=`on_path`）。`main.rs` の AssetSource
+    match に 22 本登録（未登録＝無音で出ない罠）。`file_icon` に `is_expanded` 引数追加＝呼び出し 2 箇所も更新。
+  - **② composer のテキスト移動**: 大半は既に Editor コンテキストで配線済み（Home/End・⌘←→・⌘↑↓・⌥←→）。
+    足したのは (a) **平坦入力（composer 等）で先頭行↑→文頭 / 末尾行↓→文末**（`move_vertical` で縦移動できなかった
+    ＝端に達したときだけ `self.plain` 限定で head を 0/len へ寄せる。主エディタは無変更）(b) **⌃A/⌃E=行頭行末**
+    （macOS 定番・`keymap_core` JSON と `bind_default_keys` の両方に追加）。
+  - **③ ツール結果（⎿）の折り畳み**: `Entry::Step` の結果を **>6 行 or >400B なら既定折り畳み**（`⎿ ▸ N 行`・
+    クリックで `▾` 全文）。展開状態は Thinking と同じく `AgentPanel.expanded_steps: HashSet<(thread_id, index)>`
+    （`is_step_expanded`/`toggle_step`）で持ち Entry は軽量なまま。要約は `step_result_summary`（複数行=「N 行」・
+    1 行=中身を 72 字で切る）。i18n `agent.result_lines` を ja/en 両方に。長いコード読み込みで transcript が流れる痛点への回答。
+  - 検証: `cargo check -p shirushi` clean・`agent_panel` 16 / `i18n` parity / `keymap_core` / `editor_core` 全 green・
+    `cargo fmt` 済み。offscreen スクショで **アイコン一覧（デモ dir＝全 22 種）と実リポジトリ**、**折り畳み `▸ 18 lines`**
+    を目視確認（短い結果はインライン・ignore フォルダは淡色・git ドット共存も確認）。
+- 学び/罠: (1) **Simple Icons は `fill` 未指定**＝GPUI 単色マスクに載せるには `fill="currentColor"` 注入が要る
+  （既存 brand-* と同じ正規化・LICENSE.md 記載）。(2) svg CDN は jsdelivr `@latest` を `curl -f` で叩くと transient で
+  誤 fail＝`-sL` ＋内容検証（`<svg` 判定）が堅い。lucide-static は v1.x に到達（0.x を pin すると全 404）。
+  (3) `zsh` は未クオート変数を単語分割しない＝配列で回す。(4) offscreen スクショの active スレッドは保存状態で変わる
+  ＝「特定スレッドを写す」検証は seed 依存にせず一時フラグで。(5) 展開状態は Entry に持たせず外部集合（毎フレーム
+  再構築される transcript と分離＝Thinking の既存設計に一貫）。
+- 次: ⌘P ファインダ/タブにも `file_icon_path` を波及（PickerItem/タブにアイコン欄）＝今回はエクスプローラ3ビューのみ
+
+## 2026-08-09 — ACP transcript の文字崩れ（1 文字ずつ改行 / 承認カードがパネルを占領）を根治
+- やったこと:
+  - **症状**: AI 全画面で承認待ちになると、権限カードがパネル全体を埋め、ツールタイトルが**1 文字ずつ縦に改行**される
+    （「全部 permission になる」）。ドック幅では代わりにツール名・パス・承認ボタンが**パネル外へはみ出して切れる**。
+  - **原因**（実測で確定）: flex **行**の子に `min_w_0()` を**単独で**付けていた。GPUI/taffy 下ではこれが幅 0 に潰れ、
+    `wrap_width = 0` でシェイプされて 1 文字ずつ折り返す。offscreen 実機（`SHIRUSHI_AGENT_FULLSCREEN` + `SHIRUSHI_ACP_PROBE`
+    + `on_children_prepainted` で bounds を出力）で、**同一本文・行幅 1364px** の比較を取った:
+    `min_w_0` のみ → **0px × 2540px** / `flex_1` + `min_w_0` → 1260px × 20px / 無指定 → 826px × 20px。
+  - **直し**: 折返す側は `flex_1()` + `min_w_0()` を**セット**にする規約をモジュール冒頭に明文化し、該当箇所を修正 —
+    権限カードのタイトル（+ ラベルは `flex_none`）/ `Entry::Step` の body・ツール名・パス / ツール結果（⎿）の
+    折り畳み列と要約 / Thinking の本文列。管制・編隊の `min_w_0` 単独（`overflow_hidden` + `nowrap` なので消えるだけ）も同様に是正。
+  - **ついでに 2 件**: (a) 承認ボタンのラベルは ACP エージェント任せで長さ無制限（`Always Allow access to /very/long/path`）
+    ＝**中央省略**（`ellipsize_middle`・42 字）+ 全文 tooltip でカード内に収めた。(b) Claude の Write/Edit は title に
+    パスを載せるため、同じパスが Step ヘッダに 2 回並んでいた ＝ `tool.contains(args)` なら args を出さない。
+  - 検証: `cargo fmt` / `cargo check -p shirushi` clean・`agent_panel` 16 / `workspace` 25 green。
+    実 ACP（claude-agent-acp）で **AI 全画面とドックの両方**を offscreen スクショし、Write/Bash/Read の各ステップ・
+    権限カード・markdown 本文が**すべてパネル内に収まる**ことを目視確認。
+- 学び/罠:
+  - **GPUI のテキストは min-content を max-content と同値で返す**（`AvailableSpace::MinContent` では `wrap_width = None`
+    ＝折り返さずに測る）。したがって flex 行のテキストは既定（`min-width: auto`）では**縮まない＝はみ出す**。
+    かといって `min_w_0` を単独で足すと**幅 0 まで潰れる**。「縮む余地」と「伸びる意思」は必ずセットで書く。
+  - 幅の崩れは**広い方（AI 全画面）で顕在化する**ことがある。狭いドックだけ見て「収まっている」と判断しない。
+  - レイアウト崩れの原因究明は `Div::on_children_prepainted` で子の `Bounds` を吐くのが最短
+    （`Stateful<Div>` には生えていないので、調べる間だけ `.id()` を外す）。
+  - **追い直し（同日）**: Step 見出しでツール名とパスを両方 `flex_1` にすると左右 50/50 に割れて
+    パスが右へ離れる。`max_w_full()` で頭打ちにする案は**単独タイトルがまた 0 幅に潰れた**（実測 0px × 2500px。
+    `flex_none()` を足しても潰れる＝max-width の頭打ち自体が引き金）。最終形は**場合分け**にした:
+    パスを併記する時（短いツール名）はタイトル `flex_none` + パス `flex_1`+`min_w_0`（＝直後に並ぶ・実測 111px / 1255px）、
+    タイトルが長い or パス無しの時はタイトルが `flex_1`+`min_w_0` で全幅を折返し、パスは次の行へ落とす
+    （境目は `STEP_TITLE_INLINE_MAX_CHARS = 48`）。行の揃えは `items_baseline` → `items_start`
+    （baseline だとパス折返し時にツール名が 1 行ぶん沈んで ⏺ とズレた）。
+- 次: ROADMAP の次の受入条件へ（この修正は M13 公開準備のバグ潰しとして計上）
+
+## 2026-08-17 — Agent の取り違え・途中変更・メニュー dismiss・起動遅延
+- **復元時に Codex が Claude Code へ戻る原因を修正**: `threads` が Agent を保存しておらず、復元は
+  `Thread::empty` の `Claude Code` 固定値になっていた。nullable `threads.agent` を冪等 migration で追加し、
+  upsert/load 往復へ接続。旧行だけ現在の明示既定へフォールバックする。
+- **Agent は最初の送信後に固定**: 未送信 thread だけ Agent ピルを開ける。開始後はシェブロンを消し、tooltip で
+  新規 thread を案内。防御側の `select_option`/`toggle_menu` にも guard を置き、UI 以外から混在させない。
+- **ピルのメニューは外側 mouse-down で閉じる**: タブ・transcript・別ピル・パネル外のクリックを一律 dismiss。
+- **遅延根治**: 初回 composer 描画から `claude auth status` / `codex login status`（各最大2秒）を同期実行していた。
+  キャッシュ初期化は env/資格情報ファイルの存在だけにし、status + ACP probe は Settings の背景 refresh に限定。
+  明示 `default_agent` は認証確認の一時状態で別 Agent へフォールバックしない。

@@ -14,3 +14,4 @@ agent-client-protocol.workspace = true
 blocking.workspace = true
 futures.workspace = true
 host.workspace = true
+async-io.workspace = true

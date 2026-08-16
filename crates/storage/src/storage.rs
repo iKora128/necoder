@@ -682,28 +682,31 @@ impl Storage {
         color_index: i64,
         project: &str,
         branch: Option<&str>,
+        agent: Option<&str>,
         model: Option<&str>,
         tokens_used: i64,
         tokens_limit: i64,
     ) -> Result<()> {
         let (id, name, project) = (id.to_string(), name.to_string(), project.to_string());
         let branch = branch.map(str::to_string);
+        let agent = agent.map(str::to_string);
         let model = model.map(str::to_string);
         let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
                 conn.execute(
-                    "INSERT INTO threads (id, name, color_index, project, branch, model, tokens_used, tokens_limit, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                    "INSERT INTO threads (id, name, color_index, project, branch, agent, model, tokens_used, tokens_limit, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
                      ON CONFLICT(id) DO UPDATE SET
                         name = ?2, color_index = ?3, project = ?4, branch = ?5,
-                        model = ?6, tokens_used = ?7, tokens_limit = ?8, updated_at = ?9",
+                        agent = ?6, model = ?7, tokens_used = ?8, tokens_limit = ?9, updated_at = ?10",
                     (
                         id.as_str(),
                         name.as_str(),
                         color_index,
                         project.as_str(),
                         branch.as_deref(),
+                        agent.as_deref(),
                         model.as_deref(),
                         tokens_used,
                         tokens_limit,
@@ -735,8 +738,25 @@ impl Storage {
         })
     }
 
+    /// スレッドを会話ごと削除する（threads 1 行 + その turns 全行）。
+    /// 過去バージョンが新プロジェクトへ種付けしたデモスレッドの掃除（agent_panel・2026-08-17）に使う。
+    pub fn delete_thread(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute("DELETE FROM turns WHERE thread_id = ?1", (id.as_str(),))
+                    .await
+                    .context("turns の削除に失敗")?;
+                conn.execute("DELETE FROM threads WHERE id = ?1", (id.as_str(),))
+                    .await
+                    .context("threads の削除に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
     /// 全スレッドのメタ（updated_at 降順）。
-    /// 戻り値: (id, name, color_index, project, branch, model, tokens_used, tokens_limit,
+    /// 戻り値: (id, name, color_index, project, branch, agent, model, tokens_used, tokens_limit,
     ///          created_at, last_input_at)。
     /// last_input_at = 最後の user turn の時刻（unix ms・入力が無ければ None）。スキーマは
     /// 変えず turns から導出する（「いつスタートして最終いつ入力したか」の表示用・M14）。
@@ -751,6 +771,7 @@ impl Storage {
             String,
             Option<String>,
             Option<String>,
+            Option<String>,
             i64,
             i64,
             i64,
@@ -761,7 +782,7 @@ impl Storage {
             futures::executor::block_on(async {
                 let mut rows = conn
                     .query(
-                        "SELECT id, name, color_index, project, branch, model, tokens_used, tokens_limit,
+                        "SELECT id, name, color_index, project, branch, agent, model, tokens_used, tokens_limit,
                                 created_at,
                                 (SELECT MAX(created_at) FROM turns
                                   WHERE turns.thread_id = threads.id AND turns.role = 'user')
@@ -779,10 +800,11 @@ impl Storage {
                         row.get_value(3)?.as_text().context("project")?.clone(),
                         row.get_value(4)?.as_text().cloned(),
                         row.get_value(5)?.as_text().cloned(),
-                        *row.get_value(6)?.as_integer().context("used")?,
-                        *row.get_value(7)?.as_integer().context("limit")?,
-                        *row.get_value(8)?.as_integer().context("created")?,
-                        row.get_value(9)?.as_integer().copied(),
+                        row.get_value(6)?.as_text().cloned(),
+                        *row.get_value(7)?.as_integer().context("used")?,
+                        *row.get_value(8)?.as_integer().context("limit")?,
+                        *row.get_value(9)?.as_integer().context("created")?,
+                        row.get_value(10)?.as_integer().copied(),
                     ));
                 }
                 Ok(result)
@@ -1274,6 +1296,7 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
             color_index INTEGER NOT NULL,
             project TEXT NOT NULL,
             branch TEXT,
+            agent TEXT,
             model TEXT,
             tokens_used INTEGER NOT NULL DEFAULT 0,
             tokens_limit INTEGER NOT NULL DEFAULT 0,
@@ -1285,6 +1308,17 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("threads 作成に失敗")?;
+    // 旧 DB は agent を保存していなかったため、復元すると全スレッドが Claude Code に戻っていた。
+    // nullable のまま足し、旧行だけ UI 側で現在の明示既定へ一方向フォールバックする。
+    let has_agent = conn
+        .query("SELECT agent FROM threads LIMIT 0", ())
+        .await
+        .is_ok();
+    if !has_agent {
+        conn.execute("ALTER TABLE threads ADD COLUMN agent TEXT", ())
+            .await
+            .context("threads.agent の追加に失敗")?;
+    }
     conn.execute(
         "CREATE TABLE IF NOT EXISTS turns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1683,6 +1717,41 @@ mod tests {
     }
 
     #[test]
+    fn delete_thread_removes_thread_and_turns() {
+        let path = temp_db("delete-thread");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("seed", "tab色分け", 1, "proj", None, None, None, 0, 200_000)
+            .unwrap();
+        storage
+            .upsert_thread(
+                "keep",
+                "実スレッド",
+                2,
+                "proj",
+                None,
+                None,
+                None,
+                100,
+                200_000,
+            )
+            .unwrap();
+        storage
+            .insert_turn("seed", "user", "消える側の turn")
+            .unwrap();
+        storage.delete_thread("seed").unwrap();
+        let names: Vec<String> = storage
+            .load_threads()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.1)
+            .collect();
+        assert_eq!(names, vec!["実スレッド".to_string()]);
+        assert!(storage.load_recent_turns("seed", 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn threads_and_turns_round_trip() {
         let path = temp_db("threads");
         let _ = std::fs::remove_file(&path);
@@ -1694,6 +1763,7 @@ mod tests {
                 0,
                 "shirushi",
                 Some("main"),
+                Some("Codex"),
                 Some("claude"),
                 1200,
                 200_000,
@@ -1708,13 +1778,14 @@ mod tests {
                 0,
                 "shirushi",
                 Some("main"),
+                Some("Codex"),
                 Some("claude"),
                 2400,
                 200_000,
             )
             .unwrap();
         storage
-            .upsert_thread("t2", "別スレッド", 1, "probe", None, None, 0, 0)
+            .upsert_thread("t2", "別スレッド", 1, "probe", None, None, None, 0, 0)
             .unwrap();
 
         let threads = storage.load_threads().unwrap();
@@ -1722,13 +1793,20 @@ mod tests {
         // updated_at 降順 = 直近更新の t2 or t1（同時刻あり得るので集合で確認）
         assert!(threads
             .iter()
-            .any(|t| t.0 == "t1" && t.1 == "rope設計（改名）" && t.6 == 2400));
+            .any(|t| t.0 == "t1" && t.1 == "rope設計（改名）" && t.7 == 2400));
         // 時刻の導出（M14）: created_at は正の unix ms・last_input_at は user turn がある t1 だけ Some。
         let t1 = threads.iter().find(|t| t.0 == "t1").unwrap();
-        assert!(t1.8 > 0, "created_at が入る");
-        assert!(t1.9.is_some(), "user turn があるので last_input_at は Some");
+        assert_eq!(t1.5.as_deref(), Some("Codex"));
+        assert!(t1.9 > 0, "created_at が入る");
+        assert!(
+            t1.10.is_some(),
+            "user turn があるので last_input_at は Some"
+        );
         let t2 = threads.iter().find(|t| t.0 == "t2").unwrap();
-        assert!(t2.9.is_none(), "入力の無いスレッドの last_input_at は None");
+        assert!(
+            t2.10.is_none(),
+            "入力の無いスレッドの last_input_at は None"
+        );
         let turns = storage.load_recent_turns("t1", 10).unwrap();
         assert_eq!(
             turns,
@@ -1821,13 +1899,14 @@ mod tests {
                 0,
                 "shirushi",
                 Some("main"),
+                Some("Codex"),
                 Some("claude"),
                 1200,
                 200_000,
             )
             .unwrap();
         storage
-            .upsert_thread("t2", "閉じた", 1, "probe", None, None, 500, 0)
+            .upsert_thread("t2", "閉じた", 1, "probe", None, None, None, 500, 0)
             .unwrap();
         storage.archive_thread("t2").unwrap();
         // load_threads は archived を除外（1 件）。

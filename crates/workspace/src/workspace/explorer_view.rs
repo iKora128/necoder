@@ -253,7 +253,7 @@ impl Workspace {
                         .text_color(theme.fg2)
                         .child(SharedString::from(chevron.to_string())),
                 )
-                .child(file_icon(&row.name, is_dir, &theme))
+                .child(file_icon(&row.name, is_dir, row.is_expanded, &theme))
                 .child(
                     div()
                         .flex_1()
@@ -463,7 +463,12 @@ impl Workspace {
                                     .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
                                     .when(on_path, |element| element.bg(theme.bg3))
                                     .when(is_ignored, |element| element.opacity(0.45))
-                                    .child(file_icon(&entry.name, is_dir, &theme))
+                                    .child(file_icon(
+                                        &entry.name,
+                                        is_dir,
+                                        is_dir && on_path,
+                                        &theme,
+                                    ))
                                     .child(
                                         div()
                                             .flex_1()

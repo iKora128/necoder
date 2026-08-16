@@ -1086,6 +1086,29 @@ impl Workspace {
             })
     }
 
+    /// AI 全画面時の中央列（2026-08-08 改訂）。**エディタの代わりに Agent パネルを中央へ据える**だけで、
+    /// 下ドック（ターミナル）は `render_center` と同じく列の下に積む（起動していれば残る・本人要望）。
+    /// 左ドックと右ドックの取り回しは呼び出し側（`Workspace::render`）が各自の ON/OFF で決める。
+    pub(crate) fn render_agent_full_center(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme.clone();
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .bg(theme.bg1)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(self.agent_panel.clone()),
+            )
+            .when(self.chrome.show_bottom, |element| {
+                element.child(self.render_bottom_dock(cx))
+            })
+    }
+
     /// solo の下ドック（ターミナル）。編隊の下段と同じ `bottom_height` を上縁ドラッグで共有する
     /// （2026-07-27。以前は TerminalDock 側の固定 240px で、伸ばせなかった）。
     pub(crate) fn render_bottom_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1285,15 +1308,8 @@ impl Workspace {
         let (errors, warnings) = self.active_diagnostic_counts(cx);
         let error_color = if errors > 0 { theme.err } else { theme.fg2 };
         let warning_color = if warnings > 0 { theme.warn } else { theme.fg2 };
-        // 管制マスコット表示中は 10fps 時計の 5 tick、通常画面では 2fps 時計の 1 tick ごとに反転。
-        // どちらも GPUI の 60fps Animation を使わない低頻度の承認待ち signal。
-        let control_clock =
-            self.chrome.fleet_mode && self.chrome.fleet_center_view == FleetCenterView::Control;
-        let attention_bright = if control_clock {
-            (self.visual_tick / 5) % 2 == 0
-        } else {
-            self.visual_tick % 2 == 0
-        };
+        // 承認待ち signal は1Hz時計だけで反転。マスコットの5/10fps時計とは共有しない。
+        let attention_bright = self.visual_tick % 2 == 0;
         let left = div()
             .flex()
             .items_center()

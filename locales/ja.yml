@@ -16,7 +16,10 @@ agent:
   waiting_permission: 承認待ちで停止中
   todos: Todos
   copy_tip: このエントリをコピー
+  jump_to_previous_user: 前の指示へ
+  jump_to_latest: 最新へ
   pill_agent: エージェント（どの AI で話すか）
+  pill_agent_locked: エージェントは会話開始後に変更できません。別の AI を使うには新しいスレッドを作成してください
   pill_mode: 権限モード（編集・実行の許可レベル）
   pill_model: モデル
   pill_effort: 推論の深さ（effort）
@@ -55,6 +58,7 @@ agent:
   attach_tip: ファイルを文脈に添付
   compact_tip: 文脈を要約して圧縮する（/compact）
   output_truncated: "… (%{n} 行省略)"
+  result_lines: "%{n} 行"
   hint_submit_enter: ⏎ 送信 / ⇧⏎ 改行
   hint_submit_cmd: ⏎ 改行 / ⌘⏎ 送信
   ime_tip: Enter の挙動を切替（送信 ⇄ 改行）。日本語 IME の変換確定では送信しません
@@ -106,6 +110,8 @@ cmd:
   close_tab: "ファイル: タブを閉じる"
   restore_closed_tab: "ファイル: 閉じたタブを復元"
   project_switcher: "プロジェクト: 切り替え / worktree…"
+  next_project: "プロジェクト: 次へ（レール下）"
+  prev_project: "プロジェクト: 前へ（レール上）"
   new_window: "プロジェクト: 新しいウィンドウで開く"
   buffer_search: "検索: このファイル"
   buffer_replace: "検索: 置換つき"
@@ -301,14 +307,22 @@ titlebar:
 settings:
   title: 設定
   agents_heading: AI エージェント
-  agents_sub: 既定を選ぶと新しいスレッドがそれで開きます。認証は各 CLI 側（Shirushi は鍵を持ちません）。
+  agents_sub: ローカル CLI と ACP を確認し、利用可能なものだけ選択できます。認証情報を Shirushi は保存しません。
   installed: 導入済み
   available_npx: 初回に取得（npx）
   not_installed: 未導入
+  agent_checking: 確認中…
+  agent_available: 利用可能
+  agent_configured: 設定あり・未確認
+  agent_signed_out: 未ログイン
+  logged_in: ログイン済み
+  login_required: ログインが必要
+  login_status_unknown: ログイン状態は CLI で確認
   make_default: 既定にする
   is_default: ★ 既定
   login: ログイン
-  install: 入れ方
+  open_cli: CLI を開く
+  install: 導入
   welcome_title: ようこそ 🎨
   welcome_sub: 使うエージェントを選んで始めましょう。あとから ⚙ でいつでも変えられます。
   get_started: これで始める →

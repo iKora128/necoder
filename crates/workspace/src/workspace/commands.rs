@@ -31,6 +31,14 @@ impl CommandRegistry {
                 action_name: "workspace::ProjectSwitcher",
             },
             CommandEntry {
+                label_key: "cmd.next_project",
+                action_name: "workspace::NextProject",
+            },
+            CommandEntry {
+                label_key: "cmd.prev_project",
+                action_name: "workspace::PrevProject",
+            },
+            CommandEntry {
                 label_key: "cmd.new_window",
                 action_name: "workspace::NewWindow",
             },
