@@ -543,8 +543,7 @@ fn streaming_styled_text(
     // 重なりは解消しないため、run 長の合計が本文を超え gpui の layout_line が split_at で abort する。
     // 確定経路（CachedStyledTextView::render）と同じく、まず combine_highlights で非重複・昇順の run へ
     // 畳んでから snap する（重なった装飾は .highlight() でマージされ視覚的にも正しい）。
-    let highlights =
-        gpui::combine_highlights(highlights, std::iter::empty()).collect::<Vec<_>>();
+    let highlights = gpui::combine_highlights(highlights, std::iter::empty()).collect::<Vec<_>>();
     let highlights = snap_highlights_to_char_boundaries(&text, highlights);
     let mut styled = StyledText::new(SharedString::from(text));
     if !highlights.is_empty() {
@@ -4847,6 +4846,74 @@ impl AgentPanel {
         }
     }
 
+    /// 直近のユーザー発話（＝いまの問い）を transcript 上部に固定表示する帯。長い回答を
+    /// スクロールしても「何を頼んだか」を見失わないための常設リマインダで、tail-follow で
+    /// 空きがちな上部の余白も埋める。クリックで最新（回答の末尾）へスクロールする。
+    fn render_pinned_prompt(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let entries = &self.threads.get(self.active)?.entries;
+        let last_user = entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::User(_)))?;
+        // 直近の問いがビューポート上端より上に隠れている時だけ固定表示する。まだ見えている
+        // （＝上部に余白が無い短いスレッド）なら transcript の User エントリと重複させない。
+        let top_item = self.transcript_list.logical_scroll_top().item_ix;
+        if last_user >= top_item {
+            return None;
+        }
+        let prompt = match &entries[last_user] {
+            Entry::User(text) => text.clone(),
+            _ => return None,
+        };
+        let theme = self.theme.clone();
+        let color = self.active_color();
+        Some(
+            div()
+                .id("pinned-prompt")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(6.))
+                .bg(theme.bg1)
+                .border_b_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg2))
+                // 左の色バーはユーザー発話（transcript の User エントリ）と同じ識別色で「あなたの問い」を示す。
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(2.))
+                        .h(px(14.))
+                        .rounded(px(1.))
+                        .bg(color.alpha(0.7)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate() // 1 行に省略（全文は transcript 側にある）
+                        .text_size(px(11.5))
+                        .text_color(theme.fg1)
+                        .child(prompt),
+                )
+                .tooltip(Tooltip::text(
+                    i18n::t!("agent.jump_to_latest"),
+                    theme.clone(),
+                ))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.transcript_list.scroll_to_end();
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_meta(&self, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
@@ -6621,6 +6688,8 @@ impl Render for AgentPanel {
                 AgentTabsView::List => self.render_thread_list(cx),
             })
             .child(self.render_meta(active, cx))
+            // いまの問い（直近のユーザー発話）を上部に固定（長い回答でも見失わない・上部余白も埋める）。
+            .children(self.render_pinned_prompt(cx))
             // エージェントの実行プラン（あれば transcript 上部に常設・M12-9）。
             .children(self.render_plan())
             // transcript は relative コンテナに入れ、右下へ「最新へ」ボタンを浮かべる（scroll 面の外＝
