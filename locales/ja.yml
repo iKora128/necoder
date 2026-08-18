@@ -59,6 +59,9 @@ agent:
   compact_tip: 文脈を要約して圧縮する（/compact）
   output_truncated: "… (%{n} 行省略)"
   result_lines: "%{n} 行"
+  code_show_more: "… 残り %{n} 行を表示"
+  code_collapse: コードを折りたたむ
+  code_streaming_more: "… 実行中（%{n} 行）"
   hint_submit_enter: ⏎ 送信 / ⇧⏎ 改行
   hint_submit_cmd: ⏎ 改行 / ⌘⏎ 送信
   ime_tip: Enter の挙動を切替（送信 ⇄ 改行）。日本語 IME の変換確定では送信しません

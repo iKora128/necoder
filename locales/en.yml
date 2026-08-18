@@ -58,6 +58,9 @@ agent:
   compact_tip: Summarize and compact the context (/compact)
   output_truncated: "… (%{n} lines hidden)"
   result_lines: "%{n} lines"
+  code_show_more: "… show %{n} more lines"
+  code_collapse: Collapse code
+  code_streaming_more: "… streaming (%{n} lines)"
   hint_submit_enter: ⏎ send / ⇧⏎ newline
   hint_submit_cmd: ⏎ newline / ⌘⏎ send
   ime_tip: Toggle Enter behavior (send ⇄ newline). IME confirm never sends

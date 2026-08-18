@@ -143,6 +143,7 @@ impl Workspace {
             }
             agent_panel::PanelEvent::PermissionWaiting {
                 thread,
+                thread_index,
                 color,
                 title,
                 muted,
@@ -171,12 +172,13 @@ impl Workspace {
                     );
                 }
                 if !muted {
-                    self.push_toast(
+                    self.push_toast_linked(
                         SharedString::from(format!(
                             "● {thread} — {}",
                             i18n::t!("agent.waiting_permission")
                         )),
                         *color,
+                        Some((session_index, *thread_index)),
                         cx,
                     );
                 }
@@ -308,9 +310,23 @@ impl Workspace {
 
     /// トーストを積む（右下・5 秒で自動で消える・UI-SPEC §8）。
     pub(crate) fn push_toast(&mut self, text: SharedString, color: Hsla, cx: &mut Context<Self>) {
+        self.push_toast_linked(text, color, None, cx);
+    }
+
+    /// ジャンプ先つきトースト。`link = Some((session_index, thread_index))` ならクリックで
+    /// そのプロジェクト＋スレッドへ切り替える（権限待ち通知を押して当該タブへ飛ぶ・#2）。
+    pub(crate) fn push_toast_linked(
+        &mut self,
+        text: SharedString,
+        color: Hsla,
+        link: Option<(usize, usize)>,
+        cx: &mut Context<Self>,
+    ) {
         self.notifications.toast_gen = self.notifications.toast_gen.wrapping_add(1);
         let generation = self.notifications.toast_gen;
-        self.notifications.toasts.push((text, color, generation));
+        self.notifications
+            .toasts
+            .push((text, color, generation, link));
         if self.notifications.toasts.len() > 4 {
             self.notifications.toasts.remove(0);
         }
@@ -323,15 +339,41 @@ impl Workspace {
                 workspace
                     .notifications
                     .toasts
-                    .retain(|(_, _, gen)| *gen != generation);
+                    .retain(|(_, _, gen, _)| *gen != generation);
                 cx.notify();
             });
         })
         .detach();
     }
 
+    /// 通知（トースト等）から権限待ちスレッドへ飛ぶ。編隊/通常で herd 行クリックと同じ挙動にする。
+    pub(crate) fn jump_to_thread(
+        &mut self,
+        session_index: usize,
+        thread_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if session_index >= self.project_sessions.sessions.len() {
+            return;
+        }
+        if self.chrome.fleet_mode {
+            // 編隊モードは Agent ドックを出さない。当該エージェントをグリッドに出して拡大する。
+            self.reveal_agent_in_fleet(session_index, thread_index, window, cx);
+        } else {
+            self.switch_project(session_index, window, cx);
+            let panel = self.project_sessions.sessions[session_index]
+                .agent_panel
+                .clone();
+            panel.update(cx, |panel, cx| panel.focus_thread(thread_index, cx));
+            self.chrome.show_right = true;
+            self.agent_active = true;
+            cx.notify();
+        }
+    }
+
     /// トースト描画（右下スタック・M12-5）。
-    pub(crate) fn render_toasts(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_toasts(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.notifications.toasts.is_empty() {
             return None;
         }
@@ -344,33 +386,41 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .children(
-                    self.notifications
-                        .toasts
-                        .iter()
-                        .map(|(text, color, generation)| {
-                            div()
-                                .id(("toast", *generation as usize))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .px(px(12.))
-                                .py(px(8.))
-                                .bg(theme.bg2)
-                                .border_1()
-                                .border_color(color.alpha(0.5))
-                                .rounded(px(8.))
-                                .shadow(vec![gpui::BoxShadow::new(
-                                    px(0.),
-                                    px(6.),
-                                    gpui::hsla(0., 0., 0., 0.4),
-                                )
-                                .blur_radius(px(16.))])
-                                .text_size(px(12.))
-                                .text_color(theme.fg0)
-                                .child(text.clone())
-                        }),
-                )
+                .children(self.notifications.toasts.iter().map(
+                    |(text, color, generation, link)| {
+                        let mut toast = div()
+                            .id(("toast", *generation as usize))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(12.))
+                            .py(px(8.))
+                            .bg(theme.bg2)
+                            .border_1()
+                            .border_color(color.alpha(0.5))
+                            .rounded(px(8.))
+                            .shadow(vec![gpui::BoxShadow::new(
+                                px(0.),
+                                px(6.),
+                                gpui::hsla(0., 0., 0., 0.4),
+                            )
+                            .blur_radius(px(16.))])
+                            .text_size(px(12.))
+                            .text_color(theme.fg0)
+                            .child(text.clone());
+                        // ジャンプ先つき（権限待ち）はクリックで当該タブへ飛べるようにする（#2）。
+                        if let Some((session_index, thread_index)) = *link {
+                            toast = toast.cursor_pointer().on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.jump_to_thread(session_index, thread_index, window, cx);
+                                }),
+                            );
+                        }
+                        toast
+                    },
+                ))
                 .into_any_element(),
         )
     }

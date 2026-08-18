@@ -538,6 +538,13 @@ fn streaming_styled_text(
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
 ) -> gpui::AnyElement {
+    // markdown のインライン装飾は重なる/未ソートになりうる（`***太字***` は Strong と Emphasis を
+    // 同一レンジで二重に、`**`code`**` は Strong が Code を内包）。snap は端点を文字境界へ丸めるだけで
+    // 重なりは解消しないため、run 長の合計が本文を超え gpui の layout_line が split_at で abort する。
+    // 確定経路（CachedStyledTextView::render）と同じく、まず combine_highlights で非重複・昇順の run へ
+    // 畳んでから snap する（重なった装飾は .highlight() でマージされ視覚的にも正しい）。
+    let highlights =
+        gpui::combine_highlights(highlights, std::iter::empty()).collect::<Vec<_>>();
     let highlights = snap_highlights_to_char_boundaries(&text, highlights);
     let mut styled = StyledText::new(SharedString::from(text));
     if !highlights.is_empty() {
@@ -661,8 +668,24 @@ fn render_streaming_markdown(
                 .into_any_element(),
             markdown::Block::Code { lang, text } => {
                 let language = lang.as_deref().and_then(lang::LanguageId::from_name);
-                let highlights = streaming_syntax_highlights(theme, syntax_cache, language, &text);
-                div()
+                // 実行中の最新出力（入力欄の直上）が長いコードで画面を専有しないよう、先頭数行に丸める。
+                // トグルは持たない（完了後は render_markdown 側の折り畳みへ引き継がれる）。
+                let total_lines = text.lines().count();
+                let truncated = total_lines > CODE_COLLAPSE_MIN_LINES;
+                let shown_text = if truncated {
+                    text.lines()
+                        .take(CODE_COLLAPSE_HEAD_LINES)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    text
+                };
+                let highlights =
+                    streaming_syntax_highlights(theme, syntax_cache, language, &shown_text);
+                let mut card = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
                     .rounded(px(6.))
                     .bg(theme.bg2)
                     .border_1()
@@ -672,8 +695,19 @@ fn render_streaming_markdown(
                     .font_family("Guguru Sans Code")
                     .text_size(px(11.5))
                     .text_color(theme.fg0)
-                    .child(streaming_styled_text(text, highlights))
-                    .into_any_element()
+                    .child(streaming_styled_text(shown_text, highlights));
+                if truncated {
+                    card = card.child(
+                        div()
+                            .pt(px(1.))
+                            .text_size(px(11.))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(
+                                i18n::t!("agent.code_streaming_more", "n" => total_lines),
+                            )),
+                    );
+                }
+                card.into_any_element()
             }
             markdown::Block::ListItem {
                 depth,
@@ -835,8 +869,10 @@ pub enum PanelEvent {
         muted: bool,
     },
     /// 権限待ちで停止中（裏の窓でも気づけるように）。`title` = 何の許可か（digest 素材・P1）。
+    /// `thread_index` = このパネル内でのスレッド添字（右下トーストのクリックで当該タブへ飛ぶのに使う）。
     PermissionWaiting {
         thread: SharedString,
+        thread_index: usize,
         color: Hsla,
         title: SharedString,
         muted: bool,
@@ -1192,6 +1228,12 @@ fn infer_language_from_tool_argument(value: &str) -> Option<lang::LanguageId> {
 const STEP_COLLAPSE_MIN_LINES: usize = 6;
 const STEP_COLLAPSE_MIN_BYTES: usize = 400;
 
+/// AI 応答本文の fenced コードブロックを折り畳む閾値。これを超える行数のコードは既定で
+/// 先頭 [`CODE_COLLAPSE_HEAD_LINES`] 行だけ見せ、残りはトグルで開く（入力欄直上の最新出力が
+/// 長いコードで画面を専有するのを防ぐ）。短いコードは畳む価値がないのでそのまま出す。
+const CODE_COLLAPSE_MIN_LINES: usize = 12;
+const CODE_COLLAPSE_HEAD_LINES: usize = 8;
+
 /// ステップ見出しでツール名とパスを 1 行に並べる上限（これを超えるとパスは次行へ）。
 /// `Read README.md` + パスのような短い名前だけを同じ行に置き、長いタイトルは折返しに専念させる。
 const STEP_TITLE_INLINE_MAX_CHARS: usize = 48;
@@ -1366,6 +1408,9 @@ pub struct AgentPanel {
     /// 展開したツール結果（⎿）。既定は折り畳み＝長いコード読み込みで transcript が流れないように
     /// （`expanded_thoughts` と同じく `(thread.id, entry index)` を外部集合で保持し Entry は軽量に保つ）。
     expanded_steps: std::collections::HashSet<(String, usize)>,
+    /// 展開した AI 応答内コードブロック（`(thread.id, entry index, block index)`）。既定は折り畳み。
+    /// entry 内に複数コードが在り得るので block index まで鍵に含める。
+    expanded_code: std::collections::HashSet<(String, usize, usize)>,
     /// この panel の window がアクティブか（render で更新・GPUI が activation 変化で再描画するので追従する）。
     /// 完了音は**非アクティブ時のみ**鳴らす（見ている画面に音は要らない・P2）。
     window_active: bool,
@@ -1594,6 +1639,7 @@ impl AgentPanel {
             second_ticker: false,
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_steps: std::collections::HashSet::new(),
+            expanded_code: std::collections::HashSet::new(),
             window_active: true,
             composer_height: COMPOSER_INPUT_DEFAULT,
             resizing_composer: false,
@@ -3137,7 +3183,7 @@ impl AgentPanel {
                     let mode_id = thread
                         .available_modes
                         .iter()
-                        .find(|(_, name)| *name == value)
+                        .find(|(_, name)| name.eq_ignore_ascii_case(&value))
                         .map(|(id, _)| id.to_string());
                     if let (Some(mode_id), Some(command_tx)) = (mode_id, &thread.command_tx) {
                         command_tx
@@ -3652,13 +3698,16 @@ impl AgentPanel {
                 // Configs と同じく、スレッドが望むモード（前タブから引き継いだ `permission_mode`）を正とする。
                 // 広告に在れば `set_mode` でエージェントを合わせ、無ければ広告 current を採用する。
                 let desired = thread.permission_mode.clone();
+                // 静的候補（小文字 "bypass permissions"）と広告名（Title Case "Bypass Permissions"）は
+                // 表記が食い違うため、完全一致だと必ず None に落ちて default へ戻っていた（bypass が効かない元凶）。
+                // 大文字小文字を無視して照合し、一致したら permission_mode を広告名へ正規化してピル表示も揃える。
                 let desired_id = thread
                     .available_modes
                     .iter()
-                    .find(|(_, name)| *name == desired)
-                    .map(|(id, _)| id.clone());
+                    .find(|(_, name)| name.eq_ignore_ascii_case(&desired))
+                    .map(|(id, name)| (id.clone(), name.clone()));
                 match desired_id {
-                    Some(mode_id) => {
+                    Some((mode_id, canonical_name)) => {
                         if mode_id != advertised_current {
                             if let Some(command_tx) = &thread.command_tx {
                                 command_tx
@@ -3666,7 +3715,8 @@ impl AgentPanel {
                                     .ok();
                             }
                         }
-                        thread.current_mode_id = mode_id; // permission_mode（表示名）は desired のまま
+                        thread.current_mode_id = mode_id;
+                        thread.permission_mode = canonical_name; // 広告名へ正規化（以後の照合は完全一致で通る）
                     }
                     None => {
                         // desired を提供しないエージェント → 広告 current を採用（フォールバック）。
@@ -3930,6 +3980,7 @@ impl AgentPanel {
             if let Some(thread) = self.threads.get(thread_index) {
                 cx.emit(PanelEvent::PermissionWaiting {
                     thread: thread.name.clone(),
+                    thread_index,
                     color: thread.color,
                     title: thread
                         .pending_permission
@@ -5605,7 +5656,7 @@ impl AgentPanel {
                 .gap(px(6.))
                 .text_size(px(12.5))
                 .text_color(theme.fg0)
-                .children(self.render_markdown(text, cx))
+                .children(self.render_markdown(index, text, cx))
                 .into_any_element(),
         }
     }
@@ -5613,13 +5664,19 @@ impl AgentPanel {
     /// markdown テキストをブロック列（GPUI 要素）へ描く。各ブロック = 1 選択リージョン（M13）で、
     /// 装飾は `combine_highlights` で選択背景と安全に合成される。インラインコードは mono 不可
     /// （`HighlightStyle` に font-family が無い）ため syn-mac 色 + 薄背景で表す。表・引用装飾は後続。
-    fn render_markdown(&self, text: &str, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+    fn render_markdown(
+        &self,
+        entry_index: usize,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let blocks = self.markdown_cache.borrow_mut().parse(text);
         blocks
             .iter()
             .cloned()
-            .map(|block| match block {
+            .enumerate()
+            .map(|(block_index, block)| match block {
                 markdown::Block::Heading { level, text, spans } => {
                     let size = match level {
                         1 => 16.0,
@@ -5640,8 +5697,24 @@ impl AgentPanel {
                     .into_any_element(),
                 markdown::Block::Code { lang, text } => {
                     let language = lang.as_deref().and_then(lang::LanguageId::from_name);
-                    let highlights = self.syntax_highlights(language, &text);
-                    div()
+                    let total_lines = text.lines().count();
+                    let collapsible = total_lines > CODE_COLLAPSE_MIN_LINES;
+                    let expanded = self.is_code_expanded(entry_index, block_index);
+                    // 長いコードは既定で先頭 CODE_COLLAPSE_HEAD_LINES 行だけ見せ、残りはトグルで開く。
+                    let shown_text: SharedString = if !collapsible || expanded {
+                        text.clone().into()
+                    } else {
+                        text.lines()
+                            .take(CODE_COLLAPSE_HEAD_LINES)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                            .into()
+                    };
+                    let highlights = self.syntax_highlights(language, shown_text.as_ref());
+                    let mut card = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
                         .rounded(px(6.))
                         .bg(theme.bg2)
                         .border_1()
@@ -5651,8 +5724,39 @@ impl AgentPanel {
                         .font_family("Guguru Sans Code")
                         .text_size(px(11.5))
                         .text_color(theme.fg0)
-                        .child(self.push_selectable(text.into(), highlights, cx))
-                        .into_any_element()
+                        .child(self.push_selectable(shown_text, highlights, cx));
+                    if collapsible {
+                        let hidden = total_lines.saturating_sub(CODE_COLLAPSE_HEAD_LINES);
+                        let (glyph, label) = if expanded {
+                            ("▾", SharedString::from(i18n::t!("agent.code_collapse")))
+                        } else {
+                            (
+                                "▸",
+                                SharedString::from(i18n::t!("agent.code_show_more", "n" => hidden)),
+                            )
+                        };
+                        card = card.child(
+                            div()
+                                .id(("code-fold", entry_index * 256 + block_index))
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .pt(px(1.))
+                                .cursor_pointer()
+                                .text_size(px(11.))
+                                .text_color(theme.fg2)
+                                .child(glyph)
+                                .child(label)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_code(entry_index, block_index, cx);
+                                    }),
+                                ),
+                        );
+                    }
+                    card.into_any_element()
                 }
                 markdown::Block::ListItem {
                     depth,
@@ -5813,6 +5917,29 @@ impl AgentPanel {
         let key = (id, index);
         if !self.expanded_steps.remove(&key) {
             self.expanded_steps.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn is_code_expanded(&self, entry_index: usize, block_index: usize) -> bool {
+        self.threads.get(self.active).is_some_and(|thread| {
+            self.expanded_code
+                .contains(&(thread.id.clone(), entry_index, block_index))
+        })
+    }
+
+    /// AI 応答内コードブロックの折り畳み/展開をトグルする（フッタ行クリック）。
+    fn toggle_code(&mut self, entry_index: usize, block_index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.id.clone())
+        else {
+            return;
+        };
+        let key = (id, entry_index, block_index);
+        if !self.expanded_code.remove(&key) {
+            self.expanded_code.insert(key);
         }
         cx.notify();
     }
@@ -7521,6 +7648,43 @@ mod tests {
         }
         // 先頭 run は '（' の手前（byte 8）へ縮む。
         assert_eq!(snapped[0].0, 0..8);
+    }
+
+    #[test]
+    fn streaming_overlapping_markdown_spans_stay_within_text() {
+        // 再発クラッシュ: ストリーミング中の nested markdown（`***太字***` は Strong と Emphasis を
+        // 同一レンジで二重に、`**`code`**` は Strong が Code を内包）は run が重なり、snap だけでは
+        // 合計 run 長が本文を超えて gpui の layout_line が split_at で abort する。streaming_styled_text
+        // と同じ combine→snap を通せば、run は非重複・昇順・文字境界に乗り、合計 ≤ 本文長に収まること。
+        let text = "太字コード";
+        let style = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        };
+        // `***太字コード***` 相当: Strong と Emphasis が全域で重なる（合計 2×本文長）。
+        let overlapping = vec![(0..text.len(), style), (0..text.len(), style)];
+        let combined =
+            gpui::combine_highlights(overlapping, std::iter::empty()).collect::<Vec<_>>();
+        let runs = snap_highlights_to_char_boundaries(text, combined);
+
+        let mut covered = 0usize;
+        let mut prev_end = 0usize;
+        for (range, _) in &runs {
+            assert!(
+                text.is_char_boundary(range.start) && text.is_char_boundary(range.end),
+                "run {range:?} が文字境界に乗らない",
+            );
+            assert!(range.start < range.end, "空 run");
+            assert!(range.end <= text.len(), "範囲外 run {range:?}");
+            assert!(range.start >= prev_end, "run が重なっている {range:?}");
+            prev_end = range.end;
+            covered += range.len();
+        }
+        assert!(
+            covered <= text.len(),
+            "run 合計 {covered} が本文長 {} を超過（layout_line が abort する）",
+            text.len(),
+        );
     }
 
     #[test]

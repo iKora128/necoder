@@ -208,7 +208,9 @@ const ROW_HEIGHT: f32 = 23.0;
 const INDENT: f32 = 14.0;
 const AGENT_DOCK_WIDTH: f32 = 440.0; // Agent パネル既定幅（ドラッグで可変）
 const AGENT_DOCK_MIN: f32 = 320.0;
-const AGENT_DOCK_MAX: f32 = 900.0;
+const AGENT_DOCK_MAX: f32 = 900.0; // 幅を測れない場面のフォールバック上限
+/// Agent ドックをどれだけ広げても中央エディタに最低これだけは残す（ウィンドウ相対の上限計算に使う）。
+const MIN_CENTER_WIDTH: f32 = 360.0;
 const RESIZE_HANDLE_WIDTH: f32 = 6.0;
 /// 下段ドック（編隊のニュース/ターミナル・solo のターミナル）の既定と可動域。
 /// 既定 = ターミナルが最初から使える高さ（旧・固定 240px を踏襲）。ニュース 5〜6 行に寄せた 132px は
@@ -924,7 +926,9 @@ struct WorkspaceOverlays {
 }
 
 struct NotificationCenter {
-    toasts: Vec<(SharedString, Hsla, u32)>,
+    /// (本文, 色, 世代番号, ジャンプ先)。ジャンプ先 = `Some((session_index, thread_index))` の時、
+    /// クリックでそのプロジェクト＋スレッドへ切り替える（権限待ちトースト用・それ以外は None）。
+    toasts: Vec<(SharedString, Hsla, u32, Option<(usize, usize)>)>,
     toast_gen: u32,
     /// 前回クラッシュのログパス（起動時に pending マーカーから 1 回だけ拾う・M13）。
     /// Some の間 statusbar に ⚠ チップ → クリックでバグ報告 Issue を開いて消える。

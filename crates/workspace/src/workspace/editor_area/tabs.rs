@@ -135,14 +135,22 @@ impl Workspace {
     pub(crate) fn on_resize_move(
         &mut self,
         event: &MouseMoveEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let dx = f32::from(event.position.x) - self.chrome.resize_start_x;
         if self.chrome.resizing_agent {
+            // 上限はウィンドウ幅に追従させる（大画面ではもっと左へ広げられる）。固定 900px の
+            // 「突っかかり」を廃し、中央エディタに MIN_CENTER_WIDTH だけ残す位置まで広げられる。
+            let viewport_width = f32::from(window.viewport_size().width);
+            let agent_max = if viewport_width > 0.0 {
+                (viewport_width - RAIL_WIDTH - MIN_CENTER_WIDTH).max(AGENT_DOCK_MIN)
+            } else {
+                AGENT_DOCK_MAX
+            };
             // 左縁を左へ動かすと広がる（dx 負 → 幅増）。
             self.chrome.agent_width =
-                (self.chrome.resize_start_width - dx).clamp(AGENT_DOCK_MIN, AGENT_DOCK_MAX);
+                (self.chrome.resize_start_width - dx).clamp(AGENT_DOCK_MIN, agent_max);
             self.agent_panel
                 .update(cx, |panel, cx| panel.parent_width_changed(cx));
             cx.notify();
