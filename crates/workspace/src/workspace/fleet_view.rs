@@ -2416,6 +2416,26 @@ impl Workspace {
             _ => None,
         };
 
+        // 表示名の改名 / worktree 削除は **Task セル（非 Integration）だけ**に出す。同じ space の
+        // Terminal/Editor セルには出さない（1 space = 1 Task セル ＝ 改名入力欄の二重描画も同時に防ぐ）。
+        let is_task_pane = matches!(&pane, FleetPane::Task { .. });
+        let is_task_space = slot
+            .map(|slot| !slot.task_space.is_integration())
+            .unwrap_or(false);
+        let manage_target: Option<usize> = if is_task_pane && is_task_space {
+            session_index
+        } else {
+            None
+        };
+        // 改名中の入力欄（このセルが対象で、かつ編集場所が Cell のときだけ描く＝herd との二重描画回避）。
+        let renaming_editor = manage_target.and_then(|target| {
+            self.chrome
+                .task_renaming
+                .as_ref()
+                .filter(|renaming| renaming.index == target && renaming.site == RenameSite::Cell)
+                .map(|renaming| renaming.editor.clone())
+        });
+
         let header = div()
             .flex_none()
             .flex()
@@ -2426,8 +2446,16 @@ impl Workspace {
             .border_b_1()
             .border_color(theme.border)
             .child(div().size(px(8.)).rounded_full().bg(color).flex_none())
-            .child(
-                div()
+            .child(match renaming_editor {
+                // 改名中: title だけを編集する入力欄（herd と同じ EditorView 実体・IME 対応）。
+                Some(editor) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(20.))
+                    .child(editor)
+                    .into_any_element(),
+                None => div()
+                    .id(("fleet-cell-title", index))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
@@ -2435,8 +2463,29 @@ impl Workspace {
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.fg0)
-                    .child(SharedString::from(format!("{name} · {surface_name}"))),
-            )
+                    .child(SharedString::from(format!("{name} · {surface_name}")))
+                    // ダブルクリックで改名（スレッドタブ・herd 見出しと同型）。Task セルのみ。
+                    .when_some(manage_target, |element, target| {
+                        element
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    if event.click_count == 2 {
+                                        cx.stop_propagation();
+                                        this.start_task_rename(
+                                            target,
+                                            RenameSite::Cell,
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                }),
+                            )
+                            .tooltip(Tooltip::text(i18n::t!("fleet.rename_tip"), theme.clone()))
+                    })
+                    .into_any_element(),
+            })
             .when_some(branch, |element, branch| {
                 element.child(
                     div()
@@ -2528,6 +2577,44 @@ impl Workspace {
                         }),
                     ),
             )
+            // worktree を削除 🗑（Task セルのみ）。⋯ の「片付け」に埋もれていた削除を、目の前の近道として出す。
+            // 押すと「失うものを数える」確認ダイアログ（`request_worktree_delete`）＝どこから消しても同じ。
+            .when_some(manage_target, |element, target| {
+                element.child(
+                    div()
+                        .id(("fleet-cell-trash", index))
+                        .group("fleet-cell-trash")
+                        .flex_none()
+                        .size(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg2))
+                        // svg は親の text_color を継承しないため直接指定 + hover は自グループで赤に。
+                        .child(
+                            svg()
+                                .path("icons/trash-2.svg")
+                                .size(px(11.))
+                                .text_color(theme.fg2)
+                                .group_hover("fleet-cell-trash", |style| {
+                                    style.text_color(theme.err)
+                                }),
+                        )
+                        .tooltip(Tooltip::text(
+                            i18n::t!("fleet.delete_worktree_tip"),
+                            theme.clone(),
+                        ))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.request_worktree_delete(target, false, window, cx);
+                            }),
+                        ),
+                )
+            })
             // ⋯ = 片付けメニュー（閉じる / 止める / 終了 / worktree 削除を 1 枚に・2026-07-27）。
             // × だけだと「消したのに消えない」に見えるので、全段をここに集めて言葉で説明する。
             .child(

@@ -1334,3 +1334,22 @@
   `agent_panel` 22（新規 `sticky_defaults_are_per_agent`＝Claude↔Codex で値が漏れず各自の最後の選択で開き直す・
   §8 の `default_agent` 不変を確認）green。既存 sticky テスト（configs/mode 広告・model フォールバック）も無改修で緑。
 - **文書**: DECISIONS に「sticky は agent ごとに持つ（2026-08-17）」を追記（§8 は不変と明記）。
+
+## 2026-08-18 — worktree の命名（セルヘッダ改名）＋ 削除の近道（🗑）
+- やったこと（ユーザー要望・2 件）:
+  - **セルヘッダで worktree（TaskSpace）を改名**: 既存の herd 見出しダブルクリック改名（`start_task_rename`）を編隊グリッドのセルヘッダにも展開。タイトルをダブルクリック → インライン `EditorView`（IME 対応・herd と同じ実体）。**表示名 `title` だけ**を変える（git ブランチ `task/*`・worktree フォルダは不変）。**ブランチごと改名は不採用**（生きたエージェント/タブ/ターミナルの張り替え + git-safe 名の強制＝重い。ユーザー合意）。
+  - **🗑 削除の近道**: ⋯ の「片付け」に埋もれていた worktree 削除を、セルヘッダ（拡大 / ⋯ の間）と herd 見出し（ホバー）に近道として出す。押すと既存 `request_worktree_delete`＝「失うものを数える」確認ダイアログ経由（どこから消しても同じ）。**Task セル（非 Integration）のみ**。
+- 変更ファイル: `workspace.rs`（`herd_renaming` → `task_renaming: Option<TaskRenaming>` へ一般化 + `RenameSite{Herd,Cell}` 追加）・`herd_view.rs`（start/confirm/render を site 対応 + 見出しに 🗑）・`fleet_view.rs`（セルヘッダにタイトル改名 + 🗑）・`project_switch.rs`/`project_session.rs`（フィールド追従）・`dev_probes.rs`（`SHIRUSHI_FLEET_PROBE=graph|maximize|rename` 追加・window 対応）・`main.rs`（icon 登録 + probe に window）・`assets/icons/trash-2.svg`（Lucide・**`crates/shirushi/assets/icons/` が正**）・`locales/ja|en.yml`（`fleet.rename_tip`/`delete_worktree_tip`）。
+- 学び/罠:
+  - **改名入力欄の二重描画に注意**: 編隊では herd サイドバーとセルグリッドが**同時に見える**。同じ入力欄 `Entity<EditorView>` を両方で描くと壊れる → rename 状態に編集場所 `RenameSite` を持たせ、片方だけ描く。さらに Task セルのみ（1 space = 1 Task セル）に限定して同 space 複数セル（Terminal 等）での二重描画も封じた。
+  - **アイコン資産は 2 箇所**: `include_bytes!` は `crates/shirushi/assets/icons/`（`CARGO_MANIFEST_DIR`）を読む。root の `assets/` は**フォント専用**（`../../assets/fonts`）で icons は無い。新規 svg は `crates/shirushi/assets/icons/` に置き `main.rs` の AssetSource match に登録（未登録=無音で出ない）。
+  - svg は親の `text_color` を継承しない → 直接指定 + hover の赤は `group_hover` を自グループに効かせる（既存の herd mute/delete と同型）。
+- 検証: `cargo test -p workspace` 25 green / `-p i18n` parity green / `-p shirushi` green。offscreen（`SHIRUSHI_CONTROL_PROBE=1` + `SHIRUSHI_FLEET_PROBE=graph|maximize|rename`）で **各セルヘッダに 🗑**・**拡大ヘッダの 🗑**・**タイトルがインライン入力欄（キャレット）に化ける**のを目視。実クリックの改名確定/削除確定の体感は人の手番。
+
+## 2026-08-18 — ACP transcript のダブルクリック単語選択 / トリプルクリック段落選択（Part B）
+- やったこと（ユーザー要望）: エディタ/ブラウザ定番の「ダブルクリックで単語選択」を ACP パネルの transcript に追加。**トリプルクリックはそのブロック（markdown 段落）全体**を選択。
+  - 実装は `on_transcript_mouse_down`（`agent_panel.rs`）に `event.click_count` 分岐を足すだけ（transcript は既に自前の範囲選択機構 `TranscriptSelection`/`TranscriptPoint` + ⌘C/⌘A を持つ・M13）。2=`transcript_word_span`（同一 region 内の語）/ 3+=`transcript_region_span`（region 全体）/ 1=従来のキャレット（ドラッグ起点）。語/段落選択は `selecting=false` の確定選択。
+  - 語境界は `word_range_in`（新規 free fn）= `editor_core::word_range_at` の `&str` 版移植（transcript の region は Rope でなく `SharedString` なので同ロジックを移植）。英数字/`_`/CJK が語・記号/空白は区切り・語の上でなければ空選択。
+- 学び/罠: **ライブ（ストリーミング中）のターンは region 未登録**なので、ターン完了までダブルクリック選択は効かない（`StreamingTextView` は `push_selectable` を通さない＝既知の制約・M13 由来）。完了エントリでは効く。
+- 検証: `cargo test -p agent_panel` 23 green（新規 `word_range_in_selects_word_cjk_and_underscore`＝英/CJK/`_`/記号/クランプ）。実マウスのダブル/トリプルクリックの体感は人の手番（選択の描画は既存ドラッグ選択と同じ paint 経路なのでロジックのみ確認）。
+- 次: （任意）ダブルクリック後のドラッグで**語単位に拡張**（editor_view の `DragSelectMode::Word` 相当）・リンク（`SpanKind::Link`）クリックで URL を開く導線。

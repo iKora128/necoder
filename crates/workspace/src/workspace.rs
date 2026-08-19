@@ -842,6 +842,26 @@ pub(crate) enum FleetBottomView {
     Terminal,
 }
 
+/// Task（worktree）の表示名をダブルクリックで改名している最中の入力欄。
+/// **どこで編集中か**（herd 見出し / セルヘッダ）を持つのは、編隊モードでは herd サイドバーと
+/// セルグリッドが同時に見えており、同じ入力欄 Entity を 2 箇所で描くと二重描画になるため。
+/// `index` は改名対象の project（レール slot）index。改名は表示名（`TaskSpace.title`）だけを変え、
+/// git ブランチ `task/<n>` や worktree フォルダはそのまま（表示と git 識別を分離）。
+pub(crate) struct TaskRenaming {
+    pub(crate) index: usize,
+    pub(crate) site: RenameSite,
+    pub(crate) editor: Entity<EditorView>,
+}
+
+/// 改名入力欄をどこに描くか。同じ入力欄 Entity の二重描画を避ける識別に使う。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenameSite {
+    /// herd（Fleet）サイドバーの Task 見出し。
+    Herd,
+    /// 編隊グリッドのセルヘッダのタイトル。
+    Cell,
+}
+
 struct ChromeState {
     show_left: bool,
     show_right: bool,
@@ -864,8 +884,8 @@ struct ChromeState {
     /// 編隊モードの herd で solo（Integration リポジトリ）のスレッド群を展開しているか。
     /// **既定 false = 畳む**（編隊では Task が主役・2026-07-24 ユーザー指摘）。見出しクリックで切替。
     herd_solo_expanded: bool,
-    /// herd の Task 見出しをダブルクリックで改名中 (project_index, 入力欄)。スレッドタブの改名と同型。
-    herd_renaming: Option<(usize, Entity<EditorView>)>,
+    /// Task の表示名をダブルクリックで改名中（herd 見出し / セルヘッダ）。スレッドタブの改名と同型。
+    task_renaming: Option<TaskRenaming>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
     graph_view: GraphView,
     /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。

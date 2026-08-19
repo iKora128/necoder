@@ -29,10 +29,13 @@ impl Workspace {
         cx.notify();
     }
 
-    /// herd の Task 見出しダブルクリック → 改名（スレッドタブと同じ EditorView・IME 対応・2026-07-24）。
+    /// Task 見出し / セルヘッダのダブルクリック → 改名（スレッドタブと同じ EditorView・IME 対応・2026-07-24）。
+    /// `site` = 入力欄をどこに描くか（herd 見出し / セルヘッダ）。編隊モードで両方が同時に見えても
+    /// 同じ入力欄 Entity を二重描画しないための識別。改名は表示名（title）だけを変える。
     pub(crate) fn start_task_rename(
         &mut self,
         project_index: usize,
+        site: RenameSite,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -52,23 +55,27 @@ impl Workspace {
         .detach();
         let handle = editor.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
-        self.chrome.herd_renaming = Some((project_index, editor));
+        self.chrome.task_renaming = Some(TaskRenaming {
+            index: project_index,
+            site,
+            editor,
+        });
         cx.notify();
     }
 
     /// Task 改名の確定（Enter・空白のみは無視）。title と slot 名を揃えて台帳へ永続化。
     fn confirm_task_rename(&mut self, cx: &mut Context<Self>) {
-        let Some((index, editor)) = self.chrome.herd_renaming.take() else {
+        let Some(renaming) = self.chrome.task_renaming.take() else {
             return;
         };
-        let text = editor.read(cx).plain_text();
+        let text = renaming.editor.read(cx).plain_text();
         let name = text.trim();
         if !name.is_empty() {
-            if let Some(slot) = self.project_sessions.projects.get_mut(index) {
+            if let Some(slot) = self.project_sessions.projects.get_mut(renaming.index) {
                 slot.task_space.title = SharedString::from(name.to_string());
                 slot.name = SharedString::from(name.to_string());
             }
-            self.persist_task_space(index, cx);
+            self.persist_task_space(renaming.index, cx);
         }
         cx.notify();
     }
@@ -144,13 +151,16 @@ impl Workspace {
             let project_index = group.project_index;
             let renaming_editor = self
                 .chrome
-                .herd_renaming
+                .task_renaming
                 .as_ref()
-                .filter(|(index, _)| *index == project_index)
-                .map(|(_, editor)| editor.clone());
+                .filter(|renaming| {
+                    renaming.index == project_index && renaming.site == RenameSite::Herd
+                })
+                .map(|renaming| renaming.editor.clone());
             list = list.child(
                 div()
                     .id(("herd-group", group.project_index))
+                    .group("herd-head")
                     .when(solo_toggle, |element| {
                         element.cursor_pointer().on_mouse_down(
                             MouseButton::Left,
@@ -168,7 +178,12 @@ impl Workspace {
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                     if event.click_count == 2 {
-                                        this.start_task_rename(project_index, window, cx);
+                                        this.start_task_rename(
+                                            project_index,
+                                            RenameSite::Herd,
+                                            window,
+                                            cx,
+                                        );
                                     }
                                 }),
                             )
@@ -229,6 +244,53 @@ impl Workspace {
                             .text_color(theme.fg2)
                             .child(SharedString::from(mini)),
                     )
+                    // worktree を削除 🗑（ホバーで出現）。押すと「失うものを数える」確認ダイアログ
+                    // （レール右クリック・セルの ⋯ と同じ `request_worktree_delete` へ委譲＝どこから消しても同じ）。
+                    .when(is_task_group, |element| {
+                        element.child(
+                            div()
+                                .id(("herd-head-trash", project_index))
+                                .group("herd-head-trash")
+                                .flex_none()
+                                .invisible()
+                                .group_hover("herd-head", |style| style.visible())
+                                .size(px(16.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(3.))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.bg2))
+                                // svg は親の text_color を継承しないため直接指定 + hover は自グループで赤に。
+                                .child(
+                                    svg()
+                                        .path("icons/trash-2.svg")
+                                        .size(px(10.))
+                                        .text_color(theme.fg2)
+                                        .group_hover("herd-head-trash", |style| {
+                                            style.text_color(theme.err)
+                                        }),
+                                )
+                                .tooltip(Tooltip::text(
+                                    i18n::t!("fleet.delete_worktree_tip"),
+                                    theme.clone(),
+                                ))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(
+                                        move |this, _event: &MouseDownEvent, window, cx| {
+                                            cx.stop_propagation();
+                                            this.request_worktree_delete(
+                                                project_index,
+                                                false,
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ),
+                                ),
+                        )
+                    })
                     .when(solo_toggle, |element| {
                         element.child(
                             div()

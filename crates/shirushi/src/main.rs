@@ -224,6 +224,7 @@ impl gpui::AssetSource for Assets {
             "icons/activity.svg" => icon!("activity.svg"),
             "icons/maximize.svg" => icon!("maximize.svg"),
             "icons/minimize.svg" => icon!("minimize.svg"),
+            "icons/trash-2.svg" => icon!("trash-2.svg"),
             "icons/arrow-down-to-line.svg" => icon!("arrow-down-to-line.svg"),
             "icons/bell.svg" => icon!("bell.svg"),
             "icons/bell-off.svg" => icon!("bell-off.svg"),
@@ -685,8 +686,8 @@ fn main() {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_millis(2600))
                                 .await;
-                            let _ = handle.update(cx, |workspace, _window, cx| {
-                                workspace.debug_fleet_probe(&probe, cx);
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_fleet_probe(&probe, window, cx);
                             });
                         })
                         .detach();

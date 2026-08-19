@@ -639,7 +639,7 @@ impl Workspace {
                 rail_drag: None,
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: false,
-                herd_renaming: None,
+                task_renaming: None,
             },
             overlays: WorkspaceOverlays {
                 picker: None,

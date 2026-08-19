@@ -243,6 +243,8 @@ fleet:
   add_agent_to_task: ＋ Agent to this Task
   add_history: Restore from history
   close_cell_tip: Hide this cell (the Task and its worktree stay)
+  rename_tip: Double-click to rename
+  delete_worktree_tip: Delete worktree…
   cleanup_tip: Clean up — close / stop / finish / delete
   cleanup_title: How do you want to clean up this Task?
   cleanup_close: Close cell
