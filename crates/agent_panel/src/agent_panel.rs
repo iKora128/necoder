@@ -802,6 +802,42 @@ impl TranscriptSelection {
     }
 }
 
+/// `text` の byte `offset` を含む単語の byte 範囲（ダブルクリック選択・2026-08-18）。英数字/`_`/CJK が
+/// 語、それ以外と空白が区切り。語の上でなければ空範囲 `(offset, offset)`。transcript の region は
+/// Rope でなく `SharedString` なので、`editor_core::word_range_at` の同じ規律を `&str` へ移植した。
+fn word_range_in(text: &str, offset: usize) -> (usize, usize) {
+    let mut offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let is_word = |character: char| {
+        (character.is_alphanumeric() || character == '_') && !character.is_whitespace()
+    };
+    // キャレットの直前 or 直後が語文字でなければ選択しない（記号や空白の上でのダブルクリック）。
+    let after = text[offset..].chars().next();
+    let before = text[..offset].chars().next_back();
+    if !(after.map(is_word).unwrap_or(false) || before.map(is_word).unwrap_or(false)) {
+        return (offset, offset);
+    }
+    let mut start = offset;
+    for character in text[..offset].chars().rev() {
+        if is_word(character) {
+            start -= character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let mut end = offset;
+    for character in text[offset..].chars() {
+        if is_word(character) {
+            end += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (start, end)
+}
+
 /// 承認待ちの権限リクエスト（`session/request_permission` を UI で保持する間の状態）。
 /// `respond` に選んだ選択肢の添字を送ると acp_client が応答する（このスレッドの当該ターンは
 /// それまでブロックしている）。ユーザーが答えるまで composer 上部にカードを出す。
@@ -2253,6 +2289,44 @@ impl AgentPanel {
         }
     }
 
+    /// point を含む「単語」の範囲（同一 region 内）。ダブルクリック選択用。
+    fn transcript_word_span(&self, point: TranscriptPoint) -> (TranscriptPoint, TranscriptPoint) {
+        let regions = self.transcript_regions.borrow();
+        let Some(region) = regions.get(point.region) else {
+            return (point, point);
+        };
+        let (start, end) = word_range_in(region.text.as_ref(), point.offset);
+        (
+            TranscriptPoint {
+                region: point.region,
+                offset: start,
+            },
+            TranscriptPoint {
+                region: point.region,
+                offset: end,
+            },
+        )
+    }
+
+    /// region 全体（＝その markdown ブロック / 段落）の範囲。トリプルクリック選択用。
+    fn transcript_region_span(&self, region_index: usize) -> (TranscriptPoint, TranscriptPoint) {
+        let regions = self.transcript_regions.borrow();
+        let length = regions
+            .get(region_index)
+            .map(|region| region.text.len())
+            .unwrap_or(0);
+        (
+            TranscriptPoint {
+                region: region_index,
+                offset: 0,
+            },
+            TranscriptPoint {
+                region: region_index,
+                offset: length,
+            },
+        )
+    }
+
     fn on_transcript_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -2263,11 +2337,33 @@ impl AgentPanel {
         // ⌘C の成否が composer 側の選択状態に左右されていた。
         self.transcript_focus.focus(window, cx);
         let point = self.transcript_point_at(event.position, cx);
-        self.transcript_selection = point.map(|point| TranscriptSelection {
-            start: point,
-            end: point,
-            selecting: true,
+        // ダブルクリック=単語 / トリプル=そのブロック（段落）を選択（エディタ/ブラウザの所作・2026-08-18）。
+        // 単一クリックは従来どおりキャレットを置き、ドラッグ選択の起点にする（`selecting = true`）。
+        // 語/ブロック選択は `selecting = false`（確定選択＝そのままドラッグで広げない）。
+        let selection = point.map(|point| match event.click_count {
+            2 => {
+                let (start, end) = self.transcript_word_span(point);
+                TranscriptSelection {
+                    start,
+                    end,
+                    selecting: false,
+                }
+            }
+            count if count >= 3 => {
+                let (start, end) = self.transcript_region_span(point.region);
+                TranscriptSelection {
+                    start,
+                    end,
+                    selecting: false,
+                }
+            }
+            _ => TranscriptSelection {
+                start: point,
+                end: point,
+                selecting: true,
+            },
         });
+        self.transcript_selection = selection;
         // root の「どこをクリックしても composer を focus」へ流さない。
         cx.stop_propagation();
         cx.notify();
@@ -7521,6 +7617,22 @@ mod tests {
         }
         // 先頭 run は '（' の手前（byte 8）へ縮む。
         assert_eq!(snapped[0].0, 0..8);
+    }
+
+    #[test]
+    fn word_range_in_selects_word_cjk_and_underscore() {
+        // 英単語: 途中でも語直後の境界でも同じ語（editor_core::word_range_at と同じ規律）。
+        assert_eq!(word_range_in("hello world", 2), (0, 5));
+        assert_eq!(word_range_in("hello world", 5), (0, 5)); // 直後の境界は手前の語
+        assert_eq!(word_range_in("hello world", 8), (6, 11));
+        // アンダースコアは語に含む（識別子を 1 語で選ぶ）。
+        assert_eq!(word_range_in("foo_bar", 3), (0, 7));
+        // CJK は連続する塊を 1 語として選ぶ。
+        assert_eq!(word_range_in("認証API", 0), (0, "認証API".len()));
+        // 記号/空白の上では選択なし（空範囲）。
+        assert_eq!(word_range_in("a - b", 2), (2, 2));
+        // offset は末尾へクランプ（範囲外でも panic しない）。
+        assert_eq!(word_range_in("hi", 99), (0, 2));
     }
 
     #[test]

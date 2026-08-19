@@ -164,6 +164,7 @@
 - **focus-follows-agent**: herd 行 / グリッドセルをフォーカス → 左エクスプローラ・エディタタブ・下ターミナルがその worktree に張り替わる（レール切替と同じ `ProjectSession` 単位・ARCHITECTURE §5）。＝「今見ているエージェントのファイル」で真を一意化
 - **系譜グラフ**: ネイティブ描画（webview 不使用・editor_view/terminal_view と同じ custom Element）。**扇形（Fan）既定** ＋ ツリー / カード / ハブの 4 表示（River は廃止し、Hub＝中央=リポジトリのハブ&スポークを追加）。ヘッダ右にスイッチャー（**アイコン＋語**・単体アイコンが曖昧なため語併記）＋ ⌄ で折り畳み（グリッドが上まで拡張）。レーン/エッジ=スレッド色・ノード=commit・**先端=状態（形と動き・色は据え置き）**・プロバイダバッジ・base からの fan-out とマージ。データは `git log --all --parents` でレーン自前計算
 - **N セルグリッド**: 主セルは **TaskSpace（1 task = 1 worktree）**で、通常 View と同じ完全な AgentPanel を埋め込む。同じ Task の Agent は panel 内 thread tab。surface は Task / Terminal / Editor / Diff / Tests。既定 **＋Task** は常に `task/*` branch + linked worktree を作り、**＋Agent to this Task** だけが同じ worktree への複数 Agent を許す
+- **セルの命名 / 削除の近道（2026-08-18）**: セルヘッダのタイトルを**ダブルクリックで改名**（herd 見出しと同じ機構＝§162 の `start_task_rename`）。改名は**表示名 `title` だけ**を変える — git ブランチ `task/*` と worktree フォルダは不変（表示と git 識別を分離。ブランチごと改名は「重い＝生きたエージェント/タブ/ターミナルの張り替え + git-safe 名の強制」なので採らない・2026-08-18 ユーザー合意）。手動改名は AI 自動命名に上書きされない（`is_placeholder_task_title`）。ヘッダに **🗑 worktree 削除**の近道（拡大 / ⋯ の間・押すと ⋯ の片付け最下段と同じ `request_worktree_delete`＝「失うものを数える」確認ダイアログ経由）。**Task セル（非 Integration）のみ**。herd の Task 見出しにも**ホバーで 🗑**。改名入力欄は編集場所（herd / セル）を `RenameSite` で持ち、編隊で herd とセルが同時に見えても同じ入力欄 Entity を二重描画しない
 - **セルの片付け（⋯ メニュー・2026-07-27）**: 「× を押しても消えない / 消すのと画面から外すのの違いが分からない」への回答。**同じ 1 枚に全段を並べ、各行の副題に「何が残るか」を書く**。上から下へ残るものが減る:
 
   | 段 | 何が起きる | 残るもの |

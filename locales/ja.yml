@@ -241,6 +241,8 @@ fleet:
   add_agent_to_task: ＋ Agent to this Task
   add_history: 履歴から復元
   close_cell_tip: このセルを画面から外す（Task も worktree も残る）
+  rename_tip: ダブルクリックで名前を変更
+  delete_worktree_tip: worktree を削除…
   cleanup_tip: 片付け — 閉じる / 止める / 終了 / 削除
   cleanup_title: この Task をどう片付ける？
   cleanup_close: セルを閉じる

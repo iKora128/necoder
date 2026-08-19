@@ -194,9 +194,48 @@ impl Workspace {
     /// `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）/ `close-all` = 全セルを × して残数を出す。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
-    pub fn debug_fleet_probe(&mut self, command: &str, cx: &mut Context<Self>) {
+    pub fn debug_fleet_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match command {
             "menu" => self.open_fleet_cell_menu(0, point(px(760.), px(210.)), cx),
+            // セル 0 を拡大してヘッダのタイトルを改名開始（Cell site で入力欄が出る／herd と二重描画しない）。
+            "rename" => {
+                self.chrome.fleet_center_view = FleetCenterView::Graph;
+                self.seed_fleet_cells(cx);
+                if let Some(index) = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .position(|slot| !slot.task_space.is_integration())
+                {
+                    self.chrome.fleet_maximized = Some(0);
+                    self.start_task_rename(index, RenameSite::Cell, window, cx);
+                }
+            }
+            // 中央をグリッド（系譜グラフ面）にして Task セルを seed する。CONTROL_PROBE の 5 slot が
+            // セルヘッダで並ぶ（改名ダブルクリック・🗑 削除の描画検証用）。herd も左に出す。
+            "graph" => {
+                self.chrome.fleet_center_view = FleetCenterView::Graph;
+                self.chrome.show_left = true;
+                self.chrome.show_herd = true;
+                self.seed_fleet_cells(cx);
+                // 系譜グラフを畳んでグリッドを主に（各セルヘッダの改名/🗑 を大きく撮る）。
+                self.chrome.graph_collapsed = true;
+                cx.notify();
+            }
+            // セルを 1 枚拡大（セルヘッダを最大サイズで撮る＝改名ダブルクリック/🗑 の確認）。
+            "maximize" => {
+                self.chrome.fleet_center_view = FleetCenterView::Graph;
+                self.seed_fleet_cells(cx);
+                if !self.chrome.fleet_cells.is_empty() {
+                    self.chrome.fleet_maximized = Some(0);
+                }
+                cx.notify();
+            }
             "terminal" => self.set_fleet_bottom_view(FleetBottomView::Terminal, cx),
             "tall" => {
                 self.chrome.bottom_height = 320.0;

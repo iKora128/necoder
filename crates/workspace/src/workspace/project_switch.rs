@@ -144,7 +144,7 @@ impl Workspace {
             || self.overlays.worktree_delete.is_some()
             || self.overlays.rail_menu.is_some()
             || self.overlays.add_project_dialog_open
-            || self.chrome.herd_renaming.is_some()
+            || self.chrome.task_renaming.is_some()
             || self.chrome.control_focus.is_focused(window)
             || self.focus_handle.is_focused(window)
     }
