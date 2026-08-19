@@ -3644,8 +3644,11 @@ impl AgentPanel {
                 if let Err(error) =
                     acp_client::run_session_on(host, command, prompt_rx, event_tx).await
                 {
+                    // `{:#}` で anyhow の原因鎖まで出す（例: 「ACP セッションが異常終了: ACP
+                    // initialize が 30 秒応答しません（無言ハング）」）。`to_string()` だと上位 context
+                    // だけになりハンドシェイクの無言ハングが埋もれるため。
                     error_tx
-                        .unbounded_send(AgentEvent::Failed(error.to_string()))
+                        .unbounded_send(AgentEvent::Failed(format!("{error:#}")))
                         .ok();
                 }
             })

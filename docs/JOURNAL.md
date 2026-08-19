@@ -1353,3 +1353,15 @@
 - 学び/罠: **ライブ（ストリーミング中）のターンは region 未登録**なので、ターン完了までダブルクリック選択は効かない（`StreamingTextView` は `push_selectable` を通さない＝既知の制約・M13 由来）。完了エントリでは効く。
 - 検証: `cargo test -p agent_panel` 23 green（新規 `word_range_in_selects_word_cjk_and_underscore`＝英/CJK/`_`/記号/クランプ）。実マウスのダブル/トリプルクリックの体感は人の手番（選択の描画は既存ドラッグ選択と同じ paint 経路なのでロジックのみ確認）。
 - 次: （任意）ダブルクリック後のドラッグで**語単位に拡張**（editor_view の `DragSelectMode::Word` 相当）・リンク（`SpanKind::Link`）クリックで URL を開く導線。
+
+## 2026-08-08 — ACP ハンドシェイクの無言ハング可視化 + カタログ pin + ファイルアイコン
+- やったこと（ユーザー依頼の 3 件）:
+  - **① ACP initialize のタイムアウト（無言ハング → エラー化）**: `acp_client` の initialize 3 サイト（connect_and_initialize / prompt_once / 常駐 run_session_on）は無制限に応答待ちしていた＝エージェントが生きたまま黙ると無言でスピナーが回り続けた。`with_timeout`（タイマは既存 `blocking` プールで寝るスレッド＝新規依存なし・ランタイム非依存）で `HANDSHAKE_TIMEOUT`=30s を噛ませ、時間切れは `acp::Error::new(InternalError, "… が 30 秒応答しません（無言ハング）")`（理由を message に直接）に。agent_panel は `AgentEvent::Failed(format!("{error:#}"))` で anyhow 原因鎖まで出す（`to_string()` だと上位 context だけでハング理由が埋もれる）。検証: ユニット2本（速い応答は素通り / pending は timeout でエラー・0.03s）＋ **実プロセス統合 `connect_times_out_on_silent_hang`（#[ignore]・`sleep` に実パイプ越しで当て 30.00s でエラー復帰を実挙動確認）**
+  - **② カタログ pin 更新**: `claude-agent-acp 0.58.1→0.66.0` / `codex-acp 1.1.2→1.1.14`（npm 最新を実確認）。**ただし現環境では未反映の可能性大**（下記・罠）
+  - **③ ファイルアイコンをわかりやすく**: `file_icon`（ツリー）/`icon_large`（グリッド）が無地の角丸長方形だったのを、mock の icon-grid 準拠のシルエットへ。新規 `folder.svg`（フォルダ形・landscape viewBox）/`file.svg`（折れ角のある書類形・portrait viewBox）を main.rs の AssetSource に登録。ツリー=シルエット＋色（幅が無いのでラベル無し）、グリッド=書類（中立 fg2 の紙面）＋**型ラベル**（RS/TOML/MD…）。ラベル色は型色、ただし muted 型（md/txt＝色が fg2＝紙面と同色で埋もれる）は濃いインク bg0 に落として可読に。UI-SPEC §4 ツリー行にアイコンを明記（§4 アイコン節は元から SVG40×34+拡張子タグ＝実装のドリフトを spec 側へ戻した形）。offscreen（`SHIRUSHI_EXPLORER_VIEW=tree/icons` + `--features screenshot`）で両ビュー目視
+  - 全 test green（acp_client / agent_panel 10 / workspace 21）・警告 0
+- 学び/罠:
+  - **pin 更新は現環境では効かない**: `zed_cached_agent` は Zed の npx キャッシュを **bin 名だけで拾いバージョンを見ない**。実機は claude-agent-acp が 0.58.1 と 0.59.0 の2つ + codex 1.1.2 がキャッシュ済み（＝どれが動くかは read_dir 順で非決定的）。pin は npx フォールバック（キャッシュ無しの新規/CI）だけに効く。「pin を効かせる」には (A) 古いキャッシュ削除 or (B) `zed_cached_agent` をバージョン一致優先化（pin 版が無ければ npx で取得・npx も無い時だけ既存キャッシュにフォールバック）。**ユーザー判断待ち**（resolution 挙動変更のため独断でやらない）
+  - `connect_with(transport, main_fn)` の main_fn は `Result<R, acp::Error>` 固定＝timeout エラーも `acp::Error` で返す必要（`acp::util::internal_error` は message=「Internal error」+ data に文字列＝Display が `Internal error: "…"` と quote 付き。`acp::Error::new(code, msg)` で message 直書きすると綺麗）
+  - offscreen スクショはグリフも SVG マスクも写る（font-kit 経由）＝アイコン検証に有効。新規 SVG は main.rs の match 登録を忘れると無音で出ない（既知の罠どおり）
+- 次: ② の (A)/(B) をユーザーが選定 → (B) なら version 一致 resolution を実装。必要ならコミット方針（今セッションの作業ツリーは未コミット）
