@@ -1643,12 +1643,18 @@ pub struct SshConfigHost {
     pub user: Option<String>,
 }
 
-/// `~/.ssh/config` を読んで接続可能なホスト一覧を返す（読めなければ空）。
+/// SSH config を読んで接続可能なホスト一覧を返す（読めなければ空）。
+/// 通常は `~/.ssh/config`、テストでは transport と同じ `SHIRUSHI_SSH_CONFIG` を使う。
 pub fn ssh_config_hosts() -> Vec<SshConfigHost> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
+    let path = match std::env::var_os("SHIRUSHI_SSH_CONFIG") {
+        Some(path) => PathBuf::from(path),
+        None => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Vec::new();
+            };
+            Path::new(&home).join(".ssh/config")
+        }
     };
-    let path = Path::new(&home).join(".ssh/config");
     match std::fs::read_to_string(&path) {
         Ok(text) => parse_ssh_config(&text),
         Err(_) => Vec::new(),

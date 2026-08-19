@@ -40,7 +40,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// リモート SSH ホストピッカー（M13）: `~/.ssh/config` の Host 一覧 + 末尾に「手入力」。
+    /// リモート SSH ホストピッカー（M13）: SSH config の Host 一覧 + 末尾に「手入力」。
     /// 選択で `ssh://<alias>/` を種に入力バーへ（パスだけ足して Enter で接続）。
     /// system OpenSSH に委ねるので User/HostName/鍵/ProxyJump は config のものがそのまま効く。
     pub(crate) fn open_ssh_host_picker(

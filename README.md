@@ -56,6 +56,30 @@ cargo run -p shirushi -- 'ssh://user@example.com:22/home/user/project'
 
 The matching server binary is deployed automatically (same-target sibling binary, or a bundled musl artifact; checksum-verified, old versions cleaned up). Reconnection re-subscribes watches and re-spawns LSP/PTY handles; unsaved-buffer backups are host-scoped. Remaining gaps: GUI askpass (key/agent auth is assumed) and long-haul testing on a physical Linux host — see [`docs/research/remote-ssh-2026.md`](docs/research/remote-ssh-2026.md).
 
+To exercise the complete SSH path without a separate machine, run:
+
+```sh
+./scripts/test-remote-ssh-docker.sh
+```
+
+This starts an isolated Ubuntu/OpenSSH container, creates a disposable key and
+`known_hosts`, deploys the matching Linux remote server, and runs the live SSH
+suite (file operations, search, commands, reconnects, watches, and resource
+checks). It requires Docker and a musl remote-server artifact for the Docker
+architecture; the script prints the exact `cargo zigbuild` command if one is
+not available.
+
+To try the normal GUI connection flow instead, run:
+
+```sh
+./scripts/test-remote-ssh-docker.sh --gui
+```
+
+Keep that terminal open while using the remote project. Closing Shirushi stops
+the SSH container and removes its temporary key and network automatically. In
+Shirushi, choose `+` → Remote/SSH → `shirushi-docker`, then browse to
+`work/sample` and open that folder as the project.
+
 ## Documentation
 
 | What | Where |
