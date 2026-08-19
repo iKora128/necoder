@@ -158,6 +158,9 @@ pub enum AgentEvent {
     PermissionRequest {
         title: String,
         diffs: Vec<PermissionDiff>,
+        /// Diff の無いツール（Bash/Fetch/MCP 等）の実引数（rawInput）を整形 JSON で。承認前に
+        /// 「何が実行されるか」を必ず可視化する（tool poisoning 対策・ACP #1979 / GHSA-f2g4）。
+        raw_input: Option<String>,
         options: Vec<PermissionChoice>,
         respond: mpsc::UnboundedSender<usize>,
     },
@@ -1368,6 +1371,18 @@ async fn handle_permission_request(
             _ => None,
         })
         .collect();
+    // Diff の無いツール（Bash/Fetch/MCP）の実引数を承認前に必ず見せる（ACP #1979 / GHSA-f2g4）。
+    // 編集系（Diff あり）は差分表示で内容が見えるので冗長回避のため省く。
+    let raw_input = if diffs.is_empty() {
+        request
+            .tool_call
+            .fields
+            .raw_input
+            .as_ref()
+            .and_then(|value| serde_json::to_string_pretty(value).ok())
+    } else {
+        None
+    };
     let options: Vec<PermissionChoice> = request
         .options
         .iter()
@@ -1388,6 +1403,7 @@ async fn handle_permission_request(
         .unbounded_send(AgentEvent::PermissionRequest {
             title,
             diffs,
+            raw_input,
             options,
             respond: respond_tx,
         })

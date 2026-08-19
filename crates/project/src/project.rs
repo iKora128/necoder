@@ -288,7 +288,20 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    host.run_command(&CommandSpec::new("git", dir).args(args))
+    // 未信頼 repo の repo-local `.git/config` 経由のコード実行を封じる（Zed GHSA-fj2r 同型）。
+    // フォルダを開くだけで `git status` が自動実行される（レールの git 色）ため、`core.fsmonitor`
+    // による drive-by RCE が要点。hooks / ext:: リモート transport も常時無効化して防御を集約する。
+    // git レベルのオプションは subcommand より前に置く必要があるので先頭へ差す。
+    let mut hardened: Vec<String> = vec![
+        "-c".into(),
+        "core.fsmonitor=false".into(),
+        "-c".into(),
+        "core.hooksPath=/dev/null".into(),
+        "-c".into(),
+        "protocol.ext.allow=never".into(),
+    ];
+    hardened.extend(args.into_iter().map(Into::into));
+    host.run_command(&CommandSpec::new("git", dir).args(hardened))
 }
 
 /// `dir` を含む git リポジトリのルート（`git rev-parse --show-toplevel`）。repo 外なら `None`。
@@ -919,8 +932,8 @@ pub struct WorktreeStatus {
 
 /// worktree の ahead/behind と dirty を 1 コマンドで取る（`git status --short --branch`）。
 pub fn worktree_status_on(host: &dyn Host, dir: &Path) -> Result<WorktreeStatus> {
-    let output = host
-        .run_command(&CommandSpec::new("git", dir).args(["status", "--short", "--branch"]))
+    // run_git 経由で `.git/config` ハードニング（fsmonitor/hooks/ext 無効化）を通す。
+    let output = run_git(host, dir, ["status", "--short", "--branch"])
         .context("git status を実行できません")?;
     anyhow::ensure!(
         output.success(),

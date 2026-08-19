@@ -877,6 +877,9 @@ fn word_range_in(text: &str, offset: usize) -> (usize, usize) {
 struct PendingPermission {
     title: SharedString,
     diffs: Vec<PermissionDiff>,
+    /// Diff の無いツール（Bash/Fetch/MCP）の実引数（整形 JSON）。承認カードで逐語表示して
+    /// 「何が実行されるか」を必ず見せる（tool poisoning 対策・ACP #1979 / GHSA-f2g4）。
+    raw_input: Option<SharedString>,
     options: Vec<PermissionChoice>,
     respond: mpsc::UnboundedSender<usize>,
     /// 承認待ちに入った時刻。マスコットの段階演出に使う（まず祈る→長引くと頬に手であわあわ）。
@@ -2980,6 +2983,10 @@ impl AgentPanel {
                 thread.pending_permission = Some(PendingPermission {
                     title,
                     diffs: Vec::new(),
+                    // Diff 無しツールの実引数表示（tool poisoning 対策）を描画検証で写すためのデモ値。
+                    raw_input: Some(SharedString::from(
+                        "{\n  \"command\": \"cargo publish\",\n  \"cwd\": \"/Users/daichi/Work/experience/shirushi\"\n}",
+                    )),
                     options: vec![
                         PermissionChoice {
                             label: "許可".into(),
@@ -3060,6 +3067,7 @@ impl AgentPanel {
                     thread.pending_permission = Some(PendingPermission {
                         title,
                         diffs: Vec::new(),
+                        raw_input: None,
                         options: Vec::new(),
                         respond,
                         since: std::time::Instant::now(),
@@ -3893,6 +3901,7 @@ impl AgentPanel {
             AgentEvent::PermissionRequest {
                 title,
                 diffs,
+                raw_input,
                 options,
                 respond,
             } => {
@@ -3938,6 +3947,7 @@ impl AgentPanel {
                     thread.pending_permission = Some(PendingPermission {
                         title: SharedString::from(title),
                         diffs,
+                        raw_input: raw_input.map(SharedString::from),
                         options,
                         respond: respond.clone(),
                         since: std::time::Instant::now(),
@@ -6345,6 +6355,31 @@ impl AgentPanel {
                             .child(pending.title.clone()),
                     ),
             );
+
+        // Diff の無いツール（Bash/Fetch/MCP）は実引数（rawInput）を逐語表示する。これが無いと
+        // agent 任せの title だけで承認＝tool poisoning を検知できない（ACP #1979 / GHSA-f2g4）。
+        // 行ごとに child 化して改行を確実に反映（長い行はカード幅で折り返す）。
+        if let Some(raw_input) = &pending.raw_input {
+            let mut block = div()
+                .id("permission-raw-input")
+                .flex()
+                .flex_col()
+                .max_h(px(168.))
+                .overflow_hidden()
+                .rounded(px(6.))
+                .bg(theme.bg1)
+                .border_1()
+                .border_color(theme.border)
+                .px(px(8.))
+                .py(px(6.))
+                .font_family("Guguru Sans Code")
+                .text_size(px(11.))
+                .text_color(theme.fg1);
+            for line in raw_input.lines() {
+                block = block.child(SharedString::from(line.to_string()));
+            }
+            card = card.child(block);
+        }
 
         // 編集差分（あれば）を diff レビューとして表示。
         for diff in &pending.diffs {
