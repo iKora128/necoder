@@ -207,7 +207,7 @@ pub const AGENTS: &[AgentKind] = &[
         id: "claude",
         label: "Claude Code",
         bin: "claude-agent-acp",
-        package: Some("@agentclientprotocol/claude-agent-acp@0.58.1"),
+        package: Some("@agentclientprotocol/claude-agent-acp@0.66.0"),
         extra_args: &[],
         install_cmd: "npm i -g @anthropic-ai/claude-code",
         login_cmd: "claude",
@@ -219,7 +219,7 @@ pub const AGENTS: &[AgentKind] = &[
         id: "codex",
         label: "Codex",
         bin: "codex-acp",
-        package: Some("@agentclientprotocol/codex-acp@1.1.2"),
+        package: Some("@agentclientprotocol/codex-acp@1.1.14"),
         extra_args: &[],
         install_cmd: "npm i -g @openai/codex",
         login_cmd: "codex",
@@ -469,6 +469,43 @@ fn map_config_option(option: &v1::SessionConfigOption) -> Option<ConfigOption> {
     }
 }
 
+/// ACP ハンドシェイク（initialize）応答の上限。これを超えたら「エージェントが無言でハング」とみなし、
+/// 無限に待ち続けず**エラーを返す**（＝チャットに「エラー: …」として出て、無言のスピナー継続が断てる）。
+/// ローカル起動の initialize は通常 1〜3 秒。初回だけ npx が shim を取得する分の余裕を見て、host の
+/// `REQUEST_TIMEOUT` と同じ 30 秒。プロセスが即死した場合は stdout の EOF で即エラーになる（この
+/// timeout は**プロセスが生きたまま応答しない“真の無言ハング”専用**の最後の砦）。
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// ACP リクエスト `future` を [`HANDSHAKE_TIMEOUT`] 付きで待つ薄いラッパ（各ハンドシェイクの入口）。
+async fn with_handshake_timeout<T>(
+    label: &str,
+    future: impl std::future::Future<Output = std::result::Result<T, acp::Error>>,
+) -> std::result::Result<T, acp::Error> {
+    with_timeout(HANDSHAKE_TIMEOUT, label, future).await
+}
+
+/// `future` を `timeout` 付きで待つ。時間切れなら無言ハングを表す `acp::Error`（closure の戻り型＝
+/// `Result<_, acp::Error>` に合わせるので、呼び出し側の `?` / `.context()` はそのまま効く）。理由は
+/// `message` に直接入れる＝UI（`AgentEvent::Failed`）へ「エラー: … が N 秒応答しません」と素直に出る。
+/// タイマは stdio と同じ `blocking` プールで寝るスレッド＝新規依存なし・ACP の実行ランタイム非依存。
+/// `timeout` を引数にするのはテストから短い値を渡し、30 秒待たずに挙動を検証できるようにするため。
+async fn with_timeout<T>(
+    timeout: std::time::Duration,
+    label: &str,
+    future: impl std::future::Future<Output = std::result::Result<T, acp::Error>>,
+) -> std::result::Result<T, acp::Error> {
+    use futures::future::{Either, select};
+    let timer = blocking::unblock(move || std::thread::sleep(timeout));
+    futures::pin_mut!(future, timer);
+    match select(future, timer).await {
+        Either::Left((result, _timer)) => result,
+        Either::Right(((), _future)) => Err(acp::Error::new(
+            i32::from(acp::ErrorCode::InternalError),
+            format!("{label} が {} 秒応答しません（エージェントの無言ハング）", timeout.as_secs()),
+        )),
+    }
+}
+
 /// エージェントを起動し、ACP の initialize ハンドシェイクまで行う。
 /// 返り値は初期化応答（プロトコル版・エージェント能力）。session/prompt はこの接続に積んでいく（M4 継続）。
 pub async fn connect_and_initialize(command: &AgentCommand) -> Result<v1::InitializeResponse> {
@@ -489,10 +526,11 @@ pub async fn connect_and_initialize(command: &AgentCommand) -> Result<v1::Initia
     let response = acp::Client
         .builder()
         .connect_with(transport, async |connection| {
-            connection
-                .send_request(initialize_request())
-                .block_task()
-                .await
+            with_handshake_timeout(
+                "ACP initialize",
+                connection.send_request(initialize_request()).block_task(),
+            )
+            .await
         })
         .await
         .context("ACP initialize に失敗")?;
@@ -523,10 +561,11 @@ pub async fn prompt_once(command: &AgentCommand, prompt: &str) -> Result<String>
     let result = acp::Client
         .builder()
         .connect_with(transport, async move |connection| {
-            connection
-                .send_request(initialize_request())
-                .block_task()
-                .await?;
+            with_handshake_timeout(
+                "ACP initialize",
+                connection.send_request(initialize_request()).block_task(),
+            )
+            .await?;
             let mut session = connection.build_session(&cwd).block_task().start_session().await?;
             session.send_prompt(prompt)?;
             session.read_to_string().await
@@ -574,10 +613,11 @@ pub async fn run_session_on(
     let outcome = acp::Client
         .builder()
         .connect_with(transport, async move |connection| {
-            connection
-                .send_request(initialize_request())
-                .block_task()
-                .await?;
+            with_handshake_timeout(
+                "ACP initialize",
+                connection.send_request(initialize_request()).block_task(),
+            )
+            .await?;
             // セッションを手動生成する（`start_session` は応答の `config_options` を捨てるため）。
             // NewSessionResponse から config_options を取り出してから attach する。
             let response = connection
@@ -859,6 +899,60 @@ mod tests {
         assert_eq!(AgentKind::by_label("GitHub Copilot").and_then(|k| k.oneshot()), None);
         assert_eq!(AgentKind::by_label("Kimi CLI").and_then(|k| k.oneshot()), None);
         assert_eq!(AgentKind::by_label("Nonexistent").and_then(|k| k.oneshot()), None);
+    }
+
+    #[test]
+    fn timeout_passes_fast_response_through() {
+        // すぐ返る future は timeout せず値をそのまま通す（正常なハンドシェイクは素通り）。
+        let ready = async { Ok::<i32, acp::Error>(42) };
+        let result = futures::executor::block_on(with_timeout(
+            std::time::Duration::from_secs(5),
+            "ACP initialize",
+            ready,
+        ));
+        assert_eq!(result.ok(), Some(42));
+    }
+
+    #[test]
+    fn timeout_fires_on_silent_hang() {
+        // 永遠に返らない future（＝無言ハング）は timeout してエラーになり、理由が message に載る。
+        // これが agent_panel で `AgentEvent::Failed` になり、チャットに「エラー: …」として出る。
+        let hang = futures::future::pending::<std::result::Result<i32, acp::Error>>();
+        let error = futures::executor::block_on(with_timeout(
+            std::time::Duration::from_millis(30),
+            "ACP initialize",
+            hang,
+        ))
+        .expect_err("無言ハングは timeout エラーになる");
+        let message = error.to_string();
+        assert!(
+            message.contains("ACP initialize") && message.contains("応答しません"),
+            "timeout エラーに理由が載る（UI に出る文言）: {message}"
+        );
+    }
+
+    /// 無言ハングの実プロセス検証: stdin を読まず stdout に何も返さない子（＝ハングした agent）に対し、
+    /// connect_and_initialize が [`HANDSHAKE_TIMEOUT`] で必ずエラーを返す（無限に待たない）。ユニット
+    /// テストは helper 単体を見るが、これは実パイプ + ACP トランスポート越しでも timer が発火することを見る。
+    /// 30 秒かかるので通常は無視。`cargo test -p acp_client -- --ignored --nocapture times_out`
+    #[test]
+    #[ignore = "HANDSHAKE_TIMEOUT（30 秒）待つ実プロセス検証"]
+    fn connect_times_out_on_silent_hang() {
+        // `sleep` は stdin を読まず stdout に何も書かない＝プロセスは生きたまま応答しない無言ハング。
+        let command = AgentCommand {
+            path: find_in_path("sleep").expect("sleep が PATH に無い"),
+            args: vec!["120".to_string()],
+            cwd: std::env::temp_dir(),
+        };
+        let started = std::time::Instant::now();
+        let result = futures::executor::block_on(connect_and_initialize(&command));
+        let elapsed = started.elapsed();
+        let error = result.expect_err("無言ハングは timeout エラーになる（無限待ちにならない）");
+        assert!(format!("{error:#}").contains("応答しません"), "理由が UI に出る: {error:#}");
+        assert!(
+            (29..45).contains(&elapsed.as_secs()),
+            "HANDSHAKE_TIMEOUT 付近で返る: {elapsed:?}"
+        );
     }
 
     /// 実プロセス検証: claude-agent-acp を起動して initialize が返るか。

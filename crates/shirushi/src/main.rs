@@ -208,6 +208,8 @@ impl gpui::AssetSource for Assets {
             "icons/square-terminal.svg" => icon!("square-terminal.svg"),
             "icons/folder-plus.svg" => icon!("folder-plus.svg"),
             "icons/folder-tree.svg" => icon!("folder-tree.svg"),
+            "icons/folder.svg" => icon!("folder.svg"),
+            "icons/file.svg" => icon!("file.svg"),
             "icons/settings.svg" => icon!("settings.svg"),
             "icons/square-check.svg" => icon!("square-check.svg"),
             "icons/server.svg" => icon!("server.svg"),

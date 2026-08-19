@@ -1024,28 +1024,87 @@ fn file_type_color(name: &str, theme: &Theme) -> Hsla {
     }
 }
 
-/// エクスプローラのファイル/フォルダアイコン。フォルダ＝横長（folder 色）・ファイル＝縦長（型色）の
-/// シルエットで一目で見分く。固定幅スロットに入れて名前を揃える。
+/// エクスプローラのツリー行のファイル/フォルダアイコン。フォルダ＝フォルダ形（folder 色）・ファイル＝
+/// 折れ角のある書類形（型色）の**シルエット**で一目で見分く（角丸長方形より「何か」が分かる。mock の
+/// icon-grid のシルエット準拠）。固定幅スロットに入れて名前を揃える。svg は親の text_color を継承しない
+/// ので直接指定する。型は色で伝える（型ラベルはグリッド表示だけ・ツリーは幅が無いのでシルエット＋色）。
 fn file_icon(name: &str, is_dir: bool, theme: &Theme) -> impl IntoElement {
-    let shape = if is_dir {
-        let color = theme.folder_icon();
-        div().w(px(13.)).h(px(10.)).rounded(px(2.5)).bg(color)
+    let (path, width, height, color) = if is_dir {
+        ("icons/folder.svg", 15., 12., theme.folder_icon())
     } else {
-        let color = file_type_color(name, theme);
-        div().w(px(10.)).h(px(13.)).rounded(px(2.)).bg(color.alpha(0.9))
+        ("icons/file.svg", 11., 14., file_type_color(name, theme))
     };
-    div().flex_none().w(px(16.)).flex().items_center().justify_center().child(shape)
+    div()
+        .flex_none()
+        .w(px(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(svg().path(path).w(px(width)).h(px(height)).flex_none().text_color(color))
 }
 
-/// アイコングリッド用の大きめアイコン（[`file_icon`] の 2 倍強）。
-fn icon_large(name: &str, is_dir: bool, theme: &Theme) -> impl IntoElement {
-    let shape = if is_dir {
-        div().w(px(30.)).h(px(23.)).rounded(px(4.)).bg(theme.folder_icon())
-    } else {
-        let color = file_type_color(name, theme);
-        div().w(px(22.)).h(px(28.)).rounded(px(3.5)).bg(color.alpha(0.9))
-    };
-    div().flex().items_center().justify_center().child(shape)
+/// アイコングリッド用の大きめアイコン。フォルダ＝フォルダ形、ファイル＝書類形（中立色の紙面）に
+/// **型ラベル**（RS/TOML/MD…）を型色で載せる（mock の icon-grid 準拠）。ラベルで「何のファイルか」が
+/// 読める＝色は識別（型ラベル）に集約し、紙面自体は装飾しない。
+fn icon_large(name: &str, is_dir: bool, theme: &Theme) -> gpui::AnyElement {
+    if is_dir {
+        return div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                svg()
+                    .path("icons/folder.svg")
+                    .w(px(38.))
+                    .h(px(31.))
+                    .flex_none()
+                    .text_color(theme.folder_icon()),
+            )
+            .into_any_element();
+    }
+    let color = file_type_color(name, theme);
+    let label = file_type_label(name);
+    // ラベルは紙面（fg2）の上に載る。muted 型（md/txt/log 等＝色が fg2）は紙面と同色で埋もれるので、
+    // 濃いインク（bg0）にして「紙に書いた文字」として読めるようにする。有色の型はそのまま型色で載る。
+    let label_color = if color == theme.fg2 { theme.bg0 } else { color };
+    div()
+        .relative()
+        .w(px(26.))
+        .h(px(32.))
+        .flex()
+        .items_center()
+        .justify_center()
+        // 紙面は中立色（fg2）。型色はラベルへ（原則: 色は識別に集約）。
+        .child(
+            svg()
+                .path("icons/file.svg")
+                .absolute()
+                .inset_0()
+                .size_full()
+                .flex_none()
+                .text_color(theme.fg2),
+        )
+        .when(!label.is_empty(), |element| {
+            element.child(
+                div()
+                    .text_size(px(7.5))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(label_color)
+                    .child(SharedString::from(label)),
+            )
+        })
+        .into_any_element()
+}
+
+/// アイコングリッドの紙面に載せる型ラベル（短い大文字。例 rs→RS・toml→TOML）。拡張子が無い
+/// （README 等）・ドットファイル（.gitignore 等）は空＝紙面のシルエットだけ出す。
+fn file_type_label(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
+            extension.chars().take(4).collect::<String>().to_uppercase()
+        }
+        _ => String::new(),
+    }
 }
 
 impl Focusable for Workspace {
