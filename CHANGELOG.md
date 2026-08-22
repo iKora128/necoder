@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-22
+
 ### Added
 - 初回公開リリース（v0.1.0）に向けた整備:
   - Finder/Dock からのファイル/フォルダオープン（`CFBundleDocumentTypes` + `on_open_urls` 配線）
@@ -19,4 +21,4 @@
   旧: Info.plist ベタ書きで、上げ忘れると更新チップが無限に出る実害）
 - 更新・管制 IPC のエラーメッセージを i18n 化（英語ロケールに日本語エラーが出ていた）
 
-<!-- リリース時: Unreleased を [0.1.0] - YYYY-MM-DD へ繰り上げ、新しい Unreleased 節を上に作る -->
+<!-- リリース時: Unreleased を [x.y.z] - YYYY-MM-DD へ繰り上げ、新しい Unreleased 節を上に作る -->
