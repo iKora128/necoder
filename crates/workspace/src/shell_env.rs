@@ -156,10 +156,24 @@ pub fn cache_path() -> Option<PathBuf> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// この 2 本は**プロセス唯一**の環境変数 `PATH` を書き換えて読み戻す。テストハーネスは
+    /// 同一プロセス内で並列に走るので、直列化しないと互いの値を踏んで落ちる
+    /// （CI で `gui_launch_applies_cached_path` が散発的に落ちていた実害）。
+    static PATH_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 片方が panic してロックが poison しても、もう片方は続行してよい（守るのは順序だけ）。
+    fn lock_path_env() -> std::sync::MutexGuard<'static, ()> {
+        PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// ターミナル起動（PATH が launchd 既定と違う）では何もしない＝開発フローを変えない。
     #[test]
     fn shell_launch_is_left_alone() {
+        let _guard = lock_path_env();
         let original = std::env::var_os("PATH");
         std::env::set_var("PATH", "/opt/homebrew/bin:/usr/bin:/bin");
         assert_eq!(inherit_login_shell_path(), None);
@@ -178,6 +192,7 @@ mod tests {
     /// キャッシュ有りの経路＝シェルを起こさないので速い（起動時間の予算を食わない）。
     #[test]
     fn gui_launch_applies_cached_path() {
+        let _guard = lock_path_env();
         let scratch =
             std::env::temp_dir().join(format!("necoder-shell-env-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).expect("scratch を作れる");
