@@ -6,7 +6,7 @@
 ## 1. 層構造と依存方向（鉄則）
 
 ```
-[shell]      shirushi(bin) ─ 結線・起動・メニュー
+[shell]      necoder(bin) ─ 結線・起動・メニュー
 [shell]      workspace ─ レール / chrome / active ProjectSession の合成・event routing
 [view]       editor_view / explorer / git_ui / search_ui / agent_panel / terminal_view / settings / graph_view(M14)
 [model]      editor_core / project / acp_client / search / lang / storage
@@ -27,12 +27,12 @@
 
 | crate | 中身 | 出自 | 時期 |
 |---|---|---|---|
-| `shirushi` (bin) | 結線・起動 | 済（骨組み） | M1 ✓ |
+| `necoder` (bin) | 結線・起動 | 済（骨組み） | M1 ✓ |
 | `theme_core` | トークン構造体・dark/light・ProjectIdentity/ThreadColor | UI-SPEC §1 を型に写す | M2 |
 | `i18n` | `t!` マクロ・ja/en YAML 同梱 | 自作（薄い。§6。rust-i18n は crate 局所で不適） | M2 ✓ |
 | `editor_core` | Buffer(ropey)・Selection・Transaction/undo | ropey。zed `text` は**参考のみ**（CRDT 不採用の決定済み） | M2 |
 | `editor_view` | 行仮想化描画・gutter・キャレット・IME | zed `editor` の element 実装を参考（GPL 移植可） | M2 |
-| `settings_core` | default→user→project 3層マージ・`.shirushi/`・監視・スキーマ | zed `settings` を**削って移植** | M3 |
+| `settings_core` | default→user→project 3層マージ・`.necoder/`・監視・スキーマ | zed `settings` を**削って移植** | M3 |
 | `keymap_core` | JSON keymap・コンテキスト述語 | gpui の keymap 機構 + zed 参考 | M3 |
 | `ui` | Button/List/Picker/Modal + **Registry 群**（§4） | zed `ui`/`picker` 参考に新規 | M3 |
 | `workspace` | レール・ドック・ペイン・タブ・statusbar・状態永続化 | zed `workspace` を**大幅に削って移植** | M3 |
@@ -48,7 +48,7 @@
 移植の作法: ファイル冒頭に `// Ported from zed crates/<name> (GPL-3.0-or-later, 2026-07 時点のソース)`。
 collab / CRDT / テレメトリの経路は移植時に**落とす**。Remote SSH は 2026-07-13 に方針変更し、
 Zed の GPL コードを直接移植せず [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) の
-`Host` 境界として独立実装する（将来の Apache-2.0 化の道を閉じない）。設定キーは Shirushi の体系に改名。
+`Host` 境界として独立実装する（将来の Apache-2.0 化の道を閉じない）。設定キーは necoder の体系に改名。
 
 ## 3. コア型スケッチ（M2 の契約 — 変えるならここを先に変える）
 
@@ -89,7 +89,7 @@ impl Buffer {
 pub struct Theme { /* UI-SPEC §1 のトークン表と 1:1 のフィールド */ }
 pub enum ThemeSource { BuiltIn(&'static str), User(PathBuf) } // themes/*.json = トークン上書き JSON
 impl Theme { pub fn load(source) -> Result<Theme>; }          // 欠けたキーは built-in にフォールバック
-pub struct ProjectIdentity { pub color: Hsla, pub icon: IconSource } // .shirushi/settings.json > 手動 > 自動巡回
+pub struct ProjectIdentity { pub color: Hsla, pub icon: IconSource } // .necoder/settings.json > 手動 > 自動巡回
 pub enum IconSource { Monogram(char), Emoji(String), Image(PathBuf) }
 ```
 テーマセレクタ（ライブプレビュー付き・Zed 方式）は M3 の Picker 基盤に載せる。VSCode/Zed テーマのインポートは later（zed `theme_importer` 移植）。
@@ -154,14 +154,14 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 
 **二本立て**: 「人が読む/編集するものはファイル」「機械が高頻度に読み書きするものは DB」。
 
-- **ファイルが真実（DB に入れない）**: settings.json（user/project）・`.shirushi/todos.md`（M12 Todo ボード — ファイルであること自体が要件）・keymap.json・テーマ JSON。git が真実のもの（status/diff/blame）も入れない。検索索引も持たない（regex 走査が正 — DECISIONS §8）
-- **ローカル DB（`~/Library/Application Support/Shirushi/shirushi.db`）**: [Turso](https://github.com/tursodatabase/turso)（SQLite の pure-Rust 再実装・MIT・async ネイティブ）を採用。用途は
+- **ファイルが真実（DB に入れない）**: settings.json（user/project）・`.necoder/todos.md`（M12 Todo ボード — ファイルであること自体が要件）・keymap.json・テーマ JSON。git が真実のもの（status/diff/blame）も入れない。検索索引も持たない（regex 走査が正 — DECISIONS §8）
+- **ローカル DB（`~/Library/Application Support/necoder/necoder.db`）**: [Turso](https://github.com/tursodatabase/turso)（SQLite の pure-Rust 再実装・MIT・async ネイティブ）を採用。用途は
   ①**hot exit**（dirty バッファ全文 + path/version/カーソル。WAL で kill -9 耐性）
   ②**スレッド永続化**（threads/turns テーブル。turn 毎 INSERT 追記 = JSON 全書き換えを避ける。ブラウズはページング）
   ③**トークン台帳**（turns の集計ビューでほぼ無料）
   ④**checkpoint のメタデータ**（turn→file→blob hash。blob 本体は content-addressed ファイル or DB — M12 着手時に比較）
 - **隔離**: DB アクセスは薄い `storage` crate に閉じ込める（SQL を UI 層に漏らさない）。Turso はまだ若いので、問題が出たら rusqlite へ 1 crate の差し替えで退避できる面を保つ。書き込みは全て background executor（async API がそのまま「UI スレッドで塞がない」規律に合う）
-- `state.json`（開タブ・レイアウト）は当面 JSON のまま。肥大したら shirushi.db へ統合
+- `state.json`（開タブ・レイアウト）は当面 JSON のまま。肥大したら necoder.db へ統合
 
 ## 8. 性能予算の測り方（目標: Zed 比 ~80%）
 
@@ -179,7 +179,7 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
                                       |
                          versioned RPC over system OpenSSH
                                       |
-                           shirushi-remote-server
+                           necoder-remote-server
 ```
 
 - path identity は `(HostId, RemotePath)`。remote path を local `PathBuf` として OS API に渡さない。

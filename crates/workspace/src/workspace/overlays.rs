@@ -421,7 +421,7 @@ impl Workspace {
         );
     }
 
-    /// テーマ保存ディレクトリ（`state.json` と同じ Shirushi 設定フォルダの `themes/`）。
+    /// テーマ保存ディレクトリ（`state.json` と同じ necoder 設定フォルダの `themes/`）。
     pub(crate) fn themes_dir(&self) -> Option<PathBuf> {
         self.persistence
             .state_path

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Shirushi（印） — ビジュアルモック</title>
+<title>necoder（印） — ビジュアルモック</title>
 <style>
 /* ============================================================
    Next Editor visual mock — 依存ゼロ / file:// で開くだけ
@@ -868,7 +868,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
 
 <!-- ================= モック操作（デザイン決定用） ================= -->
 <div class="mockbar">
-  <span class="brand">Shirushi（印） / mock v0.3</span>
+  <span class="brand">necoder（印） / mock v0.3</span>
   <div class="group">
     <span>テーマ</span>
     <button id="btn-dark" class="on" onclick="setTheme('dark')">Dark</button>
@@ -929,7 +929,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
   <div class="titlebar">
     <div class="traffic"><i></i><i></i><i></i></div>
     <div class="project-pill">
-      <span class="pj-name" id="pj-name" onclick="showSwitcher()" title="プロジェクトを切替 (⌘O)">shirushi ▾</span>
+      <span class="pj-name" id="pj-name" onclick="showSwitcher()" title="プロジェクトを切替 (⌘O)">necoder ▾</span>
       <span class="branch" id="pj-branch" onclick="showBranches()" title="ブランチ / worktree を切替">⎇ main ▾</span>
     </div>
     <div class="spacer"></div>
@@ -949,7 +949,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
 
     <!-- ============ 最左: プロジェクトレール（1つの窓で PJ/ブランチをまたぐ） ============ -->
     <div class="rail">
-      <div class="rail-item active" style="--pc:#7c8cf8" title="shirushi ⎇ main（スレッド3）" onclick="switchProject(this,'shirushi','main')">
+      <div class="rail-item active" style="--pc:#7c8cf8" title="necoder ⎇ main（スレッド3）" onclick="switchProject(this,'necoder','main')">
         <span style="font-size:13px">印</span>
         <div class="agents"><i class="run" style="background:var(--th1)"></i><i style="background:var(--th2)"></i><i style="background:var(--th3)"></i></div>
       </div>
@@ -968,10 +968,10 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
     <div class="dock-left">
       <!-- 上位階層ブレッドクラム: 親フォルダをクリックでどんどん上へ辿れる -->
       <div class="dock-head crumbs" title="クリックで上の階層へ移動（各フォルダは右クリックでプロジェクトとして開ける）">
-        <span class="crumb">Work</span><span class="csep2">›</span><span class="crumb">experience</span><span class="csep2">›</span><span class="crumb cur">shirushi</span>
+        <span class="crumb">Work</span><span class="csep2">›</span><span class="crumb">experience</span><span class="csep2">›</span><span class="crumb cur">necoder</span>
       </div>
       <div class="tree">
-        <div class="row dir"><span class="chev">▾</span><span class="name" id="tree-root">shirushi</span></div>
+        <div class="row dir"><span class="chev">▾</span><span class="name" id="tree-root">necoder</span></div>
         <div class="row dir i1"><span class="chev">▾</span><span class="name">crates</span></div>
         <div class="row dir i2"><span class="chev">▸</span><span class="name">app</span></div>
         <div class="row dir i2"><span class="chev">▾</span><span class="name">editor</span></div>
@@ -1007,7 +1007,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
             <div class="row"><span class="nm">view.rs</span><span class="gitdot add">●</span></div>
           </div>
         </div>
-        <div class="pathbar" id="pathbar">shirushi › crates › editor › src › <b style="color:var(--fg0)">&nbsp;buffer.rs</b></div>
+        <div class="pathbar" id="pathbar">necoder › crates › editor › src › <b style="color:var(--fg0)">&nbsp;buffer.rs</b></div>
       </div>
       <!-- アイコン表示（Finder 風）。左下のビュー切替から -->
       <div class="tree-icons">
@@ -1015,7 +1015,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
           <button class="nbtn" title="戻る">‹</button>
           <button class="nbtn" title="進む" disabled>›</button>
           <button class="nbtn" title="上の階層へ">↑</button>
-          <span class="nav-path">shirushi</span>
+          <span class="nav-path">necoder</span>
           <span class="nav-count">8 項目・右クリックでメニュー</span>
         </div>
         <div class="icon-grid">
@@ -1028,7 +1028,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
           <div class="tile"><svg viewBox="0 0 40 34"><path class="doc" d="M11 2 h12 l7 7 v23 H11 Z"/><path fill="none" stroke="var(--fg2)" stroke-width="1" d="M23 2 v7 h7"/><text x="20.5" y="27" text-anchor="middle" font-size="8" font-weight="700" fill="var(--syn-fn)">MD</text></svg><span class="tname">README.md</span></div>
           <div class="tile"><svg viewBox="0 0 40 34"><path class="doc" d="M11 2 h12 l7 7 v23 H11 Z"/><path fill="none" stroke="var(--fg2)" stroke-width="1" d="M23 2 v7 h7"/><text x="20.5" y="27" text-anchor="middle" font-size="8" font-weight="700" fill="var(--fg2)">GIT</text></svg><span class="tname">.gitignore</span></div>
         </div>
-        <div class="pathbar">shirushi</div>
+        <div class="pathbar">necoder</div>
       </div>
       <!-- 拡張の描くパネル＝ネイティブと同じ見た目で共存（UI拡張一級市民の宣言） -->
       <div class="ext-panel">
@@ -1048,7 +1048,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
       <!-- ===== 編隊モードの左ドック: 上=状態一覧(herd) / 下=focus中エージェントのworktreeファイル ===== -->
       <div class="fleet-left">
         <div class="herd">
-          <div class="ghead"><span class="pc" style="background:#7c8cf8"></span>shirushi<span class="mini">3 稼働</span></div>
+          <div class="ghead"><span class="pc" style="background:#7c8cf8"></span>necoder<span class="mini">3 稼働</span></div>
           <div class="herd-row focus" data-th="th1" style="--tc:var(--th1)" onclick="focusAgent('th1')">
             <span class="stg work">●</span>
             <div class="c2"><span class="nm">rope設計</span><span class="sub">⎇ <b>rope</b> ・ 作業中 — buffer.rs</span></div>
@@ -1158,11 +1158,11 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
           <div class="ttab">cargo watch</div>
           <div class="ttab">＋</div>
         </div>
-        <pre><span class="prompt">➜ shirushi</span> cargo run -p gpui --example hello_world
-<span class="dim">   Compiling gpui v0.2.0 (…/shirushi/zed/crates/gpui)
+        <pre><span class="prompt">➜ necoder</span> cargo run -p gpui --example hello_world
+<span class="dim">   Compiling gpui v0.2.0 (…/necoder/zed/crates/gpui)
     Finished dev [unoptimized + debuginfo] target(s) in 42.18s
      Running `target/debug/examples/hello_world`</span>
-<span class="prompt">➜ shirushi</span> <span class="caret" style="background: var(--fg1)"></span></pre>
+<span class="prompt">➜ necoder</span> <span class="caret" style="background: var(--fg1)"></span></pre>
       </div>
     </div>
 
@@ -1434,7 +1434,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
         <div class="acell" data-th="term1" style="--tc:var(--ok)">
           <div class="ah"><span class="cdot"></span><span class="nm">ターミナル</span><span class="br">⎇ rope</span><span class="tok">zsh</span><span class="cx" onclick="event.stopPropagation();removeCell()">×</span></div>
           <div class="aone"><span class="stg work">●</span><span>cargo watch — 実行中</span></div>
-          <div class="abody"><div class="result">⎿ Compiling shirushi v0.1.0
+          <div class="abody"><div class="result">⎿ Compiling necoder v0.1.0
    Finished dev [unoptimized] in 3.24s</div></div>
         </div>
         <div class="acell" data-th="ed1" style="--tc:var(--syn-fn)">
@@ -1508,7 +1508,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
         <div class="box">
           <div class="dest">
             <i></i><span id="dest-name">rope設計</span>
-            <span class="dest-pj" id="dest-pj">shirushi ⎇ main</span>
+            <span class="dest-pj" id="dest-pj">necoder ⎇ main</span>
           </div>
           <textarea placeholder="メッセージ…（Enter=改行 / ⌘Enter=送信）"></textarea>
           <div class="actions">
@@ -1573,7 +1573,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
     <div class="palette">
       <input placeholder="プロジェクト / ブランチを検索…" autocomplete="off">
       <div class="list">
-        <div class="item sel"><span class="pdot" style="background:#7c8cf8"></span>shirushi<span class="meta">~/Work/experience/shirushi</span><span class="kbd">⌘1</span></div>
+        <div class="item sel"><span class="pdot" style="background:#7c8cf8"></span>necoder<span class="meta">~/Work/experience/necoder</span><span class="kbd">⌘1</span></div>
         <div class="item sub"><span class="branch-ico">⎇</span>main<span class="meta">worktree: ./ ・現在</span><span class="agdots"><i class="run" style="background:var(--th1)"></i><i style="background:var(--th2)"></i></span></div>
         <div class="item sub"><span class="branch-ico">⎇</span>feature/thread-tabs<span class="meta">worktree: .wt/thread-tabs</span><span class="agdots"><i class="run" style="background:var(--th3)"></i></span></div>
         <div class="item"><span class="pdot" style="background:#34d3b6"></span>blog<span class="meta">~/Work/blog ⎇ main</span><span class="kbd">⌘2</span></div>
@@ -1594,7 +1594,7 @@ body.gs-textonly .graph-switch .gs svg { display: none; }
         <div class="item">ファイルを開く…<span class="kbd">⌘P</span></div>
         <div class="item">リモート SSH に接続…<span class="kbd">⌘⇧R</span></div>
         <div class="olabel">最近</div>
-        <div class="item sel"><span class="pdot" style="background:#7c8cf8"></span>shirushi<span class="meta">~/Work/experience/shirushi ⎇ main</span><span class="kbd">⌘1</span></div>
+        <div class="item sel"><span class="pdot" style="background:#7c8cf8"></span>necoder<span class="meta">~/Work/experience/necoder ⎇ main</span><span class="kbd">⌘1</span></div>
         <div class="item"><span class="pdot" style="background:#f0a24b"></span>genshiai<span class="agdots"><i class="run" style="background:#f0a24b"></i></span><span class="meta">~/Work/genshiai ⎇ dev</span><span class="kbd">⌘2</span></div>
         <div class="item"><span class="pdot" style="background:#56b6c2"></span>api<span class="host">◍ dev@prod-01</span><span class="meta">/srv/api ⎇ main</span></div>
         <div class="item"><span class="pdot" style="background:#34d3b6"></span>blog<span class="meta">~/Work/blog ⎇ main</span></div>

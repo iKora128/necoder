@@ -85,7 +85,7 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
 - **→ 決定（2026-07-11）: GPL-3.0**。Zed の GPL crate（`acp_thread` / `agent_servers` / `worktree` / `fs` 等）を
   移植・改変して土台にする戦略とセットの判断（Apache の GPUI / `agent-client-protocol` とは共存可）。
 - **→ 改定（2026-07-12）: AGPL-3.0-or-later で "park"**。**AGPL-3.0 は GPL-3.0 と相互互換**（両 §13）。
-- **→ 戦略確定（2026-07-12・本人）: 最終的に Apache-2.0（普及第一）**。堀は**ブランド/実行力/デザインの趣味/`shirushi.ai` の運営**でありライセンス保護ではない（色×横断×AI-native はライセンスでは守れない）。**重要**: 現コードは**100% GPL フリー**（gpui/gpui_platform=Apache・acp は crates.io の agent-client-protocol=permissive・worktree/editor 全自作。Zed の GPL crate は"移植"していない）。→ **著作権者=本人 + GPL コード無し + CLA を保つ限り、いつでも Apache へ緩められる**。**今 AGPL で park＝保護しつつ全選択肢を残す最善形**。**Apache の道を閉じない鉄則: Zed の GPL crate を移植せず自作/permissive で代替・貢献は CLA**（当初の「GPL 決定=Zed GPL crate 移植前提」は移植せず自作で組んだため消滅）。「採用を最大化するモード」に入る時に Apache へ緩める。
+- **→ 戦略確定（2026-07-12・本人）: 最終的に Apache-2.0（普及第一）**。堀は**ブランド/実行力/デザインの趣味/`necoder.com` の運営**でありライセンス保護ではない（色×横断×AI-native はライセンスでは守れない）。**重要**: 現コードは**100% GPL フリー**（gpui/gpui_platform=Apache・acp は crates.io の agent-client-protocol=permissive・worktree/editor 全自作。Zed の GPL crate は"移植"していない）。→ **著作権者=本人 + GPL コード無し + CLA を保つ限り、いつでも Apache へ緩められる**。**今 AGPL で park＝保護しつつ全選択肢を残す最善形**。**Apache の道を閉じない鉄則: Zed の GPL crate を移植せず自作/permissive で代替・貢献は CLA**（当初の「GPL 決定=Zed GPL crate 移植前提」は移植せず自作で組んだため消滅）。「採用を最大化するモード」に入る時に Apache へ緩める。
 - **→ 確定（2026-07-15・本人）: AGPL-3.0 を正式ライセンスとして確定**（park → 確定。「最終的に Apache へ」の前提は撤回）。理由: ①コミッタが本人のみ＝Apache の主利得（企業採用・貢献の集めやすさ）が現時点で効かない ②Apache でクローズドにコピーされることへの心理的抵抗 — ソロ多年プロジェクトは「パクられても平気か」という持続性が実利に優先する（Zed が GPL を選んだ理由と同型）③Remote SSH まで実装済み＝将来のクラウド/リモート展開にネットワーク条項（AGPL §13）が効くため GPL より AGPL が適合。07-12 の「堀はブランド/実行力」論は真のまま両立 — ライセンスは堀ではなく**続けるための保険**。**維持する鉄則（目的を「Apache の道」から「再ライセンスの自由」に読み替えて存続）**: Zed の GPL crate はコード移植せず自作/permissive で代替・外部貢献を受け始める最初の 1 件から CLA 必須。この 2 つを守る限り、デュアルライセンス/商用版/将来の緩和は本人の一存で可能なまま（AGPL→緩める方向は一方通行でいつでも撃てる。逆に一度 Apache で出た snapshot は永久に回収不能）。
 
 ## 6. 動機の切り分け（判断の本質）
@@ -106,8 +106,14 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
 
 ## 8. 決定ログ（2026-07-11 追記）
 
-- **名前: Shirushi（しるし・印）** — 暫定確定。ドメイン `shirushi.ai` 取得済み。
-  crate/バイナリ名 `shirushi`、プロジェクトローカル設定は `.shirushi/`
+- **名前: necoder（ねこーだー）— 2026-08-22 確定**（旧 Shirushi から改名。当初 2026-07-11 に「Shirushi・暫定確定」としていたものを差し替え）。
+  ドメインは `necoder.com` を保有（Cloudflare・2026-07-13 取得）＋ `necoder.ai` を確保。**表記は全部小文字** — ロゴ・UI 文字列・メニュー・`.app` すべて `necoder`（`Necoder` とは書かない）。
+  crate/バイナリ名 `necoder`、プロジェクトローカル設定は `.necoder/`、env は `NECODER_*`。
+  **改名の根拠**: ① `shirushi` は日本で衝突済み（株式会社シルシが「SHIRUSHI App」を Google Play で配布中・`tokyo.shirushi.*`）。
+  ② Shirushi 唯一の強みだった「印＝色のしるし」という意味の橋渡しが、`docs/GLOSSARY.md` にも UI 文字列にも**一度も実装されていなかった**＝捨てるコストが実質ゼロだった。
+  ③ 堀は**ブランド**（§8 上記の Apache 戦略と同じ前提）で、その顔である猫耳コーダー娘は既にアプリ内マスコット・アプリアイコン・LP まで実装済み。
+  `necoder` は**名前とマスコットが一つの資産に融合**し、かつ `coder` を含むので海外で名前の説明が要らない（普及第一と整合）。
+  **旧名の扱い**: `shirushi.ai` は保有継続 → `necoder.com` へ 301。`docs/JOURNAL.md` の過去エントリは**改名しない**（当時の記録として温存する）。
 - **ライセンス: AGPL-3.0（2026-07-15 確定）**（§5 参照。鉄則: Zed GPL crate のコード移植禁止・外部貢献は CLA — 再ライセンスの自由を保つため）
 - **性能予算: Zed 比 ~80% を下限目標**（入力レイテンシ・起動）。UX 向上を性能より優先する
   — GPUI 採用自体が「UX の一環」という位置づけ。ベンチは zed の editor_benchmarks / input_latency_ui を移植
@@ -136,7 +142,7 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   確立パターンがあるため Sparkle は不採用（M13 で実装）
 - **checkpoint の方式: content-addressed ブロブストア自作で確定（2026-07-17・比較表提示済み）** —
   (a) content-addressed（採用）: Turso に checkpoint→file→hash のメタ・blob は
-  `~/Library/Application Support/Shirushi/blobs/<hh>/<hash>` のファイル・重複排除が自然・GC は SQL で列挙。
+  `~/Library/Application Support/necoder/blobs/<hh>/<hash>` のファイル・重複排除が自然・GC は SQL で列挙。
   (b) ターン毎全コピー: 実装最小だが turn×ファイルで線形膨張（エージェントは同じファイルを何度も触る = 最悪ケース）。
   (c) shadow git: delta 圧縮は魅力だが git 依存・ユーザー .git との干渉・turn 毎 commit コスト —
   research/cursor-features.md の「Git 非依存の信頼担保」と不整合。
@@ -152,20 +158,20 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   巻き添え保存を除去済み（`agent_panel::select_option`）。モデル既定も「Settings で各エージェントに ★ で決める」
   方式に寄せる（当面は agent 自身の既定＝安定なのでドリフトは無い）。設定画面は M12・`Workspace.show_settings`。
   → **2026-07-27 に一部改訂**（モデル / 思考量だけ last-used を採用。本ログ末尾「モデルと思考量は sticky」を正とする）。
-- **M14 マルチエージェント編隊 = herdr から取るのは #3-4 のみ（2026-07-20・本人）** — herdr（AGPL・クリーンルーム参照）分析の結論: 状態検知・状態一覧・会話復元は ACP ネイティブで既にカバー/上回る（`ThreadActivity`/`activity_dot`/状態つき `RunningRegistry`・スレッド永続化。基盤は 2026-07-20 別セッションで実装済み）。**取り込むのは「エージェント自身が編隊を操作する API」（herdr の #3-4）のみ** — `shirushi` CLI ＋ ACP ツール/MCP で worktree 追加・ペイン追加・`wait agent-status`（他エージェントの完了待ち）を**クリーンルーム自作**（ソースを読まず挙動から・§5 の鉄則どおり）。**プラグイン市場（#5）は不採用**（登録式境界は既存・エコシステムは later）。トースト個別ミュート（#7）は既存通知の小改善に合流。**編隊ビュー = 専用だが軽量**（既存 `ProjectSession` を再利用し、左ファイルブラウザは残して **focus-follows-agent**＝フォーカス中エージェントの worktree を映す＝「ファイルブラウザの真」を一意化）。**系譜グラフ = 扇形（Fan）既定**（＋ツリー/カード/ハブ切替・ネイティブ描画・webview 不使用。River は廃止・Hub 追加＝2026-07-22）。**状態は色相を持たない**（既決・§1.3/JOURNAL 2026-07-20）を編隊でも貫く。M13 末尾「エージェントタブ Grouped ビュー」は**②スレッドが worktree dest を持つモデル拡張**で決着。正は UI-SPEC §11・ROADMAP M14・mock 編隊モード。
+- **M14 マルチエージェント編隊 = herdr から取るのは #3-4 のみ（2026-07-20・本人）** — herdr（AGPL・クリーンルーム参照）分析の結論: 状態検知・状態一覧・会話復元は ACP ネイティブで既にカバー/上回る（`ThreadActivity`/`activity_dot`/状態つき `RunningRegistry`・スレッド永続化。基盤は 2026-07-20 別セッションで実装済み）。**取り込むのは「エージェント自身が編隊を操作する API」（herdr の #3-4）のみ** — `necoder` CLI ＋ ACP ツール/MCP で worktree 追加・ペイン追加・`wait agent-status`（他エージェントの完了待ち）を**クリーンルーム自作**（ソースを読まず挙動から・§5 の鉄則どおり）。**プラグイン市場（#5）は不採用**（登録式境界は既存・エコシステムは later）。トースト個別ミュート（#7）は既存通知の小改善に合流。**編隊ビュー = 専用だが軽量**（既存 `ProjectSession` を再利用し、左ファイルブラウザは残して **focus-follows-agent**＝フォーカス中エージェントの worktree を映す＝「ファイルブラウザの真」を一意化）。**系譜グラフ = 扇形（Fan）既定**（＋ツリー/カード/ハブ切替・ネイティブ描画・webview 不使用。River は廃止・Hub 追加＝2026-07-22）。**状態は色相を持たない**（既決・§1.3/JOURNAL 2026-07-20）を編隊でも貫く。M13 末尾「エージェントタブ Grouped ビュー」は**②スレッドが worktree dest を持つモデル拡張**で決着。正は UI-SPEC §11・ROADMAP M14・mock 編隊モード。
 - **M14 Fleet を TaskSpace-first へ確定（2026-07-22・前項を更新）** — 既定は `+ Task` = branch + linked worktree + ProjectSession + AgentPanel。Fleet cell は Agent thread でなく TaskSpace を表し、既存 AgentPanel を完全再利用する。同じ Task への Agent 追加だけを明示操作にする。main は protected IntegrationSpace、永続 lifecycle/event ledger と Conflict Radar / explicit Integrate を Orchestration Engine が所有する。CLI/MCP の create/list/status/wait/review/integrate も同じ ledger を使う。正は `FLEET-ARCHITECTURE.md`。
 - **管制（Control）の設計判断 9 点を確定（2026-07-23・本人承認。実装計画=`FLEET-CONTROL-PLAN.md`・その §0 の転記）** —
   ① 監視役は 3 分解: 決定論の事実層（プロトコル/Git 由来・LLM なし）/ 任命制の監督（ただの ACP スレッド）/ 人間への注意ルーティング（UI）。**台帳が記憶・監督は状態を持たない**（交代・再起動が自由）。
   ② 名称「管制」（英 `Control`）。編隊モード中央面の新タブ。
   ③ 規律: 色=スレッド識別のみ / 状態=形と動き / ✳ テラコッタ=LLM 生成テキストの印 / 破線=画面推定（Herdr 由来）。`TaskPhase`・`ThreadActivity`・Git health を 1 enum に潰さない。
   ④ 遷移スナップショット（digest）は状態遷移時のみ生成・ポーリング無し。Tier1=決定論テンプレ合成 / Tier2=`oneshot()` 1 行要約（Done/Failed のみ・ledger キャッシュ）。**要約は状態を上書きしない**。
-  ⑤ Herdr は sidecar（別プロセス・socket API）。頭脳は Shirushi・PTY とプロセス生存だけ Herdr。worktree 操作は Shirushi 所有。
+  ⑤ Herdr は sidecar（別プロセス・socket API）。頭脳は necoder・PTY とプロセス生存だけ Herdr。worktree 操作は necoder 所有。
   ⑥ ACP 優先の起動形態選択: ACP 対応エージェントの既定は ACP。常駐（Herdr・CLI 形態）は明示選択時のみ・推定監視であることを破線で明示。
   ⑦ Herdr の観測値は業務上の正にしない: `TurnId`/`generation` で照合し前ターン完了の誤認を防ぐ。
-  ⑧ 守るべき操作（spawn/遷移/integrate/send）は Shirushi の MCP/CLI にだけ置く（Herdr socket 直叩きは台帳と permission の迂回路＝監督のツールセットに含めない）。
+  ⑧ 守るべき操作（spawn/遷移/integrate/send）は necoder の MCP/CLI にだけ置く（Herdr socket 直叩きは台帳と permission の迂回路＝監督のツールセットに含めない）。
   ⑨ リモート管制（QR・スマホ）は最後（P9・構想枠）。→ **2026-07-25 に更新**（構成確定 + P7/P8 より前へ繰り上げ。本ログの次項を正とする）。
   **P0 実装補足（2026-07-23）**: phase 遷移の唯一の入口は `Storage::commit_task_transition`（snapshot+event 同一 transaction）。`TaskPhase`/`SpaceKind` の単一定義は storage crate（GUI/CLI/MCP が共有・文字列は DB とプロセス境界のみ）。IntegrationSpace は phase でなく `SpaceKind`（DB は既存互換の sentinel 表現・storage 内に封じる）。
-- **Task ledger は「GUI 稼働中 = 単一 writer」で確定（2026-07-24・P5 実装中の発見）** — Turso は**プロセス排他ロック**で、GUI と headless CLI/MCP が同じ DB を同時に開けない（`Locking error` を e2e で確認）。対応: GUI が生きている間の台帳読み書きは**すべて GUI の storage ハンドル（単一ワーカースレッド）へ IPC（`~/.shirushi/gui.sock`・0600・1 行 JSON）で集約**し、headless 直開きはロック検出（`is_lock_error`）で自動フォールバック。GUI 不在時は従来どおり直接 DB。副次効果: 遷移が常に GUI の入口（`transition_task_space`）を通るためニュース/総括/管制が headless 操作でも即時に追従する。守るべき操作（spawn/send/遷移）を Shirushi の CLI/MCP にだけ置く原則（FLEET-CONTROL-PLAN §0-8）とも整合。rusqlite へ退避する場合もこの単一 writer 構造は維持する（多 writer に戻さない）。
+- **Task ledger は「GUI 稼働中 = 単一 writer」で確定（2026-07-24・P5 実装中の発見）** — Turso は**プロセス排他ロック**で、GUI と headless CLI/MCP が同じ DB を同時に開けない（`Locking error` を e2e で確認）。対応: GUI が生きている間の台帳読み書きは**すべて GUI の storage ハンドル（単一ワーカースレッド）へ IPC（`~/.necoder/gui.sock`・0600・1 行 JSON）で集約**し、headless 直開きはロック検出（`is_lock_error`）で自動フォールバック。GUI 不在時は従来どおり直接 DB。副次効果: 遷移が常に GUI の入口（`transition_task_space`）を通るためニュース/総括/管制が headless 操作でも即時に追従する。守るべき操作（spawn/send/遷移）を necoder の CLI/MCP にだけ置く原則（FLEET-CONTROL-PLAN §0-8）とも整合。rusqlite へ退避する場合もこの単一 writer 構造は維持する（多 writer に戻さない）。
 - **リモート管制（スマホ）の構成を確定（2026-07-25・本人。実装計画=`FLEET-CONTROL-PLAN.md` §2 P9・その転記）** —
   外出先のスマホのブラウザから Fleet を見て裁く。**Tailscale/VPN は使わない**（ユーザーに設定させないことが出発点）。
   **前提3点が構成を強制する**: ① Mac は NAT の内側＝公開された待ち合わせ場所（リレー）が 1 つ要る（VPN を使わない以上、回避不能）
@@ -184,7 +190,7 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   **LAN 高速経路は作らない**（HTTPS→`http://LAN-IP` は mixed content で、回避には鍵同梱の証明書細工が要る。管制はテキストなので経路は 1 本に）。
   **リレーは本体と同じ repo の `relay/`・AGPL**（`mock/` `lp/` と同じ同居。permissive に分ける案は破棄 — 100 行の交換機は AGPL で弾かれた側が自分で書けるので、
   copyleft で守るものも permissive で得るものも無く、リポジトリ/ライセンス/説明だけ増える。**§13 の義務は改変版をサービスとして走らせる人が自分の利用者に改変ソースを渡すことだけで、
-  Shirushi のユーザーにも Shirushi で書いたコードにも一切及ばない**。対応は PWA にソースへのリンクを 1 つ置く）。
+  necoder のユーザーにも necoder で書いたコードにも一切及ばない**。対応は PWA にソースへのリンクを 1 つ置く）。
   **不採用**: Tailscale/VPN・ngrok/Cloudflare Tunnel（URL 不安定 or 各自ドメイン必須で配布に向かない）・Firebase（Google 依存 + 従量）・Google/OAuth ログイン・WebRTC（TURN が結局リレー）・VPS。
   **順序**: P7/P8 より前に繰り上げ（P9a/b は P7 に非依存）。着想は zenn「自作ターミナルで 500 コミット」（MulmoTerminal）の分析 — 同記事から取るのは
   ①自分のプロンプトを digest の隣に残す ②Web Push ③（セルズームは実装済みで不要）で、状態一覧/色分け/サマリーによる認知天井の突破は P1-P3 が既にカバー。

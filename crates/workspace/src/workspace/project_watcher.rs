@@ -13,7 +13,7 @@ impl Workspace {
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
         let (sender, mut receiver) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
-        let debug = std::env::var_os("SHIRUSHI_WATCH_DEBUG").is_some();
+        let debug = std::env::var_os("NECODER_WATCH_DEBUG").is_some();
         match project::watch_root(&host, &root, move |paths| {
             if debug {
                 eprintln!("watch: raw event {paths:?}");
@@ -137,7 +137,7 @@ impl Workspace {
         // Todo ボード: どの書き手（AI/CLI/手編集）が todos.md を変えても板が追従する（M12-10 の心臓部）。
         if paths
             .iter()
-            .any(|path| path.ends_with(std::path::Path::new(".shirushi/todos.md")))
+            .any(|path| path.ends_with(std::path::Path::new(".necoder/todos.md")))
         {
             self.reload_todo_board_for(session_index, cx);
         }
@@ -149,7 +149,7 @@ impl Workspace {
     /// settings の実効値（font_size/tab_size/soft_wrap）を全エディタへ配る（live 反映・M10-13）。
     pub(crate) fn apply_editor_settings(&mut self, cx: &mut Context<Self>) {
         let current = settings::get(cx);
-        let soft_wrap = current.soft_wrap || std::env::var_os("SHIRUSHI_SOFT_WRAP").is_some();
+        let soft_wrap = current.soft_wrap || std::env::var_os("NECODER_SOFT_WRAP").is_some();
         let (font_size, tab_size) = (current.font_size, current.tab_size);
         let editors: Vec<Entity<EditorView>> = self
             .project_sessions
@@ -171,7 +171,7 @@ impl Workspace {
         }
     }
 
-    // ── プロジェクト色ピッカー（レール右クリック → .shirushi/settings.json へ・M12-11） ──
+    // ── プロジェクト色ピッカー（レール右クリック → .necoder/settings.json へ・M12-11） ──
 
-    // 選んだ色をプロジェクトへ適用し `.shirushi/settings.json` に保存（再起動後も効く）。
+    // 選んだ色をプロジェクトへ適用し `.necoder/settings.json` に保存（再起動後も効く）。
 }

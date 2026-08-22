@@ -1,7 +1,7 @@
 //! local/remote 共通の host 境界と Remote SSH wire protocol。
 //!
 //! `std::fs` / `std::process` を UI・project model から隔離し、同じ API を local process と
-//! SSH 上の `shirushi-remote-server` へ向ける。設計根拠は
+//! SSH 上の `necoder-remote-server` へ向ける。設計根拠は
 //! `docs/research/remote-ssh-2026.md`。Zed の GPL 実装は移植せず、公開仕様を基に独立実装する。
 
 use anyhow::{anyhow, bail, Context as _, Result};
@@ -402,7 +402,7 @@ fn write_file_local(path: &Path, bytes: &[u8], condition: WriteCondition) -> Res
         .unwrap_or("buffer");
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
     let temp = parent.join(format!(
-        ".{name}.shirushi-{}-{}.tmp",
+        ".{name}.necoder-{}-{}.tmp",
         std::process::id(),
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
     ));
@@ -1245,7 +1245,7 @@ fn session_socket(session: &str) -> Result<PathBuf> {
         .context("remote uid を取得できない")?;
     // macOS の SUN_LEN は短い。owner-only directory + 160-bit socket name で安全性と長さを両立する。
     Ok(PathBuf::from(format!(
-        "/tmp/shirushi-remote-{uid}-{SERVER_VERSION}-p{PROTOCOL_VERSION}"
+        "/tmp/necoder-remote-{uid}-{SERVER_VERSION}-p{PROTOCOL_VERSION}"
     ))
     .join(format!("{}.sock", &session[..40])))
 }
@@ -1339,7 +1339,7 @@ fn connect_session_proxy(session: &str) -> Result<()> {
     };
     let mut input_stream = stream.try_clone()?;
     thread::Builder::new()
-        .name("shirushi-proxy-input".to_string())
+        .name("necoder-proxy-input".to_string())
         .spawn(move || {
             remote_trace("proxy: input copy start");
             let mut stdin = std::io::stdin().lock();
@@ -1388,7 +1388,7 @@ pub fn serve_remote_server_cli() -> Result<()> {
         [command, flag, socket] if command == "daemon" && flag == "--socket" => {
             serve_daemon(Path::new(socket))
         }
-        _ => bail!("使い方: shirushi-remote-server <serve --stdio | proxy --session ID | version>"),
+        _ => bail!("使い方: necoder-remote-server <serve --stdio | proxy --session ID | version>"),
     }
 }
 
@@ -1473,7 +1473,7 @@ impl RpcClient {
         >::new()));
         let reader_pending = pending.clone();
         thread::Builder::new()
-            .name("shirushi-remote-reader".to_string())
+            .name("necoder-remote-reader".to_string())
             .spawn(move || {
                 let failure = loop {
                     match read_frame(reader.as_mut()) {
@@ -1644,9 +1644,9 @@ pub struct SshConfigHost {
 }
 
 /// SSH config を読んで接続可能なホスト一覧を返す（読めなければ空）。
-/// 通常は `~/.ssh/config`、テストでは transport と同じ `SHIRUSHI_SSH_CONFIG` を使う。
+/// 通常は `~/.ssh/config`、テストでは transport と同じ `NECODER_SSH_CONFIG` を使う。
 pub fn ssh_config_hosts() -> Vec<SshConfigHost> {
-    let path = match std::env::var_os("SHIRUSHI_SSH_CONFIG") {
+    let path = match std::env::var_os("NECODER_SSH_CONFIG") {
         Some(path) => PathBuf::from(path),
         None => {
             let Some(home) = std::env::var_os("HOME") else {
@@ -1770,7 +1770,7 @@ impl SshTransport {
         let identity_hash = content_hash(project.identity().as_bytes());
         // UNIX domain socket の長さ制限を避けるため短い /tmp 配下を使う。directory は owner-only。
         let control_dir = PathBuf::from(format!(
-            "/tmp/shirushi-ssh-{}-{identity_hash:016x}-{serial}",
+            "/tmp/necoder-ssh-{}-{identity_hash:016x}-{serial}",
             std::process::id()
         ));
         std::fs::create_dir(&control_dir).with_context(|| {
@@ -1914,15 +1914,15 @@ impl SshTransport {
         // 配備バイナリ: 明示指定（同一プラットフォーム検査を飛ばす）→ remote target 用の自動発見
         // （per-target キャッシュ / .app 同梱 / same-platform の dev ビルド・#1）。
         let explicit_artifact =
-            std::env::var_os("SHIRUSHI_REMOTE_SERVER_BINARY").map(PathBuf::from);
+            std::env::var_os("NECODER_REMOTE_SERVER_BINARY").map(PathBuf::from);
         let artifact = explicit_artifact
             .clone()
             .or_else(|| find_remote_server_for(remote_os, remote_arch))
             .with_context(|| {
                 format!(
-                    "remote ({remote_os}/{remote_arch}) 用の shirushi-remote-server が見つからない。\
-                     CI 生成物を ~/.local/share/shirushi/remote/artifacts/<target>/ に置くか、\
-                     SHIRUSHI_REMOTE_SERVER_BINARY=<remote向けartifact> を指定してください"
+                    "remote ({remote_os}/{remote_arch}) 用の necoder-remote-server が見つからない。\
+                     CI 生成物を ~/.local/share/necoder/remote/artifacts/<target>/ に置くか、\
+                     NECODER_REMOTE_SERVER_BINARY=<remote向けartifact> を指定してください"
                 )
             })?;
         if !artifact.is_file() {
@@ -1933,9 +1933,9 @@ impl SshTransport {
         }
 
         let install_dir = PathBuf::from(home)
-            .join(".local/share/shirushi/remote/servers")
+            .join(".local/share/necoder/remote/servers")
             .join(format!("{SERVER_VERSION}-p{PROTOCOL_VERSION}"));
-        let installed = install_dir.join("shirushi-remote-server");
+        let installed = install_dir.join("necoder-remote-server");
         if self.compatible_server(&installed.to_string_lossy()) {
             return Ok(installed.to_string_lossy().to_string());
         }
@@ -2004,7 +2004,7 @@ impl SshTransport {
         Ok(installed)
     }
 
-    /// `~/.local/share/shirushi/remote/servers/` 配下の、現行 version 以外の server ディレクトリを
+    /// `~/.local/share/necoder/remote/servers/` 配下の、現行 version 以外の server ディレクトリを
     /// 削除する（best-effort）。version が上がるたびに旧バイナリが溜まって容量を食うのを防ぐ。
     fn cleanup_old_servers(&self, install_dir: &Path) {
         let Some(servers_dir) = install_dir.parent() else {
@@ -2025,21 +2025,21 @@ impl SshTransport {
 
 fn find_local_remote_server() -> Option<PathBuf> {
     let current = std::env::current_exe().ok()?;
-    let sibling = current.parent()?.join("shirushi-remote-server");
+    let sibling = current.parent()?.join("necoder-remote-server");
     if sibling.is_file() {
         return Some(sibling);
     }
     let development =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/shirushi-remote-server");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/necoder-remote-server");
     development.is_file().then_some(development)
 }
 
-/// `ssh` サブプロセスの土台。`SHIRUSHI_SSH_CONFIG` が指定されていれば `-F <config>` を先頭に
+/// `ssh` サブプロセスの土台。`NECODER_SSH_CONFIG` が指定されていれば `-F <config>` を先頭に
 /// 前置きする。テスト（Docker の隔離ホスト）やサンドボックス運用で、ユーザーの `~/.ssh/config`
 /// や `known_hosts` を汚さずに remote を検証するための seam。未指定なら system ssh の既定どおり。
 fn ssh_command() -> Command {
     let mut command = Command::new("ssh");
-    if let Some(config) = std::env::var_os("SHIRUSHI_SSH_CONFIG") {
+    if let Some(config) = std::env::var_os("NECODER_SSH_CONFIG") {
         command.arg("-F").arg(config);
     }
     command
@@ -2106,16 +2106,16 @@ fn remote_target_triple(remote_os: &str, remote_arch: &str) -> Option<String> {
 }
 
 /// remote target 用の配備バイナリを探す（#1 の自動発見・env 指定なしで mac→Linux を通す）:
-/// 1) per-target キャッシュ `~/.local/share/shirushi/remote/artifacts/<triple>/shirushi-remote-server`
-/// 2) .app 同梱 `<exe>/../Resources/remote/<triple>/shirushi-remote-server`（インストール版）
+/// 1) per-target キャッシュ `~/.local/share/necoder/remote/artifacts/<triple>/necoder-remote-server`
+/// 2) .app 同梱 `<exe>/../Resources/remote/<triple>/necoder-remote-server`（インストール版）
 /// 3) same-platform なら従来の sibling / dev ビルド（[`find_local_remote_server`]）
 fn find_remote_server_for(remote_os: &str, remote_arch: &str) -> Option<PathBuf> {
     if let Some(triple) = remote_target_triple(remote_os, remote_arch) {
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
             let cached = home
-                .join(".local/share/shirushi/remote/artifacts")
+                .join(".local/share/necoder/remote/artifacts")
                 .join(&triple)
-                .join("shirushi-remote-server");
+                .join("necoder-remote-server");
             if cached.is_file() {
                 return Some(cached);
             }
@@ -2125,7 +2125,7 @@ fn find_remote_server_for(remote_os: &str, remote_arch: &str) -> Option<PathBuf>
                 let bundled = dir
                     .join("../Resources/remote")
                     .join(&triple)
-                    .join("shirushi-remote-server");
+                    .join("necoder-remote-server");
                 if bundled.is_file() {
                     return Some(bundled);
                 }
@@ -2240,7 +2240,7 @@ impl ReconnectingClient {
         if client.connector.is_some() {
             let weak = Arc::downgrade(&client);
             thread::Builder::new()
-                .name("shirushi-remote-heartbeat".to_string())
+                .name("necoder-remote-heartbeat".to_string())
                 .spawn(move || loop {
                     thread::sleep(Duration::from_secs(5));
                     let Some(client) = weak.upgrade() else {
@@ -2634,7 +2634,7 @@ impl RemoteHost {
         let keeper_stop = stop.clone();
         let keeper = self.clone();
         thread::Builder::new()
-            .name("shirushi-remote-watch-keeper".to_string())
+            .name("necoder-remote-watch-keeper".to_string())
             .spawn(move || {
                 let mut seen = keeper.client.generation();
                 while !keeper_stop.load(Acquire) {
@@ -2942,7 +2942,7 @@ fn quote_posix(value: &str) -> String {
 }
 
 fn remote_trace(message: &str) {
-    if std::env::var_os("SHIRUSHI_REMOTE_TRACE").is_some() {
+    if std::env::var_os("NECODER_REMOTE_TRACE").is_some() {
         eprintln!("[remote-trace] {message}");
     }
 }
@@ -2963,7 +2963,7 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "shirushi-host-{tag}-{}-{}",
+            "necoder-host-{tag}-{}-{}",
             std::process::id(),
             NEXT_TEST.fetch_add(1, Ordering::Relaxed)
         ));

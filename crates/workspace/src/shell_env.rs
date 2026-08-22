@@ -17,8 +17,8 @@
 //! あるため `-i` が要る（`-l` だけでは node が出ない実例）。~0.5s かかるので起動時間の予算
 //! （~215ms）を毎回食わないよう結果をキャッシュし、2 回目以降は即読み + 裏で取り直す。
 //!
-//! 置き場: `~/Library/Application Support/Shirushi/shell-path`（`SHIRUSHI_SHELL_PATH_CACHE`
-//! で差し替え・`SHIRUSHI_NO_SHELL_ENV=1` で機能ごと止める）。
+//! 置き場: `~/Library/Application Support/necoder/shell-path`（`NECODER_SHELL_PATH_CACHE`
+//! で差し替え・`NECODER_NO_SHELL_ENV=1` で機能ごと止める）。
 //!
 //! 扱うのは PATH だけ。API キー等は取り込まない — 認証は各 CLI 側に委譲する決定（DECISIONS）
 //! なので、鍵をこのプロセスへ持ち込む理由が無い。
@@ -40,14 +40,14 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const MARKER: char = '\u{1}';
 
-/// PATH キャッシュの置き場（`SHIRUSHI_SHELL_PATH_CACHE` で差し替え）。
+/// PATH キャッシュの置き場（`NECODER_SHELL_PATH_CACHE` で差し替え）。
 #[cfg(unix)]
 pub fn cache_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("SHIRUSHI_SHELL_PATH_CACHE") {
+    if let Some(path) = std::env::var_os("NECODER_SHELL_PATH_CACHE") {
         return Some(PathBuf::from(path));
     }
     let home = std::env::var_os("HOME")?;
-    Some(std::path::Path::new(&home).join("Library/Application Support/Shirushi/shell-path"))
+    Some(std::path::Path::new(&home).join("Library/Application Support/necoder/shell-path"))
 }
 
 /// GUI 起動なら、ログインシェルの PATH をこのプロセスへ取り込む。取り込んだ PATH を返す。
@@ -56,7 +56,7 @@ pub fn cache_path() -> Option<PathBuf> {
 /// 他スレッドの env 読みと競合し得るので、**窓が開く前**である必要がある。
 #[cfg(unix)]
 pub fn inherit_login_shell_path() -> Option<String> {
-    if std::env::var_os("SHIRUSHI_NO_SHELL_ENV").is_some() {
+    if std::env::var_os("NECODER_NO_SHELL_ENV").is_some() {
         return None;
     }
     // ターミナル起動（＝既に本物の環境を継いでいる）なら触らない。
@@ -179,13 +179,13 @@ mod tests {
     #[test]
     fn gui_launch_applies_cached_path() {
         let scratch =
-            std::env::temp_dir().join(format!("shirushi-shell-env-{}", std::process::id()));
+            std::env::temp_dir().join(format!("necoder-shell-env-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).expect("scratch を作れる");
         let cache = scratch.join("shell-path");
         std::fs::write(&cache, "/opt/test/bin:/usr/bin:/bin\n").expect("キャッシュを書ける");
 
         let original = std::env::var_os("PATH");
-        std::env::set_var("SHIRUSHI_SHELL_PATH_CACHE", &cache);
+        std::env::set_var("NECODER_SHELL_PATH_CACHE", &cache);
         std::env::set_var("PATH", LAUNCHD_DEFAULT_PATH);
 
         let applied = inherit_login_shell_path();
@@ -196,7 +196,7 @@ mod tests {
             "GUI 起動ではキャッシュした PATH がプロセスに載る"
         );
 
-        std::env::remove_var("SHIRUSHI_SHELL_PATH_CACHE");
+        std::env::remove_var("NECODER_SHELL_PATH_CACHE");
         match original {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),

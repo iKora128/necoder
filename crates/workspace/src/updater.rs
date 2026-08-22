@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// リリース確認先（GitHub Releases API）。
-const RELEASES_URL: &str = "https://api.github.com/repos/iKora128/shirushi/releases/latest";
+const RELEASES_URL: &str = "https://api.github.com/repos/iKora128/necoder/releases/latest";
 
 /// 見つかった新しいリリース。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +94,7 @@ pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
             "--max-time",
             "10",
             "-H",
-            "User-Agent: shirushi-updater",
+            "User-Agent: necoder-updater",
             RELEASES_URL,
         ])
         .output()
@@ -112,7 +112,7 @@ pub fn download_and_install(info: &UpdateInfo) -> Result<()> {
     // 予測不能な 0700 の作業ディレクトリに落とす（旧: /tmp の固定名 = spctl 検証→マウントの間に
     // 差し替えられる理屈上の隙。sticky /tmp で他ユーザーの unlink は防げるが、名前も読めなくする）。
     let staging_dir = unique_staging_dir()?;
-    let staging = staging_dir.join("Shirushi.dmg");
+    let staging = staging_dir.join("necoder.dmg");
     // 1) ダウンロード。
     let status = Command::new("curl")
         .args(["-fSL", "--max-time", "300", "-o"])
@@ -148,7 +148,7 @@ pub fn download_and_install(info: &UpdateInfo) -> Result<()> {
         .context(i18n::t!("update.err_attach"))?;
     anyhow::ensure!(attach.status.success(), i18n::t!("update.err_mount"));
     let result = (|| -> Result<()> {
-        let new_app = mount_point.join("Shirushi.app");
+        let new_app = mount_point.join("necoder.app");
         anyhow::ensure!(new_app.exists(), i18n::t!("update.err_no_app"));
         // ditto は bundle を安全に複製する（メタデータ/署名を保つ）。実行中でも置換可能。
         let copy = Command::new("ditto")
@@ -173,7 +173,7 @@ fn unique_staging_dir() -> Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("shirushi-update-{}-{nanos}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("necoder-update-{}-{nanos}", std::process::id()));
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -186,7 +186,7 @@ fn unique_staging_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// 実行中バイナリの .app バンドル（`…/Shirushi.app/Contents/MacOS/shirushi` → `…/Shirushi.app`）。
+/// 実行中バイナリの .app バンドル（`…/necoder.app/Contents/MacOS/necoder` → `…/necoder.app`）。
 fn running_app_bundle() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let bundle = exe.ancestors().nth(3)?.to_path_buf();
@@ -213,12 +213,12 @@ mod tests {
             "tag_name": "v0.2.0", "draft": false, "prerelease": false,
             "assets": [
                 {"name": "SHA256SUMS", "browser_download_url": "https://example.com/sums"},
-                {"name": "Shirushi.dmg", "browser_download_url": "https://example.com/Shirushi.dmg"}
+                {"name": "necoder.dmg", "browser_download_url": "https://example.com/necoder.dmg"}
             ]
         }"#;
         let update = parse_latest_release(json, "0.1.0").expect("新しい");
         assert_eq!(update.version, "0.2.0");
-        assert_eq!(update.dmg_url, "https://example.com/Shirushi.dmg");
+        assert_eq!(update.dmg_url, "https://example.com/necoder.dmg");
         // 同じバージョンなら None。prerelease も None。
         assert!(parse_latest_release(json, "0.2.0").is_none());
         let pre = json.replace("\"prerelease\": false", "\"prerelease\": true");

@@ -1,16 +1,16 @@
 //! 実 SSH ホストに対する end-to-end / 障害注入テスト（ROADMAP M13 remote 受入・障害注入）。
 //!
-//! 実行には稼働中の SSH リモートが要るため、既定では **skip**（`SHIRUSHI_REMOTE_TEST_URI`
+//! 実行には稼働中の SSH リモートが要るため、既定では **skip**（`NECODER_REMOTE_TEST_URI`
 //! 未設定なら全 test が早期 return）。CI や通常の `cargo test` は素通りする。
 //!
 //! ローカル検証（Docker の Linux ホストに対して）:
 //! ```sh
-//! SHIRUSHI_SSH_CONFIG=<scratch>/ssh_config \
-//! SHIRUSHI_REMOTE_TEST_URI=ssh://shirushi-docker/home/dev/work/sample \
+//! NECODER_SSH_CONFIG=<scratch>/ssh_config \
+//! NECODER_REMOTE_TEST_URI=ssh://necoder-docker/home/dev/work/sample \
 //!   cargo test -p host --test remote_ssh_live -- --nocapture --test-threads=1
 //! ```
 //! remote-server バイナリはホスト側の配備ロジック（`ensure_remote_server`）が
-//! `~/.local/share/shirushi/remote/artifacts/<triple>/` から自動アップロードする。
+//! `~/.local/share/necoder/remote/artifacts/<triple>/` から自動アップロードする。
 #![cfg(unix)]
 
 use host::{CommandSpec, Host, RemoteHost, SshProject, TextSearchSpec, WriteCondition};
@@ -20,10 +20,10 @@ use std::time::{Duration, Instant};
 
 /// テスト対象の URI。未設定なら「skip」を println して None を返す。
 fn test_uri() -> Option<String> {
-    match std::env::var("SHIRUSHI_REMOTE_TEST_URI") {
+    match std::env::var("NECODER_REMOTE_TEST_URI") {
         Ok(uri) if !uri.trim().is_empty() => Some(uri),
         _ => {
-            println!("skip: SHIRUSHI_REMOTE_TEST_URI 未設定（実 SSH ホストが要る）");
+            println!("skip: NECODER_REMOTE_TEST_URI 未設定（実 SSH ホストが要る）");
             None
         }
     }
@@ -31,7 +31,7 @@ fn test_uri() -> Option<String> {
 
 fn connect(uri: &str) -> Arc<RemoteHost> {
     let project = SshProject::parse(uri).expect("SSH URI をパースできる");
-    RemoteHost::connect_ssh(&project, "shirushi-remote-server")
+    RemoteHost::connect_ssh(&project, "necoder-remote-server")
         .expect("SSH 接続 + remote-server 配備に成功する")
 }
 
@@ -50,7 +50,7 @@ fn ssh_destination(uri: &str) -> String {
 /// 障害注入用に別チャネルの ssh でリモートコマンドを実行（本体の接続とは独立）。
 fn out_of_band_ssh(uri: &str, remote_command: &str) {
     let mut command = Command::new("ssh");
-    if let Some(config) = std::env::var_os("SHIRUSHI_SSH_CONFIG") {
+    if let Some(config) = std::env::var_os("NECODER_SSH_CONFIG") {
         command.arg("-F").arg(config);
     }
     let status = command
@@ -178,7 +178,7 @@ fn remote_ssh_reconnects_after_server_kill() {
     let before = remote.read_file(&lib).expect("最初の read");
 
     // remote の server プロセス（daemon + proxy）を別チャネルで kill
-    out_of_band_ssh(&uri, "pkill -f shirushi-remote-server || true");
+    out_of_band_ssh(&uri, "pkill -f necoder-remote-server || true");
     println!("remote server を kill した");
     std::thread::sleep(Duration::from_millis(500));
 
@@ -225,7 +225,7 @@ fn remote_ssh_huge_tree_respects_limit() {
 }
 
 /// リモートの latency / idle CPU / memory を実測する（ROADMAP M13 benchmark 残件）。
-/// Shirushi 対 VSCode Remote の肝＝「remote 側の常駐フットプリントの軽さ」を数値で残す。
+/// necoder 対 VSCode Remote の肝＝「remote 側の常駐フットプリントの軽さ」を数値で残す。
 /// localhost（Docker）前提の緩い予算で自動検証しつつ、実数を stdout に出す。
 #[test]
 fn remote_ssh_bench_latency_and_memory() {
@@ -256,7 +256,7 @@ fn remote_ssh_bench_latency_and_memory() {
     let rss_kb = remote_metric(
         &remote,
         &root,
-        "ps -o rss= -C shirushi-remote-server 2>/dev/null | awk '{s+=$1} END{print s+0}'",
+        "ps -o rss= -C necoder-remote-server 2>/dev/null | awk '{s+=$1} END{print s+0}'",
     );
     println!(
         "remote server RSS 合計: {rss_kb} KB (= {:.1} MB)",
@@ -413,7 +413,7 @@ fn remote_ssh_process_respawns_after_master_kill() {
 /// remote-server 全プロセスの utime+stime（jiffies）合計を出す sh スクリプト。
 fn proc_jiffies_script() -> String {
     // /proc/<pid>/stat の 14,15 番目（utime,stime）を全 remote-server 分足す。
-    "total=0; for pid in $(pgrep -f shirushi-remote-server); do \
+    "total=0; for pid in $(pgrep -f necoder-remote-server); do \
        set -- $(cut -d' ' -f14,15 /proc/$pid/stat 2>/dev/null); \
        total=$((total + ${1:-0} + ${2:-0})); \
      done; echo $total"

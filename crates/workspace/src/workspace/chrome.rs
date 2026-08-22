@@ -1516,11 +1516,11 @@ impl Workspace {
     // ── 自動アップデート（M13）: statusbar チップの中身 ──
 
     /// 起動しばらく後に GitHub Releases を確認する（背景・失敗は静かに無視）。
-    /// スクショ/プローブ実行時と `SHIRUSHI_NO_UPDATE_CHECK` ではネットへ出ない。
+    /// スクショ/プローブ実行時と `NECODER_NO_UPDATE_CHECK` ではネットへ出ない。
     pub(crate) fn schedule_update_check(&self, cx: &mut Context<Self>) {
         if cfg!(test)
-            || std::env::var_os("SHIRUSHI_NO_UPDATE_CHECK").is_some()
-            || std::env::var_os("SHIRUSHI_SCREENSHOT").is_some()
+            || std::env::var_os("NECODER_NO_UPDATE_CHECK").is_some()
+            || std::env::var_os("NECODER_SCREENSHOT").is_some()
         {
             return;
         }
@@ -1558,12 +1558,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// メニュー「Shirushi について」。バージョン表記のトースト（About パネルの最小版）。
+    /// メニュー「necoder について」。バージョン表記のトースト（About パネルの最小版）。
     pub(crate) fn about_action(&mut self, _: &About, _window: &mut Window, cx: &mut Context<Self>) {
         let accent = self.accent();
         self.push_toast(
             SharedString::from(format!(
-                "Shirushi v{} — AGPL-3.0 · shirushi.ai",
+                "necoder v{} — AGPL-3.0 · necoder.com",
                 env!("CARGO_PKG_VERSION")
             )),
             accent,
@@ -1574,18 +1574,18 @@ impl Workspace {
     // ── クラッシュ通知 + バグ報告（M13: panic hook → ログ → GitHub Issue） ──
 
     /// 起動時に前回クラッシュの pending マーカーを 1 回だけ消費してチップを出す（背景）。
-    /// offscreen 撮影ではユーザーの実マーカーを消費しない（SHIRUSHI_CRASH_DIR 指定時のみ読む）。
+    /// offscreen 撮影ではユーザーの実マーカーを消費しない（NECODER_CRASH_DIR 指定時のみ読む）。
     pub(crate) fn check_crash_notice(&mut self, cx: &mut Context<Self>) {
         // プローブ: チップ描画の offscreen 検証用（debug のみ・実ログ不要）。
         #[cfg(debug_assertions)]
-        if std::env::var_os("SHIRUSHI_CRASH_PROBE").is_some() {
-            self.notifications.crash_notice = Some(PathBuf::from("/tmp/shirushi-crash-probe.log"));
+        if std::env::var_os("NECODER_CRASH_PROBE").is_some() {
+            self.notifications.crash_notice = Some(PathBuf::from("/tmp/necoder-crash-probe.log"));
             cx.notify();
             return;
         }
         if cfg!(test)
-            || (std::env::var_os("SHIRUSHI_SCREENSHOT").is_some()
-                && std::env::var_os("SHIRUSHI_CRASH_DIR").is_none())
+            || (std::env::var_os("NECODER_SCREENSHOT").is_some()
+                && std::env::var_os("NECODER_CRASH_DIR").is_none())
         {
             return;
         }

@@ -37,7 +37,7 @@ pub(crate) struct PersistedState {
 /// Standard state.json location on macOS.
 pub fn state_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/Shirushi/state.json"))
+    Some(Path::new(&home).join("Library/Application Support/necoder/state.json"))
 }
 
 /// Read the legacy `(project roots, active index)` view of saved state.
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn legacy_and_current_state_json_round_trip() {
         let path = std::env::temp_dir().join(format!(
-            "shirushi_state_compatibility_{}.json",
+            "necoder_state_compatibility_{}.json",
             std::process::id()
         ));
         let legacy = r#"{

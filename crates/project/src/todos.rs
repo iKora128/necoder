@@ -1,4 +1,4 @@
-//! todos — Todo ボードの真実 `.shirushi/todos.md` の読み書き（M12-10）。
+//! todos — Todo ボードの真実 `.necoder/todos.md` の読み書き（M12-10）。
 //!
 //! settings と同じ「**ファイルが真実**・UI/CLI/AI は全部ただの書き手」方式:
 //! - markdown のチェックボックス（`- [ ]` / `- [x]`）+ 日付見出し（`# 2026-07-17`）
@@ -22,9 +22,9 @@ pub struct TodoItem {
     pub section: Option<String>,
 }
 
-/// 板ファイルの場所（プロジェクト直下 `.shirushi/todos.md`）。
+/// 板ファイルの場所（プロジェクト直下 `.necoder/todos.md`）。
 pub fn todos_path(root: &Path) -> PathBuf {
-    root.join(".shirushi").join("todos.md")
+    root.join(".necoder").join("todos.md")
 }
 
 /// markdown テキストから項目を抜く（`- [ ]` / `- [x]`。インデント許容・大文字 X 許容）。
@@ -204,7 +204,7 @@ pub fn draft_daily_plan_on(host: &dyn Host, root: &Path) -> Result<Vec<String>> 
     let script = format!(
         "{{ echo '--- git status ---'; git status --short | head -40; \
            echo '--- ROADMAP（先頭200行）---'; head -200 docs/ROADMAP.md 2>/dev/null; \
-           echo '--- 板の未消化 ---'; grep -n -- '- \\[ \\]' .shirushi/todos.md 2>/dev/null | head -20; \
+           echo '--- 板の未消化 ---'; grep -n -- '- \\[ \\]' .necoder/todos.md 2>/dev/null | head -20; \
         }} | claude -p \"{instruction}\""
     );
     let output = host

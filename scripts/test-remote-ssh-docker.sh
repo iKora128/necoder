@@ -9,10 +9,10 @@ fi
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 fixture_dir="$repo_root/tests/fixtures/remote-ssh"
-scratch_dir=$(mktemp -d "${TMPDIR:-/tmp}/shirushi-remote-ssh.XXXXXX")
-compose_project="shirushi-remote-ssh-$$"
+scratch_dir=$(mktemp -d "${TMPDIR:-/tmp}/necoder-remote-ssh.XXXXXX")
+compose_project="necoder-remote-ssh-$$"
 
-export SHIRUSHI_REMOTE_TEST_PUBLIC_KEY="$scratch_dir/id_ed25519.pub"
+export NECODER_REMOTE_TEST_PUBLIC_KEY="$scratch_dir/id_ed25519.pub"
 
 compose() {
     docker compose --project-name "$compose_project" --file "$fixture_dir/compose.yml" "$@"
@@ -52,7 +52,7 @@ done
 
 ssh_config="$scratch_dir/ssh_config"
 cat > "$ssh_config" <<EOF
-Host shirushi-docker
+Host necoder-docker
     HostName 127.0.0.1
     Port $ssh_port
     User dev
@@ -74,14 +74,14 @@ case "$remote_arch" in
         ;;
 esac
 
-if [ "${SHIRUSHI_REMOTE_SERVER_BINARY:-}" ]; then
-    server_binary=$SHIRUSHI_REMOTE_SERVER_BINARY
+if [ "${NECODER_REMOTE_SERVER_BINARY:-}" ]; then
+    server_binary=$NECODER_REMOTE_SERVER_BINARY
 else
     server_binary=''
     for candidate in \
-        "$HOME/.local/share/shirushi/remote/artifacts/$target/shirushi-remote-server" \
-        "$repo_root/target/$target/release/shirushi-remote-server" \
-        "$repo_root/target/$target/debug/shirushi-remote-server"
+        "$HOME/.local/share/necoder/remote/artifacts/$target/necoder-remote-server" \
+        "$repo_root/target/$target/release/necoder-remote-server" \
+        "$repo_root/target/$target/debug/necoder-remote-server"
     do
         if [ -f "$candidate" ]; then
             server_binary=$candidate
@@ -95,27 +95,27 @@ if [ ! -f "$server_binary" ]; then
 Linux remote-server artifact not found for $target.
 Build it first, then rerun this script:
 
-  cargo zigbuild -p host --bin shirushi-remote-server --release --target $target
+  cargo zigbuild -p host --bin necoder-remote-server --release --target $target
 
-Or set SHIRUSHI_REMOTE_SERVER_BINARY to an existing $target binary.
+Or set NECODER_REMOTE_SERVER_BINARY to an existing $target binary.
 EOF
     exit 1
 fi
 
-echo "==> SSH host: shirushi-docker (127.0.0.1:$ssh_port, $target)"
+echo "==> SSH host: necoder-docker (127.0.0.1:$ssh_port, $target)"
 cd "$repo_root"
 if [ "$mode" = gui ]; then
-    echo "==> Opening Shirushi for the SSH picker demo"
-    echo "==> In Shirushi: + -> Remote/SSH -> shirushi-docker"
+    echo "==> Opening necoder for the SSH picker demo"
+    echo "==> In necoder: + -> Remote/SSH -> necoder-docker"
     echo "==> Then browse to work/sample and open it as the project"
-    echo "==> The SSH container will be removed when Shirushi exits"
-    SHIRUSHI_SSH_CONFIG="$ssh_config" \
-    SHIRUSHI_REMOTE_SERVER_BINARY="$server_binary" \
-        cargo run -p shirushi -- "$@"
+    echo "==> The SSH container will be removed when necoder exits"
+    NECODER_SSH_CONFIG="$ssh_config" \
+    NECODER_REMOTE_SERVER_BINARY="$server_binary" \
+        cargo run -p necoder -- "$@"
 else
     echo "==> Running the real SSH end-to-end suite"
-    SHIRUSHI_SSH_CONFIG="$ssh_config" \
-    SHIRUSHI_REMOTE_TEST_URI="ssh://shirushi-docker/home/dev/work/sample" \
-    SHIRUSHI_REMOTE_SERVER_BINARY="$server_binary" \
+    NECODER_SSH_CONFIG="$ssh_config" \
+    NECODER_REMOTE_TEST_URI="ssh://necoder-docker/home/dev/work/sample" \
+    NECODER_REMOTE_SERVER_BINARY="$server_binary" \
         cargo test -p host --test remote_ssh_live -- --nocapture --test-threads=1 "$@"
 fi

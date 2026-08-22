@@ -1,14 +1,16 @@
-//! markdown — チャット本文（Agent 発話）の markdown 解析（M4）。
+//! markdown — CommonMark(+GFM 一部)を GPUI 非依存の「ブロックモデル」へ簡約する共有パーサ（[model] 層）。
 //!
-//! パーサは permissive な **pulldown-cmark**（MIT・CommonMark+GFM）を借り、その**イベント列を
-//! GPUI 非依存の「ブロックモデル」へ簡約**する。描画（GPUI 要素化）は agent_panel 側の責務で、
-//! ブロック毎に `push_selectable` へ載せて選択可能リージョンにする（transcript 選択 M13 を保つ）。
+//! 消費側は 2 つ。描画（GPUI 要素化）は各 view の責務で、このパーサはテーマ非依存・GPUI 非依存に保つ
+//! （＝最速で unit test が回る層）:
+//! - `agent_panel` の transcript（Agent 発話・ストリーミング。ブロック毎に選択リージョン化＝M13）
+//! - `editor_view` の `.md` 整形プレビュー（source ⇄ rendered トグル）
 //!
-//! Zed にも `markdown` crate があるが GPL のため**移植せず手法のみ参考**（DECISIONS §5・git=CLI /
-//! terminal=alacritty と同じ「読んで自作 or permissive で代替」路線）。
+//! パーサは permissive な **pulldown-cmark**（MIT・CommonMark+GFM）を借りる。Zed にも `markdown`
+//! crate があるが GPL のため**移植せず手法のみ参考**（DECISIONS §5・git=CLI / terminal=alacritty と
+//! 同じ「読んで自作 or permissive で代替」路線）。
 //!
 //! v1 で扱う範囲: 見出し / 段落 / 箇条書き・番号・タスクリスト（ネスト深さ保持）/ フェンスコード /
-//! 水平線 / インライン（**強調**・*斜体*・~~打消し~~・`コード`・リンク）。表・引用装飾は後続。
+//! 水平線 / インライン（**強調**・*斜体*・~~打消し~~・`コード`・リンク）。表・引用装飾・画像は後続。
 
 use std::ops::Range;
 

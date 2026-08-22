@@ -1,13 +1,13 @@
 [package]
-name = "shirushi"
+name = "necoder"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-default-run = "shirushi" # `cargo run -p shirushi` は本体を実行（hello は切り分け用の別 bin）
+default-run = "necoder" # `cargo run -p necoder` は本体を実行（hello は切り分け用の別 bin）
 
 [features]
-# 開発用ヘッドレススクショ（`cargo run -p shirushi --features screenshot`）。
+# 開発用ヘッドレススクショ（`cargo run -p necoder --features screenshot`）。
 # gpui の render_to_image を test-support 経由で有効化し、Metal 描画結果を PNG 化する
 # （screencapture 権限不要）。**通常ビルドには含めない**＝出荷バイナリに test-support を混ぜない。
 screenshot = ["dep:image", "gpui/test-support", "gpui_platform/test-support"]

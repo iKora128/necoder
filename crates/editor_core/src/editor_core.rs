@@ -1311,7 +1311,7 @@ mod tests {
 
     fn temp_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "shirushi_editor_core_{}_{}.txt",
+            "necoder_editor_core_{}_{}.txt",
             tag,
             std::process::id()
         ))

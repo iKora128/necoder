@@ -1,11 +1,11 @@
-# Contributing to Shirushi / コントリビュートガイド
+# Contributing to necoder / コントリビュートガイド
 
 Thanks for your interest! Issues (bugs, feature requests) are always welcome — Japanese or English, either is fine.
 バグ報告・機能要望の issue は日英どちらでも歓迎です。PR を送る前に、以下の約束だけ読んでください。
 
 ## 1. CLA — required for every contribution / 全コントリビュートで必須
 
-Shirushi is **AGPL-3.0-or-later**, and the maintainer keeps the freedom to relicense (including dual/commercial licensing) as an explicit project decision ([docs/DECISIONS.md](docs/DECISIONS.md) §5). To keep that possible, **every contribution requires signing the [CLA](CLA.md)** — it grants the maintainer a license to your contribution that includes relicensing rights. A bot will guide you through signing on your first PR (one comment, one time).
+necoder is **AGPL-3.0-or-later**, and the maintainer keeps the freedom to relicense (including dual/commercial licensing) as an explicit project decision ([docs/DECISIONS.md](docs/DECISIONS.md) §5). To keep that possible, **every contribution requires signing the [CLA](CLA.md)** — it grants the maintainer a license to your contribution that includes relicensing rights. A bot will guide you through signing on your first PR (one comment, one time).
 
 日本語要約: 本プロジェクトは AGPL ですが、再ライセンスの自由（デュアルライセンス等）をメンテナに残す方針です。そのため全ての PR に [CLA](CLA.md) への署名（初回 PR で bot がコメント案内・一度だけ）が必要です。**署名した貢献は将来 AGPL 以外のライセンスでも配布されうる**ことに同意いただきます。
 
@@ -27,7 +27,7 @@ Shirushi is **AGPL-3.0-or-later**, and the maintainer keeps the freedom to relic
 ## 4. Verify before you push / 検証ループ
 
 ```sh
-cargo check -p shirushi        # fast integrity check
+cargo check -p necoder        # fast integrity check
 cargo test --workspace         # includes the ja/en parity test and fuzz smoke
 ./scripts/screenshot-app.sh    # UI changes: attach the offscreen PNG to your PR
 cargo deny check               # if you touched dependencies

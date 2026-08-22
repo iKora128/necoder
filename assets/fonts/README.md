@@ -1,6 +1,6 @@
 # 同梱フォント（bundled fonts）
 
-Shirushi は以下のフォントを `crates/shirushi` にバイナリ埋め込み（`include_bytes!` + `add_fonts`）している。
+necoder は以下のフォントを `crates/necoder` にバイナリ埋め込み（`include_bytes!` + `add_fonts`）している。
 いずれも **SIL Open Font License 1.1（OFL）**。OFL フォントは AGPL-3.0 の本体に同梱・再配布してよい
 （フォント自体は OFL のまま。OFL 全文は `IBMPlexSansJP-OFL.txt` を参照＝同一ライセンス本文）。
 

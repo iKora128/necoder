@@ -1365,3 +1365,36 @@
   - `connect_with(transport, main_fn)` の main_fn は `Result<R, acp::Error>` 固定＝timeout エラーも `acp::Error` で返す必要（`acp::util::internal_error` は message=「Internal error」+ data に文字列＝Display が `Internal error: "…"` と quote 付き。`acp::Error::new(code, msg)` で message 直書きすると綺麗）
   - offscreen スクショはグリフも SVG マスクも写る（font-kit 経由）＝アイコン検証に有効。新規 SVG は main.rs の match 登録を忘れると無音で出ない（既知の罠どおり）
 - 次: ② の (A)/(B) をユーザーが選定 → (B) なら version 一致 resolution を実装。必要ならコミット方針（今セッションの作業ツリーは未コミット）
+
+## 2026-08-20 — Markdown 整形プレビュー（source ⇄ rendered トグル・⌘⇧V）＋ markdown パーサの共有 crate 化
+- やったこと（ユーザー依頼「.md に viewer を付けたい」）:
+  - **① markdown パーサを共有 crate へ抽出**: `agent_panel/src/markdown.rs`（`parse`/`Block`/`Span`/`SpanKind`/`ListMarker` + test 6）を新 crate `crates/markdown`（[model] 層・GPUI 非依存・pulldown-cmark のみ）へ `git mv`。agent_panel は `mod markdown;` を外し `markdown.workspace = true` へ差し替え（`markdown::X` 参照は無改変で解決先が入れ替わるだけ）。これで **chat transcript と `.md` プレビューが同じパーサを共有**する 2 消費者構成に。
+  - **② editor_view に整形プレビュー描画を新設**: `crates/editor_view/src/markdown_preview.rs`（Block→GPUI）。agent_panel の `render_streaming_markdown` と**視覚語彙を揃える自作の軽量版**（transcript の選択リージョン機構 M13 は共有せず閲覧特化）。見出し（size+weight のみ・色/罫線の装飾なし＝「色は識別に集約」原則）/ 段落 / 箇条書き・番号・☑☐ タスク（ネスト）/ フェンスコード（**tree-sitter 構文ハイライト**＝`lang::Highlighter` 再利用・枠付きカード）/ 水平線 / インライン（太字・斜体・打消し・`コード`＝色+薄背景・リンク＝色+下線）。重なり装飾は `gpui::combine_highlights` で非重複ランへ畳む。
+  - **③ ⌘⇧V トグル**: `EditorView` に `rendered_markdown` フラグ＋ブロックキャッシュ（version キー）＋独立 `ScrollHandle`。`render` で md かつ ON なら `EditorElement` を差し替え（既存 `plain` 分岐と同型）。アクション `editor::ToggleRenderedMarkdown`（keymap `cmd-shift-v`・空きを確認）は markdown ファイルのみ有効。**プレビュー中はキャレット点滅タスクを明示停止**（EditorElement を描かない＝点滅の paint 側管理 `should_blink` が走らない＝idle 再描画を止める・idle CPU 予算を守る）。
+  - 変更: root `Cargo.toml`（markdown path 依存）/ agent_panel（Cargo + `mod markdown;` 削除）/ editor_view（Cargo + `editor_view.rs` + `markdown_preview.rs` 新設）/ keymap_core / workspace(`dev_probes.rs`) / shirushi(`main.rs`)。`cargo test -p markdown` 6 / `-p editor_view` 5 green・fmt 済み。
+- 学び/罠:
+  - **依存方向で editor_view は agent_panel を見られない**（`workspace → agent_panel → editor_view`）。だからレンダラ共有ではなく**パーサだけを [model] の葉 crate に出す**のが正解（当初 agent_panel に `mod markdown;` で閉じていた）。描画は各 view が持つ＝ライセンス上も自作コードの再利用で含み無し（DECISIONS §5）。
+  - **点滅と再描画**: 点滅は `EditorElement::paint` 駆動（`should_blink`）。プレビューは EditorElement を描かないので、トグル ON で `_blink_task=None` しないと古い点滅タスクが回り続け idle で再描画→コードブロックの tree-sitter 再構築が走る。ON で明示停止・戻すと次の paint が再開。
+  - **インラインコードは mono 化不可**（`HighlightStyle` に font-family が無い＝agent_panel と同じ割り切り）→ 色（syn-mac）+薄背景で表現。コードブロックは container の `font_family` 継承で mono 可。
+  - `workspace::tests::local_and_remote_root_render_never_call_host` は**クリーン HEAD でも失敗する既存フレーキー**（remote host watch のスレッド非決定性＝test_scheduler の "Detected activity on blocking-2"）。本変更と無関係（`git stash -u` で HEAD でも再現を確認）。
+  - 検証: `--features screenshot` + `SHIRUSHI_MD_PREVIEW_PROBE=1`（新規 dev probe・アクティブ .md を rendered 化）で offscreen 撮影し、見出し3階層/太字/斜体/打消し/インラインコード/リンク/箇条書き・ネスト/☑☐/番号/rust コードブロック（syn 色）/水平線を目視確認。
+- 次: **人の手番**: 実 ⌘⇧V の source ⇄ rendered 往復・スクロールの体感。**後続（任意）**: GFM 表（パーサ未対応）/ 画像（`img()`・FEATURES §2「Markdown/画像プレビュー」の画像側）/ 引用装飾 / コードブロックのハイライトキャッシュ（現状は toggle・編集・resize で再構築）/ プレビューの discoverability（タブや隅の小バッジ・現状はキー操作のみ）。FEATURES §2 の「Markdown プレビュー」は実装済み（画像は残）＝タグ再判断はユーザー。
+
+## 2026-08-22 — Shirushi → necoder 全面リネーム（crate 名・設定パス・GitHub レポ・ディレクトリまで）
+
+- **決定**: 公開ブランドを `necoder`（全部小文字）に確定。根拠と表記規律は DECISIONS §8 の「名前」項に書いた。要点だけ再掲:
+  ① `shirushi` は日本で衝突済み（株式会社シルシが「SHIRUSHI App」を Google Play で配布・`tokyo.shirushi.*`）
+  ② Shirushi の強みだった「印＝色のしるし」の意味の橋渡しが GLOSSARY にも UI 文字列にも**一度も実装されていなかった**＝捨てるコストが実質ゼロ
+  ③ 堀＝ブランドで、その顔（猫耳コーダー娘）は既にマスコット・アプリアイコン・LP に実装済み。`necoder` は名前とマスコットが一つの資産に融合し、`coder` を含むので海外で説明が要らない。
+- **ドメインの実態**: `necoder.com` は 2026-07-13 に本人が Cloudflare で取得済みだったのを忘れていた（whois の NS ペアが `shirushi.ai` と完全一致＝同一アカウント、で判明）。`necoder.ai` は空き。
+- **やったこと（1081 箇所 / 99 ファイル）**:
+  - `crates/shirushi/` → `crates/necoder/`、`shirushi.entitlements`/`shirushi.png`/`Shirushi.icns` も改名（`git mv`）。workspace members は `crates/*` の glob なので追従不要。
+  - トークン一括置換 `SHIRUSHI_*`→`NECODER_*` / `Shirushi`→`necoder` / `shirushi`→`necoder`。`shirushi-remote-server`→`necoder-remote-server`、`.dmg`/`.app`/`CFBundleIconFile`、locales 両方、scripts、CI、Dockerfile まで。
+  - About 表記は `necoder v{} — AGPL-3.0 · necoder.com`。ja ロケールの `app.name` は `しるし` → `necoder`。
+  - GitHub レポも `iKora128/shirushi` → `iKora128/necoder` に改名（旧 URL は GitHub 側が redirect）。updater の `RELEASES_URL`・crash の Issue URL も追従。
+  - 作業ディレクトリも `~/Work/experience/shirushi` → `~/Work/experience/necoder`（**タイトルバー/エクスプローラのプロジェクト名はディレクトリ名から来る**ので、ここを変えないと UI に `shirushi` が残り続ける。offscreen スクショで発見）。
+- **移行シム（`crates/workspace/src/brand_migration.rs`・新規）**: `~/Library/Application Support/Shirushi/` → `…/necoder/` を `main()` の**最初**に引っ越す。`logging` が先に `necoder/logs/` を作ると素朴な存在判定が崩れるため順序が要る。方針は**上書きしない引っ越し**＝新側に既に在るものには触らない（二重起動・途中失敗で混ざっても新しい側が勝つ）。DB は `shirushi.db` → `necoder.db` を `-wal`/`-shm` ごと改名して相対関係を保つ。全部移し切れた時だけ旧ディレクトリを畳む。実地で 8 件（DB+wal+shm / blobs / crashes / logs / settings.json / state.json）が移り、`shell-path` だけ新側に既存だったので設計どおり残置＝旧ディレクトリは畳まれなかった。
+- **罠**: 移行を実行した時、**旧 `Shirushi.app` が起動したまま**（PID 64520）で DB を掴んでおり `Locking error`（Turso のプロセス排他・DECISIONS §8）。rename は inode を保つので走行中プロセスは移動後のファイルへ書き続ける＝データは割れないが、改名時は**先に旧アプリを終了**させるのが正しい手順。
+- リリース済みバイナリはゼロ（tag なし・GitHub Release なし・v0.1.0）なので、dmg 内 `.app` 名の後方互換シムは**不要**と判断して入れていない。
+- 検証: `cargo check -p necoder` / `cargo test --workspace` 緑（既存フレーキー 2 件を除く。`local_and_remote_root_render_never_call_host` と `project_switch_preserves_dirty_undo_and_child_entities` は**クリーン HEAD 183cdbb でも同様に失敗**することを worktree で確認済み＝本変更と無関係）。移行シムに単体テスト 2 本（DB サイドカーの改名 / 上書きしない引っ越し）。offscreen スクショで UI 目視。
+- 次: `necoder.ai` の確保。LP の `necoder.com` への配線と `shirushi.ai` からの 301。マスコットの固有名（nyaco）は据え置き。

@@ -56,12 +56,12 @@ Agent の permission wait は `blocked`、turn end は `review_ready` へ写像�
 Coordinator Agent / script の操作面は GUI と同じ ledger と Git safety gate を使う。
 
 ```bash
-shirushi fleet create [integration-root] [title]
-shirushi fleet list [integration-root]
-shirushi fleet status <task-id> <phase> [summary]
-shirushi fleet wait <task-id> <phase> [timeout-seconds]
-shirushi fleet review <task-id> [integration-root]
-shirushi fleet integrate <task-id> [integration-root]
+necoder fleet create [integration-root] [title]
+necoder fleet list [integration-root]
+necoder fleet status <task-id> <phase> [summary]
+necoder fleet wait <task-id> <phase> [timeout-seconds]
+necoder fleet review <task-id> [integration-root]
+necoder fleet integrate <task-id> [integration-root]
 ```
 
 MCP にも `fleet_create_task`, `fleet_list_tasks`, `fleet_update_task`, `fleet_wait_task`,
@@ -74,8 +74,8 @@ poll するため、Coordinator や UI が再起動しても継続できる。
 clean-room 実装とは呼ばない。調査では「worktree を隔離単位にする」「複数 Agent の状態を集約する」
 「Agent/script が別 Agent を spawn/wait できる」という公開された振る舞いと設計上の概念を比較材料とする。
 
-herdr の source code、内部型、protocol 実装、UI asset を Shirushi へ複製・翻案・移植しない。
-実装は Shirushi の `ProjectSession`, ACP events, GPUI Entity, Git CLI wrapper, Turso storage と本文書の
+herdr の source code、内部型、protocol 実装、UI asset を necoder へ複製・翻案・移植しない。
+実装は necoder の `ProjectSession`, ACP events, GPUI Entity, Git CLI wrapper, Turso storage と本文書の
 TaskSpace-first ドメインモデルから独立に設計する。herdr のコードまたは asset の取り込みが必要になった場合は、
 実装に先立って別途ライセンス判断を行う。
 

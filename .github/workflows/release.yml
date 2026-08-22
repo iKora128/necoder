@@ -8,7 +8,7 @@ name: Release
 # 揃えてある。karui のリポジトリに入っている値をそのままこの repo の secret に入れれば動く。
 #   必要 secret: APPLE_SIGNING_IDENTITY / APPLE_CERTIFICATE_BASE64 / APPLE_CERTIFICATE_PASSWORD
 #               APPLE_API_KEY / APPLE_API_ISSUER / APPLE_API_KEY_BASE64
-#   （Tauri 専用の TAURI_* は Shirushi には不要）
+#   （Tauri 専用の TAURI_* は necoder には不要）
 on:
   push:
     tags: ["v*"]
@@ -74,21 +74,21 @@ jobs:
           # Resources/remote/ の musl バイナリは Linux ELF ＝署名対象外（notarize では data 扱い）。
           codesign --force --options runtime --timestamp \
             --sign "$APPLE_SIGNING_IDENTITY" \
-            target/Shirushi.app/Contents/MacOS/shirushi-remote-server
+            target/necoder.app/Contents/MacOS/necoder-remote-server
           codesign --force --options runtime --timestamp \
-            --entitlements crates/shirushi/resources/shirushi.entitlements \
-            --sign "$APPLE_SIGNING_IDENTITY" target/Shirushi.app
-          codesign --verify --deep --strict target/Shirushi.app
+            --entitlements crates/necoder/resources/necoder.entitlements \
+            --sign "$APPLE_SIGNING_IDENTITY" target/necoder.app
+          codesign --verify --deep --strict target/necoder.app
 
       - name: Make .dmg（/Applications リンク入り）
         run: |
           set -euo pipefail
-          # ボリューム直下 = Shirushi.app + Applications リンク（ドラッグ導線）。
-          # updater はマウント直下の Shirushi.app を探すのでレイアウトは互換のまま。
+          # ボリューム直下 = necoder.app + Applications リンク（ドラッグ導線）。
+          # updater はマウント直下の necoder.app を探すのでレイアウトは互換のまま。
           rm -rf target/dmg-staging && mkdir -p target/dmg-staging
-          ditto target/Shirushi.app target/dmg-staging/Shirushi.app
+          ditto target/necoder.app target/dmg-staging/necoder.app
           ln -s /Applications target/dmg-staging/Applications
-          hdiutil create -volname Shirushi -srcfolder target/dmg-staging -ov -format UDZO target/Shirushi.dmg
+          hdiutil create -volname necoder -srcfolder target/dmg-staging -ov -format UDZO target/necoder.dmg
 
       # ── notarize + staple（karui と同じ App Store Connect API キー方式）──
       - name: Notarize + staple
@@ -101,22 +101,22 @@ jobs:
           set -euo pipefail
           mkdir -p ~/private_keys
           echo "$APPLE_API_KEY_BASE64" | base64 --decode > ~/private_keys/AuthKey_$APPLE_API_KEY.p8
-          xcrun notarytool submit target/Shirushi.dmg \
+          xcrun notarytool submit target/necoder.dmg \
             --key ~/private_keys/AuthKey_$APPLE_API_KEY.p8 \
             --key-id "$APPLE_API_KEY" \
             --issuer "$APPLE_API_ISSUER" \
             --wait
-          xcrun stapler staple target/Shirushi.dmg
+          xcrun stapler staple target/necoder.dmg
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Shirushi-macos
-          path: target/Shirushi.dmg
+          name: necoder-macos
+          path: target/necoder.dmg
       - name: Attach to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/Shirushi.dmg
+          files: target/necoder.dmg
 
   windows:
     runs-on: windows-latest
@@ -125,9 +125,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Build（release・best-effort）
-        run: cargo build --release -p shirushi
+        run: cargo build --release -p necoder
       - uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: shirushi-windows
-          path: target/release/shirushi.exe
+          name: necoder-windows
+          path: target/release/necoder.exe

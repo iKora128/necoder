@@ -16,7 +16,7 @@ pub(crate) struct ProjectSlot {
     /// アクティブ session の `EditorArea.tabs` から [`Workspace::sync_active_slot`] で同期する。
     pub(crate) open_files: Vec<PathBuf>,
     pub(crate) active_file: usize,
-    /// `.shirushi/settings.json` の絵文字アイコン（None = 頭文字モノグラム）。
+    /// `.necoder/settings.json` の絵文字アイコン（None = 頭文字モノグラム）。
     pub(crate) icon: Option<SharedString>,
     /// リンク worktree ならブランチ名。通常/メイン slot は None。
     pub(crate) worktree_branch: Option<String>,
@@ -201,7 +201,7 @@ impl Workspace {
 
     /// 復元時の active index を含めてワークスペースを組み立てる。
     /// リモートプロジェクトの窓色をローカル DB（storage）から解決する（M13 #3b）。
-    /// `.shirushi` はリモート側にあり identity に使えないため、ホスト識別子 → 色をローカルに持つ。
+    /// `.necoder` はリモート側にあり identity に使えないため、ホスト識別子 → 色をローカルに持つ。
     /// 初回は識別子から安定に 1 色を焼き付け、以後は同じ色（開き直し・レール並び順が変わっても不変）。
     pub(crate) fn apply_remote_host_colors(&mut self) {
         let Some(storage) = self.persistence.storage.clone() else {
@@ -425,7 +425,7 @@ impl Workspace {
                         .host()
                         .is_remote()
                         .then(|| SharedString::from(worktree.host().display_name().to_string()));
-                    // `.shirushi/settings.json` の color(#hex)/icon(絵文字) を反映（M12-11）。
+                    // `.necoder/settings.json` の color(#hex)/icon(絵文字) を反映（M12-11）。
                     let identity = read_project_identity(worktree.root());
                     let mut slot = ProjectSlot {
                         task_space: TaskSpace::for_worktree(&worktree, None),
@@ -446,22 +446,22 @@ impl Workspace {
                 Err(error) => eprintln!("プロジェクトを開けない（スキップ）: {error:#}"),
             }
         }
-        // 開発用: SHIRUSHI_EXPLORER_UP=1 で先頭プロジェクトをルート直上（隣リポジトリ一覧）から撮る。
-        if std::env::var_os("SHIRUSHI_EXPLORER_UP").is_some() {
+        // 開発用: NECODER_EXPLORER_UP=1 で先頭プロジェクトをルート直上（隣リポジトリ一覧）から撮る。
+        if std::env::var_os("NECODER_EXPLORER_UP").is_some() {
             if let Some(slot) = projects.first_mut() {
                 slot.explorer.current_dir = slot.worktree.root().parent().map(Path::to_path_buf);
             }
         }
         // 開発用フックの値は projects が move される前に計算しておく。
-        let mut explorer_context_menu = std::env::var_os("SHIRUSHI_CONTEXT_MENU").and_then(|_| {
+        let mut explorer_context_menu = std::env::var_os("NECODER_CONTEXT_MENU").and_then(|_| {
             projects.first().map(|slot| ExplorerContextMenu {
                 path: slot.worktree.root().to_path_buf(),
                 is_dir: true,
                 position: point(px(120.0), px(210.0)),
             })
         });
-        // 開発用: SHIRUSHI_SEARCH_PANEL=1 で「fn」を横断検索した結果パネルを開いた状態で撮る。
-        let mut search_probe = std::env::var_os("SHIRUSHI_SEARCH_PANEL").and_then(|_| {
+        // 開発用: NECODER_SEARCH_PANEL=1 で「fn」を横断検索した結果パネルを開いた状態で撮る。
+        let mut search_probe = std::env::var_os("NECODER_SEARCH_PANEL").and_then(|_| {
             projects.first().map(|slot| {
                 let results = search::SearchQuery::new("fn", false, false)
                     .map(|query| {
@@ -478,7 +478,7 @@ impl Workspace {
         });
         let active = active.min(projects.len().saturating_sub(1));
         let focus_handle = cx.focus_handle();
-        let explorer_view = match std::env::var("SHIRUSHI_EXPLORER_VIEW").as_deref() {
+        let explorer_view = match std::env::var("NECODER_EXPLORER_VIEW").as_deref() {
             Ok("icons") => ExplorerView::Icons,
             Ok("columns") => ExplorerView::Columns,
             _ => ExplorerView::Tree,
@@ -589,46 +589,46 @@ impl Workspace {
                 show_right: true,
                 show_bottom: false,
                 // 編隊で起動したら左カラムの既定は herd（編隊の主役は Task 一覧）。
-                show_herd: std::env::var_os("SHIRUSHI_HERD").is_some()
-                    || std::env::var_os("SHIRUSHI_FLEET").is_some()
-                    || std::env::var_os("SHIRUSHI_CONTROL").is_some(),
-                fleet_mode: std::env::var_os("SHIRUSHI_FLEET").is_some()
-                    || std::env::var_os("SHIRUSHI_CONTROL").is_some(),
+                show_herd: std::env::var_os("NECODER_HERD").is_some()
+                    || std::env::var_os("NECODER_FLEET").is_some()
+                    || std::env::var_os("NECODER_CONTROL").is_some(),
+                fleet_mode: std::env::var_os("NECODER_FLEET").is_some()
+                    || std::env::var_os("NECODER_CONTROL").is_some(),
                 fleet_cells: Vec::new(),
                 fleet_seeded: false,
                 fleet_cell_menu: None,
                 fleet_bottom_view: FleetBottomView::News,
-                agent_full_screen: std::env::var_os("SHIRUSHI_AGENT_FULLSCREEN").is_some(),
+                agent_full_screen: std::env::var_os("NECODER_AGENT_FULLSCREEN").is_some(),
                 bottom_height: BOTTOM_DOCK_HEIGHT,
                 resizing_bottom: false,
                 resize_start_y: 0.0,
                 resize_start_height: 0.0,
                 // 管制タブ（P3）。既定は当面 Graph（計画 §P3・ドッグフーディング後に再判断）。
-                fleet_center_view: if std::env::var_os("SHIRUSHI_CONTROL").is_some() {
+                fleet_center_view: if std::env::var_os("NECODER_CONTROL").is_some() {
                     FleetCenterView::Control
                 } else {
                     FleetCenterView::Graph
                 },
-                graph_view: match std::env::var("SHIRUSHI_GRAPH").as_deref() {
+                graph_view: match std::env::var("NECODER_GRAPH").as_deref() {
                     Ok("hub") => GraphView::Hub,
                     Ok("tree") => GraphView::Tree,
                     Ok("card") => GraphView::Card,
                     _ => GraphView::Fan,
                 },
                 graph_collapsed: false,
-                fleet_maximized: std::env::var("SHIRUSHI_FLEET_MAX")
+                fleet_maximized: std::env::var("NECODER_FLEET_MAX")
                     .ok()
                     .and_then(|value| value.parse().ok()),
                 fleet_clock: false,
                 rollup_index: 0,
                 rollup_ticker: false,
-                show_settings: std::env::var_os("SHIRUSHI_SETTINGS").is_some()
+                show_settings: std::env::var_os("NECODER_SETTINGS").is_some()
                     || (!settings::get(cx).onboarded
                         && !(cfg!(debug_assertions)
-                            && std::env::var_os("SHIRUSHI_SCREENSHOT").is_some())),
+                            && std::env::var_os("NECODER_SCREENSHOT").is_some())),
                 settings_view,
                 pending_settings_command: None,
-                confetti: std::env::var_os("SHIRUSHI_CONFETTI").is_some(),
+                confetti: std::env::var_os("NECODER_CONFETTI").is_some(),
                 agent_width: AGENT_DOCK_WIDTH,
                 resizing_agent: false,
                 resize_start_x: 0.0,
@@ -675,26 +675,26 @@ impl Workspace {
             control_summary_gen: 0,
         };
         workspace.refresh_all_git_status(cx); // ツリー/タブの git 色分け + herd の各 space のブランチ（M14 ①）
-                                              // 開発用: SHIRUSHI_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
-        if std::env::var_os("SHIRUSHI_GIT_PANEL").is_some() {
+                                              // 開発用: NECODER_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
+        if std::env::var_os("NECODER_GIT_PANEL").is_some() {
             workspace
                 .git_panel
                 .update(cx, |panel, cx| panel.set_open(true, cx));
             workspace.refresh_git_status(cx);
         }
-        // 開発用: SHIRUSHI_BRANCH_MENU=1 で branch/worktree メニューを開いた状態で撮る。
-        if std::env::var_os("SHIRUSHI_BRANCH_MENU").is_some() {
+        // 開発用: NECODER_BRANCH_MENU=1 で branch/worktree メニューを開いた状態で撮る。
+        if std::env::var_os("NECODER_BRANCH_MENU").is_some() {
             workspace.toggle_branch_menu(point(px(90.), px(44.)), cx);
         }
-        // 開発用: SHIRUSHI_TERMINAL=1 で下ドックのターミナルを開いた状態で撮る。
-        if std::env::var_os("SHIRUSHI_TERMINAL").is_some() {
+        // 開発用: NECODER_TERMINAL=1 で下ドックのターミナルを開いた状態で撮る。
+        if std::env::var_os("NECODER_TERMINAL").is_some() {
             workspace.chrome.show_bottom = true;
             workspace.terminal_dock.update(cx, |dock, cx| {
                 dock.ensure_active(cx);
             });
         }
-        // 開発用: SHIRUSHI_COLOR_PICKER=1（or hex 文字列）で色ピッカーを開いた状態で撮る（Peacock 拡張の検証）。
-        if let Ok(probe) = std::env::var("SHIRUSHI_COLOR_PICKER") {
+        // 開発用: NECODER_COLOR_PICKER=1（or hex 文字列）で色ピッカーを開いた状態で撮る（Peacock 拡張の検証）。
+        if let Ok(probe) = std::env::var("NECODER_COLOR_PICKER") {
             let hex = if probe == "1" {
                 String::new()
             } else {
@@ -707,10 +707,10 @@ impl Workspace {
                 focus: cx.focus_handle(),
             });
         }
-        // 開発用: SHIRUSHI_RAIL_MENU=1 でレール項目の右クリックメニューを開いた状態で撮る（M10-2）。
+        // 開発用: NECODER_RAIL_MENU=1 でレール項目の右クリックメニューを開いた状態で撮る（M10-2）。
         // worktree/ブランチ削除行も見せるため、アクティブスロットを worktree タブ扱いにする。
-        // （二段確認は 2026-07-27 に確認ダイアログへ一本化＝`SHIRUSHI_WORKTREE_DELETE_PROBE` を使う）
-        if std::env::var_os("SHIRUSHI_RAIL_MENU").is_some() {
+        // （二段確認は 2026-07-27 に確認ダイアログへ一本化＝`NECODER_WORKTREE_DELETE_PROBE` を使う）
+        if std::env::var_os("NECODER_RAIL_MENU").is_some() {
             let active = workspace.project_sessions.active;
             if let Some(slot) = workspace.project_sessions.projects.get_mut(active) {
                 slot.worktree_branch = Some("feature/login".to_string());
@@ -720,8 +720,8 @@ impl Workspace {
                 position: point(px(RAIL_WIDTH), px(12.)),
             });
         }
-        // 開発用: SHIRUSHI_COMPLETION=1 で補完ポップアップ（サンプル候補）を開いた状態で撮る。
-        if std::env::var_os("SHIRUSHI_COMPLETION").is_some() {
+        // 開発用: NECODER_COMPLETION=1 で補完ポップアップ（サンプル候補）を開いた状態で撮る。
+        if std::env::var_os("NECODER_COMPLETION").is_some() {
             let sample = |label: &str, detail: &str, kind: &str| CompletionItem {
                 label: SharedString::from(label.to_string()),
                 insert_text: label.to_string(),
@@ -742,8 +742,8 @@ impl Workspace {
                 focus: cx.focus_handle(),
             });
         }
-        // 開発用: SHIRUSHI_NAMING=1 でルートへの新規ファイル命名入力を開いた状態で撮る。
-        if std::env::var_os("SHIRUSHI_NAMING").is_some() {
+        // 開発用: NECODER_NAMING=1 でルートへの新規ファイル命名入力を開いた状態で撮る。
+        if std::env::var_os("NECODER_NAMING").is_some() {
             if let Some(root) = workspace
                 .active_worktree()
                 .map(|worktree| worktree.root().to_path_buf())
@@ -770,8 +770,8 @@ impl Workspace {
         workspace.loaded = true;
         workspace.schedule_update_check(cx); // 自動アップデートの確認（M13・90s 後に背景で）
         workspace.check_crash_notice(cx); // 前回クラッシュの通知（M13・pending マーカーを 1 回だけ消費）
-                                          // 開発用: SHIRUSHI_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
-        if let Ok(version) = std::env::var("SHIRUSHI_UPDATE_PROBE") {
+                                          // 開発用: NECODER_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
+        if let Ok(version) = std::env::var("NECODER_UPDATE_PROBE") {
             if !version.is_empty() {
                 workspace.updater.status = Some((
                     updater::UpdateInfo {
@@ -782,8 +782,8 @@ impl Workspace {
                 ));
             }
         }
-        // ローカル永続化 DB（hot exit・M10）。SHIRUSHI_DB でパス上書き（検証用）。開けなくても起動は続行。
-        let db_path = std::env::var("SHIRUSHI_DB")
+        // ローカル永続化 DB（hot exit・M10）。NECODER_DB でパス上書き（検証用）。開けなくても起動は続行。
+        let db_path = std::env::var("NECODER_DB")
             .map(PathBuf::from)
             .ok()
             .or_else(|| (!cfg!(test)).then(storage::default_db_path).flatten());

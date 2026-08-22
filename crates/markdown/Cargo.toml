@@ -1,0 +1,14 @@
+[package]
+name = "markdown"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/markdown.rs"
+
+[dependencies]
+# CommonMark+GFM パーサ（MIT）。イベント列を GPUI 非依存の Block モデルへ簡約するだけ。
+# 描画（GPUI 要素化）は消費側 view（agent_panel / editor_view）の責務でこの crate には入れない。
+pulldown-cmark.workspace = true

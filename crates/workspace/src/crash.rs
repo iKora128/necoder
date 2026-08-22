@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 /// バグ報告先（GitHub new issue）。updater の RELEASES_URL と同じリポジトリ。
-const NEW_ISSUE_URL: &str = "https://github.com/iKora128/shirushi/issues/new";
+const NEW_ISSUE_URL: &str = "https://github.com/iKora128/necoder/issues/new";
 
 /// Issue 本文に貼るログ抜粋の上限（URL に載せるため控えめに。全文はローカルに残る）。
 const EXCERPT_MAX_BYTES: usize = 1800;
@@ -19,14 +19,14 @@ const EXCERPT_MAX_BYTES: usize = 1800;
 /// 残すクラッシュログの数（古いものから消す）。
 const KEEP_LOGS: usize = 20;
 
-/// クラッシュログの置き場（`~/Library/Application Support/Shirushi/crashes/`）。
-/// テスト・offscreen 検証は `SHIRUSHI_CRASH_DIR` で差し替える（ユーザーの実ログを触らない）。
+/// クラッシュログの置き場（`~/Library/Application Support/necoder/crashes/`）。
+/// テスト・offscreen 検証は `NECODER_CRASH_DIR` で差し替える（ユーザーの実ログを触らない）。
 pub fn crash_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("SHIRUSHI_CRASH_DIR") {
+    if let Some(dir) = std::env::var_os("NECODER_CRASH_DIR") {
         return Some(PathBuf::from(dir));
     }
     let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/Shirushi/crashes"))
+    Some(Path::new(&home).join("Library/Application Support/necoder/crashes"))
 }
 
 /// panic hook を仕込む（main() 冒頭・GPUI 起動前に呼ぶ）。どのスレッドの panic でも
@@ -68,7 +68,7 @@ fn write_crash_log(dir: &Path, info: &std::panic::PanicHookInfo<'_>) -> std::io:
         .to_string();
     let backtrace = std::backtrace::Backtrace::force_capture();
     let body = format!(
-        "Shirushi v{version}\nos: {os} {arch}\ntime(unix): {unix_seconds}\nthread: {thread}\nlocation: {location}\npanic: {payload}\n\n{backtrace}\n",
+        "necoder v{version}\nos: {os} {arch}\ntime(unix): {unix_seconds}\nthread: {thread}\nlocation: {location}\npanic: {payload}\n\n{backtrace}\n",
         version = env!("CARGO_PKG_VERSION"),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
@@ -128,7 +128,7 @@ pub fn bug_report_url(crash_log: Option<&Path>) -> String {
         "## What happened / 何が起きたか\n\n\n\n## Steps to reproduce / 再現手順\n\n1. \n\n",
     );
     body.push_str(&format!(
-        "## Environment / 環境\n\n- Shirushi v{}\n- {} {}{}\n- locale: {}\n",
+        "## Environment / 環境\n\n- necoder v{}\n- {} {}{}\n- locale: {}\n",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -224,7 +224,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("shirushi_crash_{}_{}", tag, std::process::id()));
+            std::env::temp_dir().join(format!("necoder_crash_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -234,7 +234,7 @@ mod tests {
     fn pending_marker_round_trip_consumes_once() {
         let dir = temp_dir("pending");
         let log = dir.join("crash-100-1.log");
-        std::fs::write(&log, "Shirushi v0.0.0\npanic: test\n").unwrap();
+        std::fs::write(&log, "necoder v0.0.0\npanic: test\n").unwrap();
         std::fs::write(dir.join("pending"), log.to_string_lossy().as_bytes()).unwrap();
 
         // 1 回目 = ログパスが取れてマーカーは消える。ログ本体は残る。
@@ -283,17 +283,17 @@ mod tests {
         let log = dir.join("crash-1-1.log");
         std::fs::write(
             &log,
-            "Shirushi v0.1.0\npanic: boom at src/x.rs:1\nbacktrace line\n",
+            "necoder v0.1.0\npanic: boom at src/x.rs:1\nbacktrace line\n",
         )
         .unwrap();
 
         let url = bug_report_url(Some(&log));
         assert!(url.starts_with(
-            "https://github.com/iKora128/shirushi/issues/new?title=Crash%20report&body="
+            "https://github.com/iKora128/necoder/issues/new?title=Crash%20report&body="
         ));
         // 本文（URL エンコード済み）にバージョンと panic 行が含まれる。
         assert!(url.contains(&percent_encode(&format!(
-            "Shirushi v{}",
+            "necoder v{}",
             env!("CARGO_PKG_VERSION")
         ))));
         assert!(url.contains(&percent_encode("panic: boom at src/x.rs:1")));

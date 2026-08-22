@@ -24,16 +24,16 @@ body:
     attributes:
       label: Environment / 環境
       description: The in-app "Help: Report a Bug" command fills this automatically. / アプリ内「バグを報告」なら自動で入ります。
-      placeholder: "Shirushi v0.1.0 / macos aarch64 (macOS 15.x) / locale: ja"
+      placeholder: "necoder v0.1.0 / macos aarch64 (macOS 15.x) / locale: ja"
   - type: textarea
     id: crash-log
     attributes:
       label: Crash log / クラッシュログ
-      description: If it crashed, paste the newest log from `~/Library/Application Support/Shirushi/crashes/`. / クラッシュした場合は crashes/ の最新ログを貼ってください。
+      description: If it crashed, paste the newest log from `~/Library/Application Support/necoder/crashes/`. / クラッシュした場合は crashes/ の最新ログを貼ってください。
       render: text
   - type: textarea
     id: app-log
     attributes:
       label: App log / アプリログ
-      description: For non-crash issues (SSH/agent failures etc.), paste the newest log from `~/Library/Application Support/Shirushi/logs/` (written when launched from Finder/Dock). / 落ちない不具合（SSH・エージェント失敗など）は logs/ の最新ログを（Finder/Dock 起動時に生成されます）。
+      description: For non-crash issues (SSH/agent failures etc.), paste the newest log from `~/Library/Application Support/necoder/logs/` (written when launched from Finder/Dock). / 落ちない不具合（SSH・エージェント失敗など）は logs/ の最新ログを（Finder/Dock 起動時に生成されます）。
       render: text

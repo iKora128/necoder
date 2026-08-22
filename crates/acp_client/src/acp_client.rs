@@ -232,7 +232,7 @@ pub struct AgentKind {
     /// セットアップ画面の「入れ方」でターミナルに流す導入コマンド（vendor の CLI 本体を入れる）。
     pub install_cmd: &'static str,
     /// セットアップ画面の「ログイン」でターミナルに流す認証コマンド（vendor 自身のログイン導線）。
-    /// Shirushi は鍵を持たず、CLI 側の認証にそのまま乗る（Zed の ACP と同じ流儀）。
+    /// necoder は鍵を持たず、CLI 側の認証にそのまま乗る（Zed の ACP と同じ流儀）。
     pub login_cmd: &'static str,
     /// ブランドアイコンの svg パス（設定画面・スレッドタブで共用）。在庫が無いものは `None`＝モノグラム表示。
     /// カタログ＝アイコンの単一の出所（settings/agent_panel が共に acp_client を依存に持つため）。

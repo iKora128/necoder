@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shirushi.app（macOS アプリバンドル）を組み立てる。アイコン＝マスコット（猫耳コーダー娘）。
+# necoder.app（macOS アプリバンドル）を組み立てる。アイコン＝マスコット（猫耳コーダー娘）。
 #
 # gpui はアプリアイコンをコード設定できない（Zed 同様 .app の .icns で決まる）。
 # `cargo run` の素のバイナリは Dock に汎用アイコンが出るだけなので、Dock/Finder に
@@ -21,8 +21,8 @@ fi
 # アイコン原画 = necoder（pixel art・2026-07-27 に 01-neko-coder.png から差し替え）。
 # 小サイズで読めるバストアップ。全身の neko-art.png は 32px で潰れるため不採用。
 ICON_SRC="lp/assets/img/necoder-mark.png"
-ICON_DIR="crates/shirushi/assets/icon"
-APP="target/Shirushi.app"
+ICON_DIR="crates/necoder/assets/icon"
+APP="target/necoder.app"
 
 # 1) アイコン（.icns）を生成（角丸マスク → iconset → iconutil）。
 python3 scripts/make-icon.py "$ICON_SRC" "$ICON_DIR"
@@ -37,36 +37,36 @@ if ! xcrun -f metal >/dev/null 2>&1; then
     echo "  metal コンパイラ無し → 実行時シェーダ（runtime-shaders）でビルド"
 fi
 if [ "$PROFILE" = "debug" ]; then
-    cargo build -p shirushi $SHADER_FEATURES
-    BIN="target/debug/shirushi"
+    cargo build -p necoder $SHADER_FEATURES
+    BIN="target/debug/necoder"
 else
-    cargo build --release -p shirushi $SHADER_FEATURES
-    BIN="target/release/shirushi"
+    cargo build --release -p necoder $SHADER_FEATURES
+    BIN="target/release/necoder"
 fi
 
 # 3) .app を組み立て。
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN" "$APP/Contents/MacOS/shirushi"
-cp "$ICON_DIR/Shirushi.icns" "$APP/Contents/Resources/Shirushi.icns"
+cp "$BIN" "$APP/Contents/MacOS/necoder"
+cp "$ICON_DIR/necoder.icns" "$APP/Contents/Resources/necoder.icns"
 
 # 3b) remote SSH サーバーバイナリを同梱（#1・旧 M9）。インストール版でも配備できるように。
 #  - 同 OS 用（mac→mac / ssh://localhost）: MacOS/ の隣に置く（find_local_remote_server の sibling 探索先）。
 #  - 別 OS 用（mac→Linux）: CI 生成の musl artifact が target/<triple>/release/ にあれば
 #    Resources/remote/<triple>/ へ（find_remote_server_for の .app 同梱探索先）。
 if [ "$PROFILE" = "debug" ]; then
-    cargo build -p host --bin shirushi-remote-server
-    SERVER_BIN="target/debug/shirushi-remote-server"
+    cargo build -p host --bin necoder-remote-server
+    SERVER_BIN="target/debug/necoder-remote-server"
 else
-    cargo build --release -p host --bin shirushi-remote-server
-    SERVER_BIN="target/release/shirushi-remote-server"
+    cargo build --release -p host --bin necoder-remote-server
+    SERVER_BIN="target/release/necoder-remote-server"
 fi
-cp "$SERVER_BIN" "$APP/Contents/MacOS/shirushi-remote-server"
+cp "$SERVER_BIN" "$APP/Contents/MacOS/necoder-remote-server"
 for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-    artifact="target/$triple/release/shirushi-remote-server"
+    artifact="target/$triple/release/necoder-remote-server"
     if [ -f "$artifact" ]; then
         mkdir -p "$APP/Contents/Resources/remote/$triple"
-        cp "$artifact" "$APP/Contents/Resources/remote/$triple/shirushi-remote-server"
+        cp "$artifact" "$APP/Contents/Resources/remote/$triple/necoder-remote-server"
         echo "  remote server 同梱: $triple"
     fi
 done
@@ -79,17 +79,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Shirushi</string>
-  <key>CFBundleDisplayName</key><string>Shirushi</string>
-  <key>CFBundleIdentifier</key><string>dev.shirushi.editor</string>
+  <key>CFBundleName</key><string>necoder</string>
+  <key>CFBundleDisplayName</key><string>necoder</string>
+  <key>CFBundleIdentifier</key><string>dev.necoder.editor</string>
   <key>CFBundleVersion</key><string>${APP_VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleExecutable</key><string>shirushi</string>
-  <key>CFBundleIconFile</key><string>Shirushi</string>
+  <key>CFBundleExecutable</key><string>necoder</string>
+  <key>CFBundleIconFile</key><string>necoder</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
-  <key>NSHumanReadableCopyright</key><string>Copyright © Shirushi contributors. AGPL-3.0-or-later.</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © necoder contributors. AGPL-3.0-or-later.</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>NSAppleEventsUsageDescription</key><string>Finder 経由でファイルをゴミ箱へ移動するために使います。/ Used to move files to the Trash via Finder.</string>
@@ -122,11 +122,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # 4) ad-hoc 署名（2026-07-27 追加）。cargo が吐くバイナリにはリンカの ad-hoc 署名が付いており、
-#    その Identifier は `shirushi-<hash>` で Info.plist の CFBundleIdentifier と食い違う。
+#    その Identifier は `necoder-<hash>` で Info.plist の CFBundleIdentifier と食い違う。
 #    macOS 13+ はこの不一致でアイコン解決/Launch Services の登録がおかしくなる（Dock に
 #    マスコットが出ない実例）。組み立て後に bundle 全体を署名し直して identifier を揃える。
-codesign --force --sign - --identifier dev.shirushi.editor \
-    --entitlements crates/shirushi/resources/shirushi.entitlements "$APP"
+codesign --force --sign - --identifier dev.necoder.editor \
+    --entitlements crates/necoder/resources/necoder.entitlements "$APP"
 
 # 5) Finder / Dock のアイコンキャッシュを更新させる。
 #    バンドル dir だけ touch しても効かないことがあるので Info.plist も進め、

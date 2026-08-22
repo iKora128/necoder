@@ -16,6 +16,9 @@ use gpui::{
 use std::ops::Range;
 use theme_core::{SyntaxColors, Theme};
 
+/// .md の整形プレビュー（rendered 側の Block→GPUI 描画）。source ⇄ rendered は ⌘⇧V。
+mod markdown_preview;
+
 const FONT_SIZE: f32 = 13.0; // code 13px（既定。settings の font_size で上書き・M10-13）
 const LINE_HEIGHT: f32 = 23.0; // compact 行高 23（font_size に比例して伸縮）
 const GUTTER_PADDING: f32 = 10.0; // 行番号の左右余白
@@ -63,6 +66,8 @@ actions!(
         Cancel,
         // ── soft wrap（M10-12・⌥Z） ──
         ToggleSoftWrap,
+        // ── markdown 整形プレビュー（⌘⇧V・.md のみ） ──
+        ToggleRenderedMarkdown,
         MoveLeft,
         MoveRight,
         MoveUp,
@@ -213,6 +218,14 @@ pub struct EditorView {
     external_changed: bool,
     /// soft wrap（折り返し表示・⌥Z / 設定 `soft_wrap`）。plain（composer）では未使用。
     soft_wrap: bool,
+    /// `.md` の整形プレビュー（source ⇄ rendered トグル・⌘⇧V）。plain / 非 md では常に false。
+    /// true の間 EditorElement を描かず [`markdown_preview`] へ差し替える（キャレット点滅も止める）。
+    rendered_markdown: bool,
+    /// プレビューの縦スクロール位置（EditorElement の縦スクロールとは独立系統）。
+    markdown_scroll: gpui::ScrollHandle,
+    /// パース済みブロックのキャッシュ。version 変化時のみ再パース（idle 再描画で再解析しない）。
+    markdown_blocks: Vec<markdown::Block>,
+    markdown_blocks_version: u64,
     /// コードのフォントサイズ（settings の `font_size`・live 反映）。行高は 23/13 比で追従。
     font_size: f32,
     /// Tab 幅（settings の `tab_size`・live 反映）。
@@ -263,6 +276,10 @@ impl EditorView {
             agent_mark_color: None,
             external_changed: false,
             soft_wrap: false,
+            rendered_markdown: false,
+            markdown_scroll: gpui::ScrollHandle::new(),
+            markdown_blocks: Vec::new(),
+            markdown_blocks_version: u64::MAX,
             font_size: FONT_SIZE,
             tab_size: DEFAULT_TAB_SIZE,
             wrap_map: WrapMap::identity(1, (u64::MAX, 0, false)),
@@ -459,6 +476,44 @@ impl EditorView {
     /// ⌥Z トグル。
     fn toggle_soft_wrap(&mut self, _: &ToggleSoftWrap, _: &mut Window, cx: &mut Context<Self>) {
         self.soft_wrap = !self.soft_wrap;
+        cx.notify();
+    }
+
+    /// このバッファが markdown か（プレビュー可否）。無題・非対応拡張子は false。
+    fn is_markdown(&self) -> bool {
+        self.buffer
+            .path()
+            .map(|path| lang::language_for_path(path) == Some(lang::LanguageId::Markdown))
+            .unwrap_or(false)
+    }
+
+    /// ⌘⇧V: source ⇄ rendered 整形プレビューのトグル（markdown ファイルのみ）。
+    fn toggle_rendered_markdown(
+        &mut self,
+        _: &ToggleRenderedMarkdown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_markdown() {
+            self.set_rendered_markdown(!self.rendered_markdown, cx);
+        }
+    }
+
+    /// 整形プレビューの on/off（トグルハンドラ / offscreen probe から）。非 md での ON は無視。
+    /// ON では EditorElement を描かない＝点滅の paint 側管理（should_blink）が走らないので、
+    /// ここで点滅タスクを明示停止して idle 再描画を止める（点滅停止＝idle CPU 予算を守る）。
+    pub fn set_rendered_markdown(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && !self.is_markdown() {
+            return;
+        }
+        if self.rendered_markdown == on {
+            return;
+        }
+        self.rendered_markdown = on;
+        if on {
+            self._blink_task = None;
+            self.blink_visible = true;
+        }
         cx.notify();
     }
 
@@ -1644,6 +1699,30 @@ impl EventEmitter<EditorHoverEvent> for EditorView {}
 
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // `.md` 整形プレビュー（rendered 側）: EditorElement を差し替え、編集ハンドラ/マウスは載せない。
+        // ブロックは version キーでキャッシュ（idle 再描画で再パースしない）。
+        if self.rendered_markdown && self.is_markdown() {
+            let version = self.buffer.version();
+            if self.markdown_blocks_version != version {
+                self.markdown_blocks = markdown::parse(&self.buffer.text());
+                self.markdown_blocks_version = version;
+            }
+            return div()
+                .key_context("Editor")
+                .track_focus(&self.focus_handle(cx))
+                .size_full()
+                .bg(self.theme.bg1)
+                .text_color(self.theme.fg0)
+                .font_family("IBM Plex Sans JP")
+                .on_action(cx.listener(Self::toggle_rendered_markdown))
+                .child(markdown_preview::render_preview(
+                    &self.markdown_blocks,
+                    &self.theme,
+                    self.font_size,
+                    &self.markdown_scroll,
+                ))
+                .into_any_element();
+        }
         div()
             .key_context("Editor")
             .track_focus(&self.focus_handle(cx))
@@ -1682,6 +1761,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::add_cursor_below))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::toggle_soft_wrap))
+            .on_action(cx.listener(Self::toggle_rendered_markdown))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::move_left))
@@ -1709,6 +1789,7 @@ impl Render for EditorView {
             .child(EditorElement {
                 editor: cx.entity(),
             })
+            .into_any_element()
     }
 }
 

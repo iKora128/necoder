@@ -1,14 +1,14 @@
 services:
   ssh:
-    image: shirushi-remote-ssh-test:local
+    image: necoder-remote-ssh-test:local
     build:
       context: .
     environment:
-      AUTHORIZED_KEY_FILE: /run/shirushi/id_ed25519.pub
+      AUTHORIZED_KEY_FILE: /run/necoder/id_ed25519.pub
     volumes:
       - type: bind
-        source: ${SHIRUSHI_REMOTE_TEST_PUBLIC_KEY:?set by scripts/test-remote-ssh-docker.sh}
-        target: /run/shirushi/id_ed25519.pub
+        source: ${NECODER_REMOTE_TEST_PUBLIC_KEY:?set by scripts/test-remote-ssh-docker.sh}
+        target: /run/necoder/id_ed25519.pub
         read_only: true
     ports:
       - "127.0.0.1::22"

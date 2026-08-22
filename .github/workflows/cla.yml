@@ -26,12 +26,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: "signatures/version1/cla.json"
-          path-to-document: "https://github.com/iKora128/shirushi/blob/main/CLA.md"
+          path-to-document: "https://github.com/iKora128/necoder/blob/main/CLA.md"
           branch: "cla-signatures"
           allowlist: "iKora128,dependabot[bot]"
           custom-notsigned-prcomment: >
             Thank you for the contribution! Before we can merge, please read the
-            [CLA](https://github.com/iKora128/shirushi/blob/main/CLA.md) and sign it by posting the
+            [CLA](https://github.com/iKora128/necoder/blob/main/CLA.md) and sign it by posting the
             comment below. / コントリビュートありがとうございます。マージ前に
-            [CLA](https://github.com/iKora128/shirushi/blob/main/CLA.md) を読み、下の一文を
+            [CLA](https://github.com/iKora128/necoder/blob/main/CLA.md) を読み、下の一文を
             コメントして署名してください。

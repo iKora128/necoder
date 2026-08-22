@@ -1,6 +1,6 @@
-//! Shirushi（しるし）— GPUI ベースの自作エディタ。エントリポイント。
+//! necoder（ねこーだー）— GPUI ベースの自作エディタ。エントリポイント。
 //!
-//! `shirushi [<path>...]` で各 path をプロジェクト（レール項目）として開く。file を渡すと親を
+//! `necoder [<path>...]` で各 path をプロジェクト（レール項目）として開く。file を渡すと親を
 //! プロジェクト、その file をエディタに開く。引数無しは前回状態（`state.json`）を復元する。
 
 use gpui::{
@@ -12,20 +12,20 @@ use host::{RemoteHost, SshProject};
 use std::path::{Path, PathBuf};
 
 mod fleet;
-/// MCP サーバ（`shirushi mcp`）。AI エージェントがプロジェクトを操作する口。
+/// MCP サーバ（`necoder mcp`）。AI エージェントがプロジェクトを操作する口。
 mod mcp;
 /// macOS ネイティブメニューバー（M13）。
 mod menus;
 use std::time::Instant;
 use workspace::{ProjectSource, RestoredTabs, Workspace};
 
-actions!(shirushi, [Quit]);
+actions!(necoder, [Quit]);
 
 /// SSH project を接続して source にする。互換 server が無ければ bootstrap が自動配備する。
 fn connect_ssh_project(uri: &str) -> anyhow::Result<ProjectSource> {
     let project = SshProject::parse(uri)?;
-    let server_command = std::env::var("SHIRUSHI_REMOTE_SERVER_COMMAND")
-        .unwrap_or_else(|_| "shirushi-remote-server".to_string());
+    let server_command = std::env::var("NECODER_REMOTE_SERVER_COMMAND")
+        .unwrap_or_else(|_| "necoder-remote-server".to_string());
     let host = RemoteHost::connect_ssh(&project, &server_command)?;
     let root = host.root().to_path_buf();
     Ok(ProjectSource::new(host, root))
@@ -268,7 +268,7 @@ impl gpui::AssetSource for Assets {
     }
 }
 
-/// `shirushi config <get|set|list> …` サブコマンド。設定を CLI から読み書きする（settings.json が真実）。
+/// `necoder config <get|set|list> …` サブコマンド。設定を CLI から読み書きする（settings.json が真実）。
 /// 書き込みは即 settings.json に反映＝**起動中のアプリは watcher で live 適用**、次回起動でも効く。
 /// CLI を処理したら true（GUI を開かず終了）。設定の「書き手」の一つ（UI トグル / MCP と同じ経路）。
 fn run_config_cli() -> bool {
@@ -293,7 +293,7 @@ fn run_config_cli() -> bool {
                     None => eprintln!("キーが無い: {key}"),
                 }
             }
-            None => eprintln!("使い方: shirushi config get <key>"),
+            None => eprintln!("使い方: necoder config get <key>"),
         },
         Some("set") => match (args.get(2), args.get(3), user_path) {
             (Some(key), Some(raw), Some(path)) => {
@@ -305,14 +305,17 @@ fn run_config_cli() -> bool {
                     Err(error) => eprintln!("保存に失敗: {error:#}"),
                 }
             }
-            _ => eprintln!("使い方: shirushi config set <key> <value>"),
+            _ => eprintln!("使い方: necoder config set <key> <value>"),
         },
-        _ => eprintln!("使い方: shirushi config <list | get <key> | set <key> <value>>"),
+        _ => eprintln!("使い方: necoder config <list | get <key> | set <key> <value>>"),
     }
     true
 }
 
 fn main() {
+    // 旧ブランド Shirushi の置き場からデータを引き取る（改名 2026-08-22・DECISIONS §8）。
+    // logging が `…/necoder/logs/` を作る**前**に動かす必要があるので、ここが本当の先頭。
+    workspace::migrate_legacy_brand_data();
     // Finder/Dock 起動は stderr が /dev/null に落ちる — 最初にログファイルへ付け替える
     // （panic hook より前 = クラッシュのバックトレースも同じログに残る）。ターミナル/パイプ/
     // MCP の stdio は素通し（workspace::logging 参照）。
@@ -324,16 +327,16 @@ fn main() {
     // panic hook（M13 公開準備）: どのスレッドで落ちてもクラッシュログを書き、次回起動で
     // statusbar チップ → バグ報告 Issue に繋ぐ。GPUI 起動前・最初に仕込む。
     workspace::install_panic_hook();
-    // 開発用: SHIRUSHI_PANIC_PROBE=1 で起動 1.5s 後に背景スレッドを panic させる
+    // 開発用: NECODER_PANIC_PROBE=1 で起動 1.5s 後に背景スレッドを panic させる
     // （hook → crashes/ ログ + pending マーカー → 次回起動チップ、の E2E 検証）。
     #[cfg(debug_assertions)]
-    if std::env::var_os("SHIRUSHI_PANIC_PROBE").is_some() {
+    if std::env::var_os("NECODER_PANIC_PROBE").is_some() {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(1500));
-            panic!("SHIRUSHI_PANIC_PROBE: クラッシュフック検証用の意図的 panic");
+            panic!("NECODER_PANIC_PROBE: クラッシュフック検証用の意図的 panic");
         });
     }
-    // GUI を開く前に CLI サブコマンドを処理（`shirushi config …` / `shirushi mcp …`）。
+    // GUI を開く前に CLI サブコマンドを処理（`necoder config …` / `necoder mcp …`）。
     if run_config_cli() {
         return;
     }
@@ -372,19 +375,19 @@ fn main() {
             i18n::set_locale(locale);
         }
         // theme 名を解決（組み込み → 設定フォルダ themes/ のユーザーテーマ → dark）。
-        // 開発用: SHIRUSHI_THEME=<名> で設定を上書き（撮影確認・非破壊）。
+        // 開発用: NECODER_THEME=<名> で設定を上書き（撮影確認・非破壊）。
         let themes_dir = settings_core::user_settings_path()
             .as_deref()
             .and_then(Path::parent)
             .map(|dir| dir.join("themes"));
-        let theme_name = std::env::var("SHIRUSHI_THEME").unwrap_or_else(|_| settings.theme.clone());
+        let theme_name = std::env::var("NECODER_THEME").unwrap_or_else(|_| settings.theme.clone());
         let theme = theme_core::resolve(&theme_name, themes_dir.as_deref());
 
         match keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx) {
             Ok(bindings) => cx.bind_keys(bindings),
             Err(error) => eprintln!("keymap のロードに失敗: {error:#}"),
         }
-        // ユーザー keymap（~/Library/Application Support/Shirushi/keymap.json・M10-13）。
+        // ユーザー keymap（~/Library/Application Support/necoder/keymap.json・M10-13）。
         // 既定の**後**に bind ＝ 同じキーはユーザー側が勝つ。ファイル監視で live reload。
         let user_keymap_path = settings_core::user_settings_path()
             .as_deref()
@@ -398,10 +401,10 @@ fn main() {
         // ショットから解決されるため、keymap の bind（既定 + ユーザー）より**後**に設定する。
         cx.set_menus(menus::app_menus());
         cx.set_dock_menu(menus::dock_menu());
-        // 開発用: SHIRUSHI_MENU_PROBE=1 で OS へ登録したメニューバーを読み戻して表示
+        // 開発用: NECODER_MENU_PROBE=1 で OS へ登録したメニューバーを読み戻して表示
         // （mac 実装は setMainMenu_ と同時に owned copy を保持 = 登録済みの機械的証拠）。
         #[cfg(debug_assertions)]
-        if std::env::var_os("SHIRUSHI_MENU_PROBE").is_some() {
+        if std::env::var_os("NECODER_MENU_PROBE").is_some() {
             match cx.get_menus() {
                 Some(menus) => {
                     for menu in &menus {
@@ -414,8 +417,8 @@ fn main() {
         // Quit の後始末（hot exit のクリア）は window 生成後に登録する（下方）。
 
         // 既定 1280×800。スクショ検証で縦長パネル全体を写したいときは
-        // `SHIRUSHI_WINDOW_SIZE=1280x1500` で上書きできる（開発補助・env 未指定なら不変）。
-        let window_size = std::env::var("SHIRUSHI_WINDOW_SIZE")
+        // `NECODER_WINDOW_SIZE=1280x1500` で上書きできる（開発補助・env 未指定なら不変）。
+        let window_size = std::env::var("NECODER_WINDOW_SIZE")
             .ok()
             .and_then(|spec| {
                 let (width, height) = spec.split_once('x')?;
@@ -430,9 +433,9 @@ fn main() {
         let build_sources = sources.clone();
         let build_theme = theme.clone();
         // Offscreen QA はユーザーの通常セッションを汚さない。CLI で渡した project を描画するだけで、
-        // ~/Library/Application Support/Shirushi/state.json へは保存しない。
+        // ~/Library/Application Support/necoder/state.json へは保存しない。
         let persistence_path =
-            if cfg!(feature = "screenshot") && std::env::var_os("SHIRUSHI_SCREENSHOT").is_some() {
+            if cfg!(feature = "screenshot") && std::env::var_os("NECODER_SCREENSHOT").is_some() {
                 None
             } else {
                 workspace::state_path()
@@ -443,7 +446,7 @@ fn main() {
                 // 自前 titlebar（UI-SPEC §3）を描くため既定のシステム titlebar を隠す。
                 // 信号機は残し、38px の titlebar 内に収まる位置へ寄せる。
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Shirushi".into()),
+                    title: Some("necoder".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(13.0), px(13.0))),
                 }),
@@ -491,8 +494,8 @@ fn main() {
 
         #[cfg(debug_assertions)]
         {
-            // 開発用: SHIRUSHI_OPEN_TABS=a.rs,b.rs,… でアクティブプロジェクトに複数タブを開く（複数タブ検証）。
-            let extra_tabs = std::env::var("SHIRUSHI_OPEN_TABS").ok().map(|value| {
+            // 開発用: NECODER_OPEN_TABS=a.rs,b.rs,… でアクティブプロジェクトに複数タブを開く（複数タブ検証）。
+            let extra_tabs = std::env::var("NECODER_OPEN_TABS").ok().map(|value| {
                 let root = sources
                     .get(active_project)
                     .map(|source| source.root().to_path_buf())
@@ -504,8 +507,8 @@ fn main() {
                     .collect::<Vec<_>>()
             });
             if let Err(error) = window.update(cx, |workspace, window, cx| {
-                // 開発用: SHIRUSHI_NAMING_CONFIRM=1 で命名入力を 1s 後に Enter 確定する（ファイル生成の検証）。
-                if std::env::var_os("SHIRUSHI_NAMING_CONFIRM").is_some() {
+                // 開発用: NECODER_NAMING_CONFIRM=1 で命名入力を 1s 後に Enter 確定する（ファイル生成の検証）。
+                if std::env::var_os("NECODER_NAMING_CONFIRM").is_some() {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -518,8 +521,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_RENAME_PROBE="row:col:newname" で rename を実行（既定 8s 後）。
-                if let Ok(probe) = std::env::var("SHIRUSHI_RENAME_PROBE") {
+                // 開発用: NECODER_RENAME_PROBE="row:col:newname" で rename を実行（既定 8s 後）。
+                if let Ok(probe) = std::env::var("NECODER_RENAME_PROBE") {
                     let parts: Vec<&str> = probe.splitn(3, ':').collect();
                     if let [row, column, name] = parts[..] {
                         if let (Ok(row), Ok(column)) =
@@ -527,7 +530,7 @@ fn main() {
                         {
                             let name = name.to_string();
                             if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                                let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
+                                let delay_ms = std::env::var("NECODER_TYPE_PROBE_DELAY_MS")
                                     .ok()
                                     .and_then(|value| value.parse::<u64>().ok())
                                     .unwrap_or(8000);
@@ -544,12 +547,12 @@ fn main() {
                         }
                     }
                 }
-                // 開発用: SHIRUSHI_INLINE_PROBE="<指示>" で全選択 → ⌘I → 実行（2s 後・M12-8）。
-                // SHIRUSHI_INLINE_ACCEPT=1 なら提案到着を待って適用+保存まで（受入の round trip）。
-                if let Ok(instruction) = std::env::var("SHIRUSHI_INLINE_PROBE") {
+                // 開発用: NECODER_INLINE_PROBE="<指示>" で全選択 → ⌘I → 実行（2s 後・M12-8）。
+                // NECODER_INLINE_ACCEPT=1 なら提案到着を待って適用+保存まで（受入の round trip）。
+                if let Ok(instruction) = std::env::var("NECODER_INLINE_PROBE") {
                     if !instruction.trim().is_empty() {
                         let accept =
-                            std::env::var("SHIRUSHI_INLINE_ACCEPT").is_ok_and(|value| value == "1");
+                            std::env::var("NECODER_INLINE_ACCEPT").is_ok_and(|value| value == "1");
                         if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                             cx.spawn(async move |_workspace, cx| {
                                 cx.background_executor()
@@ -563,9 +566,9 @@ fn main() {
                         }
                     }
                 }
-                // 開発用: SHIRUSHI_SWITCHER_PROBE=<ms> で ⌘O スイッチャーを開く（M12-12 の描画検証。
+                // 開発用: NECODER_SWITCHER_PROBE=<ms> で ⌘O スイッチャーを開く（M12-12 の描画検証。
                 // ACP_PROBE と併用すると実行中ドットも写る）。
-                if let Ok(delay) = std::env::var("SHIRUSHI_SWITCHER_PROBE") {
+                if let Ok(delay) = std::env::var("NECODER_SWITCHER_PROBE") {
                     if let Ok(delay_ms) = delay.parse::<u64>() {
                         if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                             cx.spawn(async move |_workspace, cx| {
@@ -580,8 +583,8 @@ fn main() {
                         }
                     }
                 }
-                // 開発用: SHIRUSHI_SSH_PROBE=1 で SSH 入力バーを開く（2s 後・M13 の描画検証）。
-                if std::env::var("SHIRUSHI_SSH_PROBE").is_ok_and(|value| value == "1") {
+                // 開発用: NECODER_SSH_PROBE=1 で SSH 入力バーを開く（2s 後・M13 の描画検証）。
+                if std::env::var("NECODER_SSH_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -608,8 +611,8 @@ fn main() {
                     })
                     .detach();
                 }
-                // 開発用: SHIRUSHI_SSH_HOST_PROBE=1 で SSH ホストピッカーを開く（2s 後・M13 の描画検証）。
-                if std::env::var("SHIRUSHI_SSH_HOST_PROBE").is_ok_and(|value| value == "1") {
+                // 開発用: NECODER_SSH_HOST_PROBE=1 で SSH ホストピッカーを開く（2s 後・M13 の描画検証）。
+                if std::env::var("NECODER_SSH_HOST_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -622,8 +625,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_TAB_RENAME_PROBE=1 で Agent タブの改名入力を開く（2s 後・#4 の描画検証）。
-                if std::env::var("SHIRUSHI_TAB_RENAME_PROBE").is_ok_and(|value| value == "1") {
+                // 開発用: NECODER_TAB_RENAME_PROBE=1 で Agent タブの改名入力を開く（2s 後・#4 の描画検証）。
+                if std::env::var("NECODER_TAB_RENAME_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -636,8 +639,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_TEAROFF_PROBE=1 で擬似 tear-off を直接駆動（2s 後・新窓生成の機械検証）。
-                if std::env::var("SHIRUSHI_TEAROFF_PROBE").is_ok_and(|value| value == "1") {
+                // 開発用: NECODER_TEAROFF_PROBE=1 で擬似 tear-off を直接駆動（2s 後・新窓生成の機械検証）。
+                if std::env::var("NECODER_TEAROFF_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -650,8 +653,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_ACTIVITY_PROBE=1 で各スレッドに状態を仕込む（2s 後・状態表示の描画検証・#）。
-                if std::env::var("SHIRUSHI_ACTIVITY_PROBE").is_ok_and(|value| value == "1") {
+                // 開発用: NECODER_ACTIVITY_PROBE=1 で各スレッドに状態を仕込む（2s 後・状態表示の描画検証・#）。
+                if std::env::var("NECODER_ACTIVITY_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -664,8 +667,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_CONTROL_PROBE=1 で管制タブの受入シナリオ（5 擬似 TaskSpace・P3）を合成。
-                if std::env::var("SHIRUSHI_CONTROL_PROBE").is_ok_and(|value| value == "1") {
+                // 開発用: NECODER_CONTROL_PROBE=1 で管制タブの受入シナリオ（5 擬似 TaskSpace・P3）を合成。
+                if std::env::var("NECODER_CONTROL_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -678,9 +681,9 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_FLEET_PROBE=<menu|menu-armed|terminal|tall|close-all> で編隊の
+                // 開発用: NECODER_FLEET_PROBE=<menu|menu-armed|terminal|tall|close-all> で編隊の
                 // 片付け UI / 下段ドックを駆動する（2026-07-27 の受入検証）。CONTROL_PROBE の後に流す。
-                if let Ok(probe) = std::env::var("SHIRUSHI_FLEET_PROBE") {
+                if let Ok(probe) = std::env::var("NECODER_FLEET_PROBE") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -693,8 +696,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_WORKTREE_DELETE_PROBE=worktree|branch で削除確認ダイアログを出す。
-                if let Ok(mode) = std::env::var("SHIRUSHI_WORKTREE_DELETE_PROBE") {
+                // 開発用: NECODER_WORKTREE_DELETE_PROBE=worktree|branch で削除確認ダイアログを出す。
+                if let Ok(mode) = std::env::var("NECODER_WORKTREE_DELETE_PROBE") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -707,8 +710,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_AGENT_FULLSCREEN_PROBE=1 で AI 全画面（⌘⇧⏎）を駆動する。
-                if std::env::var("SHIRUSHI_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1")
+                // 開発用: NECODER_AGENT_FULLSCREEN_PROBE=1 で AI 全画面（⌘⇧⏎）を駆動する。
+                if std::env::var("NECODER_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1")
                 {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
@@ -722,8 +725,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_HISTORY_PROBE=1 でスレッド履歴 Picker を開く（2s 後・#5 の描画検証）。
-                if std::env::var("SHIRUSHI_HISTORY_PROBE").is_ok_and(|value| value == "1") {
+                // 開発用: NECODER_HISTORY_PROBE=1 でスレッド履歴 Picker を開く（2s 後・#5 の描画検証）。
+                if std::env::var("NECODER_HISTORY_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -736,9 +739,9 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_TERM_LINK_PROBE="path:line" でターミナルを開き、リンククリック相当の
+                // 開発用: NECODER_TERM_LINK_PROBE="path:line" でターミナルを開き、リンククリック相当の
                 // イベントを直接発火（emit → ジャンプの結線検証・M13。座標→リンクの hit 判定は人の手番）。
-                if let Ok(probe) = std::env::var("SHIRUSHI_TERM_LINK_PROBE") {
+                if let Ok(probe) = std::env::var("NECODER_TERM_LINK_PROBE") {
                     if let Some((path, line)) = probe.rsplit_once(':') {
                         if let (path, Ok(line)) = (path.to_string(), line.parse::<u32>()) {
                             if let Some(handle) = window.window_handle().downcast::<Workspace>() {
@@ -755,10 +758,10 @@ fn main() {
                         }
                     }
                 }
-                // 開発用: SHIRUSHI_PALETTE_PROBE="<query>" で ⌘⇧P を開く（2s 後・M13 の描画検証）。
-                // SHIRUSHI_PALETTE_CONFIRM=1 で先頭候補を確定（dispatch まで通す）。
-                if let Ok(query) = std::env::var("SHIRUSHI_PALETTE_PROBE") {
-                    let confirm = std::env::var("SHIRUSHI_PALETTE_CONFIRM").is_ok_and(|v| v == "1");
+                // 開発用: NECODER_PALETTE_PROBE="<query>" で ⌘⇧P を開く（2s 後・M13 の描画検証）。
+                // NECODER_PALETTE_CONFIRM=1 で先頭候補を確定（dispatch まで通す）。
+                if let Ok(query) = std::env::var("NECODER_PALETTE_PROBE") {
+                    let confirm = std::env::var("NECODER_PALETTE_CONFIRM").is_ok_and(|v| v == "1");
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -771,8 +774,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_TODOS_PROBE=1 で Todo ボードを開く（2s 後・M12-10 の描画検証）。
-                if std::env::var_os("SHIRUSHI_TODOS_PROBE").is_some() {
+                // 開発用: NECODER_TODOS_PROBE=1 で Todo ボードを開く（2s 後・M12-10 の描画検証）。
+                if std::env::var_os("NECODER_TODOS_PROBE").is_some() {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -785,8 +788,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_DIFF_PROBE=1 でアクティブファイルの diff タブを開く（2s 後）。
-                if std::env::var_os("SHIRUSHI_DIFF_PROBE").is_some() {
+                // 開発用: NECODER_DIFF_PROBE=1 でアクティブファイルの diff タブを開く（2s 後）。
+                if std::env::var_os("NECODER_DIFF_PROBE").is_some() {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -799,8 +802,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_OUTLINE_PROBE=1 で ⌘⇧O アウトラインを開く（2s 後・LSP 不要）。
-                if std::env::var_os("SHIRUSHI_OUTLINE_PROBE").is_some() {
+                // 開発用: NECODER_OUTLINE_PROBE=1 で ⌘⇧O アウトラインを開く（2s 後・LSP 不要）。
+                if std::env::var_os("NECODER_OUTLINE_PROBE").is_some() {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -813,13 +816,13 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_REFERENCES_PROBE="row:col" で ⇧F12 参照検索（既定 8s 後）。
-                if let Ok(probe) = std::env::var("SHIRUSHI_REFERENCES_PROBE") {
+                // 開発用: NECODER_REFERENCES_PROBE="row:col" で ⇧F12 参照検索（既定 8s 後）。
+                if let Ok(probe) = std::env::var("NECODER_REFERENCES_PROBE") {
                     if let Some((row, column)) = probe.split_once(':').and_then(|(r, c)| {
                         Some((r.parse::<usize>().ok()?, c.parse::<usize>().ok()?))
                     }) {
                         if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                            let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
+                            let delay_ms = std::env::var("NECODER_TYPE_PROBE_DELAY_MS")
                                 .ok()
                                 .and_then(|value| value.parse::<u64>().ok())
                                 .unwrap_or(8000);
@@ -835,17 +838,17 @@ fn main() {
                         }
                     }
                 }
-                // 開発用: SHIRUSHI_CODEACTION_PROBE="row:col" で ⌘. を開く（既定 8s 後）。
-                if let Ok(probe) = std::env::var("SHIRUSHI_CODEACTION_PROBE") {
+                // 開発用: NECODER_CODEACTION_PROBE="row:col" で ⌘. を開く（既定 8s 後）。
+                if let Ok(probe) = std::env::var("NECODER_CODEACTION_PROBE") {
                     if let Some((row, column)) = probe.split_once(':').and_then(|(r, c)| {
                         Some((r.parse::<usize>().ok()?, c.parse::<usize>().ok()?))
                     }) {
                         if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                            let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
+                            let delay_ms = std::env::var("NECODER_TYPE_PROBE_DELAY_MS")
                                 .ok()
                                 .and_then(|value| value.parse::<u64>().ok())
                                 .unwrap_or(8000);
-                            let confirm = std::env::var_os("SHIRUSHI_CODEACTION_CONFIRM").is_some();
+                            let confirm = std::env::var_os("NECODER_CODEACTION_CONFIRM").is_some();
                             cx.spawn(async move |_workspace, cx| {
                                 cx.background_executor()
                                     .timer(std::time::Duration::from_millis(delay_ms))
@@ -873,10 +876,24 @@ fn main() {
                         }
                     }
                 }
-                // 開発用: SHIRUSHI_FORMAT_PROBE=1 で LSP 初期化後にフォーマット→保存を実行（既定 8s 後）。
-                if std::env::var_os("SHIRUSHI_FORMAT_PROBE").is_some() {
+                // 開発用: NECODER_MD_PREVIEW_PROBE=1 でアクティブ .md を整形プレビュー（rendered）にする。
+                if std::env::var("NECODER_MD_PREVIEW_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                        let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(500))
+                                .await;
+                            let _ = handle.update(cx, |workspace, _window, cx| {
+                                workspace.debug_markdown_preview(cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: NECODER_FORMAT_PROBE=1 で LSP 初期化後にフォーマット→保存を実行（既定 8s 後）。
+                if std::env::var_os("NECODER_FORMAT_PROBE").is_some() {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        let delay_ms = std::env::var("NECODER_TYPE_PROBE_DELAY_MS")
                             .ok()
                             .and_then(|value| value.parse::<u64>().ok())
                             .unwrap_or(8000);
@@ -891,8 +908,8 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: SHIRUSHI_HOTEXIT_AUTORESTORE=1 で復元バーの「復元」を自動で押す（1.5s 後）。
-                if std::env::var_os("SHIRUSHI_HOTEXIT_AUTORESTORE").is_some() {
+                // 開発用: NECODER_HOTEXIT_AUTORESTORE=1 で復元バーの「復元」を自動で押す（1.5s 後）。
+                if std::env::var_os("NECODER_HOTEXIT_AUTORESTORE").is_some() {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
@@ -908,10 +925,10 @@ fn main() {
                 if let Some(paths) = extra_tabs {
                     workspace.open_paths(paths, window, cx);
                 }
-                // 開発用: SHIRUSHI_BUFFER_SEARCH=<query> で ⌘F バーを開いた状態で撮る
-                // （SHIRUSHI_BUFFER_REPLACE=<text> があれば置換行も開く）。
-                if let Ok(query) = std::env::var("SHIRUSHI_BUFFER_SEARCH") {
-                    let replace = std::env::var("SHIRUSHI_BUFFER_REPLACE").ok();
+                // 開発用: NECODER_BUFFER_SEARCH=<query> で ⌘F バーを開いた状態で撮る
+                // （NECODER_BUFFER_REPLACE=<text> があれば置換行も開く）。
+                if let Ok(query) = std::env::var("NECODER_BUFFER_SEARCH") {
+                    let replace = std::env::var("NECODER_BUFFER_REPLACE").ok();
                     workspace.debug_open_buffer_search(query, replace, window, cx);
                 } else {
                     let handle = workspace.focus_handle(cx);
@@ -920,14 +937,14 @@ fn main() {
             }) {
                 eprintln!("初期化に失敗: {error}");
             }
-            // 開発用: SHIRUSHI_TYPE_PROBE="row:col:text"（0 始まり）で起動後にタイプを注入する
-            // （補完の自動トリガ検証。LSP の初期化を待つため SHIRUSHI_TYPE_PROBE_DELAY_MS 後・既定 5000）。
-            if let Ok(probe) = std::env::var("SHIRUSHI_TYPE_PROBE") {
+            // 開発用: NECODER_TYPE_PROBE="row:col:text"（0 始まり）で起動後にタイプを注入する
+            // （補完の自動トリガ検証。LSP の初期化を待つため NECODER_TYPE_PROBE_DELAY_MS 後・既定 5000）。
+            if let Ok(probe) = std::env::var("NECODER_TYPE_PROBE") {
                 let parts: Vec<&str> = probe.splitn(3, ':').collect();
                 if let [row, column, text] = parts[..] {
                     if let (Ok(row), Ok(column)) = (row.parse::<usize>(), column.parse::<usize>()) {
                         let text = text.to_string();
-                        let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
+                        let delay_ms = std::env::var("NECODER_TYPE_PROBE_DELAY_MS")
                             .ok()
                             .and_then(|value| value.parse::<u64>().ok())
                             .unwrap_or(5000);
@@ -947,12 +964,12 @@ fn main() {
                     }
                 }
             }
-            // 開発用: SHIRUSHI_HOVER_PROBE="row:col"（0 始まり）でキャレットを置き ⌘K ⌘I 相当の hover を出す。
-            if let Ok(probe) = std::env::var("SHIRUSHI_HOVER_PROBE") {
+            // 開発用: NECODER_HOVER_PROBE="row:col"（0 始まり）でキャレットを置き ⌘K ⌘I 相当の hover を出す。
+            if let Ok(probe) = std::env::var("NECODER_HOVER_PROBE") {
                 if let Some((row, column)) = probe.split_once(':').and_then(|(row, column)| {
                     Some((row.parse::<usize>().ok()?, column.parse::<usize>().ok()?))
                 }) {
-                    let delay_ms = std::env::var("SHIRUSHI_TYPE_PROBE_DELAY_MS")
+                    let delay_ms = std::env::var("NECODER_TYPE_PROBE_DELAY_MS")
                         .ok()
                         .and_then(|value| value.parse::<u64>().ok())
                         .unwrap_or(5000);
@@ -971,9 +988,9 @@ fn main() {
                     .detach();
                 }
             }
-            // 開発用: SHIRUSHI_RAIL_PROBE=open-branch:<name>|remove-active でレールのフローを実駆動（M10-2 検証）。
-            if let Ok(probe) = std::env::var("SHIRUSHI_RAIL_PROBE") {
-                let delay_ms = std::env::var("SHIRUSHI_RAIL_PROBE_DELAY_MS")
+            // 開発用: NECODER_RAIL_PROBE=open-branch:<name>|remove-active でレールのフローを実駆動（M10-2 検証）。
+            if let Ok(probe) = std::env::var("NECODER_RAIL_PROBE") {
+                let delay_ms = std::env::var("NECODER_RAIL_PROBE_DELAY_MS")
                     .ok()
                     .and_then(|value| value.parse::<u64>().ok())
                     .unwrap_or(400);
@@ -1016,7 +1033,7 @@ fn main() {
             }
         })
         .detach();
-        if std::env::var_os("SHIRUSHI_STARTUP_LOG").is_some() {
+        if std::env::var_os("NECODER_STARTUP_LOG").is_some() {
             println!("startup_ms={:.1}", startup.elapsed().as_secs_f64() * 1000.0);
         }
         cx.activate(true);
@@ -1024,30 +1041,30 @@ fn main() {
     });
 }
 
-/// 開発用ヘッドレススクショ: `SHIRUSHI_SCREENSHOT=<path>` で数フレーム後に render_to_image →
+/// 開発用ヘッドレススクショ: `NECODER_SCREENSHOT=<path>` で数フレーム後に render_to_image →
 /// PNG 保存 → 終了。`--features screenshot` 時のみ（test-support で render_to_image を使うため）。
 /// このオフスクリーン経路は font-kit 経由でグリフ（テキスト）も写る。
-/// 連写: `SHIRUSHI_SCREENSHOT_FRAMES=<n>` + `SHIRUSHI_SCREENSHOT_INTERVAL_MS=<ms>`（既定 500）で
+/// 連写: `NECODER_SCREENSHOT_FRAMES=<n>` + `NECODER_SCREENSHOT_INTERVAL_MS=<ms>`（既定 500）で
 /// 1回の起動から n 枚を等間隔保存（`shot.png` → `shot-000.png`, `shot-001.png`, …）。
 /// ACP ストリーミングやマスコットのアニメを GIF 化する素材撮りに使う。
 #[cfg(feature = "screenshot")]
 fn maybe_capture_screenshot(window: gpui::WindowHandle<Workspace>, cx: &mut App) {
     use std::time::Duration;
-    let Ok(screenshot_path) = std::env::var("SHIRUSHI_SCREENSHOT") else {
+    let Ok(screenshot_path) = std::env::var("NECODER_SCREENSHOT") else {
         return;
     };
     cx.spawn(async move |cx| {
-        // 既定 600ms。ACP プローブ検証時は SHIRUSHI_SCREENSHOT_DELAY_MS で応答到着まで延ばす。
-        let delay_ms = std::env::var("SHIRUSHI_SCREENSHOT_DELAY_MS")
+        // 既定 600ms。ACP プローブ検証時は NECODER_SCREENSHOT_DELAY_MS で応答到着まで延ばす。
+        let delay_ms = std::env::var("NECODER_SCREENSHOT_DELAY_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(600);
-        let frames = std::env::var("SHIRUSHI_SCREENSHOT_FRAMES")
+        let frames = std::env::var("NECODER_SCREENSHOT_FRAMES")
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|count| *count >= 1)
             .unwrap_or(1);
-        let interval_ms = std::env::var("SHIRUSHI_SCREENSHOT_INTERVAL_MS")
+        let interval_ms = std::env::var("NECODER_SCREENSHOT_INTERVAL_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(500);

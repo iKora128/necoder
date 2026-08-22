@@ -5,7 +5,7 @@ use std::process::Command;
 
 #[test]
 fn proxy_bootstraps_daemon_and_serves_real_protocol() {
-    let scratch = std::env::temp_dir().join(format!("shirushi-daemon-test-{}", std::process::id()));
+    let scratch = std::env::temp_dir().join(format!("necoder-daemon-test-{}", std::process::id()));
     let _cleanup = std::fs::remove_dir_all(&scratch);
     let project = scratch.join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -14,7 +14,7 @@ fn proxy_bootstraps_daemon_and_serves_real_protocol() {
 
     let session = format!("{:016x}{:048x}", std::process::id(), 0);
     let proxy = || {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_shirushi-remote-server"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_necoder-remote-server"));
         command
             .args(["proxy", "--session", &session])
             .env("HOME", &scratch);

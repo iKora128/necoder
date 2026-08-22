@@ -1,7 +1,7 @@
 //! settings_core — 設定の3層マージ（default → user → project）。GPUI 非依存・テスト可能。
 //!
-//! ARCHITECTURE §7: user = `~/Library/Application Support/Shirushi/settings.json`、
-//! project = `.shirushi/settings.json`。後ろのレイヤが前を**深く**上書きする（オブジェクトは再帰マージ、
+//! ARCHITECTURE §7: user = `~/Library/Application Support/necoder/settings.json`、
+//! project = `.necoder/settings.json`。後ろのレイヤが前を**深く**上書きする（オブジェクトは再帰マージ、
 //! スカラ・配列は置換）。マージ後の JSON を [`Settings`] にデシリアライズする（欠けたキーは型の既定）。
 
 use anyhow::{Context as _, Result};
@@ -30,7 +30,7 @@ impl Density {
 }
 
 /// レール（最左アクティビティバー）の各アイコンの表示。全て既定 true・settings で個別に消せる。
-/// 例: `.shirushi/settings.json` に `{ "rail": { "terminal": false } }` でターミナルアイコンを隠す。
+/// 例: `.necoder/settings.json` に `{ "rail": { "terminal": false } }` でターミナルアイコンを隠す。
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct RailSettings {
@@ -39,7 +39,7 @@ pub struct RailSettings {
     pub git: bool,
     pub agent: bool,
     pub terminal: bool,
-    /// Todo ボード（.shirushi/todos.md・M12-10）。
+    /// Todo ボード（.necoder/todos.md・M12-10）。
     pub todos: bool,
     /// リモート SSH（~/.ssh/config のホストへ接続・#2）。
     pub remote: bool,
@@ -110,7 +110,7 @@ pub struct Settings {
     /// 任命は settings.json の明示編集（既定ドリフト禁止の原則・DECISIONS §8）。
     /// 任命すると Blocked(15s)/Done/Failed 遷移で IntegrationSpace の「監督」スレッドが 1 ターン起きる。
     pub coordinator_agent: Option<String>,
-    /// 編隊の目標文（管制ヘッダに常時表示・P3）。プロジェクト設定 `.shirushi/settings.json` に
+    /// 編隊の目標文（管制ヘッダに常時表示・P3）。プロジェクト設定 `.necoder/settings.json` に
     /// 書けばリポジトリごとの目標になる（ファイルが真実の原則＝計画の「ledger」は settings で満たす）。
     pub fleet_goal: Option<String>,
     /// スレッドタブの見せ方（"bar" 横タブ / "list" 縦リスト）。Agent パネルのスイッチャがここへ保存し、
@@ -147,7 +147,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: "shirushi-dark".to_string(),
+            theme: "necoder-dark".to_string(),
             density: Density::Compact,
             font_size: 13.0,
             tab_size: 4,
@@ -176,7 +176,7 @@ impl Default for Settings {
 
 /// 組み込みの既定設定（最下層。ユーザーが見られる正の既定値）。
 pub const DEFAULT_SETTINGS_JSON: &str = r#"{
-  "theme": "shirushi-dark",
+  "theme": "necoder-dark",
   "density": "compact",
   "font_size": 13.0,
   "tab_size": 4,
@@ -224,7 +224,7 @@ impl SettingsStore {
         Ok(SettingsStore { merged, settings })
     }
 
-    /// 既定 + user（任意）+ project（`.shirushi/settings.json`、任意）を読み込む。
+    /// 既定 + user（任意）+ project（`.necoder/settings.json`、任意）を読み込む。
     /// 読めないファイルはスキップ、JSON 破損時は既定で継続（黙って落とさず標準エラーに残す）。
     pub fn load(user_path: Option<&Path>, project_dir: Option<&Path>) -> SettingsStore {
         let mut layers: Vec<String> = vec![DEFAULT_SETTINGS_JSON.to_string()];
@@ -234,7 +234,7 @@ impl SettingsStore {
             }
         }
         if let Some(dir) = project_dir {
-            let path = dir.join(".shirushi").join("settings.json");
+            let path = dir.join(".necoder").join("settings.json");
             if let Ok(text) = std::fs::read_to_string(&path) {
                 layers.push(text);
             }
@@ -258,7 +258,7 @@ impl SettingsStore {
 /// user 設定ファイルの標準パス（macOS）。`HOME` が無ければ `None`。
 pub fn user_settings_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/Shirushi/settings.json"))
+    Some(Path::new(&home).join("Library/Application Support/necoder/settings.json"))
 }
 
 /// user 設定ファイルの 1 キーだけを書き換えて保存する（アプリ内トグルの永続化用）。
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn default_layer_resolves_to_defaults() {
         let store = SettingsStore::default();
-        assert_eq!(store.settings().theme, "shirushi-dark");
+        assert_eq!(store.settings().theme, "necoder-dark");
         assert_eq!(store.settings().density, Density::Compact);
         assert_eq!(store.settings().tab_size, 4);
     }
@@ -354,10 +354,10 @@ mod tests {
     fn user_layer_overrides_default() {
         let store = SettingsStore::from_json_layers(&[
             DEFAULT_SETTINGS_JSON,
-            r#"{ "theme": "shirushi-light", "tab_size": 2 }"#,
+            r#"{ "theme": "necoder-light", "tab_size": 2 }"#,
         ])
         .expect("マージできる");
-        assert_eq!(store.settings().theme, "shirushi-light");
+        assert_eq!(store.settings().theme, "necoder-light");
         assert_eq!(store.settings().tab_size, 2);
         // 触れていないキーは既定のまま
         assert_eq!(store.settings().density, Density::Compact);
@@ -367,11 +367,11 @@ mod tests {
     fn project_layer_overrides_user() {
         let store = SettingsStore::from_json_layers(&[
             DEFAULT_SETTINGS_JSON,
-            r#"{ "theme": "shirushi-light", "density": "cozy" }"#, // user
-            r#"{ "theme": "shirushi-dark" }"#,                     // project が最優先
+            r#"{ "theme": "necoder-light", "density": "cozy" }"#, // user
+            r#"{ "theme": "necoder-dark" }"#,                     // project が最優先
         ])
         .expect("マージできる");
-        assert_eq!(store.settings().theme, "shirushi-dark"); // project 勝ち
+        assert_eq!(store.settings().theme, "necoder-dark"); // project 勝ち
         assert_eq!(store.settings().density, Density::Cozy); // user のまま
     }
 
@@ -422,12 +422,12 @@ mod tests {
     #[test]
     fn persist_user_value_sets_one_key_and_keeps_others() {
         let dir =
-            std::env::temp_dir().join(format!("shirushi-settings-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("necoder-settings-test-{}", std::process::id()));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         // 既存にユーザー値がある状態を作る
         std::fs::create_dir_all(&dir).expect("mkdir");
-        std::fs::write(&path, r#"{ "theme": "shirushi-light" }"#).expect("seed");
+        std::fs::write(&path, r#"{ "theme": "necoder-light" }"#).expect("seed");
 
         persist_user_value(&path, "submit_on_enter", Value::Bool(true)).expect("書ける");
         let store = SettingsStore::from_json_layers(&[
@@ -436,20 +436,20 @@ mod tests {
         ])
         .expect("マージできる");
         assert!(store.settings().submit_on_enter); // 書いたキー
-        assert_eq!(store.settings().theme, "shirushi-light"); // 既存キーは保たれる
+        assert_eq!(store.settings().theme, "necoder-light"); // 既存キーは保たれる
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn persist_agent_default_is_nested_and_isolated() {
         let dir = std::env::temp_dir().join(format!(
-            "shirushi-agent-defaults-test-{}",
+            "necoder-agent-defaults-test-{}",
             std::process::id()
         ));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        std::fs::write(&path, r#"{ "theme": "shirushi-light" }"#).expect("seed");
+        std::fs::write(&path, r#"{ "theme": "necoder-light" }"#).expect("seed");
 
         // 別 agent・別 field を順に書いても、互いを潰さず nested にマージされる。
         persist_agent_default(&path, "Claude Code", "model", "claude-opus-5").expect("書ける");
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(defaults["Claude Code"].effort.as_deref(), Some("xhigh"));
         assert_eq!(defaults["Codex"].model.as_deref(), Some("GPT-5.6-Sol"));
         assert_eq!(defaults["Codex"].effort, None); // 書いていない field は None
-        assert_eq!(store.settings().theme, "shirushi-light"); // 無関係キーは保たれる
+        assert_eq!(store.settings().theme, "necoder-light"); // 無関係キーは保たれる
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

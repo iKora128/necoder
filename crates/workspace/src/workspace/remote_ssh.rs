@@ -188,8 +188,8 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     let project = host::SshProject::parse(&uri)?;
-                    let server_command = std::env::var("SHIRUSHI_REMOTE_SERVER_COMMAND")
-                        .unwrap_or_else(|_| "shirushi-remote-server".to_string());
+                    let server_command = std::env::var("NECODER_REMOTE_SERVER_COMMAND")
+                        .unwrap_or_else(|_| "necoder-remote-server".to_string());
                     let remote = host::RemoteHost::connect_ssh(&project, &server_command)?;
                     let root = remote.root().to_path_buf();
                     Ok::<ProjectSource, anyhow::Error>(ProjectSource::new(remote, root))

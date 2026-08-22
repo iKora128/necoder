@@ -12,9 +12,9 @@ RUN apt-get update \
     && mkdir -p /run/sshd
 
 COPY sshd_config /etc/ssh/sshd_config
-COPY entrypoint.sh /usr/local/bin/shirushi-test-entrypoint
-RUN chmod 755 /usr/local/bin/shirushi-test-entrypoint
+COPY entrypoint.sh /usr/local/bin/necoder-test-entrypoint
+RUN chmod 755 /usr/local/bin/necoder-test-entrypoint
 
 EXPOSE 22
 
-ENTRYPOINT ["/usr/local/bin/shirushi-test-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/necoder-test-entrypoint"]

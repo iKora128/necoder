@@ -24,7 +24,7 @@ i18n.workspace = true
 host.workspace = true
 project.workspace = true
 lang.workspace = true
-pulldown-cmark.workspace = true
+markdown.workspace = true
 image.workspace = true
 
 [dev-dependencies]

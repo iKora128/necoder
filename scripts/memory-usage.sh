@@ -6,12 +6,12 @@ set -eu
 cd "$(dirname "$0")/.."
 
 WAIT="${1:-6}"
-BIN=./target/release/shirushi
-PROBE=/tmp/shirushi-memory-probe.rs
-[ -x "$BIN" ] || { echo "先に: cargo build --release -p shirushi"; exit 1; }
+BIN=./target/release/necoder
+PROBE=/tmp/necoder-memory-probe.rs
+[ -x "$BIN" ] || { echo "先に: cargo build --release -p necoder"; exit 1; }
 printf 'fn main() {\n    println!("hello");\n}\n' > "$PROBE"
 
-SHIRUSHI_NO_UPDATE_CHECK=1 "$BIN" "$PROBE" >/dev/null 2>&1 &
+NECODER_NO_UPDATE_CHECK=1 "$BIN" "$PROBE" >/dev/null 2>&1 &
 PID=$!
 sleep "$WAIT"
 RSS_KB=$(ps -o rss= -p "$PID" | tr -d ' ')

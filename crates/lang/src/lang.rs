@@ -1417,10 +1417,10 @@ mod multilang_tests {
 
     #[test]
     fn yaml_values_receive_syntax_kinds() {
-        let source = "name: \"shirushi\"\nenabled: true\ncount: 3\n";
+        let source = "name: \"necoder\"\nenabled: true\ncount: 3\n";
         let highlighter = Highlighter::for_extension("yaml").unwrap();
         let spans = highlighter.highlight(source);
-        let string_at = source.find("\"shirushi\"").unwrap();
+        let string_at = source.find("\"necoder\"").unwrap();
         assert!(spans
             .iter()
             .any(|span| { span.kind == HighlightKind::String && span.range.contains(&string_at) }));

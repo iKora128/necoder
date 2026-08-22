@@ -135,7 +135,7 @@ pub fn pretty_keystroke(keystrokes: &str) -> String {
         .join(" ")
 }
 
-/// 組み込み既定 keymap（macOS・Zed 互換ベース）。編集アクションは `editor` 名前空間、終了は `shirushi`。
+/// 組み込み既定 keymap（macOS・Zed 互換ベース）。編集アクションは `editor` 名前空間、終了は `necoder`。
 pub const DEFAULT_KEYMAP_JSON: &str = r#"[
   {
     "context": "Editor",
@@ -198,6 +198,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-[": "editor::Outdent",
       "cmd-d": "editor::SelectNext",
       "alt-z": "editor::ToggleSoftWrap",
+      "cmd-shift-v": "editor::ToggleRenderedMarkdown",
       "ctrl-g": "workspace::GoToLine",
       "alt-cmd-up": "editor::AddCursorAbove",
       "alt-cmd-down": "editor::AddCursorBelow",
@@ -261,7 +262,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-m": "workspace::Minimize",
       "cmd-h": "workspace::Hide",
       "cmd-alt-h": "workspace::HideOthers",
-      "cmd-q": "shirushi::Quit"
+      "cmd-q": "necoder::Quit"
     }
   }
 ]"#;
@@ -321,7 +322,7 @@ mod tests {
         assert!(sections[3].context.is_empty());
         assert_eq!(
             sections[3].bindings.get("cmd-q").map(String::as_str),
-            Some("shirushi::Quit")
+            Some("necoder::Quit")
         );
     }
 

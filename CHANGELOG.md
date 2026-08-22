@@ -8,7 +8,7 @@
 ### Added
 - 初回公開リリース（v0.1.0）に向けた整備:
   - Finder/Dock からのファイル/フォルダオープン（`CFBundleDocumentTypes` + `on_open_urls` 配線）
-  - GUI 起動（Finder/Dock）時のアプリログ `~/Library/Application Support/Shirushi/logs/`（20 本保持）
+  - GUI 起動（Finder/Dock）時のアプリログ `~/Library/Application Support/necoder/logs/`（20 本保持）
   - 依存ライセンス監査（cargo-deny）を CI に常設
   - CLA / CONTRIBUTING / SECURITY / Code of Conduct を整備
 - エディタ本体はここまでの M0〜M14 で実装済み（色レール・ACP スレッド・LSP・tree-sitter 多言語・

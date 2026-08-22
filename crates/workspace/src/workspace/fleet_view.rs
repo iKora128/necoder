@@ -170,7 +170,7 @@ impl Workspace {
             })
             .collect();
         // 開発用: 最初の Task の実端末 surface を 1 枚仕込む。
-        if std::env::var_os("SHIRUSHI_FLEET_TERM").is_some() && self.chrome.fleet_cells.len() < 8 {
+        if std::env::var_os("NECODER_FLEET_TERM").is_some() && self.chrome.fleet_cells.len() < 8 {
             if let Some(space) = self.chrome.fleet_cells.iter().find_map(|pane| match pane {
                 FleetPane::Task { space } => Some(space.clone()),
                 _ => None,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shirushi のアプリアイコン（.icns）を生成する。
+"""necoder のアプリアイコン（.icns）を生成する。
 
 原画 PNG（正方・full-bleed）に macOS 風の角丸（squircle 近似の rounded-rect）を掛け、
 iconset の全サイズを作って `iconutil` で `.icns` にまとめる。マスコット＝猫耳コーダー娘。
@@ -11,7 +11,7 @@ LANCZOS のリンギングが出ず、16px でも輪郭が濁らない）。
 
 使い方:
     python3 scripts/make-icon.py [source.png] [out_dir]
-既定: source=lp/assets/img/necoder-mark.png / out_dir=crates/shirushi/assets/icon
+既定: source=lp/assets/img/necoder-mark.png / out_dir=crates/necoder/assets/icon
 """
 import os
 import subprocess
@@ -56,17 +56,17 @@ def square_1024(source: str) -> Image.Image:
 
 def main() -> None:
     source = sys.argv[1] if len(sys.argv) > 1 else "lp/assets/img/necoder-mark.png"
-    out_dir = sys.argv[2] if len(sys.argv) > 2 else "crates/shirushi/assets/icon"
+    out_dir = sys.argv[2] if len(sys.argv) > 2 else "crates/necoder/assets/icon"
     os.makedirs(out_dir, exist_ok=True)
 
     master = rounded(square_1024(source))
-    master_path = os.path.join(out_dir, "shirushi.png")
+    master_path = os.path.join(out_dir, "necoder.png")
     master.save(master_path)
 
     # iconset は中間物なので temp に吐く（コミットするのは master と .icns だけ）。
     specs = [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), (256, 2), (512, 1), (512, 2)]
     with tempfile.TemporaryDirectory() as work:
-        iconset = os.path.join(work, "Shirushi.iconset")
+        iconset = os.path.join(work, "necoder.iconset")
         os.makedirs(iconset)
         for size, scale in specs:
             pixels = size * scale
@@ -74,7 +74,7 @@ def main() -> None:
             master.resize((pixels, pixels), Image.BOX).save(
                 os.path.join(iconset, f"icon_{size}x{size}{suffix}.png")
             )
-        icns = os.path.join(out_dir, "Shirushi.icns")
+        icns = os.path.join(out_dir, "necoder.icns")
         subprocess.run(["iconutil", "-c", "icns", "-o", icns, iconset], check=True)
         print(f"生成: {master_path}\n生成: {icns}")
 

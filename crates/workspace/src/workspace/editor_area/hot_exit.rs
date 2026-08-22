@@ -10,7 +10,7 @@ impl Workspace {
     }
 
     pub(crate) fn schedule_hot_exit_snapshot(&mut self, cx: &mut Context<Self>) {
-        let debug = std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some();
+        let debug = std::env::var_os("NECODER_HOTEXIT_DEBUG").is_some();
         let Some(storage) = self.persistence.storage.clone() else {
             if debug {
                 eprintln!("hotexit: storage=None でスキップ");
@@ -57,7 +57,7 @@ impl Workspace {
                     Ok(result) => result,
                     Err(_) => return,
                 };
-            if std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some() {
+            if std::env::var_os("NECODER_HOTEXIT_DEBUG").is_some() {
                 eprintln!(
                     "hotexit: tick gen={generation} snapshot={} 件",
                     snapshot.len()
@@ -110,7 +110,7 @@ impl Workspace {
                 if mine.is_empty() {
                     return;
                 }
-                if std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some() {
+                if std::env::var_os("NECODER_HOTEXIT_DEBUG").is_some() {
                     eprintln!(
                         "hotexit: 復元候補 {} 件（scope={scope}・バー表示）",
                         mine.len()

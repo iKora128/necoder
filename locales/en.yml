@@ -1,10 +1,10 @@
-# Shirushi English locale.
+# necoder English locale.
 # Discipline (ARCHITECTURE §6 / UI-SPEC §10): every UI string goes through t!("area.key").
 # Keep the SAME key set as ja.yml (the parity test in crates/i18n fails on drift).
 app:
-  name: Shirushi
+  name: necoder
 editor:
-  empty_hint: Pass a file path as an argument to open it (e.g. shirushi README.md)
+  empty_hint: Pass a file path as an argument to open it (e.g. necoder README.md)
 common:
   untitled: Untitled
 finder:
@@ -96,14 +96,14 @@ inline:
   buffer_changed: Buffer changed — proposal discarded
 todos:
   title: Todo board
-  empty: No .shirushi/todos.md yet (✨ drafts today's plan)
+  empty: No .necoder/todos.md yet (✨ drafts today's plan)
   plan: ✨ Plan today
   plan_busy: Generating…
   plan_tip: Draft today's tasks from ROADMAP and git status (claude -p)
   add_tip: Add a task
   plan_added: Added %{count} items for today
   send_tip: Send this task to the active thread (auto-checks when done)
-  send_prompt: "%{text}\n\nWhen done, flip this item's checkbox in .shirushi/todos.md to [x]: %{text}"
+  send_prompt: "%{text}\n\nWhen done, flip this item's checkbox in .necoder/todos.md to [x]: %{text}"
 palette:
   placeholder: Search commands…
 cmd:
@@ -168,7 +168,7 @@ control:
   tab_graph: Graph
   worktrees: "+ %{n} worktrees"
   goal: "Goal: %{goal}"
-  goal_unset: "Goal: unset (set fleet_goal in .shirushi/settings.json)"
+  goal_unset: "Goal: unset (set fleet_goal in .necoder/settings.json)"
   chip_attention: attention
   chip_done_unread: done·unread
   chip_working: running
@@ -311,7 +311,7 @@ titlebar:
 settings:
   title: Settings
   agents_heading: AI Agents
-  agents_sub: Shirushi checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
+  agents_sub: necoder checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
   installed: Installed
   available_npx: Fetch on first use (npx)
   not_installed: Not installed
@@ -442,7 +442,7 @@ update:
   err_signature: "Signature verification failed (unsigned or tampered): %{detail}"
   err_attach: hdiutil attach failed
   err_mount: Failed to mount the dmg
-  err_no_app: Shirushi.app not found in the dmg
+  err_no_app: necoder.app not found in the dmg
   err_ditto: Failed to run ditto
   err_replace: Failed to replace the .app
 ipc:
@@ -461,13 +461,13 @@ ipc:
 crash:
   notice: ⚠ Crashed last time — click to report
 menu:
-  about: About Shirushi
+  about: About necoder
   settings: Settings…
   services: Services
-  hide: Hide Shirushi
+  hide: Hide necoder
   hide_others: Hide Others
   show_all: Show All
-  quit: Quit Shirushi
+  quit: Quit necoder
   file: File
   open_project: Open / Switch Project…
   open_dialog: Open…
@@ -538,7 +538,7 @@ menu:
   help: Help
   report_bug: Report a Bug…
 welcome:
-  title: Shirushi — orient by color
+  title: necoder — orient by color
   open_project: Open a project / worktree
   open_file: Open a file
   new_thread: Start an AI thread (Claude Code)

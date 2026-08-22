@@ -229,8 +229,8 @@ dependencies = [
  "i18n",
  "image",
  "lang",
+ "markdown",
  "project",
- "pulldown-cmark",
  "serde_json",
  "settings",
  "settings_core",
@@ -1793,6 +1793,7 @@ dependencies = [
  "gpui",
  "i18n",
  "lang",
+ "markdown",
  "project",
  "theme_core",
  "unicode-width 0.1.14",
@@ -3848,6 +3849,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "markdown"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4056,6 +4064,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
+]
+
+[[package]]
+name = "necoder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor_view",
+ "futures",
+ "gpui",
+ "gpui_platform",
+ "host",
+ "i18n",
+ "image",
+ "keymap_core",
+ "project",
+ "search",
+ "serde_json",
+ "settings",
+ "settings_core",
+ "storage",
+ "theme_core",
+ "url",
+ "workspace",
 ]
 
 [[package]]
@@ -5999,30 +6031,6 @@ name = "shell-words"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
-
-[[package]]
-name = "shirushi"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "editor_view",
- "futures",
- "gpui",
- "gpui_platform",
- "host",
- "i18n",
- "image",
- "keymap_core",
- "project",
- "search",
- "serde_json",
- "settings",
- "settings_core",
- "storage",
- "theme_core",
- "url",
- "workspace",
-]
 
 [[package]]
 name = "shlex"

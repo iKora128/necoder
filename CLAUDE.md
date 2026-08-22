@@ -1,6 +1,6 @@
-# Shirushi — エージェント作業ガイド
+# necoder — エージェント作業ガイド
 
-GPUI ベースの自作エディタ **Shirushi（しるし）**。ライセンス **AGPL-3.0**。ドキュメント・コメントは日本語で書く。
+GPUI ベースの自作エディタ **necoder（ねこーだー）**。ライセンス **AGPL-3.0**。ドキュメント・コメントは日本語で書く。
 コンセプト: 「色による方向感覚」×「プロジェクト/ブランチ横断」×「AI エージェントネイティブ（ACP）」。
 
 ## 一次資料（ここを正とする）
@@ -29,8 +29,8 @@ GPUI ベースの自作エディタ **Shirushi（しるし）**。ライセン�
 
 ## ビルド・検証ループ（変更のたびに回す）
 
-1. `cargo check -p shirushi` — 速い整合性確認
-2. `cargo test -p shirushi` — ロジック
+1. `cargo check -p necoder` — 速い整合性確認
+2. `cargo test -p necoder` — ロジック
 3. UI 変更時: `./scripts/screenshot-app.sh` → 出力 PNG を Read して**目視で**検証（レイアウト崩れ・色）
 4. `mock/` 変更時: ヘッドレス Chrome でスクショ → Read で検証:
    ```sh

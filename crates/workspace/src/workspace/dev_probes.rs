@@ -1,7 +1,7 @@
 use crate::workspace::*;
 
 // ── 開発用プローブ API（debug build 限定） ──
-// SHIRUSHI_* 環境変数からオフスクリーン検証を駆動するための入口だけを置く。
+// NECODER_* 環境変数からオフスクリーン検証を駆動するための入口だけを置く。
 // 全 item が `#[cfg(debug_assertions)]`。本番コードをここに置かない（release に混ざる）。
 
 impl Workspace {
@@ -70,7 +70,7 @@ impl Workspace {
         self.open_thread_history(&ThreadHistory, window, cx);
     }
 
-    /// 開発用: 管制タブの受入検証（P3・`SHIRUSHI_CONTROL_PROBE`）。5 つの擬似 TaskSpace
+    /// 開発用: 管制タブの受入検証（P3・`NECODER_CONTROL_PROBE`）。5 つの擬似 TaskSpace
     /// （Working/Blocked/MergeReady/Failed/Planned）を合成する。worktree 実体は現 root を共有
     /// （描画検証専用）・SpaceId は probe 専用値・storage は渡さない＝**Git/DB へ一切書かない**。
     #[cfg(debug_assertions)]
@@ -267,7 +267,7 @@ impl Workspace {
         self.open_ssh_input(window, cx);
     }
 
-    /// 開発用: SSH ホストピッカーを開く（SHIRUSHI_SSH_HOST_PROBE の描画検証・M13）。
+    /// 開発用: SSH ホストピッカーを開く（NECODER_SSH_HOST_PROBE の描画検証・M13）。
     #[cfg(debug_assertions)]
     pub fn debug_open_ssh_host_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_ssh_host_picker(&RemoteSsh, window, cx);
@@ -318,17 +318,17 @@ impl Workspace {
     }
 
     /// 開発用: Todo ボードを開く（M12-10 のオフスクリーン検証）。
-    /// `SHIRUSHI_TODOS_PLAN=1` なら ✨今日の計画も発火、`SHIRUSHI_TODOS_SEND=<line>` なら
+    /// `NECODER_TODOS_PLAN=1` なら ✨今日の計画も発火、`NECODER_TODOS_SEND=<line>` なら
     /// その行を ▶ で AI へ送る（受入「チェックがひとりでに入る」の自動 round trip）。
     #[cfg(debug_assertions)]
     pub fn debug_open_todo_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.todo_panel.read(cx).open {
             self.toggle_todo_board(&ToggleTodoBoard, window, cx);
         }
-        if std::env::var("SHIRUSHI_TODOS_PLAN").is_ok_and(|value| value == "1") {
+        if std::env::var("NECODER_TODOS_PLAN").is_ok_and(|value| value == "1") {
             self.run_daily_plan_for(self.project_sessions.active, cx);
         }
-        if let Ok(line) = std::env::var("SHIRUSHI_TODOS_SEND") {
+        if let Ok(line) = std::env::var("NECODER_TODOS_SEND") {
             if let Ok(line) = line.parse::<usize>() {
                 // 板の読み込み（bg）完了を待ってから該当行を送る。
                 let Some(handle) = window.window_handle().downcast::<Workspace>() else {
@@ -445,11 +445,19 @@ impl Workspace {
         self.request_format(true, window, cx);
     }
 
+    /// 開発用: アクティブエディタが .md なら整形プレビュー（rendered）へ切り替える（⌘⇧V 相当）。
+    #[cfg(debug_assertions)]
+    pub fn debug_markdown_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| editor.set_rendered_markdown(true, cx));
+        }
+    }
+
     /// 開発用: 復元バーの「復元」を押す（オフスクリーン検証。pending が無ければ何もしない）。
     #[cfg(debug_assertions)]
     pub fn debug_restore_hot_exit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.hot_exit_pending.is_some() {
-            if std::env::var_os("SHIRUSHI_HOTEXIT_DEBUG").is_some() {
+            if std::env::var_os("NECODER_HOTEXIT_DEBUG").is_some() {
                 eprintln!("hotexit: 自動復元を実行");
             }
             self.restore_hot_exit(window, cx);

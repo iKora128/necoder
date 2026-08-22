@@ -263,7 +263,7 @@ impl Workspace {
                     (path.to_path_buf(), line, character, position)
                 })
         };
-        let debug = std::env::var_os("SHIRUSHI_LSP_DEBUG").is_some();
+        let debug = std::env::var_os("NECODER_LSP_DEBUG").is_some();
         let (Some((path, line, character, position)), true) = (info, self.lsp_initialized) else {
             if debug {
                 eprintln!("code_actions: LSP 未初期化 or 対応外ファイル");
@@ -303,7 +303,7 @@ impl Workspace {
         );
         cx.spawn(async move |_workspace, cx| {
             let response = receiver.await;
-            if std::env::var_os("SHIRUSHI_LSP_DEBUG").is_some() {
+            if std::env::var_os("NECODER_LSP_DEBUG").is_some() {
                 eprintln!("code_actions 応答: {response:?}");
             }
             let Ok(Ok(value)) = response else {

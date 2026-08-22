@@ -1,4 +1,4 @@
-//! i18n — Shirushi の翻訳土台。
+//! i18n — necoder の翻訳土台。
 //!
 //! ARCHITECTURE §6 / UI-SPEC §10 の規律を実装する: **UI 文字列は全て [`t!`] 経由**、
 //! キーは `領域.キー`、`locales/ja.yml` と `en.yml` を同梱、OS ロケールで自動選択。
@@ -143,7 +143,7 @@ fn flatten(prefix: &str, value: &serde_yaml::Value, out: &mut HashMap<String, St
 ///
 /// ```
 /// i18n::set_locale("en");
-/// assert_eq!(i18n::t!("app.name"), "Shirushi");
+/// assert_eq!(i18n::t!("app.name"), "necoder");
 /// ```
 #[macro_export]
 macro_rules! t {
@@ -207,11 +207,11 @@ mod tests {
     #[test]
     fn translate_and_macro_respect_locale_and_fallback() {
         set_locale("ja");
-        assert_eq!(translate("app.name"), "しるし");
+        assert_eq!(translate("app.name"), "necoder");
 
         set_locale("en");
-        assert_eq!(translate("app.name"), "Shirushi");
-        assert_eq!(t!("app.name"), "Shirushi");
+        assert_eq!(translate("app.name"), "necoder");
+        assert_eq!(t!("app.name"), "necoder");
 
         // 未知キーはキー自身を返す（画面が空にならない）
         assert_eq!(translate("nope.missing"), "nope.missing");
@@ -221,7 +221,7 @@ mod tests {
 
         // 現在ロケールに無ければ en へフォールバック
         set_locale("zz");
-        assert_eq!(translate("app.name"), "Shirushi");
+        assert_eq!(translate("app.name"), "necoder");
 
         set_locale(FALLBACK_LOCALE);
     }

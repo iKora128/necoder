@@ -85,6 +85,7 @@ search = { path = "crates/search" }
 search_ui = { path = "crates/search_ui" }
 storage = { path = "crates/storage" }
 lang = { path = "crates/lang" }
+markdown = { path = "crates/markdown" }
 acp_client = { path = "crates/acp_client" }
 agent_panel = { path = "crates/agent_panel" }
 ui = { path = "crates/ui" }
@@ -107,7 +108,7 @@ split-debuginfo = "unpacked"
 codegen-units = 16
 debug = "limited"
 
-# "debug" は cargo の予約名なので dbg。本格デバッグ用: cargo run --profile dbg -p shirushi
+# "debug" は cargo の予約名なので dbg。本格デバッグ用: cargo run --profile dbg -p necoder
 [profile.dbg]
 inherits = "dev"
 debug = "full"

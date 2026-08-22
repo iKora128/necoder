@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # 自分で自分を更新する（ドッグフーディング用）。
-# ビルド → /Applications/Shirushi.app を差し替え → 起動し直す、までを 1 コマンドで。
+# ビルド → /Applications/necoder.app を差し替え → 起動し直す、までを 1 コマンドで。
 #
-# Shirushi で Shirushi を書いている最中に走らせる前提なので、順番が大事:
+# necoder で necoder を書いている最中に走らせる前提なので、順番が大事:
 #   重いビルドを「先に」終わらせてから終了 → 差し替え → 再起動 と繋ぎ、
 #   エディタが落ちている時間を数秒に抑える。ビルドが失敗したら何も壊さず終わる。
 #
-# さらに、統合ターミナル（＝ Shirushi の子プロセス）から叩かれた場合は、自分を quit した
-# 時点でこのスクリプトごと死んで差し替えが中途半端に終わる。祖先に shirushi がいたら
+# さらに、統合ターミナル（＝ necoder の子プロセス）から叩かれた場合は、自分を quit した
+# 時点でこのスクリプトごと死んで差し替えが中途半端に終わる。祖先に necoder がいたら
 # 差し替え以降を切り離したプロセスへ渡して生き延びさせる。
 #
-# 編集中バッファは hot exit（~/Library/Application Support/Shirushi/shirushi.db）で
+# 編集中バッファは hot exit（~/Library/Application Support/necoder/necoder.db）で
 # 復元されるが、確実を期すなら走らせる前に保存しておくこと。
 #
 # 使い方: ./scripts/install-mac.sh [release|debug]   （既定 release）
@@ -27,17 +27,17 @@ if [ "${1:-}" = "--swap-only" ]; then
     shift
 fi
 PROFILE="${1:-release}"
-SRC="target/Shirushi.app"
-DEST="/Applications/Shirushi.app"
-LOG="/tmp/shirushi-install.log"
+SRC="target/necoder.app"
+DEST="/Applications/necoder.app"
+LOG="/tmp/necoder-install.log"
 
-# 祖先を辿って shirushi 本体がいるか見る（＝統合ターミナルから走っている）。
-inside_shirushi() {
+# 祖先を辿って necoder 本体がいるか見る（＝統合ターミナルから走っている）。
+inside_necoder() {
     local pid="${PPID:-0}" hops=0 comm
     while [ "$pid" -gt 1 ] && [ "$hops" -lt 20 ]; do
         comm="$(ps -o comm= -p "$pid" 2>/dev/null)" || return 1
         [ -z "$comm" ] && return 1
-        [ "${comm##*/}" = "shirushi" ] && return 0
+        [ "${comm##*/}" = "necoder" ] && return 0
         pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
         [ -z "$pid" ] && return 1
         hops=$((hops + 1))
@@ -48,17 +48,17 @@ inside_shirushi() {
 swap_and_relaunch() {
     # 動いていれば終了させる。強制 kill ではなく quit を送り、hot exit の保存を待つ。
     local relaunch=0
-    if pgrep -x shirushi >/dev/null 2>&1; then
+    if pgrep -x necoder >/dev/null 2>&1; then
         relaunch=1
-        echo "動作中の Shirushi を終了中..."
-        osascript -e 'quit app "Shirushi"' 2>/dev/null || true
+        echo "動作中の necoder を終了中..."
+        osascript -e 'quit app "necoder"' 2>/dev/null || true
         for _ in $(seq 1 50); do
-            pgrep -x shirushi >/dev/null 2>&1 || break
+            pgrep -x necoder >/dev/null 2>&1 || break
             sleep 0.2
         done
-        if pgrep -x shirushi >/dev/null 2>&1; then
+        if pgrep -x necoder >/dev/null 2>&1; then
             echo "終了しないので強制終了する" >&2
-            pkill -x shirushi || true
+            pkill -x necoder || true
             sleep 0.5
         fi
     fi
@@ -68,7 +68,7 @@ swap_and_relaunch() {
 
     # 署名し直す。rsync は署名ごと運ぶので普通は有効なままだが、差分コピーで
     # _CodeSignature と中身がずれた時にアイコン解決が壊れる（bundle-mac.sh §4 と同じ罠）。
-    codesign --force --sign - --identifier dev.shirushi.editor "$DEST"
+    codesign --force --sign - --identifier dev.necoder.editor "$DEST"
     local lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
     [ -x "$lsregister" ] && "$lsregister" -f -R "$DEST"
 
@@ -91,9 +91,9 @@ fi
 # 1) 先にビルド＆バンドル。ここで失敗したら動作中のアプリには一切触れない。
 ./scripts/bundle-mac.sh "$PROFILE"
 
-# 2) 差し替え。Shirushi の中から走っているなら、自分の死に巻き込まれないよう切り離す。
-if inside_shirushi; then
-    echo "Shirushi の統合ターミナルから実行されている → 差し替えを別プロセスへ渡す"
+# 2) 差し替え。necoder の中から走っているなら、自分の死に巻き込まれないよう切り離す。
+if inside_necoder; then
+    echo "necoder の統合ターミナルから実行されている → 差し替えを別プロセスへ渡す"
     nohup "$SELF" --swap-only "$PROFILE" >"$LOG" 2>&1 &
     disown 2>/dev/null || true
     echo "→ 数秒で終了・再起動します（ログ: $LOG）"

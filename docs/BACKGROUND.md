@@ -19,7 +19,7 @@ Zedのエージェントまわりの不満（スレッド/プロジェクトの�
 - **マルチプラットフォーム**: GPUIは **macOS / Linux / Windows** 対応（Web・モバイルは不可）。
   Windowsが一番荒い。
 - **ライセンス**: GPLは有効（Zedと同型：GPLアプリ on Apache GPUI）。ただし義務ではなく選択。
-- **次の一手**: [`MVP-PLAN.md`](./MVP-PLAN.md) — まず `~/Work/experience/shirushi/zed` でGPUIのhello_worldを走らせて
+- **次の一手**: [`MVP-PLAN.md`](./MVP-PLAN.md) — まず `~/Work/experience/necoder/zed` でGPUIのhello_worldを走らせて
   「動くか」を最小コストで確認する。
 
 ---
@@ -134,7 +134,7 @@ Zedのエージェントまわりの不満（スレッド/プロジェクトの�
 - Claude ACPアダプタ: https://github.com/agentclientprotocol/claude-agent-acp
 
 ### 自作の土台（permissive）
-- GPUI: `~/Work/experience/shirushi/zed/crates/gpui`（Apache-2.0）/ examples に hello_world.rs, input.rs, data_table.rs 等
+- GPUI: `~/Work/experience/necoder/zed/crates/gpui`（Apache-2.0）/ examples に hello_world.rs, input.rs, data_table.rs 等
 - Floem（Lapce）: https://github.com/lapce/floem
 - Tree-sitter（MIT）/ tower-lsp・lsp-types / ropey / alacritty_terminal
 

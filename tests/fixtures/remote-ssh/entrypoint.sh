@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-key_file=${AUTHORIZED_KEY_FILE:-/run/shirushi/id_ed25519.pub}
+key_file=${AUTHORIZED_KEY_FILE:-/run/necoder/id_ed25519.pub}
 if [ ! -s "$key_file" ]; then
     echo "authorized key is missing: $key_file" >&2
     exit 1
@@ -48,8 +48,8 @@ EOF
 
 chown -R dev:dev /home/dev/work
 runuser -u dev -- git -C "$project" init -q
-runuser -u dev -- git -C "$project" config user.name "Shirushi Test"
-runuser -u dev -- git -C "$project" config user.email "shirushi-test@example.invalid"
+runuser -u dev -- git -C "$project" config user.name "necoder Test"
+runuser -u dev -- git -C "$project" config user.email "necoder-test@example.invalid"
 runuser -u dev -- git -C "$project" add .
 runuser -u dev -- git -C "$project" commit -qm "Initial fixture"
 

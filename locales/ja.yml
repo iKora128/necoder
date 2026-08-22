@@ -1,11 +1,11 @@
-# Shirushi 日本語ロケール（i18n の原文）。
+# necoder 日本語ロケール（i18n の原文）。
 # 規律（ARCHITECTURE §6 / UI-SPEC §10）: UI 文字列は全て t!("領域.キー") 経由。
 # キーは英語スネークケースの領域プレフィックス。en.yml と**同じキー集合**を保つこと
 # （crates/i18n の parity テストが差分を検出する）。
 app:
-  name: しるし
+  name: necoder
 editor:
-  empty_hint: 起動引数でファイルを渡すと開きます（例 shirushi README.md）
+  empty_hint: 起動引数でファイルを渡すと開きます（例 necoder README.md）
 common:
   untitled: 無題
 finder:
@@ -97,14 +97,14 @@ inline:
   buffer_changed: バッファが変わったため提案を破棄しました
 todos:
   title: Todo ボード
-  empty: .shirushi/todos.md がありません（✨で今日の計画を作れます）
+  empty: .necoder/todos.md がありません（✨で今日の計画を作れます）
   plan: ✨ 今日の計画
   plan_busy: 生成中…
   plan_tip: ROADMAP と git status から今日のタスク下書きを生成（claude -p）
   add_tip: タスクを追加
   plan_added: 今日の計画を %{count} 件追加しました
   send_tip: このタスクをアクティブスレッドへ送る（完了時に自動チェック）
-  send_prompt: "%{text}\n\n完了したら .shirushi/todos.md のこの項目「%{text}」のチェックボックスを [x] に書き換えて。"
+  send_prompt: "%{text}\n\n完了したら .necoder/todos.md のこの項目「%{text}」のチェックボックスを [x] に書き換えて。"
 palette:
   placeholder: コマンドを検索…
 cmd:
@@ -169,7 +169,7 @@ control:
   tab_graph: グラフ
   worktrees: "+ %{n} worktrees"
   goal: "目標: %{goal}"
-  goal_unset: "目標: 未設定（.shirushi/settings.json の fleet_goal で設定）"
+  goal_unset: "目標: 未設定（.necoder/settings.json の fleet_goal で設定）"
   chip_attention: 要対応
   chip_done_unread: 完了未確認
   chip_working: 稼働
@@ -312,7 +312,7 @@ titlebar:
 settings:
   title: 設定
   agents_heading: AI エージェント
-  agents_sub: ローカル CLI と ACP を確認し、利用可能なものだけ選択できます。認証情報を Shirushi は保存しません。
+  agents_sub: ローカル CLI と ACP を確認し、利用可能なものだけ選択できます。認証情報を necoder は保存しません。
   installed: 導入済み
   available_npx: 初回に取得（npx）
   not_installed: 未導入
@@ -443,7 +443,7 @@ update:
   err_signature: "署名検証に失敗（未署名または改ざんの疑い）: %{detail}"
   err_attach: hdiutil attach に失敗しました
   err_mount: dmg のマウントに失敗しました
-  err_no_app: dmg に Shirushi.app が見つかりません
+  err_no_app: dmg に necoder.app が見つかりません
   err_ditto: ditto を実行できません
   err_replace: .app の差し替えに失敗しました
 ipc:
@@ -462,13 +462,13 @@ ipc:
 crash:
   notice: ⚠ 前回終了時にクラッシュ — クリックで報告
 menu:
-  about: Shirushi について
+  about: necoder について
   settings: 設定…
   services: サービス
-  hide: Shirushi を隠す
+  hide: necoder を隠す
   hide_others: ほかを隠す
   show_all: すべてを表示
-  quit: Shirushi を終了
+  quit: necoder を終了
   file: ファイル
   open_project: プロジェクトを開く / 切替…
   open_dialog: 開く…
@@ -539,7 +539,7 @@ menu:
   help: ヘルプ
   report_bug: バグを報告…
 welcome:
-  title: Shirushi — 色による方向感覚
+  title: necoder — 色による方向感覚
   open_project: プロジェクト / worktree を開く
   open_file: ファイルを開く
   new_thread: AI スレッドを開始（Claude Code）

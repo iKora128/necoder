@@ -8,9 +8,9 @@
 .DS_Store
 
 # このリポジトリ自身をプロジェクトとして開いた時の設定（色・アイコン等）。
-# `.shirushi/settings.json` は仕様上はリポジトリ共有（チームで色を揃える）だが、
+# `.necoder/settings.json` は仕様上はリポジトリ共有（チームで色を揃える）だが、
 # 開発リポジトリでは各自の好みなので追跡しない。todos.md は共有したければ追跡できる。
-/.shirushi/settings.json
+/.necoder/settings.json
 
 # マスコット動画パイプラインの重い中間物（mp4・抽出フレーム。再生成可能なので追跡しない）
 # 最終スプライトは crates/agent_panel/assets/mascot/ に、参照用の縮小スプライトは vid-*/ に残す

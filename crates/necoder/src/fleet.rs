@@ -19,7 +19,7 @@ fn unix_ms() -> i64 {
 }
 
 fn open_storage() -> Result<Storage> {
-    let path = std::env::var("SHIRUSHI_DB")
+    let path = std::env::var("NECODER_DB")
         .map(PathBuf::from)
         .ok()
         .or_else(storage::default_db_path)
@@ -78,14 +78,14 @@ pub(crate) fn parse_phase(value: &str) -> Result<TaskPhase> {
 }
 
 /// 起動中 GUI への IPC（P5・1 接続 1 リクエスト・1 行 JSON）。GUI が居なければ明確なエラー。
-/// 守るべき操作（spawn/send）はこの経路 = Shirushi の CLI/MCP にだけ置く（計画 §0-8）。
+/// 守るべき操作（spawn/send）はこの経路 = necoder の CLI/MCP にだけ置く（計画 §0-8）。
 pub(crate) fn gui_request(method: &str, params: Value) -> Result<Value> {
     use std::io::{BufRead as _, BufReader, Write as _};
     let socket_path = workspace::control_socket_path()
         .context("GUI socket の場所が決められません（HOME が無い）")?;
     let mut stream = std::os::unix::net::UnixStream::connect(&socket_path).with_context(|| {
         format!(
-            "GUI が起動していません（{} に接続できない）。Shirushi を開いてから実行してください",
+            "GUI が起動していません（{} に接続できない）。necoder を開いてから実行してください",
             socket_path.display()
         )
     })?;
@@ -500,7 +500,7 @@ fn print_record(record: &TaskSpaceRecord) {
     );
 }
 
-/// `shirushi fleet …` を処理したら true。GUI は開かない。
+/// `necoder fleet …` を処理したら true。GUI は開かない。
 pub(crate) fn run_cli() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) != Some("fleet") {
@@ -524,7 +524,7 @@ pub(crate) fn run_cli() -> bool {
                 update_task(id, phase, args.get(4).map(String::as_str))
                     .map(|record| print_record(&record))
             }),
-            _ => Err(anyhow::anyhow!("使い方: shirushi fleet status <task-id> <phase> [summary]")),
+            _ => Err(anyhow::anyhow!("使い方: necoder fleet status <task-id> <phase> [summary]")),
         },
         Some("wait") => match (args.get(2), args.get(3)) {
             (Some(id), Some(target)) => {
@@ -539,13 +539,13 @@ pub(crate) fn run_cli() -> bool {
                 }
             }
             _ => Err(anyhow::anyhow!(
-                "使い方: shirushi fleet wait <task-id> <phase|activity> [timeout-seconds]"
+                "使い方: necoder fleet wait <task-id> <phase|activity> [timeout-seconds]"
             )),
         },
         Some("depend") => match (args.get(2), args.len() > 3) {
             (Some(id), true) => set_depends(id, &args[3..].to_vec())
                 .map(|record| print_record(&record)),
-            _ => Err(anyhow::anyhow!("使い方: shirushi fleet depend <task-id> <depends-on-id...>")),
+            _ => Err(anyhow::anyhow!("使い方: necoder fleet depend <task-id> <depends-on-id...>")),
         },
         Some("wait-deps") => match (args.get(2), args.get(3)) {
             (Some(id), Some(phase)) => parse_phase(phase).and_then(|phase| {
@@ -555,7 +555,7 @@ pub(crate) fn run_cli() -> bool {
                 })
             }),
             _ => Err(anyhow::anyhow!(
-                "使い方: shirushi fleet wait-deps <task-id> <phase> [timeout-seconds]"
+                "使い方: necoder fleet wait-deps <task-id> <phase> [timeout-seconds]"
             )),
         },
         Some("review") => match args.get(2) {
@@ -563,14 +563,14 @@ pub(crate) fn run_cli() -> bool {
                 let root = args.get(3).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
                 review_task(id, &root).map(|record| print_record(&record))
             }
-            None => Err(anyhow::anyhow!("使い方: shirushi fleet review <task-id> [integration-root]")),
+            None => Err(anyhow::anyhow!("使い方: necoder fleet review <task-id> [integration-root]")),
         },
         Some("integrate") => match args.get(2) {
             Some(id) => {
                 let root = args.get(3).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
                 integrate_task(id, &root).map(|record| print_record(&record))
             }
-            None => Err(anyhow::anyhow!("使い方: shirushi fleet integrate <task-id> [integration-root]")),
+            None => Err(anyhow::anyhow!("使い方: necoder fleet integrate <task-id> [integration-root]")),
         },
         // ── ここから GUI ライブ制御（P5・要 GUI 起動） ──
         Some("spawn-agent") => match args.get(2) {
@@ -584,7 +584,7 @@ pub(crate) fn run_cli() -> bool {
                 .map(|result| println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default()))
             }
             None => Err(anyhow::anyhow!(
-                "使い方: shirushi fleet spawn-agent <task-id> [agent] [prompt...]"
+                "使い方: necoder fleet spawn-agent <task-id> [agent] [prompt...]"
             )),
         },
         Some("send") => match (args.get(2), args.len() > 3) {
@@ -593,7 +593,7 @@ pub(crate) fn run_cli() -> bool {
                 json!({ "task_id": id, "message": args[3..].join(" ") }),
             )
             .map(|result| println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default())),
-            _ => Err(anyhow::anyhow!("使い方: shirushi fleet send <task-id> <message...>")),
+            _ => Err(anyhow::anyhow!("使い方: necoder fleet send <task-id> <message...>")),
         },
         Some("digest") => match args.get(2) {
             Some(id) => gui_request("digest", json!({ "task_id": id }))
@@ -612,7 +612,7 @@ pub(crate) fn run_cli() -> bool {
                     })
                 })
                 .map(|result| println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default())),
-            None => Err(anyhow::anyhow!("使い方: shirushi fleet digest <task-id>")),
+            None => Err(anyhow::anyhow!("使い方: necoder fleet digest <task-id>")),
         },
         Some("events") => {
             let since = args.get(2).and_then(|value| value.parse().ok()).unwrap_or(0);
@@ -620,7 +620,7 @@ pub(crate) fn run_cli() -> bool {
                 .map(|result| println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default()))
         }
         _ => Err(anyhow::anyhow!(
-            "使い方: shirushi fleet <create [root] [title] | list [root] | status <id> <phase> [summary] | wait <id> <phase|activity> [seconds] | wait-deps <id> <phase> [seconds] | depend <id> <on...> | review <id> [root] | integrate <id> [root] | spawn-agent <id> [agent] [prompt...] | send <id> <message...> | digest <id> | events [since-id]>"
+            "使い方: necoder fleet <create [root] [title] | list [root] | status <id> <phase> [summary] | wait <id> <phase|activity> [seconds] | wait-deps <id> <phase> [seconds] | depend <id> <on...> | review <id> [root] | integrate <id> [root] | spawn-agent <id> [agent] [prompt...] | send <id> <message...> | digest <id> | events [since-id]>"
         )),
     };
     if let Err(error) = result {

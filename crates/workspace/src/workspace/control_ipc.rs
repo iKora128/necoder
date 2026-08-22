@@ -1,6 +1,6 @@
 //! GUI ライブ制御 IPC（FLEET-CONTROL-PLAN P5・`mcp.rs` 冒頭で予告していた「後続」の本体）。
 //!
-//! 起動中の GUI が Unix socket（`~/.shirushi/gui.sock`・0600）で headless CLI/MCP からの
+//! 起動中の GUI が Unix socket（`~/.necoder/gui.sock`・0600）で headless CLI/MCP からの
 //! 制御を受ける。これで **spawn の断絶**（`fleet_create_task` は worktree を作るだけで
 //! エージェントを起こせない）が解消し、監督（P6）が編隊を実際に動かせるようになる。
 //!
@@ -13,7 +13,7 @@
 //! - accept ループは std スレッド。**I/O はしない**（task_id をそのまま UI へ渡し、UI 側は
 //!   メモリで解決 → 足りない時だけ background executor + GUI のストレージハンドルで読む。
 //!   Host/DB を UI スレッドで呼ばない規律・ARCHITECTURE §9）。
-//! - 守るべき操作（spawn / send / 遷移）はこの socket = **Shirushi の MCP/CLI にだけ**置く
+//! - 守るべき操作（spawn / send / 遷移）はこの socket = **necoder の MCP/CLI にだけ**置く
 //!   （計画 §0-8。Herdr socket 直叩きは台帳と permission の迂回路になるため作らない）。
 //! - digest は **3 段圧縮**を守る: 事実層 + Tier1（+キャッシュ済み Tier2）のみ。transcript は返さない。
 
@@ -21,14 +21,14 @@ use crate::workspace::*;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-/// GUI 制御 socket のパス（`SHIRUSHI_GUI_SOCK` で差し替え可・テスト用）。
+/// GUI 制御 socket のパス（`NECODER_GUI_SOCK` で差し替え可・テスト用）。
 /// macOS の `SUN_LEN`（~104B）に収まる短いパスであること。
 pub fn control_socket_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("SHIRUSHI_GUI_SOCK") {
+    if let Some(path) = std::env::var_os("NECODER_GUI_SOCK") {
         return Some(PathBuf::from(path));
     }
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".shirushi/gui.sock"))
+    Some(PathBuf::from(home).join(".necoder/gui.sock"))
 }
 
 /// accept スレッド → UI スレッドへ渡す 1 仕事（I/O 前・生パラメータのまま）。

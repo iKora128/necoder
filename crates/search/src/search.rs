@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn search_files_across_temp_files() {
-        let dir = std::env::temp_dir().join(format!("shirushi_search_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("necoder_search_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.rs");

@@ -1,4 +1,4 @@
-//! Shirushi workspace shell.
+//! necoder workspace shell.
 //!
 //! The public surface stays at the crate root while the implementation is split into
 //! feature-owned modules. Keeping this facade small lets callers remain stable during
@@ -7,11 +7,13 @@
 mod persistence;
 mod workspace;
 
+pub mod brand_migration;
 pub mod crash;
 pub mod logging;
 pub mod shell_env;
 pub mod updater;
 
+pub use brand_migration::migrate_legacy_brand_data;
 pub use crash::install_panic_hook;
 pub use logging::redirect_output_for_gui_launch;
 pub use persistence::{load_saved_state, load_state, state_path, RestoredTabs, SavedProject};

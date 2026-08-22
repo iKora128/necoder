@@ -9,7 +9,7 @@ publish = false
 path = "src/host.rs"
 
 [[bin]]
-name = "shirushi-remote-server"
+name = "necoder-remote-server"
 path = "src/bin/remote_server.rs"
 
 [dependencies]

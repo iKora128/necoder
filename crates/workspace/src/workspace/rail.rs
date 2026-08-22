@@ -89,18 +89,18 @@ impl Workspace {
             .is_remote()
             .then(|| slot.worktree.host().display_name().to_string());
         match &remote_key {
-            // ローカルは従来どおり `.shirushi/settings.json` へ（リポジトリ共有・チーム寄り）。
+            // ローカルは従来どおり `.necoder/settings.json` へ（リポジトリ共有・チーム寄り）。
             None => {
-                let settings_path = slot.worktree.root().join(".shirushi/settings.json");
+                let settings_path = slot.worktree.root().join(".necoder/settings.json");
                 if let Err(error) = settings_core::persist_user_value(
                     &settings_path,
                     "color",
                     serde_json::Value::String(hex.to_string()),
                 ) {
-                    eprintln!(".shirushi への色の保存に失敗: {error:#}");
+                    eprintln!(".necoder への色の保存に失敗: {error:#}");
                 }
             }
-            // リモートは `.shirushi` がリモート側にあり使えないので、手動色をローカル DB に焼く（M13 #3b・再接続で復元）。
+            // リモートは `.necoder` がリモート側にあり使えないので、手動色をローカル DB に焼く（M13 #3b・再接続で復元）。
             Some(key) => {
                 if let (Some(storage), Ok(value)) = (
                     self.persistence.storage.clone(),

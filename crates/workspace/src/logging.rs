@@ -4,12 +4,12 @@
 //! Finder / Dock から起動した .app は stderr が /dev/null に落ち、パニックしない不具合
 //! （SSH 接続失敗・ACP ハンドシェイク失敗など）でユーザーが添付できるものが何も無い。
 //! そこで **出力の行き先が /dev/null のときだけ** dup2 でログファイルへ差し替える。
-//! tty（ターミナル起動）と pipe（SHIRUSHI_* プローブの捕捉・MCP の stdio）は素通し
+//! tty（ターミナル起動）と pipe（NECODER_* プローブの捕捉・MCP の stdio）は素通し
 //! ＝開発フロー・プロトコルチャネルの挙動を一切変えない。将来 tracing 等へ載せ替える
 //! 場合もこの層の内側で済む（呼び出しは main() 冒頭の 1 箇所）。
 //!
-//! 置き場: `~/Library/Application Support/Shirushi/logs/shirushi-<unix秒>-<pid>.log`
-//! （`SHIRUSHI_LOG_DIR` で差し替え・crash.rs の crashes/ と同じ並び・新しい 20 本だけ保持）。
+//! 置き場: `~/Library/Application Support/necoder/logs/necoder-<unix秒>-<pid>.log`
+//! （`NECODER_LOG_DIR` で差し替え・crash.rs の crashes/ と同じ並び・新しい 20 本だけ保持）。
 
 use std::path::PathBuf;
 
@@ -17,14 +17,14 @@ use std::path::PathBuf;
 #[cfg(unix)]
 const KEEP_LOGS: usize = 20;
 
-/// ログの置き場。テスト・offscreen 検証は `SHIRUSHI_LOG_DIR` で差し替える。
+/// ログの置き場。テスト・offscreen 検証は `NECODER_LOG_DIR` で差し替える。
 #[cfg(unix)]
 pub fn log_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("SHIRUSHI_LOG_DIR") {
+    if let Some(dir) = std::env::var_os("NECODER_LOG_DIR") {
         return Some(PathBuf::from(dir));
     }
     let home = std::env::var_os("HOME")?;
-    Some(std::path::Path::new(&home).join("Library/Application Support/Shirushi/logs"))
+    Some(std::path::Path::new(&home).join("Library/Application Support/necoder/logs"))
 }
 
 /// Finder/Dock 起動（stderr の行き先が /dev/null）のときだけ stdout/stderr をログへ
@@ -32,7 +32,7 @@ pub fn log_dir() -> Option<PathBuf> {
 /// 同じログに残る。付け替えたときはログパスを返す。
 #[cfg(unix)]
 pub fn redirect_output_for_gui_launch() -> Option<PathBuf> {
-    if std::env::var_os("SHIRUSHI_NO_LOG_REDIRECT").is_some() {
+    if std::env::var_os("NECODER_NO_LOG_REDIRECT").is_some() {
         return None;
     }
     // stderr を誰か（tty / pipe / ファイル）が見ているなら何もしない。
@@ -46,7 +46,7 @@ pub fn redirect_output_for_gui_launch() -> Option<PathBuf> {
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
     let path = dir.join(format!(
-        "shirushi-{unix_seconds}-{}.log",
+        "necoder-{unix_seconds}-{}.log",
         std::process::id()
     ));
     let file = std::fs::OpenOptions::new()
@@ -64,7 +64,7 @@ pub fn redirect_output_for_gui_launch() -> Option<PathBuf> {
     }
     drop(file); // dup2 済み＝元の fd は閉じてよい
     eprintln!(
-        "Shirushi v{} ({} {}) — GUI 起動ログ開始",
+        "necoder v{} ({} {}) — GUI 起動ログ開始",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -97,7 +97,7 @@ fn fd_points_to_dev_null(fd: libc::c_int) -> bool {
     }
 }
 
-/// 新しい KEEP_LOGS 本だけ残す。`shirushi-<unix秒>-<pid>.log` は unix 秒が 10 桁で
+/// 新しい KEEP_LOGS 本だけ残す。`necoder-<unix秒>-<pid>.log` は unix 秒が 10 桁で
 /// 辞書順 = 時刻順になる（crash.rs の prune と同じ方針・対象外の名前は触らない）。
 #[cfg(unix)]
 fn prune_old_logs(dir: &std::path::Path) {
@@ -110,7 +110,7 @@ fn prune_old_logs(dir: &std::path::Path) {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("shirushi-") && name.ends_with(".log"))
+                .is_some_and(|name| name.starts_with("necoder-") && name.ends_with(".log"))
         })
         .collect();
     if logs.len() <= KEEP_LOGS {
@@ -141,11 +141,11 @@ mod tests {
 
     #[test]
     fn prune_keeps_newest_logs_and_ignores_other_files() {
-        let dir = std::env::temp_dir().join(format!("shirushi-log-prune-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("necoder-log-prune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for index in 0..(KEEP_LOGS + 5) {
-            let path = dir.join(format!("shirushi-{:010}-1.log", 1_700_000_000 + index));
+            let path = dir.join(format!("necoder-{:010}-1.log", 1_700_000_000 + index));
             std::fs::write(&path, "x").unwrap();
         }
         let other = dir.join("notes.txt");
@@ -159,13 +159,13 @@ mod tests {
         assert_eq!(remaining, KEEP_LOGS);
         assert!(other.exists(), "対象外ファイルは消さない");
         assert!(
-            !dir.join(format!("shirushi-{:010}-1.log", 1_700_000_000))
+            !dir.join(format!("necoder-{:010}-1.log", 1_700_000_000))
                 .exists(),
             "最古が消える"
         );
         assert!(
             dir.join(format!(
-                "shirushi-{:010}-1.log",
+                "necoder-{:010}-1.log",
                 1_700_000_000 + KEEP_LOGS + 4
             ))
             .exists(),

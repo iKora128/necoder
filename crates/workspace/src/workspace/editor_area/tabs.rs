@@ -274,9 +274,9 @@ impl Workspace {
                 }
             })
             .unwrap_or((None, None));
-        // 開発用: SHIRUSHI_TERM_ECHO="text" で起動時に text を表示してから shell へ
+        // 開発用: NECODER_TERM_ECHO="text" で起動時に text を表示してから shell へ
         // （file:line リンクの下線描画をオフスクリーン検証するためのフック・M13）。
-        let shell = match std::env::var("SHIRUSHI_TERM_ECHO") {
+        let shell = match std::env::var("NECODER_TERM_ECHO") {
             Ok(text) if !text.is_empty() && shell.is_none() => Some((
                 "/bin/sh".to_string(),
                 vec!["-c".to_string(), format!("echo '{text}'; exec zsh -f")],

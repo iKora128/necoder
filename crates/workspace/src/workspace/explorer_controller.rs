@@ -712,7 +712,7 @@ impl Workspace {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Shirushi".into()),
+                    title: Some("necoder".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(13.0), px(13.0))),
                 }),
@@ -887,7 +887,7 @@ impl Workspace {
         // settings の実効化（M10-13）: font_size/tab_size/soft_wrap を適用（live 変更は observe_global）。
         {
             let current = settings::get(cx);
-            let soft_wrap = current.soft_wrap || std::env::var_os("SHIRUSHI_SOFT_WRAP").is_some();
+            let soft_wrap = current.soft_wrap || std::env::var_os("NECODER_SOFT_WRAP").is_some();
             let (font_size, tab_size) = (current.font_size, current.tab_size);
             editor.update(cx, |view, cx| {
                 view.set_typography(font_size, tab_size, cx);
@@ -935,8 +935,8 @@ impl Workspace {
             // 既知の診断があれば即反映。
             self.push_active_diagnostics(cx);
         }
-        // 開発用: SHIRUSHI_SPLIT=1 で右分割ペインを開いた状態で撮る。
-        if self.split_editor.is_none() && std::env::var_os("SHIRUSHI_SPLIT").is_some() {
+        // 開発用: NECODER_SPLIT=1 で右分割ペインを開いた状態で撮る。
+        if self.split_editor.is_none() && std::env::var_os("NECODER_SPLIT").is_some() {
             self.toggle_split(&SplitRight, window, cx);
         }
         self.save_state();

@@ -54,7 +54,7 @@ representing the community in public spaces.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported privately to the maintainer ([@iKora128](https://github.com/iKora128))
-— for sensitive reports use [GitHub's private reporting](https://github.com/iKora128/shirushi/security/advisories/new).
+— for sensitive reports use [GitHub's private reporting](https://github.com/iKora128/necoder/security/advisories/new).
 All complaints will be reviewed and investigated promptly and fairly. The
 maintainer is obligated to respect the privacy and security of the reporter.
 

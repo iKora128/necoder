@@ -1,4 +1,4 @@
-# Shirushi 用語集（GLOSSARY）
+# necoder 用語集（GLOSSARY）
 
 **機能と場所の「正規名」の唯一の正。** 1 概念 = 1 正規名を **code / 日本語UI / 英語UI** の3列で固定する。
 実装・i18n・docs がここと乖離したら、**この表へ寄せる**（新しい UI 文字列や識別子はまずここを見る）。
@@ -51,6 +51,7 @@
 | **下段ドック**（Fleet 下の可変高タブ面） | `FleetBottomView` / `bottom_height` | 下段 | Bottom pane |
 | **AI 全画面**（solo で中央エディタを Agent に差し替える。左/下ドックは各自の ON/OFF） | `agent_full_screen` / `ToggleAgentFullScreen` | AI を全画面 | AI full screen |
 | **「最新へ」ボタン**（transcript を遡り中だけ右下に出る・最下部へ戻す） | `render_jump_to_latest` | 最新へ | Jump to latest |
+| **整形プレビュー**（`.md` を rendered 表示。source ⇄ rendered トグル・⌘⇧V） | `rendered_markdown` / `ToggleRenderedMarkdown` / `markdown_preview` | 整形プレビュー | Rendered preview |
 
 > 日本語で「Fleet」を「編隊」と表記したくなったら、UI 文字列のここだけ差し替える（概念名は Fleet で固定）。
 

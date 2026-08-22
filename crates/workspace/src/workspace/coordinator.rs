@@ -5,8 +5,8 @@
 //! - 住まい = IntegrationSpace の AgentPanel 内の pinned thread「監督」（名前で再利用）。
 //! - **wake はイベント駆動**（常駐ポーリング禁止）: Task の Done/Failed 遷移で即時・Blocked は
 //!   15s 閾値（マスコット worry と同じ）で「まだ待っているか」を確かめてから 1 ターン渡す。
-//! - 道具 = `shirushi fleet` CLI（監督のエージェントは自分の shell で実行する。守るべき操作を
-//!   Shirushi の CLI/MCP にだけ置く原則 §0-8 と両立 — Herdr 直叩きの迂回路は与えない）。
+//! - 道具 = `necoder fleet` CLI（監督のエージェントは自分の shell で実行する。守るべき操作を
+//!   necoder の CLI/MCP にだけ置く原則 §0-8 と両立 — Herdr 直叩きの迂回路は与えない）。
 //! - integrate は radar clean + **人間 gate**（監督は提案まで・テンプレートで明示）。
 //! - 采配の監査 = 監督ターンの完了を `coordinator` イベントとして task_events + ニュースへ
 //!   （丸チップ・NewsKind::Coordinator）。
@@ -43,14 +43,14 @@ impl Workspace {
         let panel = session.agent_panel.clone();
         let exe = std::env::current_exe()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "shirushi".to_string());
+            .unwrap_or_else(|_| "necoder".to_string());
         let digest_line = digest
             .as_ref()
             .map(|digest| format!(" — {digest}"))
             .unwrap_or_default();
         // 役割・規律・道具のテンプレート + 変化分の digest（フル transcript は渡さない＝3 段圧縮）。
         let prompt = format!(
-            "あなたは Shirushi 編隊の監督（coordinator）です。\n\
+            "あなたは necoder 編隊の監督（coordinator）です。\n\
              役割: 状況を読み、次の采配を決めて fleet CLI で指示する。\n\
              規律: 自分ではコードを書かない・手を動かさない（指示と采配のみ）。\
              integrate の最終承認は人間（あなたは `fleet review` で radar を確認して提案するまで）。\n\

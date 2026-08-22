@@ -152,13 +152,13 @@ pub struct TaskEventRecord {
 /// 既定の DB パス（macOS）。state.json と同じディレクトリ。
 pub fn default_db_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/Shirushi/shirushi.db"))
+    Some(PathBuf::from(home).join("Library/Application Support/necoder/necoder.db"))
 }
 
 /// 既定の blob ディレクトリ（checkpoint の content-addressed 本体・M12-2）。
 pub fn default_blobs_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/Shirushi/blobs"))
+    Some(PathBuf::from(home).join("Library/Application Support/necoder/blobs"))
 }
 
 /// 内容を SHA-256 で blob へ書く（既にあれば書かない = 重複排除）。hash（hex）を返す。
@@ -270,7 +270,7 @@ impl Storage {
         let (sender, receiver) = mpsc::channel::<Job>();
         let (ready_sender, ready_receiver) = mpsc::channel::<Result<()>>();
         std::thread::Builder::new()
-            .name("shirushi-storage".into())
+            .name("necoder-storage".into())
             .spawn(move || {
                 let opened = futures::executor::block_on(async {
                     let db = turso::Builder::new_local(path.to_string_lossy().as_ref())
@@ -1034,7 +1034,7 @@ impl Storage {
         })
     }
 
-    // ── ホスト別の窓色（M13・リモートの色をローカルに保持。`.shirushi` はリモート側にあり identity には使えない） ──
+    // ── ホスト別の窓色（M13・リモートの色をローカルに保持。`.necoder` はリモート側にあり identity には使えない） ──
 
     /// リモートホスト（ssh 別名や `ssh://…` 識別子）に割り当てた窓色（0xRRGGBB）を読む。無ければ None。
     pub fn host_color(&self, host: &str) -> Result<Option<u32>> {
@@ -1512,7 +1512,7 @@ mod tests {
 
     fn temp_db(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "shirushi_storage_{}_{}.db",
+            "necoder_storage_{}_{}.db",
             tag,
             std::process::id()
         ))
@@ -1676,7 +1676,7 @@ mod tests {
         // 未登録は空。
         assert!(storage.recent_local_projects().unwrap().is_empty());
         storage
-            .record_local_project("/Users/d/Work/shirushi", "shirushi")
+            .record_local_project("/Users/d/Work/necoder", "necoder")
             .unwrap();
         storage
             .record_local_project("/Users/d/Work/blog", "blog")
@@ -1685,16 +1685,16 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert!(recent
             .iter()
-            .any(|row| row.0 == "/Users/d/Work/shirushi" && row.1 == "shirushi"));
+            .any(|row| row.0 == "/Users/d/Work/necoder" && row.1 == "necoder"));
         // 同じ path を再記録 → 件数は増えず name/opened_at だけ更新（upsert）。
         storage
-            .record_local_project("/Users/d/Work/shirushi", "しるし")
+            .record_local_project("/Users/d/Work/necoder", "necoder")
             .unwrap();
         let recent2 = storage.recent_local_projects().unwrap();
         assert_eq!(recent2.len(), 2);
         assert!(recent2
             .iter()
-            .any(|row| row.0 == "/Users/d/Work/shirushi" && row.1 == "しるし"));
+            .any(|row| row.0 == "/Users/d/Work/necoder" && row.1 == "necoder"));
 
         // forget: local スコープは local_projects から消え、remote には触れない。
         storage
@@ -1761,7 +1761,7 @@ mod tests {
                 "t1",
                 "rope設計",
                 0,
-                "shirushi",
+                "necoder",
                 Some("main"),
                 Some("Codex"),
                 Some("claude"),
@@ -1776,7 +1776,7 @@ mod tests {
                 "t1",
                 "rope設計（改名）",
                 0,
-                "shirushi",
+                "necoder",
                 Some("main"),
                 Some("Codex"),
                 Some("claude"),
@@ -1897,7 +1897,7 @@ mod tests {
                 "t1",
                 "生きてる",
                 0,
-                "shirushi",
+                "necoder",
                 Some("main"),
                 Some("Codex"),
                 Some("claude"),
@@ -1938,7 +1938,7 @@ mod tests {
     #[test]
     fn checkpoint_round_trip_with_dedup() {
         let path = temp_db("checkpoint");
-        let blobs = std::env::temp_dir().join(format!("shirushi_blobs_{}", std::process::id()));
+        let blobs = std::env::temp_dir().join(format!("necoder_blobs_{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&blobs);
         let storage = Storage::open(&path).unwrap();

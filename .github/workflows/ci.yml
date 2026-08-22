@@ -46,7 +46,7 @@ jobs:
           sudo apt-get install -y libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev \
             libxcb1-dev libzstd-dev libasound2-dev libfontconfig1-dev libssl-dev
       - name: Check（ビルド可否のみ）
-        run: cargo check -p shirushi
+        run: cargo check -p necoder
 
   build-remote-server:
     runs-on: ubuntu-latest
@@ -64,9 +64,9 @@ jobs:
         run: |
           pip install ziglang cargo-zigbuild
           rustup target add ${{ matrix.target }}
-      - name: Build shirushi-remote-server
-        run: cargo zigbuild -p host --bin shirushi-remote-server --release --target ${{ matrix.target }}
+      - name: Build necoder-remote-server
+        run: cargo zigbuild -p host --bin necoder-remote-server --release --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
-          name: shirushi-remote-server-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/shirushi-remote-server
+          name: necoder-remote-server-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/necoder-remote-server

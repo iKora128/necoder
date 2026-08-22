@@ -1,16 +1,16 @@
-# Remote SSH 2026 — Shirushi 実装方針
+# Remote SSH 2026 — necoder 実装方針
 
 調査日: 2026-07-13
 
 ## 結論
 
-Shirushi の Remote SSH は、リモートファイルを SFTP でローカルへ見せる機能ではない。
+necoder の Remote SSH は、リモートファイルを SFTP でローカルへ見せる機能ではない。
 **ローカル UI + SSH transport + リモート常駐サーバー**の分散エディタとして作る。
 
 ```
 local                                              remote
 ┌──────────────────────────┐      OpenSSH       ┌──────────────────────────┐
-│ GPUI / input / clipboard │◀──────────────────▶│ shirushi-remote-server   │
+│ GPUI / input / clipboard │◀──────────────────▶│ necoder-remote-server   │
 │ tree-sitter / theme / UI │  length-framed RPC │ worktree + watcher       │
 │ dirty buffer backup      │                    │ file I/O + search + Git  │
 │ SSH config / credentials │                    │ LSP + PTY + tasks + ACP  │
@@ -83,11 +83,11 @@ sleep/VPN 復帰、再接続 token、複数接続モードが実運用の主要�
 transport は独自 SSH library ではなく system OpenSSH を使う。`ControlMaster` は1本の暗号化接続上で
 複数 session を共有できる。`ControlPath` は `%C` 相当で接続を一意化し、他ユーザーが書けない
 ディレクトリへ置く必要がある。`ServerAliveInterval` は protocol-level keepalive で、既定は無効。
-Shirushi 自身の application heartbeat と役割を分ける。
+necoder 自身の application heartbeat と役割を分ける。
 
 - [OpenSSH ssh_config(5)](https://man.openbsd.org/ssh_config)
 
-## Shirushi の境界
+## necoder の境界
 
 ### ローカルに残す
 
@@ -134,14 +134,14 @@ v1 から次を満たす。
 - protocol の stdout と server log の stderr を分離する。
 - path request は open 済み worktree に scope する。`..` と不正な absolute path を拒否する。
 
-Protobuf は Zed 規模では有効だが v1 の必須条件ではない。Shirushi は versioned JSON header + raw body で
+Protobuf は Zed 規模では有効だが v1 の必須条件ではない。necoder は versioned JSON header + raw body で
 開始し、wire codec を1 crateへ閉じ込める。型と frame 境界を守れば後から Protobuf/postcard へ交換できる。
 
 ## 接続と再接続
 
 1. system `ssh` で ControlMaster を作る。host key 確認や鍵 passphrase は UI askpass へ中継する。
 2. remote OS/arch/shell/server version を検出する。
-3. 一致する static server を `~/.local/share/shirushi/remote/servers/<version>/` へ配備する。
+3. 一致する static server を `~/.local/share/necoder/remote/servers/<version>/` へ配備する。
    remote download と local download + SFTP/SCP upload の両方を用意する。
 4. `proxy --session <random-256-bit-id>` を起動する。daemon が無ければ開始し、あれば再接続する。
 5. 5 秒の application heartbeat、jitter 付き exponential backoff、手動 retry/cancel を実装する。
@@ -153,7 +153,7 @@ user、port、ssh config、ProxyJump と主要 option を含める。port forwar
 ## セキュリティ
 
 - `StrictHostKeyChecking=no` を設定しない。OpenSSH 既定の ask/known_hosts を尊重する。
-- user が入力した SSH option は allowlist parser を通す。Shirushi が所有する `-M/-S/-T/-N/-O` を上書きさせない。
+- user が入力した SSH option は allowlist parser を通す。necoder が所有する `-M/-S/-T/-N/-O` を上書きさせない。
 - shell command は文字列連結しない。固定 bootstrap 以外は RPC 後に server の process API で argv として渡す。
 - control socket directory は owner only。session id は十分な entropy を持たせ、ログへ出さない。
 - agent forwarding (`-A`) と remote port forwarding (`-R`) は明示 opt-in。

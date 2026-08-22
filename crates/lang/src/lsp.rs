@@ -99,7 +99,7 @@ fn find_executable(binary: &str) -> Option<PathBuf> {
 }
 
 fn rust_analyzer_path() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("SHIRUSHI_RUST_ANALYZER") {
+    if let Some(explicit) = std::env::var_os("NECODER_RUST_ANALYZER") {
         let path = PathBuf::from(explicit);
         if path.exists() {
             return Some(path);

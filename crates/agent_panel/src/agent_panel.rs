@@ -53,8 +53,6 @@ use std::sync::Arc;
 use theme_core::{claude_bullet, thread_color, Theme};
 use ui::{DraggedFile, Tooltip};
 
-mod markdown;
-
 actions!(agent, [SubmitPrompt, CloseActiveThread]);
 
 /// ドラッグ中のスレッドタブのゴースト（Chrome 風の並べ替え用。ポインタに追従する小チップ）。
@@ -942,7 +940,7 @@ pub enum PanelEvent {
     ToggleFullScreenRequest,
 }
 
-/// エージェントスレッドの状態（herdr の 5 状態を Shirushi 流にマップ・#）。**色相は状態に使わない**
+/// エージェントスレッドの状態（herdr の 5 状態を necoder 流にマップ・#）。**色相は状態に使わない**
 /// （UI-SPEC §1.3「色＝識別」）。ドット/beacon は常にスレッド識別色で、状態は形（リング/グリフ）で見せる。
 /// ロールアップ（フッター・レール・⌘O）はこれを最重要（Blocked>Working>Done>Idle）で畳む。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1496,8 +1494,8 @@ impl AgentPanel {
             }
         })
         .detach();
-        // 開発用: SHIRUSHI_ACP_PROBE があれば、少し待って空スレッドへ自動送信（実機ストリーミングの自己検証）。
-        if let Ok(probe) = std::env::var("SHIRUSHI_ACP_PROBE") {
+        // 開発用: NECODER_ACP_PROBE があれば、少し待って空スレッドへ自動送信（実機ストリーミングの自己検証）。
+        if let Ok(probe) = std::env::var("NECODER_ACP_PROBE") {
             if !probe.trim().is_empty() {
                 cx.spawn(async move |panel, cx| {
                     cx.background_executor()
@@ -1507,9 +1505,9 @@ impl AgentPanel {
                         .update(cx, |panel, cx| {
                             panel.switch_thread(1, cx); // 種の無い空スレッドへ（応答が先頭で見える）
                             panel.send_prompt_text(probe, cx);
-                            // 開発用: SHIRUSHI_OPEN_MENU=model|effort|mode|agent でセレクタを開いて撮る
+                            // 開発用: NECODER_OPEN_MENU=model|effort|mode|agent でセレクタを開いて撮る
                             // （広告設定が届くと再描画され実選択肢が出る）。
-                            if let Ok(which) = std::env::var("SHIRUSHI_OPEN_MENU") {
+                            if let Ok(which) = std::env::var("NECODER_OPEN_MENU") {
                                 let selector = match which.trim() {
                                     "model" => Some(Selector::Model),
                                     "effort" => Some(Selector::Effort),
@@ -1527,8 +1525,8 @@ impl AgentPanel {
                 .detach();
             }
         }
-        // 開発用: SHIRUSHI_TRANSCRIPT_SEL_PROBE=1 で transcript 選択を注入（M13 の描画+コピー検証）。
-        if std::env::var("SHIRUSHI_TRANSCRIPT_SEL_PROBE").is_ok_and(|value| value == "1") {
+        // 開発用: NECODER_TRANSCRIPT_SEL_PROBE=1 で transcript 選択を注入（M13 の描画+コピー検証）。
+        if std::env::var("NECODER_TRANSCRIPT_SEL_PROBE").is_ok_and(|value| value == "1") {
             cx.spawn(async move |panel, cx| {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(1200))
@@ -1561,15 +1559,15 @@ impl AgentPanel {
             })
             .detach();
         }
-        // 開発用: SHIRUSHI_COMPOSER_PROBE="<text>" で composer に下書きを流し込む（折り返し等の描画検証）。
-        if let Ok(text) = std::env::var("SHIRUSHI_COMPOSER_PROBE") {
+        // 開発用: NECODER_COMPOSER_PROBE="<text>" で composer に下書きを流し込む（折り返し等の描画検証）。
+        if let Ok(text) = std::env::var("NECODER_COMPOSER_PROBE") {
             if !text.is_empty() {
                 composer.update(cx, |composer, cx| composer.set_plain_text(&text, cx));
             }
         }
-        // 開発用: SHIRUSHI_PLAN_PROBE=1 で実行プランを直接注入（M12-9 常設チェックリストの描画検証。
+        // 開発用: NECODER_PLAN_PROBE=1 で実行プランを直接注入（M12-9 常設チェックリストの描画検証。
         // 実 ACP を起動せずに ●/☒/☐ の 3 状態が出ることをオフスクリーンで確かめる）。
-        if std::env::var("SHIRUSHI_PLAN_PROBE").is_ok_and(|value| value == "1") {
+        if std::env::var("NECODER_PLAN_PROBE").is_ok_and(|value| value == "1") {
             cx.spawn(async move |panel, cx| {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(400))
@@ -1608,8 +1606,8 @@ impl AgentPanel {
         for thread in &mut threads {
             apply_thread_defaults(thread, cx);
         }
-        // 開発用: SHIRUSHI_TABS_PROBE=<n> でタブを n 枚まで水増しし、横スクロール（溢れ挙動）を検証する。
-        if let Ok(count) = std::env::var("SHIRUSHI_TABS_PROBE") {
+        // 開発用: NECODER_TABS_PROBE=<n> でタブを n 枚まで水増しし、横スクロール（溢れ挙動）を検証する。
+        if let Ok(count) = std::env::var("NECODER_TABS_PROBE") {
             if let Ok(count) = count.trim().parse::<usize>() {
                 while threads.len() < count {
                     let index = threads.len();
@@ -1620,11 +1618,11 @@ impl AgentPanel {
             }
         }
         // 初期表示は末尾（最新）を見せる（スクロール化 M13 での回帰防止）。
-        // 開発用: SHIRUSHI_SCROLL_TOP で先頭のまま（transcript 上部＝Thinking 等の目視撮影用）。
+        // 開発用: NECODER_SCROLL_TOP で先頭のまま（transcript 上部＝Thinking 等の目視撮影用）。
         let initial_item_count = threads.first().map_or(1, |thread| thread.entries.len());
         let transcript_list = ListState::new(initial_item_count, ListAlignment::Top, px(800.));
         transcript_list.set_follow_mode(FollowMode::Tail);
-        if std::env::var_os("SHIRUSHI_SCROLL_TOP").is_none() {
+        if std::env::var_os("NECODER_SCROLL_TOP").is_none() {
             transcript_list.scroll_to_end();
         }
         let syntax_cache = Rc::new(RefCell::new(SyntaxHighlightCache::default()));
@@ -1839,7 +1837,7 @@ impl AgentPanel {
         }
         self.storage = Some(storage);
         self.storage_scope = scope;
-        if std::env::var_os("SHIRUSHI_SCROLL_TOP").is_none() {
+        if std::env::var_os("NECODER_SCROLL_TOP").is_none() {
             self.reset_transcript_list(true); // 復元直後も末尾（最新）を見せる
         }
         cx.notify();
@@ -2926,7 +2924,7 @@ impl AgentPanel {
     /// 開発用: 複数スレッドに各状態（Working/Blocked/Done/中断 Done）を仕込む（offscreen で
     /// タブ・List・beacon・フッター・レール・⌘O の状態表示を1枚で検証する・#）。
     #[cfg(debug_assertions)]
-    /// 開発用: 管制タブの受入シナリオ（P3・`SHIRUSHI_CONTROL_PROBE`）。Task パネル（1 thread）へ
+    /// 開発用: 管制タブの受入シナリオ（P3・`NECODER_CONTROL_PROBE`）。Task パネル（1 thread）へ
     /// Working/Blocked/Done/Failed/Idle の代表状態を digest 素材つきで仕込む。
     #[cfg(debug_assertions)]
     pub fn debug_set_state(&mut self, style: u8, cx: &mut Context<Self>) {
@@ -2943,7 +2941,7 @@ impl AgentPanel {
                 thread.tokens_shown = 42_100.0;
                 thread.entries.push(Entry::Step {
                     id: None,
-                    tool: "Bash(cargo test -p shirushi)".into(),
+                    tool: "Bash(cargo test -p necoder)".into(),
                     args: SharedString::default(),
                     result: None,
                     diffs: Vec::new(),
@@ -2985,7 +2983,7 @@ impl AgentPanel {
                     diffs: Vec::new(),
                     // Diff 無しツールの実引数表示（tool poisoning 対策）を描画検証で写すためのデモ値。
                     raw_input: Some(SharedString::from(
-                        "{\n  \"command\": \"cargo publish\",\n  \"cwd\": \"/Users/daichi/Work/experience/shirushi\"\n}",
+                        "{\n  \"command\": \"cargo publish\",\n  \"cwd\": \"/Users/daichi/Work/experience/necoder\"\n}",
                     )),
                     options: vec![
                         PermissionChoice {
@@ -3040,7 +3038,7 @@ impl AgentPanel {
                     thread.turn_started_at = Some(std::time::Instant::now());
                     thread.entries.push(Entry::Step {
                         id: None,
-                        tool: "Bash cargo test -p shirushi".into(),
+                        tool: "Bash cargo test -p necoder".into(),
                         args: SharedString::default(),
                         result: None,
                         diffs: Vec::new(),
@@ -3527,7 +3525,7 @@ impl AgentPanel {
     }
 
     /// prompt テキストをアクティブスレッドへ積み、常駐 ACP セッションへ送る（composer 非依存）。
-    /// 開発時の自動プローブ（`SHIRUSHI_ACP_PROBE`）からも使う。
+    /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
     pub fn send_prompt_text(&mut self, prompt: String, cx: &mut Context<Self>) {
         let thread_index = self.active;
         // 添付コンテキストを prompt 先頭へ `@path` として付ける（表示は素の prompt のまま）。
@@ -3922,7 +3920,7 @@ impl AgentPanel {
                     }
                     files_touched = Some((files, thread.color));
                 }
-                let auto_allow = std::env::var_os("SHIRUSHI_AUTO_ALLOW").is_some();
+                let auto_allow = std::env::var_os("NECODER_AUTO_ALLOW").is_some();
                 let auto_choice = options
                     .iter()
                     .position(|option| {
@@ -4913,7 +4911,7 @@ impl AgentPanel {
 
     fn current_mascot_motion(&self) -> MascotMotion {
         if cfg!(debug_assertions) {
-            if let Ok(value) = std::env::var("SHIRUSHI_MASCOT") {
+            if let Ok(value) = std::env::var("NECODER_MASCOT") {
                 if let Some(motion) = match value.as_str() {
                     "plead" => Some(MascotMotion::Plead),
                     "worry" => Some(MascotMotion::Worry),
@@ -7162,10 +7160,10 @@ impl Render for MascotView {
     }
 }
 
-/// スレッド表示の初期モード。**開発用 `SHIRUSHI_TABS_VIEW` を最優先**（list/bar・スクショ検証用）、
+/// スレッド表示の初期モード。**開発用 `NECODER_TABS_VIEW` を最優先**（list/bar・スクショ検証用）、
 /// 無ければ**保存値**（settings.json の `agent_tabs_view`）、それも無ければ Bar。
 fn initial_tabs_view(setting: &str) -> AgentTabsView {
-    match std::env::var("SHIRUSHI_TABS_VIEW").ok().as_deref() {
+    match std::env::var("NECODER_TABS_VIEW").ok().as_deref() {
         Some("list") => AgentTabsView::List,
         Some("bar") => AgentTabsView::Bar,
         _ if setting == "list" => AgentTabsView::List,
@@ -7719,12 +7717,12 @@ fn thread_from_storage(
 
 /// offscreen 検証プローブはモック transcript（markdown/Step 描画）や複数タブ（ACP_PROBE は添字 1 の
 /// 空スレへ送信・ACTIVITY_PROBE は状態一覧）を前提にする。通常起動では種付けしない（新プロジェクトが
-/// デモ 3 タブで始まる混乱を断つ・2026-08-17）。単独でモックが欲しい時は SHIRUSHI_DEMO_THREADS=1。
+/// デモ 3 タブで始まる混乱を断つ・2026-08-17）。単独でモックが欲しい時は NECODER_DEMO_THREADS=1。
 fn demo_threads_requested() -> bool {
     [
-        "SHIRUSHI_DEMO_THREADS",
-        "SHIRUSHI_ACP_PROBE",
-        "SHIRUSHI_ACTIVITY_PROBE",
+        "NECODER_DEMO_THREADS",
+        "NECODER_ACP_PROBE",
+        "NECODER_ACTIVITY_PROBE",
     ]
     .iter()
     .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
@@ -8040,7 +8038,7 @@ mod tests {
     #[gpui::test]
     fn transcript_focus_dispatches_copy_to_panel(cx: &mut gpui::TestAppContext) {
         let settings_path = std::env::temp_dir().join(format!(
-            "shirushi_agent_copy_{}_{}.json",
+            "necoder_agent_copy_{}_{}.json",
             std::process::id(),
             now_unix_ms()
         ));
@@ -8088,7 +8086,7 @@ mod tests {
 
     fn init_test_settings(cx: &mut gpui::TestAppContext, label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "shirushi_agent_{label}_{}_{}.json",
+            "necoder_agent_{label}_{}_{}.json",
             std::process::id(),
             now_unix_ms()
         ));

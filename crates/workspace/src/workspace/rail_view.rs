@@ -308,7 +308,7 @@ impl Workspace {
                 )
             })
             .when(rail.todos, |element| {
-                // Todo ボード（.shirushi/todos.md・M12-10）。表示中（アクティブ）はプロジェクト色。
+                // Todo ボード（.necoder/todos.md・M12-10）。表示中（アクティブ）はプロジェクト色。
                 let color = if self.todo_panel.read(cx).open {
                     accent
                 } else {

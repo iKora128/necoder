@@ -1,4 +1,4 @@
-# Shirushi Individual Contributor License Agreement (v1.0)
+# necoder Individual Contributor License Agreement (v1.0)
 
 日本語要約（参考・正文は下の英語）: このCLAに署名すると、あなたはコントリビュートの著作権を保持したまま、
 プロジェクトメンテナ（Daichi Nagashima / [@iKora128](https://github.com/iKora128)）に対して、
@@ -9,7 +9,7 @@
 
 ---
 
-Thank you for your interest in contributing to **Shirushi** (the "Project"), maintained by
+Thank you for your interest in contributing to **necoder** (the "Project"), maintained by
 Daichi Nagashima ([@iKora128](https://github.com/iKora128)) (the "Maintainer").
 
 This Contributor License Agreement ("Agreement") documents the rights granted by contributors to the

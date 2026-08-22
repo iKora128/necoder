@@ -1,18 +1,18 @@
-//! mcp — Shirushi の **MCP サーバ**（`shirushi mcp [root]`）。AI エージェント（Claude 等）が
-//! Shirushi のプロジェクトを操作するための口（差別化の核＝AI エージェントネイティブ）。
+//! mcp — necoder の **MCP サーバ**（`necoder mcp [root]`）。AI エージェント（Claude 等）が
+//! necoder のプロジェクトを操作するための口（差別化の核＝AI エージェントネイティブ）。
 //!
 //! transport は MCP 標準の **stdio・改行区切り JSON-RPC**（Content-Length ではない）。同期ループで十分。
 //! 公開ツール: `list_files` / `read_file` / `write_file` / `search` / `git_status`。
-//! `root` は引数（`shirushi mcp <root>`）→無ければ CWD。プロジェクトのファイルを読み書き/検索/差分できる。
+//! `root` は引数（`necoder mcp <root>`）→無ければ CWD。プロジェクトのファイルを読み書き/検索/差分できる。
 //!
 //! 注: 起動中の GUI 窓へ「開く」指示を送るライブ制御は IPC ソケットが要る（後続）。v1 は
-//! プロジェクト（ファイル）レベルの操作に集中する。設定 CLI（`shirushi config`）と同じ「書き手」の一つ。
+//! プロジェクト（ファイル）レベルの操作に集中する。設定 CLI（`necoder config`）と同じ「書き手」の一つ。
 
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-/// `shirushi mcp [root]` を処理したら true（GUI を開かず終了）。
+/// `necoder mcp [root]` を処理したら true（GUI を開かず終了）。
 pub fn run() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) != Some("mcp") {
@@ -65,7 +65,7 @@ fn handle(request: &Value, root: &Path) -> Option<Value> {
             "jsonrpc": "2.0", "id": id,
             "result": {
                 "protocolVersion": "2024-11-05",
-                "serverInfo": { "name": "shirushi", "version": "0.1.0" },
+                "serverInfo": { "name": "necoder", "version": "0.1.0" },
                 "capabilities": { "tools": {} }
             }
         })),
@@ -538,7 +538,7 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         // tag でテスト毎に分ける（cargo test は並列実行なので共有すると削除し合う）。
-        let dir = std::env::temp_dir().join(format!("shirushi_mcp_{}_{}", tag, std::process::id()));
+        let dir = std::env::temp_dir().join(format!("necoder_mcp_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -552,7 +552,7 @@ mod tests {
             &root,
         )
         .unwrap();
-        assert_eq!(init["result"]["serverInfo"]["name"], "shirushi");
+        assert_eq!(init["result"]["serverInfo"]["name"], "necoder");
         let list = handle(
             &json!({ "jsonrpc":"2.0","id":2,"method":"tools/list" }),
             &root,

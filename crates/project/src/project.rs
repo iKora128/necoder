@@ -983,7 +983,7 @@ pub fn inline_rewrite_on(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
-    let temp = PathBuf::from(format!("/tmp/shirushi-inline-{unix_ms}.txt"));
+    let temp = PathBuf::from(format!("/tmp/necoder-inline-{unix_ms}.txt"));
     host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
         .context("インライン編集の一時ファイル作成に失敗")?;
     // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
@@ -1024,7 +1024,7 @@ pub fn inline_command_on(host: &dyn Host, dir: &Path, instruction: &str) -> Resu
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
-    let temp = PathBuf::from(format!("/tmp/shirushi-inline-cmd-{unix_ms}.txt"));
+    let temp = PathBuf::from(format!("/tmp/necoder-inline-cmd-{unix_ms}.txt"));
     host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
         .context("コマンド生成の一時ファイル作成に失敗")?;
     // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
@@ -1087,8 +1087,8 @@ pub fn oneshot_line_on(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
-    let temp = PathBuf::from(format!("/tmp/shirushi-oneshot-{unix_ms}.txt"));
-    let out = PathBuf::from(format!("/tmp/shirushi-oneshot-{unix_ms}.out"));
+    let temp = PathBuf::from(format!("/tmp/necoder-oneshot-{unix_ms}.txt"));
+    let out = PathBuf::from(format!("/tmp/necoder-oneshot-{unix_ms}.out"));
     host.write_file(&temp, input.as_bytes(), host::WriteCondition::Any)
         .context("oneshot の一時ファイル作成に失敗")?;
     let body = template
@@ -1576,7 +1576,7 @@ pub fn hunk_patch_text(
 
 /// パッチを index へ適用する（hunk 単位 stage・M11-10）。パッチは一時ファイル経由（host 汎用）。
 pub fn apply_patch_to_index_on(host: &dyn Host, repo_root: &Path, patch: &str) -> Result<()> {
-    let temp = repo_root.join(".git/shirushi-hunk.patch");
+    let temp = repo_root.join(".git/necoder-hunk.patch");
     host.write_file(&temp, patch.as_bytes(), host::WriteCondition::Any)
         .context("パッチの書き込みに失敗")?;
     let temp_arg = temp.to_string_lossy().to_string();
@@ -1816,7 +1816,7 @@ pub fn watch_root(
         let pump_stop = stop.clone();
         let root = root.to_path_buf();
         std::thread::Builder::new()
-            .name("shirushi-remote-watch-pump".to_string())
+            .name("necoder-remote-watch-pump".to_string())
             .spawn(move || {
                 use std::sync::atomic::Ordering::Acquire;
                 while !pump_stop.load(Acquire) {
@@ -1955,7 +1955,7 @@ mod tests {
 
     #[test]
     fn hunk_stage_round_trip_on_temp_repo() {
-        let dir = std::env::temp_dir().join(format!("shirushi_hunk_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("necoder_hunk_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let run = |args: &[&str]| {
@@ -2013,7 +2013,7 @@ mod tests {
 
     #[test]
     fn file_operations_create_rename_duplicate() {
-        let dir = std::env::temp_dir().join(format!("shirushi_fileops_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("necoder_fileops_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -2044,7 +2044,7 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("shirushi_project_{}_{}", tag, std::process::id()));
+            std::env::temp_dir().join(format!("necoder_project_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -2093,7 +2093,7 @@ mod tests {
         let root = scratch("name");
         std::fs::create_dir_all(&root).unwrap();
         let worktree = Worktree::new(&root).unwrap();
-        assert!(worktree.name().starts_with("shirushi_project_name_"));
+        assert!(worktree.name().starts_with("necoder_project_name_"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2124,7 +2124,7 @@ mod tests {
 
     #[test]
     fn missing_directory_errors() {
-        assert!(Worktree::new("/no/such/dir/shirushi-xyz").is_err());
+        assert!(Worktree::new("/no/such/dir/necoder-xyz").is_err());
     }
 
     #[test]
@@ -2461,12 +2461,12 @@ mod tests {
     #[test]
     fn parse_github_slug_handles_https_and_ssh() {
         assert_eq!(
-            parse_github_slug("https://github.com/iKora128/shirushi.git").as_deref(),
-            Some("iKora128/shirushi")
+            parse_github_slug("https://github.com/iKora128/necoder.git").as_deref(),
+            Some("iKora128/necoder")
         );
         assert_eq!(
-            parse_github_slug("git@github.com:iKora128/shirushi.git").as_deref(),
-            Some("iKora128/shirushi")
+            parse_github_slug("git@github.com:iKora128/necoder.git").as_deref(),
+            Some("iKora128/necoder")
         );
         assert_eq!(
             parse_github_slug("https://github.com/owner/repo").as_deref(),

@@ -8,7 +8,7 @@ pub(crate) enum TodoPanelEvent {
     AddItem { text: String },
 }
 
-/// 1 ProjectSession に属する Todo UI。真実は `.shirushi/todos.md`。
+/// 1 ProjectSession に属する Todo UI。真実は `.necoder/todos.md`。
 pub(crate) struct TodoPanel {
     pub(crate) open: bool,
     pub(crate) items: Vec<project::todos::TodoItem>,

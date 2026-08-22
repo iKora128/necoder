@@ -103,7 +103,7 @@ actions!(
         Rename,
         // ⌘I インライン編集（選択+指示 → その場 diff → accept/reject・M12-8）。
         InlineEdit,
-        // Todo ボード（.shirushi/todos.md・M12-10）。
+        // Todo ボード（.necoder/todos.md・M12-10）。
         ToggleTodoBoard,
         // 編隊 herd サイドバー（状態一覧・M14）。
         ToggleHerdSidebar,
@@ -126,7 +126,7 @@ actions!(
         OpenRecent,
         // 開く…（ネイティブのフォルダ選択ダイアログ・M13 メニューバー）。
         OpenDialog,
-        // バージョン表記のトースト（メニュー「Shirushi について」・M13 メニューバー）。
+        // バージョン表記のトースト（メニュー「necoder について」・M13 メニューバー）。
         About,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
         Hide,
@@ -611,10 +611,10 @@ fn locations_to_file_matches(host: &dyn Host, value: &serde_json::Value) -> Vec<
     results
 }
 
-/// `.shirushi/settings.json` の `color`（"#rrggbb"）と `icon`（絵文字）を読む（M12-11）。
+/// `.necoder/settings.json` の `color`（"#rrggbb"）と `icon`（絵文字）を読む（M12-11）。
 /// 無ければ (None, None)。パース失敗は無視して既定へ。
 fn read_project_identity(root: &Path) -> (Option<Hsla>, Option<SharedString>) {
-    let path = root.join(".shirushi/settings.json");
+    let path = root.join(".necoder/settings.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return (None, None);
     };
@@ -1458,8 +1458,8 @@ impl Render for Workspace {
                 // 編隊モード（mock の「編隊」ビュー・M14）: 通常の center/right dock を丸ごと置換。
                 if !self.chrome.fleet_seeded {
                     self.seed_fleet_cells(cx); // 初回（起動プローブ含む）は lanes で自動配置
-                                               // 開発用: SHIRUSHI_FLEET_ADD=n で ＋Agent を n 回（新スレッド起動が複製しない検証）。
-                    if let Ok(n) = std::env::var("SHIRUSHI_FLEET_ADD")
+                                               // 開発用: NECODER_FLEET_ADD=n で ＋Agent を n 回（新スレッド起動が複製しない検証）。
+                    if let Ok(n) = std::env::var("NECODER_FLEET_ADD")
                         .unwrap_or_default()
                         .parse::<usize>()
                     {
@@ -1696,7 +1696,7 @@ mod tests {
     #[gpui::test]
     fn project_switch_preserves_dirty_undo_and_child_entities(cx: &mut gpui::TestAppContext) {
         let root =
-            std::env::temp_dir().join(format!("shirushi_workspace_switch_{}", std::process::id()));
+            std::env::temp_dir().join(format!("necoder_workspace_switch_{}", std::process::id()));
         let project_a = root.join("a");
         let project_b = root.join("b");
         let file_a = project_a.join("a.txt");
@@ -1828,7 +1828,7 @@ mod tests {
     #[gpui::test]
     fn local_and_remote_root_render_never_call_host(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
-            "shirushi_workspace_render_audit_{}",
+            "necoder_workspace_render_audit_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -1940,7 +1940,7 @@ mod tests {
 
     #[test]
     fn locations_group_by_file_with_preview_lines() {
-        let dir = std::env::temp_dir().join(format!("shirushi_refs_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("necoder_refs_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.rs");

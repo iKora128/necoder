@@ -16,7 +16,7 @@ use i18n::t;
 pub fn app_menus() -> Vec<Menu> {
     vec![
         // ── アプリメニュー（名前は表示されず、OS がアプリ名を出す） ──
-        Menu::new("Shirushi").items(vec![
+        Menu::new("necoder").items(vec![
             MenuItem::action(t!("menu.about"), workspace::About),
             MenuItem::separator(),
             MenuItem::action(t!("menu.settings"), workspace::OpenSettings),

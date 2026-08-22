@@ -1,21 +1,21 @@
 #!/bin/sh
 # 起動時間計測（cold start → 初回描画）。予算: Zed 比 ~80%（docs/ARCHITECTURE §8 / CLAUDE.md 性能予算）。
-# アプリは SHIRUSHI_STARTUP_LOG=1 のとき初回 render で `startup_ms=<n>` を stdout に出す。
+# アプリは NECODER_STARTUP_LOG=1 のとき初回 render で `startup_ms=<n>` を stdout に出す。
 # 使い方: scripts/startup-time.sh [試行回数=5]
 set -eu
 cd "$(dirname "$0")/.."
 
 RUNS="${1:-5}"
-BIN=./target/release/shirushi
-PROBE=/tmp/shirushi-startup-probe.txt
+BIN=./target/release/necoder
+PROBE=/tmp/necoder-startup-probe.txt
 
 echo "リリースビルド中..."
-cargo build --release -p shirushi >/dev/null 2>&1
-printf 'shirushi 起動計測用プローブ\n%s\n' "$(seq 1 200 | tr '\n' ' ')" > "$PROBE"
+cargo build --release -p necoder >/dev/null 2>&1
+printf 'necoder 起動計測用プローブ\n%s\n' "$(seq 1 200 | tr '\n' ' ')" > "$PROBE"
 
 run_once() {
   log=$(mktemp)
-  SHIRUSHI_STARTUP_LOG=1 "$BIN" "$PROBE" >"$log" 2>/dev/null &
+  NECODER_STARTUP_LOG=1 "$BIN" "$PROBE" >"$log" 2>/dev/null &
   pid=$!
   # 初回描画のログ行が出るまで待つ（最大 ~10s）
   waited=0

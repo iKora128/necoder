@@ -45,7 +45,7 @@ shell
   workspace
                                   ↑
 composition
-  shirushi
+  necoder
 ```
 
 ### 2.1 Workspace / ProjectSessions / ProjectSession
@@ -202,7 +202,7 @@ crates/search_ui/src/lib.rs
 ```bash
 cargo check --workspace
 cargo test --workspace
-cargo check -p shirushi --release
+cargo check -p necoder --release
 git diff --check
 ```
 
@@ -219,7 +219,7 @@ git diff --check
   `TerminalDock` tab と `TerminalView` Entity の所有経路を検証する。
 - local / remote の両 source で root を実際に `window.draw` し、全 `Host` method を数える audit host が
   Render 中 0 call である GPUI test が通る。
-- `cargo tree -i workspace --edges normal` で `workspace` の consumer は composition crate `shirushi`
+- `cargo tree -i workspace --edges normal` で `workspace` の consumer は composition crate `necoder`
   だけ。feature crate からの逆依存はない。
 - `tabs.clear()` は初回復元 / 明示 reload のみ。通常 switch は loaded session を再生成しない。
 - release の実 cfg に `debug_assertions` がなく、生成 `.rlib` に debug probe symbol がないことを確認した。
@@ -248,7 +248,7 @@ git diff --check
 
 ### 7.1 追認できた主張
 
-- `cargo check --workspace` green。`cargo tree -i workspace` の consumer は `shirushi` のみ（feature crate の逆依存なし）
+- `cargo check --workspace` green。`cargo tree -i workspace` の consumer は `necoder` のみ（feature crate の逆依存なし）
 - `Workspace` は 8 直接フィールド、`workspace.rs` は 1,399 行、§3 のファイル構成は実在
 - 監査 test は実体がある（A→B→A の dirty/undo/child Entity 保持、RenderAuditHost による draw 中 Host call 0 など）
 - ROADMAP / JOURNAL / ARCHITECTURE の更新も確認
@@ -284,7 +284,7 @@ notify は 6.1.1 のまま。上流の teardown 修正の取り込み（バー�
 
 ### 7.4 UI 目視
 
-オフスクリーン（`SHIRUSHI_SCREENSHOT` + `--features screenshot`）で default 状態を 2560×1600 撮影。
+オフスクリーン（`NECODER_SCREENSHOT` + `--features screenshot`）で default 状態を 2560×1600 撮影。
 titlebar ピル / レール / explorer / タブ下線 / エディタ / Agent ドック（スレッド色・トークン・マスコット・
 composer 宛先チップ）/ statusbar とも崩れなし。
 
@@ -343,5 +343,5 @@ project_watcher / project_switch は移行済み。残りは触った機能か�
 
 ### 8.4 検証
 
-`cargo check --workspace` / `cargo test --workspace` ×2 / `cargo check -p shirushi --release` /
+`cargo check --workspace` / `cargo test --workspace` ×2 / `cargo check -p necoder --release` /
 オフスクリーン UI 目視。checkpoint は「1 バッチ = 1 コミット」（6335f78 〜）。

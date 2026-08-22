@@ -7,7 +7,7 @@
 //! - 全部系 [`all_ops_hold_global_invariants`]: 全公開操作を乱打し、大域不変条件
 //!   （選択が常に範囲内 + char 境界・snapshot 整合・座標変換の往復・undo 全巻き戻し）を検証
 //!
-//! 再現・強化: `SHIRUSHI_FUZZ_SEED=<n>`（そのシードだけ 1 回）/ `SHIRUSHI_FUZZ_ITERS=<n>`（回数増）。
+//! 再現・強化: `NECODER_FUZZ_SEED=<n>`（そのシードだけ 1 回）/ `NECODER_FUZZ_ITERS=<n>`（回数増）。
 
 use editor_core::{Buffer, Selection};
 use std::ops::Range;
@@ -143,14 +143,14 @@ fn next_char_end(model: &str, offset: usize) -> usize {
 }
 
 fn iterations(default_count: usize) -> usize {
-    std::env::var("SHIRUSHI_FUZZ_ITERS")
+    std::env::var("NECODER_FUZZ_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default_count)
 }
 
 fn seeds(default_count: usize, base: u64) -> Vec<u64> {
-    if let Some(seed) = std::env::var("SHIRUSHI_FUZZ_SEED")
+    if let Some(seed) = std::env::var("NECODER_FUZZ_SEED")
         .ok()
         .and_then(|v| v.parse().ok())
     {
@@ -181,7 +181,7 @@ fn strict_ops_match_reference_model() {
         let steps = 150;
         for step in 0..steps {
             let context =
-                || format!("seed={seed} step={step}（SHIRUSHI_FUZZ_SEED={seed} で単発再現）");
+                || format!("seed={seed} step={step}（NECODER_FUZZ_SEED={seed} で単発再現）");
             match rng.below(6) {
                 // insert（複数レンジ同時置換）
                 0 | 1 => {
@@ -435,7 +435,7 @@ fn all_ops_hold_global_invariants() {
                 rng.below(18)
             };
             let context = || {
-                format!("seed={seed} step={step} op={op}（SHIRUSHI_FUZZ_SEED={seed} で単発再現）")
+                format!("seed={seed} step={step} op={op}（NECODER_FUZZ_SEED={seed} で単発再現）")
             };
             match op {
                 0 | 1 => {
@@ -542,7 +542,7 @@ fn all_ops_hold_global_invariants() {
         assert_eq!(
             buffer.text(),
             initial,
-            "undo 全巻き戻しが初期テキストへ戻らない: seed={seed}（SHIRUSHI_FUZZ_SEED={seed}）"
+            "undo 全巻き戻しが初期テキストへ戻らない: seed={seed}（NECODER_FUZZ_SEED={seed}）"
         );
         for _ in 0..undo_count {
             assert!(
@@ -553,7 +553,7 @@ fn all_ops_hold_global_invariants() {
         assert_eq!(
             buffer.text(),
             final_text,
-            "redo で最終テキストへ戻らない: seed={seed}（SHIRUSHI_FUZZ_SEED={seed}）"
+            "redo で最終テキストへ戻らない: seed={seed}（NECODER_FUZZ_SEED={seed}）"
         );
     }
 }

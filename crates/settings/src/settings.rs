@@ -50,7 +50,7 @@ impl SettingsGlobal {
 }
 
 /// 設定を読み込み、グローバルに載せ、ファイル監視（poll）を開始する。main が起動時に 1 回呼ぶ。
-/// `project_dir` があれば `.shirushi/settings.json` も監視・マージ対象になる。
+/// `project_dir` があれば `.necoder/settings.json` も監視・マージ対象になる。
 pub fn init(user_path: Option<PathBuf>, project_dir: Option<PathBuf>, cx: &mut App) {
     let store = SettingsStore::load(user_path.as_deref(), project_dir.as_deref());
     cx.set_global(SettingsGlobal {
@@ -145,9 +145,9 @@ fn spawn_watcher(user_path: Option<PathBuf>, project_dir: Option<PathBuf>, cx: &
     .detach();
 }
 
-/// プロジェクト設定ファイルのパス（`<project>/.shirushi/settings.json`）。
+/// プロジェクト設定ファイルのパス（`<project>/.necoder/settings.json`）。
 fn project_settings_path(project_dir: Option<&Path>) -> Option<PathBuf> {
-    Some(project_dir?.join(".shirushi").join("settings.json"))
+    Some(project_dir?.join(".necoder").join("settings.json"))
 }
 
 /// ファイルの最終更新時刻（無ければ `None`）。

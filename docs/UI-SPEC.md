@@ -29,14 +29,14 @@
 
 **テーマ非連動の固定色**: エディタ選択面 `#7d9bd8` 28%透過 / フォルダアイコン `#7d9bd8` 55%（bg3 と mix）/ Claude バレット `#d97757`。
 
-**きせかえ契約**: この表が**テーマの全インターフェース**。ユーザー定義テーマ = このトークンを上書きする JSON 1枚（`~/Library/Application Support/Shirushi/themes/*.json`）。
+**きせかえ契約**: この表が**テーマの全インターフェース**。ユーザー定義テーマ = このトークンを上書きする JSON 1枚（`~/Library/Application Support/necoder/themes/*.json`）。
 テーマ（面と文字の配色）とプロジェクト色（識別・Peacock相当、§1.2）は**独立した2軸** — どのテーマでもプロジェクト色は §1.3 の許可リスト位置に流れる。
 
 ### 1.2 アイデンティティ色
 
 - **プロジェクト色パレット（自動巡回）**: indigo `#7c8cf8` → teal `#34d3b6` → amber `#f0a24b` → rose `#ef7d9b` → green `#85c46c`
 - **アイデンティティ・パレット（ピッカーの正典）** = `theme_core::IDENTITY_PALETTE_HEXES`: 上の巡回5色 + 予約色（Claude バレット `#d97757`・スレッド色・選択面 `#7d9bd8`）と衝突しない厳選色（cyan / chartreuse / violet / magenta / graphite）。**巡回もピッカーもこの1本が出所**
-- 優先順: `.shirushi/settings.json` の `color` > **ユーザーの手動選択** > パレット巡回。手動選択の導線 = レール右クリック / **⌘K⌘C** / コマンドパレット「表示: プロジェクトの色を変更」→ 厳選スウォッチ or **任意 hex 入力**
+- 優先順: `.necoder/settings.json` の `color` > **ユーザーの手動選択** > パレット巡回。手動選択の導線 = レール右クリック / **⌘K⌘C** / コマンドパレット「表示: プロジェクトの色を変更」→ 厳選スウォッチ or **任意 hex 入力**
 - 任意 hex はエスケープハッチ: §1.3 の流れ先（許可リスト）は変えない。**細い accent としての可読性はユーザー責任**（Peacock と違いコントラスト自動計算はしない）
 - **スレッド色パレット（自動巡回）**: `#61afef` → `#e5c07b` → `#c678dd`（プロジェクト色と独立）
 - accent-dim = プロジェクト色 16% 透過（パレット選択面・タイル選択輪郭のみ）
@@ -60,7 +60,7 @@
 
 ## 2. レール（プロジェクトの方向感覚・常設）
 
-- 項目 = 30×30 角丸8。中身は優先順: `.shirushi/settings.json` の `icon`（絵文字 or 画像パス）> プロジェクト名の頭文字（例: 印）
+- 項目 = 30×30 角丸8。中身は優先順: `.necoder/settings.json` の `icon`（絵文字 or 画像パス）> プロジェクト名の頭文字（例: 印）
 - 状態: active = プロジェクト色の枠 + 2px リング / hover = 枠のみ / 通常 = 色 14% の面 + 35% の枠
 - 下部に**実行中スレッドのドット**（5px・スレッド色・実行中 pulse 1.6s）→ 他プロジェクトの動きが常に見える
 - ＋ = **統一オープン**（`open_launcher`）: フォルダ / ファイル / リモート + **最近（local + remote 混在・opened_at 降順）** を 1 枚の広いファジー面に。最近行は ●識別色 ＋ 実行中ドット、リモートは `host:path` で識別。⏎ = 現レールに開く。⌘O は開いているプロジェクト間の切替（別物）。左クリック = 窓内切替（ARCHITECTURE §5）。ドラッグ並び替えは v1
@@ -75,7 +75,7 @@
 
 ## 4. エクスプローラ（3ビュー + ファイルブラウザ挙動）
 
-- ヘッダ = **上位階層ブレッドクラム**（`Work › experience › shirushi`、現在=太字 fg0、親=fg2・クリックで上へ。プロジェクトの外に出たら「フォルダブラウズモード」— 任意フォルダを右クリック→プロジェクトとして開ける）
+- ヘッダ = **上位階層ブレッドクラム**（`Work › experience › necoder`、現在=太字 fg0、親=fg2・クリックで上へ。プロジェクトの外に出たら「フォルダブラウズモード」— 任意フォルダを右クリック→プロジェクトとして開ける）
 - フッタ = ビュー切替アイコン3種（ツリー/カラム/アイコン）+「表示モード」ラベル
 - **ファイルタイプアイコン**（3ビュー共通・`file_icon_path`）: 拡張子/名前から SVG アイコンを引く。言語ロゴ = **Simple Icons**（CC0・rust/js/ts/tsx/py/go/json/yaml/toml/html/css/md/shell/c/cpp/git/docker）、フォルダ・汎用 = **Lucide**（ISC・folder/folder-open/file/text/image）。すべて**単色マスク**で描き、色は `file_type_color`（syntax パレット）で薄く付ける＝**形で見分け、色は識別に集約**（多色ロゴにはしない）。フォルダは開閉で folder/folder-open を切替（ツリーは `is_expanded`・カラムは選択経路上）。未知拡張子は汎用ファイルへフォールバック
 - **ツリー**: 行 = chev(10px) + **ファイルアイコン(14px)** + 名前 + git ドット（右寄せ・mod=warn色/add=ok色）。インデント 14px/段。選択 = bg3 + 左バー2pxプロジェクト色
@@ -191,5 +191,5 @@
 - **linked worktree の判定は git に聞く**（2026-07-27）。「このセッションで worktree として開いたか」の記憶に頼っていたため、再起動すると worktree なのに削除メニューが消えていた
 - **履歴（前の会話の復元）**: スレッドは DB 永続なので、編隊でも Agent パネルと同じ**スレッド履歴 Picker**（アーカイブ含む・detail に Σトークン＋開始/最終入力の相対時刻）から復元できる（＋タイル「履歴から復元」/ ⌘⇧T は直近）。編隊モード中に確定した会話は**グリッドのセルとして前面（拡大）に出る**。相対時刻は編隊/herd 表示中のみ 30 秒時計で更新（両方閉じたら自停止＝idle 予算）
 - **Task lifecycle / integration**: planned → working / blocked → review_ready → merge_ready → integrating → integrated。Review は read-only Conflict Radar、main への write は明示 Integrate のみ。
-- **編隊操作 API**: `shirushi fleet create/list/status/wait/review/integrate` と同等 MCP tools。stable Task ledger を真実にするため Coordinator/UI の再起動を跨いで wait/resume できる。詳細は `FLEET-ARCHITECTURE.md`。
+- **編隊操作 API**: `necoder fleet create/list/status/wait/review/integrate` と同等 MCP tools。stable Task ledger を真実にするため Coordinator/UI の再起動を跨いで wait/resume できる。詳細は `FLEET-ARCHITECTURE.md`。
 - 既存の**スレッド色貫通・宛先チップ・トークン常時表示**は編隊内でも不変。**キー**: 編隊トグル / ＋(パネル追加) / グラフ ⌄(折り畳み) / セルフォーカス(クリック)（既定キーは M14 で確定）

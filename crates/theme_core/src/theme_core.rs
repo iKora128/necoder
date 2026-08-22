@@ -1,4 +1,4 @@
-//! theme_core — Shirushi の「きせかえ」土台。
+//! theme_core — necoder の「きせかえ」土台。
 //!
 //! UI-SPEC §1 のデザイントークンを型に写したもの。ここが「テーマの全インターフェース」
 //! （UI-SPEC §1.1「きせかえ契約」）であり、ユーザー定義テーマ = この各トークンを上書きする
@@ -61,9 +61,9 @@ pub struct Theme {
 }
 
 /// 組み込み dark テーマの名前。
-pub const DARK_THEME_NAME: &str = "shirushi-dark";
+pub const DARK_THEME_NAME: &str = "necoder-dark";
 /// 組み込み light テーマの名前。
-pub const LIGHT_THEME_NAME: &str = "shirushi-light";
+pub const LIGHT_THEME_NAME: &str = "necoder-light";
 
 impl Theme {
     /// dark テーマ（既定）。値は UI-SPEC §1.1 の dark 列。
@@ -275,11 +275,11 @@ fn parse_hex(value: &str) -> Option<Hsla> {
 pub fn available_themes(themes_dir: Option<&Path>) -> Vec<(SharedString, ThemeSource)> {
     let mut themes = vec![
         (
-            SharedString::from("Shirushi Dark"),
+            SharedString::from("necoder Dark"),
             ThemeSource::BuiltIn(DARK_THEME_NAME),
         ),
         (
-            SharedString::from("Shirushi Light"),
+            SharedString::from("necoder Light"),
             ThemeSource::BuiltIn(LIGHT_THEME_NAME),
         ),
     ];
@@ -337,14 +337,14 @@ pub fn resolve(name: &str, themes_dir: Option<&Path>) -> Theme {
 }
 
 /// プロジェクトの識別（レール項目・ピル左縁 等に流れる）。UI-SPEC §1.2 / §2。
-/// 色の優先順は `.shirushi/settings.json` の `color` > 手動選択 > パレット巡回（解決は M3）。
+/// 色の優先順は `.necoder/settings.json` の `color` > 手動選択 > パレット巡回（解決は M3）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectIdentity {
     pub color: Hsla,
     pub icon: IconSource,
 }
 
-/// レール項目に出す図像の出所。優先順は `.shirushi/settings.json` の `icon` > プロジェクト名の頭文字（UI-SPEC §2）。
+/// レール項目に出す図像の出所。優先順は `.necoder/settings.json` の `icon` > プロジェクト名の頭文字（UI-SPEC §2）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum IconSource {
     Monogram(char), // プロジェクト名の頭文字（例: 印）
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn user_theme_overrides_base() {
-        let dir = std::env::temp_dir().join(format!("shirushi_theme_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("necoder_theme_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("midnight.json");
@@ -567,7 +567,7 @@ mod tests {
         // resolve は name 一致でユーザーテーマを引ける。
         assert_eq!(resolve("Midnight", Some(&dir)).bg0, h(0x000000));
         assert_eq!(
-            resolve("shirushi-light", Some(&dir)).appearance,
+            resolve("necoder-light", Some(&dir)).appearance,
             Appearance::Light
         );
 
