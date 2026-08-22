@@ -711,8 +711,7 @@ fn main() {
                     }
                 }
                 // 開発用: NECODER_AGENT_FULLSCREEN_PROBE=1 で AI 全画面（⌘⇧⏎）を駆動する。
-                if std::env::var("NECODER_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1")
-                {
+                if std::env::var("NECODER_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()

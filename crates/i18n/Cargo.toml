@@ -10,3 +10,4 @@ path = "src/i18n.rs"
 
 [dependencies]
 serde_yaml.workspace = true
+sys-locale.workspace = true

@@ -53,6 +53,14 @@ pub fn locale() -> String {
     current_locale()
 }
 
+/// 指定ロケールでのキーを引く（無ければ `None`）。フォールバックしない。
+///
+/// ロケールを横断して判定したい時に使う（例: 既定スレッド名 `スレッド1` / `Thread 1` は
+/// 表示言語を切り替えた後も「まだ名前を付けていない」と見なしたい）。
+pub fn translate_in(locale: &str, key: &str) -> Option<String> {
+    lookup(locale, key)
+}
+
 /// 同梱している全ロケールのコード（ソート済み）。
 pub fn available_locales() -> Vec<&'static str> {
     let mut locales: Vec<&'static str> = LOCALES.keys().copied().collect();
@@ -60,24 +68,46 @@ pub fn available_locales() -> Vec<&'static str> {
     locales
 }
 
-/// OS のロケール環境変数から現在ロケールを決める（`LC_ALL` → `LC_MESSAGES` → `LANG`）。
-/// 同梱していないロケールなら [`FALLBACK_LOCALE`]。起動時に一度呼ぶ。
+/// 開発用にロケールを固定する env（撮影で ja/en を撮り分ける。`NECODER_THEME` と同じ流儀）。
+pub const LOCALE_OVERRIDE_VAR: &str = "NECODER_LOCALE";
+
+/// OS の表示言語から現在ロケールを決める。起動時に一度呼ぶ。
+///
+/// 優先順は `NECODER_LOCALE` → **OS の表示言語** → `LC_ALL`/`LC_MESSAGES`/`LANG` →
+/// [`FALLBACK_LOCALE`]。OS を先に見るのは、**macOS の GUI 起動には `LANG` が無い**ため
+/// （Launch Services はシェルを経由しない＝環境変数だけだと日本語 Mac でも en に落ちる）。
+/// 端末から起動した時だけ効く `LANG` を後段に残してあるのは、OS 判定が空の環境の保険。
 pub fn init_from_os_locale() {
     set_locale(detect_os_locale());
 }
 
 fn detect_os_locale() -> &'static str {
-    let available = available_locales();
+    if let Ok(value) = std::env::var(LOCALE_OVERRIDE_VAR) {
+        if let Some(found) = match_available(&value) {
+            return found;
+        }
+    }
+    if let Some(value) = sys_locale::get_locale() {
+        if let Some(found) = match_available(&value) {
+            return found;
+        }
+    }
     for variable in ["LC_ALL", "LC_MESSAGES", "LANG"] {
         if let Ok(value) = std::env::var(variable) {
-            // 例: "ja_JP.UTF-8" → "ja"
-            let code = value.split(['_', '.', '-']).next().unwrap_or("");
-            if let Some(found) = available.iter().find(|locale| **locale == code) {
+            if let Some(found) = match_available(&value) {
                 return found;
             }
         }
     }
     FALLBACK_LOCALE
+}
+
+/// ロケール表記（`ja_JP.UTF-8` / `ja-JP` / `ja`）を同梱ロケールに寄せる。
+fn match_available(value: &str) -> Option<&'static str> {
+    let code = value.split(['_', '.', '-']).next().unwrap_or("");
+    available_locales()
+        .into_iter()
+        .find(|locale| *locale == code)
 }
 
 fn current_locale() -> String {
@@ -201,6 +231,18 @@ mod tests {
     #[test]
     fn available_locales_lists_both_sorted() {
         assert_eq!(available_locales(), vec!["en", "ja"]);
+    }
+
+    #[test]
+    fn locale_tags_match_bundled_locales() {
+        // OS が返す表記は環境でまちまち（macOS は BCP-47、Linux は POSIX）。
+        assert_eq!(match_available("ja_JP.UTF-8"), Some("ja"));
+        assert_eq!(match_available("ja-JP"), Some("ja"));
+        assert_eq!(match_available("ja"), Some("ja"));
+        assert_eq!(match_available("en-US"), Some("en"));
+        // 同梱していない言語は拾わない（呼び出し側が次の候補へ進める）。
+        assert_eq!(match_available("fr-FR"), None);
+        assert_eq!(match_available(""), None);
     }
 
     // ロケールはグローバル状態なので、書き換える検証はこの 1 本に集約する（並列テストでの競合回避）。

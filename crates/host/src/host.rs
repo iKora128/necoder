@@ -1913,8 +1913,7 @@ impl SshTransport {
 
         // 配備バイナリ: 明示指定（同一プラットフォーム検査を飛ばす）→ remote target 用の自動発見
         // （per-target キャッシュ / .app 同梱 / same-platform の dev ビルド・#1）。
-        let explicit_artifact =
-            std::env::var_os("NECODER_REMOTE_SERVER_BINARY").map(PathBuf::from);
+        let explicit_artifact = std::env::var_os("NECODER_REMOTE_SERVER_BINARY").map(PathBuf::from);
         let artifact = explicit_artifact
             .clone()
             .or_else(|| find_remote_server_for(remote_os, remote_arch))

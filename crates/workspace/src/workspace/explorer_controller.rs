@@ -607,9 +607,7 @@ impl Workspace {
                         .map(|worktree| worktree.path)
                         .find(|path| *path != target)
                         .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "メインの作業ツリーは削除できません（レールから外すを使ってください）"
-                            )
+                            anyhow::anyhow!(i18n::t!("explorer.main_worktree_undeletable"))
                         })?;
                     project::remove_worktree_on(host.as_ref(), &main, &target, true)?;
                     if also_branch {
@@ -637,7 +635,10 @@ impl Workspace {
                             .position(|slot| slot.worktree.root() == target_for_id.as_path())
                         {
                             // 消えた TaskSpace のセルは編隊グリッドからも外す（幽霊セルを残さない）。
-                            let space = workspace.project_sessions.projects[index].task_space.id.clone();
+                            let space = workspace.project_sessions.projects[index]
+                                .task_space
+                                .id
+                                .clone();
                             workspace.remove_fleet_cells_for(&space);
                             workspace.remove_project_slot(index, window, cx);
                         }

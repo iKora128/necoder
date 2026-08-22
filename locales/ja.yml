@@ -12,6 +12,12 @@ finder:
   files: ファイルを検索…
   projects: プロジェクトを切り替え…
 agent:
+  error_prefix: "エラー: %{message}"
+  history_archived_mark: ·閉
+  summary_prompt: 入力はエージェントターンの指示と結果です。何をして結果どうなったかを日本語で要約して。40文字以内・1行だけ・記号や引用符や前置きなしで出力して。
+  summary_input: "指示: %{instruction}"
+  summary_input_result: "結果(末尾): %{result}"
+  default_thread_name: スレッド%{n}
   open_diff_tab: エディタで開く（diff タブ）
   waiting_permission: 承認待ちで停止中
   todos: Todos
@@ -165,6 +171,31 @@ herd:
   mute: このエージェントをミュート（トースト/完了音を止める）
   unmute: ミュート解除
 control:
+  coordinator_prompt: |
+    あなたは necoder 編隊の監督（coordinator）です。
+    役割: 状況を読み、次の采配を決めて fleet CLI で指示する。
+    規律: 自分ではコードを書かない・手を動かさない（指示と采配のみ）。integrate の最終承認は人間（あなたは `fleet review` で radar を確認して提案するまで）。
+
+    イベント: [%{event}] %{title}%{digest}
+
+    道具（shell で実行）:
+    %{exe} fleet list .              — この repo の Task 一覧
+    %{exe} fleet digest <id>        — Task の事実層 + digest（今なにをしているか）
+    %{exe} fleet events [since-id]  — 台帳イベントの差分
+    %{exe} fleet spawn-agent <id> [agent] [prompt...] — Task にエージェントを起こす
+    %{exe} fleet send <id> <message...>               — 追撃指示
+    %{exe} fleet status <id> <phase> [summary]        — phase 遷移の報告
+    %{exe} fleet wait <id> <phase|activity> [秒]      — 待つ（phase=台帳 / activity=live）
+    %{exe} fleet depend <id> <on...> / wait-deps <id> <phase> — 依存の宣言と待ち
+    %{exe} fleet review <id>        — Conflict Radar（merge_ready / changes_requested へ）
+
+    まず `%{exe} fleet list .` と `digest` で現況を読み、必要な采配だけ実行して、最後に判断を 1〜3 行で要約してください。何もする必要がなければ「静観」とだけ答えてください。
+  coordinator_thread: 監督
+  summary_prompt: 入力はマルチエージェント編隊の現況です。監督として状況と次の一手を日本語で1文にまとめて。60文字以内・1行だけ・記号や引用符や前置きなしで出力して。
+  facts_stats: "稼働 %{working} · 要対応 %{attention} · 完了未確認 %{done}"
+  facts_permission: "承認待ち %{elapsed}: %{title}"
+  facts_failed: "失敗: %{digest}"
+  facts_done_unread: "完了未確認: %{digest}"
   title: 管制
   tab_graph: グラフ
   worktrees: "+ %{n} worktrees"
@@ -207,6 +238,12 @@ news:
   waiting: "承認待ち — %{title}"
   failed: "失敗 — %{detail}"
 fleet:
+  toast_no_integration_space: IntegrationSpace が開かれていません
+  toast_radar_clean: "Conflict Radar: 統合可能です"
+  toast_merge_preview_failed: "merge preview に失敗: %{error}"
+  toast_integrated: Task を IntegrationSpace へ統合しました
+  toast_integrate_failed: "統合できません: %{error}"
+  toast_need_task_first: 先に ＋ Task で隔離 worktree を作成してください
   editor_surface_hint: この Task でファイルを開くと Editor surface に表示されます
   space_closed: TaskSpace は閉じられています
   add_agent_simple: ＋ エージェント（新しい worktree で並走）
@@ -352,6 +389,7 @@ settings:
   tabs_view_list: 縦リスト
   theme_hint: "テーマ: %{name}（⌘⇧T で変更）"
 explorer:
+  main_worktree_undeletable: メインの作業ツリーは削除できません（レールから外すを使ってください）
   up_folder: 上のフォルダへ
   back_to_project: プロジェクトへ戻る
   view_tree: ツリー表示

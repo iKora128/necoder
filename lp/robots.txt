@@ -1,0 +1,5 @@
+# necoder.com — 全公開。sitemap は毎ビルド再生成される（scripts/lp-build.mjs）
+User-agent: *
+Allow: /
+
+Sitemap: https://necoder.com/sitemap.xml

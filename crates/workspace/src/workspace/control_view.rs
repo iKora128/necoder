@@ -185,8 +185,8 @@ impl Workspace {
                 .background_executor()
                 .spawn(async move {
                     // 引用符 / $ / バッククォート禁止（sh -c 埋め込み・oneshot_line_on の約束）。
-                    let prompt = "入力はマルチエージェント編隊の現況です。監督として状況と次の一手を日本語で1文にまとめて。60文字以内・1行だけ・記号や引用符や前置きなしで出力して。";
-                    project::oneshot_line_on(host.as_ref(), &cwd, &input, template, prompt, 80)
+                    let prompt = i18n::t!("control.summary_prompt");
+                    project::oneshot_line_on(host.as_ref(), &cwd, &input, template, &prompt, 80)
                 })
                 .await;
             let Ok(line) = generated else {
@@ -206,25 +206,27 @@ impl Workspace {
     fn control_summary_facts(&self, cx: &App) -> String {
         let queue = self.control_attention_queue(cx);
         let stats = self.control_stats(&queue, cx);
-        let mut lines = vec![format!(
-            "稼働 {} · 要対応 {} · 完了未確認 {}",
-            stats.working, stats.attention, stats.done_unread
+        let mut lines = vec![i18n::t!(
+            "control.facts_stats",
+            "working" => stats.working,
+            "attention" => stats.attention,
+            "done" => stats.done_unread,
         )];
         for item in queue.iter().take(4) {
             let detail = match &item.kind {
-                AttentionKind::Permission(card) => format!(
-                    "承認待ち {}: {}",
-                    elapsed_label(card.waited_secs),
-                    card.title
+                AttentionKind::Permission(card) => i18n::t!(
+                    "control.facts_permission",
+                    "elapsed" => elapsed_label(card.waited_secs),
+                    "title" => &card.title,
                 ),
                 AttentionKind::Failed { digest, .. } => {
-                    format!("失敗: {}", digest.clone().unwrap_or_default())
+                    i18n::t!("control.facts_failed", "digest" => digest.clone().unwrap_or_default())
                 }
                 AttentionKind::Review { phase, digest, .. } => {
                     format!("{}: {}", phase.as_str(), digest.clone().unwrap_or_default())
                 }
                 AttentionKind::DoneUnread { digest, .. } => {
-                    format!("完了未確認: {}", digest.clone().unwrap_or_default())
+                    i18n::t!("control.facts_done_unread", "digest" => digest.clone().unwrap_or_default())
                 }
             };
             let branch = item

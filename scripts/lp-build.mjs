@@ -175,6 +175,21 @@ template = template.replace(
 const indexPath = path.join(lpRoot, 'index.html');
 fs.writeFileSync(indexPath, template);
 
+// sitemap は 1 ページだけ。lastmod をビルド日に保つのが目的なので毎回書き出す。
+const today = new Date().toISOString().slice(0, 10);
+fs.writeFileSync(
+  path.join(lpRoot, 'sitemap.xml'),
+  `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${SITE_URL}/</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>weekly</changefreq>
+  </url>
+</urlset>
+`,
+);
+
 const leftover = [...template.matchAll(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g)];
 if (leftover.length > 0) console.warn(`  ⚠ 未解決の UUID が ${leftover.length} 件残っている`);
 

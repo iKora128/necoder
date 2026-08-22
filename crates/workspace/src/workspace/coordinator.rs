@@ -13,8 +13,24 @@
 
 use crate::workspace::*;
 
-/// 監督スレッドの固定名（IntegrationSpace の panel 内で名前により再利用する）。
-pub(crate) const COORDINATOR_THREAD_NAME: &str = "監督";
+/// 監督スレッドの表示名（IntegrationSpace の panel 内で名前により再利用する）。表示言語に追従する。
+pub(crate) fn coordinator_thread_name() -> String {
+    i18n::t!("control.coordinator_thread")
+}
+
+/// 同梱ロケール分の監督スレッド名。表示言語を切り替えても、前の言語で作った監督スレッドを
+/// 取り違えずに再利用するため、探す時はこの全部で照合する（名前は保存済みのユーザーデータ）。
+pub(crate) fn coordinator_thread_names() -> Vec<String> {
+    i18n::available_locales()
+        .into_iter()
+        .filter_map(|locale| i18n::translate_in(locale, "control.coordinator_thread"))
+        .collect()
+}
+
+/// 監督スレッドの名前か（ロケール横断）。
+pub(crate) fn is_coordinator_thread_name(name: &str) -> bool {
+    coordinator_thread_names().iter().any(|known| known == name)
+}
 
 impl Workspace {
     /// 監督へ 1 ターン渡す（イベント駆動 wake・P6）。未任命・IntegrationSpace 不在・
@@ -49,30 +65,16 @@ impl Workspace {
             .map(|digest| format!(" — {digest}"))
             .unwrap_or_default();
         // 役割・規律・道具のテンプレート + 変化分の digest（フル transcript は渡さない＝3 段圧縮）。
-        let prompt = format!(
-            "あなたは necoder 編隊の監督（coordinator）です。\n\
-             役割: 状況を読み、次の采配を決めて fleet CLI で指示する。\n\
-             規律: 自分ではコードを書かない・手を動かさない（指示と采配のみ）。\
-             integrate の最終承認は人間（あなたは `fleet review` で radar を確認して提案するまで）。\n\
-             \n\
-             イベント: [{event}] {title}{digest_line}\n\
-             \n\
-             道具（shell で実行）:\n\
-             {exe} fleet list .              — この repo の Task 一覧\n\
-             {exe} fleet digest <id>        — Task の事実層 + digest（今なにをしているか）\n\
-             {exe} fleet events [since-id]  — 台帳イベントの差分\n\
-             {exe} fleet spawn-agent <id> [agent] [prompt...] — Task にエージェントを起こす\n\
-             {exe} fleet send <id> <message...>               — 追撃指示\n\
-             {exe} fleet status <id> <phase> [summary]        — phase 遷移の報告\n\
-             {exe} fleet wait <id> <phase|activity> [秒]      — 待つ（phase=台帳 / activity=live）\n\
-             {exe} fleet depend <id> <on...> / wait-deps <id> <phase> — 依存の宣言と待ち\n\
-             {exe} fleet review <id>        — Conflict Radar（merge_ready / changes_requested へ）\n\
-             \n\
-             まず `{exe} fleet list .` と `digest` で現況を読み、必要な采配だけ実行して、\
-             最後に判断を 1〜3 行で要約してください。何もする必要がなければ「静観」とだけ答えてください。"
+        let prompt = i18n::t!(
+            "control.coordinator_prompt",
+            "event" => event,
+            "title" => &title,
+            "digest" => digest_line,
+            "exe" => exe,
         );
+        let names = coordinator_thread_names();
         panel.update(cx, |panel, cx| {
-            let index = panel.ensure_named_thread(COORDINATOR_THREAD_NAME, &agent, cx);
+            let index = panel.ensure_named_thread(&coordinator_thread_name(), &names, &agent, cx);
             if panel.thread_busy(index) {
                 return; // 実行中は重ねない（次のイベント時に最新状態ごと読む）
             }

@@ -45,10 +45,7 @@ pub fn redirect_output_for_gui_launch() -> Option<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
-    let path = dir.join(format!(
-        "necoder-{unix_seconds}-{}.log",
-        std::process::id()
-    ));
+    let path = dir.join(format!("necoder-{unix_seconds}-{}.log", std::process::id()));
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

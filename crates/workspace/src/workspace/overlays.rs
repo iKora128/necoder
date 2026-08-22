@@ -1305,7 +1305,7 @@ impl Workspace {
                 ));
             }
             if archived {
-                detail.push_str("  ·閉");
+                detail.push_str(&format!("  {}", i18n::t!("agent.history_archived_mark")));
             }
             let mut item = PickerItem::new(history.len(), name.clone())
                 .with_accent(theme_core::thread_color(color_index as usize));

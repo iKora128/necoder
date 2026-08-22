@@ -257,7 +257,7 @@ impl Workspace {
             slot.task_space.repository_id == repository_id && slot.task_space.is_integration()
         }) else {
             self.push_toast(
-                "IntegrationSpace が開かれていません".into(),
+                i18n::t!("fleet.toast_no_integration_space").into(),
                 self.accent(),
                 cx,
             );
@@ -280,7 +280,7 @@ impl Workspace {
                         cx,
                     );
                     workspace.push_toast(
-                        "Conflict Radar: 統合可能です".into(),
+                        i18n::t!("fleet.toast_radar_clean").into(),
                         workspace.accent(),
                         cx,
                     );
@@ -300,7 +300,7 @@ impl Workspace {
                     );
                 }
                 Err(error) => workspace.push_toast(
-                    SharedString::from(format!("merge preview に失敗: {error:#}")),
+                    SharedString::from(i18n::t!("fleet.toast_merge_preview_failed", "error" => format!("{error:#}"))),
                     workspace.accent(),
                     cx,
                 ),
@@ -361,7 +361,7 @@ impl Workspace {
                     );
                     workspace.refresh_git_status_for(integration_index, cx);
                     workspace.push_toast(
-                        "Task を IntegrationSpace へ統合しました".into(),
+                        i18n::t!("fleet.toast_integrated").into(),
                         workspace.accent(),
                         cx,
                     );
@@ -375,7 +375,7 @@ impl Workspace {
                         cx,
                     );
                     workspace.push_toast(
-                        SharedString::from(format!("統合できません: {error:#}")),
+                        SharedString::from(i18n::t!("fleet.toast_integrate_failed", "error" => format!("{error:#}"))),
                         workspace.accent(),
                         cx,
                     );
@@ -423,7 +423,7 @@ impl Workspace {
     pub(crate) fn add_fleet_agent(&mut self, cx: &mut Context<Self>) {
         let Some(space) = self.selected_task_space() else {
             self.push_toast(
-                SharedString::from("先に ＋ Task で隔離 worktree を作成してください"),
+                SharedString::from(i18n::t!("fleet.toast_need_task_first")),
                 self.accent(),
                 cx,
             );

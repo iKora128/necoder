@@ -1323,14 +1323,32 @@ fn fuzzy_matches(haystack: &str, query: &str) -> bool {
     query.chars().all(|needle| chars.any(|c| c == needle))
 }
 
-/// 既定のプレースホルダ名か（空 or "スレッドN"）。AI 自動命名の対象判定（#6）。
+/// 既定のスレッド名（"スレッド1" / "Thread 1"）。表示言語に追従する。
+fn default_thread_name(index: usize) -> String {
+    i18n::t!("agent.default_thread_name", "n" => index + 1)
+}
+
+/// 既定のプレースホルダ名か（空 or 既定スレッド名）。AI 自動命名の対象判定（#6）。
 /// seed 名（"rope設計" 等）や既に付いた名前は対象外＝上書きしない。
+///
+/// 判定を**同梱ロケール全部**で回すのは、表示言語を切り替えても以前作ったタブが
+/// 「まだ名前を付けていない」と見なされ続けるようにするため（名前自体は保存済みのユーザーデータ
+/// なので、既に開いているタブを翻訳し直すことはしない）。
 fn is_placeholder_name(name: &str) -> bool {
     let name = name.trim();
-    name.is_empty()
-        || name
-            .strip_prefix("スレッド")
+    if name.is_empty() {
+        return true;
+    }
+    i18n::available_locales().into_iter().any(|locale| {
+        let Some(template) = i18n::translate_in(locale, "agent.default_thread_name") else {
+            return false;
+        };
+        let Some(prefix) = template.split("%{n}").next().filter(|p| !p.is_empty()) else {
+            return false;
+        };
+        name.strip_prefix(prefix)
             .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+    })
 }
 
 /// 現在時刻（unix ms）。スレッドの開始/最終入力時刻の記録に使う。
@@ -1601,7 +1619,7 @@ impl AgentPanel {
         let mut threads = if demo_threads_requested() {
             seed_threads()
         } else {
-            vec![Thread::empty("スレッド1", 0)]
+            vec![Thread::empty(default_thread_name(0), 0)]
         };
         for thread in &mut threads {
             apply_thread_defaults(thread, cx);
@@ -1611,7 +1629,7 @@ impl AgentPanel {
             if let Ok(count) = count.trim().parse::<usize>() {
                 while threads.len() < count {
                     let index = threads.len();
-                    let mut thread = Thread::empty(format!("スレッド{}", index + 1), index);
+                    let mut thread = Thread::empty(default_thread_name(index), index);
                     apply_thread_defaults(&mut thread, cx);
                     threads.push(thread);
                 }
@@ -2836,7 +2854,7 @@ impl AgentPanel {
 
     fn add_thread(&mut self, cx: &mut Context<Self>) {
         let index = self.threads.len();
-        let mut thread = Thread::empty(format!("スレッド{}", index + 1), index);
+        let mut thread = Thread::empty(default_thread_name(index), index);
         // 既定エージェント + 前回のモデル/思考量（§8 の sticky）で開く。
         apply_thread_defaults(&mut thread, cx);
         // 権限モードは agent 広告依存で settings に sticky を持たないため、直前まで見ていたタブから
@@ -3109,17 +3127,19 @@ impl AgentPanel {
 
     /// 監督スレッドの確保（P6）: 名前一致のスレッドがあればアクティブ化・無ければ作って改名。
     /// pinned = 名前で再利用（`name_is_custom` を立てて自動命名の上書きも防ぐ）。
+    /// 名前で固定スレッドを引き当てる（無ければ作る）。`aliases` は同一スレッドとみなす別名で、
+    /// 表示言語を切り替えた後に前の言語の名前で残っているスレッドを拾い直すために使う。
     pub fn ensure_named_thread(
         &mut self,
         name: &str,
+        aliases: &[String],
         agent: &str,
         cx: &mut Context<Self>,
     ) -> usize {
-        if let Some(index) = self
-            .threads
-            .iter()
-            .position(|thread| thread.name.as_ref() == name)
-        {
+        if let Some(index) = self.threads.iter().position(|thread| {
+            thread.name.as_ref() == name
+                || aliases.iter().any(|alias| alias == thread.name.as_ref())
+        }) {
             self.switch_thread(index, cx);
             return index;
         }
@@ -4031,7 +4051,10 @@ impl AgentPanel {
                 thread.digest = digest_tail(&error).or(thread.digest.take());
                 thread
                     .entries
-                    .push(Entry::Agent(SharedString::from(format!("エラー: {error}"))));
+                    .push(Entry::Agent(SharedString::from(i18n::t!(
+                        "agent.error_prefix",
+                        "message" => &error
+                    ))));
                 thread.running = false;
                 // 失敗も「注意を要する終わり方」＝裏のスレッドは Done(中断) として灯す。
                 if thread_index != active {
@@ -4274,9 +4297,13 @@ impl AgentPanel {
         }) else {
             return; // 本文の無いターン（ツールのみ等）は Tier 1 のまま
         };
+        let result_line = i18n::t!("agent.summary_input_result", "result" => &last_agent);
         let input = match last_user {
-            Some(user) => format!("指示: {user}\n\n結果(末尾): {last_agent}"),
-            None => format!("結果(末尾): {last_agent}"),
+            Some(user) => format!(
+                "{}\n\n{result_line}",
+                i18n::t!("agent.summary_input", "instruction" => user)
+            ),
+            None => result_line,
         };
         let Some(cwd) = self.dest_cwd.clone() else {
             return;
@@ -4291,11 +4318,11 @@ impl AgentPanel {
         let thread_id = thread.id.clone();
         cx.spawn(async move |panel, cx| {
             // 引用符 / $ / バッククォート禁止（sh -c 埋め込み・oneshot_line_on の約束）。
-            let prompt = "入力はエージェントターンの指示と結果です。何をして結果どうなったかを日本語で要約して。40文字以内・1行だけ・記号や引用符や前置きなしで出力して。";
+            let prompt = i18n::t!("agent.summary_prompt");
             let generated = cx
                 .background_executor()
                 .spawn(async move {
-                    project::oneshot_line_on(host.as_ref(), &cwd, &input, template, prompt, 60)
+                    project::oneshot_line_on(host.as_ref(), &cwd, &input, template, &prompt, 60)
                 })
                 .await;
             let Ok(line) = generated else {
@@ -4310,7 +4337,10 @@ impl AgentPanel {
                     let line = SharedString::from(line);
                     thread.tier2 = Some(line.clone());
                     let name = thread.name.clone();
-                    cx.emit(PanelEvent::SummaryReady { thread: name, tier2: line });
+                    cx.emit(PanelEvent::SummaryReady {
+                        thread: name,
+                        tier2: line,
+                    });
                     cx.notify();
                 }
             });
@@ -4376,9 +4406,12 @@ impl AgentPanel {
     fn fail_turn(&mut self, thread_index: usize, message: &str, cx: &mut Context<Self>) {
         let failed = if let Some(thread) = self.threads.get_mut(thread_index) {
             thread.digest = digest_tail(message).or(thread.digest.take()); // P1 素材③
-            thread.entries.push(Entry::Agent(SharedString::from(format!(
-                "エラー: {message}"
-            ))));
+            thread
+                .entries
+                .push(Entry::Agent(SharedString::from(i18n::t!(
+                    "agent.error_prefix",
+                    "message" => message
+                ))));
             thread.running = false;
             Some((thread.name.clone(), thread.color, thread.muted))
         } else {

@@ -11,6 +11,12 @@ finder:
   files: Search files…
   projects: Switch project…
 agent:
+  error_prefix: "Error: %{message}"
+  history_archived_mark: ·closed
+  summary_prompt: The input is the instruction and result of an agent turn. Summarize what was done and how it turned out in English. At most 70 characters, one line only, plain text with no quotes and no preamble.
+  summary_input: "Instruction: %{instruction}"
+  summary_input_result: "Result (tail): %{result}"
+  default_thread_name: Thread %{n}
   open_diff_tab: Open in editor (diff tab)
   waiting_permission: Waiting for permission
   todos: Todos
@@ -164,6 +170,31 @@ herd:
   mute: Mute this agent (no toasts / no completion sound)
   unmute: Unmute
 control:
+  coordinator_prompt: |
+    You are the coordinator of the necoder fleet.
+    Role: read the situation, decide the next move, and direct the fleet through the fleet CLI.
+    Discipline: never write code or touch files yourself (direct and delegate only). Final approval for integrate belongs to a human — you go as far as checking the radar with `fleet review` and proposing.
+
+    Event: [%{event}] %{title}%{digest}
+
+    Tools (run in the shell):
+    %{exe} fleet list .              — Tasks in this repository
+    %{exe} fleet digest <id>        — a Task's facts and digest (what it is doing right now)
+    %{exe} fleet events [since-id]  — ledger event diff
+    %{exe} fleet spawn-agent <id> [agent] [prompt...] — start an agent on a Task
+    %{exe} fleet send <id> <message...>               — follow-up instruction
+    %{exe} fleet status <id> <phase> [summary]        — report a phase transition
+    %{exe} fleet wait <id> <phase|activity> [seconds] — wait (phase=ledger / activity=live)
+    %{exe} fleet depend <id> <on...> / wait-deps <id> <phase> — declare and await dependencies
+    %{exe} fleet review <id>        — Conflict Radar (to merge_ready / changes_requested)
+
+    Start by reading the situation with `%{exe} fleet list .` and `digest`, run only the moves that are needed, and close with a 1-3 line summary of your judgement. If nothing needs doing, answer with just: standing by.
+  coordinator_thread: Supervisor
+  summary_prompt: The input is the current state of a multi-agent fleet. As the supervisor, summarize the situation and the next move in one English sentence. At most 100 characters, one line only, plain text with no quotes and no preamble.
+  facts_stats: "Working %{working} · Needs attention %{attention} · Done unread %{done}"
+  facts_permission: "Awaiting permission %{elapsed}: %{title}"
+  facts_failed: "Failed: %{digest}"
+  facts_done_unread: "Done but unread: %{digest}"
   title: Control
   tab_graph: Graph
   worktrees: "+ %{n} worktrees"
@@ -206,6 +237,12 @@ news:
   waiting: "waiting for approval — %{title}"
   failed: "failed — %{detail}"
 fleet:
+  toast_no_integration_space: IntegrationSpace is not open
+  toast_radar_clean: "Conflict Radar: ready to integrate"
+  toast_merge_preview_failed: "Merge preview failed: %{error}"
+  toast_integrated: Task integrated into the IntegrationSpace
+  toast_integrate_failed: "Cannot integrate: %{error}"
+  toast_need_task_first: Create an isolated worktree with ＋ Task first
   editor_surface_hint: Open a file in this Task to show it in the Editor surface
   space_closed: This TaskSpace is closed
   add_agent_simple: "+ Agent (parallel on a fresh worktree)"
@@ -351,6 +388,7 @@ settings:
   tabs_view_list: List
   theme_hint: "Theme: %{name} (⌘⇧T to change)"
 explorer:
+  main_worktree_undeletable: The main worktree cannot be deleted (use Remove from rail instead)
   up_folder: Up one folder
   back_to_project: Back to project
   view_tree: Tree view

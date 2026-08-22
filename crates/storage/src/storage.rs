@@ -1511,11 +1511,7 @@ mod tests {
     use super::*;
 
     fn temp_db(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "necoder_storage_{}_{}.db",
-            tag,
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("necoder_storage_{}_{}.db", tag, std::process::id()))
     }
 
     #[test]

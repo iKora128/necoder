@@ -61,7 +61,7 @@ mod remote_ssh;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
 mod coordinator;
-pub(crate) use coordinator::COORDINATOR_THREAD_NAME;
+pub(crate) use coordinator::is_coordinator_thread_name;
 mod todo_panel;
 pub(crate) use todo_panel::*;
 mod editor_area;

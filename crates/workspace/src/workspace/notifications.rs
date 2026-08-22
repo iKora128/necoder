@@ -52,7 +52,7 @@ impl Workspace {
                     .get(session_index)
                     .is_some_and(|slot| slot.task_space.is_integration());
                 // 監督の采配は coordinator イベントとして監査（P6・ニュースは丸チップ）。
-                if is_integration_slot && thread.as_ref() == COORDINATOR_THREAD_NAME {
+                if is_integration_slot && is_coordinator_thread_name(thread.as_ref()) {
                     self.record_coordinator_decision(*color, digest.as_ref(), summary, cx);
                 }
                 if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {

@@ -845,14 +845,17 @@ async fn with_timeout<T>(
     label: &str,
     future: impl std::future::Future<Output = std::result::Result<T, acp::Error>>,
 ) -> std::result::Result<T, acp::Error> {
-    use futures::future::{Either, select};
+    use futures::future::{select, Either};
     let timer = blocking::unblock(move || std::thread::sleep(timeout));
     futures::pin_mut!(future, timer);
     match select(future, timer).await {
         Either::Left((result, _timer)) => result,
         Either::Right(((), _future)) => Err(acp::Error::new(
             i32::from(acp::ErrorCode::InternalError),
-            format!("{label} が {} 秒応答しません（エージェントの無言ハング）", timeout.as_secs()),
+            format!(
+                "{label} が {} 秒応答しません（エージェントの無言ハング）",
+                timeout.as_secs()
+            ),
         )),
     }
 }
@@ -933,7 +936,11 @@ pub async fn prompt_once(command: &AgentCommand, prompt: &str) -> Result<String>
                 connection.send_request(initialize_request()).block_task(),
             )
             .await?;
-            let mut session = connection.build_session(&cwd).block_task().start_session().await?;
+            let mut session = connection
+                .build_session(&cwd)
+                .block_task()
+                .start_session()
+                .await?;
             session.send_prompt(prompt)?;
             session.read_to_string().await
         })
@@ -1514,7 +1521,10 @@ mod tests {
         let result = futures::executor::block_on(connect_and_initialize(&command));
         let elapsed = started.elapsed();
         let error = result.expect_err("無言ハングは timeout エラーになる（無限待ちにならない）");
-        assert!(format!("{error:#}").contains("応答しません"), "理由が UI に出る: {error:#}");
+        assert!(
+            format!("{error:#}").contains("応答しません"),
+            "理由が UI に出る: {error:#}"
+        );
         assert!(
             (29..45).contains(&elapsed.as_secs()),
             "HANDSHAKE_TIMEOUT 付近で返る: {elapsed:?}"
