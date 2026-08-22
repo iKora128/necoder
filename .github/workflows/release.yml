@@ -89,6 +89,13 @@ jobs:
           ditto target/necoder.app target/dmg-staging/necoder.app
           ln -s /Applications target/dmg-staging/Applications
           hdiutil create -volname necoder -srcfolder target/dmg-staging -ov -format UDZO target/necoder.dmg
+          # ディスクイメージ自体にも署名する。中の .app だけ署名して notarize/staple しても、
+          # dmg が未署名だと Gatekeeper が「no usable signature」で弾く（= ダウンロードした
+          # dmg を開いた時の「壊れているため開けません」）。notarize の前に署名するのが正しい順序。
+          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" target/necoder.dmg
+            codesign --verify --strict --verbose=2 target/necoder.dmg
+          fi
 
       # ── notarize + staple（karui と同じ App Store Connect API キー方式）──
       - name: Notarize + staple
