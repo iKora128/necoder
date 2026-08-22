@@ -16,3 +16,6 @@
 # 最終スプライトは crates/agent_panel/assets/mascot/ に、参照用の縮小スプライトは vid-*/ に残す
 /mock/mascot/neko-anim/video/
 herdr/
+
+# wrangler のローカル状態（Pages デプロイ時に作られる）
+/.wrangler/

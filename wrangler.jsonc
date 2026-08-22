@@ -1,0 +1,22 @@
+// necoder.com の LP を Cloudflare Workers（静的アセット）で配信する。
+//
+// - `lp/` をそのまま配る。`main` は無し＝アセット専用 Worker。
+// - `lp/_headers` が効く（Workers の静的アセットは `_redirects` に絶対 URL を書けないので、
+//   www → apex の 301 は張らず、www も同じ内容を返す。正規化は index.html の
+//   <link rel="canonical"> で apex 側に寄せている）。
+// - Custom Domain なので DNS レコードは Cloudflare 側が作る（zone は同一アカウント）。
+//
+// デプロイ: npx wrangler deploy
+{
+  "name": "necoder",
+  "compatibility_date": "2026-08-20",
+  "assets": {
+    "directory": "./lp",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  },
+  "routes": [
+    { "pattern": "necoder.com", "custom_domain": true },
+    { "pattern": "www.necoder.com", "custom_domain": true }
+  ]
+}

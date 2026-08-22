@@ -1,0 +1,67 @@
+/* 狭い画面向けの追補レイヤ（手書き・生成物ではない）。
+ *
+ * キャンバスの書き出しはデスクトップ幅だけを想定していて、ブレークポイントを持たない。
+ * とくに 2 カラムの grid は片側が auto（nowrap のボタン列）なので、最小幅が viewport を
+ * 超えてドキュメント全体が横に伸び、見出しが折り返さないまま切れてしまう。
+ *
+ * index.html は書き出しのたびに再生成されるので、修正はこちらに置く。
+ * レイアウトはインライン style なので上書きには !important が要る。
+ * さらに dc-runtime が CSSOM 経由で値を正規化する（minmax(0,1fr) → minmax(0px, 1fr)、
+ * min-width: 0 → min-width: 0px）ため、セレクタは「書き出し時の綴り」と
+ * 「描画後の綴り」の両方を並べてある。キャンバス側で値を変えたら合わせて直すこと。
+ */
+
+@media (max-width: 900px) {
+  /* 2 カラムはすべて 1 カラムへ */
+  [style*="minmax(0px, 1fr) auto"],
+  [style*="minmax(0,1fr) auto"],
+  [style*="auto minmax(0px, 1fr)"],
+  [style*="auto minmax(0,1fr)"],
+  [style*="minmax(0px, 5fr) minmax(0px, 7fr)"],
+  [style*="minmax(0,5fr) minmax(0,7fr)"],
+  [style*="minmax(0px, 7fr) minmax(0px, 5fr)"],
+  [style*="minmax(0,7fr) minmax(0,5fr)"] {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  [style*="repeat(3, 1fr)"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  /* Fleet の視点切替（扇形 / ツリー / カード / ハブ）は 4 つ並ぶと入らない */
+  [style*="width: fit-content"] {
+    flex-wrap: wrap !important;
+    width: 100% !important;
+  }
+}
+
+@media (max-width: 640px) {
+  /* ナビは折り返す */
+  .nav {
+    flex-wrap: wrap;
+    row-gap: 10px;
+    column-gap: 16px;
+  }
+
+  [style*="repeat(3, 1fr)"],
+  [style*="repeat(4, 1fr)"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  /* 見出しの下限値（40px / 28px）は 390px 幅には大きすぎる */
+  [style*="clamp(40px, 5.8vw, 80px)"],
+  [style*="clamp(40px,5.8vw,80px)"] {
+    font-size: clamp(29px, 8vw, 46px) !important;
+    line-height: 1.18 !important;
+  }
+  [style*="clamp(28px, 3.4vw, 42px)"],
+  [style*="clamp(28px,3.4vw,42px)"] {
+    font-size: clamp(22px, 6vw, 30px) !important;
+  }
+
+  /* エディタ風モックの中身は white-space: pre。切らずに横スクロールさせる */
+  [style*="min-width: 0px"],
+  [style*="min-width: 0;"] {
+    overflow-x: auto !important;
+  }
+}

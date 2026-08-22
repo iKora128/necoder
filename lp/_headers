@@ -1,0 +1,12 @@
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: SAMEORIGIN
+
+# アセットはファイル名にハッシュを持たない（差し替えたら名前は同じまま）ので、
+# 1 日だけ固く、その後はバックグラウンド再検証にする。
+/assets/*
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/
+  Cache-Control: public, max-age=0, must-revalidate

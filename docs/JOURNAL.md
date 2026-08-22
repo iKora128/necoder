@@ -1398,3 +1398,19 @@
 - リリース済みバイナリはゼロ（tag なし・GitHub Release なし・v0.1.0）なので、dmg 内 `.app` 名の後方互換シムは**不要**と判断して入れていない。
 - 検証: `cargo check -p necoder` / `cargo test --workspace` 緑（既存フレーキー 2 件を除く。`local_and_remote_root_render_never_call_host` と `project_switch_preserves_dirty_undo_and_child_entities` は**クリーン HEAD 183cdbb でも同様に失敗**することを worktree で確認済み＝本変更と無関係）。移行シムに単体テスト 2 本（DB サイドカーの改名 / 上書きしない引っ越し）。offscreen スクショで UI 目視。
 - 次: `necoder.ai` の確保。LP の `necoder.com` への配線と `shirushi.ai` からの 301。マスコットの固有名（nyaco）は据え置き。
+
+## 2026-08-22 — LP を necoder.com へ公開（キャンバス書き出しの展開 → Workers 静的配信）
+
+- **決定（ユーザー）**: `necoder.ai` は取らない / `shirushi.ai` は**廃止**（`necoder.com` への 301 も張らない＝まだ一度も公開していないので旧名で来る人がいない）。DECISIONS §8 の「ドメイン」「旧名の扱い」を改訂した。
+- **素材**: `~/Downloads/necoder LP.html` は Claude Design キャンバスの**バンドル書き出し**だった（14.5MB の 1 枚 HTML。画像・フォント・ランタイムを base64 で内包し、開いた瞬間に JS で解凍して blob URL へ差し替える自己解凍形式）。そのまま配ると 14.5MB を落とし切るまで何も描かれないので、**展開して普通の静的サイトに戻す**方針にした。
+- **`scripts/lp-build.mjs`（新規）**: `__bundler/manifest` `__bundler/template` `__bundler/ext_resources` を取り出し、リソースを実ファイル化して UUID 参照を書き換える。**既存 `lp/assets/**` と sha256 が一致するものは再利用**（30 件中 18 件がヒット＝キャンバスに取り込んだ元画像そのもの）。dc-runtime は React を unpkg から読むので、`window.__resources` に自前パスを差し込んで**外部 CDN 依存ゼロ**にした（Babel は JSX が無いため読まれない＝全ホストを NOTFOUND に落として描画されることで確認）。SVG は `<title>` から、フォントは `@font-face` 直前の `/* subset */` コメントから名前を作る。
+- **旧名の後追いパッチ**: `iKora128/shirushi` → `/necoder`、`Shirushi.dmg` → `necoder.dmg` を**ビルド時パッチ**として build スクリプトに持たせた（キャンバスを再書き出しすると復活するため）。**恒久対応はキャンバス側の原稿を直すこと**。日本語フォントのフォールバック追加（Archivo はラテン専用）も同じ層でやっている。
+- **`lp/assets/css/responsive.css`（新規・手書き）**: 書き出しに**ブレークポイントが 1 つも無かった**。hero の grid が `minmax(0,1fr) auto` で、auto 側（nowrap のボタン列）の最小幅が viewport を超え、**ドキュメント全体が横に伸びて見出しが折り返さず切れる**状態だった。900px / 640px の 2 段で 1 カラム化・見出し縮小・コードモックの横スクロール化。生成物（index.html）は触らず、この層だけで直す。
+- 学び/罠:
+  - **dc-runtime はインライン style を CSSOM 経由で正規化する**（`minmax(0,1fr)` → `minmax(0px, 1fr)`、`min-width: 0` → `0px`、`flex: 1` → `1 1 0%`）。`[style*="…"]` セレクタは**描画後の綴り**で書かないと当たらない（両方併記してある）。
+  - **headless Chrome の `--window-size` は幅 500px 未満に効かない**。390 を指定しても 500 幅で描画してから切り取るので、正常なページが「溢れている」ように見える。DevTools Protocol の `Emulation.setDeviceMetricsOverride` で測ること（実測で `scrollWidth == 390`・溢れ要素 0）。
+  - **Pages は API から custom domain を足しても DNS レコードを作らない**（`verification: CNAME record not set`）。wrangler の OAuth トークンは zone **read** だけで DNS を書けない＝ダッシュボード手作業になる。→ **Workers Static Assets** へ切り替えた。Custom Domain は Cloudflare 側が DNS を作るので CLI だけで完結する。
+  - **Workers の静的アセットは `_redirects` に絶対 URL を書けない**（Pages は書ける＝`https://www.example.com/*` 形式）。www → apex の 301 は諦め、www も同じ内容を返して `<link rel="canonical">` で apex に寄せた。真の 301 が要るならダッシュボードの Redirect Rules。
+- **配信構成**: `wrangler.jsonc`（リポジトリ root・`main` 無しのアセット専用 Worker・`assets.directory = ./lp`）+ `lp/_headers`（セキュリティヘッダ / アセットは 1 日キャッシュ + SWR）。`necoder.com` と `www.necoder.com` を Custom Domain で接続。中継で作った Pages プロジェクトは削除済み。デプロイは `npx wrangler deploy`。
+- 検証: `necoder.com` / `www.necoder.com` とも 200・HTTPS・`_headers` 適用を確認。1440px と 390px で目視。
+- 次（**人の手番**）: ① CTA の行き先が `github.com/iKora128/necoder/releases`＝**private レポ + Release ゼロ**で、公開訪問者には 404。レポ公開・初回 Release・それまで noindex にするか、の順番を決める。② デモ画像の中の UI に旧名 `shirushi` が写っている（タイトルバー・ファイルツリーの `.shirushi`）＝再撮影が要る。
