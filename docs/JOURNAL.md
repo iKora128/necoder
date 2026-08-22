@@ -1414,3 +1414,19 @@
 - **配信構成**: `wrangler.jsonc`（リポジトリ root・`main` 無しのアセット専用 Worker・`assets.directory = ./lp`）+ `lp/_headers`（セキュリティヘッダ / アセットは 1 日キャッシュ + SWR）。`necoder.com` と `www.necoder.com` を Custom Domain で接続。中継で作った Pages プロジェクトは削除済み。デプロイは `npx wrangler deploy`。
 - 検証: `necoder.com` / `www.necoder.com` とも 200・HTTPS・`_headers` 適用を確認。1440px と 390px で目視。
 - 次（**人の手番**）: ① CTA の行き先が `github.com/iKora128/necoder/releases`＝**private レポ + Release ゼロ**で、公開訪問者には 404。レポ公開・初回 Release・それまで noindex にするか、の順番を決める。② デモ画像の中の UI に旧名 `shirushi` が写っている（タイトルバー・ファイルツリーの `.shirushi`）＝再撮影が要る。
+
+## 2026-08-22 — LP を ja/en 自動切替 + ダークモードへ（アプリ側の i18n 漏れも回収）
+
+- **アプリ: 表示言語が OS 設定で決まるようになった**。macOS の GUI 起動は Launch Services 経由でシェルを通らない＝**`LANG` が無い**ので、環境変数だけを見ていた `detect_os_locale` は日本語 Mac でも FALLBACK の `en` に落ちていた（この開発機がまさに `AppleLanguages=ja-JP` / `LANG=C.UTF-8`）。`sys-locale`（MIT/Apache・gpui→cosmic-text 経由で lock 済み）で OS の表示言語を読むように変更。優先順は `NECODER_LOCALE` → OS 表示言語 → `LC_ALL`/`LC_MESSAGES`/`LANG` → FALLBACK。
+- **アプリ: 英語 UI に残っていた日本語を 17 箇所 + α 回収**。Fleet のトースト・explorer のエラー・履歴 Picker の「閉」・`エラー:` 前置き・**要約 oneshot と監督のプロンプト**（英語 UI なのに日本語で要約が返ってきていた）。既定スレッド名と監督スレッド名はロケール追従にしつつ、**照合は同梱ロケール全部**で行う（名前は保存済みのユーザーデータ＝言語を切り替えても取り違えない・二重に作らない）。`ensure_named_thread` に `aliases` を追加。
+- **LP: ja/en の 2 ページ + エッジでの自動振り分け**。`lp/index.html`（ja・canonical）と `lp/en/index.html`。訳は `lp/i18n/en.json`（キー = 書き出しの日本語そのもの・98 件）で、build が**長い順に置換**して `en/` を吐く（短い語が長い文を先に食わないため）。訳し漏れは build が警告する。hreflang は ja / en / x-default。
+- **LP: ダークモード**。書き出しの配色が `:root` のトークン（`--color-bg` / `--color-text` / `--color-accent` / `--color-divider` / `--color-surface`）に集約されていたので、`lp/assets/css/theme.css`（手書き層）で**トークンだけ差し替える**。既定は OS 追従、ナビのトグルで明示指定すると `data-theme` + localStorage が勝つ。エディタ風モックの中の色は「アプリの dark UI そのもの」なので反転しない。
+- 学び/罠:
+  - **アクセント面の上の文字**: 書き出しの markup は「赤地の上の文字色」に `var(--color-bg)` を使っている。素直に反転すると暗字 on 赤になる。要素側で `--color-bg: var(--color-on-accent)` と**ローカルに読み替える**と、面の `background: var(--color-accent)` はそのままに、中の見出し・ボタンの文字/枠まで継承で一気に直る。
+  - **ナビに足したトグルは React の再描画に耐えるように**: dc-runtime が state 更新で描き直すので、要素に直接ハンドラを付けると外れる。markup はテンプレートに差し込み、クリックは `document` への委譲で拾う。
+  - **Pages と Workers で `_redirects` の書式が違う**: Pages は `https://www.example.com/*` と絶対 URL を書けるが、**Workers の静的アセットは相対 URL のみ**（デプロイが `code: 100324` で落ちる）。www → apex の 301 は諦め、canonical で寄せた。
+  - **`wrangler dev` は同梱 workerd が受け付ける compatibility_date までしか起動しない**（4.90.0 は 2026-05-14 まで）。未来日を書くと `wrangler deploy` は通るのにローカルで一切試せなくなる。
+  - **クローラは `Accept-Language` を送らないことが多い**。ヘッダ無しを en に倒すと `/` が常に `/en/` へ 302 され、**canonical の日本語ページが一度も読まれない**。「日本語より強く望まれた言語がある時だけ en」に倒すのが正解。
+  - **headless Chrome の `--window-size` は幅 500px 未満に効かない**（390 指定でも 500 で描いて切り取る）。狭い画面は CDP の `Emulation.setDeviceMetricsOverride` で測ること。
+- 検証: `cargo check --workspace` 緑 / i18n 6・agent_panel 18 green（workspace は既知フレーキー 2 件のみ）。`NECODER_LOCALE=en` を新規プロファイルで offscreen 撮影して英語 UI を目視。LP は `wrangler dev` で Accept-Language / cookie / `?lang=` の 7 ケースを確認し、本番でも ja=200 / en=302→/en/ / `/en/`=200 / sitemap 2 本 を確認。1440・390 とライト/ダークで目視。
+- 次（**人の手番**）: ① Cloudflare Web Analytics（wrangler の OAuth トークンでは触れない＝ダッシュボードで necoder.com を「自動セットアップ」にすればコード変更なしで入る）。② Search Console の所有権確認トークン（HTML meta 方式なら `scripts/lp-build.mjs` の `headMeta` に 1 行足すだけ）。③ CTA の GitHub Releases はまだ private + Release ゼロで 404。④ デモ画像の中の UI に旧名 `shirushi` が写っている（再撮影）。

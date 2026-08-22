@@ -39,21 +39,104 @@ const FONT_STACK_PATCHES = [
   ],
 ];
 
+// テーマ: 既定は OS 追従、ナビのトグルで明示指定したらそれを localStorage に憶える。
+// <head> で流すのは、描画前に data-theme を当てて明→暗のチラつきを消すため。
+// クリックは document への委譲にしてある（ナビは dc-runtime が React で描き直すので、
+// 要素に直接ハンドラを付けると再描画で外れる）。
+const THEME_SCRIPT = `<script>
+(function () {
+  var KEY = 'necoder-theme';
+  var root = document.documentElement;
+  function apply(theme) {
+    if (theme === 'dark' || theme === 'light') root.setAttribute('data-theme', theme);
+    else root.removeAttribute('data-theme');
+  }
+  function stored() { try { return localStorage.getItem(KEY); } catch (error) { return null; } }
+  apply(stored());
+  document.addEventListener('click', function (event) {
+    var target = event.target;
+    var button = target && target.closest ? target.closest('.theme-toggle') : null;
+    if (!button) return;
+    var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var current = root.getAttribute('data-theme') || (systemDark ? 'dark' : 'light');
+    var next = current === 'dark' ? 'light' : 'dark';
+    if ((next === 'dark') === systemDark) {
+      // OS 設定と同じに戻った → 記憶を捨てて「OS 追従」へ戻す
+      try { localStorage.removeItem(KEY); } catch (error) {}
+      apply(null);
+      return;
+    }
+    try { localStorage.setItem(KEY, next); } catch (error) {}
+    apply(next);
+  });
+})();
+<\/script>`;
+
+/// ナビに挿すテーマトグル（記号は「押すと切り替わる先」を出す。CSS 側で出し分け）。
+const THEME_TOGGLE =
+  '<button class="theme-toggle" type="button" aria-label="テーマを切り替え">' +
+  '<span class="theme-toggle-to-dark" aria-hidden="true">\u263E</span>' +
+  '<span class="theme-toggle-to-light" aria-hidden="true">\u2600</span>' +
+  '</button>';
+
 const SITE_URL = 'https://necoder.com';
-const HEAD_META = `<title>necoder — AI エージェント時代の、次世代コードエディタ</title>
-<meta name="description" content="色分け UI で、どの AI が走りどれに指示しているかが一目でわかる。ACP 対応のエージェントが契約中のサブスクのまま動く、Rust + GPUI 製のネイティブコードエディタ。">
-<link rel="canonical" href="${SITE_URL}/">
-<link rel="icon" href="assets/img/favicon.png">
+const HREFLANG = `<link rel="alternate" hreflang="ja" href="${SITE_URL}/">
+<link rel="alternate" hreflang="en" href="${SITE_URL}/en/">
+<link rel="alternate" hreflang="x-default" href="${SITE_URL}/">`;
+
+// 共通の <head>（言語ごとに title/description/canonical だけ差し替える）。
+const headMeta = ({ title, description, ogDescription, canonical, locale }) => `<title>${title}</title>
+<meta name="description" content="${description}">
+<link rel="canonical" href="${canonical}">
+${HREFLANG}
+<link rel="icon" href="/assets/img/favicon.png">
 <meta property="og:type" content="website">
-<meta property="og:url" content="${SITE_URL}/">
+<meta property="og:url" content="${canonical}">
 <meta property="og:site_name" content="necoder">
-<meta property="og:title" content="necoder — AI エージェント時代の、次世代コードエディタ">
-<meta property="og:description" content="色分け UI・ACP 対応エージェント・Rust + GPUI のネイティブ性能。AI と並走するためのコードエディタ。">
+<meta property="og:title" content="${title}">
+<meta property="og:description" content="${ogDescription}">
 <meta property="og:image" content="${SITE_URL}/assets/img/hero.png">
-<meta property="og:locale" content="ja_JP">
+<meta property="og:locale" content="${locale}">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="theme-color" content="#faf7f2">
-<link rel="stylesheet" href="assets/css/responsive.css">`;
+<meta name="theme-color" content="#f3f2f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171514" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="/assets/css/theme.css">
+<link rel="stylesheet" href="/assets/css/responsive.css">
+${THEME_SCRIPT}`;
+
+// 出力する 2 ページ。ja が正（canonical / x-default）、en は /en/ に置く。
+const PAGES = [
+  {
+    lang: 'ja',
+    dir: '',
+    translate: null,
+    switchTo: { href: '/?lang=en', hreflang: 'en', label: 'EN', title: 'Read this page in English' },
+    meta: {
+      title: 'necoder — AI エージェント時代の、次世代コードエディタ',
+      description:
+        '色分け UI で、どの AI が走りどれに指示しているかが一目でわかる。ACP 対応のエージェントが契約中のサブスクのまま動く、Rust + GPUI 製のネイティブコードエディタ。',
+      ogDescription:
+        '色分け UI・ACP 対応エージェント・Rust + GPUI のネイティブ性能。AI と並走するためのコードエディタ。',
+      canonical: `${SITE_URL}/`,
+      locale: 'ja_JP',
+    },
+  },
+  {
+    lang: 'en',
+    dir: 'en',
+    translate: 'lp/i18n/en.json',
+    switchTo: { href: '/?lang=ja', hreflang: 'ja', label: '日本語', title: 'このページを日本語で読む' },
+    meta: {
+      title: 'necoder — the next-generation code editor for the AI agent era',
+      description:
+        'A color-coded UI shows which AI is running and which one you are talking to. ACP-compatible agents run on the subscription you already have. Native code editor built in Rust + GPUI.',
+      ogDescription:
+        'Color-coded UI, ACP-compatible agents, native Rust + GPUI performance. A code editor for working alongside AI.',
+      canonical: `${SITE_URL}/en/`,
+      locale: 'en_US',
+    },
+  },
+];
 
 const MIME_EXT = {
   'image/svg+xml': 'svg', 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
@@ -153,8 +236,9 @@ for (const [target, bytes] of writes) {
   fs.writeFileSync(full, bytes);
 }
 
-// ── テンプレートを書き換える ──────────────────────────────────────────────
-for (const [uuid, target] of rewrites) template = template.replaceAll(uuid, target);
+// ── テンプレートを書き換える（言語共通の部分）──────────────────────────────
+// アセットはルート絶対で参照する。/en/ からも同じ 1 本を指すため。
+for (const [uuid, target] of rewrites) template = template.replaceAll(uuid, `/${target}`);
 
 for (const [before, after] of [...COPY_PATCHES, ...FONT_STACK_PATCHES]) {
   const hits = template.split(before).length - 1;
@@ -162,37 +246,97 @@ for (const [before, after] of [...COPY_PATCHES, ...FONT_STACK_PATCHES]) {
   template = template.replaceAll(before, after);
 }
 
-template = template.replace('<html>', '<html lang="ja">');
-
 // dc-runtime は React を unpkg から読む。__resources に自前パスを入れると
 // そちらを使うので、外部 CDN 依存なしで動く。
-const resourceShim = `<script>window.__resources=${JSON.stringify(resourceMap)};</script>`;
-template = template.replace(
-  '<script src="assets/js/dc-runtime.js"></script>',
-  `${HEAD_META}\n${resourceShim}\n<script src="assets/js/dc-runtime.js"></script>`,
-);
+const resourceShim = `<script>window.__resources=${JSON.stringify(
+  Object.fromEntries(Object.entries(resourceMap).map(([url, target]) => [url, `/${target}`])),
+)};</script>`;
 
-const indexPath = path.join(lpRoot, 'index.html');
-fs.writeFileSync(indexPath, template);
+// ナビのダウンロードボタンの直前に、テーマトグルと言語切替を挿す。書き出しの markup には
+// 無いので足すが、素の <button> / <a> なので dc-runtime（React）はそのまま描画する。
+const navDownloadButton =
+  '<a class="btn btn-primary" href="https://github.com/iKora128/necoder/releases" style="white-space: nowrap; text-decoration: none">';
+if (!template.includes(navDownloadButton)) {
+  console.warn('  ⚠ ナビのダウンロードボタンが見つからず、トグル類を挿せなかった');
+}
 
-// sitemap は 1 ページだけ。lastmod をビルド日に保つのが目的なので毎回書き出す。
+const jpText = /[ぁ-んァ-ヶ一-龥]/;
+
+for (const page of PAGES) {
+  let html = template;
+
+  const languageSwitch =
+    `<a class="lang-switch" href="${page.switchTo.href}" hreflang="${page.switchTo.hreflang}"` +
+    ` title="${page.switchTo.title}">${page.switchTo.label}</a>`;
+  html = html.replace(
+    navDownloadButton,
+    `${languageSwitch}\n    ${THEME_TOGGLE}\n    ${navDownloadButton}`,
+  );
+
+  html = html.replace(
+    '<script src="/assets/js/dc-runtime.js"></script>',
+    `${headMeta(page.meta)}\n${resourceShim}\n<script src="/assets/js/dc-runtime.js"></script>`,
+  );
+  html = html.replace('<html>', `<html lang="${page.lang}">`);
+
+  if (page.translate) {
+    const dictionary = JSON.parse(fs.readFileSync(path.join(repoRoot, page.translate), 'utf8'));
+    // 長い順に置換する。短い語（"色"）が長い文の一部を先に食うのを避けるため。
+    const entries = Object.entries(dictionary)
+      .filter(([key]) => !key.startsWith('_'))
+      .sort((a, b) => b[0].length - a[0].length);
+    let replaced = 0;
+    for (const [before, after] of entries) {
+      const hits = html.split(before).length - 1;
+      replaced += hits;
+      if (hits > 0) html = html.replaceAll(before, after);
+    }
+    // 訳し漏れ（= キャンバスに文言を足したのに en.json を更新していない）を出す。
+    // <script> の中（自前スクリプトの日本語コメント）と、言語切替リンク自体は対象外。
+    const scanned = html
+      .replace(/<script[\s\S]*?<\/script>/g, '')
+      .replaceAll(languageSwitch, '');
+    const untranslated = new Set();
+    for (const match of scanned.matchAll(/>([^<>]+)</g)) {
+      const text = match[1].trim();
+      if (text && jpText.test(text)) untranslated.add(text);
+    }
+    for (const match of scanned.matchAll(/(alt|aria-label|title|content)="([^"]*)"/g)) {
+      if (jpText.test(match[2])) untranslated.add(`[${match[1]}] ${match[2]}`);
+    }
+    console.log(`  en: ${replaced} 箇所を置換`);
+    if (untranslated.size > 0) {
+      console.warn(`  ⚠ en に日本語が ${untranslated.size} 件残っている（lp/i18n/en.json に追記して）:`);
+      for (const text of untranslated) console.warn(`     ${text.slice(0, 70)}`);
+    }
+  }
+
+  const outDir = path.join(lpRoot, page.dir);
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, 'index.html'), html);
+  console.log(`lp/${page.dir ? `${page.dir}/` : ''}index.html (${(html.length / 1024).toFixed(1)}KB)`);
+
+  const leftover = [...html.matchAll(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g)];
+  if (leftover.length > 0) console.warn(`  ⚠ 未解決の UUID が ${leftover.length} 件残っている`);
+}
+
+// sitemap は ja / en の 2 本。lastmod をビルド日に保つのが目的なので毎回書き出す。
 const today = new Date().toISOString().slice(0, 10);
+const urls = PAGES.map(
+  (page) => `  <url>
+    <loc>${page.meta.canonical}</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>weekly</changefreq>
+  </url>`,
+).join('\n');
 fs.writeFileSync(
   path.join(lpRoot, 'sitemap.xml'),
   `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>${SITE_URL}/</loc>
-    <lastmod>${today}</lastmod>
-    <changefreq>weekly</changefreq>
-  </url>
+${urls}
 </urlset>
 `,
 );
 
-const leftover = [...template.matchAll(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g)];
-if (leftover.length > 0) console.warn(`  ⚠ 未解決の UUID が ${leftover.length} 件残っている`);
-
-console.log(`\nlp/index.html (${(template.length / 1024).toFixed(1)}KB)`);
-console.log(`新規アセット ${writes.length} 件 / 既存流用 ${rewrites.size - writes.length} 件`);
+console.log(`\n新規アセット ${writes.length} 件 / 既存流用 ${rewrites.size - writes.length} 件`);
 for (const [target, bytes] of writes) console.log(`  + ${target} (${(bytes.length / 1024).toFixed(1)}KB)`);

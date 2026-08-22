@@ -6,14 +6,22 @@
 //   <link rel="canonical"> で apex 側に寄せている）。
 // - Custom Domain なので DNS レコードは Cloudflare 側が作る（zone は同一アカウント）。
 //
+// - `/` だけ worker/index.js を通し、Accept-Language と cookie で ja / en を振り分ける。
+//
 // デプロイ: npx wrangler deploy
 {
   "name": "necoder",
-  "compatibility_date": "2026-08-20",
+  "main": "worker/index.js",
+  // ローカル実行（wrangler 同梱の workerd）が受け付ける最新日。ここを未来日にすると
+  // `wrangler dev` が起動しない。wrangler を上げたら合わせて進めること。
+  "compatibility_date": "2026-05-14",
   "assets": {
     "directory": "./lp",
+    "binding": "ASSETS",
     "html_handling": "auto-trailing-slash",
-    "not_found_handling": "none"
+    "not_found_handling": "none",
+    // Worker が走るのはトップだけ（言語振り分け）。ほかは素の静的配信のまま。
+    "run_worker_first": ["/"]
   },
   "routes": [
     { "pattern": "necoder.com", "custom_domain": true },

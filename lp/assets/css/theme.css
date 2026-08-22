@@ -1,0 +1,139 @@
+/* ダークモード（手書きレイヤ・生成物ではない）。
+ *
+ * キャンバスの書き出しはライト固定。ただし配色は :root のトークン
+ * （--color-bg / --color-text / --color-accent / --color-divider / --color-surface）に
+ * 集約されているので、**トークンだけを差し替える**。個々の要素には触らない。
+ *
+ * 既定は OS 設定に追従し、ナビのトグルで明示指定した時だけ data-theme が勝つ。
+ * エディタ風モックの中の色（#101218 等）は「アプリの dark UI そのもの」なので反転しない。
+ */
+
+:root {
+  /* フォーム・スクロールバー・既定の枠線もテーマに追従させる */
+  color-scheme: light dark;
+
+  /* アクセント面の上に載る文字色。書き出しの markup は色に var(--color-bg) を使っている
+     ので、下の「アクセント面ではローカルに --color-bg を差し替える」で効かせる。 */
+  --color-on-accent: #f3f2f2;
+
+  /* ダーク側の値はここに 1 度だけ置き、下の 2 つの入口から参照する
+     （OS 追従 / トグルでの明示指定）。 */
+  --dark-bg: #171514;
+  --dark-surface: #211f1e;
+  --dark-text: #f2efed;
+  --dark-accent: #f0421f;
+  --dark-accent-2: #ef6853;
+  --dark-divider: color-mix(in srgb, #f2efed 30%, transparent);
+}
+
+/* アクセントを敷いた面の中だけ --color-bg を「アクセント上の文字色」に読み替える。
+   面自体の background: var(--color-accent) には影響しない（別トークン）。
+   カスタムプロパティは継承するので、中の見出し・ボタンの文字/枠もまとめて正しくなる。 */
+.btn-primary,
+.seg-opt:has(input:checked),
+[style*="background: var(--color-accent)"] {
+  --color-bg: var(--color-on-accent);
+}
+
+/* ── ダークの中身（2 つの入口から同じ定義を参照する）────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg: var(--dark-bg);
+    --color-surface: var(--dark-surface);
+    --color-text: var(--dark-text);
+    --color-accent: var(--dark-accent);
+    --color-accent-2: var(--dark-accent-2);
+    --color-divider: var(--dark-divider);
+
+    --color-neutral-100: #2d2b2b;
+    --color-neutral-200: #444141;
+    --color-neutral-300: #605d5d;
+    --color-neutral-400: #7d7979;
+    --color-neutral-600: #bab6b6;
+    --color-neutral-700: #d7d3d3;
+    --color-neutral-800: #eae7e7;
+    --color-neutral-900: #f8f4f4;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.55);
+    --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.68);
+  }
+}
+
+:root[data-theme="dark"] {
+  --color-bg: var(--dark-bg);
+  --color-surface: var(--dark-surface);
+  --color-text: var(--dark-text);
+  --color-accent: var(--dark-accent);
+  --color-accent-2: var(--dark-accent-2);
+  --color-divider: var(--dark-divider);
+
+  --color-neutral-100: #2d2b2b;
+  --color-neutral-200: #444141;
+  --color-neutral-300: #605d5d;
+  --color-neutral-400: #7d7979;
+  --color-neutral-600: #bab6b6;
+  --color-neutral-700: #d7d3d3;
+  --color-neutral-800: #eae7e7;
+  --color-neutral-900: #f8f4f4;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.55);
+  --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.68);
+}
+
+/* ── ナビに足したコントロール（言語切替 / テーマトグル）───────────────── */
+.lang-switch {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  padding: 5px 9px;
+  border: 1px solid var(--color-divider);
+  color: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.lang-switch:hover {
+  border-color: var(--color-text);
+  color: var(--color-accent);
+}
+
+/* ── ナビのトグル ────────────────────────────────────────────────────── */
+.theme-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--color-divider);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.theme-toggle:hover {
+  border-color: var(--color-text);
+}
+
+/* いま出ていないテーマの記号を見せる（押すと切り替わる先を示す） */
+.theme-toggle .theme-toggle-to-dark { display: block; }
+.theme-toggle .theme-toggle-to-light { display: none; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-toggle .theme-toggle-to-dark { display: none; }
+  :root:not([data-theme="light"]) .theme-toggle .theme-toggle-to-light { display: block; }
+}
+
+:root[data-theme="dark"] .theme-toggle .theme-toggle-to-dark { display: none; }
+:root[data-theme="dark"] .theme-toggle .theme-toggle-to-light { display: block; }
+:root[data-theme="light"] .theme-toggle .theme-toggle-to-dark { display: block; }
+:root[data-theme="light"] .theme-toggle .theme-toggle-to-light { display: none; }
+
+/* 画像は暗い面で少しだけ落ち着かせる（白い縁が浮くのを抑える） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) figure img { filter: brightness(0.94); }
+}
+:root[data-theme="dark"] figure img { filter: brightness(0.94); }
