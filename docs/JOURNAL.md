@@ -1430,3 +1430,447 @@
   - **headless Chrome の `--window-size` は幅 500px 未満に効かない**（390 指定でも 500 で描いて切り取る）。狭い画面は CDP の `Emulation.setDeviceMetricsOverride` で測ること。
 - 検証: `cargo check --workspace` 緑 / i18n 6・agent_panel 18 green（workspace は既知フレーキー 2 件のみ）。`NECODER_LOCALE=en` を新規プロファイルで offscreen 撮影して英語 UI を目視。LP は `wrangler dev` で Accept-Language / cookie / `?lang=` の 7 ケースを確認し、本番でも ja=200 / en=302→/en/ / `/en/`=200 / sitemap 2 本 を確認。1440・390 とライト/ダークで目視。
 - 次（**人の手番**）: ① Cloudflare Web Analytics（wrangler の OAuth トークンでは触れない＝ダッシュボードで necoder.com を「自動セットアップ」にすればコード変更なしで入る）。② Search Console の所有権確認トークン（HTML meta 方式なら `scripts/lp-build.mjs` の `headMeta` に 1 行足すだけ）。③ CTA の GitHub Releases はまだ private + Release ゼロで 404。④ デモ画像の中の UI に旧名 `shirushi` が写っている（再撮影）。
+
+## 2026-08-22 — W0 完了（Windows 実機でエラー全量を測定）＋ WINDOWS-PORT.md の穴を 3 つ塞いだ
+
+- やったこと:
+  - **Windows 実機（ネイティブ・WSL ではない）で `cargo check --workspace --all-targets --keep-going` を実測**。環境は rustc 1.95.0（host `x86_64-pc-windows-msvc`）/ VS Build Tools 2022（VC.Tools.x86.x64）/ Windows SDK 10.0.26100 / git.exe。`CARGO_TARGET_DIR=target-win` で mac・WSL の `target/` と分離。
+  - **結果: necoder 側 20 crate のうち 19 が Windows で check green**。落ちるのは `workspace` の **1 エラーだけ**:
+    - `crates/workspace/src/workspace/control_ipc.rs:22` — `use std::os::unix::net::{UnixListener, UnixStream}`（E0433）
+    - `necoder`（bin）は `workspace` に依存するため**未到達＝まだ測れていない**（`fleet.rs:86` の Unix socket は予測どおり残っているはず）
+  - **要注意依存はすべて Windows で通った**（W0 の 2 つ目の受入条件）。代替の検討は**不要**だった:
+    - `gpui_windows` **コンパイル成功**（DirectX + DirectWrite 経路が実在して通る）／`gpui_platform` check 成功
+    - `turso` 成功 = **`rusqlite` への退避は不要**／`alacritty_terminal` 成功（ConPTY）／tree-sitter grammar 17 本が cc→MSVC で成功／`windows-sys` 成功／`libmimalloc-sys` の build script も成功
+    - `font-kit` は Windows では**そもそもビルドされない**（gpui が DirectWrite を使う＝mac の font-kit 相当は不要）
+  - **`host` crate が green** = 既存の `#[cfg(unix)]` ゲートが効いており、Remote SSH は Windows で素直にコンパイル除外されている（§D6 の前提が実測で裏付いた）
+  - **W2 の「警告 0」に向けた現存警告 5 件**（Windows のみ・unix 経路が cfg で消えた副作用）: `shell_env.rs:27,28,29`（未使用 import: `Command`/`Stdio`・`std::sync::mpsc`・`std::time::Duration`）／`updater.rs:177`（不要な `mut`）／`host.rs:2438`（`connect_io` が never used）
+  - **`WINDOWS-PORT.md` の穴を 3 つ塞いだ**（詳細は各節）:
+    1. **§D3 の分岐キー** — `sh -c` 10 箇所のうち 9 箇所は `host::CommandSpec` → `run_command` 経由で**ローカルにもリモート Linux にも同じ呼び出しで飛ぶ**。`cfg!(target_os)` で分岐すると Windows→Linux に `cmd.exe` を送る。判定は「実行先 host の OS」で行う旨を明記
+    2. **§W5 の対象** — windows ジョブがあるのは `release.yml` だけ（tag push か手動でしか走らない）＝`continue-on-error` を外しても PR は止まらない。受入条件を「**`ci.yml` に `check-windows` を新設**」へ差し替え（`ci.yml` の 4 ジョブに windows は無い）
+    3. **§4 に CRLF 節を新設** — 実機で `core.autocrlf=true`（Git for Windows のシステム gitconfig・**インストーラ既定**）＋ **`.gitattributes` 無し**を確認。W4 の「gutter が全行 Modified」は**確定で起きる**。`.gitattributes` での回避は「necoder が開くのは他人のリポジトリ」なので**採れない**＝**gutter 比較前の LF 正規化が唯一の道**
+  - `.github/workflows/release.yml` の windows ジョブ先頭に `cargo check --workspace --all-targets --keep-going`（step 側 `continue-on-error: true`）を追加。`cargo build --release -p necoder` だけでは `necoder` とその依存しか見えずエラー全量が取れないため
+
+- 学び/罠:
+  - **`--keep-going` が無いと現在地を測れない**。素の `cargo check --workspace` は**最初に落ちた crate で停止**する（実測: `workspace` で止まり `necoder` 本体に到達しなかった）
+  - **ただし `--keep-going` でも「壊れた crate の下流」は測れない**。下流は上流のメタデータが要るため。**W0 のインベントリは本質的に反復**（1 個直す → 次の層が見える）。「一度で全量」は原理的に無理なので、そう書いてある受入条件は「その時点で見える全量」と読む
+  - **この機械の `python` / `python3` は Windows Store のスタブ**（実行すると `Python` とだけ出て exit 49）。YAML の機械検証などに使えない
+  - **Git Bash の `/usr/bin/link` が MSVC の `link.exe` を PATH で隠す**。ビルドは PowerShell から回すこと（`cargo check` は link しないので今回は無事だったが、build script は実行ファイルを作る＝link する）
+  - WSL の `/mnt/c/...` と PowerShell の `C:\...` は**同じ実体**なので再 clone 不要。ただし `target/` の奪い合いを避けるため `CARGO_TARGET_DIR` の分離は必須（`/target-win/` を .gitignore 済み）
+
+- 次: **W1（`paths` crate）**。ただし `necoder`（bin）のエラーがまだ測れていないので、W2 の `control_ipc.rs` + `fleet.rs` の transport 抽象を先に当てて**測定を解除する**のも手（W1 と W2 の順序はここで入れ替えてよい）。W1 の本質は Windows ではなく「**Linux で `~/Library/Application Support/` を作る現行バグ**」なので、どちらにせよ公開前に必須。
+
+## 2026-08-22 — W1（paths crate）+ W2（Windows コンパイル通し）完走。Windows 実機で 235 テスト green
+
+- やったこと:
+  - **W1 `paths` crate 新設**（依存ゼロ・foundation 最下層）。`HOME` 直読み 19 箇所と `Library/Application Support` ハードコード 9 ファイルを全部ここへ集約。**mac の戻り値は 1 文字も変えていない**（§D8）。
+    - **設計を文書より 1 段踏み込んだ**: 分岐の核を `*_on` 系（`Platform` と環境変数取得関数を**引数で受ける**）にした。`#[cfg(target_os = "macos")]` でテストを切ると **mac の期待値が mac でしか検証されず**、「mac を壊していないこと」を Windows/Linux の CI が保証できないため。**23 テストが全プラットフォームで走る**。
+    - `NECODER_HOME` で config/data/state/cache を根から差し替え。互換の `NECODER_LOG_DIR` / `NECODER_CRASH_DIR` / `NECODER_SHELL_PATH_CACHE` / `NECODER_GUI_SOCK` も維持。
+    - Windows は **Roaming（設定）と Local（DB・ログ）を分離**。Linux は XDG。「Linux で macOS のディレクトリを作る」現行バグも同時に消えた。
+  - **`paths::canonicalize` を追加**（W1 の想定外・実害があった）。Windows の `std::fs::canonicalize` は **verbatim 形式**（`\?\C:\…`）を返すが `git rev-parse --show-toplevel` は通常形（`C:/…`）＝ `Path` として**等しくない**。同じファイルが別物扱いになり **git status の色が付かない・タブが二重に開く**。verbatim を剥がして揃える。`std::fs::canonicalize` 17 箇所を全置換。
+  - **W2 IPC の transport 抽象化**（§D2）: `crates/workspace/src/workspace/control_transport.rs` 新設。`ControlListener` / `ControlStream`。
+    - Windows は `windows-sys` の Win32 直叩き（`CreateNamedPipeW` / `ConnectNamedPipe` / `PeekNamedPipe` / `WaitNamedPipeW`）。**TCP loopback は採らない**（§D2）。
+    - **`FILE_FLAG_FIRST_PIPE_INSTANCE` で二重 bind を検出**＝unix の「socket ファイルが残っているだけか生きているか」判定より確実。`PIPE_REJECT_REMOTE_CLIENTS` でネットワーク越しを拒否。
+    - `try_clone`（＝`DuplicateHandle`）を避けるため `serve_connection` を「BufReader が所有 → `get_mut()` で書き戻す」形に変更（1 接続 1 往復なので読み書き同時は不要）。
+    - **4 テストが Windows 実機で green**（往復・二重 bind 拒否・listener 不在・読み取りタイムアウト）＝ FFI が実際に動くことを機械で確認。
+  - **W2 D3 の seam**: `Host::shell_script()` / `Host::has_posix_shell()` を新設し、**分岐を Host に持たせた**。`LocalHost` だけが `cfg!(windows)` を見る。
+  - **`ci.yml` に `check-windows` を新設**（W5 の一部を前倒し）。`RUSTFLAGS=-D warnings` + `cargo test --workspace`。**checkout より前**に `core.autocrlf=false`。
+  - `find_executable` に **PATHEXT 対応**（`claude` ではなく `claude.cmd` / `.exe` / `.bat`）。W4 の ACP 起動で効く。
+
+- 学び/罠:
+  - **`Path::is_absolute()` は実行中 OS の規則で判定する**。paths crate の XDG 判定でこれを使ったら、Windows 上で `/custom/config` が「相対パス」と見なされてテストが落ちた。**この crate が防ごうとしているバグそのもの**。`is_posix_absolute()`（先頭が `/` か）を自前で持つのが正解。同じ罠が `url` crate の `to_file_path` にもある（下記）。
+  - **Path の比較で `/` と `\` の違いは問題にならない**（Windows は両方を区切りとして扱うのでコンポーネント比較で一致する）。食い違うのは **verbatim プレフィクスだけ**。ここを取り違えると無駄な正規化を書くことになる。
+  - **`std::fs::canonicalize` は Windows で `\?\` を付ける**。外部コマンド（git）の出力とは絶対に一致しない。**必ず剥がしてから比較する**。
+  - **bash 経由の perl / heredoc にバックスラッシュを含む置換文字列を渡すと壊れる**。`\.\pipe\necoder` が `\.pipe` + 改行（`\n` が解釈された）になった。**バックスラッシュを含む編集は Edit/Write ツールで**行うこと。
+  - **`url` crate の `to_file_path` / `from_file_path` も実行中 OS の規則**。`file:///x/lib.rs` は Windows では `None` になる（ドライブレターが要る）。lang の LSP テスト 3 本がこれで落ちたが、**実装は正しくテストの固定値が POSIX 偏重だった**。
+  - **テストが周囲の global git 設定に依存していた**。`core.autocrlf=true`（Windows の Git インストーラ既定）で checkout が CRLF になり `"done\n"` ≠ `"done\r\n"`。テスト用リポジトリで `core.autocrlf=false` を固定した＝**mac でも環境非依存になった**（元から潜在的にフレーキーだった）。
+  - **`sh -c` の 9/10 は `host::CommandSpec` 経由でリモートにも飛ぶ**。`acp_client.rs:621` は `if !host.is_remote()` の内側＝**必ずリモート**なので `sh` のままが正しい。`cfg!(windows)` で「直す」と壊れる。コメントで明示した。
+
+  - **`.ps1` は UTF-8 BOM 付きでなければならない**。Windows PowerShell 5.1 は **BOM 無しをシステム ANSI（日本語環境では Shift-JIS）として読む**ので、日本語コメント入りの `.ps1` は文字化けどころか**構文ごと壊れて実行できない**。W5 のスクリプト 3 本が最初これで全滅した。厄介なのは ① **編集ツールが BOM を落とす**ので一度直しても再発する ② **`pwsh`(7) は BOM 無しでも読める**ので手元では気づけないこと。→ `ci.yml` に **`shell: powershell`(5.1) でパースする**チェックを常設した（既定の pwsh で回すとチェックの意味が消えるのでシェル指定を外さないこと）。
+  - **`Start-Process -Environment` は PowerShell 7.4 以降にしか無い**。5.1 で子プロセスへ環境変数を渡すには呼び出し側の `$env:` に置いて継承させる。
+
+- 検証: **Windows 実機で `cargo check --workspace --all-targets` エラー 0・警告 0 / `cargo test --workspace` 235 テスト green**。`paths` 23 / `control_transport` 4 を含む。CI と同条件（`RUSTFLAGS=-D warnings`）の check も別 target で exit 0 を確認。`scripts/*.ps1` 3 本は Windows PowerShell 5.1 のパーサで構文 OK。
+
+- 次（**人の手番 / mac が要る**）: ① **mac での非退行確認**（`cargo test --workspace` + 起動して設定・スレッド履歴が従来どおり読めるか）— この環境に mac が無いので未実施。`.rs` を触っているので W フェーズの鉄則どおり必須。② **W3**（起動して編集・保存・IME・keymap 既定）は GUI 実機が要る。③ W4 の ACP は `claude.cmd` の**起動**側（`CreateProcess` は `.cmd` を直接実行できない）が未対応 — 探索は PATHEXT 対応済み。
+
+## 2026-08-22 — W3 前半: necoder が Windows で**起動して描画した**（+ keymap の Windows 既定）
+
+- やったこと:
+  - **Windows 実機で necoder のウィンドウが出て、正しく描画されることを確認**（`title='necoder'` 1295x807）。
+    **日本語（「ようこそ」「未導入」）も絵文字（🎨）も出る**＝同梱フォント（IBM Plex Sans JP / Guguru Sans Code）が
+    DirectWrite 経路で効いている。レール（プロジェクト色）・宛先チップ（`necoder ▾ ⎇ main`）・
+    エクスプローラの git status（黄点と `M`）・ウェルカムのエージェント一覧まで表示された。
+  - **`paths` crate が実アプリで end-to-end に効いていることを確認**: `%APPDATA%\necoder`（設定）と
+    `%LOCALAPPDATA%\necoder`（`necoder.db` / `necoder.db-wal` / `state.json`）が**分かれて**作られ、
+    `~\Library` は作られない。**`necoder.db` が実在する＝turso が実行時にも動く**（W0 では「コンパイルできる」までしか見えていなかった）。
+  - **keymap の Windows 既定（§D4）**: `KeymapPlatform` + `default_keymap_json()` + `pretty_keystroke_for()`。
+    **mac 版を唯一の正として機械変換**し、差分は `NON_MAC_DROPPED` / `NON_MAC_REPLACEMENTS` / `NON_MAC_ADDITIONS` の
+    3 表にだけ持つ（2 本の JSON を手で並べると必ず片方だけ直されて腐る）。10 テスト green。
+  - **初回起動のバグを 1 件修正**: 設定ディレクトリが存在しないのに watch していて
+    `Input watch path is neither a file nor a directory` で失敗していた。`create_dir_all` を前に置いた。
+    **mac では既存ユーザーのディレクトリが在るので表に出ていなかっただけで、まっさらな環境なら 3 プラットフォームとも起きる**。
+  - `scripts/screenshot-app.ps1` を **Win32 `PrintWindow` 方式に作り直した**（下記）。
+
+- 学び/罠:
+  - **`render_to_image` は macOS にしか実装が無い**。WINDOWS-PORT.md §0 が「追い風」として挙げていた
+    「ヘッドレススクショは OS 非依存だから Windows でもそのまま回る」は**誤り**だった
+    （実機で `render_to_image not implemented for this platform`）。文書を訂正済み。
+    代替は **Win32 の `PrintWindow` + `PW_RENDERFULLCONTENT`（flags=2）** で実ウィンドウを捕捉する方式。
+    **結果的に mac 版より良い**（画面全体を撮る `screencapture` と違い necoder の窓だけが撮れる・座標非依存）。
+    ただし実ウィンドウが要る＝**ヘッドレス CI では回せない**（mac 版と同じ制約に戻った）。
+  - **keymap の機械変換は衝突検出テストが必須**。`ctrl-a`（mac の emacs 風 行頭）と
+    `cmd-a`→`ctrl-a`（SelectAll）が同じキーに落ちる。`BTreeMap` は後勝ちで**黙って片方を消す**ので、
+    テストが無いと「なぜか効かないキーがある」という形でしか表に出ない。
+  - **既定 keymap の構造**: パレット・ファインダ系は `FleetControl` ではなく **context 無しの
+    グローバルセクション**にある（`FleetControl` は `enter` だけの小さいセクション）。テストを書く時に取り違えた。
+
+- 検証: Windows 実機で `cargo test --workspace` green（keymap_core 10 件を含む）・警告 0。
+  スクショは `scripts/screenshot-app.ps1` で撮って **Read で目視確認済み**。
+
+- 次: ① **実キー入力の確認**（`Ctrl+S` 保存・`Ctrl+Shift+P` パレット・**IME**）は人が実機で押す必要がある。
+  ② **CRLF round-trip**（W3 の残り）。③ W4（ConPTY ターミナル / `git.exe` / `claude.cmd` の起動側）。
+  ④ mac の非退行確認（mac 実機が要る）。
+
+## 2026-08-22 — W3 完了: Windows 実機で「開く→編集→保存」が通った（CRLF round-trip 込み）
+
+- やったこと:
+  - **実機で打鍵まで自動化して W3 の受入条件を通した**。`AttachThreadInput` で前面化 →
+    `SendKeys` で打鍵 → `PrintWindow` で撮影 → **Read で目視**、というループを確立。
+    - `edit.txt`（LF）: 12 bytes → **22 bytes** `hello<LF>world<LF>WINDOWS-OK`。**LF のまま**
+    - `crlf.txt`（CRLF）: 13 bytes / CRLF=2 → **18 bytes / CRLF=2 / LF=0**。**改行が 1 つも壊れない**
+      ＝ **W3 の CRLF round-trip をクリア**
+  - **実機でしか見つからないバグを 3 件修正**（下記）。
+  - `keymap_core::keystroke_label()` を新設し、UI 側は `cmd-` 表記で書けば
+    `⌘O` / `Ctrl+O` の出し分けが 1 箇所で済むようにした。
+
+- 学び/罠:
+  - **`SetForegroundWindow` は単体では効かない**。Windows のフォアグラウンド制限で弾かれ、
+    **打鍵が別のウィンドウへ飛ぶ**。しかも「アプリは前面に見えている」ので気づきにくい
+    （今回はファイルが変わらないことで気づけた）。`AttachThreadInput` で入力キューを
+    繋いでから `SetForegroundWindow` + `SetFocus` を呼ぶこと。
+  - **初回起動でウォッチャが落ちていた**: 設定ディレクトリが存在しないのに watch していて
+    `Input watch path is neither a file nor a directory`。**mac では既存ユーザーの
+    ディレクトリが在るので表に出ていなかっただけ**で、まっさらな環境なら 3 プラットフォームとも起きる。
+  - **ウェルカム画面が `⌘O` を直書きしていた**（`chrome.rs`）。Windows / Linux に mac の記号が出る。
+    i18n と同じで「**UI 文字列のハードコード禁止**」がキー表記にも要る。
+  - **キー表記が長くなると固定幅レイアウトが壊れる**。キーバッジが mac の `⌘⇧A`（3 文字）に
+    合わせて `w(52px)` 固定だったので、`Ctrl+Shift+A`（12 文字）が枠から溢れた。`min_w` へ。
+    **文字数が変わる i18n / プラットフォーム表記は固定幅を必ず壊す**と思っておくこと。
+  - **onboarding が編集の検証を邪魔する**: 初回は agent picker がエディタ領域を覆うので、
+    ファイルのタブは開いていても打鍵が届かない。検証時は
+    `%APPDATA%\necoder\settings.json` に `{"onboarded":true}` を置いてから始める。
+
+- 検証: Windows 実機で `cargo check --workspace --all-targets` 警告 0 /
+  `cargo test --workspace` green（keymap_core 11 件を含む）。
+  スクショ 4 枚を Read で目視（起動直後・タイプ後・キーヒント修正前/後）。
+
+- 次: ① **IME は人の手番**（`SendInput` で合成できるのは仮想キーだけで、変換・確定は
+  実 IME の状態が絡むため自動化しても証明にならない）。② **W4**: ConPTY ターミナル /
+  `git.exe` / `claude.cmd` の**起動側**（`CreateProcess` は `.cmd` を直接実行できない）。
+  ③ mac の非退行確認（mac 実機が要る）。
+
+## 2026-08-23 — W4 着手: ConPTY は動いた。だが端末の中身が描画されない（+ 検証ツールの DPI 誤診）
+
+- やったこと:
+  - **W4 の 1 項目目「ターミナルが ConPTY で開く」に着手**。実装は入り、**ConPTY 自体は動くと実機で確認**したが、
+    受入条件（ターミナルで `git status` が打てる）は**未達**なのでチェックは入れていない。
+  - **既定シェルの選択を実装**: `Host::terminal_launch()` が Windows でだけ launch を返す。
+    `pick_windows_shell()` が `pwsh` → `powershell` の順に PATH を見る（PATHEXT 対応）。
+    unix は `None` のまま＝alacritty の `$SHELL` 既定に任せる（mac 挙動不変・§D8）。
+    **探索を引数で受け取る形**にしたので `pwsh` が入っていないこの機械でも pwsh 優先の分岐をテストできる（4 テスト green）。
+  - **`terminal_launch_for` の cwd 落ちを修正**: `Ok(Some(launch))` を **remote 専用と決め打ち**して
+    cwd を捨てていた。ローカル Windows では launch と cwd の両方が要るので、host が remote か否かで分ける。
+  - **`scripts/screenshot-app.ps1` に `SetProcessDPIAware()` を追加**（下記の誤診対策）。
+
+- 学び/罠:
+  - **【最重要】スクショを撮るプロセスが DPI 非対応だと「機能が動いていない」と誤診する。**
+    150% スケーリング環境で `GetWindowRect` は**論理**値（1295x807）、`PrintWindow` は**物理**サイズ
+    （1942x1211）で描く＝**ウィンドウの左上 2/3 しか写らない**。下ドックと右ドックが丸ごと画面外になり、
+    「`Ctrl+J` を押してもターミナルが開かない」と読めた。**実際は最初から開いていた**。
+    `SetProcessDPIAware()` を `GetWindowRect` より前に呼ぶこと。
+    **教訓: スクショで「無い」ことを確認したら、まず撮影範囲がウィンドウ全体を覆っているかを疑う。**
+    撮影サイズをログに出しておけば一発で分かる。
+  - **ConPTY が動いている証拠の見方**: 子プロセスに
+    `conhost.exe --headless --width … --height … --signal … --server …` が居れば ConPTY。
+    加えて `powershell.exe` が子に居れば shell も起きている。GUI を見るより確実。
+  - `alacritty_terminal` 0.26 の Windows 既定シェルは **`powershell` 固定**
+    （`tty/windows/mod.rs` の `Shell::new("powershell", …)`）。pwsh を使いたければ呼び出し側から明示する。
+  - `TerminalDockEvent::Dismissed` は**明示的なタブ閉じでしか出ない**（PTY 終了では出ない）。
+    ドックが消えた原因を探すときにここを疑って時間を溶かした。
+
+- 未解決（次の 1 歩）: **端末の中身が描画されない**。ドックとタブは出て `powershell.exe` も生きているので
+  **PTY は動いていて、出力が前景へ届いていない**。`TerminalView` の pump は alacritty の IO スレッドから
+  `futures` channel 経由で `Wakeup` を受けて `cx.spawn` のループが回る作り。
+  **gpui の Windows イベントループが外部スレッドからの channel 書き込みで起きていない**のではないか
+  （mac は run loop 統合で起きる）。次はここを切り分ける。
+
+- 検証: Windows 実機で `cargo check --workspace --all-targets` 警告 0 / `cargo test --workspace` green。
+  スクショは DPI 対応後に撮り直して Read で目視（ターミナルドック・右ドック・ステータスバーまで写ることを確認）。
+
+- 次: ① 上記の pump 問題の切り分け（W4 の本体）。② ついでに見つけた **Agent コンポーザの `⌘⏎ 送信` /
+  `改行 / ⌘⏎ 送信` が記号直書き**（ウェルカム画面と同じ類。`keymap_core::keystroke_label()` を通せばよい）。
+  ③ W4 の残り（Git の gutter・ACP の `claude.cmd` 起動側）。④ mac の非退行確認。
+
+## 2026-08-23（自律ループ）— W4 の切り分け: PTY は無実。疑いを描画経路へ絞った
+
+- やったこと:
+  - **`crates/terminal_view/tests/pty_smoke.rs` を新設**。**UI を一切通さず**に
+    `alacritty_terminal` の PTY + EventLoop を叩き、シェルを起こして `echo` の出力が `Term` に
+    届くかを見る統合テスト。組み立ては `TerminalView::new_with_shell` と揃えてある。
+  - **Windows 実機で green（1.53s）** ＝ **ConPTY・シェル起動・`Wakeup` の発火まで全部動いている**。
+    「端末が真っ黒」の原因は **PTY ではなく `TerminalView` の pump / 描画側**に確定。
+  - 調査して**シロ**だと分かったもの（次の人が同じ道を辿らないように）:
+    - gpui の Windows ディスパッチャは正しい。`dispatch_on_main_thread` が
+      `PostMessageW(WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD)` を投げ、`wake_posted` も
+      `platform.rs` の 3 箇所で正しく立て／降ろしされている
+    - `resize()` はグリッドを 0 にしない（`columns.max(2)` / `lines.max(1)` の下限がある）
+    - `TerminalDockEvent::Dismissed` は明示的なタブ閉じでしか出ない（PTY 終了では出ない）
+    - `terminal_view.rs` の「`gpui::test` のスケジューラは外部スレッドからの Wakeup を禁止」という
+      コメントは**テスト用スケジューラ限定**の話で、本番の挙動とは無関係
+
+- 学び/罠:
+  - **「UI を通さない同じ組み立てのテスト」は切り分けの最短経路**。GUI を起動してスクショを撮る
+    ループは、DPI・フォーカス・タイミングと変数が多すぎる。今回は 1 本のテストで
+    「PTY か描画か」の二択を 2 分で潰せた。**次に似た症状に当たったら最初にこれを書く。**
+  - キー入力が端末に吸われている（打った文字がエディタに入らない）ことも、
+    「端末は生きているが描画だけ死んでいる」の傍証になる。**入力と出力を別々に確認すること。**
+
+- 検証: Windows 実機で `cargo check --workspace --all-targets` 警告 0 /
+  `cargo test --workspace` green（新規 `pty_smoke` 1 件を含む）。
+
+- 次: **`sync()` が実際に呼ばれているかを確かめる**。到達していれば描画側（`content` の中身か
+  render の座標系）、到達していなければ pump 側（`cx.spawn` のループが回っていない）。
+  一時的な計測を仕込んで実機で 1 回動かすのが早い。
+
+## 2026-08-23（自律ループ 2）— 端末が真っ黒の原因は**レイアウト**。パイプラインは全部無実だった
+
+- やったこと:
+  - **`NECODER_TERM_PROBE=1` の計測口を新設**（`terminal_view.rs`・既定 off）。
+    PTY 起動 / pump の受信 / `sync()` のセル数 / レイアウトの bounds を stderr に出す。
+    このコードベースの `NECODER_*_PROBE` 慣例に合わせた。
+  - 実機 1 回で**原因を特定**:
+    ```
+    pty: 起動
+    pump: 1 件目 Wakeup            ← pump は回っている
+    sync: 24 セル（うち非空白 10）  ← sync も呼ばれている
+    layout: bounds 164x0 / cell 6.6x17 → 24列 1行
+    ```
+    **端末要素の bounds が `164x0`**。80×24 なら 1920 セルのはずが 24 セル
+    ＝ **グリッドが潰れているだけ**で、PTY・pump・sync・描画は全部動いていた。
+  - **確証**: 親に固定サイズ（`h(200) w(600)`）を与えると
+    `bounds 600x200 → 90列 11行 / sync 990 セル（非空白 162）`
+    ＝ PowerShell のバナーとプロンプトが実際に入っている。**実験後に `dock.rs` は元へ戻した**。
+  - **二分**: `flex_1().min_h_0()` → `h_full().w_full()` にすると **bounds 0x0**。
+    ＝ 親（`TerminalDock` の外枠）が確定サイズを受け取れていない。原因は body より**上**。
+
+- 学び/罠:
+  - **「動いていない」の 9 割は経路のどこかで数字が 0 になっているだけ**。今回は
+    `sync: 24 セル` という 1 行が出た瞬間に「描画は生きている / グリッドが潰れている」と確定した。
+    **症状を見るより、経路の各段で「いくつ流れたか」を出す方が早い。**
+  - 前回のティックで書いた `tests/pty_smoke.rs`（UI を通さない PTY テスト）が効いた。
+    PTY が無実だと分かっていたので、今回は最初から pump より下流だけを見れば済んだ。
+    **切り分けテストは 1 本書くと次のティックが速くなる。**
+  - **固定サイズを一時的に入れて確かめる**のは、レイアウト不具合の最短の確証手段。
+    元へ戻すのを忘れないこと（今回はバックアップを取ってから実験した）。
+
+- 検証: Windows 実機で `cargo check --workspace --all-targets` 警告 0 /
+  `cargo test --workspace` 247 テスト green。`dock.rs` は無変更（差分なし）に戻してある。
+
+- 次: **`chrome.rs` の `render_bottom_dock` が `TerminalDock` を差し込むときの
+  `.cached(StyleRefinement::default().flex().flex_col().size_full())` を疑う**。
+  `cached` 越しに percentage サイズが解決できていない可能性。`cached` を外す / 明示サイズを渡す の
+  2 通りを試すのが早い。**共有コードなので、直す前に mac で現状ターミナルが正常に出ていることを確認すること**。
+
+## 2026-08-23（自律ループ 3）— W4 ①完了: Windows でターミナルが開き `git status` が打てた
+
+- やったこと:
+  - **原因を修正し、W4 の 1 項目目「ターミナルが ConPTY で開く」を実機で通した。**
+    `Ctrl+J` → PowerShell 起動 → `git status --short` の**色付き出力**まで確認（スクショを Read で目視）。
+    cwd も `PS C:\Users\a\Desktop\dev\necoder>` と project root になっている（前ティックの cwd 修正が効いている）。
+  - **真因**: gpui の `.cached()` は **children を `None` にして layout を要求する**
+    （"caching skips rendering the contents to measure them" — `gpui/src/view.rs`）。
+    ＝ **cached の subtree は隔離してレイアウトされる**ので、その root で `flex_1()` は効かない
+    （flex 親が居ない）→ 高さ 0 → グリッドが 24 セルに潰れて中身が真っ黒に見えていた。
+  - **修正は `dock.rs` の 2 行**（root を `flex_1().min_h_0()` → `size_full()`）。
+    `chrome.rs` と `fleet_view.rs` の `.cached(...)` はどちらも無変更で効く。
+  - 4 通り試して確定させた（A: cached を外す→OK / B: flex_1 の親で包む→NG /
+    C: cached に definite な高さ→NG / **D: dock の root を size_full→OK・採用**）。
+    A も直るが caching を失うので D を採った。
+
+- 学び/罠:
+  - **`.cached()` する view の root は `size_full()` で書く。`flex_1()` は効かない。**
+    cached は「中身を測らない」ことで速くしている＝ subtree は親の flex 文脈を知らない。
+    このプロジェクトで cached を使う view を足すときは必ずこれを守ること。
+  - **4 通り試すのが結局速かった。** 「どれが効くか」を推論で当てにいくより、
+    1 変数ずつ変えて bounds の数字を見る方が確実だった（各実験 ~1 分）。
+  - 前々ティックの `pty_smoke.rs`、前ティックの `NECODER_TERM_PROBE` が両方効いた。
+    **切り分け道具を先に作ると、後のティックが一気に速くなる。**
+
+- 検証: Windows 実機で `cargo check --workspace --all-targets` 警告 0 /
+  `cargo test --workspace` 247 テスト green。`chrome.rs` の実験変更は全て巻き戻し済み（cached は 2 箇所とも健在）。
+
+- 次: ① **mac での確認が必要**（`flex_1()` は cached root ではどのプラットフォームでも no-op のはずなので
+  mac も同じく壊れている可能性がある。push 前にターミナルが従来どおり出ることを確認）。
+  ② W4 の残り: Git の gutter（autocrlf 下で全行 Modified にならないか）・ACP の `claude.cmd` 起動側。
+  ③ Agent コンポーザの `⌘⏎ 送信` 記号直書き。
+
+## 2026-08-23（自律ループ 4）— W4 の Git と ACP 解決を片付けた。§4 の「.cmd」の記述は誤りだった
+
+- やったこと:
+  - **Git 項目を確認 + 回帰テストで固定**（W4 受入条件）。
+    `project.rs::gutter_ignores_line_ending_differences_but_not_real_edits` を新設。
+    **`core.autocrlf=true` を明示的に立てて罠を再現**し、①改行しか違わなければ gutter が 1 本も出ない
+    ②本物の変更は 1 hunk として出る（正規化が変更を隠していない）の両方を検証。
+    `normalize_newlines()` は元から 3 経路に入っていたが **CRLF のテストが 1 本も無かった**。
+    実装は正しく、守りが無かっただけ。
+  - **ACP の実行ファイル解決を修正**。`acp_client::find_in_path` が PATH に素朴に join していて
+    **`claude` を探して `claude.cmd` を見つけられない**状態だった。
+    `host::executable_names()` / `host::find_in_path()`（PATHEXT 対応）へ集約し、
+    `acp_client` と `lang::lsp` の両方をそこへ寄せた（同じロジックが 3 箇所に散り始めていた）。
+
+- 学び/罠:
+  - **【文書の誤りを訂正】§4 の「`.cmd` / `.bat` は `CreateProcess` が直接実行できない」は
+    necoder には当たらない。** necoder は生の `CreateProcess` ではなく Rust の
+    `std::process::Command` を使っており、**これは `.bat` / `.cmd` を検出して `cmd.exe` 経由で
+    起動する**（CVE-2024-24576 の対応以降）。`host::cmd_scripts_can_be_spawned_directly` で固定した。
+    **本当の問題は「起動できるか」ではなく「探せるか」だった**（PATHEXT）。
+    罠リストは「一般論として正しい」だけでは足りず、**自分のコードに当てはまるかを確かめる**必要がある。
+  - **同じロジックが 3 箇所に散り始めたら集約の合図**。PATHEXT 対応を `lang` → `host` → `acp_client` と
+    書きかけていた。`host` は `lang` と `acp_client` の両方が依存する層なので、そこが正しい置き場。
+  - **「実装は正しいがテストが無い」は移植で一番危ない形**。CRLF 正規化がまさにそれで、
+    誰かが「不要では」と消しても CI が止められなかった。
+
+- 検証: Windows 実機で `cargo check --workspace --all-targets` 警告 0 /
+  `cargo test --workspace` **249 テスト green**。
+
+- 次: ① **エージェントに 1 往復させる検証は、この機械に `claude` / `node` / `npx` が無いため未実施**。
+  CLI を入れれば検証できる状態。② mac の非退行確認（dock.rs の `size_full()` 修正が最優先）。
+  ③ W5 の残り（実機で性能スクリプトを走らせて Windows の予算を決める）。
+  ④ Agent コンポーザの `⌘⏎ 送信` 記号直書き。
+
+## 2026-08-23（自律ループ 5）— W5 の性能計測を実機で取った。スクリプト自身のバグも 1 件
+
+- やったこと:
+  - **Windows 実機で性能を実測**（release ビルド・NucBox M5PLUS / 3840x2160@150%）:
+
+    | 指標 | Windows | mac の記録（2026-07-17） |
+    |---|---|---|
+    | 起動（cold start → first render） | **522.7 ms**（5 回平均・501〜574） | ~215 ms |
+    | idle ワーキングセット | **169 MB** | — |
+    | idle private commit | **290 MB** | — |
+    | idle RSS | — | 122 MB |
+
+  - **`scripts/startup-time.ps1` のバグを 1 件修正**（自作スクリプトのドッグフーディングで発覚）。
+  - locale に埋まった mac 記号 60 文字列を独立タスクとして WINDOWS-PORT に記録（~30 箇所の refactor）。
+
+- 学び/罠:
+  - **【PowerShell 5.1】ネイティブ exe に `2>&1` を付けてはいけない。**
+    5.1 は exe の stderr を **1 行ずつ ErrorRecord に包む**ため、`cargo` が終了コード 0 で
+    成功していても `NativeCommandError` で落ちる。`& cargo build --release 2>&1 | Out-Null` が
+    まさにこれで失敗した。**素通しで流し、成否は `$LASTEXITCODE` で見る**。
+    5.1 の落とし穴はこれで 3 つ目（BOM / `Start-Process -Environment` / `2>&1`）。
+  - **起動が mac の ~2.4 倍**。描画スタックが別物（DirectX + DirectWrite vs Metal + font-kit）なので
+    単純比較はできないが、差が大きいので一度中身を見る価値がある。
+    **同梱フォント 4 本の DirectWrite 読み込み**と **DirectX デバイス初期化**が怪しい。
+  - **性能予算はまだ決められない**。CLAUDE.md の予算は「Zed 比 ~80%」で、この機械に Zed が
+    入っていないため比較対象が無い。**Windows 版 Zed を入れて同じ 2 本を測れば決まる**。
+
+- 検証: 2 本のスクリプトを実機で実行して数値を取得。`memory-usage.ps1` は初回から動作、
+  `startup-time.ps1` は上記の修正後に 5/5 成功。
+
+- 次: ① mac の非退行確認（`dock.rs` の `size_full()` が最優先）。
+  ② 起動時間の内訳を測る（フォント読み込みか DirectX 初期化か）。
+  ③ locale の mac 記号 60 文字列。④ エージェント 1 往復（CLI 導入が要る）。
+
+## 2026-08-23（自律ループ 6）— 起動 522ms の内訳: 96% が gpui の初期化と初回フレーム
+
+- やったこと:
+  - `NECODER_STARTUP_LOG=1` に**段ごとの累積経過**を出す計測を追加（`main.rs` の `stage()`）。
+    `startup_ms` の 1 数字だけではどの段が重いか分からなかったため。
+  - 実機 3 回で内訳を確定（代表値）:
+
+    | 段 | 累積 | 増分 | 中身 |
+    |---|---|---|---|
+    | `app_run_entered` | ~187 ms | **187 ms（36%）** | GPUI のプラットフォーム初期化（DirectX + DirectWrite） |
+    | `fonts_loaded` | ~199 ms | 12 ms | 同梱フォント 4 本 |
+    | → `before_open_window` | ~207 ms | 8 ms | プロジェクト解決・設定・テーマ |
+    | `startup_ms` | ~519 ms | **312 ms（60%）** | `open_window` → 初回描画完了 |
+
+- 学び/罠:
+  - **遅いのは necoder のコードではなかった。** necoder 自身の仕事は 519ms のうち **~20ms**。
+    残り 96% は gpui のプラットフォーム初期化（187ms）と窓生成＋初回フレーム（312ms）。
+  - **前ティックの見立て（同梱フォントの読み込みが重いのでは）は外れ**だった。実測 12ms。
+    **推測でボトルネックを当てにいかず、段を刻んで測る**。前回の「端末が真っ黒」と同じ教訓
+    （症状から原因を推論するより、経路の各段で数字を出す方が速い）。
+  - gpui は rev 固定で改変対象外なので、**necoder 側で縮められる余地は小さい**。
+    予算を決めるときはこの内訳を前提にする（Zed も同じ土台なので同じコストを payしているはず）。
+
+- 検証: Windows 実機で `cargo check --workspace --all-targets` 警告 0 /
+  `cargo test --workspace` 249 テスト green。
+
+- 次: この機械だけで進められる W フェーズの作業はほぼ出し切った。残りは
+  ① mac の非退行確認（`dock.rs` の `size_full()` が最優先）② Windows 版 Zed を入れて予算を決める
+  ③ エージェント CLI を入れて ACP 1 往復 ④ locale の mac 記号 60 文字列（~30 箇所の refactor）
+  — ①②③ は**この環境では実施できない**。
+
+## 2026-08-24 — キャプションボタン（最小化・最大化・閉じる）を実装。計画に無かった穴
+
+- やったこと:
+  - **ユーザーが実機を触って「閉じるボタンが無い」と指摘**。計画（WINDOWS-PORT）に項目が無く、
+    W3 を「起動して編集・保存できる」で通していたので気づけなかった。**窓を閉じる手段が無い**状態だった。
+  - `chrome.rs` に `render_window_controls()` を新設。**Windows / Linux だけ**右上に
+    `─ □ ✕` を 46x32 で描く（mac は GPUI のネイティブ信号機なので何も描かない）。
+  - 左の `TRAFFIC_LIGHT_INSET`（92px）も **mac 限定**にした。信号機が無い Windows で
+    92px 空けるとピルが不自然に右へ寄る。
+  - 実機で 4 挙動すべてを確認: 最大化 `IsZoomed=True` / 元に戻す `IsZoomed=False` /
+    最小化 `IsIconic=True` / 閉じる `HasExited=True`。
+
+- 学び/罠:
+  - **gpui の `window_control_area` はこの構成では発火しない。** `WM_NCHITTEST` で
+    `HTCLOSE` / `HTMAXBUTTON` / `HTMINBUTTON` を返す仕組みで、gpui 側は NC クリックの処理まで
+    持っているのに、**ボタンは描かれるのに押しても何も起きなかった**。
+    `window.mouse_hit_test.ids` に hitbox が乗らないのが原因と見られる（深追いはしていない）。
+    → **公開 API（`minimize_window` / `zoom_window` / `remove_window`）を直接叩く方が確実**。
+    引き換えに Windows 11 のスナップレイアウトは出ない（`HTMAXBUTTON` を返さないと OS が出さない）。
+  - **`zoom_window()` は「元に戻す」ができない。** gpui の Windows 実装は `SW_MAXIMIZE` を投げるだけで
+    復元の口が無い。`is_maximized()` で分岐して `SW_RESTORE` を自前で呼ぶ必要がある。
+  - **「動く」と「その OS のアプリになっている」は別物。** W3 の受入条件（起動・編集・保存）は
+    満たしていたのに、**窓を閉じられなかった**。移植の受入条件に
+    「**その OS のアプリとして最低限の操作ができるか**」を入れないと、こういう穴は残る。
+  - テストハーネスの罠: 最大化→復元→最小化→閉じるを 1 プロセスで連続実行すると、
+    フォアグラウンドの移動で座標がずれて誤判定した。**ボタンごとに新しいインスタンスで**測ると安定する。
+
+- 検証: Windows 実機で `cargo check --workspace --all-targets` 警告 0 /
+  `cargo test --workspace` 249 テスト green。4 ボタンの挙動を Win32 API で機械的に確認。
+
+- 次: ① **閉じるボタンの hover を赤にするか**（Windows 標準）は UI-SPEC §1.3 の色の掟と衝突するので
+  ユーザー判断。② mac の非退行確認（`dock.rs` の `size_full()` と、今回の titlebar 変更）。
+  ③ アプリ内メニュー（§D5）はまだ無い。④ locale の mac 記号 60 文字列。
+
+## 2026-08-24 — W6 の要: 配布物は**静的 CRT でないと他人の PC で起動しない**
+
+- やったこと:
+  - **配布物の致命的な問題を配る前に発見**。素の `cargo build --release` で作った `necoder.exe` は
+    **`VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` に依存**していた（`dumpbin /DEPENDENTS` で実測）。
+    これは VC++ 再頒布可能パッケージの DLL で、**まっさらな Windows には無い**。
+    そのまま配ると「VCRUNTIME140.dll が見つかりません」で起動できない人が出る。
+  - `RUSTFLAGS=-C target-feature=+crt-static` で解決。**依存 26 個すべて Windows 標準**になった
+    （`kernel32` / `user32` / `d3d11` / `dwrite` / `icuuc` …）。実機で起動も確認。
+  - `scripts/bundle-windows.ps1` を新設（静的ビルド →**依存検証**→ zip）。
+    `release.yml` の windows ジョブにも同じ流れを入れ、タグ push で Release に添付するようにした。
+  - 実測: zip **28 MB** / exe 75.9 MB。
+
+- 学び/罠:
+  - **【最重要】開発機では絶対に気づけない類のバグ**。Build Tools を入れた副作用で VCRUNTIME が
+    入っているので、手元でいくら起動しても問題が見えない。**「配る前に依存を機械で検証する」**を
+    CI とスクリプトの両方に入れた（残っていたらビルドを落とす）。
+  - `api-ms-win-crt-*` は Universal CRT ＝ Windows 10 以降に標準搭載なので問題ない。
+    **落とすべきは `VCRUNTIME` / `MSVCP` だけ**。両者を混同すると「全部消さないと」と誤解する。
+  - 静的 CRT はフラグが変わる＝**全再ビルド**になる。通常の `target-win` とは別ディレクトリに
+    分けないと開発ビルドと奪い合う（`target-win-dist`）。
+
+- 検証: 静的 CRT ビルドの依存を `dumpbin` で確認（VCRUNTIME なし）。実機で起動しウィンドウ生成を確認。
+  `dist/necoder-windows-x64.zip`（28 MB）を生成。
+
+- 次（**ユーザー判断が要る**）: ① **AGPL の義務** — バイナリを配ると対応するソースの提供義務が生じる。
+  リポジトリが private のままでは満たせないので、公開するか別導線を用意するかを決める必要がある。
+  ② コード署名（未署名 → SmartScreen 警告）。③ `gh auth login` が未実施。

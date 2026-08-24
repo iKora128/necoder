@@ -211,4 +211,22 @@ FEATURES で later タグの checkpoint / @mention / ⌘K / Todos をここへ�
 
 ---
 
+## M15 — Windows 対応（「Mac 以外の人が DL して使える」）
+
+2026-08-22 調査で着手可能と確認し、**同日 W0 で実機実証済み**。**GPUI 側は動く**（固定 rev の `gpui_windows`＝DirectX + DirectWrite が実際にコンパイルできた）。詰まるのは **necoder 側に残った unix 前提**（Unix socket 直使用 2 ファイル・`~/Library/Application Support` ハードコード 9 ファイル・`HOME` 直読み 19 箇所・`sh -c` 10 箇所・mac 専用コマンド 8 種）。
+
+**ただしコンパイルを止めているのは Unix socket の 2 ファイルだけ**で、残り（パス・`sh -c`・mac 専用コマンド）は**ビルドは通るが実行時に壊れる**類。＝「起動までは近い、正しく動かすまでが本番」。
+
+**受入条件・設計決定・作業手順の正は [`WINDOWS-PORT.md`](./WINDOWS-PORT.md)**（W0〜W6）。`/goal-win` がそれを上から消化する。ここには要約だけを置く。
+
+- [x] **W0 現在地の確定** — 2026-08-22 完了。**necoder 側 20 crate 中 19 が Windows で check green**、落ちるのは `workspace/control_ipc.rs:22` の 1 エラーのみ（`necoder` bin はその下流で未測定）。**依存は全部通った**（`gpui_windows` / `turso` ＝rusqlite 退避不要 / `alacritty_terminal` / tree-sitter 17 本）
+- [x] **W1 `paths` crate** — 2026-08-22 完了。パス解決を依存ゼロの foundation crate に集約。**mac の戻り値は unit test で固定**（`Platform` を引数で受ける設計＝**Windows/Linux の CI でも mac の期待値を検証できる**）。**Linux で `~/Library/Application Support/` を作る現状バグも解消**。追加で `paths::canonicalize`（Windows の `\\?\` verbatim を剥がす＝git 出力とパスが一致するようになった）
+- [x] **W2 コンパイル通し** — 2026-08-22 完了。**Windows で `cargo check --workspace --all-targets` がエラー 0・警告 0**、**`cargo test --workspace` が 235 テスト green**。IPC は名前付きパイプ（Win32 直叩き・往復テスト green）・外部コマンドは `Host::shell_script()` で**実行先 host が分岐を持つ**形に・Remote SSH は既存 cfg で除外済み
+- [ ] **W3 起動して編集・保存** — DirectWrite で文字が出る / Windows 既定 keymap（VSCode 準拠）/ CRLF round-trip / IME
+- [ ] **W4 ターミナル・Git・ACP** — ConPTY + PowerShell / `git.exe` / `claude.cmd` 起動
+- [ ] **W5 検証ループと CI 常設** — **`ci.yml` の `check-windows` は 2026-08-22 に新設済み**（`-D warnings` + `cargo test --workspace`・PR で走る必須ジョブ）。残りは PowerShell 版の検証スクリプト（screenshot / startup-time / memory-usage）
+- [ ] **W6 配布** — 署名なし zip → Authenticode。MSIX/Store は当面やらない
+
+---
+
 以降（later）: FEATURES.md のタグに従う（拡張モデル ADR・WASM ホスト・minimap・multibuffer 本体・vim・テーマ/言語パック配布 等）。
