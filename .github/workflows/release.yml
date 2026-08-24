@@ -169,36 +169,59 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
       # **配る前に依存を機械で検証する。** ここで気づけないと「手元では動くのに」で終わる。
       #
-      # 2026-08-25: **このステップは CI で一度も動いていなかった**。`${env:ProgramFiles(x86)}` の
-      # 下だけを探していたが、windows-latest の VS 2022 は **`C:\Program Files\` 側**に入っている。
-      # 結果 `dumpbin が無いため検証をスキップ` の warning を出して素通りしていた
-      # ＝ **静的 CRT が壊れても気づけない**。両方の Program Files を見るようにし、
-      # さらに **dumpbin が無くても素通りしない**よう PE の import テーブルを直接読む道を足した。
+      # このステップは 2026-08-25 に **二度**直した。どちらも「**黙って通る**」形の穴で、
+      # ガードとしては「無い」より悪い（あるつもりになる）ので、経緯ごと残す:
+      #
+      #  1. `${env:ProgramFiles(x86)}` の下だけを探していた。ランナーの VS は
+      #     **`C:\Program Files\` 側**にあるので毎回 `dumpbin が無いためスキップ` で素通り
+      #     ＝ **CI で一度も検証していなかった**。両方の Program Files を見るようにした
+      #  2. それでも `Get-ChildItem -Recurse` が最初に当てた dumpbin を無条件に信じていた。
+      #     実際に掴んだのは `SDK\ScopeCppSDK\vc15\VC\bin\dumpbin.exe`（**MSVC 本体ではなく
+      #     同梱の古い vc15**）。これが新しい PE を読めずエラーを吐くと出力が空になり、
+      #     「該当なし」＝ **合格**として通ってしまう
+      #
+      # なので **バイト走査を常に土台**にする（PE の import ディレクトリには DLL 名が
+      # リテラルの ASCII で載るので、外部ツール無しで確実に読める）。dumpbin は
+      # **出力が正気か（`KERNEL32.dll` が居るか）を確かめたときだけ**裏取りに使う。
+      # 手元の Windows 実機で、静的 CRT の exe（通る）と通常ビルドの exe
+      # （`VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` を検出して落ちる）の**両方向**を確認済み。
       - name: VCRUNTIME 依存が無いことを確認
         shell: pwsh
         run: |
+          $exe = 'target/release/necoder.exe'
+          if (-not (Test-Path $exe)) { Write-Host "::error::$exe が無い"; exit 1 }
+
+          # ── 土台: PE のバイト走査（常に実行・外部ツール不要）──
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $bad = @([regex]::Matches($text, '(VCRUNTIME|MSVCP)\d*[^\x00]*\.dll') |
+            ForEach-Object { $_.Value } | Sort-Object -Unique)
+          # 走査自体が生きていることを確かめる（PE なら必ず居る import）。
+          # これが無いなら読み方がおかしい＝「該当なし」を信用してはいけない。
+          if ($text -notmatch 'KERNEL32\.dll') {
+            Write-Host '::error::PE から KERNEL32.dll すら見つからない＝走査が機能していない'
+            exit 1
+          }
+          Write-Host "バイト走査: $(if ($bad) { $bad -join ', ' } else { '該当なし' })"
+
+          # ── 裏取り: dumpbin（見つかり、かつ出力が正気なときだけ）──
           $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
-          $dumpbin = $null
           foreach ($root in $roots) {
             $vs = Join-Path $root 'Microsoft Visual Studio'
             if (-not (Test-Path $vs)) { continue }
-            $dumpbin = Get-ChildItem $vs -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($dumpbin) { break }
+            foreach ($candidate in (Get-ChildItem $vs -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue)) {
+              $deps = & $candidate.FullName /DEPENDENTS $exe 2>$null
+              if (($deps -join "`n") -notmatch 'KERNEL32\.dll') { continue }  # 出力が正気でない
+              Write-Host "dumpbin: $($candidate.FullName)"
+              $bad += @($deps | Select-String -Pattern '^\s+((VCRUNTIME|MSVCP)\S*\.dll)' |
+                ForEach-Object { $_.Matches[0].Groups[1].Value })
+              $bad = @($bad | Sort-Object -Unique)
+              break
+            }
+            if ($deps) { break }
           }
-          $exe = 'target/release/necoder.exe'
-          if ($dumpbin) {
-            Write-Host "dumpbin: $($dumpbin.FullName)"
-            $deps = & $dumpbin.FullName /DEPENDENTS $exe
-            $bad = $deps | Select-String -Pattern '^\s+((VCRUNTIME|MSVCP)\S*\.dll)'
-          } else {
-            # dumpbin が無い環境でも黙って通さない。import される DLL 名は PE の import
-            # ディレクトリに **リテラルの ASCII** で載るので、バイト列を直接走査すれば足りる。
-            Write-Host '::warning::dumpbin が見つからないため PE のバイト走査で検証する'
-            $bytes = [System.IO.File]::ReadAllBytes($exe)
-            $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-            $bad = [regex]::Matches($text, '(VCRUNTIME|MSVCP)\d*[^\x00]*\.dll') | ForEach-Object { $_.Value } | Sort-Object -Unique
-          }
-          if ($bad) { Write-Host "::error::静的 CRT が効いていない: $bad"; exit 1 }
+
+          if ($bad) { Write-Host "::error::静的 CRT が効いていない: $($bad -join ', ')"; exit 1 }
           Write-Host 'VCRUNTIME / MSVCP 依存なし（OK）'
       - name: zip を作る
         shell: pwsh
