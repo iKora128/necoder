@@ -11,6 +11,7 @@ GPUI ベースの自作エディタ **necoder（ねこーだー）**。ライセ
 | **どう作るか（設計図）** | `docs/ARCHITECTURE.md` — crate 配置・依存方向・型契約・移植作法 |
 | **どう見せるか（UI仕様）** | `docs/UI-SPEC.md` — トークン表・色の許可リスト・領域別仕様・キー表 |
 | **何をどう呼ぶか（用語の正）** | `docs/GLOSSARY.md` — 機能・場所の正規名（code/日/英）と廃止語。UI 文字列/識別子はここに寄せる |
+| **Windows 対応（W フェーズ）** | `docs/WINDOWS-PORT.md` — 環境・設計決定・受入条件・罠・該当箇所インベントリ。`/goal-win` はこれを消化する |
 | 直近の文脈・罠 | `docs/JOURNAL.md` — セッションごとの実装日誌 |
 | 経緯・ビジョン | `docs/BACKGROUND.md` |
 | 設計判断と根拠 | `docs/DECISIONS.md`（AGPL-3.0・ウィンドウモデル・i18n などの決定ログ含む） |
@@ -58,6 +59,8 @@ GPUI ベースの自作エディタ **necoder（ねこーだー）**。ライセ
 ## /goal コマンド
 
 `.claude/commands/goal.md` — 「ROADMAP の次の受入条件を1歩実装する」自走コマンド。
+`.claude/commands/goal-win.md`（`/goal-win`）— **Windows 移植専用**。正は `docs/WINDOWS-PORT.md`。
+「mac の挙動を変えない」「実機未確認にチェックを入れない」を追加の規律として持つ。
 ユーザーが `/goal`（または `/goal <対象>`）と打つと、現在地把握 → タスク選定 → 実装 → 検証 → ROADMAP/JOURNAL 更新まで行う。
 このガイドと4枚の設計文書（ROADMAP/ARCHITECTURE/UI-SPEC/mock）が正であり続けることが /goal の前提 — 実装と文書が乖離したら**文書を直す方を先に**。
 
