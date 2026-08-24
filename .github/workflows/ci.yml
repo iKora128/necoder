@@ -54,6 +54,10 @@ jobs:
       # 編集ツールは BOM を落とすことがあるので機械で止める。
       # **`shell: powershell`（5.1）で回すこと** — 既定の pwsh(7) は BOM 無しでも読めてしまい、
       # このチェックが意味を失う。
+      # **この run: ブロックは ASCII だけで書くこと。**
+      # GitHub Actions は run: を **BOM 無しの一時 .ps1** に書き出すので、`shell: powershell`
+      # （5.1）は非 ASCII をシステム ANSI として読む ＝ 日本語を入れると構文ごと壊れる。
+      # （2026-08-24 に実際にこのステップ自身がそれで落ちた。防ごうとした問題を自分で踏んだ）
       - name: PowerShell スクリプトの構文チェック（5.1 で読めるか＝BOM の有無）
         shell: powershell
         run: |
@@ -62,8 +66,8 @@ jobs:
             $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
             if ($errors.Count -gt 0) {
-              Write-Host "::error::$($_.Name) が Windows PowerShell 5.1 で解釈できない（UTF-8 BOM が無い可能性）"
-              $errors | ForEach-Object { Write-Host "  $($_.Message)" }
+              Write-Host ("::error::" + $_.Name + " cannot be parsed by Windows PowerShell 5.1 (missing UTF-8 BOM?)")
+              $errors | ForEach-Object { Write-Host ("  " + $_.Message) }
               $failed = $true
             }
           }

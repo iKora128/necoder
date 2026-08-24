@@ -470,8 +470,12 @@ mod tests {
     use std::io::{BufRead as _, BufReader};
 
     /// テスト用の待ち受け先。unix は一時ディレクトリの socket、windows は専用のパイプ名。
+    ///
+    /// **名前は短くする。** macOS の `SUN_LEN` は ~104 バイトで、しかも `TMPDIR` が
+    /// `/var/folders/xx/…24文字…/T/` と長い。分かりやすい名前を付けると bind に失敗する
+    /// （本体の `control_socket_path` が `~/.necoder/gui.sock` と短いのも同じ理由）。
     fn test_endpoint(label: &str) -> std::path::PathBuf {
-        let unique = format!("necoder-transport-{}-{label}", std::process::id());
+        let unique = format!("nec-t{}-{label}", std::process::id());
         if cfg!(windows) {
             std::path::PathBuf::from(format!(r"\\.\pipe\{unique}"))
         } else {
@@ -482,7 +486,7 @@ mod tests {
     /// 1 接続 1 リクエストの往復。`control_ipc` が実際に使う形そのもの。
     #[test]
     fn round_trip_carries_a_request_and_a_response() {
-        let endpoint = test_endpoint("round-trip");
+        let endpoint = test_endpoint("rt");
         let mut listener = ControlListener::bind(&endpoint).expect("bind できない");
 
         let server = std::thread::spawn(move || {
@@ -517,7 +521,7 @@ mod tests {
     /// 同じ場所への二重 bind は弾く（＝GUI が二重に待ち受けない）。
     #[test]
     fn binding_twice_is_rejected() {
-        let endpoint = test_endpoint("double-bind");
+        let endpoint = test_endpoint("db");
         let _first = ControlListener::bind(&endpoint).expect("1 本目が bind できない");
         let second = ControlListener::bind(&endpoint);
         assert!(
@@ -536,14 +540,14 @@ mod tests {
     /// 誰も待っていない場所へは繋がらない（CLI が「GUI が起動していません」と言える根拠）。
     #[test]
     fn connecting_without_a_listener_fails() {
-        let endpoint = test_endpoint("no-listener");
+        let endpoint = test_endpoint("nl");
         assert!(ControlStream::connect(&endpoint).is_err());
     }
 
     /// 相手が黙っていても読み取りはタイムアウトする（スレッドを永久に抱え込まない）。
     #[test]
     fn read_times_out_when_the_peer_stays_silent() {
-        let endpoint = test_endpoint("read-timeout");
+        let endpoint = test_endpoint("to");
         let mut listener = ControlListener::bind(&endpoint).expect("bind できない");
 
         let server = std::thread::spawn(move || {

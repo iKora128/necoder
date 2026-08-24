@@ -530,22 +530,44 @@ mod tests {
         ("USERNAME", "test"),
     ];
 
+    /// **Windows のパスは区切り文字を無視して比べる。**
+    ///
+    /// mac の期待値は `PathBuf` 同士で比較できる（Windows は `/` も `\` も区切りとして扱うので
+    /// コンポーネント比較で一致する）。**だが逆は成り立たない** — mac / Linux は `\` を
+    /// **ただの文字**として扱うので、`PathBuf::from(r"C:\a\b")` は 1 コンポーネントになり、
+    /// `join` で組んだ `C:\a\b/necoder` と一致しない。
+    ///
+    /// 2026-08-24 に CI の test-macos で実際に落ちた。「mac の期待値を Windows で検証できる
+    /// ようにする」配慮を入れたのに、**逆向きが抜けていた**。この crate が防ごうとしている
+    /// バグ（実行中 OS の規則に引きずられる）の鏡写しなので、教訓としてここに残す。
+    fn assert_windows_path(actual: Option<PathBuf>, expected: &str, note: &str) {
+        let actual = actual.expect(note);
+        let normalize = |text: &str| text.replace('\\', "/");
+        assert_eq!(
+            normalize(&actual.to_string_lossy()),
+            normalize(expected),
+            "{note}"
+        );
+    }
+
     #[test]
     fn windows_separates_roaming_and_local() {
         let var = env(WINDOWS);
-        assert_eq!(
+        assert_windows_path(
             config_dir_on(Platform::Windows, &var),
-            Some(PathBuf::from(r"C:\Users\test\AppData\Roaming\necoder")),
-            "人が編集する設定は Roaming"
+            r"C:\Users\test\AppData\Roaming\necoder",
+            "人が編集する設定は Roaming",
         );
         // DB と blob は数百 MB になりうる。Roaming に置くとログオンが死ぬ
-        assert_eq!(
+        assert_windows_path(
             data_dir_on(Platform::Windows, &var),
-            Some(PathBuf::from(r"C:\Users\test\AppData\Local\necoder"))
+            r"C:\Users\test\AppData\Local\necoder",
+            "DB と blob は Local",
         );
-        assert_eq!(
+        assert_windows_path(
             state_dir_on(Platform::Windows, &var),
-            Some(PathBuf::from(r"C:\Users\test\AppData\Local\necoder"))
+            r"C:\Users\test\AppData\Local\necoder",
+            "state も Local",
         );
     }
 
@@ -604,14 +626,16 @@ mod tests {
     #[test]
     fn windows_falls_back_to_homedrive_and_homepath() {
         let var = env(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\test")]);
-        assert_eq!(
+        assert_windows_path(
             home_on(Platform::Windows, &var),
-            Some(PathBuf::from(r"C:\Users\test"))
+            r"C:\Users\test",
+            "HOMEDRIVE + HOMEPATH でホームが組める",
         );
         // APPDATA が無い環境でもホームから組める
-        assert_eq!(
+        assert_windows_path(
             config_dir_on(Platform::Windows, &var),
-            Some(PathBuf::from(r"C:\Users\test\AppData\Roaming\necoder"))
+            r"C:\Users\test\AppData\Roaming\necoder",
+            "APPDATA 不在でもホームから組める",
         );
     }
 
