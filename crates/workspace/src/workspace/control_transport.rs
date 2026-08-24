@@ -557,10 +557,15 @@ mod tests {
                 .expect("timeout を設定できない");
             let mut buffer = [0_u8; 16];
             let outcome = stream.read(&mut buffer);
-            // 何も送られてこないので TimedOut になる（EOF ではない＝相手はまだ生きている）
+            // 何も送られてこないのでタイムアウトする（EOF ではない＝相手はまだ生きている）。
+            //
+            // **エラー種別は OS で違う**（2026-08-24 に CI の test-macos で踏んだ）:
+            // unix の `SO_RCVTIMEO` は `EAGAIN` を返し Rust は `WouldBlock` に写す。
+            // Windows は `WSAETIMEDOUT` ＝ `TimedOut`。**どちらも「時間切れ」で正しい**ので
+            // 両方を受ける。片方だけを期待すると、その OS でしか通らないテストになる。
             matches!(
                 outcome.as_ref().map_err(|error| error.kind()),
-                Err(io::ErrorKind::TimedOut)
+                Err(io::ErrorKind::TimedOut) | Err(io::ErrorKind::WouldBlock)
             )
         });
 
