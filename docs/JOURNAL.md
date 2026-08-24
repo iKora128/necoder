@@ -1874,3 +1874,60 @@
 - 次（**ユーザー判断が要る**）: ① **AGPL の義務** — バイナリを配ると対応するソースの提供義務が生じる。
   リポジトリが private のままでは満たせないので、公開するか別導線を用意するかを決める必要がある。
   ② コード署名（未署名 → SmartScreen 警告）。③ `gh auth login` が未実施。
+
+## 2026-08-25 — CI を緑にするのに 4 回かかった。全部「その OS の前提に無意識に乗っていた」
+
+- やったこと:
+  - Windows 移植（W0〜W6）を main に push したあと、**CI が 4 回連続で落ちた**。落ちたのは
+    **毎回 `test-macos` だけ**で、`check-windows` は初回から一発で緑だった。4 件とも原因は同型:
+    1. **`paths` の Windows テストが mac で落ちる** — mac / Linux は `\` を**ただの文字**として
+       扱うので `PathBuf::from(r"C:\a\b")` は 1 コンポーネントになり、`join` で組んだ
+       `C:\a\b/necoder` と一致しない。区切りを正規化して比べる `assert_windows_path` を追加
+    2. **PowerShell 構文チェックのステップ自身が落ちた** — GitHub Actions は `run:` を
+       **BOM 無しの一時 `.ps1`** に書き出すため、`shell: powershell`（5.1）だと日本語が
+       システム ANSI として読まれて構文ごと壊れる。**BOM 欠落を防ぐために書いたステップが
+       BOM 欠落で落ちた。** インラインを ASCII だけに直した
+    3. **`pty_smoke` が mac で 1h12m ハング** — `io_thread.join()` が返らない
+       （Windows では同じテストが 1.5s で完走）。**シェルが生きている間 IO スレッドが落ちない
+       経路がある**らしい。`Msg::Shutdown` を投げて `drop` するだけにした
+    4. **読み取りタイムアウトのエラー種別が OS で違う** — unix の `SO_RCVTIMEO` は `EAGAIN`
+       ＝ Rust の `WouldBlock`、Windows は `WSAETIMEDOUT` ＝ `TimedOut`。**どちらも「時間切れ」で
+       正しい**ので両方を受けるようにした
+  - 結果、**run 32748471930 で全 6 ジョブ green**（test-macos / check-windows / check-linux /
+    audit-deps / build-remote-server ×2）
+  - `release.yml` の windows ジョブから **`continue-on-error` を外した**（W5 の未消化受入条件）。
+    併せて W0 用の `cargo check --workspace --all-targets --keep-going` ステップも削除
+
+- 学び/罠:
+  - **【最重要】移植でやったのと同じ間違いを、テストを書く側で繰り返していた。** 「Windows の
+    前提に乗っているコード」を潰して回った直後に、「**mac の前提に乗っているテスト**」を 4 件書いた。
+    `paths` crate は「実行中 OS の規則で判定するな」という思想で作ったのに、**その crate の
+    テストが mac で落ちた**のは象徴的。**両方向に穴が開く**と考えるのが正しい
+  - **`check-windows` を `ci.yml` に入れた効果は「Windows を守る」だけではない。** 二つの OS で
+    同じテストを回すようになって初めて、**どちらの前提に乗っていたかが露呈する**ようになった
+  - `release.yml` の W0 check ステップは、下の build と **`RUSTFLAGS` が違う（`+crt-static`）＝
+    フィンガープリントが別＝キャッシュが効かず、workspace を丸ごと 2 回ビルドしていた**
+  - `audit-deps` は普段 2 分で終わるのに今回だけ 14 分かかった（内容は無関係・入力も同じ）。
+    ランナー側の一時的な詰まりで、最終的には green
+
+- 検証: 手元（Windows 実機）で `cargo test --workspace` 250 件 green / 警告 0。
+  CI は run 32748471930 で全 6 ジョブ green。
+
+- 次（**ユーザー判断が要る**）: ① **v0.1.1 のタグ push**（打てば mac `.dmg` + Windows `.zip` が
+  Release に付く）。② **branch protection の必須チェックに `check-windows` を追加**するか
+  （現状の必須は `test-macos` / `audit-deps` の 2 つだけで、push はこれを bypass している）。
+  ③ 閉じるボタンの hover 赤（Windows 標準 `#E81123`）は **UI-SPEC §1.3 の色の許可リストに無い**ので、
+  採用するなら UI-SPEC 側に例外を書く必要がある。
+
+- 追記（同日・上の学びの 5 例目）: **この開発機の Git は `core.autocrlf=true` だった**。
+  しかも local / global ではなく **`C:/Program Files/Git/etc/gitconfig`（system）** に入っている
+  ＝ Git for Windows のインストーラ既定。**作業ツリーは全ファイル CRLF になっている**
+  （`docs/JOURNAL.md` で CR 行 1920 / `crates/paths/src/paths.rs` で 795）。
+  - **コミット自体は無害**（git が commit 時に LF へ戻すので、リポジトリ内の blob は LF のまま。
+    確認済み）。CI も checkout **前**に `autocrlf=false` を置いているので影響なし
+  - それでも**気持ちが悪い**: CRLF 起因の挙動を手元で検証するとき、作業ツリーが既に CRLF だと
+    「再現しているつもりで環境の方が汚れている」状態になる。Git gutter の CRLF テストは
+    一時リポジトリ側で `core.autocrlf=false` を明示的に固定してあるので、そこは無事だった
+  - **直すなら `git config --local core.autocrlf false` + 再 checkout が要る**（そのままだと
+    作業ツリー CRLF と index の LF が食い違って**全ファイルが変更扱い**になる）。
+    リリース直前に作業ツリーを触るのは避けたので**未実施・ユーザー判断待ち**

@@ -1,8 +1,8 @@
 name: Release
 
-# タグ push（v1.2.3 等）で mac の署名済み .dmg を作って GitHub Release に添付する。
-# 手動実行（workflow_dispatch）ではビルド確認だけ（artifact 添付）。
-# Windows は移植途中なので best-effort（落ちても mac リリースは止めない）。
+# タグ push（v1.2.3 等）で mac の署名済み .dmg と Windows の .zip を作って
+# GitHub Release に添付する。手動実行（workflow_dispatch）ではビルド確認だけ（artifact 添付）。
+# Windows は W0〜W6 完了（2026-08-25）につき **mac と同格**＝落ちたらリリースを止める。
 #
 # 署名まわりは karui（Tauri）と同じ secret 名・同じ notarize 方式（App Store Connect API キー）に
 # 揃えてある。karui のリポジトリに入っている値をそのままこの repo の secret に入れれば動く。
@@ -127,22 +127,20 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    continue-on-error: true # 移植途中: 失敗しても mac リリースは止めない（できるだけやる）
+    # **continue-on-error は付けない**（2026-08-25 に外した）。
+    #
+    # 移植中は「落ちても mac のリリースは止めない」で正しかったが、W0〜W6 が終わって
+    # CI の check-windows が必須ジョブになった今、ここが緑にならない ＝ 退行である。
+    # 付けたままだと **Windows のビルドが落ちても Release だけが作られ、zip の付かない
+    # リリースが公開される** ＝ 配布物の欠落に気づけない。落ちたらリリースごと止める。
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      # W0（WINDOWS-PORT.md §3）: 移植の現在地を測る。workspace 全体を check して
-      # コンパイルエラーを「全量」ログに出すのが目的。下の build は -p necoder ＝
-      # necoder とその依存しか見ないので、これが無いとエラー全量が取れない。
+      # ここに W0（移植の現在地を測る `cargo check --workspace --keep-going`）があったが
+      # 2026-08-25 に外した。移植が終わり **CI の check-windows が同じ検査を毎 push で
+      # 回している**ので用済みで、しかも下の build とは RUSTFLAGS が違う（+crt-static）＝
+      # フィンガープリントが別 ＝ キャッシュが効かず、丸ごと 2 回ビルドしていた。
       #
-      # --keep-going が必須: これが無いと cargo は最初に落ちた crate で停止し、
-      # その先の crate が未検査のまま終わる（2026-08-22 実測: workspace で止まり
-      # necoder 本体まで到達しなかった）。--all-targets はテスト・example も含める。
-      #
-      # 落ちるのが前提の段階なので step 側にも continue-on-error を置いて build まで進める。
-      - name: Check（workspace 全体・W0 のエラー全量取得）
-        continue-on-error: true
-        run: cargo check --workspace --all-targets --keep-going
       # 配布物は **静的 CRT** で作る（WINDOWS-PORT.md §W6）。
       # 素のビルドは `VCRUNTIME140.dll` / `VCRUNTIME140_1.dll` に依存し、
       # **VC++ 再頒布可能パッケージの入っていない環境では起動しない**（2026-08-24 に実測）。

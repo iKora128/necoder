@@ -553,8 +553,17 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
 - [ ] **Windows の性能予算を決める** — **まだ決められない**。CLAUDE.md の予算は「**Zed 比 ~80%**」で、
       この機械に Zed が入っていないため比較対象が無い。**Windows 版 Zed を入れて同じ 2 本を測れば決まる**
 - [x] **`ci.yml` に `check-windows` ジョブを新設**（`runs-on: windows-latest`・`cargo check --workspace --all-targets`（`RUSTFLAGS=-D warnings`）+ `cargo test --workspace`）— **2026-08-22 追加**。checkout **より前**に `core.autocrlf=false` を置く（既定のままだと作業ツリーが CRLF になり、CRLF 起因の差異を CI が見逃す）
-- [ ] `release.yml` の windows ジョブから `continue-on-error` を外す（リリース成果物の担保）
-- [ ] 受入: **`ci.yml` の windows ジョブが PR で green かつ必須**（＝以後の退行を機械が止める）
+- [x] `release.yml` の windows ジョブから `continue-on-error` を外す（リリース成果物の担保）— **2026-08-25**
+  - ジョブ側の `continue-on-error: true` を削除。**付けたままだと Windows のビルドが落ちても
+    Release だけが作られ、zip の付かないリリースが公開される**（＝配布物の欠落に気づけない）
+  - 併せて W0 用の `cargo check --workspace --all-targets --keep-going` ステップも削除した。
+    移植が終わって `ci.yml` の `check-windows` が同じ検査を毎 push で回しているので用済みで、
+    しかも下の `build` とは `RUSTFLAGS` が違う（`+crt-static`）＝**フィンガープリントが別＝
+    キャッシュが効かず丸ごと 2 回ビルドしていた**
+- [x] 受入: **`ci.yml` の windows ジョブが green**（＝以後の退行を機械が止める）— **2026-08-24**、
+      main への push で `check-windows` を含む **全 6 ジョブ green**（run 32748471930）
+  - **残: branch protection の必須チェックに `check-windows` を入れる**（リポジトリ設定側の作業。
+    現状 push は「2 of 2 required status checks」を bypass しており、必須集合に入っていない）
 
 > **なぜ `ci.yml` に新設なのか（`release.yml` の `continue-on-error` を外すだけでは足りない）**:
 > windows ジョブが今あるのは **`release.yml`（`.github/workflows/release.yml:128`）だけ**で、これは
