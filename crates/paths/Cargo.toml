@@ -1,0 +1,13 @@
+[package]
+name = "paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/paths.rs"
+
+# 依存ゼロ（WINDOWS-PORT.md §D1）。ARCHITECTURE §1 の最下層に置くため、
+# ここに何かを足す時は層構造を壊していないか必ず確認すること。
+[dependencies]

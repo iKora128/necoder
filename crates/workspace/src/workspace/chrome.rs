@@ -1,5 +1,32 @@
 use crate::workspace::*;
 
+/// 最大化された窓を元のサイズへ戻す（タイトルバーの最大化ボタン・2026-08-24）。
+///
+/// gpui の `Window::zoom_window()` は Windows では `ShowWindowAsync(SW_MAXIMIZE)` を投げるだけで、
+/// **戻す口が公開されていない**（`gpui_windows` の `zoom()` を読んで確認）。ボタンをトグルにするには
+/// ここだけ Win32 を直接叩くしかない。
+///
+/// `GetForegroundWindow()` は**今フォアグラウンドにある窓**を返す。この関数はクリック処理から
+/// しか呼ばれない ＝ 直前にユーザーが自分の窓を押している ＝ 自窓が前面、なので狙った窓が取れる。
+/// （`GetActiveWindow` は windows-sys 0.61 では別モジュールに居るためこちらを使う。）
+#[cfg(windows)]
+fn restore_maximized_window() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+    // SAFETY: どちらも引数の検証だけで、無効ハンドルには何もしない Win32 API。
+    unsafe {
+        let window = GetForegroundWindow();
+        if !window.is_null() {
+            ShowWindow(window, SW_RESTORE);
+        }
+    }
+}
+
+/// mac / Linux では最大化ボタン自体を出さないので呼ばれない。
+#[cfg(not(windows))]
+fn restore_maximized_window() {}
+
 impl Workspace {
     pub(crate) fn on_settings_view_event(
         &mut self,
@@ -45,8 +72,15 @@ impl Workspace {
             .gap_2()
             .h(px(TITLEBAR_HEIGHT))
             .flex_none()
-            .pl(px(TRAFFIC_LIGHT_INSET)) // ネイティブ信号機を避ける
-            .pr_2()
+            // 左の余白は **mac のネイティブ信号機を避けるため**のもの。Windows / Linux には
+            // 信号機が無いので詰める（空けるとピルが不自然に右へ寄る・2026-08-24）。
+            .pl(px(if cfg!(target_os = "macos") {
+                TRAFFIC_LIGHT_INSET
+            } else {
+                8.0
+            }))
+            // 右端は mac だけ余白を持つ。Windows はキャプションボタンを**端に密着**させる作法。
+            .when(cfg!(target_os = "macos"), |element| element.pr_2())
             .border_b_1()
             .border_color(theme.border)
             // 窓ドラッグ: down→move で開始（クリックと区別）。ダブルクリックで zoom（Zed 準拠）。
@@ -108,6 +142,73 @@ impl Workspace {
                     .child(self.dock_button(Dock::Bottom, self.chrome.show_bottom, cx))
                     .child(self.dock_button(Dock::Right, self.chrome.show_right, cx)),
             )
+            // Windows / Linux のキャプションボタン。**右端に密着**させるので、
+            // 上の `.pr_2()` より外側（最後の child）に置く。mac では空になる。
+            .child(self.render_window_controls(cx))
+    }
+
+    /// Windows / Linux のキャプションボタン（最小化・最大化・閉じる）。
+    ///
+    /// **macOS では何も描かない** — GPUI がネイティブの信号機を左上に出すため（§D8: mac の挙動不変）。
+    /// Windows はカスタム titlebar を使う以上、**自前で描かないと窓を閉じる手段が無い**
+    /// （2026-08-24・実機を触ったユーザーの指摘で発覚）。
+    ///
+    /// **クリックは自前で処理する。** `window_control_area`（gpui が `WM_NCHITTEST` で
+    /// `HTCLOSE` / `HTMAXBUTTON` / `HTMINBUTTON` を返す仕組み）は**この構成では発火しなかった**
+    /// ＝ボタンは描かれるのに押しても何も起きない、という状態になる（2026-08-24 実機で確認）。
+    /// gpui の公開 API（`minimize_window` / `zoom_window` / `remove_window`）を直接叩く方が確実。
+    ///
+    /// 引き換えに **Windows 11 のスナップレイアウト**（最大化ボタンのホバーで出る配置メニュー）は
+    /// 出ない。あれは `HTMAXBUTTON` を返さないと OS が出してくれないため。後日 hit-test 経路が
+    /// 動く形が分かったら戻す価値がある。
+    ///
+    /// 色は中立（`fg2` → hover で `fg0` + `bg2`）。UI-SPEC §1.3 の許可リストに
+    /// titlebar のキャプションボタンは無く、**識別色を置く場所ではない**ため。
+    /// Windows 標準の「閉じるだけ hover が赤」は色の掟と衝突するので採っていない（要ユーザー判断）。
+    pub(crate) fn render_window_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme.clone();
+        // 46x32 が Windows のキャプションボタンの標準寸法。titlebar 高（38）に合わせて h_full。
+        let button = move |id: &'static str, glyph: &'static str| {
+            let theme = theme.clone();
+            div()
+                .id(id)
+                .w(px(46.))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.))
+                .text_color(theme.fg2)
+                .cursor_pointer()
+                .hover(move |style| style.bg(theme.bg2).text_color(theme.fg0))
+                .child(glyph)
+        };
+        let mut controls = div().flex().items_center().h_full();
+        if !cfg!(target_os = "macos") {
+            controls = controls
+                .child(button("window-minimize", "\u{2500}").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_this, _, window, _cx| window.minimize_window()),
+                ))
+                .child(button("window-maximize", "\u{25a1}").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_this, _, window, _cx| {
+                        // gpui の `zoom_window()` は Windows で `SW_MAXIMIZE` を投げるだけで、
+                        // **元に戻す口が無い**（`gpui_windows` の `zoom()` を確認済み）。
+                        // 最大化済みなら自前で `SW_RESTORE` する。
+                        if window.is_maximized() {
+                            restore_maximized_window();
+                        } else {
+                            window.zoom_window();
+                        }
+                    }),
+                ))
+                .child(button("window-close", "\u{2715}").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_this, _, window, _cx| window.remove_window()),
+                ));
+        }
+        controls
     }
 
     /// Multi Agent（編隊）モードのトグル（titlebar 右上・M14）。ON で全画面が編隊ビュー
@@ -1018,14 +1119,18 @@ impl Workspace {
             }
         } else if self.tabs.is_empty() {
             // 初回起動の案内（M13）: 最初の 4 手をキーバッジ付きで。10 分で使い始める導線。
-            let hint = |key: &'static str, text: String| {
+            let hint = |key: String, text: String| {
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
                     .child(
+                        // **固定幅にしない**。mac の `⌘⇧A`（3 文字）に合わせて w(52px) にしていたが、
+                        // Windows の `Ctrl+Shift+A`（12 文字）が枠から溢れる（2026-08-22・実機で発見）。
+                        // 揃えたいのは「最小幅」であって「幅」ではない。
                         div()
-                            .w(px(52.))
+                            .min_w(px(52.))
+                            .flex_shrink_0()
                             .flex()
                             .justify_center()
                             .px(px(6.))
@@ -1035,7 +1140,7 @@ impl Workspace {
                             .border_color(theme.border)
                             .text_size(px(10.5))
                             .text_color(theme.fg1)
-                            .child(key),
+                            .child(SharedString::from(key)),
                     )
                     .child(
                         div()
@@ -1058,10 +1163,25 @@ impl Workspace {
                         .pb(px(6.))
                         .child(SharedString::from(i18n::t!("welcome.title"))),
                 )
-                .child(hint("⌘O", i18n::t!("welcome.open_project")))
-                .child(hint("⌘P", i18n::t!("welcome.open_file")))
-                .child(hint("⌘⇧A", i18n::t!("welcome.new_thread")))
-                .child(hint("⌘⇧P", i18n::t!("welcome.palette")))
+                // キー表記は**プラットフォーム別**（`⌘O` ↔ `Ctrl+O`）。記号を直書きすると
+                // Windows / Linux で mac の記号が出る（2026-08-22・実機で発見）。
+                // 表記の分岐は keymap_core に集約してあるので、ここは通すだけ（§D4）。
+                .child(hint(
+                    keymap_core::keystroke_label("cmd-o"),
+                    i18n::t!("welcome.open_project"),
+                ))
+                .child(hint(
+                    keymap_core::keystroke_label("cmd-p"),
+                    i18n::t!("welcome.open_file"),
+                ))
+                .child(hint(
+                    keymap_core::keystroke_label("cmd-shift-a"),
+                    i18n::t!("welcome.new_thread"),
+                ))
+                .child(hint(
+                    keymap_core::keystroke_label("cmd-shift-p"),
+                    i18n::t!("welcome.palette"),
+                ))
                 .into_any_element()
         } else {
             let mut panes = div()

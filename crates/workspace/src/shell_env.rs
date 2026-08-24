@@ -17,15 +17,22 @@
 //! あるため `-i` が要る（`-l` だけでは node が出ない実例）。~0.5s かかるので起動時間の予算
 //! （~215ms）を毎回食わないよう結果をキャッシュし、2 回目以降は即読み + 裏で取り直す。
 //!
-//! 置き場: `~/Library/Application Support/necoder/shell-path`（`NECODER_SHELL_PATH_CACHE`
-//! で差し替え・`NECODER_NO_SHELL_ENV=1` で機能ごと止める）。
+//! 置き場は `paths` crate が決める（`NECODER_SHELL_PATH_CACHE` で差し替え・
+//! `NECODER_NO_SHELL_ENV=1` で機能ごと止める）。**Windows では置き場自体が `None`** —
+//! login shell の PATH という概念が無く、環境変数 PATH がそのまま子へ継承されるので
+//! キャッシュする対象が存在しない（WINDOWS-PORT.md §D1）。
 //!
 //! 扱うのは PATH だけ。API キー等は取り込まない — 認証は各 CLI 側に委譲する決定（DECISIONS）
 //! なので、鍵をこのプロセスへ持ち込む理由が無い。
 
 use std::path::PathBuf;
+// 以下は unix 経路（`$SHELL -l -i -c`）でしか使わない。cfg を付けないと Windows で
+// 「未使用 import」の警告になる（W2 の受入条件は警告 0）。
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::mpsc;
+#[cfg(unix)]
 use std::time::Duration;
 
 /// launchd が GUI プロセスへ渡す既定の PATH。これと一致する＝シェルを経由していない起動。
@@ -40,14 +47,12 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const MARKER: char = '\u{1}';
 
-/// PATH キャッシュの置き場（`NECODER_SHELL_PATH_CACHE` で差し替え）。
-#[cfg(unix)]
+/// PATH キャッシュの置き場。決定は `paths` crate に集約している
+/// （`NECODER_SHELL_PATH_CACHE` で差し替え）。
+///
+/// **Windows では `None`**。キャッシュすべき login shell の PATH が存在しないため。
 pub fn cache_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("NECODER_SHELL_PATH_CACHE") {
-        return Some(PathBuf::from(path));
-    }
-    let home = std::env::var_os("HOME")?;
-    Some(std::path::Path::new(&home).join("Library/Application Support/necoder/shell-path"))
+    paths::shell_path_cache()
 }
 
 /// GUI 起動なら、ログインシェルの PATH をこのプロセスへ取り込む。取り込んだ PATH を返す。
@@ -145,11 +150,6 @@ fn write_cache(path: &str) {
 /// Windows は環境の渡り方が別物（launchd 相当が無い）。移植のときに専用実装を入れるまで no-op。
 #[cfg(not(unix))]
 pub fn inherit_login_shell_path() -> Option<String> {
-    None
-}
-
-#[cfg(not(unix))]
-pub fn cache_path() -> Option<PathBuf> {
     None
 }
 

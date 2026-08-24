@@ -19,14 +19,10 @@ const EXCERPT_MAX_BYTES: usize = 1800;
 /// 残すクラッシュログの数（古いものから消す）。
 const KEEP_LOGS: usize = 20;
 
-/// クラッシュログの置き場（`~/Library/Application Support/necoder/crashes/`）。
-/// テスト・offscreen 検証は `NECODER_CRASH_DIR` で差し替える（ユーザーの実ログを触らない）。
+/// クラッシュログの置き場。決定は `paths` crate に集約している（WINDOWS-PORT.md §D1）。
+/// テスト・offscreen 検証は `NECODER_CRASH_DIR` で差し替える（ユーザーの実ログを触らない・paths 側で解決）。
 pub fn crash_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("NECODER_CRASH_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/necoder/crashes"))
+    paths::crashes_dir()
 }
 
 /// panic hook を仕込む（main() 冒頭・GPUI 起動前に呼ぶ）。どのスレッドの panic でも

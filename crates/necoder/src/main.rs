@@ -52,7 +52,7 @@ fn resolve_projects() -> (Vec<ProjectSource>, Vec<RestoredTabs>, usize) {
         }
         let path = PathBuf::from(&arg);
         if path.is_file() {
-            let file = std::fs::canonicalize(&path).unwrap_or(path);
+            let file = paths::canonicalize(&path).unwrap_or(path);
             let parent = file
                 .parent()
                 .map(Path::to_path_buf)
@@ -61,7 +61,7 @@ fn resolve_projects() -> (Vec<ProjectSource>, Vec<RestoredTabs>, usize) {
             open_files.push(RestoredTabs::single(file));
         } else if path.is_dir() {
             sources.push(ProjectSource::local(
-                std::fs::canonicalize(&path).unwrap_or(path),
+                paths::canonicalize(&path).unwrap_or(path),
             ));
             open_files.push(RestoredTabs::default());
         } else {
@@ -132,6 +132,17 @@ fn watch_user_keymap(path: PathBuf, cx: &mut App) {
     let Some(parent) = path.parent().map(Path::to_path_buf) else {
         return;
     };
+    // 初回起動では設定ディレクトリがまだ無い。無いパスを watch すると
+    // 「Input watch path is neither a file nor a directory」で落ちる（2026-08-22・Windows 実機で確認）。
+    // mac では既存ユーザーのディレクトリが在るので表に出ていなかっただけで、
+    // まっさらな環境なら 3 プラットフォームとも起きる。
+    if let Err(error) = std::fs::create_dir_all(&parent) {
+        eprintln!(
+            "設定ディレクトリを作れない（keymap の監視を諦める）: {} — {error}",
+            parent.display()
+        );
+        return;
+    }
     let (sender, mut receiver) = futures::channel::mpsc::unbounded::<()>();
     let target = path.clone();
     // keymap.json はローカル設定ディレクトリ。local host で監視する。
@@ -348,6 +359,17 @@ fn main() {
         return;
     }
     let startup = Instant::now();
+    // 起動の内訳（`NECODER_STARTUP_LOG=1`）。`startup_ms` の 1 数字だけでは
+    // **どの段が重いか**が分からない。2026-08-23 に Windows の起動が mac の ~2.4 倍
+    // （523ms vs ~215ms）だったので、段ごとの累積経過を刻めるようにした。
+    fn stage(startup: &Instant, name: &str) {
+        if std::env::var_os("NECODER_STARTUP_LOG").is_some() {
+            println!(
+                "startup_stage {name}={:.1}",
+                startup.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
     // Finder/Dock「このアプリケーションで開く」等で届く file:// URL（mac は application:openURLs:）。
     // コールバックは Application 側にしか生えておらず cx も持たないため、run の**前**に登録して
     // チャネル →（run 内の）前景 spawn で窓へ届ける（CFBundleDocumentTypes とセット・M13）。
@@ -357,11 +379,15 @@ fn main() {
         let _ = open_urls_tx.unbounded_send(urls);
     });
     app.run(move |cx: &mut App| {
+        // ここまでに GPUI のプラットフォーム初期化（Windows は DirectX デバイス + DirectWrite）が済んでいる。
+        stage(&startup, "app_run_entered");
         load_fonts(cx);
+        stage(&startup, "fonts_loaded");
         i18n::init_from_os_locale();
 
         // プロジェクトを解決（roots + 起動時に開くファイル）。先頭 root を project 設定の対象にする。
         let (sources, open_files, active_project) = resolve_projects();
+        stage(&startup, "projects_resolved");
 
         // 設定（default → user → project）を **反応的 global** に載せてファイル監視を開始する。
         // 以後 UI トグル / CLI / MCP / 手編集はすべてこの 1 つの store を更新し、live で波及する。
@@ -370,6 +396,7 @@ fn main() {
             .filter(|source| !source.is_remote())
             .map(|source| source.root().to_path_buf());
         settings::init(settings_core::user_settings_path(), local_settings_root, cx);
+        stage(&startup, "settings_ready");
         let settings = settings::get(cx);
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);
@@ -383,7 +410,10 @@ fn main() {
         let theme_name = std::env::var("NECODER_THEME").unwrap_or_else(|_| settings.theme.clone());
         let theme = theme_core::resolve(&theme_name, themes_dir.as_deref());
 
-        match keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx) {
+        match keymap_core::load_bindings(
+            &keymap_core::default_keymap_json(keymap_core::KeymapPlatform::current()),
+            cx,
+        ) {
             Ok(bindings) => cx.bind_keys(bindings),
             Err(error) => eprintln!("keymap のロードに失敗: {error:#}"),
         }
@@ -440,6 +470,7 @@ fn main() {
             } else {
                 workspace::state_path()
             };
+        stage(&startup, "before_open_window");
         let open = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

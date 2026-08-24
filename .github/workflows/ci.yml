@@ -23,6 +23,52 @@ jobs:
       - name: 性能予算ガード（編集コア・release）
         run: cargo run --release -p editor_core --example bench_editor
 
+  check-windows:
+    runs-on: windows-latest
+    # W5（WINDOWS-PORT.md §3）: Windows の退行を PR で機械的に止める。
+    #
+    # release.yml にも windows ジョブはあるが、あれは **タグ push か手動でしか走らない** ＝
+    # PR を止められない。「以後の退行を機械が止める」にはこちらが要る。
+    #
+    # 2026-08-22 に W1（paths crate）+ W2（IPC 抽象・警告 0）を通して
+    # `cargo test --workspace` が Windows 実機で green になったので必須ジョブにできる。
+    # 落としてよい理由が無い＝ continue-on-error は付けない。
+    steps:
+      # checkout **より前**に改行変換を切る。Windows ランナーの Git は core.autocrlf=true が
+      # 既定で、そのまま checkout すると作業ツリーが CRLF になる（WINDOWS-PORT.md §4）。
+      - name: 改行変換を切る（checkout より前）
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Check（警告もエラー扱い）
+        run: cargo check --workspace --all-targets
+        env:
+          RUSTFLAGS: -D warnings
+      - name: Test（全 crate）
+        run: cargo test --workspace
+      # scripts/*.ps1 は **UTF-8 BOM 付き**でなければならない。Windows PowerShell 5.1 は
+      # BOM の無いファイルをシステム ANSI（日本語環境では Shift-JIS）として読むため、
+      # 日本語コメントが化けて構文ごと壊れる（2026-08-22 に実際に踏んだ）。
+      # 編集ツールは BOM を落とすことがあるので機械で止める。
+      # **`shell: powershell`（5.1）で回すこと** — 既定の pwsh(7) は BOM 無しでも読めてしまい、
+      # このチェックが意味を失う。
+      - name: PowerShell スクリプトの構文チェック（5.1 で読めるか＝BOM の有無）
+        shell: powershell
+        run: |
+          $failed = $false
+          Get-ChildItem scripts/*.ps1 | ForEach-Object {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              Write-Host "::error::$($_.Name) が Windows PowerShell 5.1 で解釈できない（UTF-8 BOM が無い可能性）"
+              $errors | ForEach-Object { Write-Host "  $($_.Message)" }
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
   audit-deps:
     runs-on: ubuntu-latest
     # 依存のライセンス互換 / 出所 / RUSTSEC 勧告の機械監査（deny.toml が正・M13 公開準備）。

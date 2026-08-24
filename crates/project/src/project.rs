@@ -903,8 +903,14 @@ pub fn ai_commit_message_on(host: &dyn Host, dir: &Path) -> Result<String> {
         1行目に要約、変更が複数なら空行のあと箇条書きで本文。\
         前置き・説明・引用符・コードブロックは付けず、メッセージ本文だけを出力して。";
     let script = format!("git --no-pager diff HEAD | claude -p \"{instruction}\"");
+    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
+    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
+    anyhow::ensure!(
+        host.has_posix_shell(),
+        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
+    );
     let output = host
-        .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
+        .run_command(&host.shell_script(script.as_str(), dir))
         .context("コミットメッセージ生成の実行に失敗（claude CLI 未導入？）")?;
     anyhow::ensure!(
         output.success(),
@@ -995,8 +1001,14 @@ pub fn inline_rewrite_on(
         "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
         temp = temp.display()
     );
+    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
+    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
+    anyhow::ensure!(
+        host.has_posix_shell(),
+        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
+    );
     let output = host
-        .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
+        .run_command(&host.shell_script(script.as_str(), dir))
         .context("インライン編集の実行に失敗（claude CLI 未導入？）")?;
     anyhow::ensure!(
         output.success(),
@@ -1034,8 +1046,14 @@ pub fn inline_command_on(host: &dyn Host, dir: &Path, instruction: &str) -> Resu
         "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
         temp = temp.display()
     );
+    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
+    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
+    anyhow::ensure!(
+        host.has_posix_shell(),
+        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
+    );
     let output = host
-        .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
+        .run_command(&host.shell_script(script.as_str(), dir))
         .context("コマンド生成の実行に失敗（claude CLI 未導入？）")?;
     anyhow::ensure!(
         output.success(),
@@ -1100,8 +1118,14 @@ pub fn oneshot_line_on(
         temp = temp.display(),
         out = out.display()
     );
+    // スクリプト本体が POSIX 構文（パイプ・`$?`・`rm -f`）なので、シェルを差し替えるだけでは動かない。
+    // Windows ローカルでは明示的に断る（WINDOWS-PORT.md §D3）。
+    anyhow::ensure!(
+        host.has_posix_shell(),
+        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
+    );
     let output = host
-        .run_command(&CommandSpec::new("sh", dir).args(["-c", script.as_str()]))
+        .run_command(&host.shell_script(script.as_str(), dir))
         .context("oneshot の実行に失敗（既定 Agent の CLI 未導入？）")?;
     anyhow::ensure!(
         output.success(),
@@ -1458,17 +1482,27 @@ fn normalize_newlines(text: &str) -> String {
 }
 
 /// [`Worktree::all_files`] の host 直呼び版（背景スレッド用・Worktree は Rc なので Send できない）。
+/// 表示・絞り込み用の相対パス文字列。**Windows でも `/` 区切りに揃える**。
+///
+/// この文字列は ⌘P の絞り込み・タブの表示・検索結果の見出しに出る。ユーザーは `/` で打つし、
+/// mac / Linux と同じ文字列になるので設定やスナップショットも揃う（VSCode と同じ流儀）。
+/// `PathBuf::from("src/main.rs")` は Windows でも正しく解決されるため、戻す側の心配も要らない。
+fn relative_display(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
 pub fn all_files_on(host: &dyn Host, root: &Path, limit: usize) -> Vec<(PathBuf, String)> {
     let mut files = host
         .list_files(root, limit)
         .unwrap_or_default()
         .into_iter()
         .map(|path| {
-            let relative = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
+            let relative = relative_display(path.strip_prefix(root).unwrap_or(&path));
             (path, relative)
         })
         .collect::<Vec<_>>();
@@ -2165,6 +2199,10 @@ mod tests {
         }
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "tester"]);
+        // 改行変換を切る。Windows の Git は既定で core.autocrlf=true（インストーラ既定）なので、
+        // 切らないと checkout したファイルが CRLF になり「書いた内容と読んだ内容が違う」で落ちる。
+        // このテストが見たいのは merge/status であって改行ではない（WINDOWS-PORT.md §4）。
+        git(&["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
         git(&["add", "tracked.txt"]);
         git(&["commit", "-q", "-m", "init"]);
@@ -2175,14 +2213,73 @@ mod tests {
         let status: std::collections::HashMap<PathBuf, StatusKind> =
             git_status(&root).into_iter().collect();
         // git は toplevel を realpath で返すので比較側も canonicalize（macOS の /var→/private/var）。
-        let tracked = std::fs::canonicalize(root.join("tracked.txt")).unwrap();
-        let new = std::fs::canonicalize(root.join("new.txt")).unwrap();
+        let tracked = paths::canonicalize(root.join("tracked.txt")).unwrap();
+        let new = paths::canonicalize(root.join("new.txt")).unwrap();
         assert_eq!(status.get(&tracked), Some(&StatusKind::Modified));
         assert_eq!(status.get(&new), Some(&StatusKind::Untracked));
 
         // buffer_diff: HEAD="one\n" vs 現在 "two\n" → 1 行 Modified
         let hunks = buffer_diff(&tracked, "two\n");
         assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].kind, HunkKind::Modified);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **gutter が「全行 Modified」にならないこと**（WINDOWS-PORT.md §W4 の受入条件）。
+    ///
+    /// Windows の Git はインストーラ既定が `core.autocrlf=true` なので、
+    /// **index は LF・作業ツリーは CRLF** という状態が普通に起きる。素朴に突き合わせると
+    /// 全行が違って見え、**変更していないファイルの gutter が真っ赤になる**。
+    ///
+    /// `.gitattributes` での回避は「necoder が開くのは他人のリポジトリ」なので採れない
+    /// （§4）。だから **necoder 側が比較前に LF 正規化する**のが唯一の道であり、
+    /// それをこのテストで固定する。
+    ///
+    /// mac / Linux でも同じ状況は作れる（autocrlf を明示的に立てる）ので、
+    /// **プラットフォームを問わず走る**ようにしてある。
+    #[test]
+    fn gutter_ignores_line_ending_differences_but_not_real_edits() {
+        let root = scratch("crlf-gutter");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return; // git 無し環境はスキップ
+        }
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "tester"]);
+        // **この罠を再現するために、あえて Windows の既定と同じ true にする。**
+        git(&["config", "core.autocrlf", "true"]);
+
+        // index には LF で入る（autocrlf=true が commit 時に CRLF→LF する）。
+        let file = root.join("note.txt");
+        std::fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
+        git(&["add", "note.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        // 作業ツリーを CRLF にする（checkout が autocrlf=true でやることと同じ）。
+        std::fs::write(&file, "alpha\r\nbeta\r\ngamma\r\n").unwrap();
+        let working = std::fs::read_to_string(&file).unwrap();
+        assert!(working.contains("\r\n"), "作業ツリーが CRLF になっていない");
+
+        let tracked = paths::canonicalize(&file).unwrap();
+
+        // ① 改行しか違わない ＝ gutter は 1 本も出ない（これが本命）。
+        assert!(
+            buffer_diff(&tracked, &working).is_empty(),
+            "改行の違いだけで gutter が出た（全行 Modified の再現）"
+        );
+
+        // ② 正規化が**本物の変更まで隠していない**こと。CRLF のまま 1 行だけ変える。
+        let edited = "alpha\r\nBETA\r\ngamma\r\n";
+        let hunks = buffer_diff(&tracked, edited);
+        assert_eq!(hunks.len(), 1, "本物の変更が 1 hunk として出ない");
         assert_eq!(hunks[0].kind, HunkKind::Modified);
 
         let _ = std::fs::remove_dir_all(&root);
@@ -2204,10 +2301,14 @@ mod tests {
         }
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "tester"]);
+        // 改行変換を切る。Windows の Git は既定で core.autocrlf=true（インストーラ既定）なので、
+        // 切らないと checkout したファイルが CRLF になり「書いた内容と読んだ内容が違う」で落ちる。
+        // このテストが見たいのは merge/status であって改行ではない（WINDOWS-PORT.md §4）。
+        git(&["config", "core.autocrlf", "false"]);
 
         // 新規ファイル → stage 前は unstaged=Untracked
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
-        let a = std::fs::canonicalize(root.join("a.txt")).unwrap();
+        let a = paths::canonicalize(root.join("a.txt")).unwrap();
         let before = git_changes(&root);
         let entry = before
             .iter()
@@ -2271,6 +2372,10 @@ mod tests {
         }
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "tester"]);
+        // 改行変換を切る。Windows の Git は既定で core.autocrlf=true（インストーラ既定）なので、
+        // 切らないと checkout したファイルが CRLF になり「書いた内容と読んだ内容が違う」で落ちる。
+        // このテストが見たいのは merge/status であって改行ではない（WINDOWS-PORT.md §4）。
+        git(&["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         stage_all(&root).unwrap();
         commit(&root, "init").unwrap();
@@ -2339,6 +2444,8 @@ mod tests {
         }
         git(&root, &["config", "user.email", "t@example.com"]);
         git(&root, &["config", "user.name", "tester"]);
+        // 改行変換を切る（Windows の Git 既定 core.autocrlf=true 対策・WINDOWS-PORT.md §4）。
+        git(&root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("base.txt"), "base\n").unwrap();
         git(&root, &["add", "-A"]);
         git(&root, &["commit", "-q", "-m", "base"]);
@@ -2386,6 +2493,8 @@ mod tests {
         git(&bare, &["init", "-q", "--bare"]);
         git(&root, &["config", "user.email", "t@example.com"]);
         git(&root, &["config", "user.name", "tester"]);
+        // 改行変換を切る（Windows の Git 既定 core.autocrlf=true 対策・WINDOWS-PORT.md §4）。
+        git(&root, &["config", "core.autocrlf", "false"]);
         git(&root, &["remote", "add", "origin", &bare.to_string_lossy()]);
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         git(&root, &["add", "-A"]);
@@ -2444,6 +2553,10 @@ mod tests {
         }
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "tester"]);
+        // 改行変換を切る。Windows の Git は既定で core.autocrlf=true（インストーラ既定）なので、
+        // 切らないと checkout したファイルが CRLF になり「書いた内容と読んだ内容が違う」で落ちる。
+        // このテストが見たいのは merge/status であって改行ではない（WINDOWS-PORT.md §4）。
+        git(&["config", "core.autocrlf", "false"]);
         for name in ["one", "two", "three"] {
             std::fs::write(root.join("a.txt"), format!("{name}\n")).unwrap();
             git(&["add", "-A"]);

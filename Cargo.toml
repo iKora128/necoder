@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["zed"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
@@ -72,8 +72,20 @@ libc = "0.2"
 notify = "8"
 # ローカル永続化 DB（hot exit / スレッド / 台帳。DECISIONS 決定ログ 2026-07-16・pure-Rust SQLite）
 turso = "0.7"
+# Windows の名前付きパイプ（制御 IPC・WINDOWS-PORT.md §D2）。Win32 API の生バインディングだけを
+# 使う（MIT OR Apache-2.0）。既に依存ツリーに lock 済みの版を共有してビルドを重複させない。
+# 定数はバージョン間で置き場が動くので control_transport 側でローカル定義し、関数だけ引く。
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Pipes",
+  # タイトルバーの「元に戻す」（gpui の zoom_window は SW_MAXIMIZE しか投げない）
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 # 自作 crate（作る順は docs/ARCHITECTURE.md §2）
+# paths は依存ゼロの最下層（WINDOWS-PORT.md §D1）。設定・DB・ログの置き場を決める唯一の場所。
+paths = { path = "crates/paths" }
 theme_core = { path = "crates/theme_core" }
 i18n = { path = "crates/i18n" }
 editor_core = { path = "crates/editor_core" }

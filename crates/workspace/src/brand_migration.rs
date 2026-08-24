@@ -17,16 +17,21 @@
 
 use std::path::{Path, PathBuf};
 
-/// 旧ブランドのアプリ支援ディレクトリ（`~/Library/Application Support/Shirushi`）。
+/// 旧ブランドのアプリ支援ディレクトリ。
+///
+/// **macOS 以外では `None`**。改名前（2026-08-22 以前）は macOS でしか配布していないので、
+/// 他のプラットフォームには引っ越すべきデータが原理的に存在しない（WINDOWS-PORT.md §D1）。
 fn legacy_support_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/Shirushi"))
+    paths::legacy_brand_dir()
 }
 
-/// 現行のアプリ支援ディレクトリ（`~/Library/Application Support/necoder`）。
+/// 現行のアプリ支援ディレクトリ。
+///
+/// 引っ越しが走るのは macOS だけで、そこでは config/data/state が同一ディレクトリなので
+/// `config_dir()` で足りる。他のプラットフォームでは `legacy_support_dir()` が `None` を
+/// 返して引っ越し自体が起きない。
 fn support_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/necoder"))
+    paths::config_dir()
 }
 
 /// 旧ファイル名 → 新ファイル名。DB は `shirushi.db` で作られていたので `-wal` / `-shm` ごと連れて行く

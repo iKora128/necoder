@@ -45,6 +45,7 @@ pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
 mod chrome;
 mod commands;
 mod control_ipc;
+mod control_transport;
 mod control_view;
 mod dev_probes;
 mod explorer_controller;
@@ -60,6 +61,8 @@ mod rail_view;
 mod remote_ssh;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
+// 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
+pub use control_transport::{ControlListener, ControlStream};
 mod coordinator;
 pub(crate) use coordinator::is_coordinator_thread_name;
 mod todo_panel;

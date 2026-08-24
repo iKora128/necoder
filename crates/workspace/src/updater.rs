@@ -86,8 +86,23 @@ pub fn parse_latest_release(json: &str, current_version: &str) -> Option<UpdateI
     })
 }
 
+/// このプラットフォームで**アプリ内更新を提供できるか**。
+///
+/// **Windows / Linux は現状 `false`**（WINDOWS-PORT.md §W6 の残項目）。
+/// 適用経路が `.dmg` + `spctl` + `hdiutil` ＝ macOS 専用で、他の OS では途中で必ず失敗する。
+///
+/// **チップを出さないのが要点**。出してしまうと「押せるのに必ず失敗する」という
+/// 一番たちの悪い形になる（2026-08-24・Windows 版を配る直前に気づいた）。
+/// Windows の更新導線を作るまでは、更新は zip の再ダウンロードで行う。
+fn in_app_update_supported() -> bool {
+    cfg!(target_os = "macos")
+}
+
 /// latest リリースを確認する（背景スレッドで呼ぶ）。ネット断・API 制限は静かに None。
 pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
+    if !in_app_update_supported() {
+        return None;
+    }
     let output = Command::new("curl")
         .args([
             "-fsSL",
@@ -174,6 +189,8 @@ fn unique_staging_dir() -> Result<PathBuf> {
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!("necoder-update-{}-{nanos}", std::process::id()));
+    // `mode()` を呼ぶのは unix だけ＝Windows では `mut` が不要になる（W2 の受入条件は警告 0）。
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -196,6 +213,22 @@ fn running_app_bundle() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **押せるのに必ず失敗するチップを出さない**（WINDOWS-PORT.md §W6）。
+    ///
+    /// 適用経路は `.dmg` + `spctl` + `hdiutil` ＝ macOS 専用。他の OS で更新チップを出すと
+    /// 「クリック → 必ずエラー」になる。Windows 版の更新導線ができるまではチップ自体を出さない。
+    /// **この期待は書いておかないと、うっかり有効化して初回リリースで踏む。**
+    #[test]
+    fn in_app_update_is_offered_only_where_it_can_actually_apply() {
+        assert_eq!(in_app_update_supported(), cfg!(target_os = "macos"));
+        if !cfg!(target_os = "macos") {
+            assert!(
+                check_for_update("0.0.1").is_none(),
+                "適用できない OS で更新チップを出してはいけない"
+            );
+        }
+    }
 
     #[test]
     fn version_compare_is_numeric_per_part() {

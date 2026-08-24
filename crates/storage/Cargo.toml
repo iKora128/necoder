@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+paths.workspace = true
 anyhow.workspace = true
 turso.workspace = true
 futures.workspace = true

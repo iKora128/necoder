@@ -18,6 +18,7 @@ screenshot = ["dep:image", "gpui/test-support", "gpui_platform/test-support"]
 runtime-shaders = ["gpui_platform/runtime_shaders"]
 
 [dependencies]
+paths.workspace = true
 anyhow.workspace = true
 gpui.workspace = true
 # font-kit = macOS のグリフ（文字）ラスタライズ。**これが無いと四角は出るが文字が全く描画されない**

@@ -1017,12 +1017,12 @@ impl Workspace {
                     let linked = {
                         let worktrees = project::git_worktrees_on(host.as_ref(), &root);
                         let canonical =
-                            std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+                            paths::canonicalize(&root).unwrap_or_else(|_| root.clone());
                         worktrees
                             .iter()
                             .skip(1)
                             .find(|worktree| {
-                                let path = std::fs::canonicalize(&worktree.path)
+                                let path = paths::canonicalize(&worktree.path)
                                     .unwrap_or_else(|_| worktree.path.clone());
                                 path == canonical
                             })

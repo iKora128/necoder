@@ -3,6 +3,16 @@
 
 # Rust
 /target/
+# Windows ネイティブビルドの成果物（WSL/mac の target と奪い合わせない・WINDOWS-PORT.md §1）
+/target-win/
+# -D warnings 付き検証用（CI と同条件・キャッシュを分ける）
+/target-win-strict/
+# GUI 実機確認用（feature 違いでキャッシュを分ける）
+/target-win-gui/
+# 配布用（静的 CRT・フラグが違うので別 target）
+/target-win-dist/
+# 配布物の置き場
+/dist/
 
 # macOS
 .DS_Store

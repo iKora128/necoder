@@ -23,7 +23,7 @@ pub fn run() -> bool {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let root = paths::canonicalize(&root).unwrap_or(root);
     serve(&root);
     true
 }
@@ -541,7 +541,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("necoder_mcp_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(&dir).unwrap()
+        paths::canonicalize(&dir).unwrap()
     }
 
     #[test]

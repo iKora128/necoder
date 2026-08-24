@@ -9,6 +9,7 @@ publish = false
 path = "src/lang.rs"
 
 [dependencies]
+paths.workspace = true
 anyhow.workspace = true
 host.workspace = true
 tree-sitter.workspace = true

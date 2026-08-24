@@ -78,7 +78,9 @@ fn find_executable(binary: &str) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path));
     }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    // GUI 起動で PATH が痩せている場合の保険。Windows でも `.cargo/bin` などは
+    // `%USERPROFILE%` 直下に同じ名前で置かれるので、そのまま候補になる。
+    if let Some(home) = paths::home_dir() {
         for suffix in [
             ".local/bin",
             ".volta/bin",
@@ -90,11 +92,16 @@ fn find_executable(binary: &str) -> Option<PathBuf> {
             dirs.push(home.join(suffix));
         }
     }
-    for base in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-        dirs.push(PathBuf::from(base));
+    // unix 固有の定番。Windows には存在しないので候補に入れない。
+    if cfg!(unix) {
+        for base in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+            dirs.push(PathBuf::from(base));
+        }
     }
+    // 拡張子の候補は host に集約（Windows の PATHEXT 対応）。
+    let names = host::executable_names(binary);
     dirs.into_iter()
-        .map(|dir| dir.join(binary))
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .find(|candidate| candidate.is_file())
 }
 
@@ -105,7 +112,7 @@ fn rust_analyzer_path() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = paths::home_dir();
     if let Some(home) = &home {
         let toolchains = home.join(".rustup/toolchains");
         if let Ok(entries) = std::fs::read_dir(toolchains) {
@@ -840,13 +847,34 @@ mod tests {
         assert!(parse_hover_lines(&Value::Null).is_empty());
     }
 
+    /// テスト用の「絶対パスとその file URI」の組。
+    ///
+    /// `url` crate の `to_file_path` / `from_file_path` は **実行中 OS の規則**で判定する。
+    /// POSIX の固定値（`file:///x/lib.rs`）をそのまま使うと Windows では必ず `None` になる
+    /// ＝ Windows の file URI はドライブレターが要るため。**実装ではなく固定値の方が偏っていた**
+    /// （2026-08-22・WINDOWS-PORT.md §4）。LSP サーバへ実際に渡す URI もこの形になる。
+    fn file_fixture(relative: &str) -> (PathBuf, String) {
+        if cfg!(windows) {
+            (
+                PathBuf::from(format!("C:\\{}", relative.replace('/', "\\"))),
+                format!("file:///C:/{relative}"),
+            )
+        } else {
+            (
+                PathBuf::from(format!("/{relative}")),
+                format!("file:///{relative}"),
+            )
+        }
+    }
+
     #[test]
     fn parse_definition_handles_location_shapes() {
-        let location = json!({ "uri": "file:///x/lib.rs", "range": { "start": { "line": 10, "character": 4 }, "end": { "line": 10, "character": 9 } } });
+        let (lib_path, lib_uri) = file_fixture("x/lib.rs");
+        let location = json!({ "uri": lib_uri, "range": { "start": { "line": 10, "character": 4 }, "end": { "line": 10, "character": 9 } } });
         assert_eq!(
             parse_definition(&location),
             Some(DefinitionLocation {
-                path: PathBuf::from("/x/lib.rs"),
+                path: lib_path,
                 position: Position {
                     line: 10,
                     character: 4
@@ -858,11 +886,12 @@ mod tests {
             parse_definition(&location)
         );
 
-        let link = json!([{ "targetUri": "file:///y/m.rs", "targetSelectionRange": { "start": { "line": 3, "character": 0 }, "end": { "line": 3, "character": 2 } } }]);
+        let (module_path, module_uri) = file_fixture("y/m.rs");
+        let link = json!([{ "targetUri": module_uri, "targetSelectionRange": { "start": { "line": 3, "character": 0 }, "end": { "line": 3, "character": 2 } } }]);
         assert_eq!(
             parse_definition(&link),
             Some(DefinitionLocation {
-                path: PathBuf::from("/y/m.rs"),
+                path: module_path,
                 position: Position {
                     line: 3,
                     character: 0
@@ -900,40 +929,42 @@ mod tests {
 
     #[test]
     fn parse_workspace_edit_supports_changes_and_document_changes() {
+        let (first_path, first_uri) = file_fixture("a.rs");
         let value = json!({
             "changes": {
-                "file:///a.rs": [
+                first_uri: [
                     { "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3} }, "newText": "new" }
                 ]
             }
         });
         let parsed = parse_workspace_edit(&value);
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].path, PathBuf::from("/a.rs"));
+        assert_eq!(parsed[0].path, first_path);
         assert_eq!(parsed[0].edits.len(), 1);
 
+        let (second_path, second_uri) = file_fixture("b.rs");
         let value = json!({
             "documentChanges": [
-                { "textDocument": { "uri": "file:///b.rs", "version": 3 },
+                { "textDocument": { "uri": second_uri, "version": 3 },
                   "edits": [ { "range": { "start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1} }, "newText": "x" } ] }
             ]
         });
         let parsed = parse_workspace_edit(&value);
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].path, PathBuf::from("/b.rs"));
+        assert_eq!(parsed[0].path, second_path);
     }
 
     #[test]
     fn uri_roundtrip() {
-        let path = Path::new("/Users/x/main.rs");
-        let uri = path_to_uri(path);
-        assert_eq!(uri, "file:///Users/x/main.rs");
-        assert_eq!(uri_to_path(&uri), Some(path.to_path_buf()));
+        let (path, expected_uri) = file_fixture("Users/x/main.rs");
+        let uri = path_to_uri(&path);
+        assert_eq!(uri, expected_uri);
+        assert_eq!(uri_to_path(&uri), Some(path));
 
-        let path_with_space = Path::new("/Users/x/project name/main.rs");
-        let uri = path_to_uri(path_with_space);
-        assert!(uri.contains("project%20name"));
-        assert_eq!(uri_to_path(&uri), Some(path_with_space.to_path_buf()));
+        let (path_with_space, _) = file_fixture("Users/x/project name/main.rs");
+        let uri = path_to_uri(&path_with_space);
+        assert!(uri.contains("project%20name"), "空白は percent encoding される: {uri}");
+        assert_eq!(uri_to_path(&uri), Some(path_with_space));
     }
 
     #[test]
@@ -985,8 +1016,8 @@ mod tests {
     #[test]
     #[ignore]
     fn real_initialize_handshake() {
-        let home = std::env::var("HOME").expect("HOME");
-        let server = PathBuf::from(home).join(".cargo/bin/rust-analyzer");
+        let home = paths::home_dir().expect("ホームディレクトリ");
+        let server = home.join(".cargo/bin/rust-analyzer");
         if !server.exists() {
             eprintln!("rust-analyzer が無いのでスキップ");
             return;
@@ -1014,8 +1045,8 @@ mod tests {
     #[test]
     #[ignore]
     fn real_diagnostics_flow() {
-        let home = std::env::var("HOME").expect("HOME");
-        let server = PathBuf::from(home).join(".cargo/bin/rust-analyzer");
+        let home = paths::home_dir().expect("ホームディレクトリ");
+        let server = home.join(".cargo/bin/rust-analyzer");
         let root = Path::new("/tmp/lsp-test");
         if !server.exists() || !root.exists() {
             eprintln!("前提が無いのでスキップ（server or /tmp/lsp-test）");

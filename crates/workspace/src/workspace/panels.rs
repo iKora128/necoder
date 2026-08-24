@@ -137,7 +137,7 @@ impl Workspace {
                 let resolved = if std::path::Path::new(path).is_absolute() {
                     PathBuf::from(path)
                 } else if let Some(stripped) = path.strip_prefix("~/") {
-                    std::env::home_dir()
+                    paths::home_dir()
                         .map(|home| home.join(stripped))
                         .unwrap_or_else(|| PathBuf::from(path))
                 } else {

@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+paths.workspace = true
 anyhow.workspace = true
 gpui.workspace = true
 host.workspace = true
@@ -34,3 +35,7 @@ libc.workspace = true
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 terminal_view = { workspace = true, features = ["test-support"] }
+
+# 名前付きパイプ（制御 IPC・WINDOWS-PORT.md §D2）。Windows でのみ引く。
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

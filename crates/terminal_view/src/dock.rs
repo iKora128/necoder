@@ -300,9 +300,16 @@ impl Render for TerminalDock {
         };
         // 高さは**置いた側**（workspace の下段ドック / 編隊セル）が決める。ここで固定高を持つと
         // 高さドラッグも、セルいっぱいに広がることもできない（2026-07-27 に固定 240px を撤去）。
+        //
+        // **`size_full()` であって `flex_1()` ではない**（2026-08-23・Windows 実機で発覚）。
+        // この view は置いた側が `.cached(...)` で差し込む。gpui の cached は
+        // **children を `None` にして layout を要求する**（"caching skips rendering the contents
+        // to measure them" — `gpui/src/view.rs`）ため、**cached の subtree は隔離してレイアウト**される。
+        // 隔離された subtree の root で `flex_1()` は効かない（flex 親が居ない）＝高さ 0 に潰れ、
+        // 端末のグリッドが 24 セルまで縮んで**中身が真っ黒**に見えた。
+        // `size_full()` なら「与えられた領域いっぱい」になるので、置いた側の意図（上記）も保たれる。
         div()
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .flex()
             .flex_col()
             .bg(theme.bg1)

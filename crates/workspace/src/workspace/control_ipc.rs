@@ -19,16 +19,13 @@
 
 use crate::workspace::*;
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::net::{UnixListener, UnixStream};
 
-/// GUI 制御 socket のパス（`NECODER_GUI_SOCK` で差し替え可・テスト用）。
-/// macOS の `SUN_LEN`（~104B）に収まる短いパスであること。
+/// GUI 制御 IPC の口（`NECODER_GUI_SOCK` で差し替え可・テスト用）。決定は `paths` crate。
+///
+/// - macOS/Linux: Unix domain socket のパス。macOS の `SUN_LEN`（~104B）に収まる短さであること
+/// - Windows: **名前付きパイプ名**（`\\.\pipe\necoder-gui-<user>`）。ファイルパスではない
 pub fn control_socket_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("NECODER_GUI_SOCK") {
-        return Some(PathBuf::from(path));
-    }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".necoder/gui.sock"))
+    paths::runtime_socket()
 }
 
 /// accept スレッド → UI スレッドへ渡す 1 仕事（I/O 前・生パラメータのまま）。
@@ -71,36 +68,46 @@ impl Workspace {
         let Some(socket_path) = control_socket_path() else {
             return;
         };
+        // unix socket はファイルなので置き場を掘る必要がある。Windows の名前付きパイプは
+        // カーネルの名前空間にあり親ディレクトリという概念が無いので掘らない。
+        #[cfg(unix)]
         if let Some(parent) = socket_path.parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 return;
             }
         }
-        // 生きている GUI が既に居るなら二重 bind しない。死んだ socket ファイルなら除去して継ぐ。
-        if UnixStream::connect(&socket_path).is_ok() {
-            return;
-        }
-        let _ = std::fs::remove_file(&socket_path);
-        let listener = match UnixListener::bind(&socket_path) {
+        // 二重 bind の検出・死んだ socket ファイルの掃除・パーミッション（0600 / 既定 DACL）は
+        // すべて control_transport が持つ（WINDOWS-PORT.md §D2）。
+        let mut listener = match ControlListener::bind(&socket_path) {
             Ok(listener) => listener,
+            // 生きている GUI が既に待ち受けている＝この窓は IPC を持たない（正常系）
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => return,
             Err(error) => {
                 eprintln!("管制 IPC を開けない: {error}");
                 return;
             }
         };
-        // 0600: 同一ユーザーのみ（socket は uid で守られるが明示しておく）。
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
-        }
         let (job_tx, mut job_rx) = futures::channel::mpsc::unbounded::<ControlJob>();
         // accept ループ（std スレッド）: 解析だけしてジョブ化。I/O はしない。
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
-                let job_tx = job_tx.clone();
-                std::thread::spawn(move || serve_connection(stream, job_tx));
+            // 一時的な失敗（EINTR 等）では諦めない。連続して失敗し続けるときだけ畳む
+            // ＝Windows で次のパイプインスタンスを作れなくなった場合に空回りさせない。
+            let mut consecutive_failures = 0_u32;
+            loop {
+                match listener.accept() {
+                    Ok(stream) => {
+                        consecutive_failures = 0;
+                        let job_tx = job_tx.clone();
+                        std::thread::spawn(move || serve_connection(stream, job_tx));
+                    }
+                    Err(error) => {
+                        consecutive_failures += 1;
+                        if consecutive_failures >= 16 {
+                            eprintln!("管制 IPC の accept が続けて失敗したので畳む: {error}");
+                            break;
+                        }
+                    }
+                }
             }
         });
         // UI 側の消費ループ。
@@ -543,28 +550,28 @@ impl Workspace {
 
 /// 1 接続 = 1 リクエスト（I/O なし・解析してジョブ化するだけ）。
 fn serve_connection(
-    stream: UnixStream,
+    mut stream: ControlStream,
     job_tx: futures::channel::mpsc::UnboundedSender<ControlJob>,
 ) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
-    let mut reader = BufReader::new(match stream.try_clone() {
-        Ok(clone) => clone,
-        Err(_) => return,
-    });
+    // 要求を読んでから同じストリームへ応答を書く（1 接続 1 往復）。以前は `try_clone` で
+    // 読み口を複製していたが、名前付きパイプの複製は `DuplicateHandle` が要るうえ、
+    // 読みと書きが同時に走らないこの形では不要（BufReader の中身を借りれば足りる）。
+    let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() {
         return;
     }
-    let respond_line = |stream: &UnixStream, value: serde_json::Value| {
-        let mut stream = stream;
+    let respond_line = |stream: &mut ControlStream, value: serde_json::Value| {
         let _ = writeln!(stream, "{value}");
+        let _ = stream.flush();
     };
     let request: serde_json::Value = match serde_json::from_str(&line) {
         Ok(value) => value,
         Err(error) => {
             respond_line(
-                &stream,
+                reader.get_mut(),
                 err(i18n::t!("ipc.err_bad_json", "detail" => error)),
             );
             return;
@@ -588,12 +595,12 @@ fn serve_connection(
         })
         .is_err()
     {
-        respond_line(&stream, err(i18n::t!("ipc.err_gui_gone")));
+        respond_line(reader.get_mut(), err(i18n::t!("ipc.err_gui_gone")));
         return;
     }
     // spawn は worktree オープンを含む＝少し待つ（UI スレッドの 1 job・通常は瞬時）。
     match respond_rx.recv_timeout(std::time::Duration::from_secs(30)) {
-        Ok(response) => respond_line(&stream, response),
-        Err(_) => respond_line(&stream, err(i18n::t!("ipc.err_gui_timeout"))),
+        Ok(response) => respond_line(reader.get_mut(), response),
+        Err(_) => respond_line(reader.get_mut(), err(i18n::t!("ipc.err_gui_timeout"))),
     }
 }

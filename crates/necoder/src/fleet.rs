@@ -81,9 +81,10 @@ pub(crate) fn parse_phase(value: &str) -> Result<TaskPhase> {
 /// 守るべき操作（spawn/send）はこの経路 = necoder の CLI/MCP にだけ置く（計画 §0-8）。
 pub(crate) fn gui_request(method: &str, params: Value) -> Result<Value> {
     use std::io::{BufRead as _, BufReader, Write as _};
+    // 口の実体は unix socket / 名前付きパイプ（WINDOWS-PORT.md §D2）。ここは中身を知らない。
     let socket_path = workspace::control_socket_path()
-        .context("GUI socket の場所が決められません（HOME が無い）")?;
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket_path).with_context(|| {
+        .context("GUI socket の場所が決められません（ホームディレクトリが分からない）")?;
+    let mut stream = workspace::ControlStream::connect(&socket_path).with_context(|| {
         format!(
             "GUI が起動していません（{} に接続できない）。necoder を開いてから実行してください",
             socket_path.display()
@@ -94,6 +95,7 @@ pub(crate) fn gui_request(method: &str, params: Value) -> Result<Value> {
         .context("IPC timeout 設定に失敗")?;
     let request = json!({ "method": method, "params": params });
     writeln!(stream, "{request}").context("IPC 送信に失敗")?;
+    stream.flush().context("IPC 送信に失敗")?;
     let mut line = String::new();
     BufReader::new(stream)
         .read_line(&mut line)
@@ -139,7 +141,7 @@ pub(crate) fn events_since(since_id: i64) -> Result<Value> {
 }
 
 pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
-    let root = std::fs::canonicalize(root).context("IntegrationSpace を開けません")?;
+    let root = paths::canonicalize(root).context("IntegrationSpace を開けません")?;
     let host = LocalHost::shared();
     let base_oid =
         project::git_head_oid_on(host.as_ref(), &root).context("Git repository ではありません")?;
@@ -166,7 +168,7 @@ pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
         number += 1;
     };
     project::create_task_worktree_on(host.as_ref(), &root, &target, &branch)?;
-    let target = std::fs::canonicalize(&target).unwrap_or(target);
+    let target = paths::canonicalize(&target).unwrap_or(target);
     let now = unix_ms();
     let record = TaskSpaceRecord {
         id: project::stable_worktree_id_on(host.as_ref(), &target),
@@ -274,7 +276,7 @@ fn record_from_json(value: &Value) -> Result<TaskSpaceRecord> {
 }
 
 pub(crate) fn list_tasks(root: &Path) -> Result<Vec<TaskSpaceRecord>> {
-    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let root = paths::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let repository_id = project::repository_id_on(&LocalHost, &root);
     let records = match open_storage().and_then(|storage| storage.load_task_spaces()) {
         Ok(records) => records,

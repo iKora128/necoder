@@ -265,7 +265,14 @@ impl Workspace {
             .map(|slot| {
                 let root = slot.worktree.root().to_path_buf();
                 match slot.worktree.host().terminal_launch(&root) {
-                    Ok(Some(launch)) => (None, Some((launch.program, launch.args))),
+                    Ok(Some(launch)) => {
+                        // remote の launch は `ssh -tt …` 自体が接続先で cwd を決めるので、
+                        // ローカルのパスを渡すと意味が無い（むしろ壊す）。
+                        // 一方 **ローカルで launch が返るのは Windows の既定シェル指定**（§W4）で、
+                        // こちらは cwd を渡さないと project root で開かない。
+                        let cwd = (!slot.worktree.host().is_remote()).then_some(root);
+                        (cwd, Some((launch.program, launch.args)))
+                    }
                     Ok(None) => (Some(root), None),
                     Err(error) => {
                         eprintln!("remote terminal を起動できない: {error:#}");

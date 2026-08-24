@@ -78,6 +78,16 @@ pub struct CommandSpec {
     pub env: HashMap<String, String>,
 }
 
+/// POSIX シェルで 1 行スクリプトを流す spec。**リモートホストは常にこれ**（相手は Linux）。
+pub fn posix_shell_script(script: &str, cwd: &Path) -> CommandSpec {
+    CommandSpec::new("sh", cwd).args(["-c", script])
+}
+
+/// Windows の `cmd.exe` で 1 行スクリプトを流す spec。**ローカルが Windows のときだけ**。
+pub fn windows_shell_script(script: &str, cwd: &Path) -> CommandSpec {
+    CommandSpec::new("cmd.exe", cwd).args(["/C", script])
+}
+
 impl CommandSpec {
     pub fn new(program: impl Into<String>, cwd: impl Into<PathBuf>) -> Self {
         Self {
@@ -217,6 +227,23 @@ pub trait Host: Send + Sync {
         file_limit: usize,
     ) -> Result<Vec<TextSearchHit>>;
     fn run_command(&self, spec: &CommandSpec) -> Result<CommandOutput>;
+    /// このホストで 1 行スクリプトを流す [`CommandSpec`] を組む。
+    ///
+    /// **分岐キーは「このホストの OS」であって `cfg!(target_os)` ではない**
+    /// （WINDOWS-PORT.md §D3）。`run_command` は同じ呼び出しがローカルにもリモートにも飛ぶので、
+    /// コンパイル先で分岐すると **Windows クライアントからリモート Linux へ `cmd.exe` を送る**
+    /// ことになる。既定は POSIX（リモートは常に unix なのでこれで正しい）。
+    fn shell_script(&self, script: &str, cwd: &Path) -> CommandSpec {
+        posix_shell_script(script, cwd)
+    }
+    /// このホストで POSIX シェル（`sh` と `head` / `grep` 等）が使えるか。
+    ///
+    /// **Windows のローカルホストだけが `false`**。リモートは常に Linux なので `true`。
+    /// POSIX 構文で組んだスクリプトを流す機能は、実行前にこれを見て「Windows では未対応」と
+    /// 明示的に断ること。`cmd.exe` へ素で渡すと不可解なエラーになるだけで誰も得をしない。
+    fn has_posix_shell(&self) -> bool {
+        true
+    }
     fn spawn_process(&self, spec: &CommandSpec) -> Result<HostProcess>;
     fn terminal_launch(&self, cwd: &Path) -> Result<Option<TerminalLaunch>>;
     /// project root の変更監視を開始する（remote SSH のみ実装・M13）。local は `None` を返し、
@@ -248,8 +275,21 @@ impl Host for LocalHost {
         false
     }
 
+    /// ローカルは「このプロセスが動いている OS」で決まる＝ここだけが `cfg!` を見てよい場所。
+    fn shell_script(&self, script: &str, cwd: &Path) -> CommandSpec {
+        if cfg!(windows) {
+            windows_shell_script(script, cwd)
+        } else {
+            posix_shell_script(script, cwd)
+        }
+    }
+
+    fn has_posix_shell(&self) -> bool {
+        !cfg!(windows)
+    }
+
     fn host_for_project(&self, path: &Path) -> Result<Arc<dyn Host>> {
-        let path = std::fs::canonicalize(path)?;
+        let path = paths::canonicalize(path)?;
         if !path.is_dir() {
             bail!("project root は directory ではない: {}", path.display());
         }
@@ -257,7 +297,7 @@ impl Host for LocalHost {
     }
 
     fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
-        std::fs::canonicalize(path)
+        paths::canonicalize(path)
             .with_context(|| format!("パスを解決できない: {}", path.display()))
     }
 
@@ -317,8 +357,70 @@ impl Host for LocalHost {
     }
 
     fn terminal_launch(&self, _cwd: &Path) -> Result<Option<TerminalLaunch>> {
+        if cfg!(windows) {
+            // Windows は alacritty の既定が `powershell` 固定なので、pwsh を優先させる（§W4）。
+            return Ok(Some(pick_windows_shell(is_in_path)));
+        }
+        // unix は alacritty の既定（`$SHELL` / passwd）に任せる
+        // ＝ mac の挙動を 1 ミリも変えない（§D8）。
         Ok(None)
     }
+}
+
+/// Windows の既定シェルを選ぶ。**`pwsh`（PowerShell 7）を優先**し、無ければ OS 同梱の `powershell`。
+///
+/// `alacritty_terminal` の Windows 既定は **`powershell` 固定**（0.26 の `tty/windows/mod.rs`）なので、
+/// pwsh を使いたければこちら側から明示的に渡す必要がある。
+///
+/// 探索を**引数で受け取る**のは、どのプラットフォームでもテストするため（`paths` crate と同じ理由。
+/// `#[cfg(windows)]` でテストを切ると Windows 上でしか検証されず、mac / Linux の CI が守れない）。
+fn pick_windows_shell(is_available: impl Fn(&str) -> bool) -> TerminalLaunch {
+    let program = ["pwsh", "powershell"]
+        .into_iter()
+        .find(|candidate| is_available(candidate))
+        // どちらも PATH に無いのは考えにくいが、その時は alacritty と同じ既定へ倒す
+        .unwrap_or("powershell");
+    TerminalLaunch {
+        program: program.to_string(),
+        args: Vec::new(),
+    }
+}
+
+/// 探すべきファイル名の候補。
+///
+/// **Windows は拡張子込みでないと見つからない**（PATH 解決が `PATHEXT` に依る）。
+/// 例: ACP の `claude` は Windows では `claude.cmd`、rust-analyzer は `rust-analyzer.exe`。
+///
+/// 既に拡張子が付いていればそのまま。unix は常に 1 候補。
+///
+/// **`.cmd` / `.bat` は「見つけたあと起動できるか」も気になるが、そちらは問題ない** —
+/// Rust の `std::process::Command` は `.bat` / `.cmd` を検出して `cmd.exe` 経由で起動する
+/// （`cmd_scripts_can_be_spawned_directly` テストで固定済み）。
+pub fn executable_names(binary: &str) -> Vec<String> {
+    if !cfg!(windows) || Path::new(binary).extension().is_some() {
+        return vec![binary.to_string()];
+    }
+    ["", ".exe", ".cmd", ".bat"]
+        .iter()
+        .map(|extension| format!("{binary}{extension}"))
+        .collect()
+}
+
+/// PATH から実行ファイルを探す（Windows は `PATHEXT` 相当の拡張子も試す）。
+pub fn find_in_path(binary: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let names = executable_names(binary);
+    std::env::split_paths(&path).find_map(|directory| {
+        names
+            .iter()
+            .map(|name| directory.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// PATH に実行ファイルがあるか。
+fn is_in_path(binary: &str) -> bool {
+    find_in_path(binary).is_some()
 }
 
 fn metadata_for(path: &Path) -> Result<HostMetadata> {
@@ -894,7 +996,7 @@ fn server_resolve_existing(
 ) -> Result<PathBuf> {
     validate_relative_path(relative)?;
     let root = server_root(state, project_id)?;
-    let resolved = std::fs::canonicalize(root.join(relative))?;
+    let resolved = paths::canonicalize(root.join(relative))?;
     if !resolved.starts_with(&root) {
         bail!("path escapes project root: {}", relative.display());
     }
@@ -910,7 +1012,7 @@ fn server_resolve_write(
     let root = server_root(state, project_id)?;
     let joined = root.join(relative);
     let parent = joined.parent().context("write path has no parent")?;
-    let parent = std::fs::canonicalize(parent)?;
+    let parent = paths::canonicalize(parent)?;
     if !parent.starts_with(&root) {
         bail!("path escapes project root: {}", relative.display());
     }
@@ -961,7 +1063,7 @@ fn handle_request(
             Vec::new(),
         )),
         Request::OpenProject { path } => {
-            let root = std::fs::canonicalize(&path)
+            let root = paths::canonicalize(&path)
                 .with_context(|| format!("project root を解決できない: {}", path.display()))?;
             if !root.is_dir() {
                 bail!("project root は directory ではない: {}", root.display());
@@ -1649,10 +1751,11 @@ pub fn ssh_config_hosts() -> Vec<SshConfigHost> {
     let path = match std::env::var_os("NECODER_SSH_CONFIG") {
         Some(path) => PathBuf::from(path),
         None => {
-            let Some(home) = std::env::var_os("HOME") else {
+            // Windows の OpenSSH も `%USERPROFILE%.sshnfig` を見る（paths が USERPROFILE を解決する）。
+            let Some(home) = paths::home_dir() else {
                 return Vec::new();
             };
-            Path::new(&home).join(".ssh/config")
+            home.join(".ssh/config")
         }
     };
     match std::fs::read_to_string(&path) {
@@ -2110,7 +2213,7 @@ fn remote_target_triple(remote_os: &str, remote_arch: &str) -> Option<String> {
 /// 3) same-platform なら従来の sibling / dev ビルド（[`find_local_remote_server`]）
 fn find_remote_server_for(remote_os: &str, remote_arch: &str) -> Option<PathBuf> {
     if let Some(triple) = remote_target_triple(remote_os, remote_arch) {
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Some(home) = paths::home_dir() {
             let cached = home
                 .join(".local/share/necoder/remote/artifacts")
                 .join(&triple)
@@ -2434,7 +2537,9 @@ impl RemoteHost {
         )
     }
 
-    #[cfg(test)]
+    // 唯一の呼び出し元が `UnixStream::pair()` を使う unix 限定テストなので cfg を揃える
+    // （揃えないと Windows で dead_code 警告になる）。
+    #[cfg(all(test, unix))]
     fn connect_io(
         reader: Box<dyn Read + Send>,
         writer: Box<dyn Write + Send>,
@@ -2952,6 +3057,85 @@ fn random_session_id() -> Result<String> {
         .context("session id 用の OS random source を開けない")?
         .read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(test)]
+mod windows_terminal_tests {
+    use super::*;
+
+    /// **`pwsh` を優先する**（W4 の受入条件）。VSCode / Terminal と同じ流儀で、
+    /// PowerShell 7 が入っていればそちらを使う。
+    #[test]
+    fn pwsh_wins_when_it_is_installed() {
+        let shell = pick_windows_shell(|candidate| candidate == "pwsh" || candidate == "powershell");
+        assert_eq!(shell.program, "pwsh");
+        assert!(shell.args.is_empty());
+    }
+
+    /// pwsh が無ければ OS 同梱の `powershell`。
+    #[test]
+    fn falls_back_to_bundled_powershell() {
+        let shell = pick_windows_shell(|candidate| candidate == "powershell");
+        assert_eq!(shell.program, "powershell");
+    }
+
+    /// どちらも見つからない場合でも**空文字を返さない**。
+    /// 空だと alacritty 側が別の既定に倒れて、何が起動したのか分からなくなる。
+    #[test]
+    fn never_yields_an_empty_program() {
+        let shell = pick_windows_shell(|_| false);
+        assert_eq!(shell.program, "powershell");
+    }
+
+    /// **`.cmd` を直接 spawn できるか**（WINDOWS-PORT.md §W4 / §4）。
+    ///
+    /// ACP の `claude` は Windows では `claude.cmd`。§4 には「`CreateProcess` は `.cmd` を直接
+    /// 実行できない」と書いてあるが、**Rust の `std::process::Command` は `.bat` / `.cmd` を検出して
+    /// `cmd.exe` 経由で起動する**（CVE-2024-24576 の対応以降）。necoder は生の `CreateProcess` を
+    /// 使っていないので、この罠には**当たらない**はず。
+    ///
+    /// 「はず」で済ませると Rust 側の挙動が変わったときに黙って壊れるので、ここで固定する。
+    #[cfg(windows)]
+    #[test]
+    fn cmd_scripts_can_be_spawned_directly() {
+        let dir = std::env::temp_dir().join(format!("necoder-cmd-spawn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("一時ディレクトリを作れない");
+        let script = dir.join("necoder-probe.cmd");
+        std::fs::write(&script, "@echo off\r\necho NECODER_CMD_OK\r\n")
+            .expect("スクリプトを書けない");
+
+        let spec = CommandSpec::new(script.to_string_lossy(), &dir);
+        let mut process = spawn_process_local(&spec, None)
+            .expect(".cmd を起動できない（Rust の Command が .cmd を扱えなくなった可能性）");
+        let mut stdout = process.take_stdout().expect("stdout が無い");
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).expect("stdout を読めない");
+
+        assert!(
+            output.contains("NECODER_CMD_OK"),
+            "`.cmd` の出力が取れない（実際の出力: {output:?}）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// unix では launch を返さない＝alacritty の `$SHELL` 既定に任せる（mac の挙動不変・§D8）。
+    /// Windows では必ず返す（返さないと `powershell` 固定になり pwsh が選べない）。
+    #[test]
+    fn local_launch_is_returned_only_on_windows() {
+        let launch = LocalHost
+            .terminal_launch(Path::new("."))
+            .expect("terminal_launch は失敗しない");
+        if cfg!(windows) {
+            let launch = launch.expect("Windows では既定シェルを明示する");
+            assert!(
+                launch.program == "pwsh" || launch.program == "powershell",
+                "想定外のシェル: {}",
+                launch.program
+            );
+        } else {
+            assert!(launch.is_none(), "unix は alacritty の既定に任せる");
+        }
+    }
 }
 
 #[cfg(test)]

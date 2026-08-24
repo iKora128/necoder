@@ -50,7 +50,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let sections = keymap_core::parse(keymap_core::DEFAULT_KEYMAP_JSON).unwrap_or_default();
+        let sections = keymap_core::parse(&keymap_core::default_keymap_json(
+            keymap_core::KeymapPlatform::current(),
+        )).unwrap_or_default();
         let items = COMMAND_REGISTRY
             .entries()
             .iter()

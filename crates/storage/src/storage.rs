@@ -149,16 +149,15 @@ pub struct TaskEventRecord {
     pub created_at: i64,
 }
 
-/// 既定の DB パス（macOS）。state.json と同じディレクトリ。
+/// 既定の DB パス。置き場の決定は `paths` crate に集約している（WINDOWS-PORT.md §D1）。
+/// Windows では Roaming ではなく Local（数百 MB になりうるため）。
 pub fn default_db_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/necoder/necoder.db"))
+    paths::db_file()
 }
 
 /// 既定の blob ディレクトリ（checkpoint の content-addressed 本体・M12-2）。
 pub fn default_blobs_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/necoder/blobs"))
+    paths::blobs_dir()
 }
 
 /// 内容を SHA-256 で blob へ書く（既にあれば書かない = 重複排除）。hash（hex）を返す。

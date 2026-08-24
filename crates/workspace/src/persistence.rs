@@ -34,10 +34,9 @@ pub(crate) struct PersistedState {
     pub(crate) active: usize,
 }
 
-/// Standard state.json location on macOS.
+/// state.json の置き場。決定は `paths` crate に集約している（WINDOWS-PORT.md §D1）。
 pub fn state_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/necoder/state.json"))
+    paths::state_file()
 }
 
 /// Read the legacy `(project roots, active index)` view of saved state.

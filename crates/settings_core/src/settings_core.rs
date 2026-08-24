@@ -255,10 +255,9 @@ impl SettingsStore {
     }
 }
 
-/// user 設定ファイルの標準パス（macOS）。`HOME` が無ければ `None`。
+/// user 設定ファイルの標準パス。置き場の決定は `paths` crate に集約している（WINDOWS-PORT.md §D1）。
 pub fn user_settings_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join("Library/Application Support/necoder/settings.json"))
+    paths::settings_file()
 }
 
 /// user 設定ファイルの 1 キーだけを書き換えて保存する（アプリ内トグルの永続化用）。

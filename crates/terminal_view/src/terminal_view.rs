@@ -142,6 +142,17 @@ impl Dimensions for TerminalSize {
     }
 }
 
+/// 開発用の計測口: `NECODER_TERM_PROBE=1` で PTY → pump → sync → 描画の到達を stderr に出す。
+///
+/// 「端末のドックは開くのに中身が真っ黒」のとき、**どこで止まっているか**は外から見えない
+/// （2026-08-23・Windows で実際に詰まった）。PTY 自体は `tests/pty_smoke.rs` が保証するので、
+/// ここは**その先の経路**専用。既定 off ＝ 通常の実行には一切影響しない。
+fn term_probe(stage: &str, detail: impl std::fmt::Display) {
+    if std::env::var_os("NECODER_TERM_PROBE").is_some() {
+        eprintln!("[term-probe] {stage}: {detail}");
+    }
+}
+
 /// alacritty の背景スレッド（EventLoop）から GPUI 前景へイベントを渡す橋渡し。
 #[derive(Clone)]
 struct Listener(UnboundedSender<AlacEvent>);
@@ -241,9 +252,13 @@ impl TerminalView {
                     notifier = Some(Notifier(event_loop.channel()));
                     // IO スレッドを起動して detach（JoinHandle は保持しない。Drop の Shutdown で畳む）。
                     event_loop.spawn();
+                    term_probe("pty", "起動");
                     // pump: PTY 出力（Wakeup 等）でのみ起きる＝idle 0%。
                     pump = Some(cx.spawn(async move |view, cx| {
+                        let mut received = 0_usize;
                         while let Some(event) = events_rx.next().await {
+                            received += 1;
+                            term_probe("pump", format_args!("{received} 件目 {event:?}"));
                             let closed = view
                                 .update(cx, |view, cx| view.on_alac_event(event, cx))
                                 .is_err();
@@ -251,6 +266,7 @@ impl TerminalView {
                                 break;
                             }
                         }
+                        term_probe("pump", format_args!("終了（計 {received} 件）"));
                     }));
                 }
                 Err(error) => eprintln!("ターミナル: EventLoop 生成失敗: {error}"),
@@ -356,6 +372,18 @@ impl TerminalView {
             cursor,
             selection,
         };
+        term_probe(
+            "sync",
+            format_args!(
+                "{} セル（うち非空白 {}）",
+                self.content.cells.len(),
+                self.content
+                    .cells
+                    .iter()
+                    .filter(|cell| !cell.character.is_whitespace())
+                    .count()
+            ),
+        );
         cx.notify();
     }
 
@@ -961,6 +989,16 @@ impl Element for TerminalElement {
         let lines = (f32::from(bounds.size.height) / f32::from(line_height))
             .floor()
             .max(1.0) as usize;
+        term_probe(
+            "layout",
+            format_args!(
+                "bounds {}x{} / cell {}x{} → {columns}列 {lines}行",
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+                f32::from(cell_width),
+                f32::from(line_height),
+            ),
+        );
         let theme = self.terminal.read(cx).theme.clone();
         let (cells, cursor, selection, focused) = {
             let focused = self.terminal.read(cx).focus_handle.is_focused(window);

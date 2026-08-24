@@ -8,7 +8,9 @@
 //! ＝開発フロー・プロトコルチャネルの挙動を一切変えない。将来 tracing 等へ載せ替える
 //! 場合もこの層の内側で済む（呼び出しは main() 冒頭の 1 箇所）。
 //!
-//! 置き場: `~/Library/Application Support/necoder/logs/necoder-<unix秒>-<pid>.log`
+//! 置き場は `paths` crate が決める（WINDOWS-PORT.md §D1）。mac は
+//! `~/Library/Application Support/necoder/logs/`、Windows は `%LOCALAPPDATA%\necoder\logs\`、
+//! Linux は `$XDG_STATE_HOME/necoder/logs/`。ファイル名は `necoder-<unix秒>-<pid>.log`
 //! （`NECODER_LOG_DIR` で差し替え・crash.rs の crashes/ と同じ並び・新しい 20 本だけ保持）。
 
 use std::path::PathBuf;
@@ -17,14 +19,13 @@ use std::path::PathBuf;
 #[cfg(unix)]
 const KEEP_LOGS: usize = 20;
 
-/// ログの置き場。テスト・offscreen 検証は `NECODER_LOG_DIR` で差し替える。
-#[cfg(unix)]
+/// ログの置き場。決定は `paths` crate に集約している。
+/// テスト・offscreen 検証は `NECODER_LOG_DIR` で差し替える（paths 側で解決）。
+///
+/// **全プラットフォームで実パスを返す**。以前は `cfg(not(unix))` で `None` を返していたため、
+/// Windows ではログの置き場すら決まらなかった。
 pub fn log_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("NECODER_LOG_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    let home = std::env::var_os("HOME")?;
-    Some(std::path::Path::new(&home).join("Library/Application Support/necoder/logs"))
+    paths::logs_dir()
 }
 
 /// Finder/Dock 起動（stderr の行き先が /dev/null）のときだけ stdout/stderr をログへ
@@ -124,11 +125,6 @@ fn prune_old_logs(dir: &std::path::Path) {
 /// 移植のときに専用実装を入れるまで no-op。
 #[cfg(not(unix))]
 pub fn redirect_output_for_gui_launch() -> Option<PathBuf> {
-    None
-}
-
-#[cfg(not(unix))]
-pub fn log_dir() -> Option<PathBuf> {
     None
 }
 

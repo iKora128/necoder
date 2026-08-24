@@ -616,6 +616,9 @@ impl AgentKind {
         if !host.is_remote() {
             return self.command(cwd);
         }
+        // ここは上の `if !host.is_remote()` で早期 return した後＝**必ずリモート（Linux）**。
+        // だから `sh` で正しい。`cfg!(windows)` で `cmd.exe` に振ってはいけない
+        // （Windows クライアントからリモート Linux へ cmd.exe を送ることになる・WINDOWS-PORT.md §D3）。
         let resolve = |binary: &str| {
             let output = host
                 .run_command(&CommandSpec::new("sh", &cwd).args([
@@ -696,15 +699,13 @@ fn env_has_any(names: &[&str]) -> bool {
 }
 
 fn home_path_exists(relative: impl AsRef<Path>) -> bool {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .is_some_and(|home| home.join(relative).exists())
+    paths::home_dir().is_some_and(|home| home.join(relative).exists())
 }
 
 fn opencode_auth_exists() -> bool {
     let path = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .or_else(|| paths::home_dir().map(|home| home.join(".local/share")))
         .map(|root| root.join("opencode/auth.json"));
     path.and_then(|path| std::fs::metadata(path).ok())
         .is_some_and(|metadata| metadata.is_file() && metadata.len() > 2)
@@ -744,15 +745,38 @@ fn shell_word(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Zed の npx キャッシュから指定 `.bin/<name>` を探す（macOS）。node シェバングなので node が PATH に要る。
-/// `~/Library/Application Support/Zed/node/cache/_npx/<hash>/node_modules/.bin/<name>`。
+/// Zed の npx キャッシュ置き場の候補（`<root>/node/cache/_npx`）。
+///
+/// **これは Zed 自身のディレクトリ規約**なので necoder の `paths` crate は使わない（別アプリの置き場）。
+/// 版やプラットフォームで揺れるため、存在するものを順に試す。mac の従来パスを必ず先頭に置く
+/// ＝mac では当たった時点で従来と同じ結果になる（WINDOWS-PORT.md §D8）。
+fn zed_npx_cache_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(home) = paths::home_dir() {
+        roots.push(home.join("Library/Application Support/Zed")); // macOS（従来）
+        roots.push(home.join(".local/share/zed")); // Linux
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(PathBuf::from(local).join("Zed")); // Windows
+    }
+    roots
+        .into_iter()
+        .map(|root| root.join("node/cache/_npx"))
+        .collect()
+}
+
+/// Zed の npx キャッシュから指定 `.bin/<name>` を探す。node シェバングなので node が PATH に要る。
+/// `<cache>/<hash>/node_modules/.bin/<name>`。
 fn zed_cached_agent(bin: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let cache = PathBuf::from(home).join("Library/Application Support/Zed/node/cache/_npx");
-    for entry in std::fs::read_dir(&cache).ok()?.flatten() {
-        let candidate = entry.path().join("node_modules/.bin").join(bin);
-        if candidate.exists() {
-            return Some(candidate);
+    for cache in zed_npx_cache_roots() {
+        let Ok(entries) = std::fs::read_dir(&cache) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("node_modules/.bin").join(bin);
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
     }
     None
@@ -760,10 +784,9 @@ fn zed_cached_agent(bin: &str) -> Option<PathBuf> {
 
 /// PATH からバイナリを探す。
 pub fn find_in_path(binary: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths)
-        .map(|dir| dir.join(binary))
-        .find(|candidate| candidate.is_file())
+    // 解決規則は host に集約している。**Windows は拡張子込みでないと見つからない**
+    // （ACP の `claude` は Windows では `claude.cmd`）ので、ここで素朴に join してはいけない。
+    host::find_in_path(binary)
 }
 
 /// 我々（クライアント）の能力を広告する initialize リクエスト。

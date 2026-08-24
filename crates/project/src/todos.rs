@@ -207,8 +207,13 @@ pub fn draft_daily_plan_on(host: &dyn Host, root: &Path) -> Result<Vec<String>> 
            echo '--- 板の未消化 ---'; grep -n -- '- \\[ \\]' .necoder/todos.md 2>/dev/null | head -20; \
         }} | claude -p \"{instruction}\""
     );
+    // `head` / `grep` / `{ }` グループ化を使う＝POSIX 前提。Windows ローカルでは明示的に断る。
+    anyhow::ensure!(
+        host.has_posix_shell(),
+        "この機能は POSIX シェル前提のため Windows ではまだ使えません"
+    );
     let output = host
-        .run_command(&host::CommandSpec::new("sh", root).args(["-c", script.as_str()]))
+        .run_command(&host.shell_script(script.as_str(), root))
         .context("今日の計画の実行に失敗（claude CLI 未導入？）")?;
     anyhow::ensure!(output.success(), "生成に失敗");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

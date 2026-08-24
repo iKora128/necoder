@@ -9,6 +9,7 @@ publish = false
 path = "src/project.rs"
 
 [dependencies]
+paths.workspace = true
 anyhow.workspace = true
 ignore.workspace = true
 imara-diff.workspace = true
