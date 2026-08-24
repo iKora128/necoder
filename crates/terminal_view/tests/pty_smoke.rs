@@ -136,8 +136,15 @@ fn pty_starts_a_shell_and_delivers_its_output() {
     }
 
     let screen = visible_text(&term.lock());
+    // Shutdown を投げるだけで **join はしない**。
+    //
+    // 2026-08-24、CI の test-macos がこの `join()` で止まった（他 5 ジョブは緑、
+    // Windows は同じテストが 1.5s で完走）。**シェルが生きている間 IO スレッドが
+    // 落ちない経路がある**らしく、join は上限の無い待ちになる。
+    // テストの目的は「PTY が出力を届けるか」であって畳み方ではないので、投げっぱなしにする。
+    // Rust はテストバイナリの main が返れば残ったスレッドごと終了するので、居座らない。
     let _ = notifier.0.send(Msg::Shutdown);
-    let _ = io_thread.join();
+    drop(io_thread);
 
     assert!(
         found,
