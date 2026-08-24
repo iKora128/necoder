@@ -46,6 +46,24 @@ jobs:
       - name: Build + bundle（.app 組み立て）
         run: bash ./scripts/bundle-mac.sh release
 
+      # **`hdiutil` は空き容量が要る**（2026-08-25 に踏んだ）。
+      # `.app` が組み上がった時点で `target/release/` の中間生成物（deps / build / incremental）は
+      # **もう要らない**（必要なバイナリは `.app` へコピー済み）のに、`ditto` で `.app` を複製し
+      # `hdiutil` で圧縮イメージを作る段階まで居座って `No space left on device` を起こす。
+      # ここで捨てておく。空き容量はログに残して、次に詰まったとき推測しないで済むようにする。
+      - name: dmg の前にディスクを空ける（hdiutil は空き容量を食う）
+        run: |
+          set -euo pipefail
+          echo "── 掃除前 ──"
+          df -h /
+          du -sh target 2>/dev/null || true
+          rm -rf target/release/deps target/release/build target/release/incremental
+          rm -rf target/debug
+          echo "── 掃除後 ──"
+          df -h /
+          du -sh target 2>/dev/null || true
+          du -sh target/necoder.app
+
       # ── 署名（karui と同じ手順・同じ secret 名）──
       - name: Import Apple certificate
         if: env.APPLE_SIGNING_IDENTITY != ''
@@ -150,15 +168,38 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
       # **配る前に依存を機械で検証する。** ここで気づけないと「手元では動くのに」で終わる。
+      #
+      # 2026-08-25: **このステップは CI で一度も動いていなかった**。`${env:ProgramFiles(x86)}` の
+      # 下だけを探していたが、windows-latest の VS 2022 は **`C:\Program Files\` 側**に入っている。
+      # 結果 `dumpbin が無いため検証をスキップ` の warning を出して素通りしていた
+      # ＝ **静的 CRT が壊れても気づけない**。両方の Program Files を見るようにし、
+      # さらに **dumpbin が無くても素通りしない**よう PE の import テーブルを直接読む道を足した。
       - name: VCRUNTIME 依存が無いことを確認
         shell: pwsh
         run: |
-          $dumpbin = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $dumpbin) { Write-Host "::warning::dumpbin が無いため検証をスキップ"; exit 0 }
-          $bad = & $dumpbin.FullName /DEPENDENTS target/release/necoder.exe |
-            Select-String -Pattern '^\s+((VCRUNTIME|MSVCP)\S*\.dll)'
+          $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+          $dumpbin = $null
+          foreach ($root in $roots) {
+            $vs = Join-Path $root 'Microsoft Visual Studio'
+            if (-not (Test-Path $vs)) { continue }
+            $dumpbin = Get-ChildItem $vs -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($dumpbin) { break }
+          }
+          $exe = 'target/release/necoder.exe'
+          if ($dumpbin) {
+            Write-Host "dumpbin: $($dumpbin.FullName)"
+            $deps = & $dumpbin.FullName /DEPENDENTS $exe
+            $bad = $deps | Select-String -Pattern '^\s+((VCRUNTIME|MSVCP)\S*\.dll)'
+          } else {
+            # dumpbin が無い環境でも黙って通さない。import される DLL 名は PE の import
+            # ディレクトリに **リテラルの ASCII** で載るので、バイト列を直接走査すれば足りる。
+            Write-Host '::warning::dumpbin が見つからないため PE のバイト走査で検証する'
+            $bytes = [System.IO.File]::ReadAllBytes($exe)
+            $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+            $bad = [regex]::Matches($text, '(VCRUNTIME|MSVCP)\d*[^\x00]*\.dll') | ForEach-Object { $_.Value } | Sort-Object -Unique
+          }
           if ($bad) { Write-Host "::error::静的 CRT が効いていない: $bad"; exit 1 }
-          Write-Host "VCRUNTIME 依存なし（OK）"
+          Write-Host 'VCRUNTIME / MSVCP 依存なし（OK）'
       - name: zip を作る
         shell: pwsh
         run: |
