@@ -33,6 +33,7 @@
 | `editor_core` | Buffer(ropey)・Selection・Transaction/undo | ropey。zed `text` は**参考のみ**（CRDT 不採用の決定済み） | M2 |
 | `editor_view` | 行仮想化描画・gutter・キャレット・IME | zed `editor` の element 実装を参考（GPL 移植可） | M2 |
 | `settings_core` | default→user→project 3層マージ・`.necoder/`・監視・スキーマ | zed `settings` を**削って移植** | M3 |
+| `settings` | `SettingsGlobal`（観測・即時反映・poll 監視）+ **設定画面本体**（外観テーマ / 動作トグル / エージェント導入） | 自作（settings_core を GPUI に載せる反応層） | M13 |
 | `keymap_core` | JSON keymap・コンテキスト述語 | gpui の keymap 機構 + zed 参考 | M3 |
 | `ui` | Button/List/Picker/Modal + **Registry 群**（§4） | zed `ui`/`picker` 参考に新規 | M3 |
 | `workspace` | レール・ドック・ペイン・タブ・statusbar・状態永続化 | zed `workspace` を**大幅に削って移植** | M3 |

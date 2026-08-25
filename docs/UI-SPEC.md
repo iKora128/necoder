@@ -30,6 +30,8 @@
 **テーマ非連動の固定色**: エディタ選択面 `#7d9bd8` 28%透過 / フォルダアイコン `#7d9bd8` 55%（bg3 と mix）/ Claude バレット `#d97757`。
 
 **きせかえ契約**: この表が**テーマの全インターフェース**。ユーザー定義テーマ = このトークンを上書きする JSON 1枚（`~/Library/Application Support/necoder/themes/*.json`）。
+**同梱テーマ**（Solarized Dark / Solarized Light / Gruvbox Dark / Catppuccin Mocha / High Contrast Dark）は同じ形式の上書き JSON をバイナリへ埋め込んだもの（`crates/theme_core/themes/`・2026-08-25）＝そのまま自作テーマの実例。
+切り替えの入口は 3 経路: **⌘K ⌘T セレクタ**（ライブプレビュー）/ **設定画面「外観」のテーマチップ**（クリックで即適用+保存）/ **settings.json の theme を手編集**（~1.2s poll で全ビューへ追従）。
 テーマ（面と文字の配色）とプロジェクト色（識別・Peacock相当、§1.2）は**独立した2軸** — どのテーマでもプロジェクト色は §1.3 の許可リスト位置に流れる。
 
 ### 1.2 アイデンティティ色

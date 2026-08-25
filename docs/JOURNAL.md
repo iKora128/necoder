@@ -2051,3 +2051,41 @@
     からも不可視・資産は保全）。latest は v0.1.0 に戻し、v0.1.2 リリースで置き換える
   - mac 手元では workspace の 2 テスト（project_switch… / local_and_remote…）が未変更ツリーでも
     "not deterministic" で落ちる既存 flake を確認（CI は通過・未着手）
+
+## 2026-08-25 — テーマの品揃え + 設定画面の「外観」+ settings.json への直行便
+
+- 動機（ユーザー対話から）: ①テーマを GUI で切り替えたい ②組み込みの品揃えを増やしたい ③「これを
+  編集すれば設定だよ」という入口が無い。調査で分かった前提: テーマ機構（⌘K ⌘T・ユーザー JSON・
+  set_user_value）は完成済みで、欠けていたのは**品揃えと入口**だけだった
+- **同梱テーマ 5 種**（`theme_core`）: Solarized Dark / Solarized Light / Gruvbox Dark /
+  Catppuccin Mocha / High Contrast Dark。**ユーザーテーマと同一の上書き JSON** を
+  `crates/theme_core/themes/*.json` に置き `include_str!` で埋め込み（初回コピー方式の
+  「一度配ったら更新されない」を回避 + JSON がそのまま自作テーマの実例になる）。
+  `Theme::builtin` が id（`solarized-dark`）と表示名（`Solarized Dark`）の両方で引けるので
+  settings.json にはどちらを書いてもよい。パレットは公開値の採用（Solarized=Schoonover/MIT,
+  Gruvbox=morhetz/MIT, Catppuccin/MIT）でコード移植ではない。壊れ JSON は
+  `embedded_themes_parse` テストが検知
+- **設定画面「外観」セクション**（`crates/settings`）: テーマ一覧（組み込み+同梱+ユーザー）を
+  チップの列で表示・クリックで**即適用 + settings.json 保存**。適用は全ビュー波及が要るので
+  `SettingsViewEvent::SelectTheme` で shell（workspace の apply_theme）へ上げる。一覧は
+  `refresh_availability`（設定を開くたび）で読み直し＝描画毎の fs 走査はしない
+- **「settings.json を開く」**: 設定画面のボタン + コマンドパレット「設定: settings.json を開く」
+  （`workspace::OpenSettingsJson`）。無ければ `{}` で作ってからエディタタブで開く。SSH プロジェクト
+  がアクティブな時は開かない（open_file が remote host 経由で読み書きしてしまうため）。
+  subscription は Window を持たないので `pending_open_settings_json` → effect cycle 末尾で処理
+  （pending_settings_command と同型）
+- **theme の live 追従を新設**: settings.json の theme を**手編集しても誰も再適用していなかった**
+  （起動時と選択時のみ）。既存の SettingsGlobal observer（エディタ実効値の配り直し）に統合し、
+  名前が変わった時だけ resolve → apply_theme（チップ/セレクタ経由は適用済みで名前一致 = no-op）。
+  併せて commit_theme の保存を `settings::set_user_value` に統一（「書き手は 1 本」の設計へ寄せた）
+- 掃除: 設定画面の古いヒント「テーマ: %{name}（⌘⇧T で変更）」を撤去（実キーは ⌘K ⌘T に変更済み
+  だった）。ARCHITECTURE の crate 表に `settings`（設定画面はここ）の行を追加。UI-SPEC §1.1 に
+  同梱テーマと切り替え 3 経路を追記
+- 検証: 並行セッションが agent_panel を編集中（ElicitationRequest WIP）で本ツリーがビルド不能
+  だったため、**HEAD + 自分の差分だけの一時 worktree** で cargo check/test（i18n parity 含む）
+  全 green + オフスクリーンスクショ。①外観セクションの表示（チップ 7 種・選択中ハイライト）
+  ②`theme: "Solarized Dark"` 起動で全面適用 ③**起動中に settings.json を書き換え → Gruvbox Dark +
+  font_size 20 が同時に live 反映**、を目視確認。罠: オフスクリーンでは poll timer が間延びする
+  （実描画が無いと ~1.2s 周期がドリフト。実窓では起きない）
+- 残: テーマチップのクリック経路（SelectTheme イベント）は実窓での対話確認が人の手番（オフスク
+  リーンではクリックできない。同経路の set_default_agent は既存実績あり）
