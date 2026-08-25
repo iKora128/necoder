@@ -125,12 +125,16 @@ impl Theme {
         }
     }
 
-    /// 名前から組み込みテーマを引く。未知の名前は `None`。
+    /// 名前から組み込みテーマを引く。dark / light の 2 種に加え、同梱テーマ（[`embedded_themes`]）も
+    /// id（例: `solarized-dark`）と表示名（例: `Solarized Dark`）のどちらでも引ける。未知の名前は `None`。
     pub fn builtin(name: &str) -> Option<Theme> {
         match name {
             DARK_THEME_NAME => Some(Theme::dark()),
             LIGHT_THEME_NAME => Some(Theme::light()),
-            _ => None,
+            _ => embedded_themes()
+                .iter()
+                .find(|(id, theme)| *id == name || theme.name.as_ref() == name)
+                .map(|(_, theme)| theme.clone()),
         }
     }
 
@@ -160,6 +164,50 @@ pub enum ThemeSource {
     User(PathBuf),
 }
 
+// ── 同梱テーマ（バイナリ埋め込み JSON）──
+
+/// 同梱テーマの一覧（id, JSON 本文）。形式はユーザーテーマと**同一**の「トークン上書き JSON」＝
+/// 同梱ファイルがそのまま自作テーマの実例になる。id は settings.json の theme 名としても使える固定名。
+/// パレット由来（値の採用のみ・コード移植ではない）: Solarized = Ethan Schoonover（MIT）/
+/// Gruvbox = morhetz（MIT）/ Catppuccin Mocha = Catppuccin project（MIT）/ High Contrast は自作。
+const EMBEDDED_THEME_JSONS: &[(&str, &str)] = &[
+    (
+        "solarized-dark",
+        include_str!("../themes/solarized-dark.json"),
+    ),
+    (
+        "solarized-light",
+        include_str!("../themes/solarized-light.json"),
+    ),
+    ("gruvbox-dark", include_str!("../themes/gruvbox-dark.json")),
+    (
+        "catppuccin-mocha",
+        include_str!("../themes/catppuccin-mocha.json"),
+    ),
+    (
+        "high-contrast-dark",
+        include_str!("../themes/high-contrast-dark.json"),
+    ),
+];
+
+/// 同梱テーマを一度だけパースして返す。JSON はビルド時に埋め込まれており、壊れは
+/// `embedded_themes_parse` テストが検知する（実行時は該当テーマだけ落として続行）。
+fn embedded_themes() -> &'static [(&'static str, Theme)] {
+    static CELL: std::sync::OnceLock<Vec<(&'static str, Theme)>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| {
+        EMBEDDED_THEME_JSONS
+            .iter()
+            .filter_map(|(id, json)| match parse_theme_json(json) {
+                Ok(theme) => Some((*id, theme)),
+                Err(error) => {
+                    eprintln!("同梱テーマが壊れている（スキップ）: {id}: {error:#}");
+                    None
+                }
+            })
+            .collect()
+    })
+}
+
 // ── ユーザーテーマ JSON（トークン上書き）──
 
 /// ユーザーテーマ JSON を読み、`appearance`（dark/light）を土台に指定トークンを上書きして返す。
@@ -167,8 +215,13 @@ pub enum ThemeSource {
 fn load_user_theme(path: &Path) -> Result<Theme> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("テーマ JSON を読めない: {}", path.display()))?;
-    let overrides: ThemeOverrides = serde_json::from_str(&text)
-        .with_context(|| format!("テーマ JSON の解析に失敗: {}", path.display()))?;
+    parse_theme_json(&text).with_context(|| format!("テーマ JSON の解析に失敗: {}", path.display()))
+}
+
+/// テーマ JSON 本文をパースする（同梱テーマ・ユーザーテーマ共通）。
+fn parse_theme_json(text: &str) -> Result<Theme> {
+    let overrides: ThemeOverrides =
+        serde_json::from_str(text).context("テーマ JSON の形式が不正")?;
     Ok(overrides.into_theme())
 }
 
@@ -270,7 +323,7 @@ fn parse_hex(value: &str) -> Option<Hsla> {
     }
 }
 
-/// 選択肢に出すテーマ一覧（組み込み 2 種 + `themes_dir` 直下の `*.json`）。
+/// 選択肢に出すテーマ一覧（組み込み 2 種 + 同梱テーマ + `themes_dir` 直下の `*.json`）。
 /// 各要素は (表示名, 出所)。表示名はユーザーテーマなら JSON の `name`、無ければファイル名。
 pub fn available_themes(themes_dir: Option<&Path>) -> Vec<(SharedString, ThemeSource)> {
     let mut themes = vec![
@@ -283,6 +336,11 @@ pub fn available_themes(themes_dir: Option<&Path>) -> Vec<(SharedString, ThemeSo
             ThemeSource::BuiltIn(LIGHT_THEME_NAME),
         ),
     ];
+    themes.extend(
+        embedded_themes()
+            .iter()
+            .map(|(id, theme)| (theme.name.clone(), ThemeSource::BuiltIn(id))),
+    );
     if let Some(dir) = themes_dir {
         if let Ok(read) = std::fs::read_dir(dir) {
             let mut users: Vec<(SharedString, ThemeSource)> = Vec::new();
@@ -526,6 +584,38 @@ mod tests {
         }
     }
 
+    /// 同梱テーマは全数パースでき、id / 表示名のどちらでも引けて、外観が宣言通りであること。
+    /// JSON の壊れ（typo・欠け・未知キー）はこのテストがビルド時産物ごと検知する。
+    #[test]
+    fn embedded_themes_parse() {
+        assert_eq!(embedded_themes().len(), EMBEDDED_THEME_JSONS.len());
+        for (id, theme) in embedded_themes() {
+            // id でも JSON の name でも同じテーマが引ける（settings.json にはどちらを書いてもよい）。
+            assert_eq!(Theme::builtin(id).as_ref(), Some(theme), "id で引けない: {id}");
+            assert_eq!(
+                Theme::builtin(theme.name.as_ref()).as_ref(),
+                Some(theme),
+                "表示名で引けない: {id}"
+            );
+            // resolve（起動時の解決）も同じ経路に落ちる。
+            assert_eq!(&resolve(id, None), theme);
+        }
+        assert_eq!(
+            Theme::builtin("solarized-light").map(|theme| theme.appearance),
+            Some(Appearance::Light)
+        );
+        assert_eq!(
+            Theme::builtin("Gruvbox Dark").map(|theme| theme.appearance),
+            Some(Appearance::Dark)
+        );
+        // 同梱テーマは全トークン明示（土台 dark/light の値が透けて残らない）を name で担保:
+        // 表示名が JSON で上書きされている＝JSON が読まれている証左。
+        for (_, theme) in embedded_themes() {
+            assert_ne!(theme.name.as_ref(), DARK_THEME_NAME);
+            assert_ne!(theme.name.as_ref(), LIGHT_THEME_NAME);
+        }
+    }
+
     #[test]
     fn load_resolves_builtins_and_reports_errors() {
         assert_eq!(Theme::builtin(DARK_THEME_NAME), Some(Theme::dark()));
@@ -560,10 +650,11 @@ mod tests {
         assert_eq!(theme.syntax.keyword, h(0xff0088)); // alpha=ff → 不透明
         assert_eq!(theme.syntax.string, Theme::light().syntax.string); // 未指定 → 土台
 
-        // 一覧に組み込み 2 種 + ユーザー 1 種が並ぶ。
+        // 一覧に組み込み 2 種 + 同梱 5 種 + ユーザー 1 種が並ぶ（ユーザーは末尾）。
         let list = available_themes(Some(&dir));
-        assert_eq!(list.len(), 3);
+        assert_eq!(list.len(), 2 + EMBEDDED_THEME_JSONS.len() + 1);
         assert_eq!(list[0].1, ThemeSource::BuiltIn(DARK_THEME_NAME));
+        assert!(matches!(list.last().unwrap().1, ThemeSource::User(_)));
         // resolve は name 一致でユーザーテーマを引ける。
         assert_eq!(resolve("Midnight", Some(&dir)).bg0, h(0x000000));
         assert_eq!(

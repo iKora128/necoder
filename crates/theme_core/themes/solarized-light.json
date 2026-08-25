@@ -1,0 +1,25 @@
+{
+  "name": "Solarized Light",
+  "appearance": "light",
+  "bg0": "#eee8d5",
+  "bg1": "#fdf6e3",
+  "bg2": "#f7f0dd",
+  "bg3": "#e6dfca",
+  "fg0": "#586e75",
+  "fg1": "#657b83",
+  "fg2": "#93a1a1",
+  "border": "#dcd4bc",
+  "ok": "#859900",
+  "warn": "#b58900",
+  "err": "#dc322f",
+  "syntax": {
+    "keyword": "#859900",
+    "function": "#268bd2",
+    "type": "#b58900",
+    "string": "#2aa198",
+    "number": "#d33682",
+    "comment": "#93a1a1",
+    "macro": "#cb4b16",
+    "punctuation": "#657b83"
+  }
+}
