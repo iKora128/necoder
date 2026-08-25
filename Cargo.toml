@@ -59,7 +59,9 @@ tree-sitter-md = "=0.5.1"
 # M4 ACP: Claude Code を ACP で包む。1.3 で ChildGuard drop 時にエージェントのプロセス
 # グループごと kill・stderr キャプチャのメモリ上限・EOF 処理修正（孤児プロセス/メモリ膨張の根治）。
 # 2.0 は wire schema(v1) 不変だが Rust API が breaking（AcpAgentConfig 化等）＝別途追従判断。
-agent-client-protocol = "1.3"
+# unstable_elicitation: エージェントが「選択肢付きの質問（4択等）」を出す仕組み（Elicitation）を
+# 使うため。**まだ unstable な API**（`cargo update` の 1.x 内でも変わりうる）＝追従はセットで見る。
+agent-client-protocol = { version = "1.3", features = ["unstable_elicitation"] }
 blocking = "1"
 futures = "0.3"
 async-io = "2"

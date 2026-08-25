@@ -127,6 +127,29 @@ pub struct PlanItem {
     pub status: PlanStatus,
 }
 
+/// Elicitation（選択肢付き質問）の 1 フィールド（単一選択のみ）。ACP の `ElicitationSchema` の
+/// 1 プロパティ（enum/oneOf 付き string）を UI 非依存に簡約したもの。
+#[derive(Debug, Clone)]
+pub struct ElicitationField {
+    /// スキーマ上のプロパティ名（応答 content のキーになる）。
+    pub name: String,
+    /// 表示ラベル（プロパティの title、無ければ name）。
+    pub label: String,
+    /// 選択肢。
+    pub options: Vec<ElicitationChoice>,
+}
+
+/// Elicitation の 1 選択肢（ACP `EnumOption` / `enum` 値の簡約）。
+#[derive(Debug, Clone)]
+pub struct ElicitationChoice {
+    /// 応答で返す値（`const`）。
+    pub value: String,
+    /// 表示名（`title`、`enum` 値なら値そのもの）。
+    pub title: String,
+    /// 補足説明（あれば）。
+    pub description: Option<String>,
+}
+
 /// UI へ流すストリーミングイベント（ACP の `SessionUpdate` を UI 非依存に簡約したもの）。
 /// agent_panel はこれを受けて transcript を逐次更新する。
 #[derive(Debug, Clone)]
@@ -166,6 +189,18 @@ pub enum AgentEvent {
     },
     /// エージェントの実行プラン全量（`SessionUpdate::Plan`）。UI は常設チェックリストへ置換反映する。
     Plan(Vec<PlanItem>),
+    /// エージェントが選択肢付きの質問（Elicitation・form）を出した。**単一選択フィールドのみ対応**し、
+    /// テキスト/数値/真偽/複数選択を含むフォームは UI へ出さず即 Decline する（下の handler で弾く）。
+    /// `respond` に **(name, value) の選択群**を送ると Accept、`None` を送ると Decline。drop で Cancel。
+    ElicitationRequest {
+        message: String,
+        fields: Vec<ElicitationField>,
+        respond: mpsc::UnboundedSender<Option<Vec<(String, String)>>>,
+    },
+    /// prompt を**実際にエージェントへ送った**（ターン開始）。UI はこれで `running` を立てる。
+    /// 楽観 UI（送信時に立てる）だけだと、生成中に積んで後回し（deferred）になった prompt が
+    /// 走る時に誰も running を立て直せず「生成中なのにアイドル表示」になる。ACP の実送信を正とする。
+    TurnStarted,
     /// 1 ターン（prompt→応答）が完了した（`StopReason`）。`reason` で正常完了/中断を区別する。
     TurnEnded { reason: TurnEnd },
     /// エラー（接続断・プロトコル異常・起動失敗など）。
@@ -793,14 +828,24 @@ pub fn find_in_path(binary: &str) -> Option<PathBuf> {
 /// **設定オプション（モデル・思考レベル）** を受け取るには config_options 能力の広告が要る
 /// （広告しないとエージェントが `config_options` を送ってこないことがある）。
 fn initialize_request() -> v1::InitializeRequest {
-    v1::InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
-        v1::ClientCapabilities::new().session(
-            v1::ClientSessionCapabilities::new().config_options(
-                v1::SessionConfigOptionsCapabilities::new()
-                    .boolean(v1::BooleanConfigOptionCapabilities::new()),
-            ),
-        ),
-    )
+    v1::InitializeRequest::new(ProtocolVersion::V1)
+        // 我々が誰か（クライアント名 = necoder）をプロトコルの正規経路で伝える。system/user prompt に
+        // 「necoder から使われている」と埋め込むのは筋が悪い（Zed もやっていない）。clientInfo が正。
+        .client_info(v1::Implementation::new("necoder", env!("CARGO_PKG_VERSION")).title("necoder"))
+        .client_capabilities(
+            v1::ClientCapabilities::new()
+                .session(
+                    v1::ClientSessionCapabilities::new().config_options(
+                        v1::SessionConfigOptionsCapabilities::new()
+                            .boolean(v1::BooleanConfigOptionCapabilities::new()),
+                    ),
+                )
+                // Elicitation（選択肢付き質問）の form モードに対応する旨を広告する。広告しないと
+                // エージェントは選択肢 UI を出してこない。unstable API（feature 有効時のみ型が在る）。
+                .elicitation(
+                    v1::ElicitationCapabilities::new().form(v1::ElicitationFormCapabilities::new()),
+                ),
+        )
 }
 
 /// ACP の `SessionConfigOption` 群を UI 非依存の [`ConfigOption`] へ簡約する（Select のみ扱う）。
@@ -1114,6 +1159,9 @@ pub async fn run_session_on(
                         .ok();
                     break;
                 }
+                // 実送信できた＝ここからが本当のターン開始。deferred から走った 2 本目も含め、UI に
+                // running を立てさせる（楽観 UI の取りこぼしを塞ぐ）。TurnEnded と対になる。
+                event_tx.unbounded_send(AgentEvent::TurnStarted).ok();
                 loop {
                     // エージェントの更新と UI のコマンドを**同時に**待つ。こうしないと
                     // ターン中（`read_update` で待っている間）に cancel を受け取れない。
@@ -1274,6 +1322,18 @@ pub async fn run_session_on(
                                         v1::RequestPermissionResponse,
                                     >| {
                                         handle_permission_request(request, responder, &event_tx)
+                                            .await
+                                    },
+                                )
+                                .await
+                                // Elicitation（選択肢付き質問）。権限確認と同じく応答するまで await は
+                                // 返らない＝ターンは正しくブロックされる。
+                                .if_request(
+                                    async |request: v1::CreateElicitationRequest,
+                                           responder: acp::Responder<
+                                        v1::CreateElicitationResponse,
+                                    >| {
+                                        handle_elicitation_request(request, responder, &event_tx)
                                             .await
                                     },
                                 )
@@ -1450,6 +1510,93 @@ async fn handle_permission_request(
     responder.respond(v1::RequestPermissionResponse::new(outcome))
 }
 
+/// ACP の Elicitation フォームを UI 非依存な [`ElicitationField`] 群へ簡約する。
+/// **全プロパティが単一選択（`enum` / `oneOf` 付き string）の時だけ** `Some` を返す。テキスト・
+/// 数値・真偽・複数選択を含むフォームは、この UI では正しく入力を返せないので `None`＝非対応にする
+/// （呼び出し側が Decline する）。単一選択に絞ることで「4 択を出して選ばせる」を安全に満たす。
+fn simplify_elicitation_form(schema: &v1::ElicitationSchema) -> Option<Vec<ElicitationField>> {
+    if schema.properties.is_empty() {
+        return None;
+    }
+    let mut fields = Vec::new();
+    for (name, property) in &schema.properties {
+        let v1::ElicitationPropertySchema::String(string_schema) = property else {
+            return None; // 単一選択でないフィールドが 1 つでもあれば非対応
+        };
+        let options: Vec<ElicitationChoice> = if let Some(one_of) = &string_schema.one_of {
+            one_of
+                .iter()
+                .map(|option| ElicitationChoice {
+                    value: option.value.clone(),
+                    title: option.title.clone(),
+                    description: option.description.clone(),
+                })
+                .collect()
+        } else if let Some(enum_values) = &string_schema.enum_values {
+            enum_values
+                .iter()
+                .map(|value| ElicitationChoice {
+                    value: value.clone(),
+                    title: value.clone(),
+                    description: None,
+                })
+                .collect()
+        } else {
+            return None; // 選択肢の無い自由入力 string も（テキスト入力になるので）非対応
+        };
+        if options.is_empty() {
+            return None;
+        }
+        fields.push(ElicitationField {
+            name: name.clone(),
+            label: string_schema.title.clone().unwrap_or_else(|| name.clone()),
+            options,
+        });
+    }
+    Some(fields)
+}
+
+/// `session/request_elicitation`（選択肢付き質問）を UI へ橋渡しして応答する。form かつ全フィールドが
+/// 単一選択の時だけ [`AgentEvent::ElicitationRequest`] を流し、UI の選択を Accept で返す。非対応な
+/// フォーム（テキスト等を含む）は UI に出さず即 Decline する。UI が sender を drop したら Decline。
+async fn handle_elicitation_request(
+    request: v1::CreateElicitationRequest,
+    responder: acp::Responder<v1::CreateElicitationResponse>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Result<(), acp::Error> {
+    let fields = match &request.mode {
+        v1::ElicitationMode::Form(form) => simplify_elicitation_form(&form.requested_schema),
+        _ => None,
+    };
+    let Some(fields) = fields else {
+        return responder
+            .respond(v1::CreateElicitationResponse::new(v1::ElicitationAction::Decline));
+    };
+
+    let (respond_tx, mut respond_rx) = mpsc::unbounded::<Option<Vec<(String, String)>>>();
+    event_tx
+        .unbounded_send(AgentEvent::ElicitationRequest {
+            message: request.message.clone(),
+            fields,
+            respond: respond_tx,
+        })
+        .ok();
+
+    // ユーザーの決定を待つ。Some(選択群)=Accept / None or drop=Decline。
+    let action = match respond_rx.next().await.flatten() {
+        Some(selections) => {
+            let content: std::collections::BTreeMap<String, v1::ElicitationContentValue> =
+                selections
+                    .into_iter()
+                    .map(|(name, value)| (name, v1::ElicitationContentValue::from(value)))
+                    .collect();
+            v1::ElicitationAction::Accept(v1::ElicitationAcceptAction::new().content(content))
+        }
+        None => v1::ElicitationAction::Decline,
+    };
+    responder.respond(v1::CreateElicitationResponse::new(action))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1459,6 +1606,60 @@ mod tests {
         // PATH に無い環境でも None を返すだけ（パニックしない）
         let _ = AgentCommand::claude(".");
         assert!(find_in_path("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn elicitation_single_select_is_supported_others_declined() {
+        use serde_json::json;
+        // oneOf 付き string（4 択質問）= 対応。ラベル・選択肢が正しく簡約される。
+        let schema: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string",
+                    "title": "方針",
+                    "oneOf": [
+                        {"const": "a", "title": "案A", "description": "説明A"},
+                        {"const": "b", "title": "案B"}
+                    ]
+                }
+            }
+        }))
+        .expect("schema をパースできる");
+        let fields = simplify_elicitation_form(&schema).expect("単一選択フォームは対応");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "answer");
+        assert_eq!(fields[0].label, "方針");
+        assert_eq!(fields[0].options.len(), 2);
+        assert_eq!(fields[0].options[0].value, "a");
+        assert_eq!(fields[0].options[0].title, "案A");
+        assert_eq!(fields[0].options[0].description.as_deref(), Some("説明A"));
+
+        // enum（タイトル無し単一選択）も対応＝値がそのまま表示名になる。
+        let enum_schema: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": { "size": {"type": "string", "enum": ["S", "M", "L"]} }
+        }))
+        .expect("schema をパースできる");
+        let enum_fields = simplify_elicitation_form(&enum_schema).expect("enum も対応");
+        assert_eq!(enum_fields[0].options.len(), 3);
+        assert_eq!(enum_fields[0].options[1].title, "M");
+
+        // boolean を含む＝この UI では正しく返せないので非対応（呼び出し側が Decline）。
+        let bool_schema: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": { "ok": {"type": "boolean"} }
+        }))
+        .expect("schema をパースできる");
+        assert!(simplify_elicitation_form(&bool_schema).is_none());
+
+        // 選択肢の無い自由入力 string も非対応（テキスト入力になるため）。
+        let text_schema: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": { "note": {"type": "string"} }
+        }))
+        .expect("schema をパースできる");
+        assert!(simplify_elicitation_form(&text_schema).is_none());
     }
 
     #[test]
@@ -1662,6 +1863,10 @@ mod tests {
                             respond.unbounded_send(0).ok(); // テストでは先頭を選んで進める
                         }
                         AgentEvent::Plan(items) => eprintln!("[plan] {} items", items.len()),
+                        AgentEvent::ElicitationRequest {
+                            message, fields, ..
+                        } => eprintln!("[elicitation] {message} fields={}", fields.len()),
+                        AgentEvent::TurnStarted => eprintln!("[turn started]"),
                         AgentEvent::TurnEnded { reason } => {
                             eprintln!("\n[turn ended: {reason:?}]")
                         }

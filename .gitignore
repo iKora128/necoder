@@ -1,5 +1,7 @@
 # 参照用クローン（各自の巨大リポジトリ。git 管理しない）
 /zed/
+# ACP の queue/steer UX 等の手法参考用（openai/codex・Apache-2.0）。zed/ と同じ参照専用の扱い
+/codex/
 
 # Rust
 /target/

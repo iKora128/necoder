@@ -21,8 +21,8 @@
 //! `min_w_0` のみ → **0px × 2540px** / `flex_1` + `min_w_0` → 1260px × 20px / 無指定 → 826px × 20px。
 
 use acp_client::{
-    AgentEvent, AgentKind, ConfigCategory, ConfigOption, PermissionChoice, PermissionDiff,
-    PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
+    AgentEvent, AgentKind, ConfigCategory, ConfigOption, ElicitationField, PermissionChoice,
+    PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
 };
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
 pub use acp_client::PermissionKind as AgentPermissionKind;
@@ -872,6 +872,19 @@ fn word_range_in(text: &str, offset: usize) -> (usize, usize) {
 /// 承認待ちの権限リクエスト（`session/request_permission` を UI で保持する間の状態）。
 /// `respond` に選んだ選択肢の添字を送ると acp_client が応答する（このスレッドの当該ターンは
 /// それまでブロックしている）。ユーザーが答えるまで composer 上部にカードを出す。
+/// エージェントが出した選択肢付き質問（Elicitation・単一選択のみ）。回答するまで composer 上部に
+/// カードを出す（承認カードと同居しない前提。両方来たら承認カードを優先表示）。
+struct PendingElicitation {
+    /// 質問文（`CreateElicitationRequest.message`）。
+    message: SharedString,
+    /// 単一選択フィールド群（acp_client が非対応フォームを弾いた後のもの）。
+    fields: Vec<ElicitationField>,
+    /// 各フィールドの現在の選択（field.name → 選んだ value）。全部埋まると「これで回答」が有効。
+    selections: std::collections::BTreeMap<String, String>,
+    /// 回答チャネル。`Some(選択群)`=Accept / `None`=Decline。drop でも Decline。
+    respond: mpsc::UnboundedSender<Option<Vec<(String, String)>>>,
+}
+
 struct PendingPermission {
     title: SharedString,
     diffs: Vec<PermissionDiff>,
@@ -1063,6 +1076,8 @@ struct Thread {
     configs: Vec<ConfigOption>,
     /// 承認待ちの権限リクエスト（あれば composer 上部にカードを出す）。
     pending_permission: Option<PendingPermission>,
+    /// 回答待ちの Elicitation（選択肢付き質問。あれば composer 上部にカードを出す・単一選択のみ）。
+    pending_elicitation: Option<PendingElicitation>,
     /// 永続化済みの entries 数（TurnEnded 時にここから先を DB へ追記・M12-1）。
     persisted_entries: usize,
     /// このスレッドが（承認済み編集で）触ったファイル（色リンク・M12-4）。
@@ -1082,13 +1097,16 @@ struct Thread {
     /// Tier 2 遷移スナップショット（✳ 1 行要約・P4）: Done/Failed 遷移の数秒後に oneshot が埋める。
     /// **状態を上書きしない**（状態と数字は事実層・これは添える文）。新しいターン開始でクリア。
     tier2: Option<SharedString>,
+    /// 生成中に積んだ送信待ちの prompt（キュー・FIFO）。ターン完了で先頭から自動フラッシュする。
+    /// 「今すぐ送信（steer）」はこのキューを介さず即 [`Self::send_prompt_text`] する。
+    queued_prompts: Vec<String>,
 }
 
 impl Thread {
     /// 現在の状態（herdr の 5 状態マップ・#）。Blocked（承認待ち）は Working（実行中）より優先で、
     /// これまで `running: bool` に埋もれていた「待ち」を分離する。Done は未確認ラッチ。
     fn activity(&self) -> ThreadActivity {
-        if self.pending_permission.is_some() {
+        if self.pending_permission.is_some() || self.pending_elicitation.is_some() {
             ThreadActivity::Blocked
         } else if self.running {
             ThreadActivity::Working
@@ -1126,6 +1144,7 @@ impl Thread {
             current_mode_id: SharedString::default(),
             configs: Vec::new(),
             pending_permission: None,
+            pending_elicitation: None,
             persisted_entries: 0,
             touched_files: Vec::new(),
             plan: Vec::new(),
@@ -1133,6 +1152,7 @@ impl Thread {
             digest: None,
             muted: false,
             tier2: None,
+            queued_prompts: Vec::new(),
         }
     }
 
@@ -1273,6 +1293,23 @@ const CODE_COLLAPSE_HEAD_LINES: usize = 8;
 /// ステップ見出しでツール名とパスを 1 行に並べる上限（これを超えるとパスは次行へ）。
 /// `Read README.md` + パスのような短い名前だけを同じ行に置き、長いタイトルは折返しに専念させる。
 const STEP_TITLE_INLINE_MAX_CHARS: usize = 48;
+
+/// この文字数を超える（または改行を含む）ツール引数（Bash のコマンド等）は既定で 1 行に畳み、
+/// ▸ クリックで全文展開する（結果 ⎿・Thinking・コードと同じ流儀）。短いパス・短いコマンドは
+/// 畳む価値がないのでそのまま見せる。
+const STEP_ARGS_COLLAPSE_MIN_CHARS: usize = 80;
+
+/// 折り畳んだツール引数（⏺ の引数行）のヘッダ要約。1 行目だけを見せ、続きがあれば ⋯ を付ける
+/// （複数行コマンドが transcript を専有しないように・横のあふれは overflow_hidden で切る）。
+fn step_args_preview(args: &str) -> SharedString {
+    let first_line = args.lines().next().unwrap_or("").trim_end();
+    let has_more = args.trim_end() != first_line;
+    if has_more {
+        SharedString::from(format!("{first_line} ⋯"))
+    } else {
+        SharedString::from(first_line.to_string())
+    }
+}
 
 /// 折り畳んだツール結果（⎿）のヘッダ要約。複数行は「N 行」、1 行なら中身を短く切って見せる。
 fn step_result_summary(result: &str, line_count: usize) -> SharedString {
@@ -1465,6 +1502,9 @@ pub struct AgentPanel {
     /// 展開した AI 応答内コードブロック（`(thread.id, entry index, block index)`）。既定は折り畳み。
     /// entry 内に複数コードが在り得るので block index まで鍵に含める。
     expanded_code: std::collections::HashSet<(String, usize, usize)>,
+    /// 展開したツール引数（⏺ の引数行）。既定は折り畳み＝長い/複数行コマンドで transcript が
+    /// 流れないように（`expanded_steps` と同じ `(thread.id, entry index)` 鍵）。
+    expanded_args: std::collections::HashSet<(String, usize)>,
     /// この panel の window がアクティブか（render で更新・GPUI が activation 変化で再描画するので追従する）。
     /// 完了音は**非アクティブ時のみ**鳴らす（見ている画面に音は要らない・P2）。
     window_active: bool,
@@ -1694,6 +1734,7 @@ impl AgentPanel {
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_steps: std::collections::HashSet::new(),
             expanded_code: std::collections::HashSet::new(),
+            expanded_args: std::collections::HashSet::new(),
             window_active: true,
             composer_height: COMPOSER_INPUT_DEFAULT,
             resizing_composer: false,
@@ -2134,6 +2175,60 @@ impl AgentPanel {
         if let Some(thread) = self.threads.get_mut(thread_index) {
             if let Some(pending) = thread.pending_permission.take() {
                 pending.respond.unbounded_send(option_index).ok();
+            }
+        }
+        self.sync_running_registry(cx);
+        cx.notify();
+    }
+
+    /// Elicitation の選択肢を1つ選ぶ（アクティブスレッド）。単一フィールドの質問（4 択）は
+    /// **選んだ瞬間に確定送信**、複数フィールドなら選択を貯めて「これで回答」で確定する。
+    fn choose_elicitation_option(&mut self, field_name: String, value: String, cx: &mut Context<Self>) {
+        let single_field = if let Some(thread) = self.threads.get_mut(self.active) {
+            let Some(pending) = thread.pending_elicitation.as_mut() else {
+                return;
+            };
+            pending.selections.insert(field_name, value);
+            pending.fields.len() == 1
+        } else {
+            return;
+        };
+        if single_field {
+            self.submit_elicitation(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Elicitation を確定送信する（全フィールド選択済みの時のみ Accept を返す）。
+    fn submit_elicitation(&mut self, cx: &mut Context<Self>) {
+        if let Some(thread) = self.threads.get_mut(self.active) {
+            let all_selected = thread
+                .pending_elicitation
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending
+                        .fields
+                        .iter()
+                        .all(|field| pending.selections.contains_key(&field.name))
+                });
+            if !all_selected {
+                return; // 未選択のフィールドがある＝まだ確定しない
+            }
+            if let Some(pending) = thread.pending_elicitation.take() {
+                let selections: Vec<(String, String)> = pending.selections.into_iter().collect();
+                pending.respond.unbounded_send(Some(selections)).ok();
+            }
+        }
+        self.sync_running_registry(cx);
+        cx.notify();
+    }
+
+    /// Elicitation に答えない（Decline）。カードを畳み、エージェントには「回答なし」を返す。
+    fn decline_elicitation(&mut self, cx: &mut Context<Self>) {
+        if let Some(thread) = self.threads.get_mut(self.active) {
+            if let Some(pending) = thread.pending_elicitation.take() {
+                pending.respond.unbounded_send(None).ok();
             }
         }
         self.sync_running_registry(cx);
@@ -2680,6 +2775,8 @@ impl AgentPanel {
             composer.set_accent(color, cx);
         });
         self.sync_running_registry(cx); // Done 解除をロールアップ（フッター/レール/⌘O）へ反映
+        // 切替先が idle で送信待ちを持っていれば流す（裏で完了したスレッドのキューをここで消化）。
+        self.flush_queued_prompt(cx);
         cx.notify();
     }
 
@@ -3527,7 +3624,76 @@ impl AgentPanel {
         if let Some(thread) = self.threads.get_mut(self.active) {
             thread.draft.clear();
         }
+        // 生成中（Working / Blocked）は即送信せずキューへ積む。ターン完了で先頭から自動フラッシュ。
+        // 割り込んで今すぐ送りたい時は宛先チップ横の「今すぐ」（steer）を使う（キューを介さない）。
+        let running = self
+            .threads
+            .get(self.active)
+            .is_some_and(|thread| thread.running);
+        if running {
+            if let Some(thread) = self.threads.get_mut(self.active) {
+                thread.queued_prompts.push(prompt);
+            }
+            cx.notify();
+            return;
+        }
         self.send_prompt_text(prompt, cx);
+    }
+
+    /// キューに積んだ prompt があれば先頭を送る（ターン完了時・スレッド切替時に呼ぶ）。
+    /// **アクティブスレッドが idle の時だけ**流す（`send_prompt_text` は active 宛のため）。
+    fn flush_queued_prompt(&mut self, cx: &mut Context<Self>) {
+        let next = self.threads.get_mut(self.active).and_then(|thread| {
+            if thread.running || thread.queued_prompts.is_empty() {
+                None
+            } else {
+                Some(thread.queued_prompts.remove(0))
+            }
+        });
+        if let Some(prompt) = next {
+            self.send_prompt_text(prompt, cx);
+        }
+    }
+
+    /// キュー内の prompt を今すぐ送る（割り込み送信）。生成中なら**現ターンを中断してから**送る。
+    /// ACP は生成中に届いた prompt を deferred に回す（＝そのままでは割り込めず、しかも UI の
+    /// running が取り残される）ため、cancel を挟んで確実に新ターンとして送るのが正しい。
+    /// idle の時は即送信。宛先チップ横のボタンから。
+    fn send_queued_now(&mut self, queue_index: usize, cx: &mut Context<Self>) {
+        let running = self.threads.get(self.active).and_then(|thread| {
+            (queue_index < thread.queued_prompts.len()).then_some(thread.running)
+        });
+        let Some(running) = running else {
+            return;
+        };
+        if running {
+            // 対象を先頭へ寄せ、現ターンを中断。中断完了（TurnEnded）で `flush_queued_prompt` が
+            // 先頭＝この prompt を新ターンとして送る（running も正しく立つ）。
+            if let Some(thread) = self.threads.get_mut(self.active) {
+                let prompt = thread.queued_prompts.remove(queue_index);
+                thread.queued_prompts.insert(0, prompt);
+            }
+            self.cancel_turn(self.active, cx);
+        } else {
+            // idle: 即送れる。
+            if let Some(prompt) = self
+                .threads
+                .get_mut(self.active)
+                .map(|thread| thread.queued_prompts.remove(queue_index))
+            {
+                self.send_prompt_text(prompt, cx);
+            }
+        }
+    }
+
+    /// キューから prompt を取り消す（宛先チップ横の ✕ から）。
+    fn remove_queued_prompt(&mut self, queue_index: usize, cx: &mut Context<Self>) {
+        if let Some(thread) = self.threads.get_mut(self.active) {
+            if queue_index < thread.queued_prompts.len() {
+                thread.queued_prompts.remove(queue_index);
+                cx.notify();
+            }
+        }
     }
 
     /// 文脈の圧縮（`/compact`）をエージェントへ依頼する（Claude Code の slash コマンドを turn として送る）。
@@ -3725,6 +3891,7 @@ impl AgentPanel {
             return;
         };
         let turn_finished = matches!(event, AgentEvent::TurnEnded { .. } | AgentEvent::Failed(_));
+        let turn_started = matches!(event, AgentEvent::TurnStarted);
         // 完了音・バンザイは**正常完了時のみ**（中断＝拒否/キャンセルや失敗では祝わない）。
         let turn_succeeded = matches!(
             event,
@@ -3733,8 +3900,18 @@ impl AgentPanel {
             }
         );
         let permission_waiting = matches!(event, AgentEvent::PermissionRequest { .. });
+        let elicitation_waiting = matches!(event, AgentEvent::ElicitationRequest { .. });
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
         match event {
+            AgentEvent::TurnStarted => {
+                // ACP が実際に prompt を送った＝ここから生成中。楽観 UI が取りこぼした場合
+                // （deferred から走った 2 本目など）でもここで確実に running を立て直す。
+                thread.running = true;
+                thread.done = None;
+                if thread.turn_started_at.is_none() {
+                    thread.turn_started_at = Some(std::time::Instant::now());
+                }
+            }
             AgentEvent::AgentChunk(text) => {
                 stream_updated = true;
                 match thread.entries.last_mut() {
@@ -3915,6 +4092,20 @@ impl AgentPanel {
             AgentEvent::Plan(items) => {
                 // プランは毎回全量で届く（ACP 仕様）ので**置換**。常設チェックリストが追従する。
                 thread.plan = items;
+            }
+            AgentEvent::ElicitationRequest {
+                message,
+                fields,
+                respond,
+            } => {
+                // 選択肢付き質問。回答するまで composer 上部にカードを出す（承認カードと同じ Blocked）。
+                thread.digest = digest_tail(&message).or(thread.digest.take());
+                thread.pending_elicitation = Some(PendingElicitation {
+                    message: SharedString::from(message),
+                    fields,
+                    selections: std::collections::BTreeMap::new(),
+                    respond,
+                });
             }
             AgentEvent::PermissionRequest {
                 title,
@@ -4120,6 +4311,9 @@ impl AgentPanel {
                 });
             }
         }
+        if elicitation_waiting {
+            self.sync_running_registry(cx); // Blocked（回答待ち）をレール/フッター/⌘O へ即時反映
+        }
         if start_token_ticker {
             self.ensure_token_ticker(cx);
         }
@@ -4131,6 +4325,16 @@ impl AgentPanel {
             if ensure_reveal {
                 self.follow_transcript_if_at_bottom();
             }
+        }
+        // ターン開始（ACP 実送信）をレール/フッター/⌘O のロールアップへ即時反映（生成中を灯す）。
+        if turn_started {
+            self.sync_running_registry(cx);
+        }
+        // ターン完了で、アクティブスレッドに送信待ちがあれば次を自動フラッシュ（キュー→新ターン）。
+        // active 限定なのは `flush_queued_prompt`（＝`send_prompt_text`）が active 宛のため。
+        // 裏スレッドのキューは、そのタブへ切り替えた時に `switch_thread` が流す。
+        if turn_finished && thread_index == active {
+            self.flush_queued_prompt(cx);
         }
         cx.notify();
     }
@@ -5719,10 +5923,17 @@ impl AgentPanel {
                 // Claude の Write/Edit はタイトル自体にパスを載せる（`Write /very/long/path`）ので、
                 // 同じパスを args としてもう一度出さない（同じ文字列が 1 行に 2 回並ぶのを防ぐ）。
                 let show_args = !args.is_empty() && !tool.contains(args.as_ref());
+                // 長い/複数行の引数（Bash のコマンド等）は既定で 1 行に畳み、クリックで展開する
+                // （結果 ⎿ と同じ流儀）。短いパス・短いコマンドはそのまま見せる。
+                let args_collapsible = show_args
+                    && (args.contains('\n') || args.chars().count() > STEP_ARGS_COLLAPSE_MIN_CHARS);
                 // ツール名もパスも長さの上限が無い（エージェント任せ）。**必ずパネル内に収める**ため、
                 // 「残りを取って折返す」役を 1 行にちょうど 1 つだけ置く（= `flex_1` + `min_w_0`。
-                // モジュール冒頭「伸縮テキストの作法」）。短いツール名の時だけパスをその直後に並べる。
-                let inline_args = show_args && tool.chars().count() <= STEP_TITLE_INLINE_MAX_CHARS;
+                // モジュール冒頭「伸縮テキストの作法」）。短いツール名かつ折り畳み不要な引数の時だけ
+                // パスをその直後に並べる（折り畳む引数は下の専用行へ回す）。
+                let inline_args = show_args
+                    && !args_collapsible
+                    && tool.chars().count() <= STEP_TITLE_INLINE_MAX_CHARS;
                 let title = if inline_args {
                     div().flex_none() // 自然幅＝パスがタイトルの直後に来る
                 } else {
@@ -5758,19 +5969,72 @@ impl AgentPanel {
                                 )
                             }),
                     );
-                // 長いツール名 + 別のパス＝1 行に収まらない。パスは次の行へ落とす（横に切らない）。
+                // 引数を専用行で出す（inline に収めなかった場合）。
                 if show_args && !inline_args {
-                    body = body.child(
-                        div().flex().child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .font_family("Guguru Sans Code")
-                                .text_size(px(11.))
-                                .text_color(theme.fg2)
-                                .child(self.selectable_text(args.clone(), cx)),
-                        ),
-                    );
+                    if args_collapsible {
+                        // 長い/複数行コマンドは ▸ + 1 行プレビューに畳み、クリックで全文展開。
+                        let expanded = self.is_args_expanded(index);
+                        let header = div()
+                            .id(("step-args", index))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .cursor_pointer()
+                            .font_family("Guguru Sans Code")
+                            .text_size(px(11.))
+                            .text_color(theme.fg2)
+                            .child(div().flex_none().text_size(px(8.)).child(if expanded {
+                                "▾"
+                            } else {
+                                "▸"
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(step_args_preview(args.as_ref())),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_args(index, cx);
+                                }),
+                            );
+                        let mut column = div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .gap(px(3.))
+                            .child(header);
+                        if expanded {
+                            column = column.child(
+                                div()
+                                    .min_w_0()
+                                    .font_family("Guguru Sans Code")
+                                    .text_size(px(11.))
+                                    .text_color(theme.fg2)
+                                    .child(self.selectable_text(args.clone(), cx)),
+                            );
+                        }
+                        body = body.child(column);
+                    } else {
+                        // 長いツール名 + 別のパス＝1 行に収まらない。パスは次の行へ落とす（横に切らない）。
+                        body = body.child(
+                            div().flex().child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .font_family("Guguru Sans Code")
+                                    .text_size(px(11.))
+                                    .text_color(theme.fg2)
+                                    .child(self.selectable_text(args.clone(), cx)),
+                            ),
+                        );
+                    }
                 }
                 // Edit 系: before/after 差分を transcript にインライン表示（権限カードと同じ描画を再利用）。
                 for diff in diffs {
@@ -6128,6 +6392,28 @@ impl AgentPanel {
         cx.notify();
     }
 
+    fn is_args_expanded(&self, index: usize) -> bool {
+        self.threads
+            .get(self.active)
+            .is_some_and(|thread| self.expanded_args.contains(&(thread.id.clone(), index)))
+    }
+
+    /// ツール引数（⏺ の引数行）の折り畳み/展開をトグルする（引数行クリック）。
+    fn toggle_args(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.id.clone())
+        else {
+            return;
+        };
+        let key = (id, index);
+        if !self.expanded_args.remove(&key) {
+            self.expanded_args.insert(key);
+        }
+        cx.notify();
+    }
+
     fn is_code_expanded(&self, entry_index: usize, block_index: usize) -> bool {
         self.threads.get(self.active).is_some_and(|thread| {
             self.expanded_code
@@ -6295,6 +6581,228 @@ impl AgentPanel {
 
     /// 承認待ちの権限リクエストのカード（composer の直上）。ツール名・編集差分・許可/拒否ボタン。
     /// ターンをブロックしているので、transcript がスクロールしても常に見える位置に置く。
+    /// Elicitation（選択肢付き質問・単一選択のみ）を composer 上部にカードで出す。質問文 + 各
+    /// フィールドの選択肢ボタン + フッタ（複数フィールドなら「これで回答」・常に「答えない」）。
+    /// 単一フィールドは選んだ瞬間に確定送信する。空なら None。
+    fn render_elicitation_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let pending = thread.pending_elicitation.as_ref()?;
+        let theme = self.theme.clone();
+        let color = thread.color;
+        let message = pending.message.clone();
+        let fields = pending.fields.clone();
+        let selections = pending.selections.clone();
+        let multi = fields.len() > 1;
+        let all_selected = fields
+            .iter()
+            .all(|field| selections.contains_key(&field.name));
+
+        let mut card = div()
+            .id("elicitation-card")
+            .mx(px(12.))
+            .mb(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .rounded(px(9.))
+            .overflow_hidden()
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(color.alpha(0.6))
+            .px(px(11.))
+            .py(px(9.))
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(theme.fg0)
+                    .child(message),
+            );
+
+        let mut option_id = 0usize;
+        for field in &fields {
+            let mut group = div().flex().flex_col().gap(px(4.));
+            if multi {
+                group = group.child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(field.label.clone())),
+                );
+            }
+            let mut options_row = div().flex().flex_wrap().gap(px(6.));
+            for option in &field.options {
+                let selected = selections.get(&field.name) == Some(&option.value);
+                let field_name = field.name.clone();
+                let value = option.value.clone();
+                option_id += 1;
+                options_row = options_row.child(
+                    div()
+                        .id(("elicit-option", option_id))
+                        .px(px(9.))
+                        .py(px(4.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(if selected { color } else { theme.border })
+                        .bg(if selected { theme.bg3 } else { theme.bg1 })
+                        .text_size(px(11.5))
+                        .text_color(if selected { theme.fg0 } else { theme.fg1 })
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                        .child(SharedString::from(option.title.clone()))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |panel, _, _window, cx| {
+                                cx.stop_propagation();
+                                panel.choose_elicitation_option(
+                                    field_name.clone(),
+                                    value.clone(),
+                                    cx,
+                                );
+                            }),
+                        ),
+                );
+            }
+            group = group.child(options_row);
+            card = card.child(group);
+        }
+
+        let mut footer = div().flex().items_center().gap(px(8.));
+        if multi {
+            footer = footer.child(
+                div()
+                    .id("elicitation-submit")
+                    .px(px(9.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(if all_selected { color } else { theme.border })
+                    .text_size(px(11.))
+                    .text_color(if all_selected { theme.fg0 } else { theme.fg2 })
+                    .when(all_selected, |element| {
+                        element
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3))
+                    })
+                    .child(SharedString::from(i18n::t!("agent.elicitation_submit")))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|panel, _, _window, cx| {
+                            cx.stop_propagation();
+                            panel.submit_elicitation(cx);
+                        }),
+                    ),
+            );
+        }
+        footer = footer.child(
+            div()
+                .id("elicitation-decline")
+                .text_size(px(11.))
+                .text_color(theme.fg2)
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.fg0))
+                .child(SharedString::from(i18n::t!("agent.elicitation_decline")))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|panel, _, _window, cx| {
+                        cx.stop_propagation();
+                        panel.decline_elicitation(cx);
+                    }),
+                ),
+        );
+        card = card.child(footer);
+        Some(card.into_any_element())
+    }
+
+    /// 送信待ちキュー（生成中に積んだ prompt）を composer 上部に並べる。各チップは 1 行プレビュー +
+    /// 「今すぐ」（steer・割り込み送信）+ ✕（取消）。空なら None（描画しない）。
+    fn render_queued_prompts(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        if thread.queued_prompts.is_empty() {
+            return None;
+        }
+        let theme = self.theme.clone();
+        let color = thread.color;
+        let prompts = thread.queued_prompts.clone();
+        let mut card = div()
+            .id("queued-prompts")
+            .mx(px(12.))
+            .mb(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(
+                        i18n::t!("agent.queued_title", "n" => prompts.len()),
+                    )),
+            );
+        for (index, prompt) in prompts.iter().enumerate() {
+            let row = div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(px(7.))
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(color.alpha(0.4))
+                .px(px(9.))
+                .py(px(5.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(11.5))
+                        .text_color(theme.fg1)
+                        .child(step_args_preview(prompt)),
+                )
+                .child(
+                    div()
+                        .id(("queue-send-now", index))
+                        .flex_none()
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(10.5))
+                        .text_color(theme.fg1)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                        .child(SharedString::from(i18n::t!("agent.queue_send_now")))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |panel, _, _window, cx| {
+                                cx.stop_propagation();
+                                panel.send_queued_now(index, cx);
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(("queue-remove", index))
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.fg0))
+                        .child("✕")
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |panel, _, _window, cx| {
+                                cx.stop_propagation();
+                                panel.remove_queued_prompt(index, cx);
+                            }),
+                        ),
+                );
+            card = card.child(row);
+        }
+        Some(card.into_any_element())
+    }
+
     fn render_permission_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
         let pending = thread.pending_permission.as_ref()?;
@@ -6872,6 +7380,8 @@ impl Render for AgentPanel {
             )
             // 承認待ちの権限リクエスト（あれば composer の直上に常時表示）。
             .children(self.render_permission_card(cx))
+            .children(self.render_elicitation_card(cx))
+            .children(self.render_queued_prompts(cx))
             .child(self.render_composer(cx))
             // セレクタのドロップダウンは各ピルの子として描く（render_selector_pill 内）。
             .when(self.context_menu_open, |element| {
@@ -7821,10 +8331,12 @@ fn seed_threads() -> Vec<Thread> {
         current_mode_id: SharedString::default(),
         configs: Vec::new(),
         pending_permission: None,
+        pending_elicitation: None,
         // 遷移スナップショット（P1）の種: offscreen 検証で herd 行/セル帯に digest が写る。
         digest: Some("結論: MVP は ropey。Buffer trait で後から差し替え可能に。".into()),
         muted: false,
         tier2: None,
+        queued_prompts: Vec::new(),
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
@@ -8145,6 +8657,30 @@ mod tests {
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some(expected)
         );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 生成中（running）の submit はキューへ積み、即送信しない（User entry を増やさない）。
+    /// 取消でキューが空になる。ターン完了時の自動フラッシュは session を要するのでここでは検証しない。
+    #[gpui::test]
+    fn submit_queues_prompt_while_running(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "queue");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].running = true; // 生成中を模擬
+            let entries_before = panel.threads[active].entries.len();
+            panel
+                .composer
+                .update(cx, |composer, cx| composer.set_plain_text("次の指示", cx));
+            panel.submit(cx);
+            let thread = &panel.threads[active];
+            assert_eq!(thread.queued_prompts, vec!["次の指示".to_string()]);
+            assert_eq!(thread.entries.len(), entries_before, "即送信していない");
+            assert!(thread.running, "running のまま");
+            panel.remove_queued_prompt(0, cx);
+            assert!(panel.threads[active].queued_prompts.is_empty());
+        });
         let _ = std::fs::remove_file(settings_path);
     }
 

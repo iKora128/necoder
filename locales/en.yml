@@ -64,6 +64,10 @@ agent:
   compact_tip: Summarize and compact the context (/compact)
   output_truncated: "… (%{n} lines hidden)"
   result_lines: "%{n} lines"
+  queued_title: "%{n} queued (sent when the turn ends)"
+  queue_send_now: Interrupt & send
+  elicitation_submit: Submit
+  elicitation_decline: Decline
   code_show_more: "… show %{n} more lines"
   code_collapse: Collapse code
   code_streaming_more: "… streaming (%{n} lines)"
