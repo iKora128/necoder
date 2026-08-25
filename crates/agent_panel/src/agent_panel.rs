@@ -8363,4 +8363,24 @@ mod tests {
         });
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn mascot_atlases_decode_from_embedded_bytes() {
+        // 回帰テスト: マスコットは埋め込みバイトからデコードできる（実行時にビルド機の
+        // パスを読まない）こと。フレーム分割もアトラス定義どおりであること。
+        let atlases = MascotAtlases::load();
+        for (name, image, frame_count) in [
+            ("idle", &atlases.idle, 1),
+            ("doze", &atlases.doze, 15),
+            ("typing", &atlases.typing, 15),
+            ("think", &atlases.think, 15),
+            ("celebrate", &atlases.celebrate, 15),
+            ("plead", &atlases.plead, 15),
+            ("worry", &atlases.worry, 15),
+        ] {
+            assert_eq!(image.frame_count(), frame_count, "{name} のフレーム数");
+            let size = image.size(0);
+            assert!(size.width.0 > 0 && size.height.0 > 0, "{name} が空画像");
+        }
+    }
 }

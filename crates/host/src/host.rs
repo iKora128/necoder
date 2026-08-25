@@ -2131,9 +2131,17 @@ fn find_local_remote_server() -> Option<PathBuf> {
     if sibling.is_file() {
         return Some(sibling);
     }
-    let development =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/necoder-remote-server");
-    development.is_file().then_some(development)
+    // 開発ビルド限定の fallback。release では CARGO_MANIFEST_DIR（ビルドマシンの絶対パス）を
+    // 配布バイナリに焼き込まない — release.yml のビルドパス焼き込みガードが 0 件を前提にする。
+    #[cfg(debug_assertions)]
+    {
+        let development =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/necoder-remote-server");
+        if development.is_file() {
+            return Some(development);
+        }
+    }
+    None
 }
 
 /// `ssh` サブプロセスの土台。`NECODER_SSH_CONFIG` が指定されていれば `-F <config>` を先頭に

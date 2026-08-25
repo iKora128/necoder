@@ -20,11 +20,18 @@
   （`D:\a\necoder\necoder` は GitHub Actions ランナーのパス）
   フォント・アイコンと同じく `include_bytes!` でバイナリに埋め込むよう修正した。
   **v0.1.0 / v0.1.1 は使えません。本版へ更新してください。**
+- クラッシュログが**二重 panic のとき 1 度目 = 本来の原因を消していた**。起動クロージャ内の
+  panic は GPUI の extern "C" 境界を unwind できず 2 度目の panic（cannot unwind）になり、
+  同一秒・同一 PID の `crash-<unix秒>-<pid>.log` を上書きしていた（上記の調査で実害）。追記式に変更
 
 ### Added
 - 上記の再発を機械で止める回帰テスト（`crates/necoder/tests/no_runtime_manifest_paths.rs`）。
   ビルド時のパスを実行時に開いている箇所を全 crate から検出する。**このバグは開発機では
   原理的に再現しない**（そのパスが手元には実在するため）ので、人間の目では防げない
+- release CI に**最終成果物側の裏取り**も追加: 配布バイナリに `strings` でビルド機のパス
+  （`$GITHUB_WORKSPACE/crates`）が残っていたら fail。併せてリモートサーバ探索の開発用
+  fallback（`target/debug/…`）を debug ビルド限定にし、release バイナリからビルド機の
+  絶対パスを全廃（ガードの期待値を 0 件にできる）
 - `release.yml` の Windows ジョブで VCRUNTIME 依存の検証が実際に動くようになった
   （`Program Files` 側の VS を見ておらず、これまで一度も検証していなかった）
 

@@ -43,7 +43,6 @@ pub fn install_panic_hook() {
 
 /// クラッシュログ 1 本を書き、`pending` マーカー（次回起動の通知フラグ）を更新する。
 fn write_crash_log(dir: &Path, info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
     let unix_seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -69,11 +68,25 @@ fn write_crash_log(dir: &Path, info: &std::panic::PanicHookInfo<'_>) -> std::io:
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
     );
-    let log_path = dir.join(format!("crash-{unix_seconds}-{}.log", std::process::id()));
-    std::fs::write(&log_path, body)?;
+    let log_path = append_crash_log(dir, unix_seconds, &body)?;
     std::fs::write(dir.join("pending"), log_path.to_string_lossy().as_bytes())?;
     prune_old_logs(dir);
     Ok(())
+}
+
+/// ログ 1 本分を追記で書き、そのパスを返す。上書きにしない理由: unwind 不能境界での二重 panic
+/// （1 度目 = 本来の原因 → 2 度目 = "panic in a function that cannot unwind"）は同一秒・同一 PID
+/// なのでファイル名が衝突し、上書きだと 1 度目 = 本来の原因が消える（v0.1.1 の調査で実際に消えた）。
+fn append_crash_log(dir: &Path, unix_seconds: u64, body: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write as _;
+    std::fs::create_dir_all(dir)?;
+    let log_path = dir.join(format!("crash-{unix_seconds}-{}.log", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    file.write_all(body.as_bytes())?;
+    Ok(log_path)
 }
 
 /// 古いクラッシュログを掃除する（新しい [`KEEP_LOGS`] 本だけ残す）。
@@ -224,6 +237,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn same_second_same_pid_appends_instead_of_overwriting() {
+        // 二重 panic（本来の原因 → cannot unwind）は同一秒・同一 PID で同名になる。
+        // 1 度目の内容が残ることが要件（消えると原因調査ができない）。
+        let dir = temp_dir("append");
+        let first = append_crash_log(&dir, 100, "panic: 本来の原因\n").unwrap();
+        let second = append_crash_log(&dir, 100, "panic: cannot unwind\n").unwrap();
+        assert_eq!(first, second, "同一秒・同一 PID は同じファイルに載る");
+        let text = std::fs::read_to_string(&first).unwrap();
+        assert!(text.contains("本来の原因"), "1 度目の panic が消えている");
+        assert!(text.contains("cannot unwind"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

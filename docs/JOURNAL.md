@@ -2033,3 +2033,21 @@
   ウィンドウ生成とマスコットの描画（色・フレーム）をスクショで目視確認。
 
 - 次: v0.1.2 として再リリース。**v0.1.0 / v0.1.1 をどう扱うか（取り下げるか）はユーザー判断**。
+
+- 追記（同日・mac 側セッションの合流）: 同じ障害を mac 側でも独立に特定していた（DMG 版の
+  クラッシュレポート → `open -n --stdout --stderr` で launchd 環境の stderr を捕獲 →
+  `mascot asset /Users/runner/work/necoder/necoder/...: No such file or directory`）。
+  実装は本体（埋め込み + ソース走査ガード）へ合流し、mac 側で見つけた穴だけ上乗せ:
+  - **crash.rs のログが二重 panic で消えていた**。起動クロージャ内の panic は extern "C" 境界で
+    「panic in a function that cannot unwind」の 2 度目の panic になり、同一秒・同一 PID の
+    `crash-<unix秒>-<pid>.log` を上書きして 1 度目 = 本来の原因が消える（今回 3 回試行分すべて
+    消えており、stderr 捕獲での再現が必要になった）。追記式へ変更 + テスト
+  - **release.yml に配布バイナリの焼き込みガード**を新設: mac ジョブで `strings` に
+    `$GITHUB_WORKSPACE/crates` が出たら fail。ソース走査（no_runtime_manifest_paths）が第一線で、
+    こちらは最終成果物側の裏取り。前提として host.rs の開発用 fallback を
+    `#[cfg(debug_assertions)]` 限定へ（ソース上の件数は 1 のままなので ALLOWED と整合）
+  - 埋め込みマスコットのデコード + フレーム分割の単体テストを追加（`MascotAtlases::load` 直叩き）
+  - 運用: **GitHub Releases の v0.1.1 を draft 化して取り下げ済み**（updater の `releases/latest`
+    からも不可視・資産は保全）。latest は v0.1.0 に戻し、v0.1.2 リリースで置き換える
+  - mac 手元では workspace の 2 テスト（project_switch… / local_and_remote…）が未変更ツリーでも
+    "not deterministic" で落ちる既存 flake を確認（CI は通過・未着手）

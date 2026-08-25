@@ -46,6 +46,25 @@ jobs:
       - name: Build + bundle（.app 組み立て）
         run: bash ./scripts/bundle-mac.sh release
 
+      # **配布バイナリにビルドマシンのパスが焼き込まれていたら落とす**（2026-08-25 に踏んだ）。
+      # v0.1.1 は `env!("CARGO_MANIFEST_DIR")` を実行時のファイルパスとして読むコード（マスコット
+      # 画像）が紛れ、CI ビルドの .app が全ユーザー環境で起動即 abort した。ローカルビルドでは
+      # パスが実在して再現しないので、CI でしか捕まえられない。依存 crate の panic 位置情報
+      # （/Users/runner/.cargo/…）は無害なため、ワークスペース配下 crates/ の絶対パスだけを見る。
+      - name: 配布バイナリへのビルドパス焼き込みを検出（起動即死ガード）
+        run: |
+          set -euo pipefail
+          status=0
+          for binary in target/necoder.app/Contents/MacOS/*; do
+            hits=$(strings "$binary" | grep -F "${GITHUB_WORKSPACE}/crates" || true)
+            if [ -n "$hits" ]; then
+              echo "::error::${binary} が実行時にビルドマシンのパスを参照している（配布先に存在せず panic の温床）:"
+              echo "$hits"
+              status=1
+            fi
+          done
+          exit $status
+
       # **`hdiutil` は空き容量が要る**（2026-08-25 に踏んだ）。
       # `.app` が組み上がった時点で `target/release/` の中間生成物（deps / build / incremental）は
       # **もう要らない**（必要なバイナリは `.app` へコピー済み）のに、`ditto` で `.app` を複製し
