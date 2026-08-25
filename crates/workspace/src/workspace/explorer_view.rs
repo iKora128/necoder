@@ -160,8 +160,13 @@ impl Workspace {
             }
         }
         div()
+            // 横スクロール可（VSCode/Zed 方式）。深い階層はインデントで右に押し出されるが、
+            // 行は自然幅（min_w_full）＝切らずに全部並べ、あふれた分は横スクロールで読む。
+            // min_h_0 は flex_col 親の中で縦スクロールを成立させるため（あふれ許可）。
+            .id("explorer-tree")
             .flex_1()
-            .overflow_hidden()
+            .min_h_0()
+            .overflow_scroll()
             .children(elements)
             .into_any_element()
     }
@@ -214,6 +219,9 @@ impl Workspace {
             div()
                 .id(("tree-row", index))
                 .flex()
+                // 横スクロール時も選択/hover 背景が幅いっぱいに伸びるよう最低でもビューポート幅。
+                // 名前が長ければこの下限を超えて伸び、ツリーの横スクロールで読める。
+                .min_w_full()
                 .items_center()
                 .gap(px(4.))
                 .h(px(ROW_HEIGHT))
@@ -255,13 +263,17 @@ impl Workspace {
                 )
                 .child(file_icon(&row.name, is_dir, row.is_expanded, &theme))
                 .child(
+                    // 名前は自然幅＝深い階層でも切らない（従来は flex_1 + overflow_hidden で
+                    // インデントに幅を食われると名前が消えていた）。あふれは親の横スクロールで読む。
                     div()
-                        .flex_1()
-                        .overflow_hidden()
+                        .flex_none()
                         .whitespace_nowrap()
                         .text_color(name_color)
                         .child(row.name.clone()),
                 )
+                // 名前と右バッジの間の伸縮スペーサ。名前が短い時はバッジを右端へ寄せ、
+                // 名前が長い時は 0 に潰れて行が伸びる（横スクロール発火）。
+                .child(div().flex_1())
                 // git バッジ（ファイル=状態文字・フォルダ=変更あり ●）
                 .when_some(file_status, |element, status| {
                     element.child(
