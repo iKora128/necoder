@@ -207,6 +207,10 @@ impl CommandRegistry {
                 action_name: "workspace::OpenSettings",
             },
             CommandEntry {
+                label_key: "cmd.open_settings_json",
+                action_name: "workspace::OpenSettingsJson",
+            },
+            CommandEntry {
                 label_key: "cmd.open_recent",
                 action_name: "workspace::OpenRecent",
             },

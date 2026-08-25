@@ -628,6 +628,7 @@ impl Workspace {
                             && std::env::var_os("NECODER_SCREENSHOT").is_some())),
                 settings_view,
                 pending_settings_command: None,
+                pending_open_settings_json: false,
                 confetti: std::env::var_os("NECODER_CONFETTI").is_some(),
                 agent_width: AGENT_DOCK_WIDTH,
                 resizing_agent: false,
@@ -823,7 +824,16 @@ impl Workspace {
             }
         }
         // 設定が変わったら全エディタへ実効値を配り直す + 再描画（font_size/tab_size/soft_wrap の live 反映）。
+        // theme も追従する（settings.json 手編集・CLI・別窓のどれでも ~1.2s poll で波及。チップ/
+        // セレクタ経由は apply_theme 済みで名前が一致するため no-op＝多重適用しない）。
         cx.observe_global::<settings::SettingsGlobal>(|workspace, cx| {
+            let name = settings::get(cx).theme;
+            if workspace.theme.name.as_ref() != name {
+                let theme = theme_core::resolve(&name, workspace.themes_dir().as_deref());
+                if theme.name != workspace.theme.name {
+                    workspace.apply_theme(theme, cx);
+                }
+            }
             workspace.apply_editor_settings(cx);
             cx.notify();
         })

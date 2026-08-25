@@ -125,6 +125,8 @@ actions!(
         ReportBug,
         // 設定画面を開く（⌘, / メニュー「設定…」・M13 メニューバー）。
         OpenSettings,
+        // user settings.json をエディタタブで開く（設定画面のボタン / パレット。真実のファイルへの直行便）。
+        OpenSettingsJson,
         // 最近使った項目を開く…（ランチャー起動。Enter=レール / ⌘⏎=新窓・M13 メニューバー）。
         OpenRecent,
         // 開く…（ネイティブのフォルダ選択ダイアログ・M13 メニューバー）。
@@ -918,6 +920,8 @@ struct ChromeState {
     rollup_ticker: bool,
     settings_view: Entity<settings::SettingsView>,
     pending_settings_command: Option<String>,
+    /// 設定画面の「settings.json を開く」。subscription は Window を持たないため effect cycle 末尾で処理。
+    pending_open_settings_json: bool,
     confetti: bool,
     agent_width: f32,
     resizing_agent: bool,
@@ -1274,6 +1278,7 @@ impl Workspace {
     /// effect cycle の末尾へまとめて送る。これにより root Render は状態変更や I/O を行わない。
     fn has_pending_shell_effects(&self) -> bool {
         self.chrome.pending_settings_command.is_some()
+            || self.chrome.pending_open_settings_json
             || self.pending_transient_tab.is_some()
             || self.pending_open_history
             || self.overlays.pending_project_switch.is_some()
@@ -1285,6 +1290,10 @@ impl Workspace {
     fn process_pending_shell_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(command) = self.chrome.pending_settings_command.take() {
             self.open_command_terminal(&command, window, cx);
+        }
+        if self.chrome.pending_open_settings_json {
+            self.chrome.pending_open_settings_json = false;
+            self.open_user_settings_json(window, cx);
         }
         if let Some((title, buffer)) = self.pending_transient_tab.take() {
             self.open_transient_tab(title, buffer, window, cx);
@@ -1366,6 +1375,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_command_palette))
             .on_action(cx.listener(Self::report_bug_action))
             .on_action(cx.listener(Self::open_settings_action))
+            .on_action(cx.listener(Self::open_settings_json_action))
             .on_action(cx.listener(Self::about_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))

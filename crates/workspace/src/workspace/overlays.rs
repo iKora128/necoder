@@ -487,13 +487,8 @@ impl Workspace {
         let name = theme.name.to_string();
         self.apply_theme(theme, cx);
         self.overlays.theme_before_preview = None;
-        if let Some(path) = settings_core::user_settings_path() {
-            if let Err(error) =
-                settings_core::persist_user_value(&path, "theme", serde_json::Value::String(name))
-            {
-                eprintln!("テーマの保存に失敗: {error:#}");
-            }
-        }
+        // set_user_value = 永続化 + global 即時 reload（設定画面のテーマチップも同じ描画で追従する）。
+        settings::set_user_value(cx, "theme", serde_json::Value::String(name));
     }
 
     pub(crate) fn open_picker(

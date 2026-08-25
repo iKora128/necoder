@@ -162,6 +162,7 @@ cmd:
   thread_history: "AI: Thread history"
   report_bug: "Help: Report a Bug"
   open_settings: "View: Open Settings"
+  open_settings_json: "Preferences: Open settings.json"
   open_recent: "File: Open Recent…"
   open_dialog: "File: Open Folder…"
 herd:
@@ -386,7 +387,13 @@ settings:
   pref_tabs_view: Thread tabs
   tabs_view_bar: Bar
   tabs_view_list: List
-  theme_hint: "Theme: %{name} (⌘⇧T to change)"
+  appearance_heading: Appearance
+  appearance_sub: Themes apply the moment you click and are saved to settings.json.
+  theme_label: Theme
+  theme_sub: Also available via the ⌘K ⌘T selector
+  open_json: Open settings.json
+  open_json_sub: The single source of truth; saved edits propagate everywhere within ~1s
+  open_json_button: Open
 explorer:
   main_worktree_undeletable: The main worktree cannot be deleted (use Remove from rail instead)
   up_folder: Up one folder

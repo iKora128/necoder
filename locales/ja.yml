@@ -163,6 +163,7 @@ cmd:
   thread_history: "AI: スレッド履歴"
   report_bug: "ヘルプ: バグを報告"
   open_settings: "表示: 設定を開く"
+  open_settings_json: "設定: settings.json を開く"
   open_recent: "ファイル: 最近使った項目を開く…"
   open_dialog: "ファイル: フォルダを開く…"
 herd:
@@ -387,7 +388,13 @@ settings:
   pref_tabs_view: スレッドタブの表示
   tabs_view_bar: 横タブ
   tabs_view_list: 縦リスト
-  theme_hint: "テーマ: %{name}（⌘⇧T で変更）"
+  appearance_heading: 外観
+  appearance_sub: テーマは押した瞬間に適用され、settings.json に保存されます。
+  theme_label: テーマ
+  theme_sub: ⌘K ⌘T のセレクタでも切り替えられます
+  open_json: settings.json を開く
+  open_json_sub: すべての設定の真実。保存すると約1秒で全体へ反映されます
+  open_json_button: 開く
 explorer:
   main_worktree_undeletable: メインの作業ツリーは削除できません（レールから外すを使ってください）
   up_folder: 上のフォルダへ

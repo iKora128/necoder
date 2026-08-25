@@ -159,6 +159,15 @@ fn mtime(path: Option<&Path>) -> Option<SystemTime> {
 pub enum SettingsViewEvent {
     RunCommand(String),
     OnboardingCompleted,
+    /// テーマ選択（外観セクション）。適用は全ビューへの波及が要るので shell（apply_theme）が担う。
+    SelectTheme(theme_core::ThemeSource),
+    /// user settings.json をエディタタブで開く（Window が要るので shell へ上げる）。
+    OpenSettingsJson,
+}
+
+/// テーマ保存ディレクトリ（user settings.json と同じ設定フォルダの `themes/`）。
+fn themes_dir() -> Option<PathBuf> {
+    Some(user_settings_path()?.parent()?.join("themes"))
 }
 
 /// 設定ホーム。設定値の保存は自身で行い、Window/Terminal が必要な操作だけ shell へ上げる。
@@ -169,6 +178,9 @@ pub struct SettingsView {
     auth_states: Vec<acp_client::AgentAuthState>,
     checking_agents: bool,
     availability_generation: u64,
+    /// 外観セクションに並べるテーマ一覧（組み込み + 同梱 + ユーザー JSON）。
+    /// 描画毎の fs 走査を避けてキャッシュし、設定を開き直すたび [`Self::refresh_availability`] で更新。
+    themes: Vec<(SharedString, theme_core::ThemeSource)>,
 }
 
 impl SettingsView {
@@ -180,6 +192,7 @@ impl SettingsView {
             auth_states: vec![acp_client::AgentAuthState::SignedOut; acp_client::AGENTS.len()],
             checking_agents: true,
             availability_generation: 0,
+            themes: theme_core::available_themes(themes_dir().as_deref()),
         };
         view.refresh_availability(cx);
         view
@@ -191,7 +204,9 @@ impl SettingsView {
     }
 
     /// vendor CLI の導入・認証確認は Render から分離し、最新世代だけを反映する。
+    /// テーマ一覧もここで読み直す（設定を開くたび＝`themes/` に JSON を足した直後も反映される）。
     pub fn refresh_availability(&mut self, cx: &mut Context<Self>) {
+        self.themes = theme_core::available_themes(themes_dir().as_deref());
         self.availability_generation = self.availability_generation.wrapping_add(1);
         self.checking_agents = true;
         let generation = self.availability_generation;
@@ -472,6 +487,96 @@ impl SettingsView {
         self.pref_row(label, None, segments.into_any_element())
     }
 
+    /// 「外観」セクション。テーマをチップの列で並べ、クリックで即適用 + settings.json へ保存する。
+    /// 適用（全ビューへの波及）は shell の apply_theme が要るので [`SettingsViewEvent::SelectTheme`] で上げる。
+    fn appearance_section(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let current = settings.theme.as_str();
+        let mut chips = div().flex().flex_wrap().gap(px(4.));
+        for (index, (display, source)) in self.themes.iter().enumerate() {
+            // settings.json には組み込みなら id（necoder-dark 等）、同梱/ユーザーなら表示名が入る。
+            // resolve はどちらでも引けるので、選択中判定も両方に一致させる。
+            let selected = current == display.as_ref()
+                || matches!(source, theme_core::ThemeSource::BuiltIn(id) if current == *id);
+            let source = source.clone();
+            chips = chips.child(
+                div()
+                    .id(("theme-chip", index))
+                    .px(px(9.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(11.5))
+                    .when(selected, |element| {
+                        element.bg(accent.alpha(0.16)).text_color(accent)
+                    })
+                    .when(!selected, |element| {
+                        element
+                            .text_color(theme.fg2)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    })
+                    .child(display.clone())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _window, cx| {
+                            cx.emit(SettingsViewEvent::SelectTheme(source.clone()))
+                        }),
+                    ),
+            );
+        }
+        let open_json = div()
+            .id("open-settings-json")
+            .px(px(8.))
+            .py(px(3.))
+            .rounded(px(5.))
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(11.))
+            .text_color(theme.fg1)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+            .child(SharedString::from(i18n::t!("settings.open_json_button")))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _window, cx| cx.emit(SettingsViewEvent::OpenSettingsJson)),
+            )
+            .into_any_element();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg1)
+                            .child(SharedString::from(i18n::t!("settings.appearance_heading"))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(i18n::t!("settings.appearance_sub"))),
+                    ),
+            )
+            .child(self.pref_row(
+                i18n::t!("settings.theme_label"),
+                Some(i18n::t!("settings.theme_sub")),
+                chips.into_any_element(),
+            ))
+            .child(self.pref_row(
+                i18n::t!("settings.open_json"),
+                Some(i18n::t!("settings.open_json_sub")),
+                open_json,
+            ))
+    }
+
     /// 「動作とエディタ」セクション（真実は settings.json・ここは操作面）。
     fn preferences_section(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
         let theme = self.theme.clone();
@@ -576,15 +681,6 @@ impl SettingsView {
                 &settings.agent_tabs_view,
                 cx,
             ))
-            .child(
-                div()
-                    .px(px(2.))
-                    .text_size(px(11.))
-                    .text_color(theme.fg2)
-                    .child(SharedString::from(
-                        i18n::t!("settings.theme_hint", "name" => settings.theme.clone()),
-                    )),
-            )
     }
 }
 
@@ -797,7 +893,9 @@ impl Render for SettingsView {
             )
             .child(rows)
             .when(!onboarding, |element| {
-                element.child(self.preferences_section(&settings, cx))
+                element
+                    .child(self.appearance_section(&settings, cx))
+                    .child(self.preferences_section(&settings, cx))
             })
             .when(onboarding, |element| {
                 element.child(

@@ -43,6 +43,20 @@ impl Workspace {
                 self.chrome.show_settings = false;
                 self.celebrate_confetti(cx);
             }
+            settings::SettingsViewEvent::SelectTheme(source) => match Theme::load(source) {
+                Ok(theme) => {
+                    let name = theme.name.to_string();
+                    self.apply_theme(theme, cx);
+                    // set_user_value = 永続化 + global 即時 reload（チップの選択中表示も同じ描画で更新）。
+                    settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+                }
+                Err(error) => eprintln!("テーマを読めない: {error:#}"),
+            },
+            settings::SettingsViewEvent::OpenSettingsJson => {
+                // subscription は Window を持たないので effect cycle 末尾へ送る（pending shell effects）。
+                self.chrome.pending_open_settings_json = true;
+                cx.notify();
+            }
         }
     }
 
@@ -1676,6 +1690,48 @@ impl Workspace {
             .settings_view
             .update(cx, |view, cx| view.refresh_availability(cx));
         cx.notify();
+    }
+
+    /// コマンドパレット「設定: settings.json を開く」。
+    pub(crate) fn open_settings_json_action(
+        &mut self,
+        _: &OpenSettingsJson,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_user_settings_json(window, cx);
+    }
+
+    /// user の settings.json をエディタタブで開く（「真実のファイル」への最短経路）。
+    /// 無ければ空の JSON を作ってから開く。保存の反映は settings の poll 監視（~1.2s）が担うので、
+    /// 手で書き換えて ⌘S するだけで全ビューへ波及する。
+    pub(crate) fn open_user_settings_json(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = settings_core::user_settings_path() else {
+            eprintln!("settings.json の場所を解決できない");
+            return;
+        };
+        if !path.exists() {
+            let created = path
+                .parent()
+                .map(std::fs::create_dir_all)
+                .unwrap_or(Ok(()))
+                .and_then(|_| std::fs::write(&path, "{}\n"));
+            if let Err(error) = created {
+                eprintln!("settings.json を作れない: {error:#}");
+                return;
+            }
+        }
+        // open_file はアクティブプロジェクトの host 経由で読む。SSH プロジェクトがアクティブだと
+        // リモート側の同パスを読み書きしてしまうため、ローカルのときだけ開く。
+        if self
+            .active_slot()
+            .map(|slot| slot.remote_host.is_some())
+            .unwrap_or(true)
+        {
+            eprintln!("リモートプロジェクトがアクティブなため settings.json タブを開けない（ローカルのプロジェクトで開き直してください）");
+            return;
+        }
+        self.open_file(path, window, cx);
     }
 
     /// メニュー「necoder について」。バージョン表記のトースト（About パネルの最小版）。
