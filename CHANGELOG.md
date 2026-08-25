@@ -5,6 +5,29 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-25
+
+### Fixed
+- **配布物が起動しなかった致命的な不具合を修正**（v0.1.0 / v0.1.1 の `.dmg` と `.zip` が該当）。
+  マスコット画像の読み込みが `env!("CARGO_MANIFEST_DIR")` を**実行時のパス**として開いていたため、
+  **ビルドした機械以外では起動直後に panic** していた:
+
+  ```text
+  mascot asset D:\a\necoder\necoder\crates\agent_panel/assets/mascot\idle.png:
+  指定されたパスが見つかりません。 (os error 3)
+  ```
+
+  （`D:\a\necoder\necoder` は GitHub Actions ランナーのパス）
+  フォント・アイコンと同じく `include_bytes!` でバイナリに埋め込むよう修正した。
+  **v0.1.0 / v0.1.1 は使えません。本版へ更新してください。**
+
+### Added
+- 上記の再発を機械で止める回帰テスト（`crates/necoder/tests/no_runtime_manifest_paths.rs`）。
+  ビルド時のパスを実行時に開いている箇所を全 crate から検出する。**このバグは開発機では
+  原理的に再現しない**（そのパスが手元には実在するため）ので、人間の目では防げない
+- `release.yml` の Windows ジョブで VCRUNTIME 依存の検証が実際に動くようになった
+  （`Program Files` 側の VS を見ておらず、これまで一度も検証していなかった）
+
 ## [0.1.1] - 2026-08-24
 
 ### Added

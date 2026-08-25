@@ -6909,16 +6909,43 @@ struct MascotAtlases {
     worry: Arc<RenderImage>,
 }
 
+/// マスコットの PNG を **バイナリに埋め込む**（`assets/mascot/` から）。
+///
+/// **実行時にディスクから読んではいけない。** 2026-08-25 まで、ここは
+/// `env!("CARGO_MANIFEST_DIR")` を**実行時のパス**として `image::open` に渡していた。
+/// これは**ビルド機のパスを焼き込むだけ**なので、配布物は他人の PC で必ず panic する:
+///
+/// ```text
+/// panicked at crates\agent_panel\src\agent_panel.rs:6946:
+/// mascot asset D:\a\necoder\necoder\crates\agent_panel/assets/mascot\idle.png:
+/// 指定されたパスが見つかりません。 (os error 3)
+/// ```
+///
+/// `D:\a\necoder\necoder` は GitHub Actions ランナーのパス。**v0.1.0 / v0.1.1 の
+/// `.dmg` と `.zip` が実際にこれで起動しなかった**（zip をダウンロードして実機で確認）。
+/// 開発機ではそのパスが実在するので**手元では絶対に気づけない**種類のバグ。
+/// フォント（`necoder/src/main.rs` の `load_fonts`）とアイコン（同 `Assets`）は
+/// 最初から `include_bytes!` で埋め込んでいたので、マスコットだけが取り残されていた。
+macro_rules! mascot_bytes {
+    ($name:literal) => {
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mascot/", $name)).as_slice()
+    };
+}
+
 impl MascotAtlases {
     fn load() -> Self {
         Self {
-            idle: load_mascot_atlas("idle.png", 1),
-            doze: load_mascot_atlas("doze-strip.png", 15),
-            typing: load_mascot_atlas("typing-strip.png", 15),
-            think: load_mascot_atlas("think-strip.png", 15),
-            celebrate: load_mascot_atlas("celebrate-strip.png", 15),
-            plead: load_mascot_atlas("plead-strip.png", 15),
-            worry: load_mascot_atlas("worry-strip.png", 15),
+            idle: load_mascot_atlas("idle.png", mascot_bytes!("idle.png"), 1),
+            doze: load_mascot_atlas("doze-strip.png", mascot_bytes!("doze-strip.png"), 15),
+            typing: load_mascot_atlas("typing-strip.png", mascot_bytes!("typing-strip.png"), 15),
+            think: load_mascot_atlas("think-strip.png", mascot_bytes!("think-strip.png"), 15),
+            celebrate: load_mascot_atlas(
+                "celebrate-strip.png",
+                mascot_bytes!("celebrate-strip.png"),
+                15,
+            ),
+            plead: load_mascot_atlas("plead-strip.png", mascot_bytes!("plead-strip.png"), 15),
+            worry: load_mascot_atlas("worry-strip.png", mascot_bytes!("worry-strip.png"), 15),
         }
     }
 
@@ -6940,10 +6967,14 @@ fn mascot_atlases() -> &'static MascotAtlases {
     ATLASES.get_or_init(MascotAtlases::load)
 }
 
-fn load_mascot_atlas(file: &str, frame_count: usize) -> Arc<RenderImage> {
-    let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mascot")).join(file);
-    let mut source = image::open(&path)
-        .unwrap_or_else(|error| panic!("mascot asset {}: {error}", path.display()))
+/// 埋め込んだ PNG（`mascot_bytes!`）をフレーム列へ展開する。
+///
+/// `name` は診断用の表示名だけに使う（**パスとして解決しない**）。ここで panic するのは
+/// 「リポジトリに入れた PNG が壊れている」＝ビルド時に確定するプログラミングエラーのときだけで、
+/// **実行環境には依存しない**（以前は「ファイルが無い」で落ちていたので環境依存だった）。
+fn load_mascot_atlas(name: &str, bytes: &'static [u8], frame_count: usize) -> Arc<RenderImage> {
+    let mut source = image::load_from_memory(bytes)
+        .unwrap_or_else(|error| panic!("mascot asset {name}: {error}"))
         .into_rgba8();
     // GPUI の RenderImage は BGRA バイト順を期待するため、image が返す RGBA を入れ替える
     // （怠ると R と B が反転して暖色マスコットが青く写る）。参考: gpui elements/img.rs
