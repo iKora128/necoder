@@ -303,188 +303,13 @@ impl StyledTextEntityCache {
     const CAPACITY: usize = 512;
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StreamingTextKind {
-    Agent,
-    Thinking,
-}
-
-/// タイプライタ本文だけの invalidation 境界。40ms時計が通知するのはこの Entity だけで、
-/// AgentPanel のタブ・meta・過去 transcript・composer は再構築しない。
-struct StreamingTextView {
-    key: Option<SharedString>,
-    text: SharedString,
-    kind: StreamingTextKind,
-    reveal: usize,
-    active: bool,
-    ticker: bool,
-    last_rendered_at: Option<std::time::Instant>,
-    theme: Theme,
-    scroll: ListState,
-    markdown_cache: Rc<RefCell<MarkdownBlockCache>>,
-    syntax_cache: Rc<RefCell<SyntaxHighlightCache>>,
-}
-
-impl StreamingTextView {
-    fn new(
-        theme: Theme,
-        scroll: ListState,
-        markdown_cache: Rc<RefCell<MarkdownBlockCache>>,
-        syntax_cache: Rc<RefCell<SyntaxHighlightCache>>,
-    ) -> Self {
-        Self {
-            key: None,
-            text: SharedString::default(),
-            kind: StreamingTextKind::Agent,
-            reveal: usize::MAX,
-            active: true,
-            ticker: false,
-            last_rendered_at: None,
-            theme,
-            scroll,
-            markdown_cache,
-            syntax_cache,
-        }
-    }
-
-    fn set_content(
-        &mut self,
-        key: SharedString,
-        text: SharedString,
-        kind: StreamingTextKind,
-        active: bool,
-        reset: bool,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) {
-        let new_stream = self.key.as_ref() != Some(&key) || self.kind != kind;
-        let target = text.chars().count();
-        let needs_restart = active && !self.ticker && self.reveal < target;
-        let changed = new_stream
-            || self.text != text
-            || self.active != active
-            || self.theme != theme
-            || reset
-            || needs_restart;
-        self.key = Some(key);
-        self.text = text;
-        self.kind = kind;
-        self.theme = theme;
-        self.active = active;
-        if !active {
-            self.reveal = target;
-        } else if reset {
-            self.reveal = 0;
-        } else if new_stream {
-            // 既に長い本文へタブを切り替えた時は打ち直さず、最初の小チャンクだけ0から始める。
-            self.reveal = if target <= 256 { 0 } else { target };
-        } else {
-            self.reveal = self.reveal.min(target);
-        }
-        if changed {
-            cx.notify();
-        }
-    }
-
-    fn ensure_ticker(&mut self, cx: &mut Context<Self>) {
-        if self.ticker || !self.active || self.reveal >= self.text.chars().count() {
-            return;
-        }
-        self.ticker = true;
-        cx.spawn(async move |body, cx| {
-            loop {
-                let done = body
-                    .update(cx, |body, cx| {
-                        let visible = body.active
-                            && body.last_rendered_at.is_some_and(|at| {
-                                at.elapsed() < std::time::Duration::from_millis(750)
-                            });
-                        if !visible {
-                            body.reveal = body.text.chars().count();
-                            return true;
-                        }
-                        let target = body.text.chars().count();
-                        if body.reveal < target {
-                            let remaining = target - body.reveal;
-                            // タイプライタは「今書いている」感の演出であって遅延源にはしない。初速を
-                            // 上げ、末尾でも 16 文字/40ms（＝400 字/秒）で送る＝ ACP の到着に UI が
-                            // 遅れない（旧: /6・最低 2 で末尾が 50 字/秒まで落ち「遅く感じる」原因だった）。
-                            let step = (remaining / 3).max(16);
-                            body.reveal = body.reveal.saturating_add(step).min(target);
-                            if body.scroll.is_scrolled_to_end().unwrap_or(true) {
-                                body.scroll.scroll_to_end();
-                            }
-                            cx.notify();
-                        }
-                        body.reveal >= target
-                    })
-                    .unwrap_or(true);
-                if done {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(40))
-                    .await;
-            }
-            body.update(cx, |body, cx| {
-                body.ticker = false;
-                if body.active && body.reveal < body.text.chars().count() {
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn visible_text(&self) -> SharedString {
-        let target = self.text.chars().count();
-        if self.reveal >= target {
-            self.text.clone()
-        } else {
-            self.text
-                .chars()
-                .take(self.reveal)
-                .collect::<String>()
-                .into()
-        }
-    }
-}
-
-impl Render for StreamingTextView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // タイプライタは装飾なので reduce motion では到着済み本文を即時表示する。
-        self.active = self.active && window.is_window_active() && !cx.reduce_motion();
-        if !self.active {
-            self.reveal = self.text.chars().count();
-        }
-        self.last_rendered_at = Some(std::time::Instant::now());
-        if self.active {
-            self.ensure_ticker(cx);
-        }
-        let text = self.visible_text();
-        match self.kind {
-            StreamingTextKind::Thinking => div()
-                .text_size(px(11.5))
-                .italic()
-                .text_color(self.theme.fg2)
-                .child(text)
-                .into_any_element(),
-            StreamingTextKind::Agent => div()
-                .flex()
-                .flex_col()
-                .min_w_0()
-                .gap(px(6.))
-                .text_size(px(12.5))
-                .text_color(self.theme.fg0)
-                .children(render_streaming_markdown(
-                    text.as_ref(),
-                    &self.theme,
-                    &self.markdown_cache,
-                    &self.syntax_cache,
-                ))
-                .into_any_element(),
-        }
+/// 生成中の本文で「今ここまで打った」接頭辞（先頭 `reveal` 文字）。全部見えていれば元の
+/// `SharedString` をそのまま返し（clone だけで再確保しない）、途中なら char 単位で切る。
+fn revealed_prefix(text: &SharedString, reveal: usize) -> SharedString {
+    if reveal >= text.chars().count() {
+        text.clone()
+    } else {
+        text.chars().take(reveal).collect::<String>().into()
     }
 }
 
@@ -528,212 +353,6 @@ fn snap_highlights_to_char_boundaries(
             let start = ceil_char_boundary(text, range.start.min(len));
             let end = floor_char_boundary(text, range.end.min(len));
             (start < end).then_some((start..end, style))
-        })
-        .collect()
-}
-
-fn streaming_styled_text(
-    text: String,
-    highlights: Vec<(Range<usize>, HighlightStyle)>,
-) -> gpui::AnyElement {
-    // markdown のインライン装飾は重なる/未ソートになりうる（`***太字***` は Strong と Emphasis を
-    // 同一レンジで二重に、`**`code`**` は Strong が Code を内包）。snap は端点を文字境界へ丸めるだけで
-    // 重なりは解消しないため、run 長の合計が本文を超え gpui の layout_line が split_at で abort する。
-    // 確定経路（CachedStyledTextView::render）と同じく、まず combine_highlights で非重複・昇順の run へ
-    // 畳んでから snap する（重なった装飾は .highlight() でマージされ視覚的にも正しい）。
-    let highlights = gpui::combine_highlights(highlights, std::iter::empty()).collect::<Vec<_>>();
-    let highlights = snap_highlights_to_char_boundaries(&text, highlights);
-    let mut styled = StyledText::new(SharedString::from(text));
-    if !highlights.is_empty() {
-        styled = styled.with_highlights(highlights);
-    }
-    styled.into_any_element()
-}
-
-fn streaming_md_highlights(
-    theme: &Theme,
-    spans: &[markdown::Span],
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    spans
-        .iter()
-        .map(|span| {
-            let style = match span.kind {
-                markdown::SpanKind::Strong => HighlightStyle {
-                    font_weight: Some(FontWeight::BOLD),
-                    ..Default::default()
-                },
-                markdown::SpanKind::Emphasis => HighlightStyle {
-                    font_style: Some(gpui::FontStyle::Italic),
-                    ..Default::default()
-                },
-                markdown::SpanKind::Strikethrough => HighlightStyle {
-                    strikethrough: Some(gpui::StrikethroughStyle {
-                        thickness: px(1.),
-                        color: Some(theme.fg2),
-                    }),
-                    ..Default::default()
-                },
-                markdown::SpanKind::Code => HighlightStyle {
-                    color: Some(theme.syntax.macro_),
-                    background_color: Some(theme.bg3),
-                    ..Default::default()
-                },
-                markdown::SpanKind::Link => HighlightStyle {
-                    color: Some(theme.syntax.function),
-                    underline: Some(gpui::UnderlineStyle {
-                        thickness: px(1.),
-                        color: Some(theme.syntax.function),
-                        wavy: false,
-                    }),
-                    ..Default::default()
-                },
-            };
-            (span.range.clone(), style)
-        })
-        .collect()
-}
-
-fn streaming_syntax_highlights(
-    theme: &Theme,
-    cache: &Rc<RefCell<SyntaxHighlightCache>>,
-    language: Option<lang::LanguageId>,
-    text: &str,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    let Some(language) = language else {
-        return Vec::new();
-    };
-    cache
-        .borrow_mut()
-        .highlight(language, text)
-        .into_iter()
-        .map(|span| {
-            let color = match span.kind {
-                lang::HighlightKind::Keyword | lang::HighlightKind::Heading => theme.syntax.keyword,
-                lang::HighlightKind::Function | lang::HighlightKind::Link => theme.syntax.function,
-                lang::HighlightKind::Type | lang::HighlightKind::Strong => theme.syntax.type_,
-                lang::HighlightKind::String | lang::HighlightKind::Code => theme.syntax.string,
-                lang::HighlightKind::Number => theme.syntax.number,
-                lang::HighlightKind::Comment => theme.syntax.comment,
-                lang::HighlightKind::Macro | lang::HighlightKind::Emphasis => theme.syntax.macro_,
-                lang::HighlightKind::Punctuation => theme.syntax.punctuation,
-            };
-            (
-                span.range,
-                HighlightStyle {
-                    color: Some(color),
-                    ..Default::default()
-                },
-            )
-        })
-        .collect()
-}
-
-fn render_streaming_markdown(
-    text: &str,
-    theme: &Theme,
-    markdown_cache: &Rc<RefCell<MarkdownBlockCache>>,
-    syntax_cache: &Rc<RefCell<SyntaxHighlightCache>>,
-) -> Vec<gpui::AnyElement> {
-    let blocks = markdown_cache.borrow_mut().parse(text);
-    blocks
-        .iter()
-        .cloned()
-        .map(|block| match block {
-            markdown::Block::Heading { level, text, spans } => {
-                let size = match level {
-                    1 => 16.0,
-                    2 => 14.5,
-                    3 => 13.5,
-                    _ => 12.5,
-                };
-                div()
-                    .pt(px(2.))
-                    .text_size(px(size))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.fg0)
-                    .child(streaming_styled_text(
-                        text,
-                        streaming_md_highlights(theme, &spans),
-                    ))
-                    .into_any_element()
-            }
-            markdown::Block::Paragraph { text, spans } => div()
-                .child(streaming_styled_text(
-                    text,
-                    streaming_md_highlights(theme, &spans),
-                ))
-                .into_any_element(),
-            markdown::Block::Code { lang, text } => {
-                let language = lang.as_deref().and_then(lang::LanguageId::from_name);
-                // 実行中の最新出力（入力欄の直上）が長いコードで画面を専有しないよう、先頭数行に丸める。
-                // トグルは持たない（完了後は render_markdown 側の折り畳みへ引き継がれる）。
-                let total_lines = text.lines().count();
-                let truncated = total_lines > CODE_COLLAPSE_MIN_LINES;
-                let shown_text = if truncated {
-                    text.lines()
-                        .take(CODE_COLLAPSE_HEAD_LINES)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else {
-                    text
-                };
-                let highlights =
-                    streaming_syntax_highlights(theme, syntax_cache, language, &shown_text);
-                let mut card = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .rounded(px(6.))
-                    .bg(theme.bg2)
-                    .border_1()
-                    .border_color(theme.border)
-                    .px(px(9.))
-                    .py(px(7.))
-                    .font_family("Guguru Sans Code")
-                    .text_size(px(11.5))
-                    .text_color(theme.fg0)
-                    .child(streaming_styled_text(shown_text, highlights));
-                if truncated {
-                    card = card.child(
-                        div()
-                            .pt(px(1.))
-                            .text_size(px(11.))
-                            .text_color(theme.fg2)
-                            .child(SharedString::from(
-                                i18n::t!("agent.code_streaming_more", "n" => total_lines),
-                            )),
-                    );
-                }
-                card.into_any_element()
-            }
-            markdown::Block::ListItem {
-                depth,
-                marker,
-                text,
-                spans,
-            } => {
-                let bullet: SharedString = match marker {
-                    markdown::ListMarker::Bullet => "•".into(),
-                    markdown::ListMarker::Ordered(number) => format!("{number}.").into(),
-                    markdown::ListMarker::Task(true) => "☑".into(),
-                    markdown::ListMarker::Task(false) => "☐".into(),
-                };
-                div()
-                    .flex()
-                    .gap(px(7.))
-                    .pl(px(2.0 + depth as f32 * 16.0))
-                    .child(div().flex_none().text_color(theme.fg2).child(bullet))
-                    .child(div().flex_1().min_w_0().child(streaming_styled_text(
-                        text,
-                        streaming_md_highlights(theme, &spans),
-                    )))
-                    .into_any_element()
-            }
-            markdown::Block::Rule => div()
-                .my(px(2.))
-                .h(px(1.))
-                .bg(theme.border)
-                .into_any_element(),
         })
         .collect()
 }
@@ -1446,8 +1065,16 @@ pub struct AgentPanel {
     /// 主点字スピナー。10fps時計と invalidation を親 AgentPanel から分離する。
     composer_spinner: Entity<BrailleSpinnerView>,
     transcript_spinner: Entity<BrailleSpinnerView>,
-    /// 実行中の末尾本文。25fpsのタイプライタ通知を親 transcript から分離する。
-    streaming_text: Entity<StreamingTextView>,
+    /// 実行中の末尾本文で「今ここまで打った」文字数（タイプライタ演出）。Zed の Markdown.selection と
+    /// 同じく、生成中の本文も通常の選択可能パス（`push_selectable`）で描き、この reveal で表示末尾だけ
+    /// 伸ばす。別ビューを持たないので生成中も過去本文と同じ選択機構に載る（2026-08-26 一本化）。
+    live_reveal: usize,
+    /// 現在タイプ中のストリームの同一性（thread.id + entry index + kind）。変わったら reveal を仕切り直す。
+    live_key: Option<SharedString>,
+    /// タイプライタの 40ms 時計が稼働中か（多重起動防止）。追いついたら false に戻る。
+    live_ticker: bool,
+    /// 実行中の末尾本文が最後に描画された時刻。非表示になったら reveal を即完了させる（打ち切り）。
+    live_rendered_at: Option<std::time::Instant>,
     /// タブ改名中の (対象 index, 入力欄)。ダブルクリックで開く・IME 正しい EditorView::plain（#4）。
     renaming: Option<(usize, Entity<EditorView>)>,
     /// transcript のスクロール（M13 UX: ホイールで遡れる。ストリーミング中は底に居る時だけ追従）。
@@ -1686,13 +1313,6 @@ impl AgentPanel {
         let syntax_cache = Rc::new(RefCell::new(SyntaxHighlightCache::default()));
         let markdown_cache = Rc::new(RefCell::new(MarkdownBlockCache::default()));
         let styled_text_cache = Rc::new(RefCell::new(StyledTextEntityCache::default()));
-        let streaming_text = {
-            let theme = theme.clone();
-            let scroll = transcript_list.clone();
-            let markdown_cache = markdown_cache.clone();
-            let syntax_cache = syntax_cache.clone();
-            cx.new(move |_cx| StreamingTextView::new(theme, scroll, markdown_cache, syntax_cache))
-        };
         AgentPanel {
             threads,
             storage: None,
@@ -1708,7 +1328,10 @@ impl AgentPanel {
             mascot,
             composer_spinner,
             transcript_spinner,
-            streaming_text,
+            live_reveal: 0,
+            live_key: None,
+            live_ticker: false,
+            live_rendered_at: None,
             renaming: None,
             transcript_list,
             transcript_focus: cx.focus_handle(),
@@ -3881,7 +3504,9 @@ impl AgentPanel {
     fn on_event(&mut self, thread_index: usize, event: AgentEvent, cx: &mut Context<Self>) {
         let active = self.active;
         let panel_visibly_active = self.is_visibly_active();
-        let animate_visible_stream = thread_index == active && panel_visibly_active;
+        // reduce motion では reveal を仕切り直さず即全開示（reset で 0 に落として一瞬空にしない）。
+        let animate_visible_stream =
+            thread_index == active && panel_visibly_active && !cx.reduce_motion();
         let mut start_token_ticker = false;
         let mut celebrate_now = false;
         let mut ensure_reveal = false; // アクティブが Agent/Thinking をストリーム → タイプライタ稼働
@@ -4321,7 +3946,7 @@ impl AgentPanel {
             self.start_celebrate(cx);
         }
         if stream_updated && thread_index == active {
-            self.sync_streaming_text(reveal_reset, ensure_reveal, cx);
+            self.sync_live_reveal(reveal_reset, ensure_reveal, cx);
             if ensure_reveal {
                 self.follow_transcript_if_at_bottom();
             }
@@ -4339,30 +3964,113 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn sync_streaming_text(&self, reset: bool, animate: bool, cx: &mut Context<Self>) {
-        let Some(thread) = self.threads.get(self.active) else {
-            return;
-        };
-        let Some((text, kind)) = thread.entries.last().and_then(|entry| match entry {
-            Entry::Agent(text) => Some((text.clone(), StreamingTextKind::Agent)),
-            Entry::Thinking(text) => Some((text.clone(), StreamingTextKind::Thinking)),
-            _ => None,
-        }) else {
-            return;
-        };
-        let kind_tag = match kind {
-            StreamingTextKind::Agent => "agent",
-            StreamingTextKind::Thinking => "thinking",
+    /// 実行中の末尾が Agent/Thinking なら (表示文字数, ストリーム同一鍵) を返す。鍵は
+    /// thread.id + entry index + kind で、変わったら別ストリーム＝タイプライタを仕切り直す。
+    fn live_stream_target(&self) -> Option<(usize, SharedString)> {
+        let thread = self.threads.get(self.active)?;
+        if !thread.running {
+            return None;
+        }
+        let (text, kind_tag) = match thread.entries.last()? {
+            Entry::Agent(text) => (text, "agent"),
+            Entry::Thinking(text) => (text, "thinking"),
+            _ => return None,
         };
         let key = SharedString::from(format!(
             "{}:{}:{kind_tag}",
             thread.id,
-            thread.entries.len().saturating_sub(1)
+            thread.entries.len() - 1
         ));
-        let theme = self.theme.clone();
-        self.streaming_text.update(cx, |body, cx| {
-            body.set_content(key, text, kind, animate, reset, theme, cx);
-        });
+        Some((text.chars().count(), key))
+    }
+
+    /// タイプライタの reveal（今どこまで打ったか）を現在の末尾本文へ同期する。別ビューを廃し
+    /// 生成中も `push_selectable` の選択可能パスで描くため、パネル側は表示末尾だけを持つ
+    /// （旧 sync_streaming_text の後継・2026-08-26 一本化）。`animate=false` は即全開示。
+    fn sync_live_reveal(&mut self, reset: bool, animate: bool, cx: &mut Context<Self>) {
+        let Some((target, key)) = self.live_stream_target() else {
+            self.live_key = None;
+            return;
+        };
+        let new_stream = self.live_key.as_ref() != Some(&key);
+        self.live_key = Some(key);
+        if !animate {
+            self.live_reveal = target;
+        } else if reset {
+            self.live_reveal = 0;
+        } else if new_stream {
+            // 既に長い本文へタブを切り替えた時は打ち直さず、短い新エントリだけ先頭から打つ。
+            self.live_reveal = if target <= 256 { 0 } else { target };
+        } else {
+            self.live_reveal = self.live_reveal.min(target);
+        }
+        if animate {
+            self.ensure_live_ticker(cx);
+        }
+    }
+
+    /// タイプライタの 40ms 時計。reveal を末尾へ寄せ、パネルへ notify する。旧 StreamingTextView の
+    /// 別クロックと違い通知先はパネル本体なので、生成中の本文も過去本文と同じ選択機構に載る。
+    /// 多重起動しない・追いついたら止まる・パネルが非表示になったら即全開示して止まる。
+    fn ensure_live_ticker(&mut self, cx: &mut Context<Self>) {
+        if self.live_ticker {
+            return;
+        }
+        let Some((target, _)) = self.live_stream_target() else {
+            return;
+        };
+        if self.live_reveal >= target {
+            return;
+        }
+        self.live_ticker = true;
+        cx.spawn(async move |panel, cx| {
+            loop {
+                let done = panel
+                    .update(cx, |panel, cx| {
+                        let Some((target, _)) = panel.live_stream_target() else {
+                            return true;
+                        };
+                        // パネルが最近描画されていない（タブ切替/非表示）なら演出を打ち切り即全開示。
+                        let visible = panel.window_active
+                            && panel.live_rendered_at.is_some_and(|at| {
+                                at.elapsed() < std::time::Duration::from_millis(750)
+                            });
+                        if !visible {
+                            panel.live_reveal = target;
+                            return true;
+                        }
+                        if panel.live_reveal < target {
+                            let remaining = target - panel.live_reveal;
+                            // 初速を上げ末尾でも 16 文字/40ms（＝400 字/秒）＝ ACP の到着に UI が遅れない。
+                            let step = (remaining / 3).max(16);
+                            panel.live_reveal =
+                                panel.live_reveal.saturating_add(step).min(target);
+                            panel.follow_transcript_if_at_bottom();
+                            cx.notify();
+                        }
+                        panel.live_reveal >= target
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(40))
+                    .await;
+            }
+            panel
+                .update(cx, |panel, cx| {
+                    panel.live_ticker = false;
+                    // 停止と最後のチャンク到着が競っていたら打ち直しをかける。
+                    if let Some((target, _)) = panel.live_stream_target() {
+                        if panel.live_reveal < target {
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+        })
+        .detach();
     }
 
     fn ensure_second_ticker(&mut self, cx: &mut Context<Self>) {
@@ -5616,7 +5324,10 @@ impl AgentPanel {
     fn render_transcript(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         if self.active_thread_running() {
-            self.sync_streaming_text(false, self.window_active, cx);
+            // 生成中の本文が今フレーム描かれる＝タイプライタを進め、描画時刻を記録する
+            // （非表示になったら ticker がこの時刻の古さを見て即全開示する）。
+            self.sync_live_reveal(false, self.window_active && !cx.reduce_motion(), cx);
+            self.live_rendered_at = Some(std::time::Instant::now());
         }
         // 可変高 ListState は可視範囲だけ request_layout/prepaint/paint する。件数の差分だけ splice し、
         // 既に測った過去 Entry の高さとスクロール位置は保持する。
@@ -5882,11 +5593,13 @@ impl AgentPanel {
                     .pl(px(11.))
                     .child(header);
                 if expanded {
-                    let body = if live {
-                        self.streaming_text.clone().into_any_element()
+                    // 生成中も完了後も同じ選択可能パス。生成中は reveal 分の接頭辞だけ見せる。
+                    let shown = if live {
+                        revealed_prefix(text, self.live_reveal)
                     } else {
-                        self.push_selectable(text.clone(), Vec::new(), cx)
+                        text.clone()
                     };
+                    let body = self.push_selectable(shown, Vec::new(), cx);
                     column = column.child(
                         div()
                             .text_size(px(11.5))
@@ -6117,18 +5830,24 @@ impl AgentPanel {
                     .child(body)
                     .into_any_element()
             }
-            // 実行中だけ本文 Entity を差し込み、その25fps時計では親 transcript を触らない。
-            // 完了後は通常の選択可能 Markdown 表示へ戻る。
-            Entry::Agent(text) if live_stream => self.streaming_text.clone().into_any_element(),
-            Entry::Agent(text) => div()
-                .flex()
-                .flex_col()
-                .min_w_0()
-                .gap(px(6.))
-                .text_size(px(12.5))
-                .text_color(theme.fg0)
-                .children(self.render_markdown(index, text, cx))
-                .into_any_element(),
+            // 生成中も完了後も同じ選択可能 Markdown パス（Zed の Markdown.selection 相当の一本化・
+            // 2026-08-26）。生成中は reveal 分の接頭辞だけ描き、タイプライタの演出を出す。
+            Entry::Agent(text) => {
+                let shown = if live_stream {
+                    revealed_prefix(text, self.live_reveal)
+                } else {
+                    text.clone()
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .gap(px(6.))
+                    .text_size(px(12.5))
+                    .text_color(theme.fg0)
+                    .children(self.render_markdown(index, shown.as_ref(), cx))
+                    .into_any_element()
+            }
         }
     }
 
@@ -8431,8 +8150,8 @@ mod tests {
     fn streaming_overlapping_markdown_spans_stay_within_text() {
         // 再発クラッシュ: ストリーミング中の nested markdown（`***太字***` は Strong と Emphasis を
         // 同一レンジで二重に、`**`code`**` は Strong が Code を内包）は run が重なり、snap だけでは
-        // 合計 run 長が本文を超えて gpui の layout_line が split_at で abort する。streaming_styled_text
-        // と同じ combine→snap を通せば、run は非重複・昇順・文字境界に乗り、合計 ≤ 本文長に収まること。
+        // 合計 run 長が本文を超えて gpui の layout_line が split_at で abort する。描画前に
+        // combine→snap を通せば、run は非重複・昇順・文字境界に乗り、合計 ≤ 本文長に収まること。
         let text = "太字コード";
         let style = HighlightStyle {
             font_weight: Some(FontWeight::BOLD),
@@ -8656,6 +8375,54 @@ mod tests {
         assert_eq!(
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some(expected)
+        );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 回帰: **生成中**の末尾本文も過去本文と同じ選択可能パス（push_selectable）に載り、
+    /// ドラッグ選択 → ⌘C でコピーできる（旧: 生成中は別ビュー StreamingTextView で選択不可・
+    /// 2026-08-26 一本化）。長文（>256 文字）にして reveal を即全開示させ、タイプライタ時計の
+    /// 非決定性を避ける（新ストリームは 256 文字超なら打ち直さず全表示・reduce/非アクティブでも全表示）。
+    #[gpui::test]
+    fn live_streaming_text_is_selectable(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "live_select");
+        let live_text = "あ".repeat(300); // 単一段落・300 文字（>256 で即全開示）
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            let mut panel = AgentPanel::new(Theme::dark(), cx);
+            if let Some(thread) = panel.threads.get_mut(panel.active) {
+                thread.running = true; // 生成中を模擬
+                thread.entries.push(Entry::Agent(live_text.clone().into()));
+            }
+            panel
+        });
+        let copied = panel.update(cx, |panel, _cx| {
+            assert!(panel.live_reveal >= 300, "長い新ストリームは即全開示される");
+            let regions = panel.transcript_regions.borrow();
+            let live = regions.last().expect("生成中の本文が選択可能リージョンに載る");
+            assert_eq!(
+                live.text.as_ref(),
+                live_text,
+                "生成中の本文が丸ごと 1 リージョンとして選択可能"
+            );
+            let end = live.text.len();
+            let last_region = regions.len() - 1;
+            drop(regions);
+            panel.transcript_selection = Some(TranscriptSelection {
+                start: TranscriptPoint {
+                    region: 0,
+                    offset: 0,
+                },
+                end: TranscriptPoint {
+                    region: last_region,
+                    offset: end,
+                },
+                selecting: false,
+            });
+            panel.transcript_selected_text()
+        });
+        assert!(
+            copied.is_some_and(|text| text.contains(&live_text)),
+            "生成中の本文が選択テキストに含まれる（= ⌘C でコピーできる）"
         );
         let _ = std::fs::remove_file(settings_path);
     }

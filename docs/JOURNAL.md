@@ -2089,3 +2089,33 @@
   （実描画が無いと ~1.2s 周期がドリフト。実窓では起きない）
 - 残: テーマチップのクリック経路（SelectTheme イベント）は実窓での対話確認が人の手番（オフスク
   リーンではクリックできない。同経路の set_default_agent は既存実績あり）
+
+## 2026-08-26 — 生成中テキストの選択を Zed 方式で一本化
+- やったこと（`crates/agent_panel/src/agent_panel.rs`・net -233 行）:
+  - **二重描画パスの廃止**: 生成中の末尾本文だけ別ビュー `StreamingTextView`（40ms 別クロック・
+    `push_selectable` を通らない＝選択領域に載らない）で描いていたのを撤去。生成中も完了後も
+    **同じ選択可能パス**（`render_markdown` / `push_selectable`）で描く（Zed の `Markdown.selection`
+    相当の一本化）。これで「生成中はドラッグ選択/⌘C できない」不具合が根治
+  - 削除: `StreamingTextView`（struct+impl+Render）・`StreamingTextKind`・`render_streaming_markdown`・
+    `streaming_styled_text`・`streaming_md_highlights`・`streaming_syntax_highlights`・
+    `sync_streaming_text`・`streaming_text` フィールド（重複していた md/syntax ハイライタも消え、
+    パネル本体の `md_highlights`/`syntax_highlights` に一本化）
+  - 追加: パネルに `live_reveal`（今どこまで打ったか）・`live_key`（ストリーム同一性）・
+    `live_ticker`・`live_rendered_at`。`sync_live_reveal` + `ensure_live_ticker`（40ms 時計は
+    **パネル本体へ notify**）+ `live_stream_target` + `revealed_prefix`。タイプライタは reveal 分の
+    接頭辞だけ描く演出として残し、演出ロジック（初速↑・末尾 400字/秒・非表示で即全開示・
+    reduce motion/非アクティブで即全開示）は旧 `set_content`/`ensure_ticker` から移植
+  - 回帰テスト `live_streaming_text_is_selectable`: **running な Agent エントリ**が実描画パスで
+    選択可能リージョンに載り `transcript_selected_text`（⌘C の元）で取れることを検証（旧コードでは
+    リージョン未登録で必ず落ちる＝バグを直接踏むテスト）
+- 学び/罠:
+  - 一本化の代償は「タイプライタ 40ms 毎にパネル再描画」。旧設計はこれを避けて別 Entity に隔離して
+    いた。ただし `ListState` は**可視項目だけ** layout/paint し `remeasure_items(last..)` で伸びる
+    生成中項目だけ測り直すので再構築は有界。syntax/markdown も従来ストリームパスが毎tick再解析して
+    いたので新規コストではない。実測: 起動 ~231ms（run2-3 は ~205ms）・idle は別 Entity が 1 個
+    減って軽くなる方向＝性能予算（Zed 比 80%）内
+  - reveal の仕切り直しは新ストリーム時のみ。256 文字超の新ストリーム（タブ切替で既存長文へ）は
+    打ち直さず全表示。reduce motion/非アクティブは `animate=false` で即全開示（`on_event` 側も
+    `!cx.reduce_motion()` を畳んで reset で一瞬空にしない）
+- 次: 実機 ACP で「生成中に前の発言へまたいでドラッグ選択 → ⌘C」を対話確認（人の手番。ヘッドレス
+  ではストリームを流せない）。長い応答での 40ms 再描画の入力レイテンシを実機計測
