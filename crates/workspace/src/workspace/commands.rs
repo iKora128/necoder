@@ -218,6 +218,10 @@ impl CommandRegistry {
                 label_key: "cmd.open_dialog",
                 action_name: "workspace::OpenDialog",
             },
+            CommandEntry {
+                label_key: "cmd.shortcut_sheet",
+                action_name: "workspace::ShortcutSheet",
+            },
         ]
     }
 

@@ -656,6 +656,7 @@ impl Workspace {
                 ssh_connecting: false,
                 add_project_dialog_open: false,
                 pending_project_switch: None,
+                shortcut_sheet: None,
             },
             notifications: NotificationCenter {
                 toasts: Vec::new(),

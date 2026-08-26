@@ -59,6 +59,7 @@ mod overlays;
 mod rail;
 mod rail_view;
 mod remote_ssh;
+mod shortcut_sheet;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
@@ -121,6 +122,8 @@ actions!(
         ControlNext,
         // ⌘⇧P コマンドパレット（M13）。
         CommandPalette,
+        // ⌘K⌘S キーボードショートカット一覧（既定 keymap から自動生成・参照専用オーバーレイ）。
+        ShortcutSheet,
         // バグ報告（GitHub new issue を環境情報つきで開く・M13 公開準備）。
         ReportBug,
         // 設定画面を開く（⌘, / メニュー「設定…」・M13 メニューバー）。
@@ -950,6 +953,8 @@ struct WorkspaceOverlays {
     ssh_connecting: bool,
     add_project_dialog_open: bool,
     pending_project_switch: Option<usize>,
+    /// キーボードショートカット一覧オーバーレイ。`Some(focus)`＝開いている（Escape 受けに focus を持つ）。
+    shortcut_sheet: Option<FocusHandle>,
 }
 
 struct NotificationCenter {
@@ -1373,6 +1378,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_control_center))
             .on_action(cx.listener(Self::control_next))
             .on_action(cx.listener(Self::open_command_palette))
+            .on_action(cx.listener(Self::open_shortcut_sheet))
             .on_action(cx.listener(Self::report_bug_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::open_settings_json_action))
@@ -1529,6 +1535,7 @@ impl Render for Workspace {
             .children(self.render_inline_edit(cx))
             .children(self.render_ssh_input(cx))
             .children(self.render_code_actions(cx))
+            .children(self.render_shortcut_sheet(cx))
             .children(self.render_hunk_menu(cx))
             .children(self.render_toasts(cx))
             .children(self.render_color_picker(cx))

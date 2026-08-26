@@ -170,6 +170,7 @@ cmd:
   open_settings_json: "設定: settings.json を開く"
   open_recent: "ファイル: 最近使った項目を開く…"
   open_dialog: "ファイル: フォルダを開く…"
+  shortcut_sheet: "ヘルプ: キーボードショートカット"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -624,3 +625,60 @@ search:
   next: 次のマッチ（Enter）
   close: 閉じる（Esc は開いた位置へ戻って閉じる）
   toggle_replace: 置換欄の表示切替（⌥⌘F）
+key:
+  sheet_title: キーボードショートカット
+  section_editor: エディタ
+  section_agent: AI チャット
+  section_control: 管制
+  section_global: グローバル
+  backspace: 前の文字を削除
+  delete: 次の文字を削除
+  newline: 改行
+  insert_newline: 改行を挿入
+  copy: コピー
+  cut: 切り取り
+  paste: 貼り付け
+  undo: 取り消し
+  redo: やり直し
+  delete_word_backward: 前の単語を削除
+  delete_line: 行を削除
+  duplicate_line_up: 行を上に複製
+  duplicate_line_down: 行を下に複製
+  move_line_up: 行を上へ移動
+  move_line_down: 行を下へ移動
+  toggle_comment: コメントの切替
+  tab_indent: インデント（Tab）
+  indent: インデント
+  outdent: アウトデント
+  toggle_soft_wrap: 折り返しの切替
+  toggle_rendered_markdown: Markdown プレビューの切替
+  move_left: 左へ移動
+  move_right: 右へ移動
+  move_up: 上へ移動
+  move_down: 下へ移動
+  move_word_left: 単語単位で左へ
+  move_word_right: 単語単位で右へ
+  move_line_start: 行頭へ
+  move_line_end: 行末へ
+  move_to_start: 文書の先頭へ
+  move_to_end: 文書の末尾へ
+  select_all: すべて選択
+  select_left: 選択を左へ広げる
+  select_right: 選択を右へ広げる
+  select_up: 選択を上へ広げる
+  select_down: 選択を下へ広げる
+  select_word_left: 単語単位で選択（左）
+  select_word_right: 単語単位で選択（右）
+  select_next: 次の同じ語を選択
+  add_cursor_above: カーソルを上に追加
+  add_cursor_below: カーソルを下に追加
+  cancel: 選択解除・取消
+  submit_prompt: プロンプトを送信
+  close_active_thread: アクティブスレッドを閉じる
+  command_palette: コマンドパレット
+  control_next: "管制: 次の要対応へ"
+  minimize: ウィンドウを最小化
+  hide: necoder を隠す
+  hide_others: 他のアプリを隠す
+  activate_project: プロジェクトを切替（レール順）
+  quit: necoder を終了

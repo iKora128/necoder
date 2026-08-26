@@ -169,6 +169,7 @@ cmd:
   open_settings_json: "Preferences: Open settings.json"
   open_recent: "File: Open Recent…"
   open_dialog: "File: Open Folder…"
+  shortcut_sheet: "Help: Keyboard shortcuts"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -623,3 +624,60 @@ search:
   next: Next match (Enter)
   close: Close (Esc returns to where you started)
   toggle_replace: Toggle replace field (⌥⌘F)
+key:
+  sheet_title: Keyboard shortcuts
+  section_editor: Editor
+  section_agent: AI chat
+  section_control: Control
+  section_global: Global
+  backspace: Delete backward
+  delete: Delete forward
+  newline: New line
+  insert_newline: Insert new line
+  copy: Copy
+  cut: Cut
+  paste: Paste
+  undo: Undo
+  redo: Redo
+  delete_word_backward: Delete word backward
+  delete_line: Delete line
+  duplicate_line_up: Duplicate line up
+  duplicate_line_down: Duplicate line down
+  move_line_up: Move line up
+  move_line_down: Move line down
+  toggle_comment: Toggle comment
+  tab_indent: Indent (tab)
+  indent: Indent
+  outdent: Outdent
+  toggle_soft_wrap: Toggle soft wrap
+  toggle_rendered_markdown: Toggle Markdown preview
+  move_left: Move left
+  move_right: Move right
+  move_up: Move up
+  move_down: Move down
+  move_word_left: Move word left
+  move_word_right: Move word right
+  move_line_start: Line start
+  move_line_end: Line end
+  move_to_start: Document start
+  move_to_end: Document end
+  select_all: Select all
+  select_left: Extend selection left
+  select_right: Extend selection right
+  select_up: Extend selection up
+  select_down: Extend selection down
+  select_word_left: Extend selection by word left
+  select_word_right: Extend selection by word right
+  select_next: Select next occurrence
+  add_cursor_above: Add cursor above
+  add_cursor_below: Add cursor below
+  cancel: Cancel / clear selection
+  submit_prompt: Send prompt
+  close_active_thread: Close active thread
+  command_palette: Command palette
+  control_next: "Control: next item"
+  minimize: Minimize window
+  hide: Hide necoder
+  hide_others: Hide others
+  activate_project: Switch to project (rail order)
+  quit: Quit necoder

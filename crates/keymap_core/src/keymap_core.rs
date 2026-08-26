@@ -306,6 +306,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
     "bindings": {
       "cmd-p": "workspace::FileFinder",
       "cmd-shift-p": "workspace::CommandPalette",
+      "cmd-k cmd-s": "workspace::ShortcutSheet",
       "cmd-o": "workspace::ProjectSwitcher",
       "cmd-f": "workspace::BufferSearch",
       "cmd-alt-f": "workspace::BufferReplace",
