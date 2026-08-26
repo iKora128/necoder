@@ -80,8 +80,9 @@ impl Render for DraggedThreadTab {
 }
 const THREAD_TABS_HEIGHT: f32 = 34.0;
 /// composer 入力欄の高さ。上縁ハンドルのドラッグで [MIN, MAX] にリサイズできる。
-/// 既定は ~4 行（以前は固定 68px ＝ ~2 行で「狭すぎ・伸ばせない」痛点だった・2026-08-04）。
-const COMPOSER_INPUT_DEFAULT: f32 = 104.0;
+/// 既定は ~3 行（固定 68px ＝ ~2 行は「狭すぎ・伸ばせない」、104px ＝ ~4 行は
+/// 「若干広い」だった経緯・2026-08-26）。
+const COMPOSER_INPUT_DEFAULT: f32 = 86.0;
 const COMPOSER_INPUT_MIN: f32 = 46.0;
 const COMPOSER_INPUT_MAX: f32 = 420.0;
 /// composer のモデルセレクタに並べる候補（クリックでアクティブスレッドに設定）。
@@ -779,7 +780,7 @@ impl Thread {
     /// 保存しない（描画のたびに最新を合成＝「今なにをしているか」が常に生）。
     fn live_digest(&self) -> Option<SharedString> {
         let tool = self.entries.iter().rev().find_map(|entry| match entry {
-            Entry::Step { tool, .. } => Some(tool.clone()),
+            Entry::Step { tool, .. } => Some(flatten_digest_line(tool)),
             _ => None,
         });
         let step = self
@@ -805,6 +806,20 @@ impl Thread {
             .count() as u32;
         (done, total)
     }
+}
+
+/// digest 用の 1 行化: 複数行のツールタイトル（長いシェルコマンド等）は先頭行だけ残して
+/// 「…」を付け、1 行でも長すぎれば切り詰める。稼働中ライン・生成中行・編隊セル・窓上部
+/// ビーコンは全部この digest を表示するので、ここで畳めば縦に伸びない。
+fn flatten_digest_line(text: &str) -> SharedString {
+    const MAX_CHARS: usize = 100;
+    let trimmed = text.trim();
+    let first_line = trimmed.lines().next().unwrap_or("").trim_end();
+    let mut flat: String = first_line.chars().take(MAX_CHARS).collect();
+    if flat.len() < trimmed.len() {
+        flat.push_str(" …");
+    }
+    SharedString::from(flat)
 }
 
 /// 遷移スナップショットの末尾抽出（Tier 1・P1）: テキスト末尾の 1〜2 文を 1 行に畳む。
@@ -3777,7 +3792,7 @@ impl AgentPanel {
                     i18n::t!("agent.permission_files", "title" => title, "n" => diffs.len());
                 if !auto_allow {
                     // 遷移スナップショット（P1 素材①）: Blocked = 何の許可を待っているか。
-                    thread.digest = Some(SharedString::from(title.clone()));
+                    thread.digest = Some(flatten_digest_line(&title));
                     thread.pending_permission = Some(PendingPermission {
                         title: SharedString::from(title),
                         diffs,
@@ -8218,6 +8233,21 @@ mod tests {
         assert!(digest.starts_with('…'));
         assert!(digest.chars().count() <= 141);
         assert!(!digest_tail("一行目\nまだ続く").unwrap().contains('\n'));
+    }
+
+    #[test]
+    fn flatten_digest_line_folds_multiline_tool_titles() {
+        // 複数行のシェルコマンドは先頭行 + … に畳む（稼働中ラインが縦に伸びない保証）。
+        assert_eq!(
+            flatten_digest_line("cargo build \\\n  --release \\\n  -p necoder").as_ref(),
+            "cargo build \\ …"
+        );
+        // 1 行でも 100 字を超えたら … 付きで切り詰める（生成中行は truncate が無く折り返すため）。
+        let long = "x".repeat(200);
+        let flat = flatten_digest_line(&long);
+        assert_eq!(flat.chars().count(), 100 + " …".chars().count());
+        // 短い 1 行はそのまま。前後の空白は落とす。
+        assert_eq!(flatten_digest_line("  Bash(ls)  ").as_ref(), "Bash(ls)");
     }
 
     #[test]

@@ -2119,3 +2119,22 @@
     `!cx.reduce_motion()` を畳んで reset で一瞬空にしない）
 - 次: 実機 ACP で「生成中に前の発言へまたいでドラッグ選択 → ⌘C」を対話確認（人の手番。ヘッドレス
   ではストリームを流せない）。長い応答での 40ms 再描画の入力レイテンシを実機計測
+
+## 2026-08-26 — LP の OGP を Nyaco 万歳カードに + composer 既定高さ縮小 + 実行中 digest の 1 行化
+- OGP 画像を新設（`lp/assets/img/ogp.png`・1200x630）:
+  - 素材はアプリ内マスコットの万歳フレーム（`crates/agent_panel/assets/mascot/celebrate-strip.png`
+    の 15 フレーム中 index 8・両腕全開）。60x72 を **NEAREST で 6 倍**（ドット絵を滲ませない）
+  - 背景は LP の `hero.png`（実際のエディタ画面）を幅 1200 に縮小→縦中央 630 でクロップし、
+    `#101218` の 40% 暗幕を重ねてマスコットを立たせる（単色 bg1 案はボツ＝「実画面を入れたい」）
+  - `lp/index.html` / `lp/en/index.html` の `og:image` を `hero.png` → `ogp.png` に差し替え、
+    `og:image:width/height` を追加。URL が変わるのでスクレイパのキャッシュ問題も自然に回避
+  - 生成は PIL のワンショット（スクリプトは残していない。作り直す時は上記レシピで再生成）
+- composer 入力欄の既定高さ 104px（~4 行）→ **86px（~3 行）**（`COMPOSER_INPUT_DEFAULT`）。
+  「若干広い」とのフィードバック。ドラッグ可変・高さ未永続なので既定値が毎回効く
+- 実行中 digest の 1 行化（`flatten_digest_line`・agent_panel）: ACP のツールタイトル（Bash の
+  フルコマンド等）は**複数行・長文**になることがあり、composer 下の稼働中ライン等が縦に伸びていた。
+  `truncate()` は折り返しは防ぐが**テキスト内の改行はそのまま改行として描かれる**のが原因。
+  digest の合成元 `live_digest()`（稼働中ライン・transcript 生成中行・編隊セル・窓上部ビーコンが
+  全部ここを読む）と Blocked の許可 digest で先頭行 + 100 字に畳む。単体テスト追加
+- 罠: この環境は CLT のみで metal シェーダをコンパイルできず `cargo check` すら通らない
+  （gpui_apple の build.rs で停止・既知）。composer 変更は定数 1 個だが実機目視は metal のある環境で
