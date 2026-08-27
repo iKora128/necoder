@@ -41,15 +41,16 @@ impl Workspace {
                     let snapshot = workspace
                         .tabs
                         .iter()
-                        .map(|tab| {
-                            let view = tab.editor.read(cx);
+                        .filter_map(|tab| {
+                            // 画像タブは編集不能＝未保存になり得ないので対象外。
+                            let view = tab.editor()?.read(cx);
                             let dirty = view.buffer().is_dirty();
                             let text = if dirty {
                                 view.buffer().text()
                             } else {
                                 String::new()
                             };
-                            (tab.path.clone(), text, dirty)
+                            Some((tab.path.clone(), text, dirty))
                         })
                         .collect();
                     (scope, snapshot)
@@ -133,8 +134,12 @@ impl Workspace {
             if !self.tabs.iter().any(|tab| tab.path == path) {
                 self.open_file_sync(path.clone(), window, cx);
             }
-            if let Some(tab) = self.tabs.iter().find(|tab| tab.path == path) {
-                let editor = tab.editor.clone();
+            if let Some(editor) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.path == path)
+                .and_then(|tab| tab.editor().cloned())
+            {
                 editor.update(cx, |view, cx| view.replace_all_text(&content, cx));
             } else {
                 eprintln!("hot exit: 復元先を開けない（スキップ）: {}", path.display());

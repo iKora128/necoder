@@ -245,12 +245,12 @@ impl Workspace {
                         .agent_touched
                         .insert(file.clone(), *color);
                     // 開いていれば gutter をスレッド色に（生中継の帰属・M12-3）。
-                    if let Some(tab) = self.project_sessions.sessions[session_index]
+                    if let Some(editor) = self.project_sessions.sessions[session_index]
                         .tabs
                         .iter()
                         .find(|tab| &tab.path == file)
+                        .and_then(|tab| tab.editor().cloned())
                     {
-                        let editor = tab.editor.clone();
                         let color = *color;
                         editor.update(cx, |view, cx| view.set_agent_mark_color(Some(color), cx));
                     }

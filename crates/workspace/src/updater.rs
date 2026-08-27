@@ -287,7 +287,10 @@ mod tests {
         } else if cfg!(target_os = "windows") {
             assert_eq!(route, Some(UpdateRoute::ReleasePage));
         } else {
-            assert_eq!(route, None, "配布物の無い OS で更新チップを出してはいけない");
+            assert_eq!(
+                route, None,
+                "配布物の無い OS で更新チップを出してはいけない"
+            );
             assert!(check_for_update("0.0.1").is_none());
         }
     }

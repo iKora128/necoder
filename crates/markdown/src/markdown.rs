@@ -10,7 +10,8 @@
 //! 同じ「読んで自作 or permissive で代替」路線）。
 //!
 //! v1 で扱う範囲: 見出し / 段落 / 箇条書き・番号・タスクリスト（ネスト深さ保持）/ フェンスコード /
-//! 水平線 / インライン（**強調**・*斜体*・~~打消し~~・`コード`・リンク）。表・引用装飾・画像は後続。
+//! 水平線 / 画像（ブロック扱い） / インライン（**強調**・*斜体*・~~打消し~~・`コード`・リンク）。
+//! 表・引用装飾は後続。
 
 use std::ops::Range;
 
@@ -64,9 +65,17 @@ pub enum Block {
         spans: Vec<Span>,
     },
     Rule,
+    /// 画像。段落の途中に現れても**独立ブロックに切り出す**（v1。インライン描画は GPUI の
+    /// StyledText がテキスト以外を挟めないため）。`alt` は装飾を落とした素のテキスト。
+    /// パスの解決（相対→絶対・URL 判定）は描画側の責務。
+    Image {
+        source: String,
+        alt: String,
+    },
 }
 
 /// 現在組み立て中のリーフブロックの種別（`buffer` が何になるか）。
+#[derive(Clone, Copy)]
 enum Pending {
     Paragraph,
     Heading(u8),
@@ -99,6 +108,10 @@ pub fn parse(source: &str) -> Vec<Block> {
     let mut item_marker = ListMarker::Bullet;
     // コードブロック中の言語とテキスト（Some = コードブロック内）。
     let mut code: Option<(Option<String>, String)> = None;
+    // 画像の収集中（Some = `![alt](url)` の内側）。本文へのイベントを alt へ逸らす。
+    let mut image: Option<(String, String)> = None;
+    // 画像でブロックを分割した直後は、残り本文の先頭空白/改行を捨てる（` after` を `after` に）。
+    let mut strip_leading = false;
 
     // buffer を pending の種別で確定して blocks へ積む（空テキストは捨てる）。
     let flush = |blocks: &mut Vec<Block>,
@@ -217,30 +230,71 @@ pub fn parse(source: &str) -> Vec<Block> {
                     blocks.push(Block::Code { lang, text: body });
                 }
             }
-            Event::Start(Tag::Emphasis) => inline.push((SpanKind::Emphasis, text.len())),
-            Event::End(TagEnd::Emphasis) => {
+            // 画像の内側では alt の装飾は捨てる（image ガード）。開閉の byte 位置が本文の text を
+            // 指してしまい、範囲外 span（= layout_line abort）を作るため。
+            Event::Start(Tag::Emphasis) if image.is_none() => {
+                inline.push((SpanKind::Emphasis, text.len()))
+            }
+            Event::End(TagEnd::Emphasis) if image.is_none() => {
                 close_span(&mut inline, &mut spans, SpanKind::Emphasis, text.len())
             }
-            Event::Start(Tag::Strong) => inline.push((SpanKind::Strong, text.len())),
-            Event::End(TagEnd::Strong) => {
+            Event::Start(Tag::Strong) if image.is_none() => {
+                inline.push((SpanKind::Strong, text.len()))
+            }
+            Event::End(TagEnd::Strong) if image.is_none() => {
                 close_span(&mut inline, &mut spans, SpanKind::Strong, text.len())
             }
-            Event::Start(Tag::Strikethrough) => inline.push((SpanKind::Strikethrough, text.len())),
-            Event::End(TagEnd::Strikethrough) => {
+            Event::Start(Tag::Strikethrough) if image.is_none() => {
+                inline.push((SpanKind::Strikethrough, text.len()))
+            }
+            Event::End(TagEnd::Strikethrough) if image.is_none() => {
                 close_span(&mut inline, &mut spans, SpanKind::Strikethrough, text.len())
             }
-            Event::Start(Tag::Link { .. }) => inline.push((SpanKind::Link, text.len())),
-            Event::End(TagEnd::Link) => {
+            Event::Start(Tag::Link { .. }) if image.is_none() => {
+                inline.push((SpanKind::Link, text.len()))
+            }
+            Event::End(TagEnd::Link) if image.is_none() => {
                 close_span(&mut inline, &mut spans, SpanKind::Link, text.len())
             }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                image = Some((dest_url.to_string(), String::new()));
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some((source, alt)) = image.take() {
+                    // 段落/項目の途中でも画像は独立ブロックに切り出す（v1）。ここまでの本文を確定し、
+                    // 開いている装飾は残り本文の先頭 (=0) から掛け直す（旧 text への stale offset で
+                    // 範囲外 span を作らないため）。
+                    let restored = pending;
+                    flush(&mut blocks, &mut text, &mut spans, &mut pending);
+                    for (_, start) in &mut inline {
+                        *start = 0;
+                    }
+                    blocks.push(Block::Image {
+                        source,
+                        alt: alt.trim().to_string(),
+                    });
+                    pending = restored;
+                    strip_leading = true;
+                }
+            }
             Event::Text(chunk) => {
-                if let Some((_, body)) = &mut code {
+                if let Some((_, alt)) = &mut image {
+                    alt.push_str(&chunk);
+                } else if let Some((_, body)) = &mut code {
                     body.push_str(&chunk);
+                } else if strip_leading && text.is_empty() {
+                    text.push_str(chunk.trim_start());
+                    strip_leading = false;
                 } else {
                     text.push_str(&chunk);
+                    strip_leading = false;
                 }
             }
             Event::Code(chunk) => {
+                if let Some((_, alt)) = &mut image {
+                    alt.push_str(&chunk);
+                    continue;
+                }
                 // インラインコードは 1 イベント = そのまま範囲を Code スパンに。
                 let start = text.len();
                 text.push_str(&chunk);
@@ -250,9 +304,11 @@ pub fn parse(source: &str) -> Vec<Block> {
                 });
             }
             Event::SoftBreak | Event::HardBreak => {
-                if let Some((_, body)) = &mut code {
+                if let Some((_, alt)) = &mut image {
+                    alt.push(' ');
+                } else if let Some((_, body)) = &mut code {
                     body.push('\n');
-                } else {
+                } else if !(strip_leading && text.is_empty()) {
                     text.push('\n');
                 }
             }
@@ -309,7 +365,7 @@ mod tests {
                 Block::Heading { text, spans, .. }
                 | Block::Paragraph { text, spans }
                 | Block::ListItem { text, spans, .. } => (text.as_str(), spans),
-                Block::Code { .. } | Block::Rule => continue,
+                Block::Code { .. } | Block::Rule | Block::Image { .. } => continue,
             };
             for span in spans {
                 assert!(
@@ -444,6 +500,100 @@ mod tests {
                 lang: Some("rust".into()),
                 text: "let x = 1;".into()
             }]
+        );
+    }
+
+    #[test]
+    fn image_becomes_block() {
+        let blocks = parse("![ねこ](images/cat.png)");
+        assert_eq!(
+            blocks,
+            vec![Block::Image {
+                source: "images/cat.png".into(),
+                alt: "ねこ".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn inline_image_splits_paragraph() {
+        let blocks = parse("before ![alt](x.png) after");
+        assert_eq!(
+            blocks,
+            vec![
+                Block::Paragraph {
+                    text: "before".into(),
+                    spans: vec![]
+                },
+                Block::Image {
+                    source: "x.png".into(),
+                    alt: "alt".into()
+                },
+                Block::Paragraph {
+                    text: "after".into(),
+                    spans: vec![]
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn open_span_across_image_stays_in_bounds() {
+        // 画像で段落を分割した後、開いたままの装飾が残り本文の先頭から掛け直されること
+        // （stale offset だと範囲外 span → layout_line abort）。
+        assert_spans_valid("**bold ![a](x.png) tail**");
+        let blocks = parse("**bold ![a](x.png) tail**");
+        assert_eq!(
+            blocks,
+            vec![
+                Block::Paragraph {
+                    text: "bold".into(),
+                    spans: vec![],
+                },
+                Block::Image {
+                    source: "x.png".into(),
+                    alt: "a".into()
+                },
+                Block::Paragraph {
+                    text: "tail".into(),
+                    spans: vec![Span {
+                        range: 0..4,
+                        kind: SpanKind::Strong
+                    }],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn image_alt_drops_formatting() {
+        let blocks = parse("![**強調** と `code`](y.png)");
+        assert_eq!(
+            blocks,
+            vec![Block::Image {
+                source: "y.png".into(),
+                alt: "強調 と code".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn image_inside_list_item_keeps_marker() {
+        let blocks = parse("- item ![a](x.png)");
+        assert_eq!(
+            blocks,
+            vec![
+                Block::ListItem {
+                    depth: 0,
+                    marker: ListMarker::Bullet,
+                    text: "item".into(),
+                    spans: vec![]
+                },
+                Block::Image {
+                    source: "x.png".into(),
+                    alt: "a".into()
+                },
+            ]
         );
     }
 

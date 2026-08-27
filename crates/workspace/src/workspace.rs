@@ -51,6 +51,8 @@ mod dev_probes;
 mod explorer_controller;
 mod explorer_view;
 mod fleet_view;
+mod image_view;
+pub(crate) use image_view::ImageView;
 mod git_controller;
 mod git_view;
 mod herd_view;
@@ -241,19 +243,68 @@ pub(crate) enum Dock {
     Bottom,
 }
 
-/// ペインに載る 1 タブ（M10 複数タブ）。当面は具体型（エディタ）だけ・多態化は必要時に育てる
-/// （ARCHITECTURE §3 の Pane/Item 初版）。`path` はタブの同一判定と永続化のキー。
+/// タブの中身（ARCHITECTURE §3 の Pane/Item 多態化。具体型 2 つ: エディタ / 画像）。
+/// enum で足す方式 — trait 化は第3の Item が要求したときに再検討する。
+pub(crate) enum TabContent {
+    Editor {
+        editor: Entity<EditorView>,
+        /// このタブのバッファ変更監視（再描画 + LSP didChange）。タブごとに持つ。
+        _observation: Subscription,
+        /// 確定入力の購読（補完の自動トリガ・M10）。
+        _input_subscription: Subscription,
+        /// hover dwell の購読（LSP hover・M10）。
+        _hover_subscription: Subscription,
+    },
+    /// 画像タブ（FEATURES §2 の画像プレビュー）。編集・保存・LSP・hot exit の対象外。
+    Image(Entity<ImageView>),
+}
+
+/// ペインに載る 1 タブ（M10 複数タブ）。`path` はタブの同一判定と永続化のキー。
 pub(crate) struct EditorTab {
     path: PathBuf,
-    editor: Entity<EditorView>,
+    content: TabContent,
     /// 一時タブ（diff タブ等・M11-9）。永続化・⌘⇧T 復元・LSP から除外する。
     transient: bool,
-    /// このタブのバッファ変更監視（再描画 + LSP didChange）。タブごとに持つ。
-    _observation: Subscription,
-    /// 確定入力の購読（補完の自動トリガ・M10）。
-    _input_subscription: Subscription,
-    /// hover dwell の購読（LSP hover・M10）。
-    _hover_subscription: Subscription,
+}
+
+impl EditorTab {
+    /// エディタタブなら [`EditorView`]（画像タブは None）。編集/LSP/保存系の呼び出し側は
+    /// この Option で自然に画像タブを素通りする。
+    pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
+        match &self.content {
+            TabContent::Editor { editor, .. } => Some(editor),
+            TabContent::Image(_) => None,
+        }
+    }
+
+    /// タブ切替・タブを閉じた後のフォーカス移譲先。
+    pub(crate) fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match &self.content {
+            TabContent::Editor { editor, .. } => editor.read(cx).focus_handle(cx),
+            TabContent::Image(view) => view.read(cx).focus_handle(cx),
+        }
+    }
+
+    /// 未保存変更ドット（画像タブは常に false）。
+    pub(crate) fn is_dirty(&self, cx: &App) -> bool {
+        self.editor()
+            .map(|editor| editor.read(cx).buffer().is_dirty())
+            .unwrap_or(false)
+    }
+
+    /// ペイン本体の要素（主ペイン / 編隊の Editor 面で共用）。
+    pub(crate) fn content_element(&self) -> gpui::AnyElement {
+        match &self.content {
+            TabContent::Editor { editor, .. } => editor
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+            TabContent::Image(view) => view
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+        }
+    }
 }
 
 /// ドラッグ中のエディタタブ（Chrome 風並べ替えのゴースト。`agent_panel` の DraggedThreadTab と同型）。

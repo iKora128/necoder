@@ -108,8 +108,40 @@ impl Workspace {
                 .iter()
                 .find(|tab| &tab.path == path)
             {
-                let editor = tab.editor.clone();
-                editor.update(cx, |view, cx| view.handle_external_change(cx));
+                match &tab.content {
+                    TabContent::Editor { editor, .. } => {
+                        let editor = editor.clone();
+                        editor.update(cx, |view, cx| view.handle_external_change(cx));
+                    }
+                    // 画像はディスクの新内容を背景で読み直して差し替える
+                    // （スクショの再生成等・エディタの自動リロードと同じ「外は正」方針）。
+                    TabContent::Image(view) => {
+                        let view = view.clone();
+                        let host = worktree.host().clone();
+                        let image_path = path.clone();
+                        cx.spawn(async move |_workspace, cx| {
+                            let content = cx
+                                .background_executor()
+                                .spawn({
+                                    let image_path = image_path.clone();
+                                    async move { host.read_file(&image_path) }
+                                })
+                                .await;
+                            match content {
+                                Ok(content) => {
+                                    // Err = タブが閉じられ view が消えた後に読み終えた（無害）。
+                                    let _ = view.update(cx, |view, cx| {
+                                        view.set_bytes(&image_path, content.bytes, cx)
+                                    });
+                                }
+                                Err(error) => {
+                                    eprintln!("画像を再読み込みできない: {error:#}")
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                }
                 git_changed = true;
                 continue;
             }
@@ -129,7 +161,7 @@ impl Workspace {
             if let Some(editor) = session
                 .tabs
                 .get(session.active_tab)
-                .map(|tab| tab.editor.clone())
+                .and_then(|tab| tab.editor().cloned())
             {
                 editor.update(cx, |view, cx| view.refresh_diff(cx));
             }
@@ -159,7 +191,7 @@ impl Workspace {
                 session
                     .tabs
                     .iter()
-                    .map(|tab| tab.editor.clone())
+                    .filter_map(|tab| tab.editor().cloned())
                     .chain(session.split_editor.clone())
             })
             .collect();

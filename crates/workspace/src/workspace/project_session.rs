@@ -785,8 +785,10 @@ impl Workspace {
                         dmg_url: String::new(),
                     }
                 };
-                workspace.updater.status =
-                    Some((updater::UpdateInfo { version, action }, UpdateState::Available));
+                workspace.updater.status = Some((
+                    updater::UpdateInfo { version, action },
+                    UpdateState::Available,
+                ));
             }
         }
         // ローカル永続化 DB（hot exit・M10）。NECODER_DB でパス上書き（検証用）。開けなくても起動は続行。
@@ -880,9 +882,12 @@ impl Workspace {
             .get(self.project_sessions.active)
     }
 
-    /// 現在アクティブなタブのエディタ（無ければ `None`）。従来 `self.editor` を読んでいた箇所の置換。
+    /// 現在アクティブなタブのエディタ（無い・画像タブなら `None`）。編集/検索/LSP 系の入口は
+    /// すべてここを通るので、画像タブでは各機能が自然に no-op になる。
     pub(crate) fn active_editor(&self) -> Option<Entity<EditorView>> {
-        self.tabs.get(self.active_tab).map(|tab| tab.editor.clone())
+        self.tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.editor().cloned())
     }
 
     /// アクティブタブのファイルパス。
@@ -934,11 +939,13 @@ impl Workspace {
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
         self.tabs.push(EditorTab {
             path: title_path,
-            editor,
+            content: TabContent::Editor {
+                editor,
+                _observation: observation,
+                _input_subscription: input_subscription,
+                _hover_subscription: hover_subscription,
+            },
             transient: true,
-            _observation: observation,
-            _input_subscription: input_subscription,
-            _hover_subscription: hover_subscription,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -1032,8 +1039,7 @@ impl Workspace {
                     // 一覧の先頭 = メイン作業ツリー。それ以外に自分が居れば linked。
                     let linked = {
                         let worktrees = project::git_worktrees_on(host.as_ref(), &root);
-                        let canonical =
-                            paths::canonicalize(&root).unwrap_or_else(|_| root.clone());
+                        let canonical = paths::canonicalize(&root).unwrap_or_else(|_| root.clone());
                         worktrees
                             .iter()
                             .skip(1)

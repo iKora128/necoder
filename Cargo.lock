@@ -8723,6 +8723,7 @@ dependencies = [
  "gpui",
  "host",
  "i18n",
+ "image",
  "keymap_core",
  "lang",
  "libc",

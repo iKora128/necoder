@@ -116,7 +116,7 @@ impl Workspace {
             let editors: Vec<Entity<EditorView>> = self
                 .tabs
                 .iter()
-                .map(|tab| tab.editor.clone())
+                .filter_map(|tab| tab.editor().cloned())
                 .chain(self.split_editor.clone())
                 .collect();
             for editor in editors {

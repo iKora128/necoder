@@ -5,6 +5,7 @@ app:
   name: necoder
 editor:
   empty_hint: Pass a file path as an argument to open it (e.g. necoder README.md)
+  blame_uncommitted: Uncommitted
 common:
   untitled: Untitled
 finder:
@@ -469,6 +470,12 @@ tabs:
   untitled: Untitled
   close_tip: Close  ⌘W
   close_split_tip: Close split  ⌘\\
+image:
+  load_failed: Unable to display image
+breadcrumb:
+  md_preview: Preview
+  md_source: Source
+  md_preview_tip: Toggle rendered preview  ⌘⇧V
 terminal:
   tab_title: Terminal %{n}
   add_tip: New terminal

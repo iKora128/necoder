@@ -499,6 +499,11 @@ impl EditorView {
         }
     }
 
+    /// 整形プレビュー中か（クローム側のトグルボタンが状態表示に読む）。
+    pub fn rendered_markdown(&self) -> bool {
+        self.rendered_markdown
+    }
+
     /// 整形プレビューの on/off（トグルハンドラ / offscreen probe から）。非 md での ON は無視。
     /// ON では EditorElement を描かない＝点滅の paint 側管理（should_blink）が走らないので、
     /// ここで点滅タスクを明示停止して idle 再描画を止める（点滅停止＝idle CPU 予算を守る）。
@@ -1720,6 +1725,7 @@ impl Render for EditorView {
                     &self.theme,
                     self.font_size,
                     &self.markdown_scroll,
+                    self.buffer.path().and_then(|path| path.parent()),
                 ))
                 .into_any_element();
         }
