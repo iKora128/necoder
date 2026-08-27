@@ -770,18 +770,23 @@ impl Workspace {
         }
         workspace.start_watcher(cx); // アクティブプロジェクトのファイル監視（M10 watch 基盤）
         workspace.loaded = true;
-        workspace.schedule_update_check(cx); // 自動アップデートの確認（M13・90s 後に背景で）
+        workspace.schedule_update_check(cx); // 自動アップデートの確認（M13・10s 後に背景で）
         workspace.check_crash_notice(cx); // 前回クラッシュの通知（M13・pending マーカーを 1 回だけ消費）
                                           // 開発用: NECODER_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
         if let Ok(version) = std::env::var("NECODER_UPDATE_PROBE") {
             if !version.is_empty() {
-                workspace.updater.status = Some((
-                    updater::UpdateInfo {
-                        version,
+                // 経路も実 OS に合わせる（Windows 実機で「クリック → ブラウザ」まで確認できるように）。
+                let action = if cfg!(target_os = "windows") {
+                    updater::UpdateAction::OpenReleasePage {
+                        html_url: "https://github.com/iKora128/necoder/releases/latest".to_string(),
+                    }
+                } else {
+                    updater::UpdateAction::InstallDmg {
                         dmg_url: String::new(),
-                    },
-                    UpdateState::Available,
-                ));
+                    }
+                };
+                workspace.updater.status =
+                    Some((updater::UpdateInfo { version, action }, UpdateState::Available));
             }
         }
         // ローカル永続化 DB（hot exit・M10）。NECODER_DB でパス上書き（検証用）。開けなくても起動は続行。

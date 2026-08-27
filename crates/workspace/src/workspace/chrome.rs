@@ -1601,7 +1601,16 @@ impl Workspace {
             .when_some(self.updater.status.clone(), |element, (info, state)| {
                 let (label, clickable) = match state {
                     UpdateState::Available => (
-                        i18n::t!("update.available", "version" => info.version.clone()),
+                        match &info.action {
+                            updater::UpdateAction::InstallDmg { .. } => {
+                                i18n::t!("update.available", "version" => info.version.clone())
+                            }
+                            // Windows（当面）: クリックで Release ページを開くだけなので、
+                            // 「更新」と言い切らず「入手」にする（WINDOWS-PORT §W6）。
+                            updater::UpdateAction::OpenReleasePage { .. } => {
+                                i18n::t!("update.get", "version" => info.version.clone())
+                            }
+                        },
                         true,
                     ),
                     UpdateState::Installing => (i18n::t!("update.installing"), false),
@@ -1659,8 +1668,10 @@ impl Workspace {
             return;
         }
         cx.spawn(async move |workspace, cx| {
+            // 起動直後のラッシュ（セッション復元・LSP 起動）だけ避ける。確認自体は
+            // 背景スレッドの curl 一発なので、それ以上待たせる理由はない。
             cx.background_executor()
-                .timer(std::time::Duration::from_secs(90))
+                .timer(std::time::Duration::from_secs(10))
                 .await;
             let found = cx
                 .background_executor()
@@ -1819,7 +1830,8 @@ impl Workspace {
         .detach();
     }
 
-    /// statusbar チップのクリック: ダウンロード → 署名検証 → 差し替え（背景）。
+    /// statusbar チップのクリック。適用経路（[`updater::UpdateAction`]）で分かれる:
+    /// mac = ダウンロード → 署名検証 → 差し替え（背景）/ Windows = Release ページを開くだけ。
     pub(crate) fn install_update(&mut self, cx: &mut Context<Self>) {
         let Some((info, state)) = self.updater.status.clone() else {
             return;
@@ -1827,12 +1839,23 @@ impl Workspace {
         if state != UpdateState::Available {
             return;
         }
+        let dmg_url = match info.action.clone() {
+            updater::UpdateAction::InstallDmg { dmg_url } => dmg_url,
+            updater::UpdateAction::OpenReleasePage { html_url } => {
+                // 開いただけでは更新されていないので、チップは Available のまま残す
+                // （ダウンロード中に再クリックしても Release ページが開くだけで無害）。
+                if let Err(error) = crate::crash::open_url(&html_url) {
+                    self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
+                }
+                return;
+            }
+        };
         self.updater.status = Some((info.clone(), UpdateState::Installing));
         cx.notify();
         cx.spawn(async move |workspace, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { updater::download_and_install(&info).map(|_| info) })
+                .spawn(async move { updater::download_and_install(&dmg_url).map(|_| info) })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| match result {
                 Ok(info) => {

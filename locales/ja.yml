@@ -483,6 +483,7 @@ difftab:
   proposal_title: "%{title} ⇄ 提案"
 update:
   available: ⬆ v%{version} に更新
+  get: ⬆ v%{version} を入手
   installing: ⬇ 更新中…
   ready: ⟳ 再起動で新バージョンに切り替わります
   err_no_bundle: 実行中の .app が見つかりません（開発ビルドでは更新できません）

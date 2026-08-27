@@ -591,6 +591,12 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
       提供する義務**が生じる。リポジトリが private のままだと満たせない。
       **公開するか、別途ソース提供の導線を用意するかを決める必要がある**（ユーザー判断）
 - [ ] updater の Windows 分岐（`.dmg`/`spctl`/`hdiutil` 経路を通らない）。当面は「新版あり → ブラウザで Release を開く」でもよい
+      — **実装済み 2026-08-27・実機未確認のためチェック保留**。`updater::UpdateAction` で経路分岐:
+      Windows は zip 付きリリースのみ「⬆ vX.Y.Z を入手」チップ（`update.get`）→ クリックで
+      `crash::open_url`（`rundll32 url.dll,FileProtocolHandler`。cmd `start` は URL 中の `&` を
+      解釈するので不採用）→ Release ページを既定ブラウザで開く。zip の入れ替えは手動。
+      アプリ内適用（zip 展開 → 実行中 exe の差し替え）は後続。
+      **実機確認**: チップ表示（旧版起動 or `NECODER_UPDATE_PROBE`）→ クリックでブラウザが開く
 - [ ] README に Windows の導入手順（SmartScreen 警告の説明込み）
 - [ ] 受入: **まっさらな Windows マシンで DL → 起動 → プロジェクトを開いて編集できる**
 

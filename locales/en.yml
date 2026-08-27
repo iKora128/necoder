@@ -482,6 +482,7 @@ difftab:
   proposal_title: "%{title} ⇄ proposal"
 update:
   available: ⬆ Update to v%{version}
+  get: ⬆ Get v%{version}
   installing: ⬇ Updating…
   ready: ⟳ Restart to finish updating
   err_no_bundle: Running .app not found (a dev build can't self-update)
