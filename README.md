@@ -140,7 +140,7 @@ necoder の出発点はとても具体的な不満です — **複数のリポ�
 - **色による方向感覚** — プロジェクトごとの識別色(自動割当 or 選択)がレール・タブ下線・キャレット・スレッドチップまで流れる。色は**識別のためだけ**に使い、装飾には使わない
 - **AI エージェントネイティブ(ACP)** — Claude Code ほか [ACP](https://agentclientprotocol.com) エージェントが中で動く: 色付きスレッド + 宛先チップ、ストリーミング表示(⏺/⎿、✳ thinking)、diff レビュー(accept/reject)、チェックポイント/巻き戻し、エージェントが自分で消す Todo ボード。既存の Claude Code サブスクのまま `claude` CLI 経由 — **API キー不要**
 
-  ![necoder 内での実 ACP ストリーミング](lp/assets/gif/stream.gif)
+  ![necoder 内での実 ACP ストリーミング](lp/assets/gif/stream-en.gif)
 
 - **並行エージェントの編隊ビュー** — 複数エージェントをコーディネータ付きで並走させ、全スレッドの状態を一覧
 
