@@ -2235,3 +2235,10 @@
   1. **checkpoint 巻き戻しがファイルを破壊する**: agent_panel の PermissionRequest スナップショットが `diff.old_text` を「変更前の全文」として保存するが、Edit ツールの oldText は**置換ハンクの断片**。restore がそれを全文としてディスクへ書き戻す（今日 agent_panel.rs が 8700 行 → 5 行になる実害。`git checkout` + 編集再適用で復旧済み）。修正方向: old_text を信じず**スナップショット時に常にディスクから全文を読む**
   2. **bypass permissions が効かないレース×2**: (a) セッションは初回送信時の遅延起動で Prompt が SetMode より先にキューへ並ぶ＝**新規タブの初回ターンは必ずエージェント既定モード**で走る (b) acp_client はターン中の SetMode を deferred に積む＝ターンが畳まれるまで送られない（許可待ちで止まると手動で答えるまで bypass が届かない）。ピルは楽観更新なので効いて見える。修正方向: session/new 直後・初回 Prompt 前に希望モードを set_mode / SetMode は Cancel 同様ターン中も即送 / bypass 中に PermissionRequest が来たら UI 側で自動 Allow
 - 次: metal のある環境でホイール/トラックパッドのスクロールと less/vim（代替画面）の挙動を目視確認。上記バグ 2 群の修正
+
+## 2026-08-28 — checkpoint 破壊バグ + bypass permissions レースの修正
+- やったこと: 同日 JOURNAL の「未修正バグ 2 群」を消化。
+  1. **checkpoint**: PermissionRequest スナップショットが `diff.old_text` を全文として保存していたのを、**常にディスクから全文を読む**方式に（agent_panel）。Edit ツールの oldText は置換ハンクの断片で、restore がファイルを断片へ破壊していた（同日 agent_panel.rs 8700 行 → 5 行の実害の根治）。読めない = checkpoint 時点で不在（新規作成）は従来どおり None → restore は削除で戻す
+  2. **bypass レース**: 3 点セットで塞いだ。(a) `run_session_on` に `desired_mode` を追加し、**session/new 直後・最初の prompt を読む前に** `session/set_mode` を送る（初回ターンが既定モードで走る元凶の根治。UI へは適用後の current を流す＝二重送信しない）。`start_session` がスレッドの sticky モードを渡す。(b) 承認待ち中に bypass へ切り替えたら **select_option がその場で Allow を返す**（set_mode はターン中 deferred で今のターンに効かないため）。(c) bypass 選択中に届いた PermissionRequest は **UI 側で自動 Allow**（NECODER_AUTO_ALLOW と同じスナップショット完了後応答の一本道＝checkpoint は従来どおり切られる）。テスト 2 本追加（`permission_request_auto_allows_in_bypass_mode` / `switching_to_bypass_flushes_pending_permission`）・全 crate check/test 緑
+- 学び/罠: acp_client の `session.modes()` は `&Option<SessionModeState>` を返す＝`.as_ref().map` で借りる。ターン中 SetMode の即時送信（deferred 廃止）は今回見送り — turn loop 内で `send_request().block_task().await` すると応答がターン終端まで来ないエージェントでポンプが止まるリスクがあり、(b)(c) で実害が消えるため
+- 次: metal のある環境で実機確認（bypass タブの初回ターンが許可なしで走る / 承認カード表示中に bypass へ切り替えると即続行 / ⟲ 巻き戻しがファイルを壊さない）
