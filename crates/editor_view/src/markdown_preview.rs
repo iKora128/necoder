@@ -9,10 +9,11 @@
 //! 足さない。色が付くのは syn-* トークン（コードブロック）・インラインコード/リンクのみ。
 
 use gpui::{
-    div, prelude::*, px, AnyElement, FontStyle, FontWeight, HighlightStyle, ScrollHandle,
-    SharedString, StrikethroughStyle, StyledText, UnderlineStyle,
+    div, img, prelude::*, px, AnyElement, FontStyle, FontWeight, HighlightStyle, ImageSource,
+    ObjectFit, ScrollHandle, SharedString, StrikethroughStyle, StyledText, UnderlineStyle,
 };
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use theme_core::Theme;
 
 /// 見出しレベル→文字サイズ（閲覧用に chat より大きめ・階層は size と weight だけで示す）。
@@ -28,11 +29,13 @@ fn heading_size(level: u8) -> f32 {
 
 /// ブロック列を縦スクロールの読み物として組む。`scroll` は呼び出し側（EditorView）が保持する
 /// 別系統のスクロール位置（EditorElement の縦スクロールとは独立）。
+/// `base_dir` は相対パス画像の解決基準（= `.md` の親ディレクトリ。無題バッファは None）。
 pub(crate) fn render_preview(
     blocks: &[markdown::Block],
     theme: &Theme,
     font_size: f32,
     scroll: &ScrollHandle,
+    base_dir: Option<&Path>,
 ) -> AnyElement {
     let prose = font_size + 1.0; // 本文は code より僅かに大きく（読み物として）
     div()
@@ -56,14 +59,19 @@ pub(crate) fn render_preview(
                     blocks
                         .iter()
                         .cloned()
-                        .map(|block| render_block(block, theme, font_size)),
+                        .map(|block| render_block(block, theme, font_size, base_dir)),
                 ),
         )
         .into_any_element()
 }
 
-/// 1 ブロックを GPUI 要素へ。`render_streaming_markdown`（agent_panel）と同じトークンを使う。
-fn render_block(block: markdown::Block, theme: &Theme, font_size: f32) -> AnyElement {
+/// 1 ブロックを GPUI 要素へ。`render_markdown`（agent_panel）と同じトークンを使う。
+fn render_block(
+    block: markdown::Block,
+    theme: &Theme,
+    font_size: f32,
+    base_dir: Option<&Path>,
+) -> AnyElement {
     match block {
         markdown::Block::Heading { level, text, spans } => div()
             .when(level <= 2, |element| element.pt(px(6.)))
@@ -129,6 +137,59 @@ fn render_block(block: markdown::Block, theme: &Theme, font_size: f32) -> AnyEle
             .h(px(1.))
             .bg(theme.border)
             .into_any_element(),
+        markdown::Block::Image { source, alt } => render_image(source, alt, theme, base_dir),
+    }
+}
+
+/// 画像ブロック。ローカルは base_dir 基準で解決したパス、http(s) は URI をそのまま `img()` へ
+/// （URI は既定 NullHttpClient だと読み込み失敗 → fallback で alt を出す＝安全に劣化）。
+/// 解決できない相対パス（無題バッファ・remote の .md）も alt テキストへフォールバックする。
+fn render_image(source: String, alt: String, theme: &Theme, base_dir: Option<&Path>) -> AnyElement {
+    let image_source: Option<ImageSource> =
+        if source.starts_with("http://") || source.starts_with("https://") {
+            Some(source.clone().into())
+        } else {
+            let path = Path::new(&source);
+            let resolved: Option<PathBuf> = if path.is_absolute() {
+                Some(path.to_path_buf())
+            } else {
+                base_dir.map(|base| base.join(path))
+            };
+            resolved
+                .filter(|path| path.is_file())
+                .map(ImageSource::from)
+        };
+    let placeholder = {
+        let text: SharedString = if alt.is_empty() {
+            source.clone().into()
+        } else {
+            alt.clone().into()
+        };
+        let color = theme.fg2;
+        move || {
+            div()
+                .flex()
+                .gap(px(6.))
+                .text_color(color)
+                .child("🖼")
+                .child(StyledText::new(text.clone()))
+                .into_any_element()
+        }
+    };
+    match image_source {
+        Some(image_source) => div()
+            .my(px(2.))
+            .child(
+                // サイズ未指定 = 画像の実寸（aspect_ratio 維持）を max_w で本文幅に収める。
+                // 高さは幅×アスペクト比で決まるので上限を付けない（付けると要素箱と描画の比が
+                // ずれてレターボックスの空白が出る）。縦長画像はスクロールで読む（Zed と同じ）。
+                img(image_source)
+                    .max_w_full()
+                    .object_fit(ObjectFit::ScaleDown)
+                    .with_fallback(placeholder),
+            )
+            .into_any_element(),
+        None => placeholder(),
     }
 }
 

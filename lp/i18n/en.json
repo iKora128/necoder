@@ -21,8 +21,9 @@
   "マルチプレクサ": "Multiplexer",
   "— AI 時代の新概念、Fleet モード": "— Fleet mode, a new idea for the agent era",
 
-  "necoder.dmg をダウンロード": "Download necoder.dmg",
+  "Mac / Windows 版をダウンロード": "Download for Mac / Windows",
   "● 実機キャプチャ": "● Real capture",
+  "/assets/gif/stream.gif": "/assets/gif/stream-en.gif",
   "Claude Code (ACP) が中で動く。思考中のみ 16 倍速、ほかは実時間。": "Claude Code (ACP) running inside. Thinking is sped up 16×; everything else is real time.",
 
   "色で、いまいる場所がわかる": "Color tells you where you are",
@@ -93,7 +94,7 @@
 
   "次のエディタは、": "The next editor moves",
   "エージェントごと動く。": "together with its agents.",
-  "無料 · macOS 13+（Apple Silicon）": "Free · macOS 13+ (Apple Silicon)",
+  "無料 · macOS 13+（Apple Silicon）/ Windows 10+（x64）": "Free · macOS 13+ (Apple Silicon) / Windows 10+ (x64)",
 
   "necoder の実機キャプチャ: Claude Code (ACP) スレッドがコードを読み、要約をストリーミングし、完了トーストが出るまで": "A real capture of necoder: a Claude Code (ACP) thread reading code, streaming a summary, through to the completion toast",
   "5 プロジェクトが色付きでレールに並び、色付き AI スレッドタブとカラーキャレットが見える実機画面": "A real screen: five projects lined up in the rail in their colors, with colored AI thread tabs and a colored caret",

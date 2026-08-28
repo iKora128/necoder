@@ -495,8 +495,7 @@ mod tests {
             let mut line = String::new();
             reader.read_line(&mut line).expect("要求を読めない");
             let stream = reader.get_mut();
-            writeln!(stream, "{{\"ok\":true,\"echo\":{}}}", line.trim())
-                .expect("応答を書けない");
+            writeln!(stream, "{{\"ok\":true,\"echo\":{}}}", line.trim()).expect("応答を書けない");
             let _ = stream.flush();
         });
 

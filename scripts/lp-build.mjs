@@ -25,6 +25,10 @@ const lpRoot = path.join(repoRoot, 'lp');
 const COPY_PATCHES = [
   ['https://github.com/iKora128/shirushi', 'https://github.com/iKora128/necoder'],
   ['Shirushi.dmg', 'necoder.dmg'],
+  // Windows 対応（W0〜W6 完了・2026-08-25）を配布文言に反映。
+  // 2つ目は `</span>` まで含めて検索し、適用済みテキストに再マッチしないようにしている。
+  ['necoder.dmg をダウンロード', 'Mac / Windows 版をダウンロード'],
+  ['無料 · macOS 13+（Apple Silicon）</span>', '無料 · macOS 13+（Apple Silicon）/ Windows 10+（x64）</span>'],
 ];
 
 // Archivo はラテン専用なので、日本語のフォールバックを足す。

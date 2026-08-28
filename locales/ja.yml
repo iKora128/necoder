@@ -6,6 +6,7 @@ app:
   name: necoder
 editor:
   empty_hint: 起動引数でファイルを渡すと開きます（例 necoder README.md）
+  blame_uncommitted: 未コミット
 common:
   untitled: 無題
 finder:
@@ -473,6 +474,12 @@ tabs:
   untitled: 無題
   close_tip: 閉じる  ⌘W
   close_split_tip: 分割を閉じる  ⌘\\
+image:
+  load_failed: 画像を表示できません
+breadcrumb:
+  md_preview: プレビュー
+  md_source: ソース
+  md_preview_tip: 整形プレビューを切替  ⌘⇧V
 terminal:
   tab_title: ターミナル %{n}
   add_tip: ターミナルを追加
@@ -486,6 +493,7 @@ difftab:
   proposal_title: "%{title} ⇄ 提案"
 update:
   available: ⬆ v%{version} に更新
+  get: ⬆ v%{version} を入手
   installing: ⬇ 更新中…
   ready: ⟳ 再起動で新バージョンに切り替わります
   err_no_bundle: 実行中の .app が見つかりません（開発ビルドでは更新できません）

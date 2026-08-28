@@ -841,8 +841,12 @@ impl Workspace {
         for file_edits in by_file {
             let path = file_edits.path;
             let edits = file_edits.edits;
-            if let Some(tab) = self.tabs.iter().find(|tab| tab.path == path) {
-                let editor = tab.editor.clone();
+            if let Some(editor) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.path == path)
+                .and_then(|tab| tab.editor().cloned())
+            {
                 editor.update(cx, |view, cx| {
                     let byte_edits = edits
                         .iter()

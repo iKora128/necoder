@@ -31,6 +31,8 @@ serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 libc.workspace = true
+# 画像タブ（ImageView）の寸法読み（ヘッダのみ・フルデコードしない）
+image.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

@@ -212,14 +212,21 @@ fn percent_encode(text: &str) -> String {
     out
 }
 
-/// URL を既定ブラウザで開く（macOS: `open` / それ以外: `xdg-open`）。
+/// URL を既定ブラウザで開く（macOS: `open` / Windows: `rundll32` / それ以外: `xdg-open`）。
+///
+/// Windows で `cmd /C start` を使わないのは、URL 中の `&` を cmd が解釈してしまうため
+/// （bug_report_url のクエリに含まれる）。`rundll32 url.dll,FileProtocolHandler` は
+/// シェルを介さず引数がそのまま渡り、既定ブラウザで開く。
 pub fn open_url(url: &str) -> anyhow::Result<()> {
-    let command = if std::env::consts::OS == "macos" {
-        "open"
+    let (command, fixed_args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else if cfg!(target_os = "windows") {
+        ("rundll32", &["url.dll,FileProtocolHandler"])
     } else {
-        "xdg-open"
+        ("xdg-open", &[])
     };
     let status = std::process::Command::new(command)
+        .args(fixed_args)
         .arg(url)
         .status()
         .map_err(|error| anyhow::anyhow!("ブラウザを開けない（{command}）: {error}"))?;

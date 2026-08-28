@@ -955,6 +955,28 @@ impl Workspace {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
+        // 画像はテキストバッファを作らず画像タブとして開く（編集・保存・LSP は関与しない）。
+        if image_view::is_image_path(&path) {
+            let theme = self.theme.clone();
+            let view = cx.new(|cx| ImageView::new(&path, content.bytes, theme, cx));
+            let handle = view.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            self.tabs.push(EditorTab {
+                path: path.clone(),
+                content: TabContent::Image(view),
+                transient: false,
+            });
+            self.active_tab = self.tabs.len() - 1;
+            let active = self.project_sessions.active;
+            if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+                slot.explorer.selected = Some(path);
+            }
+            self.sync_active_slot();
+            self.refresh_git_status(cx);
+            self.save_state();
+            cx.notify();
+            return;
+        }
         let buffer = match Buffer::from_content(worktree.host().clone(), &path, content) {
             Ok(buffer) => buffer,
             Err(error) => {
@@ -987,11 +1009,13 @@ impl Workspace {
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
         self.tabs.push(EditorTab {
             path: path.clone(),
-            editor,
+            content: TabContent::Editor {
+                editor,
+                _observation: observation,
+                _input_subscription: input_subscription,
+                _hover_subscription: hover_subscription,
+            },
             transient: false,
-            _observation: observation,
-            _input_subscription: input_subscription,
-            _hover_subscription: hover_subscription,
         });
         self.active_tab = self.tabs.len() - 1;
 

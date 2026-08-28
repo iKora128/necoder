@@ -132,6 +132,13 @@
 :root[data-theme="light"] .theme-toggle .theme-toggle-to-dark { display: block; }
 :root[data-theme="light"] .theme-toggle .theme-toggle-to-light { display: none; }
 
+/* エージェントアイコンは単色 SVG（fill="currentColor"）だが img 経由だと黒で描画される。
+   ダークでは反転して文字色（--dark-text ≈ #f2efed）相当に寄せる。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .agent-icon { filter: invert(1) brightness(0.93); }
+}
+:root[data-theme="dark"] .agent-icon { filter: invert(1) brightness(0.93); }
+
 /* 画像は暗い面で少しだけ落ち着かせる（白い縁が浮くのを抑える） */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) figure img { filter: brightness(0.94); }

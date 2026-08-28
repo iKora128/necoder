@@ -69,30 +69,33 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 次の AI スレッドタブへ（Chrome 風。⌘⌥→ / ⌃Tab）。
+    /// 次のタブへ（Chrome 風。⌘⌥→ / ⌃Tab）。⌘W と同じく**最後に触った面で振り分け**:
+    /// Agent 面ならスレッドタブ、そうでなければエディタのファイルタブを送る（agent_active）。
     pub(crate) fn select_next_thread(
         &mut self,
         _: &SelectNextThread,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.chrome.show_right {
-            self.chrome.show_right = true;
+        if !(self.chrome.show_right && self.agent_active) {
+            self.select_next_tab(&SelectNextTab, window, cx);
+            return;
         }
         self.agent_panel
             .update(cx, |panel, cx| panel.select_next_thread(cx));
         cx.notify();
     }
 
-    /// 前の AI スレッドタブへ（Chrome 風。⌘⌥← / ⌃⇧Tab）。
+    /// 前のタブへ（Chrome 風。⌘⌥← / ⌃⇧Tab）。振り分けは [`Self::select_next_thread`] と同じ。
     pub(crate) fn select_prev_thread(
         &mut self,
         _: &SelectPrevThread,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.chrome.show_right {
-            self.chrome.show_right = true;
+        if !(self.chrome.show_right && self.agent_active) {
+            self.select_prev_tab(&SelectPrevTab, window, cx);
+            return;
         }
         self.agent_panel
             .update(cx, |panel, cx| panel.select_prev_thread(cx));
@@ -354,7 +357,10 @@ impl Workspace {
         let tab = self.tabs.remove(index);
         if !tab.transient {
             self.recently_closed_files.push(tab.path.clone());
-            self.lsp_did_close(&tab.path);
+            // 画像タブは didOpen していないので didClose も送らない。
+            if tab.editor().is_some() {
+                self.lsp_did_close(&tab.path);
+            }
         }
         // hot exit: タブを閉じる＝未保存編集の破棄（現仕様）なのでスナップショットも消す。
         if let Some(storage) = self.persistence.storage.clone() {
@@ -376,8 +382,8 @@ impl Workspace {
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         }
         // 新しいアクティブタブへフォーカス + 診断反映。
-        if let Some(editor) = self.active_editor() {
-            let handle = editor.read(cx).focus_handle(cx);
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            let handle = tab.focus_handle(cx);
             window.focus(&handle, cx);
         }
         let selected = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
@@ -402,15 +408,14 @@ impl Workspace {
             self.dismiss_buffer_search(cx);
             self.close_hover(cx);
         }
-        let Some((editor, path)) = self
+        let Some((handle, path)) = self
             .tabs
             .get(index)
-            .map(|tab| (tab.editor.clone(), tab.path.clone()))
+            .map(|tab| (tab.focus_handle(cx), tab.path.clone()))
         else {
             return;
         };
         self.active_tab = index;
-        let handle = editor.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.projects.get_mut(active) {
@@ -458,6 +463,10 @@ impl Workspace {
     ) {
         if self.split_editor.is_some() {
             self.close_split(window, cx);
+            return;
+        }
+        // 画像タブは分割複製の対象外（Buffer を持たない）。
+        if self.active_editor().is_none() {
             return;
         }
         let Some(path) = self.active_tab_path() else {

@@ -362,10 +362,11 @@ impl Workspace {
                 return;
             }
             let _ = editor.update(cx, |view, cx| {
-                view.set_line_annotation(
-                    annotation.map(|text| (row, SharedString::from(text))),
-                    cx,
-                );
+                let text = annotation.map(|line| match line {
+                    project::BlameLine::Uncommitted => i18n::t!("editor.blame_uncommitted"),
+                    project::BlameLine::Commit(text) => text,
+                });
+                view.set_line_annotation(text.map(|text| (row, SharedString::from(text))), cx);
             });
         })
         .detach();

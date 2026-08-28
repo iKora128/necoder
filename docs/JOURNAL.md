@@ -2139,6 +2139,60 @@
 - 罠: この環境は CLT のみで metal シェーダをコンパイルできず `cargo check` すら通らない
   （gpui_apple の build.rs で停止・既知）。composer 変更は定数 1 個だが実機目視は metal のある環境で
 
+## 2026-08-27 — 画像ビューア（画像タブ）+ Markdown プレビューの画像描画（FEATURES §2 の画像側を消化）
+- やったこと（/goal「やりきってください」= 前会話で残と特定した画像側 2 面を実装）:
+  - **タブの多態化（ARCHITECTURE §3 Pane/Item の「必要時に育てる」を初回消化）**: `EditorTab` の
+    中身を `TabContent{Editor{editor,購読3本}, Image(Entity<ImageView>)}` に。`EditorTab::editor()
+    -> Option` を導入し、`active_editor()` がここを通るので**編集/保存/⌘F/LSP/hot exit/分割は
+    画像タブで自然に no-op**（各機能に個別分岐を足していない）。`focus_handle()/is_dirty()/
+    content_element()` をタブのメソッドに集約（主ペインと編隊 Editor 面で共用）
+  - **`image_view.rs` 新設**: 拡張子→`gpui::ImageFormat`（png/jpg/gif/webp/bmp/ico/tiff/svg）、
+    バイト列を `Arc<gpui::Image>` で保持して `img()` に渡す（デコードは gpui の asset 系が非同期・
+    **local/remote どちらの Host 読みでも同経路**）。寸法は `image::ImageReader::into_dimensions`
+    （ヘッダのみ・フルデコードしない・svg は None）。キャプション = `W × H · サイズ`（fg2 のみ）。
+    watcher に画像タブ分岐を追加＝**ディスク更新で背景再読→差し替え**（バイト hash が gpui::Image
+    の id なので asset キャッシュが自然に新テクスチャを読む。スクショ再生成の追従が狙い）
+  - **markdown crate に `Block::Image{source,alt}`**: pulldown の `Tag::Image` 内側は Text/装飾を
+    alt へ逸らし、**段落の途中でも独立ブロックに切り出す**（StyledText にインライン画像は挟めない）。
+    切り出し時に開いている装飾 span の開始を 0 に掛け直し + 残り本文の先頭空白を strip。test 11 本
+  - **markdown_preview に画像描画**: 相対パスは `.md` の親基準（`render_preview` に `base_dir`）、
+    http(s) は `img(uri)`（既定 NullHttpClient は読めない→fallback）。**解決不能/読込失敗は
+    「🖼 alt」の fg2 テキストへ劣化**。agent_panel transcript は v1 テキスト表現（🖼 + alt — source
+    を選択可能リージョンで＝⌘C でパスが取れる方を優先）
+- 検証: markdown 11 / editor_view 5 / agent_panel 22 / i18n parity 6 全 green・警告 0・fmt 済み。
+  offscreen 目視 4 枚: ①`necoder sample.png` → 画像タブ（中央表示・キャプション 2560×1600 ·
+  681.5 KB）②`.md` プレビューで段落間の画像が本文幅に収まる ③箇条書き途中の画像が独立ブロックに
+  ④不在パス/alt 無し/リモート URL の 3 fallback が「🖼 テキスト」で出る
+- 学び/罠:
+  - **`img()` は size 未指定だと実寸 + `aspect_ratio`** で箱を作る。`max_h` を足すと**箱と描画の
+    比がずれてレターボックスの空白**が出る（初回スクショで露見）。`max_w_full` だけにして高さは
+    アスペクト比に任せるのが正解（縦長はスクロールで読む・Zed と同じ）
+  - パーサで画像がブロックを割る時、**開いたままのインライン装飾の開始 offset が旧 text を指す**。
+    そのままだと範囲外 span で `layout_line` が abort（`open_span_across_image_stays_in_bounds`
+    で固定）
+  - **既存の失敗（今回の変更と無関係・HEAD の clean worktree でも再現）**: `workspace::tests::
+    {local_and_remote_root_render_never_call_host, project_switch_preserves_dirty_undo_and_child_entities}`
+    が「Detected activity on thread blocking-N / not deterministic」で FAILED（--test-threads=1 でも）。
+    blocking crate のスレッド活動を test scheduler が検出している。別途要調査
+- 次: 実機の対話確認（画像を⌘P/ツリーから開く・タブ切替・テーマ切替の波及）は人の手番。後続候補:
+  ⌘⇧V プレビューの GFM 表・引用装飾・agent_panel transcript のインライン画像描画・画像タブの
+  ズーム/実寸トグル。上記 workspace 2 test の非決定性の根治
+
+## 2026-08-27 — ⌘⇧V の discoverability（パンくず右端のプレビューボタン）+ ⌃Tab/⌘⌥←→ の面振り分け
+- やったこと（ドッグフーディング中のフィードバック 2 件を即日消化）:
+  - **プレビューボタン**: markdown ファイルのパンくず右端に 👁 トグル（`icons/eye.svg` = Lucide 追加）。
+    ソース表示中は「プレビュー」・プレビュー中は「ソース」+ bg2 ピル。クリック = ⌘⇧V と同じ
+    `set_rendered_markdown` トグル。`EditorView::rendered_markdown()` getter を公開。分割ペインの
+    パンくずにも同じボタンが出る（それぞれの EditorView に独立に効く）。i18n 3 キー追加
+  - **⌃Tab / ⌘⌥←→ の面振り分け**: 従来はフォーカスに関係なく常に AI スレッド切替だった。
+    **⌘W と同じ `chrome.show_right && agent_active` の振り分け**に揃え、エディタ面が最後に触った
+    面ならファイルタブを送る（Agent 面なら従来通りスレッド）。⌘{ / ⌘} は従来通りエディタ専用
+- 留意: コマンドパレットの「AI: 次のスレッド」をエディタ面で実行するとファイルタブが動く
+  （⌘W の「ファイル: タブを閉じる」がスレッドを閉じるのと同じ既存の割り切り。気になったら
+  パレット専用の別 action に分ける）
+- 検証: 警告 0・fmt 済み・i18n parity green。offscreen 2 枚（ソース時「プレビュー」/ プレビュー時
+  「ソース」ピル）目視。ボタンクリックとキー振り分けの対話確認は人の手番
+
 ## 2026-08-28 — 設定: 導入/ログイン後の「利用可能」反映ラグを解消
 - やったこと: エージェントの「導入」を押して npm install が終わっても、設定を閉じて開き直すまで「未導入」のままだった件を修正。原因は (1) `refresh_availability` が設定を開いた時にしか走らない (2) 導入ターミナルは `<cmd>; exec $SHELL -l` でシェルに落ちるため終了イベントが取れない、の合わせ技。導入/ログインボタン押下後だけ 1 秒間隔の軽量見張り（`cli_installed` の PATH stat + `configured_auth_state` のファイル/env 判定のみ・子プロセス無し・10 分上限・agent ごとの多重起動ガード）を回し、変化を検知した瞬間にフル `refresh_availability` へ切替える方式に。変更: `settings.rs`（`watching_agents` / `watch_agent_progress` / `agent_action_button` 配線）+ `acp_client::configured_auth_state` を pub 化。ログイン後（資格情報ファイル出現）も同じ仕組みで拾える
 - 学び/罠: **metal 無し環境でも `cargo check -p necoder --features gpui_platform/runtime_shaders` なら通る**（gpui_apple のビルド時シェーダコンパイルを飛ばせる。「cargo check すら通らない」の回避策）。`cargo test -p <crate> --features gpui_platform/runtime_shaders` も同様。なお 7/11 の「Metal Toolchain 導入済み」は別 PC の話で、この環境はもともと metal 無し（ユーザー確認済み・消えたわけではない）。実機ビルド/スクショは metal のある環境で

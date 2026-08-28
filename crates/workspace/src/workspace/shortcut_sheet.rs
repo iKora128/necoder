@@ -34,7 +34,10 @@ const ACTION_LABELS: &[(&str, &str)] = &[
     ("editor::Indent", "key.indent"),
     ("editor::Outdent", "key.outdent"),
     ("editor::ToggleSoftWrap", "key.toggle_soft_wrap"),
-    ("editor::ToggleRenderedMarkdown", "key.toggle_rendered_markdown"),
+    (
+        "editor::ToggleRenderedMarkdown",
+        "key.toggle_rendered_markdown",
+    ),
     // ── エディタ: 移動 ──
     ("editor::MoveLeft", "key.move_left"),
     ("editor::MoveRight", "key.move_right"),
@@ -293,8 +296,8 @@ mod tests {
     /// キーを足したのにラベルを追補し忘れると、この test が落ちて一覧に生アクション名が出るのを防ぐ。
     #[test]
     fn every_bound_action_has_a_label() {
-        let sections =
-            keymap_core::parse(keymap_core::DEFAULT_KEYMAP_JSON).expect("既定 keymap がパースできる");
+        let sections = keymap_core::parse(keymap_core::DEFAULT_KEYMAP_JSON)
+            .expect("既定 keymap がパースできる");
         for section in &sections {
             for action in section.bindings.values() {
                 let in_registry = COMMAND_REGISTRY

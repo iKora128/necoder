@@ -1624,9 +1624,19 @@ pub fn apply_patch_to_index_on(host: &dyn Host, repo_root: &Path, patch: &str) -
     result.map(|_| ()).context("git apply --cached に失敗")
 }
 
-/// 1 行の blame（作者・日付・要旨・M11-11）。`line` は 1 始まり。未コミット行は「未コミット」。
+/// [`blame_line_on`] の 1 行分。「未コミット」の文言は UI 側で i18n する
+/// （この crate は依存方向の規律で i18n を知らない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlameLine {
+    /// まだどのコミットにも属さない行。
+    Uncommitted,
+    /// "作者, YYYY-MM-DD • 要旨" の合成済みテキスト。
+    Commit(String),
+}
+
+/// 1 行の blame（作者・日付・要旨・M11-11）。`line` は 1 始まり。
 /// dirty バッファでは行ずれの近似になる（HEAD 基準）。失敗は None（表示しない）。
-pub fn blame_line_on(host: &dyn Host, file: &Path, line: u32) -> Option<String> {
+pub fn blame_line_on(host: &dyn Host, file: &Path, line: u32) -> Option<BlameLine> {
     let dir = file.parent()?;
     let repo = git_repo_root_on(host, dir)?;
     let file_arg = file.to_string_lossy().to_string();
@@ -1646,7 +1656,7 @@ pub fn blame_line_on(host: &dyn Host, file: &Path, line: u32) -> Option<String> 
     .ok()?;
     let text = String::from_utf8(output.stdout).ok()?;
     if text.starts_with("0000000") {
-        return Some("未コミット".to_string());
+        return Some(BlameLine::Uncommitted);
     }
     let mut author = None;
     let mut time = None;
@@ -1662,7 +1672,7 @@ pub fn blame_line_on(host: &dyn Host, file: &Path, line: u32) -> Option<String> 
     }
     let (author, summary) = (author?, summary?);
     let date = time.map(format_unix_date).unwrap_or_default();
-    Some(format!("{author}, {date} • {summary}"))
+    Some(BlameLine::Commit(format!("{author}, {date} • {summary}")))
 }
 
 /// unix 秒 → "YYYY-MM-DD"（依存なしの civil 変換・Howard Hinnant のアルゴリズム）。
@@ -1991,13 +2001,16 @@ mod tests {
             return; // 環境依存の保険
         }
         let result = blame_line_on(host::LocalHost::shared().as_ref(), &readme, 1);
-        let Some(text) = result else {
+        let Some(line) = result else {
             return; // shallow clone 等では blame が引けないことがある
         };
-        // "作者, YYYY-MM-DD • 要旨" か「未コミット」のどちらか。
+        // "作者, YYYY-MM-DD • 要旨" か Uncommitted のどちらか。
         assert!(
-            text == "未コミット" || (text.contains(" • ") && text.contains("-")),
-            "{text}"
+            match &line {
+                BlameLine::Uncommitted => true,
+                BlameLine::Commit(text) => text.contains(" • ") && text.contains("-"),
+            },
+            "{line:?}"
         );
     }
 

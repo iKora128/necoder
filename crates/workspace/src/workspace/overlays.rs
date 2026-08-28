@@ -68,7 +68,8 @@ impl Workspace {
     ) {
         let sections = keymap_core::parse(&keymap_core::default_keymap_json(
             keymap_core::KeymapPlatform::current(),
-        )).unwrap_or_default();
+        ))
+        .unwrap_or_default();
         let items = COMMAND_REGISTRY
             .entries()
             .iter()
@@ -453,8 +454,14 @@ impl Workspace {
         self.theme = theme.clone();
         for (index, session) in self.project_sessions.sessions.iter().enumerate() {
             for tab in &session.tabs {
-                tab.editor
-                    .update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+                match &tab.content {
+                    TabContent::Editor { editor, .. } => {
+                        editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+                    }
+                    TabContent::Image(view) => {
+                        view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
+                    }
+                }
             }
             if let Some(split) = &session.split_editor {
                 split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
@@ -922,8 +929,9 @@ impl Workspace {
     pub(crate) fn dismiss_buffer_search(&mut self, cx: &mut Context<Self>) {
         if self.buffer_search.take().is_some() {
             for tab in &self.tabs {
-                tab.editor
-                    .update(cx, |editor, cx| editor.set_search_ranges(Vec::new(), cx));
+                if let Some(editor) = tab.editor() {
+                    editor.update(cx, |editor, cx| editor.set_search_ranges(Vec::new(), cx));
+                }
             }
             cx.notify();
         }

@@ -2759,12 +2759,7 @@ impl Workspace {
                 FleetPane::Editor { .. } => self.project_sessions.sessions[session_index]
                     .tabs
                     .get(self.project_sessions.sessions[session_index].active_tab)
-                    .map(|tab| {
-                        tab.editor
-                            .clone()
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    })
+                    .map(|tab| tab.content_element())
                     .unwrap_or_else(|| {
                         div()
                             .flex_1()

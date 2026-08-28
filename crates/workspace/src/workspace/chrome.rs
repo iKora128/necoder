@@ -455,7 +455,7 @@ impl Workspace {
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_else(|| i18n::t!("tabs.untitled"));
-                let dirty = tab.editor.read(cx).buffer().is_dirty();
+                let dirty = tab.is_dirty(cx);
                 // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
                 let status = self.repository.status.get(&tab.path).copied();
                 let name_color = status
@@ -632,6 +632,47 @@ impl Workspace {
             .active_slot()
             .map(|slot| slot.worktree.root().to_path_buf());
         let crumbs = breadcrumb_text(root.as_deref(), path.as_deref());
+        // markdown なら右端に整形プレビュートグル（⌘⇧V の discoverability。キーを知らなくても届く）。
+        let markdown_toggle = path
+            .as_deref()
+            .filter(|path| lang::language_for_path(path) == Some(lang::LanguageId::Markdown))
+            .map(|_| {
+                let on = editor.read(cx).rendered_markdown();
+                let label = if on {
+                    i18n::t!("breadcrumb.md_source")
+                } else {
+                    i18n::t!("breadcrumb.md_preview")
+                };
+                let editor = editor.clone();
+                div()
+                    .id("md-preview-toggle")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .h(px(19.))
+                    .px(px(7.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
+                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                    .child(svg().path("icons/eye.svg").size(px(12.)).flex_none())
+                    .child(div().text_size(px(10.5)).child(label))
+                    .tooltip(Tooltip::text(
+                        i18n::t!("breadcrumb.md_preview_tip"),
+                        theme.clone(),
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_this, _, _window, cx| {
+                            cx.stop_propagation();
+                            editor.update(cx, |editor, cx| {
+                                let next = !editor.rendered_markdown();
+                                editor.set_rendered_markdown(next, cx);
+                            });
+                        }),
+                    )
+            });
         div()
             .flex()
             .items_center()
@@ -643,7 +684,14 @@ impl Workspace {
             .border_color(theme.border)
             .text_size(px(11.))
             .text_color(theme.fg2)
-            .child(SharedString::from(crumbs))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(SharedString::from(crumbs)),
+            )
+            .children(markdown_toggle)
     }
 
     /// ⌘F インライン検索/置換バー（エディタ右上に浮かせる・M10）。
@@ -965,8 +1013,13 @@ impl Workspace {
     }
 
     /// 主ペイン（複数タブ列 + アクティブタブのパンくず + 本体）。⌘F バーは本体右上に浮かせる。
+    /// 本体はタブの中身（エディタ / 画像）で差し替わる。パンくず（カーソル位置）はエディタのみ。
     pub(crate) fn render_main_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(editor) = self.active_editor() else {
+        let Some((editor, content)) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| (tab.editor().cloned(), tab.content_element()))
+        else {
             return div().flex_1().into_any_element();
         };
         div()
@@ -976,18 +1029,18 @@ impl Workspace {
             .min_h_0()
             .min_w_0()
             .child(self.render_main_tabstrip(cx))
-            .child(self.render_breadcrumb(&editor, cx))
+            .children(
+                editor
+                    .as_ref()
+                    .map(|editor| self.render_breadcrumb(editor, cx)),
+            )
             .children(self.render_external_change_bar(cx))
             .child(
                 div()
                     .flex_1()
                     .overflow_hidden()
                     .relative()
-                    .child(
-                        editor
-                            .clone()
-                            .cached(StyleRefinement::default().size_full()),
-                    )
+                    .child(content)
                     .children(self.render_buffer_search_bar(cx)),
             )
             .into_any_element()
@@ -1601,7 +1654,16 @@ impl Workspace {
             .when_some(self.updater.status.clone(), |element, (info, state)| {
                 let (label, clickable) = match state {
                     UpdateState::Available => (
-                        i18n::t!("update.available", "version" => info.version.clone()),
+                        match &info.action {
+                            updater::UpdateAction::InstallDmg { .. } => {
+                                i18n::t!("update.available", "version" => info.version.clone())
+                            }
+                            // Windows（当面）: クリックで Release ページを開くだけなので、
+                            // 「更新」と言い切らず「入手」にする（WINDOWS-PORT §W6）。
+                            updater::UpdateAction::OpenReleasePage { .. } => {
+                                i18n::t!("update.get", "version" => info.version.clone())
+                            }
+                        },
                         true,
                     ),
                     UpdateState::Installing => (i18n::t!("update.installing"), false),
@@ -1659,8 +1721,10 @@ impl Workspace {
             return;
         }
         cx.spawn(async move |workspace, cx| {
+            // 起動直後のラッシュ（セッション復元・LSP 起動）だけ避ける。確認自体は
+            // 背景スレッドの curl 一発なので、それ以上待たせる理由はない。
             cx.background_executor()
-                .timer(std::time::Duration::from_secs(90))
+                .timer(std::time::Duration::from_secs(10))
                 .await;
             let found = cx
                 .background_executor()
@@ -1819,7 +1883,8 @@ impl Workspace {
         .detach();
     }
 
-    /// statusbar チップのクリック: ダウンロード → 署名検証 → 差し替え（背景）。
+    /// statusbar チップのクリック。適用経路（[`updater::UpdateAction`]）で分かれる:
+    /// mac = ダウンロード → 署名検証 → 差し替え（背景）/ Windows = Release ページを開くだけ。
     pub(crate) fn install_update(&mut self, cx: &mut Context<Self>) {
         let Some((info, state)) = self.updater.status.clone() else {
             return;
@@ -1827,12 +1892,23 @@ impl Workspace {
         if state != UpdateState::Available {
             return;
         }
+        let dmg_url = match info.action.clone() {
+            updater::UpdateAction::InstallDmg { dmg_url } => dmg_url,
+            updater::UpdateAction::OpenReleasePage { html_url } => {
+                // 開いただけでは更新されていないので、チップは Available のまま残す
+                // （ダウンロード中に再クリックしても Release ページが開くだけで無害）。
+                if let Err(error) = crate::crash::open_url(&html_url) {
+                    self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
+                }
+                return;
+            }
+        };
         self.updater.status = Some((info.clone(), UpdateState::Installing));
         cx.notify();
         cx.spawn(async move |workspace, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { updater::download_and_install(&info).map(|_| info) })
+                .spawn(async move { updater::download_and_install(&dmg_url).map(|_| info) })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| match result {
                 Ok(info) => {

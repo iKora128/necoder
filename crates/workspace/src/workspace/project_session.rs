@@ -770,16 +770,23 @@ impl Workspace {
         }
         workspace.start_watcher(cx); // アクティブプロジェクトのファイル監視（M10 watch 基盤）
         workspace.loaded = true;
-        workspace.schedule_update_check(cx); // 自動アップデートの確認（M13・90s 後に背景で）
+        workspace.schedule_update_check(cx); // 自動アップデートの確認（M13・10s 後に背景で）
         workspace.check_crash_notice(cx); // 前回クラッシュの通知（M13・pending マーカーを 1 回だけ消費）
                                           // 開発用: NECODER_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
         if let Ok(version) = std::env::var("NECODER_UPDATE_PROBE") {
             if !version.is_empty() {
-                workspace.updater.status = Some((
-                    updater::UpdateInfo {
-                        version,
+                // 経路も実 OS に合わせる（Windows 実機で「クリック → ブラウザ」まで確認できるように）。
+                let action = if cfg!(target_os = "windows") {
+                    updater::UpdateAction::OpenReleasePage {
+                        html_url: "https://github.com/iKora128/necoder/releases/latest".to_string(),
+                    }
+                } else {
+                    updater::UpdateAction::InstallDmg {
                         dmg_url: String::new(),
-                    },
+                    }
+                };
+                workspace.updater.status = Some((
+                    updater::UpdateInfo { version, action },
                     UpdateState::Available,
                 ));
             }
@@ -875,9 +882,12 @@ impl Workspace {
             .get(self.project_sessions.active)
     }
 
-    /// 現在アクティブなタブのエディタ（無ければ `None`）。従来 `self.editor` を読んでいた箇所の置換。
+    /// 現在アクティブなタブのエディタ（無い・画像タブなら `None`）。編集/検索/LSP 系の入口は
+    /// すべてここを通るので、画像タブでは各機能が自然に no-op になる。
     pub(crate) fn active_editor(&self) -> Option<Entity<EditorView>> {
-        self.tabs.get(self.active_tab).map(|tab| tab.editor.clone())
+        self.tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.editor().cloned())
     }
 
     /// アクティブタブのファイルパス。
@@ -929,11 +939,13 @@ impl Workspace {
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
         self.tabs.push(EditorTab {
             path: title_path,
-            editor,
+            content: TabContent::Editor {
+                editor,
+                _observation: observation,
+                _input_subscription: input_subscription,
+                _hover_subscription: hover_subscription,
+            },
             transient: true,
-            _observation: observation,
-            _input_subscription: input_subscription,
-            _hover_subscription: hover_subscription,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -1027,8 +1039,7 @@ impl Workspace {
                     // 一覧の先頭 = メイン作業ツリー。それ以外に自分が居れば linked。
                     let linked = {
                         let worktrees = project::git_worktrees_on(host.as_ref(), &root);
-                        let canonical =
-                            paths::canonicalize(&root).unwrap_or_else(|_| root.clone());
+                        let canonical = paths::canonicalize(&root).unwrap_or_else(|_| root.clone());
                         worktrees
                             .iter()
                             .skip(1)

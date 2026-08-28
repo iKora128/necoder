@@ -1195,8 +1195,14 @@ impl AgentPanel {
         })
         .detach();
         // 開発用: NECODER_ACP_PROBE があれば、少し待って空スレッドへ自動送信（実機ストリーミングの自己検証）。
+        // **最初に生成されたパネル 1 枚だけ**が拾う（レールに複数スロットがあると全パネルで発火し、
+        // claude セッションが並走してしまう — 2026-08-27 の LP 素材撮りで実際に 5 本走った）。
+        static ACP_PROBE_CLAIMED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         if let Ok(probe) = std::env::var("NECODER_ACP_PROBE") {
-            if !probe.trim().is_empty() {
+            if !probe.trim().is_empty()
+                && !ACP_PROBE_CLAIMED.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
                 cx.spawn(async move |panel, cx| {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(500))
@@ -1821,7 +1827,12 @@ impl AgentPanel {
 
     /// Elicitation の選択肢を1つ選ぶ（アクティブスレッド）。単一フィールドの質問（4 択）は
     /// **選んだ瞬間に確定送信**、複数フィールドなら選択を貯めて「これで回答」で確定する。
-    fn choose_elicitation_option(&mut self, field_name: String, value: String, cx: &mut Context<Self>) {
+    fn choose_elicitation_option(
+        &mut self,
+        field_name: String,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
         let single_field = if let Some(thread) = self.threads.get_mut(self.active) {
             let Some(pending) = thread.pending_elicitation.as_mut() else {
                 return;
@@ -1841,15 +1852,12 @@ impl AgentPanel {
     /// Elicitation を確定送信する（全フィールド選択済みの時のみ Accept を返す）。
     fn submit_elicitation(&mut self, cx: &mut Context<Self>) {
         if let Some(thread) = self.threads.get_mut(self.active) {
-            let all_selected = thread
-                .pending_elicitation
-                .as_ref()
-                .is_some_and(|pending| {
-                    pending
-                        .fields
-                        .iter()
-                        .all(|field| pending.selections.contains_key(&field.name))
-                });
+            let all_selected = thread.pending_elicitation.as_ref().is_some_and(|pending| {
+                pending
+                    .fields
+                    .iter()
+                    .all(|field| pending.selections.contains_key(&field.name))
+            });
             if !all_selected {
                 return; // 未選択のフィールドがある＝まだ確定しない
             }
@@ -2413,7 +2421,7 @@ impl AgentPanel {
             composer.set_accent(color, cx);
         });
         self.sync_running_registry(cx); // Done 解除をロールアップ（フッター/レール/⌘O）へ反映
-        // 切替先が idle で送信待ちを持っていれば流す（裏で完了したスレッドのキューをここで消化）。
+                                        // 切替先が idle で送信待ちを持っていれば流す（裏で完了したスレッドのキューをここで消化）。
         self.flush_queued_prompt(cx);
         cx.notify();
     }
@@ -4067,8 +4075,7 @@ impl AgentPanel {
                             let remaining = target - panel.live_reveal;
                             // 初速を上げ末尾でも 16 文字/40ms（＝400 字/秒）＝ ACP の到着に UI が遅れない。
                             let step = (remaining / 3).max(16);
-                            panel.live_reveal =
-                                panel.live_reveal.saturating_add(step).min(target);
+                            panel.live_reveal = panel.live_reveal.saturating_add(step).min(target);
                             panel.follow_transcript_if_at_bottom();
                             cx.notify();
                         }
@@ -6001,6 +6008,32 @@ impl AgentPanel {
                     .h(px(1.))
                     .bg(theme.border)
                     .into_any_element(),
+                // transcript は選択リージョン機構（M13）と結合するため v1 はテキスト表現に留める
+                // （パス/URL が ⌘C で取れる方が実用的。インライン画像描画は .md プレビュー側）。
+                markdown::Block::Image { source, alt } => {
+                    let label: SharedString = if alt.is_empty() {
+                        source.into()
+                    } else {
+                        format!("{alt} — {source}").into()
+                    };
+                    let link = (
+                        0..label.len(),
+                        HighlightStyle {
+                            color: Some(theme.syntax.function),
+                            ..Default::default()
+                        },
+                    );
+                    div()
+                        .flex()
+                        .gap(px(7.))
+                        .child(div().flex_none().text_color(theme.fg2).child("🖼"))
+                        .child(div().flex_1().min_w_0().child(self.push_selectable(
+                            label,
+                            vec![link],
+                            cx,
+                        )))
+                        .into_any_element()
+                }
             })
             .collect()
     }
@@ -6422,9 +6455,7 @@ impl AgentPanel {
                     .text_size(px(11.))
                     .text_color(if all_selected { theme.fg0 } else { theme.fg2 })
                     .when(all_selected, |element| {
-                        element
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.bg3))
+                        element.cursor_pointer().hover(|style| style.bg(theme.bg3))
                     })
                     .child(SharedString::from(i18n::t!("agent.elicitation_submit")))
                     .on_mouse_down(
@@ -7181,7 +7212,12 @@ struct MascotAtlases {
 /// 最初から `include_bytes!` で埋め込んでいたので、マスコットだけが取り残されていた。
 macro_rules! mascot_bytes {
     ($name:literal) => {
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mascot/", $name)).as_slice()
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/mascot/",
+            $name
+        ))
+        .as_slice()
     };
 }
 
@@ -8437,7 +8473,9 @@ mod tests {
         let copied = panel.update(cx, |panel, _cx| {
             assert!(panel.live_reveal >= 300, "長い新ストリームは即全開示される");
             let regions = panel.transcript_regions.borrow();
-            let live = regions.last().expect("生成中の本文が選択可能リージョンに載る");
+            let live = regions
+                .last()
+                .expect("生成中の本文が選択可能リージョンに載る");
             assert_eq!(
                 live.text.as_ref(),
                 live_text,
