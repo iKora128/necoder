@@ -19,7 +19,8 @@ pub(crate) use futures::StreamExt as _; // LSP 通知 pump の `.next()`
 pub(crate) use git_ui::{BranchMenu as BranchMenuState, GitPanel, RepositorySnapshot};
 pub(crate) use gpui::{
     actions, div, point, prelude::*, px, size, svg, Animation, AnimationExt, App, Bounds,
-    ClipboardItem, Context, CursorStyle, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    ClickEvent, ClipboardItem, Context, CursorStyle, Div, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable,
     FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Point, SharedString, Stateful, StyleRefinement, Subscription, TitlebarOptions,
     Window, WindowBounds, WindowControlArea, WindowOptions,
@@ -207,6 +208,10 @@ pub(crate) enum PickerMode {
     /// 「＋」統一オープン: 開く系アクション + 最近（local/remote 混在）。id は `picker_open_rows` の添字。
     OpenLauncher,
 }
+
+/// ⌘P の作成アクション行の id（空プロジェクト用）。ファイル添字（最大 50k）と衝突しない番兵値。
+pub(crate) const FINDER_ACTION_NEW_FILE: usize = usize::MAX - 1;
+pub(crate) const FINDER_ACTION_NEW_DIR: usize = usize::MAX;
 
 const RAIL_WIDTH: f32 = 46.0;
 const DOCK_WIDTH: f32 = 218.0;

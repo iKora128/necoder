@@ -564,7 +564,8 @@ impl AgentKind {
 
     /// 対話も子プロセス起動もしない軽量判定。composer の初回 render から呼ばれるため、
     /// ファイル存在と環境変数だけを見る。status/probe は明示的な背景 refresh に分離する。
-    fn configured_auth_state(&self) -> AgentAuthState {
+    /// 設定画面の導入/ログイン後ポーリング（変化検知）もこの軽さを前提に毎秒呼ぶ。
+    pub fn configured_auth_state(&self) -> AgentAuthState {
         if !self.cli_installed() {
             return AgentAuthState::SignedOut;
         }

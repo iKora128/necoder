@@ -1706,6 +1706,27 @@ pub fn rename_local(from: &Path, to: &Path) -> Result<()> {
         .with_context(|| format!("リネームに失敗: {} → {}", from.display(), to.display()))
 }
 
+/// 外部（Finder D&D 等）から `target_dir` の中へコピーする（ファイル/フォルダ再帰・
+/// 同名が既に居ればエラー＝上書きしない）。元は動かさない（移動ではなくコピー＝安全側）。
+pub fn copy_into_local(source: &Path, target_dir: &Path) -> Result<PathBuf> {
+    let name = source
+        .file_name()
+        .with_context(|| format!("名前が取れない: {}", source.display()))?;
+    let destination = target_dir.join(name);
+    anyhow::ensure!(
+        !destination.exists(),
+        "既に存在する: {}",
+        destination.display()
+    );
+    if source.is_dir() {
+        copy_dir_recursive(source, &destination)?;
+    } else {
+        std::fs::copy(source, &destination)
+            .with_context(|| format!("コピーに失敗: {}", source.display()))?;
+    }
+    Ok(destination)
+}
+
 /// 複製する。`name.ext` → `name copy.ext`（衝突したら `name copy 2.ext`…）。フォルダは再帰コピー。
 pub fn duplicate_local(path: &Path) -> Result<PathBuf> {
     let parent = path.parent().context("親フォルダが無い")?;
@@ -2071,6 +2092,16 @@ mod tests {
         assert_eq!(copy2.file_name().unwrap().to_str().unwrap(), "b copy 2.rs");
         // 上書き拒否
         assert!(rename_local(&copy1, &copy2).is_err());
+
+        // 外部からのコピー（Finder D&D）: ファイル・フォルダ再帰・同名は拒否。
+        let inbox = dir.join("inbox");
+        create_dir_local(&inbox).unwrap();
+        let copied = copy_into_local(&renamed, &inbox).unwrap();
+        assert_eq!(copied, inbox.join("b.rs"));
+        assert!(copied.is_file() && renamed.is_file()); // 元は残る（移動ではなくコピー）
+        assert!(copy_into_local(&renamed, &inbox).is_err()); // 同名は上書きしない
+        let copied_dir = copy_into_local(&folder, &inbox).unwrap();
+        assert!(copied_dir.join("b.rs").is_file()); // フォルダは中身ごと
 
         let _ = std::fs::remove_dir_all(&dir);
     }

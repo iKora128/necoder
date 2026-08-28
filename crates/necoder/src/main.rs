@@ -804,6 +804,37 @@ fn main() {
                         .detach();
                     }
                 }
+                // 開発用: NECODER_FINDER_PROBE=1 で ⌘P ファイルファインダを開く（2s 後・
+                // 空プロジェクトの作成アクション検証）。NECODER_FINDER_CONFIRM=1 で先頭候補の確定まで通す。
+                if std::env::var("NECODER_FINDER_PROBE").is_ok_and(|v| v == "1") {
+                    let confirm = std::env::var("NECODER_FINDER_CONFIRM").is_ok_and(|v| v == "1");
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_file_finder_probe(confirm, window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: NECODER_DROP_PROBE="move:<src>:<dir>"|"copy:<絶対src>:<dir>" で
+                // エクスプローラ D&D の落着処理を直接叩く（2s 後・配線検証）。
+                if let Ok(spec) = std::env::var("NECODER_DROP_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_drop_probe(&spec, window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
                 // 開発用: NECODER_TODOS_PROBE=1 で Todo ボードを開く（2s 後・M12-10 の描画検証）。
                 if std::env::var_os("NECODER_TODOS_PROBE").is_some() {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {

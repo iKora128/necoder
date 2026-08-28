@@ -3132,7 +3132,11 @@ impl AgentPanel {
             .text_size(px(11.))
             .text_color(label_color)
             .when(is_open, |element| element.bg(theme.bg2))
-            .child(value)
+            // エージェントピルだけブランドバッジ（タブ / List 行と同一在庫）。開かなくても宛先が一目になる。
+            .when(selector == Selector::Agent, |element| {
+                element.child(agent_badge(&value, 12.))
+            })
+            .child(value.clone())
             .tooltip(Tooltip::text(tip, theme.clone()));
         if !locked {
             pill = pill
@@ -3204,6 +3208,7 @@ impl AgentPanel {
                             .id(("selector-option", option_index))
                             .flex()
                             .items_center()
+                            .gap(px(6.))
                             .px(px(9.))
                             .py(px(5.))
                             .rounded(px(5.))
@@ -3212,6 +3217,10 @@ impl AgentPanel {
                             .cursor_pointer()
                             .when(selected, |element| element.bg(theme.bg3))
                             .hover(|style| style.bg(theme.bg3))
+                            // エージェント選択だけブランドバッジ付き（Mode/Model/Effort は文字のみ）
+                            .when(selector == Selector::Agent, |element| {
+                                element.child(agent_badge(&option, 14.))
+                            })
                             .child(option.clone())
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -7621,7 +7630,7 @@ pub fn working_spinner(
         .into_any_element()
 }
 
-/// スレッドが話すエージェントのブランドアイコン（タブ / List 行用）。ブランド在庫が無いものは
+/// スレッドが話すエージェントのブランドアイコン（タブ / List 行 / composer のエージェントピル・選択メニュー用）。ブランド在庫が無いものは
 /// モノグラム角丸で代替（設定画面と同じ見た目・出所は `AgentKind::brand`）。アイコン＝「どのエージェントか」
 /// の識別で、スレッド色（＝どのスレッドか）とは別軸。svg は親の text_color を継承しないので直接指定する。
 pub fn agent_badge(label: &str, size: f32) -> gpui::AnyElement {

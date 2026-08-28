@@ -293,6 +293,67 @@ impl Workspace {
         self.open_project_switcher(&ProjectSwitcher, window, cx);
     }
 
+    /// 開発用: ⌘P ファイルファインダを開く（`NECODER_FINDER_PROBE`・空プロジェクトの
+    /// 作成アクション検証）。`confirm` = 列挙が終わって picker が開いた頃（700ms 後）に
+    /// 先頭候補を確定する（空プロジェクトなら「新規ファイル…」→ 命名行が出るところまで通す）。
+    #[cfg(debug_assertions)]
+    pub fn debug_file_finder_probe(
+        &mut self,
+        confirm: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_file_finder(&FileFinder, window, cx);
+        if !confirm {
+            return;
+        }
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
+        };
+        cx.spawn(async move |_workspace, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(700))
+                .await;
+            let _ = handle.update(cx, |workspace, _window, cx| {
+                if let Some(picker) = workspace.overlays.picker.clone() {
+                    picker.update(cx, |picker, cx| picker.confirm_selected(cx));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 開発用: エクスプローラ D&D の落着処理を直接叩く（`NECODER_DROP_PROBE`）。
+    /// `"move:<src>:<dir>"` = 内部移動・`"copy:<絶対src>:<dir>"` = Finder からのコピー。
+    /// src/dir はプロジェクト相対（copy の src は絶対）・dir 空 = ルート。
+    /// ドラッグのジェスチャ（drag_over ハイライト）自体は実マウスでしか出ないので実機で見る。
+    #[cfg(debug_assertions)]
+    pub fn debug_drop_probe(&mut self, spec: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self
+            .active_worktree()
+            .map(|worktree| worktree.root().to_path_buf())
+        else {
+            return;
+        };
+        let dir_of = |dir: &str| {
+            if dir.is_empty() {
+                root.clone()
+            } else {
+                root.join(dir)
+            }
+        };
+        let parts: Vec<&str> = spec.splitn(3, ':').collect();
+        match parts[..] {
+            ["move", source, dir] => {
+                self.move_entry_by_drop(root.join(source), dir_of(dir), window, cx)
+            }
+            ["copy", source, dir] => {
+                self.copy_external_paths_by_drop(&[PathBuf::from(source)], dir_of(dir), cx)
+            }
+            _ => eprintln!("NECODER_DROP_PROBE が不正: {spec:?}"),
+        }
+    }
+
     /// 開発用: ⌘⇧P を開き、query で絞り込む（M13 のオフスクリーン検証）。
     /// `confirm` なら先頭候補を確定 = 実際にアクションが dispatch されるところまで通す。
     #[cfg(debug_assertions)]

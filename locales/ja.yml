@@ -11,6 +11,8 @@ common:
 finder:
   files: ファイルを検索…
   projects: プロジェクトを切り替え…
+  new_file: 新規ファイル…
+  new_dir: 新規フォルダ…
 agent:
   error_prefix: "エラー: %{message}"
   history_archived_mark: ·閉
@@ -414,6 +416,7 @@ explorer:
   ctx_reveal: Finder で表示
   ctx_new_file: 新規ファイル
   ctx_new_dir: 新規フォルダ
+  drop_exists: 同じ名前の項目が移動先にあります
   ctx_rename: 名前を変更…
   ctx_duplicate: 複製
   ctx_trash: ゴミ箱に入れる

@@ -2138,3 +2138,38 @@
   全部ここを読む）と Blocked の許可 digest で先頭行 + 100 字に畳む。単体テスト追加
 - 罠: この環境は CLT のみで metal シェーダをコンパイルできず `cargo check` すら通らない
   （gpui_apple の build.rs で停止・既知）。composer 変更は定数 1 個だが実機目視は metal のある環境で
+
+## 2026-08-28 — 設定: 導入/ログイン後の「利用可能」反映ラグを解消
+- やったこと: エージェントの「導入」を押して npm install が終わっても、設定を閉じて開き直すまで「未導入」のままだった件を修正。原因は (1) `refresh_availability` が設定を開いた時にしか走らない (2) 導入ターミナルは `<cmd>; exec $SHELL -l` でシェルに落ちるため終了イベントが取れない、の合わせ技。導入/ログインボタン押下後だけ 1 秒間隔の軽量見張り（`cli_installed` の PATH stat + `configured_auth_state` のファイル/env 判定のみ・子プロセス無し・10 分上限・agent ごとの多重起動ガード）を回し、変化を検知した瞬間にフル `refresh_availability` へ切替える方式に。変更: `settings.rs`（`watching_agents` / `watch_agent_progress` / `agent_action_button` 配線）+ `acp_client::configured_auth_state` を pub 化。ログイン後（資格情報ファイル出現）も同じ仕組みで拾える
+- 学び/罠: **metal 無し環境でも `cargo check -p necoder --features gpui_platform/runtime_shaders` なら通る**（gpui_apple のビルド時シェーダコンパイルを飛ばせる。「cargo check すら通らない」の回避策）。`cargo test -p <crate> --features gpui_platform/runtime_shaders` も同様。なお 7/11 の「Metal Toolchain 導入済み」は別 PC の話で、この環境はもともと metal 無し（ユーザー確認済み・消えたわけではない）。実機ビルド/スクショは metal のある環境で
+- 次: metal のある状態で実機確認（未導入の CLI を導入 → 完了から数秒で「利用可能」へ変わること）
+
+## 2026-08-28 — ⌘P: 空プロジェクトで「新規ファイル/フォルダ」作成アクション
+- やったこと: 空のプロジェクトで ⌘P を開くと項目ゼロで何も出来なかった件（ユーザー要望）。列挙 0 件かつ local のとき、Picker に「新規ファイル… / 新規フォルダ…」の 2 行を出し、確定でエクスプローラの既存インライン命名（`start_naming`・root 起点）へ繋ぐ（左ドックが閉じていれば開く）。id はファイル添字（最大 50k）と衝突しない番兵値 `FINDER_ACTION_NEW_FILE/NEW_DIR`（`usize::MAX-1`/`MAX`・⌘O の `1000+` と同じ「ホストが id を解釈する」流儀）。変更: `overlays.rs`（open_file_finder + Files 確定分岐）/ `workspace.rs`（番兵定数）/ `locales/{ja,en}.yml`（`finder.new_file`/`new_dir`）/ UI-SPEC §7 に ⌘P の項を追記
+- 学び/罠: remote はファイル操作未対応（M10 の制約・エクスプローラ右クリックと同じ）なので作成行は local 限定で出す。metal 無し環境のため実機スクショ未（check/test は runtime_shaders 回避で緑）
+- 次: metal のある環境で空フォルダを開いて ⌘P → 作成行 → 命名 → ファイルが開くまでを目視確認
+
+## 2026-08-28 — エクスプローラ: Finder 風の D&D 移動（3ビュー）
+- やったこと: エクスプローラ内のドラッグ&ドロップでファイル/フォルダを移動できるように（ユーザー要望・Finder 風）。`DraggedFile` に移動元絶対パス `source` を追加（composer @メンションと同じドラッグの別の受け先という設計・payload 共通）。受け側: フォルダ行/セル=その中へ（識別色 16% 面）・余白=そのビューの文脈フォルダ（ツリー=ルート / カラム=その段 / アイコン=現在フォルダ・6% 面）・ツリーのファイル行=同じフォルダへ。移動本体は `move_entry_by_drop`（explorer_controller）: 同じ親/自分自身/配下への drop は no-op・同名は toast で断る（タブを閉じる**前**に判定）・移動対象配下の開いているタブは閉じてから `rename_local`。フォルダ行/セルもドラッグ可能になった（composer に落とすとフォルダ @メンション）。UI-SPEC §4 に受け面仕様を追記
+- 学び/罠: gpui の `on_drop` は MouseUp bubble で最内 hitbox が先に消費して `stop_propagation` + `active_drag.take()` するので、行→背景の入れ子ドロップは素直に書ける。`drag_over` のスタイルクロージャは `'static`（色は Copy の Hsla を move で捕まえる）。`rename_local` は既存で上書き拒否済み
+- 次: metal のある環境で 3 ビューの drop 面（16%/6%）と移動動作を目視確認。remote の Host ファイル操作（M13）が入ったら local ゲートを外す
+
+## 2026-08-28 — composer: Agent ピル/選択メニューにブランドバッジ
+- やったこと: エージェント選択が文字だけで見分けにくい件（ユーザー要望）。既存の `agent_badge`（スレッドタブ / List 行と同一在庫＝`AgentKind.icon`・無ければモノグラム角丸）を composer の Agent ピル（12px）と選択メニューの各行（14px・行 gap 6px）に置いた。Mode/Model/Effort のピル/メニューは文字のまま。変更: `agent_panel.rs`（`render_selector_pill` / `render_selector_menu`）/ UI-SPEC §6 sticky 節に一行追記
+- 学び/罠: なし（check/test は runtime_shaders 回避で緑・既知の手順どおり）
+- 次: metal のある環境でピルとメニューのバッジ表示を目視確認（Codex/Grok はモノグラム `>_`/`G` になること・ピル 12px が細身デザインで浮かないこと）
+
+## 2026-08-28 — エクスプローラ: Finder からの D&D 追加（コピー）
+- やったこと: Finder からエクスプローラへファイル/フォルダを落とすと**コピーで追加**できるように（ユーザー指摘: 外部からの D&D が未対応だった）。受け面は内部移動と完全に同じ（フォルダ行/セル=その中・余白=文脈フォルダ）で、`drop_into` ヘルパーに `DraggedFile`（移動）と `ExternalPaths`（コピー）の両受けを集約 — 前セッションの 6 箇所の重複配線もこれで畳んだ。コピー本体は `project::copy_into_local`（フォルダ再帰・同名拒否＝上書きしない・元は動かさない=VSCode と同じ安全側）+ `copy_external_paths_by_drop`（controller・複数パス対応・最初のエラーだけ toast）。単体テスト追加（file_operations_create_rename_duplicate に外部コピー 4 assert）
+- 学び/罠: gpui は同一要素に**型別の on_drop を複数**登録できる（dispatch は TypeId 一致だけ消費）。`ExternalPaths.paths()` は `&[PathBuf]`。大きいフォルダのコピーは同期 I/O（複製と同じ制約・気になったら背景化）
+- 次: metal のある環境で Finder → 3 ビューへのドロップを目視確認（受け面のハイライトとコピー結果）
+
+## 2026-08-28 — エクスプローラ D&D / 空⌘P をオフスクリーン実機検証・click 化
+- やったこと: 「やりきって」の指示で、metal 無しを理由に見送っていた実機検証を**この環境で**完了。(1) `NECODER_SCREENSHOT` + `--features screenshot,runtime-shaders` は metal 無しでも起動・撮影できる（screenshot-app.sh が既に同じ逃げ道を持っていた）。`NECODER_HOME=/tmp/...` で状態を隔離し、引数でフォルダを渡せば保存状態も読まない＝ユーザーデータ無傷で検証できる。(2) プローブ 2 本を追加: `NECODER_FINDER_PROBE`/`NECODER_FINDER_CONFIRM`（⌘P を開く→先頭確定）と `NECODER_DROP_PROBE="move:src:dir"|"copy:abs:dir"`（D&D の落着処理を直接叩く）。検証結果は全部 OK: 空⌘P の作成 2 行（選択面）→確定で命名行 / move がディスク+ツリーに反映 / copy は元を残して追加 / 同名は toast「既に存在する」/ 同じ親・自分自身への drop はディスク不変 / 非空⌘P に作成行は混ざらない。(3) 行/セルの開く・開閉を on_mouse_down → **on_click** に変更 — 掴んだ瞬間にフォルダが開閉/ファイルが開く癖を解消（gpui はドラッグ成立（2px）で `pending_mouse_down.take()` ＝クリック合成を破棄する。div.rs で確認）
+- 学び/罠: agent_panel の「on_drag がクリック合成を握り潰す」コメントは**微動クリック（>2px）が drag に化ける**ケースの話で、静止クリックは on_click で普通に届く。⌘P の列挙は背景 spawn なので FINDER_CONFIRM は 700ms 遅らせて picker を確定する。スクショの「@ms」表示は撮影ループ基準で遅延を含まない（惑わされない）
+- 次: 実マウスの drag_over ハイライト（16%/6% 面）だけ人の手で一度確認（合成イベントは Accessibility 権限が要るため自動化しない）
+
+## 2026-08-28 — スレッド履歴をアクティブプロジェクトに絞る（全プロジェクト混在の修正）
+- やったこと: スレッド履歴 Picker（⌘⇧H・#5）が**全プロジェクトのスレッドを混在表示**していた件（ユーザー報告）。DB でも Turso でもなく読み側の問題 — threads テーブルは最初から project（スコープ）列を持ち、Agent パネルの復元（`set_storage_for_scope`）は絞っていたのに、履歴だけ `load_all_threads()` を無絞り込みで出していた。`open_thread_history` に同じ絞り込み（TaskSpace stable id + 旧版が表示名で保存した行の移行フォールバック）を追加。プロジェクト名は全行同じになるので detail から外した（新形式の行は不透明な space-id が出ていたのも解消）。検証: 隔離 DB（NECODER_HOME）に sqlite3 で他プロジェクト 2 行（通常+アーカイブ）を直接差し込み → NECODER_HISTORY_PROBE で自プロジェクトの 3 行（現行スコープ・アーカイブ済・旧表示名形式）だけが出ることをスクショで目視確認
+- 学び/罠: necoder.db は libsql だが sqlite3 CLI でそのまま読み書きできる（検証データの種付けに便利）。スコープ文字列は `space-<hash>`（SpaceId＝stable_worktree_id）で、branch 違いの worktree は別スコープ＝履歴もパネルと同じ worktree 単位になる
+- 次: 無し（この件は完結）
