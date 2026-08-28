@@ -33,7 +33,7 @@ impl Workspace {
                 // 避ける。ファイル操作は local のみ（M10・エクスプローラの右クリックと同じ制約）。
                 let is_local = workspace
                     .active_worktree()
-                    .map(|worktree| !worktree.host().is_remote())
+                    .map(|worktree| !worktree.is_remote())
                     .unwrap_or(false);
                 if items.is_empty() && is_local {
                     items.push(PickerItem::new(

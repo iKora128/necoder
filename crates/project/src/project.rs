@@ -65,6 +65,10 @@ pub struct Worktree {
     host: Arc<dyn Host>,
     root: PathBuf,
     ignore: Gitignore,
+    /// `host.is_remote()` のキャッシュ。Render は Host を一切呼ばない規律
+    /// （workspace の render 監査テストが呼び出しゼロを強制する）ため、
+    /// render から参照する判定はここを使う。
+    remote: bool,
 }
 
 impl Worktree {
@@ -94,11 +98,22 @@ impl Worktree {
         }
         let ignore = builder.build().unwrap_or_else(|_| Gitignore::empty());
 
-        Ok(Worktree { host, root, ignore })
+        let remote = host.is_remote();
+        Ok(Worktree {
+            host,
+            root,
+            ignore,
+            remote,
+        })
     }
 
     pub fn host(&self) -> &Arc<dyn Host> {
         &self.host
+    }
+
+    /// remote host 上の worktree か（構築時キャッシュ・render から呼んでよい）。
+    pub fn is_remote(&self) -> bool {
+        self.remote
     }
 
     pub fn root(&self) -> &Path {

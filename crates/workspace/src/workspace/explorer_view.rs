@@ -185,7 +185,7 @@ impl Workspace {
                 elements.push(self.render_naming_row(row.depth + 1, cx));
             }
         }
-        let is_local = !slot.worktree.host().is_remote();
+        let is_local = !slot.worktree.is_remote();
         div()
             // 横スクロール可（VSCode/Zed 方式）。深い階層はインデントで右に押し出されるが、
             // 行は自然幅（min_w_full）＝切らずに全部並べ、あふれた分は横スクロールで読む。
@@ -285,7 +285,7 @@ impl Workspace {
                 )
                 // D&D の受け（local のみ）: フォルダ行 = その中へ（濃い面）・ファイル行 =
                 // 同じフォルダへ（Finder のリスト表示と同じ・淡い面）。
-                .when(!slot.worktree.host().is_remote(), |element| {
+                .when(!slot.worktree.is_remote(), |element| {
                     let drop_dir = if is_dir {
                         row.path.clone()
                     } else {
@@ -375,7 +375,7 @@ impl Workspace {
         let theme = self.theme.clone();
         let root = slot.worktree.root().to_path_buf();
         let color = slot.color;
-        let is_local = !slot.worktree.host().is_remote();
+        let is_local = !slot.worktree.is_remote();
         let dir = slot
             .explorer
             .current_dir
@@ -517,7 +517,7 @@ impl Workspace {
                         let entries = slot.listed_dir(dir);
                         // このカラムで選択中（＝連鎖の次の段）のパス。
                         let selected_child = chain.get(column_index + 1).cloned();
-                        let is_local = !slot.worktree.host().is_remote();
+                        let is_local = !slot.worktree.is_remote();
                         let color = slot.color;
                         div()
                             .w(px(150.))

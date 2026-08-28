@@ -8599,7 +8599,7 @@ mod tests {
             );
         });
         assert_eq!(
-            respond_rx.try_next().ok().flatten(),
+            respond_rx.try_recv().ok(),
             Some(1),
             "Allow の添字で即応答する"
         );
@@ -8639,7 +8639,7 @@ mod tests {
             );
         });
         assert_eq!(
-            respond_rx.try_next().ok().flatten(),
+            respond_rx.try_recv().ok(),
             Some(1),
             "Allow の添字で応答する"
         );

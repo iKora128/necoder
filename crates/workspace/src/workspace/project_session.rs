@@ -208,7 +208,7 @@ impl Workspace {
             return;
         };
         for slot in &mut self.project_sessions.projects {
-            if !slot.worktree.host().is_remote() {
+            if !slot.worktree.is_remote() {
                 continue;
             }
             let key = slot.worktree.host().display_name().to_string();
@@ -819,7 +819,7 @@ impl Workspace {
                     workspace.restore_task_spaces(cx);
                     if let Some(storage) = &workspace.persistence.storage {
                         for slot in &workspace.project_sessions.projects {
-                            if !slot.worktree.host().is_remote() {
+                            if !slot.worktree.is_remote() {
                                 let _ = storage.record_local_project(
                                     &slot.worktree.root().to_string_lossy(),
                                     slot.name.as_ref(),
