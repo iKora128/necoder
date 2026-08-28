@@ -2227,3 +2227,11 @@
 - やったこと: スレッド履歴 Picker（⌘⇧H・#5）が**全プロジェクトのスレッドを混在表示**していた件（ユーザー報告）。DB でも Turso でもなく読み側の問題 — threads テーブルは最初から project（スコープ）列を持ち、Agent パネルの復元（`set_storage_for_scope`）は絞っていたのに、履歴だけ `load_all_threads()` を無絞り込みで出していた。`open_thread_history` に同じ絞り込み（TaskSpace stable id + 旧版が表示名で保存した行の移行フォールバック）を追加。プロジェクト名は全行同じになるので detail から外した（新形式の行は不透明な space-id が出ていたのも解消）。検証: 隔離 DB（NECODER_HOME）に sqlite3 で他プロジェクト 2 行（通常+アーカイブ）を直接差し込み → NECODER_HISTORY_PROBE で自プロジェクトの 3 行（現行スコープ・アーカイブ済・旧表示名形式）だけが出ることをスクショで目視確認
 - 学び/罠: necoder.db は libsql だが sqlite3 CLI でそのまま読み書きできる（検証データの種付けに便利）。スコープ文字列は `space-<hash>`（SpaceId＝stable_worktree_id）で、branch 違いの worktree は別スコープ＝履歴もパネルと同じ worktree 単位になる
 - 次: 無し（この件は完結）
+
+## 2026-08-28 — ターミナル: スクロールバック閲覧（ホイール対応）+ v0.1.5 合流
+- やったこと: ターミナルが上へスクロールできない件（ユーザー報告）。`scrolling_history: 10_000` は設定済みなのに **ScrollWheel を一切拾っていなかった**のが原因。`div().on_scroll_wheel` → `wheel_lines`（1 行未満の端数持ち越し）→ 通常画面は `Term::scroll_display(Scroll::Delta)`、代替画面（less/vim・履歴なし）は ALTERNATE_SCROLL に従い ↑/↓ を行数ぶん送る。タイプ・ペースト・IME 確定で `Scroll::Bottom` へ復帰。描画は `TerminalContent`/`TerminalPrepaint` に `display_offset` を持たせ、グリッド行 → 表示行を `row_y` で写像（選択面・背景セル・文字・カーソル・file:line リンクの当たり判定）。閲覧中に下へはみ出すカーソルは面外ガード。単体テスト 2 本（端数畳み / vte parser 経由の scroll_display とクランプ）
+- あわせて: 今朝の未コミット 7 件をコミット → **origin/main（v0.1.5・別マシンからリリース済み）を merge**（衝突は JOURNAL のみ・時系列で両取り）→ 本修正を合流。check/test 緑
+- 学び/罠: 別セッションの調査で見つけた**未修正バグ 2 群**をここに記録:
+  1. **checkpoint 巻き戻しがファイルを破壊する**: agent_panel の PermissionRequest スナップショットが `diff.old_text` を「変更前の全文」として保存するが、Edit ツールの oldText は**置換ハンクの断片**。restore がそれを全文としてディスクへ書き戻す（今日 agent_panel.rs が 8700 行 → 5 行になる実害。`git checkout` + 編集再適用で復旧済み）。修正方向: old_text を信じず**スナップショット時に常にディスクから全文を読む**
+  2. **bypass permissions が効かないレース×2**: (a) セッションは初回送信時の遅延起動で Prompt が SetMode より先にキューへ並ぶ＝**新規タブの初回ターンは必ずエージェント既定モード**で走る (b) acp_client はターン中の SetMode を deferred に積む＝ターンが畳まれるまで送られない（許可待ちで止まると手動で答えるまで bypass が届かない）。ピルは楽観更新なので効いて見える。修正方向: session/new 直後・初回 Prompt 前に希望モードを set_mode / SetMode は Cancel 同様ターン中も即送 / bypass 中に PermissionRequest が来たら UI 側で自動 Allow
+- 次: metal のある環境でホイール/トラックパッドのスクロールと less/vim（代替画面）の挙動を目視確認。上記バグ 2 群の修正
