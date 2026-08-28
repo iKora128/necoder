@@ -109,6 +109,15 @@ Development docs are primarily in Japanese; the UI is fully bilingual (ja/en).
 - Contributions are welcome — read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. **All contributions require signing the [CLA](CLA.md)** (a bot guides you on your first PR); this keeps future licensing options (including dual licensing) with the maintainer.
 - Bundled fonts are OFL-1.1 ([`assets/fonts/`](assets/fonts/README.md)); icons are Lucide (ISC) and Simple Icons (CC0) ([`crates/necoder/assets/icons/LICENSE.md`](crates/necoder/assets/icons/LICENSE.md)).
 
+## Code signing policy
+
+- **macOS** — release builds are signed with the maintainer's Apple Developer ID and notarized by Apple.
+- **Windows** — free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+**Team and roles.** necoder is developed and released by its maintainer, Daichi Nagashima ([@iKora128](https://github.com/iKora128)), who acts as committer, reviewer and approver for signed releases. All release binaries are built from this public repository by GitHub Actions ([`release.yml`](.github/workflows/release.yml)) on version tags, and each signing request is approved manually.
+
+**Privacy.** necoder does not collect or transmit any user data — no telemetry, ever. The only network requests are the ones you initiate yourself (your AI agents, your SSH hosts) and a version check against GitHub Releases.
+
 ---
 
 # 日本語
@@ -210,3 +219,12 @@ SSH 経路全体をローカルで試すには `./scripts/test-remote-ssh-docker
 - **AGPL-3.0-or-later**([LICENSE](LICENSE))。全コードは自作、または permissive な依存(GPUI は Apache-2.0)の上に書かれています。**他エディタからの GPL コード移植はありません** — 手法を学び、実装は自前。CI が依存ライセンスを監査します([cargo-deny](deny.toml))。経緯: [`docs/DECISIONS.md`](docs/DECISIONS.md) §5
 - コントリビュート歓迎 — まず [`CONTRIBUTING.md`](CONTRIBUTING.md) をお読みください。**全てのコントリビュートに [CLA](CLA.md) への署名が必要**です(初回 PR で bot が案内)。将来のライセンス選択肢(デュアルライセンス含む)をメンテナに残すためです
 - 同梱フォントは OFL-1.1([`assets/fonts/`](assets/fonts/README.md))、アイコンは Lucide(ISC)と Simple Icons(CC0)([`crates/necoder/assets/icons/LICENSE.md`](crates/necoder/assets/icons/LICENSE.md))
+
+## コード署名ポリシー
+
+- **macOS** — リリースビルドはメンテナの Apple Developer ID で署名し、Apple の公証を受けています
+- **Windows** — コード署名は [SignPath.io](https://signpath.io) の無償提供、証明書は [SignPath Foundation](https://signpath.org) によるものです
+
+**体制**: necoder はメンテナの長嶋大地([@iKora128](https://github.com/iKora128))が開発・リリースし、署名リリースの committer / reviewer / approver を兼ねます。リリースバイナリは全てこの公開リポジトリのバージョンタグから GitHub Actions([`release.yml`](.github/workflows/release.yml))でビルドされ、署名リクエストは毎回手動で承認します。
+
+**プライバシー**: necoder はユーザーデータを一切収集・送信しません(テレメトリなし)。通信は自分で開始するもの(エージェント・SSH ホスト)と GitHub Releases への更新チェックのみです。
