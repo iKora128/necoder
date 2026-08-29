@@ -3054,6 +3054,25 @@ impl AgentPanel {
                             .unbounded_send(SessionCommand::SetMode(mode_id))
                             .ok();
                     }
+                    // 承認待ちの最中に bypass へ切り替えたら、その場で Allow を返す。
+                    // `set_mode` はターン中 deferred（acp_client）で今のターンには効かないため、
+                    // ここで畳まないと「bypass にしたのに止まったまま」になる。checkpoint は
+                    // リクエスト受信時に記録済み＝手動 Allow と同じ一本道。
+                    if value.to_lowercase().contains("bypass") {
+                        if let Some(pending) = thread.pending_permission.take() {
+                            let choice = pending
+                                .options
+                                .iter()
+                                .position(|option| {
+                                    matches!(
+                                        option.kind,
+                                        PermissionKind::Allow | PermissionKind::AllowAlways
+                                    )
+                                })
+                                .unwrap_or(0);
+                            pending.respond.unbounded_send(choice).ok();
+                        }
+                    }
                 }
                 Selector::Model => {
                     thread.model = value.clone();
@@ -3065,6 +3084,7 @@ impl AgentPanel {
                 }
             }
         }
+        self.sync_running_registry(cx); // bypass 切替で承認待ちを畳んだ場合の Blocked 表示更新
         self.open_menu = None;
         cx.notify();
     }
@@ -3140,7 +3160,11 @@ impl AgentPanel {
             .text_size(px(11.))
             .text_color(label_color)
             .when(is_open, |element| element.bg(theme.bg2))
-            .child(value)
+            // エージェントピルだけブランドバッジ（タブ / List 行と同一在庫）。開かなくても宛先が一目になる。
+            .when(selector == Selector::Agent, |element| {
+                element.child(agent_badge(&value, 12.))
+            })
+            .child(value.clone())
             .tooltip(Tooltip::text(tip, theme.clone()));
         if !locked {
             pill = pill
@@ -3212,6 +3236,7 @@ impl AgentPanel {
                             .id(("selector-option", option_index))
                             .flex()
                             .items_center()
+                            .gap(px(6.))
                             .px(px(9.))
                             .py(px(5.))
                             .rounded(px(5.))
@@ -3220,6 +3245,10 @@ impl AgentPanel {
                             .cursor_pointer()
                             .when(selected, |element| element.bg(theme.bg3))
                             .hover(|style| style.bg(theme.bg3))
+                            // エージェント選択だけブランドバッジ付き（Mode/Model/Effort は文字のみ）
+                            .when(selector == Selector::Agent, |element| {
+                                element.child(agent_badge(&option, 14.))
+                            })
                             .child(option.clone())
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -3473,6 +3502,13 @@ impl AgentPanel {
         let host = self.dest_host.clone();
         let command =
             acp_client::AgentKind::by_label(&agent_label)?.command_on(host.as_ref(), cwd)?;
+        // スレッドの希望モード（sticky/前タブ）を起動時に渡す＝初回 prompt 前に適用される。
+        // UI からの後追い SetMode だと Prompt に先を越され、初回ターンが既定モードで走る。
+        let desired_mode = self
+            .threads
+            .get(thread_index)
+            .map(|thread| thread.permission_mode.to_string())
+            .filter(|mode| !mode.is_empty());
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded::<AgentEvent>();
         let error_tx = event_tx.clone();
@@ -3480,7 +3516,8 @@ impl AgentPanel {
         cx.background_executor()
             .spawn(async move {
                 if let Err(error) =
-                    acp_client::run_session_on(host, command, prompt_rx, event_tx).await
+                    acp_client::run_session_on(host, command, desired_mode, prompt_rx, event_tx)
+                        .await
                 {
                     // `{:#}` で anyhow の原因鎖まで出す（例: 「ACP セッションが異常終了: ACP
                     // initialize が 30 秒応答しません（無言ハング）」）。`to_string()` だと上位 context
@@ -3762,10 +3799,13 @@ impl AgentPanel {
                 options,
                 respond,
             } => {
-                // checkpoint は**書かれる前**にここで切る（M12-2）。手動でも AUTO_ALLOW でも一本道。
-                // old_text が diff に無いツール（Claude の Write 等）は**ディスクの現内容**を読んで
-                // 変更前として記録する。読み書きは背景（Host は UI スレッド禁止）＋ AUTO_ALLOW の
-                // 応答はスナップショット完了**後**（エージェントが書く前に読む＝レース防止）。
+                // checkpoint は**書かれる前**にここで切る（M12-2）。手動でも自動 Allow でも一本道。
+                // 変更前内容は**常にディスクから全文を読む**。diff の old_text は Edit ツールだと
+                // **置換ハンクの断片**であり、全文として保存すると restore がファイルを断片へ
+                // 破壊する（2026-08-28 に agent_panel.rs 8700 行 → 5 行の実害）。読めない＝
+                // checkpoint 時点で不在（新規作成）として None を残す（restore は削除で戻す）。
+                // 読み書きは背景（Host は UI スレッド禁止）＋ 自動 Allow の応答はスナップショット
+                // 完了**後**（エージェントが書く前に読む＝レース防止）。
                 if !diffs.is_empty() {
                     // 色リンク（M12-4）は即記録。
                     let files: Vec<std::path::PathBuf> = diffs
@@ -3779,7 +3819,12 @@ impl AgentPanel {
                     }
                     files_touched = Some((files, thread.color));
                 }
-                let auto_allow = std::env::var_os("NECODER_AUTO_ALLOW").is_some();
+                // bypass permissions 選択中は UI 側でも自動 Allow する。エージェント側への
+                // `set_mode` 反映にはレースがあり（初回ターン・ターン中切替は次ターンまで既定
+                // モードのまま＝JOURNAL 2026-08-28）、その窓で届いた許可リクエストでユーザーを
+                // 止めない。応答はスナップショット完了後＝checkpoint の一本道は env 自動と共通。
+                let bypass_mode = thread.permission_mode.to_lowercase().contains("bypass");
+                let auto_allow = bypass_mode || std::env::var_os("NECODER_AUTO_ALLOW").is_some();
                 let auto_choice = options
                     .iter()
                     .position(|option| {
@@ -3789,9 +3834,9 @@ impl AgentPanel {
                         )
                     })
                     .unwrap_or(0);
-                let snapshot_inputs: Vec<(std::path::PathBuf, Option<String>)> = diffs
+                let snapshot_paths: Vec<std::path::PathBuf> = diffs
                     .iter()
-                    .map(|diff| (std::path::PathBuf::from(&diff.path), diff.old_text.clone()))
+                    .map(|diff| std::path::PathBuf::from(&diff.path))
                     .collect();
                 let storage = self.storage.clone();
                 let host = self.dest_host.clone();
@@ -3810,33 +3855,32 @@ impl AgentPanel {
                         since: std::time::Instant::now(),
                     });
                 }
-                if !snapshot_inputs.is_empty() && storage.is_some() {
+                if !snapshot_paths.is_empty() && storage.is_some() {
                     let entry_label = label.clone();
                     let thread_id_for_entry = thread_id.clone();
                     cx.spawn(async move |panel, cx| {
-                        let checkpoint_id = cx
-                            .background_executor()
-                            .spawn(async move {
-                                let blobs = storage::default_blobs_dir()?;
-                                let storage = storage?;
-                                let snapshot: Vec<(std::path::PathBuf, Option<String>)> =
-                                    snapshot_inputs
-                                        .into_iter()
-                                        .map(|(path, old_text)| {
-                                            let content = old_text.or_else(|| {
-                                                // diff に変更前が無い → 書かれる前の今、ディスクから読む。
-                                                host.read_file(&path).ok().and_then(|content| {
-                                                    String::from_utf8(content.bytes).ok()
-                                                })
-                                            });
-                                            (path, content)
-                                        })
-                                        .collect();
-                                storage
-                                    .save_checkpoint(&thread_id, &label, snapshot, &blobs)
-                                    .ok()
-                            })
-                            .await;
+                        let checkpoint_id =
+                            cx.background_executor()
+                                .spawn(async move {
+                                    let blobs = storage::default_blobs_dir()?;
+                                    let storage = storage?;
+                                    let snapshot: Vec<(std::path::PathBuf, Option<String>)> =
+                                        snapshot_paths
+                                            .into_iter()
+                                            .map(|path| {
+                                                // 書かれる前の今、ディスクの全文を読む（old_text は断片の
+                                                // ことがあるので使わない）。
+                                                let content = host.read_file(&path).ok().and_then(
+                                                    |content| String::from_utf8(content.bytes).ok(),
+                                                );
+                                                (path, content)
+                                            })
+                                            .collect();
+                                    storage
+                                        .save_checkpoint(&thread_id, &label, snapshot, &blobs)
+                                        .ok()
+                                })
+                                .await;
                         // スナップショットが済んでから許可を返す（自動許可の場合）。
                         if auto_allow {
                             respond.unbounded_send(auto_choice).ok();
@@ -7657,7 +7701,7 @@ pub fn working_spinner(
         .into_any_element()
 }
 
-/// スレッドが話すエージェントのブランドアイコン（タブ / List 行用）。ブランド在庫が無いものは
+/// スレッドが話すエージェントのブランドアイコン（タブ / List 行 / composer のエージェントピル・選択メニュー用）。ブランド在庫が無いものは
 /// モノグラム角丸で代替（設定画面と同じ見た目・出所は `AgentKind::brand`）。アイコン＝「どのエージェントか」
 /// の識別で、スレッド色（＝どのスレッドか）とは別軸。svg は親の text_color を継承しないので直接指定する。
 pub fn agent_badge(label: &str, size: f32) -> gpui::AnyElement {
@@ -8516,6 +8560,89 @@ mod tests {
             panel.remove_queued_prompt(0, cx);
             assert!(panel.threads[active].queued_prompts.is_empty());
         });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// bypass permissions 選択中に届いた許可リクエストは UI 側で即 Allow を返す
+    /// （エージェント側の set_mode 反映レースの窓を塞ぐ）。Blocked には積まない。
+    #[gpui::test]
+    fn permission_request_auto_allows_in_bypass_mode(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "bypass_auto");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond_tx, mut respond_rx) = mpsc::unbounded::<usize>();
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].permission_mode = "Bypass Permissions".into();
+            panel.on_event(
+                active,
+                AgentEvent::PermissionRequest {
+                    title: "Bash: cargo test".into(),
+                    diffs: Vec::new(), // diff 無し＝スナップショット不要の同期応答経路
+                    raw_input: None,
+                    options: vec![
+                        PermissionChoice {
+                            label: "拒否".into(),
+                            kind: PermissionKind::Reject,
+                        },
+                        PermissionChoice {
+                            label: "許可".into(),
+                            kind: PermissionKind::Allow,
+                        },
+                    ],
+                    respond: respond_tx,
+                },
+                cx,
+            );
+            assert!(
+                panel.threads[active].pending_permission.is_none(),
+                "bypass 中は Blocked に積まない"
+            );
+        });
+        assert_eq!(
+            respond_rx.try_recv().ok(),
+            Some(1),
+            "Allow の添字で即応答する"
+        );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 承認待ちの最中に bypass へ切り替えたら、その場で Allow が返って待ちが解ける
+    /// （set_mode はターン中 deferred なので、これが無いと bypass にしても止まったまま）。
+    #[gpui::test]
+    fn switching_to_bypass_flushes_pending_permission(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "bypass_flush");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond_tx, mut respond_rx) = mpsc::unbounded::<usize>();
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].pending_permission = Some(PendingPermission {
+                title: "Edit: main.rs".into(),
+                diffs: Vec::new(),
+                raw_input: None,
+                options: vec![
+                    PermissionChoice {
+                        label: "拒否".into(),
+                        kind: PermissionKind::Reject,
+                    },
+                    PermissionChoice {
+                        label: "許可".into(),
+                        kind: PermissionKind::Allow,
+                    },
+                ],
+                respond: respond_tx,
+                since: std::time::Instant::now(),
+            });
+            panel.select_option(Selector::Mode, "bypass permissions".into(), cx);
+            assert!(
+                panel.threads[active].pending_permission.is_none(),
+                "切り替えで待ちが解ける"
+            );
+        });
+        assert_eq!(
+            respond_rx.try_recv().ok(),
+            Some(1),
+            "Allow の添字で応答する"
+        );
         let _ = std::fs::remove_file(settings_path);
     }
 

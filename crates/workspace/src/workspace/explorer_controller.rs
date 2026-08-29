@@ -245,6 +245,89 @@ impl Workspace {
         }
     }
 
+    /// エクスプローラ内 D&D 移動（Finder 風・M10 local のみ）: `source` を `target_dir` の中へ。
+    /// 同じ親への drop・自分自身/配下への drop は no-op。上書きはしない（`rename_local` と同じ拒否）。
+    pub(crate) fn move_entry_by_drop(
+        &mut self,
+        source: PathBuf,
+        target_dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if target_dir.starts_with(&source) || source.parent() == Some(target_dir.as_path()) {
+            return;
+        }
+        let Some(name) = source.file_name().map(|name| name.to_os_string()) else {
+            return;
+        };
+        let destination = target_dir.join(name);
+        // 上書き拒否はタブを閉じる**前**に（rename_local も拒否するが、先に閉じると失敗時にタブだけ失う）。
+        if destination.exists() {
+            self.push_toast(
+                SharedString::from(i18n::t!("explorer.drop_exists")),
+                self.accent(),
+                cx,
+            );
+            return;
+        }
+        // 移動対象（フォルダなら配下ごと）の開いているタブは先に閉じる（旧パスへの保存＝復活防止・rename と同じ流儀）。
+        while let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.path.starts_with(&source))
+        {
+            self.close_tab_at(index, window, cx);
+        }
+        match project::rename_local(&source, &destination) {
+            Ok(()) => {
+                let active = self.project_sessions.active;
+                if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+                    slot.explorer.selected = Some(destination);
+                    slot.refresh();
+                }
+                self.refresh_git_status(cx);
+            }
+            Err(error) => {
+                self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx)
+            }
+        }
+        cx.notify();
+    }
+
+    /// Finder からの D&D（`ExternalPaths`）: 落とされたパスを `target_dir` の中へ**コピー**する
+    /// （元は動かさない安全側・VSCode と同じ）。既にそこに居るパスと、フォルダを自分の配下へ
+    /// 落とす形は no-op。同名は上書きせず toast で断る（複数落とした場合は最初のエラーだけ出す）。
+    pub(crate) fn copy_external_paths_by_drop(
+        &mut self,
+        sources: &[PathBuf],
+        target_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let mut last_copied = None;
+        let mut first_error = None;
+        for source in sources {
+            if source.parent() == Some(target_dir.as_path()) || target_dir.starts_with(source) {
+                continue;
+            }
+            match project::copy_into_local(source, &target_dir) {
+                Ok(destination) => last_copied = Some(destination),
+                Err(error) => first_error = first_error.or(Some(error)),
+            }
+        }
+        if let Some(destination) = last_copied {
+            let active = self.project_sessions.active;
+            if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+                slot.explorer.selected = Some(destination);
+                slot.refresh();
+            }
+            self.refresh_git_status(cx);
+        }
+        if let Some(error) = first_error {
+            self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
+        }
+        cx.notify();
+    }
+
     /// 複製（`name copy.ext`）→ ツリー更新。
     pub(crate) fn duplicate_entry(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.hide_context_menu(cx);

@@ -24,11 +24,27 @@ impl Workspace {
         cx.spawn(async move |_workspace, cx| {
             let files = files_task.await;
             let _ = handle.update(cx, |workspace, window, cx| {
-                let items = files
+                let mut items: Vec<PickerItem> = files
                     .iter()
                     .enumerate()
                     .map(|(id, (_, relative))| PickerItem::new(id, relative.clone()))
                     .collect();
+                // 空プロジェクト（列挙 0 件）では作成アクションを出す — 「⌘P で何も出来ない」を
+                // 避ける。ファイル操作は local のみ（M10・エクスプローラの右クリックと同じ制約）。
+                let is_local = workspace
+                    .active_worktree()
+                    .map(|worktree| !worktree.is_remote())
+                    .unwrap_or(false);
+                if items.is_empty() && is_local {
+                    items.push(PickerItem::new(
+                        FINDER_ACTION_NEW_FILE,
+                        i18n::t!("finder.new_file"),
+                    ));
+                    items.push(PickerItem::new(
+                        FINDER_ACTION_NEW_DIR,
+                        i18n::t!("finder.new_dir"),
+                    ));
+                }
                 workspace.overlays.picker_files = files.into_iter().map(|(path, _)| path).collect();
                 workspace.open_picker(
                     PickerMode::Files,
@@ -556,6 +572,24 @@ impl Workspace {
                 self.close_picker(window, cx);
                 match mode {
                     PickerMode::Files => {
+                        // 空プロジェクトの作成アクション（番兵 id）: エクスプローラの
+                        // インライン命名へ繋ぐ（命名入力が見えるよう左ドックは開く）。
+                        if id == FINDER_ACTION_NEW_FILE || id == FINDER_ACTION_NEW_DIR {
+                            let Some(root) = self
+                                .active_worktree()
+                                .map(|worktree| worktree.root().to_path_buf())
+                            else {
+                                return;
+                            };
+                            let kind = if id == FINDER_ACTION_NEW_FILE {
+                                NamingKind::NewFile
+                            } else {
+                                NamingKind::NewDir
+                            };
+                            self.chrome.show_left = true;
+                            self.start_naming(kind, root, true, window, cx);
+                            return;
+                        }
                         if let Some(path) = self.overlays.picker_files.get(id).cloned() {
                             self.record_nav_position(cx); // ⌘P もナビ履歴へ
                             self.open_file(path, window, cx);
@@ -1261,8 +1295,11 @@ impl Workspace {
     // ターミナルの file:line リンク（M13）。相対パスはアクティブプロジェクトの root 基準。
     // subscribe に window が無いので pending_transient_tab と同様「次の render で消化」する。
 
-    /// スレッド履歴を開く（#5）。DB の全スレッド（アーカイブ含む・updated_at 降順）を Picker に出す。
-    /// 行頭●= スレッド色・detail = プロジェクト / ⎇ branch / トークン累計 / 開始・最終入力の相対時刻。
+    /// スレッド履歴を開く（#5）。**アクティブプロジェクトの**スレッド（アーカイブ含む・updated_at
+    /// 降順）を Picker に出す。絞り込みキーは Agent パネルの復元（`set_storage_for_scope`）と同じ
+    /// 「TaskSpace の stable id + 旧版が表示名で保存した行」— 全プロジェクト混在になっていた件の修正
+    /// （2026-08-28。DB は最初から project 列を持っていて、読み側の絞り込みだけが抜けていた）。
+    /// 行頭●= スレッド色・detail = ⎇ branch / トークン累計 / 開始・最終入力の相対時刻。
     /// 確定で復元してアクティブに（編隊モードでは復元セルとして前面へ・M14）。
     pub(crate) fn open_thread_history(
         &mut self,
@@ -1271,6 +1308,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(storage) = self.persistence.storage.clone() else {
+            return;
+        };
+        let Some((scope, legacy)) = self.active_slot().map(|slot| {
+            (
+                slot.task_space.id.as_str().to_string(),
+                slot.name.to_string(),
+            )
+        }) else {
             return;
         };
         let threads = storage.load_all_threads().unwrap_or_default();
@@ -1288,10 +1333,10 @@ impl Workspace {
             last_input_at,
         ) in threads
         {
-            let mut detail = String::new();
-            if !project.is_empty() {
-                detail.push_str(&project);
+            if project != scope && project != legacy {
+                continue;
             }
+            let mut detail = String::new();
             if let Some(branch) = &branch {
                 detail.push_str(&format!("  ⎇ {branch}"));
             }
@@ -1314,6 +1359,7 @@ impl Workspace {
             }
             let mut item = PickerItem::new(history.len(), name.clone())
                 .with_accent(theme_core::thread_color(color_index as usize));
+            let detail = detail.trim_start().to_string();
             if !detail.is_empty() {
                 item = item.with_detail(detail);
             }

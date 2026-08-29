@@ -182,6 +182,8 @@ pub struct SettingsView {
     auth_states: Vec<acp_client::AgentAuthState>,
     checking_agents: bool,
     availability_generation: u64,
+    /// 導入/ログインボタン押下後の変化見張り中フラグ（agent ごと・多重起動防止）。
+    watching_agents: Vec<bool>,
     /// 外観セクションに並べるテーマ一覧（組み込み + 同梱 + ユーザー JSON）。
     /// 描画毎の fs 走査を避けてキャッシュし、設定を開き直すたび [`Self::refresh_availability`] で更新。
     themes: Vec<(SharedString, theme_core::ThemeSource)>,
@@ -198,6 +200,7 @@ impl SettingsView {
             auth_states: vec![acp_client::AgentAuthState::SignedOut; acp_client::AGENTS.len()],
             checking_agents: true,
             availability_generation: 0,
+            watching_agents: vec![false; acp_client::AGENTS.len()],
             themes: theme_core::available_themes(themes_dir().as_deref()),
         };
         view.refresh_availability(cx);
@@ -250,6 +253,44 @@ impl SettingsView {
         .detach();
     }
 
+    /// 導入/ログイン後の反映ラグ対策。ボタン押下後だけ 1 秒間隔の軽量チェック
+    /// （PATH/資格情報ファイルの stat のみ・子プロセス無し）を回し、変化を検知した瞬間に
+    /// [`Self::refresh_availability`] へ切り替える。設定を開き直さなくても「利用可能」まで進む。
+    fn watch_agent_progress(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(agent) = acp_client::AGENTS.get(index) else {
+            return;
+        };
+        if self.watching_agents.get(index).copied().unwrap_or(true) {
+            return; // 既に見張り中（ボタン連打・導入とログインの重複起動を防ぐ）
+        }
+        self.watching_agents[index] = true;
+        let baseline = (agent.cli_installed(), agent.configured_auth_state());
+        cx.spawn(async move |view, cx| {
+            // npm 導入は数分掛かり得るので 10 分まで見張る（stat 数回/秒＝実質タダ）。
+            let mut changed = false;
+            for _ in 0..600 {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let current = cx
+                    .background_executor()
+                    .spawn(async move { (agent.cli_installed(), agent.configured_auth_state()) })
+                    .await;
+                if current != baseline {
+                    changed = true;
+                    break;
+                }
+            }
+            let _ = view.update(cx, |view, cx| {
+                if let Some(flag) = view.watching_agents.get_mut(index) {
+                    *flag = false;
+                }
+                if changed {
+                    view.refresh_availability(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     fn set_default_agent(&mut self, label: &str, cx: &mut Context<Self>) {
         set_user_value(
             cx,
@@ -273,6 +314,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let theme = self.theme.clone();
+        let agent_index = id.1;
         div()
             .id(id)
             .px(px(8.))
@@ -287,7 +329,10 @@ impl SettingsView {
             .child(SharedString::from(text))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |_, _, _window, cx| {
+                cx.listener(move |view, _, _window, cx| {
+                    // コマンド完了イベントは取れない（terminal はシェルに落ちる）ので、
+                    // 押した時点から変化見張りを開始して反映ラグを消す。
+                    view.watch_agent_progress(agent_index, cx);
                     cx.emit(SettingsViewEvent::RunCommand(command.to_string()))
                 }),
             )

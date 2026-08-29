@@ -564,7 +564,8 @@ impl AgentKind {
 
     /// 対話も子プロセス起動もしない軽量判定。composer の初回 render から呼ばれるため、
     /// ファイル存在と環境変数だけを見る。status/probe は明示的な背景 refresh に分離する。
-    fn configured_auth_state(&self) -> AgentAuthState {
+    /// 設定画面の導入/ログイン後ポーリング（変化検知）もこの軽さを前提に毎秒呼ぶ。
+    pub fn configured_auth_state(&self) -> AgentAuthState {
         if !self.cli_installed() {
             return AgentAuthState::SignedOut;
         }
@@ -1029,16 +1030,30 @@ pub async fn prompt_once(command: &AgentCommand, prompt: &str) -> Result<String>
 /// （同一スレッド内は文脈が続く）。ターン境界は `StopReason` = [`AgentEvent::TurnEnded`]。
 pub async fn run_session(
     command: AgentCommand,
+    desired_mode: Option<String>,
     command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
-    run_session_on(LocalHost::shared(), command, command_rx, event_tx).await
+    run_session_on(
+        LocalHost::shared(),
+        command,
+        desired_mode,
+        command_rx,
+        event_tx,
+    )
+    .await
 }
 
 /// 指定 host 上の常駐 ACP セッション。remote filesystem と agent process を同居させる。
+///
+/// `desired_mode` はスレッドが望む権限モード（表示名 or mode_id・大文字小文字無視）。
+/// **最初の prompt を読む前に**エージェントへ適用する — 遅延起動では UI からの
+/// `SetMode` コマンドが Prompt の後ろに並ぶため、ここで合わせないと初回ターンが
+/// エージェント既定モードで走ってしまう（bypass が効かない元凶・JOURNAL 2026-08-28）。
 pub async fn run_session_on(
     host: Arc<dyn Host>,
     command: AgentCommand,
+    desired_mode: Option<String>,
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
@@ -1073,17 +1088,41 @@ pub async fn run_session_on(
             let mut session = connection.attach_session(response, Vec::new())?;
 
             // エージェントが広告する権限モード一覧 + 現在モードを UI へ（セレクタを実モードで組む）。
-            if let Some(state) = session.modes() {
-                let modes = state
+            // 希望モードが広告に在れば**ここで**（初回 prompt より前に）set_mode し、UI へは
+            // 適用後の current を流す＝UI 側の照合が一致して二重送信にならない。
+            let advertised = session.modes().as_ref().map(|state| {
+                let modes: Vec<(String, String)> = state
                     .available_modes
                     .iter()
                     .map(|mode| (mode.id.to_string(), mode.name.clone()))
                     .collect();
+                (modes, state.current_mode_id.to_string())
+            });
+            if let Some((modes, mut current)) = advertised {
+                let desired_id = desired_mode.as_deref().and_then(|desired| {
+                    modes
+                        .iter()
+                        .find(|(id, name)| {
+                            name.eq_ignore_ascii_case(desired) || id.eq_ignore_ascii_case(desired)
+                        })
+                        .map(|(id, _)| id.clone())
+                });
+                if let Some(desired_id) = desired_id {
+                    if desired_id != current
+                        && connection
+                            .send_request(v1::SetSessionModeRequest::new(
+                                session.session_id().clone(),
+                                desired_id.clone(),
+                            ))
+                            .block_task()
+                            .await
+                            .is_ok()
+                    {
+                        current = desired_id;
+                    }
+                }
                 event_tx
-                    .unbounded_send(AgentEvent::Modes {
-                        modes,
-                        current: state.current_mode_id.to_string(),
-                    })
+                    .unbounded_send(AgentEvent::Modes { modes, current })
                     .ok();
             }
             // 設定オプション（モデル・思考レベル）を UI へ（あればセレクタを実選択肢に置き換える）。
@@ -1569,8 +1608,9 @@ async fn handle_elicitation_request(
         _ => None,
     };
     let Some(fields) = fields else {
-        return responder
-            .respond(v1::CreateElicitationResponse::new(v1::ElicitationAction::Decline));
+        return responder.respond(v1::CreateElicitationResponse::new(
+            v1::ElicitationAction::Decline,
+        ));
     };
 
     let (respond_tx, mut respond_rx) = mpsc::unbounded::<Option<Vec<(String, String)>>>();
@@ -1810,7 +1850,7 @@ mod tests {
         drop(prompt_tx); // 送信ハンドルを閉じる → このターン後に run_session は終了する
 
         let chunks = futures::executor::block_on(async move {
-            let session = run_session(command, prompt_rx, event_tx);
+            let session = run_session(command, None, prompt_rx, event_tx);
             let drain = async move {
                 let mut chunks = Vec::new();
                 while let Some(event) = event_rx.next().await {

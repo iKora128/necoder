@@ -11,6 +11,8 @@ common:
 finder:
   files: Search files…
   projects: Switch project…
+  new_file: New file…
+  new_dir: New folder…
 agent:
   error_prefix: "Error: %{message}"
   history_archived_mark: ·closed
@@ -423,6 +425,7 @@ explorer:
   ctx_reveal: Reveal in Finder
   ctx_new_file: New file
   ctx_new_dir: New folder
+  drop_exists: An item with the same name already exists at the destination
   ctx_rename: Rename…
   ctx_duplicate: Duplicate
   ctx_trash: Move to trash

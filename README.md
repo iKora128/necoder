@@ -1,26 +1,56 @@
+<div align="center">
+
+<img src="lp/assets/img/necoder-mark.png" width="96" alt="necoder logo">
+
 # necoder
 
 **Orient by color.** A GPUI-native code editor for the agent era.
 
-Every project and branch carries an identity color that runs through the rail, tabs, caret and AI threads — so when you juggle many repositories, worktrees and parallel agents, you always know *where you are* and *what is running where*.
+[![Release](https://img.shields.io/github/v/release/iKora128/necoder)](https://github.com/iKora128/necoder/releases)
+[![CI](https://github.com/iKora128/necoder/actions/workflows/ci.yml/badge.svg)](https://github.com/iKora128/necoder/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
-![necoder — Todo board consumed by the AI agent, with color-coded threads](docs/images/hero-todo-board.png)
+[**Download**](https://github.com/iKora128/necoder/releases) · [**Website**](https://necoder.com/en/) · [**日本語**](#日本語)
+
+</div>
+
+![necoder — color-coded projects, threads and a todo board the agent checks off](lp/assets/img/hero.png)
+
+## Why another editor?
+
+necoder was born from a very concrete frustration: **running AI coding agents all day across many repositories, branches and worktrees — and constantly getting lost.**
+
+- **"Which thread is talking to which project?"** Agent chats all look the same. One mistargeted prompt to the wrong branch can cost you an afternoon.
+- **Token usage was invisible** until the context silently compacted mid-task.
+- **No existing editor could fix it.** What we wanted was *color as identity* — and that turned out to be structurally impossible to add from the outside: Zed extensions cannot render UI at all, VSCode's UI flexibility comes bundled with webview weight. ([Full background / research notes](docs/BACKGROUND.md))
+
+So necoder makes the things agent-heavy development actually needs **first-class in the editor core**:
+
+1. **Identity** — every project/branch carries a color that runs through the rail, tabs, caret and AI threads. You always know *where you are*.
+2. **Glanceable state** — destination chips (thread → project ⎇ branch), an always-visible token meter, and a fleet view for parallel agents. You always know *what is running where*.
+3. **Native speed** — GPUI, no Electron, no webview. The editor stays out of your way.
 
 ## Highlights
 
-- **Color as a sense of direction** — per-project colors (auto-assigned or picked, `.necoder/settings.json`) flow through the rail, tab underline, caret and thread chips. Color is used for *identity only*, never decoration.
-- **Across projects and branches** — worktree-first windows, `⌘O` dashboard listing every project, `⎇ branch`, dirty state and running agents at a glance; tear a rail item off into its own window.
-- **AI-agent native (ACP)** — Claude Code and other [ACP](https://agentclientprotocol.com) agents run inside: colored threads with destination chips, an always-visible token meter, streaming transcripts (⏺/⎿, ✳ thinking), diff review with accept/reject, checkpoints/rewind, a todo board the agent checks off by itself, and a fleet view for parallel agents with a coordinator. Uses your existing Claude Code subscription via the `claude` CLI — **no separate API key**.
-- **Fast and small** — native GPUI (no Electron, no webview). Dev measurements: cold start ~215ms, idle RSS ~120MB, editor-core ops ~1µs (guarded in CI).
+- **Color as a sense of direction** — per-project colors (auto-assigned or picked) flow through the rail, tab underline, caret and thread chips. Color is used for *identity only*, never decoration.
+- **AI-agent native (ACP)** — Claude Code and other [ACP](https://agentclientprotocol.com) agents run inside: colored threads with destination chips, streaming transcripts (⏺/⎿, ✳ thinking), diff review with accept/reject, checkpoints/rewind, and a todo board the agent checks off by itself. Uses your existing Claude Code subscription via the `claude` CLI — **no separate API key**.
+
+  ![Live ACP streaming inside necoder](lp/assets/gif/stream-en.gif)
+
+- **Fleet view for parallel agents** — run several agents side by side with a coordinator, and see every thread's state at a glance.
+
+  ![Fleet view — parallel agents with status](lp/assets/img/fleet.png)
+
+- **Across projects and branches** — worktree-first windows, a `⌘O` dashboard listing every project with `⎇ branch`, dirty state and running agents; tear a rail item off into its own window.
+- **Fast and small** — native GPUI. Dev measurements: cold start ~215ms, idle RSS ~120MB, editor-core ops ~1µs (guarded in CI).
 - **Remote SSH** — the same editor over `ssh://`, backed by a ~2.4MB static musl server (idle RSS 6.5MB, no node on either side). Uses your system OpenSSH config, keys and ProxyJump as-is.
-- **Editor table stakes** — LSP (diagnostics, completion, hover, rename, code actions, references, formatting), tree-sitter highlighting for Rust/TS/TSX/JS/Python/Go/JSON/YAML/TOML/HTML/CSS with incremental parsing, Git (status colors, gutter diff, hunk stage/revert, blame, diff tabs, branch/worktree menu), integrated terminal with file:line links, project-wide search, multi-cursor, soft wrap, Japanese IME, hot exit.
+- **Editor table stakes** — LSP (diagnostics, completion, hover, rename, code actions, references, formatting), tree-sitter highlighting (Rust/TS/TSX/JS/Python/Go/JSON/YAML/TOML/HTML/CSS) with incremental parsing, Git (status colors, gutter diff, hunk stage/revert, blame, diff tabs, branch/worktree menu), integrated terminal with `file:line` links, project-wide search, multi-cursor, soft wrap, Japanese IME, hot exit.
 - **Japanese / English UI** (follows your OS locale), theme skinning with live preview, **no telemetry — ever**. The only network calls are the ones you initiate (your agents, your SSH hosts) plus a version check against GitHub Releases.
 
-## Install (macOS)
+## Install
 
-1. Download the latest `necoder.dmg` from [Releases](https://github.com/iKora128/necoder/releases) and drag **necoder** into **Applications**.
-2. Requires **macOS 13+ (Apple Silicon)**. Builds are codesigned and notarized; the app self-updates from Releases (verifying the Apple signature before installing).
-3. For AI features, install and log in to the [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) — necoder talks to it over ACP.
+**macOS 13+ (Apple Silicon)** — download `necoder.dmg` from [Releases](https://github.com/iKora128/necoder/releases) and drag **necoder** into **Applications**. Builds are codesigned and notarized; the app self-updates from Releases (verifying the Apple signature before installing).
 
 On first launch, necoder offers to install its Terminal command. Click **Install CLI** and approve the standard macOS authentication prompt. You can run the bundled installer manually as a fallback:
 
@@ -31,17 +61,11 @@ necoder .
 
 The setting remains available under **Settings → Terminal**. The command reuses a running window by default; use `necoder --new-window .` for a separate window, or `necoder --help` for the full CLI overview.
 
-Something broke? In-app **Help → Report a Bug** pre-fills an issue. Logs live in `~/Library/Application Support/necoder/logs/` (written when launched from Finder/Dock) and crash reports in `…/necoder/crashes/`.
+**Windows 10+ (x64)** — download `necoder-windows-x64.zip` from [Releases](https://github.com/iKora128/necoder/releases), unzip, run `necoder.exe`. The app notifies you of new versions and opens the release page.
 
-## Build from source
+For AI features, install and log in to the [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) — necoder talks to it over ACP.
 
-```sh
-git clone https://github.com/iKora128/necoder.git && cd necoder
-cargo run -p necoder          # toolchain pinned by rust-toolchain.toml (rustup fetches it)
-./scripts/bundle-mac.sh        # optional: assemble necoder.app with the app icon
-```
-
-The first build compiles GPUI and takes a while. Without full Xcode (Command Line Tools only), `bundle-mac.sh` automatically falls back to runtime shader compilation.
+Something broke? In-app **Help → Report a Bug** pre-fills an issue. Logs live in `~/Library/Application Support/necoder/logs/`, crash reports in `…/necoder/crashes/`.
 
 ## First 10 minutes
 
@@ -54,40 +78,25 @@ The first build compiles GPUI and takes a while. Without full Xcode (Command Lin
 | `⇧⌘F` | Project-wide search |
 | `⌘⇧T` | Theme selector (live preview) |
 
-## Remote SSH
-
-Uses system OpenSSH (config, known_hosts, ssh-agent, ProxyJump) as-is. Point necoder at an SSH URI, or browse from the launcher (`＋` → SSH):
+## Build from source
 
 ```sh
-cargo build -p host --bin necoder-remote-server   # dev builds: build the server first
+git clone https://github.com/iKora128/necoder.git && cd necoder
+cargo run -p necoder          # toolchain pinned by rust-toolchain.toml (rustup fetches it)
+./scripts/bundle-mac.sh        # optional: assemble necoder.app with the app icon
+```
+
+The first build compiles GPUI and takes a while. Without full Xcode (Command Line Tools only), `bundle-mac.sh` automatically falls back to runtime shader compilation.
+
+## Remote SSH
+
+Point necoder at an SSH URI, or browse from the launcher (`＋` → SSH). System OpenSSH (config, known_hosts, ssh-agent, ProxyJump) is used as-is; the matching server binary is deployed automatically and checksum-verified.
+
+```sh
 cargo run -p necoder -- 'ssh://user@example.com:22/home/user/project'
 ```
 
-The matching server binary is deployed automatically (same-target sibling binary, or a bundled musl artifact; checksum-verified, old versions cleaned up). Reconnection re-subscribes watches and re-spawns LSP/PTY handles; unsaved-buffer backups are host-scoped. Remaining gaps: GUI askpass (key/agent auth is assumed) and long-haul testing on a physical Linux host — see [`docs/research/remote-ssh-2026.md`](docs/research/remote-ssh-2026.md).
-
-To exercise the complete SSH path without a separate machine, run:
-
-```sh
-./scripts/test-remote-ssh-docker.sh
-```
-
-This starts an isolated Ubuntu/OpenSSH container, creates a disposable key and
-`known_hosts`, deploys the matching Linux remote server, and runs the live SSH
-suite (file operations, search, commands, reconnects, watches, and resource
-checks). It requires Docker and a musl remote-server artifact for the Docker
-architecture; the script prints the exact `cargo zigbuild` command if one is
-not available.
-
-To try the normal GUI connection flow instead, run:
-
-```sh
-./scripts/test-remote-ssh-docker.sh --gui
-```
-
-Keep that terminal open while using the remote project. Closing necoder stops
-the SSH container and removes its temporary key and network automatically. In
-necoder, choose `+` → Remote/SSH → `necoder-docker`, then browse to
-`work/sample` and open that folder as the project.
+To exercise the complete SSH path locally, `./scripts/test-remote-ssh-docker.sh` spins up a disposable Ubuntu/OpenSSH container and runs the live suite (add `--gui` to try the interactive connection flow). Details and remaining gaps: [`docs/research/remote-ssh-2026.md`](docs/research/remote-ssh-2026.md).
 
 ## Documentation
 
@@ -109,21 +118,124 @@ Development docs are primarily in Japanese; the UI is fully bilingual (ja/en).
 - Contributions are welcome — read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. **All contributions require signing the [CLA](CLA.md)** (a bot guides you on your first PR); this keeps future licensing options (including dual licensing) with the maintainer.
 - Bundled fonts are OFL-1.1 ([`assets/fonts/`](assets/fonts/README.md)); icons are Lucide (ISC) and Simple Icons (CC0) ([`crates/necoder/assets/icons/LICENSE.md`](crates/necoder/assets/icons/LICENSE.md)).
 
+## Code signing policy
+
+- **macOS** — release builds are signed with the maintainer's Apple Developer ID and notarized by Apple.
+- **Windows** — free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+**Team and roles.** necoder is developed and released by its maintainer, Daichi Nagashima ([@iKora128](https://github.com/iKora128)), who acts as committer, reviewer and approver for signed releases. All release binaries are built from this public repository by GitHub Actions ([`release.yml`](.github/workflows/release.yml)) on version tags, and each signing request is approved manually.
+
+**Privacy.** necoder does not collect or transmit any user data — no telemetry, ever. The only network requests are the ones you initiate yourself (your AI agents, your SSH hosts) and a version check against GitHub Releases.
+
 ---
 
-## 日本語
+# 日本語
 
-自作エディタ **necoder（ねこーだー）**。「**色による方向感覚**」×「**プロジェクト/ブランチ横断**」×「**AI エージェントネイティブ（ACP）**」の交点を狙う、GPUI ネイティブのコードエディタです。
+<div align="center">
 
-- プロジェクト/ブランチごとの識別色がレール・タブ・キャレット・AI スレッドまで貫通し、並行作業でも「今どこで・何が走っているか」を見失わない
-- Claude Code が中で動く（既存サブスクのまま・API キー不要）: 色付きスレッド、トークン常時表示、diff レビュー、チェックポイント、Todo ボード、複数エージェントの編隊ビュー
-- Remote SSH・LSP・tree-sitter 多言語・Git（hunk stage / blame / worktree）・統合ターミナル・日本語 IME・hot exit
-- **テレメトリなし**。通信は自分で起動するもの（エージェント・SSH）と GitHub Releases への更新チェックのみ
+**色による方向感覚。** エージェント時代のための GPUI ネイティブなコードエディタ。
 
-**インストール**: [Releases](https://github.com/iKora128/necoder/releases) から `necoder.dmg` を取得して Applications へ（macOS 13+ / Apple Silicon・署名/公証済み・アプリ内自動更新）。AI 機能には `claude` CLI のログインが必要です。Terminal の `necoder .` は、初回画面または設定の「ターミナル → CLIをインストール」から導入できます（手動なら `/Applications/necoder.app/Contents/Resources/install-cli.sh`、別ウィンドウは `necoder --new-window .`）。
+[**ダウンロード**](https://github.com/iKora128/necoder/releases) · [**Web サイト**](https://necoder.com/) · [**English**](#necoder)
 
-**ソースから**: `cargo run -p necoder`（toolchain は `rust-toolchain.toml` で固定）。`./scripts/bundle-mac.sh` で .app を組み立て。
+</div>
 
-**開発に参加する**: [`CONTRIBUTING.md`](CONTRIBUTING.md) を参照。全てのコントリビュートに [CLA](CLA.md) への署名が必要です（初回 PR で bot が案内）。Zed の GPL アプリケーション crate からコードを複製・翻訳・改変して取り込むことは禁止です（[`docs/DECISIONS.md`](docs/DECISIONS.md) §5）。
+## なぜ作ったか
 
-リポジトリ構成の詳細は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照（`crates/` に約 20 crate・`zed/` は git 管理外の参照用クローン・`mock/` はビジュアルモック）。
+necoder の出発点はとても具体的な不満から始まりました。
+**複数のリポジトリ・ブランチ・worktree をまたいで一日中 AI エージェントを走らせていると、必ず迷子になる。**
+**「このスレッド、どのプロジェクトと話してるんだっけ？」** エージェントのチャットは全部同じ色と見た目。別のAIエージェントに指示を出してしまい、時間とTokenを消費するハメに。
+
+だから necoder は、エージェント中心の開発が本当に必要とするものを**エディタのコア**として実装しました:
+
+1. **アイデンティティ** — プロジェクト/ブランチごとの識別色がレール・タブ・AI スレッドまで貫通。「今どこにいるか」を見失わない
+2. **一目で分かる状態** — 宛先チップ(スレッド → プロジェクト ⎇ ブランチ)、トークン常時表示、並行エージェントの編隊ビュー。「どこで何が走っているか」を見失わない
+3. **ネイティブの速さ** — GPUI。Electron も webview も無し。メモリ効率が良く、60fpsのハイパフォーマンス
+
+## ハイライト
+
+- **色による方向感覚** — プロジェクトごとの識別色(自動割当 or 選択)がレール・タブ下線・キャレット・スレッドチップまで流れる。色は**識別のためだけ**に使い、装飾には使わない
+- **AI エージェントネイティブ(ACP)** — Claude Code ほか [ACP](https://agentclientprotocol.com) エージェントが中で動く: 色付きスレッド + 宛先チップ、ストリーミング表示(⏺/⎿、✳ thinking)、diff レビュー(accept/reject)、チェックポイント/巻き戻し、エージェントが管理する Todo ボード。既存の Claude Code サブスクのまま `claude` CLI 経由 — **API キー不要**
+
+  ![necoder 内での実 ACP ストリーミング](lp/assets/gif/stream-en.gif)
+
+- **並行エージェントの編隊ビュー** — 複数エージェントをコーディネータ付きで並走させ、全スレッドの状態を一覧
+
+  ![編隊ビュー — 並行エージェントと状態表示](lp/assets/img/fleet.png)
+
+- **プロジェクト/ブランチ横断** — worktree ファーストのウィンドウ、全プロジェクトを `⎇ ブランチ`・dirty・稼働エージェント付きで一覧する `⌘O` ダッシュボード、レール項目の別窓への切り離し
+- **速くて小さい** — ネイティブ GPUI。実測: 起動 ~215ms / idle RSS ~120MB / 編集コア操作 ~1µs(CI でガード)
+- **Remote SSH** — 同じエディタが `ssh://` 越しに動く。サーバは ~2.4MB の静的 musl バイナリ(idle RSS 6.5MB・両側 node 不要)。システムの OpenSSH 設定・鍵・ProxyJump をそのまま使う
+- **エディタの基本機能** — LSP(診断・補完・hover・rename・code actions・参照・整形)、tree-sitter ハイライト(Rust/TS/TSX/JS/Python/Go/JSON/YAML/TOML/HTML/CSS・インクリメンタル)、Git(ステータス色・ガター diff・hunk stage/revert・blame・diff タブ・ブランチ/worktree メニュー)、`file:line` リンク付き統合ターミナル、プロジェクト全体検索、マルチカーソル、折り返し、日本語 IME、hot exit
+- **日本語/英語 UI**(OS ロケール追従)、ライブプレビュー付きテーマ切替、**テレメトリなし**。通信は自分で起動するもの(エージェント・SSH)と GitHub Releases への更新チェックのみ
+
+## インストール
+
+**macOS 13+(Apple Silicon)** — [Releases](https://github.com/iKora128/necoder/releases) から `necoder.dmg` を取得して **necoder** を Applications へ。署名/公証済み・アプリ内自動更新(適用前に Apple 署名を検証)。
+
+初回起動時に Terminal コマンド `necoder .` の導入を案内します(**CLIをインストール** → macOS の認証を許可)。設定 → ターミナル からも導入でき、手動なら `/Applications/necoder.app/Contents/Resources/install-cli.sh`。別ウィンドウで開くには `necoder --new-window .`、全体は `necoder --help`。
+
+**Windows 10+(x64)** — [Releases](https://github.com/iKora128/necoder/releases) から `necoder-windows-x64.zip` を展開して `necoder.exe` を実行。新版はアプリ内通知からリリースページを開きます。
+
+AI 機能には [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) のインストールとログインが必要です(necoder は ACP で対話します)。
+
+困ったら、アプリ内 **ヘルプ → バグを報告** で issue の下書きが作られます。ログは `~/Library/Application Support/necoder/logs/`、クラッシュレポートは `…/necoder/crashes/`。
+
+## 最初の10分
+
+| キー | 動作 |
+|---|---|
+| `⌘O` | プロジェクト / worktree を開く(ダッシュボード) |
+| `⌘P` / `⇧⌘P` | ファイルファインダ / コマンドパレット |
+| `⇧⌘A` | 新しい AI スレッド(`claude` CLI が必要) |
+| `⌘J` | 統合ターミナル |
+| `⇧⌘F` | プロジェクト全体検索 |
+| `⌘⇧T` | テーマセレクタ(ライブプレビュー) |
+
+## ソースからビルド
+
+```sh
+git clone https://github.com/iKora128/necoder.git && cd necoder
+cargo run -p necoder          # toolchain は rust-toolchain.toml で固定(rustup が自動取得)
+./scripts/bundle-mac.sh        # 任意: アイコン付きの necoder.app を組み立て
+```
+
+初回ビルドは GPUI のコンパイルで時間がかかります。フル Xcode が無い環境(CLT のみ)では `bundle-mac.sh` が自動でランタイムシェーダにフォールバックします。
+
+## Remote SSH
+
+SSH URI を渡すか、ランチャー(`＋` → SSH)から辿ります。システムの OpenSSH(config・known_hosts・ssh-agent・ProxyJump)をそのまま使用し、対応するサーババイナリは自動デプロイ(チェックサム検証付き)。
+
+```sh
+cargo run -p necoder -- 'ssh://user@example.com:22/home/user/project'
+```
+
+SSH 経路全体をローカルで試すには `./scripts/test-remote-ssh-docker.sh`(使い捨ての Ubuntu/OpenSSH コンテナで実スイートを実行。`--gui` で対話フローも試せます)。詳細と残課題: [`docs/research/remote-ssh-2026.md`](docs/research/remote-ssh-2026.md)。
+
+## ドキュメント
+
+| 何 | どこ |
+|---|---|
+| マイルストーンと受入条件 | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
+| アーキテクチャ(crate 構成・契約) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| UI 仕様(トークン・色のルール・キー表) | [`docs/UI-SPEC.md`](docs/UI-SPEC.md) |
+| 設計判断ログ(ライセンス・ウィンドウモデル…) | [`docs/DECISIONS.md`](docs/DECISIONS.md) |
+| 機能バックログ | [`FEATURES.md`](FEATURES.md) |
+| エディタ調査(VSCode/Zed/Cursor) | [`docs/research/`](docs/research/) |
+| エージェント作業ガイド(このリポジトリはエージェントと作られています) | [`CLAUDE.md`](CLAUDE.md) |
+
+開発ドキュメントは主に日本語です。UI は日英完全対応。
+
+## ライセンスとコントリビュート
+
+- **AGPL-3.0-or-later**([LICENSE](LICENSE))。necoder 固有のコードは独立に実装しており、Zed の GPL アプリケーション crate からの複製・翻案はありません。固定 rev の GPUI 依存は上流表示こそ Apache-2.0 ですが、現在は文書化された GPL-3.0-or-later の推移依存を含みます(GPLv3/AGPLv3 §13 の下で両立)。詳細: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) / [`docs/DECISIONS.md`](docs/DECISIONS.md) §5
+- コントリビュート歓迎 — まず [`CONTRIBUTING.md`](CONTRIBUTING.md) をお読みください。**全てのコントリビュートに [CLA](CLA.md) への署名が必要**です(初回 PR で bot が案内)。将来のライセンス選択肢(デュアルライセンス含む)をメンテナに残すためです
+- 同梱フォントは OFL-1.1([`assets/fonts/`](assets/fonts/README.md))、アイコンは Lucide(ISC)と Simple Icons(CC0)([`crates/necoder/assets/icons/LICENSE.md`](crates/necoder/assets/icons/LICENSE.md))
+
+## コード署名ポリシー
+
+- **macOS** — リリースビルドはメンテナの Apple Developer ID で署名し、Apple の公証を受けています
+- **Windows** — コード署名は [SignPath.io](https://signpath.io) の無償提供、証明書は [SignPath Foundation](https://signpath.org) によるものです
+
+**体制**: necoder はメンテナの長嶋大地([@iKora128](https://github.com/iKora128))が開発・リリースし、署名リリースの committer / reviewer / approver を兼ねます。リリースバイナリは全てこの公開リポジトリのバージョンタグから GitHub Actions([`release.yml`](.github/workflows/release.yml))でビルドされ、署名リクエストは毎回手動で承認します。
+
+**プライバシー**: necoder はユーザーデータを一切収集・送信しません(テレメトリなし)。通信は自分で開始するもの(エージェント・SSH ホスト)と GitHub Releases への更新チェックのみです。

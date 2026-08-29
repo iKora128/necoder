@@ -9,14 +9,17 @@ use gpui::{
     Context, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton,
     Render, SharedString, Window,
 };
+use std::path::PathBuf;
 use std::time::Duration;
 use theme_core::Theme;
 
-/// エクスプローラからチャット composer へファイルをドラッグする際のペイロード兼ゴースト。
-/// `path` は @メンション用の表示文字列（プロジェクト相対が望ましい）。
+/// エクスプローラの行をドラッグする際のペイロード兼ゴースト。行き先は 2 通り:
+/// チャット composer（@メンション参照）と、エクスプローラ内のフォルダ/背景（Finder 風の移動）。
+/// `path` は @メンション用の表示文字列（プロジェクト相対が望ましい）・`source` は移動用の絶対パス。
 #[derive(Clone)]
 pub struct DraggedFile {
     pub path: SharedString,
+    pub source: PathBuf,
     pub theme: Theme,
 }
 

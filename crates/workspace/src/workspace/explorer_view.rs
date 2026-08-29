@@ -119,6 +119,32 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// D&D の受け面を付ける（エクスプローラ内の移動 = [`DraggedFile`] / Finder からの追加 =
+    /// [`ExternalPaths`]・**コピー**）。どちらも同じ `target_dir` に落ちる。`strong` = フォルダ
+    /// 行/セルの面（識別色 16%）・false = 余白（6%）。ファイル操作は local のみ（M10）なので
+    /// 呼び出し側で local をゲートする。
+    fn drop_into<E: InteractiveElement>(
+        element: E,
+        target_dir: PathBuf,
+        color: Hsla,
+        strong: bool,
+        cx: &mut Context<Self>,
+    ) -> E {
+        let alpha = if strong { 0.16 } else { 0.06 };
+        let move_target = target_dir.clone();
+        element
+            .drag_over::<DraggedFile>(move |style, _, _, _| style.bg(color.alpha(alpha)))
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(color.alpha(alpha)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedFile, window, cx| {
+                this.move_entry_by_drop(dragged.source.clone(), move_target.clone(), window, cx);
+            }))
+            .on_drop(
+                cx.listener(move |this, dropped: &ExternalPaths, _window, cx| {
+                    this.copy_external_paths_by_drop(dropped.paths(), target_dir.clone(), cx);
+                }),
+            )
+    }
+
     pub(crate) fn render_tree(
         &self,
         slot: &ProjectSlot,
@@ -159,6 +185,7 @@ impl Workspace {
                 elements.push(self.render_naming_row(row.depth + 1, cx));
             }
         }
+        let is_local = !slot.worktree.is_remote();
         div()
             // 横スクロール可（VSCode/Zed 方式）。深い階層はインデントで右に押し出されるが、
             // 行は自然幅（min_w_full）＝切らずに全部並べ、あふれた分は横スクロールで読む。
@@ -167,6 +194,11 @@ impl Workspace {
             .flex_1()
             .min_h_0()
             .overflow_scroll()
+            // D&D の受け（Finder 風・M10 local のみ）: 行の外（余白）へ落とす = ルート直下へ。
+            // 行側のドロップが先に消費する（gpui の on_drop は最内から bubble・消費で停止）。
+            .when(is_local, |element| {
+                Self::drop_into(element, root.clone(), color, false, cx)
+            })
             .children(elements)
             .into_any_element()
     }
@@ -175,7 +207,7 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_tree_row(
         &self,
-        _slot: &ProjectSlot,
+        slot: &ProjectSlot,
         index: usize,
         row: &TreeRow,
         theme: &Theme,
@@ -236,22 +268,33 @@ impl Workspace {
                 })
                 // gitignore 対象は淡く（git 管理外が一目で分かる）。
                 .when(row.ignored, |element| element.opacity(0.45))
-                // ファイルはチャット composer へドラッグ → @メンション参照にできる。
-                .when(!is_dir, |element| {
-                    let mention = row
-                        .path
-                        .strip_prefix(&root)
-                        .unwrap_or(&row.path)
-                        .to_string_lossy()
-                        .to_string();
-                    let theme = theme.clone();
-                    element.on_drag(
-                        DraggedFile {
-                            path: mention.into(),
-                            theme,
-                        },
-                        |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
-                    )
+                // 行はドラッグできる（composer へ @メンション参照 / フォルダ行・余白へ落として移動）。
+                .on_drag(
+                    DraggedFile {
+                        path: row
+                            .path
+                            .strip_prefix(&root)
+                            .unwrap_or(&row.path)
+                            .to_string_lossy()
+                            .to_string()
+                            .into(),
+                        source: row.path.clone(),
+                        theme: theme.clone(),
+                    },
+                    |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
+                )
+                // D&D の受け（local のみ）: フォルダ行 = その中へ（濃い面）・ファイル行 =
+                // 同じフォルダへ（Finder のリスト表示と同じ・淡い面）。
+                .when(!slot.worktree.is_remote(), |element| {
+                    let drop_dir = if is_dir {
+                        row.path.clone()
+                    } else {
+                        row.path
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| root.clone())
+                    };
+                    Self::drop_into(element, drop_dir, color, is_dir, cx)
                 })
                 .child(
                     div()
@@ -300,16 +343,16 @@ impl Workspace {
                         element.child(div().flex_none().size(px(7.)).rounded_full().bg(color))
                     },
                 )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                        if is_dir {
-                            this.toggle_dir(path.clone(), cx);
-                        } else {
-                            this.open_file(path.clone(), window, cx);
-                        }
-                    }),
-                )
+                // click（押して離す）で開く/開閉。on_mouse_down だと D&D の**つかんだ瞬間**にも
+                // 発火してしまう（Finder 風移動の癖になる）。gpui はドラッグが成立（2px）すると
+                // クリック合成を破棄するので、on_click ならドラッグ時に誤発火しない。
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    if is_dir {
+                        this.toggle_dir(path.clone(), cx);
+                    } else {
+                        this.open_file(path.clone(), window, cx);
+                    }
+                }))
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener({
@@ -330,6 +373,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = self.theme.clone();
+        let root = slot.worktree.root().to_path_buf();
+        let color = slot.color;
+        let is_local = !slot.worktree.is_remote();
         let dir = slot
             .explorer
             .current_dir
@@ -346,6 +392,10 @@ impl Workspace {
             .content_start()
             .gap(px(2.))
             .p(px(6.))
+            // D&D の受け（Finder 風・local のみ）: セルの外（余白）へ落とす = 現在フォルダへ。
+            .when(is_local, |element| {
+                Self::drop_into(element, dir.clone(), color, false, cx)
+            })
             .children(entries.into_iter().enumerate().map(|(index, entry)| {
                 let is_dir = entry.is_dir;
                 let is_ignored = entry.ignored;
@@ -353,6 +403,25 @@ impl Workspace {
                 let is_selected = selected.as_ref() == Some(&entry.path);
                 div()
                     .id(("icon-cell", index))
+                    // ドラッグできる（composer へ @メンション / フォルダセルへ落として移動）。
+                    .on_drag(
+                        DraggedFile {
+                            path: entry
+                                .path
+                                .strip_prefix(&root)
+                                .unwrap_or(&entry.path)
+                                .to_string_lossy()
+                                .to_string()
+                                .into(),
+                            source: entry.path.clone(),
+                            theme: theme.clone(),
+                        },
+                        |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
+                    )
+                    // フォルダセル = その中へ（濃い面）。ファイルセルは背景（現在フォルダ）に任せる。
+                    .when(is_dir && is_local, |element| {
+                        Self::drop_into(element, entry.path.clone(), color, true, cx)
+                    })
                     .w(px(84.))
                     .flex()
                     .flex_col()
@@ -383,16 +452,14 @@ impl Workspace {
                             .overflow_hidden()
                             .child(SharedString::from(entry.name.clone())),
                     )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            if is_dir {
-                                this.enter_dir(path.clone(), cx);
-                            } else {
-                                this.open_file(path.clone(), window, cx);
-                            }
-                        }),
-                    )
+                    // click で開く/中に入る（on_click = ドラッグ成立時は発火しない・ツリーと同じ理由）。
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        if is_dir {
+                            this.enter_dir(path.clone(), cx);
+                        } else {
+                            this.open_file(path.clone(), window, cx);
+                        }
+                    }))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener({
@@ -450,6 +517,8 @@ impl Workspace {
                         let entries = slot.listed_dir(dir);
                         // このカラムで選択中（＝連鎖の次の段）のパス。
                         let selected_child = chain.get(column_index + 1).cloned();
+                        let is_local = !slot.worktree.is_remote();
+                        let color = slot.color;
                         div()
                             .w(px(150.))
                             .flex_none()
@@ -457,6 +526,10 @@ impl Workspace {
                             .overflow_hidden()
                             .border_r_1()
                             .border_color(theme.border)
+                            // D&D の受け（Finder 風・local のみ）: 行の外（カラム余白）へ落とす = この段のフォルダへ。
+                            .when(is_local, |element| {
+                                Self::drop_into(element, dir.clone(), color, false, cx)
+                            })
                             .children(entries.into_iter().enumerate().map(|(row_index, entry)| {
                                 let is_dir = entry.is_dir;
                                 let is_ignored = entry.ignored;
@@ -464,6 +537,31 @@ impl Workspace {
                                 let on_path = selected_child.as_ref() == Some(&entry.path);
                                 div()
                                     .id(("col", column_index * 1000 + row_index))
+                                    // ドラッグできる（composer へ @メンション / フォルダ行へ落として移動）。
+                                    .on_drag(
+                                        DraggedFile {
+                                            path: entry
+                                                .path
+                                                .strip_prefix(&root)
+                                                .unwrap_or(&entry.path)
+                                                .to_string_lossy()
+                                                .to_string()
+                                                .into(),
+                                            source: entry.path.clone(),
+                                            theme: theme.clone(),
+                                        },
+                                        |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
+                                    )
+                                    // フォルダ行 = その中へ（濃い面）。ファイル行はカラム背景（この段）に任せる。
+                                    .when(is_dir && is_local, |element| {
+                                        Self::drop_into(
+                                            element,
+                                            entry.path.clone(),
+                                            color,
+                                            true,
+                                            cx,
+                                        )
+                                    })
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
@@ -498,16 +596,16 @@ impl Workspace {
                                                 .child("›"),
                                         )
                                     })
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, window, cx| {
+                                    // click で開く/中に入る（on_click = ドラッグ成立時は発火しない・ツリーと同じ理由）。
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, window, cx| {
                                             if is_dir {
                                                 this.enter_dir(path.clone(), cx);
                                             } else {
                                                 this.open_file(path.clone(), window, cx);
                                             }
-                                        }),
-                                    )
+                                        },
+                                    ))
                                     .on_mouse_down(
                                         MouseButton::Right,
                                         cx.listener({

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, Notify, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
@@ -33,7 +33,7 @@ use gpui::{
     DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId, IntoElement,
     KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Rgba, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    Rgba, ScrollWheelEvent, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use std::ops::Range;
 use theme_core::Theme;
@@ -181,6 +181,9 @@ struct TerminalContent {
     cursor: Option<AlacPoint>,
     /// マウス選択の範囲（グリッド座標）。ハイライト描画と ⌘C コピーに使う。
     selection: Option<SelectionRange>,
+    /// スクロールバックの表示オフセット（0 = 最下段）。セルはグリッド座標のまま持つので、
+    /// 描画時に `line + display_offset` で表示行へ写す。
+    display_offset: usize,
 }
 
 /// 統合ターミナル（モデル + ビューを兼ねる 1 エンティティ）。
@@ -194,6 +197,8 @@ pub struct TerminalView {
     app_cursor: bool,
     /// マウス左ボタンを押してドラッグ選択中か（move で範囲を延ばす判定）。
     selecting: bool,
+    /// ホイールの 1 行未満の端数持ち越し（トラックパッドのピクセル増分を行単位に畳む）。
+    scroll_remainder: f32,
     exited: bool,
     theme: Theme,
     focus_handle: FocusHandle,
@@ -282,6 +287,7 @@ impl TerminalView {
             size,
             app_cursor: false,
             selecting: false,
+            scroll_remainder: 0.0,
             exited,
             theme,
             focus_handle: cx.focus_handle(),
@@ -314,6 +320,7 @@ impl TerminalView {
             size,
             app_cursor: false,
             selecting: false,
+            scroll_remainder: 0.0,
             exited: false,
             theme,
             focus_handle: cx.focus_handle(),
@@ -349,6 +356,7 @@ impl TerminalView {
     fn sync(&mut self, cx: &mut Context<Self>) {
         let term = self.term.lock();
         let content = term.renderable_content();
+        let display_offset = content.display_offset;
         let cells = content
             .display_iter
             .map(|indexed| RenderCell {
@@ -371,6 +379,7 @@ impl TerminalView {
             cells,
             cursor,
             selection,
+            display_offset,
         };
         term_probe(
             "sync",
@@ -446,11 +455,59 @@ impl TerminalView {
             }
         }
         if let Some(bytes) = keystroke_to_bytes(&event.keystroke, self.app_cursor) {
+            // タイプしたら最下段へ復帰（スクロールバック閲覧中の入力は現在行に届く＝端末の常識）。
+            self.scroll_to_bottom(cx);
             self.write_bytes(bytes);
             // 入力したら選択は解除（出力でスクロールしても古いハイライトを残さない）。
             self.clear_selection(cx);
             cx.stop_propagation();
         }
+    }
+
+    /// ホイール/トラックパッドでスクロールバックを閲覧する。通常画面は表示オフセットを動かし、
+    /// 代替画面（less / vim 等・履歴なし）は ALTERNATE_SCROLL に従い矢印キー相当を送る。
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let delta_y = f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y);
+        let (lines, remainder) = wheel_lines(self.scroll_remainder, delta_y, LINE_HEIGHT);
+        self.scroll_remainder = remainder;
+        if lines == 0 {
+            return;
+        }
+        let mut term = self.term.lock();
+        let mode = *term.mode();
+        if mode.contains(TermMode::ALT_SCREEN) {
+            drop(term);
+            // 代替画面にスクロールバックは無い。ALTERNATE_SCROLL が立っていれば
+            // 上=↑ / 下=↓ を行数ぶん送ってアプリ側（less/vim）にスクロールさせる。
+            if mode.contains(TermMode::ALTERNATE_SCROLL) {
+                let code: &[u8] = match (lines > 0, self.app_cursor) {
+                    (true, false) => b"\x1b[A",
+                    (true, true) => b"\x1bOA",
+                    (false, false) => b"\x1b[B",
+                    (false, true) => b"\x1bOB",
+                };
+                let bytes = code.repeat(lines.unsigned_abs() as usize);
+                self.write_bytes(bytes);
+            }
+        } else {
+            term.scroll_display(Scroll::Delta(lines));
+            drop(term);
+            self.sync(cx);
+        }
+    }
+
+    /// スクロールバックを畳んで最下段（現在行）へ戻す。
+    fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        if self.content.display_offset == 0 {
+            return;
+        }
+        self.term.lock().scroll_display(Scroll::Bottom);
+        self.sync(cx);
     }
 
     /// 選択テキストをクリップボードへ（選択が空なら何もしない＝⌘C の空打ちは無害）。
@@ -464,13 +521,14 @@ impl TerminalView {
 
     /// クリップボードを PTY へ貼り付ける。bracketed paste モードなら囲み列を付ける
     /// （zsh 等が貼り付けを 1 塊として扱えるように）。
-    fn paste_from_clipboard(&self, cx: &mut Context<Self>) {
+    fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
         if text.is_empty() {
             return;
         }
+        self.scroll_to_bottom(cx);
         if self.term.lock().mode().contains(TermMode::BRACKETED_PASTE) {
             let mut bytes = b"\x1b[200~".to_vec();
             bytes.extend_from_slice(text.as_bytes());
@@ -592,6 +650,15 @@ fn viewport_cell(
     (row as i32, column, side)
 }
 
+/// ホイールのピクセル増分を行数へ畳む。1 行未満は持ち越して次回に足す
+/// （トラックパッドの細かい増分でも取りこぼさず、素早く回せば行が進む）。
+/// 戻りは (今回消費する行数, 新しい持ち越し)。
+fn wheel_lines(carry: f32, delta_y_pixels: f32, line_height: f32) -> (i32, f32) {
+    let total = carry + delta_y_pixels / line_height.max(1.0);
+    let lines = total.trunc() as i32;
+    (lines, total - lines as f32)
+}
+
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
 /// IME 対応の最小実装（M13）: 確定文字列を PTY へ流す。変換中（marked）の
@@ -639,6 +706,7 @@ impl EntityInputHandler for TerminalView {
     ) {
         // IME 確定・ディクテーション等の文字列を PTY へ（ASCII 打鍵は on_key_down 経由）。
         if !new_text.is_empty() {
+            self.scroll_to_bottom(cx);
             self.write_bytes(new_text.as_bytes().to_vec());
         }
         cx.notify();
@@ -704,6 +772,7 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             // テキストを選択できることを示す I ビーム。
             .cursor(CursorStyle::IBeam)
             // クリックでフォーカス（キー入力を受けるように）。
@@ -910,12 +979,14 @@ struct TerminalPrepaint {
     cursor: Option<AlacPoint>,
     /// マウス選択の範囲（グリッド座標）。ハイライトの矩形塗りに使う。
     selection: Option<SelectionRange>,
+    /// スクロールバックの表示オフセット。グリッド座標 → 表示行は `line + display_offset`。
+    display_offset: usize,
     cell_width: Pixels,
     line_height: Pixels,
     origin: gpui::Point<Pixels>,
     focused: bool,
     theme: Theme,
-    /// file:line リンク（表示行, セル列範囲, パス, 行番号・M13）。
+    /// file:line リンク（グリッド行, セル列範囲, パス, 行番号・M13）。
     links: Vec<(i32, Range<usize>, String, u32)>,
 }
 
@@ -1000,7 +1071,7 @@ impl Element for TerminalElement {
             ),
         );
         let theme = self.terminal.read(cx).theme.clone();
-        let (cells, cursor, selection, focused) = {
+        let (cells, cursor, selection, display_offset, focused) = {
             let focused = self.terminal.read(cx).focus_handle.is_focused(window);
             self.terminal.update(cx, |terminal, _cx| {
                 terminal.resize(columns, lines);
@@ -1008,6 +1079,7 @@ impl Element for TerminalElement {
                     terminal.content.cells.clone(),
                     terminal.content.cursor,
                     terminal.content.selection,
+                    terminal.content.display_offset,
                     focused,
                 )
             })
@@ -1018,6 +1090,7 @@ impl Element for TerminalElement {
             cells,
             cursor,
             selection,
+            display_offset,
             cell_width,
             line_height,
             origin: bounds.origin,
@@ -1041,6 +1114,9 @@ impl Element for TerminalElement {
         let origin = prepaint.origin;
         let cell_width = prepaint.cell_width;
         let line_height = prepaint.line_height;
+        let display_offset = prepaint.display_offset;
+        // グリッド行（スクロールバック閲覧中は負値もある）→ 表示 y 座標。
+        let row_y = |line: i32| origin.y + line_height * ((line + display_offset as i32) as f32);
         let font = window.text_style().font();
 
         // 面全体の背景。
@@ -1052,7 +1128,7 @@ impl Element for TerminalElement {
                 if range.contains(cell.point) {
                     let position = point(
                         origin.x + cell_width * (cell.point.column.0 as f32),
-                        origin.y + line_height * (cell.point.line.0 as f32),
+                        row_y(cell.point.line.0),
                     );
                     window.paint_quad(fill(
                         Bounds::new(position, size(cell_width, line_height)),
@@ -1071,7 +1147,7 @@ impl Element for TerminalElement {
             if !is_default_background(background) {
                 let position = point(
                     origin.x + cell_width * (cell.point.column.0 as f32),
-                    origin.y + line_height * (cell.point.line.0 as f32),
+                    row_y(cell.point.line.0),
                 );
                 window.paint_quad(fill(
                     Bounds::new(position, size(cell_width, line_height)),
@@ -1081,20 +1157,24 @@ impl Element for TerminalElement {
         }
 
         // ② カーソル（focus 時は塗りブロック・非focus は輪郭）。
+        // スクロールバック閲覧中は現在行が下へはみ出すので、面内にある時だけ描く。
         if let Some(cursor) = prepaint.cursor {
             let position = point(
                 origin.x + cell_width * (cursor.column.0 as f32),
-                origin.y + line_height * (cursor.line.0 as f32),
+                row_y(cursor.line.0),
             );
-            let cursor_bounds = Bounds::new(position, size(cell_width, line_height));
-            if prepaint.focused {
-                window.paint_quad(fill(cursor_bounds, theme.fg1));
-            } else {
-                window.paint_quad(gpui::outline(
-                    cursor_bounds,
-                    theme.fg2,
-                    gpui::BorderStyle::default(),
-                ));
+            let inside = position.y + line_height <= bounds.origin.y + bounds.size.height;
+            if inside {
+                let cursor_bounds = Bounds::new(position, size(cell_width, line_height));
+                if prepaint.focused {
+                    window.paint_quad(fill(cursor_bounds, theme.fg1));
+                } else {
+                    window.paint_quad(gpui::outline(
+                        cursor_bounds,
+                        theme.fg2,
+                        gpui::BorderStyle::default(),
+                    ));
+                }
             }
         }
 
@@ -1143,7 +1223,7 @@ impl Element for TerminalElement {
             };
             let position = point(
                 origin.x + cell_width * (cell.point.column.0 as f32),
-                origin.y + line_height * (cell.point.line.0 as f32),
+                row_y(cell.point.line.0),
             );
             let shaped = window.text_system().shape_line(
                 SharedString::from(cell.character.to_string()),
@@ -1176,7 +1256,9 @@ impl Element for TerminalElement {
                 }
                 let column =
                     (f32::from(event.position.x - origin.x) / f32::from(cell_width)) as usize;
-                let row = (f32::from(event.position.y - origin.y) / f32::from(line_height)) as i32;
+                // 表示行 → グリッド行（スクロールバック閲覧中はオフセットぶんずれる）。
+                let row = (f32::from(event.position.y - origin.y) / f32::from(line_height)) as i32
+                    - display_offset as i32;
                 for (line, columns, path, line_number) in &links {
                     if *line == row && columns.contains(&column) {
                         let (path, line_number) = (path.clone(), *line_number);
@@ -1262,5 +1344,49 @@ mod tests {
         // 時刻や単語:数字はパスらしさ（/ か .）が無いので拾わない。
         assert!(find_path_links("12:30 に会議").is_empty());
         assert!(find_path_links("error:42").is_empty());
+    }
+
+    #[test]
+    fn wheel_lines_accumulates_fractions() {
+        // 1 行未満は持ち越し、合計が 1 行に達した時だけ行が進む（トラックパッドの細かい増分）。
+        let (lines, carry) = wheel_lines(0.0, LINE_HEIGHT * 0.6, LINE_HEIGHT);
+        assert_eq!(lines, 0);
+        let (lines, carry) = wheel_lines(carry, LINE_HEIGHT * 0.6, LINE_HEIGHT);
+        assert_eq!(lines, 1);
+        assert!(carry.abs() < 1.0);
+        // 下方向（負の増分）も対称に畳まれる。
+        let (lines, _) = wheel_lines(0.0, -LINE_HEIGHT * 2.5, LINE_HEIGHT);
+        assert_eq!(lines, -2);
+    }
+
+    #[test]
+    fn scroll_display_moves_into_scrollback() {
+        // scrolling_history 設定の Term は、出力後に Scroll::Delta で履歴へ遡れて Bottom で戻る。
+        // （ホイール修正の土台 API の検証。vte parser 経由で実出力と同じ経路を通す。）
+        let (events_tx, _events_rx) = unbounded::<AlacEvent>();
+        let listener = Listener(events_tx);
+        let size = TerminalSize {
+            columns: 80,
+            lines: 24,
+        };
+        let config = Config {
+            scrolling_history: 10_000,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &size, listener);
+        let mut parser = alacritty_terminal::vte::ansi::Processor::<
+            alacritty_terminal::vte::ansi::StdSyncHandler,
+        >::new();
+        for index in 0..100 {
+            parser.advance(&mut term, format!("行 {index}\r\n").as_bytes());
+        }
+        assert_eq!(term.grid().display_offset(), 0);
+        term.scroll_display(Scroll::Delta(10));
+        assert_eq!(term.grid().display_offset(), 10);
+        // 履歴の実量を超えては遡れない（クランプされる）。
+        term.scroll_display(Scroll::Delta(10_000));
+        assert!(term.grid().display_offset() <= 100);
+        term.scroll_display(Scroll::Bottom);
+        assert_eq!(term.grid().display_offset(), 0);
     }
 }
