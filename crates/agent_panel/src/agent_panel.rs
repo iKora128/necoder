@@ -1107,6 +1107,10 @@ pub struct AgentPanel {
     transcript_regions: Rc<RefCell<Vec<SelectableRegion>>>,
     /// transcript のドラッグ選択（None = 選択なし）。⌘C でコピー・Esc/外クリックで解除。
     transcript_selection: Option<TranscriptSelection>,
+    /// ドラッグ選択中の最新ポインタ位置（ビュー外へ引っ張った時の自動スクロールが読む）。
+    transcript_drag_position: Option<gpui::Point<gpui::Pixels>>,
+    /// transcript のドラッグ自動スクロール tick が走っているか（二重 spawn 防止）。
+    transcript_autoscroll_running: bool,
     /// ACP のコードフェンス／ファイル出力用 tree-sitter 結果。描画ごとの再パースを避ける。
     syntax_cache: Rc<RefCell<SyntaxHighlightCache>>,
     /// Agent 本文の CommonMark 解析結果。マスコットや時計の再描画で再解析しない。
@@ -1361,6 +1365,8 @@ impl AgentPanel {
             thread_list_scroll: ScrollHandle::new(),
             transcript_regions: Rc::new(RefCell::new(Vec::new())),
             transcript_selection: None,
+            transcript_drag_position: None,
+            transcript_autoscroll_running: false,
             syntax_cache,
             markdown_cache,
             styled_text_cache,
@@ -2187,12 +2193,17 @@ impl AgentPanel {
         {
             return;
         }
+        self.transcript_drag_position = Some(event.position);
         let point = self.transcript_point_at(event.position, cx);
         if let (Some(selection), Some(point)) = (self.transcript_selection.as_mut(), point) {
             if selection.end != point {
                 selection.end = point;
                 cx.notify();
             }
+        }
+        // ビュー外へ引っ張ったら、押している間スクロールし続ける（下=末尾側 / 上=先頭側）。
+        if self.transcript_drag_overshoot(event.position) != gpui::px(0.) {
+            self.start_transcript_autoscroll(cx);
         }
     }
 
@@ -2202,6 +2213,7 @@ impl AgentPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.transcript_drag_position = None;
         if let Some(selection) = self.transcript_selection.as_mut() {
             selection.selecting = false;
             if selection.start == selection.end {
@@ -2209,6 +2221,72 @@ impl AgentPanel {
             }
             cx.notify();
         }
+    }
+
+    /// ポインタの transcript ビューポートからの上下はみ出し量。ビュー内（未描画含む）は 0。
+    fn transcript_drag_overshoot(&self, position: gpui::Point<gpui::Pixels>) -> gpui::Pixels {
+        let viewport = self.transcript_list.viewport_bounds();
+        if viewport.size.height <= gpui::px(0.) {
+            return gpui::px(0.);
+        }
+        if position.y < viewport.top() {
+            position.y - viewport.top()
+        } else if position.y > viewport.bottom() {
+            position.y - viewport.bottom()
+        } else {
+            gpui::px(0.)
+        }
+    }
+
+    /// ドラッグ自動スクロールの tick ループを起動する（既に走っていれば何もしない）。
+    fn start_transcript_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.transcript_autoscroll_running {
+            return;
+        }
+        self.transcript_autoscroll_running = true;
+        cx.spawn(async move |panel, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(33))
+                    .await;
+                let keep_going = panel
+                    .update(cx, |panel, cx| panel.transcript_autoscroll_tick(cx))
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 自動スクロール 1 tick: はみ出し量に比例してリストを送り、選択端を追従させる。
+    /// region 層は前フレームの可視域なので、端まで選択 → 次 tick でさらに延びる。
+    /// 続行するなら true（選択終了・ビュー内復帰で自然停止）。
+    fn transcript_autoscroll_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let selecting = self
+            .transcript_selection
+            .as_ref()
+            .is_some_and(|selection| selection.selecting);
+        let overshoot = match self.transcript_drag_position {
+            Some(position) if selecting => self.transcript_drag_overshoot(position),
+            _ => gpui::px(0.),
+        };
+        if overshoot == gpui::px(0.) {
+            self.transcript_autoscroll_running = false;
+            return false;
+        }
+        // 遠くへ引くほど速く（tick あたり最大 48px）。
+        let step = f32::from(overshoot).clamp(-96.0, 96.0) * 0.5;
+        self.transcript_list.scroll_by(gpui::px(step));
+        if let Some(position) = self.transcript_drag_position {
+            let point = self.transcript_point_at(position, cx);
+            if let (Some(selection), Some(point)) = (self.transcript_selection.as_mut(), point) {
+                selection.end = point;
+            }
+        }
+        cx.notify();
+        true
     }
 
     /// transcript 選択の ⌘C（M13）。⌘C は keymap で `editor_view::Copy` に解決され、フォーカスを
@@ -5427,7 +5505,8 @@ impl AgentPanel {
                 MouseButton::Left,
                 cx.listener(Self::on_transcript_mouse_down),
             )
-            .on_mouse_move(cx.listener(Self::on_transcript_mouse_move))
+            // move は root 側で拾う（`on_mouse_move` は hover 中しか発火せず、composer 上へ
+            // 引っ張った途端に途切れるため。composer リサイズと同じ作法）。
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up))
             .child(
@@ -7164,6 +7243,9 @@ impl Render for AgentPanel {
             )
             // composer 上縁ハンドルのドラッグ（root で move/up を拾い、枠外まで追従させる）。
             .on_mouse_move(cx.listener(Self::on_composer_resize_move))
+            // transcript のドラッグ選択も root で拾う（composer 上へはみ出しても選択を延ばし、
+            // ビュー外なら自動スクロールを起動する）。
+            .on_mouse_move(cx.listener(Self::on_transcript_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_composer_resize_end))
             .child(match self.tabs_view {
                 AgentTabsView::Bar => self.render_thread_tabs(cx).into_any_element(),

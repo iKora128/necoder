@@ -2242,3 +2242,10 @@
   2. **bypass レース**: 3 点セットで塞いだ。(a) `run_session_on` に `desired_mode` を追加し、**session/new 直後・最初の prompt を読む前に** `session/set_mode` を送る（初回ターンが既定モードで走る元凶の根治。UI へは適用後の current を流す＝二重送信しない）。`start_session` がスレッドの sticky モードを渡す。(b) 承認待ち中に bypass へ切り替えたら **select_option がその場で Allow を返す**（set_mode はターン中 deferred で今のターンに効かないため）。(c) bypass 選択中に届いた PermissionRequest は **UI 側で自動 Allow**（NECODER_AUTO_ALLOW と同じスナップショット完了後応答の一本道＝checkpoint は従来どおり切られる）。テスト 2 本追加（`permission_request_auto_allows_in_bypass_mode` / `switching_to_bypass_flushes_pending_permission`）・全 crate check/test 緑
 - 学び/罠: acp_client の `session.modes()` は `&Option<SessionModeState>` を返す＝`.as_ref().map` で借りる。ターン中 SetMode の即時送信（deferred 廃止）は今回見送り — turn loop 内で `send_request().block_task().await` すると応答がターン終端まで来ないエージェントでポンプが止まるリスクがあり、(b)(c) で実害が消えるため
 - 次: metal のある環境で実機確認（bypass タブの初回ターンが許可なしで走る / 承認カード表示中に bypass へ切り替えると即続行 / ⟲ 巻き戻しがファイルを壊さない）
+
+## 2026-08-29 — origin 合流 + ドラッグ選択の自動スクロール（ACP transcript / ターミナル）
+- やったこと:
+  1. **origin/main（v0.1.6・別セッション 12 コミット）を合流**: ローカルのライセンス境界セッション（THIRD_PARTY_NOTICES / 表現書き換え / CLI インストーラ）を先にコミット → merge。衝突は README.md のみ（EN=CLI 導入節と Windows 節を両取り / JA=origin の全面書き換えをベースに CLI 導入を再適用）。origin の JA ライセンス節に残っていた**修正前の主張**（「GPL コード移植はありません・GPUI は Apache-2.0」）を EN 側と同じ修正後の文面へ揃えた
+  2. **ドラッグ選択の自動スクロール**（ユーザー要望・ACP transcript とターミナル共通）: 選択ドラッグでビュー外へ引っ張ったら、押している間 33ms tick でスクロールし続け選択端を追従させる（はみ出し量に比例して加速・ビュー内復帰/マウスアップで自然停止）。transcript は `ListState::scroll_by` + 前フレームの region 層で端まで選択 → 次 tick でさらに延ばす。ターミナルは `Scroll::Delta` ± はみ出し行数（上=履歴側/下=最新側・代替画面は対象外）→ sync → 新 display_offset で選択を引き直す
+- 学び/罠: gpui の `div().on_mouse_move` は **hitbox が hover 中しか発火しない**＝要素外へドラッグした瞬間イベントが途絶える（transcript の下方向ドラッグ選択が composer 上で止まっていた真因）。ドラッグ追従は composer リサイズと同じく**パネル root の on_mouse_move で拾う**（ターミナルは元々 paint 内 `window.on_mouse_event`＝window 全域で問題なし）。tick ループは `Task` を持たず bool フラグ + detach（自分の Task ハンドルを tick 内で drop しない）
+- 次: 実機で目視確認（transcript を下へ引っ張って自動スクロール / ターミナルで履歴へ上ドラッグ / less 中は動かないこと）
