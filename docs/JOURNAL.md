@@ -2261,3 +2261,15 @@
 - 検証: NECODER_COMPOSER_PROBE で長文（12 段落 + 長 URL）→ 420px まで伸びて内部スクロール、
   短文 → 既定高のまま、をオフスクリーンで目視。agent_panel/editor_view テスト緑
 - 次: 実機で貼り付け・削除時の伸縮とリサイズハンドルの体感確認
+
+## 2026-08-29 —（続き）EditorView にもドラッグ選択の自動スクロール
+- やったこと: transcript/ターミナルに続き、**EditorView（本体エディタ + composer 共通）**でも
+  選択ドラッグをビュー外へ引っ張ったら 33ms tick でスクロール＋選択延長するように（ユーザー要望）。
+  選択延長を `extend_drag_selection` に抽出し、Char/Word/Line の粒度そのままで tick からも呼ぶ。
+  ここでも `div().on_mouse_move` の hover 限定問題があるため、**選択中の move は paint で登録する
+  `window.on_mouse_event` を正にした**（div 側は hover dwell 専用に）。tick は `spawn_in(window)` +
+  `update_in`（`offset_for_position` がテキスト計測で Window を要るため。transcript の Context 版とは違う）
+- 学び/罠: 複数 EditorView（分割・composer）が各自 window ハンドラを登録するが、`is_selecting` の
+  ビューだけが反応するので競合しない。scroll_top の clamp は `max_scroll_top()` が viewport 縮小時も
+  0 に畳むので stuck しない
+- 次: 実機でエディタ/composer のドラッグ上下スクロールの体感確認（速度係数 0.5・上限 48px/tick の調整余地）

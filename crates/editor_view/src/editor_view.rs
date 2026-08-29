@@ -7,7 +7,8 @@
 use editor_core::{Buffer, BufferSnapshot, Point as BufferPoint, Selection};
 use gpui::{
     actions, div, fill, hsla, point, prelude::*, px, relative, size, App, Bounds, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter,
+    CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter,
     FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ScrollWheelEvent, ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection,
@@ -180,6 +181,10 @@ pub struct EditorView {
     gutter_width: Pixels,
     caret_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// 選択ドラッグ中の最新ポインタ位置（ビュー外自動スクロールの tick が読む）。
+    drag_position: Option<Point<Pixels>>,
+    /// ビュー外ドラッグの自動スクロール tick が走っているか（二重 spawn 防止）。
+    drag_autoscroll_running: bool,
     /// ドラッグ選択の粒度（mouse down で決まり mouse move が読む）。
     drag_select: DragSelectMode,
     // キャレット点滅。focus 中のみ動かし、blur で止める（idle CPU 0% を守る）。
@@ -293,6 +298,8 @@ impl EditorView {
             gutter_width: px(0.),
             caret_bounds: None,
             is_selecting: false,
+            drag_position: None,
+            drag_autoscroll_running: false,
             drag_select: DragSelectMode::Char,
             blink_visible: true,
             caret_blink_enabled: true,
@@ -1512,6 +1519,135 @@ impl EditorView {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.is_selecting = false;
+        self.drag_position = None;
+    }
+
+    /// ドラッグ中の選択延長（現在の drag_select 粒度で position の位置まで）。
+    fn extend_drag_selection(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = self.offset_for_position(position, window);
+        match self.drag_select.clone() {
+            DragSelectMode::Char => {
+                let anchor = self.primary().anchor;
+                self.buffer
+                    .set_selections(vec![Selection::new(anchor, offset)]);
+            }
+            // 単語/行モードはカーソル側も同じ粒度に丸め、起点の単語/行を必ず含める
+            // （前方ドラッグは起点 start を anchor に、後方ドラッグは起点 end を anchor に）。
+            DragSelectMode::Word { origin } => {
+                let at = self
+                    .buffer
+                    .snapshot()
+                    .word_range_at(offset)
+                    .unwrap_or(offset..offset);
+                let selection = if at.start < origin.start {
+                    Selection::new(origin.end, at.start)
+                } else {
+                    Selection::new(origin.start, at.end.max(origin.end))
+                };
+                self.buffer.set_selections(vec![selection]);
+            }
+            DragSelectMode::Line { origin_row } => {
+                let row = self.buffer.snapshot().byte_to_point(offset).row;
+                let origin = self.line_selection_range(origin_row);
+                let at = self.line_selection_range(row);
+                let selection = if at.start < origin.start {
+                    Selection::new(origin.end, at.start)
+                } else {
+                    Selection::new(origin.start, at.end.max(origin.end))
+                };
+                self.buffer.set_selections(vec![selection]);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 選択ドラッグ中の move（paint で登録する window 全域ハンドラから）。div の
+    /// `on_mouse_move` は hover 中しか発火せず枠外で途切れるため、選択中はこちらが正。
+    /// 選択を延長し、ビュー外へはみ出していたら自動スクロールを起動する。
+    fn on_drag_selection_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_selecting {
+            return;
+        }
+        self.drag_position = Some(event.position);
+        self.extend_drag_selection(event.position, window, cx);
+        if self.drag_overshoot(event.position) != 0.0 {
+            self.start_drag_autoscroll(window, cx);
+        }
+    }
+
+    /// ポインタの上下はみ出し量（px）。負 = ビュー上端より上、正 = 下端より下。ビュー内は 0。
+    fn drag_overshoot(&self, position: Point<Pixels>) -> f32 {
+        let Some(origin) = self.content_origin else {
+            return 0.0;
+        };
+        if self.viewport_height <= px(0.) {
+            return 0.0;
+        }
+        let top = f32::from(origin.y);
+        let bottom = top + f32::from(self.viewport_height);
+        let y = f32::from(position.y);
+        if y < top {
+            y - top
+        } else if y > bottom {
+            y - bottom
+        } else {
+            0.0
+        }
+    }
+
+    /// ビュー外ドラッグの自動スクロール tick ループを起動する（既に走っていれば何もしない）。
+    fn start_drag_autoscroll(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.drag_autoscroll_running {
+            return;
+        }
+        self.drag_autoscroll_running = true;
+        cx.spawn_in(window, async move |editor, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(33))
+                    .await;
+                let keep_going = editor
+                    .update_in(cx, |editor, window, cx| editor.drag_autoscroll_tick(window, cx))
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 自動スクロール 1 tick: はみ出し量に比例して scroll_top を送り、選択端を追従させる。
+    /// 続行するなら true（選択終了・ビュー内復帰で自然停止）。
+    fn drag_autoscroll_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let overshoot = match self.drag_position {
+            Some(position) if self.is_selecting => self.drag_overshoot(position),
+            _ => 0.0,
+        };
+        if overshoot == 0.0 {
+            self.drag_autoscroll_running = false;
+            return false;
+        }
+        // 遠くへ引くほど速く（tick あたり最大 48px）。
+        let step = overshoot.clamp(-96.0, 96.0) * 0.5;
+        self.scroll_top = (self.scroll_top + px(step))
+            .max(px(0.))
+            .min(self.max_scroll_top());
+        if let Some(position) = self.drag_position {
+            self.extend_drag_selection(position, window, cx);
+        }
+        cx.notify();
+        true
     }
 
     fn on_mouse_move(
@@ -1520,42 +1656,8 @@ impl EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 選択ドラッグ中の延長は window 全域ハンドラ（on_drag_selection_move）が担う。
         if self.is_selecting {
-            let offset = self.offset_for_position(event.position, window);
-            match self.drag_select.clone() {
-                DragSelectMode::Char => {
-                    let anchor = self.primary().anchor;
-                    self.buffer
-                        .set_selections(vec![Selection::new(anchor, offset)]);
-                }
-                // 単語/行モードはカーソル側も同じ粒度に丸め、起点の単語/行を必ず含める
-                // （前方ドラッグは起点 start を anchor に、後方ドラッグは起点 end を anchor に）。
-                DragSelectMode::Word { origin } => {
-                    let at = self
-                        .buffer
-                        .snapshot()
-                        .word_range_at(offset)
-                        .unwrap_or(offset..offset);
-                    let selection = if at.start < origin.start {
-                        Selection::new(origin.end, at.start)
-                    } else {
-                        Selection::new(origin.start, at.end.max(origin.end))
-                    };
-                    self.buffer.set_selections(vec![selection]);
-                }
-                DragSelectMode::Line { origin_row } => {
-                    let row = self.buffer.snapshot().byte_to_point(offset).row;
-                    let origin = self.line_selection_range(origin_row);
-                    let at = self.line_selection_range(row);
-                    let selection = if at.start < origin.start {
-                        Selection::new(origin.end, at.start)
-                    } else {
-                        Selection::new(origin.start, at.end.max(origin.end))
-                    };
-                    self.buffer.set_selections(vec![selection]);
-                }
-            }
-            cx.notify();
             return;
         }
         // hover dwell: 同じ位置に HOVER_DWELL_MS 留まったら Dwell を emit（動くたび世代で無効化）。
@@ -2391,6 +2493,22 @@ impl Element for EditorElement {
             ElementInputHandler::new(prepaint.content_bounds, self.editor.clone()),
             cx,
         );
+
+        // 選択ドラッグの move は window 全域で拾う（div の on_mouse_move は hover 中しか
+        // 発火せず、枠外へ引っ張ると途切れるため）。is_selecting のビューだけが反応する。
+        {
+            let editor = self.editor.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || event.pressed_button != Some(MouseButton::Left)
+                {
+                    return;
+                }
+                editor.update(cx, |editor, cx| {
+                    editor.on_drag_selection_move(event, window, cx)
+                });
+            });
+        }
 
         if let Some(highlight) = prepaint.current_line.take() {
             window.paint_quad(highlight);
