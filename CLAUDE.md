@@ -8,7 +8,7 @@ GPUI ベースの自作エディタ **necoder（ねこーだー）**。ライセ
 | 何を知りたい | どこを見る |
 |---|---|
 | **何を次に作るか（受入条件）** | `docs/ROADMAP.md` — `/goal` コマンドはこれを上から消化する |
-| **どう作るか（設計図）** | `docs/ARCHITECTURE.md` — crate 配置・依存方向・型契約・移植作法 |
+| **どう作るか（設計図）** | `docs/ARCHITECTURE.md` — crate 配置・依存方向・型契約・実装来歴の記録方法 |
 | **どう見せるか（UI仕様）** | `docs/UI-SPEC.md` — トークン表・色の許可リスト・領域別仕様・キー表 |
 | **何をどう呼ぶか（用語の正）** | `docs/GLOSSARY.md` — 機能・場所の正規名（code/日/英）と廃止語。UI 文字列/識別子はここに寄せる |
 | **Windows 対応（W フェーズ）** | `docs/WINDOWS-PORT.md` — 環境・設計決定・受入条件・罠・該当箇所インベントリ。`/goal-win` はこれを消化する |
@@ -25,8 +25,8 @@ GPUI ベースの自作エディタ **necoder（ねこーだー）**。ライセ
 
 - `zed/` は参照用クローン（.gitignore 済み）。**変更禁止・勝手に `git pull` しない**（GPUI の API churn で本体が壊れるため。更新はユーザーの判断で行い、追従修正とセットにする）
 - GPUI は **git 依存（rev 固定）**（root Cargo.toml。CI ビルド可能化のため path 依存から移行済み・2026-07-15 現在）。ローカル `zed/` は API 調査・example 参照用。**rev 更新はユーザー判断**（`zed/` の pull と同じ扱い・追従修正とセット）
-- Zed の GPL crate（`acp_thread` / `agent_servers` / `worktree` / `fs` 等）の**コード移植・改変は禁止**（DECISIONS §5。ライセンスは AGPL-3.0 確定＝2026-07-15。それでも全コードを自作/permissive に保つのは、デュアルライセンス・商用版・将来の緩和という**再ライセンスの自由を本人の手に残すため**。外部貢献を受け始める時は CLA 必須）。**手法の参考は可** — 読み下して自作 or permissive crate で代替し、参考元（crate 名と概ねの時点）をファイル冒頭コメントに残す（実例: git=CLI+imara-diff / terminal=alacritty_terminal / LSP=封筒自作。`docs/research/porting-git-terminal-lsp.md`）
-- Apache 系の土台: `gpui`, crates.io の `agent-client-protocol`（ACP プロトコル）
+- Zed の GPL アプリケーション crate（`acp_thread` / `agent_servers` / `worktree` / `fs` 等）からのコード複製・翻訳・改変は禁止。公開 API の利用例や一般的な設計比較は可だが、実装は公開仕様とライセンス適合を確認した外部ライブラリを使い necoder の型と要件から独立に組み立てる。参照した場合も `ported` / `移植` とは書かず、比較対象と独立実装の境界を記録する（`docs/research/git-terminal-lsp-design-notes.md`）
+- `gpui` / `gpui_platform` 自体は Apache-2.0 表示だが、現在の固定 revision は GPL-3.0-or-later の推移依存を含む。necoder の AGPL 配布とは互換だが、全依存 permissive や配布物全体の自由な再ライセンスを意味しない（DECISIONS §5 / THIRD_PARTY_NOTICES.md）
 
 ## ビルド・検証ループ（変更のたびに回す）
 

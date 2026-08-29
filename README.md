@@ -22,6 +22,15 @@ Every project and branch carries an identity color that runs through the rail, t
 2. Requires **macOS 13+ (Apple Silicon)**. Builds are codesigned and notarized; the app self-updates from Releases (verifying the Apple signature before installing).
 3. For AI features, install and log in to the [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) — necoder talks to it over ACP.
 
+On first launch, necoder offers to install its Terminal command. Click **Install CLI** and approve the standard macOS authentication prompt. You can run the bundled installer manually as a fallback:
+
+```sh
+/Applications/necoder.app/Contents/Resources/install-cli.sh
+necoder .
+```
+
+The setting remains available under **Settings → Terminal**. The command reuses a running window by default; use `necoder --new-window .` for a separate window, or `necoder --help` for the full CLI overview.
+
 Something broke? In-app **Help → Report a Bug** pre-fills an issue. Logs live in `~/Library/Application Support/necoder/logs/` (written when launched from Finder/Dock) and crash reports in `…/necoder/crashes/`.
 
 ## Build from source
@@ -96,7 +105,7 @@ Development docs are primarily in Japanese; the UI is fully bilingual (ja/en).
 
 ## License & contributing
 
-- **AGPL-3.0-or-later** ([LICENSE](LICENSE)). All code is original or built on permissive dependencies (GPUI is Apache-2.0). **No GPL code is ported from other editors** — techniques are studied, implementations are our own, and CI enforces a dependency license audit ([cargo-deny](deny.toml)). Rationale and history: [`docs/DECISIONS.md`](docs/DECISIONS.md) §5.
+- **AGPL-3.0-or-later** ([LICENSE](LICENSE)). necoder-specific code is independently implemented; code from Zed's GPL application crates is not copied or adapted. The pinned GPUI dependency is marked Apache-2.0 upstream but currently brings documented GPL-3.0-or-later transitive crates; GPLv3/AGPLv3 §13 permits this combination under the applicable copyleft terms. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md) §5.
 - Contributions are welcome — read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. **All contributions require signing the [CLA](CLA.md)** (a bot guides you on your first PR); this keeps future licensing options (including dual licensing) with the maintainer.
 - Bundled fonts are OFL-1.1 ([`assets/fonts/`](assets/fonts/README.md)); icons are Lucide (ISC) and Simple Icons (CC0) ([`crates/necoder/assets/icons/LICENSE.md`](crates/necoder/assets/icons/LICENSE.md)).
 
@@ -111,10 +120,10 @@ Development docs are primarily in Japanese; the UI is fully bilingual (ja/en).
 - Remote SSH・LSP・tree-sitter 多言語・Git（hunk stage / blame / worktree）・統合ターミナル・日本語 IME・hot exit
 - **テレメトリなし**。通信は自分で起動するもの（エージェント・SSH）と GitHub Releases への更新チェックのみ
 
-**インストール**: [Releases](https://github.com/iKora128/necoder/releases) から `necoder.dmg` を取得して Applications へ（macOS 13+ / Apple Silicon・署名/公証済み・アプリ内自動更新）。AI 機能には `claude` CLI のログインが必要です。
+**インストール**: [Releases](https://github.com/iKora128/necoder/releases) から `necoder.dmg` を取得して Applications へ（macOS 13+ / Apple Silicon・署名/公証済み・アプリ内自動更新）。AI 機能には `claude` CLI のログインが必要です。Terminal の `necoder .` は、初回画面または設定の「ターミナル → CLIをインストール」から導入できます（手動なら `/Applications/necoder.app/Contents/Resources/install-cli.sh`、別ウィンドウは `necoder --new-window .`）。
 
 **ソースから**: `cargo run -p necoder`（toolchain は `rust-toolchain.toml` で固定）。`./scripts/bundle-mac.sh` で .app を組み立て。
 
-**開発に参加する**: [`CONTRIBUTING.md`](CONTRIBUTING.md) を参照。全てのコントリビュートに [CLA](CLA.md) への署名が必要です（初回 PR で bot が案内）。Zed の GPL crate からのコード移植は禁止（手法の参考のみ・[`docs/DECISIONS.md`](docs/DECISIONS.md) §5）。
+**開発に参加する**: [`CONTRIBUTING.md`](CONTRIBUTING.md) を参照。全てのコントリビュートに [CLA](CLA.md) への署名が必要です（初回 PR で bot が案内）。Zed の GPL アプリケーション crate からコードを複製・翻訳・改変して取り込むことは禁止です（[`docs/DECISIONS.md`](docs/DECISIONS.md) §5）。
 
 リポジトリ構成の詳細は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照（`crates/` に約 20 crate・`zed/` は git 管理外の参照用クローン・`mock/` はビジュアルモック）。

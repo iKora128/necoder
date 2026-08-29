@@ -2,7 +2,7 @@
 //!
 //! `std::fs` / `std::process` を UI・project model から隔離し、同じ API を local process と
 //! SSH 上の `necoder-remote-server` へ向ける。設計根拠は
-//! `docs/research/remote-ssh-2026.md`。Zed の GPL 実装は移植せず、公開仕様を基に独立実装する。
+//! `docs/research/remote-ssh-2026.md`。Zed の GPL コードは取り込まず、公開仕様を基に独立実装する。
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use ignore::WalkBuilder;

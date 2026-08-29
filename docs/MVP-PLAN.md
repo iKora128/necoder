@@ -3,7 +3,7 @@
 目的: エディタ全体をいきなり作らない。**GPUIが自分の手で動かせるか**を最短で確かめ、
 少しずつ"エディタらしさ"を積む。**楽しいか苦行か**を体で判定する（＝週末テスト）。
 
-前提: macOS / Rust（`rustup`, `cargo` 済み想定）。`~/Work/experience/necoder/zed` にZedのソースがclone済み。
+前提: macOS / Rust（`rustup`, `cargo` 済み想定）。必要なら `zed/` に比較用ソースをclone済み。
 
 ---
 
@@ -12,29 +12,28 @@
 自分で1行も書く前に、**GPUI公式exampleを走らせる**のが最速の「動く／動かない」判定。
 
 ```sh
-cd ~/Work/experience/necoder/zed
+cd zed
 cargo run -p gpui --example hello_world
 ```
 
 - ウィンドウが出れば **GPUIはこのマシンで動く**＝土台クリア。
 - 初回は依存ビルドで時間がかかる（Zedは巨大）。ここは我慢。
-- 他に見て損しないexample（`~/Work/experience/necoder/zed/crates/gpui/examples/`）:
+- 他に見て損しないexample（`zed/crates/gpui/examples/`）:
   - `input.rs` … テキスト入力（エディタの核心に一番近い）
   - `list_example.rs` … 仮想リスト（ファイルツリー/スレッド一覧の下地）
   - `data_table.rs` … 表
   - `painting.rs` / `gradient.rs` … 低レベル描画
 
-> ⚠️ GPUIはAPIが動く（churn）。**必ずこの`~/Work/experience/necoder/zed`内の現行exampleを正**とすること。
+> ⚠️ GPUIはAPIが動く（churn）。**固定 revision の公開 GPUI API と examplesを正**とすること。
 > ネットの古いサンプルは高確率で今のAPIと合わない。
 
 ---
 
 ## Step 1: 自分のcrateからGPUIウィンドウを出す（半日）
 
-`~/Work/experience/necoder/` 配下に実験用crateを作る。
+リポジトリ外または一時ディレクトリに実験用crateを作る。
 
 ```sh
-cd ~/Work/experience/necoder
 cargo new app --bin
 cd app
 ```
@@ -49,8 +48,9 @@ gpui = { path = "../zed/crates/gpui" }
 # gpui = { git = "https://github.com/zed-industries/zed", rev = "<固定rev>" }
 ```
 
-`src/main.rs` は **`~/Work/experience/necoder/zed/crates/gpui/examples/hello_world.rs` をコピーして出発点**にする
-（現行APIに一致している唯一の信頼できる雛形）。まず空ウィンドウ→テキスト1行描画まで。
+`src/main.rs` は固定 revision の `gpui/examples/hello_world.rs` を API 利用例として確認し、最小の
+空ウィンドウ→テキスト1行描画をローカルに組み立てる。GPUI example のコードを実際に再利用する場合は、
+Apache-2.0 の表示と [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) の帰属を保持する。
 
 ---
 
@@ -107,7 +107,7 @@ Step 0〜2 を実際にやってみて:
 
 ## 参考：example ↔ エディタ機能 対応表
 
-| やりたいこと | 見るexample（`~/Work/experience/necoder/zed/crates/gpui/examples/`） |
+| やりたいこと | 見るexample（`zed/crates/gpui/examples/`） |
 |---|---|
 | ウィンドウ/描画の基本 | `hello_world.rs` |
 | テキスト入力・カーソル | `input.rs` |
@@ -117,4 +117,5 @@ Step 0〜2 を実際にやってみて:
 | 低レベル描画・図形 | `painting.rs`, `gradient.rs`, `shadow.rs` |
 | ウィンドウ間移動 | `move_entity_between_windows.rs` |
 
-困ったら `~/Work/experience/necoder/zed` 本体を **"GPUIの生きた教科書"** として grep するのが最短。
+GPUI APIで困ったら、固定 revision の `crates/gpui` とその examples を確認する。Zed の GPL
+アプリケーション crate を実装の雛形にはしない。

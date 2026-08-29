@@ -33,7 +33,8 @@ url = "2"
 # git gutter diff（HEAD vs バッファの行差分）。Zed も同じ（純 Rust・libgit2 不使用）
 imara-diff = "0.1.8"
 # チャット本文の markdown 解析（M4）。純 Rust・MIT・CommonMark+GFM。イベント列を自作レンダラで
-# GPUI 要素へ落とす（Zed の markdown crate は GPL のため移植せず手法のみ参考・DECISIONS §5）。
+# GPUI 要素へ落とす。Zed の markdown crate のコードは取り込まず、CommonMark 仕様と
+# pulldown-cmark の公開 API から独立に実装する（DECISIONS §5）。
 # default-features off で CLI 用の getopts を外す（Zed と同じ）。
 pulldown-cmark = { version = "0.13", default-features = false }
 # tree-sitter（M7 ハイライト）。links=tree-sitter は 1 版のみ許容 → highlight 0.25 に揃える
@@ -67,7 +68,7 @@ futures = "0.3"
 async-io = "2"
 # 自前ヘッドレススクショ用（gpui の render_to_image が image::RgbaImage を返す）
 image = "0.25"
-# M8 統合ターミナル。crates.io 0.26 は Zed fork(0.26.1-dev)とほぼ同一 API
+# M8 統合ターミナル。crates.io の公開 API を使用する。
 alacritty_terminal = "0.26"
 libc = "0.2"
 # M10 ファイル監視（macOS は FSEvents バックエンド）。remote watch は M13 で Host 経由に

@@ -1,0 +1,114 @@
+#!/bin/sh
+# Terminal launcher bundled in necoder.app.
+#
+# Normal paths go through Launch Services so an already-running necoder receives
+# them via application:openURLs:. Headless subcommands keep their stdio by
+# executing the app binary directly.
+set -eu
+
+usage() {
+    cat <<'EOF'
+necoder — open a folder or file in necoder
+
+Usage:
+  necoder [path ...]
+  necoder --new-window [path ...]
+  necoder ssh://[user@]host/path
+  necoder config <list|get|set> ...
+  necoder fleet ...
+  necoder mcp [root]
+
+Options:
+  -n, --new-window  Open in a new necoder process
+  -h, --help        Show this help
+  -v, --version     Show the installed version
+
+Examples:
+  necoder .
+  necoder README.md
+  necoder --new-window ../another-project
+EOF
+}
+
+resolve_self() {
+    target=$1
+    while [ -L "$target" ]; do
+        target_dir=$(CDPATH= cd -- "$(dirname -- "$target")" && pwd -P)
+        link=$(readlink "$target")
+        case "$link" in
+            /*) target=$link ;;
+            *) target=$target_dir/$link ;;
+        esac
+    done
+    target_dir=$(CDPATH= cd -- "$(dirname -- "$target")" && pwd -P)
+    printf '%s/%s\n' "$target_dir" "$(basename -- "$target")"
+}
+
+find_app() {
+    if [ -n "${NECODER_APP_PATH:-}" ]; then
+        printf '%s\n' "$NECODER_APP_PATH"
+        return
+    fi
+
+    self=$(resolve_self "$0")
+    bundled_app=$(CDPATH= cd -- "$(dirname -- "$self")/../../.." 2>/dev/null && pwd -P) || bundled_app=
+    if [ -n "$bundled_app" ] && [ -x "$bundled_app/Contents/MacOS/necoder" ]; then
+        printf '%s\n' "$bundled_app"
+    elif [ -x "/Applications/necoder.app/Contents/MacOS/necoder" ]; then
+        printf '%s\n' "/Applications/necoder.app"
+    elif [ -x "$HOME/Applications/necoder.app/Contents/MacOS/necoder" ]; then
+        printf '%s\n' "$HOME/Applications/necoder.app"
+    else
+        printf '%s\n' "necoder.app が見つかりません。Applications フォルダへインストールし直してください。" >&2
+        exit 1
+    fi
+}
+
+app=$(find_app)
+binary=$app/Contents/MacOS/necoder
+
+case "${1:-}" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    -v|--version)
+        version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null || true)
+        printf 'necoder %s\n' "${version:-unknown}"
+        exit 0
+        ;;
+    config|fleet|mcp)
+        exec "$binary" "$@"
+        ;;
+    -n|--new-window)
+        shift
+        if [ "$#" -eq 0 ]; then
+            exec open -n -a "$app"
+        fi
+        for argument in "$@"; do
+            case "$argument" in
+                # Remote URIs are CLI project sources, not registered documents.
+                ssh://*) exec open -n -a "$app" --args "$@" ;;
+            esac
+        done
+        # Let `open` resolve relative paths in the terminal's cwd, then deliver
+        # them as file:// URLs to the newly launched instance.
+        exec open -n -a "$app" "$@"
+        ;;
+esac
+
+if [ "$#" -eq 0 ]; then
+    exec open -a "$app"
+fi
+
+# Remote URIs are command-line project sources rather than file:// documents.
+# Start a fresh instance so the URI reaches resolve_projects unchanged.
+for argument in "$@"; do
+    case "$argument" in
+        ssh://*) exec open -n -a "$app" --args "$@" ;;
+    esac
+done
+
+# Files and folders are delivered to the running app when one exists. `open`
+# also launches the app when necessary, matching the behavior of `code .`.
+exec open -a "$app" "$@"

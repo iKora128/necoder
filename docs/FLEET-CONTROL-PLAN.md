@@ -198,7 +198,8 @@ P9 は計画上 **P7（常駐）・P8 を飛び越す**（2026-07-25・ユーザ
 
 ## 3. 実装エージェントへの注意
 
-- `CLAUDE.md` と `zed/CLAUDE.md`（GPUI 節・Rust 規約）が正。GPUI API はネット記事や記憶を疑い `zed/crates/gpui/examples/` を見る。
+- `CLAUDE.md` がプロジェクト規約の正。GPUI API は固定 revision の公開 API と
+  `crates/gpui/examples/` を確認し、Zed のアプリケーション実装を作業指示には使わない。
 - mock を先に直してから実装（乖離したら文書/mock を直す方が先）。`mock/fleet-dashboard.html` を index.html へ移植する際は編隊モード節へ統合し、検証はヘッドレス Chrome スクショ + Read 目視。
 - 文書更新も作業のうち: GLOSSARY（管制/Control・遷移スナップショット/digest・監督/Coordinator・常駐/Herdr Runtime・集約気分）、UI-SPEC §11（管制タブ・✳ と破線の意味論・stat チップ）、DECISIONS（本計画 §0 の 1〜9 を決定ログとして転記）、ROADMAP M14（各フェーズ完了時にチェック + JOURNAL 記録）。
 - 性能予算: 管制タブは 8 TaskSpace で 60fps・digest 生成はレンダ外（Git/DB/Host I/O を render 中に行わない不変条件）。

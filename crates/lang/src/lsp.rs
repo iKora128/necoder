@@ -1,6 +1,6 @@
 //! lsp — rust-analyzer との最小 LSP クライアント（M7）。GPUI 非依存。
 //!
-//! 移植根拠は `docs/research/porting-git-terminal-lsp.md`。JSON-RPC 封筒は自前、型は必要分だけ手書き
+//! 独立実装の設計根拠は `docs/research/git-terminal-lsp-design-notes.md`。JSON-RPC 封筒は自前、型は必要分だけ手書き
 //! （lsp-types のバージョン差異を避ける）。transport は `std::process` + **読取スレッド**（blocking）+
 //! `futures` channel で上位（GPUI 前景）へ橋渡しする（acp_client / terminal と同じ「背景→channel→pump」）。
 //!

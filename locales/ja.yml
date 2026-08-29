@@ -372,6 +372,15 @@ settings:
   login: ログイン
   open_cli: CLI を開く
   install: 導入
+  cli_heading: ターミナル
+  cli_sub: VS Code や Cursor と同じように、現在のフォルダをコマンドから開けます。
+  cli_name: necoder コマンド
+  cli_name_sub: "例: necoder .  /  necoder README.md"
+  cli_install: CLI をインストール
+  cli_installing: インストール中…
+  cli_installed: ✓ インストール済み
+  cli_install_success: CLI をインストールしました。Terminal で necoder . が使えます
+  cli_install_failed: "CLI をインストールできませんでした: %{error}"
   welcome_title: ようこそ 🎨
   welcome_sub: 使うエージェントを選んで始めましょう。あとから ⚙ でいつでも変えられます。
   get_started: これで始める →

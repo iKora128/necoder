@@ -30,7 +30,7 @@ fn restore_maximized_window() {}
 impl Workspace {
     pub(crate) fn on_settings_view_event(
         &mut self,
-        _view: Entity<settings::SettingsView>,
+        view: Entity<settings::SettingsView>,
         event: &settings::SettingsViewEvent,
         cx: &mut Context<Self>,
     ) {
@@ -38,6 +38,10 @@ impl Workspace {
             settings::SettingsViewEvent::RunCommand(command) => {
                 self.chrome.pending_settings_command = Some(command.clone());
                 cx.notify();
+            }
+            settings::SettingsViewEvent::InstallNecoderCli => {
+                view.update(cx, |view, cx| view.set_necoder_cli_installing(true, cx));
+                self.install_necoder_cli(view, cx);
             }
             settings::SettingsViewEvent::OnboardingCompleted => {
                 self.chrome.show_settings = false;
@@ -58,6 +62,39 @@ impl Workspace {
                 cx.notify();
             }
         }
+    }
+
+    /// 同梱 installer を macOS の認証ダイアログ経由で実行する。
+    /// 初回起動で勝手に PATH を書き換えず、明示クリックされた時だけ管理者権限を求める。
+    fn install_necoder_cli(
+        &mut self,
+        settings_view: Entity<settings::SettingsView>,
+        cx: &mut Context<Self>,
+    ) {
+        let accent = self.accent();
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { install_necoder_cli_launcher() })
+                .await;
+            let _ = settings_view.update(cx, |view, cx| view.set_necoder_cli_installing(false, cx));
+            let _ = workspace.update(cx, |workspace, cx| match result {
+                Ok(()) => workspace.push_toast(
+                    SharedString::from(i18n::t!("settings.cli_install_success")),
+                    accent,
+                    cx,
+                ),
+                Err(error) => workspace.push_toast(
+                    SharedString::from(i18n::t!(
+                        "settings.cli_install_failed",
+                        "error" => error.to_string()
+                    )),
+                    workspace.theme.err,
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn accent(&self) -> Hsla {
@@ -97,7 +134,7 @@ impl Workspace {
             .when(cfg!(target_os = "macos"), |element| element.pr_2())
             .border_b_1()
             .border_color(theme.border)
-            // 窓ドラッグ: down→move で開始（クリックと区別）。ダブルクリックで zoom（Zed 準拠）。
+            // 窓ドラッグ: down→move で開始（クリックと区別）。ダブルクリックで一般的な zoom 動作。
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, _cx| this.chrome.should_move_window = true),
@@ -1927,4 +1964,46 @@ impl Workspace {
         })
         .detach();
     }
+}
+
+#[cfg(target_os = "macos")]
+fn install_necoder_cli_launcher() -> anyhow::Result<()> {
+    let executable = std::env::current_exe()?;
+    let contents = executable
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| anyhow::anyhow!("necoder.app の Contents を特定できません"))?;
+    let installer = contents.join("Resources/install-cli.sh");
+    if !installer.is_file() {
+        return Err(anyhow::anyhow!(
+            "{} が見つかりません。necoder.app を更新してください",
+            installer.display()
+        ));
+    }
+
+    // shell の一引数として安全に引用し、その文字列をさらに AppleScript の文字列へ引用する。
+    let shell_path = installer.to_string_lossy().replace('\'', "'\"'\"'");
+    let shell_command = format!("'{shell_path}'");
+    let apple_command = shell_command.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!("do shell script \"{apple_command}\" with administrator privileges");
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(anyhow::anyhow!(if message.is_empty() {
+            "macOS の認証がキャンセルされました".to_string()
+        } else {
+            message
+        }))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_necoder_cli_launcher() -> anyhow::Result<()> {
+    Err(anyhow::anyhow!(
+        "CLI のGUIインストールはmacOS版のみ対応しています"
+    ))
 }

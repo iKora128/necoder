@@ -371,6 +371,15 @@ settings:
   login: Log in
   open_cli: Open CLI
   install: Install
+  cli_heading: Terminal
+  cli_sub: Open the current folder from a command, just like VS Code or Cursor.
+  cli_name: necoder command
+  cli_name_sub: "For example: necoder .  /  necoder README.md"
+  cli_install: Install CLI
+  cli_installing: Installing…
+  cli_installed: ✓ Installed
+  cli_install_success: CLI installed. You can now run necoder . in Terminal
+  cli_install_failed: "Could not install the CLI: %{error}"
   welcome_title: Welcome 🎨
   welcome_sub: Pick your agent and get started. You can change it anytime from ⚙.
   get_started: Get started →

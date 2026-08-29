@@ -158,6 +158,8 @@ fn mtime(path: Option<&Path>) -> Option<SystemTime> {
 /// SettingsView から workspace shell へ依頼する操作。
 pub enum SettingsViewEvent {
     RunCommand(String),
+    /// macOS の `necoder .` ランチャーを /usr/local/bin へ導入する。
+    InstallNecoderCli,
     OnboardingCompleted,
     /// テーマ選択（外観セクション）。適用は全ビューへの波及が要るので shell（apply_theme）が担う。
     SelectTheme(theme_core::ThemeSource),
@@ -174,6 +176,8 @@ fn themes_dir() -> Option<PathBuf> {
 pub struct SettingsView {
     theme: Theme,
     accent: Hsla,
+    necoder_cli_installed: bool,
+    necoder_cli_installing: bool,
     cli_installed: Vec<bool>,
     auth_states: Vec<acp_client::AgentAuthState>,
     checking_agents: bool,
@@ -188,6 +192,8 @@ impl SettingsView {
         let mut view = Self {
             theme,
             accent,
+            necoder_cli_installed: necoder_cli_available(),
+            necoder_cli_installing: false,
             cli_installed: vec![false; acp_client::AGENTS.len()],
             auth_states: vec![acp_client::AgentAuthState::SignedOut; acp_client::AGENTS.len()],
             checking_agents: true,
@@ -201,6 +207,14 @@ impl SettingsView {
     pub fn set_visuals(&mut self, theme: Theme, accent: Hsla) {
         self.theme = theme;
         self.accent = accent;
+    }
+
+    pub fn set_necoder_cli_installing(&mut self, installing: bool, cx: &mut Context<Self>) {
+        self.necoder_cli_installing = installing;
+        if !installing {
+            self.necoder_cli_installed = necoder_cli_available();
+        }
+        cx.notify();
     }
 
     /// vendor CLI の導入・認証確認は Render から分離し、最新世代だけを反映する。
@@ -682,6 +696,85 @@ impl SettingsView {
                 cx,
             ))
     }
+
+    /// `code .` 相当のターミナルランチャー。初回オンボーディングにも通常の設定画面にも出す。
+    fn terminal_cli_section(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let control = if self.necoder_cli_installed {
+            div()
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .bg(theme.ok.alpha(0.14))
+                .text_size(px(11.))
+                .text_color(theme.ok)
+                .child(SharedString::from(i18n::t!("settings.cli_installed")))
+                .into_any_element()
+        } else {
+            let installing = self.necoder_cli_installing;
+            div()
+                .id("install-necoder-cli")
+                .px(px(9.))
+                .py(px(4.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(if installing {
+                    theme.border
+                } else {
+                    self.accent
+                })
+                .text_size(px(11.))
+                .text_color(if installing { theme.fg2 } else { self.accent })
+                .when(!installing, |element| {
+                    element
+                        .cursor_pointer()
+                        .hover(|style| style.bg(self.accent.alpha(0.12)))
+                })
+                .child(SharedString::from(if installing {
+                    i18n::t!("settings.cli_installing")
+                } else {
+                    i18n::t!("settings.cli_install")
+                }))
+                .when(!installing, |element| {
+                    element.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _window, cx| {
+                            cx.emit(SettingsViewEvent::InstallNecoderCli)
+                        }),
+                    )
+                })
+                .into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg1)
+                            .child(SharedString::from(i18n::t!("settings.cli_heading"))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(i18n::t!("settings.cli_sub"))),
+                    ),
+            )
+            .child(self.pref_row(
+                i18n::t!("settings.cli_name"),
+                Some(i18n::t!("settings.cli_name_sub")),
+                control,
+            ))
+    }
 }
 
 impl EventEmitter<SettingsViewEvent> for SettingsView {}
@@ -892,6 +985,9 @@ impl Render for SettingsView {
                     ),
             )
             .child(rows)
+            .when(cfg!(target_os = "macos"), |element| {
+                element.child(self.terminal_cli_section(cx))
+            })
             .when(!onboarding, |element| {
                 element
                     .child(self.appearance_section(&settings, cx))
@@ -934,6 +1030,17 @@ impl Render for SettingsView {
                     .child(body),
             )
     }
+}
+
+/// PATH と標準的な導入先のどちらかに実体があれば導入済みとみなす。
+fn necoder_cli_available() -> bool {
+    let in_path = std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| directory.join("necoder").is_file())
+    });
+    in_path
+        || Path::new("/usr/local/bin/necoder").is_file()
+        || std::env::var_os("HOME")
+            .is_some_and(|home| PathBuf::from(home).join(".local/bin/necoder").is_file())
 }
 
 /// ブランド表示はカタログ（`acp_client::AgentKind`）が単一の出所。設定画面もタブも同じ値を引く。

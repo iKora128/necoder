@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Added
+- macOS アプリに `necoder` CLI ランチャーを同梱。`necoder .` / `necoder <file>` は起動中の
+  ウィンドウを再利用し、`--new-window`、`ssh://`、既存の `config` / `fleet` / `mcp`
+  サブコマンドにも対応。初回画面と設定から macOS の認証ダイアログ経由で導入でき、
+  `Contents/Resources/install-cli.sh` からの手動導入も可能
+
 ## [0.1.2] - 2026-08-25
 
 ### Fixed

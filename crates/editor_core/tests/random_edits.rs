@@ -1,6 +1,6 @@
 //! ランダム操作ファズ — editor_core の不変条件を乱打で検証する（ベータ前の信頼性担保・M13）。
 //!
-//! 方式（Zed が rope/buffer で使う randomized test と同型・依存ゼロ）:
+//! 方式（一般的な model-based randomized test・依存ゼロ）:
 //! - 決定的 PRNG（SplitMix64）で編集列を生成 = 失敗はメッセージ中のシードで必ず単発再現できる
 //! - 厳密系 [`strict_ops_match_reference_model`]: insert/delete/undo/redo を素朴な参照実装
 //!   （String + 状態スタック）と毎手突合（テキスト・選択・undo/redo の可否まで）

@@ -23,6 +23,7 @@ jobs:
     env:
       # これが空なら署名/notarize をスキップして「未署名 .dmg」を出す（動線だけ先に作れる）。
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      ZED_SOURCE_REV: b2d9c2e122fbc408d42276b4456243ba4f90f181
     steps:
       - uses: actions/checkout@v4
       # タグと Cargo.toml の不一致は「更新チップが無限に出る」実害になる（updater は
@@ -45,6 +46,15 @@ jobs:
 
       - name: Build + bundle（.app 組み立て）
         run: bash ./scripts/bundle-mac.sh release
+
+      # GPL 対応ソースをバイナリと同じ配布場所へ置く。necoder 自身の source archive は
+      # GitHub がタグから生成し、Zed 側はビルドに固定した revision を明示的に添付する。
+      - name: Package Zed corresponding source
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://codeload.github.com/zed-industries/zed/tar.gz/${ZED_SOURCE_REV}" \
+            --output "target/zed-${ZED_SOURCE_REV}-source.tar.gz"
 
       # **配布バイナリにビルドマシンのパスが焼き込まれていたら落とす**（2026-08-25 に踏んだ）。
       # v0.1.1 は `env!("CARGO_MANIFEST_DIR")` を実行時のファイルパスとして読むコード（マスコット
@@ -155,12 +165,16 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: necoder-macos
-          path: target/necoder.dmg
+          path: |
+            target/necoder.dmg
+            target/zed-${{ env.ZED_SOURCE_REV }}-source.tar.gz
       - name: Attach to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/necoder.dmg
+          files: |
+            target/necoder.dmg
+            target/zed-${{ env.ZED_SOURCE_REV }}-source.tar.gz
 
   windows:
     runs-on: windows-latest
@@ -247,7 +261,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist/stage -Force | Out-Null
           Copy-Item target/release/necoder.exe dist/stage/
-          Copy-Item LICENSE, README.md dist/stage/ -ErrorAction SilentlyContinue
+          Copy-Item LICENSE, README.md, THIRD_PARTY_NOTICES.md dist/stage/ -ErrorAction SilentlyContinue
+          Copy-Item third_party/licenses dist/stage/licenses -Recurse
           Compress-Archive -Path dist/stage/* -DestinationPath dist/necoder-windows-x64.zip
       - uses: actions/upload-artifact@v4
         if: success()

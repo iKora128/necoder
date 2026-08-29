@@ -1,7 +1,7 @@
 //! editor_view — [`editor_core::Buffer`] を GPUI で描く編集ビュー。
 //!
-//! 参考: zed `crates/gpui/examples/input.rs`（単一行）と `crates/editor`（本物）。ここは M2 用の
-//! 素朴な複数行版: 行仮想化・行番号ガター・キャレット・縦スクロール・キーボード/マウス・IME。
+//! 公開 GPUI API と `gpui/examples/input.rs` を利用例として、necoder の Buffer と要件から組み立てた
+//! 複数行版: 行仮想化・行番号ガター・キャレット・縦スクロール・キーボード/マウス・IME。
 //! 色は theme_core、文字列は i18n（`t!`）経由（UI-SPEC の許可リスト厳守）。
 
 use editor_core::{Buffer, BufferSnapshot, Point as BufferPoint, Selection};

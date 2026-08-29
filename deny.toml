@@ -1,6 +1,7 @@
 # cargo-deny — 依存の「ライセンス互換 / 出所 / 勧告」を機械監査する（M13 公開準備）。
-# AGPL-3.0 の配布物として、依存は permissive（+ 弱コピレフト MPL-2.0 / OFL フォント）だけを許可。
-# 自作 crate は全て publish = false ＝ private.ignore で対象外（AGPL を allow に足さない）。
+# permissive（+ 弱コピレフト MPL-2.0）依存の監査。自作 crate と、publish=false である Zed git
+# 依存は private.ignore の対象になるため、この結果だけで「全依存 permissive」とは判定しない。
+# 固定 GPUI revision の GPL 推移依存は THIRD_PARTY_NOTICES.md と CI の license-boundary 検査で別途固定する。
 # 実行: cargo deny check   （CI: ci.yml の audit-deps ジョブ）
 
 [graph]

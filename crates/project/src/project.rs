@@ -1,6 +1,6 @@
-//! project — ファイルシステムの走査（worktree の縮小版）。GPUI 非依存・テスト可能。
+//! project — ファイルシステムの走査。GPUI 非依存・テスト可能。
 //!
-//! ARCHITECTURE §2: zed `fs`/`worktree` 相当。M3 は**遅延 read_dir**（展開時に直下を読む）で、
+//! ARCHITECTURE §2: M3 は**遅延 read_dir**（展開時に直下を読む）で、
 //! `.git` と gitignore 対象を除外する（ripgrep の `ignore` crate を使用）。
 //! ファイル監視・インクリメンタル更新は後続（M8/性能）で追加する。
 
@@ -270,8 +270,8 @@ impl Worktree {
 }
 
 // ── git status / gutter diff（M8） ──
-// Zed 準拠: git2/gix を使わず `git` CLI + imara-diff（純 Rust）。
-// 詳細な移植根拠は docs/research/porting-git-terminal-lsp.md。
+// 公開 Git CLI と imara-diff（純 Rust）を使う独立実装。
+// 設計根拠は docs/research/git-terminal-lsp-design-notes.md。
 
 /// ファイルの git 状態（ツリー/タブの色分け用）。色は識別に集約（UI-SPEC §1.3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

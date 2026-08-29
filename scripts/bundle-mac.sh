@@ -46,9 +46,18 @@ fi
 
 # 3) .app を組み立て。
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/bin"
 cp "$BIN" "$APP/Contents/MacOS/necoder"
 cp "$ICON_DIR/necoder.icns" "$APP/Contents/Resources/necoder.icns"
+cp LICENSE "$APP/Contents/Resources/LICENSE-AGPL-3.0.txt"
+cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
+mkdir -p "$APP/Contents/Resources/licenses"
+cp third_party/licenses/*.txt "$APP/Contents/Resources/licenses/"
+# `necoder .` 用の軽量ランチャーとインストーラー。ランチャーは通常の path を
+# Launch Services 経由で既存ウィンドウへ届け、stdio が要るサブコマンドだけ本体を直接実行する。
+cp scripts/necoder-cli "$APP/Contents/Resources/bin/necoder"
+cp scripts/install-cli-mac.sh "$APP/Contents/Resources/install-cli.sh"
+chmod +x "$APP/Contents/Resources/bin/necoder" "$APP/Contents/Resources/install-cli.sh"
 
 # 3b) remote SSH サーバーバイナリを同梱（#1・旧 M9）。インストール版でも配備できるように。
 #  - 同 OS 用（mac→mac / ssh://localhost）: MacOS/ の隣に置く（find_local_remote_server の sibling 探索先）。

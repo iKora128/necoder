@@ -1,11 +1,11 @@
 //! terminal_view — 統合ターミナル（M8）。`alacritty_terminal` を GPUI に載せる最小実装。
 //!
-//! 移植根拠は `docs/research/porting-git-terminal-lsp.md`。設計の要点:
+//! 独立実装の設計根拠は `docs/research/git-terminal-lsp-design-notes.md`。設計の要点:
 //! - **EventLoop が読取スレッド + vte parser**（自前で書かない）。PTY 出力 → parse → `Term` 更新 →
 //!   `EventListener::send_event(Wakeup)`。
 //! - **idle 0%**: 出力時のみ Wakeup → pump（`cx.spawn`）→ `sync`（スナップショット + notify）。**タイマー無し**。
 //! - 入力は v1 では `on_key_down` 一本化（印字も特殊キーも bytes 化）。IME 前編集は非対応（後続）。
-//! - 出典: zed `terminal` / `terminal_view`（GPL-3.0-or-later の設計を参考に新規実装。2026-07 時点）。
+//! - 公開 `alacritty_terminal` API と GPUI API を使った necoder 固有の実装。Zed の terminal code は取り込まない。
 
 mod dock;
 pub use dock::{TerminalDock, TerminalDockEvent, TerminalLaunch};
