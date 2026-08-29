@@ -895,6 +895,14 @@ impl EditorView {
         px(self.line_height_value())
     }
 
+    /// 現在の内容の表示高さ（折り返し後の表示行数 × 行高）。composer の auto-grow が読む。
+    /// wrap マップが古い間（直後の prepaint 前）は論理行数ベースの近似になるが、
+    /// 次フレームで正値に収束する。
+    pub fn content_height(&self) -> Pixels {
+        let snapshot = self.buffer.snapshot();
+        self.line_height() * self.total_display_rows(&snapshot) as f32
+    }
+
     /// 行高の実値（font_size × 23/13 比）。prepaint・ヒットテスト・スクロール計算はこれを使う。
     fn line_height_value(&self) -> f32 {
         self.font_size * (LINE_HEIGHT / FONT_SIZE)

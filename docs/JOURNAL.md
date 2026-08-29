@@ -2249,3 +2249,15 @@
   2. **ドラッグ選択の自動スクロール**（ユーザー要望・ACP transcript とターミナル共通）: 選択ドラッグでビュー外へ引っ張ったら、押している間 33ms tick でスクロールし続け選択端を追従させる（はみ出し量に比例して加速・ビュー内復帰/マウスアップで自然停止）。transcript は `ListState::scroll_by` + 前フレームの region 層で端まで選択 → 次 tick でさらに延ばす。ターミナルは `Scroll::Delta` ± はみ出し行数（上=履歴側/下=最新側・代替画面は対象外）→ sync → 新 display_offset で選択を引き直す
 - 学び/罠: gpui の `div().on_mouse_move` は **hitbox が hover 中しか発火しない**＝要素外へドラッグした瞬間イベントが途絶える（transcript の下方向ドラッグ選択が composer 上で止まっていた真因）。ドラッグ追従は composer リサイズと同じく**パネル root の on_mouse_move で拾う**（ターミナルは元々 paint 内 `window.on_mouse_event`＝window 全域で問題なし）。tick ループは `Task` を持たず bool フラグ + detach（自分の Task ハンドルを tick 内で drop しない）
 - 次: 実機で目視確認（transcript を下へ引っ張って自動スクロール / ターミナルで履歴へ上ドラッグ / less 中は動かないこと）
+
+## 2026-08-29 —（続き）composer の auto-grow（長文入力が固定高で隠れる件）
+- やったこと: 「入力が長いとはみ出る」（ユーザー報告）。probe で切り分け — composer の折り返し
+  （plain は常に wrap）と transcript の長文 User エントリは正常で、実体は **composer が固定高
+  （既定 86px ≈ 4 行）のままで長文が視界から消える**こと。Claude Code / Zed / Slack と同じ
+  auto-grow に変更: 高さ = clamp(内容高（折り返し後表示行 × 行高）+ 8px, composer_height, 420px)。
+  上限超えは従来どおり EditorView の内部スクロール + キャレット追従。`EditorView::content_height()`
+  を新設（wrap マップが古い間は論理行近似 → 次フレームで収束）。上縁ハンドルは「最低高」として残る
+  （長文がある間は下向きドラッグが効かない＝許容と判断）
+- 検証: NECODER_COMPOSER_PROBE で長文（12 段落 + 長 URL）→ 420px まで伸びて内部スクロール、
+  短文 → 既定高のまま、をオフスクリーンで目視。agent_panel/editor_view テスト緑
+- 次: 実機で貼り付け・削除時の伸縮とリサイズハンドルの体感確認

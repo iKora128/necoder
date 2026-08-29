@@ -85,6 +85,8 @@ const THREAD_TABS_HEIGHT: f32 = 34.0;
 const COMPOSER_INPUT_DEFAULT: f32 = 86.0;
 const COMPOSER_INPUT_MIN: f32 = 46.0;
 const COMPOSER_INPUT_MAX: f32 = 420.0;
+/// auto-grow 時に内容高へ足す余白（最終行のディセンダとキャレットを切らない）。
+const COMPOSER_INPUT_GROW_SLACK: f32 = 8.0;
 /// composer のモデルセレクタに並べる候補（クリックでアクティブスレッドに設定）。
 /// **これはフォールバック** — ACP エージェントが `session/set_config_option` で広告してきた
 /// 一覧があればそちらが優先される（`selector_options`）。広告しないエージェント用の既定リスト。
@@ -7047,12 +7049,19 @@ impl AgentPanel {
                             })),
                     )
                     // composer 本体（平坦 EditorView。Enter=改行 / ⌘Enter=送信 / IME 確定 Enter は送信にしない）
-                    // 高さは上縁ハンドルで可変（composer_height）。長文入力は内部スクロールする。
+                    // 高さは内容に合わせて自動で伸びる（auto-grow）: 基準高 composer_height
+                    // （上縁ハンドルで可変＝最低高として効く）〜 COMPOSER_INPUT_MAX。
+                    // 上限を超えた長文は EditorView の内部スクロール + キャレット追従に任せる。
                     .child(
                         div()
                             .w_full()
                             .min_w_0()
-                            .h(px(self.composer_height))
+                            .h(px({
+                                let content_height =
+                                    f32::from(self.composer.read(cx).content_height());
+                                (content_height + COMPOSER_INPUT_GROW_SLACK)
+                                    .clamp(self.composer_height, COMPOSER_INPUT_MAX)
+                            }))
                             .overflow_hidden()
                             .child(self.composer.clone()),
                     )
