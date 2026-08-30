@@ -2356,8 +2356,10 @@ mod tests {
                 .output()
                 .expect("git 実行")
         };
-        // git が無い環境ではスキップ（CI 等）。
-        if !git_in(&base, &["init", "-q", "--bare", "origin.git"])
+        // git が無い環境ではスキップ（CI 等）。bare にも `-b main` — 既定ブランチが master の
+        // 環境（CI は init.defaultBranch 未設定）だと HEAD が存在しない master を指し、
+        // clone が unborn HEAD になって Skipped("head") に化ける。
+        if !git_in(&base, &["init", "-q", "-b", "main", "--bare", "origin.git"])
             .status
             .success()
         {
