@@ -126,10 +126,12 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action(t!("menu.minimize"), workspace::Minimize),
             MenuItem::action(t!("menu.zoom"), workspace::Zoom),
         ]),
-        Menu::new(t!("menu.help")).items(vec![MenuItem::action(
-            t!("menu.report_bug"),
-            workspace::ReportBug,
-        )]),
+        Menu::new(t!("menu.help")).items(vec![
+            // キー表記（⌘K ⌘S）は gpui が keymap から自動で付ける。
+            MenuItem::action(t!("menu.shortcut_sheet"), workspace::ShortcutSheet),
+            MenuItem::separator(),
+            MenuItem::action(t!("menu.report_bug"), workspace::ReportBug),
+        ]),
     ]
 }
 

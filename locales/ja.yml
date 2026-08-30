@@ -621,6 +621,7 @@ menu:
   minimize: しまう
   zoom: 拡大/縮小
   help: ヘルプ
+  shortcut_sheet: キーボードショートカット
   report_bug: バグを報告…
 welcome:
   title: necoder — 色による方向感覚

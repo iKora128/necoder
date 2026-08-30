@@ -620,6 +620,7 @@ menu:
   minimize: Minimize
   zoom: Zoom
   help: Help
+  shortcut_sheet: Keyboard Shortcuts
   report_bug: Report a Bug…
 welcome:
   title: necoder — orient by color

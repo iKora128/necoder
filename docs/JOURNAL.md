@@ -2293,3 +2293,8 @@
 - やったこと: origin/main（別マシン・08-29 の 5 コミット = ライセンス境界一式 / `necoder` シェルランチャー CLI / ドラッグ選択自動スクロール / composer auto-grow）を merge。**CLI が二重実装**になっていた（08-29 リモート = `scripts/necoder-cli` + install-cli-mac.sh + 設定「ターミナル」節、08-30 ローカル = `crates/cli_shim` + `necoder cli` + IPC `open` + 設定「コマンドライン」節）。FEATURES §13 の仕様が「`ne <path>`」であること・IPC 転送/削除対応/テストの充実からローカル `ne` 版に一本化し、リモート版を撤去（scripts 2 本・settings の terminal_cli_section/InstallNecoderCli・chrome の installer 呼び出し・locales 9 キー・bundle-mac.sh の同梱行）。ライセンス境界（THIRD_PARTY_NOTICES / README の §13 文面 / 同梱 licenses/）はリモートを正として採用。README の衝突 4 箇所は「文体=ローカル・内容=新しい方」で解消し、CLI 導入案内を `ne` に書き換え。CHANGELOG の Unreleased も `ne` 版へ更新
 - 学び/罠: 並行セッションが同じバックログ項目を別解で消化することがある — 合流時は「どちらが仕様（FEATURES/GLOSSARY）に沿うか」で決め、負けた側は**コード・スクリプト・i18n キー・バンドル手順まで**掃除する（設定画面に同種セクションが 2 個並ぶ/死にキーが残るのが典型的な取りこぼし）。yml の同名キーは YAML 的に後勝ちで**エラーにならず**気づきにくい
 - 次: 実機で `ne` の導入→`ne .`→実行中ウィンドウで開くの一巡、composer auto-grow の体感確認
+
+## 2026-08-30 — ヘルプメニューに「キーボードショートカット」を追加
+- やったこと: ショートカットチートシート（⌘K ⌘S のオーバーレイ・実装済み）がメニューバーから辿れなかった（ユーザー要望「設定画面か上のメニューに欲しい」）。ヘルプメニューの先頭に `workspace::ShortcutSheet` を追加（キー表記は gpui が keymap から自動付与）+ セパレータ + バグを報告、の並びに。i18n `menu.shortcut_sheet` ja/en。検証: NECODER_MENU_PROBE でヘルプ 1→3 項目・i18n parity 緑
+- 学び/罠: 導線はコマンドパレット（cmd.shortcut_sheet）と keymap にはあったがメニューに無かった＝「実装済みだが発見できない」パターン。オーバーレイ系はメニューにも置くと discoverability が上がる
+- 次: なし（この件は完結）
