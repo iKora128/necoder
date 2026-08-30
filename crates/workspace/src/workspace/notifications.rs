@@ -29,13 +29,11 @@ impl Workspace {
                 cx.notify();
             }
             agent_panel::PanelEvent::ToggleFullScreenRequest => {
-                // レイアウトの持ち主は workspace。編隊とは排他（どちらも窓を丸ごと使う面）。
-                self.chrome.agent_full_screen = !self.chrome.agent_full_screen;
-                if self.chrome.agent_full_screen {
-                    self.chrome.fleet_mode = false;
-                    self.chrome.show_right = true;
-                    self.agent_active = true;
-                }
+                // child event の購読には Window が無い。ここで直接レイアウトだけ変えると、
+                // 移設される AgentPanel の focus path が孤立して全 Workspace action が死ぬ。
+                // Window を持つ effect-cycle の共通処理へ渡す（連続 2 回なら相殺）。
+                self.chrome.pending_agent_full_screen_toggle =
+                    !self.chrome.pending_agent_full_screen_toggle;
                 cx.notify();
             }
             agent_panel::PanelEvent::TurnEnded {

@@ -152,6 +152,7 @@ impl Workspace {
         let host = worktree.host().clone();
         let host_for_open = host.clone(); // 開く側（update クロージャ）用。背景 spawn に host が move される前に控える
         let branch_for_open = branch.clone();
+        let root_for_open = root.clone();
         cx.spawn(async move |workspace, cx| {
             let target = cx
                 .background_executor()
@@ -171,6 +172,15 @@ impl Workspace {
             let _ = workspace.update(cx, |workspace, cx| {
                 git_panel.update(cx, |panel, cx| panel.set_busy(false, cx));
                 match target {
+                    // 今チェックアウト中のブランチの ⧉ = 解決先が自分自身。黙って終わると
+                    // 「押しても何も起こらない」に見える（2026-08-30 ユーザーが実際に踏んだ）ので言葉で返す。
+                    Ok(target) if target == root_for_open => workspace.push_toast(
+                        SharedString::from(
+                            i18n::t!("git.worktree_is_current", "branch" => &branch_for_open),
+                        ),
+                        workspace.accent(),
+                        cx,
+                    ),
                     Ok(target) => workspace.open_folder_in_rail(
                         host_for_open,
                         target,

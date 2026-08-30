@@ -17,3 +17,4 @@ lang.workspace = true
 markdown.workspace = true
 i18n.workspace = true
 project.workspace = true
+webview_view.workspace = true

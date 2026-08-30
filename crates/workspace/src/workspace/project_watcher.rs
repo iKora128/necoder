@@ -199,6 +199,7 @@ impl Workspace {
             editor.update(cx, |view, cx| {
                 view.set_typography(font_size, tab_size, cx);
                 view.set_soft_wrap(soft_wrap, cx);
+                view.set_html_preview_evict_minutes(current.html_preview_evict_minutes, cx);
             });
         }
     }

@@ -5,6 +5,28 @@
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-08-31
+
+### Added
+- ローカル HTML プレビュー: `.html` タブをパンくずの「プレビュー」または ⌘⇧V で source ⇄ preview
+  切替。macOS は WKWebView / Windows は WebView2 を**プレビュー初回表示まで遅延生成**し、
+  Chromium/ブラウザエンジンは同梱しない（Linux は非対応表示）。↻ で再読込・保存成功で自動再読込
+- 非表示のまま放置した HTML プレビューの WebView を自動破棄してメモリを回収
+  （設定 `html_preview_evict_minutes`・既定 15 分・`0` で無効。再表示時は遅延再生成）
+- Markdown の GFM 表を描画（`.md` 整形プレビューと AI transcript の両方）。列幅は内容比 + 短い列の
+  最小幅保証、`|:---:|` の左/中央/右そろえ、セル内の `コード`/**強調** などインライン装飾に対応
+- レールのプロジェクトアイコンに画像対応: `.necoder/icon.png`（jpg/jpeg/webp も可）を置くだけで
+  絵文字/頭文字の代わりに表示（settings の `icon` にパス指定も可・プロジェクト色のリングは維持）
+- Fleet の `+ Task` 前にデフォルトブランチを upstream へ自動早送り（clean かつ behind のみ
+  ff-only。オフライン・upstream 無し・dirty・diverged は黙ってスキップして現 HEAD から作成）
+
+### Fixed
+- `ne .` / `ne <file>` が起動中の necoder に届かず新インスタンスが立つことがあったのを根治
+  （IPC socket の自己修復 + `open -a` の書類渡しへ変更 + 単一インスタンスの防波堤。
+  Dock にアイコンが複数並ぶ症状もこれで解消）
+- AI エージェントタブを全画面化すると composer の折り返しが崩れ文字がちらつくのを根治
+  （折り返し高さの変化を親へ通知 + スクロール位置の再クランプ）
+
 ## [0.1.7] - 2026-08-30
 
 ### Added

@@ -10,8 +10,8 @@
 //! （DECISIONS §5）。
 //!
 //! v1 で扱う範囲: 見出し / 段落 / 箇条書き・番号・タスクリスト（ネスト深さ保持）/ フェンスコード /
-//! 水平線 / 画像（ブロック扱い） / インライン（**強調**・*斜体*・~~打消し~~・`コード`・リンク）。
-//! 表・引用装飾は後続。
+//! 水平線 / 画像（ブロック扱い） / GFM 表 / インライン（**強調**・*斜体*・~~打消し~~・`コード`・リンク）。
+//! 引用装飾は後続。
 
 use std::ops::Range;
 
@@ -39,6 +39,22 @@ pub enum ListMarker {
     Ordered(u64),
     /// GFM タスクリスト（true = 済み）。
     Task(bool),
+}
+
+/// GFM 表の列そろえ（`:---` 記法。Auto = 指定なし＝左そろえで描く）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TableAlign {
+    Auto,
+    Left,
+    Center,
+    Right,
+}
+
+/// GFM 表のセル（テキスト + インライン装飾。ブロック本文と同じ規約）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TableCell {
+    pub text: String,
+    pub spans: Vec<Span>,
 }
 
 /// 解析後のブロック（描画側はこれを上から GPUI 要素へ落とす）。
@@ -72,6 +88,13 @@ pub enum Block {
         source: String,
         alt: String,
     },
+    /// GFM 表。`alignments` は列数ぶん（区切り行 `|:---|` 由来）。行のセル数は列数に届かない
+    /// ことがある（描画側は不足分を空セル扱いにする）。
+    Table {
+        alignments: Vec<TableAlign>,
+        head: Vec<TableCell>,
+        rows: Vec<Vec<TableCell>>,
+    },
 }
 
 /// 現在組み立て中のリーフブロックの種別（`buffer` が何になるか）。
@@ -87,13 +110,24 @@ struct ListLevel {
     next_number: Option<u64>,
 }
 
+/// 組み立て中の GFM 表（Start(Table)〜End(Table) の間だけ Some）。
+struct TableState {
+    alignments: Vec<TableAlign>,
+    head: Vec<TableCell>,
+    rows: Vec<Vec<TableCell>>,
+    /// 組み立て中の行（TableHead 内はヘッダ行として使う）。
+    row: Vec<TableCell>,
+    in_head: bool,
+}
+
 /// markdown を Block 列へ解析する（GPUI 非依存＝unit test 可能）。
 pub fn parse(source: &str) -> Vec<Block> {
-    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+    use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_TABLES);
 
     let mut blocks: Vec<Block> = Vec::new();
     // 組み立て中のリーフブロック。
@@ -112,6 +146,8 @@ pub fn parse(source: &str) -> Vec<Block> {
     let mut image: Option<(String, String)> = None;
     // 画像でブロックを分割した直後は、残り本文の先頭空白/改行を捨てる（` after` を `after` に）。
     let mut strip_leading = false;
+    // 組み立て中の GFM 表（Some の間、text/spans はセル単位で使い回す）。
+    let mut table: Option<TableState> = None;
 
     // buffer を pending の種別で確定して blocks へ積む（空テキストは捨てる）。
     let flush = |blocks: &mut Vec<Block>,
@@ -277,6 +313,64 @@ pub fn parse(source: &str) -> Vec<Block> {
                     strip_leading = true;
                 }
             }
+            Event::Start(Tag::Table(column_alignments)) => {
+                flush(&mut blocks, &mut text, &mut spans, &mut pending);
+                table = Some(TableState {
+                    alignments: column_alignments
+                        .iter()
+                        .map(|alignment| match alignment {
+                            Alignment::None => TableAlign::Auto,
+                            Alignment::Left => TableAlign::Left,
+                            Alignment::Center => TableAlign::Center,
+                            Alignment::Right => TableAlign::Right,
+                        })
+                        .collect(),
+                    head: Vec::new(),
+                    rows: Vec::new(),
+                    row: Vec::new(),
+                    in_head: false,
+                });
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(state) = table.take() {
+                    if !state.head.is_empty() || !state.rows.is_empty() {
+                        blocks.push(Block::Table {
+                            alignments: state.alignments,
+                            head: state.head,
+                            rows: state.rows,
+                        });
+                    }
+                }
+            }
+            Event::Start(Tag::TableHead) => {
+                if let Some(state) = &mut table {
+                    state.in_head = true;
+                }
+            }
+            // TableHead は TableRow を挟まず TableCell が直接並ぶ（pulldown-cmark の並び）。
+            Event::End(TagEnd::TableHead) => {
+                if let Some(state) = &mut table {
+                    state.head = std::mem::take(&mut state.row);
+                    state.in_head = false;
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(state) = &mut table {
+                    let row = std::mem::take(&mut state.row);
+                    state.rows.push(row);
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                // セル境界。前セルの取りこぼし（あり得ないが防御）と開き掛けの装飾を捨てる。
+                text.clear();
+                spans.clear();
+                inline.clear();
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(state) = &mut table {
+                    state.row.push(finish_table_cell(&mut text, &mut spans));
+                }
+            }
             Event::Text(chunk) => {
                 if let Some((_, alt)) = &mut image {
                     alt.push_str(&chunk);
@@ -323,6 +417,75 @@ pub fn parse(source: &str) -> Vec<Block> {
     blocks
 }
 
+/// セルの text/spans バッファを TableCell へ確定する。末尾空白を落とし、trim で縮んだ分だけ
+/// span を新しい長さへクランプする（範囲外 span = 描画側 layout_line abort の芽を残さない）。
+fn finish_table_cell(text: &mut String, spans: &mut Vec<Span>) -> TableCell {
+    let mut cell_text = std::mem::take(text);
+    let taken_spans = std::mem::take(spans);
+    let trimmed_length = cell_text.trim_end().len();
+    cell_text.truncate(trimmed_length);
+    let spans = taken_spans
+        .into_iter()
+        .filter_map(|mut span| {
+            span.range.end = span.range.end.min(trimmed_length);
+            (span.range.start < span.range.end).then_some(span)
+        })
+        .collect();
+    TableCell {
+        text: cell_text,
+        spans,
+    }
+}
+
+/// 表の 1 列ぶんのレイアウトヒント（テーマ/GPUI 非依存＝ここで unit test する）。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TableColumn {
+    /// 列幅の比率（全列合計 1.0）。描画側は `w(relative(fraction))` を当てる。
+    pub fraction: f32,
+    /// 折り返さず表示したい最短幅（表示幅単位: ASCII=1・CJK=2。上限つき）。描画側は
+    /// `min_w` に換算して、ID/DONE のような短い列が比率配分で 1〜2 文字幅へ潰れて
+    /// 縦書き状態になるのを防ぐ。
+    pub min_units: f32,
+}
+
+/// 表の列レイアウト（内容の最長表示幅ベース）。GPUI にテーブルレイアウトが無いため、
+/// 比率 + 最小幅の 2 段構えで近似する: ID のような短い列は内容ぶんを確保して折り返さず、
+/// 本文列は残りを比率で分け合い、極端な長文列は頭打ちにして他列を潰さない。
+pub fn table_columns(head: &[TableCell], rows: &[Vec<TableCell>]) -> Vec<TableColumn> {
+    // 表示幅の目安: ASCII=1・それ以外（CJK 主体）=2。等幅前提の近似で十分（比率と最小幅にしか使わない）。
+    fn display_width(text: &str) -> f32 {
+        text.lines()
+            .map(|line| {
+                line.chars()
+                    .map(|c| if c.is_ascii() { 1.0 } else { 2.0 })
+                    .sum::<f32>()
+            })
+            .fold(0.0, f32::max)
+    }
+    let columns = rows
+        .iter()
+        .map(Vec::len)
+        .fold(head.len(), usize::max)
+        .max(1);
+    let mut widths = vec![0.0f32; columns];
+    for row in std::iter::once(head).chain(rows.iter().map(Vec::as_slice)) {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(display_width(&cell.text));
+        }
+    }
+    // 下限: 空列でも幅を持つ / 上限: 1 列の長文が他列を 1 文字幅まで潰さない。
+    let total: f32 = widths.iter().map(|width| width.clamp(3.0, 40.0)).sum();
+    widths
+        .into_iter()
+        .map(|width| TableColumn {
+            fraction: width.clamp(3.0, 40.0) / total,
+            // 最小幅は 16 単位（≒ ASCII 16 文字）で頭打ち: 全列の最小幅合計が表幅を超えて
+            // あふれる事態を短い列の保護と両立させる。
+            min_units: width.min(16.0),
+        })
+        .collect()
+}
+
 /// 開いているインライン装飾のうち種別一致の最内を閉じて Span を確定する（proper nest 前提）。
 fn close_span(
     inline: &mut Vec<(SpanKind, usize)>,
@@ -360,13 +523,7 @@ mod tests {
     /// 全ブロックについて span の byte 範囲が block.text の文字境界に乗り、範囲外でないこと。
     /// 乗らないと StyledText → gpui layout_line が `split_at` で abort する（クラッシュ再現）。
     fn assert_spans_valid(source: &str) {
-        for block in parse(source) {
-            let (text, spans) = match &block {
-                Block::Heading { text, spans, .. }
-                | Block::Paragraph { text, spans }
-                | Block::ListItem { text, spans, .. } => (text.as_str(), spans),
-                Block::Code { .. } | Block::Rule | Block::Image { .. } => continue,
-            };
+        fn assert_text_spans(text: &str, spans: &[Span], source: &str) {
             for span in spans {
                 assert!(
                     span.range.end <= text.len(),
@@ -380,6 +537,19 @@ mod tests {
                     "span {:?} が文字境界に乗らない（text={text:?}, source={source:?})",
                     span.range,
                 );
+            }
+        }
+        for block in parse(source) {
+            match &block {
+                Block::Heading { text, spans, .. }
+                | Block::Paragraph { text, spans }
+                | Block::ListItem { text, spans, .. } => assert_text_spans(text, spans, source),
+                Block::Table { head, rows, .. } => {
+                    for cell in head.iter().chain(rows.iter().flatten()) {
+                        assert_text_spans(&cell.text, &cell.spans, source);
+                    }
+                }
+                Block::Code { .. } | Block::Rule | Block::Image { .. } => {}
             }
         }
     }
@@ -617,5 +787,76 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn gfm_table_with_inline_code_and_alignment() {
+        let blocks = parse(
+            "| ID | 状態 | タスク |\n|:---|:---:|---|\n| P0-1 | DONE | `git init` と README |\n| P0-2 | DONE | uv 環境 |",
+        );
+        let [Block::Table {
+            alignments,
+            head,
+            rows,
+        }] = blocks.as_slice()
+        else {
+            panic!("表 1 ブロックになるはず: {blocks:?}");
+        };
+        assert_eq!(
+            alignments,
+            &vec![TableAlign::Left, TableAlign::Center, TableAlign::Auto]
+        );
+        assert_eq!(
+            head.iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ID", "状態", "タスク"]
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].text, "P0-1");
+        // セル内インラインコードは Code スパンとして残る。
+        let code_cell = &rows[0][2];
+        assert_eq!(code_cell.text, "git init と README");
+        assert_eq!(
+            code_cell.spans,
+            vec![Span {
+                range: 0.."git init".len(),
+                kind: SpanKind::Code
+            }]
+        );
+        assert_spans_valid("| a | b |\n|---|---|\n| **強調（＝末尾）** | `末尾コード` |");
+    }
+
+    #[test]
+    fn table_between_paragraphs_and_ragged_rows() {
+        // 前後の段落が表に飲まれない・セル数が列数に満たない行もそのまま保持する。
+        let blocks = parse("before\n\n| a | b |\n|---|---|\n| 1 |\n\nafter");
+        assert_eq!(blocks.len(), 3, "{blocks:?}");
+        assert!(matches!(&blocks[0], Block::Paragraph { text, .. } if text == "before"));
+        let Block::Table { head, rows, .. } = &blocks[1] else {
+            panic!("中央は表: {blocks:?}");
+        };
+        assert_eq!(head.len(), 2);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(&blocks[2], Block::Paragraph { text, .. } if text == "after"));
+    }
+
+    #[test]
+    fn table_columns_favor_long_columns_but_protect_short_ones() {
+        let blocks = parse("| ID | 長い説明列 |\n|---|---|\n| P0-1 | これはとても長い説明のセルでほかの列より太くなるはず |");
+        let Some(Block::Table { head, rows, .. }) = blocks.first() else {
+            panic!("表になるはず: {blocks:?}");
+        };
+        let columns = table_columns(head, rows);
+        assert_eq!(columns.len(), 2);
+        assert!(
+            columns[1].fraction > columns[0].fraction,
+            "本文列が太い: {columns:?}"
+        );
+        let total: f32 = columns.iter().map(|column| column.fraction).sum();
+        assert!((total - 1.0).abs() < 1e-4, "正規化: {columns:?}");
+        // 短い列は内容ぶんの最小幅を持つ（P0-1 = 4 単位）・長い列は 16 で頭打ち。
+        assert_eq!(columns[0].min_units, 4.0);
+        assert_eq!(columns[1].min_units, 16.0);
     }
 }

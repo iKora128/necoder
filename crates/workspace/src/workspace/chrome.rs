@@ -632,7 +632,7 @@ impl Workspace {
             .active_slot()
             .map(|slot| slot.worktree.root().to_path_buf());
         let crumbs = breadcrumb_text(root.as_deref(), path.as_deref());
-        // markdown なら右端に整形プレビュートグル（⌘⇧V の discoverability。キーを知らなくても届く）。
+        // Markdown / HTML なら右端にプレビュートグル（⌘⇧V の discoverability）。
         let markdown_toggle = path
             .as_deref()
             .filter(|path| lang::language_for_path(path) == Some(lang::LanguageId::Markdown))
@@ -673,6 +673,85 @@ impl Workspace {
                         }),
                     )
             });
+        let html_toggle = path
+            .as_deref()
+            .filter(|path| lang::language_for_path(path) == Some(lang::LanguageId::Html))
+            .filter(|_| !editor.read(cx).buffer().host().is_remote())
+            .map(|_| {
+                let on = editor.read(cx).rendered_html();
+                let label = if on {
+                    i18n::t!("breadcrumb.html_source")
+                } else {
+                    i18n::t!("breadcrumb.html_preview")
+                };
+                let toggle_editor = editor.clone();
+                let reload_editor = editor.clone();
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.))
+                    .when(on, |element| {
+                        element.child(
+                            div()
+                                .id("html-preview-reload")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(19.))
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                                .child("↻")
+                                .tooltip(Tooltip::text(
+                                    i18n::t!("breadcrumb.html_reload_tip"),
+                                    theme.clone(),
+                                ))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |_this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        reload_editor.update(cx, |editor, cx| {
+                                            editor.reload_html_preview(cx)
+                                        });
+                                    }),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id("html-preview-toggle")
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .h(px(19.))
+                            .px(px(7.))
+                            .rounded(px(5.))
+                            .cursor_pointer()
+                            .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
+                            .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                            .child(svg().path("icons/eye.svg").size(px(12.)).flex_none())
+                            .child(div().text_size(px(10.5)).child(label))
+                            .tooltip(Tooltip::text(
+                                i18n::t!("breadcrumb.html_preview_tip"),
+                                theme.clone(),
+                            ))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    toggle_editor.update(cx, |editor, cx| {
+                                        let next = !editor.rendered_html();
+                                        editor.set_rendered_html(next, cx);
+                                        if !next {
+                                            let handle = editor.focus_handle(cx);
+                                            window.focus(&handle, cx);
+                                        }
+                                    });
+                                }),
+                            ),
+                    )
+            });
         div()
             .flex()
             .items_center()
@@ -692,6 +771,7 @@ impl Workspace {
                     .child(SharedString::from(crumbs)),
             )
             .children(markdown_toggle)
+            .children(html_toggle)
     }
 
     /// ⌘F インライン検索/置換バー（エディタ右上に浮かせる・M10）。

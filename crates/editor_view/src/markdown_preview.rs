@@ -3,14 +3,15 @@
 //! パースは共有 [`markdown`] crate（[model] 層・GPUI 非依存）、描画（Block→GPUI）だけをここに置く。
 //! `agent_panel` の transcript レンダラ（`render_streaming_markdown`）と**視覚語彙を揃える**が、あちらは
 //! 選択リージョン機構（M13）と結合するためコード共有はせず、閲覧特化の軽量版を自作する（見た目トークン
-//! だけ踏襲＝自作コードの再利用でライセンス上の含みは無い）。表・画像・引用装飾は後続。
+//! だけ踏襲＝自作コードの再利用でライセンス上の含みは無い）。引用装飾は後続。
 //!
 //! 設計原則: 色は識別に集約する（UI-SPEC）。見出しの階層は**サイズと太さだけ**で示し、色や罫線の装飾は
 //! 足さない。色が付くのは syn-* トークン（コードブロック）・インラインコード/リンクのみ。
 
 use gpui::{
-    div, img, prelude::*, px, AnyElement, FontStyle, FontWeight, HighlightStyle, ImageSource,
-    ObjectFit, ScrollHandle, SharedString, StrikethroughStyle, StyledText, UnderlineStyle,
+    div, img, prelude::*, px, relative, AnyElement, FontStyle, FontWeight, HighlightStyle,
+    ImageSource, ObjectFit, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
+    UnderlineStyle,
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -138,7 +139,67 @@ fn render_block(
             .bg(theme.border)
             .into_any_element(),
         markdown::Block::Image { source, alt } => render_image(source, alt, theme, base_dir),
+        markdown::Block::Table {
+            alignments,
+            head,
+            rows,
+        } => render_table(alignments, head, rows, theme, font_size),
     }
+}
+
+/// GFM 表。列幅は内容比（[`markdown::table_columns`]）で `w(relative(..))` + 短い列の
+/// `min_w` を当てる（GPUI にテーブルレイアウトが無いため）。装飾は罫線 = theme.border と
+/// ヘッダ行の bg2 のみ（色は識別に集約・UI-SPEC）。セル数が列数に満たない行は空セルで埋める。
+fn render_table(
+    alignments: Vec<markdown::TableAlign>,
+    head: Vec<markdown::TableCell>,
+    rows: Vec<Vec<markdown::TableCell>>,
+    theme: &Theme,
+    font_size: f32,
+) -> AnyElement {
+    let layout = markdown::table_columns(&head, &rows);
+    let columns = layout.len();
+    // 表示幅 1 単位 → px 換算（ASCII 1 文字 ≒ 0.75em（折り返し余裕込み））。左右 padding ぶんを足す。
+    let unit = font_size * 0.75;
+    let render_row = |mut cells: Vec<markdown::TableCell>, header: bool| {
+        cells.resize_with(columns, || markdown::TableCell {
+            text: String::new(),
+            spans: Vec::new(),
+        });
+        div()
+            .flex()
+            .w_full()
+            .when(header, |row| {
+                row.bg(theme.bg2)
+                    .rounded_t(px(5.))
+                    .font_weight(FontWeight::SEMIBOLD)
+            })
+            .when(!header, |row| row.border_t_1().border_color(theme.border))
+            .children(cells.into_iter().enumerate().map(|(index, cell)| {
+                let mut element = div()
+                    .w(relative(layout[index].fraction))
+                    .min_w(px(layout[index].min_units * unit + 18.))
+                    .px(px(9.))
+                    .py(px(5.))
+                    .when(index > 0, |cell| {
+                        cell.border_l_1().border_color(theme.border)
+                    });
+                element = match alignments.get(index) {
+                    Some(markdown::TableAlign::Center) => element.text_center(),
+                    Some(markdown::TableAlign::Right) => element.text_right(),
+                    _ => element,
+                };
+                element.child(styled_text(cell.text, md_highlights(theme, &cell.spans)))
+            }))
+    };
+    div()
+        .my(px(2.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.border)
+        .child(render_row(head, true))
+        .children(rows.into_iter().map(|cells| render_row(cells, false)))
+        .into_any_element()
 }
 
 /// 画像ブロック。ローカルは base_dir 基準で解決したパス、http(s) は URI をそのまま `img()` へ

@@ -677,26 +677,74 @@ fn locations_to_file_matches(host: &dyn Host, value: &serde_json::Value) -> Vec<
     results
 }
 
-/// `.necoder/settings.json` の `color`（"#rrggbb"）と `icon`（絵文字）を読む（M12-11）。
-/// 無ければ (None, None)。パース失敗は無視して既定へ。
-fn read_project_identity(root: &Path) -> (Option<Hsla>, Option<SharedString>) {
-    let path = root.join(".necoder/settings.json");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return (None, None);
+/// `.necoder/settings.json` から読むプロジェクトの見た目（M12-11 / 画像アイコンは 2026-08-30）。
+#[derive(Default)]
+pub(crate) struct ProjectIdentity {
+    pub(crate) color: Option<Hsla>,
+    /// 絵文字アイコン（テキストとして描く）。
+    pub(crate) icon: Option<SharedString>,
+    /// 画像アイコン（レールに `img` で描く）。settings の `icon` が画像パスの場合と、
+    /// 規約の `.necoder/icon.png` 自動検出の両方がここに入る。
+    pub(crate) icon_image: Option<PathBuf>,
+}
+
+/// `.necoder/settings.json` の `color`（"#rrggbb"）と `icon`（絵文字 or 画像パス・UI-SPEC §3）を
+/// 読む。`icon` は**実在する画像ファイルを指せば画像**・そうでなければ絵文字扱い。settings に
+/// 指定が無くても `.necoder/icon.png`（規約パス）があれば画像アイコンにする。
+/// リモートプロジェクトはローカル fs に無いので全て None（モノグラムへ・従来どおり）。
+fn read_project_identity(root: &Path) -> ProjectIdentity {
+    let mut identity = ProjectIdentity::default();
+    if let Ok(text) = std::fs::read_to_string(root.join(".necoder/settings.json")) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+            identity.color = value
+                .get("color")
+                .and_then(|color| color.as_str())
+                .and_then(parse_hex_color);
+            if let Some(icon) = value
+                .get("icon")
+                .and_then(|icon| icon.as_str())
+                .filter(|icon| !icon.is_empty())
+            {
+                match resolve_icon_image(root, icon) {
+                    Some(path) => identity.icon_image = Some(path),
+                    None => identity.icon = Some(SharedString::from(icon.to_string())),
+                }
+            }
+        }
+    }
+    // 規約パス: 何も指定が無ければ `.necoder/icon.<ext>` を拾う（置くだけで効く）。
+    if identity.icon.is_none() && identity.icon_image.is_none() {
+        identity.icon_image = ICON_IMAGE_EXTENSIONS
+            .iter()
+            .map(|ext| root.join(".necoder").join(format!("icon.{ext}")))
+            .find(|path| path.is_file());
+    }
+    identity
+}
+
+/// `img()`（image crate デコード）で描けるラスタ拡張子。svg はテキスト色系の描画経路が別なので対象外。
+const ICON_IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+
+/// settings の `icon` 文字列を画像パスとして解決する（相対はプロジェクト root 基準）。
+/// ラスタ画像の実在ファイルでなければ None（＝絵文字として扱う）。
+fn resolve_icon_image(root: &Path, icon: &str) -> Option<PathBuf> {
+    let has_image_extension = Path::new(icon)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ICON_IMAGE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        });
+    if !has_image_extension {
+        return None;
+    }
+    let candidate = if Path::new(icon).is_absolute() {
+        PathBuf::from(icon)
+    } else {
+        root.join(icon)
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return (None, None);
-    };
-    let color = value
-        .get("color")
-        .and_then(|color| color.as_str())
-        .and_then(parse_hex_color);
-    let icon = value
-        .get("icon")
-        .and_then(|icon| icon.as_str())
-        .filter(|icon| !icon.is_empty())
-        .map(|icon| SharedString::from(icon.to_string()));
-    (color, icon)
+    candidate.is_file().then_some(candidate)
 }
 
 /// "#rrggbb" → Hsla。
@@ -966,6 +1014,9 @@ struct ChromeState {
     /// solo で AI パネルだけを全画面にしているか（2026-07-27）。レールは残す（プロジェクト切替と
     /// 復帰の導線を失わないため）。エディタ列・エクスプローラ・下ドックは畳む。
     agent_full_screen: bool,
+    /// AgentPanel のボタンから届いた全画面切替要求。child event の購読には `Window` が無いため、
+    /// 次の effect cycle で Window を持つ共通処理へ渡す。偶数回の要求は相殺する。
+    pending_agent_full_screen_toggle: bool,
     /// 下段の高さ（px）。上縁ドラッグで変わる。ニュース/ターミナルで共有する（同じ 1 枚だから）。
     bottom_height: f32,
     resizing_bottom: bool,
@@ -1103,6 +1154,8 @@ pub struct Workspace {
     control_summary: Option<SharedString>,
     /// 総括のデバウンス世代（最新の遷移だけが生成を走らせる）。
     control_summary_gen: u32,
+    /// `on_focus_lost` は Window が得られる初回 render で一度だけ登録する。
+    focus_recovery_installed: bool,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -1361,7 +1414,8 @@ impl Workspace {
     /// child の subscription は `Window` を受け取らないため、描画中に実行せず、現在の
     /// effect cycle の末尾へまとめて送る。これにより root Render は状態変更や I/O を行わない。
     fn has_pending_shell_effects(&self) -> bool {
-        self.chrome.pending_settings_command.is_some()
+        self.chrome.pending_agent_full_screen_toggle
+            || self.chrome.pending_settings_command.is_some()
             || self.chrome.pending_open_settings_json
             || !self.chrome.pending_external_open.is_empty()
             || self.pending_transient_tab.is_some()
@@ -1373,6 +1427,10 @@ impl Workspace {
     }
 
     fn process_pending_shell_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chrome.pending_agent_full_screen_toggle {
+            self.chrome.pending_agent_full_screen_toggle = false;
+            self.toggle_agent_full_screen_state(window, cx);
+        }
         if let Some(command) = self.chrome.pending_settings_command.take() {
             self.open_command_terminal(&command, window, cx);
         }
@@ -1407,10 +1465,49 @@ impl Workspace {
             self.stage_hunk(hunk, cx);
         }
     }
+
+    /// ネイティブ WebView は GPUI の描画木から外れても OS 子ビューとして残るため、各 render の
+    /// レイアウト状態を可視性へ同期する。対象はローカル HTML タブだけで、通常のエディタには触れない。
+    fn sync_html_preview_visibility(&mut self, cx: &mut Context<Self>) {
+        let active_session = self.project_sessions.active;
+        let editor_surface_visible =
+            !self.chrome.fleet_mode && !self.chrome.agent_full_screen && !self.chrome.show_settings;
+        for (session_index, session) in self.project_sessions.sessions.iter().enumerate() {
+            for (tab_index, tab) in session.tabs.iter().enumerate() {
+                if lang::language_for_path(&tab.path) != Some(lang::LanguageId::Html) {
+                    continue;
+                }
+                let Some(editor) = tab.editor().cloned() else {
+                    continue;
+                };
+                let visible = editor_surface_visible
+                    && session_index == active_session
+                    && tab_index == session.active_tab;
+                editor.update(cx, |editor, cx| {
+                    editor.set_surface_active(visible, false, cx)
+                });
+            }
+        }
+    }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focus_recovery_installed {
+            self.focus_recovery_installed = true;
+            cx.on_focus_lost(window, |this, window, cx| {
+                if let Some(handle) = window.focus_lost_restore_target(cx) {
+                    window.focus(&handle, cx);
+                    return;
+                }
+                // レイアウト切替で focused Entity の置き場所が変わっても、dispatch path を
+                // ウィンドウ root に孤立させない。最後に操作していた可視面へ必ず着地させる。
+                let agent_visible =
+                    this.chrome.agent_full_screen || (this.chrome.show_right && this.agent_active);
+                this.focus_session_surface(agent_visible, false, window, cx);
+            })
+            .detach();
+        }
         self.window_active = window.is_window_active(); // 管制マスコット等の「動き」判定（P3）
         let control_mascot_visible =
             self.chrome.fleet_mode && self.chrome.fleet_center_view == FleetCenterView::Control;
@@ -1421,6 +1518,7 @@ impl Render for Workspace {
             self.ensure_fleet_clock(cx);
         }
         self.ensure_rollup_ticker(cx); // フッターのニュース欄を複数稼働時に順送りする（自停止）
+        self.sync_html_preview_visibility(cx);
 
         if self.has_pending_shell_effects() {
             let workspace = cx.entity();
@@ -1543,6 +1641,7 @@ impl Render for Workspace {
             }))
             .on_mouse_move(cx.listener(Self::on_resize_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_resize_end))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_resize_end))
             // レール項目の擬似 tear-off（枠外ドロップ → 新窓・M13）。resize と独立のリスナー。
             .on_mouse_move(cx.listener(Self::on_rail_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_rail_drag_end))

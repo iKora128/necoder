@@ -32,6 +32,9 @@ README のPart 2を、判断の理由まで含めて展開したもの。後で�
 - **Tauri = webview = Zedが速さのために捨てたモデル**。UI拡張は楽だが"Zedの速さ"は諦める側。
 - **GPUIは速いがUI拡張は自分で #53403 問題を再発明**する羽目に。
 - → **「速さが魂」ならGPUI**。今回はこちらに傾倒。ただし下記の代償を受け入れる前提。
+- **2026-08-30 補足**: この判断は「アプリUI/編集コアをWebViewで作らない」という境界。HTMLを実行表示する
+  プレビューだけはOS標準WebViewを隔離利用する。`webview_view` が macOS=WKWebView / Windows=WebView2 を
+  child view として遅延生成し、非表示時は止める。Electron/Chromiumは同梱せず、拡張向け汎用WebViewにも開放しない。
 
 ## 3. GPUIの「Zedのために作られてる」とは具体的に何か
 

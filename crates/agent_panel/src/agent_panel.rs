@@ -36,10 +36,10 @@ use editor_view::{ComposerEvent, EditorView};
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    actions, canvas, div, list, prelude::*, px, svg, Animation, AnimationExt, App, ClipboardItem,
-    Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, FollowMode,
-    FontWeight, HighlightStyle, Hsla, IntoElement, KeyDownEvent, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, RenderImage,
+    actions, canvas, div, list, prelude::*, px, relative, svg, Animation, AnimationExt, App,
+    ClipboardItem, Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable,
+    FollowMode, FontWeight, HighlightStyle, Hsla, IntoElement, KeyDownEvent, ListAlignment,
+    ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, RenderImage,
     ScrollHandle, SharedString, StyleRefinement, StyledText, TextLayout, Window,
 };
 use host::{Host, LocalHost};
@@ -1092,7 +1092,7 @@ pub struct AgentPanel {
     live_ticker: bool,
     /// 実行中の末尾本文が最後に描画された時刻。非表示になったら reveal を即完了させる（打ち切り）。
     live_rendered_at: Option<std::time::Instant>,
-    /// タブ改名中の (対象 index, 入力欄)。ダブルクリックで開く・IME 正しい EditorView::plain（#4）。
+    /// スレッド名モーダルの (対象 index, 入力欄)。ダブルクリックで開く・IME 正しい EditorView::plain（#4）。
     renaming: Option<(usize, Entity<EditorView>)>,
     /// transcript のスクロール（M13 UX: ホイールで遡れる。ストリーミング中は底に居る時だけ追従）。
     transcript_list: ListState,
@@ -1186,6 +1186,8 @@ impl AgentPanel {
         // composer の Enter 送信要求（IME 変換中は来ない）を受けて submit する。
         cx.subscribe(&composer, |panel, _composer, event, cx| match event {
             ComposerEvent::Submit => panel.submit(cx),
+            // 折り返し行数が変わった（入力・パネル幅変更）→ auto-grow の高さを再計算する。
+            ComposerEvent::ContentHeightChanged => cx.notify(),
         })
         .detach();
         // 設定変更（UI トグル / 手編集 / CLI / MCP のどれでも）に追従して composer へ反映。
@@ -2607,7 +2609,7 @@ impl AgentPanel {
         window.focus(&handle, cx);
     }
 
-    /// パネル内のいずれかの面（composer / transcript / ＋context / タブ改名）にフォーカスがあるか。
+    /// パネル内のいずれかの面（composer / transcript / ＋context / 改名モーダル）にフォーカスがあるか。
     /// プロジェクト切替が「Agent に居た」ことを覚え、切替先の composer へフォーカスを追従させるのに使う
     /// （旧 session のパネルは切替でツリーから外れ、フォーカスが迷子になると全キーが死ぬため）。
     pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
@@ -2688,7 +2690,7 @@ impl AgentPanel {
         cx.notify();
     }
 
-    /// タブ名のインライン編集を開始する（ダブルクリック・#4）。IME 正しい `EditorView::plain` を使う。
+    /// スレッド名のモーダル編集を開始する（ダブルクリック・#4）。IME 正しい `EditorView::plain` を使う。
     fn start_rename(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.threads.len() {
             return;
@@ -2710,6 +2712,8 @@ impl AgentPanel {
         });
         cx.subscribe(&editor, |panel, _editor, event, cx| match event {
             ComposerEvent::Submit => panel.confirm_rename(cx),
+            // 改名入力は固定高（1 行）なので高さ追従は不要。
+            ComposerEvent::ContentHeightChanged => {}
         })
         .detach();
         let handle = editor.read(cx).focus_handle(cx);
@@ -2742,7 +2746,141 @@ impl AgentPanel {
         }
     }
 
-    /// 開発用: フォーカス無しで改名入力を開く（offscreen スクショ検証・#4）。
+    /// スレッド名変更モーダル。狭いタブ内へ EditorView を埋めると入力欄がクリップされ、
+    /// IME の変換中かどうかも判別できなかったため、入力・説明・確定操作を独立した面にまとめる。
+    fn render_rename_dialog(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (index, editor) = self.renaming.as_ref()?;
+        let thread = self.threads.get(*index)?;
+        let theme = self.theme.clone();
+        let color = thread.color;
+
+        let button = |id: &'static str, label: SharedString, primary: bool| {
+            div()
+                .id(id)
+                .px(px(13.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(if primary { color } else { theme.border })
+                .bg(if primary {
+                    color.alpha(0.16)
+                } else {
+                    theme.bg1
+                })
+                .text_size(px(12.))
+                .text_color(if primary { color } else { theme.fg1 })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3))
+                .child(label)
+        };
+
+        let card = div()
+            .w(px(300.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .p(px(16.))
+            .rounded(px(10.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(12.),
+                gpui::hsla(0., 0., 0., 0.5),
+            )
+            .blur_radius(px(28.))])
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key.as_str() == "escape" {
+                    this.cancel_rename(cx);
+                }
+            }))
+            // カード内の操作を背面のキャンセル面・composer フォーカスへ伝えない。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _window, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(SharedString::from(i18n::t!("agent.rename_thread_title"))),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("agent.rename_thread_label"))),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(34.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(color)
+                    .bg(theme.bg0)
+                    .overflow_hidden()
+                    .child(editor.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("agent.rename_thread_hint"))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        button(
+                            "rename-thread-cancel",
+                            SharedString::from(i18n::t!("agent.rename_thread_cancel")),
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.cancel_rename(cx)),
+                        ),
+                    )
+                    .child(
+                        button(
+                            "rename-thread-confirm",
+                            SharedString::from(i18n::t!("agent.rename_thread_confirm")),
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.confirm_rename(cx)),
+                        ),
+                    ),
+            );
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(0., 0., 0., 0.45))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.cancel_rename(cx)),
+                )
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    /// 開発用: フォーカス無しで改名モーダルを開く（offscreen スクショ検証・#4）。
     #[cfg(debug_assertions)]
     pub fn debug_start_rename(&mut self, cx: &mut Context<Self>) {
         let index = self.active;
@@ -4489,9 +4627,6 @@ impl AgentPanel {
     fn render_thread_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active = self.active;
-        // タブ改名（#4）: 編集中タブの index と入力欄（クローンして map 内で参照する）。
-        let renaming_index = self.renaming.as_ref().map(|(index, _)| *index);
-        let renaming_editor = self.renaming.as_ref().map(|(_, editor)| editor.clone());
         div()
             .flex()
             .items_stretch()
@@ -4571,28 +4706,7 @@ impl AgentPanel {
                                     ))
                                     // どのエージェントで話しているか（Claude/Codex…）をアイコンで（設定画面と同じ在庫）。
                                     .child(agent_badge(&thread.agent, 14.0))
-                                    .child(if renaming_index == Some(index) {
-                                        // 改名中: ラベルを IME 対応の入力欄に差し替える（Enter 確定 / Esc 取消・#4）。
-                                        div()
-                                            .flex_none()
-                                            .min_w(px(90.))
-                                            .px(px(4.))
-                                            .rounded(px(4.))
-                                            .border_1()
-                                            .border_color(color)
-                                            .bg(theme.bg0)
-                                            .on_key_down(cx.listener(
-                                                |this, event: &KeyDownEvent, _window, cx| {
-                                                    if event.keystroke.key.as_str() == "escape" {
-                                                        this.cancel_rename(cx);
-                                                    }
-                                                },
-                                            ))
-                                            .children(renaming_editor.clone())
-                                            .into_any_element()
-                                    } else {
-                                        thread.name.clone().into_any_element()
-                                    })
+                                    .child(thread.name.clone())
                                     // × 閉じる（最後の1枚も閉じられる＝空状態へ）。クリックはタブ切替へ伝播させない。
                                     .child(
                                         div()
@@ -4619,7 +4733,7 @@ impl AgentPanel {
                                             ),
                                     ),
                             )
-                            // 単クリック=切替 / ダブルクリック=インライン改名（#4）。判定は押下即発火の
+                            // 単クリック=切替 / ダブルクリック=改名モーダル（#4）。判定は押下即発火の
                             // on_mouse_down で行う: 同居する on_drag の 2px 閾値がクリック合成を握り潰し、
                             // on_click 経由だと二重クリックが取りこぼされるため（div.rs の pending_mouse_down）。
                             .on_mouse_down(
@@ -4815,8 +4929,6 @@ impl AgentPanel {
     fn render_thread_list(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let active = self.active;
-        let renaming_index = self.renaming.as_ref().map(|(index, _)| *index);
-        let renaming_editor = self.renaming.as_ref().map(|(_, editor)| editor.clone());
         let total: u64 = self
             .threads
             .iter()
@@ -4897,26 +5009,7 @@ impl AgentPanel {
                             thread.activity(),
                         ))
                         .child(agent_badge(&thread.agent, 14.0))
-                        .child(if renaming_index == Some(index) {
-                            // 改名中: 名前を IME 対応の入力欄に差し替える（Bar タブと同型・#4）。
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .px(px(4.))
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(color)
-                                .bg(theme.bg0)
-                                .on_key_down(cx.listener(
-                                    |this, event: &KeyDownEvent, _window, cx| {
-                                        if event.keystroke.key.as_str() == "escape" {
-                                            this.cancel_rename(cx);
-                                        }
-                                    },
-                                ))
-                                .children(renaming_editor.clone())
-                                .into_any_element()
-                        } else {
+                        .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
@@ -4924,9 +5017,8 @@ impl AgentPanel {
                                 .whitespace_nowrap()
                                 .text_size(px(12.5))
                                 .text_color(if is_active { theme.fg0 } else { theme.fg1 })
-                                .child(thread.name.clone())
-                                .into_any_element()
-                        })
+                                .child(thread.name.clone()),
+                        )
                         .child(
                             div()
                                 .flex_none()
@@ -5996,9 +6088,9 @@ impl AgentPanel {
         }
     }
 
-    /// markdown テキストをブロック列（GPUI 要素）へ描く。各ブロック = 1 選択リージョン（M13）で、
-    /// 装飾は `combine_highlights` で選択背景と安全に合成される。インラインコードは mono 不可
-    /// （`HighlightStyle` に font-family が無い）ため syn-mac 色 + 薄背景で表す。表・引用装飾は後続。
+    /// markdown テキストをブロック列（GPUI 要素）へ描く。各ブロック = 1 選択リージョン（M13。
+    /// 表はセル毎）で、装飾は `combine_highlights` で選択背景と安全に合成される。インラインコードは
+    /// mono 不可（`HighlightStyle` に font-family が無い）ため syn-mac 色 + 薄背景で表す。引用装飾は後続。
     fn render_markdown(
         &self,
         entry_index: usize,
@@ -6148,8 +6240,77 @@ impl AgentPanel {
                         )))
                         .into_any_element()
                 }
+                markdown::Block::Table {
+                    alignments,
+                    head,
+                    rows,
+                } => self.render_markdown_table(alignments, head, rows, cx),
             })
             .collect()
+    }
+
+    /// GFM 表（transcript 用）。レイアウトは `.md` プレビューの `render_table` と同じ規約
+    /// （列幅 = 内容比・罫線 = border・ヘッダ bg2）だが、セル毎に選択リージョンを積むためここに置く。
+    fn render_markdown_table(
+        &self,
+        alignments: Vec<markdown::TableAlign>,
+        head: Vec<markdown::TableCell>,
+        rows: Vec<Vec<markdown::TableCell>>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let layout = markdown::table_columns(&head, &rows);
+        let columns = layout.len();
+        // 表示幅 1 単位 → px（transcript 本文 12.5px・ASCII 1 文字 ≒ 0.75em（折り返し余裕込み））。
+        let unit = 12.5 * 0.75;
+        let render_row =
+            |mut cells: Vec<markdown::TableCell>, header: bool, cx: &mut Context<Self>| {
+                cells.resize_with(columns, || markdown::TableCell {
+                    text: String::new(),
+                    spans: Vec::new(),
+                });
+                div()
+                    .flex()
+                    .w_full()
+                    .when(header, |row| {
+                        row.bg(theme.bg2)
+                            .rounded_t(px(5.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .when(!header, |row| row.border_t_1().border_color(theme.border))
+                    .children(cells.into_iter().enumerate().map(|(index, cell)| {
+                        let mut element = div()
+                            .w(relative(layout[index].fraction))
+                            .min_w(px(layout[index].min_units * unit + 14.))
+                            .px(px(7.))
+                            .py(px(4.))
+                            .when(index > 0, |cell| {
+                                cell.border_l_1().border_color(theme.border)
+                            });
+                        element = match alignments.get(index) {
+                            Some(markdown::TableAlign::Center) => element.text_center(),
+                            Some(markdown::TableAlign::Right) => element.text_right(),
+                            _ => element,
+                        };
+                        element.child(self.push_selectable(
+                            cell.text.into(),
+                            self.md_highlights(&cell.spans),
+                            cx,
+                        ))
+                    }))
+            };
+        div()
+            .my(px(2.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .child(render_row(head, true, cx))
+            .children(
+                rows.into_iter()
+                    .map(|cells| render_row(cells, false, cx))
+                    .collect::<Vec<_>>(),
+            )
+            .into_any_element()
     }
 
     /// markdown インラインスパン → GPUI ハイライト（テーマ色を当てる。リンク/コードは syntax 色）。
@@ -7254,6 +7415,7 @@ impl Render for AgentPanel {
             // ビュー外なら自動スクロールを起動する）。
             .on_mouse_move(cx.listener(Self::on_transcript_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_composer_resize_end))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_composer_resize_end))
             .child(match self.tabs_view {
                 AgentTabsView::Bar => self.render_thread_tabs(cx).into_any_element(),
                 AgentTabsView::List => self.render_thread_list(cx),
@@ -7285,6 +7447,8 @@ impl Render for AgentPanel {
             .when(self.context_menu_open, |element| {
                 element.child(self.render_context_menu(cx))
             })
+            // 狭いタブ行とは独立した入力面を最後に重ね、IME・ボタン・Esc を常に見える状態にする。
+            .children(self.render_rename_dialog(cx))
     }
 }
 
@@ -8527,6 +8691,43 @@ mod tests {
         assert_eq!(previous_user_entry_index(&entries, 2), Some(0));
         assert_eq!(previous_user_entry_index(&entries, 0), None);
         assert_eq!(previous_user_entry_index(&entries, usize::MAX), Some(2));
+    }
+
+    #[gpui::test]
+    fn rename_dialog_trims_name_and_ignores_empty_input(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "rename_dialog");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let index = panel.active;
+            let original = panel.threads[index].name.clone();
+            let theme = panel.theme.clone();
+            let color = panel.threads[index].color;
+            let editor = cx.new(|cx| {
+                let mut editor = EditorView::plain(theme, color, true, cx);
+                editor.set_plain_text("  新しいスレッド名  ", cx);
+                editor
+            });
+            panel.renaming = Some((index, editor));
+            assert!(panel.render_rename_dialog(cx).is_some());
+            panel.confirm_rename(cx);
+            assert_eq!(panel.threads[index].name.as_ref(), "新しいスレッド名");
+            assert!(panel.threads[index].name_is_custom);
+
+            let theme = panel.theme.clone();
+            let editor = cx.new(|cx| {
+                let mut editor = EditorView::plain(theme, color, true, cx);
+                editor.set_plain_text("   \n  ", cx);
+                editor
+            });
+            panel.renaming = Some((index, editor));
+            panel.confirm_rename(cx);
+            assert_eq!(
+                panel.threads[index].name.as_ref(),
+                "新しいスレッド名",
+                "空入力では直前の名前を維持する（元名: {original})"
+            );
+        });
+        let _ = std::fs::remove_file(settings_path);
     }
 
     #[gpui::test]

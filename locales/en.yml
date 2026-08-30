@@ -41,6 +41,11 @@ agent:
   done_touched: Done %{elapsed} · touched %{n} files
   close_thread_tip: Close thread  ⌘W
   rename_thread_tip: Rename (double-click)
+  rename_thread_title: Rename thread
+  rename_thread_label: New thread name
+  rename_thread_hint: Enter to save · Esc to cancel
+  rename_thread_cancel: Cancel
+  rename_thread_confirm: Save
   history_tip: Thread history
   history_placeholder: Open a past thread…
   new_thread_tip: New thread  ⌘⇧A
@@ -309,6 +314,7 @@ fleet:
   stopped_agents: "Interrupted %{n} agent(s)"
   no_running_agent: No agent is running
   task_archived: Task finished (the worktree is still on disk)
+  base_synced: "Fast-forwarded %{branch} to upstream (%{count} commits) before creating the Task"
 worktree_delete:
   title: Delete this worktree?
   title_branch: Delete the worktree and its branch?
@@ -468,6 +474,7 @@ git:
   no_commits: No commits
   branches: Branches
   worktree_open_tip: Open worktree in the rail
+  worktree_is_current: "⎇ %{branch} is what this window already has open (⧉ opens a different branch in parallel)"
   delete_branch_tip: Delete branch
   delete_branch_confirm: Delete branch (unmerged? use another window/worktree)
   window_chip: open
@@ -492,6 +499,13 @@ breadcrumb:
   md_preview: Preview
   md_source: Source
   md_preview_tip: Toggle rendered preview  ⌘⇧V
+  html_preview: Preview
+  html_source: Source
+  html_preview_tip: Open in the system WebView  ⌘⇧V
+  html_reload_tip: Reload HTML preview
+webview:
+  failed: Unable to open HTML preview
+  unsupported: HTML preview currently supports macOS and Windows
 terminal:
   tab_title: Terminal %{n}
   add_tip: New terminal
@@ -685,7 +699,7 @@ key:
   indent: Indent
   outdent: Outdent
   toggle_soft_wrap: Toggle soft wrap
-  toggle_rendered_markdown: Toggle Markdown preview
+  toggle_rendered_markdown: Toggle preview
   move_left: Move left
   move_right: Move right
   move_up: Move up

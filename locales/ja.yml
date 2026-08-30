@@ -42,6 +42,11 @@ agent:
   done_touched: 完了 %{elapsed}・触ったファイル %{n}
   close_thread_tip: スレッドを閉じる  ⌘W
   rename_thread_tip: 名前を変更（ダブルクリック）
+  rename_thread_title: スレッド名を変更
+  rename_thread_label: 新しいスレッド名
+  rename_thread_hint: Enterで保存・Escでキャンセル
+  rename_thread_cancel: キャンセル
+  rename_thread_confirm: 保存
   history_tip: スレッド履歴
   history_placeholder: 過去のスレッドを開く…
   new_thread_tip: 新規スレッド  ⌘⇧A
@@ -310,6 +315,7 @@ fleet:
   stopped_agents: "エージェント %{n} 本を中断しました"
   no_running_agent: 動いているエージェントはありません
   task_archived: Task を終了しました（worktree はディスクに残っています）
+  base_synced: "%{branch} を upstream に追従（%{count} コミット早送り）してから Task を作成しました"
 worktree_delete:
   title: この worktree を削除しますか？
   title_branch: worktree とブランチを削除しますか？
@@ -469,6 +475,7 @@ git:
   no_commits: コミットがありません
   branches: ブランチ
   worktree_open_tip: worktree でレールに開く
+  worktree_is_current: "⎇ %{branch} は今このウィンドウで開いています（⧉ は他のブランチを並行で開くボタン）"
   delete_branch_tip: ブランチを削除
   delete_branch_confirm: ブランチ削除（未マージは別窓/worktree で対応）
   window_chip: 開く
@@ -493,6 +500,13 @@ breadcrumb:
   md_preview: プレビュー
   md_source: ソース
   md_preview_tip: 整形プレビューを切替  ⌘⇧V
+  html_preview: プレビュー
+  html_source: ソース
+  html_preview_tip: OS 標準 WebView で表示  ⌘⇧V
+  html_reload_tip: HTML プレビューを再読み込み
+webview:
+  failed: HTML プレビューを開けませんでした
+  unsupported: HTML プレビューは現在 macOS / Windows に対応しています
 terminal:
   tab_title: ターミナル %{n}
   add_tip: ターミナルを追加
@@ -686,7 +700,7 @@ key:
   indent: インデント
   outdent: アウトデント
   toggle_soft_wrap: 折り返しの切替
-  toggle_rendered_markdown: Markdown プレビューの切替
+  toggle_rendered_markdown: プレビューの切替
   move_left: 左へ移動
   move_right: 右へ移動
   move_up: 上へ移動

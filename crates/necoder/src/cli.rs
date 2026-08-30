@@ -4,7 +4,11 @@
 //! - **実行中の GUI がいる**（`gui.sock` に接続できる）→ IPC の `open` でそのウィンドウに
 //!   開かせて前面化する（Turso は排他ロック＝二重インスタンスは hot exit / 台帳が壊れるので
 //!   起動しない。control_ipc.rs の単一 writer 原則と同じ理由）
-//! - **いない** → .app（dev ビルドなら自分自身）を**切り離して**起動する（`ne` はすぐ戻る）
+//! - **socket 不通** → .app なら `-n` を付けない「書類を開く」で LaunchServices へ渡す
+//!   （GUI が実は生きていれば openFiles で届き Finder と同じ `open_external_paths` 経路＝
+//!   そのウィンドウのレールに開く・不在なら起動して同じ経路で届く）。「socket が死んでいるが
+//!   GUI は生きている」瞬間に二重インスタンスを作らないための要。dev ビルドは従来どおり
+//!   自分自身を**切り離して**起動する（`ne` はすぐ戻る）
 //!
 //! パスの絶対化はここ（cwd を知っている側）でやる。GUI 側は絶対パスしか受けない
 //! （Finder 由来の `open_external_paths` と同じ契約）。
@@ -54,26 +58,94 @@ fn run_open(args: &[String]) -> Result<()> {
     let cwd = std::env::current_dir().context("カレントディレクトリが分かりません")?;
     let (paths, has_remote) = resolve_open_args(args, &cwd);
     // ssh:// は接続処理が新プロセス側にしかないので、IPC 転送せず常に新しいインスタンスで開く。
-    if !has_remote {
-        if let Some(result) = try_open_in_running_gui(&paths)? {
-            let opened = result
-                .get("opened")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            if let Some(skipped) = result.get("skipped").and_then(serde_json::Value::as_array) {
-                for path in skipped.iter().filter_map(serde_json::Value::as_str) {
-                    eprintln!("見つからない（スキップ）: {path}");
-                }
+    if has_remote {
+        return launch_detached(&paths);
+    }
+    if let Some(result) = try_open_in_running_gui(&paths)? {
+        let opened = result
+            .get("opened")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if let Some(skipped) = result.get("skipped").and_then(serde_json::Value::as_array) {
+            for path in skipped.iter().filter_map(serde_json::Value::as_str) {
+                eprintln!("見つからない（スキップ）: {path}");
             }
-            if opened > 0 {
-                println!("実行中の necoder で開きました（{opened} 件）");
-            } else {
-                println!("実行中の necoder を前面に出しました");
-            }
-            return Ok(());
+        }
+        if opened > 0 {
+            println!("実行中の necoder で開きました（{opened} 件）");
+        } else {
+            println!("実行中の necoder を前面に出しました");
+        }
+        return Ok(());
+    }
+    open_via_launch_services(&paths)
+}
+
+/// IPC 不通時の非 remote フォールバック。.app 内なら **`-n` を付けず「書類を開く」**で
+/// LaunchServices に渡す — 実行中インスタンスがいれば openFiles でそのウィンドウに届き
+/// （Finder「このアプリケーションで開く」と同じ `open_external_paths` 経路＝レールに追加）、
+/// いなければ起動して同じ経路で届く。socket は前任プロセス在命中に起動した GUI が bind を
+/// 持てないことがあり（control_ipc.rs 参照）、その状態で `-n` を使うと二重インスタンス
+/// （Turso 排他ロック破り）になるため、書類経由に一本化する。dev ビルドは従来どおり spawn。
+fn open_via_launch_services(paths: &[String]) -> Result<()> {
+    let exe = cli_shim::current_binary()?;
+    let Some(bundle) = bundle_root(&exe) else {
+        return launch_detached(paths);
+    };
+    // 存在しないパスが混ざると open(1) は全体を失敗させる → ここで警告してスキップ
+    // （IPC 応答の skipped と同じ見せ方）。
+    let (existing, skipped): (Vec<&String>, Vec<&String>) = paths
+        .iter()
+        .partition(|path| Path::new(path.as_str()).exists());
+    for path in &skipped {
+        eprintln!("見つからない（スキップ）: {path}");
+    }
+    let mut command = std::process::Command::new("/usr/bin/open");
+    command.arg("-a").arg(&bundle);
+    for path in &existing {
+        command.arg(path.as_str());
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("{} を起動できません", bundle.display()))?;
+    anyhow::ensure!(status.success(), "open が失敗しました（{status}）");
+    if existing.is_empty() {
+        println!("necoder を前面に出しました");
+    } else {
+        println!("necoder で開きました（{} 件）", existing.len());
+    }
+    Ok(())
+}
+
+/// GUI 起動の直前に呼ぶ**単一インスタンスの防波堤**（main.rs）。生きた GUI が socket に
+/// 居れば argv のパスを IPC `open` で渡して true ＝呼び手は即 return（この起動は窓を作らず
+/// Dock にアイコンが増えない）。`open -n` 直叩き・旧シム経由など「二重起動になる残りの入口」を
+/// すべてここで畳む（Turso 排他ロックの保険）。対象外:
+/// - dev ビルド（.app 外）: 製品版と並行して dev 版を起動する開発フローを塞がない
+/// - ssh:// を含む起動: 接続処理が新プロセス側にしかない（cli.rs の分岐と同じ理由）
+pub(crate) fn forward_launch_to_running_gui() -> bool {
+    let Ok(exe) = cli_shim::current_binary() else {
+        return false;
+    };
+    if bundle_root(&exe).is_none() {
+        return false;
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let (paths, has_remote) = resolve_open_args(&args, &cwd);
+    if has_remote {
+        return false;
+    }
+    match try_open_in_running_gui(&paths) {
+        Ok(Some(_)) => true,
+        Ok(None) => false, // GUI 不在 → 通常起動
+        // 接続できたのに転送失敗 = GUI は生きている。二重起動（DB ロック破り）よりは
+        // この起動を畳む方へ倒す（cli.rs の run_open と同じ原則）。
+        Err(error) => {
+            eprintln!("実行中の necoder へ渡せませんでした（起動を中止）: {error:#}");
+            true
         }
     }
-    launch_detached(&paths)
 }
 
 /// 実行中 GUI がいれば IPC `open` を送り、その応答を返す。いなければ `None`（→ 新規起動へ）。
@@ -118,13 +190,14 @@ fn resolve_open_args(args: &[String], cwd: &Path) -> (Vec<String>, bool) {
     (paths, has_remote)
 }
 
-/// GUI 不在時の起動。.app 内なら LaunchServices（`open -n`）で、dev ビルドなら自分自身を
-/// 切り離して spawn する（どちらも `ne` はすぐ戻る・端末を閉じても巻き込まれない）。
+/// 新インスタンス起動（ssh:// 用・dev ビルドの汎用フォールバック）。.app 内なら
+/// LaunchServices（`open -n`）で、dev ビルドなら自分自身を切り離して spawn する
+/// （どちらも `ne` はすぐ戻る・端末を閉じても巻き込まれない）。
 fn launch_detached(paths: &[String]) -> Result<()> {
     let exe = cli_shim::current_binary()?;
     if let Some(bundle) = bundle_root(&exe) {
         let status = std::process::Command::new("/usr/bin/open")
-            .arg("-n") // socket 不在確認済み＝新インスタンス（-n 無しだと既存活性化で引数が黙って落ちる）
+            .arg("-n") // ssh:// は新プロセスでしか処理できない＝明示的に新インスタンス（--args は既存活性化だと黙って落ちるため）
             .arg(&bundle)
             .arg("--args")
             .args(paths)
