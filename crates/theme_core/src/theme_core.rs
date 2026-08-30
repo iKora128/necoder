@@ -591,7 +591,11 @@ mod tests {
         assert_eq!(embedded_themes().len(), EMBEDDED_THEME_JSONS.len());
         for (id, theme) in embedded_themes() {
             // id でも JSON の name でも同じテーマが引ける（settings.json にはどちらを書いてもよい）。
-            assert_eq!(Theme::builtin(id).as_ref(), Some(theme), "id で引けない: {id}");
+            assert_eq!(
+                Theme::builtin(id).as_ref(),
+                Some(theme),
+                "id で引けない: {id}"
+            );
             assert_eq!(
                 Theme::builtin(theme.name.as_ref()).as_ref(),
                 Some(theme),

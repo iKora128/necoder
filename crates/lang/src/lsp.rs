@@ -963,7 +963,10 @@ mod tests {
 
         let (path_with_space, _) = file_fixture("Users/x/project name/main.rs");
         let uri = path_to_uri(&path_with_space);
-        assert!(uri.contains("project%20name"), "空白は percent encoding される: {uri}");
+        assert!(
+            uri.contains("project%20name"),
+            "空白は percent encoding される: {uri}"
+        );
         assert_eq!(uri_to_path(&uri), Some(path_with_space));
     }
 

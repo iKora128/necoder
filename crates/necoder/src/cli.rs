@@ -34,9 +34,15 @@ pub(crate) fn run() -> bool {
 fn run_open(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("-h") | Some("--help") => {
-            println!("使い方: {} [<path>|ssh://user@host/path]...", cli_shim::COMMAND_NAME);
+            println!(
+                "使い方: {} [<path>|ssh://user@host/path]...",
+                cli_shim::COMMAND_NAME
+            );
             println!("  引数なし: 実行中の necoder を前面に出す（いなければ前回状態で起動）");
-            println!("  そのほか: {} <config|fleet|mcp> … も素通しで使えます", cli_shim::COMMAND_NAME);
+            println!(
+                "  そのほか: {} <config|fleet|mcp> … も素通しで使えます",
+                cli_shim::COMMAND_NAME
+            );
             return Ok(());
         }
         Some("-V") | Some("--version") => {
@@ -50,7 +56,10 @@ fn run_open(args: &[String]) -> Result<()> {
     // ssh:// は接続処理が新プロセス側にしかないので、IPC 転送せず常に新しいインスタンスで開く。
     if !has_remote {
         if let Some(result) = try_open_in_running_gui(&paths)? {
-            let opened = result.get("opened").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let opened = result
+                .get("opened")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             if let Some(skipped) = result.get("skipped").and_then(serde_json::Value::as_array) {
                 for path in skipped.iter().filter_map(serde_json::Value::as_str) {
                     eprintln!("見つからない（スキップ）: {path}");
@@ -146,7 +155,10 @@ fn launch_detached(paths: &[String]) -> Result<()> {
 /// 実行ファイルが .app バンドル内（`…/necoder.app/Contents/MacOS/<bin>`）ならバンドルの根を返す。
 fn bundle_root(exe: &Path) -> Option<PathBuf> {
     let bundle = exe.ancestors().nth(3)?;
-    (bundle.extension().is_some_and(|extension| extension == "app")).then(|| bundle.to_path_buf())
+    (bundle
+        .extension()
+        .is_some_and(|extension| extension == "app"))
+    .then(|| bundle.to_path_buf())
 }
 
 /// `necoder install-cli` — `ne` シムを /usr/local/bin へ設置（権限が無ければ sudo を案内）。
@@ -231,7 +243,9 @@ mod tests {
     #[test]
     fn bundle_root_detects_app_bundle() {
         assert_eq!(
-            bundle_root(Path::new("/Applications/necoder.app/Contents/MacOS/necoder")),
+            bundle_root(Path::new(
+                "/Applications/necoder.app/Contents/MacOS/necoder"
+            )),
             Some(PathBuf::from("/Applications/necoder.app"))
         );
         assert_eq!(bundle_root(Path::new("/work/target/debug/necoder")), None);

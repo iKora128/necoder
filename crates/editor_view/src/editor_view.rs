@@ -7,12 +7,11 @@
 use editor_core::{Buffer, BufferSnapshot, Point as BufferPoint, Selection};
 use gpui::{
     actions, div, fill, hsla, point, prelude::*, px, relative, size, App, Bounds, Context,
-    CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter,
-    FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoElement, KeyBinding, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ScrollWheelEvent, ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window,
+    CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
+    IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Style, TextAlign,
+    TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use std::ops::Range;
 use theme_core::{SyntaxColors, Theme};
@@ -1611,17 +1610,17 @@ impl EditorView {
             return;
         }
         self.drag_autoscroll_running = true;
-        cx.spawn_in(window, async move |editor, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(33))
-                    .await;
-                let keep_going = editor
-                    .update_in(cx, |editor, window, cx| editor.drag_autoscroll_tick(window, cx))
-                    .unwrap_or(false);
-                if !keep_going {
-                    break;
-                }
+        cx.spawn_in(window, async move |editor, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(33))
+                .await;
+            let keep_going = editor
+                .update_in(cx, |editor, window, cx| {
+                    editor.drag_autoscroll_tick(window, cx)
+                })
+                .unwrap_or(false);
+            if !keep_going {
+                break;
             }
         })
         .detach();
@@ -2499,8 +2498,7 @@ impl Element for EditorElement {
         {
             let editor = self.editor.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                if phase != DispatchPhase::Bubble
-                    || event.pressed_button != Some(MouseButton::Left)
+                if phase != DispatchPhase::Bubble || event.pressed_button != Some(MouseButton::Left)
                 {
                     return;
                 }

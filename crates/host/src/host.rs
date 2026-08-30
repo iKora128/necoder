@@ -297,8 +297,7 @@ impl Host for LocalHost {
     }
 
     fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
-        paths::canonicalize(path)
-            .with_context(|| format!("パスを解決できない: {}", path.display()))
+        paths::canonicalize(path).with_context(|| format!("パスを解決できない: {}", path.display()))
     }
 
     fn metadata(&self, path: &Path) -> Result<HostMetadata> {
@@ -3075,7 +3074,8 @@ mod windows_terminal_tests {
     /// PowerShell 7 が入っていればそちらを使う。
     #[test]
     fn pwsh_wins_when_it_is_installed() {
-        let shell = pick_windows_shell(|candidate| candidate == "pwsh" || candidate == "powershell");
+        let shell =
+            pick_windows_shell(|candidate| candidate == "pwsh" || candidate == "powershell");
         assert_eq!(shell.program, "pwsh");
         assert!(shell.args.is_empty());
     }
@@ -3117,7 +3117,9 @@ mod windows_terminal_tests {
             .expect(".cmd を起動できない（Rust の Command が .cmd を扱えなくなった可能性）");
         let mut stdout = process.take_stdout().expect("stdout が無い");
         let mut output = String::new();
-        stdout.read_to_string(&mut output).expect("stdout を読めない");
+        stdout
+            .read_to_string(&mut output)
+            .expect("stdout を読めない");
 
         assert!(
             output.contains("NECODER_CMD_OK"),

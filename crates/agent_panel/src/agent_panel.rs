@@ -2246,17 +2246,15 @@ impl AgentPanel {
             return;
         }
         self.transcript_autoscroll_running = true;
-        cx.spawn(async move |panel, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(33))
-                    .await;
-                let keep_going = panel
-                    .update(cx, |panel, cx| panel.transcript_autoscroll_tick(cx))
-                    .unwrap_or(false);
-                if !keep_going {
-                    break;
-                }
+        cx.spawn(async move |panel, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(33))
+                .await;
+            let keep_going = panel
+                .update(cx, |panel, cx| panel.transcript_autoscroll_tick(cx))
+                .unwrap_or(false);
+            if !keep_going {
+                break;
             }
         })
         .detach();

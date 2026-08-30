@@ -20,10 +20,9 @@ pub(crate) use git_ui::{BranchMenu as BranchMenuState, GitPanel, RepositorySnaps
 pub(crate) use gpui::{
     actions, div, point, prelude::*, px, size, svg, Animation, AnimationExt, App, Bounds,
     ClickEvent, ClipboardItem, Context, CursorStyle, Div, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable,
-    FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Point, SharedString, Stateful, StyleRefinement, Subscription, TitlebarOptions,
-    Window, WindowBounds, WindowControlArea, WindowOptions,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, SharedString, Stateful, StyleRefinement,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowOptions,
 };
 pub(crate) use host::Host;
 pub(crate) use lang::lsp::{
@@ -54,6 +53,7 @@ mod explorer_view;
 mod fleet_view;
 mod image_view;
 pub(crate) use image_view::ImageView;
+mod about;
 mod git_controller;
 mod git_view;
 mod herd_view;
@@ -62,7 +62,6 @@ mod overlays;
 mod rail;
 mod rail_view;
 mod remote_ssh;
-mod about;
 mod shortcut_sheet;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;

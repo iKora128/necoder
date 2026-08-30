@@ -173,10 +173,7 @@ pub fn uninstall_with_admin_prompt(prompt: &str) -> Result<()> {
         return Err(error);
     }
     // ここに来るのは necoder 製と確認済みのシムだけ（uninstall が先に断っている）。
-    let script = format!(
-        "rm {}",
-        shell_quote(&shim_path().display().to_string())
-    );
+    let script = format!("rm {}", shell_quote(&shim_path().display().to_string()));
     run_admin_shell(&script, prompt)
 }
 
@@ -243,7 +240,8 @@ mod tests {
     use super::*;
 
     fn temp_shim(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("necoder_cli_shim_{}_{}", tag, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("necoder_cli_shim_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join(COMMAND_NAME)
     }
@@ -275,7 +273,10 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
         std::fs::write(&path, "#!/bin/sh\necho other tool\n").expect("write");
         assert_eq!(installed_target_at(&path), None, "他所製は検出しない");
-        assert!(install_at(&path, Path::new("/tmp/necoder")).is_err(), "上書きしない");
+        assert!(
+            install_at(&path, Path::new("/tmp/necoder")).is_err(),
+            "上書きしない"
+        );
         assert!(uninstall_at(&path).is_err(), "消さない");
         assert!(path.exists());
         let _ = std::fs::remove_dir_all(path.parent().expect("parent"));

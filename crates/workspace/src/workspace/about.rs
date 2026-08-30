@@ -17,12 +17,7 @@ const GITHUB_URL: &str = "https://github.com/iKora128/necoder";
 
 impl Workspace {
     /// メニュー「necoder について」。モーダルを開くだけ（勝手にネットへ出ない）。
-    pub(crate) fn about_action(
-        &mut self,
-        _: &About,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn about_action(&mut self, _: &About, window: &mut Window, cx: &mut Context<Self>) {
         self.open_about(window, cx);
     }
 
@@ -136,9 +131,7 @@ impl Workspace {
                         Some((SharedString::from(i18n::t!("about.up_to_date")), theme.ok)),
                         check_button,
                     ),
-                    ManualUpdateCheck::Failed(detail) => {
-                        (Some((detail, theme.warn)), check_button)
-                    }
+                    ManualUpdateCheck::Failed(detail) => (Some((detail, theme.warn)), check_button),
                     ManualUpdateCheck::Idle => (None, check_button),
                 }
             }
@@ -205,7 +198,10 @@ impl Workspace {
                     .pt(px(1.))
                     .text_size(px(11.5))
                     .text_color(theme.fg2)
-                    .child(SharedString::from(format!("v{}", env!("CARGO_PKG_VERSION")))),
+                    .child(SharedString::from(format!(
+                        "v{}",
+                        env!("CARGO_PKG_VERSION")
+                    ))),
             )
             .child(
                 div()

@@ -117,9 +117,9 @@ fn runtime_uses(text: &str) -> Vec<usize> {
             continue;
         }
         let window_start = index.saturating_sub(LOOKBEHIND);
-        let embedded = lines[window_start..=index]
-            .iter()
-            .any(|candidate| candidate.contains("include_bytes!") || candidate.contains("include_str!"));
+        let embedded = lines[window_start..=index].iter().any(|candidate| {
+            candidate.contains("include_bytes!") || candidate.contains("include_str!")
+        });
         if !embedded {
             hits.push(index + 1);
         }
@@ -171,10 +171,7 @@ fn build_time_paths_are_never_opened_at_runtime() {
 #[test]
 fn every_allowance_states_a_reason() {
     for (path, _, reason) in ALLOWED {
-        assert!(
-            reason.len() > 20,
-            "{path} の許可理由が短すぎる: {reason:?}"
-        );
+        assert!(reason.len() > 20, "{path} の許可理由が短すぎる: {reason:?}");
     }
 }
 

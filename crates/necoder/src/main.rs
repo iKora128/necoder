@@ -222,10 +222,11 @@ impl gpui::AssetSource for Assets {
         }
         let bytes: &'static [u8] = match path {
             // アプリアイコン（About モーダル用・.icns の元画像。角丸マスク済み）。
-            "icon/necoder.png" => {
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon/necoder.png"))
-                    .as_slice()
-            }
+            "icon/necoder.png" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/icon/necoder.png"
+            ))
+            .as_slice(),
             "icons/panel-left.svg" => icon!("panel-left.svg"),
             "icons/search.svg" => icon!("search.svg"),
             "icons/git-branch.svg" => icon!("git-branch.svg"),

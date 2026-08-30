@@ -536,17 +536,38 @@ mod windows_keymap_tests {
         let sections = windows_sections();
         let editor = &sections[0].bindings;
         // ctrl-a は SelectAll。mac の emacs 風 ctrl-a（行頭）に奪われていないこと
-        assert_eq!(editor.get("ctrl-a").map(String::as_str), Some("editor::SelectAll"));
-        assert_eq!(editor.get("ctrl-s").map(String::as_str), Some("workspace::SaveActive"));
+        assert_eq!(
+            editor.get("ctrl-a").map(String::as_str),
+            Some("editor::SelectAll")
+        );
+        assert_eq!(
+            editor.get("ctrl-s").map(String::as_str),
+            Some("workspace::SaveActive")
+        );
         // 単語単位は ctrl 側（mac の alt 側から移した）
-        assert_eq!(editor.get("ctrl-left").map(String::as_str), Some("editor::MoveWordLeft"));
+        assert_eq!(
+            editor.get("ctrl-left").map(String::as_str),
+            Some("editor::MoveWordLeft")
+        );
         // 文書の先頭・末尾
-        assert_eq!(editor.get("ctrl-home").map(String::as_str), Some("editor::MoveToStart"));
+        assert_eq!(
+            editor.get("ctrl-home").map(String::as_str),
+            Some("editor::MoveToStart")
+        );
         // Windows の Redo は ctrl-y も効く
-        assert_eq!(editor.get("ctrl-y").map(String::as_str), Some("editor::Redo"));
-        assert_eq!(editor.get("ctrl-shift-z").map(String::as_str), Some("editor::Redo"));
+        assert_eq!(
+            editor.get("ctrl-y").map(String::as_str),
+            Some("editor::Redo")
+        );
+        assert_eq!(
+            editor.get("ctrl-shift-z").map(String::as_str),
+            Some("editor::Redo")
+        );
         // 行頭・行末は home/end が持っている（cmd-left/right を落としても失われない）
-        assert_eq!(editor.get("home").map(String::as_str), Some("editor::MoveToLineStart"));
+        assert_eq!(
+            editor.get("home").map(String::as_str),
+            Some("editor::MoveToLineStart")
+        );
 
         // パレット・ファインダ等は context 無しのグローバルセクションにある
         let global = sections
@@ -577,16 +598,28 @@ mod windows_keymap_tests {
     #[test]
     fn macos_only_concepts_are_dropped() {
         let json = default_keymap_json(KeymapPlatform::Windows);
-        assert!(!json.contains("workspace::Hide\""), "Hide は macOS だけの概念");
-        assert!(!json.contains("workspace::HideOthers"), "HideOthers は macOS だけの概念");
+        assert!(
+            !json.contains("workspace::Hide\""),
+            "Hide は macOS だけの概念"
+        );
+        assert!(
+            !json.contains("workspace::HideOthers"),
+            "HideOthers は macOS だけの概念"
+        );
         // cmd- が 1 つも残っていない
-        assert!(!json.contains("\"cmd-"), "非 mac の既定に cmd- が残っている");
+        assert!(
+            !json.contains("\"cmd-"),
+            "非 mac の既定に cmd- が残っている"
+        );
     }
 
     /// **mac 側は 1 文字も変わらない**（§D8）。
     #[test]
     fn macos_default_is_returned_verbatim() {
-        assert_eq!(default_keymap_json(KeymapPlatform::MacOs), DEFAULT_KEYMAP_JSON);
+        assert_eq!(
+            default_keymap_json(KeymapPlatform::MacOs),
+            DEFAULT_KEYMAP_JSON
+        );
     }
 
     #[test]
@@ -595,15 +628,24 @@ mod windows_keymap_tests {
             pretty_keystroke_for(KeymapPlatform::Windows, "ctrl-shift-p"),
             "Ctrl+Shift+P"
         );
-        assert_eq!(pretty_keystroke_for(KeymapPlatform::Windows, "ctrl-s"), "Ctrl+S");
-        assert_eq!(pretty_keystroke_for(KeymapPlatform::Windows, "alt-f4"), "Alt+F4");
+        assert_eq!(
+            pretty_keystroke_for(KeymapPlatform::Windows, "ctrl-s"),
+            "Ctrl+S"
+        );
+        assert_eq!(
+            pretty_keystroke_for(KeymapPlatform::Windows, "alt-f4"),
+            "Alt+F4"
+        );
         assert_eq!(pretty_keystroke_for(KeymapPlatform::Windows, "f2"), "F2");
         assert_eq!(
             pretty_keystroke_for(KeymapPlatform::Windows, "ctrl-k ctrl-i"),
             "Ctrl+K Ctrl+I"
         );
         // mac 側は従来どおり記号
-        assert_eq!(pretty_keystroke_for(KeymapPlatform::MacOs, "cmd-shift-p"), "⌘⇧P");
+        assert_eq!(
+            pretty_keystroke_for(KeymapPlatform::MacOs, "cmd-shift-p"),
+            "⌘⇧P"
+        );
     }
 
     /// UI から `cmd-` 表記で引いたラベルが、そのプラットフォームで**実際に押すキー**と一致すること。
@@ -611,14 +653,23 @@ mod windows_keymap_tests {
     #[test]
     fn keystroke_labels_match_what_the_user_actually_presses() {
         assert_eq!(keystroke_label_for(KeymapPlatform::MacOs, "cmd-o"), "⌘O");
-        assert_eq!(keystroke_label_for(KeymapPlatform::Windows, "cmd-o"), "Ctrl+O");
+        assert_eq!(
+            keystroke_label_for(KeymapPlatform::Windows, "cmd-o"),
+            "Ctrl+O"
+        );
         assert_eq!(
             keystroke_label_for(KeymapPlatform::Windows, "cmd-shift-p"),
             "Ctrl+Shift+P"
         );
         // 置き換え表を通るものはラベルもそちらに従う（表示と実キーがずれない）
-        assert_eq!(keystroke_label_for(KeymapPlatform::Windows, "cmd-alt-f"), "Ctrl+H");
-        assert_eq!(keystroke_label_for(KeymapPlatform::Windows, "cmd-q"), "Alt+F4");
+        assert_eq!(
+            keystroke_label_for(KeymapPlatform::Windows, "cmd-alt-f"),
+            "Ctrl+H"
+        );
+        assert_eq!(
+            keystroke_label_for(KeymapPlatform::Windows, "cmd-q"),
+            "Alt+F4"
+        );
     }
 }
 

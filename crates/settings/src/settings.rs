@@ -882,7 +882,6 @@ impl SettingsView {
                 cx,
             ))
     }
-
 }
 
 impl EventEmitter<SettingsViewEvent> for SettingsView {}
@@ -1141,7 +1140,6 @@ impl Render for SettingsView {
             )
     }
 }
-
 
 /// ブランド表示はカタログ（`acp_client::AgentKind`）が単一の出所。設定画面もタブも同じ値を引く。
 fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {

@@ -251,10 +251,7 @@ fn home_on(platform: Platform, var: &impl Fn(&str) -> Option<OsString>) -> Optio
 }
 
 /// macOS のアプリ支援ディレクトリ。**この文字列は変えてはいけない**（§D8）。
-fn macos_support_dir(
-    app: &str,
-    var: &impl Fn(&str) -> Option<OsString>,
-) -> Option<PathBuf> {
+fn macos_support_dir(app: &str, var: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     Some(
         home_on(Platform::MacOs, var)?
             .join("Library/Application Support")
@@ -580,7 +577,10 @@ mod tests {
             state_dir_on(Platform::Windows, &var),
             cache_dir_on(Platform::Windows, &var),
         ] {
-            let rendered = dir.expect("Windows のパスが決まらない").to_string_lossy().into_owned();
+            let rendered = dir
+                .expect("Windows のパスが決まらない")
+                .to_string_lossy()
+                .into_owned();
             assert!(
                 !rendered.contains("Library"),
                 "macOS のディレクトリ名が Windows に漏れている: {rendered}"
@@ -693,7 +693,10 @@ mod tests {
 
     #[test]
     fn linux_runtime_socket_prefers_xdg_runtime_dir() {
-        let with_runtime = env(&[("HOME", "/home/test"), ("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        let with_runtime = env(&[
+            ("HOME", "/home/test"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+        ]);
         assert_eq!(
             runtime_socket_on(Platform::Linux, &with_runtime),
             Some(PathBuf::from("/run/user/1000/necoder/gui.sock"))
@@ -718,9 +721,21 @@ mod tests {
                 ("USERPROFILE", r"C:\Users\test"),
             ]);
             let root = PathBuf::from("/tmp/necoder-test");
-            assert_eq!(config_dir_on(platform, &var), Some(root.clone()), "{platform:?}");
-            assert_eq!(data_dir_on(platform, &var), Some(root.clone()), "{platform:?}");
-            assert_eq!(state_dir_on(platform, &var), Some(root.clone()), "{platform:?}");
+            assert_eq!(
+                config_dir_on(platform, &var),
+                Some(root.clone()),
+                "{platform:?}"
+            );
+            assert_eq!(
+                data_dir_on(platform, &var),
+                Some(root.clone()),
+                "{platform:?}"
+            );
+            assert_eq!(
+                state_dir_on(platform, &var),
+                Some(root.clone()),
+                "{platform:?}"
+            );
             assert_eq!(cache_dir_on(platform, &var), Some(root), "{platform:?}");
         }
     }
@@ -728,7 +743,10 @@ mod tests {
     #[test]
     fn necoder_gui_sock_overrides_every_platform() {
         for platform in [Platform::MacOs, Platform::Windows, Platform::Linux] {
-            let var = env(&[("NECODER_GUI_SOCK", "/tmp/custom.sock"), ("HOME", "/Users/test")]);
+            let var = env(&[
+                ("NECODER_GUI_SOCK", "/tmp/custom.sock"),
+                ("HOME", "/Users/test"),
+            ]);
             assert_eq!(
                 runtime_socket_on(platform, &var),
                 Some(PathBuf::from("/tmp/custom.sock")),

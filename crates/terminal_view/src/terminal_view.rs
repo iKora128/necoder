@@ -642,17 +642,15 @@ impl TerminalView {
             return;
         }
         self.drag_autoscroll_running = true;
-        cx.spawn(async move |view, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(33))
-                    .await;
-                let keep_going = view
-                    .update(cx, |view, cx| view.drag_autoscroll_tick(cx))
-                    .unwrap_or(false);
-                if !keep_going {
-                    break;
-                }
+        cx.spawn(async move |view, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(33))
+                .await;
+            let keep_going = view
+                .update(cx, |view, cx| view.drag_autoscroll_tick(cx))
+                .unwrap_or(false);
+            if !keep_going {
+                break;
             }
         })
         .detach();
@@ -676,11 +674,21 @@ impl TerminalView {
         // 遠くへ引くほど速く（1〜5 行/tick）。上はみ出し（負）= 履歴へ = Delta 正。
         let magnitude =
             (1 + (overshoot.abs() / f32::from(frame.line_height).max(1.0)) as i32).min(5);
-        let lines = if overshoot < 0.0 { magnitude } else { -magnitude };
+        let lines = if overshoot < 0.0 {
+            magnitude
+        } else {
+            -magnitude
+        };
         self.term.lock().scroll_display(Scroll::Delta(lines));
         self.sync(cx);
         // 新しい display_offset で選択端を引き直す（端の行に吸着し続ける）。
-        self.update_selection(frame.position, frame.origin, frame.cell_width, frame.line_height, cx);
+        self.update_selection(
+            frame.position,
+            frame.origin,
+            frame.cell_width,
+            frame.line_height,
+            cx,
+        );
         true
     }
 
