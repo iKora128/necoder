@@ -183,6 +183,12 @@ pub struct SettingsView {
     /// 外観セクションに並べるテーマ一覧（組み込み + 同梱 + ユーザー JSON）。
     /// 描画毎の fs 走査を避けてキャッシュし、設定を開き直すたび [`Self::refresh_availability`] で更新。
     themes: Vec<(SharedString, theme_core::ThemeSource)>,
+    /// ターミナル用 `ne` シム（cli_shim crate）の設置状態。`Some(実体パス)` = 設置済み。
+    cli_shim_target: Option<PathBuf>,
+    /// `ne` シムの設置/削除を実行中（連打防止・「実行中…」表示）。
+    cli_shim_busy: bool,
+    /// `ne` シムの直近の失敗（管理者ダイアログのキャンセル等）。行の下に赤字で出す。
+    cli_shim_error: Option<SharedString>,
 }
 
 impl SettingsView {
@@ -196,6 +202,9 @@ impl SettingsView {
             availability_generation: 0,
             watching_agents: vec![false; acp_client::AGENTS.len()],
             themes: theme_core::available_themes(themes_dir().as_deref()),
+            cli_shim_target: None,
+            cli_shim_busy: false,
+            cli_shim_error: None,
         };
         view.refresh_availability(cx);
         view
@@ -224,13 +233,14 @@ impl SettingsView {
                         .iter()
                         .map(acp_client::AgentKind::cli_installed)
                         .collect::<Vec<_>>();
-                    (installed, auth_states)
+                    (installed, auth_states, cli_shim::installed_target())
                 })
                 .await;
             let _ = view.update(cx, |view, cx| {
                 if view.availability_generation == generation {
                     view.cli_installed = agent_states.0;
                     view.auth_states = agent_states.1;
+                    view.cli_shim_target = agent_states.2;
                     view.checking_agents = false;
                     cx.notify();
                 }
@@ -322,6 +332,151 @@ impl SettingsView {
                     cx.emit(SettingsViewEvent::RunCommand(command.to_string()))
                 }),
             )
+    }
+
+    // ── コマンドライン（`ne` シム・cli_shim crate）───────────────────────────────
+
+    /// `ne` シムの設置/削除を背景で実行する。/usr/local/bin に書けない時は cli_shim が
+    /// 管理者ダイアログ（osascript）へ倒す＝UI スレッドは待たない。結果で行の状態を更新。
+    fn run_cli_shim_action(&mut self, install: bool, cx: &mut Context<Self>) {
+        if self.cli_shim_busy {
+            return; // 連打防止（ダイアログの多重表示を防ぐ）
+        }
+        self.cli_shim_busy = true;
+        self.cli_shim_error = None;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let prompt = if install {
+                i18n::t!("settings.cli_admin_prompt")
+            } else {
+                i18n::t!("settings.cli_admin_prompt_remove")
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if install {
+                        let binary = cli_shim::current_binary()?;
+                        cli_shim::install_with_admin_prompt(&binary, &prompt)?;
+                    } else {
+                        cli_shim::uninstall_with_admin_prompt(&prompt)?;
+                    }
+                    Ok::<_, anyhow::Error>(cli_shim::installed_target())
+                })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                view.cli_shim_busy = false;
+                match result {
+                    Ok(target) => view.cli_shim_target = target,
+                    Err(error) => {
+                        view.cli_shim_error = Some(SharedString::from(format!("{error:#}")))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 「コマンドライン」セクション。`ne <パス>` シムの状態表示と設置/削除
+    /// （VSCode の「Shell Command: Install 'code' command in PATH」相当・設置先は /usr/local/bin）。
+    fn cli_section(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let shim_path = cli_shim::shim_path().display().to_string();
+        let sub = match &self.cli_shim_target {
+            Some(target) => i18n::t!(
+                "settings.cli_row_sub_installed",
+                "path" => shim_path,
+                "target" => target.display()
+            ),
+            None => i18n::t!("settings.cli_row_sub_missing", "path" => shim_path),
+        };
+        let action_button = |id: &'static str, text: String, install: bool| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(text))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| view.run_cli_shim_action(install, cx)),
+                )
+        };
+        let control = if self.cli_shim_busy || self.checking_agents {
+            div()
+                .text_size(px(11.))
+                .text_color(theme.fg2)
+                .child(SharedString::from(i18n::t!("settings.cli_busy")))
+                .into_any_element()
+        } else if self.cli_shim_target.is_some() {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .px(px(8.))
+                        .py(px(3.))
+                        .rounded(px(5.))
+                        .bg(accent.alpha(0.16))
+                        .text_size(px(11.))
+                        .text_color(accent)
+                        .child(SharedString::from(i18n::t!("settings.cli_installed_chip"))),
+                )
+                .child(action_button(
+                    "cli-shim-uninstall",
+                    i18n::t!("settings.cli_uninstall_button"),
+                    false,
+                ))
+                .into_any_element()
+        } else {
+            action_button(
+                "cli-shim-install",
+                i18n::t!("settings.cli_install_button"),
+                true,
+            )
+            .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg1)
+                            .child(SharedString::from(i18n::t!("settings.cli_heading"))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(i18n::t!("settings.cli_sub"))),
+                    ),
+            )
+            .child(self.pref_row(i18n::t!("settings.cli_row_label"), Some(sub), control))
+            .when_some(self.cli_shim_error.clone(), |element, error| {
+                element.child(
+                    div()
+                        .px(px(12.))
+                        .text_size(px(10.5))
+                        .text_color(self.theme.err)
+                        .child(error),
+                )
+            })
     }
 
     // ── Preferences（設定の実効化・M13）──────────────────────────────────────────
@@ -939,6 +1094,11 @@ impl Render for SettingsView {
             .child(rows)
             .when(!onboarding, |element| {
                 element
+                    // 導入系（エージェント CLI）の直後に `ne` コマンドを並べる。
+                    // Windows は W フェーズまで非対応＝セクションごと出さない。
+                    .when(cli_shim::supported(), |element| {
+                        element.child(self.cli_section(cx))
+                    })
                     .child(self.appearance_section(&settings, cx))
                     .child(self.preferences_section(&settings, cx))
             })

@@ -150,6 +150,13 @@ pub fn parse_latest_release(
     })
 }
 
+/// この OS で更新確認が意味を持つか（= [`platform_update_route`] があるか）。
+/// About モーダルは false のとき「アップデートを確認」ボタンごと出さない
+/// （「押せるのに必ず失敗する」導線を作らない規律の手動版）。
+pub fn manual_check_supported() -> bool {
+    platform_update_route().is_some()
+}
+
 /// latest リリースを確認する（背景スレッドで呼ぶ）。ネット断・API 制限は静かに None。
 ///
 /// **「押せるのに必ず失敗する」チップを出さない**のが規律（2026-08-24・Windows 版を
@@ -157,7 +164,17 @@ pub fn parse_latest_release(
 /// 適用できない OS（Linux 等）では確認自体をしない。Windows はアプリ内適用の代わりに
 /// Release ページを開く＝クリックは常に成立する。
 pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
-    let route = platform_update_route()?;
+    check_for_update_manual(current_version).ok().flatten()
+}
+
+/// 手動の更新確認（メニュー / About モーダル）。自動チェックと違い**結果を言い分ける**:
+/// `Ok(Some)` = 新版あり / `Ok(None)` = 最新 / `Err` = 確認そのものに失敗（ネット断等）。
+/// 自動チェック（[`check_for_update`]）はこれを畳んで「失敗も最新も黙る」従来挙動のまま。
+pub fn check_for_update_manual(current_version: &str) -> Result<Option<UpdateInfo>> {
+    let Some(route) = platform_update_route() else {
+        // 配布物の無い OS（Linux 等）。呼び手はボタンを出さない前提だが、来ても壊れない。
+        return Ok(None);
+    };
     let output = Command::new("curl")
         .args([
             "-fsSL",
@@ -168,15 +185,13 @@ pub fn check_for_update(current_version: &str) -> Option<UpdateInfo> {
             RELEASES_URL,
         ])
         .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_latest_release(
+        .context(i18n::t!("update.err_curl"))?;
+    anyhow::ensure!(output.status.success(), i18n::t!("update.err_check"));
+    Ok(parse_latest_release(
         &String::from_utf8_lossy(&output.stdout),
         current_version,
         route,
-    )
+    ))
 }
 
 /// .dmg をダウンロード → Apple 署名/公証を検証 → 実行中の .app を差し替える（背景で呼ぶ）。

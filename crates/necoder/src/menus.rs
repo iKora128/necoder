@@ -18,6 +18,7 @@ pub fn app_menus() -> Vec<Menu> {
         // ── アプリメニュー（名前は表示されず、OS がアプリ名を出す） ──
         Menu::new("necoder").items(vec![
             MenuItem::action(t!("menu.about"), workspace::About),
+            MenuItem::action(t!("menu.check_updates"), workspace::CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action(t!("menu.settings"), workspace::OpenSettings),
             MenuItem::separator(),

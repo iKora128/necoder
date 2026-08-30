@@ -10,6 +10,8 @@ path = "src/settings.rs"
 
 [dependencies]
 acp_client.workspace = true
+anyhow.workspace = true
+cli_shim.workspace = true
 gpui.workspace = true
 i18n.workspace = true
 settings_core.workspace = true

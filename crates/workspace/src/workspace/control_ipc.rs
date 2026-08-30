@@ -139,6 +139,30 @@ impl Workspace {
             .unwrap_or("")
             .to_string();
         match method.as_str() {
+            "open" => {
+                // `ne` CLI（cli.rs）からの「このウィンドウで開いて」。絶対パス前提（絶対化は
+                // cwd を知る CLI 側の責務）。存在しないものは開かず skipped で返す＝CLI が警告する。
+                let (paths, skipped): (Vec<PathBuf>, Vec<PathBuf>) = params
+                    .get("paths")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(PathBuf::from)
+                            .partition(|path| path.exists())
+                    })
+                    .unwrap_or_default();
+                let opened = paths.len();
+                self.chrome.pending_external_open.extend(paths);
+                // パス 0 件（`ne` 単体）でも前面化はする＝「実行中の necoder を呼び出す」導線。
+                cx.activate(true);
+                cx.notify();
+                let _ = respond.send(ok(serde_json::json!({
+                    "opened": opened,
+                    "skipped": skipped,
+                })));
+            }
             "spawn_agent" => {
                 let agent = params
                     .get("agent")

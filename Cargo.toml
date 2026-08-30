@@ -88,6 +88,7 @@ windows-sys = { version = "0.61", features = [
 # 自作 crate（作る順は docs/ARCHITECTURE.md §2）
 # paths は依存ゼロの最下層（WINDOWS-PORT.md §D1）。設定・DB・ログの置き場を決める唯一の場所。
 paths = { path = "crates/paths" }
+cli_shim = { path = "crates/cli_shim" }
 theme_core = { path = "crates/theme_core" }
 i18n = { path = "crates/i18n" }
 editor_core = { path = "crates/editor_core" }

@@ -131,7 +131,7 @@
 - [ ] later: 追加言語パックの配布（拡張機構に載せる）・コミュニティ翻訳の受け口
 - [ ] MVP: クラッシュしても作業を失わない（未保存バッファのバックアップ — VSCode の hot exit 相当の最小版）
 - [ ] v1: 状態永続化（開いていたファイル/レイアウト復元 — Zed 方式は SQLite）
-- [ ] v1: CLI（`ne <path>` で開く）
+- [x] v1: CLI（`ne <path>` で開く — 2026-08-30。`cli_shim` + `necoder cli`。実行中 GUI へは IPC 転送・設置は 設定 > コマンドライン / `necoder install-cli`）
 - [ ] later: 自動更新、セッション復元の高度化、Workspace Trust 相当
 - [ ] v1: **Remote SSH**（2026-07-13 着手。Host/RPC/OpenSSH/daemon/files/Git/LSP/PTY/ACP は実装済み。
   task・watch・dirty buffer backup・配布署名・askpass UI・実 Linux 長時間受入は未完了）

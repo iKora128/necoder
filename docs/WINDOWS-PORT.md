@@ -725,6 +725,7 @@ gutter 経路に効いているかは別途確認が要る。
 - **mac 専用**: `/usr/bin/afplay`（agent_panel）/ `/usr/bin/open`・`/usr/bin/osascript`・`/usr/bin/trash`（project）/ `sw_vers`（crash）/ `hdiutil`・`ditto`・`spctl`（updater）
 - **unix 前提**: `sh -c` ×10（`project.rs` ×4 / `todos.rs` / `acp_client.rs` / `host.rs` 他）/ `id -u`・`mkfifo`・`ssh`（host）/ `$SHELL`（shell_env）
 - **そのまま使える**: `git`（`git.exe`）/ `curl`（Windows 10 以降 同梱）
+- **CLI シム（2026-08-30 追加・W フェーズまで非対応）**: `crates/cli_shim`（`/usr/local/bin/ne` + `osascript` 昇格）と `crates/necoder/src/cli.rs` の `open -n`。Windows でもコンパイルは通る（stub + cfg 済み）が `supported()=false` ＝設定画面のセクション非表示・`install-cli` は明示拒否。Windows の PATH 投入（per-user bin + PATH 追記等）は W フェーズで設計
 
 ### プラットフォーム分岐が要る UI
 

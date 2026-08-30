@@ -168,6 +168,8 @@ cmd:
   remote_ssh: "Remote: Connect to SSH Host"
   thread_history: "AI: Thread history"
   report_bug: "Help: Report a Bug"
+  about: "Help: About necoder"
+  check_updates: "Help: Check for Updates"
   open_settings: "View: Open Settings"
   open_settings_json: "Preferences: Open settings.json"
   open_recent: "File: Open Recent…"
@@ -402,6 +404,17 @@ settings:
   open_json: Open settings.json
   open_json_sub: The single source of truth; saved edits propagate everywhere within ~1s
   open_json_button: Open
+  cli_heading: Command line
+  cli_sub: Open necoder from the terminal with `ne <path>`.
+  cli_row_label: ne command
+  cli_row_sub_missing: "Installs to %{path} (`ne .` opens the current folder)"
+  cli_row_sub_installed: "%{path} → %{target}"
+  cli_installed_chip: Installed
+  cli_install_button: Install
+  cli_uninstall_button: Remove
+  cli_busy: Working…
+  cli_admin_prompt: necoder installs the ne command into /usr/local/bin.
+  cli_admin_prompt_remove: necoder removes the ne command from /usr/local/bin.
 explorer:
   main_worktree_undeletable: The main worktree cannot be deleted (use Remove from rail instead)
   up_folder: Up one folder
@@ -506,6 +519,15 @@ update:
   err_no_app: necoder.app not found in the dmg
   err_ditto: Failed to run ditto
   err_replace: Failed to replace the .app
+  err_check: Could not fetch release info (network or GitHub API)
+about:
+  tagline: A sense of direction, in color — an AI-agent-native editor
+  check_button: Check for Updates
+  checking: Checking for updates…
+  up_to_date: You're up to date
+  update_available: Version v%{version} is available
+  update_now: Update Now
+  copyright: © necoder contributors · AGPL-3.0
 ipc:
   err_no_storage: Ledger storage is unavailable
   err_open_worktree: "Can't open the worktree: %{path}"
@@ -523,6 +545,7 @@ crash:
   notice: ⚠ Crashed last time — click to report
 menu:
   about: About necoder
+  check_updates: Check for Updates…
   settings: Settings…
   services: Services
   hide: Hide necoder

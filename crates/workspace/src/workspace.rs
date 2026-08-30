@@ -62,6 +62,7 @@ mod overlays;
 mod rail;
 mod rail_view;
 mod remote_ssh;
+mod about;
 mod shortcut_sheet;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
@@ -137,8 +138,10 @@ actions!(
         OpenRecent,
         // 開く…（ネイティブのフォルダ選択ダイアログ・M13 メニューバー）。
         OpenDialog,
-        // バージョン表記のトースト（メニュー「necoder について」・M13 メニューバー）。
+        // About モーダル（メニュー「necoder について」。アイコン + バージョン + 更新確認）。
         About,
+        // メニュー「アップデートを確認…」。About モーダルを開いて即確認する。
+        CheckForUpdates,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
         Hide,
         HideOthers,
@@ -981,6 +984,9 @@ struct ChromeState {
     pending_settings_command: Option<String>,
     /// 設定画面の「settings.json を開く」。subscription は Window を持たないため effect cycle 末尾で処理。
     pending_open_settings_json: bool,
+    /// `ne` CLI から IPC（control_ipc の `open`）で届いたパス。ハンドラは Window を持たないため
+    /// effect cycle 末尾で `open_external_paths`（Finder 由来と同じ入口）に流す。
+    pending_external_open: Vec<PathBuf>,
     confetti: bool,
     agent_width: f32,
     resizing_agent: bool,
@@ -1011,6 +1017,8 @@ struct WorkspaceOverlays {
     pending_project_switch: Option<usize>,
     /// キーボードショートカット一覧オーバーレイ。`Some(focus)`＝開いている（Escape 受けに focus を持つ）。
     shortcut_sheet: Option<FocusHandle>,
+    /// About モーダル（メニュー「necoder について」/「アップデートを確認…」）。同じく focus = Escape 受け。
+    about: Option<FocusHandle>,
 }
 
 struct NotificationCenter {
@@ -1057,6 +1065,22 @@ struct WorkspacePersistence {
 
 struct UpdateController {
     status: Option<(updater::UpdateInfo, UpdateState)>,
+    /// 手動確認（メニュー / About モーダル）の進み。自動チェックの `status` と独立
+    /// — 新版が見つかったら `status` に合流し、こちらは Idle に戻る。
+    manual: ManualUpdateCheck,
+}
+
+/// 手動の更新確認の段階（About モーダルの表示を兼ねる）。
+#[derive(Clone, PartialEq, Eq)]
+enum ManualUpdateCheck {
+    /// 何もしていない（ボタンだけ出す）。
+    Idle,
+    /// 確認中（多重 spawn は `start_manual_update_check` の入口ガードで防ぐ）。
+    Checking,
+    /// 確認済み・最新だった。
+    UpToDate,
+    /// 確認そのものに失敗（ネット断等）。
+    Failed(SharedString),
 }
 
 pub struct Workspace {
@@ -1340,6 +1364,7 @@ impl Workspace {
     fn has_pending_shell_effects(&self) -> bool {
         self.chrome.pending_settings_command.is_some()
             || self.chrome.pending_open_settings_json
+            || !self.chrome.pending_external_open.is_empty()
             || self.pending_transient_tab.is_some()
             || self.pending_open_history
             || self.overlays.pending_project_switch.is_some()
@@ -1355,6 +1380,10 @@ impl Workspace {
         if self.chrome.pending_open_settings_json {
             self.chrome.pending_open_settings_json = false;
             self.open_user_settings_json(window, cx);
+        }
+        if !self.chrome.pending_external_open.is_empty() {
+            let paths = std::mem::take(&mut self.chrome.pending_external_open);
+            self.open_external_paths(paths, window, cx);
         }
         if let Some((title, buffer)) = self.pending_transient_tab.take() {
             self.open_transient_tab(title, buffer, window, cx);
@@ -1439,6 +1468,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::open_settings_json_action))
             .on_action(cx.listener(Self::about_action))
+            .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
             // macOS 標準のアプリ/ウィンドウ操作（メニューバー・M13）。cx は App へ deref。
@@ -1592,6 +1622,7 @@ impl Render for Workspace {
             .children(self.render_ssh_input(cx))
             .children(self.render_code_actions(cx))
             .children(self.render_shortcut_sheet(cx))
+            .children(self.render_about_modal(cx))
             .children(self.render_hunk_menu(cx))
             .children(self.render_toasts(cx))
             .children(self.render_color_picker(cx))

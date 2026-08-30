@@ -74,6 +74,18 @@ swap_and_relaunch() {
 
     echo "インストール完了: $DEST"
 
+    # ターミナル用 `ne` シム（/usr/local/bin/ne）: 旧実体（dev ビルド等）を指していたら
+    # /Applications 版へ向け直す。未設置なら案内だけ — sudo が要る設置をスクリプトで
+    # 勝手に求めない（設置は 設定 > コマンドライン のパスワードダイアログ経由が本線）。
+    if [ -x /usr/local/bin/ne ]; then
+        if ! grep -q "NECODER_BIN=\"$DEST/Contents/MacOS/necoder\"" /usr/local/bin/ne 2>/dev/null; then
+            "$DEST/Contents/MacOS/necoder" install-cli \
+                || echo "→ ne の向け直しは 設定 > コマンドライン から（または sudo \"$DEST/Contents/MacOS/necoder\" install-cli）"
+        fi
+    else
+        echo "→ ターミナル用 ne コマンドは未設置。設定 > コマンドライン、または sudo \"$DEST/Contents/MacOS/necoder\" install-cli"
+    fi
+
     # 元々動いていたなら開き直す。止まっていたなら黙って終わる（勝手に前面に出ない）。
     if [ "$relaunch" = "1" ]; then
         open -a "$DEST"

@@ -629,6 +629,7 @@ impl Workspace {
                 settings_view,
                 pending_settings_command: None,
                 pending_open_settings_json: false,
+                pending_external_open: Vec::new(),
                 confetti: std::env::var_os("NECODER_CONFETTI").is_some(),
                 agent_width: AGENT_DOCK_WIDTH,
                 resizing_agent: false,
@@ -657,6 +658,8 @@ impl Workspace {
                 add_project_dialog_open: false,
                 pending_project_switch: None,
                 shortcut_sheet: None,
+                // offscreen QA: NECODER_ABOUT=1 で起動時から About モーダルを開く（NECODER_SETTINGS と同型）。
+                about: std::env::var_os("NECODER_ABOUT").map(|_| cx.focus_handle()),
             },
             notifications: NotificationCenter {
                 toasts: Vec::new(),
@@ -668,7 +671,10 @@ impl Workspace {
                 state_path,
                 storage: None,
             },
-            updater: UpdateController { status: None },
+            updater: UpdateController {
+                status: None,
+                manual: ManualUpdateCheck::Idle,
+            },
             fleet_mascot,
             window_active: true,
             visual_tick: 0,

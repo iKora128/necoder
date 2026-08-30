@@ -1798,19 +1798,6 @@ impl Workspace {
         self.open_file(path, window, cx);
     }
 
-    /// メニュー「necoder について」。バージョン表記のトースト（About パネルの最小版）。
-    pub(crate) fn about_action(&mut self, _: &About, _window: &mut Window, cx: &mut Context<Self>) {
-        let accent = self.accent();
-        self.push_toast(
-            SharedString::from(format!(
-                "necoder v{} — AGPL-3.0 · necoder.com",
-                env!("CARGO_PKG_VERSION")
-            )),
-            accent,
-            cx,
-        );
-    }
-
     // ── クラッシュ通知 + バグ報告（M13: panic hook → ログ → GitHub Issue） ──
 
     /// 起動時に前回クラッシュの pending マーカーを 1 回だけ消費してチップを出す（背景）。

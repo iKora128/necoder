@@ -11,6 +11,8 @@ use gpui_platform::application;
 use host::{RemoteHost, SshProject};
 use std::path::{Path, PathBuf};
 
+/// ターミナル用 `ne` コマンド（`necoder cli` / `install-cli` / `uninstall-cli`）。
+mod cli;
 mod fleet;
 /// MCP サーバ（`necoder mcp`）。AI エージェントがプロジェクトを操作する口。
 mod mcp;
@@ -219,6 +221,11 @@ impl gpui::AssetSource for Assets {
             };
         }
         let bytes: &'static [u8] = match path {
+            // アプリアイコン（About モーダル用・.icns の元画像。角丸マスク済み）。
+            "icon/necoder.png" => {
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon/necoder.png"))
+                    .as_slice()
+            }
             "icons/panel-left.svg" => icon!("panel-left.svg"),
             "icons/search.svg" => icon!("search.svg"),
             "icons/git-branch.svg" => icon!("git-branch.svg"),
@@ -235,6 +242,7 @@ impl gpui::AssetSource for Assets {
             "icons/activity.svg" => icon!("activity.svg"),
             "icons/maximize.svg" => icon!("maximize.svg"),
             "icons/minimize.svg" => icon!("minimize.svg"),
+            "icons/fold-vertical.svg" => icon!("fold-vertical.svg"),
             "icons/trash-2.svg" => icon!("trash-2.svg"),
             "icons/arrow-down-to-line.svg" => icon!("arrow-down-to-line.svg"),
             "icons/bell.svg" => icon!("bell.svg"),
@@ -352,6 +360,10 @@ fn main() {
         return;
     }
     if fleet::run_cli() {
+        return;
+    }
+    // `ne` シム経由の open / シムの設置・削除（cli.rs）。
+    if cli::run() {
         return;
     }
     // MCP サーバ（AI エージェントがプロジェクトを操作する口）。stdio を占有するので GUI は開かない。

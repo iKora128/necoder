@@ -1168,6 +1168,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cli_shim"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4075,6 +4082,7 @@ name = "necoder"
 version = "0.1.6"
 dependencies = [
  "anyhow",
+ "cli_shim",
  "editor_view",
  "futures",
  "gpui",
@@ -5994,6 +6002,8 @@ name = "settings"
 version = "0.1.6"
 dependencies = [
  "acp_client",
+ "anyhow",
+ "cli_shim",
  "gpui",
  "i18n",
  "serde_json",

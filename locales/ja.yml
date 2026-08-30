@@ -169,6 +169,8 @@ cmd:
   remote_ssh: "リモート: SSH ホストに接続"
   thread_history: "AI: スレッド履歴"
   report_bug: "ヘルプ: バグを報告"
+  about: "ヘルプ: necoder について"
+  check_updates: "ヘルプ: アップデートを確認"
   open_settings: "表示: 設定を開く"
   open_settings_json: "設定: settings.json を開く"
   open_recent: "ファイル: 最近使った項目を開く…"
@@ -403,6 +405,17 @@ settings:
   open_json: settings.json を開く
   open_json_sub: すべての設定の真実。保存すると約1秒で全体へ反映されます
   open_json_button: 開く
+  cli_heading: コマンドライン
+  cli_sub: ターミナルから `ne <パス>` で necoder を開けるようにします。
+  cli_row_label: ne コマンド
+  cli_row_sub_missing: "%{path} にインストールします（`ne .` で今いるフォルダを開く）"
+  cli_row_sub_installed: "%{path} → %{target}"
+  cli_installed_chip: インストール済み
+  cli_install_button: インストール
+  cli_uninstall_button: 削除
+  cli_busy: 実行中…
+  cli_admin_prompt: necoder の ne コマンドを /usr/local/bin にインストールします。
+  cli_admin_prompt_remove: necoder の ne コマンドを /usr/local/bin から削除します。
 explorer:
   main_worktree_undeletable: メインの作業ツリーは削除できません（レールから外すを使ってください）
   up_folder: 上のフォルダへ
@@ -507,6 +520,15 @@ update:
   err_no_app: dmg に necoder.app が見つかりません
   err_ditto: ditto を実行できません
   err_replace: .app の差し替えに失敗しました
+  err_check: リリース情報を取得できません（ネットワークまたは GitHub API）
+about:
+  tagline: 色による方向感覚 — AI エージェントネイティブなエディタ
+  check_button: アップデートを確認
+  checking: 更新を確認中…
+  up_to_date: お使いのバージョンは最新です
+  update_available: 新しいバージョン v%{version} があります
+  update_now: 今すぐ更新
+  copyright: © necoder contributors · AGPL-3.0
 ipc:
   err_no_storage: 台帳ストレージが無効です
   err_open_worktree: "worktree を開けません: %{path}"
@@ -524,6 +546,7 @@ crash:
   notice: ⚠ 前回終了時にクラッシュ — クリックで報告
 menu:
   about: necoder について
+  check_updates: アップデートを確認…
   settings: 設定…
   services: サービス
   hide: necoder を隠す

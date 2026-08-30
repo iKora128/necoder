@@ -203,6 +203,14 @@ impl CommandRegistry {
                 action_name: "workspace::ReportBug",
             },
             CommandEntry {
+                label_key: "cmd.about",
+                action_name: "workspace::About",
+            },
+            CommandEntry {
+                label_key: "cmd.check_updates",
+                action_name: "workspace::CheckForUpdates",
+            },
+            CommandEntry {
                 label_key: "cmd.open_settings",
                 action_name: "workspace::OpenSettings",
             },
