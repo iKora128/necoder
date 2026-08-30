@@ -29,7 +29,7 @@ So necoder makes what agent-heavy development needs first-class in the editor co
 
 1. **Identity.** Every project and branch carries a color that runs through the rail, tabs, caret and AI threads, so you always know where you are.
 2. **Glanceable state.** Destination chips (thread → project ⎇ branch), an always-visible token meter, and a fleet view showing what is running where.
-3. **Native speed.** GPUI, no Electron, no webview.
+3. **Native speed.** GPUI, no Electron. Only HTML preview uses the OS WebView, created lazily.
 
 ## Highlights
 
@@ -44,6 +44,7 @@ So necoder makes what agent-heavy development needs first-class in the editor co
 
 - **Across projects and branches.** Worktree-first windows, a `⌘O` dashboard listing every project with `⎇ branch`, dirty state and running agents; tear a rail item off into its own window.
 - **Fast and small.** Native GPUI. Dev measurements: cold start ~215ms, idle RSS ~120MB, editor-core ops ~1µs (guarded in CI).
+- **Native HTML preview.** Switch local `.html` files between source and rendered output with `⌘⇧V`. It uses WKWebView on macOS and WebView2 on Windows; no browser engine is bundled.
 - **Remote SSH.** The same editor over `ssh://`, backed by a ~2.4MB static musl server (idle RSS 6.5MB, no node on either side). Uses your system OpenSSH config, keys and ProxyJump as-is.
 - **Editor table stakes.** LSP (diagnostics, completion, hover, rename, code actions, references, formatting), tree-sitter highlighting (Rust/TS/TSX/JS/Python/Go/JSON/YAML/TOML/HTML/CSS) with incremental parsing, Git (status colors, gutter diff, hunk stage/revert, blame, diff tabs, branch/worktree menu), integrated terminal with `file:line` links, project-wide search, multi-cursor, soft wrap, Japanese IME, hot exit.
 - **Japanese / English UI** (follows your OS locale), theme skinning with live preview, **no telemetry, ever**. The only network calls are the ones you initiate (your agents, your SSH hosts) plus a version check against GitHub Releases.
@@ -141,7 +142,7 @@ necoder は、エージェント中心の開発に要るものをエディタの
 
 1. **識別色**: プロジェクト/ブランチごとの色がレール・タブ・キャレット・AI スレッドまで貫通。今どこにいるかを見失わない
 2. **一目で分かる状態**: 宛先チップ(スレッド → プロジェクト ⎇ ブランチ)、トークン常時表示、並行エージェントの編隊ビュー。どこで何が走っているかが分かる
-3. **ネイティブの速さ**: GPUI 直書き。Electron も webview も挟まない
+3. **ネイティブの速さ**: GPUI 直書き。Electron は使わず、HTML プレビューだけ OS 標準 WebView を遅延生成
 
 ## ハイライト
 
@@ -156,6 +157,7 @@ necoder は、エージェント中心の開発に要るものをエディタの
 
 - **プロジェクト/ブランチ横断**: worktree ファーストのウィンドウ、全プロジェクトを `⎇ ブランチ`・dirty・稼働エージェント付きで一覧する `⌘O` ダッシュボード、レール項目の別窓への切り離し
 - **速くて小さい**: ネイティブ GPUI。実測で起動 ~215ms / idle RSS ~120MB / 編集コア操作 ~1µs(CI でガード)
+- **ネイティブ HTML プレビュー**: ローカル `.html` を `⌘⇧V` でソース⇄表示。macOS は WKWebView、Windows は WebView2 を使い、ブラウザエンジンは同梱しない
 - **Remote SSH**: 同じエディタが `ssh://` 越しに動く。サーバは ~2.4MB の静的 musl バイナリ(idle RSS 6.5MB・両側 node 不要)。システムの OpenSSH 設定・鍵・ProxyJump をそのまま使う
 - **エディタの基本機能**: LSP(診断・補完・hover・rename・code actions・参照・整形)、tree-sitter ハイライト(Rust/TS/TSX/JS/Python/Go/JSON/YAML/TOML/HTML/CSS・インクリメンタル)、Git(ステータス色・ガター diff・hunk stage/revert・blame・diff タブ・ブランチ/worktree メニュー)、`file:line` リンク付き統合ターミナル、プロジェクト全体検索、マルチカーソル、折り返し、日本語 IME、hot exit
 - **日本語/英語 UI**(OS ロケール追従)、ライブプレビュー付きテーマ切替、**テレメトリなし**。通信は自分で起動するもの(エージェント・SSH)と GitHub Releases への更新チェックのみ

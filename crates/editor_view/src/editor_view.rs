@@ -10,8 +10,8 @@ use gpui::{
     CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Style, TextAlign,
-    TextRun, UTF16Selection, UnderlineStyle, Window,
+    PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Style, StyleRefinement,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use std::ops::Range;
 use theme_core::{SyntaxColors, Theme};
@@ -66,7 +66,7 @@ actions!(
         Cancel,
         // ── soft wrap（M10-12・⌥Z） ──
         ToggleSoftWrap,
-        // ── markdown 整形プレビュー（⌘⇧V・.md のみ） ──
+        // ── rendered preview（⌘⇧V・Markdown / HTML） ──
         ToggleRenderedMarkdown,
         MoveLeft,
         MoveRight,
@@ -94,6 +94,10 @@ actions!(
 pub enum ComposerEvent {
     /// Enter 送信が有効かつ IME 変換中でない Enter が押された（＝親が送信すべき）。
     Submit,
+    /// wrap マップの再構築で表示行数が変わった（入力での折り返し増減・パネル幅の変更）。
+    /// composer の auto-grow（親が [`EditorView::content_height`] で決める高さ）を次フレームで
+    /// 追従させるために出す。親が再描画しない限り高さは古いままなので、この通知が唯一の合図。
+    ContentHeightChanged,
 }
 
 /// キーボード入力の確定テキスト通知（補完の自動トリガ用・M10）。
@@ -225,6 +229,11 @@ pub struct EditorView {
     /// `.md` の整形プレビュー（source ⇄ rendered トグル・⌘⇧V）。plain / 非 md では常に false。
     /// true の間 EditorElement を描かず [`markdown_preview`] へ差し替える（キャレット点滅も止める）。
     rendered_markdown: bool,
+    /// ローカル `.html` のネイティブプレビュー。WebView 自体はプレビュー初回描画まで生成しない。
+    html_preview: Option<Entity<webview_view::WebViewView>>,
+    rendered_html: bool,
+    /// 親 Workspace 上でこの EditorView が実際に表示対象か。タブ/プロジェクト/モード切替で同期する。
+    surface_active: bool,
     /// プレビューの縦スクロール位置（EditorElement の縦スクロールとは独立系統）。
     markdown_scroll: gpui::ScrollHandle,
     /// パース済みブロックのキャッシュ。version 変化時のみ再パース（idle 再描画で再解析しない）。
@@ -260,6 +269,17 @@ impl EditorView {
             highlighter.reparse_full(&buffer.text()); // 開いた直後の全文パース（以後は増分）
         }
         let highlight_version = buffer.version();
+        let html_preview = buffer
+            .path()
+            .filter(|path| {
+                !buffer.host().is_remote()
+                    && lang::language_for_path(path) == Some(lang::LanguageId::Html)
+            })
+            .map(|path| {
+                let path = path.to_path_buf();
+                let preview_theme = theme.clone();
+                cx.new(move |_| webview_view::WebViewView::local_file(path, preview_theme))
+            });
         Self {
             buffer,
             focus_handle: cx.focus_handle(),
@@ -281,6 +301,9 @@ impl EditorView {
             external_changed: false,
             soft_wrap: false,
             rendered_markdown: false,
+            html_preview,
+            rendered_html: false,
+            surface_active: true,
             markdown_scroll: gpui::ScrollHandle::new(),
             markdown_blocks: Vec::new(),
             markdown_blocks_version: u64::MAX,
@@ -493,7 +516,7 @@ impl EditorView {
             .unwrap_or(false)
     }
 
-    /// ⌘⇧V: source ⇄ rendered 整形プレビューのトグル（markdown ファイルのみ）。
+    /// ⌘⇧V: source ⇄ rendered preview のトグル（Markdown / ローカル HTML）。
     fn toggle_rendered_markdown(
         &mut self,
         _: &ToggleRenderedMarkdown,
@@ -502,6 +525,8 @@ impl EditorView {
     ) {
         if self.is_markdown() {
             self.set_rendered_markdown(!self.rendered_markdown, cx);
+        } else if self.html_preview.is_some() {
+            self.set_rendered_html(!self.rendered_html, cx);
         }
     }
 
@@ -526,6 +551,64 @@ impl EditorView {
             self.blink_visible = true;
         }
         cx.notify();
+    }
+
+    /// HTML の OS 標準 WebView プレビューが選択中か。
+    pub fn rendered_html(&self) -> bool {
+        self.rendered_html
+    }
+
+    /// ローカル HTML の source ⇄ preview を切り替える。WebView は ON の初回描画で遅延生成する。
+    pub fn set_rendered_html(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && self.html_preview.is_none() {
+            return;
+        }
+        if self.rendered_html == on {
+            return;
+        }
+        self.rendered_html = on;
+        if let Some(preview) = &self.html_preview {
+            preview.update(cx, |preview, cx| {
+                preview.set_active(on && self.surface_active, on && self.surface_active, cx)
+            });
+        }
+        if on {
+            self._blink_task = None;
+            self.blink_visible = true;
+        }
+        cx.notify();
+    }
+
+    /// 親レイアウト上の可視性をネイティブ子ビューへ同期する。
+    /// `focus` はタブ/プロジェクト切替でプレビューへ戻る時だけ true にする。
+    pub fn set_surface_active(&mut self, active: bool, focus: bool, cx: &mut Context<Self>) {
+        if self.surface_active == active && !focus {
+            return;
+        }
+        self.surface_active = active;
+        if let Some(preview) = &self.html_preview {
+            preview.update(cx, |preview, cx| {
+                preview.set_active(
+                    active && self.rendered_html,
+                    focus && self.rendered_html,
+                    cx,
+                )
+            });
+        }
+    }
+
+    /// 設定 `html_preview_evict_minutes` を WebView プレビューへ中継する（`0` = 自動破棄しない）。
+    pub fn set_html_preview_evict_minutes(&mut self, minutes: u64, cx: &mut Context<Self>) {
+        if let Some(preview) = &self.html_preview {
+            preview.update(cx, |preview, _| preview.set_evict_minutes(minutes));
+        }
+    }
+
+    /// 保存済み HTML を再読込する。未生成なら初回表示が最新ファイルを読むため何もしない。
+    pub fn reload_html_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(preview) = &self.html_preview {
+            preview.update(cx, |preview, _| preview.reload());
+        }
     }
 
     /// offset の**表示行**（wrap 有効時）。マップが古い（直後の prepaint 前）は論理行へフォールバック。
@@ -580,7 +663,10 @@ impl EditorView {
 
     /// テーマを差し替える（テーマセレクタのライブプレビュー / 切替）。次の描画で新配色になる。
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
-        self.theme = theme;
+        self.theme = theme.clone();
+        if let Some(preview) = &self.html_preview {
+            preview.update(cx, |preview, _| preview.set_theme(theme));
+        }
         cx.notify();
     }
 
@@ -902,11 +988,19 @@ impl EditorView {
     }
 
     /// 現在の内容の表示高さ（折り返し後の表示行数 × 行高）。composer の auto-grow が読む。
-    /// wrap マップが古い間（直後の prepaint 前）は論理行数ベースの近似になるが、
-    /// 次フレームで正値に収束する。
+    /// wrap マップが古い間（編集直後・prepaint 前）は**直前のマップの表示行数**を使う。
+    /// 論理行数へ落とすと折り返し中の長文で行数が激減し、キー入力のたびに
+    /// 「縮む→次フレームで戻る」の高さ振動（ちらつき）になる（2026-08-30・AI 全画面で顕在化）。
+    /// 正値へは [`ComposerEvent::ContentHeightChanged`] 経由で次フレームに収束する。
     pub fn content_height(&self) -> Pixels {
         let snapshot = self.buffer.snapshot();
-        self.line_height() * self.total_display_rows(&snapshot) as f32
+        // key.2 = wrap on。off で古い時だけ論理行数へ（恒等マップなので同値）。
+        let rows = if self.wrap_map.key.0 == snapshot.version() || self.wrap_map.key.2 {
+            self.wrap_map.total_display_rows()
+        } else {
+            snapshot.line_count()
+        };
+        self.line_height() * rows as f32
     }
 
     /// 行高の実値（font_size × 23/13 比）。prepaint・ヒットテスト・スクロール計算はこれを使う。
@@ -1319,7 +1413,10 @@ impl EditorView {
                 .await;
             let _ = editor.update(cx, |editor, cx| {
                 match result {
-                    Ok(revision) => editor.buffer.complete_save(revision, saved_version),
+                    Ok(revision) => {
+                        editor.buffer.complete_save(revision, saved_version);
+                        editor.reload_html_preview(cx);
+                    }
                     Err(error) => eprintln!("保存に失敗: {error:#}"),
                 }
                 cx.notify();
@@ -1813,6 +1910,19 @@ impl EventEmitter<EditorHoverEvent> for EditorView {}
 
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // `.html` ネイティブプレビュー: エディタ本体だけを差し替え、タブ/パンくずは GPUI のまま。
+        if self.rendered_html {
+            if let Some(preview) = self.html_preview.clone() {
+                return div()
+                    .key_context("Editor")
+                    .track_focus(&self.focus_handle(cx))
+                    .size_full()
+                    .bg(self.theme.bg1)
+                    .on_action(cx.listener(Self::toggle_rendered_markdown))
+                    .child(preview.cached(StyleRefinement::default().size_full()))
+                    .into_any_element();
+            }
+        }
         // `.md` 整形プレビュー（rendered 側）: EditorElement を差し替え、編集ハンドラ/マウスは載せない。
         // ブロックは version キーでキャッシュ（idle 再描画で再パースしない）。
         if self.rendered_markdown && self.is_markdown() {
@@ -2137,11 +2247,28 @@ impl Element for EditorElement {
             };
             let key = (snapshot.version(), columns, wrap_on);
             if view.wrap_map.key != key {
+                let old_rows = view.wrap_map.total_display_rows();
                 view.wrap_map = if key.2 {
                     WrapMap::build(&snapshot, columns, key)
                 } else {
                     WrapMap::identity(snapshot.line_count(), key)
                 };
+                // 表示行数が変わった＝content_height が変わった。composer の auto-grow は
+                // 親（agent_panel）の render が決めるので、親へ再描画の合図を出す。
+                // これが無いと幅変更（AI 全画面切替）や折り返し増減の後、親が別の理由で
+                // 再描画するまで入力欄の高さが古いまま残る／入力のたびに高さが震える。
+                if view.wrap_map.total_display_rows() != old_rows {
+                    cx.emit(ComposerEvent::ContentHeightChanged);
+                }
+                // 幅が広がって折り返し総高が縮むと scroll_top が範囲外に残り、内容が viewport の
+                // 上へ丸ごと抜けて「空に見える／末尾の1行だけ出る」（AI 全画面切替で顕在化・
+                // 2026-08-30）。新しい総高で再クランプする。
+                let total_height =
+                    view.wrap_map.total_display_rows() as f32 * view.line_height_value();
+                let max_scroll = (total_height - f32::from(bounds.size.height)).max(0.0);
+                if f32::from(view.scroll_top) > max_scroll {
+                    view.scroll_top = px(max_scroll);
+                }
             }
             if let Some(offset) = view.pending_reveal.take() {
                 let line_height = view.line_height_value();

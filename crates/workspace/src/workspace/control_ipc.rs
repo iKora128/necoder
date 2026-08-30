@@ -63,7 +63,11 @@ fn record_json(record: &storage::TaskSpaceRecord) -> serde_json::Value {
 }
 
 impl Workspace {
-    /// IPC サーバを起動する（main から 1 回）。二重起動（別窓・別プロセス）は静かにスキップ。
+    /// IPC サーバを起動する（main から窓ごとに 1 回）。socket の owner は**プロセス/窓を
+    /// またいで常に 1 つ**で、生きた owner がいる間は AddrInUse を受けて周期リトライに回り、
+    /// owner（前任プロセス・閉じられた窓）が消えたら継ぐ。この自己修復が無いと「GUI は
+    /// 生きているのに socket が死んでいる」状態が固定化し、`ne` CLI が GUI 不在と誤判定して
+    /// 新インスタンス起動へ落ちる（cli.rs のフォールバック要因・2026-08-30 実測）。
     pub fn start_control_ipc(&mut self, cx: &mut Context<Self>) {
         let Some(socket_path) = control_socket_path() else {
             return;
@@ -76,50 +80,87 @@ impl Workspace {
                 return;
             }
         }
-        // 二重 bind の検出・死んだ socket ファイルの掃除・パーミッション（0600 / 既定 DACL）は
-        // すべて control_transport が持つ（WINDOWS-PORT.md §D2）。
-        let mut listener = match ControlListener::bind(&socket_path) {
-            Ok(listener) => listener,
-            // 生きている GUI が既に待ち受けている＝この窓は IPC を持たない（正常系）
-            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => return,
-            Err(error) => {
-                eprintln!("管制 IPC を開けない: {error}");
-                return;
-            }
-        };
-        let (job_tx, mut job_rx) = futures::channel::mpsc::unbounded::<ControlJob>();
-        // accept ループ（std スレッド）: 解析だけしてジョブ化。I/O はしない。
-        std::thread::spawn(move || {
-            // 一時的な失敗（EINTR 等）では諦めない。連続して失敗し続けるときだけ畳む
-            // ＝Windows で次のパイプインスタンスを作れなくなった場合に空回りさせない。
-            let mut consecutive_failures = 0_u32;
-            loop {
-                match listener.accept() {
-                    Ok(stream) => {
-                        consecutive_failures = 0;
-                        let job_tx = job_tx.clone();
-                        std::thread::spawn(move || serve_connection(stream, job_tx));
-                    }
-                    Err(error) => {
-                        consecutive_failures += 1;
-                        if consecutive_failures >= 16 {
-                            eprintln!("管制 IPC の accept が続けて失敗したので畳む: {error}");
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-        // UI 側の消費ループ。
         cx.spawn(async move |workspace, cx| {
             use futures::StreamExt as _;
-            while let Some(job) = job_rx.next().await {
-                let handled = workspace.update(cx, |workspace, cx| {
-                    workspace.handle_control_job(job, cx);
+            loop {
+                // 二重 bind の検出・死んだ socket ファイルの掃除・パーミッション（0600 /
+                // 既定 DACL）はすべて control_transport が持つ（WINDOWS-PORT.md §D2）。
+                let bind_path = socket_path.clone();
+                let bound = cx
+                    .background_executor()
+                    .spawn(async move { ControlListener::bind(&bind_path) })
+                    .await;
+                let mut listener = match bound {
+                    Ok(listener) => listener,
+                    // 生きた owner（別窓・別プロセス）が待ち受け中。消えたら継げるよう再試行
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(15))
+                            .await;
+                        if workspace.update(cx, |_, _| {}).is_err() {
+                            return; // 窓ごと閉じた
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        eprintln!("管制 IPC を開けない: {error}");
+                        return;
+                    }
+                };
+                // stop = 「この窓は消費者をやめた」印。accept はブロッキングなので、立ててから
+                // 自分へ 1 本繋いで起こし、listener ごと畳ませる（socket の明け渡し）。
+                let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let accept_stop = stop.clone();
+                let (job_tx, mut job_rx) = futures::channel::mpsc::unbounded::<ControlJob>();
+                // accept ループ（std スレッド）: 解析だけしてジョブ化。I/O はしない。
+                std::thread::spawn(move || {
+                    // 一時的な失敗（EINTR 等）では諦めない。連続して失敗し続けるときだけ畳む
+                    // ＝Windows で次のパイプインスタンスを作れなくなった場合に空回りさせない。
+                    let mut consecutive_failures = 0_u32;
+                    loop {
+                        match listener.accept() {
+                            Ok(stream) => {
+                                if accept_stop.load(std::sync::atomic::Ordering::Acquire) {
+                                    break;
+                                }
+                                consecutive_failures = 0;
+                                let job_tx = job_tx.clone();
+                                std::thread::spawn(move || serve_connection(stream, job_tx));
+                            }
+                            Err(error) => {
+                                if accept_stop.load(std::sync::atomic::Ordering::Acquire) {
+                                    break;
+                                }
+                                consecutive_failures += 1;
+                                if consecutive_failures >= 16 {
+                                    eprintln!(
+                                        "管制 IPC の accept が続けて失敗したので畳む: {error}"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 });
-                if handled.is_err() {
-                    break; // window ごと閉じた
+                // UI 側の消費ループ。channel が尽きた＝accept スレッド死亡 → bind からやり直す。
+                let mut window_alive = true;
+                while let Some(job) = job_rx.next().await {
+                    let handled = workspace.update(cx, |workspace, cx| {
+                        workspace.handle_control_job(job, cx);
+                    });
+                    if handled.is_err() {
+                        window_alive = false; // window ごと閉じた
+                        break;
+                    }
                 }
+                stop.store(true, std::sync::atomic::Ordering::Release);
+                let _ = ControlStream::connect(&socket_path); // accept を 1 回起こして畳ませる
+                if !window_alive {
+                    return; // 他の窓の周期リトライが socket を継ぐ
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
             }
         })
         .detach();

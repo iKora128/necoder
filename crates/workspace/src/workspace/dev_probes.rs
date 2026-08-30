@@ -5,7 +5,7 @@ use crate::workspace::*;
 // 全 item が `#[cfg(debug_assertions)]`。本番コードをここに置かない（release に混ざる）。
 
 impl Workspace {
-    /// 開発用: Agent タブの改名入力を開く（offscreen 検証・#4）。
+    /// 開発用: Agent タブの改名モーダルを開く（offscreen 検証・#4）。
     #[cfg(debug_assertions)]
     pub fn debug_tab_rename(&mut self, cx: &mut Context<Self>) {
         if !self.chrome.show_right {
@@ -116,6 +116,7 @@ impl Workspace {
                 open_files: Vec::new(),
                 active_file: 0,
                 icon: None,
+                icon_image: None,
                 worktree_branch: Some(branch.to_string()),
             };
             slot.task_space.id = SpaceId(format!("probe-{branch}"));
@@ -511,6 +512,25 @@ impl Workspace {
     pub fn debug_markdown_preview(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| editor.set_rendered_markdown(true, cx));
+        }
+    }
+
+    /// 開発用: アクティブなローカル .html を OS 標準 WebView プレビューへ切り替える。
+    #[cfg(debug_assertions)]
+    pub fn debug_html_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| editor.set_rendered_html(true, cx));
+        }
+    }
+
+    /// 開発用: アクティブ .html の source ⇄ preview をトグルする（WebView 自動破棄の offscreen 検証）。
+    #[cfg(debug_assertions)]
+    pub fn debug_html_preview_toggle(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                let on = !editor.rendered_html();
+                editor.set_rendered_html(on, cx);
+            });
         }
     }
 

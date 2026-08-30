@@ -137,6 +137,11 @@ pub struct Settings {
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
+    /// HTML プレビュー（OS 標準 WebView）を非表示のまま放置したとき、自動破棄するまでの分数（既定 15・
+    /// `0` = 自動破棄しない）。WebView は生きている間 数十〜数百 MB を別プロセスで握るため、
+    /// idle メモリ予算を守る回収弁。破棄後の再表示は遅延再生成（初回表示と同じ経路）なので、
+    /// ローカル HTML では失うものは実質スクロール位置だけ。
+    pub html_preview_evict_minutes: u64,
     /// レールのアイコン表示（アクティビティバー）。
     pub rail: RailSettings,
     /// 初回オンボーディングを済ませたか（`false`＝初回で設定ホームが自動オープン・M12）。
@@ -168,6 +173,7 @@ impl Default for Settings {
             agent_defaults: BTreeMap::new(),
             confirm_worktree_delete: true,
             fleet_agent_worktree: false,
+            html_preview_evict_minutes: 15,
             rail: RailSettings::default(),
             onboarded: false,
         }
@@ -190,6 +196,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "default_model": "claude-opus-5",
   "default_effort": "high",
   "confirm_worktree_delete": true,
+  "html_preview_evict_minutes": 15,
   "onboarded": false,
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }
 }"#;

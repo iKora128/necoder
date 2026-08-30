@@ -51,6 +51,8 @@ impl Workspace {
         });
         cx.subscribe(&editor, |workspace, _editor, event, cx| match event {
             ComposerEvent::Submit => workspace.confirm_task_rename(cx),
+            // 改名入力は固定高（1 行）なので高さ追従は不要。
+            ComposerEvent::ContentHeightChanged => {}
         })
         .detach();
         let handle = editor.read(cx).focus_handle(cx);

@@ -79,7 +79,27 @@ impl ExplorerProject {
         let mut directories = self.expanded.iter().cloned().collect::<Vec<_>>();
         directories.push(worktree.root().to_path_buf());
         if let Some(current) = &self.current_dir {
-            directories.push(current.clone());
+            // Finder 風カラム表示は root → current の各ディレクトリを 1 カラムずつ描く。
+            // current だけを cache すると、深さ 2 以上では中間カラムが cache miss になり、
+            // 選択中の階層だけが透明になったように見える。Render 中に I/O はしない契約を
+            // 保ったまま、表示に必要な祖先を refresh 時にまとめて読み込む。
+            let root = worktree.root();
+            let mut directory = current.as_path();
+            loop {
+                directories.push(directory.to_path_buf());
+                if directory == root {
+                    break;
+                }
+                let Some(parent) = directory.parent() else {
+                    break;
+                };
+                if parent.starts_with(root) || parent == root {
+                    directory = parent;
+                } else {
+                    // root 外ブラウズはカラム連鎖を作らないため current だけでよい。
+                    break;
+                }
+            }
         }
         directories.sort();
         directories.dedup();
@@ -213,5 +233,58 @@ mod tests {
     fn missing_directory_cache_is_render_safe() {
         let project = ExplorerProject::default();
         assert!(project.listed_dir(Path::new("/missing")).is_empty());
+    }
+
+    #[test]
+    fn refresh_caches_every_directory_in_column_chain() {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_explorer_columns_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("現在時刻")
+                .as_nanos()
+        ));
+        let created_current = root.join("first/second/current");
+        std::fs::create_dir_all(&created_current).expect("深いディレクトリを作成");
+        std::fs::write(created_current.join("leaf.txt"), "test").expect("末端ファイルを作成");
+        let worktree = Worktree::new(&root).expect("worktree を作成");
+        // Worktree は /var → /private/var のような実パスへ正規化するため、UI が保持するのと同じ
+        // root 基準のパスで current を組み立てる。
+        let first = worktree.root().join("first");
+        let second = first.join("second");
+        let current = second.join("current");
+        let mut project = ExplorerProject {
+            current_dir: Some(current.clone()),
+            ..ExplorerProject::default()
+        };
+        project.refresh(&worktree);
+
+        assert_eq!(
+            project
+                .listed_dir(&first)
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second"]
+        );
+        assert_eq!(
+            project
+                .listed_dir(&second)
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["current"]
+        );
+        assert_eq!(
+            project
+                .listed_dir(&current)
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["leaf.txt"]
+        );
+
+        std::fs::remove_dir_all(root).expect("テストディレクトリを削除");
     }
 }

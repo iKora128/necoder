@@ -112,16 +112,30 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.toggle_agent_full_screen_state(window, cx);
+    }
+
+    /// ボタン・キーバインド共通の全画面切替。AgentPanel を別の親へ移す操作なので、
+    /// 幅 invalidation と focus 復元を必ず同じ transaction で行う。
+    pub(crate) fn toggle_agent_full_screen_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.chrome.agent_full_screen = !self.chrome.agent_full_screen;
         if self.chrome.agent_full_screen {
             self.chrome.fleet_mode = false;
-            self.chrome.show_right = true; // 全画面から抜けた時に AI が消えていない
-            self.agent_active = true; // ⌘W の宛先を AI スレッドに
-            let handle = self.agent_panel.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
         }
+        self.chrome.show_right = true; // 全画面から抜けた時にも AI が消えていない
+        self.agent_active = true; // ⌘W / thread navigation の宛先を AI に固定
         self.agent_panel
             .update(cx, |panel, cx| panel.parent_width_changed(cx));
+        // state の notify 後に focus を予約する。次の frame で AgentPanel が右 dock / 中央の
+        // どちらへ移っても、同じ composer FocusHandle が新しい dispatch tree に載る。
+        let panel = self.agent_panel.clone();
+        window.defer(cx, move |window, cx| {
+            panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+        });
         cx.notify();
     }
 
@@ -141,6 +155,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if (self.chrome.resizing_agent
+            || self.chrome.resizing_explorer
+            || self.chrome.resizing_bottom)
+            && event.pressed_button != Some(MouseButton::Left)
+        {
+            // ウィンドウ外で mouse-up を離してイベントを取りこぼしても、戻ってきた最初の
+            // move で必ず解除する。sticky resize のまま通常操作へ戻れない状態を作らない。
+            self.chrome.resizing_agent = false;
+            self.chrome.resizing_explorer = false;
+            self.chrome.resizing_bottom = false;
+            cx.notify();
+            return;
+        }
         let dx = f32::from(event.position.x) - self.chrome.resize_start_x;
         if self.chrome.resizing_agent {
             // 上限はウィンドウ幅に追従させる（大画面ではもっと左へ広げられる）。固定 900px の
@@ -234,10 +261,13 @@ impl Workspace {
                     .hover(|style| style.bg(theme.border))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             this.chrome.resizing_agent = true;
                             this.chrome.resize_start_x = f32::from(event.position.x);
                             this.chrome.resize_start_width = this.chrome.agent_width;
+                            this.agent_active = true;
+                            this.agent_panel
+                                .update(cx, |panel, cx| panel.focus_composer(window, cx));
                             cx.notify();
                         }),
                     ),
@@ -383,8 +413,17 @@ impl Workspace {
         }
         // 新しいアクティブタブへフォーカス + 診断反映。
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            let handle = tab.focus_handle(cx);
-            window.focus(&handle, cx);
+            if let Some(editor) = tab.editor().cloned() {
+                if editor.read(cx).rendered_html() {
+                    editor.update(cx, |editor, cx| editor.set_surface_active(true, true, cx));
+                } else {
+                    let handle = editor.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
+            } else {
+                let handle = tab.focus_handle(cx);
+                window.focus(&handle, cx);
+            }
         }
         let selected = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
         let active = self.project_sessions.active;
@@ -408,15 +447,21 @@ impl Workspace {
             self.dismiss_buffer_search(cx);
             self.close_hover(cx);
         }
-        let Some((handle, path)) = self
-            .tabs
-            .get(index)
-            .map(|tab| (tab.focus_handle(cx), tab.path.clone()))
-        else {
+        let Some((handle, path, editor)) = self.tabs.get(index).map(|tab| {
+            (
+                tab.focus_handle(cx),
+                tab.path.clone(),
+                tab.editor().cloned(),
+            )
+        }) else {
             return;
         };
         self.active_tab = index;
-        window.focus(&handle, cx);
+        if let Some(editor) = editor.filter(|editor| editor.read(cx).rendered_html()) {
+            editor.update(cx, |editor, cx| editor.set_surface_active(true, true, cx));
+        } else {
+            window.focus(&handle, cx);
+        }
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.explorer.selected = Some(path);

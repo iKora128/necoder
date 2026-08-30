@@ -487,6 +487,10 @@ impl Workspace {
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    // 土台（IntegrationSpace の checked-out branch）を先に upstream へ早送りして、
+                    // Task が古い base から切られるのを防ぐ（Orca の default branch 自動同期を参考・
+                    // 2026-08-30）。オフライン・dirty・diverged では黙って現 HEAD から続行する。
+                    let sync = project::sync_current_branch_on(host_for_add.as_ref(), &root);
                     let mut used = open_branches;
                     used.extend(project::git_branches_on(host_for_add.as_ref(), &root));
                     let mut number = 1;
@@ -504,11 +508,30 @@ impl Workspace {
                         &target,
                         &branch,
                     )?;
-                    Ok::<(PathBuf, String), anyhow::Error>((target, branch))
+                    Ok::<(PathBuf, String, project::BranchSyncOutcome), anyhow::Error>((
+                        target, branch, sync,
+                    ))
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| match result {
-                Ok((target, branch)) => {
+                Ok((target, branch, sync)) => {
+                    // 早送りできた時だけ知らせる（最新から切れた安心情報。スキップは無言＝作成を汚さない）。
+                    if let project::BranchSyncOutcome::FastForwarded {
+                        branch: base,
+                        commits,
+                    } = sync
+                    {
+                        let accent = workspace.accent();
+                        workspace.push_toast(
+                            SharedString::from(i18n::t!(
+                                "fleet.base_synced",
+                                "branch" => &base,
+                                "count" => commits
+                            )),
+                            accent,
+                            cx,
+                        );
+                    }
                     // worktree を space（レール slot）として開く（switch も走る）。
                     workspace.open_folder_in_rail(host, target.clone(), Some(branch), cx);
                     // その TaskSpace の AgentPanel に新スレッドを起動 → Task セルを足す。
