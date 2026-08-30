@@ -9,12 +9,18 @@ necoder is **AGPL-3.0-or-later**, and the maintainer keeps the freedom to relice
 
 日本語要約: 本プロジェクトは AGPL ですが、再ライセンスの自由（デュアルライセンス等）をメンテナに残す方針です。そのため全ての PR に [CLA](CLA.md) への署名（初回 PR で bot がコメント案内・一度だけ）が必要です。**署名した貢献は将来 AGPL 以外のライセンスでも配布されうる**ことに同意いただきます。
 
-## 2. The clean-room rule / クリーンルーム規律（最重要）
+## 2. Implementation provenance / 実装来歴の規律（最重要）
 
-- The local `zed/` directory is a **reference clone** (gitignored). GPUI itself is Apache-2.0 and used as a dependency — that is fine.
-- **Never port or adapt code from Zed's GPL crates** (`acp_thread`, `agent_servers`, `worktree`, `fs`, `editor`, …) or from any other GPL/proprietary codebase. Studying *techniques* and re-implementing from understanding is allowed; copying/translating code is not.
-- When a module's approach was informed by another project, say so in the file-header comment (crate name + rough date), as existing modules do.
-- CI runs [cargo-deny](deny.toml): new dependencies must be permissively licensed (MIT/Apache/BSD/ISC/MPL-2.0…). No GPL/AGPL dependencies.
+- The local `zed/` directory is a gitignored comparison clone. `gpui` / `gpui_platform` are marked
+  Apache-2.0 upstream, but the pinned graph also includes the GPL dependencies documented below.
+- **Do not copy, translate, or adapt code from Zed's GPL application crates** (`acp_thread`,
+  `agent_servers`, `worktree`, `fs`, `editor`, …), or from proprietary code. Reading source and then
+  producing a close reimplementation is not treated as clean-room development. Prefer public
+  specifications, documented APIs, and independently licensed libraries.
+- If another project is compared during design, document the public specification or library API that
+  the implementation actually relies on. Do not label necoder code as `ported` unless licensed source
+  was intentionally reused and its exact license and attribution are recorded.
+- CI runs [cargo-deny](deny.toml). New direct dependencies must normally be permissively licensed (MIT/Apache/BSD/ISC/MPL-2.0…). The pinned GPUI graph currently has a documented GPL-3.0-or-later transitive exception; do not add another GPL/AGPL dependency without an explicit license-boundary review and an update to `THIRD_PARTY_NOTICES.md`.
 
 ## 3. Code & UI rules / コードと UI の約束
 
@@ -38,7 +44,7 @@ Docs are the source of truth (`docs/ROADMAP.md` / `ARCHITECTURE.md` / `UI-SPEC.m
 ## 5. Sending the PR
 
 - Keep PRs small and focused; describe *why*, not just *what*.
-- The PR template has a checklist (tests, i18n parity, clean-room, CLA) — please fill it honestly.
+- The PR template has a checklist (tests, i18n parity, implementation provenance, CLA) — please fill it honestly.
 - CI must be green (macOS tests + perf budget guard + dependency audit).
 
 Security issues: do **not** open a public issue — see [SECURITY.md](SECURITY.md).

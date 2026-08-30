@@ -52,6 +52,8 @@ So necoder makes what agent-heavy development needs first-class in the editor co
 
 **macOS 13+ (Apple Silicon)**: download `necoder.dmg` from [Releases](https://github.com/iKora128/necoder/releases) and drag **necoder** into **Applications**. Builds are codesigned and notarized; the app self-updates from Releases (verifying the Apple signature before installing).
 
+To open necoder from Terminal, install the `ne` command from **Settings → Command line** (approve the standard macOS authentication prompt), then run `ne .`. It opens paths in the running necoder window; without one it launches the app.
+
 **Windows 10+ (x64)**: download `necoder-windows-x64.zip` from [Releases](https://github.com/iKora128/necoder/releases), unzip, run `necoder.exe`. The app notifies you of new versions and opens the release page.
 
 For AI features, install and log in to the [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code); necoder talks to it over ACP.
@@ -105,7 +107,7 @@ Development docs are primarily in Japanese; the UI is fully bilingual (ja/en).
 
 ## License & contributing
 
-- **AGPL-3.0-or-later** ([LICENSE](LICENSE)). All code is original or built on permissive dependencies (GPUI is Apache-2.0). **No GPL code is ported from other editors**: techniques were studied, the implementations are original, and CI enforces a dependency license audit ([cargo-deny](deny.toml)). Rationale and history: [`docs/DECISIONS.md`](docs/DECISIONS.md) §5.
+- **AGPL-3.0-or-later** ([LICENSE](LICENSE)). necoder-specific code is independently implemented; code from Zed's GPL application crates is not copied or adapted. The pinned GPUI dependency is marked Apache-2.0 upstream but currently brings documented GPL-3.0-or-later transitive crates; GPLv3/AGPLv3 §13 permits this combination under the applicable copyleft terms. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and [`docs/DECISIONS.md`](docs/DECISIONS.md) §5.
 - Contributions are welcome; read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. **All contributions require signing the [CLA](CLA.md)** (a bot guides you on your first PR); this keeps future licensing options (including dual licensing) with the maintainer.
 - Bundled fonts are OFL-1.1 ([`assets/fonts/`](assets/fonts/README.md)); icons are Lucide (ISC) and Simple Icons (CC0) ([`crates/necoder/assets/icons/LICENSE.md`](crates/necoder/assets/icons/LICENSE.md)).
 
@@ -162,6 +164,8 @@ necoder は、エージェント中心の開発に要るものをエディタの
 
 **macOS 13+(Apple Silicon)**: [Releases](https://github.com/iKora128/necoder/releases) から `necoder.dmg` を取得して **necoder** を Applications へ。署名/公証済み・アプリ内自動更新(適用前に Apple 署名を検証)。
 
+ターミナルから開くには、設定 → コマンドライン で `ne` コマンドをインストール(macOS の認証を許可)して `ne .`。実行中の necoder があればそのウィンドウで開き、無ければアプリを起動します。
+
 **Windows 10+(x64)**: [Releases](https://github.com/iKora128/necoder/releases) から `necoder-windows-x64.zip` を展開して `necoder.exe` を実行。新版はアプリ内通知からリリースページを開きます。
 
 AI 機能には [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) のインストールとログインが必要です(necoder は ACP で対話します)。
@@ -215,7 +219,7 @@ SSH 経路全体をローカルで試すには `./scripts/test-remote-ssh-docker
 
 ## ライセンスとコントリビュート
 
-- **AGPL-3.0-or-later**([LICENSE](LICENSE))。全コードは自作、または permissive な依存(GPUI は Apache-2.0)の上に書かれています。**他エディタからの GPL コード移植はありません**。手法を学び、実装は自前。CI が依存ライセンスを監査します([cargo-deny](deny.toml))。経緯: [`docs/DECISIONS.md`](docs/DECISIONS.md) §5
+- **AGPL-3.0-or-later**([LICENSE](LICENSE))。necoder 固有のコードは独立に実装しており、Zed の GPL アプリケーション crate からの複製・翻案はありません。固定 rev の GPUI 依存は上流表示こそ Apache-2.0 ですが、現在は文書化された GPL-3.0-or-later の推移依存を含みます(GPLv3/AGPLv3 §13 の下で両立)。詳細: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) / [`docs/DECISIONS.md`](docs/DECISIONS.md) §5
 - コントリビュート歓迎。まず [`CONTRIBUTING.md`](CONTRIBUTING.md) をお読みください。**全てのコントリビュートに [CLA](CLA.md) への署名が必要**です(初回 PR で bot が案内)。将来のライセンス選択肢(デュアルライセンス含む)をメンテナに残すためです
 - 同梱フォントは OFL-1.1([`assets/fonts/`](assets/fonts/README.md))、アイコンは Lucide(ISC)と Simple Icons(CC0)([`crates/necoder/assets/icons/LICENSE.md`](crates/necoder/assets/icons/LICENSE.md))
 

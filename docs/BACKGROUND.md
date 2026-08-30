@@ -12,14 +12,15 @@ Zedのエージェントまわりの不満（スレッド/プロジェクトの�
 
 - **やる価値の判定**: 「スレッド色が欲しい」だけならエディタ自作はオーバーキル。
   だが **"自分の信じるエディタを建てたい"という独立した情熱があるなら正当な多年プロジェクト**。
-- **作り方**: Zed(GPL)をforkでも、全部クリーンルームでもなく、
-  **permissiveな土台（GPUI=Apache-2.0 等）に乗って新規に作る**のが現実的。
+- **作り方**: Zed の GPL アプリケーションコードは fork せず、公開仕様とライセンス適合を確認した
+  描画・編集部品の上に necoder 固有のエディタを実装する（正確な依存境界は DECISIONS §5）。
 - **フレームワーク**: **GPUI**（速さ・ネイティブが魂なら）か **Tauri**（Web技術・UI拡張の楽さなら）。
   → 今回は **GPUI** に傾倒。ただしGPUIは「Zedのために作られた」性質（API churn・薄いdocs）を背負う。
 - **マルチプラットフォーム**: GPUIは **macOS / Linux / Windows** 対応（Web・モバイルは不可）。
   Windowsが一番荒い。
-- **ライセンス**: GPLは有効（Zedと同型：GPLアプリ on Apache GPUI）。ただし義務ではなく選択。
-- **次の一手**: [`MVP-PLAN.md`](./MVP-PLAN.md) — まず `~/Work/experience/necoder/zed` でGPUIのhello_worldを走らせて
+- **ライセンス**: necoder は AGPL-3.0-or-later。GPUI の固定依存グラフに含まれる GPL 推移依存との
+  組み合わせを含め、正確な境界は DECISIONS §5 と THIRD_PARTY_NOTICES.md を正とする。
+- **次の一手**: [`MVP-PLAN.md`](./MVP-PLAN.md) — まず比較用 `zed/` でGPUIのhello_worldを走らせて
   「動くか」を最小コストで確認する。
 
 ---
@@ -133,8 +134,9 @@ Zedのエージェントまわりの不満（スレッド/プロジェクトの�
 - Agent Panel配色: https://github.com/zed-industries/zed/discussions/53162
 - Claude ACPアダプタ: https://github.com/agentclientprotocol/claude-agent-acp
 
-### 自作の土台（permissive）
-- GPUI: `~/Work/experience/necoder/zed/crates/gpui`（Apache-2.0）/ examples に hello_world.rs, input.rs, data_table.rs 等
+### 自作の土台
+- GPUI: Zed repository の `crates/gpui` と公開 examples。crate 自体は Apache-2.0 表示だが、
+  現在の依存グラフに含まれる GPL 推移依存は [`DECISIONS.md`](./DECISIONS.md) §5 を正とする
 - Floem（Lapce）: https://github.com/lapce/floem
 - Tree-sitter（MIT）/ tower-lsp・lsp-types / ropey / alacritty_terminal
 

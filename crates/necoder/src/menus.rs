@@ -3,8 +3,7 @@
 //! アクションは keymap / コマンドパレットと**同じ dispatch 系**に流れる（gpui の
 //! `on_app_menu_action` → `dispatch_action` = アクティブウィンドウのフォーカス文脈で解決）。
 //! キー表記（⌘S 等）は gpui が keymap から自動で付ける = ここでは書かない。
-//! ラベルは i18n（`menu.*`・ja/en 両方）。Zed の `zed/src/zed/app_menus.rs` と同じ置き場
-//! （メニュー = アプリの組み立て = bin crate の責務）。
+//! ラベルは i18n（`menu.*`・ja/en 両方）。メニューはアプリの組み立てなので bin crate が所有する。
 //!
 //! 注意: `cx.set_menus` は呼び出し時点の keymap のスナップショットでキー表記を解決する。
 //! ユーザー keymap の live reload 後は main 側で `set_menus` を呼び直す。

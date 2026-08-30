@@ -76,9 +76,12 @@ jobs:
   audit-deps:
     runs-on: ubuntu-latest
     # 依存のライセンス互換 / 出所 / RUSTSEC 勧告の機械監査（deny.toml が正・M13 公開準備）。
-    # AGPL 配布物として「依存は permissive のみ」を人力でなく CI で保証する。
+    # cargo-deny 対象のライセンス、出所、勧告を検査する。publish=false の git 依存を含む
+    # 完全な copyleft 境界は別の license-boundary step で固定する。
     steps:
       - uses: actions/checkout@v4
+      - name: Check explicit GPL/AGPL boundary
+        run: bash scripts/check-license-boundary.sh
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check

@@ -1,6 +1,6 @@
 //! keymap_core — JSON keymap をコンテキスト述語つきで gpui の [`KeyBinding`] に変換する。
 //!
-//! 形式（Zed 互換の縮小版）:
+//! 形式（context と action 名を持つ necoder の JSON keymap）:
 //! ```json
 //! [
 //!   { "context": "Editor", "bindings": { "cmd-s": "editor::Save", "enter": "editor::Newline" } }
@@ -218,7 +218,7 @@ pub fn pretty_keystroke(keystrokes: &str) -> String {
         .join(" ")
 }
 
-/// 組み込み既定 keymap（macOS・Zed 互換ベース）。編集アクションは `editor` 名前空間、終了は `necoder`。
+/// 組み込み既定 keymap（macOS の一般的な編集操作ベース）。編集アクションは `editor` 名前空間、終了は `necoder`。
 pub const DEFAULT_KEYMAP_JSON: &str = r#"[
   {
     "context": "Editor",

@@ -60,11 +60,12 @@ local                                              remote
 
 - [Zed Remote Development](https://zed.dev/docs/remote-development)
 - [SSH Remoting is Here](https://zed.dev/blog/remote-development)
-- ローカルソース: `zed/crates/remote`, `zed/crates/remote_server`
+
+Zed の実装は高水準の設計比較に限って参照し、GPL アプリケーションコードは necoder へ取り込まない。
 
 2026-06-24 の利用者記事にある「VS Code server 8.3 GB 対 Zed 約 570 MB」「接続が速い」は、
-その利用者の3ホストにおける実測であり一般化できるベンチではない。ただし、単一の小さな Rust server、
-ControlMaster、daemon 再利用という実装上の理由は Zed の公式資料とソースで確認できる。
+その利用者の3ホストにおける実測であり一般化できるベンチではない。単一の小さな Rust server、
+ControlMaster、daemon 再利用という説明は Zed の公式資料との比較情報として扱う。
 
 - [VSCodeからZedに乗り換えたら、軽いうえに大学鯖にも優しくなれた話](https://zenn.dev/toramutton/articles/zed-debut-ssh)
 

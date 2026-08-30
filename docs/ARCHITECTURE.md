@@ -11,7 +11,7 @@
 [view]       editor_view / explorer / git_ui / search_ui / agent_panel / terminal_view / settings / graph_view(M14)
 [model]      editor_core / project / acp_client / search / lang / storage
 [foundation] ui(部品+Registry) / theme_core / settings_core / keymap_core / i18n
-[外部]       gpui(path=zed/) / agent-client-protocol(crates.io) / ropey / alacritty_terminal
+[外部]       gpui(git rev固定) / agent-client-protocol(crates.io) / ropey / alacritty_terminal
 ```
 
 依存の向き（Zed と同じ）。違反 import を見つけたら実装でなく設計を疑う:
@@ -23,33 +23,34 @@
 `workspace` の具体的な ownership と source 境界は
 [`REFACTOR-WORKSPACE.md`](./REFACTOR-WORKSPACE.md) を正とする。
 
-## 2. crate 対応表（作る順・移植元・ライセンス備考）
+## 2. crate 対応表（実装の出自・ライセンス境界）
 
 | crate | 中身 | 出自 | 時期 |
 |---|---|---|---|
-| `necoder` (bin) | 結線・起動 | 済（骨組み） | M1 ✓ |
-| `theme_core` | トークン構造体・dark/light・ProjectIdentity/ThreadColor | UI-SPEC §1 を型に写す | M2 |
-| `i18n` | `t!` マクロ・ja/en YAML 同梱 | 自作（薄い。§6。rust-i18n は crate 局所で不適） | M2 ✓ |
-| `editor_core` | Buffer(ropey)・Selection・Transaction/undo | ropey。zed `text` は**参考のみ**（CRDT 不採用の決定済み） | M2 |
-| `editor_view` | 行仮想化描画・gutter・キャレット・IME | zed `editor` の element 実装を参考（GPL 移植可） | M2 |
-| `settings_core` | default→user→project 3層マージ・`.necoder/`・監視・スキーマ | zed `settings` を**削って移植** | M3 |
-| `settings` | `SettingsGlobal`（観測・即時反映・poll 監視）+ **設定画面本体**（外観テーマ / 動作トグル / エージェント導入） | 自作（settings_core を GPUI に載せる反応層） | M13 |
-| `keymap_core` | JSON keymap・コンテキスト述語 | gpui の keymap 機構 + zed 参考 | M3 |
-| `ui` | Button/List/Picker/Modal + **Registry 群**（§4） | zed `ui`/`picker` 参考に新規 | M3 |
-| `workspace` | レール・ドック・ペイン・タブ・statusbar・状態永続化 | zed `workspace` を**大幅に削って移植** | M3 |
-| `project` | fs 抽象・worktree（走査/監視/gitignore/git status） | **zed `fs`+`worktree` をほぼそのまま移植** | M3 |
-| `acp_client` | ACP セッション・アダプタ導入/起動 | **crates.io `agent-client-protocol`** + zed `agent_servers`(6k行) 移植 | M4 |
-| `agent_panel` | スレッド色タブ・宛先チップ・transcript・composer | zed `acp_thread`(14k行) 移植 + UI-SPEC §6 | M4 |
-| `explorer` | ツリー/カラム/アイコン 3ビュー・ファイル操作・右クリック | ビューは新規、モデルは `project` | M5 |
-| `search` | バッファ内 / ripgrep 横断 | zed `search` 参考 | M6 |
-| `lang` | tree-sitter ハイライト・LSP クライアント | zed `language`/`lsp` を削って移植 | M7 |
-| `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | zed `buffer_diff` / `terminal` 移植 | M8 |
-| `graph_view` | 系譜グラフ（worktree×commit の DAG・custom Element・4表示） | 新規（editor_view と同型・データは `project` の git log・webview 不使用） | M14 |
+| `necoder` (bin) | 結線・起動 | necoder 固有の独立実装 | M1 ✓ |
+| `theme_core` | トークン構造体・dark/light・ProjectIdentity/ThreadColor | UI-SPEC §1 を型にした独立実装 | M2 |
+| `i18n` | `t!` マクロ・ja/en YAML 同梱 | 独立実装（§6） | M2 ✓ |
+| `editor_core` | Buffer(ropey)・Selection・Transaction/undo | `ropey` 上の独立実装。CRDT 不採用 | M2 |
+| `editor_view` | 行仮想化描画・gutter・キャレット・IME | GPUI の公開 API / examples 上の独立実装 | M2 |
+| `settings_core` / `settings` | 3層設定・監視・設定画面 | serde/YAML/GPUI 上の独立実装 | M3/M13 |
+| `keymap_core` / `ui` | keymap・Button/List/Picker/Modal・Registry 群 | GPUI の公開 API 上の独立実装 | M3 |
+| `workspace` | レール・ドック・ペイン・タブ・statusbar・永続化 | necoder の `ProjectSession` モデルによる独立実装 | M3 |
+| `project` / `explorer` / `search` | FS・worktree・Git・各ビュー | Rust 標準 API、`notify`、Git CLI、`imara-diff`、ripgrep 上の独立実装 | M3-M6 |
+| `acp_client` / `agent_panel` | ACP セッション・transcript・composer | crates.io `agent-client-protocol` と necoder 固有 UI の独立実装 | M4 |
+| `lang` | tree-sitter ハイライト・LSP クライアント | 公開 LSP 仕様と tree-sitter crates 上の独立実装 | M7 |
+| `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | `imara-diff` / crates.io `alacritty_terminal` 上の独立実装 | M8 |
+| `graph_view` | worktree×commit の DAG・custom Element | Git CLI の出力を使う独立実装 | M14 |
 
-移植の作法: ファイル冒頭に `// Ported from zed crates/<name> (GPL-3.0-or-later, 2026-07 時点のソース)`。
-collab / CRDT / テレメトリの経路は移植時に**落とす**。Remote SSH は 2026-07-13 に方針変更し、
-Zed の GPL コードを直接移植せず [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) の
-`Host` 境界として独立実装する（将来の Apache-2.0 化の道を閉じない）。設定キーは necoder の体系に改名。
+Zed のソースは GPUI API の利用例や設計比較のために閲覧しているため、本プロジェクトを厳密な意味での
+clean-room 実装とは呼ばない。一方、Zed の GPL アプリケーション crate からソースコードを複製、翻訳、
+改変して取り込まないことをプロジェクト境界とする。比較で得た一般的な設計上の知見は、公開仕様と
+permissive な依存ライブラリを使い、necoder の型と要件から独立に実装する。
+
+直接利用する `gpui` / `gpui_platform` は Zed 側で Apache-2.0 と表示されている。ただし現在固定している
+Zed revision の依存グラフには `ztracing` / `ztracing_macro` / `zlog`（GPL-3.0-or-later）が含まれる。
+necoder はこれらと GPLv3/AGPLv3 §13 の互換規定に基づいて AGPL-3.0-or-later で組み合わせて配布する。
+第三者 GPL 部分を含む間、配布バイナリ全体を任意の非 GPL/AGPL ライセンスへ再ライセンスできる、とは扱わない。
+詳細は [`DECISIONS.md`](./DECISIONS.md) §5 と [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)。
 
 ## 3. コア型スケッチ（M2 の契約 — 変えるならここを先に変える）
 
@@ -93,7 +94,8 @@ impl Theme { pub fn load(source) -> Result<Theme>; }          // 欠けたキー
 pub struct ProjectIdentity { pub color: Hsla, pub icon: IconSource } // .necoder/settings.json > 手動 > 自動巡回
 pub enum IconSource { Monogram(char), Emoji(String), Image(PathBuf) }
 ```
-テーマセレクタ（ライブプレビュー付き・Zed 方式）は M3 の Picker 基盤に載せる。VSCode/Zed テーマのインポートは later（zed `theme_importer` 移植）。
+テーマセレクタ（ライブプレビュー付き）は M3 の Picker 基盤に載せる。VSCode/Zed テーマのインポートは
+公開されたテーマ形式を解析する独立実装として later に扱う（Zed の `theme_importer` コードは取り込まない）。
 
 ## 4. 登録式境界（コアは機能を知らない）
 
@@ -117,7 +119,7 @@ VSCode の contribution points / Zed の初期化結線から学んだ形。**�
 - titlebar ピル: プロジェクト名（クリック→⌘O スイッチャー）+ ⎇ ブランチ（クリック→branch/worktree メニュー）
 - エージェントスレッドは (project, branch) に属する。titlebar beacon はアクティブ project 分、レールの静止ドットは他 project の Blocked/Done を担う（Working は herd/statusbar へ集約）
 
-**Fleet モード（M14・UI-SPEC §11）**: 主単位は thread ではなく `TaskSpace`（1 task = 1 branch = 1 linked worktree = 1 `ProjectSession`）。各 Task cell は通常 View と同じ完全な `Entity<AgentPanel>` を埋め込み、同一 Task の複数 Agent は panel 内 thread として所有する。既定 `+ Task` は常に worktree を隔離し、main は protected `IntegrationSpace`。Task lifecycle / Agent runtime / Git health は別軸で、永続 event ledger、read-only merge preview、明示 integration gate を通す。詳細と clean-room 境界は [FLEET-ARCHITECTURE.md](FLEET-ARCHITECTURE.md)。
+**Fleet モード（M14・UI-SPEC §11）**: 主単位は thread ではなく `TaskSpace`（1 task = 1 branch = 1 linked worktree = 1 `ProjectSession`）。各 Task cell は通常 View と同じ完全な `Entity<AgentPanel>` を埋め込み、同一 Task の複数 Agent は panel 内 thread として所有する。既定 `+ Task` は常に worktree を隔離し、main は protected `IntegrationSpace`。Task lifecycle / Agent runtime / Git health は別軸で、永続 event ledger、read-only merge preview、明示 integration gate を通す。詳細と実装来歴の境界は [FLEET-ARCHITECTURE.md](FLEET-ARCHITECTURE.md)。
 
 ### 5.1 Workspace shell の責務
 
@@ -166,8 +168,10 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 
 ## 8. 性能予算の測り方（目標: Zed 比 ~80%）
 
-- M2 で `zed/crates/editor_benchmarks` / `input_latency_ui` を移植し、`cargo bench` + 起動時間計測を `scripts/` に置く
-- 計測は「キー入力→フレーム提示」のヒストグラム（input_latency_ui の方式）。予算超過は CI 的に検知（しきい値をスクリプトに埋める）
+- `cargo bench` + 起動時間計測を `scripts/` に置き、一般的な「キー入力→フレーム提示」の
+  ヒストグラムを necoder のイベント境界から計測する
+- Zed の benchmark コードは取り込まず、比較する場合は同一端末・同一fixture・同一操作で外部から測る。
+  予算超過は CI 的に検知する（しきい値をスクリプトに埋める）
 - UX 優先の明示判断（DECISIONS §8）: 予算内なら速度チューニングより UI-SPEC の完成度を優先する
 
 ## 9. Remote Host 境界（2026-07-13 確定）

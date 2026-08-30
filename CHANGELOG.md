@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+### Added
+- ターミナル用 `ne` コマンド（VSCode の `code` 相当）。`ne .` / `ne <file>` は起動中の
+  necoder があればそのウィンドウで開き（IPC 転送・前面化）、無ければアプリを起動。
+  `ssh://` と既存の `config` / `fleet` / `mcp` サブコマンドは素通し。導入は
+  設定 > コマンドライン（macOS の認証ダイアログ）か `necoder install-cli`、削除も同じ場所から
+- About モーダル（メニュー「necoder について」）とメニュー/パレットの「アップデートを確認…」。
+  手動確認は 新版あり/最新です/確認失敗 を言い分ける
+- 配布物にライセンス通知を同梱（`THIRD_PARTY_NOTICES.md` + `licenses/`・macOS/Windows 両方）
+
+### Changed
+- composer 入力欄が内容に合わせて自動で伸びる（既定高〜420px・上限超えは内部スクロール）。
+  長文を貼ると入力位置が見えなくなる問題の根治
+- エディタ / ACP transcript / ターミナルで、選択ドラッグをビュー外へ引っ張ると自動スクロール
+  して選択が伸びる
+
+### Fixed
+- AI エージェントの API ストリーミング切断（「Connection closed mid-response」）でスレッドの
+  セッションごと落ちていたのを、そのターンだけの失敗に変更（同じスレッドで再送できる）
+
 ## [0.1.2] - 2026-08-25
 
 ### Fixed

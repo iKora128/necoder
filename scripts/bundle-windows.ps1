@@ -80,6 +80,8 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 Copy-Item $exe (Join-Path $stage 'necoder.exe')
 Copy-Item 'LICENSE' $stage -ErrorAction SilentlyContinue
+Copy-Item 'THIRD_PARTY_NOTICES.md' $stage
+Copy-Item 'third_party/licenses' (Join-Path $stage 'licenses') -Recurse
 Copy-Item 'README.md' $stage -ErrorAction SilentlyContinue
 
 $zip = Join-Path $OutDir 'necoder-windows-x64.zip'

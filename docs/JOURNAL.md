@@ -61,7 +61,7 @@
 - 次:
   - **UI 目視 & IME 対話検証**（screencapture 権限＋再起動、または本人実行）。ここが M2 完了ゲート
   - editor_view の見た目微調整（キャレット点滅 1.1s・パンくず・選択の複数行・ソフトラップ無し確認）
-  - `input_latency_ui` の key→frame ヒストグラム移植（今は時期尚早・UI が育ってから）
+  - necoder 固有の key→frame ヒストグラム計測（今は時期尚早・UI が育ってから）
   - その後 M3（settings_core / Picker / workspace / レール）へ
 
 ## 2026-07-12 — M3 ワークスペースシェル（レール/エクスプローラ/Picker/永続化）
@@ -94,13 +94,13 @@
 - 次（残り・全て実装可能。availability 確認済み）: M4 ACP（最大・要実機検証）・M7 LSP（rust-analyzer プロセス）・M8 git(git2 済)/terminal(alacritty 要取得)・M5 エクスプローラ 3 ビュー/右クリック・M6 検索結果 UI・コマンドパレット/⌘⇧P（要 CommandRegistry）
 
 ## 2026-07-12 — 【重大】文字が全く描画されない = font-kit 未有効 + フォント同梱
-- 症状: 実ウィンドウで**四角（quad）は出るのにグリフ（文字）が1つも出ない**（エディタ/エクスプローラ/ステータスバー全部）。offscreen 撮影・私のテストでは検出不能で、**13 crate 積むまで気づかなかった**（daichi さんの実機目視で発覚）
+- 症状: 実ウィンドウで**四角（quad）は出るのにグリフ（文字）が1つも出ない**（エディタ/エクスプローラ/ステータスバー全部）。offscreen 撮影・私のテストでは検出不能で、**13 crate 積むまで気づかなかった**（maintainer の実機目視で発覚）
 - **根本原因: `gpui_platform` の `font-kit` feature が無効だった**。font-kit = macOS のグリフ**ラスタライザ**。無いと shape（幅計算）はできてもラスタライズ0＝文字が完全に不可視。quad は font-kit 不要なので出る。gpui の example が文字を出せるのは dev-dep で `gpui_platform = { features = ["font-kit", ...] }` してるから
   - **修正**: `crates/shirushi/Cargo.toml` の `gpui_platform = { workspace = true, features = ["font-kit"] }`。**gpui_platform を使う bin は font-kit 必須**（これが無いと文字ゼロ）。最重要トラップ
 - 切り分け手法（有効だった）: `crates/shirushi/src/bin/hello.rs`（gpui 素の hello_world 相当を**同じビルドの gpui** で）→「緑だけ/文字なし」で「ビルド or gpui 側」と確定。`cargo clean` でも直らず＝古ビルドでない、と絞れた
 - フォント同梱（OFL・GPL 本体に同梱可）: `assets/fonts/` に **IBM Plex Sans JP（UI）+ PlemolJP（コード・IBM Plex Mono+Plex Sans JP の等幅）**。`include_bytes!` + `cx.text_system().add_fonts()`（bin 起動時）。family 名は `"IBM Plex Sans JP"` / `"PlemolJP"`（fontTools で確認）。~15MB
 - 併せて: コピペ ⌘C/⌘X/⌘V 追加、`default-run = "shirushi"`（hello bin 追加で `cargo run` が曖昧化したため）
-- 学び: **UI に文字を出す変更は、必ず実機の目視確認を早期に1回入れる**。offscreen render_to_image はグリフを写さない・screencapture は権限で私から不可＝私単独では文字描画を検証できない。ここは daichi さんの目が要る（今後も）
+- 学び: **UI に文字を出す変更は、必ず実機の目視確認を早期に1回入れる**。offscreen render_to_image はグリフを写さない・screencapture は権限で私から不可＝自動検証だけでは文字描画を確認できない。ここは maintainer の実機確認が要る（今後も）
 
 ## 2026-07-12 — フォント差替（Guguru Sans Code）+ 見た目の作り込み + M4 エージェントパネル
 - やったこと（font 同梱 → 見た目 → M4 パネル、を1セッションで走破）:
@@ -118,7 +118,7 @@
   - **ACP session は `build_session(cwd).block_task().start_session()`**（`start_session` は `Blocking` 状態限定）。`read_to_string` は StopReason まで `AgentMessageChunk` を集約。`prompt_once` の future は **Send**＝gpui の background executor で回せる
   - `TitlebarOptions.appears_transparent=true` でも macOS 信号機は残る＝位置指定で自前 titlebar 内へ。窓ドラッグは空き領域の `on_mouse_down`→`start_window_move()`
 - 未（honest・次の focused 作業）: **ACP 逐次ストリーミング**（`read_update` を回して chunk/thought/tool を都度反映＝現状は応答一括表示）・永続セッション（毎回プロセス起動をやめる）・権限リクエスト/diff レビュー・titlebar beacon + statusbar スレッドドット・分割ペイン・下ドック(ターミナル)・⌘⇧P パレット。transcript 初期内容は mock 会話例のプレースホルダ
-- 実機で確かめたいこと（daichi さん）: `cargo run -p shirushi <file>` で Guguru の見え方 / 右パネルでスレッドタブ切替の色貫通 / composer に日本語入力→⌘Enter で claude-agent-acp から応答が返るか（`live_prompt` テスト: `cargo test -p acp_client -- --ignored --nocapture live_prompt`）
+- 実機で確かめたいこと（maintainer）: `cargo run -p shirushi <file>` で Guguru の見え方 / 右パネルでスレッドタブ切替の色貫通 / composer に日本語入力→⌘Enter で claude-agent-acp から応答が返るか（`live_prompt` テスト: `cargo test -p acp_client -- --ignored --nocapture live_prompt`）
 
 ## 2026-07-12 —（続き）ACP を live で通す → ストリーミング化（エージェント自己検証で達成）
 - ユーザーが `live_prompt` を実行 → `claude-agent-acp が PATH に無い` で失敗。**これが本当のブロッカーだった**（バイナリは PATH 上の単体ではない）
@@ -148,7 +148,7 @@
   - offscreen プローブを長め（13〜15s）に待つと、前面化した実ウィンドウに**環境のキーイベントが漏れ込む**ことがある（⌘O/⌘⇧A が偶発発火して switcher / 新スレッドが出た）。＝逆にショートカットが動く傍証だが、検証は短時間 or プローブ無しのクリーン撮影が確実
 - 設計メモ（未決）: ユーザーは「AI パネルの UI は完全に Zed で・モデル変更等」を希望。現状は**色スレッド（差別化の核・BACKGROUND 由来）を維持しつつ Zed 風コントロール（モデルセレクタ）を足す**方針で実装。色スレッドを捨てて純 Zed にするかは要確認（勝手に核を捨てない）
 
-## 2026-07-12 —（続き）窓操作を Zed 準拠に（最大化・ドラッグの不具合修正）
+## 2026-07-12 —（続き）一般的なデスクトップ窓操作へ調整（最大化・ドラッグの不具合修正）
 - 症状（ユーザー報告）: 最大化やウィンドウの扱いが変。原因＝自前 titlebar（`appears_transparent`）にした際、Zed がやっている窓操作の作法が抜けていた
 - **修正（`crates/platform_title_bar/src/platform_title_bar.rs` と `zed.rs` を参照）**:
   - `WindowOptions.is_movable = false`（macOS）。**gpui のコメント通り**: custom titlebar で `start_window_move` を使う場合、true のままだと AppKit が titlebar を system 所有扱いして**クリック遅延・ダブルクリック判定の不具合**になる。Zed も macOS では `is_movable: cfg!(not(target_os="macos"))`＝false
@@ -293,7 +293,7 @@
 - 結果: 警告 0・test 68 passed。**M5 ファイルエクスプローラ = アイコン/3表示/上位ナビ/幅可変/右クリック 一通り完成**。新規ウィンドウ開くの round-trip は live 検証待ち（コードは main.rs と同じ open_window パターン）
 
 ## 2026-07-13 — 「全部やりきる」Phase A: M3/M5/M6 残り（⌘1-9・新窓・root上ブラウズ・検索パネル・テーマセレクタ）
-- ユーザー: 「全部やりきってください。基本のエディタ機能はZedを参考に」。ROADMAP の実装可能な残り全量に着手。まず重い Zed 移植3本（git / terminal / LSP）を並行調査に出し、要点を `docs/research/porting-git-terminal-lsp.md` に永続化（git=CLI直叩き+`imara-diff` / terminal=`alacritty_terminal`（EventLoopが読取+parser）/ LSP=`lsp-types 0.97`+自前JSON-RPC封筒+ropey UTF-16変換）
+- ユーザー: 「全部やりきってください。基本のエディタ機能はZedを参考に」。ROADMAP の実装可能な残り全量に着手。git / terminal / LSP の公開仕様・外部ライブラリと設計比較を調査し、現在の来歴説明を `docs/research/git-terminal-lsp-design-notes.md` に記録（git=CLI+`imara-diff` / terminal=`alacritty_terminal` / LSP=公開仕様+独自JSON-RPC境界+ropey UTF-16変換）。Zed の GPL アプリケーションコードを出自とするものではない
 - **⌘1..9 / 新窓**: `ActivateProject1..9`（レール切替）+ `NewWindow`。新窓は **⌘⇧N**（⌘⏎ は composer 送信と衝突するため変更）。keymap 全解決を実機 stderr で確認
 - **検索パネル（M6 受入）**: `SearchState`（クエリ+大小/正規表現トグル+ファイル別結果）オーバーレイ。`⌘⇧F`。マッチは先頭空白除去してアクセント色強調（`whitespace_nowrap`・`.inline()` は gpui に無い）。クリック/Enter で `EditorView::reveal_position`（**pending_reveal**＝初回描画前でも viewport 確定後の prepaint で対象行を中央へ・one-shot で idle 0%）。offscreen で「fn」440件のファイル別結果を目視
 - **root 上ブラウズ（M5 受入）**: `project::Worktree::read_any_dir`（ルート外は gitignore 無しで列挙）。ブレッドクラムに **⤴上へ** + ルート外は **⌂プロジェクト戻る**。`enter_dir` がルート外へ出たら Tree→Columns 自動切替。offscreen で隣接 repo 一覧を目視
@@ -303,7 +303,7 @@
 - 次: Phase B = git status 色（ツリー/タブ）+ gutter diff（`imara-diff`）+ branch/worktree メニュー
 
 ## 2026-07-13 —（続き）Phase B: M8 git（status色・gutter diff・branch/worktree）
-- **git モデル（`project`）**: Zed 準拠で git2/gix 不使用。`git_status`（`git status --porcelain=v1 -z` → XY を Added/Modified/Deleted/Untracked/Conflicted に畳む・絶対パス）/ `buffer_diff`（`git show HEAD:./<name>`〔cwd 相対で subdir も正〕+ **imara-diff 0.1.8** Histogram）/ `git_branches`/`git_worktrees`/`switch_branch`/`add_worktree`。dep 追加は imara-diff 1つだけ。test 6（diff 分類 + 一時 repo で status/diff）
+- **git モデル（`project`）**: 公開 Git CLI の porcelain 出力を使い git2/gix 不使用。`git_status`（`git status --porcelain=v1 -z` → XY を Added/Modified/Deleted/Untracked/Conflicted に畳む・絶対パス）/ `buffer_diff`（`git show HEAD:./<name>`〔cwd 相対で subdir も正〕+ **imara-diff 0.1.8** Histogram）/ `git_branches`/`git_worktrees`/`switch_branch`/`add_worktree`。dep 追加は imara-diff 1つだけ。test 6（diff 分類 + 一時 repo で status/diff）
 - **ツリー/タブ色（workspace）**: `git_status: HashMap<PathBuf,StatusKind>` を switch_project/open_file/起動時に読み直す。ツリー行=ファイル名を状態色 + 末尾バッジ（M/A/U/D/!）・フォルダは配下変更で琥珀 ●（`keys().any(starts_with)` ロールアップ）。タブ名も同色貫通
 - **gutter diff（editor_view）**: `diff_hunks: Vec<project::DiffHunk>`。**編集の choke は `after_edit` だけだと IME/入力を取り逃す** → **prepaint で `buffer.version()` 変化を検知**して一様に捕捉。`schedule_diff` = 250ms デバウンス（世代番号）+ `background_executor().spawn` で git 実行＝**idle 0%**。EditorPrepaint に `diff_marks: Vec<PaintQuad>` 追加、行ループで左端バー（追加=ok/変更=warn の全高・削除=err の上境界小マーカー）を積み paint。初回は `diff_scheduled_version=u64::MAX` で必ず計算
 - **branch/worktree メニュー（workspace）**: titlebar ⎇ クリックで overlay（context menu と同型・背面クリックで閉じる）。ブランチ行=in-place 切替（`switch_branch`→`reload_active_project`＝ツリー再構築+開ファイル再読込+git更新）、**⧉=worktree で新窓**（`add_worktree` → `open_folder_as_window`＝当初ビジョンの入口）。worktree 一覧セクションも別窓で開ける。⎇ の子は `stop_propagation` でピル（⌘O）を抑止
@@ -312,14 +312,14 @@
 - 次: Phase C = 分割ペイン + 下ドック + 統合ターミナル（alacritty_terminal）
 
 ## 2026-07-13 —（続き）Phase C 前半: 統合ターミナル + 下ドック（M8）
-- 新 crate **`terminal_view`**（crates.io `alacritty_terminal 0.26` = Zed fork 0.26.1-dev とほぼ同一 API）。移植ガイド通り。
+- 新 crate **`terminal_view`**（crates.io `alacritty_terminal 0.26`）。公開 API と necoder の dock / 描画要件から独立に接続。
 - **設計の肝**: alacritty の `EventLoop::spawn()` が**読取スレッド + vte parser**（自前で書かない）。PTY 出力→parse→`Term`(FairMutex)→`EventListener::send_event(Wakeup)`→`UnboundedSender`→**pump（`cx.spawn`）が `next().await`**→`sync`（term.lock→renderable_content スナップショット→notify）。**タイマー無し＝idle 0%**。カーソル blink は捨てた（静止ブロック）
 - **サイズ**: `TerminalSize`(impl Dimensions)。prepaint で 'M' を shape してセル幅、bounds/セル寸から行列算出→変化時のみ `term.resize` + `Msg::Resize`（PTY winsize）
 - **描画**: custom Element。①bg全面 ②非デフォ bg セルの quad ③各セル `shape_line(c,size,run,Some(cell_width))`（等幅強制）④ブロックカーソル（focus=塗り/非focus=outline・下地文字は bg 色で再描画）。色=16色 ANSI 固定パレット + 256(cube/grayscale) + truecolor、既定 fg/bg はテーマ。`Flags::INVERSE/BOLD/ITALIC/WIDE_CHAR_SPACER/HIDDEN` 対応
 - **入力**: v1 は `on_key_down` 一本化（IME 前編集は捨てた）。`keystroke_to_bytes`＝Ctrl+英字→制御バイト・Enter/BS/Tab/Esc・矢印（APP_CURSOR で `\x1bO`）・Home/End/Del/PgUp/Dn・印字は key_char。⌘系は素通し（None）
 - **workspace 配線**: `terminal: Option<Entity<TerminalView>>` 遅延生成（初回表示・cwd=プロジェクトルート）。`⌘J` / 下ドックボタン / × で開閉（`toggle_terminal`＝生成+フォーカス）。`render_center` を flex_col 化しエディタ列の下に積む（サイドドックに被らない）。`apply_theme` がターミナルにも波及。Drop で `Msg::Shutdown`
 - 学び/罠: `gpui::outline(bounds, color, BorderStyle)` は3引数。`event_loop.spawn()` の JoinHandle は detach（型名 `State` を書かずに済む）。`tty::Options { .., ..Default::default() }` でフォーク差分フィールドを吸収。struct リテラルは記述順評価＝`exited: notifier.is_none()` は `notifier,` move の前にローカルへ
-- 結果: 警告 0・**test 32 suite ok**。offscreen で **実シェル**（`Last login… / daichi@… shirushi % / ブロックカーソル`）を目視＝PTY・グリッド・cwd 全て動作
+- 結果: 警告 0・**test 32 suite ok**。offscreen で **実シェル**（`Last login… / user@… shirushi % / ブロックカーソル`）を目視＝PTY・グリッド・cwd 全て動作
 - 次: 分割ペイン（M3 残り）→ Phase D = LSP（rust-analyzer・M7）→ MCP サーバ（#21）
 
 ## 2026-07-13 —（続き）Phase D: LSP 診断（rust-analyzer・M7）
@@ -349,8 +349,8 @@
 - やったこと:
   - **完成までのギャップ分析**: 全 18 crate（約1.8万行・test 97 本）の実装棚卸しと docs/research（feature-matrix の 13 レイヤ）を突合。結論 =「レイヤは 13/13 に点が打ってあるが“所作”の層が薄い」。実使用の五大壁: ①複数タブ無し（1ペイン=1ファイル）②⌘F/置換 UI 無し ③補完が手動トリガのみ ④ファイル監視無し ⑤hot exit 無し。quick win: hover（`lang/src/lsp.rs` 実装済み・未配線）・`.shirushi` 色（`ProjectIdentity` 型定義済み・未配線）
   - **ROADMAP に M10〜M13 を追記**（/goal 消化用・各項目に受入条件つき）: M10 毎日使える（ドッグフーディング開始）→ M11 言語×Git parity → M12 AI の唯一無二（色×並行×信頼）→ M13 公開準備。**M9 の未チェック残件は M13 へ移動**（日常機能優先の判断）。FEATURES の later タグ一部（checkpoint/@mention/⌘K/Todos）を M12 に前倒し採用（タグ自体は不変更）
-  - **CLAUDE.md を現状と DECISIONS §5 に同期**: ①「Zed GPL crate 移植可」→「移植禁止・手法参考のみ」（旧記述は GPL-3.0 決定時代の残骸）②gpui は path 依存 → git rev 固定済みへ ③マイルストーン一覧を M13 まで更新・順序の正を ROADMAP に統一
-  - **ライセンス確定（本人判断・同日）**: **AGPL-3.0 で確定**（park→確定・「最終的に Apache」は撤回。理由: 単独コミッタ＝Apache の利得が効かない・クローズドコピーへの心理的抵抗・remote/cloud 展開に §13 が効く。DECISIONS §5 に追記）。鉄則（Zed GPL crate 移植禁止・貢献時 CLA）は「再ライセンスの自由の保全」として維持
+  - **CLAUDE.md を現状と DECISIONS §5 に同期**: Zed GPL アプリケーション crate のコードは取り込まず、公開仕様と独立実装で進める方針へ更新。gpui は path 依存 → git rev 固定済みへ。マイルストーン一覧を M13 まで更新・順序の正を ROADMAP に統一
+  - **ライセンス確定（本人判断・同日）**: **AGPL-3.0 で確定**（park→確定・「最終的に Apache」は撤回）。依存グラフを含む正確な現行境界は 2026-08-27 改訂の DECISIONS §5 を正とする
 - 学び/罠:
   - **7/13〜7/15 の実装が JOURNAL 未記載**（git 基礎操作+ソース管理パネル・git graph・gitignore dimming・Host 抽象+Remote SSH+多言語 LSP+GitHub 連携=M9・アプリアイコン/マスコット・スレッドタブ Chrome 風・D&D @メンション・AI コミットメッセージ・レールのアクティビティバー化・既定エージェント設定・CI 署名リリース）。詳細は git log 参照。**セッション終わりの日誌追記を忘れない**
   - i18n は仕組み（t!/parity テスト）だけ先行し locales は 5 キーのみ = UI 文字列はほぼハードコード日本語。規律はあるが回収は M13
@@ -592,7 +592,7 @@
 - ドラッグ複数行選択: エディタ/composer は is_selecting 機構で実装済み（wrap 対応も確認）。**transcript は GPUI に選択プリミティブが無く**（InteractiveText はクリック/ホバーのみ・Zed の markdown 選択は GPL 独自実装）自前実装が要る = 残件。当面は各エントリ hover の ⧉ コピー
 - `SHIRUSHI_COMPOSER_PROBE` 新設（composer へ下書き流し込み → offscreen 目視）
 ## 2026-07-17 —（続き）transcript ドラッグ選択（自前実装）+ ブランチ切替 fallback + レール＋
-- **transcript のドラッグ選択をやりきった**（GPL 移植なしの自前）: 素材は GPUI の `StyledText`（`with_highlights` = 親スタイル継承で範囲背景だけ変えられる）と `TextLayout`（`index_for_position` が**絶対座標→byte** のヒットテスト・`bounds()` 付き・Rc 共有で render 後も引ける）
+- **transcript のドラッグ選択をやりきった**（necoder 固有の独立実装）: 素材は GPUI の `StyledText`（`with_highlights` = 親スタイル継承で範囲背景だけ変えられる）と `TextLayout`（`index_for_position` が**絶対座標→byte** のヒットテスト・`bounds()` 付き・Rc 共有で render 後も引ける）
 - 構造: render 毎に `SelectableRegion { entry, text, layout }` を registry へ再構築 → コンテナ 1 箇所の mouse down/move/up で **エントリ跨ぎ選択**（隙間は直前リージョン末尾へ丸め）→ 選択は各エントリの highlight 背景（**スレッド色 30%**）→ **⌘C** はパネルルートの on_key_down で「選択がある時だけ」composer より先に拾って stop_propagation。Esc/外クリックで解除
 - 対象は User/Thinking/Agent の本文（Step の result はラベル混在のため対象外 = ⧉ コピーで代替）。offset は index_for_position 由来なので char 境界保証（プローブ注入時だけ boundary に注意）
 - 検証: `SHIRUSHI_TRANSCRIPT_SEL_PROBE` で entry0:3〜entry4:9 を注入 → **327 bytes のエントリ跨ぎコピー**（Step スキップ・空行区切り）と**行単位のハイライト描画**を offscreen 実証
@@ -1116,9 +1116,9 @@
   フィールド欠落 → LICENSE 実物（Apache-2.0）を確認して clarify。結果 = licenses/sources/advisories/bans 全 green
 - **i18n 回収の残り**: updater 10 + 管制 IPC 12 + fleet_view 2 を t! 化（ja/en +26 キー）。EN ロケールに
   「署名検証に失敗」等の日本語エラーが出ていた。IPC のエラーは fleet CLI にも届く＝人間向け文字列として扱う
-- **文書の危険文を根治**: README の「Zed = GPL 資産の移植元」（DECISIONS §5 の「移植していない」と正面矛盾・
-  公開時に最初に引用される一文）を削除し EN ユーザー向けに全面改稿。DECISIONS §5 冒頭に現状サマリ注記
-  （2026-07-11 の移植戦略は**実行されないまま撤回済み**・Cargo.lock に GPL crate 不存在・CI が機械検証）
+- **公開文書の第一段修正**: README から、Zed GPL アプリケーション crate を実装元と読める表現を削除し
+  EN ユーザー向けに全面改稿。この時点ではARCHITECTURE等の旧計画と、後のGPUI推移依存まで監査し切れて
+  いなかったため、依存グラフを含む最終的な来歴・ライセンス境界は2026-08-27改訂のDECISIONS §5を正とする
 - **CLA を「最初の 1 件から」の宣言どおり用意**: CLA.md（ICLA 型 + **再ライセンス権の明示**＝DECISIONS の
   戦略と貢献者への透明性を両立）+ contributor-assistant（署名は cla-signatures ブランチ）。
   CoC の連絡先は**個人メールを新規露出させず** GitHub 経由（コミットは noreply メール運用と確認済み）
@@ -2243,6 +2243,37 @@
 - 学び/罠: acp_client の `session.modes()` は `&Option<SessionModeState>` を返す＝`.as_ref().map` で借りる。ターン中 SetMode の即時送信（deferred 廃止）は今回見送り — turn loop 内で `send_request().block_task().await` すると応答がターン終端まで来ないエージェントでポンプが止まるリスクがあり、(b)(c) で実害が消えるため
 - 次: metal のある環境で実機確認（bypass タブの初回ターンが許可なしで走る / 承認カード表示中に bypass へ切り替えると即続行 / ⟲ 巻き戻しがファイルを壊さない）
 
+## 2026-08-29 — origin 合流 + ドラッグ選択の自動スクロール（ACP transcript / ターミナル）
+- やったこと:
+  1. **origin/main（v0.1.6・別セッション 12 コミット）を合流**: ローカルのライセンス境界セッション（THIRD_PARTY_NOTICES / 表現書き換え / CLI インストーラ）を先にコミット → merge。衝突は README.md のみ（EN=CLI 導入節と Windows 節を両取り / JA=origin の全面書き換えをベースに CLI 導入を再適用）。origin の JA ライセンス節に残っていた**修正前の主張**（「GPL コード移植はありません・GPUI は Apache-2.0」）を EN 側と同じ修正後の文面へ揃えた
+  2. **ドラッグ選択の自動スクロール**（ユーザー要望・ACP transcript とターミナル共通）: 選択ドラッグでビュー外へ引っ張ったら、押している間 33ms tick でスクロールし続け選択端を追従させる（はみ出し量に比例して加速・ビュー内復帰/マウスアップで自然停止）。transcript は `ListState::scroll_by` + 前フレームの region 層で端まで選択 → 次 tick でさらに延ばす。ターミナルは `Scroll::Delta` ± はみ出し行数（上=履歴側/下=最新側・代替画面は対象外）→ sync → 新 display_offset で選択を引き直す
+- 学び/罠: gpui の `div().on_mouse_move` は **hitbox が hover 中しか発火しない**＝要素外へドラッグした瞬間イベントが途絶える（transcript の下方向ドラッグ選択が composer 上で止まっていた真因）。ドラッグ追従は composer リサイズと同じく**パネル root の on_mouse_move で拾う**（ターミナルは元々 paint 内 `window.on_mouse_event`＝window 全域で問題なし）。tick ループは `Task` を持たず bool フラグ + detach（自分の Task ハンドルを tick 内で drop しない）
+- 次: 実機で目視確認（transcript を下へ引っ張って自動スクロール / ターミナルで履歴へ上ドラッグ / less 中は動かないこと）
+
+## 2026-08-29 —（続き）composer の auto-grow（長文入力が固定高で隠れる件）
+- やったこと: 「入力が長いとはみ出る」（ユーザー報告）。probe で切り分け — composer の折り返し
+  （plain は常に wrap）と transcript の長文 User エントリは正常で、実体は **composer が固定高
+  （既定 86px ≈ 4 行）のままで長文が視界から消える**こと。Claude Code / Zed / Slack と同じ
+  auto-grow に変更: 高さ = clamp(内容高（折り返し後表示行 × 行高）+ 8px, composer_height, 420px)。
+  上限超えは従来どおり EditorView の内部スクロール + キャレット追従。`EditorView::content_height()`
+  を新設（wrap マップが古い間は論理行近似 → 次フレームで収束）。上縁ハンドルは「最低高」として残る
+  （長文がある間は下向きドラッグが効かない＝許容と判断）
+- 検証: NECODER_COMPOSER_PROBE で長文（12 段落 + 長 URL）→ 420px まで伸びて内部スクロール、
+  短文 → 既定高のまま、をオフスクリーンで目視。agent_panel/editor_view テスト緑
+- 次: 実機で貼り付け・削除時の伸縮とリサイズハンドルの体感確認
+
+## 2026-08-29 —（続き）EditorView にもドラッグ選択の自動スクロール
+- やったこと: transcript/ターミナルに続き、**EditorView（本体エディタ + composer 共通）**でも
+  選択ドラッグをビュー外へ引っ張ったら 33ms tick でスクロール＋選択延長するように（ユーザー要望）。
+  選択延長を `extend_drag_selection` に抽出し、Char/Word/Line の粒度そのままで tick からも呼ぶ。
+  ここでも `div().on_mouse_move` の hover 限定問題があるため、**選択中の move は paint で登録する
+  `window.on_mouse_event` を正にした**（div 側は hover dwell 専用に）。tick は `spawn_in(window)` +
+  `update_in`（`offset_for_position` がテキスト計測で Window を要るため。transcript の Context 版とは違う）
+- 学び/罠: 複数 EditorView（分割・composer）が各自 window ハンドラを登録するが、`is_selecting` の
+  ビューだけが反応するので競合しない。scroll_top の clamp は `max_scroll_top()` が viewport 縮小時も
+  0 に畳むので stuck しない
+- 次: 実機でエディタ/composer のドラッグ上下スクロールの体感確認（速度係数 0.5・上限 48px/tick の調整余地）
+
 ## 2026-08-30 — prompt エラーでセッションを殺さない（Connection closed mid-response）
 - やったこと: ユーザー報告「エラー: ACP セッションが異常終了: Internal error: API Error: Connection closed mid-response」の根治。エラー自体は Anthropic API のストリーミング切断（一過性・server_error）で防げないが、セッションごと死ぬのは necoder 側の構造だった — `Session::send_prompt` は応答ハンドラを接続内タスクに spawn するため、`session/prompt` のエラー応答がタスクアクター経由で**接続ドライバごと**落とす（エラーの spawned_at session.rs:571 はその位置）。acp_client の turn loop で `session/prompt` を自前送信に変更（`send_request().block_task()` の future を select の 1 系統として並走）: Ok(StopReason) → TurnEnded / Err → Failed で**そのターンだけ**畳み、セッションと process は維持＝同じスレッドで再送できる。末尾チャンク取りこぼし防止に `select_biased!`（update > command > prompt 応答）。偽エージェント（python3 の改行区切り JSON-RPC・1 回目エラー応答→2 回目完走）の回帰テスト `prompt_error_fails_turn_but_keeps_session` 追加。acp_client / agent_panel の check・test 緑（necoder 本体はこの環境に `xcrun metal` が無くビルド不可＝既知の環境制約）
 - 学び/罠: 前回（08-28）見送った「turn loop 内 block_task はポンプが止まる」は**インラインで await した場合**の話 — select に混ぜて read_update と同時に待てば両立する。ACP crate は spawn したタスクのエラーで接続全体が Err になる設計（jsonrpc/task_actor.rs）＝ターン単位で処理したいエラーはタスクに逃がさず自分で受ける。StopReason は send_prompt 経由でしか update チャネルに流れない（自前送信では応答の stop_reason で受ける）。UI 側は `AgentEvent::Failed` が running を落として transcript にエラーを出す終端イベントなので追加変更不要
@@ -2257,3 +2288,8 @@
 - やったこと: ①About（メニュー「necoder について」）を右下トーストから **Mac ネイティブ About パネル準拠のモーダル**へ（`workspace/about.rs` 新設・アイコン/名前/バージョン/タグライン/リンク/©。器は shortcut_sheet と同型＝薄暗背景・背景クリック/Escape で閉じ・`NECODER_ABOUT=1` で offscreen QA）。アプリアイコン PNG（`assets/icon/necoder.png`・git 追跡済み）を `Assets` に埋め込み `img("icon/necoder.png")` で描画。②新アクション `CheckForUpdates` をアプリメニュー About 直下 + パレットに追加。手動確認は `updater::check_for_update_manual`（自動チェックと違い Ok(Some)/Ok(None)/Err を言い分ける。自動 `check_for_update` はこれを畳んだだけに再構成）。新版発見時は自動チェックと同じ `updater.status` に合流＝statusbar チップと状態を二重管理しない。[今すぐ更新] は既存 `install_update`。「最新です」「確認失敗（赤字）」も About 内に表示。Linux 等 route 無し OS はボタンごと非表示（`manual_check_supported`・「押せるのに必ず失敗する」導線を作らない規律の手動版）。
 - 学び/罠: gpui の `img("パス")` は文字列が URI でなければ `Resource::Embedded` として AssetSource から引く（例: examples/opacity.rs）＝アイコンは Assets に足すだけ。ネイティブメニューは offscreen スクショに写らない — `NECODER_MENU_PROBE=1` の読み戻し（項目数）で機械的に確認する。About の更新状態は `updater.status`（自動）を最優先し、無いときだけ手動状態（ManualUpdateCheck）を見る 2 層 — 逆にすると チップと About で言うことがズレる。
 - 次: 実機（メニューバーのある環境）で「アップデートを確認…」→「最新です」表示、新リリースが出たら [今すぐ更新] → 再起動の E2E。
+
+## 2026-08-30 — origin 合流: CLI 二重実装を `ne`（cli_shim）へ一本化
+- やったこと: origin/main（別マシン・08-29 の 5 コミット = ライセンス境界一式 / `necoder` シェルランチャー CLI / ドラッグ選択自動スクロール / composer auto-grow）を merge。**CLI が二重実装**になっていた（08-29 リモート = `scripts/necoder-cli` + install-cli-mac.sh + 設定「ターミナル」節、08-30 ローカル = `crates/cli_shim` + `necoder cli` + IPC `open` + 設定「コマンドライン」節）。FEATURES §13 の仕様が「`ne <path>`」であること・IPC 転送/削除対応/テストの充実からローカル `ne` 版に一本化し、リモート版を撤去（scripts 2 本・settings の terminal_cli_section/InstallNecoderCli・chrome の installer 呼び出し・locales 9 キー・bundle-mac.sh の同梱行）。ライセンス境界（THIRD_PARTY_NOTICES / README の §13 文面 / 同梱 licenses/）はリモートを正として採用。README の衝突 4 箇所は「文体=ローカル・内容=新しい方」で解消し、CLI 導入案内を `ne` に書き換え。CHANGELOG の Unreleased も `ne` 版へ更新
+- 学び/罠: 並行セッションが同じバックログ項目を別解で消化することがある — 合流時は「どちらが仕様（FEATURES/GLOSSARY）に沿うか」で決め、負けた側は**コード・スクリプト・i18n キー・バンドル手順まで**掃除する（設定画面に同種セクションが 2 個並ぶ/死にキーが残るのが典型的な取りこぼし）。yml の同名キーは YAML 的に後勝ちで**エラーにならず**気づきにくい
+- 次: 実機で `ne` の導入→`ne .`→実行中ウィンドウで開くの一巡、composer auto-grow の体感確認

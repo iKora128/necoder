@@ -27,14 +27,14 @@
 ## 2. 描画・UI
 
 - [x] 原則（2026-07-11 決定・mock v0.2 反映）: **色は識別に集約**（レール/タブ下線/キャレット/スレッド色）。グラデ額縁・選択面などの装飾には使わない
-- [x] 方針（2026-07-11 決定）: **性能予算 = Zed 比 ~80% を下限目標**（入力レイテンシ・起動）。UX 優先。自動ベンチ（`zed/crates/editor_benchmarks` / `input_latency_ui` を移植）を M2 までに導入
+- [x] 方針（2026-07-11 決定）: **性能予算 = Zed 比 ~80% を下限目標**（入力レイテンシ・起動）。UX 優先。necoder 固有の計測境界で自動ベンチを導入し、Zed は同条件で外部計測する
 - [x] 決定（2026-07-11）: **ウィンドウモデル = レールで窓内切替、⌘⏎／右クリックで新窓**（1窓 = アクティブな project×branch。詳細 docs/ARCHITECTURE.md §5）
 - [ ] MVP: GPUI ウィンドウ + 行の**仮想化描画**（可視行のみ。3エディタ共通の中核）
 - [ ] MVP: スクロール、単一ペイン、タブバー
 - [ ] MVP: **プロジェクト色（titlebar 額縁 + アクティブタブ + statusbar）** ← 差別化の種。mock 反映済み
 - [ ] MVP: テーマ（dark/light 各1。トークンは mock の CSS 変数 `--bg0..3/--fg0..2/--syn-*` をそのまま構造体に）
 - [ ] v1: **テーマのきせかえ**（2026-07-11 決定）: テーマセレクタ（ライブプレビュー付き・Zed方式）+ **ユーザー定義テーマ = トークン上書きの JSON 1枚**（`themes/*.json`）。プロジェクト色（Peacock相当）とは独立に共存
-- [ ] later: VSCode / Zed テーマのインポート（zed `theme_importer` 移植）、テーマの拡張配布
+- [ ] later: 公開テーマ形式を解析する VSCode / Zed テーマのインポート（独立実装）、テーマの拡張配布
 - [ ] MVP: ステータスバー（各機能がアイテム登録する方式 — 最初から登録式に）
 - [ ] v1: ペイン分割、3方向ドック、デコレーション基盤（検索/diff/診断ハイライトの共通土台）
 - [ ] v1: 通知/トースト、コンテキストメニュー、ツールバー+パンくず
@@ -115,7 +115,7 @@
 
 - [ ] v1: **ACP クライアント**（Agent Client Protocol — 自前エージェントを作らず Claude Code / Codex / Gemini CLI を接続。Zed が実証済みの道。**Claude Code はアダプタが CLI を子プロセスで包む形＝既存サブスクのログインがそのまま使え、API キー課金不要**。キーポイントと確認済み 2026-07-11）
   - 土台（ソース確認済み 2026-07-11）: プロトコルは crates.io の **`agent-client-protocol`**（Apache-2.0、v1.2 系、agentclientprotocol/rust-sdk — Zed 自身もこれを外部依存で使用）。Claude 側は npm **`@agentclientprotocol/claude-agent-acp`** を子プロセス起動するだけ。**一から書くのはプロトコルでもアダプタでもなく「UI とプロセス管理」だけ**
-  - Zed in-tree の `acp_thread`(約14k行・スレッドモデル) / `agent_servers`(約6k行・アダプタの導入と起動) は **GPL-3.0-or-later** → **本プロジェクトは AGPL-3.0（2026-07-12 改定・当初 GPL-3.0）済みなので移植・改変ルート解禁**
+  - Zed in-tree の `acp_thread` / `agent_servers` は GPL-3.0-or-later のためコードを取り込まない。crates.io の `agent-client-protocol` と公開 ACP 仕様を使い、プロセス管理と UI は necoder の要件から独立実装する
 - [ ] v1: チャット UI の見た目は **VSCode Claude Code 拡張を踏襲**（⏺/⎿ トランスクリプト、✳ Thinking、Todos）。スレッド色は入力枠・送信ボタン・宛先チップまで貫通（mock 検証済み）
 - [ ] v1: **スレッド = 色付きタブ**（titlebar ビーコン + statusbar ドット連動。mock 反映済み）
 - [ ] v1: **トークン使用量の常時表示**（Zed+ACP で不可視だった痛点。クライアント UI の責任範囲として設計）

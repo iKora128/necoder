@@ -97,7 +97,7 @@ impl Workspace {
             .when(cfg!(target_os = "macos"), |element| element.pr_2())
             .border_b_1()
             .border_color(theme.border)
-            // 窓ドラッグ: down→move で開始（クリックと区別）。ダブルクリックで zoom（Zed 準拠）。
+            // 窓ドラッグ: down→move で開始（クリックと区別）。ダブルクリックで一般的な zoom 動作。
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, _cx| this.chrome.should_move_window = true),
@@ -1915,3 +1915,4 @@ impl Workspace {
         .detach();
     }
 }
+

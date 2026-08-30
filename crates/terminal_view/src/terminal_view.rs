@@ -1,11 +1,11 @@
 //! terminal_view — 統合ターミナル（M8）。`alacritty_terminal` を GPUI に載せる最小実装。
 //!
-//! 移植根拠は `docs/research/porting-git-terminal-lsp.md`。設計の要点:
+//! 独立実装の設計根拠は `docs/research/git-terminal-lsp-design-notes.md`。設計の要点:
 //! - **EventLoop が読取スレッド + vte parser**（自前で書かない）。PTY 出力 → parse → `Term` 更新 →
 //!   `EventListener::send_event(Wakeup)`。
 //! - **idle 0%**: 出力時のみ Wakeup → pump（`cx.spawn`）→ `sync`（スナップショット + notify）。**タイマー無し**。
 //! - 入力は v1 では `on_key_down` 一本化（印字も特殊キーも bytes 化）。IME 前編集は非対応（後続）。
-//! - 出典: zed `terminal` / `terminal_view`（GPL-3.0-or-later の設計を参考に新規実装。2026-07 時点）。
+//! - 公開 `alacritty_terminal` API と GPUI API を使った necoder 固有の実装。Zed の terminal code は取り込まない。
 
 mod dock;
 pub use dock::{TerminalDock, TerminalDockEvent, TerminalLaunch};
@@ -186,6 +186,15 @@ struct TerminalContent {
     display_offset: usize,
 }
 
+/// ドラッグ選択の最新スナップショット（ポインタ位置 + そのフレームの描画座標）。
+#[derive(Clone, Copy)]
+struct DragFrame {
+    position: gpui::Point<Pixels>,
+    origin: gpui::Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
+}
+
 /// 統合ターミナル（モデル + ビューを兼ねる 1 エンティティ）。
 pub struct TerminalView {
     term: Arc<FairMutex<Term<Listener>>>,
@@ -197,6 +206,11 @@ pub struct TerminalView {
     app_cursor: bool,
     /// マウス左ボタンを押してドラッグ選択中か（move で範囲を延ばす判定）。
     selecting: bool,
+    /// ドラッグ選択中の最新ポインタ位置とフレーム座標。ビュー外へ引っ張った時の
+    /// 自動スクロール tick が選択の引き直しに使う（up で消える）。
+    drag_frame: Option<DragFrame>,
+    /// 自動スクロールの tick ループが走っているか（二重 spawn 防止）。
+    drag_autoscroll_running: bool,
     /// ホイールの 1 行未満の端数持ち越し（トラックパッドのピクセル増分を行単位に畳む）。
     scroll_remainder: f32,
     exited: bool,
@@ -287,6 +301,8 @@ impl TerminalView {
             size,
             app_cursor: false,
             selecting: false,
+            drag_frame: None,
+            drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited,
             theme,
@@ -320,6 +336,8 @@ impl TerminalView {
             size,
             app_cursor: false,
             selecting: false,
+            drag_frame: None,
+            drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited: false,
             theme,
@@ -586,6 +604,13 @@ impl TerminalView {
         if !self.selecting {
             return;
         }
+        let frame = DragFrame {
+            position,
+            origin,
+            cell_width,
+            line_height,
+        };
+        self.drag_frame = Some(frame);
         let (row, column, side) =
             viewport_cell(position, origin, cell_width, line_height, self.size);
         let mut term = self.term.lock();
@@ -600,7 +625,63 @@ impl TerminalView {
             .and_then(|selection| selection.to_range(&term));
         drop(term);
         self.content.selection = range;
+        // ビュー外へ引っ張ったら、押している間スクロールし続ける（下=最新側 / 上=履歴側）。
+        if drag_overshoot(&frame, self.size) != 0.0 {
+            self.start_drag_autoscroll(cx);
+        }
         cx.notify();
+    }
+
+    /// ドラッグ自動スクロールの tick ループを起動する（既に走っていれば何もしない）。
+    /// 代替画面（less / vim 等）にスクロールバックは無いので対象外。
+    fn start_drag_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.drag_autoscroll_running {
+            return;
+        }
+        if self.term.lock().mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        self.drag_autoscroll_running = true;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(33))
+                    .await;
+                let keep_going = view
+                    .update(cx, |view, cx| view.drag_autoscroll_tick(cx))
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 自動スクロール 1 tick: はみ出し量に応じて表示を送り、選択端を新オフセットで引き直す。
+    /// 続行するなら true（選択終了・ビュー内復帰で自然停止）。
+    fn drag_autoscroll_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let overshoot = match self.drag_frame {
+            Some(frame) if self.selecting => drag_overshoot(&frame, self.size),
+            _ => 0.0,
+        };
+        if overshoot == 0.0 {
+            self.drag_autoscroll_running = false;
+            return false;
+        }
+        let Some(frame) = self.drag_frame else {
+            self.drag_autoscroll_running = false;
+            return false;
+        };
+        // 遠くへ引くほど速く（1〜5 行/tick）。上はみ出し（負）= 履歴へ = Delta 正。
+        let magnitude =
+            (1 + (overshoot.abs() / f32::from(frame.line_height).max(1.0)) as i32).min(5);
+        let lines = if overshoot < 0.0 { magnitude } else { -magnitude };
+        self.term.lock().scroll_display(Scroll::Delta(lines));
+        self.sync(cx);
+        // 新しい display_offset で選択端を引き直す（端の行に吸着し続ける）。
+        self.update_selection(frame.position, frame.origin, frame.cell_width, frame.line_height, cx);
+        true
     }
 
     /// ドラッグ選択の確定（左ボタン離し）。ドラッグ無し＝空選択は解除する。
@@ -609,6 +690,7 @@ impl TerminalView {
             return;
         }
         self.selecting = false;
+        self.drag_frame = None;
         let mut term = self.term.lock();
         let empty = term
             .selection
@@ -624,6 +706,21 @@ impl TerminalView {
         drop(term);
         self.content.selection = range;
         cx.notify();
+    }
+}
+
+/// ポインタの上下はみ出し量（px）。負 = ビュー上端より上（履歴方向）、正 = 下端より下。
+/// ビュー内なら 0（自動スクロール停止の判定を兼ねる）。
+fn drag_overshoot(frame: &DragFrame, size: TerminalSize) -> f32 {
+    let top = f32::from(frame.origin.y);
+    let bottom = top + size.lines as f32 * f32::from(frame.line_height);
+    let y = f32::from(frame.position.y);
+    if y < top {
+        y - top
+    } else if y > bottom {
+        y - bottom
+    } else {
+        0.0
     }
 }
 

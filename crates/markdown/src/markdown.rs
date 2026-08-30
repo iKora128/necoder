@@ -5,9 +5,9 @@
 //! - `agent_panel` の transcript（Agent 発話・ストリーミング。ブロック毎に選択リージョン化＝M13）
 //! - `editor_view` の `.md` 整形プレビュー（source ⇄ rendered トグル）
 //!
-//! パーサは permissive な **pulldown-cmark**（MIT・CommonMark+GFM）を借りる。Zed にも `markdown`
-//! crate があるが GPL のため**移植せず手法のみ参考**（DECISIONS §5・git=CLI / terminal=alacritty と
-//! 同じ「読んで自作 or permissive で代替」路線）。
+//! パーサは permissive な **pulldown-cmark**（MIT・CommonMark+GFM）を借りる。Zed の `markdown`
+//! crate のコードは取り込まず、CommonMark 仕様と pulldown-cmark の公開 API から独立に実装する
+//! （DECISIONS §5）。
 //!
 //! v1 で扱う範囲: 見出し / 段落 / 箇条書き・番号・タスクリスト（ネスト深さ保持）/ フェンスコード /
 //! 水平線 / 画像（ブロック扱い） / インライン（**強調**・*斜体*・~~打消し~~・`コード`・リンク）。

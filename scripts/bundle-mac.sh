@@ -49,6 +49,12 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/necoder"
 cp "$ICON_DIR/necoder.icns" "$APP/Contents/Resources/necoder.icns"
+cp LICENSE "$APP/Contents/Resources/LICENSE-AGPL-3.0.txt"
+cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
+mkdir -p "$APP/Contents/Resources/licenses"
+cp third_party/licenses/*.txt "$APP/Contents/Resources/licenses/"
+# ターミナル用 `ne` コマンドはバンドル同梱物ではなく、本体の `necoder install-cli` /
+# 設定 > コマンドライン が /usr/local/bin へ委譲シムを生成する（crates/cli_shim）。
 
 # 3b) remote SSH サーバーバイナリを同梱（#1・旧 M9）。インストール版でも配備できるように。
 #  - 同 OS 用（mac→mac / ssh://localhost）: MacOS/ の隣に置く（find_local_remote_server の sibling 探索先）。
