@@ -220,6 +220,9 @@ fn run_uninstall() -> Result<()> {
 mod tests {
     use super::*;
 
+    // Unix 形式の絶対パス（`/work/…`）を前提に書いている（Windows では `/…` は絶対パスに
+    // ならず区切りも `\` になる）。`ne` の Windows 対応は W フェーズ（supported()=false）。
+    #[cfg(unix)]
     #[test]
     fn resolve_absolutizes_against_cwd() {
         let cwd = Path::new("/work/repo");
