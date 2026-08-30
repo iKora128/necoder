@@ -231,11 +231,14 @@ pub enum SessionCommand {
     SetConfig { config_id: String, value_id: String },
 }
 
-/// ターンループが待つ 2 系統（エージェントからの更新 / UI からのコマンド）。
+/// ターンループが待つ 3 系統（エージェントからの更新 / UI からのコマンド / prompt 応答）。
 /// `select!` の戻り値を所有型にして、`session` と `command_rx` の借用をブロック内で閉じる。
 enum TurnEvent {
     Update(Result<acp::SessionMessage, acp::Error>),
     Command(Option<SessionCommand>),
+    /// `session/prompt` の応答＝ターンの終端。`Ok` は StopReason、`Err` は API/エージェント側の
+    /// 失敗（例: ストリーミング切断）。どちらでもセッション自体は生きている。
+    PromptFinished(Result<v1::PromptResponse, acp::Error>),
 }
 
 /// ACP エージェント（claude-agent-acp）の起動設定。
@@ -1188,31 +1191,39 @@ pub async fn run_session_on(
                         continue;
                     }
                 };
-                if session.send_prompt(prompt).is_err() {
-                    // 送信路が死んだ＝以降このセッションは使えない。**終端イベントを必ず出す**
-                    // （出さないと UI 側の `running` が落ちず「稼働中」に取り残される）。
-                    event_tx
-                        .unbounded_send(AgentEvent::Failed(
-                            "prompt を送信できませんでした（セッションが閉じています）".into(),
-                        ))
-                        .ok();
-                    break;
-                }
-                // 実送信できた＝ここからが本当のターン開始。deferred から走った 2 本目も含め、UI に
+                // `Session::send_prompt` は使わない: あれは応答ハンドラを接続内タスクとして spawn
+                // するため、エージェントがエラー応答を返す（例: API のストリーミング切断）と
+                // タスクアクター経由で接続ドライバごと落ち、「ACP セッションが異常終了」になる。
+                // 自前送信して応答をターンループで待てば、失敗を**そのターンだけ**に留められる
+                // （応答が返せている＝接続もプロセスも生きているので、セッションを維持して再送できる）。
+                let prompt_response = connection
+                    .send_request(v1::PromptRequest::new(
+                        session_id.clone(),
+                        vec![prompt.into()],
+                    ))
+                    .block_task()
+                    .fuse();
+                futures::pin_mut!(prompt_response);
+                // ここからが本当のターン開始。deferred から走った 2 本目も含め、UI に
                 // running を立てさせる（楽観 UI の取りこぼしを塞ぐ）。TurnEnded と対になる。
                 event_tx.unbounded_send(AgentEvent::TurnStarted).ok();
                 loop {
-                    // エージェントの更新と UI のコマンドを**同時に**待つ。こうしないと
+                    // エージェントの更新・UI のコマンド・prompt 応答を**同時に**待つ。こうしないと
                     // ターン中（`read_update` で待っている間）に cancel を受け取れない。
                     // `read_update` はチャネル受信なので途中で future を捨てても取りこぼさない。
+                    // `select_biased!` で更新をコマンド・応答より先に読む: 応答（終端）が届いた
+                    // 時点で未処理の update がチャネルに残っていることがあり（応答は stream 上
+                    // 最後だが、両者が同時に ready になる）、公平 select だと末尾のチャンクを
+                    // 取りこぼす。
                     let turn_event = {
                         use futures::future::FutureExt as _;
                         let update = session.read_update().fuse();
                         let command = command_rx.next().fuse();
                         futures::pin_mut!(update, command);
-                        futures::select! {
+                        futures::select_biased! {
                             update = update => TurnEvent::Update(update),
                             command = command => TurnEvent::Command(command),
+                            result = prompt_response => TurnEvent::PromptFinished(result),
                         }
                     };
                     let update = match turn_event {
@@ -1233,6 +1244,30 @@ pub async fn run_session_on(
                         TurnEvent::Command(None) => break,
                         TurnEvent::Update(Ok(update)) => update,
                         TurnEvent::Update(Err(error)) => {
+                            event_tx
+                                .unbounded_send(AgentEvent::Failed(error.to_string()))
+                                .ok();
+                            break;
+                        }
+                        // ターンの終端。中断（拒否/キャンセル）は「注意を要する終わり方」として
+                        // 区別する。上限到達・未知バリアントは完了扱い（会話は続けられる）。
+                        TurnEvent::PromptFinished(Ok(response)) => {
+                            let end = match response.stop_reason {
+                                v1::StopReason::Refusal | v1::StopReason::Cancelled => {
+                                    TurnEnd::Interrupted
+                                }
+                                _ => TurnEnd::Completed,
+                            };
+                            event_tx
+                                .unbounded_send(AgentEvent::TurnEnded { reason: end })
+                                .ok();
+                            break;
+                        }
+                        // prompt がエラー応答で終わった（例: 「Connection closed mid-response」＝
+                        // API のストリーミング切断）。Failed は UI 側で running を落として
+                        // transcript にエラーを出す終端イベント。このターンだけ畳み、外側ループへ
+                        // 戻ってセッションを維持する（ユーザーは同じスレッドで再送できる）。
+                        TurnEvent::PromptFinished(Err(error)) => {
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
                                 .ok();
@@ -1379,21 +1414,9 @@ pub async fn run_session_on(
                                 .await
                                 .otherwise_ignore()?;
                         }
-                        acp::SessionMessage::StopReason(reason) => {
-                            // 中断（拒否/キャンセル）は「注意を要する終わり方」として区別する。
-                            // 上限到達・未知バリアントは完了扱い（会話は続けられる）。
-                            let end = match reason {
-                                v1::StopReason::Refusal | v1::StopReason::Cancelled => {
-                                    TurnEnd::Interrupted
-                                }
-                                _ => TurnEnd::Completed,
-                            };
-                            event_tx
-                                .unbounded_send(AgentEvent::TurnEnded { reason: end })
-                                .ok();
-                            break;
-                        }
-                        // 将来のバリアント（enum は #[non_exhaustive]）は無視して読み続ける。
+                        // StopReason は `send_prompt` 経由でしか流れず、ここは自前送信
+                        // （PromptFinished で終端を受ける）なので届かない。将来のバリアント
+                        // （enum は #[non_exhaustive]）ともども無視して読み続ける。
                         _ => {}
                     }
                 }
@@ -1700,6 +1723,121 @@ mod tests {
         }))
         .expect("schema をパースできる");
         assert!(simplify_elicitation_form(&text_schema).is_none());
+    }
+
+    /// 回帰テスト: `session/prompt` がエラー応答（例: API のストリーミング切断「Connection
+    /// closed mid-response」）で終わっても、セッションは死なず**そのターンだけ** Failed で畳まれ、
+    /// 同じセッションで次の prompt が完走すること。かつては `Session::send_prompt` が応答ハンドラを
+    /// 接続内タスクに spawn していたため、エラーが接続ドライバごと落として「ACP セッションが
+    /// 異常終了」になっていた。偽エージェント（python3 の改行区切り JSON-RPC）で再現する。
+    #[test]
+    fn prompt_error_fails_turn_but_keeps_session() {
+        const FAKE_AGENT: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+prompts = 0
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "sess-1"}})
+    elif method == "session/prompt":
+        prompts += 1
+        if prompts == 1:
+            send({"jsonrpc": "2.0", "id": rid,
+                  "error": {"code": -32603,
+                            "message": "Internal error: API Error: Connection closed mid-response"}})
+        else:
+            send({"jsonrpc": "2.0", "method": "session/update",
+                  "params": {"sessionId": "sess-1",
+                             "update": {"sessionUpdate": "agent_message_chunk",
+                                        "content": {"type": "text", "text": "recovered"}}}})
+            send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+"#;
+        let Some(python) = find_in_path("python3") else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let cwd = std::env::current_dir().expect("cwd");
+        let command = AgentCommand {
+            path: python,
+            args: vec!["-c".into(), FAKE_AGENT.into()],
+            cwd,
+        };
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("1回目".into()))
+            .expect("send");
+
+        let events = futures::executor::block_on(async move {
+            let session = run_session(command, None, command_rx, event_tx);
+            let scenario = async move {
+                let mut seen = Vec::new();
+                // 1 ターン目: エラー応答 → Failed（終端）。ここでセッションはまだ生きている。
+                loop {
+                    let event = event_rx.next().await.expect("イベントが途切れた");
+                    let failed = matches!(event, AgentEvent::Failed(_));
+                    seen.push(event);
+                    if failed {
+                        break;
+                    }
+                }
+                // 同じセッションへ再送 → 今度は完走する。command_tx はターン完走**後**に
+                // drop する（ターン中に閉じるとループが畳まれて途中終了してしまう）。
+                command_tx
+                    .unbounded_send(SessionCommand::Prompt("2回目".into()))
+                    .expect("再送 send");
+                loop {
+                    let event = event_rx.next().await.expect("イベントが途切れた");
+                    let ended = matches!(event, AgentEvent::TurnEnded { .. });
+                    seen.push(event);
+                    if ended {
+                        break;
+                    }
+                }
+                drop(command_tx);
+                seen
+            };
+            let (outcome, seen) = futures::join!(session, scenario);
+            outcome.expect("セッションは正常終了する");
+            seen
+        });
+
+        assert!(matches!(events[0], AgentEvent::TurnStarted), "{events:?}");
+        match &events[1] {
+            AgentEvent::Failed(message) => assert!(
+                message.contains("Connection closed mid-response"),
+                "{message}"
+            ),
+            other => panic!("Failed を期待: {other:?}"),
+        }
+        assert!(matches!(events[2], AgentEvent::TurnStarted), "{events:?}");
+        match &events[3] {
+            AgentEvent::AgentChunk(text) => assert_eq!(text, "recovered"),
+            other => panic!("AgentChunk を期待: {other:?}"),
+        }
+        assert!(
+            matches!(
+                events[4],
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed
+                }
+            ),
+            "{events:?}"
+        );
+        assert_eq!(events.len(), 5, "{events:?}");
     }
 
     #[test]
