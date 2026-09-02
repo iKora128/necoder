@@ -77,6 +77,8 @@ impl TodoPanel {
         let editor = cx.new(|cx| EditorView::plain(self.theme.clone(), self.accent, true, cx));
         cx.subscribe(&editor, |panel, _editor, event, cx| match event {
             ComposerEvent::Submit => panel.submit_add(cx),
+            // 追加入力は固定高（1 行）なので高さ追従は不要。
+            ComposerEvent::ContentHeightChanged => {}
         })
         .detach();
         let handle = editor.read(cx).focus_handle(cx);

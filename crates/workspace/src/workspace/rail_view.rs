@@ -122,6 +122,9 @@ impl Workspace {
                         .as_ref()
                         .map(|icon| icon.to_string())
                         .unwrap_or_else(|| slot.name.chars().next().unwrap_or('•').to_string());
+                    // 画像アイコン（`.necoder/icon.png` 等・UI-SPEC §3）。モノグラムより優先。
+                    // 色の枠はそのまま残す＝識別はあくまで色、画像は装飾（§1.3 を壊さない）。
+                    let icon_image = slot.icon_image.clone();
                     let name = slot.name.clone();
                     div()
                         .id(("rail-project", index))
@@ -144,7 +147,19 @@ impl Workspace {
                         .cursor_pointer()
                         // 非アクティブは hover で色が濃くなる＝クリックできる合図（Zed の気持ちよさ）
                         .hover(|style| style.bg(color.alpha(0.24)).border_color(color))
-                        .child(monogram)
+                        .child(match icon_image {
+                            Some(path) => div()
+                                .size_full()
+                                .rounded(px(6.)) // 枠 30/角丸8 − border2 の内側に沿わせる
+                                .overflow_hidden()
+                                .child(
+                                    gpui::img(path)
+                                        .size_full()
+                                        .object_fit(gpui::ObjectFit::Cover),
+                                )
+                                .into_any_element(),
+                            None => monogram.into_any_element(),
+                        })
                         .when(slot.remote_host.is_some(), |element| {
                             // リモート slot の見分け（#2）: 右下に server バッジ（SSH 接続先の目印）。
                             element.child(

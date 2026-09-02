@@ -32,6 +32,10 @@ packages and in `Cargo.lock`. `cargo deny check` audits the configured registry 
 licenses, and advisories, but publish=false packages require the separate license-boundary check in CI.
 This notice is a focused distribution notice, not a replacement for that complete dependency inventory.
 
+- `wry` 0.56.1: Apache-2.0 OR MIT, Tauri Programme within The Commons Conservancy and contributors.
+  It is used only as a thin child-view binding to WKWebView on macOS and WebView2 on Windows. necoder
+  does not bundle WebKit, Chromium, or the WebView2 runtime.
+
 ## Bundled fonts
 
 - IBM Plex Sans JP: SIL Open Font License 1.1. See `assets/fonts/IBMPlexSansJP-OFL.txt`.

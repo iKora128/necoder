@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["zed"]
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
@@ -110,6 +110,7 @@ acp_client = { path = "crates/acp_client" }
 agent_panel = { path = "crates/agent_panel" }
 ui = { path = "crates/ui" }
 terminal_view = { path = "crates/terminal_view" }
+webview_view = { path = "crates/webview_view" }
 workspace = { path = "crates/workspace" }
 
 # ビルド成果物の容量対策（2026-07-25）。cargo 既定の debug = 2（フルデバッグ情報）だと

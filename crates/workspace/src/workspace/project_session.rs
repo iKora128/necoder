@@ -18,6 +18,8 @@ pub(crate) struct ProjectSlot {
     pub(crate) active_file: usize,
     /// `.necoder/settings.json` の絵文字アイコン（None = 頭文字モノグラム）。
     pub(crate) icon: Option<SharedString>,
+    /// 画像アイコン（settings の `icon` 画像パス or 規約 `.necoder/icon.png`）。絵文字より優先。
+    pub(crate) icon_image: Option<PathBuf>,
     /// リンク worktree ならブランチ名。通常/メイン slot は None。
     pub(crate) worktree_branch: Option<String>,
 }
@@ -432,12 +434,13 @@ impl Workspace {
                         name: worktree.name().into(),
                         branch: None,
                         remote_host,
-                        color: identity.0.unwrap_or_else(|| project_color(index)),
+                        color: identity.color.unwrap_or_else(|| project_color(index)),
                         worktree: Rc::new(worktree),
                         explorer: ExplorerProject::default(),
                         open_files: Vec::new(),
                         active_file: 0,
-                        icon: identity.1,
+                        icon: identity.icon,
+                        icon_image: identity.icon_image,
                         worktree_branch: None,
                     };
                     slot.refresh();
@@ -599,6 +602,7 @@ impl Workspace {
                 fleet_cell_menu: None,
                 fleet_bottom_view: FleetBottomView::News,
                 agent_full_screen: std::env::var_os("NECODER_AGENT_FULLSCREEN").is_some(),
+                pending_agent_full_screen_toggle: false,
                 bottom_height: BOTTOM_DOCK_HEIGHT,
                 resizing_bottom: false,
                 resize_start_y: 0.0,
@@ -681,6 +685,7 @@ impl Workspace {
             visual_ticker: false,
             control_summary: None,
             control_summary_gen: 0,
+            focus_recovery_installed: false,
         };
         workspace.refresh_all_git_status(cx); // ツリー/タブの git 色分け + herd の各 space のブランチ（M14 ①）
                                               // 開発用: NECODER_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。

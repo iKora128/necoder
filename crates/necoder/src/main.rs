@@ -371,6 +371,12 @@ fn main() {
     if mcp::run() {
         return;
     }
+    // 単一インスタンスの防波堤: 生きた GUI が居れば argv を IPC で渡して即終了（Dock に
+    // アイコンが増えない・Turso 排他ロックの保険）。`open -n` 直叩きや旧 `ne` シム経由など、
+    // 二重起動になる残りの入口をここで畳む（dev ビルドと ssh:// 起動は対象外・cli.rs 参照）。
+    if cli::forward_launch_to_running_gui() {
+        return;
+    }
     let startup = Instant::now();
     // 起動の内訳（`NECODER_STARTUP_LOG=1`）。`startup_ms` の 1 数字だけでは
     // **どの段が重いか**が分からない。2026-08-23 に Windows の起動が mac の ~2.4 倍
@@ -669,7 +675,7 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: NECODER_TAB_RENAME_PROBE=1 で Agent タブの改名入力を開く（2s 後・#4 の描画検証）。
+                // 開発用: NECODER_TAB_RENAME_PROBE=1 で Agent タブの改名モーダルを開く（2s 後・#4 の描画検証）。
                 if std::env::var("NECODER_TAB_RENAME_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
@@ -964,6 +970,40 @@ fn main() {
                         .detach();
                     }
                 }
+                // 開発用: NECODER_HTML_PREVIEW_PROBE=1 でアクティブ .html を OS 標準 WebView で表示する。
+                if std::env::var("NECODER_HTML_PREVIEW_PROBE").is_ok_and(|value| value == "1") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(500))
+                                .await;
+                            let _ = handle.update(cx, |workspace, _window, cx| {
+                                workspace.debug_html_preview(cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: NECODER_HTML_PREVIEW_TOGGLE_MS=3000,9000 で指定時刻（ms）ごとに
+                // source ⇄ preview をトグルする（WebView 自動破棄→遅延再生成の offscreen 検証）。
+                if let Ok(schedule) = std::env::var("NECODER_HTML_PREVIEW_TOGGLE_MS") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        for delay_ms in schedule
+                            .split(',')
+                            .filter_map(|value| value.trim().parse::<u64>().ok())
+                        {
+                            cx.spawn(async move |_workspace, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                                let _ = handle.update(cx, |workspace, _window, cx| {
+                                    workspace.debug_html_preview_toggle(cx);
+                                });
+                            })
+                            .detach();
+                        }
+                    }
+                }
                 // 開発用: NECODER_FORMAT_PROBE=1 で LSP 初期化後にフォーマット→保存を実行（既定 8s 後）。
                 if std::env::var_os("NECODER_FORMAT_PROBE").is_some() {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
@@ -1084,8 +1124,10 @@ fn main() {
             }
         }
         // Finder/Dock から届いた file:// URL を workspace へ流す（登録は run 前・main 冒頭）。
+        // `ne` CLI の IPC 不通フォールバック（cli.rs の `open -a`）もこの経路に乗るため、
+        // 最初の窓が閉じられていたら生きている workspace 窓へ引き継いで届ける（取りこぼさない）。
         let mut open_urls_rx = open_urls_rx;
-        let open_urls_window = window;
+        let mut open_urls_window = window;
         cx.spawn(async move |cx| {
             use futures::StreamExt as _;
             while let Some(urls) = open_urls_rx.next().await {
@@ -1099,11 +1141,24 @@ fn main() {
                     continue;
                 }
                 let delivered = open_urls_window.update(cx, |workspace, window, cx| {
+                    workspace.open_external_paths(paths.clone(), window, cx);
+                });
+                if delivered.is_ok() {
+                    continue;
+                }
+                // 窓が閉じられていた → 生きている workspace 窓を探して引き継ぐ。
+                // 1 つも無ければ（終了中など）この分は落として次を待つ。
+                let Some(next_window) = cx.update(|cx| {
+                    cx.windows()
+                        .into_iter()
+                        .find_map(|window| window.downcast::<Workspace>())
+                }) else {
+                    continue;
+                };
+                open_urls_window = next_window;
+                let _ = open_urls_window.update(cx, |workspace, window, cx| {
                     workspace.open_external_paths(paths, window, cx);
                 });
-                if delivered.is_err() {
-                    break; // 窓が閉じられた
-                }
             }
         })
         .detach();

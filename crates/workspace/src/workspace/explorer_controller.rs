@@ -514,7 +514,7 @@ impl Workspace {
                     .map(|slot| slot.color)
             })
             .flatten();
-        let color = inherited.unwrap_or(match identity.0 {
+        let color = inherited.unwrap_or(match identity.color {
             Some(color) if !self.color_in_use(color) => color,
             _ => self.next_free_color(),
         });
@@ -532,7 +532,8 @@ impl Workspace {
             explorer: ExplorerProject::default(),
             open_files: Vec::new(),
             active_file: 0,
-            icon: identity.1,
+            icon: identity.icon,
+            icon_image: identity.icon_image,
             worktree_branch: branch,
         };
         slot.refresh();
@@ -998,6 +999,7 @@ impl Workspace {
             editor.update(cx, |view, cx| {
                 view.set_typography(font_size, tab_size, cx);
                 view.set_soft_wrap(soft_wrap, cx);
+                view.set_html_preview_evict_minutes(current.html_preview_evict_minutes, cx);
             });
         }
 

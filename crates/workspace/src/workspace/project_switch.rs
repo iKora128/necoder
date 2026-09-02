@@ -152,7 +152,7 @@ impl Workspace {
     /// プロジェクト切替後、新 session の「元居た面」へフォーカスを移す。
     /// Agent → composer / 端末 → アクティブ端末 / それ以外（エディタ・左ドック等）→ アクティブ
     /// エディタ（タブが無ければ workspace 本体）。どの分岐でも必ず描画中の要素に着地させる。
-    fn focus_session_surface(
+    pub(crate) fn focus_session_surface(
         &mut self,
         agent_had_focus: bool,
         terminal_had_focus: bool,
@@ -173,8 +173,12 @@ impl Workspace {
         }
         match self.active_editor() {
             Some(editor) => {
-                let handle = editor.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
+                if editor.read(cx).rendered_html() {
+                    editor.update(cx, |editor, cx| editor.set_surface_active(true, true, cx));
+                } else {
+                    let handle = editor.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
             }
             None => window.focus(&self.focus_handle, cx),
         }

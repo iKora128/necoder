@@ -92,11 +92,12 @@
 
 ## 9. 拡張モデル ← 差別化の本丸
 
+- [x] ローカル HTML プレビュー（ソース⇄表示・⌘⇧V）。アプリ UI には使わず、macOS=WKWebView / Windows=WebView2 を遅延生成。Chromium/ブラウザエンジンは同梱しない
 - [ ] v1: **登録境界を最初に切る**（コアは機能を知らない。コマンド/キーマップ/テーマ/ステータスバー項目/パネルを登録式に — 本体機能自身が最初の「拡張」として実装される状態を作る）
 - [ ] v1: 設計 ADR: 宣言的 UI 拡張の形式（webview なし・プロセス分離なしで、ネイティブ部品の宣言的合成をどこまで許すか。VSCode の contribution points 53種のうち views/statusBarItems/menus/commands/themes が宣言型で実証済み — このリストが実装カタログ）
 - [ ] later: WASM ホスト（Zed 方式: wasmtime + capability 宣言制）で資産拡張（言語/テーマ）から開始
 - [ ] later: 宣言的 UI 拡張の実装、拡張の配布方法
-- [ ] never: webview、Marketplace 事業
+- [ ] never: 拡張/API向けの汎用 webview（HTMLプレビューの隔離用途は除く）、Marketplace 事業
 
 ## 10. 設定・キーマップ
 

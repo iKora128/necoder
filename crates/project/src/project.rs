@@ -319,6 +319,34 @@ where
     host.run_command(&CommandSpec::new("git", dir).args(hardened))
 }
 
+/// [`run_git`] の env 付き版。ネットワークを触る git（fetch 等）で
+/// `GIT_TERMINAL_PROMPT=0` を差すために使う（credential 対話で永久に固まるのを防ぐ）。
+fn run_git_with_env<I, S>(
+    host: &dyn Host,
+    dir: &Path,
+    args: I,
+    env: &[(&str, &str)],
+) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut hardened: Vec<String> = vec![
+        "-c".into(),
+        "core.fsmonitor=false".into(),
+        "-c".into(),
+        "core.hooksPath=/dev/null".into(),
+        "-c".into(),
+        "protocol.ext.allow=never".into(),
+    ];
+    hardened.extend(args.into_iter().map(Into::into));
+    let mut spec = CommandSpec::new("git", dir).args(hardened);
+    for (key, value) in env {
+        spec.env.insert((*key).to_string(), (*value).to_string());
+    }
+    host.run_command(&spec)
+}
+
 /// `dir` を含む git リポジトリのルート（`git rev-parse --show-toplevel`）。repo 外なら `None`。
 fn git_repo_root_on(host: &dyn Host, dir: &Path) -> Option<PathBuf> {
     let output = run_git(host, dir, ["rev-parse", "--show-toplevel"]).ok()?;
@@ -534,6 +562,76 @@ pub fn switch_branch_on(host: &dyn Host, dir: &Path, branch: &str) -> Result<()>
         String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(())
+}
+
+/// [`sync_current_branch_on`] の結果。呼び出し側（+ Task）は FastForwarded の時だけ toast する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchSyncOutcome {
+    /// upstream へ早送りした（取り込んだコミット数付き）。
+    FastForwarded { branch: String, commits: u64 },
+    /// fetch はしたが既に最新だった。
+    UpToDate,
+    /// 同期の対象外または安全に進められない状態（理由はログ/デバッグ用の固定文字列）:
+    /// detached / upstream 無し / fetch 失敗（オフライン含む）/ dirty / diverged。
+    Skipped(&'static str),
+}
+
+/// worktree を切る前の「土台の鮮度」対策（2026-08-30・Orca の default branch 自動同期を参考）:
+/// checked-out ブランチを upstream へ fast-forward する。①fetch ②clean 確認 ③ff-only の順で、
+/// **どの段階で無理でも黙って諦める**（オフラインや fork 状態で worktree 作成を止めない）。
+/// merge/rebase を勝手にしない＝早送りだけ。dirty なら fetch 止まり（作業ツリーに触らない）。
+pub fn sync_current_branch_on(host: &dyn Host, dir: &Path) -> BranchSyncOutcome {
+    // detached HEAD（rebase 中・タグ checkout 等）は対象外。
+    let branch = match run_git(host, dir, ["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Ok(output) if output.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => return BranchSyncOutcome::Skipped("head"),
+    };
+    if branch.is_empty() || branch == "HEAD" {
+        return BranchSyncOutcome::Skipped("detached");
+    }
+    // fetch（credential 対話で固まらないよう GIT_TERMINAL_PROMPT=0）。remote 未設定もここで落ちる。
+    let fetched = run_git_with_env(
+        host,
+        dir,
+        ["fetch", "--quiet"],
+        &[("GIT_TERMINAL_PROMPT", "0")],
+    );
+    match fetched {
+        Ok(output) if output.success() => {}
+        _ => return BranchSyncOutcome::Skipped("fetch"),
+    }
+    // upstream 有無 + ahead/behind + dirty を 1 呼び出しで（`## main...origin/main [behind 2]`）。
+    let status_output = match run_git(host, dir, ["status", "--porcelain", "--branch"]) {
+        Ok(output) if output.success() => String::from_utf8_lossy(&output.stdout).to_string(),
+        _ => return BranchSyncOutcome::Skipped("status"),
+    };
+    if !status_output
+        .lines()
+        .next()
+        .is_some_and(|first| first.contains("..."))
+    {
+        return BranchSyncOutcome::Skipped("no-upstream");
+    }
+    let status = parse_status_branch(&status_output);
+    if status.dirty {
+        return BranchSyncOutcome::Skipped("dirty");
+    }
+    if status.behind == 0 {
+        return BranchSyncOutcome::UpToDate;
+    }
+    if status.ahead > 0 {
+        return BranchSyncOutcome::Skipped("diverged");
+    }
+    let merged = run_git(host, dir, ["merge", "--ff-only", "--quiet", "@{upstream}"]);
+    match merged {
+        Ok(output) if output.success() => BranchSyncOutcome::FastForwarded {
+            branch,
+            commits: status.behind as u64,
+        },
+        _ => BranchSyncOutcome::Skipped("ff"),
+    }
 }
 
 /// 既存ブランチの worktree を作る（`git worktree add <path> <branch>`）。
@@ -2239,6 +2337,98 @@ mod tests {
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].kind, HunkKind::Removed);
         assert_eq!(removed[0].new_range, 1..1);
+    }
+
+    /// [`sync_current_branch_on`] の実挙動: ローカル bare を upstream に見立て、
+    /// ①behind → 早送り ②最新 → UpToDate ③dirty → スキップ（fetch 止まり）を固定する。
+    /// ネットワーク不要（file:// 相当のローカル remote）。
+    #[test]
+    fn sync_current_branch_fast_forwards_and_skips_safely() {
+        let base = scratch("branch-sync");
+        let origin = base.join("origin.git");
+        let upstream_work = base.join("upstream-work");
+        let clone = base.join("clone");
+        std::fs::create_dir_all(&base).unwrap();
+        let git_in = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        // git が無い環境ではスキップ（CI 等）。bare にも `-b main` — 既定ブランチが master の
+        // 環境（CI は init.defaultBranch 未設定）だと HEAD が存在しない master を指し、
+        // clone が unborn HEAD になって Skipped("head") に化ける。
+        if !git_in(&base, &["init", "-q", "-b", "main", "--bare", "origin.git"])
+            .status
+            .success()
+        {
+            return;
+        }
+        // upstream 側の作業 repo → origin へ 1 コミット push。
+        git_in(&base, &["init", "-q", "-b", "main", "upstream-work"]);
+        let config = |dir: &Path| {
+            git_in(dir, &["config", "user.email", "t@example.com"]);
+            git_in(dir, &["config", "user.name", "tester"]);
+        };
+        config(&upstream_work);
+        std::fs::write(upstream_work.join("a.txt"), "one\n").unwrap();
+        git_in(&upstream_work, &["add", "a.txt"]);
+        git_in(&upstream_work, &["commit", "-q", "-m", "c1"]);
+        git_in(
+            &upstream_work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git_in(&upstream_work, &["push", "-q", "-u", "origin", "main"]);
+        // clone（同期対象）。
+        git_in(
+            &base,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        config(&clone);
+        let host = LocalHost;
+        // ①最新なら UpToDate。
+        assert_eq!(
+            sync_current_branch_on(&host, &clone),
+            BranchSyncOutcome::UpToDate
+        );
+        // upstream 側で 2 コミット進める → clone は behind 2。
+        std::fs::write(upstream_work.join("a.txt"), "two\n").unwrap();
+        git_in(&upstream_work, &["commit", "-q", "-am", "c2"]);
+        std::fs::write(upstream_work.join("a.txt"), "three\n").unwrap();
+        git_in(&upstream_work, &["commit", "-q", "-am", "c3"]);
+        git_in(&upstream_work, &["push", "-q"]);
+        // ②behind → 早送り 2 コミット。作業ツリーも追従している。
+        assert_eq!(
+            sync_current_branch_on(&host, &clone),
+            BranchSyncOutcome::FastForwarded {
+                branch: "main".to_string(),
+                commits: 2
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join("a.txt")).unwrap(),
+            "three\n"
+        );
+        // ③dirty なら作業ツリーに触らない（スキップ）。
+        std::fs::write(upstream_work.join("a.txt"), "four\n").unwrap();
+        git_in(&upstream_work, &["commit", "-q", "-am", "c4"]);
+        git_in(&upstream_work, &["push", "-q"]);
+        std::fs::write(clone.join("a.txt"), "local edit\n").unwrap();
+        assert_eq!(
+            sync_current_branch_on(&host, &clone),
+            BranchSyncOutcome::Skipped("dirty")
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join("a.txt")).unwrap(),
+            "local edit\n"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
