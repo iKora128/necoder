@@ -102,6 +102,18 @@ impl CommandSpec {
         self.args.extend(args.into_iter().map(Into::into));
         self
     }
+
+    /// 環境変数を積む（子プロセスの env に足す。既存の env は消さない）。
+    pub fn envs(
+        mut self,
+        env: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.env.extend(
+            env.into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

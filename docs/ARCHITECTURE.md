@@ -165,6 +165,22 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
   ④**checkpoint のメタデータ**（turn→file→blob hash。blob 本体は content-addressed ファイル or DB — M12 着手時に比較）
 - **隔離**: DB アクセスは薄い `storage` crate に閉じ込める（SQL を UI 層に漏らさない）。Turso はまだ若いので、問題が出たら rusqlite へ 1 crate の差し替えで退避できる面を保つ。書き込みは全て background executor（async API がそのまま「UI スレッドで塞がない」規律に合う）
 - `state.json`（開タブ・レイアウト）は当面 JSON のまま。肥大したら necoder.db へ統合
+- **キャッシュ（捨ててよい・真実ではない）**: `external_agents/registry/registry.json` = ACP 公開レジストリの写し（`paths::acp_registry_cache`）。消えても組み込みカタログで動く
+
+### 7.1 エージェントの版はどこから来るか（2026-09-02）
+
+**解決順は「設定 → 公開レジストリ → 組み込みカタログ」**（`AgentKind::resolve_command`）。
+`const AGENTS` に版を焼き込むだけだと、エージェントを 1 つ上げるたびに necoder のリリースが要る
+（実際 codex-acp は 1.1.14 のまま止まり upstream は 1.8 まで進んでいた）。
+
+- **設定** = `settings.json` の `agent_servers.<id>`。`{"type":"custom","command":…,"args":[],"env":{}}`
+  で起動を丸ごと差し替え、`{"type":"registry","env":{}}` で env だけ足す。**command を持つのは custom だけ** —
+  レジストリ管理のコマンドを半端に差し替えて版と食い違う状態を作らせない
+- **レジストリ** = ACP プロジェクトの公開 CDN（ベンダー中立）。起動時はキャッシュだけ読み、
+  ネットワークは起動 12 秒後に背景で後追い（1 時間スロットル）。**走行中のスレッドには適用しない**
+- **組み込みカタログ** = `const AGENTS`。necoder が検証した既定値で、オフライン・未登録時の土台
+- npm 指定は**完全一致ピンにしない**（`pkg@0.0.0 - X` の上限範囲）。npm の `min-release-age` 環境で
+  公開直後の版が入らなくなるため。詳細と Zed 比較の境界は `docs/research/acp-agent-registry-notes.md`
 
 ## 8. 性能予算の測り方（目標: Zed 比 ~80%）
 

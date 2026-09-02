@@ -75,6 +75,43 @@ pub struct AgentDefaults {
     pub mode: Option<String>,
 }
 
+/// エージェントの**起動方法の上書き**（`agent_servers.<id>`）。
+///
+/// 版はレジストリ（`acp_client::registry`）と組み込みカタログが決めるが、**ユーザーが
+/// necoder のリリースを待たずに先へ進める逃げ道**をここに置く。レジストリが落ちていても、
+/// 新しい版を先に試したくても、これがあれば自力で回避できる。
+///
+/// **`custom` と `registry` を分ける理由**: 起動コマンドを持つのは `custom` だけにして、
+/// 「レジストリ管理のエージェントのコマンドだけを半端に差し替える」形を作らせない。
+/// 半端な上書きは、版とコマンドが食い違ったまま動く状態を生む。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum AgentServerSetting {
+    /// 起動を丸ごと自前で決める。necoder はこのコマンドをそのまま起動する（版の解決もしない）。
+    Custom {
+        /// 実行するコマンド（絶対パス、または PATH 上の名前）。
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+    },
+    /// レジストリ管理のまま、環境変数だけ足す。**コマンドと版はレジストリが持つ**。
+    Registry {
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+    },
+}
+
+impl AgentServerSetting {
+    /// この設定が足す環境変数（どちらの形でも持つ）。
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        match self {
+            Self::Custom { env, .. } | Self::Registry { env } => env,
+        }
+    }
+}
+
 /// 解決済み設定（全レイヤをマージ後に得る）。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -130,6 +167,9 @@ pub struct Settings {
     /// `default_model`/`default_effort`（グローバルな土台）より優先し、agent を跨いでも各々を保つ（2026-08-17）。
     /// `default_agent` は §8 のまま Settings 画面だけが変える — 「どの agent か」と「その agent の設定」を分離する。
     pub agent_defaults: BTreeMap<String, AgentDefaults>,
+    /// エージェントの起動方法の上書き（necoder の `AgentKind::id` がキー。例 `"codex"`）。
+    /// 空＝レジストリと組み込みカタログに従う（通常はこれ）。詳細は [`AgentServerSetting`]。
+    pub agent_servers: BTreeMap<String, AgentServerSetting>,
     /// worktree 削除の前に確認ダイアログを出すか（既定 on・2026-07-27）。
     /// **off にしても「失うものがある」ときは必ず確認する** — 未コミットの変更は git にも残らないので、
     /// 「二度と聞くな」の対象は *取り返しがつく* 削除に限る（DECISIONS の該当項）。
@@ -166,6 +206,7 @@ impl Default for Settings {
             default_model: "claude-opus-5".to_string(),
             default_effort: "high".to_string(),
             agent_defaults: BTreeMap::new(),
+            agent_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
             fleet_agent_worktree: false,
             rail: RailSettings::default(),
@@ -190,6 +231,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "default_model": "claude-opus-5",
   "default_effort": "high",
   "confirm_worktree_delete": true,
+  "agent_servers": {},
   "onboarded": false,
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }
 }"#;
