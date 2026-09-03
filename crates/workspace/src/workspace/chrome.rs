@@ -1718,7 +1718,12 @@ impl Workspace {
                             .items_center()
                             .gap(px(3.))
                             .text_color(warning_color)
-                            .child(svg().path("icons/triangle-alert.svg").size(px(12.)).flex_none())
+                            .child(
+                                svg()
+                                    .path("icons/triangle-alert.svg")
+                                    .size(px(12.))
+                                    .flex_none(),
+                            )
                             .child(format!("{warnings}")),
                     )
                     // クリックで診断一覧（ファイル別・M11）。

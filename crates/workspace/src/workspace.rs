@@ -2063,8 +2063,9 @@ mod tests {
             cx.bind_keys(bindings);
         });
 
-        let (workspace, cx) = cx
-            .add_window_view(|_window, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
         workspace.update_in(cx, |workspace, window, cx| {
             // notify watcher の実スレッドが test scheduler の task を起こすと「非決定的」判定で
             // panic するため、キー配送の検証に不要な watcher は最初に落とす。

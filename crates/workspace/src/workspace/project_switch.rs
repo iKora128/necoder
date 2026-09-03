@@ -228,7 +228,14 @@ impl Workspace {
                         )
                         .blur_radius(px(24.))])
                         // 左の色バー = プロジェクト色（識別への集約・UI-SPEC §1.3。面は塗らない）。
-                        .child(div().flex_none().w(px(5.)).h(px(64.)).rounded(px(2.)).bg(flash.color))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(5.))
+                                .h(px(64.))
+                                .rounded(px(2.))
+                                .bg(flash.color),
+                        )
                         .child(
                             div()
                                 .flex()
