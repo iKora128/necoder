@@ -633,6 +633,28 @@ fn main() {
                         }
                     }
                 }
+                // 開発用: NECODER_FLASH_PROBE=<ms> でプロジェクト切替フラッシュを繰り返し表示する
+                // （offscreen 撮影がどのタイミングでも掴めるよう <ms> 間隔でループ・描画検証専用）。
+                if let Ok(interval) = std::env::var("NECODER_FLASH_PROBE") {
+                    if let Ok(interval_ms) = interval.parse::<u64>() {
+                        if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                            cx.spawn(async move |_workspace, cx| loop {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(interval_ms))
+                                    .await;
+                                if handle
+                                    .update(cx, |workspace, _window, cx| {
+                                        workspace.debug_project_flash(cx);
+                                    })
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            })
+                            .detach();
+                        }
+                    }
+                }
                 // 開発用: NECODER_SSH_PROBE=1 で SSH 入力バーを開く（2s 後・M13 の描画検証）。
                 if std::env::var("NECODER_SSH_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {

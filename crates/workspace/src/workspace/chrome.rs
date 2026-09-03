@@ -1375,11 +1375,21 @@ impl Workspace {
             .min_w_0()
             .bg(theme.bg1)
             .child(
-                div().flex_1().min_h_0().min_w_0().child(
-                    self.agent_panel
-                        .clone()
-                        .cached(StyleRefinement::default().flex().flex_col().size_full()),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    // Agent 面を触った → ⌘W 等の宛先を Agent に戻す（ドック版 `render_agent_dock` と同じ規律。
+                    // 全画面中に左ドックを触って落ちた agent_active を、クリックで立て直せるように）。
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, _cx| this.agent_active = true),
+                    )
+                    .child(
+                        self.agent_panel
+                            .clone()
+                            .cached(StyleRefinement::default().flex().flex_col().size_full()),
+                    ),
             )
             .when(self.chrome.show_bottom, |element| {
                 element.child(self.render_bottom_dock(cx))
@@ -1692,11 +1702,24 @@ impl Workspace {
                     .hover(|style| style.bg(theme.bg2))
                     .rounded(px(4.))
                     .px(px(4.))
-                    .child(div().text_color(error_color).child(format!("✗ {errors}")))
+                    // 診断件数。記号は文字グリフではなく Lucide の circle-x / triangle-alert（フォント差で崩れない）。
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.))
+                            .text_color(error_color)
+                            .child(svg().path("icons/circle-x.svg").size(px(12.)).flex_none())
+                            .child(format!("{errors}")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.))
                             .text_color(warning_color)
-                            .child(format!("▲ {warnings}")),
+                            .child(svg().path("icons/triangle-alert.svg").size(px(12.)).flex_none())
+                            .child(format!("{warnings}")),
                     )
                     // クリックで診断一覧（ファイル別・M11）。
                     .on_mouse_down(

@@ -1069,6 +1069,20 @@ struct WorkspaceOverlays {
     shortcut_sheet: Option<FocusHandle>,
     /// About モーダル（メニュー「necoder について」/「アップデートを確認…」）。同じく focus = Escape 受け。
     about: Option<FocusHandle>,
+    /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
+    /// 大きくフラッシュ表示する（色でも判るが名前で確定させる・2026-09-01 本人要望）。
+    project_flash: Option<ProjectFlash>,
+    /// フラッシュの世代番号。連打時に古い自動消灯タイマーが新しい表示を消さないための照合。
+    project_flash_gen: u32,
+}
+
+/// プロジェクト切替フラッシュの表示内容（切替時に確定してキャッシュ・render は読むだけ）。
+struct ProjectFlash {
+    name: SharedString,
+    /// ⎇ ブランチ（宛先チップと同じ`branch` → `worktree_branch` の順で解決）。
+    branch: Option<SharedString>,
+    color: Hsla,
+    generation: u32,
 }
 
 struct NotificationCenter {
@@ -1598,45 +1612,46 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_window))
             // ⌘1..9 = レールのプロジェクト N 番へ切替（窓内切替・ウィンドウモデル §5）
             .on_action(cx.listener(|this, _: &ActivateProject1, window, cx| {
-                this.switch_project(0, window, cx)
+                this.switch_project_flashed(0, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject2, window, cx| {
-                this.switch_project(1, window, cx)
+                this.switch_project_flashed(1, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject3, window, cx| {
-                this.switch_project(2, window, cx)
+                this.switch_project_flashed(2, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject4, window, cx| {
-                this.switch_project(3, window, cx)
+                this.switch_project_flashed(3, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject5, window, cx| {
-                this.switch_project(4, window, cx)
+                this.switch_project_flashed(4, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject6, window, cx| {
-                this.switch_project(5, window, cx)
+                this.switch_project_flashed(5, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject7, window, cx| {
-                this.switch_project(6, window, cx)
+                this.switch_project_flashed(6, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject8, window, cx| {
-                this.switch_project(7, window, cx)
+                this.switch_project_flashed(7, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject9, window, cx| {
-                this.switch_project(8, window, cx)
+                this.switch_project_flashed(8, window, cx)
             }))
             // レール上下への循環切替（⌃⌘↑↓）。番号（⌘1..9）を覚えずに隣へ流せる。
+            // 行き先を見ずに切り替えるキー操作なので、着地先の名前を中央にフラッシュする。
             .on_action(cx.listener(|this, _: &NextProject, window, cx| {
                 let count = this.project_sessions.projects.len();
                 if count > 1 {
                     let next = (this.project_sessions.active + 1) % count;
-                    this.switch_project(next, window, cx);
+                    this.switch_project_flashed(next, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &PrevProject, window, cx| {
                 let count = this.project_sessions.projects.len();
                 if count > 1 {
                     let previous = (this.project_sessions.active + count - 1) % count;
-                    this.switch_project(previous, window, cx);
+                    this.switch_project_flashed(previous, window, cx);
                 }
             }))
             .on_mouse_move(cx.listener(Self::on_resize_move))
@@ -1729,6 +1744,7 @@ impl Render for Workspace {
             .children(self.render_worktree_delete_dialog(cx))
             .children(self.render_branch_menu(cx))
             .children(self.render_explorer_context_menu(cx))
+            .children(self.render_project_flash(cx)) // キーボード切替の行き先名フラッシュ
             .children(self.render_confetti(cx)) // 最前面（祝いの紙吹雪）
     }
 }
@@ -2021,6 +2037,68 @@ mod tests {
         // 監視先を消す前に notify watcher を全セッション分落とす。監視中の root を
         // 削除したまま process teardown に入ると、fsevents スレッドのデストラクタが
         // panic → SIGABRT する race がある（フルスイート並列実行時のみ顕在化）。
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn agent_full_screen_keeps_thread_tab_keys(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_agent_fullscreen_keys_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            // notify watcher の実スレッドが test scheduler の task を起こすと「非決定的」判定で
+            // panic するため、キー配送の検証に不要な watcher は最初に落とす。
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace
+                .agent_panel
+                .update(cx, |panel, cx| panel.new_thread(cx));
+            workspace.toggle_agent_full_screen_state(window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+
+        let before = workspace.read_with(cx, |workspace, cx| {
+            workspace.agent_panel.read(cx).statuses().len()
+        });
+        assert_eq!(before, 2, "スレッドが2枚ある前提");
+
+        // 全画面中に左ドック（エクスプローラ等）を触ると agent_active が false になる。
+        // その後でも ⌘W はスレッドタブに効かなければならない（実バグの再現条件）。
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            workspace.agent_active = false;
+        });
+        cx.simulate_keystrokes("cmd-w");
+        let after = workspace.read_with(cx, |workspace, cx| {
+            workspace.agent_panel.read(cx).statuses().len()
+        });
+        assert_eq!(after, 1, "AI 全画面でも ⌘W はスレッドタブを閉じる");
+
         workspace.update_in(cx, |workspace, _window, _cx| {
             for session in workspace.project_sessions.sessions.iter_mut() {
                 session._watch = None;

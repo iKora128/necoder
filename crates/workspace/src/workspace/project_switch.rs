@@ -1,5 +1,10 @@
 use crate::workspace::*;
 
+/// プロジェクト切替フラッシュの表示時間（出現 → 保持 → フェードアウトの全体・ms）。
+const PROJECT_FLASH_TOTAL_MS: u64 = 1000;
+/// 全体のうちフェードアウト開始位置（0..1）。それまでは不透明で保持する。
+const PROJECT_FLASH_HOLD_RATIO: f32 = 0.6;
+
 impl Workspace {
     pub(crate) fn close_hover(&mut self, cx: &mut Context<Self>) {
         if self.session_mut().hover.take().is_some() {
@@ -133,6 +138,137 @@ impl Workspace {
         }
         self.save_state();
         cx.notify();
+    }
+
+    /// キーボード切替（⌃⌘↑↓ / ⌘1..9）専用の入口: 切替に成功したら行き先の名前を中央にフラッシュ。
+    /// レールクリックや ⌘O ピッカーは行き先が目に入っているので出さない（この入口を通らない）。
+    pub(crate) fn switch_project_flashed(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.project_sessions.active;
+        self.switch_project(index, window, cx);
+        if self.project_sessions.active != before {
+            self.flash_project_name(cx);
+        }
+    }
+
+    /// アクティブプロジェクトの名前を中央に大きくフラッシュ表示する（約 1 秒で自動消灯）。
+    /// 「今どのプロジェクトに居るか」を色レールに加えて名前で確定させる方向感覚の補助。
+    pub(crate) fn flash_project_name(&mut self, cx: &mut Context<Self>) {
+        let Some(slot) = self.active_slot() else {
+            return;
+        };
+        let name = slot.name.clone();
+        let branch = slot
+            .branch
+            .clone()
+            .or_else(|| slot.worktree_branch.clone())
+            .map(SharedString::from);
+        let color = slot.color;
+        self.overlays.project_flash_gen = self.overlays.project_flash_gen.wrapping_add(1);
+        let generation = self.overlays.project_flash_gen;
+        self.overlays.project_flash = Some(ProjectFlash {
+            name,
+            branch,
+            color,
+            generation,
+        });
+        cx.notify();
+        cx.spawn(async move |workspace, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(PROJECT_FLASH_TOTAL_MS))
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                // 連打中は最新世代だけが表示を持つ（古いタイマーで新しい表示を消さない）。
+                if workspace
+                    .overlays
+                    .project_flash
+                    .as_ref()
+                    .is_some_and(|flash| flash.generation == generation)
+                {
+                    workspace.overlays.project_flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// プロジェクト切替フラッシュの描画（中央・最前面）。マウスは受けない（listener を持つ要素を
+    /// 置かない＝下の面の操作を遮らない）。フェードは with_animation 1 回きりで idle 予算を守る。
+    pub(crate) fn render_project_flash(&self, _cx: &Context<Self>) -> Option<gpui::AnyElement> {
+        let flash = self.overlays.project_flash.as_ref()?;
+        let theme = self.theme.clone();
+        let hold = PROJECT_FLASH_HOLD_RATIO;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(20.))
+                        .px(px(40.))
+                        .py(px(24.))
+                        .bg(theme.bg2)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(px(12.))
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(8.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(24.))])
+                        // 左の色バー = プロジェクト色（識別への集約・UI-SPEC §1.3。面は塗らない）。
+                        .child(div().flex_none().w(px(5.)).h(px(64.)).rounded(px(2.)).bg(flash.color))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(
+                                    div()
+                                        .text_size(px(44.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(theme.fg0)
+                                        .child(flash.name.clone()),
+                                )
+                                .children(flash.branch.clone().map(|branch| {
+                                    div()
+                                        .text_size(px(17.))
+                                        .text_color(theme.fg2)
+                                        .child(SharedString::from(format!("⎇ {branch}")))
+                                })),
+                        )
+                        .with_animation(
+                            ("project-flash", flash.generation as usize),
+                            Animation::new(std::time::Duration::from_millis(
+                                PROJECT_FLASH_TOTAL_MS,
+                            )),
+                            // 線形 delta を自前で区分する（easing は掛けない）:
+                            // ふわっと出て（最初の 15% = 150ms）、保持し、後半 40% でフェードアウト。
+                            move |element, delta| {
+                                let opacity = if delta < 0.15 {
+                                    delta / 0.15
+                                } else if delta < hold {
+                                    1.0
+                                } else {
+                                    1.0 - (delta - hold) / (1.0 - hold)
+                                };
+                                element.opacity(opacity)
+                            },
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// 切替後も描画され続ける workspace 常設面（picker 等のオーバレイ・管制・herd 改名・本体）が

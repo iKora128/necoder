@@ -1,11 +1,20 @@
 use crate::workspace::*;
 
 impl Workspace {
+    /// ⌘W / ⌘⇧T / ⌃Tab 系の宛先が AI スレッドタブか（エディタタブとの振り分け・共通判定）。
+    /// AI 全画面中はエディタが不可視なので **agent_active に関わらず常に AI 宛て**。全画面中に
+    /// 左ドックを触って agent_active が落ちると、見えている ACP タブに操作が効かなくなる実バグの対策。
+    /// 編隊モードは AI 全画面を描かない（render は fleet 優先）ので、この特例も適用しない。
+    pub(crate) fn agent_surface_active(&self) -> bool {
+        (self.chrome.agent_full_screen && !self.chrome.fleet_mode)
+            || (self.chrome.show_right && self.agent_active)
+    }
+
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         // 最後に触った面が Agent なら AI スレッドタブを、そうでなければエディタタブを閉じる。
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
         // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。
-        if self.chrome.show_right && self.agent_active {
+        if self.agent_surface_active() {
             self.agent_panel
                 .update(cx, |panel, cx| panel.close_active_thread(cx));
             return;
@@ -45,7 +54,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chrome.show_right && self.agent_active {
+        if self.agent_surface_active() {
             self.agent_panel
                 .update(cx, |panel, cx| panel.restore_closed_thread(cx));
             return;
@@ -77,7 +86,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !(self.chrome.show_right && self.agent_active) {
+        if !self.agent_surface_active() {
             self.select_next_tab(&SelectNextTab, window, cx);
             return;
         }
@@ -93,7 +102,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !(self.chrome.show_right && self.agent_active) {
+        if !self.agent_surface_active() {
             self.select_prev_tab(&SelectPrevTab, window, cx);
             return;
         }

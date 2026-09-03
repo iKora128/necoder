@@ -664,6 +664,8 @@ impl Workspace {
                 shortcut_sheet: None,
                 // offscreen QA: NECODER_ABOUT=1 で起動時から About モーダルを開く（NECODER_SETTINGS と同型）。
                 about: std::env::var_os("NECODER_ABOUT").map(|_| cx.focus_handle()),
+                project_flash: None,
+                project_flash_gen: 0,
             },
             notifications: NotificationCenter {
                 toasts: Vec::new(),
