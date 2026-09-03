@@ -522,7 +522,12 @@ update:
   available: ⬆ Update to v%{version}
   get: ⬆ Get v%{version}
   installing: ⬇ Updating…
-  ready: ⟳ Restart to finish updating
+  downloading: ⬇ Downloading %{percent}%
+  verifying: Verifying signature…
+  replacing: Replacing the app…
+  ready: The new version is ready
+  restart: ⟳ Restart to v%{version}
+  err_relaunch: Couldn't schedule the relaunch (please reopen necoder manually)
   err_no_bundle: Running .app not found (a dev build can't self-update)
   err_curl: Failed to run curl
   err_download: Download failed

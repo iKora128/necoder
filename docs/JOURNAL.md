@@ -2377,3 +2377,9 @@
 - 学び/罠: 監視は `worktree.is_ignored(path)` の変更をツリー再構築の合図から落としている（gitignore 配下はノイズ扱い）。エージェントが ignore 配下に書く場合はこれが「反映されない」の原因になり得る。今回は手動更新で逃げ道を作ったのみ＝取りこぼしの根因は未調査（`NECODER_WATCH_DEBUG=1` で raw event を見れば切り分けられる）
 - 検証: cargo check --workspace --all-targets 警告 0 / cargo check --release 警告 0 / i18n・necoder・storage・paths 緑 / workspace 38 件緑（HOME 分離）。見た目は本人の再起動後に目視（ヘッダ右端 20px 枠・12px アイコン）
 - 次: 取りこぼしの再現条件を本人から聞く（どのフォルダ・どのエージェント）→ `NECODER_WATCH_DEBUG=1` で raw event が来ているか / ignore で落ちているかを切り分け
+
+## 2026-09-03 — 更新チップ: 進捗バー + 再起動ボタン（本人要望）
+- やったこと: ①`updater::download_and_install(url, report)` にコールバックを足し、`UpdateProgress::{Downloading{fraction}, Verifying, Replacing}` を報告。DL は curl を `spawn` して `-o` 先の metadata（バイト数）を 120ms ごとに見る（分母は `curl -sIL` の最後の応答の Content-Length・取れなければ不定）。②`UpdateState::Installing(UpdateProgress)`。チップは縦並び（文言 + 96×3px バー・溝 bg3 / 伸びる fg1・色相は使わない）。進みは背景 → unbounded チャネル → `cx.spawn` の受信ループで status を更新（送信側は背景タスク終了で drop → ループが抜ける）。③Ready チップを「⟳ 再起動して vX へ」の click に。`updater::spawn_relauncher()` = `sh -c 'while kill -0 PID; do sleep 0.2; done; exec open "$0"' <bundle>` を別プロセスグループで切り離し、続けて `cx.build_action("necoder::Quit")` を窓へ dispatch（通常 Quit と同じ後始末を通す。名前で組むのは Quit が necoder crate 定義のため）。About モーダルも同じ文言 + 再起動ボタン（`AboutUpdateClick` 3 値）
+- 学び/罠: `state != UpdateState::Available` の比較は `Installing(f32)` を含むので `Eq` を外す（PartialEq のみ）。Content-Length は 302 → 200 で複数並ぶため**最後の応答**を取る（先頭を取ると 0 になる）。relauncher は必ず「自プロセスの死」を待ってから `open`（早いと既存インスタンスへ転送されて何も起きない）
+- 検証: check（debug/release）警告 0・i18n 緑・workspace 39 件緑（`content_length_comes_from_the_last_response` 追加）。**実機の通しは次のリリース（v0.1.11）を出したときに本人が確認**: チップの % が動く → 検証中 → 差し替え中 → 再起動ボタン → 新版で起動
+- 次: 実機で relauncher の `open` が二重起動ガード（cli の転送）に引っかからないことを確認。Windows は当面 Release ページ経路のまま（進捗バーの出番なし）

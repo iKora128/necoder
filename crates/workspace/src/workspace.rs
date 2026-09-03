@@ -507,14 +507,37 @@ fn inline_edit_diff_lines(old_text: &str, new_text: &str, max_lines: usize) -> V
 }
 
 /// 自動アップデートの段階（M13）。statusbar チップの表示を兼ねる。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum UpdateState {
     /// 新版あり（クリックで更新開始）。
     Available,
-    /// ダウンロード + 検証 + 差し替え中。
-    Installing,
-    /// 差し替え済み（再起動で反映）。
+    /// ダウンロード + 検証 + 差し替え中（進みは背景から届く・チップに進捗バー）。
+    Installing(updater::UpdateProgress),
+    /// 差し替え済み（クリックで再起動）。
     Ready,
+}
+
+/// 更新中チップ / About の 1 行に出す文言（段階ごと）。
+fn update_progress_label(progress: updater::UpdateProgress) -> String {
+    match progress {
+        updater::UpdateProgress::Downloading {
+            fraction: Some(fraction),
+        } => i18n::t!(
+            "update.downloading",
+            "percent" => ((fraction * 100.0).round() as u32).to_string()
+        ),
+        updater::UpdateProgress::Downloading { fraction: None } => i18n::t!("update.installing"),
+        updater::UpdateProgress::Verifying => i18n::t!("update.verifying"),
+        updater::UpdateProgress::Replacing => i18n::t!("update.replacing"),
+    }
+}
+
+/// 進捗バーの埋まり具合（0.0..=1.0）。検証・差し替えは DL 済みなので満杯で見せる。
+fn update_progress_fraction(progress: updater::UpdateProgress) -> f32 {
+    match progress {
+        updater::UpdateProgress::Downloading { fraction } => fraction.unwrap_or(0.0),
+        updater::UpdateProgress::Verifying | updater::UpdateProgress::Replacing => 1.0,
+    }
 }
 
 /// ⌘. code actions のポップアップ（M11）。補完と同型（フォーカスを取り上下/Enter/Esc）。

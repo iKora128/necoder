@@ -74,7 +74,7 @@
 ## 3. titlebar / statusbar
 
 - titlebar: 信号機 → **ピル**（枠1px・左縁3pxプロジェクト色。名前クリック=⌘O、`⎇ branch ▾` クリック=branch/worktree メニュー）→ spacer → **beacons**（アクティブ project のスレッド、色ドット+名、実行中 pulse）→ ドック開閉アイコン×3
-- statusbar（登録式・左→右）: `⎇ branch`・診断（Lucide `circle-x` n `triangle-alert` n＝文字グリフは使わない。click で診断一覧）・**ターミナル切替ボタン**（`square-terminal`・レール/⌃` と同じ `toggle_terminal`・開いている間は bg3 で灯す。診断→ターミナルの動線・2026-09-03）・LSP 状態 / **中央=状態の常設ロールアップ**（herdr 本来の形＝ニュースティッカーではない。ウィンドウのレール全プロジェクトを `RunningRegistry` から集計し「N 実行 · M 承認待ち · K 完了」+ 最重要スレッドを状態ドット付きで・click で該当プロジェクト+Agent へ）/ 拡張アイテム・カーソル位置・エンコーディング・言語
+- statusbar（登録式・左→右）: `⎇ branch`・診断（Lucide `circle-x` n `triangle-alert` n＝文字グリフは使わない。click で診断一覧）・**ターミナル切替ボタン**（`square-terminal`・レール/⌃` と同じ `toggle_terminal`・開いている間は bg3 で灯す。診断→ターミナルの動線・2026-09-03）・LSP 状態 / **中央=状態の常設ロールアップ**（herdr 本来の形＝ニュースティッカーではない。ウィンドウのレール全プロジェクトを `RunningRegistry` から集計し「N 実行 · M 承認待ち · K 完了」+ 最重要スレッドを状態ドット付きで・click で該当プロジェクト+Agent へ）/ 拡張アイテム・**更新チップ**（新版あり「⬆ vX に更新」click → 更新中は文言が「ダウンロード中 NN% → 署名を検証中 → 差し替え中」と進み、下に 96×3px の進捗バー（溝 bg3・fg1 が伸びる・色相は使わない）→ 差し替え済みは「⟳ 再起動して vX へ」click で自プロセス終了待ちの relauncher を切り離してから通常 Quit・2026-09-03）・カーソル位置・エンコーディング・言語
 
 ## 4. エクスプローラ（3ビュー + ファイルブラウザ挙動）
 

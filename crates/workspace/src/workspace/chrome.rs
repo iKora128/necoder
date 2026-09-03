@@ -1797,9 +1797,10 @@ impl Workspace {
                         .child(SharedString::from(i18n::t!("crash.notice"))),
                 )
             })
-            // 自動アップデートのチップ（M13）: 新版あり → クリックで更新 → 再起動案内。
+            // 自動アップデートのチップ（M13）: 新版あり → クリックで更新（進捗バー）→ クリックで再起動。
             .when_some(self.updater.status.clone(), |element, (info, state)| {
-                let (label, clickable) = match state {
+                // (文言, クリック動作, 進捗バーの埋まり)
+                let (label, click, progress) = match state {
                     UpdateState::Available => (
                         match &info.action {
                             updater::UpdateAction::InstallDmg { .. } => {
@@ -1811,27 +1812,64 @@ impl Workspace {
                                 i18n::t!("update.get", "version" => info.version.clone())
                             }
                         },
-                        true,
+                        Some(UpdateChipClick::Install),
+                        None,
                     ),
-                    UpdateState::Installing => (i18n::t!("update.installing"), false),
-                    UpdateState::Ready => (i18n::t!("update.ready"), false),
+                    UpdateState::Installing(progress) => (
+                        update_progress_label(progress),
+                        None,
+                        Some(update_progress_fraction(progress)),
+                    ),
+                    UpdateState::Ready => (
+                        i18n::t!("update.restart", "version" => info.version.clone()),
+                        Some(UpdateChipClick::Restart),
+                        None,
+                    ),
                 };
                 element.child(
                     div()
                         .id("update-chip")
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(2.))
                         .px(px(7.))
                         .py(px(2.))
                         .rounded(px(5.))
                         .text_color(self.accent())
-                        .when(clickable, |chip| {
+                        .when_some(click, |chip, click| {
                             chip.cursor_pointer()
                                 .hover(|style| style.bg(theme.bg2))
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(|this, _, _window, cx| this.install_update(cx)),
+                                    cx.listener(move |this, _, window, cx| match click {
+                                        UpdateChipClick::Install => this.install_update(cx),
+                                        UpdateChipClick::Restart => {
+                                            this.restart_after_update(window, cx)
+                                        }
+                                    }),
                                 )
                         })
-                        .child(SharedString::from(label)),
+                        .child(SharedString::from(label))
+                        // 進捗バー: 3px の溝（bg3）に fg1 が伸びる。色相は使わない（§1.3 の許可リスト外）。
+                        .when_some(progress, |chip, fraction| {
+                            let track = 96.0_f32;
+                            chip.child(
+                                div()
+                                    .w(px(track))
+                                    .h(px(3.))
+                                    .rounded(px(2.))
+                                    .bg(theme.bg3)
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(px(track * fraction.clamp(0.0, 1.0)))
+                                            .rounded(px(2.))
+                                            .bg(theme.fg1),
+                                    ),
+                            )
+                        }),
                 )
             })
             .when_some(cursor, |element, cursor| {
@@ -2065,13 +2103,33 @@ impl Workspace {
                 return;
             }
         };
-        self.updater.status = Some((info.clone(), UpdateState::Installing));
+        self.updater.status = Some((
+            info.clone(),
+            UpdateState::Installing(updater::UpdateProgress::Downloading { fraction: None }),
+        ));
         cx.notify();
         cx.spawn(async move |workspace, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { updater::download_and_install(&dmg_url).map(|_| info) })
-                .await;
+            // 進みは背景スレッド → チャネル → ここで status に反映（UI スレッドは待たない）。
+            // 送信側は背景タスクの終了とともに落ちるので、受信ループは自然に抜ける。
+            let (sender, mut receiver) =
+                futures::channel::mpsc::unbounded::<updater::UpdateProgress>();
+            let task = cx.background_executor().spawn(async move {
+                let report = move |progress: updater::UpdateProgress| {
+                    let _ = sender.unbounded_send(progress);
+                };
+                updater::download_and_install(&dmg_url, &report).map(|_| info)
+            });
+            while let Some(progress) = receiver.next().await {
+                let _ = workspace.update(cx, |workspace, cx| {
+                    if let Some((_, state @ UpdateState::Installing(_))) =
+                        workspace.updater.status.as_mut()
+                    {
+                        *state = UpdateState::Installing(progress);
+                        cx.notify();
+                    }
+                });
+            }
+            let result = task.await;
             let _ = workspace.update(cx, |workspace, cx| match result {
                 Ok(info) => {
                     workspace.updater.status = Some((info, UpdateState::Ready));
@@ -2089,4 +2147,28 @@ impl Workspace {
         })
         .detach();
     }
+
+    /// 差し替え済みチップの「再起動」: 自プロセスの終了を待って .app を開き直す子を切り離してから、
+    /// 通常の Quit（hot exit 破棄・窓セッション整理）と同じ経路で終了する。
+    pub(crate) fn restart_after_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.updater.status, Some((_, UpdateState::Ready))) {
+            return;
+        }
+        if let Err(error) = updater::spawn_relauncher() {
+            self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
+            return;
+        }
+        // Quit アクションは necoder crate 側の定義（キーマップの `necoder::Quit`）なので名前で組み立てる。
+        match cx.build_action("necoder::Quit", None) {
+            Ok(action) => window.dispatch_action(action, cx),
+            Err(_) => cx.quit(),
+        }
+    }
+}
+
+/// 更新チップのクリックが何をするか（段階で変わる）。
+#[derive(Clone, Copy)]
+enum UpdateChipClick {
+    Install,
+    Restart,
 }

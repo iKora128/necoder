@@ -100,7 +100,7 @@ impl Workspace {
         // 更新まわりの 1 行 + ボタン。自動チェックの status が最優先（チップと同じ真実を映す）。
         let (update_line, update_button): (
             Option<(SharedString, gpui::Hsla)>,
-            Option<(SharedString, bool)>, // (ラベル, true=今すぐ更新 / false=確認)
+            Option<(SharedString, AboutUpdateClick)>,
         ) = match self.updater.status.clone() {
             Some((info, UpdateState::Available)) => (
                 Some((
@@ -109,19 +109,34 @@ impl Workspace {
                     ),
                     accent,
                 )),
-                Some((SharedString::from(i18n::t!("about.update_now")), true)),
+                Some((
+                    SharedString::from(i18n::t!("about.update_now")),
+                    AboutUpdateClick::Install,
+                )),
             ),
-            Some((_, UpdateState::Installing)) => (
-                Some((SharedString::from(i18n::t!("update.installing")), theme.fg2)),
+            Some((_, UpdateState::Installing(progress))) => (
+                Some((
+                    SharedString::from(update_progress_label(progress)),
+                    theme.fg2,
+                )),
                 None,
             ),
-            Some((_, UpdateState::Ready)) => (
+            Some((info, UpdateState::Ready)) => (
                 Some((SharedString::from(i18n::t!("update.ready")), accent)),
-                None,
+                Some((
+                    SharedString::from(
+                        i18n::t!("update.restart", "version" => info.version.clone()),
+                    ),
+                    AboutUpdateClick::Restart,
+                )),
             ),
             None => {
-                let check_button = updater::manual_check_supported()
-                    .then(|| (SharedString::from(i18n::t!("about.check_button")), false));
+                let check_button = updater::manual_check_supported().then(|| {
+                    (
+                        SharedString::from(i18n::t!("about.check_button")),
+                        AboutUpdateClick::Check,
+                    )
+                });
                 match self.updater.manual.clone() {
                     ManualUpdateCheck::Checking => (
                         Some((SharedString::from(i18n::t!("about.checking")), theme.fg2)),
@@ -221,7 +236,7 @@ impl Workspace {
                         .child(line),
                 )
             })
-            .when_some(update_button, |element, (label, is_install)| {
+            .when_some(update_button, |element, (label, click)| {
                 element.child(
                     div()
                         .id("about-update-button")
@@ -238,12 +253,10 @@ impl Workspace {
                         .child(label)
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _, _window, cx| {
-                                if is_install {
-                                    this.install_update(cx);
-                                } else {
-                                    this.start_manual_update_check(cx);
-                                }
+                            cx.listener(move |this, _, window, cx| match click {
+                                AboutUpdateClick::Install => this.install_update(cx),
+                                AboutUpdateClick::Check => this.start_manual_update_check(cx),
+                                AboutUpdateClick::Restart => this.restart_after_update(window, cx),
                             }),
                         ),
                 )
@@ -285,4 +298,12 @@ impl Workspace {
                 .into_any_element(),
         )
     }
+}
+
+/// About モーダルの更新ボタンが何をするか（段階で変わる）。
+#[derive(Clone, Copy)]
+enum AboutUpdateClick {
+    Install,
+    Check,
+    Restart,
 }

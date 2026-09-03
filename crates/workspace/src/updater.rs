@@ -194,23 +194,86 @@ pub fn check_for_update_manual(current_version: &str) -> Result<Option<UpdateInf
     ))
 }
 
+/// 更新の進み（statusbar チップの進捗バー用）。`download_and_install` が背景スレッドから報告する。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UpdateProgress {
+    /// ダウンロード中。`fraction` は 0.0..=1.0（Content-Length が取れなければ None）。
+    Downloading { fraction: Option<f32> },
+    /// Apple 署名/公証の検証中。
+    Verifying,
+    /// 実行中の .app を差し替え中。
+    Replacing,
+}
+
+/// `curl -I` の応答ヘッダから Content-Length を取る（リダイレクト追従で複数応答が並ぶので最後のもの）。
+fn parse_content_length(headers: &str) -> Option<u64> {
+    headers
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<u64>().ok())
+                .flatten()
+        })
+        .last()
+}
+
+/// ダウンロードの総バイト数を HEAD で聞く（進捗バーの分母）。取れなければ None＝不定表示。
+fn remote_content_length(url: &str) -> Option<u64> {
+    let output = Command::new("curl")
+        .args(["-sIL", "--max-time", "20"])
+        .arg(url)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| parse_content_length(&String::from_utf8_lossy(&output.stdout)))
+        .flatten()
+}
+
 /// .dmg をダウンロード → Apple 署名/公証を検証 → 実行中の .app を差し替える（背景で呼ぶ）。
-/// 成功したら Ok(()) = 「再起動で反映」を UI が案内する。macOS 専用（[`UpdateAction::InstallDmg`]）。
-pub fn download_and_install(dmg_url: &str) -> Result<()> {
+/// 成功したら Ok(()) = 「再起動」を UI が出す。macOS 専用（[`UpdateAction::InstallDmg`]）。
+/// `report` は段階と進み（ダウンロードは ~120ms ごと）を UI へ知らせるコールバック。
+pub fn download_and_install(dmg_url: &str, report: &dyn Fn(UpdateProgress)) -> Result<()> {
     let bundle = running_app_bundle().context(i18n::t!("update.err_no_bundle"))?;
     // 予測不能な 0700 の作業ディレクトリに落とす（旧: /tmp の固定名 = spctl 検証→マウントの間に
     // 差し替えられる理屈上の隙。sticky /tmp で他ユーザーの unlink は防げるが、名前も読めなくする）。
     let staging_dir = unique_staging_dir()?;
     let staging = staging_dir.join("necoder.dmg");
-    // 1) ダウンロード。
-    let status = Command::new("curl")
-        .args(["-fSL", "--max-time", "300", "-o"])
+    // 1) ダウンロード。curl を子プロセスで走らせ、落ちてくるファイルの大きさを見て進みを報告する
+    //    （curl の進捗出力を解析するより単純で、-o 先の metadata は常に取れる）。
+    report(UpdateProgress::Downloading { fraction: None });
+    let total = remote_content_length(dmg_url);
+    let mut child = Command::new("curl")
+        .args(["-fsSL", "--max-time", "300", "-o"])
         .arg(&staging)
         .arg(dmg_url)
-        .status()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .context(i18n::t!("update.err_curl"))?;
+    let status = loop {
+        if let Some(status) = child.try_wait().context(i18n::t!("update.err_curl"))? {
+            break status;
+        }
+        let received = std::fs::metadata(&staging)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let fraction = total
+            .filter(|total| *total > 0)
+            .map(|total| (received as f64 / total as f64).min(1.0) as f32);
+        report(UpdateProgress::Downloading { fraction });
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    };
     anyhow::ensure!(status.success(), i18n::t!("update.err_download"));
+    report(UpdateProgress::Downloading {
+        fraction: Some(1.0),
+    });
     // 2) Apple 署名/公証の検証（改ざん・未署名はここで弾く）。
+    report(UpdateProgress::Verifying);
     let assess = Command::new("spctl")
         .args([
             "--assess",
@@ -228,6 +291,7 @@ pub fn download_and_install(dmg_url: &str) -> Result<()> {
         i18n::t!("update.err_signature", "detail" => String::from_utf8_lossy(&assess.stderr))
     );
     // 3) マウント → .app を差し替え → アンマウント。
+    report(UpdateProgress::Replacing);
     let mount_point = staging_dir.join("mount");
     let attach = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
@@ -254,6 +318,33 @@ pub fn download_and_install(dmg_url: &str) -> Result<()> {
         .status();
     let _cleanup = std::fs::remove_dir_all(&staging_dir);
     result
+}
+
+/// 差し替え後の再起動: 自プロセスの終了を待ってから .app を開き直す子プロセスを切り離して起動する。
+/// 呼び出し側はこの後、通常の Quit（hot exit 破棄・窓セッション整理）を発行する。
+/// `open` は LaunchServices 経由なので、新しい bundle の署名でそのまま起動する。macOS 専用。
+pub fn spawn_relauncher() -> Result<()> {
+    let bundle = running_app_bundle().context(i18n::t!("update.err_no_bundle"))?;
+    let pid = std::process::id();
+    // $0 = bundle パス（引数で渡す＝パスのクォート問題を持ち込まない）。
+    let script =
+        format!("while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open \"$0\"");
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg(&bundle)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // 親（このアプリ）の終了に巻き込まれないよう別プロセスグループへ。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    command.spawn().context(i18n::t!("update.err_relaunch"))?;
+    Ok(())
 }
 
 /// 更新作業用の一意なディレクトリ（unix は 0700）を作る。既存衝突は fail-closed（作り直さない）。
@@ -287,6 +378,17 @@ fn running_app_bundle() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 進捗バーの分母: リダイレクト追従の `curl -sIL` は応答ヘッダが複数並ぶ（302 → 200）。
+    /// 最後の応答の Content-Length を取り、大文字小文字は区別しない。
+    #[test]
+    fn content_length_comes_from_the_last_response() {
+        let headers = "HTTP/2 302\r\nlocation: https://objects.example/x\r\ncontent-length: 0\r\n\r\n\
+                       HTTP/2 200\r\nContent-Type: application/octet-stream\r\nContent-Length: 12345678\r\n\r\n";
+        assert_eq!(parse_content_length(headers), Some(12_345_678));
+        assert_eq!(parse_content_length("HTTP/2 200\r\nx: y\r\n"), None);
+        assert_eq!(parse_content_length("content-length: abc"), None);
+    }
 
     /// **押せるのに必ず失敗するチップを出さない**（WINDOWS-PORT.md §W6）。
     ///
