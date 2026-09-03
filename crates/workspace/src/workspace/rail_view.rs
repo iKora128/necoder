@@ -74,7 +74,9 @@ impl Workspace {
                     .collect()
             })
             .unwrap_or_default();
+        let rail_active = self.chrome.rail_active;
         div()
+            .id("rail")
             .flex()
             .flex_col()
             .items_center()
@@ -82,10 +84,22 @@ impl Workspace {
             .w(px(RAIL_WIDTH))
             .h_full()
             .flex_none()
-            .bg(theme.bg0)
+            // レールが「最後に触った面」の間は面を bg1（エディタ面と同じ段）に上げて、
+            // ⌘{ ⌘} の宛先がここに来ていることを示す（色相は使わない・§1.3）。
+            .bg(if rail_active { theme.bg1 } else { theme.bg0 })
             .border_r_1()
             .border_color(theme.border)
             .pt_2()
+            // レールのどこを押しても（項目でも空き地でも）レールを「最後に触った面」にする。
+            // ルートの capture リスナーが先に false にし、この bubble リスナーで true に戻る。
+            // フォーカスは動かさない＝そのまま文字を打てばエディタに入る。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.chrome.rail_active = true;
+                    cx.notify();
+                }),
+            )
             .children(
                 {
                     // レール = プロジェクト（リポジトリ）単位。**Task worktree はレールに載せない**

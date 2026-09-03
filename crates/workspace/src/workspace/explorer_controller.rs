@@ -630,7 +630,7 @@ impl Workspace {
             // アクティブを外した → 新しいアクティブスロットのビュー（タブ/LSP/端末/git/監視）へ張り替える。
             self.load_active_slot(window, cx);
         }
-        self.save_state();
+        self.save_state(cx);
         cx.notify();
     }
 
@@ -789,6 +789,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let theme = self.theme.clone();
+        let storage = self.persistence.storage.clone();
         let bounds = match origin {
             Some(origin) => Bounds::new(origin, size(px(1280.0), px(800.0))),
             None => Bounds::centered(None, size(px(1280.0), px(800.0)), cx),
@@ -804,9 +805,17 @@ impl Workspace {
                 is_movable: false,
                 ..Default::default()
             },
-            move |_window, cx| {
+            move |window, cx| {
+                // 新窓は DB を共有し、自分の行（新しい窓 ID）だけを書く。閉じたら閉じ印。
+                let persistence = storage.map(|storage| WindowPersistence {
+                    storage,
+                    window_id: Some(crate::persistence::new_window_session_id()),
+                });
+                if let Some(persistence) = &persistence {
+                    crate::persistence::install_window_close_hook(window, cx, persistence);
+                }
                 cx.new(|cx| {
-                    Workspace::new_sources(vec![source.clone()], theme.clone(), state_path(), cx)
+                    Workspace::new_sources(vec![source.clone()], theme.clone(), persistence, cx)
                 })
             },
         );
@@ -974,7 +983,7 @@ impl Workspace {
             }
             self.sync_active_slot();
             self.refresh_git_status(cx);
-            self.save_state();
+            self.save_state(cx);
             cx.notify();
             return;
         }
@@ -1049,12 +1058,44 @@ impl Workspace {
         if self.split_editor.is_none() && std::env::var_os("NECODER_SPLIT").is_some() {
             self.toggle_split(&SplitRight, window, cx);
         }
-        self.save_state();
+        self.save_state(cx);
         cx.notify();
     }
 
-    pub(crate) fn save_state(&self) {
-        let Some(path) = self.persistence.state_path.as_ref() else {
+    /// エクスプローラの手動更新（ヘッダ右端の ↻）。監視（`handle_watch_events`）と同じ反映を
+    /// アクティブプロジェクト全体に行う: ツリー再構築 + git 色 + アクティブエディタの gutter diff。
+    pub(crate) fn refresh_explorer(&mut self, cx: &mut Context<Self>) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+            slot.refresh();
+        }
+        self.refresh_git_status_for(active, cx);
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |view, cx| view.refresh_diff(cx));
+        }
+        cx.notify();
+    }
+
+    /// この窓の DB 上の行 ID（永続化しない窓は None）。⌘Q 時の「開いていた窓の集合」に使う。
+    pub fn window_session_id(&self) -> Option<String> {
+        self.persistence
+            .session_writer
+            .as_ref()
+            .map(|writer| writer.window_id().to_string())
+    }
+
+    /// ユーザーがこの窓を閉じた印を DB の自分の行へ付ける（次回起動で復元しない）。
+    /// OS 経由の閉じは `install_window_close_hook` が呼ぶ。自前 titlebar の × はこれを直接呼ぶ。
+    pub(crate) fn mark_window_closed(&self) {
+        if let Some(writer) = self.persistence.session_writer.as_ref() {
+            writer.close();
+        }
+    }
+
+    /// この窓のセッション（プロジェクト列・各プロジェクトのタブ列）を DB の自分の行へ書く。
+    /// 書き込みは `WindowSessionWriter` が background で合流する（UI スレッドで DB を待たない・順序保証）。
+    pub(crate) fn save_state(&self, cx: &App) {
+        let Some(writer) = self.persistence.session_writer.as_ref() else {
             return;
         };
         let state = PersistedState {
@@ -1064,7 +1105,6 @@ impl Workspace {
                 .iter()
                 .map(|slot| PersistedProject {
                     root: slot.worktree.root().to_path_buf(),
-                    open_file: None, // 旧形式は書かない（open_files に一本化）
                     open_files: slot.open_files.clone(),
                     active_file: slot.active_file,
                     remote_uri: slot.worktree.host().project_uri(slot.worktree.root()),
@@ -1072,15 +1112,10 @@ impl Workspace {
                 .collect(),
             active: self.project_sessions.active,
         };
-        let Ok(text) = serde_json::to_string_pretty(&state) else {
+        let Some(payload) = encode_window_session(&state) else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(error) = std::fs::write(path, text) {
-            eprintln!("状態の保存に失敗: {error}");
-        }
+        writer.save(payload, cx.background_executor());
     }
 
     // ── オーバーレイ（Picker） ──

@@ -55,6 +55,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         1,
         "#[cfg(test)] の中。この repo 自身のコミットで git blame を検証している",
     ),
+    (
+        "crates/necoder/src/main.rs",
+        1,
+        "#[cfg(test)] の中。assets/icons/ の全 SVG が Assets 表に登録されているかを repo の実ファイルで検査している",
+    ),
 ];
 
 /// `crates/necoder` → リポジトリルート。ここはテストなので `CARGO_MANIFEST_DIR` を使ってよい。

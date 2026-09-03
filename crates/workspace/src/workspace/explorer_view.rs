@@ -802,7 +802,29 @@ impl Workspace {
                     );
             }
         }
-        header
+        // 手動更新（本人要望・2026-09-03）: 監視が取りこぼしたとき（エージェントが作ったファイル等）に
+        // ツリーと git 色を読み直す口。リアルタイム追従は要らないが、明示的に更新できる必要がある。
+        header.child(div().flex_1()).child(
+            div()
+                .id("explorer-refresh")
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(20.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(svg().path("icons/refresh-cw.svg").size(px(12.)).flex_none())
+                .tooltip(Tooltip::text(
+                    i18n::t!("explorer.refresh_tip"),
+                    theme.clone(),
+                ))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.refresh_explorer(cx)),
+                ),
+        )
     }
 
     /// エクスプローラ下部の表示モード切替（ツリー / カラム / アイコン）。

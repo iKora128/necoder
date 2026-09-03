@@ -136,7 +136,7 @@ impl Workspace {
         if follow_focus {
             self.focus_session_surface(agent_had_focus, terminal_had_focus, window, cx);
         }
-        self.save_state();
+        self.save_state(cx);
         cx.notify();
     }
 
@@ -153,6 +153,23 @@ impl Workspace {
         if self.project_sessions.active != before {
             self.flash_project_name(cx);
         }
+    }
+
+    /// レール上下への循環切替（⌃⌘↑↓、およびレールが最後に触った面なら ⌘{ ⌘}）。
+    /// `step` は +1 で下（次）・-1 で上（前）。1 個しか無ければ何もしない。行き先を見ずに
+    /// 切り替えるキー操作なので、着地先の名前を中央にフラッシュする。
+    pub(crate) fn switch_adjacent_project(
+        &mut self,
+        step: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let count = self.project_sessions.projects.len();
+        if count < 2 {
+            return;
+        }
+        let target = (self.project_sessions.active as isize + step).rem_euclid(count as isize);
+        self.switch_project_flashed(target as usize, window, cx);
     }
 
     /// アクティブプロジェクトの名前を中央に大きくフラッシュ表示する（約 1 秒で自動消灯）。

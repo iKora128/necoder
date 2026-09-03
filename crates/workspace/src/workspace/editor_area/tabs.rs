@@ -23,24 +23,34 @@ impl Workspace {
     }
 
     /// 次のエディタタブへ（⌘} = ⌘⇧]。末尾で先頭へ回る）。
+    /// レールが最後に触った面（`chrome.rail_active`）なら**次のプロジェクト**へ（レール = プロジェクトの
+    /// タブ列と見なす。トラックパッドで「レールを突いて ⌘}」で隣へ流せる・2026-09-03）。
     pub(crate) fn select_next_tab(
         &mut self,
         _: &SelectNextTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.chrome.rail_active {
+            self.switch_adjacent_project(1, window, cx);
+            return;
+        }
         if self.tabs.len() > 1 {
             self.select_tab((self.active_tab + 1) % self.tabs.len(), window, cx);
         }
     }
 
-    /// 前のエディタタブへ（⌘{ = ⌘⇧[。先頭で末尾へ回る）。
+    /// 前のエディタタブへ（⌘{ = ⌘⇧[。先頭で末尾へ回る）。レール面が最後なら前のプロジェクトへ（同上）。
     pub(crate) fn select_prev_tab(
         &mut self,
         _: &SelectPrevTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.chrome.rail_active {
+            self.switch_adjacent_project(-1, window, cx);
+            return;
+        }
         let count = self.tabs.len();
         if count > 1 {
             self.select_tab((self.active_tab + count - 1) % count, window, cx);
@@ -442,7 +452,7 @@ impl Workspace {
         self.sync_active_slot();
         self.push_active_diagnostics(cx);
         self.refresh_git_status(cx);
-        self.save_state();
+        self.save_state(cx);
         cx.notify();
     }
 
@@ -477,7 +487,7 @@ impl Workspace {
             slot.active_file = index;
         }
         self.push_active_diagnostics(cx);
-        self.save_state();
+        self.save_state(cx);
         cx.notify();
     }
 
@@ -503,7 +513,7 @@ impl Workspace {
             active
         };
         self.sync_active_slot();
-        self.save_state();
+        self.save_state(cx);
         cx.notify();
     }
 

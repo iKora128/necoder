@@ -95,7 +95,7 @@ pub fn data_dir() -> Option<PathBuf> {
     data_dir_on(Platform::current(), &real_var)
 }
 
-/// 状態（state.json / logs / crashes）の置き場。Windows では data と同じ Local。
+/// 状態（logs / crashes / themes）の置き場。Windows では data と同じ Local。
 pub fn state_dir() -> Option<PathBuf> {
     state_dir_on(Platform::current(), &real_var)
 }
@@ -133,11 +133,6 @@ pub fn db_file() -> Option<PathBuf> {
 /// チェックポイント blob の置き場。
 pub fn blobs_dir() -> Option<PathBuf> {
     Some(data_dir()?.join("blobs"))
-}
-
-/// 窓の復元状態 `state.json`。
-pub fn state_file() -> Option<PathBuf> {
-    Some(state_dir()?.join("state.json"))
 }
 
 /// 外部 ACP エージェント関連の置き場（レジストリのキャッシュ・将来の配備先）。
@@ -481,11 +476,6 @@ mod tests {
             data_dir_on(Platform::MacOs, &var).map(|dir| dir.join("blobs")),
             Some(support.join("blobs")),
             "storage.rs:161"
-        );
-        assert_eq!(
-            state_dir_on(Platform::MacOs, &var).map(|dir| dir.join("state.json")),
-            Some(support.join("state.json")),
-            "persistence.rs:40"
         );
         assert_eq!(
             state_dir_on(Platform::MacOs, &var).map(|dir| dir.join("logs")),

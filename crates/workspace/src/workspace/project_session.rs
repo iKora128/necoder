@@ -180,13 +180,13 @@ impl Workspace {
     pub fn new(
         roots: Vec<PathBuf>,
         theme: Theme,
-        state_path: Option<PathBuf>,
+        window_persistence: Option<WindowPersistence>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_sources(
             roots.into_iter().map(ProjectSource::local).collect(),
             theme,
-            state_path,
+            window_persistence,
             cx,
         )
     }
@@ -195,10 +195,10 @@ impl Workspace {
     pub fn new_sources(
         sources: Vec<ProjectSource>,
         theme: Theme,
-        state_path: Option<PathBuf>,
+        window_persistence: Option<WindowPersistence>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_sources_with_active(sources, 0, theme, state_path, cx)
+        Self::new_sources_with_active(sources, 0, theme, window_persistence, cx)
     }
 
     /// 復元時の active index を含めてワークスペースを組み立てる。
@@ -410,11 +410,13 @@ impl Workspace {
         cx.notify();
     }
 
+    /// `window_persistence`: この窓の DB ハンドルと窓 ID（main / 新窓経路が渡す）。None なら DB を自前で
+    /// 開き（NECODER_DB / 既定パス）、窓セッションは書かない（テスト・撮影）。
     pub fn new_sources_with_active(
         sources: Vec<ProjectSource>,
         active: usize,
         theme: Theme,
-        state_path: Option<PathBuf>,
+        window_persistence: Option<WindowPersistence>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut projects = Vec::new();
@@ -643,6 +645,7 @@ impl Workspace {
                 resizing_explorer: false,
                 should_move_window: false,
                 rail_drag: None,
+                rail_active: false,
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: false,
                 task_renaming: None,
@@ -674,7 +677,7 @@ impl Workspace {
                 news: Vec::new(),
             },
             persistence: WorkspacePersistence {
-                state_path,
+                session_writer: None,
                 storage: None,
             },
             updater: UpdateController {
@@ -805,44 +808,42 @@ impl Workspace {
                 ));
             }
         }
-        // ローカル永続化 DB（hot exit・M10）。NECODER_DB でパス上書き（検証用）。開けなくても起動は続行。
-        let db_path = std::env::var("NECODER_DB")
-            .map(PathBuf::from)
-            .ok()
-            .or_else(|| (!cfg!(test)).then(storage::default_db_path).flatten());
-        if let Some(db_path) = db_path {
-            match storage::Storage::open(&db_path) {
-                Ok(handle) => {
-                    // Agent パネルへも同じハンドルを渡す（スレッド永続化・M12-1。ワーカー 1 本を共有）。
-                    for (index, session) in workspace.project_sessions.sessions.iter().enumerate() {
-                        if let Some(slot) = workspace.project_sessions.projects.get(index) {
-                            let scope = slot.task_space.id.0.clone();
-                            let legacy = slot.name.to_string();
-                            session.agent_panel.update(cx, |panel, cx| {
-                                panel.set_storage_for_scope(handle.clone(), scope, &legacy, cx)
-                            });
-                        } else {
-                            session
-                                .agent_panel
-                                .update(cx, |panel, cx| panel.set_storage(handle.clone(), cx));
-                        }
-                    }
-                    workspace.persistence.storage = Some(handle);
-                    // リモートプロジェクトの窓色をローカル DB から解決（M13 #3b）。
-                    workspace.apply_remote_host_colors();
-                    workspace.restore_task_spaces(cx);
-                    if let Some(storage) = &workspace.persistence.storage {
-                        for slot in &workspace.project_sessions.projects {
-                            if !slot.worktree.is_remote() {
-                                let _ = storage.record_local_project(
-                                    &slot.worktree.root().to_string_lossy(),
-                                    slot.name.as_ref(),
-                                );
-                            }
-                        }
+        // ローカル永続化 DB（hot exit・M10 / 窓セッション）。main から渡された 1 本を共有し、
+        // 無ければ自前で開く（NECODER_DB でパス上書き・開けなくても起動は続行）。
+        let (storage_handle, window_id) = match window_persistence {
+            Some(WindowPersistence { storage, window_id }) => (Some(storage), window_id),
+            None => (crate::persistence::open_default_storage(), None),
+        };
+        if let Some(handle) = storage_handle {
+            // Agent パネルへも同じハンドルを渡す（スレッド永続化・M12-1。ワーカー 1 本を共有）。
+            for (index, session) in workspace.project_sessions.sessions.iter().enumerate() {
+                if let Some(slot) = workspace.project_sessions.projects.get(index) {
+                    let scope = slot.task_space.id.0.clone();
+                    let legacy = slot.name.to_string();
+                    session.agent_panel.update(cx, |panel, cx| {
+                        panel.set_storage_for_scope(handle.clone(), scope, &legacy, cx)
+                    });
+                } else {
+                    session
+                        .agent_panel
+                        .update(cx, |panel, cx| panel.set_storage(handle.clone(), cx));
+                }
+            }
+            workspace.persistence.session_writer =
+                window_id.map(|id| WindowSessionWriter::new(handle.clone(), id));
+            workspace.persistence.storage = Some(handle);
+            // リモートプロジェクトの窓色をローカル DB から解決（M13 #3b）。
+            workspace.apply_remote_host_colors();
+            workspace.restore_task_spaces(cx);
+            if let Some(storage) = &workspace.persistence.storage {
+                for slot in &workspace.project_sessions.projects {
+                    if !slot.worktree.is_remote() {
+                        let _ = storage.record_local_project(
+                            &slot.worktree.root().to_string_lossy(),
+                            slot.name.as_ref(),
+                        );
                     }
                 }
-                Err(error) => eprintln!("ローカル DB を開けない（hot exit 無効）: {error:#}"),
             }
         }
         // 設定が変わったら全エディタへ実効値を配り直す + 再描画（font_size/tab_size/soft_wrap の live 反映）。
@@ -860,7 +861,7 @@ impl Workspace {
             cx.notify();
         })
         .detach();
-        workspace.save_state(); // 起動時点で状態を書く（再起動復元のため）
+        workspace.save_state(cx); // 起動時点で状態を書く（再起動復元のため）
         workspace
     }
 

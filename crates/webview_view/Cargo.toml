@@ -16,5 +16,8 @@ url.workspace = true
 
 # WebView エンジンは同梱しない。macOS は WKWebView、Windows は WebView2 を使う。
 # Linux で wry を有効にすると WebKitGTK/GTK が必要になるため、軽量性を守って対象外にする。
+# `devtools`: release ビルドでもプレビューの右クリック →「要素を検証」（Web Inspector）を使えるようにする。
+# macOS では WKPreferences の私的キー `developerExtrasEnabled` を叩くため App Store 配布には不向きだが、
+# necoder は DMG/GitHub 配布なので採用（debug ビルドでは feature 無しでも常に有効）。
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-wry = { version = "=0.56.1", default-features = false }
+wry = { version = "=0.56.1", default-features = false, features = ["devtools"] }

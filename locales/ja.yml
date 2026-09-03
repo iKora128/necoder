@@ -425,6 +425,7 @@ settings:
 explorer:
   main_worktree_undeletable: メインの作業ツリーは削除できません（レールから外すを使ってください）
   up_folder: 上のフォルダへ
+  refresh_tip: 更新（ツリーと git 状態を読み直す）
   back_to_project: プロジェクトへ戻る
   view_tree: ツリー表示
   view_columns: カラム表示（Finder 風）

@@ -2,9 +2,13 @@
 //!
 //! ARCHITECTURE §5: 1 窓 = アクティブな (project, branch)。レール = 窓内切替。UI-SPEC §1.3 の色の
 //! 許可リストに従い、**プロジェクト色**はレール枠/リング・ツリー選択の左バー・キャレットにのみ流す。
-//! 状態（開プロジェクト・アクティブ・開ファイル）は `state.json` に保存し、再起動で復元する。
+//! 状態（開プロジェクト・アクティブ・開ファイル）は necoder.db の `window_sessions` に 1 窓 1 行で保存し、
+//! 再起動で全窓を復元する（`persistence.rs`）。
 
-pub(crate) use crate::persistence::{state_path, PersistedProject, PersistedState, RestoredTabs};
+pub(crate) use crate::persistence::{
+    encode_window_session, PersistedProject, PersistedState, RestoredTabs, WindowPersistence,
+    WindowSessionWriter,
+};
 pub(crate) use crate::updater;
 pub(crate) use agent_panel::AgentPanel;
 pub(crate) use editor_core::{Buffer, Selection};
@@ -1048,6 +1052,11 @@ struct ChromeState {
     /// レール項目のドラッグ状態（index・押下位置・閾値超えフラグ）。窓の外で離すと
     /// 擬似 tear-off = その位置に新窓（M13。本物の tear-off は gpui 未対応・DECISIONS）。
     rail_drag: Option<(usize, Point<gpui::Pixels>, bool)>,
+    /// レールが「最後に触った面」か。レールのどこか（空き地でも可）を押すと立ち、レール外を押すと落ちる。
+    /// 立っている間はタブ切替（⌘{ ⌘}）が**プロジェクト切替**に化ける＝トラックパッドで
+    /// 「レールを一度突いて ⌘} で隣のプロジェクトへ」が成り立つ（2026-09-03 本人要望）。
+    /// agent_active と同じ「クリックで確定する宛先」の流儀（フォーカスは動かさない）。
+    rail_active: bool,
 }
 
 struct WorkspaceOverlays {
@@ -1123,7 +1132,8 @@ pub(crate) enum NewsKind {
 }
 
 struct WorkspacePersistence {
-    state_path: Option<PathBuf>,
+    /// 窓セッションの書き手。None = この窓は永続化しない（offscreen 撮影・テスト）。
+    session_writer: Option<WindowSessionWriter>,
     storage: Option<storage::Storage>,
 }
 
@@ -1641,17 +1651,17 @@ impl Render for Workspace {
             // レール上下への循環切替（⌃⌘↑↓）。番号（⌘1..9）を覚えずに隣へ流せる。
             // 行き先を見ずに切り替えるキー操作なので、着地先の名前を中央にフラッシュする。
             .on_action(cx.listener(|this, _: &NextProject, window, cx| {
-                let count = this.project_sessions.projects.len();
-                if count > 1 {
-                    let next = (this.project_sessions.active + 1) % count;
-                    this.switch_project_flashed(next, window, cx);
-                }
+                this.switch_adjacent_project(1, window, cx);
             }))
             .on_action(cx.listener(|this, _: &PrevProject, window, cx| {
-                let count = this.project_sessions.projects.len();
-                if count > 1 {
-                    let previous = (this.project_sessions.active + count - 1) % count;
-                    this.switch_project_flashed(previous, window, cx);
+                this.switch_adjacent_project(-1, window, cx);
+            }))
+            // レール外をどこか押したら rail_active を落とす。capture 相なので、レール自身の
+            // bubble リスナー（rail_view.rs・true にする）より先に走る＝レール内クリックでは立ち直る。
+            .capture_any_mouse_down(cx.listener(|this, _, _window, cx| {
+                if this.chrome.rail_active {
+                    this.chrome.rail_active = false;
+                    cx.notify(); // レールの面（bg1）を元に戻す
                 }
             }))
             .on_mouse_move(cx.listener(Self::on_resize_move))
@@ -2044,6 +2054,63 @@ mod tests {
             }
         });
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// レールが最後に触った面（`chrome.rail_active`）の間は ⌘{ ⌘}（タブ切替）がプロジェクト切替に
+    /// 化け、落ちればエディタタブ宛てに戻る（トラックパッド動線・2026-09-03）。
+    #[gpui::test]
+    fn rail_surface_routes_tab_switch_to_projects(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_rail_tab_switch_{}", std::process::id()));
+        let project_a = root.join("a");
+        let project_b = root.join("b");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(
+                vec![project_a.clone(), project_b.clone()],
+                Theme::dark(),
+                None,
+                cx,
+            )
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            assert_eq!(workspace.project_sessions.active, 0);
+
+            // レール面が最後 → ⌘} で次のプロジェクト、⌘{ で前のプロジェクト（循環）。
+            workspace.chrome.rail_active = true;
+            workspace.select_next_tab(&SelectNextTab, window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 1,
+                "⌘}} が次のプロジェクトへ"
+            );
+            workspace.select_next_tab(&SelectNextTab, window, cx);
+            assert_eq!(workspace.project_sessions.active, 0, "末尾からは先頭へ回る");
+            workspace.select_prev_tab(&SelectPrevTab, window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 1,
+                "⌘{{ が前のプロジェクトへ（循環）"
+            );
+
+            // レール外を触った（フラグが落ちた）後はプロジェクトを動かさない。
+            workspace.chrome.rail_active = false;
+            workspace.select_next_tab(&SelectNextTab, window, cx);
+            workspace.select_prev_tab(&SelectPrevTab, window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 1,
+                "通常時はエディタタブ宛て"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui::test]

@@ -1,7 +1,7 @@
 //! necoder（ねこーだー）— GPUI ベースの自作エディタ。エントリポイント。
 //!
 //! `necoder [<path>...]` で各 path をプロジェクト（レール項目）として開く。file を渡すと親を
-//! プロジェクト、その file をエディタに開く。引数無しは前回状態（`state.json`）を復元する。
+//! プロジェクト、その file をエディタに開く。引数無しは前回の窓（necoder.db の `window_sessions`）を全て復元する。
 
 use gpui::{
     actions, point, prelude::*, px, size, App, Bounds, Focusable, TitlebarOptions, WindowBounds,
@@ -19,7 +19,7 @@ mod mcp;
 /// macOS ネイティブメニューバー（M13）。
 mod menus;
 use std::time::Instant;
-use workspace::{ProjectSource, RestoredTabs, Workspace};
+use workspace::{ProjectSource, RestoredTabs, WindowPersistence, Workspace};
 
 actions!(necoder, [Quit]);
 
@@ -33,13 +33,23 @@ fn connect_ssh_project(uri: &str) -> anyhow::Result<ProjectSource> {
     Ok(ProjectSource::new(host, root))
 }
 
-/// コマンドライン引数（or 前回状態）から host 付き project と復元タブ列を決める。
-fn resolve_projects() -> (Vec<ProjectSource>, Vec<RestoredTabs>, usize) {
-    let mut sources = Vec::new();
-    let mut open_files: Vec<RestoredTabs> = Vec::new();
-    let mut active = 0;
+/// 起動時に開く窓 1 つ分の計画（プロジェクト列・復元タブ列・アクティブ・DB 上の窓 ID）。
+struct WindowPlan {
+    sources: Vec<ProjectSource>,
+    open_files: Vec<RestoredTabs>,
+    active: usize,
+    /// None = 窓セッションを書かない（offscreen 撮影）。
+    window_id: Option<String>,
+}
+
+/// コマンドライン引数（or DB の窓セッション）から起動時に開く窓を決める。
+/// 引数あり = その 1 窓（新しい窓 ID。前回の窓は次の無引数起動まで DB に残る）。
+/// 引数なし = 前回生存していた全窓（1 つも無ければ最後に閉じた 1 窓）。末尾が最後に触った窓。
+fn resolve_windows(storage: Option<&storage::Storage>) -> Vec<WindowPlan> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has_explicit_args = !args.is_empty();
+    let mut sources = Vec::new();
+    let mut open_files: Vec<RestoredTabs> = Vec::new();
 
     for arg in args {
         if arg.starts_with("ssh://") {
@@ -71,40 +81,92 @@ fn resolve_projects() -> (Vec<ProjectSource>, Vec<RestoredTabs>, usize) {
         }
     }
 
-    // 引数無し → 前回状態を復元
-    if sources.is_empty() && !has_explicit_args {
-        if let Some(state_path) = workspace::state_path() {
-            if let Some((saved_projects, saved_active)) = workspace::load_saved_state(&state_path) {
-                for (saved_index, saved) in saved_projects.into_iter().enumerate() {
-                    let source = match saved.remote_uri.as_deref() {
-                        Some(uri) => connect_ssh_project(uri),
-                        None => Ok(ProjectSource::local(saved.root)),
-                    };
-                    match source {
-                        Ok(source) => {
-                            if saved_index == saved_active {
-                                active = sources.len();
-                            }
-                            sources.push(source);
-                            open_files.push(RestoredTabs {
-                                files: saved.open_files,
-                                active: saved.active_file,
-                            });
+    // 引数無し → 前回の窓を全て復元（窓ごとに 1 行。主窓 = 最後に触った窓 = 末尾）
+    if !has_explicit_args {
+        if let Some(storage) = storage {
+            let mut plans = Vec::new();
+            let rows = match storage.claim_window_sessions() {
+                Ok(rows) => rows,
+                Err(error) => {
+                    eprintln!("前回の窓セッションを読めない: {error:#}");
+                    Vec::new()
+                }
+            };
+            for (window_id, payload) in rows {
+                let plan = workspace::decode_window_session(&payload).and_then(
+                    |(saved_projects, saved_active)| {
+                        restore_window_plan(saved_projects, saved_active, window_id.clone())
+                    },
+                );
+                match plan {
+                    Some(plan) => plans.push(plan),
+                    None => {
+                        // 中身が壊れている / 全プロジェクトが開けない → 閉じ扱いにして次回は出さない。
+                        eprintln!("前回の窓を復元できない（閉じ扱い）: {window_id}");
+                        if let Err(error) = storage.mark_window_session_closed(&window_id) {
+                            eprintln!("窓セッションに閉じ印を付けられない: {error:#}");
                         }
-                        Err(error) => eprintln!("前回の Remote SSH 接続を復元できない: {error:#}"),
                     }
                 }
             }
+            if !plans.is_empty() {
+                return plans;
+            }
+        }
+        // 最後の砦: カレントディレクトリ
+        if sources.is_empty() {
+            if let Ok(cwd) = std::env::current_dir() {
+                sources.push(ProjectSource::local(cwd));
+                open_files.push(RestoredTabs::default());
+            }
         }
     }
-    // 最後の砦: カレントディレクトリ
-    if sources.is_empty() && !has_explicit_args {
-        if let Ok(cwd) = std::env::current_dir() {
-            sources.push(ProjectSource::local(cwd));
-            open_files.push(RestoredTabs::default());
+    vec![WindowPlan {
+        sources,
+        open_files,
+        active: 0,
+        window_id: Some(workspace::new_window_session_id()),
+    }]
+}
+
+/// DB の 1 行（窓セッション）を開ける形へ。SSH は接続し、失敗したプロジェクトは飛ばす。
+/// 1 つも開けなければ None。
+fn restore_window_plan(
+    saved_projects: Vec<workspace::SavedProject>,
+    saved_active: usize,
+    window_id: String,
+) -> Option<WindowPlan> {
+    let mut sources = Vec::new();
+    let mut open_files = Vec::new();
+    let mut active = 0;
+    for (saved_index, saved) in saved_projects.into_iter().enumerate() {
+        let source = match saved.remote_uri.as_deref() {
+            Some(uri) => connect_ssh_project(uri),
+            None => Ok(ProjectSource::local(saved.root)),
+        };
+        match source {
+            Ok(source) => {
+                if saved_index == saved_active {
+                    active = sources.len();
+                }
+                sources.push(source);
+                open_files.push(RestoredTabs {
+                    files: saved.open_files,
+                    active: saved.active_file,
+                });
+            }
+            Err(error) => eprintln!("前回の Remote SSH 接続を復元できない: {error:#}"),
         }
     }
-    (sources, open_files, active)
+    if sources.is_empty() {
+        return None;
+    }
+    Some(WindowPlan {
+        sources,
+        open_files,
+        active,
+        window_id: Some(window_id),
+    })
 }
 
 /// ユーザー keymap.json を読み込んで bind する（存在しなければ何もしない）。
@@ -248,6 +310,12 @@ impl gpui::AssetSource for Assets {
             "icons/arrow-down-to-line.svg" => icon!("arrow-down-to-line.svg"),
             "icons/bell.svg" => icon!("bell.svg"),
             "icons/bell-off.svg" => icon!("bell-off.svg"),
+            "icons/eye.svg" => icon!("eye.svg"),
+            // エクスプローラの手動更新（ヘッダ右端）。
+            "icons/refresh-cw.svg" => icon!("refresh-cw.svg"),
+            // statusbar の診断件数（エラー / 警告）。
+            "icons/circle-x.svg" => icon!("circle-x.svg"),
+            "icons/triangle-alert.svg" => icon!("triangle-alert.svg"),
             // AI エージェントのブランドロゴ（Simple Icons・CC0・設定画面の識別用）。
             "icons/brand-claude.svg" => icon!("brand-claude.svg"),
             "icons/brand-copilot.svg" => icon!("brand-copilot.svg"),
@@ -404,8 +472,30 @@ fn main() {
         stage(&startup, "fonts_loaded");
         i18n::init_from_os_locale();
 
-        // プロジェクトを解決（roots + 起動時に開くファイル）。先頭 root を project 設定の対象にする。
-        let (sources, open_files, active_project) = resolve_projects();
+        // ローカル DB（窓セッション・hot exit・スレッド）。1 本を全窓で共有する。
+        let storage = workspace::open_default_storage();
+        stage(&startup, "storage_opened");
+        // Offscreen QA はユーザーの通常セッションを汚さない: 窓セッションを読まず・書かない。
+        let screenshot_mode =
+            cfg!(feature = "screenshot") && std::env::var_os("NECODER_SCREENSHOT").is_some();
+        let mut plans = resolve_windows(if screenshot_mode {
+            None
+        } else {
+            storage.as_ref()
+        });
+        if screenshot_mode {
+            for plan in &mut plans {
+                plan.window_id = None;
+            }
+        }
+        // 主窓 = 末尾（最後に触った窓）。最後に開いて前面にし、project 設定と開発プローブの対象にする。
+        let sources = plans
+            .last()
+            .map(|primary| primary.sources.clone())
+            .unwrap_or_default();
+        // 開発用プローブ（NECODER_OPEN_TABS）の起点。release では使わない。
+        #[cfg(debug_assertions)]
+        let active_project = plans.last().map(|primary| primary.active).unwrap_or(0);
         stage(&startup, "projects_resolved");
 
         // 設定（default → user → project）を **反応的 global** に載せてファイル監視を開始する。
@@ -479,68 +569,95 @@ fn main() {
             .unwrap_or_else(|| size(px(1280.0), px(800.0)));
         let bounds = Bounds::centered(None, window_size, cx);
 
-        let build_sources = sources.clone();
-        let build_theme = theme.clone();
-        // Offscreen QA はユーザーの通常セッションを汚さない。CLI で渡した project を描画するだけで、
-        // ~/Library/Application Support/necoder/state.json へは保存しない。
-        let persistence_path =
-            if cfg!(feature = "screenshot") && std::env::var_os("NECODER_SCREENSHOT").is_some() {
-                None
-            } else {
-                workspace::state_path()
-            };
         stage(&startup, "before_open_window");
-        let open = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                // 自前 titlebar（UI-SPEC §3）を描くため既定のシステム titlebar を隠す。
-                // 信号機は残し、38px の titlebar 内に収まる位置へ寄せる。
-                titlebar: Some(TitlebarOptions {
-                    title: Some("necoder".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(13.0), px(13.0))),
-                }),
-                // custom titlebar で自前ドラッグ（start_window_move）を使うため false。
-                // true のままだと macOS が titlebar を system 所有扱いしてクリック遅延や
-                // ダブルクリック判定の不具合になる（gpui WindowOptions のコメント参照）。
-                is_movable: false,
-                ..Default::default()
-            },
-            move |_window, cx| {
-                cx.new(|cx| {
-                    Workspace::new_sources_with_active(
-                        build_sources.clone(),
-                        active_project,
-                        build_theme.clone(),
-                        persistence_path.clone(),
-                        cx,
-                    )
-                })
-            },
-        );
-
-        let window = match open {
-            Ok(window) => window,
-            Err(error) => {
-                eprintln!("ウィンドウを開けない: {error}");
-                return;
+        // 前回の窓を全て開く。2 窓目以降は少しずつずらして重ねる。末尾（主窓）が最後 = 前面。
+        let mut primary_window = None;
+        for (index, plan) in plans.into_iter().enumerate() {
+            let offset = px(28.0 * index as f32);
+            let plan_bounds = Bounds::new(bounds.origin + point(offset, offset), bounds.size);
+            let persistence = storage.clone().map(|storage| WindowPersistence {
+                storage,
+                window_id: plan.window_id.clone(),
+            });
+            let build_theme = theme.clone();
+            let build_sources = plan.sources;
+            let build_active = plan.active;
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(plan_bounds)),
+                    // 自前 titlebar（UI-SPEC §3）を描くため既定のシステム titlebar を隠す。
+                    // 信号機は残し、38px の titlebar 内に収まる位置へ寄せる。
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("necoder".into()),
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(13.0), px(13.0))),
+                    }),
+                    // custom titlebar で自前ドラッグ（start_window_move）を使うため false。
+                    // true のままだと macOS が titlebar を system 所有扱いしてクリック遅延や
+                    // ダブルクリック判定の不具合になる（gpui WindowOptions のコメント参照）。
+                    is_movable: false,
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    // ユーザーが窓を閉じたら DB の自分の行に閉じ印（次回は復元しない）。
+                    if let Some(persistence) = &persistence {
+                        workspace::install_window_close_hook(window, cx, persistence);
+                    }
+                    cx.new(|cx| {
+                        Workspace::new_sources_with_active(
+                            build_sources,
+                            build_active,
+                            build_theme,
+                            persistence,
+                            cx,
+                        )
+                    })
+                },
+            );
+            let handle = match opened {
+                Ok(handle) => handle,
+                Err(error) => {
+                    eprintln!("ウィンドウを開けない: {error}");
+                    continue;
+                }
+            };
+            if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                workspace.restore_open_file(&plan.open_files, window, cx);
+                workspace.check_hot_exit_restore(cx);
+                let focus = workspace.focus_handle(cx);
+                window.focus(&focus, cx);
+            }) {
+                eprintln!("初期化に失敗: {error}");
             }
+            primary_window = Some(handle);
+        }
+        let Some(window) = primary_window else {
+            eprintln!("ウィンドウを 1 つも開けない");
+            return;
         };
 
         // 正常終了（⌘Q）= hot exit スナップショットを破棄してから quit（仕様: 正常終了で破棄）。
+        // 窓セッションは今開いている窓を「生存」のまま残し、それ以外の生存行（引数付き起動 → ⌘Q で
+        // 残った過去の窓）は閉じ扱いにする＝次回の復元は「最後に終了したときの窓の集合」。
+        let quit_storage = storage.clone();
         cx.on_action(move |_: &Quit, cx: &mut App| {
-            let _ = window.update(cx, |workspace, _window, _cx| workspace.prepare_quit());
+            workspace::mark_quitting();
+            let mut live_ids = Vec::new();
+            for handle in cx.windows() {
+                if let Some(handle) = handle.downcast::<Workspace>() {
+                    let _ = handle.update(cx, |workspace, _window, _cx| {
+                        workspace.prepare_quit();
+                        live_ids.extend(workspace.window_session_id());
+                    });
+                }
+            }
+            if let Some(storage) = &quit_storage {
+                if let Err(error) = storage.retain_window_sessions(&live_ids) {
+                    eprintln!("窓セッションの整理に失敗: {error:#}");
+                }
+            }
             cx.quit();
         });
-
-        if let Err(error) = window.update(cx, |workspace, window, cx| {
-            workspace.restore_open_file(&open_files, window, cx);
-            workspace.check_hot_exit_restore(cx);
-            let handle = workspace.focus_handle(cx);
-            window.focus(&handle, cx);
-        }) {
-            eprintln!("初期化に失敗: {error}");
-        }
 
         #[cfg(debug_assertions)]
         {
@@ -1266,3 +1383,33 @@ fn maybe_capture_screenshot(window: gpui::WindowHandle<Workspace>, cx: &mut App)
 
 #[cfg(not(feature = "screenshot"))]
 fn maybe_capture_screenshot(_window: gpui::WindowHandle<Workspace>, _cx: &mut App) {}
+
+#[cfg(test)]
+mod tests {
+    use super::Assets;
+    use gpui::AssetSource;
+
+    /// `assets/icons/` に置いた SVG は全て `Assets` の埋め込み表に登録されていること。
+    /// 登録漏れは `svg().path(...)` が黙って何も描かない（2026-09-03 の診断アイコン欠落）ので、ここで落とす。
+    #[test]
+    fn every_icon_file_is_registered() {
+        let icons_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons");
+        let mut unregistered = Vec::new();
+        for entry in std::fs::read_dir(&icons_dir).expect("assets/icons を読めること") {
+            let entry = entry.expect("ディレクトリエントリを読めること");
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if !file_name.ends_with(".svg") {
+                continue;
+            }
+            let asset_path = format!("icons/{file_name}");
+            match Assets.load(&asset_path) {
+                Ok(Some(bytes)) if !bytes.is_empty() => {}
+                _ => unregistered.push(asset_path),
+            }
+        }
+        assert!(
+            unregistered.is_empty(),
+            "main.rs の Assets 表に未登録のアイコン: {unregistered:?}"
+        );
+    }
+}

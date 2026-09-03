@@ -424,6 +424,7 @@ settings:
 explorer:
   main_worktree_undeletable: The main worktree cannot be deleted (use Remove from rail instead)
   up_folder: Up one folder
+  refresh_tip: Refresh (re-read the tree and git status)
   back_to_project: Back to project
   view_tree: Tree view
   view_columns: Column view (Finder-like)

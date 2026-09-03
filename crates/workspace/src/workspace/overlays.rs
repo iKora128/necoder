@@ -440,13 +440,10 @@ impl Workspace {
         );
     }
 
-    /// テーマ保存ディレクトリ（`state.json` と同じ necoder 設定フォルダの `themes/`）。
+    /// テーマ保存ディレクトリ（necoder 状態フォルダの `themes/`）。永続化しない窓（撮影・テスト）では None。
     pub(crate) fn themes_dir(&self) -> Option<PathBuf> {
-        self.persistence
-            .state_path
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(|dir| dir.join("themes"))
+        self.persistence.session_writer.as_ref()?;
+        paths::state_dir().map(|dir| dir.join("themes"))
     }
 
     /// テーマを即時適用する（自身のクローム + エディタ + Agent パネル + Picker へ波及）。

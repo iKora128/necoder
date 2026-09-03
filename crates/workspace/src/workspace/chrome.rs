@@ -219,7 +219,11 @@ impl Workspace {
                 ))
                 .child(button("window-close", "\u{2715}").on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|_this, _, window, _cx| window.remove_window()),
+                    cx.listener(|this, _, window, _cx| {
+                        // remove_window は OS の should-close フックを通らない＝閉じ印はここで付ける。
+                        this.mark_window_closed();
+                        window.remove_window()
+                    }),
                 ));
         }
         controls
@@ -1599,6 +1603,12 @@ impl Workspace {
         let (errors, warnings) = self.active_diagnostic_counts(cx);
         let error_color = if errors > 0 { theme.err } else { theme.fg2 };
         let warning_color = if warnings > 0 { theme.warn } else { theme.fg2 };
+        // ターミナルが見えているか（レールのターミナルアイコンと同じ判定）。
+        let terminal_open = if self.chrome.fleet_mode {
+            self.chrome.fleet_bottom_view == FleetBottomView::Terminal
+        } else {
+            self.chrome.show_bottom
+        };
         // 承認待ち signal は1Hz時計だけで反転。マスコットの5/10fps時計とは共有しない。
         let attention_bright = self.visual_tick % 2 == 0;
         let left = div()
@@ -1731,6 +1741,35 @@ impl Workspace {
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
                             this.open_diagnostics_panel(&DiagnosticsPanel, window, cx)
+                        }),
+                    ),
+            )
+            // ターミナル切替（診断を見た足でそのままターミナルへ行く動線・本人要望）。
+            // レール / titlebar の下ドックボタン / ⌃` と同じ `toggle_terminal`。開いている間は面を灯す。
+            .child(
+                div()
+                    .id("statusbar-terminal")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(20.))
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_color(if terminal_open { theme.fg0 } else { theme.fg2 })
+                    .when(terminal_open, |element| element.bg(theme.bg3))
+                    .hover(|style| style.bg(theme.bg3))
+                    .child(
+                        svg()
+                            .path("icons/square-terminal.svg")
+                            .size(px(13.))
+                            .flex_none(),
+                    )
+                    .tooltip(Tooltip::text(i18n::t!("rail.terminal"), theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_terminal(&ToggleTerminal, window, cx)
                         }),
                     ),
             );

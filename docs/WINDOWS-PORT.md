@@ -173,7 +173,7 @@ pub fn settings_file() / keymap_file() / db_file() / blobs_dir()
 |---|---|---|---|
 | settings.json / keymap.json / テーマ | `~/Library/Application Support/necoder` | `%APPDATA%\necoder`（Roaming） | `$XDG_CONFIG_HOME/necoder`（既定 `~/.config/necoder`） |
 | necoder.db / blobs | 同上 | `%LOCALAPPDATA%\necoder` | `$XDG_DATA_HOME/necoder` |
-| state.json / logs / crashes | 同上 | `%LOCALAPPDATA%\necoder` | `$XDG_STATE_HOME/necoder` |
+| logs / crashes / themes | 同上 | `%LOCALAPPDATA%\necoder` | `$XDG_STATE_HOME/necoder` |
 | shell-path キャッシュ | 同上 | **不要**（Windows に login shell PATH の概念が無い） | `$XDG_CACHE_HOME/necoder` |
 | 制御 IPC | `~/.necoder/gui.sock` | `\\.\pipe\necoder-gui-<user>` | `$XDG_RUNTIME_DIR/necoder/gui.sock` |
 
@@ -374,7 +374,7 @@ Windows の `std::fs::canonicalize` は **verbatim 形式**（`\\?\C:\Users\…`
 - [x] Windows で起動し、ウィンドウが出て**文字が描画される**（DirectWrite 経路 = mac の font-kit 相当が効いているか）
   - **2026-08-22 実機で確認**。`title='necoder'` 1295x807 のウィンドウが出て、**日本語（「ようこそ」「未導入」「導入」）も絵文字（🎨）も正しく描画**される。同梱フォント（IBM Plex Sans JP / Guguru Sans Code）が DirectWrite 経路で効いている
   - レール（プロジェクト色つき）・宛先チップ（`necoder ▾ ⎇ main`）・エクスプローラの **git status（黄点と `M`）**・ウェルカム画面のエージェント一覧まで表示される
-  - **`paths` crate が実アプリで効いていることも確認**: `%APPDATA%\necoder`（設定）と `%LOCALAPPDATA%\necoder`（`necoder.db` / `necoder.db-wal` / `state.json`）が分かれて作られ、`~\Library` は**作られない**。`necoder.db` が実在する＝**turso が実行時にも動く**
+  - **`paths` crate が実アプリで効いていることも確認**: `%APPDATA%\necoder`（設定）と `%LOCALAPPDATA%\necoder`（`necoder.db` / `necoder.db-wal`）が分かれて作られ、`~\Library` は**作られない**。`necoder.db` が実在する＝**turso が実行時にも動く**
 - [x] keymap の Windows 既定（§D4）。`Ctrl+S` で保存、`Ctrl+Shift+P` でパレット
   - `KeymapPlatform` + `default_keymap_json()` を新設。**mac 版を唯一の正として機械変換**する
     （2 本の JSON を手で並べると必ず片方だけ直されて腐るため）。差分は 3 つの表にだけ持つ:
