@@ -16,11 +16,15 @@ welcome・クラッシュ報告）は実装済み — ここに残っている�
 
 ## 1. リリースを切る（毎回）
 
-1. [ ] `CHANGELOG.md` の Unreleased を版へ繰り上げ
+1. [ ] `CHANGELOG.md` の Unreleased を版へ繰り上げ（**この節がそのまま Release ページの本文になる**。
+       `scripts/release-notes.sh <version>` で CI と同じ出力を手元で確認できる。節が無いと
+       release.yml が落ちる）
 2. [ ] `Cargo.toml` の `[workspace.package] version` を上げる（唯一の出所。Info.plist へは
        bundle-mac.sh が注入・タグとの一致は release.yml が検証して不一致なら fail）
 3. [ ] `cargo test --workspace && cargo deny check` green を確認
 4. [ ] `git tag v<version> && git push origin v<version>` → CI が署名+公証済み dmg を Release に添付
+       し、本文を CHANGELOG から書き込む。公開後に本文を直すときは
+       `scripts/release-notes.sh <version> | gh release edit v<version> --notes-file -`
 5. [ ] Release ページの自動生成 dmg を**実際に DL して**新規マシン相当（隔離属性つき）で開く:
        Gatekeeper 警告なしで起動・「10 分コース」（開く→編集→保存→検索→AI 1 タスク）を通す
 6. [ ] ゴミ箱（Finder AppleScript fallback）と `claude` 子プロセス起動が**公証ビルドで**動くことを確認

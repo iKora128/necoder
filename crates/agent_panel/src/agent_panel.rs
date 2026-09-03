@@ -3716,8 +3716,17 @@ impl AgentPanel {
             .map(|thread| thread.id.clone())
             .unwrap_or_default();
         let host = self.dest_host.clone();
-        let command =
-            acp_client::AgentKind::by_label(&agent_label)?.command_on(host.as_ref(), cwd)?;
+        let kind = acp_client::AgentKind::by_label(&agent_label)?;
+        // 起動方法は **設定 → 公開レジストリ → 組み込みカタログ** の順で決める。
+        // レジストリはキャッシュを読むだけ（ここは UI thread・ネットワークへは行かない）。
+        let agent_override = agent_server_override(kind.id, cx);
+        let registry = acp_client::registry::load_cached();
+        let command = kind.resolve_command_on(
+            host.as_ref(),
+            cwd,
+            agent_override.as_ref(),
+            registry.as_ref(),
+        )?;
         // スレッドの希望モード（sticky/前タブ）を起動時に渡す＝初回 prompt 前に適用される。
         // UI からの後追い SetMode だと Prompt に先を越され、初回ターンが既定モードで走る。
         let desired_mode = self
@@ -5664,11 +5673,17 @@ impl AgentPanel {
             .right(px(0.))
             .invisible()
             .group_hover("transcript-entry", |style| style.visible())
-            .px(px(5.))
-            .py(px(1.))
-            .rounded(px(4.))
+            // 22px 角（settings の丸ボタンと同寸）。padding 由来の 18x14px だと狙って押せない。
+            // transcript の本文に重ねて出すので、枠 1px で押せる範囲を輪郭として示す。
+            .size(px(22.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .border_1()
+            .border_color(theme.border)
             .bg(theme.bg2)
-            .text_size(px(10.5))
+            .text_size(px(12.5))
             .text_color(theme.fg2)
             .cursor_pointer()
             .hover(|style| style.text_color(theme.fg0))
@@ -8263,6 +8278,28 @@ fn model_belongs_to_agent(agent: &str, model: &str) -> bool {
 /// モデルは per-agent → グローバル `default_model`（土台）→ vendor フォールバック先頭の順。
 /// 思考量は per-agent → グローバル `default_effort` → `None`（＝Thread の初期値を保つ）。
 /// モードは per-agent → `None`（広告 or 前タブ引き継ぎに委ねる）。
+/// `settings.json` の `agent_servers.<id>` を acp_client の言葉へ写す。
+///
+/// 設定スキーマ（`type: custom` / `type: registry`）を知っているのはこの層まで。acp_client 側は
+/// 「コマンドを差し替えるか / env を足すだけか」だけを受け取る（依存方向を増やさない）。
+fn agent_server_override(agent_id: &str, cx: &App) -> Option<acp_client::AgentOverride> {
+    let setting = settings::get(cx).agent_servers.get(agent_id)?.clone();
+    Some(match setting {
+        settings_core::AgentServerSetting::Custom { command, args, env } => {
+            acp_client::AgentOverride {
+                command: Some(command),
+                args,
+                env,
+            }
+        }
+        settings_core::AgentServerSetting::Registry { env } => acp_client::AgentOverride {
+            command: None,
+            args: Vec::new(),
+            env,
+        },
+    })
+}
+
 fn agent_sticky_defaults(
     agent: &str,
     cx: &App,

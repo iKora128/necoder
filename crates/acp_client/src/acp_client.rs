@@ -6,6 +6,8 @@
 //!
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
+pub mod registry;
+
 use acp::schema::v1;
 use acp::schema::ProtocolVersion;
 use agent_client_protocol as acp;
@@ -13,6 +15,7 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc;
 use futures::{FutureExt, StreamExt};
 use host::{CommandSpec, Host, LocalHost};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -246,6 +249,8 @@ pub struct AgentCommand {
     pub path: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    /// 起動時に足す環境変数（レジストリの `env` と設定の上書き分）。空が通常。
+    pub env: BTreeMap<String, String>,
 }
 
 impl AgentCommand {
@@ -253,6 +258,28 @@ impl AgentCommand {
     pub fn claude(cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
         AGENTS.first()?.command(cwd)
     }
+
+    /// env 無しで組む（既存経路の短縮形）。
+    fn new(path: PathBuf, args: Vec<String>, cwd: PathBuf) -> Self {
+        Self {
+            path,
+            args,
+            cwd,
+            env: BTreeMap::new(),
+        }
+    }
+}
+
+/// 設定（`settings.json` の `agent_servers.<id>`）から来る起動方法の上書き。
+///
+/// `settings_core` の型をそのまま持ち込まず、この crate の言葉へ写して受け取る
+/// （acp_client は設定スキーマを知らないままにする＝依存方向を増やさない）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentOverride {
+    /// 起動コマンドを丸ごと差し替える。`None` = 版の解決は通常どおり行い、env だけ足す。
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 /// 選べる ACP エージェント（Zed の external_agents レジストリ準拠）。
@@ -264,7 +291,11 @@ pub struct AgentKind {
     /// vendor CLI 本体。ACP adapter の `bin` とは別（Claude/Codex は特に別 package）。
     cli_bin: &'static str,
     bin: &'static str,
-    /// npx フォールバック用の npm パッケージ。**npm 外（kimi=PyPI 等）は None**。
+    /// 公開レジストリ側の id（necoder の `id` とは綴りが違う。例 `copilot` →
+    /// `github-copilot-cli`）。`None` = レジストリに項目が無く、`package` だけが頼り。
+    registry_id: Option<&'static str>,
+    /// npx フォールバック用の npm パッケージ。**レジストリが引けないときの既定値**
+    /// （necoder が検証した版。npm 外＝kimi は None）。
     package: Option<&'static str>,
     extra_args: &'static [&'static str],
     /// セットアップ画面の「入れ方」でターミナルに流す導入コマンド（vendor の CLI 本体を入れる）。
@@ -301,7 +332,8 @@ pub const AGENTS: &[AgentKind] = &[
         label: "Claude Code",
         cli_bin: "claude",
         bin: "claude-agent-acp",
-        package: Some("@agentclientprotocol/claude-agent-acp@0.66.0"),
+        registry_id: Some("claude-acp"),
+        package: Some("@agentclientprotocol/claude-agent-acp@0.73.0"),
         extra_args: &[],
         install_cmd: "npm i -g @anthropic-ai/claude-code",
         login_cmd: "claude auth login",
@@ -314,7 +346,8 @@ pub const AGENTS: &[AgentKind] = &[
         label: "Codex",
         cli_bin: "codex",
         bin: "codex-acp",
-        package: Some("@agentclientprotocol/codex-acp@1.1.14"),
+        registry_id: Some("codex-acp"),
+        package: Some("@agentclientprotocol/codex-acp@1.8.0"),
         extra_args: &[],
         install_cmd: "npm i -g @openai/codex",
         login_cmd: "codex login",
@@ -330,7 +363,8 @@ pub const AGENTS: &[AgentKind] = &[
         label: "GitHub Copilot",
         cli_bin: "copilot",
         bin: "copilot",
-        package: Some("@github/copilot@1.0.70"),
+        registry_id: Some("github-copilot-cli"),
+        package: Some("@github/copilot@1.0.82"),
         extra_args: &["--acp"],
         install_cmd: "npm i -g @github/copilot",
         login_cmd: "copilot login",
@@ -343,7 +377,8 @@ pub const AGENTS: &[AgentKind] = &[
         label: "Qwen Code",
         cli_bin: "qwen",
         bin: "qwen",
-        package: Some("@qwen-code/qwen-code@0.19.9"),
+        registry_id: Some("qwen-code"),
+        package: Some("@qwen-code/qwen-code@0.22.3"),
         extra_args: &["--acp", "--experimental-skills"],
         install_cmd: "npm i -g @qwen-code/qwen-code",
         login_cmd: "qwen",
@@ -357,6 +392,7 @@ pub const AGENTS: &[AgentKind] = &[
         label: "OpenCode",
         cli_bin: "opencode",
         bin: "opencode",
+        registry_id: Some("opencode"),
         package: Some("opencode-ai"),
         extra_args: &["acp"],
         install_cmd: "npm i -g opencode-ai",
@@ -371,6 +407,7 @@ pub const AGENTS: &[AgentKind] = &[
         label: "Kimi CLI",
         cli_bin: "kimi",
         bin: "kimi",
+        registry_id: Some("kimi"),
         package: None,
         extra_args: &["acp"],
         install_cmd: "uv tool install kimi-cli",
@@ -386,6 +423,7 @@ pub const AGENTS: &[AgentKind] = &[
         label: "Grok Build",
         cli_bin: "grok",
         bin: "grok",
+        registry_id: Some("grok-build"),
         package: None,
         extra_args: &["acp"],
         install_cmd: "curl -fsSL https://x.ai/cli/install.sh | bash",
@@ -516,37 +554,82 @@ impl AgentKind {
         }
     }
 
-    /// このエージェントの起動コマンドを解決する。
+    /// **設定 → レジストリ → 組み込みカタログ**の順で起動コマンドを決める（本命の入口）。
+    ///
+    /// - `settings`: `settings.json` の `agent_servers.<id>`。`command` があれば**そこで確定**
+    ///   （版の解決もレジストリ参照もしない＝ユーザーが完全に主導権を持つ逃げ道）。
+    /// - `registry`: 公開レジストリのキャッシュ。あれば npm パッケージ版はここが正になる。
+    ///   necoder のリリースを待たずに版が進むのはこの経路のおかげ。
+    /// - どちらも無ければ [`Self::command`]（組み込みカタログ＝necoder が検証した既定値）。
+    ///
+    /// `env` は**どの経路でも設定の分を最後に足す**（コマンドは差し替えないが環境だけ変えたい、
+    /// を `type: "registry"` で表せるようにするため）。
+    pub fn resolve_command(
+        &self,
+        cwd: impl Into<PathBuf>,
+        settings: Option<&AgentOverride>,
+        registry: Option<&registry::Registry>,
+    ) -> Option<AgentCommand> {
+        let cwd = cwd.into();
+        let settings_env = settings.map(|s| s.env.clone()).unwrap_or_default();
+
+        // 1) 設定でコマンドごと差し替え。PATH 上の名前も絶対パスも受ける。
+        if let Some(override_settings) = settings {
+            if let Some(command) = &override_settings.command {
+                let path = find_in_path(command).unwrap_or_else(|| PathBuf::from(command));
+                let mut args = override_settings.args.clone();
+                args.extend(self.extra_args.iter().map(|arg| (*arg).to_string()));
+                let mut resolved = AgentCommand::new(path, args, cwd);
+                resolved.env = settings_env;
+                return Some(resolved);
+            }
+        }
+
+        // 2) レジストリ。npx 経路だけ起動できる（binary 配備は未実装＝黙って落とさず次へ）。
+        if let Some(entry) = self
+            .registry_id
+            .and_then(|id| registry.and_then(|reg| reg.agent(id)))
+        {
+            if let Some(registry::Launch::Npx(npx)) = entry.launch() {
+                if let Some(npx_path) = find_in_path("npx") {
+                    let mut args = vec!["-y".to_string(), bounded_npm_spec(&npx.package)];
+                    args.extend(npx.args.iter().cloned());
+                    args.extend(self.extra_args.iter().map(|arg| (*arg).to_string()));
+                    let mut resolved = AgentCommand::new(npx_path, args, cwd);
+                    resolved.env = npx.env.clone();
+                    resolved.env.extend(settings_env);
+                    return Some(resolved);
+                }
+            }
+        }
+
+        // 3) 組み込みカタログ（レジストリが引けない・オフライン・未登録のとき）。
+        let mut resolved = self.command(cwd)?;
+        resolved.env.extend(settings_env);
+        Some(resolved)
+    }
+
+    /// このエージェントの起動コマンドを解決する（組み込みカタログのみ）。
     /// 探索順: (1) PATH の単体バイナリ → (2) Zed の npx キャッシュ(.bin) → (3) `npx <package> <args>`。
+    ///
+    /// 設定とレジストリまで見るのは [`Self::resolve_command`]。
     pub fn command(&self, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
         let cwd = cwd.into();
         let extra: Vec<String> = self.extra_args.iter().map(|arg| arg.to_string()).collect();
         // 1) PATH の単体バイナリ
         if let Some(path) = find_in_path(self.bin) {
-            return Some(AgentCommand {
-                path,
-                args: extra,
-                cwd,
-            });
+            return Some(AgentCommand::new(path, extra, cwd));
         }
         // 2) Zed が展開済みの npx キャッシュ（ネット不要）
         if let Some(bin) = zed_cached_agent(self.bin) {
-            return Some(AgentCommand {
-                path: bin,
-                args: extra,
-                cwd,
-            });
+            return Some(AgentCommand::new(bin, extra, cwd));
         }
         // 3) npx フォールバック（npm パッケージがある agent のみ。node/npx が PATH に要る）
         let package = self.package?;
         let npx = find_in_path("npx")?;
-        let mut args = vec!["-y".to_string(), package.to_string()];
+        let mut args = vec!["-y".to_string(), bounded_npm_spec(package)];
         args.extend(extra);
-        Some(AgentCommand {
-            path: npx,
-            args,
-            cwd,
-        })
+        Some(AgentCommand::new(npx, args, cwd))
     }
 
     /// ローカルでの導入状況（設定画面のステータス表示用）。認証状態までは見ない（＝CLI 任せ）。
@@ -629,15 +712,14 @@ impl AgentKind {
     fn installed_command(&self, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
         let cwd = cwd.into();
         let path = find_in_path(self.bin).or_else(|| zed_cached_agent(self.bin))?;
-        Some(AgentCommand {
+        Some(AgentCommand::new(
             path,
-            args: self
-                .extra_args
+            self.extra_args
                 .iter()
                 .map(|arg| (*arg).to_string())
                 .collect(),
             cwd,
-        })
+        ))
     }
 
     /// initialize → session/new までを短時間だけ実行する。prompt は送らないため利用料は発生せず、
@@ -649,8 +731,63 @@ impl AgentKind {
         probe_session(&command, Duration::from_secs(4)).await
     }
 
+    /// 指定 host 上で **設定 → レジストリ → 組み込み**の順に解決する（remote 対応版）。
+    ///
+    /// remote では設定の `command` と レジストリの npm パッケージ版が効き、探索そのものは
+    /// remote 側で行う（remote の認証情報は remote 側のものだけを使う原則は変えない）。
+    pub fn resolve_command_on(
+        &self,
+        host: &dyn Host,
+        cwd: impl Into<PathBuf>,
+        settings: Option<&AgentOverride>,
+        registry: Option<&registry::Registry>,
+    ) -> Option<AgentCommand> {
+        let cwd = cwd.into();
+        if !host.is_remote() {
+            return self.resolve_command(cwd, settings, registry);
+        }
+        let settings_env = settings.map(|s| s.env.clone()).unwrap_or_default();
+        // 設定でコマンドを指定していれば remote でもそれを使う（解決は remote に任せる）。
+        if let Some(command) = settings.and_then(|s| s.command.as_deref()) {
+            let mut args = settings.map(|s| s.args.clone()).unwrap_or_default();
+            args.extend(self.extra_args.iter().map(|arg| (*arg).to_string()));
+            let mut resolved = AgentCommand::new(PathBuf::from(command), args, cwd);
+            resolved.env = settings_env;
+            return Some(resolved);
+        }
+        // レジストリの版で npx 経路を組む（remote 上の npx を使う）。
+        let registry_package = self
+            .registry_id
+            .and_then(|id| registry.and_then(|reg| reg.agent(id)))
+            .and_then(|entry| match entry.launch() {
+                Some(registry::Launch::Npx(npx)) => Some(npx),
+                _ => None,
+            });
+        let mut resolved = self.command_on_with_package(
+            host,
+            cwd,
+            registry_package.as_ref().map(|npx| npx.package.as_str()),
+        )?;
+        if let Some(npx) = registry_package {
+            resolved.env.extend(npx.env);
+        }
+        resolved.env.extend(settings_env);
+        Some(resolved)
+    }
+
     /// 指定 host 上で agent を解決する。remote の認証情報は remote 側のものだけを使う。
     pub fn command_on(&self, host: &dyn Host, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
+        self.command_on_with_package(host, cwd, None)
+    }
+
+    /// [`Self::command_on`] の本体。`package_override` はレジストリ由来の npm パッケージ
+    /// （`None` = 組み込みカタログの `package` を使う）。
+    fn command_on_with_package(
+        &self,
+        host: &dyn Host,
+        cwd: impl Into<PathBuf>,
+        package_override: Option<&str>,
+    ) -> Option<AgentCommand> {
         let cwd = cwd.into();
         if !host.is_remote() {
             return self.command(cwd);
@@ -671,27 +808,44 @@ impl AgentKind {
         };
         let extra: Vec<String> = self.extra_args.iter().map(|arg| arg.to_string()).collect();
         if let Some(path) = resolve(self.bin) {
-            return Some(AgentCommand {
-                path,
-                args: extra,
-                cwd,
-            });
+            return Some(AgentCommand::new(path, extra, cwd));
         }
-        let package = self.package?;
+        let package = package_override.or(self.package)?;
         let npx = resolve("npx")?;
-        let mut args = vec!["-y".to_string(), package.to_string()];
+        let mut args = vec!["-y".to_string(), bounded_npm_spec(package)];
         args.extend(extra);
-        Some(AgentCommand {
-            path: npx,
-            args,
-            cwd,
-        })
+        Some(AgentCommand::new(npx, args, cwd))
     }
 }
 
+/// npm の指定を**完全一致ピンから上限つき範囲へ**変える（`pkg@1.2.3` → `pkg@0.0.0 - 1.2.3`）。
+///
+/// 完全一致で固定すると、npm の `min-release-age` を設定している環境では**公開直後の版が
+/// 入らない**（その版は「新しすぎる」と拒否され、代わりに落とせる版も指定されていない）。
+/// 上限だけ決めておけば、npm が条件を満たす中で最新の版を選べる。
+///
+/// `<=1.2.3` ではなく**ハイフン記法**なのは Windows のため — `npm.cmd` を PowerShell 経由で
+/// 起動すると `<` が入力リダイレクトとして食われる。
+///
+/// 版を含まない指定（`opencode-ai` ＝常に最新）と、scope 付きパッケージ名の先頭 `@` は触らない。
+fn bounded_npm_spec(package: &str) -> String {
+    // 先頭の `@` は scope であって版の区切りではない（`@scope/name@1.2.3`）。
+    let Some(separator) = package.rfind('@').filter(|index| *index > 0) else {
+        return package.to_string();
+    };
+    let (name, version) = package.split_at(separator);
+    let version = &version[1..];
+    // 版が空、または既に範囲/タグ指定なら触らない（上限を二重に付けない）。
+    if version.is_empty() || !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return package.to_string();
+    }
+    format!("{name}@0.0.0 - {version}")
+}
+
 async fn probe_session(command: &AgentCommand, timeout: Duration) -> bool {
-    let spec =
-        CommandSpec::new(command.path.to_string_lossy(), &command.cwd).args(command.args.clone());
+    let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
+        .args(command.args.clone())
+        .envs(command.env.clone());
     let mut process = match LocalHost::shared().spawn_process(&spec) {
         Ok(process) => process,
         Err(_) => return false,
@@ -1060,8 +1214,9 @@ pub async fn run_session_on(
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
-    let spec =
-        CommandSpec::new(command.path.to_string_lossy(), &command.cwd).args(command.args.clone());
+    let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
+        .args(command.args.clone())
+        .envs(command.env.clone());
     let mut process = host
         .spawn_process(&spec)
         .with_context(|| format!("ACP agent を起動できない: {}", command.path.display()))?;
@@ -1671,6 +1826,138 @@ mod tests {
         assert!(find_in_path("definitely-not-a-real-binary-xyz").is_none());
     }
 
+    /// レジストリの最小サンプル（claude だけ、組み込みより新しい版）。
+    fn sample_registry() -> registry::Registry {
+        registry::parse(
+            r#"{"version":"1.0.0","agents":[
+              {"id":"claude-acp","name":"Claude Code","version":"99.0.0","description":"",
+               "distribution":{"npx":{"package":"@agentclientprotocol/claude-agent-acp@99.0.0",
+                                      "env":{"FROM_REGISTRY":"1"}}}}
+            ]}"#,
+        )
+        .expect("サンプルを読める")
+    }
+
+    fn claude() -> &'static AgentKind {
+        AGENTS.iter().find(|a| a.id == "claude").expect("claude")
+    }
+
+    #[test]
+    fn settings_command_wins_over_registry_and_catalog() {
+        let settings = AgentOverride {
+            command: Option::Some("definitely-not-a-real-agent-xyz".to_string()),
+            args: vec!["--flag".to_string()],
+            env: [("MY_KEY".to_string(), "v".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let resolved = claude()
+            .resolve_command(".", Some(&settings), Some(&sample_registry()))
+            .expect("設定があれば必ず解決する");
+        // PATH に無い名前でもそのまま使う＝ユーザーの指定を勝手に捨てない。
+        assert!(resolved.path.ends_with("definitely-not-a-real-agent-xyz"));
+        assert_eq!(resolved.args.first().map(String::as_str), Some("--flag"));
+        assert_eq!(resolved.env.get("MY_KEY").map(String::as_str), Some("v"));
+        // レジストリの env は混ざらない（コマンドごと差し替えた＝レジストリは見ていない）。
+        assert!(!resolved.env.contains_key("FROM_REGISTRY"));
+    }
+
+    #[test]
+    fn registry_version_beats_the_builtin_catalog() {
+        // npx が無い環境ではレジストリ経路に入れないので、その場合だけ skip する。
+        if find_in_path("npx").is_none() {
+            return;
+        }
+        let resolved = claude()
+            .resolve_command(".", None, Some(&sample_registry()))
+            .expect("レジストリから解決する");
+        let spec = resolved.args.join(" ");
+        // 組み込みは 0.73.0。レジストリの 99.0.0 が上限範囲として使われる。
+        assert!(
+            spec.contains("0.0.0 - 99.0.0"),
+            "レジストリ版が使われていない: {spec}"
+        );
+        assert_eq!(
+            resolved.env.get("FROM_REGISTRY").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn registry_env_only_override_keeps_registry_command() {
+        if find_in_path("npx").is_none() {
+            return;
+        }
+        // `type: "registry"` 相当＝command は無く env だけ。
+        let settings = AgentOverride {
+            command: None,
+            args: Vec::new(),
+            env: [("EXTRA".to_string(), "yes".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let resolved = claude()
+            .resolve_command(".", Some(&settings), Some(&sample_registry()))
+            .expect("解決する");
+        assert!(resolved.args.join(" ").contains("0.0.0 - 99.0.0"));
+        // レジストリの env と設定の env が両方載る。
+        assert_eq!(
+            resolved.env.get("FROM_REGISTRY").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(resolved.env.get("EXTRA").map(String::as_str), Some("yes"));
+    }
+
+    #[test]
+    fn falls_back_to_catalog_without_registry() {
+        // レジストリが無くても（オフライン初回など）組み込みカタログで解決を試みる。
+        // PATH 事情で None になり得るが、パニックしないことと版が組み込みであることを見る。
+        if let Some(resolved) = claude().resolve_command(".", None, None) {
+            let spec = resolved.args.join(" ");
+            if spec.contains("claude-agent-acp") {
+                assert!(
+                    spec.contains("0.73.0"),
+                    "組み込み版が使われていない: {spec}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn npm_spec_becomes_bounded_range() {
+        // scope 付き: 末尾の `@` だけが版の区切り（先頭の scope `@` は触らない）。
+        assert_eq!(
+            bounded_npm_spec("@agentclientprotocol/codex-acp@1.8.0"),
+            "@agentclientprotocol/codex-acp@0.0.0 - 1.8.0"
+        );
+        // scope 無し。
+        assert_eq!(bounded_npm_spec("cline@3.0.60"), "cline@0.0.0 - 3.0.60");
+        // 版指定が無いものは常に最新のまま（`opencode-ai`）。
+        assert_eq!(bounded_npm_spec("opencode-ai"), "opencode-ai");
+        // scope だけで版が無い形も壊さない。
+        assert_eq!(bounded_npm_spec("@scope/name"), "@scope/name");
+        // タグ指定（数字で始まらない）は上限を二重に付けない。
+        assert_eq!(bounded_npm_spec("pkg@latest"), "pkg@latest");
+    }
+
+    #[test]
+    fn every_pinned_agent_package_survives_bounding() {
+        // カタログの全 package が範囲化しても空にならない＝npx へ渡せる形であること。
+        for agent in AGENTS {
+            let Some(package) = agent.package else {
+                continue;
+            };
+            let bounded = bounded_npm_spec(package);
+            assert!(!bounded.is_empty(), "{}: 空の spec", agent.id);
+            assert!(
+                bounded.starts_with(package.split('@').next().unwrap_or(package))
+                    || bounded.starts_with('@'),
+                "{}: パッケージ名が壊れた: {bounded}",
+                agent.id
+            );
+        }
+    }
+
     #[test]
     fn elicitation_single_select_is_supported_others_declined() {
         use serde_json::json;
@@ -1770,11 +2057,7 @@ for line in sys.stdin:
             return;
         };
         let cwd = std::env::current_dir().expect("cwd");
-        let command = AgentCommand {
-            path: python,
-            args: vec!["-c".into(), FAKE_AGENT.into()],
-            cwd,
-        };
+        let command = AgentCommand::new(python, vec!["-c".into(), FAKE_AGENT.into()], cwd);
         let (command_tx, command_rx) = mpsc::unbounded();
         let (event_tx, mut event_rx) = mpsc::unbounded();
         command_tx
@@ -1914,11 +2197,11 @@ for line in sys.stdin:
     #[ignore = "HANDSHAKE_TIMEOUT（30 秒）待つ実プロセス検証"]
     fn connect_times_out_on_silent_hang() {
         // `sleep` は stdin を読まず stdout に何も書かない＝プロセスは生きたまま応答しない無言ハング。
-        let command = AgentCommand {
-            path: find_in_path("sleep").expect("sleep が PATH に無い"),
-            args: vec!["120".to_string()],
-            cwd: std::env::temp_dir(),
-        };
+        let command = AgentCommand::new(
+            find_in_path("sleep").expect("sleep が PATH に無い"),
+            vec!["120".to_string()],
+            std::env::temp_dir(),
+        );
         let started = std::time::Instant::now();
         let result = futures::executor::block_on(connect_and_initialize(&command));
         let elapsed = started.elapsed();

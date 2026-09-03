@@ -264,3 +264,26 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   未コミットの変更は git にも reflog にも残らないので、*戻せる削除* と *戻せない削除* を 1 個のチェックボックスで
   一緒に無音化させない。チェックボックスのラベルでその条件を明示する（隠れた例外にしない）。
   削除前に対象 worktree のエージェントを止める（削除中に書き込まれるのを防ぐ）・消えた TaskSpace のセルは編隊から外す。
+- **リモートのエージェントは remote 側で起動する（2026-09-02・実測で確定）** —
+  「母艦に node を置きたくない・接続先が増えるたびにログインさせられる」への調査結果。
+  **仕様上は解がある**: ACP は `ClientCapabilities.fs`（`fs/read_text_file` / `fs/write_text_file`）と
+  `.terminal`（`terminal/create` ほか 5 メソッド）を定義していて、これを広告すると**エージェントは自分で
+  ファイルを開かず、シェルも自分で起動せず、クライアントに代行を頼んでくる**。つまり agent を手元
+  （リモート元）で動かし、ファイル操作とコマンド実行だけを [`Host`] 越しに remote へ流せる。そうすれば
+  remote に要るのは静的 Rust の `necoder-remote-server`（6.5MB・node 非依存）だけになり、remote 側の
+  node もログインも不要になる。VSCode Remote が remote に node を常駐させるのは fs/LSP/拡張ホストを
+  すべて remote に置く設計だからで、ACP はその逆を最初から用意している。
+  **が、主要アダプタが揃って未実装だった**。`claude-agent-acp@0.73.0` と `codex-acp@1.8.0` の両方に
+  capability を全部立てて実際に 1 ターン走らせたが、**クライアントへ飛んできたリクエストは 0 件**
+  （両者とも仕事自体は完遂＝自前でファイルを開き自前でプロセスを起動している）。ソースでも確認済みで、
+  claude 側は `clientCapabilities` の `_meta` / `elicitation` / `auth` / `session` しか読まず、
+  `fs/*`・`terminal/*` を**送る実装が無い**。同梱の ACP SDK には両方の実装が在るので、
+  **仕様と SDK の問題ではなくアダプタの実装範囲の問題**。
+  → **当面はエージェントを remote 側で起動する**（現行のまま）。remote には node/npx と vendor CLI の
+  ログインが要る、を仕様として受け入れる。その帰結として `AgentKind::command_on` の remote 解決が
+  必要であり続けるが、**そこは `sh -lc` ではなく login+interactive で PATH を取るべき**
+  （nvm 等は interactive でしか初期化されない。ローカル側は `workspace::shell_env` で既に解決済みで、
+  remote 経路にその教訓が入っていない）。
+  necoder 側で capability を先に広告しておく手はあるが、相手が読まない以上いま得るものは無い。
+  **アダプタが対応したら再検討する**。判定は再現可能: capability を立てて 1 ターン走らせ、
+  `fs/read_text_file` か `terminal/create` が飛んでくるかを見るだけ。

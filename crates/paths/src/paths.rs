@@ -140,6 +140,23 @@ pub fn state_file() -> Option<PathBuf> {
     Some(state_dir()?.join("state.json"))
 }
 
+/// 外部 ACP エージェント関連の置き場（レジストリのキャッシュ・将来の配備先）。
+pub fn external_agents_dir() -> Option<PathBuf> {
+    Some(data_dir()?.join("external_agents"))
+}
+
+/// ACP 公開レジストリのキャッシュファイル。`NECODER_ACP_REGISTRY_CACHE` で差し替え可（テスト用）。
+pub fn acp_registry_cache() -> Option<PathBuf> {
+    if let Some(path) = real_var("NECODER_ACP_REGISTRY_CACHE") {
+        return Some(PathBuf::from(path));
+    }
+    Some(
+        external_agents_dir()?
+            .join("registry")
+            .join("registry.json"),
+    )
+}
+
 /// ログの置き場。`NECODER_LOG_DIR` で差し替え可（互換）。
 pub fn logs_dir() -> Option<PathBuf> {
     if let Some(path) = real_var("NECODER_LOG_DIR") {

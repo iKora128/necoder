@@ -1843,6 +1843,34 @@ impl Workspace {
         .detach();
     }
 
+    /// ACP 公開レジストリを背景で取り直す（古ければ・失敗は静かに無視）。
+    ///
+    /// エージェントの版はここで前へ進む＝**necoder のリリースを待たずに新しい adapter が入る**。
+    /// 起動時はキャッシュだけを読んで即動き（`registry::load_cached`）、ネットワークはここで後追い。
+    /// **走行中のスレッドには触らない** — 取り直した結果は次に起動するセッションから効く。
+    /// アップデート確認と同じ抑止スイッチ（スクショ/プローブ/`NECODER_NO_UPDATE_CHECK`）に従う。
+    pub(crate) fn schedule_agent_registry_refresh(&self, cx: &mut Context<Self>) {
+        if cfg!(test)
+            || std::env::var_os("NECODER_NO_UPDATE_CHECK").is_some()
+            || std::env::var_os("NECODER_SCREENSHOT").is_some()
+        {
+            return;
+        }
+        cx.spawn(async move |_workspace, cx| {
+            // 起動直後のラッシュを避ける（アップデート確認と同じ理由）。
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(12))
+                .await;
+            cx.background_executor()
+                .spawn(async move {
+                    // 1 時間以内に取っていれば何もしない（`refresh_if_stale` が判断する）。
+                    acp_client::registry::refresh_if_stale();
+                })
+                .await;
+        })
+        .detach();
+    }
+
     // ── メニューバー連携（M13: 設定を開く / About） ──
 
     /// ⌘, / メニュー「設定…」。rail の ⚙ トグルと違い、常に「開く」（メニューの意味論）。
