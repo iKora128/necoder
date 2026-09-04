@@ -73,6 +73,8 @@ agent:
   compact_tip: 文脈を要約して圧縮する（/compact）
   output_truncated: "… (%{n} 行省略)"
   result_lines: "%{n} 行"
+  file_write: "書き込み %{path}"
+  file_append: "追記 %{path}"
   queued_title: "送信待ち %{n} 件（ターン完了で自動送信）"
   queue_send_now: 中断して今すぐ
   elicitation_submit: これで回答

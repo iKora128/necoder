@@ -2383,3 +2383,19 @@
 - 学び/罠: `state != UpdateState::Available` の比較は `Installing(f32)` を含むので `Eq` を外す（PartialEq のみ）。Content-Length は 302 → 200 で複数並ぶため**最後の応答**を取る（先頭を取ると 0 になる）。relauncher は必ず「自プロセスの死」を待ってから `open`（早いと既存インスタンスへ転送されて何も起きない）
 - 検証: check（debug/release）警告 0・i18n 緑・workspace 39 件緑（`content_length_comes_from_the_last_response` 追加）。**実機の通しは次のリリース（v0.1.11）を出したときに本人が確認**: チップの % が動く → 検証中 → 差し替え中 → 再起動ボタン → 新版で起動
 - 次: 実機で relauncher の `open` が二重起動ガード（cli の転送）に引っかからないことを確認。Windows は当面 Release ページ経路のまま（進捗バーの出番なし）
+
+## 2026-09-03 — v0.1.10 の Workspace 復元欠落 + statusbar SVG 欠落を修正
+- やったこと: ユーザー実機で「v0.1.10 再起動後、開いていた Workspace が全部消えた」。窓セッションは background 保存だけでは終了時に完了保証がなく、Turso の別プロセス排他 lock もログに実在した。終了直前に各窓の最新 payload を同期保存する経路を追加し、`WindowPersistence.storage: Option` で DB open 失敗後に Workspace ごとの再 open をしないよう整理。本人の方針どおり旧 `state.json` は一切読まず、後方互換を追加しない。statusbar は Assets 登録後も空白だった — GPUI の SVG は親 `text_color` を継承しないため、circle-x / triangle-alert / square-terminal に直接色を指定。同じ漏れの eye / explorer refresh も修正
+- 学び/罠: 終了直前まで変化するセッション状態を detached background task だけに任せると、再起動が速いほど最後の書き込みが消える。終了経路に同期 flush が必要。Turso の排他 lock 失敗後に同じプロセスから open を繰り返しても復旧せず、ログと競合を増やす。SVG は asset 登録と直接色指定の両方が必要
+- 検証: Workspace セッションの終了時 flush test、Assets 全登録テスト、debug all-target check、release check、fmt / diff checkを実行。稼働中の dogfood instanceを守るため別 GUI / offscreen は起動しない
+- 次: 新ビルドの通常起動で v0.1.10 以降に開いた Workspace が次回も戻ること、statusbar 3 アイコンの実描画を本人が確認。`window_sessions` は「生存窓 + 閉じ済み 1」に収束する。turn / task event / checkpoint は別途増えるため、明示削除時の関連行削除 + orphan blob GC を設計する
+
+## 2026-09-03 — Workspace 切り替えモードのレール cue を明るく
+- やったこと: 本人の実機フィードバック「現状は少し分かりづらい」を受け、`rail_active` 中の左レール背景を bg1 から bg2 へ一段強くした。挙動（レールクリックで有効、レール外クリックで解除、⌘{ / ⌘} 連続巡回、専用キー維持）は不変
+- 学び/罠: dark の bg0=#16181e と bg1=#1b1e25 は大面積でも差が小さく、操作対象の cue として弱かった。識別色を増やさず中立面の明度差だけを広げる
+- 次: 実機で bg2 の強さを確認。強すぎる場合は bg1/bg2 の中間色を新 token にせず局所 mix で調整する
+
+## 2026-09-04 — Claude Code の heredoc ファイル書き込みを圧縮表示
+- やったこと: Claude Code ACP が Bash tool の title として送る `cd …; cat > path <<'EOF'` + ファイル全文を検出し、transcript では `書き込み path` + `▸ N 行`へ正規化（英語 UI は `Write path`）。クリックで全文展開でき、対象パスの拡張子から言語を推測して既存 tree-sitter syntax highlight を適用する。`cat >>` は `追記` / `Append`、`Bash(…)` wrapper にも対応。通常の heredoc コマンドは誤ってファイル書き込み扱いしない。`NECODER_HEREDOC_PROBE=collapsed|expanded` を追加
+- 学び/罠: 問題の文字列は tool の output ではなく title に載っていたため、既存の「長い result / args を折り畳む」だけでは効かなかった。ACP の情報を捨てるのでなく、shell transport を意味的な Write step へ変換すると安全性（実行内容を確認できる）と密度を両立できる
+- 検証: parser 2 test、agent_panel/workspace/necoder all-target check。offscreen 1280px で collapsed は短いファイル操作名 + `▸ 11 行`の2行、expanded は Python の文字列/import/class が色分けされることを目視。実 HOME での workspace 4 test は既知の外部エージェント起動による GPUI scheduler panic を再現したが、HOME + PATH を分離した release gate は 40 passed / 1 ignored / 0 failed

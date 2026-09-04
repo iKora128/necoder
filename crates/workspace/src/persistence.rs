@@ -61,7 +61,9 @@ impl RestoredTabs {
 /// （offscreen 撮影・プローブ: ユーザーの通常セッションを汚さない）。
 #[derive(Clone)]
 pub struct WindowPersistence {
-    pub storage: storage::Storage,
+    /// `None` は呼び出し側が「DB は利用不能 / 利用しない」と判断済み。
+    /// `Option<WindowPersistence>` の外側の None は旧 API 互換で「必要なら自前で開く」を表す。
+    pub storage: Option<storage::Storage>,
     pub window_id: Option<String>,
 }
 
@@ -144,6 +146,8 @@ pub(crate) struct WindowSessionWriter {
     running: Arc<AtomicBool>,
     /// 窓が閉じられた後は書かない（閉じ印の後に遅れて上書きしない）。
     closed: Arc<AtomicBool>,
+    /// background save と終了時 flush の順序を固定する。
+    write_gate: Arc<Mutex<()>>,
 }
 
 impl WindowSessionWriter {
@@ -158,6 +162,7 @@ impl WindowSessionWriter {
             mailbox: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
             closed: Arc::new(AtomicBool::new(false)),
+            write_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -175,6 +180,7 @@ impl WindowSessionWriter {
         let mailbox = self.mailbox.clone();
         let running = self.running.clone();
         let closed = self.closed.clone();
+        let write_gate = self.write_gate.clone();
         executor
             .spawn(async move {
                 loop {
@@ -188,6 +194,9 @@ impl WindowSessionWriter {
                         }
                         break;
                     };
+                    let _write_guard = write_gate
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     if closed.load(Ordering::SeqCst) {
                         running.store(false, Ordering::SeqCst);
                         break;
@@ -198,6 +207,25 @@ impl WindowSessionWriter {
                 }
             })
             .detach();
+    }
+
+    /// ⌘Q / 再起動の直前に、その瞬間の完全な payload を同期保存する。
+    ///
+    /// detached background task はプロセス終了までの完了を保証できない。先に `closed` を立て、
+    /// 実行中の書き込みと gate で合流してから最新値を最後に書くことで、古い payload の追い越しも防ぐ。
+    pub(crate) fn flush_for_quit(&self, payload: String) {
+        self.closed.store(true, Ordering::SeqCst);
+        lock_mailbox(&self.mailbox).take();
+        let _write_guard = self
+            .write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(error) = self
+            .storage
+            .upsert_window_session(&self.window_id, &payload)
+        {
+            eprintln!("終了時に窓セッションを保存できない: {error:#}");
+        }
     }
 
     /// ユーザーが窓を閉じた: 以後の書き込みを止め、行に閉じ印を付ける（二度目以降は no-op）。
@@ -224,10 +252,12 @@ fn lock_mailbox(mailbox: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Op
 /// 自前 titlebar の × は `remove_window()` 直叩きでここを通らないので、
 /// `Workspace::mark_window_closed` を先に呼ぶ。
 pub fn install_window_close_hook(window: &Window, cx: &App, persistence: &WindowPersistence) {
-    let Some(window_id) = persistence.window_id.clone() else {
+    let (Some(storage), Some(window_id)) =
+        (persistence.storage.clone(), persistence.window_id.clone())
+    else {
         return;
     };
-    let writer = WindowSessionWriter::new(persistence.storage.clone(), window_id);
+    let writer = WindowSessionWriter::new(storage, window_id);
     window.on_window_should_close(cx, move |_window, _cx| {
         if !is_quitting() {
             writer.close();
@@ -285,5 +315,24 @@ mod tests {
         let first = new_window_session_id();
         let second = new_window_session_id();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn quit_flush_persists_the_latest_window_session_synchronously() {
+        let suffix = new_window_session_id();
+        let db_path = std::env::temp_dir().join(format!("necoder-quit-flush-{suffix}.db"));
+        let storage = storage::Storage::open(&db_path).unwrap();
+        let writer = WindowSessionWriter::new(storage.clone(), "window-1".to_string());
+        let payload = r#"{"projects":[{"root":"/tmp/latest"}]}"#.to_string();
+
+        writer.flush_for_quit(payload.clone());
+
+        assert_eq!(
+            storage.claim_window_sessions().unwrap(),
+            vec![("window-1".to_string(), payload)]
+        );
+        drop(writer);
+        drop(storage);
+        let _ = std::fs::remove_file(db_path);
     }
 }

@@ -84,9 +84,10 @@ impl Workspace {
             .w(px(RAIL_WIDTH))
             .h_full()
             .flex_none()
-            // レールが「最後に触った面」の間は面を bg1（エディタ面と同じ段）に上げて、
+            // レールが「最後に触った面」の間は面を bg2 まで上げて、
             // ⌘{ ⌘} の宛先がここに来ていることを示す（色相は使わない・§1.3）。
-            .bg(if rail_active { theme.bg1 } else { theme.bg0 })
+            // bg1 では bg0 との差が小さく実機で分かりづらかったため、一段強い中立面にする。
+            .bg(if rail_active { theme.bg2 } else { theme.bg0 })
             .border_r_1()
             .border_color(theme.border)
             .pt_2()

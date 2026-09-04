@@ -807,9 +807,11 @@ impl Workspace {
             },
             move |window, cx| {
                 // 新窓は DB を共有し、自分の行（新しい窓 ID）だけを書く。閉じたら閉じ印。
-                let persistence = storage.map(|storage| WindowPersistence {
+                let persistence = Some(WindowPersistence {
+                    window_id: storage
+                        .as_ref()
+                        .map(|_| crate::persistence::new_window_session_id()),
                     storage,
-                    window_id: Some(crate::persistence::new_window_session_id()),
                 });
                 if let Some(persistence) = &persistence {
                     crate::persistence::install_window_close_hook(window, cx, persistence);
@@ -1098,7 +1100,14 @@ impl Workspace {
         let Some(writer) = self.persistence.session_writer.as_ref() else {
             return;
         };
-        let state = PersistedState {
+        let Some(payload) = encode_window_session(&self.persisted_state()) else {
+            return;
+        };
+        writer.save(payload, cx.background_executor());
+    }
+
+    fn persisted_state(&self) -> PersistedState {
+        PersistedState {
             projects: self
                 .project_sessions
                 .projects
@@ -1111,11 +1120,18 @@ impl Workspace {
                 })
                 .collect(),
             active: self.project_sessions.active,
-        };
-        let Some(payload) = encode_window_session(&state) else {
+        }
+    }
+
+    /// 終了直前は background task に任せず、現時点の Workspace 列とタブ列を DB へ同期保存する。
+    pub(crate) fn flush_window_session_for_quit(&mut self) {
+        self.sync_active_slot();
+        let Some(payload) = encode_window_session(&self.persisted_state()) else {
             return;
         };
-        writer.save(payload, cx.background_executor());
+        if let Some(writer) = self.persistence.session_writer.as_ref() {
+            writer.flush_for_quit(payload);
+        }
     }
 
     // ── オーバーレイ（Picker） ──

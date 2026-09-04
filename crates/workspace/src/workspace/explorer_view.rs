@@ -815,7 +815,14 @@ impl Workspace {
                 .rounded(px(4.))
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-                .child(svg().path("icons/refresh-cw.svg").size(px(12.)).flex_none())
+                // GPUI の SVG は親の text_color を継承しない。
+                .child(
+                    svg()
+                        .path("icons/refresh-cw.svg")
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(theme.fg2),
+                )
                 .tooltip(Tooltip::text(
                     i18n::t!("explorer.refresh_tip"),
                     theme.clone(),

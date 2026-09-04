@@ -660,7 +660,14 @@ impl Workspace {
                     .cursor_pointer()
                     .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
                     .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
-                    .child(svg().path("icons/eye.svg").size(px(12.)).flex_none())
+                    // GPUI の SVG は親の text_color を継承しないため、必ず直接色を渡す。
+                    .child(
+                        svg()
+                            .path("icons/eye.svg")
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(if on { theme.fg0 } else { theme.fg2 }),
+                    )
                     .child(div().text_size(px(10.5)).child(label))
                     .tooltip(Tooltip::text(
                         i18n::t!("breadcrumb.md_preview_tip"),
@@ -734,7 +741,13 @@ impl Workspace {
                             .cursor_pointer()
                             .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
                             .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
-                            .child(svg().path("icons/eye.svg").size(px(12.)).flex_none())
+                            .child(
+                                svg()
+                                    .path("icons/eye.svg")
+                                    .size(px(12.))
+                                    .flex_none()
+                                    .text_color(if on { theme.fg0 } else { theme.fg2 }),
+                            )
                             .child(div().text_size(px(10.5)).child(label))
                             .tooltip(Tooltip::text(
                                 i18n::t!("breadcrumb.html_preview_tip"),
@@ -1719,7 +1732,13 @@ impl Workspace {
                             .items_center()
                             .gap(px(3.))
                             .text_color(error_color)
-                            .child(svg().path("icons/circle-x.svg").size(px(12.)).flex_none())
+                            .child(
+                                svg()
+                                    .path("icons/circle-x.svg")
+                                    .size(px(12.))
+                                    .flex_none()
+                                    .text_color(error_color),
+                            )
                             .child(format!("{errors}")),
                     )
                     .child(
@@ -1732,7 +1751,8 @@ impl Workspace {
                                 svg()
                                     .path("icons/triangle-alert.svg")
                                     .size(px(12.))
-                                    .flex_none(),
+                                    .flex_none()
+                                    .text_color(warning_color),
                             )
                             .child(format!("{warnings}")),
                     )
@@ -1763,7 +1783,8 @@ impl Workspace {
                         svg()
                             .path("icons/square-terminal.svg")
                             .size(px(13.))
-                            .flex_none(),
+                            .flex_none()
+                            .text_color(if terminal_open { theme.fg0 } else { theme.fg2 }),
                     )
                     .tooltip(Tooltip::text(i18n::t!("rail.terminal"), theme.clone()))
                     .on_mouse_down(

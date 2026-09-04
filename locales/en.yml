@@ -72,6 +72,8 @@ agent:
   compact_tip: Summarize and compact the context (/compact)
   output_truncated: "… (%{n} lines hidden)"
   result_lines: "%{n} lines"
+  file_write: "Write %{path}"
+  file_append: "Append %{path}"
   queued_title: "%{n} queued (sent when the turn ends)"
   queue_send_now: Interrupt & send
   elicitation_submit: Submit

@@ -811,7 +811,7 @@ impl Workspace {
         // ローカル永続化 DB（hot exit・M10 / 窓セッション）。main から渡された 1 本を共有し、
         // 無ければ自前で開く（NECODER_DB でパス上書き・開けなくても起動は続行）。
         let (storage_handle, window_id) = match window_persistence {
-            Some(WindowPersistence { storage, window_id }) => (Some(storage), window_id),
+            Some(WindowPersistence { storage, window_id }) => (storage, window_id),
             None => (crate::persistence::open_default_storage(), None),
         };
         if let Some(handle) = storage_handle {
@@ -881,6 +881,8 @@ impl Workspace {
         }
         self.open_slot_files(window, cx);
         self.loaded = true;
+        // constructor が書いた空タブ状態を、復元完了後の実際のタブ列で上書きする。
+        self.save_state(cx);
     }
 
     /// 複数ファイルをアクティブプロジェクトのタブとして順に開く（最後がアクティブ）。

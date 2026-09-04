@@ -113,12 +113,12 @@ fn resolve_windows(storage: Option<&storage::Storage>) -> Vec<WindowPlan> {
                 return plans;
             }
         }
-        // 最後の砦: カレントディレクトリ
-        if sources.is_empty() {
-            if let Ok(cwd) = std::env::current_dir() {
-                sources.push(ProjectSource::local(cwd));
-                open_files.push(RestoredTabs::default());
-            }
+    }
+    // 最後の砦: カレントディレクトリ。offscreen QA はここへ直接落とし、ユーザー状態を読まない。
+    if sources.is_empty() && !has_explicit_args {
+        if let Ok(cwd) = std::env::current_dir() {
+            sources.push(ProjectSource::local(cwd));
+            open_files.push(RestoredTabs::default());
         }
     }
     vec![WindowPlan {
@@ -472,17 +472,18 @@ fn main() {
         stage(&startup, "fonts_loaded");
         i18n::init_from_os_locale();
 
-        // ローカル DB（窓セッション・hot exit・スレッド）。1 本を全窓で共有する。
-        let storage = workspace::open_default_storage();
-        stage(&startup, "storage_opened");
         // Offscreen QA はユーザーの通常セッションを汚さない: 窓セッションを読まず・書かない。
         let screenshot_mode =
             cfg!(feature = "screenshot") && std::env::var_os("NECODER_SCREENSHOT").is_some();
-        let mut plans = resolve_windows(if screenshot_mode {
+        // ローカル DB（窓セッション・hot exit・スレッド）。1 本を全窓で共有する。
+        // 撮影は DB 自体を開かない。Turso のプロセス排他 lock を dogfood 本体と奪い合わないため。
+        let storage = if screenshot_mode {
             None
         } else {
-            storage.as_ref()
-        });
+            workspace::open_default_storage()
+        };
+        stage(&startup, "storage_opened");
+        let mut plans = resolve_windows(storage.as_ref());
         if screenshot_mode {
             for plan in &mut plans {
                 plan.window_id = None;
@@ -575,9 +576,11 @@ fn main() {
         for (index, plan) in plans.into_iter().enumerate() {
             let offset = px(28.0 * index as f32);
             let plan_bounds = Bounds::new(bounds.origin + point(offset, offset), bounds.size);
-            let persistence = storage.clone().map(|storage| WindowPersistence {
-                storage,
-                window_id: plan.window_id.clone(),
+            // Some の外枠は「DB を開く判断は main で完了済み」。storage=None のとき Workspace 側で
+            // 二度目の open をせず、同じ排他ロックエラーを重ねない。
+            let persistence = Some(WindowPersistence {
+                window_id: storage.as_ref().and(plan.window_id.clone()),
+                storage: storage.clone(),
             });
             let build_theme = theme.clone();
             let build_sources = plan.sources;

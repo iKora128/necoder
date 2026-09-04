@@ -878,16 +878,92 @@ pub fn digest_tail(text: &str) -> Option<SharedString> {
 /// hover の ⧉ でエントリ単位コピーを提供する・M13 UX。本文のドラッグ選択は残件）。
 /// `ToolCallInfo`（開始）から Step エントリを組む。args=主なパス / result=出力 / diffs=差分。
 fn build_step_entry(info: ToolCallInfo) -> Entry {
-    let args = info.locations.first().cloned().unwrap_or_default();
+    let mut tool = info.title.unwrap_or_default();
+    let mut args = info.locations.first().cloned().unwrap_or_default();
+    if let Some(write) = compact_shell_heredoc_write(&tool) {
+        tool = heredoc_write_label(&write);
+        args = write.content;
+    }
     Entry::Step {
         id: (!info.id.is_empty()).then(|| SharedString::from(info.id)),
-        tool: SharedString::from(info.title.unwrap_or_default()),
+        tool: SharedString::from(tool),
         args: SharedString::from(args),
         result: info
             .output
             .map(|output| SharedString::from(cap_output(&output))),
         diffs: info.diffs,
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CompactHeredocWrite {
+    path: String,
+    append: bool,
+    content: String,
+}
+
+fn heredoc_write_label(write: &CompactHeredocWrite) -> String {
+    let key = if write.append {
+        "agent.file_append"
+    } else {
+        "agent.file_write"
+    };
+    i18n::t!(key, "path" => write.path.as_str())
+}
+
+/// Claude Code が Bash tool の title に載せる
+/// `cd …; cat > path <<'EOF'\n<file 全文>\nEOF` を、ファイル書き込みとして表示できる形へ畳む。
+/// 実行内容の可視性は失わず、全文は Step の展開領域へ移す。
+fn compact_shell_heredoc_write(title: &str) -> Option<CompactHeredocWrite> {
+    let command = title.trim();
+    let command = command
+        .strip_prefix("Bash(")
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(command);
+    let mut lines = command.lines();
+    let first_line = lines.next()?.trim();
+    let heredoc_at = first_line.rfind("<<")?;
+    let marker = first_line[heredoc_at + 2..]
+        .trim()
+        .split_whitespace()
+        .next()?
+        .trim_matches(['\'', '"']);
+    if marker.is_empty() {
+        return None;
+    }
+
+    let command_before_heredoc = first_line[..heredoc_at].trim_end();
+    let cat_command = command_before_heredoc
+        .rsplit(';')
+        .next()
+        .unwrap_or(command_before_heredoc)
+        .trim();
+    if !cat_command.starts_with("cat ") {
+        return None;
+    }
+    let redirect_at = cat_command.rfind('>')?;
+    let append = redirect_at > 0 && cat_command.as_bytes()[redirect_at - 1] == b'>';
+    let target = cat_command[redirect_at + 1..]
+        .trim()
+        .trim_matches(['\'', '"']);
+    if target.is_empty() {
+        return None;
+    }
+
+    let mut content_lines: Vec<&str> = lines.collect();
+    if content_lines
+        .last()
+        .is_none_or(|line| line.trim() != marker)
+    {
+        return None;
+    }
+    content_lines.pop();
+    let content = content_lines.join("\n");
+    Some(CompactHeredocWrite {
+        path: target.to_string(),
+        append,
+        content,
+    })
 }
 
 /// ACP tool の location/path から、言語指定のない出力に使う言語を推測する。
@@ -937,7 +1013,13 @@ const STEP_ARGS_COLLAPSE_MIN_CHARS: usize = 80;
 
 /// 折り畳んだツール引数（⏺ の引数行）のヘッダ要約。1 行目だけを見せ、続きがあれば ⋯ を付ける
 /// （複数行コマンドが transcript を専有しないように・横のあふれは overflow_hidden で切る）。
-fn step_args_preview(args: &str) -> SharedString {
+fn step_args_preview(tool: &str, args: &str) -> SharedString {
+    if args.contains('\n') && infer_language_from_tool_argument(tool).is_some() {
+        return SharedString::from(i18n::t!(
+            "agent.result_lines",
+            "n" => args.lines().count().max(1)
+        ));
+    }
     let first_line = args.lines().next().unwrap_or("").trim_end();
     let has_more = args.trim_end() != first_line;
     if has_more {
@@ -1320,6 +1402,39 @@ impl AgentPanel {
         for thread in &mut threads {
             apply_thread_defaults(thread, cx);
         }
+        // 開発用: Claude Code の `cat > file <<EOF` 巨大 title を、実経路と同じ変換で描画確認する。
+        // `expanded` なら本文を開き、拡張子由来の syntax color も確認できる。
+        let mut expanded_args = std::collections::HashSet::new();
+        if let Ok(mode) = std::env::var("NECODER_HEREDOC_PROBE") {
+            if let Some(thread) = threads.first_mut() {
+                let command = r#"cd /tmp/project; cat > src/tinyvc/data/acoustic_dataset.py <<'PYEOF'
+"""Stage B dataset: frame-aligned crops."""
+
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+import torch
+from torch.utils.data import DataLoader, Dataset
+
+class AcousticDataset(Dataset):
+    """Load aligned source and target audio."""
+PYEOF"#;
+                let entry_index = thread.entries.len();
+                thread.entries.push(build_step_entry(ToolCallInfo {
+                    id: "heredoc-probe".to_string(),
+                    title: Some(command.to_string()),
+                    kind: Some(acp_client::ToolCallKind::Execute),
+                    locations: Vec::new(),
+                    diffs: Vec::new(),
+                    output: None,
+                    completed: Some(true),
+                }));
+                if mode == "expanded" {
+                    expanded_args.insert((thread.id.clone(), entry_index));
+                }
+            }
+        }
         // 開発用: NECODER_TABS_PROBE=<n> でタブを n 枚まで水増しし、横スクロール（溢れ挙動）を検証する。
         if let Ok(count) = std::env::var("NECODER_TABS_PROBE") {
             if let Ok(count) = count.trim().parse::<usize>() {
@@ -1388,7 +1503,7 @@ impl AgentPanel {
             expanded_thoughts: std::collections::HashSet::new(),
             expanded_steps: std::collections::HashSet::new(),
             expanded_code: std::collections::HashSet::new(),
-            expanded_args: std::collections::HashSet::new(),
+            expanded_args,
             window_active: true,
             composer_height: COMPOSER_INPUT_DEFAULT,
             resizing_composer: false,
@@ -3867,7 +3982,12 @@ impl AgentPanel {
                         if id.as_ref() == info.id.as_str() {
                             if let Some(title) = &info.title {
                                 if !title.is_empty() {
-                                    *tool = SharedString::from(title.clone());
+                                    if let Some(write) = compact_shell_heredoc_write(title) {
+                                        *tool = SharedString::from(heredoc_write_label(&write));
+                                        *args = SharedString::from(write.content);
+                                    } else {
+                                        *tool = SharedString::from(title.clone());
+                                    }
                                 }
                             }
                             if args.is_empty() {
@@ -5884,7 +6004,12 @@ impl AgentPanel {
                 diffs,
                 ..
             } => {
-                let result_language = infer_language_from_tool_argument(args.as_ref());
+                let result_language = infer_language_from_tool_argument(args.as_ref())
+                    .or_else(|| infer_language_from_tool_argument(tool.as_ref()));
+                let args_language = args
+                    .contains('\n')
+                    .then(|| infer_language_from_tool_argument(tool.as_ref()))
+                    .flatten();
                 // Claude の Write/Edit はタイトル自体にパスを載せる（`Write /very/long/path`）ので、
                 // 同じパスを args としてもう一度出さない（同じ文字列が 1 行に 2 回並ぶのを防ぐ）。
                 let show_args = !args.is_empty() && !tool.contains(args.as_ref());
@@ -5959,7 +6084,7 @@ impl AgentPanel {
                                     .min_w_0()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
-                                    .child(step_args_preview(args.as_ref())),
+                                    .child(step_args_preview(tool.as_ref(), args.as_ref())),
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -5982,7 +6107,11 @@ impl AgentPanel {
                                     .font_family("Guguru Sans Code")
                                     .text_size(px(11.))
                                     .text_color(theme.fg2)
-                                    .child(self.selectable_text(args.clone(), cx)),
+                                    .child(self.push_selectable(
+                                        args.clone(),
+                                        self.syntax_highlights(args_language, args.as_ref()),
+                                        cx,
+                                    )),
                             );
                         }
                         body = body.child(column);
@@ -6821,7 +6950,7 @@ impl AgentPanel {
                         .whitespace_nowrap()
                         .text_size(px(11.5))
                         .text_color(theme.fg1)
-                        .child(step_args_preview(prompt)),
+                        .child(step_args_preview("", prompt)),
                 )
                 .child(
                     div()
@@ -8401,6 +8530,7 @@ fn demo_threads_requested() -> bool {
         "NECODER_DEMO_THREADS",
         "NECODER_ACP_PROBE",
         "NECODER_ACTIVITY_PROBE",
+        "NECODER_HEREDOC_PROBE",
     ]
     .iter()
     .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
@@ -8618,6 +8748,41 @@ mod tests {
         assert_eq!(flat.chars().count(), 100 + " …".chars().count());
         // 短い 1 行はそのまま。前後の空白は落とす。
         assert_eq!(flatten_digest_line("  Bash(ls)  ").as_ref(), "Bash(ls)");
+    }
+
+    #[test]
+    fn claude_cat_heredoc_is_compacted_into_a_file_write_step() {
+        let title = r#"cd /Users/daichi/Work/experience/new-vc; cat > src/tinyvc/data/acoustic_dataset.py <<'PYEOF'
+"""Stage B dataset."""
+
+import torch
+PYEOF"#;
+        assert_eq!(
+            compact_shell_heredoc_write(title),
+            Some(CompactHeredocWrite {
+                path: "src/tinyvc/data/acoustic_dataset.py".to_string(),
+                append: false,
+                content: "\"\"\"Stage B dataset.\"\"\"\n\nimport torch".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn wrapped_claude_heredoc_is_compacted_but_other_commands_are_not() {
+        let title = "Bash(cat >> 'notes.txt' <<EOF\nnext\nEOF)";
+        assert_eq!(
+            compact_shell_heredoc_write(title),
+            Some(CompactHeredocWrite {
+                path: "notes.txt".to_string(),
+                append: true,
+                content: "next".to_string(),
+            })
+        );
+        assert_eq!(
+            compact_shell_heredoc_write("python - <<'PY'\nprint(1)\nPY"),
+            None
+        );
+        assert_eq!(compact_shell_heredoc_write("cat README.md"), None);
     }
 
     #[test]
