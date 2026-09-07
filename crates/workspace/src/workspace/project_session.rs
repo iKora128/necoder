@@ -11,6 +11,8 @@ pub(crate) struct ProjectSlot {
     /// Render が Host trait を呼ばず接続先を表示するための cache。local は None。
     pub(crate) remote_host: Option<SharedString>,
     pub(crate) color: Hsla,
+    /// `.necoder/settings.json` の `color`（None = 未指定）。色の優先順の最上位で、DB の色より先。
+    pub(crate) identity_color: Option<Hsla>,
     pub(crate) explorer: ExplorerProject,
     /// このプロジェクトで開いているタブのファイル一覧（左から順・M10 複数タブ）。
     /// アクティブ session の `EditorArea.tabs` から [`Workspace::sync_active_slot`] で同期する。
@@ -199,38 +201,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_sources_with_active(sources, 0, theme, window_persistence, cx)
-    }
-
-    /// 復元時の active index を含めてワークスペースを組み立てる。
-    /// リモートプロジェクトの窓色をローカル DB（storage）から解決する（M13 #3b）。
-    /// `.necoder` はリモート側にあり identity に使えないため、ホスト識別子 → 色をローカルに持つ。
-    /// 初回は識別子から安定に 1 色を焼き付け、以後は同じ色（開き直し・レール並び順が変わっても不変）。
-    pub(crate) fn apply_remote_host_colors(&mut self) {
-        let Some(storage) = self.persistence.storage.clone() else {
-            return;
-        };
-        for slot in &mut self.project_sessions.projects {
-            if !slot.worktree.is_remote() {
-                continue;
-            }
-            let key = slot.worktree.host().display_name().to_string();
-            let color = match storage.host_color(&key) {
-                Ok(Some(color)) => color,
-                Ok(None) => {
-                    // 初回: 識別子のハッシュで IDENTITY パレットから安定に 1 色選び、焼き付ける。
-                    let palette = theme_core::IDENTITY_PALETTE_HEXES;
-                    let index = key.bytes().fold(0u32, |acc, byte| {
-                        acc.wrapping_mul(31).wrapping_add(byte as u32)
-                    }) as usize
-                        % palette.len();
-                    let color = palette[index];
-                    let _ = storage.set_host_color(&key, color);
-                    color
-                }
-                Err(_) => continue,
-            };
-            slot.color = theme_core::color_from_hex(color);
-        }
     }
 
     /// DB の TaskSpace 台帳を、現在開いている worktree へ stable ID で重ねる。
@@ -487,7 +457,12 @@ impl Workspace {
                         .is_remote()
                         .then(|| SharedString::from(worktree.host().display_name().to_string()));
                     // `.necoder/settings.json` の color(#hex)/icon(絵文字) を反映（M12-11）。
-                    let identity = read_project_identity(worktree.root());
+                    // リモートの `.necoder` はリモート側にあるので読まない（同名のローカルパスを拾わない）。
+                    let identity = if worktree.is_remote() {
+                        ProjectIdentity::default()
+                    } else {
+                        read_project_identity(worktree.root())
+                    };
                     let mut slot = ProjectSlot {
                         // 復元した remote はまだ繋がっていない。git に聞く項目は後回しにして、
                         // 接続なしで決まる id だけ先に確定させる。
@@ -499,7 +474,9 @@ impl Workspace {
                         name: worktree.name().into(),
                         branch: None,
                         remote_host,
+                        // 仮の色。storage があれば下の resolve_project_colors が DB の色で確定する。
                         color: identity.color.unwrap_or_else(|| project_color(index)),
+                        identity_color: identity.color,
                         worktree: Rc::new(worktree),
                         explorer: ExplorerProject::default(),
                         open_files: Vec::new(),
@@ -517,6 +494,17 @@ impl Workspace {
                 }
                 Err(error) => eprintln!("プロジェクトを開けない（スキップ）: {error:#}"),
             }
+        }
+        // ローカル永続化 DB（hot exit・窓セッション・プロジェクト色）。main から渡された 1 本を共有し、
+        // 無ければ自前で開く（NECODER_DB でパス上書き・開けなくても起動は続行）。
+        let (storage_handle, window_id) = match window_persistence {
+            Some(WindowPersistence { storage, window_id }) => (storage, window_id),
+            None => (crate::persistence::open_default_storage(), None),
+        };
+        // プロジェクト色を `.necoder` > DB > 未使用パレットで確定し、DB へ焼く。session（TodoPanel 等の
+        // accent）は slot.color から作るので、その前に済ませる。
+        if let Some(storage) = &storage_handle {
+            resolve_project_colors(&mut projects, storage);
         }
         // 開発用: NECODER_EXPLORER_UP=1 で先頭プロジェクトをルート直上（隣リポジトリ一覧）から撮る。
         if std::env::var_os("NECODER_EXPLORER_UP").is_some() {
@@ -884,12 +872,6 @@ impl Workspace {
                 ));
             }
         }
-        // ローカル永続化 DB（hot exit・M10 / 窓セッション）。main から渡された 1 本を共有し、
-        // 無ければ自前で開く（NECODER_DB でパス上書き・開けなくても起動は続行）。
-        let (storage_handle, window_id) = match window_persistence {
-            Some(WindowPersistence { storage, window_id }) => (storage, window_id),
-            None => (crate::persistence::open_default_storage(), None),
-        };
         if let Some(handle) = storage_handle {
             // Agent パネルへも同じハンドルを渡す（スレッド永続化・M12-1。ワーカー 1 本を共有）。
             for (index, session) in workspace.project_sessions.sessions.iter().enumerate() {
@@ -908,8 +890,6 @@ impl Workspace {
             workspace.persistence.session_writer =
                 window_id.map(|id| WindowSessionWriter::new(handle.clone(), id));
             workspace.persistence.storage = Some(handle);
-            // リモートプロジェクトの窓色をローカル DB から解決（M13 #3b）。
-            workspace.apply_remote_host_colors();
             workspace.restore_task_spaces(cx);
             if let Some(storage) = &workspace.persistence.storage {
                 for slot in &workspace.project_sessions.projects {

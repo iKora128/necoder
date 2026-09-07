@@ -456,9 +456,16 @@ pub fn project_color(index: usize) -> Hsla {
     hex(PROJECT_COLOR_HEXES[index % PROJECT_COLOR_HEXES.len()])
 }
 
-/// 0xRRGGBB を Hsla へ（リモートのホスト別色を storage が u32 で持つため・M13 #3b）。
+/// 0xRRGGBB を Hsla へ（プロジェクト色を storage が u32 で持つため）。
 pub fn color_from_hex(value: u32) -> Hsla {
     hex(value)
+}
+
+/// Hsla を 0xRRGGBB へ（[`color_from_hex`] の逆・透明度は捨てる）。DB へ焼くときに使う。
+pub fn hex_from_color(color: Hsla) -> u32 {
+    let rgba = Rgba::from(color);
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (channel(rgba.r) << 16) | (channel(rgba.g) << 8) | channel(rgba.b)
 }
 
 /// `index` 番目のスレッド色（パレットを巡回）。
@@ -541,6 +548,18 @@ mod tests {
         // 5 個で 1 周
         assert_eq!(project_color(5), project_color(0));
         assert_eq!(project_color(11), project_color(1));
+    }
+
+    #[test]
+    fn hex_round_trips_through_hsla() {
+        // パレット全色と黒/白/灰が u32 → Hsla → u32 で 1 bit も変わらない（DB に焼いて戻す経路）。
+        for value in IDENTITY_PALETTE_HEXES
+            .iter()
+            .copied()
+            .chain([0x000000, 0xffffff, 0x808080, 0xd97757])
+        {
+            assert_eq!(hex_from_color(color_from_hex(value)), value, "{value:06x}");
+        }
     }
 
     #[test]

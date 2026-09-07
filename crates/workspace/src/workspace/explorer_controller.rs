@@ -487,11 +487,7 @@ impl Workspace {
             .filter(|component| !component.is_empty())
             .unwrap_or_else(|| path_str.clone());
         if host.is_remote() {
-            let display = host.display_name();
-            let host_key = display
-                .strip_prefix("SSH ")
-                .unwrap_or(display)
-                .replace(' ', "");
+            let host_key = host_scope_key(host);
             let _ = storage.record_remote_project(&host_key, &path_str, &name);
         } else {
             let _ = storage.record_local_project(&path_str, &name);
@@ -558,7 +554,12 @@ impl Workspace {
                 return;
             }
         };
-        let identity = read_project_identity(worktree.root());
+        // リモートの `.necoder` はリモート側にあるので読まない（同名のローカルパスを拾わない）。
+        let identity = if worktree.is_remote() {
+            ProjectIdentity::default()
+        } else {
+            read_project_identity(worktree.root())
+        };
         let task_space_preview = TaskSpace::for_worktree(&worktree, branch.as_deref());
         // 色モデル（2026-07-24 ユーザー確定）: **workspace（リポジトリ）で 1 色・スレッド（ACP）で 1 色**。
         // Task worktree は親リポジトリの色を継承する（worktree ごとに色を変えない＝方向感覚を守る）。
@@ -574,9 +575,12 @@ impl Workspace {
                     .map(|slot| slot.color)
             })
             .flatten();
+        // 優先順: 親の色（Task worktree）> `.necoder` > DB に焼いた色 > 未使用パレット色。
         let color = inherited.unwrap_or(match identity.color {
             Some(color) if !self.color_in_use(color) => color,
-            _ => self.next_free_color(),
+            _ => self
+                .stored_project_color(&worktree)
+                .unwrap_or_else(|| self.next_free_color()),
         });
         let remote_host = worktree
             .host()
@@ -588,6 +592,7 @@ impl Workspace {
             branch: None,
             remote_host,
             color,
+            identity_color: identity.color,
             worktree: Rc::new(worktree),
             explorer: ExplorerProject::default(),
             open_files: Vec::new(),
@@ -615,6 +620,8 @@ impl Workspace {
         } else {
             self.project_sessions.sessions.push(session);
         }
+        // 決めた色を DB へ焼く（次に開くときも同じ色・並び順に依存しない）。
+        self.persist_project_color(index);
         self.update_agent_destination_for(index, cx);
         if is_remote {
             self.refresh_explorer_for(index, cx);

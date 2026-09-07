@@ -92,7 +92,7 @@ impl Buffer {
 pub struct Theme { /* UI-SPEC §1 のトークン表と 1:1 のフィールド */ }
 pub enum ThemeSource { BuiltIn(&'static str), User(PathBuf) } // themes/*.json = トークン上書き JSON
 impl Theme { pub fn load(source) -> Result<Theme>; }          // 欠けたキーは built-in にフォールバック
-pub struct ProjectIdentity { pub color: Hsla, pub icon: IconSource } // .necoder/settings.json > 手動 > 自動巡回
+pub struct ProjectIdentity { pub color: Hsla, pub icon: IconSource } // .necoder/settings.json > DB project_colors（手動・初回自動割当を焼く）> 未使用パレット色（workspace/project_colors.rs）
 pub enum IconSource { Monogram(char), Emoji(String), Image(PathBuf) }
 ```
 テーマセレクタ（ライブプレビュー付き）は M3 の Picker 基盤に載せる。VSCode/Zed テーマのインポートは

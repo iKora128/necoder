@@ -78,11 +78,13 @@ pub(crate) use todo_panel::*;
 mod editor_area;
 pub(crate) use editor_area::*;
 mod panels;
+mod project_colors;
 mod project_session;
 mod project_switch;
 mod project_watcher;
 pub(crate) use commands::*;
 pub(crate) use panels::*;
+pub(crate) use project_colors::*;
 pub(crate) use project_session::*;
 
 actions!(

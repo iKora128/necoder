@@ -83,33 +83,20 @@ impl Workspace {
             return;
         };
         slot.color = color;
-        let remote_key = slot
-            .worktree
-            .host()
-            .is_remote()
-            .then(|| slot.worktree.host().display_name().to_string());
-        match &remote_key {
-            // ローカルは従来どおり `.necoder/settings.json` へ（リポジトリ共有・チーム寄り）。
-            None => {
-                let settings_path = slot.worktree.root().join(".necoder/settings.json");
-                if let Err(error) = settings_core::persist_user_value(
-                    &settings_path,
-                    "color",
-                    serde_json::Value::String(hex.to_string()),
-                ) {
-                    eprintln!(".necoder への色の保存に失敗: {error:#}");
-                }
-            }
-            // リモートは `.necoder` がリモート側にあり使えないので、手動色をローカル DB に焼く（M13 #3b・再接続で復元）。
-            Some(key) => {
-                if let (Some(storage), Ok(value)) = (
-                    self.persistence.storage.clone(),
-                    u32::from_str_radix(hex.trim_start_matches('#'), 16),
-                ) {
-                    let _ = storage.set_host_color(key, value);
-                }
+        // ローカルは `.necoder/settings.json` へも書く（リポジトリ共有・チーム寄り）。リモートは
+        // `.necoder` がリモート側にあり使えない。どちらも下でローカル DB に焼く（再起動・再接続で復元）。
+        if !slot.worktree.is_remote() {
+            slot.identity_color = Some(color);
+            let settings_path = slot.worktree.root().join(".necoder/settings.json");
+            if let Err(error) = settings_core::persist_user_value(
+                &settings_path,
+                "color",
+                serde_json::Value::String(hex.to_string()),
+            ) {
+                eprintln!(".necoder への色の保存に失敗: {error:#}");
             }
         }
+        self.persist_project_color(project_index);
         // アクティブなら全ペイン（タブ + 分割）のキャレット等アクセントへ波及。
         // レール/タブは render 時に slot.color を読むので notify で追従する（明示波及が要るのはキャレットだけ）。
         if project_index == self.project_sessions.active {

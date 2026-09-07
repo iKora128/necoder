@@ -117,6 +117,7 @@ impl Workspace {
                 branch: Some(branch.to_string()),
                 remote_host: None,
                 color,
+                identity_color: None,
                 worktree: Rc::new(worktree),
                 explorer: ExplorerProject::default(),
                 open_files: Vec::new(),

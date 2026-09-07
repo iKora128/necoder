@@ -1033,21 +1033,53 @@ impl Storage {
         })
     }
 
-    // ── ホスト別の窓色（M13・リモートの色をローカルに保持。`.necoder` はリモート側にあり identity には使えない） ──
+    // ── プロジェクト色（scope + path → 0xRRGGBB）。手動選択も初回の自動割当もここへ焼く ──
+    //
+    // 識別色をレールの並び順に依存させないための台帳（2026-09-07）。scope は local か
+    // リモートのホスト鍵（`record_remote_project` と同じ文字列）。`.necoder/settings.json` が
+    // あればそちらが優先で、この表はその写し + 自動割当の記憶。
 
-    /// リモートホスト（ssh 別名や `ssh://…` 識別子）に割り当てた窓色（0xRRGGBB）を読む。無ければ None。
-    pub fn host_color(&self, host: &str) -> Result<Option<u32>> {
-        let host = host.to_string();
+    /// 全プロジェクト色を読む（(scope, path, color)）。起動時に 1 往復で済ませるための一括読み。
+    pub fn load_project_colors(&self) -> Result<Vec<(String, String, u32)>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query("SELECT scope, path, color FROM project_colors", ())
+                    .await
+                    .context("project_colors の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("project_colors 行の取得に失敗")?
+                {
+                    let scope = row.get_value(0)?.as_text().context("scope")?.clone();
+                    let path = row.get_value(1)?.as_text().context("path")?.clone();
+                    let color = *row
+                        .get_value(2)?
+                        .as_integer()
+                        .context("color が整数でない")?;
+                    result.push((scope, path, color as u32));
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// 1 プロジェクトの色（0xRRGGBB）を読む。無ければ None。
+    pub fn project_color(&self, scope: &str, path: &str) -> Result<Option<u32>> {
+        let scope = scope.to_string();
+        let path = path.to_string();
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
                     .query(
-                        "SELECT color FROM host_colors WHERE host = ?1",
-                        (host.as_str(),),
+                        "SELECT color FROM project_colors WHERE scope = ?1 AND path = ?2",
+                        (scope.as_str(), path.as_str()),
                     )
                     .await
-                    .context("host_colors の読み出しに失敗")?;
-                match rows.next().await.context("host_colors 行の取得に失敗")? {
+                    .context("project_colors の読み出しに失敗")?;
+                match rows.next().await.context("project_colors 行の取得に失敗")? {
                     Some(row) => {
                         let color = *row
                             .get_value(0)?
@@ -1061,22 +1093,24 @@ impl Storage {
         })
     }
 
-    /// リモートホストに窓色（0xRRGGBB）を割り当てて保存する（upsert）。
-    pub fn set_host_color(&self, host: &str, color: u32) -> Result<()> {
-        let host = host.to_string();
+    /// 1 プロジェクトに色（0xRRGGBB）を割り当てて保存する（upsert）。
+    pub fn set_project_color(&self, scope: &str, path: &str, color: u32) -> Result<()> {
+        let scope = scope.to_string();
+        let path = path.to_string();
         self.run(move |conn| {
             futures::executor::block_on(async {
                 conn.execute(
-                    "INSERT INTO host_colors (host, color) VALUES (?1, ?2)
-                     ON CONFLICT(host) DO UPDATE SET color = ?2",
-                    (host.as_str(), color as i64),
+                    "INSERT INTO project_colors (scope, path, color) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(scope, path) DO UPDATE SET color = ?3",
+                    (scope.as_str(), path.as_str(), color as i64),
                 )
                 .await
-                .context("host_colors の書き込みに失敗")?;
+                .context("project_colors の書き込みに失敗")?;
                 Ok(())
             })
         })
     }
+
 
     /// リモートホストで最後に開いたプロジェクトパスを読む（SSH ピッカーの即接続用・M13 #2d）。
     pub fn host_last_path(&self, host: &str) -> Result<Option<String>> {
@@ -1542,14 +1576,16 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     .context("checkpoint_files 作成に失敗")?;
     // ホスト別の窓色（M13・リモートの色をローカルに保持）。
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS host_colors (
-            host TEXT PRIMARY KEY,
-            color INTEGER NOT NULL
+        "CREATE TABLE IF NOT EXISTS project_colors (
+            scope TEXT NOT NULL,
+            path TEXT NOT NULL,
+            color INTEGER NOT NULL,
+            PRIMARY KEY (scope, path)
         )",
         (),
     )
     .await
-    .context("host_colors 作成に失敗")?;
+    .context("project_colors 作成に失敗")?;
     // ホスト別の前回パス（M13 #2d・SSH ピッカーで即接続）。
     conn.execute(
         "CREATE TABLE IF NOT EXISTS host_last_path (
@@ -1829,20 +1865,54 @@ mod tests {
     }
 
     #[test]
-    fn host_colors_round_trip() {
-        let path = temp_db("hostcolors");
+    fn project_colors_round_trip() {
+        let path = temp_db("projectcolors");
         let _ = std::fs::remove_file(&path);
         let storage = Storage::open(&path).unwrap();
 
-        // 未登録は None。
-        assert_eq!(storage.host_color("gpu_box").unwrap(), None);
-        storage.set_host_color("gpu_box", 0xef7d9b).unwrap();
-        storage.set_host_color("gpu_spare", 0x61afef).unwrap();
-        assert_eq!(storage.host_color("gpu_box").unwrap(), Some(0xef7d9b));
-        assert_eq!(storage.host_color("gpu_spare").unwrap(), Some(0x61afef));
-        // upsert（同じ host へ上書き）。
-        storage.set_host_color("gpu_box", 0x85c46c).unwrap();
-        assert_eq!(storage.host_color("gpu_box").unwrap(), Some(0x85c46c));
+        // 未登録は None・一括読みは空。
+        assert_eq!(storage.project_color("local", "/Users/d/Work/necoder").unwrap(), None);
+        assert!(storage.load_project_colors().unwrap().is_empty());
+        storage
+            .set_project_color("local", "/Users/d/Work/necoder", 0xef4444)
+            .unwrap();
+        storage
+            .set_project_color("gpu_box", "/home/dev/proj", 0x3b82f6)
+            .unwrap();
+        // 同じ path でも scope（ホスト）が違えば別プロジェクト。
+        storage
+            .set_project_color("gpu_spare", "/home/dev/proj", 0xa855f7)
+            .unwrap();
+        assert_eq!(
+            storage.project_color("local", "/Users/d/Work/necoder").unwrap(),
+            Some(0xef4444)
+        );
+        assert_eq!(
+            storage.project_color("gpu_box", "/home/dev/proj").unwrap(),
+            Some(0x3b82f6)
+        );
+        assert_eq!(
+            storage.project_color("gpu_spare", "/home/dev/proj").unwrap(),
+            Some(0xa855f7)
+        );
+        // upsert（同じキーへ上書き）。
+        storage
+            .set_project_color("local", "/Users/d/Work/necoder", 0x22c55e)
+            .unwrap();
+        assert_eq!(
+            storage.project_color("local", "/Users/d/Work/necoder").unwrap(),
+            Some(0x22c55e)
+        );
+        let mut all = storage.load_project_colors().unwrap();
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                ("gpu_box".to_string(), "/home/dev/proj".to_string(), 0x3b82f6),
+                ("gpu_spare".to_string(), "/home/dev/proj".to_string(), 0xa855f7),
+                ("local".to_string(), "/Users/d/Work/necoder".to_string(), 0x22c55e),
+            ]
+        );
 
         // 前回パス（#2d）も同じ DB に持てる（別テーブル・upsert）。
         assert_eq!(storage.host_last_path("gpu_box").unwrap(), None);
