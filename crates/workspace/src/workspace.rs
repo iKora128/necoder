@@ -2,9 +2,13 @@
 //!
 //! ARCHITECTURE §5: 1 窓 = アクティブな (project, branch)。レール = 窓内切替。UI-SPEC §1.3 の色の
 //! 許可リストに従い、**プロジェクト色**はレール枠/リング・ツリー選択の左バー・キャレットにのみ流す。
-//! 状態（開プロジェクト・アクティブ・開ファイル）は `state.json` に保存し、再起動で復元する。
+//! 状態（開プロジェクト・アクティブ・開ファイル）は necoder.db の `window_sessions` に 1 窓 1 行で保存し、
+//! 再起動で全窓を復元する（`persistence.rs`）。
 
-pub(crate) use crate::persistence::{state_path, PersistedProject, PersistedState, RestoredTabs};
+pub(crate) use crate::persistence::{
+    encode_window_session, PersistedProject, PersistedState, RestoredTabs, WindowPersistence,
+    WindowSessionWriter,
+};
 pub(crate) use crate::updater;
 pub(crate) use agent_panel::AgentPanel;
 pub(crate) use editor_core::{Buffer, Selection};
@@ -503,14 +507,37 @@ fn inline_edit_diff_lines(old_text: &str, new_text: &str, max_lines: usize) -> V
 }
 
 /// 自動アップデートの段階（M13）。statusbar チップの表示を兼ねる。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum UpdateState {
     /// 新版あり（クリックで更新開始）。
     Available,
-    /// ダウンロード + 検証 + 差し替え中。
-    Installing,
-    /// 差し替え済み（再起動で反映）。
+    /// ダウンロード + 検証 + 差し替え中（進みは背景から届く・チップに進捗バー）。
+    Installing(updater::UpdateProgress),
+    /// 差し替え済み（クリックで再起動）。
     Ready,
+}
+
+/// 更新中チップ / About の 1 行に出す文言（段階ごと）。
+fn update_progress_label(progress: updater::UpdateProgress) -> String {
+    match progress {
+        updater::UpdateProgress::Downloading {
+            fraction: Some(fraction),
+        } => i18n::t!(
+            "update.downloading",
+            "percent" => ((fraction * 100.0).round() as u32).to_string()
+        ),
+        updater::UpdateProgress::Downloading { fraction: None } => i18n::t!("update.installing"),
+        updater::UpdateProgress::Verifying => i18n::t!("update.verifying"),
+        updater::UpdateProgress::Replacing => i18n::t!("update.replacing"),
+    }
+}
+
+/// 進捗バーの埋まり具合（0.0..=1.0）。検証・差し替えは DL 済みなので満杯で見せる。
+fn update_progress_fraction(progress: updater::UpdateProgress) -> f32 {
+    match progress {
+        updater::UpdateProgress::Downloading { fraction } => fraction.unwrap_or(0.0),
+        updater::UpdateProgress::Verifying | updater::UpdateProgress::Replacing => 1.0,
+    }
 }
 
 /// ⌘. code actions のポップアップ（M11）。補完と同型（フォーカスを取り上下/Enter/Esc）。
@@ -1071,6 +1098,11 @@ struct ChromeState {
     /// レール項目のドラッグ状態（index・押下位置・閾値超えフラグ）。窓の外で離すと
     /// 擬似 tear-off = その位置に新窓（M13。本物の tear-off は gpui 未対応・DECISIONS）。
     rail_drag: Option<(usize, Point<gpui::Pixels>, bool)>,
+    /// レールが「最後に触った面」か。レールのどこか（空き地でも可）を押すと立ち、レール外を押すと落ちる。
+    /// 立っている間はタブ切替（⌘{ ⌘}）が**プロジェクト切替**に化ける＝トラックパッドで
+    /// 「レールを一度突いて ⌘} で隣のプロジェクトへ」が成り立つ（2026-09-03 本人要望）。
+    /// agent_active と同じ「クリックで確定する宛先」の流儀（フォーカスは動かさない）。
+    rail_active: bool,
 }
 
 struct WorkspaceOverlays {
@@ -1092,6 +1124,20 @@ struct WorkspaceOverlays {
     shortcut_sheet: Option<FocusHandle>,
     /// About モーダル（メニュー「necoder について」/「アップデートを確認…」）。同じく focus = Escape 受け。
     about: Option<FocusHandle>,
+    /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
+    /// 大きくフラッシュ表示する（色でも判るが名前で確定させる・2026-09-01 本人要望）。
+    project_flash: Option<ProjectFlash>,
+    /// フラッシュの世代番号。連打時に古い自動消灯タイマーが新しい表示を消さないための照合。
+    project_flash_gen: u32,
+}
+
+/// プロジェクト切替フラッシュの表示内容（切替時に確定してキャッシュ・render は読むだけ）。
+struct ProjectFlash {
+    name: SharedString,
+    /// ⎇ ブランチ（宛先チップと同じ`branch` → `worktree_branch` の順で解決）。
+    branch: Option<SharedString>,
+    color: Hsla,
+    generation: u32,
 }
 
 struct NotificationCenter {
@@ -1132,7 +1178,8 @@ pub(crate) enum NewsKind {
 }
 
 struct WorkspacePersistence {
-    state_path: Option<PathBuf>,
+    /// 窓セッションの書き手。None = この窓は永続化しない（offscreen 撮影・テスト）。
+    session_writer: Option<WindowSessionWriter>,
     storage: Option<storage::Storage>,
 }
 
@@ -1621,45 +1668,46 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_window))
             // ⌘1..9 = レールのプロジェクト N 番へ切替（窓内切替・ウィンドウモデル §5）
             .on_action(cx.listener(|this, _: &ActivateProject1, window, cx| {
-                this.switch_project(0, window, cx)
+                this.switch_project_flashed(0, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject2, window, cx| {
-                this.switch_project(1, window, cx)
+                this.switch_project_flashed(1, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject3, window, cx| {
-                this.switch_project(2, window, cx)
+                this.switch_project_flashed(2, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject4, window, cx| {
-                this.switch_project(3, window, cx)
+                this.switch_project_flashed(3, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject5, window, cx| {
-                this.switch_project(4, window, cx)
+                this.switch_project_flashed(4, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject6, window, cx| {
-                this.switch_project(5, window, cx)
+                this.switch_project_flashed(5, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject7, window, cx| {
-                this.switch_project(6, window, cx)
+                this.switch_project_flashed(6, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject8, window, cx| {
-                this.switch_project(7, window, cx)
+                this.switch_project_flashed(7, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ActivateProject9, window, cx| {
-                this.switch_project(8, window, cx)
+                this.switch_project_flashed(8, window, cx)
             }))
             // レール上下への循環切替（⌃⌘↑↓）。番号（⌘1..9）を覚えずに隣へ流せる。
+            // 行き先を見ずに切り替えるキー操作なので、着地先の名前を中央にフラッシュする。
             .on_action(cx.listener(|this, _: &NextProject, window, cx| {
-                let count = this.project_sessions.projects.len();
-                if count > 1 {
-                    let next = (this.project_sessions.active + 1) % count;
-                    this.switch_project(next, window, cx);
-                }
+                this.switch_adjacent_project(1, window, cx);
             }))
             .on_action(cx.listener(|this, _: &PrevProject, window, cx| {
-                let count = this.project_sessions.projects.len();
-                if count > 1 {
-                    let previous = (this.project_sessions.active + count - 1) % count;
-                    this.switch_project(previous, window, cx);
+                this.switch_adjacent_project(-1, window, cx);
+            }))
+            // レール外をどこか押したら rail_active を落とす。capture 相なので、レール自身の
+            // bubble リスナー（rail_view.rs・true にする）より先に走る＝レール内クリックでは立ち直る。
+            .capture_any_mouse_down(cx.listener(|this, _, _window, cx| {
+                if this.chrome.rail_active {
+                    this.chrome.rail_active = false;
+                    cx.notify(); // レールの面（bg1）を元に戻す
                 }
             }))
             .on_mouse_move(cx.listener(Self::on_resize_move))
@@ -1752,6 +1800,7 @@ impl Render for Workspace {
             .children(self.render_worktree_delete_dialog(cx))
             .children(self.render_branch_menu(cx))
             .children(self.render_explorer_context_menu(cx))
+            .children(self.render_project_flash(cx)) // キーボード切替の行き先名フラッシュ
             .children(self.render_confetti(cx)) // 最前面（祝いの紙吹雪）
     }
 }
@@ -2368,6 +2417,126 @@ mod tests {
         // 監視先を消す前に notify watcher を全セッション分落とす。監視中の root を
         // 削除したまま process teardown に入ると、fsevents スレッドのデストラクタが
         // panic → SIGABRT する race がある（フルスイート並列実行時のみ顕在化）。
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// レールが最後に触った面（`chrome.rail_active`）の間は ⌘{ ⌘}（タブ切替）がプロジェクト切替に
+    /// 化け、落ちればエディタタブ宛てに戻る（トラックパッド動線・2026-09-03）。
+    #[gpui::test]
+    fn rail_surface_routes_tab_switch_to_projects(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_rail_tab_switch_{}", std::process::id()));
+        let project_a = root.join("a");
+        let project_b = root.join("b");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(
+                vec![project_a.clone(), project_b.clone()],
+                Theme::dark(),
+                None,
+                cx,
+            )
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            assert_eq!(workspace.project_sessions.active, 0);
+
+            // レール面が最後 → ⌘} で次のプロジェクト、⌘{ で前のプロジェクト（循環）。
+            workspace.chrome.rail_active = true;
+            workspace.select_next_tab(&SelectNextTab, window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 1,
+                "⌘}} が次のプロジェクトへ"
+            );
+            workspace.select_next_tab(&SelectNextTab, window, cx);
+            assert_eq!(workspace.project_sessions.active, 0, "末尾からは先頭へ回る");
+            workspace.select_prev_tab(&SelectPrevTab, window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 1,
+                "⌘{{ が前のプロジェクトへ（循環）"
+            );
+
+            // レール外を触った（フラグが落ちた）後はプロジェクトを動かさない。
+            workspace.chrome.rail_active = false;
+            workspace.select_next_tab(&SelectNextTab, window, cx);
+            workspace.select_prev_tab(&SelectPrevTab, window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 1,
+                "通常時はエディタタブ宛て"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn agent_full_screen_keeps_thread_tab_keys(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_agent_fullscreen_keys_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            // notify watcher の実スレッドが test scheduler の task を起こすと「非決定的」判定で
+            // panic するため、キー配送の検証に不要な watcher は最初に落とす。
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace
+                .agent_panel
+                .update(cx, |panel, cx| panel.new_thread(cx));
+            workspace.toggle_agent_full_screen_state(window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+
+        let before = workspace.read_with(cx, |workspace, cx| {
+            workspace.agent_panel.read(cx).statuses().len()
+        });
+        assert_eq!(before, 2, "スレッドが2枚ある前提");
+
+        // 全画面中に左ドック（エクスプローラ等）を触ると agent_active が false になる。
+        // その後でも ⌘W はスレッドタブに効かなければならない（実バグの再現条件）。
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            workspace.agent_active = false;
+        });
+        cx.simulate_keystrokes("cmd-w");
+        let after = workspace.read_with(cx, |workspace, cx| {
+            workspace.agent_panel.read(cx).statuses().len()
+        });
+        assert_eq!(after, 1, "AI 全画面でも ⌘W はスレッドタブを閉じる");
+
         workspace.update_in(cx, |workspace, _window, _cx| {
             for session in workspace.project_sessions.sessions.iter_mut() {
                 session._watch = None;

@@ -247,7 +247,11 @@ impl Workspace {
                 ))
                 .child(button("window-close", "\u{2715}").on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|_this, _, window, _cx| window.remove_window()),
+                    cx.listener(|this, _, window, _cx| {
+                        // remove_window は OS の should-close フックを通らない＝閉じ印はここで付ける。
+                        this.mark_window_closed();
+                        window.remove_window()
+                    }),
                 ));
         }
         controls
@@ -684,7 +688,14 @@ impl Workspace {
                     .cursor_pointer()
                     .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
                     .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
-                    .child(svg().path("icons/eye.svg").size(px(12.)).flex_none())
+                    // GPUI の SVG は親の text_color を継承しないため、必ず直接色を渡す。
+                    .child(
+                        svg()
+                            .path("icons/eye.svg")
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(if on { theme.fg0 } else { theme.fg2 }),
+                    )
                     .child(div().text_size(px(10.5)).child(label))
                     .tooltip(Tooltip::text(
                         i18n::t!("breadcrumb.md_preview_tip"),
@@ -758,7 +769,13 @@ impl Workspace {
                             .cursor_pointer()
                             .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
                             .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
-                            .child(svg().path("icons/eye.svg").size(px(12.)).flex_none())
+                            .child(
+                                svg()
+                                    .path("icons/eye.svg")
+                                    .size(px(12.))
+                                    .flex_none()
+                                    .text_color(if on { theme.fg0 } else { theme.fg2 }),
+                            )
                             .child(div().text_size(px(10.5)).child(label))
                             .tooltip(Tooltip::text(
                                 i18n::t!("breadcrumb.html_preview_tip"),
@@ -1403,11 +1420,21 @@ impl Workspace {
             .min_w_0()
             .bg(theme.bg1)
             .child(
-                div().flex_1().min_h_0().min_w_0().child(
-                    self.agent_panel
-                        .clone()
-                        .cached(StyleRefinement::default().flex().flex_col().size_full()),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    // Agent 面を触った → ⌘W 等の宛先を Agent に戻す（ドック版 `render_agent_dock` と同じ規律。
+                    // 全画面中に左ドックを触って落ちた agent_active を、クリックで立て直せるように）。
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, _cx| this.agent_active = true),
+                    )
+                    .child(
+                        self.agent_panel
+                            .clone()
+                            .cached(StyleRefinement::default().flex().flex_col().size_full()),
+                    ),
             )
             .when(self.chrome.show_bottom, |element| {
                 element.child(self.render_bottom_dock(cx))
@@ -1617,6 +1644,12 @@ impl Workspace {
         let (errors, warnings) = self.active_diagnostic_counts(cx);
         let error_color = if errors > 0 { theme.err } else { theme.fg2 };
         let warning_color = if warnings > 0 { theme.warn } else { theme.fg2 };
+        // ターミナルが見えているか（レールのターミナルアイコンと同じ判定）。
+        let terminal_open = if self.chrome.fleet_mode {
+            self.chrome.fleet_bottom_view == FleetBottomView::Terminal
+        } else {
+            self.chrome.show_bottom
+        };
         // 承認待ち signal は1Hz時計だけで反転。マスコットの5/10fps時計とは共有しない。
         let attention_bright = self.visual_tick % 2 == 0;
         let left = div()
@@ -1720,17 +1753,72 @@ impl Workspace {
                     .hover(|style| style.bg(theme.bg2))
                     .rounded(px(4.))
                     .px(px(4.))
-                    .child(div().text_color(error_color).child(format!("✗ {errors}")))
+                    // 診断件数。記号は文字グリフではなく Lucide の circle-x / triangle-alert（フォント差で崩れない）。
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.))
+                            .text_color(error_color)
+                            .child(
+                                svg()
+                                    .path("icons/circle-x.svg")
+                                    .size(px(12.))
+                                    .flex_none()
+                                    .text_color(error_color),
+                            )
+                            .child(format!("{errors}")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.))
                             .text_color(warning_color)
-                            .child(format!("▲ {warnings}")),
+                            .child(
+                                svg()
+                                    .path("icons/triangle-alert.svg")
+                                    .size(px(12.))
+                                    .flex_none()
+                                    .text_color(warning_color),
+                            )
+                            .child(format!("{warnings}")),
                     )
                     // クリックで診断一覧（ファイル別・M11）。
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
                             this.open_diagnostics_panel(&DiagnosticsPanel, window, cx)
+                        }),
+                    ),
+            )
+            // ターミナル切替（診断を見た足でそのままターミナルへ行く動線・本人要望）。
+            // レール / titlebar の下ドックボタン / ⌃` と同じ `toggle_terminal`。開いている間は面を灯す。
+            .child(
+                div()
+                    .id("statusbar-terminal")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(20.))
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_color(if terminal_open { theme.fg0 } else { theme.fg2 })
+                    .when(terminal_open, |element| element.bg(theme.bg3))
+                    .hover(|style| style.bg(theme.bg3))
+                    .child(
+                        svg()
+                            .path("icons/square-terminal.svg")
+                            .size(px(13.))
+                            .flex_none()
+                            .text_color(if terminal_open { theme.fg0 } else { theme.fg2 }),
+                    )
+                    .tooltip(Tooltip::text(i18n::t!("rail.terminal"), theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_terminal(&ToggleTerminal, window, cx)
                         }),
                     ),
             );
@@ -1758,9 +1846,10 @@ impl Workspace {
                         .child(SharedString::from(i18n::t!("crash.notice"))),
                 )
             })
-            // 自動アップデートのチップ（M13）: 新版あり → クリックで更新 → 再起動案内。
+            // 自動アップデートのチップ（M13）: 新版あり → クリックで更新（進捗バー）→ クリックで再起動。
             .when_some(self.updater.status.clone(), |element, (info, state)| {
-                let (label, clickable) = match state {
+                // (文言, クリック動作, 進捗バーの埋まり)
+                let (label, click, progress) = match state {
                     UpdateState::Available => (
                         match &info.action {
                             updater::UpdateAction::InstallDmg { .. } => {
@@ -1772,27 +1861,64 @@ impl Workspace {
                                 i18n::t!("update.get", "version" => info.version.clone())
                             }
                         },
-                        true,
+                        Some(UpdateChipClick::Install),
+                        None,
                     ),
-                    UpdateState::Installing => (i18n::t!("update.installing"), false),
-                    UpdateState::Ready => (i18n::t!("update.ready"), false),
+                    UpdateState::Installing(progress) => (
+                        update_progress_label(progress),
+                        None,
+                        Some(update_progress_fraction(progress)),
+                    ),
+                    UpdateState::Ready => (
+                        i18n::t!("update.restart", "version" => info.version.clone()),
+                        Some(UpdateChipClick::Restart),
+                        None,
+                    ),
                 };
                 element.child(
                     div()
                         .id("update-chip")
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(2.))
                         .px(px(7.))
                         .py(px(2.))
                         .rounded(px(5.))
                         .text_color(self.accent())
-                        .when(clickable, |chip| {
+                        .when_some(click, |chip, click| {
                             chip.cursor_pointer()
                                 .hover(|style| style.bg(theme.bg2))
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(|this, _, _window, cx| this.install_update(cx)),
+                                    cx.listener(move |this, _, window, cx| match click {
+                                        UpdateChipClick::Install => this.install_update(cx),
+                                        UpdateChipClick::Restart => {
+                                            this.restart_after_update(window, cx)
+                                        }
+                                    }),
                                 )
                         })
-                        .child(SharedString::from(label)),
+                        .child(SharedString::from(label))
+                        // 進捗バー: 3px の溝（bg3）に fg1 が伸びる。色相は使わない（§1.3 の許可リスト外）。
+                        .when_some(progress, |chip, fraction| {
+                            let track = 96.0_f32;
+                            chip.child(
+                                div()
+                                    .w(px(track))
+                                    .h(px(3.))
+                                    .rounded(px(2.))
+                                    .bg(theme.bg3)
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(px(track * fraction.clamp(0.0, 1.0)))
+                                            .rounded(px(2.))
+                                            .bg(theme.fg1),
+                                    ),
+                            )
+                        }),
                 )
             })
             .when_some(cursor, |element, cursor| {
@@ -1858,7 +1984,7 @@ impl Workspace {
                             // 適用中・再起動待ちには触らない（進行中の状態を告知で潰さない）。
                             if matches!(
                                 workspace.updater.status,
-                                Some((_, UpdateState::Installing | UpdateState::Ready))
+                                Some((_, UpdateState::Installing(_) | UpdateState::Ready))
                             ) {
                                 return;
                             }
@@ -2054,13 +2180,33 @@ impl Workspace {
                 return;
             }
         };
-        self.updater.status = Some((info.clone(), UpdateState::Installing));
+        self.updater.status = Some((
+            info.clone(),
+            UpdateState::Installing(updater::UpdateProgress::Downloading { fraction: None }),
+        ));
         cx.notify();
         cx.spawn(async move |workspace, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { updater::download_and_install(&dmg_url).map(|_| info) })
-                .await;
+            // 進みは背景スレッド → チャネル → ここで status に反映（UI スレッドは待たない）。
+            // 送信側は背景タスクの終了とともに落ちるので、受信ループは自然に抜ける。
+            let (sender, mut receiver) =
+                futures::channel::mpsc::unbounded::<updater::UpdateProgress>();
+            let task = cx.background_executor().spawn(async move {
+                let report = move |progress: updater::UpdateProgress| {
+                    let _ = sender.unbounded_send(progress);
+                };
+                updater::download_and_install(&dmg_url, &report).map(|_| info)
+            });
+            while let Some(progress) = receiver.next().await {
+                let _ = workspace.update(cx, |workspace, cx| {
+                    if let Some((_, state @ UpdateState::Installing(_))) =
+                        workspace.updater.status.as_mut()
+                    {
+                        *state = UpdateState::Installing(progress);
+                        cx.notify();
+                    }
+                });
+            }
+            let result = task.await;
             let _ = workspace.update(cx, |workspace, cx| match result {
                 Ok(info) => {
                     workspace.updater.status = Some((info, UpdateState::Ready));
@@ -2078,6 +2224,30 @@ impl Workspace {
         })
         .detach();
     }
+
+    /// 差し替え済みチップの「再起動」: 自プロセスの終了を待って .app を開き直す子を切り離してから、
+    /// 通常の Quit（hot exit 破棄・窓セッション整理）と同じ経路で終了する。
+    pub(crate) fn restart_after_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.updater.status, Some((_, UpdateState::Ready))) {
+            return;
+        }
+        if let Err(error) = updater::spawn_relauncher() {
+            self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
+            return;
+        }
+        // Quit アクションは necoder crate 側の定義（キーマップの `necoder::Quit`）なので名前で組み立てる。
+        match cx.build_action("necoder::Quit", None) {
+            Ok(action) => window.dispatch_action(action, cx),
+            Err(_) => cx.quit(),
+        }
+    }
+}
+
+/// 更新チップのクリックが何をするか（段階で変わる）。
+#[derive(Clone, Copy)]
+enum UpdateChipClick {
+    Install,
+    Restart,
 }
 
 #[cfg(test)]

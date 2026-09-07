@@ -168,10 +168,18 @@ jobs:
           path: |
             target/necoder.dmg
             target/zed-${{ env.ZED_SOURCE_REV }}-source.tar.gz
+      # Release 本文は CHANGELOG.md の該当節から生成する（scripts/release-notes.sh）。
+      # 節が無ければここで落ちる ＝ 本文が空のリリースは公開されない（2026-09-02 まで
+      # v0.1.2〜v0.1.9 の大半が空本文のまま公開されていた反省。RELEASE.md §1 手順 1）。
+      # mac / windows どちらのジョブが先に Release を作っても同じ本文になるよう両方で渡す。
+      - name: Release 本文を CHANGELOG から生成
+        if: startsWith(github.ref, 'refs/tags/')
+        run: bash ./scripts/release-notes.sh "${GITHUB_REF_NAME#v}" > target/release-notes.md
       - name: Attach to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          body_path: target/release-notes.md
           files: |
             target/necoder.dmg
             target/zed-${{ env.ZED_SOURCE_REV }}-source.tar.gz
@@ -270,7 +278,13 @@ jobs:
           name: necoder-windows-x64
           path: dist/necoder-windows-x64.zip
       # タグ push のときだけ GitHub Release に添付する（手動実行では artifact どまり）。
+      # 本文は mac ジョブと同じ生成物（CHANGELOG の該当節）。ランナー同梱の Git Bash で回す。
+      - name: Release 本文を CHANGELOG から生成
+        if: success() && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: bash ./scripts/release-notes.sh "${GITHUB_REF_NAME#v}" > dist/release-notes.md
       - uses: softprops/action-gh-release@v2
         if: success() && startsWith(github.ref, 'refs/tags/')
         with:
+          body_path: dist/release-notes.md
           files: dist/necoder-windows-x64.zip

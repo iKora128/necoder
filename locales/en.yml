@@ -72,6 +72,8 @@ agent:
   compact_tip: Summarize and compact the context (/compact)
   output_truncated: "… (%{n} lines hidden)"
   result_lines: "%{n} lines"
+  file_write: "Write %{path}"
+  file_append: "Append %{path}"
   queued_title: "%{n} queued (sent when the turn ends)"
   queue_send_now: Interrupt & send
   elicitation_submit: Submit
@@ -424,6 +426,7 @@ settings:
 explorer:
   main_worktree_undeletable: The main worktree cannot be deleted (use Remove from rail instead)
   up_folder: Up one folder
+  refresh_tip: Refresh (re-read the tree and git status)
   back_to_project: Back to project
   view_tree: Tree view
   view_columns: Column view (Finder-like)
@@ -521,7 +524,12 @@ update:
   available: ⬆ Update to v%{version}
   get: ⬆ Get v%{version}
   installing: ⬇ Updating…
-  ready: ⟳ Restart to finish updating
+  downloading: ⬇ Downloading %{percent}%
+  verifying: Verifying signature…
+  replacing: Replacing the app…
+  ready: The new version is ready
+  restart: ⟳ Restart to v%{version}
+  err_relaunch: Couldn't schedule the relaunch (please reopen necoder manually)
   err_no_bundle: Running .app not found (a dev build can't self-update)
   err_curl: Failed to run curl
   err_download: Download failed

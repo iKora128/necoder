@@ -1241,6 +1241,174 @@ impl Storage {
             })
         })
     }
+
+    // ── 窓セッション（開プロジェクト列・各プロジェクトの開タブ列。1 窓 = 1 行） ──
+    //
+    // 旧 `state.json`（全窓共有の 1 ファイル・丸ごと上書き）は「最後に書いた窓が勝つ」ため、
+    // 別窓で閉じたタブが次回起動で復活していた（2026-09-03）。窓ごとに行を分け、各窓は自分の行だけを
+    // 更新する。payload は workspace 側が決める JSON（storage は中身を解釈しない）。
+
+    /// 窓セッションを upsert する。closed_at は触らない（閉じた後に遅れて届いた書き込みで
+    /// 「生存」へ戻さないため。生存へ戻すのは `claim_window_sessions` だけ）。
+    pub fn upsert_window_session(&self, window_id: &str, payload: &str) -> Result<()> {
+        let window_id = window_id.to_string();
+        let payload = payload.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                // updated_at は「最後に触った窓」の並び順に使うので、同一ミリ秒でも単調に進める。
+                let mut rows = conn
+                    .query("SELECT MAX(updated_at) FROM window_sessions", ())
+                    .await
+                    .context("window_sessions の updated_at 読み出しに失敗")?;
+                let latest = match rows.next().await.context("window_sessions 行の取得に失敗")? {
+                    Some(row) => row.get_value(0)?.as_integer().copied().unwrap_or(0),
+                    None => 0,
+                };
+                let now = now.max(latest + 1);
+                conn.execute(
+                    "INSERT INTO window_sessions (window_id, payload, created_at, updated_at, closed_at)
+                     VALUES (?1, ?2, ?3, ?3, NULL)
+                     ON CONFLICT(window_id) DO UPDATE SET payload = ?2, updated_at = ?3",
+                    (window_id.as_str(), payload.as_str(), now),
+                )
+                .await
+                .context("window_sessions の書き込みに失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 窓をユーザーが閉じた印を付ける（起動時の復元対象から外す）。行は消さず、直近に閉じた 1 行だけ残す
+    /// ＝全窓を閉じてから終了しても、次回は最後に閉じた窓が戻る（旧 state.json と同じ体感）。
+    pub fn mark_window_session_closed(&self, window_id: &str) -> Result<()> {
+        let window_id = window_id.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "UPDATE window_sessions SET closed_at = ?2 WHERE window_id = ?1",
+                    (window_id.as_str(), now),
+                )
+                .await
+                .context("window_sessions の閉じ印に失敗")?;
+                conn.execute(
+                    "DELETE FROM window_sessions WHERE closed_at IS NOT NULL AND window_id != ?1",
+                    (window_id.as_str(),),
+                )
+                .await
+                .context("古い閉じ済み窓の削除に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// ⌘Q 時: その瞬間に開いていた窓（`live_ids`）以外の生存行へ閉じ印を付ける。
+    /// 引数付き起動 → ⌘Q を繰り返すと「生きたまま残る行」が溜まり、次の素起動で全部開いてしまうのを防ぐ
+    /// ＝復元対象は常に「最後に終了したときの窓の集合」（VSCode の restoreWindows と同じ意味）。
+    /// 閉じ済み行は直近 1 行だけ残す（`mark_window_session_closed` と同じ掃除）。
+    pub fn retain_window_sessions(&self, live_ids: &[String]) -> Result<()> {
+        let live_ids = live_ids.to_vec();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT window_id FROM window_sessions WHERE closed_at IS NULL",
+                        (),
+                    )
+                    .await
+                    .context("window_sessions の読み出しに失敗")?;
+                let mut stale = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("window_sessions 行の取得に失敗")?
+                {
+                    let id = row.get_value(0)?.as_text().context("window_id")?.clone();
+                    if !live_ids.contains(&id) {
+                        stale.push(id);
+                    }
+                }
+                for id in stale {
+                    conn.execute(
+                        "UPDATE window_sessions SET closed_at = ?2 WHERE window_id = ?1",
+                        (id.as_str(), now),
+                    )
+                    .await
+                    .context("window_sessions の閉じ印に失敗")?;
+                }
+                // 閉じ済みは最新 1 行だけ残す（生存行は触らない）。
+                conn.execute(
+                    "DELETE FROM window_sessions WHERE closed_at IS NOT NULL AND window_id NOT IN (
+                        SELECT window_id FROM window_sessions WHERE closed_at IS NOT NULL
+                        ORDER BY closed_at DESC, updated_at DESC LIMIT 1)",
+                    (),
+                )
+                .await
+                .context("古い閉じ済み窓の削除に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 起動時に復元する窓セッションを取り出す（(window_id, payload)・updated_at 昇順＝最後に触った窓が末尾）。
+    /// 生存中（closed_at IS NULL）の行が 1 つでもあればそれら全部、無ければ最後に閉じた 1 行。
+    /// 返した行は「これから開く窓」なので生存へ戻す（closed_at を NULL にする）。
+    pub fn claim_window_sessions(&self) -> Result<Vec<(String, String)>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut result = Vec::new();
+                let mut rows = conn
+                    .query(
+                        "SELECT window_id, payload FROM window_sessions
+                         WHERE closed_at IS NULL ORDER BY updated_at ASC",
+                        (),
+                    )
+                    .await
+                    .context("window_sessions の読み出しに失敗")?;
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("window_sessions 行の取得に失敗")?
+                {
+                    result.push((
+                        row.get_value(0)?.as_text().context("window_id")?.clone(),
+                        row.get_value(1)?.as_text().context("payload")?.clone(),
+                    ));
+                }
+                if !result.is_empty() {
+                    return Ok(result);
+                }
+                let mut rows = conn
+                    .query(
+                        "SELECT window_id, payload FROM window_sessions
+                         WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1",
+                        (),
+                    )
+                    .await
+                    .context("閉じ済み window_sessions の読み出しに失敗")?;
+                if let Some(row) = rows
+                    .next()
+                    .await
+                    .context("window_sessions 行の取得に失敗")?
+                {
+                    let window_id = row.get_value(0)?.as_text().context("window_id")?.clone();
+                    conn.execute(
+                        "UPDATE window_sessions SET closed_at = NULL WHERE window_id = ?1",
+                        (window_id.as_str(),),
+                    )
+                    .await
+                    .context("window_sessions の復元印に失敗")?;
+                    result.push((
+                        window_id,
+                        row.get_value(1)?.as_text().context("payload")?.clone(),
+                    ));
+                }
+                Ok(result)
+            })
+        })
+    }
 }
 
 /// スキーマ初期化（冪等）。将来のマイグレーションは schema_version を見て足す。
@@ -1251,6 +1419,19 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("schema_version 作成に失敗")?;
+    // 窓セッション（1 窓 = 1 行・M13 後追い 2026-09-03）。旧 state.json の後継。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS window_sessions (
+            window_id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            closed_at INTEGER
+        )",
+        (),
+    )
+    .await
+    .context("window_sessions 作成に失敗")?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS hot_exit (
             scope TEXT NOT NULL DEFAULT 'local',
@@ -1511,6 +1692,59 @@ mod tests {
 
     fn temp_db(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("necoder_storage_{}_{}.db", tag, std::process::id()))
+    }
+
+    #[test]
+    fn window_sessions_restore_live_windows_or_last_closed() {
+        let path = temp_db("window_sessions");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).expect("DB を開ける");
+
+        storage.upsert_window_session("w1", "{\"a\":1}").unwrap();
+        storage.upsert_window_session("w2", "{\"b\":2}").unwrap();
+        // 上書きは同じ行に入る（行が増えない）+ 最後に触った窓が末尾。
+        storage.upsert_window_session("w1", "{\"a\":11}").unwrap();
+        let live = storage.claim_window_sessions().unwrap();
+        assert_eq!(
+            live,
+            vec![
+                ("w2".to_string(), "{\"b\":2}".to_string()),
+                ("w1".to_string(), "{\"a\":11}".to_string()),
+            ]
+        );
+
+        // w1 を閉じる → 生存中は w2 だけ。閉じた後に遅れて届いた upsert は生存へ戻さない。
+        storage.mark_window_session_closed("w1").unwrap();
+        storage.upsert_window_session("w1", "{\"a\":12}").unwrap();
+        let live = storage.claim_window_sessions().unwrap();
+        assert_eq!(live, vec![("w2".to_string(), "{\"b\":2}".to_string())]);
+
+        // w2 も閉じる → 生存中は無し → 最後に閉じた w2 が 1 行だけ返り、復元対象として生存へ戻る
+        // （w1 の閉じ済み行は掃除されている）。
+        storage.mark_window_session_closed("w2").unwrap();
+        let fallback = storage.claim_window_sessions().unwrap();
+        assert_eq!(fallback, vec![("w2".to_string(), "{\"b\":2}".to_string())]);
+        let live = storage.claim_window_sessions().unwrap();
+        assert_eq!(live, vec![("w2".to_string(), "{\"b\":2}".to_string())]);
+
+        // 引数付き起動 → ⌘Q の繰り返しで溜まった行: ⌘Q 時点で開いていた窓だけ生存に残す。
+        storage.upsert_window_session("old1", "{}").unwrap();
+        storage.upsert_window_session("old2", "{}").unwrap();
+        storage.upsert_window_session("w3", "{\"c\":3}").unwrap();
+        storage
+            .retain_window_sessions(&["w2".to_string(), "w3".to_string()])
+            .unwrap();
+        let live = storage.claim_window_sessions().unwrap();
+        assert_eq!(
+            live,
+            vec![
+                ("w2".to_string(), "{\"b\":2}".to_string()),
+                ("w3".to_string(), "{\"c\":3}".to_string()),
+            ]
+        );
+
+        drop(storage);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

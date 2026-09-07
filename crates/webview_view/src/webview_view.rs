@@ -2,6 +2,10 @@
 //!
 //! アプリ UI やエディタは従来どおり GPUI で描画し、HTML プレビューを表示している間だけ
 //! macOS の WKWebView / Windows の WebView2 を遅延生成する。Chromium 本体は同梱しない。
+//!
+//! ネイティブ子ビューはキーボードフォーカス（macOS の first responder / Windows のフォーカス HWND）を
+//! OS レベルで奪うため、隠す・破棄する前に必ず `focus_parent()` で GPUI のウィンドウへ返す。
+//! 返し忘れると、隠れた WebView がキー入力を吸い続けて GPUI のキーマップに届かなくなる。
 
 use gpui::{canvas, div, prelude::*, px, App, Bounds, Context, IntoElement, Pixels, Task, Window};
 use std::path::{Path, PathBuf};
@@ -97,6 +101,11 @@ impl WebViewView {
         }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(webview) = &self.webview {
+            if !active {
+                // 隠す前にフォーカスを GPUI 側へ返す（隠れた WebView が first responder のまま
+                // キー入力を吸うのを防ぐ）。失敗してもプレビュー自体は壊さない。
+                Self::return_focus_to_parent(webview);
+            }
             if let Err(error) = webview.set_visible(active) {
                 self.error = Some(error.to_string());
             }
@@ -131,10 +140,25 @@ impl WebViewView {
         }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
+            // 念のため破棄直前にもフォーカスを返す（隠した時点で返しているが、Drop 後に
+            // first responder が消えたビューを指す状態を作らない防御）。
+            if let Some(webview) = &self.webview {
+                Self::return_focus_to_parent(webview);
+            }
             // wry の Drop が removeFromSuperview まで行う＝ここで None にするだけで
             // ネイティブ子ビューと WebContent プロセスが解放される。
             self.webview = None;
             self.last_bounds = None;
+        }
+    }
+
+    /// キーボードフォーカスをネイティブ子ビューから GPUI のウィンドウへ返す。
+    /// macOS では親 NSView を first responder に戻し、Windows では親 HWND に SetFocus する。
+    /// 失敗はプレビューの表示エラーにせず標準エラーへ出すだけに留める（フォーカス移動は付随処理）。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn return_focus_to_parent(webview: &WebView) {
+        if let Err(error) = webview.focus_parent() {
+            eprintln!("webview_view: フォーカスを親ウィンドウへ返せませんでした: {error}");
         }
     }
 
@@ -179,6 +203,9 @@ impl WebViewView {
                 .with_bounds(native_bounds)
                 .with_visible(true)
                 .with_back_forward_navigation_gestures(true)
+                // 右クリック →「要素を検証」で Web Inspector を開けるようにする（HTML を書く用途の
+                // プレビューなので常時 ON。release で効かせるには wry の `devtools` feature が要る）。
+                .with_devtools(true)
                 .build_as_child(window)
             {
                 Ok(webview) => {

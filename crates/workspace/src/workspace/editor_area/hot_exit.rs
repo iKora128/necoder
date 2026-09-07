@@ -165,6 +165,7 @@ impl Workspace {
 
     /// 正常終了時の後始末（Quit アクションから）。スナップショットは破棄する（仕様: 正常終了で破棄）。
     pub fn prepare_quit(&mut self) {
+        self.flush_window_session_for_quit();
         if let Some(storage) = &self.persistence.storage {
             if let Err(error) = storage.clear_hot_exit() {
                 eprintln!("hot exit のクリアに失敗: {error:#}");

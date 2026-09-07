@@ -70,6 +70,12 @@ impl Workspace {
         self.open_thread_history(&ThreadHistory, window, cx);
     }
 
+    /// 開発用: プロジェクト切替フラッシュを表示する（`NECODER_FLASH_PROBE` の描画検証）。
+    #[cfg(debug_assertions)]
+    pub fn debug_project_flash(&mut self, cx: &mut Context<Self>) {
+        self.flash_project_name(cx);
+    }
+
     /// 開発用: 管制タブの受入検証（P3・`NECODER_CONTROL_PROBE`）。5 つの擬似 TaskSpace
     /// （Working/Blocked/MergeReady/Failed/Planned）を合成する。worktree 実体は現 root を共有
     /// （描画検証専用）・SpaceId は probe 専用値・storage は渡さない＝**Git/DB へ一切書かない**。
