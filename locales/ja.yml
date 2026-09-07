@@ -650,6 +650,7 @@ ssh:
   browse_hint: "接続しました。フォルダを右クリック →「ここをプロジェクトとして開く」で開けます"
   picker_placeholder: SSH ホストを選択（~/.ssh/config）
   manual_entry: URI を手入力…
+  restore_failed: "%{project} に接続できません。操作すると再接続を試みます"
 goto:
   placeholder: 行番号…
 hotexit:
@@ -718,6 +719,13 @@ key:
   select_down: 選択を下へ広げる
   select_word_left: 単語単位で選択（左）
   select_word_right: 単語単位で選択（右）
+  select_to_line_start: 行頭まで選択
+  select_to_line_end: 行末まで選択
+  select_to_start: 文書の先頭まで選択
+  select_to_end: 文書の末尾まで選択
+  delete_word_forward: 次の単語を削除
+  delete_to_line_start: 行頭まで削除
+  delete_to_line_end: 行末まで削除
   select_next: 次の同じ語を選択
   add_cursor_above: カーソルを上に追加
   add_cursor_below: カーソルを下に追加

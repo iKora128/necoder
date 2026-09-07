@@ -16,6 +16,18 @@ use gpui::{
 use std::ops::Range;
 use theme_core::{SyntaxColors, Theme};
 
+/// remote の外部変更を背景で調べた結果（[`EditorView::handle_external_change_remote`]）。
+enum ExternalChange {
+    /// 自分の保存 or 既に同期済み。
+    Unchanged,
+    /// 外で変わっていて、読み始めた時点では無編集だった（内容を持ち帰る）。
+    Changed(host::FileContent),
+    /// 外で変わっていて、こちらも編集中（上書きしない・警告バー）。
+    ChangedWhileDirty,
+    /// 削除・アクセス不能。
+    Missing,
+}
+
 /// .md の整形プレビュー（rendered 側の Block→GPUI 描画）。source ⇄ rendered は ⌘⇧V。
 mod markdown_preview;
 
@@ -48,8 +60,15 @@ actions!(
         SelectWordLeft,
         SelectWordRight,
         DeleteWordBackward,
+        DeleteWordForward,
+        DeleteToLineStart,
+        DeleteToLineEnd,
         MoveToStart,
         MoveToEnd,
+        SelectToLineStart,
+        SelectToLineEnd,
+        SelectToStart,
+        SelectToEnd,
         MoveLineUp,
         MoveLineDown,
         DuplicateLineUp,
@@ -180,6 +199,15 @@ pub struct EditorView {
     marked_range: Option<Range<usize>>,
     // 直近 paint のキャッシュ（ウィンドウ座標）。ヒットテスト・IME 位置・スクロールに使う。
     content_origin: Option<Point<Pixels>>,
+    /// 直近 prepaint が本文の shape に使ったフォント（family/weight/features/fallbacks）。
+    /// ヒットテストは描画と**同じフォント**で幅を測らないと、クリック位置とキャレットが
+    /// ずれる（マウスイベント中の `window.text_style()` は OS 既定の UI フォント＝プロポーショナル。
+    /// 日本語 + ASCII 混在の markdown 行で全角 3 文字分ずれていた・2026-09-05）。
+    text_font: Option<gpui::Font>,
+    /// 直近 prepaint が可視表示行ぶん問い合わせたハイライト span（版 + byte 範囲つき）。
+    /// ヒットテストが描画と**同じ run 構成**（見出し/太字 = Bold・強調 = Italic）で幅を測るために使う。
+    /// Bold/Italic の advance が Regular と違う family に差し替えても x→offset がずれない（2026-09-07）。
+    visible_highlights: VisibleHighlights,
     viewport_height: Pixels,
     gutter_width: Pixels,
     caret_bounds: Option<Bounds<Pixels>>,
@@ -316,6 +344,8 @@ impl EditorView {
             scroll_top: px(0.),
             marked_range: None,
             content_origin: None,
+            text_font: None,
+            visible_highlights: VisibleHighlights::default(),
             viewport_height: px(0.),
             gutter_width: px(0.),
             caret_bounds: None,
@@ -826,6 +856,10 @@ impl EditorView {
     /// 自分の保存によるイベント（revision 一致）は無視。無編集なら自動リロード、
     /// dirty なら警告バー用のフラグを立てる（上書きは絶対にしない）。
     pub fn handle_external_change(&mut self, cx: &mut Context<Self>) {
+        if self.buffer.host().is_remote() {
+            self.handle_external_change_remote(cx);
+            return;
+        }
         match self.buffer.disk_probably_unchanged() {
             Some(true) => {
                 // 自分の保存 or 既に同期済み。
@@ -849,12 +883,99 @@ impl EditorView {
         }
     }
 
+    /// remote 版の [`Self::handle_external_change`]。メタデータ照合と再読込は SSH の往復なので
+    /// UI スレッドで待たず、背景で読んでから反映する。反映時は「読んでいる間に自分が保存・
+    /// 再読込していないか」を revision で、「編集を始めていないか」を dirty で確かめる。
+    fn handle_external_change_remote(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.buffer.path().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+        let Some(observed) = self.buffer.file_revision() else {
+            // 未保存の新規ファイル: 同期版の「メタデータ無し」と同じ扱い。
+            if self.buffer.is_dirty() {
+                self.external_changed = true;
+                cx.notify();
+            }
+            return;
+        };
+        let host = self.buffer.host().clone();
+        let dirty = self.buffer.is_dirty();
+        cx.spawn(async move |view, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    let Ok(metadata) = host.metadata(&path) else {
+                        return ExternalChange::Missing;
+                    };
+                    if metadata.len == observed.len && metadata.modified_ns == observed.modified_ns
+                    {
+                        return ExternalChange::Unchanged;
+                    }
+                    if dirty {
+                        return ExternalChange::ChangedWhileDirty;
+                    }
+                    match host.read_file(&path) {
+                        Ok(content) => ExternalChange::Changed(content),
+                        Err(_unreadable) => ExternalChange::Missing,
+                    }
+                })
+                .await;
+            // Err = 読んでいる間にタブが閉じられた（無害）。
+            let _ = view.update(cx, |view, cx| {
+                view.apply_external_change(outcome, observed, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn apply_external_change(
+        &mut self,
+        outcome: ExternalChange,
+        observed: host::FileRevision,
+        cx: &mut Context<Self>,
+    ) {
+        // 読んでいる間に保存や別の再読込で revision が動いていたら、この結果は古い。
+        if self.buffer.file_revision() != Some(observed) {
+            return;
+        }
+        match outcome {
+            ExternalChange::Unchanged => {
+                if self.external_changed {
+                    self.external_changed = false;
+                    cx.notify();
+                }
+            }
+            ExternalChange::Changed(content) if !self.buffer.is_dirty() => {
+                if let Err(error) = self.buffer.apply_reloaded(content) {
+                    eprintln!("再読込に失敗: {error:#}");
+                    return;
+                }
+                self.after_reload(cx);
+            }
+            ExternalChange::Changed(_) | ExternalChange::ChangedWhileDirty => {
+                self.external_changed = true;
+                cx.notify();
+            }
+            ExternalChange::Missing => {
+                if self.buffer.is_dirty() {
+                    self.external_changed = true;
+                    cx.notify();
+                }
+            }
+        }
+    }
+
     /// ディスクから読み直す（自動リロード / 警告バーの「再読込」）。スクロールは維持しつつクランプ。
     pub fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self.buffer.reload() {
             eprintln!("再読込に失敗: {error:#}");
             return;
         }
+        self.after_reload(cx);
+    }
+
+    /// 再読込後の表示の立て直し（警告バーを畳む・IME 変換中を捨てる・ハイライトとスクロール）。
+    fn after_reload(&mut self, cx: &mut Context<Self>) {
         self.external_changed = false;
         self.marked_range = None;
         self.refresh_highlights();
@@ -1248,6 +1369,62 @@ impl EditorView {
 
     fn move_to_end(&mut self, _: &MoveToEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.apply_cursor(false, |snapshot, _| snapshot.len_bytes(), cx);
+    }
+
+    // ── 行頭/行末・文書頭/末までの選択と削除（mac 標準のテキスト編集・2026-09-05） ──
+
+    fn select_to_line_start(
+        &mut self,
+        _: &SelectToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_cursor(
+            true,
+            |snapshot, selection| line_edge(snapshot, selection.head, false),
+            cx,
+        );
+    }
+
+    fn select_to_line_end(&mut self, _: &SelectToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_cursor(
+            true,
+            |snapshot, selection| line_edge(snapshot, selection.head, true),
+            cx,
+        );
+    }
+
+    fn select_to_start(&mut self, _: &SelectToStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_cursor(true, |_, _| 0, cx);
+    }
+
+    fn select_to_end(&mut self, _: &SelectToEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_cursor(true, |snapshot, _| snapshot.len_bytes(), cx);
+    }
+
+    fn delete_word_forward(
+        &mut self,
+        _: &DeleteWordForward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.buffer.delete_word_forward();
+        self.after_edit(cx);
+    }
+
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.buffer.delete_to_line_start();
+        self.after_edit(cx);
+    }
+
+    fn delete_to_line_end(&mut self, _: &DeleteToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.buffer.delete_to_line_end();
+        self.after_edit(cx);
     }
 
     fn move_line_up(&mut self, _: &MoveLineUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -1823,10 +2000,55 @@ impl EditorView {
             .get(segment_range.clone())
             .unwrap_or(line_text.as_str())
             .to_string();
-        let shaped = shape_plain(&segment_text, self.theme.fg0, self.font_size, window);
+        let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0)) + segment_range.start;
+        let line_end = line_start + segment_text.len();
+        // 描画（prepaint）と**同じフォント・同じ run 構成**で測る。イベント中の `window.text_style()` は
+        // 要素のスタイル外＝OS 既定フォントになり、等幅の本文と幅が合わない（[`Self::text_font`]）。
+        // 見出し/太字/強調の run（Bold/Italic）も描画と同じ [`shape_body_line`] で再現する。
+        let font = self
+            .text_font
+            .clone()
+            .unwrap_or_else(|| gpui::font(self.font_family()));
+        let recomputed_spans;
+        let line_spans: &[lang::HighlightSpan] = match self
+            .visible_highlights
+            .spans_covering(snapshot.version(), &(line_start..line_end))
+        {
+            Some(cached) => lang::spans_in_range(cached, line_start, line_end),
+            None => {
+                // viewport 外へのドラッグ・未描画の版など、直近 frame が覆っていない行だけ問い直す。
+                recomputed_spans = self
+                    .highlighter
+                    .as_ref()
+                    .map(|highlighter| highlighter.spans(&snapshot.text(), line_start..line_end))
+                    .unwrap_or_default();
+                &recomputed_spans
+            }
+        };
+        let shaped = shape_body_line(
+            &segment_text,
+            line_start,
+            line_spans,
+            self.marked_range.clone(),
+            self.theme.fg0,
+            &self.theme.syntax,
+            &font,
+            self.font_size,
+            window,
+        );
         let local_x = (position.x - origin.x).max(px(0.));
         let column = segment_range.start + shaped.closest_index_for_x(local_x);
         snapshot.point_to_byte(BufferPoint::new(row, column))
+    }
+
+    /// 本文のフォントファミリ。コード = Guguru Sans Code（等幅）/ composer(plain) = IBM Plex Sans JP。
+    /// render の `font_family` とヒットテストのフォールバックが同じ値を見る。
+    fn font_family(&self) -> &'static str {
+        if self.plain {
+            "IBM Plex Sans JP"
+        } else {
+            "Guguru Sans Code"
+        }
     }
 
     /// 括弧/クォートの自動ペア処理。介入したら true（呼び出し側は通常挿入をスキップ）。
@@ -1955,11 +2177,7 @@ impl Render for EditorView {
             .when(!self.plain, |element| element.bg(self.theme.bg1))
             .text_color(self.theme.fg0)
             // コード = Guguru Sans Code（等幅・bin で bundle 済み）/ composer(plain) = IBM Plex Sans JP（UI）
-            .font_family(if self.plain {
-                "IBM Plex Sans JP"
-            } else {
-                "Guguru Sans Code"
-            })
+            .font_family(self.font_family())
             .text_size(px(self.font_size))
             .line_height(px(self.line_height_value()))
             .cursor(CursorStyle::IBeam)
@@ -1970,8 +2188,15 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::select_word_left))
             .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::delete_to_line_end))
             .on_action(cx.listener(Self::move_to_start))
             .on_action(cx.listener(Self::move_to_end))
+            .on_action(cx.listener(Self::select_to_line_start))
+            .on_action(cx.listener(Self::select_to_line_end))
+            .on_action(cx.listener(Self::select_to_start))
+            .on_action(cx.listener(Self::select_to_end))
             .on_action(cx.listener(Self::move_line_up))
             .on_action(cx.listener(Self::move_line_down))
             .on_action(cx.listener(Self::duplicate_line_up))
@@ -2222,9 +2447,15 @@ impl Element for EditorElement {
         let composer_cell_estimate =
             (f32::from(shape_plain("永", gpui::black(), editor_font_size, window).width) / 2.0)
                 .max(1.0);
+        // 本文の shape に使うフォント（親 div の font_family = 等幅/Sans が乗った状態）。
+        // ヒットテストが同じもので測れるよう view に控える。
+        let text_font = window.text_style().font();
         // 保留リビール（検索ジャンプ等）を viewport 確定後の今、消化する（対象行を中央へ寄せる）。
         // 併せて wrap マップの再構築・gutter diff の再計算（いずれも変化時のみ）。
         self.editor.update(cx, |view, cx| {
+            if view.text_font.as_ref() != Some(&text_font) {
+                view.text_font = Some(text_font.clone());
+            }
             let snapshot = view.buffer.snapshot();
             // wrap マップ: (version, columns, on/off) が変わった時だけ作り直す。
             // plain（composer）は**常に折り返し**（長文が右へはみ出さない・横スクロールは無い）。
@@ -2315,7 +2546,6 @@ impl Element for EditorElement {
         let plain = view.plain;
         let blink_visible = view.blink_visible;
         let caret_blink_enabled = view.caret_blink_enabled;
-        let text_font = window.text_style().font();
         let primary = selections.first().copied().unwrap_or(Selection::cursor(0));
 
         let line_count = snapshot.line_count();
@@ -2347,8 +2577,9 @@ impl Element for EditorElement {
         );
 
         // 可視表示行のセグメントが跨る byte 範囲だけハイライトを問い合わせる（M11-8）。
-        let highlights: Vec<lang::HighlightSpan> = if visible.is_empty() {
-            Vec::new()
+        // 範囲は frame 末尾で view に控える（ヒットテストが同じ span で run を組むため）。
+        let highlight_range: Range<usize> = if visible.is_empty() {
+            0..0
         } else {
             let (first_line, first_segment) = wrap_map.display_to_logical(visible.start);
             let (last_line, last_segment) =
@@ -2365,13 +2596,13 @@ impl Element for EditorElement {
                 + wrap_map
                     .segment_range(last_line, last_segment, snapshot.line_len_bytes(last_line))
                     .end;
-            view.highlighter
-                .as_ref()
-                .map(|highlighter| {
-                    highlighter.spans(&snapshot.text(), start_byte..end_byte.max(start_byte))
-                })
-                .unwrap_or_default()
+            start_byte..end_byte.max(start_byte)
         };
+        let highlights: Vec<lang::HighlightSpan> = view
+            .highlighter
+            .as_ref()
+            .map(|highlighter| highlighter.spans(&snapshot.text(), highlight_range.clone()))
+            .unwrap_or_default();
 
         let mut line_numbers = Vec::new();
         let mut text_lines = Vec::new();
@@ -2481,7 +2712,7 @@ impl Element for EditorElement {
 
             // 本文（構文ハイライト + IME 変換中の下線）
             let line_spans = lang::spans_in_range(&highlights, line_start, line_end);
-            let runs = build_line_runs(
+            let shaped = shape_body_line(
                 &line_text,
                 line_start,
                 line_spans,
@@ -2489,12 +2720,8 @@ impl Element for EditorElement {
                 theme.fg0,
                 &theme.syntax,
                 &text_font,
-            );
-            let shaped = window.text_system().shape_line(
-                SharedString::from(line_text.clone()),
-                px(font_size),
-                &runs,
-                None,
+                font_size,
+                window,
             );
 
             // 検索ハイライト（⌘F の全マッチ）。選択面より先に paint する＝下に敷く。
@@ -2585,6 +2812,16 @@ impl Element for EditorElement {
         if !focused || (caret_blink_enabled && !blink_visible) {
             carets.clear();
         }
+
+        // この frame のハイライト（版 + 範囲）を控える。ヒットテスト（クリック/ドラッグ/hover/IME）は
+        // これで描画と同じ run 構成を組み、幅を測る（[`EditorView::visible_highlights`]）。
+        self.editor.update(cx, |view, _| {
+            view.visible_highlights = VisibleHighlights {
+                version: snapshot.version(),
+                range: highlight_range,
+                spans: highlights,
+            };
+        });
 
         EditorPrepaint {
             line_numbers,
@@ -2748,6 +2985,57 @@ fn line_edge(snapshot: &BufferSnapshot, head: usize, end: bool) -> usize {
     let row = snapshot.byte_to_point(head).row;
     let column = if end { usize::MAX } else { 0 };
     snapshot.point_to_byte(BufferPoint::new(row, column))
+}
+
+/// 直近 prepaint が可視範囲ぶん問い合わせたハイライト span。buffer の版と byte 範囲つきで持ち、
+/// ヒットテストは「同じ版で・範囲を丸ごと覆っている」ときだけ再利用する（それ以外は問い直す）。
+#[derive(Default)]
+struct VisibleHighlights {
+    version: u64,
+    range: Range<usize>,
+    spans: Vec<lang::HighlightSpan>,
+}
+
+impl VisibleHighlights {
+    /// `version` の buffer で `range` を丸ごと覆っていれば span 列を返す。
+    fn spans_covering(&self, version: u64, range: &Range<usize>) -> Option<&[lang::HighlightSpan]> {
+        let covers = self.version == version
+            && self.range.start <= range.start
+            && range.end <= self.range.end;
+        covers.then_some(self.spans.as_slice())
+    }
+}
+
+/// 本文 1 行（wrap 中は 1 セグメント）を run 構成ごと shape する。
+/// 描画（prepaint）とヒットテスト（座標→offset）の**両方がここを通る**ことで幅の測り方が一致する。
+/// フォントや Bold/Italic の run が片方だけ違うと、クリック位置とキャレットがずれる（2026-09-05 の根治）。
+#[allow(clippy::too_many_arguments)]
+fn shape_body_line(
+    text: &str,
+    line_start: usize,
+    line_spans: &[lang::HighlightSpan],
+    marked: Option<Range<usize>>,
+    default_color: gpui::Hsla,
+    syntax: &SyntaxColors,
+    text_font: &gpui::Font,
+    font_size: f32,
+    window: &mut Window,
+) -> ShapedLine {
+    let runs = build_line_runs(
+        text,
+        line_start,
+        line_spans,
+        marked,
+        default_color,
+        syntax,
+        text_font,
+    );
+    window.text_system().shape_line(
+        SharedString::from(text.to_string()),
+        px(font_size),
+        &runs,
+        None,
+    )
 }
 
 /// 行の TextRun 列を組む。構文ハイライト色（[`lang::HighlightSpan`]）+ IME 変換中の下線を合成する。
@@ -2961,12 +3249,25 @@ impl WrapMap {
     }
 }
 
-/// 単色 1 行を shape する（行番号・ヒットテスト用）。フォントはウィンドウの解決済みフォントを使う。
+/// 単色 1 行を shape する（行番号・ガター計測用）。フォントはウィンドウの解決済みフォント＝
+/// **描画中（prepaint/paint）にだけ**本文と一致する。イベントハンドラから呼ぶと OS 既定フォントに
+/// なるので、ヒットテストは [`shape_body_line`] に描画時のフォント（[`EditorView::text_font`]）を渡すこと。
 fn shape_plain(text: &str, color: gpui::Hsla, font_size: f32, window: &mut Window) -> ShapedLine {
     let text_font = window.text_style().font();
+    shape_with_font(text, &text_font, color, font_size, window)
+}
+
+/// 指定フォントで単色 1 行を shape する。
+fn shape_with_font(
+    text: &str,
+    font: &gpui::Font,
+    color: gpui::Hsla,
+    font_size: f32,
+    window: &mut Window,
+) -> ShapedLine {
     let run = TextRun {
         len: text.len(),
-        font: text_font,
+        font: font.clone(),
         color,
         background_color: None,
         underline: None,
@@ -3074,5 +3375,75 @@ mod tests {
         assert_eq!(utf16_to_byte_in("あい", 2), 6);
         // "𝔸" は UTF-16 で 2、UTF-8 で 4 バイト
         assert_eq!(utf16_to_byte_in("𝔸x", 2), 4);
+    }
+
+    #[test]
+    fn build_line_runs_reproduces_heading_bold_and_emphasis_italic() {
+        // 描画とヒットテストは同じ run 列（shape_body_line）で幅を測る。その run 列が span どおりに
+        // face を立てることを固定する: 見出し = Bold / 強調 = Italic / それ以外 = 素のフォント。
+        let font = gpui::font("Guguru Sans Code");
+        let syntax = Theme::dark().syntax;
+        let spans = vec![
+            lang::HighlightSpan {
+                range: 10..12,
+                kind: lang::HighlightKind::Heading,
+            },
+            lang::HighlightSpan {
+                range: 13..18,
+                kind: lang::HighlightKind::Emphasis,
+            },
+        ];
+        // 行頭 offset 10 の行 "# *foo* bar"（span は絶対 byte で来る）
+        let runs = build_line_runs(
+            "# *foo* bar",
+            10,
+            &spans,
+            None,
+            gpui::black(),
+            &syntax,
+            &font,
+        );
+        let faces: Vec<(usize, gpui::FontWeight, gpui::FontStyle)> = runs
+            .iter()
+            .map(|run| (run.len, run.font.weight, run.font.style))
+            .collect();
+        assert_eq!(
+            faces,
+            vec![
+                (2, gpui::FontWeight::BOLD, gpui::FontStyle::Normal),
+                (1, font.weight, gpui::FontStyle::Normal),
+                (5, font.weight, gpui::FontStyle::Italic),
+                (3, font.weight, gpui::FontStyle::Normal),
+            ]
+        );
+        // run の合計長 = 行の byte 長（欠けも重なりも無い）
+        assert_eq!(
+            runs.iter().map(|run| run.len).sum::<usize>(),
+            "# *foo* bar".len()
+        );
+    }
+
+    #[test]
+    fn visible_highlights_are_reused_only_for_the_same_version_and_covered_range() {
+        let cached = VisibleHighlights {
+            version: 7,
+            range: 100..400,
+            spans: vec![lang::HighlightSpan {
+                range: 120..130,
+                kind: lang::HighlightKind::Keyword,
+            }],
+        };
+        // 同じ版・範囲内 → 再利用
+        assert!(cached.spans_covering(7, &(150..200)).is_some());
+        assert!(cached.spans_covering(7, &(100..400)).is_some());
+        // 版ずれ（編集後にまだ描画していない）→ 問い直す
+        assert!(cached.spans_covering(8, &(150..200)).is_none());
+        // 範囲外（viewport 外へのドラッグ）→ 問い直す
+        assert!(cached.spans_covering(7, &(50..200)).is_none());
+        assert!(cached.spans_covering(7, &(300..401)).is_none());
+        // 初期状態（未描画）は空行以外を覆わない
+        assert!(VisibleHighlights::default()
+            .spans_covering(0, &(0..1))
+            .is_none());
     }
 }

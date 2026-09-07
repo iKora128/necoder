@@ -59,9 +59,7 @@ impl Workspace {
                     Some((path.clone(), 0, 0));
             }
             explorer::ExplorerEvent::FilesChanged => {
-                if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
-                    slot.refresh();
-                }
+                self.refresh_explorer_for(session_index, cx);
                 self.refresh_git_status_for(session_index, cx);
             }
             explorer::ExplorerEvent::Focus if session_index == self.project_sessions.active => {

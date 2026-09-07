@@ -210,6 +210,15 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   remote は 1 呼び出しが最大 `REQUEST_TIMEOUT`（30s）ブロックしうる。確立パターン
   （push/pull・gutter diff・横断検索と同じ `host.clone()` → `background_executor().spawn` → 前景で反映）に寄せる。
   render 内での FS/RPC 列挙は禁止 — ツリーが `slot.rows` にキャッシュするのと同型で、表示時に読んでキャッシュする。
+- 再接続（`host::ReconnectingClient`・2026-09-07 現在）: heartbeat は 5s ごとに Ping（timeout 5s）。
+  時間切れでも受信バイトが進んでいれば「混んでいるだけ」と見て切らない（低速回線の大きな転送を巻き添えにしない）。
+  張り直しが決まったら古い接続に乗っていた request を即失敗させ session プロセスを落とす（待たせると各自の timeout まで帰らない）。
+  ControlMaster の作り直しは Hello が**時間切れ**のときだけ（即 EOF は remote-server 側の問題）。
+  端末/LSP/ACP の session は `ControlMaster=auto` で起こし master 不在なら自分が master になる＝ launch spec を組む関数はネットワークに触らない。
+  到達不能なホストでは 1 回の試行に十数秒かかるので、**待っている間に起きた失敗は待ち人が試し直さない**
+  （到着より前の失敗＝ユーザーの新しい操作だけが繋ぎに行く）。切断中に操作するほど遅くなるのを防ぐ。
+  実 SSH の回帰は `crates/host/tests/remote_ssh_live.rs`（`scripts/test-remote-ssh-docker.sh` が
+  Linux artifact の用意から container の凍結注入まで面倒を見る）。
 - SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。
 - server は単一 static binary、client と protocol/version を handshake、daemon + proxy で再接続可能にする。
 - wire は length-prefixed typed header + raw body。初版は request id/capability/frame limit を持ち、

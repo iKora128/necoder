@@ -1,5 +1,33 @@
 use crate::workspace::*;
 
+/// 起動から最初の更新確認までの待ち（起動直後のラッシュを避けるだけ）。
+const UPDATE_FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+/// 更新確認の間隔（壁時計で測る）。開いたままでも新しい版に気付くための再確認。
+const UPDATE_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+/// 再確認の要否を見に行く周期。間隔そのものを 1 本のタイマーにしないのは、macOS の sleep 中に
+/// 単調時計が止まり「寝ていた時間」が経過に数えられないため（短く起きて壁時計で判定する）。
+const UPDATE_CHECK_TICK: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// 更新確認の時期が来たか。
+///
+/// **経過は壁時計（`SystemTime`）で測る**。macOS の sleep 中は単調時計が止まるので、
+/// 間隔ぶんの単一タイマーで数えると「8 時間寝ていた」が経過に入らず、復帰しても確認が来ない。
+/// まだ一度も確認していない場合と、時刻が逆行した場合（時刻同期・タイムゾーン変更で
+/// `duration_since` が Err）は「確認してよい」に倒す — 余分に 1 回聞く方が、
+/// 永久に聞かなくなるより害が小さい。
+fn update_check_due(
+    checked_at: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+    interval: std::time::Duration,
+) -> bool {
+    match checked_at {
+        None => true,
+        Some(last) => now
+            .duration_since(last)
+            .map_or(true, |elapsed| elapsed >= interval),
+    }
+}
+
 /// 最大化された窓を元のサイズへ戻す（タイトルバーの最大化ボタン・2026-08-24）。
 ///
 /// gpui の `Window::zoom_window()` は Windows では `ShowWindowAsync(SW_MAXIMIZE)` を投げるだけで、
@@ -1791,8 +1819,12 @@ impl Workspace {
 
     // ── 自動アップデート（M13）: statusbar チップの中身 ──
 
-    /// 起動しばらく後に GitHub Releases を確認する（背景・失敗は静かに無視）。
+    /// 起動しばらく後に GitHub Releases を確認し、以後も定期的に見直す（背景・失敗は静かに無視）。
     /// スクショ/プローブ実行時と `NECODER_NO_UPDATE_CHECK` ではネットへ出ない。
+    ///
+    /// **一度きりにしない**のは、necoder を開いたまま何日も使うため（2026-09-07 ユーザー要望
+    /// 「常に最新にしてほしい」）。起動時だけの確認だと、その後に出た版はアプリを開き直すまで
+    /// 見えない。確認は curl 一発なので、間隔を詰めても実害は無い。
     pub(crate) fn schedule_update_check(&self, cx: &mut Context<Self>) {
         if cfg!(test)
             || std::env::var_os("NECODER_NO_UPDATE_CHECK").is_some()
@@ -1803,18 +1835,42 @@ impl Workspace {
         cx.spawn(async move |workspace, cx| {
             // 起動直後のラッシュ（セッション復元・LSP 起動）だけ避ける。確認自体は
             // 背景スレッドの curl 一発なので、それ以上待たせる理由はない。
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(10))
-                .await;
-            let found = cx
-                .background_executor()
-                .spawn(async move { updater::check_for_update(env!("CARGO_PKG_VERSION")) })
-                .await;
-            if let Some(info) = found {
-                let _ = workspace.update(cx, |workspace, cx| {
-                    workspace.updater.status = Some((info, UpdateState::Available));
-                    cx.notify();
-                });
+            cx.background_executor().timer(UPDATE_FIRST_CHECK).await;
+            let mut checked_at: Option<std::time::SystemTime> = None;
+            loop {
+                // ウィンドウが閉じたらループを畳む（Err = entity が消えた）。
+                if workspace.update(cx, |_workspace, _cx| ()).is_err() {
+                    break;
+                }
+                let due = update_check_due(
+                    checked_at,
+                    std::time::SystemTime::now(),
+                    UPDATE_RECHECK_INTERVAL,
+                );
+                if due {
+                    checked_at = Some(std::time::SystemTime::now());
+                    let found = cx
+                        .background_executor()
+                        .spawn(async move { updater::check_for_update(env!("CARGO_PKG_VERSION")) })
+                        .await;
+                    if let Some(info) = found {
+                        let applied = workspace.update(cx, |workspace, cx| {
+                            // 適用中・再起動待ちには触らない（進行中の状態を告知で潰さない）。
+                            if matches!(
+                                workspace.updater.status,
+                                Some((_, UpdateState::Installing | UpdateState::Ready))
+                            ) {
+                                return;
+                            }
+                            workspace.updater.status = Some((info, UpdateState::Available));
+                            cx.notify();
+                        });
+                        if applied.is_err() {
+                            break;
+                        }
+                    }
+                }
+                cx.background_executor().timer(UPDATE_CHECK_TICK).await;
             }
         })
         .detach();
@@ -2021,5 +2077,41 @@ impl Workspace {
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    /// 更新確認は**開いたままでも**巡ってくる（2026-09-07 ユーザー要望「常に最新にしてほしい」）。
+    /// 起動時の 1 回きりだと、その後に出た版はアプリを開き直すまで見えない。
+    #[test]
+    fn update_check_comes_due_again_while_the_app_stays_open() {
+        let interval = Duration::from_secs(6 * 60 * 60);
+        let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        // まだ一度も確認していない → すぐ確認する。
+        assert!(update_check_due(None, start, interval));
+        // 間隔に満たない間は聞きに行かない。
+        assert!(!update_check_due(
+            Some(start),
+            start + interval - Duration::from_secs(1),
+            interval
+        ));
+        // 間隔ちょうどで来る。
+        assert!(update_check_due(Some(start), start + interval, interval));
+        // sleep で長く空いた後（壁時計では十分経っている）も来る。
+        assert!(update_check_due(
+            Some(start),
+            start + Duration::from_secs(8 * 60 * 60),
+            interval
+        ));
+        // 時刻が逆行しても「二度と確認しない」にならない。
+        assert!(update_check_due(
+            Some(start),
+            start - Duration::from_secs(60),
+            interval
+        ));
     }
 }

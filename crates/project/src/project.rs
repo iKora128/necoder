@@ -9,6 +9,7 @@ pub mod todos;
 use anyhow::{Context as _, Result};
 use host::{CommandOutput, CommandSpec, Host, LocalHost};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 pub struct ProjectSource {
     host: Arc<dyn Host>,
     root: PathBuf,
+    restored: bool,
 }
 
 impl ProjectSource {
@@ -26,11 +28,31 @@ impl ProjectSource {
         Self {
             host: LocalHost::shared(),
             root,
+            restored: false,
         }
     }
 
     pub fn new(host: Arc<dyn Host>, root: PathBuf) -> Self {
-        Self { host, root }
+        Self {
+            host,
+            root,
+            restored: false,
+        }
+    }
+
+    /// 前回終了時に自分で保存した root から復元する。root は host が返した綴りそのものなので、
+    /// 開くときに正式な綴りやディレクトリ判定を聞き直さない（起動を止めないため）。
+    pub fn restored(host: Arc<dyn Host>, root: PathBuf) -> Self {
+        Self {
+            host,
+            root,
+            restored: true,
+        }
+    }
+
+    /// 保存済み root からの復元か（＝ host へ問い合わせずに開いてよいか）。
+    pub fn is_restored(&self) -> bool {
+        self.restored
     }
 
     pub fn root(&self) -> &Path {
@@ -48,6 +70,10 @@ impl ProjectSource {
     pub fn into_parts(self) -> (Arc<dyn Host>, PathBuf) {
         (self.host, self.root)
     }
+
+    pub fn into_parts_with_trust(self) -> (Arc<dyn Host>, PathBuf, bool) {
+        (self.host, self.root, self.restored)
+    }
 }
 
 /// ディレクトリ 1 項目。
@@ -64,7 +90,10 @@ pub struct Entry {
 pub struct Worktree {
     host: Arc<dyn Host>,
     root: PathBuf,
-    ignore: Gitignore,
+    /// 起動時の遅延復元では**空で始めて後から差し替える**（`.gitignore` の読み込みは
+    /// remote だとネット往復になるので、窓を出す前には読まない）。Worktree は `Rc` で
+    /// メインスレッド専用なので内部可変で十分。
+    ignore: RefCell<Gitignore>,
     /// `host.is_remote()` のキャッシュ。Render は Host を一切呼ばない規律
     /// （workspace の render 監査テストが呼び出しゼロを強制する）ため、
     /// render から参照する判定はここを使う。
@@ -102,9 +131,37 @@ impl Worktree {
         Ok(Worktree {
             host,
             root,
-            ignore,
+            ignore: RefCell::new(ignore),
             remote,
         })
+    }
+
+    /// 渡された root を**そのまま信じて**開く（起動時の復元用）。
+    ///
+    /// [`Self::with_host`] は root の正式な綴りの問い合わせ・ディレクトリ確認・`.gitignore`
+    /// 読み込みで host へ 3 回往復する。remote ではこれが窓の表示を止める。復元で渡す root は
+    /// 前回 host が返した綴りそのものなので、聞き直す必要がない。
+    /// 無視規則は空で始まるので、繋がったら [`Self::set_ignore_source`] で入れ直すこと。
+    pub fn trusted(host: Arc<dyn Host>, root: PathBuf) -> Worktree {
+        let remote = host.is_remote();
+        Worktree {
+            host,
+            root,
+            ignore: RefCell::new(Gitignore::empty()),
+            remote,
+        }
+    }
+
+    /// `.gitignore` の本文から無視規則を組み直す（背景で読んだ内容を後から入れる）。
+    pub fn set_ignore_source(&self, contents: &str) {
+        let ignore_path = self.root.join(".gitignore");
+        let mut builder = GitignoreBuilder::new(&self.root);
+        for line in contents.lines() {
+            let _invalid_pattern = builder.add_line(Some(ignore_path.clone()), line);
+        }
+        if let Ok(ignore) = builder.build() {
+            *self.ignore.borrow_mut() = ignore;
+        }
     }
 
     pub fn host(&self) -> &Arc<dyn Host> {
@@ -144,64 +201,120 @@ impl Worktree {
     /// ルート配下なら [`Self::read_dir`]（gitignore 準拠）に委譲。ルート外は gitignore を適用せず
     /// （ルートのマッチャは配下専用）、`.git` と隠しファイルを除いてディレクトリ優先→名前順で返す。
     pub fn read_any_dir(&self, dir: &Path) -> Result<Vec<Entry>> {
-        if dir.starts_with(&self.root) {
-            return self.read_dir(dir);
-        }
-        let mut entries = Vec::new();
-        for dir_entry in self.host.read_dir(dir)? {
-            let name = dir_entry.name;
-            if name == ".git" || name.starts_with('.') {
-                continue;
-            }
-            let path = dir_entry.path;
-            let is_dir = dir_entry.is_dir;
-            entries.push(Entry {
-                path,
-                name,
-                is_dir,
-                ignored: false,
-            });
-        }
-        entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
-        Ok(entries)
+        read_any_dir_on(self.host.as_ref(), &self.root, &self.ignore.borrow(), dir)
     }
 
     /// パスが gitignore 対象か（watch イベントのノイズ除去用。ディレクトリ判定不能なら false 扱いで問い合わせる）。
     pub fn is_ignored(&self, path: &Path) -> bool {
-        self.ignore.matched(path, false).is_ignore() || self.ignore.matched(path, true).is_ignore()
+        let ignore = self.ignore.borrow();
+        ignore.matched(path, false).is_ignore() || ignore.matched(path, true).is_ignore()
+    }
+
+    /// 無視規則のスナップショット。`Worktree` は `Rc` で背景スレッドへ送れないので、
+    /// remote のツリー読み取りを背景へ出すときは `host` + `root` + これを持ち出す。
+    pub fn ignore_snapshot(&self) -> Gitignore {
+        self.ignore.borrow().clone()
     }
 
     /// `dir` 直下を列挙する（`.git` は除外。gitignore 対象は**除外せず** `ignored=true` で薄字表示。
     /// VSCode 同様「無視ファイルも見えるが淡い」＝ git 管理有無が一目で分かる）。ディレクトリ優先→名前順。
     pub fn read_dir(&self, dir: &Path) -> Result<Vec<Entry>> {
-        let mut entries = Vec::new();
-        for dir_entry in self.host.read_dir(dir)? {
-            let name = dir_entry.name;
-            if name == ".git" {
-                continue;
-            }
-            let path = dir_entry.path;
-            let is_dir = dir_entry.is_dir;
-            let ignored = self.ignore.matched(&path, is_dir).is_ignore();
-            entries.push(Entry {
-                path,
-                name,
-                is_dir,
-                ignored,
-            });
-        }
-        entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
-        Ok(entries)
+        read_dir_on(self.host.as_ref(), &self.ignore.borrow(), dir)
     }
+}
 
+/// [`Worktree::read_dir`] の本体（`Worktree` を持たない背景スレッドから呼べる形）。
+pub fn read_dir_on(host: &dyn Host, ignore: &Gitignore, dir: &Path) -> Result<Vec<Entry>> {
+    let mut entries = Vec::new();
+    for dir_entry in host.read_dir(dir)? {
+        let name = dir_entry.name;
+        if name == ".git" {
+            continue;
+        }
+        let path = dir_entry.path;
+        let is_dir = dir_entry.is_dir;
+        let ignored = ignore.matched(&path, is_dir).is_ignore();
+        entries.push(Entry {
+            path,
+            name,
+            is_dir,
+            ignored,
+        });
+    }
+    sort_entries(&mut entries);
+    Ok(entries)
+}
+
+/// [`Worktree::read_any_dir`] の本体（`Worktree` を持たない背景スレッドから呼べる形）。
+pub fn read_any_dir_on(
+    host: &dyn Host,
+    root: &Path,
+    ignore: &Gitignore,
+    dir: &Path,
+) -> Result<Vec<Entry>> {
+    if dir.starts_with(root) {
+        return read_dir_on(host, ignore, dir);
+    }
+    let mut entries = Vec::new();
+    for dir_entry in host.read_dir(dir)? {
+        let name = dir_entry.name;
+        if name == ".git" || name.starts_with('.') {
+            continue;
+        }
+        let path = dir_entry.path;
+        let is_dir = dir_entry.is_dir;
+        entries.push(Entry {
+            path,
+            name,
+            is_dir,
+            ignored: false,
+        });
+    }
+    sort_entries(&mut entries);
+    Ok(entries)
+}
+
+fn sort_entries(entries: &mut [Entry]) {
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+}
+
+/// ディレクトリ → 直下の一覧。エクスプローラが描画に使うキャッシュの形。
+pub type DirListings = std::collections::HashMap<PathBuf, Vec<Entry>>;
+
+/// 複数ディレクトリをまとめて列挙する（エクスプローラのツリー再構築用・背景スレッド向け）。
+///
+/// 個々のディレクトリの失敗（消えた・権限）は空の一覧にする（従来の表示と同じ）。
+/// **root が読めないときだけ `Err`** — それは接続が落ちている印で、その結果でツリーを
+/// 空に塗り替えるより手元の表示を残す方がよい。
+pub fn read_listings_on(
+    host: &dyn Host,
+    root: &Path,
+    ignore: &Gitignore,
+    directories: &[PathBuf],
+) -> Result<DirListings> {
+    let mut listings = DirListings::with_capacity(directories.len());
+    for directory in directories {
+        match read_any_dir_on(host, root, ignore, directory) {
+            Ok(entries) => {
+                listings.insert(directory.clone(), entries);
+            }
+            Err(error) if directory == root => {
+                return Err(error)
+                    .with_context(|| format!("root を列挙できない: {}", root.display()));
+            }
+            Err(_unreadable) => {
+                listings.insert(directory.clone(), Vec::new());
+            }
+        }
+    }
+    Ok(listings)
+}
+
+impl Worktree {
     pub fn read_file(&self, path: &Path) -> Result<host::FileContent> {
         self.host.read_file(path)
     }

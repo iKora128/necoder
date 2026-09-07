@@ -158,6 +158,9 @@ enum Entry {
         tool: SharedString,
         args: SharedString,
         result: Option<SharedString>,
+        /// `result` を丸める前の行数（畳んだ要約に出す元の大きさ。結果なしは 0）。
+        /// 丸めた本文から数え直すと、畳みが実際より小さい数を出してしまう。
+        result_lines: usize,
         /// ファイル編集の before/after（Edit 系。空なら差分表示なし）。
         diffs: Vec<PermissionDiff>,
     },
@@ -879,13 +882,14 @@ pub fn digest_tail(text: &str) -> Option<SharedString> {
 /// `ToolCallInfo`（開始）から Step エントリを組む。args=主なパス / result=出力 / diffs=差分。
 fn build_step_entry(info: ToolCallInfo) -> Entry {
     let args = info.locations.first().cloned().unwrap_or_default();
+    let capped = info.output.map(|output| cap_output(&output));
+    let result_lines = capped.as_ref().map(|(_, lines)| *lines).unwrap_or(0);
     Entry::Step {
         id: (!info.id.is_empty()).then(|| SharedString::from(info.id)),
         tool: SharedString::from(info.title.unwrap_or_default()),
         args: SharedString::from(args),
-        result: info
-            .output
-            .map(|output| SharedString::from(cap_output(&output))),
+        result: capped.map(|(text, _)| SharedString::from(text)),
+        result_lines,
         diffs: info.diffs,
     }
 }
@@ -962,19 +966,35 @@ fn step_result_summary(result: &str, line_count: usize) -> SharedString {
     }
 }
 
-fn cap_output(text: &str) -> String {
-    const MAX: usize = 24;
+/// transcript に載せるツール出力の**先頭**と**末尾**の保持行数。
+///
+/// 以前は「末尾 24 行だけ」だった。畳んだ要約は `⎿ ▸ N 行` と出るのに、その N は
+/// **丸めた後**の行数で、開いても丸めた 24 行しか出てこなかった（＝畳みが嘘をついていた）。
+/// 先頭も残すのは、`Read` の結果は頭が、`cargo build` の結果は尻が知りたいから。
+/// どちらを残すかツールごとに決めるより、両端を残す方が単純で外さない。
+const OUTPUT_HEAD_LINES: usize = 100;
+const OUTPUT_TAIL_LINES: usize = 100;
+
+/// ツール出力を transcript 用に丸める。戻り値は `(載せる本文, 丸める前の行数)`。
+///
+/// 行数を別に返すのは、畳んだ要約に**元の大きさ**を出すため。全文を持たない以上
+/// 「開けば全部見える」とは言えないが、少なくとも「どれだけ大きいか」は正直に出す。
+fn cap_output(text: &str) -> (String, usize) {
     let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= MAX {
-        text.trim_end().to_string()
-    } else {
-        let hidden = lines.len() - MAX;
-        let shown = lines[hidden..].join("\n");
-        format!(
-            "{}\n{shown}",
-            i18n::t!("agent.output_truncated", "n" => hidden)
-        )
+    let total = lines.len().max(1);
+    if lines.len() <= OUTPUT_HEAD_LINES + OUTPUT_TAIL_LINES + 1 {
+        return (text.trim_end().to_string(), total);
     }
+    let hidden = lines.len() - OUTPUT_HEAD_LINES - OUTPUT_TAIL_LINES;
+    let head = lines[..OUTPUT_HEAD_LINES].join("\n");
+    let tail = lines[lines.len() - OUTPUT_TAIL_LINES..].join("\n");
+    (
+        format!(
+            "{head}\n{}\n{tail}",
+            i18n::t!("agent.output_truncated", "n" => hidden)
+        ),
+        total,
+    )
 }
 
 fn entry_plain_text(entry: &Entry) -> String {
@@ -1513,6 +1533,7 @@ impl AgentPanel {
                             tool: content.into(),
                             args: SharedString::default(),
                             result: None,
+                            result_lines: 0,
                             diffs: Vec::new(),
                         },
                         "checkpoint" => {
@@ -1687,13 +1708,17 @@ impl AgentPanel {
             .unwrap_or_default()
     }
 
+    /// 宛先チップ（プロジェクト名・ブランチ・host・cwd）を差し替える。
+    ///
+    /// ＋context の候補ファイル一覧は**ここでは受け取らない**。一覧を作るには host へ
+    /// `list_files` を投げる必要があり、remote では SSH の往復になる。宛先の表示だけ即座に
+    /// 更新し、一覧は [`Self::set_context_files`] で後から届ける（2026-09-05 のハング対策）。
     pub fn set_destination(
         &mut self,
         project: SharedString,
         branch: Option<SharedString>,
         host: Arc<dyn Host>,
         cwd: Option<PathBuf>,
-        files: Vec<SharedString>,
         cx: &mut Context<Self>,
     ) {
         let destination_changed = self.dest_host.id() != host.id() || self.dest_cwd != cwd;
@@ -1701,13 +1726,23 @@ impl AgentPanel {
         self.dest_branch = branch;
         self.dest_host = host;
         self.dest_cwd = cwd;
-        self.context_files = files;
         if destination_changed {
+            // 別プロジェクトの候補を出したままにしない（新しい一覧が届くまでは空）。
+            self.context_files.clear();
             for thread in &mut self.threads {
                 thread.command_tx = None;
             }
         }
         self.sync_running_registry(cx);
+        cx.notify();
+    }
+
+    /// ＋context の候補ファイル一覧を差し替える（背景で列挙し終わった時点で呼ばれる）。
+    pub fn set_context_files(&mut self, files: Vec<SharedString>, cx: &mut Context<Self>) {
+        if self.context_files == files {
+            return;
+        }
+        self.context_files = files;
         cx.notify();
     }
 
@@ -2921,6 +2956,7 @@ impl AgentPanel {
                     tool: "Bash(cargo test -p necoder)".into(),
                     args: SharedString::default(),
                     result: None,
+                    result_lines: 0,
                     diffs: Vec::new(),
                 });
                 thread.plan = vec![
@@ -3018,6 +3054,7 @@ impl AgentPanel {
                         tool: "Bash cargo test -p necoder".into(),
                         args: SharedString::default(),
                         result: None,
+                        result_lines: 0,
                         diffs: Vec::new(),
                     });
                     thread.plan = vec![
@@ -3721,12 +3758,19 @@ impl AgentPanel {
         // レジストリはキャッシュを読むだけ（ここは UI thread・ネットワークへは行かない）。
         let agent_override = agent_server_override(kind.id, cx);
         let registry = acp_client::registry::load_cached();
-        let command = kind.resolve_command_on(
-            host.as_ref(),
-            cwd,
-            agent_override.as_ref(),
-            registry.as_ref(),
-        )?;
+        // local はここで解決する（PATH 探索だけ・一瞬）。remote は `command -v` を SSH 越しに
+        // 流す＝往復なので、下の背景タスクの中で解決する（UI スレッドで再接続を待たない）。
+        let command = if host.is_remote() {
+            None
+        } else {
+            Some(kind.resolve_command_on(
+                host.as_ref(),
+                cwd.clone(),
+                agent_override.as_ref(),
+                registry.as_ref(),
+            )?)
+        };
+        let no_acp = i18n::t!("agent.err_no_acp");
         // スレッドの希望モード（sticky/前タブ）を起動時に渡す＝初回 prompt 前に適用される。
         // UI からの後追い SetMode だと Prompt に先を越され、初回ターンが既定モードで走る。
         let desired_mode = self
@@ -3740,6 +3784,21 @@ impl AgentPanel {
 
         cx.background_executor()
             .spawn(async move {
+                let command = match command {
+                    Some(command) => command,
+                    None => match kind.resolve_command_on(
+                        host.as_ref(),
+                        cwd,
+                        agent_override.as_ref(),
+                        registry.as_ref(),
+                    ) {
+                        Some(command) => command,
+                        None => {
+                            error_tx.unbounded_send(AgentEvent::Failed(no_acp)).ok();
+                            return;
+                        }
+                    },
+                };
                 if let Err(error) =
                     acp_client::run_session_on(host, command, desired_mode, prompt_rx, event_tx)
                         .await
@@ -3861,6 +3920,7 @@ impl AgentPanel {
                         tool,
                         args,
                         result,
+                        result_lines,
                         diffs,
                     } = entry
                     {
@@ -3879,7 +3939,9 @@ impl AgentPanel {
                                 *diffs = info.diffs.clone();
                             }
                             if let Some(output) = &info.output {
-                                *result = Some(SharedString::from(cap_output(output)));
+                                let (text, lines) = cap_output(output);
+                                *result = Some(SharedString::from(text));
+                                *result_lines = lines;
                             }
                             break;
                         }
@@ -5881,6 +5943,7 @@ impl AgentPanel {
                 tool,
                 args,
                 result,
+                result_lines,
                 diffs,
                 ..
             } => {
@@ -6005,12 +6068,15 @@ impl AgentPanel {
                 for diff in diffs {
                     body = body.child(render_diff(diff, &theme));
                 }
-                // Bash/Read 等: 出力を ⎿ 行で（cap_output で末尾 24 行に丸め済み）。長い出力は
-                // 既定で折り畳み、要約行クリックで全文展開する（コード読み込みの結果で transcript が
+                // Bash/Read 等: 出力を ⎿ 行で（cap_output で両端 100 行に丸め済み）。長い出力は
+                // 既定で折り畳み、要約行クリックで展開する（コード読み込みの結果で transcript が
                 // 流れないように・Thinking と同じ流儀）。
                 if let Some(result) = result {
-                    let line_count = result.lines().count().max(1);
-                    let collapsible = line_count > STEP_COLLAPSE_MIN_LINES
+                    // 要約に出すのは**丸める前**の行数。載せている本文から数え直すと、
+                    // 2000 行の出力が「201 行」に見えて、畳みが実際より小さく嘘をつく。
+                    let shown_lines = result.lines().count().max(1);
+                    let line_count = (*result_lines).max(shown_lines);
+                    let collapsible = shown_lines > STEP_COLLAPSE_MIN_LINES
                         || result.len() > STEP_COLLAPSE_MIN_BYTES;
                     let expanded = self.is_step_expanded(index);
                     // result 全体を 1 region に保ち、複数行コピー時の改行を原文どおりにする。
@@ -8362,6 +8428,7 @@ fn entry_from_turn((role, content): (String, String)) -> Entry {
             tool: content.into(),
             args: SharedString::default(),
             result: None,
+            result_lines: 0,
             diffs: Vec::new(),
         },
         "checkpoint" => {
@@ -8453,6 +8520,7 @@ fn seed_threads() -> Vec<Thread> {
                 tool: "Read".into(),
                 args: "(zed/crates/text/src/text.rs)".into(),
                 result: Some("1,842 行 — SumTree<Chunk> / anchor / clock::Global を確認".into()),
+                result_lines: 1,
                 diffs: Vec::new(),
             },
             Entry::Step {
@@ -8460,6 +8528,7 @@ fn seed_threads() -> Vec<Thread> {
                 tool: "Update Todos".into(),
                 args: "".into(),
                 result: Some("☒ text crate の設計を調査\n☐ Buffer trait の切り方を決める".into()),
+                result_lines: 2,
                 diffs: Vec::new(),
             },
             Entry::Agent(
@@ -8650,6 +8719,40 @@ mod tests {
             !summary.starts_with("line"),
             "要約行は本文でない: {summary}"
         );
+    }
+
+    /// 短い出力はそのまま。行数も素直に返す。
+    #[test]
+    fn short_tool_output_is_left_alone() {
+        let (text, lines) = cap_output("ok\ndone\n");
+        assert_eq!(text, "ok\ndone");
+        assert_eq!(lines, 2);
+    }
+
+    /// 長い出力は**両端**を残す。`Read` の頭も `cargo build` の尻も落とさないため。
+    #[test]
+    fn long_tool_output_keeps_both_ends() {
+        let source: String = (0..1000).map(|i| format!("line{i}\n")).collect();
+        let (text, lines) = cap_output(&source);
+        assert_eq!(lines, 1000, "丸める前の行数をそのまま返す");
+        assert!(text.contains("line0"), "先頭が残る: {}", &text[..40]);
+        assert!(text.contains("line999"), "末尾が残る");
+        assert!(!text.contains("line500"), "中間は畳まれる");
+        assert!(
+            text.lines().count() < 250,
+            "載せる本文は両端ぶんに収まる: {}",
+            text.lines().count()
+        );
+    }
+
+    /// **畳んだ要約は丸める前の大きさを出す**（2026-09-05 のユーザー指摘「いい感じに畳まれてない」）。
+    /// 以前は末尾 24 行に丸めてから数えていたので、1000 行の出力が「24 行」に見えていた。
+    #[test]
+    fn collapsed_summary_reports_the_original_size() {
+        let source: String = (0..1000).map(|i| format!("line{i}\n")).collect();
+        let (text, lines) = cap_output(&source);
+        let summary = step_result_summary(&text, lines.max(text.lines().count()));
+        assert!(summary.contains("1000"), "要約に元の行数が出る: {summary}");
     }
 
     #[test]

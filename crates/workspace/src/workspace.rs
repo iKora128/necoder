@@ -854,6 +854,29 @@ impl TaskSpace {
         self.kind == SpaceKind::Integration
     }
 
+    /// 接続せずに組む（起動時の復元用）。`id` は host id と root のハッシュだけで決まる純粋関数
+    /// なので、ここで**正しい値**が入る。storage の鍵はこの id なのでスレッド復元もずれない。
+    ///
+    /// git に聞かないと分からない項目（repository_id / HEAD / task ブランチ判定）は、
+    /// 繋がってから [`Workspace::hydrate_restored_projects`] が入れ直す。それまでは
+    /// Integration 扱い＝Task の lifecycle 操作が出ない側に倒しておく。
+    fn for_restored_worktree(worktree: &Worktree) -> Self {
+        Self {
+            id: SpaceId::for_worktree(worktree),
+            repository_id: String::new(),
+            title: SharedString::from(worktree.name()),
+            kind: SpaceKind::Integration,
+            phase: TaskPhase::Planned,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            created_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or(0),
+        }
+    }
+
     fn for_worktree(worktree: &Worktree, branch: Option<&str>) -> Self {
         let repository_id = project::repository_id_on(worktree.host().as_ref(), worktree.root());
         let head = project::git_head_oid_on(worktree.host().as_ref(), worktree.root());
@@ -1871,6 +1894,330 @@ mod tests {
             self.record();
             self.inner.terminal_launch(cwd)
         }
+    }
+
+    /// I/O メソッド（往復が発生するもの）だけを数える audit host。
+    ///
+    /// `id()` / `is_remote()` のような**メモリ上の属性**は数えない。この 2 種類を混ぜると
+    /// 「UI スレッドで host を触ったか」ではなく「host という語に触れたか」を測ることになる。
+    struct BlockingIoAuditHost {
+        inner: Arc<dyn Host>,
+        io_calls: AtomicUsize,
+        /// 呼ばれたメソッド名。落ちたときに「どこが往復したか」をそのまま出すため。
+        seen: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl BlockingIoAuditHost {
+        fn new() -> Self {
+            Self {
+                inner: host::LocalHost::shared(),
+                io_calls: AtomicUsize::new(0),
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn io_calls(&self) -> usize {
+            self.io_calls.load(Ordering::SeqCst)
+        }
+
+        fn seen(&self) -> String {
+            let seen = self.seen.lock().unwrap();
+            let mut counts: Vec<(&str, usize)> = Vec::new();
+            for name in seen.iter() {
+                match counts.iter_mut().find(|(existing, _)| existing == name) {
+                    Some((_, count)) => *count += 1,
+                    None => counts.push((name, 1)),
+                }
+            }
+            counts
+                .into_iter()
+                .map(|(name, count)| format!("{name}×{count}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+
+        fn record_io(&self, what: &'static str) {
+            self.io_calls.fetch_add(1, Ordering::SeqCst);
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push(what);
+            }
+        }
+    }
+
+    impl Host for BlockingIoAuditHost {
+        fn id(&self) -> &str {
+            "blocking-io-audit"
+        }
+
+        fn display_name(&self) -> &str {
+            "Blocking IO Audit"
+        }
+
+        /// remote を名乗る＝ UI スレッドで触ってはいけない host。
+        fn is_remote(&self) -> bool {
+            true
+        }
+
+        fn project_uri(&self, path: &Path) -> Option<String> {
+            Some(format!("ssh://blocking-io-audit{}", path.display()))
+        }
+
+        fn host_for_project(&self, path: &Path) -> anyhow::Result<Arc<dyn Host>> {
+            self.inner.host_for_project(path)
+        }
+
+        fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
+            self.record_io("canonicalize");
+            self.inner.canonicalize(path)
+        }
+
+        fn metadata(&self, path: &Path) -> anyhow::Result<host::HostMetadata> {
+            self.record_io("metadata");
+            self.inner.metadata(path)
+        }
+
+        fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<host::HostEntry>> {
+            self.record_io("read_dir");
+            self.inner.read_dir(path)
+        }
+
+        fn read_file(&self, path: &Path) -> anyhow::Result<host::FileContent> {
+            self.record_io("read_file");
+            self.inner.read_file(path)
+        }
+
+        fn write_file(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+            condition: host::WriteCondition,
+        ) -> anyhow::Result<host::FileRevision> {
+            self.record_io("write_file");
+            self.inner.write_file(path, bytes, condition)
+        }
+
+        fn list_files(&self, root: &Path, limit: usize) -> anyhow::Result<Vec<PathBuf>> {
+            self.record_io("list_files");
+            self.inner.list_files(root, limit)
+        }
+
+        fn search_project(
+            &self,
+            root: &Path,
+            spec: &host::TextSearchSpec,
+            file_limit: usize,
+        ) -> anyhow::Result<Vec<host::TextSearchHit>> {
+            self.record_io("search_project");
+            self.inner.search_project(root, spec, file_limit)
+        }
+
+        fn run_command(&self, spec: &host::CommandSpec) -> anyhow::Result<host::CommandOutput> {
+            self.record_io("run_command");
+            self.inner.run_command(spec)
+        }
+
+        fn spawn_process(&self, spec: &host::CommandSpec) -> anyhow::Result<host::HostProcess> {
+            self.record_io("spawn_process");
+            self.inner.spawn_process(spec)
+        }
+
+        fn terminal_launch(&self, cwd: &Path) -> anyhow::Result<Option<host::TerminalLaunch>> {
+            self.record_io("terminal_launch");
+            self.inner.terminal_launch(cwd)
+        }
+    }
+
+    /// **プロジェクト切替のハンドラは host への往復を 1 回も起こさない**（2026-09-05 の
+    /// 20 秒ハング再発防止）。
+    ///
+    /// gpui のテスト executor は決定的で、`run_until_parked` を呼ぶまで背景タスクが進まない。
+    /// だから「`switch_project` から戻った直後の I/O 回数」＝**UI スレッドが払った往復の数**
+    /// になる。ここが 0 でなければ、その往復ぶんアプリは固まる。
+    /// 併せて、parked 後には実際に列挙が起きていることも確かめる（背景へ移しただけで
+    /// 仕事を落としていないこと）。
+    #[gpui::test]
+    fn switching_to_a_remote_project_never_blocks_the_ui_thread(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_workspace_blocking_io_audit_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("audit.txt"), "blocking io audit\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let audit = Arc::new(BlockingIoAuditHost::new());
+        let sources = vec![
+            ProjectSource::new(host::LocalHost::shared(), root.clone()),
+            ProjectSource::new(audit.clone(), root.clone()),
+        ];
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources(sources, Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+
+        let before = audit.io_calls();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.switch_project(1, window, cx);
+        });
+        assert_eq!(
+            audit.io_calls(),
+            before,
+            "切替ハンドラが UI スレッドで host I/O を呼んでいる（remote では SSH の往復＝そのぶん固まる）"
+        );
+
+        cx.run_until_parked();
+        assert!(
+            audit.io_calls() > before,
+            "背景でも列挙が走っていない（仕事ごと落ちている）"
+        );
+
+        // 他のテストと同じ teardown race 回避（watcher を root 削除より先に落とす）。
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// **エクスプローラのフォルダ展開は host への往復を 1 回も起こさない**（2026-09-07）。
+    ///
+    /// ツリー再構築は 14 箇所から UI スレッドで `read_dir` を呼んでいた（展開・監視イベント・
+    /// リネーム・ブランチ切替のたび）。remote ではディレクトリ 1 つが SSH 1 往復で、
+    /// sleep 復帰直後はそこに再接続待ちがそのまま乗る。`switch_project` のテストと同じく、
+    /// ハンドラから戻った直後の I/O 回数が 0 であることと、parked 後に展開結果が届いている
+    /// ことを見る。
+    #[gpui::test]
+    fn expanding_a_remote_directory_never_blocks_the_ui_thread(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_workspace_explorer_io_audit_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/leaf.txt"), "explorer io audit\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let audit = Arc::new(BlockingIoAuditHost::new());
+        let sources = vec![
+            ProjectSource::new(host::LocalHost::shared(), root.clone()),
+            ProjectSource::new(audit.clone(), root.clone()),
+        ];
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources(sources, Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.switch_project(1, window, cx);
+        });
+        cx.run_until_parked();
+
+        // Worktree は root を正規化する（/var → /private/var）ので、slot が持つ root から組む。
+        let sub = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_slot()
+                .expect("remote slot がアクティブ")
+                .worktree
+                .root()
+                .join("sub")
+        });
+        let before = audit.io_calls();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.toggle_dir(sub.clone(), cx);
+        });
+        assert_eq!(
+            audit.io_calls(),
+            before,
+            "フォルダ展開が UI スレッドで host I/O を呼んでいる（remote では SSH の往復＝そのぶん固まる）: {}",
+            audit.seen()
+        );
+
+        cx.run_until_parked();
+        assert!(
+            audit.io_calls() > before,
+            "背景でも列挙が走っていない（仕事ごと落ちている）"
+        );
+        let rows = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_slot()
+                .expect("remote slot がアクティブ")
+                .explorer
+                .rows
+                .iter()
+                .map(|row| row.path.clone())
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            rows.iter().any(|path| path.ends_with("sub/leaf.txt")),
+            "背景で読んだ展開結果がツリーに反映されていない: {rows:?}"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// **前回状態からの復元は、窓を作る時点で host に一切触らない**（2026-09-06）。
+    ///
+    /// 以前は remote project 1 件につき、接続に加えて root の正規化・ディレクトリ確認・
+    /// `.gitignore` 読み込みで往復していた。全部 UI スレッドで、窓が出る前に。
+    /// gpui のテスト executor は決定的なので、`run_until_parked` の前の呼び出し回数が
+    /// そのまま「窓を出すまでに払った往復」になる。
+    #[gpui::test]
+    fn restored_projects_touch_no_host_before_the_window_is_up(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_workspace_restore_audit_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("audit.txt"), "restore audit\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let audit = Arc::new(BlockingIoAuditHost::new());
+        let sources = vec![ProjectSource::restored(audit.clone(), root.clone())];
+        // 「窓を組み立てている最中」だけを測る。背景タスクがいつ走るかに影響されないよう、
+        // 構築が返った直後の値をその場で控える（parked 後に見ると背景ぶんが混ざる）。
+        let during_construction = Arc::new(AtomicUsize::new(0));
+        let probe = during_construction.clone();
+        let probed = audit.clone();
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            let workspace = Workspace::new_sources(sources, Theme::dark(), None, cx);
+            probe.store(probed.io_calls(), Ordering::SeqCst);
+            workspace
+        });
+        assert_eq!(
+            during_construction.load(Ordering::SeqCst),
+            0,
+            "復元した remote project を開くのに host へ問い合わせている（窓が出る前に固まる）: {}",
+            audit.seen()
+        );
+
+        cx.run_until_parked();
+        assert!(
+            audit.io_calls() > 0,
+            "窓が出た後の埋め戻しが走っていない（中身が永久に空になる）"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

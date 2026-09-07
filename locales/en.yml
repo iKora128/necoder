@@ -649,6 +649,7 @@ ssh:
   browse_hint: "Connected. Right-click a folder → \"Open as project here\" to open it"
   picker_placeholder: Select SSH host (~/.ssh/config)
   manual_entry: Enter URI manually…
+  restore_failed: "Cannot reach %{project}. It will retry when you use it"
 goto:
   placeholder: Line number…
 hotexit:
@@ -717,6 +718,13 @@ key:
   select_down: Extend selection down
   select_word_left: Extend selection by word left
   select_word_right: Extend selection by word right
+  select_to_line_start: Select to line start
+  select_to_line_end: Select to line end
+  select_to_start: Select to document start
+  select_to_end: Select to document end
+  delete_word_forward: Delete next word
+  delete_to_line_start: Delete to line start
+  delete_to_line_end: Delete to line end
   select_next: Select next occurrence
   add_cursor_above: Add cursor above
   add_cursor_below: Add cursor below

@@ -388,6 +388,73 @@ impl Buffer {
         self.edit(&ranges, "")
     }
 
+    /// ⌥Delete: 空選択はキャレットから次の単語境界までを、範囲選択はその範囲を消す。
+    pub fn delete_word_forward(&mut self) -> TransactionId {
+        let snapshot = self.snapshot();
+        let ranges: Vec<Range<usize>> = self
+            .selections
+            .iter()
+            .map(|selection| {
+                if selection.is_empty() {
+                    selection.head..snapshot.next_word_boundary(selection.head)
+                } else {
+                    selection.range()
+                }
+            })
+            .collect();
+        self.edit(&ranges, "")
+    }
+
+    /// ⌘⌫: 空選択は行頭からキャレットまでを消す。既に行頭なら前の改行を消す（Backspace と同じ・
+    /// 行の結合）。範囲選択はその範囲を消す。
+    pub fn delete_to_line_start(&mut self) -> TransactionId {
+        let snapshot = self.snapshot();
+        let ranges: Vec<Range<usize>> = self
+            .selections
+            .iter()
+            .map(|selection| {
+                if selection.is_empty() {
+                    let head = selection.head;
+                    let row = snapshot.byte_to_point(head).row;
+                    let line_start = snapshot.point_to_byte(Point::new(row, 0));
+                    if line_start < head {
+                        line_start..head
+                    } else {
+                        snapshot.prev_char_boundary(head)..head
+                    }
+                } else {
+                    selection.range()
+                }
+            })
+            .collect();
+        self.edit(&ranges, "")
+    }
+
+    /// ⌃K: 空選択はキャレットから行末までを消す。既に行末なら後ろの改行を消す（emacs の kill-line と
+    /// 同じ・行の結合）。範囲選択はその範囲を消す。
+    pub fn delete_to_line_end(&mut self) -> TransactionId {
+        let snapshot = self.snapshot();
+        let ranges: Vec<Range<usize>> = self
+            .selections
+            .iter()
+            .map(|selection| {
+                if selection.is_empty() {
+                    let head = selection.head;
+                    let row = snapshot.byte_to_point(head).row;
+                    let line_end = snapshot.point_to_byte(Point::new(row, usize::MAX));
+                    if head < line_end {
+                        head..line_end
+                    } else {
+                        head..snapshot.next_char_boundary(head)
+                    }
+                } else {
+                    selection.range()
+                }
+            })
+            .collect();
+        self.edit(&ranges, "")
+    }
+
     /// 主選択の行域を返す `(first_row, last_row)`。
     fn primary_rows(&self) -> (usize, usize) {
         let snapshot = self.snapshot();
@@ -842,9 +909,22 @@ impl Buffer {
     /// `None` = 無題バッファ / メタデータ取得失敗（削除など）。
     pub fn disk_probably_unchanged(&self) -> Option<bool> {
         let path = self.file.as_ref()?;
-        let revision = self.file_revision.as_ref()?;
+        self.file_revision.as_ref()?;
         let metadata = self.host.metadata(path).ok()?;
-        Some(metadata.len == revision.len && metadata.modified_ns == revision.modified_ns)
+        Some(self.matches_revision(&metadata))
+    }
+
+    /// 読み込み時の revision（外部変更の照合用。無題 / 未保存の新規は `None`）。
+    pub fn file_revision(&self) -> Option<FileRevision> {
+        self.file_revision
+    }
+
+    /// ディスクのメタデータが読み込み時の revision と一致するか（[`Self::disk_probably_unchanged`]
+    /// の判定部分。I/O はしないので、remote で背景に読んだメタデータをここへ渡せる）。
+    pub fn matches_revision(&self, metadata: &host::HostMetadata) -> bool {
+        self.file_revision.as_ref().is_some_and(|revision| {
+            metadata.len == revision.len && metadata.modified_ns == revision.modified_ns
+        })
     }
 
     /// ディスクから読み直す（外部変更の追従）。選択はバッファ長へクランプ、dirty は解除。
@@ -858,6 +938,15 @@ impl Buffer {
             .host
             .read_file(&path)
             .with_context(|| format!("再読込に失敗: {}", path.display()))?;
+        self.apply_reloaded(content)
+    }
+
+    /// 読み終えた内容で置き換える（[`Self::reload`] の反映部分。I/O はしない）。
+    pub fn apply_reloaded(&mut self, content: host::FileContent) -> Result<()> {
+        let path = self
+            .file
+            .clone()
+            .context("再読込先が未設定（無題バッファ）")?;
         let rope = Rope::from_reader(io::Cursor::new(&content.bytes))
             .with_context(|| format!("再読込内容を読めない: {}", path.display()))?;
         self.rope = rope;
@@ -1611,6 +1700,57 @@ mod tests {
         assert_eq!(buffer.text(), "hello ");
         buffer.delete_word_backward();
         assert_eq!(buffer.text(), "");
+    }
+
+    #[test]
+    fn delete_word_forward_removes_next_word() {
+        let mut buffer = Buffer::from_str("hello world");
+        buffer.set_selections(vec![Selection::cursor(0)]);
+        buffer.delete_word_forward();
+        assert_eq!(buffer.text(), " world");
+        // 範囲選択はその範囲だけ
+        buffer.set_selections(vec![Selection::new(1, 3)]);
+        buffer.delete_word_forward();
+        assert_eq!(buffer.text(), " rld");
+    }
+
+    #[test]
+    fn delete_to_line_start_clears_prefix_then_joins_lines() {
+        let mut buffer = Buffer::from_str("aaa\nbbb ccc\nddd");
+        // "bbb " の直後（byte 8）→ 行頭まで消える
+        buffer.set_selections(vec![Selection::cursor(8)]);
+        buffer.delete_to_line_start();
+        assert_eq!(buffer.text(), "aaa\nccc\nddd");
+        assert_eq!(buffer.selections()[0].head, 4);
+        // 既に行頭なら前の改行を消して前行と結合
+        buffer.delete_to_line_start();
+        assert_eq!(buffer.text(), "aaaccc\nddd");
+        assert_eq!(buffer.selections()[0].head, 3);
+        // 文書の先頭では no-op
+        buffer.set_selections(vec![Selection::cursor(0)]);
+        buffer.delete_to_line_start();
+        assert_eq!(buffer.text(), "aaaccc\nddd");
+        // 日本語（3 byte 文字）でも境界を壊さない
+        let mut jp = Buffer::from_str("こんにちは\n世界");
+        jp.set_selections(vec![Selection::cursor(9)]); // "こんに" の直後
+        jp.delete_to_line_start();
+        assert_eq!(jp.text(), "ちは\n世界");
+    }
+
+    #[test]
+    fn delete_to_line_end_kills_suffix_then_joins_lines() {
+        let mut buffer = Buffer::from_str("aaa bbb\nccc");
+        buffer.set_selections(vec![Selection::cursor(3)]);
+        buffer.delete_to_line_end();
+        assert_eq!(buffer.text(), "aaa\nccc");
+        assert_eq!(buffer.selections()[0].head, 3);
+        // 既に行末なら改行を消して次行と結合（emacs kill-line）
+        buffer.delete_to_line_end();
+        assert_eq!(buffer.text(), "aaaccc");
+        // 文書の末尾では no-op
+        buffer.set_selections(vec![Selection::cursor(6)]);
+        buffer.delete_to_line_end();
+        assert_eq!(buffer.text(), "aaaccc");
     }
 
     #[test]

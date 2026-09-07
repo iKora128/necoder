@@ -237,6 +237,21 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-right": "editor::MoveToLineEnd",
       "ctrl-a": "editor::MoveToLineStart",
       "ctrl-e": "editor::MoveToLineEnd",
+      "shift-home": "editor::SelectToLineStart",
+      "shift-end": "editor::SelectToLineEnd",
+      "shift-cmd-left": "editor::SelectToLineStart",
+      "shift-cmd-right": "editor::SelectToLineEnd",
+      "shift-cmd-up": "editor::SelectToStart",
+      "shift-cmd-down": "editor::SelectToEnd",
+      "ctrl-n": "editor::MoveDown",
+      "ctrl-p": "editor::MoveUp",
+      "ctrl-f": "editor::MoveRight",
+      "ctrl-b": "editor::MoveLeft",
+      "ctrl-d": "editor::Delete",
+      "ctrl-h": "editor::Backspace",
+      "ctrl-k": "editor::DeleteToLineEnd",
+      "cmd-backspace": "editor::DeleteToLineStart",
+      "alt-delete": "editor::DeleteWordForward",
       "shift-left": "editor::SelectLeft",
       "shift-right": "editor::SelectRight",
       "shift-up": "editor::SelectUp",
@@ -376,6 +391,11 @@ impl KeymapPlatform {
 /// - `ctrl-a` / `ctrl-e`: emacs 風の行頭・行末。**`ctrl-a` は SelectAll と衝突する**うえ、
 ///   Windows の作法でもない。`home` / `end` が既に同じ動作を持っているので失うものは無い
 /// - `cmd-left` / `cmd-right`: 同上（Windows の `ctrl-left/right` は「単語単位」を意味する）
+/// - `shift-cmd-left` / `shift-cmd-right`: 行頭/行末まで選択。Windows の `ctrl-shift-left/right` は
+///   単語選択なので落とし、`shift-home` / `shift-end` に任せる
+/// - `ctrl-n/p/f/b/d/h`: macOS 標準テキスト欄の emacs 風カーソル移動・削除。Windows では
+///   `ctrl-p`（ファインダ）/ `ctrl-f`（検索）/ `ctrl-d`（次の同じ語）/ `ctrl-h`（置換）と衝突し、
+///   矢印・Delete・Backspace が同じ動作を持つので失うものは無い
 /// - `cmd-h` / `cmd-alt-h`: アプリの Hide / Hide Others は **macOS だけの概念**
 /// - `cmd-m`: Minimize。Windows はタイトルバーの担当で、`ctrl-m` は別の意味を持つ
 const NON_MAC_DROPPED: &[&str] = &[
@@ -386,6 +406,14 @@ const NON_MAC_DROPPED: &[&str] = &[
     "cmd-h",
     "cmd-alt-h",
     "cmd-m",
+    "shift-cmd-left",
+    "shift-cmd-right",
+    "ctrl-n",
+    "ctrl-p",
+    "ctrl-f",
+    "ctrl-b",
+    "ctrl-d",
+    "ctrl-h",
 ];
 
 /// 機械変換（`cmd-` → `ctrl-`）では正しくならないものを明示的に置き換える。**VSCode 準拠**。
@@ -398,9 +426,16 @@ const NON_MAC_REPLACEMENTS: &[(&str, &str)] = &[
     ("shift-alt-left", "ctrl-shift-left"),
     ("shift-alt-right", "ctrl-shift-right"),
     ("alt-backspace", "ctrl-backspace"),
-    // 文書の先頭・末尾
+    ("alt-delete", "ctrl-delete"),
+    // 文書の先頭・末尾（選択は shift を足す）
     ("cmd-up", "ctrl-home"),
     ("cmd-down", "ctrl-end"),
+    ("shift-cmd-up", "ctrl-shift-home"),
+    ("shift-cmd-down", "ctrl-shift-end"),
+    // 行頭/行末まで削除。VSCode Windows には既定キーが無く、単純変換だと ctrl-backspace（単語削除）
+    // / ctrl-k（チョードの前置）と衝突するのでずらす。necoder 独自の割り当て
+    ("cmd-backspace", "ctrl-shift-backspace"),
+    ("ctrl-k", "ctrl-shift-delete"),
     // 複数カーソル（VSCode Windows は ctrl-alt-up/down）
     ("alt-cmd-up", "ctrl-alt-up"),
     ("alt-cmd-down", "ctrl-alt-down"),
@@ -592,6 +627,58 @@ mod windows_keymap_tests {
             global.bindings.get("alt-f4").map(String::as_str),
             Some("necoder::Quit")
         );
+    }
+
+    /// 行頭/行末・文書頭/末までの選択と削除、単語の前方削除は VSCode Windows の綴りに落ちる。
+    /// emacs 風の ctrl-n/p/f/b/d/h は Windows の定番キーと衝突するので Editor から消える。
+    #[test]
+    fn edge_selection_and_deletion_keys_follow_vscode_on_windows() {
+        let sections = windows_sections();
+        let editor = &sections[0].bindings;
+        assert_eq!(
+            editor.get("shift-home").map(String::as_str),
+            Some("editor::SelectToLineStart")
+        );
+        assert_eq!(
+            editor.get("ctrl-shift-home").map(String::as_str),
+            Some("editor::SelectToStart")
+        );
+        assert_eq!(
+            editor.get("ctrl-shift-end").map(String::as_str),
+            Some("editor::SelectToEnd")
+        );
+        assert_eq!(
+            editor.get("ctrl-delete").map(String::as_str),
+            Some("editor::DeleteWordForward")
+        );
+        assert_eq!(
+            editor.get("ctrl-shift-backspace").map(String::as_str),
+            Some("editor::DeleteToLineStart")
+        );
+        assert_eq!(
+            editor.get("ctrl-shift-delete").map(String::as_str),
+            Some("editor::DeleteToLineEnd")
+        );
+        // 単語系の Windows キーが行頭/行末系に奪われていない
+        assert_eq!(
+            editor.get("ctrl-shift-left").map(String::as_str),
+            Some("editor::SelectWordLeft")
+        );
+        assert_eq!(
+            editor.get("ctrl-backspace").map(String::as_str),
+            Some("editor::DeleteWordBackward")
+        );
+        // emacs 風は落ちる（ctrl-d は SelectNext のまま・ctrl-k はチョード前置のまま空く）
+        assert_eq!(
+            editor.get("ctrl-d").map(String::as_str),
+            Some("editor::SelectNext")
+        );
+        for key in ["ctrl-n", "ctrl-p", "ctrl-f", "ctrl-b", "ctrl-h", "ctrl-k"] {
+            assert!(
+                !editor.contains_key(key),
+                "`{key}` は Windows の Editor に残らないはず"
+            );
+        }
     }
 
     /// macOS 固有の概念は非 mac へ持ち込まない。

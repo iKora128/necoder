@@ -836,8 +836,8 @@ impl Workspace {
             return;
         }
         let mut buffers = 0usize;
-        let mut disk_files = 0usize;
-        let mut failed = 0usize;
+        // 未オープンのファイルはここに溜めて、最後に**まとめて背景で**書く（下記）。
+        let mut on_disk: Vec<(PathBuf, Vec<lang::lsp::TextEdit>)> = Vec::new();
         for file_edits in by_file {
             let path = file_edits.path;
             let edits = file_edits.edits;
@@ -867,39 +867,65 @@ impl Workspace {
                 buffers += 1;
                 continue;
             }
-            // 未オープン: ディスクへ直書き（読み → 適用 → 書き。UI スレッドだが local テキストで軽量。
-            // remote は rename 要求自体が remote LSP 側なのでここへは来ない想定・来ても host 経由）。
-            let Some(worktree) = self.active_worktree() else {
-                continue;
-            };
-            let host = worktree.host().clone();
-            match host.read_file(&path) {
-                Ok(content) => match String::from_utf8(content.bytes) {
-                    Ok(text) => {
-                        let updated = apply_text_edits_to_string(&text, &edits);
-                        match host.write_file(
-                            &path,
-                            updated.as_bytes(),
-                            host::WriteCondition::Matches(content.revision),
-                        ) {
-                            Ok(_) => disk_files += 1,
+            // 未オープン: ディスクへ直書き（読み → 適用 → 書き）。件数はリネーム対象の数だけ
+            // 増えるので、1 ファイルにつき read + write の 2 往復。remote だと UI スレッドで
+            // 払える額ではない（かつては「local テキストで軽量」と決め打っていた）。
+            on_disk.push((path, edits));
+        }
+        if on_disk.is_empty() {
+            eprintln!("rename: バッファ {buffers}・ディスク 0・失敗 0");
+            self.refresh_git_status(cx);
+            cx.notify();
+            return;
+        }
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let host = worktree.host().clone();
+        cx.spawn(async move |workspace, cx| {
+            let (disk_files, failed) = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut disk_files = 0usize;
+                    let mut failed = 0usize;
+                    for (path, edits) in on_disk {
+                        match host.read_file(&path) {
+                            Ok(content) => match String::from_utf8(content.bytes) {
+                                Ok(text) => {
+                                    let updated = apply_text_edits_to_string(&text, &edits);
+                                    match host.write_file(
+                                        &path,
+                                        updated.as_bytes(),
+                                        host::WriteCondition::Matches(content.revision),
+                                    ) {
+                                        Ok(_) => disk_files += 1,
+                                        Err(error) => {
+                                            failed += 1;
+                                            eprintln!(
+                                                "rename の書き込みに失敗 {}: {error:#}",
+                                                path.display()
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(_) => failed += 1,
+                            },
                             Err(error) => {
                                 failed += 1;
-                                eprintln!("rename の書き込みに失敗 {}: {error:#}", path.display());
+                                eprintln!("rename の読み込みに失敗 {}: {error:#}", path.display());
                             }
                         }
                     }
-                    Err(_) => failed += 1,
-                },
-                Err(error) => {
-                    failed += 1;
-                    eprintln!("rename の読み込みに失敗 {}: {error:#}", path.display());
-                }
-            }
-        }
-        eprintln!("rename: バッファ {buffers}・ディスク {disk_files}・失敗 {failed}");
-        self.refresh_git_status(cx);
-        cx.notify();
+                    (disk_files, failed)
+                })
+                .await;
+            eprintln!("rename: バッファ {buffers}・ディスク {disk_files}・失敗 {failed}");
+            let _ = workspace.update(cx, |workspace, cx| {
+                workspace.refresh_git_status(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// F2 のミニ入力（キャレット近く…は座標が要るので v1 は中央上・⌃G と同型）。

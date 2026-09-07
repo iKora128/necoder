@@ -4,7 +4,7 @@ use gpui::{
     div, Context, EventEmitter, FocusHandle, IntoElement, Pixels, Point, Render, SharedString,
     Window,
 };
-use project::Worktree;
+use project::{DirListings, Worktree};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -49,13 +49,17 @@ pub enum ViewMode {
     Icons,
 }
 
-/// Project ごとの tree/navigation state。FS 読み込みは `refresh` だけで行う。
+/// Project ごとの tree/navigation state。FS 読み込みは `refresh`（同期）か、
+/// `directories_to_read` → 背景で [`project::read_listings_on`] → `apply_listings`（非同期）
+/// の形でだけ行う。行の組み立て自体は I/O をしない。
 pub struct ExplorerProject {
     pub expanded: HashSet<PathBuf>,
     pub rows: Vec<TreeRow>,
     pub selected: Option<PathBuf>,
     pub current_dir: Option<PathBuf>,
-    dir_listings: RefCell<HashMap<PathBuf, Vec<project::Entry>>>,
+    dir_listings: RefCell<DirListings>,
+    /// 背景再構築の世代。古い読み取り結果が新しい状態を上書きしないための番号。
+    refresh_generation: u64,
 }
 
 impl Default for ExplorerProject {
@@ -66,24 +70,35 @@ impl Default for ExplorerProject {
             selected: None,
             current_dir: None,
             dir_listings: RefCell::new(HashMap::new()),
+            refresh_generation: 0,
         }
     }
 }
 
 impl ExplorerProject {
+    /// 同期版: 読み取りと反映を一度に行う。local 用（一瞬で終わる）。remote はディレクトリ
+    /// 1 つにつき SSH の往復になるので、controller が読み取りだけ背景へ出す。
     pub fn refresh(&mut self, worktree: &Worktree) {
-        let mut rows = Vec::new();
-        build_rows(worktree, worktree.root(), 0, &self.expanded, &mut rows);
-        self.rows = rows;
+        let root = worktree.root().to_path_buf();
+        let mut listings = DirListings::new();
+        for directory in self.directories_to_read(&root) {
+            listings.insert(
+                directory.clone(),
+                worktree.read_any_dir(&directory).unwrap_or_default(),
+            );
+        }
+        self.apply_listings(&root, listings);
+    }
 
+    /// 表示に必要なディレクトリ（root・展開中・カラム連鎖の祖先）。I/O はしない。
+    pub fn directories_to_read(&self, root: &Path) -> Vec<PathBuf> {
         let mut directories = self.expanded.iter().cloned().collect::<Vec<_>>();
-        directories.push(worktree.root().to_path_buf());
+        directories.push(root.to_path_buf());
         if let Some(current) = &self.current_dir {
             // Finder 風カラム表示は root → current の各ディレクトリを 1 カラムずつ描く。
             // current だけを cache すると、深さ 2 以上では中間カラムが cache miss になり、
             // 選択中の階層だけが透明になったように見える。Render 中に I/O はしない契約を
             // 保ったまま、表示に必要な祖先を refresh 時にまとめて読み込む。
-            let root = worktree.root();
             let mut directory = current.as_path();
             loop {
                 directories.push(directory.to_path_buf());
@@ -103,14 +118,35 @@ impl ExplorerProject {
         }
         directories.sort();
         directories.dedup();
-        let mut listings = self.dir_listings.borrow_mut();
-        listings.clear();
-        for directory in directories {
-            listings.insert(
-                directory.clone(),
-                worktree.read_any_dir(&directory).unwrap_or_default(),
-            );
+        directories
+    }
+
+    /// 読み取り結果を反映して行を組み直す。I/O はしない。
+    pub fn apply_listings(&mut self, root: &Path, listings: DirListings) {
+        *self.dir_listings.borrow_mut() = listings;
+        self.rebuild_rows(root);
+    }
+
+    /// 手元のキャッシュだけで行を組み直す（展開/折り畳みの即時反映用）。
+    /// まだ読んでいないディレクトリは、読み取りが届くまで空のまま。
+    pub fn rebuild_rows(&mut self, root: &Path) {
+        let mut rows = Vec::new();
+        {
+            let listings = self.dir_listings.borrow();
+            build_rows(&listings, root, 0, &self.expanded, &mut rows);
         }
+        self.rows = rows;
+    }
+
+    /// 背景再構築を 1 回始める。返った世代を [`Self::is_latest_refresh`] で照合してから反映する
+    /// （最後に始めたものだけを採用する。並び順が入れ替わって古い展開状態が勝つのを防ぐ）。
+    pub fn begin_refresh(&mut self) -> u64 {
+        self.refresh_generation += 1;
+        self.refresh_generation
+    }
+
+    pub fn is_latest_refresh(&self, generation: u64) -> bool {
+        self.refresh_generation == generation
     }
 
     /// Render-safe cache lookup. Missing directories are empty until the controller refreshes.
@@ -124,27 +160,27 @@ impl ExplorerProject {
 }
 
 fn build_rows(
-    worktree: &Worktree,
+    listings: &DirListings,
     dir: &Path,
     depth: usize,
     expanded: &HashSet<PathBuf>,
     rows: &mut Vec<TreeRow>,
 ) {
-    let Ok(entries) = worktree.read_dir(dir) else {
+    let Some(entries) = listings.get(dir) else {
         return;
     };
     for entry in entries {
         let is_expanded = entry.is_dir && expanded.contains(&entry.path);
         rows.push(TreeRow {
             path: entry.path.clone(),
-            name: entry.name.into(),
+            name: entry.name.clone().into(),
             is_dir: entry.is_dir,
             depth,
             is_expanded,
             ignored: entry.ignored,
         });
         if is_expanded {
-            build_rows(worktree, &entry.path, depth + 1, expanded, rows);
+            build_rows(listings, &entry.path, depth + 1, expanded, rows);
         }
     }
 }

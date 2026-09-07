@@ -145,7 +145,9 @@ Protobuf は Zed 規模では有効だが v1 の必須条件ではない。necod
 3. 一致する static server を `~/.local/share/necoder/remote/servers/<version>/` へ配備する。
    remote download と local download + SFTP/SCP upload の両方を用意する。
 4. `proxy --session <random-256-bit-id>` を起動する。daemon が無ければ開始し、あれば再接続する。
-5. 5 秒の application heartbeat、jitter 付き exponential backoff、手動 retry/cancel を実装する。
+5. 5 秒の application heartbeat（Ping timeout 5 秒。時間切れでも受信が進んでいれば生存扱い＝混雑と切断を区別）、
+   失敗中は 5→60 秒の exponential backoff。張り直し時は古い接続の request を即座に失敗させ新接続で再送する。
+   jitter と手動 retry/cancel は未実装。
 6. reconnect 後に watcher subscription、open buffer revision、PTY/LSP handle を capability ごとに再同期する。
 
 ControlMaster の socket は private temp/cache directory に置き、connection identity は host の文字列だけでなく

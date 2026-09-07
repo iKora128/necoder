@@ -209,40 +209,82 @@ impl Workspace {
 
     /// Fleet では非 active な TaskSpace の composer も同時に操作できるため、各 AgentPanel に
     /// それぞれの host/cwd/context を焼き付ける。active session の暗黙 Deref は使わない。
+    ///
+    /// 宛先チップ（名前・ブランチ・host・cwd）はメモリ上の値だけで決まるので即座に入れる。
+    /// ＋context の候補ファイル一覧は host への列挙が要る＝ remote では SSH の往復になるため、
+    /// [`Self::refresh_context_files_for`] に切り出して背景で埋める。
     pub(crate) fn update_agent_destination_for(&self, index: usize, cx: &mut Context<Self>) {
-        let (name, branch, host, cwd, files) = match self.project_sessions.projects.get(index) {
-            Some(slot) => {
-                // Add context の候補（プロジェクト先頭 60 ファイルの相対パス）。
-                let files = slot
-                    .worktree
-                    .all_files(2000) // ＋context の fuzzy 絞り込み対象（M12-7 で 60→2000）
-                    .into_iter()
-                    .map(|(_, relative)| SharedString::from(relative))
-                    .collect();
-                (
-                    slot.name.clone(),
-                    slot.branch
-                        .clone()
-                        .or_else(|| slot.worktree_branch.clone())
-                        .map(SharedString::from),
-                    slot.worktree.host().clone(),
-                    Some(slot.worktree.root().to_path_buf()),
-                    files,
-                )
-            }
+        let (name, branch, host, cwd) = match self.project_sessions.projects.get(index) {
+            Some(slot) => (
+                slot.name.clone(),
+                slot.branch
+                    .clone()
+                    .or_else(|| slot.worktree_branch.clone())
+                    .map(SharedString::from),
+                slot.worktree.host().clone(),
+                Some(slot.worktree.root().to_path_buf()),
+            ),
             None => (
                 SharedString::from("—"),
                 None,
                 host::LocalHost::shared(),
                 None,
-                Vec::new(),
             ),
         };
         if let Some(session) = self.project_sessions.sessions.get(index) {
             session.agent_panel.update(cx, |panel, cx| {
-                panel.set_destination(name, branch, host, cwd, files, cx)
+                panel.set_destination(name, branch, host, cwd, cx)
             });
         }
+        self.refresh_context_files_for(index, cx);
+    }
+
+    /// ＋context の候補ファイル（プロジェクト直下 2000 件の相対パス）を**背景で**集めて流し込む。
+    ///
+    /// 以前はここが `update_agent_destination_for` の中で同期に走っていた。local では一瞬なので
+    /// 誰も気付かなかったが、remote では `list_files` の SSH 往復がそのまま UI スレッドに乗る。
+    /// sleep 復帰直後に再接続待ちへ落ちると 20 秒以上アプリごと固まった（2026-09-05 のハング報告）。
+    pub(crate) fn refresh_context_files_for(&self, index: usize, cx: &mut Context<Self>) {
+        let Some(slot) = self.project_sessions.projects.get(index) else {
+            return;
+        };
+        let host = slot.worktree.host().clone();
+        let root = slot.worktree.root().to_path_buf();
+        let host_id = host.id().to_string();
+        let scan_host = host.clone();
+        let scan_root = root.clone();
+        cx.spawn(async move |workspace, cx| {
+            let files: Vec<SharedString> = cx
+                .background_executor()
+                .spawn(async move {
+                    project::all_files_on(scan_host.as_ref(), &scan_root, 2000)
+                        .into_iter()
+                        .map(|(_, relative)| SharedString::from(relative))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                // 列挙中にレールが並び替わった/別プロジェクトになった場合は捨てる。
+                // 世代番号を持たずに済むよう、宛先そのもの（host + root）で同一性を見る。
+                let still_same =
+                    workspace
+                        .project_sessions
+                        .projects
+                        .get(index)
+                        .is_some_and(|slot| {
+                            slot.worktree.root() == root && slot.worktree.host().id() == host_id
+                        });
+                if !still_same {
+                    return;
+                }
+                if let Some(session) = workspace.project_sessions.sessions.get(index) {
+                    session
+                        .agent_panel
+                        .update(cx, |panel, cx| panel.set_context_files(files, cx));
+                }
+            });
+        })
+        .detach();
     }
 
     // ── タブ/スレッドのショートカット（⌘W / ⌘⇧A） ──

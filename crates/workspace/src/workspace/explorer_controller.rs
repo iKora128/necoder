@@ -21,9 +21,69 @@ impl Workspace {
             } else {
                 slot.explorer.expanded.insert(path);
             }
-            slot.refresh();
+            self.refresh_active_explorer(cx);
             cx.notify();
         }
+    }
+
+    /// アクティブ project のツリーを組み直す（[`Self::refresh_explorer_for`]）。
+    pub(crate) fn refresh_active_explorer(&mut self, cx: &mut Context<Self>) {
+        let active = self.project_sessions.active;
+        self.refresh_explorer_for(active, cx);
+    }
+
+    /// project `index` のエクスプローラのツリーを組み直す。
+    ///
+    /// local は同期（一瞬で終わる・既存の挙動とテストをそのまま保つ）。remote は
+    /// ディレクトリ 1 つにつき SSH の往復になるので読み取りを背景へ出し、手元のキャッシュで
+    /// 行だけ先に組み直す（折り畳みと既読フォルダの展開は即座に映る）。以前はここが
+    /// UI スレッドで往復しており、sleep 復帰直後にフォルダを開くと再接続を待って固まっていた。
+    /// 完了時は宛先そのもの（host id + root）と世代で照合し、古い結果や別 project の結果は捨てる。
+    /// root すら読めない（接続が落ちている）ときは手元の表示を残す。
+    pub(crate) fn refresh_explorer_for(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(slot) = self.project_sessions.projects.get_mut(index) else {
+            return;
+        };
+        if !slot.worktree.is_remote() {
+            slot.refresh();
+            return;
+        }
+        let root = slot.worktree.root().to_path_buf();
+        slot.explorer.rebuild_rows(&root);
+        let host = slot.worktree.host().clone();
+        let host_id = host.id().to_string();
+        let ignore = slot.worktree.ignore_snapshot();
+        let directories = slot.explorer.directories_to_read(&root);
+        let generation = slot.explorer.begin_refresh();
+        let read_root = root.clone();
+        cx.spawn(async move |workspace, cx| {
+            let listings = cx
+                .background_executor()
+                .spawn(async move {
+                    project::read_listings_on(host.as_ref(), &read_root, &ignore, &directories)
+                })
+                .await;
+            let listings = match listings {
+                Ok(listings) => listings,
+                Err(error) => {
+                    eprintln!("エクスプローラを更新できない: {error:#}");
+                    return;
+                }
+            };
+            let _ = workspace.update(cx, |workspace, cx| {
+                let Some(slot) = workspace.project_sessions.projects.get_mut(index) else {
+                    return;
+                };
+                let same_destination =
+                    slot.worktree.root() == root && slot.worktree.host().id() == host_id;
+                if !same_destination || !slot.explorer.is_latest_refresh(generation) {
+                    return;
+                }
+                slot.explorer.apply_listings(&root, listings);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// エクスプローラの表示モードを切り替える（左下スイッチャー）。
@@ -49,8 +109,8 @@ impl Workspace {
         if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.explorer.current_dir = Some(dir.clone());
             slot.explorer.selected = Some(dir);
-            slot.refresh();
         }
+        self.refresh_active_explorer(cx);
         if outside && self.explorer_mode(cx) == ExplorerView::Tree {
             self.explorer.update(cx, |explorer, cx| {
                 explorer.set_view(ExplorerView::Columns, cx)
@@ -117,8 +177,8 @@ impl Workspace {
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.projects.get_mut(active) {
             slot.explorer.expanded.insert(parent.clone());
-            slot.refresh();
         }
+        self.refresh_active_explorer(cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         self.explorer.update(cx, |explorer, cx| {
@@ -174,8 +234,8 @@ impl Workspace {
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.projects.get_mut(active) {
                     slot.explorer.selected = Some(destination);
-                    slot.refresh();
                 }
+                self.refresh_active_explorer(cx);
                 self.refresh_git_status(cx);
             }
             Err(error) => eprintln!("ファイル操作に失敗: {error:#}"),
@@ -283,8 +343,8 @@ impl Workspace {
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.projects.get_mut(active) {
                     slot.explorer.selected = Some(destination);
-                    slot.refresh();
                 }
+                self.refresh_active_explorer(cx);
                 self.refresh_git_status(cx);
             }
             Err(error) => {
@@ -318,8 +378,8 @@ impl Workspace {
             let active = self.project_sessions.active;
             if let Some(slot) = self.project_sessions.projects.get_mut(active) {
                 slot.explorer.selected = Some(destination);
-                slot.refresh();
             }
+            self.refresh_active_explorer(cx);
             self.refresh_git_status(cx);
         }
         if let Some(error) = first_error {
@@ -336,8 +396,8 @@ impl Workspace {
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.projects.get_mut(active) {
                     slot.explorer.selected = Some(copy);
-                    slot.refresh();
                 }
+                self.refresh_active_explorer(cx);
                 self.refresh_git_status(cx);
             }
             Err(error) => eprintln!("複製に失敗: {error:#}"),
@@ -363,8 +423,8 @@ impl Workspace {
                     if slot.explorer.selected.as_ref() == Some(&path) {
                         slot.explorer.selected = None;
                     }
-                    slot.refresh();
                 }
+                self.refresh_active_explorer(cx);
                 self.refresh_git_status(cx);
             }
             Err(error) => eprintln!("ゴミ箱に入れられない: {error:#}"),
@@ -536,7 +596,11 @@ impl Workspace {
             icon_image: identity.icon_image,
             worktree_branch: branch,
         };
-        slot.refresh();
+        // remote のツリーは slot をレールに載せてから背景で読む（下の `refresh_explorer_for`）。
+        let is_remote = slot.worktree.is_remote();
+        if !is_remote {
+            slot.refresh();
+        }
         let session = Self::create_project_session(
             Some(&slot),
             self.theme.clone(),
@@ -552,6 +616,9 @@ impl Workspace {
             self.project_sessions.sessions.push(session);
         }
         self.update_agent_destination_for(index, cx);
+        if is_remote {
+            self.refresh_explorer_for(index, cx);
+        }
         // switch_project は window が要る（subscribe 経由に無い）ため、次の render で消化する。
         self.overlays.pending_project_switch = Some(index);
         cx.notify();

@@ -1884,6 +1884,7 @@ version = "0.1.9"
 dependencies = [
  "editor_core",
  "gpui",
+ "host",
  "i18n",
  "lang",
  "markdown",

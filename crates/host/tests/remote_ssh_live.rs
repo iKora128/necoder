@@ -154,6 +154,124 @@ fn remote_ssh_crud_search_command() {
     assert!(!arch.trim().is_empty());
 }
 
+/// 疎通を**黙って**止める / 戻すコマンド（`docker pause` / `unpause` 等）。
+/// 両方揃っているときだけ該当 test を走らせる。
+///
+/// ControlMaster kill との違いが肝: kill は接続が閉じる（EOF が届く）が、凍結は
+/// **TCP を張ったまま相手が黙る**。laptop の sleep 復帰直後がこの形で、`ssh -O check` は
+/// master プロセスの生死しか見ないため「生きている」と答えてしまう。
+fn freeze_commands() -> Option<(String, String)> {
+    let read = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .filter(|command| !command.trim().is_empty())
+    };
+    match (
+        read("NECODER_REMOTE_TEST_FREEZE"),
+        read("NECODER_REMOTE_TEST_UNFREEZE"),
+    ) {
+        (Some(freeze), Some(unfreeze)) => Some((freeze, unfreeze)),
+        _ => {
+            println!(
+                "skip: NECODER_REMOTE_TEST_FREEZE / _UNFREEZE 未設定（疎通を止める手段が要る）"
+            );
+            None
+        }
+    }
+}
+
+fn run_shell(command: &str) -> bool {
+    match Command::new("sh").arg("-c").arg(command).status() {
+        Ok(status) => {
+            println!("shell [{command}] -> {status}");
+            status.success()
+        }
+        Err(error) => {
+            println!("shell [{command}] を起動できない: {error}");
+            false
+        }
+    }
+}
+
+/// 凍結を必ず解く番人。panic しても後続の test を巻き込まないように Drop で戻す。
+struct FrozenLink {
+    unfreeze: String,
+    thawed: bool,
+}
+
+impl FrozenLink {
+    fn thaw(&mut self) {
+        if !self.thawed {
+            self.thawed = run_shell(&self.unfreeze);
+        }
+    }
+}
+
+impl Drop for FrozenLink {
+    fn drop(&mut self) {
+        self.thaw();
+    }
+}
+
+/// **無言で死んだ回線から自力で復帰する**（2026-09-07・ユーザー報告「sleep 復帰後に固まる」の実 SSH 版）。
+///
+/// 相手を凍結すると、TCP は張られたまま応答だけが消える。heartbeat が
+/// [`host`] 側の Ping timeout（5s）で気付き、古い接続に乗った request を落として
+/// master ごと張り直す。疎通が戻ったら**ユーザーが何もしなくても**読めるようになること、
+/// そしてそれが**有界な時間**で起きることを見る（直す前は ServerAlive が気付く 45s 級を待っていた）。
+#[test]
+fn remote_ssh_recovers_from_a_silently_dead_link() {
+    let Some(uri) = test_uri() else { return };
+    let Some((freeze, unfreeze)) = freeze_commands() else {
+        return;
+    };
+    let remote = connect(&uri);
+    let lib = remote.root().join("src/lib.rs");
+    let before = remote.read_file(&lib).expect("最初の read");
+
+    assert!(run_shell(&freeze), "疎通を止められなかった");
+    let mut frozen = FrozenLink {
+        unfreeze,
+        thawed: false,
+    };
+    // heartbeat（5s 間隔・Ping timeout 5s）が「黙っている」と判定して張り直しに入るまで待つ。
+    std::thread::sleep(Duration::from_secs(12));
+    frozen.thaw();
+
+    // 疎通が戻った後、操作が通るまで。ここが伸びるのが「復帰後しばらく固まる」の正体。
+    let started = Instant::now();
+    let deadline = Duration::from_secs(45);
+    let mut last_error = None;
+    let mut recovered = None;
+    while started.elapsed() < deadline {
+        match remote.read_file(&lib) {
+            Ok(content) => {
+                recovered = Some(content);
+                break;
+            }
+            Err(error) => {
+                println!("復帰待ち {:?}: {error:#}", started.elapsed());
+                last_error = Some(error);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+    let elapsed = started.elapsed();
+    let content = recovered
+        .unwrap_or_else(|| panic!("{deadline:?} 経っても復帰しない（最後の失敗: {last_error:?}）"));
+    assert_eq!(content.bytes, before.bytes, "復帰後も同じ内容を読める");
+    // 「たまたま元の接続が生き返った」のではなく、黙っていることを検知して張り直したこと。
+    // 凍結は heartbeat の Ping timeout（5s）より長いので、必ず 1 回は世代が進む。
+    assert!(
+        remote.debug_reconnect_generation() > 0,
+        "無言断を検知して張り直していない（Ping が時間切れになれば世代が進むはず）"
+    );
+    println!(
+        "無言断からの復帰: {elapsed:?}（再接続 {} 回）",
+        remote.debug_reconnect_generation()
+    );
+}
+
 #[test]
 fn remote_ssh_reconnects_after_control_master_kill() {
     let Some(uri) = test_uri() else { return };

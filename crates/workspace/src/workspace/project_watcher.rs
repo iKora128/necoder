@@ -14,21 +14,58 @@ impl Workspace {
         let root = worktree.root().to_path_buf();
         let (sender, mut receiver) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
         let debug = std::env::var_os("NECODER_WATCH_DEBUG").is_some();
-        match project::watch_root(&host, &root, move |paths| {
+        let on_paths = move |paths: Vec<PathBuf>| {
             if debug {
                 eprintln!("watch: raw event {paths:?}");
             }
             let _ = sender.unbounded_send(paths);
-        }) {
-            Ok(watch) => {
-                if debug {
-                    eprintln!("watch: 監視開始 {}", root.display());
+        };
+        if host.is_remote() {
+            // remote の監視開始は daemon への `Watch` request ＝ SSH の往復。UI スレッドで待たない
+            // （切替のたびに 1 往復ぶん固まるし、接続が不調なら再接続待ちまで背負う）。
+            // pump は下で先に立つので、監視が張れた瞬間からイベントを取りこぼさない。
+            let watch_root = root.clone();
+            cx.spawn(async move |workspace, cx| {
+                let watch = cx
+                    .background_executor()
+                    .spawn(async move { project::watch_root(&host, &watch_root, on_paths) })
+                    .await;
+                let _ = workspace.update(cx, |workspace, _cx| match watch {
+                    Ok(watch) => {
+                        // 張っている間にレールが並び替わっていたら、その watch は捨てる。
+                        let still_same = workspace
+                            .project_sessions
+                            .projects
+                            .get(session_index)
+                            .is_some_and(|slot| slot.worktree.root() == root);
+                        if !still_same {
+                            return;
+                        }
+                        if debug {
+                            eprintln!("watch: 監視開始 {}", root.display());
+                        }
+                        if let Some(session) =
+                            workspace.project_sessions.sessions.get_mut(session_index)
+                        {
+                            session._watch = Some(watch);
+                        }
+                    }
+                    Err(error) => eprintln!("{error:#}"),
+                });
+            })
+            .detach();
+        } else {
+            match project::watch_root(&host, &root, on_paths) {
+                Ok(watch) => {
+                    if debug {
+                        eprintln!("watch: 監視開始 {}", root.display());
+                    }
+                    self.session_mut()._watch = Some(watch);
                 }
-                self.session_mut()._watch = Some(watch);
-            }
-            Err(error) => {
-                eprintln!("{error:#}");
-                return;
+                Err(error) => {
+                    eprintln!("{error:#}");
+                    return;
+                }
             }
         }
         self.session_mut()._watch_pump = Some(cx.spawn(async move |workspace, cx| {
@@ -151,9 +188,9 @@ impl Workspace {
             }
         }
         if tree_changed {
-            if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
-                slot.refresh();
-            }
+            // remote は背景で読む（watch はイベントのたびに来る。ここで往復すると、接続が
+            // 不調なときにイベント 1 回ごとに固まる）。
+            self.refresh_explorer_for(session_index, cx);
         }
         if git_changed {
             self.refresh_git_status_for(session_index, cx);

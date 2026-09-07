@@ -90,10 +90,58 @@ else
     done
 fi
 
+# No artifact yet: build one in Docker. The Mac usually has no Linux cross toolchain,
+# and the full workspace cannot be reused here because it depends on gpui from the zed git
+# repository - a large clone that necoder-remote-server does not need. So assemble a tiny
+# standalone workspace with just the two crates the server is made of.
+if [ ! -f "$server_binary" ]; then
+    echo "==> No $target artifact found; building necoder-remote-server in Docker"
+    rust_channel=$(grep -m1 '^channel' "$repo_root/rust-toolchain.toml" | sed 's/.*"\(.*\)".*/\1/')
+    # The client checks "<version> protocol=<n>" for an exact match, so the standalone
+    # manifest must carry the same package version as the workspace.
+    workspace_version=$(grep -m1 '^version = ' "$repo_root/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')
+    build_dir="$scratch_dir/remote-server-build"
+    mkdir -p "$build_dir/crates"
+    cp -R "$repo_root/crates/host" "$build_dir/crates/host"
+    cp -R "$repo_root/crates/paths" "$build_dir/crates/paths"
+    rm -rf "$build_dir/crates/host/tests"
+    # Version requirements are deliberately loose (semver-compatible with the workspace) so
+    # they cannot drift. Adding a dependency to crates/host means adding it here too.
+    cat > "$build_dir/Cargo.toml" <<EOF
+[workspace]
+resolver = "2"
+members = ["crates/host", "crates/paths"]
+
+[workspace.package]
+version = "$workspace_version"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+paths = { path = "crates/paths" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ignore = "0.4"
+regex = "1"
+url = "2"
+
+[profile.release]
+strip = true
+EOF
+    docker run --rm \
+        --volume "$build_dir:/work" \
+        --volume necoder-remote-server-cargo:/usr/local/cargo/registry \
+        --workdir /work \
+        "rust:$rust_channel-alpine" \
+        sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build -p host --bin necoder-remote-server --release'
+    server_binary="$build_dir/target/release/necoder-remote-server"
+fi
+
 if [ ! -f "$server_binary" ]; then
     cat >&2 <<EOF
-Linux remote-server artifact not found for $target.
-Build it first, then rerun this script:
+Linux remote-server artifact not found for $target, and the Docker build did not produce one.
+Build it yourself, then rerun this script:
 
   cargo zigbuild -p host --bin necoder-remote-server --release --target $target
 
@@ -114,8 +162,13 @@ if [ "$mode" = gui ]; then
         cargo run -p necoder -- "$@"
 else
     echo "==> Running the real SSH end-to-end suite"
+    # 疎通を「黙って」止める手段を渡す（container を凍結 = TCP は張ったまま応答だけ消える）。
+    # laptop の sleep 復帰直後と同じ形で、ControlMaster kill（EOF が届く）では再現できない。
+    compose_command="docker compose --project-name $compose_project --file $fixture_dir/compose.yml"
     NECODER_SSH_CONFIG="$ssh_config" \
     NECODER_REMOTE_TEST_URI="ssh://necoder-docker/home/dev/work/sample" \
     NECODER_REMOTE_SERVER_BINARY="$server_binary" \
+    NECODER_REMOTE_TEST_FREEZE="$compose_command pause ssh" \
+    NECODER_REMOTE_TEST_UNFREEZE="$compose_command unpause ssh" \
         cargo test -p host --test remote_ssh_live -- --nocapture --test-threads=1 "$@"
 fi

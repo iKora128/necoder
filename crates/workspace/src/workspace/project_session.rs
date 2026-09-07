@@ -382,32 +382,76 @@ impl Workspace {
             return;
         }
         slot.task_space.phase = phase;
-        slot.task_space.head_oid =
-            project::git_head_oid_on(slot.worktree.host().as_ref(), slot.worktree.root());
-        let record = slot.task_space.to_record(slot);
+        let host = slot.worktree.host().clone();
+        let root = slot.worktree.root().to_path_buf();
+        // HEAD の取得は `git rev-parse` ＝ remote では SSH の往復。local だけ同期で取り、
+        // remote は台帳へ書く直前に背景で取る（遷移そのもの・ニュース・総括は待たせない）。
+        if !host.is_remote() {
+            slot.task_space.head_oid = project::git_head_oid_on(host.as_ref(), &root);
+        }
+        let mut record = slot.task_space.to_record(slot);
         let news_color = slot.color;
         let news_title = slot.task_space.title.clone();
-        let payload = serde_json::json!({
-            "phase": phase.as_str(),
-            "source": "gui",
-            "reason": reason,
-            "digest": digest,
-            "head_oid": record.head_oid,
-        })
-        .to_string();
         // ニュース = task_events の鏡（P2）。台帳へ書く遷移と同じ場所で 1 行積む。
         let (news_kind, news_text) = Self::news_text_for_phase(phase, digest);
         self.push_news(news_kind, news_color, news_title, news_text);
         // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
         self.schedule_control_summary(cx);
+        cx.notify();
         let Some(storage) = self.persistence.storage.clone() else {
-            cx.notify();
             return;
         };
-        cx.background_executor()
-            .spawn(async move { storage.commit_task_transition(&record, &payload) })
-            .detach();
-        cx.notify();
+        if !host.is_remote() {
+            let payload = Self::transition_payload(phase, reason, digest, &record.head_oid);
+            cx.background_executor()
+                .spawn(async move { storage.commit_task_transition(&record, &payload) })
+                .detach();
+            return;
+        }
+        let reason = reason.to_string();
+        let digest = digest.map(str::to_string);
+        let host_id = host.id().to_string();
+        cx.spawn(async move |workspace, cx| {
+            let oid_host = host.clone();
+            let oid_root = root.clone();
+            let head_oid = cx
+                .background_executor()
+                .spawn(async move { project::git_head_oid_on(oid_host.as_ref(), &oid_root) })
+                .await;
+            // 台帳の記録は遷移時点の phase のまま、HEAD だけ埋める（後から来た遷移と順序が
+            // 入れ替わっても、それぞれの記録が自分の phase を持つ）。
+            record.head_oid = head_oid.clone();
+            let payload = Self::transition_payload(phase, &reason, digest.as_deref(), &head_oid);
+            let _ = workspace.update(cx, |workspace, _cx| {
+                let Some(slot) = workspace.project_sessions.projects.get_mut(session_index) else {
+                    return;
+                };
+                if slot.worktree.root() == root && slot.worktree.host().id() == host_id {
+                    slot.task_space.head_oid = head_oid;
+                }
+            });
+            cx.background_executor()
+                .spawn(async move { storage.commit_task_transition(&record, &payload) })
+                .detach();
+        })
+        .detach();
+    }
+
+    /// task_events に載せる遷移 payload（GUI 起点）。
+    fn transition_payload(
+        phase: TaskPhase,
+        reason: &str,
+        digest: Option<&str>,
+        head_oid: &Option<String>,
+    ) -> String {
+        serde_json::json!({
+            "phase": phase.as_str(),
+            "source": "gui",
+            "reason": reason,
+            "digest": digest,
+            "head_oid": head_oid,
+        })
+        .to_string()
     }
 
     pub fn new_sources_with_active(
@@ -418,11 +462,24 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut projects = Vec::new();
+        // 復元で開いた（= まだ host に何も聞いていない）project の添字。窓が出た後に
+        // 背景で中身を埋める（`hydrate_restored_projects`）。
+        let mut restored_indexes: Vec<usize> = Vec::new();
         for source in sources {
-            let (host, root) = source.into_parts();
-            match Worktree::with_host(host, &root) {
+            let (host, root, restored) = source.into_parts_with_trust();
+            // 復元は「再会」なので身元確認をやり直さない。remote では with_host の 3 往復が
+            // そのまま窓の表示待ちになる（2026-09-06）。
+            let opened = if restored {
+                Ok(Worktree::trusted(host, root.clone()))
+            } else {
+                Worktree::with_host(host, &root)
+            };
+            match opened {
                 Ok(worktree) => {
                     let index = projects.len();
+                    if restored {
+                        restored_indexes.push(index);
+                    }
                     let remote_host = worktree
                         .host()
                         .is_remote()
@@ -430,7 +487,13 @@ impl Workspace {
                     // `.necoder/settings.json` の color(#hex)/icon(絵文字) を反映（M12-11）。
                     let identity = read_project_identity(worktree.root());
                     let mut slot = ProjectSlot {
-                        task_space: TaskSpace::for_worktree(&worktree, None),
+                        // 復元した remote はまだ繋がっていない。git に聞く項目は後回しにして、
+                        // 接続なしで決まる id だけ先に確定させる。
+                        task_space: if restored && worktree.is_remote() {
+                            TaskSpace::for_restored_worktree(&worktree)
+                        } else {
+                            TaskSpace::for_worktree(&worktree, None)
+                        },
                         name: worktree.name().into(),
                         branch: None,
                         remote_host,
@@ -443,7 +506,11 @@ impl Workspace {
                         icon_image: identity.icon_image,
                         worktree_branch: None,
                     };
-                    slot.refresh();
+                    // 復元した remote はまだ繋がっていない。ここで refresh すると read_dir が
+                    // 走って UI スレッドで接続を待つことになる（host のガードが debug で捕まえる）。
+                    if !restored || !slot.worktree.is_remote() {
+                        slot.refresh();
+                    }
                     projects.push(slot);
                 }
                 Err(error) => eprintln!("プロジェクトを開けない（スキップ）: {error:#}"),
@@ -496,14 +563,23 @@ impl Workspace {
             } else {
                 cx.new(|cx| AgentPanel::new(theme.clone(), cx))
             };
-            let terminal_launch = Self::terminal_launch_for(projects.get(index));
+            // remote の `terminal_launch` は ControlMaster を起こす＝接続そのもの。復元では
+            // ここで待たず、繋がってから `hydrate_restored_projects` が `reset_launch` で入れ直す。
+            let defer_terminal = restored_indexes.contains(&index)
+                && projects
+                    .get(index)
+                    .is_some_and(|slot| slot.worktree.is_remote());
+            let launch_for = |slot: Option<&ProjectSlot>| {
+                if defer_terminal {
+                    TerminalLaunch::default()
+                } else {
+                    Self::terminal_launch_for(slot)
+                }
+            };
+            let terminal_launch = launch_for(projects.get(index));
             let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-            let tests_dock = cx.new(|_| {
-                TerminalDock::new(
-                    Self::terminal_launch_for(projects.get(index)),
-                    theme.clone(),
-                )
-            });
+            let tests_dock =
+                cx.new(|_| TerminalDock::new(launch_for(projects.get(index)), theme.clone()));
             let explorer = cx.new(|_| Explorer::new(explorer_view));
             let git_panel = cx.new(GitPanel::new);
             let accent = projects
@@ -858,8 +934,86 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+        workspace.hydrate_restored_projects(restored_indexes, cx);
         workspace.save_state(); // 起動時点で状態を書く（再起動復元のため）
         workspace
+    }
+
+    /// 復元で開いた remote project の中身を、窓が出てから背景で埋める。
+    ///
+    /// `Worktree::trusted` で開いた直後は、無視規則が空でツリーも未読。ここで初めて
+    /// SSH を繋ぎに行く（`RemoteHost::lazy_ssh` の最初の request がこれになる）。
+    /// local は `new_sources_with_active` の中で同期に読み終わっているので何もしない。
+    pub(crate) fn hydrate_restored_projects(
+        &mut self,
+        indexes: Vec<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        for index in indexes {
+            let Some(slot) = self.project_sessions.projects.get(index) else {
+                continue;
+            };
+            if !slot.worktree.is_remote() {
+                continue;
+            }
+            let host = slot.worktree.host().clone();
+            let root = slot.worktree.root().to_path_buf();
+            let ignore_path = root.join(".gitignore");
+            let probe_root = root.clone();
+            cx.spawn(async move |workspace, cx| {
+                let (reachable, contents) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        // 1 手目が実際の接続になる。ここで繋がらなければ以降は触らない
+                        // （繋がらない host を UI スレッドから触ると、そこで再接続を待つ）。
+                        if host.metadata(&probe_root).is_err() {
+                            return (false, None);
+                        }
+                        let contents = host
+                            .read_file(&ignore_path)
+                            .ok()
+                            .and_then(|content| String::from_utf8(content.bytes).ok());
+                        (true, contents)
+                    })
+                    .await;
+                let _ = workspace.update(cx, |workspace, cx| {
+                    // 読んでいる間にレールが並び替わっていたら捨てる（宛先そのもので見る）。
+                    let Some(slot) = workspace.project_sessions.projects.get_mut(index) else {
+                        return;
+                    };
+                    if slot.worktree.root() != root {
+                        return;
+                    }
+                    if !reachable {
+                        let name = slot.name.clone();
+                        workspace.push_toast(
+                            SharedString::from(i18n::t!("ssh.restore_failed", "project" => name)),
+                            workspace.accent(),
+                            cx,
+                        );
+                        return;
+                    }
+                    if let Some(contents) = contents {
+                        slot.worktree.set_ignore_source(&contents);
+                    }
+                    // git に聞く項目（repository_id / HEAD / task ブランチ）をここで確定させる。
+                    slot.task_space = TaskSpace::for_worktree(&slot.worktree, None);
+                    // 端末の起動先も入れ直す（構築時は空で置いてある）。
+                    let launch = Self::terminal_launch_for(Some(slot));
+                    if let Some(session) = workspace.project_sessions.sessions.get(index) {
+                        let dock = session.terminal_dock.clone();
+                        let tests = session.tests_dock.clone();
+                        dock.update(cx, |dock, cx| dock.reset_launch(launch.clone(), cx));
+                        tests.update(cx, |dock, cx| dock.reset_launch(launch, cx));
+                    }
+                    // 無視規則が入ってからツリーを読む（薄字表示の判定に要る）。読み取りは
+                    // 背景（`refresh_explorer_for`）。
+                    workspace.refresh_explorer_for(index, cx);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     /// 起動後にタブ列を復元する。各プロジェクトの記録を slot へ流し込み（非アクティブは遅延復元）、
@@ -973,24 +1127,85 @@ impl Workspace {
             Some(slot) => (slot.open_files.clone(), slot.active_file),
             None => return,
         };
-        let host = self
-            .active_worktree()
-            .map(|worktree| worktree.host().clone());
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let host = worktree.host().clone();
         self.tabs.clear();
         self.active_tab = 0;
+        if host.is_remote() {
+            self.open_slot_files_remote(host, files, active_file, window, cx);
+            return;
+        }
         for path in files {
-            let exists = host
-                .as_ref()
-                .map(|host| host.metadata(&path).is_ok())
-                .unwrap_or(false);
-            if exists {
-                // 背景読み込みだと完了順でタブ順が崩れるため、復元だけは同期で開く。
+            if host.metadata(&path).is_ok() {
+                // 背景読み込みだと完了順でタブ順が崩れるため、local の復元は同期で開く
+                // （ローカル FS の stat/read はマイクロ秒。UI スレッドで払ってよい）。
                 self.open_file_sync(path, window, cx);
             }
         }
         if active_file < self.tabs.len() {
             self.select_tab(active_file, window, cx);
         }
+    }
+
+    /// remote プロジェクトのタブ復元。**1 本の背景タスクで全ファイルを順に読み**、読み終えてから
+    /// 順序どおりに開く。
+    ///
+    /// local と同じ同期ループにすると、タブ 1 枚ごとに `metadata` + `read_file` の SSH 往復が
+    /// UI スレッドに乗る。復元タブが 5 枚あれば往復 10 回、接続が不調ならそのぶん丸ごと固まる。
+    /// 読みは背景・タブを積むのは前景、という分担にすれば順序は保ったまま UI は生き続ける。
+    fn open_slot_files_remote(
+        &mut self,
+        host: Arc<dyn Host>,
+        files: Vec<PathBuf>,
+        active_file: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if files.is_empty() {
+            return;
+        }
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
+        };
+        let session_index = self.project_sessions.active;
+        let root = self
+            .active_worktree()
+            .map(|worktree| worktree.root().to_path_buf());
+        cx.spawn(async move |_workspace, cx| {
+            let loaded: Vec<(PathBuf, host::FileContent)> = cx
+                .background_executor()
+                .spawn(async move {
+                    files
+                        .into_iter()
+                        .filter_map(|path| {
+                            let content = host.read_file(&path).ok()?;
+                            Some((path, content))
+                        })
+                        .collect()
+                })
+                .await;
+            let _ = handle.update(cx, |workspace, window, cx| {
+                // 読んでいる間に別プロジェクトへ切り替わっていたら、その session のタブ列を
+                // 汚さずに捨てる（宛先そのもので同一性を見る）。
+                let still_same = workspace.project_sessions.active == session_index
+                    && workspace
+                        .active_worktree()
+                        .map(|worktree| worktree.root().to_path_buf())
+                        == root;
+                if !still_same {
+                    return;
+                }
+                for (path, content) in loaded {
+                    workspace.open_loaded_file(path, content, window, cx);
+                }
+                if active_file < workspace.tabs.len() {
+                    workspace.select_tab(active_file, window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn active_worktree(&self) -> Option<Rc<Worktree>> {

@@ -23,6 +23,26 @@ use workspace::{ProjectSource, RestoredTabs, Workspace};
 
 actions!(necoder, [Quit]);
 
+/// 前回状態の SSH project を**繋がずに** source にする（起動を止めないため）。
+///
+/// 保存済みの root をそのまま使い、ssh は窓が出た後の最初の要求で起こす。root が空
+/// （＝ `$HOME` を解決しないと決まらない）ときだけは、接続しないと開く場所が決まらないので
+/// 通常の接続にフォールバックする。
+fn restore_ssh_project(uri: &str, saved_root: &Path) -> anyhow::Result<ProjectSource> {
+    let mut project = SshProject::parse(uri)?;
+    if project.path.as_os_str().is_empty() {
+        project.path = saved_root.to_path_buf();
+    }
+    if project.path.as_os_str().is_empty() {
+        return connect_ssh_project(uri);
+    }
+    let server_command = std::env::var("NECODER_REMOTE_SERVER_COMMAND")
+        .unwrap_or_else(|_| "necoder-remote-server".to_string());
+    let host = RemoteHost::lazy_ssh(&project, &server_command)?;
+    let root = host.root().to_path_buf();
+    Ok(ProjectSource::restored(host, root))
+}
+
 /// SSH project を接続して source にする。互換 server が無ければ bootstrap が自動配備する。
 fn connect_ssh_project(uri: &str) -> anyhow::Result<ProjectSource> {
     let project = SshProject::parse(uri)?;
@@ -77,7 +97,8 @@ fn resolve_projects() -> (Vec<ProjectSource>, Vec<RestoredTabs>, usize) {
             if let Some((saved_projects, saved_active)) = workspace::load_saved_state(&state_path) {
                 for (saved_index, saved) in saved_projects.into_iter().enumerate() {
                     let source = match saved.remote_uri.as_deref() {
-                        Some(uri) => connect_ssh_project(uri),
+                        Some(uri) => restore_ssh_project(uri, &saved.root),
+                        // local は往復が無いので従来どおり開く（gitignore もその場で読む）。
                         None => Ok(ProjectSource::local(saved.root)),
                     };
                     match source {
@@ -407,6 +428,12 @@ fn main() {
         // プロジェクトを解決（roots + 起動時に開くファイル）。先頭 root を project 設定の対象にする。
         let (sources, open_files, active_project) = resolve_projects();
         stage(&startup, "projects_resolved");
+        // ここから先は「窓が在るスレッド」。以後 remote host への blocking request がこの
+        // スレッドから飛んだら host 側が捕まえる（debug は panic・release は警告）。
+        //
+        // 登録がこの位置なのは、`resolve_projects` の SSH 接続だけは意図的に同期だから
+        // ＝まだ窓が無く、固まる UI が存在しない（代わりに起動が遅くなる。別途の課題）。
+        host::mark_main_thread();
 
         // 設定（default → user → project）を **反応的 global** に載せてファイル監視を開始する。
         // 以後 UI トグル / CLI / MCP / 手編集はすべてこの 1 つの store を更新し、live で波及する。

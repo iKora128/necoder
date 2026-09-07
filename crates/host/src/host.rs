@@ -28,6 +28,61 @@ const MAX_BODY_LEN: usize = 256 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SEARCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// ハンドシェイク（Hello）だけは短く切る。再接続の総待ち時間を有界にするための上限で、
+/// 「TCP は生きているが相手が黙っている」（sleep 復帰直後の死んだ ControlMaster 越し）を
+/// 30s ではなく 10s で見切る。見切った後は master を作り直して 1 回だけやり直す。
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// 生存確認（Ping）の待ち時間。heartbeat はこれで「切れた」と判定して張り直すので、
+/// sleep 復帰から復旧が始まるまでの遅れの上限になる（30s だと復帰のたびに 30s 待たされる）。
+/// 短くしても誤爆しないのは、時間切れ時に受信バイトの進みを見て「混んでいるだけ」を
+/// 除外するため（[`ReconnectingClient::heartbeat_once`]）。
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// GUI のメインスレッド id。[`mark_main_thread`] が一度だけ書き込む。
+static MAIN_THREAD: std::sync::OnceLock<thread::ThreadId> = std::sync::OnceLock::new();
+
+/// 「このスレッドがメインスレッドだ」と登録する。GUI が窓を開ける直前に 1 回だけ呼ぶ。
+///
+/// 以後、remote host への blocking request がこのスレッドから飛んだら
+/// [`assert_off_main_thread`] が捕まえる。登録しなければ検査は丸ごと無効なので、
+/// テスト・CLI・remote-server 側は何も変わらない。
+pub fn mark_main_thread() {
+    let _already_marked = MAIN_THREAD.set(thread::current().id());
+}
+
+/// remote への blocking request が UI スレッドから飛んでいないか検査する。
+///
+/// [`Host`] は「blocking API なので UI thread では呼ばず background executor へ載せる」という
+/// 規約で書かれているが、規約は破られる。実際 2026-09-05 のハングは、プロジェクト切替が
+/// UI スレッドから `list_files` を呼び、sleep 復帰直後の SSH 再接続を丸ごと待って
+/// **20 秒間アプリが無反応**になったものだった。local では一瞬なので誰も気付けない。
+///
+/// そこで規約をコードで守らせる。既定は**警告して続行**で、`NECODER_STRICT_MAIN_THREAD_IO=1`
+/// を付けると panic する。
+///
+/// 既定を panic にしないのは、**未修正の違反がまだ残っている**ため。エクスプローラのツリー
+/// 再構築（14 箇所）・watch の開きタブ照合・端末/LSP 起動の `ensure_master`・エージェント
+/// 遷移の HEAD 取得・エージェント起動のコマンド探索は 2026-09-07 までに背景へ移した。残りは
+/// project を新規に開く経路（`Worktree::with_host` + `TaskSpace::for_worktree`）、分割時の
+/// `Buffer::from_host`、hunk の revert、hot-exit 復元、別窓/別 root で開く `host_for_project`
+/// （詳細は JOURNAL 2026-09-07）。潰し終わったら既定を strict に倒すこと。
+/// `NECODER_ALLOW_MAIN_THREAD_IO=1` で検査自体を止められる。
+fn assert_off_main_thread(what: &str) {
+    if MAIN_THREAD.get() != Some(&thread::current().id()) {
+        return;
+    }
+    if std::env::var_os("NECODER_ALLOW_MAIN_THREAD_IO").is_some() {
+        return;
+    }
+    let message = format!(
+        "UI スレッドから remote host の blocking request（{what}）を呼んでいる。\n\
+         SSH 再接続を待つ間アプリ全体が固まる。cx.background_executor().spawn(..) へ載せること。"
+    );
+    if std::env::var_os("NECODER_STRICT_MAIN_THREAD_IO").is_some() {
+        panic!("{message}");
+    }
+    eprintln!("[necoder] 警告: {message}");
+}
 
 /// Host 内で一意なパスの revision。content hash を含むため、mtime/size が同じ外部変更も検出する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -796,10 +851,34 @@ enum Request {
 }
 
 impl Request {
+    /// 診断メッセージ用の短い名前（UI スレッド違反の指摘に「どの request か」を載せる）。
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Hello { .. } => "Hello",
+            Self::OpenProject { .. } => "OpenProject",
+            Self::Canonicalize { .. } => "Canonicalize",
+            Self::Metadata { .. } => "Metadata",
+            Self::ReadDir { .. } => "ReadDir",
+            Self::ReadFile { .. } => "ReadFile",
+            Self::WriteFile { .. } => "WriteFile",
+            Self::ListFiles { .. } => "ListFiles",
+            Self::SearchProject { .. } => "SearchProject",
+            Self::RunCommand { .. } => "RunCommand",
+            Self::Watch { .. } => "Watch",
+            Self::Unwatch { .. } => "Unwatch",
+            Self::Ping => "Ping",
+            Self::Shutdown => "Shutdown",
+        }
+    }
+
     fn timeout(&self) -> Duration {
         match self {
             Self::SearchProject { .. } => SEARCH_REQUEST_TIMEOUT,
             Self::RunCommand { .. } => COMMAND_REQUEST_TIMEOUT,
+            // 再接続の一段目。ここを 30s 待つと復旧が体感で「固まった」になる。
+            Self::Hello { .. } => HELLO_TIMEOUT,
+            // 生存確認。切断の検知がこの長さで決まる。
+            Self::Ping => PING_TIMEOUT,
             _ => REQUEST_TIMEOUT,
         }
     }
@@ -871,6 +950,29 @@ impl std::fmt::Display for RemoteRequestError {
 }
 
 impl std::error::Error for RemoteRequestError {}
+
+/// request が時間切れになった（相手から何も返らなかった）。「接続が閉じた」と区別するための型。
+/// [`SshConnector::connect`] は Hello が**これで**落ちたときだけ ControlMaster を作り直す
+/// （閉じたのなら master は生きていて、落ちたのは remote-server 側）。
+/// [`ReconnectingClient`] はこれを受けたとき受信バイトの進みを見て「混んでいるだけ」を除外する。
+#[derive(Debug)]
+struct RequestTimeout {
+    request: &'static str,
+    after: Duration,
+}
+
+impl std::fmt::Display for RequestTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "remote request timeout after {}s ({}): 相手から応答が無い",
+            self.after.as_secs_f64(),
+            self.request
+        )
+    }
+}
+
+impl std::error::Error for RequestTimeout {}
 
 #[derive(Debug)]
 struct Frame {
@@ -1509,19 +1611,41 @@ pub fn serve_remote_server_cli() -> Result<()> {
 
 struct ProcessOwner(Mutex<Option<Child>>);
 
-impl Drop for ProcessOwner {
-    fn drop(&mut self) {
-        let Ok(child) = self.0.get_mut() else {
+impl ProcessOwner {
+    /// session プロセスを落として回収する。2 回目以降は no-op。
+    fn kill(&self) {
+        let Ok(mut slot) = self.0.lock() else {
             return;
         };
-        if let Some(child) = child.as_mut() {
+        if let Some(mut child) = slot.take() {
             let _kill = child.kill();
             let _wait = child.wait();
         }
     }
 }
 
+impl Drop for ProcessOwner {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
 type PendingResponses = Arc<Mutex<HashMap<u64, mpsc::SyncSender<Result<Frame, String>>>>>;
+
+/// 受信バイト数を数える reader。「request が時間切れになったが接続は生きている（相手が大きな
+/// 応答を流している最中で、Pong がその後ろに並んでいるだけ）」を、切断と区別するために使う。
+struct CountingReader {
+    inner: Box<dyn Read + Send>,
+    received: Arc<AtomicU64>,
+}
+
+impl Read for CountingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.received.fetch_add(read as u64, Ordering::Relaxed);
+        Ok(read)
+    }
+}
 
 /// remote watch の [`FrameKind::Event`] frame を現在の購読者へ配る共有シンク。RpcClient を跨いで
 /// （再接続でも）生き続けるよう [`ReconnectingClient`] が Arc で保持し、各 RpcClient の reader が
@@ -1551,7 +1675,9 @@ struct RpcClient {
     writer: Mutex<Box<dyn Write + Send>>,
     pending: PendingResponses,
     next_request_id: AtomicU64,
-    _owner: Option<Arc<ProcessOwner>>,
+    /// この接続で受信した総バイト数（reader スレッドが進める）。
+    received: Arc<AtomicU64>,
+    owner: Option<Arc<ProcessOwner>>,
 }
 
 fn rpc_client_from_command(
@@ -1575,7 +1701,7 @@ fn rpc_client_from_command(
 
 impl RpcClient {
     fn new(
-        mut reader: Box<dyn Read + Send>,
+        reader: Box<dyn Read + Send>,
         writer: Box<dyn Write + Send>,
         owner: Option<Arc<ProcessOwner>>,
         event_sink: Arc<WatchEventSink>,
@@ -1584,12 +1710,17 @@ impl RpcClient {
             u64,
             mpsc::SyncSender<Result<Frame, String>>,
         >::new()));
+        let received = Arc::new(AtomicU64::new(0));
+        let mut reader = CountingReader {
+            inner: reader,
+            received: received.clone(),
+        };
         let reader_pending = pending.clone();
         thread::Builder::new()
             .name("necoder-remote-reader".to_string())
             .spawn(move || {
                 let failure = loop {
-                    match read_frame(reader.as_mut()) {
+                    match read_frame(&mut reader) {
                         Ok(frame) => {
                             // Event frame（id を持たない push 通知）は watch シンクへ振り分ける。
                             if matches!(frame.kind, FrameKind::Event) {
@@ -1621,12 +1752,43 @@ impl RpcClient {
             writer: Mutex::new(writer),
             pending,
             next_request_id: AtomicU64::new(1),
-            _owner: owner,
+            received,
+            owner,
         })
     }
 
+    /// この接続で受信した総バイト数。2 時点の差が 0 なら、その間 相手から何も届いていない。
+    fn received_bytes(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
+    }
+
+    /// この接続を見限る: 応答待ちの全 request を即座にエラーで返し、session プロセスを落とす。
+    ///
+    /// 再接続が決まった時点で呼ぶ。呼ばないと、切れた接続に乗っていた request は各自の
+    /// タイムアウト（最大 30s）まで待ち続けるし、パイプが詰まって `write` で止まっている
+    /// スレッドは ssh が自分で死ぬ（ServerAlive で最大 45s）まで writer ロックを握ったままになる。
+    /// プロセスを落とせばパイプが閉じて `write` は EPIPE で即座に戻る。
+    fn abort(&self, reason: &str) {
+        if let Ok(mut pending) = self.pending.lock() {
+            for (_, sender) in pending.drain() {
+                let _sent = sender.send(Err(reason.to_string()));
+            }
+        }
+        if let Some(owner) = &self.owner {
+            owner.kill();
+        }
+    }
+
     fn request(&self, request: &Request, body: Vec<u8>) -> Result<(Response, Vec<u8>)> {
-        let timeout = request.timeout();
+        self.request_with_timeout(request, body, request.timeout())
+    }
+
+    fn request_with_timeout(
+        &self,
+        request: &Request,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(Response, Vec<u8>)> {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let frame = Frame::request(id, request, body)?;
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -1651,10 +1813,16 @@ impl RpcClient {
                 if let Ok(mut pending) = self.pending.lock() {
                     pending.remove(&id);
                 }
-                return Err(anyhow!(
-                    "remote request timeout/disconnect after {}s: {error}",
-                    timeout.as_secs()
-                ));
+                return Err(match error {
+                    mpsc::RecvTimeoutError::Timeout => RequestTimeout {
+                        request: request.name(),
+                        after: timeout,
+                    }
+                    .into(),
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        anyhow!("remote request channel closed ({})", request.name())
+                    }
+                });
             }
         };
         match frame.kind {
@@ -1871,6 +2039,17 @@ fn percent_decode_path(path: &str) -> Result<PathBuf> {
 }
 
 /// 1 destination に1本だけ作る system OpenSSH multiplex transport。
+/// ControlMaster（と、master になり得る standalone session）に付ける接続オプション。
+const MASTER_OPTIONS: [&str; 5] = [
+    // 死んだ/到達不能なホストで GUI が無限にハングしないよう接続打ち切りを入れる
+    // （既定は OS の TCP タイムアウト任せ＝分単位。sleep/VPN 断からの復帰性に効く）。
+    "ConnectTimeout=10",
+    "ControlPersist=600",
+    "ServerAliveInterval=15",
+    "ServerAliveCountMax=3",
+    "ExitOnForwardFailure=yes",
+];
+
 struct SshTransport {
     project: SshProject,
     control_dir: PathBuf,
@@ -1878,7 +2057,9 @@ struct SshTransport {
 }
 
 impl SshTransport {
-    fn connect(project: &SshProject) -> Result<Arc<Self>> {
+    /// 制御ソケットの置き場だけ用意する。**ここではネットワークに触らない**。
+    /// master は最初に必要になった時点で [`Self::ensure_master`] が起こす。
+    fn new(project: &SshProject) -> Result<Arc<Self>> {
         static NEXT_CONTROL: AtomicU64 = AtomicU64::new(1);
         let serial = NEXT_CONTROL.fetch_add(1, Ordering::Relaxed);
         let identity_hash = content_hash(project.identity().as_bytes());
@@ -1899,11 +2080,16 @@ impl SshTransport {
             std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o700))?;
         }
         let control_path = control_dir.join("master");
-        let transport = Arc::new(Self {
+        Ok(Arc::new(Self {
             project: project.clone(),
             control_dir,
             control_path,
-        });
+        }))
+    }
+
+    /// 置き場を用意して master も起こす（対話的に開くとき＝失敗を即その場で返したいとき）。
+    fn connect(project: &SshProject) -> Result<Arc<Self>> {
+        let transport = Self::new(project)?;
         transport.start_master()?;
         Ok(transport)
     }
@@ -1913,21 +2099,10 @@ impl SshTransport {
         master
             .args(["-M", "-N", "-f"])
             .arg("-o")
-            .arg(format!("ControlPath={}", self.control_path.display()))
-            .args([
-                "-o",
-                // 死んだ/到達不能なホストで GUI が無限にハングしないよう接続打ち切りを入れる
-                // （既定は OS の TCP タイムアウト任せ＝分単位。sleep/VPN 断からの復帰性に効く）。
-                "ConnectTimeout=10",
-                "-o",
-                "ControlPersist=600",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "ServerAliveCountMax=3",
-                "-o",
-                "ExitOnForwardFailure=yes",
-            ]);
+            .arg(format!("ControlPath={}", self.control_path.display()));
+        for option in MASTER_OPTIONS {
+            master.args(["-o", option]);
+        }
         if let Some(port) = self.project.port {
             master.args(["-p", &port.to_string()]);
         }
@@ -1942,6 +2117,9 @@ impl SshTransport {
     }
 
     fn ensure_master(&self) -> Result<()> {
+        // `terminal_launch` / `spawn_process` は request を経由しないが、ここで master を
+        // 起こす＝接続そのもの。UI スレッドから呼ばれていないかは request と同じ検査に掛ける。
+        assert_off_main_thread("ensure_master");
         let status = ssh_command()
             .args(["-S", &self.control_path.to_string_lossy(), "-O", "check"])
             .arg(self.project.destination())
@@ -1957,14 +2135,33 @@ impl SshTransport {
         self.start_master()
     }
 
+    /// RPC session 用の引数。master は [`Self::ensure_master`] が別途起こしている前提
+    /// （`ControlMaster=no`・無ければ失敗する）。
     fn session_args(&self, tty: bool, remote_command: &str) -> Vec<String> {
+        self.session_args_with(tty, remote_command, false)
+    }
+
+    /// `standalone` = master が無ければ**この session 自身が master になる**（`ControlMaster=auto`）。
+    ///
+    /// 端末・LSP・ACP のプロセスはこれで起こす。事前に `ensure_master` で接続を確かめる必要が
+    /// なくなり、「起動仕様を組むだけ」の関数がネットワークに触らずに済む（UI スレッドから
+    /// 呼ばれる。sleep 復帰直後だとそこで master の張り直しを待って固まっていた）。
+    /// master が居れば従来どおり多重化に乗る。居なければ TCP をこの session が張り、終了後も
+    /// `ControlPersist` で残るので次からは多重化される。
+    fn session_args_with(&self, tty: bool, remote_command: &str, standalone: bool) -> Vec<String> {
         let mut args = vec![
             if tty { "-tt" } else { "-T" }.to_string(),
             "-S".to_string(),
             self.control_path.display().to_string(),
-            "-o".to_string(),
-            "ControlMaster=no".to_string(),
         ];
+        if standalone {
+            for option in MASTER_OPTIONS {
+                args.extend(["-o".to_string(), option.to_string()]);
+            }
+            args.extend(["-o".to_string(), "ControlMaster=auto".to_string()]);
+        } else {
+            args.extend(["-o".to_string(), "ControlMaster=no".to_string()]);
+        }
         if let Some(port) = self.project.port {
             args.extend(["-p".to_string(), port.to_string()]);
         }
@@ -1976,6 +2173,13 @@ impl SshTransport {
     fn command(&self, tty: bool, remote_command: &str) -> Command {
         let mut command = ssh_command();
         command.args(self.session_args(tty, remote_command));
+        command
+    }
+
+    /// master 無しでも自力で繋ぐ session（[`Self::session_args_with`] の `standalone`）。
+    fn standalone_command(&self, tty: bool, remote_command: &str) -> Command {
+        let mut command = ssh_command();
+        command.args(self.session_args_with(tty, remote_command, true));
         command
     }
 
@@ -2299,15 +2503,24 @@ impl Drop for SshTransport {
 
 struct SshConnector {
     transport: Arc<SshTransport>,
-    server_command: String,
+    /// 配備前は設定値、配備後は解決済みのコマンド。遅延接続では最初の接続まで配備しないので、
+    /// 「まだ確かめていない」状態を持てる必要がある。
+    server_command: Mutex<String>,
+    /// 配備の確認が済んだか。済んだ後は再接続のたびに配備し直さない。
+    server_ready: std::sync::atomic::AtomicBool,
     session: String,
 }
 
 impl SshConnector {
     fn command(&self) -> Command {
+        let server_command = self
+            .server_command
+            .lock()
+            .map(|command| command.clone())
+            .unwrap_or_default();
         let remote_command = format!(
             "exec {} proxy --session {}",
-            quote_posix(&self.server_command),
+            quote_posix(&server_command),
             quote_posix(&self.session)
         );
         let mut command = self.transport.command(false, &remote_command);
@@ -2315,32 +2528,99 @@ impl SshConnector {
         command
     }
 
-    fn connect(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
-        self.transport.ensure_master()?;
-        let client = rpc_client_from_command(self.command(), event_sink)?;
-        let (hello, _) = client.request(
-            &Request::Hello {
-                client_version: SERVER_VERSION.to_string(),
-            },
-            Vec::new(),
-        )?;
-        let Response::Hello {
-            protocol_version, ..
-        } = hello
-        else {
-            bail!("remote server returned invalid hello response");
-        };
-        if protocol_version != PROTOCOL_VERSION {
-            bail!("remote protocol mismatch: {protocol_version}");
+    /// remote-server が使える状態か確かめ、必要なら配備する（初回だけ）。
+    fn ensure_server(&self) -> Result<()> {
+        if self.server_ready.load(Ordering::Acquire) {
+            return Ok(());
         }
+        let preferred = self
+            .server_command
+            .lock()
+            .map_err(|_| anyhow!("remote server command lock poisoned"))?
+            .clone();
+        let resolved = self
+            .transport
+            .ensure_remote_server(&preferred)
+            .context("remote-server の配備に失敗")?;
+        *self
+            .server_command
+            .lock()
+            .map_err(|_| anyhow!("remote server command lock poisoned"))? = resolved;
+        self.server_ready.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// 新しい session を張って Hello を交わす（[`HELLO_TIMEOUT`] で打ち切る）。
+    fn handshake(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
+        let client = rpc_client_from_command(self.command(), event_sink)?;
+        verify_hello(&client)?;
         Ok(client)
     }
 }
 
+/// Hello を交わして protocol 版を確かめる。接続経路（ssh / テストの UnixStream）に依らず同じ。
+fn verify_hello(client: &RpcClient) -> Result<()> {
+    let (hello, _) = client.request(
+        &Request::Hello {
+            client_version: SERVER_VERSION.to_string(),
+        },
+        Vec::new(),
+    )?;
+    let Response::Hello {
+        protocol_version, ..
+    } = hello
+    else {
+        bail!("remote server returned invalid hello response");
+    };
+    if protocol_version != PROTOCOL_VERSION {
+        bail!("remote protocol mismatch: {protocol_version}");
+    }
+    Ok(())
+}
+
+/// 接続を張る側の抽象。実物は [`SshConnector`]（OpenSSH ControlMaster 越し）。
+/// [`ReconnectingClient`] の再接続ロジックを ssh 無しで検証できるよう、テストは
+/// UnixStream の対で同じ protocol を喋る connector を差す。
+trait Connector: Send + Sync {
+    fn connect(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>>;
+}
+
+impl Connector for SshConnector {
+    fn connect(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
+        self.transport.ensure_master()?;
+        self.ensure_server()?;
+        match self.handshake(event_sink.clone()) {
+            Ok(client) => Ok(client),
+            // `ssh -O check` は **master プロセスが生きているか**しか見ない。sleep 復帰直後は
+            // master は生きたまま TCP だけ死んでいることがあり（ServerAlive が気付くまで最大 45s）、
+            // check を通った master 越しの新 session が黙って固まる。1 回で見切って
+            // master ごと作り直す — 待ち続けるより速いし、結果も決定的になる。
+            //
+            // 作り直すのは **Hello が時間切れ**（相手が黙っている）のときだけ。session が即座に
+            // 閉じたのなら master は通っていて、落ちたのは remote-server の起動側（バイナリが無い・
+            // 落ちた）。そこで master を殺しても直らず、同じ master に乗っている端末を巻き添えに
+            // するだけになる。
+            Err(stale) if stale.downcast_ref::<RequestTimeout>().is_some() => {
+                self.transport.exit_master();
+                self.transport.start_master().with_context(|| {
+                    format!("ControlMaster の作り直しに失敗（元の失敗: {stale:#}）")
+                })?;
+                self.handshake(event_sink)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
 struct ReconnectingClient {
-    current: Mutex<Arc<RpcClient>>,
-    connector: Option<Arc<SshConnector>>,
+    /// **まだ一度も繋いでいない間は `None`**。起動時の遅延接続はこの状態から始まり、
+    /// 最初の request で接続する。以後は切断のたびに張り直す。
+    current: Mutex<Option<Arc<RpcClient>>>,
+    connector: Option<Arc<dyn Connector>>,
     reconnect_lock: Mutex<()>,
+    /// 直近の接続失敗（時刻とメッセージ）。待っている間に起きた失敗を、待ち人が
+    /// もう一度やり直さないための印（[`Self::connect_now`]）。
+    last_failure: Mutex<Option<(std::time::Instant, String)>>,
     event_sink: Arc<WatchEventSink>,
     generation: AtomicU64,
 }
@@ -2348,13 +2628,27 @@ struct ReconnectingClient {
 impl ReconnectingClient {
     fn new(
         current: Arc<RpcClient>,
-        connector: Option<Arc<SshConnector>>,
+        connector: Option<Arc<dyn Connector>>,
+        event_sink: Arc<WatchEventSink>,
+    ) -> Arc<Self> {
+        Self::with_current(Some(current), connector, event_sink)
+    }
+
+    /// 接続を張らずに作る。最初の request まで ssh を起こさない（起動を止めないため）。
+    fn disconnected(connector: Arc<dyn Connector>, event_sink: Arc<WatchEventSink>) -> Arc<Self> {
+        Self::with_current(None, Some(connector), event_sink)
+    }
+
+    fn with_current(
+        current: Option<Arc<RpcClient>>,
+        connector: Option<Arc<dyn Connector>>,
         event_sink: Arc<WatchEventSink>,
     ) -> Arc<Self> {
         let client = Arc::new(Self {
             current: Mutex::new(current),
             connector,
             reconnect_lock: Mutex::new(()),
+            last_failure: Mutex::new(None),
             event_sink,
             generation: AtomicU64::new(0),
         });
@@ -2362,16 +2656,60 @@ impl ReconnectingClient {
             let weak = Arc::downgrade(&client);
             thread::Builder::new()
                 .name("necoder-remote-heartbeat".to_string())
-                .spawn(move || loop {
-                    thread::sleep(Duration::from_secs(5));
-                    let Some(client) = weak.upgrade() else {
-                        break;
-                    };
-                    let _heartbeat = client.request(&Request::Ping, Vec::new());
+                .spawn(move || {
+                    // 生きている間は 5s ごと。落ちている間は指数バックオフで 60s まで伸ばす。
+                    // 到達不能なホスト（電源断・VPN 断）に対して 5s ごとに ssh を起こし続けると、
+                    // 接続タイムアウトぶんプロセスが積み上がるだけで誰も得をしない。
+                    const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+                    const HEARTBEAT_MAX_BACKOFF: Duration = Duration::from_secs(60);
+                    let mut interval = HEARTBEAT_INTERVAL;
+                    loop {
+                        thread::sleep(interval);
+                        let Some(client) = weak.upgrade() else {
+                            break;
+                        };
+                        interval = if client.heartbeat_once(PING_TIMEOUT) {
+                            HEARTBEAT_INTERVAL
+                        } else {
+                            (interval * 2).min(HEARTBEAT_MAX_BACKOFF)
+                        };
+                    }
                 })
                 .expect("remote heartbeat thread spawn");
         }
         client
+    }
+
+    /// 生存確認を 1 回行い、切れていれば張り直す。戻り値は「いま繋がっているか」。
+    ///
+    /// Ping が `ping_timeout` 内に返らなくても、その間に受信バイトが進んでいれば**生きている**
+    /// と判定して張り直さない。低速回線で大きなファイルを流している最中は Pong がその後ろに
+    /// 並ぶだけで、そこで切ると転送が巻き添えになり、再送がまた回線を埋めて永久に繋がらない。
+    /// 何も届いていない時間切れだけを切断とみなす（sleep 復帰直後の死んだ TCP はこちら）。
+    fn heartbeat_once(&self, ping_timeout: Duration) -> bool {
+        let Ok(current) = self.current.lock().map(|current| current.clone()) else {
+            return false;
+        };
+        let Some(current) = current else {
+            // まだ一度も繋いでいない（起動時の遅延接続で、最初の request がまだ来ていない
+            // か失敗した）。ここで繋いでおけば最初の操作が速い。失敗はバックオフに乗る。
+            return self.request(&Request::Ping, Vec::new()).is_ok();
+        };
+        let received_before = current.received_bytes();
+        match current.request_with_timeout(&Request::Ping, Vec::new(), ping_timeout) {
+            Ok(_pong) => true,
+            Err(error) if error.downcast_ref::<RemoteRequestError>().is_some() => true,
+            Err(error)
+                if error.downcast_ref::<RequestTimeout>().is_some()
+                    && current.received_bytes() != received_before =>
+            {
+                true
+            }
+            Err(_dead) => match self.connect_now(Some(&current)) {
+                Ok(replacement) => replacement.request(&Request::Ping, Vec::new()).is_ok(),
+                Err(_unreachable) => false,
+            },
+        }
     }
 
     fn event_sink(&self) -> Arc<WatchEventSink> {
@@ -2397,46 +2735,41 @@ impl ReconnectingClient {
         body: Vec<u8>,
         retry_safe: bool,
     ) -> Result<(Response, Vec<u8>)> {
+        // SSH 越しの往復・再接続待ちが UI スレッドに乗っていないかをここで一括検査する
+        // （RemoteHost の全 request がこの 1 点を通る）。
+        assert_off_main_thread(request.name());
         let current = self
             .current
             .lock()
             .map_err(|_| anyhow!("remote client lock poisoned"))?
             .clone();
+        // まだ一度も繋いでいない（起動時の遅延接続）。ここが最初の接続になる。
+        let Some(current) = current else {
+            let connected = self.connect_now(None)?;
+            return connected.request(request, body);
+        };
+        let received_before = current.received_bytes();
         match current.request(request, body.clone()) {
             Ok(response) => Ok(response),
             // peer が request を処理して返したエラーは接続障害ではない。保存競合や ENOENT で
             // ControlMaster を張り直さず、そのまま呼び出し元へ返す。
             Err(error) if error.downcast_ref::<RemoteRequestError>().is_some() => Err(error),
+            // 時間切れでも、その間に受信が進んでいるなら接続は生きている（混んでいるだけ）。
+            // 張り直すと進行中の転送を巻き添えにする上、再送がまた回線を埋める。
+            // 時間切れをそのまま返す。
+            Err(error)
+                if error.downcast_ref::<RequestTimeout>().is_some()
+                    && current.received_bytes() != received_before =>
+            {
+                Err(error)
+            }
             Err(original) => {
-                let Some(connector) = &self.connector else {
+                if self.connector.is_none() {
                     return Err(original);
-                };
-                let _guard = self
-                    .reconnect_lock
-                    .lock()
-                    .map_err(|_| anyhow!("remote reconnect lock poisoned"))?;
-                let replacement = {
-                    let latest = self
-                        .current
-                        .lock()
-                        .map_err(|_| anyhow!("remote client lock poisoned"))?
-                        .clone();
-                    if Arc::ptr_eq(&latest, &current) {
-                        let replacement = connector
-                            .connect(self.event_sink.clone())
-                            .context("Remote SSH 再接続に失敗")?;
-                        *self
-                            .current
-                            .lock()
-                            .map_err(|_| anyhow!("remote client lock poisoned"))? =
-                            replacement.clone();
-                        // 世代を進める → watch keeper が新接続で監視を張り直す。
-                        self.generation.fetch_add(1, Ordering::Relaxed);
-                        replacement
-                    } else {
-                        latest
-                    }
-                };
+                }
+                let replacement = self
+                    .connect_now(Some(&current))
+                    .context("Remote SSH 再接続に失敗")?;
                 if retry_safe {
                     replacement.request(request, body)
                 } else {
@@ -2446,6 +2779,78 @@ impl ReconnectingClient {
                 }
             }
         }
+    }
+
+    /// 接続を張る（初回も再接続も同じ経路）。`stale` は「自分が掴んでいた壊れた接続」で、
+    /// 別スレッドが既に張り直していたらそれをそのまま使う（二重接続を避ける）。
+    fn connect_now(&self, stale: Option<&Arc<RpcClient>>) -> Result<Arc<RpcClient>> {
+        // ロックを取る**前**の時刻。待っている間に起きた失敗と、自分が来る前の失敗を
+        // 区別するために使う（下の「積み上がり抑制」）。
+        let arrived = std::time::Instant::now();
+        let Some(connector) = &self.connector else {
+            bail!("remote host に connector が無い（接続を張れない）");
+        };
+        let _guard = self
+            .reconnect_lock
+            .lock()
+            .map_err(|_| anyhow!("remote reconnect lock poisoned"))?;
+        let latest = self
+            .current
+            .lock()
+            .map_err(|_| anyhow!("remote client lock poisoned"))?
+            .clone();
+        // 待っている間に他のスレッドが張り直していたか（初回は None かどうかで見る）。
+        let superseded = match (&latest, stale) {
+            (Some(latest), Some(stale)) => !Arc::ptr_eq(latest, stale),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if superseded {
+            if let Some(latest) = latest {
+                return Ok(latest);
+            }
+        }
+        // 積み上がり抑制: **自分が待っている間に**他のスレッドが試して失敗したのなら、
+        // 同じことをもう一度やらない。到達不能なホストでは 1 回の試行に十数秒かかる
+        // （Hello 10s → master 作り直し 10s）ので、待ち行列の全員が順番に払うと
+        // 「切れている間はいつまでも終わらない」になる。到着より前の失敗なら自分は
+        // 新しい試行＝ユーザーの再操作なので、そのまま繋ぎに行く（復旧を止めない）。
+        if let Some((failed_at, message)) = self
+            .last_failure
+            .lock()
+            .ok()
+            .and_then(|failure| failure.clone())
+        {
+            if failed_at > arrived {
+                bail!("{message}");
+            }
+        }
+        // 見限る接続に残っている request をここで全部失敗させ、session プロセスも落とす。
+        // 待たせたままだと各自のタイムアウトまで（最大 30s）帰ってこないし、書き込みで
+        // 詰まったスレッドは writer ロックを握ったまま ssh の自滅（最大 45s）を待つことになる。
+        // 失敗した側は自分で `connect_now` に来て、張り直し済みの接続（superseded）を受け取る。
+        if let Some(dead) = &latest {
+            dead.abort("remote connection replaced: 再接続のため古い接続を破棄した");
+        }
+        let replacement = match connector.connect(self.event_sink.clone()) {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                if let Ok(mut failure) = self.last_failure.lock() {
+                    *failure = Some((std::time::Instant::now(), format!("{error:#}")));
+                }
+                return Err(error);
+            }
+        };
+        if let Ok(mut failure) = self.last_failure.lock() {
+            *failure = None;
+        }
+        *self
+            .current
+            .lock()
+            .map_err(|_| anyhow!("remote client lock poisoned"))? = Some(replacement.clone());
+        // 世代を進める → watch keeper が新接続で監視を張り直す。
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        Ok(replacement)
     }
 }
 
@@ -2503,7 +2908,9 @@ impl RemoteHost {
         let session = random_session_id()?;
         let connector = Arc::new(SshConnector {
             transport: transport.clone(),
-            server_command,
+            // 対話経路では上で配備済み。再接続で配備し直さないよう ready を立てておく。
+            server_command: Mutex::new(server_command),
+            server_ready: std::sync::atomic::AtomicBool::new(true),
             session,
         });
         let command = connector.command();
@@ -2521,6 +2928,45 @@ impl RemoteHost {
         .context("session proxy 接続 / protocol handshake に失敗")?;
         ssh_log(&destination, "session 確立（接続完了）", Some(phase));
         Ok(host)
+    }
+
+    /// **繋がずに** SSH host を作る（起動時の復元用）。
+    ///
+    /// 前回終了時に保存した URI とパスだけで作り、ssh は最初の request まで起こさない。
+    /// 窓が出るまでにネットワークを待たないための入口で、`connect_ssh` と違い
+    /// 失敗はここでは分からない（最初の request のエラーとして出る）。
+    ///
+    /// `root` が要るのは、`$HOME` の解決に接続が要るため。空パスは対話経路
+    /// （[`Self::connect_ssh`]）でしか扱えない。
+    pub fn lazy_ssh(project: &SshProject, server_command: &str) -> Result<Arc<Self>> {
+        if server_command.is_empty() || server_command.contains(['\n', '\r', '\0']) {
+            bail!("invalid remote server command");
+        }
+        anyhow::ensure!(
+            !project.path.as_os_str().is_empty(),
+            "遅延接続には保存済みの root が要る（$HOME 解決は接続が必要）"
+        );
+        let transport = SshTransport::new(project).context("SSH control directory の準備に失敗")?;
+        let connector = Arc::new(SshConnector {
+            transport: transport.clone(),
+            server_command: Mutex::new(server_command.to_string()),
+            // 未配備。最初の接続で `ensure_server` が確かめる。
+            server_ready: std::sync::atomic::AtomicBool::new(false),
+            session: random_session_id()?,
+        });
+        let event_sink = Arc::new(WatchEventSink::default());
+        let client = ReconnectingClient::disconnected(connector as Arc<dyn Connector>, event_sink);
+        Ok(Arc::new(Self {
+            id: project.identity(),
+            display_name: project.destination(),
+            root: project.path.clone(),
+            // 未接続なので project id はまだ無い。最初の request が `unknown project id` を
+            // 受けて `OpenProject` し直す既存経路に乗る（daemon 再起動時と同じ扱い）。
+            project_id: AtomicU64::new(0),
+            client,
+            ssh_project: Some(project.clone()),
+            transport: Some(transport),
+        }))
     }
 
     /// test/development 用。指定 process の stdio を同じ protocol として使う。
@@ -2592,6 +3038,7 @@ impl RemoteHost {
         connector: Option<Arc<SshConnector>>,
         event_sink: Arc<WatchEventSink>,
     ) -> Result<Arc<Self>> {
+        let connector = connector.map(|connector| connector as Arc<dyn Connector>);
         let client = ReconnectingClient::new(client, connector, event_sink);
         let (hello, _) = client.request(
             &Request::Hello {
@@ -2639,6 +3086,13 @@ impl RemoteHost {
         if let Some(transport) = &self.transport {
             transport.exit_master();
         }
+    }
+
+    /// 障害注入テスト用: これまでに接続を張り直した回数。0 = 一度も再接続していない。
+    /// 「復帰したのは張り直したからか、たまたま元の接続が生きていたからか」を切り分ける。
+    #[doc(hidden)]
+    pub fn debug_reconnect_generation(&self) -> u64 {
+        self.client.generation()
     }
 
     /// 明示的な接続削除・テスト用。通常の Drop では daemon を残して再接続可能にする。
@@ -2985,7 +3439,8 @@ impl Host for RemoteHost {
             .transport
             .clone()
             .context("SSH process transport が無い")?;
-        transport.ensure_master()?;
+        // ここで `ensure_master` は呼ばない（UI スレッドから来る＝接続待ちで固まる）。
+        // session は master が無ければ自分で繋ぐ（standalone）。
         self.relative(&spec.cwd)?;
         for key in spec.env.keys() {
             if !valid_env_key(key) {
@@ -3011,7 +3466,7 @@ impl Host for RemoteHost {
             words.join(" ")
         );
         let mut child = transport
-            .command(false, &remote_command)
+            .standalone_command(false, &remote_command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -3035,7 +3490,9 @@ impl Host for RemoteHost {
             .transport
             .as_ref()
             .context("SSH terminal transport が無い")?;
-        transport.ensure_master()?;
+        // 起動仕様を組むだけ。ネットワークには触らない（session が master 無しでも自分で繋ぐ）。
+        // 以前はここで `ensure_master` を呼んでおり、端末を開くたび・project を開くたびに
+        // UI スレッドで接続確認（切れていれば張り直し）を待っていた。
         self.relative(cwd)?;
         let remote_command = format!(
             "cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
@@ -3043,7 +3500,7 @@ impl Host for RemoteHost {
         );
         Ok(Some(TerminalLaunch {
             program: "ssh".to_string(),
-            args: transport.session_args(true, &remote_command),
+            args: transport.session_args_with(true, &remote_command, true),
         }))
     }
 
@@ -3475,5 +3932,205 @@ Host gpu
         drop(remote);
         server.join().unwrap();
         let _removed = std::fs::remove_dir_all(scratch_root);
+    }
+
+    /// UnixStream の対で実 protocol を喋る connector。ssh 無しで [`ReconnectingClient`] の
+    /// 再接続ロジック（見限り・張り直し・透過再送）を検証するための差し替え。
+    #[cfg(unix)]
+    struct PairConnector {
+        connections: AtomicU64,
+    }
+
+    #[cfg(unix)]
+    impl Connector for PairConnector {
+        fn connect(&self, event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
+            self.connections.fetch_add(1, Ordering::Relaxed);
+            let (client_stream, server_stream) = UnixStream::pair()?;
+            thread::spawn(move || {
+                let reader = server_stream.try_clone().expect("server stream clone");
+                let _served = serve_stream(reader, server_stream);
+            });
+            let reader = Box::new(client_stream.try_clone()?);
+            let client = RpcClient::new(reader, Box::new(client_stream), None, event_sink);
+            verify_hello(&client)?;
+            Ok(client)
+        }
+    }
+
+    /// 相手が黙っている接続（sleep 復帰直後の「TCP だけ死んだ」の再現）。server 側の端を返す
+    /// ので、drop すれば client の reader は EOF で終わる。
+    #[cfg(unix)]
+    fn silent_client(event_sink: Arc<WatchEventSink>) -> (Arc<RpcClient>, UnixStream) {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let reader = Box::new(client_stream.try_clone().unwrap());
+        (
+            RpcClient::new(reader, Box::new(client_stream), None, event_sink),
+            server_stream,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_timeout_is_typed_and_distinguishable_from_close() {
+        let sink = Arc::new(WatchEventSink::default());
+        let (silent, server_end) = silent_client(sink);
+        let before = silent.received_bytes();
+        let error = silent
+            .request_with_timeout(&Request::Ping, Vec::new(), Duration::from_millis(200))
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<RequestTimeout>().is_some(),
+            "黙っている相手は時間切れ: {error:#}"
+        );
+        assert_eq!(silent.received_bytes(), before, "何も受信していない");
+
+        // 相手が閉じたときは「時間切れ」ではなく「閉じた」。master を作り直す判定に効く。
+        drop(server_end);
+        let error = silent.request(&Request::Ping, Vec::new()).unwrap_err();
+        assert!(
+            error.downcast_ref::<RequestTimeout>().is_none(),
+            "閉じた接続は時間切れ扱いにしない: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_fails_requests_waiting_on_the_dead_connection_fast() {
+        let scratch_root = scratch("reconnect");
+        let sink = Arc::new(WatchEventSink::default());
+        let (dead, _server_end) = silent_client(sink.clone());
+        let connector = Arc::new(PairConnector {
+            connections: AtomicU64::new(0),
+        });
+        let client =
+            ReconnectingClient::new(dead, Some(connector.clone() as Arc<dyn Connector>), sink);
+
+        // 死んだ接続に乗った request（通常の 30s タイムアウト）。
+        let waiter_client = client.clone();
+        let waiter_root = scratch_root.clone();
+        let waiter = thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result =
+                waiter_client.request(&Request::OpenProject { path: waiter_root }, Vec::new());
+            (result, started.elapsed())
+        });
+        thread::sleep(Duration::from_millis(150));
+
+        // heartbeat 相当: 黙っている接続を見限って張り直す。
+        assert!(client.heartbeat_once(Duration::from_millis(200)));
+
+        // 待っていた request は 30s を待たされず、張り直した接続で透過的に成功する。
+        let (result, elapsed) = waiter.join().unwrap();
+        let (response, _) = result.expect("張り直した接続で成功する");
+        assert!(matches!(response, Response::ProjectOpened { .. }));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "古い接続のタイムアウトを待たされた: {elapsed:?}"
+        );
+        assert_eq!(connector.connections.load(Ordering::Relaxed), 1);
+        assert_eq!(client.generation(), 1);
+        let _removed = std::fs::remove_dir_all(scratch_root);
+    }
+
+    /// 必ず失敗する connector（到達不能なホストの代役）。1 回の試行に時間がかかることまで含めて
+    /// 再現するため、失敗の前に少し眠る。
+    #[cfg(unix)]
+    struct FailingConnector {
+        attempts: Arc<AtomicU64>,
+        delay: Duration,
+    }
+
+    #[cfg(unix)]
+    impl Connector for FailingConnector {
+        fn connect(&self, _event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            thread::sleep(self.delay);
+            bail!("host に到達できない（テスト）")
+        }
+    }
+
+    /// 切れている間に溜まった待ち人が、それぞれ再接続を試し直さない。
+    ///
+    /// 到達不能なホストでは 1 回の試行に十数秒かかる。待ち行列の全員が順番に払うと
+    /// 「切れている間は何をしても終わらない」になる（2026-09-07 のユーザー報告の体感）。
+    /// 待っている間に起きた失敗はそのまま受け取り、**到着より前**の失敗しか無いとき
+    /// （＝ユーザーの新しい操作）だけ繋ぎに行く。
+    #[cfg(unix)]
+    #[test]
+    fn queued_requests_do_not_each_pay_for_their_own_failed_reconnect() {
+        let sink = Arc::new(WatchEventSink::default());
+        let (dead, _server_end) = silent_client(sink.clone());
+        let attempts = Arc::new(AtomicU64::new(0));
+        let connector = Arc::new(FailingConnector {
+            attempts: attempts.clone(),
+            delay: Duration::from_millis(500),
+        });
+        let client =
+            ReconnectingClient::new(dead.clone(), Some(connector as Arc<dyn Connector>), sink);
+
+        let waiters: Vec<_> = (0..4)
+            .map(|_| {
+                let client = client.clone();
+                let dead = dead.clone();
+                thread::spawn(move || client.connect_now(Some(&dead)).is_err())
+            })
+            .collect();
+        for waiter in waiters {
+            assert!(waiter.join().unwrap(), "到達不能なので全員 Err で返る");
+        }
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            1,
+            "待ち行列の全員が再接続を試し直している（切断中に操作するほど遅くなる）"
+        );
+
+        // 後から来た操作（＝ユーザーの再試行）は、前の失敗に足を引っ張られず繋ぎに行く。
+        assert!(client.connect_now(Some(&dead)).is_err());
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            2,
+            "失敗の後に来た操作まで抑止すると、復旧できなくなる"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn heartbeat_keeps_a_slow_but_flowing_connection() {
+        let sink = Arc::new(WatchEventSink::default());
+        let (busy, mut server_end) = silent_client(sink.clone());
+        let connector = Arc::new(PairConnector {
+            connections: AtomicU64::new(0),
+        });
+        let client = ReconnectingClient::new(
+            busy.clone(),
+            Some(connector.clone() as Arc<dyn Connector>),
+            sink,
+        );
+
+        // 相手は「大きな応答の途中」: 誰も待っていない id の応答を少しずつ流す。Pong はその後ろ。
+        let mut bytes = Vec::new();
+        let frame = Frame::response(999, &Response::Pong, vec![0u8; 4096]).unwrap();
+        write_frame(&mut bytes, &frame).unwrap();
+        let dripper = thread::spawn(move || {
+            for chunk in bytes.chunks(128) {
+                server_end.write_all(chunk).expect("drip");
+                thread::sleep(Duration::from_millis(15));
+            }
+            server_end
+        });
+
+        let received_before = busy.received_bytes();
+        assert!(
+            client.heartbeat_once(Duration::from_millis(250)),
+            "受信が進んでいる接続は生きている扱い"
+        );
+        assert!(busy.received_bytes() > received_before);
+        assert_eq!(
+            connector.connections.load(Ordering::Relaxed),
+            0,
+            "混んでいるだけの接続を張り直してはいけない"
+        );
+        assert_eq!(client.generation(), 0);
+        drop(dripper.join().unwrap());
     }
 }
