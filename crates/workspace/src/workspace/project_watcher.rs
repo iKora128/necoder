@@ -1,5 +1,17 @@
 use crate::workspace::*;
 
+/// ファイル監視（notify / remote の watch pump）を張るか。
+///
+/// gpui のテストスケジューラは決定的で、**別 OS スレッドからタスクを起こすと「非決定的」と判定して
+/// テストを落とす**。notify の監視スレッド（Windows は `notify-rs windows loop`）が temp ディレクトリの
+/// 変化で pump を起こし、Windows CI の `expanding_a_remote_directory_never_blocks_the_ui_thread` が
+/// 落ちた（2026-09-07）。各テストが teardown で watcher を先に落とす回避は競合が残る（drop と
+/// 監視スレッドは非同期）ので、テストビルドでは監視自体を張らない。テストは watch イベントに
+/// 依存しない（必要なら `handle_watch_events` を直接呼ぶ）。
+fn file_watching_enabled() -> bool {
+    !cfg!(test)
+}
+
 impl Workspace {
     pub(crate) fn start_watcher(&mut self, cx: &mut Context<Self>) {
         let session_index = self.project_sessions.active;
@@ -9,6 +21,9 @@ impl Workspace {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
+        if !file_watching_enabled() {
+            return;
+        }
         // remote も張る（M13）: local=notify / remote=Host 経由の poll。差し替えは project::watch_root 内。
         let host = worktree.host().clone();
         let root = worktree.root().to_path_buf();
