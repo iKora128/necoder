@@ -204,6 +204,42 @@ impl Workspace {
                     "skipped": skipped,
                 })));
             }
+            "open_remote" => {
+                // Remote SSH terminal の open 専用 gateway だけがこの method を作る。gateway が
+                // 接続時の authority をローカル側で刻むため、remote 側から別 host に化けられない。
+                let Some(authority) = params
+                    .get("authority")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|authority| host::SshProject::parse(authority).ok())
+                else {
+                    let _ = respond.send(err("remote authority が不正です"));
+                    return;
+                };
+                let (uris, skipped): (Vec<String>, Vec<String>) = params
+                    .get("paths")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .partition(|path| path.starts_with('/'))
+                    })
+                    .unwrap_or_default();
+                let uris = uris
+                    .into_iter()
+                    .map(|path| authority.uri_for_path(Path::new(&path)))
+                    .collect::<Vec<_>>();
+                let opened = uris.len();
+                self.chrome.pending_remote_open.extend(uris);
+                // 引数なしの `ne` も接続元を前面化する。
+                cx.activate(true);
+                cx.notify();
+                let _ = respond.send(ok(serde_json::json!({
+                    "opened": opened,
+                    "skipped": skipped,
+                })));
+            }
             "spawn_agent" => {
                 let agent = params
                     .get("agent")

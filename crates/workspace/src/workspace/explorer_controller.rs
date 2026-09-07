@@ -537,30 +537,83 @@ impl Workspace {
         branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self
+        if self.switch_to_open_root(&path, cx) {
+            return;
+        }
+        // local は往復が無いので同期（gitignore もその場で読む）。
+        if !host.is_remote() {
+            match Worktree::with_host(host, &path) {
+                Ok(worktree) => {
+                    let task_space = TaskSpace::for_worktree(&worktree, branch.as_deref());
+                    self.add_worktree_to_rail(worktree, task_space, branch, cx);
+                }
+                Err(error) => {
+                    self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx)
+                }
+            }
+            return;
+        }
+        // remote は `with_host`（canonicalize / metadata / .gitignore）と git の問い合わせ
+        // （repository_id / HEAD / ブランチ）で RTT×7 になる。再接続が要る場面ではその全部を
+        // 待つことになるので背景へ。`Worktree` は Rc を持たないので background から返せる。
+        let branch_for_task = branch.clone();
+        cx.spawn(async move |workspace, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move {
+                    let worktree = Worktree::with_host(host, &path)?;
+                    let task_space = TaskSpace::for_worktree(&worktree, branch_for_task.as_deref());
+                    Ok::<_, anyhow::Error>((worktree, task_space))
+                })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| match opened {
+                Ok((worktree, task_space)) => {
+                    // 読んでいる間に同じ root が別経路で載っていたら切替だけ。
+                    if workspace.switch_to_open_root(worktree.root(), cx) {
+                        return;
+                    }
+                    workspace.add_worktree_to_rail(worktree, task_space, branch, cx);
+                }
+                Err(error) => workspace.push_toast(
+                    SharedString::from(format!("{error:#}")),
+                    workspace.accent(),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    /// `root` が既にレールにあれば切替を予約して true。
+    fn switch_to_open_root(&mut self, root: &Path, cx: &mut Context<Self>) -> bool {
+        let Some(index) = self
             .project_sessions
             .projects
             .iter()
-            .position(|slot| slot.worktree.root() == path.as_path())
-        {
-            self.overlays.pending_project_switch = Some(index);
-            cx.notify();
-            return;
-        }
-        let worktree = match Worktree::with_host(host, &path) {
-            Ok(worktree) => worktree,
-            Err(error) => {
-                self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
-                return;
-            }
+            .position(|slot| slot.worktree.root() == root)
+        else {
+            return false;
         };
+        self.overlays.pending_project_switch = Some(index);
+        cx.notify();
+        true
+    }
+
+    /// 開けた worktree をレールの slot にする（`open_folder_in_rail` の後半。host への
+    /// 問い合わせは済んでいる前提＝ここは UI スレッドで完結する）。
+    fn add_worktree_to_rail(
+        &mut self,
+        worktree: Worktree,
+        task_space_preview: TaskSpace,
+        branch: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         // リモートの `.necoder` はリモート側にあるので読まない（同名のローカルパスを拾わない）。
         let identity = if worktree.is_remote() {
             ProjectIdentity::default()
         } else {
             read_project_identity(worktree.root())
         };
-        let task_space_preview = TaskSpace::for_worktree(&worktree, branch.as_deref());
         // 色モデル（2026-07-24 ユーザー確定）: **workspace（リポジトリ）で 1 色・スレッド（ACP）で 1 色**。
         // Task worktree は親リポジトリの色を継承する（worktree ごとに色を変えない＝方向感覚を守る）。
         let inherited = (!task_space_preview.is_integration())
@@ -814,19 +867,44 @@ impl Workspace {
     }
 
     pub(crate) fn open_folder_as_window(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let source = match self.active_worktree() {
-            Some(worktree) => match worktree.host().host_for_project(&path) {
-                Ok(host) => ProjectSource::new(host, path),
-                Err(error) => {
-                    eprintln!("別 project を開けない: {error:#}");
-                    return;
-                }
-            },
-            None => ProjectSource::local(path),
-        };
-        self.open_source_as_window(source, cx);
         self.hide_context_menu(cx);
         cx.notify();
+        let Some(host) = self
+            .active_worktree()
+            .map(|worktree| worktree.host().clone())
+        else {
+            self.open_source_as_window(ProjectSource::local(path), cx);
+            return;
+        };
+        if !host.is_remote() {
+            match host.host_for_project(&path) {
+                Ok(host) => self.open_source_as_window(ProjectSource::new(host, path), cx),
+                Err(error) => eprintln!("別 project を開けない: {error:#}"),
+            }
+            return;
+        }
+        // remote の `host_for_project` は OpenProject の往復。背景で開いてから新窓を出す。
+        // 新窓は「復元」と同じ遅延経路（`ProjectSource::restored` → `hydrate_restored_projects`）
+        // で組み立て、窓を出すのに接続を待たない。root はここで正規化しておく（復元の契約）。
+        cx.spawn(async move |workspace, cx| {
+            let source = cx
+                .background_executor()
+                .spawn(async move {
+                    let host = host.host_for_project(&path)?;
+                    let root = host.canonicalize(&path)?;
+                    Ok::<_, anyhow::Error>(ProjectSource::restored(host, root))
+                })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| match source {
+                Ok(source) => workspace.open_source_as_window(source, cx),
+                Err(error) => workspace.push_toast(
+                    SharedString::from(format!("{error:#}")),
+                    workspace.accent(),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     /// ディレクトリを**現在のウィンドウのレール**にプロジェクトとして開く（browse 中の「ここを開く」）。
@@ -834,20 +912,43 @@ impl Workspace {
     /// home に繋いで → ツリーを辿って → このフォルダを開く、の最後の一歩。新窓は作らない
     /// （新窓が要るなら「新しいウィンドウで開く」・open_folder_as_window との対）。「最近」にも記録。
     pub(crate) fn open_dir_in_rail(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let host = match self.active_worktree() {
-            Some(worktree) => match worktree.host().host_for_project(&path) {
-                Ok(host) => host,
-                Err(error) => {
-                    self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
-                    return;
-                }
-            },
-            None => host::LocalHost::shared(),
-        };
-        self.record_recent_project(host.as_ref(), &path, cx);
-        self.open_folder_in_rail(host, path, None, cx);
         self.hide_context_menu(cx);
         cx.notify();
+        let current = self
+            .active_worktree()
+            .map(|worktree| worktree.host().clone())
+            .unwrap_or_else(host::LocalHost::shared);
+        if !current.is_remote() {
+            match current.host_for_project(&path) {
+                Ok(host) => {
+                    self.record_recent_project(host.as_ref(), &path, cx);
+                    self.open_folder_in_rail(host, path, None, cx);
+                }
+                Err(error) => {
+                    self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx)
+                }
+            }
+            return;
+        }
+        // remote の `host_for_project` は OpenProject の往復。背景で開いてからレールへ。
+        cx.spawn(async move |workspace, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { current.host_for_project(&path).map(|host| (host, path)) })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| match opened {
+                Ok((host, path)) => {
+                    workspace.record_recent_project(host.as_ref(), &path, cx);
+                    workspace.open_folder_in_rail(host, path, None, cx);
+                }
+                Err(error) => workspace.push_toast(
+                    SharedString::from(format!("{error:#}")),
+                    workspace.accent(),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     /// ProjectSource を新しいウィンドウで開く（ローカル folder / SSH の共通経路）。

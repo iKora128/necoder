@@ -700,6 +700,7 @@ impl Workspace {
                 pending_settings_command: None,
                 pending_open_settings_json: false,
                 pending_external_open: Vec::new(),
+                pending_remote_open: Vec::new(),
                 confetti: std::env::var_os("NECODER_CONFETTI").is_some(),
                 agent_width: AGENT_DOCK_WIDTH,
                 resizing_agent: false,

@@ -64,7 +64,14 @@ impl Workspace {
             frame.origin.x + release.x - px(80.),
             frame.origin.y + release.y - px(20.),
         );
-        self.open_source_as_window_at(ProjectSource::new(host, path), Some(origin), cx);
+        // remote は既に開いている root なので「復元」と同じ信頼経路で新窓を組む
+        // （`Worktree::with_host` の往復を新窓の UI スレッドで払わない）。
+        let source = if host.is_remote() {
+            ProjectSource::restored(host, path)
+        } else {
+            ProjectSource::new(host, path)
+        };
+        self.open_source_as_window_at(source, Some(origin), cx);
         if self.project_sessions.projects.len() > 1 {
             self.remove_project_slot(index, window, cx);
         }

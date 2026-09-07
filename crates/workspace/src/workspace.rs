@@ -1089,6 +1089,9 @@ struct ChromeState {
     /// `ne` CLI から IPC（control_ipc の `open`）で届いたパス。ハンドラは Window を持たないため
     /// effect cycle 末尾で `open_external_paths`（Finder 由来と同じ入口）に流す。
     pending_external_open: Vec<PathBuf>,
+    /// Remote SSH の統合ターミナル内 `ne` から、open 専用 gateway 越しに届いた SSH URI。
+    /// 接続を伴うので IPC ハンドラ内では始めず、effect cycle 末尾で remote 接続経路へ流す。
+    pending_remote_open: Vec<String>,
     confetti: bool,
     agent_width: f32,
     resizing_agent: bool,
@@ -1490,6 +1493,7 @@ impl Workspace {
             || self.chrome.pending_settings_command.is_some()
             || self.chrome.pending_open_settings_json
             || !self.chrome.pending_external_open.is_empty()
+            || !self.chrome.pending_remote_open.is_empty()
             || self.pending_transient_tab.is_some()
             || self.pending_open_history
             || self.overlays.pending_project_switch.is_some()
@@ -1513,6 +1517,12 @@ impl Workspace {
         if !self.chrome.pending_external_open.is_empty() {
             let paths = std::mem::take(&mut self.chrome.pending_external_open);
             self.open_external_paths(paths, window, cx);
+        }
+        if !self.chrome.pending_remote_open.is_empty() {
+            let uris = std::mem::take(&mut self.chrome.pending_remote_open);
+            for uri in uris {
+                self.connect_ssh_and_open(uri, cx);
+            }
         }
         if let Some((title, buffer)) = self.pending_transient_tab.take() {
             self.open_transient_tab(title, buffer, window, cx);
@@ -2207,6 +2217,141 @@ mod tests {
         assert!(
             rows.iter().any(|path| path.ends_with("sub/leaf.txt")),
             "背景で読んだ展開結果がツリーに反映されていない: {rows:?}"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// **remote のプロジェクトをレールへ足すとき、UI スレッドで host に触らない**（2026-09-07）。
+    /// `Worktree::with_host`（canonicalize / metadata / .gitignore）と git の問い合わせは
+    /// 再接続が要る場面ではそのぶん固まるので、全部背景で済ませてから slot にする。
+    #[gpui::test]
+    fn adding_a_remote_project_to_the_rail_never_blocks_the_ui_thread(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_workspace_rail_add_io_audit_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let local = root.join("local");
+        let remote = root.join("remote");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::write(remote.join("leaf.txt"), "rail add audit\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let audit = Arc::new(BlockingIoAuditHost::new());
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![local.clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+
+        let before = audit.io_calls();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.open_folder_in_rail(audit.clone(), remote.clone(), None, cx);
+        });
+        assert_eq!(
+            audit.io_calls(),
+            before,
+            "レールへの追加が UI スレッドで host I/O を呼んでいる（remote では SSH の往復＝そのぶん固まる）: {}",
+            audit.seen()
+        );
+
+        cx.run_until_parked();
+        assert!(
+            audit.io_calls() > before,
+            "背景でも worktree を開いていない（仕事ごと落ちている）"
+        );
+        let roots = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .project_sessions
+                .projects
+                .iter()
+                .map(|slot| slot.worktree.root().to_path_buf())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            roots.len(),
+            2,
+            "remote slot がレールに載っていない: {roots:?}"
+        );
+        assert!(
+            roots[1].ends_with("remote"),
+            "背景で開いた worktree が slot になっていない: {roots:?}"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// **分割ペイン（⌘\\）は remote のファイルを UI スレッドで読まない**（2026-09-07）。
+    #[gpui::test]
+    fn splitting_a_remote_file_never_blocks_the_ui_thread(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_workspace_split_io_audit_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("leaf.txt");
+        std::fs::write(&file, "split audit\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let audit = Arc::new(BlockingIoAuditHost::new());
+        let sources = vec![ProjectSource::new(audit.clone(), root.clone())];
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources(sources, Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        // Worktree は root を正規化する（/var → /private/var）ので、slot が持つ root から組む。
+        let file = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_slot()
+                .expect("remote slot がアクティブ")
+                .worktree
+                .root()
+                .join("leaf.txt")
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.restore_open_file(&[RestoredTabs::single(file.clone())], window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _cx| workspace.active_tab_path()),
+            Some(file.clone()),
+            "タブが復元されていない"
+        );
+
+        let before = audit.io_calls();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_split(&SplitRight, window, cx);
+        });
+        assert_eq!(
+            audit.io_calls(),
+            before,
+            "分割が UI スレッドで host I/O を呼んでいる: {}",
+            audit.seen()
+        );
+        cx.run_until_parked();
+        assert!(
+            workspace.read_with(cx, |workspace, _cx| workspace.split_editor.is_some()),
+            "背景で読んだ後に分割ペインが開いていない"
         );
 
         workspace.update_in(cx, |workspace, _window, _cx| {

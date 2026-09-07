@@ -130,7 +130,18 @@ impl Workspace {
         let Some(rows) = self.hot_exit_pending.take() else {
             return;
         };
+        let remote = self
+            .active_worktree()
+            .is_some_and(|worktree| worktree.is_remote());
         for (path, content) in rows {
+            // remote は読みを背景へ（`open_file_then` = 開き終わってから流し込む合流点）。
+            // local は従来どおり同期＝タブ順が復元順のまま。
+            if remote && !self.tabs.iter().any(|tab| tab.path == path) {
+                self.open_file_then(path, window, cx, move |view, cx| {
+                    view.replace_all_text(&content, cx)
+                });
+                continue;
+            }
             if !self.tabs.iter().any(|tab| tab.path == path) {
                 self.open_file_sync(path.clone(), window, cx);
             }

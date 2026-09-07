@@ -77,6 +77,83 @@ fn read_with_retry(remote: &RemoteHost, path: &std::path::Path) -> host::FileCon
     panic!("再接続後も read に失敗: {:?}", last_error);
 }
 
+/// Remote terminal の `ne .` が、接続先の GUI ではなく接続元へ reverse socket 経由で戻る。
+/// gateway が method を `open_remote` へ変換し、SSH authority をローカル側で刻むところまで実証する。
+#[test]
+fn remote_terminal_ne_opens_on_the_client() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::os::unix::net::UnixListener;
+    use std::process::Stdio;
+
+    let Some(uri) = test_uri() else { return };
+    let gui_socket =
+        std::path::PathBuf::from(format!("/tmp/necoder-live-gui-{}.sock", std::process::id()));
+    let _stale = std::fs::remove_file(&gui_socket);
+    let listener = UnixListener::bind(&gui_socket).expect("偽 GUI socket を bind できる");
+    let previous_socket = std::env::var_os("NECODER_GUI_SOCK");
+    std::env::set_var("NECODER_GUI_SOCK", &gui_socket);
+    let remote = connect(&uri);
+    match previous_socket {
+        Some(path) => std::env::set_var("NECODER_GUI_SOCK", path),
+        None => std::env::remove_var("NECODER_GUI_SOCK"),
+    }
+
+    let expected_authority = SshProject::parse(&uri).unwrap().identity();
+    let expected_path = remote.root().to_string_lossy().to_string();
+    let gui = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("gateway が GUI へ接続する");
+        let mut line = String::new();
+        BufReader::new(&mut stream)
+            .read_line(&mut line)
+            .expect("GUI request を読める");
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "open_remote");
+        assert_eq!(request["params"]["authority"], expected_authority);
+        assert_eq!(request["params"]["paths"][0], expected_path);
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({ "ok": true, "result": { "opened": 1 } })
+        )
+        .unwrap();
+    });
+
+    let launch = remote
+        .terminal_launch(remote.root())
+        .expect("terminal launch を組める")
+        .expect("remote は ssh launch を返す");
+    let mut child = Command::new(&launch.program)
+        .args(&launch.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("remote terminal を起動できる");
+    child
+        .stdin
+        .take()
+        .expect("terminal stdin")
+        .write_all(b"ne .\nexit\n")
+        .expect("ne を入力できる");
+    let output = child
+        .wait_with_output()
+        .expect("remote terminal が終了する");
+    assert!(
+        output.status.success(),
+        "remote terminal が失敗: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("接続元の necoder で開きました")
+            || stdout.contains("実行中の necoder で開きました"),
+        "ne の成功表示が無い: {stdout:?}"
+    );
+    gui.join().unwrap();
+    drop(remote);
+    let _cleanup = std::fs::remove_file(gui_socket);
+}
+
 #[test]
 fn remote_ssh_crud_search_command() {
     let Some(uri) = test_uri() else { return };

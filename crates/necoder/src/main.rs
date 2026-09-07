@@ -73,7 +73,9 @@ fn resolve_windows(storage: Option<&storage::Storage>) -> Vec<WindowPlan> {
 
     for arg in args {
         if arg.starts_with("ssh://") {
-            match connect_ssh_project(&arg) {
+            // path 付きは復元と同じ遅延接続（窓を先に出し、接続は背景で追いつく）。
+            // path 無し（home）は root を知るために繋ぐしかない。
+            match restore_ssh_project(&arg, Path::new("")) {
                 Ok(source) => {
                     sources.push(source);
                     open_files.push(RestoredTabs::default());
@@ -523,8 +525,8 @@ fn main() {
         // ここから先は「窓が在るスレッド」。以後 remote host への blocking request がこの
         // スレッドから飛んだら host 側が捕まえる（debug は panic・release は警告）。
         //
-        // 登録がこの位置なのは、`resolve_projects` の SSH 接続だけは意図的に同期だから
-        // ＝まだ窓が無く、固まる UI が存在しない（代わりに起動が遅くなる。別途の課題）。
+        // 登録がこの位置なのは、`resolve_windows` の `ssh://host/`（path 無し = home）だけは
+        // root を知るために同期で繋ぐから＝まだ窓が無く、固まる UI が存在しない。
         host::mark_main_thread();
 
         // 設定（default → user → project）を **反応的 global** に載せてファイル監視を開始する。

@@ -539,13 +539,43 @@ impl Workspace {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
-        let buffer = match Buffer::from_host(worktree.host().clone(), &path) {
-            Ok(buffer) => buffer,
-            Err(error) => {
-                eprintln!("分割ペインを開けない: {error:#}");
-                return;
+        let host = worktree.host().clone();
+        // local は同期（マイクロ秒）。remote は読みを背景へ（再接続待ちで固まらない）。
+        if !host.is_remote() {
+            match Buffer::from_host(host, &path) {
+                Ok(buffer) => self.open_split_editor(buffer, window, cx),
+                Err(error) => eprintln!("分割ペインを開けない: {error:#}"),
             }
+            return;
+        }
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
         };
+        let read_host = host.clone();
+        let read_path = path.clone();
+        cx.spawn(async move |_workspace, cx| {
+            let content = cx
+                .background_executor()
+                .spawn(async move { read_host.read_file(&read_path) })
+                .await;
+            let _ = handle.update(cx, |workspace, window, cx| {
+                // 読んでいる間に開いた/閉じた分割やタブ切替があれば、古い読みで上書きしない。
+                if workspace.split_editor.is_some()
+                    || workspace.active_tab_path() != Some(path.clone())
+                {
+                    return;
+                }
+                match content.and_then(|content| Buffer::from_content(host, &path, content)) {
+                    Ok(buffer) => workspace.open_split_editor(buffer, window, cx),
+                    Err(error) => eprintln!("分割ペインを開けない: {error:#}"),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 読み終えたバッファで右分割ペインを開いてフォーカスする（`toggle_split` の後半）。
+    fn open_split_editor(&mut self, buffer: Buffer, window: &mut Window, cx: &mut Context<Self>) {
         let theme = self.theme.clone();
         let accent = self
             .active_slot()

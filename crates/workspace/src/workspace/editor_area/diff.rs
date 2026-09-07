@@ -178,34 +178,44 @@ impl Workspace {
             return;
         };
         let host = worktree.host().clone();
-        editor.update(cx, |view, cx| {
-            let Some(path) = view.buffer().path().map(Path::to_path_buf) else {
-                return;
-            };
-            let head = project::head_text_on(host.as_ref(), &path).unwrap_or_default();
-            let head_lines: Vec<&str> = head.lines().collect();
-            let replacement: String = head_lines
-                .iter()
-                .skip(hunk.old_range.start as usize)
-                .take(hunk.old_range.len())
-                .map(|line| format!("{line}\n"))
-                .collect();
-            let snapshot = view.buffer().snapshot();
-            let start_row = hunk.new_range.start as usize;
-            let end_row = hunk.new_range.end as usize;
-            let start = snapshot.point_to_byte(editor_core::Point::new(
-                start_row.min(snapshot.line_count().saturating_sub(1)),
-                0,
-            ));
-            let end = if hunk.new_range.is_empty() {
-                start // 削除 hunk: その位置に HEAD の行を挿入
-            } else if end_row < snapshot.line_count() {
-                snapshot.point_to_byte(editor_core::Point::new(end_row, 0))
-            } else {
-                view.buffer().len_bytes()
-            };
-            view.replace_ranges(&[start..end], &replacement, cx);
-        });
+        let Some(path) = editor.read(cx).buffer().path().map(Path::to_path_buf) else {
+            return;
+        };
+        // HEAD の本文は git の呼び出し（remote なら SSH の往復）。stage_hunk と同じく背景で取り、
+        // 置換だけを前景で行う（置換は 1 Transaction・undo 可）。
+        cx.spawn(async move |_workspace, cx| {
+            let head = cx
+                .background_executor()
+                .spawn(
+                    async move { project::head_text_on(host.as_ref(), &path).unwrap_or_default() },
+                )
+                .await;
+            let _ = editor.update(cx, |view, cx| {
+                let head_lines: Vec<&str> = head.lines().collect();
+                let replacement: String = head_lines
+                    .iter()
+                    .skip(hunk.old_range.start as usize)
+                    .take(hunk.old_range.len())
+                    .map(|line| format!("{line}\n"))
+                    .collect();
+                let snapshot = view.buffer().snapshot();
+                let start_row = hunk.new_range.start as usize;
+                let end_row = hunk.new_range.end as usize;
+                let start = snapshot.point_to_byte(editor_core::Point::new(
+                    start_row.min(snapshot.line_count().saturating_sub(1)),
+                    0,
+                ));
+                let end = if hunk.new_range.is_empty() {
+                    start // 削除 hunk: その位置に HEAD の行を挿入
+                } else if end_row < snapshot.line_count() {
+                    snapshot.point_to_byte(editor_core::Point::new(end_row, 0))
+                } else {
+                    view.buffer().len_bytes()
+                };
+                view.replace_ranges(&[start..end], &replacement, cx);
+            });
+        })
+        .detach();
     }
 
     /// hunk のバッファ側テキストをコピーする。

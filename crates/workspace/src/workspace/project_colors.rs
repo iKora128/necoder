@@ -80,8 +80,11 @@ pub(crate) fn resolve_project_colors(projects: &mut [ProjectSlot], storage: &sto
         .iter()
         .zip(&keys)
         .map(|(slot, key)| {
-            slot.identity_color
-                .or_else(|| stored.get(key).map(|&value| theme_core::color_from_hex(value)))
+            slot.identity_color.or_else(|| {
+                stored
+                    .get(key)
+                    .map(|&value| theme_core::color_from_hex(value))
+            })
         })
         .collect();
     let colors = assign_free_colors(&pinned);
@@ -172,7 +175,10 @@ mod tests {
     #[test]
     fn scope_key_matches_recent_projects_convention() {
         // local は固定 scope。リモートは「最近」と同じホスト鍵（"SSH " 接頭辞と空白を落とす）。
-        assert_eq!(host_scope_key(host::LocalHost::shared().as_ref()), LOCAL_SCOPE);
+        assert_eq!(
+            host_scope_key(host::LocalHost::shared().as_ref()),
+            LOCAL_SCOPE
+        );
     }
 
     /// 窓を組み立てて各 slot の色を返す（テスト用・後片付け込み）。
@@ -205,10 +211,8 @@ mod tests {
 
     #[gpui::test]
     fn project_colors_survive_reorder_and_restart(cx: &mut gpui::TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "necoder_project_colors_{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("necoder_project_colors_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         // Worktree は root を canonicalize する（macOS の /var → /private/var）。DB の鍵もその
@@ -242,8 +246,14 @@ mod tests {
             &storage,
             cx,
         );
-        assert!(colors_close(second[2], first[0]), "a の色が並び順で変わった");
-        assert!(colors_close(second[1], first[1]), "b の色が並び順で変わった");
+        assert!(
+            colors_close(second[2], first[0]),
+            "a の色が並び順で変わった"
+        );
+        assert!(
+            colors_close(second[1], first[1]),
+            "b の色が並び順で変わった"
+        );
         assert!(!colors_close(second[0], first[0]) && !colors_close(second[0], first[1]));
 
         // `.necoder/settings.json` の色は DB より強い（チームで揃える色）。

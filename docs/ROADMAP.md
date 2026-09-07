@@ -89,6 +89,7 @@
 - [x] daemon/proxy 再接続・5秒 heartbeat・master 再生成・非冪等 request の無条件再送禁止
 - [x] protocol/fs/process concurrency・proxy 再接続・外部編集競合の統合 test
 - [x] SSH URI の状態復元と status bar の接続先表示
+- [x] **UI スレッドの remote I/O ゼロ化** — 2026-09-07。9/5〜9/7 で潰し残した 6 経路（レールへの追加 `open_folder_in_rail` = `Worktree::with_host` + git 問い合わせ / `open_folder_as_window` / `open_dir_in_rail` の `host_for_project` / `toggle_split` の読み / `revert_hunk` の HEAD 取得 / hot exit 復元 / `ssh://` 引数起動）を背景へ。remote の新窓は復元と同じ遅延経路（`ProjectSource::restored` → `hydrate_restored_projects`）で組む。`assert_off_main_thread` の既定を **debug は panic・release は警告** に倒した。回帰テスト `adding_a_remote_project_to_the_rail_never_blocks_the_ui_thread` / `splitting_a_remote_file_never_blocks_the_ui_thread`。**残: metal のある環境でスリープ復帰の実機確認**
 - → **未チェック残件（ベンチ・musl 配布・dirty backup・障害注入 test・Remote Projects UI・受入）は M13 へ移動**（2026-07-15 判断: 日常機能 M10〜M12 を先に消化する）
 
 設計と根拠: [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md)。

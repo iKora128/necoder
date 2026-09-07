@@ -10,6 +10,8 @@ use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::io::{BufRead as _, BufReader};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -18,7 +20,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const FRAME_MAGIC: [u8; 4] = *b"SHRS";
@@ -57,16 +59,15 @@ pub fn mark_main_thread() {
 /// UI スレッドから `list_files` を呼び、sleep 復帰直後の SSH 再接続を丸ごと待って
 /// **20 秒間アプリが無反応**になったものだった。local では一瞬なので誰も気付けない。
 ///
-/// そこで規約をコードで守らせる。既定は**警告して続行**で、`NECODER_STRICT_MAIN_THREAD_IO=1`
-/// を付けると panic する。
+/// そこで規約をコードで守らせる。**debug ビルドは panic・release は警告して続行**。
+/// `NECODER_STRICT_MAIN_THREAD_IO=1` で release でも panic、`NECODER_ALLOW_MAIN_THREAD_IO=1`
+/// で検査自体を止められる。
 ///
-/// 既定を panic にしないのは、**未修正の違反がまだ残っている**ため。エクスプローラのツリー
-/// 再構築（14 箇所）・watch の開きタブ照合・端末/LSP 起動の `ensure_master`・エージェント
-/// 遷移の HEAD 取得・エージェント起動のコマンド探索は 2026-09-07 までに背景へ移した。残りは
-/// project を新規に開く経路（`Worktree::with_host` + `TaskSpace::for_worktree`）、分割時の
-/// `Buffer::from_host`、hunk の revert、hot-exit 復元、別窓/別 root で開く `host_for_project`
-/// （詳細は JOURNAL 2026-09-07）。潰し終わったら既定を strict に倒すこと。
-/// `NECODER_ALLOW_MAIN_THREAD_IO=1` で検査自体を止められる。
+/// 既知の違反は 2026-09-07 までに全部背景へ移した（エクスプローラのツリー再構築・watch の
+/// 開きタブ照合・端末/LSP 起動・エージェント遷移の HEAD 取得・エージェント起動のコマンド探索・
+/// project を新規に開く経路・分割ペイン・hunk の revert・hot-exit 復元・別窓/別 root で開く
+/// `host_for_project`）。release を panic にしないのは、見落としが 1 つあっただけでユーザーの
+/// アプリを落とすより、固まって警告を残す方がましだから。
 fn assert_off_main_thread(what: &str) {
     if MAIN_THREAD.get() != Some(&thread::current().id()) {
         return;
@@ -78,7 +79,9 @@ fn assert_off_main_thread(what: &str) {
         "UI スレッドから remote host の blocking request（{what}）を呼んでいる。\n\
          SSH 再接続を待つ間アプリ全体が固まる。cx.background_executor().spawn(..) へ載せること。"
     );
-    if std::env::var_os("NECODER_STRICT_MAIN_THREAD_IO").is_some() {
+    let strict =
+        cfg!(debug_assertions) || std::env::var_os("NECODER_STRICT_MAIN_THREAD_IO").is_some();
+    if strict {
         panic!("{message}");
     }
     eprintln!("[necoder] 警告: {message}");
@@ -1578,8 +1581,98 @@ fn connect_session_proxy(session: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remote SSH の統合ターミナルに置く軽量 `ne`。`NECODER_GUI_SOCK` は SSH reverse forward
+/// の接続先であり、その先のローカル gateway が `open` 以外を拒否して接続先 identity を付ける。
+#[cfg(unix)]
+fn run_remote_cli(args: &[String]) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+
+    match args.first().map(String::as_str) {
+        Some("-h") | Some("--help") => {
+            println!("使い方: ne [<path>]...");
+            println!("  Remote SSH の接続元 necoder でパスを開きます");
+            return Ok(());
+        }
+        Some("-V") | Some("--version") => {
+            println!("necoder {SERVER_VERSION}");
+            return Ok(());
+        }
+        _ => {}
+    }
+    let cwd = std::env::current_dir().context("カレントディレクトリが分かりません")?;
+    let mut paths = Vec::new();
+    let mut skipped = Vec::new();
+    for argument in args {
+        let path = Path::new(argument);
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        if !absolute.exists() {
+            skipped.push(absolute.display().to_string());
+            continue;
+        }
+        paths.push(
+            std::fs::canonicalize(&absolute)
+                .unwrap_or(absolute)
+                .display()
+                .to_string(),
+        );
+    }
+    for path in &skipped {
+        eprintln!("見つからない（スキップ）: {path}");
+    }
+    let socket = std::env::var_os("NECODER_GUI_SOCK")
+        .map(PathBuf::from)
+        .context("この ne は necoder の Remote SSH ターミナル内でのみ使えます")?;
+    let mut stream = UnixStream::connect(&socket)
+        .with_context(|| format!("接続元の necoder に接続できません（{}）", socket.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+    let request = serde_json::json!({ "method": "open", "params": { "paths": paths } });
+    writeln!(stream, "{request}").context("接続元への open 送信に失敗")?;
+    stream.flush()?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .take((MAX_META_LEN + 1) as u64)
+        .read_line(&mut line)
+        .context("接続元からの応答を読めません")?;
+    anyhow::ensure!(!line.is_empty(), "接続元からの応答が空です");
+    anyhow::ensure!(line.len() <= MAX_META_LEN, "接続元からの応答が大きすぎます");
+    let response: serde_json::Value =
+        serde_json::from_str(&line).context("接続元からの応答が JSON ではありません")?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        bail!(
+            "{}",
+            response
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("接続元で open に失敗しました")
+        );
+    }
+    let opened = response
+        .get("result")
+        .and_then(|result| result.get("opened"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if opened == 0 {
+        println!("接続元の necoder を前面に出しました");
+    } else {
+        println!("接続元の necoder で開きました（{opened} 件）");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn run_remote_cli(_args: &[String]) -> Result<()> {
+    bail!("Remote SSH の ne は Unix remote でのみ使えます")
+}
+
 pub fn serve_remote_server_cli() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|command| command == "cli") {
+        return run_remote_cli(&args[1..]);
+    }
     match args.as_slice() {
         [command] if command == "version" || command == "--version" => {
             println!("{SERVER_VERSION} protocol={PROTOCOL_VERSION}");
@@ -1603,7 +1696,9 @@ pub fn serve_remote_server_cli() -> Result<()> {
         [command, flag, socket] if command == "daemon" && flag == "--socket" => {
             serve_daemon(Path::new(socket))
         }
-        _ => bail!("使い方: necoder-remote-server <serve --stdio | proxy --session ID | version>"),
+        _ => bail!(
+            "使い方: necoder-remote-server <serve --stdio | proxy --session ID | cli [PATH]... | version>"
+        ),
     }
 }
 
@@ -2050,10 +2145,146 @@ const MASTER_OPTIONS: [&str; 5] = [
     "ExitOnForwardFailure=yes",
 ];
 
+/// Remote terminal の `ne` から接続元 GUI へ戻る、open 専用のローカル gateway。
+///
+/// GUI の `gui.sock` をそのまま `ssh -R` すると、remote 上の任意プロセスへ fleet/send など
+/// 制御 IPC の全権限まで渡してしまう。そこで SSH が転送する先をこの socket に限定し、`open`
+/// 以外を拒否した上で、接続先 identity をローカル側で刻んだ `open_remote` へ変換する。
+#[cfg(unix)]
+struct RemoteCliGateway {
+    socket: PathBuf,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(unix)]
+impl RemoteCliGateway {
+    fn bind(socket: PathBuf, gui_socket: PathBuf, authority: String) -> Result<Self> {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
+
+        let listener = UnixListener::bind(&socket).with_context(|| {
+            format!("remote CLI gateway を bind できない: {}", socket.display())
+        })?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let cleanup_socket = socket.clone();
+        thread::Builder::new()
+            .name("necoder-remote-cli-gateway".to_string())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    if thread_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    match stream {
+                        Ok(mut stream) => {
+                            if let Err(error) = forward_remote_cli_open(
+                                &mut stream,
+                                &gui_socket,
+                                &authority,
+                            ) {
+                                let response = serde_json::json!({
+                                    "ok": false,
+                                    "error": format!("接続元の necoder へ渡せませんでした: {error:#}"),
+                                });
+                                let _written = writeln!(stream, "{response}");
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("remote CLI gateway の accept に失敗: {error}");
+                            break;
+                        }
+                    }
+                }
+                let _cleanup = std::fs::remove_file(cleanup_socket);
+            })
+            .context("remote CLI gateway thread を起動できない")?;
+        Ok(Self { socket, stop })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RemoteCliGateway {
+    fn drop(&mut self) {
+        use std::os::unix::net::UnixStream;
+
+        self.stop.store(true, Ordering::Release);
+        // blocking accept を起こす。接続後は stop を先に見るので要求として処理されない。
+        let _wake = UnixStream::connect(&self.socket);
+    }
+}
+
+/// gateway の 1 接続を処理する。remote から受け付ける method は `open` だけ。
+#[cfg(unix)]
+fn forward_remote_cli_open(
+    remote: &mut std::os::unix::net::UnixStream,
+    gui_socket: &Path,
+    authority: &str,
+) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+
+    remote.set_read_timeout(Some(Duration::from_secs(60)))?;
+    let mut line = String::new();
+    // `try_open_in_running_gui` の生存確認は connect して即 close する。その接続は静かに無視する。
+    if BufReader::new(&mut *remote)
+        .take((MAX_META_LEN + 1) as u64)
+        .read_line(&mut line)?
+        == 0
+    {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        line.len() <= MAX_META_LEN,
+        "remote CLI request が大きすぎる"
+    );
+    let request: serde_json::Value =
+        serde_json::from_str(&line).context("remote CLI request が JSON ではない")?;
+    anyhow::ensure!(
+        request.get("method").and_then(serde_json::Value::as_str) == Some("open"),
+        "remote terminal から許可されている操作は open だけです"
+    );
+    let paths: Vec<&str> = request
+        .get("params")
+        .and_then(|params| params.get("paths"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let forwarded = serde_json::json!({
+        "method": "open_remote",
+        "params": { "authority": authority, "paths": paths },
+    });
+    let mut gui = UnixStream::connect(gui_socket)
+        .with_context(|| format!("GUI socket（{}）に接続できない", gui_socket.display()))?;
+    gui.set_read_timeout(Some(Duration::from_secs(60)))?;
+    writeln!(gui, "{forwarded}").context("GUI への open 転送に失敗")?;
+    gui.flush()?;
+    let mut response = String::new();
+    BufReader::new(gui)
+        .take((MAX_META_LEN + 1) as u64)
+        .read_line(&mut response)
+        .context("GUI 応答を読めない")?;
+    anyhow::ensure!(!response.is_empty(), "GUI 応答が空です");
+    anyhow::ensure!(response.len() <= MAX_META_LEN, "GUI 応答が大きすぎる");
+    remote.write_all(response.as_bytes())?;
+    remote.flush()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+struct RemoteCliForward {
+    remote_socket: PathBuf,
+    remote_bin_dir: PathBuf,
+    _gateway: RemoteCliGateway,
+}
+
 struct SshTransport {
     project: SshProject,
     control_dir: PathBuf,
     control_path: PathBuf,
+    #[cfg(unix)]
+    remote_cli_forward: Option<RemoteCliForward>,
 }
 
 impl SshTransport {
@@ -2080,10 +2311,34 @@ impl SshTransport {
             std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o700))?;
         }
         let control_path = control_dir.join("master");
+        #[cfg(unix)]
+        let remote_cli_forward = if let Some(gui_socket) = paths::runtime_socket() {
+            let token = random_session_id()?;
+            let token = &token[..24];
+            let gateway_socket = control_dir.join("cli-gateway.sock");
+            match RemoteCliGateway::bind(gateway_socket, gui_socket, project.identity()) {
+                Ok(gateway) => Some(RemoteCliForward {
+                    remote_socket: PathBuf::from(format!("/tmp/necoder-cli-{token}.sock")),
+                    remote_bin_dir: PathBuf::from(format!("/tmp/necoder-cli-{token}")),
+                    _gateway: gateway,
+                }),
+                Err(error) => {
+                    // Remote SSH 本体は使えるように保つ。端末内 `ne` だけが無効になる。
+                    eprintln!(
+                        "remote CLI gateway を準備できない（ne は接続元へ戻りません）: {error:#}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(Arc::new(Self {
             project: project.clone(),
             control_dir,
             control_path,
+            #[cfg(unix)]
+            remote_cli_forward,
         }))
     }
 
@@ -2102,6 +2357,19 @@ impl SshTransport {
             .arg(format!("ControlPath={}", self.control_path.display()));
         for option in MASTER_OPTIONS {
             master.args(["-o", option]);
+        }
+        #[cfg(unix)]
+        if let Some(forward) = &self.remote_cli_forward {
+            // remote へ GUI 本体の socket を直出しせず、open 専用 gateway だけを reverse forward。
+            master
+                .args(["-o", "StreamLocalBindUnlink=yes"])
+                .args(["-o", "StreamLocalBindMask=0177"])
+                .arg("-R")
+                .arg(format!(
+                    "{}:{}",
+                    forward.remote_socket.display(),
+                    forward._gateway.socket.display()
+                ));
         }
         if let Some(port) = self.project.port {
             master.args(["-p", &port.to_string()]);
@@ -2496,7 +2764,20 @@ impl SshTransport {
 
 impl Drop for SshTransport {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(forward) = &self.remote_cli_forward {
+            // token 付きの専用パスだけを対象にし、remote の通常ファイルには触れない。
+            let cleanup = format!(
+                "rm -f -- {socket} {shim}; rmdir -- {bin} 2>/dev/null || true",
+                socket = quote_posix(&forward.remote_socket.to_string_lossy()),
+                shim = quote_posix(&forward.remote_bin_dir.join("ne").to_string_lossy()),
+                bin = quote_posix(&forward.remote_bin_dir.to_string_lossy()),
+            );
+            let _cleaned = self.output(&cleanup);
+        }
         self.exit_master();
+        #[cfg(unix)]
+        drop(self.remote_cli_forward.take());
         let _cleanup = std::fs::remove_dir_all(&self.control_dir);
     }
 }
@@ -2505,7 +2786,7 @@ struct SshConnector {
     transport: Arc<SshTransport>,
     /// 配備前は設定値、配備後は解決済みのコマンド。遅延接続では最初の接続まで配備しないので、
     /// 「まだ確かめていない」状態を持てる必要がある。
-    server_command: Mutex<String>,
+    server_command: Arc<Mutex<String>>,
     /// 配備の確認が済んだか。済んだ後は再接続のたびに配備し直さない。
     server_ready: std::sync::atomic::AtomicBool,
     session: String,
@@ -2862,6 +3143,8 @@ pub struct RemoteHost {
     client: Arc<ReconnectingClient>,
     ssh_project: Option<SshProject>,
     transport: Option<Arc<SshTransport>>,
+    /// terminal を開く時点での remote-server 実体。遅延接続後の自動配備結果も共有される。
+    remote_server_command: Option<Arc<Mutex<String>>>,
 }
 
 impl RemoteHost {
@@ -2906,10 +3189,11 @@ impl RemoteHost {
         };
         let project = &project;
         let session = random_session_id()?;
+        let remote_server_command = Arc::new(Mutex::new(server_command));
         let connector = Arc::new(SshConnector {
             transport: transport.clone(),
             // 対話経路では上で配備済み。再接続で配備し直さないよう ready を立てておく。
-            server_command: Mutex::new(server_command),
+            server_command: remote_server_command,
             server_ready: std::sync::atomic::AtomicBool::new(true),
             session,
         });
@@ -2947,9 +3231,10 @@ impl RemoteHost {
             "遅延接続には保存済みの root が要る（$HOME 解決は接続が必要）"
         );
         let transport = SshTransport::new(project).context("SSH control directory の準備に失敗")?;
+        let remote_server_command = Arc::new(Mutex::new(server_command.to_string()));
         let connector = Arc::new(SshConnector {
             transport: transport.clone(),
-            server_command: Mutex::new(server_command.to_string()),
+            server_command: remote_server_command.clone(),
             // 未配備。最初の接続で `ensure_server` が確かめる。
             server_ready: std::sync::atomic::AtomicBool::new(false),
             session: random_session_id()?,
@@ -2966,6 +3251,7 @@ impl RemoteHost {
             client,
             ssh_project: Some(project.clone()),
             transport: Some(transport),
+            remote_server_command: Some(remote_server_command),
         }))
     }
 
@@ -3038,6 +3324,9 @@ impl RemoteHost {
         connector: Option<Arc<SshConnector>>,
         event_sink: Arc<WatchEventSink>,
     ) -> Result<Arc<Self>> {
+        let remote_server_command = connector
+            .as_ref()
+            .map(|connector| connector.server_command.clone());
         let connector = connector.map(|connector| connector as Arc<dyn Connector>);
         let client = ReconnectingClient::new(client, connector, event_sink);
         let (hello, _) = client.request(
@@ -3072,6 +3361,7 @@ impl RemoteHost {
             client,
             ssh_project,
             transport,
+            remote_server_command,
         }))
     }
 
@@ -3138,6 +3428,7 @@ impl RemoteHost {
             client: self.client.clone(),
             ssh_project: self.ssh_project.clone(),
             transport: self.transport.clone(),
+            remote_server_command: self.remote_server_command.clone(),
         }))
     }
 
@@ -3494,10 +3785,43 @@ impl Host for RemoteHost {
         // 以前はここで `ensure_master` を呼んでおり、端末を開くたび・project を開くたびに
         // UI スレッドで接続確認（切れていれば張り直し）を待っていた。
         self.relative(cwd)?;
-        let remote_command = format!(
-            "cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
-            quote_posix(&cwd.to_string_lossy())
-        );
+        let basic_command = || {
+            format!(
+                "cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+                quote_posix(&cwd.to_string_lossy())
+            )
+        };
+        #[cfg(unix)]
+        let remote_command = match (
+            &transport.remote_cli_forward,
+            self.remote_server_command
+                .as_ref()
+                .and_then(|command| command.lock().ok())
+                .map(|command| command.clone()),
+        ) {
+            (Some(forward), Some(server_command)) if !server_command.is_empty() => {
+                // login shell の中でも `ne` が必ずこの接続元へ戻るよう、配備済みの軽量
+                // remote-server を CLI として呼ぶ専用 shim を一時 PATH の先頭へ置く。
+                let shim = format!(
+                    "#!/bin/sh\nexec {} cli \"$@\"\n",
+                    quote_posix(&server_command)
+                );
+                format!(
+                    "umask 077 && mkdir -p {bin} && printf %s {shim_body} > {shim} && \
+                     chmod 700 {shim} && cd {cwd} && \
+                     export PATH={bin}:\"$PATH\" NECODER_GUI_SOCK={socket} && \
+                     exec \"${{SHELL:-/bin/sh}}\" -l",
+                    bin = quote_posix(&forward.remote_bin_dir.to_string_lossy()),
+                    shim_body = quote_posix(&shim),
+                    shim = quote_posix(&forward.remote_bin_dir.join("ne").to_string_lossy()),
+                    cwd = quote_posix(&cwd.to_string_lossy()),
+                    socket = quote_posix(&forward.remote_socket.to_string_lossy()),
+                )
+            }
+            _ => basic_command(),
+        };
+        #[cfg(not(unix))]
+        let remote_command = basic_command();
         Ok(Some(TerminalLaunch {
             program: "ssh".to_string(),
             args: transport.session_args_with(true, &remote_command, true),
@@ -3635,6 +3959,97 @@ mod tests {
     }
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[cfg(unix)]
+    fn short_socket_scratch() -> PathBuf {
+        let path = PathBuf::from(format!(
+            "/tmp/necoder-gw-{}-{}",
+            std::process::id(),
+            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _removed = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_cli_gateway_only_forwards_open_with_trusted_authority() {
+        use std::os::unix::net::UnixListener;
+
+        let root = short_socket_scratch();
+        let gui_socket = root.join("gui.sock");
+        let gateway_socket = root.join("gateway.sock");
+        let gui_listener = UnixListener::bind(&gui_socket).unwrap();
+        let gui = thread::spawn(move || {
+            let (mut stream, _) = gui_listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(&mut stream).read_line(&mut request).unwrap();
+            let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["method"], "open_remote");
+            assert_eq!(request["params"]["authority"], "ssh://dev@example.com");
+            assert_eq!(request["params"]["paths"][0], "/srv/project");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({ "ok": true, "result": { "opened": 1 } })
+            )
+            .unwrap();
+        });
+        let gateway = RemoteCliGateway::bind(
+            gateway_socket.clone(),
+            gui_socket,
+            "ssh://dev@example.com".to_string(),
+        )
+        .unwrap();
+        let mut remote = UnixStream::connect(gateway_socket).unwrap();
+        writeln!(
+            remote,
+            "{}",
+            serde_json::json!({
+                "method": "open",
+                "params": { "paths": ["/srv/project"] },
+            })
+        )
+        .unwrap();
+        let mut response = String::new();
+        BufReader::new(remote).read_line(&mut response).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["result"]["opened"], 1);
+        gui.join().unwrap();
+        drop(gateway);
+        let _removed = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_cli_gateway_rejects_control_methods() {
+        let root = short_socket_scratch();
+        let gateway_socket = root.join("gateway.sock");
+        let gateway = RemoteCliGateway::bind(
+            gateway_socket.clone(),
+            root.join("no-gui.sock"),
+            "ssh://dev@example.com".to_string(),
+        )
+        .unwrap();
+        let mut remote = UnixStream::connect(gateway_socket).unwrap();
+        writeln!(
+            remote,
+            "{}",
+            serde_json::json!({ "method": "send", "params": {} })
+        )
+        .unwrap();
+        let mut response = String::new();
+        BufReader::new(remote).read_line(&mut response).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["ok"], false);
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("open だけ")));
+        drop(gateway);
+        let _removed = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn parses_ssh_config_hosts() {
