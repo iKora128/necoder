@@ -4633,8 +4633,10 @@ Host gpu
     }
 
     /// 到達不能ホストの再現: 接続を張ろうとすると必ず失敗する connector。
+    #[cfg(unix)]
     struct UnreachableConnector;
 
+    #[cfg(unix)]
     impl Connector for UnreachableConnector {
         fn connect(&self, _event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
             bail!("host unreachable (test)")
