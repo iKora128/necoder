@@ -36,6 +36,13 @@ agent:
   err_session_lost: Session ended. Send again to reconnect
   err_session_ended: The agent session ended (treated as interrupted)
   err_cancel_session_lost: Interrupted — the session stopped responding
+  err_session_lost_transport: Lost the connection to the agent (e.g. SSH dropped)
+  session_lost_banner: Session lost (e.g. SSH dropped). It restarts with your next message
+  session_resume: Resume
+  session_resume_tip: Restart the agent now without sending (picks up the previous conversation if the agent supports it)
+  session_resuming: Resuming…
+  session_resumed: Resumed with the previous conversation
+  session_fresh: Started a new session (the previous conversation could not be carried over)
   permission_files: "%{title} (%{n} files)"
   done: Done %{elapsed}
   done_touched: Done %{elapsed} · touched %{n} files
@@ -69,6 +76,7 @@ agent:
   context_filter: Filter by file name…
   permission_needed: ● Approval needed
   attach_tip: Attach file as context
+  compact: /compact
   compact_tip: Summarize and compact the context (/compact)
   output_truncated: "… (%{n} lines hidden)"
   result_lines: "%{n} lines"
@@ -658,6 +666,14 @@ ssh:
   picker_placeholder: Select SSH host (~/.ssh/config)
   manual_entry: Enter URI manually…
   restore_failed: "Cannot reach %{project}. It will retry when you use it"
+  state_connected: connected
+  state_connecting: connecting…
+  state_disconnected: disconnected
+  state_unconnected: not connected
+  chip_tip: "Remote SSH: %{host} (%{state})"
+  reconnect_now: Reconnect
+  connect_now: Connect
+  reconnecting: "Reconnecting to %{host}…"
 goto:
   placeholder: Line number…
 hotexit:

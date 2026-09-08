@@ -15,7 +15,7 @@ use std::io::{BufRead as _, BufReader};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
@@ -220,9 +220,16 @@ pub struct HostWatch {
 }
 
 impl HostWatch {
-    /// 変更通知を timeout 付きで待つ（daemon の poll 差分・相対パス列）。無ければ `None`。
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<Vec<PathBuf>> {
-        self.receiver.recv_timeout(timeout).ok()
+    /// 変更通知を timeout 付きで待つ（daemon の poll 差分・相対パス列）。
+    ///
+    /// `Timeout` と `Disconnected` を呼び出し側が区別できるよう、`mpsc` の結果をそのまま返す。
+    /// 購読が入れ替わって sender が drop された後、切断を「変更無し」に丸めると
+    /// `recv_timeout` が即時エラー→再試行の busy loop になるため。
+    pub fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<PathBuf>, mpsc::RecvTimeoutError> {
+        self.receiver.recv_timeout(timeout)
     }
 
     /// 非ブロッキングで溜まった通知を 1 つ取る。
@@ -320,6 +327,58 @@ pub trait Host: Send + Sync {
     /// workspace 側の notify watch を使う。返した [`HostWatch`] を drop すると監視は止まる。
     fn watch(self: Arc<Self>) -> Result<Option<HostWatch>> {
         Ok(None)
+    }
+    /// いまの接続状態（remote のみ意味を持つ。local は常に [`ConnectionState::Connected`]）。
+    /// atomic の読みだけで I/O はしないので UI スレッドから呼んでよい。
+    fn connection_state(&self) -> ConnectionState {
+        ConnectionState::Connected
+    }
+    /// 接続状態の変化を購読する（remote のみ。local は `None`）。状態が変わるたびに新しい値が
+    /// 届く。受信側が drop したら購読は自然に外れる。
+    fn watch_connection(&self) -> Option<mpsc::Receiver<ConnectionState>> {
+        None
+    }
+    /// 今すぐ再接続を試みる（remote のみ。local は no-op）。**呼び出し側をブロックしない**
+    /// — 接続は背景スレッドで張り、結果は [`Host::watch_connection`] に流れる。heartbeat は
+    /// 到達不能が続くと 60 秒までバックオフするので、「復帰したのに次の試行まで待つ」を
+    /// ユーザー操作で短絡するための入口。
+    fn reconnect(&self) {}
+}
+
+/// remote host の接続状態（statusbar の SSH チップが表示する。M9・2026-09-08）。
+///
+/// 遷移は [`ReconnectingClient`] が一手に握る: 遅延接続は `Unconnected` で始まり、最初の request
+/// または heartbeat で `Connecting` → `Connected`。切断を検知して張り直す間は `Connecting`、
+/// 張り直しに失敗すると `Disconnected`（heartbeat がバックオフしながら再試行する）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// まだ一度も繋いでいない（起動時の遅延接続）。
+    Unconnected,
+    /// 接続を張っている最中（初回も再接続も）。
+    Connecting,
+    /// 繋がっている。
+    Connected,
+    /// 切れていて、直近の張り直しも失敗した。次の試行を待っている。
+    Disconnected,
+}
+
+impl ConnectionState {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => ConnectionState::Connecting,
+            2 => ConnectionState::Connected,
+            3 => ConnectionState::Disconnected,
+            _ => ConnectionState::Unconnected,
+        }
+    }
+
+    fn as_u8(self) -> u8 {
+        match self {
+            ConnectionState::Unconnected => 0,
+            ConnectionState::Connecting => 1,
+            ConnectionState::Connected => 2,
+            ConnectionState::Disconnected => 3,
+        }
     }
 }
 
@@ -1747,19 +1806,46 @@ impl Read for CountingReader {
 /// Event をここへ流す。購読が無ければ捨てる。
 #[derive(Default)]
 struct WatchEventSink {
-    sender: Mutex<Option<mpsc::Sender<Vec<PathBuf>>>>,
+    sender: Mutex<Option<(u64, mpsc::Sender<Vec<PathBuf>>)>>,
+    next_subscription_id: AtomicU64,
 }
 
 impl WatchEventSink {
-    fn set(&self, sender: Option<mpsc::Sender<Vec<PathBuf>>>) {
+    /// 新しい購読を現在の配送先にする。戻り値は、古い keeper が新しい
+    /// 購読を誤って解除しないための世代 ID。
+    fn subscribe(&self, sender: mpsc::Sender<Vec<PathBuf>>) -> u64 {
+        let id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut slot) = self.sender.lock() {
-            *slot = sender;
+            *slot = Some((id, sender));
+        }
+        id
+    }
+
+    fn is_current(&self, id: u64) -> bool {
+        self.sender
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|(current, _)| *current == id))
+            .unwrap_or(false)
+    }
+
+    /// `id` がまだ現在の購読なら外す。古い watch の遅れた Drop で、後から
+    /// 開始した watch の sender を drop しない。
+    fn clear_if_current(&self, id: u64) -> bool {
+        let Ok(mut slot) = self.sender.lock() else {
+            return false;
+        };
+        if slot.as_ref().is_some_and(|(current, _)| *current == id) {
+            *slot = None;
+            true
+        } else {
+            false
         }
     }
 
     fn dispatch(&self, event: WatchEvent) {
         if let Ok(slot) = self.sender.lock() {
-            if let Some(sender) = slot.as_ref() {
+            if let Some((_, sender)) = slot.as_ref() {
                 let _sent = sender.send(event.paths);
             }
         }
@@ -2904,6 +2990,10 @@ struct ReconnectingClient {
     last_failure: Mutex<Option<(std::time::Instant, String)>>,
     event_sink: Arc<WatchEventSink>,
     generation: AtomicU64,
+    /// いまの接続状態（[`ConnectionState::as_u8`]）。UI が I/O 無しで読める唯一の窓。
+    state: AtomicU8,
+    /// 状態変化の購読者。送れなくなった（受信側が drop した）ものは次の通知で外す。
+    state_listeners: Mutex<Vec<mpsc::Sender<ConnectionState>>>,
 }
 
 impl ReconnectingClient {
@@ -2925,6 +3015,11 @@ impl ReconnectingClient {
         connector: Option<Arc<dyn Connector>>,
         event_sink: Arc<WatchEventSink>,
     ) -> Arc<Self> {
+        let initial_state = if current.is_some() {
+            ConnectionState::Connected
+        } else {
+            ConnectionState::Unconnected
+        };
         let client = Arc::new(Self {
             current: Mutex::new(current),
             connector,
@@ -2932,6 +3027,8 @@ impl ReconnectingClient {
             last_failure: Mutex::new(None),
             event_sink,
             generation: AtomicU64::new(0),
+            state: AtomicU8::new(initial_state.as_u8()),
+            state_listeners: Mutex::new(Vec::new()),
         });
         if client.connector.is_some() {
             let weak = Arc::downgrade(&client);
@@ -3000,6 +3097,49 @@ impl ReconnectingClient {
     /// 再接続のたびに増える世代番号。watch keeper が「監視を張り直す」判定に使う。
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
+    }
+
+    /// いまの接続状態（atomic 読みだけ・I/O 無し）。
+    fn state(&self) -> ConnectionState {
+        ConnectionState::from_u8(self.state.load(Ordering::Relaxed))
+    }
+
+    /// 状態を更新し、変わったときだけ購読者へ流す。受信側が消えた購読はここで外す。
+    fn set_state(&self, state: ConnectionState) {
+        let previous = self.state.swap(state.as_u8(), Ordering::Relaxed);
+        if previous == state.as_u8() {
+            return;
+        }
+        if let Ok(mut listeners) = self.state_listeners.lock() {
+            listeners.retain(|listener| listener.send(state).is_ok());
+        }
+    }
+
+    /// 状態変化の購読口。購読時点の状態は [`Self::state`] で別途読む（変化だけが流れる）。
+    fn subscribe_state(&self) -> mpsc::Receiver<ConnectionState> {
+        let (sender, receiver) = mpsc::channel();
+        if let Ok(mut listeners) = self.state_listeners.lock() {
+            listeners.push(sender);
+        }
+        receiver
+    }
+
+    /// ユーザー操作による「今すぐ再接続」。背景スレッドで heartbeat を 1 回だけ前倒しする。
+    /// 生きていれば何もしない（healthy な接続を捨てて張り直したりしない）、未接続なら初回接続、
+    /// 死んでいれば張り直し — 判定は [`Self::heartbeat_once`] と同じなので、定期 heartbeat と
+    /// 二重に走っても `reconnect_lock` と superseded 判定で 1 本に畳まれる。
+    fn reconnect_in_background(self: &Arc<Self>) {
+        let client = self.clone();
+        let spawned = thread::Builder::new()
+            .name("necoder-remote-reconnect".to_string())
+            .spawn(move || {
+                if !client.heartbeat_once(PING_TIMEOUT) {
+                    eprintln!("Remote SSH: 手動再接続に失敗（heartbeat が引き続き再試行します）");
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("Remote SSH: 再接続スレッドを起動できない: {error}");
+        }
     }
 
     fn request(&self, request: &Request, body: Vec<u8>) -> Result<(Response, Vec<u8>)> {
@@ -3110,6 +3250,7 @@ impl ReconnectingClient {
         // 待たせたままだと各自のタイムアウトまで（最大 30s）帰ってこないし、書き込みで
         // 詰まったスレッドは writer ロックを握ったまま ssh の自滅（最大 45s）を待つことになる。
         // 失敗した側は自分で `connect_now` に来て、張り直し済みの接続（superseded）を受け取る。
+        self.set_state(ConnectionState::Connecting);
         if let Some(dead) = &latest {
             dead.abort("remote connection replaced: 再接続のため古い接続を破棄した");
         }
@@ -3119,6 +3260,7 @@ impl ReconnectingClient {
                 if let Ok(mut failure) = self.last_failure.lock() {
                     *failure = Some((std::time::Instant::now(), format!("{error:#}")));
                 }
+                self.set_state(ConnectionState::Disconnected);
                 return Err(error);
             }
         };
@@ -3131,6 +3273,7 @@ impl ReconnectingClient {
             .map_err(|_| anyhow!("remote client lock poisoned"))? = Some(replacement.clone());
         // 世代を進める → watch keeper が新接続で監視を張り直す。
         self.generation.fetch_add(1, Ordering::Relaxed);
+        self.set_state(ConnectionState::Connected);
         Ok(replacement)
     }
 }
@@ -3141,9 +3284,12 @@ pub struct RemoteHost {
     root: PathBuf,
     project_id: AtomicU64,
     client: Arc<ReconnectingClient>,
+    /// watch の入れ替えと Unwatch を直列化する。`open_project` で作る別 root とも共有。
+    watch_control: Arc<Mutex<()>>,
     ssh_project: Option<SshProject>,
     transport: Option<Arc<SshTransport>>,
     /// terminal を開く時点での remote-server 実体。遅延接続後の自動配備結果も共有される。
+    #[cfg(unix)]
     remote_server_command: Option<Arc<Mutex<String>>>,
 }
 
@@ -3249,8 +3395,10 @@ impl RemoteHost {
             // 受けて `OpenProject` し直す既存経路に乗る（daemon 再起動時と同じ扱い）。
             project_id: AtomicU64::new(0),
             client,
+            watch_control: Arc::new(Mutex::new(())),
             ssh_project: Some(project.clone()),
             transport: Some(transport),
+            #[cfg(unix)]
             remote_server_command: Some(remote_server_command),
         }))
     }
@@ -3324,6 +3472,7 @@ impl RemoteHost {
         connector: Option<Arc<SshConnector>>,
         event_sink: Arc<WatchEventSink>,
     ) -> Result<Arc<Self>> {
+        #[cfg(unix)]
         let remote_server_command = connector
             .as_ref()
             .map(|connector| connector.server_command.clone());
@@ -3359,8 +3508,10 @@ impl RemoteHost {
             root,
             project_id: AtomicU64::new(project_id),
             client,
+            watch_control: Arc::new(Mutex::new(())),
             ssh_project,
             transport,
+            #[cfg(unix)]
             remote_server_command,
         }))
     }
@@ -3426,8 +3577,10 @@ impl RemoteHost {
             root,
             project_id: AtomicU64::new(project_id),
             client: self.client.clone(),
+            watch_control: self.watch_control.clone(),
             ssh_project: self.ssh_project.clone(),
             transport: self.transport.clone(),
+            #[cfg(unix)]
             remote_server_command: self.remote_server_command.clone(),
         }))
     }
@@ -3496,12 +3649,21 @@ impl RemoteHost {
     fn start_watch(self: &Arc<Self>) -> Result<HostWatch> {
         use std::sync::atomic::{AtomicBool, Ordering::Acquire};
         let (sender, receiver) = mpsc::channel::<Vec<PathBuf>>();
-        self.client.event_sink().set(Some(sender));
-        self.send_watch()?;
+        let event_sink = self.client.event_sink();
+        let subscription_id = {
+            // server は 1 connection に watch を 1 本持つ。古い keeper の後始末と新しい
+            // Watch が交差しないよう、remote request と sink の入れ替えを同じ lock で束ねる。
+            let _control = self
+                .watch_control
+                .lock()
+                .map_err(|_| anyhow!("remote watch control lock poisoned"))?;
+            self.send_watch()?;
+            event_sink.subscribe(sender)
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let keeper_stop = stop.clone();
         let keeper = self.clone();
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("necoder-remote-watch-keeper".to_string())
             .spawn(move || {
                 let mut seen = keeper.client.generation();
@@ -3512,20 +3674,45 @@ impl RemoteHost {
                     }
                     let generation = keeper.client.generation();
                     if generation != seen {
+                        let Ok(_control) = keeper.watch_control.lock() else {
+                            break;
+                        };
+                        if !keeper.client.event_sink().is_current(subscription_id) {
+                            // 後から始まった watch が現在の購読。古い root を張り直さない。
+                            break;
+                        }
                         // 再接続が起きた → 新しい接続で監視を張り直す（失敗しても次周で再試行）。
                         seen = generation;
                         let _resubscribed = keeper.send_watch();
                     }
                 }
-                // best-effort で監視停止 + シンクを外す。
-                let _unwatched = keeper.scoped_request(
-                    |project_id| Request::Unwatch { project_id },
-                    Vec::new(),
-                    true,
-                );
-                keeper.client.event_sink().set(None);
-            })
-            .context("remote watch keeper thread spawn")?;
+                let Ok(_control) = keeper.watch_control.lock() else {
+                    return;
+                };
+                // 自分がまだ現在の watch のときだけ、best-effort で監視停止 + sink を外す。
+                // 入れ替え済みの古い keeper は、新しい watch を Unwatch しない。
+                if keeper.client.event_sink().is_current(subscription_id) {
+                    let _unwatched = keeper.scoped_request(
+                        |project_id| Request::Unwatch { project_id },
+                        Vec::new(),
+                        true,
+                    );
+                    keeper.client.event_sink().clear_if_current(subscription_id);
+                }
+            });
+        if let Err(error) = spawned {
+            if let Ok(_control) = self.watch_control.lock() {
+                if event_sink.is_current(subscription_id) {
+                    let _unwatched = self.scoped_request(
+                        |project_id| Request::Unwatch { project_id },
+                        Vec::new(),
+                        true,
+                    );
+                    event_sink.clear_if_current(subscription_id);
+                }
+            }
+            return Err(error).context("remote watch keeper thread spawn");
+        }
         Ok(HostWatch { receiver, stop })
     }
 }
@@ -3541,6 +3728,18 @@ impl Host for RemoteHost {
 
     fn is_remote(&self) -> bool {
         true
+    }
+
+    fn connection_state(&self) -> ConnectionState {
+        self.client.state()
+    }
+
+    fn watch_connection(&self) -> Option<mpsc::Receiver<ConnectionState>> {
+        Some(self.client.subscribe_state())
+    }
+
+    fn reconnect(&self) {
+        self.client.reconnect_in_background();
     }
 
     fn project_uri(&self, path: &Path) -> Option<String> {
@@ -3946,6 +4145,55 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn host_watch_distinguishes_timeout_from_disconnection() {
+        let (sender, receiver) = mpsc::channel();
+        let watch = HostWatch {
+            receiver,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        assert_eq!(
+            watch.recv_timeout(Duration::from_millis(1)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(sender);
+        assert_eq!(
+            watch.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Disconnected),
+            "sender 切断は即時に判別でき、pump が busy loop から抜けられる"
+        );
+    }
+
+    #[test]
+    fn stale_watch_cannot_clear_replacement_subscription() {
+        let sink = WatchEventSink::default();
+        let (first_sender, first_receiver) = mpsc::channel();
+        let first = sink.subscribe(first_sender);
+        let (second_sender, second_receiver) = mpsc::channel();
+        let second = sink.subscribe(second_sender);
+
+        assert_eq!(
+            first_receiver.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Disconnected),
+            "購読の入れ替えで古い pump を終了させる"
+        );
+        assert!(!sink.clear_if_current(first));
+        sink.dispatch(WatchEvent {
+            paths: vec![PathBuf::from("new.txt")],
+        });
+        assert_eq!(
+            second_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(vec![PathBuf::from("new.txt")]),
+            "古い keeper の後始末で新しい購読を外さない"
+        );
+        assert!(sink.clear_if_current(second));
+        assert_eq!(
+            second_receiver.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -4382,6 +4630,67 @@ Host gpu
             RpcClient::new(reader, Box::new(client_stream), None, event_sink),
             server_stream,
         )
+    }
+
+    /// 到達不能ホストの再現: 接続を張ろうとすると必ず失敗する connector。
+    struct UnreachableConnector;
+
+    impl Connector for UnreachableConnector {
+        fn connect(&self, _event_sink: Arc<WatchEventSink>) -> Result<Arc<RpcClient>> {
+            bail!("host unreachable (test)")
+        }
+    }
+
+    /// 接続状態は「張り直しの前後」で Connecting → Connected と遷移し、購読者に変化だけが届く。
+    /// statusbar の SSH チップはこの遷移を見て色と再接続ボタンを出す（2026-09-08）。
+    #[cfg(unix)]
+    #[test]
+    fn connection_state_follows_reconnect() {
+        let sink = Arc::new(WatchEventSink::default());
+        let (dead, _server_end) = silent_client(sink.clone());
+        let connector = Arc::new(PairConnector {
+            connections: AtomicU64::new(0),
+        });
+        let client =
+            ReconnectingClient::new(dead, Some(connector.clone() as Arc<dyn Connector>), sink);
+        assert_eq!(client.state(), ConnectionState::Connected);
+        let states = client.subscribe_state();
+
+        // 黙っている接続を見限って張り直す（heartbeat 相当）。
+        assert!(client.heartbeat_once(Duration::from_millis(200)));
+        assert_eq!(client.state(), ConnectionState::Connected);
+        assert_eq!(
+            states.try_iter().collect::<Vec<_>>(),
+            vec![ConnectionState::Connecting, ConnectionState::Connected],
+            "張り直しの開始と完了が順に届く"
+        );
+        assert_eq!(connector.connections.load(Ordering::Relaxed), 1);
+    }
+
+    /// 張り直しに失敗すると Disconnected に落ち、遅延接続はまだ繋いでいない Unconnected で始まる。
+    #[cfg(unix)]
+    #[test]
+    fn connection_state_reports_disconnected_when_reconnect_fails() {
+        let sink = Arc::new(WatchEventSink::default());
+        let (dead, _server_end) = silent_client(sink.clone());
+        let client = ReconnectingClient::new(
+            dead,
+            Some(Arc::new(UnreachableConnector) as Arc<dyn Connector>),
+            sink,
+        );
+        let states = client.subscribe_state();
+        assert!(!client.heartbeat_once(Duration::from_millis(200)));
+        assert_eq!(client.state(), ConnectionState::Disconnected);
+        assert_eq!(
+            states.try_iter().collect::<Vec<_>>(),
+            vec![ConnectionState::Connecting, ConnectionState::Disconnected]
+        );
+
+        let lazy = ReconnectingClient::disconnected(
+            Arc::new(UnreachableConnector) as Arc<dyn Connector>,
+            Arc::new(WatchEventSink::default()),
+        );
+        assert_eq!(lazy.state(), ConnectionState::Unconnected);
     }
 
     #[cfg(unix)]

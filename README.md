@@ -90,6 +90,10 @@ Point necoder at an SSH URI, or browse from the launcher (`＋` → SSH). System
 cargo run -p necoder -- 'ssh://user@example.com:22/home/user/project'
 ```
 
+In necoder's integrated terminal for a Remote SSH project, `ne .` opens that remote directory in
+the originating necoder window. The deployed lightweight server supplies the command even when the
+remote host does not have the desktop app installed.
+
 To exercise the complete SSH path locally, `./scripts/test-remote-ssh-docker.sh` spins up a disposable Ubuntu/OpenSSH container and runs the live suite (add `--gui` to try the interactive connection flow). Details and remaining gaps: [`docs/research/remote-ssh-2026.md`](docs/research/remote-ssh-2026.md).
 
 ## Documentation
@@ -202,6 +206,10 @@ SSH URI を渡すか、ランチャー(`＋` → SSH)から辿ります。シス
 ```sh
 cargo run -p necoder -- 'ssh://user@example.com:22/home/user/project'
 ```
+
+Remote SSH プロジェクトの統合ターミナルでは、`ne .` がそのリモートディレクトリを接続元の
+necoder ウィンドウで開きます。接続先にデスクトップ版が無くても、配備済みの軽量サーバが
+`ne` コマンドを提供します。
 
 SSH 経路全体をローカルで試すには `./scripts/test-remote-ssh-docker.sh`(使い捨ての Ubuntu/OpenSSH コンテナで実スイートを実行。`--gui` で対話フローも試せます)。詳細と残課題: [`docs/research/remote-ssh-2026.md`](docs/research/remote-ssh-2026.md)。
 

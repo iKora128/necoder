@@ -37,6 +37,13 @@ agent:
   err_session_lost: セッションが切れました。もう一度送信してください
   err_session_ended: エージェントのセッションが終了しました（中断扱い）
   err_cancel_session_lost: セッションが応答しないため中断しました
+  err_session_lost_transport: エージェントとの接続が切れました（SSH 切断など）
+  session_lost_banner: セッションが切れました（SSH 切断など）。次の送信で立ち上げ直します
+  session_resume: 再開
+  session_resume_tip: 送信せずに今すぐ立ち上げ直す（前回の会話は対応エージェントなら引き継ぎます）
+  session_resuming: 再開中…
+  session_resumed: 前回の会話を引き継いで再開しました
+  session_fresh: 新しいセッションを開始しました（前回の会話は引き継げませんでした）
   permission_files: "%{title}（%{n} ファイル）"
   done: 完了 %{elapsed}
   done_touched: 完了 %{elapsed}・触ったファイル %{n}
@@ -70,6 +77,7 @@ agent:
   context_filter: ファイル名で絞り込み…
   permission_needed: ● 承認が必要
   attach_tip: ファイルを文脈に添付
+  compact: /compact
   compact_tip: 文脈を要約して圧縮する（/compact）
   output_truncated: "… (%{n} 行省略)"
   result_lines: "%{n} 行"
@@ -659,6 +667,14 @@ ssh:
   picker_placeholder: SSH ホストを選択（~/.ssh/config）
   manual_entry: URI を手入力…
   restore_failed: "%{project} に接続できません。操作すると再接続を試みます"
+  state_connected: 接続済み
+  state_connecting: 接続中…
+  state_disconnected: 切断
+  state_unconnected: 未接続
+  chip_tip: "Remote SSH: %{host}（%{state}）"
+  reconnect_now: 再接続
+  connect_now: 接続
+  reconnecting: "%{host} へ再接続中…"
 goto:
   placeholder: 行番号…
 hotexit:

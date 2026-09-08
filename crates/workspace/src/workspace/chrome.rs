@@ -1631,6 +1631,12 @@ impl Workspace {
         };
         let branch = self.active_slot().and_then(|slot| slot.branch.clone());
         let remote_host = self.active_slot().and_then(|slot| slot.remote_host.clone());
+        // 接続状態は host の atomic を読むだけ（I/O 無し）。変化は remote_connection の購読が notify する。
+        let remote_state = self
+            .active_slot()
+            .filter(|slot| slot.worktree.is_remote())
+            .map(|slot| slot.worktree.host().connection_state())
+            .unwrap_or(host::ConnectionState::Connected);
         let change_count = self.repository.status.len();
         let (cursor, language) = match self.active_editor() {
             Some(editor) => {
@@ -1679,19 +1685,78 @@ impl Workspace {
                     ),
             )
             .when_some(remote_host, |element, remote_host| {
-                let tooltip = format!("Remote SSH: {remote_host}");
+                // SSH チップ = 接続状態の表示（2026-09-08）。「SSH」の色が状態: 接続済み=ok・
+                // 接続中=warn・切断=err・未接続（遅延接続でまだ触っていない）=fg2。接続済み以外は
+                // 状態の語を添え、切断/未接続には「再接続/接続」の文字チップ（heartbeat の
+                // バックオフを待たずに今すぐ張り直す）。装飾の色ではなく診断と同じ意味色。
+                use host::ConnectionState;
+                let (label_color, state_text, action_label) = match remote_state {
+                    ConnectionState::Connected => (
+                        theme.ok,
+                        SharedString::from(i18n::t!("ssh.state_connected")),
+                        None,
+                    ),
+                    ConnectionState::Connecting => (
+                        theme.warn,
+                        SharedString::from(i18n::t!("ssh.state_connecting")),
+                        None,
+                    ),
+                    ConnectionState::Disconnected => (
+                        theme.err,
+                        SharedString::from(i18n::t!("ssh.state_disconnected")),
+                        Some(SharedString::from(i18n::t!("ssh.reconnect_now"))),
+                    ),
+                    ConnectionState::Unconnected => (
+                        theme.fg2,
+                        SharedString::from(i18n::t!("ssh.state_unconnected")),
+                        Some(SharedString::from(i18n::t!("ssh.connect_now"))),
+                    ),
+                };
+                let tooltip = i18n::t!(
+                    "ssh.chip_tip",
+                    "host" => remote_host.clone(),
+                    "state" => state_text.clone()
+                );
+                let show_state = remote_state != ConnectionState::Connected;
                 element.child(
                     div()
                         .id("statusbar-remote-host")
                         .flex()
                         .items_center()
                         .gap(px(4.))
-                        .max_w(px(180.))
+                        .max_w(px(260.))
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_color(theme.fg0)
-                        .child(div().text_color(theme.ok).child("SSH"))
+                        .child(div().text_color(label_color).child("SSH"))
                         .child(remote_host)
+                        .when(show_state, |element| {
+                            element.child(div().text_color(theme.fg2).child(state_text))
+                        })
+                        .when_some(action_label, |element, action_label| {
+                            element.child(
+                                div()
+                                    .id("statusbar-remote-reconnect")
+                                    .flex_none()
+                                    .px(px(6.))
+                                    .py(px(1.))
+                                    .rounded(px(5.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .text_size(px(10.5))
+                                    .text_color(theme.fg1)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                                    .child(action_label)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.reconnect_active_remote(cx);
+                                        }),
+                                    ),
+                            )
+                        })
                         .tooltip(Tooltip::text(tooltip, theme.clone())),
                 )
             })

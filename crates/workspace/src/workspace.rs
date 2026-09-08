@@ -65,6 +65,7 @@ mod notifications;
 mod overlays;
 mod rail;
 mod rail_view;
+mod remote_connection;
 mod remote_ssh;
 mod shortcut_sheet;
 mod worktree_delete;
@@ -1224,6 +1225,9 @@ pub struct Workspace {
     /// 経過秒・承認待ち表示だけの1Hz時計。マスコットの5/10fps時計は子Entityに分離済み。
     visual_tick: u64,
     visual_ticker: bool,
+    /// remote host ごとの接続状態の購読（host id → pump）。statusbar の SSH チップが
+    /// 「接続中/切断」を即時に映すための配線（`remote_connection.rs`・2026-09-08）。
+    connection_pumps: std::collections::HashMap<String, remote_connection::ConnectionPump>,
     /// 編隊レベルの ✳ 総括（Tier 2・P4）。キューに影響する遷移から 5s デバウンスで oneshot 生成。
     /// **状態を上書きしない**（数字とキューは事実層・これは監督バーに添える文）。
     control_summary: Option<SharedString>,

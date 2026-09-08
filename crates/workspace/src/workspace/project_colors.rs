@@ -215,9 +215,9 @@ mod tests {
             std::env::temp_dir().join(format!("necoder_project_colors_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        // Worktree は root を canonicalize する（macOS の /var → /private/var）。DB の鍵もその
-        // 文字列なので、テスト側も同じ形で持つ。
-        let root = std::fs::canonicalize(&root).unwrap();
+        // Worktree は `paths::canonicalize` する（macOS の /var → /private/var、Windows の
+        // `\\?\` 接頭辞を吸収）。DB の鍵もその文字列なので、テスト側も同じ関数を使う。
+        let root = paths::canonicalize(&root).unwrap();
         let project_a = root.join("a");
         let project_b = root.join("b");
         let project_c = root.join("c");

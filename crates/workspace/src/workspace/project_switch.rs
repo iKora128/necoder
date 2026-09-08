@@ -360,6 +360,8 @@ impl Workspace {
                 dock.ensure_active(cx);
             });
         }
+        // remote の接続状態の購読（冪等・I/O 無し）。レールの並びが変わっても取りこぼさない。
+        self.ensure_connection_pumps(cx);
     }
 
     /// Agent パネルの宛先チップにアクティブプロジェクト名・ブランチを反映する。

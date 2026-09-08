@@ -219,6 +219,15 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   （到着より前の失敗＝ユーザーの新しい操作だけが繋ぎに行く）。切断中に操作するほど遅くなるのを防ぐ。
   実 SSH の回帰は `crates/host/tests/remote_ssh_live.rs`（`scripts/test-remote-ssh-docker.sh` が
   Linux artifact の用意から container の凍結注入まで面倒を見る）。
+- 接続状態の公開（2026-09-08）: `Host::connection_state()`（atomic 読み・I/O 無し＝ UI スレッド可）/
+  `Host::watch_connection()`（変化の購読・std mpsc）/ `Host::reconnect()`（背景で heartbeat を 1 回前倒し。
+  生きていれば何もしない）。遷移は `ReconnectingClient` が一手に握る（Unconnected → Connecting → Connected / Disconnected）。
+  workspace は host ごとに 1 本の pump（`remote_connection.rs`）で notify を受け、statusbar の SSH チップが色と
+  「再接続」チップを出す。**SSH セッションに乗るプロセス（ACP/LSP/PTY）は自動再接続の外**: ssh の子が
+  落ちると stdout が EOF になり、そのプロセスは消える。ACP は `acp_client` が EOF（`is_incoming_transport_closed` /
+  待機中は `incoming_closed`）を見てセッションを畳み（`AgentEvent::SessionLost`）、次の送信で立ち上げ直す。
+  会話は `session/load`（エージェントが `loadSession` を広告するとき・id は `storage.thread_sessions`）で引き継ぐ。
+  LSP/PTY の同種の再 spawn は未着手（ROADMAP M9 残件）。
 - SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。
 - server は単一 static binary、client と protocol/version を handshake、daemon + proxy で再接続可能にする。
 - wire は length-prefixed typed header + raw body。初版は request id/capability/frame limit を持ち、

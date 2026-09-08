@@ -678,6 +678,7 @@ impl Workspace {
         self.update_agent_destination_for(index, cx);
         if is_remote {
             self.refresh_explorer_for(index, cx);
+            self.ensure_connection_pumps(cx);
         }
         // switch_project は window が要る（subscribe 経由に無い）ため、次の render で消化する。
         self.overlays.pending_project_switch = Some(index);

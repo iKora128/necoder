@@ -90,6 +90,13 @@ else
     done
 fi
 
+# 同じ workspace version の途中で wire protocol / remote CLI が変わることもある。target 名だけで
+# 拾った古い artifact を使うと、client が配備後の version 検査で落ちるので source より古ければ再生成。
+if [ -f "$server_binary" ] && { [ "$repo_root/crates/host/src/host.rs" -nt "$server_binary" ] || [ "$repo_root/crates/host/Cargo.toml" -nt "$server_binary" ]; }; then
+    echo "==> Cached $target artifact is older than host sources; rebuilding"
+    server_binary=''
+fi
+
 # No artifact yet: build one in Docker. The Mac usually has no Linux cross toolchain,
 # and the full workspace cannot be reused here because it depends on gpui from the zed git
 # repository - a large clone that necoder-remote-server does not need. So assemble a tiny

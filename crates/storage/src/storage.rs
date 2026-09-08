@@ -737,12 +737,62 @@ impl Storage {
         })
     }
 
-    /// スレッドを会話ごと削除する（threads 1 行 + その turns 全行）。
+    /// スレッドが最後に使った ACP セッション id を記録する（`session/new` / `session/load` の直後）。
+    /// 次にそのスレッドのエージェントを立ち上げ直すとき（SSH 切断後・再起動後）、エージェントが
+    /// `loadSession` を広告していればこの id で会話を引き継ぐ（2026-09-08）。
+    pub fn set_thread_session(&self, thread_id: &str, acp_session: &str) -> Result<()> {
+        let (thread_id, acp_session) = (thread_id.to_string(), acp_session.to_string());
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO thread_sessions (thread_id, acp_session, updated_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(thread_id) DO UPDATE SET acp_session = ?2, updated_at = ?3",
+                    (thread_id.as_str(), acp_session.as_str(), now),
+                )
+                .await
+                .context("thread_sessions の upsert に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 全スレッドの ACP セッション id（thread_id → acp_session）。起動時の復元で一括で読む。
+    pub fn load_thread_sessions(&self) -> Result<Vec<(String, String)>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query("SELECT thread_id, acp_session FROM thread_sessions", ())
+                    .await
+                    .context("thread_sessions の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("thread_sessions 行の取得に失敗")?
+                {
+                    let thread_id = row.get_value(0)?.as_text().context("thread_id")?.clone();
+                    let acp_session = row.get_value(1)?.as_text().context("acp_session")?.clone();
+                    result.push((thread_id, acp_session));
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// スレッドを会話ごと削除する（threads 1 行 + その turns 全行 + ACP セッション id）。
     /// 過去バージョンが新プロジェクトへ種付けしたデモスレッドの掃除（agent_panel・2026-08-17）に使う。
     pub fn delete_thread(&self, id: &str) -> Result<()> {
         let id = id.to_string();
         self.run(move |conn| {
             futures::executor::block_on(async {
+                conn.execute(
+                    "DELETE FROM thread_sessions WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_sessions の削除に失敗")?;
                 conn.execute("DELETE FROM turns WHERE thread_id = ?1", (id.as_str(),))
                     .await
                     .context("turns の削除に失敗")?;
@@ -1048,10 +1098,7 @@ impl Storage {
                     .await
                     .context("project_colors の読み出しに失敗")?;
                 let mut result = Vec::new();
-                while let Some(row) = rows
-                    .next()
-                    .await
-                    .context("project_colors 行の取得に失敗")?
+                while let Some(row) = rows.next().await.context("project_colors 行の取得に失敗")?
                 {
                     let scope = row.get_value(0)?.as_text().context("scope")?.clone();
                     let path = row.get_value(1)?.as_text().context("path")?.clone();
@@ -1110,7 +1157,6 @@ impl Storage {
             })
         })
     }
-
 
     /// リモートホストで最後に開いたプロジェクトパスを読む（SSH ピッカーの即接続用・M13 #2d）。
     pub fn host_last_path(&self, host: &str) -> Result<Option<String>> {
@@ -1551,6 +1597,19 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("turns index 作成に失敗")?;
+    // スレッドが最後に使った ACP セッション id（`session/load` で会話を引き継ぐ鍵・2026-09-08）。
+    // threads 表を広げず別表にする: 列を足すと upsert/load の tuple が全部変わる上、
+    // セッション id は「エージェント側の状態への参照」でスレッドのメタとは寿命が違う。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_sessions (
+            thread_id TEXT PRIMARY KEY,
+            acp_session TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("thread_sessions 作成に失敗")?;
     // checkpoint（M12-2・content-addressed。blob 本体はファイル、ここはメタのみ）。
     conn.execute(
         "CREATE TABLE IF NOT EXISTS checkpoints (
@@ -1871,7 +1930,12 @@ mod tests {
         let storage = Storage::open(&path).unwrap();
 
         // 未登録は None・一括読みは空。
-        assert_eq!(storage.project_color("local", "/Users/d/Work/necoder").unwrap(), None);
+        assert_eq!(
+            storage
+                .project_color("local", "/Users/d/Work/necoder")
+                .unwrap(),
+            None
+        );
         assert!(storage.load_project_colors().unwrap().is_empty());
         storage
             .set_project_color("local", "/Users/d/Work/necoder", 0xef4444)
@@ -1884,7 +1948,9 @@ mod tests {
             .set_project_color("gpu_spare", "/home/dev/proj", 0xa855f7)
             .unwrap();
         assert_eq!(
-            storage.project_color("local", "/Users/d/Work/necoder").unwrap(),
+            storage
+                .project_color("local", "/Users/d/Work/necoder")
+                .unwrap(),
             Some(0xef4444)
         );
         assert_eq!(
@@ -1892,7 +1958,9 @@ mod tests {
             Some(0x3b82f6)
         );
         assert_eq!(
-            storage.project_color("gpu_spare", "/home/dev/proj").unwrap(),
+            storage
+                .project_color("gpu_spare", "/home/dev/proj")
+                .unwrap(),
             Some(0xa855f7)
         );
         // upsert（同じキーへ上書き）。
@@ -1900,7 +1968,9 @@ mod tests {
             .set_project_color("local", "/Users/d/Work/necoder", 0x22c55e)
             .unwrap();
         assert_eq!(
-            storage.project_color("local", "/Users/d/Work/necoder").unwrap(),
+            storage
+                .project_color("local", "/Users/d/Work/necoder")
+                .unwrap(),
             Some(0x22c55e)
         );
         let mut all = storage.load_project_colors().unwrap();
@@ -1908,9 +1978,21 @@ mod tests {
         assert_eq!(
             all,
             vec![
-                ("gpu_box".to_string(), "/home/dev/proj".to_string(), 0x3b82f6),
-                ("gpu_spare".to_string(), "/home/dev/proj".to_string(), 0xa855f7),
-                ("local".to_string(), "/Users/d/Work/necoder".to_string(), 0x22c55e),
+                (
+                    "gpu_box".to_string(),
+                    "/home/dev/proj".to_string(),
+                    0x3b82f6
+                ),
+                (
+                    "gpu_spare".to_string(),
+                    "/home/dev/proj".to_string(),
+                    0xa855f7
+                ),
+                (
+                    "local".to_string(),
+                    "/Users/d/Work/necoder".to_string(),
+                    0x22c55e
+                ),
             ]
         );
 
@@ -2012,6 +2094,38 @@ mod tests {
             .unwrap();
         assert!(storage.recent_remote_projects().unwrap().is_empty());
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ACP セッション id はスレッド単位で往復し、上書きでき、スレッド削除で消える（2026-09-08）。
+    #[test]
+    fn thread_sessions_round_trip_and_follow_thread_deletion() {
+        let path = temp_db("thread_sessions");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("t1", "設計", 0, "necoder", None, None, None, 0, 0)
+            .unwrap();
+        assert!(storage.load_thread_sessions().unwrap().is_empty());
+        storage.set_thread_session("t1", "sess-old").unwrap();
+        storage.set_thread_session("t1", "sess-new").unwrap();
+        storage.set_thread_session("t2", "sess-other").unwrap();
+        let mut sessions = storage.load_thread_sessions().unwrap();
+        sessions.sort();
+        assert_eq!(
+            sessions,
+            vec![
+                ("t1".to_string(), "sess-new".to_string()),
+                ("t2".to_string(), "sess-other".to_string()),
+            ],
+            "同じスレッドは最新の id で上書きされる"
+        );
+        storage.delete_thread("t1").unwrap();
+        assert_eq!(
+            storage.load_thread_sessions().unwrap(),
+            vec![("t2".to_string(), "sess-other".to_string())],
+            "スレッド削除でセッション id も消える"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

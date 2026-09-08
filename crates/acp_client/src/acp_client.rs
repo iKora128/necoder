@@ -208,6 +208,15 @@ pub enum AgentEvent {
     TurnEnded { reason: TurnEnd },
     /// エラー（接続断・プロトコル異常・起動失敗など）。
     Failed(String),
+    /// セッションが開いた（`session/new` または `session/load` の直後・Modes/Configs より前）。
+    /// `session_id` はエージェント側の会話の鍵。UI はスレッドに控えて、次にこのスレッドの
+    /// エージェントを立ち上げ直すとき [`SessionPreferences::resume`] に渡す。
+    /// `resumed` = `session/load` で前回の会話を引き継げた（false は新規セッション）。
+    SessionStarted { session_id: String, resumed: bool },
+    /// エージェントとの transport が閉じた（プロセス終了・SSH 切断）。**この後セッションは終わる**
+    /// （[`run_session_on`] が戻り、イベントチャネルも閉じる）。ターン中なら UI はそのターンを
+    /// 畳み、以後の送信は新しいセッションを立ち上げる。待機中にも届く（EOF を待機中も見張るため）。
+    SessionLost,
 }
 
 /// ターンの終わり方（ACP `StopReason` の簡約）。UI の「完了/中断」の出し分けに使う。
@@ -1046,6 +1055,32 @@ fn map_config_option(option: &v1::SessionConfigOption) -> Option<ConfigOption> {
     }
 }
 
+/// [`find_config_choice`] の結果: どの設定のどの値を送るか、既に current かどうか。
+struct ConfigChoice {
+    config_id: String,
+    value_id: String,
+    /// エージェントの current が既にこの値（＝送る必要が無い）。
+    is_current: bool,
+}
+
+/// スレッドの希望（表示名 or value_id・大文字小文字無視）を、エージェントの広告一覧から引く。
+/// 該当カテゴリの広告が無い / 選択肢に無いなら `None`（＝エージェント既定のまま）。
+fn find_config_choice(
+    configs: &[ConfigOption],
+    category: ConfigCategory,
+    desired: &str,
+) -> Option<ConfigChoice> {
+    let config = configs.iter().find(|config| config.category == category)?;
+    let (value_id, _) = config.choices.iter().find(|(value_id, name)| {
+        name.eq_ignore_ascii_case(desired) || value_id.eq_ignore_ascii_case(desired)
+    })?;
+    Some(ConfigChoice {
+        config_id: config.config_id.clone(),
+        value_id: value_id.clone(),
+        is_current: *value_id == config.current,
+    })
+}
+
 /// ACP ハンドシェイク（initialize）応答の上限。これを超えたら「エージェントが無言でハング」とみなし、
 /// 無限に待ち続けず**エラーを返す**（＝チャットに「エラー: …」として出て、無言のスピナー継続が断てる）。
 /// ローカル起動の initialize は通常 1〜3 秒。初回だけ npx が shim を取得する分の余裕を見て、host の
@@ -1181,20 +1216,41 @@ pub async fn prompt_once(command: &AgentCommand, prompt: &str) -> Result<String>
     result
 }
 
+/// セッション起動時にエージェントへ合わせておく「スレッドの希望」（権限モード・モデル・思考量）。
+///
+/// UI からの後追いコマンド（[`SessionCommand::SetMode`] / [`SessionCommand::SetConfig`]）は遅延起動
+/// では **最初の Prompt の後ろ**にキューへ並び、ターン中は deferred に積まれる＝初回ターンには効かない。
+/// [`run_session_on`] は `session/new` 直後・最初の prompt を読む前にこれを適用し、適用後の状態を
+/// [`AgentEvent::Modes`] / [`AgentEvent::Configs`] として UI へ流す（UI 側の照合が一致し二重送信しない）。
+/// 各値は表示名 or id（大文字小文字無視）。エージェントが広告していなければ黙って既定のままにする。
+#[derive(Debug, Clone, Default)]
+pub struct SessionPreferences {
+    /// 権限モード（`session/set_mode`）。
+    pub mode: Option<String>,
+    /// モデル（`session/set_config_option`・category = Model）。
+    pub model: Option<String>,
+    /// 思考レベル / effort（`session/set_config_option`・category = ThoughtLevel）。
+    pub effort: Option<String>,
+    /// 前回このスレッドが使っていた ACP セッション id（[`AgentEvent::SessionStarted`] で控えたもの）。
+    /// エージェントが `loadSession` を広告していれば `session/load` で会話を引き継ぐ。広告が無い・
+    /// 引き継ぎに失敗した場合は黙って新規セッションにする（SSH 切断・再起動からの復帰・2026-09-08）。
+    pub resume: Option<String>,
+}
+
 /// **常駐セッション + 逐次ストリーミング**。エージェントを起動して 1 セッションを開き、`prompt_rx` から
 /// 届く各 prompt を送っては `session/update` を [`AgentEvent`] に簡約して `event_tx` へ逐次流す。
 /// `prompt_rx` が閉じる（＝送信ハンドルが全て drop）まで常駐し、プロセス・セッションを保持する
 /// （同一スレッド内は文脈が続く）。ターン境界は `StopReason` = [`AgentEvent::TurnEnded`]。
 pub async fn run_session(
     command: AgentCommand,
-    desired_mode: Option<String>,
+    preferences: SessionPreferences,
     command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
     run_session_on(
         LocalHost::shared(),
         command,
-        desired_mode,
+        preferences,
         command_rx,
         event_tx,
     )
@@ -1203,14 +1259,15 @@ pub async fn run_session(
 
 /// 指定 host 上の常駐 ACP セッション。remote filesystem と agent process を同居させる。
 ///
-/// `desired_mode` はスレッドが望む権限モード（表示名 or mode_id・大文字小文字無視）。
+/// `preferences` はスレッドが望む権限モード・モデル・思考量（表示名 or id・大文字小文字無視）。
 /// **最初の prompt を読む前に**エージェントへ適用する — 遅延起動では UI からの
-/// `SetMode` コマンドが Prompt の後ろに並ぶため、ここで合わせないと初回ターンが
-/// エージェント既定モードで走ってしまう（bypass が効かない元凶・JOURNAL 2026-08-28）。
+/// `SetMode` / `SetConfig` コマンドが Prompt の後ろに並ぶため、ここで合わせないと初回ターンが
+/// エージェント既定のモード・モデルで走ってしまう（bypass が効かない元凶・JOURNAL 2026-08-28。
+/// 「ピルは Opus なのに初回だけ Fable が答える」も同じ構造・2026-09-07）。
 pub async fn run_session_on(
     host: Arc<dyn Host>,
     command: AgentCommand,
-    desired_mode: Option<String>,
+    preferences: SessionPreferences,
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<()> {
@@ -1231,24 +1288,82 @@ pub async fn run_session_on(
     let outcome = acp::Client
         .builder()
         .connect_with(transport, async move |connection| {
-            with_handshake_timeout(
+            let initialized = with_handshake_timeout(
                 "ACP initialize",
                 connection.send_request(initialize_request()).block_task(),
             )
             .await?;
-            // セッションを手動生成する（`start_session` は応答の `config_options` を捨てるため）。
-            // NewSessionResponse から config_options を取り出してから attach する。
-            let response = connection
-                .send_request(v1::NewSessionRequest::new(&cwd))
-                .block_task()
-                .await?;
-            let config_options = response.config_options.clone();
-            let mut session = connection.attach_session(response, Vec::new())?;
+            // 前回のセッション id があり、エージェントが `loadSession` を広告していれば `session/load`
+            // で会話を引き継ぐ（SSH 切断・再起動のあとも同じスレッドで続きが話せる）。
+            //
+            // load 中にエージェントは履歴を `session/update` で**再生**してから応答する。crate は
+            // ハンドラ未登録のセッション宛て通知を捨てずに**溜めて attach 時に流す**ので、先に
+            // 仮の応答で attach し、load を待つ間に届く update を自分のチャネルで受けて捨てる
+            // ＝ transcript に古い会話が二重に載らない。応答と同時に ready だった分も捨て切る。
+            // load が失敗したら（id が古い・エージェント側の記録が消えた）新規セッションで続ける。
+            // ただし transport が閉じていたら続けても無駄なのでそのまま抜ける。
+            let can_load = initialized.agent_capabilities.load_session;
+            let resume_id = preferences.resume.clone().filter(|_| can_load);
+            let mut resumed_session = None;
+            if let Some(previous) = resume_id {
+                use futures::future::FutureExt as _;
+                let mut session = connection
+                    .attach_session(v1::NewSessionResponse::new(previous.clone()), Vec::new())?;
+                let load = connection
+                    .send_request(v1::LoadSessionRequest::new(previous.clone(), &cwd))
+                    .block_task()
+                    .fuse();
+                futures::pin_mut!(load);
+                let loaded = loop {
+                    let update = session.read_update().fuse();
+                    futures::pin_mut!(update);
+                    futures::select_biased! {
+                        update = update => match update {
+                            Ok(_replayed) => continue, // 履歴の再生。捨てる
+                            Err(error) => break Err(error),
+                        },
+                        result = load => break result,
+                    }
+                };
+                while matches!(session.read_update().now_or_never(), Some(Ok(_))) {}
+                match loaded {
+                    Ok(loaded) => {
+                        resumed_session = Some((session, loaded.modes, loaded.config_options));
+                    }
+                    Err(error) if acp::is_incoming_transport_closed(&error) => return Err(error),
+                    Err(error) => {
+                        eprintln!("ACP session/load に失敗（新規セッションで続行）: {error}");
+                        drop(session); // 仮のハンドラを外してから session/new へ
+                    }
+                }
+            }
+            let resumed = resumed_session.is_some();
+            let (mut session, modes_state, config_options) = match resumed_session {
+                Some(resumed_session) => resumed_session,
+                None => {
+                    // セッションを手動生成する（`start_session` は応答の `config_options` を捨てるため）。
+                    // NewSessionResponse から config_options を取り出してから attach する。
+                    let response = connection
+                        .send_request(v1::NewSessionRequest::new(&cwd))
+                        .block_task()
+                        .await?;
+                    let modes_state = response.modes.clone();
+                    let config_options = response.config_options.clone();
+                    let session = connection.attach_session(response, Vec::new())?;
+                    (session, modes_state, config_options)
+                }
+            };
+            event_tx
+                .unbounded_send(AgentEvent::SessionStarted {
+                    session_id: session.session_id().to_string(),
+                    resumed,
+                })
+                .ok();
 
             // エージェントが広告する権限モード一覧 + 現在モードを UI へ（セレクタを実モードで組む）。
             // 希望モードが広告に在れば**ここで**（初回 prompt より前に）set_mode し、UI へは
             // 適用後の current を流す＝UI 側の照合が一致して二重送信にならない。
-            let advertised = session.modes().as_ref().map(|state| {
+            let advertised = modes_state.as_ref().map(|state| {
                 let modes: Vec<(String, String)> = state
                     .available_modes
                     .iter()
@@ -1257,7 +1372,7 @@ pub async fn run_session_on(
                 (modes, state.current_mode_id.to_string())
             });
             if let Some((modes, mut current)) = advertised {
-                let desired_id = desired_mode.as_deref().and_then(|desired| {
+                let desired_id = preferences.mode.as_deref().and_then(|desired| {
                     modes
                         .iter()
                         .find(|(id, name)| {
@@ -1283,11 +1398,40 @@ pub async fn run_session_on(
                     .unbounded_send(AgentEvent::Modes { modes, current })
                     .ok();
             }
-            // 設定オプション（モデル・思考レベル）を UI へ（あればセレクタを実選択肢に置き換える）。
+            // 設定オプション（モデル・思考レベル）も**初回 prompt より前に**スレッドの希望へ合わせる。
+            // UI は `Configs` を受けてから `SetConfig` を送るが、遅延起動ではそれが Prompt の後ろに
+            // 並び、ターン中は deferred に積まれる＝初回ターンがエージェント既定モデルで走る
+            // （ピルは Opus・応答は Fable、の正体。モードの bypass レースと同じ構造）。
+            // 広告に無い希望は送らない（UI が広告 current を採用してピルを合わせる）。
+            // 適用後の一覧を UI へ流せば、UI 側の照合が一致して二重送信にならない。
             if let Some(options) = &config_options {
-                event_tx
-                    .unbounded_send(AgentEvent::Configs(map_config_options(options)))
-                    .ok();
+                let mut configs = map_config_options(options);
+                for (category, desired) in [
+                    (ConfigCategory::Model, preferences.model.as_deref()),
+                    (ConfigCategory::ThoughtLevel, preferences.effort.as_deref()),
+                ] {
+                    let Some(desired) = desired else {
+                        continue;
+                    };
+                    let Some(choice) = find_config_choice(&configs, category, desired) else {
+                        continue;
+                    };
+                    if choice.is_current {
+                        continue;
+                    }
+                    if let Ok(response) = connection
+                        .send_request(v1::SetSessionConfigOptionRequest::new(
+                            session.session_id().clone(),
+                            choice.config_id,
+                            v1::SessionConfigOptionValue::value_id(choice.value_id),
+                        ))
+                        .block_task()
+                        .await
+                    {
+                        configs = map_config_options(&response.config_options);
+                    }
+                }
+                event_tx.unbounded_send(AgentEvent::Configs(configs)).ok();
             }
 
             // ターン中に `session/cancel` を送るための ID（`session` はターン中
@@ -1302,11 +1446,26 @@ pub async fn run_session_on(
             loop {
                 let session_command = match deferred.pop_front() {
                     Some(command) => command,
-                    None => match command_rx.next().await {
-                        Some(command) => command,
-                        // UI が送信ハンドルを drop した＝このセッションは終わり。
-                        None => break,
-                    },
+                    None => {
+                        // 待機中も transport の EOF を見張る。command だけを待つと、SSH 切断で
+                        // エージェントが消えても次の送信まで気付けず、送信して初めて
+                        // 「Incoming transport closed」になる（2026-09-08 の報告の片割れ）。
+                        use futures::future::FutureExt as _;
+                        let next_command = command_rx.next().fuse();
+                        let closed = connection.incoming_closed().fuse();
+                        futures::pin_mut!(next_command, closed);
+                        futures::select_biased! {
+                            command = next_command => match command {
+                                Some(command) => command,
+                                // UI が送信ハンドルを drop した＝このセッションは終わり。
+                                None => break,
+                            },
+                            _ = closed => {
+                                event_tx.unbounded_send(AgentEvent::SessionLost).ok();
+                                break;
+                            }
+                        }
+                    }
                 };
                 let prompt = match session_command {
                     SessionCommand::Prompt(prompt) => prompt,
@@ -1399,6 +1558,10 @@ pub async fn run_session_on(
                         TurnEvent::Command(None) => break,
                         TurnEvent::Update(Ok(update)) => update,
                         TurnEvent::Update(Err(error)) => {
+                            if acp::is_incoming_transport_closed(&error) {
+                                event_tx.unbounded_send(AgentEvent::SessionLost).ok();
+                                return Ok(());
+                            }
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
                                 .ok();
@@ -1423,6 +1586,16 @@ pub async fn run_session_on(
                         // transcript にエラーを出す終端イベント。このターンだけ畳み、外側ループへ
                         // 戻ってセッションを維持する（ユーザーは同じスレッドで再送できる）。
                         TurnEvent::PromptFinished(Err(error)) => {
+                            if acp::is_incoming_transport_closed(&error) {
+                                // エージェントが消えた（プロセス終了・SSH 切断）。このセッションは
+                                // 二度と応答しない（crate は EOF 後の request を即座に同じエラーで
+                                // 落とす）ので、ターンだけでなくセッションごと畳む。維持すると
+                                // 送るたびに「Incoming transport closed」が返り続ける
+                                // （2026-09-08 の報告）。UI は SessionLost で送信路を捨て、
+                                // 次の送信で立ち上げ直す。
+                                event_tx.unbounded_send(AgentEvent::SessionLost).ok();
+                                return Ok(());
+                            }
                             event_tx
                                 .unbounded_send(AgentEvent::Failed(error.to_string()))
                                 .ok();
@@ -2065,7 +2238,7 @@ for line in sys.stdin:
             .expect("send");
 
         let events = futures::executor::block_on(async move {
-            let session = run_session(command, None, command_rx, event_tx);
+            let session = run_session(command, SessionPreferences::default(), command_rx, event_tx);
             let scenario = async move {
                 let mut seen = Vec::new();
                 // 1 ターン目: エラー応答 → Failed（終端）。ここでセッションはまだ生きている。
@@ -2098,29 +2271,470 @@ for line in sys.stdin:
             seen
         });
 
-        assert!(matches!(events[0], AgentEvent::TurnStarted), "{events:?}");
-        match &events[1] {
+        // 先頭はセッション開始（新規・id は偽エージェントの "sess-1"）。
+        match &events[0] {
+            AgentEvent::SessionStarted {
+                session_id,
+                resumed,
+            } => {
+                assert_eq!(session_id, "sess-1");
+                assert!(!resumed);
+            }
+            other => panic!("SessionStarted を期待: {other:?}"),
+        }
+        assert!(matches!(events[1], AgentEvent::TurnStarted), "{events:?}");
+        match &events[2] {
             AgentEvent::Failed(message) => assert!(
                 message.contains("Connection closed mid-response"),
                 "{message}"
             ),
             other => panic!("Failed を期待: {other:?}"),
         }
-        assert!(matches!(events[2], AgentEvent::TurnStarted), "{events:?}");
-        match &events[3] {
+        assert!(matches!(events[3], AgentEvent::TurnStarted), "{events:?}");
+        match &events[4] {
             AgentEvent::AgentChunk(text) => assert_eq!(text, "recovered"),
             other => panic!("AgentChunk を期待: {other:?}"),
         }
         assert!(
             matches!(
-                events[4],
+                events[5],
                 AgentEvent::TurnEnded {
                     reason: TurnEnd::Completed
                 }
             ),
             "{events:?}"
         );
-        assert_eq!(events.len(), 5, "{events:?}");
+        assert_eq!(events.len(), 6, "{events:?}");
+    }
+
+    /// 偽エージェントを走らせ、イベントチャネルが閉じるまで（＝セッションが終わるまで）の
+    /// 全イベントと `run_session` の結果を返す。transport 断系のテストの共通土台。
+    fn run_fake_agent_until_session_ends(
+        script: &str,
+        preferences: SessionPreferences,
+        first_prompt: Option<&str>,
+    ) -> Option<(Result<()>, Vec<AgentEvent>)> {
+        let python = find_in_path("python3")?;
+        let cwd = std::env::current_dir().expect("cwd");
+        let command = AgentCommand::new(python, vec!["-c".into(), script.into()], cwd);
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        if let Some(prompt) = first_prompt {
+            command_tx
+                .unbounded_send(SessionCommand::Prompt(prompt.into()))
+                .expect("send");
+        }
+        Some(futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let collect = async move {
+                let mut seen = Vec::new();
+                // 送信ハンドルは握ったまま。セッションが**自分から**終わることを検証する。
+                while let Some(event) = event_rx.next().await {
+                    seen.push(event);
+                }
+                drop(command_tx);
+                seen
+            };
+            futures::join!(session, collect)
+        }))
+    }
+
+    /// 偽エージェント: `session/prompt` を受けた瞬間にプロセスごと消える（SSH 切断で remote の
+    /// エージェントが SIGHUP で死ぬのと同じ見え方＝ stdout が EOF になる）。
+    const AGENT_THAT_DIES_ON_PROMPT: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "sess-1"}})
+    elif method == "session/prompt":
+        sys.exit(0)
+"#;
+
+    /// 回帰テスト（2026-09-08）: ターン中に transport が閉じたら、そのターンだけでなく
+    /// **セッションごと**終わる。以前は「そのターンだけ Failed」でセッションを維持していたため、
+    /// 送るたびに「Incoming transport closed」が即返るゾンビになっていた。
+    #[test]
+    fn transport_close_during_prompt_ends_session() {
+        let Some((outcome, events)) = run_fake_agent_until_session_ends(
+            AGENT_THAT_DIES_ON_PROMPT,
+            SessionPreferences::default(),
+            Some("1回目"),
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("transport 断は異常終了ではなく、畳んで正常に戻る");
+        assert!(
+            matches!(events[0], AgentEvent::SessionStarted { .. }),
+            "{events:?}"
+        );
+        assert!(matches!(events[1], AgentEvent::TurnStarted), "{events:?}");
+        assert!(
+            matches!(events.last(), Some(AgentEvent::SessionLost)),
+            "最後は SessionLost（Failed ではない）: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Failed(_))),
+            "transport 断を Failed として二重に報告しない: {events:?}"
+        );
+    }
+
+    /// 偽エージェント: `session/new` に答えた直後に消える（待機中の切断）。
+    const AGENT_THAT_DIES_WHILE_IDLE: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "sess-1"}})
+        sys.exit(0)
+"#;
+
+    /// 待機中（prompt を送っていない）に transport が閉じても、次の送信を待たずに SessionLost が
+    /// 届いてセッションが終わる。UI はこれで送信前に「切れている」と表示できる。
+    #[test]
+    fn transport_close_while_idle_ends_session() {
+        let Some((outcome, events)) = run_fake_agent_until_session_ends(
+            AGENT_THAT_DIES_WHILE_IDLE,
+            SessionPreferences::default(),
+            None,
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("待機中の transport 断も正常に畳む");
+        assert!(
+            matches!(events[0], AgentEvent::SessionStarted { .. }),
+            "{events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(AgentEvent::SessionLost)),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnStarted)),
+            "prompt を送っていないのでターンは始まらない: {events:?}"
+        );
+    }
+
+    /// 偽エージェント（`LOAD_CAP` を true/false に置換して使う）: `loadSession` の広告有無で
+    /// `session/load` が使われるかが変わる。load 時は履歴の再生（古いチャンク）を流してから応答する。
+    /// prompt 応答には受けた method の順を埋め込む＝どちらの経路を通ったかを本文で検証できる。
+    const AGENT_WITH_LOAD_SESSION: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+seen = []
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    seen.append(method)
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"loadSession": LOAD_CAP}}})
+    elif method == "session/load":
+        sid = params["sessionId"]
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": sid,
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": "old history"}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fresh"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": params["sessionId"],
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": "order=" + ",".join(seen)}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"#;
+
+    fn resume_scenario(load_advertised: bool) -> Option<Vec<AgentEvent>> {
+        // python の真偽値は大文字（json.dumps が JSON の true/false へ直す）。
+        let script = AGENT_WITH_LOAD_SESSION
+            .replace("LOAD_CAP", if load_advertised { "True" } else { "False" });
+        let preferences = SessionPreferences {
+            resume: Some("prev-1".into()),
+            ..SessionPreferences::default()
+        };
+        let (outcome, events) =
+            run_fake_agent_until_session_ends(&script, preferences, Some("続き"))?;
+        outcome.expect("セッションは正常終了する");
+        Some(events)
+    }
+
+    /// `loadSession` を広告するエージェントには `session/load` で前回の id を渡し、同じ会話を
+    /// 引き継ぐ。load 中に再生される履歴は transcript に流さない（二重表示しない）。
+    #[test]
+    fn resume_loads_previous_session_and_skips_replayed_history() {
+        let Some(events) = resume_scenario(true) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        match &events[0] {
+            AgentEvent::SessionStarted {
+                session_id,
+                resumed,
+            } => {
+                assert_eq!(session_id, "prev-1");
+                assert!(resumed, "session/load で引き継いだ");
+            }
+            other => panic!("SessionStarted を期待: {other:?}"),
+        }
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chunks,
+            vec!["order=initialize,session/load,session/prompt"],
+            "再生された履歴（old history）は流れず、session/new も呼ばれない: {events:?}"
+        );
+    }
+
+    /// 広告が無ければ前回 id があっても `session/new`（引き継がず・失敗もしない）。
+    #[test]
+    fn resume_falls_back_to_new_session_when_load_is_not_advertised() {
+        let Some(events) = resume_scenario(false) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        match &events[0] {
+            AgentEvent::SessionStarted {
+                session_id,
+                resumed,
+            } => {
+                assert_eq!(session_id, "fresh");
+                assert!(!resumed);
+            }
+            other => panic!("SessionStarted を期待: {other:?}"),
+        }
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chunks,
+            vec!["order=initialize,session/new,session/prompt"],
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn config_choice_matches_name_or_id_case_insensitively() {
+        let configs = vec![ConfigOption {
+            config_id: "model".into(),
+            category: ConfigCategory::Model,
+            current: "claude-fable-5".into(),
+            choices: vec![
+                ("claude-opus-5".into(), "Opus".into()),
+                ("claude-fable-5".into(), "Fable".into()),
+            ],
+        }];
+        let by_name = find_config_choice(&configs, ConfigCategory::Model, "opus")
+            .expect("表示名（大文字小文字無視）で引ける");
+        assert_eq!(by_name.config_id, "model");
+        assert_eq!(by_name.value_id, "claude-opus-5");
+        assert!(!by_name.is_current, "current と違うので送る対象");
+        let by_id = find_config_choice(&configs, ConfigCategory::Model, "CLAUDE-FABLE-5")
+            .expect("value_id でも引ける");
+        assert!(by_id.is_current, "current と同じなら送らない");
+        assert!(
+            find_config_choice(&configs, ConfigCategory::Model, "claude-sonnet-5").is_none(),
+            "広告に無い希望は None（エージェント既定のまま）"
+        );
+        assert!(
+            find_config_choice(&configs, ConfigCategory::ThoughtLevel, "Opus").is_none(),
+            "カテゴリ違いは None"
+        );
+    }
+
+    /// 遅延起動の初回ターン: UI からの `SetConfig` は Prompt の後ろに並ぶ（＝ターン中 deferred）ので、
+    /// 起動時の `SessionPreferences` を**最初の prompt より前に**適用する。偽エージェントは受けた
+    /// method を順に記録し、prompt 応答で「その時点の current」を返す＝初回ターンが希望どおりに
+    /// 走ったかと、`set_config_option` が `session/prompt` より前に届いたかを同時に検証できる。
+    #[test]
+    fn preferences_apply_before_first_prompt() {
+        const FAKE_AGENT: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+current = {"model": "claude-fable-5", "effort": "high"}
+seen = []
+
+def config_options():
+    return [
+        {"id": "model", "name": "Model", "category": "model", "type": "select",
+         "currentValue": current["model"],
+         "options": [{"value": "claude-opus-5", "name": "Opus"},
+                     {"value": "claude-fable-5", "name": "Fable"}]},
+        {"id": "effort", "name": "Effort", "category": "thought_level", "type": "select",
+         "currentValue": current["effort"],
+         "options": [{"value": "low", "name": "Low"},
+                     {"value": "high", "name": "High"},
+                     {"value": "max", "name": "Max"}]},
+    ]
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    seen.append(method)
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"sessionId": "sess-1", "configOptions": config_options()}})
+    elif method == "session/set_config_option":
+        current[params["configId"]] = params["value"]
+        send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": config_options()}})
+    elif method == "session/prompt":
+        text = "model=%s effort=%s order=%s" % (
+            current["model"], current["effort"], ",".join(seen))
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": "sess-1",
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": text}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+"#;
+        let Some(python) = find_in_path("python3") else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let cwd = std::env::current_dir().expect("cwd");
+        let command = AgentCommand::new(python, vec!["-c".into(), FAKE_AGENT.into()], cwd);
+        let (command_tx, command_rx) = mpsc::unbounded();
+        let (event_tx, mut event_rx) = mpsc::unbounded();
+        // UI と同じ順序: セッション起動と同時に Prompt をキューへ積む（SetConfig はまだ送れない）。
+        command_tx
+            .unbounded_send(SessionCommand::Prompt("初回".into()))
+            .expect("send");
+        // 表示名（Opus）と value_id（max）の両方で引けること・大文字小文字を無視することを兼ねる。
+        let preferences = SessionPreferences {
+            mode: None,
+            model: Some("opus".into()),
+            effort: Some("MAX".into()),
+            resume: None,
+        };
+
+        let events = futures::executor::block_on(async move {
+            let session = run_session(command, preferences, command_rx, event_tx);
+            let scenario = async move {
+                let mut seen = Vec::new();
+                loop {
+                    let event = event_rx.next().await.expect("イベントが途切れた");
+                    let ended = matches!(event, AgentEvent::TurnEnded { .. });
+                    seen.push(event);
+                    if ended {
+                        break;
+                    }
+                }
+                // command_tx はターン完走**後**に drop する（ターン中に閉じるとループが畳まれる）。
+                drop(command_tx);
+                seen
+            };
+            let (outcome, seen) = futures::join!(session, scenario);
+            outcome.expect("セッションは正常終了する");
+            seen
+        });
+
+        // UI へ届く一覧は**適用後**の current（UI 側の照合が一致し、二重送信にならない）。
+        let configs = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::Configs(configs) => Some(configs),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Configs を期待: {events:?}"));
+        let current_of = |category: ConfigCategory| {
+            configs
+                .iter()
+                .find(|config| config.category == category)
+                .map(|config| config.current.clone())
+        };
+        assert_eq!(
+            current_of(ConfigCategory::Model).as_deref(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(
+            current_of(ConfigCategory::ThoughtLevel).as_deref(),
+            Some("max")
+        );
+        // 初回ターンは希望モデル/思考量で走り、set_config_option は prompt より前に届いている。
+        let chunk = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("AgentChunk を期待: {events:?}"));
+        assert_eq!(
+            chunk,
+            "model=claude-opus-5 effort=max order=initialize,session/new,\
+             session/set_config_option,session/set_config_option,session/prompt"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed
+                })
+            ),
+            "{events:?}"
+        );
     }
 
     #[test]
@@ -2271,7 +2885,7 @@ for line in sys.stdin:
         drop(prompt_tx); // 送信ハンドルを閉じる → このターン後に run_session は終了する
 
         let chunks = futures::executor::block_on(async move {
-            let session = run_session(command, None, prompt_rx, event_tx);
+            let session = run_session(command, SessionPreferences::default(), prompt_rx, event_tx);
             let drain = async move {
                 let mut chunks = Vec::new();
                 while let Some(event) = event_rx.next().await {
@@ -2332,6 +2946,11 @@ for line in sys.stdin:
                             eprintln!("\n[turn ended: {reason:?}]")
                         }
                         AgentEvent::Failed(error) => eprintln!("[failed] {error}"),
+                        AgentEvent::SessionStarted {
+                            session_id,
+                            resumed,
+                        } => eprintln!("[session started] {session_id} resumed={resumed}"),
+                        AgentEvent::SessionLost => eprintln!("[session lost]"),
                     }
                 }
                 chunks

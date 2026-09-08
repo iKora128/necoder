@@ -2111,14 +2111,18 @@ pub fn watch_root(
             .spawn(move || {
                 use std::sync::atomic::Ordering::Acquire;
                 while !pump_stop.load(Acquire) {
-                    if let Some(relative) =
-                        host_watch.recv_timeout(std::time::Duration::from_millis(500))
-                    {
-                        let absolute: Vec<PathBuf> =
-                            relative.into_iter().map(|path| root.join(path)).collect();
-                        if !absolute.is_empty() {
-                            on_paths(absolute);
+                    match host_watch.recv_timeout(std::time::Duration::from_millis(500)) {
+                        Ok(relative) => {
+                            let absolute: Vec<PathBuf> =
+                                relative.into_iter().map(|path| root.join(path)).collect();
+                            if !absolute.is_empty() {
+                                on_paths(absolute);
+                            }
                         }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        // sender が drop された後は recv_timeout が待機せず即時に返る。
+                        // 切断を無視するとここが 1 core を使い切る busy loop になる。
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
             })

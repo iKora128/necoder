@@ -753,10 +753,13 @@ impl Workspace {
             window_active: true,
             visual_tick: 0,
             visual_ticker: false,
+            connection_pumps: std::collections::HashMap::new(),
             control_summary: None,
             control_summary_gen: 0,
             focus_recovery_installed: false,
         };
+        // remote の接続状態を statusbar へ（購読は host ごとに 1 本・I/O 無し）。
+        workspace.ensure_connection_pumps(cx);
         workspace.refresh_all_git_status(cx); // ツリー/タブの git 色分け + herd の各 space のブランチ（M14 ①）
                                               // 開発用: NECODER_GIT_PANEL=1 で git 操作パネル（ソース管理）を開いた状態で撮る。
         if std::env::var_os("NECODER_GIT_PANEL").is_some() {
@@ -933,6 +936,8 @@ impl Workspace {
         indexes: Vec<usize>,
         cx: &mut Context<Self>,
     ) {
+        // 復元した remote は「未接続」から始まる。最初の request で繋がる様子を statusbar に映す。
+        self.ensure_connection_pumps(cx);
         for index in indexes {
             let Some(slot) = self.project_sessions.projects.get(index) else {
                 continue;

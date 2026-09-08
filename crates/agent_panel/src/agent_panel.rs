@@ -725,6 +725,17 @@ struct Thread {
     /// 生成中に積んだ送信待ちの prompt（キュー・FIFO）。ターン完了で先頭から自動フラッシュする。
     /// 「今すぐ送信（steer）」はこのキューを介さず即 [`Self::send_prompt_text`] する。
     queued_prompts: Vec<String>,
+    /// エージェント側のセッション id（`SessionStarted` で控え、DB にも書く）。次にこのスレッドの
+    /// エージェントを立ち上げ直すとき `session/load` に渡して会話を引き継ぐ（2026-09-08）。
+    acp_session_id: Option<String>,
+    /// transport が閉じた/セッションが終わったあと、まだ立て直していない。composer 直上に
+    /// 「切れました」バナー + 再開ボタンを出す。次の送信か再開ボタンで消える。
+    session_lost: bool,
+    /// 再開中/再開直後の一言（引き継げた・引き継げなかった）。次のターン開始で消す。
+    session_note: Option<SharedString>,
+    /// いま握っているセッションの通し番号。古いセッションのポンプ終了（`session_ended`）を
+    /// 立て直した新セッションへ誤配送しないための照合キー。
+    session_serial: u64,
 }
 
 impl Thread {
@@ -778,6 +789,10 @@ impl Thread {
             muted: false,
             tier2: None,
             queued_prompts: Vec::new(),
+            acp_session_id: None,
+            session_lost: false,
+            session_note: None,
+            session_serial: 0,
         }
     }
 
@@ -1664,6 +1679,13 @@ PYEOF"#;
                     .collect();
                 thread.persisted_entries = thread.entries.len();
                 threads.push(thread);
+            }
+            // 前回のエージェント側セッション id。立ち上げ直しで会話を引き継ぐ鍵（無ければ新規）。
+            let sessions = storage.load_thread_sessions().unwrap_or_default();
+            for thread in &mut threads {
+                if let Some((_, session_id)) = sessions.iter().find(|(id, _)| *id == thread.id) {
+                    thread.acp_session_id = Some(session_id.clone());
+                }
             }
             self.threads = threads;
             self.active = 0;
@@ -2554,6 +2576,90 @@ PYEOF"#;
     /// このパネルに実行中のスレッドがあるか（編隊セルの片付けメニューが「止める」を出すかの判定）。
     pub fn has_running_thread(&self) -> bool {
         self.threads.iter().any(|thread| thread.running)
+    }
+
+    /// セッションのイベントポンプが終わった（＝セッションが終わった）ときの後始末。`serial` が
+    /// 今のセッションと違えば古いポンプの残響なので何もしない（畳んだ直後に立て直した
+    /// 新セッションを巻き込まない）。送信路を捨て、ターン中なら畳み、切断バナーを立てる。
+    fn session_ended(&mut self, thread_id: &str, serial: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.thread_index_by_id(thread_id) else {
+            return; // スレッドは閉じられた
+        };
+        let Some(thread) = self.threads.get_mut(index) else {
+            return;
+        };
+        if thread.session_serial != serial {
+            return;
+        }
+        thread.command_tx = None;
+        thread.session_lost = true;
+        // 終端イベント無しでターン中に終わった場合の畳み（running=false なら何もしない）。
+        self.abandon_turn(index, &i18n::t!("agent.err_session_ended"), cx);
+        self.sync_running_registry(cx);
+        cx.notify();
+    }
+
+    /// エージェントとの transport が閉じた（SSH 切断・プロセス終了）。送信路を捨て、ターン中なら
+    /// 畳み、composer 直上に「切れました」バナー + 再開ボタンを出す。次の送信は自動で
+    /// 立ち上げ直す（前回の会話は `session/load` で引き継ぐ）ので、ボタンは「送らずに今すぐ」用。
+    fn on_session_lost(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        thread.command_tx = None;
+        thread.session_lost = true;
+        thread.session_note = None;
+        self.abandon_turn(
+            thread_index,
+            &i18n::t!("agent.err_session_lost_transport"),
+            cx,
+        );
+        self.sync_running_registry(cx);
+        cx.notify();
+    }
+
+    /// 「再開」ボタン: 送信を待たずにエージェントを立ち上げ直す。前回の会話は `session/load` で
+    /// 引き継ぎ、結果（引き継げた/引き継げなかった）は `SessionStarted` で一言出す。
+    fn resume_session(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        let Some(cwd) = self.dest_cwd.clone() else {
+            self.fail_turn(thread_index, &i18n::t!("agent.err_no_project"), cx);
+            return;
+        };
+        let already_running = self
+            .threads
+            .get(thread_index)
+            .is_some_and(|thread| thread.command_tx.is_some());
+        if already_running {
+            return;
+        }
+        match self.start_session(thread_index, cwd, cx) {
+            Some((command_tx, serial)) => {
+                if let Some(thread) = self.threads.get_mut(thread_index) {
+                    thread.command_tx = Some(command_tx);
+                    thread.session_serial = serial;
+                    thread.session_lost = false;
+                    thread.session_note =
+                        Some(SharedString::from(i18n::t!("agent.session_resuming")));
+                }
+            }
+            None => self.fail_turn(thread_index, &i18n::t!("agent.err_no_acp"), cx),
+        }
+        cx.notify();
+    }
+
+    /// スレッドの ACP セッション id を DB に書く（`SessionStarted` のたび）。再起動後の復元で
+    /// 読み戻し、エージェントの立ち上げ直しで会話を引き継ぐ鍵になる。
+    fn persist_session_id(&self, thread_index: usize) {
+        let (Some(storage), Some(thread)) = (self.storage.as_ref(), self.threads.get(thread_index))
+        else {
+            return;
+        };
+        let Some(session_id) = thread.acp_session_id.as_deref() else {
+            return;
+        };
+        if let Err(error) = storage.set_thread_session(&thread.id, session_id) {
+            eprintln!("ACP セッション id の永続化に失敗: {error:#}");
+        }
     }
 
     /// 終端イベントが期待できないターンを**ローカルで**畳む（セッション断・強制中断の後始末）。
@@ -3805,9 +3911,11 @@ PYEOF"#;
             .is_some_and(|thread| thread.command_tx.is_some());
         if !has_session {
             match self.start_session(thread_index, cwd, cx) {
-                Some(command_tx) => {
+                Some((command_tx, serial)) => {
                     if let Some(thread) = self.threads.get_mut(thread_index) {
                         thread.command_tx = Some(command_tx);
+                        thread.session_serial = serial;
+                        thread.session_lost = false;
                     }
                 }
                 None => {
@@ -3851,7 +3959,11 @@ PYEOF"#;
         thread_index: usize,
         cwd: PathBuf,
         cx: &mut Context<Self>,
-    ) -> Option<mpsc::UnboundedSender<SessionCommand>> {
+    ) -> Option<(mpsc::UnboundedSender<SessionCommand>, u64)> {
+        // セッションの通し番号。ポンプ終了の後始末（`session_ended`）が「今のセッション」の
+        // ものかを照合する。畳んだ直後に立て直した新セッションを、古いポンプが巻き込まないため。
+        static SESSION_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = SESSION_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         // スレッドが選んでいるエージェント（Claude / Codex / …）の起動コマンドを解決。
         let agent_label = self
             .threads
@@ -3886,13 +3998,20 @@ PYEOF"#;
             )?)
         };
         let no_acp = i18n::t!("agent.err_no_acp");
-        // スレッドの希望モード（sticky/前タブ）を起動時に渡す＝初回 prompt 前に適用される。
-        // UI からの後追い SetMode だと Prompt に先を越され、初回ターンが既定モードで走る。
-        let desired_mode = self
+        // スレッドの希望（sticky/前タブのモード・モデル・思考量）を起動時に渡す＝初回 prompt 前に
+        // 適用される。UI からの後追い SetMode / SetConfig だと Prompt に先を越され（ターン中は
+        // deferred）、初回ターンが既定モード・既定モデルで走る（ピルは Opus なのに応答は Fable、の正体）。
+        let preferences = self
             .threads
             .get(thread_index)
-            .map(|thread| thread.permission_mode.to_string())
-            .filter(|mode| !mode.is_empty());
+            .map(|thread| acp_client::SessionPreferences {
+                mode: Some(thread.permission_mode.to_string()).filter(|mode| !mode.is_empty()),
+                model: Some(thread.model.to_string()).filter(|model| !model.is_empty()),
+                effort: Some(thread.effort.to_string()).filter(|effort| !effort.is_empty()),
+                // 前回のセッション id。エージェントが loadSession を広告していれば会話を引き継ぐ。
+                resume: thread.acp_session_id.clone(),
+            })
+            .unwrap_or_default();
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded::<AgentEvent>();
         let error_tx = event_tx.clone();
@@ -3915,7 +4034,7 @@ PYEOF"#;
                     },
                 };
                 if let Err(error) =
-                    acp_client::run_session_on(host, command, desired_mode, prompt_rx, event_tx)
+                    acp_client::run_session_on(host, command, preferences, prompt_rx, event_tx)
                         .await
                 {
                     // `{:#}` で anyhow の原因鎖まで出す（例: 「ACP セッションが異常終了: ACP
@@ -3946,16 +4065,12 @@ PYEOF"#;
             // あり、そのままだと `running` が落ちず永久に「稼働中」になる（M14 の実バグ）。
             // 終端が来ていれば `abandon_turn` は running=false を見て何もしない。
             panel
-                .update(cx, |panel, cx| {
-                    if let Some(index) = panel.thread_index_by_id(&thread_id) {
-                        panel.abandon_turn(index, &i18n::t!("agent.err_session_ended"), cx);
-                    }
-                })
+                .update(cx, |panel, cx| panel.session_ended(&thread_id, serial, cx))
                 .ok();
         })
         .detach();
 
-        Some(command_tx)
+        Some((command_tx, serial))
     }
 
     /// `run_session` の [`AgentEvent`] を transcript へ逐次反映する（ストリーミングの心臓部）。
@@ -3971,6 +4086,13 @@ PYEOF"#;
         let mut ensure_reveal = false; // アクティブが Agent/Thinking をストリーム → タイプライタ稼働
         let mut reveal_reset = false; // 新しいストリームエントリ開始 → 先頭から打つ
         let mut stream_updated = false;
+        // transport 断はスレッドの借用を取る前に別経路で畳む（送信路を捨てる・ターンを畳む・
+        // バナーを立てる）。このあとイベントチャネルが閉じて `session_ended` も走るが、
+        // そちらは通し番号で「同じセッション」のときだけ後始末する。
+        if matches!(event, AgentEvent::SessionLost) {
+            self.on_session_lost(thread_index, cx);
+            return;
+        }
         let Some(thread) = self.threads.get_mut(thread_index) else {
             return;
         };
@@ -3986,12 +4108,33 @@ PYEOF"#;
         let permission_waiting = matches!(event, AgentEvent::PermissionRequest { .. });
         let elicitation_waiting = matches!(event, AgentEvent::ElicitationRequest { .. });
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
+        let mut session_id_changed = false;
         match event {
+            AgentEvent::SessionStarted {
+                session_id,
+                resumed,
+            } => {
+                // 引き継げたか/引き継げなかったかの一言。前回 id が無い新規スレッドは黙って始める。
+                let had_previous = thread.acp_session_id.is_some();
+                thread.session_note = if resumed {
+                    Some(SharedString::from(i18n::t!("agent.session_resumed")))
+                } else if had_previous {
+                    Some(SharedString::from(i18n::t!("agent.session_fresh")))
+                } else {
+                    None
+                };
+                session_id_changed = thread.acp_session_id.as_deref() != Some(session_id.as_str());
+                thread.acp_session_id = Some(session_id);
+                thread.session_lost = false;
+            }
+            // 上で先に畳んでいる（借用の外で処理する必要があるため）。
+            AgentEvent::SessionLost => {}
             AgentEvent::TurnStarted => {
                 // ACP が実際に prompt を送った＝ここから生成中。楽観 UI が取りこぼした場合
                 // （deferred から走った 2 本目など）でもここで確実に running を立て直す。
                 thread.running = true;
                 thread.done = None;
+                thread.session_note = None;
                 if thread.turn_started_at.is_none() {
                     thread.turn_started_at = Some(std::time::Instant::now());
                 }
@@ -4136,6 +4279,9 @@ PYEOF"#;
                 // apply_thread_defaults が載せた sticky（前回選んだモデル/思考量）が毎回上書きされる＝
                 // 「タブを開くたびに設定が戻る」の正体。スレッド側の選択を正とし、広告に在れば
                 // `set_config` でエージェントを合わせ、**無いときだけ**広告 current を採用する。
+                // 起動時は acp_client が `SessionPreferences` で希望を初回 prompt 前に適用済みなので、
+                // 通常ここは一致して無送信（ここからの SetConfig はターン中 deferred＝初回ターンに
+                // 間に合わない）。ターン途中の `ConfigOptionUpdate` と広告に無い値のフォールバックが担当。
                 thread.configs = configs;
                 for category in [ConfigCategory::Model, ConfigCategory::ThoughtLevel] {
                     let desired = match category {
@@ -4351,6 +4497,9 @@ PYEOF"#;
                     thread.done = Some(TurnEnd::Interrupted);
                 }
             }
+        }
+        if session_id_changed {
+            self.persist_session_id(thread_index);
         }
         if let Some((files, color)) = files_touched {
             cx.emit(PanelEvent::FilesTouched { files, color });
@@ -5504,7 +5653,8 @@ PYEOF"#;
                     .gap(px(7.))
                     // 右側クラスタを固定幅にする。値の桁数や compact ボタンの出没で、左隣の猫が
                     // 一瞬横へ跳ねると親 surface 全体の再配置を招くため、全スロットを常時確保する。
-                    .w(px(174.))
+                    // 64（メーター）+7+72（トークン）+7+64（/compact チップ）。
+                    .w(px(214.))
                     .flex_none()
                     .child(
                         div()
@@ -5525,28 +5675,27 @@ PYEOF"#;
                             .child(format!("{}/{}", human_tokens(used), human_tokens(max))),
                     )
                     // コンパクト（/compact）ボタン: トークンの真横。文脈が溜まっていて実行中でない時だけ。
+                    // アイコンではなく文字チップ。縮小アイコン（minimize.svg）は「何が起きるか」が
+                    // 読めず不評だったため、送るコマンド名そのものを出す（送信待ちのチップと同じ様式）。
                     .child(if has_session && !running && used > 0 {
                         let theme = theme.clone();
                         div()
                             .id("compact-context")
-                            .group("compact-context")
                             .flex()
                             .items_center()
                             .justify_center()
                             .flex_none()
-                            .size(px(18.))
-                            .rounded(px(4.))
+                            .w(px(64.))
+                            .h(px(18.))
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(px(10.5))
+                            .text_color(theme.fg1)
+                            .font_family("Guguru Sans Code")
                             .cursor_pointer()
-                            .hover(|style| style.bg(theme.bg3))
-                            .child(
-                                svg()
-                                    .path("icons/minimize.svg")
-                                    .size(px(12.))
-                                    .text_color(theme.fg2)
-                                    .group_hover("compact-context", |style| {
-                                        style.text_color(theme.fg0)
-                                    }),
-                            )
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                            .child(SharedString::from(i18n::t!("agent.compact")))
                             .tooltip(Tooltip::text(i18n::t!("agent.compact_tip"), theme.clone()))
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -5554,8 +5703,8 @@ PYEOF"#;
                             )
                             .into_any_element()
                     } else {
-                        // 非表示でも同じ 18px を占有し、猫とメーターの位置を不変にする。
-                        div().size(px(18.)).flex_none().into_any_element()
+                        // 非表示でも同じ幅を占有し、猫とメーターの位置を不変にする。
+                        div().w(px(64.)).h(px(18.)).flex_none().into_any_element()
                     }),
             )
     }
@@ -6974,6 +7123,77 @@ PYEOF"#;
 
     /// 送信待ちキュー（生成中に積んだ prompt）を composer 上部に並べる。各チップは 1 行プレビュー +
     /// 「今すぐ」（steer・割り込み送信）+ ✕（取消）。空なら None（描画しない）。
+    /// セッションが切れた印（composer の直上）: 何が起きたかの一文 + 「再開」チップ。送信待ちの
+    /// チップと同じ様式（文字チップ・枠 1px・10.5px）。再開中/再開直後の一言（引き継げた・
+    /// 引き継げなかった）も同じ場所に薄字で出し、次のターン開始で消す（2026-09-08）。
+    fn render_session_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let theme = self.theme.clone();
+        if thread.session_lost {
+            let index = self.active;
+            return Some(
+                div()
+                    .id("session-lost")
+                    .mx(px(12.))
+                    .mb(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(7.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .px(px(9.))
+                    .py(px(5.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .text_color(theme.fg1)
+                            .child(SharedString::from(i18n::t!("agent.session_lost_banner"))),
+                    )
+                    .child(
+                        div()
+                            .id("session-resume")
+                            .flex_none()
+                            .px(px(7.))
+                            .py(px(2.))
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(px(10.5))
+                            .text_color(theme.fg1)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                            .child(SharedString::from(i18n::t!("agent.session_resume")))
+                            .tooltip(Tooltip::text(
+                                i18n::t!("agent.session_resume_tip"),
+                                theme.clone(),
+                            ))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |panel, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    panel.resume_session(index, cx);
+                                }),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let note = thread.session_note.clone()?;
+        Some(
+            div()
+                .mx(px(12.))
+                .mb(px(6.))
+                .text_size(px(10.5))
+                .text_color(theme.fg2)
+                .child(note)
+                .into_any_element(),
+        )
+    }
+
     fn render_queued_prompts(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
         if thread.queued_prompts.is_empty() {
@@ -7651,6 +7871,8 @@ impl Render for AgentPanel {
             // 承認待ちの権限リクエスト（あれば composer の直上に常時表示）。
             .children(self.render_permission_card(cx))
             .children(self.render_elicitation_card(cx))
+            // セッション断のバナー（再開ボタン）/ 再開の一言。
+            .children(self.render_session_banner(cx))
             .children(self.render_queued_prompts(cx))
             .child(self.render_composer(cx))
             // セレクタのドロップダウンは各ピルの子として描く（render_selector_pill 内）。
@@ -8586,6 +8808,12 @@ fn thread_from_storage(
     let turns = storage.load_recent_turns(id, 200).unwrap_or_default();
     thread.entries = turns.into_iter().map(entry_from_turn).collect();
     thread.persisted_entries = thread.entries.len();
+    thread.acp_session_id = storage
+        .load_thread_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(thread_id, _)| thread_id == id)
+        .map(|(_, session_id)| session_id);
     thread
 }
 
@@ -8638,6 +8866,10 @@ fn seed_threads() -> Vec<Thread> {
         muted: false,
         tier2: None,
         queued_prompts: Vec::new(),
+        acp_session_id: None,
+        session_lost: false,
+        session_note: None,
+        session_serial: 0,
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
