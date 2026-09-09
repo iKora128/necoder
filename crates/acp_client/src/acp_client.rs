@@ -479,6 +479,53 @@ pub fn authenticated_agent_labels() -> Vec<&'static str> {
         .collect()
 }
 
+/// [`AgentEvent::Failed`] のメッセージが **認証切れ**（再ログインで直る失敗）かを判定する。
+///
+/// ACP は認証エラーに専用コードを持たず、`-32603 Internal error` の message に各 Agent が
+/// 自由文で載せてくる（例: claude-agent-acp「Internal error: Failed to authenticate: OAuth
+/// session expired and could not be refreshed: {"errorKind":"authentication_failed"}」）。
+/// 語彙は Agent ごとに違うので、Claude / Codex / Copilot / Gemini 系 CLI の実文言に現れる
+/// 定型句を大文字小文字無視で拾う。UI はこれが真なら「エラー: …」の一般表示ではなく
+/// 「再ログインが必要」のカード（案内 + 再接続導線）を出し、古いトークンを抱えた
+/// プロセスを捨てる。誤検知は「再ログイン案内が余計に出る」だけで、取りこぼしより軽い。
+pub fn is_auth_failure(message: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "authentication_failed",
+        "authentication failed",
+        "failed to authenticate",
+        "oauth",
+        "not logged in",
+        "not authenticated",
+        "unauthenticated",
+        "unauthorized",
+        "invalid api key",
+        "invalid_api_key",
+        "invalid authentication",
+        "auth_required",
+        "login required",
+        "please run /login",
+        "please log in",
+        "please login",
+    ];
+    let lowered = message.to_lowercase();
+    MARKERS.iter().any(|marker| lowered.contains(marker))
+}
+
+/// [`AgentEvent::Failed`] のメッセージが **セッション終了**（同じプロセスへ何を送っても直らない失敗）かを
+/// 判定する。claude-agent-acp は SDK の query ストリームが死ぬと以後の `session/prompt` を
+/// 「The Claude Agent session has ended. Please start a new session.」で拒み続ける（認証切れ後の
+/// resume が失敗した時もここへ落ちる）。UI はこれが真なら送信路を捨て、次の送信で新プロセスを立てる。
+pub fn is_session_ended(message: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "session has ended",
+        "start a new session",
+        "session not found",
+        "process exited unexpectedly",
+    ];
+    let lowered = message.to_lowercase();
+    MARKERS.iter().any(|marker| lowered.contains(marker))
+}
+
 /// 最後に確認した全 Agent の状態。初回はローカルの軽い CLI/config 判定だけを行う。
 pub fn cached_agent_auth_states() -> Vec<AgentAuthState> {
     AGENT_AUTH_STATES
@@ -559,6 +606,19 @@ impl AgentKind {
             "codex" => Some(
                 r#"codex exec --sandbox read-only --color never --output-last-message {out} "{prompt}" < {excerpt} >/dev/null 2>&1 && cat {out}"#,
             ),
+            _ => None,
+        }
+    }
+
+    /// 認証が切れた時にユーザーへ案内する **再ログインコマンド**（ターミナルで打つ 1 行）。
+    /// 対話ログインは ACP 越しに代行できない（ブラウザ・コードのやり取りが要る）ため、
+    /// necoder は「何を打てばよいか」を示すに留める。**実機で `--help` を確認したものだけ**載せ、
+    /// 未確認の Agent は `None`＝「エージェントの CLI で再ログイン」の汎用文で案内する。
+    pub fn login_command(&self) -> Option<&'static str> {
+        match self.id {
+            "claude" => Some("claude auth login"),
+            "codex" => Some("codex login"),
+            "opencode" => Some("opencode auth login"),
             _ => None,
         }
     }
@@ -1395,9 +1455,7 @@ pub async fn run_session_on(
                 let desired_id = preferences.mode.as_deref().and_then(|desired| {
                     modes
                         .iter()
-                        .find(|(id, name)| {
-                            name.eq_ignore_ascii_case(desired) || id.eq_ignore_ascii_case(desired)
-                        })
+                        .find(|(id, _)| id == desired)
                         .map(|(id, _)| id.clone())
                 });
                 if let Some(desired_id) = desired_id {
@@ -2010,6 +2068,56 @@ async fn handle_elicitation_request(
 
 #[cfg(test)]
 mod tests {
+    /// 認証切れの判定: claude-agent-acp の実文言（OAuth 失効）と Codex/Copilot 系の定型句を拾い、
+    /// API のストリーミング切断・タイムアウトなど**再ログインで直らない失敗**は拾わない。
+    #[test]
+    fn auth_failure_is_detected_from_agent_messages() {
+        assert!(super::is_auth_failure(
+            "Internal error: Failed to authenticate: OAuth session expired and could not be \
+             refreshed: {\"errorKind\":\"authentication_failed\"}"
+        ));
+        assert!(super::is_auth_failure("Not logged in. Run `codex login`."));
+        assert!(super::is_auth_failure("401 Unauthorized"));
+        assert!(super::is_auth_failure(
+            "Invalid API key · Please run /login"
+        ));
+        assert!(!super::is_auth_failure(
+            "Internal error: API Error: Connection closed mid-response"
+        ));
+        assert!(!super::is_auth_failure(
+            "ACP initialize が 30 秒応答しません（無言ハング）"
+        ));
+        assert!(!super::is_auth_failure("rate limit exceeded"));
+    }
+
+    /// セッション終了の判定: adapter の定型句（query ストリーム死亡・プロセス異常終了）だけを拾い、
+    /// 認証切れやストリーミング切断など**同じセッションで再送できる失敗**は拾わない。
+    #[test]
+    fn session_ended_is_detected_from_adapter_messages() {
+        assert!(super::is_session_ended(
+            "Internal error: The Claude Agent session has ended. Please start a new session."
+        ));
+        assert!(super::is_session_ended(
+            "Internal error: The Claude Agent process exited unexpectedly. Please start a new session."
+        ));
+        assert!(super::is_session_ended("Session not found"));
+        assert!(!super::is_session_ended(
+            "Internal error: Failed to authenticate: OAuth session expired and could not be refreshed"
+        ));
+        assert!(!super::is_session_ended(
+            "Internal error: API Error: Connection closed mid-response"
+        ));
+    }
+
+    /// 再ログインコマンドは実機検証済みの Claude / Codex に必ずある（案内文の空欄を防ぐ）。
+    #[test]
+    fn verified_agents_have_login_command() {
+        let claude = super::AgentKind::by_label("Claude Code").expect("Claude Code");
+        assert_eq!(claude.login_command(), Some("claude auth login"));
+        let codex = super::AgentKind::by_label("Codex").expect("Codex");
+        assert_eq!(codex.login_command(), Some("codex login"));
+    }
+
     use super::*;
 
     #[test]

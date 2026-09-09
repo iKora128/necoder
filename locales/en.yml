@@ -34,6 +34,7 @@ agent:
   pill_mode: Permission mode (edit/run approval level)
   pill_model: Model
   pill_effort: Reasoning effort
+  pill_awaiting_agent: Available once the agent connects
   err_no_project: Can't send — no project selected
   err_no_acp: claude-agent-acp not found (check node/npx)
   err_agent_lookup: "Could not look up the agent (check the connection, then resume): %{message}"
@@ -47,6 +48,12 @@ agent:
   session_resuming: Resuming…
   session_resumed: Resumed with the previous conversation
   session_fresh: Started a new session (the previous conversation could not be carried over)
+  auth_required_title: ● Sign-in required
+  auth_required_body: The agent's sign-in has expired. Run the command below in a terminal, then press "Reconnect and resend". The last instruction is sent again and the conversation continues
+  auth_required_body_generic: "%{agent}'s sign-in has expired. Sign in again with its CLI, then press \"Reconnect and resend\". The last instruction is sent again and the conversation continues"
+  auth_reconnect_resend: Reconnect and resend
+  auth_reconnect: Reconnect
+  auth_dismiss: Dismiss
   permission_files: "%{title} (%{n} files)"
   done: Done %{elapsed}
   done_touched: Done %{elapsed} · touched %{n} files

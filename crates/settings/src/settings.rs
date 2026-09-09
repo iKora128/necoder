@@ -20,8 +20,8 @@ use std::time::{Duration, SystemTime};
 use theme_core::Theme;
 
 pub use settings_core::{
-    persist_agent_default, persist_user_value, user_settings_path, AgentDefaults, Density,
-    Settings, SettingsStore,
+    persist_agent_config_default, persist_user_value, user_settings_path, Density, Settings,
+    SettingsStore,
 };
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
@@ -93,15 +93,17 @@ pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) {
     }
 }
 
-/// `agent_defaults.<agent>.<field>` の 1 点を更新して**即適用 + 永続化**する（composer ピルの sticky）。
-/// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。agent ごとに保つので Model/Effort/Mode の
-/// 値が別 agent へ漏れない。`field` は `"model"` / `"effort"` / `"mode"`。
-pub fn set_agent_default(cx: &mut App, agent: &str, field: &str, value: &str) {
+/// `agent_config_defaults.<agent_id>.<config_id>` の 1 点を更新して**即適用 + 永続化**する（composer ピルの sticky）。
+/// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。agent ごとに保つので選択が別 agent へ漏れない。
+///
+/// `config_id` / `value_id` は **ACP が広告した綴りそのまま**を渡すこと（表示名を渡してはいけない）。
+/// necoder 側で綴りを作り直すと、次に広告と突き合わせたとき一致せずエージェント既定へ落ちる。
+pub fn set_agent_config_default(cx: &mut App, agent_id: &str, config_id: &str, value_id: &str) {
     let path = cx
         .try_global::<SettingsGlobal>()
         .and_then(|global| global.user_path.clone());
     if let Some(path) = path {
-        if let Err(error) = persist_agent_default(&path, agent, field, value) {
+        if let Err(error) = persist_agent_config_default(&path, agent_id, config_id, value_id) {
             eprintln!("エージェント既定の保存に失敗（実行時のみ反映）: {error:#}");
         }
     }
