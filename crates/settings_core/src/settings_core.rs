@@ -64,17 +64,6 @@ impl Default for RailSettings {
 
 /// エージェントごとの sticky 既定（モデル / 思考量 / 権限モード）。
 /// **どのエージェントを使うか**（`default_agent`・§8）とは別レイヤ — こちらは「作業のたびに選び直したくない」
-/// 設定を **agent ごとに** 覚える（Claude を Opus、Codex を GPT-5 のように混ぜても各々が保たれる）。
-/// composer のピルで選ぶとここへ書き戻り、その agent の次スレッドが同じ値で開く（2026-08-17）。
-/// 各値は `None`＝未選択（フォールバックへ委ねる）。JSON では欠けたキーが `None` になる。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default)]
-pub struct AgentDefaults {
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub mode: Option<String>,
-}
-
 /// エージェントの**起動方法の上書き**（`agent_servers.<id>`）。
 ///
 /// 版はレジストリ（`acp_client::registry`）と組み込みカタログが決めるが、**ユーザーが
@@ -157,16 +146,17 @@ pub struct Settings {
     /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
     /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
     pub default_agent: String,
-    /// 新規スレッドの既定モデル / 思考量。**composer のピルで選ぶとここへ書き戻る**（2026-07-27）。
-    /// `default_agent` と違い意図的に sticky にしてある — どのエージェントを使うかは「環境の選択」で
-    /// 滅多に変えないが、モデル/思考量は「作業のたびに選び直したくない設定」だから（ユーザー要望）。
-    /// エージェントが実選択肢を広告していればそちらが優先され、ここは候補が無いときの土台になる。
-    pub default_model: String,
-    pub default_effort: String,
-    /// エージェントごとの sticky 既定（表示名 → モデル/思考量/モード）。**ピルで選ぶとここへ書き戻る**。
-    /// `default_model`/`default_effort`（グローバルな土台）より優先し、agent を跨いでも各々を保つ（2026-08-17）。
+    /// エージェントごとに覚えた選択（`agent_id` → `config_id` → **value_id**）。
+    /// 例: `{"claude": {"model": "opus[1m]", "effort": "xhigh", "mode": "bypassPermissions"}}`。
+    ///
+    /// **保存するのは ACP が広告する value_id だけ**（表示名も necoder 独自の綴りも入れない・2026-09-09）。
+    /// 表示名は接続後の広告から引く。ここに表示名を混ぜると「保存した綴り」と「広告の綴り」が
+    /// 食い違い、毎回エージェント既定へ落ちる（`docs/DECISIONS.md` の該当項）。
+    ///
+    /// キーはラベルでなく `AgentKind::id`。`config_id` は ACP のもの（Claude Code なら
+    /// `model` / `effort` / `mode` / `fast`）で、necoder が知らない項目も素通しで持てる。
     /// `default_agent` は §8 のまま Settings 画面だけが変える — 「どの agent か」と「その agent の設定」を分離する。
-    pub agent_defaults: BTreeMap<String, AgentDefaults>,
+    pub agent_config_defaults: BTreeMap<String, BTreeMap<String, String>>,
     /// エージェントの起動方法の上書き（necoder の `AgentKind::id` がキー。例 `"codex"`）。
     /// 空＝レジストリと組み込みカタログに従う（通常はこれ）。詳細は [`AgentServerSetting`]。
     pub agent_servers: BTreeMap<String, AgentServerSetting>,
@@ -208,9 +198,7 @@ impl Default for Settings {
             fleet_goal: None,
             agent_tabs_view: "bar".to_string(),
             default_agent: "Claude Code".to_string(),
-            default_model: "claude-opus-5".to_string(),
-            default_effort: "high".to_string(),
-            agent_defaults: BTreeMap::new(),
+            agent_config_defaults: BTreeMap::new(),
             agent_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
             fleet_agent_worktree: false,
@@ -234,8 +222,6 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "tier2_summaries": true,
   "agent_tabs_view": "bar",
   "default_agent": "Claude Code",
-  "default_model": "claude-opus-5",
-  "default_effort": "high",
   "confirm_worktree_delete": true,
   "agent_servers": {},
   "html_preview_evict_minutes": 15,
@@ -333,10 +319,15 @@ pub fn persist_user_value(path: &Path, key: &str, value: Value) -> Result<()> {
     Ok(())
 }
 
-/// `agent_defaults.<agent>.<field>` の 1 点だけを user 設定ファイルへ書き込む（ピルの sticky 保存用）。
+/// `agent_config_defaults.<agent_id>.<config_id>` の 1 点だけを user 設定ファイルへ書き込む（ピルの sticky 保存用）。
 /// **user ファイル自身の値だけ**を読んで nested に更新する（マージ済み解決値を書き戻すと project 層の値を
 /// user へ焼き込んでしまうため）。既存の他 agent・他 field・他キーは保つ。親ディレクトリが無ければ作る。
-pub fn persist_agent_default(path: &Path, agent: &str, field: &str, value: &str) -> Result<()> {
+pub fn persist_agent_config_default(
+    path: &Path,
+    agent_id: &str,
+    config_id: &str,
+    value_id: &str,
+) -> Result<()> {
     let mut root: Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -344,14 +335,14 @@ pub fn persist_agent_default(path: &Path, agent: &str, field: &str, value: &str)
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
     let map = root.as_object_mut().expect("上で object を保証");
     let defaults = map
-        .entry("agent_defaults")
+        .entry("agent_config_defaults")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
     if !defaults.is_object() {
         *defaults = Value::Object(serde_json::Map::new());
     }
     let agents = defaults.as_object_mut().expect("直前で object を保証");
     let entry = agents
-        .entry(agent)
+        .entry(agent_id)
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
     if !entry.is_object() {
         *entry = Value::Object(serde_json::Map::new());
@@ -359,7 +350,7 @@ pub fn persist_agent_default(path: &Path, agent: &str, field: &str, value: &str)
     entry
         .as_object_mut()
         .expect("直前で object を保証")
-        .insert(field.to_string(), Value::String(value.to_string()));
+        .insert(config_id.to_string(), Value::String(value_id.to_string()));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("設定ディレクトリを作れない: {}", parent.display()))?;
@@ -489,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_agent_default_is_nested_and_isolated() {
+    fn persist_agent_config_default_is_nested_and_isolated() {
         let dir = std::env::temp_dir().join(format!(
             "necoder-agent-defaults-test-{}",
             std::process::id()
@@ -499,24 +490,25 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(&path, r#"{ "theme": "necoder-light" }"#).expect("seed");
 
-        // 別 agent・別 field を順に書いても、互いを潰さず nested にマージされる。
-        persist_agent_default(&path, "Claude Code", "model", "claude-opus-5").expect("書ける");
-        persist_agent_default(&path, "Claude Code", "effort", "xhigh").expect("書ける");
-        persist_agent_default(&path, "Codex", "model", "GPT-5.6-Sol").expect("書ける");
+        // 別 agent・別 config_id を順に書いても、互いを潰さず nested にマージされる。
+        // 値は ACP が広告する value_id そのまま（`opus[1m]` の角括弧も素通しで往復する）。
+        persist_agent_config_default(&path, "claude", "model", "opus[1m]").expect("書ける");
+        persist_agent_config_default(&path, "claude", "effort", "xhigh").expect("書ける");
+        persist_agent_config_default(&path, "codex", "model", "gpt-5.6-sol").expect("書ける");
+        // necoder が UI を持たない config_id も素通しで保存できる（Zed 流の汎用マップ）。
+        persist_agent_config_default(&path, "claude", "fast", "on").expect("書ける");
 
         let store = SettingsStore::from_json_layers(&[
             DEFAULT_SETTINGS_JSON,
             &std::fs::read_to_string(&path).expect("read"),
         ])
         .expect("マージできる");
-        let defaults = &store.settings().agent_defaults;
-        assert_eq!(
-            defaults["Claude Code"].model.as_deref(),
-            Some("claude-opus-5")
-        );
-        assert_eq!(defaults["Claude Code"].effort.as_deref(), Some("xhigh"));
-        assert_eq!(defaults["Codex"].model.as_deref(), Some("GPT-5.6-Sol"));
-        assert_eq!(defaults["Codex"].effort, None); // 書いていない field は None
+        let defaults = &store.settings().agent_config_defaults;
+        assert_eq!(defaults["claude"]["model"], "opus[1m]");
+        assert_eq!(defaults["claude"]["effort"], "xhigh");
+        assert_eq!(defaults["claude"]["fast"], "on");
+        assert_eq!(defaults["codex"]["model"], "gpt-5.6-sol");
+        assert!(!defaults["codex"].contains_key("effort")); // 書いていない config_id は不在
         assert_eq!(store.settings().theme, "necoder-light"); // 無関係キーは保たれる
         let _ = std::fs::remove_dir_all(&dir);
     }

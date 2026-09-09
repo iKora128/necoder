@@ -2475,3 +2475,54 @@
 - やったこと: ユーザー報告「workspace で作業中に SSH が切れると `Incoming transport closed`（method=session/prompt）が送るたびに出る。開くたびに再接続は嫌なので再接続ボタンを置くのはどうか」。調べると **SSH 本体は既に自動再接続していた**（`ReconnectingClient` の 5s heartbeat）が、①ACP エージェントは ssh の子プロセスとして master に乗っており切断で SIGHUP・stdout EOF になる ②`run_session_on` は prompt の失敗を「そのターンだけ」と扱いセッションを維持するため、crate が EOF 後の request を即座に同じエラーで落とす＝**送るたびに即エラーのゾンビ** ③待機中は `command_rx` しか待っておらず切断に気付かない ④接続状態は host の中に閉じ UI は常に緑、の 4 点が実態だった。直し: **acp_client** — `is_incoming_transport_closed` を prompt/update の失敗で見てセッションごと畳み `AgentEvent::SessionLost`、待機中は `connection.incoming_closed()` と select して即検知。`SessionPreferences::resume` + `AgentEvent::SessionStarted{session_id, resumed}` で `session/load` による引き継ぎ（`agentCapabilities.loadSession` を見て分岐・失敗は新規へ）。**storage** — `thread_sessions` 表（thread_id → acp_session・delete_thread で消す）。**agent_panel** — `Thread{acp_session_id, session_lost, session_note, session_serial}`、`on_session_lost` / `session_ended(serial 照合)` / `resume_session`、composer 直上の `render_session_banner`（バナー + 「再開」文字チップ・引き継ぎ結果の一言）。**host** — `ConnectionState{Unconnected,Connecting,Connected,Disconnected}` を `ReconnectingClient` が `connect_now` の前後で更新、`Host::connection_state / watch_connection / reconnect` を trait の既定付きで追加（`reconnect` は heartbeat を 1 回前倒し＝生きていれば触らない）。**workspace** — `remote_connection.rs`（host ごと 1 本の pump・切替/追加/復元の入口で `ensure_connection_pumps`）、statusbar の SSH チップを状態色 + 状態語 + 「再接続/接続」チップに。locales ja/en に agent.session_* と ssh.state_* を追加。UI-SPEC §3/§6・ARCHITECTURE・ROADMAP M9・CHANGELOG を更新
 - 学び/罠: **ACP crate は未 attach のセッション宛て `session/update` を捨てずに溜め、attach 時に流す**（`retry: true`）。「attach 前に load すれば再生は捨てられる」は誤りで、実際に `old history` が transcript に流れた（テストで発覚）。仮の `NewSessionResponse` で先に attach し、load の応答を待つ間 `read_update` を select で読み捨て、応答後も `now_or_never` で残りを捨て切る形にした。**python の偽エージェントで `true` は NameError**（`True`）— initialize 前に落ちて "method=initialize" の transport 断になり、最初は原因が読めなかった。**セッション終了の後始末は通し番号で照合する**: 畳んだ直後に立て直した新セッションを、古いポンプの `abandon_turn` が巻き込む競合があった（`session_serial`）。この環境は Metal 無しで necoder bin はビルド不可・スクショ不可
 - 次: metal のある環境で実機確認 — ①remote を開いたまま Mac をスリープ→復帰: statusbar の SSH チップが 接続中(warn)→接続済み(ok) と動く ②復帰直後にスレッドへ送信: バナー無しでそのまま再開（`loadSession` で前の文脈が続く＝直前の話題を聞いて答えられる）③エージェント稼働中に SSH を切る（`docker compose pause` 相当）: ターンが畳まれバナー + 再開チップが出る → 再開で「前回の会話を引き継いで再開しました」④到達不能にして 60s バックオフ中に「再接続」チップ → 即座に接続中へ。残件は LSP/PTY の同種の再 spawn（ROADMAP M9）
+## 2026-09-09 — 「毎回勝手に Fable になる」を value_id 一本化で根治
+
+本人「あと毎回かってにFableになる問題って解決できた？」→ 未解決だったので原因を追い、続く「んじゃそうしましょうよ、
+よくなさすぎる、しっかり完全に解決できるようにしてください」で Zed 方式へ寄せる本格リファクタまで実施。
+
+- **原因**: 1 つの文字列フィールドに **3 つの語彙**が混ざっていた。necoder の静的一覧（`claude-opus-5`）、
+  ACP の value_id（`opus[1m]`）、ACP の表示名（`Opus (1M context)`）。保存も比較も**表示名**で行っていたので
+  Claude Code の広告と毎回一致せず「提供されない選択」判定 → 広告 current（CLI 既定の Fable）を採用。
+  DB の `threads.model` にも `Fable` が入っていた（稼働中 DB を `cp` して sqlite3 で確認）。
+  さらに `model_belongs_to_agent` が `claude-` 前置きしか Claude と認めず、ドロップダウンで `Opus (1M context)` を
+  選んで保存しても静的先頭へ戻していた。二重に外れていた
+- **`[1m]` の正体調査**: Claude Code バイナリの strings と実機の ACP アダプタ（`@agentclientprotocol/claude-agent-acp@0.75.1`）を読んだ。
+  `[1m]` は Claude Code 独自のエイリアス記法で、プロバイダに送る前に剥がされ、ベータヘッダ `context-1m-2025-08-07` に化ける。
+  表示名は `display_name + " (1M context)"` の**生成物**（`supports_1m_suffix` が立つモデルのみ）。
+  内蔵モデル表で Opus 5 は `context:{window:1e6, native_1m:true}`＝もともと 1M。公式ドキュメントも
+  「Anthropic API では Opus 4.7 以降は既定で 1M」。効くのはゲートウェイ経由・env でのモデル固定・
+  サブスクのエンタイトルメント（Max/Team/Enterprise は自動、Pro はクレジット）の 3 つだけ。200K 超の割増は無い。
+  アダプタの config_id は `model` / `effort` / `mode` / `fast` / `agent`、effort の value_id は `default|low|…|max`
+- **ACP のせいではない**: `SessionConfigSelect` は `current_value: SessionConfigValueId` を持ち、選択肢も value と name の組。
+  id が同一性・name は描画用と最初から分かれている。necoder が第三の語彙を持ち込んだのが原因
+- **Zed 実装の調査**: value_id 一本。`settings.json` の `agent_servers.<agent_id>.default_config_options.<config_id>` に
+  value_id だけを保存し、復元は**完全一致が無ければ適用せず warn だけ**（フォールバックしない）。静的モデル一覧を持たず、
+  `configOptions` が来るまでモデル UI 自体を出さない。`[1m]` は不透明文字列として素通し
+- **やったこと（value_id 一本化）**: ①設定を `agent_config_defaults[agent_id][config_id] = value_id` へ（キーはラベルでなく
+  `AgentKind::id`＝`claude`/`codex`。`fast` のような necoder が UI を持たない項目も素通しで保存できる汎用マップ）。
+  旧 `default_model`/`default_effort`/`agent_defaults` は**移行コード無しで廃止**（本人方針）。②`SelectorChoice { value, label }` を
+  導入し、`selector_options`→`selector_choices` が id を捨てないように。表示は `selector_label` が広告から引き直すだけ。
+  ③`Configs`/`Modes` ハンドラを **value_id / mode_id の完全一致だけ**に（在れば `set_config`、無ければ広告 current）。
+  ④静的一覧 `CLAUDE_MODELS`/`CODEX_MODELS`/`AUTO_MODELS`/`PERMISSION_MODES`/`EFFORTS` と綴り合わせハック
+  （`resolve_config_choice`/`model_belongs_to_agent`/`claude_model_family`/`fallback_models`）を全廃。
+  ⑤広告前は選択肢ゼロ＝ピルを不活性に（シェブロン無し・押せない。`agent.pill_awaiting_agent` を ja/en 両方へ追加）。
+  ⑥`permission_mode` を mode_id に統一（`send_set_config` も `select_option(Mode)` も逆引き不要になり「引けなくて無送信」が消えた）。
+  ⑦`threads.model` は記録に降格し、復元時の正は sticky（Zed も resume で既定を適用する）
+- **学び/罠**: 「sticky が効かない」は保存側でなく**照合側**で外れていた。同じ物に 2 つの綴りがある以上、
+  緩い照合（表示名・系統名・大文字小文字無視）は「近いけれど別のモデル」を静かに選ぶので、当たらない方が安全。
+  接続前に候補を出したい欲が第三の語彙を生む — 出さない方が正しい。エージェント id は `claude-acp` ではなく `claude`（registry id と別）
+- **検証**: `cargo check --workspace --all-targets` 警告 0 / fmt 済み / **315 passed**。
+  agent_panel は 28 件緑で、実機の語彙をそのまま流す回帰テストを新設
+  （`claude_code_value_ids_survive_advertisement` / `unoffered_value_id_falls_back_to_advertised_current` /
+  `selectors_are_empty_before_advertisement` / `mode_uses_ids_and_new_tab_inherits`）。
+  workspace の 4 件（`agent_full_screen_keeps_thread_tab_keys` 他）は**変更前から落ちている既知の GPUI scheduler panic**で、
+  `git stash` して同じ 4 件が落ちることを確認済み。稼働中 dogfood のため実機・offscreen は起動していない
+- **次**: 本人が再起動後、ピルで一度モデルを選び直す（旧 `agent_defaults` は読まないので初回だけ未選択＝エージェント既定で開く）。
+  以後は `agent_config_defaults` に value_id が入り、毎回それで開く。settings.json に残る旧 `agent_defaults` ブロックは
+  読まれないだけなので、気になれば手で消す
+
+## 2026-09-09 — 認証切れ（OAuth 失効）を一般エラーから分けて「再ログインが必要」カードを出す
+- やったこと: 本人が dogfood 中に `Internal error: Failed to authenticate: OAuth session expired and could not be refreshed: {"errorKind":"authentication_failed"}` を踏んだ（`claude auth status` はログイン済み＝スレッドの ACP 子プロセスだけが古いトークンで更新に失敗した状態）。これまでは他の Internal error と同じ「エラー: …」で流すだけだった。修正: ①`acp_client::is_auth_failure(message)` — ACP に認証専用コードは無く各 Agent が `-32603` の message に自由文で載せるため、Claude/Codex/Copilot 系の定型句（`authentication_failed` / `OAuth` / `not logged in` / `401 Unauthorized` / `/login` …）を大文字小文字無視で拾う。②`AgentKind::login_command()` — 実機 `--help` で確認した claude/codex/opencode だけ 1 行コマンドを持ち、他は汎用文。③agent_panel の `Failed` で真なら `Thread::auth_required` を立てる。**セッションは捨てない**（最初はプロセス kill で実装したが、adapter 0.75.1 の `respawnSignedOutSession` を読んで撤回: 認証切れのセッションは adapter が記憶し、次の prompt で Claude セッションを `resume` 付きで作り直す＝文脈が続く。殺すとその経路を潰す）。resume にも失敗した「session has ended」/「process exited unexpectedly」は `acp_client::is_session_ended` で拾って送信路を捨て、次の送信で新プロセス。④composer 直上に「● 再ログインが必要」カード（承認カードと同じ流儀・スレッド色の枠・打つべきコマンドを等幅箱で表示）。「再接続して再送」は直近の User 指示を `send_prompt_text` で同じセッションへ送り直す。「閉じる」はカードだけ消す。⑤`auth_required` の間はキュー自動フラッシュ（ターン完了・タブ切替）を止める。i18n は ja/en 両方に 6 キー追加
+- 学び/罠: 「再送で直る失敗（ストリーミング切断）」「再ログイン後に同じセッションで再送すれば adapter が resume してくれる失敗（認証切れ）」「プロセスを立て直すしかない失敗（session ended）」の 3 段は UI 上の見た目が同じ Internal error でも後始末が違う。判定はメッセージ文字列頼みなので誤検知＝案内が余計に出るだけ、取りこぼし＝従来通り、の非対称で許容範囲に倒した。本人の「文脈は戻せるの？」に答えるため adapter を読んだ結果: 稼働中は上記 respawn で文脈が続く。**necoder 再起動を跨ぐ**復元は別問題で、ACP session id を DB に持たず `session/load`（adapter は `loadSession: true` を広告・Rust crate 1.3.0 に `LoadSessionRequest` あり）を呼んでいないため、復元スレッドは常に新セッション＝文脈なし。並走セッションが JOURNAL を Write で丸ごと上書きし、先に追記したこのエントリが消えていた（追記し直し）
+- 検証: acp_client 20 test（`auth_failure_is_detected_from_agent_messages` / `session_ended_is_detected_from_adapter_messages` / `verified_agents_have_login_command` 追加）/ agent_panel `auth_failure_raises_relogin_card_and_reconnect_resends` 追加・全緑 / i18n 6 test / `cargo check -p necoder` / fmt 済み。稼働中 dogfood のため実機・offscreen は起動していない＝カードの見た目は本人目視待ち
+- 次: 本人が次回の認証切れでカードを見て、コマンド → 再接続の流れで**文脈ごと**会話が続くか確認（adapter の resume は実機未確認）。再起動跨ぎの文脈復元は「スレッドに ACP session id を永続化 → 復元後の初回送信で `session/load` → adapter が replay する履歴を transcript に二重追加しない」の 3 点セットで別段

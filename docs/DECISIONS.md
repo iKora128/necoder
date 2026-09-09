@@ -243,6 +243,20 @@ Lapceが速いエディタをFloemで作れている＝**GPUI以外でも同じ�
   **§8 は不変** — ピル操作は `default_agent` を触らない・既定変更は Settings 画面のみ。08-08 の「mode は前タブ引き継ぎ
   （session-local）」も残す＝per-agent sticky が復元時の土台、前タブ引き継ぎが同一セッション内の追従（`add_thread`
   で sticky 適用の後に上書き）。旧 `default_model`/`default_effort` は後方互換の土台として読むだけに降格。
+- **選択は value_id 一本で持つ（2026-09-09・07-27／08-08／08-17 を置き換え）** — 「毎回勝手に Fable になる」の根治。
+  原因は **1 つの文字列フィールドに 3 つの語彙が混ざっていた**こと: necoder の静的一覧（`claude-opus-5`）、
+  ACP の value_id（`opus[1m]`）、ACP の表示名（`Opus (1M context)`）。保存も比較も表示名で行っていたため、
+  Claude Code の広告と毎回一致せず「提供されない選択」と判定され、広告 current（CLI 既定の Fable）へ落ちていた。
+  **決定**: necoder はモデル/思考量/権限モードの綴りを一切持たない。
+  (1) 保存は `agent_config_defaults[agent_id][config_id] = value_id`（キーはラベルでなく `AgentKind::id`。
+  `config_id` は necoder の区分 `model`/`effort`/`mode`＝接続前にも引ける鍵、値はエージェントの value_id）。
+  (2) 照合は **value_id の完全一致だけ**。表示名・大文字小文字・系統名で当てにいかない（緩い照合は「近いけれど
+  別のモデル」を静かに選ぶ方が、当たらないより危険）。一致すれば `set_config` で agent を合わせ、無ければ広告 current を採る。
+  (3) 静的候補（`CLAUDE_MODELS` 等）を全廃。広告が届くまで選択肢は空＝ピルは不活性（押せる死んだ面を作らない）。
+  (4) 表示名は `selector_label` が広告から引き直すだけで、どこにも保存しない。
+  (5) `threads.model` は「そのスレッドが何を使ったか」の記録に降格し、復元時の選択の正は sticky（Zed も resume で既定を適用する）。
+  比較対象は Zed（`agent_servers.<id>.default_config_options`・完全一致か skip・静的一覧なし）。旧
+  `default_model`/`default_effort`/`agent_defaults` は**移行コードを書かずに廃止**（本人方針: 後方互換の経路は作らない）。
 - **削除は「残るものが減る 4 段」として 1 枚に並べる（2026-07-27・本人要望）** —
   「× を押しても消えない・worktree を消す方法がない・完全に消すのと見た目から排除するの違いが分からない」への回答。
   段を減らすのではなく、**段を隠すのをやめる**: セルの ⋯ に 閉じる / 止める / Task を終了 / worktree 削除 / ブランチごと削除 を

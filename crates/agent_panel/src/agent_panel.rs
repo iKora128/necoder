@@ -87,34 +87,9 @@ const COMPOSER_INPUT_MIN: f32 = 46.0;
 const COMPOSER_INPUT_MAX: f32 = 420.0;
 /// auto-grow 時に内容高へ足す余白（最終行のディセンダとキャレットを切らない）。
 const COMPOSER_INPUT_GROW_SLACK: f32 = 8.0;
-/// composer のモデルセレクタに並べる候補（クリックでアクティブスレッドに設定）。
-/// **これはフォールバック** — ACP エージェントが `session/set_config_option` で広告してきた
-/// 一覧があればそちらが優先される（`selector_options`）。広告しないエージェント用の既定リスト。
-/// 選択は `send_set_config` で実際にエージェントへ送る（表示だけではない）。
-const CLAUDE_MODELS: &[&str] = &[
-    "claude-opus-5",
-    "claude-opus-4-8",
-    "claude-sonnet-5",
-    "claude-haiku-4-5",
-    "claude-fable-5",
-];
-/// Codex のセッション広告を受け取る前だけ使う候補。接続後は `config_options` の動的一覧に置き換わる。
-/// 表示名は codex-acp の Model config（Codex `model/list` の `displayName`）に合わせる。
-const CODEX_MODELS: &[&str] = &[
-    "GPT-5.6-Sol",
-    "GPT-5.6-Terra",
-    "GPT-5.6-Luna",
-    "GPT-5.5",
-    "GPT-5.4",
-    "GPT-5.4-Mini",
-];
-/// モデル在庫を静的に持てないエージェントは、ACP 広告が届くまで vendor の既定を使う。
-const AUTO_MODELS: &[&str] = &["auto"];
-/// 権限モード（Claude Code 相当。実配線は ACP の SessionMode／set_mode 経由で継続課題）。
-const PERMISSION_MODES: &[&str] = &["default", "accept edits", "bypass permissions", "plan"];
-/// 推論の effort（Zed 下部コントロール相当）。モデル候補と同じくエージェントの広告が優先。
-/// `xhigh` は high と max の間（Opus 5 / Opus 4.8 / Sonnet 5 等。コーディング/エージェント用途の推奨値）。
-const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+/// 選択ピルが「まだ値を知らない」ときに出す字（接続前・未選択）。
+/// 文言ではなく記号なので `locales` には置かない。
+const SELECTOR_UNSET: &str = "—";
 
 /// スレッドの見せ方（explorer の Tree/Columns/Icons と同じ「登録式ビュー」。Bar と List は排他）。
 /// Bar = 色付き横タブ（既定）。List = 縦リスト（「チャットのスペース履歴」風・多数でも一望）。
@@ -126,7 +101,7 @@ enum AgentTabsView {
 }
 
 /// composer 下部の選択ピル種別（Zed のエージェント下部コントロールに倣う）。
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Selector {
     Agent,
     Mode,
@@ -135,14 +110,30 @@ enum Selector {
 }
 
 impl Selector {
-    fn options(self) -> &'static [&'static str] {
+    /// この選択を `agent_config_defaults[agent_id]` のどのキーに覚えるか。
+    ///
+    /// **キーは necoder の区分（Model/Effort/Mode）、値はエージェントの value_id** という組み合わせ。
+    /// エージェント側の `config_id` を鍵にしない理由は、鍵は接続前にも引けなければならないから
+    /// （権限モードは `session/new` の時点で渡す必要がある）。値の方は必ず広告の綴りをそのまま持つ。
+    fn config_id(self) -> Option<&'static str> {
         match self {
-            Selector::Agent => &[],
-            Selector::Mode => PERMISSION_MODES,
-            Selector::Model => CLAUDE_MODELS,
-            Selector::Effort => EFFORTS,
+            Selector::Agent => None,
+            Selector::Mode => Some("mode"),
+            Selector::Model => Some("model"),
+            Selector::Effort => Some("effort"),
         }
     }
+}
+
+/// セレクタのドロップダウン 1 行。
+///
+/// `value` は **ACP が広告した value_id**（`opus[1m]` や `xhigh`）。保存・比較・エージェントへの送信は
+/// すべてこれだけを使う。`label` は描画専用（`Opus (1M context)`）で、保存も比較も絶対にしない。
+/// 2 つを 1 本の文字列に潰したのが「毎回モデルが戻る」不具合の原因だった（DECISIONS 2026-09-09）。
+#[derive(Clone, PartialEq)]
+struct SelectorChoice {
+    value: SharedString,
+    label: SharedString,
 }
 
 /// transcript の 1 エントリ（VSCode Claude Code 拡張のトランスクリプトを踏襲）。
@@ -736,6 +727,13 @@ struct Thread {
     /// いま握っているセッションの通し番号。古いセッションのポンプ終了（`session_ended`）を
     /// 立て直した新セッションへ誤配送しないための照合キー。
     session_serial: u64,
+    /// 認証切れ（再ログインで直る失敗）で止まっている。composer 上部に「再ログインが必要」カードを
+    /// 出す。**セッション（`command_tx`）は保持する**: claude-agent-acp は認証切れのセッションを
+    /// 「sign-out respawn」として覚えており、次の prompt で Claude セッションを `resume` 付きで
+    /// 作り直す（会話の文脈が残る）。プロセスを捨てると文脈も捨てることになる。
+    /// resume に失敗して「session has ended」が返ったら [`acp_client::is_session_ended`] で送信路を捨てる。
+    /// 永続化しない（プロセスの状態であって会話ではない）。
+    auth_required: bool,
 }
 
 impl Thread {
@@ -765,9 +763,11 @@ impl Thread {
             turn_started_at: None,
             created_at_ms: now_unix_ms(),
             last_input_at_ms: None,
-            model: "claude-fable-5".into(),
-            permission_mode: "default".into(),
-            effort: "high".into(),
+            // 空＝「まだ何も選んでいない」。エージェントが広告した current をそのまま採用する。
+            // ここに necoder 独自の綴りを置くと、広告と突き合わせたとき必ず外れる。
+            model: SharedString::default(),
+            permission_mode: SharedString::default(),
+            effort: SharedString::default(),
             agent: "Claude Code".into(),
             context: Vec::new(),
             draft: String::new(),
@@ -793,6 +793,7 @@ impl Thread {
             session_lost: false,
             session_note: None,
             session_serial: 0,
+            auth_required: false,
         }
     }
 
@@ -1627,7 +1628,8 @@ PYEOF"#;
                 _project,
                 _branch,
                 agent,
-                model,
+                // 記録としては読むが、**選択の正には使わない**（下のコメント参照）。
+                _last_used_model,
                 tokens_used,
                 tokens_limit,
                 created_at_ms,
@@ -1644,9 +1646,11 @@ PYEOF"#;
                     .filter(|agent| acp_client::AgentKind::by_label(agent).is_some())
                     .map(SharedString::from)
                     .unwrap_or_else(|| default_agent_name(cx));
-                if let Some(model) = model {
-                    thread.model = model.into();
-                }
+                // 復元スレッドも **その agent の sticky** で開く。DB の `threads.model` は
+                // 「そのスレッドが何を使ったか」の記録であって、次に何を選ぶかの正ではない
+                // （Zed も resume 時に既定 config を適用する）。ここで DB 値を採ると、
+                // 古い行に残る旧語彙が sticky を打ち消して毎回エージェント既定へ落ちる。
+                apply_agent_sticky(&mut thread, cx);
                 thread.tokens_used = tokens_used.max(0) as u32;
                 thread.tokens_shown = thread.tokens_used as f32;
                 if tokens_limit > 0 {
@@ -2557,6 +2561,33 @@ PYEOF"#;
         self.abandon_turn(thread_index, &i18n::t!("agent.err_cancel_session_lost"), cx);
     }
 
+    /// 「再ログインが必要」カードの再接続: 直近のユーザー指示を**同じ ACP セッション**へ送り直す
+    /// （ユーザーがターミナルで再ログインした後に押す想定）。adapter がこの prompt を機に Claude
+    /// セッションを resume 付きで作り直すので会話の文脈は続く。送信路が既に無ければ
+    /// [`Self::send_prompt_text`] の遅延起動が新プロセスを立てる（この時は文脈は新規）。
+    /// 添付コンテキストは送信時に付け直されるので、透過 prompt ではなく表示用の指示文を送る。
+    /// 指示が無ければカードを閉じるだけ。
+    fn reconnect_after_auth(&mut self, cx: &mut Context<Self>) {
+        let last_prompt = self.threads.get(self.active).and_then(|thread| {
+            thread.entries.iter().rev().find_map(|entry| match entry {
+                Entry::User(text) => Some(text.to_string()),
+                _ => None,
+            })
+        });
+        self.dismiss_auth_card(cx);
+        if let Some(prompt) = last_prompt {
+            self.send_prompt_text(prompt, cx);
+        }
+    }
+
+    /// 「再ログインが必要」カードを閉じる（セッションはそのまま＝次の送信が再接続になる）。
+    fn dismiss_auth_card(&mut self, cx: &mut Context<Self>) {
+        if let Some(thread) = self.threads.get_mut(self.active) {
+            thread.auth_required = false;
+        }
+        cx.notify();
+    }
+
     /// このパネルで走っている全スレッドを中断する（編隊セルの「エージェントを止める」・2026-07-27）。
     /// 止めた本数を返す（0 = 走っていなかった）。
     pub fn cancel_all_turns(&mut self, cx: &mut Context<Self>) -> usize {
@@ -3419,52 +3450,52 @@ PYEOF"#;
         })
     }
 
-    /// セレクタのドロップダウンに出す選択肢。エージェントが広告した実選択肢（モード/モデル/effort）が
-    /// あればそれを、無ければ静的な既定ラベルを返す。
-    fn selector_options(&self, selector: Selector) -> Vec<SharedString> {
+    /// セレクタのドロップダウンに出す選択肢。**エージェントが広告したものだけ**を返す。
+    ///
+    /// 広告が届く前は空（＝メニューを開かせない・ピルは不活性）。necoder が候補を捏造しないのが要点で、
+    /// 捏造した綴りは広告と一致せず「選んだのに次回は戻る」を生む。Zed も同じで、`configOptions` が
+    /// 来るまでモデル UI 自体を出さない（necoder は場所を保つためにピルは残し、押せなくする）。
+    fn selector_choices(&self, selector: Selector) -> Vec<SelectorChoice> {
         if selector == Selector::Agent {
             let current = self.selector_value(Selector::Agent);
-            let mut options: Vec<SharedString> = acp_client::authenticated_agent_labels()
+            let mut options: Vec<SelectorChoice> = acp_client::authenticated_agent_labels()
                 .into_iter()
-                .map(SharedString::from)
+                .map(|label| SelectorChoice {
+                    value: SharedString::from(label),
+                    label: SharedString::from(label),
+                })
                 .collect();
             // 明示既定/復元値は、起動直後の背景認証確認より強い。現在値を選択肢から消さない。
-            if !options.contains(&current) {
-                options.insert(0, current);
+            if !options.iter().any(|choice| choice.value == current) {
+                options.insert(
+                    0,
+                    SelectorChoice {
+                        value: current.clone(),
+                        label: current,
+                    },
+                );
             }
             return options;
         }
-        let advertised = self
-            .threads
-            .get(self.active)
-            .and_then(|thread| match selector {
-                Selector::Mode if !thread.available_modes.is_empty() => Some(
-                    thread
-                        .available_modes
-                        .iter()
-                        .map(|(_, name)| name.clone())
-                        .collect(),
-                ),
-                Selector::Model => config_choice_names(thread, ConfigCategory::Model),
-                Selector::Effort => config_choice_names(thread, ConfigCategory::ThoughtLevel),
-                _ => None,
-            });
-        advertised.unwrap_or_else(|| {
-            let fallback = if selector == Selector::Model {
-                self.threads
-                    .get(self.active)
-                    .map(|thread| fallback_models(thread.agent.as_ref()))
-                    .unwrap_or(CLAUDE_MODELS)
-            } else {
-                selector.options()
-            };
-            fallback
+        let Some(thread) = self.threads.get(self.active) else {
+            return Vec::new();
+        };
+        match selector {
+            Selector::Mode => thread
+                .available_modes
                 .iter()
-                .map(|option| SharedString::from(*option))
-                .collect()
-        })
+                .map(|(id, name)| SelectorChoice {
+                    value: id.clone(),
+                    label: name.clone(),
+                })
+                .collect(),
+            Selector::Model => config_choices(thread, ConfigCategory::Model),
+            Selector::Effort => config_choices(thread, ConfigCategory::ThoughtLevel),
+            Selector::Agent => Vec::new(),
+        }
     }
 
+    /// 現在の選択を **value_id** で返す（未選択なら空）。比較・保存・送信はこの値だけを使う。
     fn selector_value(&self, selector: Selector) -> SharedString {
         self.threads
             .get(self.active)
@@ -3477,14 +3508,28 @@ PYEOF"#;
             .unwrap_or_default()
     }
 
+    /// ピルに出す文字。value_id を広告の表示名へ引き直す（描画専用・どこにも保存しない）。
+    ///
+    /// 広告がまだ無い間は value_id をそのまま出す。嘘をつかず、かつ復元した選択が消えて見えない。
+    /// 値も広告も無ければ [`SELECTOR_UNSET`]。
+    /// テスト用の入口。描画側は `render_selector_pill` が選択肢を 1 回だけ作って `label_for` を直接呼ぶ
+    /// （毎フレーム 2 度 Vec を作らないため）。規則そのものは `label_for` に一本化してある。
+    #[cfg(test)]
+    fn selector_label(&self, selector: Selector) -> SharedString {
+        label_for(
+            &self.selector_choices(selector),
+            &self.selector_value(selector),
+        )
+    }
+
     /// 選択ピルの値を**このスレッドに**反映（Model/Effort は `session/set_config_option`、
     /// Mode は `session/set_mode` を実際に送る）。
     ///
     /// Agent だけは**グローバル既定（`default_agent`）を触らない** — どのエージェントを使うかは
     /// 環境の選択で、1 スレッドの都合で全体が動くと事故になる（ドリフト禁止・DECISIONS §8）。
     /// 一方 **Model / Effort / Mode は agent ごとに sticky**（2026-08-17）: 作業のたびに選び直す種類の
-    /// 設定なので、選んだ値を `agent_defaults[今の agent]` へ書き戻し、その agent の次スレッドが
-    /// それで開く。agent を跨いでも値が混ざらない（Claude=Opus / Codex=GPT を各々保つ）。
+    /// 設定なので、選んだ **value_id** を `agent_config_defaults[今の agent の id]` へ書き戻し、
+    /// その agent の次スレッドがそれで開く。agent を跨いでも語彙が混ざらない。
     /// 既定を「動かさない」（§8＝default_agent）ことと「覚える」（per-agent sticky）の線をここで引いている。
     fn select_option(&mut self, selector: Selector, value: SharedString, cx: &mut Context<Self>) {
         if selector == Selector::Agent && self.agent_selector_locked() {
@@ -3493,17 +3538,14 @@ PYEOF"#;
             return;
         }
         // sticky の宛先は「今アクティブなスレッドの agent」。選んだ値をその agent にだけ紐づける。
-        let active_agent = self
+        // 保存するのは **広告された value_id そのまま**（`value` は menu 行の `SelectorChoice::value`）。
+        let active_agent_id = self
             .threads
             .get(self.active)
-            .map(|thread| thread.agent.clone());
-        if let Some(agent) = active_agent {
-            match selector {
-                Selector::Model => settings::set_agent_default(cx, &agent, "model", &value),
-                Selector::Effort => settings::set_agent_default(cx, &agent, "effort", &value),
-                Selector::Mode => settings::set_agent_default(cx, &agent, "mode", &value),
-                Selector::Agent => {}
-            }
+            .and_then(|thread| acp_client::AgentKind::by_label(thread.agent.as_ref()))
+            .map(|kind| kind.id);
+        if let (Some(agent_id), Some(config_id)) = (active_agent_id, selector.config_id()) {
+            settings::set_agent_config_default(cx, agent_id, config_id, &value);
         }
         if let Some(thread) = self.threads.get_mut(self.active) {
             match selector {
@@ -3516,16 +3558,12 @@ PYEOF"#;
                     apply_agent_sticky(thread, cx);
                 }
                 Selector::Mode => {
+                    // `value` は mode_id。逆引きが要らないので「引けなくて無送信」が起きない。
                     thread.permission_mode = value.clone();
-                    // 表示名 → mode_id を引いて `session/set_mode` を送る（広告モードがある時）。
-                    let mode_id = thread
-                        .available_modes
-                        .iter()
-                        .find(|(_, name)| name.eq_ignore_ascii_case(&value))
-                        .map(|(id, _)| id.to_string());
-                    if let (Some(mode_id), Some(command_tx)) = (mode_id, &thread.command_tx) {
+                    thread.current_mode_id = value.clone();
+                    if let Some(command_tx) = &thread.command_tx {
                         command_tx
-                            .unbounded_send(SessionCommand::SetMode(mode_id))
+                            .unbounded_send(SessionCommand::SetMode(value.to_string()))
                             .ok();
                     }
                     // 承認待ちの最中に bypass へ切り替えたら、その場で Allow を返す。
@@ -3608,9 +3646,15 @@ PYEOF"#;
     /// hover でだけ薄く面が出る。開いている時だけラベルをスレッド色（accent）にする（チップにしない）。
     fn render_selector_pill(&self, selector: Selector, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let value = self.selector_value(selector);
+        // 選択肢は 1 回だけ作り、ラベルと不活性判定の両方をここから導く（描画のたびに 2 度作らない）。
+        let choices = self.selector_choices(selector);
+        let current = self.selector_value(selector);
+        let value = label_for(&choices, &current);
         let is_open = self.open_menu == Some(selector);
-        let locked = selector == Selector::Agent && self.agent_selector_locked();
+        // 選択肢が 1 つも無い＝まだ広告が届いていない。**押せるのに何も出ない**面を作らないため、
+        // シェブロンを外してクリックも受けない（JOURNAL 2026-07-27「押せるのに死んでいる画面」の教訓）。
+        let locked =
+            (selector == Selector::Agent && self.agent_selector_locked()) || choices.is_empty();
         let accent = self.active_color();
         let (id, mut tip): (&'static str, String) = match selector {
             Selector::Agent => ("pill-agent", i18n::t!("agent.pill_agent")),
@@ -3618,8 +3662,10 @@ PYEOF"#;
             Selector::Model => ("pill-model", i18n::t!("agent.pill_model")),
             Selector::Effort => ("pill-effort", i18n::t!("agent.pill_effort")),
         };
-        if locked {
+        if locked && selector == Selector::Agent && self.agent_selector_locked() {
             tip = i18n::t!("agent.pill_agent_locked");
+        } else if locked {
+            tip = i18n::t!("agent.pill_awaiting_agent");
         }
         let label_color = if is_open { accent } else { theme.fg1 };
         let mut pill = div()
@@ -3675,8 +3721,8 @@ PYEOF"#;
     fn render_selector_menu(&self, selector: Selector, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let current = self.selector_value(selector);
-        // エージェントが広告する実選択肢（モード/モデル/effort）があればそれを優先。無ければ既定表示。
-        let options = self.selector_options(selector);
+        // エージェントが広告した実選択肢だけ。necoder は候補を捏造しない。
+        let options = self.selector_choices(selector);
         let align_right = matches!(selector, Selector::Model | Selector::Effort);
         div()
             .absolute()
@@ -3705,7 +3751,8 @@ PYEOF"#;
                     .into_iter()
                     .enumerate()
                     .map(|(option_index, option)| {
-                        let selected = option == current;
+                        // 一致判定は **value_id で**。表示名で比べると綴り違いで選択中が消える。
+                        let selected = option.value == current;
                         div()
                             .id(("selector-option", option_index))
                             .flex()
@@ -3721,14 +3768,14 @@ PYEOF"#;
                             .hover(|style| style.bg(theme.bg3))
                             // エージェント選択だけブランドバッジ付き（Mode/Model/Effort は文字のみ）
                             .when(selector == Selector::Agent, |element| {
-                                element.child(agent_badge(&option, 14.))
+                                element.child(agent_badge(&option.label, 14.))
                             })
-                            .child(option.clone())
+                            .child(option.label.clone())
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _window, cx| {
                                     cx.stop_propagation(); // ピルの toggle が再発火して開き直すのを防ぐ
-                                    this.select_option(selector, option.clone(), cx)
+                                    this.select_option(selector, option.value.clone(), cx)
                                 }),
                             )
                     }),
@@ -3791,9 +3838,12 @@ PYEOF"#;
 
     /// キューに積んだ prompt があれば先頭を送る（ターン完了時・スレッド切替時に呼ぶ）。
     /// **アクティブスレッドが idle の時だけ**流す（`send_prompt_text` は active 宛のため）。
+    ///
+    /// 認証切れで止まっている間は流さない（再ログイン前に送っても同じ失敗を重ねるだけ。
+    /// 再接続で直近の指示を送り直した後、そのターン完了で改めてキューが流れる）。
     fn flush_queued_prompt(&mut self, cx: &mut Context<Self>) {
         let next = self.threads.get_mut(self.active).and_then(|thread| {
-            if thread.running || thread.queued_prompts.is_empty() {
+            if thread.running || thread.auth_required || thread.queued_prompts.is_empty() {
                 None
             } else {
                 Some(thread.queued_prompts.remove(0))
@@ -3885,6 +3935,7 @@ PYEOF"#;
                 .entries
                 .push(Entry::User(SharedString::from(prompt.clone())));
             thread.running = true;
+            thread.auth_required = false; // 送信＝再接続（同じセッションへ送る。adapter 側で resume）
             thread.done = None; // 新しいターン開始＝直前の「完了・未確認」ラッチは消す
             thread.tier2 = None; // ✳ 要約は前ターンの文＝新ターンでは古い（P4）
             thread.turn_started_at = Some(std::time::Instant::now()); // 経過秒の起点
@@ -4231,54 +4282,39 @@ PYEOF"#;
                     .map(|(id, name)| (SharedString::from(id), SharedString::from(name)))
                     .collect();
                 let advertised_current = SharedString::from(current);
-                // Configs と同じく、スレッドが望むモード（前タブから引き継いだ `permission_mode`）を正とする。
-                // 広告に在れば `set_mode` でエージェントを合わせ、無ければ広告 current を採用する。
+                // スレッドが望む mode_id（sticky / 前タブ引き継ぎ）を正とし、広告に**その id が在るときだけ**
+                // 合わせに行く。無ければ黙って広告 current を採る。照合は id の完全一致だけ＝
+                // 表示名の綴り違いで外れる余地が無い（Zed の apply_default_config_options と同じ規律）。
                 let desired = thread.permission_mode.clone();
-                // 静的候補（小文字 "bypass permissions"）と広告名（Title Case "Bypass Permissions"）は
-                // 表記が食い違うため、完全一致だと必ず None に落ちて default へ戻っていた（bypass が効かない元凶）。
-                // 大文字小文字を無視して照合し、一致したら permission_mode を広告名へ正規化してピル表示も揃える。
-                let desired_id = thread
-                    .available_modes
-                    .iter()
-                    .find(|(_, name)| name.eq_ignore_ascii_case(&desired))
-                    .map(|(id, name)| (id.clone(), name.clone()));
-                match desired_id {
-                    Some((mode_id, canonical_name)) => {
-                        if mode_id != advertised_current {
-                            if let Some(command_tx) = &thread.command_tx {
-                                command_tx
-                                    .unbounded_send(SessionCommand::SetMode(mode_id.to_string()))
-                                    .ok();
-                            }
+                let offered = !desired.is_empty()
+                    && thread.available_modes.iter().any(|(id, _)| *id == desired);
+                if offered {
+                    if desired != advertised_current {
+                        if let Some(command_tx) = &thread.command_tx {
+                            command_tx
+                                .unbounded_send(SessionCommand::SetMode(desired.to_string()))
+                                .ok();
                         }
-                        thread.current_mode_id = mode_id;
-                        thread.permission_mode = canonical_name; // 広告名へ正規化（以後の照合は完全一致で通る）
                     }
-                    None => {
-                        // desired を提供しないエージェント → 広告 current を採用（フォールバック）。
-                        if let Some((_, name)) = thread
-                            .available_modes
-                            .iter()
-                            .find(|(id, _)| *id == advertised_current)
-                        {
-                            thread.permission_mode = name.clone();
-                        }
-                        thread.current_mode_id = advertised_current;
-                    }
+                    thread.current_mode_id = desired;
+                } else {
+                    thread.permission_mode = advertised_current.clone();
+                    thread.current_mode_id = advertised_current;
                 }
             }
             AgentEvent::ModeChanged(id) => {
+                // エージェント発の変更。id をそのまま持ち、表示名は描画時に引き直す。
                 let id = SharedString::from(id);
-                if let Some((_, name)) = thread.available_modes.iter().find(|(mid, _)| *mid == id) {
-                    thread.permission_mode = name.clone();
-                }
+                thread.permission_mode = id.clone();
                 thread.current_mode_id = id;
             }
             AgentEvent::Configs(configs) => {
-                // 新セッションは**自分の既定**を current として広告してくる。これを鵜呑みにすると
-                // apply_thread_defaults が載せた sticky（前回選んだモデル/思考量）が毎回上書きされる＝
-                // 「タブを開くたびに設定が戻る」の正体。スレッド側の選択を正とし、広告に在れば
-                // `set_config` でエージェントを合わせ、**無いときだけ**広告 current を採用する。
+                // 新セッションは**自分の既定**を current として広告してくる。鵜呑みにすると sticky が
+                // 毎回上書きされる＝「タブを開くたびにモデルが戻る」の正体。スレッド側の選択を正とし、
+                // **広告に同じ value_id が在るときだけ** `set_config` で合わせに行く。
+                //
+                // 照合は value_id の完全一致だけ。表示名や系統名で当てにいかない（綴りの取り違えは
+                // 静かに間違ったモデルを選ぶので、当たらない方が安全）。無ければ広告 current を採る。
                 // 起動時は acp_client が `SessionPreferences` で希望を初回 prompt 前に適用済みなので、
                 // 通常ここは一致して無送信（ここからの SetConfig はターン中 deferred＝初回ターンに
                 // 間に合わない）。ターン途中の `ConfigOptionUpdate` と広告に無い値のフォールバックが担当。
@@ -4289,39 +4325,31 @@ PYEOF"#;
                         ConfigCategory::ThoughtLevel => thread.effort.clone(),
                         ConfigCategory::Other => continue,
                     };
-                    // 広告に desired があるか / エージェントの current 表示名は何か、を借用を残さず取り出す。
-                    let Some((desired_offered, current_name)) = thread
+                    // 借用を残さずに「desired は広告されているか / 広告 current は何か」を取り出す。
+                    let Some((offered, advertised_current)) = thread
                         .configs
                         .iter()
                         .find(|config| config.category == category)
                         .map(|config| {
-                            let offered = config
-                                .choices
-                                .iter()
-                                .any(|(_, name)| name.as_str() == desired.as_ref());
-                            let current_name = config
-                                .choices
-                                .iter()
-                                .find(|(id, _)| *id == config.current)
-                                .map(|(_, name)| SharedString::from(name.clone()));
-                            (offered, current_name)
+                            let offered = !desired.is_empty()
+                                && config
+                                    .choices
+                                    .iter()
+                                    .any(|(id, _)| id.as_str() == desired.as_ref());
+                            (offered, SharedString::from(config.current.clone()))
                         })
                     else {
                         continue;
                     };
-                    if desired_offered {
-                        // エージェントの current がまだ違えば合わせに行く（一致していれば無送信）。
-                        let already = current_name
-                            .as_ref()
-                            .is_some_and(|name| name.as_ref() == desired.as_ref());
-                        if !already {
+                    if offered {
+                        if advertised_current != desired {
                             send_set_config(thread, category, &desired);
                         }
-                    } else if let Some(name) = current_name {
-                        // このエージェントが提供しない選択 → 広告 current を採用（フォールバック）。
+                    } else {
+                        // 未選択、またはこのエージェントが提供しない value_id → 広告 current を採用。
                         match category {
-                            ConfigCategory::Model => thread.model = name,
-                            ConfigCategory::ThoughtLevel => thread.effort = name,
+                            ConfigCategory::Model => thread.model = advertised_current,
+                            ConfigCategory::ThoughtLevel => thread.effort = advertised_current,
                             ConfigCategory::Other => {}
                         }
                     }
@@ -4492,6 +4520,21 @@ PYEOF"#;
                         "message" => &error
                     ))));
                 thread.running = false;
+                // 認証切れ（OAuth 失効等）は一般の失敗と分け、composer 上部に「再ログインが必要」
+                // カードを立てる。**セッションは捨てない**: claude-agent-acp はこのセッションを
+                // sign-out respawn 対象として記憶し、ユーザーが再ログインした後の次の prompt で
+                // Claude セッションを resume 付きで作り直す（文脈が続く）。プロセスを殺すと
+                // その経路を自分で潰すことになる（adapter 0.75.1 の `respawnSignedOutSession`）。
+                if acp_client::is_auth_failure(&error) {
+                    thread.auth_required = true;
+                    thread.pending_permission = None;
+                    thread.pending_elicitation = None;
+                }
+                // セッション終了（query ストリーム死亡・プロセス異常終了・resume 失敗）は同じ
+                // 送信路へ何を送っても拒まれるので、ここで捨てて次の送信で新プロセスを立てる。
+                if acp_client::is_session_ended(&error) {
+                    thread.command_tx = None;
+                }
                 // 失敗も「注意を要する終わり方」＝裏のスレッドは Done(中断) として灯す。
                 if thread_index != active {
                     thread.done = Some(TurnEnd::Interrupted);
@@ -7282,6 +7325,136 @@ PYEOF"#;
         Some(card.into_any_element())
     }
 
+    /// 「再ログインが必要」カード（composer の直上・承認カードと同じ流儀）。認証切れは一般のエラーと
+    /// 違い**ユーザーがターミナルで 1 行打てば直る**ので、打つべきコマンドと再接続導線をここに置く。
+    /// 再接続は直近の指示を同じセッションへ送り直す（会話履歴も、adapter 側の文脈も捨てない）。
+    fn render_auth_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        if !thread.auth_required {
+            return None;
+        }
+        let theme = self.theme.clone();
+        let color = thread.color;
+        let login_command =
+            acp_client::AgentKind::by_label(&thread.agent).and_then(|kind| kind.login_command());
+        let body = match login_command {
+            Some(_) => i18n::t!("agent.auth_required_body"),
+            None => i18n::t!("agent.auth_required_body_generic", "agent" => thread.agent),
+        };
+        let has_last_prompt = thread
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::User(_)));
+        let reconnect_label = if has_last_prompt {
+            i18n::t!("agent.auth_reconnect_resend")
+        } else {
+            i18n::t!("agent.auth_reconnect")
+        };
+        let button = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .flex()
+                .flex_none()
+                .items_center()
+                .px(px(11.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .cursor_pointer()
+                .child(SharedString::from(label))
+        };
+        let card = div()
+            .id("auth-card")
+            .mx(px(12.))
+            .mb(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .rounded(px(9.))
+            .overflow_hidden()
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(color.alpha(0.6))
+            .px(px(11.))
+            .py(px(9.))
+            // ヘッダ: 「再ログインが必要」+ エージェント名
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(7.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(color)
+                            .child(SharedString::from(i18n::t!("agent.auth_required_title"))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.5))
+                            .text_color(theme.fg0)
+                            .child(thread.agent.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.fg1)
+                    .child(SharedString::from(body)),
+            )
+            // 打つべきコマンド（等幅・承認カードの rawInput と同じ箱）
+            .when_some(login_command, |card, command| {
+                card.child(
+                    div()
+                        .id("auth-login-command")
+                        .rounded(px(6.))
+                        .bg(theme.bg1)
+                        .border_1()
+                        .border_color(theme.border)
+                        .px(px(8.))
+                        .py(px(6.))
+                        .font_family("Guguru Sans Code")
+                        .text_size(px(11.))
+                        .text_color(theme.fg0)
+                        .child(SharedString::from(command)),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        button("auth-reconnect", reconnect_label)
+                            .bg(color)
+                            .text_color(theme.bg0)
+                            .hover(|style| style.opacity(0.85))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _window, cx| this.reconnect_after_auth(cx)),
+                            ),
+                    )
+                    .child(
+                        button("auth-dismiss", i18n::t!("agent.auth_dismiss"))
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_color(theme.fg1)
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _window, cx| this.dismiss_auth_card(cx)),
+                            ),
+                    ),
+            );
+        Some(card.into_any_element())
+    }
+
     fn render_permission_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
         let pending = thread.pending_permission.as_ref()?;
@@ -7869,6 +8042,7 @@ impl Render for AgentPanel {
                     .children(self.render_jump_to_latest(cx)),
             )
             // 承認待ちの権限リクエスト（あれば composer の直上に常時表示）。
+            .children(self.render_auth_card(cx))
             .children(self.render_permission_card(cx))
             .children(self.render_elicitation_card(cx))
             // セッション断のバナー（再開ボタン）/ 再開の一言。
@@ -8417,26 +8591,40 @@ pub fn agent_badge(label: &str, size: f32) -> gpui::AnyElement {
 }
 
 /// 指定カテゴリの広告設定の選択肢名一覧（無ければ `None`＝静的既定にフォールバック）。
-fn config_choice_names(thread: &Thread, category: ConfigCategory) -> Option<Vec<SharedString>> {
-    let config = thread
-        .configs
-        .iter()
-        .find(|config| config.category == category)?;
-    if config.choices.is_empty() {
-        return None;
+/// value_id を広告の表示名へ引き直す（描画専用）。広告がまだ無ければ value_id をそのまま出し、
+/// 値も無ければ [`SELECTOR_UNSET`]。**引けなかったことを表示名の捏造で隠さない**のが要点。
+fn label_for(choices: &[SelectorChoice], value: &SharedString) -> SharedString {
+    if let Some(choice) = choices.iter().find(|choice| &choice.value == value) {
+        return choice.label.clone();
     }
-    Some(
-        config
-            .choices
-            .iter()
-            .map(|(_, name)| SharedString::from(name.clone()))
-            .collect(),
-    )
+    if value.is_empty() {
+        SharedString::from(SELECTOR_UNSET)
+    } else {
+        value.clone()
+    }
 }
 
-/// 選んだ表示名から value_id を引いて `session/set_config_option` を送る（広告設定 + セッションがある時のみ）。
-/// 広告が無ければ何もしない（＝ラベル切替のみで実反映はできない）。
-fn send_set_config(thread: &Thread, category: ConfigCategory, value_name: &SharedString) {
+fn config_choices(thread: &Thread, category: ConfigCategory) -> Vec<SelectorChoice> {
+    thread
+        .configs
+        .iter()
+        .find(|config| config.category == category)
+        .map(|config| {
+            config
+                .choices
+                .iter()
+                .map(|(value, label)| SelectorChoice {
+                    value: SharedString::from(value.clone()),
+                    label: SharedString::from(label.clone()),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 選んだ **value_id** を `session/set_config_option` で送る（広告設定 + セッションがある時のみ）。
+/// 広告が無ければ何もしない（＝この区分をエージェントが持っていない）。
+fn send_set_config(thread: &Thread, category: ConfigCategory, value_id: &SharedString) {
     let Some(config) = thread
         .configs
         .iter()
@@ -8444,18 +8632,12 @@ fn send_set_config(thread: &Thread, category: ConfigCategory, value_name: &Share
     else {
         return;
     };
-    let Some((value_id, _)) = config
-        .choices
-        .iter()
-        .find(|(_, name)| name.as_str() == value_name.as_ref())
-    else {
-        return;
-    };
+    // `value_id` は広告された綴りそのもの。逆引きしないので「引けなくて無送信」が起きない。
     if let Some(command_tx) = &thread.command_tx {
         command_tx
             .unbounded_send(SessionCommand::SetConfig {
                 config_id: config.config_id.clone(),
-                value_id: value_id.clone(),
+                value_id: value_id.to_string(),
             })
             .ok();
     }
@@ -8670,31 +8852,6 @@ fn default_agent_name(cx: &App) -> SharedString {
     }
 }
 
-/// ACP が `config_options` を返す前に見せるモデル候補。モデル一覧を持つ二つだけ vendor 別にし、
-/// provider が任意のエージェントは一時的に `auto`（接続後に広告 current へ置換）とする。
-fn fallback_models(agent: &str) -> &'static [&'static str] {
-    match agent {
-        "Claude Code" => CLAUDE_MODELS,
-        "Codex" => CODEX_MODELS,
-        _ => AUTO_MODELS,
-    }
-}
-
-/// モデル文字列が指定エージェントの vendor に属するか。sticky やグローバル土台が別 vendor の値なら
-/// 捨ててフォールバック先頭へ戻すための判定。同じ vendor なら静的一覧に無い新モデルでも保ち、
-/// 接続後の ACP 広告で検証する。
-fn model_belongs_to_agent(agent: &str, model: &str) -> bool {
-    match agent {
-        "Claude Code" => model.starts_with("claude-"),
-        "Codex" => !model.is_empty() && !model.starts_with("claude-"),
-        _ => model == "auto",
-    }
-}
-
-/// エージェントの sticky 既定を settings から引く（`agent_defaults[agent]` を最優先）。
-/// モデルは per-agent → グローバル `default_model`（土台）→ vendor フォールバック先頭の順。
-/// 思考量は per-agent → グローバル `default_effort` → `None`（＝Thread の初期値を保つ）。
-/// モードは per-agent → `None`（広告 or 前タブ引き継ぎに委ねる）。
 /// `settings.json` の `agent_servers.<id>` を acp_client の言葉へ写す。
 ///
 /// 設定スキーマ（`type: custom` / `type: registry`）を知っているのはこの層まで。acp_client 側は
@@ -8717,53 +8874,38 @@ fn agent_server_override(agent_id: &str, cx: &App) -> Option<acp_client::AgentOv
     })
 }
 
-fn agent_sticky_defaults(
-    agent: &str,
-    cx: &App,
-) -> (SharedString, Option<SharedString>, Option<SharedString>) {
-    let settings = settings::get(cx);
-    let per_agent = settings.agent_defaults.get(agent);
-
-    let model_candidate = per_agent
-        .and_then(|defaults| defaults.model.clone())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_else(|| settings.default_model.clone());
-    let model = if model_belongs_to_agent(agent, &model_candidate) {
-        SharedString::from(model_candidate)
-    } else {
-        SharedString::from(fallback_models(agent).first().copied().unwrap_or("auto"))
+/// その agent で最後に選んだ value_id を 1 つ引く（`agent_config_defaults[agent_id][config_id]`）。
+/// 未選択なら空。**別 vendor の綴りへフォールバックしない** — 当てずっぽうの綴りは広告と一致せず、
+/// 一致しない値は結局エージェント既定に落ちるので、嘘の候補を挟むだけ無駄で紛らわしい。
+fn agent_sticky_value(agent_label: &str, config_id: &str, cx: &App) -> SharedString {
+    let Some(kind) = acp_client::AgentKind::by_label(agent_label) else {
+        return SharedString::default();
     };
-
-    let effort = per_agent
-        .and_then(|defaults| defaults.effort.clone())
-        .or_else(|| Some(settings.default_effort.clone()))
-        .filter(|effort| !effort.is_empty())
-        .map(SharedString::from);
-
-    let mode = per_agent
-        .and_then(|defaults| defaults.mode.clone())
-        .filter(|mode| !mode.is_empty())
-        .map(SharedString::from);
-
-    (model, effort, mode)
+    settings::get(cx)
+        .agent_config_defaults
+        .get(kind.id)
+        .and_then(|defaults| defaults.get(config_id))
+        .filter(|value| !value.is_empty())
+        .map(|value| SharedString::from(value.clone()))
+        .unwrap_or_default()
 }
 
 /// 指定 agent の sticky（モデル/思考量/モード）をスレッドへ載せる。Agent ピル切替と新規スレッド生成が
 /// 共有する。`thread.agent` は呼び出し側で確定済みにしておく（この関数は agent を変えない）。
+///
+/// 未選択なら**空を入れる**のが要点。前の agent の value_id（別 vendor の語彙）を残すと、次の広告で
+/// 一致せず「提供されない選択」として弾かれるだけなので、持ち越さず白紙に戻す。
 fn apply_agent_sticky(thread: &mut Thread, cx: &App) {
-    let (model, effort, mode) = agent_sticky_defaults(thread.agent.as_ref(), cx);
-    thread.model = model;
-    if let Some(effort) = effort {
-        thread.effort = effort;
-    }
-    if let Some(mode) = mode {
-        thread.permission_mode = mode;
-    }
+    let agent = thread.agent.clone();
+    thread.model = agent_sticky_value(agent.as_ref(), "model", cx);
+    thread.effort = agent_sticky_value(agent.as_ref(), "effort", cx);
+    thread.permission_mode = agent_sticky_value(agent.as_ref(), "mode", cx);
+    thread.current_mode_id = thread.permission_mode.clone();
 }
 
 /// 新規スレッドへ「前回選んだ状態」を載せる（2026-07-27 ユーザー要望「前に設定した状態を保持して」）。
 /// エージェント＝グローバル既定（Settings 画面でだけ変わる・§8）。モデル/思考量/モード＝**その agent で
-/// ピルで選んだ最後の値**（`select_option` が `agent_defaults` へ書き戻す）。毎回 fable-5/high に戻る挙動を断つ。
+/// ピルで選んだ最後の value_id**（`select_option` が `agent_config_defaults` へ書き戻す）。
 fn apply_thread_defaults(thread: &mut Thread, cx: &App) {
     thread.agent = default_agent_name(cx);
     apply_agent_sticky(thread, cx);
@@ -8846,7 +8988,7 @@ fn seed_threads() -> Vec<Thread> {
         // 種スレッドにも実感のある時刻を（offscreen 検証で「開始/入力」表示が写る）。
         created_at_ms: now_unix_ms() - 2 * 60 * 60 * 1000,
         last_input_at_ms: Some(now_unix_ms() - 5 * 60 * 1000),
-        model: "claude-fable-5".into(),
+        model: "fable".into(),
         permission_mode: "default".into(),
         effort: "high".into(),
         agent: "Claude Code".into(),
@@ -8870,6 +9012,7 @@ fn seed_threads() -> Vec<Thread> {
         session_lost: false,
         session_note: None,
         session_serial: 0,
+        auth_required: false,
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
@@ -9390,6 +9533,83 @@ PYEOF"#;
         let _ = std::fs::remove_file(settings_path);
     }
 
+    /// 認証切れ（OAuth 失効）の Failed は一般のエラーと区別する: 再ログインカードを立てるが、
+    /// **セッションは残す**（adapter が次の prompt で resume する）。セッション終了の Failed だけが
+    /// 送信路を捨てる。再接続は直近の指示を送り直す（宛先未確定なので err_no_project で畳まれるが、
+    /// User entry が積まれカードが消えることを確認する）。
+    #[gpui::test]
+    fn auth_failure_raises_relogin_card_and_reconnect_resends(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "auth_card");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, _command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.threads[active]
+                .entries
+                .push(Entry::User("続きをやって".into()));
+
+            // 一般のエラー（ストリーミング切断）はカードを立てず、セッションも残す。
+            panel.threads[active].running = true;
+            panel.on_event(
+                active,
+                AgentEvent::Failed(
+                    "Internal error: API Error: Connection closed mid-response".into(),
+                ),
+                cx,
+            );
+            assert!(!panel.threads[active].auth_required);
+            assert!(panel.threads[active].command_tx.is_some());
+
+            // 認証切れはカードを立て、プロセス（送信路）を捨てる。
+            panel.threads[active].running = true;
+            panel.on_event(
+                active,
+                AgentEvent::Failed(
+                    "Internal error: Failed to authenticate: OAuth session expired and could not \
+                     be refreshed: {\"errorKind\":\"authentication_failed\"}"
+                        .into(),
+                ),
+                cx,
+            );
+            let thread = &panel.threads[active];
+            assert!(thread.auth_required, "再ログインカードを立てる");
+            assert!(
+                thread.command_tx.is_some(),
+                "セッションは残す（adapter が次の prompt で resume する）"
+            );
+            assert!(!thread.running);
+
+            // resume にも失敗して「session has ended」が返ったら、送信路を捨てて次で新プロセス。
+            panel.threads[active].running = true;
+            panel.on_event(
+                active,
+                AgentEvent::Failed(
+                    "Internal error: The Claude Agent session has ended. Please start a new session."
+                        .into(),
+                ),
+                cx,
+            );
+            assert!(
+                panel.threads[active].command_tx.is_none(),
+                "終了したセッションの送信路は捨てる"
+            );
+
+            panel.reconnect_after_auth(cx);
+            let thread = &panel.threads[active];
+            assert!(!thread.auth_required, "再接続でカードは消える");
+            let resent = thread
+                .entries
+                .iter()
+                .filter(
+                    |entry| matches!(entry, Entry::User(text) if text.as_ref() == "続きをやって"),
+                )
+                .count();
+            assert_eq!(resent, 2, "直近の指示を送り直す");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
     /// bypass permissions 選択中に届いた許可リクエストは UI 側で即 Allow を返す
     /// （エージェント側の set_mode 反映レースの窓を塞ぐ）。Blocked には積まない。
     #[gpui::test]
@@ -9399,7 +9619,7 @@ PYEOF"#;
         let (respond_tx, mut respond_rx) = mpsc::unbounded::<usize>();
         panel.update(cx, |panel, cx| {
             let active = panel.active;
-            panel.threads[active].permission_mode = "Bypass Permissions".into();
+            panel.threads[active].permission_mode = "bypassPermissions".into();
             panel.on_event(
                 active,
                 AgentEvent::PermissionRequest {
@@ -9459,7 +9679,7 @@ PYEOF"#;
                 respond: respond_tx,
                 since: std::time::Instant::now(),
             });
-            panel.select_option(Selector::Mode, "bypass permissions".into(), cx);
+            panel.select_option(Selector::Mode, "bypassPermissions".into(), cx);
             assert!(
                 panel.threads[active].pending_permission.is_none(),
                 "切り替えで待ちが解ける"
@@ -9496,191 +9716,241 @@ PYEOF"#;
         }
     }
 
-    /// 新セッションの Configs 広告（＝エージェント既定）が、スレッドが選んでいる sticky を上書きしない。
-    /// 広告に在る限り選択を保ち（＝タブを開くたびに戻らない）、無い時だけ広告 current にフォールバックする。
+    /// 実機の Claude Code の語彙をそのまま流す回帰テスト。
+    ///
+    /// 「毎回勝手に Fable になる」の再現と根治の確認。value_id は `opus[1m]`、表示名は
+    /// `Opus (1M context)` と綴りが違う。保存・比較・送信を **value_id 一本**にしたので、
+    /// エージェントが Fable を current として広告してきても選択は動かず、`set_config` で
+    /// エージェント側を合わせに行く。ピルの表示だけが表示名になる。
     #[gpui::test]
-    fn configs_advertisement_keeps_thread_selection(cx: &mut gpui::TestAppContext) {
-        let path = init_test_settings(cx, "configs");
+    fn claude_code_value_ids_survive_advertisement(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "configs-value-id");
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
             let active = panel.active;
-            let thread = &mut panel.threads[active];
-            thread.model = "Opus".into();
-            thread.effort = "xhigh".into();
-            // エージェントは自分の既定（Sonnet / high）を current として広告してくる。
-            let configs = vec![
-                config(
-                    ConfigCategory::Model,
-                    "sonnet-id",
-                    &[("opus-id", "Opus"), ("sonnet-id", "Sonnet")],
-                ),
-                config(
-                    ConfigCategory::ThoughtLevel,
-                    "high-id",
-                    &[("high-id", "high"), ("xhigh-id", "xhigh")],
-                ),
-            ];
-            panel.on_event(active, AgentEvent::Configs(configs), cx);
-            let thread = &panel.threads[active];
-            assert_eq!(thread.model.as_ref(), "Opus", "選択したモデルを保つ");
-            assert_eq!(thread.effort.as_ref(), "xhigh", "選択した思考量を保つ");
-            assert_eq!(thread.configs.len(), 2, "広告は取り込む");
+            let (command_tx, mut command_rx) = futures::channel::mpsc::unbounded();
+            panel.threads[active].command_tx = Some(command_tx);
+            // エージェントが自分の既定（Fable / high）を current として広告してくる。
+            let advertise = || {
+                vec![
+                    config(
+                        ConfigCategory::Model,
+                        "fable",
+                        &[
+                            ("default", "Default (recommended)"),
+                            ("opus", "Opus"),
+                            ("opus[1m]", "Opus (1M context)"),
+                            ("fable", "Fable"),
+                        ],
+                    ),
+                    config(
+                        ConfigCategory::ThoughtLevel,
+                        "high",
+                        &[("high", "High"), ("xhigh", "Xhigh")],
+                    ),
+                ]
+            };
+            panel.on_event(active, AgentEvent::Configs(advertise()), cx);
+            // 何も選んでいないので広告 current をそのまま採る。
+            assert_eq!(panel.threads[active].model.as_ref(), "fable");
 
-            // フォールバック: 広告に無い選択は広告 current の表示名を採用する。
-            panel.threads[active].model = "Haiku".into();
-            let configs = vec![config(
-                ConfigCategory::Model,
-                "sonnet-id",
-                &[("opus-id", "Opus"), ("sonnet-id", "Sonnet")],
-            )];
-            panel.on_event(active, AgentEvent::Configs(configs), cx);
+            // ピルで 1M 版を選ぶ（メニュー行が渡すのは value_id）。
+            panel.select_option(Selector::Model, "opus[1m]".into(), cx);
+            panel.select_option(Selector::Effort, "xhigh".into(), cx);
+
+            // 保存されるのは value_id そのまま。角括弧も落とさない。
+            let defaults = settings::get(cx).agent_config_defaults;
+            assert_eq!(defaults["claude"]["model"], "opus[1m]");
+            assert_eq!(defaults["claude"]["effort"], "xhigh");
+
+            // 次のセッションも「自分の既定は Fable」と言ってくるが、選択は動かない。
+            panel.on_event(active, AgentEvent::Configs(advertise()), cx);
+            let thread = &panel.threads[active];
+            assert_eq!(thread.model.as_ref(), "opus[1m]", "選択は広告で動かない");
+            assert_eq!(thread.effort.as_ref(), "xhigh");
+            // 表示は広告の表示名へ引き直す（保存はしない）。
+            assert_eq!(
+                panel.selector_label(Selector::Model).as_ref(),
+                "Opus (1M context)"
+            );
+            assert_eq!(panel.selector_label(Selector::Effort).as_ref(), "Xhigh");
+
+            let sent: Vec<String> = std::iter::from_fn(|| command_rx.try_recv().ok())
+                .filter_map(|command| match command {
+                    SessionCommand::SetConfig { value_id, .. } => Some(value_id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                sent,
+                vec!["opus[1m]", "xhigh", "opus[1m]", "xhigh"],
+                "ピル選択時と、再広告で current がずれている時の両方で合わせに行く"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 広告に無い value_id は**当てずっぽうで近い物を選ばず**、エージェントの current を採る。
+    /// 別 agent の語彙が残っている場合と、まだ何も選んでいない場合の両方がこの経路。
+    #[gpui::test]
+    fn unoffered_value_id_falls_back_to_advertised_current(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "configs-unoffered");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            // 別 vendor の綴りが載っている状態（agent を跨いだ直後など）。
+            panel.threads[active].model = "gpt-5.6-sol".into();
+            panel.on_event(
+                active,
+                AgentEvent::Configs(vec![config(
+                    ConfigCategory::Model,
+                    "fable",
+                    &[("opus", "Opus"), ("fable", "Fable")],
+                )]),
+                cx,
+            );
             assert_eq!(
                 panel.threads[active].model.as_ref(),
-                "Sonnet",
-                "提供されない選択は広告 current へフォールバック"
+                "fable",
+                "提供されない選択は広告 current を採る（似た名前を勝手に選ばない）"
             );
+
+            // 未選択（空）も同じ経路。
+            panel.threads[active].model = SharedString::default();
+            panel.on_event(
+                active,
+                AgentEvent::Configs(vec![config(
+                    ConfigCategory::Model,
+                    "opus",
+                    &[("opus", "Opus"), ("fable", "Fable")],
+                )]),
+                cx,
+            );
+            assert_eq!(panel.threads[active].model.as_ref(), "opus");
         });
         let _ = std::fs::remove_file(path);
     }
 
-    /// Agent は未送信スレッドでだけ選べる。会話開始後に別 AI へ差し替えて transcript を混ぜない。
+    /// 広告が届く前は候補を捏造しない＝メニューは空。ピルは押せない（死んだクリック先を作らない）。
     #[gpui::test]
-    fn agent_is_locked_after_conversation_starts(cx: &mut gpui::TestAppContext) {
-        let path = init_test_settings(cx, "agent-lock");
+    fn selectors_are_empty_before_advertisement(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "no-advertisement");
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
-            panel.select_option(Selector::Agent, "Codex".into(), cx);
-            assert_eq!(panel.threads[panel.active].agent.as_ref(), "Codex");
-
-            panel.threads[panel.active]
-                .entries
-                .push(Entry::User("開始済み".into()));
-            panel.select_option(Selector::Agent, "Claude Code".into(), cx);
+            assert!(panel.selector_choices(Selector::Model).is_empty());
+            assert!(panel.selector_choices(Selector::Effort).is_empty());
+            assert!(panel.selector_choices(Selector::Mode).is_empty());
+            // 未選択なので記号を出す（古いモデル名を騙って出さない）。
             assert_eq!(
-                panel.threads[panel.active].agent.as_ref(),
-                "Codex",
-                "開始済みスレッドの Agent は変わらない"
+                panel.selector_label(Selector::Model).as_ref(),
+                SELECTOR_UNSET
             );
-            panel.toggle_menu(Selector::Agent, cx);
-            assert!(panel.open_menu.is_none(), "開始後は Agent menu も開かない");
+            // Agent だけは接続前でも選べる（認証済み一覧から作る）。
+            assert!(!panel.selector_choices(Selector::Agent).is_empty());
+            panel.toggle_menu(Selector::Model, cx);
+            assert_eq!(panel.open_menu, Some(Selector::Model));
         });
         let _ = std::fs::remove_file(path);
     }
 
-    /// 未接続スレッドでも、Model メニューは選択中 Agent の vendor に合う候補だけを出す。
+    /// Modes も同じ規律で mode_id 一本。新規タブは直前タブの権限モードを引き継ぐ。
     #[gpui::test]
-    fn model_fallback_follows_selected_agent(cx: &mut gpui::TestAppContext) {
-        let path = init_test_settings(cx, "agent-model-fallback");
-        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
-        panel.update(cx, |panel, cx| {
-            panel.select_option(Selector::Agent, "Codex".into(), cx);
-
-            let thread = &panel.threads[panel.active];
-            assert_eq!(thread.model.as_ref(), CODEX_MODELS[0]);
-            let options = panel.selector_options(Selector::Model);
-            assert_eq!(options.len(), CODEX_MODELS.len());
-            assert!(options.iter().all(|model| !model.starts_with("claude-")));
-            assert!(options.iter().any(|model| model.as_ref() == "GPT-5.6-Sol"));
-        });
-        let _ = std::fs::remove_file(path);
-    }
-
-    /// Modes 広告も同じ規律。加えて新規タブは直前タブの権限モードを引き継ぐ（default に戻らない）。
-    #[gpui::test]
-    fn mode_persists_and_new_tab_inherits(cx: &mut gpui::TestAppContext) {
+    fn mode_uses_ids_and_new_tab_inherits(cx: &mut gpui::TestAppContext) {
         let path = init_test_settings(cx, "modes");
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
             let active = panel.active;
-            panel.threads[active].permission_mode = "Accept Edits".into();
+            panel.threads[active].permission_mode = "acceptEdits".into();
             let modes = vec![
-                ("ask".to_string(), "Always Ask".to_string()),
-                ("accept".to_string(), "Accept Edits".to_string()),
+                ("default".to_string(), "Always Ask".to_string()),
+                ("acceptEdits".to_string(), "Accept Edits".to_string()),
             ];
             panel.on_event(
                 active,
                 AgentEvent::Modes {
                     modes,
-                    current: "ask".to_string(),
+                    current: "default".to_string(),
                 },
                 cx,
             );
             let thread = &panel.threads[active];
             assert_eq!(
                 thread.permission_mode.as_ref(),
-                "Accept Edits",
+                "acceptEdits",
                 "選択したモードを保つ（広告 current では上書きしない）"
             );
-            assert_eq!(thread.current_mode_id.as_ref(), "accept");
+            assert_eq!(thread.current_mode_id.as_ref(), "acceptEdits");
+            assert_eq!(
+                panel.selector_label(Selector::Mode).as_ref(),
+                "Accept Edits"
+            );
 
             // 新規タブは直前タブのモードを引き継ぐ。
             panel.add_thread(cx);
             assert_eq!(
                 panel.threads[panel.active].permission_mode.as_ref(),
-                "Accept Edits",
+                "acceptEdits",
                 "新規タブは前タブの権限モードを引き継ぐ"
             );
 
-            // フォールバック: 提供されないモードは広告 current の表示名を採用する。
+            // 提供されない mode_id は広告 current を採る。
             let active = panel.active;
-            panel.threads[active].permission_mode = "Plan".into();
-            let modes = vec![
-                ("ask".to_string(), "Always Ask".to_string()),
-                ("accept".to_string(), "Accept Edits".to_string()),
-            ];
+            panel.threads[active].permission_mode = "plan".into();
             panel.on_event(
                 active,
                 AgentEvent::Modes {
-                    modes,
-                    current: "ask".to_string(),
+                    modes: vec![
+                        ("default".to_string(), "Always Ask".to_string()),
+                        ("acceptEdits".to_string(), "Accept Edits".to_string()),
+                    ],
+                    current: "default".to_string(),
                 },
                 cx,
             );
             assert_eq!(
                 panel.threads[active].permission_mode.as_ref(),
-                "Always Ask",
+                "default",
                 "提供されないモードは広告 current へフォールバック"
             );
         });
         let _ = std::fs::remove_file(path);
     }
 
-    /// Model/Effort/Mode は **agent ごとに** sticky（DEFAULT §8 の default_agent とは別レイヤ）。
-    /// ある agent で選んだ値は別 agent へ漏れず、agent を切り替えると各自の最後の選択で開き直す。
+    /// sticky は **agent ごと**（§8 の default_agent とは別レイヤ）。ある agent で選んだ value_id は
+    /// 別 agent へ漏れず、agent を切り替えると各自の最後の選択で開き直す。持っていなければ白紙。
     #[gpui::test]
     fn sticky_defaults_are_per_agent(cx: &mut gpui::TestAppContext) {
         let path = init_test_settings(cx, "per-agent-sticky");
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
-            // 既定 agent（Claude Code）でモデル・思考量を選ぶ → その agent にだけ紐づいて永続化。
-            panel.select_option(Selector::Model, "claude-opus-5".into(), cx);
+            // 既定 agent（Claude Code）で選ぶ → その agent の id にだけ紐づいて永続化。
+            panel.select_option(Selector::Model, "opus".into(), cx);
             panel.select_option(Selector::Effort, "xhigh".into(), cx);
-            let defaults = settings::get(cx).agent_defaults;
-            assert_eq!(
-                defaults["Claude Code"].model.as_deref(),
-                Some("claude-opus-5")
-            );
-            assert_eq!(defaults["Claude Code"].effort.as_deref(), Some("xhigh"));
-            assert!(!defaults.contains_key("Codex"), "他 agent には書かない");
+            let defaults = settings::get(cx).agent_config_defaults;
+            assert_eq!(defaults["claude"]["model"], "opus");
+            assert_eq!(defaults["claude"]["effort"], "xhigh");
+            assert!(!defaults.contains_key("codex"), "他 agent には書かない");
 
-            // Codex へ切替 → Claude の sticky を持ち込まず vendor フォールバックで開く。
+            // Codex へ切替 → Claude の value_id を持ち込まず白紙で開く（別 vendor の語彙は無効）。
             panel.select_option(Selector::Agent, "Codex".into(), cx);
             assert_eq!(panel.threads[panel.active].agent.as_ref(), "Codex");
-            assert_eq!(panel.threads[panel.active].model.as_ref(), CODEX_MODELS[0]);
+            assert!(
+                panel.threads[panel.active].model.is_empty(),
+                "Codex の選択はまだ無い＝広告 current に従う"
+            );
 
-            // Codex で別モデルを選ぶ → Codex にだけ紐づき、Claude 側は不変。
-            panel.select_option(Selector::Model, CODEX_MODELS[1].into(), cx);
-            let defaults = settings::get(cx).agent_defaults;
-            assert_eq!(defaults["Codex"].model.as_deref(), Some(CODEX_MODELS[1]));
+            // Codex で選ぶ → Codex にだけ紐づき、Claude 側は不変。
+            panel.select_option(Selector::Model, "gpt-5.6-sol".into(), cx);
+            let defaults = settings::get(cx).agent_config_defaults;
+            assert_eq!(defaults["codex"]["model"], "gpt-5.6-sol");
             assert_eq!(
-                defaults["Claude Code"].model.as_deref(),
-                Some("claude-opus-5"),
+                defaults["claude"]["model"], "opus",
                 "Codex の選択は Claude の sticky を汚さない"
             );
 
             // Claude へ戻す → Claude の sticky（opus / xhigh）で開き直す。
             panel.select_option(Selector::Agent, "Claude Code".into(), cx);
-            assert_eq!(panel.threads[panel.active].model.as_ref(), "claude-opus-5");
+            assert_eq!(panel.threads[panel.active].model.as_ref(), "opus");
             assert_eq!(panel.threads[panel.active].effort.as_ref(), "xhigh");
 
             // §8: グローバル既定 default_agent はピル操作で動かない。

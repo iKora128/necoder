@@ -32,6 +32,7 @@ agent:
   pill_mode: 権限モード（編集・実行の許可レベル）
   pill_model: モデル
   pill_effort: 推論の深さ（effort）
+  pill_awaiting_agent: 接続すると選べます（エージェントが候補を送ってきます）
   err_no_project: プロジェクトが未確定のため送れません
   err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
   err_session_lost: セッションが切れました。もう一度送信してください
@@ -44,6 +45,12 @@ agent:
   session_resuming: 再開中…
   session_resumed: 前回の会話を引き継いで再開しました
   session_fresh: 新しいセッションを開始しました（前回の会話は引き継げませんでした）
+  auth_required_title: ● 再ログインが必要
+  auth_required_body: エージェントの認証が切れました。ターミナルで次のコマンドを実行してから「再接続して再送」を押してください。直近の指示をもう一度送り、会話を続けます
+  auth_required_body_generic: "%{agent} の認証が切れました。エージェントの CLI で再ログインしてから「再接続して再送」を押してください。直近の指示をもう一度送り、会話を続けます"
+  auth_reconnect_resend: 再接続して再送
+  auth_reconnect: 再接続
+  auth_dismiss: 閉じる
   permission_files: "%{title}（%{n} ファイル）"
   done: 完了 %{elapsed}
   done_touched: 完了 %{elapsed}・触ったファイル %{n}
