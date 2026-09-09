@@ -49,6 +49,7 @@ pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
 mod chrome;
 mod commands;
 mod control_ipc;
+mod remote_control;
 mod control_transport;
 mod control_view;
 mod dev_probes;

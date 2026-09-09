@@ -1,0 +1,32 @@
+{
+  "name": "necoder-control",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "host": "node host/cli.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "playwright test",
+    "test:native": "node test/native-smoke.mjs",
+    "test:production": "node test/production-smoke.mjs",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4",
+    "web-push": "3.6.7",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "sharp": "0.35.4",
+    "@playwright/test": "1.58.2",
+    "@cloudflare/workers-types": "5.20260908.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.130.0"
+  },
+  "overrides": { "sharp": "0.35.4" }
+}

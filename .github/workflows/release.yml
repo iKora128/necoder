@@ -41,6 +41,11 @@ jobs:
           echo "version OK: v${CARGO_VERSION}"
       # toolchain は rust-toolchain.toml（1.95.0）で固定 → rustup が自動取得。
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
       - name: Pillow（アイコン .icns 生成に使う）
         run: pip3 install --break-system-packages pillow
 
@@ -195,6 +200,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - name: Remote host の検証とビルド
+        working-directory: relay
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       # ここに W0（移植の現在地を測る `cargo check --workspace --keep-going`）があったが
       # 2026-08-25 に外した。移植が終わり **CI の check-windows が同じ検査を毎 push で
       # 回している**ので用済みで、しかも下の build とは RUSTFLAGS が違う（+crt-static）＝
@@ -271,6 +292,8 @@ jobs:
           Copy-Item target/release/necoder.exe dist/stage/
           Copy-Item LICENSE, README.md, THIRD_PARTY_NOTICES.md dist/stage/ -ErrorAction SilentlyContinue
           Copy-Item third_party/licenses dist/stage/licenses -Recurse
+          New-Item -ItemType Directory -Path dist/stage/control -Force | Out-Null
+          Copy-Item relay/dist/host.mjs, relay/dist/THIRD_PARTY_LICENSES.txt dist/stage/control/
           Compress-Archive -Path dist/stage/* -DestinationPath dist/necoder-windows-x64.zip
       - uses: actions/upload-artifact@v4
         if: success()

@@ -304,6 +304,12 @@ pub trait Host: Send + Sync {
         file_limit: usize,
     ) -> Result<Vec<TextSearchHit>>;
     fn run_command(&self, spec: &CommandSpec) -> Result<CommandOutput>;
+    /// **冪等（読み取り専用）と分かっている** command。remote では「送ったが結果不明」で
+    /// 接続が張り直された場合に**再送してよい**。`command -v` や `uname` のような探索に使う。
+    /// 既定は [`Self::run_command`] と同じ（local に再送の概念は無い）。
+    fn run_command_retry_safe(&self, spec: &CommandSpec) -> Result<CommandOutput> {
+        self.run_command(spec)
+    }
     /// このホストで 1 行スクリプトを流す [`CommandSpec`] を組む。
     ///
     /// **分岐キーは「このホストの OS」であって `cfg!(target_os)` ではない**
@@ -2444,19 +2450,6 @@ impl SshTransport {
         for option in MASTER_OPTIONS {
             master.args(["-o", option]);
         }
-        #[cfg(unix)]
-        if let Some(forward) = &self.remote_cli_forward {
-            // remote へ GUI 本体の socket を直出しせず、open 専用 gateway だけを reverse forward。
-            master
-                .args(["-o", "StreamLocalBindUnlink=yes"])
-                .args(["-o", "StreamLocalBindMask=0177"])
-                .arg("-R")
-                .arg(format!(
-                    "{}:{}",
-                    forward.remote_socket.display(),
-                    forward._gateway.socket.display()
-                ));
-        }
         if let Some(port) = self.project.port {
             master.args(["-p", &port.to_string()]);
         }
@@ -2467,7 +2460,64 @@ impl SshTransport {
         if !status.success() {
             bail!("OpenSSH ControlMaster の接続に失敗: {status}");
         }
+        // `ne` gateway の reverse forward は master が立ってから足す。master 起動の `-R` に
+        // 同居させると、前回の master が異常終了して remote に残った socket で bind が落ち、
+        // `ExitOnForwardFailure=yes` が master ごと exit 255 にして**再接続が永久に失敗**する
+        // （2026-09-08 実機: sleep 復帰後の張り直しが 100 回以上同じエラーで落ち、端末を開き直した
+        // ときだけ standalone session が `-R` 無しの master になって回復していた）。
+        #[cfg(unix)]
+        self.install_cli_forward();
         Ok(())
+    }
+
+    /// remote の `ne` が GUI へ戻るための reverse forward を、生きている master へ後付けする。
+    ///
+    /// 転送の成否は `ne` が使えるかにしか影響しないので、失敗しても接続は続ける（警告だけ）。
+    /// 先に前回の socket を消すのは、`-R` の unix socket を bind するのは **remote の sshd** で、
+    /// 古い socket を消すかは sshd_config 側の `StreamLocalBindUnlink`（既定 no）が決めるため。
+    /// client 側の同名オプションは `-L` にしか効かない。
+    #[cfg(unix)]
+    fn install_cli_forward(&self) {
+        let Some(forward) = &self.remote_cli_forward else {
+            return;
+        };
+        let remote_socket = forward.remote_socket.to_string_lossy().to_string();
+        // token 付きの専用パスだけを対象にし、remote の通常ファイルには触れない。
+        let stale = self
+            .command(false, &format!("rm -f -- {}", quote_posix(&remote_socket)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Err(error) = stale {
+            eprintln!("Remote SSH: 前回の `ne` gateway socket を消せない: {error}");
+        }
+        let mut request = ssh_command();
+        request
+            .args(["-S", &self.control_path.to_string_lossy(), "-O", "forward"])
+            .arg("-R")
+            .arg(format!(
+                "{remote_socket}:{}",
+                forward._gateway.socket.display()
+            ));
+        if let Some(port) = self.project.port {
+            request.args(["-p", &port.to_string()]);
+        }
+        let status = request
+            .arg(self.project.destination())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => eprintln!(
+                "Remote SSH: `ne` gateway の転送を張れない（remote の `ne` は使えないが接続は続く）: {status}"
+            ),
+            Err(error) => eprintln!(
+                "Remote SSH: `ne` gateway の転送を要求できない（remote の `ne` は使えないが接続は続く）: {error}"
+            ),
+        }
     }
 
     fn ensure_master(&self) -> Result<()> {
@@ -3717,6 +3767,40 @@ impl RemoteHost {
     }
 }
 
+impl RemoteHost {
+    /// `retry_safe` = 再接続後に同じ request を再送してよいか（冪等な探索だけ true）。
+    /// 非冪等（書き込みや副作用のある script）は「結果不明」のまま失敗として返す。
+    fn run_command_with(&self, spec: &CommandSpec, retry_safe: bool) -> Result<CommandOutput> {
+        let mut spec = spec.clone();
+        spec.cwd = self.relative(&spec.cwd)?;
+        let (response, body) = self.scoped_request(
+            move |project_id| Request::RunCommand {
+                project_id,
+                spec: spec.clone(),
+            },
+            Vec::new(),
+            retry_safe,
+        )?;
+        match response {
+            Response::Command {
+                status_code,
+                stdout_len,
+                stderr_len,
+            } => {
+                if stdout_len.checked_add(stderr_len) != Some(body.len()) {
+                    bail!("invalid command output lengths");
+                }
+                Ok(CommandOutput {
+                    status_code,
+                    stdout: body[..stdout_len].to_vec(),
+                    stderr: body[stdout_len..].to_vec(),
+                })
+            }
+            _ => bail!("invalid command response"),
+        }
+    }
+}
+
 impl Host for RemoteHost {
     fn id(&self) -> &str {
         &self.id
@@ -3895,33 +3979,11 @@ impl Host for RemoteHost {
     }
 
     fn run_command(&self, spec: &CommandSpec) -> Result<CommandOutput> {
-        let mut spec = spec.clone();
-        spec.cwd = self.relative(&spec.cwd)?;
-        let (response, body) = self.scoped_request(
-            move |project_id| Request::RunCommand {
-                project_id,
-                spec: spec.clone(),
-            },
-            Vec::new(),
-            false,
-        )?;
-        match response {
-            Response::Command {
-                status_code,
-                stdout_len,
-                stderr_len,
-            } => {
-                if stdout_len.checked_add(stderr_len) != Some(body.len()) {
-                    bail!("invalid command output lengths");
-                }
-                Ok(CommandOutput {
-                    status_code,
-                    stdout: body[..stdout_len].to_vec(),
-                    stderr: body[stdout_len..].to_vec(),
-                })
-            }
-            _ => bail!("invalid command response"),
-        }
+        self.run_command_with(spec, false)
+    }
+
+    fn run_command_retry_safe(&self, spec: &CommandSpec) -> Result<CommandOutput> {
+        self.run_command_with(spec, true)
     }
 
     fn spawn_process(&self, spec: &CommandSpec) -> Result<HostProcess> {

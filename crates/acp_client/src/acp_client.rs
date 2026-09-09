@@ -744,16 +744,21 @@ impl AgentKind {
     ///
     /// remote では設定の `command` と レジストリの npm パッケージ版が効き、探索そのものは
     /// remote 側で行う（remote の認証情報は remote 側のものだけを使う原則は変えない）。
+    ///
+    /// 戻り値の 3 態を混ぜない: `Ok(Some)` = 見つかった / `Ok(None)` = **探せたが無い**（導入案内へ）/
+    /// `Err` = **探せなかった**（SSH 再接続の失敗など。原因文をそのまま出す）。以前は `Err` も
+    /// `None` に畳んでいたため、SSH が切れているだけで「claude-agent-acp が見つかりません」と
+    /// 誤報していた（2026-09-08 実機）。
     pub fn resolve_command_on(
         &self,
         host: &dyn Host,
         cwd: impl Into<PathBuf>,
         settings: Option<&AgentOverride>,
         registry: Option<&registry::Registry>,
-    ) -> Option<AgentCommand> {
+    ) -> Result<Option<AgentCommand>> {
         let cwd = cwd.into();
         if !host.is_remote() {
-            return self.resolve_command(cwd, settings, registry);
+            return Ok(self.resolve_command(cwd, settings, registry));
         }
         let settings_env = settings.map(|s| s.env.clone()).unwrap_or_default();
         // 設定でコマンドを指定していれば remote でもそれを使う（解決は remote に任せる）。
@@ -762,7 +767,7 @@ impl AgentKind {
             args.extend(self.extra_args.iter().map(|arg| (*arg).to_string()));
             let mut resolved = AgentCommand::new(PathBuf::from(command), args, cwd);
             resolved.env = settings_env;
-            return Some(resolved);
+            return Ok(Some(resolved));
         }
         // レジストリの版で npx 経路を組む（remote 上の npx を使う）。
         let registry_package = self
@@ -772,20 +777,28 @@ impl AgentKind {
                 Some(registry::Launch::Npx(npx)) => Some(npx),
                 _ => None,
             });
-        let mut resolved = self.command_on_with_package(
+        let Some(mut resolved) = self.command_on_with_package(
             host,
             cwd,
             registry_package.as_ref().map(|npx| npx.package.as_str()),
-        )?;
+        )?
+        else {
+            return Ok(None);
+        };
         if let Some(npx) = registry_package {
             resolved.env.extend(npx.env);
         }
         resolved.env.extend(settings_env);
-        Some(resolved)
+        Ok(Some(resolved))
     }
 
     /// 指定 host 上で agent を解決する。remote の認証情報は remote 側のものだけを使う。
-    pub fn command_on(&self, host: &dyn Host, cwd: impl Into<PathBuf>) -> Option<AgentCommand> {
+    /// 戻り値の 3 態は [`Self::resolve_command_on`] と同じ。
+    pub fn command_on(
+        &self,
+        host: &dyn Host,
+        cwd: impl Into<PathBuf>,
+    ) -> Result<Option<AgentCommand>> {
         self.command_on_with_package(host, cwd, None)
     }
 
@@ -796,34 +809,41 @@ impl AgentKind {
         host: &dyn Host,
         cwd: impl Into<PathBuf>,
         package_override: Option<&str>,
-    ) -> Option<AgentCommand> {
+    ) -> Result<Option<AgentCommand>> {
         let cwd = cwd.into();
         if !host.is_remote() {
-            return self.command(cwd);
+            return Ok(self.command(cwd));
         }
         // ここは上の `if !host.is_remote()` で早期 return した後＝**必ずリモート（Linux）**。
         // だから `sh` で正しい。`cfg!(windows)` で `cmd.exe` に振ってはいけない
         // （Windows クライアントからリモート Linux へ cmd.exe を送ることになる・WINDOWS-PORT.md §D3）。
-        let resolve = |binary: &str| {
+        //
+        // `command -v` は読み取り専用なので **再送可**で送る。切断直後の 1 発目は「送ったが結果
+        // 不明」で接続が張り直されるが、非冪等扱いだとそこで失敗して次の候補（npx）へ落ちていた。
+        let resolve = |binary: &str| -> Result<Option<PathBuf>> {
             let output = host
-                .run_command(&CommandSpec::new("sh", &cwd).args([
+                .run_command_retry_safe(&CommandSpec::new("sh", &cwd).args([
                     "-lc".to_string(),
                     format!("command -v -- {}", shell_word(binary)),
                 ]))
-                .ok()?;
-            output
+                .with_context(|| format!("remote で {binary} を探せない"))?;
+            Ok(output
                 .success()
-                .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+                .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())))
         };
         let extra: Vec<String> = self.extra_args.iter().map(|arg| arg.to_string()).collect();
-        if let Some(path) = resolve(self.bin) {
-            return Some(AgentCommand::new(path, extra, cwd));
+        if let Some(path) = resolve(self.bin)? {
+            return Ok(Some(AgentCommand::new(path, extra, cwd)));
         }
-        let package = package_override.or(self.package)?;
-        let npx = resolve("npx")?;
+        let Some(package) = package_override.or(self.package) else {
+            return Ok(None);
+        };
+        let Some(npx) = resolve("npx")? else {
+            return Ok(None);
+        };
         let mut args = vec!["-y".to_string(), bounded_npm_spec(package)];
         args.extend(extra);
-        Some(AgentCommand::new(npx, args, cwd))
+        Ok(Some(AgentCommand::new(npx, args, cwd)))
     }
 }
 
@@ -2962,5 +2982,172 @@ for line in sys.stdin:
 
         println!("\n--- 受信チャンク数: {}", chunks.len());
         assert!(!chunks.is_empty(), "少なくとも 1 つの AgentChunk が来る");
+    }
+}
+
+/// remote での解決は「見つからない」と「探せなかった」を混ぜない（2026-09-08 の実バグ:
+/// SSH 再接続の失敗が「claude-agent-acp が見つかりません」になっていた）。
+#[cfg(test)]
+mod resolve_on_host_tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    /// remote の `command -v` の返事を台本で決める偽 host。
+    enum Probe {
+        /// SSH が切れていて探しに行けない。
+        Unreachable,
+        /// 探せたが無い。
+        Missing,
+        /// 見つかった。
+        Found,
+    }
+
+    struct FakeRemote {
+        inner: Arc<dyn Host>,
+        probe: Probe,
+        /// (流した script, 再送可で来たか)
+        calls: Mutex<Vec<(String, bool)>>,
+    }
+
+    impl FakeRemote {
+        fn new(probe: Probe) -> Self {
+            Self {
+                inner: LocalHost::shared(),
+                probe,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn answer(&self, spec: &CommandSpec, retry_safe: bool) -> Result<host::CommandOutput> {
+            let script = spec.args.get(1).cloned().unwrap_or_default();
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push((script, retry_safe));
+            match self.probe {
+                Probe::Unreachable => anyhow::bail!(
+                    "Remote SSH 再接続に失敗: OpenSSH ControlMaster の接続に失敗: exit status: 255"
+                ),
+                Probe::Missing => Ok(host::CommandOutput {
+                    status_code: Some(1),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                Probe::Found => Ok(host::CommandOutput {
+                    status_code: Some(0),
+                    stdout: b"/remote/bin/claude-agent-acp\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            }
+        }
+    }
+
+    impl Host for FakeRemote {
+        fn id(&self) -> &str {
+            "fake-remote"
+        }
+        fn display_name(&self) -> &str {
+            "fake-remote"
+        }
+        fn is_remote(&self) -> bool {
+            true
+        }
+        fn host_for_project(&self, path: &Path) -> Result<Arc<dyn Host>> {
+            self.inner.host_for_project(path)
+        }
+        fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
+            self.inner.canonicalize(path)
+        }
+        fn metadata(&self, path: &Path) -> Result<host::HostMetadata> {
+            self.inner.metadata(path)
+        }
+        fn read_dir(&self, path: &Path) -> Result<Vec<host::HostEntry>> {
+            self.inner.read_dir(path)
+        }
+        fn read_file(&self, path: &Path) -> Result<host::FileContent> {
+            self.inner.read_file(path)
+        }
+        fn write_file(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+            condition: host::WriteCondition,
+        ) -> Result<host::FileRevision> {
+            self.inner.write_file(path, bytes, condition)
+        }
+        fn list_files(&self, root: &Path, limit: usize) -> Result<Vec<PathBuf>> {
+            self.inner.list_files(root, limit)
+        }
+        fn search_project(
+            &self,
+            root: &Path,
+            spec: &host::TextSearchSpec,
+            file_limit: usize,
+        ) -> Result<Vec<host::TextSearchHit>> {
+            self.inner.search_project(root, spec, file_limit)
+        }
+        fn run_command(&self, spec: &CommandSpec) -> Result<host::CommandOutput> {
+            self.answer(spec, false)
+        }
+        fn run_command_retry_safe(&self, spec: &CommandSpec) -> Result<host::CommandOutput> {
+            self.answer(spec, true)
+        }
+        fn spawn_process(&self, spec: &CommandSpec) -> Result<host::HostProcess> {
+            self.inner.spawn_process(spec)
+        }
+        fn terminal_launch(&self, cwd: &Path) -> Result<Option<host::TerminalLaunch>> {
+            self.inner.terminal_launch(cwd)
+        }
+    }
+
+    fn claude() -> &'static AgentKind {
+        AgentKind::by_label("Claude Code").expect("Claude Code は組み込みカタログにある")
+    }
+
+    /// SSH が切れているときは `Err`（原因文つき）。`Ok(None)`＝「見つからない」にしない。
+    #[test]
+    fn unreachable_remote_is_an_error_not_missing() {
+        let host = FakeRemote::new(Probe::Unreachable);
+        let message = match claude().resolve_command_on(&host, "/work", None, None) {
+            Err(error) => format!("{error:#}"),
+            Ok(resolved) => panic!(
+                "探しに行けないなら Err（見つかった扱い: {}）",
+                resolved.is_some()
+            ),
+        };
+        assert!(message.contains("探せない"), "文脈が付く: {message}");
+        assert!(
+            message.contains("exit status: 255"),
+            "原因文が残る: {message}"
+        );
+    }
+
+    /// 探せたが無いなら `Ok(None)`（bin も npx も無い）。
+    #[test]
+    fn missing_on_remote_is_none() {
+        let host = FakeRemote::new(Probe::Missing);
+        let resolved = claude()
+            .resolve_command_on(&host, "/work", None, None)
+            .expect("探せている");
+        assert!(resolved.is_none());
+        let calls = host.calls.lock().expect("calls lock");
+        assert_eq!(calls.len(), 2, "bin → npx の順に 2 回探す: {calls:?}");
+    }
+
+    /// 見つかったら remote のパスで組む。探索は**再送可**で流す（切断直後の 1 発目で落とさない）。
+    #[test]
+    fn found_on_remote_uses_retry_safe_probe() {
+        let host = FakeRemote::new(Probe::Found);
+        let resolved = claude()
+            .resolve_command_on(&host, "/work", None, None)
+            .expect("探せている")
+            .expect("見つかる");
+        assert_eq!(resolved.path, PathBuf::from("/remote/bin/claude-agent-acp"));
+        let calls = host.calls.lock().expect("calls lock");
+        assert!(
+            calls.iter().all(|(_, retry_safe)| *retry_safe),
+            "command -v は再送可で送る: {calls:?}"
+        );
     }
 }

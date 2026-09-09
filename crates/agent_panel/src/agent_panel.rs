@@ -24,6 +24,7 @@ use acp_client::{
     AgentEvent, AgentKind, ConfigCategory, ConfigOption, ElicitationField, PermissionChoice,
     PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
 };
+mod remote;
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
 pub use acp_client::PermissionKind as AgentPermissionKind;
 
@@ -500,6 +501,7 @@ fn word_range_in(text: &str, offset: usize) -> (usize, usize) {
 /// エージェントが出した選択肢付き質問（Elicitation・単一選択のみ）。回答するまで composer 上部に
 /// カードを出す（承認カードと同居しない前提。両方来たら承認カードを優先表示）。
 struct PendingElicitation {
+    remote_id: String,
     /// 質問文（`CreateElicitationRequest.message`）。
     message: SharedString,
     /// 単一選択フィールド群（acp_client が非対応フォームを弾いた後のもの）。
@@ -511,6 +513,8 @@ struct PendingElicitation {
 }
 
 struct PendingPermission {
+    /// リモート応答の相関キー。添字を再利用した別の承認へ応答させない。
+    remote_id: String,
     title: SharedString,
     diffs: Vec<PermissionDiff>,
     /// Diff の無いツール（Bash/Fetch/MCP）の実引数（整形 JSON）。承認カードで逐語表示して
@@ -1015,6 +1019,44 @@ fn infer_language_from_tool_argument(value: &str) -> Option<lang::LanguageId> {
 const STEP_COLLAPSE_MIN_LINES: usize = 6;
 const STEP_COLLAPSE_MIN_BYTES: usize = 400;
 
+/// **ユーザー入力（User エントリ）を既定で折り畳む閾値**。貼り付けたログや長い仕様を送ると
+/// transcript が自分の入力だけで埋まり、その後のエージェントの応答が画面の外へ押し出される
+/// （ユーザー報告 2026-09-09）。行数と bytes の両方で見るのは、改行の無い長文の貼り付け
+/// （折り返しで何十行にもなる）も同じように畳むため。
+const USER_COLLAPSE_MIN_LINES: usize = 12;
+const USER_COLLAPSE_MIN_BYTES: usize = 1000;
+/// 折り畳んだときに見せる先頭の行数。「何を送ったか」が分かる程度は残す（全消しにしない）。
+const USER_PREVIEW_LINES: usize = 8;
+/// 折り畳んだときに見せる先頭の文字数（1 行の長文貼り付け用の上限）。
+const USER_PREVIEW_CHARS: usize = 400;
+
+/// transcript エントリの hover 操作ボタン（折り畳み・コピー）の一辺 px。
+/// 本文に重ねて出すので枠 1px で押せる範囲を示す。22px では「狙って押せない・小さい」の
+/// 指摘が続いたため 28px（2026-09-09）。
+const ENTRY_CONTROL_SIZE: f32 = 28.;
+
+/// この User エントリは畳む価値があるか（= 長い入力か）。
+fn user_entry_foldable(text: &str) -> bool {
+    text.lines().count() > USER_COLLAPSE_MIN_LINES || text.len() > USER_COLLAPSE_MIN_BYTES
+}
+
+/// 折り畳み時に見せる先頭部分。行でも文字数でも切る（改行の無い長文でも縮む）。
+/// 末尾に `…` を付けて「続きがある」ことを示す。
+fn user_entry_preview(text: &str) -> SharedString {
+    let head: String = text
+        .lines()
+        .take(USER_PREVIEW_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let clipped: String = head.chars().take(USER_PREVIEW_CHARS).collect();
+    let truncated = clipped.len() < text.len();
+    if truncated {
+        SharedString::from(format!("{}…", clipped.trim_end()))
+    } else {
+        SharedString::from(clipped)
+    }
+}
+
 /// AI 応答本文の fenced コードブロックを折り畳む閾値。これを超える行数のコードは既定で
 /// 先頭 [`CODE_COLLAPSE_HEAD_LINES`] 行だけ見せ、残りはトグルで開く（入力欄直上の最新出力が
 /// 長いコードで画面を専有するのを防ぐ）。短いコードは畳む価値がないのでそのまま出す。
@@ -1270,6 +1312,9 @@ pub struct AgentPanel {
     /// 展開したツール引数（⏺ の引数行）。既定は折り畳み＝長い/複数行コマンドで transcript が
     /// 流れないように（`expanded_steps` と同じ `(thread.id, entry index)` 鍵）。
     expanded_args: std::collections::HashSet<(String, usize)>,
+    /// 展開したユーザー入力（長い User エントリ）。既定は折り畳み（[`user_entry_foldable`]）。
+    /// 同じく `(thread.id, entry index)` 鍵で Entry 自体は軽量に保つ。
+    expanded_inputs: std::collections::HashSet<(String, usize)>,
     /// この panel の window がアクティブか（render で更新・GPUI が activation 変化で再描画するので追従する）。
     /// 完了音は**非アクティブ時のみ**鳴らす（見ている画面に音は要らない・P2）。
     window_active: bool,
@@ -1539,6 +1584,7 @@ PYEOF"#;
             expanded_steps: std::collections::HashSet::new(),
             expanded_code: std::collections::HashSet::new(),
             expanded_args,
+            expanded_inputs: std::collections::HashSet::new(),
             window_active: true,
             composer_height: COMPOSER_INPUT_DEFAULT,
             resizing_composer: false,
@@ -3213,6 +3259,7 @@ PYEOF"#;
                 thread.tokens_used = 8_400;
                 thread.tokens_shown = 8_400.0;
                 thread.pending_permission = Some(PendingPermission {
+                    remote_id: new_thread_id(),
                     title,
                     diffs: Vec::new(),
                     // Diff 無しツールの実引数表示（tool poisoning 対策）を描画検証で写すためのデモ値。
@@ -3298,6 +3345,7 @@ PYEOF"#;
                     let title = SharedString::from("workspace.rs への書き込みを許可しますか");
                     thread.digest = Some(title.clone()); // 実経路（on_event）と同じ素材①
                     thread.pending_permission = Some(PendingPermission {
+                        remote_id: new_thread_id(),
                         title,
                         diffs: Vec::new(),
                         raw_input: None,
@@ -3990,12 +4038,17 @@ PYEOF"#;
         let command = if host.is_remote() {
             None
         } else {
-            Some(kind.resolve_command_on(
-                host.as_ref(),
-                cwd.clone(),
-                agent_override.as_ref(),
-                registry.as_ref(),
-            )?)
+            // local は探索が失敗しない（`Err` は remote だけ）。`Ok(None)` = 導入されていない。
+            Some(
+                kind.resolve_command_on(
+                    host.as_ref(),
+                    cwd.clone(),
+                    agent_override.as_ref(),
+                    registry.as_ref(),
+                )
+                .ok()
+                .flatten()?,
+            )
         };
         let no_acp = i18n::t!("agent.err_no_acp");
         // スレッドの希望（sticky/前タブのモード・モデル・思考量）を起動時に渡す＝初回 prompt 前に
@@ -4026,9 +4079,20 @@ PYEOF"#;
                         agent_override.as_ref(),
                         registry.as_ref(),
                     ) {
-                        Some(command) => command,
-                        None => {
+                        Ok(Some(command)) => command,
+                        // 探せたが無い＝本当に導入されていない。
+                        Ok(None) => {
                             error_tx.unbounded_send(AgentEvent::Failed(no_acp)).ok();
+                            return;
+                        }
+                        // 探せなかった（SSH 再接続の失敗など）。「見つかりません」と言わず原因を出す。
+                        Err(error) => {
+                            error_tx
+                                .unbounded_send(AgentEvent::Failed(i18n::t!(
+                                    "agent.err_agent_lookup",
+                                    "message" => &format!("{error:#}")
+                                )))
+                                .ok();
                             return;
                         }
                     },
@@ -4339,6 +4403,7 @@ PYEOF"#;
                 // 選択肢付き質問。回答するまで composer 上部にカードを出す（承認カードと同じ Blocked）。
                 thread.digest = digest_tail(&message).or(thread.digest.take());
                 thread.pending_elicitation = Some(PendingElicitation {
+                    remote_id: new_thread_id(),
                     message: SharedString::from(message),
                     fields,
                     selections: std::collections::BTreeMap::new(),
@@ -4400,6 +4465,7 @@ PYEOF"#;
                     // 遷移スナップショット（P1 素材①）: Blocked = 何の許可を待っているか。
                     thread.digest = Some(flatten_digest_line(&title));
                     thread.pending_permission = Some(PendingPermission {
+                        remote_id: new_thread_id(),
                         title: SharedString::from(title),
                         diffs,
                         raw_input: raw_input.map(SharedString::from),
@@ -5997,27 +6063,60 @@ PYEOF"#;
             && matches!(thread.entries[index], Entry::Agent(_) | Entry::Thinking(_));
         let entry = &thread.entries[index];
         let rendered_entry = self.render_entry(index, entry, color, live_stream, cx);
+        // 長い入力だけ「畳む/開く」を出す（他のエントリ種別はそれぞれ自前のヘッダで畳める）。
+        let foldable_input = match entry {
+            Entry::User(text) => user_entry_foldable(text),
+            _ => false,
+        };
+        let input_expanded = self.is_input_expanded(index);
+        let fold_button = foldable_input.then(|| {
+            div()
+                .id(("entry-fold", index))
+                .size(px(ENTRY_CONTROL_SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg2)
+                .text_size(px(11.))
+                .text_color(theme.fg2)
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.fg0).bg(theme.bg3))
+                .child(if input_expanded { "▾" } else { "▸" })
+                .tooltip(Tooltip::text(
+                    if input_expanded {
+                        i18n::t!("agent.input_collapse_tip")
+                    } else {
+                        i18n::t!("agent.input_expand_tip")
+                    },
+                    theme.clone(),
+                ))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_input(index, cx);
+                    }),
+                )
+        });
+        // 28px 角。padding 由来の 18x14px だと狙って押せず、22px でも「小さい」の指摘が続いた。
+        // transcript の本文に重ねて出すので、枠 1px で押せる範囲を輪郭として示す。
         let copy_button = div()
             .id(("entry-copy", index))
-            .absolute()
-            .top(px(0.))
-            .right(px(0.))
-            .invisible()
-            .group_hover("transcript-entry", |style| style.visible())
-            // 22px 角（settings の丸ボタンと同寸）。padding 由来の 18x14px だと狙って押せない。
-            // transcript の本文に重ねて出すので、枠 1px で押せる範囲を輪郭として示す。
-            .size(px(22.))
+            .size(px(ENTRY_CONTROL_SIZE))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(5.))
+            .rounded(px(6.))
             .border_1()
             .border_color(theme.border)
             .bg(theme.bg2)
-            .text_size(px(12.5))
+            .text_size(px(15.))
             .text_color(theme.fg2)
             .cursor_pointer()
-            .hover(|style| style.text_color(theme.fg0))
+            .hover(|style| style.text_color(theme.fg0).bg(theme.bg3))
             .child("⧉")
             .tooltip(Tooltip::text(i18n::t!("agent.copy_tip"), theme))
             .on_mouse_down(
@@ -6033,6 +6132,18 @@ PYEOF"#;
                     }
                 }),
             );
+        // hover 中だけ右上に出す操作列（畳む → コピーの順）。
+        let controls = div()
+            .absolute()
+            .top(px(0.))
+            .right(px(0.))
+            .invisible()
+            .group_hover("transcript-entry", |style| style.visible())
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .children(fold_button)
+            .child(copy_button);
         div()
             .px(px(12.))
             .pt(if index == 0 { px(12.) } else { px(0.) })
@@ -6042,7 +6153,7 @@ PYEOF"#;
                     .relative()
                     .group("transcript-entry")
                     .child(rendered_entry)
-                    .child(copy_button)
+                    .child(controls)
                     .with_animation(
                         ("transcript-entry", index),
                         Animation::new(std::time::Duration::from_millis(200)),
@@ -6103,27 +6214,65 @@ PYEOF"#;
                     )
                     .into_any_element()
             }
-            Entry::User(text) => div()
-                .flex()
-                .items_stretch()
-                .rounded(px(7.))
-                .overflow_hidden()
-                .bg(theme.bg2)
-                .border_1()
-                .border_color(theme.border)
-                .child(div().w(px(2.)).flex_none().bg(color.alpha(0.65)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0() // flex 子の折り返しを許可（はみ出し防止）
-                        .px(px(11.))
-                        .py(px(8.))
-                        .text_size(px(13.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.fg0)
-                        .child(self.selectable_text(text.clone(), cx)),
-                )
-                .into_any_element(),
+            // 長い入力は既定で折り畳む（先頭 8 行 + 「全 N 行」チップ）。展開状態は
+            // 右上の操作ボタンとこのチップの両方から切り替わる。
+            Entry::User(text) => {
+                let foldable = user_entry_foldable(text);
+                let expanded = !foldable || self.is_input_expanded(index);
+                let shown = if expanded {
+                    text.clone()
+                } else {
+                    user_entry_preview(text)
+                };
+                let mut column = div()
+                    .flex_1()
+                    .min_w_0() // flex 子の折り返しを許可（はみ出し防止）
+                    .px(px(11.))
+                    .py(px(8.))
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(self.selectable_text(shown, cx));
+                if foldable && !expanded {
+                    let lines = text.lines().count();
+                    // 畳んでいる間だけ出す**文字チップ**（アイコンだけにしない＝押せると分かる）。
+                    column = column.child(
+                        div()
+                            .id(("user-fold", index))
+                            .mt(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(theme.fg2)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.fg0))
+                            .child(div().flex_none().text_size(px(8.)).child("▸"))
+                            .child(SharedString::from(
+                                i18n::t!("agent.input_expand", "n" => lines),
+                            ))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_input(index, cx);
+                                }),
+                            ),
+                    );
+                }
+                div()
+                    .flex()
+                    .items_stretch()
+                    .rounded(px(7.))
+                    .overflow_hidden()
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(div().w(px(2.)).flex_none().bg(color.alpha(0.65)))
+                    .child(column)
+                    .into_any_element()
+            }
             // 思考ブロック（Claude Code 風・印っぽく）: 既定は折り畳み（✳ Thought + 1 行プレビュー）で
             // クリックでいつでも全文展開。実行中の最終ブロックは自動展開し、状態文とマスコットで
             // 「動いている」を示す。ここでは独立した無限 pulse を増やさない。
@@ -6776,6 +6925,28 @@ PYEOF"#;
         let key = (id, index);
         if !self.expanded_thoughts.remove(&key) {
             self.expanded_thoughts.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn is_input_expanded(&self, index: usize) -> bool {
+        self.threads
+            .get(self.active)
+            .is_some_and(|thread| self.expanded_inputs.contains(&(thread.id.clone(), index)))
+    }
+
+    /// 長いユーザー入力の折り畳み/展開をトグルする（右上のボタン・畳んだ本文下の文字チップ）。
+    fn toggle_input(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.id.clone())
+        else {
+            return;
+        };
+        let key = (id, index);
+        if !self.expanded_inputs.remove(&key) {
+            self.expanded_inputs.insert(key);
         }
         cx.notify();
     }
@@ -8924,6 +9095,59 @@ pub trait Buffer {
 mod tests {
     use super::*;
 
+    /// 短い入力は畳まない（数行の指示に「▸ 全 N 行」が付くと邪魔なだけ）。
+    #[test]
+    fn short_input_is_not_foldable() {
+        assert!(!user_entry_foldable("直して"));
+        assert!(!user_entry_foldable(
+            &"行\n".repeat(USER_COLLAPSE_MIN_LINES)
+        ));
+    }
+
+    /// 行数が閾値を超えたら畳む対象。
+    #[test]
+    fn many_lines_are_foldable() {
+        let text = "行\n".repeat(USER_COLLAPSE_MIN_LINES + 1);
+        assert!(user_entry_foldable(&text));
+    }
+
+    /// 改行の無い長文の貼り付けも畳む（折り返しで何十行にもなるため）。
+    #[test]
+    fn one_long_line_is_foldable() {
+        let text = "a".repeat(USER_COLLAPSE_MIN_BYTES + 1);
+        assert!(user_entry_foldable(&text));
+    }
+
+    /// プレビューは先頭 [`USER_PREVIEW_LINES`] 行 + `…`（何を送ったかは残す）。
+    #[test]
+    fn preview_keeps_the_head_and_marks_the_rest() {
+        let text = (1..=30)
+            .map(|n| format!("行{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = user_entry_preview(&text);
+        assert!(preview.starts_with("行1\n行2"), "先頭から見せる: {preview}");
+        assert_eq!(
+            preview.lines().count(),
+            USER_PREVIEW_LINES,
+            "行数は閾値どおり: {preview}"
+        );
+        assert!(preview.ends_with('…'), "続きがあると分かる: {preview}");
+        assert!(!preview.contains("行9"), "9 行目以降は出さない: {preview}");
+    }
+
+    /// 改行の無い長文は文字数で切る（行数だけ見ていると 1 行のまま巨大になる）。
+    #[test]
+    fn preview_clips_a_single_long_line_by_chars() {
+        let text = "b".repeat(USER_COLLAPSE_MIN_BYTES * 2);
+        let preview = user_entry_preview(&text);
+        assert_eq!(
+            preview.chars().count(),
+            USER_PREVIEW_CHARS + 1,
+            "… の 1 文字ぶん"
+        );
+    }
+
     fn tones(diff: &[(DiffTone, String)]) -> String {
         diff.iter()
             .map(|(tone, text)| {
@@ -9443,6 +9667,7 @@ PYEOF"#;
         panel.update(cx, |panel, cx| {
             let active = panel.active;
             panel.threads[active].pending_permission = Some(PendingPermission {
+                remote_id: new_thread_id(),
                 title: "Edit: main.rs".into(),
                 diffs: Vec::new(),
                 raw_input: None,
@@ -9471,6 +9696,82 @@ PYEOF"#;
             "Allow の添字で応答する"
         );
         let _ = std::fs::remove_file(settings_path);
+    }
+
+    #[gpui::test]
+    fn remote_permissions_reject_stale_and_persistent_approvals(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "remote-permissions");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (tx, mut rx) = mpsc::unbounded();
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].pending_permission = Some(PendingPermission {
+                remote_id: "permission-test".into(),
+                title: "Bash".into(),
+                diffs: vec![],
+                raw_input: Some("{\"command\":\"echo safe\"}".into()),
+                options: vec![
+                    PermissionChoice {
+                        label: "allow".into(),
+                        kind: PermissionKind::Allow,
+                    },
+                    PermissionChoice {
+                        label: "always".into(),
+                        kind: PermissionKind::AllowAlways,
+                    },
+                    PermissionChoice {
+                        label: "reject".into(),
+                        kind: PermissionKind::Reject,
+                    },
+                ],
+                respond: tx,
+                since: std::time::Instant::now(),
+            });
+            let id = panel.threads[active].id.clone();
+            let detail = panel.remote_thread(&id).unwrap();
+            assert_eq!(detail["permission"]["options"].as_array().unwrap().len(), 2);
+            let mut params = serde_json::json!({ "thread_id": id, "turn_id": detail["turn_id"],
+                "permission_id": "old-permission", "option_id": "permission-test:0" });
+            assert!(panel
+                .remote_command("permission_response", &params, cx)
+                .unwrap_err()
+                .to_string()
+                .contains("stale_permission"));
+            params["permission_id"] = "permission-test".into();
+            params["option_id"] = "permission-test:1".into();
+            assert!(panel
+                .remote_command("permission_response", &params, cx)
+                .unwrap_err()
+                .to_string()
+                .contains("forbidden"));
+            params["option_id"] = "permission-test:0".into();
+            panel.threads[active]
+                .pending_permission
+                .as_mut()
+                .unwrap()
+                .raw_input = None;
+            assert!(panel
+                .remote_command("permission_response", &params, cx)
+                .unwrap_err()
+                .to_string()
+                .contains("forbidden"));
+            params["option_id"] = "permission-test:2".into();
+            panel
+                .remote_command("permission_response", &params, cx)
+                .unwrap();
+            assert!(panel.threads[active].pending_permission.is_none());
+            assert!(panel
+                .remote_command("permission_response", &params, cx)
+                .is_err());
+            params["turn_id"] = "old-turn".into();
+            assert!(panel
+                .remote_command("interrupt", &params, cx)
+                .unwrap_err()
+                .to_string()
+                .contains("stale_turn"));
+        });
+        assert_eq!(rx.try_recv().ok(), Some(2));
+        let _ = std::fs::remove_file(path);
     }
 
     fn init_test_settings(cx: &mut gpui::TestAppContext, label: &str) -> PathBuf {

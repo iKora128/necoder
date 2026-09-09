@@ -25,6 +25,7 @@ pub(crate) fn run() -> bool {
         Some("cli") => run_open(&args[1..]),
         Some("install-cli") => run_install(),
         Some("uninstall-cli") => run_uninstall(),
+        Some("remote") => run_remote(&args[1..]),
         _ => return false,
     };
     if let Err(error) = result {
@@ -34,9 +35,33 @@ pub(crate) fn run() -> bool {
     true
 }
 
+/// Node.js の補助プロセスへ委譲。GUI のライフサイクルとリモート接続を分離する。
+fn run_remote(args: &[String]) -> Result<()> {
+    let executable = std::env::current_exe()?;
+    let bundled = executable.parent().and_then(Path::parent)
+        .map(|contents| contents.join("Resources/control/host.mjs"));
+    let adjacent = executable.parent().map(|directory| directory.join("control/host.mjs"));
+    #[cfg(debug_assertions)]
+    let development = executable.parent().and_then(Path::parent).and_then(Path::parent)
+        .map(|root| root.join("relay/dist/host.mjs"));
+    #[cfg(not(debug_assertions))]
+    let development: Option<PathBuf> = None;
+    let script = std::env::var_os("NECODER_REMOTE_SCRIPT").map(PathBuf::from)
+        .or_else(|| bundled.filter(|path| path.is_file()))
+        .or_else(|| adjacent.filter(|path| path.is_file()))
+        .or(development)
+        .context("Remote host が同梱されていません。更新版 necoder をインストールしてください")?;
+    anyhow::ensure!(script.is_file(), "Remote host が未ビルドです: cd relay && npm ci && npm run build");
+    let status = std::process::Command::new("node").arg(script).args(args).status()
+        .context("Remote host を起動できません。Node.js 22 以降が必要です")?;
+    anyhow::ensure!(status.success(), "Remote host が終了しました ({status})");
+    Ok(())
+}
+
 /// `necoder cli [<path>|ssh://…]...` — `ne` の本体。
 fn run_open(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
+        Some("remote") => return run_remote(&args[1..]),
         Some("-h") | Some("--help") => {
             println!(
                 "使い方: {} [<path>|ssh://user@host/path]...",

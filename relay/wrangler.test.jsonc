@@ -1,0 +1,9 @@
+{
+  "name": "necoder-control-test",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-03-17",
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": ["/api/*"] },
+  "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "ControlRoom" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ControlRoom"] }],
+  "vars": { "APP_ORIGIN": "http://localhost:8791", "PROVISION_TOKEN": "local-test-only" }
+}

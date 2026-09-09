@@ -24,6 +24,9 @@ agent:
   waiting_permission: Waiting for permission
   todos: Todos
   copy_tip: Copy this entry
+  input_expand: "Show all %{n} lines"
+  input_expand_tip: Show this input in full
+  input_collapse_tip: Collapse this input
   jump_to_previous_user: Previous instruction
   jump_to_latest: Jump to latest
   pill_agent: Agent (which AI to talk to)
@@ -33,6 +36,7 @@ agent:
   pill_effort: Reasoning effort
   err_no_project: Can't send — no project selected
   err_no_acp: claude-agent-acp not found (check node/npx)
+  err_agent_lookup: "Could not look up the agent (check the connection, then resume): %{message}"
   err_session_lost: Session ended. Send again to reconnect
   err_session_ended: The agent session ended (treated as interrupted)
   err_cancel_session_lost: Interrupted — the session stopped responding

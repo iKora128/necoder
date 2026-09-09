@@ -1,0 +1,32 @@
+name: Remote control
+on:
+  push:
+    paths: ['relay/**', '.github/workflows/remote-control.yml']
+  pull_request:
+    paths: ['relay/**', '.github/workflows/remote-control.yml']
+permissions:
+  contents: read
+jobs:
+  host:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - if: runner.os == 'macOS'
+        run: npx playwright install chromium webkit
+      - if: runner.os == 'macOS'
+        run: npm run test:browser

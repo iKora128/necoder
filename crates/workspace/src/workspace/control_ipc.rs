@@ -169,6 +169,10 @@ impl Workspace {
     /// UI スレッドでの 1 仕事。メモリで済むものは即応答・DB が要るものは background へ
     /// （GUI のストレージハンドル = 単一ワーカーを使うので headless とロック衝突しない）。
     fn handle_control_job(&mut self, job: ControlJob, cx: &mut Context<Self>) {
+        if job.method.starts_with("remote_") {
+            self.handle_remote_control(&job.method, job.params, job.respond, cx);
+            return;
+        }
         let ControlJob {
             method,
             params,

@@ -25,6 +25,9 @@ agent:
   waiting_permission: 承認待ちで停止中
   todos: Todos
   copy_tip: このエントリをコピー
+  input_expand: "全 %{n} 行を表示"
+  input_expand_tip: この入力を全文表示
+  input_collapse_tip: この入力を折り畳む
   jump_to_previous_user: 前の指示へ
   jump_to_latest: 最新へ
   pill_agent: エージェント（どの AI で話すか）
@@ -34,6 +37,7 @@ agent:
   pill_effort: 推論の深さ（effort）
   err_no_project: プロジェクトが未確定のため送れません
   err_no_acp: claude-agent-acp が見つかりません（node/npx を確認）
+  err_agent_lookup: "エージェントを探せません（接続を確認して再開してください）: %{message}"
   err_session_lost: セッションが切れました。もう一度送信してください
   err_session_ended: エージェントのセッションが終了しました（中断扱い）
   err_cancel_session_lost: セッションが応答しないため中断しました

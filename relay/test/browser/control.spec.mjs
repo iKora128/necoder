@@ -1,0 +1,50 @@
+import { test, expect } from '@playwright/test';
+
+test('PWA: ペアリング・限定共有・送信・承認・再接続・失効', async ({ page, request }, testInfo) => {
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  const count = (await (await request.get('http://127.0.0.1:8792/count')).json()).count;
+  const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
+  const room = new URLSearchParams(new URL(pairing.url).hash.slice(1)).get('room');
+  await page.goto(pairing.url);
+  await expect(page.locator('#status')).toHaveText('接続済み');
+  await expect(page.locator('#destination')).toContainText('PWA integration');
+  expect(new URL(page.url()).hash).toBe('');
+  await expect(page.locator('#projects option')).toHaveCount(1);
+  await page.locator('#message').fill('スマホからのテスト指示');
+  await page.locator('#send').click();
+  await expect(page.locator('#transcript')).toContainText('スマホからのテスト指示');
+  expect((await (await request.get('http://127.0.0.1:8792/count')).json()).count).toBe(count + 1);
+  await page.locator('#diff').click();
+  await expect(page.locator('#diff-text')).toContainText('+remote ready');
+  await page.locator('#close-diff').click();
+  await request.get('http://127.0.0.1:8792/permission');
+  await expect(page.getByRole('button', { name: '今回だけ許可' })).toBeDisabled();
+  await page.getByRole('checkbox').check();
+  await page.getByRole('button', { name: '今回だけ許可' }).click();
+  await expect(page.locator('#permission')).toBeEmpty();
+  await page.reload();
+  await expect(page.locator('#status')).toHaveText('接続済み');
+  await request.get('http://127.0.0.1:8792/offline');
+  await expect(page.locator('#status')).toHaveText('necoderが起動していません');
+  await expect(page.locator('#send')).toBeDisabled();
+  await request.get('http://127.0.0.1:8792/online');
+  await expect(page.locator('#status')).toHaveText('接続済み');
+  await request.get('http://127.0.0.1:8792/disconnect');
+  await expect(page.locator('#status')).toHaveText('PCに接続できません');
+  await expect(page.locator('#status')).toHaveText('接続済み', { timeout: 15000 });
+  await expect(page.locator('#transcript')).toContainText('スマホからのテスト指示');
+  await page.screenshot({ path: `test-results/pwa-mobile-${testInfo.project.name}.png`, fullPage: true });
+  await request.get(`http://127.0.0.1:8792/revoke?room=${room}`);
+  await expect(page.locator('#send')).toBeDisabled();
+  expect(errors).toEqual([]);
+});
+
+test('未認証の room 作成と異なる Origin を拒否、PWA 配信ヘッダー', async ({ request, page }) => {
+  const room = 'a'.repeat(43);
+  expect((await request.post(`/api/rooms/${room}`, { data: {} })).status()).toBe(401);
+  expect((await request.get('/api/health', { headers: { Origin: 'https://evil.example' } })).status()).toBe(403);
+  const response = await page.goto('/');
+  expect(response.headers()['content-security-policy']).toContain("frame-ancestors 'none'");
+  await expect(page.getByRole('heading', { name: 'PCの作業を、手元から。' })).toBeVisible();
+  await page.screenshot({ path: 'test-results/pwa-welcome.png', fullPage: true });
+});

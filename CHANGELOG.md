@@ -5,6 +5,30 @@
 
 ## [Unreleased]
 
+### Added
+- **スマホ向け Remote PWA**。`control.necoder.com` で Mac / Windows の既存 ACP スレッドを閲覧・操作。
+  QR ペアリング、端末間暗号化、今回だけの承認・拒否、選択式質問、Git diff、通知、切断からの再同期に対応。
+  `ne remote` で接続・端末失効を管理する（Node.js 22+ が必要）。セットアップと制約は `relay/README.md`
+- **長いユーザー入力を transcript で折り畳む**。12 行（または 1000 バイト）を超える入力は既定で先頭 8 行だけ見せ、
+  本文下の `▸ 全 N 行を表示` チップか、エントリ右上の折り畳みボタンで全文へ切り替わる。貼り付けたログや仕様で
+  スレッドが自分の入力だけで埋まり、エージェントの応答が画面外へ押し出されるのをやめる
+
+### Changed
+- **transcript エントリの操作ボタンを大きく**。コピー `⧉` は 22px 角 → **28px 角**（グリフ 12.5px → 15px・hover で背景も変わる）。
+  折り畳みボタンはその左に並ぶ
+
+### Fixed
+- **Remote SSH の再接続が「再開」からも送信からも永久に失敗する**。切断後の master 張り直しが、remote に残った
+  前回の `ne` gateway socket（`/tmp/necoder-cli-….sock`）で `-R` の bind に落ち、`ExitOnForwardFailure=yes`
+  が master ごと exit 255 にしていた（client 側の `StreamLocalBindUnlink` は `-R` に効かない）。端末を
+  開き直したときだけ standalone session が `-R` 無しの master になって回復していたのはこのため。
+  master は `-R` 無しで張り、gateway の転送は master 経由で古い socket を消してから `ssh -O forward` で
+  後付けする。転送の失敗は `ne` が使えないだけに留め、接続は道連れにしない
+- **SSH 側の失敗が「claude-agent-acp が見つかりません」と誤報される**。remote でのエージェント探索は
+  「探せたが無い」と「探せなかった（再接続失敗など）」を分け、後者は原因文をそのままエラー行に出す
+- **再接続直後の 1 発目の探索が落ちて npx 経路へ倒れる**。`command -v` は読み取り専用なので再送可で送る
+  （`Host::run_command_retry_safe`）
+
 ## [0.1.13] - 2026-09-08
 
 ### Added

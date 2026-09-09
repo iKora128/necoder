@@ -51,6 +51,11 @@ cp "$BIN" "$APP/Contents/MacOS/necoder"
 cp "$ICON_DIR/necoder.icns" "$APP/Contents/Resources/necoder.icns"
 cp LICENSE "$APP/Contents/Resources/LICENSE-AGPL-3.0.txt"
 cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
+# PWA 補助プロセスは単一 JS に bundle する（実行にはユーザー環境の Node.js 22+）。
+(cd relay && npm ci && npm run build)
+mkdir -p "$APP/Contents/Resources/control"
+cp relay/dist/host.mjs "$APP/Contents/Resources/control/host.mjs"
+cp relay/dist/THIRD_PARTY_LICENSES.txt "$APP/Contents/Resources/control/THIRD_PARTY_LICENSES.txt"
 mkdir -p "$APP/Contents/Resources/licenses"
 cp third_party/licenses/*.txt "$APP/Contents/Resources/licenses/"
 # ターミナル用 `ne` コマンドはバンドル同梱物ではなく、本体の `necoder install-cli` /

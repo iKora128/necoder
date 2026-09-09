@@ -83,6 +83,16 @@ Copy-Item 'LICENSE' $stage -ErrorAction SilentlyContinue
 Copy-Item 'THIRD_PARTY_NOTICES.md' $stage
 Copy-Item 'third_party/licenses' (Join-Path $stage 'licenses') -Recurse
 Copy-Item 'README.md' $stage -ErrorAction SilentlyContinue
+Push-Location 'relay'
+try {
+    & npm.cmd ci
+    if ($LASTEXITCODE -ne 0) { throw 'Remote host の依存インストールに失敗しました' }
+    & npm.cmd run build
+    if ($LASTEXITCODE -ne 0) { throw 'Remote host のビルドに失敗しました' }
+} finally { Pop-Location }
+New-Item -ItemType Directory -Path (Join-Path $stage 'control') -Force | Out-Null
+Copy-Item 'relay/dist/host.mjs' (Join-Path $stage 'control')
+Copy-Item 'relay/dist/THIRD_PARTY_LICENSES.txt' (Join-Path $stage 'control')
 
 $zip = Join-Path $OutDir 'necoder-windows-x64.zip'
 if (Test-Path $zip) { Remove-Item $zip -Force }

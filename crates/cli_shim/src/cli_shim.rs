@@ -46,7 +46,7 @@ if [ ! -x "$NECODER_BIN" ]; then
 fi
 # 既存サブコマンドは素通し（`ne fleet status` / `ne config get theme` / `ne mcp`）
 case "$1" in
-    config|fleet|mcp) exec "$NECODER_BIN" "$@" ;;
+    config|fleet|mcp|remote) exec "$NECODER_BIN" "$@" ;;
 esac
 exec "$NECODER_BIN" cli "$@"
 "#,
@@ -286,7 +286,7 @@ mod tests {
     fn shim_delegates_subcommands_and_cli() {
         let script = shim_script(Path::new("/usr/local/necoder"));
         assert!(script.starts_with("#!/bin/sh"));
-        assert!(script.contains(r#"config|fleet|mcp) exec "$NECODER_BIN" "$@" ;;"#));
+        assert!(script.contains(r#"config|fleet|mcp|remote) exec "$NECODER_BIN" "$@" ;;"#));
         assert!(script.contains(r#"exec "$NECODER_BIN" cli "$@""#));
     }
 }

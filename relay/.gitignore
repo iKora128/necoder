@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.dev.vars
+test-results/
+playwright-report/
+dist/
+public/icon-192.png
+public/icon-512.png
+public/source.tar.gz
