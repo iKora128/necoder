@@ -93,12 +93,17 @@ try {
     await writeState('config', { origin, name: hostname(), adminToken: random(), provisionToken: process.env.NECODER_PROVISION_TOKEN, vapid: webpush.generateVAPIDKeys() });
     console.log('Initialized. Run: npm run host -- pair');
   } else if (command === 'start') console.log(await ensureStarted());
-  else if (command === 'pair') {
+  else if (command === 'pair' || command === 'pair-json') {
     await ensureStarted();
     const result = await admin('pair', { name: args[0] || 'Phone', tasks: args.slice(1) });
-    console.log(await QRCode.toString(result.url, { type: 'terminal', small: true }));
-    console.log(result.url);
-    console.log('5分以内に読み取り、PWAで接続してください。共有対象:', result.tasks.join(', '));
+    if (command === 'pair-json') {
+      const qr = QRCode.create(result.url, { errorCorrectionLevel: 'M' });
+      console.log(JSON.stringify({ ...result, size: qr.modules.size, modules: Array.from(qr.modules.data).join('') }));
+    } else {
+      console.log(await QRCode.toString(result.url, { type: 'terminal', small: true }));
+      console.log(result.url);
+      console.log('5分以内に読み取り、PWAで接続してください。共有対象:', result.tasks.join(', '));
+    }
   } else if (['status', 'stop', 'revoke'].includes(command)) {
     console.log(JSON.stringify(await admin(command, { id: args[0] }), null, 2));
   } else {

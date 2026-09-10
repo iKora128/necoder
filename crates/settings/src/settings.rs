@@ -18,6 +18,7 @@ use gpui::{
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use theme_core::Theme;
+mod remote;
 
 pub use settings_core::{
     persist_agent_config_default, persist_user_value, user_settings_path, Density, Settings,
@@ -191,6 +192,10 @@ pub struct SettingsView {
     cli_shim_busy: bool,
     /// `ne` シムの直近の失敗（管理者ダイアログのキャンセル等）。行の下に赤字で出す。
     cli_shim_error: Option<SharedString>,
+    remote_pairing: Option<remote::Pairing>,
+    remote_busy: bool,
+    remote_error: Option<SharedString>,
+    remote_generation: u64,
 }
 
 impl SettingsView {
@@ -207,6 +212,10 @@ impl SettingsView {
             cli_shim_target: None,
             cli_shim_busy: false,
             cli_shim_error: None,
+            remote_pairing: None,
+            remote_busy: false,
+            remote_error: None,
+            remote_generation: 0,
         };
         view.refresh_availability(cx);
         view
@@ -1102,6 +1111,7 @@ impl Render for SettingsView {
                         element.child(self.cli_section(cx))
                     })
                     .child(self.appearance_section(&settings, cx))
+                    .child(self.remote_section(cx))
                     .child(self.preferences_section(&settings, cx))
             })
             .when(onboarding, |element| {

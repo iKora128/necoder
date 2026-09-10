@@ -432,6 +432,15 @@ settings:
   open_json_sub: The single source of truth; saved edits propagate everywhere within ~1s
   open_json_button: Open
   cli_heading: Command line
+  remote_heading: Phone connection
+  remote_label: Control from your phone
+  remote_sub: Shares all projects open when the QR is issued. Switch projects on your phone to control each independently.
+  remote_issue: Generate pairing QR
+  remote_copy: Copy pairing URL
+  remote_hide: Hide QR
+  remote_qr_hint: "Sharing %{count} projects. Valid for 5 minutes. Scan with your phone's camera, or paste the URL into the Home Screen PWA. Keep the QR and URL private."
+  remote_error: Could not generate a QR. Open a project and check Node.js 22+, the bundled Remote host, connection configuration, and network access.
+  remote_expired: This QR expired. Generate a new pairing QR.
   cli_sub: Open necoder from the terminal with `ne <path>`.
   cli_row_label: ne command
   cli_row_sub_missing: "Installs to %{path} (`ne .` opens the current folder)"

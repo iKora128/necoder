@@ -8,6 +8,16 @@ publish = false
 [lib]
 path = "src/settings.rs"
 
+[features]
+remote-preview = ["gpui/test-support", "gpui_platform/test-support"]
+
+[dev-dependencies]
+gpui_platform.workspace = true
+
+[[example]]
+name = "remote_preview"
+required-features = ["remote-preview"]
+
 [dependencies]
 acp_client.workspace = true
 anyhow.workspace = true

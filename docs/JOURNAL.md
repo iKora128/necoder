@@ -2543,3 +2543,7 @@
 - 検証: Node 11 テスト、Chromium / WebKit 4 統合テスト、Rust の necoder / agent_panel / cli_shim テスト、実 GUI の隔離 IPC、本番 relay の暗号化疎通が成功。Metal 不在は既存 `runtime-shaders` feature でビルドできる。PWA のスクリーンショットも確認。
 - 次: 更新版 GUI のユーザー環境への切替（稼働中アプリは終了・上書きしていない）、iPhone 実機のホーム画面と通知、Windows 実機の起動・ACL・GUI 連携、独立セキュリティレビュー。
 
+## 2026-09-10 — 設定画面のQR発行と v0.1.14 リリース準備
+- やったこと: 歯車の「スマホ連携」にQR発行・URLコピー・非表示・期限切れ表示を追加。ホストの `pair-json` を背景実行し、Windowsのpipe bufferでも終了待ちと相互待ちにならないようstdoutを並行読取。共有範囲は発行時の全プロジェクトのまま。前回タグからの認証カード・ACP値ID保存・SSH復旧・長文折り畳みも含めてCHANGELOGを整理し、0.1.14へ更新。
+- 検証: `cargo test --workspace --features necoder/runtime-shaders`、Node 11テスト、Chromium/WebKit 4テストが成功。隔離プレビューのQRはVisionで元URLへ復号できることを確認。プレビューのoffscreen画像では文字が取得できず、ネイティブ画面全体の目視確認は残る。ローカルにcargo-denyが無いため依存監査はGitHub CIで確認する。
+- 次: mainのCI（Windowsホスト検証と依存監査を含む）確認後にタグをpushし、Mac/Windowsの配布物と署名を確認する。

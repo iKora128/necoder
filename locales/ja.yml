@@ -433,6 +433,15 @@ settings:
   open_json_sub: すべての設定の真実。保存すると約1秒で全体へ反映されます
   open_json_button: 開く
   cli_heading: コマンドライン
+  remote_heading: スマホ連携
+  remote_label: スマホから操作
+  remote_sub: QR発行時に開いている全プロジェクトを共有します。スマホで切り替えて個別に操作できます。
+  remote_issue: 接続用QRを発行
+  remote_copy: ペアリングURLをコピー
+  remote_hide: QRを隠す
+  remote_qr_hint: "%{count} プロジェクトを共有。QRは5分間有効です。スマホのカメラで読み取ってください。ホーム画面のPWAにはURLを貼り付けて接続できます。URLやQRを他人に渡さないでください。"
+  remote_error: QRを発行できませんでした。プロジェクトを開き、Node.js 22以降・Remoteホストの同梱・接続設定・ネット接続を確認してください。
+  remote_expired: QRの有効期限が切れました。接続用QRを再発行してください。
   cli_sub: ターミナルから `ne <パス>` で necoder を開けるようにします。
   cli_row_label: ne コマンド
   cli_row_sub_missing: "%{path} にインストールします（`ne .` で今いるフォルダを開く）"
