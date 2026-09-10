@@ -95,9 +95,9 @@ fn issue_pairing() -> anyhow::Result<Pairing> {
 impl SettingsView {
     /// 隔離した UI 撮影用。公開鍵やユーザー設定を変更せず、ダミー QR だけを描画する。
     #[cfg(feature = "remote-preview")]
-    pub fn remote_preview(&mut self, payload: &[u8], cx: &mut Context<Self>) -> Div {
+    pub fn remote_preview(&mut self, payload: &[u8]) {
         self.remote_pairing = parse_pairing(payload).ok();
-        self.remote_section(cx)
+        self.remote_preview_only = true;
     }
     fn issue_remote_qr(&mut self, cx: &mut Context<Self>) {
         if self.remote_busy {

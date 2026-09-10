@@ -15,7 +15,9 @@ export async function secureDirectory() {
       + "$acl.SetAccessRuleProtection($true,$false); $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; "
       + "$acl.SetOwner($sid); foreach ($id in @($sid, [System.Security.Principal.SecurityIdentifier]'S-1-5-18')) { "
       + "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule($id,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule) }; "
-      + "Set-Acl -LiteralPath $env:NECODER_ACL_TARGET -AclObject $acl";
+      // pwsh から起動した Windows PowerShell は異なる PSModulePath を継承する。
+      // Set-Acl のモジュール自動読み込みに頼らず、.NET の同じ ACL API を直接使う。
+      + "[System.IO.Directory]::SetAccessControl($env:NECODER_ACL_TARGET,$acl)";
     await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
       windowsHide: true, env: { ...process.env, NECODER_ACL_TARGET: path.resolve(stateDir) }, timeout: 15000,
     });

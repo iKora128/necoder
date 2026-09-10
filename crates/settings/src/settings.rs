@@ -196,6 +196,8 @@ pub struct SettingsView {
     remote_busy: bool,
     remote_error: Option<SharedString>,
     remote_generation: u64,
+    #[cfg(feature = "remote-preview")]
+    remote_preview_only: bool,
 }
 
 impl SettingsView {
@@ -216,6 +218,8 @@ impl SettingsView {
             remote_busy: false,
             remote_error: None,
             remote_generation: 0,
+            #[cfg(feature = "remote-preview")]
+            remote_preview_only: false,
         };
         view.refresh_availability(cx);
         view
@@ -899,6 +903,17 @@ impl EventEmitter<SettingsViewEvent> for SettingsView {}
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "remote-preview")]
+        if self.remote_preview_only {
+            return div()
+                .id("remote-preview")
+                .size_full()
+                .font_family("IBM Plex Sans JP")
+                .text_size(px(12.5))
+                .bg(self.theme.bg1)
+                .p(px(28.))
+                .child(self.remote_section(cx));
+        }
         let theme = self.theme.clone();
         let accent = self.accent;
         let settings = get(cx);
