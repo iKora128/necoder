@@ -627,6 +627,23 @@ impl EditorView {
         }
     }
 
+    /// HTML プレビューに OS のキーボードフォーカスを渡す / 返す（表示状態は変えない）。
+    /// `false` は「以後のキーは GPUI のもの」＝ composer や検索欄へ日本語入力を戻す経路。
+    pub fn set_html_preview_key_focus(&mut self, owns: bool, cx: &mut Context<Self>) {
+        let Some(preview) = &self.html_preview else {
+            return;
+        };
+        let owns = owns && self.rendered_html && self.surface_active;
+        preview.update(cx, |preview, _| preview.set_key_focus(owns));
+    }
+
+    /// プレビューがキーボードフォーカスを持つ想定か（要求の記録。OS の真実ではない）。
+    pub fn html_preview_wants_key_focus(&self, cx: &App) -> bool {
+        self.html_preview
+            .as_ref()
+            .is_some_and(|preview| preview.read(cx).wants_key_focus())
+    }
+
     /// 設定 `html_preview_evict_minutes` を WebView プレビューへ中継する（`0` = 自動破棄しない）。
     pub fn set_html_preview_evict_minutes(&mut self, minutes: u64, cx: &mut Context<Self>) {
         if let Some(preview) = &self.html_preview {

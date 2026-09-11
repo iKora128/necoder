@@ -15,15 +15,22 @@ fn reply(result: anyhow::Result<Value>) -> Value {
 }
 
 impl Workspace {
-    pub(crate) fn handle_remote_control(&mut self, method: &str, params: Value,
-        respond: std::sync::mpsc::Sender<Value>, cx: &mut Context<Self>) {
+    pub(crate) fn handle_remote_control(
+        &mut self,
+        method: &str,
+        params: Value,
+        respond: std::sync::mpsc::Sender<Value>,
+        cx: &mut Context<Self>,
+    ) {
         if method == "remote_snapshot" {
             let projects: Vec<Value> = self.project_sessions.projects.iter().enumerate().map(|(index, slot)| {
                 json!({"id": slot.task_space.id.as_str(), "name": slot.name.as_ref(),
                     "branch": slot.branch, "remote_host": slot.remote_host.as_ref().map(SharedString::as_ref),
                     "threads": self.project_sessions.sessions[index].agent_panel.read(cx).remote_threads()})
             }).collect();
-            if let Err(error) = respond.send(reply(Ok(json!({"instance_id": instance_id(), "projects": projects})))) {
+            if let Err(error) = respond.send(reply(Ok(
+                json!({"instance_id": instance_id(), "projects": projects}),
+            ))) {
                 eprintln!("remote snapshot receiver: {error}");
             }
             return;
@@ -34,7 +41,9 @@ impl Workspace {
                     && params["task_id"].as_str() == Some(slot.task_space.id.as_str())
             });
             let Some(slot) = target else {
-                if let Err(error) = respond.send(reply(Err(anyhow::anyhow!("task_not_open")))) { eprintln!("remote diff: {error}"); }
+                if let Err(error) = respond.send(reply(Err(anyhow::anyhow!("task_not_open")))) {
+                    eprintln!("remote diff: {error}");
+                }
                 return;
             };
             let host = slot.worktree.host().clone();
@@ -53,16 +62,27 @@ impl Workspace {
             return;
         }
         let result = (|| -> anyhow::Result<Value> {
-            anyhow::ensure!(params["instance_id"].as_str() == Some(instance_id()), "stale_instance");
+            anyhow::ensure!(
+                params["instance_id"].as_str() == Some(instance_id()),
+                "stale_instance"
+            );
             let task = params["task_id"].as_str().unwrap_or("");
-            let index = self.project_sessions.projects.iter().position(|slot| slot.task_space.id.as_str() == task)
+            let index = self
+                .project_sessions
+                .projects
+                .iter()
+                .position(|slot| slot.task_space.id.as_str() == task)
                 .ok_or_else(|| anyhow::anyhow!("task_not_open"))?;
             let panel = self.project_sessions.sessions[index].agent_panel.clone();
             if method == "remote_thread" {
-                return panel.read(cx).remote_thread(params["thread_id"].as_str().unwrap_or(""));
+                return panel
+                    .read(cx)
+                    .remote_thread(params["thread_id"].as_str().unwrap_or(""));
             }
             // 承認/送信はネットワーク断を跨いで遅延実行しない。IPC キュー内の待ちも期限に含める。
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as u64;
             let expires = params["expires_at"].as_u64().unwrap_or(0);
             anyhow::ensure!(expires > now && expires <= now + 60_000, "command_expired");
             let command = method.strip_prefix("remote_").unwrap_or("");

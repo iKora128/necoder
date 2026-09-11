@@ -49,13 +49,66 @@ fn parse_pairing(bytes: &[u8]) -> anyhow::Result<Pairing> {
     })
 }
 
-fn issue_pairing() -> anyhow::Result<Pairing> {
+/// 画面に出してよい失敗コード。`relay/host`（cli.mjs / bridge.mjs）と `necoder remote`
+/// が返す語をそのまま並べる。**ここに無い文字列は一切画面に出さない** — 生の stderr には
+/// ペアリング URL やローカルのパスが混ざり得るため。
+const KNOWN_FAILURES: &[&str] = &[
+    "necoder_not_running_or_update_required",
+    "open_a_project_first",
+    "provision_token_missing",
+    "run_init_first",
+    "device_limit_revoke_unused_devices",
+    "host_startup_failed",
+    "local_auth_required",
+    "node_missing",
+    "host_not_bundled",
+    "host_not_built",
+    "room_create_",
+    "ipc_timeout_outcome_unknown",
+];
+
+/// 子プロセスの stderr から既知の失敗コードだけ拾う（見つからなければ何も言わない）。
+fn known_failure(diagnostics: &str) -> Option<&'static str> {
+    KNOWN_FAILURES
+        .iter()
+        .find(|code| diagnostics.contains(**code))
+        .copied()
+}
+
+/// 失敗コード → 画面に出す一文。未知のコードは総称の一文に倒す（原因を当て推量しない）。
+fn failure_message(code: &str) -> String {
+    let key = match code {
+        "necoder_not_running_or_update_required" => "settings.remote_err_no_gui",
+        "open_a_project_first" => "settings.remote_err_no_project",
+        "provision_token_missing" | "run_init_first" => "settings.remote_err_not_initialized",
+        "device_limit_revoke_unused_devices" => "settings.remote_err_device_limit",
+        "node_missing" => "settings.remote_err_node",
+        "host_not_bundled" | "host_not_built" => "settings.remote_err_host_missing",
+        "host_startup_failed" | "local_auth_required" => "settings.remote_err_host_start",
+        "pairing_timeout" | "ipc_timeout_outcome_unknown" => "settings.remote_err_timeout",
+        "invalid_pairing" | "invalid_qr" | "expired_pairing" => "settings.remote_err_bad_payload",
+        code if code.starts_with("room_create_") => "settings.remote_err_relay",
+        _ => "settings.remote_error",
+    };
+    i18n::t!(key)
+}
+
+/// 失敗は**コードだけ**を返す（呼び手が [`failure_message`] で一文にする）。
+fn issue_pairing() -> Result<Pairing, String> {
+    run_pairing().map_err(|error| {
+        // 生の stderr はログにも残さない。残すのは分類済みのコードだけ。
+        eprintln!("QR を発行できない: {error}");
+        error.to_string()
+    })
+}
+
+fn run_pairing() -> anyhow::Result<Pairing> {
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["remote", "pair-json", "Phone"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -66,10 +119,19 @@ fn issue_pairing() -> anyhow::Result<Pairing> {
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("missing_stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("missing_stderr"))?;
     // Windows の小さい pipe buffer でも子の終了待ちと相互待ちにならないよう、並行して読む。
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout.take(65_536).read_to_end(&mut bytes).map(|_| bytes)
+    });
+    // 失敗の理由は stderr に 1 行で来る。読み捨てずに拾って**コードだけ**を取り出す。
+    let error_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.take(8_192).read_to_end(&mut bytes).map(|_| bytes)
     });
     let deadline = std::time::Instant::now() + Duration::from_secs(35);
     loop {
@@ -87,8 +149,16 @@ fn issue_pairing() -> anyhow::Result<Pairing> {
     let output = reader
         .join()
         .map_err(|_| anyhow::anyhow!("qr_reader_failed"))??;
-    // 生の stderr は表示しない（将来 CLI が URL を含むエラーを返しても漏らさない）。
-    anyhow::ensure!(status.success(), "pairing_failed");
+    let diagnostics = error_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("qr_reader_failed"))??;
+    if !status.success() {
+        // 生の stderr は持ち出さない（将来 CLI が URL を含むエラーを返しても漏らさない）。
+        // 既知のコードに当たらなければ総称の失敗＝画面では「原因不明」と正直に言う。
+        let code =
+            known_failure(&String::from_utf8_lossy(&diagnostics)).unwrap_or("pairing_failed");
+        anyhow::bail!("{code}");
+    }
     parse_pairing(&output)
 }
 
@@ -120,9 +190,7 @@ impl SettingsView {
                     view.remote_busy = false;
                     match result {
                         Ok(pairing) => view.remote_pairing = Some(pairing),
-                        Err(_) => {
-                            view.remote_error = Some(i18n::t!("settings.remote_error").into())
-                        }
+                        Err(code) => view.remote_error = Some(failure_message(&code).into()),
                     }
                     cx.notify();
                 })
@@ -230,5 +298,35 @@ mod tests {
         value["modules"] = "0".repeat(441).into();
         value["expires"] = 0.into();
         assert!(parse_pairing(value.to_string().as_bytes()).is_err());
+    }
+
+    /// stderr から拾うのは**既知のコードだけ**。URL やパスの混ざった行からは何も取らない。
+    #[test]
+    fn only_known_codes_are_picked_from_stderr() {
+        assert_eq!(
+            known_failure("necoder_not_running_or_update_required\n"),
+            Some("necoder_not_running_or_update_required")
+        );
+        assert_eq!(known_failure("room_create_503"), Some("room_create_"));
+        assert_eq!(
+            known_failure("Error: https://control.necoder.com/#room=secret"),
+            None
+        );
+    }
+
+    /// 原因ごとに違う一文を出す（「Node.js 22 以降」を全部の失敗に貼らない）。
+    #[test]
+    fn failures_map_to_their_own_message() {
+        let generic = failure_message("pairing_failed");
+        let no_gui = failure_message("necoder_not_running_or_update_required");
+        assert_ne!(no_gui, generic);
+        assert_ne!(failure_message("open_a_project_first"), generic);
+        assert_ne!(failure_message("room_create_503"), generic);
+        assert_eq!(failure_message("なにか未知の失敗"), generic);
+        // 翻訳漏れならキー文字列がそのまま返る（i18n::translate の仕様）。
+        assert!(
+            !no_gui.starts_with("settings."),
+            "ja/en に対訳が無い: {no_gui}"
+        );
     }
 }

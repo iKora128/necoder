@@ -28,6 +28,8 @@ keymap_core.workspace = true
 settings_core.workspace = true
 settings.workspace = true
 terminal_view.workspace = true
+# PDF タブ（PdfView）が OS 標準 WebView に PDF を描かせる（自前 PDF レンダラは積まない）
+webview_view.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true

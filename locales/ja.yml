@@ -406,6 +406,14 @@ settings:
   welcome_title: ようこそ 🎨
   welcome_sub: 使うエージェントを選んで始めましょう。あとから ⚙ でいつでも変えられます。
   get_started: これで始める →
+  mcp_heading: MCP サーバ
+  mcp_sub: エージェントに持たせる道具。有効にしたものだけが新しいスレッドから見えます。
+  mcp_empty: MCP サーバがありません。settings.json の mcp_servers に書くか、Codex CLI・Claude Code・Cursor に登録すると、ここに並びます。
+  mcp_note: 変更は次に開くスレッドから効きます（実行中のセッションは繋ぎ直しません）。
+  mcp_source_necoder: necoder の設定
+  mcp_source_codex: Codex CLI で発見
+  mcp_source_claude: Claude Code で発見
+  mcp_source_cursor: Cursor で発見
   prefs_heading: 動作とエディタ
   prefs_sub: 真実は settings.json。ここはそれを操作するだけです。
   pref_submit_on_enter: Enter で送信
@@ -416,8 +424,13 @@ settings:
   pref_format_on_save_sub: 対応言語のみ・⌘S で整形→保存
   pref_agent_auto_name: スレッドの自動命名
   pref_agent_auto_name_sub: 最初のやり取りから AI が題名を付けます
-  pref_completion_sound: 完了音
-  pref_completion_sound_sub: エージェントのターン完了で鳴らします
+  pref_agent_prewarm: エージェントを先に起動
+  pref_agent_prewarm_sub: 送信を待たずに接続し、モデル一覧をすぐ選べるようにします
+  pref_sound_done: 完了音
+  pref_sound_waiting: 入力待ちの音
+  sound_nya: にゃー
+  sound_system: システム音
+  sound_off: オフ
   pref_reduce_motion: 動きを減らす
   pref_reduce_motion_sub: 点字スピナーや猫などの装飾アニメーションを静止します
   pref_font_size: フォントサイズ
@@ -440,7 +453,17 @@ settings:
   remote_copy: ペアリングURLをコピー
   remote_hide: QRを隠す
   remote_qr_hint: "%{count} プロジェクトを共有。QRは5分間有効です。スマホのカメラで読み取ってください。ホーム画面のPWAにはURLを貼り付けて接続できます。URLやQRを他人に渡さないでください。"
-  remote_error: QRを発行できませんでした。プロジェクトを開き、Node.js 22以降・Remoteホストの同梱・接続設定・ネット接続を確認してください。
+  remote_error: QRを発行できませんでした（原因不明）。ターミナルで `ne remote pair` を実行すると理由が出ます。
+  remote_err_no_gui: necoder 本体と通信できませんでした。necoder を再起動してからもう一度お試しください。
+  remote_err_no_project: 共有できるプロジェクトがありません。先にプロジェクトを開いてください。
+  remote_err_not_initialized: スマホ連携がまだ初期化されていません。ターミナルで `ne remote init` を実行してください。
+  remote_err_device_limit: 登録済みの端末が上限（8台）です。使っていない端末を失効させてから発行してください。
+  remote_err_node: Node.js 22以降が見つかりません。インストールしてから発行してください。
+  remote_err_host_missing: Remoteホストが同梱されていません。necoder を入れ直してください。
+  remote_err_host_start: Remoteホストを起動できませんでした。`~/.necoder/remote/host.log` に理由が残ります。
+  remote_err_relay: 中継サーバに接続できませんでした。ネット接続を確認してもう一度お試しください。
+  remote_err_timeout: 発行が時間内に終わりませんでした。もう一度お試しください。
+  remote_err_bad_payload: 受け取ったQRが壊れていました。necoder とRemoteホストの版が揃っているか確認してください。
   remote_expired: QRの有効期限が切れました。接続用QRを再発行してください。
   cli_sub: ターミナルから `ne <パス>` で necoder を開けるようにします。
   cli_row_label: ne コマンド
@@ -538,6 +561,9 @@ breadcrumb:
 webview:
   failed: HTML プレビューを開けませんでした
   unsupported: HTML プレビューは現在 macOS / Windows に対応しています
+pdf:
+  unsupported: この環境では PDF をタブに表示できません
+  unsupported_hint: OS のビューアを使うため macOS / Windows のみ対応します。右クリック →「既定アプリで開く」で開けます
 terminal:
   tab_title: ターミナル %{n}
   add_tip: ターミナルを追加
@@ -783,3 +809,46 @@ key:
   hide_others: 他のアプリを隠す
   activate_project: プロジェクトを切替（レール順）
   quit: necoder を終了
+work:
+  title: 作業
+  repositories: リポジトリ / 作業
+  open_beside: 隣に開く
+  reveal_session: 実行中のターミナルを表示
+  terminal: Terminal
+  agent: Agent
+  diff: 変更
+  add_worktree: ＋ 作業を追加
+  add_worktree_tip: 既存worktreeを開く / ブランチからworktreeを作る
+  choose_worktree: worktreeを選択 / 新しいブランチ名を入力
+  create_existing: このブランチのworktreeを作成
+  create_branch: 現在のHEADからworktreeを作成
+  empty: 左の一覧からworktreeを選ぶと、ここに開きます
+  empty_pane: ＋からAgent・Terminal・ファイルを開けます
+  unavailable: このworktreeは開かれていません。左の一覧から開き直してください。
+  columns: 横並び
+  grid: グリッド
+  toggle_layout: 横並び / グリッドを切り替え
+  restore: 配置に戻る
+  close_column: 列を隠す（セッションは継続）
+  close_pane: ペインを閉じる（タブは隣へ移動）
+  pane_menu: タブを追加 / ペインを配置
+  terminal_stopped: Terminalは停止しています。配置の復元ではコマンドを再実行しません。
+  start_terminal: シェルを起動
+  open_file: ファイルを開く…
+  new_thread: 新しいスレッド
+  new_terminal: 新しいTerminal
+  move_terminal: 下ドックのTerminalをここへ移動
+  split: 下に分割してTerminalを開く
+  tabs_top: タブを上に表示
+  tabs_left: タブを左に表示
+  focus: ペインに集中 / 配置に戻る
+  move_left: 列を左へ移動
+  move_right: 列を右へ移動
+  tab_previous: タブを前へ移動
+  tab_next: タブを後ろへ移動
+  hide_tab: タブを隠す（セッションは継続）
+  return_terminal: Terminalを下ドックへ移動
+  stop_terminal: Terminalセッションを終了
+  tabs_setting: タブの既定位置
+  top: 上
+  left: 左

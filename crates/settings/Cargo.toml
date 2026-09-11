@@ -18,6 +18,12 @@ gpui_platform.workspace = true
 name = "remote_preview"
 required-features = ["remote-preview"]
 
+# 設定ホーム全体を 1 枚に描く（セクション追加時のレイアウト目視）。offscreen 描画に
+# gpui の test-support が要るので `remote-preview` と同じ feature に相乗りする。
+[[example]]
+name = "settings_preview"
+required-features = ["remote-preview"]
+
 [dependencies]
 acp_client.workspace = true
 anyhow.workspace = true

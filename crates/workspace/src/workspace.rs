@@ -49,15 +49,22 @@ pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
 mod chrome;
 mod commands;
 mod control_ipc;
-mod remote_control;
 mod control_transport;
 mod control_view;
 mod dev_probes;
 mod explorer_controller;
 mod explorer_view;
 mod fleet_view;
+mod work_layout;
+mod workbench;
+pub(crate) use work_layout::{
+    RepositoryLayout, WorkColumn, WorkLayoutState, WorkPane, WorkSurface,
+};
 mod image_view;
+mod pdf_view;
+mod remote_control;
 pub(crate) use image_view::ImageView;
+pub(crate) use pdf_view::PdfView;
 mod about;
 mod git_controller;
 mod git_view;
@@ -204,6 +211,7 @@ actions!(
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum PickerMode {
+    Worktrees,
     Files,
     Projects,
     Themes,
@@ -258,8 +266,8 @@ pub(crate) enum Dock {
     Bottom,
 }
 
-/// タブの中身（ARCHITECTURE §3 の Pane/Item 多態化。具体型 2 つ: エディタ / 画像）。
-/// enum で足す方式 — trait 化は第3の Item が要求したときに再検討する。
+/// タブの中身（ARCHITECTURE §3 の Pane/Item 多態化。具体型 3 つ: エディタ / 画像 / PDF）。
+/// enum で足す方式 — trait 化は「編集も保存もしない表示専用タブ」以外の Item が要ったときに再考する。
 pub(crate) enum TabContent {
     Editor {
         editor: Entity<EditorView>,
@@ -272,6 +280,9 @@ pub(crate) enum TabContent {
     },
     /// 画像タブ（FEATURES §2 の画像プレビュー）。編集・保存・LSP・hot exit の対象外。
     Image(Entity<ImageView>),
+    /// PDF タブ。中身は OS のビューア（WKWebView / WebView2）を載せたネイティブ子ビュー。
+    /// 画像タブと同じく編集・保存・LSP・hot exit の対象外。
+    Pdf(Entity<PdfView>),
 }
 
 /// ペインに載る 1 タブ（M10 複数タブ）。`path` はタブの同一判定と永続化のキー。
@@ -283,12 +294,20 @@ pub(crate) struct EditorTab {
 }
 
 impl EditorTab {
-    /// エディタタブなら [`EditorView`]（画像タブは None）。編集/LSP/保存系の呼び出し側は
-    /// この Option で自然に画像タブを素通りする。
+    /// エディタタブなら [`EditorView`]（画像・PDF タブは None）。編集/LSP/保存系の呼び出し側は
+    /// この Option で自然に表示専用タブを素通りする。
     pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.content {
             TabContent::Editor { editor, .. } => Some(editor),
-            TabContent::Image(_) => None,
+            TabContent::Image(_) | TabContent::Pdf(_) => None,
+        }
+    }
+
+    /// PDF タブならその [`PdfView`]。ネイティブ子ビューの可視性同期の対象を拾う口。
+    pub(crate) fn pdf(&self) -> Option<&Entity<PdfView>> {
+        match &self.content {
+            TabContent::Pdf(view) => Some(view),
+            TabContent::Editor { .. } | TabContent::Image(_) => None,
         }
     }
 
@@ -297,10 +316,11 @@ impl EditorTab {
         match &self.content {
             TabContent::Editor { editor, .. } => editor.read(cx).focus_handle(cx),
             TabContent::Image(view) => view.read(cx).focus_handle(cx),
+            TabContent::Pdf(view) => view.read(cx).focus_handle(cx),
         }
     }
 
-    /// 未保存変更ドット（画像タブは常に false）。
+    /// 未保存変更ドット（画像・PDF タブは常に false）。
     pub(crate) fn is_dirty(&self, cx: &App) -> bool {
         self.editor()
             .map(|editor| editor.read(cx).buffer().is_dirty())
@@ -315,6 +335,10 @@ impl EditorTab {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
             TabContent::Image(view) => view
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+            TabContent::Pdf(view) => view
                 .clone()
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
@@ -997,6 +1021,7 @@ pub(crate) enum GraphView {
 /// 既定は当面 Graph（ドッグフーディング後に再判断・計画 §P3）。
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum FleetCenterView {
+    Work,
     Graph,
     Control,
 }
@@ -1031,6 +1056,13 @@ pub(crate) enum RenameSite {
 }
 
 struct ChromeState {
+    worktree_choices: Vec<(String, Option<PathBuf>)>,
+    worktree_origin: Option<Rc<Worktree>>,
+    work_layout: WorkLayoutState,
+    work_menu: Option<(u64, Point<gpui::Pixels>)>,
+    /// `sync_work_chrome` が最後に適用した (埋め込みか, session 数)。毎 render の早期脱出用。
+    work_embedded: Option<(bool, usize)>,
+    work_resize: Option<workbench::WorkResize>,
     show_left: bool,
     show_right: bool,
     show_bottom: bool,
@@ -1236,6 +1268,12 @@ pub struct Workspace {
     control_summary_gen: u32,
     /// `on_focus_lost` は Window が得られる初回 render で一度だけ登録する。
     focus_recovery_installed: bool,
+    /// 直近の render 時点で GPUI がフォーカスしていた要素。ネイティブ WebView から OS の
+    /// キーボードフォーカスを取り返す合図（フォーカスが動いた＝キー操作で別の面へ移った）に使う。
+    last_focused: Option<FocusHandle>,
+    /// `projects[i]` が構築時の `sources` の何番目から来たか。開けなかった source は飛ばされるので、
+    /// タブ列の復元（`restore_open_file`）はこの写像を通す。1 回使ったら空にする。
+    restored_source_map: Vec<usize>,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -1537,7 +1575,11 @@ impl Workspace {
             self.open_thread_history(&ThreadHistory, window, cx);
         }
         if let Some(index) = self.overlays.pending_project_switch.take() {
-            self.switch_project(index, window, cx);
+            if self.work_is_visible() {
+                self.open_work_space(index, true, window, cx);
+            } else {
+                self.switch_project(index, window, cx);
+            }
         }
         if let Some((path, line, column)) = self.pending_navigation.take() {
             self.record_nav_position(cx);
@@ -1554,26 +1596,83 @@ impl Workspace {
     }
 
     /// ネイティブ WebView は GPUI の描画木から外れても OS 子ビューとして残るため、各 render の
-    /// レイアウト状態を可視性へ同期する。対象はローカル HTML タブだけで、通常のエディタには触れない。
-    fn sync_html_preview_visibility(&mut self, cx: &mut Context<Self>) {
+    /// レイアウト状態を可視性へ同期する。対象はネイティブ子ビューを載せるタブ（ローカル HTML
+    /// プレビューと PDF タブ）だけで、通常のエディタには触れない。
+    fn sync_native_view_visibility(&mut self, window: &Window, cx: &mut Context<Self>) {
         let active_session = self.project_sessions.active;
         let editor_surface_visible =
             !self.chrome.fleet_mode && !self.chrome.agent_full_screen && !self.chrome.show_settings;
         for (session_index, session) in self.project_sessions.sessions.iter().enumerate() {
             for (tab_index, tab) in session.tabs.iter().enumerate() {
+                let visible = editor_surface_visible
+                    && session_index == active_session
+                    && tab_index == session.active_tab;
+                if let Some(pdf) = tab.pdf().cloned() {
+                    pdf.update(cx, |pdf, cx| pdf.set_surface_active(visible, false, cx));
+                    continue;
+                }
                 if lang::language_for_path(&tab.path) != Some(lang::LanguageId::Html) {
                     continue;
                 }
                 let Some(editor) = tab.editor().cloned() else {
                     continue;
                 };
-                let visible = editor_surface_visible
-                    && session_index == active_session
-                    && tab_index == session.active_tab;
                 editor.update(cx, |editor, cx| {
                     editor.set_surface_active(visible, false, cx)
                 });
             }
+        }
+        // GPUI のフォーカスが動いた ＝ キー操作で別の面（composer・検索欄など）へ移った合図。
+        // 行き先がプレビュー自身でなければ OS のキーボードフォーカスを GPUI へ返す。
+        // クリックでの移動は capture フェーズの mouse down（`release_native_key_focus`）が先に返す。
+        let focused = window.focused(cx);
+        if self.last_focused != focused {
+            self.last_focused = focused.clone();
+            let native_focus = self.active_native_view_focus(cx);
+            if focused != native_focus {
+                self.release_native_key_focus(cx);
+            }
+        }
+    }
+
+    /// アクティブタブが HTML プレビューならそのエディタ。ネイティブ WebView が OS のキーボード
+    /// フォーカスを握りうるのはこの 1 枚だけ（他は非表示になる時点で親へ返している）。
+    fn active_html_preview(&self, cx: &App) -> Option<Entity<EditorView>> {
+        let editor = self.tabs.get(self.active_tab)?.editor()?;
+        editor.read(cx).rendered_html().then(|| editor.clone())
+    }
+
+    /// アクティブタブが PDF タブ（ネイティブビューア付き）ならその view。
+    fn active_pdf_view(&self, cx: &App) -> Option<Entity<PdfView>> {
+        let view = self.tabs.get(self.active_tab)?.pdf()?;
+        view.read(cx).has_native_viewer().then(|| view.clone())
+    }
+
+    /// 今 OS のキーボードフォーカスを握りうるネイティブ子ビューの GPUI 側 focus handle。
+    fn active_native_view_focus(&self, cx: &App) -> Option<FocusHandle> {
+        if let Some(editor) = self.active_html_preview(cx) {
+            return Some(editor.read(cx).focus_handle(cx));
+        }
+        self.active_pdf_view(cx)
+            .map(|view| view.read(cx).focus_handle(cx))
+    }
+
+    /// ネイティブ WebView が握っている OS のキーボードフォーカス（macOS の first responder）を
+    /// GPUI のウィンドウへ返す。
+    ///
+    /// GPUI にマウスダウンが届いた＝そのクリックは WebView の**外**に落ちた（WebView 上のクリックは
+    /// OS 子ビューが食うので GPUI には来ない）。これは「以後のキーは GPUI のもの」という確実な合図で、
+    /// ここを取りこぼすと first responder が WebView に残り、IME（日本語）の変換セッションだけが
+    /// WebView 側に付いたまま＝ composer に 1 文字も入らないのにショートカットだけ効く状態になる
+    /// （生のキーは responder chain を上って GPUI に届くため・2026-09-11）。
+    pub(crate) fn release_native_key_focus(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_html_preview(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.set_html_preview_key_focus(false, cx)
+            });
+        }
+        if let Some(view) = self.active_pdf_view(cx) {
+            view.update(cx, |view, cx| view.set_key_focus(false, cx));
         }
     }
 }
@@ -1605,7 +1704,10 @@ impl Render for Workspace {
             self.ensure_fleet_clock(cx);
         }
         self.ensure_rollup_ticker(cx); // フッターのニュース欄を複数稼働時に順送りする（自停止）
-        self.sync_html_preview_visibility(cx);
+        self.sync_native_view_visibility(window, cx);
+        // 作業面の出入りで Agent パネルの chrome を合わせる（面を切り替える入口が複数あるので、
+        // 呼び出し側に配らず毎 render で 1 箇所に集める＝上の native view と同じ流儀）。
+        self.sync_work_chrome(cx);
 
         if self.has_pending_shell_effects() {
             let workspace = cx.entity();
@@ -1622,6 +1724,12 @@ impl Render for Workspace {
         div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            // GPUI 側で押された＝ネイティブ WebView の外のクリック。OS のキーボードフォーカスを
+            // 取り返してから各要素の処理へ渡す（capture フェーズ。HTML タブを押した場合は
+            // この後の `select_tab` がプレビューへ渡し直す）。
+            .capture_any_mouse_down(cx.listener(|this, _event, _window, cx| {
+                this.release_native_key_focus(cx);
+            }))
             .on_action(cx.listener(Self::open_file_finder))
             .on_action(cx.listener(Self::open_project_switcher))
             .on_action(cx.listener(Self::open_project_search))
@@ -2578,6 +2686,354 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// PDF は OS のビューアを載せた表示専用タブとして開くこと。
+    /// 以前はテキスト経路へ落ちて UTF-8 デコードに失敗し、**タブが 1 枚も開かず無反応**だった。
+    #[gpui::test]
+    fn opening_a_pdf_gives_a_native_viewer_tab_not_a_text_buffer(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_pdf_tab_{}", std::process::id()));
+        let project = root.join("papers");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project).unwrap();
+        let pdf = project.join("spec.pdf");
+        // 先頭のバイナリコメントを含む最小の PDF。ここが UTF-8 として読めないのが要点。
+        std::fs::write(&pdf, b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n%%EOF\n").unwrap();
+        assert!(
+            String::from_utf8(std::fs::read(&pdf).unwrap()).is_err(),
+            "テキストとしては読めないファイルであることが前提"
+        );
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        // テスト窓は raw window handle を持たない＝ネイティブ子ビューは作れない（生成だけ黙らせる）。
+        ::webview_view::disable_native_webviews_for_tests();
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.restore_open_file(&[RestoredTabs::single(pdf.clone())], window, cx);
+
+            let tab = workspace
+                .tabs
+                .get(workspace.active_tab)
+                .expect("PDF タブが 1 枚開く");
+            assert_eq!(tab.path, pdf);
+            let view = tab.pdf().expect("PDF タブは PdfView を持つ");
+            assert!(
+                view.read(cx).has_native_viewer(),
+                "ローカル PDF は OS のビューアに載せる（macOS / Windows）"
+            );
+            assert!(
+                workspace.active_editor().is_none(),
+                "PDF はテキストバッファを作らない（編集・保存・LSP の対象外）"
+            );
+            assert!(!tab.is_dirty(cx), "表示専用タブに未保存変更は無い");
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// HTML プレビュー中に GPUI 側をクリックしたら、ネイティブ WebView が握っている OS の
+    /// キーボードフォーカスが GPUI へ返ること（返らないと IME＝日本語が WebView 側に吸われる）。
+    #[gpui::test]
+    fn clicking_outside_the_html_preview_returns_key_focus(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_preview_focus_{}", std::process::id()));
+        let project = root.join("site");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project).unwrap();
+        let page = project.join("page.html");
+        std::fs::write(&page, "<h1>hi</h1>\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        // テスト窓は raw window handle を持たない＝ネイティブ子ビューは作れない。
+        // 作らせずに、フォーカス受け渡しの配線だけを通す。
+        ::webview_view::disable_native_webviews_for_tests();
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        let editor = workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.restore_open_file(&[RestoredTabs::single(page.clone())], window, cx);
+            workspace.active_editor().expect("HTML タブが開く")
+        });
+
+        // 先に 1 度クリックして描画とフォーカス追跡を落ち着かせる。こうしないと、この後の
+        // assert が「描画時のフォーカス変化」経路でも通ってしまい、クリック経路を見ていない。
+        cx.simulate_mouse_down(
+            point(px(200.), px(400.)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+
+        // プレビュー表示 + タブ選択でプレビューへキーを渡した状態を作る。
+        workspace.update_in(cx, |_workspace, _window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.set_rendered_html(true, cx);
+                editor.set_surface_active(true, true, cx);
+            });
+        });
+        assert!(
+            editor.read_with(cx, |editor, cx| editor.html_preview_wants_key_focus(cx)),
+            "プレビューを選んだ時点ではプレビューがキーを持つ"
+        );
+
+        // GPUI 側でクリックが起きた ＝ WebView の外。キーは GPUI に戻る。
+        cx.simulate_mouse_down(
+            point(px(200.), px(400.)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert!(
+            !editor.read_with(cx, |editor, cx| editor.html_preview_wants_key_focus(cx)),
+            "GPUI 側のクリックで OS のキーボードフォーカスが返らない＝ composer に日本語が入らない"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ⌘W / × で閉じたタブが再起動で戻らないこと。窓セッション行（necoder.db）まで往復して見る。
+    /// 「閉じたはずのタブが復活する」報告の再現用（2026-09-10）。
+    #[gpui::test]
+    fn closed_tabs_do_not_come_back_after_restart(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_tab_close_persist_{}", std::process::id()));
+        let project_a = root.join("a");
+        let project_b = root.join("b");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        let a1 = project_a.join("a1.txt");
+        let a2 = project_a.join("a2.txt");
+        let a3 = project_a.join("a3.txt");
+        let b1 = project_b.join("b1.txt");
+        let b2 = project_b.join("b2.txt");
+        for path in [&a1, &a2, &a3, &b1, &b2] {
+            std::fs::write(path, "x\n").unwrap();
+        }
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let storage = storage::Storage::open(&root.join("necoder.db")).unwrap();
+        let persistence = WindowPersistence {
+            storage: Some(storage.clone()),
+            window_id: Some("w1".to_string()),
+        };
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(
+                vec![project_a.clone(), project_b.clone()],
+                Theme::dark(),
+                Some(persistence),
+                cx,
+            )
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.restore_open_file(
+                &[
+                    RestoredTabs {
+                        files: vec![a1.clone(), a2.clone(), a3.clone()],
+                        active: 0,
+                    },
+                    RestoredTabs {
+                        files: vec![b1.clone(), b2.clone()],
+                        active: 0,
+                    },
+                ],
+                window,
+                cx,
+            );
+            assert_eq!(workspace.tabs.len(), 3, "A のタブが 3 枚開く");
+
+            // A の真ん中を閉じる。
+            workspace.close_tab_at(1, window, cx);
+            assert_eq!(workspace.tabs.len(), 2);
+
+            // B へ切替（遅延復元） → 1 枚閉じる → A へ戻る。
+            workspace.switch_project(1, window, cx);
+            assert_eq!(workspace.tabs.len(), 2, "B のタブが遅延復元される");
+            workspace.close_tab_at(0, window, cx);
+            workspace.switch_project(0, window, cx);
+
+            // ⌘Q 相当（同期 flush）。
+            workspace.flush_window_session_for_quit();
+        });
+
+        let rows = storage.claim_window_sessions().unwrap();
+        assert_eq!(rows.len(), 1, "窓セッションは 1 行");
+        let (projects, _active) =
+            crate::persistence::decode_window_session(&rows[0].1).expect("復元できる");
+        assert_eq!(
+            projects[0].open_files,
+            vec![a1, a3],
+            "A: 閉じたタブが窓セッションに残ってはいけない"
+        );
+        assert_eq!(
+            projects[1].open_files,
+            vec![b2],
+            "B: 閉じたタブが窓セッションに残ってはいけない"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 窓の × を押した直後でも、直前に閉じたタブの保存が落ちないこと。
+    #[gpui::test]
+    fn closing_the_window_does_not_drop_the_pending_tab_save(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_tab_close_window_{}", std::process::id()));
+        let project_a = root.join("a");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project_a).unwrap();
+        let a1 = project_a.join("a1.txt");
+        let a2 = project_a.join("a2.txt");
+        let a3 = project_a.join("a3.txt");
+        for path in [&a1, &a2, &a3] {
+            std::fs::write(path, "x\n").unwrap();
+        }
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let storage = storage::Storage::open(&root.join("necoder.db")).unwrap();
+        let persistence = WindowPersistence {
+            storage: Some(storage.clone()),
+            window_id: Some("w1".to_string()),
+        };
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(
+                vec![project_a.clone()],
+                Theme::dark(),
+                Some(persistence),
+                cx,
+            )
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.restore_open_file(
+                &[RestoredTabs {
+                    files: vec![a1.clone(), a2.clone(), a3.clone()],
+                    active: 0,
+                }],
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked(); // 3 枚の状態が DB へ落ちる
+
+        // タブを閉じ、書き手が走る前に窓の × を押す。
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_tab_at(1, window, cx);
+            workspace.mark_window_closed();
+        });
+        cx.run_until_parked();
+
+        let rows = storage.claim_window_sessions().unwrap();
+        let (projects, _active) =
+            crate::persistence::decode_window_session(&rows[0].1).expect("復元できる");
+        assert_eq!(
+            projects[0].open_files,
+            vec![a1, a3],
+            "窓を閉じる直前のタブ操作が保存されていない"
+        );
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 開けなくなったプロジェクト（消えた worktree など）が混ざっていても、
+    /// タブ列が別プロジェクトへずれて復元されないこと。
+    #[gpui::test]
+    fn a_missing_project_does_not_shift_restored_tabs(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_tab_restore_shift_{}", std::process::id()));
+        let project_a = root.join("a");
+        let project_c = root.join("c");
+        let missing = root.join("gone");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_c).unwrap();
+        let a1 = project_a.join("a1.txt");
+        let c1 = project_c.join("c1.txt");
+        std::fs::write(&a1, "x\n").unwrap();
+        std::fs::write(&c1, "x\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources_with_active(
+                vec![
+                    ProjectSource::local(project_a.clone()),
+                    ProjectSource::local(missing.clone()),
+                    ProjectSource::local(project_c.clone()),
+                ],
+                2, // アクティブは c（source 基準）
+                Theme::dark(),
+                None,
+                cx,
+            )
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            assert_eq!(
+                workspace.project_sessions.projects.len(),
+                2,
+                "消えたプロジェクトは飛ばされる"
+            );
+            assert_eq!(
+                workspace.project_sessions.active, 1,
+                "アクティブも詰めた並びへ写す"
+            );
+            workspace.restore_open_file(
+                &[
+                    RestoredTabs::single(a1.clone()),
+                    RestoredTabs::single(missing.join("gone.txt")),
+                    RestoredTabs::single(c1.clone()),
+                ],
+                window,
+                cx,
+            );
+            assert_eq!(
+                workspace.project_sessions.projects[1].open_files,
+                vec![c1.clone()],
+                "c のタブ列が別プロジェクトのものにすり替わっている"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// レールが最後に触った面（`chrome.rail_active`）の間は ⌘{ ⌘}（タブ切替）がプロジェクト切替に
     /// 化け、落ちればエディタタブ宛てに戻る（トラックパッド動線・2026-09-03）。
     #[gpui::test]
@@ -2630,6 +3086,54 @@ mod tests {
             assert_eq!(
                 workspace.project_sessions.active, 1,
                 "通常時はエディタタブ宛て"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AI 全画面中でも、エディタ領域を前に出す操作（設定を開く・ファイルを開く）は通ること。
+    /// 全画面は中央を Agent に差し替えるので、畳まないと「開いたのに何も起きない」になる。
+    #[gpui::test]
+    fn opening_a_surface_while_the_agent_is_maximized_unmaximizes_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_agent_unmaximize_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("a.txt");
+        std::fs::write(&file, "x\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+
+            // ⌘, で設定を開く。
+            workspace.toggle_agent_full_screen_state(window, cx);
+            assert!(workspace.chrome.agent_full_screen);
+            workspace.open_settings_action(&OpenSettings, window, cx);
+            assert!(workspace.chrome.show_settings);
+            assert!(
+                !workspace.chrome.agent_full_screen,
+                "設定を開いたら全画面は畳む（中央が Agent のままでは設定が見えない）"
+            );
+            assert!(workspace.chrome.show_right, "抜けた先でも AI は消えない");
+
+            // ファイルを開く経路（⌘P・ツリー・検索ジャンプ）。
+            workspace.toggle_agent_full_screen_state(window, cx);
+            assert!(workspace.chrome.agent_full_screen);
+            workspace.open_file(file.clone(), window, cx);
+            assert!(
+                !workspace.chrome.agent_full_screen,
+                "ファイルを開いたら全画面は畳む"
             );
         });
         let _ = std::fs::remove_dir_all(&root);

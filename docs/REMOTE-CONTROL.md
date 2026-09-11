@@ -26,6 +26,24 @@ iPhone で固定 URL をホーム画面に追加し、PWA にペアリング URL
 配布版の更新後は `ne remote pair`、Windows では `necoder.exe remote pair` が使えます。
 Windows 用バイナリの生成と実機検証は、この Mac では行っていません。Windows CI にホスト起動・名前付きパイプ認証・配布同梱の検査を追加済みです。
 
+## QR が発行できないとき（2026-09-11）
+
+設定画面の失敗表示は**原因ごとに違う一文**を出す。総称の一文（「原因不明」）が出た時だけ、
+ターミナルで `ne remote pair` を実行すると生の理由が見られる。
+
+- 画面に出す文字列は `crates/settings/src/remote.rs` の allowlist（`KNOWN_FAILURES` →
+  `failure_message`）を通したものだけ。**host の生 stderr は画面にもログにも出さない**
+  （ペアリング URL やローカルのパスが混ざり得るため）。新しい失敗コードを host 側に足す時は、
+  この allowlist と `locales/ja.yml` / `en.yml` の `settings.remote_err_*` も一緒に足す。
+- v0.1.14 までは **release ビルドが管制 IPC を一度も起動していなかった**（`main.rs` の呼び出しが
+  開発用 probe の `#[cfg(debug_assertions)]` ブロックの中にあった）。この版の .app では QR は
+  必ず失敗する。0.1.15 以降で修正済み（JOURNAL 2026-09-11）。
+- 最頻の原因は `necoder_not_running_or_update_required` = **ホストが GUI と話せない**。
+  Remote host は `~/.necoder/gui.sock`（管制 IPC）越しに `remote_snapshot` を取るので、
+  GUI が socket を張っていないと「necoder が起動していない」と判断する。GUI 側は 30 秒ごとに
+  `control_ping` で持ち主を確かめ、見失っていれば張り直す（`control_ipc.rs`）。
+  それでも出るなら `lsof -U -p <GUI の pid> | grep gui.sock` で持ち主を確かめる。
+
 ## 2026-09-10 の確認
 
 - Cloudflare custom domain / HTTPS / Worker / SQLite Durable Object / provisioning secret の配置に成功。

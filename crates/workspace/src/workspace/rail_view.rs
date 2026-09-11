@@ -442,6 +442,7 @@ impl Workspace {
                     cx.listener(|this, _, _window, cx| {
                         this.chrome.show_settings = !this.chrome.show_settings;
                         if this.chrome.show_settings {
+                            this.exit_agent_full_screen(cx); // 全画面のままだと設定が出ない
                             this.chrome
                                 .settings_view
                                 .update(cx, |view, cx| view.refresh_availability(cx));

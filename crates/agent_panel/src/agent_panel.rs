@@ -25,6 +25,7 @@ use acp_client::{
     PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
 };
 mod remote;
+mod sound;
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
 pub use acp_client::PermissionKind as AgentPermissionKind;
 
@@ -489,18 +490,19 @@ fn word_range_in(text: &str, offset: usize) -> (usize, usize) {
 /// 承認待ちの権限リクエスト（`session/request_permission` を UI で保持する間の状態）。
 /// `respond` に選んだ選択肢の添字を送ると acp_client が応答する（このスレッドの当該ターンは
 /// それまでブロックしている）。ユーザーが答えるまで composer 上部にカードを出す。
-/// エージェントが出した選択肢付き質問（Elicitation・単一選択のみ）。回答するまで composer 上部に
+/// エージェントが出した選択肢付き質問（Elicitation）。回答するまで composer 上部に
 /// カードを出す（承認カードと同居しない前提。両方来たら承認カードを優先表示）。
 struct PendingElicitation {
     remote_id: String,
     /// 質問文（`CreateElicitationRequest.message`）。
     message: SharedString,
-    /// 単一選択フィールド群（acp_client が非対応フォームを弾いた後のもの）。
+    /// 選択式フィールド群（acp_client が非対応フォームを弾いた後のもの）。
     fields: Vec<ElicitationField>,
-    /// 各フィールドの現在の選択（field.name → 選んだ value）。全部埋まると「これで回答」が有効。
-    selections: std::collections::BTreeMap<String, String>,
+    /// 各フィールドの現在の選択（field.name → 選んだ値の並び）。単一選択は要素 1 つ、複数選択は
+    /// 押すたびに増減する。**全フィールドが 1 つ以上選ばれる**と「これで回答」が有効になる。
+    selections: std::collections::BTreeMap<String, Vec<String>>,
     /// 回答チャネル。`Some(選択群)`=Accept / `None`=Decline。drop でも Decline。
-    respond: mpsc::UnboundedSender<Option<Vec<(String, String)>>>,
+    respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
 }
 
 struct PendingPermission {
@@ -614,6 +616,31 @@ pub struct RunningRegistry(
 );
 
 impl gpui::Global for RunningRegistry {}
+
+/// あるエージェントが広告した選択肢の在庫（モデル・思考量・権限モード）。
+///
+/// 広告は **agent 固有でスレッド非依存**（同じ `claude-agent-acp` なら、どのセッションに聞いても
+/// 同じ一覧が返る）。だから 1 度でも受け取ったらパネル内で使い回す — まだセッションが開いていない
+/// タブでも、ピルが表示名で出て**押して選べる**（選んだ値は sticky に載り、次に開くセッションへ
+/// [`acp_client::SessionPreferences`] で渡る）。捏造ではなく「そのエージェントが実際に広告した物」
+/// だけを持つのが要点。
+#[derive(Default, Clone)]
+struct AgentAdvertisement {
+    configs: Vec<ConfigOption>,
+    modes: Vec<(SharedString, SharedString)>,
+}
+
+/// セッション先張り（prewarm）を実行するまでの待ち時間。タブを続けて切り替えた時に、
+/// **通り過ぎただけのタブの分までエージェントのプロセスを立てない**ための間。
+const PREWARM_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 先張りで立てたまま **1 度も使っていない** セッションを、同時に何本まで抱えるか。
+///
+/// 実測（2026-09-11・本人環境）: 未送信のセッションは adapter + 子で **約 16MB**（使うと 46MB、
+/// 会話が育つと 244MB）。つまり「見ただけのタブ」が溜まるほど無駄が積む。2 本にしてあるのは、
+/// タブを行き来（A→B→A）しても立て直しが起きない最小の数だから。超えた分は古い順に畳む
+/// （畳んでもピルの選択肢は在庫（[`AgentAdvertisement`]）から出続けるので見た目は変わらない）。
+const MAX_IDLE_PREWARMED_SESSIONS: usize = 2;
 
 /// herd サイドバー（状態一覧・M14）の 1 スレッド行。`beacons()` のリッチ版で、エージェント種別と
 /// トークンも返す。**色相は識別（`color`）、状態は `activity`（形と動き）**で見せる（UI-SPEC §1.3/§11）。
@@ -731,6 +758,9 @@ struct Thread {
     /// いま握っているセッションの通し番号。古いセッションのポンプ終了（`session_ended`）を
     /// 立て直した新セッションへ誤配送しないための照合キー。
     session_serial: u64,
+    /// 今のセッションへ **1 度でも prompt を送ったか**。先張りしただけで一度も使っていない
+    /// セッションは、上限を超えたら畳んでよい（[`AgentPanel::retire_idle_prewarms`]）。
+    session_used: bool,
     /// 認証切れ（再ログインで直る失敗）で止まっている。composer 上部に「再ログインが必要」カードを
     /// 出す。**セッション（`command_tx`）は保持する**: claude-agent-acp は認証切れのセッションを
     /// 「sign-out respawn」として覚えており、次の prompt で Claude セッションを `resume` 付きで
@@ -797,6 +827,7 @@ impl Thread {
             session_lost: false,
             session_note: None,
             session_serial: 0,
+            session_used: false,
             auth_required: false,
         }
     }
@@ -903,9 +934,9 @@ pub fn digest_tail(text: &str) -> Option<SharedString> {
 fn build_step_entry(info: ToolCallInfo) -> Entry {
     let mut tool = info.title.unwrap_or_default();
     let mut args = info.locations.first().cloned().unwrap_or_default();
-    if let Some(write) = compact_shell_heredoc_write(&tool) {
-        tool = heredoc_write_label(&write);
-        args = write.content;
+    if let Some(compact) = compact_shell_heredoc(&tool) {
+        tool = compact.label();
+        args = compact.into_content();
     }
     let capped = info.output.map(|output| cap_output(&output));
     let result_lines = capped.as_ref().map(|(_, lines)| *lines).unwrap_or(0);
@@ -919,26 +950,50 @@ fn build_step_entry(info: ToolCallInfo) -> Entry {
     }
 }
 
+/// heredoc 付きコマンドを「見出し 1 行 + 展開領域の本文」へ畳んだ結果。
 #[derive(Debug, PartialEq, Eq)]
-struct CompactHeredocWrite {
-    path: String,
-    append: bool,
-    content: String,
+enum CompactHeredoc {
+    /// `cat > path <<'EOF'` — ファイル書き込みとして見せる（本文 = 書いた中身）。
+    Write {
+        path: String,
+        append: bool,
+        content: String,
+    },
+    /// それ以外（`python3 - <<'PY'` など）— 走ったコマンドを見出しに、本文 = 流し込んだ script。
+    Script { command: String, content: String },
 }
 
-fn heredoc_write_label(write: &CompactHeredocWrite) -> String {
-    let key = if write.append {
-        "agent.file_append"
-    } else {
-        "agent.file_write"
-    };
-    i18n::t!(key, "path" => write.path.as_str())
+impl CompactHeredoc {
+    /// Step の見出しに出す行。
+    fn label(&self) -> String {
+        match self {
+            Self::Write { path, append, .. } => {
+                let key = if *append {
+                    "agent.file_append"
+                } else {
+                    "agent.file_write"
+                };
+                i18n::t!(key, "path" => path.as_str())
+            }
+            Self::Script { command, .. } => command.clone(),
+        }
+    }
+
+    /// Step の展開領域へ回す heredoc 本文。
+    fn into_content(self) -> String {
+        match self {
+            Self::Write { content, .. } | Self::Script { content, .. } => content,
+        }
+    }
 }
 
-/// Claude Code が Bash tool の title に載せる
-/// `cd …; cat > path <<'EOF'\n<file 全文>\nEOF` を、ファイル書き込みとして表示できる形へ畳む。
-/// 実行内容の可視性は失わず、全文は Step の展開領域へ移す。
-fn compact_shell_heredoc_write(title: &str) -> Option<CompactHeredocWrite> {
+/// Claude Code が Bash tool の title に載せる heredoc 付きコマンドを、見出し 1 行へ畳む。
+///
+/// `cd …; cat > path <<'EOF'\n<file 全文>\nEOF` はファイル書き込みとして、
+/// `python3 - <<'PY'\n<script>\nPY` のような**標準入力へ流し込む実行**は走ったコマンドとして見せる。
+/// どちらも**実行内容の可視性は失わない** — 畳むのは heredoc の本文だけで、それは Step の展開領域
+/// （`▸` で開く）へ移る。畳まないと script 全文が transcript の見出しを占領する（2026-09-11 報告）。
+fn compact_shell_heredoc(title: &str) -> Option<CompactHeredoc> {
     let command = title.trim();
     let command = command
         .strip_prefix("Bash(")
@@ -955,8 +1010,43 @@ fn compact_shell_heredoc_write(title: &str) -> Option<CompactHeredocWrite> {
     if marker.is_empty() {
         return None;
     }
-
     let command_before_heredoc = first_line[..heredoc_at].trim_end();
+    if command_before_heredoc.is_empty() {
+        return None;
+    }
+
+    // 本文は最初に marker だけの行が来るまで（shell の heredoc と同じ終端規則）。
+    // 終端が無ければ heredoc として解釈しない＝畳まない。
+    let rest: Vec<&str> = lines.collect();
+    let end = rest.iter().position(|line| line.trim() == marker)?;
+    let content = rest[..end].join("\n");
+    let trailing = rest[end + 1..].join("\n");
+    let trailing = trailing.trim_end();
+
+    // 後続コマンドの無い `cat > path` だけをファイル書き込みとして見せる。後続があると
+    // 見出しの「書き込み path」が実行内容を取りこぼすので、コマンドを見せる側へ倒す。
+    if trailing.is_empty() {
+        if let Some((path, append)) = heredoc_write_target(command_before_heredoc) {
+            return Some(CompactHeredoc::Write {
+                path,
+                append,
+                content,
+            });
+        }
+    }
+    let label = if trailing.is_empty() {
+        command_before_heredoc.to_string()
+    } else {
+        format!("{command_before_heredoc}\n{trailing}")
+    };
+    Some(CompactHeredoc::Script {
+        command: label,
+        content,
+    })
+}
+
+/// heredoc の手前が `cat > path` / `cat >> path`（`cd …;` 前置きも可）なら、その宛先と追記か。
+fn heredoc_write_target(command_before_heredoc: &str) -> Option<(String, bool)> {
     let cat_command = command_before_heredoc
         .rsplit(';')
         .next()
@@ -973,21 +1063,7 @@ fn compact_shell_heredoc_write(title: &str) -> Option<CompactHeredocWrite> {
     if target.is_empty() {
         return None;
     }
-
-    let mut content_lines: Vec<&str> = lines.collect();
-    if content_lines
-        .last()
-        .is_none_or(|line| line.trim() != marker)
-    {
-        return None;
-    }
-    content_lines.pop();
-    let content = content_lines.join("\n");
-    Some(CompactHeredocWrite {
-        path: target.to_string(),
-        append,
-        content,
-    })
+    Some((target.to_string(), append))
 }
 
 /// ACP tool の location/path から、言語指定のない出力に使う言語を推測する。
@@ -1035,6 +1111,24 @@ const USER_PREVIEW_CHARS: usize = 400;
 /// 本文に重ねて出すので枠 1px で押せる範囲を示す。22px では「狙って押せない・小さい」の
 /// 指摘が続いたため 28px（2026-09-09）。
 const ENTRY_CONTROL_SIZE: f32 = 28.;
+
+/// transcript 上部に固定する「いまの問い」の帯を、展開したときの最大高（px）。
+/// 帯が伸びて回答を画面外へ押し出すのが元の不具合なので、展開しても上限は外さない
+/// （あふれは帯の中でスクロールする）。
+const PINNED_PROMPT_MAX_HEIGHT: f32 = 160.;
+
+/// 固定帯に出す本文と、▸（展開/折り畳み）を出すかを決める。
+///
+/// **畳んだ側は必ず 1 行**。ここが帯の高さの保証で、改行を含む問いでも帯が行数ぶん伸びない
+/// （`truncate()` は横あふれしか畳まない）。畳んで中身が減らない短い問いには操作を生やさない。
+fn pinned_prompt_body(prompt: &str, expanded: bool) -> (SharedString, bool) {
+    let folded = flatten_digest_line(prompt);
+    let foldable = folded.as_ref() != prompt.trim();
+    if foldable && expanded {
+        return (SharedString::from(prompt.trim().to_string()), true);
+    }
+    (folded, foldable)
+}
 
 /// この User エントリは畳む価値があるか（= 長い入力か）。
 fn user_entry_foldable(text: &str) -> bool {
@@ -1263,6 +1357,10 @@ pub struct AgentPanel {
     tabs_scroll: ScrollHandle,
     /// スレッドの見せ方（Bar 横タブ / List 縦リスト。登録式・スイッチャで切替）。
     tabs_view: AgentTabsView,
+    /// Fleet の作業ペインに埋め込まれている（＝自前のスレッドタブ行を描かない）。
+    /// 列が 3 本並ぶ面では、work pane のタブ行と二重になって中身の高さを食うため、
+    /// スレッドの切替は左の作業ツリーとペインのタブに任せる（UI-SPEC §6.1）。
+    embedded: bool,
     /// List ビューの縦スクロール（スレッドが多いときリスト内で送る）。
     thread_list_scroll: ScrollHandle,
     /// transcript の選択可能リージョン（render で clear→push・mouse イベントが読む）。
@@ -1326,6 +1424,19 @@ pub struct AgentPanel {
     /// リサイズ開始時のマウス Y と高さ（ドラッグ量の基準）。
     composer_resize_start_y: f32,
     composer_resize_start_height: f32,
+    /// エージェント別の広告在庫（[`AgentAdvertisement`]）。セッションがまだ開いていないタブの
+    /// ピルは、同じ agent のこの在庫から選択肢と表示名を引く。
+    catalog: HashMap<SharedString, AgentAdvertisement>,
+    /// 先張りの世代。タブを続けて切り替えた時、最後の予約だけを生かす。
+    prewarm_gen: u32,
+    /// この宛先で先張りを試したスレッド id。失敗しても連打しない（1 スレッド 1 回）。
+    prewarmed: std::collections::HashSet<String>,
+    /// 先張りで立てたセッションを持つスレッド id（古い順）。[`MAX_IDLE_PREWARMED_SESSIONS`] を
+    /// 超えたら、まだ使われていない古い物から畳む。
+    prewarm_order: Vec<String>,
+    /// このパネルで先張りしてよいか。Fleet の Task セルは **false** — 画面に N 枚並べただけで
+    /// エージェントのプロセスが N 本立つのを避ける（あちらは送信で立てる）。
+    prewarm_allowed: bool,
 }
 
 impl gpui::EventEmitter<PanelEvent> for AgentPanel {}
@@ -1336,6 +1447,27 @@ impl AgentPanel {
             && self
                 .last_rendered_at
                 .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1500))
+    }
+
+    /// 入力待ち（承認・質問）で止まったことを音で知らせる。**見えていないときだけ**鳴らす＝
+    /// 別ウィンドウにいるか、同じ窓でも別スレッドを見ているとき。見ている画面には合図は要らない。
+    /// 完了音（`window_active` だけを見る）より広いのは、Blocked は**こちらの手番**だから
+    /// ＝裏のタブで止まったまま気づかないのが一番困る（`docs/BACKGROUND.md` の原点痛点）。
+    /// ミュート中のスレッドは鳴らさない。auto-allow で素通りした要求はブロックしないので対象外。
+    fn ring_waiting(&self, thread_index: usize, cx: &App) {
+        if self.wants_waiting_sound(thread_index) {
+            sound::play(sound::Cue::Waiting, &settings::get(cx).sound_waiting);
+        }
+    }
+
+    /// 入力待ちの音を鳴らすべきか。鳴らす判断だけを分けてある（テストで音を出さずに条件を確かめる）。
+    fn wants_waiting_sound(&self, thread_index: usize) -> bool {
+        let seen = self.is_visibly_active() && self.active == thread_index;
+        let blocked = self.threads.get(thread_index).is_some_and(|thread| {
+            !thread.muted
+                && (thread.pending_permission.is_some() || thread.pending_elicitation.is_some())
+        });
+        !seen && blocked
     }
 
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
@@ -1562,6 +1694,7 @@ PYEOF"#;
             transcript_focus: cx.focus_handle(),
             tabs_scroll: ScrollHandle::new(),
             tabs_view: initial_tabs_view(&settings::get(cx).agent_tabs_view),
+            embedded: false,
             thread_list_scroll: ScrollHandle::new(),
             transcript_regions: Rc::new(RefCell::new(Vec::new())),
             transcript_selection: None,
@@ -1591,6 +1724,11 @@ PYEOF"#;
             resizing_composer: false,
             composer_resize_start_y: 0.0,
             composer_resize_start_height: 0.0,
+            catalog: HashMap::new(),
+            prewarm_gen: 0,
+            prewarmed: std::collections::HashSet::new(),
+            prewarm_order: Vec::new(),
+            prewarm_allowed: true,
         }
     }
 
@@ -1602,6 +1740,8 @@ PYEOF"#;
             std::sync::atomic::AtomicUsize::new(0);
         let seed = TASK_THREAD_COLOR_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut panel = Self::new(theme, cx);
+        // Task セルは Fleet に何枚も並ぶ。並べただけでプロセスが増えないよう先張りしない。
+        panel.prewarm_allowed = false;
         let mut thread = Thread::empty("Task", seed);
         apply_thread_defaults(&mut thread, cx);
         panel.threads = vec![thread];
@@ -1674,8 +1814,8 @@ PYEOF"#;
                 _project,
                 _branch,
                 agent,
-                // 記録としては読むが、**選択の正には使わない**（下のコメント参照）。
-                _last_used_model,
+                // 選択の正は sticky。これは sticky が空のときの**表示と初回起動の希望**に使う。
+                last_used_model,
                 tokens_used,
                 tokens_limit,
                 created_at_ms,
@@ -1688,15 +1828,28 @@ PYEOF"#;
                 thread.last_input_at_ms = last_input_at_ms;
                 // 旧 DB 行（agent=NULL）は保存当時の Agent を知り得ないため現在の明示既定へ。
                 // 新しい行は thread 固有の Agent を復元し、Claude Code へ勝手に戻さない。
-                thread.agent = agent
+                let recorded_agent = agent
                     .filter(|agent| acp_client::AgentKind::by_label(agent).is_some())
-                    .map(SharedString::from)
+                    .map(SharedString::from);
+                thread.agent = recorded_agent
+                    .clone()
                     .unwrap_or_else(|| default_agent_name(cx));
                 // 復元スレッドも **その agent の sticky** で開く。DB の `threads.model` は
                 // 「そのスレッドが何を使ったか」の記録であって、次に何を選ぶかの正ではない
                 // （Zed も resume 時に既定 config を適用する）。ここで DB 値を採ると、
                 // 古い行に残る旧語彙が sticky を打ち消して毎回エージェント既定へ落ちる。
                 apply_agent_sticky(&mut thread, cx);
+                // ただし sticky が**空**（＝一度もピルで選んでいない）なら、その行が最後に使った
+                // モデルを採る。セッションは初回送信まで立たない＝広告も届かないので、ここで
+                // 空のままだとピルが起動直後ずっと「—」になる（0.1.14 の実害）。sticky を
+                // 上書きしないので「旧語彙が sticky を打ち消す」問題は起きず、広告に無い綴りなら
+                // `AgentEvent::Configs` が広告 current へ落とす。agent を記録していない旧行は
+                // 別 vendor の綴りを持ち込みかねないので対象外。
+                if thread.model.is_empty() && recorded_agent.is_some() {
+                    if let Some(model) = last_used_model.filter(|model| !model.is_empty()) {
+                        thread.model = model.into();
+                    }
+                }
                 thread.tokens_used = tokens_used.max(0) as u32;
                 thread.tokens_shown = thread.tokens_used as f32;
                 if tokens_limit > 0 {
@@ -1761,6 +1914,8 @@ PYEOF"#;
         if std::env::var_os("NECODER_SCROLL_TOP").is_none() {
             self.reset_transcript_list(true); // 復元直後も末尾（最新）を見せる
         }
+        // 起動直後にモデル/モードの一覧が要る＝ここで先に繋ぐ（0.1.14 の「ピルが — のまま」の根治）。
+        self.schedule_prewarm(cx);
         cx.notify();
     }
 
@@ -1919,6 +2074,10 @@ PYEOF"#;
             for thread in &mut self.threads {
                 thread.command_tx = None;
             }
+            // 宛先が変われば cwd も変わる＝別のセッション。先張りの試行履歴も畳んで張り直す。
+            self.prewarmed.clear();
+            self.prewarm_order.clear();
+            self.schedule_prewarm(cx);
         }
         self.sync_running_registry(cx);
         cx.notify();
@@ -1952,6 +2111,21 @@ PYEOF"#;
         self.threads
             .get(self.active)
             .map(|thread| thread.name.clone())
+    }
+
+    /// いま選ばれているスレッドの添字（`statuses()` と同じ並び）。
+    pub fn active_thread(&self) -> usize {
+        self.active
+    }
+
+    /// Fleet の作業ペインへ埋め込むかどうか。埋め込み中は自前のスレッドタブ行を描かない。
+    /// 値が変わった時だけ notify する（render の中から呼ばれても再描画が振動しない）。
+    pub fn set_embedded(&mut self, embedded: bool, cx: &mut Context<Self>) {
+        if self.embedded == embedded {
+            return;
+        }
+        self.embedded = embedded;
+        cx.notify();
     }
 
     pub fn active_color(&self) -> Hsla {
@@ -2057,44 +2231,64 @@ PYEOF"#;
         cx.notify();
     }
 
-    /// Elicitation の選択肢を1つ選ぶ（アクティブスレッド）。単一フィールドの質問（4 択）は
-    /// **選んだ瞬間に確定送信**、複数フィールドなら選択を貯めて「これで回答」で確定する。
+    /// Elicitation の選択肢を1つ押す（アクティブスレッド）。単一選択なら置き換え、複数選択なら
+    /// **トグル**（押し直しで外れる）。「単一選択フィールドが 1 つだけ」の質問（4 択）は
+    /// 選んだ瞬間に確定送信し、それ以外は選択を貯めて「これで回答」で確定する。
     fn choose_elicitation_option(
         &mut self,
         field_name: String,
         value: String,
         cx: &mut Context<Self>,
     ) {
-        let single_field = if let Some(thread) = self.threads.get_mut(self.active) {
+        let submit_now = if let Some(thread) = self.threads.get_mut(self.active) {
             let Some(pending) = thread.pending_elicitation.as_mut() else {
                 return;
             };
-            pending.selections.insert(field_name, value);
-            pending.fields.len() == 1
+            let multi = pending
+                .fields
+                .iter()
+                .find(|field| field.name == field_name)
+                .is_some_and(|field| field.multi);
+            let selected = pending.selections.entry(field_name).or_default();
+            if multi {
+                match selected.iter().position(|chosen| chosen == &value) {
+                    Some(index) => {
+                        selected.remove(index);
+                    }
+                    None => selected.push(value),
+                }
+            } else {
+                *selected = vec![value];
+            }
+            // 複数選択は「選び終わった」がこちらから判らないので、必ず「これで回答」を待つ。
+            !multi && pending.fields.len() == 1
         } else {
             return;
         };
-        if single_field {
+        if submit_now {
             self.submit_elicitation(cx);
         } else {
             cx.notify();
         }
     }
 
-    /// Elicitation を確定送信する（全フィールド選択済みの時のみ Accept を返す）。
+    /// Elicitation を確定送信する（全フィールドが 1 つ以上選択済みの時のみ Accept を返す）。
     fn submit_elicitation(&mut self, cx: &mut Context<Self>) {
         if let Some(thread) = self.threads.get_mut(self.active) {
             let all_selected = thread.pending_elicitation.as_ref().is_some_and(|pending| {
-                pending
-                    .fields
-                    .iter()
-                    .all(|field| pending.selections.contains_key(&field.name))
+                pending.fields.iter().all(|field| {
+                    pending
+                        .selections
+                        .get(&field.name)
+                        .is_some_and(|values| !values.is_empty())
+                })
             });
             if !all_selected {
                 return; // 未選択のフィールドがある＝まだ確定しない
             }
             if let Some(pending) = thread.pending_elicitation.take() {
-                let selections: Vec<(String, String)> = pending.selections.into_iter().collect();
+                let selections: Vec<(String, Vec<String>)> =
+                    pending.selections.into_iter().collect();
                 pending.respond.unbounded_send(Some(selections)).ok();
             }
         }
@@ -2724,6 +2918,112 @@ PYEOF"#;
         cx.notify();
     }
 
+    /// アクティブスレッドの ACP セッションを**送信を待たずに**立てる予約を入れる。
+    ///
+    /// ACP はセッションが開くまでモデル/権限モードを広告しない。だから「送るまでピルが空で押せない」
+    /// を断つには、Zed と同じく**先に繋ぐ**しかない（Zed は `ConversationView` 生成時に
+    /// `AgentConnectionStore::request_connection` を呼び、接続が済むまでピル自体を描かない）。
+    /// necoder はスレッド 1 本 = プロセス 1 本なので、**人が見ている 1 枚**だけを先張りする。
+    ///
+    /// 少し遅らせるのは、タブを続けて切り替えた時に通り過ぎたタブの分まで立てないため
+    /// （世代番号で最後の予約だけが生き残る）。
+    fn schedule_prewarm(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.prewarm_target(cx) else {
+            return;
+        };
+        self.prewarm_gen = self.prewarm_gen.wrapping_add(1);
+        let generation = self.prewarm_gen;
+        cx.spawn(async move |panel, cx| {
+            cx.background_executor().timer(PREWARM_DELAY).await;
+            panel
+                .update(cx, |panel, cx| {
+                    if panel.prewarm_gen == generation {
+                        panel.prewarm_thread(&thread_id, cx);
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// 先張りの対象（アクティブスレッドの id）。対象が無ければ `None`:
+    /// Fleet の Task セル / 宛先未定 / 設定で off / もう繋がっている / この宛先で試行済み。
+    fn prewarm_target(&self, cx: &App) -> Option<String> {
+        if !self.prewarm_allowed || self.dest_cwd.is_none() || !settings::get(cx).agent_prewarm {
+            return None;
+        }
+        let thread = self.threads.get(self.active)?;
+        if thread.command_tx.is_some() || self.prewarmed.contains(&thread.id) {
+            return None;
+        }
+        Some(thread.id.clone())
+    }
+
+    /// 予約された先張りを実行する。**静かに**失敗するのが規律 — ユーザーは何も頼んでいないので、
+    /// エージェント未導入や起動失敗を transcript のエラーにしない（送信すれば同じ経路で必ず出る）。
+    /// 1 スレッド 1 回だけ試す（失敗しても連打しない・落ちたら composer 直上の「再開」が担当）。
+    fn prewarm_thread(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.thread_index_by_id(thread_id) else {
+            return; // 予約から実行までの間に閉じられた
+        };
+        let Some(cwd) = self.dest_cwd.clone() else {
+            return;
+        };
+        if self
+            .threads
+            .get(index)
+            .is_none_or(|thread| thread.command_tx.is_some())
+        {
+            return; // もう繋がっている（送信が先に立てた等）
+        }
+        if !self.prewarmed.insert(thread_id.to_string()) {
+            return;
+        }
+        let Some((command_tx, serial)) = self.start_session(index, cwd, cx) else {
+            return; // エージェントが導入されていない。ここでは黙る
+        };
+        if let Some(thread) = self.threads.get_mut(index) {
+            thread.command_tx = Some(command_tx);
+            thread.session_serial = serial;
+            thread.session_lost = false;
+            thread.session_used = false;
+        }
+        self.prewarm_order.retain(|id| id != thread_id);
+        self.prewarm_order.push(thread_id.to_string());
+        self.retire_idle_prewarms();
+        cx.notify();
+    }
+
+    /// 先張りしたまま **1 度も使っていない** セッションが [`MAX_IDLE_PREWARMED_SESSIONS`] を
+    /// 超えたら、古い方から畳む（見るだけ見たタブの分までエージェントを常駐させない）。
+    ///
+    /// 畳むのは送信路を捨てるだけ（`run_session` が抜け、`HostProcess` の drop でプロセスも落ちる）。
+    /// `session_serial` を 0 に戻すのが要点で、これでポンプ終了の後始末（[`Self::session_ended`]）が
+    /// 「今のセッションではない」と判断して**切断バナーを出さない**（意図して畳んだので当然）。
+    /// エージェント側の session id は残すので、次に先張りした時は `session/load` で続きに戻れる。
+    fn retire_idle_prewarms(&mut self) {
+        while self.prewarm_order.len() > MAX_IDLE_PREWARMED_SESSIONS {
+            let oldest = self.prewarm_order.remove(0);
+            let Some(index) = self.thread_index_by_id(&oldest) else {
+                continue; // 閉じられたタブ
+            };
+            let Some(thread) = self.threads.get_mut(index) else {
+                continue;
+            };
+            // 使われたセッション（送信済み・実行中・承認待ち）は畳まない。
+            if thread.session_used
+                || thread.running
+                || thread.pending_permission.is_some()
+                || thread.pending_elicitation.is_some()
+            {
+                continue;
+            }
+            thread.command_tx = None;
+            thread.session_serial = 0;
+            self.prewarmed.remove(&oldest); // 戻ってきたらまた張れる
+        }
+    }
+
     /// スレッドの ACP セッション id を DB に書く（`SessionStarted` のたび）。再起動後の復元で
     /// 読み戻し、エージェントの立ち上げ直しで会話を引き継ぐ鍵になる。
     fn persist_session_id(&self, thread_index: usize) {
@@ -2836,6 +3136,8 @@ PYEOF"#;
         self.sync_running_registry(cx); // Done 解除をロールアップ（フッター/レール/⌘O）へ反映
                                         // 切替先が idle で送信待ちを持っていれば流す（裏で完了したスレッドのキューをここで消化）。
         self.flush_queued_prompt(cx);
+        // 見ているタブのセッションを先に張る（ピルを空で放置しない）。
+        self.schedule_prewarm(cx);
         cx.notify();
     }
 
@@ -3017,9 +3319,20 @@ PYEOF"#;
         // 引き継ぐ（「タブを開くたびに mode が default に戻る」を断つ）。
         if let Some(previous) = self.threads.get(self.active) {
             thread.permission_mode = previous.permission_mode.clone();
+            // モデル/思考量も、sticky が空（一度もピルで選んでいない）なら直前タブが**実際に使って
+            // いる**値を引き継ぐ。同じ agent のときだけ＝別 vendor の綴りは持ち込まない。
+            if previous.agent == thread.agent {
+                if thread.model.is_empty() {
+                    thread.model = previous.model.clone();
+                }
+                if thread.effort.is_empty() {
+                    thread.effort = previous.effort.clone();
+                }
+            }
         }
         self.threads.push(thread);
         self.switch_thread(index, cx);
+        self.schedule_prewarm(cx);
         cx.notify();
     }
 
@@ -3492,10 +3805,15 @@ PYEOF"#;
 
     /// Agent は会話の送り先そのもの。1 発でも会話した後に差し替えると、同じ transcript に
     /// 別 AI の文脈が混ざり、復元時にも「このスレッドは誰か」を一意にできないため固定する。
+    ///
+    /// 判定は**会話が始まったか**（entries / 実行中）だけ。セッションが立っているかは見ない —
+    /// 先張り（[`Self::schedule_prewarm`]）で未送信のタブにもセッションが在るので、そこを見ると
+    /// 「起動しただけで Agent が選べない」になる。切替時は [`Self::select_option`] が
+    /// 先張り済みセッションを畳んで、新しい agent で張り直す。
     fn agent_selector_locked(&self) -> bool {
-        self.threads.get(self.active).is_some_and(|thread| {
-            !thread.entries.is_empty() || thread.command_tx.is_some() || thread.running
-        })
+        self.threads
+            .get(self.active)
+            .is_some_and(|thread| !thread.entries.is_empty() || thread.running)
     }
 
     /// セレクタのドロップダウンに出す選択肢。**エージェントが広告したものだけ**を返す。
@@ -3528,19 +3846,46 @@ PYEOF"#;
         let Some(thread) = self.threads.get(self.active) else {
             return Vec::new();
         };
+        // このスレッドのセッションが開いていれば**そのセッションの広告**が正。まだなら同じ agent の
+        // 在庫（別タブ・先張りで受け取った物）で代替する。どちらも無ければ空＝ピルは押せない。
         match selector {
-            Selector::Mode => thread
-                .available_modes
-                .iter()
-                .map(|(id, name)| SelectorChoice {
-                    value: id.clone(),
-                    label: name.clone(),
-                })
-                .collect(),
-            Selector::Model => config_choices(thread, ConfigCategory::Model),
-            Selector::Effort => config_choices(thread, ConfigCategory::ThoughtLevel),
+            Selector::Mode => {
+                let stock = self.catalog.get(&thread.agent);
+                let modes = if thread.available_modes.is_empty() {
+                    stock
+                        .map(|stock| stock.modes.as_slice())
+                        .unwrap_or_default()
+                } else {
+                    thread.available_modes.as_slice()
+                };
+                modes
+                    .iter()
+                    .map(|(id, name)| SelectorChoice {
+                        value: id.clone(),
+                        label: name.clone(),
+                    })
+                    .collect()
+            }
+            Selector::Model => self.stocked_config_choices(thread, ConfigCategory::Model),
+            Selector::Effort => self.stocked_config_choices(thread, ConfigCategory::ThoughtLevel),
             Selector::Agent => Vec::new(),
         }
+    }
+
+    /// 選択肢を「スレッド自身の広告 → 同じ agent の在庫」の順で引く。
+    fn stocked_config_choices(
+        &self,
+        thread: &Thread,
+        category: ConfigCategory,
+    ) -> Vec<SelectorChoice> {
+        let advertised = config_choices(&thread.configs, category);
+        if !advertised.is_empty() {
+            return advertised;
+        }
+        self.catalog
+            .get(&thread.agent)
+            .map(|stock| config_choices(&stock.configs, category))
+            .unwrap_or_default()
     }
 
     /// 現在の選択を **value_id** で返す（未選択なら空）。比較・保存・送信はこの値だけを使う。
@@ -3585,6 +3930,8 @@ PYEOF"#;
             cx.notify();
             return;
         }
+        // agent を差し替えた場合だけ、畳んだセッションを新しい agent で張り直す（借用が明けてから）。
+        let mut agent_changed: Option<String> = None;
         // sticky の宛先は「今アクティブなスレッドの agent」。選んだ値をその agent にだけ紐づける。
         // 保存するのは **広告された value_id そのまま**（`value` は menu 行の `SelectorChoice::value`）。
         let active_agent_id = self
@@ -3604,6 +3951,16 @@ PYEOF"#;
                     // 切り替え先 agent の sticky（モデル/思考量/モード）で開き直す。無ければ vendor
                     // フォールバック — Claude の sticky を Codex へ持ち込むとメニューが Claude 一色になる。
                     apply_agent_sticky(thread, cx);
+                    // 先張り済みのセッションは**前の agent のプロセス**。送信路を捨てると
+                    // `run_session` が抜けてプロセスも落ちる。広告とセッション id も前の agent の
+                    // 物なので一緒に捨て、下で新しい agent に張り直す。
+                    thread.command_tx = None;
+                    thread.acp_session_id = None;
+                    thread.available_modes.clear();
+                    thread.configs.clear();
+                    thread.session_lost = false;
+                    thread.session_note = None;
+                    agent_changed = Some(thread.id.clone());
                 }
                 Selector::Mode => {
                     // `value` は mode_id。逆引きが要らないので「引けなくて無送信」が起きない。
@@ -3643,6 +4000,11 @@ PYEOF"#;
                     send_set_config(thread, ConfigCategory::ThoughtLevel, &value);
                 }
             }
+        }
+        if let Some(thread_id) = agent_changed {
+            // 前の agent の試行履歴は無効。新しい agent で先に繋いで、ピルの一覧を入れ替える。
+            self.prewarmed.remove(&thread_id);
+            self.schedule_prewarm(cx);
         }
         self.sync_running_registry(cx); // bypass 切替で承認待ちを畳んだ場合の Blocked 表示更新
         self.open_menu = None;
@@ -3988,6 +4350,7 @@ PYEOF"#;
             thread.tier2 = None; // ✳ 要約は前ターンの文＝新ターンでは古い（P4）
             thread.turn_started_at = Some(std::time::Instant::now()); // 経過秒の起点
             thread.last_input_at_ms = Some(now_unix_ms()); // 「最終いつ入力したか」（M14）
+            thread.session_used = true; // 先張りの「畳んでよい」対象から外れる
         }
         self.sync_running_registry(cx); // ⌘O ダッシュボードの「実行中」を即時反映（M12-12）
         cx.notify();
@@ -4105,6 +4468,10 @@ PYEOF"#;
         // スレッドの希望（sticky/前タブのモード・モデル・思考量）を起動時に渡す＝初回 prompt 前に
         // 適用される。UI からの後追い SetMode / SetConfig だと Prompt に先を越され（ターン中は
         // deferred）、初回ターンが既定モード・既定モデルで走る（ピルは Opus なのに応答は Fable、の正体）。
+        // 有効な MCP サーバ（設定 + 他ツールからの発見）。**ACP では渡さない限りエージェントから
+        // 1 つも見えない** — Codex CLI 等に登録しただけでは necoder のスレッドからは使えない。
+        // 設定画面が並べているのと同じ解決結果を渡す（画面と実際が食い違わない）。
+        let mcp_servers = settings::mcp_servers(cx);
         let preferences = self
             .threads
             .get(thread_index)
@@ -4114,6 +4481,7 @@ PYEOF"#;
                 effort: Some(thread.effort.to_string()).filter(|effort| !effort.is_empty()),
                 // 前回のセッション id。エージェントが loadSession を広告していれば会話を引き継ぐ。
                 resume: thread.acp_session_id.clone(),
+                mcp_servers,
             })
             .unwrap_or_default();
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
@@ -4198,6 +4566,10 @@ PYEOF"#;
             thread_index == active && panel_visibly_active && !cx.reduce_motion();
         let mut start_token_ticker = false;
         let mut celebrate_now = false;
+        // 広告（モデル/思考量/モード）は agent 固有なので、受け取ったら在庫へ控えて他タブでも使う。
+        // `thread` の借用が残っている間は self を触れないので、末尾でまとめて反映する。
+        let mut stocked_configs: Option<(SharedString, Vec<ConfigOption>)> = None;
+        let mut stocked_modes: Option<(SharedString, Vec<(SharedString, SharedString)>)> = None;
         let mut ensure_reveal = false; // アクティブが Agent/Thinking をストリーム → タイプライタ稼働
         let mut reveal_reset = false; // 新しいストリームエントリ開始 → 先頭から打つ
         let mut stream_updated = false;
@@ -4300,9 +4672,9 @@ PYEOF"#;
                         if id.as_ref() == info.id.as_str() {
                             if let Some(title) = &info.title {
                                 if !title.is_empty() {
-                                    if let Some(write) = compact_shell_heredoc_write(title) {
-                                        *tool = SharedString::from(heredoc_write_label(&write));
-                                        *args = SharedString::from(write.content);
+                                    if let Some(compact) = compact_shell_heredoc(title) {
+                                        *tool = SharedString::from(compact.label());
+                                        *args = SharedString::from(compact.into_content());
                                     } else {
                                         *tool = SharedString::from(title.clone());
                                     }
@@ -4345,6 +4717,7 @@ PYEOF"#;
                     .into_iter()
                     .map(|(id, name)| (SharedString::from(id), SharedString::from(name)))
                     .collect();
+                stocked_modes = Some((thread.agent.clone(), thread.available_modes.clone()));
                 let advertised_current = SharedString::from(current);
                 // スレッドが望む mode_id（sticky / 前タブ引き継ぎ）を正とし、広告に**その id が在るときだけ**
                 // 合わせに行く。無ければ黙って広告 current を採る。照合は id の完全一致だけ＝
@@ -4383,6 +4756,7 @@ PYEOF"#;
                 // 通常ここは一致して無送信（ここからの SetConfig はターン中 deferred＝初回ターンに
                 // 間に合わない）。ターン途中の `ConfigOptionUpdate` と広告に無い値のフォールバックが担当。
                 thread.configs = configs;
+                stocked_configs = Some((thread.agent.clone(), thread.configs.clone()));
                 for category in [ConfigCategory::Model, ConfigCategory::ThoughtLevel] {
                     let desired = match category {
                         ConfigCategory::Model => thread.model.clone(),
@@ -4576,6 +4950,12 @@ PYEOF"#;
                 // アクティブスレッドの**正常完了**でマスコットがバンザイ（数秒だけ）。中断/失敗では祝わない。
                 celebrate_now = thread_index == active && reason == TurnEnd::Completed;
             }
+            // 失敗ではない知らせ（MCP サーバを渡せなかった等）。1 行出すだけで、走行状態は触らない。
+            AgentEvent::Notice(message) => {
+                thread
+                    .entries
+                    .push(Entry::Agent(SharedString::from(message)));
+            }
             AgentEvent::Failed(error) => {
                 // 遷移スナップショット（P1 素材③）: Failed = エラー文字列（1 行に畳む）。
                 thread.digest = digest_tail(&error).or(thread.digest.take());
@@ -4620,12 +5000,8 @@ PYEOF"#;
                 .threads
                 .get(thread_index)
                 .is_some_and(|thread| thread.muted);
-            if turn_succeeded
-                && !self.window_active
-                && !thread_muted
-                && settings::get(cx).completion_sound
-            {
-                play_completion_sound();
+            if turn_succeeded && !self.window_active && !thread_muted {
+                sound::play(sound::Cue::Done, &settings::get(cx).sound_done);
             }
             self.sync_running_registry(cx); // 実行中 → 完了をダッシュボードへ（M12-12）
             self.persist_thread(thread_index); // turn 確定分を DB へ（M12-1）
@@ -4654,6 +5030,7 @@ PYEOF"#;
         }
         if permission_waiting {
             self.sync_running_registry(cx); // Blocked をレール/フッター/⌘O のロールアップへ即時反映
+            self.ring_waiting(thread_index, cx);
             if let Some(thread) = self.threads.get(thread_index) {
                 cx.emit(PanelEvent::PermissionWaiting {
                     thread: thread.name.clone(),
@@ -4670,6 +5047,7 @@ PYEOF"#;
         }
         if elicitation_waiting {
             self.sync_running_registry(cx); // Blocked（回答待ち）をレール/フッター/⌘O へ即時反映
+            self.ring_waiting(thread_index, cx);
         }
         if start_token_ticker {
             self.ensure_token_ticker(cx);
@@ -4692,6 +5070,12 @@ PYEOF"#;
         // 裏スレッドのキューは、そのタブへ切り替えた時に `switch_thread` が流す。
         if turn_finished && thread_index == active {
             self.flush_queued_prompt(cx);
+        }
+        if let Some((agent, configs)) = stocked_configs {
+            self.catalog.entry(agent).or_default().configs = configs;
+        }
+        if let Some((agent, modes)) = stocked_modes {
+            self.catalog.entry(agent).or_default().modes = modes;
         }
         cx.notify();
     }
@@ -5585,7 +5969,13 @@ PYEOF"#;
 
     /// 直近のユーザー発話（＝いまの問い）を transcript 上部に固定表示する帯。長い回答を
     /// スクロールしても「何を頼んだか」を見失わないための常設リマインダで、tail-follow で
-    /// 空きがちな上部の余白も埋める。クリックで最新（回答の末尾）へスクロールする。
+    /// 空きがちな上部の余白も埋める。本文クリックで最新（回答の末尾）へスクロール、
+    /// ▸ で全文の展開/折り畳み。
+    ///
+    /// **既定は必ず 1 行**。`truncate()` は横あふれしか畳まないので、改行を含む問いはそのまま
+    /// 行数ぶん帯が伸び、下の回答を画面外へ押し出していた（2026-09-11 報告）。畳みは
+    /// [`flatten_digest_line`]（先頭行 + …）で行い、展開しても [`PINNED_PROMPT_MAX_HEIGHT`] で
+    /// 頭打ちにする＝帯が回答を潰さないことを構造で保証する。
     fn render_pinned_prompt(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let entries = &self.threads.get(self.active)?.entries;
         let last_user = entries
@@ -5603,12 +5993,17 @@ PYEOF"#;
         };
         let theme = self.theme.clone();
         let color = self.active_color();
+        // 展開状態は transcript の User エントリと共有する（同じ 1 発話なので別々に持たない）。
+        let requested = self.is_input_expanded(last_user);
+        let (body, foldable) = pinned_prompt_body(&prompt, requested);
+        let expanded = foldable && requested;
         Some(
             div()
                 .id("pinned-prompt")
                 .flex_none()
                 .flex()
                 .items_center()
+                .when(expanded, |element| element.items_start())
                 .gap(px(8.))
                 .px(px(12.))
                 .py(px(6.))
@@ -5626,14 +6021,46 @@ PYEOF"#;
                         .rounded(px(1.))
                         .bg(color.alpha(0.7)),
                 )
+                .children(foldable.then(|| {
+                    div()
+                        .id("pinned-prompt-fold")
+                        .flex_none()
+                        .text_size(px(9.))
+                        .text_color(theme.fg2)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.fg0))
+                        .child(if expanded { "▾" } else { "▸" })
+                        .tooltip(Tooltip::text(
+                            if expanded {
+                                i18n::t!("agent.input_collapse_tip")
+                            } else {
+                                i18n::t!("agent.input_expand_tip")
+                            },
+                            theme.clone(),
+                        ))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _window, cx| {
+                                cx.stop_propagation(); // 帯本体の「最新へ」を巻き込まない
+                                this.toggle_input(last_user, cx);
+                            }),
+                        )
+                }))
                 .child(
                     div()
+                        .id("pinned-prompt-body")
                         .flex_1()
                         .min_w_0()
-                        .truncate() // 1 行に省略（全文は transcript 側にある）
+                        .when(!expanded, |element| element.truncate()) // 1 行に省略
+                        .when(expanded, |element| {
+                            // 展開しても帯は伸ばし切らない。あふれはこの中でスクロールさせる。
+                            element
+                                .max_h(px(PINNED_PROMPT_MAX_HEIGHT))
+                                .overflow_y_scroll()
+                        })
                         .text_size(px(11.5))
                         .text_color(theme.fg1)
-                        .child(prompt),
+                        .child(body),
                 )
                 .tooltip(Tooltip::text(
                     i18n::t!("agent.jump_to_latest"),
@@ -5688,7 +6115,12 @@ PYEOF"#;
         // マスコットの状態: 承認待ち→祈る（15s 以上待たされたら頬に手であわあわへ段階変化）/ 考え中→考える /
         // 生成中→打鍵 / 直近成功→バンザイ / それ以外→低頻度の居眠り。
         let motion = self.current_mascot_motion();
+        // 埋め込み（Fleet の作業ペイン）では列が 3 本並ぶので、この行が中身の高さを食わないよう
+        // 詰める。ただし**猫は縮めすぎない** — necoder の顔で、状態（考える/打鍵/祈る）を
+        // 形と動きで伝える担当でもある。46px は「3 列でも表情が読める」下限として選んだ。
+        let mascot_height = if self.embedded { 46. } else { 64. };
         self.mascot.update(cx, |mascot, cx| {
+            mascot.set_height(mascot_height, cx);
             mascot.set_state(motion, active, cx);
         });
         // 左のステータス行（スカスカ対策＋「何が起きてるか」）: 状態テキスト＋実行中は経過秒。
@@ -5736,7 +6168,7 @@ PYEOF"#;
             .items_center()
             .gap(px(8.))
             .px(px(12.))
-            .py(px(7.))
+            .py(px(if self.embedded { 4. } else { 7. }))
             .flex_none()
             .bg(theme.bg1)
             .border_b_1()
@@ -5750,8 +6182,8 @@ PYEOF"#;
             .child(
                 self.mascot.clone().cached(
                     StyleRefinement::default()
-                        .w(px(64.0 * 60.0 / 72.0))
-                        .h(px(64.)),
+                        .w(px(mascot_height * 60.0 / 72.0))
+                        .h(px(mascot_height)),
                 ),
             )
             // トークンは常時可視（Zed+ACP で見えなかった痛点）
@@ -7205,9 +7637,11 @@ PYEOF"#;
 
     /// 承認待ちの権限リクエストのカード（composer の直上）。ツール名・編集差分・許可/拒否ボタン。
     /// ターンをブロックしているので、transcript がスクロールしても常に見える位置に置く。
-    /// Elicitation（選択肢付き質問・単一選択のみ）を composer 上部にカードで出す。質問文 + 各
-    /// フィールドの選択肢ボタン + フッタ（複数フィールドなら「これで回答」・常に「答えない」）。
-    /// 単一フィールドは選んだ瞬間に確定送信する。空なら None。
+    /// Elicitation（選択肢付き質問）を composer 上部にカードで出す。質問文 + 各フィールドの
+    /// 選択肢ボタン + フッタ（「これで回答」・常に「答えない」）。
+    /// 単一選択フィールドが 1 つだけの質問は押した瞬間に確定送信するので「これで回答」を出さない。
+    /// 複数選択（トグル）を含む質問は、選び終わりがこちらから判らないので必ず確定ボタンを出す。
+    /// 空なら None。
     fn render_elicitation_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
         let pending = thread.pending_elicitation.as_ref()?;
@@ -7216,10 +7650,14 @@ PYEOF"#;
         let message = pending.message.clone();
         let fields = pending.fields.clone();
         let selections = pending.selections.clone();
-        let multi = fields.len() > 1;
-        let all_selected = fields
-            .iter()
-            .all(|field| selections.contains_key(&field.name));
+        // ラベルと確定ボタンが要るのは「フィールドが複数」か「トグルで選ぶフィールドが在る」時。
+        let needs_submit = fields.len() > 1 || fields.iter().any(|field| field.multi);
+        let labelled = needs_submit;
+        let all_selected = fields.iter().all(|field| {
+            selections
+                .get(&field.name)
+                .is_some_and(|values| !values.is_empty())
+        });
 
         let mut card = div()
             .id("elicitation-card")
@@ -7245,7 +7683,7 @@ PYEOF"#;
         let mut option_id = 0usize;
         for field in &fields {
             let mut group = div().flex().flex_col().gap(px(4.));
-            if multi {
+            if labelled {
                 group = group.child(
                     div()
                         .text_size(px(10.5))
@@ -7255,7 +7693,9 @@ PYEOF"#;
             }
             let mut options_row = div().flex().flex_wrap().gap(px(6.));
             for option in &field.options {
-                let selected = selections.get(&field.name) == Some(&option.value);
+                let selected = selections
+                    .get(&field.name)
+                    .is_some_and(|values| values.contains(&option.value));
                 let field_name = field.name.clone();
                 let value = option.value.clone();
                 option_id += 1;
@@ -7291,7 +7731,7 @@ PYEOF"#;
         }
 
         let mut footer = div().flex().items_center().gap(px(8.));
-        if multi {
+        if needs_submit {
             footer = footer.child(
                 div()
                     .id("elicitation-submit")
@@ -7992,8 +8432,16 @@ PYEOF"#;
                             .h(px({
                                 let content_height =
                                     f32::from(self.composer.read(cx).content_height());
+                                // 埋め込み（Fleet の作業ペイン）は上下分割で背が低くなりうる。
+                                // 空の入力欄が 86px を占めると composer ごと下へはみ出して
+                                // 切れるので、基準高を最小まで下げる（打てば auto-grow で伸びる）。
+                                let base = if self.embedded {
+                                    self.composer_height.min(COMPOSER_INPUT_MIN)
+                                } else {
+                                    self.composer_height
+                                };
                                 (content_height + COMPOSER_INPUT_GROW_SLACK)
-                                    .clamp(self.composer_height, COMPOSER_INPUT_MAX)
+                                    .clamp(base, COMPOSER_INPUT_MAX)
                             }))
                             .overflow_hidden()
                             .child(self.composer.clone()),
@@ -8190,9 +8638,12 @@ impl Render for AgentPanel {
             .on_mouse_move(cx.listener(Self::on_transcript_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_composer_resize_end))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_composer_resize_end))
-            .child(match self.tabs_view {
-                AgentTabsView::Bar => self.render_thread_tabs(cx).into_any_element(),
-                AgentTabsView::List => self.render_thread_list(cx),
+            // 埋め込み時（Fleet の作業ペイン）はペイン側のタブ行がスレッドを持つので描かない。
+            .when(!self.embedded, |panel| {
+                panel.child(match self.tabs_view {
+                    AgentTabsView::Bar => self.render_thread_tabs(cx).into_any_element(),
+                    AgentTabsView::List => self.render_thread_list(cx),
+                })
             })
             .child(self.render_meta(active, cx))
             // いまの問い（直近のユーザー発話）を上部に固定（長い回答でも見失わない・上部余白も埋める）。
@@ -8492,6 +8943,15 @@ impl MascotView {
         }
     }
 
+    /// 描画高さ（atlas frame の拡大率）。親の器だけ縮めても絵は切り取られるので、こちらを合わせる。
+    fn set_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        if (self.height - height).abs() < 0.5 {
+            return;
+        }
+        self.height = height;
+        cx.notify();
+    }
+
     fn set_state(&mut self, motion: MascotMotion, active: bool, cx: &mut Context<Self>) {
         let active = active && !cx.reduce_motion();
         let needs_restart = active && !self.ticker;
@@ -8587,26 +9047,6 @@ fn initial_tabs_view(setting: &str) -> AgentTabsView {
         _ if setting == "list" => AgentTabsView::List,
         _ => AgentTabsView::Bar,
     }
-}
-
-/// ターン完了の通知音（macOS の system sound を `afplay` で鳴らす・設定 `completion_sound`）。
-/// 既存の shell-out（open/osascript/trash と同じ）で**依存ゼロ**。独自チャイム同梱は後続。
-/// **短命スレッドで `status()` まで待って子を刈る**（zombie を残さない）ので UI スレッドは即戻る。
-/// イベント駆動（完了時のみ）＝idle 予算に影響しない。
-fn play_completion_sound() {
-    #[cfg(target_os = "macos")]
-    std::thread::spawn(|| {
-        use std::process::{Command, Stdio};
-        let result = Command::new("/usr/bin/afplay")
-            .arg("/System/Library/Sounds/Glass.aiff")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if let Err(error) = result {
-            eprintln!("完了音の再生に失敗: {error}");
-        }
-    });
 }
 
 /// 折り畳んだ Thinking の 1 行プレビュー（先頭行を ~64 文字で切る。続きがあれば … を付す）。
@@ -8775,9 +9215,8 @@ fn label_for(choices: &[SelectorChoice], value: &SharedString) -> SharedString {
     }
 }
 
-fn config_choices(thread: &Thread, category: ConfigCategory) -> Vec<SelectorChoice> {
-    thread
-        .configs
+fn config_choices(configs: &[ConfigOption], category: ConfigCategory) -> Vec<SelectorChoice> {
+    configs
         .iter()
         .find(|config| config.category == category)
         .map(|config| {
@@ -9183,6 +9622,7 @@ fn seed_threads() -> Vec<Thread> {
         session_lost: false,
         session_note: None,
         session_serial: 0,
+        session_used: false,
         auth_required: false,
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
@@ -9403,6 +9843,25 @@ mod tests {
         assert!(!digest_tail("一行目\nまだ続く").unwrap().contains('\n'));
     }
 
+    /// 上部に固定する「いまの問い」は既定で必ず 1 行。改行を含む長い入力で帯が伸びて
+    /// 回答を画面外へ押し出していた（2026-09-11 報告）ので、畳んだ側の高さを保証する。
+    #[test]
+    fn pinned_prompt_folds_to_one_line_and_expands_on_request() {
+        let prompt = "ACP の固定帯を直したい\n\n- 長いと縮める\n- クリックで展開";
+        let (folded, foldable) = pinned_prompt_body(prompt, false);
+        assert!(foldable, "畳めるので ▸ を出す");
+        assert!(!folded.contains('\n'), "畳んだ側は必ず 1 行");
+        assert_eq!(folded.as_ref(), "ACP の固定帯を直したい …");
+
+        let (full, _) = pinned_prompt_body(prompt, true);
+        assert_eq!(full.as_ref(), prompt, "展開したら全文");
+
+        // 短い 1 行の問いは畳んでも変わらない＝操作を生やさない。
+        let (body, foldable) = pinned_prompt_body("直して", false);
+        assert!(!foldable);
+        assert_eq!(body.as_ref(), "直して");
+    }
+
     #[test]
     fn flatten_digest_line_folds_multiline_tool_titles() {
         // 複数行のシェルコマンドは先頭行 + … に畳む（稼働中ラインが縦に伸びない保証）。
@@ -9426,8 +9885,8 @@ mod tests {
 import torch
 PYEOF"#;
         assert_eq!(
-            compact_shell_heredoc_write(title),
-            Some(CompactHeredocWrite {
+            compact_shell_heredoc(title),
+            Some(CompactHeredoc::Write {
                 path: "src/tinyvc/data/acoustic_dataset.py".to_string(),
                 append: false,
                 content: "\"\"\"Stage B dataset.\"\"\"\n\nimport torch".to_string(),
@@ -9439,18 +9898,49 @@ PYEOF"#;
     fn wrapped_claude_heredoc_is_compacted_but_other_commands_are_not() {
         let title = "Bash(cat >> 'notes.txt' <<EOF\nnext\nEOF)";
         assert_eq!(
-            compact_shell_heredoc_write(title),
-            Some(CompactHeredocWrite {
+            compact_shell_heredoc(title),
+            Some(CompactHeredoc::Write {
                 path: "notes.txt".to_string(),
                 append: true,
                 content: "next".to_string(),
             })
         );
+        assert_eq!(compact_shell_heredoc("cat README.md"), None);
+        // 終端の無い `<<` は heredoc ではない（`grep "a<<b"` のような誤検出を畳まない）。
+        assert_eq!(compact_shell_heredoc("python3 - <<'PY'\nprint(1)"), None);
+    }
+
+    /// 標準入力へ script を流し込む実行（`python3 - <<'PY'`）は、**見出しにコマンドだけ**を残して
+    /// 本文を展開領域へ回す。畳まないと script 全文が transcript を占領する（2026-09-11 報告）。
+    #[test]
+    fn stdin_script_heredoc_keeps_the_command_and_folds_the_body() {
         assert_eq!(
-            compact_shell_heredoc_write("python - <<'PY'\nprint(1)\nPY"),
-            None
+            compact_shell_heredoc("python3 - <<'PY'\nimport pathlib\nprint(1)\nPY"),
+            Some(CompactHeredoc::Script {
+                command: "python3 -".to_string(),
+                content: "import pathlib\nprint(1)".to_string(),
+            })
         );
-        assert_eq!(compact_shell_heredoc_write("cat README.md"), None);
+    }
+
+    /// heredoc の後ろに続くコマンドは見出しに残す（畳んで消さない）。`cat >` もこの場合は
+    /// 「書き込み」見出しにすると後続を取りこぼすので、コマンドを見せる側へ倒す。
+    #[test]
+    fn commands_after_the_heredoc_stay_visible_in_the_label() {
+        assert_eq!(
+            compact_shell_heredoc("python3 - <<'PY'\nprint(1)\nPY\ncargo test -p agent_panel"),
+            Some(CompactHeredoc::Script {
+                command: "python3 -\ncargo test -p agent_panel".to_string(),
+                content: "print(1)".to_string(),
+            })
+        );
+        assert_eq!(
+            compact_shell_heredoc("cat > a.txt <<EOF\nx\nEOF\nls"),
+            Some(CompactHeredoc::Script {
+                command: "cat > a.txt\nls".to_string(),
+                content: "x".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -9918,6 +10408,63 @@ PYEOF"#;
         let _ = std::fs::remove_file(settings_path);
     }
 
+    /// 入力待ちの音は「気づけないとき」だけ鳴らす。見ているスレッドで鳴らすと、
+    /// 承認カードが目の前に出ているのに音まで浴びることになる（P2 の「見ている画面に音は要らない」）。
+    #[gpui::test]
+    fn the_waiting_sound_only_rings_for_a_thread_you_cannot_see(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "waiting-sound");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let (respond, _rx) = mpsc::unbounded();
+            let active = panel.active;
+            panel.threads[active].pending_permission = Some(PendingPermission {
+                remote_id: "waiting-sound".into(),
+                title: "Bash".into(),
+                diffs: vec![],
+                raw_input: None,
+                options: vec![],
+                respond,
+                since: std::time::Instant::now(),
+            });
+            // 「見えている」= 窓がアクティブ + 直前に描画された + そのスレッドが選ばれている。
+            panel.window_active = true;
+            panel.last_rendered_at = Some(std::time::Instant::now());
+            assert!(
+                !panel.wants_waiting_sound(active),
+                "目の前で止まったスレッドでは鳴らさない"
+            );
+
+            panel.window_active = false;
+            assert!(
+                panel.wants_waiting_sound(active),
+                "他アプリにいる間に止まったら鳴らす"
+            );
+
+            // 同じ窓でも別スレッドを見ているなら気づけない（完了音より広い条件はここが理由）。
+            panel.window_active = true;
+            panel.new_thread(cx);
+            assert_ne!(panel.active, active, "新しいタブへ移っている");
+            assert!(
+                panel.wants_waiting_sound(active),
+                "裏のタブで止まったら鳴らす"
+            );
+
+            panel.threads[active].muted = true;
+            assert!(
+                !panel.wants_waiting_sound(active),
+                "ミュート中のスレッドは鳴らさない"
+            );
+            panel.threads[active].muted = false;
+
+            panel.threads[active].pending_permission = None;
+            assert!(
+                !panel.wants_waiting_sound(active),
+                "止まっていない（auto-allow で素通りした）なら鳴らさない"
+            );
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
     #[gpui::test]
     fn remote_permissions_reject_stale_and_persistent_approvals(cx: &mut gpui::TestAppContext) {
         let path = init_test_settings(cx, "remote-permissions");
@@ -9992,6 +10539,105 @@ PYEOF"#;
         });
         assert_eq!(rx.try_recv().ok(), Some(2));
         let _ = std::fs::remove_file(path);
+    }
+
+    fn elicitation_choice(value: &str) -> acp_client::ElicitationChoice {
+        acp_client::ElicitationChoice {
+            value: value.to_string(),
+            title: value.to_string(),
+            description: None,
+        }
+    }
+
+    /// 複数選択の質問は **押すたびにトグル**し、確定は「これで回答」でだけ起きること。
+    /// 単一選択と同じ「押した瞬間に送る」だと 1 つ目を選んだ時点で答えが確定してしまう。
+    #[gpui::test]
+    fn multi_select_question_toggles_and_waits_for_submit(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "elicit_multi");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
+        panel.update(cx, |panel, cx| {
+            let index = panel.active;
+            panel.threads[index].pending_elicitation = Some(PendingElicitation {
+                remote_id: "q1".into(),
+                message: "入れる機能は？".into(),
+                fields: vec![ElicitationField {
+                    name: "question_0".into(),
+                    label: "機能".into(),
+                    options: vec![
+                        elicitation_choice("検索"),
+                        elicitation_choice("Git"),
+                        elicitation_choice("LSP"),
+                    ],
+                    multi: true,
+                }],
+                selections: Default::default(),
+                respond,
+            });
+            assert!(
+                panel.render_elicitation_card(cx).is_some(),
+                "複数選択の質問もカードで出る（以前は acp_client が弾いて出なかった）"
+            );
+
+            panel.choose_elicitation_option("question_0".into(), "検索".into(), cx);
+            assert!(
+                panel.threads[index].pending_elicitation.is_some(),
+                "1 つ押しただけでは確定しない"
+            );
+            panel.choose_elicitation_option("question_0".into(), "LSP".into(), cx);
+            panel.choose_elicitation_option("question_0".into(), "検索".into(), cx); // 押し直し = 外す
+            assert_eq!(
+                panel.threads[index]
+                    .pending_elicitation
+                    .as_ref()
+                    .and_then(|pending| pending.selections.get("question_0")),
+                Some(&vec!["LSP".to_string()]),
+                "押し直しで外れ、残りだけが選択に残る"
+            );
+
+            panel.submit_elicitation(cx);
+            assert!(
+                panel.threads[index].pending_elicitation.is_none(),
+                "「これで回答」でカードが畳まれる"
+            );
+        });
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![("question_0".to_string(), vec!["LSP".to_string()])]),
+            "選んだ値の並びがそのまま応答へ渡る"
+        );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 単一選択が 1 つだけの質問（4 択）は従来どおり押した瞬間に確定すること（回帰よけ）。
+    #[gpui::test]
+    fn single_select_question_still_submits_on_click(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "elicit_single");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
+        panel.update(cx, |panel, cx| {
+            let index = panel.active;
+            panel.threads[index].pending_elicitation = Some(PendingElicitation {
+                remote_id: "q2".into(),
+                message: "どちらにする？".into(),
+                fields: vec![ElicitationField {
+                    name: "question_0".into(),
+                    label: "方針".into(),
+                    options: vec![elicitation_choice("A"), elicitation_choice("B")],
+                    multi: false,
+                }],
+                selections: Default::default(),
+                respond,
+            });
+            panel.choose_elicitation_option("question_0".into(), "B".into(), cx);
+            assert!(panel.threads[index].pending_elicitation.is_none());
+        });
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![("question_0".to_string(), vec!["B".to_string()])]),
+            "単一選択も要素 1 つの並びで返す"
+        );
+        let _ = std::fs::remove_file(settings_path);
     }
 
     fn init_test_settings(cx: &mut gpui::TestAppContext, label: &str) -> PathBuf {
@@ -10128,6 +10774,218 @@ PYEOF"#;
                 cx,
             );
             assert_eq!(panel.threads[active].model.as_ref(), "opus");
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 起動直後（＝セッション未起動で広告がまだ無い）でも、前回使っていたモデル名がピルに出る。
+    ///
+    /// 0.1.14 の実害の回帰テスト: 復元を sticky だけで決めるようにした結果、ピルで一度も
+    /// モデルを選んでいないユーザーは**最初の送信まで「—」**になっていた（送ればセッションが
+    /// 立って広告が届き、そこで初めて名前が出る）。sticky が空のときだけ DB の記録へ落ちる。
+    #[gpui::test]
+    fn restored_thread_shows_last_used_model_before_advertisement(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "restore-model");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_restore_model_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        storage
+            .upsert_thread(
+                "restored-1",
+                "設計メモ",
+                0,
+                "",
+                None,
+                Some("Claude Code"),
+                Some("opus[1m]"),
+                0,
+                0,
+            )
+            .expect("スレッド行を書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage(storage, cx);
+            let thread = &panel.threads[panel.active];
+            assert_eq!(thread.agent.as_ref(), "Claude Code");
+            assert_eq!(
+                thread.model.as_ref(),
+                "opus[1m]",
+                "sticky が無ければ DB の記録を採る（広告前でも空にしない）"
+            );
+            // 広告がまだ無いので表示名には引けない＝value_id をそのまま出す（捏造しない）。
+            assert_eq!(panel.selector_label(Selector::Model).as_ref(), "opus[1m]");
+            // 新規タブも同じ agent なら直前タブの値で開く（開くたびに「—」へ戻らない）。
+            panel.add_thread(cx);
+            assert_eq!(panel.threads[panel.active].model.as_ref(), "opus[1m]");
+        });
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// 先張り（Zed の「先に繋いでから描く」）の対象判定。狙うのは**人が見ている 1 枚**だけで、
+    /// 宛先未定・設定 off・もう繋がっている・この宛先で試行済み・Fleet の Task セルでは狙わない
+    /// （画面に並べただけでエージェントのプロセスが N 本立つのを避ける）。
+    #[gpui::test]
+    fn prewarm_targets_only_the_visible_thread(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "prewarm-target");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            // 宛先（cwd）が決まるまでは起動しようがない。
+            assert_eq!(panel.prewarm_target(cx), None);
+            panel.set_destination(
+                "necoder".into(),
+                None,
+                LocalHost::shared(),
+                Some(std::env::temp_dir()),
+                cx,
+            );
+            let active_id = panel.threads[panel.active].id.clone();
+            assert_eq!(
+                panel.prewarm_target(cx).as_deref(),
+                Some(active_id.as_str())
+            );
+
+            // もう繋がっているタブは狙わない。
+            let (command_tx, _command_rx) = futures::channel::mpsc::unbounded();
+            panel.threads[panel.active].command_tx = Some(command_tx);
+            assert_eq!(panel.prewarm_target(cx), None);
+            panel.threads[panel.active].command_tx = None;
+
+            // 一度試したら連打しない（落ちた後の立て直しは composer 直上の「再開」が担当）。
+            panel.prewarmed.insert(active_id.clone());
+            assert_eq!(panel.prewarm_target(cx), None);
+            panel.prewarmed.remove(&active_id);
+
+            // Fleet の Task セル。
+            panel.prewarm_allowed = false;
+            assert_eq!(panel.prewarm_target(cx), None);
+            panel.prewarm_allowed = true;
+
+            // 設定で off にできる（idle メモリを優先したい人向け。既定は on）。
+            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(false));
+            assert_eq!(panel.prewarm_target(cx), None);
+            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(true));
+            assert_eq!(
+                panel.prewarm_target(cx).as_deref(),
+                Some(active_id.as_str())
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 先張りしたまま **1 度も使っていない** セッションは 2 本までしか抱えない（見ただけのタブの
+    /// 分までエージェントを常駐させない。未送信のセッションでも実測 ~16MB ある）。使ったもの・
+    /// 実行中・承認待ちは畳まない。畳んだ跡は `session_serial = 0` で、切断バナーを出さない。
+    #[gpui::test]
+    fn idle_prewarmed_sessions_are_capped(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "prewarm-cap");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            while panel.threads.len() < 4 {
+                panel.add_thread(cx);
+            }
+            let mut keep_alive = Vec::new();
+            for index in 0..4 {
+                let id = panel.threads[index].id.clone();
+                let (command_tx, command_rx) = futures::channel::mpsc::unbounded();
+                keep_alive.push(command_rx);
+                let thread = &mut panel.threads[index];
+                thread.command_tx = Some(command_tx);
+                thread.session_serial = index as u64 + 1;
+                thread.session_used = index == 0; // 1 本目だけ送信済み
+                panel.prewarm_order.push(id);
+            }
+            panel.retire_idle_prewarms();
+
+            assert!(
+                panel.threads[0].command_tx.is_some(),
+                "使ったセッションは畳まない（会話の文脈が乗っている）"
+            );
+            assert!(
+                panel.threads[1].command_tx.is_none(),
+                "未使用で最も古い 1 本を畳む"
+            );
+            assert!(panel.threads[2].command_tx.is_some());
+            assert!(panel.threads[3].command_tx.is_some());
+            assert_eq!(
+                panel.threads[1].session_serial, 0,
+                "意図して畳んだ印。ポンプ終了の後始末が切断バナーを出さない"
+            );
+            assert!(!panel.threads[1].session_lost);
+            assert!(
+                !panel.prewarmed.contains(&panel.threads[1].id),
+                "戻ってきたらまた張れる"
+            );
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 広告は **agent 固有でスレッド非依存**なので在庫として使い回す: セッションがまだ無いタブでも
+    /// モデルが表示名で出て**押して選べる**。逆に、先張りでセッションが立っただけでは Agent ピルを
+    /// 固定しない（固定するのは会話が始まってから）。agent を替えたら前のプロセスは畳む。
+    #[gpui::test]
+    fn advertisement_stock_feeds_tabs_without_a_session(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "advertisement-stock");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.on_event(
+                active,
+                AgentEvent::Configs(vec![config(
+                    ConfigCategory::Model,
+                    "opus[1m]",
+                    &[("opus", "Opus"), ("opus[1m]", "Opus (1M context)")],
+                )]),
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::Modes {
+                    modes: vec![("default".to_string(), "Always Ask".to_string())],
+                    current: "default".to_string(),
+                },
+                cx,
+            );
+
+            // 新しいタブはセッションを持たない。それでも同じ agent の在庫から選択肢が出る。
+            panel.add_thread(cx);
+            let fresh = panel.active;
+            assert!(
+                panel.threads[fresh].configs.is_empty(),
+                "このタブ自身はまだ広告を受け取っていない"
+            );
+            assert_eq!(panel.selector_choices(Selector::Model).len(), 2);
+            assert_eq!(panel.selector_choices(Selector::Mode).len(), 1);
+            assert_eq!(
+                panel.selector_label(Selector::Model).as_ref(),
+                "Opus (1M context)",
+                "在庫から表示名まで引ける"
+            );
+
+            // 先張りでセッションが立っただけ＝まだ会話していない → Agent は選べる。
+            let (command_tx, _command_rx) = futures::channel::mpsc::unbounded();
+            panel.threads[fresh].command_tx = Some(command_tx);
+            assert!(!panel.agent_selector_locked());
+
+            // agent を替えたら前の agent のプロセスと広告は畳む（送信路 drop でプロセスも落ちる）。
+            panel.select_option(Selector::Agent, "Codex".into(), cx);
+            let thread = &panel.threads[panel.active];
+            assert_eq!(thread.agent.as_ref(), "Codex");
+            assert!(thread.command_tx.is_none(), "前の agent のセッションは畳む");
+            assert!(thread.acp_session_id.is_none());
+            assert!(
+                panel.selector_choices(Selector::Model).is_empty(),
+                "Codex の広告はまだ無い＝捏造しない"
+            );
+
+            // 会話が始まったら Agent は固定（同じ transcript に別 AI の文脈を混ぜない）。
+            panel.threads[panel.active]
+                .entries
+                .push(Entry::User("こんにちは".into()));
+            assert!(panel.agent_selector_locked());
         });
         let _ = std::fs::remove_file(path);
     }

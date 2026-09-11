@@ -4,8 +4,17 @@
 //! macOS の WKWebView / Windows の WebView2 を遅延生成する。Chromium 本体は同梱しない。
 //!
 //! ネイティブ子ビューはキーボードフォーカス（macOS の first responder / Windows のフォーカス HWND）を
-//! OS レベルで奪うため、隠す・破棄する前に必ず `focus_parent()` で GPUI のウィンドウへ返す。
-//! 返し忘れると、隠れた WebView がキー入力を吸い続けて GPUI のキーマップに届かなくなる。
+//! **OS レベルで**奪う。GPUI 側にこれを取り返す仕組みは無い（`makeFirstResponder` を呼ぶのは窓を
+//! 作る瞬間の 1 回だけ）ので、返すのは necoder の責任＝`set_key_focus(false)` を呼ぶ経路を持つ側が
+//! 常に正しく呼ばないと、キーの宛先は WebView に残り続ける。返し忘れた時の見え方:
+//!
+//! - IME（日本語）は first responder の入力コンテキストに属するので、変換が丸ごと WebView 側へ行く
+//!   ＝ GPUI の composer にはキャレットが見えているのに 1 文字も入らない
+//! - 一方 IME が食わない生のキーは responder chain を上って GPUI に届く＝**ショートカットだけ効く**
+//!
+//! 返す合図は 3 つ: ①隠す / 破棄する（`set_active(false)`・`evict_if_hidden`）②GPUI 側でマウスダウンが
+//! 起きた（＝クリックが WebView の外に落ちた）③GPUI のフォーカスが別の面へ動いた。②③は
+//! `Workspace::release_native_key_focus` が呼ぶ。
 
 use gpui::{canvas, div, prelude::*, px, App, Bounds, Context, IntoElement, Pixels, Task, Window};
 use std::path::{Path, PathBuf};
@@ -23,6 +32,21 @@ pub const fn is_supported() -> bool {
     cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
+/// ネイティブ子ビューの生成を止める針（既定 OFF）。
+///
+/// gpui の TestWindow は raw window handle を持たず、`build_as_child` が panic する
+/// （`Test Windows are not backed by a real platform window`）。フォーカス受け渡しの配線を
+/// gpui テストから通すために、生成だけを黙らせる。`TerminalDock::ensure_active_test` と同じ流儀。
+static NATIVE_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn disable_native_webviews_for_tests() {
+    NATIVE_DISABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn native_disabled() -> bool {
+    NATIVE_DISABLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// ローカル HTML ファイルを OS 標準 WebView で表示する GPUI view。
 pub struct WebViewView {
     path: PathBuf,
@@ -30,6 +54,10 @@ pub struct WebViewView {
     theme: Theme,
     active: bool,
     focus_when_ready: bool,
+    /// 最後に OS へ要求したキーボードフォーカスの持ち主（true = この WebView）。
+    /// **判断の記録であって OS の真実ではない**。ページ内クリックで first responder は
+    /// AppKit が黙って移すので、この値を見て OS への言い直しを省いてはいけない。
+    key_focus: bool,
     error: Option<String>,
     /// 非表示のまま放置された WebView を自動破棄するまでの時間（`None` = 破棄しない・設定
     /// `html_preview_evict_minutes` 由来）。表示中は数十〜数百 MB を別プロセスで握るため、
@@ -56,6 +84,7 @@ impl WebViewView {
             theme,
             active: false,
             focus_when_ready: false,
+            key_focus: false,
             error,
             evict_after: default_evict_after(),
             _evict_task: None,
@@ -87,34 +116,28 @@ impl WebViewView {
     pub fn set_active(&mut self, active: bool, focus: bool, cx: &mut Context<Self>) {
         if self.active == active {
             if active && focus {
-                self.focus();
+                self.set_key_focus(true);
             }
             return;
         }
         self.active = active;
-        self.focus_when_ready = active && focus;
         // 表示に戻ったら破棄タイマーを解除、非表示になったら仕掛ける（タブ切替の速い行き来で
         // 破棄→即再生成の白フレームを出さないため、キャンセルは必ず先）。
         self._evict_task = None;
         if !active {
             self.schedule_evict(cx);
+            // 隠す前にフォーカスを GPUI 側へ返す（隠れた WebView が first responder のまま
+            // キー入力を吸うのを防ぐ）。
+            self.set_key_focus(false);
         }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(webview) = &self.webview {
-            if !active {
-                // 隠す前にフォーカスを GPUI 側へ返す（隠れた WebView が first responder のまま
-                // キー入力を吸うのを防ぐ）。失敗してもプレビュー自体は壊さない。
-                Self::return_focus_to_parent(webview);
-            }
             if let Err(error) = webview.set_visible(active) {
                 self.error = Some(error.to_string());
             }
-            if active && focus {
-                if let Err(error) = webview.focus() {
-                    self.error = Some(error.to_string());
-                }
-                self.focus_when_ready = false;
-            }
+        }
+        if active {
+            self.set_key_focus(focus);
         }
     }
 
@@ -172,15 +195,38 @@ impl WebViewView {
     }
 
     pub fn focus(&mut self) {
-        self.focus_when_ready = true;
+        self.set_key_focus(true);
+    }
+
+    /// OS のキーボードフォーカス（macOS の first responder / Windows のフォーカス HWND）を、
+    /// **表示状態は変えずに**渡す / 返す。`false` は「以後のキーは GPUI のもの」。
+    ///
+    /// 要求は毎回 OS へ言い直す（`key_focus` を見て省かない）。ページ内クリックで WebView が
+    /// first responder になるのは AppKit が勝手にやることで、こちらからは観測できない＝手元の
+    /// 「持っているつもり」はいつでも OS に裏切られるため。`makeFirstResponder` は同じ responder
+    /// なら AppKit が即 YES を返す no-op なので、言い直しは安い。
+    pub fn set_key_focus(&mut self, owns: bool) {
+        let owns = owns && self.active; // 非表示のビューにキーは渡さない
+        self.key_focus = owns;
+        self.focus_when_ready = owns; // 遅延生成前なら、生成時にこれが効く
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(webview) = &self.webview {
-            if let Err(error) = webview.focus() {
-                self.error = Some(error.to_string());
+            let result = if owns {
+                webview.focus()
             } else {
-                self.focus_when_ready = false;
+                Self::return_focus_to_parent(webview);
+                Ok(())
+            };
+            if let Err(error) = result {
+                self.error = Some(error.to_string());
             }
+            self.focus_when_ready = false;
         }
+    }
+
+    /// この WebView がキーボードフォーカスを持つ想定か（要求の記録。OS の真実ではない）。
+    pub fn wants_key_focus(&self) -> bool {
+        self.key_focus
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -190,7 +236,7 @@ impl WebViewView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.active {
+        if !self.active || native_disabled() {
             return;
         }
         let Some(url) = self.url.as_deref() else {
@@ -331,6 +377,29 @@ fn rect(bounds: Bounds<Pixels>) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 非表示のプレビューにキーボードフォーカスを渡さない（隠れた WebView が入力を吸う事故の逆）。
+    #[test]
+    fn hidden_preview_never_takes_key_focus() {
+        let mut view = WebViewView::local_file(std::env::temp_dir().join("a.html"), Theme::dark());
+        view.set_key_focus(true);
+        assert!(!view.focus_when_ready, "非表示なら渡す予約もしない");
+        assert!(!view.wants_key_focus());
+    }
+
+    /// 遅延生成前でも「渡す / 返す」の意思は覚え、返す側で予約を消す
+    /// （生成直後に古い予約でフォーカスを奪い返さない）。
+    #[test]
+    fn key_focus_request_is_remembered_before_the_webview_exists() {
+        let mut view = WebViewView::local_file(std::env::temp_dir().join("a.html"), Theme::dark());
+        view.active = true;
+        view.set_key_focus(true);
+        assert!(view.focus_when_ready, "表示中なら生成時に渡す");
+        assert!(view.wants_key_focus());
+        view.set_key_focus(false);
+        assert!(!view.focus_when_ready, "返したら予約も消える");
+        assert!(!view.wants_key_focus());
+    }
 
     #[test]
     fn local_html_path_becomes_file_url() {

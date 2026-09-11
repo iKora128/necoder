@@ -124,9 +124,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.chrome.fleet_center_view = view;
+        self.chrome.fleet_maximized = None;
+        self.ensure_work_layout(cx);
         if view == FleetCenterView::Control {
             window.focus(&self.chrome.control_focus, cx);
         }
+        self.save_state(cx);
         cx.notify();
     }
 
@@ -297,6 +300,13 @@ impl Workspace {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.bg0)
+            .child(tab(
+                "center-tab-work",
+                SharedString::from(i18n::t!("work.title")),
+                FleetCenterView::Work,
+                current == FleetCenterView::Work,
+                &theme,
+            ))
             .child(tab(
                 "center-tab-control",
                 SharedString::from(i18n::t!("control.title")),

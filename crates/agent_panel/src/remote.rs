@@ -97,7 +97,7 @@ impl AgentPanel {
         let question = thread.pending_elicitation.as_ref().map(|q| json!({
             "id": q.remote_id, "message": text(&q.message),
             "fields": q.fields.iter().map(|field| json!({
-                "name": field.name, "title": field.label,
+                "name": field.name, "title": field.label, "multi": field.multi,
                 "choices": field.options.iter().map(|o| json!({"value": o.value, "label": o.title})).collect::<Vec<_>>()
             })).collect::<Vec<_>>()
         }));
@@ -176,15 +176,36 @@ impl AgentPanel {
                     anyhow::ensure!(selections.len() == question.fields.len(), "invalid_answers");
                     let mut answers = Vec::new();
                     for field in &question.fields {
-                        let value = selections
+                        // 複数選択は配列、単一選択は文字列で来る。片方しか受けないと、
+                        // スマホ側の 1 フィールド分の型違いで質問ごと答えられなくなる。
+                        let raw = selections
                             .get(&field.name)
-                            .and_then(Value::as_str)
                             .ok_or_else(|| anyhow::anyhow!("answer_required"))?;
+                        let values: Vec<String> = match raw {
+                            Value::String(value) => vec![value.clone()],
+                            Value::Array(values) => values
+                                .iter()
+                                .map(|value| {
+                                    value
+                                        .as_str()
+                                        .map(str::to_string)
+                                        .ok_or_else(|| anyhow::anyhow!("invalid_answer"))
+                                })
+                                .collect::<anyhow::Result<Vec<String>>>()?,
+                            _ => anyhow::bail!("invalid_answer"),
+                        };
+                        anyhow::ensure!(!values.is_empty(), "answer_required");
                         anyhow::ensure!(
-                            field.options.iter().any(|option| option.value == value),
-                            "invalid_answer"
+                            field.multi || values.len() == 1,
+                            "invalid_answer" // 単一選択に複数返させない
                         );
-                        answers.push((field.name.clone(), value.to_string()));
+                        for value in &values {
+                            anyhow::ensure!(
+                                field.options.iter().any(|option| &option.value == value),
+                                "invalid_answer"
+                            );
+                        }
+                        answers.push((field.name.clone(), values));
                     }
                     Some(answers)
                 };

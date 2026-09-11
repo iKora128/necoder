@@ -13,6 +13,7 @@ paths.workspace = true
 anyhow.workspace = true
 agent-client-protocol.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 blocking.workspace = true
 futures.workspace = true
 host.workspace = true

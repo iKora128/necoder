@@ -19,6 +19,14 @@
 
 use crate::workspace::*;
 use std::io::{BufRead as _, BufReader, Write as _};
+use std::time::Duration;
+
+/// bind に失敗した時の再試行間隔（生きた owner が消えるのを待つ・権限などの一時障害も同じ）。
+const BIND_RETRY: Duration = Duration::from_secs(15);
+
+/// 「この socket に今いるのは自分か」を確かめる間隔。socket ファイルが外から消された・
+/// 別プロセスに奪われた状態を**自分で**見つけて張り直すための心拍（2026-09-11）。
+const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// GUI 制御 IPC の口（`NECODER_GUI_SOCK` で差し替え可・テスト用）。決定は `paths` crate。
 ///
@@ -62,6 +70,31 @@ fn record_json(record: &storage::TaskSpaceRecord) -> serde_json::Value {
     })
 }
 
+/// 今この socket で待ち受けているプロセスの pid を聞く（`control_ping`）。
+/// 誰も居ない・壊れている・喋らないなら `None`。
+///
+/// `control_ping` は accept スレッドが即答する（UI スレッドを経由しない）。UI が重い時に
+/// 「socket は死んでいる」と誤判定して張り直さないための分離であり、**呼び出し側が UI の
+/// 消費ループを止めて待っていても詰まらない**ことの根拠でもある。
+fn socket_owner_pid(path: &Path) -> Option<u32> {
+    let mut stream = ControlStream::connect(path).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .ok()?;
+    writeln!(
+        stream,
+        "{}",
+        serde_json::json!({ "method": "control_ping" })
+    )
+    .ok()?;
+    stream.flush().ok()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).ok()?;
+    let response: serde_json::Value = serde_json::from_str(&line).ok()?;
+    response["result"]["pid"].as_u64().map(|pid| pid as u32)
+}
+
 impl Workspace {
     /// IPC サーバを起動する（main から窓ごとに 1 回）。socket の owner は**プロセス/窓を
     /// またいで常に 1 つ**で、生きた owner がいる間は AddrInUse を受けて周期リトライに回り、
@@ -82,6 +115,8 @@ impl Workspace {
         }
         cx.spawn(async move |workspace, cx| {
             use futures::StreamExt as _;
+            // 同じ bind 失敗を 15 秒ごとにログへ積まないための直前の文言。
+            let mut reported_failure: Option<String> = None;
             loop {
                 // 二重 bind の検出・死んだ socket ファイルの掃除・パーミッション（0600 /
                 // 既定 DACL）はすべて control_transport が持つ（WINDOWS-PORT.md §D2）。
@@ -91,20 +126,30 @@ impl Workspace {
                     .spawn(async move { ControlListener::bind(&bind_path) })
                     .await;
                 let mut listener = match bound {
-                    Ok(listener) => listener,
-                    // 生きた owner（別窓・別プロセス）が待ち受け中。消えたら継げるよう再試行
-                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_secs(15))
-                            .await;
+                    Ok(listener) => {
+                        reported_failure = None;
+                        listener
+                    }
+                    // AddrInUse = 生きた owner（別窓・別プロセス）が待ち受け中。消えたら継ぐ。
+                    // それ以外（掃除の競合・権限など）でも**諦めない** — ここで return すると
+                    // 「GUI は生きているのに socket が死んでいる」状態が窓の寿命ぶん固定化し、
+                    // `ne` も Remote（QR 発行）も GUI を見つけられなくなる（2026-09-11 実測）。
+                    Err(error) => {
+                        if error.kind() != std::io::ErrorKind::AddrInUse {
+                            let text = error.to_string();
+                            if reported_failure.as_deref() != Some(text.as_str()) {
+                                eprintln!(
+                                    "管制 IPC を開けない（{} 秒ごとに再試行する）: {error}",
+                                    BIND_RETRY.as_secs()
+                                );
+                                reported_failure = Some(text);
+                            }
+                        }
+                        cx.background_executor().timer(BIND_RETRY).await;
                         if workspace.update(cx, |_, _| {}).is_err() {
                             return; // 窓ごと閉じた
                         }
                         continue;
-                    }
-                    Err(error) => {
-                        eprintln!("管制 IPC を開けない: {error}");
-                        return;
                     }
                 };
                 // stop = 「この窓は消費者をやめた」印。accept はブロッキングなので、立ててから
@@ -143,14 +188,42 @@ impl Workspace {
                     }
                 });
                 // UI 側の消費ループ。channel が尽きた＝accept スレッド死亡 → bind からやり直す。
+                // 併せて HEALTH_INTERVAL ごとに「この socket に今いるのは自分か」を確かめる。
+                // 外から socket ファイルを消された/別プロセスに継がれた場合、accept は永久に
+                // 呼ばれず（＝この channel は尽きない）気づけないため、心拍側から見つける。
                 let mut window_alive = true;
-                while let Some(job) = job_rx.next().await {
-                    let handled = workspace.update(cx, |workspace, cx| {
-                        workspace.handle_control_job(job, cx);
-                    });
-                    if handled.is_err() {
-                        window_alive = false; // window ごと閉じた
-                        break;
+                loop {
+                    let health_tick = Box::pin(cx.background_executor().timer(HEALTH_INTERVAL));
+                    match futures::future::select(job_rx.next(), health_tick).await {
+                        futures::future::Either::Left((Some(job), _)) => {
+                            if workspace
+                                .update(cx, |workspace, cx| {
+                                    workspace.handle_control_job(job, cx);
+                                })
+                                .is_err()
+                            {
+                                window_alive = false; // window ごと閉じた
+                                break;
+                            }
+                        }
+                        // accept スレッドが畳まれた（job_tx が落ちた）
+                        futures::future::Either::Left((None, _)) => break,
+                        futures::future::Either::Right(_) => {
+                            let probe_path = socket_path.clone();
+                            let owner = cx
+                                .background_executor()
+                                .spawn(async move { socket_owner_pid(&probe_path) })
+                                .await;
+                            if owner == Some(std::process::id()) {
+                                continue; // 健全
+                            }
+                            // 誰も居ない（掃除された）か、別プロセスが持っている。張り直す
+                            // ＝相手が生きていれば次の bind が AddrInUse で待機側に回る。
+                            eprintln!(
+                                "管制 IPC の socket を見失った（応答 pid: {owner:?}）。張り直す"
+                            );
+                            break;
+                        }
                     }
                 }
                 stop.store(true, std::sync::atomic::Ordering::Release);
@@ -691,6 +764,15 @@ fn serve_connection(
         .get("params")
         .cloned()
         .unwrap_or(serde_json::json!({}));
+    // 生存確認だけは**ここで**返す。UI スレッドに渡さないので、UI が詰まっていても
+    // 「この socket の待ち受けは誰か」は必ず分かる（socket_owner_pid の相手方）。
+    if method == "control_ping" {
+        respond_line(
+            reader.get_mut(),
+            ok(serde_json::json!({ "pid": std::process::id() })),
+        );
+        return;
+    }
     let (respond_tx, respond_rx) = std::sync::mpsc::channel();
     if job_tx
         .unbounded_send(ControlJob {
@@ -707,5 +789,52 @@ fn serve_connection(
     match respond_rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(response) => respond_line(reader.get_mut(), response),
         Err(_) => respond_line(reader.get_mut(), err(i18n::t!("ipc.err_gui_timeout"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// テスト — 心拍（socket の持ち主確認）の土台だけを見る。窓を要する経路は対象外。
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// テスト用の待ち受け先。名前は短くする（macOS の `SUN_LEN` ~104B・control_transport 参照）。
+    fn test_endpoint(label: &str) -> PathBuf {
+        let unique = format!("nec-c{}-{label}", std::process::id());
+        if cfg!(windows) {
+            PathBuf::from(format!(r"\\.\pipe\{unique}"))
+        } else {
+            std::env::temp_dir().join(format!("{unique}.sock"))
+        }
+    }
+
+    /// `control_ping` は accept 側が即答する＝UI の消費ループが居なくても pid が返る。
+    /// 「socket の持ち主を外から特定できる」ことが、心拍で張り直せることの前提。
+    #[test]
+    fn ping_answers_with_our_pid_without_the_ui_loop() {
+        let endpoint = test_endpoint("pg");
+        let mut listener = ControlListener::bind(&endpoint).expect("bind できない");
+        // job の受け手（UI ループ）は**作らない**。ping がそこへ回されていたら返事は来ない。
+        let (job_tx, job_rx) = futures::channel::mpsc::unbounded::<ControlJob>();
+        drop(job_rx);
+        let server = std::thread::spawn(move || {
+            let stream = listener.accept().expect("accept できない");
+            serve_connection(stream, job_tx);
+        });
+
+        assert_eq!(socket_owner_pid(&endpoint), Some(std::process::id()));
+
+        server.join().expect("サーバスレッドが落ちた");
+        if !cfg!(windows) {
+            let _ = std::fs::remove_file(&endpoint);
+        }
+    }
+
+    /// 誰も待っていない socket は `None`＝心拍が「張り直す」と判断できる。
+    #[test]
+    fn ping_to_a_socket_without_a_listener_is_none() {
+        assert_eq!(socket_owner_pid(&test_endpoint("nl")), None);
     }
 }

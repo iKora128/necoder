@@ -153,6 +153,7 @@ pub enum PickerEvent {
 
 /// ファジーリストのモーダル。
 pub struct Picker {
+    query_action: Option<(usize, SharedString)>,
     placeholder: SharedString,
     query: String,
     items: Vec<PickerItem>,
@@ -175,6 +176,7 @@ impl Picker {
     ) -> Self {
         let filtered = (0..items.len()).collect();
         Self {
+            query_action: None,
             placeholder: placeholder.into(),
             query: String::new(),
             items,
@@ -188,6 +190,22 @@ impl Picker {
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// 入力した名前で作成する行。既存候補を選ぶ操作と同じ Picker の中で完結する。
+    pub fn set_query_action(
+        &mut self,
+        id: usize,
+        label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.query_action = Some((id, label.into()));
+        self.refilter();
+        cx.notify();
     }
 
     /// テーマを差し替える（ライブプレビュー中に Picker 自身も追従させる）。
@@ -226,6 +244,9 @@ impl Picker {
     }
 
     fn refilter(&mut self) {
+        if let Some((id, _)) = &self.query_action {
+            self.items.retain(|item| item.id != *id);
+        }
         let mut scored: Vec<(usize, i32)> = self
             .items
             .iter()
@@ -236,6 +257,15 @@ impl Picker {
             .collect();
         scored.sort_by(|a, b| b.1.cmp(&a.1));
         self.filtered = scored.into_iter().map(|(index, _)| index).collect();
+        if let Some((id, label)) = &self.query_action {
+            if !self.query.trim().is_empty() {
+                self.filtered.push(self.items.len());
+                self.items.push(PickerItem::new(
+                    *id,
+                    format!("{label}: {}", self.query.trim()),
+                ));
+            }
+        }
         self.selected = 0;
     }
 

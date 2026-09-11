@@ -207,7 +207,7 @@ pub fn settings_file() / keymap_file() / db_file() / blobs_dir()
 | ファイルを OS で開く | `/usr/bin/open` | `explorer.exe` / `start` |
 | Finder/エクスプローラで表示 | `open -R` | `explorer.exe /select,<path>` |
 | ゴミ箱へ | `/usr/bin/trash` | Recycle Bin（`SHFileOperation` or permissive crate） |
-| 完了音 | `afplay Glass.aiff` | ROADMAP の「独自チャイム同梱 + `rodio`」を前倒しするのが筋 |
+| 通知音（完了 / 入力待ち） | `agent_panel/src/sound.rs` が同梱 wav を一時ファイルへ展開して `afplay` | **`rodio` へ差し替える**（wav は既に `assets/sounds/` にある・`play()` の cfg 分岐 1 箇所で済む）。現状 macOS 以外では黙る |
 | OS バージョン | `sw_vers` | `cmd /c ver` / WinAPI |
 
 **注意**: `sh -c` を使っている 10 箇所は「複数コマンドのパイプ」を組み立てている可能性が高い。

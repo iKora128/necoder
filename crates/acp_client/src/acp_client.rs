@@ -6,6 +6,7 @@
 //!
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
+pub mod mcp;
 pub mod registry;
 
 use acp::schema::v1;
@@ -130,8 +131,8 @@ pub struct PlanItem {
     pub status: PlanStatus,
 }
 
-/// Elicitation（選択肢付き質問）の 1 フィールド（単一選択のみ）。ACP の `ElicitationSchema` の
-/// 1 プロパティ（enum/oneOf 付き string）を UI 非依存に簡約したもの。
+/// Elicitation（選択肢付き質問）の 1 フィールド。ACP の `ElicitationSchema` の 1 プロパティ
+/// （単一選択 = enum/oneOf 付き string / 複数選択 = anyOf 付き array）を UI 非依存に簡約したもの。
 #[derive(Debug, Clone)]
 pub struct ElicitationField {
     /// スキーマ上のプロパティ名（応答 content のキーになる）。
@@ -140,6 +141,8 @@ pub struct ElicitationField {
     pub label: String,
     /// 選択肢。
     pub options: Vec<ElicitationChoice>,
+    /// 複数選択か（true = ACP の array プロパティ。応答は `StringArray` で返す）。
+    pub multi: bool,
 }
 
 /// Elicitation の 1 選択肢（ACP `EnumOption` / `enum` 値の簡約）。
@@ -192,13 +195,14 @@ pub enum AgentEvent {
     },
     /// エージェントの実行プラン全量（`SessionUpdate::Plan`）。UI は常設チェックリストへ置換反映する。
     Plan(Vec<PlanItem>),
-    /// エージェントが選択肢付きの質問（Elicitation・form）を出した。**単一選択フィールドのみ対応**し、
-    /// テキスト/数値/真偽/複数選択を含むフォームは UI へ出さず即 Decline する（下の handler で弾く）。
-    /// `respond` に **(name, value) の選択群**を送ると Accept、`None` を送ると Decline。drop で Cancel。
+    /// エージェントが選択肢付きの質問（Elicitation・form）を出した。**選択式フィールドのみ対応**し、
+    /// テキスト/数値/真偽を含むフォームは UI へ出さず即 Decline する（下の handler で弾く）。
+    /// `respond` に **(name, 選んだ値の並び) の群**を送ると Accept、`None` を送ると Decline。
+    /// 単一選択フィールドは要素 1 つ、複数選択は 0 個以上。drop で Cancel。
     ElicitationRequest {
         message: String,
         fields: Vec<ElicitationField>,
-        respond: mpsc::UnboundedSender<Option<Vec<(String, String)>>>,
+        respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
     },
     /// prompt を**実際にエージェントへ送った**（ターン開始）。UI はこれで `running` を立てる。
     /// 楽観 UI（送信時に立てる）だけだと、生成中に積んで後回し（deferred）になった prompt が
@@ -208,6 +212,9 @@ pub enum AgentEvent {
     TurnEnded { reason: TurnEnd },
     /// エラー（接続断・プロトコル異常・起動失敗など）。
     Failed(String),
+    /// 失敗ではないが黙って進めたくない知らせ（MCP サーバを渡せなかった等）。transcript に 1 行
+    /// 出すだけで、ターン状態（running / auth_required）には触らない。
+    Notice(String),
     /// セッションが開いた（`session/new` または `session/load` の直後・Modes/Configs より前）。
     /// `session_id` はエージェント側の会話の鍵。UI はスレッドに控えて、次にこのスレッドの
     /// エージェントを立ち上げ直すとき [`SessionPreferences::resume`] に渡す。
@@ -1315,6 +1322,10 @@ pub struct SessionPreferences {
     /// エージェントが `loadSession` を広告していれば `session/load` で会話を引き継ぐ。広告が無い・
     /// 引き継ぎに失敗した場合は黙って新規セッションにする（SSH 切断・再起動からの復帰・2026-09-08）。
     pub resume: Option<String>,
+    /// このセッションでエージェントへ渡す MCP サーバ（解決済み・[`mcp::resolve`] の結果）。
+    /// **ACP では渡さない限りエージェントから MCP は 1 つも見えない** — エージェント側の
+    /// 設定ファイルに登録してあっても、セッションには出てこない（`mcp` モジュール冒頭）。
+    pub mcp_servers: Vec<mcp::McpServerConfig>,
 }
 
 /// **常駐セッション + 逐次ストリーミング**。エージェントを起動して 1 セッションを開き、`prompt_rx` から
@@ -1354,6 +1365,9 @@ pub async fn run_session_on(
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
         .envs(command.env.clone());
+    // MCP の stdio サーバはエージェントと同じホストで起動される＝リモートでは接続元のコマンドを
+    // 渡しても意味がない。判定はここで取る（下の接続クロージャは `move` で `host` を持ち込まない）。
+    let is_remote = host.is_remote();
     let mut process = host
         .spawn_process(&spec)
         .with_context(|| format!("ACP agent を起動できない: {}", command.path.display()))?;
@@ -1382,6 +1396,22 @@ pub async fn run_session_on(
             // ＝ transcript に古い会話が二重に載らない。応答と同時に ready だった分も捨て切る。
             // load が失敗したら（id が古い・エージェント側の記録が消えた）新規セッションで続ける。
             // ただし transport が閉じていたら続けても無駄なのでそのまま抜ける。
+            // このセッションで使える MCP サーバを ACP の型へ写す。**渡さない限りエージェントからは
+            // 1 つも見えない**（`mcp` モジュール冒頭）。渡せなかったものは黙って落とさず知らせる。
+            let (mcp_servers, skipped_mcp) = mcp::to_acp_servers(
+                &preferences.mcp_servers,
+                &initialized.agent_capabilities.mcp_capabilities,
+                is_remote,
+            );
+            for (name, reason) in &skipped_mcp {
+                let message = format!(
+                    "MCP サーバ「{name}」を渡せませんでした: {}",
+                    reason.describe()
+                );
+                eprintln!("{message}");
+                event_tx.unbounded_send(AgentEvent::Notice(message)).ok();
+            }
+
             let can_load = initialized.agent_capabilities.load_session;
             let resume_id = preferences.resume.clone().filter(|_| can_load);
             let mut resumed_session = None;
@@ -1390,7 +1420,10 @@ pub async fn run_session_on(
                 let mut session = connection
                     .attach_session(v1::NewSessionResponse::new(previous.clone()), Vec::new())?;
                 let load = connection
-                    .send_request(v1::LoadSessionRequest::new(previous.clone(), &cwd))
+                    .send_request(
+                        v1::LoadSessionRequest::new(previous.clone(), &cwd)
+                            .mcp_servers(mcp_servers.clone()),
+                    )
                     .block_task()
                     .fuse();
                 futures::pin_mut!(load);
@@ -1424,7 +1457,7 @@ pub async fn run_session_on(
                     // セッションを手動生成する（`start_session` は応答の `config_options` を捨てるため）。
                     // NewSessionResponse から config_options を取り出してから attach する。
                     let response = connection
-                        .send_request(v1::NewSessionRequest::new(&cwd))
+                        .send_request(v1::NewSessionRequest::new(&cwd).mcp_servers(mcp_servers))
                         .block_task()
                         .await?;
                     let modes_state = response.modes.clone();
@@ -1978,50 +2011,116 @@ async fn handle_permission_request(
     responder.respond(v1::RequestPermissionResponse::new(outcome))
 }
 
+/// AskUserQuestion 系ブリッジが「自由入力の Other 欄」に付ける `_meta` の印。ベンダ接頭辞を持たない
+/// 共有キーで、Claude / Codex など複数のブリッジが同じ印を使う取り決めになっている。
+/// この印が付いた選択肢無し string は**選択欄の付属品**なので、非対応判定ではなく読み飛ばす。
+const CUSTOM_ANSWER_META_KEY: &str = "_askUserQuestionCustomAnswer";
+
 /// ACP の Elicitation フォームを UI 非依存な [`ElicitationField`] 群へ簡約する。
-/// **全プロパティが単一選択（`enum` / `oneOf` 付き string）の時だけ** `Some` を返す。テキスト・
-/// 数値・真偽・複数選択を含むフォームは、この UI では正しく入力を返せないので `None`＝非対応にする
-/// （呼び出し側が Decline する）。単一選択に絞ることで「4 択を出して選ばせる」を安全に満たす。
+/// **全プロパティが選択式（単一選択 = `enum` / `oneOf` 付き string、複数選択 = `anyOf` / `enum` 付き
+/// array）の時だけ** `Some` を返す。テキスト・数値・真偽を含むフォームは、この UI では正しく入力を
+/// 返せないので `None`＝非対応にする（呼び出し側が Decline する）。「選ばせる」に絞ることで、
+/// 押せば答えになるカードだけを出す。
+///
+/// 例外は [`CUSTOM_ANSWER_META_KEY`] 印の Other 欄だけ。Claude Code の AskUserQuestion は
+/// 質問ごとに「選択肢 + Other 欄」の 2 プロパティを送るため、Other 欄を非対応扱いにすると
+/// **質問そのものが Decline されて UI に出ない**（＝エージェントの質問に答えられない）。
+/// 印つき Other 欄は任意入力なので、読み飛ばして選択欄だけ返す方が仕様に忠実。
 fn simplify_elicitation_form(schema: &v1::ElicitationSchema) -> Option<Vec<ElicitationField>> {
     if schema.properties.is_empty() {
         return None;
     }
     let mut fields = Vec::new();
     for (name, property) in &schema.properties {
-        let v1::ElicitationPropertySchema::String(string_schema) = property else {
-            return None; // 単一選択でないフィールドが 1 つでもあれば非対応
-        };
-        let options: Vec<ElicitationChoice> = if let Some(one_of) = &string_schema.one_of {
-            one_of
-                .iter()
-                .map(|option| ElicitationChoice {
-                    value: option.value.clone(),
-                    title: option.title.clone(),
-                    description: option.description.clone(),
-                })
-                .collect()
-        } else if let Some(enum_values) = &string_schema.enum_values {
-            enum_values
-                .iter()
-                .map(|value| ElicitationChoice {
-                    value: value.clone(),
-                    title: value.clone(),
-                    description: None,
-                })
-                .collect()
-        } else {
-            return None; // 選択肢の無い自由入力 string も（テキスト入力になるので）非対応
+        let (options, multi, title) = match property {
+            v1::ElicitationPropertySchema::String(string_schema) => {
+                if is_custom_answer_field(string_schema) {
+                    continue; // 選択欄に付属する任意の Other 欄 — 出さないだけで非対応にはしない
+                }
+                let options = single_select_options(string_schema)?;
+                (options, false, string_schema.title.clone())
+            }
+            v1::ElicitationPropertySchema::Array(array_schema) => {
+                let options = multi_select_options(&array_schema.items)?;
+                (options, true, array_schema.title.clone())
+            }
+            _ => return None, // 数値・真偽・未知の型が 1 つでもあれば非対応
         };
         if options.is_empty() {
             return None;
         }
         fields.push(ElicitationField {
             name: name.clone(),
-            label: string_schema.title.clone().unwrap_or_else(|| name.clone()),
+            label: title.unwrap_or_else(|| name.clone()),
             options,
+            multi,
         });
     }
+    // Other 欄だけを読み飛ばした結果 0 件＝選ばせるものが無いフォーム。非対応として Decline に回す。
+    if fields.is_empty() {
+        return None;
+    }
     Some(fields)
+}
+
+/// 単一選択 string の選択肢（`oneOf` 優先・無ければ `enum`）。どちらも無い自由入力は `None`＝非対応。
+fn single_select_options(schema: &v1::StringPropertySchema) -> Option<Vec<ElicitationChoice>> {
+    if let Some(one_of) = &schema.one_of {
+        return Some(one_of.iter().map(enum_option_choice).collect());
+    }
+    let enum_values = schema.enum_values.as_ref()?;
+    Some(
+        enum_values
+            .iter()
+            .map(|value| ElicitationChoice {
+                value: value.clone(),
+                title: value.clone(),
+                description: None,
+            })
+            .collect(),
+    )
+}
+
+/// 複数選択 array の選択肢（`items.anyOf` = タイトル付き / `items.enum` = 値のみ）。
+/// 未知の items 形は `None`＝非対応（読めない選択肢を空カードで出さない）。
+fn multi_select_options(items: &v1::MultiSelectItems) -> Option<Vec<ElicitationChoice>> {
+    match items {
+        v1::MultiSelectItems::Titled(titled) => {
+            Some(titled.options.iter().map(enum_option_choice).collect())
+        }
+        v1::MultiSelectItems::String(strings) => Some(
+            strings
+                .values
+                .iter()
+                .map(|value| ElicitationChoice {
+                    value: value.clone(),
+                    title: value.clone(),
+                    description: None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn enum_option_choice(option: &v1::EnumOption) -> ElicitationChoice {
+    ElicitationChoice {
+        value: option.value.clone(),
+        title: option.title.clone(),
+        description: option.description.clone(),
+    }
+}
+
+/// 選択欄に付属する任意の「Other」自由入力欄か（`_meta` の共有印で判定）。
+/// 選択肢を持つ string には印が付いていても選択欄として扱う（印だけで捨てない防御）。
+fn is_custom_answer_field(schema: &v1::StringPropertySchema) -> bool {
+    if schema.one_of.is_some() || schema.enum_values.is_some() {
+        return false;
+    }
+    schema
+        .meta
+        .as_ref()
+        .is_some_and(|meta| meta.contains_key(CUSTOM_ANSWER_META_KEY))
 }
 
 /// `session/request_elicitation`（選択肢付き質問）を UI へ橋渡しして応答する。form かつ全フィールドが
@@ -2042,7 +2141,15 @@ async fn handle_elicitation_request(
         ));
     };
 
-    let (respond_tx, mut respond_rx) = mpsc::unbounded::<Option<Vec<(String, String)>>>();
+    // 応答の型はフィールドの種類で決まる（単一選択 = string / 複数選択 = string の配列）。
+    // fields はイベントへ渡して手放すので、名前 → 複数選択かの対応だけ先に控える。
+    let multi_fields: std::collections::BTreeSet<String> = fields
+        .iter()
+        .filter(|field| field.multi)
+        .map(|field| field.name.clone())
+        .collect();
+
+    let (respond_tx, mut respond_rx) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
     event_tx
         .unbounded_send(AgentEvent::ElicitationRequest {
             message: request.message.clone(),
@@ -2057,7 +2164,17 @@ async fn handle_elicitation_request(
             let content: std::collections::BTreeMap<String, v1::ElicitationContentValue> =
                 selections
                     .into_iter()
-                    .map(|(name, value)| (name, v1::ElicitationContentValue::from(value)))
+                    .map(|(name, values)| {
+                        // 複数選択は 1 つしか選ばれていなくても配列で返す（スキーマの型に合わせる）。
+                        let value = if multi_fields.contains(&name) {
+                            v1::ElicitationContentValue::StringArray(values)
+                        } else {
+                            v1::ElicitationContentValue::from(
+                                values.into_iter().next().unwrap_or_default(),
+                            )
+                        };
+                        (name, value)
+                    })
                     .collect();
             v1::ElicitationAction::Accept(v1::ElicitationAcceptAction::new().content(content))
         }
@@ -2311,6 +2428,109 @@ mod tests {
         }))
         .expect("schema をパースできる");
         assert!(simplify_elicitation_form(&text_schema).is_none());
+    }
+
+    /// Claude Code の AskUserQuestion がそのまま届く形。質問ごとに「選択欄 + 任意の Other 欄」の
+    /// 2 プロパティが来るので、Other 欄で非対応にすると質問が UI に出ない（実際に出なかった）。
+    #[test]
+    fn ask_user_question_custom_answer_field_is_skipped_not_rejected() {
+        use serde_json::json;
+        let schema: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "question_0": {
+                    "type": "string",
+                    "title": "PDF の見せ方",
+                    "oneOf": [
+                        {"const": "A: アプリ内タブ", "title": "A: アプリ内タブ", "description": "OS の WebView に載せる"},
+                        {"const": "B: 外部アプリ", "title": "B: 外部アプリ"}
+                    ]
+                },
+                "question_0_custom": {
+                    "type": "string",
+                    "title": "Other",
+                    "description": "Type your own answer instead of choosing an option above (optional).",
+                    "_meta": {
+                        "_askUserQuestionCustomAnswer": {
+                            "questionId": "question_0",
+                            "isCustomAnswer": true
+                        }
+                    }
+                }
+            }
+        }))
+        .expect("schema をパースできる");
+        let fields = simplify_elicitation_form(&schema).expect("Other 欄つきでも質問は出せる");
+        assert_eq!(fields.len(), 1, "Other 欄は選択欄として数えない");
+        assert_eq!(fields[0].name, "question_0");
+        assert_eq!(fields[0].label, "PDF の見せ方");
+        assert_eq!(fields[0].options.len(), 2);
+
+        // 印が無いただの自由入力なら従来どおり非対応（返せない入力を勝手に握り潰さない）。
+        let unmarked: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "question_0": {"type": "string", "enum": ["a", "b"]},
+                "free": {"type": "string", "title": "自由記述"}
+            }
+        }))
+        .expect("schema をパースできる");
+        assert!(simplify_elicitation_form(&unmarked).is_none());
+
+        // multiSelect の質問（`type: array` + `items.anyOf`）も対応する。
+        // ここを弾いていた間は「複数選んでください」系の質問がまるごと UI に出なかった。
+        let multi: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "question_0": {
+                    "type": "array",
+                    "title": "入れる機能",
+                    "items": {"anyOf": [
+                        {"const": "検索", "title": "検索", "description": "全文検索"},
+                        {"const": "Git", "title": "Git"}
+                    ]}
+                },
+                "question_0_custom": {
+                    "type": "string",
+                    "_meta": {"_askUserQuestionCustomAnswer": {"isCustomAnswer": true}}
+                }
+            }
+        }))
+        .expect("schema をパースできる");
+        let multi_fields = simplify_elicitation_form(&multi).expect("複数選択も対応");
+        assert_eq!(multi_fields.len(), 1);
+        assert!(multi_fields[0].multi, "複数選択として印を付ける");
+        assert_eq!(multi_fields[0].label, "入れる機能");
+        assert_eq!(multi_fields[0].options.len(), 2);
+        assert_eq!(
+            multi_fields[0].options[0].description.as_deref(),
+            Some("全文検索")
+        );
+
+        // タイトル無しの複数選択（items.enum）も値がそのまま表示名になる。
+        let plain_multi: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "tags": {"type": "array", "items": {"type": "string", "enum": ["a", "b", "c"]}}
+            }
+        }))
+        .expect("schema をパースできる");
+        let plain = simplify_elicitation_form(&plain_multi).expect("items.enum も対応");
+        assert!(plain[0].multi);
+        assert_eq!(plain[0].options[2].title, "c");
+
+        // Other 欄しか無い＝選ばせるものが無いので非対応。
+        let only_custom: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "question_0_custom": {
+                    "type": "string",
+                    "_meta": {"_askUserQuestionCustomAnswer": {"isCustomAnswer": true}}
+                }
+            }
+        }))
+        .expect("schema をパースできる");
+        assert!(simplify_elicitation_form(&only_custom).is_none());
     }
 
     /// 回帰テスト: `session/prompt` がエラー応答（例: API のストリーミング切断「Connection
@@ -2694,6 +2914,133 @@ for line in sys.stdin:
         );
     }
 
+    /// 偽エージェント: `session/new` で受け取った `mcpServers` をそのまま prompt 応答に載せる。
+    /// **ACP の線に何が乗ったか**を本文で検証できる（渡し忘れると空配列が返って落ちる）。
+    /// `mcpCapabilities` は http だけ広告する＝sse は渡してはいけない側の検証にも使う。
+    const AGENT_THAT_ECHOES_MCP: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+received = []
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"mcpCapabilities": {"http": True, "sse": False}}}})
+    elif method == "session/new":
+        received = params.get("mcpServers") or []
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "mcp-1"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": params["sessionId"],
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": json.dumps(received, sort_keys=True)}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"#;
+
+    /// `session/new` に MCP サーバが実際に乗ること、広告の無い伝送方式は乗らずに知らせが出ること。
+    /// **この層が無いと「Codex CLI に登録したのにスレッドから使えない」に戻る**（2026-09-10）。
+    #[test]
+    fn new_session_carries_the_enabled_mcp_servers_over_the_wire() {
+        let server = |name: &str, transport| mcp::McpServerConfig {
+            name: name.to_string(),
+            source: mcp::McpSource::Necoder,
+            enabled: true,
+            transport,
+        };
+        let mut disabled = server(
+            "muted",
+            mcp::McpTransport::Stdio {
+                command: "/usr/local/bin/muted".into(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+        );
+        disabled.enabled = false;
+        let preferences = SessionPreferences {
+            mcp_servers: vec![
+                server(
+                    "tools",
+                    mcp::McpTransport::Stdio {
+                        command: "/usr/local/bin/tools".into(),
+                        args: vec!["--flag".into()],
+                        env: BTreeMap::new(),
+                    },
+                ),
+                server(
+                    "higgsfield",
+                    mcp::McpTransport::Http {
+                        url: "https://mcp.example.invalid/mcp".into(),
+                        headers: BTreeMap::new(),
+                    },
+                ),
+                server(
+                    "streamed",
+                    mcp::McpTransport::Sse {
+                        url: "https://mcp.example.invalid/sse".into(),
+                        headers: BTreeMap::new(),
+                    },
+                ),
+                disabled,
+            ],
+            ..SessionPreferences::default()
+        };
+        let Some((outcome, events)) =
+            run_fake_agent_until_session_ends(AGENT_THAT_ECHOES_MCP, preferences, Some("やって"))
+        else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("セッションは正常終了する");
+
+        let echoed = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("エージェントが受け取った mcpServers が返る");
+        let received: serde_json::Value = serde_json::from_str(echoed).expect("JSON で返る");
+        let names: Vec<&str> = received
+            .as_array()
+            .expect("配列")
+            .iter()
+            .filter_map(|server| server.get("name")?.as_str())
+            .collect();
+        // 有効な stdio と http だけが乗る。無効な行と、広告の無い sse は乗らない。
+        assert_eq!(names, vec!["tools", "higgsfield"], "{echoed}");
+        assert_eq!(received[0]["command"], "/usr/local/bin/tools");
+        assert_eq!(received[0]["args"][0], "--flag");
+        assert_eq!(received[1]["url"], "https://mcp.example.invalid/mcp");
+
+        // 渡せなかったものは黙って落とさない（transcript に 1 行出す）。
+        let notices: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Notice(message) => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("streamed"), "{}", notices[0]);
+        assert!(
+            !notices[0].contains("muted"),
+            "無効な行は知らせにも出さない: {}",
+            notices[0]
+        );
+    }
+
     #[test]
     fn config_choice_matches_name_or_id_case_insensitively() {
         let configs = vec![ConfigOption {
@@ -2796,6 +3143,7 @@ for line in sys.stdin:
             model: Some("opus".into()),
             effort: Some("MAX".into()),
             resume: None,
+            mcp_servers: Vec::new(),
         };
 
         let events = futures::executor::block_on(async move {
@@ -3074,6 +3422,7 @@ for line in sys.stdin:
                             eprintln!("\n[turn ended: {reason:?}]")
                         }
                         AgentEvent::Failed(error) => eprintln!("[failed] {error}"),
+                        AgentEvent::Notice(message) => eprintln!("[notice] {message}"),
                         AgentEvent::SessionStarted {
                             session_id,
                             resumed,

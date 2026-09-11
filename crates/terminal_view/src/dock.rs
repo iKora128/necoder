@@ -23,6 +23,8 @@ pub enum TerminalDockEvent {
 /// 1 project に属する端末タブ群。PTY と active index のライフサイクルをまとめて所有する。
 pub struct TerminalDock {
     terminals: Vec<Entity<TerminalView>>,
+    /// Fleet に配置した端末。ドックの表示リストから外しても同じ PTY を保持する。
+    detached: std::collections::BTreeMap<u64, Entity<TerminalView>>,
     active: usize,
     launch: TerminalLaunch,
     theme: Theme,
@@ -32,6 +34,7 @@ impl TerminalDock {
     pub fn new(launch: TerminalLaunch, theme: Theme) -> Self {
         Self {
             terminals: Vec::new(),
+            detached: Default::default(),
             active: 0,
             launch,
             theme,
@@ -72,14 +75,59 @@ impl TerminalDock {
         self.terminals.get(self.active).cloned()
     }
 
+    pub fn session(&self, id: u64) -> Option<Entity<TerminalView>> {
+        self.detached.get(&id).cloned()
+    }
+
+    pub fn detached_sessions(&self) -> Vec<u64> {
+        self.detached.keys().copied().collect()
+    }
+
+    /// 明示的な起動操作だけで呼ぶ。保存配置の復元や Render は shell を起動しない。
+    pub fn start_session(&mut self, id: u64, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        if let Some(terminal) = self.detached.get(&id) {
+            return terminal.clone();
+        }
+        let terminal = self.create_terminal(self.launch.clone(), cx);
+        self.detached.insert(id, terminal.clone());
+        cx.notify();
+        terminal
+    }
+
+    pub fn detach_active(&mut self, id: u64, cx: &mut Context<Self>) -> Entity<TerminalView> {
+        self.ensure_active(cx);
+        let terminal = self.terminals.remove(self.active);
+        self.active = self.active.min(self.terminals.len().saturating_sub(1));
+        self.detached.insert(id, terminal.clone());
+        cx.notify();
+        terminal
+    }
+
+    pub fn attach_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self.detached.remove(&id) {
+            self.terminals.push(terminal);
+            self.active = self.terminals.len() - 1;
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub fn terminate_session(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.detached.remove(&id);
+        cx.notify();
+    }
+
     /// dock 内のいずれかの端末にキーボードフォーカスがあるか（プロジェクト切替のフォーカス追従判定）。
     pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
-        self.terminals.iter().any(|terminal| {
-            terminal
-                .read(cx)
-                .focus_handle()
-                .contains_focused(window, cx)
-        })
+        self.terminals
+            .iter()
+            .chain(self.detached.values())
+            .any(|terminal| {
+                terminal
+                    .read(cx)
+                    .focus_handle()
+                    .contains_focused(window, cx)
+            })
     }
 
     pub fn ensure_active(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
@@ -154,7 +202,7 @@ impl TerminalDock {
 
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
-        for terminal in &self.terminals {
+        for terminal in self.terminals.iter().chain(self.detached.values()) {
             terminal.update(cx, |terminal, cx| terminal.set_theme(theme.clone(), cx));
         }
         cx.notify();
@@ -163,6 +211,7 @@ impl TerminalDock {
     /// ProjectSession 作成前の互換経路。session 化後は dock 自体を切り替えるため不要になる。
     pub fn reset_launch(&mut self, launch: TerminalLaunch, cx: &mut Context<Self>) {
         self.terminals.clear();
+        self.detached.clear();
         self.active = 0;
         self.launch = launch;
         cx.notify();

@@ -241,11 +241,21 @@ function renderDetail() {
     card.append(buttons); $('permission').append(card);
   }
   const oldQuestion = $('question').firstElementChild;
-  const selections = oldQuestion instanceof HTMLFormElement && oldQuestion.dataset.id === detail.question?.id ? Object.fromEntries(new FormData(oldQuestion)) : {};
+  const selections = oldQuestion instanceof HTMLFormElement && oldQuestion.dataset.id === detail.question?.id ? questionSelections(oldQuestion, detail.question) : {};
   $('question').replaceChildren();
   if (detail.question) renderQuestion(detail.question, selections);
   else if (detail.question_pending) $('question').append(node('p', t('questionLocal'), 'question'));
   controls();
+}
+// 複数選択フィールドは配列、単一選択は文字列で集める（ホスト側 question_response が両方受ける）。
+// FormData をそのまま Object.fromEntries すると複数選択が最後の 1 件に潰れる。
+function questionSelections(form, question) {
+  const data = new FormData(form);
+  const selections = {};
+  for (const field of question?.fields ?? []) {
+    selections[field.name] = field.multi ? data.getAll(field.name) : (data.get(field.name) ?? '');
+  }
+  return selections;
 }
 function renderQuestion(question, selections = {}) {
   const form = node('form', undefined, 'question');
@@ -254,16 +264,29 @@ function renderQuestion(question, selections = {}) {
   for (const field of question.fields) {
     const label = node('label', field.title || field.name);
     const select = node('select'); select.name = field.name; select.required = true;
-    const blank = node('option', '—'); blank.value = ''; select.append(blank);
-    for (const choice of field.choices) { const option = node('option', choice.label); option.value = choice.value; select.append(option); }
-    select.value = selections[field.name] || '';
+    const chosen = selections[field.name];
+    if (field.multi) {
+      // multiple では空欄の選択肢が「選べてしまう」ので置かない（required が最低 1 件を担保）。
+      select.multiple = true;
+      select.size = Math.min(field.choices.length, 5);
+      const picked = Array.isArray(chosen) ? chosen : (chosen ? [chosen] : []);
+      for (const choice of field.choices) {
+        const option = node('option', choice.label); option.value = choice.value;
+        option.selected = picked.includes(choice.value);
+        select.append(option);
+      }
+    } else {
+      const blank = node('option', '—'); blank.value = ''; select.append(blank);
+      for (const choice of field.choices) { const option = node('option', choice.label); option.value = choice.value; select.append(option); }
+      select.value = (Array.isArray(chosen) ? chosen[0] : chosen) || '';
+    }
     label.append(select); form.append(label);
   }
   const submit = node('button', t('answer')); submit.type = 'submit'; submit.dataset.mutation = 'true';
   const decline = node('button', t('decline')); decline.type = 'button'; decline.dataset.mutation = 'true';
   decline.onclick = () => mutate('question_response', { question_id: question.id, selections: null }).catch(showError);
   form.append(submit, decline);
-  form.onsubmit = event => { event.preventDefault(); mutate('question_response', { question_id: question.id, selections: Object.fromEntries(new FormData(form)) }).catch(showError); };
+  form.onsubmit = event => { event.preventDefault(); mutate('question_response', { question_id: question.id, selections: questionSelections(form, question) }).catch(showError); };
   $('question').append(form);
 }
 function showError(error) {

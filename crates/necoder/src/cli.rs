@@ -38,22 +38,36 @@ pub(crate) fn run() -> bool {
 /// Node.js の補助プロセスへ委譲。GUI のライフサイクルとリモート接続を分離する。
 fn run_remote(args: &[String]) -> Result<()> {
     let executable = std::env::current_exe()?;
-    let bundled = executable.parent().and_then(Path::parent)
+    let bundled = executable
+        .parent()
+        .and_then(Path::parent)
         .map(|contents| contents.join("Resources/control/host.mjs"));
-    let adjacent = executable.parent().map(|directory| directory.join("control/host.mjs"));
+    let adjacent = executable
+        .parent()
+        .map(|directory| directory.join("control/host.mjs"));
     #[cfg(debug_assertions)]
-    let development = executable.parent().and_then(Path::parent).and_then(Path::parent)
+    let development = executable
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
         .map(|root| root.join("relay/dist/host.mjs"));
     #[cfg(not(debug_assertions))]
     let development: Option<PathBuf> = None;
-    let script = std::env::var_os("NECODER_REMOTE_SCRIPT").map(PathBuf::from)
+    let script = std::env::var_os("NECODER_REMOTE_SCRIPT")
+        .map(PathBuf::from)
         .or_else(|| bundled.filter(|path| path.is_file()))
         .or_else(|| adjacent.filter(|path| path.is_file()))
         .or(development)
-        .context("Remote host が同梱されていません。更新版 necoder をインストールしてください")?;
-    anyhow::ensure!(script.is_file(), "Remote host が未ビルドです: cd relay && npm ci && npm run build");
-    let status = std::process::Command::new("node").arg(script).args(args).status()
-        .context("Remote host を起動できません。Node.js 22 以降が必要です")?;
+        .context("Remote host が同梱されていません。更新版 necoder をインストールしてください（host_not_bundled）")?;
+    anyhow::ensure!(
+        script.is_file(),
+        "Remote host が未ビルドです: cd relay && npm ci && npm run build（host_not_built）"
+    );
+    let status = std::process::Command::new("node")
+        .arg(script)
+        .args(args)
+        .status()
+        .context("Remote host を起動できません。Node.js 22 以降が必要です（node_missing）")?;
     anyhow::ensure!(status.success(), "Remote host が終了しました ({status})");
     Ok(())
 }

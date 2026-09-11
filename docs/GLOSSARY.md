@@ -30,6 +30,12 @@
 | **IntegrationSpace**（保護された統合先） | `SpaceKind::Integration`（P0 で phase から分離） | Integration | Integration |
 | **thread**（Task 内の会話 / AgentRun 1 本） | `Thread` | スレッド | Thread |
 | **agent**（話す相手の AI） | `AgentKind` / `agent` | エージェント | Agent |
+| **作業**（Fleet 中央タブ。worktree を列で並べて触る面・既定） | `FleetCenterView::Work` / `workbench` | 作業 | Work |
+| ↳ **作業ツリー**（左の 3 段ツリー。Fleet の主たる移動手段） | `render_work_sidebar` | リポジトリ / 作業 | Repositories / work |
+| ↳ **列**（1 列 = 1 worktree） | `WorkColumn` | 列 | Column |
+| ↳ **ペイン**（列の中の分割。タブ行を 1 本持つ） | `WorkPane` | ペイン | Pane |
+| ↳ **面**（ペインが映すもの） | `WorkSurface::{Agent,Terminal,File,Diff}` | スレッド / Terminal / ファイル / 変更 | Thread / Terminal / File / Diff |
+| ↳ **配置**（リポジトリごとの列・ペイン・タブの保存形） | `RepositoryLayout` / `WorkLayoutState` | 配置 | Layout |
 | **管制**（編隊統括ダッシュボード・中央タブ） | `FleetCenterView::Control` / `control_view` | 管制 | Control |
 | **遷移スナップショット**（状態遷移時の 1 行） | `digest` / `digest_tail` / `Thread.digest` | （文そのもの・ラベル無し） | （no label） |
 | **要対応キュー**（管制左・裁く列） | `AttentionItem` / `attention_queue` | 要対応 | Attention |
@@ -53,6 +59,8 @@
 | **「最新へ」ボタン**（transcript を遡り中だけ右下に出る・最下部へ戻す） | `render_jump_to_latest` | 最新へ | Jump to latest |
 | **プレビュー**（`.md` のネイティブ整形表示 / `.html` のOS標準WebView表示。source ⇄ preview・⌘⇧V） | `rendered_markdown` / `rendered_html` / `ToggleRenderedMarkdown` / `markdown_preview` / `webview_view` | プレビュー | Preview |
 | **ne コマンド**（ターミナルから開く CLI・`code`/`cursor` 相当） | `cli_shim`（シム生成）/ `necoder cli`（実体） | ne コマンド | ne command |
+| **MCP サーバ**（エージェントに持たせる道具。`session/new` で渡す） | `acp_client::mcp` / `mcp_servers` | MCP サーバ | MCP server |
+| ↳ **発見**（他ツールの設定に居るサーバを一覧に載せる・既定 off） | `mcp::discover` / `McpSource` | 〈出所〉で発見 | found in 〈source〉 |
 
 > 日本語で「Fleet」を「編隊」と表記したくなったら、UI 文字列のここだけ差し替える（概念名は Fleet で固定）。
 

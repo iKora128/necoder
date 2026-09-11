@@ -55,6 +55,7 @@ fn connect_ssh_project(uri: &str) -> anyhow::Result<ProjectSource> {
 
 /// 起動時に開く窓 1 つ分の計画（プロジェクト列・復元タブ列・アクティブ・DB 上の窓 ID）。
 struct WindowPlan {
+    layout_payload: Option<String>,
     sources: Vec<ProjectSource>,
     open_files: Vec<RestoredTabs>,
     active: usize,
@@ -117,7 +118,12 @@ fn resolve_windows(storage: Option<&storage::Storage>) -> Vec<WindowPlan> {
             for (window_id, payload) in rows {
                 let plan = workspace::decode_window_session(&payload).and_then(
                     |(saved_projects, saved_active)| {
-                        restore_window_plan(saved_projects, saved_active, window_id.clone())
+                        restore_window_plan(saved_projects, saved_active, window_id.clone()).map(
+                            |mut plan| {
+                                plan.layout_payload = Some(payload.clone());
+                                plan
+                            },
+                        )
                     },
                 );
                 match plan {
@@ -144,6 +150,7 @@ fn resolve_windows(storage: Option<&storage::Storage>) -> Vec<WindowPlan> {
         }
     }
     vec![WindowPlan {
+        layout_payload: None,
         sources,
         open_files,
         active: 0,
@@ -186,6 +193,7 @@ fn restore_window_plan(
         return None;
     }
     Some(WindowPlan {
+        layout_payload: None,
         sources,
         open_files,
         active,
@@ -424,6 +432,35 @@ fn run_config_cli() -> bool {
     true
 }
 
+/// 管制 IPC（`~/.necoder/gui.sock` / Windows は名前付きパイプ）を**窓ごとに 1 回**起こす。
+///
+/// `ne` CLI・MCP・Remote PWA（QR）が「起動中の GUI」を見つける唯一の口。先に bind した窓が
+/// owner になり、残りは control_ipc の周期リトライで待機する。
+///
+/// **開発用 probe 群（`#[cfg(debug_assertions)]` ブロック）の中に置かないこと。** 中にあった
+/// 間、出荷ビルドは socket を一度も張らず、`ne` は LaunchServices 経由に落ち、Remote の QR は
+/// 「necoder が起動していない」で失敗し続けた（v0.1.14 で発覚・2026-09-11）。
+fn start_control_ipc_for_window(window: &mut gpui::Window, cx: &mut gpui::Context<Workspace>) {
+    let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+        return;
+    };
+    // 窓の構築直後は update が届かないことがある。1 回で諦めるとこの窓の寿命ぶん IPC が
+    // 立たないので、数回だけ待って張り直す。
+    cx.spawn(async move |_workspace, cx| {
+        for attempt in 1..=10 {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            match handle.update(cx, |workspace, _window, cx| workspace.start_control_ipc(cx)) {
+                Ok(()) => return,
+                Err(error) if attempt == 10 => eprintln!("管制 IPC を開始できない: {error}"),
+                Err(_) => {}
+            }
+        }
+    })
+    .detach();
+}
+
 fn main() {
     // 旧ブランド Shirushi の置き場からデータを引き取る（改名 2026-08-22・DECISIONS §8）。
     // logging が `…/necoder/logs/` を作る**前**に動かす必要があるので、ここが本当の先頭。
@@ -656,9 +693,13 @@ fn main() {
             };
             if let Err(error) = handle.update(cx, |workspace, window, cx| {
                 workspace.restore_open_file(&plan.open_files, window, cx);
+                if let Some(payload) = &plan.layout_payload {
+                    workspace.restore_work_layout(payload, cx);
+                }
                 workspace.check_hot_exit_restore(cx);
                 let focus = workspace.focus_handle(cx);
                 window.focus(&focus, cx);
+                start_control_ipc_for_window(window, cx);
             }) {
                 eprintln!("初期化に失敗: {error}");
             }
@@ -819,20 +860,6 @@ fn main() {
                         .detach();
                     }
                 }
-                // 管制 IPC（P5・常時）: headless CLI/MCP が起動中 GUI を制御する Unix socket（0600）。
-                // 二重起動（別窓が先に bind 済み）は内部で静かにスキップ。window 構築完了後に開始する
-                // （このクロージャ内の即時 update は届かない＝probe 群と同じく defer する）。
-                if let Some(handle) = window.window_handle().downcast::<Workspace>() {
-                    cx.spawn(async move |_workspace, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(500))
-                            .await;
-                        let _ = handle.update(cx, |workspace, _window, cx| {
-                            workspace.start_control_ipc(cx);
-                        });
-                    })
-                    .detach();
-                }
                 // 開発用: NECODER_SSH_HOST_PROBE=1 で SSH ホストピッカーを開く（2s 後・M13 の描画検証）。
                 if std::env::var("NECODER_SSH_HOST_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
@@ -914,6 +941,21 @@ fn main() {
                             let _ = handle.update(cx, |workspace, window, cx| {
                                 workspace.debug_fleet_probe(&probe, window, cx);
                             });
+                        })
+                        .detach();
+                    }
+                }
+                if let Ok(mode) = std::env::var("NECODER_WORKBENCH_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(1600))
+                                .await;
+                            if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_workbench_probe(&mode, window, cx)
+                            }) {
+                                eprintln!("workbench probe: {error:#}");
+                            }
                         })
                         .detach();
                     }

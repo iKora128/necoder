@@ -193,6 +193,38 @@ impl Workspace {
                         })
                         .detach();
                     }
+                    // PDF: local は OS のビューアが自分でファイルを読む＝再読込を指示するだけ。
+                    // remote は見せているのがローカル複製なので、画像と同じく背景で読み直して書き換える。
+                    TabContent::Pdf(view) => {
+                        if !view.read(cx).is_remote_backed() {
+                            view.update(cx, |view, cx| view.reload(cx));
+                            git_changed = true;
+                            continue;
+                        }
+                        let view = view.clone();
+                        let host = worktree.host().clone();
+                        let pdf_path = path.clone();
+                        cx.spawn(async move |_workspace, cx| {
+                            let content = cx
+                                .background_executor()
+                                .spawn({
+                                    let pdf_path = pdf_path.clone();
+                                    async move { host.read_file(&pdf_path) }
+                                })
+                                .await;
+                            match content {
+                                Ok(content) => {
+                                    // Err = タブが閉じられ view が消えた後に読み終えた（無害）。
+                                    let _ = view
+                                        .update(cx, |view, cx| view.set_bytes(&content.bytes, cx));
+                                }
+                                Err(error) => {
+                                    eprintln!("PDF を再読み込みできない: {error:#}")
+                                }
+                            }
+                        })
+                        .detach();
+                    }
                 }
                 git_changed = true;
                 continue;
@@ -252,6 +284,18 @@ impl Workspace {
                 view.set_typography(font_size, tab_size, cx);
                 view.set_soft_wrap(soft_wrap, cx);
                 view.set_html_preview_evict_minutes(current.html_preview_evict_minutes, cx);
+            });
+        }
+        // PDF タブのネイティブビューアも同じ回収弁（非表示 WebView の破棄猶予）を共有する。
+        let pdf_views: Vec<Entity<PdfView>> = self
+            .project_sessions
+            .sessions
+            .iter()
+            .flat_map(|session| session.tabs.iter().filter_map(|tab| tab.pdf().cloned()))
+            .collect();
+        for view in pdf_views {
+            view.update(cx, |view, cx| {
+                view.set_evict_minutes(current.html_preview_evict_minutes, cx)
             });
         }
     }

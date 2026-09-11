@@ -83,6 +83,14 @@ impl Buffer {
   具体型 `EditorTab { path, editor: Entity<EditorView>, _observation }` の `Vec` + `active_tab: usize` で始める
   （ペインは当面「主ペイン = 複数タブ」+「右分割 = 単一比較ビュー」）。多態化（画像/diff/設定 UI を同格に）が
   必要になった時点で `enum PaneItem { Editor(..), Diff(..), .. }` → `trait TabItem` へ育てる（multibuffer 本体は later）。
+  **現在地（2026-09-11）**: `enum TabContent { Editor, Image, Pdf }` の 3 具体型。Image / Pdf は「編集も保存も
+  LSP もしない表示専用タブ」で、trait 化はこの性質を持たない Item（diff / 設定 UI）が要求した時点で再検討する。
+  Pdf は自前レンダラを持たず、`webview_view`（HTML プレビュー用のネイティブ子ビュー層）に `file://` を渡して
+  OS のビューア（macOS = WKWebView の PDFKit / Windows = WebView2）に描かせる。ネイティブ子ビューは GPUI の
+  描画木を外れても OS 側に残るため、`Workspace::sync_native_view_visibility` が毎 render で可視性と
+  キーボードフォーカスを同期する（HTML プレビューと共用の規律・回収弁も `html_preview_evict_minutes` を共有）。
+  remote (SSH) の PDF は OS 子ビューがローカルパスしか読めないので `<cache>/remote-pdf/` へ複製して見せる。
+  複製はタブが所有し `Drop` で消す（リモートの中身を手元に残さない）。
   永続化は `ProjectSlot.open_files: Vec<PathBuf>` + `active_file`（プロジェクト単位でタブ列を復元）。
   非アクティブプロジェクトのタブは**遅延復元**（レール切替時に開く）。LSP は didOpen/didClose をタブ開閉に追従、
   didChange は編集タブごと（`lsp_sent_versions: HashMap<Path, u64>` で誤スキップを防ぐ）。
@@ -182,6 +190,81 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - **組み込みカタログ** = `const AGENTS`。necoder が検証した既定値で、オフライン・未登録時の土台
 - npm 指定は**完全一致ピンにしない**（`pkg@0.0.0 - X` の上限範囲）。npm の `min-release-age` 環境で
   公開直後の版が入らなくなるため。詳細と Zed 比較の境界は `docs/research/acp-agent-registry-notes.md`
+
+### 7.2 MCP サーバはクライアントが渡す（2026-09-10）
+
+**ACP では「どの MCP サーバへ繋ぐか」を決めるのはクライアント（＝necoder）**。エージェント側の
+設定ファイル（`~/.codex/config.toml` 等）はセッションに現れず、`session/new` / `session/load` の
+`mcpServers` に載せた分だけがエージェントから見える。この受け渡しが無かった間は「Codex CLI に
+登録したのに necoder のスレッドからは `not installed or connected`」になっていた（実測 2026-09-10）。
+
+解決は `acp_client::mcp`（1 本の解決結果を設定画面とセッションが共有する）:
+
+- **真実は `settings.json` の `mcp_servers.<name>`**。`command`（stdio）か `url`（http/sse）を書けば
+  necoder 自身の定義＝**既定 on**。`{"enabled": true}` だけの行は「発見済みサーバの on/off」
+- **発見** = `~/.codex/config.toml` の `[mcp_servers.*]` / `~/.claude.json` / `~/.cursor/mcp.json` の
+  `mcpServers`。登録し直しを強いないための読み取りで、**既定 off**（他人の設定を根拠に子プロセスを
+  起こしたり課金されるリモートサーバへ繋いだりしない・DECISIONS の該当項）
+- 伝送方式の解釈は `transport_from_parts` の 1 箇所だけ（`type`/`transport` 明示 → 無ければ `url` の
+  有無）。necoder の設定と他ツールの設定が**同じ書き方で同じ意味**になる
+- **渡せなかったものは黙って落とさない** — 広告の無い伝送方式（`mcpCapabilities.http` / `.sse`）、
+  リモートセッションの stdio（コマンドは接続元のパス）、未設定の `${VAR}` は `AgentEvent::Notice`
+  として transcript に 1 行出す。`${VAR}` を展開できないまま送ると `Bearer ${TOKEN}` という嘘の
+  ヘッダで繋ぎに行くことになるので、**そのサーバごと渡さない**
+- 反映は**次に開くスレッド**から（走行中のセッションは繋ぎ直さない）
+
+### 7.3 セッションは送信を待たずに張る（2026-09-10）
+
+**ACP はセッションが開くまでモデル・思考量・権限モードを広告しない。** `session/new` の応答（と
+直後の通知）に載って初めて一覧が分かるので、「初回送信でセッションを立てる」遅延起動のままだと、
+composer 下のピルは最初の送信まで空で押せない（0.1.14 の実害）。実測でも `claude-agent-acp` は
+**prompt を 1 通も送らない状態**で Model 5 種 / ThoughtLevel 6 種 / Mode 5 種を広告する
+（`cargo run -p acp_client --example probe_advertisement`）。
+
+そこで **先張り（prewarm）**: `AgentPanel::schedule_prewarm` が、宛先が決まった時・復元直後・
+タブ切替・新規タブ・agent 切替で、**アクティブなスレッド 1 本だけ**のセッションを 500ms 後に立てる。
+
+- **1 枚だけ**なのは necoder が「スレッド 1 本 = エージェントのプロセス 1 本」だから。Zed は
+  `AgentConnectionStore` で **agent ごとに 1 接続を共有**するので画面を開いた分だけ繋いでよいが、
+  necoder で同じことをすると idle メモリ予算（§8）が壊れる。Fleet の Task セル
+  （`AgentPanel::new_task`）は並べただけで N 本立たないよう先張りしない
+- **静かに失敗する**: ユーザーは何も頼んでいないので、未導入・起動失敗を transcript のエラーに
+  しない（送信すれば同じ経路で必ず出る）。1 スレッド 1 回だけ試し、落ちた後の立て直しは
+  composer 直上の「再開」に任せる（自動リトライで無限に立て直さない）
+- **広告は agent 固有**（同じ実行ファイルなら誰に聞いても同じ）。受け取った一覧は
+  `AgentPanel::catalog` に agent 別で控え、**まだセッションの無いタブのピル**もそこから選択肢と
+  表示名を出す。そこで選んだ value_id は sticky に載り、次に開くセッションへ
+  `SessionPreferences` で渡る（＝先に選んでから送れる）
+- **抱える数に上限**（`MAX_IDLE_PREWARMED_SESSIONS` = 2）: 先張りしたまま 1 度も送っていない
+  セッションは 2 本までで、超えたら古い順に畳む（送信路を捨てるだけ＝`HostProcess` の drop で
+  プロセスも落ちる。`session_serial = 0` に戻して「意図して畳んだ」と印を付け、切断バナーを
+  出さない）。実測（2026-09-11）: 未送信のセッションは adapter + 子で **~16MB**、使うと ~46MB、
+  会話が育つと ~244MB。だから「見ただけのタブ」の分だけを刈る。畳んでもピルは在庫から出続ける
+- **定期ポーリングはしない**。一覧の変化はセッション中に `ConfigOptionUpdate` で push される
+- `settings.agent_prewarm`（既定 on）で off にできる＝ idle メモリを優先する選択肢を残す
+
+### 7.4 作業面（Fleet の机）は「配置」しか持たない（2026-09-11）
+
+Fleet 中央の**作業**タブ（`FleetCenterView::Work` / `workbench.rs`・UI-SPEC §6.1）は、リポジトリ 1 つを
+机として開き、その worktree を列で並べる面。ここで守る境界は 1 つだけ:
+
+**`work_layout` は「どこに何を置いたか」しか持たない。** 会話・PTY・バッファの寿命は既存の
+`ProjectSession`（`agent_panel` / `terminal_dock` / `tabs`）が所有し続ける。
+
+- 型は `work_layout.rs` に閉じる（`WorkLayoutState` → repository → `RepositoryLayout` → `WorkColumn`
+  → `WorkPane` → `WorkSurface`）。**全部 serde 可能な値**で、Entity も `SpaceId` 以外の参照も持たない。
+  だから窓セッション（`PersistedState::work_layout`）へそのまま載る
+- `WorkSurface::Terminal { id }` の `id` は **necoder が採番した端末の名札**で、PTY そのものではない。
+  `TerminalDock` が `detached: BTreeMap<u64, Entity<TerminalView>>` で名札 → 実体を持ち、作業面は
+  名札しか書かない。だから**配置の復元でシェルは起動しない**（停止中は「シェルを起動」を出す）し、
+  下ドック ⇄ 作業面の往復（`detach_active` / `attach_session`）で**同じ Entity が動く**＝走っている
+  プロセスも履歴も失われない
+- 列を閉じる = `hidden` へ退避（捨てない）。同じ worktree をまた開いたらタブ配置ごと戻る
+- **同じ Entity を 1 フレームに 2 回描かない**のが配置側の責任。`reveal` は既に居る面を探してから
+  足し、`sanitize` は 1 列の中で面の重複を落とす。だから Agent 面は 1 列に 1 つで、
+  「どのスレッドを映すか」は `AgentPanel` 側の active（作業ツリーが `focus_thread` で動かす）
+- 復元時に repository ID がまだ解決していない場合があるので、`ensure_work_layout` が
+  Space ID で作った仮の机を引き継ぐ（キーの張り替え 1 箇所に閉じ込める）
 
 ## 8. 性能予算の測り方（目標: Zed 比 ~80%）
 

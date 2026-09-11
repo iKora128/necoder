@@ -111,6 +111,7 @@ impl Workspace {
     ) {
         self.chrome.fleet_mode = !self.chrome.fleet_mode;
         if self.chrome.fleet_mode {
+            self.ensure_work_layout(cx);
             self.seed_fleet_cells(cx);
             // 編隊の左カラム既定は herd。以後はレールの エクスプローラ/git/Todo で切り替わる。
             self.chrome.show_left = true;
@@ -1097,6 +1098,7 @@ impl Workspace {
         let maximized = self
             .chrome
             .fleet_maximized
+            .filter(|_| self.chrome.fleet_center_view != FleetCenterView::Work)
             .filter(|index| *index < self.chrome.fleet_cells.len());
         let mut center = div().flex_1().flex().flex_col().min_w_0().bg(theme.bg1);
         if self.chrome.show_settings {
@@ -1129,6 +1131,7 @@ impl Workspace {
                     )
                 }
                 None => match self.chrome.fleet_center_view {
+                    FleetCenterView::Work => center.child(self.render_workbench(cx)),
                     FleetCenterView::Control => center.child(self.render_control(cx)),
                     FleetCenterView::Graph => center
                         .child(self.render_lineage_graph(cx))
@@ -1159,7 +1162,11 @@ impl Workspace {
         } else if !self.chrome.show_herd {
             self.render_explorer(cx).into_any_element()
         } else {
-            self.render_herd_sidebar(cx)
+            if self.chrome.fleet_center_view == FleetCenterView::Work {
+                self.render_work_sidebar(cx)
+            } else {
+                self.render_herd_sidebar(cx)
+            }
         }
     }
 

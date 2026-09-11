@@ -20,7 +20,7 @@ async function admin(method, params = {}) {
 }
 async function serve() {
   const config = await readState('config');
-  if (!config) throw new Error('Run init first / init を実行してください');
+  if (!config) throw new Error('run_init_first: init を実行してください');
   if (!config.adminToken) { config.adminToken = random(); await writeState('config', config); }
   const origin = new URL(config.origin);
   if (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(origin.hostname))) throw new Error('HTTPS origin required');
@@ -72,7 +72,7 @@ async function ensureStarted() {
   try { return await admin('status'); } catch (error) {
     if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error;
   }
-  if (!await readState('config')) throw new Error('Run init first');
+  if (!await readState('config')) throw new Error('run_init_first: init を実行してください');
   await secureDirectory();
   const log = await open(path.join(stateDir, 'host.log'), 'a', 0o600);
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'serve'], {
@@ -83,7 +83,7 @@ async function ensureStarted() {
     await new Promise(resolve => setTimeout(resolve, 150));
     try { return await admin('status'); } catch { /* 起動待ち。 */ }
   }
-  throw new Error(`Host startup failed; see ${path.join(stateDir, 'host.log')}`);
+  throw new Error(`host_startup_failed: see ${path.join(stateDir, 'host.log')}`);
 }
 try {
   if (command === 'serve') await serve();

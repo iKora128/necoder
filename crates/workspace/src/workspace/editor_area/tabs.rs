@@ -11,6 +11,9 @@ impl Workspace {
     }
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_work_tab(window, cx) {
+            return;
+        }
         // 最後に触った面が Agent なら AI スレッドタブを、そうでなければエディタタブを閉じる。
         // gpui は no-context バインドを最深で解決する（keymap では分離不能）ので、ここで振り分ける。
         // フォーカス依存だと transcript クリック等で判定を外すため、クリックで確定する agent_active を使う。
@@ -35,6 +38,9 @@ impl Workspace {
             self.switch_adjacent_project(1, window, cx);
             return;
         }
+        if self.work_cycle_tab(1, window, cx) {
+            return;
+        }
         if self.tabs.len() > 1 {
             self.select_tab((self.active_tab + 1) % self.tabs.len(), window, cx);
         }
@@ -49,6 +55,9 @@ impl Workspace {
     ) {
         if self.chrome.rail_active {
             self.switch_adjacent_project(-1, window, cx);
+            return;
+        }
+        if self.work_cycle_tab(-1, window, cx) {
             return;
         }
         let count = self.tabs.len();
@@ -155,6 +164,24 @@ impl Workspace {
         window.defer(cx, move |window, cx| {
             panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
         });
+        cx.notify();
+    }
+
+    /// AI 全画面を畳む（既に通常配置なら何もしない）。
+    ///
+    /// 全画面中は**中央がまるごと Agent に差し替わる**ので、タブを開いても設定ホームを出しても
+    /// 画面には出ない＝「開いたのに何も起きない」に見える（2026-09-11 報告）。エディタ領域を
+    /// 前に出す対話操作（ファイルを開く・設定を開く・diff タブ）は必ずここを通す。
+    /// 復元・監視など**ユーザーの意思でない経路からは呼ばない**（勝手に全画面が解けるため）。
+    pub(crate) fn exit_agent_full_screen(&mut self, cx: &mut Context<Self>) {
+        if !self.chrome.agent_full_screen {
+            return;
+        }
+        self.chrome.agent_full_screen = false;
+        self.chrome.show_right = true; // 抜けた先で AI が消えていない（トグルと同じ出口）
+        self.agent_active = false; // これから見せるエディタ側が ⌘W の宛先
+        self.agent_panel
+            .update(cx, |panel, cx| panel.parent_width_changed(cx));
         cx.notify();
     }
 
@@ -476,6 +503,7 @@ impl Workspace {
             return;
         };
         self.active_tab = index;
+        self.reveal_work_file(path.clone(), cx);
         if let Some(editor) = editor.filter(|editor| editor.read(cx).rendered_html()) {
             editor.update(cx, |editor, cx| editor.set_surface_active(true, true, cx));
         } else {

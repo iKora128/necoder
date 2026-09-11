@@ -1028,9 +1028,11 @@ impl Workspace {
     /// ファイルを開く（⌘P・ツリークリック・検索ジャンプ・F12 等の対話経路）。
     /// **読み込みは背景スレッド**（remote は 30s ブロックしうる — ARCHITECTURE §9）。
     pub(crate) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        // 対話でファイルを開いたら設定ホームは退く（起動復元の open_file_sync には入れない＝
-        // 未オンボーディング時に settings を出しっぱなしにするゲートを壊さないため）。
+        // 対話でファイルを開いたら設定ホームは退き、AI 全画面も畳む（起動復元の open_file_sync には
+        // 入れない＝未オンボーディング時に settings を出しっぱなしにするゲートを壊さないため）。
+        // 全画面のままだと中央が Agent なので、開いたタブが画面に出ない。
         self.chrome.show_settings = false;
+        self.exit_agent_full_screen(cx);
         // 既に開いていれば重複タブを作らず、そのタブへ切り替える。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
@@ -1124,6 +1126,34 @@ impl Workspace {
         .detach();
     }
 
+    /// 表示専用タブ（画像 / PDF）を追加してアクティブにする。バッファも LSP も持たないので
+    /// エディタタブの購読群は要らず、選択状態・git・永続化の更新だけを共通で済ませる。
+    fn push_display_only_tab(
+        &mut self,
+        path: PathBuf,
+        content: TabContent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = EditorTab {
+            path: path.clone(),
+            content,
+            transient: false,
+        };
+        let handle = tab.focus_handle(cx);
+        window.focus(&handle, cx);
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+            slot.explorer.selected = Some(path);
+        }
+        self.sync_active_slot();
+        self.refresh_git_status(cx);
+        self.save_state(cx);
+        cx.notify();
+    }
+
     /// 読み込み済み内容からタブを開く（open_file / open_file_sync の合流点）。
     pub(crate) fn open_loaded_file(
         &mut self,
@@ -1132,6 +1162,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reveal_work_file(path.clone(), cx);
         // 読み込み中に同じファイルが開かれていたら切り替えるだけ。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
@@ -1147,22 +1178,19 @@ impl Workspace {
         if image_view::is_image_path(&path) {
             let theme = self.theme.clone();
             let view = cx.new(|cx| ImageView::new(&path, content.bytes, theme, cx));
-            let handle = view.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-            self.tabs.push(EditorTab {
-                path: path.clone(),
-                content: TabContent::Image(view),
-                transient: false,
-            });
-            self.active_tab = self.tabs.len() - 1;
-            let active = self.project_sessions.active;
-            if let Some(slot) = self.project_sessions.projects.get_mut(active) {
-                slot.explorer.selected = Some(path);
-            }
-            self.sync_active_slot();
-            self.refresh_git_status(cx);
-            self.save_state(cx);
-            cx.notify();
+            self.push_display_only_tab(path, TabContent::Image(view), window, cx);
+            return;
+        }
+        // PDF も同じ扱い。自前でデコードせず OS のビューア（macOS = WKWebView の PDFKit /
+        // Windows = WebView2）に file:// を渡す。local は元のファイルを直接読ませるのでバイト列は
+        // 捨てられ、remote だけがローカル複製の材料に使う（PdfView::new）。
+        if pdf_view::is_pdf_path(&path) {
+            let theme = self.theme.clone();
+            let remote = worktree.host().is_remote();
+            let view = cx.new(|cx| PdfView::new(&path, remote, content.bytes, theme, cx));
+            let evict_minutes = settings::get(cx).html_preview_evict_minutes;
+            view.update(cx, |view, cx| view.set_evict_minutes(evict_minutes, cx));
+            self.push_display_only_tab(path, TabContent::Pdf(view), window, cx);
             return;
         }
         let buffer = match Buffer::from_content(worktree.host().clone(), &path, content) {
@@ -1263,9 +1291,14 @@ impl Workspace {
 
     /// ユーザーがこの窓を閉じた印を DB の自分の行へ付ける（次回起動で復元しない）。
     /// OS 経由の閉じは `install_window_close_hook` が呼ぶ。自前 titlebar の × はこれを直接呼ぶ。
-    pub(crate) fn mark_window_closed(&self) {
+    ///
+    /// 閉じ印を付けると以後この窓は書けなくなるので、**今のタブ列を書き切ってから**印を付ける
+    /// （郵便受けに残っていた分を捨てると、直前に閉じたタブが次回起動で復活する）。
+    pub(crate) fn mark_window_closed(&mut self) {
+        self.sync_active_slot();
+        let payload = encode_window_session(&self.persisted_state());
         if let Some(writer) = self.persistence.session_writer.as_ref() {
-            writer.close();
+            writer.close(payload);
         }
     }
 
@@ -1295,6 +1328,14 @@ impl Workspace {
                 })
                 .collect(),
             active: self.project_sessions.active,
+            work_layout: self.chrome.work_layout.clone(),
+            fleet_mode: self.chrome.fleet_mode,
+            fleet_view: match self.chrome.fleet_center_view {
+                FleetCenterView::Work => "work",
+                FleetCenterView::Graph => "graph",
+                FleetCenterView::Control => "control",
+            }
+            .to_string(),
         }
     }
 

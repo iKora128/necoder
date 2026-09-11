@@ -470,12 +470,19 @@ impl Workspace {
     /// git 色貫通）。M10 複数タブ。`agent_panel::render_thread_tabs` と同じ流儀。
     pub(crate) fn render_main_tabstrip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
+        let vertical = settings::get(cx).work_tabs_position == "left";
         let accent = self.accent();
         let active_tab = self.active_tab;
         div()
+            .id("editor-tabstrip")
             .flex()
             .items_stretch()
-            .h(px(TABSTRIP_HEIGHT))
+            .when(!vertical, |tabs| {
+                tabs.h(px(TABSTRIP_HEIGHT)).min_w_0().overflow_x_scroll()
+            })
+            .when(vertical, |tabs| {
+                tabs.flex_col().w(px(190.)).h_full().overflow_y_scroll()
+            })
             .flex_none()
             .bg(theme.bg0)
             .border_b_1()
@@ -500,7 +507,10 @@ impl Workspace {
                     .id(("editor-tab", index))
                     .flex()
                     .flex_col()
-                    .h_full()
+                    .when(!vertical, |tab| tab.h_full())
+                    .when(vertical, |tab| {
+                        tab.h(px(TABSTRIP_HEIGHT)).w_full().flex_none()
+                    })
                     .border_r_1()
                     .border_color(theme.border)
                     .cursor_pointer()
@@ -526,7 +536,14 @@ impl Workspace {
                             .when(dirty, |element| {
                                 element.child(div().size(px(7.)).rounded(px(3.5)).bg(theme.warn))
                             })
-                            .child(div().text_color(name_color).child(SharedString::from(name)))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_color(name_color)
+                                    .child(SharedString::from(name)),
+                            )
                             .child(
                                 div()
                                     .id(("close-tab", index))
@@ -1150,23 +1167,33 @@ impl Workspace {
         div()
             .flex_1()
             .flex()
-            .flex_col()
+            .when(settings::get(cx).work_tabs_position != "left", |pane| {
+                pane.flex_col()
+            })
             .min_h_0()
             .min_w_0()
             .child(self.render_main_tabstrip(cx))
-            .children(
-                editor
-                    .as_ref()
-                    .map(|editor| self.render_breadcrumb(editor, cx)),
-            )
-            .children(self.render_external_change_bar(cx))
             .child(
                 div()
                     .flex_1()
-                    .overflow_hidden()
-                    .relative()
-                    .child(content)
-                    .children(self.render_buffer_search_bar(cx)),
+                    .min_h_0()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .children(
+                        editor
+                            .as_ref()
+                            .map(|editor| self.render_breadcrumb(editor, cx)),
+                    )
+                    .children(self.render_external_change_bar(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .relative()
+                            .child(content)
+                            .children(self.render_buffer_search_bar(cx)),
+                    ),
             )
             .into_any_element()
     }
@@ -2105,6 +2132,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.chrome.show_settings = true;
+        self.exit_agent_full_screen(cx); // 全画面のままだと中央が Agent で設定が出ない
         self.chrome
             .settings_view
             .update(cx, |view, cx| view.refresh_availability(cx));

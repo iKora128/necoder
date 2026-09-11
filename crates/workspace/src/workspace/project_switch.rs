@@ -107,6 +107,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let index = self.work_switch_target(index);
         let Some(active) = active_index_after_switch(
             self.project_sessions.active,
             index,
@@ -133,6 +134,7 @@ impl Workspace {
         let follow_focus = !self.chrome.fleet_mode && !self.chrome_owns_focus(window);
         self.project_sessions.active = active;
         self.load_active_slot(window, cx);
+        self.work_project_changed(cx);
         if follow_focus {
             self.focus_session_surface(agent_had_focus, terminal_had_focus, window, cx);
         }

@@ -405,6 +405,14 @@ settings:
   welcome_title: Welcome 🎨
   welcome_sub: Pick your agent and get started. You can change it anytime from ⚙.
   get_started: Get started →
+  mcp_heading: MCP servers
+  mcp_sub: Tools you hand to the agent. Only the ones you enable are visible to new threads.
+  mcp_empty: No MCP servers yet. Add them under mcp_servers in settings.json, or register them with Codex CLI, Claude Code or Cursor and they show up here.
+  mcp_note: Changes apply to the next thread you open; running sessions are not reconnected.
+  mcp_source_necoder: necoder settings
+  mcp_source_codex: found in Codex CLI
+  mcp_source_claude: found in Claude Code
+  mcp_source_cursor: found in Cursor
   prefs_heading: Behavior & editor
   prefs_sub: settings.json is the source of truth; this just edits it.
   pref_submit_on_enter: Submit on Enter
@@ -415,8 +423,13 @@ settings:
   pref_format_on_save_sub: Supported languages only; ⌘S formats then saves
   pref_agent_auto_name: Auto-name threads
   pref_agent_auto_name_sub: AI titles new threads from the first exchange
-  pref_completion_sound: Completion sound
-  pref_completion_sound_sub: Plays when an agent turn finishes
+  pref_agent_prewarm: Connect agents up front
+  pref_agent_prewarm_sub: Connects before you send so the model list is ready to pick
+  pref_sound_done: Completion sound
+  pref_sound_waiting: Waiting-for-you sound
+  sound_nya: Meow
+  sound_system: System
+  sound_off: Off
   pref_reduce_motion: Reduce motion
   pref_reduce_motion_sub: Freezes decorative animation such as Braille spinners and the mascot
   pref_font_size: Font size
@@ -439,7 +452,17 @@ settings:
   remote_copy: Copy pairing URL
   remote_hide: Hide QR
   remote_qr_hint: "Sharing %{count} projects. Valid for 5 minutes. Scan with your phone's camera, or paste the URL into the Home Screen PWA. Keep the QR and URL private."
-  remote_error: Could not generate a QR. Open a project and check Node.js 22+, the bundled Remote host, connection configuration, and network access.
+  remote_error: Could not generate a QR (cause unknown). Run `ne remote pair` in a terminal to see the reason.
+  remote_err_no_gui: Could not reach necoder itself. Restart necoder and try again.
+  remote_err_no_project: No project to share. Open a project first.
+  remote_err_not_initialized: Phone connection is not initialized yet. Run `ne remote init` in a terminal.
+  remote_err_device_limit: The device limit (8) is reached. Revoke a device you no longer use, then try again.
+  remote_err_node: Node.js 22+ was not found. Install it, then try again.
+  remote_err_host_missing: The Remote host is not bundled. Reinstall necoder.
+  remote_err_host_start: The Remote host failed to start. See `~/.necoder/remote/host.log` for the reason.
+  remote_err_relay: Could not reach the relay server. Check your network connection and try again.
+  remote_err_timeout: Generating the QR timed out. Try again.
+  remote_err_bad_payload: The QR payload was malformed. Check that necoder and the Remote host are on the same version.
   remote_expired: This QR expired. Generate a new pairing QR.
   cli_sub: Open necoder from the terminal with `ne <path>`.
   cli_row_label: ne command
@@ -537,6 +560,9 @@ breadcrumb:
 webview:
   failed: Unable to open HTML preview
   unsupported: HTML preview currently supports macOS and Windows
+pdf:
+  unsupported: PDF cannot be shown in a tab in this environment
+  unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead
 terminal:
   tab_title: Terminal %{n}
   add_tip: New terminal
@@ -782,3 +808,46 @@ key:
   hide_others: Hide others
   activate_project: Switch to project (rail order)
   quit: Quit necoder
+work:
+  title: Work
+  repositories: Repositories / work
+  open_beside: Open beside
+  reveal_session: Show the running terminal
+  terminal: Terminal
+  agent: Agent
+  diff: Changes
+  add_worktree: ＋ Add worktree
+  add_worktree_tip: Open a worktree or create one from a branch
+  choose_worktree: Choose a worktree or type a new branch name
+  create_existing: Create a worktree for this branch
+  create_branch: Create worktree from current HEAD
+  empty: Choose a worktree from the sidebar to open it here
+  empty_pane: Use ＋ to open an agent, terminal, or file
+  unavailable: This worktree is not open. Reopen it from the sidebar.
+  columns: Columns
+  grid: Grid
+  toggle_layout: Switch between columns and grid
+  restore: Restore layout
+  close_column: Hide column (sessions keep running)
+  close_pane: Close pane (move tabs to the adjacent pane)
+  pane_menu: Add a tab or arrange this pane
+  terminal_stopped: Terminal is not running. Restoring a layout does not restart commands.
+  start_terminal: Start shell
+  open_file: Open file…
+  new_thread: New thread
+  new_terminal: New terminal
+  move_terminal: Move dock terminal here
+  split: Split below with a terminal
+  tabs_top: Tabs at top
+  tabs_left: Tabs on left
+  focus: Focus / restore pane
+  move_left: Move column left
+  move_right: Move column right
+  tab_previous: Move tab earlier
+  tab_next: Move tab later
+  hide_tab: Hide tab (keep session)
+  return_terminal: Move terminal to dock
+  stop_terminal: End terminal session
+  tabs_setting: Default tab position
+  top: Top
+  left: Left

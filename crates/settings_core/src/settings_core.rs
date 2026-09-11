@@ -101,6 +101,37 @@ impl AgentServerSetting {
     }
 }
 
+/// MCP サーバ 1 件の設定（`mcp_servers.<name>`）。
+///
+/// ACP は「どの MCP サーバへ繋ぐか」を**クライアント（necoder）が決める**プロトコルで、
+/// エージェント側の設定ファイル（`~/.codex/config.toml` 等）はセッションに現れない。
+/// necoder が渡した分だけがエージェントから見える（`acp_client::mcp`）。
+///
+/// 書き方は 2 通り:
+/// - **自前定義**（`command` か `url` を書く）— necoder がこの内容でエージェントへ渡す。既定 on。
+/// - **有効/無効だけ**（`enabled` のみ）— 他ツール（Codex CLI / Claude Code / Cursor）の設定から
+///   発見したサーバの on/off を決める行。発見しただけのサーバは**既定 off**（他人の設定を根拠に
+///   子プロセスを起こしたり課金されるリモートサーバへ繋いだりしない）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct McpServerSetting {
+    /// 明示的な有効/無効。`None` = 出所ごとの既定（自前定義は on・発見は off）。
+    pub enabled: Option<bool>,
+    /// 伝送方式（`stdio` / `http` / `sse`）。省略時は `url` があれば http、無ければ stdio。
+    /// 他ツールの設定ファイルに合わせて `type` でも書ける。
+    #[serde(alias = "type")]
+    pub transport: Option<String>,
+    /// stdio: 起動するコマンド（絶対パス、または PATH 上の名前）。
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    /// http / sse: 接続先 URL。
+    pub url: Option<String>,
+    /// http / sse: 付けるヘッダ。値の `${VAR}` は起動時に環境変数へ展開する
+    /// （未設定なら**そのサーバを渡さない**＝嘘のトークンで繋ぎに行かない）。
+    pub headers: BTreeMap<String, String>,
+}
+
 /// 解決済み設定（全レイヤをマージ後に得る）。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -123,9 +154,18 @@ pub struct Settings {
     /// エージェントの新規スレッドに、最初のやり取りから AI が自動でタイトルを付けるか（#6・既定 on）。
     /// 既定名（"スレッドN"）のまま・手動改名していないスレッドだけが対象。無効なら既定名のまま。
     pub agent_auto_name: bool,
-    /// エージェントのターン完了時に通知音を鳴らすか（macOS system sound・既定 on）。
-    /// 裏の窓で走らせた作業の完了にも気づける（`docs/BACKGROUND.md` の原点痛点）。独自チャイム同梱は後続。
-    pub completion_sound: bool,
+    /// エージェントのセッションを**送信を待たずに**先に張るか（既定 on）。
+    /// ACP はセッションが開くまでモデル/モード一覧を広告しないので、off にすると composer 下の
+    /// ピルは最初の送信まで空のまま（Zed は常に先張りする側）。off の利点は idle メモリ:
+    /// 見ているタブごとにエージェントのプロセスが 1 本立たなくなる。
+    pub agent_prewarm: bool,
+    /// ターン完了の通知音。`"nya"`（同梱・既定）/ `"system"`（OS の音）/ `"off"` /
+    /// 任意のファイルパス（`~/` 可）。裏の窓で走らせた作業の完了に気づくための音
+    /// （`docs/BACKGROUND.md` の原点痛点）。**見ている画面では鳴らさない**。
+    pub sound_done: String,
+    /// 入力待ち（承認・質問で止まった）の通知音。値の取り方は [`Settings::sound_done`] と同じ。
+    /// 完了とは違う音を当てて、耳だけで「終わった」と「呼ばれている」を区別する。
+    pub sound_waiting: String,
     /// 装飾的な動きを静止するアクセシビリティ設定。GPUI の `reduce_motion` へ接続し、
     /// スピナー・fade・マスコットなどの継続アニメーションを静止画として描く。
     pub reduce_motion: bool,
@@ -142,6 +182,8 @@ pub struct Settings {
     /// スレッドタブの見せ方（"bar" 横タブ / "list" 縦リスト）。Agent パネルのスイッチャがここへ保存し、
     /// 次の起動でも保つ。設定画面のトグル化は後続（真実はこの値・画面はこれを操作するだけ）。
     pub agent_tabs_view: String,
+    /// 作業ペイン / ファイルタブの既定位置。各 Fleet ペインは個別に上書きできる。
+    pub work_tabs_position: String,
     /// 新規スレッドの既定 AI エージェント（表示名。`acp_client::AGENT_LABELS` のいずれか）。
     /// **変更は Settings 画面（★ 既定にする）でのみ** — composer のピルはこのグローバル既定を書き換えない
     /// （哲学「自分で決めた既定はドリフトしない」・DECISIONS §8）。
@@ -160,6 +202,9 @@ pub struct Settings {
     /// エージェントの起動方法の上書き（necoder の `AgentKind::id` がキー。例 `"codex"`）。
     /// 空＝レジストリと組み込みカタログに従う（通常はこれ）。詳細は [`AgentServerSetting`]。
     pub agent_servers: BTreeMap<String, AgentServerSetting>,
+    /// スレッドのセッションでエージェントへ渡す MCP サーバ（サーバ名がキー）。詳細は [`McpServerSetting`]。
+    /// 空＝他ツールから発見した分だけが一覧に並び、どれも渡さない（有効化は明示だけ）。
+    pub mcp_servers: BTreeMap<String, McpServerSetting>,
     /// worktree 削除の前に確認ダイアログを出すか（既定 on・2026-07-27）。
     /// **off にしても「失うものがある」ときは必ず確認する** — 未コミットの変更は git にも残らないので、
     /// 「二度と聞くな」の対象は *取り返しがつく* 削除に限る（DECISIONS の該当項）。
@@ -191,15 +236,19 @@ impl Default for Settings {
             locale: None,
             submit_on_enter: false,
             agent_auto_name: true,
-            completion_sound: true,
+            agent_prewarm: true,
+            sound_done: "nya".to_string(),
+            sound_waiting: "nya".to_string(),
             reduce_motion: false,
             tier2_summaries: true,
             coordinator_agent: None,
             fleet_goal: None,
             agent_tabs_view: "bar".to_string(),
+            work_tabs_position: "top".to_string(),
             default_agent: "Claude Code".to_string(),
             agent_config_defaults: BTreeMap::new(),
             agent_servers: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
@@ -217,13 +266,16 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "tab_size": 4,
   "submit_on_enter": false,
   "agent_auto_name": true,
-  "completion_sound": true,
+  "agent_prewarm": true,
+  "sound_done": "nya",
+  "sound_waiting": "nya",
   "reduce_motion": false,
   "tier2_summaries": true,
   "agent_tabs_view": "bar",
   "default_agent": "Claude Code",
   "confirm_worktree_delete": true,
   "agent_servers": {},
+  "mcp_servers": {},
   "html_preview_evict_minutes": 15,
   "onboarded": false,
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }
@@ -360,6 +412,44 @@ pub fn persist_agent_config_default(
     Ok(())
 }
 
+/// `mcp_servers.<name>.enabled` の 1 点だけを user 設定ファイルへ書き込む（設定画面のトグル）。
+/// [`persist_agent_config_default`] と同じ理由で **user ファイル自身の値だけ**を読んで更新する
+/// （マージ済みの解決値を書き戻すと project 層の定義を user へ焼き込んでしまう）。
+/// 自前定義（`command` / `url` を持つ行）の他フィールドは触らない。
+pub fn persist_mcp_enabled(path: &Path, name: &str, enabled: bool) -> Result<()> {
+    let mut root: Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    let map = root.as_object_mut().expect("上で object を保証");
+    let servers = map
+        .entry("mcp_servers")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !servers.is_object() {
+        *servers = Value::Object(serde_json::Map::new());
+    }
+    let entry = servers
+        .as_object_mut()
+        .expect("直前で object を保証")
+        .entry(name)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = Value::Object(serde_json::Map::new());
+    }
+    entry
+        .as_object_mut()
+        .expect("直前で object を保証")
+        .insert("enabled".to_string(), Value::Bool(enabled));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("設定ディレクトリを作れない: {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&root).context("設定の JSON 化に失敗")?;
+    std::fs::write(path, text).with_context(|| format!("設定を書けない: {}", path.display()))?;
+    Ok(())
+}
+
 /// `overlay` を `base` に深くマージする。オブジェクトは再帰、それ以外は置換。
 fn merge_value(base: &mut Value, overlay: &Value) {
     match (base, overlay) {
@@ -423,6 +513,63 @@ mod tests {
             base,
             serde_json::from_str::<Value>(r#"{ "a": { "x": 1, "y": 9, "z": 3 } }"#).unwrap()
         );
+    }
+
+    #[test]
+    fn reads_both_shapes_of_mcp_server_settings() {
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{ "mcp_servers": {
+                   "higgsfield": { "enabled": true },
+                   "tools": { "command": "npx", "args": ["-y", "tools-mcp"], "env": { "A": "1" } },
+                   "private": { "type": "http", "url": "https://example.invalid/mcp",
+                                "headers": { "Authorization": "Bearer ${TOKEN}" } }
+                 } }"#,
+        ])
+        .expect("マージできる");
+        let servers = &store.settings().mcp_servers;
+        assert_eq!(servers.len(), 3);
+        // 有効/無効だけの行（発見済みサーバのトグル）。
+        let higgsfield = &servers["higgsfield"];
+        assert_eq!(higgsfield.enabled, Some(true));
+        assert!(higgsfield.command.is_none() && higgsfield.url.is_none());
+        // 自前定義（stdio）。
+        assert_eq!(servers["tools"].command.as_deref(), Some("npx"));
+        assert_eq!(servers["tools"].args, vec!["-y", "tools-mcp"]);
+        assert_eq!(servers["tools"].env["A"], "1");
+        // 自前定義（http）。`type` は `transport` の別名として読める。
+        assert_eq!(servers["private"].transport.as_deref(), Some("http"));
+        assert_eq!(
+            servers["private"].headers["Authorization"],
+            "Bearer ${TOKEN}"
+        );
+    }
+
+    #[test]
+    fn persists_only_the_enabled_flag_of_one_mcp_server() {
+        let dir = std::env::temp_dir().join(format!("necoder_mcp_persist_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).expect("作れる");
+        std::fs::write(
+            &path,
+            r#"{ "theme": "necoder-light",
+                 "mcp_servers": { "tools": { "command": "npx", "enabled": true } } }"#,
+        )
+        .expect("書ける");
+
+        persist_mcp_enabled(&path, "tools", false).expect("保存できる");
+        persist_mcp_enabled(&path, "higgsfield", true).expect("保存できる");
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("読める")).expect("JSON");
+        // 他のキーも、自前定義の他フィールドも触らない。
+        assert_eq!(written["theme"], "necoder-light");
+        assert_eq!(written["mcp_servers"]["tools"]["command"], "npx");
+        assert_eq!(written["mcp_servers"]["tools"]["enabled"], false);
+        // 未知の名前は「発見済みサーバの on/off だけの行」として足される。
+        assert_eq!(written["mcp_servers"]["higgsfield"]["enabled"], true);
+        assert!(written["mcp_servers"]["higgsfield"]["command"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

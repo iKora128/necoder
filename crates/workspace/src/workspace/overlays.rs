@@ -458,6 +458,9 @@ impl Workspace {
                     TabContent::Image(view) => {
                         view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
                     }
+                    TabContent::Pdf(view) => {
+                        view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
+                    }
                 }
             }
             if let Some(split) = &session.split_editor {
@@ -565,9 +568,11 @@ impl Workspace {
             }
             PickerEvent::Confirmed(id) => {
                 let id = *id;
+                let query = _picker.read(cx).query().to_string();
                 let mode = self.overlays.picker_mode;
                 self.close_picker(window, cx);
                 match mode {
+                    PickerMode::Worktrees => self.confirm_worktree_choice(id, query, cx),
                     PickerMode::Files => {
                         // 空プロジェクトの作成アクション（番兵 id）: エクスプローラの
                         // インライン命名へ繋ぐ（命名入力が見えるよう左ドックは開く）。

@@ -437,7 +437,11 @@ impl Workspace {
         // 復元で開いた（= まだ host に何も聞いていない）project の添字。窓が出た後に
         // 背景で中身を埋める（`hydrate_restored_projects`）。
         let mut restored_indexes: Vec<usize> = Vec::new();
-        for source in sources {
+        // `projects[i]` が `sources` の何番目から来たか。開けなかった source は飛ばすので、
+        // ここを持たないと復元タブ列（source と同じ並びで渡ってくる）が 1 つずつずれて
+        // 隣のプロジェクトへ入る＝閉じたはずのタブが別プロジェクトに戻る（2026-09-10）。
+        let mut source_map: Vec<usize> = Vec::new();
+        for (source_index, source) in sources.into_iter().enumerate() {
             let (host, root, restored) = source.into_parts_with_trust();
             // 復元は「再会」なので身元確認をやり直さない。remote では with_host の 3 往復が
             // そのまま窓の表示待ちになる（2026-09-06）。
@@ -490,6 +494,7 @@ impl Workspace {
                     if !restored || !slot.worktree.is_remote() {
                         slot.refresh();
                     }
+                    source_map.push(source_index);
                     projects.push(slot);
                 }
                 Err(error) => eprintln!("プロジェクトを開けない（スキップ）: {error:#}"),
@@ -536,7 +541,14 @@ impl Workspace {
                 results
             })
         });
-        let active = active.min(projects.len().saturating_sub(1));
+        // `active` も source 基準で渡ってくる。飛ばされた分を詰めて projects 基準へ写す
+        // （アクティブ自体が開けなかったら、その手前で生き残った 1 つへ寄せる）。
+        let active = source_map
+            .iter()
+            .position(|index| *index == active)
+            .or_else(|| source_map.iter().rposition(|index| *index < active))
+            .unwrap_or(0)
+            .min(projects.len().saturating_sub(1));
         let focus_handle = cx.focus_handle();
         let explorer_view = match std::env::var("NECODER_EXPLORER_VIEW").as_deref() {
             Ok("icons") => ExplorerView::Icons,
@@ -654,6 +666,12 @@ impl Workspace {
             theme,
             focus_handle,
             chrome: ChromeState {
+                worktree_choices: Vec::new(),
+                worktree_origin: None,
+                work_layout: WorkLayoutState::default(),
+                work_menu: None,
+                work_embedded: None,
+                work_resize: None,
                 show_left: true,
                 show_right: true,
                 show_bottom: false,
@@ -677,7 +695,7 @@ impl Workspace {
                 fleet_center_view: if std::env::var_os("NECODER_CONTROL").is_some() {
                     FleetCenterView::Control
                 } else {
-                    FleetCenterView::Graph
+                    FleetCenterView::Work
                 },
                 graph_view: match std::env::var("NECODER_GRAPH").as_deref() {
                     Ok("hub") => GraphView::Hub,
@@ -757,6 +775,8 @@ impl Workspace {
             control_summary: None,
             control_summary_gen: 0,
             focus_recovery_installed: false,
+            last_focused: None,
+            restored_source_map: source_map,
         };
         // remote の接続状態を statusbar へ（購読は host ごとに 1 本・I/O 無し）。
         workspace.ensure_connection_pumps(cx);
@@ -922,6 +942,7 @@ impl Workspace {
         })
         .detach();
         workspace.hydrate_restored_projects(restored_indexes, cx);
+        workspace.ensure_work_layout(cx);
         workspace.save_state(cx); // 起動時点で状態を書く（再起動復元のため）
         workspace
     }
@@ -1013,7 +1034,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        for (index, tabs) in restored.iter().enumerate() {
+        // `restored` は構築時の `sources` と同じ並び。開けなかった source は projects に居ないので、
+        // 添字ではなく構築時の写像で対応づける（ずらすと隣のプロジェクトのタブ列が入る）。
+        let source_map = std::mem::take(&mut self.restored_source_map);
+        for (index, source_index) in source_map.iter().enumerate() {
+            let Some(tabs) = restored.get(*source_index) else {
+                continue;
+            };
             if let Some(slot) = self.project_sessions.projects.get_mut(index) {
                 slot.open_files = tabs.files.clone();
                 slot.active_file = tabs.active;
@@ -1083,6 +1110,7 @@ impl Workspace {
         }
         self.dismiss_buffer_search(cx);
         self.close_hover(cx);
+        self.exit_agent_full_screen(cx); // 全画面のままだと開いた diff が画面に出ない
         let theme = self.theme.clone();
         let accent = self
             .active_slot()

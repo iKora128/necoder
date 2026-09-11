@@ -21,8 +21,8 @@ use theme_core::Theme;
 mod remote;
 
 pub use settings_core::{
-    persist_agent_config_default, persist_user_value, user_settings_path, Density, Settings,
-    SettingsStore,
+    persist_agent_config_default, persist_mcp_enabled, persist_user_value, user_settings_path,
+    Density, McpServerSetting, Settings, SettingsStore,
 };
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
@@ -113,6 +113,55 @@ pub fn set_agent_config_default(cx: &mut App, agent_id: &str, config_id: &str, v
     }
 }
 
+/// `mcp_servers.<name>.enabled` を更新して**即適用 + 永続化**する（設定画面のトグル）。
+/// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。次に開くセッションから効く。
+pub fn set_mcp_enabled(cx: &mut App, name: &str, enabled: bool) {
+    let path = cx
+        .try_global::<SettingsGlobal>()
+        .and_then(|global| global.user_path.clone());
+    if let Some(path) = path {
+        if let Err(error) = persist_mcp_enabled(&path, name, enabled) {
+            eprintln!("MCP サーバの有効/無効の保存に失敗（実行時のみ反映）: {error:#}");
+        }
+    }
+    if cx.has_global::<SettingsGlobal>() {
+        cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
+    }
+}
+
+/// このマシンで使える MCP サーバの一覧（**設定 + 他ツールからの発見**を突き合わせた結果）。
+///
+/// 設定画面はこれを並べてトグルし、スレッドはこれを [`acp_client::SessionPreferences`] へ渡す
+/// ＝画面に出ているものと実際にエージェントへ渡るものが同じ 1 本の解決結果になる。
+/// 他ツールの設定ファイルを読む（数 KB の JSON/TOML を 3 本）ので、毎フレームではなく
+/// 「設定を開いた時」「セッションを起こす時」に呼ぶこと。
+pub fn mcp_servers(cx: &App) -> Vec<acp_client::mcp::McpServerConfig> {
+    let settings = get(cx);
+    let overrides = settings
+        .mcp_servers
+        .iter()
+        .map(|(name, setting)| (name.clone(), mcp_override(setting)))
+        .collect();
+    acp_client::mcp::resolve(&overrides, acp_client::mcp::discover())
+}
+
+/// 設定スキーマ（`settings_core`）を acp_client の言葉へ写す。
+/// 伝送方式の解釈は他ツールの設定を読む時と**同じ 1 つの規則**に委ねる
+/// （[`acp_client::mcp::transport_from_parts`]）— 同じ書き方が場所によって別の意味にならない。
+fn mcp_override(setting: &McpServerSetting) -> acp_client::mcp::McpServerOverride {
+    acp_client::mcp::McpServerOverride {
+        enabled: setting.enabled,
+        transport: acp_client::mcp::transport_from_parts(
+            setting.transport.as_deref(),
+            setting.command.as_deref(),
+            &setting.args,
+            &setting.env,
+            setting.url.as_deref(),
+            &setting.headers,
+        ),
+    }
+}
+
 /// user/project の settings.json を poll 監視し、**解決値が実際に変わった時だけ** global を更新する。
 fn spawn_watcher(user_path: Option<PathBuf>, project_dir: Option<PathBuf>, cx: &mut App) {
     let project_file = project_settings_path(project_dir.as_deref());
@@ -186,6 +235,9 @@ pub struct SettingsView {
     /// 外観セクションに並べるテーマ一覧（組み込み + 同梱 + ユーザー JSON）。
     /// 描画毎の fs 走査を避けてキャッシュし、設定を開き直すたび [`Self::refresh_availability`] で更新。
     themes: Vec<(SharedString, theme_core::ThemeSource)>,
+    /// MCP サーバの一覧（設定 + 他ツールからの発見）。描画毎に 3 本のファイルを読まないよう
+    /// キャッシュし、設定を開き直すたび / トグルするたびに [`Self::refresh_availability`] で更新。
+    mcp_servers: Vec<acp_client::mcp::McpServerConfig>,
     /// ターミナル用 `ne` シム（cli_shim crate）の設置状態。`Some(実体パス)` = 設置済み。
     cli_shim_target: Option<PathBuf>,
     /// `ne` シムの設置/削除を実行中（連打防止・「実行中…」表示）。
@@ -211,6 +263,7 @@ impl SettingsView {
             availability_generation: 0,
             watching_agents: vec![false; acp_client::AGENTS.len()],
             themes: theme_core::available_themes(themes_dir().as_deref()),
+            mcp_servers: Vec::new(),
             cli_shim_target: None,
             cli_shim_busy: false,
             cli_shim_error: None,
@@ -234,6 +287,7 @@ impl SettingsView {
     /// テーマ一覧もここで読み直す（設定を開くたび＝`themes/` に JSON を足した直後も反映される）。
     pub fn refresh_availability(&mut self, cx: &mut Context<Self>) {
         self.themes = theme_core::available_themes(themes_dir().as_deref());
+        self.mcp_servers = mcp_servers(cx);
         self.availability_generation = self.availability_generation.wrapping_add(1);
         self.checking_agents = true;
         let generation = self.availability_generation;
@@ -536,6 +590,11 @@ impl SettingsView {
     }
 
     /// 設定行の器（左=ラベル+副題 / 右=コントロール）。
+    ///
+    /// 左列は `flex_1` + **`min_w_0` をセットで**付ける（crate 冒頭の GPUI の罠と同じ）。
+    /// `min_w_0` が無いと、長い副題（MCP の stdio コマンドは絶対パスで 100 文字を超える）が
+    /// 縮まずに右のコントロールを押し出し、**トグルが幅 0 に潰れて押せなくなる**
+    /// （2026-09-10 の offscreen 目視で発見）。コントロール側も潰されないよう縮小を止める。
     fn pref_row(&self, label: String, sub: Option<String>, control: gpui::AnyElement) -> Div {
         let theme = self.theme.clone();
         div()
@@ -554,6 +613,7 @@ impl SettingsView {
                     .flex_col()
                     .gap(px(1.))
                     .flex_1()
+                    .min_w_0()
                     .child(
                         div()
                             .text_size(px(13.))
@@ -569,7 +629,7 @@ impl SettingsView {
                         )
                     }),
             )
-            .child(control)
+            .child(div().flex_shrink_0().child(control))
     }
 
     fn toggle_row(
@@ -792,6 +852,98 @@ impl SettingsView {
             ))
     }
 
+    // ── MCP サーバ（ACP セッションへ渡す道具）────────────────────────────────────
+
+    /// 1 件の on/off を保存し、一覧を読み直す（次に開くスレッドのセッションから効く）。
+    fn toggle_mcp_server(&mut self, name: String, enabled: bool, cx: &mut Context<Self>) {
+        set_mcp_enabled(cx, &name, enabled);
+        self.mcp_servers = mcp_servers(cx);
+        cx.notify();
+    }
+
+    /// 「MCP サーバ」セクション。necoder の設定に書いたものと、他ツール（Codex CLI /
+    /// Claude Code / Cursor）の設定から**発見**したものを 1 つの一覧に並べ、トグルで有効化する。
+    ///
+    /// ACP は「どの MCP サーバへ繋ぐか」をクライアントが決めるプロトコルなので、ここで on に
+    /// したものだけがエージェントから見える（エージェント側の設定ファイルはセッションに出てこない）。
+    /// 発見しただけのものが既定 off なのは、他人の設定を根拠に子プロセスを起こしたり課金される
+    /// リモートサーバへ繋いだりしないため。
+    fn mcp_section(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let mut rows = div().flex().flex_col().gap(px(6.));
+        for (index, server) in self.mcp_servers.iter().enumerate() {
+            let name = server.name.clone();
+            let enabled = server.enabled;
+            // 出所のラベルはキーを literal で並べる（動的に組むと locales の書き忘れに気づけない）。
+            let source = match server.source {
+                acp_client::mcp::McpSource::Necoder => i18n::t!("settings.mcp_source_necoder"),
+                acp_client::mcp::McpSource::Codex => i18n::t!("settings.mcp_source_codex"),
+                acp_client::mcp::McpSource::ClaudeCode => i18n::t!("settings.mcp_source_claude"),
+                acp_client::mcp::McpSource::Cursor => i18n::t!("settings.mcp_source_cursor"),
+            };
+            let control = self
+                .switch(("mcp-server", index), enabled)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| {
+                        view.toggle_mcp_server(name.clone(), !enabled, cx)
+                    }),
+                )
+                .into_any_element();
+            rows = rows.child(self.pref_row(
+                server.name.clone(),
+                Some(format!("{source} · {}", server.transport.summary())),
+                control,
+            ));
+        }
+        if self.mcp_servers.is_empty() {
+            rows = rows.child(
+                div()
+                    .px(px(12.))
+                    .py(px(9.))
+                    .rounded(px(8.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(px(11.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.mcp_empty"))),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.fg1)
+                            .child(SharedString::from(i18n::t!("settings.mcp_heading"))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(i18n::t!("settings.mcp_sub"))),
+                    ),
+            )
+            .child(rows)
+            .child(
+                // 注記は fg2（色は識別のためだけに使う・UI-SPEC §1。ここを accent にしない）。
+                div()
+                    .px(px(12.))
+                    .text_size(px(10.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.mcp_note"))),
+            )
+    }
+
     /// 「動作とエディタ」セクション（真実は settings.json・ここは操作面）。
     fn preferences_section(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
         let theme = self.theme.clone();
@@ -851,11 +1003,11 @@ impl SettingsView {
                 cx,
             ))
             .child(self.toggle_row(
-                "completion_sound",
-                4,
-                i18n::t!("settings.pref_completion_sound"),
-                Some(i18n::t!("settings.pref_completion_sound_sub")),
-                settings.completion_sound,
+                "agent_prewarm",
+                6,
+                i18n::t!("settings.pref_agent_prewarm"),
+                Some(i18n::t!("settings.pref_agent_prewarm_sub")),
+                settings.agent_prewarm,
                 cx,
             ))
             .child(self.toggle_row(
@@ -887,6 +1039,28 @@ impl SettingsView {
                 cx,
             ))
             .child(self.segmented_row(
+                "sound_done",
+                i18n::t!("settings.pref_sound_done"),
+                &[
+                    ("nya", i18n::t!("settings.sound_nya")),
+                    ("system", i18n::t!("settings.sound_system")),
+                    ("off", i18n::t!("settings.sound_off")),
+                ],
+                &settings.sound_done,
+                cx,
+            ))
+            .child(self.segmented_row(
+                "sound_waiting",
+                i18n::t!("settings.pref_sound_waiting"),
+                &[
+                    ("nya", i18n::t!("settings.sound_nya")),
+                    ("system", i18n::t!("settings.sound_system")),
+                    ("off", i18n::t!("settings.sound_off")),
+                ],
+                &settings.sound_waiting,
+                cx,
+            ))
+            .child(self.segmented_row(
                 "agent_tabs_view",
                 i18n::t!("settings.pref_tabs_view"),
                 &[
@@ -894,6 +1068,16 @@ impl SettingsView {
                     ("list", i18n::t!("settings.tabs_view_list")),
                 ],
                 &settings.agent_tabs_view,
+                cx,
+            ))
+            .child(self.segmented_row(
+                "work_tabs_position",
+                i18n::t!("work.tabs_setting"),
+                &[
+                    ("top", i18n::t!("work.top")),
+                    ("left", i18n::t!("work.left")),
+                ],
+                &settings.work_tabs_position,
                 cx,
             ))
     }
@@ -1125,6 +1309,9 @@ impl Render for SettingsView {
                     .when(cli_shim::supported(), |element| {
                         element.child(self.cli_section(cx))
                     })
+                    // 道具（MCP）はエージェントの直後に置く — 「どのエージェントか」の次に
+                    // 決めるのが「そのエージェントに何を持たせるか」。
+                    .child(self.mcp_section(cx))
                     .child(self.appearance_section(&settings, cx))
                     .child(self.remote_section(cx))
                     .child(self.preferences_section(&settings, cx))

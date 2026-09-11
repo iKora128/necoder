@@ -32,6 +32,12 @@ pub(crate) struct PersistedState {
     pub(crate) projects: Vec<PersistedProject>,
     #[serde(default)]
     pub(crate) active: usize,
+    #[serde(default)]
+    pub(crate) work_layout: crate::workspace::WorkLayoutState,
+    #[serde(default)]
+    pub(crate) fleet_mode: bool,
+    #[serde(default)]
+    pub(crate) fleet_view: String,
 }
 
 #[derive(Debug, Clone)]
@@ -230,11 +236,30 @@ impl WindowSessionWriter {
 
     /// ユーザーが窓を閉じた: 以後の書き込みを止め、行に閉じ印を付ける（二度目以降は no-op）。
     /// 窓を閉じた直後に ⌘Q されても印が残るよう、ここだけは同期で書く（1 UPDATE・§9 の例外）。
-    pub(crate) fn close(&self) {
+    ///
+    /// **閉じ印の前に、その窓の最後の状態を書き切る**。`final_payload` は窓を閉じる瞬間に
+    /// Workspace が作った完全な payload（None なら郵便受けに残っている最新）。ここを捨てると
+    /// 「タブを閉じてすぐ窓を閉じる」で最後のタブ操作が無かったことになり、次回起動で復活する。
+    pub(crate) fn close(&self, final_payload: Option<String>) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        lock_mailbox(&self.mailbox).take();
+        let queued = lock_mailbox(&self.mailbox).take();
+        let pending = final_payload.or(queued);
+        // 走っている書き手と合流してから書く（古い payload に追い越されない。
+        // gate を取った書き手は `closed` を見て自分の分を捨てる）。
+        let _write_guard = self
+            .write_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(payload) = pending {
+            if let Err(error) = self
+                .storage
+                .upsert_window_session(&self.window_id, &payload)
+            {
+                eprintln!("窓を閉じる直前の窓セッションを保存できない: {error:#}");
+            }
+        }
         if let Err(error) = self.storage.mark_window_session_closed(&self.window_id) {
             eprintln!("窓セッションに閉じ印を付けられない: {error:#}");
         }
@@ -260,7 +285,11 @@ pub fn install_window_close_hook(window: &Window, cx: &App, persistence: &Window
     let writer = WindowSessionWriter::new(storage, window_id);
     window.on_window_should_close(cx, move |_window, _cx| {
         if !is_quitting() {
-            writer.close();
+            // ここで Workspace 側を触りに行くことはできない（この窓は今まさに update 中で、
+            // `WindowHandle::update` は入れ子を Err で弾く）。閉じ印だけを付け、Workspace 側の
+            // 書き手はそのまま生かす＝郵便受けに残っている分は background の書き手が流し切る
+            // （`upsert_window_session` は closed_at を触らないので印は消えない）。
+            writer.close(None);
         }
         true
     });
@@ -291,6 +320,7 @@ mod tests {
                 },
             ],
             active: 1,
+            ..Default::default()
         };
         let payload = encode_window_session(&state).expect("JSON にできる");
         let (projects, active) = decode_window_session(&payload).expect("復元できる");
