@@ -140,7 +140,18 @@ jobs:
           rm -rf target/dmg-staging && mkdir -p target/dmg-staging
           ditto target/necoder.app target/dmg-staging/necoder.app
           ln -s /Applications target/dmg-staging/Applications
-          hdiutil create -volname necoder -srcfolder target/dmg-staging -ov -format UDZO target/necoder.dmg
+          # **イメージのサイズは自分で決める**（2026-09-11・v0.1.15 の 1 回目が落ちた）。
+          # `-srcfolder` だけを渡すと hdiutil が中身から容量を見積もるが、この見積もりは
+          # .app のような「小さいファイルが大量」の構成でファイルシステムのメタデータぶんを
+          # 取りこぼし、ホストに 36GiB 空いていても**マウントしたボリューム側**が
+          # `No space left on device` で埋まる（エラーが /Volumes/necoder/… を指すのが目印で、
+          # ホストの df を見ても何も分からない）。実測 80MB の .app に対して倍 + 256MB を渡す。
+          # UDZO は最終的に圧縮されるので、盛っても配布物のサイズには出ない。
+          staging_mb=$(du -sm target/dmg-staging | cut -f1)
+          image_mb=$(( staging_mb * 2 + 256 ))
+          echo "staging: ${staging_mb}MB → image: ${image_mb}MB"
+          hdiutil create -volname necoder -srcfolder target/dmg-staging -ov \
+            -format UDZO -size "${image_mb}m" target/necoder.dmg
           # ディスクイメージ自体にも署名する。中の .app だけ署名して notarize/staple しても、
           # dmg が未署名だと Gatekeeper が「no usable signature」で弾く（= ダウンロードした
           # dmg を開いた時の「壊れているため開けません」）。notarize の前に署名するのが正しい順序。
