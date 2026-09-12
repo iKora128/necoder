@@ -955,6 +955,23 @@ impl Storage {
         })
     }
 
+    /// アーカイブを解除する（⌘⇧T / 履歴から開き直したスレッドを一覧へ戻す）。
+    /// 解除しないと、開き直したタブが次回起動で消える（閉じ判定の逆側の取りこぼし）。
+    pub fn unarchive_thread(&self, thread_id: &str) -> Result<()> {
+        let thread_id = thread_id.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "UPDATE threads SET archived = 0 WHERE id = ?1",
+                    (thread_id.as_str(),),
+                )
+                .await
+                .context("threads のアーカイブ解除に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
     // ── checkpoint（M12-2・content-addressed。DECISIONS 決定ログ 2026-07-17） ──
 
     /// checkpoint を 1 つ記録する。`files` は (パス, その時点の内容。None = 当時ファイルが無かった)。
@@ -2236,6 +2253,10 @@ mod tests {
         // アーカイブで一覧から消える
         storage.archive_thread("t2").unwrap();
         assert_eq!(storage.load_threads().unwrap().len(), 1);
+        // 解除で戻る（⌘⇧T / 履歴から開き直した分）
+        storage.unarchive_thread("t2").unwrap();
+        assert_eq!(storage.load_threads().unwrap().len(), 2);
+        storage.archive_thread("t2").unwrap();
         // 台帳
         let ledger = storage.token_ledger().unwrap();
         assert_eq!(ledger[0].2, 2400);

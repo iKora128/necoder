@@ -396,9 +396,17 @@ impl Workspace {
             ),
         };
         if let Some(session) = self.project_sessions.sessions.get(index) {
-            session.agent_panel.update(cx, |panel, cx| {
-                panel.set_destination(name, branch, host, cwd, cx)
-            });
+            for panel in &session.fleet_agents {
+                panel.update(cx, |panel, cx| {
+                    panel.set_destination(
+                        name.clone(),
+                        branch.clone(),
+                        host.clone(),
+                        cwd.clone(),
+                        cx,
+                    )
+                });
+            }
         }
         self.refresh_context_files_for(index, cx);
     }
@@ -442,9 +450,9 @@ impl Workspace {
                     return;
                 }
                 if let Some(session) = workspace.project_sessions.sessions.get(index) {
-                    session
-                        .agent_panel
-                        .update(cx, |panel, cx| panel.set_context_files(files, cx));
+                    for panel in &session.fleet_agents {
+                        panel.update(cx, |panel, cx| panel.set_context_files(files.clone(), cx));
+                    }
                 }
             });
         })

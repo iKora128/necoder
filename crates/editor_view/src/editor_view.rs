@@ -1544,11 +1544,19 @@ impl EditorView {
     }
 
     /// Esc。複数選択を 1 個へ畳む（単一なら何もしない＝他のオーバーレイの Esc を邪魔しない）。
+    ///
+    /// **畳まなかったときは握り潰さない**のが肝。GPUI は action listener を呼ぶ**前に**伝播を
+    /// 止めるので（`Window::dispatch_action_on_node`）、何もしなくても `cx.propagate()` を
+    /// 言わない限り Esc はここで死ぬ。既定 keymap は `Editor` 文脈で `escape` を
+    /// `editor::Cancel` に割り当てている＝入力欄にフォーカスがあると、親の Esc
+    /// （Agent パネルのターン中断など）へ一生届かなかった（2026-09-11）。
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         if self.buffer.collapse_to_primary() {
             self.blink_visible = true;
             cx.notify();
+            return;
         }
+        cx.propagate();
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {

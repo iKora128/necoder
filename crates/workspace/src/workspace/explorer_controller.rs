@@ -775,10 +775,9 @@ impl Workspace {
         self.chrome.fleet_cell_menu = None;
         // 消す前にそこで走っているエージェントを止める（削除中に worktree へ書かれるのを防ぐ）。
         if let Some(session) = self.project_sessions.sessions.get(index) {
-            session
-                .agent_panel
-                .clone()
-                .update(cx, |panel, cx| panel.cancel_all_turns(cx));
+            for panel in &session.fleet_agents {
+                panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
+            }
         }
         // レール最後の1枚の worktree を消すと空レール＋ディスク破壊になる → 事前に断る（安全側）。
         if self.project_sessions.projects.len() <= 1 {

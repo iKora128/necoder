@@ -38,14 +38,15 @@ use editor_view::{ComposerEvent, EditorView};
 use futures::channel::mpsc;
 use futures::StreamExt;
 use gpui::{
-    actions, canvas, div, list, prelude::*, px, relative, svg, Animation, AnimationExt, App,
-    ClipboardItem, Context, Corners, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable,
-    FollowMode, FontWeight, HighlightStyle, Hsla, IntoElement, KeyDownEvent, ListAlignment,
-    ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, RenderImage,
-    ScrollHandle, SharedString, StyleRefinement, StyledText, TextLayout, Window,
+    actions, canvas, div, list, prelude::*, px, relative, svg, Animation, AnimationExt, AnyElement,
+    App, Bounds, ClipboardItem, Context, Corners, CursorStyle, ElementId, Entity, ExternalPaths,
+    FocusHandle, Focusable, FollowMode, FontWeight, GlobalElementId, HighlightStyle, Hsla,
+    InspectorElementId, IntoElement, KeyDownEvent, LayoutId, ListAlignment, ListOffset, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, RenderImage, ScrollHandle,
+    SharedString, StyleRefinement, StyledText, TextLayout, Window,
 };
 use host::{Host, LocalHost};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
@@ -172,16 +173,110 @@ fn previous_user_entry_index(entries: &[Entry], top_item: usize) -> Option<usize
         .rposition(|entry| matches!(entry, Entry::User(_)))
 }
 
-/// transcript の選択可能リージョン（毎フレーム再構築・M13）。`layout` は同フレームの
-/// paint 後に有効になる（transcript は全リージョン描画 = 登録したものは必ず paint される）。
-/// リージョンの同一性は**登録順のインデックス**（= このベクタ内の位置）。1 エントリが markdown で
-/// 複数ブロック（＝複数リージョン）に割れても選択が破綻しないよう、エントリ index ではなく
-/// リージョン index を選択の基準にする。
+/// transcript の選択可能リージョンの同一性（エントリ index, そのエントリ内の連番）。
+/// タプル順 = 画面の上から下の順。1 エントリが markdown で複数ブロックに割れても選択が
+/// 破綻しないよう、エントリ index だけでなくブロックの連番まで見る。
+///
+/// **登録順ではない**のが肝: `list` は可視範囲だけを描く代わりに、可視外のエントリも
+/// 高さを知るために「計測だけ」描く。しかも末尾追従中は下から上へ向かって描くので、
+/// 登録順は画面順と一致しない（2026-09-11 のクラッシュの原因）。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct RegionId {
+    /// transcript item（= エントリ）の index。
+    item: usize,
+    /// そのエントリの中で積まれた順（markdown のブロックごとに 1 つ）。
+    sub: usize,
+}
+
+/// transcript の選択可能リージョン（毎フレーム再構築・M13）。
 struct SelectableRegion {
+    /// 画面上の位置で決まる同一性。選択範囲の前後はこの順で比べる。
+    id: RegionId,
     /// 表示テキストそのもの（コピーはここから切る。offset はこのテキスト基準）。
     text: SharedString,
     /// hash cache 上の永続 View。hit test 時に最新の TextLayout を読む。
     styled: Entity<CachedStyledTextView>,
+    /// **実際に描かれた**矩形（paint 時に記録）。`None` = このフレームでは画面に出ていない
+    /// （＝ `list` の計測専用パスで積まれただけ）。ヒットテストはこれを持つものだけを見る。
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+/// 積まれたリージョンを**画面順（id 順）**に並べた index 列。同じ id が二度積まれた場合
+/// （`list` は request_layout の計測と prepaint の描画で同じエントリを二度描く）は、
+/// 描かれた方を残して 1 つに畳む。
+fn ordered_region_indices(regions: &[SelectableRegion]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..regions.len()).collect();
+    // 同じ id では bounds を持つ（= 描かれた）方を先に置き、後続を dedup で落とす。
+    indices.sort_by_key(|&index| (regions[index].id, regions[index].bounds.get().is_none()));
+    indices.dedup_by_key(|&mut index| regions[index].id);
+    indices
+}
+
+/// 子（選択可能テキスト）が**実際に描かれた**矩形を記録するだけの通し要素。レイアウトは子の
+/// `LayoutId` をそのまま返すので、挟んでも折り返しも見た目も変わらない。`list` の計測専用パスは
+/// prepaint も paint も通らないので、この記録の有無が「画面に出ているか」の判定になる。
+/// prepaint ではなく paint で記録するのは、autoscroll のやり直しで prepaint が巻き戻される
+/// ことがあるため（`window.transact`）。
+struct RecordedBounds {
+    child: AnyElement,
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl Element for RecordedBounds {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+        self.bounds.set(Some(bounds));
+    }
+}
+
+impl IntoElement for RecordedBounds {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -242,8 +337,9 @@ struct StyledTextCacheKey {
     content: ContentCacheKey,
     styles_hash: u64,
     styles_len: usize,
-    /// 同じ本文が複数箇所にある場合も bounds を共有しないための描画順スロット。
-    region: usize,
+    /// 同じ本文が複数箇所にある場合も TextLayout を共有しないための登録順スロット。
+    /// 1 フレーム内で同じ View が二度描かれないよう、id ではなく登録順を鍵にする。
+    slot: usize,
 }
 
 /// 本文 hash ごとの独立 View。Entity の Render cache に `StyledText` と shape/wrap 済み layout が
@@ -426,10 +522,11 @@ impl SyntaxHighlightCache {
     }
 }
 
-/// transcript ドラッグ選択の 1 点（リージョン index, リージョン内 byte）。タプル順で比較。
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// transcript ドラッグ選択の 1 点（リージョン id, リージョン内 byte）。タプル順で比較 =
+/// 画面の上から下の順（`RegionId` が画面順なので、登録順が入れ替わっても前後がぶれない）。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct TranscriptPoint {
-    region: usize,
+    region: RegionId,
     offset: usize,
 }
 
@@ -609,13 +706,32 @@ impl ThreadActivity {
 
 /// 全ウィンドウ横断の「スレッド状態」台帳: worktree root → (スレッド名, 色, 状態)。
 /// ⌘O ダッシュボード・フッターのロールアップ・レールのドットが「どこで何が起きているか」を読む（M12-12・#）。
-/// 各窓の AgentPanel が自分の root のエントリを上書きする（書き手は窓ごとに排他）。
+/// 同じ root に複数 ACP があるため、各パネルの状態を集約する。
 #[derive(Default)]
 pub struct RunningRegistry(
     pub HashMap<std::path::PathBuf, Vec<(SharedString, Hsla, ThreadActivity)>>,
+    HashMap<
+        gpui::EntityId,
+        (
+            std::path::PathBuf,
+            Vec<(SharedString, Hsla, ThreadActivity)>,
+        ),
+    >,
 );
 
 impl gpui::Global for RunningRegistry {}
+
+impl RunningRegistry {
+    fn rebuild(&mut self) {
+        self.0.clear();
+        for (root, rows) in self.1.values() {
+            self.0
+                .entry(root.clone())
+                .or_default()
+                .extend(rows.iter().cloned());
+        }
+    }
+}
 
 /// あるエージェントが広告した選択肢の在庫（モデル・思考量・権限モード）。
 ///
@@ -1365,6 +1481,9 @@ pub struct AgentPanel {
     thread_list_scroll: ScrollHandle,
     /// transcript の選択可能リージョン（render で clear→push・mouse イベントが読む）。
     transcript_regions: Rc<RefCell<Vec<SelectableRegion>>>,
+    /// いま描いている transcript item と、その中で次に積むリージョンの連番（= [`RegionId`] 発番器）。
+    /// `list` はエントリを描く順も回数も約束しないので、登録順ではなくこの id を同一性にする。
+    transcript_region_cursor: Cell<RegionId>,
     /// transcript のドラッグ選択（None = 選択なし）。⌘C でコピー・Esc/外クリックで解除。
     transcript_selection: Option<TranscriptSelection>,
     /// ドラッグ選択中の最新ポインタ位置（ビュー外へ引っ張った時の自動スクロールが読む）。
@@ -1471,6 +1590,13 @@ impl AgentPanel {
     }
 
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
+        let panel_id = cx.entity_id();
+        cx.on_release(move |_, cx| {
+            let registry = cx.default_global::<RunningRegistry>();
+            registry.1.remove(&panel_id);
+            registry.rebuild();
+        })
+        .detach();
         // 設定は global（settings.json が真実）から取る。live-reload / CLI / MCP 変更に observe で追従。
         let submit_on_enter = settings::get(cx).submit_on_enter;
         let composer =
@@ -1544,11 +1670,11 @@ impl AgentPanel {
                     .update(cx, |panel, cx| {
                         panel.transcript_selection = Some(TranscriptSelection {
                             start: TranscriptPoint {
-                                region: 0,
+                                region: RegionId { item: 0, sub: 0 },
                                 offset: 3,
                             },
                             end: TranscriptPoint {
-                                region: 4,
+                                region: RegionId { item: 4, sub: 0 },
                                 offset: 9,
                             },
                             selecting: false,
@@ -1697,6 +1823,7 @@ PYEOF"#;
             embedded: false,
             thread_list_scroll: ScrollHandle::new(),
             transcript_regions: Rc::new(RefCell::new(Vec::new())),
+            transcript_region_cursor: Cell::new(RegionId { item: 0, sub: 0 }),
             transcript_selection: None,
             transcript_drag_position: None,
             transcript_autoscroll_running: false,
@@ -1773,6 +1900,14 @@ PYEOF"#;
         cx: &mut Context<Self>,
     ) {
         self.set_storage_inner(storage, Some(scope), Some(legacy_project), cx);
+    }
+
+    /// 同じ作業場所に追加する独立 ACP。既存パネルの会話は復元せず、新しい会話だけを保存する。
+    /// scope は共通なので再起動後の履歴には全ペインの会話が残る。
+    pub fn set_storage_for_new_pane(&mut self, storage: storage::Storage, scope: String) {
+        self.storage = Some(storage);
+        self.storage_scope = Some(scope);
+        self.persist_thread(self.active);
     }
 
     fn set_storage_inner(
@@ -2093,7 +2228,7 @@ PYEOF"#;
     }
 
     /// 実行中スレッド台帳（Global・全窓横断）へ自窓の状態を書く（⌘O ダッシュボード用・M12-12）。
-    /// キーは worktree root（= dest_cwd）。書き手は窓ごとに排他なので上書きで正しい。
+    /// 各パネルの行を保持してから root ごとにまとめる。他の ACP の状態を上書きしない。
     fn sync_running_registry(&self, cx: &mut Context<Self>) {
         let Some(root) = self.dest_cwd.clone() else {
             return;
@@ -2103,7 +2238,10 @@ PYEOF"#;
             .iter()
             .map(|thread| (thread.name.clone(), thread.color, thread.activity()))
             .collect();
-        cx.default_global::<RunningRegistry>().0.insert(root, rows);
+        let id = cx.entity_id();
+        let registry = cx.default_global::<RunningRegistry>();
+        registry.1.insert(id, (root, rows));
+        registry.rebuild();
     }
 
     /// 現在アクティブなスレッド名（herd 下段の「focus 中 worktree」見出し・M14）。空パネルは None。
@@ -2116,6 +2254,10 @@ PYEOF"#;
     /// いま選ばれているスレッドの添字（`statuses()` と同じ並び）。
     pub fn active_thread(&self) -> usize {
         self.active
+    }
+
+    pub fn contains_thread(&self, id: &str) -> bool {
+        self.threads.iter().any(|thread| thread.id == id)
     }
 
     /// Fleet の作業ペインへ埋め込むかどうか。埋め込み中は自前のスレッドタブ行を描かない。
@@ -2356,32 +2498,36 @@ PYEOF"#;
     /// 本文テキストを**選択可能**にして描く（M13・transcript ドラッグ選択の部品）。
     /// `base_highlights`（markdown の装飾など）に加え、選択範囲だけ背景（スレッド色）を
     /// `combine_highlights` で重ねる（重なりは端点スイープで非重複ランへ畳まれる＝入れ子強調も安全）。
-    /// layout を registry へ登録し、マウスイベントのヒットテストに使う。リージョン index = 登録順（描画順）。
+    /// layout を registry へ登録し、マウスイベントのヒットテストに使う。リージョンの同一性は
+    /// 登録順ではなく [`RegionId`]（エントリ index + ブロック連番 = 画面順）。
     fn push_selectable(
         &self,
         text: SharedString,
         base_highlights: Vec<(Range<usize>, HighlightStyle)>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let region_index = self.transcript_regions.borrow().len();
-        let selection = self
-            .region_selection(region_index, text.len())
-            .map(|range| {
-                (
-                    range,
-                    HighlightStyle {
-                        background_color: Some(self.active_color().alpha(0.30)),
-                        ..Default::default()
-                    },
-                )
-            });
+        let id = self.transcript_region_cursor.get();
+        self.transcript_region_cursor.set(RegionId {
+            item: id.item,
+            sub: id.sub + 1,
+        });
+        let slot = self.transcript_regions.borrow().len();
+        let selection = self.region_selection(id, text.len()).map(|range| {
+            (
+                range,
+                HighlightStyle {
+                    background_color: Some(self.active_color().alpha(0.30)),
+                    ..Default::default()
+                },
+            )
+        });
         let mut style_hasher = DefaultHasher::new();
         base_highlights.hash(&mut style_hasher);
         let key = StyledTextCacheKey {
             content: content_cache_key(text.as_ref()),
             styles_hash: style_hasher.finish(),
             styles_len: base_highlights.len(),
-            region: region_index,
+            slot,
         };
         let cached = {
             let cache = self.styled_text_cache.borrow();
@@ -2419,11 +2565,18 @@ PYEOF"#;
         styled.update(cx, |styled, cx| {
             styled.set_selection(selection, cx);
         });
+        let bounds = Rc::new(Cell::new(None));
         self.transcript_regions.borrow_mut().push(SelectableRegion {
+            id,
             text,
             styled: styled.clone(),
+            bounds: bounds.clone(),
         });
-        styled.into_any_element()
+        RecordedBounds {
+            child: styled.into_any_element(),
+            bounds,
+        }
+        .into_any_element()
     }
 
     /// 装飾なしの選択可能テキスト（プレーンなエントリ用）。
@@ -2432,7 +2585,7 @@ PYEOF"#;
     }
 
     /// リージョンに掛かる選択 byte range（無ければ None。offset はヒットテスト由来 = char 境界保証）。
-    fn region_selection(&self, region: usize, len: usize) -> Option<Range<usize>> {
+    fn region_selection(&self, region: RegionId, len: usize) -> Option<Range<usize>> {
         let (start, end) = self.transcript_selection.as_ref()?.normalized();
         if region < start.region || region > end.region {
             return None;
@@ -2451,6 +2604,8 @@ PYEOF"#;
     }
 
     /// マウス位置 → transcript 上の選択点。リージョンの隙間は直前リージョンの末尾へ丸める。
+    /// 走査は**画面順**（id 順）で、描かれたリージョンだけを見る: `list` が高さを測るためだけに
+    /// 描いたリージョンは画面のどこにも無いので、位置を持たない（＝踏むと落ちる）。
     fn transcript_point_at(
         &self,
         position: gpui::Point<gpui::Pixels>,
@@ -2458,28 +2613,31 @@ PYEOF"#;
     ) -> Option<TranscriptPoint> {
         let regions = self.transcript_regions.borrow();
         let mut previous_end: Option<TranscriptPoint> = None;
-        for (region_index, region) in regions.iter().enumerate() {
-            let styled = region.styled.read(cx);
-            let layout = &styled.layout;
-            let bounds = layout.bounds();
+        for index in ordered_region_indices(&regions) {
+            let region = &regions[index];
+            let Some(bounds) = region.bounds.get() else {
+                continue; // 計測だけされたリージョン = 画面に出ていない
+            };
             if position.y < bounds.top() {
                 // このリージョンより上 = 直前の末尾（最上部より上なら先頭）。
                 return Some(previous_end.unwrap_or(TranscriptPoint {
-                    region: region_index,
+                    region: region.id,
                     offset: 0,
                 }));
             }
             if position.y <= bounds.bottom() {
+                // bounds があるリージョンは paint 済み = TextLayout も prepaint 済み。
+                let layout = &region.styled.read(cx).layout;
                 let offset = match layout.index_for_position(position) {
                     Ok(index) | Err(index) => index.min(region.text.len()),
                 };
                 return Some(TranscriptPoint {
-                    region: region_index,
+                    region: region.id,
                     offset,
                 });
             }
             previous_end = Some(TranscriptPoint {
-                region: region_index,
+                region: region.id,
                 offset: region.text.len(),
             });
         }
@@ -2494,17 +2652,18 @@ PYEOF"#;
         }
         let regions = self.transcript_regions.borrow();
         let mut parts = Vec::new();
-        for (region_index, region) in regions.iter().enumerate() {
-            if region_index < start.region || region_index > end.region {
+        for index in ordered_region_indices(&regions) {
+            let region = &regions[index];
+            if region.id < start.region || region.id > end.region {
                 continue;
             }
             let text = region.text.as_ref();
-            let from = if region_index == start.region {
+            let from = if region.id == start.region {
                 start.offset.min(text.len())
             } else {
                 0
             };
-            let to = if region_index == end.region {
+            let to = if region.id == end.region {
                 end.offset.min(text.len())
             } else {
                 text.len()
@@ -2523,7 +2682,7 @@ PYEOF"#;
     /// point を含む「単語」の範囲（同一 region 内）。ダブルクリック選択用。
     fn transcript_word_span(&self, point: TranscriptPoint) -> (TranscriptPoint, TranscriptPoint) {
         let regions = self.transcript_regions.borrow();
-        let Some(region) = regions.get(point.region) else {
+        let Some(region) = regions.iter().find(|region| region.id == point.region) else {
             return (point, point);
         };
         let (start, end) = word_range_in(region.text.as_ref(), point.offset);
@@ -2540,19 +2699,17 @@ PYEOF"#;
     }
 
     /// region 全体（＝その markdown ブロック / 段落）の範囲。トリプルクリック選択用。
-    fn transcript_region_span(&self, region_index: usize) -> (TranscriptPoint, TranscriptPoint) {
+    fn transcript_region_span(&self, region: RegionId) -> (TranscriptPoint, TranscriptPoint) {
         let regions = self.transcript_regions.borrow();
         let length = regions
-            .get(region_index)
+            .iter()
+            .find(|candidate| candidate.id == region)
             .map(|region| region.text.len())
             .unwrap_or(0);
         (
+            TranscriptPoint { region, offset: 0 },
             TranscriptPoint {
-                region: region_index,
-                offset: 0,
-            },
-            TranscriptPoint {
-                region: region_index,
+                region,
                 offset: length,
             },
         )
@@ -2733,18 +2890,19 @@ PYEOF"#;
         cx: &mut Context<Self>,
     ) {
         let regions = self.transcript_regions.borrow();
-        let Some(last) = regions.last() else {
+        let ordered = ordered_region_indices(&regions);
+        let (Some(&first), Some(&last)) = (ordered.first(), ordered.last()) else {
             cx.propagate();
             return;
         };
         self.transcript_selection = Some(TranscriptSelection {
             start: TranscriptPoint {
-                region: 0,
+                region: regions[first].id,
                 offset: 0,
             },
             end: TranscriptPoint {
-                region: regions.len() - 1,
-                offset: last.text.len(),
+                region: regions[last].id,
+                offset: regions[last].text.len(),
             },
             selecting: false,
         });
@@ -3147,6 +3305,14 @@ PYEOF"#;
         if index >= self.threads.len() {
             return;
         }
+        // 閉じる＝一覧から消える。台帳（threads.archived）も落とさないと、次回起動の復元
+        // （`load_threads` は archived = 0 を全部開く）で閉じたはずのタブが戻る。
+        // × と ⌘W はここを通るだけで `close_thread` を経由していなかった（2026-09-11）。
+        if let (Some(storage), Some(thread)) = (self.storage.clone(), self.threads.get(index)) {
+            if let Err(error) = storage.archive_thread(&thread.id) {
+                eprintln!("スレッドのアーカイブに失敗（次回起動で復活する）: {error:#}");
+            }
+        }
         self.save_active_draft(cx);
         let mut closed = self.threads.remove(index);
         closed.command_tx = None; // セッションは畳む（復元時に次の送信で張り直す）
@@ -3176,11 +3342,8 @@ PYEOF"#;
 
     /// 指定インデックスのスレッドを閉じる（アーカイブして一覧から除く）。編隊セルの × / herd 行の削除・
     /// ⌘W から共用。台帳の行は残り、`closed_threads` に積むので ⌘⇧T で復元できる（M12-1）。
+    /// 閉じる経路は 1 本（[`Self::remove_thread`]）＝タブの × と挙動を違えない。
     pub fn close_thread(&mut self, index: usize, cx: &mut Context<Self>) {
-        // 永続化側はアーカイブ（一覧から消えるが台帳の行は残る・M12-1）。
-        if let (Some(storage), Some(thread)) = (self.storage.clone(), self.threads.get(index)) {
-            let _ = storage.archive_thread(&thread.id);
-        }
         self.remove_thread(index, cx);
     }
 
@@ -3193,6 +3356,7 @@ PYEOF"#;
     pub fn restore_closed_thread(&mut self, cx: &mut Context<Self>) {
         if let Some(thread) = self.closed_threads.pop() {
             self.save_active_draft(cx);
+            self.unarchive(&thread.id);
             self.threads.push(thread);
             self.active = self.threads.len() - 1;
             let color = self.active_color();
@@ -3202,6 +3366,16 @@ PYEOF"#;
                 composer.set_accent(color, cx);
             });
             cx.notify();
+        }
+    }
+
+    /// 開き直したスレッドを一覧へ戻す（台帳のアーカイブ印を外す）。外し忘れると、開いたタブが
+    /// 次回起動の復元から漏れて黙って消える。
+    fn unarchive(&self, thread_id: &str) {
+        if let Some(storage) = self.storage.as_ref() {
+            if let Err(error) = storage.unarchive_thread(thread_id) {
+                eprintln!("スレッドのアーカイブ解除に失敗（次回起動で消える）: {error:#}");
+            }
         }
     }
 
@@ -3222,6 +3396,7 @@ PYEOF"#;
         }
         let storage = self.storage.clone()?;
         self.save_active_draft(cx);
+        self.unarchive(id);
         let mut thread = thread_from_storage(&storage, id, name, color_index, cx);
         thread.created_at_ms = created_at_ms;
         thread.last_input_at_ms = last_input_at_ms;
@@ -3439,6 +3614,9 @@ PYEOF"#;
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if event.keystroke.key.as_str() == "escape" {
                     this.cancel_rename(cx);
+                    // 親（パネル root）の Esc へ渡さない＝改名を閉じたついでに走行中のターンを
+                    // 中断しない。
+                    cx.stop_propagation();
                 }
             }))
             // カード内の操作を背面のキャンセル面・composer フォーカスへ伝えない。
@@ -6497,6 +6675,11 @@ PYEOF"#;
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // このエントリの中で積むリージョンの id を先頭へ戻す（同じエントリを二度描いても同じ id）。
+        self.transcript_region_cursor.set(RegionId {
+            item: index,
+            sub: 0,
+        });
         let theme = self.theme.clone();
         let color = self.active_color();
         let Some(thread) = self.threads.get(self.active) else {
@@ -7603,6 +7786,8 @@ PYEOF"#;
             "escape" => {
                 self.context_menu_open = false;
                 self.context_focus = None;
+                // 親（パネル root）の Esc へ渡さない＝候補を閉じたついでに中断しない。
+                cx.stop_propagation();
                 cx.notify();
             }
             "enter" => {
@@ -10149,11 +10334,11 @@ PYEOF"#;
             let text = first.text.to_string();
             panel.transcript_selection = Some(TranscriptSelection {
                 start: TranscriptPoint {
-                    region: 0,
+                    region: first.id,
                     offset: 0,
                 },
                 end: TranscriptPoint {
-                    region: 0,
+                    region: first.id,
                     offset: first.text.len(),
                 },
                 selecting: false,
@@ -10201,15 +10386,20 @@ PYEOF"#;
                 "生成中の本文が丸ごと 1 リージョンとして選択可能"
             );
             let end = live.text.len();
-            let last_region = regions.len() - 1;
+            let live_region = live.id;
+            let first_region = regions
+                .iter()
+                .map(|region| region.id)
+                .min()
+                .expect("リージョンが 1 つ以上ある");
             drop(regions);
             panel.transcript_selection = Some(TranscriptSelection {
                 start: TranscriptPoint {
-                    region: 0,
+                    region: first_region,
                     offset: 0,
                 },
                 end: TranscriptPoint {
-                    region: last_region,
+                    region: live_region,
                     offset: end,
                 },
                 selecting: false,
@@ -10220,6 +10410,86 @@ PYEOF"#;
             copied.is_some_and(|text| text.contains(&live_text)),
             "生成中の本文が選択テキストに含まれる（= ⌘C でコピーできる）"
         );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 回帰: transcript のクリックは、`list` が**高さを測るためだけに描いた**リージョンを踏んでも
+    /// 落ちない（v0.1.15 のクラッシュ・2026-09-11）。`list` は可視範囲だけを描き、可視外のエントリは
+    /// 計測のために描いて捨てる（= 画面上の位置を持たない）。しかも末尾追従中は下から上へ描くので、
+    /// 「登録順 = 画面順」を前提にしていた旧ヒットテストは ①位置を持たないリージョンの bounds を
+    /// 掴んで panic ②画面のどこを押しても最下エントリの先頭が返る、の 2 つを踏んでいた。
+    #[gpui::test]
+    fn transcript_hit_test_skips_unpainted_regions(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "transcript_hit");
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            let mut panel = AgentPanel::new(Theme::dark(), cx);
+            if let Some(thread) = panel.threads.get_mut(panel.active) {
+                for index in 0..40 {
+                    thread
+                        .entries
+                        .push(Entry::Agent(format!("本文 {index} 行目").into()));
+                }
+            }
+            panel
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            {
+                let regions = panel.transcript_regions.borrow();
+                let painted = regions
+                    .iter()
+                    .filter(|region| region.bounds.get().is_some())
+                    .count();
+                assert!(
+                    painted > 0 && painted < regions.len(),
+                    "積まれた {} のうち描かれたのは可視ぶんだけ（実際 {painted}）",
+                    regions.len()
+                );
+            }
+            // 画面のどこを押しても落ちない（旧実装は最下リージョンより下で panic した）。
+            let points: Vec<TranscriptPoint> = [0., 80., 300., 700., 2000.]
+                .into_iter()
+                .map(|y| {
+                    panel
+                        .transcript_point_at(gpui::point(px(100.), px(y)), cx)
+                        .expect("描かれたリージョンがあるので点が返る")
+                })
+                .collect();
+            // 下を押すほど後ろの点 = 登録順ではなく画面順で走査している。
+            assert!(
+                points.windows(2).all(|pair| pair[0] <= pair[1]),
+                "画面順に並んでいない: {points:?}"
+            );
+            assert!(
+                points[0].region < points[points.len() - 1].region,
+                "上端と下端が同じリージョンへ丸められている: {points:?}"
+            );
+            // コピーも画面順（上 → 下）で連結される（登録順のままだと逆さに繋がる）。
+            let regions = panel.transcript_regions.borrow();
+            let first = regions.iter().map(|region| region.id).min().unwrap();
+            let last = regions.iter().map(|region| region.id).max().unwrap();
+            let last_len = regions
+                .iter()
+                .find(|region| region.id == last)
+                .map(|region| region.text.len())
+                .unwrap();
+            drop(regions);
+            panel.transcript_selection = Some(TranscriptSelection {
+                start: TranscriptPoint {
+                    region: first,
+                    offset: 0,
+                },
+                end: TranscriptPoint {
+                    region: last,
+                    offset: last_len,
+                },
+                selecting: false,
+            });
+            let copied = panel.transcript_selected_text().expect("全選択のコピー");
+            let zero = copied.find("本文 0 行目").expect("先頭エントリが含まれる");
+            let one = copied.find("本文 1 行目").expect("次のエントリが含まれる");
+            assert!(zero < one, "画面順に連結されていない:\n{copied}");
+        });
         let _ = std::fs::remove_file(settings_path);
     }
 
@@ -10821,6 +11091,100 @@ PYEOF"#;
             panel.add_thread(cx);
             assert_eq!(panel.threads[panel.active].model.as_ref(), "opus[1m]");
         });
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// 入力欄（composer）にフォーカスがある状態の Esc で、走行中のターンが止まる。
+    ///
+    /// 実害の回帰テスト: 既定 keymap は `Editor` 文脈の `escape` を `editor::Cancel` に割り当てて
+    /// おり、GPUI は action listener を呼ぶ前に伝播を止める。`EditorView::cancel` は複数選択が
+    /// 無ければ**何もしない**が、伝播だけは止めていた＝パネル root の Esc（中断）に一生届かず、
+    /// 停止ボタンでしか止められなかった。キー配送そのものを通して確かめる。
+    #[gpui::test]
+    fn escape_in_composer_interrupts_the_running_turn(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "escape-cancel");
+        cx.update(|cx| {
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update_in(cx, |panel, window, cx| {
+            panel.focus_composer(window, cx);
+            // 送信路の無い走行中ターン（セッションが落ちた後と同じ形）。中断はローカルで畳まれる。
+            panel.threads[panel.active].running = true;
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            !panel.read_with(cx, |panel, _cx| panel.threads[panel.active].running),
+            "composer にフォーカスがあっても Esc でターンが止まる"
+        );
+
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// タブの × / ⌘W で閉じたスレッドは、台帳でもアーカイブされて次回起動に戻ってこない。
+    ///
+    /// 0.1.15 までの実害の回帰テスト: 閉じる実処理（`remove_thread`）が台帳を触らず、
+    /// アーカイブしていたのは `close_thread`（編隊セルの × と workspace 側 ⌘W）だけだった＝
+    /// タブの × で閉じたスレッドが再起動のたび全部復活していた。逆に ⌘⇧T で戻した分は
+    /// アーカイブが解除されないと次回起動で黙って消える。
+    #[gpui::test]
+    fn closed_thread_tab_stays_closed_across_restart(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "close-thread-archive");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_close_archive_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        for (id, name) in [("keep-1", "残すスレッド"), ("close-1", "閉じるスレッド")] {
+            storage
+                .upsert_thread(id, name, 0, "", None, Some("Claude Code"), None, 0, 0)
+                .expect("スレッド行を書ける");
+        }
+        let live_ids = |storage: &storage::Storage| {
+            let mut ids = storage
+                .load_threads()
+                .expect("一覧を読める")
+                .into_iter()
+                .map(|row| row.0)
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        };
+
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let index = panel
+                .threads
+                .iter()
+                .position(|thread| thread.id == "close-1")
+                .expect("復元されている");
+            panel.remove_thread(index, cx); // タブの × と同じ経路
+        });
+        assert_eq!(
+            live_ids(&storage),
+            vec!["keep-1".to_string()],
+            "閉じたスレッドは次回起動の復元対象から外れる"
+        );
+
+        panel.update(cx, |panel, cx| panel.restore_closed_thread(cx)); // ⌘⇧T
+        assert_eq!(
+            live_ids(&storage),
+            vec!["close-1".to_string(), "keep-1".to_string()],
+            "戻したスレッドは次回起動でも戻る"
+        );
+
         let _ = std::fs::remove_file(settings_path);
         let _ = std::fs::remove_file(db_path);
     }

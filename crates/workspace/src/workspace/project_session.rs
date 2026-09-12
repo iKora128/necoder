@@ -57,6 +57,8 @@ pub(crate) enum OpenRow {
 pub struct ProjectSession {
     pub(crate) editor_area: EditorArea,
     pub(crate) agent_panel: Entity<AgentPanel>,
+    /// 先頭は初期 ACP、以降は Fleet で追加した独立 ACP。agent_panel は現在の操作先。
+    pub(crate) fleet_agents: Vec<Entity<AgentPanel>>,
     pub(crate) explorer: Entity<Explorer>,
     pub(crate) search_panel: Option<Entity<SearchPanel>>,
     pub(crate) repository: RepositoryController,
@@ -79,6 +81,27 @@ pub struct ProjectSession {
     pub(crate) waiting_thread: Option<(SharedString, Hsla)>,
     pub(crate) _watch: Option<project::Watch>,
     pub(crate) _watch_pump: Option<gpui::Task<()>>,
+}
+
+impl ProjectSession {
+    /// 状態と操作先を一緒に運ぶ。thread 添字はパネル内でのみ一意。
+    pub(crate) fn agent_statuses(
+        &self,
+        cx: &App,
+    ) -> Vec<(Entity<AgentPanel>, usize, agent_panel::AgentStatus)> {
+        self.fleet_agents
+            .iter()
+            .flat_map(|panel| {
+                panel
+                    .read(cx)
+                    .statuses()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(thread, status)| (panel.clone(), thread, status))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
 }
 
 /// Rail metadata と長寿命 session を同じ添字で管理する非公開 owner。
@@ -153,6 +176,7 @@ impl Workspace {
         );
         ProjectSession {
             editor_area: EditorArea::new(),
+            fleet_agents: vec![agent_panel.clone()],
             agent_panel,
             explorer,
             search_panel: None,
@@ -626,6 +650,7 @@ impl Workspace {
             };
             sessions.push(ProjectSession {
                 editor_area: EditorArea::new(),
+                fleet_agents: vec![agent_panel.clone()],
                 agent_panel,
                 explorer,
                 search_panel,
@@ -695,7 +720,7 @@ impl Workspace {
                 fleet_center_view: if std::env::var_os("NECODER_CONTROL").is_some() {
                     FleetCenterView::Control
                 } else {
-                    FleetCenterView::Work
+                    FleetCenterView::Graph
                 },
                 graph_view: match std::env::var("NECODER_GRAPH").as_deref() {
                     Ok("hub") => GraphView::Hub,
@@ -730,7 +755,7 @@ impl Workspace {
                 rail_drag: None,
                 rail_active: false,
                 control_focus: cx.focus_handle(),
-                herd_solo_expanded: false,
+                herd_solo_expanded: true,
                 task_renaming: None,
             },
             overlays: WorkspaceOverlays {

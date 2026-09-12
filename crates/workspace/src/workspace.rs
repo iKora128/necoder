@@ -993,18 +993,36 @@ impl TaskSpace {
     }
 }
 
-/// 編隊グリッドの 1 surface。Task セルは worktree ごとの完整 AgentPanel を表示する。
-/// 同じ Task へ Agent を追加するとセルを増やさず、パネル内の thread tab が増える。
+/// 編隊グリッドの 1 surface。ACP/端末はそれぞれ独立した実体を参照する。
+/// Task は初期パネル。追加パネルも ProjectSession が所有し、配置変更で会話を作り直さない。
 /// Editor/Diff/Tests は 2026-07-24 に ＋ タイルの入口から外した（＋ = エージェント 1 択へ単純化）。
 /// 機能は残す（後で控えめな入口から再接続する）ため dead_code を許す。
 #[derive(Clone, PartialEq)]
 #[allow(dead_code)]
 pub(crate) enum FleetPane {
-    Task { space: SpaceId },
-    Terminal { space: SpaceId },
-    Editor { space: SpaceId },
-    Diff { space: SpaceId },
-    Tests { space: SpaceId },
+    Task {
+        space: SpaceId,
+    },
+    Agent {
+        space: SpaceId,
+        panel: Entity<AgentPanel>,
+    },
+    Shell {
+        space: SpaceId,
+        id: u64,
+    },
+    Terminal {
+        space: SpaceId,
+    },
+    Editor {
+        space: SpaceId,
+    },
+    Diff {
+        space: SpaceId,
+    },
+    Tests {
+        space: SpaceId,
+    },
 }
 
 /// 系譜グラフの表示（M14 #4）。扇形＝base から放射状に分岐 / ツリー＝上から下へ枝分かれ /
@@ -3195,6 +3213,83 @@ mod tests {
 
         workspace.update_in(cx, |workspace, _window, _cx| {
             for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 独立 ACP を増やしても元の会話を置換せず、非表示・復帰・管制から同じ実体を扱う。
+    #[gpui::test]
+    fn fleet_panes_keep_their_threads_and_remote_targets(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_fleet_panes_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.fleet_mode = true;
+            workspace.seed_fleet_cells(cx);
+            let original = workspace.fleet_cell_agent(0).unwrap();
+            original.update(cx, |panel, cx| { panel.ensure_named_thread("original", &[], "Claude Code", cx); });
+            workspace.add_fleet_agent(cx);
+            let added = workspace.fleet_cell_agent(1).unwrap();
+            added.update(cx, |panel, cx| { panel.ensure_named_thread("added", &[], "Claude Code", cx); });
+            workspace.add_fleet_agent(cx);
+            assert_eq!(workspace.chrome.fleet_cells.len(), 3);
+            assert!(workspace.fleet_cell_agent(0).unwrap() == original);
+            assert!(workspace.fleet_cell_agent(1).unwrap() == added);
+            assert!(original != added);
+            assert_eq!(original.read(cx).active_thread_name().as_deref(), Some("original"));
+
+            workspace.chrome.fleet_maximized = Some(1);
+            workspace.close_fleet_cell(1, cx);
+            assert!(workspace.chrome.fleet_maximized.is_none());
+            assert_eq!(workspace.project_sessions.sessions[0].fleet_agents.len(), 3);
+            workspace.project_sessions.sessions[0].agent_panel = added.clone();
+            workspace.reveal_agent_in_fleet(0, added.read(cx).active_thread(), window, cx);
+            assert_eq!(workspace.chrome.fleet_cells.len(), 3);
+            assert!(workspace.fleet_cell_agent(2).unwrap() == added);
+
+            let (sender, receiver) = std::sync::mpsc::channel();
+            workspace.handle_remote_control("remote_snapshot", serde_json::json!({}), sender, cx);
+            let snapshot = receiver.try_recv().unwrap();
+            let result = &snapshot["result"];
+            let threads = result["projects"][0]["threads"].as_array().unwrap();
+            assert_eq!(threads.len(), workspace.project_sessions.sessions[0].agent_statuses(cx).len());
+            let thread = threads.iter().find(|thread| thread["name"] == "added").unwrap();
+            workspace.project_sessions.sessions[0].agent_panel = original;
+            let (sender, receiver) = std::sync::mpsc::channel();
+            workspace.handle_remote_control("remote_thread", serde_json::json!({
+                "instance_id": result["instance_id"], "task_id": result["projects"][0]["id"], "thread_id": thread["id"]
+            }), sender, cx);
+            assert_eq!(receiver.try_recv().unwrap()["ok"], true, "選択外のペインも固定 ID で参照できる");
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _, _| {
+            for session in &mut workspace.project_sessions.sessions {
                 session._watch = None;
                 session._watch_pump = None;
             }

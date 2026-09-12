@@ -274,12 +274,14 @@ news:
   waiting: "waiting for approval — %{title}"
   failed: "failed — %{detail}"
 fleet:
+  add_acp: "+ ACP"
+  add_terminal: "+ Terminal"
+  add_worktree: "+ Worktree"
   toast_no_integration_space: IntegrationSpace is not open
   toast_radar_clean: "Conflict Radar: ready to integrate"
   toast_merge_preview_failed: "Merge preview failed: %{error}"
   toast_integrated: Task integrated into the IntegrationSpace
   toast_integrate_failed: "Cannot integrate: %{error}"
-  toast_need_task_first: Create an isolated worktree with ＋ Task first
   editor_surface_hint: Open a file in this Task to show it in the Editor surface
   space_closed: This TaskSpace is closed
   add_agent_simple: "+ Agent (parallel on a fresh worktree)"
@@ -308,7 +310,7 @@ fleet:
   bottom_collapse: Collapse / expand the bottom pane
   cell_editor_hint: Editor (worktree)
   closed: Closed thread
-  add_hint: Tasks are isolated in worktrees · max 8 surfaces
+  add_hint: Add ACP or Terminal to the selected directory. Use Worktree for a separate branch.
   maximize: Maximize (tuck the rest away)
   restore: Back to grid
   add_agent: Agent (here)

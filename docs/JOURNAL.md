@@ -2644,3 +2644,93 @@
 - 次: **人の手番**: ①実ターンで 2 音を耳で確認（完了＝他アプリに移ってから / 入力待ち＝別タブに移ってから）
   ②音量・長さの再調律が要るなら `scripts/gen-chime.py` の数値（`points` / `duration` / `close`）を直す。
   **後続**: Windows は `rodio`（`play()` の cfg 分岐 1 箇所・W フェーズ）。
+
+## 2026-09-11 — 閉じたスレッドタブが再起動で復活するのを止める
+- やったこと: スレッドタブを閉じる経路を 1 本に統合した。タブの ×（`agent_panel.rs` のタブ列・herd 行）と
+  パネル内 ⌘W（`CloseActiveThread`）は `remove_thread` だけを呼んでおり、DB の `threads.archived` を
+  落としていなかった＝起動時の復元（`load_threads` は `archived = 0` を**全部**開く）で、閉じたはずの
+  タブが毎回そろって戻っていた。アーカイブを `remove_thread` 側へ移し、`close_thread`（編隊セルの × と
+  workspace 側 ⌘W）はその薄い別名に。逆側の取りこぼし（⌘⇧T / 履歴から開き直したスレッドが次回起動で
+  黙って消える）も塞ぐため `storage::unarchive_thread` を足し、`restore_closed_thread` /
+  `open_thread_from_history` から呼ぶ。回帰テスト: `closed_thread_tab_stays_closed_across_restart`
+  （閉じる → 一覧から消える → ⌘⇧T → 戻る、を DB 越しに確認。修正前は落ちることを確認済み）
+- 学び/罠: **「閉じる」の実処理と「永続化を落とす」が別関数に分かれていると、UI の経路が増えたときに
+  片方だけ通る**。今回は `close_thread`（永続化あり）と `remove_thread`（永続化なし）の 2 段構えが原因で、
+  タブの × は内側だけを呼んでいた。閉じる/開くのような対になる操作は、永続化まで含めて 1 関数に寄せる。
+  既存 DB に溜まった `archived = 0` の行は救済しない（旧版の救済はしない方針）＝一度出てくるので、
+  出てきたタブを閉じ直せば以後は残らない
+- 次: 同型の取りこぼしが無いか、プロジェクト（レール）と作業タブの閉じる経路も同じ目で見る
+
+## 2026-09-11 — transcript のクリックで落ちるのを直す（リージョンの同一性を画面順へ）
+- やったこと: 長い会話で transcript を押すと落ちる（0.1.15）。原因は選択リージョンの同一性を
+  **登録順**（`transcript_regions` への push 順）にしていたこと。`list` は可視範囲だけを描き、
+  可視外のエントリは**高さを測るためだけ**に描いて捨てる。しかも末尾追従中は下から上へ描くので、
+  登録順は画面順と一致せず、①位置を持たないリージョンの bounds を掴んで panic ②どこを押しても
+  最下エントリの先頭が返る ③コピーが上下逆に繋がる、の 3 つを同時に踏んでいた。同一性を
+  `RegionId { item, sub }`（エントリ index + そのエントリ内のブロック連番 = 画面順）に変え、
+  `RecordedBounds`（子の `LayoutId` をそのまま返し、paint された矩形だけを記録する通し要素）で
+  **実際に描かれたか**を持たせる。ヒットテスト・コピー・全選択は `ordered_region_indices`（id 順に
+  並べ、同じ id が二度積まれたら描かれた方を残す）を通す。回帰テスト:
+  `transcript_hit_test_skips_unpainted_regions`（40 エントリを実描画し、画面外リージョンが
+  積まれていること・全 y でクリックが落ちないこと・下ほど後ろの点が返ること・コピーが上から
+  下へ繋がることを確認）
+- 学び/罠: **`list` の子は「描かれる順」も「描かれる回数」も約束しない**。描画順に依存した index を
+  同一性にすると、可視範囲が変わった瞬間に壊れる。位置由来の id を自分で発番する。
+  記録は prepaint ではなく **paint** で取る — autoscroll のやり直し（`window.transact`）で
+  prepaint は巻き戻ることがあり、巻き戻った矩形を信じると同じ事故になる
+- 次: transcript 以外に「登録順 = 画面順」を仮定している箇所が無いか（検索結果リスト・ニュース）
+
+## 2026-09-11 — 入力欄の Esc が中断に届いていなかった
+- やったこと: composer にカーソルがあると Esc で走行中のターンが止まらず、停止ボタンでしか
+  止められなかった。既定 keymap は `Editor` 文脈の `escape` を `editor::Cancel` に割り当てており、
+  GPUI は **action listener を呼ぶ前に伝播を止める**（`Window::dispatch_action_on_node`）。
+  `EditorView::cancel` は複数選択が無ければ何もしないが、伝播だけは止めていた＝パネル root の
+  Esc（中断）に一生届かない。畳まなかったときは `cx.propagate()` を言うようにした。代わりに
+  「Esc で閉じるだけにしたい」2 箇所（スレッド名の変更中・候補メニュー表示中）は明示的に
+  `cx.stop_propagation()` を置き、閉じたついでにターンを止めないようにしている。回帰テストは
+  既定 keymap を実際に bind して `simulate_keystrokes("escape")` を打つ形
+  （`escape_in_composer_interrupts_the_running_turn`）— 関数を直接呼ぶテストでは配送の穴は映らない
+- 学び/罠: **GPUI の action handler は「何もしない」と「伝播させる」が別物**。条件付きで働く
+  ハンドラは、働かなかった枝で必ず `cx.propagate()` する。keymap の穴はユニットテストに映らないので、
+  キー配送そのものを通すテストを書く
+- 次: 同じ形（条件付き action で propagate 漏れ）が他の Esc 系に無いか（検索バー・ピッカー）
+
+## 2026-09-11 — 「作業」タブを既定から外し、Fleet を元のグリッド＋独立 ACP/Terminal へ
+- やったこと: 0.1.15 で Fleet 中央の既定にした「作業」タブ（リポジトリを机に、worktree を列で並べる面）は、
+  実際に毎日使うと従来の編隊グリッドより取り回しが悪かった（本人判断）。**面ごと消さずに降格**させ、
+  既定を `FleetCenterView::Graph`（系譜グラフ＋セルのグリッド）へ戻し、「作業」は中央タブから選ぶ
+  任意の別表示にした。そのうえで「今までの機能に近く、さらに良く」を満たすため、元のグリッドに
+  作業タブで得た並列性を持ち込む:
+  - `ProjectSession.fleet_agents: Vec<Entity<AgentPanel>>` を足し、`agent_panel` は**現在の操作先**に。
+    `FleetPane::Agent { space, panel }` / `Shell { space, id }` で ACP と PTY を**セルごとに独立**させた
+    （0.1.15 までの ＋ は「新 worktree を切る」か「同じパネルにタブを足す」の二択だった）。
+  - 下部の追加バーを ＋ ACP / ＋ Terminal / ＋ Worktree の 3 ボタンに。押した先（プロジェクト ⎇ ブランチ）を
+    隣に常時出す。セル 8 枚上限は撤廃し、3 枚は横一列・4 枚以降はグリッド・溢れは行スクロール。
+  - IntegrationSpace（`main`）も seed とセルに含め、herd の solo 見出しも既定で開く。
+    **守るのは Git 側の gate であって画面の取り締まりではない**（2026-07-24 の判断の延長）。
+  - 集約の縫い目は `ProjectSession::agent_statuses`（`(panel, thread_index, status)` を返す）に一本化。
+    herd / 管制キュー / ニュース / 統計 / IPC digest / remote_snapshot を全部ここへ寄せた。
+    **thread 添字はパネル内でのみ一意**なので、外へ渡すときは必ず panel を同伴させる。
+  - `remote_thread` は「アクティブなパネル」ではなく **thread_id で持ち主のパネルを引く**ようにした
+    （`contains_thread`）＝スマホから選択外のペインも指せる。
+  - `RunningRegistry` は root キーの上書きだったのを **panel ごとの行を持って root で集約**に変更
+    （同じ root に複数 ACP が居ると、後から書いた方が他を消していた）。パネル解放時は `on_release` で掃除。
+  - **8 枚上限の撤廃が 3 箇所やり残していた**ので潰した: `NECODER_FLEET_TERM` プローブ・
+    worktree 作成後のセル追加（`fleet_view.rs`・上限に当たると**黙って追加しない**壊れ方だった）・
+    管制タブの ＋ に残っていた残数チップ `{free}/8`。
+  - 上限を外したぶん「行数だけ潰れる」のが青天井になったので、**行に最小高さ（300px）**を持たせ、
+    入りきらない分はグリッドごと縦スクロールにした（`min_h_0` + `flex_1` のままだと 5 枚で
+    全行がヘッダだけになる）。潰して全部映すより、映っているセルが読める方を採る。
+  - 検証: `fleet_panes_keep_their_threads_and_remote_targets`（追加した ACP が元の会話を置換しない /
+    セルを閉じても実体が残る / 一覧から同じ実体へ戻れる / 管制と remote が固定 ID で参照できる）
+    + 実 worktree 3 本の fixture（`/tmp/necoder-fleet-fixture`）を `NECODER_FLEET=1` /
+    `NECODER_FLEET_ADD=2` で offscreen 撮影して目視: グラフ既定・3 セル横一列・＋3 ボタンと宛先表示・
+    ＋ ACP で herd の main が 1→3（色も別＝会話が独立）・5 枚でも 1 行目が読める
+- 学び/罠: **「1 worktree = 1 AgentPanel」を前提にした参照が想像より広く散っていた**。
+  `session.agent_panel` を読むだけの箇所が 9 ファイルにあり、1 対多にした瞬間どれも
+  「たまたまいま選ばれているパネル」を見る壊れ方をする。集約関数を 1 つ作って全部そこへ寄せるまで、
+  直したつもりで直っていない。逆に**添字だけを外へ渡す API は 1 対多に弱い** — thread 添字は
+  パネル内でのみ一意なので、`(panel, thread)` の対で運ぶか、ID で引き直す
+- 次: **人の手番**: 実機で 3〜4 セル並走の体感（＋ ACP を 2 枚足して会話が混ざらないか・
+  ＋ Terminal の PTY が拡大/縮小で切れないか）。通知トーストの「タップで飛ぶ」は複数パネル時に
+  抑止しているので、飛び先を `(panel, thread)` で持てば復活できる

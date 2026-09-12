@@ -275,12 +275,14 @@ news:
   waiting: "承認待ち — %{title}"
   failed: "失敗 — %{detail}"
 fleet:
+  add_acp: ＋ ACP
+  add_terminal: ＋ Terminal
+  add_worktree: ＋ Worktree
   toast_no_integration_space: IntegrationSpace が開かれていません
   toast_radar_clean: "Conflict Radar: 統合可能です"
   toast_merge_preview_failed: "merge preview に失敗: %{error}"
   toast_integrated: Task を IntegrationSpace へ統合しました
   toast_integrate_failed: "統合できません: %{error}"
-  toast_need_task_first: 先に ＋ Task で隔離 worktree を作成してください
   editor_surface_hint: この Task でファイルを開くと Editor surface に表示されます
   space_closed: TaskSpace は閉じられています
   add_agent_simple: ＋ エージェント（新しい worktree で並走）
@@ -309,7 +311,7 @@ fleet:
   bottom_collapse: 下段を畳む / 開く
   cell_editor_hint: エディタ（worktree）
   closed: 閉じたスレッド
-  add_hint: Task は worktree に隔離・surface は最大 8
+  add_hint: ACP・Terminal は選択中の作業場所へ追加。別ブランチは Worktree で並走
   maximize: 拡大表示（他は畳む）
   restore: 元のレイアウトへ戻す
   add_agent: Agent（ここ）

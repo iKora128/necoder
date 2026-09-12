@@ -24,9 +24,14 @@ impl Workspace {
     ) {
         if method == "remote_snapshot" {
             let projects: Vec<Value> = self.project_sessions.projects.iter().enumerate().map(|(index, slot)| {
+                let threads: Vec<Value> = self.project_sessions.sessions[index].fleet_agents.iter()
+                    .flat_map(|panel| match panel.read(cx).remote_threads() {
+                        Value::Array(threads) => threads,
+                        _ => Vec::new(),
+                    }).collect();
                 json!({"id": slot.task_space.id.as_str(), "name": slot.name.as_ref(),
                     "branch": slot.branch, "remote_host": slot.remote_host.as_ref().map(SharedString::as_ref),
-                    "threads": self.project_sessions.sessions[index].agent_panel.read(cx).remote_threads()})
+                    "threads": threads})
             }).collect();
             if let Err(error) = respond.send(reply(Ok(
                 json!({"instance_id": instance_id(), "projects": projects}),
@@ -73,7 +78,13 @@ impl Workspace {
                 .iter()
                 .position(|slot| slot.task_space.id.as_str() == task)
                 .ok_or_else(|| anyhow::anyhow!("task_not_open"))?;
-            let panel = self.project_sessions.sessions[index].agent_panel.clone();
+            let thread_id = params["thread_id"].as_str().unwrap_or("");
+            let panel = self.project_sessions.sessions[index]
+                .fleet_agents
+                .iter()
+                .find(|panel| panel.read(cx).contains_thread(thread_id))
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("thread_not_found"))?;
             if method == "remote_thread" {
                 return panel
                     .read(cx)

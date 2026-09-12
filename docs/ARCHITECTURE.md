@@ -246,7 +246,9 @@ composer 下のピルは最初の送信まで空で押せない（0.1.14 の実�
 ### 7.4 作業面（Fleet の机）は「配置」しか持たない（2026-09-11）
 
 Fleet 中央の**作業**タブ（`FleetCenterView::Work` / `workbench.rs`・UI-SPEC §6.1）は、リポジトリ 1 つを
-机として開き、その worktree を列で並べる面。ここで守る境界は 1 つだけ:
+机として開き、その worktree を列で並べる面。**2026-09-11 に既定から降格**し（実機で従来のグリッドより
+取り回しが悪かった・ROADMAP 参照）、いまは中央タブから選ぶ任意の別表示。既定は §7.5 のグリッド。
+面としては残すので、ここで守る境界も変わらない:
 
 **`work_layout` は「どこに何を置いたか」しか持たない。** 会話・PTY・バッファの寿命は既存の
 `ProjectSession`（`agent_panel` / `terminal_dock` / `tabs`）が所有し続ける。
@@ -265,6 +267,32 @@ Fleet 中央の**作業**タブ（`FleetCenterView::Work` / `workbench.rs`・UI-
   「どのスレッドを映すか」は `AgentPanel` 側の active（作業ツリーが `focus_thread` で動かす）
 - 復元時に repository ID がまだ解決していない場合があるので、`ensure_work_layout` が
   Space ID で作った仮の机を引き継ぐ（キーの張り替え 1 箇所に閉じ込める）
+
+### 7.5 1 worktree に ACP は何本でも（Fleet グリッドの既定・2026-09-11）
+
+Fleet 中央の既定（系譜グラフ＋セルのグリッド・UI-SPEC §6.1）では、同じ作業ディレクトリに
+**独立した ACP と端末をいくつでも並べられる**。ここで守る契約は 2 つ:
+
+**① 実体は `ProjectSession` が所有し、セルは参照しか持たない。**
+`fleet_agents: Vec<Entity<AgentPanel>>` が全パネル（先頭 = その worktree を開いたときの初期パネル）を
+持ち、`agent_panel` は**いま操作している 1 枚**を指すだけの別名。`FleetPane::Agent { space, panel }` /
+`Shell { space, id }` はセル側の見え方で、**セルを閉じても実体は消えない**（会話も PTY も走り続け、
+herd から同じ実体へ戻せる）。配置替え・拡大でも作り直さない。端末は §7.4 と同じ名札方式
+（`TerminalDock` が `id` → Entity を持つ）。
+
+**② 横断で読むときは `ProjectSession::agent_statuses` を通す。**
+`(panel, thread_index, status)` の三つ組を返し、herd / 管制キュー / ニュース / 統計 / IPC digest /
+`remote_snapshot` は全部ここから読む。理由は 2 つ:
+
+- **thread 添字はパネル内でのみ一意**。外へ渡すときは `(panel, thread)` の対で運ぶか、thread ID で
+  引き直す（`remote_thread` は `AgentPanel::contains_thread` で持ち主を引く＝スマホから選択外の
+  ペインも指せる）。添字だけを渡す API は「たまたまいま選ばれているパネル」を見る壊れ方をする
+- `session.agent_panel` を直接読む箇所は 1 対多にした瞬間に全部バグる。集約関数へ寄せるまでは
+  「直したつもりで直っていない」状態が続く（9 ファイルに散っていた・JOURNAL 2026-09-11）
+
+**`RunningRegistry`（全窓横断のスレッド台帳）は panel ごとの行を保持して root で集約する。**
+root キーに直接 upsert すると、同じ root の 2 枚目の ACP が 1 枚目の行を消す。パネルの解放は
+`cx.on_release` で自分の行だけ落とす。
 
 ## 8. 性能予算の測り方（目標: Zed 比 ~80%）
 

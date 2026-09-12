@@ -137,7 +137,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_worktree_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_worktree_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
@@ -287,7 +287,31 @@ impl Workspace {
                 .await;
             if let Err(error) = workspace.update(cx, |workspace, cx| match result {
                 Ok((target, branch)) => {
-                    workspace.open_folder_in_rail(opening_host, target, Some(branch), cx)
+                    workspace.open_folder_in_rail(
+                        opening_host.clone(),
+                        target.clone(),
+                        Some(branch),
+                        cx,
+                    );
+                    if workspace.chrome.fleet_mode
+                        && workspace.chrome.fleet_center_view == FleetCenterView::Graph
+                    {
+                        if let Some(slot) =
+                            workspace.project_sessions.projects.iter().find(|slot| {
+                                slot.worktree.root() == target
+                                    && slot.worktree.host().id() == opening_host.id()
+                            })
+                        {
+                            let pane = FleetPane::Task {
+                                space: slot.task_space.id.clone(),
+                            };
+                            if !workspace.chrome.fleet_cells.contains(&pane) {
+                                workspace.chrome.fleet_cells.push(pane);
+                            }
+                            workspace.chrome.fleet_maximized = None;
+                            cx.notify();
+                        }
+                    }
                 }
                 Err(error) => workspace.push_toast(
                     SharedString::from(format!("{error:#}")),
@@ -321,7 +345,14 @@ impl Workspace {
     /// **毎 render で呼ぶ**（`Workspace::render`）。面を切り替える入口は作業タブ・管制トグル・
     /// AI 全画面・復元と複数あり、呼び出し側に配ると必ずどれかを取りこぼす。
     pub(crate) fn sync_work_chrome(&mut self, cx: &mut Context<Self>) {
-        let state = (self.work_is_visible(), self.project_sessions.sessions.len());
+        let state = (
+            self.work_is_visible(),
+            self.project_sessions
+                .sessions
+                .iter()
+                .map(|session| session.fleet_agents.len())
+                .sum(),
+        );
         if self.chrome.work_embedded == Some(state) {
             return;
         }
@@ -330,7 +361,7 @@ impl Workspace {
             .project_sessions
             .sessions
             .iter()
-            .map(|session| session.agent_panel.clone())
+            .flat_map(|session| session.fleet_agents.iter().cloned())
             .collect();
         for panel in panels {
             panel.update(cx, |panel, cx| panel.set_embedded(state.0, cx));
@@ -793,7 +824,8 @@ impl Workspace {
             self.chrome.fleet_center_view = match saved.fleet_view.as_str() {
                 "control" => FleetCenterView::Control,
                 "graph" => FleetCenterView::Graph,
-                _ => FleetCenterView::Work,
+                "work" => FleetCenterView::Work,
+                _ => FleetCenterView::Graph,
             };
             self.ensure_work_layout(cx);
             cx.notify();

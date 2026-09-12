@@ -7,12 +7,14 @@ impl Workspace {
         event: &agent_panel::PanelEvent,
         cx: &mut Context<Self>,
     ) {
-        let session_index = self
+        let Some(session_index) = self
             .project_sessions
             .sessions
             .iter()
-            .position(|session| session.agent_panel == panel)
-            .unwrap_or(self.project_sessions.active);
+            .position(|session| session.fleet_agents.contains(&panel))
+        else {
+            return;
+        };
         match event {
             agent_panel::PanelEvent::TurnStarted { .. } => {
                 self.transition_task_space(
@@ -24,11 +26,25 @@ impl Workspace {
                 );
             }
             agent_panel::PanelEvent::OpenHistoryRequest => {
+                self.project_sessions.sessions[session_index].agent_panel = panel.clone();
                 // window が無いので次の render で消化する（pending_transient_tab と同じ迂回・#5）。
                 self.project_sessions.sessions[session_index].pending_open_history = true;
                 cx.notify();
             }
             agent_panel::PanelEvent::ToggleFullScreenRequest => {
+                if self.chrome.fleet_mode {
+                    if let Some(cell) = (0..self.chrome.fleet_cells.len())
+                        .find(|cell| self.fleet_cell_agent(*cell).as_ref() == Some(&panel))
+                    {
+                        self.chrome.fleet_maximized = if self.chrome.fleet_maximized == Some(cell) {
+                            None
+                        } else {
+                            Some(cell)
+                        };
+                        cx.notify();
+                        return;
+                    }
+                }
                 // child event の購読には Window が無い。ここで直接レイアウトだけ変えると、
                 // 移設される AgentPanel の focus path が孤立して全 Workspace action が死ぬ。
                 // Window を持つ effect-cycle の共通処理へ渡す（連続 2 回なら相殺）。
@@ -60,10 +76,10 @@ impl Workspace {
                             Some(digest.clone().unwrap_or_else(|| summary.clone()));
                     }
                 }
-                let remaining = panel
-                    .read(cx)
-                    .statuses()
-                    .into_iter()
+                let remaining = self.project_sessions.sessions[session_index]
+                    .fleet_agents
+                    .iter()
+                    .flat_map(|panel| panel.read(cx).statuses())
                     .map(|status| status.activity)
                     .max_by_key(|activity| activity.urgency());
                 let (phase, reason) = match remaining {
@@ -107,10 +123,10 @@ impl Workspace {
                 muted,
             } => {
                 self.project_sessions.sessions[session_index].waiting_thread = None;
-                let another_running = panel
-                    .read(cx)
-                    .statuses()
-                    .into_iter()
+                let another_running = self.project_sessions.sessions[session_index]
+                    .fleet_agents
+                    .iter()
+                    .flat_map(|panel| panel.read(cx).statuses())
                     .any(|status| status.activity == agent_panel::ThreadActivity::Working);
                 self.transition_task_space(
                     session_index,
@@ -176,7 +192,11 @@ impl Workspace {
                             i18n::t!("agent.waiting_permission")
                         )),
                         *color,
-                        Some((session_index, *thread_index)),
+                        (self.project_sessions.sessions[session_index]
+                            .fleet_agents
+                            .len()
+                            == 1)
+                            .then_some((session_index, *thread_index)),
                         cx,
                     );
                 }

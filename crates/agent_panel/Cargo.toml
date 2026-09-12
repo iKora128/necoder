@@ -29,3 +29,5 @@ image.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+# Esc の配送（既定 keymap の Editor 文脈 → 親のパネル）を実際のキー配送で検証するため。
+keymap_core.workspace = true

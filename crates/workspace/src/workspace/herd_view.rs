@@ -98,7 +98,7 @@ impl Workspace {
             name: SharedString,
             color: Hsla,
             branch: Option<SharedString>,
-            statuses: Vec<agent_panel::AgentStatus>,
+            statuses: Vec<(Entity<AgentPanel>, usize, agent_panel::AgentStatus)>,
             is_integration: bool,
         }
         let mut groups: Vec<HerdGroup> = Vec::new();
@@ -106,7 +106,7 @@ impl Workspace {
             let Some(session) = self.project_sessions.sessions.get(index) else {
                 continue;
             };
-            let statuses = session.agent_panel.read(cx).statuses();
+            let statuses = session.agent_statuses(cx);
             if statuses.is_empty() {
                 continue;
             }
@@ -141,7 +141,7 @@ impl Workspace {
             .overflow_y_scroll()
             .py(px(4.));
         let mut seq = 0usize;
-        // 編隊モードでは solo（Integration）のスレッド群を既定で畳む（Task が主役・見出しクリックで展開）。
+        // 元の作業場所も既定で見せ、見出しからの折り畳みは維持する。
         let collapse_solo = self.chrome.fleet_mode && !self.chrome.herd_solo_expanded;
         for group in &groups {
             let collapsed = collapse_solo && group.is_integration;
@@ -306,7 +306,11 @@ impl Workspace {
             if collapsed {
                 continue; // 見出しだけ（件数と ▸ が「居ることは分かる」を担保）
             }
-            for (thread_index, status) in group.statuses.iter().enumerate() {
+            for (panel, thread_index, status) in &group.statuses {
+                let thread_index = *thread_index;
+                let mute_panel = panel.clone();
+                let close_panel = panel.clone();
+                let focus_panel = panel.clone();
                 let color = status.color;
                 let activity = status.activity;
                 // 行は状態 + 時刻 1 つ（幅が狭いので、入力済みなら最終入力・未入力なら開始だけ。
@@ -446,13 +450,12 @@ impl Workspace {
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(
-                                        move |this, _event: &MouseDownEvent, _window, cx| {
+                                        move |_this, _event: &MouseDownEvent, _window, cx| {
                                             cx.stop_propagation();
-                                            this.project_sessions.sessions[project_index]
-                                                .agent_panel
-                                                .update(cx, |panel, cx| {
-                                                    panel.toggle_thread_mute(thread_index, cx)
-                                                });
+                                            mute_panel.update(cx, |panel, cx| {
+                                                panel.toggle_thread_mute(thread_index, cx)
+                                            });
+                                            cx.notify();
                                         },
                                     ),
                                 )
@@ -479,7 +482,7 @@ impl Workspace {
                                     cx.listener(
                                         move |this, _event: &MouseDownEvent, _window, cx| {
                                             cx.stop_propagation(); // 行本体（reveal/switch）へ伝播させない
-                                            this.close_agent(project_index, thread_index, cx);
+                                            this.close_agent(&close_panel, thread_index, cx);
                                         },
                                     ),
                                 ),
@@ -487,6 +490,8 @@ impl Workspace {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                                this.project_sessions.sessions[project_index].agent_panel =
+                                    focus_panel.clone();
                                 if this.chrome.fleet_mode {
                                     // 編隊モード: そのエージェントをグリッドに出す（無ければセル追加）→拡大。
                                     // ＝閉じたセルもここから戻せる（Agent ドックは編隊では非表示なので開かない）。

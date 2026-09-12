@@ -230,6 +230,7 @@ dependencies = [
  "host",
  "i18n",
  "image",
+ "keymap_core",
  "lang",
  "markdown",
  "project",

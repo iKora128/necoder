@@ -388,7 +388,7 @@ impl Workspace {
                     let _ = respond.send(err(i18n::t!("ipc.err_task_not_open_spawn")));
                     return;
                 };
-                let panel = self.project_sessions.sessions[index].agent_panel.clone();
+                let panel = self.project_sessions.sessions[index].fleet_agents[0].clone();
                 panel.update(cx, |panel, cx| panel.send_prompt_text(message, cx));
                 cx.notify();
                 let _ = respond.send(ok(serde_json::json!({ "session_index": index })));
@@ -659,20 +659,19 @@ impl Workspace {
         prompt: Option<String>,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
-        // Task セルにも出す（編隊グリッド・上限 8 は既存規則）。
+        // Task セルにも出す。IPC の起動先は初期パネルに固定し、UI の選択に左右されない。
         let space_id = self.project_sessions.projects[index].task_space.id.clone();
-        if self.chrome.fleet_cells.len() < 8
-            && !self
-                .chrome
-                .fleet_cells
-                .iter()
-                .any(|pane| matches!(pane, FleetPane::Task { space } if *space == space_id))
+        if !self
+            .chrome
+            .fleet_cells
+            .iter()
+            .any(|pane| matches!(pane, FleetPane::Task { space } if *space == space_id))
         {
             self.chrome
                 .fleet_cells
                 .push(FleetPane::Task { space: space_id });
         }
-        let panel = self.project_sessions.sessions[index].agent_panel.clone();
+        let panel = self.project_sessions.sessions[index].fleet_agents[0].clone();
         let thread_index = panel.update(cx, |panel, cx| {
             let thread_index = panel.acquire_thread(agent, cx);
             if let Some(prompt) = prompt {
@@ -687,13 +686,10 @@ impl Workspace {
     /// 事実層 + Tier1（+キャッシュ済み Tier2）。**フル transcript は返さない**（3 段圧縮・計画 §P5）。
     fn ipc_digest(&self, index: usize, cx: &mut Context<Self>) -> serde_json::Value {
         let slot = &self.project_sessions.projects[index];
-        let statuses = self.project_sessions.sessions[index]
-            .agent_panel
-            .read(cx)
-            .statuses();
+        let statuses = self.project_sessions.sessions[index].agent_statuses(cx);
         let threads: Vec<serde_json::Value> = statuses
             .iter()
-            .map(|status| {
+            .map(|(_, _, status)| {
                 serde_json::json!({
                     "name": status.name.as_ref(),
                     "activity": match status.activity {

@@ -466,9 +466,9 @@ impl Workspace {
             if let Some(split) = &session.split_editor {
                 split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
             }
-            session
-                .agent_panel
-                .update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
+            for panel in &session.fleet_agents {
+                panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
+            }
             if let Some(panel) = &session.search_panel {
                 let accent = self
                     .project_sessions

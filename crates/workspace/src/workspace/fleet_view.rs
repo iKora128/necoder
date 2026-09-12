@@ -153,7 +153,7 @@ impl Workspace {
     }
 
     /// 編隊グリッドを TaskSpace（= linked worktree）単位で**初回だけ**自動配置する。
-    /// IntegrationSpace は保護された統合先なので Agent セルにはせず、herd / lineage にだけ残す。
+    /// 元の作業ディレクトリも含めて並べる（Git の保護と表示の可否を混同しない）。
     /// 2 回目以降は何もしない — グリッドの中身はユーザーの操作（＋ / ×）が正になる。
     pub(crate) fn seed_fleet_cells(&mut self, cx: &App) {
         if self.chrome.fleet_seeded {
@@ -164,14 +164,12 @@ impl Workspace {
             .project_sessions
             .projects
             .iter()
-            .filter(|slot| !slot.task_space.is_integration())
-            .take(8)
             .map(|slot| FleetPane::Task {
                 space: slot.task_space.id.clone(),
             })
             .collect();
         // 開発用: 最初の Task の実端末 surface を 1 枚仕込む。
-        if std::env::var_os("NECODER_FLEET_TERM").is_some() && self.chrome.fleet_cells.len() < 8 {
+        if std::env::var_os("NECODER_FLEET_TERM").is_some() {
             if let Some(space) = self.chrome.fleet_cells.iter().find_map(|pane| match pane {
                 FleetPane::Task { space } => Some(space.clone()),
                 _ => None,
@@ -182,7 +180,6 @@ impl Workspace {
         let _ = cx;
     }
 
-    #[allow(dead_code)] // 2026-07-24 の 1 択化で入口を外した（機能は保持）
     fn add_fleet_cell(&mut self, pane: FleetPane, cx: &mut Context<Self>) {
         if let Some(index) = self
             .chrome
@@ -191,25 +188,41 @@ impl Workspace {
             .position(|current| current == &pane)
         {
             self.chrome.fleet_maximized = Some(index);
-        } else if self.chrome.fleet_cells.len() < 8 {
+        } else {
             self.chrome.fleet_cells.push(pane);
         }
         cx.notify();
     }
 
-    #[allow(dead_code)] // 2026-07-24 の 1 択化で入口を外した（機能は保持）
-    fn add_terminal_to_selected_task(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn add_terminal_to_selected_task(&mut self, cx: &mut Context<Self>) {
         let Some(space) = self.selected_task_space() else {
             return;
         };
-        if let Some(index) = self.session_index_for_space(&space) {
-            self.project_sessions.sessions[index]
-                .terminal_dock
-                .update(cx, |dock, cx| {
-                    dock.ensure_active(cx);
-                });
+        let Some(index) = self.session_index_for_space(&space) else {
+            return;
+        };
+        let id = self.chrome.work_layout.allocate();
+        self.project_sessions.sessions[index]
+            .terminal_dock
+            .update(cx, |dock, cx| {
+                dock.start_session(id, cx);
+            });
+        self.chrome.fleet_maximized = None;
+        self.add_fleet_cell(FleetPane::Shell { space, id }, cx);
+    }
+
+    /// セルの ACP 実体を解決する。Task は初期パネルに固定し、現在の選択に連動させない。
+    pub(crate) fn fleet_cell_agent(&self, cell: usize) -> Option<Entity<AgentPanel>> {
+        match self.chrome.fleet_cells.get(cell)? {
+            FleetPane::Agent { panel, .. } => Some(panel.clone()),
+            FleetPane::Task { space } => self.session_index_for_space(space).and_then(|index| {
+                self.project_sessions.sessions[index]
+                    .fleet_agents
+                    .first()
+                    .cloned()
+            }),
+            _ => None,
         }
-        self.add_fleet_cell(FleetPane::Terminal { space }, cx);
     }
 
     #[allow(dead_code)] // 2026-07-24 の 1 択化で入口を外した（機能は保持）
@@ -398,7 +411,9 @@ impl Workspace {
             .fleet_maximized
             .and_then(|index| self.chrome.fleet_cells.get(index))
             .and_then(|pane| match pane {
-                FleetPane::Task { space }
+                FleetPane::Agent { space, .. }
+                | FleetPane::Shell { space, .. }
+                | FleetPane::Task { space }
                 | FleetPane::Terminal { space }
                 | FleetPane::Editor { space }
                 | FleetPane::Diff { space }
@@ -408,7 +423,6 @@ impl Workspace {
                 self.project_sessions
                     .projects
                     .get(self.project_sessions.active)
-                    .filter(|slot| !slot.task_space.is_integration())
                     .map(|slot| slot.task_space.id.clone())
             })
             .or_else(|| {
@@ -419,38 +433,33 @@ impl Workspace {
             })
     }
 
-    /// `+ Agent to this Task`: 選択 TaskSpace の完全な AgentPanel に thread を追加する。
-    /// surface は増やさないため、1 worktree / 1 composer の ownership を破らない。
+    /// 選択した作業場所へ独立 ACP を追加する。既存の会話・composer を共有しない。
     pub(crate) fn add_fleet_agent(&mut self, cx: &mut Context<Self>) {
         let Some(space) = self.selected_task_space() else {
-            self.push_toast(
-                SharedString::from(i18n::t!("fleet.toast_need_task_first")),
-                self.accent(),
-                cx,
-            );
             return;
         };
-        let Some(session_index) = self.session_index_for_space(&space) else {
+        let Some(index) = self.session_index_for_space(&space) else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index]
-            .agent_panel
-            .clone();
-        panel.update(cx, |panel, cx| panel.new_thread(cx));
-        cx.notify();
-    }
-
-    /// Fleet の既定操作は設定に左右されず、常に隔離 Task を作る。
-    fn add_fleet_agent_default(&mut self, cx: &mut Context<Self>) {
-        self.add_worktree_agent(cx);
+        let panel = cx.new(|cx| AgentPanel::new_task(self.theme.clone(), cx));
+        if let Some(storage) = self.persistence.storage.clone() {
+            panel.update(cx, |panel, _| {
+                panel.set_storage_for_new_pane(storage, space.0.clone())
+            });
+        }
+        cx.subscribe(&panel, Workspace::on_panel_event).detach();
+        self.project_sessions.sessions[index]
+            .fleet_agents
+            .push(panel.clone());
+        self.project_sessions.sessions[index].agent_panel = panel.clone();
+        self.update_agent_destination_for(index, cx);
+        self.chrome.fleet_maximized = None;
+        self.add_fleet_cell(FleetPane::Agent { space, panel }, cx);
     }
 
     /// `+ Task`: IntegrationSpace の HEAD から `task/<n>` branch + linked worktree を作り、
     /// ProjectSession/AgentPanel を 1 組起動する。Fleet の通常作業は必ずこの隔離導線を通る。
     pub(crate) fn add_worktree_agent(&mut self, cx: &mut Context<Self>) {
-        if self.chrome.fleet_cells.len() >= 8 {
-            return;
-        }
         let active_repository = self
             .active_slot()
             .map(|slot| slot.task_space.repository_id.clone());
@@ -546,12 +555,10 @@ impl Workspace {
                             .task_space
                             .id
                             .clone();
-                        if workspace.chrome.fleet_cells.len() < 8 {
-                            workspace
-                                .chrome
-                                .fleet_cells
-                                .push(FleetPane::Task { space: space_id });
-                        }
+                        workspace
+                            .chrome
+                            .fleet_cells
+                            .push(FleetPane::Task { space: space_id });
                         workspace.persist_task_space(space, cx);
                         workspace.transition_task_space(
                             space,
@@ -579,10 +586,8 @@ impl Workspace {
         // 「閉じた ＝ 止まった」と誤解させない（ユーザー報告「ずっと背景で動いたまま」）。
         // 走ったまま画面から消すのは正しい挙動なので、消さずに**そう言う**。
         let still_running = self
-            .space_of_cell(index)
-            .and_then(|space| self.session_index_for_space(&space))
-            .and_then(|session_index| self.project_sessions.sessions.get(session_index))
-            .is_some_and(|session| session.agent_panel.read(cx).has_running_thread());
+            .fleet_cell_agent(index)
+            .is_some_and(|panel| panel.read(cx).has_running_thread());
         self.chrome.fleet_cells.remove(index);
         self.chrome.fleet_cell_menu = None;
         // 拡大中のセルを閉じたら拡大解除・後ろを閉じたら添字を詰める。
@@ -623,7 +628,9 @@ impl Workspace {
     /// セル → その TaskSpace（全 surface が同じ形なので 1 か所に畳む）。
     pub(crate) fn space_of_cell(&self, index: usize) -> Option<SpaceId> {
         self.chrome.fleet_cells.get(index).map(|pane| match pane {
-            FleetPane::Task { space }
+            FleetPane::Agent { space, .. }
+            | FleetPane::Shell { space, .. }
+            | FleetPane::Task { space }
             | FleetPane::Terminal { space }
             | FleetPane::Editor { space }
             | FleetPane::Diff { space }
@@ -649,15 +656,9 @@ impl Workspace {
 
     /// 走っているエージェントを止める（編隊セルの ⋯ から）。中断は Agent パネルの esc と同じ経路。
     fn stop_fleet_cell_agents(&mut self, cell: usize, cx: &mut Context<Self>) {
-        let session_index = self
-            .space_of_cell(cell)
-            .and_then(|space| self.session_index_for_space(&space));
-        let Some(session_index) = session_index else {
+        let Some(panel) = self.fleet_cell_agent(cell) else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index]
-            .agent_panel
-            .clone();
         let stopped = panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
         let accent = self.accent();
         let message = if stopped > 0 {
@@ -679,10 +680,9 @@ impl Workspace {
         let Some(session_index) = session_index else {
             return;
         };
-        let panel = self.project_sessions.sessions[session_index]
-            .agent_panel
-            .clone();
-        panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
+        for panel in &self.project_sessions.sessions[session_index].fleet_agents {
+            panel.update(cx, |panel, cx| panel.cancel_all_turns(cx));
+        }
         self.transition_task_space(
             session_index,
             TaskPhase::Archived,
@@ -738,9 +738,9 @@ impl Workspace {
         let session_index = self
             .space_of_cell(cell)
             .and_then(|space| self.session_index_for_space(&space));
-        let running = session_index
-            .and_then(|index| self.project_sessions.sessions.get(index))
-            .is_some_and(|session| session.agent_panel.read(cx).has_running_thread());
+        let running = self
+            .fleet_cell_agent(cell)
+            .is_some_and(|panel| panel.read(cx).has_running_thread());
         // worktree（linked）でなければ削除段は出さない — main を消させない安全側。
         let is_worktree = session_index
             .and_then(|index| self.project_sessions.projects.get(index))
@@ -939,14 +939,13 @@ impl Workspace {
     }
 
     /// エージェント（スレッド）を閉じる。Task cell は worktree の surface なので維持する。
-    pub(crate) fn close_agent(&mut self, space: usize, thread: usize, cx: &mut Context<Self>) {
-        let Some(session) = self.project_sessions.sessions.get(space) else {
-            return;
-        };
-        session
-            .agent_panel
-            .clone()
-            .update(cx, |panel, cx| panel.close_thread(thread, cx));
+    pub(crate) fn close_agent(
+        &mut self,
+        panel: &Entity<AgentPanel>,
+        thread: usize,
+        cx: &mut Context<Self>,
+    ) {
+        panel.update(cx, |panel, cx| panel.close_thread(thread, cx));
         cx.notify();
     }
 
@@ -981,8 +980,16 @@ impl Workspace {
         // IntegrationSpace（main）もセルに出せる（2026-07-24 ユーザー指摘で「保護」トーストを撤廃。
         // 本当に守るべきは Git 側 = 統合の radar + 人間 gate と台帳の遷移拒否で、画面の取り締まりではない）。
         let space_id = slot.task_space.id.clone();
-        let target = FleetPane::Task {
-            space: space_id.clone(),
+        let session = &self.project_sessions.sessions[space];
+        let target = if session.fleet_agents.first() == Some(&session.agent_panel) {
+            FleetPane::Task {
+                space: space_id.clone(),
+            }
+        } else {
+            FleetPane::Agent {
+                space: space_id.clone(),
+                panel: session.agent_panel.clone(),
+            }
         };
         if let Some(session) = self.project_sessions.sessions.get(space) {
             session
@@ -998,9 +1005,6 @@ impl Workspace {
         {
             Some(index) => index,
             None => {
-                if self.chrome.fleet_cells.len() >= 8 {
-                    return;
-                }
                 self.chrome.fleet_cells.push(target);
                 self.chrome.fleet_cells.len() - 1
             }
@@ -1041,12 +1045,12 @@ impl Workspace {
                 .clone()
                 .or_else(|| slot.worktree_branch.clone())
                 .map(SharedString::from);
-            let statuses = session.agent_panel.read(cx).statuses();
+            let statuses = session.agent_statuses(cx);
             let (thread_index, representative) = statuses
                 .iter()
                 .enumerate()
-                .max_by_key(|(_, status)| status.activity.urgency())
-                .map(|(index, status)| (index, Some(status)))
+                .max_by_key(|(_, (_, _, status))| status.activity.urgency())
+                .map(|(index, (_, _, status))| (index, Some(status)))
                 .unwrap_or((0, None));
             let runtime_activity = representative
                 .map(|status| status.activity)
@@ -1072,17 +1076,20 @@ impl Workspace {
                 agent: representative
                     .map(|status| status.agent.clone())
                     .unwrap_or_else(|| SharedString::from("Agent")),
-                tokens_used: statuses.iter().map(|status| status.tokens_used).sum(),
-                tokens_max: statuses.iter().map(|status| status.tokens_max).sum(),
+                tokens_used: statuses
+                    .iter()
+                    .map(|(_, _, status)| status.tokens_used)
+                    .sum(),
+                tokens_max: statuses
+                    .iter()
+                    .map(|(_, _, status)| status.tokens_max)
+                    .sum(),
                 integrated: slot.task_space.phase == TaskPhase::Integrated,
                 has_commits: matches!(
                     (&slot.task_space.base_oid, &slot.task_space.head_oid),
                     (Some(base), Some(head)) if base != head
                 ),
             });
-            if lanes.len() >= 8 {
-                return lanes;
-            }
         }
         lanes
     }
@@ -1193,7 +1200,9 @@ impl Workspace {
             .border_color(theme.border);
         for (index, pane) in cells.iter().enumerate() {
             let space = match pane {
-                FleetPane::Task { space }
+                FleetPane::Agent { space, .. }
+                | FleetPane::Shell { space, .. }
+                | FleetPane::Task { space }
                 | FleetPane::Terminal { space }
                 | FleetPane::Editor { space }
                 | FleetPane::Diff { space }
@@ -1202,9 +1211,8 @@ impl Workspace {
             let session_index = self.session_index_for_space(space);
             let slot = session_index.and_then(|index| self.project_sessions.projects.get(index));
             let color = slot.map(|slot| slot.color).unwrap_or(theme.fg2);
-            let activity = session_index.and_then(|session_index| {
-                self.project_sessions.sessions[session_index]
-                    .agent_panel
+            let activity = self.fleet_cell_agent(index).and_then(|panel| {
+                panel
                     .read(cx)
                     .statuses()
                     .into_iter()
@@ -1212,7 +1220,8 @@ impl Workspace {
                     .map(|status| status.activity)
             });
             let surface = match pane {
-                FleetPane::Task { .. } => "Agent",
+                FleetPane::Agent { .. } | FleetPane::Task { .. } => "ACP",
+                FleetPane::Shell { .. } => "Terminal",
                 FleetPane::Terminal { .. } => "Terminal",
                 FleetPane::Editor { .. } => "Editor",
                 FleetPane::Diff { .. } => "Diff",
@@ -1531,8 +1540,10 @@ impl Workspace {
     ) {
         self.switch_project(space, window, cx);
         if let Some(session) = self.project_sessions.sessions.get(space) {
-            let panel = session.agent_panel.clone();
-            panel.update(cx, |panel, cx| panel.focus_thread(thread, cx));
+            if let Some((panel, thread, _)) = session.agent_statuses(cx).into_iter().nth(thread) {
+                self.project_sessions.sessions[space].agent_panel = panel.clone();
+                panel.update(cx, |panel, cx| panel.focus_thread(thread, cx));
+            }
         }
         cx.notify();
     }
@@ -1544,7 +1555,9 @@ impl Workspace {
         let theme = self.theme.clone();
         let count = scene.branches.len();
         // 扇形/リバーはレーン数で伸縮・ツリーは固定。上下に余白を持たせて詰まりを防ぐ。
-        let body_h = if scene.root.is_some() {
+        let body_h = if count == 0 {
+            76.0
+        } else if scene.root.is_some() {
             300.0
         } else {
             (170.0 + count as f32 * 42.0).clamp(230.0, 380.0)
@@ -2321,7 +2334,7 @@ impl Workspace {
     fn render_fleet_grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let lanes = self.fleet_lanes(cx);
         let cells = self.chrome.fleet_cells.clone();
-        let show_add = cells.len() < 8;
+        let show_add = true;
         // ＋ が丸ごと 1 セルを占めるとデッドスペースになる（2026-07-24 ユーザー指摘）。
         // セルが 1 つでもあれば ＋ は下部のスリムバーにして、セルに面積を返す。
         let add_as_cell = show_add && cells.is_empty();
@@ -2329,7 +2342,8 @@ impl Workspace {
         let cols = match total {
             0 | 1 => 1,
             2 => 2,
-            3 | 4 => 2,
+            3 => 3,
+            4 => 2,
             5 | 6 => 3,
             _ => 4,
         }
@@ -2351,8 +2365,12 @@ impl Workspace {
             .flex_col()
             .gap(px(8.))
             .p(px(10.));
+        // 行は余りがあれば伸びるが、**読める高さは下回らせない**（下回る分はグリッドごとスクロール）。
+        // 8 枚上限を外した（2026-09-11）ので、行数だけ潰れるのが青天井になった＝高さで止める。
+        // ヘッダ + タブ行 + メタ行 + transcript が最低限見える寸法。
+        grid = grid.overflow_y_scroll();
         for row in items.chunks(cols) {
-            let mut row_element = div().flex_1().min_h_0().flex().gap(px(8.));
+            let mut row_element = div().flex_1().min_h(px(300.)).flex().gap(px(8.));
             for item in row {
                 row_element = row_element.child(match item {
                     Some((index, pane)) => {
@@ -2364,42 +2382,16 @@ impl Workspace {
             grid = grid.child(row_element);
         }
         // セルがある時の ＋ = 下部スリムバー（1 行 30px・セルの面積を奪わない）。
-        if show_add && !add_as_cell {
-            let free = 8usize.saturating_sub(self.chrome.fleet_cells.len());
-            grid = grid.child(
-                div()
-                    .id("fleet-add-bar")
-                    .flex_none()
-                    .h(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(8.))
-                    .rounded(px(7.))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(self.theme.border)
-                    .text_size(px(11.))
-                    .text_color(self.theme.fg2)
-                    .cursor_pointer()
-                    .hover(|style| style.border_color(self.theme.fg2))
-                    .child(SharedString::from(i18n::t!("fleet.add_agent_simple")))
-                    .child(
-                        div()
-                            .text_size(px(9.5))
-                            .text_color(self.theme.fg2.alpha(0.7))
-                            .child(SharedString::from(format!("{free}/8"))),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| {
-                            cx.stop_propagation();
-                            this.add_fleet_agent_default(cx);
-                        }),
-                    ),
-            );
-        }
-        grid.into_any_element()
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(grid)
+            .when(!add_as_cell, |element| {
+                element.child(self.render_fleet_add_buttons(cx))
+            })
+            .into_any_element()
     }
 
     /// TaskSpace の surface。Task は通常 View と同じ `Entity<AgentPanel>` をそのまま埋め込むため、
@@ -2414,7 +2406,9 @@ impl Workspace {
     ) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let (space, surface_name) = match &pane {
-            FleetPane::Task { space } => (space, "Agent"),
+            FleetPane::Agent { space, .. } => (space, "ACP"),
+            FleetPane::Shell { space, .. } => (space, "Terminal"),
+            FleetPane::Task { space } => (space, "ACP"),
             FleetPane::Terminal { space } => (space, "Terminal"),
             FleetPane::Editor { space } => (space, "Editor"),
             FleetPane::Diff { space } => (space, "Diff"),
@@ -2715,12 +2709,9 @@ impl Workspace {
             .child(header);
         // 遷移スナップショット帯（P1）: Task セルは「今なにを/どう終わったか」+ plan メーターを 1 行で。
         // 代表 = 最重要 activity のスレッド（lane のロールアップと同じ規則）。digest 無しなら帯ごと出さない。
-        if matches!(&pane, FleetPane::Task { .. }) {
-            let snapshot = session_index.and_then(|session_index| {
-                let statuses = self.project_sessions.sessions[session_index]
-                    .agent_panel
-                    .read(cx)
-                    .statuses();
+        if let Some(panel) = self.fleet_cell_agent(index) {
+            let snapshot = {
+                let statuses = panel.read(cx).statuses();
                 statuses
                     .into_iter()
                     .max_by_key(|status| status.activity.urgency())
@@ -2730,7 +2721,7 @@ impl Workspace {
                             .clone()
                             .map(|digest| (digest, status.plan_done, status.plan_total))
                     })
-            });
+            };
             if let Some((digest, plan_done, plan_total)) = snapshot {
                 cell = cell.child(
                     div()
@@ -2765,19 +2756,33 @@ impl Workspace {
             }
         }
         if let Some(session_index) = session_index {
-            let agent_surface = matches!(&pane, FleetPane::Task { .. });
-            cell = cell.on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.switch_project(session_index, window, cx);
-                    this.agent_active = agent_surface;
-                }),
-            );
+            let agent = self.fleet_cell_agent(index);
+            let agent_surface = agent.is_some();
+            cell = cell.capture_any_mouse_down(cx.listener(move |this, _, window, cx| {
+                this.switch_project(session_index, window, cx);
+                if let Some(panel) = &agent {
+                    this.project_sessions.sessions[session_index].agent_panel = panel.clone();
+                }
+                this.agent_active = agent_surface;
+            }));
         }
         let body = session_index
             .map(|session_index| match pane {
+                FleetPane::Agent { panel, .. } => panel
+                    .cached(StyleRefinement::default().flex().flex_col().size_full())
+                    .into_any_element(),
+                FleetPane::Shell { id, .. } => self.project_sessions.sessions[session_index]
+                    .terminal_dock
+                    .read(cx)
+                    .session(id)
+                    .map(|terminal| {
+                        terminal
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element()
+                    })
+                    .unwrap_or_else(|| div().into_any_element()),
                 FleetPane::Task { .. } => self.project_sessions.sessions[session_index]
-                    .agent_panel
+                    .fleet_agents[0]
                     .clone()
                     .cached(StyleRefinement::default().flex().flex_col().size_full())
                     .into_any_element(),
@@ -2824,46 +2829,84 @@ impl Workspace {
         cell.into_any_element()
     }
 
+    /// 繰り返す追加操作はメニューを経由せず直接押せるようにする。
+    fn render_fleet_add_buttons(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut bar = div()
+            .id("fleet-add-bar")
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .py(px(4.));
+        for (id, key) in [
+            (0usize, "fleet.add_acp"),
+            (1, "fleet.add_terminal"),
+            (2, "fleet.add_worktree"),
+        ] {
+            bar = bar.child(
+                div()
+                    .id(("fleet-add-type", id))
+                    .px(px(12.))
+                    .py(px(5.))
+                    .rounded(px(7.))
+                    .border_1()
+                    .border_color(self.theme.border)
+                    .bg(self.theme.bg0)
+                    .text_size(px(11.5))
+                    .text_color(self.theme.fg1)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(self.theme.bg2))
+                    .child(i18n::t!(key))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            match id {
+                                0 => this.add_fleet_agent(cx),
+                                1 => this.add_terminal_to_selected_task(cx),
+                                _ => {
+                                    if let Some(index) = this
+                                        .selected_task_space()
+                                        .and_then(|space| this.session_index_for_space(&space))
+                                    {
+                                        this.switch_project(index, window, cx);
+                                    }
+                                    this.open_worktree_picker(window, cx);
+                                }
+                            }
+                        }),
+                    ),
+            );
+        }
+        if let Some(space) = self.selected_task_space() {
+            if let Some(index) = self.session_index_for_space(&space) {
+                let slot = &self.project_sessions.projects[index];
+                let branch = slot
+                    .branch
+                    .as_deref()
+                    .or(slot.worktree_branch.as_deref())
+                    .unwrap_or("—");
+                bar = bar.child(
+                    div()
+                        .id("fleet-add-destination")
+                        .text_size(px(10.))
+                        .text_color(self.theme.fg2)
+                        .child(format!("{} ⎇ {branch}", slot.name))
+                        .tooltip(Tooltip::text(
+                            slot.worktree.root().display().to_string(),
+                            self.theme.clone(),
+                        )),
+                );
+            }
+        }
+        bar.into_any_element()
+    }
+
     /// ＋ タイル。既定は隔離 `+ Task`。同一 worktree へ書く Agent は明示操作でだけ追加する。
     fn render_fleet_add_tile(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
-        let add_button = |tag: usize, label: SharedString, theme: &Theme| {
-            div()
-                .id(("fleet-add-type", tag))
-                .px(px(12.))
-                .py(px(5.))
-                .rounded(px(7.))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.bg0)
-                .text_size(px(11.5))
-                .text_color(theme.fg1)
-                .cursor_pointer()
-                .hover(|style| {
-                    style
-                        .bg(theme.bg2)
-                        .text_color(theme.fg0)
-                        .border_color(theme.fg2)
-                })
-                .child(label)
-        };
-        // ＋ は 1 択（2026-07-24 ユーザー指摘で単純化）: エージェントを新しい worktree で並走させる。
-        // Terminal/Editor/Diff/Tests セルや履歴復元の機能自体は残っている（パレット/コード経路）が、
-        // 入口の顔からは外す — 「＋ = 並走エージェントを増やす」だけにする。
-        let buttons = div().flex().justify_center().child(
-            add_button(
-                0,
-                SharedString::from(i18n::t!("fleet.add_agent_simple")),
-                &theme,
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    cx.stop_propagation();
-                    this.add_fleet_agent_default(cx);
-                }),
-            ),
-        );
+        let buttons = self.render_fleet_add_buttons(cx);
         div()
             .id("fleet-add")
             .flex_1()

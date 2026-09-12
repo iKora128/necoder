@@ -15,6 +15,7 @@ use crate::workspace::*;
 /// 要対応キューの 1 項目。優先順は Blocked（経過時間降順）→ Failed → Review 系 → Done 未確認。
 struct AttentionItem {
     session_index: usize,
+    panel: Entity<AgentPanel>,
     thread_index: usize,
     color: Hsla,
     title: SharedString,
@@ -146,6 +147,7 @@ impl Workspace {
         let Some(head) = self.control_attention_queue(cx).into_iter().next() else {
             return;
         };
+        self.project_sessions.sessions[head.session_index].agent_panel = head.panel;
         self.immerse_from_control(head.session_index, head.thread_index, window, cx);
     }
 
@@ -334,8 +336,7 @@ impl Workspace {
             let Some(session) = self.project_sessions.sessions.get(index) else {
                 continue;
             };
-            let panel = session.agent_panel.read(cx);
-            let statuses = panel.statuses();
+            let statuses = session.agent_statuses(cx);
             let is_task = !slot.task_space.is_integration();
             let card_title: SharedString = if is_task {
                 slot.task_space.title.clone()
@@ -356,14 +357,16 @@ impl Workspace {
                         | TaskPhase::ChangesRequested
                         | TaskPhase::MergeReady
                 );
-            for (thread_index, status) in statuses.iter().enumerate() {
+            for (panel, thread_index, status) in &statuses {
+                let thread_index = *thread_index;
                 match status.activity {
                     agent_panel::ThreadActivity::Blocked => {
-                        if let Some(card) = panel.permission_card(thread_index) {
+                        if let Some(card) = panel.read(cx).permission_card(thread_index) {
                             blocked.push((
                                 card.waited_secs,
                                 AttentionItem {
                                     session_index: index,
+                                    panel: panel.clone(),
                                     thread_index,
                                     color: status.color,
                                     title: card_title.clone(),
@@ -376,6 +379,7 @@ impl Workspace {
                     agent_panel::ThreadActivity::Done { .. } if !slot_covered => {
                         done.push(AttentionItem {
                             session_index: index,
+                            panel: panel.clone(),
                             thread_index,
                             color: status.color,
                             title: card_title.clone(),
@@ -392,22 +396,23 @@ impl Workspace {
             if is_task {
                 let representative = statuses
                     .iter()
-                    .enumerate()
-                    .max_by_key(|(_, status)| status.activity.urgency())
-                    .map(|(thread_index, status)| {
+                    .max_by_key(|(_, _, status)| status.activity.urgency())
+                    .map(|(panel, thread_index, status)| {
                         (
-                            thread_index,
+                            *thread_index,
                             status.color,
                             status.digest.clone(),
                             status.tier2.clone(),
+                            panel.clone(),
                         )
                     })
-                    .unwrap_or((0, slot.color, None, None));
+                    .unwrap_or((0, slot.color, None, None, session.agent_panel.clone()));
                 let digest = slot.task_space.result_summary.clone().or(representative.2);
                 let tier2 = representative.3;
                 match slot.task_space.phase {
                     TaskPhase::Failed => failed.push(AttentionItem {
                         session_index: index,
+                        panel: representative.4.clone(),
                         thread_index: representative.0,
                         color: representative.1,
                         title: card_title.clone(),
@@ -418,6 +423,7 @@ impl Workspace {
                     | TaskPhase::ChangesRequested
                     | TaskPhase::MergeReady => review.push(AttentionItem {
                         session_index: index,
+                        panel: representative.4.clone(),
                         thread_index: representative.0,
                         color: representative.1,
                         title: card_title.clone(),
@@ -474,7 +480,7 @@ impl Workspace {
             let Some(session) = self.project_sessions.sessions.get(index) else {
                 continue;
             };
-            for status in session.agent_panel.read(cx).statuses() {
+            for (_, _, status) in session.agent_statuses(cx) {
                 if status.activity == agent_panel::ThreadActivity::Working {
                     stats.working += 1;
                     stats.any_working = true;
@@ -957,6 +963,7 @@ impl Workspace {
         let theme = self.theme.clone();
         let session_index = item.session_index;
         let thread_index = item.thread_index;
+        let focus_panel = item.panel.clone();
         let urgent = matches!(item.kind, AttentionKind::Permission(_));
         let activity = match &item.kind {
             AttentionKind::Permission(_) => agent_panel::ThreadActivity::Blocked,
@@ -988,6 +995,9 @@ impl Workspace {
         };
         let mut card = div()
             .id(("control-card", position))
+            .capture_any_mouse_down(cx.listener(move |this, _, _, _| {
+                this.project_sessions.sessions[session_index].agent_panel = focus_panel.clone();
+            }))
             .flex_none()
             .flex()
             .flex_col()
@@ -1057,9 +1067,7 @@ impl Workspace {
                 let mut buttons = div().flex().flex_wrap().gap(px(5.));
                 for (option_index, _kind, label) in &permission.options {
                     let option_index = *option_index;
-                    let panel = self.project_sessions.sessions[session_index]
-                        .agent_panel
-                        .clone();
+                    let panel = item.panel.clone();
                     buttons = buttons.child(
                         button(
                             ("control-perm", position * 8 + option_index),
@@ -1268,9 +1276,7 @@ impl Workspace {
                 )
             }
             AttentionKind::DoneUnread { digest, tier2 } => {
-                let panel = self.project_sessions.sessions[session_index]
-                    .agent_panel
-                    .clone();
+                let panel = item.panel.clone();
                 card.when_some(digest.clone(), |element, digest| {
                     element.child(
                         div()
@@ -1341,14 +1347,15 @@ impl Workspace {
             let Some(session) = self.project_sessions.sessions.get(index) else {
                 continue;
             };
-            let statuses = session.agent_panel.read(cx).statuses();
-            let Some((thread_index, status)) = statuses
+            let statuses = session.agent_statuses(cx);
+            let Some((panel, thread_index, status)) = statuses
                 .iter()
-                .enumerate()
-                .find(|(_, status)| status.activity == agent_panel::ThreadActivity::Working)
+                .find(|(_, _, status)| status.activity == agent_panel::ThreadActivity::Working)
             else {
                 continue;
             };
+            let panel = panel.clone();
+            let thread_index = *thread_index;
             active_count += 1;
             let branch = slot
                 .branch
@@ -1389,6 +1396,8 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
+                            this.project_sessions.sessions[session_index].agent_panel =
+                                panel.clone();
                             this.immerse_from_control(session_index, thread_index, window, cx);
                         }),
                     )
@@ -1451,7 +1460,7 @@ impl Workspace {
             );
         }
         // ＋ はスリム 1 行（2026-07-24 デッドスペース圧縮・セルとカードに面積を返す）。
-        let free = 8usize.saturating_sub(self.chrome.fleet_cells.len());
+        // 残数は出さない（2026-09-11 に 8 枚上限を撤廃＝数えるものが無い）。
         cards.push(
             div()
                 .id("control-add-task")
@@ -1471,12 +1480,6 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
                 .child(SharedString::from(i18n::t!("fleet.add_agent_simple")))
-                .child(
-                    div()
-                        .text_size(px(9.))
-                        .text_color(theme.fg2.alpha(0.7))
-                        .child(SharedString::from(format!("{free}/8"))),
-                )
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _window, cx| {
