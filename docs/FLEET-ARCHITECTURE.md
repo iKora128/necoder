@@ -53,7 +53,7 @@ Agent の permission wait は `blocked`、turn end は `review_ready` へ写像�
 `task_events` は phase change / spawn / result / integration の追記ログ。rail index や cell index は identity
 に使わない。Agent thread は同じ Space ID を storage scope として保存し、別 Task の Panel に混入しない。
 
-Coordinator Agent / script の操作面は GUI と同じ ledger と Git safety gate を使う。
+Captain / script の操作面は GUI と同じ ledger と Git safety gate を使う。
 
 ```bash
 necoder fleet create [integration-root] [title]
@@ -66,7 +66,7 @@ necoder fleet integrate <task-id> [integration-root]
 
 MCP にも `fleet_create_task`, `fleet_list_tasks`, `fleet_update_task`, `fleet_wait_task`,
 `fleet_review_task`, `fleet_integrate_task` を公開する。wait は GUI process の一時 state でなく永続 ledger を
-poll するため、Coordinator や UI が再起動しても継続できる。
+poll するため、Captain や UI が再起動しても継続できる。
 
 ## Independent implementation and licensing boundary
 

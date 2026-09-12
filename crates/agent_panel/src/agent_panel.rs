@@ -772,6 +772,8 @@ pub struct AgentStatus {
     pub created_at_ms: i64,
     /// 最後にユーザーが入力した時刻（unix ms・まだ入力が無ければ None）。
     pub last_input_at_ms: Option<i64>,
+    /// 人間が最後に頼んだことの原文（`Thread::last_prompt`）。**✳ は付けない**（人間の発話）。
+    pub last_prompt: Option<SharedString>,
     /// 遷移スナップショット（Tier 1・決定論・FLEET-CONTROL-PLAN P1）。
     /// Blocked=許可待ちの内容 / Done=最後の発言の末尾 / Failed=エラー文 /
     /// Working=ライブ素材（最新ツール + plan の進行中項目・保存せずその場で合成）。
@@ -815,6 +817,11 @@ struct Thread {
     created_at_ms: i64,
     /// 最後にユーザーが入力した時刻（unix ms・送信のたびに更新。復元時は最後の user turn から）。
     last_input_at_ms: Option<i64>,
+    /// **人間が最後に頼んだこと**（原文・FLEET-V2 §3.2-3 / FLEET-CONTROL-PLAN P1 の残）。
+    /// digest が「エージェントが何をしたか」なのに対し、これは「自分が何を頼んだか」。
+    /// 並べると N 体並走で**ズレているやつ**が一目で分かる。LLM 生成ではない（人間の発話）ので
+    /// 表示側は ✳ を付けない。送信のたびに更新し、復元時は `turns` の最後の user から拾う。
+    last_prompt: Option<SharedString>,
     model: SharedString,
     permission_mode: SharedString,
     effort: SharedString,
@@ -913,6 +920,7 @@ impl Thread {
             turn_started_at: None,
             created_at_ms: now_unix_ms(),
             last_input_at_ms: None,
+            last_prompt: None,
             // 空＝「まだ何も選んでいない」。エージェントが広告した current をそのまま採用する。
             // ここに necoder 独自の綴りを置くと、広告と突き合わせたとき必ず外れる。
             model: SharedString::default(),
@@ -2310,6 +2318,7 @@ PYEOF"#;
                     tokens_max: thread.tokens_max,
                     created_at_ms: thread.created_at_ms,
                     last_input_at_ms: thread.last_input_at_ms,
+                    last_prompt: thread.last_prompt.clone(),
                     digest,
                     plan_done,
                     plan_total,
@@ -4528,6 +4537,9 @@ PYEOF"#;
             thread.tier2 = None; // ✳ 要約は前ターンの文＝新ターンでは古い（P4）
             thread.turn_started_at = Some(std::time::Instant::now()); // 経過秒の起点
             thread.last_input_at_ms = Some(now_unix_ms()); // 「最終いつ入力したか」（M14）
+                                                           // 「頼んだこと」は**エージェントに渡す原文ではなく人間が書いた本文**を残す
+                                                           // （`@path` の context 接頭辞を混ぜない＝サイドバーで読めるのは自分の言葉だけ）。
+            thread.last_prompt = Some(SharedString::from(prompt.clone()));
             thread.session_used = true; // 先張りの「畳んでよい」対象から外れる
         }
         self.sync_running_registry(cx); // ⌘O ダッシュボードの「実行中」を即時反映（M12-12）
@@ -9731,6 +9743,15 @@ fn entry_from_turn((role, content): (String, String)) -> Entry {
 }
 
 /// storage の1スレッドを復元する（履歴オープン・#5）。id/name/色から Thread を作り直近 turn を積む。
+/// entries から「頼んだこと」を引く（復元経路・`turns` の**最後の user 発話**）。
+/// 送信時は [`AgentPanel::send_prompt_text`] が直接書くので、ここは復元のためだけにある。
+fn last_prompt_from_entries(entries: &[Entry]) -> Option<SharedString> {
+    entries.iter().rev().find_map(|entry| match entry {
+        Entry::User(text) => Some(text.clone()),
+        _ => None,
+    })
+}
+
 fn thread_from_storage(
     storage: &storage::Storage,
     id: &str,
@@ -9745,6 +9766,8 @@ fn thread_from_storage(
     let turns = storage.load_recent_turns(id, 200).unwrap_or_default();
     thread.entries = turns.into_iter().map(entry_from_turn).collect();
     thread.persisted_entries = thread.entries.len();
+    // 「頼んだこと」は復元時に turns の最後の user 発話から引き直す（DB に列を足さない）。
+    thread.last_prompt = last_prompt_from_entries(&thread.entries);
     thread.acp_session_id = storage
         .load_thread_sessions()
         .unwrap_or_default()
@@ -9783,6 +9806,7 @@ fn seed_threads() -> Vec<Thread> {
         // 種スレッドにも実感のある時刻を（offscreen 検証で「開始/入力」表示が写る）。
         created_at_ms: now_unix_ms() - 2 * 60 * 60 * 1000,
         last_input_at_ms: Some(now_unix_ms() - 5 * 60 * 1000),
+        last_prompt: Some("rope の設計を Zed のやり方と比べて詰めて".into()),
         model: "fable".into(),
         permission_mode: "default".into(),
         effort: "high".into(),
@@ -9862,6 +9886,23 @@ pub trait Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 復元した会話でも「頼んだこと」は**最後の**人間の発話（FLEET-V2 §3.2-3 / P1 残の回収）。
+    /// 途中のアシスタント発言やツール行に引っぱられない。
+    #[test]
+    fn last_prompt_comes_from_the_latest_user_turn() {
+        assert_eq!(last_prompt_from_entries(&[]), None);
+        let entries = vec![
+            Entry::User("rope を設計して".into()),
+            Entry::Agent("やりました".into()),
+            Entry::User("テストも足して".into()),
+            Entry::Agent("足しました".into()),
+        ];
+        assert_eq!(
+            last_prompt_from_entries(&entries).as_deref(),
+            Some("テストも足して")
+        );
+    }
 
     /// 短い入力は畳まない（数行の指示に「▸ 全 N 行」が付くと邪魔なだけ）。
     #[test]

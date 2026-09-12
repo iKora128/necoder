@@ -232,6 +232,10 @@ pub struct SettingsView {
     availability_generation: u64,
     /// 導入/ログインボタン押下後の変化見張り中フラグ（agent ごと・多重起動防止）。
     watching_agents: Vec<bool>,
+    /// vendor CLI の調査を次の描画で 1 回蹴る（[`Self::refresh_availability`] が立て、render が倒す）。
+    /// **調査は実 CLI を起動する**（`probe_acp_session`）ので、開かれてもいない設定ホームのために
+    /// 子プロセスを撒かない。設定ホームが実際に描かれた時だけ走らせるための 1 bit。
+    availability_pending: bool,
     /// 外観セクションに並べるテーマ一覧（組み込み + 同梱 + ユーザー JSON）。
     /// 描画毎の fs 走査を避けてキャッシュし、設定を開き直すたび [`Self::refresh_availability`] で更新。
     themes: Vec<(SharedString, theme_core::ThemeSource)>,
@@ -262,6 +266,7 @@ impl SettingsView {
             checking_agents: true,
             availability_generation: 0,
             watching_agents: vec![false; acp_client::AGENTS.len()],
+            availability_pending: false,
             themes: theme_core::available_themes(themes_dir().as_deref()),
             mcp_servers: Vec::new(),
             cli_shim_target: None,
@@ -283,13 +288,26 @@ impl SettingsView {
         self.accent = accent;
     }
 
-    /// vendor CLI の導入・認証確認は Render から分離し、最新世代だけを反映する。
-    /// テーマ一覧もここで読み直す（設定を開くたび＝`themes/` に JSON を足した直後も反映される）。
-    pub fn refresh_availability(&mut self, cx: &mut Context<Self>) {
+    /// テーマ / MCP の一覧を読み直す（同期・fs のみ）。描画毎の fs 走査を避けるキャッシュの更新。
+    fn refresh_lists(&mut self, cx: &mut Context<Self>) {
         self.themes = theme_core::available_themes(themes_dir().as_deref());
         self.mcp_servers = mcp_servers(cx);
-        self.availability_generation = self.availability_generation.wrapping_add(1);
+    }
+
+    /// 設定ホームを開く / 開き直す時に呼ぶ。一覧はここで即座に読み直し（`themes/` に JSON を足した
+    /// 直後も反映される）、**vendor CLI の調査は次の描画に予約する**（[`Self::availability_pending`]）。
+    /// 調査は実 CLI を起動するので「開いた」ではなく「描かれた」を合図にする。
+    pub fn refresh_availability(&mut self, cx: &mut Context<Self>) {
+        self.refresh_lists(cx);
         self.checking_agents = true;
+        self.availability_pending = true;
+        cx.notify();
+    }
+
+    /// 予約済みの vendor CLI 調査を 1 回だけ走らせる（render から。最新世代だけを反映する）。
+    fn probe_availability(&mut self, cx: &mut Context<Self>) {
+        self.availability_pending = false;
+        self.availability_generation = self.availability_generation.wrapping_add(1);
         let generation = self.availability_generation;
         cx.spawn(async move |view, cx| {
             let agent_states = cx
@@ -1087,6 +1105,10 @@ impl EventEmitter<SettingsViewEvent> for SettingsView {}
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 開いた時に予約された vendor CLI 調査を、実際に描かれたこの瞬間に 1 回だけ蹴る。
+        if self.availability_pending {
+            self.probe_availability(cx);
+        }
         #[cfg(feature = "remote-preview")]
         if self.remote_preview_only {
             return div()

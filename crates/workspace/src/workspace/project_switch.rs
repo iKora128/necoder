@@ -135,6 +135,10 @@ impl Workspace {
         self.project_sessions.active = active;
         self.load_active_slot(window, cx);
         self.work_project_changed(cx);
+        // 編隊は「このリポジトリの編隊」。跨いだらグリッドを行き先のものへ差し替える。
+        if self.chrome.fleet_mode {
+            self.seed_fleet_cells(cx);
+        }
         if follow_focus {
             self.focus_session_surface(agent_had_focus, terminal_had_focus, window, cx);
         }
@@ -308,6 +312,9 @@ impl Workspace {
             || self.overlays.add_project_dialog_open
             || self.chrome.task_renaming.is_some()
             || self.chrome.control_focus.is_focused(window)
+            // レールにフォーカスがある間は着地先へ飛ばさない。飛ばすと 1 回目の ↑ でエディタへ抜け、
+            // 2 回目の ↑ がキャレット移動になって連打できなくなる（2026-09-12）。
+            || self.chrome.rail_focus.is_focused(window)
             || self.focus_handle.is_focused(window)
     }
 

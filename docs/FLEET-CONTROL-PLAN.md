@@ -56,7 +56,7 @@
 ### P2 — ニュース常設（ユーザー高評価・早く出す）
 
 - ROADMAP M14「ニュースフィード + 通知の細部」の実装。ソースは `task_events`（P1 で digest が載っている）。下ドックに時系列フィード（mock の F 案 → `fleet-dashboard.html` 下段の書式）: 時刻 + スレッド色チップ + 太字タスク名 + イベント文。
-- 行頭チップ=スレッド色（帰属）。**将来の監督の采配も同じログに載る**前提でイベント種別を設計（`phase_change / permission / digest / integration / coordinator`）。
+- 行頭チップ=スレッド色（帰属）。**Captain の采配も同じログに載る**前提でイベント種別を設計（`phase_change / permission / digest / integration / captain`。`coordinator` は 2026-09-12 の F0 で改名）。
 - エージェント別ミュート + window 非フォーカス時のみ通知音（M13 完了音と合流）。
 - 受入: 承認待ち/完了/失敗が下フィードに時系列で流れ、個別ミュートできる。
 
@@ -88,9 +88,11 @@
 
 ### P6 — 監督席（Coordinator seat）+ 依存待ち
 
+> 2026-09-12: 「監督 / Coordinator」は **Captain** に改名した（FLEET-V2 §2・実装は `captain.rs` / 設定 `captain_agent` / `NewsKind::Captain` / 台帳 kind `captain`）。以下は当時の計画文のまま残す。
+
 - `TaskSpaceRecord` に `depends_on: Vec<SpaceId>` を追加。`fleet_wait` を activity/phase 両対応に拡張。
 - 監督 = **任命制のただのスレッド**: IntegrationSpace に住む pinned thread + fleet ツールセット + システムプロンプトテンプレート（役割・規律・「手を動かさない」）。任命 UI は Settings（既定ドリフト禁止の原則どおり）。7 種カタログのどれでも可。
-- **wake はイベント駆動**: 常駐ポーリング禁止。Blocked（15s 閾値・worry と同じ）/ Done / Failed 遷移で、変化分の digest を添えて監督に 1 ターン渡す。監督の発言/采配は `coordinator` イベントとして task_events へ（ニュースに載る＝監査可能）。
+- **wake はイベント駆動**: 常駐ポーリング禁止。Blocked（15s 閾値・worry と同じ）/ Done / Failed 遷移で、変化分の digest を添えて監督に 1 ターン渡す。監督の発言/采配は `coordinator` イベント（現 `captain`）として task_events へ（ニュースに載る＝監査可能）。
 - integrate は radar clean + 人間 gate 既定（監督は提案まで）。
 - 受入: **ROADMAP M14 総合受入の自走部分** — 「B の完了を待って merge」を監督が fleet ツールだけで実行（integrate の最終承認は人間）。
 

@@ -165,6 +165,18 @@ impl Workspace {
     }
 
     /// ショートカット一覧の描画（開いている時のみ）。既定 keymap をセクションごとに表で見せる。
+    /// 既定キーマップで **action に割り当てられているキー**の表示名（`⌘⇧M` / `Ctrl+Shift+M`）。
+    /// 案内文にキーを直書きすると keymap と静かにズレるので、文言側はここから受け取る。
+    pub(crate) fn shortcut_label_for(action_name: &str) -> Option<String> {
+        let platform = keymap_core::KeymapPlatform::current();
+        keymap_core::parse(&keymap_core::default_keymap_json(platform))
+            .ok()?
+            .iter()
+            .flat_map(|section| section.bindings.iter())
+            .find(|(_, action)| action.as_str() == action_name)
+            .map(|(key, _)| keymap_core::pretty_keystroke_for(platform, key))
+    }
+
     pub(crate) fn render_shortcut_sheet(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let focus = self.overlays.shortcut_sheet.as_ref()?;
         let theme = self.theme.clone();

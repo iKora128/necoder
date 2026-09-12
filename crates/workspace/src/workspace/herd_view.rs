@@ -1,34 +1,6 @@
 use crate::workspace::*;
 
 impl Workspace {
-    /// 編隊 herd サイドバー（状態一覧・M14）の開閉。todo/git と排他（explorer が既定ビュー）。
-    /// レールの ⚡ アイコン / コマンドパレット「表示: 編隊」から呼ぶ。
-    pub(crate) fn toggle_herd_sidebar(
-        &mut self,
-        _: &ToggleHerdSidebar,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.chrome.show_herd {
-            self.chrome.show_herd = false;
-            // 閉じたらエディタへフォーカスを戻す（git パネルと同じ所作）。
-            if let Some(editor) = self.active_editor() {
-                let handle = editor.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            }
-        } else {
-            self.chrome.show_herd = true;
-            self.chrome.show_left = true;
-            // 排他: 他の左ドックボード（todo/git）は畳む。
-            self.todo_panel
-                .update(cx, |panel, cx| panel.set_open(false, cx));
-            self.git_panel
-                .update(cx, |panel, cx| panel.set_open(false, cx));
-            self.ensure_fleet_clock(cx); // 行の相対時刻（開始/入力）を古びさせない
-        }
-        cx.notify();
-    }
-
     /// Task 見出し / セルヘッダのダブルクリック → 改名（スレッドタブと同じ EditorView・IME 対応・2026-07-24）。
     /// `site` = 入力欄をどこに描くか（herd 見出し / セルヘッダ）。編隊モードで両方が同時に見えても
     /// 同じ入力欄 Entity を二重描画しないための識別。改名は表示名（title）だけを変える。

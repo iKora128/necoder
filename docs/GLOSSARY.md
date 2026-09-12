@@ -7,7 +7,7 @@
 
 - **1 概念 1 名**。同義語・別名を増やさない。
 - **agent / エージェント = 「どの AI か」だけ**（Claude Code 等 = `AgentKind`）。Fleet の作業単位は **TaskSpace**、会話単位は thread。
-- **Fleet = 多エージェント・モードのコンセプト名**（新概念・ユーザーにもそのまま "Fleet"）。
+- **Fleet = 多エージェント・モードのコンセプト名**（新概念・ユーザーにもそのまま "Fleet"）。ユーザーに見せる概念は **Task / Task の中のタブ / Captain** の 3 つだけ（正は `FLEET-V2.md`）。
 - レールの 1 枠は **project**。Fleet で lifecycle を持つ worktree だけを **TaskSpace** と呼ぶ。
 - `Workspace` は**アプリの窓 / シェル全体**（全 project を所有）＝ 作業フォルダではない。
 
@@ -21,8 +21,14 @@
 | **Fleet サイドバー**（状態一覧） | `fleet_sidebar`（← `herd`） | Fleet サイドバー | Fleet sidebar |
 | **系譜グラフ** | `lineage` / `graph` | 系譜 | Lineage |
 | ↳ 表示（4 種） | `GraphView::{Fan,Tree,Card,Hub}` | 扇形 / ツリー / カード / ハブ | Fan / Tree / Card / Hub |
-| **セル**（グリッドのタイル） | `FleetCell`（← `FleetPane`・提案） | セル | Cell |
-| ↳ セルの中身 | `FleetPane::{Task,Terminal,Editor,Diff,Tests}` | Task / ターミナル / エディタ / Diff / Tests | Task / Terminal / Editor / Diff / Tests |
+| **舞台**（Fleet 中央。Task カードを 1〜3 枚） | `stage` / `StageLayout::{One,Two,Three}` | 舞台 | Stage |
+| **Task カード**（舞台の 1 枚 = 1 Task。← セル） | `TaskCard` | Task カード | Task card |
+| ↳ **Task タブ**（カードの中の面。← FleetPane / 面） | `TaskTab::{Thread(id),Diff,Terminal(id),Files}` | スレッド / 変更 / ターミナル / ファイル | Thread / Diff / Terminal / Files |
+| ↳ **ピン**（舞台に並べる Task を選ぶ） | `pinned` | 並べる | Pin |
+| **系譜の帯**（中央上の薄い系譜・⌄ で 4 表示に展開） | `lineage_strip` | 系譜 | Lineage |
+| **次へ**（phase に応じた唯一の主操作ボタン） | `next_action` | （phase 別の語） | （phase 別） |
+| **＋ Task**（1 プロンプト = 1 worktree のダイアログ） | `new_task_dialog` | ＋ Task | + Task |
+| **準備スクリプト**（worktree 作成直後に 1 回） | `worktree_setup`（`.necoder/worktree-setup.sh` / `task.env`） | 準備 | Setup |
 | **レール**（左の色バー） | `rail` | レール | Rail |
 | **project**（レールの 1 枠） | `ProjectSlot` / `slot` | プロジェクト | Project |
 | 長寿命 UI 束（1 project 分） | `ProjectSession` | — | — |
@@ -30,18 +36,13 @@
 | **IntegrationSpace**（保護された統合先） | `SpaceKind::Integration`（P0 で phase から分離） | Integration | Integration |
 | **thread**（Task 内の会話 / AgentRun 1 本） | `Thread` | スレッド | Thread |
 | **agent**（話す相手の AI） | `AgentKind` / `agent` | エージェント | Agent |
-| **作業**（Fleet 中央タブ。worktree を列で並べて触る面・既定） | `FleetCenterView::Work` / `workbench` | 作業 | Work |
-| ↳ **作業ツリー**（左の 3 段ツリー。Fleet の主たる移動手段） | `render_work_sidebar` | リポジトリ / 作業 | Repositories / work |
-| ↳ **列**（1 列 = 1 worktree） | `WorkColumn` | 列 | Column |
-| ↳ **ペイン**（列の中の分割。タブ行を 1 本持つ） | `WorkPane` | ペイン | Pane |
-| ↳ **面**（ペインが映すもの） | `WorkSurface::{Agent,Terminal,File,Diff}` | スレッド / Terminal / ファイル / 変更 | Thread / Terminal / File / Diff |
-| ↳ **配置**（リポジトリごとの列・ペイン・タブの保存形） | `RepositoryLayout` / `WorkLayoutState` | 配置 | Layout |
-| **管制**（編隊統括ダッシュボード・中央タブ） | `FleetCenterView::Control` / `control_view` | 管制 | Control |
 | **遷移スナップショット**（状態遷移時の 1 行） | `digest` / `digest_tail` / `Thread.digest` | （文そのもの・ラベル無し） | （no label） |
-| **要対応キュー**（管制左・裁く列） | `AttentionItem` / `attention_queue` | 要対応 | Attention |
+| **要対応**（Fleet サイドバー最上段・裁く列。← 管制の要対応キュー） | `AttentionItem` / `attention_queue` | 要対応 | Attention |
 | **統合パイプライン**（TaskPhase 列の帯） | `render_pipeline` | 統合パイプライン | Integration pipeline |
 | **ニュース**（task_events の鏡・時系列） | `NewsItem` / `NewsKind` | ニュース | News |
-| **監督**（任命制の采配スレッド・P6） | `coordinator`（`NewsKind::Coordinator`） | 監督 | Coordinator |
+| **Captain**（任命制の采配スレッド。コードを書かず fleet CLI/MCP で采配・integrate は人間。← 監督） | `captain`（`NewsKind::Captain`・設定 `captain_agent`） | Captain | Captain |
+| ↳ **介入**（Captain を通さず Task に直接書く。台帳に残る） | `human_send`（`NewsKind::HumanSend`） | （宛先チップで示す） | — |
+| ↳ **采配ログ**（Captain の判断と実行の履歴） | `NewsKind::Captain` | 采配ログ | Captain log |
 | **集約気分**（編隊の最悪状態に追従する 1 匹） | `fleet_mood_mascot` | — | — |
 | **常駐**（Herdr sidecar 実行形態・P7） | `HerdrRuntime`（予定） | 常駐 | Resident (Herdr) |
 | **リモート管制**（スマホから見る/裁く・P9） | `serve --control` / `remote_control` | リモート管制 | Remote control |
@@ -49,8 +50,8 @@
 | ↳ **デバイス**（ペア済みの端末・失効の単位） | `PairedDevice` | デバイス | Device |
 | ↳ **リレー**（room id が一致する 2 本を繋ぐ交換機） | `relay`（`relay/`・DO） | リレー | Relay |
 | ↳ **封**（transport 非依存の暗号化フレーム） | `seal` / `open` / `SealedFrame` | — | — |
-| **片付けメニュー**（セルの ⋯・残るものが減る順の段） | `FleetCellMenuState` / `FleetCellAction` | 片付け | Clean up |
-| ↳ セルを閉じる（画面から外すだけ） | `close_fleet_cell` | セルを閉じる | Close cell |
+| **片付けメニュー**（Task カードの ⋯・残るものが減る順の段） | `FleetCellMenuState` / `FleetCellAction` | 片付け | Clean up |
+| ↳ カードを閉じる（舞台から外すだけ） | `close_fleet_cell` | カードを閉じる | Close card |
 | ↳ Task を終了（台帳を archived に） | `archive_fleet_cell_task` | Task を終了 | Finish Task |
 | ↳ worktree を削除（ディスクから消す） | `delete_fleet_cell_worktree` | worktree を削除 | Delete worktree |
 | ↳ 削除の確認（失うものを数えて見せる） | `WorktreeDeleteConfirm` / `WorktreeStakes` | — | — |
@@ -76,6 +77,11 @@
 | 禁止 | → 正 | 理由 |
 |---|---|---|
 | `herd` / herd サイドバー | `fleet_sidebar` / Fleet サイドバー | Fleet に統一（`herd` は UI に一度も出ない code 専用語） |
+| 監督 / `coordinator` / Coordinator | Captain / `captain` | Fleet の比喩に合わせ中核機能として改名（2026-09-12）。旧設定キー `coordinator_agent` の読み替えは作らない |
+| セル / `FleetPane` / surface | Task カード / `TaskTab` | 同じ worktree のターミナルが別セルになって増殖していた。全部 Task の中のタブ（FLEET-V2 §3.5） |
+| 作業 / 作業ツリー / 列 / ペイン / 面 / 配置（`workbench` / `WorkColumn` / `WorkPane` / `WorkSurface` / `RepositoryLayout`） | 廃止 | 0.1.15 の作業タブは実機で取り回しが悪く降格 → FLEET-V2 で削除 |
+| 管制（中央タブ）/ `FleetCenterView` | 要対応（サイドバー常設）+ Captain カード | 中央タブ 3 面は「今どこを見ているか」を失わせる。**リモート管制**の名前だけ P9 完了まで据え置き |
+| ＋ACP / ＋Terminal / ＋Worktree | ＋ Task（と Task タブ行の ＋▾） | 押す前に「どれか」を考えさせない。1 プロンプト = 1 worktree |
 | Multi Agent / 編隊（UI） | Fleet | Fleet を新概念としてユーザーにも前面 |
 | river / リバー | hub / Hub | 系譜の表示は Fan/Tree/Card/Hub に確定（River は廃止済み） |
 | space（一般的なレール枠の意味） | project / `ProjectSlot` | `TaskSpace` / `IntegrationSpace` という型名に限り使用 |

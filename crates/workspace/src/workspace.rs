@@ -80,8 +80,9 @@ mod worktree_delete;
 pub use control_ipc::control_socket_path;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
-mod coordinator;
-pub(crate) use coordinator::is_coordinator_thread_name;
+mod captain;
+pub(crate) use captain::is_captain_thread_name;
+mod fleet_sidebar;
 mod todo_panel;
 pub(crate) use todo_panel::*;
 mod editor_area;
@@ -128,9 +129,10 @@ actions!(
         // Todo ボード（.necoder/todos.md・M12-10）。
         ToggleTodoBoard,
         // 編隊 herd サイドバー（状態一覧・M14）。
-        ToggleHerdSidebar,
         // 編隊モード（全画面 = herd + 系譜グラフ + グリッド + ニュース・M14）。
         ToggleFleet,
+        /// Captain の会話へ寄せる（⌘0・FLEET-V2 §7）。未任命なら設定ホームへ。
+        FocusCaptain,
         // solo で AI パネルだけを全画面に（2026-07-27）。エディタもエクスプローラも畳んで
         // チャット 1 枚にする＝「ファイルを開かずに全部 AI に任せる」使い方のための面。
         ToggleAgentFullScreen,
@@ -1089,12 +1091,16 @@ struct ChromeState {
     show_herd: bool,
     /// 編隊モード（全画面 = herd + 系譜グラフ + グリッド + ニュース・M14）。通常ビューを置き換える。
     fleet_mode: bool,
-    /// 編隊グリッドのセル（mock の `.acell`・＋/× で増減・上限 8・M14 #3）。
+    /// 編隊グリッドのセル（mock の `.acell`・＋/× で増減・M14 #3）。**いまのリポジトリの分だけ**。
     fleet_cells: Vec<FleetPane>,
-    /// lanes からの自動配置を**もう済ませたか**（2026-07-27）。旧実装は「空なら seed」だったので、
-    /// 最後の 1 枚を × で閉じた次のフレームに全セルが復活していた（ユーザー報告「罰おしても消えない」）。
-    /// 空はユーザーが選んだ状態でもありうる ＝ 空かどうかで判断してはいけない。
-    fleet_seeded: bool,
+    /// `fleet_cells` がどのリポジトリの編隊か（`ProjectSlot::repository_key`）。`None` = まだ配置していない。
+    /// lanes からの自動配置を**もう済ませたか**の記録も兼ねる（2026-07-27）。旧実装は「空なら seed」
+    /// だったので、最後の 1 枚を × で閉じた次のフレームに全セルが復活していた（ユーザー報告
+    /// 「罰おしても消えない」）。空はユーザーが選んだ状態でもありうる ＝ 空かどうかで判断しない。
+    fleet_repository: Option<String>,
+    /// リポジトリを跨いだときに畳んでおく編隊（鍵 = `repository_key`）。戻ってきたら ＋/× の結果ごと
+    /// 復元する（切替のたびに並べ直さない・閉じたセルは閉じたまま）。
+    fleet_grids: HashMap<String, Vec<FleetPane>>,
     /// 編隊中央のタブ（管制 / グラフ・P3）。
     fleet_center_view: FleetCenterView,
     /// 管制タブのフォーカス（⏎ = キュー先頭へ・keymap context "FleetControl" の足場）。
@@ -1155,11 +1161,16 @@ struct ChromeState {
     /// レール項目のドラッグ状態（index・押下位置・閾値超えフラグ）。窓の外で離すと
     /// 擬似 tear-off = その位置に新窓（M13。本物の tear-off は gpui 未対応・DECISIONS）。
     rail_drag: Option<(usize, Point<gpui::Pixels>, bool)>,
-    /// レールが「最後に触った面」か。レールのどこか（空き地でも可）を押すと立ち、レール外を押すと落ちる。
-    /// 立っている間はタブ切替（⌘{ ⌘}）が**プロジェクト切替**に化ける＝トラックパッドで
-    /// 「レールを一度突いて ⌘} で隣のプロジェクトへ」が成り立つ（2026-09-03 本人要望）。
-    /// agent_active と同じ「クリックで確定する宛先」の流儀（フォーカスは動かさない）。
-    rail_active: bool,
+    /// レールのフォーカス（`rail_view.rs` の root div が `track_focus` で載せる）。
+    /// ここにフォーカスがある間だけ**素の ↑/↓ がプロジェクト切替**になる（2026-09-12 本人要望・
+    /// 「レールを突いて上下だけで動きたい」）。以前は `rail_active` フラグでタブ切替（⌘{ ⌘}）を
+    /// プロジェクト切替に化けさせていたが、キーの意味が press 履歴で変わる隠れモードなので廃止した。
+    ///
+    /// キーマップに素の ↑/↓ を足す道は使えない: gpui はコンテキスト無しのバインドを**最深**として
+    /// 解決するので（`Keymap::binding_enabled`）、エディタのキャレット移動を全域で殺す。逆に
+    /// Workspace コンテキストへ足すと Editor コンテキストより浅く負ける。**本物のフォーカスを
+    /// レールへ渡してエディタを dispatch 経路から外す**のが唯一の筋（`on_rail_key_down`）。
+    rail_focus: FocusHandle,
 }
 
 struct WorkspaceOverlays {
@@ -1207,7 +1218,7 @@ struct NotificationCenter {
     crash_notice: Option<PathBuf>,
     /// ニュースフィード（管制 P2）: `task_events` と同型の時系列ログ（新しいものが先頭）。
     /// 起動時に DB から backfill し、以後は task_events へ書くのと同じ場所で live に積む。
-    /// **将来の監督（coordinator）の采配も同じ形でここへ載る**（監査可能なニュース）。
+    /// **Captain の采配も同じ形でここへ載る**（監査可能なニュース・FLEET-V2 §5.6）。
     news: Vec<NewsItem>,
 }
 
@@ -1215,23 +1226,23 @@ struct NotificationCenter {
 #[derive(Clone)]
 pub(crate) struct NewsItem {
     pub at_ms: i64,
-    /// 帰属チップの色（スレッド色 / TaskSpace 色）。**色は識別・種別は形**（coordinator は丸チップ）。
+    /// 帰属チップの色（スレッド色 / TaskSpace 色）。**色は識別・種別は形**（Captain は丸チップ）。
     pub color: Hsla,
-    /// 太字部（タスク名 / スレッド名 / 「監督」）。
+    /// 太字部（タスク名 / スレッド名 / 「Captain」）。
     pub title: SharedString,
     pub text: SharedString,
     pub kind: NewsKind,
 }
 
-/// ニュースのイベント種別（task_events の kind と同じ語彙・監督の采配も同じログに載る前提の設計）。
+/// ニュースのイベント種別（task_events の kind と同じ語彙・Captain の采配も同じログに載る）。
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum NewsKind {
     PhaseChange,
     Permission,
     Digest,
     Integration,
-    #[allow(dead_code)] // P6（監督席）が載せる。ニュースの語彙として先に確保する。
-    Coordinator,
+    /// Captain の采配（丸チップ・FLEET-V2 §5.6）。
+    Captain,
 }
 
 struct WorkspacePersistence {
@@ -1280,7 +1291,7 @@ pub struct Workspace {
     /// 「接続中/切断」を即時に映すための配線（`remote_connection.rs`・2026-09-08）。
     connection_pumps: std::collections::HashMap<String, remote_connection::ConnectionPump>,
     /// 編隊レベルの ✳ 総括（Tier 2・P4）。キューに影響する遷移から 5s デバウンスで oneshot 生成。
-    /// **状態を上書きしない**（数字とキューは事実層・これは監督バーに添える文）。
+    /// **状態を上書きしない**（数字とキューは事実層・これは Captain バーに添える文）。
     control_summary: Option<SharedString>,
     /// 総括のデバウンス世代（最新の遷移だけが生成を走らせる）。
     control_summary_gen: u32,
@@ -1767,8 +1778,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_rename))
             .on_action(cx.listener(Self::open_inline_edit))
             .on_action(cx.listener(Self::toggle_todo_board))
-            .on_action(cx.listener(Self::toggle_herd_sidebar))
             .on_action(cx.listener(Self::toggle_fleet_mode))
+            .on_action(cx.listener(Self::focus_captain))
             .on_action(cx.listener(Self::toggle_agent_full_screen))
             .on_action(cx.listener(Self::toggle_control_center))
             .on_action(cx.listener(Self::control_next))
@@ -1845,12 +1856,16 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &PrevProject, window, cx| {
                 this.switch_adjacent_project(-1, window, cx);
             }))
-            // レール外をどこか押したら rail_active を落とす。capture 相なので、レール自身の
-            // bubble リスナー（rail_view.rs・true にする）より先に走る＝レール内クリックでは立ち直る。
-            .capture_any_mouse_down(cx.listener(|this, _, _window, cx| {
-                if this.chrome.rail_active {
-                    this.chrome.rail_active = false;
-                    cx.notify(); // レールの面（bg1）を元に戻す
+            // レールにフォーカスがある状態でどこかを押したら、作業面へフォーカスを返す。capture 相
+            // なので、レール自身の bubble リスナー（rail_view.rs・レールへ focus し直す）より先に
+            // 走る＝レール内クリックでは戻ってきて、レール外クリックでだけ実際に抜ける。
+            // エディタ・端末・composer は自分でフォーカスを取るのでこの処理が無くても抜けるが、
+            // statusbar やタブ列の空き地のような「押せるだけでフォーカスを取らない面」を押した後も
+            // ↑/↓ がプロジェクトを動かし続けるのを防ぐ（フォーカスの迷子を作らない）。
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                if this.chrome.rail_focus.is_focused(window) {
+                    this.focus_session_surface(false, false, window, cx);
+                    cx.notify(); // レールの面（bg2）を元に戻す
                 }
             }))
             .on_mouse_move(cx.listener(Self::on_resize_move))
@@ -1873,7 +1888,7 @@ impl Render for Workspace {
             .child(self.render_titlebar(cx))
             .child(if self.chrome.fleet_mode {
                 // 編隊モード（mock の「編隊」ビュー・M14）: 通常の center/right dock を丸ごと置換。
-                if !self.chrome.fleet_seeded {
+                if self.chrome.fleet_repository.is_none() {
                     self.seed_fleet_cells(cx); // 初回（起動プローブ含む）は lanes で自動配置
                                                // 開発用: NECODER_FLEET_ADD=n で ＋Agent を n 回（新スレッド起動が複製しない検証）。
                     if let Ok(n) = std::env::var("NECODER_FLEET_ADD")
@@ -3052,12 +3067,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// レールが最後に触った面（`chrome.rail_active`）の間は ⌘{ ⌘}（タブ切替）がプロジェクト切替に
-    /// 化け、落ちればエディタタブ宛てに戻る（トラックパッド動線・2026-09-03）。
+    /// レールにフォーカスがある間は素の ↑/↓ がプロジェクト切替になり、**切り替えてもフォーカスは
+    /// レールに残る**＝連打できる。Escape で作業面へ抜け、⌘{ ⌘} は常にタブ切替のまま（2026-09-12）。
     #[gpui::test]
-    fn rail_surface_routes_tab_switch_to_projects(cx: &mut gpui::TestAppContext) {
+    fn rail_focus_routes_arrow_keys_to_projects(cx: &mut gpui::TestAppContext) {
+        fn key(stroke: &str) -> KeyDownEvent {
+            KeyDownEvent {
+                keystroke: gpui::Keystroke::parse(stroke).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            }
+        }
+
         let root =
-            std::env::temp_dir().join(format!("necoder_rail_tab_switch_{}", std::process::id()));
+            std::env::temp_dir().join(format!("necoder_rail_arrow_switch_{}", std::process::id()));
         let project_a = root.join("a");
         let project_b = root.join("b");
         let _ = std::fs::remove_dir_all(&root);
@@ -3082,28 +3105,48 @@ mod tests {
             }
             assert_eq!(workspace.project_sessions.active, 0);
 
-            // レール面が最後 → ⌘} で次のプロジェクト、⌘{ で前のプロジェクト（循環）。
-            workspace.chrome.rail_active = true;
-            workspace.select_next_tab(&SelectNextTab, window, cx);
+            // レールを押した状態＝レールにフォーカスがある状態を作る。
+            let rail = workspace.chrome.rail_focus.clone();
+            window.focus(&rail, cx);
+
+            workspace.on_rail_key_down(&key("down"), window, cx);
             assert_eq!(
                 workspace.project_sessions.active, 1,
-                "⌘}} が次のプロジェクトへ"
+                "↓ で次のプロジェクトへ"
             );
-            workspace.select_next_tab(&SelectNextTab, window, cx);
-            assert_eq!(workspace.project_sessions.active, 0, "末尾からは先頭へ回る");
-            workspace.select_prev_tab(&SelectPrevTab, window, cx);
-            assert_eq!(
-                workspace.project_sessions.active, 1,
-                "⌘{{ が前のプロジェクトへ（循環）"
+            assert!(
+                workspace.chrome.rail_focus.is_focused(window),
+                "切替後もフォーカスがレールに残らないと 2 回目の ↑↓ が効かない"
             );
 
-            // レール外を触った（フラグが落ちた）後はプロジェクトを動かさない。
-            workspace.chrome.rail_active = false;
+            workspace.on_rail_key_down(&key("down"), window, cx);
+            assert_eq!(workspace.project_sessions.active, 0, "末尾からは先頭へ回る");
+            workspace.on_rail_key_down(&key("up"), window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 1,
+                "↑ で前のプロジェクトへ（循環）"
+            );
+
+            // 修飾キー付きは横取りしない（⌃⌘↑↓ は keymap 側で受ける）。
+            workspace.on_rail_key_down(&key("ctrl-cmd-down"), window, cx);
+            assert_eq!(
+                workspace.project_sessions.active, 1,
+                "修飾キー付きはここで処理しない"
+            );
+
+            // ⌘{ ⌘} はレールにフォーカスがあってもタブ切替のまま（付け替えは廃止）。
             workspace.select_next_tab(&SelectNextTab, window, cx);
             workspace.select_prev_tab(&SelectPrevTab, window, cx);
             assert_eq!(
                 workspace.project_sessions.active, 1,
-                "通常時はエディタタブ宛て"
+                "⌘{{ ⌘}} はプロジェクトを動かさない"
+            );
+
+            // Escape で作業面へ戻る＝以後 ↑/↓ はレールに届かない。
+            workspace.on_rail_key_down(&key("escape"), window, cx);
+            assert!(
+                !workspace.chrome.rail_focus.is_focused(window),
+                "Escape でレールからフォーカスが外れる"
             );
         });
         let _ = std::fs::remove_dir_all(&root);
@@ -3218,6 +3261,51 @@ mod tests {
             }
         });
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// F0.5 入口: titlebar の `Editor | Fleet` セグメントが ⌘⇧M と同じ 1 本の道（`ToggleFleet`）で
+    /// 面を切り替え、**Editor に居る間も**要対応の件数が数えられる（バッジの素）こと。
+    #[gpui::test]
+    fn mode_switch_and_attention_badge_share_one_seam(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_mode_switch_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            // 静穏（要対応 0）ではバッジを出さない＝件数が 0。
+            assert!(!workspace.chrome.fleet_mode);
+            assert_eq!(workspace.attention_badge_count(cx), 0);
+
+            // Failed な Task は Editor に居ても数に入る（「裁くべきものが目に入る」の素）。
+            // IntegrationSpace は対象外なので、Task 扱いにしてから phase を倒す。
+            workspace.project_sessions.projects[0].task_space.kind = SpaceKind::Task;
+            workspace.project_sessions.projects[0].task_space.phase = TaskPhase::Failed;
+            assert_eq!(workspace.attention_badge_count(cx), 1);
+
+            // セグメントのクリックもキー（⌘⇧M）もこの 1 本を通る。
+            workspace.toggle_fleet_mode(&ToggleFleet, window, cx);
+            assert!(workspace.chrome.fleet_mode, "Fleet に入る");
+            workspace.toggle_fleet_mode(&ToggleFleet, window, cx);
+            assert!(!workspace.chrome.fleet_mode, "Editor に戻る");
+        });
     }
 
     /// 独立 ACP を増やしても元の会話を置換せず、非表示・復帰・管制から同じ実体を扱う。

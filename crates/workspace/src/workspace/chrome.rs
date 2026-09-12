@@ -149,9 +149,9 @@ impl Workspace {
                 }
             })
             .child(self.render_project_pill(cx))
+            // モード切替（FLEET-V2 §3.0）: どのプロジェクトかの隣に、どちらの面に居るかを置く。
+            .child(self.render_mode_switch(cx))
             .child(div().flex_1().h_full()) // 空き＝ドラッグ領域（titlebar 全体で処理）
-            // Multi Agent（編隊）モードのトグル（右上・UI-SPEC §11）。通常 ⇄ 編隊ビューを切替。
-            .child(self.render_fleet_toggle(cx))
             // 実行中スレッドの beacon（窓上部から常に見える＝方向感覚の核・UI-SPEC §3）
             .child(self.render_beacons(cx))
             // リモート SSH で開く（M13・GUI 導線。~/.ssh/config のエイリアス/鍵/ProxyJump がそのまま効く）
@@ -257,35 +257,73 @@ impl Workspace {
         controls
     }
 
-    /// Multi Agent（編隊）モードのトグル（titlebar 右上・M14）。ON で全画面が編隊ビュー
-    /// （herd + 系譜グラフ + N分割グリッド + ニュース）に。ON の間はプロジェクト色でハイライト。
-    pub(crate) fn render_fleet_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// **モード切替**（titlebar 左・プロジェクトピルの右隣・FLEET-V2 §3.0）。
+    /// 「今どちらの面にいるか」は「どのプロジェクトか」の隣にあるべき情報なので、右上の
+    /// 設定っぽいトグルをやめてここに `Editor | Fleet` のセグメントで置く。
+    /// Fleet 側には**要対応の件数バッジ**（0 なら出さない）を載せ、Editor で作業中でも
+    /// 裁くべきものが目に入るようにする。
+    pub(crate) fn render_mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let on = self.chrome.fleet_mode;
         let accent = self.accent();
+        let fleet = self.chrome.fleet_mode;
+        let attention = self.attention_badge_count(cx);
+        // セグメント 1 枚。選択側だけが accent（識別）・非選択は fg2（UI-SPEC §1.3: 色は識別のみ）。
+        let segment = |label: SharedString, active: bool| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .h(px(20.))
+                .px(px(8.))
+                .rounded(px(4.))
+                .text_size(px(11.))
+                .when(active, |element| {
+                    element.bg(accent.alpha(0.16)).text_color(theme.fg0)
+                })
+                .when(!active, |element| element.text_color(theme.fg2))
+                .child(label)
+        };
         div()
-            .id("titlebar-fleet")
+            .id("titlebar-mode")
             .flex()
             .items_center()
-            .gap(px(5.))
+            .gap(px(2.))
             .h(px(24.))
-            .px(px(9.))
+            .p(px(2.))
             .rounded(px(6.))
             .border_1()
-            .border_color(if on { accent } else { theme.border })
-            .when(on, |element| element.bg(accent.alpha(0.16)))
-            .text_color(if on { theme.fg0 } else { theme.fg2 })
+            .border_color(theme.border)
             .cursor_pointer()
-            .hover(|style| style.bg(theme.bg2).text_color(theme.fg1))
+            .hover(|style| style.border_color(theme.fg2))
+            .child(segment(
+                SharedString::from(i18n::t!("titlebar.editor")),
+                !fleet,
+            ))
             .child(
-                svg()
-                    .path("icons/layout-grid.svg")
-                    .size(px(13.))
-                    .flex_none()
-                    .text_color(if on { accent } else { theme.fg2 }),
+                segment(SharedString::from(i18n::t!("titlebar.fleet")), fleet)
+                    // 要対応バッジ: 件数 + err 色ボーダー。0 件では**出さない**（静かな時は静かに）。
+                    .when(attention > 0, |element| {
+                        element.child(
+                            div()
+                                .flex_none()
+                                .px(px(4.))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(theme.err)
+                                .text_size(px(9.5))
+                                .text_color(theme.err)
+                                .child(SharedString::from(format!("◐ {attention}"))),
+                        )
+                    }),
             )
-            .child(div().text_size(px(11.)).child(i18n::t!("titlebar.fleet")))
-            .tooltip(Tooltip::text(i18n::t!("rail.fleet"), theme.clone()))
+            .tooltip(Tooltip::text(
+                if attention > 0 {
+                    i18n::t!("titlebar.attention_tip", "n" => attention)
+                } else {
+                    i18n::t!("titlebar.mode_tip")
+                },
+                theme.clone(),
+            ))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

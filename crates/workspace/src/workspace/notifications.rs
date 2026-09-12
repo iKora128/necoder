@@ -65,9 +65,9 @@ impl Workspace {
                     .projects
                     .get(session_index)
                     .is_some_and(|slot| slot.task_space.is_integration());
-                // 監督の采配は coordinator イベントとして監査（P6・ニュースは丸チップ）。
-                if is_integration_slot && is_coordinator_thread_name(thread.as_ref()) {
-                    self.record_coordinator_decision(*color, digest.as_ref(), summary, cx);
+                // Captain の采配は captain イベントとして監査（FLEET-V2 §5.6・ニュースは丸チップ）。
+                if is_integration_slot && is_captain_thread_name(thread.as_ref()) {
+                    self.record_captain_decision(*color, digest.as_ref(), summary, cx);
                 }
                 if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
                     if !slot.task_space.is_integration() {
@@ -92,7 +92,7 @@ impl Workspace {
                     _ => (TaskPhase::ReviewReady, "all_agent_turns_ended"),
                 };
                 self.transition_task_space(session_index, phase, reason, digest.as_deref(), cx);
-                // 監督 wake（P6・Task の Done 遷移で即時・自分自身=integration は起こさない）。
+                // Captain wake（§5.3・Task の Done 遷移で即時・自分自身=integration は起こさない）。
                 if !is_integration_slot {
                     let title = self
                         .project_sessions
@@ -100,7 +100,7 @@ impl Workspace {
                         .get(session_index)
                         .map(|slot| slot.task_space.title.clone())
                         .unwrap_or_else(|| thread.clone());
-                    self.wake_coordinator("done", title, digest.clone(), cx);
+                    self.wake_captain("done", title, digest.clone(), cx);
                 }
                 if !muted {
                     self.push_toast(
@@ -139,13 +139,13 @@ impl Workspace {
                     Some(message),
                     cx,
                 );
-                // 監督 wake（P6・Failed 遷移で即時）。
+                // Captain wake（§5.3・Failed 遷移で即時）。
                 let failed_slot = self.project_sessions.projects.get(session_index);
                 if failed_slot.is_some_and(|slot| !slot.task_space.is_integration()) {
                     let title = failed_slot
                         .map(|slot| slot.task_space.title.clone())
                         .unwrap_or_else(|| thread.clone());
-                    self.wake_coordinator("failed", title, Some(message.clone()), cx);
+                    self.wake_captain("failed", title, Some(message.clone()), cx);
                 }
                 if !muted {
                     self.push_toast(
@@ -172,13 +172,13 @@ impl Workspace {
                     (!title.is_empty()).then(|| title.as_ref()),
                     cx,
                 );
-                // 監督 wake（P6・Blocked は 15s 閾値 = すぐ人間が許可したら起こさない）。
+                // Captain wake（§5.3・Blocked は 15s 閾値 = すぐ人間が許可したら起こさない）。
                 let blocked_slot = self.project_sessions.projects.get(session_index);
                 if blocked_slot.is_some_and(|slot| !slot.task_space.is_integration()) {
                     let task_title = blocked_slot
                         .map(|slot| slot.task_space.title.clone())
                         .unwrap_or_else(|| thread.clone());
-                    self.wake_coordinator_for_blocked(
+                    self.wake_captain_for_blocked(
                         session_index,
                         task_title,
                         (!title.is_empty()).then(|| title.clone()),
@@ -236,7 +236,7 @@ impl Workspace {
                         }
                     }
                 }
-                // 監督バーの総括（編隊レベル）もこの遷移でデバウンス生成を蹴る。
+                // Captain バーの総括（編隊レベル）もこの遷移でデバウンス生成を蹴る。
                 self.schedule_control_summary(cx);
                 cx.notify();
             }
@@ -279,7 +279,7 @@ impl Workspace {
     }
 
     /// ニュースを積む（管制 P2・新しいものが先頭・上限 100）。
-    /// **task_events へ書くのと同じ場所からだけ呼ぶ**（ニュース = 台帳の鏡。将来の監督の采配も同じ道）。
+    /// **task_events へ書くのと同じ場所からだけ呼ぶ**（ニュース = 台帳の鏡。Captain の采配も同じ道）。
     pub(crate) fn push_news(
         &mut self,
         kind: NewsKind,

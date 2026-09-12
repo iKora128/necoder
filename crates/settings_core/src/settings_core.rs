@@ -43,8 +43,8 @@ pub struct RailSettings {
     pub todos: bool,
     /// リモート SSH（~/.ssh/config のホストへ接続・#2）。
     pub remote: bool,
-    /// 編隊（herd サイドバー・状態一覧・M14）。
-    pub herd: bool,
+    /// Fleet（多エージェントの面・FLEET-V2）。レールから Editor ⇄ Fleet を切り替える。
+    pub fleet: bool,
 }
 
 impl Default for RailSettings {
@@ -57,7 +57,7 @@ impl Default for RailSettings {
             terminal: true,
             todos: true,
             remote: true,
-            herd: true,
+            fleet: true,
         }
     }
 }
@@ -172,10 +172,10 @@ pub struct Settings {
     /// Tier 2 遷移スナップショット（✳ 1 行要約・FLEET-CONTROL-PLAN P4・既定 on）。
     /// Done/Failed 遷移時に既定 Agent の oneshot CLI で 1 行生成する。オフでも Tier 1（決定論）は出続ける。
     pub tier2_summaries: bool,
-    /// 監督（coordinator）に任命するエージェント表示名（P6・None = 未任命）。
+    /// Captain に任命するエージェント表示名（FLEET-V2 §5.7・None = 未任命）。
     /// 任命は settings.json の明示編集（既定ドリフト禁止の原則・DECISIONS §8）。
-    /// 任命すると Blocked(15s)/Done/Failed 遷移で IntegrationSpace の「監督」スレッドが 1 ターン起きる。
-    pub coordinator_agent: Option<String>,
+    /// 任命すると Blocked(15s)/Done/Failed 遷移で IntegrationSpace の Captain スレッドが 1 ターン起きる。
+    pub captain_agent: Option<String>,
     /// 編隊の目標文（管制ヘッダに常時表示・P3）。プロジェクト設定 `.necoder/settings.json` に
     /// 書けばリポジトリごとの目標になる（ファイルが真実の原則＝計画の「ledger」は settings で満たす）。
     pub fleet_goal: Option<String>,
@@ -219,6 +219,9 @@ pub struct Settings {
     pub html_preview_evict_minutes: u64,
     /// レールのアイコン表示（アクティビティバー）。
     pub rail: RailSettings,
+    /// Fleet の初回導線（2 本目の Task を切った時の 1 回だけのトースト・FLEET-V2 §3.0）を出したか。
+    /// 出したら `true` を書き込み、以後は**何も案内しない**（案内は 1 回・DECISIONS の静かさの原則）。
+    pub fleet_hint_seen: bool,
     /// 初回オンボーディングを済ませたか（`false`＝初回で設定ホームが自動オープン・M12）。
     /// 「これで始める」で `true` に。以後は自動では開かない（レール ⚙ からいつでも開ける）。
     pub onboarded: bool,
@@ -241,7 +244,7 @@ impl Default for Settings {
             sound_waiting: "nya".to_string(),
             reduce_motion: false,
             tier2_summaries: true,
-            coordinator_agent: None,
+            captain_agent: None,
             fleet_goal: None,
             agent_tabs_view: "bar".to_string(),
             work_tabs_position: "top".to_string(),
@@ -253,6 +256,7 @@ impl Default for Settings {
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
             rail: RailSettings::default(),
+            fleet_hint_seen: false,
             onboarded: false,
         }
     }

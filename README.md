@@ -38,7 +38,7 @@ So necoder makes what agent-heavy development needs first-class in the editor co
 
   ![Live ACP streaming inside necoder](lp/assets/gif/stream-en.gif)
 
-- **Fleet view for parallel agents.** Run several agents side by side with a coordinator, and see every thread's state at a glance.
+- **Fleet view for parallel agents.** Run several agents side by side with a Captain, and see every thread's state at a glance.
 
   ![Fleet view: parallel agents with status](lp/assets/img/fleet.png)
 

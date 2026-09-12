@@ -43,6 +43,36 @@ impl Workspace {
             .tooltip(Tooltip::text(tooltip, theme.clone()))
     }
 
+    /// レールにフォーカスがある間のキー（`chrome.rail_focus` を載せた root div の bubble）。
+    /// ↑/↓ で前後のプロジェクトへ循環し、Escape で作業面へ戻る。
+    ///
+    /// **keymap ではなくここで受ける理由**: gpui はコンテキスト無しのバインドを最深として解決するので
+    /// （`Keymap::binding_enabled`）、素の ↑/↓ を keymap に足すとエディタのキャレット移動を全域で殺す。
+    /// Workspace コンテキストへ足すと今度は Editor コンテキストより浅くて負ける。フォーカスがレールに
+    /// 来ている間はエディタが dispatch 経路から外れるので、ここで受ければ衝突しない（2026-09-12）。
+    ///
+    /// ⌃⌘↑↓（NextProject / PrevProject）は従来どおり keymap 側。どこにフォーカスがあっても効く。
+    pub(crate) fn on_rail_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 修飾キー付きは素通し（⌃⌘↑↓ や ⌘{ ⌘} を横取りしない）。
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "down" => self.switch_adjacent_project(1, window, cx),
+            "up" => self.switch_adjacent_project(-1, window, cx),
+            // レールに居座ったままだと Editor コンテキストのキーが効かないので、手をマウスへ
+            // 戻さずに抜ける口。行き先はタブが無ければ workspace 本体＝必ず描画中の要素。
+            "escape" => self.focus_session_surface(false, false, window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
     pub(crate) fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active = self.project_sessions.active;
@@ -74,9 +104,13 @@ impl Workspace {
                     .collect()
             })
             .unwrap_or_default();
-        let rail_active = self.chrome.rail_active;
+        let rail_focus = self.chrome.rail_focus.clone();
+        let focused_surface = theme.bg2;
         div()
             .id("rail")
+            // レールを本物のキーの宛先にする。これが無いとレールは dispatch 経路に載らず、
+            // `on_key_down` が一度も呼ばれない（＝素の ↑/↓ を受けられない・`chrome.rail_focus`）。
+            .track_focus(&rail_focus)
             .flex()
             .flex_col()
             .items_center()
@@ -84,23 +118,26 @@ impl Workspace {
             .w(px(RAIL_WIDTH))
             .h_full()
             .flex_none()
-            // レールが「最後に触った面」の間は面を bg2 まで上げて、
-            // ⌘{ ⌘} の宛先がここに来ていることを示す（色相は使わない・§1.3）。
-            // bg1 では bg0 との差が小さく実機で分かりづらかったため、一段強い中立面にする。
-            .bg(if rail_active { theme.bg2 } else { theme.bg0 })
+            .bg(theme.bg0)
+            // フォーカスがレールに来ている間は面を bg2 まで上げて、↑/↓ の宛先がここだと示す
+            // （色相は使わない・§1.3）。bg1 では bg0 との差が小さく実機で分かりづらかったため、
+            // 一段強い中立面にする。
+            .focus(move |style| style.bg(focused_surface))
             .border_r_1()
             .border_color(theme.border)
             .pt_2()
-            // レールのどこを押しても（項目でも空き地でも）レールを「最後に触った面」にする。
-            // ルートの capture リスナーが先に false にし、この bubble リスナーで true に戻る。
-            // フォーカスは動かさない＝そのまま文字を打てばエディタに入る。
+            // レールのどこを押しても（項目でも空き地でも）レールへフォーカスを渡す。ルートの
+            // capture リスナーが先に作業面へ返し、この bubble リスナーで戻ってくる＝レール外
+            // クリックでだけ実際に抜ける。押した後に ↑/↓ でプロジェクトを流せる（本人要望）。
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    this.chrome.rail_active = true;
+                cx.listener(|this, _, window, cx| {
+                    let handle = this.chrome.rail_focus.clone();
+                    window.focus(&handle, cx);
                     cx.notify();
                 }),
             )
+            .on_key_down(cx.listener(Self::on_rail_key_down))
             .children(
                 {
                     // レール = プロジェクト（リポジトリ）単位。**Task worktree はレールに載せない**
@@ -355,6 +392,31 @@ impl Workspace {
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
                             this.toggle_todo_board(&ToggleTodoBoard, window, cx)
+                        }),
+                    ),
+                )
+            })
+            .when(rail.fleet, |element| {
+                // Fleet の入口（FLEET-V2 §3.0）。**herd サイドバーを開くのではなく面ごと切り替える**。
+                // 稼働中の Task があればアイコン下に activity ドット（既存のレール流儀）。
+                let attention = self.attention_badge_count(cx);
+                element.child(
+                    self.rail_icon(
+                        "rail-fleet",
+                        "icons/layout-grid.svg",
+                        i18n::t!("rail.fleet"),
+                        if self.chrome.fleet_mode {
+                            accent
+                        } else if attention > 0 {
+                            theme.err
+                        } else {
+                            theme.fg2
+                        },
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_fleet_mode(&ToggleFleet, window, cx)
                         }),
                     ),
                 )

@@ -2734,3 +2734,147 @@
 - 次: **人の手番**: 実機で 3〜4 セル並走の体感（＋ ACP を 2 枚足して会話が混ざらないか・
   ＋ Terminal の PTY が拡大/縮小で切れないか）。通知トーストの「タップで飛ぶ」は複数パネル時に
   抑止しているので、飛び先を `(panel, thread)` で持てば復活できる
+
+## 2026-09-12 — Fleet のグリッドを「このリポジトリの編隊」に閉じる
+- やったこと: ユーザー報告「Fleet に別のプロジェクトが出てくる」。原因は前エントリの差し戻しで
+  `seed_fleet_cells` の `filter(|slot| !slot.task_space.is_integration())` を**丸ごと外した**こと。
+  狙いは「いまのプロジェクトの main も並べる」だったが、レール上のプロジェクトは（`task/*` に
+  居ない限り）全部 IntegrationSpace なので、**無関係なリポジトリまで 1 枚ずつセルになる**。
+  上限 8 の撤廃と重なって歯止めも無い。直しは「アクティブなリポジトリの slot だけ seed」:
+  - `ProjectSlot::repository_key()` を新設（`repository_id`・未解決なら SpaceId で代用）。
+    `repository_id` は復元直後は空で `hydrate_restored_projects` が後から埋めるので、**空のまま
+    比べると別リポジトリ同士が同じ鍵になる**。この if 式は `workbench.rs` に 4 か所コピーされて
+    いたので helper へ寄せ、`work_switch_target` の「鍵 vs 生の `repository_id`」比較（未解決の
+    間は必ず不一致になっていた）もここで揃えた。
+  - `chrome.fleet_seeded: bool` → `fleet_repository: Option<String>`。「もう seed したか」と
+    「どのリポジトリの編隊か」を 1 つの値で持つ（× で全部閉じた次のフレームに復活しない規律は
+    2026-07-27 のまま — 空かどうかでは判断しない）。
+  - リポジトリを跨いだら `fleet_grids: HashMap<String, Vec<FleetPane>>` に現在の並びを畳み、
+    行き先の並びを戻す。プロジェクト切替（`project_switch`）からも `seed_fleet_cells` を呼ぶ。
+    **＋/× の結果を切替のたびに捨てない**（閉じたセルは戻ってきても閉じたまま）。
+  - `remove_fleet_cells_for` は畳んである並びからも消す。セル → space の match は `pane_space()`
+    に畳んで 3 か所の重複を 1 つに（clippy の `and_then(|x| Some(y))` も同時に解消）。
+- 学び/罠: **「絞りを外す」と「絞りを別の軸に変える」は違う**。IntegrationSpace を出したかった
+  だけなのに `filter` ごと消したので、「同じリポジトリか」という**本当に必要な軸**が残らなかった。
+  絞りを外すときは「この filter が同時に守っていた別の性質は何か」を数える。
+- 検証: `cargo check` / `cargo fmt` / clippy 新規警告なし。`cargo test -p workspace --lib` は
+  **この作業の前から**赤（`Detected activity on thread ... Your test is not deterministic.` /
+  `local task dropped by a thread that didn't spawn it`・`settings.rs:294` の背景タスク）。
+  stash して同じ失敗を確認済み＝本変更の影響ではないが、**編隊の回帰テストが実機で回らない**
+  状態なので、ここは別途つぶす必要がある。目視は本人（ドッグフーディング中のため別インスタンスは立てない）
+- 次: Fleet そのものの作り直し案が `docs/research/fleet-ux-2026-09.md`（＋ `mock/fleet-v2.html`）に
+  未採用で置いてある。§6 の 5 つの決めごとに答えが出たら UI-SPEC §11 / GLOSSARY を先に書き換える
+
+## 2026-09-12 — Fleet v2 F0: 監督 → Captain の改名（+ 編隊の回帰テストを走るようにする）
+- やったこと: `docs/FLEET-V2.md` §10 の **F0**。`coordinator` を実装の全層で `captain` に改名した。
+  後方互換の読み替えは**作らない**（旧 `coordinator_agent` は読まない・GLOSSARY の廃止語表のとおり）。
+  - `coordinator.rs` → `captain.rs`（`wake_captain` / `wake_captain_for_blocked` /
+    `record_captain_decision` / `is_captain_thread_name`）・設定 `captain_agent`・
+    `NewsKind::Captain`（語彙の予約が実在の道になったので `#[allow(dead_code)]` も落とした）・
+    台帳イベント kind `captain`・`render_captain_bar`。
+  - i18n は `control.coordinator` / `_none` / `_thread` / `_prompt` の 4 キーを廃し、
+    **`captain:` セクション**（`title` / `appoint` / `prompt`）へ移した。`captain.title` は
+    Captain バーの見出し・ニュースの帰属名・**Captain スレッドの表示名**を兼ねる（ja/en とも "Captain"）。
+    `control.summary_prompt` と `control.news_hint` の本文に残っていた「監督 / supervisor / coordinator」も直した。
+  - README（英語の機能一覧）・FLEET-ARCHITECTURE・UI-SPEC §11 の `Coordinator` も追従。
+    FLEET-CONTROL-PLAN は**当時の計画文として残し**、P6 見出しに改名の注記だけ足す（歴史は書き換えない）。
+- 学び/罠: **改名の受入「全 test green」が、改名と無関係の理由で満たせなかった**。
+  `cargo test -p workspace --lib` は 1 本目の途中で SIGABRT していて（JOURNAL 2026-09-12 前エントリで
+  「前からの赤」と記録したまま）、原因はこの作業で初めて特定できた: **`SettingsView::new` が
+  `refresh_availability` を無条件に呼び、その背景タスクが vendor CLI を実際に起動する**
+  （`refresh_agent_auth_states` → `command_succeeds` / `probe_acp_session` = 子プロセス）。
+  gpui の test scheduler は blocking スレッドの活動を「非決定的」として即 panic させるので、
+  **Workspace を作るだけのテストが全部巻き添え**になっていた。エージェント CLI が入っていない CI では
+  probe が即座に終わるので緑＝**開発機だけが赤**という形で 3 週間気付かれなかった。
+  直しは「調べるのは設定ホームを開く時だけ」: `new` は一覧（テーマ / MCP・同期 fs のみ）を読む
+  `refresh_lists` だけにし、vendor CLI の調査は開く 3 経路（レール・`OpenSettings`・
+  起動直後のオンボーディング）から呼ぶ。**起動のたびに子プロセスを撒かなくなる**副作用もある
+  （起動時間の予算に効く方向）。`show_settings` の式は `Workspace` の構造体リテラルの中にあったので
+  構築前に持ち上げた（設定ホームを出す起動だけ probe を蹴るため）。
+- 検証: `cargo check --workspace --all-targets` 警告 0・`cargo fmt` clean・clippy に新規警告なし。
+  `cargo test --workspace` は **workspace crate の 64 test が完走するようになった**（この作業の前は
+  SIGABRT で 1 本も完走しなかった）。3 連続で全体 green を確認したが、下記の 1 本だけ機械が忙しいと落ちる。
+  i18n は parity テスト green に加え、`t!("…")` の**全 604 キーが ja/en 双方に
+  存在する**ことをアドホックに突き合わせて確認（`control.coordinator*` の残骸ゼロ）。
+  改名前後の赤が同一であることは `git stash` で確認済み。目視は本人（ドッグフーディング中）
+- 次:
+  - **残る 1 本の flake**: `opening_a_surface_while_the_agent_is_maximized_unmaximizes_it` は
+    `open_settings_action` を**わざと**通るので、上の probe が今度は正しく走り、同じ理由で
+    8 回中 5 回落ちた（CI は CLI 未導入なので緑）。→ **同セッションの次のエントリで根治**
+  - F1（サイドバー: Task 行 3 段 + Captain 行 + 統合先行 + ⌘0..9）
+
+## 2026-09-12 — レールを押したら ↑/↓ でプロジェクト移動（⌘{ ⌘} の付け替えは廃止）
+- やったこと: 本人要望「左のレール押して、上下ボタンだけでワークスペース移動できるようになりたいだけ」。
+  2026-09-03 の `chrome.rail_active`（レールを押すと ⌘{ ⌘} がプロジェクト切替に化ける）を廃止し、
+  **レールに本物のフォーカスを渡す**方式へ置換。
+  ①`chrome.rail_active: bool` → `chrome.rail_focus: FocusHandle`（`workspace.rs` / 初期化は
+  `project_session.rs`）②レールの root div（`rail_view.rs`・`id("rail")`）に `track_focus` +
+  `on_key_down`、`on_mouse_down` は `window.focus(&rail_focus)`。面の bg2 は `if rail_active` を
+  やめて `.focus(|style| style.bg(bg2))` へ（実際にフォーカスがそこにある＝表示が正直になる）
+  ③`on_rail_key_down`（`rail_view.rs`）: 修飾キー無しの `down`/`up` → `switch_adjacent_project(±1)`、
+  `escape` → `focus_session_surface(false, false, ..)`。修飾キー付きは素通し（⌃⌘↑↓ は keymap のまま）
+  ④`chrome_owns_focus`（`project_switch.rs`）に `rail_focus.is_focused` を追加 ⑤Workspace root の
+  `capture_any_mouse_down` は「フラグを落とす」から「レールにフォーカスがあれば作業面へ返す」へ
+  ⑥`tabs.rs` の `select_next_tab` / `select_prev_tab` から分岐を削除＝⌘{ ⌘} は常にタブ切替
+  ⑦テストを `rail_surface_routes_tab_switch_to_projects` → `rail_focus_routes_arrow_keys_to_projects`
+  に差し替え。UI-SPEC §2 + キー表を更新
+- 学び/罠: **素の ↑/↓ を keymap に足す道は無い**。gpui の `Keymap::binding_enabled` はコンテキスト
+  無しのバインドに `contexts.len()`（＝最深）を返すので、`{"up": ...}` を足すとエディタの
+  `editor::MoveUp`（Editor コンテキスト・末端）に勝ってしまいキャレット移動を全域で殺す。逆に
+  `"context": "Workspace"` へ足すと `depth_of` が浅い値を返して Editor に負ける。**フォーカスを移して
+  エディタを dispatch 経路から外す**のが唯一の筋。capture 相のキーリスナーで先回りする道も無い
+  （`dispatch_key_event` は**バインド解決 → アクション dispatch が先**で、`capture_key_down` は
+  どのバインドも食わなかった時しか走らない）。
+  ④は必須: 入れないと 1 回目の ↑ で `focus_session_surface` がエディタへフォーカスを飛ばし、
+  2 回目の ↑ がキャレット移動になる＝連打できない。
+  代償として**レールにフォーカスがある間は Editor コンテキストの束（⌘S・⌘Z・⌘C/⌘V）が効かない**。
+  git パネル等にフォーカスがあるときの既存挙動と同じで、本人判断で保護しない（Escape かクリックで復帰）。
+  作業中、**別の necoder セッションが同じ crate（編隊 V2・`captain.rs`/`coordinator.rs` 削除）を
+  並行編集していた**。重なったのは `rail_view.rs` の別関数と `project_switch.rs` の +4 行だけで衝突
+  無しだったが、`git status` が急に汚れていたら**まず別セッションを疑う**
+- 検証: `cargo check --workspace --all-targets` 警告 0 / `cargo test -p workspace` 64 件緑
+  （HOME 分離。実 HOME だと既存フレークで落ちる）
+- 次: 本人の実機で「レールの空き地を突く → ↑↓ で隣のプロジェクトへ連打 → Escape で編集へ戻る」を確認。
+  レール外の「押せるだけでフォーカスを取らない面」（statusbar・タブ列の空き地）を押した後に ↑ が
+  プロジェクトを動かさないことも一度目視
+
+## 2026-09-12 — Fleet v2 F0.5（入口）と F1（サイドバー）
+- やったこと:
+  - **probe の flake を根治**（前エントリの残件）: `refresh_availability` は「一覧の読み直し（同期 fs）」と
+    「vendor CLI の調査（実 CLI 起動）」の 2 つを 1 つの関数でやっていた。前者はそのまま・後者を
+    **`availability_pending` の 1 bit に予約して render で 1 回だけ蹴る**形に分けた。
+    「開いた」ではなく「**描かれた**」を合図にすると、設定ホームを出さない起動・出さないテストでは
+    子プロセスが 1 つも生えない。`SettingsView::new` は元どおり `refresh_availability` を呼ぶだけに戻せた
+    （フラグを立てるだけなので安い）＝呼び出し側に条件分岐を撒かずに済む。6 連続で workspace 64 test green。
+  - **F0.5 入口**: titlebar の右上トグルを廃し、**プロジェクトピルの右隣に `Editor | Fleet` セグメント**。
+    Fleet 側に要対応バッジ（`◐ N`・err 色・0 なら出さない）。`attention_badge_count` は管制の `◐` チップと
+    同じ数え方だが、**カードを組まずに数だけ数える**（titlebar は毎フレーム描かれるので clone を持ち込まない）。
+    レールに Fleet アイコンを新設（`layout-grid.svg` = 旧トグルと同じ絵。入口が 2 つに見えない）。
+    `⌘⇧M` を既定に。`ToggleHerdSidebar` は action / palette / メニュー / fn ごと削除。
+    初回導線は「2 本目の Task が立った瞬間に 1 回だけ」トースト（`fleet_hint_seen` を書いて二度と出さない）。
+  - **F1 サイドバー**: `fleet_sidebar.rs` 新設。**1 行 = 1 Task の 3 段**（名前 + ⎇branch /
+    `› 頼んだこと` / digest）+ Captain バー + 統合先行 + ＋Task + 凡例。出すのは
+    **レールで選んだ 1 リポジトリの slot だけ**（`repository_key`）。Task の状態グリフは
+    その worktree で**いちばん切迫しているスレッド**に畳む（1 Task = 1 行だから）。
+  - **`Thread.last_prompt`**（= ROADMAP P1 残「自分が頼んだこと」の回収）: 送信時に**人間が書いた本文**だけを
+    持つ（`@path` の context 接頭辞は混ぜない＝サイドバーで読めるのは自分の言葉だけ）。復元は DB に列を足さず
+    `turns` の最後の user 発話から引く（`last_prompt_from_entries`）。
+- 学び/罠:
+  - **「開いた」と「描かれた」は別の合図**。重い副作用を「開く操作」に紐づけると、開かない経路
+    （テスト・オンボーディング判定・プローブ）で全部撒かれる。**描画を合図にすると「人間が見ている」と
+    等価**になるので、条件分岐を呼び出し側に配らずに 1 か所で済む。render に副作用を置くのは本来避けたいが、
+    「1 bit のラッチを倒して 1 回だけ蹴る」なら描画毎の走査にはならない。
+  - **`⌘1..9` は行順ではなくレール順で出した**。サイドバーはリポジトリで絞るので行順とレール順が一致せず、
+    行順で番号を振ると押した先が表示と食い違う。**キーの実体に表示を合わせる**（文書の「並び順」を訂正）。
+  - 案内文にキーを直書きすると keymap と静かにズレるので、`shortcut_label_for(action)` で
+    既定 keymap から引くようにした（F1 の Captain バーの `⌘0` 表示も同じ道）。
+- 検証: `cargo check --workspace --all-targets` 警告 0・`cargo fmt` clean・`cargo test --workspace` green。
+  新規 test 3 本: `mode_switch_and_attention_badge_share_one_seam`（F0.5 受入）/
+  `task_rows_are_scoped_to_the_selected_repository`（F1 受入・よそのリポジトリが混ざらない・
+  アーカイブは消える・レール切替で編隊ごと入れ替わる）/ `last_prompt_comes_from_the_latest_user_turn`。
+  目視は本人（ドッグフーディング中はスクショを回さない）
+- 次: **F2 舞台と Task カード**（`StageLayout` One/Two/Three + ピン `◫`・`FleetPane` → `TaskTab`）。
+  F1 で積み残したのは **`+N −M`**（`git diff --shortstat` を Task 単位でキャッシュ・render 中に取らない）と
+  **ピン**（F2 の `pinned` と同時）と **⚑ 帰属**（Captain が起動した Task の記録が無い＝F6）。
+  途中で `workspace.rs` の `rail_active` → `rail_focus` の書き換えと衝突した（保存途中の状態を読んで
+  ビルドが割れた）。**同じファイルを人と同時に触るときは、ビルドが割れたらまず mtime を見る**

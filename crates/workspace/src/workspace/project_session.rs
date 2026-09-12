@@ -27,6 +27,17 @@ pub(crate) struct ProjectSlot {
 }
 
 impl ProjectSlot {
+    /// 机（作業面）と編隊を束ねる鍵。`repository_id` は起動直後の復元ではまだ空で、
+    /// `hydrate_restored_projects` が後から埋める。空のまま比べると**別リポジトリ同士が
+    /// 同じ鍵になる**ので、その間は SpaceId（slot ごとに一意）で代用する。
+    pub(crate) fn repository_key(&self) -> &str {
+        if self.task_space.repository_id.is_empty() {
+            self.task_space.id.0.as_str()
+        } else {
+            self.task_space.repository_id.as_str()
+        }
+    }
+
     pub(crate) fn refresh(&mut self) {
         self.explorer.refresh(&self.worktree);
     }
@@ -707,7 +718,8 @@ impl Workspace {
                 fleet_mode: std::env::var_os("NECODER_FLEET").is_some()
                     || std::env::var_os("NECODER_CONTROL").is_some(),
                 fleet_cells: Vec::new(),
-                fleet_seeded: false,
+                fleet_repository: None,
+                fleet_grids: HashMap::new(),
                 fleet_cell_menu: None,
                 fleet_bottom_view: FleetBottomView::News,
                 agent_full_screen: std::env::var_os("NECODER_AGENT_FULLSCREEN").is_some(),
@@ -753,7 +765,7 @@ impl Workspace {
                 resizing_explorer: false,
                 should_move_window: false,
                 rail_drag: None,
-                rail_active: false,
+                rail_focus: cx.focus_handle(),
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: true,
                 task_renaming: None,
@@ -1089,6 +1101,11 @@ impl Workspace {
         self.project_sessions
             .projects
             .get(self.project_sessions.active)
+    }
+
+    /// アクティブなリポジトリの鍵（机 / 編隊の束ね単位）。
+    pub(crate) fn active_repository_key(&self) -> Option<&str> {
+        self.active_slot().map(ProjectSlot::repository_key)
     }
 
     /// 現在アクティブなタブのエディタ（無い・画像タブなら `None`）。編集/検索/LSP 系の入口は

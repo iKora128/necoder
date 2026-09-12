@@ -147,6 +147,7 @@ todos:
 palette:
   placeholder: コマンドを検索…
 cmd:
+  focus_captain: "Fleet: Captain へ"
   file_finder: "ファイル: 開く…"
   save_active: "ファイル: 保存"
   close_tab: "ファイル: タブを閉じる"
@@ -182,7 +183,6 @@ cmd:
   toggle_terminal: "表示: ターミナル"
   toggle_git_panel: "表示: ソース管理"
   toggle_todo_board: "表示: Todo ボード"
-  toggle_herd: "表示: 編隊サイドバー"
   toggle_control: "表示: 管制"
   toggle_fleet: "表示: 編隊モード"
   toggle_agent_full_screen: "表示: AI を全画面（エディタを畳む）"
@@ -208,27 +208,7 @@ herd:
   mute: このエージェントをミュート（トースト/完了音を止める）
   unmute: ミュート解除
 control:
-  coordinator_prompt: |
-    あなたは necoder 編隊の監督（coordinator）です。
-    役割: 状況を読み、次の采配を決めて fleet CLI で指示する。
-    規律: 自分ではコードを書かない・手を動かさない（指示と采配のみ）。integrate の最終承認は人間（あなたは `fleet review` で radar を確認して提案するまで）。
-
-    イベント: [%{event}] %{title}%{digest}
-
-    道具（shell で実行）:
-    %{exe} fleet list .              — この repo の Task 一覧
-    %{exe} fleet digest <id>        — Task の事実層 + digest（今なにをしているか）
-    %{exe} fleet events [since-id]  — 台帳イベントの差分
-    %{exe} fleet spawn-agent <id> [agent] [prompt...] — Task にエージェントを起こす
-    %{exe} fleet send <id> <message...>               — 追撃指示
-    %{exe} fleet status <id> <phase> [summary]        — phase 遷移の報告
-    %{exe} fleet wait <id> <phase|activity> [秒]      — 待つ（phase=台帳 / activity=live）
-    %{exe} fleet depend <id> <on...> / wait-deps <id> <phase> — 依存の宣言と待ち
-    %{exe} fleet review <id>        — Conflict Radar（merge_ready / changes_requested へ）
-
-    まず `%{exe} fleet list .` と `digest` で現況を読み、必要な采配だけ実行して、最後に判断を 1〜3 行で要約してください。何もする必要がなければ「静観」とだけ答えてください。
-  coordinator_thread: 監督
-  summary_prompt: 入力はマルチエージェント編隊の現況です。監督として状況と次の一手を日本語で1文にまとめて。60文字以内・1行だけ・記号や引用符や前置きなしで出力して。
+  summary_prompt: 入力はマルチエージェント編隊の現況です。Captain として状況と次の一手を日本語で1文にまとめて。60文字以内・1行だけ・記号や引用符や前置きなしで出力して。
   facts_stats: "稼働 %{working} · 要対応 %{attention} · 完了未確認 %{done}"
   facts_permission: "承認待ち %{elapsed}: %{title}"
   facts_failed: "失敗: %{digest}"
@@ -242,8 +222,6 @@ control:
   chip_done_unread: 完了未確認
   chip_working: 稼働
   chip_integrated: 統合
-  coordinator: 監督
-  coordinator_none: 未任命 — Settings で任命（P6）
   summary_attention: "%{title} が先頭%{waited} — 要対応/未確認 %{n} 件"
   summary_calm: "静穏 — 要対応はありません（稼働 %{n}）"
   updated: "%{when}更新"
@@ -274,7 +252,35 @@ control:
 news:
   waiting: "承認待ち — %{title}"
   failed: "失敗 — %{detail}"
+captain:
+  title: Captain
+  appoint: Captain を任命する — settings.json の captain_agent
+  prompt: |
+    あなたは necoder 編隊の Captain（采配役）です。
+    役割: 状況を読み、次の采配を決めて fleet CLI で指示する。
+    規律: 自分ではコードを書かない・手を動かさない（指示と采配のみ）。integrate の最終承認は人間（あなたは `fleet review` で radar を確認して提案するまで）。
+
+    イベント: [%{event}] %{title}%{digest}
+
+    道具（shell で実行）:
+    %{exe} fleet list .              — この repo の Task 一覧
+    %{exe} fleet digest <id>        — Task の事実層 + digest（今なにをしているか）
+    %{exe} fleet events [since-id]  — 台帳イベントの差分
+    %{exe} fleet spawn-agent <id> [agent] [prompt...] — Task にエージェントを起こす
+    %{exe} fleet send <id> <message...>               — 追撃指示
+    %{exe} fleet status <id> <phase> [summary]        — phase 遷移の報告
+    %{exe} fleet wait <id> <phase|activity> [秒]      — 待つ（phase=台帳 / activity=live）
+    %{exe} fleet depend <id> <on...> / wait-deps <id> <phase> — 依存の宣言と待ち
+    %{exe} fleet review <id>        — Conflict Radar（merge_ready / changes_requested へ）
+
+    まず `%{exe} fleet list .` と `digest` で現況を読み、必要な采配だけ実行して、最後に判断を 1〜3 行で要約してください。何もする必要がなければ「静観」とだけ答えてください。
 fleet:
+  tasks_count: "%{n} Tasks"
+  integration_row: "統合先 · 保護"
+  integration_sub: "%{branched} 本が分岐中 · 今日 %{integrated} 件統合"
+  asked: "› %{text}"
+  new_task: "＋ Task"
+  mode_hint: "並走を Fleet で見る（%{key}）"
   add_acp: ＋ ACP
   add_terminal: ＋ Terminal
   add_worktree: ＋ Worktree
@@ -300,7 +306,7 @@ fleet:
   graph_hub_agents: "%{count} エージェント"
   news: ニュース
   news_idle: 動きなし
-  news_hint: task_events — 監督の采配も同じログ（監査可能）
+  news_hint: task_events — Captain の采配も同じログ（監査可能）
   cell_agent: Agent
   cell_terminal: ターミナル
   cell_editor: エディタ
@@ -376,7 +382,6 @@ rail:
   open_project: プロジェクトを開く  ⌘O
   explorer: エクスプローラの表示切替
   search: 検索  ⌘⇧F
-  herd: 編隊モード（系譜グラフ + 状態一覧）
   fleet: 編隊モード
   git: ソース管理  ⌃⇧G
   todos: Todo ボード
@@ -385,6 +390,9 @@ rail:
   remote: リモート SSH
   settings: 設定
 titlebar:
+  editor: Editor
+  mode_tip: Editor ⇄ Fleet を切り替える
+  attention_tip: "要対応 %{n} 件"
   fleet: Fleet
 settings:
   title: 設定
@@ -669,7 +677,6 @@ menu:
   terminal: ターミナル
   git_panel: ソース管理
   todo_board: Todo ボード
-  herd: 編隊サイドバー
   fleet: 編隊モード
   agent_full_screen: AI を全画面  ⌘⇧⏎
   diagnostics: 診断一覧

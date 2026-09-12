@@ -326,13 +326,7 @@ impl Workspace {
     }
 
     pub(crate) fn work_repository(&self) -> Option<String> {
-        self.active_slot().map(|slot| {
-            if slot.task_space.repository_id.is_empty() {
-                slot.task_space.id.0.clone()
-            } else {
-                slot.task_space.repository_id.clone()
-            }
-        })
+        self.active_repository_key().map(str::to_string)
     }
 
     pub(crate) fn work_is_visible(&self) -> bool {
@@ -434,13 +428,13 @@ impl Workspace {
         let Some(slot) = self.project_sessions.projects.get(index) else {
             return index;
         };
-        if self.work_repository().as_deref() == Some(&slot.task_space.repository_id) {
+        if self.active_repository_key() == Some(slot.repository_key()) {
             return index;
         }
         self.chrome
             .work_layout
             .repositories
-            .get(&slot.task_space.repository_id)
+            .get(slot.repository_key())
             .and_then(|layout| {
                 layout
                     .focused
@@ -485,11 +479,7 @@ impl Workspace {
         let Some(slot) = self.project_sessions.projects.get(index) else {
             return;
         };
-        let repository = if slot.task_space.repository_id.is_empty() {
-            slot.task_space.id.0.clone()
-        } else {
-            slot.task_space.repository_id.clone()
-        };
+        let repository = slot.repository_key().to_string();
         let space = slot.task_space.id.0.clone();
         let column = self
             .chrome
@@ -858,11 +848,7 @@ impl Workspace {
         let active_repository = self.work_repository();
         let mut repositories: Vec<(String, Vec<usize>)> = Vec::new();
         for (index, slot) in self.project_sessions.projects.iter().enumerate() {
-            let key = if slot.task_space.repository_id.is_empty() {
-                slot.task_space.id.0.clone()
-            } else {
-                slot.task_space.repository_id.clone()
-            };
+            let key = slot.repository_key().to_string();
             if let Some((_, slots)) = repositories
                 .iter_mut()
                 .find(|(repository, _)| repository == &key)
@@ -1233,11 +1219,7 @@ impl Workspace {
         let Some(slot) = self.project_sessions.projects.get(index) else {
             return;
         };
-        let repository = if slot.task_space.repository_id.is_empty() {
-            slot.task_space.id.0.clone()
-        } else {
-            slot.task_space.repository_id.clone()
-        };
+        let repository = slot.repository_key().to_string();
         let space = slot.task_space.id.0.clone();
         let visible = self
             .chrome

@@ -11,6 +11,7 @@ GPUI ベースの自作エディタ **necoder（ねこーだー）**。ライセ
 | **どう作るか（設計図）** | `docs/ARCHITECTURE.md` — crate 配置・依存方向・型契約・実装来歴の記録方法 |
 | **どう見せるか（UI仕様）** | `docs/UI-SPEC.md` — トークン表・色の許可リスト・領域別仕様・キー表 |
 | **何をどう呼ぶか（用語の正）** | `docs/GLOSSARY.md` — 機能・場所の正規名（code/日/英）と廃止語。UI 文字列/識別子はここに寄せる |
+| **Fleet（多エージェント）の UI・Captain** | `docs/FLEET-V2.md` — Task を主語にした 1 画面と Captain の設計・実装計画（F0〜F7）。ドメイン不変条件は `docs/FLEET-ARCHITECTURE.md` |
 | **Windows 対応（W フェーズ）** | `docs/WINDOWS-PORT.md` — 環境・設計決定・受入条件・罠・該当箇所インベントリ。`/goal-win` はこれを消化する |
 | 直近の文脈・罠 | `docs/JOURNAL.md` — セッションごとの実装日誌 |
 | 経緯・ビジョン | `docs/BACKGROUND.md` |

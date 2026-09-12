@@ -151,12 +151,12 @@ impl CommandRegistry {
                 action_name: "workspace::ToggleTodoBoard",
             },
             CommandEntry {
-                label_key: "cmd.toggle_herd",
-                action_name: "workspace::ToggleHerdSidebar",
-            },
-            CommandEntry {
                 label_key: "cmd.toggle_fleet",
                 action_name: "workspace::ToggleFleet",
+            },
+            CommandEntry {
+                label_key: "cmd.focus_captain",
+                action_name: "workspace::FocusCaptain",
             },
             CommandEntry {
                 label_key: "cmd.toggle_agent_full_screen",

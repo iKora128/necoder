@@ -102,6 +102,19 @@ fn dot_overlay(xf: f32, yf: f32, diameter: f32, body_h: f32) -> gpui::Div {
         .rounded_full()
 }
 
+/// セルが載っている TaskSpace。全 surface が `space` を持つので match は 1 か所に畳む。
+fn pane_space(pane: &FleetPane) -> &SpaceId {
+    match pane {
+        FleetPane::Agent { space, .. }
+        | FleetPane::Shell { space, .. }
+        | FleetPane::Task { space }
+        | FleetPane::Terminal { space }
+        | FleetPane::Editor { space }
+        | FleetPane::Diff { space }
+        | FleetPane::Tests { space } => space,
+    }
+}
+
 impl Workspace {
     pub(crate) fn toggle_fleet_mode(
         &mut self,
@@ -152,18 +165,38 @@ impl Workspace {
         .detach();
     }
 
-    /// 編隊グリッドを TaskSpace（= linked worktree）単位で**初回だけ**自動配置する。
-    /// 元の作業ディレクトリも含めて並べる（Git の保護と表示の可否を混同しない）。
-    /// 2 回目以降は何もしない — グリッドの中身はユーザーの操作（＋ / ×）が正になる。
+    /// 編隊グリッドを**いまのリポジトリ**の space 単位で自動配置する。元の作業ディレクトリ
+    /// （IntegrationSpace）も並べる（Git の保護と表示の可否を混同しない）。
+    ///
+    /// **レールに開いている別リポジトリは混ぜない**（2026-09-12）。編隊は「このリポジトリの編隊」で、
+    /// ＋ ACP / ＋ Terminal / ＋ Worktree の宛先もアクティブなリポジトリに閉じている。全 slot を
+    /// 並べると無関係なプロジェクトのセルが並ぶ（0.1.15 の差し戻しで `is_integration` の絞りを
+    /// 丸ごと外したときの退行・ユーザー報告）。
+    ///
+    /// 同じリポジトリの 2 回目以降は何もしない — 中身はユーザーの操作（＋ / ×）が正になる。
+    /// リポジトリを跨いだら現在の並びを畳み、行き先の並びを戻す（前に閉じたセルは閉じたまま）。
     pub(crate) fn seed_fleet_cells(&mut self, cx: &App) {
-        if self.chrome.fleet_seeded {
+        let Some(repository) = self.active_repository_key().map(str::to_string) else {
+            return;
+        };
+        if self.chrome.fleet_repository.as_deref() == Some(repository.as_str()) {
             return;
         }
-        self.chrome.fleet_seeded = true;
+        if let Some(previous) = self.chrome.fleet_repository.take() {
+            let cells = std::mem::take(&mut self.chrome.fleet_cells);
+            self.chrome.fleet_grids.insert(previous, cells);
+        }
+        self.chrome.fleet_maximized = None;
+        self.chrome.fleet_repository = Some(repository.clone());
+        if let Some(stashed) = self.chrome.fleet_grids.remove(&repository) {
+            self.chrome.fleet_cells = stashed;
+            return;
+        }
         self.chrome.fleet_cells = self
             .project_sessions
             .projects
             .iter()
+            .filter(|slot| slot.repository_key() == repository)
             .map(|slot| FleetPane::Task {
                 space: slot.task_space.id.clone(),
             })
@@ -410,15 +443,8 @@ impl Workspace {
         self.chrome
             .fleet_maximized
             .and_then(|index| self.chrome.fleet_cells.get(index))
-            .and_then(|pane| match pane {
-                FleetPane::Agent { space, .. }
-                | FleetPane::Shell { space, .. }
-                | FleetPane::Task { space }
-                | FleetPane::Terminal { space }
-                | FleetPane::Editor { space }
-                | FleetPane::Diff { space }
-                | FleetPane::Tests { space } => Some(space.clone()),
-            })
+            .map(pane_space)
+            .cloned()
             .or_else(|| {
                 self.project_sessions
                     .projects
@@ -568,6 +594,7 @@ impl Workspace {
                             cx,
                         );
                     }
+                    workspace.hint_fleet_mode_once(cx);
                     cx.notify();
                 }
                 Err(error) => {
@@ -577,6 +604,32 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Fleet の初回導線（FLEET-V2 §3.0-4）: **2 本目の Task が立った瞬間に一度だけ**
+    /// 「並走を Fleet で見る（⌘⇧M）」と言う。すでに Fleet に居るなら言わない（見えているものは案内しない）。
+    /// 一度出したら設定へ `fleet_hint_seen` を書いて二度と出さない — 案内はこれ 1 回きり。
+    pub(crate) fn hint_fleet_mode_once(&mut self, cx: &mut Context<Self>) {
+        if self.chrome.fleet_mode || settings::get(cx).fleet_hint_seen {
+            return;
+        }
+        let tasks = self
+            .project_sessions
+            .projects
+            .iter()
+            .filter(|slot| !slot.task_space.is_integration())
+            .count();
+        if tasks < 2 {
+            return; // 1 本目は「並走」ではない
+        }
+        settings::set_user_value(cx, "fleet_hint_seen", serde_json::Value::Bool(true));
+        let key = Self::shortcut_label_for("workspace::ToggleFleet").unwrap_or_default();
+        let accent = self.accent();
+        self.push_toast(
+            SharedString::from(i18n::t!("fleet.mode_hint", "key" => key)),
+            accent,
+            cx,
+        );
     }
 
     pub(crate) fn close_fleet_cell(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -610,6 +663,10 @@ impl Workspace {
     /// 消えた TaskSpace のセルをグリッドから外す（worktree 削除後の後始末）。
     /// 拡大中の添字も畳み直すので、`close_fleet_cell` と同じ規律で安全に詰まる。
     pub(crate) fn remove_fleet_cells_for(&mut self, space: &SpaceId) {
+        // 畳んである別リポジトリの並びからも外す（戻ってきたときに消えた worktree を出さない）。
+        for cells in self.chrome.fleet_grids.values_mut() {
+            cells.retain(|pane| pane_space(pane) != space);
+        }
         let mut index = 0;
         while index < self.chrome.fleet_cells.len() {
             if self.space_of_cell(index).as_ref() == Some(space) {
@@ -627,15 +684,7 @@ impl Workspace {
 
     /// セル → その TaskSpace（全 surface が同じ形なので 1 か所に畳む）。
     pub(crate) fn space_of_cell(&self, index: usize) -> Option<SpaceId> {
-        self.chrome.fleet_cells.get(index).map(|pane| match pane {
-            FleetPane::Agent { space, .. }
-            | FleetPane::Shell { space, .. }
-            | FleetPane::Task { space }
-            | FleetPane::Terminal { space }
-            | FleetPane::Editor { space }
-            | FleetPane::Diff { space }
-            | FleetPane::Tests { space } => space.clone(),
-        })
+        self.chrome.fleet_cells.get(index).map(pane_space).cloned()
     }
 
     pub(crate) fn open_fleet_cell_menu(
@@ -1172,7 +1221,9 @@ impl Workspace {
             if self.chrome.fleet_center_view == FleetCenterView::Work {
                 self.render_work_sidebar(cx)
             } else {
-                self.render_herd_sidebar(cx)
+                // Fleet サイドバー（F1）。旧 herd の「プロジェクト + スレッド行」ではなく
+                // **1 行 = 1 Task** の 3 段（FLEET-V2 §3.2）。
+                self.render_fleet_sidebar(cx)
             }
         }
     }
@@ -3123,7 +3174,7 @@ impl Workspace {
 
     /// ニュース常設（管制 P2・mock `fleet-dashboard.html` 下段の書式）。ソースは task_events の鏡
     /// （`NotificationCenter.news`・起動時 backfill + 遷移時 live 追記）。行 = 時刻 + 帰属チップ
-    /// （スレッド/Task 色・coordinator は丸）+ **太字名** + イベント文。新しいものが上。
+    /// （スレッド/Task 色・Captain は丸）+ **太字名** + イベント文。新しいものが上。
     fn render_newsfeed(&self, _cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let mut list = div()
@@ -3147,9 +3198,9 @@ impl Workspace {
                 .flex_none()
                 .size(px(7.))
                 .bg(item.color)
-                // 帰属=色・種別=形の規律: エージェント/Task は角丸四角・監督（coordinator）は丸。
+                // 帰属=色・種別=形の規律: エージェント/Task は角丸四角・Captain は丸。
                 .map(|chip| {
-                    if item.kind == NewsKind::Coordinator {
+                    if item.kind == NewsKind::Captain {
                         chip.rounded_full()
                     } else {
                         chip.rounded(px(2.))

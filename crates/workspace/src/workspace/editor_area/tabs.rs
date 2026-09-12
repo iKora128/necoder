@@ -26,18 +26,15 @@ impl Workspace {
     }
 
     /// 次のエディタタブへ（⌘} = ⌘⇧]。末尾で先頭へ回る）。
-    /// レールが最後に触った面（`chrome.rail_active`）なら**次のプロジェクト**へ（レール = プロジェクトの
-    /// タブ列と見なす。トラックパッドで「レールを突いて ⌘}」で隣へ流せる・2026-09-03）。
+    /// **常にタブ切替**。かつてはレールを押した後だけプロジェクト切替に化けていたが、押した履歴で
+    /// キーの意味が変わる隠れモードなので廃止した。プロジェクト移動は ⌃⌘↑↓ か、レールに
+    /// フォーカスを渡した上での ↑/↓（`on_rail_key_down`・2026-09-12）。
     pub(crate) fn select_next_tab(
         &mut self,
         _: &SelectNextTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chrome.rail_active {
-            self.switch_adjacent_project(1, window, cx);
-            return;
-        }
         if self.work_cycle_tab(1, window, cx) {
             return;
         }
@@ -46,17 +43,13 @@ impl Workspace {
         }
     }
 
-    /// 前のエディタタブへ（⌘{ = ⌘⇧[。先頭で末尾へ回る）。レール面が最後なら前のプロジェクトへ（同上）。
+    /// 前のエディタタブへ（⌘{ = ⌘⇧[。先頭で末尾へ回る）。こちらも常にタブ切替（同上）。
     pub(crate) fn select_prev_tab(
         &mut self,
         _: &SelectPrevTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chrome.rail_active {
-            self.switch_adjacent_project(-1, window, cx);
-            return;
-        }
         if self.work_cycle_tab(-1, window, cx) {
             return;
         }

@@ -2,7 +2,7 @@
 //! `mock/fleet-dashboard.html`）。編隊中央のタブとして系譜グラフ+グリッドと切替える。
 //!
 //! 構成（上から）: ① ヘッダ（repo ⎇ main + N worktrees・目標・stat チップ・トークン計）
-//! ② 監督バー（集約気分マスコット・総括は P4/P6 まで未任命プレースホルダ・⏎ 次）
+//! ② Captain バー（集約気分マスコット・総括は Tier2・未任命なら任命案内・⏎ 次）
 //! ③ 要対応キュー（左 336px・許可/拒否・Radar・Integrate・確認の**インライン操作**）
 //! ④ 稼働カード（右グリッド・digest + ▰▱ + tok + 経過・クリックで没入）
 //! ⑤ 統合パイプライン（TaskPhase 列にタスクチップ）。ニュース（P2）は render_fleet が下段に常設。
@@ -134,7 +134,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// ⏎: 要対応キューの先頭へ没入（keymap "FleetControl" context / 監督バーの「次」ボタン）。
+    /// ⏎: 要対応キューの先頭へ没入（keymap "FleetControl" context / Captain バーの「次」ボタン）。
     pub(crate) fn control_next(
         &mut self,
         _: &ControlNext,
@@ -447,6 +447,29 @@ impl Workspace {
         queue
     }
 
+    /// titlebar のモード切替に出す**要対応の件数**（`◐ N`・FLEET-V2 §3.0）。キュー全体を組まずに
+    /// 数だけ数える（titlebar は毎フレーム描かれるので、カードの生成と clone を持ち込まない）。
+    /// 数える対象は管制の `◐` チップと同じ = 承認待ち（permission card 有り）+ Failed な Task。
+    pub(crate) fn attention_badge_count(&self, cx: &App) -> usize {
+        let mut count = 0;
+        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
+            let Some(session) = self.project_sessions.sessions.get(index) else {
+                continue;
+            };
+            for (panel, thread_index, status) in session.agent_statuses(cx) {
+                if status.activity == agent_panel::ThreadActivity::Blocked
+                    && panel.read(cx).permission_card(thread_index).is_some()
+                {
+                    count += 1;
+                }
+            }
+            if !slot.task_space.is_integration() && slot.task_space.phase == TaskPhase::Failed {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// ヘッダの数字（キューと同じソースから 1 パス・render 内 memory 読みのみ）。
     fn control_stats(&self, queue: &[AttentionItem], cx: &App) -> ControlStats {
         let mut stats = ControlStats {
@@ -514,7 +537,7 @@ impl Workspace {
                 }),
             )
             .child(self.render_control_header(&stats, cx))
-            .child(self.render_coordinator_bar(&queue, &stats, cx))
+            .child(self.render_control_captain_bar(&queue, &stats, cx))
             .child(
                 div()
                     .flex_1()
@@ -704,8 +727,8 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// ② 監督バー: 集約気分マスコット + 監督（P6 まで未任命）+ 総括（Tier2 まで事実文）+ ⏎ 次。
-    fn render_coordinator_bar(
+    /// ② Captain バー: 集約気分マスコット + Captain（未任命なら任命案内）+ 総括（Tier2 まで事実文）+ ⏎ 次。
+    fn render_control_captain_bar(
         &self,
         queue: &[AttentionItem],
         stats: &ControlStats,
@@ -775,16 +798,16 @@ impl Workspace {
                             .text_size(px(11.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.fg0)
-                            .child(SharedString::from(i18n::t!("control.coordinator"))),
+                            .child(SharedString::from(i18n::t!("captain.title"))),
                     )
                     .child(
                         div()
                             .text_size(px(9.5))
                             .text_color(theme.fg2)
-                            // 任命済み = エージェント表示名（P6・settings.coordinator_agent）。
-                            .child(match settings::get(cx).coordinator_agent.clone() {
+                            // 任命済み = エージェント表示名（§5.7・settings.captain_agent）。
+                            .child(match settings::get(cx).captain_agent.clone() {
                                 Some(agent) => SharedString::from(agent),
-                                None => SharedString::from(i18n::t!("control.coordinator_none")),
+                                None => SharedString::from(i18n::t!("captain.appoint")),
                             }),
                     ),
             )

@@ -1,7 +1,7 @@
 //! Worktree-native Fleet orchestration API.
 //!
 //! GUI / CLI / MCP は同じ `storage::TaskSpaceRecord` と project の Git safety gate を使う。
-//! Coordinator はこの API で Task を作り、Agent は status/result を報告し、別プロセスは永続 DB を
+//! Captain はこの API で Task を作り、Agent は status/result を報告し、別プロセスは永続 DB を
 //! poll して待てる。GUI プロセスの一時 state に依存しないため再起動後も継続可能。
 
 use anyhow::{Context as _, Result};
@@ -113,7 +113,7 @@ pub(crate) fn gui_request(method: &str, params: Value) -> Result<Value> {
 }
 
 /// `fleet events [since_id]`: 全 Task 横断の task_events 差分（古い順・最大 200 件）。
-/// GUI 不在なら DB 直読み・稼働中（ロック）は IPC（P5）。監督/CLI は最後の id を覚えて差分だけ読む。
+/// GUI 不在なら DB 直読み・稼働中（ロック）は IPC（P5）。Captain/CLI は最後の id を覚えて差分だけ読む。
 pub(crate) fn events_since(since_id: i64) -> Result<Value> {
     let events =
         match open_storage().and_then(|storage| storage.load_task_events_since(since_id, 200)) {
