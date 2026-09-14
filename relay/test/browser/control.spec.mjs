@@ -145,7 +145,17 @@ test('カメラが使えなければ行き止まりにせず貼り付けへ倒�
   await expectFakeCamera(page);
   await expect(page.locator('#pair-manual')).not.toHaveAttribute('open', '');
   await page.locator('#scan').click();
-  await expect(page.locator('#scan-error'), problems.join(' / ') || '(ブラウザ側にエラーなし)').toContainText('カメラ');
+  // 押しても何も起きなかった時のために、押下後の状態を読む（ハンドラは居るか・
+  // 偽カメラは残っているか・文言はどの言語か）。
+  const state = await page.evaluate(() => ({
+    handler: typeof document.getElementById('scan').onclick,
+    stillFake: navigator.mediaDevices?.getUserMedia?.fakeCamera === true,
+    error: document.getElementById('scan-error').textContent,
+    manualOpen: document.getElementById('pair-manual').open,
+    lang: document.documentElement.lang,
+  }));
+  const why = [problems.join(' / ') || '(ブラウザ側にエラーなし)', JSON.stringify(state)].join(' ');
+  await expect(page.locator('#scan-error'), why).toContainText('カメラ');
   await expect(page.locator('#pair-manual')).toHaveAttribute('open', '');
   await expect(page.locator('#pair-url')).toBeVisible();
 });
