@@ -60,15 +60,19 @@ test('部屋作成はアカウント不要・壊れた資格情報と異なる O
 });
 
 /// 偽カメラを `navigator.mediaDevices.getUserMedia` に差し込む（`qr` = QR を写す / `denied` = 拒否）。
+/// **`page.goto` の後に呼ぶこと**。
 ///
-/// **WebKit はカメラの無い機械では `navigator.mediaDevices` ごと生やさない**（GitHub の macOS
-/// runner がこれ。手元の Mac は内蔵カメラがあるので生えていて、素の代入で通ってしまっていた）。
-/// 器が無ければ器から作り、生えている時も上書きが効かない場合に備えて defineProperty で押し込む。
-/// 差し込めたかは `window.fakeCameraInstalled` で確かめる — 差し込めていないと本物の
-/// getUserMedia が permission 待ちのまま**解決も拒否もしない**ので、失敗が 20 秒のタイムアウトに
-/// 化けて原因が読めない（2026-09-14 の CI）。CSP があるので eval / new Function は使わない。
+/// `addInitScript` では効かない。WebKit は**文書が確定する時に `navigator` を作り直す**ので、
+/// init script が navigator に載せた own property は消える（`window` に置いた印だけ残るため
+/// 「差し込めた」ように見えて、実際には本物の getUserMedia が呼ばれる）。本物は permission 待ちの
+/// まま解決も拒否もしないので、失敗が 45 秒のテストタイムアウトに化けて原因が読めなかった
+/// （CI の WebKit だけで落ちた 2026-09-14。手元の Mac は内蔵カメラがあるので素の代入で通っていた）。
+/// アプリがカメラを触るのはボタンを押した後なので、文書ができてから差し込めば足りる。
+///
+/// **カメラの無い機械では `navigator.mediaDevices` ごと生えない**（CI の runner がこれ）ので、
+/// 器が無ければ器から作る。
 async function installFakeCamera(page, mode, image = null) {
-  await page.addInitScript(([mode, source]) => {
+  await page.evaluate(([mode, source]) => {
     const getUserMedia = mode === 'denied'
       ? async () => { throw new DOMException('denied', 'NotAllowedError'); }
       : async () => {
@@ -86,19 +90,17 @@ async function installFakeCamera(page, mode, image = null) {
     Object.defineProperty(media, 'getUserMedia', { configurable: true, writable: true, value: getUserMedia });
     if (navigator.mediaDevices?.getUserMedia?.fakeCamera !== true)
       Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: media });
-    window.fakeCameraInstalled = true;
   }, [mode, image]);
 }
 
-/// 偽カメラが実際に効いているか（差し込めていても本物が残っていれば permission 待ちで固まり、
-/// 失敗がタイムアウトに化けて原因が読めない）。`denied` は拒否が返ることまで見る。
+/// 偽カメラが**実際に呼ばれる**か。差し込んだつもりで本物が残っていると固まるだけなので、
+/// 形（own property になっているか・印が付いているか）と呼び出し結果を両方見て、
+/// 落ちた時は中身を報告する。
 async function expectFakeCamera(page) {
   const report = await page.evaluate(async () => {
     const shape = {
-      installed: window.fakeCameraInstalled === true,
       ownOnNavigator: !!Object.getOwnPropertyDescriptor(navigator, 'mediaDevices'),
       ownGetUserMedia: !!Object.getOwnPropertyDescriptor(navigator.mediaDevices ?? {}, 'getUserMedia'),
-      stableObject: navigator.mediaDevices === navigator.mediaDevices,
       marked: navigator.mediaDevices?.getUserMedia?.fakeCamera === true,
     };
     // 本物が残っていると permission 待ちで固まるので、待たずに hung として返す。
@@ -121,8 +123,8 @@ test('PWA 内で QR を読み取ってペアリングする', async ({ page, req
   // 偽カメラ: Mac の画面に出る QR を canvas に描き、その captureStream を getUserMedia に返す。
   // 実際の読み取り経路（BarcodeDetector / jsQR）をそのまま通す。
   const image = await QRCode.toDataURL(pairing.url, { width: 512, margin: 2 });
-  await installFakeCamera(page, 'qr', image);
   await page.goto('/');
+  await installFakeCamera(page, 'qr', image);
   await expectFakeCamera(page);
   await page.locator('#scan').click();
   await expect(page.locator('#status')).toHaveText('接続済み', { timeout: 20000 });
@@ -138,8 +140,8 @@ test('カメラが使えなければ行き止まりにせず貼り付けへ倒�
   const problems = [];
   page.on('pageerror', error => problems.push(`pageerror: ${error.message}`));
   page.on('console', message => { if (message.type() === 'error') problems.push(`console: ${message.text()}`); });
-  await installFakeCamera(page, 'denied');
   await page.goto('/');
+  await installFakeCamera(page, 'denied');
   await expectFakeCamera(page);
   await expect(page.locator('#pair-manual')).not.toHaveAttribute('open', '');
   await page.locator('#scan').click();
