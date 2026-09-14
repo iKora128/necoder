@@ -89,6 +89,9 @@ impl Buffer {
   OS のビューア（macOS = WKWebView の PDFKit / Windows = WebView2）に描かせる。ネイティブ子ビューは GPUI の
   描画木を外れても OS 側に残るため、`Workspace::sync_native_view_visibility` が毎 render で可視性と
   キーボードフォーカスを同期する（HTML プレビューと共用の規律・回収弁も `html_preview_evict_minutes` を共有）。
+  **OS 子ビューは同じ窓の GPUI 描画より常に手前**で層を挟めない（z 順で勝つ手が無い）ため、操作を受ける
+  オーバーレイ（Picker / 検索バー / メニュー / モーダル / 補完…）が開いている間は `overlay_hides_native_view`
+  が false を返して**ネイティブ側を隠す**。通知系（トースト・フラッシュ・紙吹雪）は数えない（2026-09-13）。
   remote (SSH) の PDF は OS 子ビューがローカルパスしか読めないので `<cache>/remote-pdf/` へ複製して見せる。
   複製はタブが所有し `Drop` で消す（リモートの中身を手元に残さない）。
   永続化は `ProjectSlot.open_files: Vec<PathBuf>` + `active_file`（プロジェクト単位でタブ列を復元）。

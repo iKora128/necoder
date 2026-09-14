@@ -229,6 +229,12 @@ impl WebViewView {
         self.key_focus
     }
 
+    /// 表示対象として同期されているか（＝ネイティブ子ビューを出してよい状態か）。
+    /// 「オーバーレイ中は隠す」判断が効いているかを外から観測する点。
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn sync_native_view(
         &mut self,
@@ -313,9 +319,28 @@ impl Render for WebViewView {
         }
 
         let view = cx.entity();
+        // 描画木に居るのに非表示 ＝ 手前のオーバーレイに場所を譲っている間（`Workspace::
+        // overlay_hides_native_view`）。タブが非選択なら描画木にも居ないので、ここは
+        // 「オーバーレイ中」だけ。黙って bg1 の空面にすると「プレビューが消えた」に見えるため、
+        // 戻し方を 1 行書く。
+        let hidden_by_overlay = !self.active;
         div()
             .size_full()
+            .relative()
             .bg(self.theme.bg1)
+            .when(hidden_by_overlay, |element| {
+                element.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(11.))
+                        .text_color(self.theme.fg2)
+                        .child(i18n::t!("webview.hidden_by_overlay")),
+                )
+            })
             .child(
                 canvas(
                     |bounds, _, _| bounds,

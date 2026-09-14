@@ -2878,3 +2878,76 @@
   **ピン**（F2 の `pinned` と同時）と **⚑ 帰属**（Captain が起動した Task の記録が無い＝F6）。
   途中で `workspace.rs` の `rail_active` → `rail_focus` の書き換えと衝突した（保存途中の状態を読んで
   ビルドが割れた）。**同じファイルを人と同時に触るときは、ビルドが割れたらまず mtime を見る**
+
+## 2026-09-13 — 設定「外観」のラベル縦書き崩れ と スマホ連携の provisioning 行き止まり
+- やったこと:
+  - **設定 §外観のレイアウト修正**（`crates/settings/src/settings.rs`）。テーマチップを `pref_row` の右カラム（`flex_shrink_0`）に入れていたため、テーマが 7 種（組み込み 2 + 同梱 5）に増えてチップ合計幅が行を超え、**左カラムだけが幅 0 まで潰れて「テーマ」「⌘K ⌘T…」が 1 文字ずつ縦に折り返っていた**。上下 2 段の器 `pref_stack` を追加してチップを行いっぱいに置き、`flex_wrap` が素直に効くようにした
+  - **スマホ連携の provisioning 行き止まりを解消**（`relay/host/cli.mjs` / `relay/scripts/provision.mjs` / `crates/settings/src/remote.rs` / `locales/{ja,en}.yml`）:
+    - `ne remote init` が provisioning token 無しで「Initialized」とだけ言って終わり、pair が必ず `provision_token_missing` で落ちていた。init はその場で未設定を告げ、1台目 / 2台目以降の手順を出す
+    - init が既存 config にも `NECODER_PROVISION_TOKEN` だけを後入れできるようにした（端末・VAPID 鍵は保持。値が食い違えば `provision_token_conflict`）
+    - `ne remote status` に `provisioned`（真偽のみ・token は出さない）を追加。1 コマンドで詰まりが見える
+    - GUI の失敗文言を分割: `provision_token_missing` → `settings.remote_err_not_provisioned`（provision.mjs へ誘導）。従来は「`ne remote init` を実行してください」＝ init 済みの人が堂々巡りしていた
+    - `provision.mjs --rotate`: Worker に `PROVISION_TOKEN` があるのに手元 config から失われたときの唯一の復旧口
+  - 検証: `cargo check -p necoder` / `cargo test -p i18n -p settings` / `relay: npm test`（11 pass）・`npm run check`・`npm run build`。init の 5 経路は `NECODER_REMOTE_HOME=/tmp/...` の隔離 home で確認
+- 学び/罠:
+  - **GPUI で「日本語ラベルが縦になる」は幅 0 のサイン**。`min_w_0` の左カラム + `flex_shrink_0` の右カラムで右が溢れると左が 0 になり、空白の無い日本語は 1 文字ずつ折り返る。横に伸びうる操作面（チップ列・可変個の選択肢）は `pref_row` に入れない
+  - taffy を直接叩く 30 行の再現（`taffy 0.13`、テキストは measure function で近似）で GPUI を起動せずに原因特定と修正確認ができた。ドッグフーディング中にアプリを起こさずに済む手として有効
+  - relay の秘密は **Worker secret（`PROVISION_TOKEN`）と手元 config の両方に同じ値が要る**。片方だけ残ると `wrangler secret list` では「設定済み」に見えるのに pair は落ちる。`--rotate` 以外に手元へ復元する手段は無い（secret は読み出せない）
+- 次: 更新版の `.app` を入れ直さないと同梱 `Resources/control/host.mjs` は古いまま（`ne remote` は同梱側を使う）。配布ビルドのタイミングで差し替える
+
+## 2026-09-13 — control.necoder.com をアカウント不要の公開リレーにした
+- やったこと（`docs/DECISIONS.md` の同日エントリが判断の正）:
+  - `PROVISION_TOKEN` を Worker・ホスト・README・テストから撤去し、Worker secret も削除。`scripts/provision.mjs` は不要になったので削除。`ne remote init` → `ne remote pair` の 2 コマンドだけで繋がる
+  - 濫用対策を 3 枚に置き換え: `ratelimits` binding `ROOM_LIMITER`（5回/60s/IP）・未ペア部屋 300s TTL（既存）・`POW_DIFFICULTY`（既定 0）。ホストは pair のたびに `/api/health` の `difficulty` を読んで hashcash を解く（`Bridge.proveWork` / `leadingZeroBits`）
+  - GUI の文言: `provision_token_missing` が消えたので撤去し、`room_create_429` / `proof_of_work_too_hard` → `settings.remote_err_relay_busy`（「混雑」はネット不通と原因が違う）
+  - 検証: `npm run check` / `npm test`（13 pass）/ `cargo check -p necoder` / `cargo test -p settings -p i18n`。**本番 deploy 後に end-to-end**: token 無しで `POST /api/rooms` が 201、`pair-json` が 9 プロジェクトで QR 57x57 を発行、スモーク端末は revoke 済み
+- 学び/罠:
+  - **`unsafe.bindings` の `type: "ratelimit"` は無言で効かない**。wrangler は "Unsafe Metadata" として受け付け deploy も通るが `limit()` が常に success を返す。正しくは**トップレベルの `ratelimits`**（deploy 出力が `Rate Limit` と表示すれば効いている）
+  - **レート制限 binding は colo ごとの近似**。10回/60s では 15 連打が全部通り、5回/60s にして初めて 6 発目で落ちた。**厳密な上限として設計に組み込まない**こと（だから PoW の穴を空けてある）
+  - `known_failure` は KNOWN_FAILURES の**要素**を返す＝`"room_create_429"` は `"room_create_"` より**前**に置かないと総称に食われて専用の文言に届かない。回帰テストを `failures_map_to_their_own_message` に追加した
+  - 手元の config から provisioning 秘密が失われると `wrangler secret list` では「設定済み」に見えるのに pair は落ちる。**この形の秘密を持たない設計にしたので、この詰まり自体が消えた**
+- 次: 請求アラート（Cloudflare Notifications・運用側の手番）。その後 R1〜R4（Node ホストを Rust に畳んで本体プロセスへ）
+
+## 2026-09-13 — 設定ホームを 2 ペイン化（左ナビ + ページ）・MCP ページに絞り込み
+- やったこと:
+  - **設定ホームを 1 枚スクロールから 2 ペインへ**（`crates/settings/src/settings.rs` / `docs/UI-SPEC.md` §12 新設）。左 = ナビ列 184px（スクロールしない・選択は bg3 面 + 左バー 2px プロジェクト色）/ 右 = 選ばれた 1 ページだけのスクロール面。ページは **AI エージェント（+ `ne` コマンド）/ MCP サーバ / 外観 / リモート / 動作とエディタ**。ナビのラベルは**セクション見出しと同じ i18n キー**（`SettingsPage::heading_key`）を引く＝目次と本文で呼び名が割れない
+  - 契機は「MCP サーバは Codex CLI / Claude Code / Cursor に足すだけ増える＝1 枚だと外観以下が画面外へ押し下げられる」（ユーザー指摘）。**MCP 専用の別画面へ遷移**ではなく**ページ化**を選択 — 伸びるのは MCP だけではない（エージェント・リモート・この先の Fleet 設定）ので、器を先に作ればナビに 1 行足すだけで済む
+  - **MCP ページに件数と絞り込み**: 「N 件中 M 件有効」+ 出所チップ（すべて / necoder の設定 / Codex CLI / Claude Code / Cursor。**実際に 1 件以上ある出所だけ**出す）+「有効のみ」。絞り込みで 0 件になった時は `mcp_filtered_empty`（1 件も無い時の登録案内 `mcp_empty` とは別文言）
+  - ナビの MCP 行に **`有効/全体` バッジ**（開かなくても状態が見える）
+  - オンボーディング（`onboarded == false`）は**ナビを出さず**従来の 1 枚スクロールのまま（初回は上から順に読ませる）
+  - リファクタ: render に直書きだったエージェント行を `agents_rows` へ、見出しの繰り返しを `section_heading` へ切り出し
+  - 検証: `cargo check -p necoder` / `cargo test -p necoder -p settings -p i18n`（全 green・i18n の ja/en キー一致テスト含む）/ `cargo fmt`。**画面はユーザーがドッグフーディングで目視**（別インスタンスを起こさない約束）
+- 学び/罠:
+  - **ページの選択を「設定を開いた時にリセット」してはいけない**。開く経路（⌘, / レール ⚙）と、CLI 導入・ログインの進捗見張り（`watch_agent_progress`）が**同じ `refresh_availability` を叩く**ので、ここで戻すと作業中に勝手にページが飛ぶ。永続化もしない（どのページを見ていたかは設定値ではない）＝窓の寿命だけ覚える
+  - `impl Render` ブロックの中にメソッドを差し込むと `method is not a member of trait Render` で落ちる。render から関数を切り出す時は**継承 impl 側へ**置く
+  - ナビ行は非選択でも**透明の 2px 左ボーダー**を敷く。選択時だけ `border_l_2()` を足すと、その分だけ文字がずれる（explorer のツリー行は 2px ずれを許容しているが、目次は並んで見えるのでずれが目立つ）
+- 次: MCP の件数が実際に増えたら検索欄（今は出所チップと「有効のみ」だけ。テキスト入力は SettingsView にフォーカス処理が要る）。`~/.claude.json` は**トップレベルの `mcpServers` しか読んでいない**ので、プロジェクト別登録（`projects.<path>.mcpServers`）を拾うかは別途判断
+
+## 2026-09-13 — PWA 内 QR スキャナと「ペアリング中は Mac を寝かせない」
+- やったこと:
+  - **PWA 内で QR を読む**（`relay/public/{index.html,app.mjs,i18n.mjs,style.css}`）。iOS のカメラアプリで QR を読むと **Safari** が開き、ホーム画面 PWA とは**保存領域が別**なのでペアリングが引き継がれない（iOS に PWA 向け universal link は無い）。答えは「アプリの中で読む」＝ Signal / WhatsApp / Tailscale と同じ形。`getUserMedia` + `BarcodeDetector`（Safari には無いので）→ **jsQR フォールバック**。デコーダは `public/jsqr.mjs`（Apache-2.0・esbuild で生成・47KB gzip）で、**スキャンを開いた時だけ動的 import** する
+    - 読み取った文字列は**この origin のペアリング URL 以外を受け付けない**（`pairingFragment`）。成功したら必ずトラックを止めてダイアログを閉じる
+    - カメラ拒否・カメラ無しは**行き止まりにしない** — 貼り付け `<details>` を開いて理由を出す。URL 貼り付けは主導線から代替へ降格した
+  - **ペアリング中は Mac を寝かせない**（`relay/host/bridge.mjs` の `updateWakeLock`）。ペアリング済み端末が 1 台でもあれば `caffeinate -i -s -w <自 pid>` を掴み、`stop()` / 全 revoke で放す。`config.keepAwake: false` で無効化。mac のみ
+  - 検証: `npm test`（14 pass）/ `npm run check` / **`npx playwright test` 8 pass（chromium + webkit 両方）**。うち 2 本が新規: canvas の `captureStream` を `getUserMedia` に差し込む**偽カメラで実際の QR をデコードしてペアリングまで通す**テストと、カメラ拒否時に貼り付けへ倒れるテスト。deploy 済み（`/jsqr.mjs` 200・`id="scan"` がライブ）
+- 学び/罠:
+  - **「iOS だから無理」ではなかった**。カメラアプリ経由が駄目なだけで、アプリ内スキャンなら普通に通る。実際 **WebKit でも QR デコードのテストが green**。制約の切り分けを間違えると、直せるものを仕様として説明してしまう
+  - `sleep` の実測が **1 分**（`pmset -g custom`）。今まで落ちなかったのは無関係なアプリ（Claude の Electron 等）が assertion を持っていた偶然。necoder は 1 つも持っていなかった
+  - 眠らせない条件を「**接続中**」にしてはいけない。寝たら**外から起こす手段が無い**ので、条件は「ペアリング済みの端末がある」
+  - `-w <自 pid>` は保険。デーモンが SIGKILL されたとき caffeinate が残って永久に Mac を起こし続けるのを防ぐ
+  - Playwright の DO 状態は project（chromium→webkit）を跨いで**残る**。固定 room id を使った新テストが 2 本目で 409 になった＝部屋は毎回乱数で作る
+- **蓋スリープの申告を追加**（同日・追記）: `caffeinate` は idle sleep しか止められず、**蓋を閉じるスリープは power assertion の対象外**。止める手は clamshell（AC + 外部ディスプレイ）か `sudo pmset -a disablesleep 1` だけで、後者は root・システム全体・永続・鞄の中で発熱なので **necoder からは実行しない**。代わりに `ioreg -r -k AppleClamshellState`（蓋のある機種にだけ存在するキー）で判定し、`ne remote pair` の後と `ne remote status` の `sleeps_on_lid_close` で申告する。`keeps_awake` も status に出した。黙って切れるのが一番まずい、という判断
+- **wake lock を電源連動にした**（同日・追記。「問題ない程度に起こしておく」＝ユーザー判断）: `caffeinate -s` は AC 限定だが **`-i` は電池でも効いてしまう**ので、抑止の範囲を assertion の種別に頼らず自分で決める。`Bridge.refreshPower`（`pmset -g ps` を **30 秒に 1 回**だけ実測・poll から呼ぶ）で AC/電池を追い、**電池の間は掴まない**。電源を読めない場合は「挿さっている」に倒す（据え置き機で黙って効かなくなるのを避ける）。`ne remote status` に `keeps_awake` / `on_ac_power` / `sleeps_on_lid_close` を出した
+  - **root を要求する手（`pmset -a disablesleep`）は採らない**（ユーザー判断）。蓋スリープは申告だけに留める
+  - OS 側の着地を実測で確認: ペアリング済み端末があると `pmset -g assertions` に `PreventUserIdleSystemSleep` + `PreventSystemSleep` が載り、`stop()` で消える。ディスプレイのスリープは止めていない（`-d` を付けていない）
+- 次: 請求アラート（運用側）。その後 R1〜R4（Node ホストの Rust 化）
+
+## 2026-09-13 — HTML プレビューの OS 子ビューが全 UI の手前に居座る件
+- やったこと: **オーバーレイが開いている間だけ、ネイティブ子ビュー（HTML プレビュー / PDF）を隠す**（`crates/workspace/src/workspace.rs` の `overlay_hides_native_view` + `sync_native_view_visibility`）。数えるのは**操作を受けるもの**だけ — Picker 系（⌘P / ⌘⇧P / テーマ / 履歴…）・⌘F 検索バー・プロジェクト検索・補完 / hover / コードアクション・行移動 / リネーム / インライン編集・hunk メニュー・レールメニュー・色ピッカー・ブランチメニュー・エクスプローラ右クリック・SSH 入力・キー一覧・About・worktree 削除確認。トースト / プロジェクト名フラッシュ / 紙吹雪は**数えない**（通知のたびにプレビューが消える方が邪魔）
+  - 隠れている間は黙って bg1 にせず `webview.hidden_by_overlay`（「前面の UI を閉じると表示に戻ります」・ja/en 両方）を中央に出す。そうしないと「プレビューが消えた」に見える
+  - 観測点として `WebViewView::is_active` / `EditorView::html_preview_is_active` を追加。テスト `overlays_hide_the_html_preview_while_they_are_open`（⌘⇧P で隠れる → キーも GPUI へ返る → 閉じたら戻る）
+- 学び/罠:
+  - **OS 子ビュー（WKWebView / WebView2）は同じ窓の GPUI 描画より常に手前**で、間に層を挟む手段が無い（gpui の描画木に載っているのは `canvas` の矩形だけ）。`z_index` 相当では絶対に勝てないので、**重なる間は隠す**以外の解が無い
+  - 隠す経路（`set_active(false)`）は OS のキーボードフォーカスも GPUI へ返すので、「パレットを開いたのに日本語が入らない」も同時に消える
+  - gpui 内製のツールチップは状態を外から観測できないので、この方式では救えない（待てば消えるものとして割り切り）
+- 次: ツールチップがプレビューに隠れるのが実際に気になるなら、ツールチップ表示中かを gpui から引く手を探す

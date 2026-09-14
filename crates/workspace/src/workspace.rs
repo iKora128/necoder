@@ -1629,8 +1629,10 @@ impl Workspace {
     /// プレビューと PDF タブ）だけで、通常のエディタには触れない。
     fn sync_native_view_visibility(&mut self, window: &Window, cx: &mut Context<Self>) {
         let active_session = self.project_sessions.active;
-        let editor_surface_visible =
-            !self.chrome.fleet_mode && !self.chrome.agent_full_screen && !self.chrome.show_settings;
+        let editor_surface_visible = !self.chrome.fleet_mode
+            && !self.chrome.agent_full_screen
+            && !self.chrome.show_settings
+            && !self.overlay_hides_native_view(cx);
         for (session_index, session) in self.project_sessions.sessions.iter().enumerate() {
             for (tab_index, tab) in session.tabs.iter().enumerate() {
                 let visible = editor_surface_visible
@@ -1662,6 +1664,38 @@ impl Workspace {
                 self.release_native_key_focus(cx);
             }
         }
+    }
+
+    /// GPUI のオーバーレイが開いている＝ネイティブ子ビュー（HTML プレビュー / PDF）を隠す合図か。
+    ///
+    /// OS 子ビュー（WKWebView / WebView2）は同じ窓の GPUI 描画より**常に手前**で、間に層を挟む
+    /// 手段が無い。そのため ⌘P・⌘F・メニュー・モーダルを開いてもプレビューが上に残って
+    /// 読めない／押せない（2026-09-13 本人報告）。層を作れない以上、**重なる間はネイティブ側を
+    /// 隠す**しかない。隠す経路（`set_active(false)`）は OS のキーボードフォーカスも GPUI へ
+    /// 返すので、オーバーレイの入力欄に日本語が入らない事故も同時に消える。
+    ///
+    /// 数えるのは**操作を受けるオーバーレイ**だけ。トースト・プロジェクト名フラッシュ・紙吹雪は
+    /// 数えない — 通知が出るたびにプレビューが消える方が邪魔で、どれも押さずに消えるため。
+    /// （gpui 内製のツールチップも同じ理由で観測できないが、これも待てば消えるもの。）
+    fn overlay_hides_native_view(&self, cx: &App) -> bool {
+        self.overlays.picker.is_some()
+            || self.overlays.color_picker.is_some()
+            || self.overlays.rail_menu.is_some()
+            || self.overlays.worktree_delete.is_some()
+            || self.overlays.ssh_input.is_some()
+            || self.overlays.shortcut_sheet.is_some()
+            || self.overlays.about.is_some()
+            || self.search_panel.is_some()
+            || self.buffer_search.is_some()
+            || self.completion.is_some()
+            || self.hover.is_some()
+            || self.goto_line.is_some()
+            || self.rename_input.is_some()
+            || self.inline_edit.is_some()
+            || self.code_actions.is_some()
+            || self.hunk_menu.is_some()
+            || self.git_panel.read(cx).branch_menu.is_some()
+            || self.explorer_context_menu(cx).is_some()
     }
 
     /// アクティブタブが HTML プレビューならそのエディタ。ネイティブ WebView が OS のキーボード
@@ -2828,6 +2862,76 @@ mod tests {
         assert!(
             !editor.read_with(cx, |editor, cx| editor.html_preview_wants_key_focus(cx)),
             "GPUI 側のクリックで OS のキーボードフォーカスが返らない＝ composer に日本語が入らない"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// オーバーレイ（⌘⇧P など）を開いている間は HTML プレビューのネイティブ子ビューを隠すこと。
+    /// OS 子ビューは GPUI 描画より常に手前なので、隠さないとパレットが読めない・押せない
+    /// （2026-09-13 本人報告）。閉じたら戻ること（隠しっぱなしは「プレビューが消えた」になる）。
+    #[gpui::test]
+    fn overlays_hide_the_html_preview_while_they_are_open(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_preview_overlay_{}", std::process::id()));
+        let project = root.join("site");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project).unwrap();
+        let page = project.join("page.html");
+        std::fs::write(&page, "<h1>hi</h1>\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        ::webview_view::disable_native_webviews_for_tests();
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        let editor = workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.restore_open_file(&[RestoredTabs::single(page.clone())], window, cx);
+            let editor = workspace.active_editor().expect("HTML タブが開く");
+            editor.update(cx, |editor, cx| {
+                editor.set_rendered_html(true, cx);
+                editor.set_surface_active(true, true, cx);
+            });
+            editor
+        });
+        cx.run_until_parked();
+        assert!(
+            editor.read_with(cx, |editor, cx| editor.html_preview_is_active(cx)),
+            "プレビュー選択中はネイティブ子ビューが出ている"
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_command_palette(&CommandPalette, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            !editor.read_with(cx, |editor, cx| editor.html_preview_is_active(cx)),
+            "オーバーレイ中にネイティブ子ビューを残すと、手前に居座ってパレットを隠す"
+        );
+        assert!(
+            !editor.read_with(cx, |editor, cx| editor.html_preview_wants_key_focus(cx)),
+            "隠す時はキーボードフォーカスも GPUI へ返す（パレットに日本語が入らない事故を防ぐ）"
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_picker(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            editor.read_with(cx, |editor, cx| editor.html_preview_is_active(cx)),
+            "閉じたらプレビューは戻る"
         );
 
         workspace.update_in(cx, |workspace, _window, _cx| {

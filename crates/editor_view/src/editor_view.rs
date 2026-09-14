@@ -637,6 +637,13 @@ impl EditorView {
         preview.update(cx, |preview, _| preview.set_key_focus(owns));
     }
 
+    /// HTML プレビューのネイティブ子ビューが出ている想定か（オーバーレイ中の退避を観測する点）。
+    pub fn html_preview_is_active(&self, cx: &App) -> bool {
+        self.html_preview
+            .as_ref()
+            .is_some_and(|preview| preview.read(cx).is_active())
+    }
+
     /// プレビューがキーボードフォーカスを持つ想定か（要求の記録。OS の真実ではない）。
     pub fn html_preview_wants_key_focus(&self, cx: &App) -> bool {
         self.html_preview
