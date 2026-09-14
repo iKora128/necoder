@@ -424,6 +424,10 @@ settings:
   mcp_source_codex: Codex CLI で発見
   mcp_source_claude: Claude Code で発見
   mcp_source_cursor: Cursor で発見
+  mcp_count: "%{total} 件中 %{enabled} 件有効"
+  mcp_filter_all: すべて
+  mcp_filter_enabled: 有効のみ
+  mcp_filtered_empty: この条件に合う MCP サーバはありません。
   prefs_heading: 動作とエディタ
   prefs_sub: 真実は settings.json。ここはそれを操作するだけです。
   pref_submit_on_enter: Enter で送信

@@ -423,6 +423,10 @@ settings:
   mcp_source_codex: found in Codex CLI
   mcp_source_claude: found in Claude Code
   mcp_source_cursor: found in Cursor
+  mcp_count: "%{enabled} of %{total} enabled"
+  mcp_filter_all: All
+  mcp_filter_enabled: Enabled only
+  mcp_filtered_empty: No MCP servers match this filter.
   prefs_heading: Behavior & editor
   prefs_sub: settings.json is the source of truth; this just edits it.
   pref_submit_on_enter: Submit on Enter

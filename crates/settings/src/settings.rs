@@ -217,6 +217,41 @@ pub enum SettingsViewEvent {
     OpenSettingsJson,
 }
 
+/// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
+///
+/// 選ばれているページは**ビューのメモリ**で、`settings.json` には書かない —
+/// 「どのページを見ていたか」は設定値ではない（閉じて開き直せば [`SettingsPage::Agents`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    Agents,
+    Mcp,
+    Appearance,
+    Remote,
+    Preferences,
+}
+
+impl SettingsPage {
+    /// ナビに並べる全ページ（上から順）。
+    const ALL: [SettingsPage; 5] = [
+        SettingsPage::Agents,
+        SettingsPage::Mcp,
+        SettingsPage::Appearance,
+        SettingsPage::Remote,
+        SettingsPage::Preferences,
+    ];
+
+    /// ナビのラベル。**ページ本文の見出しと同じキー**を引く（目次と本文で呼び名を割らない）。
+    fn heading_key(self) -> &'static str {
+        match self {
+            SettingsPage::Agents => "settings.agents_heading",
+            SettingsPage::Mcp => "settings.mcp_heading",
+            SettingsPage::Appearance => "settings.appearance_heading",
+            SettingsPage::Remote => "settings.remote_heading",
+            SettingsPage::Preferences => "settings.prefs_heading",
+        }
+    }
+}
+
 /// テーマ保存ディレクトリ（user settings.json と同じ設定フォルダの `themes/`）。
 fn themes_dir() -> Option<PathBuf> {
     Some(user_settings_path()?.parent()?.join("themes"))
@@ -239,9 +274,15 @@ pub struct SettingsView {
     /// 外観セクションに並べるテーマ一覧（組み込み + 同梱 + ユーザー JSON）。
     /// 描画毎の fs 走査を避けてキャッシュし、設定を開き直すたび [`Self::refresh_availability`] で更新。
     themes: Vec<(SharedString, theme_core::ThemeSource)>,
+    /// 表示中のページ（左ナビの選択）。永続化しない（[`SettingsPage`]）。
+    page: SettingsPage,
     /// MCP サーバの一覧（設定 + 他ツールからの発見）。描画毎に 3 本のファイルを読まないよう
     /// キャッシュし、設定を開き直すたび / トグルするたびに [`Self::refresh_availability`] で更新。
     mcp_servers: Vec<acp_client::mcp::McpServerConfig>,
+    /// MCP ページの絞り込み: 出所（`None` = すべて）。
+    mcp_filter_source: Option<acp_client::mcp::McpSource>,
+    /// MCP ページの絞り込み: 有効なものだけ表示する。
+    mcp_filter_enabled_only: bool,
     /// ターミナル用 `ne` シム（cli_shim crate）の設置状態。`Some(実体パス)` = 設置済み。
     cli_shim_target: Option<PathBuf>,
     /// `ne` シムの設置/削除を実行中（連打防止・「実行中…」表示）。
@@ -268,7 +309,10 @@ impl SettingsView {
             watching_agents: vec![false; acp_client::AGENTS.len()],
             availability_pending: false,
             themes: theme_core::available_themes(themes_dir().as_deref()),
+            page: SettingsPage::Agents,
             mcp_servers: Vec::new(),
+            mcp_filter_source: None,
+            mcp_filter_enabled_only: false,
             cli_shim_target: None,
             cli_shim_busy: false,
             cli_shim_error: None,
@@ -650,6 +694,49 @@ impl SettingsView {
             .child(div().flex_shrink_0().child(control))
     }
 
+    /// 設定行の器（上=ラベル+副題 / 下=コントロールが 1 行まるごと）。
+    ///
+    /// **横に伸びるコントロール（チップの列）は [`pref_row`] に入れない**。右列は
+    /// `flex_shrink_0` なので、チップの合計幅が行を超えると左列だけが幅 0 まで潰れ、
+    /// 日本語は空白が無いぶん 1 文字ずつ折り返って**ラベルが縦書きに見える**
+    /// （テーマが 7 種に増えて発生・2026-09-13）。上下に分ければ、コントロールは
+    /// 行いっぱいを使って `flex_wrap` で素直に折り返せる。
+    fn pref_stack(&self, label: String, sub: Option<String>, control: gpui::AnyElement) -> Div {
+        let theme = self.theme.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .px(px(12.))
+            .py(px(9.))
+            .rounded(px(8.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(theme.fg0)
+                            .child(SharedString::from(label)),
+                    )
+                    .when_some(sub, |element, sub| {
+                        element.child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(sub)),
+                        )
+                    }),
+            )
+            .child(div().w_full().min_w_0().child(control))
+    }
+
     fn toggle_row(
         &self,
         key: &'static str,
@@ -858,7 +945,8 @@ impl SettingsView {
                             .child(SharedString::from(i18n::t!("settings.appearance_sub"))),
                     ),
             )
-            .child(self.pref_row(
+            // チップは数がテーマの数だけ増える＝右列に収まらない。上下 2 段の器を使う。
+            .child(self.pref_stack(
                 i18n::t!("settings.theme_label"),
                 Some(i18n::t!("settings.theme_sub")),
                 chips.into_any_element(),
@@ -868,6 +956,313 @@ impl SettingsView {
                 Some(i18n::t!("settings.open_json_sub")),
                 open_json,
             ))
+    }
+
+    // ── AI エージェント（ページ「AI エージェント」）──────────────────────────
+
+    /// エージェント一覧の行。**ページとオンボーディングで共用する**（初回はナビ無しの
+    /// 1 枚スクロールに同じ行が出る・UI-SPEC §12）。
+    fn agents_rows(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let default_agent = settings.default_agent.clone();
+        let mut rows = div().flex().flex_col().gap(px(6.));
+        for (index, agent) in acp_client::AGENTS.iter().enumerate() {
+            let is_default = agent.label == default_agent;
+            let cli_installed = self.cli_installed.get(index).copied().unwrap_or(false);
+            let auth_state = self
+                .auth_states
+                .get(index)
+                .copied()
+                .unwrap_or(acp_client::AgentAuthState::SignedOut);
+            let available = auth_state == acp_client::AgentAuthState::Available;
+            let (dot_color, status_text) = if self.checking_agents {
+                (theme.fg2, i18n::t!("settings.agent_checking"))
+            } else {
+                match (cli_installed, auth_state) {
+                    (_, acp_client::AgentAuthState::Available) => {
+                        (theme.ok, i18n::t!("settings.agent_available"))
+                    }
+                    (true, acp_client::AgentAuthState::Configured) => {
+                        (theme.warn, i18n::t!("settings.agent_configured"))
+                    }
+                    (true, acp_client::AgentAuthState::SignedOut) => {
+                        (theme.fg2, i18n::t!("settings.agent_signed_out"))
+                    }
+                    (false, _) => (theme.fg2, i18n::t!("settings.not_installed")),
+                }
+            };
+            let default_control = if is_default && available {
+                div()
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .bg(accent.alpha(0.16))
+                    .text_size(px(11.))
+                    .text_color(accent)
+                    .child(SharedString::from(i18n::t!("settings.is_default")))
+                    .into_any_element()
+            } else if available {
+                let label = agent.label;
+                div()
+                    .id(("set-default", index))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    .child(SharedString::from(i18n::t!("settings.make_default")))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| view.set_default_agent(label, cx)),
+                    )
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
+            let (logo, mono, brand) = agent_brand(agent.id);
+            let logo = match logo {
+                Some(path) => div()
+                    .flex_none()
+                    .size(px(26.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(svg().path(path).size(px(20.)).text_color(gpui::rgb(brand)))
+                    .into_any_element(),
+                None => div()
+                    .flex_none()
+                    .size(px(26.))
+                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui::rgb(brand))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(gpui::white())
+                    .child(mono)
+                    .into_any_element(),
+            };
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(12.))
+                    .py(px(9.))
+                    .rounded(px(8.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(if is_default && available {
+                        accent.alpha(0.5)
+                    } else {
+                        theme.border
+                    })
+                    .child(logo)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.fg0)
+                                    .child(agent.label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(dot_color)
+                                    .child(SharedString::from(status_text)),
+                            ),
+                    )
+                    .child(div().flex_1())
+                    .child(default_control)
+                    .child(if self.checking_agents || available {
+                        div().into_any_element()
+                    } else if cli_installed {
+                        self.agent_action_button(
+                            ("agent-login", index),
+                            if auth_state == acp_client::AgentAuthState::Configured {
+                                i18n::t!("settings.open_cli")
+                            } else {
+                                i18n::t!("settings.login")
+                            },
+                            agent.login_cmd,
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
+                    .when(
+                        !self.checking_agents && !cli_installed && !available,
+                        |row| {
+                            row.child(self.agent_action_button(
+                                ("agent-install", index),
+                                i18n::t!("settings.install"),
+                                agent.install_cmd,
+                                cx,
+                            ))
+                        },
+                    ),
+            );
+        }
+        rows
+    }
+
+    // ── ページの器（左ナビ + ページ面）──────────────────────────────────────────
+
+    /// ナビの行を押した。**ページの選択は永続化しない**（[`SettingsPage`]）。
+    fn select_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        if self.page != page {
+            self.page = page;
+            cx.notify();
+        }
+    }
+
+    /// セクション見出し（太字ラベル + 副題）。ナビのラベルと同じキーを引く側の相方。
+    fn section_heading(&self, title: String, sub: Option<String>) -> Div {
+        let theme = self.theme.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg1)
+                    .child(SharedString::from(title)),
+            )
+            .when_some(sub, |element, sub| {
+                element.child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(sub)),
+                )
+            })
+    }
+
+    /// 左ナビ（ページの目次）。**スクロールしない** — どこに居るかが常に見える（UI-SPEC §12）。
+    fn nav_column(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let enabled = self
+            .mcp_servers
+            .iter()
+            .filter(|server| server.enabled)
+            .count();
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .flex_none()
+            .w(px(184.))
+            .h_full()
+            .px(px(12.))
+            .py(px(24.))
+            .border_r_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .px(px(8.))
+                    .pb(px(10.))
+                    .text_size(px(18.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(SharedString::from(i18n::t!("settings.title"))),
+            );
+        for (index, page) in SettingsPage::ALL.iter().enumerate() {
+            let page = *page;
+            let selected = self.page == page;
+            // MCP だけは「有効/全体」を添える＝開かなくても状態が見える。
+            let badge = (page == SettingsPage::Mcp && !self.mcp_servers.is_empty())
+                .then(|| format!("{enabled}/{}", self.mcp_servers.len()));
+            column = column.child(
+                div()
+                    .id(("settings-nav", index))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(30.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .text_size(px(12.5))
+                    // 非選択でも 2px を敷いて（透明）、選択で文字位置がずれないようにする。
+                    .border_l_2()
+                    .border_color(if selected {
+                        accent
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .when(selected, |element| {
+                        element.bg(theme.bg3).text_color(theme.fg0)
+                    })
+                    .when(!selected, |element| {
+                        element
+                            .text_color(theme.fg1)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(SharedString::from(i18n::t!(page.heading_key()))),
+                    )
+                    .when_some(badge, |element, badge| {
+                        element.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(11.))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(badge)),
+                        )
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| view.select_page(page, cx)),
+                    ),
+            );
+        }
+        column
+    }
+
+    /// 選ばれているページの中身。1 ページ = 1 セクション（エージェントだけ `ne` コマンドを伴う）。
+    fn page_body(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        match self.page {
+            SettingsPage::Agents => div()
+                .flex()
+                .flex_col()
+                .gap(px(14.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(self.section_heading(
+                            i18n::t!("settings.agents_heading"),
+                            Some(i18n::t!("settings.agents_sub")),
+                        ))
+                        .child(self.agents_rows(settings, cx)),
+                )
+                // 導入系（エージェント CLI）の直後に `ne` コマンドを並べる。
+                // Windows は W フェーズまで非対応＝セクションごと出さない。
+                .when(cli_shim::supported(), |element| {
+                    element.child(self.cli_section(cx))
+                }),
+            SettingsPage::Mcp => self.mcp_section(cx),
+            SettingsPage::Appearance => self.appearance_section(settings, cx),
+            SettingsPage::Remote => self.remote_section(cx),
+            SettingsPage::Preferences => self.preferences_section(settings, cx),
+        }
     }
 
     // ── MCP サーバ（ACP セッションへ渡す道具）────────────────────────────────────
@@ -888,17 +1283,22 @@ impl SettingsView {
     /// リモートサーバへ繋いだりしないため。
     fn mcp_section(&self, cx: &mut Context<Self>) -> Div {
         let theme = self.theme.clone();
+        let total = self.mcp_servers.len();
+        let enabled_count = self
+            .mcp_servers
+            .iter()
+            .filter(|server| server.enabled)
+            .count();
         let mut rows = div().flex().flex_col().gap(px(6.));
+        let mut shown = 0usize;
         for (index, server) in self.mcp_servers.iter().enumerate() {
+            if !self.mcp_row_visible(server) {
+                continue;
+            }
+            shown += 1;
             let name = server.name.clone();
             let enabled = server.enabled;
-            // 出所のラベルはキーを literal で並べる（動的に組むと locales の書き忘れに気づけない）。
-            let source = match server.source {
-                acp_client::mcp::McpSource::Necoder => i18n::t!("settings.mcp_source_necoder"),
-                acp_client::mcp::McpSource::Codex => i18n::t!("settings.mcp_source_codex"),
-                acp_client::mcp::McpSource::ClaudeCode => i18n::t!("settings.mcp_source_claude"),
-                acp_client::mcp::McpSource::Cursor => i18n::t!("settings.mcp_source_cursor"),
-            };
+            let source = mcp_source_label(server.source);
             let control = self
                 .switch(("mcp-server", index), enabled)
                 .on_mouse_down(
@@ -914,7 +1314,13 @@ impl SettingsView {
                 control,
             ));
         }
-        if self.mcp_servers.is_empty() {
+        // 1 件も無い（＝登録のしかたを案内する）と、絞り込んだ結果 0 件は別の話なので文言を分ける。
+        if total == 0 || shown == 0 {
+            let message = if total == 0 {
+                i18n::t!("settings.mcp_empty")
+            } else {
+                i18n::t!("settings.mcp_filtered_empty")
+            };
             rows = rows.child(
                 div()
                     .px(px(12.))
@@ -925,32 +1331,21 @@ impl SettingsView {
                     .border_color(theme.border)
                     .text_size(px(11.5))
                     .text_color(theme.fg2)
-                    .child(SharedString::from(i18n::t!("settings.mcp_empty"))),
+                    .child(SharedString::from(message)),
             );
         }
         div()
             .flex()
             .flex_col()
             .gap(px(6.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg1)
-                            .child(SharedString::from(i18n::t!("settings.mcp_heading"))),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(theme.fg2)
-                            .child(SharedString::from(i18n::t!("settings.mcp_sub"))),
-                    ),
-            )
+            .child(self.section_heading(
+                i18n::t!("settings.mcp_heading"),
+                Some(i18n::t!("settings.mcp_sub")),
+            ))
+            // 件数と絞り込みは 1 件でもある時だけ（空の画面に操作子を並べても読ませるだけ）。
+            .when(total > 0, |element| {
+                element.child(self.mcp_filter_bar(total, enabled_count, cx))
+            })
             .child(rows)
             .child(
                 // 注記は fg2（色は識別のためだけに使う・UI-SPEC §1。ここを accent にしない）。
@@ -960,6 +1355,121 @@ impl SettingsView {
                     .text_color(theme.fg2)
                     .child(SharedString::from(i18n::t!("settings.mcp_note"))),
             )
+    }
+
+    /// 絞り込み（出所 / 有効のみ）を通る行か。
+    fn mcp_row_visible(&self, server: &acp_client::mcp::McpServerConfig) -> bool {
+        self.mcp_filter_source
+            .is_none_or(|source| source == server.source)
+            && (!self.mcp_filter_enabled_only || server.enabled)
+    }
+
+    fn set_mcp_filter_source(
+        &mut self,
+        source: Option<acp_client::mcp::McpSource>,
+        cx: &mut Context<Self>,
+    ) {
+        self.mcp_filter_source = source;
+        cx.notify();
+    }
+
+    fn toggle_mcp_filter_enabled_only(&mut self, cx: &mut Context<Self>) {
+        self.mcp_filter_enabled_only = !self.mcp_filter_enabled_only;
+        cx.notify();
+    }
+
+    /// 「N 件中 M 件有効」+ 絞り込みチップ。**実際に 1 件以上ある出所だけ**をチップにする
+    /// （押しても何も起きないチップを並べない）。
+    fn mcp_filter_bar(&self, total: usize, enabled_count: usize, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let mut chips = div().flex().flex_wrap().items_center().gap(px(4.)).child(
+            self.filter_chip(
+                ("mcp-filter", 0),
+                i18n::t!("settings.mcp_filter_all"),
+                self.mcp_filter_source.is_none(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, _window, cx| view.set_mcp_filter_source(None, cx)),
+            ),
+        );
+        for (index, source) in MCP_SOURCES.iter().enumerate() {
+            let source = *source;
+            if !self
+                .mcp_servers
+                .iter()
+                .any(|server| server.source == source)
+            {
+                continue;
+            }
+            chips = chips.child(
+                self.filter_chip(
+                    ("mcp-filter", index + 1),
+                    mcp_source_label(source),
+                    self.mcp_filter_source == Some(source),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| {
+                        view.set_mcp_filter_source(Some(source), cx)
+                    }),
+                ),
+            );
+        }
+        chips = chips.child(
+            self.filter_chip(
+                ("mcp-filter", MCP_SOURCES.len() + 1),
+                i18n::t!("settings.mcp_filter_enabled"),
+                self.mcp_filter_enabled_only,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, _window, cx| view.toggle_mcp_filter_enabled_only(cx)),
+            ),
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .px(px(12.))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!(
+                        "settings.mcp_count",
+                        "total" => total,
+                        "enabled" => enabled_count,
+                    ))),
+            )
+            .child(chips)
+    }
+
+    /// 絞り込みチップ（選択 = accent-dim。外観のテーマチップと同じ書式）。
+    fn filter_chip(
+        &self,
+        id: (&'static str, usize),
+        label: String,
+        selected: bool,
+    ) -> Stateful<Div> {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        div()
+            .id(id)
+            .px(px(9.))
+            .py(px(3.))
+            .rounded(px(5.))
+            .text_size(px(11.5))
+            .cursor_pointer()
+            .when(selected, |element| {
+                element.bg(accent.alpha(0.16)).text_color(accent)
+            })
+            .when(!selected, |element| {
+                element
+                    .text_color(theme.fg2)
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+            })
+            .child(SharedString::from(label))
     }
 
     /// 「動作とエディタ」セクション（真実は settings.json・ここは操作面）。
@@ -1123,223 +1633,40 @@ impl Render for SettingsView {
         let theme = self.theme.clone();
         let accent = self.accent;
         let settings = get(cx);
-        let default_agent = settings.default_agent.clone();
         let onboarding = !settings.onboarded;
-        let mut rows = div().flex().flex_col().gap(px(6.));
-        for (index, agent) in acp_client::AGENTS.iter().enumerate() {
-            let is_default = agent.label == default_agent;
-            let cli_installed = self.cli_installed.get(index).copied().unwrap_or(false);
-            let auth_state = self
-                .auth_states
-                .get(index)
-                .copied()
-                .unwrap_or(acp_client::AgentAuthState::SignedOut);
-            let available = auth_state == acp_client::AgentAuthState::Available;
-            let (dot_color, status_text) = if self.checking_agents {
-                (theme.fg2, i18n::t!("settings.agent_checking"))
-            } else {
-                match (cli_installed, auth_state) {
-                    (_, acp_client::AgentAuthState::Available) => {
-                        (theme.ok, i18n::t!("settings.agent_available"))
-                    }
-                    (true, acp_client::AgentAuthState::Configured) => {
-                        (theme.warn, i18n::t!("settings.agent_configured"))
-                    }
-                    (true, acp_client::AgentAuthState::SignedOut) => {
-                        (theme.fg2, i18n::t!("settings.agent_signed_out"))
-                    }
-                    (false, _) => (theme.fg2, i18n::t!("settings.not_installed")),
-                }
-            };
-            let default_control = if is_default && available {
-                div()
-                    .px(px(8.))
-                    .py(px(3.))
-                    .rounded(px(5.))
-                    .bg(accent.alpha(0.16))
-                    .text_size(px(11.))
-                    .text_color(accent)
-                    .child(SharedString::from(i18n::t!("settings.is_default")))
-                    .into_any_element()
-            } else if available {
-                let label = agent.label;
-                div()
-                    .id(("set-default", index))
-                    .px(px(8.))
-                    .py(px(3.))
-                    .rounded(px(5.))
-                    .text_size(px(11.))
-                    .text_color(theme.fg2)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
-                    .child(SharedString::from(i18n::t!("settings.make_default")))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |view, _, _window, cx| view.set_default_agent(label, cx)),
-                    )
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            };
-            let (logo, mono, brand) = agent_brand(agent.id);
-            let logo = match logo {
-                Some(path) => div()
-                    .flex_none()
-                    .size(px(26.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(svg().path(path).size(px(20.)).text_color(gpui::rgb(brand)))
-                    .into_any_element(),
-                None => div()
-                    .flex_none()
-                    .size(px(26.))
-                    .rounded(px(7.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(gpui::rgb(brand))
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(gpui::white())
-                    .child(mono)
-                    .into_any_element(),
-            };
-            rows = rows.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(12.))
-                    .py(px(9.))
-                    .rounded(px(8.))
-                    .bg(theme.bg2)
-                    .border_1()
-                    .border_color(if is_default && available {
-                        accent.alpha(0.5)
-                    } else {
-                        theme.border
-                    })
-                    .child(logo)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.fg0)
-                                    .child(agent.label),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .text_color(dot_color)
-                                    .child(SharedString::from(status_text)),
-                            ),
-                    )
-                    .child(div().flex_1())
-                    .child(default_control)
-                    .child(if self.checking_agents || available {
-                        div().into_any_element()
-                    } else if cli_installed {
-                        self.agent_action_button(
-                            ("agent-login", index),
-                            if auth_state == acp_client::AgentAuthState::Configured {
-                                i18n::t!("settings.open_cli")
-                            } else {
-                                i18n::t!("settings.login")
-                            },
-                            agent.login_cmd,
-                            cx,
+        // 初回は器（ナビ）を出さない — 上から順に読ませたいので 1 枚スクロールのまま（UI-SPEC §12）。
+        if onboarding {
+            let body = div()
+                .flex()
+                .flex_col()
+                .gap(px(14.))
+                .w_full()
+                .max_w(px(680.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_size(px(18.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.fg0)
+                                .child(SharedString::from(i18n::t!("settings.welcome_title"))),
                         )
-                        .into_any_element()
-                    } else {
-                        div().into_any_element()
-                    })
-                    .when(
-                        !self.checking_agents && !cli_installed && !available,
-                        |row| {
-                            row.child(self.agent_action_button(
-                                ("agent-install", index),
-                                i18n::t!("settings.install"),
-                                agent.install_cmd,
-                                cx,
-                            ))
-                        },
-                    ),
-            );
-        }
-
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(14.))
-            .w_full()
-            .max_w(px(680.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(18.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg0)
-                            .child(SharedString::from(if onboarding {
-                                i18n::t!("settings.welcome_title")
-                            } else {
-                                i18n::t!("settings.title")
-                            })),
-                    )
-                    .when(onboarding, |element| {
-                        element.child(
+                        .child(
                             div()
                                 .text_size(px(12.))
                                 .text_color(theme.fg2)
                                 .child(SharedString::from(i18n::t!("settings.welcome_sub"))),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.fg1)
-                            .child(SharedString::from(i18n::t!("settings.agents_heading"))),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(theme.fg2)
-                            .child(SharedString::from(i18n::t!("settings.agents_sub"))),
-                    ),
-            )
-            .child(rows)
-            .when(!onboarding, |element| {
-                element
-                    // 導入系（エージェント CLI）の直後に `ne` コマンドを並べる。
-                    // Windows は W フェーズまで非対応＝セクションごと出さない。
-                    .when(cli_shim::supported(), |element| {
-                        element.child(self.cli_section(cx))
-                    })
-                    // 道具（MCP）はエージェントの直後に置く — 「どのエージェントか」の次に
-                    // 決めるのが「そのエージェントに何を持たせるか」。
-                    .child(self.mcp_section(cx))
-                    .child(self.appearance_section(&settings, cx))
-                    .child(self.remote_section(cx))
-                    .child(self.preferences_section(&settings, cx))
-            })
-            .when(onboarding, |element| {
-                element.child(
+                        ),
+                )
+                .child(self.section_heading(
+                    i18n::t!("settings.agents_heading"),
+                    Some(i18n::t!("settings.agents_sub")),
+                ))
+                .child(self.agents_rows(&settings, cx))
+                .child(
                     div()
                         .id("onboarding-start")
                         .flex()
@@ -1358,22 +1685,67 @@ impl Render for SettingsView {
                             MouseButton::Left,
                             cx.listener(|view, _, _window, cx| view.finish_onboarding(cx)),
                         ),
-                )
-            });
+                );
+            return div()
+                .id("settings-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .bg(theme.bg1)
+                .child(
+                    div()
+                        .flex()
+                        .justify_center()
+                        .px(px(28.))
+                        .py(px(24.))
+                        .child(body),
+                );
+        }
 
+        // 2 ペイン: 左 = スクロールしないナビ列 / 右 = 選ばれた 1 ページだけのスクロール面。
+        // 設定が増えてもナビに 1 行足すだけで済み、縦に伸び続けない（UI-SPEC §12）。
         div()
-            .id("settings-scroll")
+            .id("settings-pane")
             .size_full()
-            .overflow_y_scroll()
+            .flex()
             .bg(theme.bg1)
+            .child(self.nav_column(cx))
             .child(
                 div()
-                    .flex()
-                    .justify_center()
-                    .px(px(28.))
-                    .py(px(24.))
-                    .child(body),
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .child(
+                        div().flex().justify_center().px(px(28.)).py(px(24.)).child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(14.))
+                                .w_full()
+                                .max_w(px(680.))
+                                .child(self.page_body(&settings, cx)),
+                        ),
+                    ),
             )
+    }
+}
+
+/// 絞り込みチップに並べる出所（**necoder の設定 → 発見の 3 本**の順）。
+const MCP_SOURCES: [acp_client::mcp::McpSource; 4] = [
+    acp_client::mcp::McpSource::Necoder,
+    acp_client::mcp::McpSource::Codex,
+    acp_client::mcp::McpSource::ClaudeCode,
+    acp_client::mcp::McpSource::Cursor,
+];
+
+/// 出所の表示名。キーを literal で並べる（動的に組むと locales の書き忘れに気づけない）。
+fn mcp_source_label(source: acp_client::mcp::McpSource) -> String {
+    match source {
+        acp_client::mcp::McpSource::Necoder => i18n::t!("settings.mcp_source_necoder"),
+        acp_client::mcp::McpSource::Codex => i18n::t!("settings.mcp_source_codex"),
+        acp_client::mcp::McpSource::ClaudeCode => i18n::t!("settings.mcp_source_claude"),
+        acp_client::mcp::McpSource::Cursor => i18n::t!("settings.mcp_source_cursor"),
     }
 }
 
