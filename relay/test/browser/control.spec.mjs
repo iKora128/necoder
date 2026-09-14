@@ -59,25 +59,50 @@ test('部屋作成はアカウント不要・壊れた資格情報と異なる O
   await page.screenshot({ path: 'test-results/pwa-welcome.png', fullPage: true });
 });
 
+/// 偽カメラを `navigator.mediaDevices.getUserMedia` に差し込む（`qr` = QR を写す / `denied` = 拒否）。
+///
+/// **WebKit はカメラの無い機械では `navigator.mediaDevices` ごと生やさない**（GitHub の macOS
+/// runner がこれ。手元の Mac は内蔵カメラがあるので生えていて、素の代入で通ってしまっていた）。
+/// 器が無ければ器から作り、生えている時も上書きが効かない場合に備えて defineProperty で押し込む。
+/// 差し込めたかは `window.fakeCameraInstalled` で確かめる — 差し込めていないと本物の
+/// getUserMedia が permission 待ちのまま**解決も拒否もしない**ので、失敗が 20 秒のタイムアウトに
+/// 化けて原因が読めない（2026-09-14 の CI）。CSP があるので eval / new Function は使わない。
+async function installFakeCamera(page, mode, image = null) {
+  await page.addInitScript(([mode, source]) => {
+    const getUserMedia = mode === 'denied'
+      ? async () => { throw new DOMException('denied', 'NotAllowedError'); }
+      : async () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 512;
+        const context = canvas.getContext('2d');
+        const picture = new Image();
+        await new Promise(resolve => { picture.onload = resolve; picture.src = source; });
+        const draw = () => { context.drawImage(picture, 0, 0, 512, 512); requestAnimationFrame(draw); };
+        draw();
+        return canvas.captureStream(15);
+      };
+    const media = navigator.mediaDevices ?? {};
+    Object.defineProperty(media, 'getUserMedia', { configurable: true, writable: true, value: getUserMedia });
+    if (navigator.mediaDevices !== media) Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: media });
+    window.fakeCameraInstalled = true;
+  }, [mode, image]);
+}
+
+/// 偽カメラが実際に差し込まれたか（差し込めていなければ、以降の期待値は何も証明しない）。
+async function expectFakeCamera(page) {
+  expect(await page.evaluate(() => window.fakeCameraInstalled === true
+    && typeof navigator.mediaDevices?.getUserMedia === 'function')).toBe(true);
+}
+
 test('PWA 内で QR を読み取ってペアリングする', async ({ page, request, browserName }) => {
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   const pairing = await (await request.get('http://127.0.0.1:8792/pair')).json();
   // 偽カメラ: Mac の画面に出る QR を canvas に描き、その captureStream を getUserMedia に返す。
   // 実際の読み取り経路（BarcodeDetector / jsQR）をそのまま通す。
   const image = await QRCode.toDataURL(pairing.url, { width: 512, margin: 2 });
-  await page.addInitScript(source => {
-    navigator.mediaDevices.getUserMedia = async () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = canvas.height = 512;
-      const context = canvas.getContext('2d');
-      const picture = new Image();
-      await new Promise(resolve => { picture.onload = resolve; picture.src = source; });
-      const draw = () => { context.drawImage(picture, 0, 0, 512, 512); requestAnimationFrame(draw); };
-      draw();
-      return canvas.captureStream(15);
-    };
-  }, image);
+  await installFakeCamera(page, 'qr', image);
   await page.goto('/');
+  await expectFakeCamera(page);
   await page.locator('#scan').click();
   await expect(page.locator('#status')).toHaveText('接続済み', { timeout: 20000 });
   await expect(page.locator('#destination')).toContainText('PWA integration');
@@ -88,10 +113,9 @@ test('PWA 内で QR を読み取ってペアリングする', async ({ page, req
 });
 
 test('カメラが使えなければ行き止まりにせず貼り付けへ倒す', async ({ page }) => {
-  await page.addInitScript(() => {
-    navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('denied', 'NotAllowedError'); };
-  });
+  await installFakeCamera(page, 'denied');
   await page.goto('/');
+  await expectFakeCamera(page);
   await expect(page.locator('#pair-manual')).not.toHaveAttribute('open', '');
   await page.locator('#scan').click();
   await expect(page.locator('#scan-error')).toContainText('カメラ');
