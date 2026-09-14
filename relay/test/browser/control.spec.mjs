@@ -81,23 +81,38 @@ async function installFakeCamera(page, mode, image = null) {
         draw();
         return canvas.captureStream(15);
       };
+    getUserMedia.fakeCamera = true;
     const media = navigator.mediaDevices ?? {};
     Object.defineProperty(media, 'getUserMedia', { configurable: true, writable: true, value: getUserMedia });
-    if (navigator.mediaDevices !== media) Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: media });
+    if (navigator.mediaDevices?.getUserMedia?.fakeCamera !== true)
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: media });
     window.fakeCameraInstalled = true;
   }, [mode, image]);
 }
 
 /// 偽カメラが実際に効いているか（差し込めていても本物が残っていれば permission 待ちで固まり、
 /// 失敗がタイムアウトに化けて原因が読めない）。`denied` は拒否が返ることまで見る。
-async function expectFakeCamera(page, mode) {
-  expect(await page.evaluate(() => window.fakeCameraInstalled === true
-    && typeof navigator.mediaDevices?.getUserMedia === 'function')).toBe(true);
-  if (mode !== 'denied') return;
-  expect(await page.evaluate(async () => {
-    try { await navigator.mediaDevices.getUserMedia({ video: true }); return 'resolved'; }
-    catch (error) { return error.name; }
-  })).toBe('NotAllowedError');
+async function expectFakeCamera(page) {
+  const report = await page.evaluate(async () => {
+    const shape = {
+      installed: window.fakeCameraInstalled === true,
+      ownOnNavigator: !!Object.getOwnPropertyDescriptor(navigator, 'mediaDevices'),
+      ownGetUserMedia: !!Object.getOwnPropertyDescriptor(navigator.mediaDevices ?? {}, 'getUserMedia'),
+      stableObject: navigator.mediaDevices === navigator.mediaDevices,
+      marked: navigator.mediaDevices?.getUserMedia?.fakeCamera === true,
+    };
+    // 本物が残っていると permission 待ちで固まるので、待たずに hung として返す。
+    const called = await Promise.race([
+      navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+        for (const track of stream.getTracks()) track.stop();
+        return 'resolved';
+      }, error => error.name),
+      new Promise(resolve => setTimeout(() => resolve('hung'), 3000)),
+    ]);
+    return { ...shape, called };
+  });
+  expect(report.marked, `偽カメラが差し込めていない: ${JSON.stringify(report)}`).toBe(true);
+  expect(report.called, `偽カメラが呼ばれていない: ${JSON.stringify(report)}`).not.toBe('hung');
 }
 
 test('PWA 内で QR を読み取ってペアリングする', async ({ page, request, browserName }) => {
@@ -108,7 +123,7 @@ test('PWA 内で QR を読み取ってペアリングする', async ({ page, req
   const image = await QRCode.toDataURL(pairing.url, { width: 512, margin: 2 });
   await installFakeCamera(page, 'qr', image);
   await page.goto('/');
-  await expectFakeCamera(page, 'qr');
+  await expectFakeCamera(page);
   await page.locator('#scan').click();
   await expect(page.locator('#status')).toHaveText('接続済み', { timeout: 20000 });
   await expect(page.locator('#destination')).toContainText('PWA integration');
@@ -125,7 +140,7 @@ test('カメラが使えなければ行き止まりにせず貼り付けへ倒�
   page.on('console', message => { if (message.type() === 'error') problems.push(`console: ${message.text()}`); });
   await installFakeCamera(page, 'denied');
   await page.goto('/');
-  await expectFakeCamera(page, 'denied');
+  await expectFakeCamera(page);
   await expect(page.locator('#pair-manual')).not.toHaveAttribute('open', '');
   await page.locator('#scan').click();
   await expect(page.locator('#scan-error'), problems.join(' / ') || '(ブラウザ側にエラーなし)').toContainText('カメラ');
