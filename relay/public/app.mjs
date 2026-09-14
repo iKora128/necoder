@@ -364,11 +364,13 @@ async function startScan() {
     finally { scanning = false; }
   }, 250);
 }
-$('scan').onclick = () => startScan().catch(error => {
-  stopScan();
+$('scan').onclick = () => startScan().catch(() => {
   // 権限拒否・カメラ無しは行き止まりにしない（貼り付けの導線を開いて見せる）。
+  // **文言を先に出してから後始末する** — 後始末（トラック停止・dialog.close）が環境依存で
+  // 転んでも、利用者には理由が残る。逆順だと黙って何も起きないボタンになる。
   $('scan-error').textContent = t('scanUnavailable');
   $('pair-manual').open = true;
+  try { stopScan(); } catch { /* 後始末の失敗は見せない */ }
 });
 $('close-scan').onclick = () => stopScan();
 $('scan-dialog').addEventListener('close', stopScan);

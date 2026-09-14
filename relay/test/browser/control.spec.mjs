@@ -88,10 +88,16 @@ async function installFakeCamera(page, mode, image = null) {
   }, [mode, image]);
 }
 
-/// 偽カメラが実際に差し込まれたか（差し込めていなければ、以降の期待値は何も証明しない）。
-async function expectFakeCamera(page) {
+/// 偽カメラが実際に効いているか（差し込めていても本物が残っていれば permission 待ちで固まり、
+/// 失敗がタイムアウトに化けて原因が読めない）。`denied` は拒否が返ることまで見る。
+async function expectFakeCamera(page, mode) {
   expect(await page.evaluate(() => window.fakeCameraInstalled === true
     && typeof navigator.mediaDevices?.getUserMedia === 'function')).toBe(true);
+  if (mode !== 'denied') return;
+  expect(await page.evaluate(async () => {
+    try { await navigator.mediaDevices.getUserMedia({ video: true }); return 'resolved'; }
+    catch (error) { return error.name; }
+  })).toBe('NotAllowedError');
 }
 
 test('PWA 内で QR を読み取ってペアリングする', async ({ page, request, browserName }) => {
@@ -102,7 +108,7 @@ test('PWA 内で QR を読み取ってペアリングする', async ({ page, req
   const image = await QRCode.toDataURL(pairing.url, { width: 512, margin: 2 });
   await installFakeCamera(page, 'qr', image);
   await page.goto('/');
-  await expectFakeCamera(page);
+  await expectFakeCamera(page, 'qr');
   await page.locator('#scan').click();
   await expect(page.locator('#status')).toHaveText('接続済み', { timeout: 20000 });
   await expect(page.locator('#destination')).toContainText('PWA integration');
@@ -113,12 +119,16 @@ test('PWA 内で QR を読み取ってペアリングする', async ({ page, req
 });
 
 test('カメラが使えなければ行き止まりにせず貼り付けへ倒す', async ({ page }) => {
+  // 落ちた時に「何も起きなかった」で終わらせない（CI だけで落ちた 2026-09-14 の反省）。
+  const problems = [];
+  page.on('pageerror', error => problems.push(`pageerror: ${error.message}`));
+  page.on('console', message => { if (message.type() === 'error') problems.push(`console: ${message.text()}`); });
   await installFakeCamera(page, 'denied');
   await page.goto('/');
-  await expectFakeCamera(page);
+  await expectFakeCamera(page, 'denied');
   await expect(page.locator('#pair-manual')).not.toHaveAttribute('open', '');
   await page.locator('#scan').click();
-  await expect(page.locator('#scan-error')).toContainText('カメラ');
+  await expect(page.locator('#scan-error'), problems.join(' / ') || '(ブラウザ側にエラーなし)').toContainText('カメラ');
   await expect(page.locator('#pair-manual')).toHaveAttribute('open', '');
   await expect(page.locator('#pair-url')).toBeVisible();
 });
