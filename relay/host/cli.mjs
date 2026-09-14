@@ -11,6 +11,7 @@ import webpush from 'web-push';
 import { Bridge } from './bridge.mjs';
 import { ipc } from './ipc.mjs';
 import { stateDir, adminSocket, readState, writeState, secureDirectory } from './storage.mjs';
+import { hasLid } from './platform.mjs';
 import { random, validSecret } from '../public/crypto.mjs';
 
 const [command = 'help', ...args] = process.argv.slice(2);
@@ -46,6 +47,7 @@ async function serve() {
           if (!validSecret(auth) || !timingSafeEqual(Buffer.from(auth), Buffer.from(config.adminToken))) throw new Error('local_auth_required');
           let result;
           if (method === 'status') result = { pid: process.pid, online: !!bridge.snapshot, origin: config.origin,
+            keeps_awake: bridge.keepsAwake(), on_ac_power: bridge.onAcPower, sleeps_on_lid_close: hasLid(),
             devices: bridge.devices.filter(d => !d.revoked).map(d => ({ id: d.room, name: d.name, paired: d.confirmed, projects: d.tasks })) };
           else if (method === 'pair') { await bridge.poll(); result = await bridge.pair(params.name, params.tasks); }
           else if (method === 'revoke') result = await bridge.revoke(params.id);
@@ -88,10 +90,15 @@ async function ensureStarted() {
 try {
   if (command === 'serve') await serve();
   else if (command === 'init') {
-    if (await readState('config')) throw new Error('Already initialized; existing device keys preserved');
+    // アカウントも事前登録も無い。作るのは「どのリレーを使うか」と、この Mac 固有の鍵だけ。
     const origin = new URL(args[0] || 'https://control.necoder.com').origin;
-    await writeState('config', { origin, name: hostname(), adminToken: random(), provisionToken: process.env.NECODER_PROVISION_TOKEN, vapid: webpush.generateVAPIDKeys() });
-    console.log('Initialized. Run: npm run host -- pair');
+    const existing = await readState('config');
+    if (existing) {
+      if (existing.origin !== origin) throw new Error(`origin_conflict: 既存の設定は ${existing.origin} です`);
+      throw new Error('Already initialized; existing device keys preserved');
+    }
+    await writeState('config', { origin, name: hostname(), adminToken: random(), vapid: webpush.generateVAPIDKeys() });
+    console.log(`Initialized (${origin}). Run: ne remote pair`);
   } else if (command === 'start') console.log(await ensureStarted());
   else if (command === 'pair' || command === 'pair-json') {
     await ensureStarted();
@@ -103,6 +110,8 @@ try {
       console.log(await QRCode.toString(result.url, { type: 'terminal', small: true }));
       console.log(result.url);
       console.log('5分以内に読み取り、PWAで接続してください。共有対象:', result.tasks.join(', '));
+      if (hasLid()) console.log('注意: この Mac は蓋を閉じるとスリープします（power assertion では止まりません）。'
+        + '\n  外部ディスプレイ + 電源で clamshell にするか、蓋を開けたままにしてください。');
     }
   } else if (['status', 'stop', 'revoke'].includes(command)) {
     console.log(JSON.stringify(await admin(command, { id: args[0] }), null, 2));

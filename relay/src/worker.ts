@@ -1,21 +1,43 @@
 import { DurableObject } from 'cloudflare:workers';
 
-interface Env { ROOMS: DurableObjectNamespace<ControlRoom>; ASSETS: Fetcher; PROVISION_TOKEN: string; APP_ORIGIN: string; }
+/// IP あたりの部屋作成回数を絞る Workers 標準のレート制限 binding。
+interface RateLimiter { limit(options: { key: string }): Promise<{ success: boolean }> }
+interface Env {
+  ROOMS: DurableObjectNamespace<ControlRoom>; ASSETS: Fetcher; APP_ORIGIN: string;
+  ROOM_LIMITER: RateLimiter; POW_DIFFICULTY?: string;
+}
 interface Room { hostHash: string; phoneHash: string; created: number; expires: number; }
 interface Peer { role: 'host' | 'phone'; window: number; messages: number; bytes: number; }
 const MAX_FRAME = 2_800_000;
+// PoW の上限。ホストが現実的な時間で解けない難易度を設定事故で入れないための天井。
+const MAX_DIFFICULTY = 26;
 const valid = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
 const response = (status: number, error: string) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 async function hash(value: string) {
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
   return [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
 }
-async function equal(a: string, b: string) {
-  // 固定長ダイジェストの全バイトを比較する。生の資格情報は DO に保存しない。
-  const [one, two] = await Promise.all([hash(a), hash(b)]);
-  let difference = 0;
-  for (let i = 0; i < one.length; i++) difference |= one.charCodeAt(i) ^ two.charCodeAt(i);
-  return difference === 0;
+
+/// 要求する PoW の難易度（先頭ゼロ bit 数）。0 = 無効。
+function difficulty(env: Env) {
+  const value = Number(env.POW_DIFFICULTY ?? 0);
+  return Number.isInteger(value) && value > 0 ? Math.min(value, MAX_DIFFICULTY) : 0;
+}
+
+/// `SHA-256("necoder-room|<room>|<nonce>")` の先頭ゼロ bit が `bits` 以上か。
+///
+/// 部屋作成は一生に数回なので、ホスト側が 1〜2 秒回すのは体感ゼロ。攻撃側には**部屋あたり**
+/// 同じ費用がかかるので、IP を分散されてもコストが線形に効く（レート制限の穴を塞ぐ二枚目）。
+async function provenWork(room: string, nonce: string, bits: number) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(nonce)) return false;
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`necoder-room|${room}|${nonce}`)));
+  let remaining = bits;
+  for (const byte of bytes) {
+    if (remaining <= 0) return true;
+    if (remaining >= 8) { if (byte !== 0) return false; remaining -= 8; continue; }
+    return (byte >> (8 - remaining)) === 0;
+  }
+  return true;
 }
 
 export default {
@@ -24,12 +46,21 @@ export default {
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     const origin = request.headers.get('Origin');
     if (origin && origin !== env.APP_ORIGIN) return response(403, 'origin_rejected');
-    if (url.pathname === '/api/health') return Response.json({ version: 1 }, { headers: { 'Cache-Control': 'no-store' } });
+    // ホストは pair のたびにここを読み、必要な PoW を計算してから部屋を作る。
+    if (url.pathname === '/api/health')
+      return Response.json({ version: 1, difficulty: difficulty(env) }, { headers: { 'Cache-Control': 'no-store' } });
     const match = /^\/api\/rooms\/([A-Za-z0-9_-]{43})(\/ws)?$/.exec(url.pathname);
     if (!match) return response(404, 'not_found');
-    if (request.method === 'POST') {
-      if (!env.PROVISION_TOKEN || !await equal(request.headers.get('Authorization') ?? '', `Bearer ${env.PROVISION_TOKEN}`))
-        return response(401, 'provisioning_required');
+    // 部屋の作成だけがアカウント不要の開かれた入口＝ここに濫用対策を集める。資格情報は
+    // 部屋ごとに Mac がローカル生成するので、リレーが認証すべき「身元」は存在しない
+    // （DECISIONS 2026-07-25「QR がそのまま資格情報＝アカウント不要」）。
+    if (request.method === 'POST' && !url.pathname.endsWith('/ws')) {
+      const bits = difficulty(env);
+      if (bits > 0 && !await provenWork(match[1], request.headers.get('X-Necoder-Pow') ?? '', bits))
+        return response(400, 'proof_of_work_required');
+      const address = request.headers.get('CF-Connecting-IP');
+      if (address && !(await env.ROOM_LIMITER.limit({ key: address })).success)
+        return response(429, 'rate_limited');
     }
     return env.ROOMS.getByName(match[1]).fetch(request);
   },

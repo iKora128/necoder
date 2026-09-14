@@ -17,7 +17,20 @@ Mac に受信用ポートや SSH を公開しません。コード実行・セ�
 
 ## セットアップ
 
-Node.js 22 以上、更新版 necoder、Cloudflare Workers / Durable Objects を使用できるアカウントが必要です。
+使う側に必要なのは **Node.js 22 以上と更新版 necoder だけ**です。アカウント登録も Cloudflare も要りません。
+
+```sh
+ne remote init
+ne remote pair iPhone
+```
+
+資格情報（room id・host/phone token・E2E の長期鍵）は**すべて Mac がローカルで生成**します。
+リレーは token の SHA-256 ハッシュしか持たず、E2E の鍵は QR のフラグメント（`#`）にしか載りません。
+サインアップ・OAuth・ユーザーレコードは存在しません（DECISIONS 2026-07-25「QR がそのまま資格情報＝アカウント不要」）。
+
+### リレーを自分で運用する場合
+
+既定は `https://control.necoder.com`。self-host するなら `ne remote init https://<自分のorigin>` で差し替えます。
 
 ```sh
 cd relay
@@ -27,13 +40,15 @@ npm run check
 npm test
 npx wrangler login
 npm run deploy
-node scripts/provision.mjs
 ```
 
-`scripts/provision.mjs` は初回の秘密を生成し、Mac/Windows の保護ファイルと Worker secret に保存します。既存の鍵を保持して再実行できます。
-別の PC を追加する際は初回 PC の provisioning token を安全に渡して `init` してください。既存 relay の秘密を新しい値で上書きすると他の PC がペアリングできなくなるため、スクリプトはそれを拒否します。
-手動設定する場合は、暗号学的乱数の 32 byte 以上の provisioning token を `wrangler secret put PROVISION_TOKEN` で登録してください。
-同じ値を Mac だけに `NECODER_PROVISION_TOKEN` 環境変数で渡して初期化します。公開 JS、URL、Git に入れないでください。
+部屋作成（`POST /api/rooms/…`）はアカウント不要の開かれた入口なので、濫用対策は 3 枚で持ちます。
+① Workers のレート制限 binding で IP あたり 10 回/60s（`wrangler.jsonc` の `ROOM_LIMITER`）
+② 未ペア部屋は 300 秒で `alarm()` が `deleteAll()`（量産しても残らない）
+③ 足りなくなったら `POW_DIFFICULTY` を 20 前後へ上げる（既定 0＝無効）。
+ホストは pair のたびに `/api/health` の `difficulty` を読んで PoW を計算するので、**ホストを配り直さずに**効きます。
+ペアリングは一生に数回なので 1〜2 秒の CPU は体感に出ません。
+運用側は Cloudflare Notifications で Workers / Durable Objects の使用量に請求アラートを設定してください。
 
 ```sh
 ne remote init https://control.necoder.com
@@ -50,8 +65,10 @@ ne remote stop
 `ne remote pair iPhone <task-id> ...` は指定プロジェクトだけを共有します。省略すると、その時点で開いているプロジェクトだけを共有します。
 後から開いた別プロジェクトは自動共有されません。端末追加は最大 8 台、QR は 5 分で期限切れです。
 
-iPhone はまず固定 HTTPS URL を Safari で開き「ホーム画面に追加」。追加した PWA 内に Mac の新しいペアリング URL を貼り付けて接続してください。
-QR を Safari で読み取った場合、ホーム画面の PWA と保存領域が別なら再ペアリングが必要です。
+iPhone はまず固定 HTTPS URL を Safari で開き「ホーム画面に追加」。**QR はホーム画面アプリの中の「QRを読み取る」で読み取ります**。
+**iOS のカメラアプリで読むと Safari が開き、ホーム画面 PWA とは保存領域が別なのでペアリングが引き継がれません**（iOS に PWA 向けの universal link は無い）。だからアプリ内で読む。
+QR の中身はこの origin のペアリング URL 以外を受け付けません。カメラを拒否した／使えない端末には URL 貼り付けの導線が開きます。
+デコーダ（jsQR・Apache-2.0）は `public/jsqr.mjs` としてビルド時に生成し、**スキャンを開いた時だけ動的 import** します（起動時には読みません）。
 通知はホーム画面に追加した対応 iOS とユーザーの明示許可が必要です。複数 Mac の通知を同じ PWA で使う場合は各 Mac の VAPID 鍵を揃えてください。
 
 ## 操作と切断
@@ -70,7 +87,16 @@ Git diff は HEAD と追跡ファイルの比較で、未追跡ファイルは�
 
 PWA を閉じても Mac の処理は PWA から独立しています。復帰時は新しい暗号セッションを作り、Mac から最新状態を再取得します。
 Mac のスリープ・電源断・回線断の間は操作できません。Mac 自体の回線断は agent の API 通信も止める可能性があります。
-スリープを避ける場合は電源に接続し、必要な時間だけ macOS の設定や `caffeinate -i` を利用してください。
+**電源に挿さっていて、ペアリング済みの端末が 1 台でもある間、ホストが `caffeinate -i -s` で idle sleep を止めます**（mac のみ）。
+外から繋ぐのが目的なので「繋がっている間だけ」では意味が無い — 寝てしまうと外から起こす手段がないため、ペアリングが生きている間ずっと掴みます。
+**電池駆動の間は掴みません**（ノートを鞄の中で起こし続けて電池を溶かさないため）。電源を抜き差しすると 30 秒以内に追従します。
+ディスプレイのスリープは止めません（画面は普通に消えます）。root は要求しません。
+現在の状態は `ne remote status` の `keeps_awake` / `on_ac_power` / `sleeps_on_lid_close` で確認できます。
+`ne remote stop` か全端末の revoke で外れ、`config.json` に `"keepAwake": false` を書けば掴みません。
+**ノート PC の蓋を閉じるスリープは止まりません**（power assertion の対象外）。蓋のある機種は `ne remote pair` と `ne remote status`（`sleeps_on_lid_close`）で申告します。
+蓋を閉じたまま使うなら **AC 電源 + 外部ディスプレイの clamshell**（Apple の想定する唯一の常道）か、`sudo pmset -a disablesleep 1`。
+後者は **root・システム全体・再起動を跨いで永続**で、鞄の中で発熱し電池も溶かすため necoder からは実行しません（外すのは `sudo pmset -a disablesleep 0`）。
+常時繋がる必要があるなら、ホストはノートではなく据え置き機に置いてください。Windows / Linux の keep-awake は未対応（`SetThreadExecutionState` / `systemd-inhibit` が必要）。
 回線復旧後にホストが再接続します。GUI 再起動は別世代として扱い、古い承認は拒否します。
 命令の期限は 25 秒。オフライン中の命令はキューに入れず、勝手に再送しません。
 受付記録を IPC より前に永続化し、同じ request ID の二重実行を防ぎます。クラッシュ等で結果不明の場合は会話を確認してから再操作してください。

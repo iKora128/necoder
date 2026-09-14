@@ -1,5 +1,5 @@
-const CACHE = 'necoder-control-v1';
-const ASSETS = ['/', '/index.html', '/app.mjs', '/crypto.mjs', '/storage.mjs', '/i18n.mjs', '/style.css', '/icon.svg', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
+const CACHE = 'necoder-control-v2';
+const ASSETS = ['/', '/index.html', '/app.mjs', '/crypto.mjs', '/storage.mjs', '/i18n.mjs', '/jsqr.mjs', '/style.css', '/icon.svg', '/icon-192.png', '/icon-512.png', '/manifest.webmanifest'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS))));
 self.addEventListener('activate', event => event.waitUntil((async () => {
   for (const key of await caches.keys()) if (key.startsWith('necoder-control-') && key !== CACHE) await caches.delete(key);

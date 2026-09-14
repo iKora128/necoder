@@ -55,7 +55,6 @@ fn parse_pairing(bytes: &[u8]) -> anyhow::Result<Pairing> {
 const KNOWN_FAILURES: &[&str] = &[
     "necoder_not_running_or_update_required",
     "open_a_project_first",
-    "provision_token_missing",
     "run_init_first",
     "device_limit_revoke_unused_devices",
     "host_startup_failed",
@@ -63,7 +62,10 @@ const KNOWN_FAILURES: &[&str] = &[
     "node_missing",
     "host_not_bundled",
     "host_not_built",
+    // 429 は "room_create_" より前に置く（known_failure は先に一致した要素を返す）。
+    "room_create_429",
     "room_create_",
+    "proof_of_work_too_hard",
     "ipc_timeout_outcome_unknown",
 ];
 
@@ -80,13 +82,15 @@ fn failure_message(code: &str) -> String {
     let key = match code {
         "necoder_not_running_or_update_required" => "settings.remote_err_no_gui",
         "open_a_project_first" => "settings.remote_err_no_project",
-        "provision_token_missing" | "run_init_first" => "settings.remote_err_not_initialized",
+        "run_init_first" => "settings.remote_err_not_initialized",
         "device_limit_revoke_unused_devices" => "settings.remote_err_device_limit",
         "node_missing" => "settings.remote_err_node",
         "host_not_bundled" | "host_not_built" => "settings.remote_err_host_missing",
         "host_startup_failed" | "local_auth_required" => "settings.remote_err_host_start",
         "pairing_timeout" | "ipc_timeout_outcome_unknown" => "settings.remote_err_timeout",
         "invalid_pairing" | "invalid_qr" | "expired_pairing" => "settings.remote_err_bad_payload",
+        "room_create_429" => "settings.remote_err_relay_busy",
+        "proof_of_work_too_hard" => "settings.remote_err_relay_busy",
         code if code.starts_with("room_create_") => "settings.remote_err_relay",
         _ => "settings.remote_error",
     };
@@ -322,6 +326,18 @@ mod tests {
         assert_ne!(no_gui, generic);
         assert_ne!(failure_message("open_a_project_first"), generic);
         assert_ne!(failure_message("room_create_503"), generic);
+        // 混雑（429）は「ネットに繋がらない」と原因が違うので別の一文にする。
+        assert_ne!(
+            failure_message("room_create_429"),
+            failure_message("room_create_503")
+        );
+        assert_eq!(
+            failure_message("proof_of_work_too_hard"),
+            failure_message("room_create_429")
+        );
+        // stderr から拾う段でも 429 が総称の "room_create_" に食われない。
+        assert_eq!(known_failure("room_create_429"), Some("room_create_429"));
+        assert_eq!(known_failure("room_create_503"), Some("room_create_"));
         assert_eq!(failure_message("なにか未知の失敗"), generic);
         // 翻訳漏れならキー文字列がそのまま返る（i18n::translate の仕様）。
         assert!(

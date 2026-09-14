@@ -6,4 +6,5 @@ playwright-report/
 dist/
 public/icon-192.png
 public/icon-512.png
+public/jsqr.mjs
 public/source.tar.gz

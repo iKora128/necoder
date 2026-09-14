@@ -470,6 +470,7 @@ settings:
   remote_err_no_gui: Could not reach necoder itself. Restart necoder and try again.
   remote_err_no_project: No project to share. Open a project first.
   remote_err_not_initialized: Phone connection is not initialized yet. Run `ne remote init` in a terminal.
+  remote_err_relay_busy: The relay is busy. Wait about a minute, then generate the QR again.
   remote_err_device_limit: The device limit (8) is reached. Revoke a device you no longer use, then try again.
   remote_err_node: Node.js 22+ was not found. Install it, then try again.
   remote_err_host_missing: The Remote host is not bundled. Reinstall necoder.

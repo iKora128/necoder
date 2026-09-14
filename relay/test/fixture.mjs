@@ -7,7 +7,7 @@ const detail = { id: 'thread-a', turn_id: 'turn-a', entries: [{ kind: 'agent', t
 const snapshot = { instance_id: 'fixture-a', projects: [{ id: 'project-a', name: 'necoder-test', branch: 'remote-pwa', threads: [
   { id: 'thread-a', name: 'PWA integration', agent: 'Codex', turn_id: 'turn-a', running: false, tokens_used: 1234 },
 ] }, { id: 'private-project', name: '共有しないプロジェクト', threads: [] }] };
-const bridge = new Bridge({ origin: 'http://localhost:8791', provisionToken: 'local-test-only', name: 'Test Mac', vapid: webpush.generateVAPIDKeys() }, [], {
+const bridge = new Bridge({ origin: 'http://localhost:8791', name: 'Test Mac', vapid: webpush.generateVAPIDKeys() }, [], {
   persist: async () => {}, persistReceipts: async () => {},
   ipc: async (method, params) => {
     if (!online) throw new Error('gui_offline');

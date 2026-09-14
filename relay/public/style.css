@@ -24,3 +24,6 @@ dialog { background: var(--bg); color: var(--fg); border: 1px solid var(--border
 footer { color: var(--muted); font-size: 11px; border-top: 1px solid var(--border); padding: 20px 0; display: flex; justify-content: space-between; gap: 16px; } .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (min-width: 700px) { main { padding-top: 36px; } .welcome { margin: 20px auto; } }
 @media (prefers-reduced-motion: no-preference) { button { transition: background .12s ease; } }
+
+#scan-video { width: 100%; max-height: 60dvh; border-radius: 10px; background: #000; object-fit: cover; }
+#pair-manual { margin-top: 14px; } #pair-manual summary { font-size: 12px; color: var(--muted); cursor: pointer; }

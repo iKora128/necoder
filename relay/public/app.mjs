@@ -311,6 +311,66 @@ $('pair-form').onsubmit = event => {
     $('pair-url').value = ''; pairing(url.hash).catch(showError);
   } catch (error) { showError(error); }
 };
+// ── QR スキャン ─────────────────────────────────────────────────────────────
+// iOS のカメラアプリで QR を読むと **Safari** が開き、ホーム画面 PWA とは保存領域が別なので
+// ペアリングが引き継がれない（iOS に PWA 向けの universal link は無い）。だから**アプリの中で**
+// 読む。QR の中身はこの origin のペアリング URL 以外は一切受け付けない。
+let scanStream = null, scanTimer = null, scanning = false;
+function stopScan() {
+  clearInterval(scanTimer); scanTimer = null; scanning = false;
+  for (const track of scanStream?.getTracks() ?? []) track.stop();
+  scanStream = null;
+  $('scan-video').srcObject = null;
+  if ($('scan-dialog').open) $('scan-dialog').close();
+}
+/// 読み取れた文字列がこの origin のペアリング URL なら fragment を返す（それ以外は null）。
+function pairingFragment(text) {
+  try {
+    const url = new URL(text);
+    return url.origin === location.origin && url.hash ? url.hash : null;
+  } catch { return null; }
+}
+async function startScan() {
+  $('scan-error').textContent = '';
+  scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+  const video = $('scan-video');
+  video.srcObject = scanStream;
+  await video.play();
+  $('scan-dialog').showModal();
+  // Safari は BarcodeDetector を持たないので、その時だけデコーダを取りに行く（起動時には読まない）。
+  const detector = 'BarcodeDetector' in window ? new BarcodeDetector({ formats: ['qr_code'] }) : null;
+  const decode = detector ? null : (await import('/jsqr.mjs')).default;
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  scanTimer = setInterval(async () => {
+    if (scanning || video.readyState < 2 || !video.videoWidth) return;
+    scanning = true;
+    try {
+      let text = null;
+      if (detector) text = (await detector.detect(video))[0]?.rawValue ?? null;
+      else {
+        canvas.width = Math.min(640, video.videoWidth);
+        canvas.height = Math.round(canvas.width * video.videoHeight / video.videoWidth);
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        text = decode(context.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)?.data ?? null;
+      }
+      const fragment = text && pairingFragment(text);
+      if (!fragment) return;
+      stopScan();
+      await pairing(fragment);
+    } catch (error) { stopScan(); showError(error); }
+    finally { scanning = false; }
+  }, 250);
+}
+$('scan').onclick = () => startScan().catch(error => {
+  stopScan();
+  // 権限拒否・カメラ無しは行き止まりにしない（貼り付けの導線を開いて見せる）。
+  $('scan-error').textContent = t('scanUnavailable');
+  $('pair-manual').open = true;
+});
+$('close-scan').onclick = () => stopScan();
+$('scan-dialog').addEventListener('close', stopScan);
+
 $('hosts').onchange = () => { device = known.find(d => d.room === $('hosts').value); connect().catch(showError); };
 $('projects').onchange = () => { selectedTask = $('projects').value; selectedThread = ''; detail = null; renderProjects(); };
 $('reconnect').onclick = () => connect().catch(showError);

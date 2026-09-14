@@ -5,7 +5,7 @@ import { Bridge } from '../host/bridge.mjs';
 import { readState } from '../host/storage.mjs';
 import { initiate, finish, random } from '../public/crypto.mjs';
 const config = await readState('config');
-assert.ok(config?.provisionToken, 'provision first');
+assert.ok(config?.origin, 'run init first');
 const bridge = new Bridge(config, [], { persist: async () => {}, persistReceipts: async () => {},
   ipc: async method => { assert.equal(method, 'remote_snapshot'); return { instance_id: 'smoke-only', projects: [{ id: 'smoke', name: 'Smoke test', threads: [] }] }; },
 });

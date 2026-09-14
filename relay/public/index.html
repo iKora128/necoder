@@ -17,8 +17,12 @@
   <main>
     <section id="welcome" class="welcome">
       <p class="eyebrow" data-t="eyebrow"></p><h1 data-t="welcome"></h1><p data-t="intro"></p>
-      <ol><li data-t="install"></li><li data-t="pairHelp"></li><li data-t="pairHint"></li></ol>
-      <form id="pair-form"><label for="pair-url" data-t="pairUrl"></label><input id="pair-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://control.necoder.com/#…"><button type="submit" data-t="connect"></button></form>
+      <ol><li data-t="install"></li><li data-t="pairHelp"></li></ol>
+      <button id="scan" class="primary" data-t="scan"></button>
+      <p id="scan-error" class="hint" role="status"></p>
+      <details id="pair-manual"><summary data-t="pairManual"></summary>
+        <form id="pair-form"><label for="pair-url" data-t="pairUrl"></label><input id="pair-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://control.necoder.com/#…"><button type="submit" data-t="connect"></button></form>
+      </details>
       <p class="hint" data-t="privacy"></p>
     </section>
     <section id="control" hidden>
@@ -37,6 +41,8 @@
       </section>
     </section>
     <div id="notice" role="status" hidden></div>
+    <dialog id="scan-dialog"><div class="dialog-head"><h2 data-t="scan"></h2><button id="close-scan" data-t="close"></button></div>
+      <video id="scan-video" playsinline muted autoplay></video><p data-t="scanHint"></p></dialog>
     <dialog id="diff-dialog"><div class="dialog-head"><h2 data-t="diff"></h2><button id="close-diff" data-t="close"></button></div><p data-t="diffHint"></p><pre id="diff-text"></pre></dialog>
   </main>
   <footer><span data-t="footer"></span><a href="/source.tar.gz" data-t="source"></a></footer>

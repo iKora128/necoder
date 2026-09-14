@@ -471,6 +471,7 @@ settings:
   remote_err_no_gui: necoder 本体と通信できませんでした。necoder を再起動してからもう一度お試しください。
   remote_err_no_project: 共有できるプロジェクトがありません。先にプロジェクトを開いてください。
   remote_err_not_initialized: スマホ連携がまだ初期化されていません。ターミナルで `ne remote init` を実行してください。
+  remote_err_relay_busy: 中継サーバが混み合っています。1分ほど置いてからもう一度発行してください。
   remote_err_device_limit: 登録済みの端末が上限（8台）です。使っていない端末を失効させてから発行してください。
   remote_err_node: Node.js 22以降が見つかりません。インストールしてから発行してください。
   remote_err_host_missing: Remoteホストが同梱されていません。necoder を入れ直してください。

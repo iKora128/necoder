@@ -9,6 +9,10 @@ await mkdir(path.join(root, 'dist'), { recursive: true });
 await build({ absWorkingDir: root, entryPoints: ['host/cli.mjs'], outfile: 'dist/host.mjs',
   bundle: true, platform: 'node', target: 'node22', format: 'esm',
   banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" } });
+// QR デコーダ（Apache-2.0）はブラウザへ配る静的資産として吐く。スキャンを開いた時だけ
+// 動的 import されるので、通常の起動では読み込まれない。
+await build({ absWorkingDir: root, stdin: { contents: "export { default } from 'jsqr';", resolveDir: root, loader: 'js' },
+  outfile: 'public/jsqr.mjs', bundle: true, platform: 'browser', format: 'esm', target: 'safari16', minify: true });
 for (const size of [192, 512]) await sharp(path.join(root, 'public/icon.svg')).resize(size, size).png().toFile(path.join(root, `public/icon-${size}.png`));
 const lock = JSON.parse(await readFile(path.join(root, 'package-lock.json'), 'utf8'));
 const packages = Object.entries(lock.packages).filter(([name, metadata]) => name && !metadata.dev).map(([name]) => path.join(root, name));
