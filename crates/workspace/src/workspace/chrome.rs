@@ -80,6 +80,14 @@ impl Workspace {
                 }
                 Err(error) => eprintln!("テーマを読めない: {error:#}"),
             },
+            settings::SettingsViewEvent::PreviewSound { key, value } => {
+                // 押した音をその場で鳴らす。`"off"` も同じ経路（sound::play が黙る）。
+                let cue = match *key {
+                    "sound_waiting" => agent_panel::sound::Cue::Waiting,
+                    _ => agent_panel::sound::Cue::Done,
+                };
+                agent_panel::sound::play(cue, value);
+            }
             settings::SettingsViewEvent::OpenSettingsJson => {
                 // subscription は Window を持たないので effect cycle 末尾へ送る（pending shell effects）。
                 self.chrome.pending_open_settings_json = true;

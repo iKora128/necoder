@@ -442,6 +442,8 @@ settings:
   pref_sound_done: Completion sound
   pref_sound_waiting: Waiting-for-you sound
   sound_nya: Meow
+  sound_nyaan: Long meow
+  sound_mew: Chirp
   sound_system: System
   sound_off: Off
   pref_reduce_motion: Reduce motion

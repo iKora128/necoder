@@ -159,12 +159,12 @@ pub struct Settings {
     /// ピルは最初の送信まで空のまま（Zed は常に先張りする側）。off の利点は idle メモリ:
     /// 見ているタブごとにエージェントのプロセスが 1 本立たなくなる。
     pub agent_prewarm: bool,
-    /// ターン完了の通知音。`"nya"`（同梱・既定）/ `"system"`（OS の音）/ `"off"` /
-    /// 任意のファイルパス（`~/` 可）。裏の窓で走らせた作業の完了に気づくための音
+    /// ターン完了の通知音。同梱の猫の声（[`SOUND_VOICES`]・既定 `"nyaan"`）/ `"system"`（OS の音）/
+    /// `"off"` / 任意のファイルパス（`~/` 可）。裏の窓で走らせた作業の完了に気づくための音
     /// （`docs/BACKGROUND.md` の原点痛点）。**見ている画面では鳴らさない**。
     pub sound_done: String,
     /// 入力待ち（承認・質問で止まった）の通知音。値の取り方は [`Settings::sound_done`] と同じ。
-    /// 完了とは違う音を当てて、耳だけで「終わった」と「呼ばれている」を区別する。
+    /// 完了とは違う音（別の声でもいい）を当てて、耳だけで「終わった」と「呼ばれている」を区別する。
     pub sound_waiting: String,
     /// 装飾的な動きを静止するアクセシビリティ設定。GPUI の `reduce_motion` へ接続し、
     /// スピナー・fade・マスコットなどの継続アニメーションを静止画として描く。
@@ -240,8 +240,8 @@ impl Default for Settings {
             submit_on_enter: false,
             agent_auto_name: true,
             agent_prewarm: true,
-            sound_done: "nya".to_string(),
-            sound_waiting: "nya".to_string(),
+            sound_done: "nyaan".to_string(),
+            sound_waiting: "nyaan".to_string(),
             reduce_motion: false,
             tier2_summaries: true,
             captain_agent: None,
@@ -262,6 +262,11 @@ impl Default for Settings {
     }
 }
 
+/// 同梱している猫の声（`sound_done` / `sound_waiting` に書ける値・設定画面の並び順もこれ）。
+/// 実体は `assets/sounds/<声>-<場面>.wav`（`scripts/gen-chime.py` の合成）で、鳴らすのは
+/// `agent_panel::sound`。ここに置くのは「設定が受け取れる値」の正が settings 側だから。
+pub const SOUND_VOICES: [&str; 3] = ["nyaan", "nya", "mew"];
+
 /// 組み込みの既定設定（最下層。ユーザーが見られる正の既定値）。
 pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "theme": "necoder-dark",
@@ -271,8 +276,8 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "submit_on_enter": false,
   "agent_auto_name": true,
   "agent_prewarm": true,
-  "sound_done": "nya",
-  "sound_waiting": "nya",
+  "sound_done": "nyaan",
+  "sound_waiting": "nyaan",
   "reduce_motion": false,
   "tier2_summaries": true,
   "agent_tabs_view": "bar",

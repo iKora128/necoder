@@ -215,6 +215,12 @@ pub enum SettingsViewEvent {
     SelectTheme(theme_core::ThemeSource),
     /// user settings.json をエディタタブで開く（Window が要るので shell へ上げる）。
     OpenSettingsJson,
+    /// 通知音の試聴（選んだ場でその音を鳴らす）。再生は agent_panel::sound なので shell が担う。
+    /// `key` は `"sound_done"` / `"sound_waiting"` ＝場面、`value` は選ばれた設定値。
+    PreviewSound {
+        key: &'static str,
+        value: String,
+    },
 }
 
 /// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
@@ -833,9 +839,24 @@ impl SettingsView {
         current: &str,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.segmented_row_with(key, label, options, current, false, cx)
+    }
+
+    /// セグメント行の本体。`preview` を立てると、押したときに保存に加えて
+    /// [`SettingsViewEvent::PreviewSound`] を上げる（通知音は聴かないと選べない）。
+    fn segmented_row_with(
+        &self,
+        key: &'static str,
+        label: String,
+        options: &[(&'static str, String)],
+        current: &str,
+        preview: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = self.theme.clone();
         let accent = self.accent;
-        let mut segments = div().flex().items_center().gap(px(4.));
+        // 通知音のように選択肢が増える行があるので折り返す（はみ出して押せなくなるのを防ぐ）。
+        let mut segments = div().flex().flex_wrap().justify_end().items_center().gap(px(4.));
         for (idx, (value, display)) in options.iter().enumerate() {
             let selected = *value == current;
             let value = *value;
@@ -859,7 +880,13 @@ impl SettingsView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, _, _window, cx| {
-                            view.set_pref_string(key, value, cx)
+                            view.set_pref_string(key, value, cx);
+                            if preview {
+                                cx.emit(SettingsViewEvent::PreviewSound {
+                                    key,
+                                    value: value.to_string(),
+                                });
+                            }
                         }),
                     ),
             );
@@ -1566,26 +1593,20 @@ impl SettingsView {
                 true,
                 cx,
             ))
-            .child(self.segmented_row(
+            .child(self.segmented_row_with(
                 "sound_done",
                 i18n::t!("settings.pref_sound_done"),
-                &[
-                    ("nya", i18n::t!("settings.sound_nya")),
-                    ("system", i18n::t!("settings.sound_system")),
-                    ("off", i18n::t!("settings.sound_off")),
-                ],
+                &sound_options(),
                 &settings.sound_done,
+                true,
                 cx,
             ))
-            .child(self.segmented_row(
+            .child(self.segmented_row_with(
                 "sound_waiting",
                 i18n::t!("settings.pref_sound_waiting"),
-                &[
-                    ("nya", i18n::t!("settings.sound_nya")),
-                    ("system", i18n::t!("settings.sound_system")),
-                    ("off", i18n::t!("settings.sound_off")),
-                ],
+                &sound_options(),
                 &settings.sound_waiting,
+                true,
                 cx,
             ))
             .child(self.segmented_row(
@@ -1609,6 +1630,27 @@ impl SettingsView {
                 cx,
             ))
     }
+}
+
+/// 通知音のセグメント（同梱の猫の声 → システム音 → オフ）。
+/// 完了 / 入力待ちの 2 行で同じ並びを使う＝場面ごとに別の声を当てられる。
+/// ラベルの無い声は id をそのまま出す（声を増やしたとき、文言待ちで選べなくならないように）。
+fn sound_options() -> Vec<(&'static str, String)> {
+    let mut options: Vec<(&'static str, String)> = settings_core::SOUND_VOICES
+        .iter()
+        .map(|voice| {
+            let label = match *voice {
+                "nya" => i18n::t!("settings.sound_nya"),
+                "nyaan" => i18n::t!("settings.sound_nyaan"),
+                "mew" => i18n::t!("settings.sound_mew"),
+                other => other.to_string(),
+            };
+            (*voice, label)
+        })
+        .collect();
+    options.push(("system", i18n::t!("settings.sound_system")));
+    options.push(("off", i18n::t!("settings.sound_off")));
+    options
 }
 
 impl EventEmitter<SettingsViewEvent> for SettingsView {}

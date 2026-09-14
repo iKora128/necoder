@@ -442,7 +442,9 @@ settings:
   pref_agent_prewarm_sub: 送信を待たずに接続し、モデル一覧をすぐ選べるようにします
   pref_sound_done: 完了音
   pref_sound_waiting: 入力待ちの音
-  sound_nya: にゃー
+  sound_nya: にゃっ
+  sound_nyaan: にゃー
+  sound_mew: みゃっ
   sound_system: システム音
   sound_off: オフ
   pref_reduce_motion: 動きを減らす
