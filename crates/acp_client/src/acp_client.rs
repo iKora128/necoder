@@ -1364,6 +1364,7 @@ pub async fn run_session_on(
 ) -> Result<()> {
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
+        .envs(host::task_environment(host.as_ref(), &command.cwd)?)
         .envs(command.env.clone());
     // MCP の stdio サーバはエージェントと同じホストで起動される＝リモートでは接続元のコマンドを
     // 渡しても意味がない。判定はここで取る（下の接続クロージャは `move` で `host` を持ち込まない）。

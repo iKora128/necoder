@@ -402,6 +402,9 @@ impl Workspace {
         self.push_news(news_kind, news_color, news_title, news_text);
         // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
         self.schedule_control_summary(cx);
+        if phase == TaskPhase::Integrated {
+            self.wake_captain(session_index, "integrated", record.title.clone().into(), digest.map(|text| text.to_string().into()), cx);
+        }
         cx.notify();
         let Some(storage) = self.persistence.storage.clone() else {
             return;
@@ -692,7 +695,6 @@ impl Workspace {
             .unwrap_or_else(|| project_color(0));
         let settings_view = cx.new(|cx| settings::SettingsView::new(theme.clone(), accent, cx));
         PanelRegistry::bind_settings(&settings_view, cx);
-        let fleet_mascot = cx.new(|_cx| agent_panel::MascotView::new(34.0));
         let mut workspace = Workspace {
             project_sessions: ProjectSessions {
                 projects,
@@ -713,11 +715,17 @@ impl Workspace {
                 show_bottom: false,
                 // 編隊で起動したら左カラムの既定は herd（編隊の主役は Task 一覧）。
                 show_herd: std::env::var_os("NECODER_HERD").is_some()
-                    || std::env::var_os("NECODER_FLEET").is_some()
-                    || std::env::var_os("NECODER_CONTROL").is_some(),
-                fleet_mode: std::env::var_os("NECODER_FLEET").is_some()
-                    || std::env::var_os("NECODER_CONTROL").is_some(),
+                    || std::env::var_os("NECODER_FLEET").is_some(),
+                fleet_mode: std::env::var_os("NECODER_FLEET").is_some(),
                 fleet_cells: Vec::new(),
+                new_task: None,
+                captain_pending: HashMap::new(),
+                captain_space: None,
+                captain_tab: 0,
+                stage_columns: 1,
+                stage_width: 1200.,
+                stage_pinned: Vec::new(),
+                stage_tabs: HashMap::new(),
                 fleet_repository: None,
                 fleet_grids: HashMap::new(),
                 fleet_cell_menu: None,
@@ -728,22 +736,14 @@ impl Workspace {
                 resizing_bottom: false,
                 resize_start_y: 0.0,
                 resize_start_height: 0.0,
-                // 管制タブ（P3）。既定は当面 Graph（計画 §P3・ドッグフーディング後に再判断）。
-                fleet_center_view: if std::env::var_os("NECODER_CONTROL").is_some() {
-                    FleetCenterView::Control
-                } else {
-                    FleetCenterView::Graph
-                },
+                fleet_center_view: FleetCenterView::Graph,
                 graph_view: match std::env::var("NECODER_GRAPH").as_deref() {
                     Ok("hub") => GraphView::Hub,
                     Ok("tree") => GraphView::Tree,
                     Ok("card") => GraphView::Card,
                     _ => GraphView::Fan,
                 },
-                graph_collapsed: false,
-                fleet_maximized: std::env::var("NECODER_FLEET_MAX")
-                    .ok()
-                    .and_then(|value| value.parse().ok()),
+                graph_collapsed: true,
                 fleet_clock: false,
                 rollup_index: 0,
                 rollup_ticker: false,
@@ -804,7 +804,6 @@ impl Workspace {
                 status: None,
                 manual: ManualUpdateCheck::Idle,
             },
-            fleet_mascot,
             window_active: true,
             visual_tick: 0,
             visual_ticker: false,

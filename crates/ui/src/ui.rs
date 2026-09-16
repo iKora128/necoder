@@ -4,6 +4,9 @@
 //! に載せる。Picker は項目 [`PickerItem`] のリストを持ち、確定/中止を [`PickerEvent`] で通知する
 //! （ホスト側が id を解釈する）。色は UI-SPEC §1.3 の許可位置のみ（選択面 = accent-dim）。
 
+/// 本文中のパス・URL 検出（`agent_panel` の transcript と `terminal_view` が共有する）。
+pub mod links;
+
 use gpui::{
     div, ease_out_quint, hsla, prelude::*, px, Animation, AnimationExt, AnyView, App, BoxShadow,
     Context, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, MouseButton,

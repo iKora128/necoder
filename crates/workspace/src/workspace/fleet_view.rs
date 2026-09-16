@@ -103,7 +103,7 @@ fn dot_overlay(xf: f32, yf: f32, diameter: f32, body_h: f32) -> gpui::Div {
 }
 
 /// セルが載っている TaskSpace。全 surface が `space` を持つので match は 1 か所に畳む。
-fn pane_space(pane: &FleetPane) -> &SpaceId {
+pub(super) fn pane_space(pane: &FleetPane) -> &SpaceId {
     match pane {
         FleetPane::Agent { space, .. }
         | FleetPane::Shell { space, .. }
@@ -186,7 +186,6 @@ impl Workspace {
             let cells = std::mem::take(&mut self.chrome.fleet_cells);
             self.chrome.fleet_grids.insert(previous, cells);
         }
-        self.chrome.fleet_maximized = None;
         self.chrome.fleet_repository = Some(repository.clone());
         if let Some(stashed) = self.chrome.fleet_grids.remove(&repository) {
             self.chrome.fleet_cells = stashed;
@@ -214,14 +213,8 @@ impl Workspace {
     }
 
     fn add_fleet_cell(&mut self, pane: FleetPane, cx: &mut Context<Self>) {
-        if let Some(index) = self
-            .chrome
-            .fleet_cells
-            .iter()
-            .position(|current| current == &pane)
-        {
-            self.chrome.fleet_maximized = Some(index);
-        } else {
+        self.chrome.stage_tabs.insert(pane_space(&pane).clone(), pane.clone());
+        if !self.chrome.fleet_cells.contains(&pane) {
             self.chrome.fleet_cells.push(pane);
         }
         cx.notify();
@@ -240,7 +233,6 @@ impl Workspace {
             .update(cx, |dock, cx| {
                 dock.start_session(id, cx);
             });
-        self.chrome.fleet_maximized = None;
         self.add_fleet_cell(FleetPane::Shell { space, id }, cx);
     }
 
@@ -440,23 +432,7 @@ impl Workspace {
     }
 
     fn selected_task_space(&self) -> Option<SpaceId> {
-        self.chrome
-            .fleet_maximized
-            .and_then(|index| self.chrome.fleet_cells.get(index))
-            .map(pane_space)
-            .cloned()
-            .or_else(|| {
-                self.project_sessions
-                    .projects
-                    .get(self.project_sessions.active)
-                    .map(|slot| slot.task_space.id.clone())
-            })
-            .or_else(|| {
-                self.chrome.fleet_cells.iter().find_map(|pane| match pane {
-                    FleetPane::Task { space } => Some(space.clone()),
-                    _ => None,
-                })
-            })
+        self.active_slot().map(|slot| slot.task_space.id.clone())
     }
 
     /// 選択した作業場所へ独立 ACP を追加する。既存の会話・composer を共有しない。
@@ -479,13 +455,10 @@ impl Workspace {
             .push(panel.clone());
         self.project_sessions.sessions[index].agent_panel = panel.clone();
         self.update_agent_destination_for(index, cx);
-        self.chrome.fleet_maximized = None;
         self.add_fleet_cell(FleetPane::Agent { space, panel }, cx);
     }
 
-    /// `+ Task`: IntegrationSpace の HEAD から `task/<n>` branch + linked worktree を作り、
-    /// ProjectSession/AgentPanel を 1 組起動する。Fleet の通常作業は必ずこの隔離導線を通る。
-    pub(crate) fn add_worktree_agent(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn create_prompted_task(&mut self, prompt: String, cx: &mut Context<Self>) {
         let active_repository = self
             .active_slot()
             .map(|slot| slot.task_space.repository_id.clone());
@@ -503,20 +476,6 @@ impl Workspace {
         };
         let worktree = slot.worktree.clone();
         let root = worktree.root().to_path_buf();
-        let repo_name = root
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "repo".to_string());
-        let Some(parent) = root.parent().map(Path::to_path_buf) else {
-            return;
-        };
-        // branch = task/<n>（レールで未使用の最小 n）。
-        let open_branches: std::collections::HashSet<String> = self
-            .project_sessions
-            .projects
-            .iter()
-            .filter_map(|slot| slot.branch.clone().or_else(|| slot.worktree_branch.clone()))
-            .collect();
         let host = worktree.host().clone();
         let host_for_add = host.clone();
         cx.spawn(async move |workspace, cx| {
@@ -527,30 +486,12 @@ impl Workspace {
                     // Task が古い base から切られるのを防ぐ（Orca の default branch 自動同期を参考・
                     // 2026-08-30）。オフライン・dirty・diverged では黙って現 HEAD から続行する。
                     let sync = project::sync_current_branch_on(host_for_add.as_ref(), &root);
-                    let mut used = open_branches;
-                    used.extend(project::git_branches_on(host_for_add.as_ref(), &root));
-                    let mut number = 1;
-                    let (branch, target) = loop {
-                        let branch = format!("task/{number}");
-                        let target = parent.join(format!("{repo_name}-task-{number}"));
-                        if !used.contains(&branch) && host_for_add.metadata(&target).is_err() {
-                            break (branch, target);
-                        }
-                        number += 1;
-                    };
-                    project::create_task_worktree_on(
-                        host_for_add.as_ref(),
-                        &root,
-                        &target,
-                        &branch,
-                    )?;
-                    Ok::<(PathBuf, String, project::BranchSyncOutcome), anyhow::Error>((
-                        target, branch, sync,
-                    ))
+                    let (target, branch, failure) = project::create_named_task_on(host_for_add.as_ref(), &root, &prompt)?;
+                    Ok::<_, anyhow::Error>((target, branch, sync, prompt, failure))
                 })
                 .await;
             let _ = workspace.update(cx, |workspace, cx| match result {
-                Ok((target, branch, sync)) => {
+                Ok((target, branch, sync, prompt, failure)) => {
                     // 早送りできた時だけ知らせる（最新から切れた安心情報。スキップは無言＝作成を汚さない）。
                     if let project::BranchSyncOutcome::FastForwarded {
                         branch: base,
@@ -585,6 +526,9 @@ impl Workspace {
                             .chrome
                             .fleet_cells
                             .push(FleetPane::Task { space: space_id });
+                        if !prompt.trim().is_empty() {
+                            workspace.project_sessions.projects[space].task_space.title = prompt.lines().next().unwrap_or("").to_string().into();
+                        }
                         workspace.persist_task_space(space, cx);
                         workspace.transition_task_space(
                             space,
@@ -593,6 +537,13 @@ impl Workspace {
                             None,
                             cx,
                         );
+                    }
+                    if let Some(index) = workspace.project_sessions.projects.iter().position(|slot| slot.worktree.root() == target.as_path()) {
+                        if let Some(error) = failure {
+                            workspace.transition_task_space(index, TaskPhase::Failed, "setup_failed", Some(&error), cx);
+                        } else if !prompt.trim().is_empty() {
+                            workspace.ipc_spawn_into(index, None, Some(prompt), cx);
+                        }
                     }
                     workspace.hint_fleet_mode_once(cx);
                     cx.notify();
@@ -643,12 +594,6 @@ impl Workspace {
             .is_some_and(|panel| panel.read(cx).has_running_thread());
         self.chrome.fleet_cells.remove(index);
         self.chrome.fleet_cell_menu = None;
-        // 拡大中のセルを閉じたら拡大解除・後ろを閉じたら添字を詰める。
-        match self.chrome.fleet_maximized {
-            Some(max) if max == index => self.chrome.fleet_maximized = None,
-            Some(max) if max > index => self.chrome.fleet_maximized = Some(max - 1),
-            _ => {}
-        }
         if still_running {
             let accent = self.accent();
             self.push_toast(
@@ -661,7 +606,6 @@ impl Workspace {
     }
 
     /// 消えた TaskSpace のセルをグリッドから外す（worktree 削除後の後始末）。
-    /// 拡大中の添字も畳み直すので、`close_fleet_cell` と同じ規律で安全に詰まる。
     pub(crate) fn remove_fleet_cells_for(&mut self, space: &SpaceId) {
         // 畳んである別リポジトリの並びからも外す（戻ってきたときに消えた worktree を出さない）。
         for cells in self.chrome.fleet_grids.values_mut() {
@@ -671,11 +615,6 @@ impl Workspace {
         while index < self.chrome.fleet_cells.len() {
             if self.space_of_cell(index).as_ref() == Some(space) {
                 self.chrome.fleet_cells.remove(index);
-                match self.chrome.fleet_maximized {
-                    Some(max) if max == index => self.chrome.fleet_maximized = None,
-                    Some(max) if max > index => self.chrome.fleet_maximized = Some(max - 1),
-                    _ => {}
-                }
             } else {
                 index += 1;
             }
@@ -998,24 +937,11 @@ impl Workspace {
         cx.notify();
     }
 
-    /// セルを拡大表示（mock の focus・M14）。系譜グラフを隠し、そのセルを大きく・他はサムネイル列へ。
-    fn maximize_fleet_cell(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.chrome.fleet_maximized = Some(index);
-        cx.notify();
-    }
-
-    /// 拡大表示を解除して通常のグリッド（系譜グラフ + N分割）へ戻す。
-    fn restore_fleet_layout(&mut self, cx: &mut Context<Self>) {
-        self.chrome.fleet_maximized = None;
-        cx.notify();
-    }
-
     /// 左 Fleet 列のエージェントをグリッドに出す（無ければセル追加）→ そのセルへ寄せる（M14）。
     /// ＝タップで必ず反応し、× で閉じたセルもここから復帰できる。
     ///
-    /// **拡大はしない**（2026-07-27）。以前は必ず `fleet_maximized` を立てていたので、herd を
-    /// タップしただけで全画面になり「勝手に全画面になる」状態だった。拡大は ⤢ の明示操作にだけ属する。
-    /// ただし既に拡大表示中なら、拡大の枠のまま対象を差し替える（没入モードから勝手に抜けない）。
+    /// **列数は変えない**（2026-07-27 の「勝手に全画面になる」報告以来の規律）。舞台に何枚並べるかは
+    /// ⌘⇧1/2/3 と ⤢ の明示操作にだけ属し、一覧のタップは「その Task を舞台の選択にする」だけ。
     pub(crate) fn reveal_agent_in_fleet(
         &mut self,
         space: usize,
@@ -1058,9 +984,7 @@ impl Workspace {
                 self.chrome.fleet_cells.len() - 1
             }
         };
-        if self.chrome.fleet_maximized.is_some() {
-            self.chrome.fleet_maximized = Some(index);
-        }
+        self.chrome.stage_tabs.insert(space_id, self.chrome.fleet_cells[index].clone());
         cx.notify();
     }
 
@@ -1080,7 +1004,7 @@ impl Workspace {
     fn fleet_lanes(&self, cx: &App) -> Vec<FleetLane> {
         let mut lanes = Vec::new();
         for (index, slot) in self.project_sessions.projects.iter().enumerate() {
-            if slot.task_space.is_integration() {
+            if Some(slot.repository_key()) != self.active_repository_key() || slot.task_space.is_integration() {
                 continue;
             }
             if slot.task_space.phase == TaskPhase::Archived {
@@ -1143,19 +1067,13 @@ impl Workspace {
         lanes
     }
 
-    /// 編隊ビュー本体（mock の編隊モード）: レール | 左カラム | 中央（系譜グラフ + グリッド + 下段）。
-    /// セル拡大中（`fleet_maximized`）は系譜グラフを隠し、拡大セル + サムネイル列に切替（ユーザー案）。
+    /// Fleet 本体（FLEET-V2 §3）: レール | 左カラム（Task 一覧）| 中央（列数トグル + 系譜の帯 + 舞台 + 下段）。
     ///
     /// 左カラムは **solo と同じ排他規則**で選ぶ（2026-07-27）。以前は herd 決め打ちだったので、
     /// 編隊中はレールの エクスプローラ / git / Todo / ⚙ を押しても状態が変わるだけで何も出ず、
     /// 「左のメニュー系が全然使えない」状態だった。編隊での既定ビューだけ herd に寄せてある。
     pub(crate) fn render_fleet(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
-        let maximized = self
-            .chrome
-            .fleet_maximized
-            .filter(|_| self.chrome.fleet_center_view != FleetCenterView::Work)
-            .filter(|index| *index < self.chrome.fleet_cells.len());
         let mut center = div().flex_1().flex().flex_col().min_w_0().bg(theme.bg1);
         if self.chrome.show_settings {
             // ⚙ は編隊でも中央を占有する（solo の render_center と同じ扱い）。
@@ -1164,36 +1082,9 @@ impl Workspace {
             view.update(cx, |view, _| view.set_visuals(self.theme.clone(), accent));
             center = center.child(div().flex_1().min_h_0().child(view));
         } else {
-            // 中央タブ帯（P3）: 管制 / グラフ。セル拡大中は没入を優先してタブ帯を出さない。
-            if maximized.is_none() {
-                center = center.child(self.render_center_tabs(cx));
-            }
-            center = match maximized {
-                Some(index) => {
-                    // 拡大: 上にサムネイル列（他セルが避ける）+ 大きい拡大セル（グラフの場所に出る）。
-                    let lanes = self.fleet_lanes(cx);
-                    center.child(self.render_fleet_thumbnails(index, cx)).child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .p(px(10.))
-                            .child(self.render_fleet_cell(
-                                index,
-                                self.chrome.fleet_cells[index].clone(),
-                                &lanes,
-                                true,
-                                cx,
-                            )),
-                    )
-                }
-                None => match self.chrome.fleet_center_view {
-                    FleetCenterView::Work => center.child(self.render_workbench(cx)),
-                    FleetCenterView::Control => center.child(self.render_control(cx)),
-                    FleetCenterView::Graph => center
-                        .child(self.render_lineage_graph(cx))
-                        .child(self.render_fleet_grid(cx)),
-                },
-            };
+            center = center.child(self.render_stage_toolbar(cx))
+                .child(self.render_lineage_graph(cx))
+                .child(self.render_fleet_grid(cx));
         }
         center = center.child(self.render_fleet_bottom(cx));
         div()
@@ -1218,140 +1109,8 @@ impl Workspace {
         } else if !self.chrome.show_herd {
             self.render_explorer(cx).into_any_element()
         } else {
-            if self.chrome.fleet_center_view == FleetCenterView::Work {
-                self.render_work_sidebar(cx)
-            } else {
-                // Fleet サイドバー（F1）。旧 herd の「プロジェクト + スレッド行」ではなく
-                // **1 行 = 1 Task** の 3 段（FLEET-V2 §3.2）。
-                self.render_fleet_sidebar(cx)
-            }
+            self.render_fleet_sidebar(cx)
         }
-    }
-
-    /// 拡大表示中のサムネイル列（mock focus 時の他セル）。全セルを小さく横並びに・クリックで拡大先を切替。
-    fn render_fleet_thumbnails(
-        &self,
-        max_index: usize,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let theme = self.theme.clone();
-        let accent = self.accent();
-        let cells = self.chrome.fleet_cells.clone();
-        let mut strip = div()
-            .id("fleet-thumbs")
-            .flex_none()
-            .h(px(72.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .px(px(10.))
-            .py(px(8.))
-            .overflow_x_scroll()
-            .border_b_1()
-            .border_color(theme.border);
-        for (index, pane) in cells.iter().enumerate() {
-            let space = match pane {
-                FleetPane::Agent { space, .. }
-                | FleetPane::Shell { space, .. }
-                | FleetPane::Task { space }
-                | FleetPane::Terminal { space }
-                | FleetPane::Editor { space }
-                | FleetPane::Diff { space }
-                | FleetPane::Tests { space } => space,
-            };
-            let session_index = self.session_index_for_space(space);
-            let slot = session_index.and_then(|index| self.project_sessions.projects.get(index));
-            let color = slot.map(|slot| slot.color).unwrap_or(theme.fg2);
-            let activity = self.fleet_cell_agent(index).and_then(|panel| {
-                panel
-                    .read(cx)
-                    .statuses()
-                    .into_iter()
-                    .max_by_key(|status| status.activity.urgency())
-                    .map(|status| status.activity)
-            });
-            let surface = match pane {
-                FleetPane::Agent { .. } | FleetPane::Task { .. } => "ACP",
-                FleetPane::Shell { .. } => "Terminal",
-                FleetPane::Terminal { .. } => "Terminal",
-                FleetPane::Editor { .. } => "Editor",
-                FleetPane::Diff { .. } => "Diff",
-                FleetPane::Tests { .. } => "Tests",
-            };
-            let name = slot
-                .map(|slot| SharedString::from(format!("{} · {surface}", slot.task_space.title)))
-                .unwrap_or_else(|| SharedString::from(surface));
-            let branch = slot.and_then(|slot| {
-                slot.branch
-                    .clone()
-                    .or_else(|| slot.worktree_branch.clone())
-                    .map(SharedString::from)
-            });
-            let active = index == max_index;
-            let sub = match &branch {
-                Some(branch) => SharedString::from(format!("⎇ {branch}")),
-                None => SharedString::from(surface),
-            };
-            strip = strip.child(
-                div()
-                    .id(("fleet-thumb", index))
-                    .w(px(184.))
-                    .h_full()
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .px(px(9.))
-                    .py(px(6.))
-                    .rounded(px(7.))
-                    .border_1()
-                    .border_color(if active { accent } else { theme.border })
-                    .bg(if active { theme.bg2 } else { theme.bg0 })
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg2))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(div().size(px(7.)).rounded_full().bg(color).flex_none())
-                            .when_some(activity, |element, activity| {
-                                element.child(agent_panel::activity_dot(
-                                    ("thumb-dot", index),
-                                    8.0,
-                                    color,
-                                    activity,
-                                ))
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(px(11.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.fg0)
-                                    .child(name),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_size(px(9.5))
-                            .text_color(theme.fg2)
-                            .child(sub),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.maximize_fleet_cell(index, cx)
-                        }),
-                    ),
-            );
-        }
-        strip.into_any_element()
     }
 
     // ── 系譜グラフ（M14 #4・最重要ビジュアル・ネイティブ描画） ──
@@ -1560,6 +1319,7 @@ impl Workspace {
                 .border_b_1()
                 .border_color(theme.border)
                 .child(header)
+                .child(self.render_lineage_strip(cx))
                 .into_any_element();
         }
         let lanes = self.fleet_lanes(cx);
@@ -2383,66 +2143,16 @@ impl Workspace {
     /// グリッド本体。**＋ で Agent/Terminal を追加・× で閉じる**（上限 8）。フル画面を使うよう、
     /// 行×列の flex で各セルを `flex_1`（幅も高さも均等に伸びる）。列数はセル数で自動。
     fn render_fleet_grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let lanes = self.fleet_lanes(cx);
-        let cells = self.chrome.fleet_cells.clone();
-        let show_add = true;
-        // ＋ が丸ごと 1 セルを占めるとデッドスペースになる（2026-07-24 ユーザー指摘）。
-        // セルが 1 つでもあれば ＋ は下部のスリムバーにして、セルに面積を返す。
-        let add_as_cell = show_add && cells.is_empty();
-        let total = cells.len() + if add_as_cell { 1 } else { 0 };
-        let cols = match total {
-            0 | 1 => 1,
-            2 => 2,
-            3 => 3,
-            4 => 2,
-            5 | 6 => 3,
-            _ => 4,
-        }
-        .max(1);
-        // items: 既存セル（index, pane）+ 末尾に ＋ タイル。
-        let mut items: Vec<Option<(usize, FleetPane)>> = cells
-            .iter()
-            .enumerate()
-            .map(|(index, pane)| Some((index, pane.clone())))
-            .collect();
-        if add_as_cell {
-            items.push(None);
-        }
-        let mut grid = div()
-            .id("fleet-grid")
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .p(px(10.));
-        // 行は余りがあれば伸びるが、**読める高さは下回らせない**（下回る分はグリッドごとスクロール）。
-        // 8 枚上限を外した（2026-09-11）ので、行数だけ潰れるのが青天井になった＝高さで止める。
-        // ヘッダ + タブ行 + メタ行 + transcript が最低限見える寸法。
-        grid = grid.overflow_y_scroll();
-        for row in items.chunks(cols) {
-            let mut row_element = div().flex_1().min_h(px(300.)).flex().gap(px(8.));
-            for item in row {
-                row_element = row_element.child(match item {
-                    Some((index, pane)) => {
-                        self.render_fleet_cell(*index, pane.clone(), &lanes, false, cx)
-                    }
-                    None => self.render_fleet_add_tile(cx),
-                });
+        let mut stage = div().id("fleet-stage").flex_1().min_h_0().flex().gap(px(8.)).p(px(10.));
+        for (index, pane) in self.stage_cards() {
+            let space = pane_space(&pane);
+            if self.chrome.captain_space.as_ref() == Some(space) {
+                if let Some(session) = self.session_index_for_space(space) { stage = stage.child(self.render_captain_card(session, cx)); }
+            } else {
+                stage = stage.child(self.render_fleet_cell(index, pane, cx));
             }
-            grid = grid.child(row_element);
         }
-        // セルがある時の ＋ = 下部スリムバー（1 行 30px・セルの面積を奪わない）。
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(grid)
-            .when(!add_as_cell, |element| {
-                element.child(self.render_fleet_add_buttons(cx))
-            })
-            .into_any_element()
+        stage.into_any_element()
     }
 
     /// TaskSpace の surface。Task は通常 View と同じ `Entity<AgentPanel>` をそのまま埋め込むため、
@@ -2451,298 +2161,13 @@ impl Workspace {
         &self,
         index: usize,
         pane: FleetPane,
-        _lanes: &[FleetLane],
-        maximized: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = self.theme.clone();
-        let (space, surface_name) = match &pane {
-            FleetPane::Agent { space, .. } => (space, "ACP"),
-            FleetPane::Shell { space, .. } => (space, "Terminal"),
-            FleetPane::Task { space } => (space, "ACP"),
-            FleetPane::Terminal { space } => (space, "Terminal"),
-            FleetPane::Editor { space } => (space, "Editor"),
-            FleetPane::Diff { space } => (space, "Diff"),
-            FleetPane::Tests { space } => (space, "Tests"),
-        };
+        let space = pane_space(&pane);
         let session_index = self.session_index_for_space(space);
-        let slot = session_index.and_then(|index| self.project_sessions.projects.get(index));
-        let color = slot.map(|slot| slot.color).unwrap_or(theme.fg2);
-        let name = slot
-            .map(|slot| slot.task_space.title.clone())
-            .unwrap_or_else(|| SharedString::from("Closed Task"));
-        let branch = slot.and_then(|slot| {
-            slot.branch
-                .clone()
-                .or_else(|| slot.worktree_branch.clone())
-                .map(SharedString::from)
-        });
-        let phase = slot
-            .map(|slot| SharedString::from(slot.task_space.phase.as_str()))
-            .unwrap_or_else(|| SharedString::from("closed"));
-        let task_action = match (&pane, slot.map(|slot| slot.task_space.phase)) {
-            (
-                FleetPane::Task { space },
-                Some(TaskPhase::ReviewReady | TaskPhase::ChangesRequested),
-            ) => Some((space.clone(), TaskPhase::ReviewReady)),
-            (FleetPane::Task { space }, Some(TaskPhase::MergeReady)) => {
-                Some((space.clone(), TaskPhase::MergeReady))
-            }
-            _ => None,
-        };
-
-        // 表示名の改名 / worktree 削除は **Task セル（非 Integration）だけ**に出す。同じ space の
-        // Terminal/Editor セルには出さない（1 space = 1 Task セル ＝ 改名入力欄の二重描画も同時に防ぐ）。
-        let is_task_pane = matches!(&pane, FleetPane::Task { .. });
-        let is_task_space = slot
-            .map(|slot| !slot.task_space.is_integration())
-            .unwrap_or(false);
-        let manage_target: Option<usize> = if is_task_pane && is_task_space {
-            session_index
-        } else {
-            None
-        };
-        // 改名中の入力欄（このセルが対象で、かつ編集場所が Cell のときだけ描く＝herd との二重描画回避）。
-        let renaming_editor = manage_target.and_then(|target| {
-            self.chrome
-                .task_renaming
-                .as_ref()
-                .filter(|renaming| renaming.index == target && renaming.site == RenameSite::Cell)
-                .map(|renaming| renaming.editor.clone())
-        });
-
-        let header = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(7.))
-            .px(px(9.))
-            .py(px(6.))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(div().size(px(8.)).rounded_full().bg(color).flex_none())
-            .child(match renaming_editor {
-                // 改名中: title だけを編集する入力欄（herd と同じ EditorView 実体・IME 対応）。
-                Some(editor) => div()
-                    .flex_1()
-                    .min_w_0()
-                    .h(px(20.))
-                    .child(editor)
-                    .into_any_element(),
-                None => div()
-                    .id(("fleet-cell-title", index))
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.fg0)
-                    .child(SharedString::from(format!("{name} · {surface_name}")))
-                    // ダブルクリックで改名（スレッドタブ・herd 見出しと同型）。Task セルのみ。
-                    .when_some(manage_target, |element, target| {
-                        element
-                            .cursor_pointer()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                    if event.click_count == 2 {
-                                        cx.stop_propagation();
-                                        this.start_task_rename(
-                                            target,
-                                            RenameSite::Cell,
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                }),
-                            )
-                            .tooltip(Tooltip::text(i18n::t!("fleet.rename_tip"), theme.clone()))
-                    })
-                    .into_any_element(),
-            })
-            .when_some(branch, |element, branch| {
-                element.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(10.))
-                        .text_color(theme.fg2)
-                        .child(SharedString::from(format!("⎇ {branch}"))),
-                )
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(10.))
-                    .text_color(theme.fg2)
-                    .child(phase),
-            )
-            .when_some(task_action, |element, (space, action)| {
-                let label = if action == TaskPhase::MergeReady {
-                    "Integrate"
-                } else {
-                    "Review"
-                };
-                element.child(
-                    div()
-                        .id(("fleet-task-action", index))
-                        .flex_none()
-                        .px(px(7.))
-                        .py(px(2.))
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_size(px(10.))
-                        .text_color(theme.fg1)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
-                        .child(label)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _window, cx| {
-                                cx.stop_propagation();
-                                if action == TaskPhase::MergeReady {
-                                    this.integrate_task(space.clone(), cx);
-                                } else {
-                                    this.review_task_for_merge(space.clone(), cx);
-                                }
-                            }),
-                        ),
-                )
-            })
-            // 拡大 / 復元（mock focus・ユーザー案）。拡大中は系譜グラフが消えてこのセルが大きくなる。
-            .child(
-                div()
-                    .id(("fleet-cell-max", index))
-                    .flex_none()
-                    .size(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg2))
-                    .child(
-                        svg()
-                            .path(if maximized {
-                                "icons/minimize.svg"
-                            } else {
-                                "icons/maximize.svg"
-                            })
-                            .size(px(11.))
-                            .text_color(theme.fg2),
-                    )
-                    .tooltip(Tooltip::text(
-                        i18n::t!(if maximized {
-                            "fleet.restore"
-                        } else {
-                            "fleet.maximize"
-                        }),
-                        theme.clone(),
-                    ))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            cx.stop_propagation();
-                            if maximized {
-                                this.restore_fleet_layout(cx);
-                            } else {
-                                this.maximize_fleet_cell(index, cx);
-                            }
-                        }),
-                    ),
-            )
-            // worktree を削除 🗑（Task セルのみ）。⋯ の「片付け」に埋もれていた削除を、目の前の近道として出す。
-            // 押すと「失うものを数える」確認ダイアログ（`request_worktree_delete`）＝どこから消しても同じ。
-            .when_some(manage_target, |element, target| {
-                element.child(
-                    div()
-                        .id(("fleet-cell-trash", index))
-                        .group("fleet-cell-trash")
-                        .flex_none()
-                        .size(px(18.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.bg2))
-                        // svg は親の text_color を継承しないため直接指定 + hover は自グループで赤に。
-                        .child(
-                            svg()
-                                .path("icons/trash-2.svg")
-                                .size(px(11.))
-                                .text_color(theme.fg2)
-                                .group_hover("fleet-cell-trash", |style| {
-                                    style.text_color(theme.err)
-                                }),
-                        )
-                        .tooltip(Tooltip::text(
-                            i18n::t!("fleet.delete_worktree_tip"),
-                            theme.clone(),
-                        ))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.request_worktree_delete(target, false, window, cx);
-                            }),
-                        ),
-                )
-            })
-            // ⋯ = 片付けメニュー（閉じる / 止める / 終了 / worktree 削除を 1 枚に・2026-07-27）。
-            // × だけだと「消したのに消えない」に見えるので、全段をここに集めて言葉で説明する。
-            .child(
-                div()
-                    .id(("fleet-cell-menu", index))
-                    .flex_none()
-                    .size(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .text_size(px(13.))
-                    .text_color(theme.fg2)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
-                    .child("⋯")
-                    .tooltip(Tooltip::text(i18n::t!("fleet.cleanup_tip"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                            cx.stop_propagation();
-                            this.open_fleet_cell_menu(index, event.position, cx);
-                        }),
-                    ),
-            )
-            .child(
-                div()
-                    .id(("fleet-cell-close", index))
-                    .flex_none()
-                    .size(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .text_size(px(13.))
-                    .text_color(theme.fg2)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
-                    .child("×")
-                    // 「× で何が起きるのか」をその場で言う（ユーザー報告「違いが分からない」）。
-                    .tooltip(Tooltip::text(
-                        i18n::t!("fleet.close_cell_tip"),
-                        theme.clone(),
-                    ))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            cx.stop_propagation();
-                            this.close_fleet_cell(index, cx);
-                        }),
-                    ),
-            );
-
+        let color = session_index.map(|session| self.project_sessions.projects[session].color).unwrap_or(theme.fg2);
+        let header = self.render_task_header(index, space, cx);
         let mut cell = div()
             .id(("fleet-cell", index))
             .flex_1()
@@ -2817,6 +2242,10 @@ impl Workspace {
                 this.agent_active = agent_surface;
             }));
         }
+        if let Some(session_index) = session_index {
+            cell = cell.child(self.render_task_tabs(session_index, cx));
+        }
+        let pane = self.chrome.stage_tabs.get(space).cloned().unwrap_or(pane);
         let body = session_index
             .map(|session_index| match pane {
                 FleetPane::Agent { panel, .. } => panel
@@ -2842,20 +2271,7 @@ impl Workspace {
                     .clone()
                     .cached(StyleRefinement::default().flex().flex_col().size_full())
                     .into_any_element(),
-                FleetPane::Editor { .. } => self.project_sessions.sessions[session_index]
-                    .tabs
-                    .get(self.project_sessions.sessions[session_index].active_tab)
-                    .map(|tab| tab.content_element())
-                    .unwrap_or_else(|| {
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(theme.fg2)
-                            .child(i18n::t!("fleet.editor_surface_hint"))
-                            .into_any_element()
-                    }),
+                FleetPane::Editor { .. } => self.render_stage_files(session_index, cx),
                 FleetPane::Diff { .. } => self.project_sessions.sessions[session_index]
                     .git_panel
                     .clone()
@@ -2878,121 +2294,6 @@ impl Workspace {
             });
         cell = cell.child(div().flex_1().min_h_0().overflow_hidden().child(body));
         cell.into_any_element()
-    }
-
-    /// 繰り返す追加操作はメニューを経由せず直接押せるようにする。
-    fn render_fleet_add_buttons(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let mut bar = div()
-            .id("fleet-add-bar")
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(8.))
-            .py(px(4.));
-        for (id, key) in [
-            (0usize, "fleet.add_acp"),
-            (1, "fleet.add_terminal"),
-            (2, "fleet.add_worktree"),
-        ] {
-            bar = bar.child(
-                div()
-                    .id(("fleet-add-type", id))
-                    .px(px(12.))
-                    .py(px(5.))
-                    .rounded(px(7.))
-                    .border_1()
-                    .border_color(self.theme.border)
-                    .bg(self.theme.bg0)
-                    .text_size(px(11.5))
-                    .text_color(self.theme.fg1)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(self.theme.bg2))
-                    .child(i18n::t!(key))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            match id {
-                                0 => this.add_fleet_agent(cx),
-                                1 => this.add_terminal_to_selected_task(cx),
-                                _ => {
-                                    if let Some(index) = this
-                                        .selected_task_space()
-                                        .and_then(|space| this.session_index_for_space(&space))
-                                    {
-                                        this.switch_project(index, window, cx);
-                                    }
-                                    this.open_worktree_picker(window, cx);
-                                }
-                            }
-                        }),
-                    ),
-            );
-        }
-        if let Some(space) = self.selected_task_space() {
-            if let Some(index) = self.session_index_for_space(&space) {
-                let slot = &self.project_sessions.projects[index];
-                let branch = slot
-                    .branch
-                    .as_deref()
-                    .or(slot.worktree_branch.as_deref())
-                    .unwrap_or("—");
-                bar = bar.child(
-                    div()
-                        .id("fleet-add-destination")
-                        .text_size(px(10.))
-                        .text_color(self.theme.fg2)
-                        .child(format!("{} ⎇ {branch}", slot.name))
-                        .tooltip(Tooltip::text(
-                            slot.worktree.root().display().to_string(),
-                            self.theme.clone(),
-                        )),
-                );
-            }
-        }
-        bar.into_any_element()
-    }
-
-    /// ＋ タイル。既定は隔離 `+ Task`。同一 worktree へ書く Agent は明示操作でだけ追加する。
-    fn render_fleet_add_tile(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = self.theme.clone();
-        let buttons = self.render_fleet_add_buttons(cx);
-        div()
-            .id("fleet-add")
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(12.))
-            .rounded(px(8.))
-            .border_1()
-            .border_dashed()
-            .border_color(theme.border)
-            .text_color(theme.fg2)
-            .hover(|style| style.border_color(theme.fg2))
-            .child(
-                div()
-                    .size(px(40.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(px(24.))
-                    .child(SharedString::from("＋")),
-            )
-            .child(buttons)
-            .child(
-                div()
-                    .text_size(px(10.5))
-                    .child(SharedString::from(i18n::t!("fleet.add_hint"))),
-            )
-            .into_any_element()
     }
 
     // ── 下段ドック（ニュース / ターミナル・2026-07-27） ──

@@ -55,6 +55,8 @@ mod dev_probes;
 mod explorer_controller;
 mod explorer_view;
 mod fleet_view;
+mod fleet_stage;
+mod new_task_dialog;
 mod work_layout;
 mod workbench;
 pub(crate) use work_layout::{
@@ -137,9 +139,13 @@ actions!(
         // チャット 1 枚にする＝「ファイルを開かずに全部 AI に任せる」使い方のための面。
         ToggleAgentFullScreen,
         // 管制タブ（編隊中央のダッシュボード・FLEET-CONTROL-PLAN P3）。編隊モードごと開く。
-        ToggleControl,
         // 管制: 要対応キューの先頭へ没入（⏎・P3）。
         ControlNext,
+        NewTask,
+        StageOne,
+        StageTwo,
+        StageThree,
+        ToggleLineage,
         // ⌘⇧P コマンドパレット（M13）。
         CommandPalette,
         // ⌘K⌘S キーボードショートカット一覧（既定 keymap から自動生成・参照専用オーバーレイ）。
@@ -1037,13 +1043,14 @@ pub(crate) enum GraphView {
     Hub,
 }
 
-/// 編隊中央面のタブ（FLEET-CONTROL-PLAN P3）。Graph=系譜グラフ+グリッド / Control=管制ダッシュボード。
-/// 既定は当面 Graph（ドッグフーディング後に再判断・計画 §P3）。
+/// Fleet 中央の面。Graph = 系譜の帯 + 舞台（FLEET-V2 の 1 画面・唯一の描画経路）。
+/// Work（作業タブ）は 2026-09-11 に既定から降格し、F3（2026-09-16）で中央タブ帯ごと非表示に
+/// なった。`workbench.rs` / `work_layout.rs` の削除は F7 で行う（配置 ID の割当だけがまだ生きている）。
+/// 管制（Control）は F3 で削除 — 要対応キューはサイドバーへ移設済み（`control_view.rs`）。
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum FleetCenterView {
     Work,
     Graph,
-    Control,
 }
 
 /// 編隊下段のタブ（2026-07-27）。ニュース＝task_events の鏡 / ターミナル＝アクティブ Task の実シェル。
@@ -1093,6 +1100,23 @@ struct ChromeState {
     fleet_mode: bool,
     /// 編隊グリッドのセル（mock の `.acell`・＋/× で増減・M14 #3）。**いまのリポジトリの分だけ**。
     fleet_cells: Vec<FleetPane>,
+    /// ＋ Task ダイアログ（Some の間はモーダル・FLEET-V2 §4.1）。
+    new_task: Option<new_task_dialog::NewTaskDialog>,
+    /// Captain へまだ渡していない台帳イベント（リポジトリ別）。Captain スレッドが busy の間に
+    /// 溜め、手が空いた最初の wake でまとめて 1 通にする（ポーリング禁止・§5.3）。
+    captain_pending: HashMap<String, Vec<String>>,
+    /// 舞台に Captain カードを出している統合先の space（⌘0 で Some・Task 行クリックで None）。
+    captain_space: Option<SpaceId>,
+    /// Captain カードのタブ（0 = スレッド / 1 = 采配ログ / 2 = Task 一覧・§3.6）。
+    captain_tab: usize,
+    /// 舞台の列数 1..=3（⌘⇧1/2/3・§3.4）。幅が足りなければ描画時に落とす。
+    stage_columns: usize,
+    /// 中央の実幅（render で更新）。列数の上限 = 1 枚 420px を割らない範囲。
+    stage_width: f32,
+    /// ピンした Task（◫・左から並ぶ・最大 3）。選択中の Task は不足分として末尾に埋まる。
+    stage_pinned: Vec<SpaceId>,
+    /// Task カードごとに選んでいるタブ（スレッド / 変更 / ターミナル / ファイル）。
+    stage_tabs: HashMap<SpaceId, FleetPane>,
     /// `fleet_cells` がどのリポジトリの編隊か（`ProjectSlot::repository_key`）。`None` = まだ配置していない。
     /// lanes からの自動配置を**もう済ませたか**の記録も兼ねる（2026-07-27）。旧実装は「空なら seed」
     /// だったので、最後の 1 枚を × で閉じた次のフレームに全セルが復活していた（ユーザー報告
@@ -1114,9 +1138,6 @@ struct ChromeState {
     graph_view: GraphView,
     /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。
     graph_collapsed: bool,
-    /// 拡大表示中のセル（mock の focus・M14）。Some のとき系譜グラフを隠し、そのセルを大きく・
-    /// 他セルはサムネイル列に避ける。index は `fleet_cells` の添字（範囲外は None 扱い）。
-    fleet_maximized: Option<usize>,
     /// 編隊セルの ⋯ メニュー（片付けの 4 段を 1 枚に並べる・2026-07-27）。
     fleet_cell_menu: Option<FleetCellMenuState>,
     /// 編隊下段のタブ（ニュース / ターミナル・2026-07-27）。
@@ -1243,6 +1264,7 @@ pub(crate) enum NewsKind {
     Integration,
     /// Captain の采配（丸チップ・FLEET-V2 §5.6）。
     Captain,
+    HumanSend,
 }
 
 struct WorkspacePersistence {
@@ -1280,8 +1302,6 @@ pub struct Workspace {
     notifications: NotificationCenter,
     persistence: WorkspacePersistence,
     updater: UpdateController,
-    /// 管制バーの固定サイズマスコット。atlas時計はWorkspace全体をinvalidにしない。
-    fleet_mascot: Entity<agent_panel::MascotView>,
     /// この窓がアクティブか（render で更新）。管制のマスコット等が「動き」を止める判定に使う。
     window_active: bool,
     /// 経過秒・承認待ち表示だけの1Hz時計。マスコットの5/10fps時計は子Entityに分離済み。
@@ -1537,10 +1557,8 @@ impl Workspace {
         self.visual_ticker = true;
         cx.spawn(async move |workspace, cx| loop {
             let next_delay = workspace.update(cx, |workspace, cx| {
-                let control_visible = workspace.chrome.fleet_mode
-                    && workspace.chrome.fleet_center_view == FleetCenterView::Control;
                 let attention_visible = workspace.waiting_thread.is_some();
-                if !workspace.window_active || (!control_visible && !attention_visible) {
+                if !workspace.window_active || !attention_visible {
                     workspace.visual_ticker = false;
                     return None;
                 }
@@ -1570,6 +1588,7 @@ impl Workspace {
             || self.pending_open_history
             || self.overlays.pending_project_switch.is_some()
             || self.pending_navigation.is_some()
+            || self.pending_html_preview.is_some()
             || self.pending_open_git_diff.is_some()
             || self.pending_stage_hunk.is_some()
     }
@@ -1614,6 +1633,12 @@ impl Workspace {
             self.record_nav_position(cx);
             self.open_file_then(path, window, cx, move |editor, cx| {
                 editor.reveal_position(line, column, cx);
+            });
+        }
+        if let Some(path) = self.pending_html_preview.take() {
+            self.record_nav_position(cx);
+            self.open_file_then(path, window, cx, move |editor, cx| {
+                editor.set_rendered_html(true, cx);
             });
         }
         if let Some(path) = self.pending_open_git_diff.take() {
@@ -1678,7 +1703,8 @@ impl Workspace {
     /// 数えない — 通知が出るたびにプレビューが消える方が邪魔で、どれも押さずに消えるため。
     /// （gpui 内製のツールチップも同じ理由で観測できないが、これも待てば消えるもの。）
     fn overlay_hides_native_view(&self, cx: &App) -> bool {
-        self.overlays.picker.is_some()
+        self.chrome.new_task.is_some()
+            || self.overlays.picker.is_some()
             || self.overlays.color_picker.is_some()
             || self.overlays.rail_menu.is_some()
             || self.overlays.worktree_delete.is_some()
@@ -1742,6 +1768,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.chrome.stage_width = f32::from(window.viewport_size().width) - 70. - if self.chrome.show_left { self.chrome.explorer_width } else { 0. };
         if !self.focus_recovery_installed {
             self.focus_recovery_installed = true;
             cx.on_focus_lost(window, |this, window, cx| {
@@ -1757,10 +1784,8 @@ impl Render for Workspace {
             })
             .detach();
         }
-        self.window_active = window.is_window_active(); // 管制マスコット等の「動き」判定（P3）
-        let control_mascot_visible =
-            self.chrome.fleet_mode && self.chrome.fleet_center_view == FleetCenterView::Control;
-        if self.window_active && (control_mascot_visible || self.waiting_thread.is_some()) {
+        self.window_active = window.is_window_active(); // 承認待ちの脈動など「動き」を止める判定
+        if self.window_active && self.waiting_thread.is_some() {
             self.ensure_visual_ticker(cx);
         }
         if self.window_active && (self.chrome.fleet_mode || self.chrome.show_herd) {
@@ -1793,6 +1818,11 @@ impl Render for Workspace {
             .capture_any_mouse_down(cx.listener(|this, _event, _window, cx| {
                 this.release_native_key_focus(cx);
             }))
+            .on_action(cx.listener(|this, _: &NewTask, window, cx| { if this.chrome.fleet_mode { this.open_new_task(window, cx); } }))
+            .on_action(cx.listener(|this, _: &StageOne, _, cx| { if this.chrome.fleet_mode { this.chrome.stage_columns = 1; cx.notify(); } }))
+            .on_action(cx.listener(|this, _: &StageTwo, _, cx| { if this.chrome.fleet_mode { this.chrome.stage_columns = 2; cx.notify(); } }))
+            .on_action(cx.listener(|this, _: &StageThree, _, cx| { if this.chrome.fleet_mode { this.chrome.stage_columns = 3; cx.notify(); } }))
+            .on_action(cx.listener(|this, _: &ToggleLineage, _, cx| { if this.chrome.fleet_mode { this.chrome.graph_collapsed = !this.chrome.graph_collapsed; cx.notify(); } }))
             .on_action(cx.listener(Self::open_file_finder))
             .on_action(cx.listener(Self::open_project_switcher))
             .on_action(cx.listener(Self::open_project_search))
@@ -1815,7 +1845,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_fleet_mode))
             .on_action(cx.listener(Self::focus_captain))
             .on_action(cx.listener(Self::toggle_agent_full_screen))
-            .on_action(cx.listener(Self::toggle_control_center))
             .on_action(cx.listener(Self::control_next))
             .on_action(cx.listener(Self::open_command_palette))
             .on_action(cx.listener(Self::open_shortcut_sheet))
@@ -1984,6 +2013,7 @@ impl Render for Workspace {
             .children(self.render_code_actions(cx))
             .children(self.render_shortcut_sheet(cx))
             .children(self.render_about_modal(cx))
+            .children(self.render_new_task_dialog(cx))
             .children(self.render_hunk_menu(cx))
             .children(self.render_toasts(cx))
             .children(self.render_color_picker(cx))
@@ -3452,14 +3482,31 @@ mod tests {
             assert!(original != added);
             assert_eq!(original.read(cx).active_thread_name().as_deref(), Some("original"));
 
-            workspace.chrome.fleet_maximized = Some(1);
             workspace.close_fleet_cell(1, cx);
-            assert!(workspace.chrome.fleet_maximized.is_none());
             assert_eq!(workspace.project_sessions.sessions[0].fleet_agents.len(), 3);
             workspace.project_sessions.sessions[0].agent_panel = added.clone();
             workspace.reveal_agent_in_fleet(0, added.read(cx).active_thread(), window, cx);
             assert_eq!(workspace.chrome.fleet_cells.len(), 3);
             assert!(workspace.fleet_cell_agent(2).unwrap() == added);
+
+            // 舞台（F2）: セルが何枚あっても Task カードは 1 Task につき 1 枚。ピンしても同じ Task は
+            // 重複せず、幅が 420px × 列数に足りなければ列数を落とす（FLEET-V2 §3.4）。
+            let space = workspace.project_sessions.projects[0].task_space.id.clone();
+            workspace.chrome.stage_width = 1500.;
+            assert_eq!(workspace.stage_cards().len(), 1);
+            workspace.toggle_stage_pin(space.clone(), cx);
+            assert_eq!(workspace.chrome.stage_columns, 2, "ピンで 2 列以上に広がる");
+            assert_eq!(workspace.stage_cards().len(), 1, "ピン + 選択中が同じ Task なら 1 枚");
+            workspace.chrome.stage_columns = 3;
+            workspace.chrome.stage_width = 800.;
+            assert!(workspace.stage_cards().len() <= 1, "幅が足りなければ列数を落とす");
+            workspace.toggle_stage_pin(space, cx);
+            assert!(workspace.chrome.stage_pinned.is_empty(), "もう一度 ◫ で外れる");
+            // Task 内のタブ（F2）: 選んだ面は Task ごとに覚え、カードは増えない。
+            let cells_before = workspace.chrome.fleet_cells.len();
+            workspace.add_terminal_to_selected_task(cx);
+            assert_eq!(workspace.chrome.fleet_cells.len(), cells_before + 1, "端末は fleet_cells に実体として残る");
+            assert_eq!(workspace.stage_cards().len(), 1, "が、舞台のカードは 1 枚のまま");
 
             let (sender, receiver) = std::sync::mpsc::channel();
             workspace.handle_remote_control("remote_snapshot", serde_json::json!({}), sender, cx);

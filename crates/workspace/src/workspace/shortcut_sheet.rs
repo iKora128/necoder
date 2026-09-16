@@ -71,6 +71,12 @@ const ACTION_LABELS: &[(&str, &str)] = &[
     // ── AI チャット ──
     ("agent::SubmitPrompt", "key.submit_prompt"),
     ("agent::CloseActiveThread", "key.close_active_thread"),
+    // ── Fleet（FLEET-V2 §7 のキー表と同じ語を使う）──
+    ("workspace::NewTask", "fleet.new_task"),
+    ("workspace::StageOne", "fleet.stage_one"),
+    ("workspace::StageTwo", "fleet.stage_two"),
+    ("workspace::StageThree", "fleet.stage_three"),
+    ("workspace::ToggleLineage", "fleet.lineage"),
     // ── その他（レジストリ未収録の workspace / necoder）──
     ("workspace::CommandPalette", "key.command_palette"),
     ("workspace::ControlNext", "key.control_next"),

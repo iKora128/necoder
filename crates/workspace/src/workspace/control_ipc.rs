@@ -652,7 +652,7 @@ impl Workspace {
     }
 
     /// slot が開いている前提で thread を起こし（空スレッドは使い回し）、必要なら prompt を送る。
-    fn ipc_spawn_into(
+    pub(super) fn ipc_spawn_into(
         &mut self,
         index: usize,
         agent: Option<String>,

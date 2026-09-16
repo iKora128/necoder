@@ -339,6 +339,12 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-shift-a": "workspace::NewThread",
       "cmd-shift-enter": "workspace::ToggleAgentFullScreen",
       "cmd-shift-m": "workspace::ToggleFleet",
+      "cmd-n": "workspace::NewTask",
+      "cmd-shift-1": "workspace::StageOne",
+      "cmd-shift-2": "workspace::StageTwo",
+      "cmd-shift-3": "workspace::StageThree",
+      "cmd-shift-g": "workspace::ToggleLineage",
+      "cmd-shift-u": "workspace::ControlNext",
       "cmd-0": "workspace::FocusCaptain",
       "cmd-shift-h": "workspace::ThreadHistory",
       "cmd-alt-right": "workspace::SelectNextThread",
@@ -449,6 +455,9 @@ const NON_MAC_REPLACEMENTS: &[(&str, &str)] = &[
     // VSCode に相当機能が無く前例が引けないため、これは necoder 独自の割り当て。
     ("ctrl-cmd-down", "ctrl-alt-shift-down"),
     ("ctrl-cmd-up", "ctrl-alt-shift-up"),
+    // 系譜の帯の畳み/展開（⌘⇧G・FLEET-V2 §7）。単純変換だと Git パネル（mac の ⌃⇧G）と
+    // 同じ ctrl-shift-g に落ちて片方が黙って消える。VSCode に相当機能が無いので necoder 独自の割り当て。
+    ("cmd-shift-g", "ctrl-alt-g"),
 ];
 
 /// 非 mac にだけ足すバインド（mac 側には対応物が無い、その OS の定番）。

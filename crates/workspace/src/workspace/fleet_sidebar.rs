@@ -59,14 +59,21 @@ impl Workspace {
             self.open_settings_action(&OpenSettings, window, cx);
             return;
         };
-        let panel = self.project_sessions.sessions[index].agent_panel.clone();
+        let panel = self.project_sessions.sessions[index].fleet_agents[0].clone();
+        self.project_sessions.sessions[index].agent_panel = panel.clone();
+        let facts = self.captain_facts(&key, cx);
         let names = captain::captain_thread_names();
         let thread = panel.update(cx, |panel, cx| {
             let thread =
                 panel.ensure_named_thread(&captain::captain_thread_name(), &names, &agent, cx);
+            panel.set_prompt_context(thread, facts);
             panel.focus_thread(thread, cx);
             thread
         });
+        self.chrome.fleet_mode = true;
+        self.chrome.stage_columns = 1;
+        self.chrome.captain_space = Some(self.project_sessions.projects[index].task_space.id.clone());
+        self.chrome.captain_tab = 0;
         self.reveal_agent_in_fleet(index, thread, window, cx);
     }
 
@@ -365,6 +372,7 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            this.chrome.captain_space = None;
                             this.switch_project(index, window, cx);
                         }),
                     ),
@@ -509,6 +517,12 @@ impl Workspace {
                                 )
                             }),
                     )
+                    .child(div().id(("stage-pin", seq)).flex_none().text_size(px(12.)).text_color(color).cursor_pointer().child("◫")
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let space = this.project_sessions.projects[project_index].task_space.id.clone();
+                            this.toggle_stage_pin(space, cx);
+                        })))
                     // 🗑 worktree ごと削除（ホバーで出現・「失うものを数える」確認へ委譲）。
                     .child(
                         div()
@@ -636,12 +650,15 @@ impl Workspace {
             .child(SharedString::from(i18n::t!("fleet.new_task")))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                    this.add_worktree_agent(cx);
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.open_new_task(window, cx);
                 }),
             );
 
         div()
+            .key_context("FleetControl")
+            .track_focus(&self.chrome.control_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.chrome.control_focus, cx)))
             .w(px(self.chrome.explorer_width))
             .h_full()
             .flex_none()
@@ -652,6 +669,7 @@ impl Workspace {
             .border_r_1()
             .border_color(theme.border)
             .child(self.render_captain_bar(cx))
+            .child(self.render_stage_attention(cx))
             .child(body)
             .child(add_task)
             .child(legend)

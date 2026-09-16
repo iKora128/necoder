@@ -43,6 +43,9 @@ pub struct EditorArea {
     pub(crate) hunk_menu: Option<(project::DiffHunk, Point<gpui::Pixels>)>,
     pub(crate) pending_transient_tab: Option<(PathBuf, Buffer)>,
     pub(crate) pending_navigation: Option<(PathBuf, usize, usize)>,
+    /// 開いた上で**整形プレビュー**を出す待ち行列（transcript の `.html` リンク）。
+    /// 行番号つきのジャンプは source を見たいので `pending_navigation` のまま。
+    pub(crate) pending_html_preview: Option<PathBuf>,
     pub(crate) pending_open_git_diff: Option<PathBuf>,
     pub(crate) pending_stage_hunk: Option<project::DiffHunk>,
     pub(crate) blame_gen: u32,
@@ -86,6 +89,7 @@ impl EditorArea {
             hunk_menu: None,
             pending_transient_tab: None,
             pending_navigation: None,
+            pending_html_preview: None,
             pending_open_git_diff: None,
             pending_stage_hunk: None,
             blame_gen: 0,

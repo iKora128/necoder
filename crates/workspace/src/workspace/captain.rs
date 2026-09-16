@@ -38,6 +38,7 @@ impl Workspace {
     /// Captain スレッド実行中（重ねない＝次のイベントで最新状態ごと読む）は静かにスキップ。
     pub(crate) fn wake_captain(
         &mut self,
+        source: usize,
         event: &str,
         title: SharedString,
         digest: Option<SharedString>,
@@ -46,18 +47,15 @@ impl Workspace {
         let Some(agent) = settings::get(cx).captain_agent.clone() else {
             return;
         };
-        let Some(integration) = self
-            .project_sessions
-            .projects
-            .iter()
-            .position(|slot| slot.task_space.is_integration())
-        else {
-            return;
-        };
+        let Some(repository) = self.project_sessions.projects.get(source).map(|slot| slot.repository_key().to_string()) else { return; };
+        let Some(integration) = self.project_sessions.projects.iter().position(|slot| slot.task_space.is_integration() && slot.repository_key() == repository) else { return; };
+        if event != "flush" {
+            self.chrome.captain_pending.entry(repository.clone()).or_default().push(format!("{event}: {title} — {}", digest.as_deref().unwrap_or("")));
+        }
         let Some(session) = self.project_sessions.sessions.get(integration) else {
             return;
         };
-        let panel = session.agent_panel.clone();
+        let panel = session.fleet_agents[0].clone();
         let exe = std::env::current_exe()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "necoder".to_string());
@@ -74,12 +72,14 @@ impl Workspace {
             "exe" => exe,
         );
         let names = captain_thread_names();
+        let index = panel.update(cx, |panel, cx| panel.ensure_named_thread(&captain_thread_name(), &names, &agent, cx));
+        if panel.read(cx).thread_busy(index) { return; }
+        let events = self.chrome.captain_pending.remove(&repository).unwrap_or_default();
+        if events.is_empty() { return; }
+        let facts = self.captain_facts(&repository, cx);
         panel.update(cx, |panel, cx| {
-            let index = panel.ensure_named_thread(&captain_thread_name(), &names, &agent, cx);
-            if panel.thread_busy(index) {
-                return; // 実行中は重ねない（次のイベント時に最新状態ごと読む）
-            }
-            panel.send_prompt_text(prompt, cx);
+            panel.focus_thread(index, cx);
+            panel.send_ledger_event(format!("{prompt}\n{facts}\n{}", events.join("\n")), cx);
         });
         cx.notify();
     }
@@ -114,7 +114,7 @@ impl Workspace {
                             .any(|status| status.activity == agent_panel::ThreadActivity::Blocked)
                     });
                 if still_blocked {
-                    workspace.wake_captain("blocked", title, digest, cx);
+                    workspace.wake_captain(session_index, "blocked", title, digest, cx);
                 }
             });
         })
@@ -148,5 +148,75 @@ impl Workspace {
                 .detach();
         }
         cx.notify();
+    }
+}
+
+impl Workspace {
+    pub(super) fn captain_facts(&self, repository: &str, cx: &App) -> String {
+        self.project_sessions.projects.iter().enumerate()
+            .filter(|(_, slot)| slot.repository_key() == repository && !slot.task_space.is_integration())
+            .map(|(index, slot)| {
+                let statuses = self.project_sessions.sessions[index].agent_statuses(cx);
+                let digest = statuses.iter().filter_map(|(_, _, status)| status.digest.as_deref()).collect::<Vec<_>>().join(" / ");
+                format!("{} | {} | {} | {}", slot.task_space.id.0, slot.task_space.title, slot.task_space.phase.as_str(), digest)
+            }).collect::<Vec<_>>().join("\n")
+    }
+
+    pub(super) fn record_human_send(&mut self, index: usize, thread: &SharedString, text: &str, cx: &mut Context<Self>) {
+        let slot = &self.project_sessions.projects[index];
+        if slot.task_space.is_integration() { return; }
+        let id = slot.task_space.id.0.clone();
+        let title = slot.task_space.title.clone();
+        let color = slot.color;
+        let repository = slot.repository_key().to_string();
+        self.chrome.captain_pending.entry(repository).or_default().push(format!("human_send: {title} / {thread}: {text}"));
+        self.push_news(NewsKind::HumanSend, color, title, text.to_string().into());
+        if let Some(storage) = self.persistence.storage.clone() {
+            let payload = serde_json::json!({"thread": thread.as_ref(), "text": text}).to_string();
+            cx.background_executor().spawn(async move {
+                if let Err(error) = storage.append_task_event(&id, "human_send", &payload) { eprintln!("human_send: {error:#}"); }
+            }).detach();
+        }
+        cx.notify();
+    }
+}
+
+impl Workspace {
+    pub(super) fn render_captain_card(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let session = &self.project_sessions.sessions[index];
+        let repository = self.project_sessions.projects[index].repository_key();
+        let panel = session.fleet_agents[0].clone();
+        let mut tabs = div().flex_none().flex().gap(px(12.)).px(px(12.)).h(px(30.));
+        for (tab, key) in [(0usize, "captain.title"), (1, "captain.log"), (2, "captain.tasks")] {
+            tabs = tabs.child(div().id(("captain-tab", tab)).cursor_pointer().text_size(px(12.)).text_color(self.theme.fg1)
+                .border_b_2().border_color(if tab == self.chrome.captain_tab { self.accent() } else { self.theme.border })
+                .child(SharedString::from(i18n::t!(key))).on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                    this.chrome.captain_tab = tab; cx.notify();
+                })));
+        }
+        let body = match self.chrome.captain_tab {
+            1 => {
+                let mut log = div().id("captain-log").size_full().overflow_y_scroll().p(px(12.));
+                for item in self.notifications.news.iter().filter(|item| item.kind == NewsKind::Captain) {
+                    log = log.child(div().py(px(6.)).text_size(px(12.)).text_color(self.theme.fg1)
+                        .child(SharedString::from(format!("{} · ✳ {}", agent_panel::relative_time_label(item.at_ms), item.text))));
+                }
+                log.into_any_element()
+            }
+            2 => {
+                let mut tasks = div().id("captain-tasks").size_full().overflow_y_scroll().p(px(12.));
+                for (target, slot) in self.project_sessions.projects.iter().enumerate().filter(|(_, slot)| slot.repository_key() == repository && !slot.task_space.is_integration()) {
+                    tasks = tasks.child(div().id(("captain-task", target)).cursor_pointer().py(px(6.)).text_size(px(12.)).text_color(slot.color)
+                        .child(slot.task_space.title.clone()).on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.switch_project(target, window, cx))));
+                }
+                tasks.into_any_element()
+            }
+            _ => panel.cached(StyleRefinement::default().flex().flex_col().size_full()).into_any_element(),
+        };
+        div().flex_1().min_w_0().min_h_0().flex().flex_col().rounded(px(8.)).overflow_hidden().border_1().border_color(self.theme.border).bg(self.theme.bg0)
+            .child(div().h(px(2.)).flex_none().bg(self.accent()))
+            .child(div().px(px(12.)).py(px(8.)).text_size(px(13.)).text_color(self.theme.fg0).child(SharedString::from(format!("⚑ Captain · {}", self.project_sessions.projects[index].branch.as_deref().unwrap_or("")))))
+            .child(div().px(px(12.)).pb(px(8.)).text_size(px(10.)).text_color(self.theme.fg2).child(i18n::t!("captain.human_gate")))
+            .child(tabs).child(div().flex_1().min_h_0().child(body)).into_any_element()
     }
 }

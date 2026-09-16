@@ -143,6 +143,8 @@ struct SelectorChoice {
 enum Entry {
     /// ユーザー発話（bg2 箱・左縁スレッド色）。
     User(SharedString),
+    /// 台帳から受け取ったイベント。人間の発話とは別に保存・描画する。
+    LedgerEvent(SharedString),
     /// 思考（常時展開・斜体）。
     Thinking(SharedString),
     /// ステップ（⏺ ツール名 + 引数 → ⎿ 結果）。Edit は before/after 差分、Bash 等は出力を持てる。
@@ -189,6 +191,40 @@ struct RegionId {
 }
 
 /// transcript の選択可能リージョン（毎フレーム再構築・M13）。
+/// transcript の 1 リンク（描画時に確定した byte 範囲 + 解決済みの行き先）。
+///
+/// 検出は `ui::links`（ターミナルと共有）だが、**リンクにするかはここで決める**: 実測では
+/// パスらしきトークンの 8 割が `0.5` / `v0.1.17` / `ja/en` のような非パスなので、
+/// プロジェクト索引か実在で解決できたものだけを下線にする（2026-09-16・JOURNAL）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct TranscriptLink {
+    range: Range<usize>,
+    destination: LinkDestination,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum LinkDestination {
+    /// OS 既定のブラウザへ。
+    Url(SharedString),
+    /// necoder で開く（`line`/`column` は 1 始まり）。
+    File {
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
+}
+
+/// ブロック本文 hash → 解決済みリンク列の小さな LRU（描画毎の再走査と再解決を避ける）。
+#[derive(Default)]
+struct TranscriptLinkCache {
+    items: HashMap<ContentCacheKey, (SharedString, Rc<Vec<TranscriptLink>>)>,
+    order: VecDeque<ContentCacheKey>,
+}
+
+impl TranscriptLinkCache {
+    const CAPACITY: usize = 256;
+}
+
 struct SelectableRegion {
     /// 画面上の位置で決まる同一性。選択範囲の前後はこの順で比べる。
     id: RegionId,
@@ -199,6 +235,8 @@ struct SelectableRegion {
     /// **実際に描かれた**矩形（paint 時に記録）。`None` = このフレームでは画面に出ていない
     /// （＝ `list` の計測専用パスで積まれただけ）。ヒットテストはこれを持つものだけを見る。
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// このリージョンの中のリンク（byte 範囲はこのテキスト基準）。クリックのヒットテストに使う。
+    links: Rc<Vec<TranscriptLink>>,
 }
 
 /// 積まれたリージョンを**画面順（id 順）**に並べた index 列。同じ id が二度積まれた場合
@@ -619,6 +657,7 @@ struct PendingPermission {
 /// workspace への通知イベント（トースト・色リンク・statusbar ドット・M12-4/5）。
 #[derive(Debug, Clone)]
 pub enum PanelEvent {
+    HumanSend { thread: SharedString, text: String },
     /// prompt を ACP session へ送る直前。Fleet Task lifecycle の `working` 起点。
     TurnStarted { thread: SharedString, color: Hsla },
     /// ターン完了（summary = 触ったファイル数・経過秒 / digest = 最後の発言の末尾・P1）。
@@ -654,6 +693,15 @@ pub enum PanelEvent {
     /// 初回ターン後に AI がスレッド名を付けた（#6）。Task 名がプレースホルダのままなら
     /// workspace が Task 名にも引き継ぐ（2026-07-24・タスク命名）。
     ThreadAutoNamed { name: SharedString },
+    /// transcript のパスリンクをクリックした（M12-17）。行/桁は**1 始まり**のまま渡す
+    /// （0 始まりへの変換と「エディタで開くか OS 既定か」の判断は workspace の責務）。
+    OpenPathRequest {
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
+    /// transcript の URL をクリックした（OS 既定のブラウザへ）。
+    OpenUrlRequest { url: SharedString },
     /// エージェントの編集を承認した（色リンク用・M12-4）。
     FilesTouched {
         files: Vec<std::path::PathBuf>,
@@ -1357,7 +1405,7 @@ fn cap_output(text: &str) -> (String, usize) {
 
 fn entry_plain_text(entry: &Entry) -> String {
     match entry {
-        Entry::User(text) | Entry::Thinking(text) | Entry::Agent(text) => text.to_string(),
+        Entry::User(text) | Entry::LedgerEvent(text) | Entry::Thinking(text) | Entry::Agent(text) => text.to_string(),
         Entry::Step {
             tool, args, result, ..
         } => match result {
@@ -1485,6 +1533,7 @@ pub struct AgentPanel {
     /// 列が 3 本並ぶ面では、work pane のタブ行と二重になって中身の高さを食うため、
     /// スレッドの切替は左の作業ツリーとペインのタブに任せる（UI-SPEC §6.1）。
     embedded: bool,
+    prompt_context: std::collections::HashMap<String, String>,
     /// List ビューの縦スクロール（スレッドが多いときリスト内で送る）。
     thread_list_scroll: ScrollHandle,
     /// transcript の選択可能リージョン（render で clear→push・mouse イベントが読む）。
@@ -1504,6 +1553,14 @@ pub struct AgentPanel {
     markdown_cache: Rc<RefCell<MarkdownBlockCache>>,
     /// 選択されていない本文の `StyledText`（shape/wrap 済み TextLayout を含む）。
     styled_text_cache: Rc<RefCell<StyledTextEntityCache>>,
+    /// ブロック本文 → 解決済みリンク（描画毎の再走査を避ける）。
+    link_cache: Rc<RefCell<TranscriptLinkCache>>,
+    /// トークン → 解決先（`None` = リンクにしない）。宛先プロジェクトが変われば捨てる。
+    link_resolutions: Rc<RefCell<HashMap<String, Option<PathBuf>>>>,
+    /// いまポインタが乗っているリンク（カーソルを指差しに変えるためだけに持つ）。
+    hovered_link: Option<(RegionId, Range<usize>)>,
+    /// 押した時にリンクの上だった（up で選択が空のままなら開く＝ドラッグ選択と両立させる）。
+    pressed_link: Option<(RegionId, Range<usize>)>,
     /// composer 下部の選択ピルのうち開いているメニュー（None = 閉）。
     open_menu: Option<Selector>,
     /// Add context の候補（プロジェクトのファイル相対パス。workspace が渡す）と開閉。
@@ -1829,6 +1886,7 @@ PYEOF"#;
             tabs_scroll: ScrollHandle::new(),
             tabs_view: initial_tabs_view(&settings::get(cx).agent_tabs_view),
             embedded: false,
+            prompt_context: std::collections::HashMap::new(),
             thread_list_scroll: ScrollHandle::new(),
             transcript_regions: Rc::new(RefCell::new(Vec::new())),
             transcript_region_cursor: Cell::new(RegionId { item: 0, sub: 0 }),
@@ -1838,6 +1896,10 @@ PYEOF"#;
             syntax_cache,
             markdown_cache,
             styled_text_cache,
+            link_cache: Rc::new(RefCell::new(TranscriptLinkCache::default())),
+            link_resolutions: Rc::new(RefCell::new(HashMap::new())),
+            hovered_link: None,
+            pressed_link: None,
             open_menu: None,
             context_files: Vec::new(),
             context_menu_open: false,
@@ -2003,6 +2065,7 @@ PYEOF"#;
                     .into_iter()
                     .map(|(role, content)| match role.as_str() {
                         "user" => Entry::User(content.into()),
+                        "ledger_event" => Entry::LedgerEvent(content.into()),
                         "thinking" => Entry::Thinking(content.into()),
                         "step" => Entry::Step {
                             id: None,
@@ -2078,6 +2141,7 @@ PYEOF"#;
         for entry in thread.entries.iter().skip(thread.persisted_entries) {
             let (role, content) = match entry {
                 Entry::User(text) => ("user", text.to_string()),
+                Entry::LedgerEvent(text) => ("ledger_event", text.to_string()),
                 Entry::Thinking(text) => ("thinking", text.to_string()),
                 Entry::Step { tool, .. } => ("step", tool.to_string()),
                 Entry::Agent(text) => ("agent", text.to_string()),
@@ -2214,6 +2278,8 @@ PYEOF"#;
         if destination_changed {
             // 別プロジェクトの候補を出したままにしない（新しい一覧が届くまでは空）。
             self.context_files.clear();
+            // パスリンクの解決も別ルート基準になる。
+            self.forget_link_resolutions();
             for thread in &mut self.threads {
                 thread.command_tx = None;
             }
@@ -2232,6 +2298,8 @@ PYEOF"#;
             return;
         }
         self.context_files = files;
+        // 索引が届くまで解決できなかったトークンを引き直す（裸のファイル名はこの索引で効く）。
+        self.forget_link_resolutions();
         cx.notify();
     }
 
@@ -2492,6 +2560,7 @@ PYEOF"#;
             .map(|entry| {
                 let (bullet, text): (&str, SharedString) = match entry {
                     Entry::User(text) => ("▸", text.clone()),
+                    Entry::LedgerEvent(text) => ("◇", text.clone()),
                     Entry::Thinking(text) => ("✳", text.clone()),
                     Entry::Step { tool, result, .. } => {
                         ("⏺", result.clone().unwrap_or_else(|| tool.clone()))
@@ -2513,6 +2582,17 @@ PYEOF"#;
         &self,
         text: SharedString,
         base_highlights: Vec<(Range<usize>, HighlightStyle)>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        self.push_selectable_with_links(text, base_highlights, Rc::new(Vec::new()), cx)
+    }
+
+    /// リンク付きの選択可能テキスト。`links` の byte 範囲は `text` 基準（クリックのヒットテスト用）。
+    fn push_selectable_with_links(
+        &self,
+        text: SharedString,
+        base_highlights: Vec<(Range<usize>, HighlightStyle)>,
+        links: Rc<Vec<TranscriptLink>>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let id = self.transcript_region_cursor.get();
@@ -2580,6 +2660,7 @@ PYEOF"#;
             text,
             styled: styled.clone(),
             bounds: bounds.clone(),
+            links,
         });
         RecordedBounds {
             child: styled.into_any_element(),
@@ -2591,6 +2672,229 @@ PYEOF"#;
     /// 装飾なしの選択可能テキスト（プレーンなエントリ用）。
     fn selectable_text(&self, text: SharedString, cx: &mut Context<Self>) -> gpui::AnyElement {
         self.push_selectable(text, Vec::new(), cx)
+    }
+
+    /// 解決結果を覚えておくトークン数の上限（超えたら捨てて引き直す）。
+    const LINK_RESOLUTION_CAPACITY: usize = 4096;
+
+    /// リンク検出つきの素テキスト（ツールの引数行など、markdown を通らない 1 行用）。
+    fn linked_text(&self, text: SharedString, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let links = self.transcript_links(text.as_ref(), &[]);
+        let highlights = self.link_highlights(&links);
+        self.push_selectable_with_links(text, highlights, links, cx)
+    }
+
+    /// 1 ブロックぶんの本文からリンクを拾って解決する（結果は本文 hash でキャッシュ）。
+    ///
+    /// 順番が大事: **markdown リンク（`[text](dest)`）を先に**取る。実測（2026-09-16）では
+    /// エージェントの引用の主流がこの形で、本文には表示テキストしか出ないため、素のトークン走査
+    /// だけでは行き先を失う。素のトークンは markdown リンクと重ならないものだけ足す。
+    fn transcript_links(
+        &self,
+        text: &str,
+        spans: &[markdown::Span],
+    ) -> Rc<Vec<TranscriptLink>> {
+        if text.is_empty() {
+            return Rc::new(Vec::new());
+        }
+        let key = content_cache_key(text);
+        if let Some((cached_text, links)) = self.link_cache.borrow().items.get(&key) {
+            if cached_text.as_ref() == text {
+                return links.clone();
+            }
+        }
+        let mut links: Vec<TranscriptLink> = Vec::new();
+        for span in spans {
+            let markdown::SpanKind::Link { destination } = &span.kind else {
+                continue;
+            };
+            let Some(target) = ui::links::parse_target(destination) else {
+                continue;
+            };
+            if let Some(destination) = self.resolve_link_target(&target) {
+                links.push(TranscriptLink {
+                    range: span.range.clone(),
+                    destination,
+                });
+            }
+        }
+        for found in ui::links::find_links(text) {
+            let overlaps = links
+                .iter()
+                .any(|link| link.range.start < found.range.end && found.range.start < link.range.end);
+            if overlaps {
+                continue;
+            }
+            if let Some(destination) = self.resolve_link_target(&found.target) {
+                links.push(TranscriptLink {
+                    range: found.range,
+                    destination,
+                });
+            }
+        }
+        links.sort_by_key(|link| link.range.start);
+        let links = Rc::new(links);
+        let mut cache = self.link_cache.borrow_mut();
+        while cache.order.len() >= TranscriptLinkCache::CAPACITY {
+            if let Some(expired) = cache.order.pop_front() {
+                cache.items.remove(&expired);
+            }
+        }
+        cache.order.push_back(key);
+        cache
+            .items
+            .insert(key, (SharedString::from(text.to_owned()), links.clone()));
+        links
+    }
+
+    /// 検出結果を「開ける行き先」へ。解決できなければ `None` = リンクにしない。
+    fn resolve_link_target(&self, target: &ui::links::LinkTarget) -> Option<LinkDestination> {
+        match target {
+            ui::links::LinkTarget::Url(url) => Some(LinkDestination::Url(url.clone().into())),
+            ui::links::LinkTarget::Path { path, line, column } => {
+                Some(LinkDestination::File {
+                    path: self.resolve_link_path(path)?,
+                    line: *line,
+                    column: *column,
+                })
+            }
+        }
+    }
+
+    /// トークン → 実ファイル（memo つき）。宛先が変わると [`Self::forget_link_resolutions`] で捨てる。
+    fn resolve_link_path(&self, token: &str) -> Option<PathBuf> {
+        if let Some(cached) = self.link_resolutions.borrow().get(token) {
+            return cached.clone();
+        }
+        let resolved = self.resolve_link_path_uncached(token);
+        let mut resolutions = self.link_resolutions.borrow_mut();
+        // タイプライタ表示は 1 文字ずつ本文が伸びるので、途中の断片（`crates/agent_pa`）まで
+        // 解けなかった記録が溜まる。idle メモリも予算対象（CLAUDE.md）なので上限で畳む。
+        if resolutions.len() >= Self::LINK_RESOLUTION_CAPACITY {
+            resolutions.clear();
+        }
+        resolutions.insert(token.to_string(), resolved.clone());
+        resolved
+    }
+
+    /// 解決規則（上から）:
+    /// 1. プロジェクト索引（`context_files` = @mention と同じ一覧）に**一意に**当たる
+    ///    — 裸の `agent_panel.rs` はここで効く。`lib.rs` のように複数当たるものはリンクにしない
+    /// 2. 絶対パス / `~` — ローカル宛先なら実在を確かめる（他プロジェクトのファイルもここで開ける）
+    /// 3. ルート相対で実在する — 索引に無い（gitignore 済み・生成物）ファイルの救済
+    ///
+    /// リモート宛先ではローカルの fs を触らない（別マシンのパスをこちらで stat しても意味が無い）。
+    fn resolve_link_path_uncached(&self, token: &str) -> Option<PathBuf> {
+        let root = self.dest_cwd.as_ref()?;
+        let local = !self.dest_host.is_remote();
+        let candidate = Path::new(token);
+        if candidate.is_absolute() {
+            return (!local || candidate.is_file()).then(|| candidate.to_path_buf());
+        }
+        if let Some(rest) = token.strip_prefix("~/") {
+            if !local {
+                return None; // リモートの ~ はこちらの home ではない
+            }
+            let expanded = paths::home_dir()?.join(rest);
+            return expanded.is_file().then_some(expanded);
+        }
+        let suffix = format!("/{token}");
+        let mut hit: Option<&SharedString> = None;
+        for entry in &self.context_files {
+            if entry.as_ref() == token {
+                hit = Some(entry);
+                break;
+            }
+            if entry.ends_with(suffix.as_str()) {
+                if hit.is_some() {
+                    return None; // 曖昧（`lib.rs` が 4 つ等）= どれとも決められないので開かない
+                }
+                hit = Some(entry);
+            }
+        }
+        if let Some(hit) = hit {
+            return Some(root.join(hit.as_ref()));
+        }
+        if !local {
+            return None;
+        }
+        let relative = root.join(token);
+        relative.is_file().then_some(relative)
+    }
+
+    /// 宛先プロジェクトが変わった／索引が届いた = 解決結果を捨てる（別ルートで解決し直す）。
+    fn forget_link_resolutions(&self) {
+        self.link_resolutions.borrow_mut().clear();
+        let mut cache = self.link_cache.borrow_mut();
+        cache.items.clear();
+        cache.order.clear();
+    }
+
+    /// リンクの見た目。**色は増やさない** — markdown リンクと同じ syn-fn + 1px 下線（UI-SPEC §1.3）。
+    fn link_highlights(&self, links: &[TranscriptLink]) -> Vec<(Range<usize>, HighlightStyle)> {
+        let color = self.theme.syntax.function;
+        links
+            .iter()
+            .map(|link| {
+                (
+                    link.range.clone(),
+                    HighlightStyle {
+                        color: Some(color),
+                        underline: Some(gpui::UnderlineStyle {
+                            thickness: px(1.),
+                            color: Some(color),
+                            wavy: false,
+                        }),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// 座標の真下にあるリンク。`index_for_position` が `Err`（= テキストの外）の時は拾わない
+    /// ＝ 行末の余白をクリックしても最後のリンクが暴発しない。
+    fn link_at(
+        &self,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &App,
+    ) -> Option<(RegionId, Range<usize>, LinkDestination)> {
+        // 画面順に並べ替える必要は無い（矩形に入っているかだけを見る。計測専用で積まれた重複は
+        // bounds を持たないので自然に外れる）。hover の度に走るので、ここは素直に線形で回す。
+        let regions = self.transcript_regions.borrow();
+        for region in regions.iter() {
+            if region.links.is_empty() {
+                continue;
+            }
+            let Some(bounds) = region.bounds.get() else {
+                continue;
+            };
+            if !bounds.contains(&position) {
+                continue;
+            }
+            let layout = &region.styled.read(cx).layout;
+            let Ok(offset) = layout.index_for_position(position) else {
+                return None;
+            };
+            return region
+                .links
+                .iter()
+                .find(|link| link.range.contains(&offset))
+                .map(|link| (region.id, link.range.clone(), link.destination.clone()));
+        }
+        None
+    }
+
+    /// リンクを開く。ファイルは workspace（タブ/ジャンプ/既定アプリの判断を持つ側）へ委ねる。
+    fn activate_link(&mut self, destination: LinkDestination, cx: &mut Context<Self>) {
+        match destination {
+            LinkDestination::Url(url) => cx.emit(PanelEvent::OpenUrlRequest { url }),
+            LinkDestination::File { path, line, column } => cx.emit(PanelEvent::OpenPathRequest {
+                path,
+                line,
+                column,
+            }),
+        }
     }
 
     /// リージョンに掛かる選択 byte range（無ければ None。offset はヒットテスト由来 = char 境界保証）。
@@ -2733,6 +3037,11 @@ PYEOF"#;
         // 出力欄自身へフォーカスを置く。以前は bubble 先の root が composer を focus し、
         // ⌘C の成否が composer 側の選択状態に左右されていた。
         self.transcript_focus.focus(window, cx);
+        // リンクの上で押したことを覚える（開くのは up。ドラッグ選択の起点は従来どおり残す）。
+        self.pressed_link = self
+            .link_at(event.position, cx)
+            .filter(|_| event.click_count == 1)
+            .map(|(region, range, _)| (region, range));
         let point = self.transcript_point_at(event.position, cx);
         // ダブルクリック=単語 / トリプル=そのブロック（段落）を選択（エディタ/ブラウザの所作・2026-08-18）。
         // 単一クリックは従来どおりキャレットを置き、ドラッグ選択の起点にする（`selecting = true`）。
@@ -2772,6 +3081,14 @@ PYEOF"#;
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // リンクの上に居るか（カーソル形状のためだけ）。変わった時しか notify しない。
+        let hovered = self
+            .link_at(event.position, cx)
+            .map(|(region, range, _)| (region, range));
+        if self.hovered_link != hovered {
+            self.hovered_link = hovered;
+            cx.notify();
+        }
         if !self
             .transcript_selection
             .as_ref()
@@ -2795,17 +3112,32 @@ PYEOF"#;
 
     fn on_transcript_mouse_up(
         &mut self,
-        _event: &MouseUpEvent,
+        event: &MouseUpEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.transcript_drag_position = None;
+        let clicked_without_dragging = self
+            .transcript_selection
+            .as_ref()
+            .is_none_or(|selection| selection.start == selection.end);
         if let Some(selection) = self.transcript_selection.as_mut() {
             selection.selecting = false;
             if selection.start == selection.end {
                 self.transcript_selection = None; // ただのクリック = 選択なし
             }
             cx.notify();
+        }
+        // 押した時と同じリンクの上で離した時だけ開く（範囲選択のドラッグでは開かない）。
+        if let Some((region, range)) = self.pressed_link.take() {
+            if clicked_without_dragging {
+                let released = self.link_at(event.position, cx);
+                if let Some((hit_region, hit_range, destination)) = released {
+                    if hit_region == region && hit_range == range {
+                        self.activate_link(destination, cx);
+                    }
+                }
+            }
         }
     }
 
@@ -4413,6 +4745,9 @@ PYEOF"#;
         if prompt.is_empty() {
             return;
         }
+        if let Some(thread) = self.threads.get(self.active) {
+            cx.emit(PanelEvent::HumanSend { thread: thread.name.clone(), text: prompt.clone() });
+        }
         self.composer.update(cx, |composer, cx| composer.clear(cx));
         if let Some(thread) = self.threads.get_mut(self.active) {
             thread.draft.clear();
@@ -4508,10 +4843,22 @@ PYEOF"#;
 
     /// prompt テキストをアクティブスレッドへ積み、常駐 ACP セッションへ送る（composer 非依存）。
     /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
+    pub fn set_prompt_context(&mut self, thread: usize, context: String) {
+        if let Some(thread) = self.threads.get(thread) { self.prompt_context.insert(thread.id.to_string(), context); }
+    }
+
+    pub fn send_ledger_event(&mut self, prompt: String, cx: &mut Context<Self>) {
+        self.send_prompt_entry(prompt, true, cx);
+    }
+
     pub fn send_prompt_text(&mut self, prompt: String, cx: &mut Context<Self>) {
+        self.send_prompt_entry(prompt, false, cx);
+    }
+
+    fn send_prompt_entry(&mut self, prompt: String, ledger: bool, cx: &mut Context<Self>) {
         let thread_index = self.active;
         // 添付コンテキストを prompt 先頭へ `@path` として付ける（表示は素の prompt のまま）。
-        let context_prefix: String = self
+        let mut context_prefix: String = self
             .threads
             .get(thread_index)
             .map(|thread| {
@@ -4522,6 +4869,9 @@ PYEOF"#;
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(context) = self.threads.get(thread_index).and_then(|thread| self.prompt_context.get(thread.id.as_str())) {
+            context_prefix.push_str(context);
+        }
         let full_prompt = if context_prefix.is_empty() {
             prompt.clone()
         } else {
@@ -4530,7 +4880,7 @@ PYEOF"#;
         if let Some(thread) = self.threads.get_mut(thread_index) {
             thread
                 .entries
-                .push(Entry::User(SharedString::from(prompt.clone())));
+                .push(if ledger { Entry::LedgerEvent(prompt.clone().into()) } else { Entry::User(prompt.clone().into()) });
             thread.running = true;
             thread.auth_required = false; // 送信＝再接続（同じセッションへ送る。adapter 側で resume）
             thread.done = None; // 新しいターン開始＝直前の「完了・未確認」ラッチは消す
@@ -6661,7 +7011,12 @@ PYEOF"#;
             .flex_col()
             .min_h_0()
             .bg(theme.bg1)
-            .cursor(CursorStyle::IBeam)
+            // リンクの上だけ指差し（範囲は行内の一部なので hitbox では表せない = hover 状態で切替）。
+            .cursor(if self.hovered_link.is_some() {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::IBeam
+            })
             // List が wheel を処理し、親は浮遊ボタンの出没だけ再評価する。
             .on_scroll_wheel(cx.listener(|_, _: &gpui::ScrollWheelEvent, _, cx| cx.notify()))
             .on_mouse_down(
@@ -6843,6 +7198,8 @@ PYEOF"#;
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         match entry {
+            Entry::LedgerEvent(text) => div().p(px(10.)).rounded(px(6.)).bg(theme.bg2).text_size(px(11.)).text_color(theme.fg2)
+                .child(SharedString::from(format!("◇ {}\n{text}", i18n::t!("captain.ledger_event")))).into_any_element(),
             // checkpoint 行（⟲ この時点へ戻す・M12-2）。クリックで blob から全ファイルを書き戻す。
             Entry::Checkpoint { id, label } => {
                 let checkpoint_id = *id;
@@ -7086,7 +7443,7 @@ PYEOF"#;
                                         .font_family("Guguru Sans Code")
                                         .text_size(px(11.))
                                         .text_color(theme.fg2)
-                                        .child(self.selectable_text(args.clone(), cx)),
+                                        .child(self.linked_text(args.clone(), cx)),
                                 )
                             }),
                     );
@@ -7156,7 +7513,7 @@ PYEOF"#;
                                     .font_family("Guguru Sans Code")
                                     .text_size(px(11.))
                                     .text_color(theme.fg2)
-                                    .child(self.selectable_text(args.clone(), cx)),
+                                    .child(self.linked_text(args.clone(), cx)),
                             ),
                         );
                     }
@@ -7266,6 +7623,20 @@ PYEOF"#;
         }
     }
 
+    /// markdown の 1 ブロック（本文 + インライン装飾）を、リンク検出つきで積む。
+    fn push_markdown_text(
+        &self,
+        text: String,
+        spans: &[markdown::Span],
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let links = self.transcript_links(&text, spans);
+        let highlights =
+            gpui::combine_highlights(self.md_highlights(spans), self.link_highlights(&links))
+                .collect();
+        self.push_selectable_with_links(text.into(), highlights, links, cx)
+    }
+
     /// markdown テキストをブロック列（GPUI 要素）へ描く。各ブロック = 1 選択リージョン（M13。
     /// 表はセル毎）で、装飾は `combine_highlights` で選択背景と安全に合成される。インラインコードは
     /// mono 不可（`HighlightStyle` に font-family が無い）ため syn-mac 色 + 薄背景で表す。引用装飾は後続。
@@ -7294,11 +7665,11 @@ PYEOF"#;
                         .text_size(px(size))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.fg0)
-                        .child(self.push_selectable(text.into(), self.md_highlights(&spans), cx))
+                        .child(self.push_markdown_text(text, &spans, cx))
                         .into_any_element()
                 }
                 markdown::Block::Paragraph { text, spans } => div()
-                    .child(self.push_selectable(text.into(), self.md_highlights(&spans), cx))
+                    .child(self.push_markdown_text(text, &spans, cx))
                     .into_any_element(),
                 markdown::Block::Code { lang, text } => {
                     let language = lang.as_deref().and_then(lang::LanguageId::from_name);
@@ -7380,11 +7751,12 @@ PYEOF"#;
                         .gap(px(7.))
                         .pl(px(2.0 + depth as f32 * 16.0))
                         .child(div().flex_none().text_color(theme.fg2).child(bullet))
-                        .child(div().flex_1().min_w_0().child(self.push_selectable(
-                            text.into(),
-                            self.md_highlights(&spans),
-                            cx,
-                        )))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(self.push_markdown_text(text, &spans, cx)),
+                        )
                         .into_any_element()
                 }
                 markdown::Block::Rule => div()
@@ -7470,11 +7842,7 @@ PYEOF"#;
                             Some(markdown::TableAlign::Right) => element.text_right(),
                             _ => element,
                         };
-                        element.child(self.push_selectable(
-                            cell.text.into(),
-                            self.md_highlights(&cell.spans),
-                            cx,
-                        ))
+                        element.child(self.push_markdown_text(cell.text, &cell.spans, cx))
                     }))
             };
         div()
@@ -7497,7 +7865,7 @@ PYEOF"#;
         spans
             .iter()
             .map(|span| {
-                let style = match span.kind {
+                let style = match &span.kind {
                     markdown::SpanKind::Strong => HighlightStyle {
                         font_weight: Some(FontWeight::BOLD),
                         ..Default::default()
@@ -7518,7 +7886,7 @@ PYEOF"#;
                         background_color: Some(self.theme.bg3),
                         ..Default::default()
                     },
-                    markdown::SpanKind::Link => HighlightStyle {
+                    markdown::SpanKind::Link { .. } => HighlightStyle {
                         color: Some(syntax.function),
                         underline: Some(gpui::UnderlineStyle {
                             thickness: px(1.),
@@ -9722,6 +10090,7 @@ fn apply_thread_defaults(thread: &mut Thread, cx: &App) {
 fn entry_from_turn((role, content): (String, String)) -> Entry {
     match role.as_str() {
         "user" => Entry::User(content.into()),
+                        "ledger_event" => Entry::LedgerEvent(content.into()),
         "thinking" => Entry::Thinking(content.into()),
         "step" => Entry::Step {
             id: None,
@@ -11541,5 +11910,159 @@ PYEOF"#;
             let size = image.size(0);
             assert!(size.width.0 > 0 && size.height.0 > 0, "{name} が空画像");
         }
+    }
+
+    /// transcript のリンク（M12-17）。**解決できたものだけ**を下線にする規律の回帰テスト。
+    /// 期待値は実スレッド 2,734 ターンの実測（JOURNAL 2026-09-16）から採った形をそのまま使う。
+    #[gpui::test]
+    fn transcript_links_only_cover_what_resolves(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "transcript-links");
+        let root = std::env::temp_dir().join(format!(
+            "necoder_links_{}_{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        for relative in [
+            "crates/agent_panel/src/agent_panel.rs",
+            "crates/explorer/src/lib.rs",
+            "crates/git_ui/src/lib.rs",
+            "docs/ROADMAP.md",
+            "target/debug/build.log",
+        ] {
+            let path = root.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("テスト用ディレクトリを作れない");
+            }
+            std::fs::write(&path, "test").expect("テスト用ファイルを書けない");
+        }
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_destination(
+                "necoder".into(),
+                None,
+                LocalHost::shared(),
+                Some(root.clone()),
+                cx,
+            );
+            // 索引が届く前は、裸のファイル名は解決できない（絶対パスと URL は届く前から効く）。
+            assert!(panel.transcript_links("agent_panel.rs を直した", &[]).is_empty());
+
+            // @mention と同じ一覧（gitignore 済みの target/ は入らない）。
+            panel.set_context_files(
+                vec![
+                    "crates/agent_panel/src/agent_panel.rs".into(),
+                    "crates/explorer/src/lib.rs".into(),
+                    "crates/git_ui/src/lib.rs".into(),
+                    "docs/ROADMAP.md".into(),
+                ],
+                cx,
+            );
+
+            // ① 裸のファイル名 + 行番号 = 実測で最多の形。索引で一意に当たるので開ける。
+            let text = "agent_panel.rs:42 を直した";
+            let links = panel.transcript_links(text, &[]);
+            assert_eq!(links.len(), 1, "{links:?}");
+            assert_eq!(&text[links[0].range.clone()], "agent_panel.rs:42");
+            assert_eq!(
+                links[0].destination,
+                LinkDestination::File {
+                    path: root.join("crates/agent_panel/src/agent_panel.rs"),
+                    line: Some(42),
+                    column: None,
+                }
+            );
+
+            // ② 同名が複数ある（`lib.rs` は 2 つ）= どれとも決められないのでリンクにしない。
+            assert!(panel.transcript_links("lib.rs を見て", &[]).is_empty());
+
+            // ③ 誤爆の常連（バージョン番号・秒数・`ja/en` のような並記）。
+            assert!(panel
+                .transcript_links("0.5 倍で v0.1.17 を出す。ja/en 両方に書く", &[])
+                .is_empty());
+
+            // ④ 索引に無くてもディスクにあれば開ける（生成物・gitignore 済みの救済）。
+            let links = panel.transcript_links("target/debug/build.log を見て", &[]);
+            assert_eq!(links.len(), 1, "{links:?}");
+            assert_eq!(
+                links[0].destination,
+                LinkDestination::File {
+                    path: root.join("target/debug/build.log"),
+                    line: None,
+                    column: None,
+                }
+            );
+
+            // ⑤ 実在しないパスは下線にしない（死んだリンクを作らない）。
+            assert!(panel.transcript_links("docs/NOPE.md は無い", &[]).is_empty());
+
+            // ⑥ markdown リンク（実測 163 件の引用形式）。本文に出ない dest から行き先を取る。
+            let absolute = root.join("docs/ROADMAP.md");
+            let source = format!("[ROADMAP.md]({}:157) を見て", absolute.display());
+            let blocks = markdown::parse(&source);
+            let Some(markdown::Block::Paragraph { text, spans }) = blocks.first() else {
+                panic!("段落が来ていない: {blocks:?}");
+            };
+            let links = panel.transcript_links(text, spans);
+            assert_eq!(links.len(), 1, "{links:?}");
+            assert_eq!(&text[links[0].range.clone()], "ROADMAP.md");
+            assert_eq!(
+                links[0].destination,
+                LinkDestination::File {
+                    path: absolute,
+                    line: Some(157),
+                    column: None,
+                }
+            );
+
+            // ⑦ URL はブラウザ行き（実在確認の対象外）。
+            let links = panel.transcript_links("詳細は https://necoder.com/docs を参照", &[]);
+            assert_eq!(links.len(), 1, "{links:?}");
+            assert_eq!(
+                links[0].destination,
+                LinkDestination::Url("https://necoder.com/docs".into())
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// クリック → イベント。行/桁は**1 始まりのまま**上へ渡す（0 始まりへの変換は workspace）。
+    #[gpui::test]
+    fn activating_a_link_emits_the_open_request(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "link-activate");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let recorder = seen.clone();
+        cx.update(|_window, cx| {
+            cx.subscribe(&panel, move |_panel, event: &PanelEvent, _cx| {
+                match event {
+                    PanelEvent::OpenPathRequest { path, line, column } => recorder
+                        .borrow_mut()
+                        .push(format!("path {} {line:?} {column:?}", path.display())),
+                    PanelEvent::OpenUrlRequest { url } => {
+                        recorder.borrow_mut().push(format!("url {url}"))
+                    }
+                    _ => {}
+                }
+            })
+            .detach();
+        });
+        panel.update(cx, |panel, cx| {
+            panel.activate_link(
+                LinkDestination::File {
+                    path: PathBuf::from("/tmp/a.rs"),
+                    line: Some(42),
+                    column: Some(7),
+                },
+                cx,
+            );
+            panel.activate_link(LinkDestination::Url("https://necoder.com".into()), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            seen.borrow().as_slice(),
+            ["path /tmp/a.rs Some(42) Some(7)", "url https://necoder.com"]
+        );
+        let _ = std::fs::remove_file(settings_path);
     }
 }

@@ -163,7 +163,6 @@ impl Workspace {
             }
         }
         self.chrome.fleet_mode = true;
-        self.chrome.fleet_center_view = FleetCenterView::Control;
         // 監督バーの ✳ 総括の描画検証（実生成は oneshot・ここは見た目の確認用）。
         self.control_summary = Some(SharedString::from(
             "バグ #412 の publish 許可が最優先 — deps の失敗は独立、LP 文言は radar clean で統合可能",
@@ -220,7 +219,7 @@ impl Workspace {
                     .iter()
                     .position(|slot| !slot.task_space.is_integration())
                 {
-                    self.chrome.fleet_maximized = Some(0);
+                    self.chrome.stage_columns = 1;
                     self.start_task_rename(index, RenameSite::Cell, window, cx);
                 }
             }
@@ -239,9 +238,7 @@ impl Workspace {
             "maximize" => {
                 self.chrome.fleet_center_view = FleetCenterView::Graph;
                 self.seed_fleet_cells(cx);
-                if !self.chrome.fleet_cells.is_empty() {
-                    self.chrome.fleet_maximized = Some(0);
-                }
+                self.chrome.stage_columns = 1;
                 cx.notify();
             }
             "terminal" => self.set_fleet_bottom_view(FleetBottomView::Terminal, cx),

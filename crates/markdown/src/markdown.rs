@@ -16,13 +16,17 @@
 use std::ops::Range;
 
 /// インライン装飾の種別（具体色は描画側でテーマから当てる＝パーサはテーマ非依存）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// `Link` だけは**行き先を持つ**。`[text](dest)` の dest は本文テキストに現れないため、ここで
+/// 運ばないと描画側が「クリックで開く」を作れない（2026-09-16）。
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SpanKind {
     Strong,
     Emphasis,
     Strikethrough,
     Code,
-    Link,
+    /// `destination` は生の dest 文字列（URL / パス / アンカーの区別は描画側の責務）。
+    Link { destination: String },
 }
 
 /// ブロックのテキストに掛かるインライン装飾（byte 範囲・ブロックのテキスト基準）。
@@ -286,12 +290,20 @@ pub fn parse(source: &str) -> Vec<Block> {
             Event::End(TagEnd::Strikethrough) if image.is_none() => {
                 close_span(&mut inline, &mut spans, SpanKind::Strikethrough, text.len())
             }
-            Event::Start(Tag::Link { .. }) if image.is_none() => {
-                inline.push((SpanKind::Link, text.len()))
-            }
-            Event::End(TagEnd::Link) if image.is_none() => {
-                close_span(&mut inline, &mut spans, SpanKind::Link, text.len())
-            }
+            Event::Start(Tag::Link { dest_url, .. }) if image.is_none() => inline.push((
+                SpanKind::Link {
+                    destination: dest_url.to_string(),
+                },
+                text.len(),
+            )),
+            Event::End(TagEnd::Link) if image.is_none() => close_span(
+                &mut inline,
+                &mut spans,
+                SpanKind::Link {
+                    destination: String::new(),
+                },
+                text.len(),
+            ),
             Event::Start(Tag::Image { dest_url, .. }) => {
                 image = Some((dest_url.to_string(), String::new()));
             }
@@ -487,18 +499,24 @@ pub fn table_columns(head: &[TableCell], rows: &[Vec<TableCell>]) -> Vec<TableCo
 }
 
 /// 開いているインライン装飾のうち種別一致の最内を閉じて Span を確定する（proper nest 前提）。
+/// 開いているインライン装飾を閉じる。`kind` は**種別の照合にだけ**使い、実際に積むのは
+/// 開いた時の値（`Link` が持つ行き先を落とさないため）。
 fn close_span(
     inline: &mut Vec<(SpanKind, usize)>,
     spans: &mut Vec<Span>,
     kind: SpanKind,
     end: usize,
 ) {
-    if let Some(position) = inline.iter().rposition(|(open_kind, _)| *open_kind == kind) {
-        let (_, start) = inline.remove(position);
+    let wanted = std::mem::discriminant(&kind);
+    if let Some(position) = inline
+        .iter()
+        .rposition(|(open_kind, _)| std::mem::discriminant(open_kind) == wanted)
+    {
+        let (open_kind, start) = inline.remove(position);
         if start < end {
             spans.push(Span {
                 range: start..end,
-                kind,
+                kind: open_kind,
             });
         }
     }
@@ -519,6 +537,38 @@ fn heading_level(level: pulldown_cmark::HeadingLevel) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_spans_carry_their_destination() {
+        // 実測（2026-09-16）で Claude が最も使う引用形式。dest を捨てるとクリックで開けない。
+        let blocks = parse("[acp_client.rs](/tmp/crates/acp_client/src/acp_client.rs:361) を直した");
+        let Some(Block::Paragraph { text, spans }) = blocks.first() else {
+            panic!("段落が来ていない: {blocks:?}");
+        };
+        assert_eq!(text, "acp_client.rs を直した");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&text[spans[0].range.clone()], "acp_client.rs");
+        assert_eq!(
+            spans[0].kind,
+            SpanKind::Link {
+                destination: "/tmp/crates/acp_client/src/acp_client.rs:361".into()
+            }
+        );
+    }
+
+    #[test]
+    fn nested_decorations_close_without_stealing_the_link_destination() {
+        // 強調の中のリンク: 種別だけで閉じるので、内側の行き先が外側に混ざらないこと。
+        let blocks = parse("**強調と [リンク](https://necoder.com) の混在**");
+        let Some(Block::Paragraph { spans, .. }) = blocks.first() else {
+            panic!("段落が来ていない: {blocks:?}");
+        };
+        assert!(spans.iter().any(|span| span.kind
+            == SpanKind::Link {
+                destination: "https://necoder.com".into()
+            }));
+        assert!(spans.iter().any(|span| span.kind == SpanKind::Strong));
+    }
 
     /// 全ブロックについて span の byte 範囲が block.text の文字境界に乗り、範囲外でないこと。
     /// 乗らないと StyledText → gpui layout_line が `split_at` で abort する（クラッシュ再現）。

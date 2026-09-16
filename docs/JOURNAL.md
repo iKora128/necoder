@@ -3014,3 +3014,97 @@
     「2 と 6 系統」までしか絞れなかったが、一軸にした2周目以降は1本に決まった。
   - `--candidates` は残してある。次に調律するときも同じ回し方ができる。
 - 次: Windows は `rodio`（W フェーズ）。それまで macOS 以外では黙る
+
+## 2026-09-16 — transcript のパスをクリックで開く（実データを見てから設計した）
+
+- やったこと: ROADMAP M12 の「トランスクリプトのパスをクリックで開く」。**手を動かす前に、実際の
+  エージェント出力を見に行った** — `~/Library/Application Support/necoder/necoder.db` の `turns` から
+  実スレッド 2,734 ターンを取り出して走査した。これで設計が 3 箇所変わった:
+  1. **Claude の引用の主流は markdown リンク**（`[acp_client.rs](/abs/path.rs:361)` が 163 件）。
+     ところが `markdown` crate は `SpanKind::Link` を**範囲としてしか持たず dest を捨てていた**ので、
+     素のトークン走査だけ作っていたら「一番よく来る形」が最後まで開けないままだった。
+  2. **裸のファイル名が最多**（`agent_panel.rs` 60 / `workspace.rs` 28 / `main.rs` 25…）。
+     ルート相対では解決できない。@mention 用の索引 `context_files` に**一意に**当たるかで解決する。
+  3. **形だけで判定すると壊れる**。パスらしきトークン 3,939 件のうち実在は 421 件で、残りは
+     `0.5` / `1.5s` / `v0.1.17` / `Apache-2.0` / `crates.io` / `//127.0.0.1:8000` / `ja/en` / `/goal`。
+     これを全部下線にしたら本文が読めない。→ **解決できたものだけをリンクにする**規律にした。
+- 実装:
+  - `ui::links`（新規・GPUI 非依存）: `find_links`（byte 範囲・URL を先に食う・`path:line:col`）と
+    `parse_target`（markdown の dest 用）。`terminal_view::find_path_links` を置き換え、
+    ターミナルは**行番号つきだけ**をリンクにする従来挙動のまま（実在確認をしない側は厳しく）。
+  - `markdown`: `SpanKind::Link { destination }`。`close_span` は**種別（discriminant）で照合し、
+    積むのは開いた時の値**に変えた（そうしないと行き先が落ちる）。
+  - `agent_panel`: `SelectableRegion.links` + `link_at`。クリックは **down で覚えて up で開く** =
+    ドラッグ選択と両立する。`index_for_position` が `Err`（テキストの外）なら発火しないので、
+    行末の余白をクリックしても行末のリンクが暴発しない。hover 中だけカーソルを指差しに。
+  - `workspace`: `PanelEvent::{OpenPathRequest, OpenUrlRequest}` → 既存の `pending_navigation`
+    （行ジャンプ）/ `crash::open_url` / `open_with_default_app`。
+- 学び/罠:
+  - **「どういう出力が来るか」は憶測せず DB に聞ける**。necoder は自分の会話を `turns` に持っている
+    ので、transcript を相手にする機能は**自分の実データを corpus にして設計できる**。通知音の時に
+    学んだ「自分が判定できないものを机上で詰めない」と同じ形の話（2026-09-14）。
+  - リンク判定は **shape（形）と resolution（実在）を分ける**と綺麗に収まる。形の層は共有でき、
+    厳しさは消費側が決められる（ターミナル = 行番号必須 / transcript = 実在必須）。
+  - 拡張子は「英字で始まり英数字だけ」に絞ると `1.5s` や `v0.1.17` が消える。代償は `.7z`。
+  - `ui` crate の lib root は `src/ui.rs` なので、サブモジュールは `src/ui/links.rs` ではなく
+    **`src/links.rs`**（crate root の隣）。`workspace` が `src/workspace/*.rs` を持てるのは
+    root が `lib.rs` で `workspace.rs` 自体がサブモジュールだから。
+  - ROADMAP の当初案「`.html` はブラウザ」は M14 の HTML プレビュータブが入った時点で古くなっていた。
+    **ユーザー判断で「プレビューで開く」に確定**（外のブラウザへ出す理由が無い）。ただし `.html` を
+    開くと既定は **source** なので、リンク経由だけ `set_rendered_html(true)` を掛ける
+    `pending_html_preview` を足した。**行番号つきで指された時は source のまま** — 行を見たいのだから
+    プレビューに化けさせない（検索ヒットやターミナルの `file:line` と同じ扱い）。
+- 検証: `ui` 7 / `markdown` 16 / `terminal_view`（全角混じり行の byte→列変換つき）/ `agent_panel` の
+  解決規則テスト（実データの形をそのまま期待値に）/ `workspace` の既定アプリ表 — すべて green。
+  `cargo run -p ui --example scan_links -- <transcript> [root]` で規則を実データに当て直せる。
+  実 transcript での歩留まりは **パス候補 3,432 → 実際に下線になるのは 797（23%）**・URL 166。
+  **実クリックの体感確認は人の手番**（ドッグフーディング中なのでこちらからは窓を上げない）。
+- 次:
+  - コードフェンス内のパスは今回対象外（diff の中まで下線にすると読みにくい）。要望が出たら足す。
+  - 同名衝突（`lib.rs` / `Cargo.toml`）は今はリンクにしない。直近で触ったファイルを優先する等の
+    「文脈で一つ選ぶ」案はあるが、外した時に別ファイルを開くのが怖いので保留。
+  - （同日中に解消）未コミットの Fleet 作業が入れたキーで落ちていた 3 件を直した。原因は 1 つ:
+    **mac の `⌘⇧G`（系譜の帯）が Windows 変換で `ctrl-shift-g`（Git パネル）と衝突**し、
+    後勝ちで `ToggleLineage` が消えていた（= Windows で「なぜか効かないキー」になる手前だった）。
+    `NON_MAC_REPLACEMENTS` に `cmd-shift-g → ctrl-alt-g` を追加。併せて新アクション 5 つ
+    （NewTask / StageOne・Two・Three / ToggleLineage）に `ACTION_LABELS` のラベルを追補し、
+    `fleet.stage_one/two/three` を ja/en に追加（キー名は FLEET-V2 §8 の予定表どおり）。
+    **この 2 本の test（Windows 衝突検出・全 bound アクションのラベル）は実際によく効く**
+    — キーを足した人に「Windows 側も考えたか」を機械で聞いている。
+
+## 2026-09-16 — Fleet v2 F2〜F5 を 1 画面に着地（舞台 / Task タブ / ＋Task / 要対応と系譜の帯）
+
+- やったこと: FLEET-V2 §10 の F2（舞台と Task カード）・F3（要対応をサイドバーへ・中央タブ廃止）・
+  F4（＋Task ダイアログ + 準備スクリプト + task.env）・F5（系譜の帯）と F6 の前半（Captain カード・
+  台帳イベントのまとめ送り・`human_send`）。途中まで書かれていた `fleet_stage.rs` / `new_task_dialog.rs`
+  を仕上げ、管制タブ本体（約 1,000 行）・中央タブ帯・旧 ＋ボタン列・拡大サムネイル列を削除した。
+- 形の判断（FLEET-V2 に「実装時の訂正」として転記）:
+  - **配置は毎 render 導出**（`stage_cards()` = ピン + 選択中を列数と幅で切る）。`fleet_cells` は
+    「Task の中身の実体一覧」に格下げし、`StageLayout` enum は作らず `stage_columns: usize`。状態を
+    2 重に持たないので、閉じる / ピン / リポジトリ切替で添字がズレる類のバグの居場所が無い。
+  - **拡大 ⤢ = 1 列化**。`fleet_maximized`（index を持つ）は close で詰め直す処理が 3 か所にあり、
+    舞台と二重管理になるので消した。ToggleFullScreen（⌘⇧⏎）も Fleet では 1 列化に写像。
+  - **`FleetCenterView` は残す**（F3 で消す予定だった）。`Work` が `workbench.rs` 全体を支えていて、
+    `work_layout.allocate()` が Task 内ターミナルの ID 割当に使われている。描画経路からは外し、削除は
+    F7 で ID 割当を移してから。中途半端に消して警告 0 を偽装しない。
+  - **準備スクリプトの有無は開いた時に 1 回だけ stat**（`NewTaskDialog.setup_script_present`）。
+    render 中に Host I/O をしない規律を守るため、ダイアログは `Option<Entity<EditorView>>` ではなく
+    小さな struct にした。「作る」は `WriteCondition::NotExists` で書いてエディタで開く（Fleet を出る）。
+- 罠:
+  - **`timeout` コマンドは macOS に無い**。`timeout 600 cargo check` は「command not found」で
+    exit 0 を返し、grep で潰すと**何も無かったように見える**。今日の最初の cargo check / test は
+    それで空振りしていた。長い cargo は `run_in_background` で回す。
+  - shell の heredoc に `<<'EOF'` を使い、中に sh テンプレの `EOF` 行を含めると**そこで切れる**。
+    テンプレ内の終端子は `ENV` に変え、編集スクリプトはファイルに落として実行した。
+  - i18n の死キー: `control.*` に 26 個、`fleet.*` に 23 個、旧管制・旧セル由来の未使用キーが
+    parity テストをすり抜けて残っていた（parity は ja/en の一致しか見ない）。2 階層の簡易 flatten で
+    `"section.key"` の文字列検索をかけて一掃。動的に組んでいるキーが無いことは `format!("fleet.` 等の
+    grep で確認してから消した。
+- 検証: `cargo check --workspace --all-targets` は workbench 由来 5 警告のみ（F7 で消える）。
+  `cargo test --workspace` 全 green（`task_slug` / `task_worktree_dir` / `task_environment` の unit と、
+  Fleet の統合テストに舞台の不変条件 4 つを追加）。**実機の目視（3 列で 420px を割らないか・Task
+  タブの切替・＋Task から 1 発で走るか・necoder 自身の `CARGO_TARGET_DIR` 共有）は本人の手番**
+  （ドッグフーディング中なので窓を上げていない）。
+- 次: F6 の残り（台帳イベントの灰色カード・承認の推薦 ✳・トークン表示・実 e2e）→ F7 掃除
+  （workbench / work_layout / FleetCenterView / `work.*` キー・UI-SPEC §11 の置換）。F2 の残 `+N −M`
+  shortstat キャッシュは transition と FilesTouched をトリガに背景で取るのが素直。

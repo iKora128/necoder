@@ -44,57 +44,6 @@ pub enum TerminalEvent {
     OpenPath { path: String, line: u32 },
 }
 
-/// 1 行のテキストから `path:line(:col)` を探す（cargo/rustc/grep の出力形式）。
-/// 戻りは (char 添字の範囲, パス, 行番号)。範囲は `:col` まで含める（クリック域を広く）。
-fn find_path_links(text: &str) -> Vec<(Range<usize>, String, u32)> {
-    let chars: Vec<char> = text.chars().collect();
-    let is_path_char =
-        |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '~' | '-');
-    let mut links = Vec::new();
-    let mut index = 0;
-    while index < chars.len() {
-        if !is_path_char(chars[index]) {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        while index < chars.len() && is_path_char(chars[index]) {
-            index += 1;
-        }
-        // `:数字` が続き、トークンがパスらしい（/ か . を含む）ならリンク。
-        if index < chars.len() && chars[index] == ':' {
-            let mut digits_end = index + 1;
-            while digits_end < chars.len() && chars[digits_end].is_ascii_digit() {
-                digits_end += 1;
-            }
-            if digits_end > index + 1 {
-                let path: String = chars[start..index].iter().collect();
-                if path.contains('/') || path.contains('.') {
-                    let line: u32 = chars[index + 1..digits_end]
-                        .iter()
-                        .collect::<String>()
-                        .parse()
-                        .unwrap_or(1);
-                    let mut end = digits_end;
-                    if end < chars.len() && chars[end] == ':' {
-                        let mut column_end = end + 1;
-                        while column_end < chars.len() && chars[column_end].is_ascii_digit() {
-                            column_end += 1;
-                        }
-                        if column_end > end + 1 {
-                            end = column_end;
-                        }
-                    }
-                    links.push((start..end, path, line));
-                    index = end;
-                    continue;
-                }
-            }
-        }
-    }
-    links
-}
-
 /// 表示セルから行を再構成してリンクを検出する。戻りは (表示行, セル列範囲, パス, 行番号)。
 fn detect_links(cells: &[RenderCell]) -> Vec<(i32, Range<usize>, String, u32)> {
     let mut rows: std::collections::BTreeMap<i32, Vec<(usize, char)>> =
@@ -110,10 +59,32 @@ fn detect_links(cells: &[RenderCell]) -> Vec<(i32, Range<usize>, String, u32)> {
     let mut links = Vec::new();
     for (line, row) in rows {
         let text: String = row.iter().map(|(_, character)| *character).collect();
-        for (char_range, path, line_number) in find_path_links(&text) {
-            let start_column = row[char_range.start].0;
-            let end_column = row[char_range.end - 1].0 + 1;
-            links.push((line, start_column..end_column, path, line_number));
+        // 検出は `ui::links`（agent_panel の transcript と共有）。ターミナルは cargo/grep の
+        // 出力が相手なので**行番号つきだけ**をリンクにする（実在確認をしないぶん厳しくする）。
+        let offsets: Vec<usize> = text.char_indices().map(|(offset, _)| offset).collect();
+        for link in ui::links::find_links(&text) {
+            let ui::links::LinkTarget::Path {
+                path,
+                line: Some(line_number),
+                ..
+            } = link.target
+            else {
+                continue;
+            };
+            // byte 範囲 → セル列（全角が混ざる行でもずれないよう char 添字を経由する）。
+            let Ok(first) = offsets.binary_search(&link.range.start) else {
+                continue;
+            };
+            let last = match offsets.binary_search(&link.range.end) {
+                Ok(index) => index,
+                Err(index) => index,
+            };
+            let (Some((start_column, _)), Some((end_column, _))) =
+                (row.get(first), row.get(last.saturating_sub(1)))
+            else {
+                continue;
+            };
+            links.push((line, *start_column..*end_column + 1, path, line_number));
         }
     }
     links
@@ -247,6 +218,14 @@ impl TerminalView {
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
 
         let mut env = HashMap::new();
+        if shell.is_none() {
+            if let Some(root) = &cwd {
+                match host::task_environment(host::LocalHost::shared().as_ref(), root) {
+                    Ok(task_env) => env.extend(task_env),
+                    Err(error) => eprintln!("terminal task.env: {error:#}"),
+                }
+            }
+        }
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
         let options = tty::Options {
@@ -1430,25 +1409,62 @@ impl Element for TerminalElement {
 mod tests {
     use super::*;
 
+    /// 1 行ぶんの表示セルを組む（列は 0 から連番・全角は WIDE_CHAR_SPACER を挟む）。
+    fn row_cells(line: i32, text: &str) -> Vec<RenderCell> {
+        let mut cells = Vec::new();
+        let mut column = 0usize;
+        for character in text.chars() {
+            let wide = !character.is_ascii();
+            cells.push(RenderCell {
+                point: AlacPoint::new(alacritty_terminal::index::Line(line), Column(column)),
+                character,
+                fg: AnsiColor::Named(NamedColor::Foreground),
+                bg: AnsiColor::Named(NamedColor::Background),
+                flags: Flags::empty(),
+            });
+            column += 1;
+            if wide {
+                cells.push(RenderCell {
+                    point: AlacPoint::new(alacritty_terminal::index::Line(line), Column(column)),
+                    character: ' ',
+                    fg: AnsiColor::Named(NamedColor::Foreground),
+                    bg: AnsiColor::Named(NamedColor::Background),
+                    flags: Flags::WIDE_CHAR_SPACER,
+                });
+                column += 1;
+            }
+        }
+        cells
+    }
+
     #[test]
-    fn path_links_match_cargo_and_grep_output() {
-        // cargo/rustc 形式（--> path:line:col）。範囲は :col まで含む。
-        let cargo = "  --> src/main.rs:10:5";
-        let links = find_path_links(cargo);
+    fn detect_links_maps_byte_ranges_to_cell_columns() {
+        // cargo/rustc 形式。クリック域は `:col` まで（検出そのものの規則は `ui::links` の test）。
+        let cells = row_cells(0, "  --> src/main.rs:10:5");
+        let links = detect_links(&cells);
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].1, "src/main.rs");
-        assert_eq!(links[0].2, 10);
-        let range = &links[0].0;
-        assert_eq!(&cargo[range.start..range.end], "src/main.rs:10:5");
+        let (line, columns, path, line_number) = &links[0];
+        assert_eq!(*line, 0);
+        assert_eq!(path, "src/main.rs");
+        assert_eq!(*line_number, 10);
+        assert_eq!(*columns, 6..22);
 
-        // grep -n 形式（path:line）と絶対パス・~。
-        assert_eq!(find_path_links("lib.rs:42 に一致")[0].2, 42);
-        assert_eq!(find_path_links("/tmp/a.log:7")[0].1, "/tmp/a.log");
-        assert_eq!(find_path_links("~/notes/todo.md:3")[0].1, "~/notes/todo.md");
+        // 全角が先にある行でも列がずれない（byte 範囲 → char 添字 → 列の変換）。
+        let cells = row_cells(1, "エラー lib.rs:42");
+        let links = detect_links(&cells);
+        assert_eq!(links.len(), 1);
+        let (_, columns, path, line_number) = &links[0];
+        assert_eq!(path, "lib.rs");
+        assert_eq!(*line_number, 42);
+        // 「エラー」= 3 文字 × 2 列 + 空白 1 列 = 7 列目から。
+        assert_eq!(*columns, 7..16);
+    }
 
-        // 時刻や単語:数字はパスらしさ（/ か .）が無いので拾わない。
-        assert!(find_path_links("12:30 に会議").is_empty());
-        assert!(find_path_links("error:42").is_empty());
+    #[test]
+    fn detect_links_ignores_paths_without_line_numbers() {
+        // ターミナルは実在確認をしないので、行番号の無いトークンはリンクにしない
+        // （`ls` の出力を全部下線にしない）。
+        assert!(detect_links(&row_cells(0, "Cargo.toml  README.md")).is_empty());
     }
 
     #[test]

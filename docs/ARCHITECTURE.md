@@ -33,7 +33,7 @@
 | `editor_core` | Buffer(ropey)・Selection・Transaction/undo | `ropey` 上の独立実装。CRDT 不採用 | M2 |
 | `editor_view` | 行仮想化描画・gutter・キャレット・IME | GPUI の公開 API / examples 上の独立実装 | M2 |
 | `settings_core` / `settings` | 3層設定・監視・設定画面 | serde/YAML/GPUI 上の独立実装 | M3/M13 |
-| `keymap_core` / `ui` | keymap・Button/List/Picker/Modal・Registry 群 | GPUI の公開 API 上の独立実装 | M3 |
+| `keymap_core` / `ui` | keymap・Button/List/Picker/Modal・Registry 群・`links`（本文中のパス/URL 検出。transcript とターミナルが共有） | GPUI の公開 API 上の独立実装 | M3 |
 | `workspace` | レール・ドック・ペイン・タブ・statusbar・永続化 | necoder の `ProjectSession` モデルによる独立実装 | M3 |
 | `project` / `explorer` / `search` | FS・worktree・Git・各ビュー | Rust 標準 API、`notify`、Git CLI、`imara-diff`、ripgrep 上の独立実装 | M3-M6 |
 | `acp_client` / `agent_panel` | ACP セッション・transcript・composer | crates.io `agent-client-protocol` と necoder 固有 UI の独立実装 | M4 |
@@ -250,8 +250,11 @@ composer 下のピルは最初の送信まで空で押せない（0.1.14 の実�
 
 Fleet 中央の**作業**タブ（`FleetCenterView::Work` / `workbench.rs`・UI-SPEC §6.1）は、リポジトリ 1 つを
 机として開き、その worktree を列で並べる面。**2026-09-11 に既定から降格**し（実機で従来のグリッドより
-取り回しが悪かった・ROADMAP 参照）、いまは中央タブから選ぶ任意の別表示。既定は §7.5 のグリッド。
-面としては残すので、ここで守る境界も変わらない:
+取り回しが悪かった・ROADMAP 参照）、**2026-09-16（FLEET-V2 F3）で中央タブ帯ごと描画経路から外れた**。
+コードは F7 で削除する（`work_layout.allocate()` が Task 内ターミナルの ID 割当に使われているので、
+それを移してから消す）。Fleet の描画は `fleet_view.rs`（枠・系譜・下段）+ `fleet_stage.rs`（舞台 / Task
+カード / Task タブ / 系譜の帯）+ `fleet_sidebar.rs`（Task 一覧・要対応・Captain バー）+ `new_task_dialog.rs`
+（＋Task）+ `captain.rs`（Captain カード・wake）の 5 枚。以下は削除までの間の境界:
 
 **`work_layout` は「どこに何を置いたか」しか持たない。** 会話・PTY・バッファの寿命は既存の
 `ProjectSession`（`agent_panel` / `terminal_dock` / `tabs`）が所有し続ける。

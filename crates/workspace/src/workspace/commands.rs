@@ -163,10 +163,6 @@ impl CommandRegistry {
                 action_name: "workspace::ToggleAgentFullScreen",
             },
             CommandEntry {
-                label_key: "cmd.toggle_control",
-                action_name: "workspace::ToggleControl",
-            },
-            CommandEntry {
                 label_key: "cmd.split_right",
                 action_name: "workspace::SplitRight",
             },

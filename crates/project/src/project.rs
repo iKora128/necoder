@@ -2963,4 +2963,104 @@ mod tests {
         );
         assert_eq!(parse_github_slug("git@github.com:owner"), None);
     }
+
+    #[test]
+    fn task_slug_is_ascii_first_line_and_never_empty() {
+        // 1 行目だけ・小文字 ASCII・区切りは '-' に畳む（FLEET-V2 §4.1）。
+        assert_eq!(task_slug("Rope 設計 (undo)\n2 行目は無視"), "rope-undo");
+        assert_eq!(task_slug("  --Fix:  Login!!  "), "fix-login");
+        // 40 字で切り、末尾の '-' は残さない。
+        let long = task_slug(&"abcdefghij-".repeat(6));
+        assert!(long.len() <= 40 && !long.ends_with('-'), "{long}");
+        // ASCII が 1 文字も無ければ既定名（branch 名が空にならない）。
+        assert_eq!(task_slug("設計"), "task");
+        assert_eq!(task_slug(""), "task");
+    }
+
+    #[test]
+    fn task_worktrees_sit_beside_the_repository() {
+        let dir = task_worktree_dir(Path::new("/work/necoder")).unwrap();
+        assert_eq!(dir, PathBuf::from("/work/necoder-worktrees"));
+        assert_eq!(worktree_setup_script(Path::new("/work/necoder")), PathBuf::from("/work/necoder/.necoder/worktree-setup.sh"));
+        assert!(task_worktree_dir(Path::new("/")).is_none(), "親が無ければ作れない");
+    }
+}
+
+/// GUI / CLI 共通の Task 作成先。タイトルは表示用、branch は安全な ASCII slug に分ける。
+pub fn task_slug(title: &str) -> String {
+    let text: String = title.lines().next().unwrap_or("").chars().map(|c| {
+        if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }
+    }).collect();
+    let slug = text.split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
+    let slug = slug.chars().take(40).collect::<String>().trim_end_matches('-').to_string();
+    if slug.is_empty() { "task".to_string() } else { slug }
+}
+
+/// Task の worktree を置く親フォルダ `<repo の親>/<repo 名>-worktrees`（FLEET-V2 §4.1・§6.1）。
+/// ダイアログの表示と実際の作成が同じ場所を指すよう、計算はここ 1 か所に置く。
+pub fn task_worktree_dir(root: &Path) -> Option<PathBuf> {
+    let parent = root.parent()?;
+    let repo = root.file_name()?.to_string_lossy();
+    Some(parent.join(format!("{repo}-worktrees")))
+}
+
+/// 準備スクリプトの置き場所（統合先の worktree 基準・§6.2）。
+pub fn worktree_setup_script(root: &Path) -> PathBuf {
+    root.join(".necoder/worktree-setup.sh")
+}
+
+/// 「作る」ボタンが書く準備スクリプトのテンプレ（§6.2 の 3 用途そのまま）。
+/// necoder に言語の知識を持たせない — Rust 固有の `CARGO_TARGET_DIR` 共有はスクリプト側の判断。
+pub const WORKTREE_SETUP_TEMPLATE: &str = r#"#!/bin/sh
+# necoder の Task worktree 準備スクリプト。worktree 作成直後に 1 回、その worktree を cwd にして走る。
+# 環境: NECODER_MAIN_ROOT（統合先）/ NECODER_TASK_ROOT（新 worktree）/ NECODER_TASK_BRANCH
+set -e
+# 1) 追跡外ファイルを持ち込む（worktree には commit 済みしか入らない）
+for f in .env .env.local .necoder/settings.local.json; do
+  if [ -f "$NECODER_MAIN_ROOT/$f" ]; then
+    mkdir -p "$(dirname "$NECODER_TASK_ROOT/$f")"
+    cp "$NECODER_MAIN_ROOT/$f" "$NECODER_TASK_ROOT/$f"
+  fi
+done
+# 2) Task のプロセス（ACP・ターミナル）に渡す環境変数（KEY=VALUE を 1 行ずつ・.gitignore 推奨）
+mkdir -p "$NECODER_TASK_ROOT/.necoder"
+cat > "$NECODER_TASK_ROOT/.necoder/task.env" <<ENV
+CARGO_TARGET_DIR=$NECODER_MAIN_ROOT/target
+ENV
+# 3) 依存の準備（言語ごと・任意）
+# pnpm install --prefer-offline
+"#;
+
+/// worktree を作って準備を一度だけ実行する。準備失敗でも作成済み worktree を返し、台帳に failed を残せる。
+pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str) -> Result<(PathBuf, String, Option<String>)> {
+    let worktrees = task_worktree_dir(root).context("worktree の作成先がありません")?;
+    let stem = task_slug(title);
+    let used = git_branches_on(host, root);
+    let mut number = 1;
+    let (branch, target) = loop {
+        let suffix = if number == 1 { stem.clone() } else { format!("{stem}-{number}") };
+        let branch = format!("task/{suffix}");
+        let target = worktrees.join(&suffix);
+        if !used.contains(&branch) && host.metadata(&target).is_err() { break (branch, target); }
+        number += 1;
+    };
+    create_task_worktree_on(host, root, &target, &branch)?;
+    let failure = run_task_setup_on(host, root, &target, &branch).err().map(|error| format!("{error:#}"));
+    Ok((target, branch, failure))
+}
+
+/// 準備スクリプト（§6.2）を新 worktree を cwd に 1 回流す。無ければ何もしない。
+pub fn run_task_setup_on(host: &dyn Host, main: &Path, target: &Path, branch: &str) -> Result<()> {
+    let script = worktree_setup_script(main);
+    if host.metadata(&script).is_err() { return Ok(()); }
+    anyhow::ensure!(host.has_posix_shell(), "worktree-setup.sh には POSIX shell が必要です");
+    let spec = host::CommandSpec::new("sh", target).args([script.to_string_lossy().into_owned()])
+        .envs([
+            ("NECODER_MAIN_ROOT", main.to_string_lossy().into_owned()),
+            ("NECODER_TASK_ROOT", target.to_string_lossy().into_owned()),
+            ("NECODER_TASK_BRANCH", branch.to_string()),
+        ]);
+    let output = host.run_command(&spec)?;
+    anyhow::ensure!(output.success(), "準備スクリプトに失敗しました: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    Ok(())
 }

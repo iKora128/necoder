@@ -12,6 +12,7 @@ path = "src/terminal_view.rs"
 test-support = []
 
 [dependencies]
+host.workspace = true
 gpui.workspace = true
 theme_core.workspace = true
 alacritty_terminal.workspace = true

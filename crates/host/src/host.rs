@@ -4922,3 +4922,60 @@ Host gpu
         drop(dripper.join().unwrap());
     }
 }
+
+/// Task の環境ファイルは shell として評価しない。値の `=` と空白はそのまま子へ渡す。
+pub fn task_environment(host: &dyn Host, root: &Path) -> Result<HashMap<String, String>> {
+    let path = root.join(".necoder/task.env");
+    if host.metadata(&path).is_err() { return Ok(HashMap::new()); }
+    let content = host.read_file(&path)?;
+    let text = std::str::from_utf8(&content.bytes)?;
+    let mut environment = HashMap::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let (key, value) = line.split_once('=').with_context(|| format!("task.env:{}: KEY=VALUE が必要です", index + 1))?;
+        let valid = !key.is_empty() && key.chars().enumerate().all(|(index, c)| c == '_' || c.is_ascii_alphabetic() || (index > 0 && c.is_ascii_digit()));
+        anyhow::ensure!(valid, "task.env:{}: 無効なキー", index + 1);
+        environment.insert(key.to_string(), value.to_string());
+    }
+    Ok(environment)
+}
+
+#[cfg(test)]
+mod task_environment_tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("necoder_task_env_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".necoder")).expect("一時ディレクトリを作れない");
+        root
+    }
+
+    #[test]
+    fn task_env_is_key_value_lines_not_shell() {
+        let root = temp_root("parse");
+        std::fs::write(
+            root.join(".necoder/task.env"),
+            "# comment\n\nCARGO_TARGET_DIR=/main/target\nURL=http://x?a=1=2\n",
+        )
+        .unwrap();
+        let environment = task_environment(LocalHost::shared().as_ref(), &root).unwrap();
+        assert_eq!(environment["CARGO_TARGET_DIR"], "/main/target");
+        // 最初の '=' だけが区切り。値の '=' はそのまま子へ渡す（shell 評価しない）。
+        assert_eq!(environment["URL"], "http://x?a=1=2");
+        assert_eq!(environment.len(), 2);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn missing_task_env_is_empty_and_bad_lines_are_errors() {
+        let root = temp_root("missing");
+        assert!(task_environment(LocalHost::shared().as_ref(), &root).unwrap().is_empty());
+        std::fs::write(root.join(".necoder/task.env"), "1BAD=x\n").unwrap();
+        assert!(task_environment(LocalHost::shared().as_ref(), &root).is_err(), "数字始まりのキーは拒否");
+        std::fs::write(root.join(".necoder/task.env"), "NOEQUALS\n").unwrap();
+        assert!(task_environment(LocalHost::shared().as_ref(), &root).is_err(), "KEY=VALUE でない行は拒否");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

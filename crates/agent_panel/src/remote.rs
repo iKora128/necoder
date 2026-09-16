@@ -61,6 +61,7 @@ impl AgentPanel {
             .map(|(index, entry)| {
                 let (kind, content) = match entry {
                     Entry::User(v) => ("user", text(v)),
+                    Entry::LedgerEvent(v) => ("ledger_event", text(v)),
                     Entry::Agent(v) => ("agent", text(v)),
                     Entry::Thinking(v) => ("thinking", text(v)),
                     Entry::Step {

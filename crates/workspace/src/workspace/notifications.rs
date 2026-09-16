@@ -16,6 +16,10 @@ impl Workspace {
             return;
         };
         match event {
+            agent_panel::PanelEvent::HumanSend { thread, text } => {
+                self.record_human_send(session_index, thread, text, cx);
+            }
+
             agent_panel::PanelEvent::TurnStarted { .. } => {
                 self.transition_task_space(
                     session_index,
@@ -33,14 +37,11 @@ impl Workspace {
             }
             agent_panel::PanelEvent::ToggleFullScreenRequest => {
                 if self.chrome.fleet_mode {
-                    if let Some(cell) = (0..self.chrome.fleet_cells.len())
-                        .find(|cell| self.fleet_cell_agent(*cell).as_ref() == Some(&panel))
+                    // Fleet では「全画面」= 舞台を 1 列にしてその Task だけを読む（⤢ と同じ）。
+                    if (0..self.chrome.fleet_cells.len())
+                        .any(|cell| self.fleet_cell_agent(cell).as_ref() == Some(&panel))
                     {
-                        self.chrome.fleet_maximized = if self.chrome.fleet_maximized == Some(cell) {
-                            None
-                        } else {
-                            Some(cell)
-                        };
+                        self.chrome.stage_columns = 1;
                         cx.notify();
                         return;
                     }
@@ -68,6 +69,7 @@ impl Workspace {
                 // Captain の采配は captain イベントとして監査（FLEET-V2 §5.6・ニュースは丸チップ）。
                 if is_integration_slot && is_captain_thread_name(thread.as_ref()) {
                     self.record_captain_decision(*color, digest.as_ref(), summary, cx);
+                    self.wake_captain(session_index, "flush", thread.clone(), None, cx);
                 }
                 if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
                     if !slot.task_space.is_integration() {
@@ -100,7 +102,7 @@ impl Workspace {
                         .get(session_index)
                         .map(|slot| slot.task_space.title.clone())
                         .unwrap_or_else(|| thread.clone());
-                    self.wake_captain("done", title, digest.clone(), cx);
+                    self.wake_captain(session_index, "done", title, digest.clone(), cx);
                 }
                 if !muted {
                     self.push_toast(
@@ -145,7 +147,7 @@ impl Workspace {
                     let title = failed_slot
                         .map(|slot| slot.task_space.title.clone())
                         .unwrap_or_else(|| thread.clone());
-                    self.wake_captain("failed", title, Some(message.clone()), cx);
+                    self.wake_captain(session_index, "failed", title, Some(message.clone()), cx);
                 }
                 if !muted {
                     self.push_toast(
@@ -257,6 +259,25 @@ impl Workspace {
                     cx.notify();
                 }
             }
+            agent_panel::PanelEvent::OpenPathRequest { path, line, column } => {
+                self.open_transcript_path(session_index, path.clone(), *line, *column, cx);
+            }
+            agent_panel::PanelEvent::OpenUrlRequest { url } => {
+                if let Err(error) = crate::crash::open_url(url) {
+                    eprintln!("URL を開けない: {error:#}");
+                    let color = self
+                        .project_sessions
+                        .projects
+                        .get(session_index)
+                        .map(|slot| slot.color)
+                        .unwrap_or_else(|| project_color(0));
+                    self.push_toast(
+                        i18n::t!("link.open_failed", "target" => url.as_ref()).into(),
+                        color,
+                        cx,
+                    );
+                }
+            }
             agent_panel::PanelEvent::FilesTouched { files, color } => {
                 for file in files {
                     self.project_sessions.sessions[session_index]
@@ -327,6 +348,63 @@ impl Workspace {
     }
 
     /// トーストを積む（右下・5 秒で自動で消える・UI-SPEC §8）。
+    /// transcript のパスリンクを開く（M12-17）。
+    ///
+    /// necoder が中で見せられるもの（テキスト/画像/PDF/HTML プレビュー）はタブで開き、
+    /// フォルダと necoder が描けない形式だけ OS 既定へ回す。ROADMAP の当初案は「`.html` は
+    /// ブラウザ」だったが、M14 で HTML プレビュータブが入り**エクスプローラのクリックは中で開く**
+    /// ようになったため、同じファイルの開き方が経路で割れないよう中で開く側へ揃えた（2026-09-16）。
+    fn open_transcript_path(
+        &mut self,
+        session_index: usize,
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let local = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .is_none_or(|slot| !slot.worktree.host().is_remote());
+        // リモートのパスをこちら側で stat しても意味が無いので、判定はローカルの時だけ。
+        if local && (path.is_dir() || opens_in_default_app(&path)) {
+            if let Err(error) = project::open_with_default_app_local(&path) {
+                eprintln!("既定アプリで開けない: {error:#}");
+                let color = self
+                    .project_sessions
+                    .projects
+                    .get(session_index)
+                    .map(|slot| slot.color)
+                    .unwrap_or_else(|| project_color(0));
+                self.push_toast(
+                    i18n::t!("link.open_failed", "target" => path.display().to_string()).into(),
+                    color,
+                    cx,
+                );
+            }
+            return;
+        }
+        // ローカルの `.html` を**行指定なしで**指された時は、ソースではなく整形プレビューを出す
+        // （「見せたい」意図で貼られるため。行番号つきならその行の source を見たいので下へ流す）。
+        // リモートの HTML は webview を持てない（`EditorView::html_preview` が local 限定）。
+        if local
+            && line.is_none()
+            && lang::language_for_path(&path) == Some(lang::LanguageId::Html)
+        {
+            self.project_sessions.sessions[session_index].pending_html_preview = Some(path);
+            cx.notify();
+            return;
+        }
+        // 行/桁は 1 始まりで届く（`:0` は先頭扱い）。
+        self.project_sessions.sessions[session_index].pending_navigation = Some((
+            path,
+            line.unwrap_or(1).saturating_sub(1) as usize,
+            column.unwrap_or(1).saturating_sub(1) as usize,
+        ));
+        cx.notify();
+    }
+
     pub(crate) fn push_toast(&mut self, text: SharedString, color: Hsla, cx: &mut Context<Self>) {
         self.push_toast_linked(text, color, None, cx);
     }
@@ -447,4 +525,63 @@ impl Workspace {
 
     // dirty バッファのスナップショットを（2 秒デバウンスで）DB へ書く。クリーンになった分は消す。
     // 編集の notify 毎に呼ばれるが、世代番号で最後の 1 回だけ実行される。書き込みは背景。
+}
+
+/// necoder が中で描けない形式（= クリックしたら OS 既定へ回す）。
+/// テキスト・画像・PDF・HTML は中のタブで開けるのでここには入れない。
+fn opens_in_default_app(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "zip" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "dmg" | "pkg" | "app"
+            | "mp4" | "mov" | "m4v" | "avi" | "mkv"
+            | "mp3" | "wav" | "aiff" | "m4a" | "flac"
+            | "xlsx" | "xls" | "docx" | "doc" | "pptx" | "ppt"
+            | "sketch" | "psd" | "ai" | "key" | "numbers" | "pages"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `.html` は「ブラウザ」でも「ソース」でもなく **necoder の整形プレビュー**で開く
+    /// （2026-09-16・ユーザー判断）。ただし行番号つきで指された時はその行の source を見たい。
+    #[test]
+    fn html_links_choose_preview_only_without_a_line_number() {
+        let html = Path::new("docs/index.html");
+        assert_eq!(
+            lang::language_for_path(html),
+            Some(lang::LanguageId::Html),
+            "HTML の判定は lang に一本化している"
+        );
+        assert!(!opens_in_default_app(html), "OS 既定へ回さない");
+    }
+
+    #[test]
+    fn default_app_is_only_for_what_necoder_cannot_draw() {
+        // necoder が中で見せられるもの = タブで開く（HTML は M14 のプレビュー、画像・PDF は専用タブ）。
+        for inside in [
+            "docs/index.html",
+            "crates/ui/src/links.rs",
+            "assets/logo.png",
+            "docs/spec.pdf",
+            "README",
+            ".gitignore",
+        ] {
+            assert!(
+                !opens_in_default_app(Path::new(inside)),
+                "necoder の中で開きたい: {inside}"
+            );
+        }
+        // 中で描けないものだけ OS 既定へ。
+        for outside in ["dist/necoder.dmg", "note.xlsx", "clip.MP4", "song.wav"] {
+            assert!(
+                opens_in_default_app(Path::new(outside)),
+                "OS 既定へ回したい: {outside}"
+            );
+        }
+    }
 }

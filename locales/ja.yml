@@ -183,7 +183,6 @@ cmd:
   toggle_terminal: "表示: ターミナル"
   toggle_git_panel: "表示: ソース管理"
   toggle_todo_board: "表示: Todo ボード"
-  toggle_control: "表示: 管制"
   toggle_fleet: "表示: 編隊モード"
   toggle_agent_full_screen: "表示: AI を全画面（エディタを畳む）"
   split_right: "表示: 右に分割"
@@ -213,28 +212,8 @@ control:
   facts_permission: "承認待ち %{elapsed}: %{title}"
   facts_failed: "失敗: %{digest}"
   facts_done_unread: "完了未確認: %{digest}"
-  title: 管制
-  tab_graph: グラフ
-  worktrees: "+ %{n} worktrees"
-  goal: "目標: %{goal}"
-  goal_unset: "目標: 未設定（.necoder/settings.json の fleet_goal で設定）"
-  chip_attention: 要対応
-  chip_done_unread: 完了未確認
-  chip_working: 稼働
-  chip_integrated: 統合
-  summary_attention: "%{title} が先頭%{waited} — 要対応/未確認 %{n} 件"
-  summary_calm: "静穏 — 要対応はありません（稼働 %{n}）"
-  updated: "%{when}更新"
-  next: "次: %{what}"
   next_badge: "次 ⏎"
-  next_permission: 許可判断
-  next_failed: 失敗の対処
-  next_review: レビュー
-  next_confirm: 完了の確認
   queue: 要対応
-  queue_done: ・完了未確認
-  queue_empty: 要対応はありません — 全員稼働中/静穏です
-  enter_hint: ⏎ で先頭へ
   waiting: 待ち
   files: "%{n} files"
   open: 開く
@@ -243,16 +222,14 @@ control:
   integrate: Integrate
   review: Radar 実行
   fix_instruct: 修正を指示
-  active: 稼働中
-  immersion_hint: クリックで没入（セル/スレッドへ）
-  add_task: "+ Task（worktree を切って開始）"
-  free_cells: "空きセル %{n}/8"
-  pipeline: 統合パイプライン
-  pipeline_hint: WORKTREE → MAIN への流れ・チップ=TASKSPACE
 news:
   waiting: "承認待ち — %{title}"
   failed: "失敗 — %{detail}"
 captain:
+  log: "采配ログ"
+  tasks: "Task"
+  human_gate: "采配のみ · 統合と承認は人間が操作"
+  ledger_event: "台帳イベント"
   title: Captain
   appoint: Captain を任命する — settings.json の captain_agent
   prompt: |
@@ -275,23 +252,43 @@ captain:
 
     まず `%{exe} fleet list .` と `digest` で現況を読み、必要な采配だけ実行して、最後に判断を 1〜3 行で要約してください。何もする必要がなければ「静観」とだけ答えてください。
 fleet:
+  new_task_worktree: "worktree: %{path}"
+  new_task_setup_ready: "準備スクリプト ✓ .necoder/worktree-setup.sh"
+  new_task_setup_missing: "準備スクリプトなし"
+  new_task_setup_create: "作る（.env の持ち込み・target 共有のテンプレ）"
+  new_task_no_repository: "統合先（main の worktree）が開いていないので Task を切れません"
+  next_allow: "許可"
+  phase_working: "稼働中"
+  phase_blocked: "承認待ち"
+  phase_failed: "失敗"
+  phase_review: "レビュー待ち"
+  phase_integrated: "統合済み"
+  next_fix: "修正を指示"
+  next_review: "レビューへ"
+  new_task_hint: "何をしますか？ 複数のTaskに分けるならCaptainへ（⌘0）"
+  new_task_cancel: "キャンセル"
+  new_task_start: "Taskを起動 ⌘↵"
+  stage_columns: "{count} 列"
+  tab_diff: "変更"
+  tab_terminal: "ターミナル"
+  tab_files: "ファイル"
+  tab_add_thread: "＋ 会話"
+  tab_add_terminal: "＋ 端末"
   tasks_count: "%{n} Tasks"
   integration_row: "統合先 · 保護"
   integration_sub: "%{branched} 本が分岐中 · 今日 %{integrated} 件統合"
   asked: "› %{text}"
   new_task: "＋ Task"
   mode_hint: "並走を Fleet で見る（%{key}）"
-  add_acp: ＋ ACP
-  add_terminal: ＋ Terminal
-  add_worktree: ＋ Worktree
   toast_no_integration_space: IntegrationSpace が開かれていません
   toast_radar_clean: "Conflict Radar: 統合可能です"
   toast_merge_preview_failed: "merge preview に失敗: %{error}"
   toast_integrated: Task を IntegrationSpace へ統合しました
   toast_integrate_failed: "統合できません: %{error}"
-  editor_surface_hint: この Task でファイルを開くと Editor surface に表示されます
   space_closed: TaskSpace は閉じられています
-  add_agent_simple: ＋ エージェント（新しい worktree で並走）
+  stage_one: 舞台 1 枚
+  stage_two: 舞台 2 列
+  stage_three: 舞台 3 列
   lineage: 系譜グラフ
   graph_fan: 扇形
   graph_tree: ツリー
@@ -307,26 +304,9 @@ fleet:
   news: ニュース
   news_idle: 動きなし
   news_hint: task_events — Captain の采配も同じログ（監査可能）
-  cell_agent: Agent
   cell_terminal: ターミナル
-  cell_editor: エディタ
-  cell_diff: Diff / Review
-  cell_tests: Tests
-  cell_terminal_hint: シェル（cwd = worktree）
   terminal_hint: "%{name} の worktree で開いています"
   bottom_collapse: 下段を畳む / 開く
-  cell_editor_hint: エディタ（worktree）
-  closed: 閉じたスレッド
-  add_hint: ACP・Terminal は選択中の作業場所へ追加。別ブランチは Worktree で並走
-  maximize: 拡大表示（他は畳む）
-  restore: 元のレイアウトへ戻す
-  add_agent: Agent（ここ）
-  add_agent_worktree: Agent＋⎇worktree
-  add_task: ＋ Task
-  add_agent_to_task: ＋ Agent to this Task
-  add_history: 履歴から復元
-  close_cell_tip: このセルを画面から外す（Task も worktree も残る）
-  rename_tip: ダブルクリックで名前を変更
   delete_worktree_tip: worktree を削除…
   cleanup_tip: 片付け — 閉じる / 止める / 終了 / 削除
   cleanup_title: この Task をどう片付ける？
@@ -591,6 +571,8 @@ theme:
   builtin: 組み込み
   user: ユーザー
   picker_placeholder: テーマを選択
+link:
+  open_failed: "開けませんでした: %{target}"
 difftab:
   proposal_title: "%{title} ⇄ 提案"
 update:
@@ -827,10 +809,8 @@ key:
   activate_project: プロジェクトを切替（レール順）
   quit: necoder を終了
 work:
-  title: 作業
   repositories: リポジトリ / 作業
   open_beside: 隣に開く
-  reveal_session: 実行中のターミナルを表示
   terminal: Terminal
   agent: Agent
   diff: 変更

@@ -27,30 +27,6 @@ fn open_storage() -> Result<Storage> {
     Storage::open(&path)
 }
 
-fn slug(value: &str) -> String {
-    let slug = value
-        .chars()
-        .flat_map(char::to_lowercase)
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .take(5)
-        .collect::<Vec<_>>()
-        .join("-");
-    if slug.is_empty() {
-        "task".to_string()
-    } else {
-        slug
-    }
-}
-
 fn record_json(record: &TaskSpaceRecord) -> Value {
     json!({
         "id": record.id,
@@ -146,28 +122,7 @@ pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
     let base_oid =
         project::git_head_oid_on(host.as_ref(), &root).context("Git repository ではありません")?;
     let repository_id = project::repository_id_on(host.as_ref(), &root);
-    let repo_name = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("repo");
-    let parent = root.parent().context("worktree の作成先がありません")?;
-    let stem = slug(title);
-    let used = project::git_branches_on(host.as_ref(), &root);
-    let mut number = 1usize;
-    let (branch, target) = loop {
-        let suffix = if number == 1 {
-            stem.clone()
-        } else {
-            format!("{stem}-{number}")
-        };
-        let branch = format!("task/{suffix}");
-        let target = parent.join(format!("{repo_name}-task-{suffix}"));
-        if !used.contains(&branch) && !target.exists() {
-            break (branch, target);
-        }
-        number += 1;
-    };
-    project::create_task_worktree_on(host.as_ref(), &root, &target, &branch)?;
+    let (target, branch, setup_failure) = project::create_named_task_on(host.as_ref(), &root, title)?;
     let target = paths::canonicalize(&target).unwrap_or(target);
     let now = unix_ms();
     let record = TaskSpaceRecord {
@@ -177,10 +132,10 @@ pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
         branch: Some(branch),
         title: title.to_string(),
         kind: SpaceKind::Task,
-        phase: TaskPhase::Planned,
+        phase: if setup_failure.is_some() { TaskPhase::Failed } else { TaskPhase::Planned },
         base_oid: Some(base_oid.clone()),
         head_oid: Some(base_oid),
-        result_summary: None,
+        result_summary: setup_failure,
         depends_on: Vec::new(),
         created_at: now,
         updated_at: now,

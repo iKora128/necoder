@@ -182,7 +182,6 @@ cmd:
   toggle_terminal: "View: Terminal"
   toggle_git_panel: "View: Source control"
   toggle_todo_board: "View: Todo board"
-  toggle_control: "View: Control"
   toggle_fleet: "View: Fleet mode"
   toggle_agent_full_screen: "View: AI full screen (hide the editor)"
   split_right: "View: Split right"
@@ -212,28 +211,8 @@ control:
   facts_permission: "Awaiting permission %{elapsed}: %{title}"
   facts_failed: "Failed: %{digest}"
   facts_done_unread: "Done but unread: %{digest}"
-  title: Control
-  tab_graph: Graph
-  worktrees: "+ %{n} worktrees"
-  goal: "Goal: %{goal}"
-  goal_unset: "Goal: unset (set fleet_goal in .necoder/settings.json)"
-  chip_attention: attention
-  chip_done_unread: done·unread
-  chip_working: running
-  chip_integrated: merged
-  summary_attention: "%{title} is at the head%{waited} — %{n} items need you"
-  summary_calm: "calm — nothing needs you (%{n} running)"
-  updated: "updated %{when}"
-  next: "next: %{what}"
   next_badge: "next ⏎"
-  next_permission: permission decision
-  next_failed: handle failure
-  next_review: review
-  next_confirm: confirm done
   queue: Attention
-  queue_done: "· done unread"
-  queue_empty: Nothing needs you — everyone is working / calm
-  enter_hint: ⏎ jumps to head
   waiting: waited
   files: "%{n} files"
   open: Open
@@ -242,16 +221,14 @@ control:
   integrate: Integrate
   review: Run radar
   fix_instruct: Instruct fix
-  active: Running
-  immersion_hint: click to immerse (cell/thread)
-  add_task: "+ Task (start on a fresh worktree)"
-  free_cells: "free cells %{n}/8"
-  pipeline: Integration pipeline
-  pipeline_hint: WORKTREE → MAIN flow · chip=TASKSPACE
 news:
   waiting: "waiting for approval — %{title}"
   failed: "failed — %{detail}"
 captain:
+  log: "Decision log"
+  tasks: "Tasks"
+  human_gate: "Coordination only · Integration and approvals require a human"
+  ledger_event: "Ledger event"
   title: Captain
   appoint: appoint a Captain — captain_agent in settings.json
   prompt: |
@@ -274,23 +251,43 @@ captain:
 
     Start by reading the situation with `%{exe} fleet list .` and `digest`, run only the moves that are needed, and close with a 1-3 line summary of your judgement. If nothing needs doing, answer with just: standing by.
 fleet:
+  new_task_worktree: "worktree: %{path}"
+  new_task_setup_ready: "Setup script ✓ .necoder/worktree-setup.sh"
+  new_task_setup_missing: "No setup script"
+  new_task_setup_create: "Create (template: bring .env, share target)"
+  new_task_no_repository: "No integration worktree (main) is open, so a Task cannot be started"
+  next_allow: "Allow"
+  phase_working: "Working"
+  phase_blocked: "Awaiting approval"
+  phase_failed: "Failed"
+  phase_review: "Review"
+  phase_integrated: "Integrated"
+  next_fix: "Request changes"
+  next_review: "Review"
+  new_task_hint: "What should be done? For multiple tasks, ask Captain (⌘0)."
+  new_task_cancel: "Cancel"
+  new_task_start: "Start Task ⌘↵"
+  stage_columns: "{count} columns"
+  tab_diff: "Changes"
+  tab_terminal: "Terminal"
+  tab_files: "Files"
+  tab_add_thread: "+ Thread"
+  tab_add_terminal: "+ Terminal"
   tasks_count: "%{n} Tasks"
   integration_row: "Integration · protected"
   integration_sub: "%{branched} branched · %{integrated} integrated today"
   asked: "› %{text}"
   new_task: "+ Task"
   mode_hint: "See them run side by side in Fleet (%{key})"
-  add_acp: "+ ACP"
-  add_terminal: "+ Terminal"
-  add_worktree: "+ Worktree"
   toast_no_integration_space: IntegrationSpace is not open
   toast_radar_clean: "Conflict Radar: ready to integrate"
   toast_merge_preview_failed: "Merge preview failed: %{error}"
   toast_integrated: Task integrated into the IntegrationSpace
   toast_integrate_failed: "Cannot integrate: %{error}"
-  editor_surface_hint: Open a file in this Task to show it in the Editor surface
   space_closed: This TaskSpace is closed
-  add_agent_simple: "+ Agent (parallel on a fresh worktree)"
+  stage_one: Stage 1 card
+  stage_two: Stage 2 columns
+  stage_three: Stage 3 columns
   lineage: Lineage
   graph_fan: Fan
   graph_tree: Tree
@@ -306,26 +303,9 @@ fleet:
   news: News
   news_idle: No activity
   news_hint: task_events — Captain decisions land in the same log (auditable)
-  cell_agent: Agent
   cell_terminal: Terminal
-  cell_editor: Editor
-  cell_diff: Diff / Review
-  cell_tests: Tests
-  cell_terminal_hint: Shell (cwd = worktree)
   terminal_hint: "Running in the worktree of %{name}"
   bottom_collapse: Collapse / expand the bottom pane
-  cell_editor_hint: Editor (worktree)
-  closed: Closed thread
-  add_hint: Add ACP or Terminal to the selected directory. Use Worktree for a separate branch.
-  maximize: Maximize (tuck the rest away)
-  restore: Back to grid
-  add_agent: Agent (here)
-  add_agent_worktree: Agent + ⎇worktree
-  add_task: ＋ Task
-  add_agent_to_task: ＋ Agent to this Task
-  add_history: Restore from history
-  close_cell_tip: Hide this cell (the Task and its worktree stay)
-  rename_tip: Double-click to rename
   delete_worktree_tip: Delete worktree…
   cleanup_tip: Clean up — close / stop / finish / delete
   cleanup_title: How do you want to clean up this Task?
@@ -590,6 +570,8 @@ theme:
   builtin: Built-in
   user: User
   picker_placeholder: Select theme
+link:
+  open_failed: "Could not open %{target}"
 difftab:
   proposal_title: "%{title} ⇄ proposal"
 update:
@@ -826,10 +808,8 @@ key:
   activate_project: Switch to project (rail order)
   quit: Quit necoder
 work:
-  title: Work
   repositories: Repositories / work
   open_beside: Open beside
-  reveal_session: Show the running terminal
   terminal: Terminal
   agent: Agent
   diff: Changes

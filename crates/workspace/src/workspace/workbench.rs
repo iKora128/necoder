@@ -308,7 +308,6 @@ impl Workspace {
                             if !workspace.chrome.fleet_cells.contains(&pane) {
                                 workspace.chrome.fleet_cells.push(pane);
                             }
-                            workspace.chrome.fleet_maximized = None;
                             cx.notify();
                         }
                     }
@@ -340,7 +339,7 @@ impl Workspace {
     /// AI 全画面・復元と複数あり、呼び出し側に配ると必ずどれかを取りこぼす。
     pub(crate) fn sync_work_chrome(&mut self, cx: &mut Context<Self>) {
         let state = (
-            self.work_is_visible(),
+            self.chrome.fleet_mode,
             self.project_sessions
                 .sessions
                 .iter()
@@ -493,7 +492,6 @@ impl Workspace {
             .or_default()
             .open(column, beside);
         self.chrome.fleet_center_view = FleetCenterView::Work;
-        self.chrome.fleet_maximized = None;
         self.focus_work_pane(pane, window, cx);
     }
 
@@ -812,7 +810,6 @@ impl Workspace {
             self.chrome.fleet_mode = saved.fleet_mode;
             self.chrome.show_herd |= saved.fleet_mode;
             self.chrome.fleet_center_view = match saved.fleet_view.as_str() {
-                "control" => FleetCenterView::Control,
                 "graph" => FleetCenterView::Graph,
                 "work" => FleetCenterView::Work,
                 _ => FleetCenterView::Graph,

@@ -1332,7 +1332,6 @@ impl Workspace {
             fleet_view: match self.chrome.fleet_center_view {
                 FleetCenterView::Work => "work",
                 FleetCenterView::Graph => "graph",
-                FleetCenterView::Control => "control",
             }
             .to_string(),
         }

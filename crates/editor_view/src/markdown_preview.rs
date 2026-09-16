@@ -259,7 +259,7 @@ fn md_highlights(theme: &Theme, spans: &[markdown::Span]) -> Vec<(Range<usize>, 
     spans
         .iter()
         .map(|span| {
-            let style = match span.kind {
+            let style = match &span.kind {
                 markdown::SpanKind::Strong => HighlightStyle {
                     font_weight: Some(FontWeight::BOLD),
                     ..Default::default()
@@ -282,7 +282,7 @@ fn md_highlights(theme: &Theme, spans: &[markdown::Span]) -> Vec<(Range<usize>, 
                     background_color: Some(theme.bg3),
                     ..Default::default()
                 },
-                markdown::SpanKind::Link => HighlightStyle {
+                markdown::SpanKind::Link { .. } => HighlightStyle {
                     color: Some(theme.syntax.function),
                     underline: Some(UnderlineStyle {
                         thickness: px(1.),
