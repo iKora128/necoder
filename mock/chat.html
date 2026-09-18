@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Chat モード — プロジェクトに紐づかない会話と artifact（提案・正は index.html / DECISIONS 2026-09-18 / CHAT.md）</title>
+<style>
+/* ============================================================
+   Chat モード モック（2026-09-18 提案・ROADMAP M16）
+   ねらい: Editor / Fleet に並ぶ第 3 のモード。新しい部品を作らず、既にある 3 つを並べるだけ。
+     - 左   = チャットの一覧（＋ 新しいチャット・日付グループ・行頭●スレッド色）
+     - 中央 = agent_panel の transcript と composer をそのまま（⏺/⎿・✳・宛先チップ・トークン常時表示）
+     - 右   = 既存のエディタ領域。artifact は「artifacts/ に書かれたファイル」を既存の HTML プレビュータブで開いたもの
+   作らないもの: 新しいチャットエンジン / artifact 専用ペイン / MCP ツール / テキスト目印のパーサ
+   規律: 色 = 識別。Chat はプロジェクトに属さないので額縁は無彩色。会話 = スレッドなのでスレッド色は持つ
+         状態 = 形と動き / テラコッタは ⏺ と ✳ のみ
+   ============================================================ */
+:root {
+  --desktop: #0c0d11;
+  --bg0: #16181e; --bg1: #1b1e25; --bg2: #232733; --bg3: #2b3040;
+  --fg0: #d7dae3; --fg1: #9aa1b2; --fg2: #646b7a;
+  --border: #262b36;
+  --ok: #7bc96f; --warn: #e5c07b; --err: #e06c75;
+  --terra: #d97757;
+  --frame: #3a4050;                 /* Chat の額縁 = 無彩色（プロジェクト色を持たない） */
+  --th1: #61afef; --th2: #e5c07b; --th3: #c678dd; --th4: #34d3b6; --th5: #98c379;
+  --tc: var(--th1);                 /* いま開いているチャットのスレッド色 */
+  --mono: "SF Mono", Menlo, monospace;
+  --shadow: 0 24px 80px rgba(0,0,0,.55);
+}
+[data-theme="light"] {
+  --desktop: #d8dce3;
+  --bg0: #f0f1f4; --bg1: #ffffff; --bg2: #ffffff; --bg3: #e7eaf0;
+  --fg0: #333845; --fg1: #5c6370; --fg2: #9aa1b2;
+  --border: #d8dce3;
+  --frame: #b9bfcc;
+  --th1: #2f7fd1; --th2: #b8860b; --th3: #a04fc4; --th4: #129d86; --th5: #5a8f2f;
+  --shadow: 0 24px 70px rgba(30,35,50,.28), 0 2px 8px rgba(30,35,50,.14);
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { background: var(--desktop); color: var(--fg0); font: 12.5px/1.5 -apple-system, "Hiragino Sans", sans-serif;
+  display: flex; flex-direction: column; overflow: hidden; }
+b { font-weight: 600; }
+.mono { font-family: var(--mono); }
+.dim { color: var(--fg2); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* ---- mockbar ---- */
+.mockbar { flex: none; display: flex; align-items: center; gap: 14px; padding: 8px 16px; font-size: 11px; color: var(--fg1);
+  border-bottom: 1px solid var(--border); }
+.mockbar .grp { display: flex; align-items: center; gap: 4px; }
+.mockbar .grp > span { color: var(--fg2); margin-right: 4px; }
+.mockbar button { font: inherit; color: var(--fg1); background: var(--bg1); border: 1px solid var(--border); border-radius: 5px; padding: 3px 9px; cursor: pointer; }
+.mockbar button.on { color: var(--fg0); background: var(--bg3); border-color: var(--fg2); }
+.mockbar .title { font-weight: 700; color: var(--fg0); margin-right: 8px; }
+
+.shell { flex: 1; min-height: 0; display: flex; }
+
+/* ---- window ---- */
+.win { flex: 1; min-width: 0; margin: 12px 16px 14px; display: flex; flex-direction: column; border-radius: 10px; overflow: hidden;
+  border: 2px solid var(--frame); background: var(--bg0); box-shadow: var(--shadow); position: relative; }
+.titlebar { flex: none; height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--border); font-size: 11.5px; }
+.lights { display: flex; gap: 7px; margin-right: 6px; }
+.lights i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+.pill { display: flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 6px; background: var(--bg1); border: 1px solid var(--border); border-left: 3px solid var(--frame); }
+.pill .dest { color: var(--fg2); }
+.titlebar .mode { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin-left: 8px; }
+.titlebar .mode span { padding: 3px 10px; color: var(--fg2); border-left: 1px solid var(--border); }
+.titlebar .mode span:first-child { border-left: none; }
+.titlebar .mode span.on { color: var(--fg0); background: var(--bg3); }
+.titlebar .mode .badge { font-size: 9.5px; font-weight: 600; color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 45%, var(--border)); border-radius: 8px; padding: 0 5px; margin-left: 4px; }
+.titlebar .fill { flex: 1; }
+.beacons { display: flex; gap: 12px; font-size: 11px; color: var(--fg1); }
+.beacons span::before { content: "● "; color: var(--bc); }
+.beacons span.work::before { animation: pulse 1.6s ease-in-out infinite; }
+.tb-btns { display: flex; gap: 2px; margin-left: 12px; }
+.tb-btns span { width: 24px; height: 22px; display: grid; place-items: center; border-radius: 5px; color: var(--fg2); font-size: 12px; cursor: pointer; }
+.tb-btns span.on { background: var(--bg3); color: var(--fg0); }
+
+.body { flex: 1; min-height: 0; display: flex; }
+
+/* ---- rail ---- */
+.rail { flex: none; width: 46px; border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding-top: 8px; gap: 8px; }
+.rail .pj { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; font-size: 12px; color: var(--fg0); background: var(--bg2); border: 1px solid var(--border); position: relative; }
+.rail .pj .dots { position: absolute; bottom: -6px; left: 50%; transform: translateX(-50%); display: flex; gap: 2px; }
+.rail .pj .dots i { width: 4px; height: 4px; border-radius: 50%; display: block; }
+.rail .sep { width: 22px; height: 1px; background: var(--border); margin: 6px 0; }
+.rail .act { width: 30px; height: 30px; display: grid; place-items: center; color: var(--fg2); font-size: 14px; border-radius: 6px; }
+.rail .act.off { opacity: .42; }               /* プロジェクトに属する機能は Chat では使えない */
+.rail .act.on { color: var(--fg0); background: var(--bg2); }
+.rail .act svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.rail .foot { margin-top: auto; padding-bottom: 8px; }
+
+/* ---- チャットの一覧 ---- */
+.side { flex: none; width: 248px; border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; background: var(--bg0); }
+.side .new { flex: none; margin: 10px 10px 6px; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px; background: var(--bg1); border: 1px solid var(--border); color: var(--fg0); cursor: pointer; }
+.side .new:hover { background: var(--bg2); }
+.side .new .k { margin-left: auto; color: var(--fg2); font-size: 10.5px; }
+.side .find { flex: none; margin: 0 10px 4px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); color: var(--fg2); font-size: 11.5px; }
+.side .sec-h { flex: none; padding: 10px 12px 4px; font-size: 10px; font-weight: 700; letter-spacing: .1em; color: var(--fg2); }
+.side .list { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 8px; }
+.chat { display: grid; grid-template-columns: 12px 1fr auto; column-gap: 8px; align-items: center; padding: 6px 10px 6px 9px; border-left: 3px solid transparent; cursor: pointer; }
+.chat:hover { background: var(--bg1); }
+.chat.sel { background: var(--bg2); border-left-color: var(--c); }
+.chat .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); justify-self: center; }
+.chat.work .dot { animation: pulse 1.6s ease-in-out infinite; box-shadow: 0 0 0 2px color-mix(in srgb, var(--c) 30%, transparent); }
+.chat.idle .dot { background: none; border: 1.5px solid var(--c); }     /* エージェント未起動 = 輪郭だけ */
+.chat .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.chat.sel .nm { font-weight: 600; }
+.chat .cnt { color: var(--fg2); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.side .foot { flex: none; padding: 7px 12px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--fg2); display: flex; align-items: center; gap: 6px; }
+
+/* ---- 中央: transcript + composer（agent_panel の再利用） ---- */
+.main { container-type: inline-size; flex: 1; min-width: 380px; display: flex; flex-direction: column; min-height: 0; }
+.col { width: 100%; max-width: 760px; margin: 0 auto; }
+.thead { flex: none; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.thead .tab { display: flex; align-items: center; gap: 6px; height: 100%; border-bottom: 2px solid var(--tc); padding: 0 2px; }
+.thead .tab i { width: 7px; height: 7px; border-radius: 50%; background: var(--tc); }
+.thead .r { margin-left: auto; display: flex; gap: 10px; color: var(--fg2); font-size: 11px; }
+
+.trwrap { flex: 1; min-height: 0; overflow: hidden; }
+.tr { padding: 14px 18px 10px; font-size: 12.5px; line-height: 1.65; display: flex; flex-direction: column; gap: 8px; }
+.tr .u { align-self: flex-start; max-width: 92%; padding: 6px 10px; border-radius: 7px; background: var(--bg2); border: 1px solid var(--border); border-left: 3px solid var(--tc); color: var(--fg0); margin-top: 6px; }
+.tr .th { color: var(--fg2); font-style: italic; border-left: 2px solid color-mix(in srgb, var(--tc) 45%, transparent); padding-left: 8px; font-size: 11.5px; }
+.tr .th::before { content: "✳ "; color: var(--terra); font-style: normal; }
+.tr .s { display: grid; grid-template-columns: 16px 1fr; column-gap: 4px; }
+.tr .s::before { content: "⏺"; color: var(--terra); font-size: 11px; line-height: 1.9; }
+.tr .s .r { grid-column: 2; color: var(--fg1); font-size: 11.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tr .s .r::before { content: "⎿"; color: var(--fg2); }
+.tr code { font-family: var(--mono); font-size: 11.5px; background: var(--bg2); padding: 0 4px; border-radius: 3px; }
+.tr .fin { display: grid; grid-template-columns: 16px 1fr; column-gap: 4px; color: var(--fg0); }
+.tr .fin::before { content: "⏺"; color: var(--terra); font-size: 11px; line-height: 1.9; }
+.tr .fin p + p { margin-top: 6px; }
+/* プレビューチップ: 色を使わない（識別の対象ではない）。開いているものだけスレッド色の下線 */
+.pchip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg1); color: var(--fg0); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.pchip:hover { background: var(--bg3); }
+.pchip.open { border-bottom: 2px solid var(--tc); }
+.tr .stat .a { color: var(--ok); } .tr .stat .d { color: var(--err); }
+
+/* composer */
+.comp { flex: none; padding: 8px 18px 12px; display: flex; flex-direction: column; gap: 6px; }
+.comp .dst { display: flex; align-items: center; gap: 8px; white-space: nowrap; font-size: 10.5px; color: var(--fg1); }
+.comp .dst .chip { min-width: 0; overflow: hidden; display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 10px; background: var(--bg2); border: 1px solid var(--border); color: var(--fg0); }
+.comp .dst .chip i { width: 7px; height: 7px; border-radius: 50%; background: var(--tc); }
+.comp .dst .chip .d { color: var(--fg2); }
+.comp .dst .tok { margin-left: auto; display: flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.comp .dst .tok .bar { width: 64px; height: 4px; border-radius: 2px; background: var(--bg3); overflow: hidden; }
+.comp .dst .tok .bar i { display: block; height: 100%; background: var(--tc); }
+.comp .box { border: 1px solid color-mix(in srgb, var(--tc) 55%, var(--border)); border-radius: 8px; background: var(--bg2); padding: 8px 10px; min-height: 64px; display: flex; flex-direction: column; }
+.comp .box .ph { color: var(--fg2); flex: 1; }
+.comp .box .ph .caret { display: inline-block; width: 2px; height: 14px; background: var(--tc); vertical-align: -3px; margin-right: 2px; }
+.comp .box .row { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--fg2); }
+.comp .box .row .p { white-space: nowrap; padding: 1px 7px; border-radius: 4px; border: 1px solid var(--border); color: var(--fg1); }
+.comp .box .row .hint { margin-left: auto; white-space: nowrap; }
+.comp .box .row .send { margin-left: 0; }
+.comp .box .row .scope { border-style: dashed; }
+@container (max-width: 640px) { .comp .box .row .hint { display: none; } .comp .box .row .send { margin-left: auto; } }
+.comp .box .row .send { width: 24px; height: 22px; border-radius: 5px; background: var(--tc); color: #0c0d11; display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+
+/* 新規チャット（空の状態） */
+.empty { flex: 1; min-height: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--fg1); text-align: center; padding-bottom: 40px; }
+.empty h2 { font-size: 19px; font-weight: 600; color: var(--fg0); }
+.empty ul { list-style: none; padding: 0; font-size: 12px; line-height: 1.9; color: var(--fg1); }
+.empty ul li::before { content: "— "; color: var(--fg2); }
+
+/* ---- 右: 既存のエディタ領域（artifact = プレビュータブ） ---- */
+.art { flex: none; width: 40%; min-width: 420px; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; background: var(--bg0); }
+.art .tabs { flex: none; height: 34px; display: flex; align-items: stretch; border-bottom: 1px solid var(--border); font-size: 12px; }
+.art .tabs .t { display: flex; align-items: center; gap: 7px; padding: 0 12px; border-right: 1px solid var(--border); color: var(--fg1); }
+.art .tabs .t.on { color: var(--fg0); background: var(--bg1); border-bottom: 2px solid var(--tc); }   /* タブ下線 = このタブを作ったスレッドの色 */
+.art .tabs .t .x { color: var(--fg2); font-size: 10px; }
+.art .tabs .close { margin-left: auto; display: grid; place-items: center; width: 34px; color: var(--fg2); cursor: pointer; }
+.art .crumb { flex: none; height: 30px; display: flex; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; padding: 0 10px 0 12px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--fg1); }
+.art .crumb .path b { color: var(--fg0); }
+.art .crumb .seg { margin-left: auto; display: flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+.art .crumb .seg span { padding: 1px 9px; color: var(--fg2); cursor: pointer; }
+.art .crumb .seg span.on { color: var(--fg0); background: var(--bg3); }
+.art .crumb .ib { width: 22px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: var(--fg1); border: 1px solid var(--border); }
+.art .crumb .iso { color: var(--fg2); white-space: nowrap; }
+.art .crumb .re { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.art .view { flex: 1; min-height: 0; position: relative; background: #fff; }
+.art .view iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+.art .src { flex: 1; min-height: 0; display: none; overflow: hidden; background: var(--bg0); font-family: var(--mono); font-size: 12px; line-height: 1.6; padding: 8px 0; }
+.art .src .ln { display: grid; grid-template-columns: 44px 3px 1fr; white-space: pre; }
+.art .src .ln > i { font-style: normal; color: var(--fg2); text-align: right; padding-right: 10px; }
+.art .src .ln > u { text-decoration: none; }
+.art .src .ln.chg > u { background: var(--tc); }     /* gutter の diff バー = スレッド色（既存の帰属表示） */
+.art .src .ln > span { padding-left: 10px; color: var(--fg0); }
+.art .src .tg { color: var(--th1); } .art .src .at { color: var(--th2); } .art .src .st { color: var(--th5); } .art .src .cm { color: var(--fg2); } .art .src .kw { color: var(--th3); }
+
+/* ---- statusbar ---- */
+.status { flex: none; height: 24px; display: flex; align-items: center; gap: 16px; padding: 0 12px; font-size: 10.5px; color: var(--fg1); border-top: 1px solid var(--border); }
+.status .fill { flex: 1; }
+.status .dots { display: flex; gap: 5px; align-items: center; }
+.status .dots i { width: 7px; height: 7px; border-radius: 50%; display: block; }
+.status .dots i.work { animation: pulse 1.6s ease-in-out infinite; }
+
+/* ---- 設計メモ（モックの外） ---- */
+.notes { flex: none; width: 300px; margin: 12px 16px 14px 0; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg1); overflow-y: auto; font-size: 11px; line-height: 1.55; color: var(--fg1); }
+.notes h3 { font-size: 11px; letter-spacing: .08em; color: var(--fg2); margin-bottom: 8px; }
+.notes ol { padding-left: 0; list-style: none; counter-reset: n; display: flex; flex-direction: column; gap: 7px; }
+.notes li { counter-increment: n; display: grid; grid-template-columns: 18px 1fr; column-gap: 6px; }
+.notes li::before { content: counter(n); width: 16px; height: 16px; border-radius: 50%; background: var(--bg3); color: var(--fg0); font-size: 10px; font-weight: 700; display: grid; place-items: center; margin-top: 2px; }
+.notes li b { color: var(--fg0); }
+body.no-notes .notes { display: none; }
+.mk { position: absolute; z-index: 5; width: 16px; height: 16px; border-radius: 50%; background: var(--fg0); color: var(--bg0); font-size: 10px; font-weight: 700; display: grid; place-items: center; pointer-events: none; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+body.no-notes .mk { display: none; }
+
+
+/* 状態「ファイルを渡す」: ドロップしたファイルのチップ + 初回の書き込み確認 + 差分 */
+.only-file { display: none; }
+body.s-file .only-file { display: revert; }
+body.s-file .tr .s.only-file, body.s-file .tr .fin.only-file { display: grid; }
+body.s-file .tr .perm.only-file { display: flex; }
+body.s-file .only-nofile, body.s-file .only-art:not(.keep-file) { display: none; }
+body.s-file .art .view { display: none; }
+body.s-file .art .mdv { display: block; }
+.att { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg1); color: var(--fg0); font-size: 11px; font-family: var(--mono); white-space: nowrap; }
+.att .x { color: var(--fg2); font-family: inherit; }
+.att .d { color: var(--fg2); }
+.tr .u .att { margin: 0 0 4px; display: flex; width: fit-content; }
+.comp .atts { display: none; gap: 6px; margin-bottom: 6px; }
+body.s-file .comp .atts { display: flex; }
+.tr .perm { margin: 2px 0 0 20px; padding: 8px 10px; border-radius: 7px; border: 1px solid color-mix(in srgb, var(--tc) 50%, var(--border)); background: var(--bg2); display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+.tr .perm .ops { margin-left: auto; display: flex; gap: 4px; }
+.tr .perm .ops span { white-space: nowrap; font-size: 10.5px; padding: 2px 9px; border-radius: 5px; border: 1px solid var(--border); color: var(--fg1); }
+.tr .perm .ops span.pri { color: var(--fg0); border-color: var(--fg2); background: var(--bg3); }
+.art .mdv { display: none; flex: 1; min-height: 0; overflow: hidden; padding: 22px 28px; font-size: 13px; line-height: 1.75; color: var(--fg0); }
+.art .mdv h1 { font-size: 20px; font-weight: 700; margin-bottom: 10px; }
+.art .mdv h2 { font-size: 15px; font-weight: 600; margin: 16px 0 6px; }
+.art .mdv li { margin-left: 18px; }
+.art .mdv mark { background: color-mix(in srgb, var(--tc) 22%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }
+.art .mdv code { font-family: var(--mono); font-size: 12px; background: var(--bg2); padding: 0 4px; border-radius: 3px; }
+
+/* ---- 状態の切替 ---- */
+body.s-new .trwrap, body.s-new .thead .tab b + span { display: none; }
+body.s-new .empty { display: flex; }
+body.s-new .art, body.s-talk .art { display: none; }
+body.s-new .tb-art, body.s-talk .tb-art { background: none; color: var(--fg2); }
+body.s-talk .only-art, body.s-new .only-art { display: none; }
+.only-new { display: none; }
+body.s-new .only-new { display: revert; }
+body.s-new .chat.only-new { display: grid; }
+body.s-new .chat .cnt.only-art { display: revert; }
+body.s-new .chat.sel:not(.only-new) { background: none; border-left-color: transparent; }
+body.s-new .chat.sel:not(.only-new) .nm { font-weight: 400; }
+body.s-new .comp .tok .bar i { width: 0 !important; }
+body.s-new .only-chat { display: none; }
+body.s-src .art .view { display: none; }
+body.s-file .only-chat-title { display: none; }
+body.s-src .art .src { display: block; }
+body.s-new .mk.m-art, body.s-talk .mk.m-art { display: none; }
+body.s-new .mk.m-tr { display: none; }
+body.s-talk .mk.m-tr { left: 432px !important; top: 134px !important; }
+body.s-file .mk.m-tr { top: 196px !important; }
+body.s-file .mk.m-comp { bottom: 140px !important; }
+body.s-talk .mk.m-comp, body.s-new .mk.m-comp { left: 412px !important; }
+</style>
+</head>
+<body class="s-art">
+
+<div class="mockbar">
+  <span class="title">Chat モード（提案）</span>
+  <div class="grp"><span>状態</span>
+    <button data-s="s-new">新規チャット</button>
+    <button data-s="s-talk">相談だけ</button>
+    <button data-s="s-art" class="on">artifact（プレビュー）</button>
+    <button data-s="s-src">artifact（ソース）</button>
+    <button data-s="s-file">ファイルを渡す</button>
+  </div>
+  <div class="grp"><span>テーマ</span>
+    <button data-t="dark" class="on">Dark</button>
+    <button data-t="light">Light</button>
+  </div>
+  <div class="grp"><span>スレッド色</span>
+    <button data-c="--th1" class="on">青</button>
+    <button data-c="--th3">紫</button>
+    <button data-c="--th4">緑</button>
+  </div>
+  <div class="grp"><button id="notes-btn" class="on">設計メモ</button></div>
+</div>
+
+<div class="shell">
+<div class="win">
+  <!-- マーカー（設計メモの番号に対応） -->
+  <div class="mk" style="left:444px; top:10px">1</div>
+  <div class="mk" style="left:37px; top:40px">2</div>
+  <div class="mk" style="left:268px; top:128px">3</div>
+  <div class="mk m-tr" style="left:290px; top:346px">4</div>
+  <div class="mk m-art" style="right:44px; top:45px">5</div>
+  <div class="mk m-art" style="right:8px; top:106px">6</div>
+  <div class="mk m-comp" style="left:290px; bottom:118px">7</div>
+
+  <!-- titlebar -->
+  <div class="titlebar">
+    <div class="lights"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <div class="pill"><b>Chat</b> <span class="dest">プロジェクトなし</span></div>
+    <div class="mode"><span>Editor</span><span>Fleet <b class="badge">◐ 2</b></span><span class="on">Chat</span></div>
+    <div class="fill"></div>
+    <div class="beacons" title="他のプロジェクトで走っているスレッド（Chat にいても見える）">
+      <span class="work" style="--bc:#e5c07b">tab色分け</span>
+      <span style="--bc:#c678dd">gpui起動</span>
+    </div>
+    <div class="tb-btns"><span class="on" title="チャットの一覧">◧</span><span class="on tb-art" title="artifact（エディタ領域）">◨</span></div>
+  </div>
+
+  <div class="body">
+    <!-- rail: プロジェクトはそのまま（押せばそのプロジェクトの Editor へ戻る）。どれも選択状態にならない -->
+    <div class="rail">
+      <div class="pj" style="color:#7c8cf8">印<div class="dots"><i style="background:#e5c07b"></i><i style="background:#c678dd"></i></div></div>
+      <div class="pj" style="color:#f0a24b">G</div>
+      <div class="pj" style="color:var(--fg2)">＋</div>
+      <div class="sep"></div>
+      <div class="act off">▤</div>
+      <div class="act off">⌕</div>
+      <div class="act off">⎇</div>
+      <div class="act" title="Fleet（⌘⇧M）">⚡</div>
+      <div class="act on" title="Chat（キーは UI-SPEC で確定）">
+        <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      </div>
+      <div class="foot"><div class="act">⚙</div></div>
+    </div>
+
+    <!-- チャットの一覧 -->
+    <div class="side">
+      <div class="new">＋ 新しいチャット <span class="k">⌘N</span></div>
+      <div class="find">⌕ チャットを検索</div>
+      <div class="list">
+        <div class="sec-h">今日</div>
+        <div class="chat sel idle only-new" style="--c:var(--tc)"><span class="dot"></span><span class="nm">新しいチャット</span><span class="cnt"></span></div>
+        <div class="chat sel" style="--c:var(--tc)"><span class="dot"></span><span class="nm"><span class="only-nofile">ポモドーロタイマー</span><span class="only-file">リリースノートの校正</span></span><span class="cnt only-art">▣ 1</span></div>
+        <div class="chat work" style="--c:var(--th2)"><span class="dot"></span><span class="nm">LP のコピー案を 5 本</span><span class="cnt">▣ 1</span></div>
+        <div class="chat idle" style="--c:var(--th5)"><span class="dot"></span><span class="nm">確定申告の経費の分け方</span><span class="cnt"></span></div>
+        <div class="sec-h">昨日</div>
+        <div class="chat idle" style="--c:var(--th3)"><span class="dot"></span><span class="nm">AGPL §13 の対応ソースの範囲</span><span class="cnt"></span></div>
+        <div class="chat idle" style="--c:var(--th4)"><span class="dot"></span><span class="nm">料金表の比較図</span><span class="cnt">▣ 2</span></div>
+        <div class="sec-h">過去 7 日</div>
+        <div class="chat idle" style="--c:var(--th1)"><span class="dot"></span><span class="nm">リリースノートの英訳</span><span class="cnt">▣ 1</span></div>
+        <div class="chat idle" style="--c:var(--th2)"><span class="dot"></span><span class="nm">wry の custom protocol</span><span class="cnt"></span></div>
+        <div class="chat idle" style="--c:var(--th5)"><span class="dot"></span><span class="nm">猫の名前の候補</span><span class="cnt"></span></div>
+      </div>
+      <div class="foot">Claude · 起動中 2 / 8</div>
+    </div>
+
+    <!-- 中央 -->
+    <div class="main">
+      <div class="thead">
+        <div class="tab"><i></i><b class="only-chat"><span class="only-nofile">ポモドーロタイマー</span><span class="only-file">リリースノートの校正</span></b><b class="only-new">新しいチャット</b><span class="dim only-chat"></span></div>
+        <div class="r"><span title="スレッド履歴">🕘</span><span>⋯</span></div>
+      </div>
+
+      <div class="empty">
+        <h2>何を話しますか？</h2>
+        <ul>
+          <li>質問や相談には、会話で答えます</li>
+          <li>見せる成果物を頼むと <span class="mono">書類/necoder/</span> の中に 1 ファイル書いて、右に表示します</li>
+          <li>ファイルをここへドロップすると、読んで、直せます</li>
+          <li>コードを直したいときは、プロジェクトの Editor か Fleet へ</li>
+        </ul>
+      </div>
+
+      <div class="trwrap"><div class="tr col">
+        <div class="u only-nofile">WebView の evict って 15 分が妥当？短くすると何が困る？</div>
+        <div class="fin only-nofile"><div>
+          <p>妥当な範囲です。短くして困るのは、タブを往復するたびに再生成の白フレームが出ることと、ページ内の状態（入力中のフォームやタイマー）が消えることです。</p>
+          <p>メモリを優先するなら 5 分、作業中の往復が多いなら 15 分のままを勧めます。</p>
+        </div></div>
+
+
+        <div class="u only-file"><span class="att">▤ release-notes.md <span class="d">~/Work/blog</span></span>このリリースノートの誤字を直して、見出しの表記をそろえて</div>
+        <div class="s only-file"><div>Read <code>~/Work/blog/release-notes.md</code></div><div class="r">64 行 <span class="dim">添付したファイル = 読み取りは自動で許可</span></div></div>
+        <div class="perm only-file"><span><b>release-notes.md</b> を書き換えます。許可しますか？ <span class="dim">書かれる前の中身は記録され、巻き戻せます</span></span>
+          <span class="ops"><span>拒否</span><span>今回だけ</span><span class="pri">このチャットでは以後許可</span></span></div>
+        <div class="s only-file"><div>Edit <code>~/Work/blog/release-notes.md</code></div>
+          <div class="r stat"><span><span class="a">+6</span> <span class="d">−6</span></span> <span class="pchip">⇄ 差分</span> <span class="pchip open">▣ プレビュー</span></div></div>
+        <div class="fin only-file"><div>誤字を 4 か所直し、見出しを「v0.1.18 — 日付」の形にそろえました。元のファイルをそのまま編集しています。</div></div>
+        <div class="u only-art">ポモドーロタイマー作って。作業 25 分・休憩 5 分で</div>
+        <div class="th only-art">Thought — 単体の HTML 1 枚で足りる。artifacts/ に書く</div>
+        <div class="s only-art"><div>Write <code>artifacts/pomodoro.html</code></div>
+          <div class="r">182 行 · 7.1 KB <span class="pchip" data-s="s-art">▣ プレビュー</span></div></div>
+        <div class="fin only-art"><div>作りました。開始・一時停止・リセットができ、作業と休憩が自動で切り替わります。</div></div>
+
+        <div class="u only-art">アクセントを青にして</div>
+        <div class="s only-art"><div>Edit <code>artifacts/pomodoro.html</code></div>
+          <div class="r stat"><span><span class="a">+3</span> <span class="d">−3</span></span> <span class="pchip open" data-s="s-art">▣ プレビュー</span></div></div>
+        <div class="fin only-art"><div>青にしました。</div></div>
+      </div></div>
+
+      <div class="comp"><div class="col">
+        <div class="dst">
+          <span class="chip"><i></i><span class="only-chat"><span class="only-nofile">ポモドーロタイマー</span><span class="only-file">リリースノートの校正</span></span><span class="only-new">新しいチャット</span><span class="d">／ Chat</span></span>
+          <span class="tok"><span class="only-chat">12.4k</span><span class="only-new">0</span> / 200k <span class="bar"><i style="width:7%"></i></span></span>
+        </div>
+        <div class="box" style="margin-top:6px">
+          <div class="atts"><span class="att">▤ release-notes.md <span class="x">✕</span></span><span class="att">▦ screenshot.png <span class="x">✕</span></span></div>
+          <div class="ph"><span class="caret"></span>メッセージを入力…</div>
+          <div class="row">
+            <span class="p">Claude</span><span class="p">Opus ▾</span><span class="p">思考 中 ▾</span><span class="p">＋ 添付</span><span class="p scope" title="このチャットのフォルダは自動許可・添付は初回だけ確認・それ以外は necoder が自動拒否">書込 フォルダ + 添付</span>
+            <span class="hint">Enter = 改行 / ⌘Enter = 送信</span>
+            <span class="send">↑</span>
+          </div>
+        </div>
+      </div></div>
+    </div>
+
+    <!-- 右: 既存のエディタ領域 -->
+    <div class="art">
+      <div class="tabs">
+        <div class="t on"><span class="only-nofile">▣ pomodoro.html</span><span class="only-file">▤ release-notes.md</span> <span class="x">✕</span></div>
+        <div class="close" title="閉じる（◨）">⟩</div>
+      </div>
+      <div class="crumb">
+        <span class="path"><span class="only-nofile">2026-09-18 ポモドーロタイマー作って › artifacts › <b>pomodoro.html</b></span><span class="only-file">~/Work/blog › <b>release-notes.md</b></span></span>
+        <span class="re only-nofile" title="ターン終了時に 1 回だけ再読込する">再読込 12:04</span>
+        <span class="seg"><span data-s="s-art" class="v-prev on">プレビュー</span><span data-s="s-src" class="v-src">ソース</span></span>
+        <span class="ib" title="再読込">↻</span>
+        <span class="iso only-nofile" title="配信はこのチャットの artifacts/ のみ・外部通信なし・外部リンクは既定ブラウザ">⊘ 隔離表示</span>
+      </div>
+      <div class="view"><iframe id="frame" sandbox="allow-scripts" title="artifact"></iframe></div>
+      <div class="mdv">
+        <h1>リリースノート</h1>
+        <h2><mark>v0.1.18 — 2026-09-17</mark></h2>
+        <ul><li>Fleet v2 の舞台と Task タブを追加しました</li><li>transcript のパスをクリックで<mark>開けます</mark></li><li>通知音を<mark>作り直しました</mark></li></ul>
+        <h2><mark>v0.1.17 — 2026-09-12</mark></h2>
+        <ul><li>スキャンボタンが反応しないとき、ページの状態を<mark>報告します</mark></li><li><code>session/new</code> に MCP サーバを載せるようにしました</li></ul>
+      </div>
+      <div class="src">
+        <div class="ln"><i>1</i><u></u><span><span class="tg">&lt;!doctype html&gt;</span></span></div>
+        <div class="ln"><i>2</i><u></u><span><span class="tg">&lt;html</span> <span class="at">lang</span>=<span class="st">"ja"</span><span class="tg">&gt;</span></span></div>
+        <div class="ln"><i>3</i><u></u><span><span class="tg">&lt;meta</span> <span class="at">charset</span>=<span class="st">"utf-8"</span><span class="tg">&gt;</span></span></div>
+        <div class="ln"><i>4</i><u></u><span><span class="tg">&lt;title&gt;</span>ポモドーロタイマー<span class="tg">&lt;/title&gt;</span></span></div>
+        <div class="ln"><i>5</i><u></u><span><span class="tg">&lt;style&gt;</span></span></div>
+        <div class="ln chg"><i>6</i><u></u><span>  :root { <span class="at">--accent</span>: <span class="st">#2f6fed</span>; <span class="at">--accent-soft</span>: <span class="st">#e8f0ff</span>; }</span></div>
+        <div class="ln"><i>7</i><u></u><span>  body { <span class="at">font</span>: 16px/1.5 system-ui; <span class="at">display</span>: grid; <span class="at">place-items</span>: center; }</span></div>
+        <div class="ln"><i>8</i><u></u><span>  .ring { <span class="at">width</span>: 260px; <span class="at">height</span>: 260px; <span class="at">border-radius</span>: 50%; }</span></div>
+        <div class="ln chg"><i>9</i><u></u><span>  .ring { <span class="at">background</span>: conic-gradient(var(--accent) var(--p), var(--accent-soft) 0); }</span></div>
+        <div class="ln"><i>10</i><u></u><span>  .time { <span class="at">font-size</span>: 56px; <span class="at">font-variant-numeric</span>: tabular-nums; }</span></div>
+        <div class="ln chg"><i>11</i><u></u><span>  button.primary { <span class="at">background</span>: var(--accent); <span class="at">color</span>: #fff; }</span></div>
+        <div class="ln"><i>12</i><u></u><span><span class="tg">&lt;/style&gt;</span></span></div>
+        <div class="ln"><i>13</i><u></u><span><span class="tg">&lt;main&gt;</span></span></div>
+        <div class="ln"><i>14</i><u></u><span>  <span class="tg">&lt;p</span> <span class="at">class</span>=<span class="st">"phase"</span><span class="tg">&gt;</span>作業<span class="tg">&lt;/p&gt;</span></span></div>
+        <div class="ln"><i>15</i><u></u><span>  <span class="tg">&lt;div</span> <span class="at">class</span>=<span class="st">"ring"</span><span class="tg">&gt;&lt;span</span> <span class="at">class</span>=<span class="st">"time"</span><span class="tg">&gt;</span>25:00<span class="tg">&lt;/span&gt;&lt;/div&gt;</span></span></div>
+        <div class="ln"><i>16</i><u></u><span>  <span class="tg">&lt;button</span> <span class="at">class</span>=<span class="st">"primary"</span> <span class="at">id</span>=<span class="st">"go"</span><span class="tg">&gt;</span>開始<span class="tg">&lt;/button&gt;</span></span></div>
+        <div class="ln"><i>17</i><u></u><span><span class="tg">&lt;/main&gt;</span></span></div>
+        <div class="ln"><i>18</i><u></u><span><span class="tg">&lt;script&gt;</span></span></div>
+        <div class="ln"><i>19</i><u></u><span>  <span class="kw">const</span> WORK = 25 * 60, REST = 5 * 60;   <span class="cm">// 秒</span></span></div>
+        <div class="ln"><i>20</i><u></u><span>  <span class="kw">let</span> left = WORK, phase = <span class="st">"work"</span>, timer = <span class="kw">null</span>;</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="status">
+    <span>Chat</span>
+    <span class="mono dim only-chat" title="Finder では「書類」"><span class="only-nofile">~/Documents/necoder/2026-09-18 ポモドーロタイマー作って</span><span class="only-file">フォルダなし（成果物を書いていない）</span></span>
+    <span class="fill"></span>
+    <span class="dots" title="全プロジェクトの実行中スレッド"><i class="work" style="background:#e5c07b"></i><i style="background:#c678dd"></i> 1 実行 · 1 完了</span>
+    <span class="fill"></span>
+    <span class="only-art">WebView 1</span>
+    <span>Claude</span>
+  </div>
+</div>
+
+<!-- 設計メモ -->
+<aside class="notes">
+  <h3>設計メモ（DECISIONS 2026-09-18 / CHAT.md）</h3>
+  <ol>
+    <li><span><b>モードは 3 つ</b>: Editor / Fleet / Chat。Chat はプロジェクトに属さないので、ピルに <span class="mono">⎇ branch</span> が出ず、<b>額縁は無彩色</b>。「色のある窓 = プロジェクト、色のない窓 = Chat」が方向感覚になる。</span></li>
+    <li><span><b>レールは残す</b>。プロジェクトを押せばその Editor へ戻る。エクスプローラ・検索・Git はプロジェクトの機能なので Chat では薄くする。他プロジェクトのビーコンは Chat にいても見える。</span></li>
+    <li><span><b>チャット = thread</b>（別の型を作らない）。行頭 ● はスレッド色、選択は左バー。状態は形と動き: 塗り = 起動中 / 点滅 = 応答中 / <b>輪郭だけ = エージェント未起動</b>。一覧に並んでいるだけではプロセスを起こさない（idle メモリ予算）。</span></li>
+    <li><span><b>transcript は agent_panel のまま</b>（⏺/⎿・✳）。相談にはテキストだけで答え、ファイルを作らない。成果物を頼まれた時だけ <span class="mono">artifacts/</span> に 1 ファイル Write し、修正は同じファイルの Edit。<b>▣ プレビュー</b>チップはツール呼び出しの構造化されたパス + 実在確認 + 拡張子で出す（文言は解析しない）。</span></li>
+    <li><span><b>右は既存のエディタ領域</b>。artifact 専用ペインは作らない。タブ下線はそれを書いたスレッドの色。artifact が無い会話では閉じていて、transcript が中央に広がる（状態「相談だけ」）。</span></li>
+    <li><span><b>プレビュー ⇄ ソース</b>は既存の ⌘⇧V。ソースでは自分で編集でき、エージェントが触った行は gutter がスレッド色。<b>再読込はターン終了時に 1 回</b>（途中で読み直すとタイマーなどのページ状態が消える）。<b>隔離表示</b> = 配信は <span class="mono">artifacts/</span> のみ・外部通信なし・外部リンクは既定ブラウザ（ROADMAP C3）。</span></li>
+    <li><span><b>宛先チップとトークンは常時表示</b>（必須要件）。宛先は「スレッド名 ／ Chat」。権限モードのピルは出さず、<b>書込 フォルダ + 添付</b>を固定で示す。最初は Claude のみ。</span></li>
+    <li><span><b>保存場所は <span class="mono">書類/necoder/&lt;日付 最初の文&gt;/artifacts/</span></b>（statusbar に表示）。最初の送信時に作り、空のまま終われば消す。名前は作成後に変えない。<b>ファイルを渡す = 触ってよいと伝える</b>（状態「ファイルを渡す」）: 元の場所のまま扱い、読み取りは自動、書き込みは初回だけ確認。それ以外への書き込みは拒否。</span></li>
+  </ol>
+</aside>
+</div>
+
+<!-- artifact の中身（エージェントが書いた単体 HTML の例。necoder の見た目ではない） -->
+<template id="pomodoro">
+<!doctype html><html lang="ja"><meta charset="utf-8"><title>ポモドーロタイマー</title>
+<style>
+  :root { --accent: #2f6fed; --accent-soft: #e8f0ff; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 16px/1.5 system-ui, "Hiragino Sans", sans-serif; color: #1d2433; background: #f7f8fb; display: grid; place-items: center; }
+  main { text-align: center; }
+  .phase { font-size: 14px; letter-spacing: .2em; color: #6b7487; margin: 0 0 18px; }
+  .ring { --p: 0%; width: 260px; height: 260px; border-radius: 50%; margin: 0 auto 26px; display: grid; place-items: center;
+    background: conic-gradient(var(--accent) var(--p), var(--accent-soft) 0); }
+  .ring > div { width: 228px; height: 228px; border-radius: 50%; background: #fff; display: grid; place-items: center; box-shadow: inset 0 0 0 1px #e6e9f0; }
+  .time { font-size: 56px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .ops { display: flex; gap: 10px; justify-content: center; }
+  button { font: inherit; padding: 9px 22px; border-radius: 9px; border: 1px solid #d5dae5; background: #fff; color: #1d2433; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .count { margin-top: 22px; font-size: 13px; color: #6b7487; }
+</style>
+<main>
+  <p class="phase" id="phase">作業</p>
+  <div class="ring" id="ring"><div><span class="time" id="time">25:00</span></div></div>
+  <div class="ops"><button class="primary" id="go">開始</button><button id="reset">リセット</button></div>
+  <p class="count">今日のポモドーロ <b id="n">0</b></p>
+</main>
+<script>
+  const WORK = 25 * 60, REST = 5 * 60;
+  let left = WORK, total = WORK, phase = "work", timer = null, done = 0;
+  const $ = id => document.getElementById(id);
+  function draw() {
+    $("time").textContent = String(Math.floor(left / 60)).padStart(2, "0") + ":" + String(left % 60).padStart(2, "0");
+    $("ring").style.setProperty("--p", (100 * (total - left) / total) + "%");
+    $("phase").textContent = phase === "work" ? "作業" : "休憩";
+    $("go").textContent = timer ? "一時停止" : "開始";
+    $("n").textContent = done;
+  }
+  function tick() {
+    if (--left > 0) return draw();
+    if (phase === "work") { done++; phase = "rest"; total = left = REST; } else { phase = "work"; total = left = WORK; }
+    draw();
+  }
+  $("go").onclick = () => { if (timer) { clearInterval(timer); timer = null; } else { timer = setInterval(tick, 1000); } draw(); };
+  $("reset").onclick = () => { clearInterval(timer); timer = null; phase = "work"; total = left = WORK; draw(); };
+  draw();
+</script>
+</html>
+</template>
+
+<script>
+  document.getElementById("frame").srcdoc = document.getElementById("pomodoro").innerHTML;
+
+  const states = ["s-new", "s-talk", "s-art", "s-src", "s-file"];
+  function setState(s) {
+    states.forEach(x => document.body.classList.remove(x));
+    document.body.classList.add(s);
+    document.querySelectorAll(".mockbar [data-s]").forEach(b => b.classList.toggle("on", b.dataset.s === s));
+    document.querySelector(".v-prev").classList.toggle("on", s !== "s-src");
+    document.querySelector(".v-src").classList.toggle("on", s === "s-src");
+  }
+  document.querySelectorAll("[data-s]").forEach(el => el.addEventListener("click", () => setState(el.dataset.s)));
+  document.querySelectorAll("[data-t]").forEach(b => b.addEventListener("click", () => {
+    document.documentElement.dataset.theme = b.dataset.t;
+    document.querySelectorAll("[data-t]").forEach(x => x.classList.toggle("on", x === b));
+  }));
+  document.querySelectorAll("[data-c]").forEach(b => b.addEventListener("click", () => {
+    document.documentElement.style.setProperty("--tc", `var(${b.dataset.c})`);
+    document.querySelectorAll("[data-c]").forEach(x => x.classList.toggle("on", x === b));
+  }));
+  document.getElementById("notes-btn").addEventListener("click", e => {
+    e.currentTarget.classList.toggle("on");
+    document.body.classList.toggle("no-notes");
+  });
+  document.querySelector(".side .new").addEventListener("click", () => setState("s-new"));
+  document.querySelector(".art .close").addEventListener("click", () => setState("s-talk"));
+
+  // スクショ用: chat.html#s-src / #light / #no-notes をハッシュで指定できる
+  location.hash.slice(1).split(",").filter(Boolean).forEach(h => {
+    if (states.includes(h)) setState(h);
+    else if (h === "light") document.querySelector('[data-t="light"]').click();
+    else if (h === "no-notes") document.getElementById("notes-btn").click();
+  });
+</script>
+</body>
+</html>

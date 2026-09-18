@@ -545,6 +545,10 @@ tabs:
   untitled: 無題
   close_tip: 閉じる  ⌘W
   close_split_tip: 分割を閉じる  ⌘\\
+  ctx_copy_relative: 相対パスをコピー
+  ctx_close: タブを閉じる
+  ctx_close_others: 他のタブを閉じる
+  ctx_close_right: 右側のタブを閉じる
 image:
   load_failed: 画像を表示できません
 breadcrumb:

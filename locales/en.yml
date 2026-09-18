@@ -544,6 +544,10 @@ tabs:
   untitled: Untitled
   close_tip: Close  ⌘W
   close_split_tip: Close split  ⌘\\
+  ctx_copy_relative: Copy relative path
+  ctx_close: Close tab
+  ctx_close_others: Close other tabs
+  ctx_close_right: Close tabs to the right
 image:
   load_failed: Unable to display image
 breadcrumb:

@@ -1195,7 +1195,7 @@
   - **transcript の右下に「最新へ」丸ボタン**（`agent_panel::render_jump_to_latest`）。エージェントが進んで下に
     新着が溜まった時、1 タップで最下部（`scroll_to_bottom`）へ戻す。出現は fade-in + せり上がり（既存
     `render_selector_menu` と同じ `with_animation` oneshot＝完了後は再描画を要求せず idle 0% を保つ）。
-  - 判定は `follow_transcript_if_at_bottom` と同系（offset.y は下ほど負）。**閾は 140px**（follow の 60px より
+  - 判定は `follow_transcript_if_at_bottom`（2026-09-17 撤去・`FollowMode::Tail` へ一本化）と同系（offset.y は下ほど負）。**閾は 140px**（follow の 60px より
     広め＝ヒステリシスで底付近の出没チラつきを防ぐ）。`max_offset.y <= 0`（スクロール不要）では出さない。
   - 手動スクロールで出没を更新するため transcript に `on_scroll_wheel → cx.notify()`（stop_propagation しないので
     スクロール自体はそのまま。実行中は on_event が毎チャンク notify するので追加コストは遡り読み時のみ）。
@@ -3108,3 +3108,84 @@
 - 次: F6 の残り（台帳イベントの灰色カード・承認の推薦 ✳・トークン表示・実 e2e）→ F7 掃除
   （workbench / work_layout / FleetCenterView / `work.*` キー・UI-SPEC §11 の置換）。F2 の残 `+N −M`
   shortstat キャッシュは transition と FilesTouched をトリガに背景で取るのが素直。
+
+## 2026-09-17 — ストリーミング冒頭だけ transcript が上下に揺れるのを根治
+- やったこと: ユーザー報告「ACP のストリーミング出力で、最初の方だけ行が上下にガタガタする。下まで
+  出しきった後や途中は問題ない」。原因は **固定プロンプト（`render_pinned_prompt`）の 1 フレームおきの
+  出没**。タイプライタ時計とチャンク到着のたびに呼んでいた `follow_transcript_if_at_bottom` →
+  `ListState::scroll_to_end()` は `logical_scroll_top` を**末尾の番兵値（item_ix = 項目数）**へ書き換え、
+  実値に戻るのは次の prepaint。その間に走る render で固定プロンプトが `last_user < top_item` を
+  番兵と比べ、「直近の問いは上に隠れた」と誤判定してバーを出す → レイアウト後の素の再描画
+  （フェードインのアニメフレーム・1Hz 時計・hover）では実値で判定して消す、を繰り返していた。バーは
+  transcript の上に `flex_none` で積むので、出没のたびに list の上端が 31.5px 動き、内容がビューポートに
+  満たない間（上詰め）は本文ごと往復する。問いが本当に上へ抜けた後（＝途中）と完了後は判定が
+  安定するので止まる＝報告の症状と一致。
+  - `follow_transcript_if_at_bottom` を撤去。末尾追従は `FollowMode::Tail` が prepaint で行っており
+    （底に居る時だけ張り付く・遡ると止まる・底へ戻ると再開）、毎 tick の `scroll_to_end` は冗長だった
+  - `transcript_top_item()` を新設: 番兵の間は直前にレイアウトされた実値を返す。固定プロンプトと
+    「前の指示へ」ボタンの判定をこれへ寄せた。`reset`（スレッド切替）で 0 に戻す
+  - 番兵のまま描いたフレームは `cx.on_next_frame` で 1 回だけ再描画し、出し分けを実値で確定させる
+    （従来はスレッド切替直後、短いスレッドでも次の再描画まで固定プロンプトが出たままだった）
+- 学び/罠: **`ListState::logical_scroll_top()` は `scroll_to_end` / `reset` 直後〜次の prepaint まで
+  番兵値を返す**。描画の出し分けに直接使わない。headless テストは `run_until_parked` 後の落ち着いた
+  状態しか見えず往復を観測できないので、回帰テスト `streaming_does_not_toggle_pinned_prompt` は
+  描画前の判定（番兵を書かない・番兵でも誤判定しない）を直接見る。テストで実機経路（タイプライタ）を
+  通すには `window.activate_window()` が要る（`is_visibly_active` が偽だと追従経路に入らない）
+- 続き（同日）: 調査中に見つけた「1 回きりの下方向ジャンプ」2 つも潰した。原則は **末尾追従中、過去の
+  行は上へしか動かさない＝生成中の表示高さを単調増加に保つ**（UI-SPEC §transcript へ明記）
+  - **Thinking→本文の切替で思考の行数ぶん下へ跳ねる**（テストで 115.5px・実際の長い思考なら数百 px）:
+    生成中だけ自動展開していた思考ブロックが、次のエントリ到着で live でなくなり畳まれるのが原因。
+    自動展開をやめ、生成中も折り畳みと同じ高さ（ヘッダ + 1 行プレビュー）で描く。動きは
+    `thought_live_preview`（最後の非空行の末尾 64 文字）で見せる。展開はユーザー操作だけで決まり、
+    生成中に開いたものは完了後も開いたまま（従来は生成中のクリックが効かなかった）。UI-SPEC の
+    Thinking 行は「常時展開」のまま実装と乖離していたので合わせて直した
+  - **表の区切り行で 6px 下がる**: `|---|--` は揃うまでヘッダ行と同じ段落の 2 行目として描かれ、
+    揃った瞬間に表（ヘッダ 1 行）へ再解釈されて縮む。生成中だけ `hold_back_partial_table_delimiter`
+    で「表ヘッダに続く区切り行の書きかけ」を改行が届くまで伏せる＝段落 1 行 → 表、と増える一方
+  - 回帰テスト `streaming_never_pushes_earlier_lines_down`: 狭幅（420px）・末尾追従・実イベント経路で
+    思考 → 表入り本文を流し、直前エントリの y が一度も増えないことを見る。各修正を戻すと
+    それぞれ落ちることを確認（115.5px / 6px）
+- 検証: `cargo check -p necoder`（既存の workbench 由来警告のみ）・`cargo test -p agent_panel` 62 green・
+  `cargo test -p necoder` green。修正前の挙動へ戻すと回帰テストが落ちることを確認。**実機の目視は
+  本人の手番**（ドッグフーディング中なので窓を上げていない）
+
+## 2026-09-17 — composer の右端で入力が見えなくなるのを根治（桁数折返し → 画素折返し）
+- やったこと: ユーザー報告「ACP のテキスト入力で、見えている右端より先まで入力できて文字が見えなく
+  なる」。原因は composer（`EditorView` 平坦モード・IBM Plex Sans JP）の折返しが**桁数ベース**だった
+  こと。半角=1 / 全角=2 セル・1 セル=「永」の幅÷2 で数えるので全角は画素ぴったりだが、Sans の
+  英数字は `m` `W`・大文字・数字など半角セルより広い字が多く、英数字が続く行は折返し桁に届く前に
+  右端を超えて切れていた（日本語だけの行では再現しない）。
+  - `compute_wrap_segments_by_width(line, max_width, position_at)` を新設し、折り方（単語境界優先・
+    1 語が幅を超えたら文字で切る・最低 1 文字）を桁数版と共有。桁数版 `compute_wrap_segments` は
+    累積セル数を渡す薄いラッパになった（コードエディタの等幅折返しは挙動不変・既存テスト緑）
+  - plain の wrap マップは prepaint で論理行を本文フォントで shape し、`ShapedLine::x_for_index` の
+    実測 x で折る。折返し幅 = bounds 幅 − `COMPOSER_WRAP_MARGIN`（2px・行末キャレット分）。
+    `WrapMap::build` は「行 → セグメント列」のクロージャを受ける形にした。鍵の第 2 要素は
+    等幅=桁数 / composer=px
+- 学び/罠: プロポーショナルフォントに「平均字幅のセル」を当てる折返しは、字種の偏った行で必ず
+  外れる（2026-08 に 'M' 幅 → 全角÷2 へ直したのは早折れの解消で、今回はその逆側）。同じ行の shape は
+  GPUI の行レイアウトキャッシュに載るので、打鍵ごとに測り直すのは編集した行だけ
+- 検証: `cargo check -p necoder`・`cargo test -p editor_view -p agent_panel -p necoder` 緑
+  （擬似字幅での単体テスト `wrap_segments_by_width_follow_measured_glyph_widths` を追加）。
+  **実フォントでの目視（英数字の長文・URL・日英混在・IME 変換中）は本人の手番**
+
+## 2026-09-18 — タブの右クリックメニュー
+- やったこと: エディタタブの右クリックで タブメニュー（Finder で表示 / 既定のアプリで開く / パスをコピー / 相対パスをコピー / タブを閉じる・他を閉じる・右側を閉じる）。`chrome.rs` に `open_tab_menu` / `render_tab_menu` / `copy_tab_path`、`editor_area/tabs.rs` に `close_other_tabs` / `close_tabs_to_right`、overlays へ `tab_menu`。文言はエクスプローラの `explorer.ctx_*` を再利用し、閉じる系だけ `tabs.ctx_*` を追加（ja/en）。UI-SPEC §5 に追記。テスト `the_tab_menu_closes_the_tabs_it_names`
+- 学び/罠: 複数タブを閉じるときは**後ろの添字から**閉じる（`close_tab_at` が `tabs.remove` で詰めるので、前から回すと別のファイルが消える）。OS 連携行は `active_slot().remote_host.is_none()` でローカル限定 — リモートのパスを Finder に渡さない
+- 次: pdf.unsupported_hint が言う「右クリック →『既定アプリで開く』」が PDF タブ上でも成立するようになったので、文言の宛先を見直すかは様子見
+
+## 2026-09-18 — Chat モードと artifact の設計を決める（文書とモックのみ・実装なし）
+- やったこと: ユーザーとの設計議論を文書に落とした。**DECISIONS 決定ログ**に「Chat モード = セッション設定のプリセット / artifact = エージェントが書いたファイル + 既存プレビュー」（確定 8 点 + 採らなかった方式）、**ROADMAP に M16**（C0 通し確認 → C1 プレビュー更新とチップ → C2 面とプリセット → C3 表示の隔離 → C4 実測）、**GLOSSARY** に `chat` / `SessionPreset::Chat` / `chat_scratch` / `artifact` / `preview_chip`。見た目の提案は **`mock/chat.html`**（状態 4 つ: 新規 / 相談だけ / artifact プレビュー / ソース・Dark/Light・設計メモ付き。ハッシュ `#s-src,light,no-notes` でスクショ用に状態を指定できる）。ヘッドレス Chrome で 4 状態を目視。コードは触っていない
+- 学び/罠: ①**「Claude Code はガンガン実装する」はモデルではなくプロンプトと道具の帰結**。`claude -p --system-prompt … --tools "Write,Edit,Read" --setting-sources ""` を空ディレクトリで走らせると、相談にはテキストだけ（ファイル 0 個）、「ポモドーロタイマー作って」には `artifacts/pomodoro.html` 1 個だけを書いた。`claude-agent-acp` は同じ口を `_meta.systemPrompt`（文字列 = 置換・オブジェクト = append）と `_meta.claudeCode.options.{tools, settingSources, …}` で持つ（`acp-agent.js` の `createSession`。`loadSession` も同じ関数に入り `params._meta` を読む＝**necoder が `session/load` にも載せれば再開で保たれる**）。②`settingSources` の既定は `["user","project","local"]` で、直後に `...userProvidedOptions` が展開されるので上書きできる。`tools` だけでは MCP は閉じない ③**外部変更の経路はプレビューを再読込していない**: `reload_html_preview` を呼ぶのは `save_impl` だけで、`after_reload`（`handle_external_change` → `reload_from_disk`）からは呼ばれない＝エージェントが HTML を書き換えてもプレビューが古いまま。Chat と無関係に今の Editor スレッドでも起きる（M16 C1）④推奨を 3 回変えてユーザーを混乱させた（MCP ツール → テキスト目印 → ファイル）。**方式を比べる前に「今の実装でそれをやると何が起きるか」をコードで確かめるべきだった** — 既存の HTML プレビューと `OpenPathRequest` を先に読んでいれば最初からファイル方式に着いた ⑤モックの CSS で `.chat .art`（一覧のバッジ）が右ペインの `.art`（width 40%）と衝突し、一覧のタイトルが全部消えた。スクショを見るまで気づかない類
+- 次: **M16 C0**（実 `claude-agent-acp` で新規・再開の通し確認。`crates/acp_client/examples/` に probe を置く形が合う）。モックへのユーザーの目視フィードバックを受けてから UI-SPEC に Chat の節とキーを書く（キー候補は ⌘⇧J — keymap_core で未使用。未確定）
+
+## 2026-09-18 — Chat モードの保存場所・ファイルの扱い・機能一覧を決める（文書とモックのみ）
+- やったこと: **`docs/CHAT.md` を新設**（原則 4 つ / 保存場所 / ファイルの扱いと権限の表 / 機能一覧 P0〜P2 と既存・改修・新規の別 / プリセットの中身 / 実装の順序）。CLAUDE.md の一次資料表に行を追加。DECISIONS ③ を同日改訂（保存場所を `~/.necoder/chats/<thread id>/` から**書類フォルダの `necoder/<YYYY-MM-DD 最初の文>/`** へ・成果物はフォルダ直下・「ファイルを渡す = 触ってよいと伝える」）。ROADMAP M16 を C0〜C6 に組み直し（C3 = ファイルを渡す + 隔離、C4 = 画像、C5 = P1 群）。GLOSSARY は `chat_scratch` → `chat_dir`、`添付` を追加。`mock/chat.html` に状態「ファイルを渡す」（添付チップ・初回の書き込み確認カード・差分チップ・Markdown プレビュー）と設計メモ ⑧
+- 学び/罠: ①**ファイルの D&D → @メンションは既にある**（`agent_panel.rs` の `add_context_path`。Finder の `ExternalPaths` とエクスプローラの `DraggedFile` の両方）。Chat で足りないのは「常に絶対パス」と「権限の表」だけ ②**フォルダ名は作成後に変えられない** — Claude Code はセッションを cwd のパス文字列で引くので、スレッドの改名に追従させると `session/load` が前回を見つけられない。だから名前は LLM の自動命名（1 ターン後）を待たず、最初のメッセージの先頭から決める ③相談だけのチャットが大半なので、**フォルダは「ファイルがある間だけ存在する」**にしないと書類が空フォルダで埋まる（無ければ同じパスで作り直せば再開は通る）④Windows の書類は OneDrive へリダイレクトされていることが多い＝`%USERPROFILE%\Documents` の決め打ちは外れる。Known Folder を引く ⑤モックで `display: revert` を使うと、その要素に当てていた `display: grid / flex` まで戻ってレイアウトが崩れる（状態の出し分けクラスと構造のクラスを同じ要素に載せるときは個別に戻す）⑥Bash の heredoc に長い日本語を流して python に渡すと `Non-UTF-8 code` で落ちることがある。本文は Write でファイルに置き、スクリプトは読むだけにすると安定する
+- 次: M16 C0。CHAT §4 の「要確認」3 件（transcript 内検索・入力のキュー・コードブロック単位のコピー）は C5 の前にコードで有無を確かめる
+
+## 2026-09-18 — check-windows を green に戻す（Fleet v2 で浮いた旧グリッドの削除）
+- やったこと: `main` の CI `check-windows` が dead code で落ちていたのを直した。`3efcbef`（Fleet v2 stage）で呼び出し口が消えた**旧 Fleet グリッド UI** を削除: `workbench.rs` の描画・リサイズ・worktree ピッカー経路（`render_workbench` / `render_work_sidebar` / `render_work_column` / `render_work_pane` / `render_work_menu` / `render_work_resize` / `resize_workbench` / `work_button` / `render_work_surface_row` / `open_work_thread` / `work_surface_label` / `open_worktree_picker` / `confirm_worktree_choice` / `WorkResize`）で 1984 → 524 行。`WorkAction` は生きている 6 つ（`Terminal` / `DockTerminal` / `Split` / `Vertical` / `CloseTab` / `ReturnTerminal`）に絞り、到達不能になった `run_work_action` の腕も落とした。連鎖して `PickerMode::Worktrees`、`ChromeState` の `work_resize` / `worktree_choices` / `worktree_origin`、`RepositoryLayout::close_column` も削除（`work_layout` のテストは末尾の `close_column` 検証だけ外した。hidden のラウンドトリップは前半の `open(beside)` で今も見ている）
+- 学び/罠: **mac の CI は警告を許すので、UI を置き換えて浮いたコードは Windows ジョブでしか見つからない**（`check-windows` だけ `RUSTFLAGS: -D warnings`）。OS 依存ではなく、手元でも `RUSTFLAGS="-D warnings" cargo check --workspace --all-targets` で同じ 5 件が再現する＝**大きな UI 差し替えの後はこれを 1 回回す**。dead code は連鎖するので、消す → 再チェックを繰り返して底を打たせる（今回は 4 周）
+- 検証: `RUSTFLAGS="-D warnings" cargo check --workspace --all-targets` 緑・`cargo test --workspace` 緑
+- 次: M16 C0（変更なし）

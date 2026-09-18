@@ -59,9 +59,7 @@ mod fleet_stage;
 mod new_task_dialog;
 mod work_layout;
 mod workbench;
-pub(crate) use work_layout::{
-    RepositoryLayout, WorkColumn, WorkLayoutState, WorkPane, WorkSurface,
-};
+pub(crate) use work_layout::{WorkLayoutState, WorkPane, WorkSurface};
 mod image_view;
 mod pdf_view;
 mod remote_control;
@@ -219,7 +217,6 @@ actions!(
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum PickerMode {
-    Worktrees,
     Files,
     Projects,
     Themes,
@@ -380,6 +377,15 @@ impl Render for DraggedEditorTab {
 struct RailMenuState {
     /// 対象プロジェクトのレール index。
     project_index: usize,
+    /// ポップオーバー表示位置（右クリック位置）。
+    position: Point<gpui::Pixels>,
+}
+
+/// エディタタブの右クリックメニュー（Finder で表示 / 既定アプリ / パスコピー / 閉じる系）。
+/// タブ = ファイルの居場所なので、エクスプローラを開かずに OS 側へ橋渡しできる導線を置く。
+struct TabMenuState {
+    /// 対象タブの `tabs` 添字。
+    index: usize,
     /// ポップオーバー表示位置（右クリック位置）。
     position: Point<gpui::Pixels>,
 }
@@ -1083,13 +1089,10 @@ pub(crate) enum RenameSite {
 }
 
 struct ChromeState {
-    worktree_choices: Vec<(String, Option<PathBuf>)>,
-    worktree_origin: Option<Rc<Worktree>>,
     work_layout: WorkLayoutState,
     work_menu: Option<(u64, Point<gpui::Pixels>)>,
     /// `sync_work_chrome` が最後に適用した (埋め込みか, session 数)。毎 render の早期脱出用。
     work_embedded: Option<(bool, usize)>,
-    work_resize: Option<workbench::WorkResize>,
     show_left: bool,
     show_right: bool,
     show_bottom: bool,
@@ -1203,6 +1206,8 @@ struct WorkspaceOverlays {
     picker_observation: Option<Subscription>,
     color_picker: Option<ColorPickerState>,
     rail_menu: Option<RailMenuState>,
+    /// エディタタブの右クリックメニュー。
+    tab_menu: Option<TabMenuState>,
     /// worktree 削除の確認ダイアログ（2026-07-27）。何を失うかを git に聞いて見せる。
     worktree_delete: Option<worktree_delete::WorktreeDeleteConfirm>,
     ssh_input: Option<(String, FocusHandle)>,
@@ -1721,6 +1726,7 @@ impl Workspace {
             || self.code_actions.is_some()
             || self.hunk_menu.is_some()
             || self.git_panel.read(cx).branch_menu.is_some()
+            || self.overlays.tab_menu.is_some()
             || self.explorer_context_menu(cx).is_some()
     }
 
@@ -2021,6 +2027,7 @@ impl Render for Workspace {
             .children(self.render_fleet_cell_menu(cx))
             .children(self.render_worktree_delete_dialog(cx))
             .children(self.render_branch_menu(cx))
+            .children(self.render_tab_menu(cx))
             .children(self.render_explorer_context_menu(cx))
             .children(self.render_project_flash(cx)) // キーボード切替の行き先名フラッシュ
             .children(self.render_confetti(cx)) // 最前面（祝いの紙吹雪）
@@ -3066,6 +3073,62 @@ mod tests {
             }
         });
         drop(storage);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// タブメニューの「他のタブを閉じる」「右側のタブを閉じる」が、押したタブを残すこと。
+    /// 後ろから閉じるので添字がずれない — ここが崩れると別のファイルが消える。
+    #[gpui::test]
+    fn the_tab_menu_closes_the_tabs_it_names(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_tab_menu_close_{}", std::process::id()));
+        let project = root.join("a");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project).unwrap();
+        let files: Vec<PathBuf> = (1..=4)
+            .map(|index| project.join(format!("f{index}.txt")))
+            .collect();
+        for path in &files {
+            std::fs::write(path, "x\n").unwrap();
+        }
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.restore_open_file(
+                &[RestoredTabs {
+                    files: files.clone(),
+                    active: 0,
+                }],
+                window,
+                cx,
+            );
+            assert_eq!(workspace.tabs.len(), 4);
+
+            // 2 枚目（添字 1）を基点に右側を閉じる → f1, f2 が残る。
+            workspace.close_tabs_to_right(1, window, cx);
+            let left: Vec<PathBuf> = workspace.tabs.iter().map(|tab| tab.path.clone()).collect();
+            assert_eq!(left, vec![files[0].clone(), files[1].clone()]);
+
+            // 残った 2 枚目だけを残す → f2 のみ・それがアクティブ。
+            workspace.close_other_tabs(1, window, cx);
+            let left: Vec<PathBuf> = workspace.tabs.iter().map(|tab| tab.path.clone()).collect();
+            assert_eq!(left, vec![files[1].clone()]);
+            assert_eq!(workspace.active_tab, 0);
+
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
         let _ = std::fs::remove_dir_all(&root);
     }
 

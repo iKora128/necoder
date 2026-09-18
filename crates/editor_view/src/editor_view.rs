@@ -34,6 +34,8 @@ mod markdown_preview;
 const FONT_SIZE: f32 = 13.0; // code 13px（既定。settings の font_size で上書き・M10-13）
 const LINE_HEIGHT: f32 = 23.0; // compact 行高 23（font_size に比例して伸縮）
 const GUTTER_PADDING: f32 = 10.0; // 行番号の左右余白
+/// composer の折返し幅から引く右端の余白（行末に立つ 2px キャレットが切れない分）。
+const COMPOSER_WRAP_MARGIN: f32 = 2.0;
 const GUTTER_MIN_WIDTH: f32 = 46.0; // UI-SPEC §1.4 行番号ガター 46
 /// 既定タブ幅（空白換算）。settings の `tab_size` 配線（M10-13）までの暫定値。
 const DEFAULT_TAB_SIZE: usize = 4;
@@ -2472,13 +2474,10 @@ impl Element for EditorElement {
         let editor_font_size = self.editor.read(cx).font_size;
         let cell_width_estimate =
             f32::from(shape_plain("M", gpui::black(), editor_font_size, window).width).max(1.0);
-        // composer（プロポーショナルな Sans）は「等幅セル」が無い。折返しは半角=1 / 全角=2 セルで
-        // 数える（compute_wrap_segments）ので、セル幅の単位 = 全角グリフ幅 ÷2（＝半角1個分）に採る。
-        // これで全角の折返しは画素ぴったり・半角も平均字幅に近く、右端まで使い切る。
-        // （旧: 'M' 幅を単位 → Sans では過大評価で ~3 割手前の早折れ・右に余白が残っていた）
-        let composer_cell_estimate =
-            (f32::from(shape_plain("永", gpui::black(), editor_font_size, window).width) / 2.0)
-                .max(1.0);
+        // composer（プロポーショナルな Sans）は「等幅セル」が無いので、桁数ではなく**実測の
+        // ピクセル幅**で折り返す（[`compute_wrap_segments_by_width`]）。以前は半角=全角÷2 のセルで
+        // 数えており、全角はぴったりでも `m` `W` や数字など半角セルより広い英数字が続く行は
+        // 折返しより先に右端を超え、入力した文字が見えなくなっていた（2026-09-17）。
         // 本文の shape に使うフォント（親 div の font_family = 等幅/Sans が乗った状態）。
         // ヒットテストが同じもので測れるよう view に控える。
         let text_font = window.text_style().font();
@@ -2494,9 +2493,9 @@ impl Element for EditorElement {
             let wrap_on = view.soft_wrap || view.plain;
             let columns = if wrap_on {
                 if view.plain {
-                    // composer はガター無し。半角セル幅（全角÷2）を単位に折返し桁数を出す。
-                    ((f32::from(bounds.size.width) / composer_cell_estimate).floor() as usize)
-                        .max(10)
+                    // composer はガター無し。鍵は折返し幅（px・整数）。右端のキャレット分を空ける。
+                    ((f32::from(bounds.size.width) - COMPOSER_WRAP_MARGIN).floor() as usize)
+                        .max(40)
                 } else {
                     let digits = snapshot.line_count().to_string().len() as f32;
                     let gutter =
@@ -2511,10 +2510,20 @@ impl Element for EditorElement {
             let key = (snapshot.version(), columns, wrap_on);
             if view.wrap_map.key != key {
                 let old_rows = view.wrap_map.total_display_rows();
-                view.wrap_map = if key.2 {
-                    WrapMap::build(&snapshot, columns, key)
-                } else {
+                view.wrap_map = if !key.2 {
                     WrapMap::identity(snapshot.line_count(), key)
+                } else if view.plain {
+                    // 同じ行の shape は GPUI の行レイアウトキャッシュに載るので、打鍵ごとに
+                    // 測り直すのは編集した行だけ。
+                    WrapMap::build(&snapshot, key, |line| {
+                        let shaped =
+                            shape_with_font(line, &text_font, gpui::black(), editor_font_size, window);
+                        compute_wrap_segments_by_width(line, columns as f32, |byte| {
+                            f32::from(shaped.x_for_index(byte))
+                        })
+                    })
+                } else {
+                    WrapMap::build(&snapshot, key, |line| compute_wrap_segments(line, columns))
                 };
                 // 表示行数が変わった＝content_height が変わった。composer の auto-grow は
                 // 親（agent_panel）の render が決めるので、親へ再描画の合図を出す。
@@ -3172,17 +3181,37 @@ fn syntax_color(kind: lang::HighlightKind, syntax: &SyntaxColors) -> gpui::Hsla 
 /// 1 語が幅を超えるときは文字で切る。columns==0 は折返し無し扱い。
 fn compute_wrap_segments(line: &str, columns: usize) -> Vec<usize> {
     use unicode_width::UnicodeWidthChar as _;
-    let mut starts = vec![0usize];
     if columns == 0 {
+        return vec![0];
+    }
+    // 行頭からの累積セル数（byte 位置 → セル）。等幅なので位置は文字幅の和で決まる。
+    let mut cell_at = vec![0f32; line.len() + 1];
+    let mut cells = 0f32;
+    for (byte, character) in line.char_indices() {
+        cells += character.width().unwrap_or(1).max(1) as f32;
+        cell_at[byte + character.len_utf8()] = cells;
+    }
+    compute_wrap_segments_by_width(line, columns as f32, |byte| cell_at[byte])
+}
+
+/// [`compute_wrap_segments`] の幅ベース版。`position_at(byte)` は行頭から `byte` までの幅
+/// （文字境界でのみ呼ぶ・単位は `max_width` と同じ）。composer（プロポーショナルな Sans）は
+/// shape 済みの行の実測 x を渡し、画素で折り返す。折り方は同じ: 単語境界（空白の直後）優先・
+/// 1 語が幅を超えるときは文字で切る・1 セグメントに最低 1 文字は置く。
+fn compute_wrap_segments_by_width(
+    line: &str,
+    max_width: f32,
+    position_at: impl Fn(usize) -> f32,
+) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    if max_width <= 0.0 {
         return starts;
     }
-    let mut cells = 0usize;
     let mut last_break: Option<usize> = None; // 直近の折返し候補（空白の直後の byte）
     let mut segment_start = 0usize;
-    let mut byte = 0usize;
-    for c in line.chars() {
-        let width = c.width().unwrap_or(1).max(1);
-        if cells + width > columns && byte > segment_start {
+    for (byte, character) in line.char_indices() {
+        let end = byte + character.len_utf8();
+        if position_at(end) - position_at(segment_start) > max_width && byte > segment_start {
             // 単語境界があればそこで、無ければ現在位置（文字境界）で折る。
             let break_at = match last_break {
                 Some(candidate) if candidate > segment_start => candidate,
@@ -3190,17 +3219,10 @@ fn compute_wrap_segments(line: &str, columns: usize) -> Vec<usize> {
             };
             starts.push(break_at);
             segment_start = break_at;
-            // 折返し後のセル数を数え直す（break_at..byte+この文字）。
-            cells = line[break_at..byte]
-                .chars()
-                .map(|c| c.width().unwrap_or(1).max(1))
-                .sum();
             last_break = None;
         }
-        cells += width;
-        byte += c.len_utf8();
-        if c == ' ' || c == '\t' {
-            last_break = Some(byte);
+        if character == ' ' || character == '\t' {
+            last_break = Some(end);
         }
     }
     starts
@@ -3212,7 +3234,8 @@ struct WrapMap {
     segments: Vec<Vec<usize>>,
     /// 論理行 i の先頭表示行（累積）。len = 行数 + 1・末尾 = 総表示行数。
     prefix_rows: Vec<usize>,
-    /// このマップを計算した (buffer version, columns, enabled)。
+    /// このマップを計算した (buffer version, 折返し幅, enabled)。折返し幅の単位は等幅=桁数・
+    /// composer=px（同じ EditorView が両方を行き来することは無いので鍵は共用）。
     key: (u64, usize, bool),
 }
 
@@ -3225,14 +3248,19 @@ impl WrapMap {
         }
     }
 
-    fn build(snapshot: &BufferSnapshot, columns: usize, key: (u64, usize, bool)) -> WrapMap {
+    /// `segments_for(行テキスト)` がその行のセグメント開始 byte 列を返す（等幅=桁数 / composer=画素）。
+    fn build(
+        snapshot: &BufferSnapshot,
+        key: (u64, usize, bool),
+        mut segments_for: impl FnMut(&str) -> Vec<usize>,
+    ) -> WrapMap {
         let line_count = snapshot.line_count();
         let mut segments = Vec::with_capacity(line_count);
         let mut prefix_rows = Vec::with_capacity(line_count + 1);
         let mut total = 0usize;
         for row in 0..line_count {
             prefix_rows.push(total);
-            let starts = compute_wrap_segments(&snapshot.line_text(row), columns);
+            let starts = segments_for(&snapshot.line_text(row));
             total += starts.len();
             segments.push(starts);
         }
@@ -3375,11 +3403,39 @@ mod tests {
         assert_eq!(compute_wrap_segments("", 8), vec![0]);
     }
 
+    /// composer の画素折返し: 桁数では収まる行も、字幅が広ければ実測幅で折る（右端で見えなくなる
+    /// 回帰・2026-09-17）。ここでは `m`=10px・他=5px の擬似フォントで測る。
+    #[test]
+    fn wrap_segments_by_width_follow_measured_glyph_widths() {
+        let positions = |line: &str| {
+            let mut position_at = vec![0f32; line.len() + 1];
+            let mut x = 0f32;
+            for (byte, character) in line.char_indices() {
+                x += if character == 'm' { 10.0 } else { 5.0 };
+                position_at[byte + character.len_utf8()] = x;
+            }
+            position_at
+        };
+        let wrap = |line: &str, width: f32| {
+            let position_at = positions(line);
+            compute_wrap_segments_by_width(line, width, |byte| position_at[byte])
+        };
+        // 8 文字 = 桁数なら 10 桁に収まるが、実幅 80px は 50px を超えるので 5 文字ごとに折る。
+        assert_eq!(wrap("mmmmmmmm", 50.0), vec![0, 5]);
+        // 同じ 8 文字でも細い字なら 40px で収まる。
+        assert_eq!(wrap("iiiiiiii", 50.0), vec![0]);
+        // 単語境界優先（"mmm " = 35px・次の語で超える → 空白の直後で折る）。
+        assert_eq!(wrap("mmm mmm", 50.0), vec![0, 4]);
+        // 1 文字が幅を超えても最低 1 文字は置く（無限ループ・空セグメント無し）。
+        assert_eq!(wrap("mm", 4.0), vec![0, 1]);
+        assert_eq!(wrap("anything", 0.0), vec![0]);
+    }
+
     #[test]
     fn wrap_map_round_trips_display_and_logical_rows() {
         let buffer = Buffer::from_str("short\naaaaaaaaaaaa\nx");
         let snapshot = buffer.snapshot();
-        let map = WrapMap::build(&snapshot, 5, (0, 5, true));
+        let map = WrapMap::build(&snapshot, (0, 5, true), |line| compute_wrap_segments(line, 5));
         // 行0=1seg・行1=3seg(12 文字/5)・行2=1seg → 計 5 表示行
         assert_eq!(map.total_display_rows(), 5);
         assert_eq!(map.display_to_logical(0), (0, 0));

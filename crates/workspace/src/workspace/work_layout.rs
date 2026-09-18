@@ -97,25 +97,6 @@ impl RepositoryLayout {
         focused
     }
 
-    pub fn close_column(&mut self, pane: u64) {
-        let Some(index) = self.column_for(pane) else {
-            return;
-        };
-        let column = self.columns.remove(index);
-        let removed_focus = self
-            .focused
-            .is_some_and(|id| column.panes.iter().any(|p| p.id == id));
-        self.hidden.insert(column.space.clone(), column);
-        if removed_focus {
-            self.focused = self
-                .columns
-                .get(index.min(self.columns.len().saturating_sub(1)))
-                .and_then(|column| column.panes.first())
-                .map(|pane| pane.id);
-        }
-        self.maximized = None;
-    }
-
     pub fn reveal(&mut self, space: &str, surface: WorkSurface) -> Option<u64> {
         let column = self
             .columns
@@ -273,9 +254,6 @@ mod tests {
         assert_eq!(layout.pane(first).unwrap().tabs.len(), 2);
         layout.open(b, true);
         assert_eq!(layout.columns.len(), 2);
-        layout.close_column(first);
-        assert_eq!(layout.columns.len(), 1);
-        assert_eq!(layout.hidden["main"].panes[0].tabs.len(), 2);
     }
 
     #[test]

@@ -622,6 +622,14 @@ impl Workspace {
                             this.select_tab(index, window, cx);
                         }),
                     )
+                    // 右クリック = タブメニュー（Finder で表示 / パスコピー / 閉じる系）。
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.open_tab_menu(index, event.position, cx);
+                        }),
+                    )
                     // Chrome 風ドラッグ並べ替え: タブを掴んで別タブ上で離すと順序が入れ替わる。
                     .on_drag(
                         DraggedEditorTab {
@@ -641,6 +649,192 @@ impl Workspace {
                     )
             }))
             .child(div().flex_1())
+    }
+
+    /// タブメニューを開く（右クリック）。**アクティブタブは変えない**（VSCode と同じ — 見ている
+    /// ファイルを保ったまま別タブを畳める）。メニューの対象は右クリックしたタブ固定。
+    pub(crate) fn open_tab_menu(
+        &mut self,
+        index: usize,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.overlays.tab_menu = Some(TabMenuState { index, position });
+        cx.notify();
+    }
+
+    pub(crate) fn close_tab_menu(&mut self, cx: &mut Context<Self>) {
+        if self.overlays.tab_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// タブのパスをクリップボードへ（relative=true はプロジェクトルートからの相対）。
+    pub(crate) fn copy_tab_path(&mut self, path: &Path, relative: bool, cx: &mut Context<Self>) {
+        let text = if relative {
+            self.active_slot()
+                .and_then(|slot| path.strip_prefix(slot.worktree.root()).ok())
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        } else {
+            path.display().to_string()
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.close_tab_menu(cx);
+    }
+
+    /// エディタタブの右クリックメニュー（UI-SPEC §5）。エクスプローラのメニューと同じ流儀・同じ文言。
+    /// OS 連携（Finder で表示 / 既定アプリ）はローカルのプロジェクトのみ。
+    pub(crate) fn render_tab_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.overlays.tab_menu.as_ref()?;
+        let index = menu.index;
+        let position = menu.position;
+        let path = self.tabs.get(index)?.path.clone();
+        let tab_count = self.tabs.len();
+        let (bg2, bg3, border, fg0, fg1) = (
+            self.theme.bg2,
+            self.theme.bg3,
+            self.theme.border,
+            self.theme.fg0,
+            self.theme.fg1,
+        );
+        let item = move |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .px(px(9.))
+                .py(px(5.))
+                .rounded(px(5.))
+                .text_size(px(12.))
+                .text_color(fg1)
+                .cursor_pointer()
+                .hover(move |style| style.bg(bg3).text_color(fg0))
+                .child(label)
+        };
+        let separator = move || div().h(px(1.)).bg(border).my(px(3.));
+
+        let mut menu_box = div()
+            .absolute()
+            .left(position.x)
+            .top(position.y)
+            .w(px(210.))
+            .bg(bg2)
+            .border_1()
+            .border_color(border)
+            .rounded(px(8.))
+            .p(px(4.))
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(6.),
+                gpui::hsla(0., 0., 0., 0.4),
+            )
+            .blur_radius(px(16.))]);
+
+        let is_local = self
+            .active_slot()
+            .map(|slot| slot.remote_host.is_none())
+            .unwrap_or(false);
+        if is_local {
+            let reveal_path = path.clone();
+            menu_box = menu_box.child(
+                item("tab-ctx-reveal", i18n::t!("explorer.ctx_reveal")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        if let Err(error) = project::reveal_in_finder_local(&reveal_path) {
+                            eprintln!("Finder 表示に失敗: {error:#}");
+                        }
+                        this.close_tab_menu(cx);
+                    }),
+                ),
+            );
+            let open_path = path.clone();
+            menu_box = menu_box.child(
+                item("tab-ctx-open-default", i18n::t!("explorer.ctx_open_default")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        if let Err(error) = project::open_with_default_app_local(&open_path) {
+                            eprintln!("既定アプリで開けない: {error:#}");
+                        }
+                        this.close_tab_menu(cx);
+                    }),
+                ),
+            );
+            menu_box = menu_box.child(separator());
+        }
+        let copy_path = path.clone();
+        menu_box = menu_box.child(
+            item("tab-ctx-copy-path", i18n::t!("explorer.ctx_copy_path")).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.copy_tab_path(&copy_path, false, cx)
+                }),
+            ),
+        );
+        let relative_path = path.clone();
+        menu_box = menu_box.child(
+            item("tab-ctx-copy-relative", i18n::t!("tabs.ctx_copy_relative")).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.copy_tab_path(&relative_path, true, cx)
+                }),
+            ),
+        );
+        menu_box = menu_box.child(separator());
+        menu_box = menu_box.child(
+            item("tab-ctx-close", i18n::t!("tabs.ctx_close")).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.close_tab_menu(cx);
+                    this.close_tab_at(index, window, cx);
+                }),
+            ),
+        );
+        if tab_count > 1 {
+            menu_box = menu_box.child(
+                item("tab-ctx-close-others", i18n::t!("tabs.ctx_close_others")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.close_tab_menu(cx);
+                        this.close_other_tabs(index, window, cx);
+                    }),
+                ),
+            );
+        }
+        if index + 1 < tab_count {
+            menu_box = menu_box.child(
+                item("tab-ctx-close-right", i18n::t!("tabs.ctx_close_right")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.close_tab_menu(cx);
+                        this.close_tabs_to_right(index, window, cx);
+                    }),
+                ),
+            );
+        }
+
+        // 透明バックドロップ（外側クリックで閉じる）。
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.close_tab_menu(cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _window, cx| this.close_tab_menu(cx)),
+                )
+                .child(menu_box)
+                .into_any_element(),
+        )
     }
 
     /// 右分割ペインのタブ列（単一比較ビュー。× = 分割を閉じる）。

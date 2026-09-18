@@ -1522,6 +1522,8 @@ pub struct AgentPanel {
     renaming: Option<(usize, Entity<EditorView>)>,
     /// transcript のスクロール（M13 UX: ホイールで遡れる。ストリーミング中は底に居る時だけ追従）。
     transcript_list: ListState,
+    /// 直近にレイアウトされたビューポート先頭の項目 index（[`Self::transcript_top_item`]）。
+    transcript_top_item_seen: Cell<usize>,
     /// transcript 専用フォーカス。出力をドラッグした後の ⌘A / ⌘C を composer の選択状態から
     /// 独立させる（出力は read-only なのでテキスト入力先にはしない）。
     transcript_focus: FocusHandle,
@@ -1633,9 +1635,34 @@ impl AgentPanel {
                 .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1500))
     }
 
+    /// ターンが正常に終わったことを音で知らせる。**このパネルが見えていないときだけ**鳴らす
+    /// （見ている画面に音は要らない・裏の窓/他アプリ作業中の完了に気づくための音・P2）。
+    ///
+    /// 「見えている」の判定に [`Self::is_visibly_active`] を使うのが要点。`window_active` は
+    /// render でしか更新されないので、**画面に出ていないパネル**（Fleet の追加エージェント・
+    /// Task セル・隠したチャット面・非アクティブな project space）は値が古いまま＝「見ている」と
+    /// 誤認して永久に黙る（2026-09-18 に「Codex だと完了音が出ない」として踏んだ）。描画の鮮度まで
+    /// 見れば、描かれていないパネル＝見えていない、として正しく鳴る。
+    /// ミュート中のスレッドは鳴らさない。
+    fn ring_done(&self, thread_index: usize, cx: &App) {
+        if self.wants_done_sound(thread_index) {
+            sound::play(sound::Cue::Done, &settings::get(cx).sound_done);
+        }
+    }
+
+    /// 完了音を鳴らすべきか。[`Self::wants_waiting_sound`] と同じく判断だけを分けてある
+    /// （テストで音を出さずに条件を確かめる）。
+    fn wants_done_sound(&self, thread_index: usize) -> bool {
+        let muted = self
+            .threads
+            .get(thread_index)
+            .is_some_and(|thread| thread.muted);
+        !self.is_visibly_active() && !muted
+    }
+
     /// 入力待ち（承認・質問）で止まったことを音で知らせる。**見えていないときだけ**鳴らす＝
     /// 別ウィンドウにいるか、同じ窓でも別スレッドを見ているとき。見ている画面には合図は要らない。
-    /// 完了音（`window_active` だけを見る）より広いのは、Blocked は**こちらの手番**だから
+    /// 完了音（パネルが見えているかだけを見る）より広いのは、Blocked は**こちらの手番**だから
     /// ＝裏のタブで止まったまま気づかないのが一番困る（`docs/BACKGROUND.md` の原点痛点）。
     /// ミュート中のスレッドは鳴らさない。auto-allow で素通りした要求はブロックしないので対象外。
     fn ring_waiting(&self, thread_index: usize, cx: &App) {
@@ -1882,6 +1909,7 @@ PYEOF"#;
             live_rendered_at: None,
             renaming: None,
             transcript_list,
+            transcript_top_item_seen: Cell::new(0),
             transcript_focus: cx.focus_handle(),
             tabs_scroll: ScrollHandle::new(),
             tabs_view: initial_tabs_view(&settings::get(cx).agent_tabs_view),
@@ -3569,12 +3597,21 @@ PYEOF"#;
         cx.notify();
     }
 
-    /// ストリーミング追従: **底に居る時だけ**最下部へ張り付く（遡って読んでいる間は動かさない）。
-    /// `FollowMode::Tail` と同じ状態を読み、ユーザーが上へ戻った後は追従を再開しない。
-    fn follow_transcript_if_at_bottom(&self) {
-        if self.transcript_list.is_scrolled_to_end().unwrap_or(true) {
-            self.transcript_list.scroll_to_end();
+    /// レイアウト済みの「ビューポート先頭の項目 index」。`scroll_to_end` / `reset` の直後は
+    /// `logical_scroll_top` が**末尾の番兵値（= 項目数）**になり、次の prepaint で実値へ置き換わる。
+    /// 番兵をそのまま読むと「直近の問いは上に隠れた」と 1 フレームだけ誤判定し、固定プロンプトが
+    /// 出没して transcript 全体が上下に揺れる（2026-09-17）。番兵の間は直前の実値を返す。
+    fn transcript_top_item(&self) -> usize {
+        let top_item = self.transcript_list.logical_scroll_top().item_ix;
+        if top_item < self.transcript_list.item_count() {
+            self.transcript_top_item_seen.set(top_item);
         }
+        self.transcript_top_item_seen.get()
+    }
+
+    /// `logical_scroll_top` が番兵値のまま（= まだレイアウトされていない）か。
+    fn transcript_top_item_pending(&self) -> bool {
+        self.transcript_list.logical_scroll_top().item_ix >= self.transcript_list.item_count()
     }
 
     /// transcript の仮想リスト項目数。Entry に加え、送信直後など本文がまだ無い間だけ
@@ -3592,6 +3629,7 @@ PYEOF"#;
 
     fn reset_transcript_list(&self, scroll_to_end: bool) {
         self.transcript_list.reset(self.transcript_item_count());
+        self.transcript_top_item_seen.set(0); // 別スレッドの先頭位置を持ち越さない
         if scroll_to_end {
             self.transcript_list.scroll_to_end();
         }
@@ -5534,14 +5572,9 @@ PYEOF"#;
             cx.emit(PanelEvent::FilesTouched { files, color });
         }
         if turn_finished {
-            // 完了音（設定 on・成功時のみ）。**window 非アクティブ時のみ**鳴らす（見ている画面に
-            // 音は要らない・裏の窓/他アプリ作業中の完了に気づくための音・P2）。ミュート中スレッドは鳴らさない。
-            let thread_muted = self
-                .threads
-                .get(thread_index)
-                .is_some_and(|thread| thread.muted);
-            if turn_succeeded && !self.window_active && !thread_muted {
-                sound::play(sound::Cue::Done, &settings::get(cx).sound_done);
+            // 完了音（設定 on・成功時のみ）。
+            if turn_succeeded {
+                self.ring_done(thread_index, cx);
             }
             self.sync_running_registry(cx); // 実行中 → 完了をダッシュボードへ（M12-12）
             self.persist_thread(thread_index); // turn 確定分を DB へ（M12-1）
@@ -5596,10 +5629,8 @@ PYEOF"#;
             self.start_celebrate(cx);
         }
         if stream_updated && thread_index == active {
+            // 末尾追従は `FollowMode::Tail` が prepaint で行う（底に居る時だけ張り付き、遡ると止まる）。
             self.sync_live_reveal(reveal_reset, ensure_reveal, cx);
-            if ensure_reveal {
-                self.follow_transcript_if_at_bottom();
-            }
         }
         // ターン開始（ACP 実送信）をレール/フッター/⌘O のロールアップへ即時反映（生成中を灯す）。
         if turn_started {
@@ -5700,7 +5731,6 @@ PYEOF"#;
                             // 初速を上げ末尾でも 16 文字/40ms（＝400 字/秒）＝ ACP の到着に UI が遅れない。
                             let step = (remaining / 3).max(16);
                             panel.live_reveal = panel.live_reveal.saturating_add(step).min(target);
-                            panel.follow_transcript_if_at_bottom();
                             cx.notify();
                         }
                         panel.live_reveal >= target
@@ -6523,7 +6553,7 @@ PYEOF"#;
             .rposition(|entry| matches!(entry, Entry::User(_)))?;
         // 直近の問いがビューポート上端より上に隠れている時だけ固定表示する。まだ見えている
         // （＝上部に余白が無い短いスレッド）なら transcript の User エントリと重複させない。
-        let top_item = self.transcript_list.logical_scroll_top().item_ix;
+        let top_item = self.transcript_top_item();
         if last_user >= top_item {
             return None;
         }
@@ -6854,7 +6884,7 @@ PYEOF"#;
 
     /// 「最新へ」ボタン（transcript を遡って読んでいる間だけ右下に浮かべる・出現時フェード＋せり上がり）。
     /// エージェントがどんどん進んで下に新着が溜まった時に、1 タップで最下部（最新）へ戻す。底に居る時は出さない。
-    /// 判定は `follow_transcript_if_at_bottom` と同系（offset.y は下ほど負・GPUI）。閾はヒステリシスのため広め。
+    /// 判定は `FollowMode::Tail` の末尾追従と同じ `ListState` の状態を読む。
     fn render_jump_to_latest(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         // 底から十分離れている閾（follow の 60px より広め＝ヒステリシスで出没のチラつきを防ぐ）。
         let _scrolled_up_threshold = px(140.);
@@ -6927,8 +6957,7 @@ PYEOF"#;
     /// 「前の指示へ」ボタン。長いツール出力や回答を、ユーザー発話単位で一気に遡る。
     fn render_jump_to_previous_user(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let entries = &self.threads.get(self.active)?.entries;
-        let target =
-            previous_user_entry_index(entries, self.transcript_list.logical_scroll_top().item_ix);
+        let target = previous_user_entry_index(entries, self.transcript_top_item());
         target?;
 
         // 常に右端（14px）固定。連打で前の指示へ遡る間、下ボタンの出没でこのボタンが
@@ -7301,11 +7330,13 @@ PYEOF"#;
                     .into_any_element()
             }
             // 思考ブロック（Claude Code 風・印っぽく）: 既定は折り畳み（✳ Thought + 1 行プレビュー）で
-            // クリックでいつでも全文展開。実行中の最終ブロックは自動展開し、状態文とマスコットで
-            // 「動いている」を示す。ここでは独立した無限 pulse を増やさない。
+            // クリックでいつでも全文展開。**生成中も自動展開しない** — 自動展開すると本文へ切り替わる
+            // 瞬間に畳まれ、その行数ぶん transcript が下へ跳ねる（2026-09-17）。生成中は同じ高さのまま
+            // プレビューを「いま書いている末尾」にして動きを見せる。展開はユーザーの操作だけで決まり、
+            // 生成中に開いたものは完了後も開いたまま。ここでは独立した無限 pulse を増やさない。
             Entry::Thinking(text) => {
                 let live = live_stream;
-                let expanded = live || self.is_thought_expanded(index);
+                let expanded = self.is_thought_expanded(index);
                 let star = if live {
                     div()
                         .flex_none()
@@ -7374,7 +7405,11 @@ PYEOF"#;
                             .text_color(theme.fg2)
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .child(thought_preview(text)),
+                            .child(if live {
+                                thought_live_preview(&revealed_prefix(text, self.live_reveal))
+                            } else {
+                                thought_preview(text)
+                            }),
                     );
                 }
                 div()
@@ -7606,7 +7641,7 @@ PYEOF"#;
             // 2026-08-26）。生成中は reveal 分の接頭辞だけ描き、タイプライタの演出を出す。
             Entry::Agent(text) => {
                 let shown = if live_stream {
-                    revealed_prefix(text, self.live_reveal)
+                    hold_back_partial_table_delimiter(revealed_prefix(text, self.live_reveal))
                 } else {
                     text.clone()
                 };
@@ -9165,6 +9200,11 @@ impl Render for AgentPanel {
         let active = window.is_window_active();
         self.window_active = active; // 完了音の「非アクティブ時のみ」判定が読む（P2）
         self.last_rendered_at = Some(std::time::Instant::now());
+        // 先頭項目が未確定（末尾へ飛んだ直後）の描画は直前値で組んでいる。この描画の prepaint で
+        // 実値が決まるので、固定プロンプト・「前の指示へ」の出し分けを次フレームで確定させる。
+        if self.transcript_top_item_pending() {
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
         let caret_blink_enabled = !self.active_thread_running();
         self.composer.update(cx, |composer, cx| {
             composer.set_caret_blink_enabled(caret_blink_enabled, cx);
@@ -9623,6 +9663,48 @@ fn thought_preview(text: &str) -> SharedString {
         format!("{preview}…").into()
     } else {
         preview.into()
+    }
+}
+
+/// 生成中の思考の 1 行プレビュー = **いま書いている末尾**。先頭行を出す [`thought_preview`] だと
+/// 2 行目以降を書いている間ずっと表示が止まって見えるため、最後の非空行の末尾 64 文字を出す。
+fn thought_live_preview(text: &str) -> SharedString {
+    let last_line = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let length = last_line.chars().count();
+    if length > 64 {
+        let tail: String = last_line.chars().skip(length - 64).collect();
+        format!("…{tail}").into()
+    } else {
+        last_line.to_string().into()
+    }
+}
+
+/// 生成中の Markdown から、末尾の「GFM 表の区切り行になりかけ」（`|---|--` など）を隠す。
+/// 区切り行は揃うまで直前のヘッダ行と同じ段落の 2 行目として描かれ、揃った瞬間に表（ヘッダ 1 行）へ
+/// 再解釈されて高さが縮む＝末尾追従中の transcript が一瞬下へ動く。改行が届くまで伏せておけば
+/// 「段落 1 行 → 表」と高さは増える一方になる。
+fn hold_back_partial_table_delimiter(text: SharedString) -> SharedString {
+    let Some(line_start) = text.rfind('\n').map(|index| index + 1) else {
+        return text;
+    };
+    let last_line = text[line_start..].trim();
+    let is_delimiter_fragment = !last_line.is_empty()
+        && last_line
+            .chars()
+            .all(|character| matches!(character, '|' | '-' | ':' | ' '));
+    let follows_table_header = text[..line_start]
+        .lines()
+        .next_back()
+        .is_some_and(|line| line.contains('|'));
+    if is_delimiter_fragment && follows_table_header {
+        text[..line_start].to_string().into()
+    } else {
+        text
     }
 }
 
@@ -11088,6 +11170,46 @@ PYEOF"#;
         let _ = std::fs::remove_file(settings_path);
     }
 
+    /// 完了音は「このパネルが見えていないとき」に鳴らす。`window_active` は render でしか
+    /// 更新されないので、**描かれていないパネルは古い値のまま**＝それだけを見ると永久に黙る
+    /// （2026-09-18 の「Codex だと完了音が出ない」の正体。Fleet の追加エージェント・Task セル・
+    /// 隠したチャット面は、窓がアクティブでも描かれない）。
+    #[gpui::test]
+    fn the_done_sound_rings_for_a_panel_that_is_not_on_screen(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "done-sound");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, _cx| {
+            let active = panel.active;
+            // 目の前で終わった＝鳴らさない（窓がアクティブ + 直前に描画されている）。
+            panel.window_active = true;
+            panel.last_rendered_at = Some(std::time::Instant::now());
+            assert!(
+                !panel.wants_done_sound(active),
+                "見ている画面の完了では鳴らさない"
+            );
+
+            // 他アプリへ移っている＝鳴らす（従来からの主目的）。
+            panel.window_active = false;
+            assert!(panel.wants_done_sound(active), "他アプリにいる間の完了で鳴る");
+
+            // 窓はアクティブだが**このパネルは描かれていない**＝見えていないので鳴らす。
+            // 描画が止まると `window_active` は更新されないため、ここが `true` のまま残る。
+            panel.window_active = true;
+            panel.last_rendered_at = None;
+            assert!(
+                panel.wants_done_sound(active),
+                "画面に出ていないパネルの完了で鳴る（古い window_active に騙されない）"
+            );
+
+            panel.threads[active].muted = true;
+            assert!(
+                !panel.wants_done_sound(active),
+                "ミュート中のスレッドは鳴らさない"
+            );
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
     /// 入力待ちの音は「気づけないとき」だけ鳴らす。見ているスレッドで鳴らすと、
     /// 承認カードが目の前に出ているのに音まで浴びることになる（P2 の「見ている画面に音は要らない」）。
     #[gpui::test]
@@ -12064,5 +12186,143 @@ PYEOF"#;
             ["path /tmp/a.rs Some(42) Some(7)", "url https://necoder.com"]
         );
         let _ = std::fs::remove_file(settings_path);
+    }
+    /// 回帰: ストリーミング中、直近の問いがまだ見えている間に transcript が上下へ揺れない
+    /// （2026-09-17）。`scroll_to_end` 直後の `logical_scroll_top` は末尾の番兵値（= 項目数）で、
+    /// これを読んだ固定プロンプトが「問いは上に隠れた」と誤判定して 1 フレームおきに出没し、
+    /// transcript の上端ごと本文が 31.5px 往復していた。描画前（= 番兵のまま）の判定を直接見る。
+    #[gpui::test]
+    fn streaming_does_not_toggle_pinned_prompt(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "stream_pinned_jitter");
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            let mut panel = AgentPanel::new(Theme::dark(), cx);
+            if let Some(thread) = panel.threads.get_mut(panel.active) {
+                thread.entries.push(Entry::User("質問です".into()));
+                thread.running = true;
+            }
+            panel.reset_transcript_list(true);
+            panel
+        });
+        // アクティブなウィンドウでだけタイプライタが動く（実機と同じ経路を通す）。
+        cx.update(|window, _cx| window.activate_window());
+        cx.run_until_parked();
+        for step in 0..4 {
+            panel.update(cx, |panel, cx| {
+                let active = panel.active;
+                panel.on_event(
+                    active,
+                    AgentEvent::AgentChunk(format!("追記 {step} です。")),
+                    cx,
+                );
+                assert!(
+                    !panel.transcript_top_item_pending(),
+                    "チャンク到着は scroll 位置を番兵値へ書き換えない（追従は FollowMode::Tail）"
+                );
+                assert!(
+                    panel.render_pinned_prompt(cx).is_none(),
+                    "問いが見えている間、チャンク到着の描画で固定プロンプトを出さない"
+                );
+            });
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(40));
+        }
+        // 「最新へ」などで末尾へ飛んだ直後（番兵値）も、レイアウト前は直前の実値で判定する。
+        panel.update(cx, |panel, cx| {
+            panel.transcript_list.scroll_to_end();
+            assert!(panel.transcript_top_item_pending());
+            assert_eq!(panel.transcript_top_item(), 0);
+            assert!(panel.render_pinned_prompt(cx).is_none());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, _cx| {
+            assert!(!panel.transcript_top_item_pending(), "prepaint 後は実値へ戻る");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+    /// 回帰: 末尾追従中、過去の行は**上へしか動かない**（2026-09-17）。以前は ①生成中だけ自動展開して
+    /// いた思考ブロックが本文への切替で畳まれ、その行数ぶん下へ跳ねる ②表の区切り行が揃った瞬間に
+    /// 段落 2 行 → 表ヘッダ 1 行へ再解釈されて 6px 下がる、の 2 つがあった。実イベント経路で流して
+    /// 直前エントリの y が一度も増えないことを見る。
+    #[gpui::test]
+    fn streaming_never_pushes_earlier_lines_down(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "stream_monotonic");
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            let mut panel = AgentPanel::new(Theme::dark(), cx);
+            if let Some(thread) = panel.threads.get_mut(panel.active) {
+                for index in 0..30 {
+                    thread.entries.push(Entry::Agent(
+                        format!("本文 {index} 行目\n\n二段落目 {index} です。").into(),
+                    ));
+                }
+                thread.entries.push(Entry::User("質問です".into()));
+                thread.running = true;
+            }
+            panel.reset_transcript_list(true);
+            panel
+        });
+        cx.update(|window, _cx| window.activate_window());
+        cx.simulate_resize(gpui::size(px(420.), px(800.)));
+        cx.run_until_parked();
+        let mut events: Vec<AgentEvent> = (0..8)
+            .map(|step| AgentEvent::ThoughtChunk(format!("考え中 {step} の思考です。\n")))
+            .collect();
+        let message = "結果です。\n\n| 項目 | 値 |\n|---|---|\n| 幅 | 420 |\n| 高さ | 800 |\n\n以上です。";
+        let characters: Vec<char> = message.chars().collect();
+        events.extend(
+            characters
+                .chunks(2)
+                .map(|chunk| AgentEvent::AgentChunk(chunk.iter().collect())),
+        );
+        let mut previous: Option<Pixels> = None;
+        for event in events {
+            let label = format!("{event:?}");
+            panel.update(cx, |panel, cx| {
+                let active = panel.active;
+                panel.on_event(active, event, cx);
+            });
+            cx.run_until_parked();
+            let current = panel.update(cx, |panel, _cx| {
+                panel
+                    .transcript_regions
+                    .borrow()
+                    .iter()
+                    .filter(|region| region.id.item == 30)
+                    .find_map(|region| region.bounds.get())
+                    .map(|bounds| bounds.origin.y)
+            });
+            if let (Some(before), Some(now)) = (previous, current) {
+                assert!(now <= before, "{label} で問いの行が下へ動いた: {before} -> {now}");
+            }
+            previous = current.or(previous);
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(40));
+        }
+        assert!(previous.is_some(), "問いの行が一度は描かれている");
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    #[test]
+    fn partial_table_delimiter_is_held_back_until_newline() {
+        let held = |text: &str| hold_back_partial_table_delimiter(text.to_string().into()).to_string();
+        assert_eq!(held("| 項目 | 値 |\n|--"), "| 項目 | 値 |\n");
+        assert_eq!(held("| 項目 | 値 |\n|---|---|"), "| 項目 | 値 |\n");
+        // 改行が届けば表として確定するのでそのまま渡す。
+        assert_eq!(held("| 項目 | 値 |\n|---|---|\n"), "| 項目 | 値 |\n|---|---|\n");
+        // 表のヘッダに続かない `--` や通常の文は触らない。
+        assert_eq!(held("本文です\n--"), "本文です\n--");
+        assert_eq!(held("| 項目 | 値 |\n| 幅"), "| 項目 | 値 |\n| 幅");
+        assert_eq!(held("|--"), "|--");
+    }
+
+    #[test]
+    fn live_thought_preview_shows_the_tail_being_written() {
+        assert_eq!(thought_live_preview("一行目\n二行目を書いている\n").as_ref(), "二行目を書いている");
+        let long_line = "あ".repeat(100);
+        let preview = thought_live_preview(&long_line);
+        assert_eq!(preview.chars().count(), 65);
+        assert!(preview.starts_with('…'));
+        assert_eq!(thought_live_preview("").as_ref(), "");
     }
 }

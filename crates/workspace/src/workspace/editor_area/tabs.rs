@@ -476,6 +476,38 @@ impl Workspace {
         cx.notify();
     }
 
+    /// `index` 番目を残して他を全部閉じる（タブメニュー）。後ろから閉じて添字のズレを避ける。
+    pub(crate) fn close_other_tabs(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        for target in (0..self.tabs.len()).rev() {
+            if target != index {
+                self.close_tab_at(target, window, cx);
+            }
+        }
+    }
+
+    /// `index` より右のタブを全部閉じる（タブメニュー）。
+    pub(crate) fn close_tabs_to_right(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        for target in ((index + 1)..self.tabs.len()).rev() {
+            self.close_tab_at(target, window, cx);
+        }
+    }
+
     /// `index` 番目のタブをアクティブにする（タブクリック・⌘{ / ⌘}・重複オープン時）。
     pub(crate) fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
