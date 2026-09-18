@@ -121,6 +121,18 @@ pub fn artifacts_dir(chat_dir: &Path) -> PathBuf {
     chat_dir.join(ARTIFACTS_DIR)
 }
 
+/// `path` がどれかのチャットの `artifacts/` の中なら、その `artifacts/` を返す
+/// （`<root>/<チャットのフォルダ>/artifacts/…`）。表示の隔離で配信の根に使う。
+pub fn artifacts_root_of(chats_root: &Path, path: &Path) -> Option<PathBuf> {
+    let mut components = path.strip_prefix(chats_root).ok()?.components();
+    let chat_folder = components.next()?;
+    let artifacts = components.next()?;
+    // `artifacts/` そのものではなく、その中のファイルであること。
+    components.next()?;
+    (artifacts.as_os_str() == ARTIFACTS_DIR)
+        .then(|| chats_root.join(chat_folder).join(ARTIFACTS_DIR))
+}
+
 /// 中身の無いチャットのフォルダを消す。消したら `true`。
 ///
 /// 「空」= `artifacts/` が空か無い、かつ他のファイルも無い。Finder が覗いただけで作る
@@ -344,6 +356,27 @@ mod tests {
         assert_eq!(listed, vec![artifacts.join("a.html")]);
         assert!(list_artifacts(&root.join("missing")).is_empty());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_path_knows_which_chats_artifacts_it_belongs_to() {
+        let root = Path::new("/docs/necoder");
+        assert_eq!(
+            artifacts_root_of(
+                root,
+                Path::new("/docs/necoder/2026-09-18 タイマー/artifacts/a.html")
+            ),
+            Some(PathBuf::from("/docs/necoder/2026-09-18 タイマー/artifacts"))
+        );
+        // フォルダ直下（会話の書き出し）・`artifacts/` そのもの・置き場の外は対象外。
+        for path in [
+            "/docs/necoder/2026-09-18 タイマー/会話.md",
+            "/docs/necoder/2026-09-18 タイマー/artifacts",
+            "/docs/necoder/artifacts/a.html",
+            "/work/site/artifacts/a.html",
+        ] {
+            assert_eq!(artifacts_root_of(root, Path::new(path)), None, "{path}");
+        }
     }
 
     #[test]

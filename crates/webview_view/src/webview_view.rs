@@ -16,6 +16,8 @@
 //! 起きた（＝クリックが WebView の外に落ちた）③GPUI のフォーカスが別の面へ動いた。②③は
 //! `Workspace::release_native_key_focus` が呼ぶ。
 
+pub mod sandbox;
+
 use gpui::{canvas, div, prelude::*, px, App, Bounds, Context, IntoElement, Pixels, Task, Window};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -63,6 +65,8 @@ pub struct WebViewView {
     /// `html_preview_evict_minutes` 由来）。表示中は数十〜数百 MB を別プロセスで握るため、
     /// idle メモリ予算を守る回収弁。破棄後の再表示は初回表示と同じ遅延生成経路で復元する。
     evict_after: Option<Duration>,
+    /// 閉じ込めて見せる時の配信の根（[`sandbox`]）。`None` は従来どおり `file://` で開く。
+    sandbox_root: Option<PathBuf>,
     /// 非表示化で仕掛ける破棄タイマー。再表示（set_active(true)）で drop ＝キャンセル。
     _evict_task: Option<Task<()>>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -87,12 +91,33 @@ impl WebViewView {
             key_focus: false,
             error,
             evict_after: default_evict_after(),
+            sandbox_root: None,
             _evict_task: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             webview: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             last_bounds: None,
         }
+    }
+
+    /// エージェントが生成した HTML を**閉じ込めて**見せる（[`sandbox`]）。配信するのは `root` の中だけで、
+    /// ページは外部と通信できず、外へ移動できず、necoder を呼ぶ口も持たない。
+    /// `path` が `root` の外ならエラー表示になる（黙って `file://` に倒さない）。
+    pub fn sandboxed(root: impl Into<PathBuf>, path: impl Into<PathBuf>, theme: Theme) -> Self {
+        let (root, path) = (root.into(), path.into());
+        let url = sandbox::url_for(&root, &path);
+        let error = url
+            .is_none()
+            .then(|| i18n::t!("webview.outside_sandbox").to_string());
+        let mut view = Self::local_file(path, theme);
+        view.url = url;
+        view.error = error;
+        view.sandbox_root = Some(root);
+        view
+    }
+
+    pub fn is_sandboxed(&self) -> bool {
+        self.sandbox_root.is_some()
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -250,7 +275,11 @@ impl WebViewView {
         };
         let native_bounds = rect(bounds);
         if self.webview.is_none() {
-            match WebViewBuilder::new()
+            let mut builder = WebViewBuilder::new();
+            if let Some(root) = self.sandbox_root.clone() {
+                builder = sandboxed_builder(builder, root);
+            }
+            match builder
                 .with_url(url)
                 .with_bounds(native_bounds)
                 .with_visible(true)
@@ -357,6 +386,58 @@ impl Render for WebViewView {
             )
             .into_any_element()
     }
+}
+
+/// 閉じ込め用の設定を足す: 専用スキームでの配信・外への移動の禁止・新しい窓の禁止。
+/// **IPC ハンドラは付けない**（ページから necoder を呼ぶ口を作らない）。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn sandboxed_builder(builder: WebViewBuilder<'_>, root: PathBuf) -> WebViewBuilder<'_> {
+    use std::borrow::Cow;
+    use wry::http::{header, Response};
+    // 開発用の覗き窓: 隔離の検証ページは結果を外へ出す手段を持たない（それが隔離）ので、
+    // `document.title` に書いた結果を necoder 側でファイルへ落とす。debug ビルドで
+    // `NECODER_WEBVIEW_PROBE_LOG` を置いた時だけ。
+    #[cfg(debug_assertions)]
+    let builder = match std::env::var_os("NECODER_WEBVIEW_PROBE_LOG") {
+        Some(log) => builder.with_document_title_changed_handler(move |title| {
+            use std::io::Write as _;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log);
+            if let Ok(mut file) = file {
+                if let Err(error) = writeln!(file, "{title}") {
+                    eprintln!("WEBVIEW_PROBE: 書けない: {error}");
+                }
+            }
+        }),
+        None => builder,
+    };
+    builder
+        .with_custom_protocol(sandbox::SCHEME.to_string(), move |_id, request| {
+            let served = sandbox::serve(&root, request.uri().path());
+            let body: Cow<'static, [u8]> = Cow::Owned(served.body);
+            let response = Response::builder()
+                .status(served.status)
+                .header(header::CONTENT_TYPE, served.content_type)
+                .header("Content-Security-Policy", sandbox::CONTENT_SECURITY_POLICY)
+                .header("X-Content-Type-Options", "nosniff")
+                .header(header::CACHE_CONTROL, "no-store")
+                .body(body.clone());
+            // ヘッダは全部定数なので組み立ては失敗しない。万一の時も本文だけは返す。
+            response.unwrap_or_else(|_| Response::new(body))
+        })
+        .with_navigation_handler(|url| {
+            if sandbox::is_internal(&url) {
+                return true;
+            }
+            sandbox::open_in_browser(&url);
+            false
+        })
+        .with_new_window_req_handler(|url, _features| {
+            sandbox::open_in_browser(&url);
+            wry::NewWindowResponse::Deny
+        })
 }
 
 /// 既定の破棄猶予（settings 適用前のフォールバック = settings_core の既定 15 分と同値）。

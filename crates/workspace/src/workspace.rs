@@ -1115,6 +1115,8 @@ struct ChromeState {
     chat_shown: Option<String>,
     /// いま見ているチャットのスレッド色（`accent()` は `cx` を持たないのでここに控える）。
     chat_accent: Option<Hsla>,
+    /// このターンでエージェントが触ると予告したファイル（ターン終了時に取り込む）。
+    chat_touched: Vec<PathBuf>,
     /// 復元で Chat モードへ入る予約（window のある描画で消化）。
     pending_chat_mode: bool,
     /// 編隊グリッドのセル（mock の `.acell`・＋/× で増減・M14 #3）。**いまのリポジトリの分だけ**。
@@ -3722,6 +3724,10 @@ mod tests {
                 editor.read(cx).rendered_html(),
                 "最初からプレビュー表示で開く"
             );
+            assert!(
+                editor.read(cx).html_preview_is_sandboxed(cx),
+                "エージェントが書いた HTML は閉じ込めて見せる"
+            );
             assert_eq!(
                 workspace.project_sessions.projects[0].open_files,
                 vec![source.clone()],
@@ -3747,6 +3753,10 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.restore_open_file(&[RestoredTabs::single(page.clone())], window, cx);
             let editor = workspace.tabs[0].editor().cloned().expect("エディタ");
+            assert!(
+                !editor.read(cx).html_preview_is_sandboxed(cx),
+                "プロジェクトの HTML は自分のファイル＝従来どおり"
+            );
             editor.update(cx, |editor, cx| editor.set_rendered_html(true, cx));
             workspace.sync_native_view_visibility(window, cx);
             assert!(editor.read(cx).html_preview_is_active(cx));

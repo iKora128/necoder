@@ -260,6 +260,83 @@ impl Workspace {
         }
     }
 
+    /// 開発用: Chat モードを offscreen で検証する（`NECODER_CHAT_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の
+    /// チャットの行 / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
+    /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
+    #[cfg(debug_assertions)]
+    pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        match name {
+            "open" => self.set_chat_mode(true, window, cx),
+            "editor" => self.set_chat_mode(false, window, cx),
+            "seed" => {
+                self.set_chat_mode(true, window, cx);
+                if let Some(panel) = self.chat_panel() {
+                    panel.update(cx, |panel, cx| panel.debug_seed_chat(cx));
+                }
+            }
+            "history" => {
+                if let Some(panel) = self.chat_panel() {
+                    panel.update(cx, |panel, cx| panel.debug_seed_chat_history(cx));
+                }
+            }
+            "send" => {
+                self.set_chat_mode(true, window, cx);
+                if let Some(panel) = self.chat_panel() {
+                    let prompt = argument.to_string();
+                    panel.update(cx, |panel, cx| panel.send_prompt_text(prompt, cx));
+                }
+            }
+            "search" => {
+                let query = argument.to_string();
+                self.chrome
+                    .chat_search
+                    .update(cx, |editor, cx| editor.set_plain_text(&query, cx));
+                self.sync_chat_search(cx);
+            }
+            "menu" => {
+                let id = self
+                    .chat_panel()
+                    .and_then(|panel| panel.read(cx).chat_rows().first().map(|row| row.id.clone()));
+                if let Some(id) = id {
+                    self.chrome.chat_menu = Some(chat_view::ChatMenuState {
+                        id,
+                        position: point(px(150.), px(210.)),
+                    });
+                }
+            }
+            "delete" => {
+                self.chrome.chat_menu = None;
+                self.chrome.chat_delete_confirm = self
+                    .chat_panel()
+                    .and_then(|panel| panel.read(cx).active_chat_id());
+            }
+            "source" => {
+                if let Some(editor) = self.active_editor() {
+                    editor.update(cx, |editor, cx| editor.set_rendered_html(false, cx));
+                }
+            }
+            "state" => {
+                let rows = self
+                    .chat_panel()
+                    .map(|panel| panel.read(cx).chat_rows().len())
+                    .unwrap_or(0);
+                let dir = self
+                    .chat_panel()
+                    .and_then(|panel| panel.read(cx).active_chat_dir());
+                println!(
+                    "chat: mode={} rows={rows} tabs={} dir={dir:?}",
+                    self.chat_mode(),
+                    self.tabs.len()
+                );
+            }
+            other => eprintln!("CHAT_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
+    }
+
     /// 開発用: AI 全画面（⌘⇧⏎）を駆動する。
     #[cfg(debug_assertions)]
     pub fn debug_agent_full_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -777,6 +777,7 @@ impl Workspace {
                 chat_delete_confirm: None,
                 chat_shown: None,
                 chat_accent: None,
+                chat_touched: Vec::new(),
                 pending_chat_mode: false,
                 fleet_cells: Vec::new(),
                 new_task: None,

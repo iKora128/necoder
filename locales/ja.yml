@@ -564,6 +564,7 @@ breadcrumb:
   html_preview_tip: OS 標準 WebView で表示  ⌘⇧V
   html_reload_tip: HTML プレビューを再読み込み
 webview:
+  outside_sandbox: このファイルは表示できる範囲の外にあります
   failed: HTML プレビューを開けませんでした
   unsupported: HTML プレビューは現在 macOS / Windows に対応しています
   hidden_by_overlay: 前面の UI を閉じると表示に戻ります
@@ -893,3 +894,5 @@ chat:
   delete_keep_files: ファイルは残す
   delete_trash_files: ファイルもゴミ箱へ
   cancel: キャンセル
+  write_scope: 書込 フォルダ + 添付
+  write_scope_tip: このチャットのフォルダは自動で許可、渡したファイルは初回だけ確認、それ以外への書き込みは拒否します

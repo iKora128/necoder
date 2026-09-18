@@ -9247,6 +9247,22 @@ PYEOF"#;
                                 row.child(self.render_selector_pill(Selector::Agent, cx))
                                     .child(self.render_selector_pill(Selector::Mode, cx))
                             })
+                            // Chat は権限モードを選ばせない代わりに、書ける範囲を固定で示す
+                            // （フォルダの中は自動で許可・渡したファイルは初回だけ確認・それ以外は拒否）。
+                            .when(self.chat_mode, |row| {
+                                row.child(
+                                    div()
+                                        .id("chat-write-scope")
+                                        .px(px(6.))
+                                        .text_size(px(10.5))
+                                        .text_color(theme.fg2)
+                                        .child(SharedString::from(i18n::t!("chat.write_scope")))
+                                        .tooltip(ui::Tooltip::text(
+                                            SharedString::from(i18n::t!("chat.write_scope_tip")),
+                                            theme.clone(),
+                                        )),
+                                )
+                            })
                             .child(self.render_selector_pill(Selector::Model, cx))
                             .child(self.render_selector_pill(Selector::Effort, cx)),
                     )

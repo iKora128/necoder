@@ -214,6 +214,7 @@ impl Workspace {
                         cx,
                     );
                 }
+                self.on_chat_turn_ended(cx);
                 if let Some(panel) = self.chat_panel() {
                     panel.update(cx, |panel, cx| panel.stop_idle_chat_agents(cx));
                 }
@@ -252,21 +253,38 @@ impl Workspace {
         }
     }
 
-    /// エージェントが書いたファイル。Chat の session にはファイル監視が無いので、開いているタブは
-    /// ここで読み直す（＝プレビューの再読込も**ターンにつき 1 回**になる。ツール呼び出しのたびに
-    /// 読み直すとタイマーなどのページ状態が消える）。新しく書かれた成果物は右に出す。
+    /// エージェントが触るファイルの予告。**このイベントは書かれる前に届く**（許可リクエストの時点）ので、
+    /// ここでは覚えるだけにして、読み直しと表示はターン終了時に行う（[`Self::on_chat_turn_ended`]）。
     fn on_chat_files_touched(&mut self, files: &[PathBuf], color: Hsla, cx: &mut Context<Self>) {
         let Some(chat) = self.project_sessions.chat.as_mut() else {
             return;
         };
-        let mut newest_artifact = None;
         for file in files {
             chat.agent_touched.insert(file.clone(), color);
+            if !self.chrome.chat_touched.contains(file) {
+                self.chrome.chat_touched.push(file.clone());
+            }
+        }
+        cx.notify();
+    }
+
+    /// ターンが終わった。Chat の session にはファイル監視が無いので、このターンで書かれた物を
+    /// ここで取り込む: 開いているタブは読み直し（＝プレビューの再読込も**ターンにつき 1 回**。
+    /// ツール呼び出しのたびに読み直すとタイマーなどのページ状態が消える）、まだ開いていない
+    /// 成果物は右に出す。
+    fn on_chat_turn_ended(&mut self, cx: &mut Context<Self>) {
+        let touched = std::mem::take(&mut self.chrome.chat_touched);
+        let Some(chat) = self.project_sessions.chat.as_mut() else {
+            return;
+        };
+        let mut newest_artifact = None;
+        for file in &touched {
+            let color = chat.agent_touched.get(file).copied();
             match chat.tabs.iter().find(|tab| &tab.path == file) {
                 Some(tab) => {
                     if let Some(editor) = tab.editor().cloned() {
                         editor.update(cx, |view, cx| {
-                            view.set_agent_mark_color(Some(color), cx);
+                            view.set_agent_mark_color(color, cx);
                             view.handle_external_change(cx);
                         });
                     }
@@ -280,7 +298,6 @@ impl Workspace {
         if let Some(path) = newest_artifact {
             self.queue_chat_preview(path, cx);
         }
-        cx.notify();
     }
 
     /// 右のエディタ領域にプレビュー表示で開く（実際に開くのは window のある次の描画）。

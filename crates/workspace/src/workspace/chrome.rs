@@ -1959,10 +1959,14 @@ impl Workspace {
 
     pub(crate) fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        // Peacock 相当: statusbar をアクティブプロジェクト色で淡く塗る（窓ごと識別・M13）。
-        let accent = self.accent();
+        // Peacock 相当: statusbar をアクティブプロジェクト色で淡く塗る（窓ごと識別・M13）。Chat は無彩色。
+        let accent = self.frame_accent();
         let tint = gpui::Hsla {
-            s: (accent.s + 0.12).min(1.0),
+            s: if self.chat_mode() {
+                0.0
+            } else {
+                (accent.s + 0.12).min(1.0)
+            },
             a: 0.26,
             ..accent
         };

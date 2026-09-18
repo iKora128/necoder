@@ -563,6 +563,7 @@ breadcrumb:
   html_preview_tip: Open in the system WebView  ⌘⇧V
   html_reload_tip: Reload HTML preview
 webview:
+  outside_sandbox: This file is outside the folder that may be shown
   failed: Unable to open HTML preview
   unsupported: HTML preview currently supports macOS and Windows
   hidden_by_overlay: Returns when the panel in front closes
@@ -892,3 +893,5 @@ chat:
   delete_keep_files: Keep files
   delete_trash_files: Move files to Trash
   cancel: Cancel
+  write_scope: Writes — folder + attachments
+  write_scope_tip: Writes inside this chat's folder are allowed, attached files ask once, anything else is refused

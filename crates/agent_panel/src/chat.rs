@@ -621,6 +621,132 @@ fn chat_markdown(name: &str, entries: &[Entry]) -> String {
     markdown
 }
 
+#[cfg(debug_assertions)]
+impl AgentPanel {
+    /// 開発用（`NECODER_CHAT_PROBE=seed`）: エージェントを起こさずに、相談 → 成果物 → 修正の会話と
+    /// 実ファイルの成果物を作る。フォルダの作成・一覧・`▣ プレビュー`・右ペインの経路は本物を通る。
+    pub fn debug_seed_chat(&mut self, cx: &mut Context<Self>) {
+        let active = self.active;
+        let Ok(dir) = self.ensure_chat_dir(
+            active,
+            "ポモドーロタイマー作って。作業 25 分・休憩 5 分で",
+            cx,
+        ) else {
+            return;
+        };
+        let artifact = chat_core::folder::artifacts_dir(&dir).join("pomodoro.html");
+        if let Some(parent) = artifact.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!("CHAT_PROBE: artifacts を作れない: {error}");
+                return;
+            }
+        }
+        let page = "<!doctype html><meta charset=utf-8><title>Pomodoro</title>\
+<body style='font:16px system-ui;display:grid;place-items:center;height:100vh;margin:0;background:#f7f8fb'>\
+<main style='text-align:center'><p style='letter-spacing:.2em;color:#6b7487'>作業</p>\
+<div style='font-size:64px;font-weight:600'>25:00</div>\
+<button style='margin-top:20px;padding:9px 22px;border-radius:9px;border:0;background:#2f6fed;color:#fff'>開始</button>\
+</main>";
+        // `NECODER_CHAT_PROBE_PAGE=<html ファイル>` があれば、それを成果物として置く（隔離の検証ページ用）。
+        let custom_page = std::env::var_os("NECODER_CHAT_PROBE_PAGE")
+            .and_then(|path| std::fs::read_to_string(path).ok());
+        let page = custom_page.as_deref().unwrap_or(page);
+        if let Err(error) = std::fs::write(&artifact, page) {
+            eprintln!("CHAT_PROBE: 成果物を書けない: {error}");
+            return;
+        }
+        let path = artifact.display().to_string();
+        let step = |tool: &str, old_text: Option<&str>, new_text: &str| Entry::Step {
+            id: None,
+            tool: SharedString::from(tool.to_string()),
+            args: SharedString::from(path.clone()),
+            result: None,
+            result_lines: 0,
+            diffs: vec![PermissionDiff {
+                path: path.clone(),
+                old_text: old_text.map(str::to_string),
+                new_text: new_text.to_string(),
+            }],
+        };
+        let Some(thread) = self.threads.get_mut(active) else {
+            return;
+        };
+        thread.name = "ポモドーロタイマー".into();
+        thread.name_is_custom = true;
+        thread.last_input_at_ms = Some(now_unix_ms());
+        thread.tokens_used = 12_400;
+        thread.entries = vec![
+            Entry::User("WebView の evict って 15 分が妥当？短くすると何が困る？".into()),
+            Entry::Agent(
+                "妥当な範囲です。短くして困るのは、タブを往復するたびに再生成の白フレームが出ることと、\
+ページ内の状態（入力中のフォームやタイマー）が消えることです。\n\n\
+メモリを優先するなら 5 分、作業中の往復が多いなら 15 分のままを勧めます。"
+                    .into(),
+            ),
+            Entry::User("ポモドーロタイマー作って。作業 25 分・休憩 5 分で".into()),
+            step("Write artifacts/pomodoro.html", None, "<!doctype html>…"),
+            Entry::Agent(
+                "作りました。開始・一時停止・リセットができ、作業と休憩が自動で切り替わります。".into(),
+            ),
+            Entry::User("アクセントを青にして".into()),
+            step(
+                "Edit artifacts/pomodoro.html",
+                Some("background:#d9534f"),
+                "background:#2f6fed",
+            ),
+            Entry::Agent("青にしました。".into()),
+        ];
+        self.persist_thread(active);
+        self.preview_exists.borrow_mut().clear();
+        self.reset_transcript_list(true);
+        self.refresh_chat_rows(cx);
+        if let Some(thread) = self.threads.get(active) {
+            cx.emit(PanelEvent::FilesTouched {
+                files: vec![artifact],
+                color: thread.color,
+            });
+        }
+        cx.notify();
+    }
+
+    /// 開発用: 過去のチャットの行を並べる（一覧の日付グループ・輪郭だけの ●・ピンの見え方）。
+    pub fn debug_seed_chat_history(&mut self, cx: &mut Context<Self>) {
+        let Some(storage) = self.storage.clone() else {
+            return;
+        };
+        let names = [
+            "LP のコピー案を 5 本",
+            "確定申告の経費の分け方",
+            "AGPL §13 の対応ソースの範囲",
+            "料金表の比較図",
+            "リリースノートの英訳",
+        ];
+        for (index, name) in names.iter().enumerate() {
+            let id = format!("probe-chat-{index}");
+            if let Err(error) = storage.upsert_thread(
+                &id,
+                name,
+                (index + 1) as i64,
+                chat_core::STORAGE_SCOPE,
+                None,
+                Some("Claude Code"),
+                None,
+                0,
+                200_000,
+            ) {
+                eprintln!("CHAT_PROBE: 行を足せない: {error:#}");
+            }
+            if let Err(error) = storage.insert_turn(&id, "user", name) {
+                eprintln!("CHAT_PROBE: turn を足せない: {error:#}");
+            }
+        }
+        if let Err(error) = storage.set_thread_chat_pinned("probe-chat-3", true) {
+            eprintln!("CHAT_PROBE: ピン留めに失敗: {error:#}");
+        }
+        self.refresh_chat_rows(cx);
+    }
+}
+
 fn new_chat_thread(color_index: usize, cx: &App) -> Thread {
     let mut thread = Thread::empty(i18n::t!("chat.new_chat"), color_index);
     apply_thread_defaults(&mut thread, cx);

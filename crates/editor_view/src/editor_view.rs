@@ -666,6 +666,31 @@ impl EditorView {
         }
     }
 
+    /// HTML プレビューを**閉じ込めて**見せる（エージェントが生成した HTML 用・`webview_view::sandbox`）。
+    /// 配信は `root` の中だけ・外部通信なし・外への移動なし。エディタは「なぜ閉じ込めるか」を
+    /// 知らない（決めるのは親）。WebView はまだ生成前なので、差し替えても何も失わない。
+    pub fn sandbox_html_preview(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        let Some(path) = self.buffer.path().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+        if self
+            .html_preview
+            .as_ref()
+            .is_none_or(|preview| preview.read(cx).is_sandboxed())
+        {
+            return;
+        }
+        let theme = self.theme.clone();
+        self.html_preview =
+            Some(cx.new(move |_| webview_view::WebViewView::sandboxed(root, path, theme)));
+    }
+
+    pub fn html_preview_is_sandboxed(&self, cx: &App) -> bool {
+        self.html_preview
+            .as_ref()
+            .is_some_and(|preview| preview.read(cx).is_sandboxed())
+    }
+
     /// 保存済み HTML を再読込する。未生成なら初回表示が最新ファイルを読むため何もしない。
     pub fn reload_html_preview(&mut self, cx: &mut Context<Self>) {
         self.preview_reload_task = None; // 今読み直すので、予約していた分は要らない

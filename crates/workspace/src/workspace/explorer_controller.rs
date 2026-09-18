@@ -1198,11 +1198,17 @@ impl Workspace {
             }
         };
         let theme = self.theme.clone();
-        let accent = self
-            .active_slot()
-            .map(|slot| slot.color)
-            .unwrap_or_else(|| project_color(0));
+        // プロジェクトではその色、Chat ではいま見ているチャットのスレッド色（`accent()`）。
+        let accent = self.accent();
         let editor = cx.new(|cx| EditorView::new(buffer, theme, accent, cx));
+        // チャットの `artifacts/` の中の HTML は**エージェントが書いた JavaScript**なので、どの経路で
+        // 開いても閉じ込めて見せる（`file://` だとページから手元のファイルを読める）。タブ生成の
+        // この一点で決めるので、`▣ プレビュー`・パスのリンク・⌘⇧V のどれから出しても同じ扱いになる。
+        if let Some(root) = chat_core::folder::chats_root(Some(&settings::get(cx).chat.directory))
+            .and_then(|chats| chat_core::folder::artifacts_root_of(&chats, &path))
+        {
+            editor.update(cx, |view, cx| view.sandbox_html_preview(root, cx));
+        }
         // settings の実効化（M10-13）: font_size/tab_size/soft_wrap を適用（live 変更は observe_global）。
         {
             let current = settings::get(cx);
