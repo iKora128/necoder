@@ -398,6 +398,45 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Chat から成果物を持っていける先: Chat を抜けた時に戻るプロジェクト（ローカルのものだけ）。
+    pub(crate) fn chat_copy_target(&self) -> Option<(SharedString, PathBuf)> {
+        if !self.chat_mode() {
+            return None;
+        }
+        let slot = self
+            .project_sessions
+            .projects
+            .get(self.project_sessions.active)?;
+        slot.remote_host
+            .is_none()
+            .then(|| (slot.name.clone(), slot.worktree.root().to_path_buf()))
+    }
+
+    /// `source` をプロジェクトのルートへ複製する。**上書きしない**（同名があれば ` 2`・` 3` …）。
+    pub(crate) fn copy_to_project(
+        &mut self,
+        source: &Path,
+        project_root: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        let neutral = self.theme.fg2;
+        match copy_without_overwrite(source, project_root) {
+            Ok(copied) => self.push_toast(
+                i18n::t!("chat.copied_to_project", "path" => &copied.display().to_string()).into(),
+                neutral,
+                cx,
+            ),
+            Err(error) => {
+                eprintln!("プロジェクトへコピーできない: {error:#}");
+                self.push_toast(
+                    i18n::t!("chat.copy_failed", "message" => &error.to_string()).into(),
+                    self.theme.err,
+                    cx,
+                );
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // 描画
     // ------------------------------------------------------------------
@@ -434,6 +473,7 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(|this, _, _window, _cx| this.agent_active = true),
             )
+            .children(self.render_chat_artifact_bar(cx))
             .child(
                 div()
                     .flex_1()
@@ -445,6 +485,70 @@ impl Workspace {
                     })
                     .child(panel.cached(StyleRefinement::default().flex().flex_col().size_full())),
             )
+    }
+
+    /// このチャットの成果物の帯（会話の上）。ツールカードの `▣ プレビュー` は再起動すると消える
+    /// （永続化するのは会話の本文だけ）ので、**成果物へ戻る道**はここに常設する。無ければ出さない。
+    fn render_chat_artifact_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let theme = self.theme.clone();
+        let artifacts: Vec<PathBuf> = self.chat_panel()?.read(cx).chat_artifacts().to_vec();
+        if artifacts.is_empty() {
+            return None;
+        }
+        let accent = self.accent();
+        let open_path = self.active_tab_path();
+        let mut bar = div()
+            .id("chat-artifacts")
+            .flex_none()
+            .w_full()
+            .h(px(30.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(14.))
+            .overflow_x_scroll()
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(px(11.));
+        for (index, path) in artifacts.into_iter().enumerate() {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let shown = open_path.as_ref() == Some(&path);
+            let target = path.clone();
+            bar = bar.child(
+                div()
+                    .id(("chat-artifact", index))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .px(px(8.))
+                    .py(px(2.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_color(if shown { theme.fg0 } else { theme.fg1 })
+                    // 開いている物だけスレッド色の下線（色は識別。面は塗らない）。
+                    .when(shown, |chip| chip.border_b_2().border_color(accent))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    .child("▣")
+                    .child(SharedString::from(name))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            if let Some(chat) = this.project_sessions.chat.as_mut() {
+                                chat.pending_preview = Some(target.clone());
+                            }
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+        Some(bar.into_any_element())
     }
 
     /// 右 = 既存のエディタ領域（タブ列 + パンくず + エディタ / プレビュー）。artifact 専用のペインは無い。
@@ -1056,6 +1160,76 @@ impl Workspace {
                     }),
                 )
             })
+    }
+}
+
+/// `directory` へ `source` を複製する。同名があれば ` 2`・` 3` … を付ける。存在確認ではなく
+/// **`create_new` の成否**で決める（確認してから書くと、間に出来たファイルを上書きする）。
+fn copy_without_overwrite(source: &Path, directory: &Path) -> std::io::Result<PathBuf> {
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let extension = source
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    let bytes = std::fs::read(source)?;
+    for attempt in 1..=999 {
+        let name = if attempt == 1 {
+            format!("{stem}{extension}")
+        } else {
+            format!("{stem} {attempt}{extension}")
+        };
+        let target = directory.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                file.write_all(&bytes)?;
+                return Ok(target);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "同名のファイルが多すぎます",
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copying_never_overwrites_what_the_project_already_has() {
+        let base = std::env::temp_dir().join(format!(
+            "necoder_chat_copy_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let project = base.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let artifact = base.join("timer.html");
+        std::fs::write(&artifact, "new").unwrap();
+        std::fs::write(project.join("timer.html"), "mine").unwrap();
+
+        let copied = copy_without_overwrite(&artifact, &project).unwrap();
+        assert_eq!(copied, project.join("timer 2.html"));
+        assert_eq!(
+            std::fs::read_to_string(project.join("timer.html")).unwrap(),
+            "mine"
+        );
+        assert_eq!(std::fs::read_to_string(&copied).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(base);
     }
 }
 

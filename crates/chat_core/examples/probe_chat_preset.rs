@@ -14,6 +14,7 @@
 //! 8. **プロセスを立て直して `session/load` で再開しても** 2〜5 が保たれる
 //!
 //! 使い方: `cargo run -p chat_core --example probe_chat_preset`
+//! `-- --image` を付けると、画像つき prompt（ROADMAP M16 C4）の 1 ターンだけを確かめる。
 //! 課金されるので CI では回さない（実エージェント・10 ターン前後）。一時ディレクトリだけを触る。
 
 use acp_client::{AgentEvent, SessionCommand, SessionPreferences};
@@ -86,6 +87,10 @@ impl Probe {
 
     /// 1 ターン送って、終わるまでのイベントを畳む。権限リクエストは本番と同じ裁定で答える。
     fn turn(&mut self, prompt: &str) -> Turn {
+        self.turn_with_images(prompt, Vec::new())
+    }
+
+    fn turn_with_images(&mut self, prompt: &str, images: Vec<acp_client::PromptImage>) -> Turn {
         use futures::StreamExt as _;
         let attachments_prefix: String = self
             .attachments
@@ -100,7 +105,14 @@ impl Probe {
         println!("\n> {prompt}");
         let started = Instant::now();
         self.command_tx
-            .unbounded_send(SessionCommand::Prompt(full_prompt))
+            .unbounded_send(if images.is_empty() {
+                SessionCommand::Prompt(full_prompt)
+            } else {
+                SessionCommand::PromptWithImages {
+                    text: full_prompt,
+                    images,
+                }
+            })
             .expect("送信路");
         let mut turn = Turn {
             text: String::new(),
@@ -285,6 +297,31 @@ fn main() {
     let mut report = Report {
         failures: Vec::new(),
     };
+
+    if std::env::args().any(|argument| argument == "--image") {
+        // 単色の PNG を作って送り、色を答えさせる（貼り付けたスクリーンショットと同じ経路）。
+        use base64::Engine as _;
+        let red = image::RgbImage::from_pixel(96, 96, image::Rgb([225, 30, 30]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        red.write_to(&mut png, image::ImageFormat::Png)
+            .expect("png");
+        let mut probe = Probe::start(&chat_dir, Vec::new(), None);
+        let turn = probe.turn_with_images(
+            "この画像は何色？色の名前を一語で答えて",
+            vec![acp_client::PromptImage {
+                mime_type: "image/png".to_string(),
+                data: base64::engine::general_purpose::STANDARD.encode(png.into_inner()),
+            }],
+        );
+        let lowered = turn.text.to_lowercase();
+        report.check(
+            "貼り付けた画像をエージェントが見ている",
+            lowered.contains('赤') || lowered.contains("red"),
+            turn.text.replace('\n', " "),
+        );
+        drop(probe);
+        std::process::exit(if report.failures.is_empty() { 0 } else { 1 });
+    }
 
     // ---- 新規セッション ----
     let mut probe = Probe::start(&chat_dir, Vec::new(), None);

@@ -224,6 +224,7 @@ version = "0.1.18"
 dependencies = [
  "acp_client",
  "anyhow",
+ "base64",
  "chat_core",
  "editor_view",
  "futures",
@@ -1146,8 +1147,10 @@ name = "chat_core"
 version = "0.1.18"
 dependencies = [
  "acp_client",
+ "base64",
  "futures",
  "host",
+ "image",
  "libc",
  "paths",
  "serde_json",

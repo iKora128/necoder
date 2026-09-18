@@ -896,3 +896,11 @@ chat:
   cancel: キャンセル
   write_scope: 書込 フォルダ + 添付
   write_scope_tip: このチャットのフォルダは自動で許可、渡したファイルは初回だけ確認、それ以外への書き込みは拒否します
+  empty_title: 何を話しますか？
+  empty_talk: 質問や相談には、会話で答えます
+  empty_artifact: 見せる成果物を頼むと、書類フォルダに 1 ファイル書いて右に表示します
+  empty_files: ファイルをここへドロップすると、読んで、直せます
+  empty_code: コードを直したいときは、プロジェクトの Editor か Fleet へ
+  copy_to_project: "プロジェクト「%{project}」へコピー"
+  copied_to_project: "コピーしました: %{path}"
+  copy_failed: "コピーできませんでした: %{message}"

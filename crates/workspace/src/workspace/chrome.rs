@@ -838,6 +838,25 @@ impl Workspace {
             );
             menu_box = menu_box.child(separator());
         }
+        // Chat の成果物を、戻り先のプロジェクトへ持っていく（`docs/CHAT.md` §3.3）。
+        if let Some((project_name, project_root)) = self.chat_copy_target() {
+            let source = path.clone();
+            menu_box = menu_box
+                .child(
+                    item(
+                        "tab-ctx-copy-to-project",
+                        i18n::t!("chat.copy_to_project", "project" => project_name.as_ref()),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.close_tab_menu(cx);
+                            this.copy_to_project(&source, &project_root, cx);
+                        }),
+                    ),
+                )
+                .child(separator());
+        }
         let copy_path = path.clone();
         menu_box = menu_box.child(
             item("tab-ctx-copy-path", i18n::t!("explorer.ctx_copy_path")).on_mouse_down(

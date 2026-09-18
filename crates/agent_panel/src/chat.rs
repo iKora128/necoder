@@ -171,6 +171,7 @@ impl AgentPanel {
                 .then(right.sort_at_ms.cmp(&left.sort_at_ms))
         });
         self.chat_rows = rows;
+        self.chat_artifacts = self.active_chat_artifacts();
         cx.emit(PanelEvent::ChatRowsChanged);
         cx.notify();
     }
@@ -291,6 +292,11 @@ impl AgentPanel {
             .find(|record| record.thread_id == id)?
             .dir
             .map(PathBuf::from)
+    }
+
+    /// いま見ているチャットの成果物（新しい順・控え）。描画から呼んでよい。
+    pub fn chat_artifacts(&self) -> &[PathBuf] {
+        &self.chat_artifacts
     }
 
     /// いま開いているチャットの成果物（新しい順）。
@@ -747,6 +753,47 @@ impl AgentPanel {
     }
 }
 
+impl AgentPanel {
+    /// Chat で、いま見ているチャットがまだ空か（空状態の案内を出す条件）。
+    pub(crate) fn chat_is_empty(&self) -> bool {
+        self.chat_mode
+            && self
+                .threads
+                .get(self.active)
+                .is_some_and(|thread| thread.entries.is_empty() && !thread.running)
+    }
+
+    pub(crate) fn render_chat_empty(&self) -> impl IntoElement {
+        let theme = self.theme.clone();
+        let line = |key: &str| {
+            div()
+                .text_size(px(12.))
+                .text_color(theme.fg1)
+                .child(SharedString::from(format!("— {}", i18n::translate(key))))
+        };
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .pb(px(40.))
+            .child(
+                div()
+                    .pb(px(6.))
+                    .text_size(px(19.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(SharedString::from(i18n::t!("chat.empty_title"))),
+            )
+            .child(line("chat.empty_talk"))
+            .child(line("chat.empty_artifact"))
+            .child(line("chat.empty_files"))
+            .child(line("chat.empty_code"))
+    }
+}
+
 fn new_chat_thread(color_index: usize, cx: &App) -> Thread {
     let mut thread = Thread::empty(i18n::t!("chat.new_chat"), color_index);
     apply_thread_defaults(&mut thread, cx);
@@ -1133,6 +1180,73 @@ mod tests {
                 dir.join("artifacts/timer.html").exists(),
                 "成果物はユーザーのもの"
             );
+        });
+        drop(fixture);
+    }
+
+    /// 画像の添付は中身を image ブロックで送り、**その 1 通だけ**に添える。画像でない添付は
+    /// 従来どおり `@path` として毎ターン付く。
+    #[gpui::test]
+    fn an_attached_image_is_sent_as_a_block_once(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx, "image");
+        let shot = fixture.root.join("screenshot.png");
+        let note = fixture.root.join("note.md");
+        std::fs::write(&shot, b"not-really-a-png").unwrap();
+        std::fs::write(&note, "# note").unwrap();
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
+        let mut commands = panel.update(cx, |panel, cx| {
+            let commands = attach_fake_session(panel);
+            panel.add_context_path(&shot, cx);
+            panel.add_context_path(&note, cx);
+            panel.send_prompt_text("このエラーは何？".into(), cx);
+            commands
+        });
+        match commands.try_recv() {
+            Ok(SessionCommand::PromptWithImages { text, images }) => {
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].mime_type, "image/png");
+                assert_eq!(images[0].data, "bm90LXJlYWxseS1hLXBuZw==");
+                assert!(text.contains(&format!("@{}", note.display())), "{text}");
+                assert!(
+                    !text.contains("screenshot.png"),
+                    "画像はパスでは送らない: {text}"
+                );
+            }
+            other => panic!("画像つきの prompt を期待: {other:?}"),
+        }
+        panel.read_with(cx, |panel, _| {
+            let thread = &panel.threads[panel.active];
+            assert_eq!(
+                thread.context,
+                vec![SharedString::from(note.display().to_string())],
+                "画像は送ったら添付から外れる"
+            );
+            assert!(matches!(
+                thread.entries.first(),
+                Some(Entry::User(text)) if text.contains("▦ screenshot.png")
+            ));
+        });
+    }
+
+    /// 貼り付けた画像はキャッシュへ置いて添付にする（チャットのフォルダにもプロジェクトにも置かない）。
+    #[gpui::test]
+    fn a_pasted_image_becomes_an_attachment(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx, "paste");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.attach_pasted_image(
+                &editor_view::PastedImage {
+                    format: gpui::ImageFormat::Png,
+                    bytes: vec![1, 2, 3],
+                },
+                cx,
+            );
+            let thread = &panel.threads[panel.active];
+            assert_eq!(thread.context.len(), 1);
+            let path = PathBuf::from(thread.context[0].as_ref());
+            assert!(path.to_string_lossy().contains("chat-paste"), "{path:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3]);
+            let _ = std::fs::remove_file(path);
         });
         drop(fixture);
     }

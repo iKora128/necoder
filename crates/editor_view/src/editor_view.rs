@@ -124,6 +124,14 @@ pub enum ComposerEvent {
     ContentHeightChanged,
 }
 
+/// composer（平坦モード）に**画像**が貼り付けられた。エディタは画像を持てないので、どう扱うか
+/// （添付にする・捨てる）は親が決める。テキストの貼り付けは従来どおりバッファへ入る。
+#[derive(Debug, Clone)]
+pub struct PastedImage {
+    pub format: gpui::ImageFormat,
+    pub bytes: Vec<u8>,
+}
+
 /// キーボード入力の確定テキスト通知（補完の自動トリガ用・M10）。
 /// **入力ハンドラ経由の確定入力のみ** emit する（IME 変換中・paste・undo・補完適用では出さない）。
 /// workspace がタブ毎に subscribe し、識別子/`.`/`::` で補完を自動トリガする。
@@ -1379,9 +1387,26 @@ impl EditorView {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        // テキストがあればテキストを貼る（Web からのコピーは文字と画像の両方を載せてくる。
+        // 入力欄で欲しいのは文字の方）。画像だけの時（スクリーンショット）は composer なら親へ渡す。
+        if let Some(text) = item.text() {
             self.buffer.insert(&text);
             self.after_edit(cx);
+            return;
+        }
+        if !self.plain {
+            return;
+        }
+        for entry in item.into_entries() {
+            if let gpui::ClipboardEntry::Image(image) = entry {
+                cx.emit(PastedImage {
+                    format: image.format,
+                    bytes: image.bytes,
+                });
+            }
         }
     }
 
@@ -2209,6 +2234,7 @@ impl Focusable for EditorView {
 
 /// composer は親（agent_panel）へ [`ComposerEvent`] を通知できる（Enter 送信の委譲）。
 impl EventEmitter<ComposerEvent> for EditorView {}
+impl EventEmitter<PastedImage> for EditorView {}
 
 /// 確定入力の通知（workspace が補完の自動トリガに使う）。
 impl EventEmitter<EditorInputEvent> for EditorView {}

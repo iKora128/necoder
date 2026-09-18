@@ -1127,6 +1127,55 @@ pub fn digest_tail(text: &str) -> Option<SharedString> {
 
 /// エントリのコピー用プレーンテキスト（GPUI の素のテキストは選択ドラッグ不可のため、
 /// hover の ⧉ でエントリ単位コピーを提供する・M13 UX。本文のドラッグ選択は残件）。
+/// image ブロックで送る 1 枚の上限。これを超える画像はパスの添付として残す（エージェントが
+/// 自分で読む）。Claude の上限は 5 MB 程度で、base64 にすると 4/3 倍に膨らむ。
+const PROMPT_IMAGE_MAX_BYTES: u64 = 3_500_000;
+
+/// 添付のうち画像として送れる物を読む。戻り値は (画像, 画像として送った添付)。
+/// 相対パスは宛先プロジェクト基準。読めない物（リモートのパスなど）は黙って対象外＝`@path` に残る。
+fn load_prompt_images(
+    context: &[SharedString],
+    base: Option<&Path>,
+) -> (Vec<acp_client::PromptImage>, Vec<SharedString>) {
+    use base64::Engine as _;
+    let mut images = Vec::new();
+    let mut sent = Vec::new();
+    for entry in context {
+        let path = Path::new(entry.as_ref());
+        let Some(mime_type) = prompt_image_mime(path) else {
+            continue;
+        };
+        let absolute = match base {
+            Some(base) if path.is_relative() => base.join(path),
+            _ => path.to_path_buf(),
+        };
+        let small_enough = std::fs::metadata(&absolute)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= PROMPT_IMAGE_MAX_BYTES);
+        if !small_enough {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&absolute) {
+            images.push(acp_client::PromptImage {
+                mime_type: mime_type.to_string(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+            sent.push(entry.clone());
+        }
+    }
+    (images, sent)
+}
+
+fn prompt_image_mime(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
 /// `ToolCallInfo`（開始）から Step エントリを組む。args=主なパス / result=出力 / diffs=差分。
 fn build_step_entry(info: ToolCallInfo) -> Entry {
     let mut tool = info.title.unwrap_or_default();
@@ -1664,6 +1713,8 @@ pub struct AgentPanel {
     chat_rows: Vec<chat::ChatRow>,
     /// 一覧の絞り込み語（タイトル + 本文の全文検索）。
     chat_search: String,
+    /// いま見ているチャットの成果物（新しい順）。一覧と同じ節目で読み直す＝描画のたびに readdir しない。
+    chat_artifacts: Vec<PathBuf>,
     /// `▣ プレビュー` チップを出してよいか（パス → 実在）の控え。描画のたびに stat しない。
     preview_exists: RefCell<HashMap<String, bool>>,
 }
@@ -1745,6 +1796,14 @@ impl AgentPanel {
             // 折り返し行数が変わった（入力・パネル幅変更）→ auto-grow の高さを再計算する。
             ComposerEvent::ContentHeightChanged => cx.notify(),
         })
+        .detach();
+        // 画像の貼り付け（スクリーンショット）→ 添付にして、次の 1 通に image ブロックで添える。
+        cx.subscribe(
+            &composer,
+            |panel, _composer, image: &editor_view::PastedImage, cx| {
+                panel.attach_pasted_image(image, cx)
+            },
+        )
         .detach();
         // 設定変更（UI トグル / 手編集 / CLI / MCP のどれでも）に追従して composer へ反映。
         cx.observe_global::<settings::SettingsGlobal>(|panel, cx| {
@@ -2000,6 +2059,7 @@ PYEOF"#;
             chat_mode: false,
             chat_rows: Vec::new(),
             chat_search: String::new(),
+            chat_artifacts: Vec::new(),
             preview_exists: RefCell::new(HashMap::new()),
         }
     }
@@ -4667,6 +4727,29 @@ PYEOF"#;
         cx.notify();
     }
 
+    /// composer に貼り付けられた画像（スクリーンショットなど）を添付にする。実体はキャッシュへ置く —
+    /// ユーザーの成果物ではないので、チャットのフォルダにもプロジェクトにも置かない。
+    fn attach_pasted_image(&mut self, image: &editor_view::PastedImage, cx: &mut Context<Self>) {
+        let extension = match image.format {
+            gpui::ImageFormat::Png => "png",
+            gpui::ImageFormat::Jpeg => "jpg",
+            gpui::ImageFormat::Webp => "webp",
+            gpui::ImageFormat::Gif => "gif",
+            // SVG・BMP・TIFF は image ブロックで送れる形式ではない。
+            _ => return,
+        };
+        let Some(directory) = paths::cache_dir().map(|cache| cache.join("chat-paste")) else {
+            return;
+        };
+        let path = directory.join(format!("paste-{}.{extension}", new_thread_id()));
+        let written =
+            std::fs::create_dir_all(&directory).and_then(|()| std::fs::write(&path, &image.bytes));
+        match written {
+            Ok(()) => self.add_context(SharedString::from(path.display().to_string()), cx),
+            Err(error) => eprintln!("貼り付けた画像を保存できない: {error}"),
+        }
+    }
+
     /// ドロップされたファイルパスを @メンションに加える（プロジェクト root 配下なら相対、外なら絶対）。
     /// D&D（Finder / エクスプローラ）→ context 参照の受け口。
     fn add_context_path(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -4971,7 +5054,14 @@ PYEOF"#;
 
     fn send_prompt_entry(&mut self, prompt: String, ledger: bool, cx: &mut Context<Self>) {
         let thread_index = self.active;
-        // 添付コンテキストを prompt 先頭へ `@path` として付ける（表示は素の prompt のまま）。
+        // 添付のうち**画像**は中身を ACP の image ブロックで送る（貼り付けたスクリーンショット・
+        // ドロップした画像）。読めなかった物・大きすぎる物はパスの添付として残す。
+        let (images, image_paths) = self
+            .threads
+            .get(thread_index)
+            .map(|thread| load_prompt_images(&thread.context, self.dest_cwd.as_deref()))
+            .unwrap_or_default();
+        // それ以外の添付は prompt 先頭へ `@path` として付ける（表示は素の prompt のまま）。
         let mut context_prefix: String = self
             .threads
             .get(thread_index)
@@ -4979,6 +5069,7 @@ PYEOF"#;
                 thread
                     .context
                     .iter()
+                    .filter(|path| !image_paths.contains(path))
                     .map(|path| format!("@{path}\n"))
                     .collect()
             })
@@ -4996,11 +5087,27 @@ PYEOF"#;
             format!("{context_prefix}\n{prompt}")
         };
         if let Some(thread) = self.threads.get_mut(thread_index) {
-            thread.entries.push(if ledger {
-                Entry::LedgerEvent(prompt.clone().into())
+            let shown = if images.is_empty() {
+                prompt.clone()
             } else {
-                Entry::User(prompt.clone().into())
+                let names: Vec<String> = image_paths
+                    .iter()
+                    .map(|path| {
+                        Path::new(path.as_ref())
+                            .file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.to_string())
+                    })
+                    .collect();
+                format!("{prompt}\n\n▦ {}", names.join(" · "))
+            };
+            thread.entries.push(if ledger {
+                Entry::LedgerEvent(shown.into())
+            } else {
+                Entry::User(shown.into())
             });
+            // 画像は**その 1 通だけ**に添える（パスの添付と違って毎ターン送り直すと重い）。
+            thread.context.retain(|path| !image_paths.contains(path));
             thread.running = true;
             thread.auth_required = false; // 送信＝再接続（同じセッションへ送る。adapter 側で resume）
             thread.done = None; // 新しいターン開始＝直前の「完了・未確認」ラッチは消す
@@ -5068,9 +5175,15 @@ PYEOF"#;
             .get(thread_index)
             .and_then(|thread| thread.command_tx.as_ref())
             .map(|command_tx| {
-                command_tx
-                    .unbounded_send(SessionCommand::Prompt(full_prompt))
-                    .is_ok()
+                let command = if images.is_empty() {
+                    SessionCommand::Prompt(full_prompt)
+                } else {
+                    SessionCommand::PromptWithImages {
+                        text: full_prompt,
+                        images,
+                    }
+                };
+                command_tx.unbounded_send(command).is_ok()
             })
             .unwrap_or(false);
         if !alive {
@@ -7225,13 +7338,17 @@ PYEOF"#;
             // 引っ張った途端に途切れるため。composer リサイズと同じ作法）。
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up))
-            .child(
+            .child(if self.chat_is_empty() {
+                // まだ何も話していないチャット: 何が起きるかを 3 行で（`docs/CHAT.md` §4.3）。
+                self.render_chat_empty().into_any_element()
+            } else {
                 list(
                     self.transcript_list.clone(),
                     cx.processor(Self::render_transcript_item),
                 )
-                .flex_1(),
-            )
+                .flex_1()
+                .into_any_element()
+            })
     }
 
     fn render_transcript_item(

@@ -895,3 +895,11 @@ chat:
   cancel: Cancel
   write_scope: Writes — folder + attachments
   write_scope_tip: Writes inside this chat's folder are allowed, attached files ask once, anything else is refused
+  empty_title: What would you like to talk about?
+  empty_talk: Questions and advice are answered in the conversation
+  empty_artifact: Ask for something to see, and it is written as one file in Documents and shown on the right
+  empty_files: Drop a file here to have it read and edited
+  empty_code: To work on code, use Editor or Fleet in a project
+  copy_to_project: "Copy to project “%{project}”"
+  copied_to_project: "Copied: %{path}"
+  copy_failed: "Could not copy: %{message}"

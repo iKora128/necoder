@@ -243,11 +243,26 @@ pub enum TurnEnd {
     Interrupted,
 }
 
+/// prompt に添える画像 1 枚（ACP の image ブロック）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptImage {
+    /// `image/png` など。
+    pub mime_type: String,
+    /// 中身（base64）。
+    pub data: String,
+}
+
 /// UI → 常駐セッションへの指示（[`run_session`] が単一チャネルで受ける）。
 #[derive(Debug, Clone)]
 pub enum SessionCommand {
     /// prompt を送る。
     Prompt(String),
+    /// 画像つきの prompt（貼り付けたスクリーンショット・ドロップした画像）。エージェントが
+    /// `promptCapabilities.image` を広告していなければ画像は落として、その旨を 1 行知らせる。
+    PromptWithImages {
+        text: String,
+        images: Vec<PromptImage>,
+    },
     /// 実行中のターンを中断する（`session/cancel` 通知）。エージェントは
     /// `StopReason::Cancelled` でターンを畳むので、UI には `TurnEnded { Interrupted }` が届く。
     /// **ターン中に受け取れる**必要があるため、ターンループが `read_update` と同時に待つ。
@@ -1429,6 +1444,7 @@ pub async fn run_session_on(
             // プリセットの `_meta`。new と load で同じ物を使う（上の `preset` のコメント参照）。
             let session_meta = preferences.preset.to_meta();
 
+            let accepts_images = initialized.agent_capabilities.prompt_capabilities.image;
             let can_load = initialized.agent_capabilities.load_session;
             let resume_id = preferences.resume.clone().filter(|_| can_load);
             let mut resumed_session = None;
@@ -1600,8 +1616,9 @@ pub async fn run_session_on(
                         }
                     }
                 };
-                let prompt = match session_command {
-                    SessionCommand::Prompt(prompt) => prompt,
+                let (prompt, images) = match session_command {
+                    SessionCommand::Prompt(prompt) => (prompt, Vec::new()),
+                    SessionCommand::PromptWithImages { text, images } => (text, images),
                     // ターン外の cancel は畳む対象が無いので黙って捨てる。
                     SessionCommand::Cancel => continue,
                     SessionCommand::SetMode(mode_id) => {
@@ -1646,7 +1663,7 @@ pub async fn run_session_on(
                 let prompt_response = connection
                     .send_request(v1::PromptRequest::new(
                         session_id.clone(),
-                        vec![prompt.into()],
+                        prompt_blocks(prompt, images, accepts_images, &event_tx),
                     ))
                     .block_task()
                     .fuse();
@@ -1938,6 +1955,30 @@ fn tool_output(content: &[v1::ToolCallContent]) -> Option<String> {
         }
     }
     (!text.is_empty()).then_some(text)
+}
+
+/// prompt を ACP の content ブロック列へ。画像は本文の**前**に置く（「この画像について…」と
+/// 続く文が自然に読める順）。受け取れないエージェントには送らず、黙って落とさずに知らせる。
+fn prompt_blocks(
+    text: String,
+    images: Vec<PromptImage>,
+    accepts_images: bool,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Vec<v1::ContentBlock> {
+    let mut blocks: Vec<v1::ContentBlock> = Vec::new();
+    if accepts_images {
+        blocks.extend(images.into_iter().map(|image| {
+            v1::ContentBlock::Image(v1::ImageContent::new(image.data, image.mime_type))
+        }));
+    } else if !images.is_empty() {
+        event_tx
+            .unbounded_send(AgentEvent::Notice(
+                "このエージェントは画像を受け取れないため、画像を除いて送りました".to_string(),
+            ))
+            .ok();
+    }
+    blocks.push(text.into());
+    blocks
 }
 
 /// 権限リクエストが触る場所を、取れる所から全部集める（重複なし・出た順）。
@@ -3068,6 +3109,114 @@ for line in sys.stdin:
         };
         assert_eq!(received["method"], "session/new", "{received}");
         assert_eq!(received["has_meta"], false, "{received}");
+    }
+
+    /// 偽エージェント（`IMAGE_CAP` を置換して使う）: 受け取った prompt のブロック列をそのまま返す。
+    const AGENT_THAT_ECHOES_PROMPT_BLOCKS: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"promptCapabilities": {"image": IMAGE_CAP}}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "img-1"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": params["sessionId"],
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": json.dumps(params.get("prompt"))}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"#;
+
+    fn image_prompt_scenario(agent_accepts_images: bool) -> Option<Vec<AgentEvent>> {
+        let script = AGENT_THAT_ECHOES_PROMPT_BLOCKS.replace(
+            "IMAGE_CAP",
+            if agent_accepts_images {
+                "True"
+            } else {
+                "False"
+            },
+        );
+        let python = find_in_path("python3")?;
+        let cwd = std::env::temp_dir();
+        let command = AgentCommand::new(python, vec!["-c".into(), script], cwd);
+        let (command_tx, command_rx) = mpsc::unbounded::<SessionCommand>();
+        let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
+        command_tx
+            .unbounded_send(SessionCommand::PromptWithImages {
+                text: "このエラーは何？".into(),
+                images: vec![PromptImage {
+                    mime_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                }],
+            })
+            .ok()?;
+        let (outcome, events) = futures::executor::block_on(futures::future::join(
+            run_session(command, SessionPreferences::default(), command_rx, event_tx),
+            event_rx.collect::<Vec<_>>(),
+        ));
+        drop(command_tx);
+        outcome.expect("セッションは正常終了する");
+        Some(events)
+    }
+
+    fn echoed_blocks(events: &[AgentEvent]) -> serde_json::Value {
+        let echoed = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("エージェントが受け取った prompt が返る");
+        serde_json::from_str(echoed).expect("JSON で返る")
+    }
+
+    /// 画像は ACP の image ブロックとして、**本文の前**に乗る。
+    #[test]
+    fn images_ride_as_image_blocks_before_the_text() {
+        let Some(events) = image_prompt_scenario(true) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let blocks = echoed_blocks(&events);
+        assert_eq!(blocks.as_array().map(Vec::len), Some(2), "{blocks}");
+        assert_eq!(blocks[0]["type"], "image");
+        assert_eq!(blocks[0]["mimeType"], "image/png");
+        assert_eq!(blocks[0]["data"], "aGVsbG8=");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "このエラーは何？");
+    }
+
+    /// 画像を受け取れないエージェントには送らない。黙って落とさず、1 行で知らせる。
+    #[test]
+    fn images_are_dropped_with_a_notice_when_the_agent_cannot_take_them() {
+        let Some(events) = image_prompt_scenario(false) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let blocks = echoed_blocks(&events);
+        assert_eq!(blocks.as_array().map(Vec::len), Some(1), "{blocks}");
+        assert_eq!(blocks[0]["type"], "text");
+        assert!(
+            events.iter().any(
+                |event| matches!(event, AgentEvent::Notice(message) if message.contains("画像"))
+            ),
+            "{events:?}"
+        );
     }
 
     /// 偽エージェント: `session/new` で受け取った `mcpServers` をそのまま prompt 応答に載せる。

@@ -334,6 +334,7 @@ impl gpui::AssetSource for Assets {
             "icons/list.svg" => icon!("list.svg"),
             "icons/columns-3.svg" => icon!("columns-3.svg"),
             "icons/layout-grid.svg" => icon!("layout-grid.svg"),
+            "icons/message-square.svg" => icon!("message-square.svg"),
             "icons/activity.svg" => icon!("activity.svg"),
             "icons/maximize.svg" => icon!("maximize.svg"),
             "icons/minimize.svg" => icon!("minimize.svg"),
