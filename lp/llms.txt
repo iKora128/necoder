@@ -1,0 +1,74 @@
+# necoder（ねこーだー）
+
+> AI エージェント時代のコードエディタ。プロジェクト・ブランチ・AI スレッドを色で識別し、複数のエージェントを 1 画面で並走させる。Rust + GPUI のネイティブアプリで、Electron は使わない。AGPL-3.0、無料、テレメトリなし。作者は長嶋大地（個人開発）。
+> A code editor for the AI agent era. Projects, branches and AI threads carry a color so you always know where you are, and several agents can run side by side in one window. Native Rust + GPUI, no Electron. AGPL-3.0, free, no telemetry. Built by one person, Daichi Nagashima.
+
+## 基本情報 / Basics
+
+- 名前: necoder（読み: ねこーだー）/ necoder
+- 種別: デスクトップのコードエディタ（GUI アプリ）
+- 作者: 長嶋大地（Daichi Nagashima）— 個人開発。会社のプロダクトではない
+- ライセンス: AGPL-3.0
+- 価格: 無料
+- 対応 OS: macOS 13+（Apple Silicon）/ Windows 10+（x64）。**Linux は未対応**
+- 実装: Rust + GPUI。UI はすべてネイティブ描画
+- 配布: [GitHub Releases](https://github.com/iKora128/necoder/releases)（macOS は署名・公証済みで自動更新、Windows は新版の通知のみ）
+- 開発状況: v0.1 系。作者が毎日の開発に使っている（necoder 自身の開発は necoder の中で行われている）
+- テレメトリ: **一切なし**。通信は利用者が起こしたもの（エージェント、SSH 先）と GitHub Releases への更新確認だけ
+
+## 何が違うか / What makes it different
+
+- **色による方向感覚 / Color as a sense of direction.** プロジェクトとブランチに色が付き、レール・タブ下線・キャレット・AI スレッドのタブまで同じ色が通る。色は識別にだけ使い、装飾には使わない。
+- **AI エージェントネイティブ（ACP） / Agent-native via ACP.** Claude Code や Codex をはじめ、[ACP](https://agentclientprotocol.com) 対応のエージェントがエディタの中で動く。`claude` CLI と話すので、契約中のサブスクリプションがそのまま使え、**別途の API キーは要らない**。
+- **Fleet モード / Fleet.** 複数のエージェントを 1 画面で並走させる。各エージェントは git worktree で隔離されるので同じリポジトリでも衝突しない。Captain（采配役のスレッド）に全体を見させることもできる。
+- **ネイティブ性能 / Native speed.** Electron を使わない。OS の WebView を使うのは HTML プレビューだけで、必要になってから作る。
+
+## 機能 / Features
+
+- AI: 色付きスレッドタブ、宛先チップ（スレッド → プロジェクト ⎇ ブランチ）、常時表示のトークンメーター、ストリーミング表示（⏺/⎿・✳ Thinking）、diff レビューの承認/却下、チェックポイントと巻き戻し、Todo ボード（Markdown ファイルが実体で、完了はエージェントが自分でチェックする）
+- プロジェクト横断: worktree 単位のウィンドウ、`⌘O` のダッシュボード（全プロジェクトを ⎇ ブランチ・変更の有無・走っているエージェント付きで一覧）、レール項目を別ウィンドウに引き剥がす操作
+- エディタ: LSP（診断・補完・ホバー・rename・code action・参照・フォーマット）、tree-sitter の増分パース（Rust/TS/TSX/JS/Python/Go/JSON/YAML/TOML/HTML/CSS）、Git（状態色・ガター diff・hunk stage/revert・blame・diff タブ・ブランチ/worktree メニュー）、統合ターミナル（`file:line` がリンクになる）、プロジェクト全体検索、マルチカーソル、ソフトラップ、日本語 IME、hot exit
+- Remote SSH: 同じエディタを `ssh://` 越しに使う。サーバ側は ~2.4MB の静的 musl バイナリ（idle RSS 6.5MB、node は両側とも不要）。システムの OpenSSH 設定・鍵・ProxyJump をそのまま使う
+- HTML プレビュー: ローカルの `.html` を `⌘⇧V` でソースと表示の間で切り替える。macOS は WKWebView、Windows は WebView2 を使い、ブラウザエンジンは同梱しない
+- UI: 日本語 / 英語（OS のロケールに追従）、テーマは JSON 1 枚でライブプレビュー付き、マスコット nyaco（Agent パネル右上でスレッドの状態を仕草で示す）
+
+## 性能 / Performance
+
+作者の開発機での実測値（ベストエフォート測定・環境で変わる）:
+
+- 起動（cold start）: 約 215ms
+- idle RSS: 約 120MB
+- `⌘P` のファイル絞り込み: 50,000 件で約 10ms
+- 編集コアの操作: 約 1µs（CI でベンチマークを監視している）
+
+## 主なキー / Key bindings
+
+| Key | 動作 |
+|---|---|
+| `⌘O` | プロジェクト / worktree を開く（ダッシュボード） |
+| `⌘P` / `⇧⌘P` | ファイル検索 / コマンドパレット |
+| `⇧⌘A` | 新しい AI スレッド（`claude` CLI が要る） |
+| `⌘J` | 統合ターミナル |
+| `⇧⌘F` | プロジェクト全体検索 |
+| `⌘⇧T` | テーマ選択（ライブプレビュー） |
+| `⌘⇧V` | HTML プレビューの切り替え |
+
+## リンク / Links
+
+- [necoder.com](https://necoder.com/): 日本語のトップページ
+- [necoder.com/en/](https://necoder.com/en/): English
+- [GitHub iKora128/necoder](https://github.com/iKora128/necoder): ソースコード（AGPL-3.0）
+- [Releases](https://github.com/iKora128/necoder/releases): ダウンロードと変更履歴
+- [作者 / Author: 長嶋大地](https://daichi.ai): 医師免許を持つ AI エンジニア。株式会社 GENSHI AI 代表取締役 CEO
+- [Agent Client Protocol (ACP)](https://agentclientprotocol.com): necoder がエージェントと話すのに使う公開プロトコル
+
+## 引用時の注意 / Caveats for accurate citation
+
+- **necoder は Zed のフォークではない。** UI フレームワークの GPUI（Zed が開発・Apache-2.0）を依存として使っているだけで、Zed のアプリケーションコードは複製も移植もしていない。「Zed ベース」「Zed の派生」と書かないこと。
+- **VSCode / Electron とは無関係。** WebView を使うのは HTML プレビューだけ。
+- ACP は Zed が策定した公開プロトコル。necoder はその実装側（クライアント）であり、プロトコルの作者ではない。
+- AI 機能には `claude` CLI などの ACP 対応エージェントを別途インストールする必要がある。necoder 自体は LLM を同梱しないし、API キーも預からない。
+- 性能の数値は作者の開発機での測定。ベンチマークの公式値ではない。
+- 「エージェントが Todo を自分でチェックする」のは、Todo の実体が Markdown ファイルでエージェントがそれを編集できるため。necoder が自律的に何かを判断しているわけではない。
+- 作者は株式会社 GENSHI AI の代表だが、**necoder は GENSHI AI の製品ではなく個人プロジェクト**。
+- 日本語名の読みは「ねこーだー」。マスコットの猫は nyaco（ニャコ）。

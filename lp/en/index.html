@@ -417,6 +417,7 @@ a:hover { color: var(--color-accent-600); }
     <a href="#perf" style="text-decoration: none">Speed</a>
     <a href="#fleet" style="text-decoration: none">Fleet</a>
     <a href="#editor" style="text-decoration: none">Editor</a>
+    <a href="#author" style="text-decoration: none">Author</a>
     <a class="lang-switch" href="/?lang=ja" hreflang="ja" title="このページを日本語で読む">日本語</a>
     <button class="theme-toggle" type="button" aria-label="Toggle theme"><span class="theme-toggle-to-dark" aria-hidden="true">☾</span><span class="theme-toggle-to-light" aria-hidden="true">☀</span></button>
     <a class="btn btn-primary" href="https://github.com/iKora128/necoder/releases" style="white-space: nowrap; text-decoration: none">Download</a>
@@ -580,6 +581,40 @@ a:hover { color: var(--color-accent-600); }
       <div style="margin-top: 32px; border: 2px solid var(--color-divider); padding: 22px 26px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 20px; font-size: 13.5px; color: color-mix(in srgb, var(--color-text) 78%, transparent)">
         <span>completion (auto-triggered)</span><span>definition F12 / references ⇧F12</span><span>rename F2 / code action ⌘.</span><span>format on save</span>
         <span>tree-sitter incremental parsing</span><span>hunk stage / blame</span><span>⌘F find · ⌘⇧F find in project</span><span>themes are a single JSON file</span>
+      </div>
+    </section>
+    <section id="author" style="padding: 110px 0 0">
+      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
+        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">06</span>
+        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">The person building it</h2>
+        <span style="flex: 1"></span>
+        <p class="text-muted" style="margin: 0; font-size: 14px; max-width: 44ch">Daichi Nagashima — physician · AI engineer · CEO of GENSHI AI</p>
+      </div>
+      <div style="display: grid; grid-template-columns: minmax(0,7fr) minmax(0,5fr); gap: clamp(24px,4vw,56px); margin-top: 32px; align-items: start">
+        <div>
+          <p style="font-size: 16.5px; line-height: 1.9; margin: 0; max-width: 56ch">I got my medical license in 2022 and met generative AI while working as a resident in Beppu, Oita. A year later I left residency to build AI full time. Today I hold a research post in cardiology at the University of Tokyo Hospital and run GENSHI AI as its CEO — training image, speech and language models, shipping them as products, and carrying them all the way to the clinic myself.</p>
+          <p style="font-size: 16.5px; line-height: 1.9; margin: 20px 0 0; max-width: 56ch">My main product is <a href="https://medlocal.jp" target="_blank" rel="noopener" style="font-weight: 700; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px">MedLocal</a> — a medical LLM that lives inside the hospital. Discharge summary drafts, ambient voice charting in the clinic and OCR for referral letters, all running on machines inside the building so patient data never leaves it. In September 2026, <a href="https://www.itmedia.co.jp/aiplus/article/2609/17/2000001587/" target="_blank" rel="noopener" style="text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px">an ITmedia feature</a> on on-premise LLMs in Japanese clinics interviewed me as CEO of GENSHI AI.</p>
+          <p style="font-size: 16.5px; line-height: 1.9; margin: 20px 0 0; max-width: 56ch">necoder came out of those days. Once several agents are running at once, <b>you lose track of which AI is working on which project, on which branch</b>. The color-coded UI, the destination chip and Fleet all started from that pain. necoder is developed inside necoder: I use it every day and fix whatever trips me up, on the spot. That is the only way features get chosen.</p>
+          <blockquote style="margin: 24px 0 0; border-left: 2px solid var(--color-accent); padding: 2px 0 2px 18px; font-size: 15.5px; line-height: 1.85; max-width: 52ch">Solving a problem I felt in the exam room with code I wrote myself. That short distance is what makes my work worth something.</blockquote>
+          <div style="display: flex; gap: 18px; flex-wrap: wrap; margin-top: 24px; font-size: 14px">
+            <a href="https://daichi.ai" style="text-decoration: none">daichi.ai</a>
+            <a href="https://github.com/iKora128" style="text-decoration: none">GitHub @iKora128</a>
+            <a href="https://x.com/daichi_genshiai" style="text-decoration: none">X @daichi_genshiai</a>
+            <a href="https://note.com/ikora" style="text-decoration: none">note</a>
+          </div>
+        </div>
+        <div style="display: grid; gap: 26px">
+          <figure style="margin: 0; border: 2px solid var(--color-text); max-width: 280px"><img src="/assets/img/daichi.jpg" alt="A portrait of Daichi Nagashima" width="512" height="640" style="width: 100%; height: auto; display: block" loading="lazy"></figure>
+          <div style="border: 2px solid var(--color-divider); padding: 22px 26px">
+            <h3 style="font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; margin: 0 0 16px; color: color-mix(in srgb, var(--color-text) 70%, transparent)">Other things I have built</h3>
+            <div style="display: grid; gap: 16px; font-size: 14px; line-height: 1.75">
+              <div><a href="https://karui.app" style="font-weight: 700; text-decoration: none">Karui</a><span> — a pay-once app that makes images up to 90% smaller. JPEG · PNG · HEIC · AVIF · PDF, 100% offline.</span></div>
+              <div><b>stop-ai-slop-jp</b><span> — a Claude Skill that turns AI-written Japanese back into prose a human would write.</span></div>
+              <div><b>Baberu OCR</b><span> — a 115M-parameter manga OCR for Japanese, Chinese and English. Weights are public.</span></div>
+              <div><a href="https://medlocal.jp" target="_blank" rel="noopener" style="font-weight: 700; text-decoration: none">MedLocal</a><span> — a medical LLM that runs inside the hospital. Patient data never leaves the building.</span></div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
     <section style="padding: 96px 0 84px">

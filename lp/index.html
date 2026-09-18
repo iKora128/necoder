@@ -417,6 +417,7 @@ a:hover { color: var(--color-accent-600); }
     <a href="#perf" style="text-decoration: none">性能</a>
     <a href="#fleet" style="text-decoration: none">Fleet</a>
     <a href="#editor" style="text-decoration: none">エディタ</a>
+    <a href="#author" style="text-decoration: none">作者</a>
     <a class="lang-switch" href="/?lang=en" hreflang="en" title="Read this page in English">EN</a>
     <button class="theme-toggle" type="button" aria-label="テーマを切り替え"><span class="theme-toggle-to-dark" aria-hidden="true">☾</span><span class="theme-toggle-to-light" aria-hidden="true">☀</span></button>
     <a class="btn btn-primary" href="https://github.com/iKora128/necoder/releases" style="white-space: nowrap; text-decoration: none">ダウンロード</a>
@@ -580,6 +581,40 @@ a:hover { color: var(--color-accent-600); }
       <div style="margin-top: 32px; border: 2px solid var(--color-divider); padding: 22px 26px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 20px; font-size: 13.5px; color: color-mix(in srgb, var(--color-text) 78%, transparent)">
         <span>補完（自動トリガ）</span><span>定義へ F12 / 参照 ⇧F12</span><span>rename F2 / code action ⌘.</span><span>保存時フォーマット</span>
         <span>tree-sitter 増分パース</span><span>hunk stage / blame</span><span>⌘F 検索 · ⌘⇧F 全体検索</span><span>テーマは JSON 1 枚</span>
+      </div>
+    </section>
+    <section id="author" style="padding: 110px 0 0">
+      <div style="display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap">
+        <span style="font-family: var(--font-heading); font-weight: 800; font-size: 15px; font-feature-settings: 'tnum' 1">06</span>
+        <h2 style="font-size: clamp(28px,3.4vw,42px); letter-spacing: -0.015em; margin: 0">作っている人</h2>
+        <span style="flex: 1"></span>
+        <p class="text-muted" style="margin: 0; font-size: 14px; max-width: 44ch">長嶋大地 — 医師 · AI エンジニア · GENSHI AI 代表</p>
+      </div>
+      <div style="display: grid; grid-template-columns: minmax(0,7fr) minmax(0,5fr); gap: clamp(24px,4vw,56px); margin-top: 32px; align-items: start">
+        <div>
+          <p style="font-size: 16.5px; line-height: 1.9; margin: 0; max-width: 56ch">2022 年に医師免許を取り、大分・別府で研修医として働きながら生成 AI に出会いました。翌年には研修を離れて AI エンジニアへ。いまは東京大学医学部附属病院 循環器内科の学術専門職員と、株式会社 GENSHI AI の代表取締役 CEO を兼ねています。画像・音声・言語のモデルを訓練し、プロダクトにして、医療の現場へ届けるところまでを自分の手で通します。</p>
+          <p style="font-size: 16.5px; line-height: 1.9; margin: 20px 0 0; max-width: 56ch">主力プロダクトは <a href="https://medlocal.jp" target="_blank" rel="noopener" style="font-weight: 700; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px">MedLocal</a> — 院内に置く医療 LLM です。退院サマリーの下書き、外来の音声カルテ、紹介状の OCR を、患者データを院外に出さずに院内のマシンだけで動かします。2026 年 9 月、<a href="https://www.itmedia.co.jp/aiplus/article/2609/17/2000001587/" target="_blank" rel="noopener" style="text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px">ITmedia の記事</a> に GENSHI AI 代表として取材を受けました。</p>
+          <p style="font-size: 16.5px; line-height: 1.9; margin: 20px 0 0; max-width: 56ch">necoder は、その毎日から出てきたエディタです。複数のエージェントを同時に走らせていると、<b>どの AI が、どのプロジェクトの、どのブランチで動いているのか分からなくなる</b>。色分け UI も、宛先チップも、Fleet も、その痛みが出発点でした。necoder の開発は necoder の中で行っています。毎日使って、引っかかったところをその場で直す。それだけが機能の決め方です。</p>
+          <blockquote style="margin: 24px 0 0; border-left: 2px solid var(--color-accent); padding: 2px 0 2px 18px; font-size: 15.5px; line-height: 1.85; max-width: 52ch">診察室で感じた課題を、自分の手で書いたコードで解決する。その距離の近さが、私の仕事の価値だと考えています。</blockquote>
+          <div style="display: flex; gap: 18px; flex-wrap: wrap; margin-top: 24px; font-size: 14px">
+            <a href="https://daichi.ai" style="text-decoration: none">daichi.ai</a>
+            <a href="https://github.com/iKora128" style="text-decoration: none">GitHub @iKora128</a>
+            <a href="https://x.com/daichi_genshiai" style="text-decoration: none">X @daichi_genshiai</a>
+            <a href="https://note.com/ikora" style="text-decoration: none">note</a>
+          </div>
+        </div>
+        <div style="display: grid; gap: 26px">
+          <figure style="margin: 0; border: 2px solid var(--color-text); max-width: 280px"><img src="/assets/img/daichi.jpg" alt="長嶋大地のポートレート" width="512" height="640" style="width: 100%; height: auto; display: block" loading="lazy"></figure>
+          <div style="border: 2px solid var(--color-divider); padding: 22px 26px">
+            <h3 style="font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; margin: 0 0 16px; color: color-mix(in srgb, var(--color-text) 70%, transparent)">ほかに作ったもの</h3>
+            <div style="display: grid; gap: 16px; font-size: 14px; line-height: 1.75">
+              <div><a href="https://karui.app" style="font-weight: 700; text-decoration: none">Karui</a><span> — 画像を最大 90% 軽くする買い切りアプリ。JPEG · PNG · HEIC · AVIF · PDF を 100% オフラインで。</span></div>
+              <div><b>stop-ai-slop-jp</b><span> — AI が書いた日本語を、人が書いた文章に戻す Claude Skill。</span></div>
+              <div><b>Baberu OCR</b><span> — 日中英対応・115M パラメータの漫画 OCR。重みは公開。</span></div>
+              <div><a href="https://medlocal.jp" target="_blank" rel="noopener" style="font-weight: 700; text-decoration: none">MedLocal</a><span> — 院内に置く医療 LLM。患者データを院外に出さない。</span></div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
     <section style="padding: 96px 0 84px">

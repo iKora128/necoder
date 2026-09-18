@@ -29,6 +29,10 @@ const COPY_PATCHES = [
   // 2つ目は `</span>` まで含めて検索し、適用済みテキストに再マッチしないようにしている。
   ['necoder.dmg をダウンロード', 'Mac / Windows 版をダウンロード'],
   ['無料 · macOS 13+（Apple Silicon）</span>', '無料 · macOS 13+（Apple Silicon）/ Windows 10+（x64）</span>'],
+  // MedLocal（GENSHI AI の主力プロダクト）を作者セクションに載せる。キャンバス側の原稿には無い。
+  // 2 つ目は <b> を外して medlocal.jp へのリンクにする。どちらも適用済みテキストには再マッチしない。
+  ['医療の現場へ届けるところまでを自分の手で通します。</p>', '医療の現場へ届けるところまでを自分の手で通します。</p>\n          <p style="font-size: 16.5px; line-height: 1.9; margin: 20px 0 0; max-width: 56ch">主力プロダクトは <a href="https://medlocal.jp" target="_blank" rel="noopener" style="font-weight: 700; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px">MedLocal</a> — 院内に置く医療 LLM です。退院サマリーの下書き、外来の音声カルテ、紹介状の OCR を、患者データを院外に出さずに院内のマシンだけで動かします。2026 年 9 月、<a href="https://www.itmedia.co.jp/aiplus/article/2609/17/2000001587/" target="_blank" rel="noopener" style="text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px">ITmedia の記事</a> に GENSHI AI 代表として取材を受けました。</p>'],
+  ['<div><b>MedLocal</b><span>', '<div><a href="https://medlocal.jp" target="_blank" rel="noopener" style="font-weight: 700; text-decoration: none">MedLocal</a><span>'],
 ];
 
 // Archivo はラテン専用なので、日本語のフォールバックを足す。
