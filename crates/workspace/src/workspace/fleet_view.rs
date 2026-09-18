@@ -122,7 +122,13 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.chrome.fleet_mode = !self.chrome.fleet_mode;
+        // 3 つのモードは排他。Chat から押したら「Fleet へ行く」（Chat を抜けて Editor には戻らない）。
+        if self.chat_mode() {
+            self.set_chat_mode(false, _window, cx);
+            self.chrome.fleet_mode = true;
+        } else {
+            self.chrome.fleet_mode = !self.chrome.fleet_mode;
+        }
         if self.chrome.fleet_mode {
             self.ensure_work_layout(cx);
             self.seed_fleet_cells(cx);
@@ -213,7 +219,9 @@ impl Workspace {
     }
 
     fn add_fleet_cell(&mut self, pane: FleetPane, cx: &mut Context<Self>) {
-        self.chrome.stage_tabs.insert(pane_space(&pane).clone(), pane.clone());
+        self.chrome
+            .stage_tabs
+            .insert(pane_space(&pane).clone(), pane.clone());
         if !self.chrome.fleet_cells.contains(&pane) {
             self.chrome.fleet_cells.push(pane);
         }
@@ -486,7 +494,8 @@ impl Workspace {
                     // Task が古い base から切られるのを防ぐ（Orca の default branch 自動同期を参考・
                     // 2026-08-30）。オフライン・dirty・diverged では黙って現 HEAD から続行する。
                     let sync = project::sync_current_branch_on(host_for_add.as_ref(), &root);
-                    let (target, branch, failure) = project::create_named_task_on(host_for_add.as_ref(), &root, &prompt)?;
+                    let (target, branch, failure) =
+                        project::create_named_task_on(host_for_add.as_ref(), &root, &prompt)?;
                     Ok::<_, anyhow::Error>((target, branch, sync, prompt, failure))
                 })
                 .await;
@@ -527,7 +536,8 @@ impl Workspace {
                             .fleet_cells
                             .push(FleetPane::Task { space: space_id });
                         if !prompt.trim().is_empty() {
-                            workspace.project_sessions.projects[space].task_space.title = prompt.lines().next().unwrap_or("").to_string().into();
+                            workspace.project_sessions.projects[space].task_space.title =
+                                prompt.lines().next().unwrap_or("").to_string().into();
                         }
                         workspace.persist_task_space(space, cx);
                         workspace.transition_task_space(
@@ -538,9 +548,20 @@ impl Workspace {
                             cx,
                         );
                     }
-                    if let Some(index) = workspace.project_sessions.projects.iter().position(|slot| slot.worktree.root() == target.as_path()) {
+                    if let Some(index) = workspace
+                        .project_sessions
+                        .projects
+                        .iter()
+                        .position(|slot| slot.worktree.root() == target.as_path())
+                    {
                         if let Some(error) = failure {
-                            workspace.transition_task_space(index, TaskPhase::Failed, "setup_failed", Some(&error), cx);
+                            workspace.transition_task_space(
+                                index,
+                                TaskPhase::Failed,
+                                "setup_failed",
+                                Some(&error),
+                                cx,
+                            );
                         } else if !prompt.trim().is_empty() {
                             workspace.ipc_spawn_into(index, None, Some(prompt), cx);
                         }
@@ -984,7 +1005,9 @@ impl Workspace {
                 self.chrome.fleet_cells.len() - 1
             }
         };
-        self.chrome.stage_tabs.insert(space_id, self.chrome.fleet_cells[index].clone());
+        self.chrome
+            .stage_tabs
+            .insert(space_id, self.chrome.fleet_cells[index].clone());
         cx.notify();
     }
 
@@ -1004,7 +1027,9 @@ impl Workspace {
     fn fleet_lanes(&self, cx: &App) -> Vec<FleetLane> {
         let mut lanes = Vec::new();
         for (index, slot) in self.project_sessions.projects.iter().enumerate() {
-            if Some(slot.repository_key()) != self.active_repository_key() || slot.task_space.is_integration() {
+            if Some(slot.repository_key()) != self.active_repository_key()
+                || slot.task_space.is_integration()
+            {
                 continue;
             }
             if slot.task_space.phase == TaskPhase::Archived {
@@ -1082,7 +1107,8 @@ impl Workspace {
             view.update(cx, |view, _| view.set_visuals(self.theme.clone(), accent));
             center = center.child(div().flex_1().min_h_0().child(view));
         } else {
-            center = center.child(self.render_stage_toolbar(cx))
+            center = center
+                .child(self.render_stage_toolbar(cx))
                 .child(self.render_lineage_graph(cx))
                 .child(self.render_fleet_grid(cx));
         }
@@ -2143,11 +2169,19 @@ impl Workspace {
     /// グリッド本体。**＋ で Agent/Terminal を追加・× で閉じる**（上限 8）。フル画面を使うよう、
     /// 行×列の flex で各セルを `flex_1`（幅も高さも均等に伸びる）。列数はセル数で自動。
     fn render_fleet_grid(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let mut stage = div().id("fleet-stage").flex_1().min_h_0().flex().gap(px(8.)).p(px(10.));
+        let mut stage = div()
+            .id("fleet-stage")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .gap(px(8.))
+            .p(px(10.));
         for (index, pane) in self.stage_cards() {
             let space = pane_space(&pane);
             if self.chrome.captain_space.as_ref() == Some(space) {
-                if let Some(session) = self.session_index_for_space(space) { stage = stage.child(self.render_captain_card(session, cx)); }
+                if let Some(session) = self.session_index_for_space(space) {
+                    stage = stage.child(self.render_captain_card(session, cx));
+                }
             } else {
                 stage = stage.child(self.render_fleet_cell(index, pane, cx));
             }
@@ -2166,7 +2200,9 @@ impl Workspace {
         let theme = self.theme.clone();
         let space = pane_space(&pane);
         let session_index = self.session_index_for_space(space);
-        let color = session_index.map(|session| self.project_sessions.projects[session].color).unwrap_or(theme.fg2);
+        let color = session_index
+            .map(|session| self.project_sessions.projects[session].color)
+            .unwrap_or(theme.fg2);
         let header = self.render_task_header(index, space, cx);
         let mut cell = div()
             .id(("fleet-cell", index))

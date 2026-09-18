@@ -421,6 +421,27 @@ impl Workspace {
                     ),
                 )
             })
+            .when(rail.chat, |element| {
+                // Chat の入口（`docs/CHAT.md`）。プロジェクトに紐づかない会話の面へ切り替える。
+                element.child(
+                    self.rail_icon(
+                        "rail-chat",
+                        "icons/message-square.svg",
+                        i18n::t!("rail.chat"),
+                        if self.chat_mode() {
+                            theme.fg0
+                        } else {
+                            theme.fg2
+                        },
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_chat_mode(&ToggleChat, window, cx)
+                        }),
+                    ),
+                )
+            })
             .when(rail.agent, |element| {
                 element.child(
                     self.rail_icon(

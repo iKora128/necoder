@@ -85,7 +85,7 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action(t!("menu.git_panel"), workspace::ToggleGitPanel),
             MenuItem::action(t!("menu.todo_board"), workspace::ToggleTodoBoard),
             MenuItem::action(t!("menu.fleet"), workspace::ToggleFleet),
-            MenuItem::action(t!("menu.fleet"), workspace::ToggleFleet),
+            MenuItem::action(t!("menu.chat"), workspace::ToggleChat),
             MenuItem::action(
                 t!("menu.agent_full_screen"),
                 workspace::ToggleAgentFullScreen,

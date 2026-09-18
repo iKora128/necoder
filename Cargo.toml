@@ -88,6 +88,10 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Pipes",
   # タイトルバーの「元に戻す」（gpui の zoom_window は SW_MAXIMIZE しか投げない）
   "Win32_UI_WindowsAndMessaging",
+  # Chat の書類フォルダ（Known Folder）とローカルの日付（chat_core）
+  "Win32_UI_Shell",
+  "Win32_System_Com",
+  "Win32_System_SystemInformation",
 ] }
 
 # 自作 crate（作る順は docs/ARCHITECTURE.md §2）
@@ -111,6 +115,7 @@ storage = { path = "crates/storage" }
 lang = { path = "crates/lang" }
 markdown = { path = "crates/markdown" }
 acp_client = { path = "crates/acp_client" }
+chat_core = { path = "crates/chat_core" }
 agent_panel = { path = "crates/agent_panel" }
 ui = { path = "crates/ui" }
 terminal_view = { path = "crates/terminal_view" }

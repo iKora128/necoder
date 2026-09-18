@@ -96,10 +96,28 @@ impl Workspace {
         }
     }
 
+    /// 中身の識別色（タブ下線・キャレット・選択の左バー）。プロジェクトではその色、
+    /// **Chat ではいま見ているチャットのスレッド色**（成果物のタブはそれを書いた会話の色）。
     pub(crate) fn accent(&self) -> Hsla {
+        if self.chat_mode() {
+            return self.chrome.chat_accent.unwrap_or(self.theme.fg2);
+        }
         self.active_slot()
             .map(|slot| slot.color)
             .unwrap_or_else(|| project_color(0))
+    }
+
+    /// 窓の額縁（枠線・titlebar・statusbar の淡い塗り）の色。プロジェクト色だが、**Chat は
+    /// プロジェクトに属さないので無彩色** —「色のある窓 = プロジェクトの中、色のない窓 = Chat」が
+    /// そのまま方向感覚になる（`docs/CHAT.md` §4.3）。
+    pub(crate) fn frame_accent(&self) -> Hsla {
+        if self.chat_mode() {
+            return gpui::Hsla {
+                s: 0.0,
+                ..self.theme.fg2
+            };
+        }
+        self.accent()
     }
 
     // ── titlebar（UI-SPEC §3） ──
@@ -107,9 +125,14 @@ impl Workspace {
     pub(crate) fn render_titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         // Peacock 相当: titlebar をアクティブプロジェクト色で淡く塗る（窓ごと識別・M13）。
-        let accent = self.accent();
+        // Chat は無彩色（彩度を足さない）。
+        let accent = self.frame_accent();
         let tint = gpui::Hsla {
-            s: (accent.s + 0.12).min(1.0),
+            s: if self.chat_mode() {
+                0.0
+            } else {
+                (accent.s + 0.12).min(1.0)
+            },
             a: 0.26,
             ..accent
         };
@@ -156,7 +179,11 @@ impl Workspace {
                     window.titlebar_double_click();
                 }
             })
-            .child(self.render_project_pill(cx))
+            .child(if self.chat_mode() {
+                self.render_chat_pill().into_any_element()
+            } else {
+                self.render_project_pill(cx).into_any_element()
+            })
             // モード切替（FLEET-V2 §3.0）: どのプロジェクトかの隣に、どちらの面に居るかを置く。
             .child(self.render_mode_switch(cx))
             .child(div().flex_1().h_full()) // 空き＝ドラッグ領域（titlebar 全体で処理）
@@ -270,14 +297,18 @@ impl Workspace {
     /// 設定っぽいトグルをやめてここに `Editor | Fleet` のセグメントで置く。
     /// Fleet 側には**要対応の件数バッジ**（0 なら出さない）を載せ、Editor で作業中でも
     /// 裁くべきものが目に入るようにする。
+    /// titlebar のモード切替 `Editor | Fleet | Chat`。3 つは排他で、**押した面へ行く**
+    /// （いま居る面を押しても何も起きない）。
     pub(crate) fn render_mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let accent = self.accent();
-        let fleet = self.chrome.fleet_mode;
+        let accent = self.frame_accent();
+        let chat = self.chat_mode();
+        let fleet = self.chrome.fleet_mode && !chat;
         let attention = self.attention_badge_count(cx);
         // セグメント 1 枚。選択側だけが accent（識別）・非選択は fg2（UI-SPEC §1.3: 色は識別のみ）。
-        let segment = |label: SharedString, active: bool| {
+        let segment = |id: &'static str, label: SharedString, active: bool| {
             div()
+                .id(id)
                 .flex()
                 .items_center()
                 .gap(px(4.))
@@ -285,10 +316,15 @@ impl Workspace {
                 .px(px(8.))
                 .rounded(px(4.))
                 .text_size(px(11.))
+                .cursor_pointer()
                 .when(active, |element| {
                     element.bg(accent.alpha(0.16)).text_color(theme.fg0)
                 })
-                .when(!active, |element| element.text_color(theme.fg2))
+                .when(!active, |element| {
+                    element
+                        .text_color(theme.fg2)
+                        .hover(|style| style.text_color(theme.fg1))
+                })
                 .child(label)
         };
         div()
@@ -301,28 +337,67 @@ impl Workspace {
             .rounded(px(6.))
             .border_1()
             .border_color(theme.border)
-            .cursor_pointer()
-            .hover(|style| style.border_color(theme.fg2))
-            .child(segment(
-                SharedString::from(i18n::t!("titlebar.editor")),
-                !fleet,
-            ))
             .child(
-                segment(SharedString::from(i18n::t!("titlebar.fleet")), fleet)
-                    // 要対応バッジ: 件数 + err 色ボーダー。0 件では**出さない**（静かな時は静かに）。
-                    .when(attention > 0, |element| {
-                        element.child(
-                            div()
-                                .flex_none()
-                                .px(px(4.))
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(theme.err)
-                                .text_size(px(9.5))
-                                .text_color(theme.err)
-                                .child(SharedString::from(format!("◐ {attention}"))),
-                        )
+                segment(
+                    "titlebar-mode-editor",
+                    SharedString::from(i18n::t!("titlebar.editor")),
+                    !fleet && !chat,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        if this.chat_mode() {
+                            this.set_chat_mode(false, window, cx);
+                        } else if this.chrome.fleet_mode {
+                            this.toggle_fleet_mode(&ToggleFleet, window, cx);
+                        }
                     }),
+                ),
+            )
+            .child(
+                segment(
+                    "titlebar-mode-fleet",
+                    SharedString::from(i18n::t!("titlebar.fleet")),
+                    fleet,
+                )
+                // 要対応バッジ: 件数 + err 色ボーダー。0 件では**出さない**（静かな時は静かに）。
+                .when(attention > 0, |element| {
+                    element.child(
+                        div()
+                            .flex_none()
+                            .px(px(4.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(theme.err)
+                            .text_size(px(9.5))
+                            .text_color(theme.err)
+                            .child(SharedString::from(format!("◐ {attention}"))),
+                    )
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        if this.chat_mode() || !this.chrome.fleet_mode {
+                            this.toggle_fleet_mode(&ToggleFleet, window, cx);
+                        }
+                    }),
+                ),
+            )
+            .child(
+                segment(
+                    "titlebar-mode-chat",
+                    SharedString::from(i18n::t!("titlebar.chat")),
+                    chat,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.set_chat_mode(true, window, cx);
+                    }),
+                ),
             )
             .tooltip(Tooltip::text(
                 if attention > 0 {
@@ -332,13 +407,6 @@ impl Workspace {
                 },
                 theme.clone(),
             ))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.toggle_fleet_mode(&ToggleFleet, window, cx)
-                }),
-            )
     }
 
     /// titlebar の beacon 列（アクティブプロジェクトのスレッド。実行中は色濃く・停止中は淡く）。
@@ -738,7 +806,7 @@ impl Workspace {
         let is_local = self
             .active_slot()
             .map(|slot| slot.remote_host.is_none())
-            .unwrap_or(false);
+            .unwrap_or(self.chat_mode());
         if is_local {
             let reveal_path = path.clone();
             menu_box = menu_box.child(
@@ -754,7 +822,11 @@ impl Workspace {
             );
             let open_path = path.clone();
             menu_box = menu_box.child(
-                item("tab-ctx-open-default", i18n::t!("explorer.ctx_open_default")).on_mouse_down(
+                item(
+                    "tab-ctx-open-default",
+                    i18n::t!("explorer.ctx_open_default"),
+                )
+                .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _window, cx| {
                         if let Err(error) = project::open_with_default_app_local(&open_path) {
@@ -770,9 +842,7 @@ impl Workspace {
         menu_box = menu_box.child(
             item("tab-ctx-copy-path", i18n::t!("explorer.ctx_copy_path")).on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.copy_tab_path(&copy_path, false, cx)
-                }),
+                cx.listener(move |this, _, _window, cx| this.copy_tab_path(&copy_path, false, cx)),
             ),
         );
         let relative_path = path.clone();
@@ -2270,7 +2340,11 @@ impl Workspace {
             .border_color(theme.border)
             .text_size(px(11.))
             .text_color(theme.fg1)
-            .child(left)
+            .child(if self.chat_mode() {
+                self.render_chat_status(cx).into_any_element()
+            } else {
+                left.into_any_element()
+            })
             .child(self.render_activity_rollup(cx)) // 中央＝状態の常設ロールアップ（herdr 本来の形）
             .child(right)
     }

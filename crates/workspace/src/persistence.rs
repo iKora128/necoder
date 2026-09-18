@@ -36,6 +36,9 @@ pub(crate) struct PersistedState {
     pub(crate) work_layout: crate::workspace::WorkLayoutState,
     #[serde(default)]
     pub(crate) fleet_mode: bool,
+    /// Chat モードで閉じたか（`docs/CHAT.md` §4.3「最後に居た面へ戻る」）。
+    #[serde(default)]
+    pub(crate) chat_mode: bool,
     #[serde(default)]
     pub(crate) fleet_view: String,
 }

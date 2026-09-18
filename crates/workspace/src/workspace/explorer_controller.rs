@@ -15,7 +15,7 @@ impl Workspace {
 
     pub(crate) fn toggle_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let active = self.project_sessions.active;
-        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
             if slot.explorer.expanded.contains(&path) {
                 slot.explorer.expanded.remove(&path);
             } else {
@@ -106,7 +106,7 @@ impl Workspace {
             .map(|slot| !dir.starts_with(slot.worktree.root()))
             .unwrap_or(false);
         let active = self.project_sessions.active;
-        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.explorer.current_dir = Some(dir.clone());
             slot.explorer.selected = Some(dir);
         }
@@ -175,7 +175,7 @@ impl Workspace {
         };
         // 親フォルダを展開しておく（入力行が見えるように）。
         let active = self.project_sessions.active;
-        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.explorer.expanded.insert(parent.clone());
         }
         self.refresh_active_explorer(cx);
@@ -232,7 +232,7 @@ impl Workspace {
                     self.open_file(destination.clone(), window, cx);
                 }
                 let active = self.project_sessions.active;
-                if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+                if let Some(slot) = self.project_sessions.slot_mut(active) {
                     slot.explorer.selected = Some(destination);
                 }
                 self.refresh_active_explorer(cx);
@@ -341,7 +341,7 @@ impl Workspace {
         match project::rename_local(&source, &destination) {
             Ok(()) => {
                 let active = self.project_sessions.active;
-                if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+                if let Some(slot) = self.project_sessions.slot_mut(active) {
                     slot.explorer.selected = Some(destination);
                 }
                 self.refresh_active_explorer(cx);
@@ -376,7 +376,7 @@ impl Workspace {
         }
         if let Some(destination) = last_copied {
             let active = self.project_sessions.active;
-            if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+            if let Some(slot) = self.project_sessions.slot_mut(active) {
                 slot.explorer.selected = Some(destination);
             }
             self.refresh_active_explorer(cx);
@@ -394,7 +394,7 @@ impl Workspace {
         match project::duplicate_local(&path) {
             Ok(copy) => {
                 let active = self.project_sessions.active;
-                if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+                if let Some(slot) = self.project_sessions.slot_mut(active) {
                     slot.explorer.selected = Some(copy);
                 }
                 self.refresh_active_explorer(cx);
@@ -419,7 +419,7 @@ impl Workspace {
         match project::trash_local(&path) {
             Ok(()) => {
                 let active = self.project_sessions.active;
-                if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+                if let Some(slot) = self.project_sessions.slot_mut(active) {
                     if slot.explorer.selected.as_ref() == Some(&path) {
                         slot.explorer.selected = None;
                     }
@@ -1037,13 +1037,12 @@ impl Workspace {
             self.select_tab(index, window, cx);
             return;
         }
-        let Some(worktree) = self.active_worktree() else {
+        let Some(host) = self.active_host() else {
             return;
         };
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
-        let host = worktree.host().clone();
         let read_path = path.clone();
         cx.spawn(async move |_workspace, cx| {
             let content = cx
@@ -1070,10 +1069,10 @@ impl Workspace {
             self.select_tab(index, window, cx);
             return;
         }
-        let Some(worktree) = self.active_worktree() else {
+        let Some(host) = self.active_host() else {
             return;
         };
-        let content = match worktree.host().read_file(&path) {
+        let content = match host.read_file(&path) {
             Ok(content) => content,
             Err(error) => {
                 eprintln!("ファイルを開けない: {error:#}");
@@ -1099,13 +1098,12 @@ impl Workspace {
             }
             return;
         }
-        let Some(worktree) = self.active_worktree() else {
+        let Some(host) = self.active_host() else {
             return;
         };
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
-        let host = worktree.host().clone();
         let read_path = path.clone();
         cx.spawn(async move |_workspace, cx| {
             let content = cx
@@ -1144,7 +1142,7 @@ impl Workspace {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         let active = self.project_sessions.active;
-        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.explorer.selected = Some(path);
         }
         self.sync_active_slot();
@@ -1170,7 +1168,7 @@ impl Workspace {
         // 新しいタブがアクティブになる ＝ ⌘F バー・hover は畳む。
         self.dismiss_buffer_search(cx);
         self.close_hover(cx);
-        let Some(worktree) = self.active_worktree() else {
+        let Some(host) = self.active_host() else {
             return;
         };
         // 画像はテキストバッファを作らず画像タブとして開く（編集・保存・LSP は関与しない）。
@@ -1185,14 +1183,14 @@ impl Workspace {
         // 捨てられ、remote だけがローカル複製の材料に使う（PdfView::new）。
         if pdf_view::is_pdf_path(&path) {
             let theme = self.theme.clone();
-            let remote = worktree.host().is_remote();
+            let remote = host.is_remote();
             let view = cx.new(|cx| PdfView::new(&path, remote, content.bytes, theme, cx));
             let evict_minutes = settings::get(cx).html_preview_evict_minutes;
             view.update(cx, |view, cx| view.set_evict_minutes(evict_minutes, cx));
             self.push_display_only_tab(path, TabContent::Pdf(view), window, cx);
             return;
         }
-        let buffer = match Buffer::from_content(worktree.host().clone(), &path, content) {
+        let buffer = match Buffer::from_content(host.clone(), &path, content) {
             Ok(buffer) => buffer,
             Err(error) => {
                 eprintln!("ファイルを開けない: {error:#}");
@@ -1236,7 +1234,7 @@ impl Workspace {
         self.active_tab = self.tabs.len() - 1;
 
         let active = self.project_sessions.active;
-        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.explorer.selected = Some(path.clone());
         }
         self.sync_active_slot();
@@ -1313,7 +1311,7 @@ impl Workspace {
         writer.save(payload, cx.background_executor());
     }
 
-    fn persisted_state(&self) -> PersistedState {
+    pub(crate) fn persisted_state(&self) -> PersistedState {
         PersistedState {
             projects: self
                 .project_sessions
@@ -1329,6 +1327,7 @@ impl Workspace {
             active: self.project_sessions.active,
             work_layout: self.chrome.work_layout.clone(),
             fleet_mode: self.chrome.fleet_mode,
+            chat_mode: self.chat_mode(),
             fleet_view: match self.chrome.fleet_center_view {
                 FleetCenterView::Work => "work",
                 FleetCenterView::Graph => "graph",

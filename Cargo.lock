@@ -224,6 +224,7 @@ version = "0.1.18"
 dependencies = [
  "acp_client",
  "anyhow",
+ "chat_core",
  "editor_view",
  "futures",
  "gpui",
@@ -1138,6 +1139,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ced0551234e87afee12411d535648dd89d2e7f34c78b753395567aff3d447ff"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "chat_core"
+version = "0.1.18"
+dependencies = [
+ "acp_client",
+ "futures",
+ "host",
+ "libc",
+ "paths",
+ "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9141,6 +9155,7 @@ dependencies = [
  "acp_client",
  "agent_panel",
  "anyhow",
+ "chat_core",
  "editor_core",
  "editor_view",
  "explorer",

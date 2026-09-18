@@ -54,8 +54,8 @@ mod control_view;
 mod dev_probes;
 mod explorer_controller;
 mod explorer_view;
-mod fleet_view;
 mod fleet_stage;
+mod fleet_view;
 mod new_task_dialog;
 mod work_layout;
 mod workbench;
@@ -81,6 +81,7 @@ pub use control_ipc::control_socket_path;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
 mod captain;
+mod chat_view;
 pub(crate) use captain::is_captain_thread_name;
 mod fleet_sidebar;
 mod todo_panel;
@@ -212,6 +213,9 @@ actions!(
         ActivateProject9,
         NextProject,
         PrevProject,
+        // Chat モード（`docs/CHAT.md`）。プロジェクトに紐づかない会話の面。
+        ToggleChat,
+        NewChat,
     ]
 );
 
@@ -1101,6 +1105,18 @@ struct ChromeState {
     show_herd: bool,
     /// 編隊モード（全画面 = herd + 系譜グラフ + グリッド + ニュース・M14）。通常ビューを置き換える。
     fleet_mode: bool,
+    /// Chat の一覧の検索欄（IME の正しい `EditorView::plain`）。
+    chat_search: Entity<EditorView>,
+    /// Chat の一覧の行メニュー（右クリック）。
+    chat_menu: Option<chat_view::ChatMenuState>,
+    /// 消す前の確認（フォルダにファイルが残っているチャットの id）。
+    chat_delete_confirm: Option<String>,
+    /// 右のタブを合わせ済みのチャット id（見ているチャットが替わったことの検出用）。
+    chat_shown: Option<String>,
+    /// いま見ているチャットのスレッド色（`accent()` は `cx` を持たないのでここに控える）。
+    chat_accent: Option<Hsla>,
+    /// 復元で Chat モードへ入る予約（window のある描画で消化）。
+    pending_chat_mode: bool,
     /// 編隊グリッドのセル（mock の `.acell`・＋/× で増減・M14 #3）。**いまのリポジトリの分だけ**。
     fleet_cells: Vec<FleetPane>,
     /// ＋ Task ダイアログ（Some の間はモーダル・FLEET-V2 §4.1）。
@@ -1593,7 +1609,9 @@ impl Workspace {
             || self.pending_open_history
             || self.overlays.pending_project_switch.is_some()
             || self.pending_navigation.is_some()
-            || self.pending_html_preview.is_some()
+            || self.pending_preview.is_some()
+            || self.chrome.pending_chat_mode
+            || self.pending_close_clean_tabs
             || self.pending_open_git_diff.is_some()
             || self.pending_stage_hunk.is_some()
     }
@@ -1640,11 +1658,35 @@ impl Workspace {
                 editor.reveal_position(line, column, cx);
             });
         }
-        if let Some(path) = self.pending_html_preview.take() {
+        if std::mem::take(&mut self.chrome.pending_chat_mode) {
+            self.set_chat_mode(true, window, cx);
+        }
+        if std::mem::take(&mut self.pending_close_clean_tabs) {
+            // Chat: 見ているチャットが替わった。前のチャットの成果物を閉じる（未保存の編集は残す）。
+            for index in (0..self.tabs.len()).rev() {
+                if !self.tabs[index].is_dirty(cx) {
+                    self.close_tab_at(index, window, cx);
+                }
+            }
+        }
+        if let Some(path) = self.pending_preview.take() {
+            let keeps_focus = std::mem::take(&mut self.pending_preview_keeps_focus);
             self.record_nav_position(cx);
-            self.open_file_then(path, window, cx, move |editor, cx| {
-                editor.set_rendered_html(true, cx);
+            let kind = chat_core::folder::preview_kind(&path);
+            self.open_file_then(path, window, cx, move |editor, cx| match kind {
+                Some(chat_core::folder::PreviewKind::Markdown) => {
+                    editor.set_rendered_markdown(true, cx)
+                }
+                _ => editor.set_rendered_html(true, cx),
             });
+            // エージェントが書いた成果物を出す時は、書きかけの入力からフォーカスを奪わない。
+            if keeps_focus && self.chat_mode() {
+                let panel = self.agent_panel.clone();
+                self.agent_active = true;
+                window.defer(cx, move |window, cx| {
+                    panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+                });
+            }
         }
         if let Some(path) = self.pending_open_git_diff.take() {
             self.open_diff_tab_for(path, None, window, cx);
@@ -1658,16 +1700,31 @@ impl Workspace {
     /// レイアウト状態を可視性へ同期する。対象はネイティブ子ビューを載せるタブ（ローカル HTML
     /// プレビューと PDF タブ）だけで、通常のエディタには触れない。
     fn sync_native_view_visibility(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let chat_active = self.project_sessions.chat_active;
         let active_session = self.project_sessions.active;
-        let editor_surface_visible = !self.chrome.fleet_mode
-            && !self.chrome.agent_full_screen
+        // Chat は右のエディタ領域が常に出ている（Fleet / AI 全画面とは排他なので見なくてよい）。
+        let editor_surface_visible = (chat_active
+            || (!self.chrome.fleet_mode && !self.chrome.agent_full_screen))
             && !self.chrome.show_settings
             && !self.overlay_hides_native_view(cx);
-        for (session_index, session) in self.project_sessions.sessions.iter().enumerate() {
+        // OS の子ビューは GPUI の描画木から外れても残るので、**見えていない session の分も**
+        // 明示的に隠す（Chat ⇄ プロジェクトの切替で、裏の session のプレビューが浮いて残らない）。
+        let sessions = self
+            .project_sessions
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| (!chat_active && index == active_session, session))
+            .chain(
+                self.project_sessions
+                    .chat
+                    .iter()
+                    .map(|session| (chat_active, session)),
+            );
+        for (session_shown, session) in sessions {
             for (tab_index, tab) in session.tabs.iter().enumerate() {
-                let visible = editor_surface_visible
-                    && session_index == active_session
-                    && tab_index == session.active_tab;
+                let visible =
+                    editor_surface_visible && session_shown && tab_index == session.active_tab;
                 if let Some(pdf) = tab.pdf().cloned() {
                     pdf.update(cx, |pdf, cx| pdf.set_surface_active(visible, false, cx));
                     continue;
@@ -1727,6 +1784,8 @@ impl Workspace {
             || self.hunk_menu.is_some()
             || self.git_panel.read(cx).branch_menu.is_some()
             || self.overlays.tab_menu.is_some()
+            || self.chrome.chat_menu.is_some()
+            || self.chrome.chat_delete_confirm.is_some()
             || self.explorer_context_menu(cx).is_some()
     }
 
@@ -1774,7 +1833,13 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.chrome.stage_width = f32::from(window.viewport_size().width) - 70. - if self.chrome.show_left { self.chrome.explorer_width } else { 0. };
+        self.chrome.stage_width = f32::from(window.viewport_size().width)
+            - 70.
+            - if self.chrome.show_left {
+                self.chrome.explorer_width
+            } else {
+                0.
+            };
         if !self.focus_recovery_installed {
             self.focus_recovery_installed = true;
             cx.on_focus_lost(window, |this, window, cx| {
@@ -1814,7 +1879,6 @@ impl Render for Workspace {
         let theme = self.theme.clone();
         // 窓縁のプロジェクト色枠（方向感覚・Peacock 相当。面は塗らず縁の 2px 線のみ = UI-SPEC §1.3）。
         // リモートでは「今どのマシンか」を窓ごと一目で判る signal になる。
-        let accent = self.accent();
         div()
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
@@ -1824,11 +1888,38 @@ impl Render for Workspace {
             .capture_any_mouse_down(cx.listener(|this, _event, _window, cx| {
                 this.release_native_key_focus(cx);
             }))
-            .on_action(cx.listener(|this, _: &NewTask, window, cx| { if this.chrome.fleet_mode { this.open_new_task(window, cx); } }))
-            .on_action(cx.listener(|this, _: &StageOne, _, cx| { if this.chrome.fleet_mode { this.chrome.stage_columns = 1; cx.notify(); } }))
-            .on_action(cx.listener(|this, _: &StageTwo, _, cx| { if this.chrome.fleet_mode { this.chrome.stage_columns = 2; cx.notify(); } }))
-            .on_action(cx.listener(|this, _: &StageThree, _, cx| { if this.chrome.fleet_mode { this.chrome.stage_columns = 3; cx.notify(); } }))
-            .on_action(cx.listener(|this, _: &ToggleLineage, _, cx| { if this.chrome.fleet_mode { this.chrome.graph_collapsed = !this.chrome.graph_collapsed; cx.notify(); } }))
+            .on_action(cx.listener(|this, _: &NewTask, window, cx| {
+                // ⌘N は面ごとに意味が決まる: Chat = 新しいチャット / Fleet = ＋ Task。
+                if this.chat_mode() {
+                    this.new_chat(&NewChat, window, cx);
+                } else if this.chrome.fleet_mode {
+                    this.open_new_task(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &StageOne, _, cx| {
+                if this.chrome.fleet_mode {
+                    this.chrome.stage_columns = 1;
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &StageTwo, _, cx| {
+                if this.chrome.fleet_mode {
+                    this.chrome.stage_columns = 2;
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &StageThree, _, cx| {
+                if this.chrome.fleet_mode {
+                    this.chrome.stage_columns = 3;
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleLineage, _, cx| {
+                if this.chrome.fleet_mode {
+                    this.chrome.graph_collapsed = !this.chrome.graph_collapsed;
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(Self::open_file_finder))
             .on_action(cx.listener(Self::open_project_switcher))
             .on_action(cx.listener(Self::open_project_search))
@@ -1849,6 +1940,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_inline_edit))
             .on_action(cx.listener(Self::toggle_todo_board))
             .on_action(cx.listener(Self::toggle_fleet_mode))
+            .on_action(cx.listener(Self::toggle_chat_mode))
+            .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::focus_captain))
             .on_action(cx.listener(Self::toggle_agent_full_screen))
             .on_action(cx.listener(Self::control_next))
@@ -1948,14 +2041,17 @@ impl Render for Workspace {
             .size_full()
             .bg(theme.bg0)
             .border_2()
-            .border_color(accent)
+            .border_color(self.frame_accent())
             // 窓の角丸(10px・UI-SPEC §1.4)に枠を沿わせる。四角い枠だと隅が窓の丸みでクリップされ細く見える。
             .rounded(px(10.))
             .text_color(theme.fg0)
             .font_family("IBM Plex Sans JP") // UI = IBM Plex Sans JP（bin で bundle 済み）
             .text_size(px(12.5))
             .child(self.render_titlebar(cx))
-            .child(if self.chrome.fleet_mode {
+            .child(if self.chat_mode() {
+                // Chat モード: 一覧 + 会話 + 既存のエディタ領域（`chat_view.rs`）。
+                self.render_chat(cx).into_any_element()
+            } else if self.chrome.fleet_mode {
                 // 編隊モード（mock の「編隊」ビュー・M14）: 通常の center/right dock を丸ごと置換。
                 if self.chrome.fleet_repository.is_none() {
                     self.seed_fleet_cells(cx); // 初回（起動プローブ含む）は lanes で自動配置
@@ -1969,7 +2065,7 @@ impl Render for Workspace {
                         }
                     }
                 }
-                self.render_fleet(cx)
+                self.render_fleet(cx).into_any_element()
             } else {
                 // 通常レイアウト。**AI 全画面（`agent_full_screen`）は中央のエディタを Agent に差し替える**
                 // だけの面へ変更（2026-08-08 本人要望）。左ドック（ファイルブラウザ）と下ドック（ターミナル）は
@@ -2028,6 +2124,8 @@ impl Render for Workspace {
             .children(self.render_worktree_delete_dialog(cx))
             .children(self.render_branch_menu(cx))
             .children(self.render_tab_menu(cx))
+            .children(self.render_chat_menu(cx))
+            .children(self.render_chat_delete_confirm(cx))
             .children(self.render_explorer_context_menu(cx))
             .children(self.render_project_flash(cx)) // キーボード切替の行き先名フラッシュ
             .children(self.render_confetti(cx)) // 最前面（祝いの紙吹雪）
@@ -3503,6 +3601,210 @@ mod tests {
             workspace.toggle_fleet_mode(&ToggleFleet, window, cx);
             assert!(!workspace.chrome.fleet_mode, "Editor に戻る");
         });
+    }
+
+    /// Chat のテスト用の窓。チャットの置き場は一時ディレクトリへ向ける（実ユーザーの書類を触らない）。
+    fn chat_workspace<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        label: &str,
+    ) -> (
+        PathBuf,
+        gpui::Entity<Workspace>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_chat_mode_{label}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("project")).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            serde_json::json!({
+                "onboarded": true,
+                "agent_prewarm": false,
+                "chat": { "directory": root.join("chats") },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        ::webview_view::disable_native_webviews_for_tests();
+        let project = root.join("project");
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        (root, workspace, cx)
+    }
+
+    /// 3 つのモードは排他で、Chat は開くまで何も作らない。Chat 中は枠（プロジェクト）が無く、
+    /// 額縁は無彩色になる。
+    #[gpui::test]
+    fn chat_is_a_third_exclusive_mode_with_no_project(cx: &mut gpui::TestAppContext) {
+        let (root, workspace, cx) = chat_workspace(cx, "exclusive");
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace.project_sessions.chat.is_none(),
+                "開くまで session を作らない"
+            );
+            let project_color = workspace.frame_accent();
+
+            workspace.toggle_fleet_mode(&ToggleFleet, window, cx);
+            workspace.set_chat_mode(true, window, cx);
+            assert!(workspace.chat_mode());
+            assert!(!workspace.chrome.fleet_mode, "Fleet とは排他");
+            assert!(
+                workspace.active_slot().is_none(),
+                "Chat はプロジェクトに属さない"
+            );
+            assert_eq!(workspace.frame_accent().s, 0.0, "額縁は無彩色");
+            assert!(
+                workspace.agent_panel.read(cx).is_chat(),
+                "アクティブな session が Chat を指す"
+            );
+
+            // Chat から Fleet を押したら Fleet へ行く（Editor に落ちない）。
+            workspace.toggle_fleet_mode(&ToggleFleet, window, cx);
+            assert!(!workspace.chat_mode() && workspace.chrome.fleet_mode);
+            assert!(!workspace.agent_panel.read(cx).is_chat());
+            assert_eq!(
+                workspace.frame_accent(),
+                project_color,
+                "プロジェクトの色に戻る"
+            );
+
+            // AI 全画面は Chat では意味を持たない（会話は最初から中央に居る）。
+            workspace.set_chat_mode(true, window, cx);
+            workspace.toggle_agent_full_screen_state(window, cx);
+            assert!(!workspace.chrome.agent_full_screen);
+
+            // レールでプロジェクトを選んだら Chat を抜ける（同じプロジェクトでも「そこへ戻る」）。
+            workspace.switch_project(0, window, cx);
+            assert!(!workspace.chat_mode());
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Chat で開いたタブは Chat の session のもの。プロジェクトの枠（復元されるタブの並び）を汚さない。
+    #[gpui::test]
+    fn chat_tabs_never_leak_into_the_project_slot(cx: &mut gpui::TestAppContext) {
+        let (root, workspace, cx) = chat_workspace(cx, "slot");
+        let source = root.join("project/main.rs");
+        let artifact = root.join("chats/2026-09-18 timer/artifacts/timer.html");
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, "<p>timer</p>").unwrap();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.restore_open_file(&[RestoredTabs::single(source.clone())], window, cx);
+            assert_eq!(workspace.tabs.len(), 1);
+
+            workspace.set_chat_mode(true, window, cx);
+            assert!(workspace.tabs.is_empty(), "Chat の右は最初は閉じている");
+            workspace.pending_preview = Some(artifact.clone());
+            workspace.process_pending_shell_effects(window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(workspace.tabs.len(), 1);
+            assert_eq!(workspace.tabs[0].path, artifact);
+            let editor = workspace.tabs[0].editor().cloned().expect("エディタのタブ");
+            assert!(
+                editor.read(cx).rendered_html(),
+                "最初からプレビュー表示で開く"
+            );
+            assert_eq!(
+                workspace.project_sessions.projects[0].open_files,
+                vec![source.clone()],
+                "プロジェクトの枠に Chat のタブが混ざらない"
+            );
+
+            workspace.set_chat_mode(false, window, cx);
+            assert_eq!(workspace.tabs.len(), 1);
+            assert_eq!(
+                workspace.tabs[0].path, source,
+                "戻ればプロジェクトのタブがそのまま"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 裏に回った session の HTML プレビューは隠す（OS の子ビューは GPUI の描画木から外れても残る）。
+    #[gpui::test]
+    fn the_hidden_sessions_preview_is_hidden_across_the_mode_switch(cx: &mut gpui::TestAppContext) {
+        let (root, workspace, cx) = chat_workspace(cx, "native");
+        let page = root.join("project/index.html");
+        std::fs::write(&page, "<p>project</p>").unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.restore_open_file(&[RestoredTabs::single(page.clone())], window, cx);
+            let editor = workspace.tabs[0].editor().cloned().expect("エディタ");
+            editor.update(cx, |editor, cx| editor.set_rendered_html(true, cx));
+            workspace.sync_native_view_visibility(window, cx);
+            assert!(editor.read(cx).html_preview_is_active(cx));
+
+            workspace.set_chat_mode(true, window, cx);
+            workspace.sync_native_view_visibility(window, cx);
+            assert!(
+                !editor.read(cx).html_preview_is_active(cx),
+                "Chat の上にプロジェクトのプレビューが浮いて残らない"
+            );
+
+            workspace.set_chat_mode(false, window, cx);
+            workspace.sync_native_view_visibility(window, cx);
+            assert!(editor.read(cx).html_preview_is_active(cx));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⌘N は面ごとに意味が決まる。Chat では新しいチャット（空のチャットを積み上げない）。
+    #[gpui::test]
+    fn cmd_n_in_chat_opens_a_new_chat(cx: &mut gpui::TestAppContext) {
+        let (root, workspace, cx) = chat_workspace(cx, "cmd_n");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.new_chat(&NewChat, window, cx);
+            assert!(workspace.chat_mode(), "Chat の外から呼んだら Chat へ移る");
+            workspace.new_chat(&NewChat, window, cx);
+            let rows = workspace
+                .chat_panel()
+                .map(|panel| panel.read(cx).chat_rows().len());
+            assert_eq!(rows, Some(1), "空のチャットは 1 本だけ");
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// どのモードで閉じたかは窓の状態として残る（Chat で閉じたら Chat で開く）。
+    #[gpui::test]
+    fn the_mode_survives_a_restart(cx: &mut gpui::TestAppContext) {
+        let (root, workspace, cx) = chat_workspace(cx, "persist");
+        let payload = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_chat_mode(true, window, cx);
+            serde_json::to_string(&workspace.persisted_state()).unwrap()
+        });
+        assert!(payload.contains("\"chat_mode\":true"), "{payload}");
+
+        let (reopened, cx) = cx.add_window_view(|_, cx| {
+            Workspace::new(vec![root.join("project")], Theme::dark(), None, cx)
+        });
+        reopened.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.restore_work_layout(&payload, cx);
+            assert!(!workspace.chat_mode(), "window のある描画まで待つ");
+            workspace.process_pending_shell_effects(window, cx);
+            assert!(workspace.chat_mode());
+        });
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// 独立 ACP を増やしても元の会話を置換せず、非表示・復帰・管制から同じ実体を扱う。

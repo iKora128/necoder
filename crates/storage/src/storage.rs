@@ -138,6 +138,19 @@ impl TaskSpaceRecord {
     }
 }
 
+/// Chat モードのスレッド 1 本ぶんの付帯情報（[`Storage::load_thread_chats`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadChatRecord {
+    pub thread_id: String,
+    /// チャットのフォルダ（絶対パス）。まだ 1 通も送っていなければ `None`。
+    pub dir: Option<String>,
+    pub pinned: bool,
+    /// ユーザーが渡したファイル・フォルダ（絶対パス・渡した順）。
+    pub attachments: Vec<String>,
+    /// そのうち、書き込みを「このチャットでは以後許可」にしたもの。
+    pub write_grants: Vec<String>,
+}
+
 /// Task lifecycle の追記イベント。wait/orchestration は transient な UI state ではなく
 /// このログと `task_spaces.phase` を読む。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -781,6 +794,181 @@ impl Storage {
         })
     }
 
+    /// Chat モードのスレッドの付帯情報を 1 件ぶん書く（`docs/CHAT.md` §2.3 / §3.2）。
+    ///
+    /// フォルダの場所は**作成後に変えない**（エージェントはセッションを cwd のパス文字列で引く）ので、
+    /// 再開のたびにここから同じパスを引く。添付と書き込み許可は「ファイルを渡す = 触ってよいと
+    /// 伝える」の記憶で、再起動をまたいで同じ裁定をするために残す。3 つは一緒に動くので 1 回で置換する。
+    pub fn set_thread_chat(
+        &self,
+        thread_id: &str,
+        dir: Option<&str>,
+        attachments: &[String],
+        write_grants: &[String],
+    ) -> Result<()> {
+        let thread_id = thread_id.to_string();
+        let dir = dir.map(str::to_string);
+        let paths: Vec<(String, &'static str)> = attachments
+            .iter()
+            .map(|path| (path.clone(), "attachment"))
+            .chain(write_grants.iter().map(|path| (path.clone(), "grant")))
+            .collect();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO thread_chats (thread_id, dir, pinned, updated_at)
+                     VALUES (?1, ?2, 0, ?3)
+                     ON CONFLICT(thread_id) DO UPDATE SET dir = ?2, updated_at = ?3",
+                    (thread_id.as_str(), dir.as_deref(), now),
+                )
+                .await
+                .context("thread_chats の upsert に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_chat_paths WHERE thread_id = ?1",
+                    (thread_id.as_str(),),
+                )
+                .await
+                .context("thread_chat_paths の置換に失敗")?;
+                for (path, role) in &paths {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO thread_chat_paths (thread_id, role, path)
+                         VALUES (?1, ?2, ?3)",
+                        (thread_id.as_str(), *role, path.as_str()),
+                    )
+                    .await
+                    .context("thread_chat_paths の追加に失敗")?;
+                }
+                Ok(())
+            })
+        })
+    }
+
+    /// チャットのピン留めを切り替える（一覧の先頭に固定）。まだ 1 通も送っていないチャット
+    /// （＝フォルダが無い）でも留められるよう、行が無ければ作る。
+    pub fn set_thread_chat_pinned(&self, thread_id: &str, pinned: bool) -> Result<()> {
+        let thread_id = thread_id.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO thread_chats (thread_id, dir, pinned, updated_at)
+                     VALUES (?1, NULL, ?2, ?3)
+                     ON CONFLICT(thread_id) DO UPDATE SET pinned = ?2, updated_at = ?3",
+                    (thread_id.as_str(), i64::from(pinned), now),
+                )
+                .await
+                .context("thread_chats のピン留めに失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 全チャットの付帯情報。起動時と一覧の描画で一括で読む（件数はチャットの数＝小さい）。
+    pub fn load_thread_chats(&self) -> Result<Vec<ThreadChatRecord>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut records: Vec<ThreadChatRecord> = Vec::new();
+                let mut rows = conn
+                    .query(
+                        "SELECT thread_id, dir, pinned FROM thread_chats ORDER BY thread_id",
+                        (),
+                    )
+                    .await
+                    .context("thread_chats の読み出しに失敗")?;
+                while let Some(row) = rows.next().await.context("thread_chats 行の取得に失敗")?
+                {
+                    records.push(ThreadChatRecord {
+                        thread_id: row.get_value(0)?.as_text().context("thread_id")?.clone(),
+                        dir: row.get_value(1)?.as_text().cloned(),
+                        pinned: *row.get_value(2)?.as_integer().context("pinned")? != 0,
+                        attachments: Vec::new(),
+                        write_grants: Vec::new(),
+                    });
+                }
+                let mut rows = conn
+                    .query(
+                        "SELECT thread_id, role, path FROM thread_chat_paths ORDER BY rowid",
+                        (),
+                    )
+                    .await
+                    .context("thread_chat_paths の読み出しに失敗")?;
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("thread_chat_paths 行の取得に失敗")?
+                {
+                    let thread_id = row.get_value(0)?.as_text().context("thread_id")?.clone();
+                    let role = row.get_value(1)?.as_text().context("role")?.clone();
+                    let path = row.get_value(2)?.as_text().context("path")?.clone();
+                    let Some(record) = records
+                        .iter_mut()
+                        .find(|record| record.thread_id == thread_id)
+                    else {
+                        continue;
+                    };
+                    match role.as_str() {
+                        "attachment" => record.attachments.push(path),
+                        "grant" => record.write_grants.push(path),
+                        _ => {}
+                    }
+                }
+                Ok(records)
+            })
+        })
+    }
+
+    /// 本文に `query` を含むスレッド（`project` 列が `scope` のものだけ・新しい順）。
+    /// 戻り値: (thread_id, 一致した turn の本文)。1 スレッド 1 件（最新の一致）。
+    ///
+    /// Chat の全文検索（`docs/CHAT.md` §4.1）。チャットの件数と本文量なら `LIKE` で足りる
+    /// （FTS の表を足すと書き込みのたびに索引を更新する費用が常時かかる）。
+    pub fn search_turns(
+        &self,
+        scope: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let scope = scope.to_string();
+        // `LIKE` のワイルドカードを字面として扱う（`100%` で検索して全件が返るのを防ぐ）。
+        let pattern = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let limit = limit as i64;
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT turns.thread_id, turns.content
+                         FROM turns JOIN threads ON threads.id = turns.thread_id
+                         WHERE threads.project = ?1 AND threads.archived = 0
+                           AND turns.role IN ('user', 'agent')
+                           AND turns.content LIKE ?2 ESCAPE '\\'
+                           AND turns.id = (
+                               SELECT MAX(inner_turns.id) FROM turns AS inner_turns
+                               WHERE inner_turns.thread_id = turns.thread_id
+                                 AND inner_turns.role IN ('user', 'agent')
+                                 AND inner_turns.content LIKE ?2 ESCAPE '\\')
+                         ORDER BY turns.id DESC LIMIT ?3",
+                        (scope.as_str(), pattern.as_str(), limit),
+                    )
+                    .await
+                    .context("turns の検索に失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("検索結果の取得に失敗")? {
+                    let thread_id = row.get_value(0)?.as_text().context("thread_id")?.clone();
+                    let content = row.get_value(1)?.as_text().context("content")?.clone();
+                    result.push((thread_id, content));
+                }
+                Ok(result)
+            })
+        })
+    }
+
     /// スレッドを会話ごと削除する（threads 1 行 + その turns 全行 + ACP セッション id）。
     /// 過去バージョンが新プロジェクトへ種付けしたデモスレッドの掃除（agent_panel・2026-08-17）に使う。
     pub fn delete_thread(&self, id: &str) -> Result<()> {
@@ -793,6 +981,18 @@ impl Storage {
                 )
                 .await
                 .context("thread_sessions の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_chat_paths WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_chat_paths の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_chats WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_chats の削除に失敗")?;
                 conn.execute("DELETE FROM turns WHERE thread_id = ?1", (id.as_str(),))
                     .await
                     .context("turns の削除に失敗")?;
@@ -1627,6 +1827,30 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("thread_sessions 作成に失敗")?;
+    // Chat モードのスレッドの付帯情報（`docs/CHAT.md`）。threads 表を広げない理由は
+    // thread_sessions と同じ。パスは改行を含みうるので 1 行 1 パスの別表にする。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_chats (
+            thread_id TEXT PRIMARY KEY,
+            dir TEXT,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("thread_chats 作成に失敗")?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_chat_paths (
+            thread_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            path TEXT NOT NULL,
+            PRIMARY KEY (thread_id, role, path)
+        )",
+        (),
+    )
+    .await
+    .context("thread_chat_paths 作成に失敗")?;
     // checkpoint（M12-2・content-addressed。blob 本体はファイル、ここはメタのみ）。
     conn.execute(
         "CREATE TABLE IF NOT EXISTS checkpoints (
@@ -2142,6 +2366,131 @@ mod tests {
             storage.load_thread_sessions().unwrap(),
             vec![("t2".to_string(), "sess-other".to_string())],
             "スレッド削除でセッション id も消える"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn thread_chats_round_trip_and_follow_thread_deletion() {
+        let path = temp_db("thread_chats");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        assert!(storage.load_thread_chats().unwrap().is_empty());
+
+        let dir = "/Users/test/Documents/necoder/2026-09-18 タイマー";
+        storage
+            .set_thread_chat("c1", Some(dir), &["/work/note.md".into()], &[])
+            .unwrap();
+        // 置換: 添付が増え、片方に書き込み許可が付いた。フォルダは同じ。
+        storage
+            .set_thread_chat(
+                "c1",
+                Some(dir),
+                &["/work/note.md".into(), "/work/blog".into()],
+                &["/work/blog".into()],
+            )
+            .unwrap();
+        // まだ 1 通も送っていないチャットもピン留めできる（フォルダは無い）。
+        storage.set_thread_chat_pinned("c2", true).unwrap();
+
+        let records = storage.load_thread_chats().unwrap();
+        assert_eq!(
+            records,
+            vec![
+                ThreadChatRecord {
+                    thread_id: "c1".into(),
+                    dir: Some(dir.into()),
+                    pinned: false,
+                    attachments: vec!["/work/note.md".into(), "/work/blog".into()],
+                    write_grants: vec!["/work/blog".into()],
+                },
+                ThreadChatRecord {
+                    thread_id: "c2".into(),
+                    dir: None,
+                    pinned: true,
+                    attachments: Vec::new(),
+                    write_grants: Vec::new(),
+                },
+            ]
+        );
+
+        // ピン留めはフォルダと添付を動かさない。逆も同じ。
+        storage.set_thread_chat_pinned("c1", true).unwrap();
+        storage.set_thread_chat("c2", Some("/x"), &[], &[]).unwrap();
+        let records = storage.load_thread_chats().unwrap();
+        assert!(records[0].pinned && records[0].dir.as_deref() == Some(dir));
+        assert!(records[1].pinned && records[1].dir.as_deref() == Some("/x"));
+
+        storage
+            .upsert_thread("c1", "タイマー", 0, "necoder:chat", None, None, None, 0, 0)
+            .unwrap();
+        storage.delete_thread("c1").unwrap();
+        let remaining: Vec<String> = storage
+            .load_thread_chats()
+            .unwrap()
+            .into_iter()
+            .map(|record| record.thread_id)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec!["c2".to_string()],
+            "スレッド削除で付帯情報も消える"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn search_turns_finds_the_latest_match_per_thread_within_a_scope() {
+        let path = temp_db("search_turns");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        for (id, project) in [
+            ("c1", "necoder:chat"),
+            ("c2", "necoder:chat"),
+            ("p1", "necoder"),
+        ] {
+            storage
+                .upsert_thread(id, id, 0, project, None, None, None, 0, 0)
+                .unwrap();
+        }
+        storage
+            .insert_turn("c1", "user", "ポモドーロタイマー作って")
+            .unwrap();
+        storage
+            .insert_turn("c1", "agent", "タイマーを作りました")
+            .unwrap();
+        storage
+            .insert_turn("c1", "step", "Write タイマー.html")
+            .unwrap();
+        storage.insert_turn("c2", "user", "確定申告の経費").unwrap();
+        storage
+            .insert_turn("p1", "user", "タイマーの crate を足して")
+            .unwrap();
+        storage
+            .insert_turn("c2", "user", "進捗 100% って書きたい")
+            .unwrap();
+
+        let hits = storage
+            .search_turns("necoder:chat", "タイマー", 10)
+            .unwrap();
+        assert_eq!(
+            hits,
+            vec![("c1".to_string(), "タイマーを作りました".to_string())],
+            "スコープ外（p1）と、会話ではない行（step）は出ない。1 スレッドは最新の 1 件"
+        );
+        // `%` は字面として探す（ワイルドカードにならない）。
+        let hits = storage.search_turns("necoder:chat", "100%", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "c2");
+        assert!(storage.search_turns("necoder:chat", "%", 10).unwrap().len() == 1);
+
+        storage.archive_thread("c1").unwrap();
+        assert!(
+            storage
+                .search_turns("necoder:chat", "タイマー", 10)
+                .unwrap()
+                .is_empty(),
+            "閉じたチャットは検索に出ない"
         );
         let _ = std::fs::remove_file(&path);
     }

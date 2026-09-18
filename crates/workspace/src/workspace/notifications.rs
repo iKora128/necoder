@@ -7,6 +7,11 @@ impl Workspace {
         event: &agent_panel::PanelEvent,
         cx: &mut Context<Self>,
     ) {
+        // Chat のパネルはプロジェクトの session ではない（TaskSpace も Captain も無い）。
+        if self.chat_panel().as_ref() == Some(&panel) {
+            self.on_chat_panel_event(event, cx);
+            return;
+        }
         let Some(session_index) = self
             .project_sessions
             .sessions
@@ -262,6 +267,12 @@ impl Workspace {
             agent_panel::PanelEvent::OpenPathRequest { path, line, column } => {
                 self.open_transcript_path(session_index, path.clone(), *line, *column, cx);
             }
+            // ツールカードの `▣ プレビュー`: 最初からプレビュー表示で開く（source ⇄ は ⌘⇧V）。
+            agent_panel::PanelEvent::OpenPreviewRequest { path } => {
+                self.project_sessions.sessions[session_index].pending_preview = Some(path.clone());
+                cx.notify();
+            }
+            agent_panel::PanelEvent::ChatRowsChanged => {}
             agent_panel::PanelEvent::OpenUrlRequest { url } => {
                 if let Err(error) = crate::crash::open_url(url) {
                     eprintln!("URL を開けない: {error:#}");
@@ -388,11 +399,9 @@ impl Workspace {
         // ローカルの `.html` を**行指定なしで**指された時は、ソースではなく整形プレビューを出す
         // （「見せたい」意図で貼られるため。行番号つきならその行の source を見たいので下へ流す）。
         // リモートの HTML は webview を持てない（`EditorView::html_preview` が local 限定）。
-        if local
-            && line.is_none()
-            && lang::language_for_path(&path) == Some(lang::LanguageId::Html)
+        if local && line.is_none() && lang::language_for_path(&path) == Some(lang::LanguageId::Html)
         {
-            self.project_sessions.sessions[session_index].pending_html_preview = Some(path);
+            self.project_sessions.sessions[session_index].pending_preview = Some(path);
             cx.notify();
             return;
         }
@@ -535,11 +544,38 @@ fn opens_in_default_app(path: &Path) -> bool {
     };
     matches!(
         extension.to_ascii_lowercase().as_str(),
-        "zip" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "dmg" | "pkg" | "app"
-            | "mp4" | "mov" | "m4v" | "avi" | "mkv"
-            | "mp3" | "wav" | "aiff" | "m4a" | "flac"
-            | "xlsx" | "xls" | "docx" | "doc" | "pptx" | "ppt"
-            | "sketch" | "psd" | "ai" | "key" | "numbers" | "pages"
+        "zip"
+            | "gz"
+            | "tgz"
+            | "bz2"
+            | "xz"
+            | "7z"
+            | "rar"
+            | "dmg"
+            | "pkg"
+            | "app"
+            | "mp4"
+            | "mov"
+            | "m4v"
+            | "avi"
+            | "mkv"
+            | "mp3"
+            | "wav"
+            | "aiff"
+            | "m4a"
+            | "flac"
+            | "xlsx"
+            | "xls"
+            | "docx"
+            | "doc"
+            | "pptx"
+            | "ppt"
+            | "sketch"
+            | "psd"
+            | "ai"
+            | "key"
+            | "numbers"
+            | "pages"
     )
 }
 

@@ -28,6 +28,9 @@
 //! （テストが実ユーザーのデータを触らないため）。個別の互換変数
 //! （`NECODER_LOG_DIR` / `NECODER_CRASH_DIR` / `NECODER_SHELL_PATH_CACHE` / `NECODER_GUI_SOCK`）
 //! も従来どおり効く。
+//!
+//! **書類フォルダ（[`documents_dir`]）は `NECODER_HOME` に巻き込まない。** あれはアプリの状態ではなく
+//! ユーザーの成果物の置き場で、隔離したいテストは `NECODER_DOCUMENTS_DIR` を別に置く。
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -113,6 +116,24 @@ pub fn cache_dir() -> Option<PathBuf> {
 ///   叩けてしまい「守るべき操作の単一経路」が崩れるので採らない・§D2）
 pub fn runtime_socket() -> Option<PathBuf> {
     runtime_socket_on(Platform::current(), &real_var)
+}
+
+/// ユーザーの**書類フォルダ**（Chat モードの成果物の親・`docs/CHAT.md` §2.2）。
+///
+/// - macOS: `~/Documents`（Finder の表示名が「書類」。実パスは英語のまま）
+/// - Linux: `user-dirs.dirs` の `XDG_DOCUMENTS_DIR`（日本語環境では `~/ドキュメント`）。無ければ `~/Documents`
+/// - Windows: **呼び手が Known Folder（`FOLDERID_Documents`）を引いて渡す**。OneDrive のバックアップが
+///   on だと実体は `OneDrive\ドキュメント` へリダイレクトされていて、`%USERPROFILE%\Documents` の
+///   決め打ちは外れる。この crate は依存ゼロなので Win32 を呼べない — 渡されなかった時だけ決め打ちに倒す
+///
+/// `NECODER_DOCUMENTS_DIR` で差し替え可（テストと隔離実行用）。`NECODER_HOME` には巻き込まない。
+pub fn documents_dir(windows_known_folder: Option<PathBuf>) -> Option<PathBuf> {
+    documents_dir_on(
+        Platform::current(),
+        &real_var,
+        &|path| std::fs::read_to_string(path).ok(),
+        windows_known_folder,
+    )
 }
 
 /// ユーザー設定 `settings.json`。
@@ -293,6 +314,52 @@ fn xdg_dir(
         _ => home_on(Platform::Linux, var)?.join(fallback),
     };
     Some(base.join(APP))
+}
+
+fn documents_dir_on(
+    platform: Platform,
+    var: &impl Fn(&str) -> Option<OsString>,
+    read: &impl Fn(&Path) -> Option<String>,
+    windows_known_folder: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = var("NECODER_DOCUMENTS_DIR") {
+        return Some(PathBuf::from(path));
+    }
+    let home = home_on(platform, var)?;
+    match platform {
+        Platform::MacOs => Some(home.join("Documents")),
+        Platform::Windows => Some(windows_known_folder.unwrap_or_else(|| home.join("Documents"))),
+        Platform::Linux => {
+            let config = match var("XDG_CONFIG_HOME") {
+                Some(value) if is_posix_absolute(&value) => PathBuf::from(value),
+                _ => home.join(".config"),
+            };
+            let configured = read(&config.join("user-dirs.dirs"))
+                .and_then(|text| xdg_user_dir(&text, "XDG_DOCUMENTS_DIR", &home));
+            Some(configured.unwrap_or_else(|| home.join("Documents")))
+        }
+    }
+}
+
+/// `user-dirs.dirs` から 1 項目を引く。書式は `XDG_DOCUMENTS_DIR="$HOME/ドキュメント"`
+/// （値は `$HOME/…` か絶対パスのどちらか。それ以外は xdg-user-dirs の仕様で無効）。
+/// 同じキーが複数あれば最後の行が勝つ（シェルで source した時と同じ）。
+fn xdg_user_dir(text: &str, key: &str, home: &Path) -> Option<PathBuf> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let value = line.strip_prefix(key)?.trim_start().strip_prefix('=')?;
+            let value = value.trim().trim_matches('"');
+            if let Some(relative) = value.strip_prefix("$HOME/") {
+                // `$HOME/` だけ（＝ホームそのもの）は「未設定」の意味なので採らない。
+                (!relative.is_empty()).then(|| home.join(relative))
+            } else if value.starts_with('/') {
+                Some(PathBuf::from(value))
+            } else {
+                None
+            }
+        })
+        .last()
 }
 
 fn config_dir_on(platform: Platform, var: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
@@ -647,6 +714,105 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // 書類フォルダ（Chat モードの成果物の親）
+    // -----------------------------------------------------------------------
+
+    fn no_file(_path: &Path) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn macos_documents_is_the_english_path() {
+        assert_eq!(
+            documents_dir_on(Platform::MacOs, &env(MAC), &no_file, None),
+            Some(PathBuf::from("/Users/test/Documents"))
+        );
+    }
+
+    /// OneDrive へリダイレクトされた Known Folder が渡されたら、`%USERPROFILE%\Documents` より優先する。
+    #[test]
+    fn windows_documents_prefers_the_known_folder() {
+        assert_windows_path(
+            documents_dir_on(
+                Platform::Windows,
+                &env(WINDOWS),
+                &no_file,
+                Some(PathBuf::from(r"C:\Users\test\OneDrive\ドキュメント")),
+            ),
+            r"C:\Users\test\OneDrive\ドキュメント",
+            "Known Folder をそのまま使う",
+        );
+        assert_windows_path(
+            documents_dir_on(Platform::Windows, &env(WINDOWS), &no_file, None),
+            r"C:\Users\test\Documents",
+            "引けなかった時だけ決め打ちに倒す",
+        );
+    }
+
+    #[test]
+    fn linux_documents_follows_user_dirs() {
+        let var = env(&[("HOME", "/home/test")]);
+        let japanese = |path: &Path| {
+            (path == Path::new("/home/test/.config/user-dirs.dirs")).then(|| {
+                "# comment\nXDG_DESKTOP_DIR=\"$HOME/デスクトップ\"\nXDG_DOCUMENTS_DIR=\"$HOME/ドキュメント\"\n"
+                    .to_string()
+            })
+        };
+        assert_eq!(
+            documents_dir_on(Platform::Linux, &var, &japanese, None),
+            Some(PathBuf::from("/home/test/ドキュメント"))
+        );
+        assert_eq!(
+            documents_dir_on(Platform::Linux, &var, &no_file, None),
+            Some(PathBuf::from("/home/test/Documents")),
+            "user-dirs.dirs が無ければ ~/Documents"
+        );
+    }
+
+    #[test]
+    fn xdg_user_dir_rejects_values_the_spec_calls_invalid() {
+        let home = Path::new("/home/test");
+        assert_eq!(
+            xdg_user_dir("XDG_DOCUMENTS_DIR=\"/mnt/docs\"", "XDG_DOCUMENTS_DIR", home),
+            Some(PathBuf::from("/mnt/docs"))
+        );
+        // `$HOME/` は「この種別は無効」の意味。相対パスも無効。
+        assert_eq!(
+            xdg_user_dir("XDG_DOCUMENTS_DIR=\"$HOME/\"", "XDG_DOCUMENTS_DIR", home),
+            None
+        );
+        assert_eq!(
+            xdg_user_dir("XDG_DOCUMENTS_DIR=\"docs\"", "XDG_DOCUMENTS_DIR", home),
+            None
+        );
+        // 別のキーの前方一致に釣られない。
+        assert_eq!(
+            xdg_user_dir("XDG_DOCUMENTS_DIR_OLD=\"/x\"", "XDG_DOCUMENTS_DIR", home),
+            None
+        );
+    }
+
+    /// 書類フォルダはユーザーの成果物の置き場＝`NECODER_HOME` では動かない。専用の変数だけが効く。
+    #[test]
+    fn documents_ignore_necoder_home_but_honor_their_own_override() {
+        let isolated = env(&[("HOME", "/Users/test"), ("NECODER_HOME", "/tmp/iso")]);
+        assert_eq!(
+            documents_dir_on(Platform::MacOs, &isolated, &no_file, None),
+            Some(PathBuf::from("/Users/test/Documents"))
+        );
+        let overridden = env(&[
+            ("HOME", "/Users/test"),
+            ("NECODER_DOCUMENTS_DIR", "/tmp/docs"),
+        ]);
+        for platform in [Platform::MacOs, Platform::Windows, Platform::Linux] {
+            assert_eq!(
+                documents_dir_on(platform, &overridden, &no_file, None),
+                Some(PathBuf::from("/tmp/docs"))
+            );
+        }
+    }
+
     // Linux — 「Linux で Library/Application Support を作る」現行バグの回帰テスト
     // -----------------------------------------------------------------------
 

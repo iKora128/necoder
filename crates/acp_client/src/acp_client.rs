@@ -7,6 +7,7 @@
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
 pub mod mcp;
+pub mod preset;
 pub mod registry;
 
 use acp::schema::v1;
@@ -186,6 +187,13 @@ pub enum AgentEvent {
     /// このイベントの間、当該ターンはエージェント側でブロックしている（応答するまで進まない）。
     PermissionRequest {
         title: String,
+        /// ツールの種別（読む / 書く / 実行 / Web …）。エージェントが言わなければ `None`。
+        kind: Option<ToolCallKind>,
+        /// このツール呼び出しが触る場所（`locations` と差分のパス、それに rawInput の
+        /// `file_path` / `path`。重複なし）。Chat モードはこれで「チャットのフォルダか・渡された
+        /// ファイルか・それ以外か」を裁く（`chat_core::policy`）。**ACP はツール名を運ばない**ので、
+        /// 裁定の材料は `kind` とここだけ。
+        paths: Vec<String>,
         diffs: Vec<PermissionDiff>,
         /// Diff の無いツール（Bash/Fetch/MCP 等）の実引数（rawInput）を整形 JSON で。承認前に
         /// 「何が実行されるか」を必ず可視化する（tool poisoning 対策・ACP #1979 / GHSA-f2g4）。
@@ -1326,6 +1334,9 @@ pub struct SessionPreferences {
     /// **ACP では渡さない限りエージェントから MCP は 1 つも見えない** — エージェント側の
     /// 設定ファイルに登録してあっても、セッションには出てこない（`mcp` モジュール冒頭）。
     pub mcp_servers: Vec<mcp::McpServerConfig>,
+    /// セッションの作り方のプリセット（Chat モード・`docs/CHAT.md` §5）。`session/new` と
+    /// `session/load` の**両方**に同じ `_meta` を載せる — 片方だけだと再開した会話から設定が抜ける。
+    pub preset: preset::SessionPreset,
 }
 
 /// **常駐セッション + 逐次ストリーミング**。エージェントを起動して 1 セッションを開き、`prompt_rx` から
@@ -1365,7 +1376,9 @@ pub async fn run_session_on(
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
         .envs(host::task_environment(host.as_ref(), &command.cwd)?)
-        .envs(command.env.clone());
+        .envs(command.env.clone())
+        // プリセットの環境変数が最後＝ユーザーの agent_servers 設定より優先（Chat の持ち込み遮断は設定で外せない）。
+        .envs(preferences.preset.env.clone());
     // MCP の stdio サーバはエージェントと同じホストで起動される＝リモートでは接続元のコマンドを
     // 渡しても意味がない。判定はここで取る（下の接続クロージャは `move` で `host` を持ち込まない）。
     let is_remote = host.is_remote();
@@ -1413,6 +1426,9 @@ pub async fn run_session_on(
                 event_tx.unbounded_send(AgentEvent::Notice(message)).ok();
             }
 
+            // プリセットの `_meta`。new と load で同じ物を使う（上の `preset` のコメント参照）。
+            let session_meta = preferences.preset.to_meta();
+
             let can_load = initialized.agent_capabilities.load_session;
             let resume_id = preferences.resume.clone().filter(|_| can_load);
             let mut resumed_session = None;
@@ -1423,7 +1439,8 @@ pub async fn run_session_on(
                 let load = connection
                     .send_request(
                         v1::LoadSessionRequest::new(previous.clone(), &cwd)
-                            .mcp_servers(mcp_servers.clone()),
+                            .mcp_servers(mcp_servers.clone())
+                            .meta(session_meta.clone()),
                     )
                     .block_task()
                     .fuse();
@@ -1458,7 +1475,11 @@ pub async fn run_session_on(
                     // セッションを手動生成する（`start_session` は応答の `config_options` を捨てるため）。
                     // NewSessionResponse から config_options を取り出してから attach する。
                     let response = connection
-                        .send_request(v1::NewSessionRequest::new(&cwd).mcp_servers(mcp_servers))
+                        .send_request(
+                            v1::NewSessionRequest::new(&cwd)
+                                .mcp_servers(mcp_servers)
+                                .meta(session_meta),
+                        )
                         .block_task()
                         .await?;
                     let modes_state = response.modes.clone();
@@ -1919,6 +1940,34 @@ fn tool_output(content: &[v1::ToolCallContent]) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// 権限リクエストが触る場所を、取れる所から全部集める（重複なし・出た順）。
+///
+/// `locations` が正だが、アダプタによっては権限リクエストの時点で空のまま来る（検索系は
+/// 場所を rawInput の `path` にしか書かない）。取りこぼすと「場所が分からないので素通し」に
+/// なるので、差分のパスと rawInput のよくあるキーも見る。
+fn permission_paths(fields: &v1::ToolCallUpdateFields, diffs: &[PermissionDiff]) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut push = |path: String| {
+        if !path.is_empty() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    for location in fields.locations.iter().flatten() {
+        push(location.path.display().to_string());
+    }
+    for diff in diffs {
+        push(diff.path.clone());
+    }
+    if let Some(serde_json::Value::Object(input)) = &fields.raw_input {
+        for key in ["file_path", "path", "notebook_path"] {
+            if let Some(serde_json::Value::String(path)) = input.get(key) {
+                push(path.clone());
+            }
+        }
+    }
+    paths
+}
+
 /// ツールが触ったファイルのパス一覧を取り出す。
 fn tool_locations(locations: &[v1::ToolCallLocation]) -> Vec<String> {
     locations
@@ -1963,6 +2012,8 @@ async fn handle_permission_request(
             _ => None,
         })
         .collect();
+    let kind = request.tool_call.fields.kind.map(map_tool_kind);
+    let paths = permission_paths(&request.tool_call.fields, &diffs);
     // Diff の無いツール（Bash/Fetch/MCP）の実引数を承認前に必ず見せる（ACP #1979 / GHSA-f2g4）。
     // 編集系（Diff あり）は差分表示で内容が見えるので冗長回避のため省く。
     let raw_input = if diffs.is_empty() {
@@ -1994,6 +2045,8 @@ async fn handle_permission_request(
     event_tx
         .unbounded_send(AgentEvent::PermissionRequest {
             title,
+            kind,
+            paths,
             diffs,
             raw_input,
             options,
@@ -2915,6 +2968,108 @@ for line in sys.stdin:
         );
     }
 
+    /// 偽エージェント（`LOAD_CAP` を置換して使う）: `session/new` / `session/load` で受け取った
+    /// `_meta` を、どちらの method で受けたかと一緒に prompt 応答へ載せる。キーが無ければ `null`。
+    const AGENT_THAT_ECHOES_META: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+received = {}
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"loadSession": LOAD_CAP}}})
+    elif method in ("session/new", "session/load"):
+        received = {"method": method, "has_meta": "_meta" in params, "meta": params.get("_meta")}
+        result = {} if method == "session/load" else {"sessionId": "fresh"}
+        send({"jsonrpc": "2.0", "id": rid, "result": result})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": params["sessionId"],
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": json.dumps(received, sort_keys=True)}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"#;
+
+    fn echoed_session_params(
+        preferences: SessionPreferences,
+        load_advertised: bool,
+    ) -> Option<serde_json::Value> {
+        let script = AGENT_THAT_ECHOES_META
+            .replace("LOAD_CAP", if load_advertised { "True" } else { "False" });
+        let (outcome, events) =
+            run_fake_agent_until_session_ends(&script, preferences, Some("やあ"))?;
+        outcome.expect("セッションは正常終了する");
+        let echoed = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("エージェントが受け取った params が返る");
+        Some(serde_json::from_str(echoed).expect("JSON で返る"))
+    }
+
+    fn chat_like_preset() -> preset::SessionPreset {
+        preset::SessionPreset {
+            system_prompt: Some("質問には会話で答える".to_string()),
+            tools: Some(vec!["Read".to_string(), "Write".to_string()]),
+            setting_sources: Some(Vec::new()),
+            ..preset::SessionPreset::default()
+        }
+    }
+
+    /// プリセットの `_meta` は **`session/new` と `session/load` の両方**に同じ形で乗る。
+    /// load 側に載せ忘れると、再起動して会話を再開した瞬間に Chat がコーディングエージェントへ戻る
+    /// （アダプタは `loadSession` でも `params._meta` からセッションを組み立てる）。
+    #[test]
+    fn the_preset_meta_rides_on_both_new_and_load() {
+        let expected = serde_json::Value::Object(chat_like_preset().to_meta().expect("meta"));
+
+        let fresh = SessionPreferences {
+            preset: chat_like_preset(),
+            ..SessionPreferences::default()
+        };
+        let Some(received) = echoed_session_params(fresh, true) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(received["method"], "session/new", "{received}");
+        assert_eq!(received["meta"], expected, "{received}");
+
+        let resumed = SessionPreferences {
+            preset: chat_like_preset(),
+            resume: Some("prev-1".into()),
+            ..SessionPreferences::default()
+        };
+        let received = echoed_session_params(resumed, true).expect("python3 は上で確認済み");
+        assert_eq!(received["method"], "session/load", "{received}");
+        assert_eq!(received["meta"], expected, "{received}");
+    }
+
+    /// プリセットが空なら `_meta` キーごと送らない（`null` も送らない）＝既存のスレッドは線の上で不変。
+    #[test]
+    fn no_preset_means_no_meta_key_on_the_wire() {
+        let Some(received) = echoed_session_params(SessionPreferences::default(), false) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(received["method"], "session/new", "{received}");
+        assert_eq!(received["has_meta"], false, "{received}");
+    }
+
     /// 偽エージェント: `session/new` で受け取った `mcpServers` をそのまま prompt 応答に載せる。
     /// **ACP の線に何が乗ったか**を本文で検証できる（渡し忘れると空配列が返って落ちる）。
     /// `mcpCapabilities` は http だけ広告する＝sse は渡してはいけない側の検証にも使う。
@@ -3145,6 +3300,7 @@ for line in sys.stdin:
             effort: Some("MAX".into()),
             resume: None,
             mcp_servers: Vec::new(),
+            preset: preset::SessionPreset::default(),
         };
 
         let events = futures::executor::block_on(async move {

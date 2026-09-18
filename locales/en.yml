@@ -183,6 +183,8 @@ cmd:
   toggle_git_panel: "View: Source control"
   toggle_todo_board: "View: Todo board"
   toggle_fleet: "View: Fleet mode"
+  toggle_chat: "View: Chat mode"
+  new_chat: "Chat: New chat"
   toggle_agent_full_screen: "View: AI full screen (hide the editor)"
   split_right: "View: Split right"
   new_thread: "AI: New thread"
@@ -349,6 +351,7 @@ time:
   started: "started %{when}"
   last_input: "input %{when}"
 rail:
+  chat: Chat (conversations outside any project)
   add_tip: Open — folder / file / remote / recent (⌘O switches)
   add_prompt: Open
   menu_new_window: Open in new window
@@ -369,6 +372,7 @@ rail:
   remote: Remote SSH
   settings: Settings
 titlebar:
+  chat: Chat
   editor: Editor
   mode_tip: Switch between Editor and Fleet
   attention_tip: "%{n} need you"
@@ -624,6 +628,7 @@ ipc:
 crash:
   notice: ⚠ Crashed last time — click to report
 menu:
+  chat: Chat Mode
   about: About necoder
   check_updates: Check for Updates…
   settings: Settings…
@@ -852,3 +857,38 @@ work:
   tabs_setting: Default tab position
   top: Top
   left: Left
+chat:
+  destination: Chat
+  new_chat: New chat
+  preview: Preview
+  preview_tip: Open in preview
+  allow_in_this_chat: Always allow in this chat
+  denied_write: "Refused a write outside this chat's folder and attachments: %{path}"
+  denied_execute: Refused to run a command (Chat has no shell)
+  err_folder: "Could not prepare the chat folder: %{message}"
+  err_no_documents: Could not locate the Documents folder (set chat.directory in settings)
+  no_project: no project
+  no_folder: No folder (nothing written yet)
+  search_placeholder: Search chats
+  no_results: No chats match
+  agents_running: "Running %{n} / %{total}"
+  group_pinned: Pinned
+  group_today: Today
+  group_yesterday: Yesterday
+  group_week: Previous 7 days
+  group_older: Older
+  pin: Pin
+  unpin: Unpin
+  reveal_folder: Reveal folder
+  export_markdown: Export conversation as Markdown
+  export_file_name: conversation.md
+  export_you: You
+  export_assistant: Assistant
+  exported: "Exported: %{path}"
+  err_export_empty: A chat with no messages yet cannot be exported
+  delete: Delete chat…
+  delete_confirm_title: "Delete “%{name}”?"
+  delete_confirm_body: The conversation history will be removed. Choose what happens to the files left in its folder (they are moved to the Trash, never erased).
+  delete_keep_files: Keep files
+  delete_trash_files: Move files to Trash
+  cancel: Cancel

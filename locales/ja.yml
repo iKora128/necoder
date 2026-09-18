@@ -184,6 +184,8 @@ cmd:
   toggle_git_panel: "表示: ソース管理"
   toggle_todo_board: "表示: Todo ボード"
   toggle_fleet: "表示: 編隊モード"
+  toggle_chat: "表示: Chat モード"
+  new_chat: "Chat: 新しいチャット"
   toggle_agent_full_screen: "表示: AI を全画面（エディタを畳む）"
   split_right: "表示: 右に分割"
   new_thread: "AI: 新しいスレッド"
@@ -350,6 +352,7 @@ time:
   started: "開始 %{when}"
   last_input: "入力 %{when}"
 rail:
+  chat: Chat（プロジェクトに紐づかない会話）
   add_tip: 開く — フォルダ / ファイル / リモート / 最近（⌘O は切替）
   add_prompt: 開く
   menu_new_window: 新しいウィンドウで開く
@@ -371,9 +374,10 @@ rail:
   settings: 設定
 titlebar:
   editor: Editor
-  mode_tip: Editor ⇄ Fleet を切り替える
+  mode_tip: Editor / Fleet / Chat を切り替える
   attention_tip: "要対応 %{n} 件"
   fleet: Fleet
+  chat: Chat
 settings:
   title: 設定
   agents_heading: AI エージェント
@@ -625,6 +629,7 @@ ipc:
 crash:
   notice: ⚠ 前回終了時にクラッシュ — クリックで報告
 menu:
+  chat: Chat モード
   about: necoder について
   check_updates: アップデートを確認…
   settings: 設定…
@@ -853,3 +858,38 @@ work:
   tabs_setting: タブの既定位置
   top: 上
   left: 左
+chat:
+  destination: Chat
+  new_chat: 新しいチャット
+  preview: プレビュー
+  preview_tip: プレビュー表示で開く
+  allow_in_this_chat: このチャットでは以後許可
+  denied_write: "渡されていない場所への書き込みを拒否しました: %{path}"
+  denied_execute: コマンドの実行を拒否しました（Chat はシェルを使いません）
+  err_folder: "チャットのフォルダを用意できません: %{message}"
+  err_no_documents: 書類フォルダの場所が分かりません（設定 chat.directory で指定できます）
+  no_project: プロジェクトなし
+  no_folder: フォルダなし（まだ成果物を書いていません）
+  search_placeholder: チャットを検索
+  no_results: 一致するチャットはありません
+  agents_running: "起動中 %{n} / %{total}"
+  group_pinned: ピン留め
+  group_today: 今日
+  group_yesterday: 昨日
+  group_week: 過去 7 日
+  group_older: それ以前
+  pin: ピン留め
+  unpin: ピン留めを外す
+  reveal_folder: フォルダを表示
+  export_markdown: 会話を Markdown で書き出す
+  export_file_name: 会話.md
+  export_you: あなた
+  export_assistant: アシスタント
+  exported: "書き出しました: %{path}"
+  err_export_empty: まだ何も話していないチャットは書き出せません
+  delete: チャットを削除…
+  delete_confirm_title: "「%{name}」を削除しますか？"
+  delete_confirm_body: 会話の履歴は消えます。フォルダに残っているファイルをどうするか選んでください（ゴミ箱へ移すだけで、完全には消しません）。
+  delete_keep_files: ファイルは残す
+  delete_trash_files: ファイルもゴミ箱へ
+  cancel: キャンセル

@@ -24,8 +24,11 @@ use acp_client::{
     AgentEvent, AgentKind, ConfigCategory, ConfigOption, ElicitationField, PermissionChoice,
     PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
 };
+mod chat;
 mod remote;
 pub mod sound;
+
+pub use chat::ChatRow;
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
 pub use acp_client::PermissionKind as AgentPermissionKind;
 
@@ -652,14 +655,23 @@ struct PendingPermission {
     respond: mpsc::UnboundedSender<usize>,
     /// 承認待ちに入った時刻。マスコットの段階演出に使う（まず祈る→長引くと頬に手であわあわ）。
     since: std::time::Instant,
+    /// Chat: 「このチャットでは以後許可」を選んだ時に書き込み許可として覚える添付。
+    /// 空でなければ Chat の確認カード（`chat.rs`）。
+    chat_grantable: Vec<PathBuf>,
 }
 
 /// workspace への通知イベント（トースト・色リンク・statusbar ドット・M12-4/5）。
 #[derive(Debug, Clone)]
 pub enum PanelEvent {
-    HumanSend { thread: SharedString, text: String },
+    HumanSend {
+        thread: SharedString,
+        text: String,
+    },
     /// prompt を ACP session へ送る直前。Fleet Task lifecycle の `working` 起点。
-    TurnStarted { thread: SharedString, color: Hsla },
+    TurnStarted {
+        thread: SharedString,
+        color: Hsla,
+    },
     /// ターン完了（summary = 触ったファイル数・経過秒 / digest = 最後の発言の末尾・P1）。
     TurnEnded {
         thread: SharedString,
@@ -692,7 +704,9 @@ pub enum PanelEvent {
     },
     /// 初回ターン後に AI がスレッド名を付けた（#6）。Task 名がプレースホルダのままなら
     /// workspace が Task 名にも引き継ぐ（2026-07-24・タスク命名）。
-    ThreadAutoNamed { name: SharedString },
+    ThreadAutoNamed {
+        name: SharedString,
+    },
     /// transcript のパスリンクをクリックした（M12-17）。行/桁は**1 始まり**のまま渡す
     /// （0 始まりへの変換と「エディタで開くか OS 既定か」の判断は workspace の責務）。
     OpenPathRequest {
@@ -701,7 +715,9 @@ pub enum PanelEvent {
         column: Option<u32>,
     },
     /// transcript の URL をクリックした（OS 既定のブラウザへ）。
-    OpenUrlRequest { url: SharedString },
+    OpenUrlRequest {
+        url: SharedString,
+    },
     /// エージェントの編集を承認した（色リンク用・M12-4）。
     FilesTouched {
         files: Vec<std::path::PathBuf>,
@@ -718,6 +734,12 @@ pub enum PanelEvent {
     /// AI パネルの全画面表示を切り替えたい（ヘッダの ⤢・2026-07-27）。
     /// パネル自身はレイアウトの持ち主ではないので、判断は workspace に委ねる（依存方向を守る）。
     ToggleFullScreenRequest,
+    /// ファイルを**プレビュー表示で**開きたい（ツールカードの `▣ プレビュー`・成果物の一覧）。
+    OpenPreviewRequest {
+        path: PathBuf,
+    },
+    /// チャットの一覧が変わった（Chat モード。workspace の左の列が描き直す）。
+    ChatRowsChanged,
 }
 
 /// エージェントスレッドの状態（herdr の 5 状態を necoder 流にマップ・#）。**色相は状態に使わない**
@@ -939,6 +961,8 @@ struct Thread {
     /// resume に失敗して「session has ended」が返ったら [`acp_client::is_session_ended`] で送信路を捨てる。
     /// 永続化しない（プロセスの状態であって会話ではない）。
     auth_required: bool,
+    /// Chat モードのスレッドだけが持つ状態（フォルダ・書き込み許可・ピン）。`docs/CHAT.md`。
+    chat: Option<chat::ChatThreadState>,
 }
 
 impl Thread {
@@ -1001,6 +1025,7 @@ impl Thread {
             session_serial: 0,
             session_used: false,
             auth_required: false,
+            chat: None,
         }
     }
 
@@ -1405,7 +1430,10 @@ fn cap_output(text: &str) -> (String, usize) {
 
 fn entry_plain_text(entry: &Entry) -> String {
     match entry {
-        Entry::User(text) | Entry::LedgerEvent(text) | Entry::Thinking(text) | Entry::Agent(text) => text.to_string(),
+        Entry::User(text)
+        | Entry::LedgerEvent(text)
+        | Entry::Thinking(text)
+        | Entry::Agent(text) => text.to_string(),
         Entry::Step {
             tool, args, result, ..
         } => match result {
@@ -1436,6 +1464,13 @@ fn default_thread_name(index: usize) -> String {
 fn is_placeholder_name(name: &str) -> bool {
     let name = name.trim();
     if name.is_empty() {
+        return true;
+    }
+    // Chat の既定名（どの言語で作られたチャットでも、まだ名前が付いていない物として扱う）。
+    if i18n::available_locales()
+        .into_iter()
+        .any(|locale| i18n::translate_in(locale, "chat.new_chat").as_deref() == Some(name))
+    {
         return true;
     }
     i18n::available_locales().into_iter().any(|locale| {
@@ -1623,6 +1658,14 @@ pub struct AgentPanel {
     /// このパネルで先張りしてよいか。Fleet の Task セルは **false** — 画面に N 枚並べただけで
     /// エージェントのプロセスが N 本立つのを避ける（あちらは送信で立てる）。
     prewarm_allowed: bool,
+    /// Chat モードのパネルか（`chat.rs`）。スレッドは全部チャットで、cwd はチャットごとのフォルダ。
+    chat_mode: bool,
+    /// チャットの一覧（開いていないチャットは DB の行だけ）。変化の節目で作り直す。
+    chat_rows: Vec<chat::ChatRow>,
+    /// 一覧の絞り込み語（タイトル + 本文の全文検索）。
+    chat_search: String,
+    /// `▣ プレビュー` チップを出してよいか（パス → 実在）の控え。描画のたびに stat しない。
+    preview_exists: RefCell<HashMap<String, bool>>,
 }
 
 impl gpui::EventEmitter<PanelEvent> for AgentPanel {}
@@ -1954,6 +1997,10 @@ PYEOF"#;
             prewarmed: std::collections::HashSet::new(),
             prewarm_order: Vec::new(),
             prewarm_allowed: true,
+            chat_mode: false,
+            chat_rows: Vec::new(),
+            chat_search: String::new(),
+            preview_exists: RefCell::new(HashMap::new()),
         }
     }
 
@@ -2226,7 +2273,7 @@ PYEOF"#;
             Some(agent) => format!("User: {first_user}\n\nAgent: {agent}"),
             None => format!("User: {first_user}"),
         };
-        let Some(cwd) = self.dest_cwd.clone() else {
+        let Some(cwd) = self.session_cwd(thread_index) else {
             return;
         };
         let host = self.dest_host.clone();
@@ -2259,6 +2306,7 @@ PYEOF"#;
                             thread.name = name.clone();
                             cx.emit(PanelEvent::ThreadAutoNamed { name });
                             panel.persist_thread(index);
+                            panel.refresh_chat_rows(cx);
                             cx.notify();
                         }
                     }
@@ -2469,10 +2517,36 @@ PYEOF"#;
         option_index: usize,
         cx: &mut Context<Self>,
     ) {
+        let mut grants_changed = false;
         if let Some(thread) = self.threads.get_mut(thread_index) {
             if let Some(pending) = thread.pending_permission.take() {
-                pending.respond.unbounded_send(option_index).ok();
+                let mut answer = option_index;
+                // Chat の「このチャットでは以後許可」: 覚えるのは necoder 側で、エージェントには
+                // **今回だけ**の許可として返す（常に許可を返すとエージェントが自分のモードを変える）。
+                let chose_always = pending
+                    .options
+                    .get(option_index)
+                    .is_some_and(|option| option.kind == PermissionKind::AllowAlways);
+                if chose_always && thread.chat.is_some() {
+                    if let Some(chat) = thread.chat.as_mut() {
+                        for path in &pending.chat_grantable {
+                            if !chat.write_grants.contains(path) {
+                                chat.write_grants.push(path.clone());
+                                grants_changed = true;
+                            }
+                        }
+                    }
+                    answer = pending
+                        .options
+                        .iter()
+                        .position(|option| option.kind == PermissionKind::Allow)
+                        .unwrap_or(option_index);
+                }
+                pending.respond.unbounded_send(answer).ok();
             }
+        }
+        if grants_changed {
+            self.persist_chat_state(thread_index);
         }
         self.sync_running_registry(cx);
         cx.notify();
@@ -2717,11 +2791,7 @@ PYEOF"#;
     /// 順番が大事: **markdown リンク（`[text](dest)`）を先に**取る。実測（2026-09-16）では
     /// エージェントの引用の主流がこの形で、本文には表示テキストしか出ないため、素のトークン走査
     /// だけでは行き先を失う。素のトークンは markdown リンクと重ならないものだけ足す。
-    fn transcript_links(
-        &self,
-        text: &str,
-        spans: &[markdown::Span],
-    ) -> Rc<Vec<TranscriptLink>> {
+    fn transcript_links(&self, text: &str, spans: &[markdown::Span]) -> Rc<Vec<TranscriptLink>> {
         if text.is_empty() {
             return Rc::new(Vec::new());
         }
@@ -2747,9 +2817,9 @@ PYEOF"#;
             }
         }
         for found in ui::links::find_links(text) {
-            let overlaps = links
-                .iter()
-                .any(|link| link.range.start < found.range.end && found.range.start < link.range.end);
+            let overlaps = links.iter().any(|link| {
+                link.range.start < found.range.end && found.range.start < link.range.end
+            });
             if overlaps {
                 continue;
             }
@@ -2779,13 +2849,11 @@ PYEOF"#;
     fn resolve_link_target(&self, target: &ui::links::LinkTarget) -> Option<LinkDestination> {
         match target {
             ui::links::LinkTarget::Url(url) => Some(LinkDestination::Url(url.clone().into())),
-            ui::links::LinkTarget::Path { path, line, column } => {
-                Some(LinkDestination::File {
-                    path: self.resolve_link_path(path)?,
-                    line: *line,
-                    column: *column,
-                })
-            }
+            ui::links::LinkTarget::Path { path, line, column } => Some(LinkDestination::File {
+                path: self.resolve_link_path(path)?,
+                line: *line,
+                column: *column,
+            }),
         }
     }
 
@@ -2917,11 +2985,9 @@ PYEOF"#;
     fn activate_link(&mut self, destination: LinkDestination, cx: &mut Context<Self>) {
         match destination {
             LinkDestination::Url(url) => cx.emit(PanelEvent::OpenUrlRequest { url }),
-            LinkDestination::File { path, line, column } => cx.emit(PanelEvent::OpenPathRequest {
-                path,
-                line,
-                column,
-            }),
+            LinkDestination::File { path, line, column } => {
+                cx.emit(PanelEvent::OpenPathRequest { path, line, column })
+            }
         }
     }
 
@@ -3391,6 +3457,7 @@ PYEOF"#;
         }
         thread.command_tx = None;
         thread.session_lost = true;
+        self.tidy_chat_dir(index);
         // 終端イベント無しでターン中に終わった場合の畳み（running=false なら何もしない）。
         self.abandon_turn(index, &i18n::t!("agent.err_session_ended"), cx);
         self.sync_running_registry(cx);
@@ -3419,7 +3486,7 @@ PYEOF"#;
     /// 「再開」ボタン: 送信を待たずにエージェントを立ち上げ直す。前回の会話は `session/load` で
     /// 引き継ぎ、結果（引き継げた/引き継げなかった）は `SessionStarted` で一言出す。
     fn resume_session(&mut self, thread_index: usize, cx: &mut Context<Self>) {
-        let Some(cwd) = self.dest_cwd.clone() else {
+        let Some(cwd) = self.session_cwd(thread_index) else {
             self.fail_turn(thread_index, &i18n::t!("agent.err_no_project"), cx);
             return;
         };
@@ -4185,6 +4252,7 @@ PYEOF"#;
                     since: Instant::now()
                         .checked_sub(Duration::from_secs(45))
                         .unwrap_or_else(Instant::now),
+                    chat_grantable: Vec::new(),
                 });
             }
             2 => {
@@ -4253,6 +4321,7 @@ PYEOF"#;
                         options: Vec::new(),
                         respond,
                         since: std::time::Instant::now(),
+                        chat_grantable: Vec::new(),
                     });
                 }
                 2 => {
@@ -4584,6 +4653,7 @@ PYEOF"#;
             }
         }
         self.context_menu_open = false;
+        self.persist_chat_state(self.active);
         cx.notify();
     }
 
@@ -4593,6 +4663,7 @@ PYEOF"#;
                 thread.context.remove(index);
             }
         }
+        self.persist_chat_state(self.active);
         cx.notify();
     }
 
@@ -4784,7 +4855,10 @@ PYEOF"#;
             return;
         }
         if let Some(thread) = self.threads.get(self.active) {
-            cx.emit(PanelEvent::HumanSend { thread: thread.name.clone(), text: prompt.clone() });
+            cx.emit(PanelEvent::HumanSend {
+                thread: thread.name.clone(),
+                text: prompt.clone(),
+            });
         }
         self.composer.update(cx, |composer, cx| composer.clear(cx));
         if let Some(thread) = self.threads.get_mut(self.active) {
@@ -4882,7 +4956,9 @@ PYEOF"#;
     /// prompt テキストをアクティブスレッドへ積み、常駐 ACP セッションへ送る（composer 非依存）。
     /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
     pub fn set_prompt_context(&mut self, thread: usize, context: String) {
-        if let Some(thread) = self.threads.get(thread) { self.prompt_context.insert(thread.id.to_string(), context); }
+        if let Some(thread) = self.threads.get(thread) {
+            self.prompt_context.insert(thread.id.to_string(), context);
+        }
     }
 
     pub fn send_ledger_event(&mut self, prompt: String, cx: &mut Context<Self>) {
@@ -4907,7 +4983,11 @@ PYEOF"#;
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(context) = self.threads.get(thread_index).and_then(|thread| self.prompt_context.get(thread.id.as_str())) {
+        if let Some(context) = self
+            .threads
+            .get(thread_index)
+            .and_then(|thread| self.prompt_context.get(thread.id.as_str()))
+        {
             context_prefix.push_str(context);
         }
         let full_prompt = if context_prefix.is_empty() {
@@ -4916,9 +4996,11 @@ PYEOF"#;
             format!("{context_prefix}\n{prompt}")
         };
         if let Some(thread) = self.threads.get_mut(thread_index) {
-            thread
-                .entries
-                .push(if ledger { Entry::LedgerEvent(prompt.clone().into()) } else { Entry::User(prompt.clone().into()) });
+            thread.entries.push(if ledger {
+                Entry::LedgerEvent(prompt.clone().into())
+            } else {
+                Entry::User(prompt.clone().into())
+            });
             thread.running = true;
             thread.auth_required = false; // 送信＝再接続（同じセッションへ送る。adapter 側で resume）
             thread.done = None; // 新しいターン開始＝直前の「完了・未確認」ラッチは消す
@@ -4933,10 +5015,26 @@ PYEOF"#;
         self.sync_running_registry(cx); // ⌘O ダッシュボードの「実行中」を即時反映（M12-12）
         cx.notify();
 
-        // 宛先プロジェクトの cwd が要る。
-        let Some(cwd) = self.dest_cwd.clone() else {
-            self.fail_turn(thread_index, &i18n::t!("agent.err_no_project"), cx);
-            return;
+        // 宛先の cwd が要る。Chat はプロジェクトではなく**チャットごとのフォルダ**で、最初の送信で
+        // 名前が決まる（`docs/CHAT.md` §2.3）。一覧にすぐ出るよう、この時点で 1 度永続化する。
+        let cwd = if self.chat_mode {
+            match self.ensure_chat_dir(thread_index, &prompt, cx) {
+                Ok(dir) => {
+                    self.persist_thread(thread_index);
+                    self.refresh_chat_rows(cx);
+                    dir
+                }
+                Err(message) => {
+                    self.fail_turn(thread_index, &message, cx);
+                    return;
+                }
+            }
+        } else {
+            let Some(cwd) = self.dest_cwd.clone() else {
+                self.fail_turn(thread_index, &i18n::t!("agent.err_no_project"), cx);
+                return;
+            };
+            cwd
         };
         if let Some(thread) = self.threads.get(thread_index) {
             cx.emit(PanelEvent::TurnStarted {
@@ -4989,6 +5087,18 @@ PYEOF"#;
     /// 閉じられたスレッドには `None`＝そのイベントは捨てる（別タブへ誤配送しない）。
     fn thread_index_by_id(&self, id: &str) -> Option<usize> {
         self.threads.iter().position(|thread| thread.id == id)
+    }
+
+    /// このスレッドのエージェントが動く場所。Chat はチャットのフォルダ、それ以外は宛先プロジェクト。
+    fn session_cwd(&self, thread_index: usize) -> Option<PathBuf> {
+        if self.chat_mode {
+            return self
+                .threads
+                .get(thread_index)
+                .and_then(|thread| thread.chat.as_ref())
+                .and_then(|chat| chat.dir.clone());
+        }
+        self.dest_cwd.clone()
     }
 
     /// スレッド用の常駐 ACP セッションを起動する。バックグラウンドで `run_session` を回し、
@@ -5060,8 +5170,11 @@ PYEOF"#;
                 // 前回のセッション id。エージェントが loadSession を広告していれば会話を引き継ぐ。
                 resume: thread.acp_session_id.clone(),
                 mcp_servers,
+                preset: acp_client::preset::SessionPreset::default(),
             })
             .unwrap_or_default();
+        // Chat のスレッドはセッションの作り方が違う（プリセット・権限モード固定・MCP なし）。
+        let preferences = self.chat_session_preferences(thread_index, preferences, cx);
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded::<AgentEvent>();
         let error_tx = event_tx.clone();
@@ -5170,7 +5283,7 @@ PYEOF"#;
                 reason: TurnEnd::Completed
             }
         );
-        let permission_waiting = matches!(event, AgentEvent::PermissionRequest { .. });
+        let mut permission_waiting = matches!(event, AgentEvent::PermissionRequest { .. });
         let elicitation_waiting = matches!(event, AgentEvent::ElicitationRequest { .. });
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
         let mut session_id_changed = false;
@@ -5392,11 +5505,15 @@ PYEOF"#;
             }
             AgentEvent::PermissionRequest {
                 title,
+                kind,
+                paths,
                 diffs,
                 raw_input,
-                options,
+                mut options,
                 respond,
             } => {
+                // Chat は「ファイルを渡す = 触ってよいと伝える」で裁く（`chat.rs`）。それ以外は `None`。
+                let chat_permission = Self::chat_permission(thread, kind, &paths);
                 // checkpoint は**書かれる前**にここで切る（M12-2）。手動でも自動 Allow でも一本道。
                 // 変更前内容は**常にディスクから全文を読む**。diff の old_text は Edit ツールだと
                 // **置換ハンクの断片**であり、全文として保存すると restore がファイルを断片へ
@@ -5422,8 +5539,9 @@ PYEOF"#;
                 // モードのまま＝JOURNAL 2026-08-28）、その窓で届いた許可リクエストでユーザーを
                 // 止めない。応答はスナップショット完了後＝checkpoint の一本道は env 自動と共通。
                 let bypass_mode = thread.permission_mode.to_lowercase().contains("bypass");
-                let auto_allow = bypass_mode || std::env::var_os("NECODER_AUTO_ALLOW").is_some();
-                let auto_choice = options
+                let mut auto_allow =
+                    bypass_mode || std::env::var_os("NECODER_AUTO_ALLOW").is_some();
+                let mut auto_choice = options
                     .iter()
                     .position(|option| {
                         matches!(
@@ -5432,10 +5550,56 @@ PYEOF"#;
                         )
                     })
                     .unwrap_or(0);
-                let snapshot_paths: Vec<std::path::PathBuf> = diffs
+                let mut snapshot_paths: Vec<std::path::PathBuf> = diffs
                     .iter()
                     .map(|diff| std::path::PathBuf::from(&diff.path))
                     .collect();
+                let mut chat_grantable = Vec::new();
+                match chat_permission {
+                    None => {}
+                    // 許可は**今回だけ**で答える。「常に許可」を返すとエージェント側が自分の権限モードを
+                    // 切り替えてしまい、以後のリクエストがここへ来なくなる（裁定は necoder が持ち続ける）。
+                    Some(chat::ChatPermission::Allow) => {
+                        auto_allow = true;
+                        auto_choice = options
+                            .iter()
+                            .position(|option| option.kind == PermissionKind::Allow)
+                            .unwrap_or(auto_choice);
+                    }
+                    Some(chat::ChatPermission::Deny { notice }) => {
+                        auto_allow = true;
+                        auto_choice = options
+                            .iter()
+                            .position(|option| option.kind == PermissionKind::Reject)
+                            .or_else(|| {
+                                options
+                                    .iter()
+                                    .position(|option| option.kind == PermissionKind::RejectAlways)
+                            })
+                            .unwrap_or(options.len().saturating_sub(1));
+                        snapshot_paths.clear(); // 書かせないので控えも要らない
+                        thread
+                            .entries
+                            .push(Entry::Agent(SharedString::from(notice)));
+                        permission_waiting = false;
+                    }
+                    Some(chat::ChatPermission::Ask { grantable }) => {
+                        auto_allow = false;
+                        // 「常に許可」は Chat では「このチャットでは以後許可」の意味（添付への書き込みを
+                        // necoder 側で覚える）。覚える対象が無いリクエストでは出さない。
+                        // **選択肢は消さない** — 応答はエージェントが送ってきた並びの添字なので、
+                        // 間引くと別の選択肢を選んだことになる。出さない判断は描画側でする。
+                        for option in &mut options {
+                            if option.kind == PermissionKind::AllowAlways {
+                                option.label = i18n::t!("chat.allow_in_this_chat");
+                            }
+                        }
+                        chat_grantable = grantable;
+                    }
+                }
+                if auto_allow && thread.chat.is_some() {
+                    permission_waiting = false; // 聞いていないので「承認待ち」を鳴らさない
+                }
                 let storage = self.storage.clone();
                 let host = self.dest_host.clone();
                 let thread_id = thread.id.clone();
@@ -5452,6 +5616,7 @@ PYEOF"#;
                         options,
                         respond: respond.clone(),
                         since: std::time::Instant::now(),
+                        chat_grantable,
                     });
                 }
                 if !snapshot_paths.is_empty() && storage.is_some() {
@@ -5600,6 +5765,10 @@ PYEOF"#;
                     muted: thread.muted,
                 });
             }
+        }
+        if turn_finished {
+            self.preview_exists.borrow_mut().clear();
+            self.refresh_chat_rows(cx);
         }
         if permission_waiting {
             self.sync_running_registry(cx); // Blocked をレール/フッター/⌘O のロールアップへ即時反映
@@ -5902,7 +6071,7 @@ PYEOF"#;
             ),
             None => result_line,
         };
-        let Some(cwd) = self.dest_cwd.clone() else {
+        let Some(cwd) = self.session_cwd(thread_index) else {
             return;
         };
         let host = self.dest_host.clone();
@@ -7227,8 +7396,17 @@ PYEOF"#;
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         match entry {
-            Entry::LedgerEvent(text) => div().p(px(10.)).rounded(px(6.)).bg(theme.bg2).text_size(px(11.)).text_color(theme.fg2)
-                .child(SharedString::from(format!("◇ {}\n{text}", i18n::t!("captain.ledger_event")))).into_any_element(),
+            Entry::LedgerEvent(text) => div()
+                .p(px(10.))
+                .rounded(px(6.))
+                .bg(theme.bg2)
+                .text_size(px(11.))
+                .text_color(theme.fg2)
+                .child(SharedString::from(format!(
+                    "◇ {}\n{text}",
+                    i18n::t!("captain.ledger_event")
+                )))
+                .into_any_element(),
             // checkpoint 行（⟲ この時点へ戻す・M12-2）。クリックで blob から全ファイルを書き戻す。
             Entry::Checkpoint { id, label } => {
                 let checkpoint_id = *id;
@@ -7556,6 +7734,12 @@ PYEOF"#;
                 // Edit 系: before/after 差分を transcript にインライン表示（権限カードと同じ描画を再利用）。
                 for diff in diffs {
                     body = body.child(render_diff(diff, &theme));
+                }
+                // 書かれたのが単体でプレビューできる物（HTML / Markdown）なら、1 クリックで
+                // プレビュー表示へ。判定は**構造化されたパス**（差分のパス）+ 実在 + 拡張子で、
+                // ツールの文言は解析しない（`docs/CHAT.md` §3.3）。
+                if let Some(path) = self.step_preview_path(diffs) {
+                    body = body.child(self.render_preview_chip(index, path, &theme, cx));
                 }
                 // Bash/Read 等: 出力を ⎿ 行で（cap_output で両端 100 行に丸め済み）。長い出力は
                 // 既定で折り畳み、要約行クリックで展開する（コード読み込みの結果で transcript が
@@ -8799,6 +8983,11 @@ PYEOF"#;
                     .options
                     .iter()
                     .enumerate()
+                    .filter(|(_, option)| {
+                        !(self.chat_mode
+                            && option.kind == PermissionKind::AllowAlways
+                            && pending.chat_grantable.is_empty())
+                    })
                     .map(|(index, option)| permission_button(index, option, color, &theme, cx)),
             );
         card = card.child(buttons);
@@ -9054,8 +9243,10 @@ PYEOF"#;
                             .items_center()
                             .gap(px(6.))
                             .pt(px(6.))
-                            .child(self.render_selector_pill(Selector::Agent, cx))
-                            .child(self.render_selector_pill(Selector::Mode, cx))
+                            .when(!self.chat_mode, |row| {
+                                row.child(self.render_selector_pill(Selector::Agent, cx))
+                                    .child(self.render_selector_pill(Selector::Mode, cx))
+                            })
                             .child(self.render_selector_pill(Selector::Model, cx))
                             .child(self.render_selector_pill(Selector::Effort, cx)),
                     )
@@ -10172,7 +10363,7 @@ fn apply_thread_defaults(thread: &mut Thread, cx: &App) {
 fn entry_from_turn((role, content): (String, String)) -> Entry {
     match role.as_str() {
         "user" => Entry::User(content.into()),
-                        "ledger_event" => Entry::LedgerEvent(content.into()),
+        "ledger_event" => Entry::LedgerEvent(content.into()),
         "thinking" => Entry::Thinking(content.into()),
         "step" => Entry::Step {
             id: None,
@@ -10284,6 +10475,7 @@ fn seed_threads() -> Vec<Thread> {
         session_serial: 0,
         session_used: false,
         auth_required: false,
+        chat: None,
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
@@ -10332,6 +10524,67 @@ pub trait Buffer {
         Thread::empty("tab色分け", 1),
         Thread::empty("gpui起動", 2),
     ]
+}
+
+impl AgentPanel {
+    /// この Step が書いたファイルのうち、necoder がその場でプレビューできる物（最初の 1 つ）。
+    /// 実在は 1 パス 1 回だけ確かめて控える（ターン終了で捨てる）＝描画のたびに stat しない。
+    fn step_preview_path(&self, diffs: &[PermissionDiff]) -> Option<PathBuf> {
+        diffs.iter().find_map(|diff| {
+            let path = Path::new(&diff.path);
+            if !path.is_absolute() || !chat_core::folder::is_previewable(path) {
+                return None;
+            }
+            let exists = *self
+                .preview_exists
+                .borrow_mut()
+                .entry(diff.path.clone())
+                .or_insert_with(|| self.dest_host.is_remote() || path.is_file());
+            // remote は手元から stat できないので出しておく（開く側が扱いを決める）。
+            (exists && !self.dest_host.is_remote()).then(|| path.to_path_buf())
+        })
+    }
+
+    fn render_preview_chip(
+        &self,
+        entry_index: usize,
+        path: PathBuf,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let hover_background = theme.bg3;
+        let hover_text = theme.fg0;
+        div().flex().pt(px(2.)).child(
+            div()
+                .id(("step-preview", entry_index))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .px(px(8.))
+                .py(px(2.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover_background).text_color(hover_text))
+                .child("▣")
+                .child(SharedString::from(i18n::t!("chat.preview")))
+                .tooltip(ui::Tooltip::text(
+                    SharedString::from(i18n::t!("chat.preview_tip")),
+                    theme.clone(),
+                ))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |_panel, _, _window, cx| {
+                        // transcript のドラッグ選択と、ルートの「composer へフォーカスを戻す」に流さない。
+                        cx.stop_propagation();
+                        cx.emit(PanelEvent::OpenPreviewRequest { path: path.clone() });
+                    }),
+                ),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -11100,6 +11353,8 @@ PYEOF"#;
                 active,
                 AgentEvent::PermissionRequest {
                     title: "Bash: cargo test".into(),
+                    kind: None,
+                    paths: Vec::new(),
                     diffs: Vec::new(), // diff 無し＝スナップショット不要の同期応答経路
                     raw_input: None,
                     options: vec![
@@ -11155,6 +11410,7 @@ PYEOF"#;
                 ],
                 respond: respond_tx,
                 since: std::time::Instant::now(),
+                chat_grantable: Vec::new(),
             });
             panel.select_option(Selector::Mode, "bypassPermissions".into(), cx);
             assert!(
@@ -11190,7 +11446,10 @@ PYEOF"#;
 
             // 他アプリへ移っている＝鳴らす（従来からの主目的）。
             panel.window_active = false;
-            assert!(panel.wants_done_sound(active), "他アプリにいる間の完了で鳴る");
+            assert!(
+                panel.wants_done_sound(active),
+                "他アプリにいる間の完了で鳴る"
+            );
 
             // 窓はアクティブだが**このパネルは描かれていない**＝見えていないので鳴らす。
             // 描画が止まると `window_active` は更新されないため、ここが `true` のまま残る。
@@ -11227,6 +11486,7 @@ PYEOF"#;
                 options: vec![],
                 respond,
                 since: std::time::Instant::now(),
+                chat_grantable: Vec::new(),
             });
             // 「見えている」= 窓がアクティブ + 直前に描画された + そのスレッドが選ばれている。
             panel.window_active = true;
@@ -11295,6 +11555,7 @@ PYEOF"#;
                 ],
                 respond: tx,
                 since: std::time::Instant::now(),
+                chat_grantable: Vec::new(),
             });
             let id = panel.threads[active].id.clone();
             let detail = panel.remote_thread(&id).unwrap();
@@ -12067,7 +12328,9 @@ PYEOF"#;
                 cx,
             );
             // 索引が届く前は、裸のファイル名は解決できない（絶対パスと URL は届く前から効く）。
-            assert!(panel.transcript_links("agent_panel.rs を直した", &[]).is_empty());
+            assert!(panel
+                .transcript_links("agent_panel.rs を直した", &[])
+                .is_empty());
 
             // @mention と同じ一覧（gitignore 済みの target/ は入らない）。
             panel.set_context_files(
@@ -12115,7 +12378,9 @@ PYEOF"#;
             );
 
             // ⑤ 実在しないパスは下線にしない（死んだリンクを作らない）。
-            assert!(panel.transcript_links("docs/NOPE.md は無い", &[]).is_empty());
+            assert!(panel
+                .transcript_links("docs/NOPE.md は無い", &[])
+                .is_empty());
 
             // ⑥ markdown リンク（実測 163 件の引用形式）。本文に出ない dest から行き先を取る。
             let absolute = root.join("docs/ROADMAP.md");
@@ -12156,16 +12421,14 @@ PYEOF"#;
         let seen = Rc::new(RefCell::new(Vec::new()));
         let recorder = seen.clone();
         cx.update(|_window, cx| {
-            cx.subscribe(&panel, move |_panel, event: &PanelEvent, _cx| {
-                match event {
-                    PanelEvent::OpenPathRequest { path, line, column } => recorder
-                        .borrow_mut()
-                        .push(format!("path {} {line:?} {column:?}", path.display())),
-                    PanelEvent::OpenUrlRequest { url } => {
-                        recorder.borrow_mut().push(format!("url {url}"))
-                    }
-                    _ => {}
+            cx.subscribe(&panel, move |_panel, event: &PanelEvent, _cx| match event {
+                PanelEvent::OpenPathRequest { path, line, column } => recorder
+                    .borrow_mut()
+                    .push(format!("path {} {line:?} {column:?}", path.display())),
+                PanelEvent::OpenUrlRequest { url } => {
+                    recorder.borrow_mut().push(format!("url {url}"))
                 }
+                _ => {}
             })
             .detach();
         });
@@ -12237,7 +12500,10 @@ PYEOF"#;
         });
         cx.run_until_parked();
         panel.update(cx, |panel, _cx| {
-            assert!(!panel.transcript_top_item_pending(), "prepaint 後は実値へ戻る");
+            assert!(
+                !panel.transcript_top_item_pending(),
+                "prepaint 後は実値へ戻る"
+            );
         });
         let _ = std::fs::remove_file(settings_path);
     }
@@ -12268,7 +12534,8 @@ PYEOF"#;
         let mut events: Vec<AgentEvent> = (0..8)
             .map(|step| AgentEvent::ThoughtChunk(format!("考え中 {step} の思考です。\n")))
             .collect();
-        let message = "結果です。\n\n| 項目 | 値 |\n|---|---|\n| 幅 | 420 |\n| 高さ | 800 |\n\n以上です。";
+        let message =
+            "結果です。\n\n| 項目 | 値 |\n|---|---|\n| 幅 | 420 |\n| 高さ | 800 |\n\n以上です。";
         let characters: Vec<char> = message.chars().collect();
         events.extend(
             characters
@@ -12293,7 +12560,10 @@ PYEOF"#;
                     .map(|bounds| bounds.origin.y)
             });
             if let (Some(before), Some(now)) = (previous, current) {
-                assert!(now <= before, "{label} で問いの行が下へ動いた: {before} -> {now}");
+                assert!(
+                    now <= before,
+                    "{label} で問いの行が下へ動いた: {before} -> {now}"
+                );
             }
             previous = current.or(previous);
             cx.executor()
@@ -12305,11 +12575,15 @@ PYEOF"#;
 
     #[test]
     fn partial_table_delimiter_is_held_back_until_newline() {
-        let held = |text: &str| hold_back_partial_table_delimiter(text.to_string().into()).to_string();
+        let held =
+            |text: &str| hold_back_partial_table_delimiter(text.to_string().into()).to_string();
         assert_eq!(held("| 項目 | 値 |\n|--"), "| 項目 | 値 |\n");
         assert_eq!(held("| 項目 | 値 |\n|---|---|"), "| 項目 | 値 |\n");
         // 改行が届けば表として確定するのでそのまま渡す。
-        assert_eq!(held("| 項目 | 値 |\n|---|---|\n"), "| 項目 | 値 |\n|---|---|\n");
+        assert_eq!(
+            held("| 項目 | 値 |\n|---|---|\n"),
+            "| 項目 | 値 |\n|---|---|\n"
+        );
         // 表のヘッダに続かない `--` や通常の文は触らない。
         assert_eq!(held("本文です\n--"), "本文です\n--");
         assert_eq!(held("| 項目 | 値 |\n| 幅"), "| 項目 | 値 |\n| 幅");
@@ -12318,7 +12592,10 @@ PYEOF"#;
 
     #[test]
     fn live_thought_preview_shows_the_tail_being_written() {
-        assert_eq!(thought_live_preview("一行目\n二行目を書いている\n").as_ref(), "二行目を書いている");
+        assert_eq!(
+            thought_live_preview("一行目\n二行目を書いている\n").as_ref(),
+            "二行目を書いている"
+        );
         let long_line = "あ".repeat(100);
         let preview = thought_live_preview(&long_line);
         assert_eq!(preview.chars().count(), 65);

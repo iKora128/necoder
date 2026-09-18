@@ -120,6 +120,23 @@ pub(crate) struct ProjectSessions {
     pub(crate) projects: Vec<ProjectSlot>,
     pub(crate) active: usize,
     pub(crate) sessions: Vec<ProjectSession>,
+    /// Chat モードの session（`docs/CHAT.md`）。プロジェクトに属さないので `projects` / `sessions`
+    /// （レールの枠と同じ添字で並ぶ）には混ぜない。初めて Chat を開くまで `None`。
+    pub(crate) chat: Option<ProjectSession>,
+    /// Chat を見ているか。`true` の間は `Deref` が `chat` を返す＝「アクティブな session」を相手に
+    /// する既存のコード（タブ・プレビュー・ファイルを開く）がそのまま Chat で動く。
+    pub(crate) chat_active: bool,
+}
+
+impl ProjectSessions {
+    /// プロジェクトの枠。**Chat 中は `None`** — Chat のタブの並びや選択をプロジェクトの枠へ
+    /// 書き戻さない（`active` は「戻った時にどのプロジェクトか」として保たれている）。
+    pub(crate) fn slot_mut(&mut self, index: usize) -> Option<&mut ProjectSlot> {
+        if self.chat_active {
+            return None;
+        }
+        self.projects.get_mut(index)
+    }
 }
 
 pub(crate) struct RepositoryController {
@@ -131,13 +148,19 @@ impl Deref for ProjectSessions {
     type Target = ProjectSession;
 
     fn deref(&self) -> &Self::Target {
-        &self.sessions[self.active]
+        match &self.chat {
+            Some(chat) if self.chat_active => chat,
+            _ => &self.sessions[self.active],
+        }
     }
 }
 
 impl DerefMut for ProjectSessions {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.sessions[self.active]
+        match &mut self.chat {
+            Some(chat) if self.chat_active => chat,
+            _ => &mut self.sessions[self.active],
+        }
     }
 }
 
@@ -211,6 +234,27 @@ impl Workspace {
             _watch: None,
             _watch_pump: None,
         }
+    }
+
+    /// Chat モードの session。中身はプロジェクトの session と同じ束（エディタ領域・パネル）だが、
+    /// 枠（`ProjectSlot`）を持たず、AgentPanel は Chat モード（`AgentPanel::new_chat`）。
+    /// ファイル監視は張らない — Chat が触るファイルは「エージェントが書いた」とイベントで分かる。
+    pub(crate) fn create_chat_session(
+        theme: Theme,
+        storage: Option<storage::Storage>,
+        cx: &mut Context<Self>,
+    ) -> ProjectSession {
+        let mut session =
+            Self::create_project_session(None, theme.clone(), ExplorerView::Tree, None, cx);
+        let agent_panel = cx.new(|cx| AgentPanel::new_chat(theme, cx));
+        if let Some(storage) = storage {
+            agent_panel.update(cx, |panel, cx| panel.set_storage_for_chat(storage, cx));
+        }
+        cx.subscribe(&agent_panel, Workspace::on_panel_event)
+            .detach();
+        session.fleet_agents = vec![agent_panel.clone()];
+        session.agent_panel = agent_panel;
+        session
     }
 
     /// プロジェクトのルート群からワークスペースを組み立てる。開けないルートはスキップ。
@@ -403,7 +447,13 @@ impl Workspace {
         // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
         self.schedule_control_summary(cx);
         if phase == TaskPhase::Integrated {
-            self.wake_captain(session_index, "integrated", record.title.clone().into(), digest.map(|text| text.to_string().into()), cx);
+            self.wake_captain(
+                session_index,
+                "integrated",
+                record.title.clone().into(),
+                digest.map(|text| text.to_string().into()),
+                cx,
+            );
         }
         cx.notify();
         let Some(storage) = self.persistence.storage.clone() else {
@@ -695,11 +745,19 @@ impl Workspace {
             .unwrap_or_else(|| project_color(0));
         let settings_view = cx.new(|cx| settings::SettingsView::new(theme.clone(), accent, cx));
         PanelRegistry::bind_settings(&settings_view, cx);
+        // Chat の一覧の検索欄。打つたびにパネルへ流す（絞り込みと全文検索はパネルの仕事）。
+        let chat_search = cx.new(|cx| EditorView::plain(theme.clone(), theme.fg2, true, cx));
+        cx.observe(&chat_search, |workspace, _, cx| {
+            workspace.sync_chat_search(cx)
+        })
+        .detach();
         let mut workspace = Workspace {
             project_sessions: ProjectSessions {
                 projects,
                 active,
                 sessions,
+                chat: None,
+                chat_active: false,
             },
             theme,
             focus_handle,
@@ -714,6 +772,12 @@ impl Workspace {
                 show_herd: std::env::var_os("NECODER_HERD").is_some()
                     || std::env::var_os("NECODER_FLEET").is_some(),
                 fleet_mode: std::env::var_os("NECODER_FLEET").is_some(),
+                chat_search,
+                chat_menu: None,
+                chat_delete_confirm: None,
+                chat_shown: None,
+                chat_accent: None,
+                pending_chat_mode: false,
                 fleet_cells: Vec::new(),
                 new_task: None,
                 captain_pending: HashMap::new(),
@@ -852,7 +916,7 @@ impl Workspace {
         // （二段確認は 2026-07-27 に確認ダイアログへ一本化＝`NECODER_WORKTREE_DELETE_PROBE` を使う）
         if std::env::var_os("NECODER_RAIL_MENU").is_some() {
             let active = workspace.project_sessions.active;
-            if let Some(slot) = workspace.project_sessions.projects.get_mut(active) {
+            if let Some(slot) = workspace.project_sessions.slot_mut(active) {
                 slot.worktree_branch = Some("feature/login".to_string());
             }
             workspace.overlays.rail_menu = Some(RailMenuState {
@@ -1094,7 +1158,11 @@ impl Workspace {
         }
     }
 
+    /// いま見ているプロジェクトの枠。**Chat 中は `None`**（Chat はプロジェクトに属さない）。
     pub(crate) fn active_slot(&self) -> Option<&ProjectSlot> {
+        if self.project_sessions.chat_active {
+            return None;
+        }
         self.project_sessions
             .projects
             .get(self.project_sessions.active)
@@ -1129,7 +1197,7 @@ impl Workspace {
             .collect();
         let active_file = self.active_tab.min(files.len().saturating_sub(1));
         let active = self.project_sessions.active;
-        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.open_files = files;
             slot.active_file = active_file;
         }
@@ -1264,6 +1332,16 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// ファイルを読み書きする相手。プロジェクトはその worktree の host（リモートなら SSH の先）、
+    /// **Chat は枠を持たないので常にこのマシン**。
+    pub(crate) fn active_host(&self) -> Option<Arc<dyn host::Host>> {
+        if self.chat_mode() {
+            return Some(host::LocalHost::shared());
+        }
+        self.active_worktree()
+            .map(|worktree| worktree.host().clone())
     }
 
     pub(crate) fn active_worktree(&self) -> Option<Rc<Worktree>> {

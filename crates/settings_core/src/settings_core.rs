@@ -45,6 +45,34 @@ pub struct RailSettings {
     pub remote: bool,
     /// Fleet（多エージェントの面・FLEET-V2）。レールから Editor ⇄ Fleet を切り替える。
     pub fleet: bool,
+    /// Chat（プロジェクトに紐づかない会話の面・`docs/CHAT.md`）。
+    pub chat: bool,
+}
+
+/// Chat モードの設定（`docs/CHAT.md` §2.2 / §4.1）。
+/// 例: `{ "chat": { "directory": "~/Chats", "instructions": "敬語は使わない" } }`
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ChatSettings {
+    /// チャットのフォルダを並べる場所。空なら書類フォルダの `necoder/`（`~/` は展開する）。
+    /// 同期フォルダを避けたい人・別ドライブに置きたい人のための逃げ道。
+    pub directory: String,
+    /// どのチャットにも効かせる指示。Chat 用のシステムプロンプトの末尾に足す。
+    pub instructions: String,
+    /// 使っていないチャットのエージェントを止めるまでの分数（`0` = 止めない）。
+    /// チャットは何本も開いたままになりがちで、1 本ごとにエージェントのプロセスが常駐する。
+    /// 止めても会話は失われない（次の送信で `session/load` が同じ会話を引き継ぐ）。
+    pub idle_stop_minutes: u64,
+}
+
+impl Default for ChatSettings {
+    fn default() -> Self {
+        Self {
+            directory: String::new(),
+            instructions: String::new(),
+            idle_stop_minutes: 10,
+        }
+    }
 }
 
 impl Default for RailSettings {
@@ -58,6 +86,7 @@ impl Default for RailSettings {
             todos: true,
             remote: true,
             fleet: true,
+            chat: true,
         }
     }
 }
@@ -219,6 +248,8 @@ pub struct Settings {
     pub html_preview_evict_minutes: u64,
     /// レールのアイコン表示（アクティビティバー）。
     pub rail: RailSettings,
+    /// Chat モード（`docs/CHAT.md`）。
+    pub chat: ChatSettings,
     /// Fleet の初回導線（2 本目の Task を切った時の 1 回だけのトースト・FLEET-V2 §3.0）を出したか。
     /// 出したら `true` を書き込み、以後は**何も案内しない**（案内は 1 回・DECISIONS の静かさの原則）。
     pub fleet_hint_seen: bool,
@@ -256,6 +287,7 @@ impl Default for Settings {
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
             rail: RailSettings::default(),
+            chat: ChatSettings::default(),
             fleet_hint_seen: false,
             onboarded: false,
         }
@@ -287,7 +319,8 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
   "onboarded": false,
-  "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }
+  "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true },
+  "chat": { "directory": "", "instructions": "", "idle_stop_minutes": 10 }
 }"#;
 
 /// マージ済み JSON と型付き設定を保持する。
