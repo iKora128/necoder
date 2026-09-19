@@ -263,7 +263,7 @@ impl Workspace {
     /// 開発用: Chat モードを offscreen で検証する（`NECODER_CHAT_PROBE`・`;` 区切りで順に実行）。
     ///
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の
-    /// チャットの行 / `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
+    /// チャットの行 / `edit:<文字>` = 成果物を書き換える（本番と同じ合図を出す）/ `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
     /// `settings:<page>` / `find:<語>` / `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
     #[cfg(debug_assertions)]
     pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -290,6 +290,36 @@ impl Workspace {
                 });
                 if let (Some(panel), Some(id)) = (self.chat_panel(), id) {
                     panel.update(cx, |panel, cx| panel.open_chat(&id, cx));
+                }
+            }
+            "attach" => {
+                let path = PathBuf::from(argument);
+                if let Some(panel) = self.chat_panel() {
+                    panel.update(cx, |panel, cx| panel.debug_attach(&path, cx));
+                }
+            }
+            "approve" => {
+                let kind = argument.to_string();
+                if let Some(panel) = self.chat_panel() {
+                    panel.update(cx, |panel, cx| panel.debug_answer_permission(&kind, cx));
+                }
+            }
+            "rollback" => {
+                let which = argument.to_string();
+                if let Some(panel) = self.chat_panel() {
+                    panel.update(cx, |panel, cx| panel.debug_restore_checkpoint(&which, cx));
+                }
+            }
+            "paste-image" => {
+                self.set_chat_mode(true, window, cx);
+                if let Some(panel) = self.chat_panel() {
+                    panel.update(cx, |panel, cx| panel.debug_paste_image(window, cx));
+                }
+            }
+            "edit" => {
+                let marker = argument.to_string();
+                if let Some(panel) = self.chat_panel() {
+                    panel.update(cx, |panel, cx| panel.debug_edit_artifact(&marker, cx));
                 }
             }
             "history" => {

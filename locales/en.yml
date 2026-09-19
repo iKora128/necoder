@@ -14,6 +14,7 @@ finder:
   new_file: New file…
   new_dir: New folder…
 agent:
+  pasted_image: Pasted image
   search_placeholder: Search this conversation
   search_count: "%{position}/%{entries} · %{total} matches"
   search_none: No matches

@@ -198,6 +198,18 @@ ROADMAP M16 の C0〜C6 に対応する。P0 が揃うのは C3 まで。
 - **claude.ai のコネクタは Editor のスレッドにも効いていた**。切ると文脈 31,731 → 24,986 トークン・初回応答 4.2 → 1.8 秒。設定「MCP サーバ > claude.ai のコネクタを Claude のスレッドへ読み込む」（既定 on = Claude Code の既定どおり）。**Chat モードはこの設定に関わらず常に読み込まない**（necoder の MCP 設定で選んだ物だけを渡す原則）
 - **表示の隔離は実物の WKWebView で確認**: https への fetch / `file://` / 親フォルダ / エンコードした `..` / XHR / WebSocket / 外部画像はすべて遮断。ページに `window.ipc` の殻はあるが、ネイティブの受け口は `ipc_handler` を渡した時しか登録されない（wry `wkwebview/mod.rs`）。
 
+### 「人の手番」だと思っていた 3 件は offscreen で通せた（2026-09-19 追検証）
+
+最初は「WebView の見た目 / OS の D&D / クリップボードは自動では確かめられない」として人の手番に回したが、**確かめたいのは OS の所作ではなく necoder の経路**だと切り分ければ 3 件とも通せた。
+
+| 確かめたかったこと | どう通したか | 残る人の手番 |
+|---|---|---|
+| エージェントの修正後にプレビューが読み直される | 検証用のページが `document.title` に自分の中身を書き、necoder 側で拾う（debug 限定の `NECODER_WEBVIEW_PROBE_LOG`）。実物の WKWebView で `BEFORE-EDIT` → `AFTER-EDIT` と読み直された | 無し |
+| 渡したファイルを直して、確認して、巻き戻せる | 実エージェントに、チャットのフォルダの**外**の `.md` の誤字 3 つを直させた。承認カードは 1 度だけ出て、「このチャットでは以後許可」の後は聞かれない。最初のチェックポイントへ戻すと元のファイルに戻る | **ドラッグ操作そのもの**（`ExternalPaths` を受ける口は既存） |
+| スクリーンショットを ⌘V で送れる | 実 PNG をクリップボードへ置いて composer で貼る（`EditorView::paste` → `PastedImage` → キャッシュ → 添付）| **OS がクリップボードへ置く所まで** |
+
+**チェックポイントは書き込みのたびに切られる**（自動で許可した時も同じ）。だから「直前へ戻す」は最後の書き込みだけを取り消す。全部を戻すなら transcript の**最初の**チェックポイント行を押す。
+
 ### 検証の回し方
 
 ```sh
@@ -215,5 +227,19 @@ NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO
   cargo run -p necoder --features screenshot -- $ISO/project
 ```
 
-`NECODER_CHAT_PROBE` の命令（`;` 区切り）: `open` / `editor` / `seed`（エージェントを起こさない見本）/ `history` / `pick`（過去のチャットを開く）/ `send:<文>`（**実エージェントへ送る**）/ `search:<語>`（一覧の絞り込み）/ `find:<語>`（transcript 内検索）/ `menu` / `delete` / `settings:<page>` / `source` / `state` / `wait:<ms>`。
+`NECODER_CHAT_PROBE` の命令（`;` 区切り）:
+
+| 命令 | 何をするか |
+|---|---|
+| `open` / `editor` | Chat へ / Chat を抜ける |
+| `seed` / `history` | 見本の会話と成果物（エージェントを起こさない）/ 過去のチャットの行 |
+| `pick` | 一覧から過去のチャットを開く（再開の入口） |
+| `send:<文>` | **実エージェントへ送る**（課金される） |
+| `attach:<path>` | ファイルを添付（Finder からの D&D と同じ受け口） |
+| `approve[:always\|reject]` | 出ている承認カードに答える |
+| `rollback[:first]` | チェックポイントへ戻す（既定は直近・`first` は最初） |
+| `paste-image` | クリップボードへ PNG を置いて composer で貼る |
+| `edit:<文字>` | 成果物を書き換えて**本番と同じ合図**（`FilesTouched` → `TurnEnded`）を出す |
+| `search:<語>` / `find:<語>` | 一覧の絞り込み / transcript 内検索 |
+| `menu` / `delete` / `settings:<page>` / `source` / `state` / `wait:<ms>` | 行メニュー / 削除の確認 / 設定画面 / 右をソース表示 / 状態を出力 / 待つ |
 `reduce_motion` を入れるのは、transcript のフェードインが offscreen では 1 フレーム目で固定されて薄く写るため。隔離の検証は `NECODER_WEBVIEW_PROBE_LOG=<file>` と `NECODER_CHAT_PROBE_PAGE=<html>` で、ページが `document.title` に書いた結果をログへ落とす（debug ビルド限定）。
