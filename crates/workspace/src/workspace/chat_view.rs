@@ -215,9 +215,7 @@ impl Workspace {
                     );
                 }
                 self.on_chat_turn_ended(cx);
-                if let Some(panel) = self.chat_panel() {
-                    panel.update(cx, |panel, cx| panel.stop_idle_chat_agents(cx));
-                }
+                self.schedule_chat_idle_sweep(cx);
                 cx.notify();
             }
             agent_panel::PanelEvent::TurnFailed {
@@ -251,6 +249,28 @@ impl Workspace {
             }
             _ => {}
         }
+    }
+
+    /// 使っていないチャットのエージェントを止める見回りを予約する。**ターンが終わるたびに 1 回**だけ
+    /// 仕掛ける一発のタイマーで、常時回る時計は持たない（何も起きていない間は CPU を使わない）。
+    /// 猶予が明けた時点でまだ使っていなければ、そのチャットはここで止まる。
+    fn schedule_chat_idle_sweep(&mut self, cx: &mut Context<Self>) {
+        let Some(delay) = AgentPanel::chat_idle_stop_after(cx) else {
+            return;
+        };
+        cx.spawn(async move |workspace, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                // Chat の面に居なければ、最後に見ていたチャットも止めてよい。
+                let include_active = !workspace.chat_mode();
+                if let Some(panel) = workspace.chat_panel() {
+                    panel.update(cx, |panel, cx| {
+                        panel.stop_idle_chat_agents(include_active, cx)
+                    });
+                }
+            });
+        })
+        .detach();
     }
 
     /// エージェントが触るファイルの予告。**このイベントは書かれる前に届く**（許可リクエストの時点）ので、

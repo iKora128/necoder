@@ -263,7 +263,7 @@ impl Workspace {
     /// 開発用: Chat モードを offscreen で検証する（`NECODER_CHAT_PROBE`・`;` 区切りで順に実行）。
     ///
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の
-    /// チャットの行 / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
+    /// チャットの行 / `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
     /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
     #[cfg(debug_assertions)]
     pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -275,6 +275,21 @@ impl Workspace {
                 self.set_chat_mode(true, window, cx);
                 if let Some(panel) = self.chat_panel() {
                     panel.update(cx, |panel, cx| panel.debug_seed_chat(cx));
+                }
+            }
+            // 一覧の先頭（開いていない過去のチャット）を開く＝再起動後の再開の入口。
+            "pick" => {
+                self.set_chat_mode(true, window, cx);
+                let id = self.chat_panel().and_then(|panel| {
+                    panel
+                        .read(cx)
+                        .chat_rows()
+                        .iter()
+                        .find(|row| row.activity.is_none() && !row.active)
+                        .map(|row| row.id.clone())
+                });
+                if let (Some(panel), Some(id)) = (self.chat_panel(), id) {
+                    panel.update(cx, |panel, cx| panel.open_chat(&id, cx));
                 }
             }
             "history" => {

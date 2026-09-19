@@ -14,6 +14,7 @@
 //! 8. **プロセスを立て直して `session/load` で再開しても** 2〜5 が保たれる
 //!
 //! 使い方: `cargo run -p chat_core --example probe_chat_preset`
+//! `-- --compare` は同じ問いを Editor のスレッドと同じ作り方でも投げ、初回応答と文脈の量を比べる。
 //! `-- --image` を付けると、画像つき prompt（ROADMAP M16 C4）の 1 ターンだけを確かめる。
 //! 課金されるので CI では回さない（実エージェント・10 ターン前後）。一時ディレクトリだけを触る。
 
@@ -46,6 +47,16 @@ struct Turn {
 
 impl Probe {
     fn start(chat_dir: &Path, attachments: Vec<PathBuf>, resume: Option<String>) -> Probe {
+        Self::start_with(chat_dir, attachments, resume, true)
+    }
+
+    /// `chat_preset = false` は Editor のスレッドと同じ作り方（プリセットなし）＝比較の基準。
+    fn start_with(
+        chat_dir: &Path,
+        attachments: Vec<PathBuf>,
+        resume: Option<String>,
+        chat_preset: bool,
+    ) -> Probe {
         let host = host::LocalHost::shared();
         let kind = acp_client::AgentKind::by_label("Claude Code").expect("Claude Code");
         let command = kind
@@ -57,7 +68,11 @@ impl Probe {
             resume,
             // ユーザー設定の MCP は渡さない（Chat は空が既定）。
             mcp_servers: Vec::new(),
-            preset: chat_core::preset::session_preset(chat_dir, chat_core::date::Date::today(), ""),
+            preset: if chat_preset {
+                chat_core::preset::session_preset(chat_dir, chat_core::date::Date::today(), "")
+            } else {
+                acp_client::preset::SessionPreset::default()
+            },
             ..SessionPreferences::default()
         };
         let (command_tx, command_rx) = futures::channel::mpsc::unbounded();
@@ -297,6 +312,23 @@ fn main() {
     let mut report = Report {
         failures: Vec::new(),
     };
+
+    if std::env::args().any(|argument| argument == "--compare") {
+        // 同じ問いを、Chat のプリセットと Editor のスレッドと同じ作り方の両方で投げる（ROADMAP M16 C6）。
+        for (label, chat_preset) in [("chat preset", true), ("editor thread (no preset)", false)] {
+            let mut probe = Probe::start_with(&chat_dir, Vec::new(), None, chat_preset);
+            let turn = probe.turn("Rust の所有権って何？2 行で教えて");
+            println!(
+                "COMPARE {label}: first chunk {:?} · total {:?} · context {} tokens",
+                turn.first_chunk.unwrap_or_default(),
+                turn.total,
+                probe.tokens_used
+            );
+            drop(probe);
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        return;
+    }
 
     if std::env::args().any(|argument| argument == "--image") {
         // 単色の PNG を作って送り、色を答えさせる（貼り付けたスクリーンショットと同じ経路）。

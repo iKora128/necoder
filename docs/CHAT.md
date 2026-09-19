@@ -39,7 +39,7 @@ Editor / Fleet に並ぶ第 3 のモード。claude.ai や ChatGPT のような�
 ### 2.3 フォルダ名と寿命
 
 - **名前 = `YYYY-MM-DD <最初のメッセージの先頭 24 文字>`**（例: `2026-09-18 ポモドーロタイマー作って`）。LLM を呼ばずに決まる。同名があれば ` 2` を付ける。
-  使えない文字（`/ \ : * ? " < > |`・制御文字）は除き、末尾の空白とピリオドを落とし、Windows の予約名（`CON` など）は `_` を前置する。空になったら時刻 `HHMM`。
+  使えない文字（`/ \ : * ? " < > |`・制御文字）は空白にして連続を畳み、末尾の空白とピリオドを落とす。先頭が必ず日付なので Windows の予約名（`CON` など）とは衝突しない。空になったら時刻 `HHMM`。
 - **作成後は変えない**。スレッドを改名してもフォルダ名は追従しない。Claude Code はセッションを cwd のパス文字列で引くので、cwd が変わると `session/load` が前回の会話を見つけられなくなる。
 - **作るのは最初の送信時**（cwd が要るのはセッション開始時）。新規チャットを開いただけでは作らない。
 - **空のフォルダは残さない**。相談だけで終わったチャットのフォルダは、エージェント停止時と起動時の掃除で消す。再開時に無ければ同じパスで作り直す（パス文字列が同じなら `session/load` は通る）。
@@ -60,10 +60,10 @@ Editor / Fleet に並ぶ第 3 のモード。claude.ai や ChatGPT のような�
 |---|---|---|
 | ファイルを composer へドロップ（Finder / エクスプローラ） | @メンションのチップになる。Chat では常に絶対パス | **既存**（`add_context_path`）。Chat では cwd 相対にしない |
 | フォルダをドロップ | 同じくチップ。中のファイルは読める | 要改修（フォルダの表示） |
-| 画像をドロップ / 貼り付け | 画像として送る（ACP の image ブロック） | **未実装**（ROADMAP M12「composer への画像添付」が前提） |
+| 画像をドロップ / 貼り付け | 画像として送る（ACP の image ブロック・本文の前）。**その 1 通だけ**に添える。3.5 MB 超・読めない物はパスの添付のまま | **実装済み**（2026-09-19・全スレッド共通） |
 | スクリーンショットを貼り付け | 同上。実体は `cache_dir()/chat-paste/` | 同上 |
 | 長いテキストを貼り付け | そのまま送る。transcript では折り畳み | **既存** |
-| PDF をドロップ | チップ。エージェントが Read で読む | 要確認（C0 で読めるか試す） |
+| PDF をドロップ | チップ。エージェントが Read で読む | **確認済み**（C0 の通し確認で合言葉を読めた） |
 | Word / Excel などをドロップ | チップにはなるが、読めない旨を 1 行出す | later（変換の道具が Chat に無い） |
 
 添付は**コピーしない**。ユーザーが頼みたいのは「このファイルを直して」なので、元の場所のファイルを扱う。
@@ -84,13 +84,13 @@ Editor / Fleet に並ぶ第 3 のモード。claude.ai や ChatGPT のような�
 
 | 操作 | 中身 | 状態 |
 |---|---|---|
-| `▣ プレビュー` チップ | ツールカードから、プレビュー表示でタブを開く。判定は構造化されたパス + 実在確認 + 拡張子。Chat では `artifacts/` の中と添付したファイルが対象 | 新規（M16 C1） |
+| `▣ プレビュー` チップ | ツールカードから、プレビュー表示でタブを開く。判定は差分のパス（構造化）+ 実在確認 + 拡張子。全スレッドで出る | **実装済み** |
 | `+3 −3` チップ | 添付ファイルや成果物の変更を diff タブで開く | **既存**（diff タブ） |
 | プレビュー ⇄ ソース / 再読込 | ⌘⇧V / ↻。再読込はターン終了時に 1 回 | 既存 + 要改修（C1） |
 | 対応形式 | `.html` `.md`（最初）→ `.svg`・画像・PDF（既存の画像タブ / PDF タブで開く） | 段階的 |
-| このチャットのファイル一覧 | スレッドのヘッダの `▣ n` からピッカー | 新規 |
+| このチャットの成果物 | 会話の上の帯（`▣ 名前` のチップ）。ツールカードのチップは再起動で消えるので、戻る道をここに常設 | **実装済み** |
 | Finder で表示 / 既定アプリで開く / ブラウザで開く | タブの右クリックメニュー | **既存**（2026-09-18） |
-| プロジェクトへコピー / 別名で保存 | 成果物を Editor のプロジェクトへ持っていく | 新規 |
+| プロジェクトへコピー | タブの右クリック。Chat を抜けた時に戻るプロジェクトのルートへ（上書きしない・同名は連番） | **実装済み** |
 | タブやチップを Finder・他アプリへドラッグ | 要調査（GPUI から OS へのドラッグ開始） | later |
 | 印刷 / PDF に書き出す | WebView の印刷 | later |
 
@@ -103,25 +103,25 @@ Editor / Fleet に並ぶ第 3 のモード。claude.ai や ChatGPT のような�
 
 | 機能 | 優先 | 状態 |
 |---|---|---|
-| 新しいチャット（⌘N）・一覧・日付グループ・行頭●スレッド色 | P0 | 新規（面） |
+| 新しいチャット（⌘N）・一覧・日付グループ・行頭●スレッド色 | P0 | **実装済み** |
 | 送信 / 停止（Esc）/ Enter = 改行・⌘Enter = 送信 | P0 | 既存 |
 | ストリーミング表示・✳ Thinking・Markdown・表・コードのハイライト | P0 | 既存 |
 | 宛先チップ・トークン常時表示・Σ 台帳 | P0 | 既存 |
 | 自動命名・改名 | P0 | 既存 |
-| 履歴の復元（再起動後に続きを頼める） | P0 | 既存 + 改修（`session/load` にプリセットを載せる） |
+| 履歴の復元（再起動後に続きを頼める） | P0 | **実装済み**（`session/load` にも同じプリセット・実エージェントで確認） |
 | モデル・思考量の切替 | P0 | 既存 |
-| メッセージとコードブロックのコピー | P0 | 既存（コードブロック単位は要確認） |
-| Web の検索と URL の取得 | P0 | 新規（プリセットの `tools` に入れる） |
-| 画像の貼り付け・ドロップ | P0 | 新規（M12 の未了項目が前提） |
-| タイトル検索 | P0 | 新規 |
+| メッセージのコピー | P0 | 既存（エントリ単位の ⧉ とドラッグ選択。**コードブロック単位のボタンは無い** = 後続） |
+| Web の検索と URL の取得 | P0 | **実装済み**（プリセットの `tools`。権限は自動で許可） |
+| 画像の貼り付け・ドロップ | P0 | **実装済み**（実エージェントが画像の色を答えた） |
+| タイトル検索 | P0 | **実装済み** |
 | ターン終了の通知（トースト・音） | P1 | 既存 |
-| 全文検索（履歴の本文） | P1 | 新規（`turns` を検索） |
-| transcript 内検索（⌘F） | P1 | 要確認 |
-| ピン留め・アーカイブ・削除 | P1 | 改修（`archived` は既存） |
-| 応答中に次の入力を積む（キュー） | P1 | 要確認 |
-| カスタム指示（設定 `chat.instructions` を Chat 用プロンプトへ追記） | P1 | 新規 |
-| 会話を Markdown で書き出す（チャットのフォルダ直下へ。`artifacts/` には入れない） | P1 | 新規 |
-| 使っていないチャットのエージェントを自動で止める（再開は `session/load`） | P1 | 要確認（既存スレッドの扱いに合わせる） |
+| 全文検索（履歴の本文） | P1 | **実装済み**（`storage::search_turns`・`LIKE`。一致行に抜粋） |
+| transcript 内検索（⌘F） | P1 | **無い**（確認済み 2026-09-19）= 後続 |
+| ピン留め・アーカイブ・削除 | P1 | **実装済み**（削除はファイルの扱いを聞く・既定は残す） |
+| 応答中に次の入力を積む（キュー） | P1 | 既存（`queued_prompts`・確認済み） |
+| カスタム指示（設定 `chat.instructions` を Chat 用プロンプトへ追記） | P1 | **実装済み**（設定画面の入力欄は無い = `settings.json` を編集） |
+| 会話を Markdown で書き出す（チャットのフォルダ直下へ。`artifacts/` には入れない） | P1 | **実装済み**（一覧の右クリック） |
+| 使っていないチャットのエージェントを自動で止める（再開は `session/load`） | P1 | **実装済み**（`chat.idle_stop_minutes` 既定 10。ターン終了ごとに一発のタイマー） |
 | Chat から Editor のスレッドへ引き継ぐ（要約を渡して新しいスレッド） | P2 | 新規 |
 | メッセージを編集して再送・再生成 | P2 | 要調査（ACP に標準の口が無い） |
 | チャットごとに MCP を選ぶ | P2 | 新規 |
@@ -142,7 +142,7 @@ Editor / Fleet に並ぶ第 3 のモード。claude.ai や ChatGPT のような�
 ### 4.3 面
 
 - **P0**: モード切替（Editor / Fleet / Chat）/ 無彩色の額縁 / 左の一覧・中央の transcript・右のエディタ領域 / artifact が無ければ右は閉じる / 状態の ●（塗り・点滅・輪郭）
-- **P1**: 一覧の幅の保存 / 最後に開いていたチャットの復元 / キー（候補 ⌘⇧J）/ コマンドパレットの `Chat: …`
+- **P1**: キー ⌘⇧J・パレットの `表示: Chat モード` / `Chat: 新しいチャット`・**どのモードで閉じたかの復元**は実装済み。一覧の幅の保存と、最後に開いていたチャットの復元は後続
 - **P2**: チャットを別の窓へ
 
 ## 5. プリセット（`SessionPreset::Chat`）の中身
@@ -155,6 +155,8 @@ Editor / Fleet に並ぶ第 3 のモード。claude.ai や ChatGPT のような�
 | `_meta.systemPrompt` | necoder 自前の Chat 用プロンプト（文字列 = 置換）。末尾に `chat.instructions` |
 | `_meta.claudeCode.options.tools` | `Read` `Write` `Edit` `Glob` `Grep` `WebSearch` `WebFetch`（Bash は入れない） |
 | `_meta.claudeCode.options.settingSources` | `[]`（user / project / local 設定を持ち込まない） |
+| `_meta.claudeCode.options.strictMcpConfig` | `true`（`.mcp.json`・プラグインの MCP を無視） |
+| 環境変数 `ENABLE_CLAUDEAI_MCP_SERVERS` | `false`。**claude.ai アカウントのコネクタは上の 2 つでは止まらない**（§7） |
 | `mcpServers` | 空。チャットごとに選んだものだけ（P2） |
 | 権限 | §3.2 の表を necoder 側で適用 |
 
@@ -179,3 +181,34 @@ ROADMAP M16 の C0〜C6 に対応する。P0 が揃うのは C3 まで。
 | C4 | 画像の貼り付け・ドロップ（M12 の未了項目と同じ実装） | P0 の残り |
 | C5 | P1（検索・削除・カスタム指示・書き出し・ファイル一覧・プロジェクトへコピー・自動停止） | 毎日使える |
 | C6 | 実測（メモリ・初回応答・トークン） | 「重くならない」を数字に |
+
+## 7. 実機で分かったこと（2026-09-19）
+
+実 `claude-agent-acp` への通し確認（`cargo run -p chat_core --example probe_chat_preset`）と、隔離起動した GUI から実エージェントへ送る E2E（`NECODER_CHAT_PROBE`）の結果。
+
+- **行動規則は 11 項目すべて通った**: 相談はテキストだけ / 成果物は `artifacts/` に 1 ファイル / 相談の途中でファイルを触らない / 修正は同じファイルの編集 / 曖昧な依頼でファイルを増やさない / 道具は持たせた 7 個だけ / 渡していない場所への書き込みは拒否 / `session/load` で再開できる / 渡した PDF を読める / 再開後も同じファイルを編集する / 再開後も道具は同じ。
+- **claude.ai アカウントのコネクタが漏れ込む**。`settingSources: []` でも `strictMcpConfig` でも、アカウントに繋いだコネクタ（Figma・Google Calendar・Higgsfield …）は自動で読み込まれ、170 個超のツール定義が**最初のターンから文脈を 11 万トークン**食った。止める口は環境変数 `ENABLE_CLAUDEAI_MCP_SERVERS=false` だけ（SDK の実行ファイルの文字列から特定）。止めた後は 5,202 トークン。Chat でコネクタを使いたくなったら「チャットごとに MCP を選ぶ」（P2）で明示的に渡す。
+- **同じ問いの比較**（`-- --compare`）: Chat のプリセット = 文脈 5,199 トークン・初回応答 3.1 秒 / Editor のスレッドと同じ作り方 = 28,703 トークン・4.0 秒。
+- **メモリ**（debug ビルド・隔離 offscreen）: Chat を開くだけなら necoder 本体 +2 MB（143 → 145）。重いのは**生きているエージェント 1 本 ≈ 400 MB**（アダプタの node + claude 本体）で、これは Editor のスレッドと同じ。だから使っていないチャットのエージェントを止める弁（`chat.idle_stop_minutes`）が idle メモリ予算を守る。
+- **`FilesTouched` は書かれる前に届く**（許可リクエストの時点）。成果物を右に出す判断をそこでやると、まだファイルが無い。覚えておいてターン終了時に取り込む。
+- **表示の隔離は実物の WKWebView で確認**: https への fetch / `file://` / 親フォルダ / エンコードした `..` / XHR / WebSocket / 外部画像はすべて遮断。ページに `window.ipc` の殻はあるが、ネイティブの受け口は `ipc_handler` を渡した時しか登録されない（wry `wkwebview/mod.rs`）。
+
+### 検証の回し方
+
+```sh
+# 行動規則（実エージェント・課金あり・一時ディレクトリだけを触る）
+cargo run -p chat_core --example probe_chat_preset            # 11 項目
+cargo run -p chat_core --example probe_chat_preset -- --image  # 画像つき prompt
+cargo run -p chat_core --example probe_chat_preset -- --compare
+
+# GUI（稼働中の本体に触れない: データ・ソケット・書類フォルダを全部隔離する）
+ISO=$(mktemp -d); mkdir -p $ISO/home $ISO/docs $ISO/project
+echo '{"onboarded":true,"agent_prewarm":false,"reduce_motion":true}' > $ISO/home/settings.json
+NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO/docs \
+  NECODER_SCREENSHOT=$ISO/shot.png NECODER_SCREENSHOT_DELAY_MS=7000 \
+  NECODER_CHAT_PROBE="open;history;seed;wait:2500;state" \
+  cargo run -p necoder --features screenshot -- $ISO/project
+```
+
+`NECODER_CHAT_PROBE` の命令（`;` 区切り）: `open` / `editor` / `seed`（エージェントを起こさない見本）/ `history` / `send:<文>`（**実エージェントへ送る**）/ `search:<語>` / `menu` / `delete` / `source` / `state` / `wait:<ms>`。
+`reduce_motion` を入れるのは、transcript のフェードインが offscreen では 1 フレーム目で固定されて薄く写るため。隔離の検証は `NECODER_WEBVIEW_PROBE_LOG=<file>` と `NECODER_CHAT_PROBE_PAGE=<html>` で、ページが `document.title` に書いた結果をログへ落とす（debug ビルド限定）。

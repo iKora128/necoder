@@ -114,7 +114,10 @@ impl AgentPanel {
                 id: thread.id.clone(),
                 name: thread.name.clone(),
                 color: thread.color,
-                activity: Some(thread.activity()),
+                // 状態を持つのは**エージェントが起きているチャットだけ**。開いていても、まだ送っていない・
+                // 止めたチャットは輪郭だけの ●（一覧の「起動中 n」もこれを数える）。
+                activity: (thread.command_tx.is_some() || thread.running)
+                    .then(|| thread.activity()),
                 active: index == self.active,
                 pinned: chat.pinned,
                 sort_at_ms: thread.last_input_at_ms.unwrap_or(thread.created_at_ms),
@@ -491,14 +494,22 @@ impl AgentPanel {
     }
 
     /// 使っていないチャットのエージェントを止める（`chat.idle_stop_minutes`）。会話は失われない —
-    /// 次の送信で `session/load` が同じ会話を引き継ぐ。走行中・承認待ち・いま見ているチャットは対象外。
-    pub fn stop_idle_chat_agents(&mut self, cx: &mut Context<Self>) {
+    /// 次の送信で `session/load` が同じ会話を引き継ぐ。走行中・承認待ちは対象外。いま見ている
+    /// チャットも対象外だが、`include_active`（＝ユーザーが Chat の面に居ない）なら止める。
+    ///
+    /// エージェントは 1 本で 400 MB 前後を握る（実測 2026-09-19: アダプタの node + claude 本体）。
+    /// チャットは何本も開いたままになりがちなので、この弁が idle メモリ予算を守る。
+    pub fn stop_idle_chat_agents(&mut self, include_active: bool, cx: &mut Context<Self>) {
         let minutes = settings::get(cx).chat.idle_stop_minutes;
         if !self.chat_mode || minutes == 0 {
             return;
         }
         let cutoff = now_unix_ms() - (minutes as i64) * 60_000;
-        let active = self.active;
+        let active = if include_active {
+            usize::MAX
+        } else {
+            self.active
+        };
         let mut stopped = Vec::new();
         for (index, thread) in self.threads.iter_mut().enumerate() {
             let idle = thread.command_tx.is_some()
@@ -507,12 +518,25 @@ impl AgentPanel {
                 && thread.last_input_at_ms.unwrap_or(thread.created_at_ms) < cutoff;
             if idle {
                 thread.command_tx = None;
+                // 自分で止めたセッションの終了を「切れました」と報告させない（先張りの畳みと同じ）。
+                thread.session_serial = 0;
                 stopped.push(index);
             }
+        }
+        if stopped.is_empty() {
+            return;
         }
         for index in stopped {
             self.tidy_chat_dir(index);
         }
+        self.sync_running_registry(cx);
+        self.refresh_chat_rows(cx);
+    }
+
+    /// 止める弁の猶予（設定 `chat.idle_stop_minutes`・`0` = 止めない）。
+    pub fn chat_idle_stop_after(cx: &App) -> Option<std::time::Duration> {
+        let minutes = settings::get(cx).chat.idle_stop_minutes;
+        (minutes > 0).then(|| std::time::Duration::from_secs(minutes * 60 + 5))
     }
 
     /// 権限リクエストの裁定。Chat のスレッドでなければ `None`（＝従来どおり）。
@@ -710,6 +734,13 @@ impl AgentPanel {
             cx.emit(PanelEvent::FilesTouched {
                 files: vec![artifact],
                 color: thread.color,
+            });
+            cx.emit(PanelEvent::TurnEnded {
+                thread: thread.name.clone(),
+                color: thread.color,
+                summary: SharedString::default(),
+                digest: None,
+                muted: true,
             });
         }
         cx.notify();
@@ -1247,6 +1278,49 @@ mod tests {
             assert!(path.to_string_lossy().contains("chat-paste"), "{path:?}");
             assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3]);
             let _ = std::fs::remove_file(path);
+        });
+        drop(fixture);
+    }
+
+    /// 使っていないチャットのエージェントは止まる（会話は残る）。走行中と、見ているチャットは止めない。
+    #[gpui::test]
+    fn idle_chat_agents_are_stopped_but_not_the_one_in_use(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx, "idle");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let long_ago = now_unix_ms() - 3 * 60 * 60_000;
+            let _first = attach_fake_session(panel);
+            panel.send_prompt_text("古い相談".into(), cx);
+            panel.threads[0].running = false;
+            panel.threads[0].last_input_at_ms = Some(long_ago);
+            panel.open_new_chat(cx);
+            let _second = attach_fake_session(panel);
+            panel.send_prompt_text("走っている相談".into(), cx);
+            panel.threads[1].last_input_at_ms = Some(long_ago);
+            panel.open_new_chat(cx);
+            let _third = attach_fake_session(panel);
+            panel.threads[2].last_input_at_ms = Some(long_ago);
+
+            panel.stop_idle_chat_agents(false, cx);
+            assert!(
+                panel.threads[0].command_tx.is_none(),
+                "古くて静かなチャットは止まる"
+            );
+            assert!(panel.threads[1].command_tx.is_some(), "走行中は止めない");
+            assert!(
+                panel.threads[2].command_tx.is_some(),
+                "いま見ているチャットは止めない"
+            );
+            assert!(!panel.threads[0].entries.is_empty(), "会話は残る");
+            assert!(
+                !panel.threads[0].session_lost,
+                "自分で止めたものを「切れました」にしない"
+            );
+
+            // Chat の面を離れていれば、最後に見ていたチャットも止める。
+            panel.stop_idle_chat_agents(true, cx);
+            assert!(panel.threads[2].command_tx.is_none());
+            assert!(panel.threads[1].command_tx.is_some());
         });
         drop(fixture);
     }
