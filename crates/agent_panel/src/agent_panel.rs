@@ -1138,20 +1138,37 @@ pub fn digest_tail(text: &str) -> Option<SharedString> {
 /// hover の ⧉ でエントリ単位コピーを提供する・M13 UX。本文のドラッグ選択は残件）。
 /// 添付チップに出す短い名前。相対パス（プロジェクトの中）はそのまま、絶対パスはファイル名だけ。
 /// 貼り付けた画像（`chat-paste/`）は機械が付けた名前なので「貼り付けた画像」と呼ぶ。
-fn context_chip_label(path: &str) -> SharedString {
-    let path = Path::new(path);
-    if path
+fn context_chip_label(text: &str) -> SharedString {
+    if Path::new(text)
         .parent()
         .is_some_and(|parent| parent.ends_with("chat-paste"))
     {
         return SharedString::from(i18n::t!("agent.pasted_image"));
     }
-    if path.is_relative() {
-        return SharedString::from(path.display().to_string());
+    if !looks_absolute(text) {
+        return SharedString::from(text.to_string());
     }
-    path.file_name()
-        .map(|name| SharedString::from(name.to_string_lossy().to_string()))
-        .unwrap_or_else(|| SharedString::from(path.display().to_string()))
+    // 区切りは両方見る（Windows のパスを mac で描くことも、その逆もある）。
+    text.rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(|name| SharedString::from(name.to_string()))
+        .unwrap_or_else(|| SharedString::from(text.to_string()))
+}
+
+/// **実行中 OS の規則で判定しない**絶対パス判定（`paths` crate と同じ規律）。
+///
+/// `Path::is_absolute()` は走っている OS の流儀で判じるので、Windows では `/Users/…` が、
+/// mac では `C:\…` が「相対パス」に見える。ここは受け取った文字列を**描く**ための判定なので、
+/// どちらの流儀の絶対パスも絶対として扱う（Windows CI で実際に踏んだ・2026-09-19）。
+fn looks_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with("\\\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'/' || bytes[2] == b'\\'))
 }
 
 /// image ブロックで送る 1 枚の上限。これを超える画像はパスの添付として残す（エージェントが
@@ -10831,8 +10848,13 @@ mod tests {
     fn a_chip_shows_a_short_readable_name() {
         // プロジェクトの中は相対パスのまま（どこのファイルかが分かる）。
         assert_eq!(context_chip_label("src/main.rs"), "src/main.rs");
-        // 外のファイルはファイル名だけ（全体はツールチップ）。
+        // 外のファイルはファイル名だけ（全体はツールチップ）。**どちらの OS で走っても**
+        // 両方の流儀の絶対パスを絶対として扱う（実行中 OS の規則で判定しない）。
         assert_eq!(context_chip_label("/Users/me/work/notes.md"), "notes.md");
+        assert_eq!(context_chip_label(r"C:\Users\me\work\notes.md"), "notes.md");
+        assert_eq!(context_chip_label(r"\\\\server\share\notes.md"), "notes.md");
+        assert!(looks_absolute("/x") && looks_absolute(r"C:\x") && looks_absolute("D:/x"));
+        assert!(!looks_absolute("src/main.rs") && !looks_absolute("x:y"));
         // 貼り付けた画像は機械が付けた名前なので呼び名に置き換える。
         assert_eq!(
             context_chip_label("/var/cache/necoder/chat-paste/paste-123-4.png"),
