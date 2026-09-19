@@ -255,9 +255,14 @@ impl Workspace {
             || self.chrome.resizing_explorer
             || self.chrome.resizing_bottom
         {
+            // 左ドックの幅は窓の状態として残す（次に開いた時も同じ幅）。
+            let save_width = self.chrome.resizing_explorer;
             self.chrome.resizing_agent = false;
             self.chrome.resizing_explorer = false;
             self.chrome.resizing_bottom = false;
+            if save_width {
+                self.save_state(cx);
+            }
             cx.notify();
         }
     }

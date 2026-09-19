@@ -39,6 +39,13 @@ pub(crate) struct PersistedState {
     /// Chat モードで閉じたか（`docs/CHAT.md` §4.3「最後に居た面へ戻る」）。
     #[serde(default)]
     pub(crate) chat_mode: bool,
+    /// 最後に見ていたチャット（Chat を開いた時にそこへ戻る）。
+    #[serde(default)]
+    pub(crate) chat_active: Option<String>,
+    /// 左ドックの幅（エクスプローラ・Git・Todo・Fleet サイドバー・チャットの一覧で共有）。
+    /// `0` は未保存＝既定の幅。
+    #[serde(default)]
+    pub(crate) left_dock_width: f32,
     #[serde(default)]
     pub(crate) fleet_view: String,
 }

@@ -307,6 +307,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
     "context": "AgentPanel",
     "bindings": {
       "cmd-w": "agent::CloseActiveThread",
+      "cmd-f": "agent::FindInTranscript",
       "cmd-a": "editor::SelectAll",
       "cmd-c": "editor::Copy"
     }

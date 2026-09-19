@@ -60,9 +60,16 @@ impl Probe {
         let host = host::LocalHost::shared();
         let kind = acp_client::AgentKind::by_label("Claude Code").expect("Claude Code");
         let command = kind
-            .resolve_command_on(host.as_ref(), chat_dir.to_path_buf(), None, None)
+            // アプリと同じ解決（公開レジストリのキャッシュを見る）＝起動経路まで本番と揃える。
+            .resolve_command_on(
+                host.as_ref(),
+                chat_dir.to_path_buf(),
+                None,
+                acp_client::registry::load_cached().as_ref(),
+            )
             .expect("解決に失敗")
             .expect("claude-agent-acp が導入されていない");
+        println!("launch: {} {:?}", command.path.display(), command.args);
         let preferences = SessionPreferences {
             mode: Some(chat_core::preset::PERMISSION_MODE.to_string()),
             resume,
@@ -148,6 +155,7 @@ impl Probe {
                     AgentEvent::SessionStarted {
                         session_id,
                         resumed,
+                        ..
                     } => {
                         println!("  session {session_id} resumed={resumed}");
                         self.session_id = Some(session_id);

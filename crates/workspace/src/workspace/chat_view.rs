@@ -15,8 +15,8 @@
 use crate::workspace::*;
 use chat_core::date::{Date, Recency};
 
-/// 一覧の幅。
-const CHAT_SIDEBAR_WIDTH: f32 = 248.0;
+/// 一覧の最小幅。幅そのものは左ドックと共有する（`explorer_width`・右縁をドラッグ・窓の状態として保存）。
+const CHAT_SIDEBAR_MIN_WIDTH: f32 = 232.0;
 /// 会話の列の最大幅（右が閉じている時に 1 行が長くなりすぎない）。
 const CHAT_COLUMN_MAX_WIDTH: f32 = 860.0;
 
@@ -54,6 +54,10 @@ impl Workspace {
             }
         });
         self.project_sessions.chat = Some(session);
+        // 最後に見ていたチャットへ戻る（まだ一覧に在る時だけ。消されていれば新しいチャットのまま）。
+        if let (Some(id), Some(panel)) = (self.chrome.chat_restore.take(), self.chat_panel()) {
+            panel.update(cx, |panel, cx| panel.open_chat(&id, cx));
+        }
     }
 
     pub(crate) fn toggle_chat_mode(
@@ -215,7 +219,6 @@ impl Workspace {
                     );
                 }
                 self.on_chat_turn_ended(cx);
-                self.schedule_chat_idle_sweep(cx);
                 cx.notify();
             }
             agent_panel::PanelEvent::TurnFailed {
@@ -249,28 +252,6 @@ impl Workspace {
             }
             _ => {}
         }
-    }
-
-    /// 使っていないチャットのエージェントを止める見回りを予約する。**ターンが終わるたびに 1 回**だけ
-    /// 仕掛ける一発のタイマーで、常時回る時計は持たない（何も起きていない間は CPU を使わない）。
-    /// 猶予が明けた時点でまだ使っていなければ、そのチャットはここで止まる。
-    fn schedule_chat_idle_sweep(&mut self, cx: &mut Context<Self>) {
-        let Some(delay) = AgentPanel::chat_idle_stop_after(cx) else {
-            return;
-        };
-        cx.spawn(async move |workspace, cx| {
-            cx.background_executor().timer(delay).await;
-            let _ = workspace.update(cx, |workspace, cx| {
-                // Chat の面に居なければ、最後に見ていたチャットも止めてよい。
-                let include_active = !workspace.chat_mode();
-                if let Some(panel) = workspace.chat_panel() {
-                    panel.update(cx, |panel, cx| {
-                        panel.stop_idle_chat_agents(include_active, cx)
-                    });
-                }
-            });
-        })
-        .detach();
     }
 
     /// エージェントが触るファイルの予告。**このイベントは書かれる前に届く**（許可リクエストの時点）ので、
@@ -343,6 +324,7 @@ impl Workspace {
             return;
         }
         self.chrome.chat_shown = active_id;
+        self.save_state(cx);
         if let Some(chat) = self.project_sessions.chat.as_mut() {
             chat.pending_close_clean_tabs = true;
             chat.pending_preview = artifacts
@@ -722,14 +704,16 @@ impl Workspace {
         }
 
         div()
+            .relative() // 右縁のリサイズハンドル（絶対配置）の基準
             .flex_none()
-            .w(px(CHAT_SIDEBAR_WIDTH))
+            .w(px(self.chrome.explorer_width.max(CHAT_SIDEBAR_MIN_WIDTH)))
             .min_h_0()
             .flex()
             .flex_col()
             .bg(theme.bg0)
             .border_r_1()
             .border_color(theme.border)
+            .child(self.left_dock_resize_handle(cx))
             .child(new_button)
             .child(search)
             .child(list)

@@ -15,6 +15,13 @@ finder:
   new_file: 新規ファイル…
   new_dir: 新規フォルダ…
 agent:
+  search_placeholder: この会話を検索
+  search_count: "%{position}/%{entries} · %{total} 件"
+  search_none: 見つかりません
+  search_prev: 前の一致へ
+  search_next: 次の一致へ（⏎）
+  search_close: 検索を閉じる（esc）
+  code_copy_tip: このコードをコピー
   error_prefix: "エラー: %{message}"
   history_archived_mark: ·閉
   summary_prompt: 入力はエージェントターンの指示と結果です。何をして結果どうなったかを日本語で要約して。40文字以内・1行だけ・記号や引用符や前置きなしで出力して。
@@ -379,6 +386,19 @@ titlebar:
   fleet: Fleet
   chat: Chat
 settings:
+  pref_agent_idle_stop: 使っていないエージェントを止めるまで（分）
+  pref_agent_idle_stop_sub: エージェントは 1 本で数百 MB を握ります。止めても会話は残り、次の送信で引き継ぎます。0 = 止めない
+  chat_heading: CHAT
+  chat_directory: チャットのフォルダの置き場
+  chat_directory_default: 書類フォルダの necoder（既定）
+  chat_directory_pick: フォルダを選ぶ…
+  chat_directory_reset: 既定に戻す
+  chat_idle_stop: 使っていないチャットのエージェントを止めるまで（分）
+  chat_idle_stop_sub: 0 = 止めない
+  chat_instructions: カスタム指示（どのチャットにも効かせる）
+  chat_instructions_none: なし（settings.json の chat.instructions に書きます）
+  mcp_claude_connectors: claude.ai のコネクタを Claude のスレッドへ読み込む
+  mcp_claude_connectors_sub: アカウントに繋いだコネクタ（Figma・Google Calendar など）。切ると初回応答が速くなります（実測 4.2 秒 → 1.8 秒）。Chat モードは常に読み込みません
   title: 設定
   agents_heading: AI エージェント
   agents_sub: ローカル CLI と ACP を確認し、利用可能なものだけ選択できます。認証情報を necoder は保存しません。
@@ -755,6 +775,7 @@ search:
   close: 閉じる（Esc は開いた位置へ戻って閉じる）
   toggle_replace: 置換欄の表示切替（⌥⌘F）
 key:
+  find_in_transcript: この会話を検索
   sheet_title: キーボードショートカット
   section_editor: エディタ
   section_agent: AI チャット

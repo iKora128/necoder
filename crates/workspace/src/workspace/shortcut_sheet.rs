@@ -71,6 +71,7 @@ const ACTION_LABELS: &[(&str, &str)] = &[
     // ── AI チャット ──
     ("agent::SubmitPrompt", "key.submit_prompt"),
     ("agent::CloseActiveThread", "key.close_active_thread"),
+    ("agent::FindInTranscript", "key.find_in_transcript"),
     // ── Fleet（FLEET-V2 §7 のキー表と同じ語を使う）──
     ("workspace::NewTask", "fleet.new_task"),
     ("workspace::StageOne", "fleet.stage_one"),

@@ -14,6 +14,13 @@ finder:
   new_file: New file…
   new_dir: New folder…
 agent:
+  search_placeholder: Search this conversation
+  search_count: "%{position}/%{entries} · %{total} matches"
+  search_none: No matches
+  search_prev: Previous match
+  search_next: Next match (⏎)
+  search_close: Close search (esc)
+  code_copy_tip: Copy this code
   error_prefix: "Error: %{message}"
   history_archived_mark: ·closed
   summary_prompt: The input is the instruction and result of an agent turn. Summarize what was done and how it turned out in English. At most 70 characters, one line only, plain text with no quotes and no preamble.
@@ -378,6 +385,19 @@ titlebar:
   attention_tip: "%{n} need you"
   fleet: Fleet
 settings:
+  pref_agent_idle_stop: Stop unused agents after (minutes)
+  pref_agent_idle_stop_sub: Each agent holds several hundred MB. The conversation is kept and resumes on the next message. 0 = never
+  chat_heading: CHAT
+  chat_directory: Where chat folders are kept
+  chat_directory_default: necoder in your Documents folder (default)
+  chat_directory_pick: Choose folder…
+  chat_directory_reset: Reset to default
+  chat_idle_stop: Stop unused chat agents after (minutes)
+  chat_idle_stop_sub: 0 = never
+  chat_instructions: Custom instructions (apply to every chat)
+  chat_instructions_none: None (set chat.instructions in settings.json)
+  mcp_claude_connectors: Load claude.ai connectors into Claude threads
+  mcp_claude_connectors_sub: Connectors linked to your account (Figma, Google Calendar, …). Turning this off makes the first reply faster (measured 4.2 s → 1.8 s). Chat mode never loads them
   title: Settings
   agents_heading: AI Agents
   agents_sub: necoder checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
@@ -754,6 +774,7 @@ search:
   close: Close (Esc returns to where you started)
   toggle_replace: Toggle replace field (⌥⌘F)
 key:
+  find_in_transcript: Search this conversation
   sheet_title: Keyboard shortcuts
   section_editor: Editor
   section_agent: AI chat

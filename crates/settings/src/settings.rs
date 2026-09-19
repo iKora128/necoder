@@ -113,6 +113,22 @@ pub fn set_agent_config_default(cx: &mut App, agent_id: &str, config_id: &str, v
     }
 }
 
+/// `<section>.<key>`（`chat.directory` など 1 段の入れ子）を更新して**即適用 + 永続化**する。
+/// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。
+pub fn set_nested_user_value(cx: &mut App, section: &str, key: &str, value: serde_json::Value) {
+    let path = cx
+        .try_global::<SettingsGlobal>()
+        .and_then(|global| global.user_path.clone());
+    if let Some(path) = path {
+        if let Err(error) = settings_core::persist_nested_value(&path, section, key, value) {
+            eprintln!("設定の保存に失敗（実行時のみ反映）: {error:#}");
+        }
+    }
+    if cx.has_global::<SettingsGlobal>() {
+        cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
+    }
+}
+
 /// `mcp_servers.<name>.enabled` を更新して**即適用 + 永続化**する（設定画面のトグル）。
 /// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。次に開くセッションから効く。
 pub fn set_mcp_enabled(cx: &mut App, name: &str, enabled: bool) {
@@ -856,7 +872,12 @@ impl SettingsView {
         let theme = self.theme.clone();
         let accent = self.accent;
         // 通知音のように選択肢が増える行があるので折り返す（はみ出して押せなくなるのを防ぐ）。
-        let mut segments = div().flex().flex_wrap().justify_end().items_center().gap(px(4.));
+        let mut segments = div()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .items_center()
+            .gap(px(4.));
         for (idx, (value, display)) in options.iter().enumerate() {
             let selected = *value == current;
             let value = *value;
@@ -1146,6 +1167,19 @@ impl SettingsView {
     // ── ページの器（左ナビ + ページ面）──────────────────────────────────────────
 
     /// ナビの行を押した。**ページの選択は永続化しない**（[`SettingsPage`]）。
+    /// 開発用（offscreen 検証）: ページを指定して開く。`"prefs"` / `"mcp"` / `"agents"` …
+    #[cfg(debug_assertions)]
+    pub fn debug_select_page(&mut self, page: &str, cx: &mut Context<Self>) {
+        let page = match page {
+            "prefs" => SettingsPage::Preferences,
+            "mcp" => SettingsPage::Mcp,
+            "appearance" => SettingsPage::Appearance,
+            "remote" => SettingsPage::Remote,
+            _ => SettingsPage::Agents,
+        };
+        self.select_page(page, cx);
+    }
+
     fn select_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         if self.page != page {
             self.page = page;
@@ -1316,6 +1350,9 @@ impl SettingsView {
             .iter()
             .filter(|server| server.enabled)
             .count();
+        // claude.ai アカウントのコネクタは necoder の一覧を通らずに Claude のスレッドへ入ってくる
+        // （ここで選んだ物だけを渡す、の唯一の例外）。だからこのページの一番上で切れるようにする。
+        let connectors = get(cx).claude_ai_connectors;
         let mut rows = div().flex().flex_col().gap(px(6.));
         let mut shown = 0usize;
         for (index, server) in self.mcp_servers.iter().enumerate() {
@@ -1368,6 +1405,16 @@ impl SettingsView {
             .child(self.section_heading(
                 i18n::t!("settings.mcp_heading"),
                 Some(i18n::t!("settings.mcp_sub")),
+            ))
+            // claude.ai のコネクタは**サーバの一覧ではない**（necoder の設定を通らずに入ってくる物を
+            // 切る口）ので、下の件数・絞り込み・一覧の外に置く。
+            .child(self.toggle_row(
+                "claude_ai_connectors",
+                0,
+                i18n::t!("settings.mcp_claude_connectors"),
+                Some(i18n::t!("settings.mcp_claude_connectors_sub")),
+                connectors,
+                cx,
             ))
             // 件数と絞り込みは 1 件でもある時だけ（空の画面に操作子を並べても読ませるだけ）。
             .when(total > 0, |element| {
@@ -1629,6 +1676,224 @@ impl SettingsView {
                 &settings.work_tabs_position,
                 cx,
             ))
+            .child(self.stepper_row_with_sub(
+                "agent_idle_stop_minutes",
+                i18n::t!("settings.pref_agent_idle_stop"),
+                i18n::t!("settings.pref_agent_idle_stop_sub"),
+                settings.agent_idle_stop_minutes as f64,
+                0.0,
+                240.0,
+                5.0,
+                cx,
+            ))
+            .child(self.chat_group(settings, cx))
+    }
+
+    /// 分数のステッパー（副題つき）。`stepper_row` は副題を持てないので、説明が要る物だけこちら。
+    #[allow(clippy::too_many_arguments)]
+    fn stepper_row_with_sub(
+        &self,
+        key: &'static str,
+        label: String,
+        sub: String,
+        value: f64,
+        min: f64,
+        max: f64,
+        step: f64,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(self.stepper_button(key, (key, 0), "−", (value - step).max(min), true, cx))
+            .child(
+                div()
+                    .min_w(px(28.))
+                    .text_size(px(12.5))
+                    .text_color(self.theme.fg0)
+                    .child(SharedString::from(format!("{}", value as i64))),
+            )
+            .child(self.stepper_button(key, (key, 1), "+", (value + step).min(max), true, cx))
+            .into_any_element();
+        self.pref_row(label, Some(sub), control)
+    }
+
+    /// Chat モードの設定（`docs/CHAT.md` §2.2 / §4.1）: 置き場・自動停止・カスタム指示。
+    fn chat_group(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let small_button = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(label))
+        };
+        let directory = settings.chat.directory.trim().to_string();
+        let directory_control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                small_button(
+                    "chat-directory-pick",
+                    i18n::t!("settings.chat_directory_pick"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _window, cx| view.pick_chat_directory(cx)),
+                ),
+            )
+            .when(!directory.is_empty(), |row| {
+                row.child(
+                    small_button(
+                        "chat-directory-reset",
+                        i18n::t!("settings.chat_directory_reset"),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _window, cx| {
+                            set_nested_user_value(
+                                cx,
+                                "chat",
+                                "directory",
+                                serde_json::Value::String(String::new()),
+                            );
+                            cx.notify();
+                        }),
+                    ),
+                )
+            })
+            .into_any_element();
+        let idle = settings.chat.idle_stop_minutes as f64;
+        let idle_button = |id: (&'static str, usize), glyph: &'static str, target: f64| {
+            div()
+                .id(id)
+                .size(px(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(13.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(glyph)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_, _, _window, cx| {
+                        set_nested_user_value(
+                            cx,
+                            "chat",
+                            "idle_stop_minutes",
+                            serde_json::json!(target as i64),
+                        );
+                        cx.notify();
+                    }),
+                )
+        };
+        let idle_control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(idle_button(("chat-idle", 0), "−", (idle - 5.0).max(0.0)))
+            .child(
+                div()
+                    .min_w(px(28.))
+                    .text_size(px(12.5))
+                    .text_color(theme.fg0)
+                    .child(SharedString::from(format!("{}", idle as i64))),
+            )
+            .child(idle_button(("chat-idle", 1), "+", (idle + 5.0).min(240.0)))
+            .into_any_element();
+        let instructions = settings.chat.instructions.trim();
+        let instructions_sub = if instructions.is_empty() {
+            i18n::t!("settings.chat_instructions_none")
+        } else {
+            let head: String = instructions.chars().take(60).collect();
+            if instructions.chars().count() > 60 {
+                format!("{head}…")
+            } else {
+                head
+            }
+        };
+        let instructions_control = small_button(
+            "chat-instructions-edit",
+            i18n::t!("settings.open_json_button"),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _, _window, cx| cx.emit(SettingsViewEvent::OpenSettingsJson)),
+        )
+        .into_any_element();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .pt(px(14.))
+            .child(
+                div()
+                    .px(px(2.))
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.chat_heading"))),
+            )
+            .child(self.pref_row(
+                i18n::t!("settings.chat_directory"),
+                Some(if directory.is_empty() {
+                    i18n::t!("settings.chat_directory_default")
+                } else {
+                    directory.clone()
+                }),
+                directory_control,
+            ))
+            .child(self.pref_row(
+                i18n::t!("settings.chat_idle_stop"),
+                Some(i18n::t!("settings.chat_idle_stop_sub")),
+                idle_control,
+            ))
+            .child(self.pref_row(
+                i18n::t!("settings.chat_instructions"),
+                Some(instructions_sub),
+                instructions_control,
+            ))
+    }
+
+    /// チャットの置き場をフォルダ選択ダイアログで決める。既にあるチャットのフォルダは動かさない
+    /// （置き場が変わるのは、これから作るチャットだけ）。
+    fn pick_chat_directory(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(SharedString::from(i18n::t!("settings.chat_directory_pick"))),
+        });
+        cx.spawn(async move |view, cx| {
+            if let Ok(Ok(Some(paths))) = receiver.await {
+                if let Some(path) = paths.into_iter().next() {
+                    let _ = view.update(cx, |_, cx| {
+                        set_nested_user_value(
+                            cx,
+                            "chat",
+                            "directory",
+                            serde_json::Value::String(path.display().to_string()),
+                        );
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 }
 

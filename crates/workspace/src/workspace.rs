@@ -1115,6 +1115,8 @@ struct ChromeState {
     chat_shown: Option<String>,
     /// いま見ているチャットのスレッド色（`accent()` は `cx` を持たないのでここに控える）。
     chat_accent: Option<Hsla>,
+    /// 復元: 最後に見ていたチャット。初めて Chat を開いた時に 1 度だけそこへ戻る。
+    chat_restore: Option<String>,
     /// このターンでエージェントが触ると予告したファイル（ターン終了時に取り込む）。
     chat_touched: Vec<PathBuf>,
     /// 復元で Chat モードへ入る予約（window のある描画で消化）。
@@ -3797,6 +3799,8 @@ mod tests {
         let (root, workspace, cx) = chat_workspace(cx, "persist");
         let payload = workspace.update_in(cx, |workspace, window, cx| {
             workspace.set_chat_mode(true, window, cx);
+            workspace.chrome.explorer_width = 312.0;
+            workspace.chrome.chat_shown = Some("chat-42".into());
             serde_json::to_string(&workspace.persisted_state()).unwrap()
         });
         assert!(payload.contains("\"chat_mode\":true"), "{payload}");
@@ -3811,6 +3815,15 @@ mod tests {
             }
             workspace.restore_work_layout(&payload, cx);
             assert!(!workspace.chat_mode(), "window のある描画まで待つ");
+            assert_eq!(
+                workspace.chrome.explorer_width, 312.0,
+                "一覧（左ドック）の幅も戻る"
+            );
+            assert_eq!(
+                workspace.chrome.chat_restore.as_deref(),
+                Some("chat-42"),
+                "最後に見ていたチャットへ戻る予約"
+            );
             workspace.process_pending_shell_effects(window, cx);
             assert!(workspace.chat_mode());
         });

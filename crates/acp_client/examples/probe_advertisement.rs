@@ -41,6 +41,7 @@ fn main() {
                 acp_client::AgentEvent::SessionStarted {
                     session_id,
                     resumed,
+                    ..
                 } => {
                     println!("SessionStarted: id={session_id} resumed={resumed}");
                 }

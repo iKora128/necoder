@@ -1334,6 +1334,8 @@ impl Workspace {
             work_layout: self.chrome.work_layout.clone(),
             fleet_mode: self.chrome.fleet_mode,
             chat_mode: self.chat_mode(),
+            chat_active: self.chrome.chat_shown.clone(),
+            left_dock_width: self.chrome.explorer_width,
             fleet_view: match self.chrome.fleet_center_view {
                 FleetCenterView::Work => "work",
                 FleetCenterView::Graph => "graph",

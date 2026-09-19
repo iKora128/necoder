@@ -227,7 +227,14 @@ pub enum AgentEvent {
     /// `session_id` はエージェント側の会話の鍵。UI はスレッドに控えて、次にこのスレッドの
     /// エージェントを立ち上げ直すとき [`SessionPreferences::resume`] に渡す。
     /// `resumed` = `session/load` で前回の会話を引き継げた（false は新規セッション）。
-    SessionStarted { session_id: String, resumed: bool },
+    SessionStarted {
+        session_id: String,
+        resumed: bool,
+        /// エージェントが `loadSession` を広告している＝このセッションを畳んでも、次に同じ id で
+        /// 会話を引き継げる。UI はこれが `true` のスレッドだけ、使っていないエージェントを止めてよい
+        /// （広告しないエージェントを止めると会話の文脈が失われる）。
+        resumable: bool,
+    },
     /// エージェントとの transport が閉じた（プロセス終了・SSH 切断）。**この後セッションは終わる**
     /// （[`run_session_on`] が戻り、イベントチャネルも閉じる）。ターン中なら UI はそのターンを
     /// 畳み、以後の送信は新しいセッションを立ち上げる。待機中にも届く（EOF を待機中も見張るため）。
@@ -690,6 +697,22 @@ impl AgentKind {
             .and_then(|id| registry.and_then(|reg| reg.agent(id)))
         {
             if let Some(registry::Launch::Npx(npx)) = entry.launch() {
+                // 同じ版が npx のキャッシュに在れば直接起こす（`npm exec` の親プロセスを持たない）。
+                // レジストリの起動引数が付いている時は npx の解釈に任せる（取り違えない）。
+                let cached = npm_npx_cache_root()
+                    .filter(|_| npx.args.is_empty())
+                    .and_then(|cache| npx_cached_agent(&cache, &npx.package, self.bin));
+                if let Some(bin) = cached {
+                    let args = self
+                        .extra_args
+                        .iter()
+                        .map(|arg| (*arg).to_string())
+                        .collect();
+                    let mut resolved = AgentCommand::new(bin, args, cwd);
+                    resolved.env = npx.env.clone();
+                    resolved.env.extend(settings_env);
+                    return Some(resolved);
+                }
                 if let Some(npx_path) = find_in_path("npx") {
                     let mut args = vec!["-y".to_string(), bounded_npm_spec(&npx.package)];
                     args.extend(npx.args.iter().cloned());
@@ -723,8 +746,14 @@ impl AgentKind {
         if let Some(bin) = zed_cached_agent(self.bin) {
             return Some(AgentCommand::new(bin, extra, cwd));
         }
-        // 3) npx フォールバック（npm パッケージがある agent のみ。node/npx が PATH に要る）
+        // 3) npx フォールバック（npm パッケージがある agent のみ。node/npx が PATH に要る）。
+        //    同じ版が npx のキャッシュに在れば直接起こす。
         let package = self.package?;
+        if let Some(bin) =
+            npm_npx_cache_root().and_then(|cache| npx_cached_agent(&cache, package, self.bin))
+        {
+            return Some(AgentCommand::new(bin, extra, cwd));
+        }
         let npx = find_in_path("npx")?;
         let mut args = vec!["-y".to_string(), bounded_npm_spec(package)];
         args.extend(extra);
@@ -1062,6 +1091,48 @@ fn shell_word(value: &str) -> String {
 /// **これは Zed 自身のディレクトリ規約**なので necoder の `paths` crate は使わない（別アプリの置き場）。
 /// 版やプラットフォームで揺れるため、存在するものを順に試す。mac の従来パスを必ず先頭に置く
 /// ＝mac では当たった時点で従来と同じ結果になる（WINDOWS-PORT.md §D8）。
+/// npm の npx キャッシュ（`~/.npm/_npx`）の場所。`npm_config_cache` があればそちら。
+fn npm_npx_cache_root() -> Option<PathBuf> {
+    if let Some(cache) = std::env::var_os("npm_config_cache") {
+        return Some(PathBuf::from(cache).join("_npx"));
+    }
+    Some(paths::home_dir()?.join(".npm/_npx"))
+}
+
+/// `npx -y <package>@<version>` が**既に入れてある**アダプタの実行ファイル。
+///
+/// `npx` 経由で起こすと、`npm exec` のプロセスがエージェントの親として生き続ける（実測 48 MB/本・
+/// 起動のたびに依存解決で 1 秒前後）。同じ物がキャッシュに在るなら直接起こせば、その両方が要らない。
+///
+/// 使うのは**指定された版とちょうど同じ版**が入っている時だけ。「上限以下なら何でも」にすると、
+/// レジストリが版を上げても古いキャッシュを使い続けて更新されなくなる（無ければ従来どおり npx に
+/// 任せる＝npx が新しい版を入れ、次の起動からはそれを直接使う）。
+/// Windows は `.cmd` のラッパー経由になるので対象外（従来どおり npx）。
+fn npx_cached_agent(cache_root: &Path, package: &str, bin: &str) -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    // 先頭の `@` は scope。版の区切りは最後の `@`。
+    let separator = package.rfind('@').filter(|index| *index > 0)?;
+    let (name, version) = (&package[..separator], &package[separator + 1..]);
+    if version.is_empty() || !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return None; // 範囲やタグ指定は「どの版か」が決まらない
+    }
+    for entry in std::fs::read_dir(cache_root).ok()?.flatten() {
+        let modules = entry.path().join("node_modules");
+        let manifest = modules.join(name).join("package.json");
+        let installed = std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|json| json.get("version")?.as_str().map(str::to_string));
+        let candidate = modules.join(".bin").join(bin);
+        if installed.as_deref() == Some(version) && candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn zed_npx_cache_roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(home) = paths::home_dir() {
@@ -1508,6 +1579,7 @@ pub async fn run_session_on(
                 .unbounded_send(AgentEvent::SessionStarted {
                     session_id: session.session_id().to_string(),
                     resumed,
+                    resumable: can_load,
                 })
                 .ok();
 
@@ -2719,6 +2791,7 @@ for line in sys.stdin:
             AgentEvent::SessionStarted {
                 session_id,
                 resumed,
+                ..
             } => {
                 assert_eq!(session_id, "sess-1");
                 assert!(!resumed);
@@ -2958,6 +3031,7 @@ for line in sys.stdin:
             AgentEvent::SessionStarted {
                 session_id,
                 resumed,
+                ..
             } => {
                 assert_eq!(session_id, "prev-1");
                 assert!(resumed, "session/load で引き継いだ");
@@ -2989,6 +3063,7 @@ for line in sys.stdin:
             AgentEvent::SessionStarted {
                 session_id,
                 resumed,
+                ..
             } => {
                 assert_eq!(session_id, "fresh");
                 assert!(!resumed);
@@ -3109,6 +3184,56 @@ for line in sys.stdin:
         };
         assert_eq!(received["method"], "session/new", "{received}");
         assert_eq!(received["has_meta"], false, "{received}");
+    }
+
+    /// npx のキャッシュに**指定と同じ版**が在る時だけ、そこを直接起こす。
+    #[cfg(not(windows))]
+    #[test]
+    fn a_cached_adapter_of_the_exact_version_is_launched_directly() {
+        let cache = std::env::temp_dir().join(format!(
+            "necoder_npx_cache_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let install = |hash: &str, version: &str| {
+            let modules = cache.join(hash).join("node_modules");
+            let package = modules.join("@scope/adapter");
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::create_dir_all(modules.join(".bin")).unwrap();
+            std::fs::write(
+                package.join("package.json"),
+                format!(r#"{{"name":"@scope/adapter","version":"{version}"}}"#),
+            )
+            .unwrap();
+            std::fs::write(modules.join(".bin/adapter"), "#!/usr/bin/env node\n").unwrap();
+            modules.join(".bin/adapter")
+        };
+        install("aaa", "0.77.0");
+        let wanted = install("bbb", "0.78.0");
+
+        assert_eq!(
+            npx_cached_agent(&cache, "@scope/adapter@0.78.0", "adapter"),
+            Some(wanted)
+        );
+        // 無い版は npx に任せる（古いキャッシュを使い続けて更新が止まらないように）。
+        assert_eq!(
+            npx_cached_agent(&cache, "@scope/adapter@0.79.0", "adapter"),
+            None
+        );
+        // 版が決まらない指定（範囲・タグ・版なし）も npx に任せる。
+        assert_eq!(
+            npx_cached_agent(&cache, "@scope/adapter@latest", "adapter"),
+            None
+        );
+        assert_eq!(npx_cached_agent(&cache, "@scope/adapter", "adapter"), None);
+        assert_eq!(
+            npx_cached_agent(&cache.join("missing"), "@scope/adapter@0.78.0", "adapter"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(cache);
     }
 
     /// 偽エージェント（`IMAGE_CAP` を置換して使う）: 受け取った prompt のブロック列をそのまま返す。
@@ -3732,6 +3857,7 @@ for line in sys.stdin:
                         AgentEvent::SessionStarted {
                             session_id,
                             resumed,
+                            ..
                         } => eprintln!("[session started] {session_id} resumed={resumed}"),
                         AgentEvent::SessionLost => eprintln!("[session lost]"),
                     }

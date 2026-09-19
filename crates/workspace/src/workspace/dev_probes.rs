@@ -264,7 +264,7 @@ impl Workspace {
     ///
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の
     /// チャットの行 / `pick` = 過去のチャットを開く / `send:<文>` = **実エージェントへ送る** / `search:<語>` / `menu` / `delete` /
-    /// `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
+    /// `settings:<page>` / `find:<語>` / `source` = 右ペインを source 表示へ / `editor` = Chat を抜ける。
     #[cfg(debug_assertions)]
     pub fn debug_chat_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (name, argument) = command.split_once(':').unwrap_or((command, ""));
@@ -327,6 +327,23 @@ impl Workspace {
                 self.chrome.chat_delete_confirm = self
                     .chat_panel()
                     .and_then(|panel| panel.read(cx).active_chat_id());
+            }
+            // 設定画面をページ指定で開く（Chat の設定・MCP のコネクタの見た目を撮る）。
+            "settings" => {
+                self.set_chat_mode(false, window, cx);
+                self.chrome.show_settings = true;
+                let view = self.chrome.settings_view.clone();
+                view.update(cx, |view, cx| view.debug_select_page(argument, cx));
+            }
+            // transcript 内の検索（⌘F）。
+            "find" => {
+                self.set_chat_mode(true, window, cx);
+                if let Some(panel) = self.chat_panel() {
+                    let query = argument.to_string();
+                    panel.update(cx, |panel, cx| {
+                        panel.debug_find_in_transcript(&query, window, cx)
+                    });
+                }
             }
             "source" => {
                 if let Some(editor) = self.active_editor() {

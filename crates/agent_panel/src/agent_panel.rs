@@ -25,7 +25,9 @@ use acp_client::{
     PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
 };
 mod chat;
+mod idle;
 mod remote;
+mod search;
 pub mod sound;
 
 pub use chat::ChatRow;
@@ -59,7 +61,7 @@ use std::sync::Arc;
 use theme_core::{claude_bullet, thread_color, Theme};
 use ui::{DraggedFile, Tooltip};
 
-actions!(agent, [SubmitPrompt, CloseActiveThread]);
+actions!(agent, [SubmitPrompt, CloseActiveThread, FindInTranscript]);
 
 /// ドラッグ中のスレッドタブのゴースト（Chrome 風の並べ替え用。ポインタに追従する小チップ）。
 #[derive(Clone)]
@@ -963,6 +965,11 @@ struct Thread {
     auth_required: bool,
     /// Chat モードのスレッドだけが持つ状態（フォルダ・書き込み許可・ピン）。`docs/CHAT.md`。
     chat: Option<chat::ChatThreadState>,
+    /// いまのセッションを畳んでも会話を引き継げるか（エージェントが `loadSession` を広告）。
+    /// `false` のスレッドのエージェントは自動では止めない（文脈が失われる）。
+    session_resumable: bool,
+    /// エージェントが最後に働いた時刻（送信・ターン終了）。自動停止の起点。
+    last_active_at_ms: i64,
 }
 
 impl Thread {
@@ -1026,6 +1033,8 @@ impl Thread {
             session_used: false,
             auth_required: false,
             chat: None,
+            session_resumable: false,
+            last_active_at_ms: 0,
         }
     }
 
@@ -1715,6 +1724,8 @@ pub struct AgentPanel {
     chat_search: String,
     /// いま見ているチャットの成果物（新しい順）。一覧と同じ節目で読み直す＝描画のたびに readdir しない。
     chat_artifacts: Vec<PathBuf>,
+    /// transcript 内の検索（⌘F・`search.rs`）。`None` = 閉じている。
+    transcript_search: Option<search::TranscriptSearch>,
     /// `▣ プレビュー` チップを出してよいか（パス → 実在）の控え。描画のたびに stat しない。
     preview_exists: RefCell<HashMap<String, bool>>,
 }
@@ -2060,6 +2071,7 @@ PYEOF"#;
             chat_rows: Vec::new(),
             chat_search: String::new(),
             chat_artifacts: Vec::new(),
+            transcript_search: None,
             preview_exists: RefCell::new(HashMap::new()),
         }
     }
@@ -2762,6 +2774,10 @@ PYEOF"#;
             item: id.item,
             sub: id.sub + 1,
         });
+        // 検索の強調はここで足す（transcript の文字は全部この 1 か所を通る）。キャッシュ鍵の
+        // 計算より前に混ぜるので、検索語が変われば作り直される。
+        let mut base_highlights = base_highlights;
+        base_highlights.extend(self.transcript_search_highlights(id.item, text.as_ref()));
         let slot = self.transcript_regions.borrow().len();
         let selection = self.region_selection(id, text.len()).map(|range| {
             (
@@ -3409,11 +3425,16 @@ PYEOF"#;
     fn on_panel_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let keystroke = &event.keystroke;
         if keystroke.key == "escape" {
+            // 検索バーが開いていれば、まずそれを閉じる（読むのを邪魔している物から順に畳む）。
+            if self.transcript_search_open() {
+                self.close_transcript_search(window, cx);
+                return;
+            }
             // 選択の解除が先（transcript を読んでいる最中の Esc でターンを止めない）。
             if self.transcript_selection.take().is_some() {
                 cx.notify();
@@ -3791,6 +3812,7 @@ PYEOF"#;
             thread.done = None; // 見た＝herdr の Done ラッチ（完了・未確認）を解除
         }
         self.reset_transcript_list(true); // 切替先は最新（末尾）を見せる
+        self.refresh_transcript_search(cx); // 別の会話を開いた＝一致も数え直す
         let color = self.active_color();
         let draft = self.threads[index].draft.clone();
         self.composer.update(cx, |composer, cx| {
@@ -5114,8 +5136,9 @@ PYEOF"#;
             thread.tier2 = None; // ✳ 要約は前ターンの文＝新ターンでは古い（P4）
             thread.turn_started_at = Some(std::time::Instant::now()); // 経過秒の起点
             thread.last_input_at_ms = Some(now_unix_ms()); // 「最終いつ入力したか」（M14）
-                                                           // 「頼んだこと」は**エージェントに渡す原文ではなく人間が書いた本文**を残す
-                                                           // （`@path` の context 接頭辞を混ぜない＝サイドバーで読めるのは自分の言葉だけ）。
+            thread.last_active_at_ms = now_unix_ms();
+            // 「頼んだこと」は**エージェントに渡す原文ではなく人間が書いた本文**を残す
+            // （`@path` の context 接頭辞を混ぜない＝サイドバーで読めるのは自分の言葉だけ）。
             thread.last_prompt = Some(SharedString::from(prompt.clone()));
             thread.session_used = true; // 先張りの「畳んでよい」対象から外れる
         }
@@ -5286,6 +5309,15 @@ PYEOF"#;
                 preset: acp_client::preset::SessionPreset::default(),
             })
             .unwrap_or_default();
+        // claude.ai のコネクタを読み込まない設定なら、エージェントのプロセスへそう伝える
+        // （`settings.claude_ai_connectors`。Chat は下で常に切る）。
+        let mut preferences = preferences;
+        if !settings::get(cx).claude_ai_connectors {
+            preferences.preset.env.insert(
+                "ENABLE_CLAUDEAI_MCP_SERVERS".to_string(),
+                "false".to_string(),
+            );
+        }
         // Chat のスレッドはセッションの作り方が違う（プリセット・権限モード固定・MCP なし）。
         let preferences = self.chat_session_preferences(thread_index, preferences, cx);
         let (command_tx, prompt_rx) = mpsc::unbounded::<SessionCommand>();
@@ -5404,7 +5436,11 @@ PYEOF"#;
             AgentEvent::SessionStarted {
                 session_id,
                 resumed,
+                resumable,
             } => {
+                thread.session_resumable = resumable;
+                // 起こしたばかりのセッション（先張りを含む）を、別スレッドの見回りが巻き込まないように。
+                thread.last_active_at_ms = now_unix_ms();
                 // 引き継げたか/引き継げなかったかの一言。前回 id が無い新規スレッドは黙って始める。
                 let had_previous = thread.acp_session_id.is_some();
                 thread.session_note = if resumed {
@@ -5882,6 +5918,11 @@ PYEOF"#;
         if turn_finished {
             self.preview_exists.borrow_mut().clear();
             self.refresh_chat_rows(cx);
+            self.refresh_transcript_search(cx); // 会話が伸びた＝一致も数え直す
+            if let Some(thread) = self.threads.get_mut(thread_index) {
+                thread.last_active_at_ms = now_unix_ms();
+            }
+            self.schedule_idle_agent_sweep(cx);
         }
         if permission_waiting {
             self.sync_running_registry(cx); // Blocked をレール/フッター/⌘O のロールアップへ即時反映
@@ -7338,6 +7379,7 @@ PYEOF"#;
             // 引っ張った途端に途切れるため。composer リサイズと同じ作法）。
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_transcript_mouse_up))
+            .children(self.render_transcript_search(cx))
             .child(if self.chat_is_empty() {
                 // まだ何も話していないチャット: 何が起きるかを 3 行で（`docs/CHAT.md` §4.3）。
                 self.render_chat_empty().into_any_element()
@@ -8023,7 +8065,46 @@ PYEOF"#;
                             .into()
                     };
                     let highlights = self.syntax_highlights(language, shown_text.as_ref());
+                    // コードブロック単位のコピー（hover で右上に出る）。畳んでいても**全文**を取る。
+                    // エントリ右上の ⧉ と重ならないよう、こちらはブロックの内側の右上に置く。
+                    let copy_source = text.clone();
+                    let copy_button = div()
+                        .id(("code-copy", entry_index * 256 + block_index))
+                        .absolute()
+                        .top(px(4.))
+                        .right(px(4.))
+                        .invisible()
+                        .group_hover("code-block", |style| style.visible())
+                        .size(px(22.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg1)
+                        .font_family("IBM Plex Sans JP")
+                        .text_size(px(12.5))
+                        .text_color(theme.fg2)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.fg0).bg(theme.bg3))
+                        .child("⧉")
+                        .tooltip(Tooltip::text(
+                            i18n::t!("agent.code_copy_tip"),
+                            theme.clone(),
+                        ))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_this, _, _window, cx| {
+                                cx.stop_propagation();
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_source.clone(),
+                                ));
+                            }),
+                        );
                     let mut card = div()
+                        .relative()
+                        .group("code-block")
                         .flex()
                         .flex_col()
                         .gap(px(4.))
@@ -8036,7 +8117,8 @@ PYEOF"#;
                         .font_family("Guguru Sans Code")
                         .text_size(px(11.5))
                         .text_color(theme.fg0)
-                        .child(self.push_selectable(shown_text, highlights, cx));
+                        .child(self.push_selectable(shown_text, highlights, cx))
+                        .child(copy_button);
                     if collapsible {
                         let hidden = total_lines.saturating_sub(CODE_COLLAPSE_HEAD_LINES);
                         let (glyph, label) = if expanded {
@@ -9547,6 +9629,7 @@ impl Render for AgentPanel {
             // agent フォーカス時のキー割当（keymap の "AgentPanel" context に一致）。⌘W=スレッド閉じ。
             .key_context("AgentPanel")
             .on_action(cx.listener(Self::on_submit))
+            .on_action(cx.listener(Self::open_transcript_search))
             .on_action(cx.listener(Self::on_close_thread))
             // transcript が focus 中の ⌘A。composer focus 中は EditorView 側が先に消費する。
             .on_action(cx.listener(Self::on_select_all_transcript))
@@ -10609,6 +10692,8 @@ fn seed_threads() -> Vec<Thread> {
         session_used: false,
         auth_required: false,
         chat: None,
+        session_resumable: false,
+        last_active_at_ms: 0,
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
