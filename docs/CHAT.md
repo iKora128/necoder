@@ -188,7 +188,7 @@ ROADMAP M16 の C0〜C6 に対応する。P0 が揃うのは C3 まで。
 実 `claude-agent-acp` への通し確認（`cargo run -p chat_core --example probe_chat_preset`）と、隔離起動した GUI から実エージェントへ送る E2E（`NECODER_CHAT_PROBE`）の結果。
 
 - **行動規則は 11 項目すべて通った**: 相談はテキストだけ / 成果物は `artifacts/` に 1 ファイル / 相談の途中でファイルを触らない / 修正は同じファイルの編集 / 曖昧な依頼でファイルを増やさない / 道具は持たせた 7 個だけ / 渡していない場所への書き込みは拒否 / `session/load` で再開できる / 渡した PDF を読める / 再開後も同じファイルを編集する / 再開後も道具は同じ。
-- **claude.ai アカウントのコネクタが漏れ込む**。`settingSources: []` でも `strictMcpConfig` でも、アカウントに繋いだコネクタ（Figma・Google Calendar・Higgsfield …）は自動で読み込まれ、170 個超のツール定義が**最初のターンから文脈を 11 万トークン**食った。止める口は環境変数 `ENABLE_CLAUDEAI_MCP_SERVERS=false` だけ（SDK の実行ファイルの文字列から特定）。止めた後は 5,202 トークン。Chat でコネクタを使いたくなったら「チャットごとに MCP を選ぶ」（P2）で明示的に渡す。
+- **claude.ai アカウントのコネクタが漏れ込む**。`settingSources: []` でも `strictMcpConfig` でも、アカウントに繋いだコネクタ（Figma・Google Calendar など）は自動で読み込まれ、170 個超のツール定義が**最初のターンから文脈を 11 万トークン**食った。止める口は環境変数 `ENABLE_CLAUDEAI_MCP_SERVERS=false` だけ（SDK の実行ファイルの文字列から特定）。止めた後は 5,202 トークン。Chat でコネクタを使いたくなったら「チャットごとに MCP を選ぶ」（P2）で明示的に渡す。
 - **同じ問いの比較**（`-- --compare`）: Chat のプリセット = 文脈 5,199 トークン・初回応答 3.1 秒 / Editor のスレッドと同じ作り方 = 28,703 トークン・4.0 秒。
 - **メモリ**（debug ビルド・隔離 offscreen）: Chat を開くだけなら necoder 本体 +2 MB（143 → 145）。重いのは**生きているエージェント 1 本 ≈ 400 MB**（アダプタの node + claude 本体）で、これは Editor のスレッドと同じ。だから使っていないチャットのエージェントを止める弁（`chat.idle_stop_minutes`）が idle メモリ予算を守る。
 - **`FilesTouched` は書かれる前に届く**（許可リクエストの時点）。成果物を右に出す判断をそこでやると、まだファイルが無い。覚えておいてターン終了時に取り込む。
