@@ -15,6 +15,7 @@ finder:
   new_file: 新規ファイル…
   new_dir: 新規フォルダ…
 agent:
+  pasted_image: 貼り付けた画像
   search_placeholder: この会話を検索
   search_count: "%{position}/%{entries} · %{total} 件"
   search_none: 見つかりません

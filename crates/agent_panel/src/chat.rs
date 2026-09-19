@@ -700,6 +700,110 @@ impl AgentPanel {
         cx.notify();
     }
 
+    /// 開発用（`attach:<path>`）: ファイルを添付する（Finder からの D&D と同じ受け口）。
+    pub fn debug_attach(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.add_context_path(path, cx);
+    }
+
+    /// 開発用（`approve`）: 出ている承認カードに答える（`kind` = allow / always / reject）。
+    pub fn debug_answer_permission(&mut self, kind: &str, cx: &mut Context<Self>) {
+        let wanted = match kind {
+            "always" => PermissionKind::AllowAlways,
+            "reject" => PermissionKind::Reject,
+            _ => PermissionKind::Allow,
+        };
+        let active = self.active;
+        let Some(index) = self.threads.get(active).and_then(|thread| {
+            let pending = thread.pending_permission.as_ref()?;
+            pending
+                .options
+                .iter()
+                .position(|option| option.kind == wanted)
+        }) else {
+            eprintln!("CHAT_PROBE: 承認カードが出ていない（または選択肢が無い）");
+            return;
+        };
+        self.respond_permission(active, index, cx);
+    }
+
+    /// 開発用（`rollback[:first]`）: チェックポイントへ戻す（transcript の巻き戻し行と同じ経路）。
+    /// 既定は直近、`first` は最初（= そのターンで最初に書かれる前）。
+    pub fn debug_restore_checkpoint(&mut self, which: &str, cx: &mut Context<Self>) {
+        let first = which == "first";
+        let Some(id) = self.threads.get(self.active).and_then(|thread| {
+            let mut ids = thread.entries.iter().filter_map(|entry| match entry {
+                Entry::Checkpoint { id, .. } => Some(*id),
+                _ => None,
+            });
+            if first {
+                ids.next()
+            } else {
+                ids.next_back()
+            }
+        }) else {
+            eprintln!("CHAT_PROBE: チェックポイントが無い");
+            return;
+        };
+        self.restore_checkpoint(id, cx);
+    }
+
+    /// 開発用（`paste-image`）: クリップボードへ PNG を置いて composer に貼り付ける
+    /// （スクリーンショットの ⌘V と**同じ経路**: `EditorView::paste` → `PastedImage` → 添付）。
+    pub fn debug_paste_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 1x1 の赤い PNG（外部ツールを使わずに作れる最小の実データ）。
+        const RED_DOT_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D,
+            0xB0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image {
+            format: gpui::ImageFormat::Png,
+            bytes: RED_DOT_PNG.to_vec(),
+            id: 1,
+        }));
+        self.focus_composer(window, cx);
+        let composer = self.composer.clone();
+        window.defer(cx, move |window, cx| {
+            composer.update(cx, |composer, cx| composer.debug_paste(window, cx));
+        });
+    }
+
+    /// 開発用（`NECODER_CHAT_PROBE=edit:<文字>`）: いまの成果物を書き換えて、**本番と同じ合図**
+    /// （`FilesTouched` → `TurnEnded`）を出す。エージェントの修正後にプレビューが読み直されるかを
+    /// offscreen で確かめるための口（ページは `document.title` に自分の中身を書く）。
+    pub fn debug_edit_artifact(&mut self, marker: &str, cx: &mut Context<Self>) {
+        let Some(path) = self.active_chat_artifacts().into_iter().next() else {
+            eprintln!("CHAT_PROBE: 成果物が無い");
+            return;
+        };
+        let page = format!(
+            "<!doctype html><meta charset=utf-8><title>{marker}</title>\
+<body style='font:28px system-ui;display:grid;place-items:center;height:100vh;margin:0'>{marker}"
+        );
+        if let Err(error) = std::fs::write(&path, page) {
+            eprintln!("CHAT_PROBE: 書き換えられない: {error}");
+            return;
+        }
+        let Some(thread) = self.threads.get(self.active) else {
+            return;
+        };
+        let (name, color) = (thread.name.clone(), thread.color);
+        cx.emit(PanelEvent::FilesTouched {
+            files: vec![path],
+            color,
+        });
+        cx.emit(PanelEvent::TurnEnded {
+            thread: name,
+            color,
+            summary: SharedString::default(),
+            digest: None,
+            muted: true,
+        });
+        cx.notify();
+    }
+
     /// 開発用: 過去のチャットの行を並べる（一覧の日付グループ・輪郭だけの ●・ピンの見え方）。
     pub fn debug_seed_chat_history(&mut self, cx: &mut Context<Self>) {
         let Some(storage) = self.storage.clone() else {

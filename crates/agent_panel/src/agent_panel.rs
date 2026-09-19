@@ -1136,6 +1136,24 @@ pub fn digest_tail(text: &str) -> Option<SharedString> {
 
 /// エントリのコピー用プレーンテキスト（GPUI の素のテキストは選択ドラッグ不可のため、
 /// hover の ⧉ でエントリ単位コピーを提供する・M13 UX。本文のドラッグ選択は残件）。
+/// 添付チップに出す短い名前。相対パス（プロジェクトの中）はそのまま、絶対パスはファイル名だけ。
+/// 貼り付けた画像（`chat-paste/`）は機械が付けた名前なので「貼り付けた画像」と呼ぶ。
+fn context_chip_label(path: &str) -> SharedString {
+    let path = Path::new(path);
+    if path
+        .parent()
+        .is_some_and(|parent| parent.ends_with("chat-paste"))
+    {
+        return SharedString::from(i18n::t!("agent.pasted_image"));
+    }
+    if path.is_relative() {
+        return SharedString::from(path.display().to_string());
+    }
+    path.file_name()
+        .map(|name| SharedString::from(name.to_string_lossy().to_string()))
+        .unwrap_or_else(|| SharedString::from(path.display().to_string()))
+}
+
 /// image ブロックで送る 1 枚の上限。これを超える画像はパスの添付として残す（エージェントが
 /// 自分で読む）。Claude の上限は 5 MB 程度で、base64 にすると 4/3 倍に膨らむ。
 const PROMPT_IMAGE_MAX_BYTES: u64 = 3_500_000;
@@ -5114,12 +5132,7 @@ PYEOF"#;
             } else {
                 let names: Vec<String> = image_paths
                     .iter()
-                    .map(|path| {
-                        Path::new(path.as_ref())
-                            .file_name()
-                            .map(|name| name.to_string_lossy().to_string())
-                            .unwrap_or_else(|| path.to_string())
-                    })
+                    .map(|path| context_chip_label(path.as_ref()).to_string())
                     .collect();
                 format!("{prompt}\n\n▦ {}", names.join(" · "))
             };
@@ -9382,7 +9395,11 @@ PYEOF"#;
                                     ),
                             )
                             .children(context.into_iter().enumerate().map(|(index, path)| {
+                                // チップは**短く読める名前**にして、全体はツールチップで見せる
+                                // （貼り付けた画像のキャッシュのパスをそのまま出すと長い上に読めない）。
+                                let theme_for_tip = theme.clone();
                                 div()
+                                    .id(("context-chip", index))
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
@@ -9392,7 +9409,8 @@ PYEOF"#;
                                     .bg(theme.bg3)
                                     .text_size(px(10.5))
                                     .text_color(theme.fg1)
-                                    .child(path)
+                                    .child(context_chip_label(&path))
+                                    .tooltip(Tooltip::text(path.to_string(), theme_for_tip))
                                     .child(
                                         div()
                                             .id(("context-chip-x", index))
@@ -10808,6 +10826,19 @@ impl AgentPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chip_shows_a_short_readable_name() {
+        // プロジェクトの中は相対パスのまま（どこのファイルかが分かる）。
+        assert_eq!(context_chip_label("src/main.rs"), "src/main.rs");
+        // 外のファイルはファイル名だけ（全体はツールチップ）。
+        assert_eq!(context_chip_label("/Users/me/work/notes.md"), "notes.md");
+        // 貼り付けた画像は機械が付けた名前なので呼び名に置き換える。
+        assert_eq!(
+            context_chip_label("/var/cache/necoder/chat-paste/paste-123-4.png"),
+            i18n::translate("agent.pasted_image").as_str()
+        );
+    }
 
     /// 復元した会話でも「頼んだこと」は**最後の**人間の発話（FLEET-V2 §3.2-3 / P1 残の回収）。
     /// 途中のアシスタント発言やツール行に引っぱられない。

@@ -1386,7 +1386,13 @@ impl EditorView {
         self.after_edit(cx);
     }
 
-    fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+    /// 開発用: クリップボードからの貼り付けを直接起こす（offscreen 検証。実 ⌘V と同じ経路）。
+    #[cfg(debug_assertions)]
+    pub fn debug_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.paste(&Paste, window, cx);
+    }
+
+    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
