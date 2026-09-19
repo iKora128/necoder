@@ -108,6 +108,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let index = self.work_switch_target(index);
+        // Chat からプロジェクトを選んだら Chat を抜ける（同じプロジェクトでも「そこへ戻る」）。
+        if self.chat_mode() {
+            self.set_chat_mode(false, window, cx);
+        }
         let Some(active) = active_index_after_switch(
             self.project_sessions.active,
             index,

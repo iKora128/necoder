@@ -155,6 +155,14 @@ impl CommandRegistry {
                 action_name: "workspace::ToggleFleet",
             },
             CommandEntry {
+                label_key: "cmd.toggle_chat",
+                action_name: "workspace::ToggleChat",
+            },
+            CommandEntry {
+                label_key: "cmd.new_chat",
+                action_name: "workspace::NewChat",
+            },
+            CommandEntry {
                 label_key: "cmd.focus_captain",
                 action_name: "workspace::FocusCaptain",
             },

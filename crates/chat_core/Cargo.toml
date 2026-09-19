@@ -1,0 +1,31 @@
+[package]
+name = "chat_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/chat_core.rs"
+
+# Chat モードの UI 非依存ロジック（docs/CHAT.md）。GPUI を引かない＝テストが速く、
+# 実エージェントへの通し確認（examples/probe_chat_preset）も窓なしで走る。
+[dependencies]
+acp_client.workspace = true
+paths.workspace = true
+
+# ローカルの日付（フォルダ名の `YYYY-MM-DD`）。
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# 書類フォルダの Known Folder と、ローカルの日付。
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+host.workspace = true
+serde_json.workspace = true
+# 実エージェントへの通し確認で、送る画像（単色の PNG）をその場で作る。
+image.workspace = true
+base64.workspace = true

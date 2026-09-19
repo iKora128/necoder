@@ -7,6 +7,7 @@
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
 pub mod mcp;
+pub mod preset;
 pub mod registry;
 
 use acp::schema::v1;
@@ -186,6 +187,13 @@ pub enum AgentEvent {
     /// このイベントの間、当該ターンはエージェント側でブロックしている（応答するまで進まない）。
     PermissionRequest {
         title: String,
+        /// ツールの種別（読む / 書く / 実行 / Web …）。エージェントが言わなければ `None`。
+        kind: Option<ToolCallKind>,
+        /// このツール呼び出しが触る場所（`locations` と差分のパス、それに rawInput の
+        /// `file_path` / `path`。重複なし）。Chat モードはこれで「チャットのフォルダか・渡された
+        /// ファイルか・それ以外か」を裁く（`chat_core::policy`）。**ACP はツール名を運ばない**ので、
+        /// 裁定の材料は `kind` とここだけ。
+        paths: Vec<String>,
         diffs: Vec<PermissionDiff>,
         /// Diff の無いツール（Bash/Fetch/MCP 等）の実引数（rawInput）を整形 JSON で。承認前に
         /// 「何が実行されるか」を必ず可視化する（tool poisoning 対策・ACP #1979 / GHSA-f2g4）。
@@ -219,7 +227,14 @@ pub enum AgentEvent {
     /// `session_id` はエージェント側の会話の鍵。UI はスレッドに控えて、次にこのスレッドの
     /// エージェントを立ち上げ直すとき [`SessionPreferences::resume`] に渡す。
     /// `resumed` = `session/load` で前回の会話を引き継げた（false は新規セッション）。
-    SessionStarted { session_id: String, resumed: bool },
+    SessionStarted {
+        session_id: String,
+        resumed: bool,
+        /// エージェントが `loadSession` を広告している＝このセッションを畳んでも、次に同じ id で
+        /// 会話を引き継げる。UI はこれが `true` のスレッドだけ、使っていないエージェントを止めてよい
+        /// （広告しないエージェントを止めると会話の文脈が失われる）。
+        resumable: bool,
+    },
     /// エージェントとの transport が閉じた（プロセス終了・SSH 切断）。**この後セッションは終わる**
     /// （[`run_session_on`] が戻り、イベントチャネルも閉じる）。ターン中なら UI はそのターンを
     /// 畳み、以後の送信は新しいセッションを立ち上げる。待機中にも届く（EOF を待機中も見張るため）。
@@ -235,11 +250,26 @@ pub enum TurnEnd {
     Interrupted,
 }
 
+/// prompt に添える画像 1 枚（ACP の image ブロック）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptImage {
+    /// `image/png` など。
+    pub mime_type: String,
+    /// 中身（base64）。
+    pub data: String,
+}
+
 /// UI → 常駐セッションへの指示（[`run_session`] が単一チャネルで受ける）。
 #[derive(Debug, Clone)]
 pub enum SessionCommand {
     /// prompt を送る。
     Prompt(String),
+    /// 画像つきの prompt（貼り付けたスクリーンショット・ドロップした画像）。エージェントが
+    /// `promptCapabilities.image` を広告していなければ画像は落として、その旨を 1 行知らせる。
+    PromptWithImages {
+        text: String,
+        images: Vec<PromptImage>,
+    },
     /// 実行中のターンを中断する（`session/cancel` 通知）。エージェントは
     /// `StopReason::Cancelled` でターンを畳むので、UI には `TurnEnded { Interrupted }` が届く。
     /// **ターン中に受け取れる**必要があるため、ターンループが `read_update` と同時に待つ。
@@ -667,6 +697,22 @@ impl AgentKind {
             .and_then(|id| registry.and_then(|reg| reg.agent(id)))
         {
             if let Some(registry::Launch::Npx(npx)) = entry.launch() {
+                // 同じ版が npx のキャッシュに在れば直接起こす（`npm exec` の親プロセスを持たない）。
+                // レジストリの起動引数が付いている時は npx の解釈に任せる（取り違えない）。
+                let cached = npm_npx_cache_root()
+                    .filter(|_| npx.args.is_empty())
+                    .and_then(|cache| npx_cached_agent(&cache, &npx.package, self.bin));
+                if let Some(bin) = cached {
+                    let args = self
+                        .extra_args
+                        .iter()
+                        .map(|arg| (*arg).to_string())
+                        .collect();
+                    let mut resolved = AgentCommand::new(bin, args, cwd);
+                    resolved.env = npx.env.clone();
+                    resolved.env.extend(settings_env);
+                    return Some(resolved);
+                }
                 if let Some(npx_path) = find_in_path("npx") {
                     let mut args = vec!["-y".to_string(), bounded_npm_spec(&npx.package)];
                     args.extend(npx.args.iter().cloned());
@@ -700,8 +746,14 @@ impl AgentKind {
         if let Some(bin) = zed_cached_agent(self.bin) {
             return Some(AgentCommand::new(bin, extra, cwd));
         }
-        // 3) npx フォールバック（npm パッケージがある agent のみ。node/npx が PATH に要る）
+        // 3) npx フォールバック（npm パッケージがある agent のみ。node/npx が PATH に要る）。
+        //    同じ版が npx のキャッシュに在れば直接起こす。
         let package = self.package?;
+        if let Some(bin) =
+            npm_npx_cache_root().and_then(|cache| npx_cached_agent(&cache, package, self.bin))
+        {
+            return Some(AgentCommand::new(bin, extra, cwd));
+        }
         let npx = find_in_path("npx")?;
         let mut args = vec!["-y".to_string(), bounded_npm_spec(package)];
         args.extend(extra);
@@ -1039,6 +1091,48 @@ fn shell_word(value: &str) -> String {
 /// **これは Zed 自身のディレクトリ規約**なので necoder の `paths` crate は使わない（別アプリの置き場）。
 /// 版やプラットフォームで揺れるため、存在するものを順に試す。mac の従来パスを必ず先頭に置く
 /// ＝mac では当たった時点で従来と同じ結果になる（WINDOWS-PORT.md §D8）。
+/// npm の npx キャッシュ（`~/.npm/_npx`）の場所。`npm_config_cache` があればそちら。
+fn npm_npx_cache_root() -> Option<PathBuf> {
+    if let Some(cache) = std::env::var_os("npm_config_cache") {
+        return Some(PathBuf::from(cache).join("_npx"));
+    }
+    Some(paths::home_dir()?.join(".npm/_npx"))
+}
+
+/// `npx -y <package>@<version>` が**既に入れてある**アダプタの実行ファイル。
+///
+/// `npx` 経由で起こすと、`npm exec` のプロセスがエージェントの親として生き続ける（実測 48 MB/本・
+/// 起動のたびに依存解決で 1 秒前後）。同じ物がキャッシュに在るなら直接起こせば、その両方が要らない。
+///
+/// 使うのは**指定された版とちょうど同じ版**が入っている時だけ。「上限以下なら何でも」にすると、
+/// レジストリが版を上げても古いキャッシュを使い続けて更新されなくなる（無ければ従来どおり npx に
+/// 任せる＝npx が新しい版を入れ、次の起動からはそれを直接使う）。
+/// Windows は `.cmd` のラッパー経由になるので対象外（従来どおり npx）。
+fn npx_cached_agent(cache_root: &Path, package: &str, bin: &str) -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    // 先頭の `@` は scope。版の区切りは最後の `@`。
+    let separator = package.rfind('@').filter(|index| *index > 0)?;
+    let (name, version) = (&package[..separator], &package[separator + 1..]);
+    if version.is_empty() || !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return None; // 範囲やタグ指定は「どの版か」が決まらない
+    }
+    for entry in std::fs::read_dir(cache_root).ok()?.flatten() {
+        let modules = entry.path().join("node_modules");
+        let manifest = modules.join(name).join("package.json");
+        let installed = std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|json| json.get("version")?.as_str().map(str::to_string));
+        let candidate = modules.join(".bin").join(bin);
+        if installed.as_deref() == Some(version) && candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn zed_npx_cache_roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(home) = paths::home_dir() {
@@ -1326,6 +1420,9 @@ pub struct SessionPreferences {
     /// **ACP では渡さない限りエージェントから MCP は 1 つも見えない** — エージェント側の
     /// 設定ファイルに登録してあっても、セッションには出てこない（`mcp` モジュール冒頭）。
     pub mcp_servers: Vec<mcp::McpServerConfig>,
+    /// セッションの作り方のプリセット（Chat モード・`docs/CHAT.md` §5）。`session/new` と
+    /// `session/load` の**両方**に同じ `_meta` を載せる — 片方だけだと再開した会話から設定が抜ける。
+    pub preset: preset::SessionPreset,
 }
 
 /// **常駐セッション + 逐次ストリーミング**。エージェントを起動して 1 セッションを開き、`prompt_rx` から
@@ -1365,7 +1462,9 @@ pub async fn run_session_on(
     let spec = CommandSpec::new(command.path.to_string_lossy(), &command.cwd)
         .args(command.args.clone())
         .envs(host::task_environment(host.as_ref(), &command.cwd)?)
-        .envs(command.env.clone());
+        .envs(command.env.clone())
+        // プリセットの環境変数が最後＝ユーザーの agent_servers 設定より優先（Chat の持ち込み遮断は設定で外せない）。
+        .envs(preferences.preset.env.clone());
     // MCP の stdio サーバはエージェントと同じホストで起動される＝リモートでは接続元のコマンドを
     // 渡しても意味がない。判定はここで取る（下の接続クロージャは `move` で `host` を持ち込まない）。
     let is_remote = host.is_remote();
@@ -1413,6 +1512,10 @@ pub async fn run_session_on(
                 event_tx.unbounded_send(AgentEvent::Notice(message)).ok();
             }
 
+            // プリセットの `_meta`。new と load で同じ物を使う（上の `preset` のコメント参照）。
+            let session_meta = preferences.preset.to_meta();
+
+            let accepts_images = initialized.agent_capabilities.prompt_capabilities.image;
             let can_load = initialized.agent_capabilities.load_session;
             let resume_id = preferences.resume.clone().filter(|_| can_load);
             let mut resumed_session = None;
@@ -1423,7 +1526,8 @@ pub async fn run_session_on(
                 let load = connection
                     .send_request(
                         v1::LoadSessionRequest::new(previous.clone(), &cwd)
-                            .mcp_servers(mcp_servers.clone()),
+                            .mcp_servers(mcp_servers.clone())
+                            .meta(session_meta.clone()),
                     )
                     .block_task()
                     .fuse();
@@ -1458,7 +1562,11 @@ pub async fn run_session_on(
                     // セッションを手動生成する（`start_session` は応答の `config_options` を捨てるため）。
                     // NewSessionResponse から config_options を取り出してから attach する。
                     let response = connection
-                        .send_request(v1::NewSessionRequest::new(&cwd).mcp_servers(mcp_servers))
+                        .send_request(
+                            v1::NewSessionRequest::new(&cwd)
+                                .mcp_servers(mcp_servers)
+                                .meta(session_meta),
+                        )
                         .block_task()
                         .await?;
                     let modes_state = response.modes.clone();
@@ -1471,6 +1579,7 @@ pub async fn run_session_on(
                 .unbounded_send(AgentEvent::SessionStarted {
                     session_id: session.session_id().to_string(),
                     resumed,
+                    resumable: can_load,
                 })
                 .ok();
 
@@ -1579,8 +1688,9 @@ pub async fn run_session_on(
                         }
                     }
                 };
-                let prompt = match session_command {
-                    SessionCommand::Prompt(prompt) => prompt,
+                let (prompt, images) = match session_command {
+                    SessionCommand::Prompt(prompt) => (prompt, Vec::new()),
+                    SessionCommand::PromptWithImages { text, images } => (text, images),
                     // ターン外の cancel は畳む対象が無いので黙って捨てる。
                     SessionCommand::Cancel => continue,
                     SessionCommand::SetMode(mode_id) => {
@@ -1625,7 +1735,7 @@ pub async fn run_session_on(
                 let prompt_response = connection
                     .send_request(v1::PromptRequest::new(
                         session_id.clone(),
-                        vec![prompt.into()],
+                        prompt_blocks(prompt, images, accepts_images, &event_tx),
                     ))
                     .block_task()
                     .fuse();
@@ -1919,6 +2029,58 @@ fn tool_output(content: &[v1::ToolCallContent]) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// prompt を ACP の content ブロック列へ。画像は本文の**前**に置く（「この画像について…」と
+/// 続く文が自然に読める順）。受け取れないエージェントには送らず、黙って落とさずに知らせる。
+fn prompt_blocks(
+    text: String,
+    images: Vec<PromptImage>,
+    accepts_images: bool,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Vec<v1::ContentBlock> {
+    let mut blocks: Vec<v1::ContentBlock> = Vec::new();
+    if accepts_images {
+        blocks.extend(images.into_iter().map(|image| {
+            v1::ContentBlock::Image(v1::ImageContent::new(image.data, image.mime_type))
+        }));
+    } else if !images.is_empty() {
+        event_tx
+            .unbounded_send(AgentEvent::Notice(
+                "このエージェントは画像を受け取れないため、画像を除いて送りました".to_string(),
+            ))
+            .ok();
+    }
+    blocks.push(text.into());
+    blocks
+}
+
+/// 権限リクエストが触る場所を、取れる所から全部集める（重複なし・出た順）。
+///
+/// `locations` が正だが、アダプタによっては権限リクエストの時点で空のまま来る（検索系は
+/// 場所を rawInput の `path` にしか書かない）。取りこぼすと「場所が分からないので素通し」に
+/// なるので、差分のパスと rawInput のよくあるキーも見る。
+fn permission_paths(fields: &v1::ToolCallUpdateFields, diffs: &[PermissionDiff]) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut push = |path: String| {
+        if !path.is_empty() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    for location in fields.locations.iter().flatten() {
+        push(location.path.display().to_string());
+    }
+    for diff in diffs {
+        push(diff.path.clone());
+    }
+    if let Some(serde_json::Value::Object(input)) = &fields.raw_input {
+        for key in ["file_path", "path", "notebook_path"] {
+            if let Some(serde_json::Value::String(path)) = input.get(key) {
+                push(path.clone());
+            }
+        }
+    }
+    paths
+}
+
 /// ツールが触ったファイルのパス一覧を取り出す。
 fn tool_locations(locations: &[v1::ToolCallLocation]) -> Vec<String> {
     locations
@@ -1963,6 +2125,8 @@ async fn handle_permission_request(
             _ => None,
         })
         .collect();
+    let kind = request.tool_call.fields.kind.map(map_tool_kind);
+    let paths = permission_paths(&request.tool_call.fields, &diffs);
     // Diff の無いツール（Bash/Fetch/MCP）の実引数を承認前に必ず見せる（ACP #1979 / GHSA-f2g4）。
     // 編集系（Diff あり）は差分表示で内容が見えるので冗長回避のため省く。
     let raw_input = if diffs.is_empty() {
@@ -1994,6 +2158,8 @@ async fn handle_permission_request(
     event_tx
         .unbounded_send(AgentEvent::PermissionRequest {
             title,
+            kind,
+            paths,
             diffs,
             raw_input,
             options,
@@ -2625,6 +2791,7 @@ for line in sys.stdin:
             AgentEvent::SessionStarted {
                 session_id,
                 resumed,
+                ..
             } => {
                 assert_eq!(session_id, "sess-1");
                 assert!(!resumed);
@@ -2864,6 +3031,7 @@ for line in sys.stdin:
             AgentEvent::SessionStarted {
                 session_id,
                 resumed,
+                ..
             } => {
                 assert_eq!(session_id, "prev-1");
                 assert!(resumed, "session/load で引き継いだ");
@@ -2895,6 +3063,7 @@ for line in sys.stdin:
             AgentEvent::SessionStarted {
                 session_id,
                 resumed,
+                ..
             } => {
                 assert_eq!(session_id, "fresh");
                 assert!(!resumed);
@@ -2911,6 +3080,266 @@ for line in sys.stdin:
         assert_eq!(
             chunks,
             vec!["order=initialize,session/new,session/prompt"],
+            "{events:?}"
+        );
+    }
+
+    /// 偽エージェント（`LOAD_CAP` を置換して使う）: `session/new` / `session/load` で受け取った
+    /// `_meta` を、どちらの method で受けたかと一緒に prompt 応答へ載せる。キーが無ければ `null`。
+    const AGENT_THAT_ECHOES_META: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+received = {}
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"loadSession": LOAD_CAP}}})
+    elif method in ("session/new", "session/load"):
+        received = {"method": method, "has_meta": "_meta" in params, "meta": params.get("_meta")}
+        result = {} if method == "session/load" else {"sessionId": "fresh"}
+        send({"jsonrpc": "2.0", "id": rid, "result": result})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": params["sessionId"],
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": json.dumps(received, sort_keys=True)}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"#;
+
+    fn echoed_session_params(
+        preferences: SessionPreferences,
+        load_advertised: bool,
+    ) -> Option<serde_json::Value> {
+        let script = AGENT_THAT_ECHOES_META
+            .replace("LOAD_CAP", if load_advertised { "True" } else { "False" });
+        let (outcome, events) =
+            run_fake_agent_until_session_ends(&script, preferences, Some("やあ"))?;
+        outcome.expect("セッションは正常終了する");
+        let echoed = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("エージェントが受け取った params が返る");
+        Some(serde_json::from_str(echoed).expect("JSON で返る"))
+    }
+
+    fn chat_like_preset() -> preset::SessionPreset {
+        preset::SessionPreset {
+            system_prompt: Some("質問には会話で答える".to_string()),
+            tools: Some(vec!["Read".to_string(), "Write".to_string()]),
+            setting_sources: Some(Vec::new()),
+            ..preset::SessionPreset::default()
+        }
+    }
+
+    /// プリセットの `_meta` は **`session/new` と `session/load` の両方**に同じ形で乗る。
+    /// load 側に載せ忘れると、再起動して会話を再開した瞬間に Chat がコーディングエージェントへ戻る
+    /// （アダプタは `loadSession` でも `params._meta` からセッションを組み立てる）。
+    #[test]
+    fn the_preset_meta_rides_on_both_new_and_load() {
+        let expected = serde_json::Value::Object(chat_like_preset().to_meta().expect("meta"));
+
+        let fresh = SessionPreferences {
+            preset: chat_like_preset(),
+            ..SessionPreferences::default()
+        };
+        let Some(received) = echoed_session_params(fresh, true) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(received["method"], "session/new", "{received}");
+        assert_eq!(received["meta"], expected, "{received}");
+
+        let resumed = SessionPreferences {
+            preset: chat_like_preset(),
+            resume: Some("prev-1".into()),
+            ..SessionPreferences::default()
+        };
+        let received = echoed_session_params(resumed, true).expect("python3 は上で確認済み");
+        assert_eq!(received["method"], "session/load", "{received}");
+        assert_eq!(received["meta"], expected, "{received}");
+    }
+
+    /// プリセットが空なら `_meta` キーごと送らない（`null` も送らない）＝既存のスレッドは線の上で不変。
+    #[test]
+    fn no_preset_means_no_meta_key_on_the_wire() {
+        let Some(received) = echoed_session_params(SessionPreferences::default(), false) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(received["method"], "session/new", "{received}");
+        assert_eq!(received["has_meta"], false, "{received}");
+    }
+
+    /// npx のキャッシュに**指定と同じ版**が在る時だけ、そこを直接起こす。
+    #[cfg(not(windows))]
+    #[test]
+    fn a_cached_adapter_of_the_exact_version_is_launched_directly() {
+        let cache = std::env::temp_dir().join(format!(
+            "necoder_npx_cache_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let install = |hash: &str, version: &str| {
+            let modules = cache.join(hash).join("node_modules");
+            let package = modules.join("@scope/adapter");
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::create_dir_all(modules.join(".bin")).unwrap();
+            std::fs::write(
+                package.join("package.json"),
+                format!(r#"{{"name":"@scope/adapter","version":"{version}"}}"#),
+            )
+            .unwrap();
+            std::fs::write(modules.join(".bin/adapter"), "#!/usr/bin/env node\n").unwrap();
+            modules.join(".bin/adapter")
+        };
+        install("aaa", "0.77.0");
+        let wanted = install("bbb", "0.78.0");
+
+        assert_eq!(
+            npx_cached_agent(&cache, "@scope/adapter@0.78.0", "adapter"),
+            Some(wanted)
+        );
+        // 無い版は npx に任せる（古いキャッシュを使い続けて更新が止まらないように）。
+        assert_eq!(
+            npx_cached_agent(&cache, "@scope/adapter@0.79.0", "adapter"),
+            None
+        );
+        // 版が決まらない指定（範囲・タグ・版なし）も npx に任せる。
+        assert_eq!(
+            npx_cached_agent(&cache, "@scope/adapter@latest", "adapter"),
+            None
+        );
+        assert_eq!(npx_cached_agent(&cache, "@scope/adapter", "adapter"), None);
+        assert_eq!(
+            npx_cached_agent(&cache.join("missing"), "@scope/adapter@0.78.0", "adapter"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(cache);
+    }
+
+    /// 偽エージェント（`IMAGE_CAP` を置換して使う）: 受け取った prompt のブロック列をそのまま返す。
+    const AGENT_THAT_ECHOES_PROMPT_BLOCKS: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"promptCapabilities": {"image": IMAGE_CAP}}}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "img-1"}})
+    elif method == "session/prompt":
+        send({"jsonrpc": "2.0", "method": "session/update",
+              "params": {"sessionId": params["sessionId"],
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text",
+                                                "text": json.dumps(params.get("prompt"))}}}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        sys.exit(0)
+"#;
+
+    fn image_prompt_scenario(agent_accepts_images: bool) -> Option<Vec<AgentEvent>> {
+        let script = AGENT_THAT_ECHOES_PROMPT_BLOCKS.replace(
+            "IMAGE_CAP",
+            if agent_accepts_images {
+                "True"
+            } else {
+                "False"
+            },
+        );
+        let python = find_in_path("python3")?;
+        let cwd = std::env::temp_dir();
+        let command = AgentCommand::new(python, vec!["-c".into(), script], cwd);
+        let (command_tx, command_rx) = mpsc::unbounded::<SessionCommand>();
+        let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
+        command_tx
+            .unbounded_send(SessionCommand::PromptWithImages {
+                text: "このエラーは何？".into(),
+                images: vec![PromptImage {
+                    mime_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                }],
+            })
+            .ok()?;
+        let (outcome, events) = futures::executor::block_on(futures::future::join(
+            run_session(command, SessionPreferences::default(), command_rx, event_tx),
+            event_rx.collect::<Vec<_>>(),
+        ));
+        drop(command_tx);
+        outcome.expect("セッションは正常終了する");
+        Some(events)
+    }
+
+    fn echoed_blocks(events: &[AgentEvent]) -> serde_json::Value {
+        let echoed = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::AgentChunk(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("エージェントが受け取った prompt が返る");
+        serde_json::from_str(echoed).expect("JSON で返る")
+    }
+
+    /// 画像は ACP の image ブロックとして、**本文の前**に乗る。
+    #[test]
+    fn images_ride_as_image_blocks_before_the_text() {
+        let Some(events) = image_prompt_scenario(true) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let blocks = echoed_blocks(&events);
+        assert_eq!(blocks.as_array().map(Vec::len), Some(2), "{blocks}");
+        assert_eq!(blocks[0]["type"], "image");
+        assert_eq!(blocks[0]["mimeType"], "image/png");
+        assert_eq!(blocks[0]["data"], "aGVsbG8=");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "このエラーは何？");
+    }
+
+    /// 画像を受け取れないエージェントには送らない。黙って落とさず、1 行で知らせる。
+    #[test]
+    fn images_are_dropped_with_a_notice_when_the_agent_cannot_take_them() {
+        let Some(events) = image_prompt_scenario(false) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let blocks = echoed_blocks(&events);
+        assert_eq!(blocks.as_array().map(Vec::len), Some(1), "{blocks}");
+        assert_eq!(blocks[0]["type"], "text");
+        assert!(
+            events.iter().any(
+                |event| matches!(event, AgentEvent::Notice(message) if message.contains("画像"))
+            ),
             "{events:?}"
         );
     }
@@ -3145,6 +3574,7 @@ for line in sys.stdin:
             effort: Some("MAX".into()),
             resume: None,
             mcp_servers: Vec::new(),
+            preset: preset::SessionPreset::default(),
         };
 
         let events = futures::executor::block_on(async move {
@@ -3427,6 +3857,7 @@ for line in sys.stdin:
                         AgentEvent::SessionStarted {
                             session_id,
                             resumed,
+                            ..
                         } => eprintln!("[session started] {session_id} resumed={resumed}"),
                         AgentEvent::SessionLost => eprintln!("[session lost]"),
                     }

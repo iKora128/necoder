@@ -14,6 +14,13 @@ finder:
   new_file: New file…
   new_dir: New folder…
 agent:
+  search_placeholder: Search this conversation
+  search_count: "%{position}/%{entries} · %{total} matches"
+  search_none: No matches
+  search_prev: Previous match
+  search_next: Next match (⏎)
+  search_close: Close search (esc)
+  code_copy_tip: Copy this code
   error_prefix: "Error: %{message}"
   history_archived_mark: ·closed
   summary_prompt: The input is the instruction and result of an agent turn. Summarize what was done and how it turned out in English. At most 70 characters, one line only, plain text with no quotes and no preamble.
@@ -183,6 +190,8 @@ cmd:
   toggle_git_panel: "View: Source control"
   toggle_todo_board: "View: Todo board"
   toggle_fleet: "View: Fleet mode"
+  toggle_chat: "View: Chat mode"
+  new_chat: "Chat: New chat"
   toggle_agent_full_screen: "View: AI full screen (hide the editor)"
   split_right: "View: Split right"
   new_thread: "AI: New thread"
@@ -349,6 +358,7 @@ time:
   started: "started %{when}"
   last_input: "input %{when}"
 rail:
+  chat: Chat (conversations outside any project)
   add_tip: Open — folder / file / remote / recent (⌘O switches)
   add_prompt: Open
   menu_new_window: Open in new window
@@ -369,11 +379,25 @@ rail:
   remote: Remote SSH
   settings: Settings
 titlebar:
+  chat: Chat
   editor: Editor
   mode_tip: Switch between Editor and Fleet
   attention_tip: "%{n} need you"
   fleet: Fleet
 settings:
+  pref_agent_idle_stop: Stop unused agents after (minutes)
+  pref_agent_idle_stop_sub: Each agent holds several hundred MB. The conversation is kept and resumes on the next message. 0 = never
+  chat_heading: CHAT
+  chat_directory: Where chat folders are kept
+  chat_directory_default: necoder in your Documents folder (default)
+  chat_directory_pick: Choose folder…
+  chat_directory_reset: Reset to default
+  chat_idle_stop: Stop unused chat agents after (minutes)
+  chat_idle_stop_sub: 0 = never
+  chat_instructions: Custom instructions (apply to every chat)
+  chat_instructions_none: None (set chat.instructions in settings.json)
+  mcp_claude_connectors: Load claude.ai connectors into Claude threads
+  mcp_claude_connectors_sub: Connectors linked to your account (Figma, Google Calendar, …). Turning this off makes the first reply faster (measured 4.2 s → 1.8 s). Chat mode never loads them
   title: Settings
   agents_heading: AI Agents
   agents_sub: necoder checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
@@ -559,6 +583,7 @@ breadcrumb:
   html_preview_tip: Open in the system WebView  ⌘⇧V
   html_reload_tip: Reload HTML preview
 webview:
+  outside_sandbox: This file is outside the folder that may be shown
   failed: Unable to open HTML preview
   unsupported: HTML preview currently supports macOS and Windows
   hidden_by_overlay: Returns when the panel in front closes
@@ -624,6 +649,7 @@ ipc:
 crash:
   notice: ⚠ Crashed last time — click to report
 menu:
+  chat: Chat Mode
   about: About necoder
   check_updates: Check for Updates…
   settings: Settings…
@@ -748,6 +774,7 @@ search:
   close: Close (Esc returns to where you started)
   toggle_replace: Toggle replace field (⌥⌘F)
 key:
+  find_in_transcript: Search this conversation
   sheet_title: Keyboard shortcuts
   section_editor: Editor
   section_agent: AI chat
@@ -852,3 +879,48 @@ work:
   tabs_setting: Default tab position
   top: Top
   left: Left
+chat:
+  destination: Chat
+  new_chat: New chat
+  preview: Preview
+  preview_tip: Open in preview
+  allow_in_this_chat: Always allow in this chat
+  denied_write: "Refused a write outside this chat's folder and attachments: %{path}"
+  denied_execute: Refused to run a command (Chat has no shell)
+  err_folder: "Could not prepare the chat folder: %{message}"
+  err_no_documents: Could not locate the Documents folder (set chat.directory in settings)
+  no_project: no project
+  no_folder: No folder (nothing written yet)
+  search_placeholder: Search chats
+  no_results: No chats match
+  agents_running: "Running %{n} / %{total}"
+  group_pinned: Pinned
+  group_today: Today
+  group_yesterday: Yesterday
+  group_week: Previous 7 days
+  group_older: Older
+  pin: Pin
+  unpin: Unpin
+  reveal_folder: Reveal folder
+  export_markdown: Export conversation as Markdown
+  export_file_name: conversation.md
+  export_you: You
+  export_assistant: Assistant
+  exported: "Exported: %{path}"
+  err_export_empty: A chat with no messages yet cannot be exported
+  delete: Delete chat…
+  delete_confirm_title: "Delete “%{name}”?"
+  delete_confirm_body: The conversation history will be removed. Choose what happens to the files left in its folder (they are moved to the Trash, never erased).
+  delete_keep_files: Keep files
+  delete_trash_files: Move files to Trash
+  cancel: Cancel
+  write_scope: Writes — folder + attachments
+  write_scope_tip: Writes inside this chat's folder are allowed, attached files ask once, anything else is refused
+  empty_title: What would you like to talk about?
+  empty_talk: Questions and advice are answered in the conversation
+  empty_artifact: Ask for something to see, and it is written as one file in Documents and shown on the right
+  empty_files: Drop a file here to have it read and edited
+  empty_code: To work on code, use Editor or Fleet in a project
+  copy_to_project: "Copy to project “%{project}”"
+  copied_to_project: "Copied: %{path}"
+  copy_failed: "Could not copy: %{message}"

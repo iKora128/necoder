@@ -43,9 +43,14 @@ pub struct EditorArea {
     pub(crate) hunk_menu: Option<(project::DiffHunk, Point<gpui::Pixels>)>,
     pub(crate) pending_transient_tab: Option<(PathBuf, Buffer)>,
     pub(crate) pending_navigation: Option<(PathBuf, usize, usize)>,
-    /// 開いた上で**整形プレビュー**を出す待ち行列（transcript の `.html` リンク）。
+    /// 開いた上で**整形プレビュー**を出す待ち行列（transcript の `.html` リンク・`▣ プレビュー`・
+    /// Chat の成果物）。HTML か Markdown かは拡張子で決める。
     /// 行番号つきのジャンプは source を見たいので `pending_navigation` のまま。
-    pub(crate) pending_html_preview: Option<PathBuf>,
+    pub(crate) pending_preview: Option<PathBuf>,
+    /// 上を開いた後、フォーカスを会話の入力欄へ戻すか（エージェントが書いた成果物を出す時）。
+    pub(crate) pending_preview_keeps_focus: bool,
+    /// 未保存の編集が無いタブを全部閉じる予約（Chat で見ているチャットが替わった時）。
+    pub(crate) pending_close_clean_tabs: bool,
     pub(crate) pending_open_git_diff: Option<PathBuf>,
     pub(crate) pending_stage_hunk: Option<project::DiffHunk>,
     pub(crate) blame_gen: u32,
@@ -89,7 +94,9 @@ impl EditorArea {
             hunk_menu: None,
             pending_transient_tab: None,
             pending_navigation: None,
-            pending_html_preview: None,
+            pending_preview: None,
+            pending_preview_keeps_focus: false,
+            pending_close_clean_tabs: false,
             pending_open_git_diff: None,
             pending_stage_hunk: None,
             blame_gen: 0,

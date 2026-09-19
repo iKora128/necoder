@@ -73,9 +73,29 @@ impl Workspace {
         cx.stop_propagation();
     }
 
+    /// Chat モード中の、プロジェクトに属する機能（検索・Git・Todo・AI ドック・ターミナル・SSH）の
+    /// アイコン。**位置は動かさず**薄くするだけで、押しても何も起きない（Chat には対象が無い）。
+    fn rail_icon_inert(&self, id: &'static str, icon: &'static str) -> impl IntoElement {
+        div()
+            .id(id)
+            .w(px(30.))
+            .h(px(30.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(0.32)
+            .child(
+                gpui::svg()
+                    .path(icon)
+                    .size(px(17.))
+                    .text_color(self.theme.fg2),
+            )
+    }
+
     pub(crate) fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let active = self.project_sessions.active;
+        let chat_mode = self.chat_mode();
         let accent = self.accent();
         let rail = settings::get(cx).rail; // アイコンの表示/非表示（settings 反応）
                                            // 他プロジェクトの承認待ち・完了に気づけるよう、各スロットへ最重要スレッドの状態ドットを出す。
@@ -165,10 +185,12 @@ impl Workspace {
                 }
                 .map(|(index, slot, active_slot_is_task, active_repository)| {
                     let color = slot.color;
-                    let is_active = index == active
-                        || (active_slot_is_task
-                            && active_repository.as_deref()
-                                == Some(slot.task_space.repository_id.as_str()));
+                    // Chat はプロジェクトに属さない＝どの枠も選択状態にしない（押せばそこへ戻る）。
+                    let is_active = !chat_mode
+                        && (index == active
+                            || (active_slot_is_task
+                                && active_repository.as_deref()
+                                    == Some(slot.task_space.repository_id.as_str())));
                     let monogram = slot
                         .icon
                         .as_ref()
@@ -334,6 +356,9 @@ impl Workspace {
                 )
             })
             .when(rail.search, |element| {
+                if chat_mode {
+                    return element.child(self.rail_icon_inert("rail-search", "icons/search.svg"));
+                }
                 element.child(
                     self.rail_icon(
                         "rail-search",
@@ -355,6 +380,9 @@ impl Workspace {
             })
             // 編隊モードの入口は titlebar 右上の「Multi Agent」トグルへ移設（レール ⚡ は廃止・M14）。
             .when(rail.git, |element| {
+                if chat_mode {
+                    return element.child(self.rail_icon_inert("rail-git", "icons/git-branch.svg"));
+                }
                 element.child(
                     self.rail_icon(
                         "rail-git",
@@ -375,6 +403,10 @@ impl Workspace {
                 )
             })
             .when(rail.todos, |element| {
+                if chat_mode {
+                    return element
+                        .child(self.rail_icon_inert("rail-todos", "icons/square-check.svg"));
+                }
                 // Todo ボード（.necoder/todos.md・M12-10）。表示中（アクティブ）はプロジェクト色。
                 let color = if self.todo_panel.read(cx).open {
                     accent
@@ -421,7 +453,31 @@ impl Workspace {
                     ),
                 )
             })
+            .when(rail.chat, |element| {
+                // Chat の入口（`docs/CHAT.md`）。プロジェクトに紐づかない会話の面へ切り替える。
+                element.child(
+                    self.rail_icon(
+                        "rail-chat",
+                        "icons/message-square.svg",
+                        i18n::t!("rail.chat"),
+                        if self.chat_mode() {
+                            theme.fg0
+                        } else {
+                            theme.fg2
+                        },
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_chat_mode(&ToggleChat, window, cx)
+                        }),
+                    ),
+                )
+            })
             .when(rail.agent, |element| {
+                if chat_mode {
+                    return element.child(self.rail_icon_inert("rail-agent", "icons/sparkles.svg"));
+                }
                 element.child(
                     self.rail_icon(
                         "rail-agent",
@@ -442,6 +498,10 @@ impl Workspace {
                 )
             })
             .when(rail.terminal, |element| {
+                if chat_mode {
+                    return element
+                        .child(self.rail_icon_inert("rail-terminal", "icons/square-terminal.svg"));
+                }
                 element.child(
                     self.rail_icon(
                         "rail-terminal",
@@ -467,6 +527,9 @@ impl Workspace {
                 )
             })
             .when(rail.remote, |element| {
+                if chat_mode {
+                    return element.child(self.rail_icon_inert("rail-remote", "icons/server.svg"));
+                }
                 // リモート SSH（~/.ssh/config → ワンクリック接続・#2）。アクティブがリモートなら色付き。
                 let is_remote_active = self
                     .active_slot()

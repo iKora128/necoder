@@ -45,6 +45,34 @@ pub struct RailSettings {
     pub remote: bool,
     /// Fleet（多エージェントの面・FLEET-V2）。レールから Editor ⇄ Fleet を切り替える。
     pub fleet: bool,
+    /// Chat（プロジェクトに紐づかない会話の面・`docs/CHAT.md`）。
+    pub chat: bool,
+}
+
+/// Chat モードの設定（`docs/CHAT.md` §2.2 / §4.1）。
+/// 例: `{ "chat": { "directory": "~/Chats", "instructions": "敬語は使わない" } }`
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ChatSettings {
+    /// チャットのフォルダを並べる場所。空なら書類フォルダの `necoder/`（`~/` は展開する）。
+    /// 同期フォルダを避けたい人・別ドライブに置きたい人のための逃げ道。
+    pub directory: String,
+    /// どのチャットにも効かせる指示。Chat 用のシステムプロンプトの末尾に足す。
+    pub instructions: String,
+    /// 使っていないチャットのエージェントを止めるまでの分数（`0` = 止めない）。
+    /// チャットは何本も開いたままになりがちで、1 本ごとにエージェントのプロセスが常駐する。
+    /// 止めても会話は失われない（次の送信で `session/load` が同じ会話を引き継ぐ）。
+    pub idle_stop_minutes: u64,
+}
+
+impl Default for ChatSettings {
+    fn default() -> Self {
+        Self {
+            directory: String::new(),
+            instructions: String::new(),
+            idle_stop_minutes: 10,
+        }
+    }
 }
 
 impl Default for RailSettings {
@@ -58,6 +86,7 @@ impl Default for RailSettings {
             todos: true,
             remote: true,
             fleet: true,
+            chat: true,
         }
     }
 }
@@ -217,8 +246,21 @@ pub struct Settings {
     /// idle メモリ予算を守る回収弁。破棄後の再表示は遅延再生成（初回表示と同じ経路）なので、
     /// ローカル HTML では失うものは実質スクロール位置だけ。
     pub html_preview_evict_minutes: u64,
+    /// 使っていないスレッドのエージェントを止めるまでの分数（既定 15・`0` = 止めない）。
+    /// エージェントは 1 本で 350〜700 MB を握り（実測 2026-09-19: npm のラッパー + アダプタの node +
+    /// claude 本体）、スレッドを閉じるまで生き続けるので、開きっぱなしのスレッドが 20 本あれば 7 GB を超える。
+    /// 止めても会話は失われない — 次の送信で `session/load` が同じ会話を引き継ぐ。
+    /// **会話を引き継げるエージェント（`loadSession` を広告するもの）だけ**が対象。
+    pub agent_idle_stop_minutes: u64,
+    /// claude.ai アカウントに繋いだコネクタ（Figma・Google Calendar 等）を Claude のスレッドへ
+    /// 読み込むか（既定 true = Claude Code の既定どおり）。読み込むとセッションの開始のたびに
+    /// リモートの MCP サーバへ繋ぎに行く（実測: 初回応答 4.2 秒 → 切ると 1.8 秒・文脈 +6.7k トークン）。
+    /// **Chat モードはこの設定に関わらず常に読み込まない**（necoder の MCP 設定で選んだ物だけを渡す原則）。
+    pub claude_ai_connectors: bool,
     /// レールのアイコン表示（アクティビティバー）。
     pub rail: RailSettings,
+    /// Chat モード（`docs/CHAT.md`）。
+    pub chat: ChatSettings,
     /// Fleet の初回導線（2 本目の Task を切った時の 1 回だけのトースト・FLEET-V2 §3.0）を出したか。
     /// 出したら `true` を書き込み、以後は**何も案内しない**（案内は 1 回・DECISIONS の静かさの原則）。
     pub fleet_hint_seen: bool,
@@ -255,7 +297,10 @@ impl Default for Settings {
             confirm_worktree_delete: true,
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
+            agent_idle_stop_minutes: 15,
+            claude_ai_connectors: true,
             rail: RailSettings::default(),
+            chat: ChatSettings::default(),
             fleet_hint_seen: false,
             onboarded: false,
         }
@@ -286,8 +331,11 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "agent_servers": {},
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
+  "agent_idle_stop_minutes": 15,
+  "claude_ai_connectors": true,
   "onboarded": false,
-  "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true }
+  "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true },
+  "chat": { "directory": "", "instructions": "", "idle_stop_minutes": 10 }
 }"#;
 
 /// マージ済み JSON と型付き設定を保持する。
@@ -371,6 +419,36 @@ pub fn persist_user_value(path: &Path, key: &str, value: Value) -> Result<()> {
     if let Value::Object(map) = &mut root {
         map.insert(key.to_string(), value);
     }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("設定ディレクトリを作れない: {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&root).context("設定の JSON 化に失敗")?;
+    std::fs::write(path, text).with_context(|| format!("設定を書けない: {}", path.display()))?;
+    Ok(())
+}
+
+/// `<section>.<key>` の 1 点だけを user 設定ファイルへ書き込む（`chat.directory` のような 1 段の入れ子）。
+/// `persist_user_value` はトップレベルのキーしか書けない（`"chat.directory"` という名前のキーになる）。
+/// **user ファイル自身の値だけ**を読んで更新する（マージ済みの解決値を書き戻すと project 層を焼き込む）。
+/// 同じ section の他のキーは保つ。
+pub fn persist_nested_value(path: &Path, section: &str, key: &str, value: Value) -> Result<()> {
+    let mut root: Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    let map = root.as_object_mut().expect("上で object を保証");
+    let entry = map
+        .entry(section)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = Value::Object(serde_json::Map::new());
+    }
+    entry
+        .as_object_mut()
+        .expect("直前で object を保証")
+        .insert(key.to_string(), value);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("設定ディレクトリを作れない: {}", parent.display()))?;
@@ -479,6 +557,36 @@ fn merge_value(base: &mut Value, overlay: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_nested_value_is_written_without_disturbing_its_neighbours() {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_settings_nested_{}_{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(
+            &path,
+            r#"{"font_size": 15, "chat": {"instructions": "敬語は使わない"}}"#,
+        )
+        .unwrap();
+        persist_nested_value(&path, "chat", "directory", Value::String("~/Chats".into())).unwrap();
+        persist_nested_value(&path, "chat", "idle_stop_minutes", serde_json::json!(5)).unwrap();
+
+        let store = SettingsStore::load(Some(&path), None);
+        let settings = store.settings();
+        assert_eq!(settings.chat.directory, "~/Chats");
+        assert_eq!(settings.chat.idle_stop_minutes, 5);
+        assert_eq!(
+            settings.chat.instructions, "敬語は使わない",
+            "同じ section の他の値は保つ"
+        );
+        assert_eq!(settings.font_size, 15.0, "他のキーも保つ");
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn default_layer_resolves_to_defaults() {

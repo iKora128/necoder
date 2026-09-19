@@ -109,6 +109,9 @@ actions!(
     ]
 );
 
+/// 外部変更を取り込んでから HTML プレビューを読み直すまでの猶予（連続書き込みの畳み込み）。
+const EXTERNAL_PREVIEW_RELOAD_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
+
 /// composer（平坦モード）が親（agent_panel）へ通知するイベント。
 /// UI 非依存を保つため EditorView は「送信」を知らず、確定要求だけを emit する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +122,14 @@ pub enum ComposerEvent {
     /// composer の auto-grow（親が [`EditorView::content_height`] で決める高さ）を次フレームで
     /// 追従させるために出す。親が再描画しない限り高さは古いままなので、この通知が唯一の合図。
     ContentHeightChanged,
+}
+
+/// composer（平坦モード）に**画像**が貼り付けられた。エディタは画像を持てないので、どう扱うか
+/// （添付にする・捨てる）は親が決める。テキストの貼り付けは従来どおりバッファへ入る。
+#[derive(Debug, Clone)]
+pub struct PastedImage {
+    pub format: gpui::ImageFormat,
+    pub bytes: Vec<u8>,
 }
 
 /// キーボード入力の確定テキスト通知（補完の自動トリガ用・M10）。
@@ -262,6 +273,8 @@ pub struct EditorView {
     /// ローカル `.html` のネイティブプレビュー。WebView 自体はプレビュー初回描画まで生成しない。
     html_preview: Option<Entity<webview_view::WebViewView>>,
     rendered_html: bool,
+    /// 外部変更で再読込した後の、プレビュー再読込の予約（連続した書き込みを 1 回にまとめる）。
+    preview_reload_task: Option<gpui::Task<()>>,
     /// 親 Workspace 上でこの EditorView が実際に表示対象か。タブ/プロジェクト/モード切替で同期する。
     surface_active: bool,
     /// プレビューの縦スクロール位置（EditorElement の縦スクロールとは独立系統）。
@@ -333,6 +346,7 @@ impl EditorView {
             rendered_markdown: false,
             html_preview,
             rendered_html: false,
+            preview_reload_task: None,
             surface_active: true,
             markdown_scroll: gpui::ScrollHandle::new(),
             markdown_blocks: Vec::new(),
@@ -660,11 +674,54 @@ impl EditorView {
         }
     }
 
+    /// HTML プレビューを**閉じ込めて**見せる（エージェントが生成した HTML 用・`webview_view::sandbox`）。
+    /// 配信は `root` の中だけ・外部通信なし・外への移動なし。エディタは「なぜ閉じ込めるか」を
+    /// 知らない（決めるのは親）。WebView はまだ生成前なので、差し替えても何も失わない。
+    pub fn sandbox_html_preview(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        let Some(path) = self.buffer.path().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+        if self
+            .html_preview
+            .as_ref()
+            .is_none_or(|preview| preview.read(cx).is_sandboxed())
+        {
+            return;
+        }
+        let theme = self.theme.clone();
+        self.html_preview =
+            Some(cx.new(move |_| webview_view::WebViewView::sandboxed(root, path, theme)));
+    }
+
+    pub fn html_preview_is_sandboxed(&self, cx: &App) -> bool {
+        self.html_preview
+            .as_ref()
+            .is_some_and(|preview| preview.read(cx).is_sandboxed())
+    }
+
     /// 保存済み HTML を再読込する。未生成なら初回表示が最新ファイルを読むため何もしない。
     pub fn reload_html_preview(&mut self, cx: &mut Context<Self>) {
+        self.preview_reload_task = None; // 今読み直すので、予約していた分は要らない
         if let Some(preview) = &self.html_preview {
             preview.update(cx, |preview, _| preview.reload());
         }
+    }
+
+    /// 外部変更（エージェントの書き換え・他アプリでの保存）を取り込んだ後のプレビュー再読込。
+    ///
+    /// **書き込みが落ち着いてから 1 回だけ**読み直す。エージェントは 1 ターンで同じファイルを
+    /// 何度も Edit するので、そのたびに読み直すとページが点滅し、タイマーや入力途中のフォームのような
+    /// ページの状態も毎回消える。猶予の間に次の変更が来たら予約を取り直す（Task の drop ＝取消）。
+    fn schedule_html_preview_reload(&mut self, cx: &mut Context<Self>) {
+        if self.html_preview.is_none() {
+            return;
+        }
+        self.preview_reload_task = Some(cx.spawn(async move |editor, cx| {
+            cx.background_executor()
+                .timer(EXTERNAL_PREVIEW_RELOAD_DELAY)
+                .await;
+            let _ = editor.update(cx, |editor, cx| editor.reload_html_preview(cx));
+        }));
     }
 
     /// offset の**表示行**（wrap 有効時）。マップが古い（直後の prepaint 前）は論理行へフォールバック。
@@ -1003,6 +1060,9 @@ impl EditorView {
     /// 再読込後の表示の立て直し（警告バーを畳む・IME 変換中を捨てる・ハイライトとスクロール）。
     fn after_reload(&mut self, cx: &mut Context<Self>) {
         self.external_changed = false;
+        // 保存（`save_impl`）だけがプレビューを読み直していて、外部変更の経路は抜けていた＝
+        // エージェントが HTML を書き換えてもプレビューが古いままだった（ROADMAP M16 C1）。
+        self.schedule_html_preview_reload(cx);
         self.marked_range = None;
         self.refresh_highlights();
         self.scroll_top = self.scroll_top.max(px(0.)).min(self.max_scroll_top());
@@ -1327,9 +1387,26 @@ impl EditorView {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        // テキストがあればテキストを貼る（Web からのコピーは文字と画像の両方を載せてくる。
+        // 入力欄で欲しいのは文字の方）。画像だけの時（スクリーンショット）は composer なら親へ渡す。
+        if let Some(text) = item.text() {
             self.buffer.insert(&text);
             self.after_edit(cx);
+            return;
+        }
+        if !self.plain {
+            return;
+        }
+        for entry in item.into_entries() {
+            if let gpui::ClipboardEntry::Image(image) = entry {
+                cx.emit(PastedImage {
+                    format: image.format,
+                    bytes: image.bytes,
+                });
+            }
         }
     }
 
@@ -2157,6 +2234,7 @@ impl Focusable for EditorView {
 
 /// composer は親（agent_panel）へ [`ComposerEvent`] を通知できる（Enter 送信の委譲）。
 impl EventEmitter<ComposerEvent> for EditorView {}
+impl EventEmitter<PastedImage> for EditorView {}
 
 /// 確定入力の通知（workspace が補完の自動トリガに使う）。
 impl EventEmitter<EditorInputEvent> for EditorView {}
@@ -2494,8 +2572,7 @@ impl Element for EditorElement {
             let columns = if wrap_on {
                 if view.plain {
                     // composer はガター無し。鍵は折返し幅（px・整数）。右端のキャレット分を空ける。
-                    ((f32::from(bounds.size.width) - COMPOSER_WRAP_MARGIN).floor() as usize)
-                        .max(40)
+                    ((f32::from(bounds.size.width) - COMPOSER_WRAP_MARGIN).floor() as usize).max(40)
                 } else {
                     let digits = snapshot.line_count().to_string().len() as f32;
                     let gutter =
@@ -2516,8 +2593,13 @@ impl Element for EditorElement {
                     // 同じ行の shape は GPUI の行レイアウトキャッシュに載るので、打鍵ごとに
                     // 測り直すのは編集した行だけ。
                     WrapMap::build(&snapshot, key, |line| {
-                        let shaped =
-                            shape_with_font(line, &text_font, gpui::black(), editor_font_size, window);
+                        let shaped = shape_with_font(
+                            line,
+                            &text_font,
+                            gpui::black(),
+                            editor_font_size,
+                            window,
+                        );
                         compute_wrap_segments_by_width(line, columns as f32, |byte| {
                             f32::from(shaped.x_for_index(byte))
                         })
@@ -3435,7 +3517,9 @@ mod tests {
     fn wrap_map_round_trips_display_and_logical_rows() {
         let buffer = Buffer::from_str("short\naaaaaaaaaaaa\nx");
         let snapshot = buffer.snapshot();
-        let map = WrapMap::build(&snapshot, (0, 5, true), |line| compute_wrap_segments(line, 5));
+        let map = WrapMap::build(&snapshot, (0, 5, true), |line| {
+            compute_wrap_segments(line, 5)
+        });
         // 行0=1seg・行1=3seg(12 文字/5)・行2=1seg → 計 5 表示行
         assert_eq!(map.total_display_rows(), 5);
         assert_eq!(map.display_to_logical(0), (0, 0));

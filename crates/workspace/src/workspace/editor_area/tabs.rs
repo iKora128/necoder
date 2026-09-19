@@ -6,6 +6,10 @@ impl Workspace {
     /// 左ドックを触って agent_active が落ちると、見えている ACP タブに操作が効かなくなる実バグの対策。
     /// 編隊モードは AI 全画面を描かない（render は fleet 優先）ので、この特例も適用しない。
     pub(crate) fn agent_surface_active(&self) -> bool {
+        // Chat は会話が常に見えている。右のエディタ領域を触った時だけエディタ宛てになる。
+        if self.chat_mode() {
+            return self.agent_active || self.tabs.is_empty();
+        }
         (self.chrome.agent_full_screen && !self.chrome.fleet_mode)
             || (self.chrome.show_right && self.agent_active)
     }
@@ -143,6 +147,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Chat は最初から会話が中央に居る（全画面にする物が無い）。
+        if self.chat_mode() {
+            return;
+        }
         self.chrome.agent_full_screen = !self.chrome.agent_full_screen;
         if self.chrome.agent_full_screen {
             self.chrome.fleet_mode = false;
@@ -247,9 +255,14 @@ impl Workspace {
             || self.chrome.resizing_explorer
             || self.chrome.resizing_bottom
         {
+            // 左ドックの幅は窓の状態として残す（次に開いた時も同じ幅）。
+            let save_width = self.chrome.resizing_explorer;
             self.chrome.resizing_agent = false;
             self.chrome.resizing_explorer = false;
             self.chrome.resizing_bottom = false;
+            if save_width {
+                self.save_state(cx);
+            }
             cx.notify();
         }
     }
@@ -466,7 +479,7 @@ impl Workspace {
         }
         let selected = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
         let active = self.project_sessions.active;
-        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.explorer.selected = selected;
         }
         self.sync_active_slot();
@@ -535,7 +548,7 @@ impl Workspace {
             window.focus(&handle, cx);
         }
         let active = self.project_sessions.active;
-        if let Some(slot) = self.project_sessions.projects.get_mut(active) {
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.explorer.selected = Some(path);
             slot.active_file = index;
         }

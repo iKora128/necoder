@@ -19,8 +19,8 @@
 | **Fleet モード**（多エージェント表示） | `fleet` / `fleet_mode` | Fleet | Fleet |
 | 既定モード（単一・エディタ） | `solo`（対語・任意） | （無名） | （unnamed / Editor） |
 | **Chat モード**（プロジェクトに紐づかない会話。2026-09-18・ROADMAP M16） | `chat` / `chat_mode` | Chat | Chat |
-| ↳ **チャット**（Chat の会話 1 本 = thread。別の型は作らない） | `Thread`（`preset = Chat`） | チャット | Chat |
-| ↳ **Chat プリセット**（セッションの作り方。プロンプト・ツール・設定の継承・MCP・フォルダの束。正は `CHAT.md` §5） | `SessionPreset::Chat` | — | — |
+| ↳ **チャット**（Chat の会話 1 本 = thread。別の型は作らない） | `Thread`（`chat: Some(ChatThreadState)`）/ 一覧の行は `ChatRow` | チャット | Chat |
+| ↳ **Chat プリセット**（セッションの作り方。プロンプト・ツール・設定の継承・MCP・フォルダの束。正は `CHAT.md` §5） | `acp_client::preset::SessionPreset`（中身を詰めるのは `chat_core::preset::session_preset`） | — | — |
 | ↳ **チャットのフォルダ**（会話ごとの永続の作業場所 = cwd。成果物はその中の `artifacts/`。隔離ではない） | `chat_dir`（`<書類>/necoder/<YYYY-MM-DD 先頭の文>/`・`paths::documents_dir()`） | フォルダ | Folder |
 | **artifact**（エージェントがチャットのフォルダの `artifacts/` に書いた、見せるための単体ファイル。表示は既存プレビュー） | `artifact` | artifact | Artifact |
 | ↳ **添付**（composer へドロップしたファイル・フォルダ。読み取りは自動許可・書き込みは初回確認） | `Thread.context`（既存の @メンション） | 添付 | Attachment |

@@ -334,6 +334,7 @@ impl gpui::AssetSource for Assets {
             "icons/list.svg" => icon!("list.svg"),
             "icons/columns-3.svg" => icon!("columns-3.svg"),
             "icons/layout-grid.svg" => icon!("layout-grid.svg"),
+            "icons/message-square.svg" => icon!("message-square.svg"),
             "icons/activity.svg" => icon!("activity.svg"),
             "icons/maximize.svg" => icon!("maximize.svg"),
             "icons/minimize.svg" => icon!("minimize.svg"),
@@ -538,7 +539,9 @@ fn main() {
             cfg!(feature = "screenshot") && std::env::var_os("NECODER_SCREENSHOT").is_some();
         // ローカル DB（窓セッション・hot exit・スレッド）。1 本を全窓で共有する。
         // 撮影は DB 自体を開かない。Turso のプロセス排他 lock を dogfood 本体と奪い合わないため。
-        let storage = if screenshot_mode {
+        // ただし `NECODER_HOME` で根ごと隔離した撮影は別の DB を見るので、開いてよい（永続化を含む
+        // 機能 — Chat の一覧・再開 — を offscreen で検証できる）。
+        let storage = if screenshot_mode && std::env::var_os("NECODER_HOME").is_none() {
             None
         } else {
             workspace::open_default_storage()
@@ -970,6 +973,35 @@ fn main() {
                             let _ = handle.update(cx, |workspace, window, cx| {
                                 workspace.debug_worktree_delete(&mode, window, cx);
                             });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: NECODER_CHAT_PROBE="open;seed;wait:800;state" で Chat モードを駆動する
+                // （`;` 区切りで順に実行。`wait:<ms>` はその場で待つ）。
+                #[cfg(debug_assertions)]
+                if let Ok(script) = std::env::var("NECODER_CHAT_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(1800))
+                                .await;
+                            for command in script.split(';').map(str::trim) {
+                                if let Some(milliseconds) = command.strip_prefix("wait:") {
+                                    let milliseconds = milliseconds.parse::<u64>().unwrap_or(500);
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(milliseconds))
+                                        .await;
+                                    continue;
+                                }
+                                let command = command.to_string();
+                                let _ = handle.update(cx, |workspace, window, cx| {
+                                    workspace.debug_chat_probe(&command, window, cx);
+                                });
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(250))
+                                    .await;
+                            }
                         })
                         .detach();
                     }

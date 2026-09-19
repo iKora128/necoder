@@ -449,7 +449,14 @@ impl Workspace {
     /// テーマを即時適用する（自身のクローム + エディタ + Agent パネル + Picker へ波及）。
     pub(crate) fn apply_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
-        for (index, session) in self.project_sessions.sessions.iter().enumerate() {
+        // Chat の session は枠を持たないので添字の外（検索パネルの色引きは `get(index)` が `None`）。
+        let sessions = self
+            .project_sessions
+            .sessions
+            .iter()
+            .chain(self.project_sessions.chat.iter())
+            .enumerate();
+        for (index, session) in sessions {
             for tab in &session.tabs {
                 match &tab.content {
                     TabContent::Editor { editor, .. } => {

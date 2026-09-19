@@ -271,6 +271,7 @@ impl Workspace {
             .project_sessions
             .sessions
             .iter()
+            .chain(self.project_sessions.chat.iter())
             .flat_map(|session| {
                 session
                     .tabs
@@ -291,6 +292,7 @@ impl Workspace {
             .project_sessions
             .sessions
             .iter()
+            .chain(self.project_sessions.chat.iter())
             .flat_map(|session| session.tabs.iter().filter_map(|tab| tab.pdf().cloned()))
             .collect();
         for view in pdf_views {

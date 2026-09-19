@@ -520,7 +520,13 @@ impl Workspace {
         if let Ok(saved) = serde_json::from_str::<PersistedState>(payload) {
             self.chrome.work_layout = saved.work_layout;
             self.chrome.work_layout.sanitize();
-            self.chrome.fleet_mode = saved.fleet_mode;
+            self.chrome.fleet_mode = saved.fleet_mode && !saved.chat_mode;
+            // Chat へ入るには window が要る（フォーカスの付け直し）ので、次の描画で消化する。
+            self.chrome.pending_chat_mode = saved.chat_mode;
+            self.chrome.chat_restore = saved.chat_active;
+            if saved.left_dock_width >= 160.0 {
+                self.chrome.explorer_width = saved.left_dock_width.min(720.0);
+            }
             self.chrome.show_herd |= saved.fleet_mode;
             self.chrome.fleet_center_view = match saved.fleet_view.as_str() {
                 "graph" => FleetCenterView::Graph,
