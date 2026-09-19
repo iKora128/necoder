@@ -2825,14 +2825,29 @@ for line in sys.stdin:
 
     /// 偽エージェントを走らせ、イベントチャネルが閉じるまで（＝セッションが終わるまで）の
     /// 全イベントと `run_session` の結果を返す。transport 断系のテストの共通土台。
+    /// 偽エージェントの stdio を **UTF-8 に固定する**前置き。
+    ///
+    /// Python は Windows で stdin/stdout を**ロケールの符号**（US の runner なら cp1252）で読み書き
+    /// する。ACP の線を流れる日本語は UTF-8 なので、そのままだと復号できないバイト
+    /// （`こ` = E3 81 93 の `0x81` など）が `surrogateescape` で孤立サロゲートに化け、エージェントが
+    /// 返す JSON をこちらが読めなくなる（Windows CI の `lone leading surrogate in hex escape`・
+    /// 2026-09-19）。**mac では再現しない**ので、偽エージェントを足すときは必ずここを通すこと。
+    const FAKE_AGENT_UTF8: &str = "import sys\nsys.stdin.reconfigure(encoding='utf-8')\n\
+sys.stdout.reconfigure(encoding='utf-8')\n";
+
+    fn fake_agent_command(script: &str) -> Option<AgentCommand> {
+        let python = find_in_path("python3")?;
+        let cwd = std::env::current_dir().expect("cwd");
+        let script = format!("{FAKE_AGENT_UTF8}{script}");
+        Some(AgentCommand::new(python, vec!["-c".into(), script], cwd))
+    }
+
     fn run_fake_agent_until_session_ends(
         script: &str,
         preferences: SessionPreferences,
         first_prompt: Option<&str>,
     ) -> Option<(Result<()>, Vec<AgentEvent>)> {
-        let python = find_in_path("python3")?;
-        let cwd = std::env::current_dir().expect("cwd");
-        let command = AgentCommand::new(python, vec!["-c".into(), script.into()], cwd);
+        let command = fake_agent_command(script)?;
         let (command_tx, command_rx) = mpsc::unbounded();
         let (event_tx, mut event_rx) = mpsc::unbounded();
         if let Some(prompt) = first_prompt {
@@ -3276,9 +3291,7 @@ for line in sys.stdin:
                 "False"
             },
         );
-        let python = find_in_path("python3")?;
-        let cwd = std::env::temp_dir();
-        let command = AgentCommand::new(python, vec!["-c".into(), script], cwd);
+        let command = fake_agent_command(&script)?;
         let (command_tx, command_rx) = mpsc::unbounded::<SessionCommand>();
         let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
         command_tx
