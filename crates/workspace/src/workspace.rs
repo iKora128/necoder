@@ -3855,6 +3855,12 @@ mod tests {
             for session in &mut workspace.project_sessions.sessions {
                 session._watch = None;
                 session._watch_pump = None;
+                // 端末は PTY 無しで作る。実シェルを起こすと、そのリーダースレッドが
+                // `gpui::test` のスケジューラに割り込んで「not deterministic」で落ちる
+                // （CI の遅い機械で頻発・2026-09-18）。
+                session
+                    .terminal_dock
+                    .update(cx, |dock, _| dock.use_test_terminals());
             }
             workspace.chrome.fleet_mode = true;
             workspace.seed_fleet_cells(cx);

@@ -87,8 +87,28 @@ fn looks_like_path(token: &str) -> bool {
     true
 }
 
+/// Windows のドライブ接頭辞（`C:\\…` / `C:/…`）の byte 長。無ければ 0。
+/// 位置（`:line:column`）の解釈から外すために使う。
+fn drive_prefix_length(token: &str) -> usize {
+    let bytes = token.as_bytes();
+    let looks_drive = bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || bytes[2] == b'\\' || bytes[2] == b'/');
+    if looks_drive { 2 } else { 0 }
+}
+
 /// `path:line:column` を分解する（markdown リンクの dest にも使う）。
+/// **ドライブ文字は先に切り離す** — `C:\Users\…\ROADMAP.md:157` を素で `rsplitn(3, ':')` に
+/// 掛けると頭が `C` に食われて `path:line` の腕へ落ちず、行番号が消える（2026-09-18・Windows CI）。
 fn split_position(token: &str) -> (&str, Option<u32>, Option<u32>) {
+    let drive = drive_prefix_length(token);
+    let (path, line, column) = split_position_after_drive(&token[drive..]);
+    (&token[..drive + path.len()], line, column)
+}
+
+/// ドライブ接頭辞を除いた部分の分解。返す path は入力の接頭辞であること（上で繋ぎ直す）。
+fn split_position_after_drive(token: &str) -> (&str, Option<u32>, Option<u32>) {
     let mut parts = token.rsplitn(3, ':');
     let (last, middle, head) = (parts.next(), parts.next(), parts.next());
     match (head, middle, last) {
@@ -254,6 +274,37 @@ mod tests {
                 LinkTarget::Url(_) => None,
             })
             .collect()
+    }
+
+    /// Windows の絶対パスでも行番号が拾えること（ドライブ文字を位置と取り違えない）。
+    /// mac では再現しないので Windows CI でしか見つからなかった（2026-09-18）。
+    #[test]
+    fn a_drive_letter_is_not_mistaken_for_a_position() {
+        assert_eq!(
+            parse_target(r"C:\Users\daichi\docs\ROADMAP.md:157"),
+            Some(LinkTarget::Path {
+                path: r"C:\Users\daichi\docs\ROADMAP.md".into(),
+                line: Some(157),
+                column: None,
+            })
+        );
+        assert_eq!(
+            parse_target("C:/work/src/main.rs:10:5"),
+            Some(LinkTarget::Path {
+                path: "C:/work/src/main.rs".into(),
+                line: Some(10),
+                column: Some(5),
+            })
+        );
+        // 位置が付いていないドライブ付きパスはそのまま。
+        assert_eq!(
+            parse_target(r"C:\work\Cargo.toml"),
+            Some(LinkTarget::Path {
+                path: r"C:\work\Cargo.toml".into(),
+                line: None,
+                column: None,
+            })
+        );
     }
 
     #[test]

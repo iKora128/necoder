@@ -28,6 +28,9 @@ pub struct TerminalDock {
     active: usize,
     launch: TerminalLaunch,
     theme: Theme,
+    /// テストで PTY を起動しない（[`Self::use_test_terminals`]）。本番のビルドには存在しない。
+    #[cfg(feature = "test-support")]
+    test_terminals: bool,
 }
 
 impl TerminalDock {
@@ -38,7 +41,18 @@ impl TerminalDock {
             active: 0,
             launch,
             theme,
+            #[cfg(feature = "test-support")]
+            test_terminals: false,
         }
+    }
+
+    /// 以後この Dock が作る端末を PTY 無しにする（`gpui::test` の決定性のため）。
+    /// `start_session` 経由で端末が増える経路（Fleet の「端末を足す」）をテストから
+    /// 通せるようにするための口。本番の生成経路には入らない。
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn use_test_terminals(&mut self) {
+        self.test_terminals = true;
     }
 
     fn create_terminal(
@@ -47,6 +61,12 @@ impl TerminalDock {
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
         let theme = self.theme.clone();
+        #[cfg(feature = "test-support")]
+        if self.test_terminals {
+            let terminal = cx.new(|cx| TerminalView::new_test(theme, cx));
+            cx.subscribe(&terminal, Self::on_terminal_event).detach();
+            return terminal;
+        }
         let terminal =
             cx.new(|cx| TerminalView::new_with_shell(launch.cwd, launch.shell, theme, cx));
         cx.subscribe(&terminal, Self::on_terminal_event).detach();
