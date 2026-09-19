@@ -103,7 +103,10 @@ mod tests {
     fn the_prompt_names_the_folder_the_date_and_the_rules() {
         let chat_dir = PathBuf::from("/Users/test/Documents/necoder/2026-09-18 タイマー");
         let prompt = system_prompt(&chat_dir, DAY, "");
-        assert!(prompt.contains("/Users/test/Documents/necoder/2026-09-18 タイマー/artifacts"));
+        // 期待値は**プロンプトが使うのと同じ組み立て**から作る。ここで区切りを直書きすると、
+        // Windows（`\`）で落ちる（Windows CI で実際に踏んだ・2026-09-19）。
+        let artifacts = chat_dir.join(ARTIFACTS_DIR).display().to_string();
+        assert!(prompt.contains(&artifacts), "{artifacts}");
         assert!(prompt.contains("Today's date: 2026-09-18"));
         assert!(prompt.contains("EDIT THE SAME FILE"));
         assert!(prompt.contains("NOT acting as a coding agent"));
