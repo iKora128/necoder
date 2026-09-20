@@ -1251,6 +1251,7 @@ impl Workspace {
         // タブ列ごと入れ替わる（レール/ブランチ切替）ので ⌘F バー・hover は畳む。
         self.dismiss_buffer_search(cx);
         self.close_hover(cx);
+        let rail_had_focus = self.chrome.rail_focus.is_focused(window);
         let (files, active_file) = match self.active_slot() {
             Some(slot) => (slot.open_files.clone(), slot.active_file),
             None => return,
@@ -1275,6 +1276,31 @@ impl Workspace {
         if active_file < self.tabs.len() {
             self.select_tab(active_file, window, cx);
         }
+        self.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
+    }
+
+    /// タブ復元（`open_slot_files`）は**キーの宛先を変えない**。
+    ///
+    /// 復元は 1 枚ごとに `open_loaded_file` が `window.focus(エディタ)` し、最後の `select_tab` は
+    /// HTML プレビューなら OS の first responder まで WebView へ渡す。レールに ↑/↓ を打っている
+    /// 最中にこれが起きると、その瞬間からキーがレールへ来なくなる＝「連打していたら急に止まる」。
+    /// 復元が走るのはその session の初回表示だけなので、**特定のプロジェクトを跨いだ時だけ止まる**
+    /// という見え方になる（2026-09-19 本人報告）。宛先がレールだったなら復元後に戻す。
+    fn restore_rail_focus_after_tabs(
+        &mut self,
+        rail_had_focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !rail_had_focus {
+            return;
+        }
+        let handle = self.chrome.rail_focus.clone();
+        window.focus(&handle, cx);
+        // GPUI のフォーカスだけでは足りない。復元したタブが HTML プレビューだと OS の
+        // キーボードフォーカスが WKWebView にあり、素の ↑/↓ はページのスクロールに食われて
+        // GPUI まで上がって来ない（`webview_view` のモジュール注記）。ここで親へ返す。
+        self.release_native_key_focus(cx);
     }
 
     /// remote プロジェクトのタブ復元。**1 本の背景タスクで全ファイルを順に読み**、読み終えてから
@@ -1325,12 +1351,14 @@ impl Workspace {
                 if !still_same {
                     return;
                 }
+                let rail_had_focus = workspace.chrome.rail_focus.is_focused(window);
                 for (path, content) in loaded {
                     workspace.open_loaded_file(path, content, window, cx);
                 }
                 if active_file < workspace.tabs.len() {
                     workspace.select_tab(active_file, window, cx);
                 }
+                workspace.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
             });
         })
         .detach();

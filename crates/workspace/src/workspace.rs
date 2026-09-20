@@ -3451,6 +3451,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// レールで ↑/↓ を連打している最中に、**まだ開いていないプロジェクト**へ着地して
+    /// タブ復元が走っても宛先はレールに残ること。復元は 1 枚ごとにエディタへフォーカスを
+    /// 移すので、戻さないとその瞬間から ↑/↓ がキャレット移動になって連打が止まる
+    /// （HTML タブが出た瞬間に止まる、という見え方・2026-09-19 本人報告）。
+    #[gpui::test]
+    fn restoring_a_projects_tabs_does_not_steal_the_rails_keys(cx: &mut gpui::TestAppContext) {
+        fn key(stroke: &str) -> KeyDownEvent {
+            KeyDownEvent {
+                keystroke: gpui::Keystroke::parse(stroke).unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("necoder_rail_restore_focus_{}", std::process::id()));
+        let project_a = root.join("a");
+        let project_b = root.join("b");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        let page = project_b.join("index.html");
+        std::fs::write(&page, "<h1>hi</h1>\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        ::webview_view::disable_native_webviews_for_tests();
+
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(
+                vec![project_a.clone(), project_b.clone()],
+                Theme::dark(),
+                None,
+                cx,
+            )
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            // b は「まだ開いていない・HTML タブが 1 枚ある」状態にする（= 着地で復元が走る）。
+            workspace.project_sessions.projects[1].open_files = vec![page.clone()];
+            workspace.project_sessions.projects[1].active_file = 0;
+            workspace.project_sessions.sessions[1].loaded = false;
+
+            let rail = workspace.chrome.rail_focus.clone();
+            window.focus(&rail, cx);
+            workspace.on_rail_key_down(&key("down"), window, cx);
+            assert_eq!(workspace.project_sessions.active, 1, "↓ で b へ");
+            assert_eq!(workspace.tabs.len(), 1, "b のタブが復元される");
+            assert!(
+                workspace.chrome.rail_focus.is_focused(window),
+                "タブ復元がレールからキーの宛先を奪っている（↑/↓ の連打が止まる）"
+            );
+
+            // 連打が続くこと（止まっていたらここで active が動かない）。
+            workspace.on_rail_key_down(&key("down"), window, cx);
+            assert_eq!(workspace.project_sessions.active, 0, "復元後も ↑/↓ が効く");
+
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// AI 全画面中でも、エディタ領域を前に出す操作（設定を開く・ファイルを開く）は通ること。
     /// 全画面は中央を Agent に差し替えるので、畳まないと「開いたのに何も起きない」になる。
     #[gpui::test]
