@@ -1,1 +1,12 @@
-{"signedContributors":[]}
+{
+  "signedContributors": [
+    {
+      "name": "torumitsutake",
+      "id": 6825440,
+      "comment_id": 5746864461,
+      "created_at": "2026-09-20T01:54:35Z",
+      "repoId": 1143021376,
+      "pullRequestNo": 5
+    }
+  ]
+}
