@@ -100,6 +100,7 @@ To exercise the complete SSH path locally, `./scripts/test-remote-ssh-docker.sh`
 
 | What | Where |
 |---|---|
+| User manual (Japanese) | [`docs/MANUAL.md`](docs/MANUAL.md) |
 | Milestones & acceptance criteria | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | Architecture (crates, contracts) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | UI spec (tokens, color rules, keys) | [`docs/UI-SPEC.md`](docs/UI-SPEC.md) |
@@ -217,6 +218,7 @@ SSH 経路全体をローカルで試すには `./scripts/test-remote-ssh-docker
 
 | 何 | どこ |
 |---|---|
+| 使い方マニュアル | [`docs/MANUAL.md`](docs/MANUAL.md) |
 | マイルストーンと受入条件 | [`docs/ROADMAP.md`](docs/ROADMAP.md) |
 | アーキテクチャ(crate 構成・契約) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | UI 仕様(トークン・色のルール・キー表) | [`docs/UI-SPEC.md`](docs/UI-SPEC.md) |
