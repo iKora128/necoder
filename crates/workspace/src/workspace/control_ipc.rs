@@ -243,6 +243,25 @@ impl Workspace {
         .detach();
     }
 
+    /// 同じ effect cycle に認証要求が重なっても、先に待っている要求を上書きしない。
+    #[cfg(unix)]
+    fn queue_askpass(
+        &mut self,
+        prompt: String,
+        attempt: u32,
+        respond: std::sync::mpsc::Sender<serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chrome.pending_askpass.is_some() || self.overlays.askpass.is_some() {
+            if respond.send(err(i18n::t!("askpass.err_busy"))).is_err() {
+                // 要求元が終了済みなら応答を届ける先はない。
+            }
+            return;
+        }
+        self.chrome.pending_askpass = Some((prompt, attempt, respond));
+        cx.notify();
+    }
+
     /// UI スレッドでの 1 仕事。メモリで済むものは即応答・DB が要るものは background へ
     /// （GUI のストレージハンドル = 単一ワーカーを使うので headless とロック衝突しない）。
     fn handle_control_job(&mut self, job: ControlJob, cx: &mut Context<Self>) {
@@ -282,8 +301,7 @@ impl Workspace {
                         let _ = respond.send(err(i18n::t!("askpass.err_token")));
                         return;
                     };
-                    self.chrome.pending_askpass = Some((prompt, attempt, respond));
-                    cx.notify();
+                    self.queue_askpass(prompt, attempt, respond, cx);
                 }
                 #[cfg(not(unix))]
                 {
@@ -835,6 +853,24 @@ fn serve_connection(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[gpui::test]
+    fn simultaneous_askpass_requests_preserve_the_first(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let workspace = cx.new(|cx| super::Workspace::new(Vec::new(), theme_core::Theme::dark(), None, cx));
+        let (first, first_reply) = std::sync::mpsc::channel();
+        let (second, second_reply) = std::sync::mpsc::channel();
+        workspace.update(cx, |workspace, cx| {
+            workspace.queue_askpass("first".into(), 1, first, cx);
+            workspace.queue_askpass("second".into(), 1, second, cx);
+            let (prompt, _, respond) = workspace.chrome.pending_askpass.take().unwrap();
+            assert_eq!(prompt, "first");
+            respond.send(super::ok(serde_json::json!({"secret": "test-only"}))).unwrap();
+        });
+        assert_eq!(second_reply.try_recv().unwrap()["ok"], false);
+        assert_eq!(first_reply.try_recv().unwrap()["result"]["secret"], "test-only");
+    }
+
     use super::*;
 
     /// テスト用の待ち受け先。名前は短くする（macOS の `SUN_LEN` ~104B・control_transport 参照）。

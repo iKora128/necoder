@@ -3224,3 +3224,5 @@
 - やったこと: 設定 › AI エージェントの各行に `Captain にする` / `⚑ Captain`（押すと解任）を追加（`crates/settings/src/settings.rs` の `agents_rows` / `toggle_captain` / `next_captain_value` + test 2 本）。未任命の Captain 行 / ⌘0 は設定の AI エージェントページを開く（`fleet_sidebar.rs` の `focus_captain` → `show_agents_page`）。`captain.appoint` の文言を行き先の名前に変更。ja/en 両方。FLEET-V2 §5.7・UI-SPEC §12・MANUAL を更新
 - 学び/罠: 以前は任命の UI が無く、「任命する」を押しても設定が開くだけ（行き止まり）で、settings.json の手書きが唯一の手段だった。エージェント行はボタンが 2 つになると幅が足りず「★ 既定」がカードからはみ出した → 名前の列を `flex_1().min_w_0()` で縮めて折り返し、ボタンは `flex_none` にした
 - 次: プロジェクト設定（`.necoder/settings.json`）で `captain_agent` を上書きしていると、UI で user 側を変えても効かない。必要ならその旨を行に出す
+
+- PR #5 取り込み後の補足: 同一フレームに届く askpass 要求は先の要求を維持し、後の要求へ busy を返す（回帰テスト追加）。秘密入力のキー伝播も止める。#7 が指摘した README のテーマ選択キーを直し、#8 の project 設定優先をマニュアルへ追記。
