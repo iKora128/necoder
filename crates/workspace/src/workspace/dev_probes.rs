@@ -411,6 +411,20 @@ impl Workspace {
         self.open_ssh_input(window, cx);
     }
 
+    /// 開発用: askpass 入力欄を開く（NECODER_ASKPASS_PROBE の描画検証）。
+    /// 応答先は捨てるので、Enter / Escape どちらでも送り先は消えているだけ。
+    #[cfg(all(debug_assertions, unix))]
+    /// `attempt` は 1 = 初回・2 以上 = 再入力の表示（`NECODER_ASKPASS_PROBE` の値をそのまま渡す）。
+    pub fn debug_open_askpass(&mut self, attempt: u32, cx: &mut Context<Self>) {
+        let (respond, _discard) = std::sync::mpsc::channel();
+        self.open_askpass(
+            "user@example.internal's password:".to_string(),
+            attempt,
+            respond,
+            cx,
+        );
+    }
+
     /// 開発用: SSH ホストピッカーを開く（NECODER_SSH_HOST_PROBE の描画検証・M13）。
     #[cfg(debug_assertions)]
     pub fn debug_open_ssh_host_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {

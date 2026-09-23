@@ -752,6 +752,13 @@ ssh:
   reconnect_now: Reconnect
   connect_now: Connect
   reconnecting: "Reconnecting to %{host}…"
+askpass:
+  hint: Enter to send, Escape to cancel (nothing is stored)
+  hint_click: Click the field to start typing
+  retry: "Authentication failed (attempt %{attempt})"
+  cancelled: Input cancelled
+  err_busy: Another SSH prompt is waiting
+  err_token: This askpass request has no valid token
 goto:
   placeholder: Line number…
 hotexit:

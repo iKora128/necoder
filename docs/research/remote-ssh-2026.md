@@ -30,7 +30,7 @@ local                                              remote
 | 境界 | `Host`、`LocalHost`、`RemoteHost`。project/editor/search/Git/LSP/terminal/ACP を接続 | watcher、task/debug adapter、formatter |
 | wire | version/magic/request ID/型付き JSON header/raw body/frame 上限、8 worker multiplex | stream/event/cancel、compression、backpressure telemetry |
 | file | root scope、symlink escape 拒否、batch list/search、revision 付き atomic save | watch event、rename/delete、巨大 file streaming |
-| SSH | system OpenSSH、ControlMaster、alive option、same-target 自動配備、明示 cross artifact | GUI askpass、release download、署名/checksum、artifact cleanup |
+| SSH | system OpenSSH、ControlMaster、alive option、same-target 自動配備、明示 cross artifact、GUI askpass | release download、署名/checksum、artifact cleanup |
 | 復旧 | session daemon/proxy、5秒 heartbeat、lazy reconnect、master 再生成、project reopen | backoff/jitter UI、LSP/PTY handle 再同期、dirty buffer crash backup |
 | UX | `ssh://` 起動/状態復元、status bar host 表示、検索の background 実行 | host picker、接続ログ、retry/cancel、port forwarding、trust UI |
 | 検証 | full-duplex protocol、root escape、競合保存、process 並行性、real daemon/proxy 再接続 | 実 Linux、VPN/sleep/SSH kill、長時間運用、性能計測 |

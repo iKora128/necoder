@@ -753,6 +753,13 @@ ssh:
   reconnect_now: 再接続
   connect_now: 接続
   reconnecting: "%{host} へ再接続中…"
+askpass:
+  hint: Enter で送信・Escape で取り消し（入力内容は保存されません）
+  hint_click: 入力欄をクリックしてから入力してください
+  retry: "入力が拒否されました（%{attempt} 回目）"
+  cancelled: 入力が取り消されました
+  err_busy: 別の SSH 入力を待っています
+  err_token: この askpass 要求には有効な token がありません
 goto:
   placeholder: 行番号…
 hotexit:
