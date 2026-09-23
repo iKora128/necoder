@@ -3221,3 +3221,7 @@
 - 検証で追加: Esc で閉じない（UI-SPEC §7 の「esc で閉じる」違反・入力欄が `editor::Cancel` を親へ流しても誰も受けていなかった）→ ダイアログで `editor::Cancel` を受けて取り消す。取り消し時は開く前のフォーカス（サイドバー等）へ返す。テストは「クリック → フォーカス → 打鍵が入る → 余白クリックでも外れない → Esc で閉じてサイドバーへ戻る」を通し、修正を 1 つずつ外すとそれぞれの assert で落ちることを確認した（4 通り）
 - 背景クリックで閉じるのは入れていない（UI-SPEC §7 は「背景クリックで閉じる」だが、書きかけの依頼文を誤クリックで失うため）。背景は `occlude` で何もしない
 - 次: 他のオーバーレイ（フォーカス可能な親の中から開くもの）に同じ形が無いか、報告が出たら同じテストの型で確かめる
+## 2026-09-23 — Captain を設定画面から任命できるようにする
+- やったこと: 設定 › AI エージェントの各行に `Captain にする` / `⚑ Captain`（押すと解任）を追加（`crates/settings/src/settings.rs` の `agents_rows` / `toggle_captain` / `next_captain_value` + test 2 本）。未任命の Captain 行 / ⌘0 は設定の AI エージェントページを開く（`fleet_sidebar.rs` の `focus_captain` → `show_agents_page`）。`captain.appoint` の文言を行き先の名前に変更。ja/en 両方。FLEET-V2 §5.7・UI-SPEC §12・MANUAL を更新
+- 学び/罠: 以前は任命の UI が無く、「任命する」を押しても設定が開くだけ（行き止まり）で、settings.json の手書きが唯一の手段だった。エージェント行はボタンが 2 つになると幅が足りず「★ 既定」がカードからはみ出した → 名前の列を `flex_1().min_w_0()` で縮めて折り返し、ボタンは `flex_none` にした
+- 次: プロジェクト設定（`.necoder/settings.json`）で `captain_agent` を上書きしていると、UI で user 側を変えても効かない。必要ならその旨を行に出す

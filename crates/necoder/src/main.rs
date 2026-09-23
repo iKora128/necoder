@@ -11,6 +11,8 @@ use gpui_platform::application;
 use host::{RemoteHost, SshProject};
 use std::path::{Path, PathBuf};
 
+/// `SSH_ASKPASS` 委譲（GUI から起こす ssh のパスワード入力）。
+mod askpass;
 /// ターミナル用 `ne` コマンド（`necoder cli` / `install-cli` / `uninstall-cli`）。
 mod cli;
 mod fleet;
@@ -463,6 +465,11 @@ fn start_control_ipc_for_window(window: &mut gpui::Window, cx: &mut gpui::Contex
 }
 
 fn main() {
+    // `ssh` が askpass として起こした自分自身なら、GUI にも log にも触れずに答えだけ返す
+    // （stdout は答え専用。redirect_output_for_gui_launch より**前**でなければならない）。
+    if askpass::run() {
+        return;
+    }
     // 旧ブランド Shirushi の置き場からデータを引き取る（改名 2026-08-22・DECISIONS §8）。
     // logging が `…/necoder/logs/` を作る**前**に動かす必要があるので、ここが本当の先頭。
     workspace::migrate_legacy_brand_data();
@@ -858,6 +865,25 @@ fn main() {
                                 .await;
                             let _ = handle.update(cx, |workspace, window, cx| {
                                 workspace.debug_open_ssh_input(window, cx);
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: NECODER_ASKPASS_PROBE=1 で askpass 入力欄を開く（2s 後・描画検証）。
+                #[cfg(unix)]
+                if let Some(attempt) = std::env::var("NECODER_ASKPASS_PROBE")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .filter(|attempt| *attempt >= 1)
+                {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            let _ = handle.update(cx, |workspace, _window, cx| {
+                                workspace.debug_open_askpass(attempt, cx);
                             });
                         })
                         .detach();

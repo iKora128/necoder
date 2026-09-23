@@ -55,8 +55,11 @@ impl Workspace {
             return;
         };
         let Some(agent) = settings::get(cx).captain_agent.clone() else {
-            // 未任命なら設定ホームへ（「任命する」の行き先は設定・§5.7）。
+            // 未任命なら設定ホームの「AI エージェント」ページへ（任命ボタンの在処・§5.7）。
             self.open_settings_action(&OpenSettings, window, cx);
+            self.chrome
+                .settings_view
+                .update(cx, |view, cx| view.show_agents_page(cx));
             return;
         };
         let panel = self.project_sessions.sessions[index].fleet_agents[0].clone();
