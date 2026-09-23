@@ -3214,3 +3214,9 @@
 - やったこと: `open_slot_files`（＋remote 版の継続）に `restore_rail_focus_after_tabs` を追加。復元前にレールがキーの宛先だったら、復元後にレールへ戻し `release_native_key_focus` も呼ぶ（`crates/workspace/src/workspace/project_session.rs`）。回帰テスト `restoring_a_projects_tabs_does_not_steal_the_rails_keys` を追加（修正前は落ちることを確認済み）。
 - 学び/罠: レール ↑/↓ の連打は「**その session の初回表示**」でだけ止まる。タブ復元は 1 枚ごとに `open_loaded_file` が `window.focus(エディタ)` し、最後の `select_tab` は rendered_html なら OS の first responder まで WebView に渡す。後者まで行くと素の ↑/↓ は WKWebView のスクロールに食われて GPUI に上がって来ない（⌘付きのショートカットだけ効く）ので、GPUI のフォーカスを戻すだけでは足りない。
 - 次: 同じ形（描画/復元がフォーカスを奪う）が Fleet の初回表示側にも無いか、報告が出たら見る。
+
+
+## 2026-09-23 — コミュニティ報告の Windows・IME・Linux 配布を修正
+- #4: Windows の PATH 探索から拡張子なし候補を除外。Node 同梱の Unix 用 `npx` より `npx.cmd` を選び、Unix 用だけなら未検出にする回帰テストを追加。PATH 自体はテスト中も書き換えない。
+- #3: ターミナルの前編集と UTF-16 選択範囲を保持し、GPUI の公開 EntityInputHandler API で OS に変換中であることを返す。確定文字だけを PTY に送り、次の通常 Enter は送信する。変換取消し・サロゲートペア・PTY への送信内容をテスト。GPUI macOS の固定 revision の公開入力実装を参照し、Zed アプリケーション crate は参照していない。
+- #6: Release workflow 内で同じタグの Linux musl サーバを x86_64 / aarch64 向けにビルドし、macOS ジョブが受け取って同梱。リリースでは欠落をエラーにし、同梱した ELF を検査する。ローカル開発ビルドは従来どおり任意同梱。

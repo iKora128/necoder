@@ -79,6 +79,9 @@ for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
         mkdir -p "$APP/Contents/Resources/remote/$triple"
         cp "$artifact" "$APP/Contents/Resources/remote/$triple/necoder-remote-server"
         echo "  remote server 同梱: $triple"
+    elif [ "${NECODER_REQUIRE_REMOTE_SERVERS:-0}" = "1" ]; then
+        echo "error: Linux remote server が無い: $artifact" >&2
+        exit 1
     fi
 done
 

@@ -18,7 +18,28 @@ permissions:
   contents: write # GitHub Release への添付に必要
 
 jobs:
+  remote-servers:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Zig + cargo-zigbuild + target
+        run: |
+          pip install ziglang cargo-zigbuild
+          rustup target add ${{ matrix.target }}
+      - name: Build Linux remote server
+        run: cargo zigbuild --locked -p host --bin necoder-remote-server --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remote-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/necoder-remote-server
+          if-no-files-found: error
+
   macos:
+    needs: remote-servers
     runs-on: macos-14 # Apple Silicon
     env:
       # これが空なら署名/notarize をスキップして「未署名 .dmg」を出す（動線だけ先に作れる）。
@@ -49,8 +70,26 @@ jobs:
       - name: Pillow（アイコン .icns 生成に使う）
         run: pip3 install --break-system-packages pillow
 
+      # CI の別 workflow の成果物には依存せず、同じタグから作ったサーバを必ず同梱する（#6）。
+      - uses: actions/download-artifact@v4
+        with:
+          name: remote-x86_64-unknown-linux-musl
+          path: target/x86_64-unknown-linux-musl/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: remote-aarch64-unknown-linux-musl
+          path: target/aarch64-unknown-linux-musl/release
       - name: Build + bundle（.app 組み立て）
         run: bash ./scripts/bundle-mac.sh release
+        env:
+          NECODER_REQUIRE_REMOTE_SERVERS: '1'
+      - name: Verify bundled Linux remote servers
+        run: |
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            binary="target/necoder.app/Contents/Resources/remote/$target/necoder-remote-server"
+            test -s "$binary"
+            file "$binary" | grep -q ELF
+          done
 
       # GPL 対応ソースをバイナリと同じ配布場所へ置く。necoder 自身の source archive は
       # GitHub がタグから生成し、Zed 側はビルドに固定した revision を明示的に添付する。
