@@ -3214,3 +3214,8 @@
 - やったこと: `open_slot_files`（＋remote 版の継続）に `restore_rail_focus_after_tabs` を追加。復元前にレールがキーの宛先だったら、復元後にレールへ戻し `release_native_key_focus` も呼ぶ（`crates/workspace/src/workspace/project_session.rs`）。回帰テスト `restoring_a_projects_tabs_does_not_steal_the_rails_keys` を追加（修正前は落ちることを確認済み）。
 - 学び/罠: レール ↑/↓ の連打は「**その session の初回表示**」でだけ止まる。タブ復元は 1 枚ごとに `open_loaded_file` が `window.focus(エディタ)` し、最後の `select_tab` は rendered_html なら OS の first responder まで WebView に渡す。後者まで行くと素の ↑/↓ は WKWebView のスクロールに食われて GPUI に上がって来ない（⌘付きのショートカットだけ効く）ので、GPUI のフォーカスを戻すだけでは足りない。
 - 次: 同じ形（描画/復元がフォーカスを奪う）が Fleet の初回表示側にも無いか、報告が出たら見る。
+
+## 2026-09-23 — Fleet の ＋ Task をクリックすると入力できないのを直した
+- やったこと: サイドバーの ＋ Task の mouse-down で `cx.stop_propagation()`（`fleet_sidebar.rs`）。＋ Task ダイアログの背面を `occlude()` にし、入力欄の外を押しても入力欄へフォーカスを戻す（ボタン 3 つは各自 stop_propagation・`new_task_dialog.rs`）。回帰テスト `clicking_add_task_leaves_the_dialog_input_focused`（実際に ＋ Task をクリック → 入力欄にフォーカス。修正を外すと落ちることを確認）
+- 学び/罠: ボタンのハンドラで入力欄へ `window.focus` しても、**親の mouse-down が同じクリックの泡立ちで後から走り**、親の `control_focus` へ奪い返していた（泡立ちは子 → 親の順）。⌘N（action）では親の mouse-down が走らないので打てる＝「入力できないことがある」の正体。親の `track_focus` の既定のフォーカス移動は `prevent_default` で止まるが、この親は明示の `on_mouse_down(window.focus(..))` も持つので `stop_propagation` が要る。背面に `occlude` が無いと、ダイアログの余白クリックも裏の要素へ届いてフォーカスを取られる
+- 次: 他のオーバーレイ（フォーカス可能な親の中から開くもの）に同じ形が無いか、報告が出たら同じテストの型で確かめる

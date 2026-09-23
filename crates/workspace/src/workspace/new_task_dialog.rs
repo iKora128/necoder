@@ -36,6 +36,12 @@ impl Workspace {
         cx.notify();
     }
 
+    /// テスト用: ＋ Task の入力欄にフォーカスがあるか（ダイアログが無ければ false）。
+    #[cfg(test)]
+    pub(crate) fn new_task_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.chrome.new_task.as_ref().is_some_and(|dialog| dialog.editor.read(cx).focus_handle(cx).is_focused(window))
+    }
+
     fn submit_new_task(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = &self.chrome.new_task else { return; };
         if dialog.root.is_none() { return; }
@@ -91,13 +97,17 @@ impl Workspace {
                     .child(div().text_color(if dialog.setup_script_present { self.theme.fg1 } else { self.theme.fg2 }).child(SharedString::from(i18n::t!(setup_key))))
                     .when(!dialog.setup_script_present, |row| row.child(
                         div().id("new-task-setup-create").cursor_pointer().text_color(self.accent()).child(i18n::t!("fleet.new_task_setup_create"))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.create_setup_script(window, cx))))));
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.create_setup_script(window, cx) })))));
         }
         body = body.child(div().flex().justify_end().gap(px(10.))
             .child(div().id("new-task-cancel").cursor_pointer().text_color(self.theme.fg2).child(i18n::t!("fleet.new_task_cancel"))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.chrome.new_task = None; cx.notify(); })))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.chrome.new_task = None; cx.notify(); })))
             .child(div().id("new-task-submit").cursor_pointer().text_color(self.theme.fg0).child(i18n::t!("fleet.new_task_start"))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.submit_new_task(cx)))));
-        Some(div().absolute().inset_0().flex().items_center().justify_center().bg(gpui::rgba(0x00000088)).child(body).into_any_element())
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.submit_new_task(cx) }))));
+        // 入力欄の外（余白・ラベル）を押しても入力欄へ戻す（ボタンは各自 stop_propagation で除外）。背面は `occlude` でクリックを通さない
+        // ＝ダイアログ越しに裏のサイドバーや composer がフォーカスを取らない。
+        let focus = dialog.editor.read(cx).focus_handle(cx);
+        body = body.on_mouse_down(MouseButton::Left, move |_, window, cx| window.focus(&focus, cx));
+        Some(div().absolute().inset_0().occlude().flex().items_center().justify_center().bg(gpui::rgba(0x00000088)).child(body).into_any_element())
     }
 }

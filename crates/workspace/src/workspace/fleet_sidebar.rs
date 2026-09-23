@@ -648,10 +648,15 @@ impl Workspace {
             .cursor_pointer()
             .hover(|style| style.bg(theme.bg2))
             .child(SharedString::from(i18n::t!("fleet.new_task")))
+            .debug_selector(|| "fleet-add-task".to_string())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     this.open_new_task(window, cx);
+                    // 親（サイドバー）の mouse-down は `control_focus` へフォーカスを移す。
+                    // 止めないと、いま入力欄へ当てたフォーカスを同じクリックの泡立ちで奪い返され、
+                    // ダイアログは出ているのに打鍵がサイドバーへ流れる（⌘N だと起きない）。
+                    cx.stop_propagation();
                 }),
             );
 

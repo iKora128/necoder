@@ -3898,6 +3898,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Fleet サイドバーの ＋ Task を**クリック**して開いたダイアログは、入力欄にフォーカスがあること
+    /// （2026-09-23 本人報告「入力できないことがある」）。ボタンの親（サイドバー）の mouse-down が
+    /// 同じクリックの泡立ちで `control_focus` を取り返し、⌘N では打てるのにクリックでは打てなかった。
+    #[gpui::test]
+    fn clicking_add_task_leaves_the_dialog_input_focused(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_add_task_focus_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true,"agent_prewarm":false}"#).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+                session
+                    .terminal_dock
+                    .update(cx, |dock, _| dock.use_test_terminals());
+            }
+            workspace.chrome.fleet_mode = true;
+            // 左カラムを Fleet サイドバーにする（エクスプローラが開いているとそちらが出る）。
+            workspace.chrome.show_left = true;
+            workspace.chrome.show_herd = true;
+            workspace.seed_fleet_cells(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let button = cx
+            .debug_bounds("fleet-add-task")
+            .expect("Fleet サイドバーに ＋ Task が描かれている");
+        cx.simulate_mouse_down(button.center(), MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.chrome.new_task.is_some(), "＋ Task のクリックでダイアログが開く");
+            assert!(
+                workspace.new_task_input_focused(window, cx),
+                "ダイアログは出ているのに入力欄にフォーカスが無い＝打鍵が裏へ流れる"
+            );
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// 独立 ACP を増やしても元の会話を置換せず、非表示・復帰・管制から同じ実体を扱う。
     #[gpui::test]
     fn fleet_panes_keep_their_threads_and_remote_targets(cx: &mut gpui::TestAppContext) {
