@@ -268,6 +268,10 @@ UI は要対応カードに ✳ 付きで添えるだけで、**応答はしな�
 設定 `captain_agent`（旧 `coordinator_agent`・プロジェクト設定 `.necoder/settings.json` でも可・既定ドリフト禁止）。
 未任命の間はサイドバーの Captain 行が「任命する」になり、要対応・Task 行・＋Task は全部そのまま使える
 （Captain 無しでも Fleet は成立する）。
+**任命の UI（2026-09-23）**: 設定 › AI エージェントの各行（利用可能なもの）に `Captain にする` ボタン。任命中の行は
+`⚑ Captain`（accent）で、もう一度押すと解任（`captain_agent: null`）。書くのは user の settings.json（`set_user_value`）で、
+既定エージェント（★）とは連動させない。未任命の Captain 行 / ⌘0 はこのページを開く。オンボーディングには出さない。
+それまでは任命ボタンが無く、「任命する」を押しても設定画面が開くだけで行き止まりだった。
 
 ## 6. worktree の運用（1 branch = 1 worktree・準備スクリプト・ビルドコスト）
 

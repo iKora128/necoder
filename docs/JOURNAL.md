@@ -3214,3 +3214,8 @@
 - やったこと: `open_slot_files`（＋remote 版の継続）に `restore_rail_focus_after_tabs` を追加。復元前にレールがキーの宛先だったら、復元後にレールへ戻し `release_native_key_focus` も呼ぶ（`crates/workspace/src/workspace/project_session.rs`）。回帰テスト `restoring_a_projects_tabs_does_not_steal_the_rails_keys` を追加（修正前は落ちることを確認済み）。
 - 学び/罠: レール ↑/↓ の連打は「**その session の初回表示**」でだけ止まる。タブ復元は 1 枚ごとに `open_loaded_file` が `window.focus(エディタ)` し、最後の `select_tab` は rendered_html なら OS の first responder まで WebView に渡す。後者まで行くと素の ↑/↓ は WKWebView のスクロールに食われて GPUI に上がって来ない（⌘付きのショートカットだけ効く）ので、GPUI のフォーカスを戻すだけでは足りない。
 - 次: 同じ形（描画/復元がフォーカスを奪う）が Fleet の初回表示側にも無いか、報告が出たら見る。
+
+## 2026-09-23 — Captain を設定画面から任命できるようにする
+- やったこと: 設定 › AI エージェントの各行に `Captain にする` / `⚑ Captain`（押すと解任）を追加（`crates/settings/src/settings.rs` の `agents_rows` / `toggle_captain` / `next_captain_value` + test 2 本）。未任命の Captain 行 / ⌘0 は設定の AI エージェントページを開く（`fleet_sidebar.rs` の `focus_captain` → `show_agents_page`）。`captain.appoint` の文言を行き先の名前に変更。ja/en 両方。FLEET-V2 §5.7・UI-SPEC §12・MANUAL を更新
+- 学び/罠: 以前は任命の UI が無く、「任命する」を押しても設定が開くだけ（行き止まり）で、settings.json の手書きが唯一の手段だった。エージェント行はボタンが 2 つになると幅が足りず「★ 既定」がカードからはみ出した → 名前の列を `flex_1().min_w_0()` で縮めて折り返し、ボタンは `flex_none` にした
+- 次: プロジェクト設定（`.necoder/settings.json`）で `captain_agent` を上書きしていると、UI で user 側を変えても効かない。必要ならその旨を行に出す
