@@ -3220,6 +3220,12 @@
 - #4: Windows の PATH 探索から拡張子なし候補を除外。Node 同梱の Unix 用 `npx` より `npx.cmd` を選び、Unix 用だけなら未検出にする回帰テストを追加。PATH 自体はテスト中も書き換えない。
 - #3: ターミナルの前編集と UTF-16 選択範囲を保持し、GPUI の公開 EntityInputHandler API で OS に変換中であることを返す。確定文字だけを PTY に送り、次の通常 Enter は送信する。変換取消し・サロゲートペア・PTY への送信内容をテスト。GPUI macOS の固定 revision の公開入力実装を参照し、Zed アプリケーション crate は参照していない。
 - #6: Release workflow 内で同じタグの Linux musl サーバを x86_64 / aarch64 向けにビルドし、macOS ジョブが受け取って同梱。リリースでは欠落をエラーにし、同梱した ELF を検査する。ローカル開発ビルドは従来どおり任意同梱。
+## 2026-09-23 — Fleet の ＋ Task をクリックすると入力できないのを直した
+- やったこと: サイドバーの ＋ Task の mouse-down で `cx.stop_propagation()`（`fleet_sidebar.rs`）。＋ Task ダイアログの背面を `occlude()` にし、入力欄の外を押しても入力欄へフォーカスを戻す（ボタン 3 つは各自 stop_propagation・`new_task_dialog.rs`）。回帰テスト `clicking_add_task_leaves_the_dialog_input_focused`（実際に ＋ Task をクリック → 入力欄にフォーカス。修正を外すと落ちることを確認）
+- 学び/罠: ボタンのハンドラで入力欄へ `window.focus` しても、**親の mouse-down が同じクリックの泡立ちで後から走り**、親の `control_focus` へ奪い返していた（泡立ちは子 → 親の順）。⌘N（action）では親の mouse-down が走らないので打てる＝「入力できないことがある」の正体。親の `track_focus` の既定のフォーカス移動は `prevent_default` で止まるが、この親は明示の `on_mouse_down(window.focus(..))` も持つので `stop_propagation` が要る。背面に `occlude` が無いと、ダイアログの余白クリックも裏の要素へ届いてフォーカスを取られる
+- 検証で追加: Esc で閉じない（UI-SPEC §7 の「esc で閉じる」違反・入力欄が `editor::Cancel` を親へ流しても誰も受けていなかった）→ ダイアログで `editor::Cancel` を受けて取り消す。取り消し時は開く前のフォーカス（サイドバー等）へ返す。テストは「クリック → フォーカス → 打鍵が入る → 余白クリックでも外れない → Esc で閉じてサイドバーへ戻る」を通し、修正を 1 つずつ外すとそれぞれの assert で落ちることを確認した（4 通り）
+- 背景クリックで閉じるのは入れていない（UI-SPEC §7 は「背景クリックで閉じる」だが、書きかけの依頼文を誤クリックで失うため）。背景は `occlude` で何もしない
+- 次: 他のオーバーレイ（フォーカス可能な親の中から開くもの）に同じ形が無いか、報告が出たら同じテストの型で確かめる
 ## 2026-09-23 — Captain を設定画面から任命できるようにする
 - やったこと: 設定 › AI エージェントの各行に `Captain にする` / `⚑ Captain`（押すと解任）を追加（`crates/settings/src/settings.rs` の `agents_rows` / `toggle_captain` / `next_captain_value` + test 2 本）。未任命の Captain 行 / ⌘0 は設定の AI エージェントページを開く（`fleet_sidebar.rs` の `focus_captain` → `show_agents_page`）。`captain.appoint` の文言を行き先の名前に変更。ja/en 両方。FLEET-V2 §5.7・UI-SPEC §12・MANUAL を更新
 - 学び/罠: 以前は任命の UI が無く、「任命する」を押しても設定が開くだけ（行き止まり）で、settings.json の手書きが唯一の手段だった。エージェント行はボタンが 2 つになると幅が足りず「★ 既定」がカードからはみ出した → 名前の列を `flex_1().min_w_0()` で縮めて折り返し、ボタンは `flex_none` にした
