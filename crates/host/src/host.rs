@@ -534,7 +534,7 @@ pub fn executable_names(binary: &str) -> Vec<String> {
     if !cfg!(windows) || Path::new(binary).extension().is_some() {
         return vec![binary.to_string()];
     }
-    ["", ".exe", ".cmd", ".bat"]
+    [".exe", ".cmd", ".bat"]
         .iter()
         .map(|extension| format!("{binary}{extension}"))
         .collect()
@@ -543,8 +543,12 @@ pub fn executable_names(binary: &str) -> Vec<String> {
 /// PATH から実行ファイルを探す（Windows は `PATHEXT` 相当の拡張子も試す）。
 pub fn find_in_path(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    find_in_search_path(binary, &path)
+}
+
+fn find_in_search_path(binary: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
     let names = executable_names(binary);
-    std::env::split_paths(&path).find_map(|directory| {
+    std::env::split_paths(path).find_map(|directory| {
         names
             .iter()
             .map(|name| directory.join(name))
@@ -4147,6 +4151,22 @@ mod windows_terminal_tests {
     fn never_yields_an_empty_program() {
         let shell = pick_windows_shell(|_| false);
         assert_eq!(shell.program, "powershell");
+    }
+
+    /// Node.js が同梱する Unix 用 npx と Windows 用 npx.cmd を取り違えない（#4）。
+    #[cfg(windows)]
+    #[test]
+    fn path_lookup_skips_unix_wrappers_on_windows() {
+        let directory = std::env::temp_dir().join(format!("necoder-path-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("npx"), "#!/usr/bin/env bash\n").unwrap();
+        std::fs::write(directory.join("npx.cmd"), "@echo off\r\n").unwrap();
+        let search_path = std::env::join_paths([&directory]).unwrap();
+        assert_eq!(find_in_search_path("npx", &search_path), Some(directory.join("npx.cmd")));
+        assert_eq!(find_in_search_path("npx.cmd", &search_path), Some(directory.join("npx.cmd")));
+        std::fs::remove_file(directory.join("npx.cmd")).unwrap();
+        assert_eq!(find_in_search_path("npx", &search_path), None);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// **`.cmd` を直接 spawn できるか**（WINDOWS-PORT.md §W4 / §4）。
