@@ -3218,4 +3218,6 @@
 ## 2026-09-23 — Fleet の ＋ Task をクリックすると入力できないのを直した
 - やったこと: サイドバーの ＋ Task の mouse-down で `cx.stop_propagation()`（`fleet_sidebar.rs`）。＋ Task ダイアログの背面を `occlude()` にし、入力欄の外を押しても入力欄へフォーカスを戻す（ボタン 3 つは各自 stop_propagation・`new_task_dialog.rs`）。回帰テスト `clicking_add_task_leaves_the_dialog_input_focused`（実際に ＋ Task をクリック → 入力欄にフォーカス。修正を外すと落ちることを確認）
 - 学び/罠: ボタンのハンドラで入力欄へ `window.focus` しても、**親の mouse-down が同じクリックの泡立ちで後から走り**、親の `control_focus` へ奪い返していた（泡立ちは子 → 親の順）。⌘N（action）では親の mouse-down が走らないので打てる＝「入力できないことがある」の正体。親の `track_focus` の既定のフォーカス移動は `prevent_default` で止まるが、この親は明示の `on_mouse_down(window.focus(..))` も持つので `stop_propagation` が要る。背面に `occlude` が無いと、ダイアログの余白クリックも裏の要素へ届いてフォーカスを取られる
+- 検証で追加: Esc で閉じない（UI-SPEC §7 の「esc で閉じる」違反・入力欄が `editor::Cancel` を親へ流しても誰も受けていなかった）→ ダイアログで `editor::Cancel` を受けて取り消す。取り消し時は開く前のフォーカス（サイドバー等）へ返す。テストは「クリック → フォーカス → 打鍵が入る → 余白クリックでも外れない → Esc で閉じてサイドバーへ戻る」を通し、修正を 1 つずつ外すとそれぞれの assert で落ちることを確認した（4 通り）
+- 背景クリックで閉じるのは入れていない（UI-SPEC §7 は「背景クリックで閉じる」だが、書きかけの依頼文を誤クリックで失うため）。背景は `occlude` で何もしない
 - 次: 他のオーバーレイ（フォーカス可能な親の中から開くもの）に同じ形が無いか、報告が出たら同じテストの型で確かめる

@@ -3914,7 +3914,13 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let settings_path = root.join("settings.json");
         std::fs::write(&settings_path, r#"{"onboarded":true,"agent_prewarm":false}"#).unwrap();
-        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            // Esc（`editor::Cancel`）を実キーで通すため既定 keymap を張る。
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
         let (workspace, cx) =
             cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
         workspace.update_in(cx, |workspace, _window, cx| {
@@ -3933,6 +3939,12 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
+        // ＋ Task を押す前はサイドバーに居る（Esc で戻る先の確認に使う）。
+        workspace.update_in(cx, |workspace, window, cx| {
+            let sidebar = workspace.chrome.control_focus.clone();
+            window.focus(&sidebar, cx);
+        });
+        cx.run_until_parked();
 
         let button = cx
             .debug_bounds("fleet-add-task")
@@ -3945,6 +3957,39 @@ mod tests {
             assert!(
                 workspace.new_task_input_focused(window, cx),
                 "ダイアログは出ているのに入力欄にフォーカスが無い＝打鍵が裏へ流れる"
+            );
+        });
+
+        // フォーカスだけでなく、打った文字が実際に入力欄へ入る（IME と同じ入力経路）。
+        cx.simulate_input("fix login");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert_eq!(workspace.new_task_input_text(cx).as_deref(), Some("fix login"), "打鍵が ＋ Task の入力欄に入らない");
+        });
+
+        // 入力欄の外（ダイアログの余白）を押しても入力欄のまま。背面の occlude が無いと、
+        // 余白のクリックが裏のサイドバー / Task カードへ届いてフォーカスを取られる。
+        let input_row = cx
+            .debug_bounds("new-task-dialog")
+            .expect("＋ Task ダイアログが描かれている");
+        cx.simulate_mouse_down(
+            point(input_row.origin.x + px(4.), input_row.origin.y + px(4.)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.new_task_input_focused(window, cx), "ダイアログの余白クリックで入力欄からフォーカスが外れた");
+        });
+
+        // Esc で閉じ、押す前に居たサイドバーへフォーカスが戻る（UI-SPEC §7）。
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, _cx| {
+            assert!(workspace.chrome.new_task.is_none(), "Esc で ＋ Task ダイアログが閉じない");
+            assert!(
+                workspace.chrome.control_focus.is_focused(window),
+                "取り消し後、押す前に居たサイドバーへフォーカスが戻らない"
             );
             for session in workspace.project_sessions.sessions.iter_mut() {
                 session._watch = None;
