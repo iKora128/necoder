@@ -22,3 +22,6 @@ ui.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

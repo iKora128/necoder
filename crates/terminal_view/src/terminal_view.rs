@@ -4,7 +4,7 @@
 //! - **EventLoop が読取スレッド + vte parser**（自前で書かない）。PTY 出力 → parse → `Term` 更新 →
 //!   `EventListener::send_event(Wakeup)`。
 //! - **idle 0%**: 出力時のみ Wakeup → pump（`cx.spawn`）→ `sync`（スナップショット + notify）。**タイマー無し**。
-//! - 入力は v1 では `on_key_down` 一本化（印字も特殊キーも bytes 化）。IME 前編集は非対応（後続）。
+//! - 通常キーは `on_key_down`、IME は `EntityInputHandler`。前編集は保持し、確定文字だけ PTY へ送る。
 //! - 公開 `alacritty_terminal` API と GPUI API を使った necoder 固有の実装。Zed の terminal code は取り込まない。
 
 mod dock;
@@ -175,6 +175,11 @@ pub struct TerminalView {
     size: TerminalSize,
     /// アプリケーションカーソルモード（矢印キーのエスケープが変わる）。
     app_cursor: bool,
+    /// OS に変換中の範囲を返すための前編集。PTY には確定するまで送らない。
+    marked_text: String,
+    marked_selection: Range<usize>,
+    #[cfg(test)]
+    written_input: std::cell::RefCell<Vec<u8>>,
     /// マウス左ボタンを押してドラッグ選択中か（move で範囲を延ばす判定）。
     selecting: bool,
     /// ドラッグ選択中の最新ポインタ位置とフレーム座標。ビュー外へ引っ張った時の
@@ -279,6 +284,10 @@ impl TerminalView {
             content: TerminalContent::default(),
             size,
             app_cursor: false,
+            marked_text: String::new(),
+            marked_selection: 0..0,
+            #[cfg(test)]
+            written_input: std::cell::RefCell::new(Vec::new()),
             selecting: false,
             drag_frame: None,
             drag_autoscroll_running: false,
@@ -294,7 +303,7 @@ impl TerminalView {
     ///
     /// `gpui::test` のスケジューラは外部スレッドからの Wakeup を禁止するため、
     /// test-support feature でだけ公開する。本番の生成経路には入らない。
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn new_test(theme: Theme, cx: &mut Context<Self>) -> Self {
         let (events_tx, _events_rx) = unbounded::<AlacEvent>();
@@ -314,6 +323,10 @@ impl TerminalView {
             content: TerminalContent::default(),
             size,
             app_cursor: false,
+            marked_text: String::new(),
+            marked_selection: 0..0,
+            #[cfg(test)]
+            written_input: std::cell::RefCell::new(Vec::new()),
             selecting: false,
             drag_frame: None,
             drag_autoscroll_running: false,
@@ -395,6 +408,8 @@ impl TerminalView {
 
     /// PTY へ入力バイトを送る。
     fn write_bytes(&self, bytes: Vec<u8>) {
+        #[cfg(test)]
+        self.written_input.borrow_mut().extend_from_slice(&bytes);
         if let Some(notifier) = &self.notifier {
             notifier.notify(bytes);
         }
@@ -434,6 +449,11 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // 変換候補の操作は IME のもの。未処理キーが流れてきても PTY へ漏らさない。
+        if !self.marked_text.is_empty() {
+            cx.stop_propagation();
+            return;
+        }
         let keystroke = &event.keystroke;
         // ⌘C = 選択コピー / ⌘V = 貼り付け。macOS 系のみ（⌃C は SIGINT のまま）。
         if keystroke.modifiers.platform && !keystroke.modifiers.control {
@@ -750,12 +770,15 @@ impl EventEmitter<TerminalEvent> for TerminalView {}
 impl EntityInputHandler for TerminalView {
     fn text_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
-        _actual_range: &mut Option<Range<usize>>,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        None
+        let units: Vec<u16> = self.marked_text.encode_utf16().collect();
+        let text = String::from_utf16(units.get(range_utf16.clone())?).ok()?;
+        *actual_range = Some(range_utf16);
+        Some(text)
     }
 
     fn selected_text_range(
@@ -766,7 +789,7 @@ impl EntityInputHandler for TerminalView {
     ) -> Option<UTF16Selection> {
         // 空選択（カーソル位置相当）。これが Some でないと IME セッションが始まらない。
         Some(UTF16Selection {
-            range: 0..0,
+            range: self.marked_selection.clone(),
             reversed: false,
         })
     }
@@ -776,10 +799,14 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        None
+        (!self.marked_text.is_empty()).then(|| 0..self.marked_text.encode_utf16().count())
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.marked_text.clear();
+        self.marked_selection = 0..0;
+        cx.notify();
+    }
 
     fn replace_text_in_range(
         &mut self,
@@ -788,6 +815,8 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.marked_text.clear();
+        self.marked_selection = 0..0;
         // IME 確定・ディクテーション等の文字列を PTY へ（ASCII 打鍵は on_key_down 経由）。
         if !new_text.is_empty() {
             self.scroll_to_bottom(cx);
@@ -799,12 +828,16 @@ impl EntityInputHandler for TerminalView {
     fn replace_and_mark_text_in_range(
         &mut self,
         _range_utf16: Option<Range<usize>>,
-        _new_text: &str,
-        _new_selected_range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        // 変換中はインライン表示しない（確定時に replace_text_in_range が来る）。
+        // marked_text_range が None だと OS は確定 Enter を通常入力として扱ってしまう（#3）。
+        self.marked_text = new_text.to_owned();
+        let length = new_text.encode_utf16().count();
+        self.marked_selection = new_selected_range_utf16.unwrap_or(length..length);
+        cx.notify();
     }
 
     fn bounds_for_range(
@@ -1509,5 +1542,46 @@ mod tests {
         assert!(term.grid().display_offset() <= 100);
         term.scroll_display(Scroll::Bottom);
         assert_eq!(term.grid().display_offset(), 0);
+    }
+}
+
+#[cfg(test)]
+mod ime_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn composition_confirmation_does_not_send_enter(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.replace_and_mark_text_in_range(None, "にほんご", Some(4..4), window, cx);
+            assert_eq!(terminal.marked_text_range(window, cx), Some(0..4));
+            assert!(terminal.written_input.borrow().is_empty());
+            // IME 操作用の Enter が通常キー経路に来ても送らない。
+            let enter = KeyDownEvent { keystroke: gpui::Keystroke::parse("enter").unwrap(), is_held: false, prefer_character_input: false };
+            terminal.on_key_down(&enter, window, cx);
+            assert!(terminal.written_input.borrow().is_empty());
+            terminal.replace_text_in_range(None, "日本語", window, cx);
+            assert_eq!(&*terminal.written_input.borrow(), "日本語".as_bytes());
+            assert_eq!(terminal.marked_text_range(window, cx), None);
+            // 変換確定の後に、意図して押した次の Enter は通常どおり送信。
+            terminal.on_key_down(&enter, window, cx);
+            assert_eq!(&*terminal.written_input.borrow(), "日本語\r".as_bytes());
+        });
+    }
+
+    #[gpui::test]
+    fn cancelled_composition_and_utf16_ranges(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.replace_and_mark_text_in_range(None, "猫🐱", Some(1..3), window, cx);
+            assert_eq!(terminal.marked_text_range(window, cx), Some(0..3));
+            assert_eq!(terminal.selected_text_range(false, window, cx).unwrap().range, 1..3);
+            assert_eq!(terminal.text_for_range(1..3, &mut None, window, cx).as_deref(), Some("🐱"));
+            terminal.unmark_text(window, cx);
+            assert_eq!(terminal.marked_text_range(window, cx), None);
+            assert!(terminal.written_input.borrow().is_empty());
+            terminal.replace_and_mark_text_in_range(None, "", None, window, cx);
+            assert_eq!(terminal.marked_text_range(window, cx), None);
+        });
     }
 }
