@@ -449,6 +449,18 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Captain の任命 / 解任（FLEET-V2 §5.7）。同じエージェントをもう一度押すと解任（`null`）。
+    /// 任命は人の明示操作に限る（既定ドリフト禁止・DECISIONS §8）ので、既定エージェントとは連動させない。
+    fn toggle_captain(&mut self, label: &str, current: Option<&str>, cx: &mut Context<Self>) {
+        set_user_value(cx, "captain_agent", next_captain_value(label, current));
+        cx.notify();
+    }
+
+    /// 「AI エージェント」ページを開いた状態にする（Fleet の Captain 行「任命する」の行き先）。
+    pub fn show_agents_page(&mut self, cx: &mut Context<Self>) {
+        self.select_page(SettingsPage::Agents, cx);
+    }
+
     fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
         set_user_value(cx, "onboarded", serde_json::Value::Bool(true));
         cx.emit(SettingsViewEvent::OnboardingCompleted);
@@ -1010,10 +1022,12 @@ impl SettingsView {
 
     /// エージェント一覧の行。**ページとオンボーディングで共用する**（初回はナビ無しの
     /// 1 枚スクロールに同じ行が出る・UI-SPEC §12）。
-    fn agents_rows(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+    /// `show_captain` = Captain の任命ボタンを出すか（オンボーディングでは出さない＝初回に Fleet の概念を持ち込まない）。
+    fn agents_rows(&self, settings: &Settings, show_captain: bool, cx: &mut Context<Self>) -> Div {
         let theme = self.theme.clone();
         let accent = self.accent;
         let default_agent = settings.default_agent.clone();
+        let captain_agent = settings.captain_agent.clone();
         let mut rows = div().flex().flex_col().gap(px(6.));
         for (index, agent) in acp_client::AGENTS.iter().enumerate() {
             let is_default = agent.label == default_agent;
@@ -1042,6 +1056,8 @@ impl SettingsView {
             };
             let default_control = if is_default && available {
                 div()
+                    .flex_none()
+                    .whitespace_nowrap()
                     .px(px(8.))
                     .py(px(3.))
                     .rounded(px(5.))
@@ -1054,6 +1070,8 @@ impl SettingsView {
                 let label = agent.label;
                 div()
                     .id(("set-default", index))
+                    .flex_none()
+                    .whitespace_nowrap()
                     .px(px(8.))
                     .py(px(3.))
                     .rounded(px(5.))
@@ -1065,6 +1083,43 @@ impl SettingsView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, _, _window, cx| view.set_default_agent(label, cx)),
+                    )
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
+            // 任命済みの行は利用不可（ログアウト等）でも出す＝解任の手段を消さない。
+            let is_captain = captain_agent.as_deref() == Some(agent.label);
+            let captain_control = if show_captain && (available || is_captain) {
+                let label = agent.label;
+                let current = captain_agent.clone();
+                div()
+                    .id(("set-captain", index))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(11.))
+                    .cursor_pointer()
+                    .when(is_captain, |element| {
+                        element.bg(accent.alpha(0.16)).text_color(accent)
+                    })
+                    .when(!is_captain, |element| {
+                        element
+                            .text_color(theme.fg2)
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    })
+                    .child(SharedString::from(if is_captain {
+                        i18n::t!("settings.is_captain")
+                    } else {
+                        i18n::t!("settings.make_captain")
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| {
+                            view.toggle_captain(label, current.as_deref(), cx)
+                        }),
                     )
                     .into_any_element()
             } else {
@@ -1110,8 +1165,12 @@ impl SettingsView {
                         theme.border
                     })
                     .child(logo)
+                    // 名前の列だけが縮む（右のボタン群をカードの外へ押し出さない）。長い名前は折り返す。
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .flex()
                             .flex_col()
                             .gap(px(1.))
@@ -1129,7 +1188,7 @@ impl SettingsView {
                                     .child(SharedString::from(status_text)),
                             ),
                     )
-                    .child(div().flex_1())
+                    .child(captain_control)
                     .child(default_control)
                     .child(if self.checking_agents || available {
                         div().into_any_element()
@@ -1312,7 +1371,7 @@ impl SettingsView {
                             i18n::t!("settings.agents_heading"),
                             Some(i18n::t!("settings.agents_sub")),
                         ))
-                        .child(self.agents_rows(settings, cx)),
+                        .child(self.agents_rows(settings, true, cx)),
                 )
                 // 導入系（エージェント CLI）の直後に `ne` コマンドを並べる。
                 // Windows は W フェーズまで非対応＝セクションごと出さない。
@@ -1900,6 +1959,16 @@ impl SettingsView {
 /// 通知音のセグメント（同梱の猫の声 → システム音 → オフ）。
 /// 完了 / 入力待ちの 2 行で同じ並びを使う＝場面ごとに別の声を当てられる。
 /// ラベルの無い声は id をそのまま出す（声を増やしたとき、文言待ちで選べなくならないように）。
+/// Captain ボタンを押した後の `captain_agent` の値。任命中の同じエージェント = 解任（`null`）、
+/// それ以外 = そのエージェントへ任命（別の Captain からの交代も 1 押し）。
+fn next_captain_value(label: &str, current: Option<&str>) -> serde_json::Value {
+    if current == Some(label) {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(label.to_string())
+    }
+}
+
 fn sound_options() -> Vec<(&'static str, String)> {
     let mut options: Vec<(&'static str, String)> = settings_core::SOUND_VOICES
         .iter()
@@ -1972,7 +2041,7 @@ impl Render for SettingsView {
                     i18n::t!("settings.agents_heading"),
                     Some(i18n::t!("settings.agents_sub")),
                 ))
-                .child(self.agents_rows(&settings, cx))
+                .child(self.agents_rows(&settings, false, cx))
                 .child(
                     div()
                         .id("onboarding-start")
@@ -2063,4 +2132,40 @@ fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
         .find(|agent| agent.id == id)
         .map(|agent| agent.brand())
         .unwrap_or((None, "?", 0x88_88_88))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captain_button_appoints_switches_and_dismisses() {
+        // 未任命 → 任命
+        assert_eq!(
+            next_captain_value("Claude Code", None),
+            serde_json::Value::String("Claude Code".to_string())
+        );
+        // 別の Captain からの交代
+        assert_eq!(
+            next_captain_value("Codex", Some("Claude Code")),
+            serde_json::Value::String("Codex".to_string())
+        );
+        // 任命中の同じエージェント → 解任
+        assert_eq!(
+            next_captain_value("Claude Code", Some("Claude Code")),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn dismissed_captain_reads_back_as_unappointed() {
+        // 解任は `null` を書く。読み戻すと未任命（None）になること＝ Fleet が「任命する」に戻る。
+        let store = settings_core::SettingsStore::from_json_layers(&[
+            settings_core::DEFAULT_SETTINGS_JSON,
+            r#"{ "captain_agent": "Claude Code" }"#,
+            r#"{ "captain_agent": null }"#,
+        ])
+        .expect("マージできる");
+        assert_eq!(store.settings().captain_agent, None);
+    }
 }
