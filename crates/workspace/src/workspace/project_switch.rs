@@ -311,6 +311,7 @@ impl Workspace {
         self.overlays.picker.is_some()
             || self.overlays.color_picker.is_some()
             || self.overlays.ssh_input.is_some()
+            || self.overlays.askpass.is_some()
             || self.overlays.worktree_delete.is_some()
             || self.overlays.rail_menu.is_some()
             || self.overlays.add_project_dialog_open

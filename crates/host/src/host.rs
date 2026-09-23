@@ -2770,12 +2770,151 @@ fn find_local_remote_server() -> Option<PathBuf> {
 /// `ssh` サブプロセスの土台。`NECODER_SSH_CONFIG` が指定されていれば `-F <config>` を先頭に
 /// 前置きする。テスト（Docker の隔離ホスト）やサンドボックス運用で、ユーザーの `~/.ssh/config`
 /// や `known_hosts` を汚さずに remote を検証するための seam。未指定なら system ssh の既定どおり。
+///
+/// GUI から起こす ssh には TTY が無いので、パスワード / passphrase / host key 確認は
+/// `SSH_ASKPASS` 経由で GUI に訊く（[`install_askpass`]）。
 fn ssh_command() -> Command {
     let mut command = Command::new("ssh");
     if let Some(config) = std::env::var_os("NECODER_SSH_CONFIG") {
         command.arg("-F").arg(config);
     }
+    #[cfg(unix)]
+    install_askpass(&mut command);
     command
+}
+
+// ---------------------------------------------------------------------------
+// GUI askpass（ROADMAP「残: GUI askpass」）
+// ---------------------------------------------------------------------------
+
+/// 発行した askpass token の寿命。1 回の接続試行（再入力 3 回ぶん）を見込んだ上限で、
+/// 切れた token は次の発行時に掃除される。
+#[cfg(unix)]
+const ASKPASS_TOKEN_TTL: Duration = Duration::from_secs(180);
+
+/// 1 回の接続試行に対して発行した askpass token と、その token で訊かれた回数。
+///
+/// GUI から秘密を引き出せるのは、**その ssh のために発行した token を持つ子プロセスだけ**。
+/// token は `ssh` の環境変数にしか置かないので、`gui.sock` を開けるだけの別プロセスは
+/// パスワード入力欄を出せない（`gui.sock` は 0600 だが、秘密を返す口は更に絞る）。
+///
+/// `asked` は**同じ問い**が何回来たかを prompt 文字列ごとに数える。OpenSSH は入力を間違えると
+/// 同じ prompt で askpass を呼び直す（既定 3 回）ので、2 回目以降は GUI が「失敗したので
+/// もう一度」と言える。prompt ごとに分けるのは、passphrase → password のように**別の問い**へ
+/// 進んだときに再入力と誤表示しないため。
+#[cfg(unix)]
+struct AskpassIssue {
+    token: String,
+    issued: std::time::Instant,
+    asked: Vec<(String, u32)>,
+}
+
+#[cfg(unix)]
+static ASKPASS_TOKENS: Mutex<Vec<AskpassIssue>> = Mutex::new(Vec::new());
+
+/// 128bit の乱数 token を hex で作る。`/dev/urandom` が読めなければ askpass を諦める
+/// （推測可能な token を配るくらいなら、従来どおり「TTY が無いので失敗」の方が安全）。
+#[cfg(unix)]
+fn askpass_random_token() -> Option<String> {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut bytes)
+        .ok()?;
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        if write!(token, "{byte:02x}").is_err() {
+            return None;
+        }
+    }
+    Some(token)
+}
+
+/// token を 1 つ発行して登録する（期限切れはこの機会に捨てる）。
+#[cfg(unix)]
+fn issue_askpass_token() -> Option<String> {
+    let token = askpass_random_token()?;
+    let mut tokens = ASKPASS_TOKENS.lock().ok()?;
+    let now = std::time::Instant::now();
+    tokens.retain(|issue| now.duration_since(issue.issued) < ASKPASS_TOKEN_TTL);
+    tokens.push(AskpassIssue {
+        token: token.clone(),
+        issued: now,
+        asked: Vec::new(),
+    });
+    Some(token)
+}
+
+/// GUI 側の検証。「今このプロセスが出した、まだ生きている token か」だけを見る。
+///
+/// 使い捨てにはしない — OpenSSH は 1 回の接続で鍵の passphrase とパスワードを続けて訊くことが
+/// あり、再入力（`NumberOfPasswordPrompts`）もあるため、寿命は TTL で切る。
+#[cfg(unix)]
+pub fn askpass_token_is_live(token: &str) -> bool {
+    let Ok(mut tokens) = ASKPASS_TOKENS.lock() else {
+        return false;
+    };
+    let now = std::time::Instant::now();
+    tokens.retain(|issue| now.duration_since(issue.issued) < ASKPASS_TOKEN_TTL);
+    tokens.iter().any(|issue| issue.token == token)
+}
+
+/// token を検証しつつ「この問いは何回目か」を 1 始まりで返す（生きていなければ `None`）。
+/// 2 以上 = 直前の入力が拒否されて OpenSSH が訊き直している、と GUI が判断できる。
+#[cfg(unix)]
+pub fn askpass_attempt(token: &str, prompt: &str) -> Option<u32> {
+    let mut tokens = ASKPASS_TOKENS.lock().ok()?;
+    let now = std::time::Instant::now();
+    tokens.retain(|issue| now.duration_since(issue.issued) < ASKPASS_TOKEN_TTL);
+    let issue = tokens.iter_mut().find(|issue| issue.token == token)?;
+    if let Some((_, count)) = issue
+        .asked
+        .iter_mut()
+        .find(|(seen, _)| seen == prompt)
+    {
+        *count += 1;
+        return Some(*count);
+    }
+    issue.asked.push((prompt.to_string(), 1));
+    Some(1)
+}
+
+/// この `ssh` に「訊く先」を持たせる。
+///
+/// - `SSH_ASKPASS` = necoder 自身（起動時に `NECODER_ASKPASS_TOKEN` を見て askpass モードに入る）
+/// - `SSH_ASKPASS_REQUIRE=force` = TTY の有無に依らず askpass を使う（OpenSSH 8.4+ の公開仕様）
+///
+/// 何もせず返る条件（いずれも「GUI に訊けない・訊くべきでない」場合）:
+/// 利用者が自前の `SSH_ASKPASS` を持っている / `NECODER_ASKPASS_DISABLE` / GUI socket が無い
+/// （headless CLI・統合テスト・`necoder-remote-server`）。
+#[cfg(unix)]
+fn install_askpass(command: &mut Command) {
+    if std::env::var_os("SSH_ASKPASS").is_some()
+        || std::env::var_os("NECODER_ASKPASS_DISABLE").is_some()
+    {
+        return;
+    }
+    // 自分自身が askpass として呼ばれている最中なら、その子に token を配り直さない。
+    if std::env::var_os("NECODER_ASKPASS_TOKEN").is_some() {
+        return;
+    }
+    let Some(socket) = paths::runtime_socket() else {
+        return;
+    };
+    if !socket.exists() {
+        return;
+    }
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let Some(token) = issue_askpass_token() else {
+        return;
+    };
+    command
+        .env("SSH_ASKPASS", executable)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("NECODER_ASKPASS_TOKEN", token);
 }
 
 /// ローカルのハッシュツール（`sha256sum` か BSD/macOS の `shasum -a 256`）で SHA-256 hex を計算する。
@@ -4997,5 +5136,61 @@ mod task_environment_tests {
         std::fs::write(root.join(".necoder/task.env"), "NOEQUALS\n").unwrap();
         assert!(task_environment(LocalHost::shared().as_ref(), &root).is_err(), "KEY=VALUE でない行は拒否");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+}
+
+/// askpass（GUI への秘密の訊き方）だけを見るテスト。
+#[cfg(all(test, unix))]
+mod askpass_tests {
+    use super::*;
+
+    /// askpass token: 発行したものだけが生き、知らない値は通らない。
+    /// （GUI 側 `control_ipc` の "askpass" はこの判定だけを根拠に秘密を返す。）
+    #[test]
+    fn askpass_token_only_matches_issued_value() {
+        let token = issue_askpass_token().expect("/dev/urandom から token を作れる");
+        assert_eq!(token.len(), 32, "128bit を hex で = 32 文字");
+        assert!(askpass_token_is_live(&token));
+        assert!(!askpass_token_is_live("deadbeef"), "発行していない値は通さない");
+        assert!(!askpass_token_is_live(""), "空も通さない");
+        let second = issue_askpass_token().expect("2 本目も作れる");
+        assert_ne!(token, second, "接続ごとに別の token");
+        assert!(askpass_token_is_live(&token), "TTL 内なら先の token も生きている");
+    }
+
+    /// 同じ問いの回数だけが増え、別の問い・別の token では 1 に戻る
+    /// （GUI の「入力が拒否されました」表示の根拠）。
+    #[test]
+    fn askpass_attempt_counts_repeats_per_prompt() {
+        let token = issue_askpass_token().expect("token を作れる");
+        let password = "user@example.internal's password:";
+        let passphrase = "Enter passphrase for key '/home/user/.ssh/id_ed25519':";
+        assert_eq!(askpass_attempt(&token, password), Some(1));
+        assert_eq!(askpass_attempt(&token, password), Some(2), "同じ問い = 再入力");
+        assert_eq!(
+            askpass_attempt(&token, passphrase),
+            Some(1),
+            "別の問いは 1 回目から"
+        );
+        let other = issue_askpass_token().expect("別の接続の token");
+        assert_eq!(askpass_attempt(&other, password), Some(1), "token ごとに独立");
+        assert_eq!(askpass_attempt("deadbeef", password), None, "無効な token");
+    }
+
+    /// `install_askpass`: 利用者の `SSH_ASKPASS` があれば触らない（環境の尊重）。
+    /// env は同一プロセス共有なので、判定に使う関数の入口だけを直接確かめる。
+    #[test]
+    fn install_askpass_respects_disable_switch() {
+        // SAFETY: このテストは env を書き換える。並行実行される他テストは
+        // NECODER_ASKPASS_DISABLE を読まないので影響しない。
+        unsafe { std::env::set_var("NECODER_ASKPASS_DISABLE", "1") };
+        let mut command = Command::new("ssh");
+        install_askpass(&mut command);
+        assert!(
+            command.get_envs().next().is_none(),
+            "無効化されているときは env を足さない"
+        );
+        unsafe { std::env::remove_var("NECODER_ASKPASS_DISABLE") };
     }
 }

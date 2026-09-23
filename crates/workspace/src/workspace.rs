@@ -1191,6 +1191,11 @@ struct ChromeState {
     /// `ne` CLI から IPC（control_ipc の `open`）で届いたパス。ハンドラは Window を持たないため
     /// effect cycle 末尾で `open_external_paths`（Finder 由来と同じ入口）に流す。
     pending_external_open: Vec<PathBuf>,
+    /// SSH askpass の要求（原文プロンプト・応答の戻り口）。IPC スレッドは Window を持てないので
+    /// ここに積み、effect cycle の末尾（`process_pending_shell_effects`）で入力欄を開く。
+    pending_askpass: Option<(String, u32, std::sync::mpsc::Sender<serde_json::Value>)>,
+    /// askpass 入力欄へフォーカスを移す予約（描画を 1 フレーム挟んでから当てる・`open_askpass`）。
+    pending_askpass_focus: bool,
     /// Remote SSH の統合ターミナル内 `ne` から、open 専用 gateway 越しに届いた SSH URI。
     /// 接続を伴うので IPC ハンドラ内では始めず、effect cycle 末尾で remote 接続経路へ流す。
     pending_remote_open: Vec<String>,
@@ -1231,6 +1236,9 @@ struct WorkspaceOverlays {
     /// worktree 削除の確認ダイアログ（2026-07-27）。何を失うかを git に聞いて見せる。
     worktree_delete: Option<worktree_delete::WorktreeDeleteConfirm>,
     ssh_input: Option<(String, FocusHandle)>,
+    /// SSH の askpass 入力欄（パスワード / passphrase / host key 確認）。`ssh` が TTY を
+    /// 持たない GUI 起動でも訊けるようにするための口（`remote_ssh.rs`）。
+    askpass: Option<remote_ssh::AskpassPrompt>,
     ssh_connecting: bool,
     add_project_dialog_open: bool,
     pending_project_switch: Option<usize>,
@@ -1608,6 +1616,8 @@ impl Workspace {
             || self.chrome.pending_settings_command.is_some()
             || self.chrome.pending_open_settings_json
             || !self.chrome.pending_external_open.is_empty()
+            || self.chrome.pending_askpass.is_some()
+            || self.chrome.pending_askpass_focus
             || !self.chrome.pending_remote_open.is_empty()
             || self.pending_transient_tab.is_some()
             || self.pending_open_history
@@ -1635,6 +1645,18 @@ impl Workspace {
         if !self.chrome.pending_external_open.is_empty() {
             let paths = std::mem::take(&mut self.chrome.pending_external_open);
             self.open_external_paths(paths, window, cx);
+        }
+        // 入力欄は前フレームで描画済み = dispatch tree に居るので、ここで初めて focus が定着する。
+        if self.chrome.pending_askpass_focus {
+            self.chrome.pending_askpass_focus = false;
+            if let Some(prompt) = self.overlays.askpass.as_ref() {
+                let focus = prompt.focus.clone();
+                window.focus(&focus, cx);
+                self.ensure_askpass_caret_blink(cx);
+            }
+        }
+        if let Some((prompt, attempt, respond)) = self.chrome.pending_askpass.take() {
+            self.open_askpass(prompt, attempt, respond, cx);
         }
         if !self.chrome.pending_remote_open.is_empty() {
             let uris = std::mem::take(&mut self.chrome.pending_remote_open);
@@ -1775,6 +1797,7 @@ impl Workspace {
             || self.overlays.rail_menu.is_some()
             || self.overlays.worktree_delete.is_some()
             || self.overlays.ssh_input.is_some()
+            || self.overlays.askpass.is_some()
             || self.overlays.shortcut_sheet.is_some()
             || self.overlays.about.is_some()
             || self.search_panel.is_some()
@@ -2116,6 +2139,7 @@ impl Render for Workspace {
             .children(self.render_rename_input(cx))
             .children(self.render_inline_edit(cx))
             .children(self.render_ssh_input(cx))
+            .children(self.render_askpass(window, cx))
             .children(self.render_code_actions(cx))
             .children(self.render_shortcut_sheet(cx))
             .children(self.render_about_modal(cx))

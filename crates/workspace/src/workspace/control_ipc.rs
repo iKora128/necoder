@@ -24,6 +24,10 @@ use std::time::Duration;
 /// bind に失敗した時の再試行間隔（生きた owner が消えるのを待つ・権限などの一時障害も同じ）。
 const BIND_RETRY: Duration = Duration::from_secs(15);
 
+/// askpass（パスワード入力）を人が打ち終わるまで待つ上限。ssh 側はこの間ずっと
+/// askpass プロセスの終了を待っている＝長すぎると接続が固まったように見えるので 3 分で切る。
+const ASKPASS_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// 「この socket に今いるのは自分か」を確かめる間隔。socket ファイルが外から消された・
 /// 別プロセスに奪われた状態を**自分で**見つけて張り直すための心拍（2026-09-11）。
 const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
@@ -44,11 +48,11 @@ pub(crate) struct ControlJob {
     respond: std::sync::mpsc::Sender<serde_json::Value>,
 }
 
-fn ok(value: serde_json::Value) -> serde_json::Value {
+pub(crate) fn ok(value: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "ok": true, "result": value })
 }
 
-fn err(message: impl std::fmt::Display) -> serde_json::Value {
+pub(crate) fn err(message: impl std::fmt::Display) -> serde_json::Value {
     serde_json::json!({ "ok": false, "error": message.to_string() })
 }
 
@@ -257,6 +261,36 @@ impl Workspace {
             .unwrap_or("")
             .to_string();
         match method.as_str() {
+            // SSH の askpass（`host::install_askpass` が起こした necoder 自身からの要求）。
+            // **token を持つ子だけ**が秘密を要求できる（token は ssh の環境変数にしか無い）。
+            // 入力欄は Window が要るので、pending effect に積んで effect cycle の末尾で開く。
+            "askpass" => {
+                #[cfg(unix)]
+                {
+                    let token = params
+                        .get("token")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let prompt = params
+                        .get("prompt")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    // token の検証と「何回目の問いか」を同時に取る。2 回目以降 = 直前の入力が
+                    // 拒否されて OpenSSH が訊き直している。
+                    let Some(attempt) = host::askpass_attempt(token, &prompt) else {
+                        let _ = respond.send(err(i18n::t!("askpass.err_token")));
+                        return;
+                    };
+                    self.chrome.pending_askpass = Some((prompt, attempt, respond));
+                    cx.notify();
+                }
+                #[cfg(not(unix))]
+                {
+                    // Windows の GUI ssh は現状 askpass を使わない（WINDOWS-PORT.md §D2 の続き）。
+                    let _ = respond.send(err(i18n::t!("askpass.err_token")));
+                }
+            }
             "open" => {
                 // `ne` CLI（cli.rs）からの「このウィンドウで開いて」。絶対パス前提（絶対化は
                 // cwd を知る CLI 側の責務）。存在しないものは開かず skipped で返す＝CLI が警告する。
@@ -728,7 +762,7 @@ fn serve_connection(
     job_tx: futures::channel::mpsc::UnboundedSender<ControlJob>,
 ) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(ASKPASS_TIMEOUT));
     // 要求を読んでから同じストリームへ応答を書く（1 接続 1 往復）。以前は `try_clone` で
     // 読み口を複製していたが、名前付きパイプの複製は `DuplicateHandle` が要るうえ、
     // 読みと書きが同時に走らないこの形では不要（BufReader の中身を借りれば足りる）。
@@ -756,6 +790,7 @@ fn serve_connection(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string();
+    let is_askpass = method == "askpass";
     let params = request
         .get("params")
         .cloned()
@@ -782,7 +817,13 @@ fn serve_connection(
         return;
     }
     // spawn は worktree オープンを含む＝少し待つ（UI スレッドの 1 job・通常は瞬時）。
-    match respond_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+    // askpass だけは**人の入力**を待つので桁が違う（ssh 側も askpass の終了を待っている）。
+    let wait = if is_askpass {
+        ASKPASS_TIMEOUT
+    } else {
+        std::time::Duration::from_secs(30)
+    };
+    match respond_rx.recv_timeout(wait) {
         Ok(response) => respond_line(reader.get_mut(), response),
         Err(_) => respond_line(reader.get_mut(), err(i18n::t!("ipc.err_gui_timeout"))),
     }

@@ -3220,3 +3220,7 @@
 - #4: Windows の PATH 探索から拡張子なし候補を除外。Node 同梱の Unix 用 `npx` より `npx.cmd` を選び、Unix 用だけなら未検出にする回帰テストを追加。PATH 自体はテスト中も書き換えない。
 - #3: ターミナルの前編集と UTF-16 選択範囲を保持し、GPUI の公開 EntityInputHandler API で OS に変換中であることを返す。確定文字だけを PTY に送り、次の通常 Enter は送信する。変換取消し・サロゲートペア・PTY への送信内容をテスト。GPUI macOS の固定 revision の公開入力実装を参照し、Zed アプリケーション crate は参照していない。
 - #6: Release workflow 内で同じタグの Linux musl サーバを x86_64 / aarch64 向けにビルドし、macOS ジョブが受け取って同梱。リリースでは欠落をエラーにし、同梱した ELF を検査する。ローカル開発ビルドは従来どおり任意同梱。
+## 2026-09-23 — Captain を設定画面から任命できるようにする
+- やったこと: 設定 › AI エージェントの各行に `Captain にする` / `⚑ Captain`（押すと解任）を追加（`crates/settings/src/settings.rs` の `agents_rows` / `toggle_captain` / `next_captain_value` + test 2 本）。未任命の Captain 行 / ⌘0 は設定の AI エージェントページを開く（`fleet_sidebar.rs` の `focus_captain` → `show_agents_page`）。`captain.appoint` の文言を行き先の名前に変更。ja/en 両方。FLEET-V2 §5.7・UI-SPEC §12・MANUAL を更新
+- 学び/罠: 以前は任命の UI が無く、「任命する」を押しても設定が開くだけ（行き止まり）で、settings.json の手書きが唯一の手段だった。エージェント行はボタンが 2 つになると幅が足りず「★ 既定」がカードからはみ出した → 名前の列を `flex_1().min_w_0()` で縮めて折り返し、ボタンは `flex_none` にした
+- 次: プロジェクト設定（`.necoder/settings.json`）で `captain_agent` を上書きしていると、UI で user 側を変えても効かない。必要ならその旨を行に出す

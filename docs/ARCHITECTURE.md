@@ -346,6 +346,10 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   会話は `session/load`（エージェントが `loadSession` を広告するとき・id は `storage.thread_sessions`）で引き継ぐ。
   LSP/PTY の同種の再 spawn は未着手（ROADMAP M9 残件）。
 - SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。
+  GUI 起動の ssh には TTY が無いので、パスワード / passphrase / host key 確認だけは
+  `SSH_ASKPASS` に necoder 自身を指して入力欄へ中継する（`host::install_askpass` →
+  `control_ipc` の `askpass` → `remote_ssh::AskpassPrompt`）。秘密を要求できるのは
+  その ssh のために発行した token を持つ子プロセスだけで、秘密は保存しない。
 - server は単一 static binary、client と protocol/version を handshake、daemon + proxy で再接続可能にする。
 - wire は length-prefixed typed header + raw body。初版は request id/capability/frame limit を持ち、
   stream/event/cancel は watch・PTY の protocol 化と同時に追加する。

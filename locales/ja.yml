@@ -241,7 +241,7 @@ captain:
   human_gate: "采配のみ · 統合と承認は人間が操作"
   ledger_event: "台帳イベント"
   title: Captain
-  appoint: Captain を任命する — settings.json の captain_agent
+  appoint: Captain を任命する（設定 › AI エージェント）
   prompt: |
     あなたは necoder 編隊の Captain（采配役）です。
     役割: 状況を読み、次の采配を決めて fleet CLI で指示する。
@@ -415,6 +415,8 @@ settings:
   login_status_unknown: ログイン状態は CLI で確認
   make_default: 既定にする
   is_default: ★ 既定
+  make_captain: Captain にする
+  is_captain: ⚑ Captain
   login: ログイン
   open_cli: CLI を開く
   install: 導入
@@ -751,6 +753,13 @@ ssh:
   reconnect_now: 再接続
   connect_now: 接続
   reconnecting: "%{host} へ再接続中…"
+askpass:
+  hint: Enter で送信・Escape で取り消し（入力内容は保存されません）
+  hint_click: 入力欄をクリックしてから入力してください
+  retry: "入力が拒否されました（%{attempt} 回目）"
+  cancelled: 入力が取り消されました
+  err_busy: 別の SSH 入力を待っています
+  err_token: この askpass 要求には有効な token がありません
 goto:
   placeholder: 行番号…
 hotexit:

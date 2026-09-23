@@ -240,7 +240,7 @@ captain:
   human_gate: "Coordination only · Integration and approvals require a human"
   ledger_event: "Ledger event"
   title: Captain
-  appoint: appoint a Captain — captain_agent in settings.json
+  appoint: Appoint a Captain (Settings › AI Agents)
   prompt: |
     You are the Captain of the necoder fleet.
     Role: read the situation, decide the next move, and direct the fleet through the fleet CLI.
@@ -414,6 +414,8 @@ settings:
   login_status_unknown: Check login status in the CLI
   make_default: Set as default
   is_default: ★ Default
+  make_captain: Make Captain
+  is_captain: ⚑ Captain
   login: Log in
   open_cli: Open CLI
   install: Install
@@ -750,6 +752,13 @@ ssh:
   reconnect_now: Reconnect
   connect_now: Connect
   reconnecting: "Reconnecting to %{host}…"
+askpass:
+  hint: Enter to send, Escape to cancel (nothing is stored)
+  hint_click: Click the field to start typing
+  retry: "Authentication failed (attempt %{attempt})"
+  cancelled: Input cancelled
+  err_busy: Another SSH prompt is waiting
+  err_token: This askpass request has no valid token
 goto:
   placeholder: Line number…
 hotexit:
