@@ -10,6 +10,8 @@ pub(crate) struct NewTaskDialog {
     root: Option<PathBuf>,
     /// `.necoder/worktree-setup.sh` があるか（開いた時点・「作る」で true に）。
     setup_script_present: bool,
+    /// 開く直前にフォーカスがあった場所。取り消し（Esc / キャンセル）でそこへ返す。
+    previous_focus: Option<FocusHandle>,
 }
 
 impl Workspace {
@@ -26,13 +28,36 @@ impl Workspace {
             if matches!(event, ComposerEvent::Submit) { this.submit_new_task(cx); }
             cx.notify();
         }).detach();
+        let previous_focus = window.focused(cx);
         window.focus(&editor.read(cx).focus_handle(cx), cx);
         let integration = self.integration_index_for_active_repository().map(|index| &self.project_sessions.projects[index].worktree);
         let root = integration.map(|worktree| worktree.root().to_path_buf());
         let setup_script_present = integration.is_some_and(|worktree| {
             worktree.host().metadata(&project::worktree_setup_script(worktree.root())).is_ok()
         });
-        self.chrome.new_task = Some(NewTaskDialog { editor, root, setup_script_present });
+        self.chrome.new_task = Some(NewTaskDialog { editor, root, setup_script_present, previous_focus });
+        cx.notify();
+    }
+
+    /// テスト用: ＋ Task の入力欄にフォーカスがあるか（ダイアログが無ければ false）。
+    #[cfg(test)]
+    pub(crate) fn new_task_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.chrome.new_task.as_ref().is_some_and(|dialog| dialog.editor.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// 取り消し（Esc / キャンセル）。開く前にいた場所へフォーカスを返す（返さないと
+    /// focus-lost 復帰がエディタ等へ落とし、押す前に居たサイドバーから外れる）。
+    /// テスト用: ＋ Task の入力欄の中身（ダイアログが無ければ None）。
+    #[cfg(test)]
+    pub(crate) fn new_task_input_text(&self, cx: &App) -> Option<String> {
+        self.chrome.new_task.as_ref().map(|dialog| dialog.editor.read(cx).plain_text())
+    }
+
+    fn cancel_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.chrome.new_task.take() else { return; };
+        if let Some(previous) = dialog.previous_focus {
+            window.focus(&previous, cx);
+        }
         cx.notify();
     }
 
@@ -75,7 +100,7 @@ impl Workspace {
         let prompt = dialog.editor.read(cx).plain_text();
         let slug = project::task_slug(&prompt);
         let worktree = dialog.root.as_deref().and_then(project::task_worktree_dir).map(|dir| dir.join(&slug));
-        let mut body = div().id("new-task-dialog").w(px(600.)).max_w_full().p(px(20.)).flex().flex_col().gap(px(12.)).rounded(px(10.)).bg(self.theme.bg0).border_1().border_color(self.theme.border)
+        let mut body = div().id("new-task-dialog").debug_selector(|| "new-task-dialog".to_string()).w(px(600.)).max_w_full().p(px(20.)).flex().flex_col().gap(px(12.)).rounded(px(10.)).bg(self.theme.bg0).border_1().border_color(self.theme.border)
             .child(div().text_size(px(16.)).text_color(self.theme.fg0).child(i18n::t!("fleet.new_task")))
             .child(div().text_size(px(11.)).text_color(self.theme.fg2).child(i18n::t!("fleet.new_task_hint")))
             .child(div().h(px(150.)).border_1().border_color(self.theme.border).child(dialog.editor.clone()));
@@ -91,13 +116,21 @@ impl Workspace {
                     .child(div().text_color(if dialog.setup_script_present { self.theme.fg1 } else { self.theme.fg2 }).child(SharedString::from(i18n::t!(setup_key))))
                     .when(!dialog.setup_script_present, |row| row.child(
                         div().id("new-task-setup-create").cursor_pointer().text_color(self.accent()).child(i18n::t!("fleet.new_task_setup_create"))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.create_setup_script(window, cx))))));
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.create_setup_script(window, cx) })))));
         }
         body = body.child(div().flex().justify_end().gap(px(10.))
             .child(div().id("new-task-cancel").cursor_pointer().text_color(self.theme.fg2).child(i18n::t!("fleet.new_task_cancel"))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.chrome.new_task = None; cx.notify(); })))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.cancel_new_task(window, cx); })))
             .child(div().id("new-task-submit").cursor_pointer().text_color(self.theme.fg0).child(i18n::t!("fleet.new_task_start"))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.submit_new_task(cx)))));
-        Some(div().absolute().inset_0().flex().items_center().justify_center().bg(gpui::rgba(0x00000088)).child(body).into_any_element())
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.submit_new_task(cx) }))));
+        // 入力欄の外（余白・ラベル）を押しても入力欄へ戻す（ボタンは各自 stop_propagation で除外）。背面は `occlude` でクリックを通さない
+        // ＝ダイアログ越しに裏のサイドバーや composer がフォーカスを取らない。
+        let focus = dialog.editor.read(cx).focus_handle(cx);
+        body = body
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| window.focus(&focus, cx))
+            // Esc = 取り消し（UI-SPEC §7 のオーバーレイ共通）。入力欄は複数選択を畳む時以外
+            // `editor::Cancel` を親へ流すので、ここで受ける。
+            .on_action(cx.listener(|this, _: &editor_view::Cancel, window, cx| this.cancel_new_task(window, cx)));
+        Some(div().absolute().inset_0().occlude().flex().items_center().justify_center().bg(gpui::rgba(0x00000088)).child(body).into_any_element())
     }
 }
