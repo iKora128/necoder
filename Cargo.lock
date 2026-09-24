@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "acp_client"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "agent_panel"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "acp_client",
  "anyhow",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "chat_core"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "acp_client",
  "base64",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "cli_shim"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
 ]
@@ -1891,7 +1891,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "editor_core"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "host",
@@ -1900,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "editor_view"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "editor_core",
  "gpui",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "explorer"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "gpui",
  "project",
@@ -2543,7 +2543,7 @@ checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
 name = "git_ui"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "gpui",
  "project",
@@ -3082,7 +3082,7 @@ dependencies = [
 
 [[package]]
 name = "host"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "ignore",
@@ -3151,7 +3151,7 @@ dependencies = [
 
 [[package]]
 name = "i18n"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "serde_yaml",
  "sys-locale",
@@ -3609,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "keymap_core"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3668,7 +3668,7 @@ dependencies = [
 
 [[package]]
 name = "lang"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "futures",
@@ -3994,7 +3994,7 @@ dependencies = [
 
 [[package]]
 name = "markdown"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "pulldown-cmark",
 ]
@@ -4238,7 +4238,7 @@ dependencies = [
 
 [[package]]
 name = "necoder"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "cli_shim",
@@ -4947,7 +4947,7 @@ dependencies = [
 
 [[package]]
 name = "paths"
-version = "0.1.19"
+version = "0.1.20"
 
 [[package]]
 name = "pbkdf2"
@@ -5269,7 +5269,7 @@ dependencies = [
 
 [[package]]
 name = "project"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "host",
@@ -6035,7 +6035,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "search"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "host",
@@ -6044,7 +6044,7 @@ dependencies = [
 
 [[package]]
 name = "search_ui"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "gpui",
  "host",
@@ -6260,7 +6260,7 @@ dependencies = [
 
 [[package]]
 name = "settings"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "acp_client",
  "anyhow",
@@ -6275,7 +6275,7 @@ dependencies = [
 
 [[package]]
 name = "settings_core"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "paths",
@@ -6564,7 +6564,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "storage"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "futures",
@@ -7105,7 +7105,7 @@ dependencies = [
 
 [[package]]
 name = "terminal_view"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "alacritty_terminal",
  "futures",
@@ -7119,7 +7119,7 @@ dependencies = [
 
 [[package]]
 name = "theme_core"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "gpui",
@@ -7871,7 +7871,7 @@ dependencies = [
 
 [[package]]
 name = "ui"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "gpui",
  "theme_core",
@@ -8347,7 +8347,7 @@ dependencies = [
 
 [[package]]
 name = "webview_view"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "gpui",
  "i18n",
@@ -9153,7 +9153,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "workspace"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "acp_client",
  "agent_panel",
