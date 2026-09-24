@@ -3215,6 +3215,11 @@
 - 学び/罠: レール ↑/↓ の連打は「**その session の初回表示**」でだけ止まる。タブ復元は 1 枚ごとに `open_loaded_file` が `window.focus(エディタ)` し、最後の `select_tab` は rendered_html なら OS の first responder まで WebView に渡す。後者まで行くと素の ↑/↓ は WKWebView のスクロールに食われて GPUI に上がって来ない（⌘付きのショートカットだけ効く）ので、GPUI のフォーカスを戻すだけでは足りない。
 - 次: 同じ形（描画/復元がフォーカスを奪う）が Fleet の初回表示側にも無いか、報告が出たら見る。
 
+
+## 2026-09-23 — コミュニティ報告の Windows・IME・Linux 配布を修正
+- #4: Windows の PATH 探索から拡張子なし候補を除外。Node 同梱の Unix 用 `npx` より `npx.cmd` を選び、Unix 用だけなら未検出にする回帰テストを追加。PATH 自体はテスト中も書き換えない。
+- #3: ターミナルの前編集と UTF-16 選択範囲を保持し、GPUI の公開 EntityInputHandler API で OS に変換中であることを返す。確定文字だけを PTY に送り、次の通常 Enter は送信する。変換取消し・サロゲートペア・PTY への送信内容をテスト。GPUI macOS の固定 revision の公開入力実装を参照し、Zed アプリケーション crate は参照していない。
+- #6: Release workflow 内で同じタグの Linux musl サーバを x86_64 / aarch64 向けにビルドし、macOS ジョブが受け取って同梱。リリースでは欠落をエラーにし、同梱した ELF を検査する。ローカル開発ビルドは従来どおり任意同梱。
 ## 2026-09-23 — Fleet の ＋ Task をクリックすると入力できないのを直した
 - やったこと: サイドバーの ＋ Task の mouse-down で `cx.stop_propagation()`（`fleet_sidebar.rs`）。＋ Task ダイアログの背面を `occlude()` にし、入力欄の外を押しても入力欄へフォーカスを戻す（ボタン 3 つは各自 stop_propagation・`new_task_dialog.rs`）。回帰テスト `clicking_add_task_leaves_the_dialog_input_focused`（実際に ＋ Task をクリック → 入力欄にフォーカス。修正を外すと落ちることを確認）
 - 学び/罠: ボタンのハンドラで入力欄へ `window.focus` しても、**親の mouse-down が同じクリックの泡立ちで後から走り**、親の `control_focus` へ奪い返していた（泡立ちは子 → 親の順）。⌘N（action）では親の mouse-down が走らないので打てる＝「入力できないことがある」の正体。親の `track_focus` の既定のフォーカス移動は `prevent_default` で止まるが、この親は明示の `on_mouse_down(window.focus(..))` も持つので `stop_propagation` が要る。背面に `occlude` が無いと、ダイアログの余白クリックも裏の要素へ届いてフォーカスを取られる
@@ -3225,3 +3230,5 @@
 - やったこと: 設定 › AI エージェントの各行に `Captain にする` / `⚑ Captain`（押すと解任）を追加（`crates/settings/src/settings.rs` の `agents_rows` / `toggle_captain` / `next_captain_value` + test 2 本）。未任命の Captain 行 / ⌘0 は設定の AI エージェントページを開く（`fleet_sidebar.rs` の `focus_captain` → `show_agents_page`）。`captain.appoint` の文言を行き先の名前に変更。ja/en 両方。FLEET-V2 §5.7・UI-SPEC §12・MANUAL を更新
 - 学び/罠: 以前は任命の UI が無く、「任命する」を押しても設定が開くだけ（行き止まり）で、settings.json の手書きが唯一の手段だった。エージェント行はボタンが 2 つになると幅が足りず「★ 既定」がカードからはみ出した → 名前の列を `flex_1().min_w_0()` で縮めて折り返し、ボタンは `flex_none` にした
 - 次: プロジェクト設定（`.necoder/settings.json`）で `captain_agent` を上書きしていると、UI で user 側を変えても効かない。必要ならその旨を行に出す
+
+- PR #5 取り込み後の補足: 同一フレームに届く askpass 要求は先の要求を維持し、後の要求へ busy を返す（回帰テスト追加）。秘密入力のキー伝播も止める。#7 が指摘した README のテーマ選択キーを直し、#8 の project 設定優先をマニュアルへ追記。

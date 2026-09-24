@@ -70,7 +70,7 @@ Something broke? In-app **Help → Report a Bug** pre-fills an issue. Logs live 
 | `⇧⌘A` | New AI thread (needs `claude` CLI) |
 | `⌘J` | Integrated terminal |
 | `⇧⌘F` | Project-wide search |
-| `⌘⇧T` | Theme selector (live preview) |
+| `⌘K ⌘T` | Theme selector (live preview) |
 
 ## Build from source
 
@@ -188,7 +188,7 @@ AI 機能には [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) �
 | `⇧⌘A` | 新しい AI スレッド(`claude` CLI が必要) |
 | `⌘J` | 統合ターミナル |
 | `⇧⌘F` | プロジェクト全体検索 |
-| `⌘⇧T` | テーマセレクタ(ライブプレビュー) |
+| `⌘K ⌘T` | テーマセレクタ(ライブプレビュー) |
 
 ## ソースからビルド
 

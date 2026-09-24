@@ -434,6 +434,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // パスワード欄の文字や Enter を背後のキー処理へ流さない。
+        cx.stop_propagation();
         match event.keystroke.key.as_str() {
             "escape" => self.close_askpass(window, cx),
             "enter" => {

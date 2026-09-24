@@ -327,6 +327,8 @@ Captain は、目標を Task に分解して起動・レビューまで采配す
 任命中の行は `⚑ Captain` と表示され、もう一度押すと解任する。Fleet サイドバーの「Captain を任命する」を押してもこのページが開く。
 未任命でも Fleet は使える（settings.json の `captain_agent` に直接書いても同じ）。
 
+このボタンが更新するのはユーザー設定。プロジェクトの `.necoder/settings.json` に `captain_agent` がある場合はそちらが優先されるため、その設定を編集・削除して変更する。
+
 ### Task の片付け（⋯ メニュー）
 
 下の段ほど残るものが減る。
