@@ -5095,6 +5095,11 @@ PYEOF"#;
 
     /// prompt テキストをアクティブスレッドへ積み、常駐 ACP セッションへ送る（composer 非依存）。
     /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
+    /// 名前でスレッドの位置を引く（作らない・アクティブ化しない）。
+    pub fn thread_index_named(&self, name: &str) -> Option<usize> {
+        self.threads.iter().position(|thread| thread.name.as_ref() == name)
+    }
+
     pub fn set_prompt_context(&mut self, thread: usize, context: String) {
         if let Some(thread) = self.threads.get(thread) {
             self.prompt_context.insert(thread.id.to_string(), context);
@@ -5131,9 +5136,13 @@ PYEOF"#;
                     .collect()
             })
             .unwrap_or_default();
+        // slash コマンド（`/clear` `/compact` 等）は先頭が `/` でないとエージェントが認識しない。
+        // スレッドの context（Captain の役割・現況表）は付けずにそのまま送る。
+        let is_slash_command = prompt.starts_with('/');
         if let Some(context) = self
             .threads
             .get(thread_index)
+            .filter(|_| !is_slash_command)
             .and_then(|thread| self.prompt_context.get(thread.id.as_str()))
         {
             context_prefix.push_str(context);
@@ -11529,6 +11538,32 @@ PYEOF"#;
             assert!(thread.running, "running のまま");
             panel.remove_queued_prompt(0, cx);
             assert!(panel.threads[active].queued_prompts.is_empty());
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// スレッドの context（Captain の役割・現況表）は普通の発話には前置するが、slash コマンドには
+    /// 付けない。前置すると先頭が `/` でなくなり、`/clear` がただの文としてエージェントに届く。
+    #[gpui::test]
+    fn prompt_context_is_not_prepended_to_slash_commands(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "prompt_context_slash");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.dest_cwd = Some(std::env::temp_dir());
+            panel.set_prompt_context(active, "ROLE\n".to_string());
+            let mut sent = |panel: &mut AgentPanel, prompt: &str, cx: &mut Context<AgentPanel>| {
+                panel.send_prompt_text(prompt.to_string(), cx);
+                panel.threads[active].running = false;
+                match command_rx.try_recv() {
+                    Ok(SessionCommand::Prompt(text)) => text,
+                    other => panic!("prompt が送られていない: {other:?}"),
+                }
+            };
+            assert_eq!(sent(panel, "目標", cx), "ROLE\n\n目標");
+            assert_eq!(sent(panel, "/clear", cx), "/clear");
         });
         let _ = std::fs::remove_file(settings_path);
     }

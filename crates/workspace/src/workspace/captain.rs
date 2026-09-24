@@ -56,30 +56,27 @@ impl Workspace {
             return;
         };
         let panel = session.fleet_agents[0].clone();
-        let exe = std::env::current_exe()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "necoder".to_string());
         let digest_line = digest
             .as_ref()
             .map(|digest| format!(" — {digest}"))
             .unwrap_or_default();
-        // 役割・規律・道具のテンプレート + 変化分の digest（フル transcript は渡さない＝3 段圧縮）。
-        let prompt = i18n::t!(
-            "captain.prompt",
+        // 変化分の digest だけ（フル transcript は渡さない＝3 段圧縮）。役割と現況は prompt context 側。
+        let event_line = i18n::t!(
+            "captain.event",
             "event" => event,
             "title" => &title,
             "digest" => digest_line,
-            "exe" => exe,
         );
         let names = captain_thread_names();
         let index = panel.update(cx, |panel, cx| panel.ensure_named_thread(&captain_thread_name(), &names, &agent, cx));
         if panel.read(cx).thread_busy(index) { return; }
         let events = self.chrome.captain_pending.remove(&repository).unwrap_or_default();
         if events.is_empty() { return; }
-        let facts = self.captain_facts(&repository, cx);
+        let context = self.captain_context(&repository, cx);
         panel.update(cx, |panel, cx| {
+            panel.set_prompt_context(index, context);
             panel.focus_thread(index, cx);
-            panel.send_ledger_event(format!("{prompt}\n{facts}\n{}", events.join("\n")), cx);
+            panel.send_ledger_event(format!("{event_line}\n{}", events.join("\n")), cx);
         });
         cx.notify();
     }
@@ -152,6 +149,36 @@ impl Workspace {
 }
 
 impl Workspace {
+    /// Captain スレッドの prompt context（役割・規律・道具 + 現況表）。台帳イベントだけでなく
+    /// **人間が Captain に直接書いた発話にも**前置される（§5.3「発話 + 現況」）。これが無いと
+    /// 人間から始めた Captain は自分の役割を知らず、普通のエージェントとして手を動かしてしまう。
+    pub(super) fn captain_context(&self, repository: &str, cx: &App) -> String {
+        let exe = std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "necoder".to_string());
+        let role = i18n::t!("captain.role", "exe" => exe);
+        let facts = self.captain_facts(repository, cx);
+        format!("{role}\n{}\n{facts}\n", i18n::t!("captain.facts"))
+    }
+
+    /// 人間が Captain に書いた後、次のターン用に現況を差し替える（⌘0 で開いた時点の表のままにしない）。
+    pub(super) fn refresh_captain_context(
+        &self,
+        session_index: usize,
+        panel: &Entity<AgentPanel>,
+        thread: &SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.project_sessions.projects.get(session_index) else { return; };
+        if !slot.task_space.is_integration() { return; }
+        let context = self.captain_context(slot.repository_key(), cx);
+        panel.update(cx, |panel, _| {
+            if let Some(index) = panel.thread_index_named(thread) {
+                panel.set_prompt_context(index, context);
+            }
+        });
+    }
+
     pub(super) fn captain_facts(&self, repository: &str, cx: &App) -> String {
         self.project_sessions.projects.iter().enumerate()
             .filter(|(_, slot)| slot.repository_key() == repository && !slot.task_space.is_integration())
@@ -218,5 +245,19 @@ impl Workspace {
             .child(div().px(px(12.)).py(px(8.)).text_size(px(13.)).text_color(self.theme.fg0).child(SharedString::from(format!("⚑ Captain · {}", self.project_sessions.projects[index].branch.as_deref().unwrap_or("")))))
             .child(div().px(px(12.)).pb(px(8.)).text_size(px(10.)).text_color(self.theme.fg2).child(i18n::t!("captain.human_gate")))
             .child(tabs).child(div().flex_1().min_h_0().child(body)).into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Captain が Task を切れないと、目標を渡されても自分で手を動かすしかない。
+    /// 役割プロンプトの道具一覧に `fleet create` があることを全ロケールで守る。
+    #[test]
+    fn role_prompt_lists_task_creation_in_every_locale() {
+        for locale in i18n::available_locales() {
+            let role = i18n::translate_in(locale, "captain.role")
+                .unwrap_or_else(|| panic!("captain.role missing in {locale}"));
+            assert!(role.contains("fleet create"), "{locale}: {role}");
+        }
     }
 }

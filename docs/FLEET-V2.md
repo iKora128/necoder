@@ -345,7 +345,7 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 `fleet.new_task_setup_found/missing/create` `fleet.new_task_more` `fleet.new_task_existing_branch` `fleet.new_task_same_worktree`
 `fleet.new_task_start` `fleet.setup_failed`
 `captain.title` `captain.row_sub` `captain.appoint` `captain.phase` `captain.tab_log` `captain.tab_tasks`
-`captain.dest` `captain.pill_scope` `captain.prompt` `captain.recommend` `captain.spawned_by` `captain.human_send`
+`captain.dest` `captain.pill_scope` `captain.role` `captain.facts` `captain.event` `captain.recommend` `captain.spawned_by` `captain.human_send`
 既存の `control.*` は要対応カードで使うものだけ `fleet.*` に移し、残りは削除。`coordinator_*` は `captain_*` に改名。
 
 ## 9. 既存コードとの対応
@@ -383,6 +383,9 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 
 F0 で追加した i18n キーは `captain.title`（Captain バーの見出し・ニュースの帰属名・**Captain スレッドの表示名**を兼ねる）/
 `captain.appoint`（未任命の行）/ `captain.prompt`（wake テンプレート）の 3 つ。§8 の残りは使う面（F1/F6）と同時に足す。
+*2026-09-24 訂正*: `captain.prompt` は `captain.role`（役割・規律・道具）/ `captain.facts`（現況表の見出し）/ `captain.event`（wake のイベント行）に分割。
+役割 + 現況は Captain スレッドの prompt context として**人間の発話にも**前置する（§5.3「発話 + 現況」。以前は wake にしか付かず、
+人間から始めた Captain が役割を知らずに自分で作業していた）。道具一覧に `fleet create` を追加（無いと Task を切れない）。
 実装は `/goal` の規律（現在地把握 → 1 歩 → 検証 → 文書）で進める。ドッグフーディング中はスクショを回さず本人目視。
 
 ## 11. 今回確定した判断（DECISIONS に転記済み）
