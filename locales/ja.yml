@@ -278,7 +278,7 @@ fleet:
   new_task_hint: "何をしますか？ 複数のTaskに分けるならCaptainへ（⌘0）"
   new_task_cancel: "キャンセル"
   new_task_start: "Taskを起動 ⌘↵"
-  stage_columns: "{count} 列"
+  stage_columns: "%{count} 列"
   tab_diff: "変更"
   tab_terminal: "ターミナル"
   tab_files: "ファイル"

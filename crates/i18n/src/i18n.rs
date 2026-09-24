@@ -218,6 +218,38 @@ mod tests {
         );
     }
 
+    /// 差し替えの綴りは `%{名前}` だけ。`%` を落とした `{名前}` は UI にそのまま出てしまい、
+    /// キーの一致しか見ない parity テストをすり抜けるので、値の書き方として弾く。
+    #[test]
+    fn placeholders_are_written_with_percent() {
+        for (locale, text) in [
+            ("ja.yml", include_str!("../../../locales/ja.yml")),
+            ("en.yml", include_str!("../../../locales/en.yml")),
+        ] {
+            let map = parse_locale(text).expect("解析できる");
+            for (key, value) in &map {
+                let bytes: Vec<char> = value.chars().collect();
+                for (index, character) in bytes.iter().enumerate() {
+                    if *character != '{' || (index > 0 && bytes[index - 1] == '%') {
+                        continue;
+                    }
+                    let name: String = bytes[index + 1..]
+                        .iter()
+                        .take_while(|candidate| **candidate != '}')
+                        .collect();
+                    assert!(
+                        name.is_empty()
+                            || !name
+                                .chars()
+                                .all(|candidate| candidate.is_ascii_lowercase()
+                                    || candidate == '_'),
+                        "{locale} の {key} が `{{{name}}}` を書いている（`%{{{name}}}` が正しい綴り）"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn nested_keys_flatten_to_dotted() {
         let text = "explorer:\n  context:\n    open: ひらく\n";

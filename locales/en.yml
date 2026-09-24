@@ -277,7 +277,7 @@ fleet:
   new_task_hint: "What should be done? For multiple tasks, ask Captain (⌘0)."
   new_task_cancel: "Cancel"
   new_task_start: "Start Task ⌘↵"
-  stage_columns: "{count} columns"
+  stage_columns: "%{count} columns"
   tab_diff: "Changes"
   tab_terminal: "Terminal"
   tab_files: "Files"
