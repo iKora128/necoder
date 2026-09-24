@@ -3232,3 +3232,8 @@
 - 次: プロジェクト設定（`.necoder/settings.json`）で `captain_agent` を上書きしていると、UI で user 側を変えても効かない。必要ならその旨を行に出す
 
 - PR #5 取り込み後の補足: 同一フレームに届く askpass 要求は先の要求を維持し、後の要求へ busy を返す（回帰テスト追加）。秘密入力のキー伝播も止める。#7 が指摘した README のテーマ選択キーを直し、#8 の project 設定優先をマニュアルへ追記。
+
+## 2026-09-24 — Captain が人間の指示で自分で作業してしまう問題
+- やったこと: `captain.prompt` を `captain.role` / `captain.facts` / `captain.event` に分割。役割 + 現況表（`captain_context`）を Captain スレッドの prompt context に入れ、⌘0 で開いた時・wake の時・人間が Captain に書いた後に差し替える。wake 本文はイベント行 + 溜めたイベントだけ。道具一覧に `fleet create . <title>` を追加。回帰 test `role_prompt_lists_task_creation_in_every_locale`
+- 学び/罠: `PanelEvent::HumanSend` は送信**後**に届く（emit は遅延）ので、その発話の中身は差し替えられない。今のターンは既存の context、HumanSend で次のターン用に現況を更新する形。prompt context はメモリのみ（再起動後は ⌘0 か次の wake まで無い）。規律はプロンプトだけでツール制限は無い（案2 = Captain スレッドの編集系 permission を拒否、は未着手）。prompt context を前置すると slash コマンド（`/clear` `/compact`）の先頭が `/` でなくなり認識されない → `/` 始まりの発話には context を付けない（test `prompt_context_is_not_prepended_to_slash_commands`）
+- 次: 実機で「目標 1 つ → Captain が Task を切る」を確認（F6 の実 e2e）

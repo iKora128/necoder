@@ -22,6 +22,9 @@ impl Workspace {
         };
         match event {
             agent_panel::PanelEvent::HumanSend { thread, text } => {
+                if is_captain_thread_name(thread.as_ref()) {
+                    self.refresh_captain_context(session_index, &panel, thread, cx);
+                }
                 self.record_human_send(session_index, thread, text, cx);
             }
 

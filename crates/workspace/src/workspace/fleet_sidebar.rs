@@ -64,12 +64,12 @@ impl Workspace {
         };
         let panel = self.project_sessions.sessions[index].fleet_agents[0].clone();
         self.project_sessions.sessions[index].agent_panel = panel.clone();
-        let facts = self.captain_facts(&key, cx);
+        let context = self.captain_context(&key, cx);
         let names = captain::captain_thread_names();
         let thread = panel.update(cx, |panel, cx| {
             let thread =
                 panel.ensure_named_thread(&captain::captain_thread_name(), &names, &agent, cx);
-            panel.set_prompt_context(thread, facts);
+            panel.set_prompt_context(thread, context);
             panel.focus_thread(thread, cx);
             thread
         });
