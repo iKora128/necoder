@@ -1,7 +1,7 @@
 //! links — 文章の中の「パスらしきトークン」と URL を見つける（GPUI 非依存・純テキスト）。
 //!
 //! 消費側は 2 つ。**同じ規則で拾い、リンクにするかは各 view が決める**:
-//! - `terminal_view`: cargo/rustc/grep の `path:line(:col)`（行番号つきだけをリンクにする）
+//! - `terminal_view`: cargo/rustc/grep の `path:line(:col)`（行番号つきだけをリンクにする）と URL
 //! - `agent_panel`: エージェント返答の本文（プロジェクト索引で**実在解決できたものだけ**をリンクにする）
 //!
 //! ## なぜ「形」だけで決めないか（2026-09-16・実スレッド 2,734 ターンの実測）
@@ -13,6 +13,14 @@
 //!
 //! そこでこの層は**形の判定だけ**を持ち（`looks_like_path`）、実在確認は呼び出し側に委ねる。
 //! 形の段階で落とすのは「後ろが数字だけの拡張子」（= バージョン番号）と「英字を1つも含まない」もの。
+//!
+//! ## スキーム無しのローカル URL（2026-09-26）
+//!
+//! 開発サーバは `localhost:3000` / `127.0.0.1:5173` / `[::1]:8080` のように**スキームを付けずに**
+//! 待ち受け先を出すことが多い。これを `path:line` の形（`localhost` + 行 3000）と読むと、
+//! パスらしくないので捨てられてリンクにならなかった。**ホストがローカルの形（`localhost` /
+//! IPv4 / `[IPv6]`）で、ポートが付いているものだけ**を `http://` を補った URL として拾う。
+//! ポートの無い `127.0.0.1` はバージョン番号と区別できないので拾わない。
 
 use std::ops::Range;
 
@@ -54,6 +62,93 @@ fn ends_url(character: char) -> bool {
 /// 末尾の句読点はリンクに含めない（`settings.json.` の `.` や `…rs:42,` の `,`）。
 fn trim_trailing_punctuation(token: &str) -> &str {
     token.trim_end_matches(['.', ',', ';', ':', '!', '?'])
+}
+
+/// `[` から始まる IPv6 リテラル（`[::1]` / `[fe80::1%en0]`）の byte 長。形が違えば None。
+/// URL の終端文字に `]` が入っているので、ホスト部の括弧だけはここで先に読み切る。
+fn ipv6_literal_length(text: &str) -> Option<usize> {
+    let inner = text.strip_prefix('[')?;
+    let close = inner.find(']')?;
+    // `%` の後ろはゾーン ID（`en0` など英数字）。
+    let (address, zone) = inner[..close]
+        .split_once('%')
+        .unwrap_or((&inner[..close], ""));
+    let well_formed = address.contains(':')
+        && address
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() || matches!(character, ':' | '.'))
+        && zone
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric());
+    well_formed.then_some(close + 2)
+}
+
+/// `http(s)://` から始まる URL の byte 長（末尾の句読点は後で落とす）。
+fn url_length(text: &str) -> usize {
+    let mut length = text.find("://").map_or(0, |offset| offset + "://".len());
+    if let Some(literal) = ipv6_literal_length(&text[length..]) {
+        length += literal;
+    }
+    length
+        + text[length..]
+            .char_indices()
+            .find(|(_, character)| ends_url(*character))
+            .map_or(text.len() - length, |(offset, _)| offset)
+}
+
+/// 10 進の IPv4（`127.0.0.1`）の byte 長。4 組で各 0〜255 でなければ None。
+fn ipv4_length(text: &str) -> Option<usize> {
+    let mut length = 0;
+    for part in 0..4 {
+        if part > 0 {
+            if !text[length..].starts_with('.') {
+                return None;
+            }
+            length += 1;
+        }
+        let digits = text[length..]
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 || digits > 3 || text[length..length + digits].parse::<u8>().is_err() {
+            return None;
+        }
+        length += digits;
+    }
+    Some(length)
+}
+
+/// スキーム無しのローカル URL（`localhost:3000/path` / `127.0.0.1:5173` / `[::1]:8080`）の byte 長。
+/// ポート必須（無いものはバージョン番号や単語と区別できない）。末尾の句読点は含めない。
+fn local_url_length(text: &str) -> Option<usize> {
+    let host = if text.starts_with("localhost") {
+        "localhost".len()
+    } else if text.starts_with('[') {
+        ipv6_literal_length(text)?
+    } else {
+        ipv4_length(text)?
+    };
+    let rest = text[host..].strip_prefix(':')?;
+    let port_digits = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if port_digits == 0 || rest[..port_digits].parse::<u16>().is_err() {
+        return None;
+    }
+    let mut length = host + 1 + port_digits;
+    // ポートの直後が英数字なら別の語（`localhost:3000abc`）。
+    let next = text[length..].chars().next();
+    if next.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_') {
+        return None;
+    }
+    if next == Some('/') {
+        length += text[length..]
+            .char_indices()
+            .find(|(_, character)| ends_url(*character))
+            .map_or(text.len() - length, |(offset, _)| offset);
+    }
+    Some(trim_trailing_punctuation(&text[..length]).len())
 }
 
 /// ディレクトリを含まない裸のトークンを「ファイル名らしいか」で絞る。
@@ -141,6 +236,9 @@ pub fn parse_target(destination: &str) -> Option<LinkTarget> {
     if destination.starts_with("http://") || destination.starts_with("https://") {
         return Some(LinkTarget::Url(destination.to_string()));
     }
+    if local_url_length(destination) == Some(destination.len()) {
+        return Some(LinkTarget::Url(format!("http://{destination}")));
+    }
     let destination = destination.strip_prefix("file://").unwrap_or(destination);
     if destination.starts_with('#') || destination.contains("://") {
         return None; // 見出しアンカー・未対応スキーム
@@ -180,12 +278,7 @@ pub fn find_links(text: &str) -> Vec<TextLink> {
             break;
         };
         if rest.starts_with("http://") || rest.starts_with("https://") {
-            let length = rest
-                .char_indices()
-                .find(|(_, character)| ends_url(*character))
-                .map(|(offset, _)| offset)
-                .unwrap_or(rest.len());
-            let raw = &rest[..length];
+            let raw = &rest[..url_length(rest)];
             let url = trim_trailing_punctuation(raw);
             // スキームだけ（`https://`）は拾わない。
             if url.len() > "https://".len() {
@@ -194,6 +287,21 @@ pub fn find_links(text: &str) -> Vec<TextLink> {
                     target: LinkTarget::Url(url.to_string()),
                 });
                 index += raw.len().max(1);
+                continue;
+            }
+        }
+        // スキーム無しのローカル URL は語の先頭でだけ見る（`mylocalhost:3000` の途中から拾わない）。
+        let at_word_start = text[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|previous| !is_path_char(previous));
+        if at_word_start {
+            if let Some(length) = local_url_length(rest) {
+                links.push(TextLink {
+                    range: index..index + length,
+                    target: LinkTarget::Url(format!("http://{}", &rest[..length])),
+                });
+                index += length;
                 continue;
             }
         }
@@ -380,8 +488,87 @@ mod tests {
         );
     }
 
+    /// (見えている文字列, 開く URL) の組。
+    fn urls(text: &str) -> Vec<(String, String)> {
+        find_links(text)
+            .into_iter()
+            .filter_map(|link| match link.target {
+                LinkTarget::Url(url) => Some((text[link.range].to_string(), url)),
+                LinkTarget::Path { .. } => None,
+            })
+            .collect()
+    }
+
+    fn url_pair(visible: &str, url: &str) -> Vec<(String, String)> {
+        vec![(visible.to_string(), url.to_string())]
+    }
+
+    #[test]
+    fn local_dev_server_addresses_become_urls() {
+        // スキーム無しは `http://` を補う。見えている範囲（下線の位置）は元の文字列のまま。
+        assert_eq!(
+            urls("ready on localhost:3000"),
+            url_pair("localhost:3000", "http://localhost:3000")
+        );
+        assert_eq!(
+            urls("Listening on 127.0.0.1:5173."),
+            url_pair("127.0.0.1:5173", "http://127.0.0.1:5173")
+        );
+        assert_eq!(
+            urls("open [::1]:8080/app, then"),
+            url_pair("[::1]:8080/app", "http://[::1]:8080/app")
+        );
+        assert_eq!(
+            urls("  ➜  Local:   localhost:5173/"),
+            url_pair("localhost:5173/", "http://localhost:5173/")
+        );
+        // path:line と読み違えて捨てない（`localhost` + 行 3000 のパスにしない）。
+        assert!(paths("localhost:3000").is_empty());
+        assert!(paths("127.0.0.1:5173").is_empty());
+    }
+
+    #[test]
+    fn ipv6_hosts_are_not_cut_at_the_bracket() {
+        // 以前は URL の終端文字 `]` で `http://[::1` に切れていた。
+        assert_eq!(
+            urls("http://[::1]:5173/ を開く"),
+            url_pair("http://[::1]:5173/", "http://[::1]:5173/")
+        );
+        assert_eq!(
+            urls("(http://[fe80::1%en0]:8000)"),
+            url_pair("http://[fe80::1%en0]:8000", "http://[fe80::1%en0]:8000")
+        );
+        // ホスト以外の `]` は従来どおり終端（markdown の `[text](url)` の外側など）。
+        assert_eq!(
+            urls("[docs](https://necoder.com/x)"),
+            url_pair("https://necoder.com/x", "https://necoder.com/x")
+        );
+    }
+
+    #[test]
+    fn local_addresses_need_a_port_and_a_word_boundary() {
+        for noise in [
+            "localhost",
+            "127.0.0.1 と 10.0.0.1",
+            "mylocalhost:3000",
+            "localhost:99999",
+            "localhost:3000abc",
+            "999.0.0.1:80",
+            "1.2.3:80",
+        ] {
+            assert!(urls(noise).is_empty(), "URL と誤認した: {noise}");
+        }
+        // 既存の path:line は壊れない。
+        assert_eq!(paths("src/main.rs:10:5")[0].1, Some(10));
+        assert_eq!(paths("localhost.rs:12")[0].0, "localhost.rs");
+    }
+
     #[test]
     fn markdown_destinations_are_parsed() {
+        assert_eq!(
+            parse_target("localhost:3000"),
+            Some(LinkTarget::Url("http://localhost:3000".into()))
+        );
         // 実測で最多だった Claude の引用形式。
         assert_eq!(
             parse_target("/Users/me/work/crates/acp_client/src/acp_client.rs:361"),
