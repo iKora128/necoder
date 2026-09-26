@@ -63,12 +63,18 @@ pub enum WebViewEvent {
 /// WebView を持たない OS（Linux）では積む側が居ない。
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 enum NativeEvent {
-    PageLoad { url: String, finished: bool },
+    PageLoad {
+        url: String,
+        finished: bool,
+    },
     Title(String),
     /// 最上位の読み込みの失敗（macOS の navigation delegate だけが積む。WebView2 は自前のエラーページ）。
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     LoadFailed(String),
-    Message { sender: String, body: String },
+    Message {
+        sender: String,
+        body: String,
+    },
 }
 
 /// Web タブだけが持つ状態。WebView を持たない OS（Linux）では生成に使う欄が読まれない。
