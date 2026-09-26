@@ -44,6 +44,14 @@ impl AgentAlert {
     }
 }
 
+/// その窓を見ているか = アプリの前面の窓がこの窓で、**かつ** OS がこの窓をキー窓にしている。
+/// macOS の前面の窓（GPUI の `active_window` = `NSApp.mainWindow`）は、アプリを隠した・他のアプリへ
+/// 移った時に空になるとは限らない（Apple の文書は「nil のこともある」止まり）。キー窓はその時に
+/// 必ず外れるので両方を見る＝「隠して動かし続ける」の間も通知が出る（R15）。
+pub(crate) fn looking_at_window(front_window: bool, key_window: bool) -> bool {
+    front_window && key_window
+}
+
 /// OS 通知を出すか: 設定で有効・スレッドがミュートでない・**その窓を見ていない**
 /// （窓が非アクティブ、またはアプリが隠れている / 前面に居ない）。
 pub(crate) fn should_post_system_notification(
@@ -91,8 +99,9 @@ pub fn install_agent_notifications(cx: &mut App) {
 }
 
 /// 通知を押した: アプリを前へ出し、その窓のそのスレッドへ飛ぶ。窓やスレッドが既に無ければ
-/// 前へ出すだけ。
+/// 前へ出すだけ。「隠して動かし続ける」（O4）で隠していた時は、先に隠れた状態を解く。
 fn open_notified_thread(tag: &SharedString, cx: &mut App) {
+    unhide_app();
     cx.activate(true);
     let target = cx
         .try_global::<SystemNotificationTargets>()
@@ -109,12 +118,37 @@ fn open_notified_thread(tag: &SharedString, cx: &mut App) {
     }
 }
 
+/// 隠れたアプリを戻す（macOS）。GPUI の `activate` は `activateIgnoringOtherApps:` だけで、隠れた
+/// アプリの窓が戻る保証が無いので `unhide:` を先に呼ぶ。隠れていなければ何もしない。
+#[cfg(target_os = "macos")]
+fn unhide_app() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    // 通知の応答は GPUI の前景＝メインスレッドで届く。万一それ以外から来たら AppKit に触らない。
+    let Some(main_thread) = MainThreadMarker::new() else {
+        eprintln!("隠れたアプリはメインスレッドからしか戻せない（今回は見送り）");
+        return;
+    };
+    let application = NSApplication::sharedApplication(main_thread);
+    if application.isHidden() {
+        application.unhide(None);
+    }
+}
+
+/// hide が無い OS（Windows / Linux の「動かし続ける」は最小化）では、窓の `activate_window` が
+/// 最小化を戻す。
+#[cfg(not(target_os = "macos"))]
+fn unhide_app() {}
+
 impl Workspace {
     /// いまこの窓を見ているか（アプリが前面で、この窓がキー窓）。隠している・他のアプリ・別の窓を
-    /// 見ている時は false。
+    /// 見ている時は false（[`looking_at_window`]）。
     pub(crate) fn is_looking_at_this_window(&self, cx: &App) -> bool {
-        self.window_handle
-            .is_some_and(|handle| cx.active_window() == Some(handle))
+        let front_window = self
+            .window_handle
+            .is_some_and(|handle| cx.active_window() == Some(handle));
+        looking_at_window(front_window, self.window_active)
     }
 
     /// エージェントの出来事を OS の通知センターへ出す（出すかどうかは
@@ -215,6 +249,18 @@ mod tests {
         );
     }
 
+    /// 前面の窓の記録が残っていても、キー窓でなければ（隠している・他のアプリ）見ていない扱い。
+    #[test]
+    fn a_hidden_or_background_window_is_not_being_looked_at() {
+        assert!(looking_at_window(true, true));
+        assert!(
+            !looking_at_window(true, false),
+            "隠している間も mainWindow が残る場合"
+        );
+        assert!(!looking_at_window(false, true), "別の窓が前");
+        assert!(!looking_at_window(false, false));
+    }
+
     #[test]
     fn a_muted_thread_or_the_setting_turns_it_off() {
         assert!(
@@ -225,6 +271,111 @@ mod tests {
             !should_post_system_notification(false, false, false),
             "設定で切った"
         );
+    }
+
+    /// R15: 「隠して動かし続ける」の後（窓がキー窓でない）に承認待ちになったら OS の通知が出て、
+    /// 押すとその窓のそのスレッドへ戻れる（前面にしていたのとは別のスレッドでも）。見ている間は
+    /// 出さない（トーストで足りる）。通知で前に戻った瞬間の処理（O21 の worktree の読み直し）も
+    /// 取り逃さない（キー窓を render より先に写しても）。
+    #[gpui::test]
+    fn a_hidden_window_still_notifies_and_the_notification_leads_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_system_notifications_{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の残りを消せる");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("一時フォルダを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("書ける");
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            // テストの OS も、身元（mac の bundle ID 相当）が無ければ通知を出さない（本番の `.app` と同じ）。
+            cx.set_app_identity("dev.necoder.test", "necoder");
+            install_agent_notifications(cx);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        let panel = workspace.read_with(cx, |workspace, _| {
+            workspace.project_sessions.sessions[0].agent_panel.clone()
+        });
+        // スレッドを 2 本にして、前面は 1 本目に戻しておく（知らせは 2 本目から来る）。
+        panel.update(cx, |panel, cx| {
+            panel.new_thread(cx);
+            panel.focus_thread(0, cx);
+        });
+        let thread_id = panel
+            .read_with(cx, |panel, _| panel.thread_id(1))
+            .expect("2 本目のスレッド");
+        let permission_waiting = |cx: &mut gpui::VisualTestContext| {
+            panel.update(cx, |_, cx| {
+                cx.emit(agent_panel::PanelEvent::PermissionWaiting {
+                    thread: "スレッド2".into(),
+                    thread_id: thread_id.clone(),
+                    thread_index: 1,
+                    color: gpui::hsla(0., 0., 0.5, 1.),
+                    title: "main.rs への書き込み".into(),
+                    muted: false,
+                })
+            });
+            cx.run_until_parked();
+        };
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |workspace, cx| workspace.is_looking_at_this_window(cx)));
+        permission_waiting(cx);
+        assert!(
+            cx.shown_system_notifications().is_empty(),
+            "見ている間はトーストで足りる"
+        );
+
+        // 隠す（アプリが前面でなくなり、窓はキー窓でなくなる）。
+        cx.deactivate_window();
+        assert!(!workspace.read_with(cx, |workspace, cx| workspace.is_looking_at_this_window(cx)));
+        permission_waiting(cx);
+        let shown = cx.shown_system_notifications();
+        assert_eq!(shown.len(), 1, "隠している間も通知が出る");
+        assert_eq!(shown[0].tag, notification_tag(&thread_id));
+
+        // 隠している間に読んであった worktree の一覧（O21）。前に戻ったら読み直す＝古い扱いになる。
+        workspace.update(cx, |workspace, _| {
+            workspace
+                .chrome
+                .fleet_worktrees
+                .insert("test-repository".into(), Some(Vec::new()));
+        });
+        cx.simulate_system_notification_response(gpui::SystemNotificationResponse {
+            tag: shown[0].tag.clone(),
+            action_id: None,
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.active_thread()),
+            1,
+            "押すと、知らせてきたスレッドへ戻る"
+        );
+        assert!(workspace.read_with(cx, |workspace, cx| workspace.is_looking_at_this_window(cx)));
+        assert!(
+            workspace.read_with(cx, |workspace, _| !workspace
+                .chrome
+                .fleet_worktrees
+                .contains_key("test-repository")),
+            "前に戻った瞬間に worktree の一覧を古い扱いにする（O21）"
+        );
+        if let Err(error) = std::fs::remove_dir_all(&root) {
+            eprintln!("一時フォルダを消せない: {error}");
+        }
     }
 
     #[test]
