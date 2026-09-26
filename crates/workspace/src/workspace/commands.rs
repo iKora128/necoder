@@ -243,6 +243,10 @@ impl CommandRegistry {
                 action_name: "workspace::TestSshConnection",
             },
             CommandEntry {
+                label_key: "cmd.register_ssh",
+                action_name: "workspace::RegisterSshHost",
+            },
+            CommandEntry {
                 label_key: "cmd.thread_history",
                 action_name: "workspace::ThreadHistory",
             },

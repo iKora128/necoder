@@ -101,6 +101,14 @@ impl Workspace {
             PickerItem::new(recent_count + hosts.len(), i18n::t!("ssh.manual_entry"))
                 .with_detail("ssh://user@host/path"),
         );
+        // その下に「＋ 接続先を登録…」（~/.ssh/config に Host を足す・O37・G01）。
+        items.push(
+            PickerItem::new(
+                recent_count + hosts.len() + 1,
+                i18n::t!("ssh.register_entry"),
+            )
+            .with_detail("~/.ssh/config"),
+        );
         self.picker_ssh_recent = recent_uris;
         self.picker_ssh_hosts = hosts;
         self.open_picker(
@@ -807,6 +815,17 @@ mod tests {
             let picker = workspace.overlays.picker.clone().expect("ピッカー");
             workspace.on_picker_event(&picker, &PickerEvent::Confirmed(manual), window, cx);
             assert!(workspace.overlays.ssh_input.is_some(), "手入力は入力バー");
+
+            // その下の「＋ 接続先を登録…」は登録のダイアログ（O37・G01）。
+            workspace.open_ssh_host_picker(&RemoteSsh, window, cx);
+            let register = workspace.picker_ssh_recent.len() + workspace.picker_ssh_hosts.len() + 1;
+            let picker = workspace.overlays.picker.clone().expect("ピッカー");
+            workspace.on_picker_event(&picker, &PickerEvent::Confirmed(register), window, cx);
+            assert!(
+                workspace.chrome.ssh_registering.is_some(),
+                "登録のダイアログ"
+            );
+            workspace.cancel_ssh_register(cx);
         });
         workspace.update(cx, |workspace, _cx| {
             for session in workspace.project_sessions.sessions.iter_mut() {

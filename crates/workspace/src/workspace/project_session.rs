@@ -906,6 +906,7 @@ impl Workspace {
                 pending_shell_picker: false,
                 statusbar_menu: None,
                 task_details: None,
+                ssh_registering: None,
                 auto_branches: HashMap::new(),
             },
             overlays: WorkspaceOverlays {
