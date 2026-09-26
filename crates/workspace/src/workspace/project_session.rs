@@ -829,6 +829,7 @@ impl Workspace {
                 explorer_width: DOCK_WIDTH,
                 resizing_explorer: false,
                 explorer_scroll: gpui::UniformListScrollHandle::new(),
+                explorer_focus: cx.focus_handle(),
                 should_move_window: false,
                 rail_drag: None,
                 rail_focus: cx.focus_handle(),

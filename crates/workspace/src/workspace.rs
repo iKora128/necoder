@@ -216,6 +216,8 @@ actions!(
         // Chat モード（`docs/CHAT.md`）。プロジェクトに紐づかない会話の面。
         ToggleChat,
         NewChat,
+        // エクスプローラのファイル操作を 1 手戻す（⌘Z・Explorer コンテキストだけ・H30）。
+        UndoFileOperation,
     ]
 );
 
@@ -1209,6 +1211,10 @@ struct ChromeState {
     /// エクスプローラのツリー（仮想化した `uniform_list`）のスクロール。命名の入力行を
     /// 見える位置へ寄せるのに使う（見えない行は描かれない＝入力が見えなくなるため）。
     explorer_scroll: gpui::UniformListScrollHandle,
+    /// エクスプローラのフォーカス（`explorer_view.rs` の root div が `track_focus` で載せる）。
+    /// ここにある間だけ ⌘Z がファイル操作の取り消しになる（keymap の `Explorer` コンテキスト・H30）。
+    /// エディタにフォーカスがある時の ⌘Z は従来どおりエディタの undo。
+    explorer_focus: FocusHandle,
     should_move_window: bool,
     /// レール項目のドラッグ状態（index・押下位置・閾値超えフラグ）。窓の外で離すと
     /// 擬似 tear-off = その位置に新窓（M13。本物の tear-off は gpui 未対応・DECISIONS）。
@@ -1951,6 +1957,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(Self::open_file_finder))
+            .on_action(cx.listener(Self::undo_file_operation))
             .on_action(cx.listener(Self::open_project_switcher))
             .on_action(cx.listener(Self::open_project_search))
             .on_action(cx.listener(Self::open_buffer_search))
@@ -3655,6 +3662,118 @@ mod tests {
             }
         });
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⌘Z はエクスプローラにフォーカスがある時だけファイル操作を 1 手戻し、エディタにある時は
+    /// 従来どおりエディタの undo（H30）。名前の変更 → 取り消し・作成 → 取り消しを一時ディレクトリで。
+    #[gpui::test]
+    fn explorer_cmd_z_undoes_file_operations_only_with_explorer_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_explorer_undo_keys_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("一時プロジェクト");
+        std::fs::write(project.join("a.txt"), "a\n").expect("a.txt");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        };
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        draw(cx);
+
+        // 名前の変更（インライン命名の確定まで本物の経路）: a.txt → b.txt。
+        let name_it = |workspace: &Entity<Workspace>,
+                       kind: NamingKind,
+                       base: PathBuf,
+                       is_dir: bool,
+                       name: &'static str,
+                       cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.start_naming(kind, base, is_dir, window, cx);
+                workspace.explorer.update(cx, |explorer, cx| {
+                    explorer.update_naming(|naming| naming.value = name.to_string(), cx)
+                });
+                workspace.confirm_naming(window, cx);
+            });
+        };
+        let canonical_root = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_worktree()
+                .map(|worktree| worktree.root().to_path_buf())
+                .expect("プロジェクトが開いている")
+        });
+        name_it(
+            &workspace,
+            NamingKind::Rename,
+            canonical_root.join("a.txt"),
+            false,
+            "b.txt",
+            cx,
+        );
+        draw(cx);
+        assert!(project.join("b.txt").exists() && !project.join("a.txt").exists());
+        cx.simulate_keystrokes("cmd-z");
+        assert!(
+            project.join("a.txt").exists() && !project.join("b.txt").exists(),
+            "エクスプローラにフォーカスがある ⌘Z は名前の変更を戻す"
+        );
+
+        // 新規ファイル → エディタで開く（フォーカスはエディタ）。
+        name_it(
+            &workspace,
+            NamingKind::NewFile,
+            canonical_root.clone(),
+            true,
+            "c.txt",
+            cx,
+        );
+        draw(cx);
+        assert!(project.join("c.txt").exists());
+        cx.simulate_keystrokes("cmd-z");
+        assert!(
+            project.join("c.txt").exists(),
+            "エディタにフォーカスがある ⌘Z はエディタの undo（ファイルは消さない）"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_explorer(window, cx);
+        });
+        draw(cx);
+        cx.simulate_keystrokes("cmd-z");
+        assert!(
+            !project.join("c.txt").exists(),
+            "エクスプローラへ戻ると ⌘Z は作成を取り消す"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        std::fs::remove_dir_all(&root).expect("後片付け");
     }
 
     /// F0.5 入口: titlebar の `Editor | Fleet` セグメントが ⌘⇧M と同じ 1 本の道（`ToggleFleet`）で

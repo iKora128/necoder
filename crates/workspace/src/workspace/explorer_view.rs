@@ -19,6 +19,12 @@ impl Workspace {
             ExplorerView::Icons => self.render_icons(slot, cx),
         };
         div()
+            // エクスプローラを本物のキーの宛先にする（⌘Z = ファイル操作の取り消し・H30）。
+            // keymap の `Explorer` コンテキストはここにフォーカスがある時だけ効くので、
+            // エディタの ⌘Z（editor::Undo）とはぶつからない。
+            .key_context("Explorer")
+            .track_focus(&self.chrome.explorer_focus)
+            .on_key_down(cx.listener(Self::on_explorer_key_down))
             .w(px(self.chrome.explorer_width))
             .h_full()
             .flex_none()
@@ -29,9 +35,18 @@ impl Workspace {
             .border_r_1()
             .border_color(theme.border)
             // エクスプローラを触った → ⌘W の宛先はエディタタブ（Agent 判定を下げる）。
+            // 押したらフォーカスもエクスプローラへ（ファイル行はこの後の click でエディタへ移る）。
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, _cx| this.agent_active = false),
+                cx.listener(|this, _, window, cx| {
+                    this.agent_active = false;
+                    this.focus_explorer(window, cx);
+                }),
+            )
+            // 右クリックも同じ（メニューから「ゴミ箱に入れる」→ ⌘Z で戻せるように）。
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| this.focus_explorer(window, cx)),
             )
             .child(self.render_explorer_header(slot, cx))
             .child(body)

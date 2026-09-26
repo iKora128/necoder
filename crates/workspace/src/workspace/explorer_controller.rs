@@ -1,4 +1,5 @@
 use crate::workspace::*;
+use project::file_operations::{FileOperation, UndoError};
 
 impl Workspace {
     pub(crate) fn explorer_mode(&self, cx: &App) -> ExplorerView {
@@ -11,6 +12,121 @@ impl Workspace {
 
     pub(crate) fn explorer_context_menu(&self, cx: &App) -> Option<ExplorerContextMenu> {
         self.explorer.read(cx).context_menu()
+    }
+
+    /// フォーカスをエクスプローラへ（⌘Z をファイル操作の取り消しにする・H30）。命名の入力中は
+    /// 入力欄から奪わない（打ちかけの名前へのキーが消える）。
+    pub(crate) fn focus_explorer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.explorer_naming(cx).is_some() {
+            return;
+        }
+        let handle = self.chrome.explorer_focus.clone();
+        window.focus(&handle, cx);
+    }
+
+    /// エクスプローラにフォーカスがある間のキー。Escape で作業面へ戻る（レールと同じ抜け口）。
+    pub(crate) fn on_explorer_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key != "escape" || event.keystroke.modifiers.modified() {
+            return;
+        }
+        if self.explorer_naming(cx).is_some() || self.explorer_context_menu(cx).is_some() {
+            return; // 命名とメニューは自分の Escape で閉じる
+        }
+        self.focus_session_surface(false, false, window, cx);
+        cx.stop_propagation();
+    }
+
+    /// 1 回のユーザー操作ぶんのファイル操作を、アクティブ project の取り消し履歴へ積む。
+    pub(crate) fn record_file_operations(&mut self, operations: Vec<FileOperation>) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
+            slot.explorer.history.record(operations);
+        }
+    }
+
+    /// ⌘Z（エクスプローラにフォーカスがある時だけ・H30）: 直前のファイル操作を 1 手戻す。
+    /// 戻せない時（ゴミ箱に無い・戻し先に同名がある 等）は理由をトーストで出す。
+    pub(crate) fn undo_file_operation(
+        &mut self,
+        _: &UndoFileOperation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 命名の入力中は何もしない（打ちかけの名前の裏でファイルが動くと驚く）。
+        if self.explorer_naming(cx).is_some() {
+            return;
+        }
+        let active = self.project_sessions.active;
+        let Some(step) = self
+            .project_sessions
+            .slot_mut(active)
+            .and_then(|slot| slot.explorer.history.pop())
+        else {
+            self.push_toast(
+                SharedString::from(i18n::t!("explorer.undo_empty")),
+                self.accent(),
+                cx,
+            );
+            return;
+        };
+        // 戻すと消える・動くパス（作ったもの・動かした先）。開いているタブは先に閉じる
+        // （旧パスへの保存でファイルが復活しないように・名前の変更と同じ流儀）。ただし未保存の
+        // 変更があれば戻さない（取り消し 1 回で打った内容を失わせない）。
+        let vanishing: Vec<PathBuf> = step
+            .iter()
+            .filter_map(|operation| match operation {
+                FileOperation::Created { path } => Some(path.clone()),
+                FileOperation::Moved { to, .. } => Some(to.clone()),
+                FileOperation::Trashed { .. } => None,
+            })
+            .collect();
+        let dirty = self.tabs.iter().find(|tab| {
+            vanishing.iter().any(|path| tab.path.starts_with(path)) && tab.is_dirty(cx)
+        });
+        if let Some(tab) = dirty {
+            let message = i18n::t!("explorer.undo_dirty", "name" => file_label(&tab.path));
+            if let Some(slot) = self.project_sessions.slot_mut(active) {
+                slot.explorer.history.record(step);
+            }
+            self.push_toast(SharedString::from(message), self.accent(), cx);
+            return;
+        }
+        while let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| vanishing.iter().any(|path| tab.path.starts_with(path)))
+        {
+            self.close_tab_at(index, window, cx);
+        }
+        let result = project::file_operations::undo_file_operations_local(&step);
+        let message = match &result {
+            Ok(()) => undo_done_message(&step),
+            Err(error) => {
+                eprintln!("ファイル操作を取り消せない: {error}");
+                undo_error_message(error)
+            }
+        };
+        if result.is_ok() {
+            // 戻った先を選択しておく（ツリーのどこに戻ったかが見える）。
+            let restored = step.first().and_then(|operation| match operation {
+                FileOperation::Moved { from, .. } => Some(from.clone()),
+                FileOperation::Trashed { original, .. } => Some(original.clone()),
+                FileOperation::Created { .. } => None,
+            });
+            if let Some(slot) = self.project_sessions.slot_mut(active) {
+                slot.explorer.selected = restored;
+            }
+        }
+        self.refresh_active_explorer(cx);
+        self.refresh_git_status(cx);
+        self.push_toast(SharedString::from(message), self.accent(), cx);
+        self.focus_explorer(window, cx);
+        cx.notify();
     }
 
     pub(crate) fn toggle_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -253,8 +369,21 @@ impl Workspace {
         };
         match result {
             Ok(()) => {
+                let operation = match (naming.kind, naming.target) {
+                    (NamingKind::Rename, Some(target)) => FileOperation::Moved {
+                        from: target,
+                        to: destination.clone(),
+                    },
+                    _ => FileOperation::Created {
+                        path: destination.clone(),
+                    },
+                };
+                self.record_file_operations(vec![operation]);
                 if naming.kind == NamingKind::NewFile {
                     self.open_file(destination.clone(), window, cx);
+                } else {
+                    // 名前の変更・新規フォルダの直後に ⌘Z で戻せるよう、フォーカスはツリーに残す。
+                    self.focus_explorer(window, cx);
                 }
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.slot_mut(active) {
@@ -365,6 +494,10 @@ impl Workspace {
         }
         match project::rename_local(&source, &destination) {
             Ok(()) => {
+                self.record_file_operations(vec![FileOperation::Moved {
+                    from: source,
+                    to: destination.clone(),
+                }]);
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.slot_mut(active) {
                     slot.explorer.selected = Some(destination);
@@ -388,18 +521,25 @@ impl Workspace {
         target_dir: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let mut last_copied = None;
+        let mut copied = Vec::new();
         let mut first_error = None;
         for source in sources {
             if source.parent() == Some(target_dir.as_path()) || target_dir.starts_with(source) {
                 continue;
             }
             match project::copy_into_local(source, &target_dir) {
-                Ok(destination) => last_copied = Some(destination),
+                Ok(destination) => copied.push(destination),
                 Err(error) => first_error = first_error.or(Some(error)),
             }
         }
-        if let Some(destination) = last_copied {
+        // 1 回のドロップ = 1 手（⌘Z でまとめて戻る）。
+        self.record_file_operations(
+            copied
+                .iter()
+                .map(|path| FileOperation::Created { path: path.clone() })
+                .collect(),
+        );
+        if let Some(destination) = copied.pop() {
             let active = self.project_sessions.active;
             if let Some(slot) = self.project_sessions.slot_mut(active) {
                 slot.explorer.selected = Some(destination);
@@ -418,6 +558,7 @@ impl Workspace {
         self.hide_context_menu(cx);
         match project::duplicate_local(&path) {
             Ok(copy) => {
+                self.record_file_operations(vec![FileOperation::Created { path: copy.clone() }]);
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.slot_mut(active) {
                     slot.explorer.selected = Some(copy);
@@ -441,8 +582,13 @@ impl Workspace {
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.close_tab_at(index, window, cx);
         }
-        match project::trash_local(&path) {
-            Ok(()) => {
+        match project::move_to_trash_local(&path) {
+            Ok(trashed) => {
+                // ゴミ箱の中の場所を覚えておく（⌘Z で戻す。分からなければ戻せないと出す）。
+                self.record_file_operations(vec![FileOperation::Trashed {
+                    original: path.clone(),
+                    trashed,
+                }]);
                 let active = self.project_sessions.active;
                 if let Some(slot) = self.project_sessions.slot_mut(active) {
                     if slot.explorer.selected.as_ref() == Some(&path) {
@@ -1383,4 +1529,46 @@ impl Workspace {
     // ── オーバーレイ（Picker） ──
 
     // ⌘P ファイルファインダ。全ファイル列挙は背景（大リポジトリの walk / remote RPC で UI を止めない）。
+}
+
+/// トーストに出す名前（パスの末尾）。
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// 取り消しが済んだ時のトースト（何を戻したか）。
+fn undo_done_message(step: &[FileOperation]) -> String {
+    match step {
+        [FileOperation::Created { path }] => {
+            i18n::t!("explorer.undid_create", "name" => file_label(path))
+        }
+        [FileOperation::Moved { from, .. }] => {
+            i18n::t!("explorer.undid_move", "name" => file_label(from))
+        }
+        [FileOperation::Trashed { original, .. }] => {
+            i18n::t!("explorer.undid_trash", "name" => file_label(original))
+        }
+        _ => i18n::t!("explorer.undid_many", "n" => step.len()),
+    }
+}
+
+/// 取り消せなかった時のトースト（なぜ戻せないか）。
+fn undo_error_message(error: &UndoError) -> String {
+    match error {
+        UndoError::TrashLocationUnknown { original } => {
+            i18n::t!("explorer.undo_trash_unknown", "name" => file_label(original))
+        }
+        UndoError::MissingFromTrash { original } => {
+            i18n::t!("explorer.undo_not_in_trash", "name" => file_label(original))
+        }
+        UndoError::DestinationExists { path } => {
+            i18n::t!("explorer.undo_exists", "name" => file_label(path))
+        }
+        UndoError::SourceMissing { path } => {
+            i18n::t!("explorer.undo_missing", "name" => file_label(path))
+        }
+        UndoError::Io(error) => i18n::t!("explorer.undo_failed", "error" => format!("{error:#}")),
+    }
 }

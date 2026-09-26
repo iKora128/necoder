@@ -263,15 +263,18 @@ impl Workspace {
     /// 開発用: エクスプローラと検索の所作を offscreen で検証する（`NECODER_EXPLORER_PROBE`・
     /// `;` 区切りで順に実行・パスはプロジェクト相対）。
     ///
-    /// `expand:<dir>` = フォルダを開く / `scroll:<n>` = ツリーを n 行目へ（仮想化の確認）。
+    /// `expand:<dir>` = フォルダを開く / `scroll:<n>` = ツリーを n 行目へ（仮想化の確認）/
+    /// `rename:<path>:<新しい名前>` / `newfile:<dir>:<名前>` / `duplicate:<path>` /
+    /// `trash:<path>`（**本物のゴミ箱へ入る**。後に `undo` を続けて戻すこと）/ `undo` = ⌘Z 相当。
     #[cfg(debug_assertions)]
     pub fn debug_explorer_probe(
         &mut self,
         command: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        let (argument, value) = argument.split_once(':').unwrap_or((argument, ""));
         let Some(root) = self
             .active_worktree()
             .map(|worktree| worktree.root().to_path_buf())
@@ -296,6 +299,25 @@ impl Workspace {
                 self.chrome
                     .explorer_scroll
                     .scroll_to_item(index, gpui::ScrollStrategy::Top);
+            }
+            "rename" | "newfile" => {
+                let kind = if name == "rename" {
+                    NamingKind::Rename
+                } else {
+                    NamingKind::NewFile
+                };
+                self.start_naming(kind, target, name == "newfile", window, cx);
+                let value = value.to_string();
+                self.explorer.update(cx, |explorer, cx| {
+                    explorer.update_naming(|naming| naming.value = value, cx)
+                });
+                self.confirm_naming(window, cx);
+            }
+            "duplicate" => self.duplicate_entry(target, cx),
+            "trash" => self.trash_entry(target, window, cx),
+            "undo" => {
+                self.focus_explorer(window, cx);
+                self.undo_file_operation(&UndoFileOperation, window, cx);
             }
             other => eprintln!("EXPLORER_PROBE: 未知のコマンド {other}"),
         }

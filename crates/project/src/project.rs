@@ -4,6 +4,7 @@
 //! `.git` と gitignore 対象を除外する（ripgrep の `ignore` crate を使用）。
 //! ファイル監視・インクリメンタル更新は後続（M8/性能）で追加する。
 
+pub mod file_operations;
 pub mod todos;
 
 use anyhow::{Context as _, Result};
@@ -2057,30 +2058,86 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
 
 /// OS のゴミ箱へ入れる（macOS: `/usr/bin/trash`、無ければ Finder 経由）。完全削除はしない。
 pub fn trash_local(path: &Path) -> Result<()> {
-    anyhow::ensure!(path.exists(), "存在しない: {}", path.display());
-    if Path::new("/usr/bin/trash").exists() {
-        let status = std::process::Command::new("/usr/bin/trash")
-            .arg(path)
-            .status()
-            .context("trash コマンドの起動に失敗")?;
-        anyhow::ensure!(status.success(), "trash が失敗: {}", path.display());
-        return Ok(());
-    }
-    // フォールバック: Finder に頼む（AppleScript）。
-    let script = format!(
-        "tell application \"Finder\" to delete POSIX file \"{}\"",
+    move_to_trash_local(path).map(|_location| ())
+}
+
+/// [`trash_local`] と同じくゴミ箱へ入れ、**ゴミ箱の中での場所**を返す（⌘Z で戻すため・H30）。
+///
+/// macOS 15 からの `/usr/bin/trash` は `NSFileManager trashItemAtURL:resultingItemURL:` を呼び、
+/// `-v` を付けると標準出力へ `# Moved "<元>" to "<ゴミ箱の中>"` を書く（名前が重なると
+/// ゴミ箱側で別名になるので、場所は出力から読むしかない）。Finder 経由（それより古い macOS）は
+/// `delete` が返す項目から読む。どちらも読めなければ `None`（ゴミ箱には入ったが戻せない）。
+pub fn move_to_trash_local(path: &Path) -> Result<Option<PathBuf>> {
+    anyhow::ensure!(
+        path.symlink_metadata().is_ok(),
+        "存在しない: {}",
         path.display()
     );
-    let status = std::process::Command::new("/usr/bin/osascript")
-        .args(["-e", &script])
-        .status()
+    if Path::new("/usr/bin/trash").exists() {
+        let output = std::process::Command::new("/usr/bin/trash")
+            .arg("-v")
+            .arg(path)
+            .output()
+            .context("trash コマンドの起動に失敗")?;
+        anyhow::ensure!(output.status.success(), "trash が失敗: {}", path.display());
+        let printed = String::from_utf8_lossy(&output.stdout);
+        return Ok(parse_trash_destination(&printed, path)
+            .filter(|location| location.symlink_metadata().is_ok()));
+    }
+    // フォールバック: Finder に頼む（AppleScript）。戻り値（ゴミ箱の中の項目）のパスを出力させる。
+    // パスの取り出しに失敗しても、ゴミ箱へ入れること自体は成功として扱う（`try` で包む）。
+    let quoted = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            &format!(
+                "tell application \"Finder\" to set trashedItem to delete POSIX file \"{quoted}\""
+            ),
+            "-e",
+            "try",
+            "-e",
+            "return POSIX path of (trashedItem as alias)",
+            "-e",
+            "on error",
+            "-e",
+            "return \"\"",
+            "-e",
+            "end try",
+        ])
+        .output()
         .context("osascript の起動に失敗")?;
     anyhow::ensure!(
-        status.success(),
+        output.status.success(),
         "Finder でのゴミ箱移動が失敗: {}",
         path.display()
     );
-    Ok(())
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let location = printed.trim().trim_end_matches('/');
+    Ok((!location.is_empty())
+        .then(|| PathBuf::from(location))
+        .filter(|location| location.symlink_metadata().is_ok()))
+}
+
+/// `/usr/bin/trash -v` の出力からゴミ箱の中での場所を読む。書式は `# Moved "<元>" to "<先>"`
+/// （引用符はエスケープされない）。元のパスが分かっているので、その後ろを切り出す。
+fn parse_trash_destination(printed: &str, original: &Path) -> Option<PathBuf> {
+    let prefix = format!("# Moved \"{}\" to \"", original.display());
+    printed.lines().find_map(|line| {
+        let destination = match line.strip_prefix(prefix.as_str()) {
+            Some(rest) => rest.strip_suffix('"')?,
+            // 元の綴りが変わって出た場合（正規化など）は最後の `" to "` で切る。
+            None => line
+                .strip_prefix("# Moved \"")?
+                .rsplit_once("\" to \"")?
+                .1
+                .strip_suffix('"')?,
+        };
+        (!destination.is_empty()).then(|| PathBuf::from(destination))
+    })
 }
 
 /// Finder で対象を表示（親フォルダを開いて選択状態にする）。macOS の `open -R`。
@@ -2542,6 +2599,25 @@ mod tests {
             vec!["dir9", "dir10", "file1.rs", "file2.rs", "file10.rs"]
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trash_output_parser_reads_the_destination() {
+        let original = Path::new("/tmp/a \"quoted\" name.txt");
+        let printed = "# Moved \"/tmp/a \"quoted\" name.txt\" to \"/Users/me/.Trash/a \"quoted\" name 2.txt\"\n";
+        assert_eq!(
+            parse_trash_destination(printed, original),
+            Some(PathBuf::from("/Users/me/.Trash/a \"quoted\" name 2.txt"))
+        );
+        // 元の綴りが違って出ても最後の ` to ` で拾う。
+        assert_eq!(
+            parse_trash_destination(
+                "# Moved \"/private/tmp/b.txt\" to \"/Users/me/.Trash/b.txt\"",
+                Path::new("/tmp/b.txt")
+            ),
+            Some(PathBuf::from("/Users/me/.Trash/b.txt"))
+        );
+        assert_eq!(parse_trash_destination("", original), None);
     }
 
     #[test]

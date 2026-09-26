@@ -4,6 +4,7 @@ use gpui::{
     div, Context, EventEmitter, FocusHandle, IntoElement, Pixels, Point, Render, SharedString,
     Window,
 };
+use project::file_operations::FileOperationHistory;
 use project::{DirListings, Worktree};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -136,6 +137,8 @@ pub struct ExplorerProject {
     pub rows: Vec<TreeRow>,
     pub selected: Option<PathBuf>,
     pub current_dir: Option<PathBuf>,
+    /// このプロジェクトでのファイル操作の取り消し履歴（⌘Z・H30）。メモリだけに持つ。
+    pub history: FileOperationHistory,
     dir_listings: RefCell<DirListings>,
     /// 背景再構築の世代。古い読み取り結果が新しい状態を上書きしないための番号。
     refresh_generation: u64,
@@ -148,6 +151,7 @@ impl Default for ExplorerProject {
             rows: Vec::new(),
             selected: None,
             current_dir: None,
+            history: FileOperationHistory::default(),
             dir_listings: RefCell::new(HashMap::new()),
             refresh_generation: 0,
         }
