@@ -618,8 +618,9 @@ impl Workspace {
         .detach();
     }
 
-    /// テスト用: 出ているトースト（本文, 全文つきか）。
-    #[cfg(test)]
+    /// テスト用: 出ているトースト（本文, 全文つきか）。使うのは git のフックを走らせるテスト
+    /// （`#[cfg(unix)]`）だけなので同じ条件で置く（Windows の `-D warnings` で未使用にならない）。
+    #[cfg(all(test, unix))]
     pub(crate) fn toast_snapshot(&self) -> Vec<(String, bool)> {
         self.notifications
             .toasts
