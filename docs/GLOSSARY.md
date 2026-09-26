@@ -69,6 +69,9 @@
 | **ne コマンド**（ターミナルから開く CLI・`code`/`cursor` 相当） | `cli_shim`（シム生成）/ `necoder cli`（実体） | ne コマンド | ne command |
 | **Skill**（エージェントが読む手順書 `SKILL.md`。置き場は `~/.claude/skills`・`~/.codex/skills`・`~/.agents/skills` とプロジェクトの `.claude/skills`・`.agents/skills`） | `agent_skills`（走査・設置）/ `necoder skills`（CLI） | skill | Skill |
 | ↳ **necoder の skill**（入口だけの `SKILL.md`。使い方の本文は `ne skills get` が版に合わせて出す） | `agent_skills::stub_skill_md` / `StubState` | necoder の skill | necoder skill |
+| **Task の指し方**（CLI の `<task>`。id / `branch:` / `name:` / `active` = GUI で選択中） | `fleet::TaskSelector` / `select_task` | — | — |
+| **端末ハンドル**（`ne terminal list` が返す端末の名前 `t<番号>`。GUI を再起動すると変わる） | `terminal_handle`（control_ipc） | — | — |
+| **CLI から端末へ入力を送る**（`ne terminal send` の許可。既定 off） | `allow_terminal_send` | CLI から端末へ入力を送る | Let the CLI type into terminals |
 | **MCP サーバ**（エージェントに持たせる道具。`session/new` で渡す） | `acp_client::mcp` / `mcp_servers` | MCP サーバ | MCP server |
 | ↳ **発見**（他ツールの設定に居るサーバを一覧に載せる・既定 off） | `mcp::discover` / `McpSource` | 〈出所〉で発見 | found in 〈source〉 |
 
