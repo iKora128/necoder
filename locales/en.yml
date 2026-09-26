@@ -699,6 +699,10 @@ settings:
   font_terminal: Terminal font
   font_default: Default (bundled font)
   font_terminal_default: Default (same as the code font)
+  density_label: Row spacing
+  density_sub: Row height in the explorer, pickers, search results and the Fleet's Task list
+  density_compact: Compact
+  density_cozy: Cozy
   font_pick: Choose…
   font_reset: Use default
   font_picker_placeholder: Search fonts…

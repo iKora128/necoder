@@ -711,7 +711,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | `font_size` / `tab_size` | `13` / `4` | 文字サイズ / タブ幅 |
 | `ui_font_family` | 空 | UI の書体（空 = 同梱の IBM Plex Sans JP。入っている書体の名前を書く。設定 › 外観 の「選ぶ…」でも選べる） |
 | `code_font_family` | 空 | コードの書体（空 = 同梱の Guguru Sans Code。エディタ・差分・パス・ターミナルの既定。等幅の書体を書く） |
-| `density` | compact | 行の密度（compact / cozy）。**未実装**: 値は読むが、まだ画面に反映されない |
+| `density` | compact | 行の間隔（`compact` = 詰める / `cozy` = ゆったり）。エクスプローラ・ピッカー・検索の結果・Fleet の Task の行の高さが変わる。設定 › 外観 の「行の間隔」でも選べる |
 | `soft_wrap` | `false` | 折り返し表示 |
 | `format_on_save` | `false` | 保存時にフォーマット |
 | `preview_tabs` | `true` | エクスプローラの 1 回クリックでプレビュータブ（次の 1 回クリックで置き換わる）に開く |

@@ -1902,6 +1902,22 @@ impl SettingsView {
                 i18n::t!("settings.font_terminal_default"),
                 cx,
             ))
+            // 行の詰め具合（O27）: エクスプローラ・ピッカー・検索の結果・Fleet の Task の行の高さ。
+            .child(self.segmented_row_with(
+                "density",
+                i18n::t!("settings.density_label"),
+                Some(i18n::t!("settings.density_sub")),
+                &[
+                    ("compact", i18n::t!("settings.density_compact")),
+                    ("cozy", i18n::t!("settings.density_cozy")),
+                ],
+                match settings.density {
+                    Density::Compact => "compact",
+                    Density::Cozy => "cozy",
+                },
+                false,
+                cx,
+            ))
             .child(self.pref_row(
                 i18n::t!("settings.open_json"),
                 Some(i18n::t!("settings.open_json_sub")),

@@ -700,6 +700,10 @@ settings:
   font_terminal: ターミナルの書体
   font_default: 既定（同梱の書体）
   font_terminal_default: 既定（コードの書体に揃える）
+  density_label: 行の間隔
+  density_sub: エクスプローラ・ピッカー・検索の結果・Fleet の Task の行の高さ
+  density_compact: 詰める
+  density_cozy: ゆったり
   font_pick: 選ぶ…
   font_reset: 既定に戻す
   font_picker_placeholder: 書体を探す…
