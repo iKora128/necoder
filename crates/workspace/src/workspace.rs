@@ -190,6 +190,8 @@ actions!(
         CopyPathWithLine,
         // タブを全部閉じる（⌘K ⌘W・未保存のタブは残す・O26）。
         CloseAllTabs,
+        // アクティブなタブのピン留めを付ける / 外す（⌘K ⇧⏎・O26）。
+        TogglePinTab,
         // 開いているファイルを外部のエディタ / ターミナルで開く（パレット・O26）。
         OpenInVsCode,
         OpenInCursor,
@@ -362,6 +364,9 @@ pub(crate) struct EditorTab {
     content: TabContent,
     /// 一時タブ（diff タブ等・M11-9）。永続化・⌘⇧T 復元・LSP から除外する。
     transient: bool,
+    /// ピン留め（O26）。ピン留めしたタブは常にタブ列の左端にまとまり、まとめて閉じる操作と ⌘W では
+    /// 閉じない。窓セッション（`pinned_files`）に残る（`editor_area/pins.rs`）。
+    pinned: bool,
 }
 
 impl EditorTab {
@@ -1864,9 +1869,10 @@ impl Workspace {
             self.set_chat_mode(true, window, cx);
         }
         if std::mem::take(&mut self.pending_close_clean_tabs) {
-            // Chat: 見ているチャットが替わった。前のチャットの成果物を閉じる（未保存の編集は残す）。
+            // Chat: 見ているチャットが替わった。前のチャットの成果物を閉じる（未保存の編集と
+            // ピン留めは残す）。
             for index in (0..self.tabs.len()).rev() {
-                if !self.tabs[index].is_dirty(cx) {
+                if !self.tabs[index].is_dirty(cx) && !self.tabs[index].pinned {
                     self.close_tab_at(index, window, cx);
                 }
             }
@@ -2197,6 +2203,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_usage_limits))
             .on_action(cx.listener(Self::copy_path_with_line))
             .on_action(cx.listener(Self::close_all_tabs))
+            .on_action(cx.listener(Self::toggle_pin_active_tab))
             .on_action(cx.listener(Self::open_in_vs_code))
             .on_action(cx.listener(Self::open_in_cursor))
             .on_action(cx.listener(Self::open_in_zed))
@@ -3384,10 +3391,12 @@ mod tests {
                     RestoredTabs {
                         files: vec![a1.clone(), a2.clone(), a3.clone()],
                         active: 0,
+                        pinned: Vec::new(),
                     },
                     RestoredTabs {
                         files: vec![b1.clone(), b2.clone()],
                         active: 0,
+                        pinned: Vec::new(),
                     },
                 ],
                 window,
@@ -3465,6 +3474,7 @@ mod tests {
                 &[RestoredTabs {
                     files: files.clone(),
                     active: 0,
+                    pinned: Vec::new(),
                 }],
                 window,
                 cx,
@@ -3530,6 +3540,7 @@ mod tests {
                 &[RestoredTabs {
                     files: vec![a1.clone(), a2.clone(), a3.clone()],
                     active: 0,
+                    pinned: Vec::new(),
                 }],
                 window,
                 cx,

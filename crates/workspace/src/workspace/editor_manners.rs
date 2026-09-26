@@ -155,10 +155,13 @@ impl Workspace {
         self.close_saved_tabs(window, cx);
     }
 
-    /// 保存済みのタブを全部閉じる（タブメニュー「全部閉じる」と ⌘K ⌘W の本体）。
+    /// 保存済みのタブを全部閉じる（タブメニュー「全部閉じる」と ⌘K ⌘W の本体）。ピン留めは残す。
     pub(crate) fn close_saved_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut kept = 0;
         for index in (0..self.tabs.len()).rev() {
+            if self.tabs[index].pinned {
+                continue;
+            }
             if self.tabs[index].is_dirty(cx) {
                 kept += 1;
                 continue;

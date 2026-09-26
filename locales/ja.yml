@@ -230,6 +230,7 @@ cmd:
   usage_stats: "使用量: 統計を開く"
   copy_path_line: "編集: パス:行をコピー"
   close_all_tabs: "タブ: 全部閉じる（未保存は残す）"
+  toggle_pin_tab: "タブ: ピン留め / 外す"
   open_in_vscode: "外部: VS Code で開く"
   open_in_cursor: "外部: Cursor で開く"
   open_in_zed: "外部: Zed で開く"
@@ -703,6 +704,10 @@ dock:
   right: 右パネル（エージェント）を表示/隠す
 tabs:
   ctx_close_all: 全部閉じる（未保存は残す）
+  ctx_pin: ピン留め
+  ctx_unpin: ピン留めを外す
+  unpin_tip: ピン留めを外す  ⌘K ⇧⏎
+  pinned_kept: ピン留めしたタブは ⌘W で閉じません（ピンを押して外すか、右クリック › タブを閉じる）
   copied_path_line: "コピーしました: %{path}"
   kept_unsaved: "未保存のタブ %{count} 枚は残しました"
   external_remote: SSH 先のファイルは手元のアプリで開けません

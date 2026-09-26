@@ -24,6 +24,9 @@ pub(crate) struct PersistedProject {
     pub(crate) active_file: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) remote_uri: Option<String>,
+    /// ピン留めしたタブ（O26）。古い版は知らない欄として読み飛ばす。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pinned_files: Vec<PathBuf>,
 }
 
 /// 窓 1 つ分の payload（`window_sessions.payload` の JSON）。
@@ -56,12 +59,15 @@ pub struct SavedProject {
     pub open_files: Vec<PathBuf>,
     pub active_file: usize,
     pub remote_uri: Option<String>,
+    pub pinned_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct RestoredTabs {
     pub files: Vec<PathBuf>,
     pub active: usize,
+    /// `files` のうちピン留めしていたもの（O26）。
+    pub pinned: Vec<PathBuf>,
 }
 
 impl RestoredTabs {
@@ -69,6 +75,7 @@ impl RestoredTabs {
         Self {
             files: vec![file],
             active: 0,
+            pinned: Vec::new(),
         }
     }
 }
@@ -125,6 +132,7 @@ pub fn decode_window_session(payload: &str) -> Option<(Vec<SavedProject>, usize)
             open_files: project.open_files,
             active_file: project.active_file,
             remote_uri: project.remote_uri,
+            pinned_files: project.pinned_files,
         })
         .collect();
     Some((projects, state.active))
@@ -330,12 +338,14 @@ mod tests {
                     ],
                     active_file: 1,
                     remote_uri: None,
+                    pinned_files: vec![PathBuf::from("/tmp/one/a.rs")],
                 },
                 PersistedProject {
                     root: PathBuf::from("/tmp/remote"),
                     open_files: Vec::new(),
                     active_file: 0,
                     remote_uri: Some("ssh://host/tmp/remote".to_string()),
+                    pinned_files: Vec::new(),
                 },
             ],
             active: 1,
@@ -347,6 +357,11 @@ mod tests {
         assert_eq!(projects.len(), 2);
         assert_eq!(projects[0].open_files, state.projects[0].open_files);
         assert_eq!(projects[0].active_file, 1);
+        assert_eq!(projects[0].pinned_files, state.projects[0].pinned_files);
+        assert!(
+            !payload.contains("\"pinned_files\":[]"),
+            "ピン留めが無い時は書かない（古い版の payload と同じ形）"
+        );
         assert_eq!(
             projects[1].remote_uri.as_deref(),
             Some("ssh://host/tmp/remote")

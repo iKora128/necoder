@@ -229,6 +229,7 @@ cmd:
   usage_stats: "Usage: Open statistics"
   copy_path_line: "Edit: Copy path:line"
   close_all_tabs: "Tabs: Close all (keep unsaved)"
+  toggle_pin_tab: "Tabs: Pin / unpin"
   open_in_vscode: "External: Open in VS Code"
   open_in_cursor: "External: Open in Cursor"
   open_in_zed: "External: Open in Zed"
@@ -702,6 +703,10 @@ dock:
   right: Show/hide right panel (agent)
 tabs:
   ctx_close_all: Close all (keep unsaved)
+  ctx_pin: Pin tab
+  ctx_unpin: Unpin tab
+  unpin_tip: Unpin  ⌘K ⇧⏎
+  pinned_kept: "Pinned tabs don't close with ⌘W (click the pin to unpin, or right-click › Close tab)"
   copied_path_line: "Copied %{path}"
   kept_unsaved: "Kept %{count} unsaved tabs open"
   external_remote: Files on an SSH host cannot be opened in local apps

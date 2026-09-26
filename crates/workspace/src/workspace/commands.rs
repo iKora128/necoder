@@ -263,6 +263,10 @@ impl CommandRegistry {
                 action_name: "workspace::CloseAllTabs",
             },
             CommandEntry {
+                label_key: "cmd.toggle_pin_tab",
+                action_name: "workspace::TogglePinTab",
+            },
+            CommandEntry {
                 label_key: "cmd.open_in_vscode",
                 action_name: "workspace::OpenInVsCode",
             },
