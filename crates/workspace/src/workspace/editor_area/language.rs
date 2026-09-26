@@ -214,6 +214,8 @@ impl Workspace {
             if let Some(path) = path {
                 if self.hot_exit_versions.get(&path) != Some(&version) {
                     self.hot_exit_versions.insert(path, version);
+                    // 編集が始まったプレビュータブは普通のタブにする（O26）。
+                    self.keep_edited_preview(&editor, cx);
                     self.schedule_hot_exit_snapshot(cx);
                     // 手を止めた時の自動保存（O26・`after_delay` の時だけ予約する）。
                     self.schedule_auto_save(cx);

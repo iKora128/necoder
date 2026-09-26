@@ -37,6 +37,8 @@ impl Workspace {
         let pinned_count = self.pinned_tab_count();
         let pin = !tab.pinned;
         self.tabs[index].pinned = pin;
+        // 留めたタブはプレビューでもなくなる（置き換えられて消えない）。
+        self.tabs[index].preview = false;
         let target = if pin {
             pinned_count
         } else {

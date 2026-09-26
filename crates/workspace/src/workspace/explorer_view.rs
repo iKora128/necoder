@@ -394,11 +394,16 @@ impl Workspace {
                 // click（押して離す）で開く/開閉。on_mouse_down だと D&D の**つかんだ瞬間**にも
                 // 発火してしまう（Finder 風移動の癖になる）。gpui はドラッグが成立（2px）すると
                 // クリック合成を破棄するので、on_click ならドラッグ時に誤発火しない。
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     if is_dir {
                         this.toggle_dir(path.clone(), cx);
                     } else {
-                        this.open_file(path.clone(), window, cx);
+                        // 1 回クリック = プレビュータブ・ダブルクリック = 普通のタブ（O26）。
+                        if event.click_count() >= 2 {
+                            this.open_file(path.clone(), window, cx);
+                        } else {
+                            this.open_file_preview(path.clone(), window, cx);
+                        }
                         // フォーカスはエディタへ（エクスプローラ枠の click で取り返さない）。
                         cx.stop_propagation();
                     }
@@ -503,11 +508,14 @@ impl Workspace {
                             .child(SharedString::from(entry.name.clone())),
                     )
                     // click で開く/中に入る（on_click = ドラッグ成立時は発火しない・ツリーと同じ理由）。
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         if is_dir {
                             this.enter_dir(path.clone(), cx);
-                        } else {
+                        } else if event.click_count() >= 2 {
                             this.open_file(path.clone(), window, cx);
+                            cx.stop_propagation(); // フォーカスはエディタへ
+                        } else {
+                            this.open_file_preview(path.clone(), window, cx);
                             cx.stop_propagation(); // フォーカスはエディタへ
                         }
                     }))
@@ -649,11 +657,14 @@ impl Workspace {
                                     })
                                     // click で開く/中に入る（on_click = ドラッグ成立時は発火しない・ツリーと同じ理由）。
                                     .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
+                                        move |this, event: &ClickEvent, window, cx| {
                                             if is_dir {
                                                 this.enter_dir(path.clone(), cx);
-                                            } else {
+                                            } else if event.click_count() >= 2 {
                                                 this.open_file(path.clone(), window, cx);
+                                                cx.stop_propagation(); // フォーカスはエディタへ
+                                            } else {
+                                                this.open_file_preview(path.clone(), window, cx);
                                                 cx.stop_propagation(); // フォーカスはエディタへ
                                             }
                                         },

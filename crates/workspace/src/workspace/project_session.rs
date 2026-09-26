@@ -1299,6 +1299,7 @@ impl Workspace {
             },
             transient: true,
             pinned: false,
+            preview: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();

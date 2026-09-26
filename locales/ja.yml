@@ -507,6 +507,8 @@ settings:
   pref_soft_wrap_sub: ⌥Z で一時トグルもできます
   pref_format_on_save: 保存時にフォーマット
   pref_format_on_save_sub: 対応言語のみ・⌘S で整形→保存
+  pref_preview_tabs: プレビュータブ
+  pref_preview_tabs_sub: エクスプローラで 1 回クリックしたファイルは、次にクリックしたファイルで置き換わるタブ（名前が斜体）で開きます。編集するか、ダブルクリックで普通のタブになります
   pref_auto_save: 自動保存
   pref_auto_save_sub: 他のタブ・パネル・アプリへ移った時に保存します。「手を止めた時」は打つのを 1 秒止めた時にも保存します（自動保存ではフォーマットしません）
   auto_save_off: しない
