@@ -278,6 +278,10 @@ impl CommandRegistry {
                 label_key: "cmd.open_in_terminal",
                 action_name: "workspace::OpenInTerminal",
             },
+            CommandEntry {
+                label_key: "cmd.show_ports",
+                action_name: "workspace::ShowPorts",
+            },
         ]
     }
 

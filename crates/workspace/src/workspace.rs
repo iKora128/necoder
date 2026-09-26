@@ -88,6 +88,7 @@ mod system_notifications;
 mod usage_view;
 mod worktree_delete;
 mod editor_manners;
+mod ports;
 pub use control_ipc::control_socket_path;
 pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
@@ -192,6 +193,8 @@ actions!(
         OpenInCursor,
         OpenInZed,
         OpenInTerminal,
+        // necoder の中で動いている開発サーバのポート（開く / 止める・O5）。
+        ShowPorts,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
         Hide,
         HideOthers,
@@ -1369,6 +1372,8 @@ struct WorkspaceOverlays {
     about: Option<FocusHandle>,
     /// 使用量のポップオーバー（statusbar のチップから・O11）。
     usage_popover: Option<usage_view::UsagePopoverState>,
+    /// Ports（O5・開いている間だけ Some）。
+    ports: Option<ports::PortsState>,
     /// 使用量の統計の画面（パレット「使用量: 統計を開く」・O11）。
     usage_stats: Option<usage_view::UsageStatsState>,
     /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
@@ -1973,6 +1978,7 @@ impl Workspace {
             || self.overlays.shortcut_sheet.is_some()
             || self.overlays.about.is_some()
             || self.overlays.usage_popover.is_some()
+            || self.overlays.ports.is_some()
             || self.overlays.usage_stats.is_some()
             || self.search_panel.is_some()
             || self.buffer_search.is_some()
@@ -2182,6 +2188,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_in_cursor))
             .on_action(cx.listener(Self::open_in_zed))
             .on_action(cx.listener(Self::open_in_terminal))
+            .on_action(cx.listener(Self::show_ports))
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
@@ -2351,6 +2358,7 @@ impl Render for Workspace {
             .children(self.render_shortcut_sheet(cx))
             .children(self.render_about_modal(cx))
             .children(self.render_usage_popover(cx))
+            .children(self.render_ports(cx))
             .children(self.render_usage_stats(cx))
             .children(self.render_new_task_dialog(cx))
             .children(self.render_hunk_menu(cx))
