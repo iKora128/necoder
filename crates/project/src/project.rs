@@ -3760,6 +3760,9 @@ mod tests {
     }
 
     /// O20: 準備スクリプトは今回だけ飛ばせる。失敗した準備は直してからやり直せる。
+    /// 準備スクリプトは POSIX shell で流す物なので unix だけ（Windows のローカルは
+    /// `has_posix_shell` が false で、流さずに「shell が要る」を返す）。
+    #[cfg(unix)]
     #[test]
     fn setup_can_be_skipped_and_retried() {
         let base = scratch("setup_retry");
