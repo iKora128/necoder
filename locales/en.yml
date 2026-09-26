@@ -112,6 +112,7 @@ agent:
   elicitation_decline: Decline
   elicitation_custom_single: Type your own answer (or a note on the option you pick)
   elicitation_custom_multi: Type your own answer (added to your picks)
+  subagent_steps: "Subagent · %{count} steps"
   code_show_more: "… show %{n} more lines"
   code_collapse: Collapse code
   code_streaming_more: "… streaming (%{n} lines)"

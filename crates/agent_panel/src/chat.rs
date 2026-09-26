@@ -651,6 +651,7 @@ impl AgentPanel {
                 old_text: old_text.map(str::to_string),
                 new_text: new_text.to_string(),
             }],
+            parent: None,
         };
         let Some(thread) = self.threads.get_mut(active) else {
             return;
