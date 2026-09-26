@@ -258,6 +258,16 @@ pub struct Settings {
     /// 普通に消え、自分で選んだスリープとノートの蓋を閉じた時のスリープは止めない。
     /// 解釈は [`Settings::keep_awake_mode`]（知らない値は止める側に倒す）。
     pub keep_awake: String,
+    /// ターミナルの文字の大きさ（pt・既定 12.5 = エディタより少し小さい・O25）。範囲の外は 8〜32 に丸める。
+    /// 変えると開いている端末もその場で描き直す（行と列は測り直してシェルへ伝わる）。
+    pub terminal_font_size: f32,
+    /// ターミナルのフォント（空 = エディタと同じコードフォント・O25）。等幅のフォントの名前を書く。
+    pub terminal_font_family: String,
+    /// ターミナルで遡れる行数（既定 10,000・上限 100,000・O25）。減らすと古い行から捨てる。
+    pub terminal_scrollback: u64,
+    /// ターミナルのカーソルの形（`"block"` 既定 / `"bar"` / `"underline"`・O25）。vim やシェルの設定が
+    /// 形を指定すればそちらが勝つ（ここはその既定）。知らない値は `"block"`。
+    pub terminal_cursor: String,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
@@ -325,6 +335,10 @@ impl Default for Settings {
             confirm_worktree_delete: true,
             confirm_quit: "running".to_string(),
             keep_awake: "working".to_string(),
+            terminal_font_size: 12.5,
+            terminal_font_family: String::new(),
+            terminal_scrollback: 10_000,
+            terminal_cursor: "block".to_string(),
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
             agent_idle_stop_minutes: 15,
@@ -426,6 +440,10 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "confirm_worktree_delete": true,
   "confirm_quit": "running",
   "keep_awake": "working",
+  "terminal_font_size": 12.5,
+  "terminal_font_family": "",
+  "terminal_scrollback": 10000,
+  "terminal_cursor": "block",
   "agent_servers": {},
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
@@ -998,6 +1016,32 @@ mod tests {
             SettingsStore::from_json_layers(&[DEFAULT_SETTINGS_JSON, r#"{ "keep_awake": "of" }"#])
                 .expect("マージできる");
         assert_eq!(typo.settings().keep_awake_mode(), KeepAwake::WhileWorking);
+    }
+
+    /// O25: ターミナルの見た目は既定で設定を持つ前と同じ（12.5pt・1 万行・ブロック）。書けば上書き。
+    #[test]
+    fn terminal_appearance_defaults_to_the_old_look_and_overrides() {
+        let defaults = SettingsStore::default();
+        let settings = defaults.settings();
+        assert_eq!(settings.terminal_font_size, 12.5);
+        assert_eq!(settings.terminal_font_family, "");
+        assert_eq!(settings.terminal_scrollback, 10_000);
+        assert_eq!(settings.terminal_cursor, "block");
+        assert_eq!(
+            *settings,
+            Settings::default(),
+            "既定の JSON と型の既定が同じ"
+        );
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{ "terminal_font_size": 15, "terminal_font_family": "Menlo", "terminal_scrollback": 50000, "terminal_cursor": "bar" }"#,
+        ])
+        .expect("マージできる");
+        let settings = store.settings();
+        assert_eq!(settings.terminal_font_size, 15.0, "整数で書いても読める");
+        assert_eq!(settings.terminal_font_family, "Menlo");
+        assert_eq!(settings.terminal_scrollback, 50_000);
+        assert_eq!(settings.terminal_cursor, "bar");
     }
 
     #[test]

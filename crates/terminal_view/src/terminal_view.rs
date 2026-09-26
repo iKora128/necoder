@@ -7,12 +7,14 @@
 //! - 通常キーは `on_key_down`、IME は `EntityInputHandler`。前編集は保持し、確定文字だけ PTY へ送る。
 //! - 公開 `alacritty_terminal` API と GPUI API を使った necoder 固有の実装。Zed の terminal code は取り込まない。
 
+mod appearance;
 mod dock;
 mod element;
 mod keys;
 mod mouse;
 mod pty_guard;
 mod search;
+pub use appearance::{TerminalAppearance, TerminalCursor};
 pub use dock::{TerminalDock, TerminalDockEvent, TerminalLaunch};
 
 /// 端末のアクション。keymap の `Terminal` コンテキストから引く（`keymap_core` の既定の末尾）。
@@ -197,10 +199,6 @@ fn detect_links(cells: &[RenderCell], hyperlinks: &[String]) -> Vec<TerminalLink
     links
 }
 
-/// ターミナルのセル寸法。フォントメトリクスと矛盾しないよう prepaint で決める。
-const FONT_SIZE: f32 = 12.5;
-const LINE_HEIGHT: f32 = 17.0;
-
 /// 行列サイズ（alacritty の [`Dimensions`] を満たす）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct TerminalSize {
@@ -258,11 +256,13 @@ fn sanitize_title(title: &str) -> String {
         .to_string()
 }
 
-/// 端末の設定。scrollback 1 万行・kitty keyboard を受け付ける・OSC 52 は書き込み（コピー）だけ
-/// 許す（読み出しはクリップボードの中身をアプリへ渡すことになるので既定で拒否）。
-fn terminal_config() -> Config {
+/// 端末の設定。scrollback とカーソルの既定は見た目の設定（O25・既定 1 万行・ブロック）から。
+/// kitty keyboard を受け付ける・OSC 52 は書き込み（コピー）だけ許す（読み出しはクリップボードの
+/// 中身をアプリへ渡すことになるので既定で拒否）。
+fn terminal_config(appearance: &TerminalAppearance) -> Config {
     Config {
-        scrolling_history: 10_000,
+        scrolling_history: appearance.scrollback,
+        default_cursor_style: appearance.cursor_style(),
         kitty_keyboard: true,
         osc52: Osc52::OnlyCopy,
         ..Config::default()
@@ -423,6 +423,9 @@ pub struct TerminalView {
     reported_focus: Option<bool>,
     /// フォーカスと窓のアクティブの出入りの購読（最初の描画で張る）。
     focus_subscriptions: Vec<gpui::Subscription>,
+    /// 見た目の設定（O25・文字の大きさ・フォント・scrollback・カーソル）。global が変わったら入れ直す。
+    appearance: TerminalAppearance,
+    _appearance_observer: gpui::Subscription,
     /// ドラッグ選択中の最新ポインタ位置とフレーム座標。ビュー外へ引っ張った時の
     /// 自動スクロール tick が選択の引き直しに使う（up で消える）。
     drag_frame: Option<DragFrame>,
@@ -506,8 +509,9 @@ impl TerminalView {
             columns: 80,
             lines: 24,
         };
+        let appearance = TerminalAppearance::current(cx);
         let term = Arc::new(FairMutex::new(Term::new(
-            terminal_config(),
+            terminal_config(&appearance),
             &size,
             listener.clone(),
         )));
@@ -602,6 +606,8 @@ impl TerminalView {
             grid_frame: None,
             reported_focus: None,
             focus_subscriptions: Vec::new(),
+            appearance,
+            _appearance_observer: cx.observe_global::<TerminalAppearance>(Self::apply_appearance),
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
@@ -629,8 +635,9 @@ impl TerminalView {
             columns: 80,
             lines: 24,
         };
+        let appearance = TerminalAppearance::current(cx);
         let term = Arc::new(FairMutex::new(Term::new(
-            terminal_config(),
+            terminal_config(&appearance),
             &size,
             listener,
         )));
@@ -657,6 +664,8 @@ impl TerminalView {
             grid_frame: None,
             reported_focus: None,
             focus_subscriptions: Vec::new(),
+            appearance,
+            _appearance_observer: cx.observe_global::<TerminalAppearance>(Self::apply_appearance),
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
@@ -705,6 +714,28 @@ impl TerminalView {
     pub fn set_accent(&mut self, accent: Hsla, cx: &mut Context<Self>) {
         self.accent = accent;
         cx.notify();
+    }
+
+    /// 見た目の設定が変わった（O25）: 文字の大きさとフォントは次の描画から（行列は prepaint で
+    /// 測り直して PTY へ伝わる）。scrollback とカーソルの既定は term に入れ直す（遡れる行を減らした
+    /// 時は古い方から捨てる）。
+    fn apply_appearance(&mut self, cx: &mut Context<Self>) {
+        let next = TerminalAppearance::current(cx);
+        if next == self.appearance {
+            return;
+        }
+        if next.scrollback != self.appearance.scrollback || next.cursor != self.appearance.cursor {
+            self.term.lock().set_options(terminal_config(&next));
+        }
+        self.appearance = next;
+        cx.notify();
+    }
+
+    /// いまの見た目（テスト用）。
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn debug_appearance(&self) -> &TerminalAppearance {
+        &self.appearance
     }
 
     /// 端末内検索のバーが開いているか。
@@ -1093,8 +1124,9 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let delta_y = f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y);
-        let (lines, remainder) = wheel_lines(self.scroll_remainder, delta_y, LINE_HEIGHT);
+        let line_height = self.appearance.line_height();
+        let delta_y = f32::from(event.delta.pixel_delta(px(line_height)).y);
+        let (lines, remainder) = wheel_lines(self.scroll_remainder, delta_y, line_height);
         self.scroll_remainder = remainder;
         if lines == 0 {
             return;
@@ -1792,15 +1824,22 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // IME 候補ウィンドウの位置 = カーソルセルの位置（セル幅は概算で十分）。
+        // IME 候補ウィンドウの位置 = カーソルセルの位置。描いたフレームがあればその実寸、
+        // まだなら文字の大きさからの概算。
         let cursor = self.content.cursor?;
-        let cell_width = px(FONT_SIZE * 0.6);
+        let (cell_width, line_height) = match self.grid_frame {
+            Some(frame) => (frame.cell_width, frame.line_height),
+            None => (
+                px(self.appearance.font_size * 0.6),
+                px(self.appearance.line_height()),
+            ),
+        };
         let origin = element_bounds.origin
             + point(
                 cell_width * (cursor.column.0 as f32),
-                px(LINE_HEIGHT) * (cursor.line.0 as f32),
+                line_height * (cursor.line.0 as f32),
             );
-        Some(Bounds::new(origin, size(cell_width, px(LINE_HEIGHT))))
+        Some(Bounds::new(origin, size(cell_width, line_height)))
     }
 
     fn character_index_for_point(
@@ -2092,9 +2131,9 @@ impl Render for TerminalView {
             .size_full()
             .bg(self.theme.bg1)
             // 端末は等幅必須。UI フォント（IBM Plex Sans JP）を継承すると 1 文字ずつ間延びして
-            // 崩れるので、エディタと同じコードフォント（等幅）を明示する。要素は text_style().font()
-            // を読むのでコンテナで指定すれば伝播する。
-            .font_family("Guguru Sans Code")
+            // 崩れるので、コードフォント（既定はエディタと同じ・設定で変えられる・O25）を明示する。
+            // 要素は text_style().font() を読むのでコンテナで指定すれば伝播する。
+            .font_family(self.appearance.font_family.clone())
             .child(element::TerminalElement {
                 terminal: cx.entity(),
             })
@@ -2411,13 +2450,14 @@ mod tests {
     #[test]
     fn wheel_lines_accumulates_fractions() {
         // 1 行未満は持ち越し、合計が 1 行に達した時だけ行が進む（トラックパッドの細かい増分）。
-        let (lines, carry) = wheel_lines(0.0, LINE_HEIGHT * 0.6, LINE_HEIGHT);
+        let line_height = TerminalAppearance::default().line_height();
+        let (lines, carry) = wheel_lines(0.0, line_height * 0.6, line_height);
         assert_eq!(lines, 0);
-        let (lines, carry) = wheel_lines(carry, LINE_HEIGHT * 0.6, LINE_HEIGHT);
+        let (lines, carry) = wheel_lines(carry, line_height * 0.6, line_height);
         assert_eq!(lines, 1);
         assert!(carry.abs() < 1.0);
         // 下方向（負の増分）も対称に畳まれる。
-        let (lines, _) = wheel_lines(0.0, -LINE_HEIGHT * 2.5, LINE_HEIGHT);
+        let (lines, _) = wheel_lines(0.0, -line_height * 2.5, line_height);
         assert_eq!(lines, -2);
     }
 
@@ -2525,6 +2565,46 @@ mod action_tests {
             quote_path_for_shell(r"C:\Program Files\x", true),
             r#""C:\Program Files\x""#
         );
+    }
+
+    /// O25: 見た目の設定を変えると、開いている端末がその場で従う（scrollback を減らせば古い行を
+    /// 捨て、カーソルの既定が替わる。アプリが DECSCUSR で指定した形はそちらが勝つ）。
+    #[gpui::test]
+    fn open_terminals_follow_the_appearance_setting(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, _window, _cx| {
+            assert_eq!(terminal.debug_appearance(), &TerminalAppearance::default());
+            let output: String = (0..300).map(|index| format!("out {index}\r\n")).collect();
+            feed(terminal, &output);
+            assert!(terminal.term.lock().grid().history_size() > 100);
+            assert_eq!(
+                terminal.term.lock().cursor_style().shape,
+                CursorShape::Block
+            );
+        });
+        cx.update(|_window, cx| {
+            cx.set_global(TerminalAppearance::new(16.0, "Menlo", 100, "bar"));
+        });
+        cx.run_until_parked();
+        terminal.update_in(cx, |terminal, _window, _cx| {
+            let appearance = terminal.debug_appearance();
+            assert_eq!(appearance.font_size, 16.0);
+            assert_eq!(appearance.font_family.as_ref(), "Menlo");
+            let term = terminal.term.lock();
+            assert!(
+                term.grid().history_size() <= 100,
+                "減らした分は古い方から捨てる"
+            );
+            assert_eq!(term.cursor_style().shape, CursorShape::Beam);
+        });
+        terminal.update_in(cx, |terminal, _window, _cx| {
+            // アプリの指定（DECSCUSR 4 = 下線）は既定より勝つ。
+            feed(terminal, "\x1b[4 q");
+            assert_eq!(
+                terminal.term.lock().cursor_style().shape,
+                CursorShape::Underline
+            );
+        });
     }
 
     #[gpui::test]

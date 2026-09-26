@@ -580,6 +580,15 @@ settings:
   pref_reduce_motion_sub: Freezes decorative animation such as Braille spinners and the mascot
   pref_font_size: Font size
   pref_tab_size: Tab width
+  pref_terminal_font_size: Terminal font size
+  pref_terminal_scrollback: Terminal scrollback
+  pref_terminal_scrollback_sub: "Lowering it drops the oldest lines. Change the font with terminal_font_family in settings.json"
+  terminal_scrollback_lines: "%{n} lines"
+  pref_terminal_cursor: Terminal cursor
+  pref_terminal_cursor_sub: "A shape set by vim or your shell takes precedence"
+  terminal_cursor_block: Block
+  terminal_cursor_bar: Bar
+  terminal_cursor_underline: Underline
   pref_tabs_view: Thread tabs
   tabs_view_bar: Bar
   tabs_view_list: List
