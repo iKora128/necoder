@@ -486,6 +486,8 @@ necoder の skill を入れておくと、エージェントが `ne fleet …` �
 
 Task をいつも同じブランチから切りたい（`main` ではなく `develop` から等）時は、リポジトリの `.necoder/settings.json` に `"task_base": "origin/develop"` のように書く。＋ Task の「詳細」で起点を空のままにすると、そこから切る（CLI の `ne fleet create` も同じ）。
 
+大きなリポジトリ（monorepo）で Task に一部のフォルダだけあれば足りる時は、同じファイルに `"task_sparse": ["web", "packages/ui"]` のように書く。新しい Task の worktree はそのフォルダと根のファイルだけになる（作るのが速く、ディスクも食わない）。メインの作業ツリーはそのまま。
+
 サイドバーの Task は **⌘ クリック**（Windows / Linux は Ctrl）で複数選べる（**⇧ クリック**で範囲）。選ぶと上に帯が出て、まとめて **休ませる**（静かなエージェントを止めてメモリを空ける）・**舞台に並べる**（3 本まで）・**片付け…**（片付けの画面を、選んだ Task に印を付けて開く）ができる。普通のクリックで選択は外れる。
 
 Task が 6 本以上あると、サイドバーの ⌂ main の下に **絞り込み欄**が出る。名前・ブランチ・頼んだこと・いま何をしているかのどれかに含まれる語で Task を絞れる（空白で区切ると全部の語を含む Task だけ）。欄の右の「並び: レール」を押すと、最近頼んだ順・要対応（承認や質問を待っているもの）が先の順に切り替わる。
@@ -653,7 +655,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | 置き場所 | 効く範囲 |
 |---|---|
 | アプリの `settings.json`（macOS: `~/Library/Application Support/necoder/`） | 全体 |
-| プロジェクトの `.necoder/settings.json` | そのプロジェクトだけ（`color` / `icon` / `task_base` など） |
+| プロジェクトの `.necoder/settings.json` | そのプロジェクトだけ（`color` / `icon` / `task_base` / `task_sparse` など） |
 
 よく使う設定:
 

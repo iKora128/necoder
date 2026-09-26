@@ -883,19 +883,84 @@ pub fn create_task_worktree_on(
     path: &Path,
     branch: &str,
 ) -> Result<()> {
-    let path = path.to_string_lossy().into_owned();
-    let output = run_git(
-        host,
-        dir,
-        ["worktree", "add", "-b", branch, path.as_str(), "HEAD"],
-    )
-    .context("Task worktree の作成に失敗")?;
+    add_task_worktree_on(host, dir, path, Some(branch), "HEAD")
+}
+
+/// Task の worktree を切り出す。`new_branch` が Some なら `start` から新しいブランチを切り、None なら
+/// 既にあるブランチ `start` の worktree を作る。リポジトリに `task_sparse`（[`repository_task_sparse_on`]）が
+/// あれば、そのフォルダ（と根のファイル）だけを取り出す sparse checkout（cone）にする（O20・A24）。
+/// sparse の設定に失敗したら全部を取り出して続ける（空の worktree を残さない）。
+fn add_task_worktree_on(
+    host: &dyn Host,
+    dir: &Path,
+    path: &Path,
+    new_branch: Option<&str>,
+    start: &str,
+) -> Result<()> {
+    let sparse = repository_task_sparse_on(host, dir);
+    let path_text = path.to_string_lossy().into_owned();
+    let mut args: Vec<&str> = vec!["worktree", "add"];
+    if !sparse.is_empty() {
+        args.push("--no-checkout");
+    }
+    if let Some(branch) = new_branch {
+        args.extend(["-b", branch]);
+    }
+    args.extend([path_text.as_str(), start]);
+    let output = run_git(host, dir, args).context("Task worktree の作成に失敗")?;
     anyhow::ensure!(
         output.success(),
         "Task worktree の作成に失敗: {}",
         git_fail_message(&output)
     );
+    if sparse.is_empty() {
+        return Ok(());
+    }
+    let mut set: Vec<&str> = vec!["sparse-checkout", "set", "--cone"];
+    set.extend(sparse.iter().map(String::as_str));
+    let configured = run_git(host, path, set).is_ok_and(|output| output.success());
+    if !configured {
+        eprintln!(
+            "task_sparse を設定できないので全部を取り出します: {}",
+            path.display()
+        );
+    }
+    let branch = new_branch.unwrap_or(start);
+    let output = run_git(host, path, ["checkout", "-q", branch])
+        .context("Task worktree の取り出しに失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "Task worktree の取り出しに失敗: {}",
+        git_fail_message(&output)
+    );
     Ok(())
+}
+
+/// リポジトリの `.necoder/settings.json` の `task_sparse`（O20・A24）: 新しい Task の worktree に取り出す
+/// フォルダ（根からの相対パス・cone）。空・無い・読めない = 全部。`..` を含む物・`-` で始まる物は捨てる。
+pub fn repository_task_sparse_on(host: &dyn Host, root: &Path) -> Vec<String> {
+    let Ok(content) = host.read_file(&root.join(".necoder").join("settings.json")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&content.bytes) else {
+        return Vec::new();
+    };
+    let Some(entries) = value
+        .get("task_sparse")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(|entry| entry.trim().trim_matches('/').to_string())
+        .filter(|entry| {
+            !entry.is_empty()
+                && !entry.starts_with('-')
+                && !entry.split('/').any(|part| part == "..")
+        })
+        .collect()
 }
 
 /// IntegrationSpace から見た Task branch の merge 可否。`git merge-tree` なので index / worktree を
@@ -3801,6 +3866,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// O20 / A24: リポジトリの `task_sparse` があれば、新しい Task はそのフォルダ（と根のファイル）だけを
+    /// 取り出す。統合先はそのまま。既にあるブランチの worktree も同じ。変な書き方は捨てる。
+    #[test]
+    fn task_worktrees_follow_the_repository_sparse_list() {
+        let base = scratch("task_sparse");
+        let root = base.join("repo");
+        for dir in ["web/src", "api/src", "docs", ".necoder"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join("web/src/a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("api/src/b.txt"), "b\n").unwrap();
+        std::fs::write(root.join("docs/c.md"), "c\n").unwrap();
+        std::fs::write(root.join("README.md"), "r\n").unwrap();
+        std::fs::write(
+            root.join(".necoder/settings.json"),
+            r#"{ "task_sparse": ["web", "/docs/", "../evil", "-x", " "] }"#,
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        assert_eq!(
+            repository_task_sparse_on(&LocalHost, &root),
+            vec!["web".to_string(), "docs".to_string()],
+            "前後の / は落とし、.. と - で始まる物と空は捨てる"
+        );
+
+        let (target, _, failure) =
+            create_task_with_on(&LocalHost, &root, "Sparse", &TaskStart::default()).unwrap();
+        assert_eq!(failure, None);
+        assert!(target.join("web/src/a.txt").exists());
+        assert!(target.join("docs/c.md").exists());
+        assert!(target.join("README.md").exists(), "根のファイルは取り出す");
+        assert!(!target.join("api").exists(), "書いていないフォルダは取り出さない");
+        assert!(root.join("api/src/b.txt").exists(), "統合先はそのまま");
+        let status = std::process::Command::new("git")
+            .current_dir(&target)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(status.stdout.is_empty(), "取り出した後は clean");
+
+        git(&["branch", "feature/old"]);
+        let existing = TaskStart {
+            branch: Some("feature/old".to_string()),
+            ..TaskStart::default()
+        };
+        let (target, _, _) = create_task_with_on(&LocalHost, &root, "x", &existing).unwrap();
+        assert!(target.join("web/src/a.txt").exists());
+        assert!(!target.join("api").exists(), "既にあるブランチも同じ");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// O20: `.worktreeinclude` に書かれ、かつ git が無視しているファイルだけを新しい Task へ持ち込む。
     #[test]
     fn worktree_include_brings_ignored_files_into_new_tasks() {
@@ -4435,7 +4563,7 @@ pub fn create_task_with_on(
     }
     if git_branches_on(host, root).iter().any(|known| known == branch) {
         // 既にあるブランチ = その worktree を作る（別の worktree で使っていれば git が断る）。
-        add_worktree_on(host, root, &target, branch)?;
+        add_task_worktree_on(host, root, &target, None, branch)?;
     } else {
         let valid = run_git(host, root, ["check-ref-format", "--branch", branch])
             .is_ok_and(|output| output.success());
@@ -4477,19 +4605,7 @@ pub fn create_task_worktree_from_on(
     base: &str,
 ) -> Result<()> {
     anyhow::ensure!(!base.starts_with('-'), "起点に使えない名前です: {base}");
-    let path = path.to_string_lossy().into_owned();
-    let output = run_git(
-        host,
-        dir,
-        ["worktree", "add", "-b", branch, path.as_str(), base],
-    )
-    .context("Task worktree の作成に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "Task worktree の作成に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    add_task_worktree_on(host, dir, path, Some(branch), base)
 }
 
 /// `.worktreeinclude`（統合先のルート・`.gitignore` と同じ書き方）の置き場所（O20・A05）。
