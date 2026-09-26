@@ -5769,8 +5769,12 @@ dependencies = [
  "gpui",
  "host",
  "i18n",
+ "keymap_core",
  "lang",
  "project",
+ "serde",
+ "serde_json",
+ "storage",
  "theme_core",
  "ui",
 ]

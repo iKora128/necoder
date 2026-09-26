@@ -16,8 +16,15 @@ lang.workspace = true
 project.workspace = true
 theme_core.workspace = true
 ui.workspace = true
-# 構文色の写像（`syntax_color`）をエディタと共有する。エディタのコアは変更レビューを知らない（逆向きだけ）。
+# 構文色の写像（`syntax_color`）と注記の入力欄（平坦モード = IME 安全）をエディタと共有する。
+# エディタのコアは変更レビューを知らない（逆向きだけ）。
 editor_view.workspace = true
+# キー表記（⌘⏎ / Ctrl+Enter）をプラットフォームに合わせる。
+keymap_core.workspace = true
+# 注記の保存（`review_notes`）。SQL はこの crate に漏らさない（storage の API だけ使う）。
+storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
