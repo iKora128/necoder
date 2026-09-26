@@ -46,6 +46,11 @@
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
 | ↳ **会話名**（エージェントが付けたスレッドの題名。手動改名が優先） | `AgentEvent::TitleChanged`（ACP `session_info_update.title`）/ 手動の印 `thread_custom_names` | （スレッド名） | (thread name) |
 | ↳ **目標**（`/goal` でエージェントが追う目的。composer の上に 1 行） | `acp_client::AgentGoal` / `AgentEvent::GoalChanged` / `Thread.goal` | 目標 | Goal |
+| ↳ **使用量**（エージェントがターンごとに報告したトークンと推定コスト。推定コストは実際の請求額ではない。報告の無い値は NULL＝`—`。台帳に 1 ターン 1 行・O11） | `turn_usage`（storage）/ `AgentEvent::TurnUsage` / `AgentEvent::SessionCost` / `agent_panel::usage::CostMeter` | 使用量 | Usage |
+| ↳ **レート制限**（プランの利用上限の窓と使用率。エージェントが知らせてきた**最後の値**・O11） | `acp_client::usage::RateLimits` / `AgentEvent::RateLimits` / `agent_panel::usage::UsageLimits` | レート制限 | Rate limits |
+| ↳ **アカウント**（レート制限の持ち主 = エージェント × 実行 host × 認証の環境の指紋。値はこれごとに分ける・R08） | `agent_panel::usage::UsageAccount` | —（名前の隣に `dev@devbox（SSH）` / 置き場のパス / `設定の env #…` を添える） | — |
+| ↳ **窓**（レート制限の期間） | `LimitWindow::{FiveHour, Weekly, Named, Minutes}` | 5 時間枠 / 週枠 / 〈名前〉の週枠 | 5-hour window / Weekly window / Weekly (〈name〉) |
+| ↳ **使用量の統計**（日付 × エージェントの集計画面） | `usage_view::render_usage_stats` / `Storage::daily_usage` | 使用量の統計 | Usage statistics |
 | **遷移スナップショット**（状態遷移時の 1 行） | `digest` / `digest_tail` / `Thread.digest` | （文そのもの・ラベル無し） | （no label） |
 | **要対応**（Fleet サイドバー最上段・裁く列。← 管制の要対応キュー） | `AttentionItem` / `attention_queue` | 要対応 | Attention |
 | **統合パイプライン**（TaskPhase 列の帯） | `render_pipeline` | 統合パイプライン | Integration pipeline |
@@ -99,6 +104,8 @@
 | `"Claude"`（agent ラベル） | `"Claude Code"` | `AgentKind::by_label` は完全一致（フォールバックのバグ源） |
 | モデル名・思考量・権限モードを「表示名」で保存/比較 | **value_id** で保存/比較 | 同じ物に `opus[1m]` と `Opus (1M context)` の 2 つの綴りがある。表示名は描画専用（DECISIONS 2026-09-09） |
 | necoder 独自のモデル綴り（`claude-opus-5` 等の静的一覧） | ACP の広告 | 第三の語彙を作ると必ず広告と食い違う。接続前は候補を出さない |
+| トークン台帳 / `token_ledger` | 使用量（`turn_usage`） | `threads.tokens_used` は文脈窓の使用量で累計ではなかった（O11 で削除） |
+| クォータ / quota（UI の語として） | レート制限 / 使用量 | adapter の `_meta.quota` は「そのターンに使ったトークン」で上限ではない。上限は レート制限、使った量は 使用量 |
 
 ## 正の所在（どこを直すか）
 

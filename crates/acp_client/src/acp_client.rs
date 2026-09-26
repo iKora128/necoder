@@ -6,9 +6,11 @@
 //!
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
+pub mod codex_limits;
 pub mod mcp;
 pub mod preset;
 pub mod registry;
+pub mod usage;
 
 use acp::schema::v1;
 use acp::schema::ProtocolVersion;
@@ -204,6 +206,15 @@ pub enum AgentEvent {
     ToolUpdated(ToolCallInfo),
     /// コンテキスト使用量の更新（`UsageUpdate`）。`used`/`size` はトークン数。
     Usage { used: u64, size: u64 },
+    /// 会話の累計コスト（`UsageUpdate.cost`・O11）。Claude はターンの結果ごとに**会話全体の累計**
+    /// （Claude Code の推定）を送る。ターンの分は UI が前回との差で数える（`session/load` で引き継いだ
+    /// 会話の最初の値は、トランスクリプトに残る過去の分を含む）。
+    SessionCost { amount: f64, currency: String },
+    /// レート制限の知らせ（O11）。Claude は `usage_update._meta["_claude/rateLimit"]` で送ってくる。
+    /// アカウント単位の値。1 回の知らせに全部の窓が載るとは限らないので、受け手は窓ごとに差し替える。
+    RateLimits(usage::RateLimits),
+    /// ターンに使ったトークン（`PromptResponse._meta.quota`・O11）。`TurnEnded` の直前に流す。
+    TurnUsage(usage::TurnTokens),
     /// エージェントが広告する権限モード一覧 + 現在モード（セッション開始時）。`(mode_id, 表示名)`。
     Modes {
         modes: Vec<(String, String)>,
@@ -1890,6 +1901,14 @@ pub async fn run_session_on(
                                 }
                                 _ => TurnEnd::Completed,
                             };
+                            // このターンに使ったトークン（O11）。UI は TurnEnded でコストと一緒に台帳へ書く。
+                            if let Some(tokens) = response
+                                .meta
+                                .as_ref()
+                                .and_then(usage::turn_tokens_from_quota)
+                            {
+                                event_tx.unbounded_send(AgentEvent::TurnUsage(tokens)).ok();
+                            }
                             event_tx
                                 .unbounded_send(AgentEvent::TurnEnded { reason: end })
                                 .ok();
@@ -2043,10 +2062,30 @@ fn session_update_events(update: v1::SessionUpdate, mut emit: impl FnMut(AgentEv
                 completed: update.fields.status.and_then(tool_completed),
             }));
         }
-        v1::SessionUpdate::UsageUpdate(usage) => emit(AgentEvent::Usage {
-            used: usage.used,
-            size: usage.size,
-        }),
+        v1::SessionUpdate::UsageUpdate(update) => {
+            emit(AgentEvent::Usage {
+                used: update.used,
+                size: update.size,
+            });
+            // 会話の累計コスト（Claude はターンの結果の分にだけ付く）。負・NaN は捨てる。
+            if let Some(cost) = update.cost {
+                if cost.amount.is_finite() && cost.amount >= 0.0 {
+                    emit(AgentEvent::SessionCost {
+                        amount: cost.amount,
+                        currency: cost.currency,
+                    });
+                }
+            }
+            // Claude のレート制限（`rate_limit_event` の中継）。
+            if let Some(limits) = update
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("_claude/rateLimit"))
+                .and_then(usage::rate_limits_from_claude)
+            {
+                emit(AgentEvent::RateLimits(limits));
+            }
+        }
         v1::SessionUpdate::CurrentModeUpdate(update) => {
             emit(AgentEvent::ModeChanged(update.current_mode_id.to_string()))
         }
@@ -3983,6 +4022,11 @@ for line in sys.stdin:
                             info.output.map(|text| text.lines().count()).unwrap_or(0)
                         ),
                         AgentEvent::Usage { used, size } => eprintln!("[usage] {used}/{size}"),
+                        AgentEvent::SessionCost { amount, currency } => {
+                            eprintln!("[cost] {amount} {currency}")
+                        }
+                        AgentEvent::RateLimits(limits) => eprintln!("[rate limits] {limits:?}"),
+                        AgentEvent::TurnUsage(tokens) => eprintln!("[turn usage] {tokens:?}"),
                         AgentEvent::Modes { modes, current } => {
                             eprintln!("[modes] current={current} available={modes:?}")
                         }
@@ -4154,6 +4198,173 @@ for line in sys.stdin:
             v1::SessionInfoUpdate::new().meta(other_meta)
         ))
         .is_empty());
+    }
+
+    /// `usage_update`（claude-agent-acp が送る実際の形）: 文脈の使用量に加えて、ターンの結果の
+    /// `cost`（会話の累計）と、`rate_limit_event` の中継 `_meta["_claude/rateLimit"]` を捨てずに流す。
+    #[test]
+    fn usage_updates_carry_cost_and_rate_limits() {
+        let result: v1::SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate": "usage_update",
+            "used": 52_000,
+            "size": 200_000,
+            "cost": {"amount": 1.25, "currency": "USD"},
+            "_meta": {"_claude/model": "claude-opus-5[1m]"}
+        }))
+        .expect("usage_update を読める");
+        let events = mapped(result);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    AgentEvent::Usage { used: 52_000, size: 200_000 },
+                    AgentEvent::SessionCost { amount, currency },
+                ] if (*amount - 1.25).abs() < 1e-9 && currency == "USD"
+            ),
+            "{events:?}"
+        );
+
+        let rate_limit: v1::SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate": "usage_update",
+            "used": 52_000,
+            "size": 200_000,
+            "_meta": {
+                "_claude/rateLimit": {
+                    "status": "allowed_warning",
+                    "resetsAt": 1_790_000_000,
+                    "rateLimitType": "five_hour",
+                    "utilization": 0.85,
+                    "unifiedWindows": {
+                        "five_hour": {"utilization": 0.85, "resetsAt": 1_790_000_000},
+                        "seven_day": {"utilization": 0.2, "resetsAt": 1_790_400_000}
+                    }
+                },
+                "_claude/model": "claude-opus-5[1m]"
+            }
+        }))
+        .expect("usage_update を読める");
+        let events = mapped(rate_limit);
+        let [AgentEvent::Usage { .. }, AgentEvent::RateLimits(limits)] = events.as_slice() else {
+            panic!("Usage と RateLimits: {events:?}");
+        };
+        assert_eq!(limits.status, Some(usage::LimitStatus::Warning));
+        assert_eq!(limits.windows.len(), 2);
+
+        // 壊れた cost（負）は流さない。rate limit の無い `_meta` も何も足さない。
+        let odd: v1::SessionUpdate = serde_json::from_value(json!({
+            "sessionUpdate": "usage_update",
+            "used": 1,
+            "size": 2,
+            "cost": {"amount": -3.0, "currency": "USD"},
+            "_meta": {"_claude/origin": {"kind": "task-notification"}}
+        }))
+        .expect("usage_update を読める");
+        assert!(
+            matches!(
+                mapped(odd).as_slice(),
+                [AgentEvent::Usage { used: 1, size: 2 }]
+            ),
+            "負のコストは捨てる"
+        );
+    }
+
+    /// 偽エージェント: prompt を受けると、ターン中に rate limit とコストを送り、`_meta.quota` 付きで
+    /// 応答する（claude-agent-acp の `turnOutcome` と同じ形）。
+    const AGENT_THAT_REPORTS_USAGE: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def update(sid, body):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": sid, "update": body}})
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1)}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "sess-1"}})
+    elif method == "session/prompt":
+        sid = params["sessionId"]
+        update(sid, {"sessionUpdate": "usage_update", "used": 900, "size": 200000,
+                     "_meta": {"_claude/rateLimit": {"status": "allowed", "rateLimitType": "five_hour",
+                                                     "resetsAt": 1790000000, "utilization": 0.42}}})
+        update(sid, {"sessionUpdate": "agent_message_chunk",
+                     "content": {"type": "text", "text": "done"}})
+        update(sid, {"sessionUpdate": "usage_update", "used": 1200, "size": 200000,
+                     "cost": {"amount": 0.37, "currency": "USD"}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 20, "cachedReadTokens": 30,
+                      "cachedWriteTokens": 40, "totalTokens": 100},
+            "_meta": {"quota": {
+                "token_count": {"totalTokens": 100, "inputTokens": 10, "cachedInputTokens": 30,
+                                "cachedWriteTokens": 40, "outputTokens": 20,
+                                "reasoningOutputTokens": 0},
+                "model_usage": [{"model": "claude-opus-5[1m]", "token_count": {
+                    "totalTokens": 100, "inputTokens": 10, "cachedInputTokens": 30,
+                    "cachedWriteTokens": 40, "outputTokens": 20, "reasoningOutputTokens": 0}}]}}}})
+        sys.exit(0)
+"#;
+
+    /// ターンの終わりの `_meta.quota` は `TurnUsage` になり、`TurnEnded` より先に届く。ターン中の
+    /// コストと rate limit も流れる。
+    #[test]
+    fn turn_usage_arrives_before_turn_end() {
+        let Some((outcome, events)) = run_fake_agent_until_session_ends(
+            AGENT_THAT_REPORTS_USAGE,
+            SessionPreferences::default(),
+            Some("やって"),
+        ) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("セッションは正常終了する");
+        let usage_at = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::TurnUsage(usage::TurnTokens {
+                        input: 10,
+                        output: 20,
+                        cached_read: 30,
+                        cached_write: 40,
+                        total: 100,
+                    })
+                )
+            })
+            .unwrap_or_else(|| panic!("TurnUsage が届く: {events:?}"));
+        let ended_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::TurnEnded { .. }))
+            .unwrap_or_else(|| panic!("TurnEnded が届く: {events:?}"));
+        assert!(
+            usage_at < ended_at,
+            "TurnUsage は TurnEnded の前: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::SessionCost { amount, .. } if (*amount - 0.37).abs() < 1e-9
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(
+                |event| matches!(event, AgentEvent::RateLimits(limits) if limits.windows.len() == 1)
+            ),
+            "{events:?}"
+        );
     }
 
     /// slash コマンドは本文 1 ブロックだけで送る（先頭 = 末尾 = `/…`）。Claude は末尾、Codex は

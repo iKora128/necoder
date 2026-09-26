@@ -35,6 +35,115 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: 使用量（O11）を offscreen で確かめる（`NECODER_USAGE_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `limits` / `near` / `blocked` = いまのスレッドにレート制限を流す（本番と同じ `on_event`）/
+    /// `codex` = Codex の値を置き場へ直接入れる（**codex app-server は起こさない**）/
+    /// `accounts` = 同じ Claude Code の別のアカウント（SSH 先・別の認証の置き場）の値を置く /
+    /// `codex-loading` / `codex-failed` = Codex の読み取りの途中 / 失敗の行 /
+    /// `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ直近 12 日分の使用量を書く /
+    /// `popover` = チップを押したのと同じにポップオーバーを開く（Codex は訊かない）/ `stats` = 統計の画面。
+    #[cfg(debug_assertions)]
+    pub fn debug_usage_probe(
+        &mut self,
+        commands: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for command in commands
+            .split(';')
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+        {
+            match command {
+                "limits" | "near" | "blocked" => {
+                    if !self.chrome.show_right {
+                        self.chrome.show_right = true;
+                    }
+                    self.agent_panel
+                        .update(cx, |panel, cx| panel.debug_seed_rate_limits(command, cx));
+                }
+                "codex" => agent_panel::usage::debug_seed_codex_limits(cx),
+                // 同じ Claude Code の別のアカウント（SSH の接続先・別の認証の置き場）の値（R08）。
+                "accounts" => agent_panel::usage::debug_seed_other_accounts(cx),
+                "codex-loading" => agent_panel::usage::debug_set_codex_read(
+                    agent_panel::usage::CodexRead::Loading,
+                    cx,
+                ),
+                "codex-failed" => agent_panel::usage::debug_set_codex_read(
+                    agent_panel::usage::CodexRead::Failed(SharedString::from(
+                        "codex account authentication required to read rate limits",
+                    )),
+                    cx,
+                ),
+                "seed" => self.debug_seed_usage_rows(),
+                "popover" => {
+                    let anchor = window.viewport_size().width - px(300.);
+                    self.open_usage_popover(anchor, false, window, cx);
+                }
+                "stats" => self.open_usage_stats(&UsageStats, window, cx),
+                other => eprintln!("NECODER_USAGE_PROBE: 未知のコマンド {other}"),
+            }
+        }
+        cx.notify();
+    }
+
+    /// 開発用: 直近 12 日分の使用量を台帳へ書く（`NECODER_USAGE_PROBE=seed`）。本物の DB を汚さないよう、
+    /// `NECODER_HOME` で隔離している時だけ書く。
+    #[cfg(debug_assertions)]
+    fn debug_seed_usage_rows(&self) {
+        if std::env::var_os("NECODER_HOME").is_none() {
+            eprintln!(
+                "NECODER_USAGE_PROBE=seed: NECODER_HOME が無いので書かない（本物の DB を守る）"
+            );
+            return;
+        }
+        let Some(storage) = self.persistence.storage.as_ref() else {
+            eprintln!("NECODER_USAGE_PROBE=seed: DB が無い");
+            return;
+        };
+        let now = agent_panel::now_unix_ms();
+        const HOUR: i64 = 3_600_000;
+        for day in 0..12_i64 {
+            let turns = [
+                (
+                    "Claude Code",
+                    3 + day % 4,
+                    38_000 + day * 5_300,
+                    Some(0.42 + day as f64 * 0.11),
+                ),
+                ("Codex", (day % 3) + 1, 21_000 + (day % 5) * 9_000, None),
+            ];
+            for (agent, count, tokens, cost) in turns {
+                if agent == "Codex" && day % 4 == 3 {
+                    continue; // Codex を使わなかった日
+                }
+                for turn in 0..count {
+                    // 今日の Claude の最後のターンはトークンの報告が無い（表の `≥` の検証・R08）。
+                    let reported = !(day == 0 && agent == "Claude Code" && turn == count - 1);
+                    let record = storage::TurnUsageRecord {
+                        thread_id: format!("probe-{agent}"),
+                        agent: agent.to_string(),
+                        ended_at: now - day * 24 * HOUR - turn * HOUR,
+                        tokens: reported.then(|| storage::TurnTokenCounts {
+                            input: tokens as u64 / 4,
+                            output: tokens as u64 / 4,
+                            cached_read: tokens as u64 / 2,
+                            cached_write: 0,
+                            total: tokens as u64,
+                        }),
+                        cost_usd: cost.map(|cost| cost / count as f64),
+                        session_cost_usd: None,
+                    };
+                    if let Err(error) = storage.record_turn_usage(&record) {
+                        eprintln!("NECODER_USAGE_PROBE=seed: 書けない: {error:#}");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     /// 開発用: スレッドに各状態を仕込んで開く（タブ/beacon/フッター/レールの状態表示を offscreen で検証・#）。
     #[cfg(debug_assertions)]
     /// 開発用: 擬似 tear-off を直接駆動（枠外ドロップ相当の座標 → 新窓生成まで・M13）。

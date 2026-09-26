@@ -1119,6 +1119,25 @@ fn main() {
                         .detach();
                     }
                 }
+                // 開発用: NECODER_USAGE_PROBE="limits;codex;seed;popover" で使用量（O11）の表示を組み立てる
+                // （2s 後）。レート制限はスレッドの on_event を通し、Codex は app-server を起こさずに値を置く。
+                // `seed` は NECODER_HOME で隔離している時だけ DB に書く。
+                #[cfg(debug_assertions)]
+                if let Ok(commands) = std::env::var("NECODER_USAGE_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2000))
+                                .await;
+                            if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_usage_probe(&commands, window, cx);
+                            }) {
+                                eprintln!("NECODER_USAGE_PROBE: 窓が無い: {error:#}");
+                            }
+                        })
+                        .detach();
+                    }
+                }
                 // 開発用: NECODER_FINDER_PROBE=1 で ⌘P ファイルファインダを開く（2s 後・
                 // 空プロジェクトの作成アクション検証）。NECODER_FINDER_CONFIRM=1 で先頭候補の確定まで通す。
                 if std::env::var("NECODER_FINDER_PROBE").is_ok_and(|v| v == "1") {

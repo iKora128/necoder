@@ -854,6 +854,8 @@ impl Workspace {
                 shortcut_sheet: None,
                 // offscreen QA: NECODER_ABOUT=1 で起動時から About モーダルを開く（NECODER_SETTINGS と同型）。
                 about: std::env::var_os("NECODER_ABOUT").map(|_| cx.focus_handle()),
+                usage_popover: None,
+                usage_stats: None,
                 project_flash: None,
                 project_flash_gen: 0,
             },
@@ -1044,6 +1046,9 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+        // 使用量（O11）: エージェントのレート制限が届いたら statusbar とポップオーバーを描き直す（全窓）。
+        cx.observe_global::<agent_panel::usage::UsageLimits>(|_workspace, cx| cx.notify())
+            .detach();
         workspace.hydrate_restored_projects(restored_indexes, cx);
         workspace.ensure_work_layout(cx);
         workspace.save_state(cx); // 起動時点で状態を書く（再起動復元のため）

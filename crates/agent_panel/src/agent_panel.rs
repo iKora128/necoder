@@ -29,6 +29,7 @@ mod idle;
 mod remote;
 mod search;
 pub mod sound;
+pub mod usage;
 
 pub use chat::ChatRow;
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
@@ -984,6 +985,12 @@ struct Thread {
     session_resumable: bool,
     /// エージェントが最後に働いた時刻（送信・ターン終了）。自動停止の起点。
     last_active_at_ms: i64,
+    /// ターンのトークンとコストの数え方（O11）。ターンが終わるたびに台帳 `turn_usage` へ書く。
+    usage: usage::CostMeter,
+    /// 今のセッションのレート制限の持ち主（R08）。セッションを立てた時の host と認証の環境で決まり、
+    /// そのセッションの知らせはここへ重ねる（後で設定の env を変えても、動いているセッションは前の
+    /// アカウントのまま）。セッションが無ければ `None`。
+    usage_account: Option<usage::UsageAccount>,
 }
 
 impl Thread {
@@ -1051,6 +1058,8 @@ impl Thread {
             chat: None,
             session_resumable: false,
             last_active_at_ms: 0,
+            usage: usage::CostMeter::default(),
+            usage_account: None,
         }
     }
 
@@ -1761,6 +1770,9 @@ pub struct AgentPanel {
     /// ACP エージェントの起動 cwd（アクティブプロジェクトのルート）。無ければ送信できない。
     dest_cwd: Option<PathBuf>,
     dest_host: Arc<dyn Host>,
+    /// `dest_host` の見分け（レート制限の持ち主・R08）。Render から host に触らないよう、宛先を
+    /// 決めた時に取っておく。
+    dest_usage_host: usage::UsageHost,
     composer: Entity<EditorView>,
     /// 固定レイアウトのマスコット。フレーム時計と paint invalidation を親 transcript から分離する。
     mascot: Entity<MascotView>,
@@ -2212,6 +2224,7 @@ PYEOF"#;
             dest_branch: None,
             dest_cwd: None,
             dest_host: LocalHost::shared(),
+            dest_usage_host: usage::UsageHost::local(),
             composer,
             mascot,
             composer_spinner,
@@ -2535,6 +2548,38 @@ PYEOF"#;
         }
     }
 
+    /// ターンの使用量（トークン・コスト）を台帳 `turn_usage` へ 1 行書く（O11・Stats の日別集計の元）。
+    /// エージェントが何も報告しなかったターンは書かない。DB が無い（テスト・一部の検証起動）時は捨てる。
+    fn record_turn_usage(&mut self, thread_index: usize) {
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        let Some(spend) = thread.usage.take_turn() else {
+            return;
+        };
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let record = storage::TurnUsageRecord {
+            thread_id: thread.id.clone(),
+            agent: thread.agent.to_string(),
+            ended_at: now_unix_ms(),
+            // 報告の無いトークンは 0 と書かない（R08）。
+            tokens: spend.tokens.map(|tokens| storage::TurnTokenCounts {
+                input: tokens.input,
+                output: tokens.output,
+                cached_read: tokens.cached_read,
+                cached_write: tokens.cached_write,
+                total: tokens.total,
+            }),
+            cost_usd: spend.cost_usd,
+            session_cost_usd: spend.session_total_usd,
+        };
+        if let Err(error) = storage.record_turn_usage(&record) {
+            eprintln!("ターンの使用量を記録できない: {error:#}");
+        }
+    }
+
     /// 最初のターン後、まだ既定名なら会話の冒頭から AI にタイトルを付けてもらう（#6・非同期）。
     /// 手動改名済み or 既に命名済み（＝プレースホルダでない）スレッドは対象外。失敗は静かに既定名のまま。
     ///
@@ -2673,6 +2718,7 @@ PYEOF"#;
         let destination_changed = self.dest_host.id() != host.id() || self.dest_cwd != cwd;
         self.dest_project = project;
         self.dest_branch = branch;
+        self.dest_usage_host = usage::UsageHost::of(host.as_ref());
         self.dest_host = host;
         self.dest_cwd = cwd;
         if destination_changed {
@@ -2736,6 +2782,35 @@ PYEOF"#;
     /// いま選ばれているスレッドの添字（`statuses()` と同じ並び）。
     pub fn active_thread(&self) -> usize {
         self.active
+    }
+
+    /// いま選ばれているスレッドが話すエージェント（ラベル）。statusbar の使用量が読む（O11）。
+    pub fn active_agent(&self) -> Option<SharedString> {
+        self.threads
+            .get(self.active)
+            .map(|thread| thread.agent.clone())
+    }
+
+    /// いまのスレッドのレート制限の持ち主（statusbar の使用量チップ・R08）。セッションが動いていれば
+    /// その持ち主、無ければ今の宛先と設定で立てた時の持ち主。
+    pub fn active_usage_account(&self, cx: &App) -> Option<usage::UsageAccount> {
+        let thread = self.threads.get(self.active)?;
+        match (&thread.command_tx, &thread.usage_account) {
+            (Some(_), Some(account)) => Some(account.clone()),
+            _ => Some(self.prospective_usage_account(self.active, cx)),
+        }
+    }
+
+    /// 今の宛先（host）と設定（`agent_servers.<id>`）でこのスレッドのセッションを立てた時の持ち主。
+    fn prospective_usage_account(&self, thread_index: usize, cx: &App) -> usage::UsageAccount {
+        let agent = self
+            .threads
+            .get(thread_index)
+            .map(|thread| thread.agent.clone())
+            .unwrap_or_else(|| SharedString::from("Claude Code"));
+        let agent_override = acp_client::AgentKind::by_label(&agent)
+            .and_then(|kind| agent_server_override(kind.id, cx));
+        usage::UsageAccount::new(agent, &self.dest_usage_host, agent_override.as_ref())
     }
 
     pub fn contains_thread(&self, id: &str) -> bool {
@@ -3837,10 +3912,11 @@ PYEOF"#;
             return;
         }
         match self.start_session(thread_index, cwd, cx) {
-            Some((command_tx, serial)) => {
+            Some((command_tx, serial, usage_account)) => {
                 if let Some(thread) = self.threads.get_mut(thread_index) {
                     thread.command_tx = Some(command_tx);
                     thread.session_serial = serial;
+                    thread.usage_account = Some(usage_account);
                     thread.session_lost = false;
                     thread.session_note =
                         Some(SharedString::from(i18n::t!("agent.session_resuming")));
@@ -3912,12 +3988,13 @@ PYEOF"#;
         if !self.prewarmed.insert(thread_id.to_string()) {
             return;
         }
-        let Some((command_tx, serial)) = self.start_session(index, cwd, cx) else {
+        let Some((command_tx, serial, usage_account)) = self.start_session(index, cwd, cx) else {
             return; // エージェントが導入されていない。ここでは黙る
         };
         if let Some(thread) = self.threads.get_mut(index) {
             thread.command_tx = Some(command_tx);
             thread.session_serial = serial;
+            thread.usage_account = Some(usage_account);
             thread.session_lost = false;
             thread.session_used = false;
         }
@@ -4503,6 +4580,42 @@ PYEOF"#;
                 .child(card)
                 .into_any_element(),
         )
+    }
+
+    /// 開発用: いまのスレッドにレート制限の知らせを流す（`NECODER_USAGE_PROBE`・O11 の offscreen 検証）。
+    /// 本番と同じ `on_event` を通す（置き場への反映・statusbar の再描画まで）。`near` = 上限に近い値 /
+    /// `blocked` = 上限に達して止められた値 / それ以外 = ふだんの値。
+    #[cfg(debug_assertions)]
+    pub fn debug_seed_rate_limits(&mut self, variant: &str, cx: &mut Context<Self>) {
+        use acp_client::usage::{LimitStatus, LimitWindow, RateLimits, WindowUsage};
+        let now_secs = now_unix_ms() / 1000;
+        let (status, five_hour, weekly, opus) = match variant {
+            "near" => (LimitStatus::Warning, 86.0, 41.0, 83.0),
+            "blocked" => (LimitStatus::Rejected, 100.0, 64.0, 70.0),
+            _ => (LimitStatus::Allowed, 42.0, 18.0, 12.0),
+        };
+        let window = |window: LimitWindow, percent: f64, seconds: i64| WindowUsage {
+            window,
+            used_percent: Some(percent),
+            resets_at: Some(now_secs + seconds),
+        };
+        let active = self.active;
+        self.on_event(
+            active,
+            AgentEvent::RateLimits(RateLimits {
+                status: Some(status),
+                windows: vec![
+                    window(LimitWindow::FiveHour, five_hour, 2 * 3_600 + 13 * 60),
+                    window(LimitWindow::Weekly, weekly, 4 * 86_400 + 3 * 3_600),
+                    window(
+                        LimitWindow::Named("seven_day_opus".into()),
+                        opus,
+                        4 * 86_400 + 3 * 3_600,
+                    ),
+                ],
+            }),
+            cx,
+        );
     }
 
     /// 開発用: composer の `/` 補完を開いた状態にする（`NECODER_SLASH_PROBE`・O2 の offscreen 検証）。
@@ -5605,10 +5718,11 @@ PYEOF"#;
             .is_some_and(|thread| thread.command_tx.is_some());
         if !has_session {
             match self.start_session(thread_index, cwd, cx) {
-                Some((command_tx, serial)) => {
+                Some((command_tx, serial, usage_account)) => {
                     if let Some(thread) = self.threads.get_mut(thread_index) {
                         thread.command_tx = Some(command_tx);
                         thread.session_serial = serial;
+                        thread.usage_account = Some(usage_account);
                         thread.session_lost = false;
                     }
                 }
@@ -5664,14 +5778,19 @@ PYEOF"#;
     }
 
     /// スレッド用の常駐 ACP セッションを起動する。バックグラウンドで `run_session` を回し、
-    /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドルを返す。
+    /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドル・通し番号・
+    /// レート制限の持ち主（起動した host と認証の環境・R08）を返す。
     /// claude-agent-acp が見つからなければ `None`。
     fn start_session(
         &self,
         thread_index: usize,
         cwd: PathBuf,
         cx: &mut Context<Self>,
-    ) -> Option<(mpsc::UnboundedSender<SessionCommand>, u64)> {
+    ) -> Option<(
+        mpsc::UnboundedSender<SessionCommand>,
+        u64,
+        usage::UsageAccount,
+    )> {
         // セッションの通し番号。ポンプ終了の後始末（`session_ended`）が「今のセッション」の
         // ものかを照合する。畳んだ直後に立て直した新セッションを、古いポンプが巻き込まないため。
         static SESSION_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -5696,6 +5815,11 @@ PYEOF"#;
         // 起動方法は **設定 → 公開レジストリ → 組み込みカタログ** の順で決める。
         // レジストリはキャッシュを読むだけ（ここは UI thread・ネットワークへは行かない）。
         let agent_override = agent_server_override(kind.id, cx);
+        let usage_account = usage::UsageAccount::new(
+            agent_label.clone(),
+            &self.dest_usage_host,
+            agent_override.as_ref(),
+        );
         let registry = acp_client::registry::load_cached();
         // local はここで解決する（PATH 探索だけ・一瞬）。remote は `command -v` を SSH 越しに
         // 流す＝往復なので、下の背景タスクの中で解決する（UI スレッドで再接続を待たない）。
@@ -5815,7 +5939,7 @@ PYEOF"#;
         })
         .detach();
 
-        Some((command_tx, serial))
+        Some((command_tx, serial, usage_account))
     }
 
     /// `run_session` の [`AgentEvent`] を transcript へ逐次反映する（ストリーミングの心臓部）。
@@ -5833,6 +5957,10 @@ PYEOF"#;
         let mut stocked_configs: Option<(SharedString, Vec<ConfigOption>)> = None;
         let mut stocked_modes: Option<(SharedString, Vec<(SharedString, SharedString)>)> = None;
         let mut stocked_commands: Option<(SharedString, Vec<acp_client::SlashCommand>)> = None;
+        // レート制限の知らせ（O11）。持ち主（セッションのアカウント・R08）ごとの全体の置き場（Global）へ
+        // 末尾で重ねる。`None` = セッションの持ち主が分からない（今の宛先と設定で決め直す）。
+        let mut rate_limits: Option<(Option<usage::UsageAccount>, acp_client::usage::RateLimits)> =
+            None;
         // 会話名を送ってきた agent（在庫に「自分で名付ける」と控える）と、付け替えた名前。
         let mut titled_by_agent: Option<SharedString> = None;
         let mut agent_renamed: Option<SharedString> = None;
@@ -5883,6 +6011,25 @@ PYEOF"#;
                 session_id_changed = thread.acp_session_id.as_deref() != Some(session_id.as_str());
                 thread.acp_session_id = Some(session_id);
                 thread.session_lost = false;
+                // コストの基準（O11）: 新しい会話は 0 から数える。引き継いだ会話は前回の累計が基準で、
+                // 再起動後の最初の再開なら台帳に残る最後の累計を使う。
+                if !resumed {
+                    thread.usage.start_fresh();
+                } else if thread.usage.needs_stored_total() {
+                    let stored = match self
+                        .storage
+                        .as_ref()
+                        .map(|storage| storage.last_session_cost(&thread.id))
+                    {
+                        Some(Ok(total)) => total,
+                        Some(Err(error)) => {
+                            eprintln!("会話の累計コストを読めない: {error:#}");
+                            None
+                        }
+                        None => None,
+                    };
+                    thread.usage.resume_from(stored);
+                }
                 // 目標はエージェント側の会話の状態。新しい会話では消え、引き継いだ会話ならエージェントが
                 // 送り直す（届くまでは前の表示を残す）。
                 if !resumed {
@@ -5992,6 +6139,19 @@ PYEOF"#;
                     thread.tokens_shown = thread.tokens_used as f32;
                 }
             }
+            // 会話の累計コスト（O11）。合算できるのは USD だけ（Claude は USD で送る）。
+            AgentEvent::SessionCost { amount, currency } => {
+                if currency.eq_ignore_ascii_case("USD") {
+                    thread.usage.observe_total(amount);
+                }
+            }
+            // レート制限（O11）はアカウント単位＝持ち主が同じなら 1 つを共有する（末尾で反映）。
+            // 持ち主はこのセッションを立てた時の host と認証の環境（R08）。
+            AgentEvent::RateLimits(limits) => {
+                rate_limits = Some((thread.usage_account.clone(), limits));
+            }
+            // ターンに使ったトークン（O11）。TurnEnded でコストと一緒に台帳へ書く。
+            AgentEvent::TurnUsage(tokens) => thread.usage.observe_tokens(tokens),
             AgentEvent::Modes { modes, current } => {
                 thread.available_modes = modes
                     .into_iter()
@@ -6355,6 +6515,7 @@ PYEOF"#;
             }
             self.sync_running_registry(cx); // 実行中 → 完了をダッシュボードへ（M12-12）
             self.persist_thread(thread_index); // turn 確定分を DB へ（M12-1）
+            self.record_turn_usage(thread_index); // トークンとコストを台帳へ（O11）
             self.maybe_auto_name(thread_index, cx); // 初回ターン後、既定名なら AI がタイトルを付ける（#6）
             self.maybe_tier2_summary(thread_index, cx); // ✳ 1 行要約（P4・Done/Failed 遷移のみ）
             if let Some(thread) = self.threads.get(thread_index) {
@@ -6436,6 +6597,13 @@ PYEOF"#;
         }
         if let Some((agent, commands)) = stocked_commands {
             self.catalog.entry(agent).or_default().commands = commands;
+        }
+        if let Some((account, limits)) = rate_limits {
+            let account =
+                account.unwrap_or_else(|| self.prospective_usage_account(thread_index, cx));
+            // `default_global` は観測者（全ウィンドウの statusbar）を起こす＝値が変わった時だけ呼ぶ。
+            cx.default_global::<usage::UsageLimits>()
+                .record(account, limits, now_unix_ms());
         }
         if let Some(agent) = titled_by_agent {
             self.catalog.entry(agent).or_default().sends_titles = true;
@@ -11440,6 +11608,8 @@ fn seed_threads() -> Vec<Thread> {
         chat: None,
         session_resumable: false,
         last_active_at_ms: 0,
+        usage: usage::CostMeter::default(),
+        usage_account: None,
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
@@ -14055,5 +14225,235 @@ PYEOF"#;
         assert_eq!(saved, vec!["最初の答えの続き", "待機中の報告"]);
         let _ = std::fs::remove_file(settings_path);
         let _ = std::fs::remove_file(db_path);
+    }
+
+    /// O11: ターンのトークンとコスト（会話の累計の差分）を台帳へ書き、レート制限はエージェントごとの
+    /// 置き場（Global）へ重ねる。再起動後に引き継いだ会話のコストは、台帳の最後の累計を基準にする
+    /// （過去の分を 1 ターンに載せない）。
+    #[gpui::test]
+    fn turn_usage_is_recorded_and_rate_limits_are_shared(cx: &mut gpui::TestAppContext) {
+        use acp_client::usage::{LimitStatus, LimitWindow, RateLimits, TurnTokens, WindowUsage};
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_usage_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_auto_name":false,"tier2_summaries":false,"sound_done":"off"}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_usage_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let now_secs = now_unix_ms() / 1000;
+        let turn =
+            |panel: &mut AgentPanel, cost: f64, tokens: u64, cx: &mut Context<AgentPanel>| {
+                let active = panel.active;
+                panel.on_event(active, AgentEvent::TurnStarted, cx);
+                panel.on_event(
+                    active,
+                    AgentEvent::SessionCost {
+                        amount: cost,
+                        currency: "USD".into(),
+                    },
+                    cx,
+                );
+                panel.on_event(
+                    active,
+                    AgentEvent::TurnUsage(TurnTokens {
+                        input: tokens / 2,
+                        output: tokens / 2,
+                        total: tokens,
+                        ..TurnTokens::default()
+                    }),
+                    cx,
+                );
+                panel.on_event(
+                    active,
+                    AgentEvent::TurnEnded {
+                        reason: TurnEnd::Completed,
+                    },
+                    cx,
+                );
+            };
+        let thread_id = panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let active = panel.active;
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "session-1".into(),
+                    resumed: false,
+                    resumable: true,
+                },
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::RateLimits(RateLimits {
+                    status: Some(LimitStatus::Warning),
+                    windows: vec![WindowUsage {
+                        window: LimitWindow::FiveHour,
+                        used_percent: Some(85.0),
+                        resets_at: Some(now_secs + 3_600),
+                    }],
+                }),
+                cx,
+            );
+            turn(panel, 0.4, 100, cx);
+            turn(panel, 1.0, 50, cx);
+            let account = panel
+                .active_usage_account(cx)
+                .expect("いまのスレッドの持ち主");
+            assert_eq!(account, usage::UsageAccount::local("Claude Code", None));
+            let limits = cx
+                .try_global::<usage::UsageLimits>()
+                .expect("レート制限の置き場がある");
+            let claude = limits.account(&account).expect("スレッドの持ち主の値");
+            assert!(claude.near_limit(now_secs), "85% は目立たせる");
+            assert_eq!(panel.active_agent().as_deref(), Some("Claude Code"));
+            panel.threads[active].id.clone()
+        });
+        let rows = storage.daily_usage(0, 0).expect("集計を読める");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].agent, "Claude Code");
+        assert_eq!(rows[0].turns, 2);
+        assert_eq!(rows[0].total_tokens, Some(150));
+        assert!(
+            (rows[0].cost_usd.expect("コスト") - 1.0).abs() < 1e-9,
+            "{rows:?}"
+        );
+
+        // 再起動の真似: スレッドの記憶を消し、同じ会話を引き継ぐ。最初の累計（1.3）は過去の 1.0 を含む。
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].usage = usage::CostMeter::default();
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "session-1".into(),
+                    resumed: true,
+                    resumable: true,
+                },
+                cx,
+            );
+            turn(panel, 1.3, 10, cx);
+        });
+        let rows = storage.daily_usage(0, 0).expect("集計を読める");
+        assert!(
+            (rows[0].cost_usd.expect("コスト") - 1.3).abs() < 1e-9,
+            "引き継いだ会話は差分の 0.3 だけ足す: {rows:?}"
+        );
+        assert_eq!(
+            storage.last_session_cost(&thread_id).expect("読める"),
+            Some(1.3)
+        );
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// R08: 同じ Claude Code でも、認証の環境（設定 `agent_servers.claude.env`）を変えた前後で立てた
+    /// 2 本のセッションの知らせは別の持ち主へ重なり、混ざらない。動いているセッションは後で設定を
+    /// 変えても立てた時の持ち主のまま。statusbar のチップ（`active_usage_account`）はいまのスレッドの
+    /// 持ち主を見る。プロセスは起こさない（持ち主は本番の `start_session` と同じ関数で決める）。
+    #[gpui::test]
+    fn rate_limits_of_two_auth_environments_do_not_mix(cx: &mut gpui::TestAppContext) {
+        use acp_client::usage::{LimitStatus, LimitWindow, RateLimits, WindowUsage};
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_usage_accounts_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_auto_name":false,"tier2_summaries":false,"sound_done":"off","agent_prewarm":false,
+                "agent_servers":{"claude":{"type":"registry","env":{"CLAUDE_CONFIG_DIR":"/tmp/necoder-claude-work"}}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let now_secs = now_unix_ms() / 1000;
+        let limits_at = |percent: f64| {
+            AgentEvent::RateLimits(RateLimits {
+                status: Some(LimitStatus::Allowed),
+                windows: vec![WindowUsage {
+                    window: LimitWindow::FiveHour,
+                    used_percent: Some(percent),
+                    resets_at: Some(now_secs + 3_600),
+                }],
+            })
+        };
+        // 1 本目: 仕事用の置き場でセッションを立てる。
+        let (first, work, _first_commands) = panel.update(cx, |panel, cx| {
+            let first = panel.active;
+            let work = panel.prospective_usage_account(first, cx);
+            let (command_tx, commands) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[first].command_tx = Some(command_tx);
+            panel.threads[first].usage_account = Some(work.clone());
+            (first, work, commands)
+        });
+        // 設定の env を個人用の置き場へ変えてから、2 本目のセッションを立てる。
+        cx.update(|_window, cx| {
+            settings::set_user_value(
+                cx,
+                "agent_servers",
+                serde_json::json!({
+                    "claude": {"type": "registry", "env": {"CLAUDE_CONFIG_DIR": "/tmp/necoder-claude-personal"}}
+                }),
+            )
+        });
+        let (second, personal, _second_commands) = panel.update(cx, |panel, cx| {
+            let second = panel.new_thread_index(cx);
+            let personal = panel.prospective_usage_account(second, cx);
+            let (command_tx, commands) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[second].command_tx = Some(command_tx);
+            panel.threads[second].usage_account = Some(personal.clone());
+            (second, personal, commands)
+        });
+        assert_ne!(work, personal, "認証の置き場が違えば別の持ち主");
+
+        panel.update(cx, |panel, cx| {
+            // 設定は個人用に変わった後でも、1 本目のセッションの知らせは仕事用の持ち主へ。
+            panel.on_event(first, limits_at(20.0), cx);
+            panel.on_event(second, limits_at(70.0), cx);
+            let limits = cx
+                .try_global::<usage::UsageLimits>()
+                .expect("レート制限の置き場がある");
+            assert_eq!(
+                limits
+                    .account(&work)
+                    .map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 20.0)])
+            );
+            assert_eq!(
+                limits
+                    .account(&personal)
+                    .map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 70.0)])
+            );
+            assert!(
+                limits
+                    .account(&usage::UsageAccount::local("Claude Code", None))
+                    .is_none(),
+                "名前だけの持ち主には何も重ねない"
+            );
+
+            // チップはいまのスレッドの持ち主を見る。
+            assert_eq!(panel.active, second);
+            assert_eq!(panel.active_usage_account(cx), Some(personal.clone()));
+            panel.focus_thread(first, cx);
+            assert_eq!(panel.active_usage_account(cx), Some(work.clone()));
+            // セッションが畳まれたスレッドは、今の設定で立て直した時の持ち主を見る（古い持ち主の値を
+            // 今の値として見せない）。
+            panel.threads[first].command_tx = None;
+            assert_eq!(panel.active_usage_account(cx), Some(personal.clone()));
+        });
+        let _ = std::fs::remove_file(settings_path);
     }
 }
