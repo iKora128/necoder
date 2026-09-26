@@ -76,7 +76,9 @@ impl Workspace {
                     let name = theme.name.to_string();
                     self.apply_theme(theme, cx);
                     // set_user_value = 永続化 + global 即時 reload（チップの選択中表示も同じ描画で更新）。
-                    settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+                    let result =
+                        settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+                    self.report_settings_save(result, cx);
                 }
                 Err(error) => eprintln!("テーマを読めない: {error:#}"),
             },
@@ -93,6 +95,20 @@ impl Workspace {
                 self.chrome.pending_open_settings_json = true;
                 cx.notify();
             }
+            settings::SettingsViewEvent::SaveFailed(message) => {
+                self.push_failure_toast(message.clone(), None, cx);
+            }
+        }
+    }
+
+    /// 設定の保存結果を見る。失敗（settings.json を読めないので書かなかった等）はトーストで知らせる。
+    pub(crate) fn report_settings_save(
+        &mut self,
+        result: anyhow::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = result {
+            self.push_failure_toast(settings::save_failure_message(&error), None, cx);
         }
     }
 

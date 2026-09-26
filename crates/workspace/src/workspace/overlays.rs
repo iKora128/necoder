@@ -473,6 +473,16 @@ impl Workspace {
             if let Some(split) = &session.split_editor {
                 split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
             }
+            // ソース管理パネルの入力欄（コミットメッセージ / ブランチ名）も EditorView。
+            let git_inputs: Vec<Entity<EditorView>> = {
+                let panel = session.git_panel.read(cx);
+                std::iter::once(panel.message.clone())
+                    .chain(panel.branch_name.clone())
+                    .collect()
+            };
+            for editor in git_inputs {
+                editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+            }
             for panel in &session.fleet_agents {
                 panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
             }
@@ -518,7 +528,8 @@ impl Workspace {
         self.apply_theme(theme, cx);
         self.overlays.theme_before_preview = None;
         // set_user_value = 永続化 + global 即時 reload（設定画面のテーマチップも同じ描画で追従する）。
-        settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+        let result = settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+        self.report_settings_save(result, cx);
     }
 
     pub(crate) fn open_picker(

@@ -927,6 +927,15 @@ impl TaskSpace {
         self.kind == SpaceKind::Integration
     }
 
+    /// この Task の変更を見る時の比較相手。Task を切った時点の commit（`base_oid`）と比べる＝
+    /// エージェントがコミット済みの変更も出る（HEAD と比べると消える）。base を持たない枠
+    /// （統合先・復元前）は HEAD。Fleet の「変更」から diff を開く時はこれを渡す。
+    pub fn diff_base(&self) -> project::DiffBase {
+        self.base_oid
+            .clone()
+            .map_or(project::DiffBase::Head, project::DiffBase::Commit)
+    }
+
     /// 接続せずに組む（起動時の復元用）。`id` は host id と root のハッシュだけで決まる純粋関数
     /// なので、ここで**正しい値**が入る。storage の鍵はこの id なのでスレッド復元もずれない。
     ///
@@ -1263,9 +1272,8 @@ struct ProjectFlash {
 }
 
 struct NotificationCenter {
-    /// (本文, 色, 世代番号, ジャンプ先)。ジャンプ先 = `Some((session_index, thread_index))` の時、
-    /// クリックでそのプロジェクト＋スレッドへ切り替える（権限待ちトースト用・それ以外は None）。
-    toasts: Vec<(SharedString, Hsla, u32, Option<(usize, usize)>)>,
+    /// 右下のトースト（新しいものが末尾・最大 4 枚）。押した時の行き先は `ToastAction`。
+    toasts: Vec<notifications::Toast>,
     toast_gen: u32,
     /// 前回クラッシュのログパス（起動時に pending マーカーから 1 回だけ拾う・M13）。
     /// Some の間 statusbar に ⚠ チップ → クリックでバグ報告 Issue を開いて消える。
@@ -1715,7 +1723,7 @@ impl Workspace {
             }
         }
         if let Some(path) = self.pending_open_git_diff.take() {
-            self.open_diff_tab_for(path, None, window, cx);
+            self.open_diff_tab_for(path, None, project::DiffBase::Head, window, cx);
         }
         if let Some(hunk) = self.pending_stage_hunk.take() {
             self.stage_hunk(hunk, cx);
