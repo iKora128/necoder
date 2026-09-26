@@ -1690,7 +1690,16 @@ pub struct DiffHunk {
 /// `file`（絶対パス）の HEAD 版テキスト。`HEAD:./<name>`（cwd 相対）で subdir でも正しく引く。
 /// HEAD に無い（新規/未追跡）or repo 外なら `None`。
 fn head_blob_on(host: &dyn Host, dir: &Path, name: &OsStr) -> Option<String> {
-    let spec = format!("HEAD:./{}", name.to_string_lossy());
+    blob_at_on(host, dir, "HEAD", Path::new(name))
+}
+
+/// `rev` 時点の `dir/<relative>` のテキスト（`git show <rev>:./<relative>`・cwd 相対）。
+/// その rev に無い・repo 外・`rev` がオプションに見える（`-` 始まり）なら `None`。
+fn blob_at_on(host: &dyn Host, dir: &Path, rev: &str, relative: &Path) -> Option<String> {
+    if rev.is_empty() || rev.starts_with('-') {
+        return None;
+    }
+    let spec = format!("{rev}:./{}", relative_display(relative));
     let output = run_git(host, dir, ["--no-optional-locks", "show", spec.as_str()]).ok()?;
     output
         .success()
@@ -1771,41 +1780,84 @@ pub fn head_text_on(host: &dyn Host, file: &Path) -> Option<String> {
     head_blob_on(host, dir, name)
 }
 
-/// HEAD vs 現在テキストの **unified diff 文字列**（M11-9 diff タブ）。差分なしは None。
-pub fn unified_diff_on(host: &dyn Host, file: &Path, current: &str) -> Option<String> {
-    use imara_diff::intern::InternedInput;
-    use imara_diff::sources::lines_with_terminator;
-    use imara_diff::{Algorithm, UnifiedDiffBuilder};
-    let head = head_text_on(host, file).unwrap_or_default();
-    if head == current {
-        return None;
+/// `file`（絶対パス）の `rev` 時点のテキスト（`git show <rev>:<path>` 相当）。その rev に無い・
+/// repo 外・読めないなら `None`。親フォルダごと消えていても、残っている祖先から引く
+/// （削除されたファイルの diff を出すため）。
+pub fn rev_text_on(host: &dyn Host, file: &Path, rev: &str) -> Option<String> {
+    let mut anchor = file.parent()?;
+    while !host.metadata(anchor).is_ok_and(|metadata| metadata.is_dir) {
+        anchor = anchor.parent()?;
     }
-    let head_normalized = normalize_newlines(&head);
-    let current_normalized = normalize_newlines(current);
-    let input = InternedInput::new(
-        lines_with_terminator(head_normalized.as_str()),
-        lines_with_terminator(current_normalized.as_str()),
-    );
-    let body = imara_diff::diff(
-        Algorithm::Histogram,
-        &input,
-        UnifiedDiffBuilder::new(&input),
-    );
-    if body.is_empty() {
-        return None;
-    }
-    let name = file
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    Some(format!(
-        "--- a/{name}（HEAD）\n+++ b/{name}（バッファ）\n{body}"
-    ))
+    let relative = file.strip_prefix(anchor).ok()?;
+    blob_at_on(host, anchor, rev, relative)
 }
 
-/// 任意テキスト同士の unified diff（エージェント承認カードの「エディタで開く」・M12-6）。
-/// 差分なしは None。
-pub fn unified_diff_texts(old_text: &str, new_text: &str, name: &str) -> Option<String> {
+/// diff タブの比較相手（左側）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffBase {
+    /// HEAD（ソース管理パネルの行・開いているファイルの diff）。
+    Head,
+    /// 任意の commit。Fleet の Task は worktree を切った時点の commit（`TaskSpace.base_oid`）と比べる
+    /// ＝エージェントがコミット済みの変更も出る。
+    Commit(String),
+}
+
+impl DiffBase {
+    /// git に渡す rev。
+    pub fn rev(&self) -> &str {
+        match self {
+            DiffBase::Head => "HEAD",
+            DiffBase::Commit(oid) => oid,
+        }
+    }
+
+    /// 見出し・タブ題名に出す比較相手（`HEAD` / 短い SHA）。
+    pub fn label(&self) -> String {
+        match self {
+            DiffBase::Head => "HEAD".to_string(),
+            DiffBase::Commit(oid) => oid.chars().take(7).collect(),
+        }
+    }
+}
+
+/// 1 ファイルを base と作業ツリー（またはバッファ）で比べた結果（diff タブの中身の元）。
+/// 本文は `@@` 行から始まる unified diff。見出し行（`---` / `+++`）は UI が自分の言葉で付ける
+/// （この crate は i18n を知らない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileDiff {
+    /// 両方に在って中身が違う。
+    Modified(String),
+    /// base に無く、今は在る（全行が追加）。
+    Added(String),
+    /// base に在って、作業ツリーから消えた（全行が削除）。
+    Deleted(String),
+    /// base と同じ（改行コードの違いだけも同じ扱い）。
+    Unchanged,
+    /// base にも作業ツリーにも無い。
+    Missing,
+}
+
+/// `file` を `base` 時点と比べる。`current` は今の中身で、`None` は「作業ツリーから消えている」。
+pub fn diff_file_on(
+    host: &dyn Host,
+    file: &Path,
+    base: &DiffBase,
+    current: Option<&str>,
+) -> FileDiff {
+    match (rev_text_on(host, file, base.rev()), current) {
+        (None, None) => FileDiff::Missing,
+        (Some(old), None) => FileDiff::Deleted(unified_diff_body(&old, "").unwrap_or_default()),
+        (None, Some(new)) => FileDiff::Added(unified_diff_body("", new).unwrap_or_default()),
+        (Some(old), Some(new)) => match unified_diff_body(&old, new) {
+            Some(body) => FileDiff::Modified(body),
+            None => FileDiff::Unchanged,
+        },
+    }
+}
+
+/// テキスト同士の unified diff の本文（`@@` hunk 列・見出し行なし）。差分なしは None。
+/// 改行コード（CRLF / LF）の違いだけでは差分にしない。
+pub fn unified_diff_body(old_text: &str, new_text: &str) -> Option<String> {
     use imara_diff::intern::InternedInput;
     use imara_diff::sources::lines_with_terminator;
     use imara_diff::{Algorithm, UnifiedDiffBuilder};
@@ -1823,9 +1875,13 @@ pub fn unified_diff_texts(old_text: &str, new_text: &str, name: &str) -> Option<
         &input,
         UnifiedDiffBuilder::new(&input),
     );
-    if body.is_empty() {
-        return None;
-    }
+    (!body.is_empty()).then_some(body)
+}
+
+/// 任意テキスト同士の unified diff（エージェント承認カードの「エディタで開く」・M12-6）。
+/// 差分なしは None。
+pub fn unified_diff_texts(old_text: &str, new_text: &str, name: &str) -> Option<String> {
+    let body = unified_diff_body(old_text, new_text)?;
     Some(format!(
         "--- a/{name}（現在）\n+++ b/{name}（提案）\n{body}"
     ))
@@ -3204,6 +3260,88 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    /// Fleet の「変更」から開く diff は Task の base と比べる。エージェントがコミット済みの変更は
+    /// HEAD 比較では消えるが、base 比較なら出る。削除・新規・フォルダごとの削除も区別する。
+    #[test]
+    fn diff_against_a_base_commit_shows_committed_deleted_and_new_files() {
+        let Some(root) = hook_repo("diff_base") else {
+            return;
+        };
+        let host = LocalHost::shared();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("gone.txt"), "bye\n").unwrap();
+        std::fs::write(root.join("sub").join("deep.txt"), "deep\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "base").unwrap();
+        let base = git_head_oid_on(host.as_ref(), &root).unwrap();
+
+        // エージェントのコミット（base より後）＋作業ツリーの削除・新規。
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "agent").unwrap();
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        std::fs::remove_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+
+        let a = root.join("a.txt");
+        let task_base = DiffBase::Commit(base.clone());
+        assert_eq!(
+            diff_file_on(host.as_ref(), &a, &DiffBase::Head, Some("two\n")),
+            FileDiff::Unchanged,
+            "HEAD 比較ではコミット済みの変更が消える（直した不具合の再現）"
+        );
+        match diff_file_on(host.as_ref(), &a, &task_base, Some("two\n")) {
+            FileDiff::Modified(body) => {
+                assert!(body.contains("-one") && body.contains("+two"), "{body}")
+            }
+            other => panic!("base 比較なら中身が出る: {other:?}"),
+        }
+        match diff_file_on(host.as_ref(), &root.join("gone.txt"), &task_base, None) {
+            FileDiff::Deleted(body) => assert!(body.contains("-bye"), "{body}"),
+            other => panic!("削除は削除として出る: {other:?}"),
+        }
+        match diff_file_on(
+            host.as_ref(),
+            &root.join("sub").join("deep.txt"),
+            &task_base,
+            None,
+        ) {
+            FileDiff::Deleted(body) => assert!(body.contains("-deep"), "{body}"),
+            other => panic!("フォルダごと消えても削除として出る: {other:?}"),
+        }
+        match diff_file_on(
+            host.as_ref(),
+            &root.join("new.txt"),
+            &task_base,
+            Some("new\n"),
+        ) {
+            FileDiff::Added(body) => assert!(body.contains("+new"), "{body}"),
+            other => panic!("base に無いファイルは新規: {other:?}"),
+        }
+        assert_eq!(
+            diff_file_on(host.as_ref(), &root.join("never.txt"), &task_base, None),
+            FileDiff::Missing
+        );
+
+        assert_eq!(
+            rev_text_on(host.as_ref(), &a, &base).as_deref(),
+            Some("one\n")
+        );
+        assert_eq!(
+            rev_text_on(host.as_ref(), &root.join("new.txt"), &base),
+            None
+        );
+        assert_eq!(
+            rev_text_on(host.as_ref(), &a, "--output=/tmp/necoder-probe"),
+            None,
+            "オプションに見える rev は git に渡さない"
+        );
+        assert_eq!(task_base.label(), base[..7]);
+        assert_eq!(DiffBase::Head.label(), "HEAD");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

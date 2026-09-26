@@ -608,6 +608,16 @@ link:
   open_failed: "開けませんでした: %{target}"
 difftab:
   proposal_title: "%{title} ⇄ 提案"
+  title: "%{name} ⇄ %{base}"
+  title_deleted: "%{name} ⇄ %{base}（削除）"
+  header_side: "%{path}（%{side}）"
+  side_working_tree: 作業ツリー
+  side_buffer: バッファ
+  new_file: 新規ファイル
+  deleted_file: 削除されたファイル
+  no_changes: "%{name} は %{base} と同じです（差分はありません）"
+  missing: "%{name} は %{base} にも作業ツリーにもありません"
+  unreadable: "%{name} をテキストとして読めないので diff を出せません"
 update:
   available: ⬆ v%{version} に更新
   get: ⬆ v%{version} を入手

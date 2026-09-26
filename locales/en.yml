@@ -607,6 +607,16 @@ link:
   open_failed: "Could not open %{target}"
 difftab:
   proposal_title: "%{title} ⇄ proposal"
+  title: "%{name} ⇄ %{base}"
+  title_deleted: "%{name} ⇄ %{base} (deleted)"
+  header_side: "%{path} (%{side})"
+  side_working_tree: working tree
+  side_buffer: buffer
+  new_file: new file
+  deleted_file: deleted file
+  no_changes: "No changes: %{name} is the same as %{base}"
+  missing: "%{name} is in neither %{base} nor the working tree"
+  unreadable: "Can't show a diff: %{name} isn't readable as text"
 update:
   available: ⬆ Update to v%{version}
   get: ⬆ Get v%{version}
