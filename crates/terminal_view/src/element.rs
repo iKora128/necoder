@@ -256,6 +256,12 @@ impl Element for TerminalElement {
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         self.terminal.update(cx, |terminal, _cx| {
             terminal.resize(columns, lines, cell_width, line_height);
+            let frame = GridFrame {
+                origin: bounds.origin,
+                cell_width,
+                line_height,
+            };
+            terminal.grid_frame = Some(frame);
             let content = &terminal.content;
             TerminalPrepaint {
                 cells: content.cells.clone(),
@@ -263,11 +269,7 @@ impl Element for TerminalElement {
                 cursor_shape: content.cursor_shape,
                 selection: content.selection,
                 display_offset: content.display_offset,
-                frame: GridFrame {
-                    origin: bounds.origin,
-                    cell_width,
-                    line_height,
-                },
+                frame,
                 underline_offset,
                 strikethrough_offset,
                 focused,

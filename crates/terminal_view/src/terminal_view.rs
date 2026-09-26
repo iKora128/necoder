@@ -10,6 +10,7 @@
 mod dock;
 mod element;
 mod keys;
+mod mouse;
 mod pty_guard;
 mod search;
 pub use dock::{TerminalDock, TerminalDockEvent, TerminalLaunch};
@@ -327,6 +328,16 @@ pub struct TerminalView {
     hovered_link: Option<usize>,
     /// 左ボタンを押したセル（グリッド座標）。離した時に同じセルならクリック＝リンクを開く。
     mouse_down_cell: Option<AlacPoint>,
+    /// アプリへ押したと報告したボタン（離した時に同じボタンで報告する）。
+    reported_button: Option<mouse::ReportButton>,
+    /// 最後に報告したセル（表示座標）。同じセルの中の移動は報告しない。
+    last_reported_cell: Option<(usize, usize)>,
+    /// 直近の描画フレームのグリッドの座標（ホイールの報告で位置 → セルに使う）。
+    grid_frame: Option<GridFrame>,
+    /// 最後にアプリへ伝えたフォーカス（FOCUS_IN_OUT・同じ状態を二度送らない）。
+    reported_focus: Option<bool>,
+    /// フォーカスと窓のアクティブの出入りの購読（最初の描画で張る）。
+    focus_subscriptions: Vec<gpui::Subscription>,
     /// ドラッグ選択中の最新ポインタ位置とフレーム座標。ビュー外へ引っ張った時の
     /// 自動スクロール tick が選択の引き直しに使う（up で消える）。
     drag_frame: Option<DragFrame>,
@@ -446,6 +457,11 @@ impl TerminalView {
             selecting: false,
             hovered_link: None,
             mouse_down_cell: None,
+            reported_button: None,
+            last_reported_cell: None,
+            grid_frame: None,
+            reported_focus: None,
+            focus_subscriptions: Vec::new(),
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
@@ -490,6 +506,11 @@ impl TerminalView {
             selecting: false,
             hovered_link: None,
             mouse_down_cell: None,
+            reported_button: None,
+            last_reported_cell: None,
+            grid_frame: None,
+            reported_focus: None,
+            focus_subscriptions: Vec::new(),
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
@@ -769,6 +790,21 @@ impl TerminalView {
         let (lines, remainder) = wheel_lines(self.scroll_remainder, delta_y, LINE_HEIGHT);
         self.scroll_remainder = remainder;
         if lines == 0 {
+            return;
+        }
+        // アプリがマウスの報告を求めていれば、ホイールも報告する（1 行 = 1 回）。
+        if mouse::wants_report(self.mode, event.modifiers) {
+            if let Some(frame) = self.grid_frame {
+                let cell = self.viewport_point(event.position, frame);
+                let button = if lines > 0 {
+                    mouse::ReportButton::WheelUp
+                } else {
+                    mouse::ReportButton::WheelDown
+                };
+                for _ in 0..lines.unsigned_abs() {
+                    self.report_mouse(button, mouse::ReportAction::Press, cell, event.modifiers);
+                }
+            }
             return;
         }
         let mut term = self.term.lock();
@@ -1160,13 +1196,48 @@ impl TerminalView {
         )
     }
 
+    /// ピクセル位置 → 表示座標のセル（列, 行。報告用・0 始まり）。
+    fn viewport_point(&self, position: gpui::Point<Pixels>, frame: GridFrame) -> (usize, usize) {
+        let (row, column, _) = viewport_cell(
+            position,
+            frame.origin,
+            frame.cell_width,
+            frame.line_height,
+            self.size,
+        );
+        (column, row.max(0) as usize)
+    }
+
+    /// マウスの報告を 1 つ PTY へ送る。
+    fn report_mouse(
+        &mut self,
+        button: mouse::ReportButton,
+        action: mouse::ReportAction,
+        cell: (usize, usize),
+        modifiers: gpui::Modifiers,
+    ) {
+        self.last_reported_cell = Some(cell);
+        if let Some(bytes) = mouse::encode(button, action, cell.0, cell.1, modifiers, self.mode) {
+            self.write_bytes(bytes);
+        }
+    }
+
     /// グリッドの上でボタンを押した（`element.rs` の paint が、このフレームの座標で呼ぶ）。
+    /// アプリがマウスの報告を求めていれば報告し（⇧ を押している間は選択）、そうでなければ選択を始める。
     fn on_grid_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         frame: GridFrame,
         cx: &mut Context<Self>,
     ) {
+        if mouse::wants_report(self.mode, event.modifiers) {
+            if let Some(button) = mouse::ReportButton::from_gpui(event.button) {
+                let cell = self.viewport_point(event.position, frame);
+                self.reported_button = Some(button);
+                self.report_mouse(button, mouse::ReportAction::Press, cell, event.modifiers);
+            }
+            return;
+        }
         if event.button != MouseButton::Left {
             return;
         }
@@ -1188,6 +1259,22 @@ impl TerminalView {
         inside: bool,
         cx: &mut Context<Self>,
     ) {
+        // アプリへの報告中（押したボタンの移動・1003 なら全ての移動）。同じセルの中は送らない。
+        if self.reported_button.is_some() || mouse::wants_report(self.mode, event.modifiers) {
+            let held = self.reported_button.is_some();
+            if mouse::wants_motion(self.mode, held) {
+                let cell = self.viewport_point(event.position, frame);
+                if self.last_reported_cell != Some(cell) {
+                    let button = self
+                        .reported_button
+                        .unwrap_or(mouse::ReportButton::NoButton);
+                    self.report_mouse(button, mouse::ReportAction::Motion, cell, event.modifiers);
+                }
+            }
+            if held {
+                return;
+            }
+        }
         if event.pressed_button == Some(MouseButton::Left) {
             self.update_selection(
                 event.position,
@@ -1215,6 +1302,15 @@ impl TerminalView {
 
     /// ボタンを離した。動かさずに離した（クリック）ならリンクを開く（path:line と URL で同じ操作感）。
     fn on_grid_mouse_up(&mut self, event: &MouseUpEvent, frame: GridFrame, cx: &mut Context<Self>) {
+        // 押した時に報告したボタンは、離した時も（⇧ に関わらず）報告して閉じる。
+        if let Some(button) = self.reported_button {
+            if mouse::ReportButton::from_gpui(event.button) == Some(button) {
+                self.reported_button = None;
+                let cell = self.viewport_point(event.position, frame);
+                self.report_mouse(button, mouse::ReportAction::Release, cell, event.modifiers);
+            }
+            return;
+        }
         if event.button != MouseButton::Left {
             return;
         }
@@ -1413,8 +1509,45 @@ impl Focusable for TerminalView {
     }
 }
 
+impl TerminalView {
+    /// フォーカスの出入りをアプリへ伝える（FOCUS_IN_OUT・`CSI I` / `CSI O`）。
+    /// 端末にフォーカスがあり、かつ窓がアクティブな時を「入っている」とする。
+    fn report_focus(&mut self, window: &mut Window) {
+        let focused = self.focus_handle.is_focused(window) && window.is_window_active();
+        if self.reported_focus == Some(focused) {
+            return;
+        }
+        self.reported_focus = Some(focused);
+        if self.term.lock().mode().contains(TermMode::FOCUS_IN_OUT) {
+            let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+            self.write_bytes(bytes.to_vec());
+        }
+    }
+
+    /// フォーカスと窓のアクティブの出入りを購読する（窓が要るので最初の描画で張る）。
+    fn subscribe_focus_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_subscriptions.is_empty() {
+            return;
+        }
+        // 今の状態は伝えずに覚えるだけ（変わった時だけ伝える＝xterm と同じ）。
+        self.reported_focus =
+            Some(self.focus_handle.is_focused(window) && window.is_window_active());
+        let focus_handle = self.focus_handle.clone();
+        self.focus_subscriptions = vec![
+            cx.on_focus(&focus_handle, window, |this, window, _cx| {
+                this.report_focus(window)
+            }),
+            cx.on_blur(&focus_handle, window, |this, window, _cx| {
+                this.report_focus(window)
+            }),
+            cx.observe_window_activation(window, |this, window, _cx| this.report_focus(window)),
+        ];
+    }
+}
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.subscribe_focus_changes(window, cx);
         let search_bar = self.render_search_bar(window, cx);
         div()
             .key_context("Terminal")
@@ -1770,6 +1903,81 @@ mod action_tests {
             drop(term);
             assert_eq!(line_text(terminal, 0), "$ prompt", "いまの行は先頭に残る");
             assert_eq!(line_text(terminal, 1), "");
+        });
+    }
+
+    /// アプリがマウスの報告（1000 + SGR 1006）を有効にしたら、押す・離すを報告し、選択はしない。
+    /// ⇧ を押している間は従来どおり選択。
+    #[gpui::test]
+    fn mouse_reports_go_to_the_app_unless_shift_is_held(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, _window, cx| {
+            feed(terminal, "\x1b[?1000h\x1b[?1006h");
+            terminal.sync(cx);
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let frame = terminal
+            .read_with(cx, |terminal, _| terminal.grid_frame)
+            .expect("描画でグリッドの座標が決まる");
+        // 3 列目・2 行目のセルの中央。
+        let position = frame.origin + point(frame.cell_width * 2.5, frame.line_height * 1.5);
+        cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::none());
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.debug_written_input(), b"\x1b[<0;3;2M\x1b[<0;3;2m");
+            assert!(
+                terminal.term.lock().selection.is_none(),
+                "報告中は選択しない"
+            );
+        });
+        let shift = gpui::Modifiers {
+            shift: true,
+            ..gpui::Modifiers::none()
+        };
+        cx.simulate_mouse_down(position, MouseButton::Left, shift);
+        cx.simulate_mouse_move(
+            position + point(frame.cell_width * 3., px(0.)),
+            Some(MouseButton::Left),
+            shift,
+        );
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(
+                terminal.debug_written_input().len(),
+                b"\x1b[<0;3;2M\x1b[<0;3;2m".len(),
+                "⇧ の間は報告しない"
+            );
+            assert!(terminal.term.lock().selection.is_some(), "⇧ の間は選択する");
+        });
+    }
+
+    /// FOCUS_IN_OUT（1004）を有効にしたアプリへ、フォーカスの出入りを `CSI I` / `CSI O` で伝える。
+    #[gpui::test]
+    fn focus_changes_are_reported_when_the_app_asks(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, _window, cx| {
+            feed(terminal, "\x1b[?1004h");
+            terminal.sync(cx);
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        // フォーカスの出入りの通知は次の描画で配られる。
+        terminal.update_in(cx, |terminal, window, cx| {
+            window.focus(&terminal.focus_handle, cx);
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        terminal.update_in(cx, |_terminal, window, _cx| window.blur());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.debug_written_input(), b"\x1b[I\x1b[O");
         });
     }
 
