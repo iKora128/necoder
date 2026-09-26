@@ -459,7 +459,8 @@ impl Workspace {
             })
     }
 
-    /// 変更 1 行（色付きレター + ファイル名 + stage/unstage ボタン）。
+    /// 変更 1 行（色付きレター + ファイル名 + stage/unstage ボタン）。行を押すと HEAD との diff を
+    /// タブで開く（± は stage / unstage だけ・行の押下へは伝えない）。
     pub(crate) fn git_change_row(
         &self,
         path: PathBuf,
@@ -480,13 +481,19 @@ impl Workspace {
         let action_path = path.clone();
         div()
             .id((row_id, index))
+            .debug_selector(move || format!("{row_id}-{index}"))
             .flex()
             .items_center()
             .gap(px(6.))
             .px(px(10.))
             .py(px(3.))
             .text_size(px(12.))
+            .cursor_pointer()
             .hover(|style| style.bg(theme.bg3))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| this.request_git_diff(path.clone(), cx)),
+            )
             .child(
                 div()
                     .w(px(12.))
@@ -535,6 +542,14 @@ impl Workspace {
                     ),
             )
             .into_any_element()
+    }
+
+    /// ソース管理パネルの行からの diff 要求。パネルの typed event（`GitPanelEvent::OpenDiff`）で
+    /// shell へ上げ、Window を持つ effect cycle の末尾で開く（`pending_open_git_diff`）。
+    pub(crate) fn request_git_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.git_panel.update(cx, |_panel, cx| {
+            cx.emit(git_ui::GitPanelEvent::OpenDiff(path))
+        });
     }
 
     /// git 履歴（コミットグラフ・M8）。レーン線＝矩形（railway）で描き、色はプロジェクト色
