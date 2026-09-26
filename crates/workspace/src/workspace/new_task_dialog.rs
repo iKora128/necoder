@@ -16,6 +16,8 @@ pub(crate) struct NewTaskDialog {
     root: Option<PathBuf>,
     /// `.necoder/worktree-setup.sh` があるか（開いた時点・「作る」で true に）。
     setup_script_present: bool,
+    /// 準備スクリプトを今回は流さない（詳細のチェック・O20）。`.worktreeinclude` は写す。
+    skip_setup: bool,
     /// 開く直前にフォーカスがあった場所。取り消し（Esc / キャンセル）でそこへ返す。
     previous_focus: Option<FocusHandle>,
 }
@@ -53,6 +55,7 @@ impl Workspace {
             base_editor,
             root,
             setup_script_present,
+            skip_setup: false,
             previous_focus,
         });
         cx.notify();
@@ -92,6 +95,7 @@ impl Workspace {
         let start = project::TaskStart {
             branch: field(&dialog.branch_editor),
             base: field(&dialog.base_editor),
+            skip_setup: dialog.skip_setup,
         };
         self.chrome.new_task = None;
         self.create_prompted_task(prompt, start, cx);
@@ -176,6 +180,23 @@ impl Workspace {
                 body = body
                     .child(field(i18n::t!("fleet.new_task_branch_label"), &dialog.branch_editor))
                     .child(field(i18n::t!("fleet.new_task_base_label"), &dialog.base_editor));
+                // 準備スクリプトを今回は流さない（O20・スクリプトがある時だけ）。
+                if dialog.setup_script_present {
+                    let skip = dialog.skip_setup;
+                    body = body.child(
+                        div().id("new-task-skip-setup").flex().items_center().gap(px(6.)).cursor_pointer()
+                            .text_size(px(11.)).text_color(if skip { self.theme.fg0 } else { self.theme.fg1 })
+                            .child(div().size(px(12.)).rounded(px(3.)).border_1().border_color(self.theme.fg2)
+                                .flex().items_center().justify_center().text_size(px(9.))
+                                .when(skip, |box_| box_.child("✓")))
+                            .child(SharedString::from(i18n::t!("fleet.new_task_skip_setup")))
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(dialog) = this.chrome.new_task.as_mut() { dialog.skip_setup = !dialog.skip_setup; }
+                                cx.notify();
+                            })),
+                    );
+                }
             }
         }
         body = body.child(div().flex().justify_end().gap(px(10.))

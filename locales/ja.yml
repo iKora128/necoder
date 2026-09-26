@@ -260,6 +260,8 @@ control:
   integrate: Integrate
   review: Radar 実行
   fix_instruct: 修正を指示
+  retry_setup: 準備をやり直す
+  skip_setup: 準備を飛ばして始める
   answer: 開いて答える
 news:
   waiting: "承認待ち — %{title}"
@@ -299,6 +301,7 @@ fleet:
   new_task_details: 詳細（ブランチ名・起点）
   new_task_branch_label: "ブランチ（空 = task/<1 行目>。既にあるブランチ名なら、そのブランチの worktree を作る）"
   new_task_base_label: "起点（空 = 統合先の今の HEAD。ブランチ / タグ / コミット）"
+  new_task_skip_setup: 今回は準備スクリプトを実行しない（.worktreeinclude のファイルは写す）
   new_task_from_base: "⎇ %{branch}（起点 %{base}）"
   new_task_no_repository: "統合先（main の worktree）が開いていないので Task を切れません"
   next_allow: "許可"

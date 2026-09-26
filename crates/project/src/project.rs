@@ -3585,6 +3585,7 @@ mod tests {
         let start = |branch: &str, base: &str| TaskStart {
             branch: (!branch.is_empty()).then(|| branch.to_string()),
             base: (!base.is_empty()).then(|| base.to_string()),
+            skip_setup: false,
         };
 
         // 名前も起点も空 = 従来どおり task/<slug> を HEAD から。
@@ -3710,6 +3711,55 @@ mod tests {
             copy_worktree_includes_on(&LocalHost, &root, &fourth).unwrap(),
             WorktreeIncludes::default()
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// O20: 準備スクリプトは今回だけ飛ばせる。失敗した準備は直してからやり直せる。
+    #[test]
+    fn setup_can_be_skipped_and_retried() {
+        let base = scratch("setup_retry");
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join(".necoder")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        let script = worktree_setup_script(&root);
+        std::fs::write(&script, "touch \"$NECODER_TASK_ROOT/prepared\"\n").unwrap();
+
+        let skip = TaskStart {
+            skip_setup: true,
+            ..TaskStart::default()
+        };
+        let (target, _, failure) = create_task_with_on(&LocalHost, &root, "Quick", &skip).unwrap();
+        assert_eq!(failure, None);
+        assert!(!target.join("prepared").exists(), "飛ばした");
+
+        let (target, branch, failure) =
+            create_task_with_on(&LocalHost, &root, "Normal", &TaskStart::default()).unwrap();
+        assert_eq!(failure, None);
+        assert!(target.join("prepared").exists(), "既定は流す");
+
+        std::fs::write(&script, "echo broken >&2\nexit 3\n").unwrap();
+        let (target, branch_failed, failure) =
+            create_task_with_on(&LocalHost, &root, "Broken", &TaskStart::default()).unwrap();
+        let failure = failure.expect("準備の失敗を返す");
+        assert!(failure.contains("broken"), "{failure}");
+        // 直してからやり直す。
+        std::fs::write(&script, "touch \"$NECODER_TASK_ROOT/prepared\"\n").unwrap();
+        prepare_task_worktree_on(&LocalHost, &root, &target, &branch_failed, true).unwrap();
+        assert!(target.join("prepared").exists());
+        assert!(!branch.is_empty());
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -4062,7 +4112,7 @@ ENV
 "#;
 
 /// worktree を作って準備を一度だけ実行する。準備失敗でも作成済み worktree を返し、台帳に failed を残せる。
-pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str) -> Result<(PathBuf, String, Option<String>)> {
+pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str, run_setup: bool) -> Result<(PathBuf, String, Option<String>)> {
     let worktrees = task_worktree_dir(root).context("worktree の作成先がありません")?;
     let stem = task_slug(title);
     let used = git_branches_on(host, root);
@@ -4075,7 +4125,7 @@ pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str) -> Result
         number += 1;
     };
     create_task_worktree_on(host, root, &target, &branch)?;
-    let failure = prepare_task_worktree_on(host, root, &target, &branch).err().map(|error| format!("{error:#}"));
+    let failure = prepare_task_worktree_on(host, root, &target, &branch, run_setup).err().map(|error| format!("{error:#}"));
     Ok((target, branch, failure))
 }
 
@@ -4087,6 +4137,8 @@ pub struct TaskStart {
     pub branch: Option<String>,
     /// 新しいブランチを切る起点（ブランチ / タグ / コミット）。空 = 統合先の HEAD。
     pub base: Option<String>,
+    /// 準備スクリプトを今回は流さない（`.worktreeinclude` の持ち込みはする・O20）。
+    pub skip_setup: bool,
 }
 
 /// [`TaskStart`] に従って Task の worktree を作り、準備スクリプトを流す（O20）。
@@ -4107,14 +4159,15 @@ pub fn create_task_with_on(
         .as_deref()
         .map(str::trim)
         .filter(|base| !base.is_empty());
+    let run_setup = !start.skip_setup;
     let Some(branch) = branch else {
         if base.is_none() {
-            return create_named_task_on(host, root, title);
+            return create_named_task_on(host, root, title, run_setup);
         }
         // 名前は自動・起点だけ指定。
         let (target, branch) = free_task_target(host, root, &task_slug(title))?;
         create_task_worktree_from_on(host, root, &target, &branch, base.unwrap_or("HEAD"))?;
-        let failure = prepare_task_worktree_on(host, root, &target, &branch)
+        let failure = prepare_task_worktree_on(host, root, &target, &branch, run_setup)
             .err()
             .map(|error| format!("{error:#}"));
         return Ok((target, branch, failure));
@@ -4136,7 +4189,7 @@ pub fn create_task_with_on(
         anyhow::ensure!(valid, "ブランチ名に使えない文字があります: {branch}");
         create_task_worktree_from_on(host, root, &target, branch, base.unwrap_or("HEAD"))?;
     }
-    let failure = prepare_task_worktree_on(host, root, &target, branch)
+    let failure = prepare_task_worktree_on(host, root, &target, branch, run_setup)
         .err()
         .map(|error| format!("{error:#}"));
     Ok((target, branch.to_string(), failure))
@@ -4301,13 +4354,15 @@ fn copy_worktree_includes_within_on(
 }
 
 /// 作ったばかりの Task worktree を使える状態にする: `.worktreeinclude` の持ち込み → 準備スクリプト
-/// （スクリプトは持ち込んだファイルを前提にできる）。持ち込みに失敗しても準備は走らせ、両方の失敗を
-/// まとめて返す（台帳の failed に残る）。上限で写さなかった分は失敗にしない（標準エラーに残す）。
+/// （スクリプトは持ち込んだファイルを前提にできる・`run_setup = false` なら流さない）。持ち込みに
+/// 失敗しても準備は走らせ、両方の失敗をまとめて返す（台帳の failed に残る）。上限で写さなかった分は
+/// 失敗にしない（標準エラーに残す）。失敗した準備をやり直す時も同じ関数を呼ぶ（既にある物は写さない）。
 pub fn prepare_task_worktree_on(
     host: &dyn Host,
     main: &Path,
     target: &Path,
     branch: &str,
+    run_setup: bool,
 ) -> Result<()> {
     let includes = copy_worktree_includes_on(host, main, target);
     if let Ok(includes) = &includes {
@@ -4320,7 +4375,11 @@ pub fn prepare_task_worktree_on(
             );
         }
     }
-    let setup = run_task_setup_on(host, main, target, branch);
+    let setup = if run_setup {
+        run_task_setup_on(host, main, target, branch)
+    } else {
+        Ok(())
+    };
     match (includes, setup) {
         (Ok(_), Ok(())) => Ok(()),
         (Err(error), Ok(())) => {

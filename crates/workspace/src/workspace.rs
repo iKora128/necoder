@@ -1278,6 +1278,9 @@ struct ChromeState {
     hide_external_worktrees: bool,
     /// 取り込み中の worktree（レールに開いたら Task にする・O21）。
     adopt_as_task: std::collections::HashSet<PathBuf>,
+    /// 準備に失敗して送れていない ＋ Task の依頼（O20）。「準備をやり直す」/「準備を飛ばして始める」で
+    /// 送る。起動している間だけ（再起動したら Task の名前から書き直す）。
+    pending_task_prompts: HashMap<SpaceId, String>,
     /// 編隊中央のタブ（管制 / グラフ・P3）。
     fleet_center_view: FleetCenterView,
     /// 管制タブのフォーカス（⏎ = キュー先頭へ・keymap context "FleetControl" の足場）。

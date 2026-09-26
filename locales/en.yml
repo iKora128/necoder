@@ -259,6 +259,8 @@ control:
   integrate: Integrate
   review: Run radar
   fix_instruct: Instruct fix
+  retry_setup: Retry setup
+  skip_setup: Start without setup
   answer: Open to answer
 news:
   waiting: "waiting for approval — %{title}"
@@ -298,6 +300,7 @@ fleet:
   new_task_details: Details (branch name, starting point)
   new_task_branch_label: "Branch (empty = task/<first line>; an existing branch name opens a worktree on that branch)"
   new_task_base_label: "Starting point (empty = the integration HEAD; a branch, tag or commit)"
+  new_task_skip_setup: Skip the setup script this time (files in .worktreeinclude are still copied)
   new_task_from_base: "⎇ %{branch} (from %{base})"
   new_task_no_repository: "No integration worktree (main) is open, so a Task cannot be started"
   next_allow: "Allow"

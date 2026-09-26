@@ -255,7 +255,7 @@ pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
     let base_oid =
         project::git_head_oid_on(host.as_ref(), &root).context("Git repository ではありません")?;
     let repository_id = project::repository_id_on(host.as_ref(), &root);
-    let (target, branch, setup_failure) = project::create_named_task_on(host.as_ref(), &root, title)?;
+    let (target, branch, setup_failure) = project::create_named_task_on(host.as_ref(), &root, title, true)?;
     let target = paths::canonicalize(&target).unwrap_or(target);
     let now = unix_ms();
     let record = TaskSpaceRecord {
