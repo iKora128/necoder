@@ -155,6 +155,10 @@ impl CommandRegistry {
                 action_name: "workspace::MoveTerminalToEditor",
             },
             CommandEntry {
+                label_key: "cmd.toggle_floating_terminal",
+                action_name: "workspace::ToggleFloatingTerminal",
+            },
+            CommandEntry {
                 label_key: "cmd.toggle_git_panel",
                 action_name: "workspace::ToggleGitPanel",
             },

@@ -107,6 +107,8 @@ pub struct TerminalDock {
     accent: Hsla,
     /// よく使うコマンドの帯を開いているか（ドックの ▶・O25）。
     quick_open: bool,
+    /// 閉じるボタンのツールチップ（無ければ「下ドックを閉じる」・浮かべた端末は「隠す」・O24）。
+    close_tip: Option<SharedString>,
     /// テストで PTY を起動しない（[`Self::use_test_terminals`]）。本番のビルドには存在しない。
     #[cfg(feature = "test-support")]
     test_terminals: bool,
@@ -120,6 +122,7 @@ impl TerminalDock {
             active: 0,
             launch,
             quick_open: false,
+            close_tip: None,
             accent: theme.fg2,
             theme,
             #[cfg(feature = "test-support")]
@@ -156,6 +159,12 @@ impl TerminalDock {
     /// ドックのタブの端末（分割も含めて左から）。
     fn docked(&self) -> impl Iterator<Item = &Entity<TerminalView>> {
         self.tabs.iter().flat_map(|tab| tab.panes.iter())
+    }
+
+    /// 閉じるボタンのツールチップを差し替える（下ドック以外に置く時・O24 の浮かべた端末）。
+    pub fn with_close_tip(mut self, tip: impl Into<SharedString>) -> Self {
+        self.close_tip = Some(tip.into());
+        self
     }
 
     /// 以後作る端末と、今ある端末のプロジェクト色。
@@ -790,7 +799,9 @@ impl Render for TerminalDock {
                     .hover(|style| style.text_color(theme.fg0))
                     .child("×")
                     .tooltip(Tooltip::text(
-                        i18n::t!("terminal.close_dock_tip"),
+                        self.close_tip
+                            .clone()
+                            .unwrap_or_else(|| i18n::t!("terminal.close_dock_tip").into()),
                         theme.clone(),
                     ))
                     .on_mouse_down(

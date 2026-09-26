@@ -362,6 +362,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-k cmd-t": "workspace::ThemeSelector",
       "cmd-k cmd-c": "workspace::ProjectColor",
       "cmd-j": "workspace::ToggleTerminal",
+      "ctrl-`": "workspace::ToggleFloatingTerminal",
       "cmd-i": "workspace::InlineEdit",
       "cmd-\\": "workspace::SplitRight",
       "ctrl-shift-g": "workspace::ToggleGitPanel",
