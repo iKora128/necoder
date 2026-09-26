@@ -116,6 +116,7 @@ agent:
   stop: Stop esc
   running_hint: esc to interrupt
   running_thinking: Thinking
+  slash_footer: "%{count} commands · ↑↓ to choose · Enter / Tab to insert · esc to close"
   more_lines: "… (+%{n} lines)"
 hunk:
   stage: Stage this hunk

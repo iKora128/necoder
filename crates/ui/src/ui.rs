@@ -470,7 +470,8 @@ pub fn fuzzy_score_for_bench(query: &str, text: &str) -> Option<i32> {
 
 /// 素朴なサブシーケンス fuzzy スコア。query の各文字が text に順に現れれば `Some(score)`。
 /// 連続一致・先頭寄りを加点。大文字小文字は無視。空 query は全一致（スコア 0）。
-fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
+/// Picker（⌘P 等）と composer の `/` 補完が同じ並びになるよう共有する。
+pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     if query.is_empty() {
         return Some(0);
     }

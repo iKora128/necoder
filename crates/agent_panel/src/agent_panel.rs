@@ -1616,6 +1616,99 @@ fn agent_title_for_tab(title: &str) -> Option<SharedString> {
 /// 二重になり名前も 2 回変わる。待っても来なければ自前で付ける。
 const AGENT_TITLE_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// prompt がエージェントの slash コマンドか（`/name` で始まり、name に `/` を含まない）。
+/// `/Users/me/a.rs を見て` のようにパスで始まる依頼は slash ではない（添付・context を付けて送る）。
+fn is_slash_command(prompt: &str) -> bool {
+    let Some(rest) = prompt.strip_prefix('/') else {
+        return false;
+    };
+    let name = rest.split_whitespace().next().unwrap_or("");
+    !name.is_empty() && !name.contains('/')
+}
+
+/// composer の `/` 補完の局面（O2）。composer の本文が変わるたびに [`slash_input`] で読み直す。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum SlashInput {
+    /// 補完の対象外（行頭が `/` でない・複数行・IME 変換中）。
+    #[default]
+    Inactive,
+    /// コマンド名を打っている途中（`/` の後ろ・空白の前）。値は絞り込み語。
+    Query(String),
+    /// `/name ` まで打って引数がまだ空。値はコマンド名（引数のヒントを出す）。
+    AwaitingArgs(String),
+}
+
+/// composer の `/` 補完の状態。候補そのものは描画のたびにスレッドの一覧から絞る（持たない）。
+#[derive(Default)]
+struct SlashCompletion {
+    input: SlashInput,
+    /// 選んでいる候補（絞り込み後の並びの添字）。絞り込み語が変わると先頭へ戻す。
+    selected: usize,
+    /// Esc で閉じた。行頭の `/` が消えるまで開き直さない。
+    dismissed: bool,
+}
+
+/// `/` 補完が開いている間に先取りするキー（composer の Editor アクションから写す）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlashKey {
+    Up,
+    Down,
+    /// Enter / Tab: 選んでいる候補を入れる。
+    Accept,
+    /// Esc: 閉じる。
+    Dismiss,
+}
+
+/// `/` 補完に出す候補の最大行数（超えた分は選択に合わせて窓をずらす）。
+const SLASH_POPUP_ROWS: usize = 8;
+
+/// composer の 1 行目から `/` 補完の局面を読む。`single_line` = 本文が 1 行だけ、
+/// `composing` = IME 変換中（変換中は開かない＝Enter を奪わない）。
+fn slash_input(first_line: &str, single_line: bool, composing: bool) -> SlashInput {
+    if composing || !single_line {
+        return SlashInput::Inactive;
+    }
+    let Some(rest) = first_line.strip_prefix('/') else {
+        return SlashInput::Inactive;
+    };
+    match rest.find(char::is_whitespace) {
+        None => SlashInput::Query(rest.to_string()),
+        Some(end) => {
+            let (name, args) = rest.split_at(end);
+            if !name.is_empty() && args.trim().is_empty() {
+                SlashInput::AwaitingArgs(name.to_string())
+            } else {
+                SlashInput::Inactive
+            }
+        }
+    }
+}
+
+/// `/` 補完の候補を絞って並べる（`commands` の添字を返す）。名前へのあいまい一致
+/// （`ui::fuzzy_score`＝⌘P と同じ採点）の高い順、同点はエージェントが広告した順。
+fn slash_matches(commands: &[acp_client::SlashCommand], query: &str) -> Vec<usize> {
+    let mut scored: Vec<(usize, i32)> = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| {
+            ui::fuzzy_score(query, &command.name).map(|score| (index, score))
+        })
+        .collect();
+    // 安定ソート＝同点は元の並びのまま。
+    scored.sort_by(|left, right| right.1.cmp(&left.1));
+    scored.into_iter().map(|(index, _)| index).collect()
+}
+
+/// 候補を選んだ時に composer へ入れる文字列。引数を続けて打てるよう末尾に空白を付ける。
+/// Codex の skill（`$name`）は本文中の `$name` で呼ぶので `/` を付けない。
+fn slash_insertion(name: &str) -> String {
+    if name.starts_with('$') {
+        format!("{name} ")
+    } else {
+        format!("/{name} ")
+    }
+}
+
 /// 現在時刻（unix ms）。スレッドの開始/最終入力時刻の記録に使う。
 pub fn now_unix_ms() -> i64 {
     std::time::SystemTime::now()
@@ -1804,6 +1897,8 @@ pub struct AgentPanel {
     /// 自前の命名（[`Self::maybe_auto_name`]）を待っている/走らせているスレッド id。
     /// ターンが続けて終わっても同じスレッドに命名の子プロセスを重ねない。
     auto_naming: std::collections::HashSet<String>,
+    /// composer の `/` 補完（O2）。composer の変化を observe して局面を読み直す。
+    slash: SlashCompletion,
 }
 
 impl gpui::EventEmitter<PanelEvent> for AgentPanel {}
@@ -1882,6 +1977,13 @@ impl AgentPanel {
             ComposerEvent::Submit => panel.submit(cx),
             // 折り返し行数が変わった（入力・パネル幅変更）→ auto-grow の高さを再計算する。
             ComposerEvent::ContentHeightChanged => cx.notify(),
+        })
+        .detach();
+        // 本文・IME の状態が変わるたびに `/` 補完の局面を読み直す（O2）。打鍵・Backspace・貼り付け・
+        // undo・タブ切替の下書き差し替えのどれでも composer は notify するので、ここ 1 箇所で拾える。
+        // 点滅の notify でも呼ばれるが、局面が変わらなければ何もしない（再描画を増やさない）。
+        cx.observe(&composer, |panel, _composer, cx| {
+            panel.refresh_slash_state(cx)
         })
         .detach();
         // 画像の貼り付け（スクリーンショット）→ 添付にして、次の 1 通に image ブロックで添える。
@@ -2150,6 +2252,7 @@ PYEOF"#;
             transcript_search: None,
             preview_exists: RefCell::new(HashMap::new()),
             auto_naming: std::collections::HashSet::new(),
+            slash: SlashCompletion::default(),
         }
     }
 
@@ -4373,6 +4476,53 @@ PYEOF"#;
         )
     }
 
+    /// 開発用: composer の `/` 補完を開いた状態にする（`NECODER_SLASH_PROBE`・O2 の offscreen 検証）。
+    /// `text` を composer に入れてフォーカスする。`fake` なら偽のコマンド一覧を先に流し込む
+    /// （実エージェント無しで描画を確かめる。偽でなければ先張りしたセッションの本物の一覧を使う）。
+    #[cfg(debug_assertions)]
+    pub fn debug_slash_probe(
+        &mut self,
+        text: &str,
+        fake: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if fake {
+            let command =
+                |name: &str, description: &str, hint: Option<&str>| acp_client::SlashCommand {
+                    name: name.to_string(),
+                    description: description.to_string(),
+                    hint: hint.map(str::to_string),
+                };
+            let commands = vec![
+                command(
+                    "compact",
+                    "Clear conversation history but keep a summary in context",
+                    Some("<optional custom summarization instructions>"),
+                ),
+                command("context", "Visualize current context usage", None),
+                command("cost", "Show the total cost and duration", None),
+                command(
+                    "review",
+                    "Review a pull request",
+                    Some("optional review instructions"),
+                ),
+                command(
+                    "mcp:github:pr",
+                    "Create a pull request from the current branch (MCP)",
+                    Some("title"),
+                ),
+                command("init", "Initialize a new CLAUDE.md file", None),
+            ];
+            let active = self.active;
+            self.on_event(active, AgentEvent::Commands(commands), cx);
+        }
+        self.composer
+            .update(cx, |composer, cx| composer.set_plain_text(text, cx));
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
     /// 開発用: フォーカス無しで改名モーダルを開く（offscreen スクショ検証・#4）。
     #[cfg(debug_assertions)]
     pub fn debug_start_rename(&mut self, cx: &mut Context<Self>) {
@@ -5195,6 +5345,88 @@ PYEOF"#;
         }
     }
 
+    /// composer の本文から `/` 補完の局面を読み直す（composer の notify ごと・O2）。
+    fn refresh_slash_state(&mut self, cx: &mut Context<Self>) {
+        let composer = self.composer.read(cx);
+        let first_line = composer.first_line_text();
+        let single_line = composer.buffer().len_bytes() == first_line.len();
+        let input = slash_input(&first_line, single_line, composer.has_marked_text());
+        if input == self.slash.input {
+            return;
+        }
+        if input == SlashInput::Inactive {
+            self.slash.dismissed = false; // 行頭の `/` が消えた＝次に `/` を打てばまた開く
+        }
+        self.slash.selected = 0;
+        self.slash.input = input;
+        cx.notify();
+    }
+
+    /// アクティブスレッドの `/` 補完の候補。まだ届いていなければ同じ agent の在庫で代用する
+    /// （Chat は除く＝チャットごとにフォルダが違い、一覧も違いうる）。
+    fn slash_commands(&self) -> &[acp_client::SlashCommand] {
+        let Some(thread) = self.threads.get(self.active) else {
+            return &[];
+        };
+        if !thread.commands.is_empty() || self.chat_mode {
+            return &thread.commands;
+        }
+        self.catalog
+            .get(&thread.agent)
+            .map(|advertisement| advertisement.commands.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// いま `/` 補完に出す候補（[`Self::slash_commands`] の添字・並び順）。出さない時は空
+    /// （コマンド名を打っていない・Esc で閉じた・1 件も当たらない）。
+    fn slash_popup_items(&self) -> Vec<usize> {
+        let SlashInput::Query(query) = &self.slash.input else {
+            return Vec::new();
+        };
+        if self.slash.dismissed {
+            return Vec::new();
+        }
+        slash_matches(self.slash_commands(), query)
+    }
+
+    /// `/` 補完が開いている間の ↑↓ / Enter・Tab / Esc。composer の Editor アクション（MoveUp /
+    /// MoveDown / Newline / TabIndent / Cancel）を capture で先取りする。開いていない時・IME 変換中は
+    /// 何もしない＝アクションはそのまま composer へ流れる（変換確定の Enter を奪わない）。
+    fn on_slash_key(&mut self, key: SlashKey, cx: &mut Context<Self>) {
+        if self.composer.read(cx).has_marked_text() {
+            return;
+        }
+        let items = self.slash_popup_items();
+        if items.is_empty() {
+            return;
+        }
+        cx.stop_propagation();
+        let selected = self.slash.selected.min(items.len() - 1);
+        match key {
+            SlashKey::Up => self.slash.selected = (selected + items.len() - 1) % items.len(),
+            SlashKey::Down => self.slash.selected = (selected + 1) % items.len(),
+            SlashKey::Accept => self.accept_slash_command(items[selected], cx),
+            SlashKey::Dismiss => self.slash.dismissed = true,
+        }
+        cx.notify();
+    }
+
+    /// 候補を composer へ入れる（`/name ` に置き換え・キャレットは末尾＝引数を続けて打てる）。
+    fn accept_slash_command(&mut self, command_index: usize, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .slash_commands()
+            .get(command_index)
+            .map(|command| command.name.clone())
+        else {
+            return;
+        };
+        let text = slash_insertion(&name);
+        // 1 回の編集で置き換える＝⌘Z で打っていた `/co` に戻せる。
+        self.composer
+            .update(cx, |composer, cx| composer.replace_all_text(&text, cx));
+        self.slash.selected = 0;
+    }
+
     /// 文脈の圧縮（`/compact`）をエージェントへ依頼する（Claude Code の slash コマンドを turn として送る）。
     /// 実行中は無視（ターンの最中には送らない）。トークンメーター横のボタンから呼ぶ。
     fn compact_context(&mut self, cx: &mut Context<Self>) {
@@ -5234,17 +5466,25 @@ PYEOF"#;
 
     fn send_prompt_entry(&mut self, prompt: String, ledger: bool, cx: &mut Context<Self>) {
         let thread_index = self.active;
+        // slash コマンド（`/clear` `/compact` 等）は**本文 1 ブロックだけ**で送る。エージェントに
+        // よってコマンドとして読むブロックが違い（Claude は末尾・Codex は先頭）、添付や画像を
+        // 1 つでも足すとどちらかで効かない（`acp_client::prompt_blocks` の説明）。スレッドの
+        // context（Captain の役割・現況表）・`@path` の添付・画像は付けない。添付は外さずに残す＝
+        // 次の通常の送信に付く（毎ターン送る設計はそのまま）。
+        let is_slash_command = is_slash_command(&prompt);
         // 添付のうち**画像**は中身を ACP の image ブロックで送る（貼り付けたスクリーンショット・
         // ドロップした画像）。読めなかった物・大きすぎる物はパスの添付として残す。
         let (images, image_paths) = self
             .threads
             .get(thread_index)
+            .filter(|_| !is_slash_command)
             .map(|thread| load_prompt_images(&thread.context, self.dest_cwd.as_deref()))
             .unwrap_or_default();
         // それ以外の添付は prompt 先頭へ `@path` として付ける（表示は素の prompt のまま）。
         let mut context_prefix: String = self
             .threads
             .get(thread_index)
+            .filter(|_| !is_slash_command)
             .map(|thread| {
                 thread
                     .context
@@ -5254,9 +5494,6 @@ PYEOF"#;
                     .collect()
             })
             .unwrap_or_default();
-        // slash コマンド（`/clear` `/compact` 等）は先頭が `/` でないとエージェントが認識しない。
-        // スレッドの context（Captain の役割・現況表）は付けずにそのまま送る。
-        let is_slash_command = prompt.starts_with('/');
         if let Some(context) = self
             .threads
             .get(thread_index)
@@ -9437,7 +9674,176 @@ PYEOF"#;
         cx.notify();
     }
 
-    fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// composer の `/` 補完（O2）。composer の真上に重ねる。面は ＋context・選択ピルのメニューと
+    /// 同じ（bg2・枠 1px・角 8・影）で、**色は中立**（選択中の行は bg3・識別色は使わない＝§1.3）。
+    /// コマンド名を打っている間は候補（名前・引数ヒント・説明）を、`/name ` まで入って引数がまだ
+    /// 空の間はそのコマンドの引数ヒントだけを 1 行出す。
+    fn render_slash_popup(
+        &self,
+        composer_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !composer_focused {
+            return None;
+        }
+        let theme = self.theme.clone();
+        let commands = self.slash_commands();
+        let display_name = |name: &str| -> SharedString {
+            if name.starts_with('$') {
+                SharedString::from(name.to_string())
+            } else {
+                SharedString::from(format!("/{name}"))
+            }
+        };
+        let card = || {
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(8.))
+                .p(px(4.))
+                .shadow(vec![gpui::BoxShadow::new(
+                    px(0.),
+                    px(6.),
+                    gpui::hsla(0., 0., 0., 0.4),
+                )
+                .blur_radius(px(16.))])
+                // 下の transcript へクリック・ホイールを通さない。
+                .occlude()
+        };
+        let body = match &self.slash.input {
+            SlashInput::Query(_) => {
+                let items = self.slash_popup_items();
+                if items.is_empty() {
+                    return None;
+                }
+                let selected = self.slash.selected.min(items.len() - 1);
+                // 選んでいる行が必ず見えるように、最大行数の窓をずらす。
+                let start = selected.saturating_sub(SLASH_POPUP_ROWS - 1);
+                let rows = items
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(SLASH_POPUP_ROWS)
+                    .filter_map(|(position, &command_index)| {
+                        let command = commands.get(command_index)?;
+                        let is_selected = position == selected;
+                        Some(
+                            div()
+                                .id(("slash-command", position))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .px(px(9.))
+                                .py(px(4.))
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .when(is_selected, |row| row.bg(theme.bg3))
+                                .hover(|style| style.bg(theme.bg3))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(12.))
+                                        .text_color(if is_selected { theme.fg0 } else { theme.fg1 })
+                                        .child(display_name(&command.name)),
+                                )
+                                // 引数ヒントは斜体で説明と見分ける（どちらも fg2・色は足さない）。
+                                .children(command.hint.clone().map(|hint| {
+                                    div()
+                                        .flex_none()
+                                        .max_w(px(200.))
+                                        .truncate()
+                                        .italic()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(hint)
+                                }))
+                                // 説明は残りの幅で 1 行に切る（flex 行で縮ませる本文は flex_1 + min_w_0）。
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(command.description.clone()),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        this.accept_slash_command(command_index, cx);
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                card().children(rows).child(
+                    div()
+                        .mt(px(2.))
+                        .px(px(9.))
+                        .pt(px(4.))
+                        .pb(px(2.))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_size(px(10.))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!(
+                            "agent.slash_footer",
+                            "count" => items.len()
+                        ))),
+                )
+            }
+            SlashInput::AwaitingArgs(name) => {
+                let hint = commands
+                    .iter()
+                    .find(|command| command.name == *name)
+                    .and_then(|command| command.hint.clone())?;
+                card().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(9.))
+                        .py(px(4.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .text_color(theme.fg1)
+                                .child(display_name(name)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .italic()
+                                .text_size(px(11.))
+                                .text_color(theme.fg2)
+                                .child(hint),
+                        ),
+                )
+            }
+            SlashInput::Inactive => return None,
+        };
+        Some(
+            div()
+                .absolute()
+                .left(px(12.))
+                .right(px(12.))
+                // composer の上端に付ける（composer は自動で伸びるので px で決めない）。4px 浮かせる。
+                .bottom(relative(1.))
+                .pb(px(4.))
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    fn render_composer(&self, composer_focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
         let drop_glow = color.alpha(0.14); // ファイル D&D 中のハイライト
@@ -9471,6 +9877,7 @@ PYEOF"#;
 
         div()
             .id("composer-drop")
+            .relative() // `/` 補完を composer の真上へ重ねる基準
             .flex_none()
             .w_full()
             .min_w_0()
@@ -9490,6 +9897,7 @@ PYEOF"#;
             .on_drop(cx.listener(|this, dragged: &DraggedFile, _window, cx| {
                 this.add_context(dragged.path.clone(), cx);
             }))
+            .children(self.render_slash_popup(composer_focused, cx))
             .child(
                 div()
                     .flex()
@@ -9636,6 +10044,28 @@ PYEOF"#;
                                     .clamp(base, COMPOSER_INPUT_MAX)
                             }))
                             .overflow_hidden()
+                            // `/` 補完が開いている間だけ ↑↓ / Enter・Tab / Esc を先取りする（O2）。
+                            // composer の Editor アクションより先に capture で受け、閉じている時・
+                            // IME 変換中は何もせず composer へ流す。
+                            .capture_action(cx.listener(|this, _: &editor_view::MoveUp, _, cx| {
+                                this.on_slash_key(SlashKey::Up, cx)
+                            }))
+                            .capture_action(cx.listener(
+                                |this, _: &editor_view::MoveDown, _, cx| {
+                                    this.on_slash_key(SlashKey::Down, cx)
+                                },
+                            ))
+                            .capture_action(cx.listener(|this, _: &editor_view::Newline, _, cx| {
+                                this.on_slash_key(SlashKey::Accept, cx)
+                            }))
+                            .capture_action(cx.listener(
+                                |this, _: &editor_view::TabIndent, _, cx| {
+                                    this.on_slash_key(SlashKey::Accept, cx)
+                                },
+                            ))
+                            .capture_action(cx.listener(|this, _: &editor_view::Cancel, _, cx| {
+                                this.on_slash_key(SlashKey::Dismiss, cx)
+                            }))
                             .child(self.composer.clone()),
                     )
                     // Zed 風の下部コントロール列: エージェント / 権限モード / モデル / effort
@@ -9815,6 +10245,8 @@ impl Render for AgentPanel {
         if self.transcript_top_item_pending() {
             cx.on_next_frame(window, |_, _, cx| cx.notify());
         }
+        // `/` 補完は composer にフォーカスがある時だけ出す（キーの先取りも composer 経由だけ）。
+        let composer_focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let caret_blink_enabled = !self.active_thread_running();
         self.composer.update(cx, |composer, cx| {
             composer.set_caret_blink_enabled(caret_blink_enabled, cx);
@@ -9886,7 +10318,7 @@ impl Render for AgentPanel {
             // セッション断のバナー（再開ボタン）/ 再開の一言。
             .children(self.render_session_banner(cx))
             .children(self.render_queued_prompts(cx))
-            .child(self.render_composer(cx))
+            .child(self.render_composer(composer_focused, cx))
             // セレクタのドロップダウンは各ピルの子として描く（render_selector_pill 内）。
             .when(self.context_menu_open, |element| {
                 element.child(self.render_context_menu(cx))
@@ -13181,5 +13613,257 @@ PYEOF"#;
         );
         let _ = std::fs::remove_file(settings_path);
         let _ = std::fs::remove_file(db_path);
+    }
+
+    // ── O2: composer の `/` 補完 ──
+
+    fn slash(name: &str, description: &str, hint: Option<&str>) -> acp_client::SlashCommand {
+        acp_client::SlashCommand {
+            name: name.into(),
+            description: description.into(),
+            hint: hint.map(str::to_string),
+        }
+    }
+
+    /// 行頭の `/` の後ろ・空白の前だけが絞り込み語。`/name ` まで入れば引数待ち。
+    /// 複数行・IME 変換中・行頭でない `/` は対象外。
+    #[test]
+    fn slash_input_reads_the_leading_command_word() {
+        assert_eq!(
+            slash_input("/", true, false),
+            SlashInput::Query(String::new())
+        );
+        assert_eq!(
+            slash_input("/co", true, false),
+            SlashInput::Query("co".into())
+        );
+        assert_eq!(
+            slash_input("/review ", true, false),
+            SlashInput::AwaitingArgs("review".into())
+        );
+        assert_eq!(
+            slash_input("/review 認証", true, false),
+            SlashInput::Inactive
+        );
+        assert_eq!(
+            slash_input("/co", false, false),
+            SlashInput::Inactive,
+            "複数行"
+        );
+        assert_eq!(
+            slash_input("/こ", true, true),
+            SlashInput::Inactive,
+            "IME 変換中"
+        );
+        assert_eq!(slash_input("see /co", true, false), SlashInput::Inactive);
+        assert_eq!(slash_input("", true, false), SlashInput::Inactive);
+    }
+
+    /// あいまい一致（⌘P と同じ採点）の高い順、同点はエージェントの並び。当たらない物は出さない。
+    #[test]
+    fn slash_matches_rank_by_fuzzy_score_then_agent_order() {
+        let commands = vec![
+            slash("review-commit", "Review a commit", Some("commit sha")),
+            slash("compact", "Compact", None),
+            slash("mcp:github:pr", "Open a PR", None),
+            slash("context", "Context usage", None),
+        ];
+        let names = |query: &str| -> Vec<&str> {
+            slash_matches(&commands, query)
+                .into_iter()
+                .map(|index| commands[index].name.as_str())
+                .collect()
+        };
+        assert_eq!(names("co"), vec!["compact", "context", "review-commit"]);
+        assert_eq!(names("pr"), vec!["mcp:github:pr"]);
+        assert_eq!(
+            names(""),
+            vec!["review-commit", "compact", "mcp:github:pr", "context"],
+            "空の絞り込み語は広告された順のまま全部"
+        );
+        assert!(names("zz").is_empty());
+        assert_eq!(slash_insertion("compact"), "/compact ");
+        assert_eq!(
+            slash_insertion("$lint-fix"),
+            "$lint-fix ",
+            "Codex の skill は $ で呼ぶ"
+        );
+    }
+
+    #[test]
+    fn a_leading_path_is_not_a_slash_command() {
+        assert!(is_slash_command("/compact"));
+        assert!(is_slash_command("/review 認証まわり"));
+        assert!(is_slash_command("/mcp:github:pr 12"));
+        assert!(!is_slash_command("/Users/me/a.rs を見て"));
+        assert!(!is_slash_command("/"));
+        assert!(!is_slash_command("compact"));
+    }
+
+    /// 実際のキー配送（既定 keymap の Editor 文脈）で: ↑↓ で選び、Enter / Tab で `/name ` を入れる。
+    /// Esc は補完だけを閉じ、走行中のターンは止めない（閉じた後の Esc は従来どおり中断）。
+    /// IME 変換中は開かない。
+    #[gpui::test]
+    fn slash_popup_keys_choose_and_insert_a_command(cx: &mut gpui::TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        let settings_path = init_test_settings(cx, "slash-keys");
+        cx.update(|cx| {
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let set_text = |cx: &mut gpui::VisualTestContext, text: &'static str| {
+            panel.update_in(cx, |panel, _window, cx| {
+                panel
+                    .composer
+                    .update(cx, |composer, cx| composer.set_plain_text(text, cx));
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        let composer_text = |cx: &mut gpui::VisualTestContext| {
+            panel.read_with(cx, |panel, cx| panel.composer.read(cx).plain_text())
+        };
+        panel.update_in(cx, |panel, window, cx| {
+            let active = panel.active;
+            panel.on_event(
+                active,
+                AgentEvent::Commands(vec![
+                    slash("compact", "Compact", None),
+                    slash("context", "Context usage", None),
+                    slash("cost", "Cost", None),
+                    slash("review", "Review", Some("instructions")),
+                ]),
+                cx,
+            );
+            panel.focus_composer(window, cx);
+        });
+        set_text(cx, "/co");
+        let names = |cx: &mut gpui::VisualTestContext| -> Vec<String> {
+            panel.read_with(cx, |panel, _cx| {
+                panel
+                    .slash_popup_items()
+                    .into_iter()
+                    .map(|index| panel.slash_commands()[index].name.clone())
+                    .collect()
+            })
+        };
+        assert_eq!(names(cx), vec!["compact", "context", "cost"]);
+
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("up up");
+        assert_eq!(
+            panel.read_with(cx, |panel, _cx| panel.slash.selected),
+            2,
+            "先頭で ↑ は末尾へ回る"
+        );
+        cx.simulate_keystrokes("down down enter");
+        assert_eq!(
+            composer_text(cx),
+            "/context ",
+            "Enter は改行ではなく候補を入れる"
+        );
+        assert!(names(cx).is_empty(), "入れたら閉じる");
+
+        set_text(cx, "/rev");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(composer_text(cx), "/review ");
+        assert_eq!(
+            panel.read_with(cx, |panel, _cx| panel.slash.input.clone()),
+            SlashInput::AwaitingArgs("review".into()),
+            "引数ヒントを出す局面"
+        );
+
+        // Esc は補完だけを閉じる（ターンは止めない）。閉じた後の Esc は従来どおり中断。
+        set_text(cx, "/c");
+        panel.update(cx, |panel, _cx| {
+            let active = panel.active;
+            panel.threads[active].running = true;
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(names(cx).is_empty(), "Esc で閉じる");
+        assert!(
+            panel.read_with(cx, |panel, _cx| panel.threads[panel.active].running),
+            "補完を閉じる Esc でターンを止めない"
+        );
+        cx.simulate_keystrokes("o");
+        assert!(names(cx).is_empty(), "行頭の `/` が消えるまで開き直さない");
+        cx.simulate_keystrokes("escape");
+        assert!(
+            !panel.read_with(cx, |panel, _cx| panel.threads[panel.active].running),
+            "補完が閉じていれば Esc は中断"
+        );
+
+        // IME 変換中は開かない（Enter は変換の確定＝奪わない）。
+        set_text(cx, "");
+        panel.update_in(cx, |panel, window, cx| {
+            panel.composer.update(cx, |composer, cx| {
+                composer.replace_and_mark_text_in_range(None, "/こ", None, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _cx| panel.slash.input.clone()),
+            SlashInput::Inactive
+        );
+        assert!(names(cx).is_empty());
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// slash コマンドは本文 1 ブロックだけで送る: `@path` の添付も画像も付けない（Claude は末尾、
+    /// Codex は先頭のブロックをコマンドとして読む）。添付は外さずに残り、次の通常の送信に付く。
+    #[gpui::test]
+    fn a_slash_command_is_sent_alone_and_keeps_the_attachments(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "slash-send");
+        let root = std::env::temp_dir().join(format!(
+            "necoder_slash_send_{}_{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("一時ディレクトリを作れる");
+        std::fs::write(root.join("shot.png"), [0x89, b'P', b'N', b'G']).expect("画像を置ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.dest_cwd = Some(root.clone());
+            panel.set_prompt_context(active, "ROLE\n".to_string());
+            panel.threads[active].context = vec!["src/lib.rs".into(), "shot.png".into()];
+
+            panel.send_prompt_text("/compact".to_string(), cx);
+            panel.threads[active].running = false;
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "/compact"),
+                other => panic!("slash は本文だけの Prompt で送る: {other:?}"),
+            }
+            assert_eq!(
+                panel.threads[active].context,
+                vec![
+                    SharedString::from("src/lib.rs"),
+                    SharedString::from("shot.png")
+                ],
+                "添付は外さない（画像も次の通常の送信まで残す）"
+            );
+
+            // パスで始まる依頼は slash ではない＝添付・画像・context を付けて送る。
+            panel.send_prompt_text("/Users/me/a.rs を見て".to_string(), cx);
+            panel.threads[active].running = false;
+            match command_rx.try_recv() {
+                Ok(SessionCommand::PromptWithImages { text, images }) => {
+                    assert_eq!(text, "@src/lib.rs\nROLE\n\n/Users/me/a.rs を見て");
+                    assert_eq!(images.len(), 1);
+                }
+                other => panic!("普通の依頼は添付つき: {other:?}"),
+            }
+            assert_eq!(
+                panel.threads[active].context,
+                vec![SharedString::from("src/lib.rs")],
+                "画像は送った 1 通で外れる"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(settings_path);
     }
 }

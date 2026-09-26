@@ -117,6 +117,7 @@ agent:
   stop: 停止 esc
   running_hint: esc で中断
   running_thinking: 考えています
+  slash_footer: "%{count} 件 · ↑↓ で選ぶ · Enter / Tab で入れる · esc で閉じる"
   more_lines: … （他 %{n} 行）
 hunk:
   stage: この hunk を stage
