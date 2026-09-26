@@ -35,9 +35,9 @@ pub use syntax::{highlight_text, split_highlights, FileSyntax, HighlightedText};
 
 use editor_view::EditorView;
 use gpui::{
-    div, list, prelude::*, px, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, HighlightStyle, Hsla, KeyDownEvent, ListAlignment, ListOffset, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText, Window,
+    div, list, prelude::*, px, App, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, FontWeight, HighlightStyle, Hsla, KeyDownEvent, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText, Window,
 };
 use host::Host;
 use project::review::{
@@ -86,13 +86,17 @@ pub struct ReviewContext {
     pub scope: String,
 }
 
-/// 注記を送る宛先（一覧は Workspace が作る。このビューは添字をそのまま返すだけ）。
+/// 注記を送る宛先（一覧は Workspace が作る。このビューは選ばれたものをそのまま返すだけ）。
+///
+/// 宛先は**安定した id** で持つ（R07）。メニューを開いてから選ぶまでにスレッドが閉じられたり
+/// 並び替わったりしても、添字のずれで別のスレッドへ送らない。id から今の添字を引くのは
+/// 送る直前の Workspace で、引けなければ注記を送信済みにせず、メニューを開き直す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendTarget {
-    /// session のパネルの添字（Workspace が解釈する）。
-    pub panel: usize,
-    /// パネルの中のスレッドの添字。`None` = 新しいスレッドを作って送る。
-    pub thread: Option<usize>,
+    /// 宛先のパネル（AgentPanel の Entity id・Workspace が解釈する）。
+    pub panel: EntityId,
+    /// パネルの中のスレッドの永続 id。`None` = 新しいスレッドを作って送る。
+    pub thread: Option<SharedString>,
     pub label: SharedString,
     pub detail: SharedString,
     /// スレッド色（宛先のドット・UI-SPEC §1.3）。
@@ -110,10 +114,12 @@ pub enum ReviewEvent {
     /// `resend` = 未解決（送信済みを含む）をもう一度送る。
     SendMenuRequested { resend: bool },
     /// 注記を 1 通のプロンプトにまとめて送る。届いたら [`ReviewView::mark_notes_sent`] を呼ぶ。
+    /// `resend` は選んだメニューの種類（届かなかった時に同じ種類で開き直すため）。
     SendNotes {
         target: SendTarget,
         prompt: String,
         note_ids: Vec<String>,
+        resend: bool,
     },
 }
 
@@ -2048,8 +2054,8 @@ mod tests {
             Some(&ReviewEvent::SendMenuRequested { resend: false })
         );
         let target = SendTarget {
-            panel: 0,
-            thread: Some(1),
+            panel: EntityId::from(7u64),
+            thread: Some("thread-2".into()),
             label: "スレッド2".into(),
             detail: "待機中".into(),
             color: Theme::dark().fg1,
@@ -2066,11 +2072,13 @@ mod tests {
             target: chosen,
             prompt,
             note_ids,
+            resend,
         }) = sent
         else {
             panic!("注記が送られていない: {sent:?}");
         };
         assert_eq!(chosen, target, "宛先は選んだものがそのまま返る");
+        assert!(!resend, "未送信だけを送るメニューから選んだ");
         assert!(prompt.starts_with("レビューコメント（1 件）— 比較: "));
         assert!(prompt.contains("1. a.rs:5\n```diff\n-line 5\n+LINE 5\n```\n大文字にしない"));
         view.update(cx, |view, cx| {
