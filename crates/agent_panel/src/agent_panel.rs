@@ -1806,6 +1806,9 @@ pub struct AgentPanel {
     /// ACP エージェントの起動 cwd（アクティブプロジェクトのルート）。無ければ送信できない。
     dest_cwd: Option<PathBuf>,
     dest_host: Arc<dyn Host>,
+    /// 宛先ホストの使用量の鍵の「場所」（手元は空・SSH 先は表示名・R08）。描画は Host を呼ばない規律
+    /// なので、宛先が変わった時に控えておく。
+    dest_host_label: SharedString,
     composer: Entity<EditorView>,
     /// 固定レイアウトのマスコット。フレーム時計と paint invalidation を親 transcript から分離する。
     mascot: Entity<MascotView>,
@@ -2261,6 +2264,7 @@ PYEOF"#;
             dest_branch: None,
             dest_cwd: None,
             dest_host: LocalHost::shared(),
+            dest_host_label: SharedString::default(),
             composer,
             mascot,
             composer_spinner,
@@ -2771,6 +2775,7 @@ PYEOF"#;
         let destination_changed = self.dest_host.id() != host.id() || self.dest_cwd != cwd;
         self.dest_project = project;
         self.dest_branch = branch;
+        self.dest_host_label = usage::host_label(host.as_ref());
         self.dest_host = host;
         self.dest_cwd = cwd;
         if destination_changed {
@@ -2844,9 +2849,10 @@ PYEOF"#;
     }
 
     /// いまのスレッドの使用量の鍵（エージェント + 動かしている場所 + 認証の置き場・R08）。
+    /// 描画から呼ぶので Host は呼ばない（場所は宛先を受け取った時に控えた値）。
     pub fn active_usage_key(&self, cx: &App) -> Option<usage::UsageKey> {
         self.active_agent()
-            .map(|agent| usage::UsageKey::for_agent(agent, self.dest_host.as_ref(), cx))
+            .map(|agent| usage::UsageKey::for_agent(agent, self.dest_host_label.clone(), cx))
     }
 
     pub fn contains_thread(&self, id: &str) -> bool {
@@ -6811,7 +6817,7 @@ PYEOF"#;
         }
         if let Some((agent, limits)) = rate_limits {
             // 鍵は「エージェント + 動かしている場所 + 認証の置き場」（R08・SSH 先や別の置き場の値と混ぜない）。
-            let key = usage::UsageKey::for_agent(agent, self.dest_host.as_ref(), cx);
+            let key = usage::UsageKey::for_agent(agent, self.dest_host_label.clone(), cx);
             // `default_global` は観測者（全ウィンドウの statusbar）を起こす＝値が変わった時だけ呼ぶ。
             cx.default_global::<usage::UsageLimits>()
                 .record(key, limits, now_unix_ms());
