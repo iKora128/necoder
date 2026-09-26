@@ -85,6 +85,7 @@
 | **下段ドック**（Fleet 下の可変高タブ面） | `FleetBottomView` / `bottom_height` | 下段 | Bottom pane |
 | **OS の通知**（通知センター。その窓を見ていない時だけ・スレッドごとに 1 件） | `system_notifications` / `post_agent_notification` / 設定 `system_notifications` | OS の通知 | System notifications |
 | **Dock バッジ**（要対応の件数・全窓の合計・macOS） | `dock_badge` | — | — |
+| **自動保存**（他へ移った時 / 手を止めた時に未保存のタブを書く・外で変わったタブは書かない・O26） | `auto_save`（設定 `auto_save`・`AutoSave`） | 自動保存 / 他へ移った時 / 手を止めた時 | Auto save / On focus change / After a pause |
 | **作業中はスリープさせない**（作業中のスレッドが全窓で 1 本でもある間だけ、放っておいた時のスリープを止める・O13） | `keep_awake`（設定 `keep_awake`・`KeepAwake`） | 作業中はスリープさせない | Keep awake while agents work |
 | **質問待ち**（エージェントが選択肢付きで聞いてきて止まっている。状態は承認待ちと同じ Blocked） | `PanelEvent::QuestionWaiting` / `AttentionKind::Question` | 質問待ち | Waiting for an answer |
 | **終了の確認**（⌘Q・窓を閉じる時。動いているエージェント・ターミナルがある時だけ。窓を閉じる時はその窓の分だけ数える） | `quit_guard` / `QuitConfirmState`（設定 `confirm_quit`） | 終了時の確認 | Confirm before quitting |

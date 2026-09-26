@@ -1,5 +1,6 @@
 use crate::workspace::*;
 
+mod auto_save;
 mod diagnostics;
 mod diff;
 mod hot_exit;

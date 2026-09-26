@@ -273,6 +273,10 @@ pub struct EditorView {
     agent_mark_color: Option<gpui::Hsla>,
     /// 外部変更が来たが dirty のため自動リロードしなかった（警告バー表示中）。
     external_changed: bool,
+    /// ディスクへの書き込み中（`save_impl` の背景書き込みが終わるまで）。
+    save_in_flight: bool,
+    /// 書き込み中にもう一度保存を頼まれた（終わってから、まだ未保存ならもう一度書く）。
+    save_queued: bool,
     /// soft wrap（折り返し表示・⌥Z / 設定 `soft_wrap`）。plain（composer）では未使用。
     soft_wrap: bool,
     /// `.md` の整形プレビュー（source ⇄ rendered トグル・⌘⇧V）。plain / 非 md では常に false。
@@ -350,6 +354,8 @@ impl EditorView {
             line_annotation: None,
             agent_mark_color: None,
             external_changed: false,
+            save_in_flight: false,
+            save_queued: false,
             soft_wrap: false,
             rendered_markdown: false,
             html_preview,
@@ -1740,26 +1746,42 @@ impl EditorView {
     }
 
     fn save_impl(&mut self, cx: &mut Context<Self>) {
+        if self.save_in_flight {
+            // 書き込み中にもう一度頼まれた（⌘S の連打・自動保存と重なった）。同時に 2 本書くと、
+            // 後の方は読み込み時の revision で書こうとして、先の書き込みを「外で変わった」と見て
+            // 断られる。終わってから、まだ未保存ならもう一度書く。
+            self.save_queued = true;
+            return;
+        }
         let Some(pending) = self.buffer.prepare_save() else {
             eprintln!("保存先が未設定（無題バッファ）");
             return;
         };
         let saved_version = pending.version;
+        self.save_in_flight = true;
         cx.spawn(async move |editor, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { pending.write() })
                 .await;
-            let _ = editor.update(cx, |editor, cx| {
-                match result {
-                    Ok(revision) => {
-                        editor.buffer.complete_save(revision, saved_version);
-                        editor.reload_html_preview(cx);
+            // Err = 書いている間にタブが閉じた（書き込み自体は済んでいる）。
+            editor
+                .update(cx, |editor, cx| {
+                    editor.save_in_flight = false;
+                    let queued = std::mem::take(&mut editor.save_queued);
+                    match result {
+                        Ok(revision) => {
+                            editor.buffer.complete_save(revision, saved_version);
+                            editor.reload_html_preview(cx);
+                            if queued && editor.buffer.is_dirty() {
+                                editor.save_impl(cx);
+                            }
+                        }
+                        Err(error) => eprintln!("保存に失敗: {error:#}"),
                     }
-                    Err(error) => eprintln!("保存に失敗: {error:#}"),
-                }
-                cx.notify();
-            });
+                    cx.notify();
+                })
+                .ok();
         })
         .detach();
         cx.notify();

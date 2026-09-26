@@ -73,11 +73,14 @@ pub(crate) use web_preview_view::{
     web_tab_key, web_tab_url, PickTarget, WebPreviewEvent, WebPreviewView,
 };
 mod about;
+mod editor_manners;
 mod git_controller;
 mod git_view;
 mod herd_view;
+mod keep_awake;
 mod notifications;
 mod overlays;
+mod ports;
 mod quit_guard;
 mod rail;
 mod rail_view;
@@ -87,13 +90,10 @@ mod shortcut_sheet;
 mod system_notifications;
 mod usage_view;
 mod worktree_delete;
-mod editor_manners;
-mod keep_awake;
-mod ports;
 pub use control_ipc::control_socket_path;
+pub use keep_awake::install_keep_awake;
 pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
-pub use keep_awake::install_keep_awake;
 pub use system_notifications::install_agent_notifications;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
@@ -335,6 +335,8 @@ pub(crate) enum TabContent {
         _hover_subscription: Subscription,
         /// 整形プレビュー（Markdown）のリンクの購読（URL は Web タブ / ブラウザ・ファイルはタブで開く）。
         _link_subscription: Subscription,
+        /// フォーカスが外れた時の自動保存の購読（O26・設定 `auto_save`）。
+        _blur_subscription: Subscription,
     },
     /// 画像タブ（FEATURES §2 の画像プレビュー）。編集・保存・LSP・hot exit の対象外。
     Image(Entity<ImageView>),
@@ -1490,6 +1492,8 @@ pub struct Workspace {
     /// この窓のハンドル（render で控える）。Window を持たない場面（パネルのイベント）で
     /// 「いまこの窓を見ているか」を OS 通知の判断に使う（O12）。
     window_handle: Option<gpui::AnyWindowHandle>,
+    /// 手を止めた時の自動保存の予約の世代（最後の編集の予約だけが保存する・O26）。
+    auto_save_generation: u64,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -2063,6 +2067,13 @@ impl Render for Workspace {
             };
         if !self.focus_recovery_installed {
             self.focus_recovery_installed = true;
+            // 窓を離れた（別の窓・別のアプリ）= 他へ移った時の自動保存（O26）。
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.auto_save_window_left(cx);
+                }
+            })
+            .detach();
             cx.on_focus_lost(window, |this, window, cx| {
                 if let Some(handle) = window.focus_lost_restore_target(cx) {
                     window.focus(&handle, cx);
@@ -2078,8 +2089,8 @@ impl Render for Workspace {
         }
         let was_active = self.window_active;
         self.window_active = window.is_window_active(); // 承認待ちの脈動など「動き」を止める判定
-        // 窓が前に出た = 外で worktree を作った / 消した後かもしれない（O21・ポーリングの代わり）。
         if self.window_active && !was_active {
+            // 窓が前に出た = 外で worktree を作った / 消した後かもしれない（O21・ポーリングの代わり）。
             self.forget_fleet_worktrees();
         }
         if self.chrome.fleet_mode {

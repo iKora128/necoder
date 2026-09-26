@@ -174,6 +174,10 @@ pub struct Settings {
     pub soft_wrap: bool,
     /// 保存時に LSP フォーマットをかける（対応言語のみ・M11）。
     pub format_on_save: bool,
+    /// 自動保存（`"off"` = ⌘S だけ・既定 / `"focus_change"` = 他へ移った時 / `"after_delay"` = 手を
+    /// 止めて 1 秒たった時と他へ移った時・O26）。自動保存ではフォーマットしない（打っている途中の行を
+    /// 動かさない）。解釈は [`Settings::auto_save_mode`]（知らない値は保存しない側に倒す）。
+    pub auto_save: String,
     /// UI ロケール。`None` = OS 追従。
     pub locale: Option<String>,
     /// エージェント composer で **Enter を送信に使うか**。
@@ -293,6 +297,7 @@ impl Default for Settings {
             tab_size: 4,
             soft_wrap: false,
             format_on_save: false,
+            auto_save: "off".to_string(),
             locale: None,
             submit_on_enter: false,
             agent_auto_name: true,
@@ -350,7 +355,28 @@ pub enum KeepAwake {
     Off,
 }
 
+/// 自動保存の仕方（`auto_save` の解釈・O26）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoSave {
+    /// しない（⌘S だけ）。
+    Off,
+    /// 他へ移った時（エディタからフォーカスが外れた・窓を離れた）に保存する。
+    OnFocusChange,
+    /// 手を止めて少したった時と、他へ移った時に保存する。
+    AfterDelay,
+}
+
 impl Settings {
+    /// `auto_save` の値。**知らない値は保存しない側に倒す**（綴り違いで、頼んでいない書き込みを
+    /// ディスクへ始めない）。
+    pub fn auto_save_mode(&self) -> AutoSave {
+        match self.auto_save.as_str() {
+            "focus_change" => AutoSave::OnFocusChange,
+            "after_delay" => AutoSave::AfterDelay,
+            _ => AutoSave::Off,
+        }
+    }
+
     /// `keep_awake` の値。**知らない値は止める側に倒す**（綴り違いで作業中のターンが寝て途切れる方が、
     /// 作業の間だけ起きている電力より高くつく）。
     pub fn keep_awake_mode(&self) -> KeepAwake {
@@ -376,6 +402,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "density": "compact",
   "font_size": 13.0,
   "tab_size": 4,
+  "auto_save": "off",
   "submit_on_enter": false,
   "agent_auto_name": true,
   "agent_prewarm": true,
@@ -786,6 +813,25 @@ mod tests {
             typo.settings().quit_confirmation(),
             QuitConfirmation::WhenRunning
         );
+    }
+
+    #[test]
+    fn auto_save_defaults_off_and_unknown_values_do_not_save() {
+        assert_eq!(
+            SettingsStore::default().settings().auto_save_mode(),
+            AutoSave::Off
+        );
+        for (value, expected) in [
+            ("focus_change", AutoSave::OnFocusChange),
+            ("after_delay", AutoSave::AfterDelay),
+            ("off", AutoSave::Off),
+            ("afterDelay", AutoSave::Off),
+        ] {
+            let layer = format!(r#"{{ "auto_save": "{value}" }}"#);
+            let store = SettingsStore::from_json_layers(&[DEFAULT_SETTINGS_JSON, &layer])
+                .expect("マージできる");
+            assert_eq!(store.settings().auto_save_mode(), expected, "{value}");
+        }
     }
 
     #[test]

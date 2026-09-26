@@ -505,6 +505,11 @@ settings:
   pref_soft_wrap_sub: Can also toggle temporarily with ⌥Z
   pref_format_on_save: Format on save
   pref_format_on_save_sub: Supported languages only; ⌘S formats then saves
+  pref_auto_save: Auto save
+  pref_auto_save_sub: "Saves when you move to another tab, panel or app. “After a pause” also saves when you stop typing for a second (auto save never formats)"
+  auto_save_off: "Off"
+  auto_save_focus_change: On focus change
+  auto_save_after_delay: After a pause
   pref_agent_auto_name: Auto-name threads
   pref_agent_auto_name_sub: AI titles new threads from the first exchange
   pref_agent_prewarm: Connect agents up front
