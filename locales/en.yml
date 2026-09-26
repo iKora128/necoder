@@ -248,6 +248,7 @@ cmd:
   prev_thread: "AI: Previous thread"
   remote_ssh: "Remote: Connect to SSH Host"
   test_ssh: "Remote: Test SSH connection…"
+  register_ssh: "Remote: Add an SSH host…"
   thread_history: "AI: Thread history"
   report_bug: "Help: Report a Bug"
   about: "Help: About necoder"
@@ -1196,6 +1197,24 @@ ssh:
   browse_hint: "Connected. Right-click a folder → \"Open as project here\" to open it"
   picker_placeholder: Select SSH host (~/.ssh/config)
   manual_entry: Enter URI manually…
+  register_entry: + Add an SSH host…
+  register_title: Add an SSH host
+  register_sub: "Appended to %{path} (existing lines stay as they are; ssh and scp can use it too)"
+  register_alias: Name
+  register_alias_hint: "A short name for ssh <name> (e.g. devbox)"
+  register_hostname: Host or IP
+  register_hostname_hint: "e.g. 192.168.1.20 / build.example.com"
+  register_user: User
+  register_user_hint: Empty = the same user as here
+  register_port: Port
+  register_port_hint: Empty = 22
+  register_identity: Key file
+  register_identity_hint: "Empty = ssh's default (e.g. ~/.ssh/id_ed25519)"
+  register_cancel: Cancel
+  register_confirm: Add and test
+  register_bad_port: "The port must be a number from 1 to 65535: %{port}"
+  register_no_config: Can't find where the SSH config goes (no home folder)
+  registered: "Added %{alias} (%{path}). Testing the connection…"
   restore_failed: "Cannot reach %{project}. It will retry when you use it"
   state_connected: connected
   state_connecting: connecting…

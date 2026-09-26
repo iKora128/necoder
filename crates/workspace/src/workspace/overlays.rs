@@ -826,6 +826,10 @@ impl Workspace {
                                         }
                                     }
                                 }
+                                // 最後の「＋ 接続先を登録…」（O37・G01）。
+                                None if host_id > self.picker_ssh_hosts.len() => {
+                                    self.open_ssh_register(window, cx)
+                                }
                                 // 末尾の「手入力」= 空の ssh:// 入力バー。
                                 None => {
                                     self.open_ssh_input_seeded("ssh://".to_string(), window, cx)

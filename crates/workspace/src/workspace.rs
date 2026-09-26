@@ -92,6 +92,7 @@ mod remote_connection;
 mod remote_ssh;
 mod remote_transfer;
 mod shortcut_sheet;
+mod ssh_register;
 mod system_notifications;
 mod font_settings;
 mod statusbar_items;
@@ -229,6 +230,8 @@ actions!(
         RemoteSsh,
         // SSH の接続を確かめる（O37・ホストを選んで `ssh host true` を 1 回）。
         TestSshConnection,
+        // 接続先を ~/.ssh/config に登録する（O37・G01）。
+        RegisterSshHost,
         // スレッド履歴（過去スレッド一覧 → 復元・#5）。
         ThreadHistory,
         // code actions（⌘.・M11）と参照検索（⇧F12・M11）。
@@ -1358,6 +1361,8 @@ struct ChromeState {
     statusbar_menu: Option<Point<gpui::Pixels>>,
     /// 詳細を出している project（O21・右クリックの「詳細…」）。
     task_details: Option<usize>,
+    /// 接続先の登録のダイアログ（O37・G01）。
+    ssh_registering: Option<ssh_register::SshRegistering>,
     /// 自動で名付けたブランチの改名の予約（O23・A23・Task の SpaceId ごと・この起動の間だけ）。
     auto_branches: HashMap<SpaceId, task_creation::AutoBranch>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
@@ -2341,6 +2346,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
             .on_action(cx.listener(Self::open_ssh_host_picker))
             .on_action(cx.listener(Self::open_ssh_test_picker))
+            .on_action(cx.listener(|this, _: &RegisterSshHost, window, cx| {
+                this.open_ssh_register(window, cx)
+            }))
             .on_action(cx.listener(Self::open_thread_history))
             .on_action(cx.listener(Self::open_code_actions))
             .on_action(cx.listener(Self::find_references))
@@ -2515,6 +2523,7 @@ impl Render for Workspace {
             .children(self.render_terminal_rename(cx))
             .children(self.render_statusbar_menu(cx))
             .children(self.render_task_details(cx))
+            .children(self.render_ssh_register(cx))
             .children(self.render_inline_edit(cx))
             .children(self.render_ssh_input(cx))
             .children(self.render_askpass(window, cx))

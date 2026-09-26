@@ -249,6 +249,7 @@ cmd:
   prev_thread: "AI: 前のスレッド"
   remote_ssh: "リモート: SSH ホストに接続"
   test_ssh: "リモート: SSH の接続を確かめる…"
+  register_ssh: "リモート: 接続先を登録…"
   thread_history: "AI: スレッド履歴"
   report_bug: "ヘルプ: バグを報告"
   about: "ヘルプ: necoder について"
@@ -1197,6 +1198,24 @@ ssh:
   browse_hint: "接続しました。フォルダを右クリック →「ここをプロジェクトとして開く」で開けます"
   picker_placeholder: SSH ホストを選択（~/.ssh/config）
   manual_entry: URI を手入力…
+  register_entry: ＋ 接続先を登録…
+  register_title: 接続先を登録
+  register_sub: "%{path} の末尾に足します（今ある行は変えません・ssh や scp からも使えます）"
+  register_alias: 名前
+  register_alias_hint: "ssh <名前> で使う短い名前（例: devbox）"
+  register_hostname: ホスト名・IP
+  register_hostname_hint: "例: 192.168.1.20 / build.example.com"
+  register_user: ユーザー
+  register_user_hint: 空なら手元と同じユーザー
+  register_port: ポート
+  register_port_hint: 空なら 22
+  register_identity: 鍵のファイル
+  register_identity_hint: "空なら ssh の既定（例: ~/.ssh/id_ed25519）"
+  register_cancel: キャンセル
+  register_confirm: 登録して確かめる
+  register_bad_port: "ポートは 1〜65535 の数です: %{port}"
+  register_no_config: SSH の config の置き場が分かりません（ホームのフォルダが無い）
+  registered: "%{alias} を登録しました（%{path}）。接続を確かめています…"
   restore_failed: "%{project} に接続できません。操作すると再接続を試みます"
   state_connected: 接続済み
   state_connecting: 接続中…

@@ -2130,23 +2130,153 @@ pub struct SshConfigHost {
     pub user: Option<String>,
 }
 
+/// SSH config の置き場。通常は `~/.ssh/config`、テストでは transport と同じ `NECODER_SSH_CONFIG`。
+pub fn ssh_config_path() -> Option<PathBuf> {
+    match std::env::var_os("NECODER_SSH_CONFIG") {
+        Some(path) => Some(PathBuf::from(path)),
+        // Windows の OpenSSH も `%USERPROFILE%\.ssh\config` を見る（paths が USERPROFILE を解決する）。
+        None => paths::home_dir().map(|home| home.join(".ssh/config")),
+    }
+}
+
 /// SSH config を読んで接続可能なホスト一覧を返す（読めなければ空）。
-/// 通常は `~/.ssh/config`、テストでは transport と同じ `NECODER_SSH_CONFIG` を使う。
 pub fn ssh_config_hosts() -> Vec<SshConfigHost> {
-    let path = match std::env::var_os("NECODER_SSH_CONFIG") {
-        Some(path) => PathBuf::from(path),
-        None => {
-            // Windows の OpenSSH も `%USERPROFILE%.sshnfig` を見る（paths が USERPROFILE を解決する）。
-            let Some(home) = paths::home_dir() else {
-                return Vec::new();
-            };
-            home.join(".ssh/config")
-        }
+    let Some(path) = ssh_config_path() else {
+        return Vec::new();
     };
     match std::fs::read_to_string(&path) {
         Ok(text) => parse_ssh_config(&text),
         Err(_) => Vec::new(),
     }
+}
+
+/// 接続先の登録（O37・G01）で SSH config に足す 1 つ。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewSshHost {
+    /// `Host` の名前（`ssh <名前>` で使う）。
+    pub alias: String,
+    /// `HostName`（ホスト名か IP）。
+    pub hostname: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    /// `IdentityFile`（`~/` 可）。
+    pub identity_file: Option<String>,
+}
+
+/// 1 語の値として config に書けるか（空白・引用符・`#`・先頭の `-` を含まない）。
+fn plain_ssh_word(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || matches!(character, '"' | '\'' | '#'))
+}
+
+impl NewSshHost {
+    /// 書く前に確かめる（書けない値は理由つきで断る・config を壊さない）。
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            plain_ssh_word(&self.alias)
+                && !self
+                    .alias
+                    .chars()
+                    .any(|character| matches!(character, '*' | '?' | '!' | ',')),
+            "名前には空白や記号（* ? ! , # 引用符）を使えません: {}",
+            self.alias
+        );
+        anyhow::ensure!(
+            plain_ssh_word(&self.hostname),
+            "ホスト名に使えない文字があります: {}",
+            self.hostname
+        );
+        if let Some(user) = &self.user {
+            anyhow::ensure!(
+                plain_ssh_word(user),
+                "ユーザー名に使えない文字があります: {user}"
+            );
+        }
+        anyhow::ensure!(self.port != Some(0), "ポートは 1〜65535");
+        if let Some(identity) = &self.identity_file {
+            anyhow::ensure!(
+                !identity.is_empty()
+                    && !identity.contains(['"', '\n', '\r'])
+                    && !identity.starts_with('-'),
+                "鍵のファイルに使えない文字があります: {identity}"
+            );
+        }
+        Ok(())
+    }
+
+    /// 足す塊（前に空行・necoder が足した印のコメント・末尾に改行）。空白を含む鍵のパスは引用符で囲む。
+    pub fn config_block(&self) -> String {
+        let mut block = format!(
+            "\n# necoder で登録\nHost {}\n  HostName {}\n",
+            self.alias, self.hostname
+        );
+        if let Some(user) = &self.user {
+            block.push_str(&format!("  User {user}\n"));
+        }
+        if let Some(port) = self.port {
+            block.push_str(&format!("  Port {port}\n"));
+        }
+        if let Some(identity) = &self.identity_file {
+            if identity.contains(char::is_whitespace) {
+                block.push_str(&format!("  IdentityFile \"{identity}\"\n"));
+            } else {
+                block.push_str(&format!("  IdentityFile {identity}\n"));
+            }
+        }
+        block
+    }
+}
+
+/// SSH config の末尾に `host` を足す（O37・G01）。**既存の行は触らない**（追記だけ）。同じ名前の
+/// `Host` があれば断る。config が無ければ作る（unix は `~/.ssh` を 0700・config を 0600）。
+pub fn append_ssh_config_host(path: &Path, host: &NewSshHost) -> Result<()> {
+    host.validate()?;
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("{} を読めない", path.display()));
+        }
+    };
+    anyhow::ensure!(
+        !parse_ssh_config(&existing)
+            .iter()
+            .any(|known| known.alias == host.alias),
+        "同じ名前の接続先があります: {}",
+        host.alias
+    );
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("{} を作れない", parent.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("{} を開けない", path.display()))?;
+    let mut text = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&host.config_block());
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("{} に書けない", path.display()))?;
+    Ok(())
 }
 
 /// ssh_config テキストを Host 単位で列挙する（IO 無し = テスト可能）。
@@ -4824,6 +4954,80 @@ mod tests {
             .is_some_and(|error| error.contains("open だけ")));
         drop(gateway);
         let _removed = std::fs::remove_dir_all(root);
+    }
+
+    /// O37（G01）: 接続先の登録は config の末尾に足すだけ。同じ名前・書けない値は断り、元の行は触らない。
+    #[test]
+    fn registering_a_host_appends_a_block() {
+        let dir = std::env::temp_dir().join(format!("necoder-ssh-register-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(".ssh/config");
+        let host = NewSshHost {
+            alias: "devbox".into(),
+            hostname: "192.168.1.20".into(),
+            user: Some("me".into()),
+            port: Some(2222),
+            identity_file: Some("~/.ssh/My Keys/id_ed25519".into()),
+        };
+        append_ssh_config_host(&path, &host).expect("無ければ作って書く");
+        let written = std::fs::read_to_string(&path).expect("読める");
+        assert!(written.contains("Host devbox\n  HostName 192.168.1.20\n  User me\n  Port 2222\n"));
+        assert!(
+            written.contains("IdentityFile \"~/.ssh/My Keys/id_ed25519\""),
+            "{written}"
+        );
+        let hosts = parse_ssh_config(&written);
+        assert_eq!(hosts[0].alias, "devbox");
+        assert_eq!(hosts[0].user.as_deref(), Some("me"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "config は本人だけ");
+        }
+
+        assert!(
+            append_ssh_config_host(&path, &host).is_err(),
+            "同じ名前は断る"
+        );
+        std::fs::write(&path, "Host old\n  HostName old.example.com").unwrap();
+        let other = NewSshHost {
+            alias: "other".into(),
+            hostname: "other.example.com".into(),
+            ..NewSshHost::default()
+        };
+        append_ssh_config_host(&path, &other).expect("足せる");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.starts_with("Host old\n  HostName old.example.com\n\n# necoder"),
+            "元の行は触らず、改行を補って足す: {written}"
+        );
+        for bad in [
+            NewSshHost {
+                alias: "two words".into(),
+                hostname: "h".into(),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "web*".into(),
+                hostname: "h".into(),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "-oProxyCommand=x".into(),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "h".into(),
+                port: Some(0),
+                ..NewSshHost::default()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
