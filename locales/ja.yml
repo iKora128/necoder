@@ -237,6 +237,7 @@ cmd:
   open_in_terminal: "外部: ターミナルでフォルダを開く"
   show_ports: "Ports: 開いているポート（開く / 止める）"
   show_inbox: "通知: 履歴を開く"
+  show_resources: "リソース: メモリとプロセス"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -1306,3 +1307,13 @@ inbox:
   mark_unread: 未読に戻す
   empty: まだ通知はありません（エージェントの完了・失敗・承認待ち・質問待ちがここに残ります）
   note: "この窓の最新 %{count} 件・起動している間だけ残ります"
+resources:
+  title: リソース（メモリ）
+  loading: 読んでいます…
+  unsupported: この OS ではまだ読めません
+  summary: "necoder 本体 %{own} · 子プロセス %{children}（%{count} 本）"
+  outside: プロジェクトの外
+  process: "%{command}（pid %{pid}・%{count} プロセス）"
+  stop_quiet: "使っていないエージェントを止める（%{count}）"
+  stopped: "エージェントを %{count} 本止めました（会話は残っています・次に送ると続きから）"
+  hint: 読むのは開いた時と ↻ の時だけ。止めるのは静かで会話を引き継げるエージェントだけです（端末・開発サーバは止めません）

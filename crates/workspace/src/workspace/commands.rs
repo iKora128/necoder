@@ -290,6 +290,10 @@ impl CommandRegistry {
                 label_key: "cmd.show_inbox",
                 action_name: "workspace::ShowInbox",
             },
+            CommandEntry {
+                label_key: "cmd.show_resources",
+                action_name: "workspace::ShowResources",
+            },
         ]
     }
 

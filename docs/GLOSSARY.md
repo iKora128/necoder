@@ -51,6 +51,7 @@
 | **TaskSpace**（Fleet の隔離作業単位） | `TaskSpace` / `SpaceId` | Task | Task |
 | **IntegrationSpace**（保護された統合先） | `SpaceKind::Integration`（P0 で phase から分離） | Integration | Integration |
 | ↳ 統合先の選び方（同じリポジトリに統合先扱いが複数ある時はメインの作業ツリー） | `integration_slot_for` / `TaskSpace::linked` | — | — |
+| **リソース**（necoder 本体と子プロセスのメモリをプロジェクト / Task ごとに見る画面・使っていないエージェントを止める・O22） | `resources` / `ShowResources` / `AgentPanel::stop_quiet_agents` | リソース / 使っていないエージェントを止める | Resources / Stop idle agents |
 | **Ports**（necoder の中で待ち受けている開発サーバのポート。開く / 止める） | `ports` / `ShowPorts` | 開いているポート | Open ports |
 | **外部の worktree**（リポジトリの worktree のうち Task でないもの。necoder の外で作ったものも含む） | `external_worktrees` / `fleet_worktrees` | 外部の worktree | Other worktrees |
 | ↳ **取り込む**（外部の worktree をレールに開いて Task にする） | `adopt_worktree` / `make_task_space` | 取り込む | Adopt |

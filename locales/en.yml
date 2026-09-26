@@ -236,6 +236,7 @@ cmd:
   open_in_terminal: "External: Open folder in Terminal"
   show_ports: "Ports: Open ports (open / stop)"
   show_inbox: "Notifications: Show history"
+  show_resources: "Resources: Memory and processes"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -1305,3 +1306,13 @@ inbox:
   mark_unread: Mark as unread
   empty: No notifications yet (finished, failed and waiting agents show up here)
   note: "Latest %{count} in this window, kept while necoder is running"
+resources:
+  title: Resources (memory)
+  loading: Reading…
+  unsupported: Not available on this OS yet
+  summary: "necoder %{own} · child processes %{children} (%{count})"
+  outside: Outside any project
+  process: "%{command} (pid %{pid}, %{count} processes)"
+  stop_quiet: "Stop idle agents (%{count})"
+  stopped: "Stopped %{count} agents (conversations are kept and resume on the next send)"
+  hint: Read only when opened or on ↻. Only quiet agents whose conversation can resume are stopped (terminals and dev servers are left alone)

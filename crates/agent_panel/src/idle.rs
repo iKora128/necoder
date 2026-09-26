@@ -49,16 +49,39 @@ impl AgentPanel {
             return 0;
         }
         let cutoff = now_unix_ms() - (minutes as i64) * 60_000;
+        self.stop_agents_quiet_since(cutoff, cx)
+    }
+
+    /// 静かで会話を引き継げるスレッドのエージェントを、猶予を待たずに今止める（リソースの画面の
+    /// 「使っていないエージェントを止める」・O22）。止める条件は猶予以外 [`Self::stop_idle_agents`] と同じ。
+    pub fn stop_quiet_agents(&mut self, cx: &mut Context<Self>) -> usize {
+        self.stop_agents_quiet_since(i64::MAX, cx)
+    }
+
+    /// いま止められるエージェントの数（動いていて・静かで・会話を引き継げる）。
+    pub fn stoppable_agent_count(&self) -> usize {
+        self.threads
+            .iter()
+            .filter(|thread| thread.command_tx.is_some() && Self::can_stop_agent_of(thread))
+            .count()
+    }
+
+    /// 止めてよいスレッドか: 走行中・承認待ち・回答待ちでなく、送信待ちの入力も無く、会話を引き継げる。
+    fn can_stop_agent_of(thread: &Thread) -> bool {
+        let quiet = matches!(
+            thread.activity(),
+            ThreadActivity::Idle | ThreadActivity::Done { .. }
+        ) && thread.queued_prompts.is_empty();
+        let resumable = thread.session_resumable && thread.acp_session_id.is_some();
+        quiet && resumable
+    }
+
+    /// `cutoff`（unix ms）より前から使っていない、止めてよいスレッドのエージェントを止める。
+    fn stop_agents_quiet_since(&mut self, cutoff: i64, cx: &mut Context<Self>) -> usize {
         let mut stopped = Vec::new();
         for (index, thread) in self.threads.iter_mut().enumerate() {
-            let quiet = matches!(
-                thread.activity(),
-                ThreadActivity::Idle | ThreadActivity::Done { .. }
-            ) && thread.queued_prompts.is_empty();
-            let resumable = thread.session_resumable && thread.acp_session_id.is_some();
             if thread.command_tx.is_some()
-                && quiet
-                && resumable
+                && Self::can_stop_agent_of(thread)
                 && thread.last_active_at_ms < cutoff
             {
                 thread.command_tx = None;
@@ -159,6 +182,38 @@ mod tests {
             );
         });
         let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// リソースの画面から「今止める」: 猶予は待たないが、止めてよい条件は同じ（O22）。
+    #[gpui::test]
+    fn quiet_agents_can_be_stopped_now_without_waiting(cx: &mut gpui::TestAppContext) {
+        let settings_path = settings_for_test(cx, "now");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let mut running = live_thread("running", now_unix_ms());
+            running.running = true;
+            let mut cannot_resume = live_thread("no-load-session", now_unix_ms());
+            cannot_resume.session_resumable = false;
+            panel.threads = vec![
+                live_thread("just-used", now_unix_ms()),
+                running,
+                cannot_resume,
+            ];
+            panel.active = 0;
+            assert_eq!(panel.stoppable_agent_count(), 1);
+            assert_eq!(
+                panel.stop_quiet_agents(cx),
+                1,
+                "使った直後でも静かなら止める"
+            );
+            assert_eq!(panel.stoppable_agent_count(), 0);
+            assert!(panel.threads[1].command_tx.is_some(), "走行中は止めない");
+            assert!(
+                panel.threads[2].command_tx.is_some(),
+                "引き継げない会話は止めない"
+            );
+        });
+        std::fs::remove_file(settings_path).ok();
     }
 
     #[gpui::test]
