@@ -181,6 +181,11 @@ for line in sys.stdin:
     sys.stdout.flush()
 "#;
 
+    /// 偽の app-server が答えるまでの上限。python の起動込みなので、テストが並んで重い Windows の
+    /// ランナー（起動のたびに検査が走る）では 10 秒を超えることがある（PR #30 の check-windows）。
+    /// 答えが来ればすぐ返るので、長くしても通る時は遅くならない（固まった時の保険でしかない）。
+    const FAKE_BUDGET: Duration = Duration::from_secs(60);
+
     fn run_fake(script: &str, timeout: Duration) -> Option<Result<RateLimits>> {
         let python = crate::find_in_path("python3")?;
         Some(read_rate_limits_with(
@@ -193,7 +198,7 @@ for line in sys.stdin:
 
     #[test]
     fn reads_both_windows_skipping_unrequested_notifications() {
-        let Some(result) = run_fake(FAKE_APP_SERVER, Duration::from_secs(10)) else {
+        let Some(result) = run_fake(FAKE_APP_SERVER, FAKE_BUDGET) else {
             eprintln!("python3 が PATH に無いためスキップ");
             return;
         };
@@ -214,7 +219,7 @@ for line in sys.stdin:
 
     #[test]
     fn signed_out_codex_reports_its_own_message() {
-        let Some(result) = run_fake(FAKE_SIGNED_OUT, Duration::from_secs(10)) else {
+        let Some(result) = run_fake(FAKE_SIGNED_OUT, FAKE_BUDGET) else {
             eprintln!("python3 が PATH に無いためスキップ");
             return;
         };
