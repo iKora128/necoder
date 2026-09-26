@@ -414,7 +414,8 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-k": "terminal::Clear",
       "cmd-t": "terminal::NewTab",
       "cmd-v": "terminal::Paste",
-      "cmd-w": "terminal::CloseTab"
+      "cmd-w": "terminal::CloseTab",
+      "cmd-\\": "terminal::Split"
     }
   }
 ]"#;

@@ -17,6 +17,7 @@ mod search;
 pub use appearance::{TerminalAppearance, TerminalColors, TerminalCursor};
 pub use dock::{
     QuickCommand, QuickCommands, TerminalDock, TerminalDockEvent, TerminalLaunch, TerminalShell,
+    MAX_PANES,
 };
 
 /// 端末のアクション。keymap の `Terminal` コンテキストから引く（`keymap_core` の既定の末尾）。
@@ -37,8 +38,10 @@ pub mod actions {
             Find,
             /// ドックに新しい端末のタブを開く（O24・C18）。
             NewTab,
-            /// いまの端末のタブを閉じる（前面で動いていれば確かめる・O24・C18）。
+            /// いまの端末を閉じる（分割していなければタブごと・前面で動いていれば確かめる・O24・C18）。
             CloseTab,
+            /// いまのタブを横に分割して新しい端末を開く（O24・C02）。
+            Split,
         ]
     );
 }

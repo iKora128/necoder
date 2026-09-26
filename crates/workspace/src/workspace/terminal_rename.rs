@@ -315,4 +315,43 @@ mod tests {
             assert_eq!(dock.debug_tabs().0, 1, "⌘W でいまの端末を閉じる");
         });
     }
+
+    /// O24（C02）: ⌘\ で前にあるタブを横に分割し、⌘W は前にいる端末だけを閉じる。分割は
+    /// [`terminal_view::MAX_PANES`] まで（それ以上は新しいタブ）。CLI の一覧は分割も数える。
+    #[gpui::test]
+    fn a_terminal_tab_splits_side_by_side(cx: &mut gpui::TestAppContext) {
+        let (dock, cx) = cx.add_window_view(|_, _cx| {
+            let mut dock = TerminalDock::new(
+                TerminalLaunch {
+                    cwd: None,
+                    shell: None,
+                },
+                Theme::dark(),
+            );
+            dock.use_test_terminals();
+            dock
+        });
+        dock.update_in(cx, |dock, window, cx| dock.add(window, cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.dispatch_action(terminal_view::actions::Split);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        dock.update_in(cx, |dock, _window, _cx| {
+            assert_eq!(dock.debug_tabs(), (1, 0), "タブは増えない");
+            assert_eq!(dock.debug_panes(), (2, 1), "右に開いて前にする");
+            let (terminals, active) = dock.tab_terminals();
+            assert_eq!((terminals.len(), active), (2, 1));
+        });
+        cx.dispatch_action(terminal_view::actions::CloseTab);
+        cx.run_until_parked();
+        dock.update_in(cx, |dock, window, cx| {
+            assert_eq!(dock.debug_panes(), (1, 0), "⌘W は前にいる端末だけ");
+            for _ in 0..terminal_view::MAX_PANES {
+                dock.split(window, cx);
+            }
+            assert_eq!(dock.debug_panes().0, 1, "並べられる数を超えたら新しいタブ");
+            assert_eq!(dock.debug_tabs(), (2, 1));
+            assert_eq!(dock.tab_terminals().0.len(), terminal_view::MAX_PANES + 1);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
 }
