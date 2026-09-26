@@ -64,6 +64,17 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: Fleet を開いて、アクティブなスレッドへ選択肢付きの質問を届ける（O12: 質問待ちが
+    /// 要対応・トースト・statusbar の待ち表示に出るかの撮影。質問は実際の経路を通る）。
+    #[cfg(debug_assertions)]
+    pub fn debug_question_probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.chrome.fleet_mode {
+            self.toggle_fleet_mode(&ToggleFleet, window, cx);
+        }
+        let panel = self.agent_panel.clone();
+        panel.update(cx, |panel, cx| panel.debug_ask_question(cx));
+    }
+
     /// 開発用: スレッド履歴 Picker を開く（offscreen 検証・#5）。
     #[cfg(debug_assertions)]
     pub fn debug_open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {

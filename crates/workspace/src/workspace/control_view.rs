@@ -25,6 +25,9 @@ struct AttentionItem {
 enum AttentionKind {
     /// 承認待ち（インライン許可/拒否。選択肢ラベルは ACP がエージェントから広告されたものをそのまま使う）。
     Permission(agent_panel::PermissionCard),
+    /// 質問待ち（O12）。選択肢はスレッドのカードで選ぶ（複数フィールドにまたがり得る）ので、
+    /// ここは質問文を見せて没入させるだけ。
+    Question(agent_panel::QuestionCard),
     /// Task が failed（没入して修正指示 / 破棄）。
     Failed {
         digest: Option<SharedString>,
@@ -181,6 +184,11 @@ impl Workspace {
                     "elapsed" => elapsed_label(card.waited_secs),
                     "title" => &card.title,
                 ),
+                AttentionKind::Question(card) => i18n::t!(
+                    "control.facts_question",
+                    "elapsed" => elapsed_label(card.waited_secs),
+                    "message" => &card.message,
+                ),
                 AttentionKind::Failed { digest, .. } => {
                     i18n::t!("control.facts_failed", "digest" => digest.clone().unwrap_or_default())
                 }
@@ -247,9 +255,17 @@ impl Workspace {
                 let thread_index = *thread_index;
                 match status.activity {
                     agent_panel::ThreadActivity::Blocked => {
-                        if let Some(card) = panel.read(cx).permission_card(thread_index) {
+                        // 承認待ちが先（両方来たらスレッドのカードも承認を先に出す）、無ければ質問待ち。
+                        let waiting = match panel.read(cx).permission_card(thread_index) {
+                            Some(card) => Some((card.waited_secs, AttentionKind::Permission(card))),
+                            None => panel
+                                .read(cx)
+                                .question_card(thread_index)
+                                .map(|card| (card.waited_secs, AttentionKind::Question(card))),
+                        };
+                        if let Some((waited_secs, kind)) = waiting {
                             blocked.push((
-                                card.waited_secs,
+                                waited_secs,
                                 AttentionItem {
                                     session_index: index,
                                     panel: panel.clone(),
@@ -257,7 +273,7 @@ impl Workspace {
                                     color: status.color,
                                     title: card_title.clone(),
                                     branch: branch.clone(),
-                                    kind: AttentionKind::Permission(card),
+                                    kind,
                                 },
                             ));
                         }
@@ -335,25 +351,55 @@ impl Workspace {
 
     /// titlebar のモード切替に出す**要対応の件数**（`◐ N`・FLEET-V2 §3.0）。キュー全体を組まずに
     /// 数だけ数える（titlebar は毎フレーム描かれるので、カードの生成と clone を持ち込まない）。
-    /// 数える対象は管制の `◐` チップと同じ = 承認待ち（permission card 有り）+ Failed な Task。
+    /// 数える対象 = 承認待ち・質問待ち（Blocked）のスレッド + Failed な Task。Dock のバッジ（O12）も
+    /// これを全窓で足す（数え方は `dock_badge::attention_count` の 1 か所）。
     pub(crate) fn attention_badge_count(&self, cx: &App) -> usize {
-        let mut count = 0;
+        let mut activities = Vec::new();
+        let mut failed_tasks = 0;
         for (index, slot) in self.project_sessions.projects.iter().enumerate() {
             let Some(session) = self.project_sessions.sessions.get(index) else {
                 continue;
             };
-            for (panel, thread_index, status) in session.agent_statuses(cx) {
-                if status.activity == agent_panel::ThreadActivity::Blocked
-                    && panel.read(cx).permission_card(thread_index).is_some()
-                {
-                    count += 1;
-                }
+            for panel in &session.fleet_agents {
+                activities.extend(
+                    panel
+                        .read(cx)
+                        .beacons()
+                        .into_iter()
+                        .map(|(_, _, activity)| activity),
+                );
             }
             if !slot.task_space.is_integration() && slot.task_space.phase == TaskPhase::Failed {
-                count += 1;
+                failed_tasks += 1;
             }
         }
-        count
+        super::dock_badge::attention_count(activities, failed_tasks)
+    }
+
+    /// Task が**質問だけ**で止まっているなら、その質問のスレッド（承認待ちが 1 つでもあれば None
+    /// ＝ Task カードの「次へ」は従来どおり「許可」）。「次へ」を「答える」にするのに使う（O12）。
+    pub(super) fn question_only_thread(
+        &self,
+        session_index: usize,
+        cx: &App,
+    ) -> Option<(Entity<AgentPanel>, usize)> {
+        let session = self.project_sessions.sessions.get(session_index)?;
+        let mut question = None;
+        for panel in &session.fleet_agents {
+            let reader = panel.read(cx);
+            for (thread, (_, _, activity)) in reader.beacons().into_iter().enumerate() {
+                if activity != agent_panel::ThreadActivity::Blocked {
+                    continue;
+                }
+                if reader.permission_card(thread).is_some() {
+                    return None;
+                }
+                if question.is_none() && reader.question_card(thread).is_some() {
+                    question = Some((panel.clone(), thread));
+                }
+            }
+        }
+        question
     }
 
     /// ヘッダの数字（キューと同じソースから 1 パス・render 内 memory 読みのみ）。
@@ -365,7 +411,9 @@ impl Workspace {
         };
         for item in queue {
             match &item.kind {
-                AttentionKind::Permission(_) | AttentionKind::Failed { .. } => stats.attention += 1,
+                AttentionKind::Permission(_)
+                | AttentionKind::Question(_)
+                | AttentionKind::Failed { .. } => stats.attention += 1,
                 AttentionKind::Review { .. } | AttentionKind::DoneUnread { .. } => {
                     stats.done_unread += 1
                 }
@@ -403,9 +451,14 @@ impl Workspace {
         let session_index = item.session_index;
         let thread_index = item.thread_index;
         let focus_panel = item.panel.clone();
-        let urgent = matches!(item.kind, AttentionKind::Permission(_));
+        let urgent = matches!(
+            item.kind,
+            AttentionKind::Permission(_) | AttentionKind::Question(_)
+        );
         let activity = match &item.kind {
-            AttentionKind::Permission(_) => agent_panel::ThreadActivity::Blocked,
+            AttentionKind::Permission(_) | AttentionKind::Question(_) => {
+                agent_panel::ThreadActivity::Blocked
+            }
             AttentionKind::Failed { .. } => agent_panel::ThreadActivity::Done { interrupted: true },
             AttentionKind::Review { .. } | AttentionKind::DoneUnread { .. } => {
                 agent_panel::ThreadActivity::Done { interrupted: false }
@@ -556,6 +609,40 @@ impl Workspace {
                 )
                 .child(buttons)
             }
+            AttentionKind::Question(question) => card
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg1)
+                        .child(SharedString::from(format!("「{}」", question.message))),
+                )
+                .child(
+                    div()
+                        .text_size(px(9.5))
+                        .text_color(theme.err)
+                        .child(SharedString::from(format!(
+                            "{} {}",
+                            i18n::t!("control.waiting"),
+                            elapsed_label(question.waited_secs)
+                        ))),
+                )
+                .child(
+                    div().flex().gap(px(5.)).child(
+                        button(
+                            ("control-answer", position),
+                            SharedString::from(i18n::t!("control.answer")),
+                            true,
+                            &theme,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.immerse_from_control(session_index, thread_index, window, cx);
+                            }),
+                        ),
+                    ),
+                ),
             AttentionKind::Failed { digest, tier2 } => card
                 .when_some(digest.clone(), |element, digest| {
                     element.child(
@@ -772,5 +859,69 @@ impl Workspace {
             }
         };
         card.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 質問（Elicitation）で止まったスレッドは承認待ちと同じ網に載る（O12）: ◐N（= Dock バッジ）・
+    /// 要対応の先頭・statusbar の待ち表示・押せるトースト。以前は音だけでどれにも出なかった。
+    #[gpui::test]
+    fn a_question_is_treated_like_a_permission_wait(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_question_attention_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace.attention_badge_count(cx)),
+            0
+        );
+
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let panel = workspace.project_sessions.sessions[0].agent_panel.clone();
+            panel.update(cx, |panel, cx| panel.debug_ask_question(cx));
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.attention_badge_count(cx),
+                1,
+                "質問待ちも ◐N と Dock バッジに数える"
+            );
+            let queue = workspace.control_attention_queue(cx);
+            assert!(
+                matches!(queue.first().map(|item| &item.kind), Some(AttentionKind::Question(card)) if card.message.as_ref() == "バッファはどちらで実装しますか？"),
+                "要対応の先頭に質問のカードが出る"
+            );
+            assert!(
+                workspace.project_sessions.sessions[0].waiting_thread.is_some(),
+                "statusbar の待ち表示"
+            );
+            let waiting = i18n::t!("agent.waiting_question");
+            assert!(
+                workspace
+                    .notifications
+                    .toasts
+                    .iter()
+                    .any(|(text, _, _, link)| text.contains(&waiting) && link.is_some()),
+                "押すとスレッドへ飛べるトースト"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

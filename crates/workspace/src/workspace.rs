@@ -52,6 +52,7 @@ mod control_ipc;
 mod control_transport;
 mod control_view;
 mod dev_probes;
+mod dock_badge;
 mod explorer_controller;
 mod explorer_view;
 mod fleet_stage;
@@ -77,10 +78,12 @@ mod rail_view;
 mod remote_connection;
 mod remote_ssh;
 mod shortcut_sheet;
+mod system_notifications;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
 pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
+pub use system_notifications::install_agent_notifications;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
 mod captain;
@@ -1361,6 +1364,9 @@ pub struct Workspace {
     /// `projects[i]` が構築時の `sources` の何番目から来たか。開けなかった source は飛ばされるので、
     /// タブ列の復元（`restore_open_file`）はこの写像を通す。1 回使ったら空にする。
     restored_source_map: Vec<usize>,
+    /// この窓のハンドル（render で控える）。Window を持たない場面（パネルのイベント）で
+    /// 「いまこの窓を見ているか」を OS 通知の判断に使う（O12）。
+    window_handle: Option<gpui::AnyWindowHandle>,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -1888,6 +1894,7 @@ impl Render for Workspace {
             .detach();
         }
         self.window_active = window.is_window_active(); // 承認待ちの脈動など「動き」を止める判定
+        self.window_handle = Some(window.window_handle());
         if self.window_active && self.waiting_thread.is_some() {
             self.ensure_visual_ticker(cx);
         }
