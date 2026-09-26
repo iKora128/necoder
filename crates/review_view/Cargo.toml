@@ -1,0 +1,23 @@
+[package]
+name = "review_view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/review_view.rs"
+
+[dependencies]
+gpui.workspace = true
+host.workspace = true
+i18n.workspace = true
+lang.workspace = true
+project.workspace = true
+theme_core.workspace = true
+ui.workspace = true
+# 構文色の写像（`syntax_color`）をエディタと共有する。エディタのコアは変更レビューを知らない（逆向きだけ）。
+editor_view.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

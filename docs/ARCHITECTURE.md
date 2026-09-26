@@ -8,7 +8,7 @@
 ```
 [shell]      necoder(bin) ─ 結線・起動・メニュー
 [shell]      workspace ─ レール / chrome / active ProjectSession の合成・event routing
-[view]       editor_view / webview_view / explorer / git_ui / search_ui / agent_panel / terminal_view / settings / graph_view(M14)
+[view]       editor_view / webview_view / explorer / git_ui / review_view / search_ui / agent_panel / terminal_view / settings / graph_view(M14)
 [model]      editor_core / project / acp_client / search / lang / storage
 [foundation] ui(部品+Registry) / theme_core / settings_core / keymap_core / i18n
 [外部]       gpui(git rev固定) / agent-client-protocol(crates.io) / ropey / alacritty_terminal
@@ -39,6 +39,7 @@
 | `acp_client` / `agent_panel` | ACP セッション・transcript・composer | crates.io `agent-client-protocol` と necoder 固有 UI の独立実装 | M4 |
 | `lang` | tree-sitter ハイライト・LSP クライアント | 公開 LSP 仕様と tree-sitter crates 上の独立実装 | M7 |
 | `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | `imara-diff` / crates.io `alacritty_terminal` 上の独立実装 | M8 |
+| `review_view` | 変更レビュー（worktree の全変更を 1 画面で・可変高リスト・ツリー・畳み）。構造化 diff は `project::review`（git CLI の unified diff を解析）。`editor_view` は構文色の写像だけ借りる（コアは変更レビューを知らない） | GPUI の公開 API・Git CLI 上の独立実装（Orca の機能比較のみ） | parity O6 |
 | `webview_view` | ローカル HTML プレビュー | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱） | M14 |
 | `graph_view` | worktree×commit の DAG・custom Element | Git CLI の出力を使う独立実装 | M14 |
 

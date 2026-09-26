@@ -80,7 +80,7 @@ impl Workspace {
                         if let Some(thread) = thread { panel.update(cx, |panel, cx| panel.focus_thread(thread, cx)); }
                         this.project_sessions.sessions[session_index].agent_panel = panel.clone();
                     }
-                    if matches!(&pane, FleetPane::Diff { .. }) { this.refresh_git_status_for(session_index, cx); }
+                    if matches!(&pane, FleetPane::Diff { .. }) { this.refresh_git_status_for(session_index, cx); this.activate_review(session_index, cx); }
                     this.chrome.stage_tabs.insert(target.clone(), pane.clone());
                     cx.notify();
                 })));

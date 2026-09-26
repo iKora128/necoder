@@ -225,6 +225,8 @@ impl Workspace {
                         })
                         .detach();
                     }
+                    // 変更レビューのタブはファイルではない（読み直しは下の mark_review_outdated）。
+                    TabContent::Review(_) => {}
                 }
                 git_changed = true;
                 continue;
@@ -241,6 +243,7 @@ impl Workspace {
         }
         if git_changed {
             self.refresh_git_status_for(session_index, cx);
+            self.mark_review_outdated(session_index, cx);
             let session = &self.project_sessions.sessions[session_index];
             if let Some(editor) = session
                 .tabs

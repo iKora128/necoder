@@ -145,7 +145,7 @@ One = サイドバーで選んだ Task を差し替え表示。Two / Three = ピ
   `＋▾` = スレッドを足す / ターミナルを足す / ファイルを開く。**同じ worktree に何本足しても Task は 1 枚のまま**。
   スレッドタブの × は既存 `remove_thread`（archive まで 1 本）。
 - **本体**: スレッド = 既存 `AgentPanel` を **chrome を畳んで**埋め込む（自前のスレッドタブ行は描かない・メタ行 1 行・
-  トークンメーターは畳まない）。変更 = 既存 Diff surface。ターミナル = `TerminalDock.detached` の名札で PTY を持ち回る
+  トークンメーターは畳まない）。変更 = 変更レビュー（UI-SPEC §14・Task の base が既定の比較）。ターミナル = `TerminalDock.detached` の名札で PTY を持ち回る
   （既存）。ファイル = worktree のツリー（クリックで solo のエディタに開く。Fleet 内にエディタは持たない）。
 - **composer**: 宛先チップ `● スレッド名 ／ プロジェクト ⎇ branch` + トークン `used / limit` + 入力枠（Task 色の枠）
   + ピル（Agent / model · effort / 承認モード）。既存そのまま。

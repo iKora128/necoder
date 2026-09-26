@@ -74,6 +74,9 @@ pub struct ProjectSession {
     pub(crate) search_panel: Option<Entity<SearchPanel>>,
     pub(crate) repository: RepositoryController,
     pub(crate) git_panel: Entity<GitPanel>,
+    /// 変更レビュー（エディタのタブと Fleet の「変更」タブで同じ 1 枚を使う・Chat には無い）。
+    /// 表示するまで git を叩かない（`Workspace::activate_review`）。
+    pub(crate) review: Option<Entity<ReviewView>>,
     pub(crate) terminal_dock: Entity<TerminalDock>,
     /// Fleet の Tests surface 専用。通常 Terminal と同じ Entity を二箇所へ描画しない。
     pub(crate) tests_dock: Entity<TerminalDock>,
@@ -199,6 +202,11 @@ impl Workspace {
             .map(|slot| slot.color)
             .unwrap_or_else(|| project_color(0));
         let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
+        let review = slot.map(|_| {
+            let review = cx.new(|cx| ReviewView::new(theme.clone(), cx));
+            PanelRegistry::bind_review(&review, cx);
+            review
+        });
         PanelRegistry::bind_session(
             &agent_panel,
             &explorer,
@@ -219,6 +227,7 @@ impl Workspace {
                 refresh_generation: 0,
             },
             git_panel,
+            review,
             terminal_dock,
             tests_dock,
             agent_active: false,
@@ -712,6 +721,8 @@ impl Workspace {
             } else {
                 None
             };
+            let review = cx.new(|cx| ReviewView::new(theme.clone(), cx));
+            PanelRegistry::bind_review(&review, cx);
             sessions.push(ProjectSession {
                 editor_area: EditorArea::new(),
                 fleet_agents: vec![agent_panel.clone()],
@@ -723,6 +734,7 @@ impl Workspace {
                     refresh_generation: 0,
                 },
                 git_panel,
+                review: Some(review),
                 terminal_dock,
                 tests_dock,
                 agent_active: false,

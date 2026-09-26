@@ -34,6 +34,7 @@ pub(crate) use lang::lsp::{
     parse_text_edits, parse_workspace_edit,
 };
 pub(crate) use project::{GraphCommit, ProjectSource, StatusKind, Worktree};
+pub(crate) use review_view::{ReviewContext, ReviewEvent, ReviewView};
 pub(crate) use search_ui::{SearchPanel, SearchPanelEvent};
 pub(crate) use std::collections::HashMap;
 pub(crate) use std::ops::{Deref, DerefMut, Range};
@@ -93,6 +94,7 @@ mod project_colors;
 mod project_session;
 mod project_switch;
 mod project_watcher;
+mod review_controller;
 pub(crate) use commands::*;
 pub(crate) use panels::*;
 pub(crate) use project_colors::*;
@@ -178,6 +180,8 @@ actions!(
         FindReferences,
         // diff タブ（HEAD vs バッファ・M11-9）と hunk 移動（F7・M11-9）。
         OpenDiff,
+        // 変更レビュー（worktree の全変更を 1 画面で・パレット「Git: 変更をレビュー」）。
+        OpenReview,
         NextHunk,
         PrevHunk,
         // シンボル（⌘⇧O アウトライン / ⌘T ワークスペース・M11）と診断移動（F8・M11）。
@@ -275,7 +279,7 @@ pub(crate) enum Dock {
     Bottom,
 }
 
-/// タブの中身（ARCHITECTURE §3 の Pane/Item 多態化。具体型 3 つ: エディタ / 画像 / PDF）。
+/// タブの中身（ARCHITECTURE §3 の Pane/Item 多態化。具体型 4 つ: エディタ / 画像 / PDF / 変更レビュー）。
 /// enum で足す方式 — trait 化は「編集も保存もしない表示専用タブ」以外の Item が要ったときに再考する。
 pub(crate) enum TabContent {
     Editor {
@@ -292,6 +296,8 @@ pub(crate) enum TabContent {
     /// PDF タブ。中身は OS のビューア（WKWebView / WebView2）を載せたネイティブ子ビュー。
     /// 画像タブと同じく編集・保存・LSP・hot exit の対象外。
     Pdf(Entity<PdfView>),
+    /// 変更レビュー（session の `ReviewView` を載せる一時タブ・永続化しない）。
+    Review(Entity<ReviewView>),
 }
 
 /// ペインに載る 1 タブ（M10 複数タブ）。`path` はタブの同一判定と永続化のキー。
@@ -308,7 +314,7 @@ impl EditorTab {
     pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.content {
             TabContent::Editor { editor, .. } => Some(editor),
-            TabContent::Image(_) | TabContent::Pdf(_) => None,
+            TabContent::Image(_) | TabContent::Pdf(_) | TabContent::Review(_) => None,
         }
     }
 
@@ -316,7 +322,7 @@ impl EditorTab {
     pub(crate) fn pdf(&self) -> Option<&Entity<PdfView>> {
         match &self.content {
             TabContent::Pdf(view) => Some(view),
-            TabContent::Editor { .. } | TabContent::Image(_) => None,
+            TabContent::Editor { .. } | TabContent::Image(_) | TabContent::Review(_) => None,
         }
     }
 
@@ -326,7 +332,13 @@ impl EditorTab {
             TabContent::Editor { editor, .. } => editor.read(cx).focus_handle(cx),
             TabContent::Image(view) => view.read(cx).focus_handle(cx),
             TabContent::Pdf(view) => view.read(cx).focus_handle(cx),
+            TabContent::Review(view) => view.read(cx).focus_handle(cx),
         }
+    }
+
+    /// 変更レビューのタブか（タブ名・タブメニューの出し分け）。
+    pub(crate) fn is_review(&self) -> bool {
+        matches!(self.content, TabContent::Review(_))
     }
 
     /// 未保存変更ドット（画像・PDF タブは常に false）。
@@ -348,6 +360,10 @@ impl EditorTab {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
             TabContent::Pdf(view) => view
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+            TabContent::Review(view) => view
                 .clone()
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
@@ -1992,6 +2008,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_code_actions))
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::open_diff_tab))
+            .on_action(cx.listener(Self::open_review_tab))
             .on_action(cx.listener(|this, _: &NextHunk, _window, cx| this.step_hunk_header(1, cx)))
             .on_action(cx.listener(|this, _: &PrevHunk, _window, cx| this.step_hunk_header(-1, cx)))
             .on_action(cx.listener(Self::open_outline))
