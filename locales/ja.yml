@@ -381,6 +381,8 @@ fleet:
   cleanup_close_sub: 画面から外すだけ。エージェントは動き続ける
   cleanup_stop: エージェントを止める
   cleanup_stop_sub: 実行中のターンを中断（esc と同じ）。Task は残る
+  cleanup_sleep: 休ませる
+  cleanup_sleep_sub: "静かなエージェント %{count} 体を止めてメモリを空ける。会話は残り、次に送ると続きから"
   cleanup_archive: Task を終了
   cleanup_archive_sub: 編隊と herd から消す。worktree はディスクに残る
   cleanup_remove_worktree: worktree を削除

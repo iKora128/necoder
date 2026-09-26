@@ -303,6 +303,7 @@ Worktree は既存ブランチ・既存 worktree または新しいブランチ�
   |---|---|---|
   | セルを閉じる（× と同じ） | 画面から外すだけ | Task・worktree・**動いているエージェント** |
   | エージェントを止める | 実行中ターンを中断（esc と同じ） | Task・worktree |
+  | 休ませる（O21・静かなエージェントがある時だけ・`☾`） | 静かで会話を引き継げるエージェントを止める（O22 の「使っていないエージェントを止める」と同じ・副題に体数） | Task・worktree・会話（次に送ると続きから） |
   | Task を終了 | 台帳を `archived` に。編隊/herd から消える | worktree（ディスク） |
   | worktree を削除 ⚠ | `git worktree remove` | ブランチ |
   | ブランチごと削除 ⚠ | worktree + `git branch -D` | なし |
