@@ -578,8 +578,8 @@
 | H18 | 配布の形態 | 一部 | §5 |
 | H19 | プラグイン | 無 | §5 |
 | H20 | ペット | 一部 | O45 |
-| H21 | Resource Manager | 一部 | O22 |
-| H22 | Open in 外部アプリ | 一部 | O26 |
+| H21 | Resource Manager | 一部（#30・necoder と子プロセスのメモリをプロジェクトごと・静かなエージェントを止める。SSH 先のプロセスは未） | O22 |
+| H22 | Open in 外部アプリ | 有（#30・D29 と同じ） | O26 |
 | H23 | star・Discord への導線 | 無 | O27 |
 | H24 | GPU の表示 | 無 | §5 |
 | H25 | statusbar の項目の切替 | 有（#30・右クリックで出し入れ・`statusbar_hidden`） | O27 |
