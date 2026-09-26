@@ -142,17 +142,27 @@ pub fn summaries_from(sessions: Vec<v1::SessionInfo>) -> Vec<AgentSessionSummary
         .collect()
 }
 
-/// 履歴ビューに出す「エージェントの過去の会話」: necoder が既に持っている会話（`known` の id）と
+/// 履歴ビューに出す「エージェントの過去の会話」: necoder が既に持っている会話（`known` の id）・
+/// 題が `hidden_title_prefixes` のどれかで始まる会話（necoder が自分の用事で CLI に頼んだ要約や命名）・
 /// 重複を除き、新しい順（時刻の分からない物は後ろ）に `limit` 件まで。
 pub fn fresh_sessions(
     listed: Vec<AgentSessionSummary>,
     known: &HashSet<String>,
+    hidden_title_prefixes: &[String],
     limit: usize,
 ) -> Vec<AgentSessionSummary> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut sessions: Vec<AgentSessionSummary> = listed
         .into_iter()
         .filter(|session| !known.contains(&session.session_id))
+        .filter(|session| {
+            !session.title.as_deref().is_some_and(|title| {
+                let title = title.trim_start();
+                hidden_title_prefixes
+                    .iter()
+                    .any(|prefix| !prefix.is_empty() && title.starts_with(prefix.as_str()))
+            })
+        })
         .filter(|session| seen.insert(session.session_id.clone()))
         .collect();
     // `Option` は None < Some なので、降順にすると時刻の無い物が末尾へ回る。
@@ -555,7 +565,8 @@ mod tests {
         );
     }
 
-    /// `session/list` の応答 → 履歴の行: necoder が既に持っている会話と重複を除き、新しい順に上限まで。
+    /// `session/list` の応答 → 履歴の行: necoder が既に持っている会話・necoder が自分の用事で CLI に
+    /// 頼んだ会話（題の頭で見分ける）・重複を除き、新しい順に上限まで。
     #[test]
     fn listed_sessions_drop_known_ones_and_sort_newest_first() {
         let response: v1::ListSessionsResponse = serde_json::from_value(json!({
@@ -568,19 +579,27 @@ mod tests {
                  "updatedAt": "2026-09-20T12:00:00Z"},
                 {"sessionId": "untimed", "cwd": "/repo", "title": "   "},
                 {"sessionId": "new", "cwd": "/repo", "title": "重複"},
+                {"sessionId": "helper", "cwd": "/repo",
+                 "title": "入力はエージェントターンの指示と結果です。何をして…",
+                 "updatedAt": "2026-09-26T00:00:00.000Z"},
             ],
         }))
         .expect("応答として読める");
         let listed = summaries_from(response.sessions);
         let known: HashSet<String> = ["known".to_string()].into_iter().collect();
-        let rows = fresh_sessions(listed.clone(), &known, 10);
+        let hidden = vec!["入力はエージェントターンの".to_string(), String::new()];
+        let rows = fresh_sessions(listed.clone(), &known, &hidden, 10);
         let ids: Vec<&str> = rows.iter().map(|row| row.session_id.as_str()).collect();
         assert_eq!(ids, vec!["new", "old", "untimed"]);
         assert_eq!(rows[0].title.as_deref(), Some("CLI の会話"));
         assert_eq!(rows[0].cwd, PathBuf::from("/repo-wt"));
         assert_eq!(rows[2].title, None, "空白だけの題は無し");
         assert_eq!(rows[2].updated_at_ms, None);
-        assert_eq!(fresh_sessions(listed, &known, 1).len(), 1, "上限が効く");
+        assert_eq!(
+            fresh_sessions(listed, &known, &hidden, 1).len(),
+            1,
+            "上限が効く"
+        );
     }
 
     #[test]

@@ -1218,11 +1218,7 @@ pub fn inline_rewrite_on(
     let temp = PathBuf::from(format!("/tmp/necoder-inline-{unix_ms}.txt"));
     host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
         .context("インライン編集の一時ファイル作成に失敗")?;
-    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
-    let prompt =
-        "入力の最初の行にある指示に従って、対象コードの区切り行より後のコードを書き換えて。\
-        出力は書き換え後のコード全体だけ。前置き・説明・コードフェンスは出力しない。\
-        インデントと空行は元のスタイルを保つ。";
+    let prompt = INLINE_REWRITE_PROMPT;
     let script = format!(
         "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
         temp = temp.display()
@@ -1265,9 +1261,7 @@ pub fn inline_command_on(host: &dyn Host, dir: &Path, instruction: &str) -> Resu
     let temp = PathBuf::from(format!("/tmp/necoder-inline-cmd-{unix_ms}.txt"));
     host.write_file(&temp, payload.as_bytes(), host::WriteCondition::Any)
         .context("コマンド生成の一時ファイル作成に失敗")?;
-    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
-    let prompt = "入力のやりたいことを実現するシェルコマンドを1行だけ出力して。\
-        対象は macOS の zsh。説明・前置き・コードフェンスは出力しない。";
+    let prompt = INLINE_COMMAND_PROMPT;
     let script = format!(
         "claude -p \"{prompt}\" < {temp}; status=$?; rm -f {temp}; exit $status",
         temp = temp.display()
@@ -1308,10 +1302,35 @@ pub fn name_thread_on(
     excerpt: &str,
     template: &str,
 ) -> Result<String> {
-    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
-    let prompt = "入力はエージェントとの会話の冒頭です。この会話に短いタイトルを付けて。\
-        日本語・18文字以内・体言止め・記号や引用符や句読点や番号は付けない・タイトルだけを1行で出力して。";
-    oneshot_line_on(host, dir, excerpt, template, prompt, 24)
+    oneshot_line_on(host, dir, excerpt, template, THREAD_TITLE_PROMPT, 24)
+}
+
+// necoder が自分の用事で `claude -p` / `codex exec` に渡す決まった指示。
+// 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+
+/// インライン編集（[`inline_rewrite_on`]）の指示。
+const INLINE_REWRITE_PROMPT: &str =
+    "入力の最初の行にある指示に従って、対象コードの区切り行より後のコードを書き換えて。\
+    出力は書き換え後のコード全体だけ。前置き・説明・コードフェンスは出力しない。\
+    インデントと空行は元のスタイルを保つ。";
+
+/// コマンド生成（[`inline_command_on`]）の指示。
+const INLINE_COMMAND_PROMPT: &str = "入力のやりたいことを実現するシェルコマンドを1行だけ出力して。\
+    対象は macOS の zsh。説明・前置き・コードフェンスは出力しない。";
+
+/// スレッドの自動命名（[`name_thread_on`]）の指示。
+const THREAD_TITLE_PROMPT: &str = "入力はエージェントとの会話の冒頭です。この会話に短いタイトルを付けて。\
+    日本語・18文字以内・体言止め・記号や引用符や句読点や番号は付けない・タイトルだけを1行で出力して。";
+
+/// necoder が自分の用事（インライン編集・コマンド生成・命名）でエージェントの CLI に渡す指示。
+/// これらの会話はエージェントの会話の一覧（ACP `session/list`）にも載るので、履歴ビューはこの頭で
+/// 見分けて出さない（O15）。
+pub fn helper_prompts() -> [&'static str; 3] {
+    [
+        INLINE_REWRITE_PROMPT,
+        INLINE_COMMAND_PROMPT,
+        THREAD_TITLE_PROMPT,
+    ]
 }
 
 /// 汎用の 1 行生成（スレッド命名・Tier 2 遷移スナップショット要約が共用・FLEET-CONTROL-PLAN P4）。

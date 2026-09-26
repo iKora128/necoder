@@ -14,7 +14,8 @@
 //! 4. **スレッドの右クリックメニュー**（名前を変更 / 新しいセッションで続ける / 閉じる）
 
 use super::*;
-use acp_client::history::{AgentSessionSummary, ReplayItem, SessionListing};
+use acp_client::history::ReplayItem;
+use std::collections::HashSet;
 
 /// 履歴ビューが一覧で読む「エージェントの過去の会話」の上限。
 pub const AGENT_SESSION_LIMIT: usize = 100;
@@ -27,6 +28,48 @@ const HANDOFF_RECENT_ENTRIES: usize = 6;
 const HANDOFF_RECENT_CHARS: usize = 1_500;
 /// 前置きに並べる「編集したファイル」の上限。
 const HANDOFF_FILES: usize = 20;
+
+/// necoder が自分の用事（✳ 要約・Captain の総括・命名・インライン編集・コマンド生成）でエージェントの
+/// CLI（`claude -p` / `codex exec`）に頼んだ会話の題の頭。エージェントの会話の一覧（`session/list`）には
+/// これらも載るので、履歴ビューはこの頭で始まる会話を出さない。表示言語を切り替える前に作られた会話も
+/// あるので、全ロケールの文言を集める。頭だけで比べるのは、エージェントが題を切り詰めて返すため。
+pub(crate) fn helper_session_prefixes() -> Vec<String> {
+    const PREFIX_CHARS: usize = 16;
+    let mut prompts: Vec<String> = project::helper_prompts()
+        .iter()
+        .map(|prompt| prompt.to_string())
+        .collect();
+    for locale in i18n::available_locales() {
+        for key in ["agent.summary_prompt", "control.summary_prompt"] {
+            if let Some(prompt) = i18n::translate_in(locale, key) {
+                prompts.push(prompt);
+            }
+        }
+    }
+    let mut prefixes: Vec<String> = prompts
+        .iter()
+        .map(|prompt| prompt.trim().chars().take(PREFIX_CHARS).collect::<String>())
+        .filter(|prefix| !prefix.is_empty())
+        .collect();
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+/// 一覧の応答 → 履歴ビューに出す「エージェントの過去の会話」: necoder が既に持っている会話（`known`）・
+/// necoder が自分の用事で CLI に頼んだ会話（[`helper_session_prefixes`]）・重複を除き、新しい順に
+/// [`AGENT_SESSION_LIMIT`] 件まで。
+pub fn fresh_agent_sessions(
+    listed: Vec<AgentSessionSummary>,
+    known: &HashSet<String>,
+) -> Vec<AgentSessionSummary> {
+    acp_client::history::fresh_sessions(
+        listed,
+        known,
+        &helper_session_prefixes(),
+        AGENT_SESSION_LIMIT,
+    )
+}
 
 /// スレッドタブ（一覧の行）の右クリックメニュー。
 pub(crate) struct ThreadMenu {
@@ -811,6 +854,34 @@ mod tests {
             assert_eq!(search.current, 0);
         });
         std::fs::remove_dir_all(&root).expect("片付けられる");
+    }
+
+    /// necoder が自分の用事で CLI に頼んだ会話は、どの表示言語で作った物でも題の頭で見分ける。
+    #[test]
+    fn helper_sessions_are_recognized_in_every_locale() {
+        let prefixes = helper_session_prefixes();
+        for locale in i18n::available_locales() {
+            for key in ["agent.summary_prompt", "control.summary_prompt"] {
+                let prompt = i18n::translate_in(locale, key).expect("文言がある");
+                assert!(
+                    prefixes
+                        .iter()
+                        .any(|prefix| prompt.starts_with(prefix.as_str())),
+                    "{locale} {key}"
+                );
+            }
+        }
+        for prompt in project::helper_prompts() {
+            assert!(prefixes
+                .iter()
+                .any(|prefix| prompt.starts_with(prefix.as_str())));
+        }
+        assert!(
+            !prefixes
+                .iter()
+                .any(|prefix| "README を直して".starts_with(prefix.as_str())),
+            "人の会話は隠さない"
+        );
     }
 
     #[test]

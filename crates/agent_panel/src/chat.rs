@@ -896,7 +896,7 @@ fn new_chat_thread(color_index: usize, cx: &App) -> Thread {
 }
 
 /// 一致した語の前後を 1 行に畳んで返す（一覧の行に収まる長さ）。
-fn snippet_around(content: &str, lowercase_query: &str) -> SharedString {
+pub fn snippet_around(content: &str, lowercase_query: &str) -> SharedString {
     let flat: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
     let characters: Vec<char> = flat.chars().collect();
     let lowered: Vec<char> = flat.to_lowercase().chars().collect();
