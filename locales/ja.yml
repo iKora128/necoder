@@ -117,6 +117,13 @@ agent:
   stop: 停止 esc
   running_hint: esc で中断
   running_thinking: 考えています
+  slash_footer: "%{count} 件 · ↑↓ で選ぶ · Enter / Tab で入れる · esc で閉じる"
+  goal_label: 目標
+  goal_status_active: 進行中
+  goal_status_paused: 一時停止
+  goal_status_blocked: 止まっています
+  goal_status_complete: 達成
+  goal_status_limited: 上限で停止
   more_lines: … （他 %{n} 行）
 hunk:
   stage: この hunk を stage

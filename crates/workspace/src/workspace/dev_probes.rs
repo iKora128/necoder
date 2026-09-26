@@ -16,6 +16,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: Agent パネルの composer の `/` 補完を開く（`NECODER_SLASH_PROBE`・O2 の offscreen 検証）。
+    /// `fake` = 偽のコマンド一覧を流し込む（`NECODER_SLASH_PROBE_FAKE=1`）。
+    #[cfg(debug_assertions)]
+    pub fn debug_slash_probe(
+        &mut self,
+        text: &str,
+        fake: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
+        }
+        self.agent_panel.update(cx, |panel, cx| {
+            panel.debug_slash_probe(text, fake, window, cx)
+        });
+        cx.notify();
+    }
+
     /// 開発用: スレッドに各状態を仕込んで開く（タブ/beacon/フッター/レールの状態表示を offscreen で検証・#）。
     #[cfg(debug_assertions)]
     /// 開発用: 擬似 tear-off を直接駆動（枠外ドロップ相当の座標 → 新窓生成まで・M13）。

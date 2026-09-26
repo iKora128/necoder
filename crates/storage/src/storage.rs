@@ -794,6 +794,56 @@ impl Storage {
         })
     }
 
+    /// スレッド名が**人の手で**付けられたかの印を書く（O2）。`custom = false` で印を外す。
+    /// エージェントが送ってくる会話名（ACP `SessionInfoUpdate.title`）は、印のあるスレッドの名前を
+    /// 上書きしない。印は再起動をまたいで残す（残さないと、再開した会話の名前でタブ名が戻る）。
+    pub fn set_thread_name_custom(&self, thread_id: &str, custom: bool) -> Result<()> {
+        let thread_id = thread_id.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                if custom {
+                    conn.execute(
+                        "INSERT INTO thread_custom_names (thread_id, updated_at) VALUES (?1, ?2)
+                         ON CONFLICT(thread_id) DO UPDATE SET updated_at = ?2",
+                        (thread_id.as_str(), now),
+                    )
+                    .await
+                    .context("thread_custom_names の upsert に失敗")?;
+                } else {
+                    conn.execute(
+                        "DELETE FROM thread_custom_names WHERE thread_id = ?1",
+                        (thread_id.as_str(),),
+                    )
+                    .await
+                    .context("thread_custom_names の削除に失敗")?;
+                }
+                Ok(())
+            })
+        })
+    }
+
+    /// 人の手で名前を付けたスレッドの id 一覧（起動時の復元で一括で読む）。
+    pub fn load_custom_named_threads(&self) -> Result<Vec<String>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query("SELECT thread_id FROM thread_custom_names", ())
+                    .await
+                    .context("thread_custom_names の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("thread_custom_names 行の取得に失敗")?
+                {
+                    result.push(row.get_value(0)?.as_text().context("thread_id")?.clone());
+                }
+                Ok(result)
+            })
+        })
+    }
+
     /// Chat モードのスレッドの付帯情報を 1 件ぶん書く（`docs/CHAT.md` §2.3 / §3.2）。
     ///
     /// フォルダの場所は**作成後に変えない**（エージェントはセッションを cwd のパス文字列で引く）ので、
@@ -981,6 +1031,12 @@ impl Storage {
                 )
                 .await
                 .context("thread_sessions の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_custom_names WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_custom_names の削除に失敗")?;
                 conn.execute(
                     "DELETE FROM thread_chat_paths WHERE thread_id = ?1",
                     (id.as_str(),),
@@ -1827,6 +1883,17 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("thread_sessions 作成に失敗")?;
+    // 人が手で付けたスレッド名の印（O2・2026-09-26）。エージェントが送ってくる会話名はこの印の
+    // あるスレッドを上書きしない。行が在る＝手動。threads 表を広げない理由は thread_sessions と同じ。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_custom_names (
+            thread_id TEXT PRIMARY KEY,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("thread_custom_names 作成に失敗")?;
     // Chat モードのスレッドの付帯情報（`docs/CHAT.md`）。threads 表を広げない理由は
     // thread_sessions と同じ。パスは改行を含みうるので 1 行 1 パスの別表にする。
     conn.execute(
@@ -2366,6 +2433,35 @@ mod tests {
             storage.load_thread_sessions().unwrap(),
             vec![("t2".to_string(), "sess-other".to_string())],
             "スレッド削除でセッション id も消える"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 手動で付けたスレッド名の印は往復し、外せて、スレッド削除で消える（O2）。
+    #[test]
+    fn custom_thread_names_round_trip_and_follow_thread_deletion() {
+        let path = temp_db("thread_custom_names");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("t1", "設計の相談", 0, "necoder", None, None, None, 0, 0)
+            .unwrap();
+        assert!(storage.load_custom_named_threads().unwrap().is_empty());
+        storage.set_thread_name_custom("t1", true).unwrap();
+        storage.set_thread_name_custom("t1", true).unwrap();
+        storage.set_thread_name_custom("t2", true).unwrap();
+        let mut custom = storage.load_custom_named_threads().unwrap();
+        custom.sort();
+        assert_eq!(custom, vec!["t1".to_string(), "t2".to_string()]);
+        storage.set_thread_name_custom("t2", false).unwrap();
+        assert_eq!(
+            storage.load_custom_named_threads().unwrap(),
+            vec!["t1".to_string()]
+        );
+        storage.delete_thread("t1").unwrap();
+        assert!(
+            storage.load_custom_named_threads().unwrap().is_empty(),
+            "スレッド削除で印も消える"
         );
         let _ = std::fs::remove_file(&path);
     }

@@ -1133,6 +1133,18 @@ impl EditorView {
         self.buffer.text()
     }
 
+    /// 1 行目のテキスト（末尾の改行は含めない）。composer の親が行頭の `/` を読むのに使う
+    /// （変更のたびに全文を複製しない）。
+    pub fn first_line_text(&self) -> String {
+        self.buffer.snapshot().line_text(0)
+    }
+
+    /// IME の変換中（未確定の文字がある）か。composer の親が補完を開くか・Enter を横取りするかを
+    /// 決めるのに使う（変換中の Enter は確定であって、選択や送信ではない）。
+    pub fn has_marked_text(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
     /// テキストを差し替える（composer の下書き流し込み・開発プローブ用）。
     pub fn set_plain_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.buffer = Buffer::from_str(text);
