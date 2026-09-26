@@ -236,6 +236,7 @@ cmd:
   open_in_zed: "外部: Zed で開く"
   open_in_terminal: "外部: ターミナルでフォルダを開く"
   show_ports: "Ports: 開いているポート（開く / 止める）"
+  show_inbox: "通知: 履歴を開く"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -1294,3 +1295,12 @@ ports:
   stop_failed: "止められませんでした（pid %{pid}）— もう終わっているか、necoder の中のプロセスではありません"
   hint: 開いた時と ↻ の時だけ読みます（lsof / ps）。止められるのは necoder の中のプロセスだけ。SSH 先のポートはまだ出ません
   unsupported: この OS ではまだ使えません（macOS / Linux）
+inbox:
+  title: 通知の履歴
+  bell_tip: 通知の履歴
+  bell_tip_unread: "通知の履歴（未読 %{count}）"
+  mark_all_read: すべて既読
+  mark_read: 既読にする
+  mark_unread: 未読に戻す
+  empty: まだ通知はありません（エージェントの完了・失敗・承認待ち・質問待ちがここに残ります）
+  note: "この窓の最新 %{count} 件・起動している間だけ残ります"

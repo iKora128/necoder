@@ -131,6 +131,16 @@ impl Workspace {
         muted: bool,
         cx: &mut Context<Self>,
     ) {
+        // 通知の履歴（ベル・O13）には、見ているかどうかに関わらず残す（ミュートは残さない）。
+        if !muted {
+            self.record_inbox(
+                alert.title(thread),
+                notification_body(place, detail),
+                panel,
+                thread_id,
+                cx,
+            );
+        }
         let enabled = settings::get(cx).system_notifications;
         if !should_post_system_notification(enabled, muted, self.is_looking_at_this_window(cx)) {
             return;
@@ -160,7 +170,7 @@ impl Workspace {
 
     /// 通知を押した先: Chat のスレッドなら Chat を開いてそのチャットへ、プロジェクトのスレッドなら
     /// トーストのクリックと同じく当該プロジェクト + スレッドへ（Fleet 中は Task カードへ）。
-    fn jump_to_notified_thread(
+    pub(crate) fn jump_to_notified_thread(
         &mut self,
         panel: &WeakEntity<AgentPanel>,
         thread_id: &str,

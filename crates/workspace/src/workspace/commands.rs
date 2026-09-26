@@ -286,6 +286,10 @@ impl CommandRegistry {
                 label_key: "cmd.show_ports",
                 action_name: "workspace::ShowPorts",
             },
+            CommandEntry {
+                label_key: "cmd.show_inbox",
+                action_name: "workspace::ShowInbox",
+            },
         ]
     }
 

@@ -205,6 +205,8 @@ impl Workspace {
             .child(div().flex_1().h_full()) // 空き＝ドラッグ領域（titlebar 全体で処理）
             // 実行中スレッドの beacon（窓上部から常に見える＝方向感覚の核・UI-SPEC §3）
             .child(self.render_beacons(cx))
+            // 通知の履歴（ベル・O13）。未読があれば件数。
+            .child(self.render_inbox_bell(cx))
             // リモート SSH で開く（M13・GUI 導線。~/.ssh/config のエイリアス/鍵/ProxyJump がそのまま効く）
             .child(
                 self.rail_icon(
