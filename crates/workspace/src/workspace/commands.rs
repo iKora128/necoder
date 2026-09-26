@@ -246,6 +246,14 @@ impl CommandRegistry {
                 label_key: "cmd.shortcut_sheet",
                 action_name: "workspace::ShortcutSheet",
             },
+            CommandEntry {
+                label_key: "cmd.usage_limits",
+                action_name: "workspace::ShowUsageLimits",
+            },
+            CommandEntry {
+                label_key: "cmd.usage_stats",
+                action_name: "workspace::UsageStats",
+            },
         ]
     }
 

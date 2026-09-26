@@ -1,7 +1,7 @@
 //! storage — ローカル永続化 DB（Turso = SQLite の pure-Rust 再実装・MIT）。
 //!
 //! ARCHITECTURE §7 / DECISIONS 決定ログ 2026-07-16。用途は hot exit / スレッド永続化 /
-//! トークン台帳 / checkpoint メタに**限定**（設定・todos.md は「ファイルが真実」のまま）。
+//! ターンごとの使用量（O11）/ checkpoint メタに**限定**（設定・todos.md は「ファイルが真実」のまま）。
 //! Turso の型はこの crate の外に漏らさない（成熟度問題が出たら rusqlite へ 1 crate 差し替え）。
 //!
 //! **スレッドモデル**: Turso の API は async だが、GPUI に runtime を持ち込まないため
@@ -193,6 +193,37 @@ pub struct ReviewNoteRecord {
     pub sent_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// ターン 1 回分の使用量（O11・[`Storage::record_turn_usage`]）。値はエージェントの報告のまま。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TurnUsageRecord {
+    pub thread_id: String,
+    /// 話したエージェントのラベル（`threads.agent` と同じ綴り。例 `Claude Code`）。
+    pub agent: String,
+    /// ターンが終わった時刻（unix ms）。日別の集計の鍵。
+    pub ended_at: i64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_read_tokens: u64,
+    pub cached_write_tokens: u64,
+    pub total_tokens: u64,
+    /// このターンの推定コスト（USD）。エージェントが出さなければ `None`。
+    pub cost_usd: Option<f64>,
+    /// エージェントが報告した会話の累計コスト（USD）。次のターンの差分の基準。
+    pub session_cost_usd: Option<f64>,
+}
+
+/// 日付 × エージェントの集計 1 行（[`Storage::daily_usage`]・Stats 画面）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyUsage {
+    /// ローカル日付の通し日数（1970-01-01 = 0）。
+    pub day: i64,
+    pub agent: String,
+    pub turns: i64,
+    pub total_tokens: i64,
+    /// コストの合計（USD）。その日そのエージェントのターンにコストの報告が 1 つも無ければ `None`。
+    pub cost_usd: Option<f64>,
 }
 
 /// Task lifecycle の追記イベント。wait/orchestration は transient な UI state ではなく
@@ -1427,25 +1458,96 @@ impl Storage {
         })
     }
 
-    /// トークン台帳（M12-13）: 全スレッド（アーカイブ済みも含む）の `(id, 名前, tokens_used)` を
-    /// `tokens_used`（ACP の実測の累計）の多い順に返すだけ。日付での絞り込みや turn 数の集計はしない。
-    pub fn token_ledger(&self) -> Result<Vec<(String, String, i64)>> {
+    // ── ターンごとの使用量（O11）。Stats の日別集計と、コスト差分の基準の引き継ぎに使う ──
+
+    /// ターン 1 回分の使用量を 1 行追記する（ターンが終わった時）。
+    pub fn record_turn_usage(&self, record: &TurnUsageRecord) -> Result<()> {
+        let record = record.clone();
+        let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO turn_usage (thread_id, agent, ended_at, input_tokens, output_tokens,
+                        cached_read_tokens, cached_write_tokens, total_tokens, cost_usd, session_cost_usd)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    (
+                        record.thread_id.as_str(),
+                        record.agent.as_str(),
+                        record.ended_at,
+                        count(record.input_tokens),
+                        count(record.output_tokens),
+                        count(record.cached_read_tokens),
+                        count(record.cached_write_tokens),
+                        count(record.total_tokens),
+                        record.cost_usd,
+                        record.session_cost_usd,
+                    ),
+                )
+                .await
+                .context("turn_usage の追記に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// そのスレッドで最後に記録した「会話の累計コスト」（USD）。再起動後に `session/load` で引き継いだ
+    /// 会話は、最初の累計に過去の分を含むので、その差分の基準にする。記録が無ければ `None`。
+    pub fn last_session_cost(&self, thread_id: &str) -> Result<Option<f64>> {
+        let thread_id = thread_id.to_string();
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
                     .query(
-                        "SELECT id, name, tokens_used FROM threads ORDER BY tokens_used DESC",
-                        (),
+                        "SELECT session_cost_usd FROM turn_usage
+                         WHERE thread_id = ?1 AND session_cost_usd IS NOT NULL
+                         ORDER BY id DESC LIMIT 1",
+                        (thread_id.as_str(),),
                     )
                     .await
-                    .context("台帳の読み出しに失敗")?;
+                    .context("turn_usage の読み出しに失敗")?;
+                match rows.next().await.context("turn_usage 行の取得に失敗")? {
+                    Some(row) => Ok(row.get_value(0)?.as_real().copied()),
+                    None => Ok(None),
+                }
+            })
+        })
+    }
+
+    /// `since_ms` 以降のターンを、ローカル日付 × エージェントで集計する（新しい日から・同じ日は
+    /// エージェント名順）。`offset_ms` はローカル時刻と UTC の差（日付の境目をローカルの 0 時にする）。
+    pub fn daily_usage(&self, since_ms: i64, offset_ms: i64) -> Result<Vec<DailyUsage>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT (ended_at + ?2) / 86400000 AS day, agent, COUNT(*), SUM(total_tokens),
+                                SUM(cost_usd)
+                         FROM turn_usage WHERE ended_at >= ?1
+                         GROUP BY (ended_at + ?2) / 86400000, agent
+                         ORDER BY day DESC, agent",
+                        (since_ms, offset_ms),
+                    )
+                    .await
+                    .context("日別の使用量の読み出しに失敗")?;
                 let mut result = Vec::new();
-                while let Some(row) = rows.next().await.context("台帳行の取得に失敗")? {
-                    result.push((
-                        row.get_value(0)?.as_text().context("id")?.clone(),
-                        row.get_value(1)?.as_text().context("name")?.clone(),
-                        *row.get_value(2)?.as_integer().context("tokens")?,
-                    ));
+                while let Some(row) = rows.next().await.context("日別の使用量の取得に失敗")?
+                {
+                    result.push(DailyUsage {
+                        day: *row.get_value(0)?.as_integer().context("day")?,
+                        agent: row.get_value(1)?.as_text().context("agent")?.clone(),
+                        turns: *row.get_value(2)?.as_integer().context("turns")?,
+                        total_tokens: row
+                            .get_value(3)?
+                            .as_integer()
+                            .copied()
+                            .unwrap_or_default(),
+                        cost_usd: {
+                            let cost = row.get_value(4)?;
+                            cost.as_real()
+                                .copied()
+                                .or_else(|| cost.as_integer().map(|value| *value as f64))
+                        },
+                    });
                 }
                 Ok(result)
             })
@@ -2053,6 +2155,39 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("turns index 作成に失敗")?;
+    // ターンごとの使用量（O11）。エージェントがターンの終わりに報告したトークンと、会話の累計コストの
+    // 差分（USD の推定）。`turns` は発話の行（1 ターンに何行も）なので別表にする。`session_cost_usd` は
+    // エージェントが報告した累計そのもので、再起動後に引き継いだ会話の差分の基準になる。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS turn_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            ended_at INTEGER NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            cached_read_tokens INTEGER NOT NULL,
+            cached_write_tokens INTEGER NOT NULL,
+            total_tokens INTEGER NOT NULL,
+            cost_usd REAL,
+            session_cost_usd REAL
+        )",
+        (),
+    )
+    .await
+    .context("turn_usage 作成に失敗")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS turn_usage_ended ON turn_usage (ended_at)",
+        (),
+    )
+    .await
+    .context("turn_usage index 作成に失敗")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS turn_usage_thread ON turn_usage (thread_id, id)",
+        (),
+    )
+    .await
+    .context("turn_usage index 作成に失敗")?;
     // スレッドが最後に使った ACP セッション id（`session/load` で会話を引き継ぐ鍵・2026-09-08）。
     // threads 表を広げず別表にする: 列を足すと upsert/load の tuple が全部変わる上、
     // セッション id は「エージェント側の状態への参照」でスレッドのメタとは寿命が違う。
@@ -3002,9 +3137,98 @@ mod tests {
         storage.unarchive_thread("t2").unwrap();
         assert_eq!(storage.load_threads().unwrap().len(), 2);
         storage.archive_thread("t2").unwrap();
-        // 台帳
-        let ledger = storage.token_ledger().unwrap();
-        assert_eq!(ledger[0].2, 2400);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ターンごとの使用量（O11）: ローカル日付 × エージェントで集計する。日付の境目はローカルの 0 時
+    /// （`offset_ms`）、`since_ms` より前は数えない、コストの無いターンだけの日はコスト `None`。
+    #[test]
+    fn turn_usage_is_aggregated_per_local_day_and_agent() {
+        let path = temp_db("turn_usage");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        const DAY: i64 = 86_400_000;
+        const HOUR: i64 = 3_600_000;
+        // UTC+9（日本）。UTC の 2026-09-25 16:00 はローカルの 2026-09-26 01:00。
+        let offset = 9 * HOUR;
+        let day_start_utc = 20_722 * DAY; // 2026-09-26 00:00 UTC
+        let record = |thread: &str, agent: &str, ended_at: i64, total: u64, cost: Option<f64>| {
+            TurnUsageRecord {
+                thread_id: thread.into(),
+                agent: agent.into(),
+                ended_at,
+                input_tokens: total / 2,
+                output_tokens: total / 2,
+                total_tokens: total,
+                cost_usd: cost,
+                session_cost_usd: cost,
+                ..TurnUsageRecord::default()
+            }
+        };
+        for row in [
+            // 集計の範囲外（古い）
+            record(
+                "t1",
+                "Claude Code",
+                day_start_utc - 40 * DAY,
+                9_999,
+                Some(9.0),
+            ),
+            // ローカル 2026-09-25
+            record("t1", "Claude Code", day_start_utc - 20 * HOUR, 500, None),
+            // ローカル 2026-09-26（UTC では前日の 16:00 と当日の 02:00）
+            record(
+                "t1",
+                "Claude Code",
+                day_start_utc - 8 * HOUR,
+                1_000,
+                Some(0.25),
+            ),
+            record(
+                "t1",
+                "Claude Code",
+                day_start_utc + 2 * HOUR,
+                3_000,
+                Some(0.5),
+            ),
+            record("t2", "Codex", day_start_utc + 3 * HOUR, 7_000, None),
+        ] {
+            storage.record_turn_usage(&row).unwrap();
+        }
+        let rows = storage
+            .daily_usage(day_start_utc - 30 * DAY, offset)
+            .unwrap();
+        let today = (day_start_utc + offset) / DAY;
+        assert_eq!(
+            rows,
+            vec![
+                DailyUsage {
+                    day: today,
+                    agent: "Claude Code".into(),
+                    turns: 2,
+                    total_tokens: 4_000,
+                    cost_usd: Some(0.75),
+                },
+                DailyUsage {
+                    day: today,
+                    agent: "Codex".into(),
+                    turns: 1,
+                    total_tokens: 7_000,
+                    cost_usd: None,
+                },
+                DailyUsage {
+                    day: today - 1,
+                    agent: "Claude Code".into(),
+                    turns: 1,
+                    total_tokens: 500,
+                    cost_usd: None,
+                },
+            ]
+        );
+        // 会話の累計コストの基準: そのスレッドの最後の既知の値（コストの無い行は飛ばす）。
+        assert_eq!(storage.last_session_cost("t1").unwrap(), Some(0.5));
+        assert_eq!(storage.last_session_cost("t2").unwrap(), None);
+        assert_eq!(storage.last_session_cost("none").unwrap(), None);
         let _ = std::fs::remove_file(&path);
     }
 

@@ -176,7 +176,7 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - **ローカル DB（`~/Library/Application Support/necoder/necoder.db`）**: [Turso](https://github.com/tursodatabase/turso)（SQLite の pure-Rust 再実装・MIT・async ネイティブ）を採用。用途は
   ①**hot exit**（dirty バッファ全文 + path/version/カーソル。WAL で kill -9 耐性）
   ②**スレッド永続化**（threads/turns テーブル。turn 毎 INSERT 追記 = JSON 全書き換えを避ける。ブラウズはページング）
-  ③**トークン台帳**（turns の集計ビューでほぼ無料）
+  ③**使用量**（`turn_usage`・O11・2026-09-26: エージェントがターンの終わりに報告したトークンと、会話の累計コストの差分＝推定 USD を 1 ターン 1 行。Stats の日別集計と、再起動後に引き継いだ会話のコスト差分の基準に使う。旧「トークン台帳」`token_ledger` は `threads.tokens_used`＝文脈窓の使用量を並べるだけで累計ではなかったため削除。レート制限は保存しない＝エージェントが知らせた最後の値をメモリに持つだけ）
   ④**checkpoint のメタデータ**（turn→file→blob hash。blob 本体は content-addressed ファイル or DB — M12 着手時に比較）
 - **隔離**: DB アクセスは薄い `storage` crate に閉じ込める（SQL を UI 層に漏らさない）。Turso はまだ若いので、問題が出たら rusqlite へ 1 crate の差し替えで退避できる面を保つ。書き込みは全て background executor（async API がそのまま「UI スレッドで塞がない」規律に合う）
 - ⑥**変更レビューの注記**（`review_notes`・parity O7）: 1 注記 = 1 行（scope = TaskSpace id / 対象は JSON 1 列 + `target_kind` / 本文 / 状態 unsent・sent・resolved / sent_at）。対象を列に展開しないのは、Design Mode のページ要素など種類が増えても表を変えないため

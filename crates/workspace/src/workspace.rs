@@ -83,6 +83,7 @@ mod remote_connection;
 mod remote_ssh;
 mod shortcut_sheet;
 mod system_notifications;
+mod usage_view;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
 pub(crate) use quit_guard::intercept_last_window_close;
@@ -172,6 +173,11 @@ actions!(
         OpenDialog,
         // About モーダル（メニュー「necoder について」。アイコン + バージョン + 更新確認）。
         About,
+        // 使用量の統計（日付 × エージェントのトークンとコスト・直近 30 日・O11）。
+        UsageStats,
+        // 使用量のポップオーバー（statusbar のチップと同じ。チップは値が無いと出ないので、
+        // ACP で知らせてこない Codex の入口を兼ねる・O11）。
+        ShowUsageLimits,
         // メニュー「アップデートを確認…」。About モーダルを開いて即確認する。
         CheckForUpdates,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
@@ -1321,6 +1327,10 @@ struct WorkspaceOverlays {
     shortcut_sheet: Option<FocusHandle>,
     /// About モーダル（メニュー「necoder について」/「アップデートを確認…」）。同じく focus = Escape 受け。
     about: Option<FocusHandle>,
+    /// 使用量のポップオーバー（statusbar のチップから・O11）。
+    usage_popover: Option<usage_view::UsagePopoverState>,
+    /// 使用量の統計の画面（パレット「使用量: 統計を開く」・O11）。
+    usage_stats: Option<usage_view::UsageStatsState>,
     /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
     /// 大きくフラッシュ表示する（色でも判るが名前で確定させる・2026-09-01 本人要望）。
     project_flash: Option<ProjectFlash>,
@@ -1885,6 +1895,8 @@ impl Workspace {
             || self.overlays.askpass.is_some()
             || self.overlays.shortcut_sheet.is_some()
             || self.overlays.about.is_some()
+            || self.overlays.usage_popover.is_some()
+            || self.overlays.usage_stats.is_some()
             || self.search_panel.is_some()
             || self.buffer_search.is_some()
             || self.completion.is_some()
@@ -2076,6 +2088,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::open_settings_json_action))
             .on_action(cx.listener(Self::about_action))
+            .on_action(cx.listener(Self::open_usage_stats))
+            .on_action(cx.listener(Self::show_usage_limits))
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
@@ -2244,6 +2258,8 @@ impl Render for Workspace {
             .children(self.render_code_actions(cx))
             .children(self.render_shortcut_sheet(cx))
             .children(self.render_about_modal(cx))
+            .children(self.render_usage_popover(cx))
+            .children(self.render_usage_stats(cx))
             .children(self.render_new_task_dialog(cx))
             .children(self.render_hunk_menu(cx))
             .children(self.render_toasts(cx))
