@@ -67,8 +67,10 @@ mod web_preview_view;
 mod web_tabs;
 pub(crate) use image_view::ImageView;
 pub(crate) use pdf_view::PdfView;
-pub(crate) use web_preview_view::{web_tab_key, web_tab_url, WebPreviewEvent, WebPreviewView};
-pub(crate) use web_tabs::UrlOrigin;
+pub(crate) use web_preview_view::{
+    web_tab_key, web_tab_url, PickDropReason, WebPreviewEvent, WebPreviewView,
+};
+pub(crate) use web_tabs::{DesignTarget, UrlOrigin};
 mod about;
 mod git_controller;
 mod git_view;

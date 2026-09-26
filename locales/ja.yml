@@ -637,6 +637,10 @@ design:
   capture_failed: 要素の切り抜きを撮れませんでした（テキストだけ添えました）
   needs_web_tab: "Design は Web タブ（プレビュー: localhost を開く…）で使えます"
   not_ready: ページが表示されてから Design を始めてください
+  dropped_moved: 撮っている間に会話が切り替わったので、選んだ要素は添えませんでした。もう一度選んでください
+  no_thread: 添える会話がありません。スレッドを開いてから、もう一度選んでください
+  dropped_ended: Design を終えたので、撮っていた要素は添えませんでした
+  dropped_reloaded: 撮っている間にページが読み込み直されたので、選んだ要素は添えませんでした。もう一度選んでください
 pdf:
   unsupported: この環境では PDF をタブに表示できません
   unsupported_hint: OS のビューアを使うため macOS / Windows のみ対応します。右クリック →「既定アプリで開く」で開けます

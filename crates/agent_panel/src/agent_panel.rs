@@ -2520,6 +2520,14 @@ PYEOF"#;
         self.active
     }
 
+    /// いま選ばれているスレッドの永続 id（再起動を跨いで同じ・添字と違って閉じても他へずれない）。
+    /// 空パネルは `None`。
+    pub fn active_thread_id(&self) -> Option<&str> {
+        self.threads
+            .get(self.active)
+            .map(|thread| thread.id.as_str())
+    }
+
     pub fn contains_thread(&self, id: &str) -> bool {
         self.threads.iter().any(|thread| thread.id == id)
     }

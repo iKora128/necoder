@@ -39,6 +39,18 @@ impl UrlOrigin {
     }
 }
 
+/// Design Mode で選んだ要素の宛先。**選んだ時点で**固定し、切り抜きの完了時に照合する（台帳 R05）。
+/// 完了時に「その時の」パネルやスレッドを引き直すと、撮っている間に切り替えた先へ付いてしまう。
+#[derive(Clone)]
+pub(crate) struct DesignTarget {
+    /// Web タブが居た session（プロジェクトは TaskSpace の安定 ID・Chat は `None`）。
+    space: Option<SpaceId>,
+    /// その session で操作先だった Agent パネル。
+    panel: gpui::WeakEntity<AgentPanel>,
+    /// そのパネルで選ばれていたスレッドの永続 id（添字は閉じるとずれるので使わない）。
+    thread_id: String,
+}
+
 /// Markdown のリンクの行き先をファイルのパスへ（`base` = その `.md` のフォルダ）。
 /// URL（`https:` など scheme 付き）・ページ内アンカー（`#…`）・空は `None`。`?` / `#` 以降は落とし、
 /// `%20` などのエスケープは戻す。
@@ -242,9 +254,14 @@ impl Workspace {
         }
     }
 
-    /// Design Mode で要素が選ばれた: その Web タブが居る session のアクティブなスレッドの composer へ、
-    /// 切り抜き（画像の添付・チップ名は要素の呼び名）と説明の文章を足す。**送信はしない**。
-    /// 選び終えたら composer へフォーカスを移す（続けて指示を打てる）。
+    /// Design Mode の知らせ（台帳 R05）。
+    ///
+    /// - `PickStarted`: 選んだ**この時点の**宛先（Web タブが居る session・その操作先のパネル・
+    ///   選ばれているスレッド）を固定して view に預ける
+    /// - `ElementPicked`: 預けた宛先がまだ同じ会話か照合し、合えばそのスレッドの composer へ切り抜き
+    ///   （画像の添付・チップ名は要素の呼び名）と説明の文章を足す。**送信はしない**。合わなければ添えずに
+    ///   知らせる（黙って別の会話に付けない）。見えている session なら composer へフォーカスを移す
+    /// - `PickDropped`: 撮っている間に Design が終わった・ページが読み込み直された＝添えなかったと知らせる
     pub(crate) fn on_web_preview_event(
         &mut self,
         view: &Entity<WebPreviewView>,
@@ -252,55 +269,121 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let WebPreviewEvent::ElementPicked {
-            capture,
-            png,
-            finished,
-        } = event;
-        let Some(panel) = self.panel_for_web_view(view) else {
-            return;
-        };
-        let text = webview_view::design::format_for_prompt(capture);
-        let chip = SharedString::from(format!(
-            "◎ {}",
-            truncate_chip(&webview_view::design::element_label(capture))
-        ));
-        let attached = panel.update(cx, |panel, cx| {
-            let attached = png.as_ref().is_some_and(|png| {
-                panel.attach_labeled_image(
-                    &editor_view::PastedImage {
-                        format: gpui::ImageFormat::Png,
-                        bytes: png.clone(),
-                    },
-                    chip,
-                    cx,
-                )
-            });
-            panel.append_to_composer(&text, cx);
-            attached
-        });
-        if !attached {
-            let color = self.accent();
-            self.push_toast(i18n::t!("design.capture_failed").into(), color, cx);
+        match event {
+            WebPreviewEvent::PickStarted { pick } => {
+                let target = self.design_target_for(view, cx);
+                view.update(cx, |view, _| view.set_pick_target(*pick, target));
+            }
+            WebPreviewEvent::ElementPicked {
+                capture,
+                png,
+                target,
+                finished,
+            } => {
+                // 選んだ時に宛先が無かった（スレッドが 1 つも無い）/ 撮っている間に会話が替わった。
+                let Some(target) = target else {
+                    let color = self.accent();
+                    self.push_toast(i18n::t!("design.no_thread").into(), color, cx);
+                    return;
+                };
+                let Some((panel, visible)) = self.design_target_panel(target, cx) else {
+                    let color = self.accent();
+                    self.push_toast(i18n::t!("design.dropped_moved").into(), color, cx);
+                    return;
+                };
+                let text = webview_view::design::format_for_prompt(capture);
+                let chip = SharedString::from(format!(
+                    "◎ {}",
+                    truncate_chip(&webview_view::design::element_label(capture))
+                ));
+                let attached = panel.update(cx, |panel, cx| {
+                    let attached = png.as_ref().is_some_and(|png| {
+                        panel.attach_labeled_image(
+                            &editor_view::PastedImage {
+                                format: gpui::ImageFormat::Png,
+                                bytes: png.clone(),
+                            },
+                            chip,
+                            cx,
+                        )
+                    });
+                    panel.append_to_composer(&text, cx);
+                    attached
+                });
+                if !attached {
+                    let color = self.accent();
+                    self.push_toast(i18n::t!("design.capture_failed").into(), color, cx);
+                }
+                // 宛先の session が見えている時だけ composer を出して移る（別の Task へ移っていたら、
+                // 添えるだけで画面は動かさない）。
+                if visible {
+                    if !self.chat_mode() {
+                        self.chrome.show_right = true;
+                    }
+                    if *finished {
+                        self.agent_active = true;
+                        panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+                    }
+                }
+                cx.notify();
+            }
+            WebPreviewEvent::PickDropped { reason } => {
+                let message = match reason {
+                    PickDropReason::DesignEnded => i18n::t!("design.dropped_ended"),
+                    PickDropReason::PageChanged => i18n::t!("design.dropped_reloaded"),
+                };
+                let color = self.accent();
+                self.push_toast(message.into(), color, cx);
+            }
         }
-        if !self.chat_mode() {
-            self.chrome.show_right = true;
-        }
-        if *finished {
-            self.agent_active = true;
-            panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
-        }
-        cx.notify();
     }
 
-    /// Web タブが居る session（プロジェクト / Chat）の Agent パネル。
-    fn panel_for_web_view(&self, view: &Entity<WebPreviewView>) -> Option<Entity<AgentPanel>> {
-        self.project_sessions
-            .sessions
-            .iter()
-            .chain(self.project_sessions.chat.iter())
-            .find(|session| session.tabs.iter().any(|tab| tab.web() == Some(view)))
-            .map(|session| session.agent_panel.clone())
+    /// Web タブが居る session と、そこで今の操作先のパネル・選ばれているスレッド（＝選んだ時点の宛先）。
+    fn design_target_for(&self, view: &Entity<WebPreviewView>, cx: &App) -> Option<DesignTarget> {
+        let holds =
+            |session: &ProjectSession| session.tabs.iter().any(|tab| tab.web() == Some(view));
+        let sessions = &self.project_sessions;
+        let (space, session) = match sessions.sessions.iter().position(holds) {
+            Some(index) => (
+                Some(sessions.projects.get(index)?.task_space.id.clone()),
+                &sessions.sessions[index],
+            ),
+            None => (None, sessions.chat.as_ref().filter(|chat| holds(chat))?),
+        };
+        let panel = session.agent_panel.clone();
+        let thread_id = panel.read(cx).active_thread_id()?.to_string();
+        Some(DesignTarget {
+            space,
+            panel: panel.downgrade(),
+            thread_id,
+        })
+    }
+
+    /// 固定した宛先がまだ同じ会話か（パネルが残っていて同じ session に居て、同じスレッドが選ばれている）。
+    /// 合えばそのパネルと、その session が今見えているか。
+    fn design_target_panel(
+        &self,
+        target: &DesignTarget,
+        cx: &App,
+    ) -> Option<(Entity<AgentPanel>, bool)> {
+        let panel = target.panel.upgrade()?;
+        let (session, visible) = match &target.space {
+            Some(space) => {
+                let index = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .position(|slot| &slot.task_space.id == space)?;
+                (
+                    self.project_sessions.sessions.get(index)?,
+                    !self.chat_mode() && index == self.project_sessions.active,
+                )
+            }
+            None => (self.project_sessions.chat.as_ref()?, self.chat_mode()),
+        };
+        let belongs = session.agent_panel == panel || session.fleet_agents.contains(&panel);
+        let same_thread = panel.read(cx).active_thread_id() == Some(target.thread_id.as_str());
+        (belongs && same_thread).then_some((panel, visible))
     }
 
     /// パレット「プレビュー: localhost を開く…」。入力欄にポート番号か localhost の URL を打つ
@@ -405,7 +488,7 @@ impl Workspace {
     /// `picker:<入力>` = 入力欄を開いて文字を入れる（確定しない）/
     /// `viewport:<full|幅>` / `zoom:<+|-|0>` / `reload` / `eval:<式>` = ページで式を評価して結果を標準エラーへ /
     /// `menu` = タブの右クリックメニュー / `overlay` = ⌘⇧P（オーバーレイ中は WebView を隠す）/
-    /// `close-overlay` /
+    /// `close-overlay` / `new-thread` / `thread:<n>` / `composer`（Design の宛先の検証）/
     /// `state` = タブ列と WebView の状態を標準エラーへ。
     #[cfg(debug_assertions)]
     pub fn debug_web_preview_probe(
@@ -483,6 +566,25 @@ impl Workspace {
                         .debug_snapshot_view(PathBuf::from(argument), cx);
                 }
             }
+            // Design の宛先の検証（台帳 R05）: `new-thread` = スレッドを足して移る / `thread:<n>` = n 番目の
+            // スレッドへ移る / `composer` = アクティブなスレッドの composer の本文を標準エラーへ。
+            "new-thread" => {
+                let panel = self.agent_panel.clone();
+                panel.update(cx, |panel, cx| panel.new_thread(cx));
+            }
+            "thread" => {
+                let panel = self.agent_panel.clone();
+                let index = argument.parse::<usize>().unwrap_or(0);
+                panel.update(cx, |panel, cx| panel.focus_thread(index, cx));
+            }
+            "composer" => {
+                let panel = self.agent_panel.read(cx);
+                eprintln!(
+                    "WEB_PREVIEW_PROBE composer: thread={} text={:?}",
+                    panel.active_thread(),
+                    panel.composer_text(cx)
+                );
+            }
             "menu" => {
                 let index = self.active_tab;
                 self.open_tab_menu(index, point(px(520.), px(76.)), cx);
@@ -539,7 +641,12 @@ mod tests {
             std::fs::write(project.join("a.txt"), "a\n").expect("書ける");
             std::fs::write(project.join("b.txt"), "b\n").expect("書ける");
             let settings_path = root.join("settings.json");
-            std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("書ける");
+            // エージェントを先張りさせない（テストで外部のプロセスを起こさない）。
+            std::fs::write(
+                &settings_path,
+                r#"{"onboarded":true,"agent_prewarm":false}"#,
+            )
+            .expect("書ける");
             cx.update(|cx| settings::init(Some(settings_path), None, cx));
             // テスト窓は raw window handle を持たない＝ネイティブ子ビューは作らずに配線だけ通す。
             ::webview_view::disable_native_webviews_for_tests();
@@ -889,6 +996,64 @@ mod tests {
         workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
     }
 
+    /// Design の検証に使う要素（`selector` と `text` だけ変える）。
+    fn element(selector: &str, text: &str) -> webview_view::design::ElementCapture {
+        serde_json::from_value(serde_json::json!({
+            "page": {"url": "http://localhost:5173/", "title": "App", "viewport_width": 800.0,
+                     "viewport_height": 600.0, "device_pixel_ratio": 2.0},
+            "element": {"tag": "button", "selector": selector, "path": format!("main > {selector}"),
+                        "text": text, "nearby_text": [], "html": format!("<button>{text}</button>"),
+                        "role": null, "accessible_name": null, "attributes": [],
+                        "rect": {"x": 10.0, "y": 20.0, "width": 80.0, "height": 30.0},
+                        "styles": {}, "components": [], "source": null}
+        }))
+        .expect("形どおり")
+    }
+
+    /// 預けた切り抜きの完了の口を 1 つ呼ぶ（テストでは画像を書かない＝撮れなかった扱いで届ける。
+    /// 画像があると添付がキャッシュのフォルダへ書かれる）。
+    fn finish_snapshot(
+        held: &Rc<std::cell::RefCell<Vec<webview_view::snapshot::SnapshotDone>>>,
+        index: usize,
+    ) {
+        let done = held.borrow_mut().remove(index);
+        done(Err("テストは画像を撮らない".to_string()));
+    }
+
+    fn has_toast(workspace: &Workspace, key: &str) -> bool {
+        let expected = i18n::t!(key);
+        workspace
+            .notifications
+            .toasts
+            .iter()
+            .any(|(message, ..)| message.as_ref() == expected)
+    }
+
+    /// Web タブを 1 枚開いて Design 中にし、切り抜きの完了をテストが握る。
+    fn open_designing_tab(
+        workspace: &Entity<Workspace>,
+        url: &str,
+        cx: &mut gpui::VisualTestContext,
+    ) -> (
+        Entity<WebPreviewView>,
+        Rc<std::cell::RefCell<Vec<webview_view::snapshot::SnapshotDone>>>,
+    ) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.open_url(url, UrlOrigin::Local, cx);
+            workspace.process_pending_shell_effects(window, cx);
+            let view = workspace.tabs[workspace.active_tab]
+                .web()
+                .cloned()
+                .expect("Web タブ");
+            let held = view.update(cx, |view, cx| {
+                view.force_design_for_test(cx);
+                view.hold_snapshots_for_test()
+            });
+            (view, held)
+        })
+    }
+
     /// Design Mode で選んだ要素は、その Web タブが居るプロジェクトのアクティブなスレッドの composer に
     /// 足される（送らない）。切り抜きが無い時はテキストだけ足して、撮れなかったと知らせる。
     #[gpui::test]
@@ -897,28 +1062,16 @@ mod tests {
         let project = fixture.project.clone();
         let (workspace, cx) = cx
             .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
-        let capture: webview_view::design::ElementCapture = serde_json::from_value(serde_json::json!({
-            "page": {"url": "http://localhost:5173/", "title": "App", "viewport_width": 800.0,
-                     "viewport_height": 600.0, "device_pixel_ratio": 2.0},
-            "element": {"tag": "button", "selector": "button#start", "path": "main > button#start",
-                        "text": "Start", "nearby_text": [], "html": "<button id=\"start\">Start</button>",
-                        "role": null, "accessible_name": null, "attributes": [],
-                        "rect": {"x": 10.0, "y": 20.0, "width": 80.0, "height": 30.0},
-                        "styles": {}, "components": [], "source": null}
-        }))
-        .expect("形どおり");
         workspace.update_in(cx, |workspace, window, cx| {
             stop_watchers(workspace);
             workspace.chrome.show_right = false;
             workspace.open_url("http://localhost:5173/", UrlOrigin::Local, cx);
             workspace.process_pending_shell_effects(window, cx);
             let view = workspace.tabs[0].web().cloned().expect("Web タブ");
-            view.update(cx, |_view, cx| {
-                cx.emit(WebPreviewEvent::ElementPicked {
-                    capture: Box::new(capture),
-                    png: None,
-                    finished: true,
-                })
+            // 切り抜きは預けない＝テスト窓の WebView は撮れずに失敗で届く。
+            view.update(cx, |view, cx| {
+                view.force_design_for_test(cx);
+                view.pick_for_test(element("button#start", "Start"), false, cx);
             });
         });
         cx.run_until_parked();
@@ -931,15 +1084,258 @@ mod tests {
                 "composer が見えるよう右のドックを出す"
             );
             assert!(
-                workspace
-                    .notifications
-                    .toasts
-                    .iter()
-                    .any(|(message, ..)| message.as_ref() == i18n::t!("design.capture_failed")),
+                has_toast(workspace, "design.capture_failed"),
                 "切り抜きが無いことを知らせる"
             );
             stop_watchers(workspace);
         });
+    }
+
+    /// 台帳 R05: 宛先は選んだ時点のスレッド。撮っている間に別のスレッドへ切り替えたら、どちらの会話にも
+    /// 添えずに知らせる。切り替えずに撮り終えれば、選んだスレッドへ添える。
+    #[gpui::test]
+    fn a_pick_goes_only_to_the_thread_it_was_made_for(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("design_thread", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let panel = workspace.update(cx, |workspace, cx| {
+            let panel = workspace.agent_panel.clone();
+            panel.update(cx, |panel, cx| {
+                panel.new_thread(cx);
+                panel.focus_thread(0, cx);
+            });
+            panel
+        });
+        let (view, held) = open_designing_tab(&workspace, "http://localhost:5173/", cx);
+        view.update(cx, |view, cx| {
+            view.pick_for_test(element("button#moved", "Moved"), false, cx)
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.focus_thread(1, cx));
+        finish_snapshot(&held, 0);
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert!(
+                !panel.read(cx).composer_text(cx).contains("button#moved"),
+                "切り替えた先のスレッドに付けない"
+            );
+            assert!(
+                has_toast(workspace, "design.dropped_moved"),
+                "添えなかったと言う"
+            );
+        });
+        panel.update(cx, |panel, cx| panel.focus_thread(0, cx));
+        assert!(
+            !panel.read_with(cx, |panel, cx| panel
+                .composer_text(cx)
+                .contains("button#moved")),
+            "元のスレッドにも黙って付けない"
+        );
+
+        // 切り替えずに撮り終えれば、選んだスレッドへ添える。
+        view.update(cx, |view, cx| {
+            view.force_design_for_test(cx);
+            view.pick_for_test(element("button#stay", "Stay"), false, cx)
+        });
+        cx.run_until_parked();
+        finish_snapshot(&held, 0);
+        cx.run_until_parked();
+        assert!(panel.read_with(cx, |panel, cx| panel
+            .composer_text(cx)
+            .contains("button#stay")));
+        workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
+    }
+
+    /// スレッドが 1 つも無い時に選んだ要素は、どこにも添えずに「会話が無い」と言う（閉じた会話へ黙って
+    /// 入れない）。
+    #[gpui::test]
+    fn a_pick_without_any_thread_says_so(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("design_no_thread", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let panel = workspace.update(cx, |workspace, _cx| workspace.agent_panel.clone());
+        panel.update(cx, |panel, cx| {
+            while panel.active_thread_id().is_some() {
+                panel.close_active_thread(cx);
+            }
+        });
+        let (view, held) = open_designing_tab(&workspace, "http://localhost:5173/", cx);
+        view.update(cx, |view, cx| {
+            view.pick_for_test(element("button#nowhere", "Nowhere"), false, cx)
+        });
+        cx.run_until_parked();
+        finish_snapshot(&held, 0);
+        cx.run_until_parked();
+        assert!(!panel.read_with(cx, |panel, cx| panel
+            .composer_text(cx)
+            .contains("button#nowhere")));
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            assert!(has_toast(workspace, "design.no_thread"));
+            stop_watchers(workspace);
+        });
+    }
+
+    /// 台帳 R05: 撮っている間に別の Task（プロジェクト）へ移っても、宛先は Web タブが居た Task の
+    /// スレッドのまま。今見ている Task の composer には付けず、画面も動かさない。
+    #[gpui::test]
+    fn a_pick_stays_with_its_task_when_you_switch_away(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("design_task", cx);
+        let other = fixture.root.join("other");
+        std::fs::create_dir_all(&other).expect("一時フォルダを作れる");
+        let projects = vec![fixture.project.clone(), other];
+        let (workspace, cx) =
+            cx.add_window_view(|_window, cx| Workspace::new(projects, Theme::dark(), None, cx));
+        let (view, held) = open_designing_tab(&workspace, "http://localhost:5173/", cx);
+        let (first_panel, second_panel) = workspace.update(cx, |workspace, _cx| {
+            (
+                workspace.project_sessions.sessions[0].agent_panel.clone(),
+                workspace.project_sessions.sessions[1].agent_panel.clone(),
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.pick_for_test(element("button#task", "Task"), false, cx)
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.switch_project(1, window, cx);
+            stop_watchers(workspace);
+            workspace.chrome.show_right = false;
+        });
+        finish_snapshot(&held, 0);
+        cx.run_until_parked();
+        assert!(
+            first_panel.read_with(cx, |panel, cx| panel
+                .composer_text(cx)
+                .contains("button#task")),
+            "Web タブが居た Task のスレッドへ添える"
+        );
+        assert!(
+            !second_panel.read_with(cx, |panel, cx| panel
+                .composer_text(cx)
+                .contains("button#task")),
+            "今見ている Task には付けない"
+        );
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            assert!(
+                !workspace.chrome.show_right,
+                "見えていない Task のために画面を動かさない"
+            );
+            stop_watchers(workspace);
+        });
+    }
+
+    /// 台帳 R05: キャンセル → Design 再開・再読込・タブを閉じた後に届いた古い切り抜きは添えず、
+    /// 新しい Design を終わらせない。
+    #[gpui::test]
+    fn stale_picks_never_touch_a_new_design(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("design_stale", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let panel = workspace.update(cx, |workspace, _cx| workspace.agent_panel.clone());
+        let (view, held) = open_designing_tab(&workspace, "http://localhost:5173/", cx);
+
+        // キャンセル → 再開: 捨てたと知らせ、後から届いた完了は新しい Design に触らない。
+        view.update(cx, |view, cx| {
+            view.pick_for_test(element("button#cancelled", "Cancelled"), false, cx);
+            view.stop_design(cx);
+            view.force_design_for_test(cx);
+        });
+        cx.run_until_parked();
+        finish_snapshot(&held, 0);
+        cx.run_until_parked();
+        assert!(
+            view.read_with(cx, |view, _cx| view.is_designing()),
+            "新しい Design は続く"
+        );
+        assert!(!panel.read_with(cx, |panel, cx| panel
+            .composer_text(cx)
+            .contains("button#cancelled")));
+        workspace.update(cx, |workspace, _cx| {
+            assert!(has_toast(workspace, "design.dropped_ended"));
+        });
+
+        // 再読込: 切り抜きが新しいページの物になりうるので添えない。
+        view.update(cx, |view, cx| {
+            view.pick_for_test(element("button#reloaded", "Reloaded"), false, cx);
+            view.page_started_for_test(cx);
+            view.force_design_for_test(cx);
+        });
+        cx.run_until_parked();
+        finish_snapshot(&held, 0);
+        cx.run_until_parked();
+        assert!(
+            view.read_with(cx, |view, _cx| view.is_designing()),
+            "新しい Design は続く"
+        );
+        assert!(!panel.read_with(cx, |panel, cx| panel
+            .composer_text(cx)
+            .contains("button#reloaded")));
+        workspace.update(cx, |workspace, _cx| {
+            assert!(has_toast(workspace, "design.dropped_reloaded"));
+        });
+
+        // タブを閉じる → 同じ URL を開き直して Design: 閉じたタブの切り抜きは新しいタブに届かない。
+        view.update(cx, |view, cx| {
+            view.pick_for_test(element("button#closed", "Closed"), false, cx)
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_tab_at(0, window, cx);
+            assert!(workspace.tabs.is_empty());
+        });
+        drop(view);
+        cx.run_until_parked();
+        let (reopened, _reopened_held) =
+            open_designing_tab(&workspace, "http://localhost:5173/", cx);
+        finish_snapshot(&held, 0);
+        cx.run_until_parked();
+        assert!(
+            reopened.read_with(cx, |view, _cx| view.is_designing()),
+            "開き直したタブの Design は続く"
+        );
+        assert!(!panel.read_with(cx, |panel, cx| panel
+            .composer_text(cx)
+            .contains("button#closed")));
+        workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
+    }
+
+    /// 台帳 R05: 複数選択の切り抜きが逆の順に撮り終わっても、composer には選んだ順に並ぶ。
+    #[gpui::test]
+    fn multi_picks_reach_the_composer_in_selection_order(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("design_order", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let panel = workspace.update(cx, |workspace, _cx| workspace.agent_panel.clone());
+        let (view, held) = open_designing_tab(&workspace, "http://localhost:5173/", cx);
+        view.update(cx, |view, cx| {
+            view.pick_for_test(element("button#first", "First"), true, cx);
+            view.pick_for_test(element("button#second", "Second"), false, cx);
+        });
+        cx.run_until_parked();
+        // 後に選んだ方が先に撮り終わる。
+        finish_snapshot(&held, 1);
+        cx.run_until_parked();
+        assert!(
+            !panel.read_with(cx, |panel, cx| panel
+                .composer_text(cx)
+                .contains("button#second")),
+            "先に選んだ物が撮り終わるまで待つ"
+        );
+        finish_snapshot(&held, 0);
+        cx.run_until_parked();
+        let text = panel.read_with(cx, |panel, cx| panel.composer_text(cx));
+        let first = text.find("button#first").expect("1 つ目が入る");
+        let second = text.find("button#second").expect("2 つ目が入る");
+        assert!(first < second, "選んだ順: {text}");
+        assert!(
+            !view.read_with(cx, |view, _cx| view.is_designing()),
+            "Shift 無しの選択で Design は終わる"
+        );
+        workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
     }
 
     /// Design 中に GPUI 側へキーが来ている時も Esc で Design を抜ける。Web タブが無い時の ⌘⇧D は案内だけ。
@@ -965,7 +1361,7 @@ mod tests {
             workspace.open_url("http://localhost:5173/", UrlOrigin::Local, cx);
             workspace.process_pending_shell_effects(window, cx);
             let view = workspace.tabs[0].web().cloned().expect("Web タブ");
-            view.update(cx, |view, _cx| view.force_design_for_test());
+            view.update(cx, |view, cx| view.force_design_for_test(cx));
             let handle = view.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
             view
