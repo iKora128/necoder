@@ -4832,10 +4832,11 @@ PYEOF"#;
             return;
         };
         let text = editor.read(cx).plain_text();
-        let name = text.trim();
+        // `:rocket:` は絵文字に（O20・A08・Task 名と同じ）。
+        let name = ui::emoji::expand_shortcodes(text.trim());
         if !name.is_empty() {
             if let Some(thread) = self.threads.get_mut(index) {
-                thread.name = SharedString::from(name.to_string());
+                thread.name = SharedString::from(name);
                 thread.name_is_custom = true; // 以後 AI 自動命名で上書きしない
             }
             // 名前（メタ）だけ保存する。生成中に改名しても、途中の本文を DB に書かない。

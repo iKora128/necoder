@@ -47,7 +47,8 @@ impl Workspace {
         let Some(renaming) = self.chrome.terminal_renaming.take() else {
             return;
         };
-        let name = renaming.editor.read(cx).plain_text().trim().to_string();
+        // `:rocket:` は絵文字に（O20・A08）。
+        let name = ui::emoji::expand_shortcodes(renaming.editor.read(cx).plain_text().trim());
         renaming.terminal.update(cx, |terminal, cx| {
             terminal.set_custom_title((!name.is_empty()).then_some(name), cx)
         });
@@ -282,6 +283,23 @@ mod tests {
         });
         terminal.read_with(cx, |terminal, _| {
             assert_eq!(terminal.custom_title(), None, "空はシェルのタイトルに戻す");
+        });
+
+        // `:tada:` のようなショートコードは絵文字にする（O20・A08）。
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.start_terminal_rename(terminal.clone(), cx);
+            let editor = workspace
+                .chrome
+                .terminal_renaming
+                .as_ref()
+                .unwrap()
+                .editor
+                .clone();
+            editor.update(cx, |editor, cx| editor.set_plain_text(":tada: build", cx));
+            workspace.confirm_terminal_rename(cx);
+        });
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.custom_title(), Some("🎉 build"));
         });
         let _ = std::fs::remove_dir_all(&root);
     }

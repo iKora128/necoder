@@ -553,7 +553,8 @@ impl Workspace {
             space: space_id.clone(),
         });
         if !prompt.trim().is_empty() {
-            let first_line = prompt.lines().next().unwrap_or("").to_string();
+            // `:rocket:` は絵文字に（O20・A08）。
+            let first_line = ui::emoji::expand_shortcodes(prompt.lines().next().unwrap_or(""));
             let title = match &task.title_suffix {
                 Some(suffix) => format!("{first_line} · {suffix}"),
                 None => first_line,
