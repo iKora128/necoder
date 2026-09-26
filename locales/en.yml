@@ -797,6 +797,8 @@ review:
   open_file_tip: Open this file in the editor
   reviewed: Viewed
   reviewed_tip: Mark as viewed and collapse (click again to unmark)
+  reviewed_stale: Changed since viewed
+  reviewed_stale_tip: This file's changes differ from when you marked it viewed. Look again, then mark it viewed
   renamed_from: "← %{path}"
   no_newline: No newline at end of file
   add_note_tip: Add a note (or select lines and press c)
@@ -825,6 +827,8 @@ review:
   save_retry: Retry
   prompt_header: "Review comments (%{count}) — compared: %{base}..working tree"
   prompt_old_side: "%{location} (removed lines, base-side line numbers)"
+  prompt_lost: "%{location} (where it was written; not found in the current diff)"
+  note_lost: "Moved note — the code at %{location} changed and the same code can't be found in one place"
 difftab:
   proposal_title: "%{title} ⇄ proposal"
   title: "%{name} ⇄ %{base}"
