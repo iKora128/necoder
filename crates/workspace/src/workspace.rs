@@ -953,8 +953,14 @@ impl TaskSpace {
     fn for_worktree(worktree: &Worktree, branch: Option<&str>) -> Self {
         let repository_id = project::repository_id_on(worktree.host().as_ref(), worktree.root());
         let head = project::git_head_oid_on(worktree.host().as_ref(), worktree.root());
+        // `task/*` の自動判定は linked worktree に限る。本体チェックアウトでエージェントが一時的に
+        // `task/*` を checkout しただけで Task 扱い＝レールから消え、＋ で開き直しても隠れた枠へ
+        // 切り替わるだけになっていた（2026-09-26 ユーザー報告）。
+        let host = worktree.host();
         let detected_branch = branch.map(str::to_string).or_else(|| {
-            project::git_current_branch_on(worktree.host().as_ref(), worktree.root())
+            project::git_is_linked_worktree_on(host.as_ref(), worktree.root())
+                .then(|| project::git_current_branch_on(host.as_ref(), worktree.root()))
+                .flatten()
                 .filter(|branch| branch.starts_with("task/"))
         });
         let is_task = detected_branch.is_some();
