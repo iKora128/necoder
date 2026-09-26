@@ -319,6 +319,8 @@ pub enum SettingsViewEvent {
     PickFont {
         key: &'static str,
     },
+    /// 手元のターミナルのシェルを選ぶ（O25）。入っているシェルの一覧は shell のピッカーが担う。
+    PickShell,
 }
 
 /// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
@@ -2890,6 +2892,7 @@ impl SettingsView {
                 cx,
             ))
             .child(self.terminal_color_scheme_row(settings, cx))
+            .child(self.terminal_shell_row(settings, cx))
             .child(self.segmented_row_with(
                 "sound_done",
                 i18n::t!("settings.pref_sound_done"),
@@ -3260,6 +3263,72 @@ impl SettingsView {
                 "windows terminal",
             ],
             i18n::t!("settings.pref_terminal_color_scheme"),
+            Some(sub),
+            control,
+        )
+    }
+
+    /// 手元のターミナルのシェル（O25）: 選ぶ…（shell のピッカー）/ 既定に戻す。副題は今のシェル。
+    fn terminal_shell_row(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let small_button = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(label))
+        };
+        let current = settings.terminal_shell.trim().to_string();
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                small_button(
+                    "terminal-shell-pick",
+                    i18n::t!("settings.terminal_shell_pick"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _window, cx| cx.emit(SettingsViewEvent::PickShell)),
+                ),
+            )
+            .when(!current.is_empty(), |row| {
+                row.child(
+                    small_button(
+                        "terminal-shell-reset",
+                        i18n::t!("settings.terminal_shell_reset"),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _window, cx| {
+                            let result = set_user_value(
+                                cx,
+                                "terminal_shell",
+                                serde_json::Value::String(String::new()),
+                            );
+                            view.report_save(result, cx);
+                            cx.notify();
+                        }),
+                    ),
+                )
+            })
+            .into_any_element();
+        let sub = if current.is_empty() {
+            i18n::t!("settings.terminal_shell_default")
+        } else {
+            current
+        };
+        self.pref_row_with_keywords(
+            &["terminal_shell", "shell", "zsh", "bash", "fish", "pwsh"],
+            i18n::t!("settings.pref_terminal_shell"),
             Some(sub),
             control,
         )

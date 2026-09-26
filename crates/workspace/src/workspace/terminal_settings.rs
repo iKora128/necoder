@@ -84,6 +84,95 @@ fn refresh_terminal_settings(cx: &mut App) {
     }
 }
 
+/// `/etc/shells` の書き方（`#` はコメント・1 行 1 パス）から、実在するシェルを並べる（重複は外す）。
+/// `extra`（`$SHELL`）は一覧に無ければ先頭に足す。
+pub(crate) fn shells_from_list(
+    text: &str,
+    extra: Option<&str>,
+    exists: impl Fn(&Path) -> bool,
+) -> Vec<String> {
+    let mut shells: Vec<String> = Vec::new();
+    let candidates = extra
+        .into_iter()
+        .chain(text.lines().map(str::trim))
+        .filter(|line| line.starts_with('/'));
+    for shell in candidates {
+        if !shells.iter().any(|known| known == shell) && exists(Path::new(shell)) {
+            shells.push(shell.to_string());
+        }
+    }
+    shells
+}
+
+/// 手元で開けるシェルの一覧（O25・シェルを選ぶ画面）。mac / Linux は `/etc/shells` と `$SHELL`、
+/// Windows は PATH にある pwsh / powershell / cmd / bash（Git Bash）/ wsl。
+pub(crate) fn available_shells() -> Vec<String> {
+    if cfg!(windows) {
+        let paths: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default();
+        ["pwsh", "powershell", "cmd", "bash", "wsl"]
+            .into_iter()
+            .filter(|name| {
+                paths
+                    .iter()
+                    .any(|directory| directory.join(format!("{name}.exe")).is_file())
+            })
+            .map(str::to_string)
+            .collect()
+    } else {
+        let listed = std::fs::read_to_string("/etc/shells").unwrap_or_default();
+        let current = std::env::var("SHELL").ok();
+        shells_from_list(&listed, current.as_deref(), |path| path.is_file())
+    }
+}
+
+impl Workspace {
+    /// シェルのピッカーを開く（O25）。先頭 = 既定に戻す、続けて入っているシェル。
+    pub(crate) fn open_shell_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shells = available_shells();
+        let current = settings::get(cx).terminal_shell.trim().to_string();
+        let mut items = vec![PickerItem::new(
+            0,
+            i18n::t!("settings.shell_picker_default"),
+        )];
+        items.extend(shells.iter().enumerate().map(|(index, shell)| {
+            let name = Path::new(shell)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| shell.clone());
+            let item = PickerItem::new(index + 1, name).with_detail(shell.clone());
+            if *shell == current {
+                item.with_accent(self.accent())
+            } else {
+                item
+            }
+        }));
+        self.overlays.picker_shells = shells;
+        self.open_picker(
+            PickerMode::Shells,
+            i18n::t!("settings.shell_picker_placeholder"),
+            items,
+            window,
+            cx,
+        );
+    }
+
+    /// 選んだシェルを `terminal_shell` へ書く（id 0 = 空 = 既定）。引数（`terminal_shell_args`）は触らない。
+    pub(crate) fn commit_shell(&mut self, id: usize, cx: &mut Context<Self>) {
+        let value = match id {
+            0 => String::new(),
+            index => match self.overlays.picker_shells.get(index - 1) {
+                Some(shell) => shell.clone(),
+                None => return,
+            },
+        };
+        let result =
+            settings::set_user_value(cx, "terminal_shell", serde_json::Value::String(value));
+        self.report_settings_save(result, cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +252,67 @@ mod tests {
             terminal_view::TerminalAppearance::default(),
             "既定の設定は設定を持つ前の見た目"
         );
+    }
+
+    #[test]
+    fn shells_come_from_the_list_and_the_login_shell() {
+        let list =
+            "# /etc/shells\n/bin/bash\n/bin/zsh\n/usr/local/bin/fish\n/bin/zsh\nnot-a-path\n";
+        let exists = |path: &Path| path != Path::new("/usr/local/bin/fish");
+        assert_eq!(
+            shells_from_list(list, Some("/opt/homebrew/bin/nu"), exists),
+            vec![
+                "/opt/homebrew/bin/nu".to_string(),
+                "/bin/bash".to_string(),
+                "/bin/zsh".to_string(),
+            ],
+            "ログインシェルが先頭・無いものと重複は外す"
+        );
+        assert_eq!(
+            shells_from_list(list, Some("/bin/zsh"), |_| true).len(),
+            3,
+            "一覧にあるログインシェルは重ねない"
+        );
+    }
+
+    #[gpui::test]
+    fn the_shell_picker_writes_the_chosen_shell(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_shell_picker_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.pending_shell_picker = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert!(workspace.overlays.picker_mode == PickerMode::Shells);
+            workspace.overlays.picker_shells = vec!["/bin/zsh".to_string()];
+            workspace.commit_shell(1, cx);
+            assert_eq!(settings::get(cx).terminal_shell, "/bin/zsh");
+            assert_eq!(
+                terminal_shell_from(&settings::get(cx)).program,
+                "/bin/zsh",
+                "新しく開く端末のシェルになる"
+            );
+            workspace.commit_shell(0, cx);
+            assert_eq!(settings::get(cx).terminal_shell, "");
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

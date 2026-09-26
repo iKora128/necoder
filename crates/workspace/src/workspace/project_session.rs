@@ -899,6 +899,7 @@ impl Workspace {
                 terminal_renaming: None,
                 focus_next_frame: None,
                 pending_font_picker: None,
+                pending_shell_picker: false,
                 statusbar_menu: None,
             },
             overlays: WorkspaceOverlays {
@@ -908,6 +909,7 @@ impl Workspace {
                 picker_themes: Vec::new(),
                 picker_fonts: Vec::new(),
                 picker_font_key: "",
+                picker_shells: Vec::new(),
                 theme_before_preview: None,
                 picker_observation: None,
                 color_picker: None,

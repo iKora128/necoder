@@ -713,6 +713,7 @@ impl Workspace {
                 match mode {
                     PickerMode::PreviewUrl => self.confirm_localhost_input(&query, window, cx),
                     PickerMode::Fonts => self.commit_font(id, cx),
+                    PickerMode::Shells => self.commit_shell(id, cx),
                     PickerMode::Files => {
                         // 空プロジェクトの作成アクション（番兵 id）: エクスプローラの
                         // インライン命名へ繋ぐ（命名入力が見えるよう左ドックは開く）。

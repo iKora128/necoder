@@ -618,6 +618,12 @@ settings:
   terminal_color_scheme_default: Default (follows the app theme). Reads Ghostty themes, Windows Terminal schemes (JSON) and iTerm2 .itermcolors
   terminal_color_scheme_pick: Choose file…
   terminal_color_scheme_reset: Use default
+  pref_terminal_shell: Terminal shell
+  terminal_shell_default: Default (the OS shell). Applies to new local terminals
+  terminal_shell_pick: Choose…
+  terminal_shell_reset: Use default
+  shell_picker_placeholder: Search shells…
+  shell_picker_default: Use default (the OS shell)
   pref_terminal_cursor_sub: "A shape set by vim or your shell takes precedence"
   terminal_cursor_block: Block
   terminal_cursor_bar: Bar

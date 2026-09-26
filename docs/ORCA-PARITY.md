@@ -282,7 +282,7 @@
 | O14 | 同上 | #30 | アカウントのフォルダ・切替（`agent_servers.<id>.env`）・公式 CLI でログイン。mac 実機未確認・Windows は未 |
 | O23（一部） | 同上 | #30 | fan-out（1 つの依頼をエージェントごとの Task へ・舞台に並べて比べる）。自動命名ブランチの改名は未 |
 | O17（一部） | 同上 | #30 | 質問カードの自由入力（Other 欄に書いて答える・選んだ案に添える。スマホの質問も）・サブエージェントの手順を親の Task の下に畳む・目標の一時停止 / 再開 / 取り消し（Codex の goal の操作）・message rail。ツールのまとめ表示と個別停止は未（個別停止は `_session/async_task/stop` があるが、`async_task_*` の更新は JetBrains AIR 拡張 `_meta.jetbrains.air.capabilities` を名乗った時だけ来る。SDK が未知の sessionUpdate をどう扱うかを実機で確かめてから） |
-| O25（一部） | 同上 | #30 | ターミナルの文字の大きさ・フォント・遡れる行数・カーソルの形（設定と設定画面・開いている端末にもその場で効く）・シェルと引数（`terminal_shell`・手元の端末だけ・settings.json）・Quick Commands（`quick_commands`・ドックの ▶ から新しい端末で走らせる）・配色の取り込み（`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2）。シェルを選ぶ画面・OSC 133・TUI の状態推定は未 |
+| O25（一部） | 同上 | #30 | ターミナルの文字の大きさ・フォント・遡れる行数・カーソルの形（設定と設定画面・開いている端末にもその場で効く）・シェルと引数（`terminal_shell`・手元の端末だけ・settings.json）・Quick Commands（`quick_commands`・ドックの ▶ から新しい端末で走らせる）・配色の取り込み（`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2）・シェルを選ぶ画面。OSC 133・TUI の状態推定は未 |
 | O19（一部） | 同上 | #30 | conflict を AI に渡す（統合の下見で競合したら Task の次へが「競合を直させる」・競合したファイルの一覧つきで Task のエージェントに頼む）。3-way の画面・Abort は未 |
 | O29（一部） | 同上 | #30 | CSV / TSV の表（⌘⇧V・RFC 4180・見出しの固定・行番号・仮想リスト）・画像のドロップ（Markdown に落とすと隣へコピーして落とした所に `![]()`・ほかのファイルはタブで開く）・front matter（プロパティの表）・目次（`[toc]`・押すと見出しへ）・横並びのライブプレビュー（⌘K V）・スラッシュメニュー（行頭の `/`）。Mermaid・Markdown の注記は未 |
 | O27（一部） | 同上 | #30 | 設定の検索（全ページから一致した行を集める・キー / 選択肢の名前でも当たる）・表示言語の切替（その場で）・UI とコードの書体（`ui_font_family` / `code_font_family`・settings.json・直書きしていた 30 か所を `ui::ui_font` / `ui::code_font` に）。・statusbar の項目の出し入れ（右クリック・`statusbar_hidden`）・書体を選ぶ画面（設定 › 外観・入っている書体のピッカー）。キー割り当ての GUI・UI ズーム・density は未 |
@@ -414,13 +414,13 @@
 | C13 | Floating terminal | 一部 | O24 |
 | C14 | Quick Commands | 無 | O25 |
 | C15 | インライン画像 | 無 | O45 |
-| C16 | Windows のシェル選択 | 一部 | O25 |
+| C16 | Windows のシェル選択 | 有（#30・設定の「ターミナルのシェル」・PATH の pwsh / powershell / cmd / bash / wsl） | O25 |
 | C17 | 端末へのファイルドロップ | 無 | O3 |
 | C18 | 端末のショートカット（⌘T・⌘⇧\ 等） | 一部 | O24 |
 | C19 | 端末タブの改名 | 有（#30・ダブルクリック・空で元に戻る。保存はしない） | O3・O24 |
 | C20 | シェル統合（OSC 133） | 無 | O25 |
 | C21 | 実行中の端末を閉じる前の確認 | 無 | O4 |
-| C22 | シェルの引数・既定のシェル | 無 | O25 |
+| C22 | シェルの引数・既定のシェル | 有（#30・`terminal_shell` / `terminal_shell_args`・選ぶ画面は引数を除く） | O25 |
 | C23 | file:line のクリック | 有 | 済 |
 | C24 | 端末のフォント・scrollback・カーソル | 無 | O25 |
 
