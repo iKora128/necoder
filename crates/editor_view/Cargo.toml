@@ -21,3 +21,7 @@ markdown.workspace = true
 i18n.workspace = true
 project.workspace = true
 webview_view.workspace = true
+
+[dev-dependencies]
+# 表の切り替えを実際に描いて確かめる（O29）
+gpui = { workspace = true, features = ["test-support"] }

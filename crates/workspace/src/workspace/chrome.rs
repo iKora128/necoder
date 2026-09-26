@@ -1138,54 +1138,52 @@ impl Workspace {
             .active_slot()
             .map(|slot| slot.worktree.root().to_path_buf());
         let crumbs = breadcrumb_text(root.as_deref(), path.as_deref());
-        // Markdown / HTML なら右端にプレビュートグル（⌘⇧V の discoverability）。
-        let markdown_toggle = path
-            .as_deref()
-            .filter(|path| lang::language_for_path(path) == Some(lang::LanguageId::Markdown))
-            .map(|_| {
-                let on = editor.read(cx).rendered_markdown();
-                let label = if on {
-                    i18n::t!("breadcrumb.md_source")
-                } else {
-                    i18n::t!("breadcrumb.md_preview")
-                };
-                let editor = editor.clone();
-                div()
-                    .id("md-preview-toggle")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.))
-                    .h(px(19.))
-                    .px(px(7.))
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
-                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
-                    // GPUI の SVG は親の text_color を継承しないため、必ず直接色を渡す。
-                    .child(
-                        svg()
-                            .path("icons/eye.svg")
-                            .size(px(12.))
-                            .flex_none()
-                            .text_color(if on { theme.fg0 } else { theme.fg2 }),
-                    )
-                    .child(div().text_size(px(10.5)).child(label))
-                    .tooltip(Tooltip::text(
-                        i18n::t!("breadcrumb.md_preview_tip"),
-                        theme.clone(),
-                    ))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |_this, _, _window, cx| {
-                            cx.stop_propagation();
-                            editor.update(cx, |editor, cx| {
-                                let next = !editor.rendered_markdown();
-                                editor.set_rendered_markdown(next, cx);
-                            });
-                        }),
-                    )
-            });
+        // Markdown・CSV / TSV（表・O29）なら右端にプレビュートグル（⌘⇧V の discoverability）。
+        let previewable = editor.read(cx).has_text_preview();
+        let markdown_toggle = path.as_deref().filter(|_| previewable).map(|_| {
+            let on = editor.read(cx).rendered_markdown();
+            let label = if on {
+                i18n::t!("breadcrumb.md_source")
+            } else {
+                i18n::t!("breadcrumb.md_preview")
+            };
+            let editor = editor.clone();
+            div()
+                .id("md-preview-toggle")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(5.))
+                .h(px(19.))
+                .px(px(7.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
+                .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                // GPUI の SVG は親の text_color を継承しないため、必ず直接色を渡す。
+                .child(
+                    svg()
+                        .path("icons/eye.svg")
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(if on { theme.fg0 } else { theme.fg2 }),
+                )
+                .child(div().text_size(px(10.5)).child(label))
+                .tooltip(Tooltip::text(
+                    i18n::t!("breadcrumb.md_preview_tip"),
+                    theme.clone(),
+                ))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_this, _, _window, cx| {
+                        cx.stop_propagation();
+                        editor.update(cx, |editor, cx| {
+                            let next = !editor.rendered_markdown();
+                            editor.set_rendered_markdown(next, cx);
+                        });
+                    }),
+                )
+        });
         let html_toggle = path
             .as_deref()
             .filter(|path| lang::language_for_path(path) == Some(lang::LanguageId::Html))

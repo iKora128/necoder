@@ -11,9 +11,10 @@ use gpui::{
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Style, StyleRefinement,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, UniformListScrollHandle, Window,
 };
 use std::ops::Range;
+use std::rc::Rc;
 use theme_core::{SyntaxColors, Theme};
 
 /// remote の外部変更を背景で調べた結果（[`EditorView::handle_external_change_remote`]）。
@@ -30,6 +31,7 @@ enum ExternalChange {
 
 /// .md の整形プレビュー（rendered 側の Block→GPUI 描画）。source ⇄ rendered は ⌘⇧V。
 mod markdown_preview;
+mod table_preview;
 
 const FONT_SIZE: f32 = 13.0; // code 13px（既定。settings の font_size で上書き・M10-13）
 const LINE_HEIGHT: f32 = 23.0; // compact 行高 23（font_size に比例して伸縮）
@@ -297,6 +299,10 @@ pub struct EditorView {
     /// パース済みブロックのキャッシュ。version 変化時のみ再パース（idle 再描画で再解析しない）。
     markdown_blocks: Vec<markdown::Block>,
     markdown_blocks_version: u64,
+    /// CSV / TSV を表として見ている時の表（O29・版で持ち直す＝描き直しのたびに読み直さない）。
+    table: Rc<table_preview::ParsedTable>,
+    table_version: u64,
+    table_scroll: UniformListScrollHandle,
     /// コードのフォントサイズ（settings の `font_size`・live 反映）。行高は 23/13 比で追従。
     font_size: f32,
     /// Tab 幅（settings の `tab_size`・live 反映）。
@@ -368,6 +374,9 @@ impl EditorView {
             markdown_scroll: gpui::ScrollHandle::new(),
             markdown_blocks: Vec::new(),
             markdown_blocks_version: u64::MAX,
+            table: Rc::default(),
+            table_version: u64::MAX,
+            table_scroll: UniformListScrollHandle::new(),
             font_size: FONT_SIZE,
             tab_size: DEFAULT_TAB_SIZE,
             wrap_map: WrapMap::identity(1, (u64::MAX, 0, false)),
@@ -580,14 +589,28 @@ impl EditorView {
             .unwrap_or(false)
     }
 
-    /// ⌘⇧V: source ⇄ rendered preview のトグル（Markdown / ローカル HTML）。
+    /// CSV / TSV か（⌘⇧V で表として見られる・O29）。
+    fn is_table(&self) -> bool {
+        self.buffer
+            .path()
+            .and_then(table_preview::table_delimiter)
+            .is_some()
+    }
+
+    /// 本文 ⇄ 整形表示を切り替えられるか（Markdown の整形プレビュー・CSV / TSV の表）。
+    /// パンくずのトグルを出すかどうかに使う。
+    pub fn has_text_preview(&self) -> bool {
+        self.is_markdown() || self.is_table()
+    }
+
+    /// ⌘⇧V: source ⇄ rendered preview のトグル（Markdown / CSV・TSV の表 / ローカル HTML）。
     fn toggle_rendered_markdown(
         &mut self,
         _: &ToggleRenderedMarkdown,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_markdown() {
+        if self.has_text_preview() {
             self.set_rendered_markdown(!self.rendered_markdown, cx);
         } else if self.html_preview.is_some() {
             self.set_rendered_html(!self.rendered_html, cx);
@@ -603,7 +626,7 @@ impl EditorView {
     /// ON では EditorElement を描かない＝点滅の paint 側管理（should_blink）が走らないので、
     /// ここで点滅タスクを明示停止して idle 再描画を止める（点滅停止＝idle CPU 予算を守る）。
     pub fn set_rendered_markdown(&mut self, on: bool, cx: &mut Context<Self>) {
-        if on && !self.is_markdown() {
+        if on && !self.has_text_preview() {
             return;
         }
         if self.rendered_markdown == on {
@@ -2344,6 +2367,43 @@ impl Render for EditorView {
                     .into_any_element();
             }
         }
+        // CSV / TSV の表（O29）: 読むだけ。表は版で持ち直す（idle の描き直しで読み直さない）。
+        if self.rendered_markdown && self.is_table() {
+            let version = self.buffer.version();
+            if self.table_version != version {
+                let delimiter = self
+                    .buffer
+                    .path()
+                    .and_then(table_preview::table_delimiter)
+                    .unwrap_or(',');
+                self.table = Rc::new(table_preview::parse_delimited(
+                    &self.buffer.text(),
+                    delimiter,
+                    table_preview::MAX_ROWS,
+                ));
+                self.table_version = version;
+            }
+            let truncated = self.table.truncated.then(|| {
+                SharedString::from(i18n::t!(
+                    "editor.table_truncated",
+                    "n" => table_preview::MAX_ROWS
+                ))
+            });
+            return div()
+                .key_context("Editor")
+                .track_focus(&self.focus_handle(cx))
+                .size_full()
+                .on_action(cx.listener(Self::toggle_rendered_markdown))
+                .child(table_preview::render_table(
+                    self.table.clone(),
+                    &self.theme,
+                    self.fonts.code.clone(),
+                    self.font_size,
+                    &self.table_scroll,
+                    truncated,
+                ))
+                .into_any_element();
+        }
         // `.md` 整形プレビュー（rendered 側）: EditorElement を差し替え、編集ハンドラ/マウスは載せない。
         // ブロックは version キーでキャッシュ（idle 再描画で再パースしない）。
         if self.rendered_markdown && self.is_markdown() {
@@ -3552,6 +3612,61 @@ fn selection_line_span(start: (usize, usize), end: (usize, usize)) -> (usize, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O29: `.csv` は ⌘⇧V（`set_rendered_markdown`）で表になって描け、`.txt` はならない。
+    /// 本文を変えると表も読み直す。
+    #[gpui::test]
+    fn csv_files_toggle_into_a_table(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("necoder_table_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("作れる");
+        let csv = dir.join("data.csv");
+        std::fs::write(&csv, "id,name\n1,Alice\n2,\"Bob, Jr.\"\n").expect("書ける");
+        let text = dir.join("notes.txt");
+        std::fs::write(&text, "id,name\n").expect("書ける");
+        let (table_editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&csv).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        table_editor.update_in(cx, |editor, _window, cx| {
+            assert!(editor.has_text_preview());
+            editor.set_rendered_markdown(true, cx);
+            assert!(editor.rendered_markdown());
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        table_editor.update_in(cx, |editor, _window, _cx| {
+            let rows: Vec<Vec<String>> = editor.table.rows.clone();
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[2], vec!["2".to_string(), "Bob, Jr.".to_string()]);
+        });
+        table_editor.update_in(cx, |editor, _window, cx| {
+            editor.set_rendered_markdown(false, cx);
+            editor.replace_all_text("id,name\n1,Alice\n2,\"Bob, Jr.\"\n3,Carol\n", cx);
+            editor.set_rendered_markdown(true, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        table_editor.update_in(cx, |editor, _window, _cx| {
+            assert_eq!(editor.table.rows.len(), 4, "本文の版が変われば読み直す");
+        });
+
+        let (text_editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&text).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        text_editor.update_in(cx, |editor, _window, cx| {
+            assert!(!editor.has_text_preview());
+            editor.set_rendered_markdown(true, cx);
+            assert!(!editor.rendered_markdown(), ".txt は表にならない");
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn selections_cover_the_lines_they_look_like() {
