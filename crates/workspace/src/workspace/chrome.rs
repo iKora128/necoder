@@ -1184,6 +1184,49 @@ impl Workspace {
                     }),
                 )
         });
+        // ⌘K V: 本文の右に整形プレビューを並べる（Markdown だけ・O29）。
+        let side_toggle = path
+            .as_deref()
+            .filter(|path| lang::language_for_path(path) == Some(lang::LanguageId::Markdown))
+            .map(|_| {
+                let on = editor.read(cx).side_preview();
+                let editor = editor.clone();
+                div()
+                    .id("md-side-preview-toggle")
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(px(19.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .when(on, |element| element.bg(theme.bg2))
+                    .hover(|style| style.bg(theme.bg2))
+                    .child(
+                        svg()
+                            .path("icons/columns-2.svg")
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(if on { theme.fg0 } else { theme.fg2 }),
+                    )
+                    .tooltip(Tooltip::text(
+                        i18n::t!(
+                            "breadcrumb.md_side_preview_tip",
+                            "key" => keymap_core::keystroke_label_in("Editor", "cmd-k v")
+                        ),
+                        theme.clone(),
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_this, _, _window, cx| {
+                            cx.stop_propagation();
+                            editor.update(cx, |editor, cx| {
+                                let next = !editor.side_preview();
+                                editor.set_side_preview(next, cx);
+                            });
+                        }),
+                    )
+            });
         let html_toggle = path
             .as_deref()
             .filter(|path| lang::language_for_path(path) == Some(lang::LanguageId::Html))
@@ -1288,6 +1331,7 @@ impl Workspace {
                     .child(SharedString::from(crumbs)),
             )
             .children(markdown_toggle)
+            .children(side_toggle)
             .children(html_toggle)
     }
 

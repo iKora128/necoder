@@ -41,6 +41,7 @@ const ACTION_LABELS: &[(&str, &str)] = &[
         "editor::ToggleRenderedMarkdown",
         "key.toggle_rendered_markdown",
     ),
+    ("editor::ToggleSidePreview", "key.toggle_side_preview"),
     // ── エディタ: 移動 ──
     ("editor::MoveLeft", "key.move_left"),
     ("editor::MoveRight", "key.move_right"),

@@ -315,6 +315,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-d": "editor::SelectNext",
       "alt-z": "editor::ToggleSoftWrap",
       "cmd-shift-v": "editor::ToggleRenderedMarkdown",
+      "cmd-k v": "editor::ToggleSidePreview",
       "ctrl-g": "workspace::GoToLine",
       "alt-cmd-up": "editor::AddCursorAbove",
       "alt-cmd-down": "editor::AddCursorBelow",

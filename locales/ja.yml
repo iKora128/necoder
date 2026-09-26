@@ -827,6 +827,7 @@ breadcrumb:
   md_preview: プレビュー
   md_source: ソース
   md_preview_tip: 整形プレビューを切替  ⌘⇧V
+  md_side_preview_tip: "本文の右にプレビューを並べる（打つたびに更新）  %{key}"
   html_preview: プレビュー
   html_source: ソース
   html_preview_tip: OS 標準 WebView で表示  ⌘⇧V
@@ -1218,6 +1219,7 @@ key:
   outdent: アウトデント
   toggle_soft_wrap: 折り返しの切替
   toggle_rendered_markdown: プレビューの切替
+  toggle_side_preview: プレビューを右に並べる
   move_left: 左へ移動
   move_right: 右へ移動
   move_up: 上へ移動

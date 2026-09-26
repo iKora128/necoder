@@ -91,6 +91,8 @@ actions!(
         ToggleSoftWrap,
         // ── rendered preview（⌘⇧V・Markdown / HTML） ──
         ToggleRenderedMarkdown,
+        // ── 横並びのプレビュー（⌘K V・Markdown・O29） ──
+        ToggleSidePreview,
         MoveLeft,
         MoveRight,
         MoveUp,
@@ -287,6 +289,8 @@ pub struct EditorView {
     /// `.md` の整形プレビュー（source ⇄ rendered トグル・⌘⇧V）。plain / 非 md では常に false。
     /// true の間 EditorElement を描かず [`markdown_preview`] へ差し替える（キャレット点滅も止める）。
     rendered_markdown: bool,
+    /// ⌘K V: 本文の右に整形プレビューを並べている（Markdown だけ・O29）。
+    side_preview: bool,
     /// ローカル `.html` のネイティブプレビュー。WebView 自体はプレビュー初回描画まで生成しない。
     html_preview: Option<Entity<webview_view::WebViewView>>,
     rendered_html: bool,
@@ -369,6 +373,7 @@ impl EditorView {
             save_queued: false,
             soft_wrap: false,
             rendered_markdown: false,
+            side_preview: false,
             html_preview,
             rendered_html: false,
             preview_reload_task: None,
@@ -642,6 +647,67 @@ impl EditorView {
         } else if self.html_preview.is_some() {
             self.set_rendered_html(!self.rendered_html, cx);
         }
+    }
+
+    /// ⌘K V: Markdown の本文の右に整形プレビューを並べる / 外す（O29）。
+    fn toggle_side_preview(
+        &mut self,
+        _: &ToggleSidePreview,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_side_preview(!self.side_preview, cx);
+    }
+
+    /// 横並びのプレビューの on/off。Markdown でなければ ON は無視。ON では整形表示だけの状態を
+    /// 解く（本文が見えるように）。
+    pub fn set_side_preview(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && !self.is_markdown() {
+            return;
+        }
+        if on {
+            self.rendered_markdown = false;
+        }
+        if self.side_preview != on {
+            self.side_preview = on;
+            cx.notify();
+        }
+    }
+
+    /// 横並びのプレビュー中か（パンくずのボタンが状態表示に読む）。
+    pub fn side_preview(&self) -> bool {
+        self.side_preview
+    }
+
+    /// Markdown の整形プレビュー（⌘⇧V の全面・⌘K V の右半分で共有）。ブロックは本文の版で持ち直す
+    /// （idle 再描画で読み直さない）。
+    fn markdown_preview_element(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let version = self.buffer.version();
+        if self.markdown_blocks_version != version {
+            let text = self.buffer.text();
+            let (front_matter, body) = markdown::split_front_matter(&text);
+            self.markdown_blocks = markdown::parse(body);
+            self.markdown_front_matter = front_matter;
+            self.markdown_blocks_version = version;
+        }
+        markdown_preview::render_preview(
+            &self.markdown_blocks,
+            self.markdown_front_matter.as_ref(),
+            &self.theme,
+            self.font_size,
+            self.fonts.code.clone(),
+            &self.markdown_scroll,
+            self.buffer.path().and_then(|path| path.parent()),
+            {
+                let editor = cx.entity().downgrade();
+                std::rc::Rc::new(move |destination, _window, cx| {
+                    // 閉じたタブのプレビューを押すことは無いが、消えていれば何もしない。
+                    if let Some(editor) = editor.upgrade() {
+                        editor.update(cx, |_, cx| cx.emit(PreviewLinkClicked { destination }));
+                    }
+                })
+            },
+        )
     }
 
     /// 整形プレビュー中か（クローム側のトグルボタンが状態表示に読む）。
@@ -2434,14 +2500,7 @@ impl Render for EditorView {
         // `.md` 整形プレビュー（rendered 側）: EditorElement を差し替え、編集ハンドラ/マウスは載せない。
         // ブロックは version キーでキャッシュ（idle 再描画で再パースしない）。
         if self.rendered_markdown && self.is_markdown() {
-            let version = self.buffer.version();
-            if self.markdown_blocks_version != version {
-                let text = self.buffer.text();
-                let (front_matter, body) = markdown::split_front_matter(&text);
-                self.markdown_blocks = markdown::parse(body);
-                self.markdown_front_matter = front_matter;
-                self.markdown_blocks_version = version;
-            }
+            let preview = self.markdown_preview_element(cx);
             return div()
                 .key_context("Editor")
                 .track_focus(&self.focus_handle(cx))
@@ -2450,29 +2509,14 @@ impl Render for EditorView {
                 .text_color(self.theme.fg0)
                 .font_family(self.fonts.ui.clone())
                 .on_action(cx.listener(Self::toggle_rendered_markdown))
-                .child(markdown_preview::render_preview(
-                    &self.markdown_blocks,
-                    self.markdown_front_matter.as_ref(),
-                    &self.theme,
-                    self.font_size,
-                    self.fonts.code.clone(),
-                    &self.markdown_scroll,
-                    self.buffer.path().and_then(|path| path.parent()),
-                    {
-                        let editor = cx.entity().downgrade();
-                        std::rc::Rc::new(move |destination, _window, cx| {
-                            // 閉じたタブのプレビューを押すことは無いが、消えていれば何もしない。
-                            if let Some(editor) = editor.upgrade() {
-                                editor.update(cx, |_, cx| {
-                                    cx.emit(PreviewLinkClicked { destination })
-                                });
-                            }
-                        })
-                    },
-                ))
+                .on_action(cx.listener(Self::toggle_side_preview))
+                .child(preview)
                 .into_any_element();
         }
-        div()
+        // ⌘K V: 本文の右に整形プレビュー（打つたびに追いつく・O29）。
+        let side_preview =
+            (self.side_preview && self.is_markdown()).then(|| self.markdown_preview_element(cx));
+        let source = div()
             .key_context("Editor")
             .track_focus(&self.focus_handle(cx))
             .size_full()
@@ -2514,6 +2558,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::toggle_soft_wrap))
             .on_action(cx.listener(Self::toggle_rendered_markdown))
+            .on_action(cx.listener(Self::toggle_side_preview))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::move_left))
@@ -2540,8 +2585,26 @@ impl Render for EditorView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(EditorElement {
                 editor: cx.entity(),
-            })
-            .into_any_element()
+            });
+        match side_preview {
+            None => source.into_any_element(),
+            Some(preview) => div()
+                .size_full()
+                .flex()
+                .child(div().flex_1().min_w_0().h_full().child(source))
+                .child(div().flex_none().w(px(1.)).h_full().bg(self.theme.border))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .bg(self.theme.bg1)
+                        .text_color(self.theme.fg0)
+                        .font_family(self.fonts.ui.clone())
+                        .child(preview),
+                )
+                .into_any_element(),
+        }
     }
 }
 
@@ -3756,6 +3819,62 @@ mod tests {
                 "見出しまで流れる: {:?}",
                 editor.markdown_scroll.offset()
             );
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn the_side_preview_follows_typing(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("necoder_side_preview_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("作れる");
+        let markdown_path = dir.join("notes.md");
+        std::fs::write(&markdown_path, "# Notes\n").expect("書ける");
+        let text_path = dir.join("notes.txt");
+        std::fs::write(&text_path, "# Notes\n").expect("書ける");
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&markdown_path).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        editor.update_in(cx, |editor, _window, cx| {
+            editor.set_rendered_markdown(true, cx);
+            editor.set_side_preview(true, cx);
+            assert!(editor.side_preview());
+            assert!(!editor.rendered_markdown(), "並べる時は本文を見せる");
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, _window, cx| {
+            assert!(editor.content_origin.is_some(), "左に本文が描かれる");
+            assert_eq!(editor.markdown_blocks.len(), 1, "右にプレビュー");
+            editor.move_to_end(&MoveToEnd, _window, cx);
+            editor.insert_text("\n## Added\n", cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, _window, _cx| {
+            assert!(
+                editor.markdown_blocks.iter().any(|block| matches!(
+                    block,
+                    markdown::Block::Heading { level: 2, text, .. } if text == "Added"
+                )),
+                "打った分が右に出る: {:?}",
+                editor.markdown_blocks
+            );
+        });
+
+        let (text_editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&text_path).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        text_editor.update_in(cx, |editor, _window, cx| {
+            editor.set_side_preview(true, cx);
+            assert!(!editor.side_preview(), ".txt には並べない");
         });
         std::fs::remove_dir_all(&dir).ok();
     }

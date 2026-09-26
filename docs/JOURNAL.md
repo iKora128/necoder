@@ -3310,7 +3310,7 @@
   （Finder からエクスプローラへ落とす / 右クリック・`project::transfer`・O37 / G09）・**SSH が繋がらない理由の案内**
   （`host::SshFailure`・パスフレーズの問いに `ssh-add` の案内・O37 / G02 / G04）・**エディタへのドロップ**
   （Markdown に画像 = 隣へコピーして落とした所に `![]()`・ほかはタブで開く・O29）・Markdown の **front matter の表と
-  目次**（`markdown::split_front_matter`・`[toc]`・O29）。
+  目次**（`markdown::split_front_matter`・`[toc]`・O29）・**横並びのライブプレビュー**（⌘K V・O29）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
