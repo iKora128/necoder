@@ -495,6 +495,8 @@ impl Workspace {
 }
 
 /// 進行中のマージ / リベース（どちらでもなければ `None`）。worktree でも正しい場所を git に聞く。
+/// リベースを先に見る: `git rebase -r` がマージの衝突で止まると MERGE_HEAD もあり、`merge --abort` では
+/// 取り消せずリベースが残る（HEAD は切り離されたまま）。
 fn in_progress(host: &dyn host::Host, root: &Path) -> Option<InProgress> {
     let git = |args: &[&str]| {
         host.run_command(&host::CommandSpec::new("git", root).args(args.iter().copied()))
@@ -502,19 +504,31 @@ fn in_progress(host: &dyn host::Host, root: &Path) -> Option<InProgress> {
             .filter(|output| output.status_code == Some(0))
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
     };
-    if git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_some() {
-        return Some(InProgress::Merge);
-    }
     for directory in ["rebase-merge", "rebase-apply"] {
         let Some(path) = git(&["rev-parse", "--git-path", directory]) else {
             continue;
         };
-        let path = root.join(path);
-        if host.metadata(&path).is_ok() {
+        if exists_from(host, root, &root.join(path)) {
             return Some(InProgress::Rebase);
         }
     }
+    if git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_some() {
+        return Some(InProgress::Merge);
+    }
     None
+}
+
+/// `path` があるか。接続先の host は開いた worktree の外（linked worktree の git の置き場は統合先の
+/// `.git/worktrees/…`）を metadata で見られないので、worktree の中から `test -e` で聞く。
+fn exists_from(host: &dyn host::Host, root: &Path, path: &Path) -> bool {
+    if host.is_remote() {
+        let spec = host::CommandSpec::new("test", root)
+            .args(["-e".to_string(), path.to_string_lossy().into_owned()]);
+        host.run_command(&spec)
+            .is_ok_and(|output| output.status_code == Some(0))
+    } else {
+        host.metadata(path).is_ok()
+    }
 }
 
 fn abort(host: &dyn host::Host, root: &Path, kind: InProgress) -> anyhow::Result<()> {
@@ -697,6 +711,181 @@ mod tests {
         assert_eq!(in_progress(host.as_ref(), &repo), None);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "main\n");
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    fn scratch_git(
+        tag: &str,
+    ) -> Option<(PathBuf, impl Fn(&Path, &[&str]) -> std::process::Output)> {
+        let base =
+            std::env::temp_dir().join(format!("necoder_conflicts_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("repo")).unwrap();
+        let base = paths::canonicalize(&base).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=necoder",
+                    "-c",
+                    "user.email=necoder@example.com",
+                ])
+                .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+        };
+        git(&base.join("repo"), &["init", "-q", "-b", "main"])
+            .status
+            .success()
+            .then_some((base, git))
+    }
+
+    /// `git rebase -r` がマージの衝突で止まると MERGE_HEAD もある。中止はリベースの方（本物の git）。
+    #[test]
+    fn a_rebase_stopped_on_a_merge_is_aborted_as_a_rebase() {
+        let Some((base, git)) = scratch_git("rebase_merges") else {
+            return;
+        };
+        let repo = base.join("repo");
+        let file = repo.join("a.txt");
+        std::fs::write(&file, "base\n").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        // side と feature が同じ行を変え、手で解いたマージ。main は別のファイルだけを変える
+        // （1 つずつの pick は通り、マージの作り直しだけが衝突する）。
+        git(&repo, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(&file, "side\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "side"]);
+        git(&repo, &["checkout", "-q", "-b", "feature", "main"]);
+        std::fs::write(&file, "feature\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "feature"]);
+        git(&repo, &["merge", "-q", "--no-edit", "side"]);
+        std::fs::write(&file, "resolved\n").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(&repo, &["commit", "-q", "-m", "merge side"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("m.txt"), "m\n").unwrap();
+        git(&repo, &["add", "m.txt"]);
+        git(&repo, &["commit", "-q", "-m", "main"]);
+        let rebased = git(&repo, &["rebase", "-r", "main", "feature"]);
+        assert!(!rebased.status.success(), "マージの作り直しで衝突する");
+        assert!(
+            git(&repo, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+                .status
+                .success(),
+            "MERGE_HEAD もある"
+        );
+        let host = host::LocalHost::shared();
+        assert_eq!(in_progress(host.as_ref(), &repo), Some(InProgress::Rebase));
+        abort(host.as_ref(), &repo, InProgress::Rebase).unwrap();
+        assert_eq!(in_progress(host.as_ref(), &repo), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 開いた根の外を metadata で見られない（SSH の接続先と同じ）host でも、linked worktree のリベースを
+    /// 見つける（git の置き場が統合先の `.git/worktrees/…` にある）。
+    #[cfg(unix)]
+    #[test]
+    fn a_rebase_in_a_linked_worktree_is_found_through_a_scoped_host() {
+        struct Scoped {
+            root: PathBuf,
+        }
+        impl host::Host for Scoped {
+            fn id(&self) -> &str {
+                "scoped"
+            }
+            fn display_name(&self) -> &str {
+                "scoped"
+            }
+            fn is_remote(&self) -> bool {
+                true
+            }
+            fn host_for_project(&self, path: &Path) -> anyhow::Result<Arc<dyn host::Host>> {
+                Ok(Arc::new(Scoped {
+                    root: path.to_path_buf(),
+                }))
+            }
+            fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
+                host::LocalHost.canonicalize(path)
+            }
+            fn metadata(&self, path: &Path) -> anyhow::Result<host::HostMetadata> {
+                anyhow::ensure!(
+                    std::fs::canonicalize(path)?.starts_with(&self.root),
+                    "path escapes project root"
+                );
+                host::LocalHost.metadata(path)
+            }
+            fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<host::HostEntry>> {
+                host::LocalHost.read_dir(path)
+            }
+            fn read_file(&self, path: &Path) -> anyhow::Result<host::FileContent> {
+                host::LocalHost.read_file(path)
+            }
+            fn write_file(
+                &self,
+                path: &Path,
+                bytes: &[u8],
+                condition: host::WriteCondition,
+            ) -> anyhow::Result<host::FileRevision> {
+                host::LocalHost.write_file(path, bytes, condition)
+            }
+            fn list_files(&self, root: &Path, limit: usize) -> anyhow::Result<Vec<PathBuf>> {
+                host::LocalHost.list_files(root, limit)
+            }
+            fn search_project(
+                &self,
+                root: &Path,
+                spec: &host::TextSearchSpec,
+                file_limit: usize,
+            ) -> anyhow::Result<Vec<host::TextSearchHit>> {
+                host::LocalHost.search_project(root, spec, file_limit)
+            }
+            fn run_command(&self, spec: &host::CommandSpec) -> anyhow::Result<host::CommandOutput> {
+                anyhow::ensure!(
+                    spec.cwd.starts_with(&self.root),
+                    "path is outside remote project"
+                );
+                host::LocalHost.run_command(spec)
+            }
+            fn spawn_process(&self, spec: &host::CommandSpec) -> anyhow::Result<host::HostProcess> {
+                host::LocalHost.spawn_process(spec)
+            }
+            fn terminal_launch(&self, cwd: &Path) -> anyhow::Result<Option<host::TerminalLaunch>> {
+                host::LocalHost.terminal_launch(cwd)
+            }
+        }
+
+        let Some((base, git)) = scratch_git("linked_rebase") else {
+            return;
+        };
+        let repo = base.join("repo");
+        let task = base.join("task");
+        std::fs::write(repo.join("a.txt"), "base\n").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task",
+                task.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(task.join("a.txt"), "task\n").unwrap();
+        git(&task, &["commit", "-q", "-am", "task"]);
+        std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "main"]);
+        let rebased = git(&task, &["rebase", "main"]);
+        assert!(!rebased.status.success(), "衝突する");
+        let scoped = Scoped { root: task.clone() };
+        assert_eq!(in_progress(&scoped, &task), Some(InProgress::Rebase));
+        git(&task, &["rebase", "--abort"]);
+        assert_eq!(in_progress(&scoped, &task), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
