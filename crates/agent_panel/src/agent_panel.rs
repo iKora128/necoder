@@ -816,6 +816,12 @@ impl RunningRegistry {
 struct AgentAdvertisement {
     configs: Vec<ConfigOption>,
     modes: Vec<(SharedString, SharedString)>,
+    /// slash コマンド一覧（O2）。セッションがまだ開いていないタブの `/` 補完に使う。
+    /// 同じパネルのスレッドは宛先（cwd）も同じなので、同じ agent なら一覧もほぼ同じ。
+    commands: Vec<acp_client::SlashCommand>,
+    /// この agent は会話名を自分で送ってくる（一度でも `TitleChanged` を受け取った）。
+    /// 立っていれば necoder 自前の命名（`claude -p` 等）を走らせない（O2）。
+    sends_titles: bool,
 }
 
 /// セッション先張り（prewarm）を実行するまでの待ち時間。タブを続けて切り替えた時に、
@@ -928,7 +934,15 @@ struct Thread {
     /// transcript 上部の常設チェックリストに出す。空 = 非表示。
     plan: Vec<PlanItem>,
     /// ユーザーが手動でタブ名を変更したか（true なら AI 自動命名で上書きしない・#4/#6）。
+    /// エージェントが送ってくる会話名（`AgentEvent::TitleChanged`）もこれが立っていれば当てない。
+    /// 手動改名（改名モーダル・名前で固定するスレッド）の分は DB にも印を残す（再起動後も守る）。
     name_is_custom: bool,
+    /// エージェントが使える slash コマンド（`AgentEvent::Commands` の最新の全量・O2）。
+    /// composer の `/` 補完の候補。まだ届いていなければ空（同じ agent の在庫で代用する）。
+    commands: Vec<acp_client::SlashCommand>,
+    /// エージェントが追っている目標（`/goal`・`AgentEvent::GoalChanged`）。composer の上に 1 行で出す。
+    /// 保存しない（エージェント側の状態の写し。再開すれば送り直される）。
+    goal: Option<acp_client::AgentGoal>,
     /// 遷移スナップショット（Tier 1・FLEET-CONTROL-PLAN P1）。**状態遷移時のみ**更新する:
     /// PermissionRequest→許可待ちの内容 / TurnEnded→最終発言の末尾 / Failed→エラー文。
     /// Working 中は保存せず `live_digest()` を流す（生成不要・無料）。
@@ -1022,6 +1036,8 @@ impl Thread {
             touched_files: Vec::new(),
             plan: Vec::new(),
             name_is_custom: false,
+            commands: Vec::new(),
+            goal: None,
             digest: None,
             muted: false,
             tier2: None,
@@ -1578,6 +1594,28 @@ fn is_placeholder_name(name: &str) -> bool {
     })
 }
 
+/// エージェントが付けた会話名（`AgentEvent::TitleChanged`）をタブに載せる形へ。空白・改行は 1 つの
+/// 空白に畳み、長すぎれば末尾を `…` で切る。空なら `None`（名前として使わない）。
+/// Claude は題名を生成できない時に最初の依頼文をそのまま（最大 256 文字）名前にして送ってくる。
+fn agent_title_for_tab(title: &str) -> Option<SharedString> {
+    const MAX_CHARS: usize = 80;
+    let flat = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    if flat.chars().count() <= MAX_CHARS {
+        return Some(flat.into());
+    }
+    let mut cut: String = flat.chars().take(MAX_CHARS - 1).collect();
+    cut.push('…');
+    Some(cut.into())
+}
+
+/// エージェント自身の命名を待つ時間（O2）。Claude は最初のターンの終了後に小さなモデルで題名を
+/// 作って送ってくる（数秒）。その間に necoder 自前の命名（`claude -p` 等）を走らせると、課金が
+/// 二重になり名前も 2 回変わる。待っても来なければ自前で付ける。
+const AGENT_TITLE_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// 現在時刻（unix ms）。スレッドの開始/最終入力時刻の記録に使う。
 pub fn now_unix_ms() -> i64 {
     std::time::SystemTime::now()
@@ -1763,6 +1801,9 @@ pub struct AgentPanel {
     transcript_search: Option<search::TranscriptSearch>,
     /// `▣ プレビュー` チップを出してよいか（パス → 実在）の控え。描画のたびに stat しない。
     preview_exists: RefCell<HashMap<String, bool>>,
+    /// 自前の命名（[`Self::maybe_auto_name`]）を待っている/走らせているスレッド id。
+    /// ターンが続けて終わっても同じスレッドに命名の子プロセスを重ねない。
+    auto_naming: std::collections::HashSet<String>,
 }
 
 impl gpui::EventEmitter<PanelEvent> for AgentPanel {}
@@ -2108,6 +2149,7 @@ PYEOF"#;
             chat_artifacts: Vec::new(),
             transcript_search: None,
             preview_exists: RefCell::new(HashMap::new()),
+            auto_naming: std::collections::HashSet::new(),
         }
     }
 
@@ -2273,10 +2315,13 @@ PYEOF"#;
             }
             // 前回のエージェント側セッション id。立ち上げ直しで会話を引き継ぐ鍵（無ければ新規）。
             let sessions = storage.load_thread_sessions().unwrap_or_default();
+            // 人が付けた名前の印（エージェントの会話名で上書きしない・O2）。
+            let custom_names = storage.load_custom_named_threads().unwrap_or_default();
             for thread in &mut threads {
                 if let Some((_, session_id)) = sessions.iter().find(|(id, _)| *id == thread.id) {
                     thread.acp_session_id = Some(session_id.clone());
                 }
+                thread.name_is_custom = custom_names.contains(&thread.id);
             }
             self.threads = threads;
             self.active = 0;
@@ -2312,11 +2357,6 @@ PYEOF"#;
         let Some(storage) = self.storage.clone() else {
             return;
         };
-        let project = self
-            .storage_scope
-            .clone()
-            .unwrap_or_else(|| self.dest_project.to_string());
-        let branch = self.dest_branch.clone();
         let Some(thread) = self.threads.get_mut(thread_index) else {
             return;
         };
@@ -2335,6 +2375,23 @@ PYEOF"#;
             }
         }
         thread.persisted_entries = thread.entries.len();
+        self.persist_thread_meta(thread_index);
+    }
+
+    /// スレッドのメタ（名前・色・宛先・agent・モデル・トークン累計）だけを upsert する。本文は書かない
+    /// （ターンの途中に呼んでも、生成中の途切れた本文を DB に残さない）。
+    fn persist_thread_meta(&self, thread_index: usize) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let project = self
+            .storage_scope
+            .clone()
+            .unwrap_or_else(|| self.dest_project.to_string());
+        let branch = self.dest_branch.clone();
+        let Some(thread) = self.threads.get(thread_index) else {
+            return;
+        };
         // 色 index は巡回パレットの逆引き（見つからなければ 0）。
         let color = thread.color;
         let color_index = (0..12).find(|i| thread_color(*i) == color).unwrap_or(0) as i64;
@@ -2355,6 +2412,10 @@ PYEOF"#;
 
     /// 最初のターン後、まだ既定名なら会話の冒頭から AI にタイトルを付けてもらう（#6・非同期）。
     /// 手動改名済み or 既に命名済み（＝プレースホルダでない）スレッドは対象外。失敗は静かに既定名のまま。
+    ///
+    /// **エージェントが自分で会話名を送ってくるなら任せる**（O2）: 一度でも `TitleChanged` を送って
+    /// きた agent は即やめ、まだ分からない agent は [`AGENT_TITLE_GRACE`] だけ待ってから、その間に
+    /// 名前が付かなかった時だけ自前の命名（子プロセス）を走らせる。
     fn maybe_auto_name(&mut self, thread_index: usize, cx: &mut Context<Self>) {
         if !settings::get(cx).agent_auto_name {
             return;
@@ -2362,7 +2423,7 @@ PYEOF"#;
         let Some(thread) = self.threads.get(thread_index) else {
             return;
         };
-        if thread.name_is_custom || !is_placeholder_name(&thread.name) {
+        if !self.needs_own_auto_name(thread) || self.auto_naming.contains(&thread.id) {
             return;
         }
         // 会話の冒頭（最初の user 発言 + 最初の agent 応答の先頭）を excerpt に。
@@ -2393,18 +2454,38 @@ PYEOF"#;
             return;
         };
         let thread_id = thread.id.clone();
+        self.auto_naming.insert(thread_id.clone());
         cx.spawn(async move |panel, cx| {
+            // エージェント自身の命名を少し待つ。その間に名前が付いた・人が改名した・この agent が
+            // 名前を送ってくると分かった、のどれかなら自前の命名はしない（子プロセスを立てない）。
+            cx.background_executor().timer(AGENT_TITLE_GRACE).await;
+            let still_needed = panel
+                .update(cx, |panel, _cx| {
+                    let needed = panel
+                        .thread_index_by_id(&thread_id)
+                        .and_then(|index| panel.threads.get(index))
+                        .is_some_and(|thread| panel.needs_own_auto_name(thread));
+                    if !needed {
+                        panel.auto_naming.remove(&thread_id);
+                    }
+                    needed
+                })
+                .unwrap_or(false);
+            if !still_needed {
+                return;
+            }
             let generated = cx
                 .background_executor()
                 .spawn(
                     async move { project::name_thread_on(host.as_ref(), &cwd, &excerpt, oneshot) },
                 )
                 .await;
-            let Ok(name) = generated else {
-                return; // claude 未導入等 → 既定名のまま（静かに諦める）
-            };
             panel
                 .update(cx, |panel, cx| {
+                    panel.auto_naming.remove(&thread_id);
+                    let Ok(name) = generated else {
+                        return; // claude 未導入等 → 既定名のまま（静かに諦める）
+                    };
                     if let Some(index) = panel.thread_index_by_id(&thread_id) {
                         let thread = &mut panel.threads[index];
                         // 生成待ちの間にユーザーが手動改名していたら尊重する。
@@ -2412,7 +2493,8 @@ PYEOF"#;
                             let name = SharedString::from(name);
                             thread.name = name.clone();
                             cx.emit(PanelEvent::ThreadAutoNamed { name });
-                            panel.persist_thread(index);
+                            // メタだけ（生成が長引けば次のターンが走っている＝本文は書かない）。
+                            panel.persist_thread_meta(index);
                             panel.refresh_chat_rows(cx);
                             cx.notify();
                         }
@@ -2421,6 +2503,16 @@ PYEOF"#;
                 .ok();
         })
         .detach();
+    }
+
+    /// necoder 自前の命名（`claude -p` 等）が要るスレッドか: 人が名前を付けていない・まだ既定名・
+    /// その agent が会話名を自分で送ってこない（O2）。
+    fn needs_own_auto_name(&self, thread: &Thread) -> bool {
+        let agent_names_itself = self
+            .catalog
+            .get(&thread.agent)
+            .is_some_and(|advertisement| advertisement.sends_titles);
+        !thread.name_is_custom && is_placeholder_name(&thread.name) && !agent_names_itself
     }
 
     /// このパスを触ったスレッドの色（色リンク・M12-4）。複数スレッドなら最後に触った方。
@@ -4119,8 +4211,22 @@ PYEOF"#;
                 thread.name_is_custom = true; // 以後 AI 自動命名で上書きしない
             }
             self.persist_thread(index);
+            self.persist_custom_name(index);
         }
         cx.notify();
+    }
+
+    /// 「人が名前を付けた」印を DB に残す（再起動後もエージェントの会話名で上書きしない・O2）。
+    fn persist_custom_name(&self, thread_index: usize) {
+        let (Some(storage), Some(thread)) = (self.storage.as_ref(), self.threads.get(thread_index))
+        else {
+            return;
+        };
+        if let Err(error) = storage.set_thread_name_custom(&thread.id, true) {
+            eprintln!(
+                "スレッド名の手動の印を保存できない（再起動後に会話名で上書きされうる）: {error:#}"
+            );
+        }
     }
 
     /// 改名を取り消す（Esc / 別タブへ切替）。入力内容は破棄する。
@@ -4493,6 +4599,15 @@ PYEOF"#;
                 || aliases.iter().any(|alias| alias == thread.name.as_ref())
         }) {
             self.switch_thread(index, cx);
+            // 名前で引き当てるスレッドの名前は動かしてはいけない（エージェントの会話名で変わると
+            // 次から見つからない）。印の無い行（印を残す前の DB から復元した等）には付け直す。
+            let newly_marked = self
+                .threads
+                .get_mut(index)
+                .is_some_and(|thread| !std::mem::replace(&mut thread.name_is_custom, true));
+            if newly_marked {
+                self.persist_custom_name(index);
+            }
             return index;
         }
         let index = self.acquire_thread(Some(agent.to_string()), cx);
@@ -4500,6 +4615,7 @@ PYEOF"#;
             thread.name = SharedString::from(name.to_string());
             thread.name_is_custom = true;
         }
+        self.persist_custom_name(index);
         index
     }
 
@@ -5097,7 +5213,9 @@ PYEOF"#;
     /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
     /// 名前でスレッドの位置を引く（作らない・アクティブ化しない）。
     pub fn thread_index_named(&self, name: &str) -> Option<usize> {
-        self.threads.iter().position(|thread| thread.name.as_ref() == name)
+        self.threads
+            .iter()
+            .position(|thread| thread.name.as_ref() == name)
     }
 
     pub fn set_prompt_context(&mut self, thread: usize, context: String) {
@@ -5445,6 +5563,10 @@ PYEOF"#;
         // `thread` の借用が残っている間は self を触れないので、末尾でまとめて反映する。
         let mut stocked_configs: Option<(SharedString, Vec<ConfigOption>)> = None;
         let mut stocked_modes: Option<(SharedString, Vec<(SharedString, SharedString)>)> = None;
+        let mut stocked_commands: Option<(SharedString, Vec<acp_client::SlashCommand>)> = None;
+        // 会話名を送ってきた agent（在庫に「自分で名付ける」と控える）と、付け替えた名前。
+        let mut titled_by_agent: Option<SharedString> = None;
+        let mut agent_renamed: Option<SharedString> = None;
         let mut ensure_reveal = false; // アクティブが Agent/Thinking をストリーム → タイプライタ稼働
         let mut reveal_reset = false; // 新しいストリームエントリ開始 → 先頭から打つ
         let mut stream_updated = false;
@@ -5676,6 +5798,29 @@ PYEOF"#;
                 // プランは毎回全量で届く（ACP 仕様）ので**置換**。常設チェックリストが追従する。
                 thread.plan = items;
             }
+            AgentEvent::Commands(commands) => {
+                // slash コマンドの一覧も毎回全量で届く＝置き換える（O2）。在庫にも控えて、
+                // まだセッションの無い同じ agent のタブの `/` 補完に使う。
+                thread.commands = commands;
+                stocked_commands = Some((thread.agent.clone(), thread.commands.clone()));
+            }
+            AgentEvent::TitleChanged(title) => {
+                // エージェントが会話名を付けた（Claude はターン終了の数秒後・Codex は /rename 等）。
+                // この agent には以後、自前の命名（`claude -p` 等の子プロセス）を走らせない。
+                titled_by_agent = Some(thread.agent.clone());
+                // 人が付けた名前（改名モーダル・固定スレッド）は上書きしない。自動命名を切って
+                // いる人の名前も動かさない（エージェントの命名も「自動命名」のうち）。
+                // null（名前を消した）は何もしない＝今の名前を保つ。既定名へ戻すと付いていた
+                // 名前が消え、自前の命名で付け直すのは余計な課金になるため。
+                let auto_name = settings::get(cx).agent_auto_name;
+                if let Some(title) = title.as_deref().and_then(agent_title_for_tab) {
+                    if auto_name && !thread.name_is_custom && thread.name != title {
+                        thread.name = title.clone();
+                        agent_renamed = Some(title);
+                    }
+                }
+            }
+            AgentEvent::GoalChanged(goal) => thread.goal = goal,
             AgentEvent::ElicitationRequest {
                 message,
                 fields,
@@ -6009,6 +6154,21 @@ PYEOF"#;
         }
         if let Some((agent, modes)) = stocked_modes {
             self.catalog.entry(agent).or_default().modes = modes;
+        }
+        if let Some((agent, commands)) = stocked_commands {
+            self.catalog.entry(agent).or_default().commands = commands;
+        }
+        if let Some(agent) = titled_by_agent {
+            self.catalog.entry(agent).or_default().sends_titles = true;
+        }
+        if let Some(name) = agent_renamed {
+            // 自動命名と同じ出口（Task 名の引き継ぎ・一覧の更新）。保存はメタだけ — ターンの途中に
+            // 届くこともあり（Codex は最初のターンの終わり際に仮の名前を送る）、本文まで書くと
+            // 生成中の途切れた本文が DB に残る。
+            cx.emit(PanelEvent::ThreadAutoNamed { name });
+            self.persist_thread_meta(thread_index);
+            self.refresh_chat_rows(cx);
+            self.sync_running_registry(cx);
         }
         cx.notify();
     }
@@ -10676,6 +10836,12 @@ fn thread_from_storage(
         .into_iter()
         .find(|(thread_id, _)| thread_id == id)
         .map(|(_, session_id)| session_id);
+    // 人が付けた名前は、履歴から開き直してもエージェントの会話名で上書きしない（O2）。
+    thread.name_is_custom = storage
+        .load_custom_named_threads()
+        .unwrap_or_default()
+        .iter()
+        .any(|thread_id| thread_id == id);
     thread
 }
 
@@ -10700,6 +10866,8 @@ fn seed_threads() -> Vec<Thread> {
         touched_files: Vec::new(),
         plan: Vec::new(),
         name_is_custom: false,
+        commands: Vec::new(),
+        goal: None,
         name: "rope設計".into(),
         color: thread_color(0),
         running: false,
@@ -12907,5 +13075,111 @@ PYEOF"#;
         assert_eq!(preview.chars().count(), 65);
         assert!(preview.starts_with('…'));
         assert_eq!(thought_live_preview("").as_ref(), "");
+    }
+
+    // ── O2: エージェントの会話名 ──
+
+    /// エージェントの会話名は既定名のスレッドに当たり、以後その agent には自前の命名を走らせない。
+    /// 人が改名したスレッドは上書きしない。null（名前を消した）は今の名前を保つ。
+    #[gpui::test]
+    fn agent_title_names_the_thread_unless_a_human_renamed_it(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "agent_title");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let index = panel.active;
+            assert!(is_placeholder_name(&panel.threads[index].name));
+            assert!(panel.needs_own_auto_name(&panel.threads[index]));
+
+            panel.on_event(
+                index,
+                AgentEvent::TitleChanged(Some("ログイン\n修正".into())),
+                cx,
+            );
+            assert_eq!(panel.threads[index].name.as_ref(), "ログイン 修正");
+            assert!(
+                !panel.needs_own_auto_name(&panel.threads[index]),
+                "名前が付いた＝自前の命名は要らない"
+            );
+            // 同じ agent の別スレッド（まだ既定名）でも、この agent は自分で名付けると分かった。
+            panel.add_thread(cx);
+            let fresh = panel.active;
+            assert!(is_placeholder_name(&panel.threads[fresh].name));
+            assert!(
+                !panel.needs_own_auto_name(&panel.threads[fresh]),
+                "会話名を送ってくる agent には claude -p を走らせない"
+            );
+
+            // null は今の名前を保つ。
+            panel.on_event(index, AgentEvent::TitleChanged(None), cx);
+            assert_eq!(panel.threads[index].name.as_ref(), "ログイン 修正");
+
+            // 人が改名したら、その後に届いた会話名では上書きしない。
+            let theme = panel.theme.clone();
+            let color = panel.threads[index].color;
+            let editor = cx.new(|cx| {
+                let mut editor = EditorView::plain(theme, color, true, cx);
+                editor.set_plain_text("自分で付けた名前", cx);
+                editor
+            });
+            panel.renaming = Some((index, editor));
+            panel.confirm_rename(cx);
+            panel.on_event(
+                index,
+                AgentEvent::TitleChanged(Some("エージェントの名前".into())),
+                cx,
+            );
+            assert_eq!(panel.threads[index].name.as_ref(), "自分で付けた名前");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 手動改名の印は DB に残り、再起動（パネルの作り直し + 復元）後も会話名で上書きされない。
+    /// 印の無いスレッドは復元後も会話名を受け取る。
+    #[gpui::test]
+    fn a_human_rename_survives_restart(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "agent_title_restart");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_title_restart_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        for (id, name) in [("renamed-1", "手で付けた名前"), ("auto-1", "設計の相談")] {
+            storage
+                .upsert_thread(id, name, 0, "", None, Some("Claude Code"), None, 0, 0)
+                .expect("スレッド行を書ける");
+        }
+        storage
+            .set_thread_name_custom("renamed-1", true)
+            .expect("印を書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let renamed = panel
+                .thread_index_by_id("renamed-1")
+                .expect("手動改名のスレッドが復元される");
+            let auto = panel
+                .thread_index_by_id("auto-1")
+                .expect("もう 1 本も復元される");
+            assert!(panel.threads[renamed].name_is_custom);
+            assert!(!panel.threads[auto].name_is_custom);
+            for index in [renamed, auto] {
+                panel.on_event(index, AgentEvent::TitleChanged(Some("会話名".into())), cx);
+            }
+            assert_eq!(panel.threads[renamed].name.as_ref(), "手で付けた名前");
+            assert_eq!(panel.threads[auto].name.as_ref(), "会話名");
+        });
+        let names: Vec<(String, String)> = storage
+            .load_threads()
+            .expect("一覧を読める")
+            .into_iter()
+            .map(|row| (row.0, row.1))
+            .collect();
+        assert!(
+            names.contains(&("auto-1".to_string(), "会話名".to_string())),
+            "会話名は保存される: {names:?}"
+        );
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
     }
 }
