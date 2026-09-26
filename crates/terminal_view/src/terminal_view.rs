@@ -438,6 +438,8 @@ pub struct TerminalView {
     exited: bool,
     /// アプリが付けたタイトル（OSC 0 / 2）。
     title: Option<String>,
+    /// 人が付けた名前（タブのダブルクリック・O24）。あればアプリのタイトルより先に出す。
+    custom_title: Option<String>,
     /// ベルが鳴った（次の描画で、窓が後ろにあれば知らせる）。
     bell_pending: bool,
     /// 前面でシェル以外のプロセスが動いているかを調べる口（閉じる前の確認・O4）。
@@ -615,6 +617,7 @@ impl TerminalView {
             scroll_remainder: 0.0,
             exited,
             title: None,
+            custom_title: None,
             bell_pending: false,
             #[cfg(unix)]
             foreground,
@@ -673,6 +676,7 @@ impl TerminalView {
             scroll_remainder: 0.0,
             exited: false,
             title: None,
+            custom_title: None,
             bell_pending: false,
             #[cfg(unix)]
             foreground: None,
@@ -873,6 +877,28 @@ impl TerminalView {
     /// アプリが付けたタイトル（OSC 0 / 2）。無ければ None（タブは「ターミナル N」）。
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
+    }
+
+    /// 人が付けた名前（無ければ `None`）。
+    pub fn custom_title(&self) -> Option<&str> {
+        self.custom_title.as_deref()
+    }
+
+    /// タブに出す名前: 人が付けた名前 → アプリのタイトル（OSC 0 / 2）の順。
+    pub fn display_title(&self) -> Option<&str> {
+        self.custom_title.as_deref().or(self.title.as_deref())
+    }
+
+    /// 人が付けた名前を置く（空・空白だけ = 外して、アプリのタイトルに戻す・O24）。
+    pub fn set_custom_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        let title = title
+            .map(|title| sanitize_title(&title))
+            .filter(|title| !title.is_empty());
+        if self.custom_title != title {
+            self.custom_title = title;
+            cx.emit(TerminalEvent::TitleChanged);
+            cx.notify();
+        }
     }
 
     fn set_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
@@ -2280,6 +2306,20 @@ fn is_default_background(color: AnsiColor) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn a_custom_name_wins_over_the_shell_title(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_title(Some("vim".to_string()), cx);
+            assert_eq!(terminal.display_title(), Some("vim"));
+            terminal.set_custom_title(Some("editor".to_string()), cx);
+            assert_eq!(terminal.display_title(), Some("editor"));
+            assert_eq!(terminal.title(), Some("vim"), "シェルのタイトルは残る");
+            terminal.set_custom_title(Some("   ".to_string()), cx);
+            assert_eq!(terminal.display_title(), Some("vim"), "空は外す");
+        });
+    }
 
     #[test]
     fn an_imported_scheme_replaces_the_palette_and_the_surface() {

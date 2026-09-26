@@ -94,6 +94,7 @@ mod shortcut_sheet;
 mod system_notifications;
 mod font_settings;
 mod terminal_colors;
+mod terminal_rename;
 mod terminal_settings;
 mod usage_view;
 mod worktree_delete;
@@ -1336,6 +1337,10 @@ struct ChromeState {
     herd_solo_expanded: bool,
     /// Task の表示名をダブルクリックで改名中（herd 見出し / セルヘッダ）。スレッドタブの改名と同型。
     task_renaming: Option<TaskRenaming>,
+    /// 端末のタブの改名（O24・ダブルクリック）。
+    terminal_renaming: Option<terminal_rename::TerminalRenaming>,
+    /// 窓を持たない経路（パネルのイベント）で開いた入力欄へ、次の描画でフォーカスを渡す。
+    focus_next_frame: Option<FocusHandle>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
     graph_view: GraphView,
     /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。
@@ -2135,6 +2140,9 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(focus) = self.chrome.focus_next_frame.take() {
+            window.focus(&focus, cx);
+        }
         self.chrome.stage_width = f32::from(window.viewport_size().width)
             - 70.
             - if self.chrome.show_left {
@@ -2466,6 +2474,7 @@ impl Render for Workspace {
             .children(self.render_hover(cx))
             .children(self.render_goto_line(cx))
             .children(self.render_rename_input(cx))
+            .children(self.render_terminal_rename(cx))
             .children(self.render_inline_edit(cx))
             .children(self.render_ssh_input(cx))
             .children(self.render_askpass(window, cx))

@@ -327,6 +327,7 @@ impl Workspace {
             || self.overlays.rail_menu.is_some()
             || self.overlays.add_project_dialog_open
             || self.chrome.task_renaming.is_some()
+            || self.chrome.terminal_renaming.is_some()
             || self.chrome.control_focus.is_focused(window)
             // レールにフォーカスがある間は着地先へ飛ばさない。飛ばすと 1 回目の ↑ でエディタへ抜け、
             // 2 回目の ↑ がキャレット移動になって連打できなくなる（2026-09-12）。

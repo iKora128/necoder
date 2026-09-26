@@ -161,6 +161,9 @@ impl Workspace {
                 self.chrome.show_bottom = false
             }
             TerminalDockEvent::Dismissed => {}
+            TerminalDockEvent::RenameRequested(terminal) => {
+                self.start_terminal_rename(terminal.clone(), cx)
+            }
         }
         cx.notify();
     }

@@ -902,6 +902,10 @@ pdf:
 terminal:
   quick_tip: "Quick commands (quick_commands in settings.json). Pick one to run it in a new terminal"
   tab_title: Terminal %{n}
+  rename_title: Terminal name
+  rename_hint: Leave it empty to go back to the title the shell sets
+  rename_cancel: Cancel
+  rename_confirm: Rename
   close_busy_title: "A process is running in Terminal %{n}"
   close_busy_detail: Closing the terminal stops it too.
   close_busy_confirm: Close

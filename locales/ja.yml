@@ -903,6 +903,10 @@ pdf:
 terminal:
   quick_tip: "よく使うコマンド（settings.json の quick_commands）。押すと並ぶので、選ぶと新しいターミナルで走らせる"
   tab_title: ターミナル %{n}
+  rename_title: 端末の名前
+  rename_hint: 空にして確定すると、シェルが付けるタイトルに戻ります
+  rename_cancel: キャンセル
+  rename_confirm: 変更
   close_busy_title: "ターミナル %{n} でプロセスが動いています"
   close_busy_detail: 閉じるとこのプロセスも止まります。
   close_busy_confirm: 閉じる

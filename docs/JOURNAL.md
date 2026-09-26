@@ -3312,7 +3312,7 @@
   （Markdown に画像 = 隣へコピーして落とした所に `![]()`・ほかはタブで開く・O29）・Markdown の **front matter の表と
   目次**（`markdown::split_front_matter`・`[toc]`・O29）・**横並びのライブプレビュー**（⌘K V・O29）・
   **スラッシュメニュー**（Markdown の行頭の `/`・補完のポップアップを使い回す・O29）・ターミナルの**配色の取り込み**
-  （`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2・O25）。
+  （`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2・O25）・**端末タブの改名**（ダブルクリック・O24）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3356,6 +3356,8 @@
     setext 見出し（h2）にする。
   - 補完のポップアップの絞り込みは、`Typed` の**最後の 1 文字**だけを足す（1 打鍵 1 文字の前提）。テストで
     `insert_text("co")` とまとめて打つと `o` だけが足されて閉じる。テストは 1 文字ずつ打つ。
+  - パネルのイベント（`cx.subscribe`）は窓を持たないので、そこで開く入力欄へは `window.focus` できない。
+    `chrome.focus_next_frame` に置いて、`Workspace::render` の頭で渡す（端末タブの改名で使った）。
   - **`ssh -M -N -f` の stderr はパイプで読めない**: `-f` で背景に回った master がパイプの書き口を握り続け、
     `output()` が master の終わりまで返らない。理由を読みたい時は `-E <ファイル>` でログへ書かせ、親の終わりを
     待ってから読む（`-E` は追記なので試行の前に消す）。以前は stderr を継いでいたので、失敗のトーストは
