@@ -285,4 +285,34 @@ mod tests {
         });
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// O24（C18）: 端末にフォーカスがある時の ⌘T / ⌘W はドックのタブを開く / 閉じる（裏のエディタの
+    /// タブは閉じない）。
+    #[gpui::test]
+    fn tab_keys_from_a_focused_terminal_open_and_close_tabs(cx: &mut gpui::TestAppContext) {
+        let (dock, cx) = cx.add_window_view(|_, _cx| {
+            let mut dock = TerminalDock::new(
+                TerminalLaunch {
+                    cwd: None,
+                    shell: None,
+                },
+                Theme::dark(),
+            );
+            dock.use_test_terminals();
+            dock
+        });
+        dock.update_in(cx, |dock, window, cx| dock.add(window, cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.dispatch_action(terminal_view::actions::NewTab);
+        dock.update_in(cx, |dock, _window, _cx| {
+            let (terminals, active) = dock.debug_tabs();
+            assert_eq!((terminals, active), (2, 1), "⌘T で開いて前に出す");
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.dispatch_action(terminal_view::actions::CloseTab);
+        cx.run_until_parked();
+        dock.update_in(cx, |dock, _window, _cx| {
+            assert_eq!(dock.debug_tabs().0, 1, "⌘W でいまの端末を閉じる");
+        });
+    }
 }

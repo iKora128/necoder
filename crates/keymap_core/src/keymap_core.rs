@@ -410,7 +410,9 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-c": "terminal::Copy",
       "cmd-f": "terminal::Find",
       "cmd-k": "terminal::Clear",
-      "cmd-v": "terminal::Paste"
+      "cmd-t": "terminal::NewTab",
+      "cmd-v": "terminal::Paste",
+      "cmd-w": "terminal::CloseTab"
     }
   }
 ]"#;
@@ -807,6 +809,8 @@ mod windows_keymap_tests {
             ("ctrl-shift-a", "terminal::SelectAll"),
             ("ctrl-shift-f", "terminal::Find"),
             ("ctrl-shift-k", "terminal::Clear"),
+            ("ctrl-shift-t", "terminal::NewTab"),
+            ("ctrl-shift-w", "terminal::CloseTab"),
         ] {
             assert_eq!(
                 terminal.bindings.get(key).map(String::as_str),

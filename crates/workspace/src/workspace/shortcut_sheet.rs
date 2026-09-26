@@ -81,6 +81,8 @@ const ACTION_LABELS: &[(&str, &str)] = &[
     ("terminal::SelectAll", "key.terminal_select_all"),
     ("terminal::Clear", "key.terminal_clear"),
     ("terminal::Find", "key.terminal_find"),
+    ("terminal::NewTab", "key.terminal_new_tab"),
+    ("terminal::CloseTab", "key.terminal_close_tab"),
     // ── Fleet（FLEET-V2 §7 のキー表と同じ語を使う）──
     ("workspace::NewTask", "fleet.new_task"),
     ("workspace::StageOne", "fleet.stage_one"),
