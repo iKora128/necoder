@@ -4645,8 +4645,11 @@ for line in sys.stdin:
             let session = run_session(command, SessionPreferences::default(), command_rx, event_tx);
             let collect = async move {
                 let mut seen = Vec::new();
+                // 上限は偽エージェント（python）の起動込み。テストが並んで重い Windows のランナーでは
+                // 起動だけで 10 秒近くかかり、届く前に打ち切っていた（PR #30 の check-windows）。
+                // 条件がそろえばすぐ抜けるので、長くしても通る時は遅くならない（固まった時の保険）。
                 let deadline =
-                    blocking::unblock(|| std::thread::sleep(Duration::from_secs(10))).fuse();
+                    blocking::unblock(|| std::thread::sleep(Duration::from_secs(60))).fuse();
                 futures::pin_mut!(deadline);
                 loop {
                     let next = event_rx.next().fuse();
