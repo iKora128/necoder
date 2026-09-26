@@ -515,6 +515,9 @@ settings:
   mcp_filtered_empty: この条件に合う MCP サーバはありません。
   prefs_heading: 動作とエディタ
   prefs_sub: 真実は settings.json。ここはそれを操作するだけです。
+  search_placeholder: 設定を検索
+  search_count: "%{count} 件"
+  search_none: 一致する設定はありません
   pref_submit_on_enter: Enter で送信
   pref_submit_on_enter_sub: オフ=⌘Enter 送信（日本語 IME で誤送信しない安全側）
   pref_soft_wrap: ソフトラップ（折り返し）

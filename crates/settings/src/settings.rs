@@ -11,10 +11,12 @@
 //! 監視は poll（mtime 差分）。真の event-driven（FSEvents/notify）へは後で差し替え可能だが、
 //! 2 回の stat / 1.2s は事実上 0% で再描画も起こさない（変化時のみ）。
 
+use editor_view::EditorView;
 use gpui::{
-    div, prelude::*, px, svg, App, BorrowAppContext, Context, Div, EventEmitter, FontWeight,
-    Global, Hsla, IntoElement, MouseButton, Render, SharedString, Stateful, Window,
+    div, prelude::*, px, svg, App, BorrowAppContext, Context, Div, Entity, EventEmitter,
+    FontWeight, Global, Hsla, IntoElement, MouseButton, Render, SharedString, Stateful, Window,
 };
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use theme_core::Theme;
@@ -317,6 +319,31 @@ impl SettingsPage {
             SettingsPage::Preferences => "settings.prefs_heading",
         }
     }
+
+    /// ページ本文の副題のキー（検索でページごと当てる時に見出しと一緒に読む・O27）。
+    fn sub_key(self) -> &'static str {
+        match self {
+            SettingsPage::Agents => "settings.agents_sub",
+            SettingsPage::Mcp => "settings.mcp_sub",
+            SettingsPage::Appearance => "settings.appearance_sub",
+            SettingsPage::Remote => "settings.remote_sub",
+            SettingsPage::Preferences => "settings.prefs_sub",
+        }
+    }
+
+    /// 検索で行ごとに当てるページか。行（ラベル + 副題 + コントロール）の積み重ねでできている
+    /// ページだけ。一覧・QR・カードでできているページは、ページ名と副題で当てて「開く」だけ出す。
+    fn searches_rows(self) -> bool {
+        matches!(self, SettingsPage::Appearance | SettingsPage::Preferences)
+    }
+}
+
+/// 設定の検索（O27）: 語を空白で区切り、**全部の語**がどれかの `haystacks` に含まれれば一致。
+/// 大文字小文字は無視する（`Auto save` でも `auto` でも当たる）。
+fn search_matches(query: &str, haystacks: &[&str]) -> bool {
+    let haystack = haystacks.join("\n").to_lowercase();
+    let mut words = query.split_whitespace().peekable();
+    words.peek().is_some() && words.all(|word| haystack.contains(&word.to_lowercase()))
 }
 
 /// テーマ保存ディレクトリ（user settings.json と同じ設定フォルダの `themes/`）。
@@ -373,6 +400,13 @@ pub struct SettingsView {
     /// 直近の設置の失敗。行の下に出す。
     skills_error: Option<SharedString>,
     skills_generation: u64,
+    /// 設定の検索欄（O27）。打つと右の面が全ページの一致した行になる。
+    search: Entity<EditorView>,
+    /// 検索語の写し（空白だけ = 検索していない＝普段のページ表示）。
+    search_query: String,
+    /// 検索中の描画で一致した行を数える。ページごとに 0 へ戻し、0 件のページは出さない。
+    search_hits: Cell<usize>,
+    _search_subscription: gpui::Subscription,
     #[cfg(feature = "remote-preview")]
     remote_preview_only: bool,
 }
@@ -441,6 +475,14 @@ fn load_skills(project: Option<&Path>) -> Option<SkillsSnapshot> {
 
 impl SettingsView {
     pub fn new(theme: Theme, accent: Hsla, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| EditorView::plain(theme.clone(), accent, true, cx));
+        let search_subscription = cx.observe(&search, |view, search, cx| {
+            let query = search.read(cx).plain_text();
+            if view.search_query != query {
+                view.search_query = query;
+                cx.notify();
+            }
+        });
         let mut view = Self {
             theme,
             accent,
@@ -468,11 +510,51 @@ impl SettingsView {
             skills_busy: false,
             skills_error: None,
             skills_generation: 0,
+            search,
+            search_query: String::new(),
+            search_hits: Cell::new(0),
+            _search_subscription: search_subscription,
             #[cfg(feature = "remote-preview")]
             remote_preview_only: false,
         };
         view.refresh_availability(cx);
         view
+    }
+
+    /// 検索しているか（検索語が空白以外を含む）。
+    fn searching(&self) -> bool {
+        !self.search_query.trim().is_empty()
+    }
+
+    /// 検索中なら、この行が検索語に当たるかを見て、当たれば数える。検索していなければ常に出す。
+    /// `keywords` はラベル・副題に加えて当てる語（settings.json のキー・選択肢の名前）。
+    fn search_admits(&self, keywords: &[&str], label: &str, sub: Option<&str>) -> bool {
+        if !self.searching() {
+            return true;
+        }
+        let mut haystacks = vec![label, sub.unwrap_or("")];
+        haystacks.extend_from_slice(keywords);
+        let admitted = search_matches(&self.search_query, &haystacks);
+        if admitted {
+            self.search_hits.set(self.search_hits.get() + 1);
+        }
+        admitted
+    }
+
+    /// 検索を消す（✕・ページを選んだ時）。
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |search, cx| search.set_plain_text("", cx));
+        self.search_query.clear();
+        cx.notify();
+    }
+
+    /// 検索結果やナビからページを開く。検索中なら検索を消してそのページへ。
+    fn open_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        if self.searching() {
+            self.clear_search(cx);
+        }
+        self.select_page(page, cx);
     }
 
     pub fn set_visuals(&mut self, theme: Theme, accent: Hsla) {
@@ -1240,6 +1322,21 @@ impl SettingsView {
     /// 縮まずに右のコントロールを押し出し、**トグルが幅 0 に潰れて押せなくなる**
     /// （2026-09-10 の offscreen 目視で発見）。コントロール側も潰されないよう縮小を止める。
     fn pref_row(&self, label: String, sub: Option<String>, control: gpui::AnyElement) -> Div {
+        self.pref_row_with_keywords(&[], label, sub, control)
+    }
+
+    /// 設定行の本体。検索中（O27）は当たらない行を**レイアウトから外す**（`display: none` は
+    /// 列の gap も取らない）。`keywords` は検索でラベル・副題に加えて当てる語。
+    fn pref_row_with_keywords(
+        &self,
+        keywords: &[&str],
+        label: String,
+        sub: Option<String>,
+        control: gpui::AnyElement,
+    ) -> Div {
+        if !self.search_admits(keywords, &label, sub.as_deref()) {
+            return div().hidden();
+        }
         let theme = self.theme.clone();
         div()
             .flex()
@@ -1284,6 +1381,9 @@ impl SettingsView {
     /// （テーマが 7 種に増えて発生・2026-09-13）。上下に分ければ、コントロールは
     /// 行いっぱいを使って `flex_wrap` で素直に折り返せる。
     fn pref_stack(&self, label: String, sub: Option<String>, control: gpui::AnyElement) -> Div {
+        if !self.search_admits(&[], &label, sub.as_deref()) {
+            return div().hidden();
+        }
         let theme = self.theme.clone();
         div()
             .flex()
@@ -1335,7 +1435,7 @@ impl SettingsView {
                 cx.listener(move |view, _, _window, cx| view.set_pref_bool(key, !value, cx)),
             )
             .into_any_element();
-        self.pref_row(label, sub, control)
+        self.pref_row_with_keywords(&[key], label, sub, control)
     }
 
     fn stepper_button(
@@ -1403,7 +1503,7 @@ impl SettingsView {
             )
             .child(self.stepper_button(key, (key, 1), "+", inc, is_int, cx))
             .into_any_element();
-        self.pref_row(label, None, control)
+        self.pref_row_with_keywords(&[key], label, None, control)
     }
 
     /// セグメント選択（複数値からひとつ・選択中は accent）。
@@ -1474,7 +1574,11 @@ impl SettingsView {
                     ),
             );
         }
-        self.pref_row(label, sub, segments.into_any_element())
+        // 選択肢の名前でも当てる（「Glass」で通知音の行に着く等）。
+        let keywords: Vec<&str> = std::iter::once(key)
+            .chain(options.iter().map(|(_, display)| display.as_str()))
+            .collect();
+        self.pref_row_with_keywords(&keywords, label, sub, segments.into_any_element())
     }
 
     /// 「外観」セクション。テーマをチップの列で並べ、クリックで即適用 + settings.json へ保存する。
@@ -1553,7 +1657,9 @@ impl SettingsView {
                             .text_size(px(11.5))
                             .text_color(theme.fg2)
                             .child(SharedString::from(i18n::t!("settings.appearance_sub"))),
-                    ),
+                    )
+                    // 検索中は結果の面がページ名を出すので、ページの見出しは外す（O27）。
+                    .when(self.searching(), |heading| heading.hidden()),
             )
             // チップは数がテーマの数だけ増える＝右列に収まらない。上下 2 段の器を使う。
             .child(self.pref_stack(
@@ -1981,10 +2087,12 @@ impl SettingsView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.fg0)
                     .child(SharedString::from(i18n::t!("settings.title"))),
-            );
+            )
+            .child(self.search_box(cx));
+        let searching = self.searching();
         for (index, page) in SettingsPage::ALL.iter().enumerate() {
             let page = *page;
-            let selected = self.page == page;
+            let selected = !searching && self.page == page;
             // MCP だけは「有効/全体」を添える＝開かなくても状態が見える。
             let badge = (page == SettingsPage::Mcp && !self.mcp_servers.is_empty())
                 .then(|| format!("{enabled}/{}", self.mcp_servers.len()));
@@ -2031,16 +2139,70 @@ impl SettingsView {
                     })
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |view, _, _window, cx| view.select_page(page, cx)),
+                        cx.listener(move |view, _, _window, cx| view.open_page(page, cx)),
                     ),
             );
         }
         column
     }
 
+    /// ナビの頭の検索欄（O27）。打つと右が全ページの一致した設定になる。✕ で消す。
+    fn search_box(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let blank = self.search_query.is_empty();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .mb(px(8.))
+            .h(px(28.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(12.))
+            .child(div().flex_none().text_color(theme.fg2).child("⌕"))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    // 高さを与えないと 1 行ぶんに潰れて文字が出ない（transcript の検索欄と同じ）。
+                    .h(px(18.))
+                    .child(self.search.clone())
+                    .when(blank, |field| {
+                        field.child(
+                            div()
+                                .absolute()
+                                .top(px(0.))
+                                .left(px(1.))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(i18n::t!("settings.search_placeholder"))),
+                        )
+                    }),
+            )
+            .when(!blank, |row| {
+                row.child(
+                    div()
+                        .id("settings-search-clear")
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.fg0))
+                        .child("✕")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _, _window, cx| view.clear_search(cx)),
+                        ),
+                )
+            })
+    }
+
     /// 選ばれているページの中身。1 ページ = 1 セクション（エージェントだけ `ne` コマンドと Skills を伴う）。
-    fn page_body(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
-        match self.page {
+    fn page_body(&self, page: SettingsPage, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        match page {
             SettingsPage::Agents => div()
                 .flex()
                 .flex_col()
@@ -2068,6 +2230,78 @@ impl SettingsView {
             SettingsPage::Remote => self.remote_section(cx),
             SettingsPage::Preferences => self.preferences_section(settings, cx),
         }
+    }
+
+    /// 検索結果の組（O27）: ナビの順に、当たったページとその中身（行で当てるページ）と当たった数。
+    /// 行で当てるページは実物の行をそのまま出す（その場で切り替えられる）。当たらなかった行は
+    /// レイアウトから外れている。ほかのページはページ名と副題で当て、中身は出さない。
+    fn search_sections(
+        &self,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> Vec<(SettingsPage, Option<Div>, usize)> {
+        let mut sections = Vec::new();
+        for page in SettingsPage::ALL {
+            if page.searches_rows() {
+                self.search_hits.set(0);
+                let body = self.page_body(page, settings, cx);
+                let hits = self.search_hits.get();
+                if hits > 0 {
+                    sections.push((page, Some(body), hits));
+                }
+            } else {
+                let heading = i18n::t!(page.heading_key());
+                let sub = i18n::t!(page.sub_key());
+                if search_matches(&self.search_query, &[&heading, &sub]) {
+                    sections.push((page, None, 1));
+                }
+            }
+        }
+        sections
+    }
+
+    /// 検索中の右の面: 件数 → ページごとに「ページ名 ›」（押すとそのページを開く）+ 当たった行。
+    fn search_results(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let sections = self.search_sections(settings, cx);
+        let total: usize = sections.iter().map(|(_, _, hits)| hits).sum();
+        let mut results = div().flex().flex_col().gap(px(18.)).child(
+            div()
+                .text_size(px(11.5))
+                .text_color(theme.fg2)
+                .child(SharedString::from(if total == 0 {
+                    i18n::t!("settings.search_none")
+                } else {
+                    i18n::t!("settings.search_count", "count" => total)
+                })),
+        );
+        for (index, (page, body, _)) in sections.into_iter().enumerate() {
+            let link = div()
+                .id(("settings-search-page", index))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.fg0))
+                .child(SharedString::from(i18n::t!(page.heading_key())))
+                .child(div().text_color(theme.fg2).child("›"))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| view.open_page(page, cx)),
+                );
+            results = results.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(link)
+                    .children(body),
+            );
+        }
+        results
     }
 
     // ── MCP サーバ（ACP セッションへ渡す道具）────────────────────────────────────
@@ -2315,7 +2549,8 @@ impl SettingsView {
                             .text_size(px(11.5))
                             .text_color(theme.fg2)
                             .child(SharedString::from(i18n::t!("settings.prefs_sub"))),
-                    ),
+                    )
+                    .when(self.searching(), |heading| heading.hidden()),
             )
             .child(self.toggle_row(
                 "submit_on_enter",
@@ -2547,7 +2782,7 @@ impl SettingsView {
             )
             .child(self.stepper_button(key, (key, 1), "+", (value + step).min(max), true, cx))
             .into_any_element();
-        self.pref_row(label, Some(sub), control)
+        self.pref_row_with_keywords(&[key], label, Some(sub), control)
     }
 
     /// Chat モードの設定（`docs/CHAT.md` §2.2 / §4.1）: 置き場・自動停止・カスタム指示。
@@ -2668,6 +2903,30 @@ impl SettingsView {
             cx.listener(|_, _, _window, cx| cx.emit(SettingsViewEvent::OpenSettingsJson)),
         )
         .into_any_element();
+        // 行を先に組む（検索中は当たった数が分かる）。1 行も当たらなければ組ごと外す（O27）。
+        let hits_before = self.search_hits.get();
+        let rows = [
+            self.pref_row(
+                i18n::t!("settings.chat_directory"),
+                Some(if directory.is_empty() {
+                    i18n::t!("settings.chat_directory_default")
+                } else {
+                    directory.clone()
+                }),
+                directory_control,
+            ),
+            self.pref_row(
+                i18n::t!("settings.chat_idle_stop"),
+                Some(i18n::t!("settings.chat_idle_stop_sub")),
+                idle_control,
+            ),
+            self.pref_row(
+                i18n::t!("settings.chat_instructions"),
+                Some(instructions_sub),
+                instructions_control,
+            ),
+        ];
+        let empty = self.searching() && self.search_hits.get() == hits_before;
         div()
             .flex()
             .flex_col()
@@ -2681,25 +2940,8 @@ impl SettingsView {
                     .text_color(theme.fg2)
                     .child(SharedString::from(i18n::t!("settings.chat_heading"))),
             )
-            .child(self.pref_row(
-                i18n::t!("settings.chat_directory"),
-                Some(if directory.is_empty() {
-                    i18n::t!("settings.chat_directory_default")
-                } else {
-                    directory.clone()
-                }),
-                directory_control,
-            ))
-            .child(self.pref_row(
-                i18n::t!("settings.chat_idle_stop"),
-                Some(i18n::t!("settings.chat_idle_stop_sub")),
-                idle_control,
-            ))
-            .child(self.pref_row(
-                i18n::t!("settings.chat_instructions"),
-                Some(instructions_sub),
-                instructions_control,
-            ))
+            .children(rows)
+            .when(empty, |group| group.hidden())
     }
 
     /// チャットの置き場をフォルダ選択ダイアログで決める。既にあるチャットのフォルダは動かさない
@@ -2875,7 +3117,11 @@ impl Render for SettingsView {
                                 .gap(px(14.))
                                 .w_full()
                                 .max_w(px(680.))
-                                .child(self.page_body(&settings, cx)),
+                                .child(if self.searching() {
+                                    self.search_results(&settings, cx)
+                                } else {
+                                    self.page_body(self.page, &settings, cx)
+                                }),
                         ),
                     ),
             )
@@ -2928,6 +3174,72 @@ mod tests {
             "CODEX_HOME='/tmp/it'\\''s' codex login",
             "単引用符は閉じて逃がしてから開き直す"
         );
+    }
+
+    #[test]
+    fn search_needs_every_word_somewhere() {
+        let haystacks = ["自動保存", "編集を止めてから保存する", "auto_save"];
+        assert!(search_matches("保存", &haystacks));
+        assert!(search_matches("AUTO", &haystacks), "大文字小文字は無視");
+        assert!(
+            search_matches("自動 止めて", &haystacks),
+            "語はどの欄に在ってもよい"
+        );
+        assert!(
+            !search_matches("自動 フォント", &haystacks),
+            "全部の語が要る"
+        );
+        assert!(!search_matches("   ", &haystacks), "空白だけは検索ではない");
+    }
+
+    /// 設定の検索（O27）: 行で当てるページは当たった行だけ数え、当たらないページは出さない。
+    /// ほかのページはページ名で当てる。ページを開くと検索は消える。
+    #[gpui::test]
+    fn search_lists_matching_settings_across_pages(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-search-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"{ "onboarded": true }"#).expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            // 描画で実 CLI を調べに行かない。
+            view.availability_pending = false;
+            view
+        });
+        let search = |query: &str, cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |view, cx| {
+                view.search
+                    .update(cx, |search, cx| search.set_plain_text(query, cx))
+            });
+            cx.run_until_parked();
+            view.update(cx, |view, cx| {
+                let settings = get(cx);
+                view.search_sections(&settings, cx)
+                    .into_iter()
+                    .map(|(page, _, hits)| (page, hits))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            search("preview_tabs", cx),
+            vec![(SettingsPage::Preferences, 1)],
+            "settings.json のキーでも当たる・当たらないページは出さない"
+        );
+        assert_eq!(search("tab_size preview", cx), Vec::new(), "全部の語が要る");
+        assert!(
+            search("MCP", cx).contains(&(SettingsPage::Mcp, 1)),
+            "行を持たないページはページ名で当てる"
+        );
+        view.update(cx, |view, cx| {
+            assert!(view.searching());
+            view.open_page(SettingsPage::Mcp, cx);
+            assert!(!view.searching(), "ページを開くと検索は消える");
+            assert_eq!(view.page, SettingsPage::Mcp);
+            assert!(view.search.read(cx).plain_text().is_empty());
+        });
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
