@@ -94,6 +94,16 @@ impl Workspace {
         cx.notify();
     }
 
+    /// エージェントを決めて新規スレッド（B28）。
+    pub(crate) fn new_agent_thread_with(&mut self, agent: &str, cx: &mut Context<Self>) {
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
+        }
+        self.agent_panel
+            .update(cx, |panel, cx| panel.new_thread_with_agent(agent, cx));
+        cx.notify();
+    }
+
     /// 次のタブへ（Chrome 風。⌘⌥→ / ⌃Tab）。⌘W と同じく**最後に触った面で振り分け**:
     /// Agent 面ならスレッドタブ、そうでなければエディタのファイルタブを送る（agent_active）。
     pub(crate) fn select_next_thread(

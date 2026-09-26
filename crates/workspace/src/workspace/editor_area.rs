@@ -11,6 +11,18 @@ mod pins;
 mod preview_tabs;
 mod tabs;
 
+/// エージェント別の新規スレッドの行き先（B28）。表示名はカタログ（`acp_client::AGENTS`）と同じで、
+/// 並びは workspace の `NewThreadClaudeCode` … `NewThreadGrok` とパレットの `cmd.new_thread_*` と同じ。
+pub(crate) const AGENT_THREAD_LABELS: [&str; 7] = [
+    "Claude Code",
+    "Codex",
+    "GitHub Copilot",
+    "Qwen Code",
+    "OpenCode",
+    "Kimi CLI",
+    "Grok Build",
+];
+
 /// 1 ProjectSession の編集面。tab / pane / language / diff / navigation の状態を一括所有する。
 ///
 /// `EditorArea` 自身は長寿命 aggregate とし、実際に描画・入力を持つ各 `EditorView` を Entity として
