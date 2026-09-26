@@ -395,6 +395,14 @@ fleet:
   cleanup_stop: エージェントを止める
   cleanup_stop_sub: 実行中のターンを中断（esc と同じ）。Task は残る
   cleanup_sleep: 休ませる
+  selection_count: "%{n} 本を選択"
+  selection_rest_tip: "選んだ Task の静かなエージェントを止めてメモリを空ける（会話は残り、次に送ると続きから）"
+  selection_stage: 舞台に並べる
+  selection_stage_tip: "舞台に横に並べる（先に選んだ 3 本まで）"
+  selection_stage_first: "舞台は 3 枚までなので、先に選んだ 3 本を並べました（%{count} 本を選択）"
+  selection_cleanup: 片付け…
+  selection_cleanup_tip: "片付けの画面を、選んだ Task に印を付けて開く（失うものを数えてから消す）"
+  selection_clear_tip: 選択を外す
   cleanup_sleep_sub: "静かなエージェント %{count} 体を止めてメモリを空ける。会話は残り、次に送ると続きから"
   cleanup_archive: Task を終了
   cleanup_archive_sub: 編隊と herd から消す。worktree はディスクに残る

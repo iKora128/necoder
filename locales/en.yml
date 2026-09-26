@@ -394,6 +394,14 @@ fleet:
   cleanup_stop: Stop the agent
   cleanup_stop_sub: Interrupt the running turn (same as esc). The Task stays
   cleanup_sleep: Put to sleep
+  selection_count: "%{n} selected"
+  selection_rest_tip: "Stop the quiet agents of the selected Tasks to free memory (conversations stay; the next message resumes them)"
+  selection_stage: Put on the stage
+  selection_stage_tip: "Show them side by side on the stage (the first 3 you selected)"
+  selection_stage_first: "The stage holds 3, so the first 3 of the %{count} selected are shown"
+  selection_cleanup: Clean up…
+  selection_cleanup_tip: "Open the cleanup screen with these Tasks selected (it counts what you would lose before deleting)"
+  selection_clear_tip: Clear the selection
   cleanup_sleep_sub: "Stop %{count} idle agents to free memory. Conversations stay and resume on your next message"
   cleanup_archive: Finish Task
   cleanup_archive_sub: Removes it from fleet and herd. The worktree stays on disk

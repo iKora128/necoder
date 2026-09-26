@@ -270,6 +270,112 @@ impl Workspace {
     }
 
     /// 外で消えた worktree の Task をレールから外す（O21・「片付け」）。
+    /// Task 行の ⌘ クリック（O21・Windows / Linux は Ctrl）: 選択に足す / 外す。
+    pub(crate) fn toggle_fleet_selection(&mut self, space: SpaceId, cx: &mut Context<Self>) {
+        if let Some(position) = self
+            .chrome
+            .fleet_selection
+            .iter()
+            .position(|selected| selected == &space)
+        {
+            self.chrome.fleet_selection.remove(position);
+        } else {
+            self.chrome.fleet_selection.push(space.clone());
+        }
+        self.chrome.fleet_selection_anchor = Some(space);
+        cx.notify();
+    }
+
+    /// Task 行の ⇧ クリック: 起点（最後に ⌘ / ⇧ で押した行）から押した行までを、見えている並びで選ぶ。
+    /// 起点が見えていなければ押した行だけ。
+    pub(crate) fn select_fleet_range(
+        &mut self,
+        order: &[SpaceId],
+        space: SpaceId,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor = self
+            .chrome
+            .fleet_selection_anchor
+            .clone()
+            .unwrap_or_else(|| space.clone());
+        let clicked = order.iter().position(|candidate| candidate == &space);
+        let from = order.iter().position(|candidate| candidate == &anchor);
+        self.chrome.fleet_selection = match (from, clicked) {
+            (Some(from), Some(to)) => order[from.min(to)..=from.max(to)].to_vec(),
+            _ => vec![space.clone()],
+        };
+        if self.chrome.fleet_selection_anchor.is_none() {
+            self.chrome.fleet_selection_anchor = Some(space);
+        }
+        cx.notify();
+    }
+
+    /// 選択を外す（普通のクリック・まとめての操作の後・× ボタン）。
+    pub(crate) fn clear_fleet_selection(&mut self, cx: &mut Context<Self>) {
+        if self.chrome.fleet_selection.is_empty() && self.chrome.fleet_selection_anchor.is_none() {
+            return;
+        }
+        self.chrome.fleet_selection.clear();
+        self.chrome.fleet_selection_anchor = None;
+        cx.notify();
+    }
+
+    /// まとめて休ませる: 選んだ Task の静かなエージェントを止める（会話は残り、次に送ると続きから）。
+    pub(crate) fn rest_selected_tasks(&mut self, spaces: &[SpaceId], cx: &mut Context<Self>) {
+        let sessions: Vec<usize> = spaces
+            .iter()
+            .filter_map(|space| self.session_index_for_space(space))
+            .collect();
+        let stopped: usize = sessions
+            .into_iter()
+            .map(|index| self.stop_quiet_agents_of(index, cx))
+            .sum();
+        self.report_stopped_agents(stopped, cx);
+        self.clear_fleet_selection(cx);
+    }
+
+    /// まとめて舞台に並べる（先頭の 3 本まで・舞台の枠は 3 枚）。
+    pub(crate) fn stage_selected_tasks(&mut self, spaces: &[SpaceId], cx: &mut Context<Self>) {
+        let known: Vec<SpaceId> = spaces
+            .iter()
+            .filter(|space| self.session_index_for_space(space).is_some())
+            .cloned()
+            .collect();
+        if known.is_empty() {
+            return;
+        }
+        if known.len() > 3 {
+            let accent = self.accent();
+            self.push_toast(
+                SharedString::from(i18n::t!(
+                    "fleet.selection_stage_first",
+                    "count" => known.len()
+                )),
+                accent,
+                cx,
+            );
+        }
+        self.chrome.stage_pinned = known.into_iter().take(3).collect();
+        self.chrome.stage_columns = self.chrome.stage_pinned.len().max(2);
+        // ピンは窓セッションに残す（再起動を越える・O21）。
+        self.save_state(cx);
+        self.clear_fleet_selection(cx);
+    }
+
+    /// まとめて片付ける: 片付けの画面（O22）を、選んだ Task に印を付けた状態で開く。消す前に
+    /// 失うもの（未コミットの変更・統合していないコミット）をそこで数える。
+    pub(crate) fn cleanup_selected_tasks(
+        &mut self,
+        spaces: &[SpaceId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_cleanup(&ShowCleanup, window, cx);
+        self.select_cleanup_rows(spaces);
+        self.clear_fleet_selection(cx);
+    }
+
     pub(crate) fn forget_vanished_task(
         &mut self,
         index: usize,
@@ -515,6 +621,113 @@ impl Workspace {
     }
 
     /// Task の絞り込み欄（O21）。`⌕` + 1 行入力（placeholder「Task を絞り込む」）。
+    /// 複数選択のまとめての操作（O21）: `N 本を選択 · 休ませる · 舞台に並べる · 片付け… · ×`。
+    fn render_fleet_selection_bar(
+        &self,
+        selected: Rc<[SpaceId]>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        let chip = |id: &'static str, label: SharedString, tip: String| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(3.))
+                .border_1()
+                .border_color(theme.border)
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg2))
+                .child(label)
+                .tooltip(Tooltip::text(tip, theme.clone()))
+        };
+        let rest = selected.clone();
+        let stage = selected.clone();
+        let cleanup = selected.clone();
+        div()
+            .id("fleet-selection-bar")
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(5.))
+            .mx(px(8.))
+            .my(px(3.))
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(theme.bg2)
+            .text_size(px(10.5))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme.fg1)
+                    .child(SharedString::from(i18n::t!(
+                        "fleet.selection_count",
+                        "n" => selected.len()
+                    ))),
+            )
+            .child(div().flex_1())
+            .child(
+                chip(
+                    "fleet-selection-rest",
+                    SharedString::from(i18n::t!("fleet.cleanup_sleep")),
+                    i18n::t!("fleet.selection_rest_tip"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.rest_selected_tasks(&rest, cx);
+                    }),
+                ),
+            )
+            .child(
+                chip(
+                    "fleet-selection-stage",
+                    SharedString::from(i18n::t!("fleet.selection_stage")),
+                    i18n::t!("fleet.selection_stage_tip"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.stage_selected_tasks(&stage, cx);
+                    }),
+                ),
+            )
+            .child(
+                chip(
+                    "fleet-selection-cleanup",
+                    SharedString::from(i18n::t!("fleet.selection_cleanup")),
+                    i18n::t!("fleet.selection_cleanup_tip"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.cleanup_selected_tasks(&cleanup, window, cx);
+                    }),
+                ),
+            )
+            .child(
+                chip(
+                    "fleet-selection-clear",
+                    SharedString::from("×"),
+                    i18n::t!("fleet.selection_clear_tip"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.clear_fleet_selection(cx);
+                    }),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn render_fleet_filter(&self, filtering: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         div()
@@ -591,6 +804,23 @@ impl Workspace {
             .filter(|row| task_row_matches(row, &self.chrome.fleet_filter_query))
             .collect();
         sort_task_rows(&mut rows, self.chrome.fleet_sort);
+        // 見えている並び（⇧ クリックの範囲）と、その中で選んでいる Task（複数選択・O21）。
+        let order: Rc<[SpaceId]> = rows
+            .iter()
+            .map(|row| {
+                self.project_sessions.projects[row.project_index]
+                    .task_space
+                    .id
+                    .clone()
+            })
+            .collect();
+        let selected: Rc<[SpaceId]> = self
+            .chrome
+            .fleet_selection
+            .iter()
+            .filter(|space| order.contains(space))
+            .cloned()
+            .collect();
 
         let mut list = div()
             .id("fleet-task-list")
@@ -729,9 +959,17 @@ impl Workspace {
         let repository_key = self.fleet_repository_key();
         list = list.children(self.render_task_creations(repository_key.as_deref(), cx));
 
+        // 複数選択のまとめての操作（O21）: 選んでいる間だけ Task 行の上に出す。
+        if !selected.is_empty() {
+            list = list.child(self.render_fleet_selection_bar(selected.clone(), cx));
+        }
+
         // ③ Task 行（3 段固定・§3.2-3）。
         for (seq, row) in rows.iter().enumerate() {
             let project_index = row.project_index;
+            let space = order[seq].clone();
+            let is_selected = selected.contains(&space);
+            let order = order.clone();
             let color = row.color;
             let tokens = if row.tokens == 0 {
                 SharedString::from("—")
@@ -759,6 +997,8 @@ impl Workspace {
                     .rounded(px(6.))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg3))
+                    // 選んでいる行は地を 1 段上げる（色相は使わない・選択面の色塗りはしない）。
+                    .when(is_selected, |row| row.bg(theme.bg3))
                     // 左 2px Task 色バー（帰属＝どの Task か・UI-SPEC §11）。
                     .child(
                         div()
@@ -959,6 +1199,16 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            // ⌘（Windows / Linux は Ctrl）= 選択に足す / 外す・⇧ = 範囲（O21）。
+                            if event.modifiers.secondary() {
+                                this.toggle_fleet_selection(space.clone(), cx);
+                                return;
+                            }
+                            if event.modifiers.shift {
+                                this.select_fleet_range(&order, space.clone(), cx);
+                                return;
+                            }
+                            this.clear_fleet_selection(cx);
                             if event.click_count == 2 {
                                 this.start_task_rename(project_index, RenameSite::Herd, window, cx);
                                 return;
@@ -1407,6 +1657,96 @@ mod tests {
     }
 
     /// Task の絞り込み（O21）: 名前・ブランチ・頼んだこと・いま何を のどれかに全部の語が要る。
+    /// O21: ⌘ クリックで Task を選び、⇧ クリックで範囲。まとめて舞台に並べる（3 本まで）・片付けの
+    /// 画面へ印を付けて渡す。どれも済んだら選択は外れる。
+    #[gpui::test]
+    fn several_tasks_can_be_selected_and_handled_together(cx: &mut gpui::TestAppContext) {
+        let base =
+            std::env::temp_dir().join(format!("necoder_fleet_selection_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let folders: Vec<PathBuf> = ["main", "a", "b", "c", "d"]
+            .iter()
+            .map(|name| base.join(name))
+            .collect();
+        for folder in &folders {
+            std::fs::create_dir_all(folder).expect("作れる");
+        }
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(folders.clone(), Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            for slot in &mut workspace.project_sessions.projects {
+                slot.task_space.repository_id = "repo".to_string();
+            }
+            for index in 1..=4 {
+                workspace.project_sessions.projects[index].task_space.kind = SpaceKind::Task;
+            }
+            workspace.switch_project(0, window, cx);
+            let ids: Vec<SpaceId> = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .map(|slot| slot.task_space.id.clone())
+                .collect();
+            let order = &ids[1..];
+
+            workspace.toggle_fleet_selection(ids[1].clone(), cx);
+            workspace.toggle_fleet_selection(ids[3].clone(), cx);
+            assert_eq!(
+                workspace.chrome.fleet_selection,
+                [ids[1].clone(), ids[3].clone()]
+            );
+            workspace.toggle_fleet_selection(ids[1].clone(), cx);
+            assert_eq!(
+                workspace.chrome.fleet_selection,
+                [ids[3].clone()],
+                "もう一度で外れる"
+            );
+            // ⇧ は起点（最後に押した行）から押した行まで、見えている並びで。
+            workspace.select_fleet_range(order, ids[4].clone(), cx);
+            assert_eq!(workspace.chrome.fleet_selection, ids[1..=4].to_vec());
+            // 選んでいる間はサイドバーにまとめての操作が出る（描けること）。
+            workspace.render_fleet_sidebar(cx);
+
+            workspace.stage_selected_tasks(&ids[1..=4], cx);
+            assert_eq!(
+                workspace.chrome.stage_pinned,
+                ids[1..=3].to_vec(),
+                "舞台は 3 枚まで"
+            );
+            assert_eq!(workspace.chrome.stage_columns, 3);
+            assert!(
+                workspace.chrome.fleet_selection.is_empty(),
+                "済んだら外れる"
+            );
+
+            workspace.cleanup_selected_tasks(&[ids[2].clone(), ids[4].clone()], window, cx);
+            let marked = workspace.cleanup_selection().expect("片付けの画面が開く");
+            assert_eq!(
+                marked,
+                [ids[2].clone(), ids[4].clone()].into_iter().collect(),
+                "選んだ Task に印が付いている"
+            );
+
+            // 普通のクリックに当たる操作で外れる。
+            workspace.toggle_fleet_selection(ids[2].clone(), cx);
+            workspace.clear_fleet_selection(cx);
+            assert!(workspace.chrome.fleet_selection.is_empty());
+            assert!(workspace.chrome.fleet_selection_anchor.is_none());
+        });
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn task_rows_are_filtered_by_every_word() {
         let row = task_row(

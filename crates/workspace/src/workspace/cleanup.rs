@@ -160,6 +160,28 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開いている片付けの画面で、この Task たちに印を付ける（Fleet サイドバーの複数選択から・O21）。
+    /// 画面に無い Task（別のリポジトリ・統合先）は数えない。
+    pub(crate) fn select_cleanup_rows(&mut self, spaces: &[SpaceId]) {
+        if let Some(state) = self.overlays.cleanup.as_mut() {
+            state.selected = state
+                .rows
+                .iter()
+                .filter(|row| spaces.contains(&row.space))
+                .map(|row| row.space.clone())
+                .collect();
+        }
+    }
+
+    /// テスト用: 片付けの画面で印を付けている Task（閉じていれば None）。
+    #[cfg(test)]
+    pub(crate) fn cleanup_selection(&self) -> Option<HashSet<SpaceId>> {
+        self.overlays
+            .cleanup
+            .as_ref()
+            .map(|state| state.selected.clone())
+    }
+
     /// 各 Task の失うものを背景で数える（1 本ずつ・数えた順に反映）。
     fn count_cleanup_stakes(&mut self, cx: &mut Context<Self>) {
         let Some(state) = self.overlays.cleanup.as_mut() else {

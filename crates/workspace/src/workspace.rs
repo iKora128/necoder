@@ -1297,6 +1297,11 @@ struct ChromeState {
     fleet_filter_query: String,
     /// Fleet サイドバーの Task の並べ方（O21・既定はレールの順）。
     fleet_sort: fleet_sidebar::FleetSort,
+    /// Fleet サイドバーで ⌘ / ⇧ クリックで選んでいる Task（O21・押した順）。まとめて休ませる・
+    /// 舞台に並べる・片付けへ渡す。普通のクリックで外れる。
+    fleet_selection: Vec<SpaceId>,
+    /// ⇧ クリックの範囲の起点（最後に ⌘ / ⇧ で押した Task）。
+    fleet_selection_anchor: Option<SpaceId>,
     /// 取り込み中の worktree（レールに開いたら Task にする・O21）。
     adopt_as_task: std::collections::HashSet<PathBuf>,
     /// 準備に失敗して送れていない ＋ Task の依頼（O20）。「準備をやり直す」/「準備を飛ばして始める」で
