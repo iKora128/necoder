@@ -270,8 +270,29 @@
 | O39 | `parity/o39-cli`（O40 の上） | #26 | レビュー待ち |
 | O40 | `parity/o40-skills` | #25 | レビュー待ち |
 | — | `parity/integration` | #21（draft） | 全部を重ねた確認用。ぶつかりを解いた状態でテストが通る |
-| O15 | `parity/o15-session-history`（O11 の上） | | 実装中 |
-| O18 | `parity/o18-git-panel`（O1 の上） | | 実装中 |
+| O15 | `parity/o15-session-history`（O11 の上） | | 実装中（Mac の worktree・未 push） |
+| O18 | `parity/o18-git-panel`（O1 の上） | | 実装中（Mac の worktree・未 push） |
+| O5（手元） | `claude/sleepy-hamilton-gesxiq` | なし | 実装済み・実機未確認（SSH 転送・Windows は未） |
+| O21（一部） | 同上 | なし | 外部の worktree・取り込み・統合先の取り違え・消えた worktree。残りは未 |
+| O26（一部） | 同上 | なし | `path:行`・全部閉じる・外部アプリ。自動保存・プレビュータブ・ピンは未 |
+
+### 7.1 クラウドでの続き（2026-09-26・`claude/sleepy-hamilton-gesxiq`）
+
+本人の指示（「全て統合して、できるところまで走って」）で、クラウドの Linux 環境で続けた。
+
+- **土台**: `parity/integration`（#21 相当・PR 14 本を重ねたもの）+ この計画（`parity/o00-plan`）+
+  UX・コードレビュー台帳（`docs/ux-code-review-2026-09`）をマージ。衝突なし。
+- **台帳の修正**: R01〜R08・R14 を修正、R11 は一部（使用量の記録を背景へ）、R15 は表現だけ。各項目の
+  コミットと検証は `UX-CODE-REVIEW.md` の各項目の末尾。R09・R10 は Mac の main の未コミット差分が対象で、
+  このブランチからは見えないので触っていない。
+- **計画の続き**: O5（手元の Ports）・O21 の一部（外部の worktree）・O26 の一部（エディタの所作）。
+  O15・O18 は Mac の worktree に途中があるので触っていない（push されれば取り込める）。
+- **確かめたこと**: Linux で `cargo check --workspace --all-targets`（警告 0）と `cargo test`。落ちるのは
+  Linux で元から落ちる 2 件（PDF のネイティブビューア・Web タブの surface。どちらも macOS / Windows の
+  ネイティブ部品が要る）だけ。**実画面・macOS 実機・SSH 実機は未確認**（隔離 offscreen の撮影は macOS が要る）。
+- **push**: このセッションに GitHub への書き込み権限が無く 403。コミットは git bundle で本人に渡した。
+  PR に分けるなら、台帳の修正は元の PR（O4・O6/O7・O8/O9・O11）のブランチへ、O5・O21・O26 は新しい
+  ブランチへ切り出すのが素直。
 
 ## 付録 A: 調査の全 226 項目の行き先
 
