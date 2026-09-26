@@ -49,6 +49,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.picker_ssh_testing = false;
         let hosts = host::ssh_config_hosts();
         // 2階層: 上=最近のリモートプロジェクト（履歴・直接接続・#5）、下=config ホスト、末尾=手入力。
         let recent = self
@@ -109,6 +110,57 @@ impl Workspace {
             window,
             cx,
         );
+    }
+
+    /// パレット「SSH: 接続を確かめる…」（O37・G01）: 同じホストピッカーを「試すだけ」で開く。
+    pub(crate) fn open_ssh_test_picker(
+        &mut self,
+        _: &TestSshConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_ssh_host_picker(&RemoteSsh, window, cx);
+        self.picker_ssh_testing = true;
+    }
+
+    /// `uri` の接続を確かめる（開かない）。繋がれば掛かった時間、だめなら理由と次にすること
+    /// （[`Self::report_ssh_failure`]・接続に失敗した時と同じ案内）。
+    pub(crate) fn test_ssh_uri(&mut self, uri: String, cx: &mut Context<Self>) {
+        let project = match host::SshProject::parse(&uri) {
+            Ok(project) => project,
+            Err(error) => {
+                self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
+                return;
+            }
+        };
+        let host_name = project.host.clone();
+        self.push_toast(
+            SharedString::from(i18n::t!("ssh.testing", "host" => host_name.clone())),
+            self.accent(),
+            cx,
+        );
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { host::test_ssh_connection(&project) })
+                .await;
+            let finished = workspace.update(cx, |workspace, cx| match result {
+                Ok(elapsed) => workspace.push_toast(
+                    SharedString::from(i18n::t!(
+                        "ssh.test_ok",
+                        "host" => host_name.clone(),
+                        "ms" => elapsed.as_millis()
+                    )),
+                    workspace.accent(),
+                    cx,
+                ),
+                Err(error) => workspace.report_ssh_failure(&host_name, &error, cx),
+            });
+            if let Err(error) = finished {
+                eprintln!("SSH の接続テストの結果を出せない: {error:#}");
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn close_ssh_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -715,6 +767,54 @@ mod tests {
         );
         assert_eq!(passphrase_tip("me@devbox's password: "), None);
         assert_eq!(passphrase_tip("Enter passphrase for key '': "), None);
+    }
+
+    #[gpui::test]
+    fn the_test_picker_only_tests_and_the_normal_picker_opens(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_ssh_test_picker_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let folders = vec![root.clone()];
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(folders, Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_ssh_test_picker(&TestSshConnection, window, cx);
+            assert!(workspace.picker_ssh_testing);
+            assert!(workspace.overlays.picker_mode == PickerMode::SshHosts);
+            // 末尾の「手入力」を選んでも、試すだけの時は入力バーを開かない。
+            let manual = workspace.picker_ssh_recent.len() + workspace.picker_ssh_hosts.len();
+            let picker = workspace.overlays.picker.clone().expect("ピッカー");
+            workspace.on_picker_event(&picker, &PickerEvent::Confirmed(manual), window, cx);
+            assert!(!workspace.picker_ssh_testing, "1 回で外れる");
+            assert!(workspace.overlays.ssh_input.is_none(), "開かない");
+
+            // 普通に開けば試す印は付かない（手入力は入力バーを開く）。
+            workspace.open_ssh_host_picker(&RemoteSsh, window, cx);
+            assert!(!workspace.picker_ssh_testing);
+            let manual = workspace.picker_ssh_recent.len() + workspace.picker_ssh_hosts.len();
+            let picker = workspace.overlays.picker.clone().expect("ピッカー");
+            workspace.on_picker_event(&picker, &PickerEvent::Confirmed(manual), window, cx);
+            assert!(workspace.overlays.ssh_input.is_some(), "手入力は入力バー");
+        });
+        workspace.update(cx, |workspace, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui::test]

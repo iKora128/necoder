@@ -2349,6 +2349,49 @@ fn master_result(success: bool, status: &str, log: &str) -> Result<()> {
     Err(anyhow::Error::new(SshConnectError::new(status, log)))
 }
 
+/// 接続を確かめる（O37・G01）。ControlMaster も server の配備もせず、`ssh <destination> true` を
+/// 1 回だけ走らせる（鍵のパスフレーズやホスト鍵の確認は askpass で訊く・10 秒で打ち切る）。
+/// 成功なら掛かった時間、失敗なら理由つきの [`SshConnectError`]（種類は [`SshFailure`]）。
+/// blocking なので背景で呼ぶ。
+pub fn test_ssh_connection(project: &SshProject) -> Result<Duration> {
+    static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+    let log = std::env::temp_dir().join(format!(
+        "necoder-ssh-test-{}-{}.log",
+        std::process::id(),
+        NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+    ));
+    let started = std::time::Instant::now();
+    let mut command = ssh_command();
+    command
+        .args(["-o", "ConnectTimeout=10"])
+        .arg("-E")
+        .arg(&log);
+    if let Some(port) = project.port {
+        command.args(["-p", &port.to_string()]);
+    }
+    let status = command
+        .arg(project.destination())
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("ssh を起動できない")?;
+    let elapsed = started.elapsed();
+    let written = std::fs::read(&log).unwrap_or_default();
+    if let Err(error) = std::fs::remove_file(&log) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("Remote SSH: 接続テストのログを消せない: {error}");
+        }
+    }
+    master_result(
+        status.success(),
+        &status.to_string(),
+        &String::from_utf8_lossy(&written),
+    )?;
+    Ok(elapsed)
+}
+
 /// Remote terminal の `ne` から接続元 GUI へ戻る、open 専用のローカル gateway。
 ///
 /// GUI の `gui.sock` をそのまま `ssh -R` すると、remote 上の任意プロセスへ fleet/send など
