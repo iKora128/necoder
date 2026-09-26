@@ -337,6 +337,14 @@ impl Workspace {
 
     /// レール項目の右クリックメニュー（M10-2）。色スウォッチ + 新規窓 / レールから外す /
     /// （worktree タブなら）worktree・ブランチ削除。破壊的操作は二段確認。
+    /// レールのメニューから文字をコピーする（パス・ブランチ名・O21）。閉じて、何を写したかを出す。
+    pub(crate) fn copy_from_rail_menu(&mut self, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        self.close_rail_menu(cx);
+        let color = self.accent();
+        self.push_toast(i18n::t!("rail.copied", "text" => text).into(), color, cx);
+    }
+
     pub(crate) fn render_rail_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let menu = self.overlays.rail_menu.as_ref()?;
         let index = menu.project_index;
@@ -345,6 +353,7 @@ impl Workspace {
         let slot = self.project_sessions.projects.get(index)?;
         let is_worktree = slot.worktree_branch.is_some();
         let slot_root = slot.worktree.root().to_path_buf();
+        let branch = slot.branch.clone().or_else(|| slot.worktree_branch.clone());
         let (bg2, bg3, border, fg0, fg1, fg2, err) = (
             theme.bg2,
             theme.bg3,
@@ -478,6 +487,40 @@ impl Workspace {
                     }),
                 )
             })
+            // パス・ブランチ名のコピー（O21・Task を端末や別の道具へ持っていく）。
+            .child({
+                let text = slot_root.display().to_string();
+                make_row(
+                    "rail-copy-path",
+                    "📋",
+                    SharedString::from(i18n::t!("rail.menu_copy_path")),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.copy_from_rail_menu(text.clone(), cx);
+                    }),
+                )
+            })
+            .when_some(branch, |menu, branch| {
+                menu.child(
+                    make_row(
+                        "rail-copy-branch",
+                        "⎇",
+                        SharedString::from(i18n::t!("rail.menu_copy_branch")),
+                        false,
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.copy_from_rail_menu(branch.clone(), cx);
+                        }),
+                    ),
+                )
+            })
             .child(div().h(px(1.)).bg(border).my(px(2.)))
             // レールから外す（安全＝ディスク無傷。表示だけ消す）。
             .child(
@@ -552,4 +595,54 @@ impl Workspace {
     }
 
     // ── Agent パネル連携（トースト・色リンク・生中継・M12-3/4/5） ──
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// レールのメニューの「パスをコピー」「ブランチ名をコピー」（O21）: 写して、閉じて、何を写したかを出す。
+    #[gpui::test]
+    fn copying_from_the_rail_menu_fills_the_clipboard(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_rail_copy_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("作業フォルダを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_rail_menu(0, gpui::point(px(10.), px(10.)), cx);
+            workspace.copy_from_rail_menu(project.display().to_string(), cx);
+            assert!(workspace.overlays.rail_menu.is_none(), "写したら閉じる");
+            let toast = workspace
+                .notifications
+                .toasts
+                .last()
+                .map(|toast| toast.text.to_string())
+                .unwrap_or_default();
+            assert!(
+                toast.contains(&project.display().to_string()),
+                "何を写したかを出す: {toast}"
+            );
+        });
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some(project.display().to_string().as_str())
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

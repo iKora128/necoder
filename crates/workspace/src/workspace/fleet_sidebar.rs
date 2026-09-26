@@ -28,6 +28,28 @@ struct TaskRow {
     rail_shortcut: Option<usize>,
 }
 
+/// Task がこの数以上ある時に絞り込み欄を出す（少ない時は一覧を見れば足りる・O21）。
+const FLEET_FILTER_MIN_TASKS: usize = 6;
+
+/// Task 行が絞り込みの語に当たるか（O21）: 語を空白で区切り、全部の語が名前・ブランチ・
+/// 頼んだこと・いま何を のどれかに含まれる（大文字小文字は無視）。語が無ければ全部当たる。
+fn task_row_matches(row: &TaskRow, query: &str) -> bool {
+    let haystack = [
+        Some(row.title.as_ref()),
+        row.branch.as_deref(),
+        row.asked.as_deref(),
+        row.digest.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n")
+    .to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| haystack.contains(&word.to_lowercase()))
+}
+
 impl Workspace {
     /// いま編隊として見ているリポジトリの鍵（レールで選んでいる slot のもの）。
     fn fleet_repository_key(&self) -> Option<String> {
@@ -445,11 +467,63 @@ impl Workspace {
         (integration, rows, integrated_today)
     }
 
+    /// Task の絞り込み欄（O21）。`⌕` + 1 行入力（placeholder「Task を絞り込む」）。
+    fn render_fleet_filter(&self, filtering: bool) -> gpui::AnyElement {
+        let theme = self.theme.clone();
+        div()
+            .mx(px(8.))
+            .my(px(4.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(26.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(11.5))
+            .child(div().flex_none().text_color(theme.fg2).child("⌕"))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    // 高さを与えないと 1 行ぶんに潰れて文字が出ない（Chat の一覧の検索欄と同じ）。
+                    .h(px(18.))
+                    .child(self.chrome.fleet_filter.clone())
+                    .when(
+                        !filtering && self.chrome.fleet_filter_query.is_empty(),
+                        |field| {
+                            field.child(
+                                div()
+                                    .absolute()
+                                    .top(px(0.))
+                                    .left(px(1.))
+                                    .text_color(theme.fg2)
+                                    .child(SharedString::from(i18n::t!(
+                                        "fleet.filter_placeholder"
+                                    ))),
+                            )
+                        },
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// Fleet サイドバー本体。
     pub(crate) fn render_fleet_sidebar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use agent_panel::ThreadActivity;
         let theme = self.theme.clone();
         let (integration, rows, integrated_today) = self.fleet_sidebar_rows(cx);
+        // 見出しの数は絞り込む前の全部（絞り込みは見せ方だけ・O21）。
+        let total_tasks = rows.len();
+        let filtering = !self.chrome.fleet_filter_query.trim().is_empty();
+        let show_filter = filtering || total_tasks >= FLEET_FILTER_MIN_TASKS;
+        let rows: Vec<TaskRow> = rows
+            .into_iter()
+            .filter(|row| task_row_matches(row, &self.chrome.fleet_filter_query))
+            .collect();
 
         let mut list = div()
             .id("fleet-task-list")
@@ -496,7 +570,7 @@ impl Workspace {
                             .text_size(px(9.5))
                             .text_color(theme.fg2)
                             .child(SharedString::from(
-                                i18n::t!("fleet.tasks_count", "n" => rows.len()),
+                                i18n::t!("fleet.tasks_count", "n" => total_tasks),
                             )),
                     ),
             );
@@ -547,7 +621,7 @@ impl Workspace {
                                     .text_color(theme.fg2)
                                     .child(SharedString::from(i18n::t!(
                                         "fleet.integration_sub",
-                                        "branched" => rows.len(),
+                                        "branched" => total_tasks,
                                         "integrated" => integrated_today
                                     ))),
                             ),
@@ -567,6 +641,21 @@ impl Workspace {
                         }),
                     ),
             );
+        }
+
+        // Task の絞り込み欄（O21）: Task が多い時か、書いてある間だけ。
+        if show_filter {
+            list = list.child(self.render_fleet_filter(filtering));
+            if filtering && rows.is_empty() {
+                list = list.child(
+                    div()
+                        .px(px(12.))
+                        .py(px(6.))
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!("fleet.filter_none"))),
+                );
+            }
         }
 
         // ③ Task 行（3 段固定・§3.2-3）。
@@ -1192,6 +1281,40 @@ mod tests {
     }
 
     /// F1 受入: サイドバーは**レールで選んでいる 1 リポジトリの Task だけ**を 3 段で出し、
+    fn task_row(title: &str, branch: &str, asked: Option<&str>, digest: Option<&str>) -> TaskRow {
+        TaskRow {
+            project_index: 0,
+            title: SharedString::from(title.to_string()),
+            color: gpui::red(),
+            branch: Some(SharedString::from(branch.to_string())),
+            activity: agent_panel::ThreadActivity::Idle,
+            asked: asked.map(|text| SharedString::from(text.to_string())),
+            digest: digest.map(|text| SharedString::from(text.to_string())),
+            tokens: 0,
+            rail_shortcut: None,
+        }
+    }
+
+    /// Task の絞り込み（O21）: 名前・ブランチ・頼んだこと・いま何を のどれかに全部の語が要る。
+    #[test]
+    fn task_rows_are_filtered_by_every_word() {
+        let row = task_row(
+            "ログイン修正",
+            "task/login-fix",
+            Some("OAuth の期限切れを直して"),
+            Some("テストを流しています"),
+        );
+        assert!(task_row_matches(&row, ""), "語が無ければ全部当たる");
+        assert!(task_row_matches(&row, "   "));
+        assert!(task_row_matches(&row, "ログイン"));
+        assert!(task_row_matches(&row, "LOGIN-FIX"), "大文字小文字は無視");
+        assert!(
+            task_row_matches(&row, "oauth テスト"),
+            "語は別の欄に在ってよい"
+        );
+        assert!(!task_row_matches(&row, "oauth 決済"), "全部の語が要る");
+    }
+
     /// レールを切り替えたら編隊ごと入れ替わる。統合先は Task 行に混ぜず別行にする。
     #[gpui::test]
     fn task_rows_are_scoped_to_the_selected_repository(cx: &mut gpui::TestAppContext) {
@@ -1270,6 +1393,24 @@ mod tests {
             let (integration, rows, _) = workspace.fleet_sidebar_rows(cx);
             assert_eq!(integration.map(|(index, ..)| index), Some(4));
             assert!(rows.is_empty(), "よそのリポジトリの Task は混ざらない");
+
+            // 絞り込み欄に打つと語の写しが変わり、行はそれで絞られる（O21）。
+            workspace.switch_project(0, window, cx);
+            workspace
+                .chrome
+                .fleet_filter
+                .update(cx, |filter, cx| filter.set_plain_text("task/2", cx));
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert_eq!(workspace.chrome.fleet_filter_query, "task/2");
+            let (_, rows, _) = workspace.fleet_sidebar_rows(cx);
+            let shown: Vec<String> = rows
+                .iter()
+                .filter(|row| task_row_matches(row, &workspace.chrome.fleet_filter_query))
+                .map(|row| row.title.to_string())
+                .collect();
+            assert_eq!(shown, ["task2"]);
         });
     }
 }

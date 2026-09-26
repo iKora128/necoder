@@ -332,6 +332,8 @@ fleet:
   tab_add_thread: "＋ 会話"
   tab_add_terminal: "＋ 端末"
   tasks_count: "%{n} Tasks"
+  filter_placeholder: Task を絞り込む
+  filter_none: 一致する Task はありません
   external_header: "外部の worktree（%{count}）"
   external_tip: このリポジトリの worktree のうち Task になっていないもの（Orca・Claude Code・手で git worktree add したもの等）。押すと畳む
   external_adopt: 取り込む
@@ -440,6 +442,9 @@ rail:
   add_tip: 開く — フォルダ / ファイル / リモート / 最近（⌘O は切替）
   add_prompt: 開く
   menu_new_window: 新しいウィンドウで開く
+  menu_copy_path: パスをコピー
+  menu_copy_branch: ブランチ名をコピー
+  copied: "コピーしました: %{text}"
   menu_remove: レールから外す
   menu_remove_worktree: worktree を削除
   menu_delete_branch: worktree ごとブランチを削除

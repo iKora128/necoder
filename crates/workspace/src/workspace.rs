@@ -1279,6 +1279,10 @@ struct ChromeState {
     fleet_worktrees: HashMap<String, Option<Vec<project::GitWorktree>>>,
     /// 「外部の worktree」を畳んでいるか（O21・見出しで切り替え）。
     hide_external_worktrees: bool,
+    /// Fleet サイドバーの Task の絞り込み欄（O21・Task が多い時か、書いてある間だけ出す）。
+    fleet_filter: Entity<EditorView>,
+    /// 絞り込みの語の写し（空白だけ = 絞り込まない）。
+    fleet_filter_query: String,
     /// 取り込み中の worktree（レールに開いたら Task にする・O21）。
     adopt_as_task: std::collections::HashSet<PathBuf>,
     /// 準備に失敗して送れていない ＋ Task の依頼（O20）。「準備をやり直す」/「準備を飛ばして始める」で
