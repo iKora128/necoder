@@ -3309,7 +3309,8 @@
   ターミナルの ▶・O25）・**sparse checkout**（`task_sparse`・O20）・**リモートのダウンロード / アップロード**
   （Finder からエクスプローラへ落とす / 右クリック・`project::transfer`・O37 / G09）・**SSH が繋がらない理由の案内**
   （`host::SshFailure`・パスフレーズの問いに `ssh-add` の案内・O37 / G02 / G04）・**エディタへのドロップ**
-  （Markdown に画像 = 隣へコピーして落とした所に `![]()`・ほかはタブで開く・O29）。
+  （Markdown に画像 = 隣へコピーして落とした所に `![]()`・ほかはタブで開く・O29）・Markdown の **front matter の表と
+  目次**（`markdown::split_front_matter`・`[toc]`・O29）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3347,6 +3348,10 @@
   - gpui の `on_drop` の listener は落とした位置を受け取らない。位置が要る時は `window.mouse_position()` を
     読む（落とした瞬間のポインタ）。エディタの行へ入れるのは `EditorView::insert_dropped_text`（描画と同じ
     ヒットテスト・本文より上ならキャレット）。
+  - `ScrollHandle::scroll_to_top_of_item(i)` は**スクロールする要素の直下の子**の i 番目にしか効かない。
+    Markdown のプレビューは 1 枚の列の中にブロックを並べていたので、ブロックを直下の子へ平らにした
+    （行長の max_w は子ごとに）。front matter の閉じの `---` は、front matter を切り出さずに読むと直前の行を
+    setext 見出し（h2）にする。
   - **`ssh -M -N -f` の stderr はパイプで読めない**: `-f` で背景に回った master がパイプの書き口を握り続け、
     `output()` が master の終わりまで返らない。理由を読みたい時は `-E <ファイル>` でログへ書かせ、親の終わりを
     待ってから読む（`-E` は追記なので試行の前に消す）。以前は stderr を継いでいたので、失敗のトーストは

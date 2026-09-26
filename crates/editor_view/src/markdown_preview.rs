@@ -51,8 +51,10 @@ fn heading_size(level: u8) -> f32 {
 /// ブロック列を縦スクロールの読み物として組む。`scroll` は呼び出し側（EditorView）が保持する
 /// 別系統のスクロール位置（EditorElement の縦スクロールとは独立）。
 /// `base_dir` は相対パス画像の解決基準（= `.md` の親ディレクトリ。無題バッファは None）。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_preview(
     blocks: &[markdown::Block],
+    front_matter: Option<&markdown::FrontMatter>,
     theme: &Theme,
     font_size: f32,
     code_font: SharedString,
@@ -65,6 +67,12 @@ pub(crate) fn render_preview(
         next_id: Cell::new(0),
     };
     let prose = font_size + 1.0; // 本文は code より僅かに大きく（読み物として）
+                                 // ブロックはスクロールする要素の**直下の子**に並べる（目次から `scroll_to_top_of_item` で飛ぶため）。
+                                 // 行長は子ごとの max_w で抑える（左寄せ・センタリングはしない）。
+    let front_matter = front_matter.filter(|front_matter| !front_matter.entries.is_empty());
+    let first_block = usize::from(front_matter.is_some());
+    let contents = toc_entries(blocks, first_block);
+    let column = |element: AnyElement| div().max_w(px(860.)).child(element);
     div()
         .id("markdown-preview")
         .size_full()
@@ -72,20 +80,142 @@ pub(crate) fn render_preview(
         .track_scroll(scroll)
         .px(px(32.))
         .py(px(22.))
-        .child(
-            // 行長を抑えて可読性を上げる（左寄せ・センタリングはしない）。
-            div()
-                .max_w(px(860.))
-                .flex()
-                .flex_col()
-                .gap(px(11.))
-                .text_size(px(prose))
-                .line_height(px(prose * 1.65))
-                .text_color(theme.fg0)
-                .children(blocks.iter().cloned().map(|block| {
-                    render_block(block, theme, font_size, &code_font, base_dir, &links)
-                })),
+        .flex()
+        .flex_col()
+        .gap(px(11.))
+        .text_size(px(prose))
+        .line_height(px(prose * 1.65))
+        .text_color(theme.fg0)
+        .children(
+            front_matter
+                .map(|front_matter| column(render_front_matter(front_matter, theme, font_size))),
         )
+        .children(blocks.iter().cloned().map(|block| {
+            let element = match &block {
+                markdown::Block::Paragraph { text, .. } if is_toc_marker(text) => {
+                    render_toc(&contents, theme, scroll)
+                }
+                _ => render_block(block, theme, font_size, &code_font, base_dir, &links),
+            };
+            column(element)
+        }))
+        .into_any_element()
+}
+
+/// 目次の印（段落が `[toc]` / `[[toc]]` だけ・大文字小文字は問わない・O29）。Typora や markdown-it の
+/// 書き方に合わせる。
+pub(crate) fn is_toc_marker(text: &str) -> bool {
+    let text = text.trim().to_ascii_lowercase();
+    text == "[toc]" || text == "[[toc]]"
+}
+
+/// 目次の 1 行（`child` = スクロールする要素の中での子の番号）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TocEntry {
+    pub(crate) child: usize,
+    pub(crate) level: u8,
+    pub(crate) text: String,
+}
+
+/// 目次に載せる見出し（h1〜h4）。`first_block` = 最初のブロックの子の番号（front matter の表が
+/// あれば 1）。
+pub(crate) fn toc_entries(blocks: &[markdown::Block], first_block: usize) -> Vec<TocEntry> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            markdown::Block::Heading { level, text, .. } if *level <= 4 => Some(TocEntry {
+                child: first_block + index,
+                level: *level,
+                text: text.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 目次（O29）: 見出しを字下げで並べ、押すとその見出しが上に来るまで流す。色は付けない
+/// （fg1・hover で fg0）。見出しが無ければ「見出しがありません」。
+fn render_toc(entries: &[TocEntry], theme: &Theme, scroll: &ScrollHandle) -> AnyElement {
+    let top = entries.iter().map(|entry| entry.level).min().unwrap_or(1);
+    let (fg0, fg1, fg2) = (theme.fg0, theme.fg1, theme.fg2);
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .py(px(4.))
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(fg2)
+                .child(SharedString::from(i18n::t!("editor.toc"))),
+        )
+        .when(entries.is_empty(), |element| {
+            element.child(
+                div()
+                    .text_color(fg2)
+                    .child(SharedString::from(i18n::t!("editor.toc_empty"))),
+            )
+        })
+        .children(entries.iter().map(|entry| {
+            let scroll = scroll.clone();
+            let child = entry.child;
+            div()
+                .id(("toc", entry.child))
+                .pl(px(f32::from(entry.level - top) * 14.))
+                .text_color(fg1)
+                .cursor_pointer()
+                .hover(move |style| style.text_color(fg0))
+                .on_click(move |_, window, _cx| {
+                    scroll.scroll_to_top_of_item(child);
+                    window.refresh();
+                })
+                .child(SharedString::from(entry.text.clone()))
+        }))
+        .into_any_element()
+}
+
+/// front matter の表（O29）: キー（fg2・固定幅）と値（fg1）の 2 列を枠で囲む。本文より一回り小さく、
+/// 色は付けない（識別に集約）。長い値は折り返す。
+fn render_front_matter(
+    front_matter: &markdown::FrontMatter,
+    theme: &Theme,
+    font_size: f32,
+) -> AnyElement {
+    let size = font_size - 0.5;
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .px(px(11.))
+        .py(px(8.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(px(size))
+        .line_height(px(size * 1.5))
+        .children(front_matter.entries.iter().map(|(key, value)| {
+            div()
+                .flex()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(120.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(key.clone())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(theme.fg1)
+                        .child(SharedString::from(value.clone())),
+                )
+        }))
         .into_any_element()
 }
 
@@ -407,4 +537,33 @@ fn linked_text(text: String, spans: &[markdown::Span], theme: &Theme, links: &Li
             }
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod toc_tests {
+    use super::*;
+
+    #[test]
+    fn toc_markers_and_entries() {
+        assert!(is_toc_marker("[toc]"));
+        assert!(is_toc_marker(" [[TOC]] "));
+        assert!(!is_toc_marker("[toc] please"));
+        let blocks = markdown::parse("# A\n\n[toc]\n\n## B\n\ntext\n\n##### deep\n");
+        assert_eq!(
+            toc_entries(&blocks, 1),
+            vec![
+                TocEntry {
+                    child: 1,
+                    level: 1,
+                    text: "A".to_string()
+                },
+                TocEntry {
+                    child: 3,
+                    level: 2,
+                    text: "B".to_string()
+                },
+            ],
+            "h5 は載せない・子の番号は front matter の分ずれる"
+        );
+    }
 }
