@@ -582,6 +582,8 @@ impl Workspace {
                     TabContent::Web { view, .. } => {
                         view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
                     }
+                    // 端末は session の `terminal_dock` の物（下でドックごと塗り直す）。
+                    TabContent::Terminal { .. } => {}
                 }
             }
             if let Some(review) = &session.review {

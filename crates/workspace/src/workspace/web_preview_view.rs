@@ -103,9 +103,9 @@ pub(crate) enum Viewport {
 pub(crate) const VIEWPORT_WIDTHS: [u32; 3] = [375, 768, 1280];
 
 /// タブ名に出す文字数の上限（ページのタイトルは長いことがある）。
-const TAB_LABEL_MAX_CHARS: usize = 32;
+pub(crate) const TAB_LABEL_MAX_CHARS: usize = 32;
 
-fn truncate_label(label: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_label(label: &str, max_chars: usize) -> String {
     if label.chars().count() <= max_chars {
         return label.to_string();
     }

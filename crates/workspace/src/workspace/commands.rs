@@ -147,6 +147,14 @@ impl CommandRegistry {
                 action_name: "workspace::ToggleTerminal",
             },
             CommandEntry {
+                label_key: "cmd.new_terminal_tab",
+                action_name: "workspace::NewTerminalTab",
+            },
+            CommandEntry {
+                label_key: "cmd.move_terminal_to_editor",
+                action_name: "workspace::MoveTerminalToEditor",
+            },
+            CommandEntry {
                 label_key: "cmd.toggle_git_panel",
                 action_name: "workspace::ToggleGitPanel",
             },

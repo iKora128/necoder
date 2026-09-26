@@ -99,6 +99,7 @@ mod statusbar_items;
 mod terminal_colors;
 mod terminal_rename;
 mod terminal_settings;
+mod terminal_tabs;
 mod usage_view;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
@@ -144,6 +145,9 @@ actions!(
         // ⌘K⌘C プロジェクト色ピッカー（Peacock 拡張）。
         ProjectColor,
         ToggleTerminal,
+        // 端末をエディタ領域のタブで開く / 下ドックの前にいる端末をエディタ領域へ移す（O24）。
+        NewTerminalTab,
+        MoveTerminalToEditor,
         GoToDefinition,
         TriggerCompletion,
         // hover をキーで出す（マウス dwell と同じポップアップ。⌘K ⌘I = VSCode 互換）。
@@ -394,6 +398,14 @@ pub(crate) enum TabContent {
         /// Design Mode で選ばれた要素を composer へ添える。
         _events: Subscription,
     },
+    /// 端末タブ（O24・`terminal_tabs`）。PTY は session の `terminal_dock` が `session` の id で持ち、
+    /// タブは見せるだけ。鍵は [`terminal_tabs::terminal_tab_key`]。一時タブ（窓セッションに残さない）。
+    Terminal {
+        view: Entity<TerminalView>,
+        session: u64,
+        /// 名前（シェルのタイトル・人が付けた名前）の変化でタブ名を描き直す。出力のたびには描かない。
+        _title: Subscription,
+    },
 }
 
 /// ペインに載る 1 タブ（M10 複数タブ）。`path` はタブの同一判定と永続化のキー。
@@ -419,7 +431,8 @@ impl EditorTab {
             TabContent::Image(_)
             | TabContent::Pdf(_)
             | TabContent::Review(_)
-            | TabContent::Web { .. } => None,
+            | TabContent::Web { .. }
+            | TabContent::Terminal { .. } => None,
         }
     }
 
@@ -430,7 +443,8 @@ impl EditorTab {
             TabContent::Editor { .. }
             | TabContent::Image(_)
             | TabContent::Review(_)
-            | TabContent::Web { .. } => None,
+            | TabContent::Web { .. }
+            | TabContent::Terminal { .. } => None,
         }
     }
 
@@ -441,8 +455,26 @@ impl EditorTab {
             TabContent::Editor { .. }
             | TabContent::Image(_)
             | TabContent::Pdf(_)
-            | TabContent::Review(_) => None,
+            | TabContent::Review(_)
+            | TabContent::Terminal { .. } => None,
         }
+    }
+
+    /// 端末タブならその [`TerminalView`] と、session の `terminal_dock` での id（O24）。
+    pub(crate) fn terminal(&self) -> Option<(&Entity<TerminalView>, u64)> {
+        match &self.content {
+            TabContent::Terminal { view, session, .. } => Some((view, *session)),
+            TabContent::Editor { .. }
+            | TabContent::Image(_)
+            | TabContent::Pdf(_)
+            | TabContent::Review(_)
+            | TabContent::Web { .. } => None,
+        }
+    }
+
+    /// 端末タブか（ファイルではない＝⌘P の最近・パスの操作・タブ復元から外す）。
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(self.content, TabContent::Terminal { .. })
     }
 
     /// タブ切替・タブを閉じた後のフォーカス移譲先。
@@ -453,6 +485,7 @@ impl EditorTab {
             TabContent::Pdf(view) => view.read(cx).focus_handle(cx),
             TabContent::Review(view) => view.read(cx).focus_handle(cx),
             TabContent::Web { view, .. } => view.read(cx).focus_handle(cx),
+            TabContent::Terminal { view, .. } => view.read(cx).focus_handle(),
         }
     }
 
@@ -488,6 +521,10 @@ impl EditorTab {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
             TabContent::Web { view, .. } => view
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+            TabContent::Terminal { view, .. } => view
                 .clone()
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
@@ -2297,6 +2334,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_theme_selector))
             .on_action(cx.listener(Self::open_project_color))
             .on_action(cx.listener(Self::toggle_terminal))
+            .on_action(cx.listener(Self::new_terminal_tab))
+            .on_action(cx.listener(Self::move_terminal_to_editor))
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::trigger_completion))
             .on_action(cx.listener(Self::show_hover_at_caret))

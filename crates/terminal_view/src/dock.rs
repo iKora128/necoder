@@ -241,6 +241,11 @@ impl TerminalDock {
         self.detached.get(&id).cloned()
     }
 
+    /// 下ドックにタブが残っているか（最後の端末をエディタ領域へ移したらドックを畳む・O24）。
+    pub fn has_tabs(&self) -> bool {
+        !self.tabs.is_empty()
+    }
+
     /// 下ドックの端末（タブの順・分割は左から）と、その中のアクティブの位置（CLI の `terminal list`）。
     /// 読み取りだけ＝PTY を起動しない。
     pub fn tab_terminals(&self) -> (Vec<Entity<TerminalView>>, usize) {

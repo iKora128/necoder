@@ -638,6 +638,8 @@ impl Workspace {
                     i18n::t!("review.tab_title")
                 } else if let Some(web) = tab.web() {
                     web.read(cx).tab_label(cx)
+                } else if tab.is_terminal() {
+                    self.terminal_tab_label(index, cx)
                 } else {
                     tab.path
                         .file_name()
@@ -759,8 +761,15 @@ impl Workspace {
                             this.agent_active = false; // エディタ側を触った → ⌘W の宛先をタブへ
                             this.chrome.show_settings = false; // タブを押したら設定ホームは退く
                             if event.click_count == 2 {
-                                // ダブルクリック = プレビューを普通のタブにする（O26）。
-                                this.keep_preview_tab(index, cx);
+                                // ダブルクリック = プレビューを普通のタブにする（O26）。端末のタブは
+                                // 下ドックと同じく改名（O24）。
+                                match this.tabs.get(index).and_then(EditorTab::terminal) {
+                                    Some((terminal, _)) => {
+                                        let terminal = terminal.clone();
+                                        this.start_terminal_rename(terminal, cx);
+                                    }
+                                    None => this.keep_preview_tab(index, cx),
+                                }
                             }
                             this.select_tab(index, window, cx);
                         }),
@@ -879,6 +888,43 @@ impl Workspace {
             )
             .blur_radius(px(16.))]);
 
+        // 端末のタブ（O24）: ファイルの操作の代わりに「名前を変更 / 下ドックへ移す」。
+        let terminal = self
+            .tabs
+            .get(index)?
+            .terminal()
+            .map(|(terminal, _)| terminal.clone());
+        if let Some(terminal) = &terminal {
+            let renamed = terminal.clone();
+            menu_box = menu_box
+                .child(
+                    item(
+                        "tab-ctx-terminal-rename",
+                        i18n::t!("tabs.ctx_terminal_rename"),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.close_tab_menu(cx);
+                            this.start_terminal_rename(renamed.clone(), cx);
+                        }),
+                    ),
+                )
+                .child(
+                    item(
+                        "tab-ctx-terminal-dock",
+                        i18n::t!("tabs.ctx_terminal_to_dock"),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.close_tab_menu(cx);
+                            this.move_terminal_tab_to_dock(index, window, cx);
+                        }),
+                    ),
+                )
+                .child(separator());
+        }
         // Web タブ: ファイルの操作の代わりに「既定のブラウザで開く / URL をコピー」。
         let web = self.tabs.get(index)?.web().cloned();
         if let Some(web) = &web {
@@ -907,7 +953,9 @@ impl Workspace {
                 )
                 .child(separator());
         }
-        let is_local = web.is_none()
+        // ファイルのタブだけ（Web / 端末のタブの鍵はファイルのパスではない）。
+        let file_backed = web.is_none() && terminal.is_none();
+        let is_local = file_backed
             && self
                 .active_slot()
                 .map(|slot| slot.remote_host.is_none())
@@ -944,8 +992,7 @@ impl Workspace {
             menu_box = menu_box.child(separator());
         }
         // Chat の成果物を、戻り先のプロジェクトへ持っていく（`docs/CHAT.md` §3.3）。
-        if let Some((project_name, project_root)) =
-            self.chat_copy_target().filter(|_| web.is_none())
+        if let Some((project_name, project_root)) = self.chat_copy_target().filter(|_| file_backed)
         {
             let source = path.clone();
             menu_box = menu_box
@@ -964,7 +1011,7 @@ impl Workspace {
                 )
                 .child(separator());
         }
-        if web.is_none() {
+        if file_backed {
             let copy_path = path.clone();
             menu_box = menu_box.child(
                 item("tab-ctx-copy-path", i18n::t!("explorer.ctx_copy_path")).on_mouse_down(
@@ -1684,6 +1731,23 @@ impl Workspace {
                 let position = Some(window.mouse_position());
                 this.drop_paths_on_editor(paths.paths().to_vec(), None, position, window, cx)
             }))
+            // エディタ領域の端末タブ（O24）の中の ⌘W / ⌘T / ⌘\。下ドックの端末はドックが受ける。
+            // ここで受けないと次の束縛（全域の ⌘W 等）へ落ち、AI のスレッドを閉じるなど別の物に効く。
+            .on_action(
+                cx.listener(|this, _: &terminal_view::actions::CloseTab, window, cx| {
+                    this.close_active_editor(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &terminal_view::actions::NewTab, window, cx| {
+                    this.new_terminal_tab(&NewTerminalTab, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &terminal_view::actions::Split, _window, cx| {
+                    this.explain_terminal_tab_split(cx)
+                }),
+            )
             .child(self.render_main_tabstrip(cx))
             .child(
                 div()

@@ -1376,12 +1376,15 @@ impl Workspace {
             return;
         };
         let host = worktree.host().clone();
-        self.tabs.clear();
+        // 端末のタブ（O24）はファイルではないので開き直さずに残す（ブランチを切り替えてもシェルは
+        // 動き続けている）。ファイルのタブはその後ろへ積み直すので、選ぶ位置はその分ずらす。
+        self.tabs.retain(EditorTab::is_terminal);
         self.active_tab = 0;
         if host.is_remote() {
             self.open_slot_files_remote(host, files, active_file, pinned, window, cx);
             return;
         }
+        let first_file = self.tabs.len();
         for path in files {
             if web_tab_url(&path).is_some() || host.metadata(&path).is_ok() {
                 // 背景読み込みだと完了順でタブ順が崩れるため、local の復元は同期で開く
@@ -1389,8 +1392,8 @@ impl Workspace {
                 self.open_file_sync(path, window, cx);
             }
         }
-        if active_file < self.tabs.len() {
-            self.select_tab(active_file, window, cx);
+        if first_file + active_file < self.tabs.len() {
+            self.select_tab(first_file + active_file, window, cx);
         }
         self.restore_tab_pins(&pinned);
         self.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
@@ -1478,6 +1481,7 @@ impl Workspace {
                     return;
                 }
                 let rail_had_focus = workspace.chrome.rail_focus.is_focused(window);
+                let first_file = workspace.tabs.len();
                 for tab in loaded {
                     match tab {
                         RestoredTab::File(path, content) => {
@@ -1486,8 +1490,8 @@ impl Workspace {
                         RestoredTab::Web(url) => workspace.show_web_tab(url, window, cx),
                     }
                 }
-                if active_file < workspace.tabs.len() {
-                    workspace.select_tab(active_file, window, cx);
+                if first_file + active_file < workspace.tabs.len() {
+                    workspace.select_tab(first_file + active_file, window, cx);
                 }
                 workspace.restore_tab_pins(&pinned);
                 workspace.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
