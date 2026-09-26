@@ -183,6 +183,7 @@ cmd:
   trigger_completion: "Edit: Trigger completion"
   show_hover: "Edit: Show hover"
   open_diff: "Git: Open diff tab"
+  open_review: "Git: Review changes"
   next_hunk: "Git: Next change"
   prev_hunk: "Git: Previous change"
   theme_selector: "View: Switch theme"
@@ -547,6 +548,8 @@ git:
   changes: Changes
   no_changes: No changes
   stage_all_tip: Stage all
+  review_changes: Review changes
+  review_changes_tip: Read every changed file on one screen (choose what to compare against)
   stage: Stage
   unstage: Unstage
   history: History
@@ -605,6 +608,42 @@ theme:
   picker_placeholder: Select theme
 link:
   open_failed: "Could not open %{target}"
+review:
+  tab_title: Review
+  compare: Compare
+  base_task: "Task base · %{sha}"
+  base_head: HEAD (uncommitted changes)
+  base_branch: "⎇ %{branch} · fork point %{sha}"
+  base_branch_pending: "⎇ %{branch}"
+  base_commit: "Commit %{sha}"
+  menu_task: Task base (when the Task was created)
+  menu_head: HEAD — uncommitted changes only
+  menu_branches: Branches (from the fork point)
+  menu_commits: Commits
+  menu_loading: Loading…
+  ignore_whitespace: Ignore whitespace
+  ignore_whitespace_tip: Hide whitespace-only differences (git diff -w)
+  files: "%{count} files"
+  refresh_tip: Reload
+  outdated: New changes
+  tree_tip: Show / hide the file tree
+  loading: Loading changes…
+  empty: "No changes (compared with %{base})"
+  error_not_repo: Not a git repository
+  error_unknown_base: "Can't find what to compare with: %{base}"
+  error_git: "git failed: %{message}"
+  notice_binary: Binary file — contents not shown
+  notice_too_large: "Too large to show (%{counts}) — use Open to see it in the editor"
+  notice_mode: Mode change only
+  notice_empty: No content changes
+  fold: "⋯ %{count} lines"
+  fold_tip: Click to reveal 20 more lines on each side
+  open_file: Open
+  open_file_tip: Open this file in the editor
+  reviewed: Viewed
+  reviewed_tip: Mark as viewed and collapse (click again to unmark)
+  renamed_from: "← %{path}"
+  no_newline: No newline at end of file
 difftab:
   proposal_title: "%{title} ⇄ proposal"
 update:

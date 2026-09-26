@@ -270,6 +270,7 @@ impl Workspace {
         if let Some(space) = self.selected_task_space() {
             if let Some(index) = self.session_index_for_space(&space) {
                 self.refresh_git_status_for(index, cx);
+                self.activate_review(index, cx);
             }
             self.add_fleet_cell(FleetPane::Diff { space }, cx);
         }
@@ -2308,10 +2309,16 @@ impl Workspace {
                     .cached(StyleRefinement::default().flex().flex_col().size_full())
                     .into_any_element(),
                 FleetPane::Editor { .. } => self.render_stage_files(session_index, cx),
-                FleetPane::Diff { .. } => self.project_sessions.sessions[session_index]
-                    .git_panel
-                    .clone()
-                    .into_any_element(),
+                // 「変更」= 変更レビュー（Task の base から作業ツリーまで）。基準と読み込みは
+                // タブを押した時の `activate_review` が渡す（描画中に git を叩かない）。
+                FleetPane::Diff { .. } => {
+                    match self.project_sessions.sessions[session_index].review.clone() {
+                        Some(review) => review
+                            .cached(StyleRefinement::default().size_full())
+                            .into_any_element(),
+                        None => div().into_any_element(),
+                    }
+                }
                 FleetPane::Tests { .. } => self.project_sessions.sessions[session_index]
                     .tests_dock
                     .clone()
