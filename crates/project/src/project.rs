@@ -3851,6 +3851,8 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    // 使うのはフックを走らせるテスト（`#[cfg(unix)]`）だけ。Windows の `-D warnings` で未使用にしない。
+    #[cfg(unix)]
     fn commit_count(root: &Path) -> usize {
         let output = Command::new("git")
             .current_dir(root)
