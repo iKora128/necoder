@@ -234,6 +234,7 @@ cmd:
   open_in_cursor: "外部: Cursor で開く"
   open_in_zed: "外部: Zed で開く"
   open_in_terminal: "外部: ターミナルでフォルダを開く"
+  show_ports: "Ports: 開いているポート（開く / 止める）"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -1262,3 +1263,14 @@ usage:
   stats_loading: 読み込み中…
   stats_failed: "使用量を読めませんでした: %{error}"
   stats_note: トークンとコストは、エージェントがターンごとに報告した推定値です（Claude のコストは Claude Code の推定。Codex はコストを報告せず、トークンは各ターンの最後の要求の分だけ）。~/.claude などのローカルのログは読みません。
+ports:
+  title: 開いているポート
+  loading: 読んでいます…
+  empty: necoder の中で待ち受けているポートはありません（端末やエージェントで開発サーバを立てると出ます）
+  others: "ほかのプロセス（%{count}）"
+  no_project: どのプロジェクトでもない
+  open: 開く
+  stop: 止める
+  stop_failed: "止められませんでした（pid %{pid}）— もう終わっているか、necoder の中のプロセスではありません"
+  hint: 開いた時と ↻ の時だけ読みます（lsof / ps）。止められるのは necoder の中のプロセスだけ。SSH 先のポートはまだ出ません
+  unsupported: この OS ではまだ使えません（macOS / Linux）

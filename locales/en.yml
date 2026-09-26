@@ -233,6 +233,7 @@ cmd:
   open_in_cursor: "External: Open in Cursor"
   open_in_zed: "External: Open in Zed"
   open_in_terminal: "External: Open folder in Terminal"
+  show_ports: "Ports: Open ports (open / stop)"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -1261,3 +1262,14 @@ usage:
   stats_loading: Loading…
   stats_failed: "Couldn't read usage: %{error}"
   stats_note: Tokens and cost are estimates each agent reports per turn (Claude's cost is Claude Code's estimate; Codex reports no cost, and its tokens cover only the last request of each turn). Local logs such as ~/.claude are not read.
+ports:
+  title: Open ports
+  loading: Reading…
+  empty: Nothing inside necoder is listening (start a dev server in a terminal or through an agent)
+  others: "Other processes (%{count})"
+  no_project: Not in a project
+  open: Open
+  stop: Stop
+  stop_failed: "Could not stop pid %{pid}: it already exited or is not a process inside necoder"
+  hint: Read only when opened and on ↻ (lsof / ps). Only processes inside necoder can be stopped. Ports on SSH hosts are not listed yet
+  unsupported: Not available on this OS yet (macOS / Linux)
