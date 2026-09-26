@@ -2885,6 +2885,38 @@ impl Workspace {
         self.open_bug_report(None, cx);
     }
 
+    /// メニュー「ヘルプ › ログのフォルダを開く」（O27・H29）: necoder のログ（状態フォルダの `logs/`）を
+    /// OS のファイルマネージャで開く。起動の仕方によってはまだ無いので、無ければ作ってから。
+    pub(crate) fn open_logs_action(
+        &mut self,
+        _: &OpenLogs,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = paths::logs_dir() else {
+            return;
+        };
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    std::fs::create_dir_all(&dir)?;
+                    crate::crash::open_url(&dir.display().to_string())
+                })
+                .await;
+            if let Err(error) = result {
+                // Err = 待っている間に窓が閉じた。
+                workspace
+                    .update(cx, |workspace, cx| {
+                        let accent = workspace.accent();
+                        workspace.push_toast(SharedString::from(format!("{error:#}")), accent, cx);
+                    })
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
     /// new issue URL を組んでブラウザで開く（sw_vers・ログ読みがあるので背景で）。
     fn open_bug_report(&mut self, crash_log: Option<PathBuf>, cx: &mut Context<Self>) {
         cx.spawn(async move |workspace, cx| {
