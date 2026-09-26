@@ -339,8 +339,9 @@ impl Workspace {
                 self.push_failure_toast(message.clone(), None, cx);
             }
             // transcript の URL: localhost 系は Web タブ、それ以外は既定のブラウザ（`open_url`）。
+            // SSH 先のプロジェクトのエージェントが出した localhost は SSH 先の物（R06）。
             agent_panel::PanelEvent::OpenUrlRequest { url } => {
-                self.open_url(url, cx);
+                self.open_url_from_session(session_index, url, cx);
             }
             agent_panel::PanelEvent::FilesTouched { files, color } => {
                 for file in files {

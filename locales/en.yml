@@ -763,6 +763,9 @@ theme:
   picker_placeholder: Select theme
 link:
   open_failed: "Could not open %{target}"
+  remote_localhost: "%{url} is a dev server on the SSH host (%{host}). It was not opened here, where the same port is a different server"
+  remote_localhost_title: Viewing an SSH host's localhost here
+  remote_localhost_details: "%{url} is localhost on the SSH host (%{host}). necoder does not forward ports yet.\n\nRun this in a local terminal, then open http://localhost:%{port} here:\n\n    ssh -N -L %{port}:localhost:%{port} %{host}\n\n(If another app already uses that port here, change the first %{port} to a free one.)\n"
 toast:
   open_details: Details ›
 review:

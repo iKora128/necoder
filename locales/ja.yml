@@ -764,6 +764,9 @@ theme:
   picker_placeholder: テーマを選択
 link:
   open_failed: "開けませんでした: %{target}"
+  remote_localhost: "%{url} は SSH 先（%{host}）の開発サーバです。手元の同じポートは別物なので開きません"
+  remote_localhost_title: SSH 先の localhost を手元で見るには
+  remote_localhost_details: "%{url} は SSH 先（%{host}）の localhost です。necoder はまだポート転送をしません。\n\n手元のターミナルで次を実行してから、手元の http://localhost:%{port} を開いてください:\n\n    ssh -N -L %{port}:localhost:%{port} %{host}\n\n（手元で同じポートを使っているアプリがあれば、左の %{port} を空いている番号に変えます）\n"
 toast:
   open_details: 全文 ›
 review:

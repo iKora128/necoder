@@ -72,8 +72,87 @@ fn percent_decode(text: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
+/// URL をどこで開くか（R06）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UrlDestination {
+    /// 手元の localhost の開発サーバ = necoder の Web タブ。
+    WebTab,
+    /// それ以外の URL = 既定のブラウザ。
+    Browser,
+    /// SSH 先で動いているプロジェクトから来た localhost の URL。手元の同じポートは別物なので
+    /// 開かず、SSH 先のものだと知らせる（ポート転送は O5）。
+    RemoteLocalhost { host: String, port: u16 },
+}
+
+/// URL の行き先を決める（R06・純関数）。`remote_host` は URL が出てきたプロジェクトの SSH 先
+/// （手元のプロジェクト・Chat は `None`）。
+pub(crate) fn url_destination(url: &str, remote_host: Option<&str>) -> UrlDestination {
+    let Some(normalized) = localhost::normalize(url) else {
+        return UrlDestination::Browser;
+    };
+    match remote_host {
+        Some(host) => UrlDestination::RemoteLocalhost {
+            host: host.to_string(),
+            port: localhost_port(&normalized),
+        },
+        None => UrlDestination::WebTab,
+    }
+}
+
+/// 正規形の localhost の URL のポート（省略時は http = 80 / https = 443）。
+fn localhost_port(url: &str) -> u16 {
+    let https = url.starts_with("https://");
+    let authority = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    // `[::1]:5173` / `localhost:5173`（IPv6 の `:` を読み違えないよう、最後の `]` の後ろだけ見る）。
+    let after_host = authority
+        .rsplit_once(']')
+        .map_or(authority, |(_, rest)| rest);
+    after_host
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse().ok())
+        .unwrap_or(if https { 443 } else { 80 })
+}
+
 impl Workspace {
+    /// プロジェクト（session）から出てきた URL を開く（R06）。そのプロジェクトが SSH 先で動いていれば、
+    /// localhost の URL は SSH 先の物なので手元では開かず、ポート転送の手順を添えて知らせる。
+    /// それ以外は [`Self::open_url`]。
+    pub(crate) fn open_url_from_session(
+        &mut self,
+        session_index: usize,
+        url: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let remote_host = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .and_then(|slot| slot.remote_host.clone());
+        match url_destination(url, remote_host.as_deref()) {
+            UrlDestination::RemoteLocalhost { host, port } => {
+                let details = i18n::t!(
+                    "link.remote_localhost_details",
+                    "url" => url,
+                    "host" => &host,
+                    "port" => port
+                );
+                self.push_failure_toast(
+                    i18n::t!("link.remote_localhost", "url" => url, "host" => &host).into(),
+                    Some((i18n::t!("link.remote_localhost_title").into(), details)),
+                    cx,
+                );
+            }
+            UrlDestination::WebTab | UrlDestination::Browser => self.open_url(url, cx),
+        }
+    }
+
     /// URL を開く（唯一の入口）。localhost 系は Web タブ、それ以外は既定のブラウザ。
+    /// プロジェクトから出てきた URL は [`Self::open_url_from_session`] を通す（SSH 先の localhost・R06）。
     ///
     /// Window を取らない形にしてあるので、Window の無いイベント購読（エージェントのパネル・端末）からも
     /// そのまま呼べる。Web タブを開くのは次の effect cycle（`process_pending_shell_effects`）。
@@ -335,7 +414,9 @@ impl Workspace {
     ) {
         let destination = event.destination.trim();
         if destination.starts_with("http://") || destination.starts_with("https://") {
-            self.open_url(destination, cx);
+            // プレビューしている文書のプロジェクト（SSH 先なら localhost は SSH 先の物・R06）。
+            let session_index = self.project_sessions.active;
+            self.open_url_from_session(session_index, destination, cx);
             return;
         }
         let (base, local) = {
@@ -683,6 +764,41 @@ mod tests {
             );
             stop_watchers(workspace);
         });
+    }
+
+    /// R06: SSH 先のプロジェクトから来た localhost の URL は手元で開かない（手元の同じポートは別物）。
+    #[test]
+    fn remote_localhost_urls_are_not_opened_locally() {
+        assert_eq!(
+            url_destination("http://localhost:5173/app", None),
+            UrlDestination::WebTab
+        );
+        assert_eq!(
+            url_destination("http://localhost:5173/app", Some("dev-box")),
+            UrlDestination::RemoteLocalhost {
+                host: "dev-box".into(),
+                port: 5173
+            }
+        );
+        assert_eq!(
+            url_destination("https://[::1]/", Some("dev-box")),
+            UrlDestination::RemoteLocalhost {
+                host: "dev-box".into(),
+                port: 443
+            }
+        );
+        assert_eq!(
+            url_destination("http://127.0.0.1:8080", Some("dev-box")),
+            UrlDestination::RemoteLocalhost {
+                host: "dev-box".into(),
+                port: 8080
+            }
+        );
+        assert_eq!(
+            url_destination("https://example.com/", Some("dev-box")),
+            UrlDestination::Browser,
+            "localhost でない URL は手元のブラウザ"
+        );
     }
 
     fn sample_capture(selector: &str, text: &str) -> webview_view::design::ElementCapture {
