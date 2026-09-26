@@ -662,11 +662,45 @@ impl Workspace {
         let Some(path) = self.active_tab_path() else {
             return;
         };
+        self.open_path_in_split(path, true, window, cx);
+    }
+
+    /// タブを右へドラッグして落とした（O24・C03）: そのタブのファイルを右の分割ペインに並べる
+    /// （分割が開いていれば中身を差し替える・主ペインのタブはそのまま）。エディタのタブでない物
+    /// （画像・PDF・Web・端末・変更レビュー・diff の一時タブ）は並べられないので知らせる。
+    pub(crate) fn split_dragged_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self
+            .tabs
+            .get(index)
+            .filter(|tab| tab.editor().is_some() && !tab.transient)
+            .map(|tab| tab.path.clone())
+        else {
+            let color = self.accent();
+            self.push_toast(i18n::t!("tabs.split_needs_file").into(), color, cx);
+            return;
+        };
+        self.split_editor = None;
+        self.open_path_in_split(path, false, window, cx);
+    }
+
+    /// `path` を読んで右分割ペインに開く。local は同期（マイクロ秒）・remote は読みを背景へ
+    /// （再接続待ちで固まらない）。`follow_active` = ⌘\ の複製（読む間にタブを移ったら開かない）。
+    fn open_path_in_split(
+        &mut self,
+        path: PathBuf,
+        follow_active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(worktree) = self.active_worktree() else {
             return;
         };
         let host = worktree.host().clone();
-        // local は同期（マイクロ秒）。remote は読みを背景へ（再接続待ちで固まらない）。
         if !host.is_remote() {
             match Buffer::from_host(host, &path) {
                 Ok(buffer) => self.open_split_editor(buffer, window, cx),
@@ -687,7 +721,7 @@ impl Workspace {
             let _ = handle.update(cx, |workspace, window, cx| {
                 // 読んでいる間に開いた/閉じた分割やタブ切替があれば、古い読みで上書きしない。
                 if workspace.split_editor.is_some()
-                    || workspace.active_tab_path() != Some(path.clone())
+                    || (follow_active && workspace.active_tab_path() != Some(path.clone()))
                 {
                     return;
                 }
@@ -723,5 +757,71 @@ impl Workspace {
             window.focus(&handle, cx);
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// O24・C03: タブを右へドラッグして落とすと、そのファイルを右の分割ペインに並べる（主ペインの
+    /// タブと選択はそのまま・開いていれば差し替える）。ファイルでないタブは並べずに知らせる。
+    #[gpui::test]
+    fn a_dragged_tab_opens_on_the_right(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_split_drop_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("a.txt"), "alpha\n").unwrap();
+        std::fs::write(root.join("b.txt"), "beta\n").unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_file_sync(root.join("a.txt"), window, cx);
+            workspace.open_file_sync(root.join("b.txt"), window, cx);
+            assert_eq!(workspace.active_tab, 1);
+            let split_text = |workspace: &Workspace, cx: &App| {
+                workspace
+                    .split_editor
+                    .as_ref()
+                    .map(|split| split.read(cx).plain_text())
+            };
+
+            workspace.split_dragged_tab(0, window, cx);
+            assert_eq!(split_text(workspace, cx).as_deref(), Some("alpha\n"));
+            assert_eq!(workspace.tabs.len(), 2, "主ペインのタブはそのまま");
+            assert_eq!(workspace.active_tab, 1);
+
+            workspace.split_dragged_tab(1, window, cx);
+            assert_eq!(
+                split_text(workspace, cx).as_deref(),
+                Some("beta\n"),
+                "差し替える"
+            );
+
+            workspace
+                .terminal_dock
+                .update(cx, |dock, _cx| dock.use_test_terminals());
+            workspace.new_terminal_tab(&NewTerminalTab, window, cx);
+            workspace.split_dragged_tab(2, window, cx);
+            assert_eq!(split_text(workspace, cx).as_deref(), Some("beta\n"));
+            assert!(workspace
+                .notifications
+                .toasts
+                .iter()
+                .any(|toast| toast.text.as_ref() == i18n::t!("tabs.split_needs_file")));
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

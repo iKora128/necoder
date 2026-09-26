@@ -909,6 +909,7 @@ tabs:
   ctx_close: Close tab
   ctx_close_others: Close other tabs
   ctx_close_right: Close tabs to the right
+  split_needs_file: Only file tabs can be placed on the right
   ctx_terminal_rename: Rename…
   ctx_terminal_to_dock: Move to the bottom dock
 image:

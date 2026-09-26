@@ -1769,9 +1769,34 @@ impl Workspace {
                             .overflow_hidden()
                             .relative()
                             .child(content)
-                            .children(self.render_buffer_search_bar(cx)),
+                            .children(self.render_buffer_search_bar(cx))
+                            // タブを右へドラッグ → 右に並べる（O24・C03）。ドラッグ中だけ置く
+                            // （種類は落とす時に見る・エディタのタブの時だけ地が変わる）。
+                            .when(cx.has_active_drag(), |area| {
+                                area.child(self.render_split_drop_zone(cx))
+                            }),
                     ),
             )
+            .into_any_element()
+    }
+
+    /// 主ペインの右 35% の落とし先（タブのドラッグ中だけ）。エディタのタブを落とすと右に並べる。
+    fn render_split_drop_zone(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let highlight = self.theme.bg2.alpha(0.85);
+        let border = self.theme.border;
+        div()
+            .id("split-drop-zone")
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .w(gpui::relative(0.35))
+            .drag_over::<DraggedEditorTab>(move |style, _dragged, _window, _cx| {
+                style.bg(highlight).border_l_1().border_color(border)
+            })
+            .on_drop(cx.listener(|this, dragged: &DraggedEditorTab, window, cx| {
+                this.split_dragged_tab(dragged.index, window, cx)
+            }))
             .into_any_element()
     }
 
