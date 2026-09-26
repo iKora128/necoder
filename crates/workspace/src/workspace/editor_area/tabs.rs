@@ -703,6 +703,9 @@ impl Workspace {
             return;
         };
         let host = worktree.host().clone();
+        let root = worktree.root().to_path_buf();
+        self.split_generation = self.split_generation.wrapping_add(1);
+        let generation = self.split_generation;
         if !host.is_remote() {
             match Buffer::from_host(host, &path) {
                 Ok(buffer) => self.open_split_editor(buffer, window, cx),
@@ -721,8 +724,15 @@ impl Workspace {
                 .spawn(async move { read_host.read_file(&read_path) })
                 .await;
             let _ = handle.update(cx, |workspace, window, cx| {
-                // 読んでいる間に開いた/閉じた分割やタブ切替があれば、古い読みで上書きしない。
-                if workspace.split_editor.is_some()
+                // 読んでいる間に別のプロジェクトへ移った（分割はプロジェクトごと）・次の読みを始めた
+                // （続けて落とした・⌘\）・分割を開き閉めした・（⌘\ の複製なら）タブを移った時は、
+                // 古い読みで上書きしない。
+                let same_project = workspace
+                    .active_worktree()
+                    .is_some_and(|worktree| worktree.root() == root.as_path());
+                if !same_project
+                    || workspace.split_generation != generation
+                    || workspace.split_editor.is_some()
                     || (follow_active && workspace.active_tab_path() != Some(path.clone()))
                 {
                     return;
@@ -751,6 +761,8 @@ impl Workspace {
     }
 
     pub(crate) fn close_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 読みかけの分割も取り消す（閉じた後に開かない）。
+        self.split_generation = self.split_generation.wrapping_add(1);
         if self.split_editor.take().is_none() {
             return;
         }
@@ -765,6 +777,132 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O24・C03: 接続先（SSH）のファイルは背景で読む。続けて落とせば後の方だけが開き、読んでいる間に
+    /// 別のプロジェクトへ移れば、移った先の分割には開かない（遅れて届いた古い読みで上書きしない）。
+    #[gpui::test]
+    fn late_remote_reads_do_not_land_in_the_wrong_split(cx: &mut gpui::TestAppContext) {
+        /// 手元のファイルを読むが、接続先として振る舞う host（読みが背景に回る）。
+        struct RemoteLike;
+        impl host::Host for RemoteLike {
+            fn id(&self) -> &str {
+                "remote-like"
+            }
+            fn display_name(&self) -> &str {
+                "devbox"
+            }
+            fn is_remote(&self) -> bool {
+                true
+            }
+            fn host_for_project(&self, _path: &Path) -> anyhow::Result<Arc<dyn host::Host>> {
+                Ok(Arc::new(RemoteLike))
+            }
+            fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
+                host::LocalHost.canonicalize(path)
+            }
+            fn metadata(&self, path: &Path) -> anyhow::Result<host::HostMetadata> {
+                host::LocalHost.metadata(path)
+            }
+            fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<host::HostEntry>> {
+                host::LocalHost.read_dir(path)
+            }
+            fn read_file(&self, path: &Path) -> anyhow::Result<host::FileContent> {
+                host::LocalHost.read_file(path)
+            }
+            fn write_file(
+                &self,
+                path: &Path,
+                bytes: &[u8],
+                condition: host::WriteCondition,
+            ) -> anyhow::Result<host::FileRevision> {
+                host::LocalHost.write_file(path, bytes, condition)
+            }
+            fn list_files(&self, root: &Path, limit: usize) -> anyhow::Result<Vec<PathBuf>> {
+                host::LocalHost.list_files(root, limit)
+            }
+            fn search_project(
+                &self,
+                root: &Path,
+                spec: &host::TextSearchSpec,
+                file_limit: usize,
+            ) -> anyhow::Result<Vec<host::TextSearchHit>> {
+                host::LocalHost.search_project(root, spec, file_limit)
+            }
+            fn run_command(&self, spec: &host::CommandSpec) -> anyhow::Result<host::CommandOutput> {
+                host::LocalHost.run_command(spec)
+            }
+            fn spawn_process(&self, spec: &host::CommandSpec) -> anyhow::Result<host::HostProcess> {
+                host::LocalHost.spawn_process(spec)
+            }
+            fn terminal_launch(&self, cwd: &Path) -> anyhow::Result<Option<host::TerminalLaunch>> {
+                host::LocalHost.terminal_launch(cwd)
+            }
+        }
+
+        let base =
+            std::env::temp_dir().join(format!("necoder_split_remote_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("remote")).unwrap();
+        std::fs::create_dir_all(base.join("local")).unwrap();
+        let base = paths::canonicalize(&base).unwrap();
+        let remote = base.join("remote");
+        std::fs::write(remote.join("a.txt"), "alpha\n").unwrap();
+        std::fs::write(remote.join("b.txt"), "beta\n").unwrap();
+        std::fs::write(base.join("local").join("c.txt"), "gamma\n").unwrap();
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let sources = vec![
+            ProjectSource::new(Arc::new(RemoteLike), remote.clone()),
+            ProjectSource::new(host::LocalHost::shared(), base.join("local")),
+        ];
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources(sources, Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        let split_text = |workspace: &Workspace, cx: &App| {
+            workspace
+                .split_editor
+                .as_ref()
+                .map(|split| split.read(cx).plain_text())
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.switch_project(0, window, cx);
+            workspace.open_file_sync(remote.join("a.txt"), window, cx);
+            workspace.open_file_sync(remote.join("b.txt"), window, cx);
+            // 続けて 2 回落とす（どちらも背景で読む）。
+            workspace.split_dragged_tab(0, window, cx);
+            workspace.split_dragged_tab(1, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(
+                split_text(workspace, cx).as_deref(),
+                Some("beta\n"),
+                "後に落とした方"
+            );
+            // 落として、読み終わる前に別のプロジェクトへ。
+            workspace.split_dragged_tab(0, window, cx);
+            workspace.switch_project(1, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert_eq!(
+                split_text(workspace, cx),
+                None,
+                "移った先のプロジェクトの分割には開かない"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// O24・C03: タブを右へドラッグして落とすと、そのファイルを右の分割ペインに並べる（主ペインの
     /// タブと選択はそのまま・開いていれば差し替える）。ファイルでないタブは並べずに知らせる。

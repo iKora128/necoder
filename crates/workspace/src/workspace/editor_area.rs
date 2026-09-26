@@ -52,6 +52,8 @@ pub struct EditorArea {
     pub(crate) tabs: Vec<EditorTab>,
     pub(crate) active_tab: usize,
     pub(crate) split_editor: Option<Entity<EditorView>>,
+    /// 右分割ペインへの読みの世代（開く・閉じるたびに進む）。遅れて届いた古い読みで上書きしない（O24）。
+    pub(crate) split_generation: u64,
     pub(crate) buffer_search: Option<BufferSearchState>,
     pub(crate) recently_closed_files: Vec<PathBuf>,
     pub(crate) lsp: Option<lang::lsp::LspClient>,
@@ -108,6 +110,7 @@ impl EditorArea {
             tabs: Vec::new(),
             active_tab: 0,
             split_editor: None,
+            split_generation: 0,
             buffer_search: None,
             recently_closed_files: Vec::new(),
             lsp: None,
