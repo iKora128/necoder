@@ -9,6 +9,7 @@ publish = false
 path = "src/webview_view.rs"
 
 [dependencies]
+futures.workspace = true
 gpui.workspace = true
 i18n.workspace = true
 theme_core.workspace = true
@@ -21,3 +22,24 @@ url.workspace = true
 # necoder は DMG/GitHub 配布なので採用（debug ビルドでは feature 無しでも常に有効）。
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 wry = { version = "=0.56.1", default-features = false, features = ["devtools"] }
+
+# macOS の Web タブ: wry の navigation delegate を包んで移動判定を最上位だけにする（`main_frame.rs`）。
+# 版は wry が引いている物に揃える（Cargo.lock の同じ版を共有して二重にビルドしない）。
+# feature は使う物だけ（既定の全部入りはビルドが重い）。
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSObject", "NSString"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "objc2-app-kit",
+  "objc2-core-foundation",
+  "WKDownload",
+  "WKFrameInfo",
+  "WKNavigation",
+  "WKNavigationAction",
+  "WKNavigationDelegate",
+  "WKNavigationResponse",
+  "WKWebView",
+] }

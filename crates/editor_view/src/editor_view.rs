@@ -132,6 +132,14 @@ pub struct PastedImage {
     pub bytes: Vec<u8>,
 }
 
+/// 整形プレビュー（Markdown）のリンクが押された。行き先の解釈（URL を開く・ファイルを開く）は
+/// 親が決める — エディタは Web タブもファイルを開くことも知らない（依存の向き）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewLinkClicked {
+    /// Markdown に書かれたままの行き先（`https://…` / `./guide.md` / `#anchor` など）。
+    pub destination: String,
+}
+
 /// キーボード入力の確定テキスト通知（補完の自動トリガ用・M10）。
 /// **入力ハンドラ経由の確定入力のみ** emit する（IME 変換中・paste・undo・補完適用では出さない）。
 /// workspace がタブ毎に subscribe し、識別子/`.`/`::` で補完を自動トリガする。
@@ -2248,6 +2256,9 @@ impl EventEmitter<EditorInputEvent> for EditorView {}
 /// hover dwell の通知（workspace が LSP hover 要求に使う）。
 impl EventEmitter<EditorHoverEvent> for EditorView {}
 
+/// 整形プレビューのリンクの通知（workspace が URL / ファイルとして開く）。
+impl EventEmitter<PreviewLinkClicked> for EditorView {}
+
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // `.html` ネイティブプレビュー: エディタ本体だけを差し替え、タブ/パンくずは GPUI のまま。
@@ -2285,6 +2296,17 @@ impl Render for EditorView {
                     self.font_size,
                     &self.markdown_scroll,
                     self.buffer.path().and_then(|path| path.parent()),
+                    {
+                        let editor = cx.entity().downgrade();
+                        std::rc::Rc::new(move |destination, _window, cx| {
+                            // 閉じたタブのプレビューを押すことは無いが、消えていれば何もしない。
+                            if let Some(editor) = editor.upgrade() {
+                                editor.update(cx, |_, cx| {
+                                    cx.emit(PreviewLinkClicked { destination })
+                                });
+                            }
+                        })
+                    },
                 ))
                 .into_any_element();
         }
