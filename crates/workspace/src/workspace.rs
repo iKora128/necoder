@@ -311,6 +311,8 @@ pub(crate) enum PickerMode {
     PreviewUrl,
     /// 書体を選ぶ（O27・設定の「選ぶ…」から）。id 0 = 既定に戻す、1.. = `picker_fonts` の添字 + 1。
     Fonts,
+    /// 手元のターミナルのシェルを選ぶ（O25）。id 0 = 既定に戻す、1.. = `picker_shells` の添字 + 1。
+    Shells,
 }
 
 /// ⌘P の作成アクション行の id（空プロジェクト用）。ファイル添字（最大 50k）と衝突しない番兵値。
@@ -1346,6 +1348,8 @@ struct ChromeState {
     focus_next_frame: Option<FocusHandle>,
     /// 設定の「選ぶ…」で頼まれた書体のピッカー（設定のキー・窓が要るので後処理で開く）。
     pending_font_picker: Option<&'static str>,
+    /// 設定の「選ぶ…」で頼まれたシェルのピッカー（窓が要るので後処理で開く・O25）。
+    pending_shell_picker: bool,
     /// statusbar の項目の出し入れのメニュー（右クリックした所・O27）。
     statusbar_menu: Option<Point<gpui::Pixels>>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
@@ -1431,6 +1435,8 @@ struct WorkspaceOverlays {
     /// 書体のピッカーの行（入っている書体）と、選んだ書体を書く設定のキー（O27）。
     picker_fonts: Vec<String>,
     picker_font_key: &'static str,
+    /// シェルのピッカーの行（入っているシェル・O25）。
+    picker_shells: Vec<String>,
     theme_before_preview: Option<Theme>,
     picker_observation: Option<Subscription>,
     color_picker: Option<ColorPickerState>,
@@ -1888,6 +1894,7 @@ impl Workspace {
             || self.pending_stage_hunk.is_some()
             || self.chrome.focus_next_frame.is_some()
             || self.chrome.pending_font_picker.is_some()
+            || self.chrome.pending_shell_picker
     }
 
     fn process_pending_shell_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1897,6 +1904,10 @@ impl Workspace {
         }
         if let Some(key) = self.chrome.pending_font_picker.take() {
             self.open_font_picker(key, window, cx);
+        }
+        if self.chrome.pending_shell_picker {
+            self.chrome.pending_shell_picker = false;
+            self.open_shell_picker(window, cx);
         }
         if self.chrome.pending_agent_full_screen_toggle {
             self.chrome.pending_agent_full_screen_toggle = false;

@@ -619,6 +619,12 @@ settings:
   terminal_color_scheme_default: 既定（アプリのテーマに合わせる）。Ghostty のテーマ・Windows Terminal の配色（JSON）・iTerm2 の .itermcolors を読めます
   terminal_color_scheme_pick: ファイルを選ぶ…
   terminal_color_scheme_reset: 既定に戻す
+  pref_terminal_shell: ターミナルのシェル
+  terminal_shell_default: 既定（OS のシェル）。新しく開く手元の端末から効きます
+  terminal_shell_pick: 選ぶ…
+  terminal_shell_reset: 既定に戻す
+  shell_picker_placeholder: シェルを探す…
+  shell_picker_default: 既定に戻す（OS のシェル）
   pref_terminal_cursor_sub: "vim などが形を指定した時はそちらが優先されます"
   terminal_cursor_block: ブロック
   terminal_cursor_bar: 縦線
