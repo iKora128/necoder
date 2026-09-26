@@ -44,6 +44,8 @@ export class Bridge {
     this.persist = options.persist || (() => writeState('devices', this.devices));
     this.persistReceipts = options.persistReceipts || (receipts => writeState('receipts', receipts));
     this.receipts = {}; this.polling = false; this.caffeinate = null;
+    // 端末ごと（room）の「前の poll で走っていたスレッド」。完了の push を決めるだけなので保存しない。
+    this.runningThreads = new Map();
     // 電源が読めない機種・OS では「挿さっている」に倒す（据え置き機で黙って効かなくなるのを避ける）。
     this.onAcPower = true; this.powerCheckedAt = 0;
     this.readPower = options.readPower || (() => new Promise(resolve =>
@@ -223,16 +225,29 @@ export class Bridge {
     } finally { this.polling = false; }
   }
   async maybeNotify(device, snapshot) {
-    const pending = snapshot.projects.filter(project => device.tasks.includes(project.id))
-      .flatMap(project => project.threads).filter(thread => thread.permission_id || thread.question_pending);
+    const threads = snapshot.projects.filter(project => device.tasks.includes(project.id))
+      .flatMap(project => project.threads);
+    // 終わった: 前の poll で走っていて、いまは走っていない（承認・質問待ちでも、切断でもない）。
+    // 待ちに入った時は下の attention が知らせる。
+    const wasRunning = this.runningThreads.get(device.room) || new Set();
+    const finished = threads.some(thread => wasRunning.has(thread.id)
+      && !thread.running && !thread.blocked && !thread.session_lost);
+    this.runningThreads.set(device.room, new Set(threads.filter(thread => thread.running).map(thread => thread.id)));
+    if (finished) await this.push(device, 'done');
+    const pending = threads.filter(thread => thread.permission_id || thread.question_pending);
     const fingerprint = pending.map(thread => thread.permission_id || thread.question_id || thread.id + ':question').sort().join(',');
     if (fingerprint === device.lastNotification) return;
     device.lastNotification = fingerprint;
     await this.persist();
     if (!pending.length) return;
+    await this.push(device, 'attention');
+  }
+  /// Push を 1 通。本文は種類（'attention' / 'done'）だけ — コード・プロジェクト名・入力は含めない。
+  /// 送信先も既知の Push サービスへ限定（購読の検証済み）。
+  async push(device, type) {
+    if (!device.subscription) return;
     try {
-      // Push にコード・プロジェクト名・入力は含めない。送信先も既知の Push サービスへ限定。
-      await webpush.sendNotification(device.subscription, JSON.stringify({ type: 'attention' }), {
+      await webpush.sendNotification(device.subscription, JSON.stringify({ type }), {
         TTL: 300, timeout: 10_000, urgency: 'normal', vapidDetails: {
           subject: this.config.origin, publicKey: this.config.vapid.publicKey, privateKey: this.config.vapid.privateKey,
         },
