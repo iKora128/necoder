@@ -250,6 +250,9 @@ impl Workspace {
                     );
                 }
             }
+            agent_panel::PanelEvent::SettingsSaveFailed { message } => {
+                self.push_failure_toast(message.clone(), None, cx);
+            }
             _ => {}
         }
     }

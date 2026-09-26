@@ -499,6 +499,8 @@ settings:
   cli_busy: Working…
   cli_admin_prompt: necoder installs the ne command into /usr/local/bin.
   cli_admin_prompt_remove: necoder removes the ne command from /usr/local/bin.
+  save_unreadable: "Couldn't read %{file}, so nothing was saved (%{reason})"
+  save_failed: "Couldn't save the setting (%{reason})"
 explorer:
   main_worktree_undeletable: The main worktree cannot be deleted (use Remove from rail instead)
   up_folder: Up one folder

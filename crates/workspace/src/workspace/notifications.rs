@@ -299,6 +299,9 @@ impl Workspace {
                 cx.notify();
             }
             agent_panel::PanelEvent::ChatRowsChanged => {}
+            agent_panel::PanelEvent::SettingsSaveFailed { message } => {
+                self.push_failure_toast(message.clone(), None, cx);
+            }
             agent_panel::PanelEvent::OpenUrlRequest { url } => {
                 if let Err(error) = crate::crash::open_url(url) {
                     eprintln!("URL を開けない: {error:#}");

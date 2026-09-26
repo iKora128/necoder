@@ -528,7 +528,8 @@ impl Workspace {
         self.apply_theme(theme, cx);
         self.overlays.theme_before_preview = None;
         // set_user_value = 永続化 + global 即時 reload（設定画面のテーマチップも同じ描画で追従する）。
-        settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+        let result = settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+        self.report_settings_save(result, cx);
     }
 
     pub(crate) fn open_picker(
