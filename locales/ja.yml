@@ -1251,6 +1251,15 @@ search:
 key:
   find_in_transcript: この会話を検索
   sheet_title: キーボードショートカット
+  sheet_hint: 行を押すと、次に押したキーに割り当てる（Esc でやめる）。↺ で既定に戻す
+  open_keymap: keymap.json を開く
+  press_keys: キーを押す…（Esc でやめる）
+  reset: 既定に戻す
+  conflict: "%{keys} は %{actions} でも使っています。置き換えますか"
+  replace: 置き換える
+  keep: やめる
+  unreadable: "keymap.json を読めないので、ここでは変えられません（%{error}）。keymap.json を開いて直してください"
+  write_failed: "keymap.json に書けません: %{path}: %{error}"
   section_editor: エディタ
   section_agent: AI チャット
   section_control: 管制

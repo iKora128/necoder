@@ -3313,7 +3313,7 @@
   目次**（`markdown::split_front_matter`・`[toc]`・O29）・**横並びのライブプレビュー**（⌘K V・O29）・
   **スラッシュメニュー**（Markdown の行頭の `/`・補完のポップアップを使い回す・O29）・ターミナルの**配色の取り込み**
   （`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2・O25）・**端末タブの改名**（ダブルクリック・O24）・
-  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）・**SSH の接続テスト**（O37）・端末の **⌘T / ⌘W**（O24）・Task の**詳細**（レールの右クリック「詳細…」・O21 / A12）・エージェントの**使う / 使わない**（`disabled_agents`・O16 / B02）・**権限の既定**（Yolo の一括・`agent_permission_default`・O16 / B07）・**自動命名ブランチの改名**（`task/task` → 最初のスレッドの名前から `task/<slug>`・O23 / A23）。
+  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）・**SSH の接続テスト**（O37）・端末の **⌘T / ⌘W**（O24）・Task の**詳細**（レールの右クリック「詳細…」・O21 / A12）・エージェントの**使う / 使わない**（`disabled_agents`・O16 / B02）・**権限の既定**（Yolo の一括・`agent_permission_default`・O16 / B07）・**自動命名ブランチの改名**（`task/task` → 最初のスレッドの名前から `task/<slug>`・O23 / A23）・**キー割り当ての画面**（⌘K ⌘S で押して変える・O27 / D23）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3370,6 +3370,17 @@
     リモートの追跡ブランチを渡すと、`git worktree add -b` が既定（`branch.autoSetupMerge`）で upstream を
     付ける。push したかは `branch.<名前>.merge` が自分自身（`refs/heads/<名前>`）か、リモートに同じ名前が
     あるかで見る。`git branch -m` は追跡の設定ごと運ぶ。
+  - **gpui のキーは、割り当て（keymap）の照合が `on_key_down` より先**。⌘P のような割り当て済みのキーを
+    画面で受けたい時は `cx.intercept_keystrokes`（照合の前に呼ばれる）で受けて `cx.stop_propagation()`。
+    止めた後は最初のノードの capture 相の listener だけが呼ばれ、`on_key_down`（bubble）は呼ばれない。
+    受け口の Subscription はコールバックの中で落としてよい（gpui の `SubscriberSet::retain` が扱う）。
+    テストは `cx.simulate_keystrokes` で受け口の道筋まで通る。
+  - **同じキーの書き方は 1 つではない**: `shift-alt-up` と `alt-shift-up` は gpui では同じキー。
+    重ねる・衝突を見る時は `Keystroke::parse` で読み直してから比べる（`keymap_core::user_keymap::canonical`）。
+    gpui の `unparse` はプラットフォームの修飾キーを Linux で `super-`・Windows で `win-` と書くので、
+    keymap の表示（`⌘` / `Win`）と合わない。necoder の書き方（`cmd-` …）は自前で組む。
+  - **keymap の読み直しは「全部捨てて張り直す」**（`cx.clear_key_bindings()` → 既定 → ユーザー）。上から
+    bind するだけでは、ファイルから消した束が残る（gpui は後から足した束が勝つだけで、前の束は消えない）。
   - **rustfmt は edition 2021 で見る**（crate は 2021・CI に fmt の段は無い）。`--edition 2024` だと style edition
     が変わり、`.shadow(vec![…])` などの折り方が違って、整っているファイルにも差分が出る。crate の根に
     `rustfmt --check` をかけると子のモジュールも見るので、変える前（`git stash`）と後で「Diff in」の数を

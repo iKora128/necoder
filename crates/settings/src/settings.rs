@@ -102,6 +102,13 @@ fn follow_locale_with(cx: &mut App, apply: impl Fn(Option<&str>) + 'static) {
     .detach();
 }
 
+/// ユーザーの keymap.json（user の settings.json と同じフォルダ）。キー割り当ての画面（O27）が読み書き
+/// する。設定を初期化していなければ `None`（テストは一時フォルダの settings.json の隣になる）。
+pub fn user_keymap_path(cx: &App) -> Option<PathBuf> {
+    let global = cx.try_global::<SettingsGlobal>()?;
+    Some(global.user_path.as_ref()?.parent()?.join("keymap.json"))
+}
+
 /// 表示名（`AgentKind::label`）のエージェントを使うか（`disabled_agents`・O16）。カタログに無い
 /// 名前は使う扱い（外す根拠が無い）。
 pub fn agent_label_enabled(settings: &Settings, label: &str) -> bool {

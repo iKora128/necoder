@@ -929,6 +929,7 @@ impl Workspace {
                 add_project_dialog_open: false,
                 pending_project_switch: None,
                 shortcut_sheet: None,
+                keymap_editing: None,
                 // offscreen QA: NECODER_ABOUT=1 で起動時から About モーダルを開く（NECODER_SETTINGS と同型）。
                 about: std::env::var_os("NECODER_ABOUT").map(|_| cx.focus_handle()),
                 usage_popover: None,
