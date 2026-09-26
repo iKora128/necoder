@@ -736,6 +736,8 @@ design:
   prompt_text: テキスト
   prompt_nearby: 近くのテキスト
   capture_failed: 要素の切り抜きを撮れませんでした（テキストだけ添えました）
+  target_moved: "選んだ要素は添えませんでした — 撮っている間に「%{thread}」から別のスレッドへ移ったため。そのスレッドに戻ってから選び直してください"
+  target_gone: 選んだ要素は添えませんでした — 選んだ時のスレッドが閉じられています
   needs_web_tab: "Design は Web タブ（プレビュー: localhost を開く…）で使えます"
   not_ready: ページが表示されてから Design を始めてください
 pdf:

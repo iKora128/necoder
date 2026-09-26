@@ -175,9 +175,12 @@ impl Workspace {
         }
     }
 
-    /// Design Mode で要素が選ばれた: その Web タブが居る session のアクティブなスレッドの composer へ、
+    /// Design Mode の知らせ。要素が選ばれた瞬間（`PickStarted`）に、その Web タブが居る session の
+    /// アクティブなスレッドを宛先として控え、撮り終わったら（`ElementPicked`）**控えた宛先**の composer へ
     /// 切り抜き（画像の添付・チップ名は要素の呼び名）と説明の文章を足す。**送信はしない**。
     /// 選び終えたら composer へフォーカスを移す（続けて指示を打てる）。
+    ///
+    /// 撮っている間にスレッドを切り替えていたら、今のスレッドへは添えない（R05・別の会話へ入れない）。
     pub(crate) fn on_web_preview_event(
         &mut self,
         view: &Entity<WebPreviewView>,
@@ -185,14 +188,57 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let WebPreviewEvent::ElementPicked {
-            capture,
-            png,
-            finished,
-        } = event;
-        let Some(panel) = self.panel_for_web_view(view) else {
+        let (capture, png, finished, target) = match event {
+            WebPreviewEvent::PickStarted { serial } => {
+                let Some(panel) = self.panel_for_web_view(view) else {
+                    return;
+                };
+                let thread_id = {
+                    let panel = panel.read(cx);
+                    panel.thread_id(panel.active_thread())
+                };
+                if let Some(thread_id) = thread_id {
+                    let target = PickTarget {
+                        panel: panel.downgrade(),
+                        thread_id,
+                    };
+                    let serial = *serial;
+                    view.update(cx, |view, _| view.remember_pick_target(serial, target));
+                }
+                return;
+            }
+            WebPreviewEvent::PickDropped => return,
+            WebPreviewEvent::ElementPicked {
+                capture,
+                png,
+                finished,
+                target,
+            } => (capture, png, finished, target),
+        };
+        let Some(target) = target else {
             return;
         };
+        let Some(panel) = target.panel.upgrade() else {
+            return;
+        };
+        let (still_active, thread_name) = {
+            let panel = panel.read(cx);
+            let active = panel.thread_id(panel.active_thread());
+            let name = panel
+                .thread_position(&target.thread_id)
+                .and_then(|index| panel.statuses().into_iter().nth(index))
+                .map(|status| status.name);
+            (active.as_ref() == Some(&target.thread_id), name)
+        };
+        if !still_active {
+            let color = self.accent();
+            let message = match thread_name {
+                Some(name) => i18n::t!("design.target_moved", "thread" => name),
+                None => i18n::t!("design.target_gone"),
+            };
+            self.push_toast(message.into(), color, cx);
+            return;
+        }
         let text = webview_view::design::format_for_prompt(capture);
         let chip = SharedString::from(format!(
             "◎ {}",
@@ -596,19 +642,27 @@ mod tests {
                         "styles": {}, "components": [], "source": null}
         }))
         .expect("形どおり");
-        workspace.update_in(cx, |workspace, window, cx| {
+        let view = workspace.update_in(cx, |workspace, window, cx| {
             stop_watchers(workspace);
             workspace.chrome.show_right = false;
             workspace.open_url("http://localhost:5173/", cx);
             workspace.process_pending_shell_effects(window, cx);
-            let view = workspace.tabs[0].web().cloned().expect("Web タブ");
-            view.update(cx, |_view, cx| {
-                cx.emit(WebPreviewEvent::ElementPicked {
-                    capture: Box::new(capture),
-                    png: None,
-                    finished: true,
-                })
-            });
+            workspace.tabs[0].web().cloned().expect("Web タブ")
+        });
+        // 選んだ瞬間（宛先を控える）→ 撮り終わった（切り抜きは撮れなかった）。
+        let start = view.update(cx, |view, cx| {
+            view.force_design_for_test();
+            view.begin_pick(cx)
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.finish_pick(
+                start,
+                Box::new(capture),
+                false,
+                Err("テスト窓は撮れない".into()),
+                cx,
+            )
         });
         cx.run_until_parked();
         workspace.update_in(cx, |workspace, _window, cx| {
@@ -629,6 +683,154 @@ mod tests {
             );
             stop_watchers(workspace);
         });
+    }
+
+    fn sample_capture(selector: &str, text: &str) -> webview_view::design::ElementCapture {
+        serde_json::from_value(serde_json::json!({
+            "page": {"url": "http://localhost:5173/", "title": "App", "viewport_width": 800.0,
+                     "viewport_height": 600.0, "device_pixel_ratio": 2.0},
+            "element": {"tag": "button", "selector": selector, "path": selector,
+                        "text": text, "nearby_text": [], "html": "<button>x</button>",
+                        "role": null, "accessible_name": null, "attributes": [],
+                        "rect": {"x": 10.0, "y": 20.0, "width": 80.0, "height": 30.0},
+                        "styles": {}, "components": [], "source": null}
+        }))
+        .expect("形どおり")
+    }
+
+    /// R05: 宛先は選んだ瞬間に決まる。撮っている間にスレッドを切り替えたら今のスレッドへは添えない。
+    /// 読み直した後の古い結果は捨て、Design を始め直していたら新しい Design を止めない。
+    /// 複数選んだ時は、撮り終わる順が逆でも選んだ順に添える。
+    #[gpui::test]
+    fn picked_elements_go_where_they_were_picked_and_in_order(cx: &mut gpui::TestAppContext) {
+        i18n::set_locale("ja");
+        let fixture = Fixture::new("design_target", cx);
+        // エージェントを先張りしない（2 本目のスレッドを作っても子プロセスを立てない）。
+        let settings_path = fixture.root.join("settings_no_prewarm.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.open_url("http://localhost:5173/", cx);
+            workspace.process_pending_shell_effects(window, cx);
+            workspace.tabs[0].web().cloned().expect("Web タブ")
+        });
+        let panel = workspace.read_with(cx, |workspace, _| workspace.agent_panel.clone());
+        let composer = |cx: &mut gpui::VisualTestContext| {
+            panel.read_with(cx, |panel, cx| panel.composer_text(cx))
+        };
+
+        // ① 選んだ後でスレッドを切り替える → 添えない（トーストで知らせる）。
+        let start = view.update(cx, |view, cx| {
+            view.force_design_for_test();
+            view.begin_pick(cx)
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            panel.new_thread_index(cx);
+        });
+        view.update(cx, |view, cx| {
+            view.finish_pick(
+                start,
+                Box::new(sample_capture("button#moved", "Moved")),
+                false,
+                Err("撮れない".into()),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(
+            !composer(cx).contains("button#moved"),
+            "別のスレッドへは添えない"
+        );
+        let toasts: Vec<String> = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .notifications
+                .toasts
+                .iter()
+                .map(|toast| toast.text.to_string())
+                .collect()
+        });
+        assert!(
+            toasts
+                .iter()
+                .any(|toast| toast.contains("添えませんでした")),
+            "{toasts:?}"
+        );
+
+        // ② 読み直した後の古い結果は捨てる。
+        let start = view.update(cx, |view, cx| {
+            view.force_design_for_test();
+            view.begin_pick(cx)
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.begin_navigation_for_test(cx);
+            view.finish_pick(
+                start,
+                Box::new(sample_capture("button#stale", "Stale")),
+                false,
+                Err("撮れない".into()),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(!composer(cx).contains("button#stale"), "古いページの要素");
+
+        // ③ Design を始め直していたら、古い撮影結果で新しい Design を止めない。
+        let start = view.update(cx, |view, cx| {
+            view.force_design_for_test();
+            view.begin_pick(cx)
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.force_design_for_test(); // 始め直した
+            view.finish_pick(
+                start,
+                Box::new(sample_capture("button#old", "Old")),
+                false,
+                Err("撮れない".into()),
+                cx,
+            );
+            assert!(view.is_designing(), "新しい Design は続く");
+        });
+        cx.run_until_parked();
+
+        // ④ 2 つ選んで、後の方が先に撮り終わっても、選んだ順に添える。
+        let (first, second) = view.update(cx, |view, cx| {
+            view.force_design_for_test();
+            (view.begin_pick(cx), view.begin_pick(cx))
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| {
+            view.finish_pick(
+                second,
+                Box::new(sample_capture("button#second", "Second")),
+                true,
+                Err("撮れない".into()),
+                cx,
+            );
+            view.finish_pick(
+                first,
+                Box::new(sample_capture("button#first", "First")),
+                true,
+                Err("撮れない".into()),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let text = composer(cx);
+        let first_at = text.find("button#first").expect("1 つ目が添えられる");
+        let second_at = text.find("button#second").expect("2 つ目が添えられる");
+        assert!(first_at < second_at, "選んだ順: {text}");
+        workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
     }
 
     /// Design 中に GPUI 側へキーが来ている時も Esc で Design を抜ける。Web タブが無い時の ⌘⇧D は案内だけ。
