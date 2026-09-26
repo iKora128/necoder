@@ -301,6 +301,11 @@ fleet:
   new_task_branch_label: "Branch (empty = task/<first line>; an existing branch name opens a worktree on that branch)"
   new_task_base_label: "Starting point (empty = the integration HEAD; a branch, tag or commit)"
   new_task_skip_setup: Skip the setup script this time (files in .worktreeinclude are still copied)
+  new_task_fanout: Compare side by side (one Task per chosen agent; none = one Task with the default agent)
+  new_task_fanout_each: Each
+  new_task_fanout_preview: "→ %{count} Tasks: %{names}"
+  fanout_created: "Created %{count} Tasks and put them side by side on the stage"
+  fanout_created_outside: "Created %{count} Tasks. Compare them side by side in Fleet (%{key})"
   new_task_from_base: "⎇ %{branch} (from %{base})"
   new_task_no_repository: "No integration worktree (main) is open, so a Task cannot be started"
   next_allow: "Allow"

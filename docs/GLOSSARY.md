@@ -43,6 +43,7 @@
 | **系譜の帯**（中央上の薄い系譜・⌄ で 4 表示に展開） | `lineage_strip` | 系譜 | Lineage |
 | **次へ**（phase に応じた唯一の主操作ボタン） | `next_action` | （phase 別の語） | （phase 別） |
 | **＋ Task**（1 プロンプト = 1 worktree のダイアログ） | `new_task_dialog` | ＋ Task | + Task |
+| ↳ **並べて比べる**（fan-out。1 つの依頼を選んだエージェントごとの Task へ・舞台に並べる・O23） | `plan_fanout` / `FanoutTask` / `create_prompted_tasks` | 並べて比べる | Compare side by side |
 | **準備スクリプト**（worktree 作成直後に 1 回） | `worktree_setup`（`.necoder/worktree-setup.sh` / `task.env`） | 準備 | Setup |
 | **`.worktreeinclude`**（無視しているファイルのうち、新しい Task へ写す物の一覧・`.gitignore` と同じ書き方・準備の前） | `copy_worktree_includes_on` / `prepare_task_worktree_on` | （ファイル名のまま） | (file name) |
 | **レール**（左の色バー） | `rail` | レール | Rail |

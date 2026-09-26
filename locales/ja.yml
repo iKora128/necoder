@@ -302,6 +302,11 @@ fleet:
   new_task_branch_label: "ブランチ（空 = task/<1 行目>。既にあるブランチ名なら、そのブランチの worktree を作る）"
   new_task_base_label: "起点（空 = 統合先の今の HEAD。ブランチ / タグ / コミット）"
   new_task_skip_setup: 今回は準備スクリプトを実行しない（.worktreeinclude のファイルは写す）
+  new_task_fanout: 並べて比べる（選んだエージェントごとに Task を切る・選ばなければ既定のエージェントで 1 本）
+  new_task_fanout_each: 各
+  new_task_fanout_preview: "→ Task を %{count} 本: %{names}"
+  fanout_created: "Task を %{count} 本切りました。舞台に並べています"
+  fanout_created_outside: "Task を %{count} 本切りました。Fleet（%{key}）で並べて比べられます"
   new_task_from_base: "⎇ %{branch}（起点 %{base}）"
   new_task_no_repository: "統合先（main の worktree）が開いていないので Task を切れません"
   next_allow: "許可"

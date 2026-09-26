@@ -18,6 +18,10 @@ pub(crate) struct NewTaskDialog {
     setup_script_present: bool,
     /// 準備スクリプトを今回は流さない（詳細のチェック・O20）。`.worktreeinclude` は写す。
     skip_setup: bool,
+    /// 並べて比べるエージェント（表示名・空 = 既定のエージェントで 1 本・O23）。
+    fanout_agents: Vec<String>,
+    /// エージェントごとの本数（1〜3）。
+    fanout_count: usize,
     /// 開く直前にフォーカスがあった場所。取り消し（Esc / キャンセル）でそこへ返す。
     previous_focus: Option<FocusHandle>,
 }
@@ -56,6 +60,8 @@ impl Workspace {
             root,
             setup_script_present,
             skip_setup: false,
+            fanout_agents: Vec::new(),
+            fanout_count: 1,
             previous_focus,
         });
         cx.notify();
@@ -97,8 +103,9 @@ impl Workspace {
             base: field(&dialog.base_editor),
             skip_setup: dialog.skip_setup,
         };
+        let plan = super::fleet_view::plan_fanout(&prompt, start.branch.as_deref(), &dialog.fanout_agents, dialog.fanout_count);
         self.chrome.new_task = None;
-        self.create_prompted_task(prompt, start, cx);
+        self.create_prompted_tasks(prompt, start, plan, cx);
         cx.notify();
     }
 
@@ -180,6 +187,51 @@ impl Workspace {
                 body = body
                     .child(field(i18n::t!("fleet.new_task_branch_label"), &dialog.branch_editor))
                     .child(field(i18n::t!("fleet.new_task_base_label"), &dialog.base_editor));
+                // 並べて比べる（O23）: 選んだエージェントごとに Task を切る。選ばなければ既定で 1 本。
+                let chip = |id: (&'static str, usize), label: String, selected: bool| {
+                    div().id(id).px(px(8.)).h(px(22.)).flex().items_center().rounded(px(5.)).text_size(px(11.)).cursor_pointer()
+                        .when(selected, |chip| chip.bg(self.theme.bg3).text_color(self.theme.fg0))
+                        .when(!selected, |chip| chip.border_1().border_color(self.theme.border).text_color(self.theme.fg1)
+                            .hover(|style| style.text_color(self.theme.fg0)))
+                        .child(SharedString::from(label))
+                };
+                let mut agents = div().flex().flex_wrap().gap(px(4.));
+                for (index, label) in acp_client::AGENT_LABELS.iter().enumerate() {
+                    let selected = dialog.fanout_agents.iter().any(|agent| agent == label);
+                    agents = agents.child(chip(("new-task-fanout-agent", index), label.to_string(), selected)
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(dialog) = this.chrome.new_task.as_mut() {
+                                if let Some(position) = dialog.fanout_agents.iter().position(|agent| agent == label) {
+                                    dialog.fanout_agents.remove(position);
+                                } else {
+                                    dialog.fanout_agents.push(label.to_string());
+                                }
+                            }
+                            cx.notify();
+                        })));
+                }
+                let mut counts = div().flex().items_center().gap(px(4.))
+                    .child(div().text_size(px(10.5)).text_color(self.theme.fg2).child(SharedString::from(i18n::t!("fleet.new_task_fanout_each"))));
+                for count in 1..=3usize {
+                    counts = counts.child(chip(("new-task-fanout-count", count), count.to_string(), dialog.fanout_count == count)
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(dialog) = this.chrome.new_task.as_mut() { dialog.fanout_count = count; }
+                            cx.notify();
+                        })));
+                }
+                let plan = super::fleet_view::plan_fanout(&prompt, None, &dialog.fanout_agents, dialog.fanout_count);
+                body = body.child(div().flex().flex_col().gap(px(5.))
+                    .child(div().text_size(px(10.5)).text_color(self.theme.fg2).child(SharedString::from(i18n::t!("fleet.new_task_fanout"))))
+                    .child(agents)
+                    .child(counts)
+                    .when(plan.len() > 1, |column| column.child(
+                        div().text_size(px(11.)).text_color(self.theme.fg1).child(SharedString::from(i18n::t!(
+                            "fleet.new_task_fanout_preview",
+                            "count" => plan.len(),
+                            "names" => plan.iter().filter_map(|task| task.title_suffix.clone()).collect::<Vec<_>>().join(" · ")
+                        ))))));
                 // 準備スクリプトを今回は流さない（O20・スクリプトがある時だけ）。
                 if dialog.setup_script_present {
                     let skip = dialog.skip_setup;

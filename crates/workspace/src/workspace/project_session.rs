@@ -823,6 +823,7 @@ impl Workspace {
                 hide_external_worktrees: false,
                 adopt_as_task: std::collections::HashSet::new(),
                 pending_task_prompts: HashMap::new(),
+                pending_task_agents: HashMap::new(),
                 fleet_cell_menu: None,
                 fleet_bottom_view: FleetBottomView::News,
                 agent_full_screen: std::env::var_os("NECODER_AGENT_FULLSCREEN").is_some(),
