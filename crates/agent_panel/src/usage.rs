@@ -224,6 +224,15 @@ pub struct UsageKey {
     pub profile: SharedString,
 }
 
+/// 使用量の鍵の「場所」: 手元は空、SSH 先はホストの表示名（R08）。Host を呼ぶので描画からは使わない。
+pub fn host_label(host: &dyn host::Host) -> SharedString {
+    if host.is_remote() {
+        SharedString::from(host.display_name().to_string())
+    } else {
+        SharedString::default()
+    }
+}
+
 /// 認証の置き場を表す env（値はディレクトリのパス。鍵やトークンの env は見ない）。
 const AUTH_PROFILE_ENV: [&str; 2] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"];
 
@@ -237,8 +246,9 @@ impl UsageKey {
         }
     }
 
-    /// エージェントを動かしている場所と、設定の認証の置き場から作る。
-    pub fn for_agent(agent: SharedString, host: &dyn host::Host, cx: &App) -> Self {
+    /// エージェントを動かしている場所（[`host_label`]）と、設定の認証の置き場から作る。
+    /// Host は呼ばない（描画からも呼ばれる）。
+    pub fn for_agent(agent: SharedString, host: SharedString, cx: &App) -> Self {
         let profile = acp_client::AGENTS
             .iter()
             .find(|candidate| candidate.label == agent.as_ref())
@@ -252,11 +262,7 @@ impl UsageKey {
             .unwrap_or_default();
         Self {
             agent,
-            host: if host.is_remote() {
-                SharedString::from(host.display_name().to_string())
-            } else {
-                SharedString::default()
-            },
+            host,
             profile,
         }
     }
@@ -381,7 +387,7 @@ pub fn refresh_codex_limits(force: bool, cx: &mut App) {
             // 読みに行ったのは手元の codex（設定の CODEX_HOME を渡した）。
             let key = UsageKey::for_agent(
                 SharedString::from(codex_label()),
-                host::LocalHost::shared().as_ref(),
+                SharedString::default(),
                 cx,
             );
             let limits = cx.default_global::<UsageLimits>();

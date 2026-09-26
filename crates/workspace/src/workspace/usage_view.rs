@@ -43,6 +43,8 @@ impl Workspace {
     /// statusbar の使用量チップ: いまのスレッドのエージェントの 5 時間枠・週枠（と上限に近い窓）。
     /// 値が無ければ出さない。
     pub(crate) fn render_usage_chip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        // 値の置き場が無ければ鍵も作らない（描画の手間を増やさない）。
+        cx.try_global::<UsageLimits>()?;
         let key = self.agent_panel.read(cx).active_usage_key(cx)?;
         let limits = cx.try_global::<UsageLimits>()?.get(&key)?.clone();
         let now_secs = agent_panel::now_unix_ms() / 1000;
