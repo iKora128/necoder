@@ -20,6 +20,8 @@ pub(crate) enum ToastAction {
     },
     /// トーストに収まらない全文（git フックの出力など）を読み取り専用タブで開く。
     OpenDetails { title: SharedString, text: String },
+    /// 手元に置いたもの（ダウンロードしたファイル・O37）を Finder で見せる。
+    Reveal { path: PathBuf },
 }
 
 /// トーストが消えるまで。失敗の知らせは理由を読む時間が要るので長めにする。
@@ -585,6 +587,18 @@ impl Workspace {
         self.push_toast_entry(text, color, action, FAILURE_TOAST_LIFETIME, cx);
     }
 
+    /// 手元に置いたもの（`path`）の知らせ。押すと Finder で見せる。
+    pub(crate) fn push_toast_revealing(
+        &mut self,
+        text: SharedString,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let color = self.accent();
+        let action = Some(ToastAction::Reveal { path });
+        self.push_toast_entry(text, color, action, TOAST_LIFETIME, cx);
+    }
+
     fn push_toast_entry(
         &mut self,
         text: SharedString,
@@ -773,6 +787,28 @@ impl Workspace {
                                                 window,
                                                 cx,
                                             );
+                                        },
+                                    ),
+                                );
+                        }
+                        // 手元に置いたもの（ダウンロード）は押すと Finder で見せる。
+                        Some(ToastAction::Reveal { path }) => {
+                            let path = path.clone();
+                            toast = toast
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(SharedString::from(i18n::t!("toast.reveal"))),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(
+                                        move |_this, _event: &MouseDownEvent, _window, cx| {
+                                            cx.stop_propagation();
+                                            cx.reveal_path(&path);
                                         },
                                     ),
                                 );

@@ -704,6 +704,18 @@ explorer:
   ctx_duplicate: 複製
   ctx_trash: ゴミ箱に入れる
   ctx_copy_path: パスをコピー
+  ctx_download: ダウンロード…
+  ctx_upload_into: このフォルダへアップロード…
+  ctx_upload_beside: 同じフォルダへアップロード…
+  upload_prompt: アップロード
+  uploading_one: "「%{name}」をアップロードしています…"
+  uploading_many: "%{n} 個の項目をアップロードしています…"
+  uploaded: "%{n} 個のファイル（%{size}）をアップロードしました"
+  upload_failed: "アップロードできませんでした: %{error}"
+  downloading: "「%{name}」をダウンロードしています…"
+  downloaded: "「%{name}」に保存しました（%{n} 個のファイル・%{size}）"
+  download_failed: "ダウンロードできませんでした: %{error}"
+  transfer_skipped: "（シンボリックリンクなど %{n} 個は飛ばしました）"
   ctx_search_folder: フォルダ内を検索
   ctx_stage: ステージ
   ctx_discard: 変更を破棄…
@@ -894,6 +906,7 @@ link:
   remote_localhost_details: "%{url} は SSH 先（%{host}）の localhost です。necoder はまだポート転送をしません。\n\n手元のターミナルで次を実行してから、手元の http://localhost:%{port} を開いてください:\n\n    ssh -N -L %{port}:localhost:%{port} %{host}\n\n（手元で同じポートを使っているアプリがあれば、左の %{port} を空いている番号に変えます）\n"
 toast:
   open_details: 全文 ›
+  reveal: Finder で表示 ›
 review:
   tab_title: 変更レビュー
   compare: 比較
