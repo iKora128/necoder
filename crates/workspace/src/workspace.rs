@@ -3851,6 +3851,29 @@ mod tests {
             "開いているファイルの行でもエディタへ渡る"
         );
 
+        // Escape: 開いている右クリックメニューを先に閉じ、次でエディタへ戻る。
+        cx.simulate_click(empty, gpui::Modifiers::none());
+        let menu_target = project.join("a.txt");
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.show_context_menu(menu_target, false, empty, cx)
+        });
+        cx.simulate_keystrokes("escape");
+        let menu_open = workspace.read_with(cx, |workspace, cx| {
+            workspace.explorer_context_menu(cx).is_some()
+        });
+        assert!(!menu_open, "Escape はまずメニューを閉じる");
+        assert_eq!(
+            focus_state(cx),
+            (true, false),
+            "フォーカスはエクスプローラのまま"
+        );
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            focus_state(cx),
+            (false, true),
+            "次の Escape でエディタへ戻る"
+        );
+
         std::fs::remove_dir_all(&root).expect("後片付け");
     }
 

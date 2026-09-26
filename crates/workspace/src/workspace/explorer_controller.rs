@@ -24,7 +24,8 @@ impl Workspace {
         window.focus(&handle, cx);
     }
 
-    /// エクスプローラにフォーカスがある間のキー。Escape で作業面へ戻る（レールと同じ抜け口）。
+    /// エクスプローラにフォーカスがある間のキー。Escape は開いているもの（破棄の確認・右クリック
+    /// メニュー）を先に閉じ、何も無ければ作業面へ戻る（レールと同じ抜け口）。
     pub(crate) fn on_explorer_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -34,10 +35,17 @@ impl Workspace {
         if event.keystroke.key != "escape" || event.keystroke.modifiers.modified() {
             return;
         }
-        if self.explorer_naming(cx).is_some() || self.explorer_context_menu(cx).is_some() {
-            return; // 命名とメニューは自分の Escape で閉じる
+        if self.explorer_naming(cx).is_some() {
+            return; // 命名は自分の Escape で取り消す（`on_naming_key_down`）
         }
-        self.focus_session_surface(false, false, window, cx);
+        if self.explorer.read(cx).discard_confirm().is_some() {
+            self.cancel_discard(cx);
+        } else if self.explorer_context_menu(cx).is_some() {
+            self.hide_context_menu(cx);
+            cx.notify();
+        } else {
+            self.focus_session_surface(false, false, window, cx);
+        }
         cx.stop_propagation();
     }
 
