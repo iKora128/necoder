@@ -3303,7 +3303,10 @@
   直した（下の学び）。その上に、＋ Task の**作成中の行**（段の表示・取り消し・やり直し・O20 / A03）・
   ターミナルの**文字の大きさ / フォント / 遡れる行数 / カーソル**（設定と設定画面・開いている端末にもすぐ効く・O25）・
   **シェルと引数**（`terminal_shell`・手元の端末だけ・O25）・Fleet サイドバーの**複数選択**（⌘ / ⇧ クリック →
-  まとめて休ませる・舞台に並べる・片付けへ・O21 / A11）。
+  まとめて休ませる・舞台に並べる・片付けへ・O21 / A11）・**統合で競合したら Task のエージェントに直させる**
+  （`MergeConflicts`・O19 / E15）・**UI とコードの書体**（`ui_font_family` / `code_font_family`・直書き 30 か所を
+  `ui::ui_font` / `ui::code_font` に・O27）・**CSV / TSV の表**（⌘⇧V・O29）・**Quick Commands**（`quick_commands`・
+  ターミナルの ▶・O25）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3325,7 +3328,14 @@
   - CLA: クラウドのコミットの著者は `Claude <noreply@anthropic.com>`（GitHub のアカウントに紐付かない）で、
     `cla.yml` の allowlist に無いので未署名扱いになる。エージェントは署名しない。本人の判断待ち。
   - ディスク: `target/debug/deps` を成果物ごとに新しい 2 版だけ残して 5 GB、`incremental/` で 4 GB 空く。
-    途中で空きが 0 になり、コマンドの出力（`/tmp` の同じ枠）まで失われた。
+    途中で空きが 0 になり、コマンドの出力（`/tmp` の同じ枠）まで失われた。`cargo test --workspace` 1 回で
+    5〜7 GB 増えるので、全体のテストの前に毎回刈る。
+  - `#[cfg(feature = "…")]` の中の行は、その feature を付けないと型もパスも検査されない（settings の
+    `remote-preview` の中で、依存に無い `ui::` を書いても通ってしまった）。feature 付きの example は
+    `cargo check -p settings --features remote-preview --examples` で確かめる。
+  - 描画を伴うテストは `cx.update(|window, cx| window.draw(cx).clear(cx))` で 1 回描かせると、レイアウトで
+    落ちる類いの誤りを拾える（CSV の表で使った）。
 - 検証: Linux の `cargo check --workspace --all-targets`（`-D warnings`）と Windows 向けの同じ check は警告 0。
   `cargo test --workspace` 845 通過・落ちるのは Linux で元から落ちる 2 件だけ。#30 の CI は 243152f で CLA 以外すべて緑。
-- 次: 実機（mac）で作成中の行・ターミナルの文字の大きさ（行と列の測り直し）・複数選択の帯を確かめる。CLA の判断。
+- 次: 実機（mac）で作成中の行・ターミナルの文字の大きさ（行と列の測り直し）・複数選択の帯・書体の差し替え
+  （エディタのヒットテストがずれないか）・CSV の表（横スクロールと見出しの固定）・Quick Commands の帯を確かめる。CLA の判断。
