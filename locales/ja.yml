@@ -546,6 +546,12 @@ settings:
   tabs_view_list: 縦リスト
   pref_system_notifications: OS の通知
   pref_system_notifications_sub: 見ていない窓のエージェントが終わった・止まった時に通知センターへ出します（押すとそのスレッドへ）
+  account_label: "アカウント:"
+  account_default: 既定
+  account_elsewhere: （ほかの場所）
+  account_add: ＋ 新しいアカウント
+  account_login: ログイン
+  account_hint: 切り替えは次に起動するエージェントから（動いているスレッドは今のアカウントのまま）。アカウントの資格情報は necoder が読まず、公式 CLI が扱います
   pref_confirm_quit: 終了時の確認
   pref_confirm_quit_sub: ⌘Q・窓を閉じる時、エージェントや端末が動いていれば「隠して動かし続ける」を選べます
   confirm_quit_running: 動いている時だけ

@@ -124,6 +124,24 @@ pub fn set_agent_config_default(
     })
 }
 
+/// `agent_servers.<agent_id>.env.<var>` を更新して**即適用 + 永続化**する（`None` = 消す・O14）。
+pub fn set_agent_server_env(
+    cx: &mut App,
+    agent_id: &str,
+    var: &str,
+    value: Option<&str>,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_agent_server_env(path, agent_id, var, value)
+    })
+}
+
+/// アカウントのフォルダを指してログインを流すコマンド（POSIX シェル向け・パスは単引用符で囲む）。
+pub(crate) fn account_login_command(var: &str, directory: &Path, login: &str) -> String {
+    let quoted = directory.to_string_lossy().replace('\'', "'\\''");
+    format!("{var}='{quoted}' {login}")
+}
+
 /// `<section>.<key>`（`chat.directory` など 1 段の入れ子）を更新して**即適用 + 永続化**する。
 /// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。
 pub fn set_nested_user_value(
@@ -332,6 +350,9 @@ pub struct SettingsView {
     mcp_filter_source: Option<acp_client::mcp::McpSource>,
     /// MCP ページの絞り込み: 有効なものだけ表示する。
     mcp_filter_enabled_only: bool,
+    /// エージェントごとのアカウントのフォルダ名（`acp_client::AGENTS` と同じ並び・O14）。
+    /// 描画ごとに fs を読まないよう、開き直すたび / 作るたびに [`Self::refresh_lists`] で読む。
+    accounts: Vec<Vec<String>>,
     /// ターミナル用 `ne` シム（cli_shim crate）の設置状態。`Some(実体パス)` = 設置済み。
     cli_shim_target: Option<PathBuf>,
     /// `ne` シムの設置/削除を実行中（連打防止・「実行中…」表示）。
@@ -434,6 +455,7 @@ impl SettingsView {
             mcp_servers: Vec::new(),
             mcp_filter_source: None,
             mcp_filter_enabled_only: false,
+            accounts: Vec::new(),
             cli_shim_target: None,
             cli_shim_busy: false,
             cli_shim_error: None,
@@ -462,6 +484,77 @@ impl SettingsView {
     fn refresh_lists(&mut self, cx: &mut Context<Self>) {
         self.themes = theme_core::available_themes(themes_dir().as_deref());
         self.mcp_servers = mcp_servers(cx);
+        self.accounts = acp_client::AGENTS
+            .iter()
+            .map(|agent| {
+                settings_core::accounts_root(agent.id)
+                    .map(|root| settings_core::list_accounts(&root))
+                    .unwrap_or_default()
+            })
+            .collect();
+    }
+
+    // ── アカウント切替（O14）─────────────────────────────────────────────────────
+
+    /// このエージェントで使うアカウントを選ぶ（`None` = 既定のアカウント＝環境変数を消す）。
+    /// 効くのは次に起動するエージェントから（動いているスレッドは今のアカウントのまま）。
+    fn use_account(
+        &mut self,
+        agent_id: &'static str,
+        account: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(var) = settings_core::account_env_var(agent_id) else {
+            return;
+        };
+        let directory = account
+            .and_then(|name| settings_core::accounts_root(agent_id).map(|root| root.join(name)));
+        let value = directory
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let result = set_agent_server_env(cx, agent_id, var, value.as_deref());
+        self.report_save(result, cx);
+        cx.notify();
+    }
+
+    /// ＋ 新しいアカウント: 置き場に空のフォルダを作って選び、公式 CLI のログインをターミナルで流す。
+    fn add_account(&mut self, agent_index: usize, cx: &mut Context<Self>) {
+        let Some(agent) = acp_client::AGENTS.get(agent_index) else {
+            return;
+        };
+        let Some(root) = settings_core::accounts_root(agent.id) else {
+            return;
+        };
+        let existing = self.accounts.get(agent_index).cloned().unwrap_or_default();
+        let name = settings_core::next_account_name(&existing);
+        let directory = root.join(&name);
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(format!(
+                "{}: {error}",
+                directory.display()
+            ))));
+            return;
+        }
+        self.refresh_lists(cx);
+        self.use_account(agent.id, Some(name), cx);
+        self.login_account(agent_index, &directory, cx);
+    }
+
+    /// 選んだアカウントのフォルダで公式 CLI のログインを流す（ターミナル・資格情報は CLI が自分で扱う）。
+    fn login_account(&mut self, agent_index: usize, directory: &Path, cx: &mut Context<Self>) {
+        let Some(agent) = acp_client::AGENTS.get(agent_index) else {
+            return;
+        };
+        let (Some(var), Some(login)) = (
+            settings_core::account_env_var(agent.id),
+            agent.login_command(),
+        ) else {
+            return;
+        };
+        self.watch_agent_progress(agent_index, cx);
+        cx.emit(SettingsViewEvent::RunCommand(account_login_command(
+            var, directory, login,
+        )));
     }
 
     /// 設定ホームを開く / 開き直す時に呼ぶ。一覧はここで即座に読み直し（`themes/` に JSON を足した
@@ -1676,8 +1769,141 @@ impl SettingsView {
                         },
                     ),
             );
+            // アカウント切替（O14・Claude Code / Codex）。ログインは POSIX シェルで流すので Windows は未対応。
+            if let Some(var) =
+                settings_core::account_env_var(agent.id).filter(|_| cli_installed && !cfg!(windows))
+            {
+                rows = rows.child(self.account_line(index, agent.id, var, settings, cx));
+            }
         }
         rows
+    }
+
+    /// 1 エージェント分のアカウントの行: 既定 / 作ったアカウント / ＋ 新しいアカウント / ログイン。
+    /// 選ぶと `agent_servers.<id>.env.<var>` を書く（資格情報は読まない・置き場を指すだけ）。
+    fn account_line(
+        &self,
+        index: usize,
+        agent_id: &'static str,
+        var: &'static str,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme.clone();
+        let current = settings
+            .agent_servers
+            .get(agent_id)
+            .and_then(|server| server.env().get(var))
+            .cloned();
+        let root = settings_core::accounts_root(agent_id);
+        let accounts = self.accounts.get(index).cloned().unwrap_or_default();
+        let selected = current.as_deref().and_then(|path| {
+            let root = root.as_ref()?;
+            let name = Path::new(path)
+                .strip_prefix(root)
+                .ok()?
+                .to_str()?
+                .to_string();
+            accounts.contains(&name).then_some(name)
+        });
+        let chip = |id: (&'static str, usize), label: String, chosen: bool| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .h(px(20.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .text_size(px(11.))
+                .cursor_pointer()
+                .when(chosen, |chip| chip.bg(theme.bg3).text_color(theme.fg0))
+                .when(!chosen, |chip| {
+                    chip.border_1()
+                        .border_color(theme.border)
+                        .text_color(theme.fg1)
+                        .hover(|style| style.text_color(theme.fg0))
+                })
+                .child(SharedString::from(label))
+        };
+        let mut line = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.))
+            .pl(px(48.))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.account_label"))),
+            )
+            .child(
+                chip(
+                    ("account-default", index),
+                    i18n::t!("settings.account_default"),
+                    current.is_none(),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| view.use_account(agent_id, None, cx)),
+                ),
+            );
+        for (position, name) in accounts.iter().enumerate() {
+            let chosen = selected.as_deref() == Some(name.as_str());
+            let account = name.clone();
+            line = line.child(
+                chip(("account", index * 100 + position), name.clone(), chosen).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| {
+                        view.use_account(agent_id, Some(account.clone()), cx)
+                    }),
+                ),
+            );
+        }
+        // settings.json で necoder の置き場の外を指している（手で書いた）: 選ばれていることだけ見せる。
+        if current.is_some() && selected.is_none() {
+            line = line.child(chip(
+                ("account-elsewhere", index),
+                i18n::t!("settings.account_elsewhere"),
+                true,
+            ));
+        }
+        line = line.child(
+            chip(
+                ("account-add", index),
+                i18n::t!("settings.account_add"),
+                false,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, _, _window, cx| view.add_account(index, cx)),
+            ),
+        );
+        if let Some(path) = current.clone() {
+            line = line.child(
+                div()
+                    .id(("account-login", index))
+                    .px(px(6.))
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg0))
+                    .child(SharedString::from(i18n::t!("settings.account_login")))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| {
+                            view.login_account(index, Path::new(&path), cx)
+                        }),
+                    ),
+            );
+        }
+        line.child(
+            div()
+                .w_full()
+                .text_size(px(10.))
+                .text_color(theme.fg2)
+                .child(SharedString::from(i18n::t!("settings.account_hint"))),
+        )
     }
 
     // ── ページの器（左ナビ + ページ面）──────────────────────────────────────────
@@ -2686,6 +2912,23 @@ fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_login_quotes_the_folder_for_the_shell() {
+        assert_eq!(
+            account_login_command(
+                "CLAUDE_CONFIG_DIR",
+                Path::new("/Users/me/Library/Application Support/necoder/accounts/claude/account-2"),
+                "claude auth login"
+            ),
+            "CLAUDE_CONFIG_DIR='/Users/me/Library/Application Support/necoder/accounts/claude/account-2' claude auth login"
+        );
+        assert_eq!(
+            account_login_command("CODEX_HOME", Path::new("/tmp/it's"), "codex login"),
+            "CODEX_HOME='/tmp/it'\\''s' codex login",
+            "単引用符は閉じて逃がしてから開き直す"
+        );
+    }
 
     #[test]
     fn captain_button_appoints_switches_and_dismisses() {
