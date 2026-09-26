@@ -213,7 +213,7 @@ Esc で閉じると検索を開いた位置へ戻る。× で閉じると現在�
 ## 6. 言語機能（LSP）
 
 言語サーバがインストールされていれば自動で使う（例: TypeScript は `typescript-language-server`）。
-シンタックスハイライトは Rust / TS / TSX / JS / Python / Go / JSON / YAML / TOML / HTML / CSS に対応。
+シンタックスハイライトは Rust / TS / TSX / JS / Python / Go / JSON / YAML / TOML / HTML / CSS / Markdown / Shell / C / C++ / Java / Ruby / PHP / SQL / Dockerfile / Lua / Elixir / Zig / Makefile / CMake / Protocol Buffers / GraphQL に対応（`Dockerfile`・`Makefile`・`CMakeLists.txt`・`Gemfile` などのファイル名でも判定する）。
 
 | キー | 動作 |
 |---|---|

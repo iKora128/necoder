@@ -1564,6 +1564,21 @@ fn file_type_color(name: &str, theme: &Theme) -> Hsla {
         }
         Some(lang::LanguageId::Html | lang::LanguageId::Css) => syntax.keyword,
         Some(lang::LanguageId::C | lang::LanguageId::Cpp) => syntax.type_,
+        // O30 で足したハイライト言語は、専用アイコンを用意するまで従来どおり既定色。
+        Some(
+            lang::LanguageId::Java
+            | lang::LanguageId::Ruby
+            | lang::LanguageId::Php
+            | lang::LanguageId::Sql
+            | lang::LanguageId::Dockerfile
+            | lang::LanguageId::Lua
+            | lang::LanguageId::Elixir
+            | lang::LanguageId::Zig
+            | lang::LanguageId::Make
+            | lang::LanguageId::CMake
+            | lang::LanguageId::Protobuf
+            | lang::LanguageId::GraphQl,
+        ) => theme.fg1,
         None if matches!(
             extension.as_str(),
             "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico"
@@ -1612,6 +1627,21 @@ fn file_icon_path(name: &str, is_dir: bool, is_expanded: bool) -> &'static str {
         Some(lang::LanguageId::Bash) => "icons/file-shell.svg",
         Some(lang::LanguageId::C) => "icons/file-c.svg",
         Some(lang::LanguageId::Cpp) => "icons/file-cpp.svg",
+        Some(lang::LanguageId::Dockerfile) => "icons/file-docker.svg",
+        // O30 で足したハイライト言語は、専用アイコンを用意するまで従来どおり汎用ファイル。
+        Some(
+            lang::LanguageId::Java
+            | lang::LanguageId::Ruby
+            | lang::LanguageId::Php
+            | lang::LanguageId::Sql
+            | lang::LanguageId::Lua
+            | lang::LanguageId::Elixir
+            | lang::LanguageId::Zig
+            | lang::LanguageId::Make
+            | lang::LanguageId::CMake
+            | lang::LanguageId::Protobuf
+            | lang::LanguageId::GraphQl,
+        ) => "icons/file-generic.svg",
         None if matches!(
             extension,
             "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "bmp" | "avif"
