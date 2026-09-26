@@ -3624,6 +3624,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// O20: `.worktreeinclude` に書かれ、かつ git が無視しているファイルだけを新しい Task へ持ち込む。
+    #[test]
+    fn worktree_include_brings_ignored_files_into_new_tasks() {
+        let base = scratch("worktree_include");
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join("secrets")).unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join(".gitignore"), ".env\nsecrets/\nbuild/\n*.log\n").unwrap();
+        std::fs::write(
+            root.join(".worktreeinclude"),
+            // `.gitignore` と同じ約束: 否定で戻すなら親はディレクトリごとでなく `secrets/*` と書く。
+            "# Task へ持ち込む\n.env\nsecrets/*\nnotes.txt\n!secrets/skip.json\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("a.txt"), "1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        std::fs::write(root.join(".env"), "TOKEN=local\n").unwrap();
+        std::fs::write(root.join("secrets/key.json"), "{}\n").unwrap();
+        std::fs::write(root.join("secrets/skip.json"), "{}\n").unwrap();
+        std::fs::write(root.join("build/out.bin"), "bin").unwrap();
+        std::fs::write(root.join("debug.log"), "log").unwrap();
+        // 無視されていない追跡外（書きかけ）は、`.worktreeinclude` に書いてあっても持ち込まない。
+        std::fs::write(root.join("notes.txt"), "draft").unwrap();
+
+        let (target, _branch, failure) =
+            create_task_with_on(&LocalHost, &root, "Use env", &TaskStart::default()).unwrap();
+        assert_eq!(failure, None);
+        assert_eq!(
+            std::fs::read_to_string(target.join(".env")).unwrap(),
+            "TOKEN=local\n"
+        );
+        assert!(target.join("secrets/key.json").exists());
+        assert!(
+            !target.join("secrets/skip.json").exists(),
+            "否定（!）も効く"
+        );
+        assert!(
+            !target.join("build/out.bin").exists(),
+            "書いていない物は写さない"
+        );
+        assert!(!target.join("debug.log").exists());
+        assert!(
+            !target.join("notes.txt").exists(),
+            "無視されていない物は写さない"
+        );
+
+        // 既にある物は上書きしない・上限を超えた分は数えて写さない。
+        let second = base.join("second");
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join(".env"), "TOKEN=mine\n").unwrap();
+        let result =
+            copy_worktree_includes_within_on(&LocalHost, &root, &second, 1, u64::MAX).unwrap();
+        assert_eq!(result.already_there, 1);
+        assert_eq!(result.copied, vec![PathBuf::from("secrets/key.json")]);
+        assert_eq!(result.over_limit, 0);
+        assert_eq!(
+            std::fs::read_to_string(second.join(".env")).unwrap(),
+            "TOKEN=mine\n"
+        );
+        let third = base.join("third");
+        std::fs::create_dir_all(&third).unwrap();
+        let result =
+            copy_worktree_includes_within_on(&LocalHost, &root, &third, 1, u64::MAX).unwrap();
+        assert_eq!(result.copied.len(), 1);
+        assert_eq!(result.over_limit, 1, "件数の上限");
+
+        // `.worktreeinclude` が無ければ何もしない。
+        std::fs::remove_file(root.join(".worktreeinclude")).unwrap();
+        let fourth = base.join("fourth");
+        std::fs::create_dir_all(&fourth).unwrap();
+        assert_eq!(
+            copy_worktree_includes_on(&LocalHost, &root, &fourth).unwrap(),
+            WorktreeIncludes::default()
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn task_worktrees_sit_beside_the_repository() {
         let dir = task_worktree_dir(Path::new("/work/necoder")).unwrap();
@@ -3986,7 +4075,7 @@ pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str) -> Result
         number += 1;
     };
     create_task_worktree_on(host, root, &target, &branch)?;
-    let failure = run_task_setup_on(host, root, &target, &branch).err().map(|error| format!("{error:#}"));
+    let failure = prepare_task_worktree_on(host, root, &target, &branch).err().map(|error| format!("{error:#}"));
     Ok((target, branch, failure))
 }
 
@@ -4025,7 +4114,7 @@ pub fn create_task_with_on(
         // 名前は自動・起点だけ指定。
         let (target, branch) = free_task_target(host, root, &task_slug(title))?;
         create_task_worktree_from_on(host, root, &target, &branch, base.unwrap_or("HEAD"))?;
-        let failure = run_task_setup_on(host, root, &target, &branch)
+        let failure = prepare_task_worktree_on(host, root, &target, &branch)
             .err()
             .map(|error| format!("{error:#}"));
         return Ok((target, branch, failure));
@@ -4047,7 +4136,7 @@ pub fn create_task_with_on(
         anyhow::ensure!(valid, "ブランチ名に使えない文字があります: {branch}");
         create_task_worktree_from_on(host, root, &target, branch, base.unwrap_or("HEAD"))?;
     }
-    let failure = run_task_setup_on(host, root, &target, branch)
+    let failure = prepare_task_worktree_on(host, root, &target, branch)
         .err()
         .map(|error| format!("{error:#}"));
     Ok((target, branch.to_string(), failure))
@@ -4095,6 +4184,153 @@ pub fn create_task_worktree_from_on(
         git_fail_message(&output)
     );
     Ok(())
+}
+
+/// `.worktreeinclude`（統合先のルート・`.gitignore` と同じ書き方）の置き場所（O20・A05）。
+pub fn worktree_include_file(root: &Path) -> PathBuf {
+    root.join(".worktreeinclude")
+}
+
+/// `.worktreeinclude` で持ち込む量の上限（件数・合計バイト）。`node_modules` のような大物を
+/// 1 ファイルずつ写さない（それは準備スクリプトの `pnpm install` や symlink の仕事）。
+pub const WORKTREE_INCLUDE_MAX_FILES: usize = 500;
+pub const WORKTREE_INCLUDE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `.worktreeinclude` で持ち込んだ結果。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorktreeIncludes {
+    /// 写したファイル（統合先からの相対パス）。
+    pub copied: Vec<PathBuf>,
+    /// 新しい worktree に既にあったので写さなかった数（上書きしない）。
+    pub already_there: usize,
+    /// 上限を超えたので写さなかった数。
+    pub over_limit: usize,
+}
+
+/// `.worktreeinclude` に書かれ、**かつ git が無視している**追跡外のファイルを、統合先 `main` から
+/// 新しい worktree `target` へ写す（Claude Code・Orca と同じ約束。`.env` のように commit しない
+/// 物を Task へ持ち込む）。追跡中のファイルは checkout で既に入り、無視されていない追跡外の
+/// ファイル（書きかけのソース）は持ち込まない。`.worktreeinclude` が無ければ何もしない。
+///
+/// 一致の判定は git 自身（`git ls-files --others --ignored`）に任せる＝否定（`!`）やディレクトリの
+/// 書き方も `.gitignore` とまったく同じに効く。書き込みは `target` を開き直した host で行う
+/// （SSH の host は project の外へ書けない）。
+pub fn copy_worktree_includes_on(
+    host: &dyn Host,
+    main: &Path,
+    target: &Path,
+) -> Result<WorktreeIncludes> {
+    copy_worktree_includes_within_on(
+        host,
+        main,
+        target,
+        WORKTREE_INCLUDE_MAX_FILES,
+        WORKTREE_INCLUDE_MAX_BYTES,
+    )
+}
+
+fn copy_worktree_includes_within_on(
+    host: &dyn Host,
+    main: &Path,
+    target: &Path,
+    max_files: usize,
+    max_bytes: u64,
+) -> Result<WorktreeIncludes> {
+    let include = worktree_include_file(main);
+    if host.metadata(&include).is_err() {
+        return Ok(WorktreeIncludes::default());
+    }
+    let list = |extra: &str| -> Result<Vec<PathBuf>> {
+        let output = run_git(
+            host,
+            main,
+            ["ls-files", "-z", "--others", "--ignored", extra],
+        )?;
+        anyhow::ensure!(
+            output.success(),
+            "git ls-files に失敗: {}",
+            git_fail_message(&output)
+        );
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).into_owned()))
+            .collect())
+    };
+    let wanted = list(&format!("--exclude-from={}", include.to_string_lossy()))?;
+    if wanted.is_empty() {
+        return Ok(WorktreeIncludes::default());
+    }
+    let ignored: std::collections::HashSet<PathBuf> =
+        list("--exclude-standard")?.into_iter().collect();
+    let mut files: Vec<PathBuf> = wanted
+        .into_iter()
+        .filter(|relative| ignored.contains(relative))
+        .collect();
+    files.sort();
+    let target_host = host.host_for_project(target)?;
+    let mut result = WorktreeIncludes::default();
+    let mut total = 0u64;
+    for relative in files {
+        let source = main.join(&relative);
+        let destination = target.join(&relative);
+        if target_host.metadata(&destination).is_ok() {
+            result.already_there += 1;
+            continue;
+        }
+        let size = host.metadata(&source).map(|metadata| metadata.len)?;
+        if result.copied.len() >= max_files || total + size > max_bytes {
+            result.over_limit += 1;
+            continue;
+        }
+        let content = host
+            .read_file(&source)
+            .with_context(|| format!("読めない: {}", source.display()))?;
+        target_host
+            .write_file(
+                &destination,
+                &content.bytes,
+                host::WriteCondition::NotExists,
+            )
+            .with_context(|| format!("書けない: {}", destination.display()))?;
+        total += size;
+        result.copied.push(relative);
+    }
+    Ok(result)
+}
+
+/// 作ったばかりの Task worktree を使える状態にする: `.worktreeinclude` の持ち込み → 準備スクリプト
+/// （スクリプトは持ち込んだファイルを前提にできる）。持ち込みに失敗しても準備は走らせ、両方の失敗を
+/// まとめて返す（台帳の failed に残る）。上限で写さなかった分は失敗にしない（標準エラーに残す）。
+pub fn prepare_task_worktree_on(
+    host: &dyn Host,
+    main: &Path,
+    target: &Path,
+    branch: &str,
+) -> Result<()> {
+    let includes = copy_worktree_includes_on(host, main, target);
+    if let Ok(includes) = &includes {
+        if includes.over_limit > 0 {
+            eprintln!(
+                ".worktreeinclude: 上限（{WORKTREE_INCLUDE_MAX_FILES} 件・{} MiB）を超えた {} 件は写していません: {}",
+                WORKTREE_INCLUDE_MAX_BYTES / (1024 * 1024),
+                includes.over_limit,
+                target.display()
+            );
+        }
+    }
+    let setup = run_task_setup_on(host, main, target, branch);
+    match (includes, setup) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => {
+            Err(error.context(".worktreeinclude のファイルを持ち込めませんでした"))
+        }
+        (Ok(_), Err(error)) => Err(error),
+        (Err(include_error), Err(setup_error)) => Err(anyhow::anyhow!(
+            ".worktreeinclude のファイルを持ち込めませんでした: {include_error:#}\n{setup_error:#}"
+        )),
+    }
 }
 
 /// 準備スクリプト（§6.2）を新 worktree を cwd に 1 回流す。無ければ何もしない。

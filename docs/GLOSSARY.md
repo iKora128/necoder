@@ -44,6 +44,7 @@
 | **次へ**（phase に応じた唯一の主操作ボタン） | `next_action` | （phase 別の語） | （phase 別） |
 | **＋ Task**（1 プロンプト = 1 worktree のダイアログ） | `new_task_dialog` | ＋ Task | + Task |
 | **準備スクリプト**（worktree 作成直後に 1 回） | `worktree_setup`（`.necoder/worktree-setup.sh` / `task.env`） | 準備 | Setup |
+| **`.worktreeinclude`**（無視しているファイルのうち、新しい Task へ写す物の一覧・`.gitignore` と同じ書き方・準備の前） | `copy_worktree_includes_on` / `prepare_task_worktree_on` | （ファイル名のまま） | (file name) |
 | **レール**（左の色バー） | `rail` | レール | Rail |
 | **project**（レールの 1 枠） | `ProjectSlot` / `slot` | プロジェクト | Project |
 | 長寿命 UI 束（1 project 分） | `ProjectSession` | — | — |
