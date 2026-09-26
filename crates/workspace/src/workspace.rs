@@ -89,6 +89,7 @@ mod rail;
 mod rail_view;
 mod remote_connection;
 mod remote_ssh;
+mod remote_transfer;
 mod shortcut_sheet;
 mod system_notifications;
 mod font_settings;
@@ -2496,7 +2497,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Render 中の Host trait 呼び出しを local / remote の両方で検出する wrapper。
-    struct RenderAuditHost {
+    /// 手元のファイルを「接続先」として見せる用途で、ほかの module のテストも使う。
+    pub(super) struct RenderAuditHost {
         inner: Arc<dyn Host>,
         remote: bool,
         armed: AtomicBool,
@@ -2504,7 +2506,7 @@ mod tests {
     }
 
     impl RenderAuditHost {
-        fn new(remote: bool) -> Self {
+        pub(super) fn new(remote: bool) -> Self {
             Self {
                 inner: host::LocalHost::shared(),
                 remote,

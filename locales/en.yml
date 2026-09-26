@@ -703,6 +703,18 @@ explorer:
   ctx_duplicate: Duplicate
   ctx_trash: Move to trash
   ctx_copy_path: Copy path
+  ctx_download: Download…
+  ctx_upload_into: Upload into this folder…
+  ctx_upload_beside: Upload to the same folder…
+  upload_prompt: Upload
+  uploading_one: "Uploading “%{name}”…"
+  uploading_many: "Uploading %{n} items…"
+  uploaded: "Uploaded %{n} files (%{size})"
+  upload_failed: "Could not upload: %{error}"
+  downloading: "Downloading “%{name}”…"
+  downloaded: "Saved to “%{name}” (%{n} files, %{size})"
+  download_failed: "Could not download: %{error}"
+  transfer_skipped: " (skipped %{n} symlinks or special files)"
   ctx_search_folder: Find in folder
   ctx_stage: Stage
   ctx_discard: Discard changes…
@@ -893,6 +905,7 @@ link:
   remote_localhost_details: "%{url} is localhost on the SSH host (%{host}). necoder does not forward ports yet.\n\nRun this in a local terminal, then open http://localhost:%{port} here:\n\n    ssh -N -L %{port}:localhost:%{port} %{host}\n\n(If another app already uses that port here, change the first %{port} to a free one.)\n"
 toast:
   open_details: Details ›
+  reveal: Reveal in Finder ›
 review:
   tab_title: Review
   compare: Compare

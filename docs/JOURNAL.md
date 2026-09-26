@@ -3306,7 +3306,8 @@
   まとめて休ませる・舞台に並べる・片付けへ・O21 / A11）・**統合で競合したら Task のエージェントに直させる**
   （`MergeConflicts`・O19 / E15）・**UI とコードの書体**（`ui_font_family` / `code_font_family`・直書き 30 か所を
   `ui::ui_font` / `ui::code_font` に・O27）・**CSV / TSV の表**（⌘⇧V・O29）・**Quick Commands**（`quick_commands`・
-  ターミナルの ▶・O25）。
+  ターミナルの ▶・O25）・**sparse checkout**（`task_sparse`・O20）・**リモートのダウンロード / アップロード**
+  （Finder からエクスプローラへ落とす / 右クリック・`project::transfer`・O37 / G09）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3335,7 +3336,14 @@
     `cargo check -p settings --features remote-preview --examples` で確かめる。
   - 描画を伴うテストは `cx.update(|window, cx| window.draw(cx).clear(cx))` で 1 回描かせると、レイアウトで
     落ちる類いの誤りを拾える（CSV の表で使った）。
+  - リモートとの受け渡しは Host の `read_file` / `write_file`（`WriteCondition::NotExists`）だけで組める。
+    ファイルを書けば daemon が親フォルダを作るので、作れないのは**空のフォルダだけ**（`mkdir -p` を
+    `run_command` で 1 回・argv 渡しなのでクォート不要）。接続先の SSH 実機が無くても、`is_remote` を
+    偽る wrapper（`workspace::tests::RenderAuditHost`）で手元のフォルダを「接続先」にしてテストできる。
+    gpui の保存ダイアログは `cx.simulate_new_path_selection` で答えられる。
+  - `Path::join("")` は末尾に区切りを足す（`/a/b/`）。空の相対パス = 根そのものは別に扱う。
 - 検証: Linux の `cargo check --workspace --all-targets`（`-D warnings`）と Windows 向けの同じ check は警告 0。
   `cargo test --workspace` 845 通過・落ちるのは Linux で元から落ちる 2 件だけ。#30 の CI は 243152f で CLA 以外すべて緑。
 - 次: 実機（mac）で作成中の行・ターミナルの文字の大きさ（行と列の測り直し）・複数選択の帯・書体の差し替え
-  （エディタのヒットテストがずれないか）・CSV の表（横スクロールと見出しの固定）・Quick Commands の帯を確かめる。CLA の判断。
+  （エディタのヒットテストがずれないか）・CSV の表（横スクロールと見出しの固定）・Quick Commands の帯・
+  SSH 実機でのアップロード / ダウンロード（大きいフォルダの所要時間）を確かめる。CLA の判断。

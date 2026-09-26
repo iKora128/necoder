@@ -11,6 +11,7 @@
 pub mod review;
 pub mod file_operations;
 pub mod todos;
+pub mod transfer;
 
 use anyhow::{Context as _, Result};
 use host::{CommandOutput, CommandSpec, Host, LocalHost};
