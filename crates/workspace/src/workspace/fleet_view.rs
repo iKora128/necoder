@@ -559,6 +559,15 @@ impl Workspace {
                         .position(|slot| slot.worktree.root() == target.as_path())
                     {
                         if let Some(error) = failure {
+                            // 依頼は送らずに控える（「準備をやり直す」/「飛ばして始める」で送る・O20）。
+                            let space_id = workspace.project_sessions.projects[index]
+                                .task_space
+                                .id
+                                .clone();
+                            workspace
+                                .chrome
+                                .pending_task_prompts
+                                .insert(space_id, prompt.clone());
                             workspace.transition_task_space(
                                 index,
                                 TaskPhase::Failed,
@@ -580,6 +589,118 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// 準備に失敗して依頼を控えている Task か（失敗のカードに「準備をやり直す」を出す）。
+    pub(crate) fn task_waits_for_setup(&self, session_index: usize) -> bool {
+        self.project_sessions
+            .projects
+            .get(session_index)
+            .is_some_and(|slot| {
+                self.chrome
+                    .pending_task_prompts
+                    .contains_key(&slot.task_space.id)
+            })
+    }
+
+    /// 「準備をやり直す」: `.worktreeinclude` と準備スクリプトをもう一度流し、通ったら控えていた依頼を
+    /// 送る。また失敗したら理由を差し替えて Failed のまま（O20）。
+    pub(crate) fn retry_task_setup(&mut self, session_index: usize, cx: &mut Context<Self>) {
+        let Some(slot) = self.project_sessions.projects.get(session_index) else {
+            return;
+        };
+        let target = slot.worktree.root().to_path_buf();
+        let branch = slot
+            .worktree_branch
+            .clone()
+            .or_else(|| slot.branch.clone())
+            .unwrap_or_default();
+        let space_id = slot.task_space.id.clone();
+        // 読むのは統合先（`.worktreeinclude` と準備スクリプトの置き場）。SSH の host は project の外を
+        // 読めないので、作った時と同じく統合先の host で流す。
+        let Some(integration) = self
+            .integration_slot_for(slot.repository_key())
+            .and_then(|index| self.project_sessions.projects.get(index))
+        else {
+            return;
+        };
+        let main = integration.worktree.root().to_path_buf();
+        let host = integration.worktree.host().clone();
+        self.transition_task_space(session_index, TaskPhase::Planned, "setup_retried", None, cx);
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    project::prepare_task_worktree_on(host.as_ref(), &main, &target, &branch, true)
+                })
+                .await;
+            // Err = 待っている間に窓が閉じた。
+            workspace
+                .update(cx, |workspace, cx| {
+                    let Some(index) = workspace
+                        .project_sessions
+                        .projects
+                        .iter()
+                        .position(|slot| slot.task_space.id == space_id)
+                    else {
+                        return;
+                    };
+                    match result {
+                        Ok(()) => workspace.send_pending_task_prompt(index, cx),
+                        Err(error) => workspace.transition_task_space(
+                            index,
+                            TaskPhase::Failed,
+                            "setup_failed",
+                            Some(&format!("{error:#}")),
+                            cx,
+                        ),
+                    }
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// 「準備を飛ばして始める」: 準備を流さずに、控えていた依頼を送る（O20）。
+    pub(crate) fn start_task_without_setup(
+        &mut self,
+        session_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.transition_task_space(session_index, TaskPhase::Planned, "setup_skipped", None, cx);
+        self.send_pending_task_prompt(session_index, cx);
+    }
+
+    /// 控えていた依頼をその Task のスレッドへ送る（無ければ何もしない）。
+    fn send_pending_task_prompt(&mut self, session_index: usize, cx: &mut Context<Self>) {
+        let Some(space_id) = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| slot.task_space.id.clone())
+        else {
+            return;
+        };
+        let Some(prompt) = self.chrome.pending_task_prompts.remove(&space_id) else {
+            return;
+        };
+        if self.project_sessions.projects[session_index]
+            .task_space
+            .phase
+            == TaskPhase::Failed
+        {
+            self.transition_task_space(
+                session_index,
+                TaskPhase::Planned,
+                "setup_retried",
+                None,
+                cx,
+            );
+        }
+        if !prompt.trim().is_empty() {
+            self.ipc_spawn_into(session_index, None, Some(prompt), cx);
+        }
+        cx.notify();
     }
 
     /// Fleet の初回導線（FLEET-V2 §3.0-4）: **2 本目の Task が立った瞬間に一度だけ**
@@ -2602,5 +2723,55 @@ impl Workspace {
         }
         // 高さは下段ドック（`render_fleet_bottom`）が持つ。ここは中身として器を満たすだけ。
         list.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// O20: 準備に失敗した Task は依頼を控え、「飛ばして始める」で送って控えを消す。
+    #[gpui::test]
+    fn a_task_whose_setup_failed_keeps_its_prompt_until_started(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_setup_pending_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).expect("作業フォルダを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.project_sessions.projects[0].task_space.kind = SpaceKind::Task;
+            workspace.project_sessions.projects[0].task_space.phase = TaskPhase::Failed;
+            assert!(!workspace.task_waits_for_setup(0));
+            let space = workspace.project_sessions.projects[0].task_space.id.clone();
+            // 実エージェントを起こさないよう、依頼は空にしておく（送る経路はここでは通らない）。
+            workspace
+                .chrome
+                .pending_task_prompts
+                .insert(space, String::new());
+            assert!(
+                workspace.task_waits_for_setup(0),
+                "失敗のカードにやり直し / 飛ばすが出る"
+            );
+
+            workspace.start_task_without_setup(0, cx);
+            assert!(!workspace.task_waits_for_setup(0), "控えは消える");
+            assert_eq!(
+                workspace.project_sessions.projects[0].task_space.phase,
+                TaskPhase::Planned
+            );
+        });
+        std::fs::remove_dir_all(&root).ok();
     }
 }

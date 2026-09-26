@@ -658,26 +658,61 @@ impl Workspace {
                     div()
                         .flex()
                         .gap(px(5.))
-                        .child(
-                            button(
-                                ("control-fix", position),
-                                SharedString::from(i18n::t!("control.fix_instruct")),
-                                true,
-                                &theme,
+                        // 準備に失敗して依頼を控えている Task（O20）: やり直す / 飛ばして始める。
+                        .when(self.task_waits_for_setup(session_index), |row| {
+                            row.child(
+                                button(
+                                    ("control-retry-setup", position),
+                                    SharedString::from(i18n::t!("control.retry_setup")),
+                                    true,
+                                    &theme,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.retry_task_setup(session_index, cx);
+                                    }),
+                                ),
                             )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.immerse_from_control(
-                                        session_index,
-                                        thread_index,
-                                        window,
-                                        cx,
-                                    );
-                                }),
-                            ),
-                        )
+                            .child(
+                                button(
+                                    ("control-skip-setup", position),
+                                    SharedString::from(i18n::t!("control.skip_setup")),
+                                    false,
+                                    &theme,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.start_task_without_setup(session_index, cx);
+                                    }),
+                                ),
+                            )
+                        })
+                        .when(!self.task_waits_for_setup(session_index), |row| {
+                            row.child(
+                                button(
+                                    ("control-fix", position),
+                                    SharedString::from(i18n::t!("control.fix_instruct")),
+                                    true,
+                                    &theme,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.immerse_from_control(
+                                            session_index,
+                                            thread_index,
+                                            window,
+                                            cx,
+                                        );
+                                    }),
+                                ),
+                            )
+                        })
                         .child(
                             button(
                                 ("control-discard", position),
