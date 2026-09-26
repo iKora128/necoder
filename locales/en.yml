@@ -1353,6 +1353,8 @@ resources:
 cleanup:
   title: Clean up Tasks
   select_finished: Select integrated and finished
+  order_by_age: "Order: oldest first"
+  order_by_size: "Order: largest first"
   counting: Counting…
   nothing_to_lose: Nothing to lose
   dirty: "%{n} uncommitted"

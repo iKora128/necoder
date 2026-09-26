@@ -1354,6 +1354,8 @@ resources:
 cleanup:
   title: Task の片付け
   select_finished: 統合済み・終了済みを選ぶ
+  order_by_age: "並び: 作った順"
+  order_by_size: "並び: 大きい順"
   counting: 数えています…
   nothing_to_lose: 失うもの無し
   dirty: "未コミット %{n}"
