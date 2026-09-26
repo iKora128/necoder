@@ -967,6 +967,16 @@ impl Workspace {
                 ),
             );
         }
+        // 全部閉じる（未保存のタブは残す・⌘K ⌘W と同じ・O26）。
+        menu_box = menu_box.child(
+            item("tab-ctx-close-all", i18n::t!("tabs.ctx_close_all")).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_tab_menu(cx);
+                    this.close_saved_tabs(window, cx);
+                }),
+            ),
+        );
 
         // 透明バックドロップ（外側クリックで閉じる）。
         Some(

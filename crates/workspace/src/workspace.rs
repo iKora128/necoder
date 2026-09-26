@@ -87,6 +87,7 @@ mod shortcut_sheet;
 mod system_notifications;
 mod usage_view;
 mod worktree_delete;
+mod editor_manners;
 pub use control_ipc::control_socket_path;
 pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
@@ -182,6 +183,15 @@ actions!(
         ShowUsageLimits,
         // メニュー「アップデートを確認…」。About モーダルを開いて即確認する。
         CheckForUpdates,
+        // 開いているファイルの `path:行`（範囲なら `path:10-14`）をコピー（⌘⌥C・O26）。
+        CopyPathWithLine,
+        // タブを全部閉じる（⌘K ⌘W・未保存のタブは残す・O26）。
+        CloseAllTabs,
+        // 開いているファイルを外部のエディタ / ターミナルで開く（パレット・O26）。
+        OpenInVsCode,
+        OpenInCursor,
+        OpenInZed,
+        OpenInTerminal,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
         Hide,
         HideOthers,
@@ -2166,6 +2176,12 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::about_action))
             .on_action(cx.listener(Self::open_usage_stats))
             .on_action(cx.listener(Self::show_usage_limits))
+            .on_action(cx.listener(Self::copy_path_with_line))
+            .on_action(cx.listener(Self::close_all_tabs))
+            .on_action(cx.listener(Self::open_in_vs_code))
+            .on_action(cx.listener(Self::open_in_cursor))
+            .on_action(cx.listener(Self::open_in_zed))
+            .on_action(cx.listener(Self::open_in_terminal))
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
