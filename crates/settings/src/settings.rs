@@ -2115,6 +2115,20 @@ impl SettingsView {
                 settings.format_on_save,
                 cx,
             ))
+            // 自動保存（O26）。値は settings.json の `auto_save`。
+            .child(self.segmented_row_with(
+                "auto_save",
+                i18n::t!("settings.pref_auto_save"),
+                Some(i18n::t!("settings.pref_auto_save_sub")),
+                &[
+                    ("off", i18n::t!("settings.auto_save_off")),
+                    ("focus_change", i18n::t!("settings.auto_save_focus_change")),
+                    ("after_delay", i18n::t!("settings.auto_save_after_delay")),
+                ],
+                &settings.auto_save,
+                false,
+                cx,
+            ))
             .child(self.toggle_row(
                 "agent_auto_name",
                 3,

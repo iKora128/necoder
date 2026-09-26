@@ -912,6 +912,7 @@ impl Workspace {
             connection_pumps: std::collections::HashMap::new(),
             control_summary: None,
             control_summary_gen: 0,
+            auto_save_generation: 0,
             focus_recovery_installed: false,
             last_focused: None,
             restored_source_map: source_map,
@@ -1274,6 +1275,7 @@ impl Workspace {
         let input_subscription = cx.subscribe_in(&editor, window, Self::on_editor_typed);
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
         let link_subscription = cx.subscribe_in(&editor, window, Self::on_preview_link);
+        let blur_subscription = self.auto_save_on_blur(&editor, window, cx);
         self.tabs.push(EditorTab {
             path: title_path,
             content: TabContent::Editor {
@@ -1282,6 +1284,7 @@ impl Workspace {
                 _input_subscription: input_subscription,
                 _hover_subscription: hover_subscription,
                 _link_subscription: link_subscription,
+                _blur_subscription: blur_subscription,
             },
             transient: true,
         });

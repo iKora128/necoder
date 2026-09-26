@@ -215,6 +215,8 @@ impl Workspace {
                 if self.hot_exit_versions.get(&path) != Some(&version) {
                     self.hot_exit_versions.insert(path, version);
                     self.schedule_hot_exit_snapshot(cx);
+                    // 手を止めた時の自動保存（O26・`after_delay` の時だけ予約する）。
+                    self.schedule_auto_save(cx);
                 }
             }
         }
