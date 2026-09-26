@@ -58,6 +58,22 @@ tree-sitter-css = "0.23"
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
+# O30 の追加言語（どれも tree-sitter-language shim 経由・ABI 14/15・MIT か Apache-2.0）。
+# 合計で release バイナリ +8.8MB。C#・Swift・Kotlin・Scala は 1 言語 3.8〜5.8MB と重いので見送り。
+# SQL は DerekStride 版（crate 名 sequel）、Dockerfile は Containerfile 版。Protobuf / GraphQL は
+# 上流 crate が highlights クエリを公開しないため、クエリを同梱する arborium 版を使う。
+tree-sitter-java = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-php = "0.24"
+tree-sitter-sequel = "0.3"
+tree-sitter-containerfile = "0.9"
+tree-sitter-lua = "0.5"
+tree-sitter-elixir = "0.3"
+tree-sitter-zig = "1.1"
+tree-sitter-make = "1.1"
+tree-sitter-cmake = "0.7"
+arborium-proto = "2.18"
+arborium-graphql = "2.18"
 # Markdown は block/inline の 2 grammar 構成。0.5.1 は LanguageFn 経由で tree-sitter 0.25 と共存する。
 # `parser` feature は tree-sitter 0.24 を直接引くため有効にせず、薄い統合層を lang 側に置く。
 tree-sitter-md = "=0.5.1"
