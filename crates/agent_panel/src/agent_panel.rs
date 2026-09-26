@@ -2600,7 +2600,7 @@ PYEOF"#;
 
     /// ターンの使用量（トークン・コスト）を台帳 `turn_usage` へ 1 行書く（O11・Stats の日別集計の元）。
     /// エージェントが何も報告しなかったターンは書かない。DB が無い（テスト・一部の検証起動）時は捨てる。
-    fn record_turn_usage(&mut self, thread_index: usize) {
+    fn record_turn_usage(&mut self, thread_index: usize, cx: &mut Context<Self>) {
         let Some(thread) = self.threads.get_mut(thread_index) else {
             return;
         };
@@ -2622,9 +2622,15 @@ PYEOF"#;
             cost_usd: spend.cost_usd,
             session_cost_usd: spend.session_total_usd,
         };
-        if let Err(error) = storage.record_turn_usage(&record) {
-            eprintln!("ターンの使用量を記録できない: {error:#}");
-        }
+        // 追記するだけなので UI スレッドで DB を待たない（R11・ターンの終わりの応答を止めない）。
+        let storage = storage.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = storage.record_turn_usage(&record) {
+                    eprintln!("ターンの使用量を記録できない: {error:#}");
+                }
+            })
+            .detach();
     }
 
     /// 最初のターン後、まだ既定名なら会話の冒頭から AI にタイトルを付けてもらう（#6・非同期）。
@@ -6703,7 +6709,7 @@ PYEOF"#;
             }
             self.sync_running_registry(cx); // 実行中 → 完了をダッシュボードへ（M12-12）
             self.persist_thread(thread_index); // turn 確定分を DB へ（M12-1）
-            self.record_turn_usage(thread_index); // トークンとコストを台帳へ（O11）
+            self.record_turn_usage(thread_index, cx); // トークンとコストを台帳へ（O11）
             self.maybe_auto_name(thread_index, cx); // 初回ターン後、既定名なら AI がタイトルを付ける（#6）
             self.maybe_tier2_summary(thread_index, cx); // ✳ 1 行要約（P4・Done/Failed 遷移のみ）
             if let Some(thread) = self.threads.get(thread_index) {
@@ -14751,6 +14757,8 @@ PYEOF"#;
             assert_eq!(panel.active_agent().as_deref(), Some("Claude Code"));
             panel.threads[active].id.clone()
         });
+        // 台帳への追記は背景で行う（R11・UI スレッドで DB を待たない）。
+        cx.run_until_parked();
         let rows = storage.daily_usage(0, 0).expect("集計を読める");
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].agent, "Claude Code");
@@ -14776,6 +14784,7 @@ PYEOF"#;
             );
             turn(panel, 1.3, 10, cx);
         });
+        cx.run_until_parked();
         let rows = storage.daily_usage(0, 0).expect("集計を読める");
         assert!(
             (rows[0].cost_usd.expect("コスト") - 1.3).abs() < 1e-9,
