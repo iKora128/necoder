@@ -23,6 +23,9 @@ pub(crate) fn terminal_appearance_from(
         usize::try_from(settings.terminal_scrollback).unwrap_or(usize::MAX),
         &settings.terminal_cursor,
     )
+    .with_colors(super::terminal_colors::load_color_scheme(
+        &settings.terminal_color_scheme,
+    ))
 }
 
 /// 設定から手元で開くシェルを作る（空 = OS の既定）。

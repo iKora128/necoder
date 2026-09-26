@@ -283,6 +283,10 @@ pub struct Settings {
     /// ターミナルのカーソルの形（`"block"` 既定 / `"bar"` / `"underline"`・O25）。vim やシェルの設定が
     /// 形を指定すればそちらが勝つ（ここはその既定）。知らない値は `"block"`。
     pub terminal_cursor: String,
+    /// ターミナルの配色ファイル（空 = 既定・アプリのテーマに合わせる・O25）。Ghostty のテーマ・
+    /// Windows Terminal の scheme（JSON）・iTerm2 の `.itermcolors` から ANSI 16 色と文字 / 背景の色を読む。
+    /// `~/` はホーム。設定を保存し直すと読み直す。
+    pub terminal_color_scheme: String,
     /// 手元のターミナルで開くシェル（空 = OS の既定・mac / Linux は `$SHELL`・Windows は pwsh → powershell・O25）。
     /// 名前（PATH から探す）か絶対パス。新しく開く端末から効く。SSH 先の端末は接続先のシェルのまま。
     pub terminal_shell: String,
@@ -364,6 +368,7 @@ impl Default for Settings {
             terminal_font_family: String::new(),
             terminal_scrollback: 10_000,
             terminal_cursor: "block".to_string(),
+            terminal_color_scheme: String::new(),
             terminal_shell: String::new(),
             terminal_shell_args: Vec::new(),
             quick_commands: Vec::new(),
@@ -474,6 +479,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "terminal_font_family": "",
   "terminal_scrollback": 10000,
   "terminal_cursor": "block",
+  "terminal_color_scheme": "",
   "terminal_shell": "",
   "terminal_shell_args": [],
   "quick_commands": [],

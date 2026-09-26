@@ -93,6 +93,7 @@ mod remote_transfer;
 mod shortcut_sheet;
 mod system_notifications;
 mod font_settings;
+mod terminal_colors;
 mod terminal_settings;
 mod usage_view;
 mod worktree_delete;

@@ -3311,7 +3311,8 @@
   （`host::SshFailure`・パスフレーズの問いに `ssh-add` の案内・O37 / G02 / G04）・**エディタへのドロップ**
   （Markdown に画像 = 隣へコピーして落とした所に `![]()`・ほかはタブで開く・O29）・Markdown の **front matter の表と
   目次**（`markdown::split_front_matter`・`[toc]`・O29）・**横並びのライブプレビュー**（⌘K V・O29）・
-  **スラッシュメニュー**（Markdown の行頭の `/`・補完のポップアップを使い回す・O29）。
+  **スラッシュメニュー**（Markdown の行頭の `/`・補完のポップアップを使い回す・O29）・ターミナルの**配色の取り込み**
+  （`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2・O25）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を

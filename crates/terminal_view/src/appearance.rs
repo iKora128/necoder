@@ -51,6 +51,17 @@ impl TerminalCursor {
     }
 }
 
+/// 取り込んだ配色（O25・Ghostty / Windows Terminal / iTerm2 の配色ファイルから workspace が読む）。
+/// `None` の色は既定のまま（ANSI は VSCode 系の 16 色・文字と背景はアプリのテーマ）。カーソルの色は
+/// 取り込まない（キャレットはプロジェクトの識別色・UI-SPEC）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalColors {
+    /// ANSI 0〜15（normal 8 + bright 8）。
+    pub palette: [Option<(u8, u8, u8)>; 16],
+    pub foreground: Option<(u8, u8, u8)>,
+    pub background: Option<(u8, u8, u8)>,
+}
+
 /// ターミナルの見た目（workspace が設定から作る global）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerminalAppearance {
@@ -58,6 +69,8 @@ pub struct TerminalAppearance {
     pub font_family: SharedString,
     pub scrollback: usize,
     pub cursor: TerminalCursor,
+    /// 取り込んだ配色（無ければ既定）。
+    pub colors: TerminalColors,
 }
 
 impl Global for TerminalAppearance {}
@@ -69,6 +82,7 @@ impl Default for TerminalAppearance {
             font_family: SharedString::new_static(DEFAULT_FONT_FAMILY),
             scrollback: DEFAULT_SCROLLBACK,
             cursor: TerminalCursor::default(),
+            colors: TerminalColors::default(),
         }
     }
 }
@@ -90,7 +104,14 @@ impl TerminalAppearance {
             font_family,
             scrollback: scrollback.min(MAX_SCROLLBACK),
             cursor: TerminalCursor::from_setting(cursor),
+            colors: TerminalColors::default(),
         }
+    }
+
+    /// 取り込んだ配色を載せる。
+    pub fn with_colors(mut self, colors: TerminalColors) -> Self {
+        self.colors = colors;
+        self
     }
 
     /// 行の高さ（px・整数に丸める＝行の境目がにじまない）。
