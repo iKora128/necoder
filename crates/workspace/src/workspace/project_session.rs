@@ -898,6 +898,7 @@ impl Workspace {
                 task_renaming: None,
                 terminal_renaming: None,
                 focus_next_frame: None,
+                statusbar_menu: None,
             },
             overlays: WorkspaceOverlays {
                 picker: None,

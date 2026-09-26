@@ -2203,32 +2203,59 @@ impl Workspace {
         };
         // 承認待ち signal は1Hz時計だけで反転。マスコットの5/10fps時計とは共有しない。
         let attention_bright = self.visual_tick % 2 == 0;
+        // 右クリックで出し入れできる項目（O27・settings.json の `statusbar_hidden`）。知らせは常に出す。
+        let hidden = settings::get(cx).statusbar_hidden.clone();
+        let shows = |id: &str| statusbar_items::statusbar_shows(&hidden, id);
+        let (show_color, show_branch, show_diagnostics, show_terminal) = (
+            shows("color"),
+            shows("branch"),
+            shows("diagnostics"),
+            shows("terminal"),
+        );
+        let (show_activity, show_usage, show_cursor, show_encoding, show_language) = (
+            shows("activity"),
+            shows("usage"),
+            shows("cursor"),
+            shows("encoding"),
+            shows("language"),
+        );
+        let branch = branch.filter(|_| show_branch);
+        let cursor = cursor.filter(|_| show_cursor);
+        let language = language.filter(|_| show_language);
         let left = div()
             .flex()
             .items_center()
             .gap_3()
             // プロジェクト色スウォッチ（footer から色変更・M13）。常に「今の窓の色」が見え、クリックで色ピッカー（⌘K⌘C と同経路）。
-            .child(
-                div()
-                    .id("statusbar-project-color")
-                    .size(px(11.))
-                    .rounded_full()
-                    .bg(self.accent())
-                    .border_1()
-                    .border_color(theme.border)
-                    .cursor_pointer()
-                    .hover(|style| style.border_color(theme.fg2))
-                    .tooltip(Tooltip::text(i18n::t!("cmd.project_color"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            // クリック位置の真上にピッカーを出す（footer から開くので左上へ飛ばさない）。
-                            let anchor = gpui::point(event.position.x, event.position.y - px(176.));
-                            this.open_color_picker(this.project_sessions.active, anchor, window, cx)
-                        }),
-                    ),
-            )
+            .when(show_color, |element| {
+                element.child(
+                    div()
+                        .id("statusbar-project-color")
+                        .size(px(11.))
+                        .rounded_full()
+                        .bg(self.accent())
+                        .border_1()
+                        .border_color(theme.border)
+                        .cursor_pointer()
+                        .hover(|style| style.border_color(theme.fg2))
+                        .tooltip(Tooltip::text(i18n::t!("cmd.project_color"), theme.clone()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                // クリック位置の真上にピッカーを出す（footer から開くので左上へ飛ばさない）。
+                                let anchor =
+                                    gpui::point(event.position.x, event.position.y - px(176.));
+                                this.open_color_picker(
+                                    this.project_sessions.active,
+                                    anchor,
+                                    window,
+                                    cx,
+                                )
+                            }),
+                        ),
+                )
+            })
             .when_some(remote_host, |element, remote_host| {
                 // SSH チップ = 接続状態の表示（2026-09-08）。「SSH」の色が状態: 接続済み=ok・
                 // 接続中=warn・切断=err・未接続（遅延接続でまだ触っていない）=fg2。接続済み以外は
@@ -2353,92 +2380,96 @@ impl Workspace {
                         ),
                 )
             })
-            .child(
-                div()
-                    .id("statusbar-diagnostics")
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg2))
-                    .rounded(px(4.))
-                    .px(px(4.))
-                    // 診断件数。記号は文字グリフではなく Lucide の circle-x / triangle-alert（フォント差で崩れない）。
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(3.))
-                            .text_color(error_color)
-                            .child(
-                                svg()
-                                    .path("icons/circle-x.svg")
-                                    .size(px(12.))
-                                    .flex_none()
-                                    .text_color(error_color),
-                            )
-                            .child(format!("{errors}")),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(3.))
-                            .text_color(warning_color)
-                            .child(
-                                svg()
-                                    .path("icons/triangle-alert.svg")
-                                    .size(px(12.))
-                                    .flex_none()
-                                    .text_color(warning_color),
-                            )
-                            .child(format!("{warnings}")),
-                    )
-                    // クリックで診断一覧（ファイル別・M11）。
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.open_diagnostics_panel(&DiagnosticsPanel, window, cx)
-                        }),
-                    ),
-            )
+            .when(show_diagnostics, |element| {
+                element.child(
+                    div()
+                        .id("statusbar-diagnostics")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg2))
+                        .rounded(px(4.))
+                        .px(px(4.))
+                        // 診断件数。記号は文字グリフではなく Lucide の circle-x / triangle-alert（フォント差で崩れない）。
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(3.))
+                                .text_color(error_color)
+                                .child(
+                                    svg()
+                                        .path("icons/circle-x.svg")
+                                        .size(px(12.))
+                                        .flex_none()
+                                        .text_color(error_color),
+                                )
+                                .child(format!("{errors}")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(3.))
+                                .text_color(warning_color)
+                                .child(
+                                    svg()
+                                        .path("icons/triangle-alert.svg")
+                                        .size(px(12.))
+                                        .flex_none()
+                                        .text_color(warning_color),
+                                )
+                                .child(format!("{warnings}")),
+                        )
+                        // クリックで診断一覧（ファイル別・M11）。
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.open_diagnostics_panel(&DiagnosticsPanel, window, cx)
+                            }),
+                        ),
+                )
+            })
             // ターミナル切替（診断を見た足でそのままターミナルへ行く動線・本人要望）。
             // レール / titlebar の下ドックボタン / ⌃` と同じ `toggle_terminal`。開いている間は面を灯す。
-            .child(
-                div()
-                    .id("statusbar-terminal")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(20.))
-                    .px(px(5.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .text_color(if terminal_open { theme.fg0 } else { theme.fg2 })
-                    .when(terminal_open, |element| element.bg(theme.bg3))
-                    .hover(|style| style.bg(theme.bg3))
-                    .child(
-                        svg()
-                            .path("icons/square-terminal.svg")
-                            .size(px(13.))
-                            .flex_none()
-                            .text_color(if terminal_open { theme.fg0 } else { theme.fg2 }),
-                    )
-                    .tooltip(Tooltip::text(i18n::t!("rail.terminal"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.toggle_terminal(&ToggleTerminal, window, cx)
-                        }),
-                    ),
-            );
+            .when(show_terminal, |element| {
+                element.child(
+                    div()
+                        .id("statusbar-terminal")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(20.))
+                        .px(px(5.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .text_color(if terminal_open { theme.fg0 } else { theme.fg2 })
+                        .when(terminal_open, |element| element.bg(theme.bg3))
+                        .hover(|style| style.bg(theme.bg3))
+                        .child(
+                            svg()
+                                .path("icons/square-terminal.svg")
+                                .size(px(13.))
+                                .flex_none()
+                                .text_color(if terminal_open { theme.fg0 } else { theme.fg2 }),
+                        )
+                        .tooltip(Tooltip::text(i18n::t!("rail.terminal"), theme.clone()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.toggle_terminal(&ToggleTerminal, window, cx)
+                            }),
+                        ),
+                )
+            });
 
         let right = div()
             .flex()
             .items_center()
             .gap_3()
             // 使用量（O11）: いまのスレッドのエージェントの「5h 42% · 週 18%」。値が無ければ出さない。
-            .children(self.render_usage_chip(cx))
+            .children(show_usage.then(|| self.render_usage_chip(cx)).flatten())
             // 前回クラッシュの通知チップ（M13）: クリックでログ抜粋つきのバグ報告 Issue を開く。
             // 色は theme.warn（診断 ▲ と同じ警告色 = 識別色は使わない）。
             .when_some(self.notifications.crash_notice.clone(), |element, _log| {
@@ -2536,7 +2567,9 @@ impl Workspace {
             .when_some(cursor, |element, cursor| {
                 element.child(SharedString::from(cursor))
             })
-            .child(SharedString::from("UTF-8"))
+            .when(show_encoding, |element| {
+                element.child(SharedString::from("UTF-8"))
+            })
             .when_some(language, |element, language| element.child(language));
 
         div()
@@ -2550,12 +2583,24 @@ impl Workspace {
             .border_color(theme.border)
             .text_size(px(11.))
             .text_color(theme.fg1)
+            // 右クリック = 項目の出し入れ（O27）。
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.show_statusbar_menu(event.position, cx)
+                }),
+            )
             .child(if self.chat_mode() {
                 self.render_chat_status(cx).into_any_element()
             } else {
                 left.into_any_element()
             })
-            .child(self.render_activity_rollup(cx)) // 中央＝状態の常設ロールアップ（herdr 本来の形）
+            // 中央＝状態の常設ロールアップ（herdr 本来の形）。隠した時も左右を両端へ分ける空きは残す。
+            .child(if show_activity {
+                self.render_activity_rollup(cx)
+            } else {
+                div().flex_1().into_any_element()
+            })
             .child(right)
     }
 
