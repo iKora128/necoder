@@ -148,6 +148,9 @@ pub struct ExplorerProject {
     pub current_dir: Option<PathBuf>,
     /// このプロジェクトでのファイル操作の取り消し履歴（⌘Z・H30）。メモリだけに持つ。
     pub history: FileOperationHistory,
+    /// 最近開いたファイル（新しい順・⌘P の並びに使う・D19）。メモリだけに持つ。起動時や
+    /// プロジェクト切替で開き直したタブは「まだ無ければ一番古い位置に」積む（本物の新しい順を崩さない）。
+    recent: Vec<PathBuf>,
     dir_listings: RefCell<DirListings>,
     /// 背景再構築の世代。古い読み取り結果が新しい状態を上書きしないための番号。
     refresh_generation: u64,
@@ -161,6 +164,7 @@ impl Default for ExplorerProject {
             selected: None,
             current_dir: None,
             history: FileOperationHistory::default(),
+            recent: Vec::new(),
             dir_listings: RefCell::new(HashMap::new()),
             refresh_generation: 0,
         }
@@ -239,6 +243,31 @@ impl ExplorerProject {
 
     pub fn is_latest_refresh(&self, generation: u64) -> bool {
         self.refresh_generation == generation
+    }
+
+    /// 覚えておく「最近開いたファイル」の数。
+    pub const RECENT_LIMIT: usize = 20;
+
+    /// ファイルを開いた（タブを選んだ）ことを覚える。同じファイルは先頭へ寄せ直す。
+    pub fn note_opened(&mut self, path: &Path) {
+        self.recent.retain(|recent| recent != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(Self::RECENT_LIMIT);
+    }
+
+    /// 開き直したタブ（起動時の復元・プロジェクト切替）を覚える。まだ無ければ一番古い位置に
+    /// 足すだけで、既にある順は動かさない。
+    pub fn note_reopened(&mut self, path: &Path) {
+        if self.recent.len() < Self::RECENT_LIMIT
+            && !self.recent.iter().any(|recent| recent == path)
+        {
+            self.recent.push(path.to_path_buf());
+        }
+    }
+
+    /// 最近開いたファイル（新しい順）。
+    pub fn recent_files(&self) -> &[PathBuf] {
+        &self.recent
     }
 
     /// Render-safe cache lookup. Missing directories are empty until the controller refreshes.
@@ -388,6 +417,32 @@ mod tests {
             is_expanded: is_dir,
             ignored: false,
         }
+    }
+
+    #[test]
+    fn recent_files_keep_the_newest_first_without_duplicates() {
+        let mut project = ExplorerProject::default();
+        for name in ["a.rs", "b.rs", "a.rs"] {
+            project.note_opened(Path::new(name));
+        }
+        assert_eq!(
+            project.recent_files(),
+            &[PathBuf::from("a.rs"), PathBuf::from("b.rs")]
+        );
+        for index in 0..ExplorerProject::RECENT_LIMIT + 3 {
+            project.note_opened(&PathBuf::from(format!("{index}.rs")));
+        }
+        assert_eq!(project.recent_files().len(), ExplorerProject::RECENT_LIMIT);
+
+        // 開き直したタブは順を崩さず、無ければ一番古い位置へ。
+        let mut project = ExplorerProject::default();
+        project.note_opened(Path::new("new.rs"));
+        project.note_reopened(Path::new("restored.rs"));
+        project.note_reopened(Path::new("new.rs"));
+        assert_eq!(
+            project.recent_files(),
+            &[PathBuf::from("new.rs"), PathBuf::from("restored.rs")]
+        );
     }
 
     #[test]

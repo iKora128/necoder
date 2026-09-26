@@ -114,6 +114,9 @@ pub struct PickerItem {
     pub accent: Option<Hsla>,
     /// 右端の小ドット列（実行中スレッド色・M12-12 の「どこで何が走っているか」）。
     pub dots: Vec<Hsla>,
+    /// 並びの加点（あいまい一致のスコアに足す・既定 0）。⌘P の「最近開いたファイルを上へ」
+    /// 「無視されたファイルは後ろへ」に使う（D19）。一致しない項目を出す力は無い。
+    pub boost: i32,
 }
 
 impl PickerItem {
@@ -124,6 +127,7 @@ impl PickerItem {
             detail: None,
             accent: None,
             dots: Vec::new(),
+            boost: 0,
         }
     }
 
@@ -139,6 +143,11 @@ impl PickerItem {
 
     pub fn with_dots(mut self, dots: Vec<Hsla>) -> Self {
         self.dots = dots;
+        self
+    }
+
+    pub fn with_boost(mut self, boost: i32) -> Self {
+        self.boost = boost;
         self
     }
 }
@@ -157,6 +166,9 @@ pub enum PickerEvent {
 /// ファジーリストのモーダル。
 pub struct Picker {
     query_action: Option<(usize, SharedString)>,
+    /// 入力に 1 件も一致しない時だけ出す行（⌘P の「無視されたファイルも探す」・D19）。
+    /// 一致が 1 件でもあれば出さない（普段のリストを汚さない）。
+    fallback_action: Option<(usize, SharedString)>,
     placeholder: SharedString,
     query: String,
     items: Vec<PickerItem>,
@@ -177,9 +189,11 @@ impl Picker {
         accent: Hsla,
         cx: &mut Context<Self>,
     ) -> Self {
-        let filtered = (0..items.len()).collect();
+        // 空のクエリでも加点（⌘P の最近開いたファイル）で並べる。加点が無ければ元の並びのまま。
+        let filtered = rank_items("", &items);
         Self {
             query_action: None,
+            fallback_action: None,
             placeholder: placeholder.into(),
             query: String::new(),
             items,
@@ -209,6 +223,38 @@ impl Picker {
         self.query_action = Some((id, label.into()));
         self.refilter();
         cx.notify();
+    }
+
+    /// 入力に何も一致しない時だけ出す行を設定する（`None` で消す）。確定すると `id` を通知する。
+    pub fn set_fallback_action(
+        &mut self,
+        action: Option<(usize, SharedString)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.fallback_action = action;
+        cx.notify();
+    }
+
+    /// 一致なしの行が今出ているか（入力があり、項目が 1 件も一致しない）。
+    pub fn fallback_visible(&self) -> bool {
+        self.fallback_action.is_some() && !self.query.trim().is_empty() && self.filtered.is_empty()
+    }
+
+    /// 項目を後ろに足す（背景で追加で集めた行・⌘P の 2 回目）。現在のクエリで並べ直し、
+    /// 先頭の一致を選ぶ。
+    pub fn append_items(&mut self, items: Vec<PickerItem>, cx: &mut Context<Self>) {
+        self.items.extend(items);
+        self.refilter();
+        self.emit_highlight(cx);
+        cx.notify();
+    }
+
+    /// いま一致している項目の id（並び順）。テスト・プログラム操作用。
+    pub fn matched_ids(&self) -> Vec<usize> {
+        self.filtered
+            .iter()
+            .filter_map(|&index| self.items.get(index).map(|item| item.id))
+            .collect()
     }
 
     /// テーマを差し替える（ライブプレビュー中に Picker 自身も追従させる）。
@@ -250,16 +296,7 @@ impl Picker {
         if let Some((id, _)) = &self.query_action {
             self.items.retain(|item| item.id != *id);
         }
-        let mut scored: Vec<(usize, i32)> = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| {
-                fuzzy_score(&self.query, &item.label).map(|score| (index, score))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
-        self.filtered = scored.into_iter().map(|(index, _)| index).collect();
+        self.filtered = rank_items(&self.query, &self.items);
         if let Some((id, label)) = &self.query_action {
             if !self.query.trim().is_empty() {
                 self.filtered.push(self.items.len());
@@ -285,6 +322,10 @@ impl Picker {
     fn confirm(&mut self, cx: &mut Context<Self>) {
         if let Some(&item_index) = self.filtered.get(self.selected) {
             cx.emit(PickerEvent::Confirmed(self.items[item_index].id));
+        } else if self.fallback_visible() {
+            if let Some((id, _)) = &self.fallback_action {
+                cx.emit(PickerEvent::Confirmed(*id));
+            }
         }
     }
 
@@ -456,10 +497,59 @@ impl Render for Picker {
                                             )
                                         })
                                 },
-                            )),
+                            ))
+                            // 一致なしの時だけの行（⌘P の「無視されたファイルも探す」）。唯一の行なので
+                            // 選択面で出し、⏎ / クリックで確定する。
+                            .when_some(
+                                self.fallback_visible()
+                                    .then(|| self.fallback_action.clone())
+                                    .flatten(),
+                                |list, (_, label)| {
+                                    list.child(
+                                        div()
+                                            .id("picker-fallback")
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(px(5.))
+                                            .cursor_pointer()
+                                            .text_size(px(12.5))
+                                            .text_color(theme.fg0)
+                                            .bg(accent.alpha(0.16))
+                                            .child(
+                                                div().flex_none().text_color(theme.fg2).child("⌕"),
+                                            )
+                                            .child(label)
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.confirm(cx);
+                                                }),
+                                            ),
+                                    )
+                                },
+                            ),
                     ),
             )
     }
+}
+
+/// クエリに一致する項目の添字を、良い順に並べて返す（Picker の refilter の本体）。
+/// 順位 = あいまい一致のスコア + [`PickerItem::boost`]。同点は元の並び（安定ソート）。
+/// 一致しない項目は加点があっても出さない。
+pub fn rank_items(query: &str, items: &[PickerItem]) -> Vec<usize> {
+    let mut scored: Vec<(usize, i32)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            fuzzy_score(query, &item.label).map(|score| (index, score.saturating_add(item.boost)))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.into_iter().map(|(index, _)| index).collect()
 }
 
 /// ベンチ専用の公開ラッパ（examples/bench_fuzzy が ⌘P の refilter 負荷を実測する用）。
@@ -507,6 +597,42 @@ mod tests {
         assert!(fuzzy_score("mn", "main.rs").is_some());
         assert!(fuzzy_score("xyz", "main.rs").is_none());
         assert_eq!(fuzzy_score("", "anything"), Some(0));
+    }
+
+    fn items(labels: &[(&str, i32)]) -> Vec<PickerItem> {
+        labels
+            .iter()
+            .enumerate()
+            .map(|(id, (label, boost))| PickerItem::new(id, *label).with_boost(*boost))
+            .collect()
+    }
+
+    /// ⌘P の並び（D19）: 加点（最近開いた = +・無視された = −）がスコアに足され、
+    /// 空のクエリでは加点順（同点は元の並び）。一致しない項目は加点があっても出ない。
+    #[test]
+    fn rank_items_adds_boost_to_the_fuzzy_score() {
+        let list = items(&[
+            ("src/a.rs", 0),
+            ("src/main.rs", 0),
+            ("src/recent.rs", 10_000),
+            ("build/ignored.rs", -10_000),
+        ]);
+        assert_eq!(rank_items("", &list), vec![2, 0, 1, 3]);
+        assert_eq!(
+            rank_items("rs", &list).first(),
+            Some(&2),
+            "最近開いたファイルが上"
+        );
+        assert_eq!(
+            rank_items("rs", &list).last(),
+            Some(&3),
+            "無視されたファイルは最後"
+        );
+        assert_eq!(
+            rank_items("main", &list),
+            vec![1],
+            "一致しないものは出さない"
+        );
     }
 
     #[test]

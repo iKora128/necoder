@@ -267,7 +267,8 @@ impl Workspace {
     /// `rename:<path>:<新しい名前>` / `newfile:<dir>:<名前>` / `duplicate:<path>` /
     /// `trash:<path>`（**本物のゴミ箱へ入る**。後に `undo` を続けて戻すこと）/ `undo` = ⌘Z 相当 /
     /// `menu:<path>` = 右クリックメニュー / `discard:<path>` = 変更の破棄の確認 /
-    /// `search:<dir>:<クエリ>` = フォルダ内を検索。
+    /// `search:<dir>:<クエリ>` = フォルダ内を検索 / `open:<path>` / `finder` = ⌘P /
+    /// `finder_query:<語>` / `finder_confirm` = ⌘P の ⏎。
     #[cfg(debug_assertions)]
     pub fn debug_explorer_probe(
         &mut self,
@@ -345,6 +346,21 @@ impl Workspace {
                 if let (Some(panel), false) = (self.search_panel.clone(), value.is_empty()) {
                     let query = value.to_string();
                     panel.update(cx, |panel, cx| panel.set_query(query, cx));
+                }
+            }
+            "open" => self.open_file(target, window, cx),
+            // ⌘P（`finder` → 列挙を待って `finder_query:<語>` → `finder_confirm` = ⏎）。
+            "finder" => self.open_file_finder(&FileFinder, window, cx),
+            "finder_query" | "finder_confirm" => {
+                if let Some(picker) = self.overlays.picker.clone() {
+                    let query = argument.to_string();
+                    picker.update(cx, |picker, cx| {
+                        if name == "finder_query" {
+                            picker.set_query(query, cx);
+                        } else {
+                            picker.confirm_selected(cx);
+                        }
+                    });
                 }
             }
             "duplicate" => self.duplicate_entry(target, cx),

@@ -243,6 +243,9 @@ pub(crate) enum PickerMode {
 /// ⌘P の作成アクション行の id（空プロジェクト用）。ファイル添字（最大 50k）と衝突しない番兵値。
 pub(crate) const FINDER_ACTION_NEW_FILE: usize = usize::MAX - 1;
 pub(crate) const FINDER_ACTION_NEW_DIR: usize = usize::MAX;
+/// ⌘P の一致なしの行「無視されたファイルも探す」（2 回目・D19）と、2 回目でも無かった時の行。
+pub(crate) const FINDER_ACTION_SEARCH_IGNORED: usize = usize::MAX - 2;
+pub(crate) const FINDER_ACTION_IGNORED_EMPTY: usize = usize::MAX - 3;
 
 const RAIL_WIDTH: f32 = 46.0;
 const DOCK_WIDTH: f32 = 218.0;
@@ -3774,6 +3777,100 @@ mod tests {
                 session._watch_pump = None;
             }
         });
+        std::fs::remove_dir_all(&root).expect("後片付け");
+    }
+
+    /// ⌘P（D19）: 最近開いたファイルが上に来る。gitignore で隠れたファイルは 1 回目には出ず、
+    /// 一致なしの時だけ出る「無視されたファイルも探す」（2 回目）で、Picker を開いたまま足される。
+    #[gpui::test]
+    fn file_finder_ranks_recent_files_and_finds_ignored_files_on_the_second_pass(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_finder_passes_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join("src")).expect("src");
+        std::fs::create_dir_all(project.join("build")).expect("build");
+        for name in ["src/a.txt", "src/b.txt", "src/zzz.txt"] {
+            std::fs::write(project.join(name), "x\n").expect("ファイル");
+        }
+        std::fs::write(project.join(".gitignore"), ".env\nbuild/\n").expect(".gitignore");
+        std::fs::write(project.join(".env"), "SECRET=1\n").expect(".env");
+        std::fs::write(project.join("build/out.js"), "x\n").expect("build/out.js");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let canonical_root = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_worktree()
+                .map(|worktree| worktree.root().to_path_buf())
+                .expect("プロジェクトが開いている")
+        });
+        // 名前順では最後の zzz.txt を開いておく（最近開いたファイル）。LSP の無い拡張子にして、
+        // 言語サーバの起動（別スレッド）でテストのスケジューラを乱さない。
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file(canonical_root.join("src/zzz.txt"), window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file_finder(&FileFinder, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (picker, first) = workspace.read_with(cx, |workspace, cx| {
+            let picker = workspace.overlays.picker.clone().expect("⌘P が開いている");
+            let first = picker
+                .read(cx)
+                .matched_ids()
+                .first()
+                .and_then(|id| workspace.overlays.picker_files.get(*id).cloned());
+            let listed_ignored = workspace
+                .overlays
+                .picker_files
+                .iter()
+                .any(|path| path.ends_with(".env") || path.ends_with("build/out.js"));
+            assert!(!listed_ignored, "1 回目に無視されたファイルは出ない");
+            (picker, first)
+        });
+        assert_eq!(
+            first,
+            Some(canonical_root.join("src/zzz.txt")),
+            "最近開いたファイルが先頭"
+        );
+
+        picker.update(cx, |picker, cx| picker.set_query(".env", cx));
+        assert!(
+            picker.read_with(cx, |picker, _cx| picker.matched_ids().is_empty()
+                && picker.fallback_visible()),
+            "1 回目で見つからない時だけ「無視されたファイルも探す」が出る"
+        );
+        picker.update(cx, |picker, cx| picker.confirm_selected(cx));
+        cx.run_until_parked();
+        let found = workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace.overlays.picker.is_some(),
+                "2 回目を探しても Picker は開いたまま"
+            );
+            picker
+                .read(cx)
+                .matched_ids()
+                .first()
+                .and_then(|id| workspace.overlays.picker_files.get(*id).cloned())
+        });
+        assert_eq!(found, Some(canonical_root.join(".env")), "2 回目で見つかる");
+
         std::fs::remove_dir_all(&root).expect("後片付け");
     }
 

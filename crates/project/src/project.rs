@@ -1868,8 +1868,55 @@ pub fn all_files_on(host: &dyn Host, root: &Path, limit: usize) -> Vec<(PathBuf,
             (path, relative)
         })
         .collect::<Vec<_>>();
-    files.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    // ツリーと同じ自然順（`item2` < `item10`・D16）。⌘P の空クエリと同点の並びがこれになる。
+    files.sort_by(|a, b| natural_name_cmp(&a.1, &b.1));
     files
+}
+
+/// ⌘P の 2 回目（D19）: [`all_files_on`] が返さなかったファイル（主に gitignore で隠れたもの）を、
+/// **浅いものから順に**（幅優先）最大 `limit` 件集める。`listed` = 1 回目で出したパス（除く）。
+///
+/// `node_modules` や `target` のような巨大な無視フォルダの奥まで同じ重さで辿ると、`.env` や
+/// `build/` 直下のような「たまに開きたいもの」へ届く前に上限を使い切るので、深さ順にする。
+/// `.git` とシンボリックリンクは辿らない（循環を避ける）。local のみ。
+pub fn ignored_files_local(
+    root: &Path,
+    listed: &std::collections::HashSet<PathBuf>,
+    limit: usize,
+) -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    while let Some(directory) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue; // 読めないフォルダ（権限など）は飛ばす
+        };
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            natural_name_cmp(
+                &left.file_name().to_string_lossy(),
+                &right.file_name().to_string_lossy(),
+            )
+        });
+        for entry in entries {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                queue.push_back(path);
+            } else if kind.is_file() && !listed.contains(&path) {
+                let relative = relative_display(path.strip_prefix(root).unwrap_or(&path));
+                found.push((path, relative));
+                if found.len() >= limit {
+                    return found;
+                }
+            }
+        }
+    }
+    found
 }
 
 /// HEAD のファイル内容（テキスト）。無ければ None（新規ファイル等）。M11 diff タブ/hunk 操作用。
@@ -2764,6 +2811,48 @@ mod tests {
 
         // 変更の無いファイルは断る。
         assert!(discard_path_on(&LocalHost, &root, &tracked).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ⌘P の 2 回目: 1 回目（gitignore 準拠）に出なかったファイルだけが、浅い順に出る。
+    #[test]
+    fn ignored_files_appear_only_in_the_second_pass() {
+        let root = scratch("ignored-pass");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("build/deep/deeper")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join(".env"), "").unwrap();
+        std::fs::write(root.join("app.log"), "").unwrap();
+        std::fs::write(root.join("build/deep/deeper/out.js"), "").unwrap();
+        std::fs::write(root.join(".git/HEAD"), "").unwrap();
+        std::fs::write(root.join(".gitignore"), ".env\n*.log\nbuild/\n").unwrap();
+
+        let first = all_files_on(&LocalHost, &root, 1000);
+        let first_relatives: Vec<&str> = first
+            .iter()
+            .map(|(_, relative)| relative.as_str())
+            .collect();
+        assert!(first_relatives.contains(&"src/main.rs"));
+        for ignored in [".env", "app.log", "build/deep/deeper/out.js"] {
+            assert!(
+                !first_relatives.contains(&ignored),
+                "1 回目に無視ファイル {ignored} を出さない"
+            );
+        }
+
+        let listed: std::collections::HashSet<PathBuf> =
+            first.into_iter().map(|(path, _)| path).collect();
+        let second: Vec<String> = ignored_files_local(&root, &listed, 1000)
+            .into_iter()
+            .map(|(_, relative)| relative)
+            .collect();
+        assert_eq!(
+            second,
+            vec![".env", "app.log", "build/deep/deeper/out.js"],
+            "無視ファイルだけ・浅い順（.git は辿らない）"
+        );
+        assert_eq!(ignored_files_local(&root, &listed, 1).len(), 1, "上限");
         let _ = std::fs::remove_dir_all(&root);
     }
 

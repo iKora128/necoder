@@ -69,6 +69,7 @@
 | **ne コマンド**（ターミナルから開く CLI・`code`/`cursor` 相当） | `cli_shim`（シム生成）/ `necoder cli`（実体） | ne コマンド | ne command |
 | **MCP サーバ**（エージェントに持たせる道具。`session/new` で渡す） | `acp_client::mcp` / `mcp_servers` | MCP サーバ | MCP server |
 | ↳ **発見**（他ツールの設定に居るサーバを一覧に載せる・既定 off） | `mcp::discover` / `McpSource` | 〈出所〉で発見 | found in 〈source〉 |
+| **無視されたファイルも探す**（⌘P の 2 回目。1 回目で何も一致しない時だけ出る行） | `ignored_files_local` / `FINDER_ACTION_SEARCH_IGNORED` / `Picker::set_fallback_action` | 無視されたファイルも探す / 無視 | Also search ignored files / ignored |
 | **フォルダ内を検索**（⌘⇧F の検索を 1 フォルダに絞る。パネルの頭に範囲のチップ） | `SearchPanel::scope` / `open_folder_search` | フォルダ内を検索 / 範囲 | Find in folder / In |
 | **ファイル操作の取り消し**（エクスプローラの ⌘Z。作成・名前の変更・移動・複製・ゴミ箱を 1 手ずつ戻す） | `FileOperation` / `FileOperationHistory` / `UndoFileOperation` | ファイル操作を取り消す | Undo file operation |
 

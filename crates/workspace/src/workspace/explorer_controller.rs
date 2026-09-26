@@ -1319,6 +1319,14 @@ impl Workspace {
         self.hide_context_menu(cx);
     }
 
+    /// 対話でファイルを開いた・選んだことを、アクティブ project の「最近開いた」の先頭へ（⌘P・D19）。
+    pub(crate) fn note_recent_file(&mut self, path: &Path) {
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
+            slot.explorer.note_opened(path);
+        }
+    }
+
     /// ファイルを開く（⌘P・ツリークリック・検索ジャンプ・F12 等の対話経路）。
     /// **読み込みは背景スレッド**（remote は 30s ブロックしうる — ARCHITECTURE §9）。
     pub(crate) fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -1327,6 +1335,7 @@ impl Workspace {
         // 全画面のままだと中央が Agent なので、開いたタブが画面に出ない。
         self.chrome.show_settings = false;
         self.exit_agent_full_screen(cx);
+        self.note_recent_file(&path);
         // 既に開いていれば重複タブを作らず、そのタブへ切り替える。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
@@ -1386,6 +1395,7 @@ impl Workspace {
         cx: &mut Context<Self>,
         apply: impl FnOnce(&mut EditorView, &mut Context<EditorView>) + 'static,
     ) {
+        self.note_recent_file(&path);
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
             if let Some(editor) = self.active_editor() {
@@ -1455,6 +1465,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.reveal_work_file(path.clone(), cx);
+        // ⌘P の「最近開いた」（D19）。対話で開いた分は `open_file` が先頭へ寄せ済みなので、
+        // ここは起動時の復元・プロジェクト切替で開き直した分を古い側へ足すだけ。
+        let active = self.project_sessions.active;
+        if let Some(slot) = self.project_sessions.slot_mut(active) {
+            slot.explorer.note_reopened(&path);
+        }
         // 読み込み中に同じファイルが開かれていたら切り替えるだけ。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
