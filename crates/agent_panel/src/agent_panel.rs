@@ -29,6 +29,7 @@ mod idle;
 mod remote;
 mod search;
 pub mod sound;
+pub mod usage;
 
 pub use chat::ChatRow;
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
@@ -984,6 +985,8 @@ struct Thread {
     session_resumable: bool,
     /// エージェントが最後に働いた時刻（送信・ターン終了）。自動停止の起点。
     last_active_at_ms: i64,
+    /// ターンのトークンとコストの数え方（O11）。ターンが終わるたびに台帳 `turn_usage` へ書く。
+    usage: usage::CostMeter,
 }
 
 impl Thread {
@@ -1051,6 +1054,7 @@ impl Thread {
             chat: None,
             session_resumable: false,
             last_active_at_ms: 0,
+            usage: usage::CostMeter::default(),
         }
     }
 
@@ -2535,6 +2539,35 @@ PYEOF"#;
         }
     }
 
+    /// ターンの使用量（トークン・コスト）を台帳 `turn_usage` へ 1 行書く（O11・Stats の日別集計の元）。
+    /// エージェントが何も報告しなかったターンは書かない。DB が無い（テスト・一部の検証起動）時は捨てる。
+    fn record_turn_usage(&mut self, thread_index: usize) {
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return;
+        };
+        let Some(spend) = thread.usage.take_turn() else {
+            return;
+        };
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let record = storage::TurnUsageRecord {
+            thread_id: thread.id.clone(),
+            agent: thread.agent.to_string(),
+            ended_at: now_unix_ms(),
+            input_tokens: spend.tokens.input,
+            output_tokens: spend.tokens.output,
+            cached_read_tokens: spend.tokens.cached_read,
+            cached_write_tokens: spend.tokens.cached_write,
+            total_tokens: spend.tokens.total,
+            cost_usd: spend.cost_usd,
+            session_cost_usd: spend.session_total_usd,
+        };
+        if let Err(error) = storage.record_turn_usage(&record) {
+            eprintln!("ターンの使用量を記録できない: {error:#}");
+        }
+    }
+
     /// 最初のターン後、まだ既定名なら会話の冒頭から AI にタイトルを付けてもらう（#6・非同期）。
     /// 手動改名済み or 既に命名済み（＝プレースホルダでない）スレッドは対象外。失敗は静かに既定名のまま。
     ///
@@ -2736,6 +2769,13 @@ PYEOF"#;
     /// いま選ばれているスレッドの添字（`statuses()` と同じ並び）。
     pub fn active_thread(&self) -> usize {
         self.active
+    }
+
+    /// いま選ばれているスレッドが話すエージェント（ラベル）。statusbar の使用量が読む（O11）。
+    pub fn active_agent(&self) -> Option<SharedString> {
+        self.threads
+            .get(self.active)
+            .map(|thread| thread.agent.clone())
     }
 
     pub fn contains_thread(&self, id: &str) -> bool {
@@ -5833,6 +5873,8 @@ PYEOF"#;
         let mut stocked_configs: Option<(SharedString, Vec<ConfigOption>)> = None;
         let mut stocked_modes: Option<(SharedString, Vec<(SharedString, SharedString)>)> = None;
         let mut stocked_commands: Option<(SharedString, Vec<acp_client::SlashCommand>)> = None;
+        // レート制限の知らせ（O11）。agent ごとの全体の置き場（Global）へ末尾で重ねる。
+        let mut rate_limits: Option<(SharedString, acp_client::usage::RateLimits)> = None;
         // 会話名を送ってきた agent（在庫に「自分で名付ける」と控える）と、付け替えた名前。
         let mut titled_by_agent: Option<SharedString> = None;
         let mut agent_renamed: Option<SharedString> = None;
@@ -5883,6 +5925,25 @@ PYEOF"#;
                 session_id_changed = thread.acp_session_id.as_deref() != Some(session_id.as_str());
                 thread.acp_session_id = Some(session_id);
                 thread.session_lost = false;
+                // コストの基準（O11）: 新しい会話は 0 から数える。引き継いだ会話は前回の累計が基準で、
+                // 再起動後の最初の再開なら台帳に残る最後の累計を使う。
+                if !resumed {
+                    thread.usage.start_fresh();
+                } else if thread.usage.needs_stored_total() {
+                    let stored = match self
+                        .storage
+                        .as_ref()
+                        .map(|storage| storage.last_session_cost(&thread.id))
+                    {
+                        Some(Ok(total)) => total,
+                        Some(Err(error)) => {
+                            eprintln!("会話の累計コストを読めない: {error:#}");
+                            None
+                        }
+                        None => None,
+                    };
+                    thread.usage.resume_from(stored);
+                }
                 // 目標はエージェント側の会話の状態。新しい会話では消え、引き継いだ会話ならエージェントが
                 // 送り直す（届くまでは前の表示を残す）。
                 if !resumed {
@@ -5992,10 +6053,18 @@ PYEOF"#;
                     thread.tokens_shown = thread.tokens_used as f32;
                 }
             }
-            // 使用量（O11）は今は受け取るだけ。
-            AgentEvent::SessionCost { .. }
-            | AgentEvent::RateLimits(_)
-            | AgentEvent::TurnUsage(_) => {}
+            // 会話の累計コスト（O11）。合算できるのは USD だけ（Claude は USD で送る）。
+            AgentEvent::SessionCost { amount, currency } => {
+                if currency.eq_ignore_ascii_case("USD") {
+                    thread.usage.observe_total(amount);
+                }
+            }
+            // レート制限（O11）はアカウント単位＝エージェントごとに 1 つを共有する（末尾で反映）。
+            AgentEvent::RateLimits(limits) => {
+                rate_limits = Some((thread.agent.clone(), limits));
+            }
+            // ターンに使ったトークン（O11）。TurnEnded でコストと一緒に台帳へ書く。
+            AgentEvent::TurnUsage(tokens) => thread.usage.observe_tokens(tokens),
             AgentEvent::Modes { modes, current } => {
                 thread.available_modes = modes
                     .into_iter()
@@ -6359,6 +6428,7 @@ PYEOF"#;
             }
             self.sync_running_registry(cx); // 実行中 → 完了をダッシュボードへ（M12-12）
             self.persist_thread(thread_index); // turn 確定分を DB へ（M12-1）
+            self.record_turn_usage(thread_index); // トークンとコストを台帳へ（O11）
             self.maybe_auto_name(thread_index, cx); // 初回ターン後、既定名なら AI がタイトルを付ける（#6）
             self.maybe_tier2_summary(thread_index, cx); // ✳ 1 行要約（P4・Done/Failed 遷移のみ）
             if let Some(thread) = self.threads.get(thread_index) {
@@ -6440,6 +6510,11 @@ PYEOF"#;
         }
         if let Some((agent, commands)) = stocked_commands {
             self.catalog.entry(agent).or_default().commands = commands;
+        }
+        if let Some((agent, limits)) = rate_limits {
+            // `default_global` は観測者（全ウィンドウの statusbar）を起こす＝値が変わった時だけ呼ぶ。
+            cx.default_global::<usage::UsageLimits>()
+                .record(agent, limits, now_unix_ms());
         }
         if let Some(agent) = titled_by_agent {
             self.catalog.entry(agent).or_default().sends_titles = true;
@@ -11444,6 +11519,7 @@ fn seed_threads() -> Vec<Thread> {
         chat: None,
         session_resumable: false,
         last_active_at_ms: 0,
+        usage: usage::CostMeter::default(),
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
@@ -14057,6 +14133,133 @@ PYEOF"#;
             .map(|(_, content)| content)
             .collect();
         assert_eq!(saved, vec!["最初の答えの続き", "待機中の報告"]);
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// O11: ターンのトークンとコスト（会話の累計の差分）を台帳へ書き、レート制限はエージェントごとの
+    /// 置き場（Global）へ重ねる。再起動後に引き継いだ会話のコストは、台帳の最後の累計を基準にする
+    /// （過去の分を 1 ターンに載せない）。
+    #[gpui::test]
+    fn turn_usage_is_recorded_and_rate_limits_are_shared(cx: &mut gpui::TestAppContext) {
+        use acp_client::usage::{LimitStatus, LimitWindow, RateLimits, TurnTokens, WindowUsage};
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_usage_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_auto_name":false,"tier2_summaries":false,"sound_done":"off"}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_usage_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let now_secs = now_unix_ms() / 1000;
+        let turn =
+            |panel: &mut AgentPanel, cost: f64, tokens: u64, cx: &mut Context<AgentPanel>| {
+                let active = panel.active;
+                panel.on_event(active, AgentEvent::TurnStarted, cx);
+                panel.on_event(
+                    active,
+                    AgentEvent::SessionCost {
+                        amount: cost,
+                        currency: "USD".into(),
+                    },
+                    cx,
+                );
+                panel.on_event(
+                    active,
+                    AgentEvent::TurnUsage(TurnTokens {
+                        input: tokens / 2,
+                        output: tokens / 2,
+                        total: tokens,
+                        ..TurnTokens::default()
+                    }),
+                    cx,
+                );
+                panel.on_event(
+                    active,
+                    AgentEvent::TurnEnded {
+                        reason: TurnEnd::Completed,
+                    },
+                    cx,
+                );
+            };
+        let thread_id = panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let active = panel.active;
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "session-1".into(),
+                    resumed: false,
+                    resumable: true,
+                },
+                cx,
+            );
+            panel.on_event(
+                active,
+                AgentEvent::RateLimits(RateLimits {
+                    status: Some(LimitStatus::Warning),
+                    windows: vec![WindowUsage {
+                        window: LimitWindow::FiveHour,
+                        used_percent: Some(85.0),
+                        resets_at: Some(now_secs + 3_600),
+                    }],
+                }),
+                cx,
+            );
+            turn(panel, 0.4, 100, cx);
+            turn(panel, 1.0, 50, cx);
+            let limits = cx
+                .try_global::<usage::UsageLimits>()
+                .expect("レート制限の置き場がある");
+            let claude = limits.agent("Claude Code").expect("スレッドの agent の値");
+            assert!(claude.near_limit(now_secs), "85% は目立たせる");
+            assert_eq!(panel.active_agent().as_deref(), Some("Claude Code"));
+            panel.threads[active].id.clone()
+        });
+        let rows = storage.daily_usage(0, 0).expect("集計を読める");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].agent, "Claude Code");
+        assert_eq!(rows[0].turns, 2);
+        assert_eq!(rows[0].total_tokens, 150);
+        assert!(
+            (rows[0].cost_usd.expect("コスト") - 1.0).abs() < 1e-9,
+            "{rows:?}"
+        );
+
+        // 再起動の真似: スレッドの記憶を消し、同じ会話を引き継ぐ。最初の累計（1.3）は過去の 1.0 を含む。
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].usage = usage::CostMeter::default();
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "session-1".into(),
+                    resumed: true,
+                    resumable: true,
+                },
+                cx,
+            );
+            turn(panel, 1.3, 10, cx);
+        });
+        let rows = storage.daily_usage(0, 0).expect("集計を読める");
+        assert!(
+            (rows[0].cost_usd.expect("コスト") - 1.3).abs() < 1e-9,
+            "引き継いだ会話は差分の 0.3 だけ足す: {rows:?}"
+        );
+        assert_eq!(
+            storage.last_session_cost(&thread_id).expect("読める"),
+            Some(1.3)
+        );
         let _ = std::fs::remove_file(settings_path);
         let _ = std::fs::remove_file(db_path);
     }

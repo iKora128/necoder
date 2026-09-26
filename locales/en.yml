@@ -217,6 +217,7 @@ cmd:
   open_recent: "File: Open Recent…"
   open_dialog: "File: Open Folder…"
   shortcut_sheet: "Help: Keyboard shortcuts"
+  usage_stats: "Usage: Open statistics"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -942,3 +943,51 @@ chat:
   copy_to_project: "Copy to project “%{project}”"
   copied_to_project: "Copied: %{path}"
   copy_failed: "Could not copy: %{message}"
+usage:
+  window_five_hour: 5-hour window
+  window_five_hour_short: 5h
+  window_weekly: Weekly window
+  window_weekly_short: 7d
+  window_opus: Weekly (Opus)
+  window_opus_short: Opus 7d
+  window_sonnet: Weekly (Sonnet)
+  window_sonnet_short: Sonnet 7d
+  window_weekly_extra: Weekly (incl. extra usage)
+  window_weekly_extra_short: 7d+extra
+  window_extra: Extra usage
+  window_extra_short: Extra
+  window_days: "%{days}-day window"
+  window_days_short: "%{days}d"
+  window_hours: "%{hours}-hour window"
+  window_hours_short: "%{hours}h"
+  window_minutes: "%{minutes}-minute window"
+  window_minutes_short: "%{minutes}m"
+  resets_in: "resets in %{time}"
+  reset_done: reset (no new value yet)
+  duration_minutes: "%{minutes}m"
+  duration_hours: "%{hours}h %{minutes}m"
+  duration_days: "%{days}d %{hours}h"
+  chip_tip: "%{agent} usage (last value received). Click for details"
+  popover_title: Usage & rate limits
+  received: "received %{when}"
+  status_warning: Near the limit
+  status_rejected: Limit reached
+  no_values: No values yet. They appear once an agent reports them
+  note: Values change only when an agent reports them (the last value received). necoder never asks for your plan limits on its own.
+  codex_note: Codex does not report limits over ACP, so they are read from the Codex CLI (codex app-server) when you open this panel.
+  codex_loading: Reading Codex limits…
+  codex_failed: "Couldn't read Codex limits: %{error}"
+  reload: Reload
+  open_stats: Open statistics
+  stats_title: Usage statistics
+  stats_subtitle: Last 30 days · only turns recorded by necoder
+  stats_date: Date
+  stats_agent: Agent
+  stats_turns: Turns
+  stats_tokens: Tokens
+  stats_cost: Cost
+  stats_total: 30-day total
+  stats_empty: Nothing recorded yet. Turns are recorded once an agent reports usage.
+  stats_loading: Loading…
+  stats_failed: "Couldn't read usage: %{error}"
+  stats_note: Tokens and cost are estimates each agent reports per turn (Claude's cost is Claude Code's estimate; Codex reports no cost, and its tokens cover only the last request of each turn). Local logs such as ~/.claude are not read.

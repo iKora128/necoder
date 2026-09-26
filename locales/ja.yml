@@ -218,6 +218,7 @@ cmd:
   open_recent: "ファイル: 最近使った項目を開く…"
   open_dialog: "ファイル: フォルダを開く…"
   shortcut_sheet: "ヘルプ: キーボードショートカット"
+  usage_stats: "使用量: 統計を開く"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -943,3 +944,51 @@ chat:
   copy_to_project: "プロジェクト「%{project}」へコピー"
   copied_to_project: "コピーしました: %{path}"
   copy_failed: "コピーできませんでした: %{message}"
+usage:
+  window_five_hour: 5 時間枠
+  window_five_hour_short: 5h
+  window_weekly: 週枠
+  window_weekly_short: 週
+  window_opus: Opus の週枠
+  window_opus_short: Opus 週
+  window_sonnet: Sonnet の週枠
+  window_sonnet_short: Sonnet 週
+  window_weekly_extra: 週枠（追加の使用枠を含む）
+  window_weekly_extra_short: 週+追加
+  window_extra: 追加の使用枠
+  window_extra_short: 追加枠
+  window_days: "%{days} 日枠"
+  window_days_short: "%{days}日"
+  window_hours: "%{hours} 時間枠"
+  window_hours_short: "%{hours}h"
+  window_minutes: "%{minutes} 分枠"
+  window_minutes_short: "%{minutes}m"
+  resets_in: "あと %{time}でリセット"
+  reset_done: リセット済み（新しい値はまだ届いていません）
+  duration_minutes: "%{minutes} 分"
+  duration_hours: "%{hours} 時間 %{minutes} 分"
+  duration_days: "%{days} 日 %{hours} 時間"
+  chip_tip: "%{agent} の使用量（最後に受け取った値）。クリックで詳細"
+  popover_title: 使用量・レート制限
+  received: "受信 %{when}"
+  status_warning: 上限が近い
+  status_rejected: 上限に達しています
+  no_values: まだ値を受け取っていません。エージェントが知らせてきたら出ます
+  note: 値はエージェントが知らせてきた時にだけ変わります（最後に受け取った値）。necoder から利用上限を問い合わせることはしません。
+  codex_note: Codex だけは ACP で知らせてこないので、このポップオーバーを開いた時に codex 本体（codex app-server）に訊きます。
+  codex_loading: Codex の値を読み込み中…
+  codex_failed: "Codex の値を読めませんでした: %{error}"
+  reload: 再読み込み
+  open_stats: 統計を開く
+  stats_title: 使用量の統計
+  stats_subtitle: 直近 30 日 · necoder で記録したターンだけ
+  stats_date: 日付
+  stats_agent: エージェント
+  stats_turns: ターン
+  stats_tokens: トークン
+  stats_cost: コスト
+  stats_total: 30 日の合計
+  stats_empty: まだ記録がありません。エージェントが使用量を知らせたターンから記録します。
+  stats_loading: 読み込み中…
+  stats_failed: "使用量を読めませんでした: %{error}"
+  stats_note: トークンとコストは、エージェントがターンごとに報告した推定値です（Claude のコストは Claude Code の推定。Codex はコストを報告せず、トークンは各ターンの最後の要求の分だけ）。~/.claude などのローカルのログは読みません。
