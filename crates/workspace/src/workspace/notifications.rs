@@ -524,6 +524,30 @@ impl Workspace {
             .collect()
     }
 
+    /// 開発用: 最後のトーストの「全文 ›」を押したのと同じ入口（`NECODER_GIT_PROBE` の `details`）。
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_open_last_toast_details(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let details =
+            self.notifications
+                .toasts
+                .iter()
+                .rev()
+                .find_map(|toast| match &toast.action {
+                    Some(ToastAction::OpenDetails { title, text }) => {
+                        Some((title.clone(), text.clone()))
+                    }
+                    _ => None,
+                });
+        match details {
+            Some((title, text)) => self.open_toast_details(title, text, window, cx),
+            None => eprintln!("GIT_PROBE: 全文つきのトーストが無い"),
+        }
+    }
+
     /// トーストの「全文」を読み取り専用タブで開く（Editor で読む＝Fleet 中なら Editor へ出る）。
     fn open_toast_details(
         &mut self,

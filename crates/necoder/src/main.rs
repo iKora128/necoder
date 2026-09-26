@@ -1032,6 +1032,35 @@ fn main() {
                         .detach();
                     }
                 }
+                // 開発用: NECODER_GIT_PROBE="open;row:0;type:fix;commit;wait:800;details" でソース管理
+                // パネルを駆動する（`;` 区切りで順に実行。`wait:<ms>` はその場で待つ）。
+                #[cfg(debug_assertions)]
+                if let Ok(script) = std::env::var("NECODER_GIT_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(1800))
+                                .await;
+                            for command in script.split(';').map(str::trim) {
+                                if let Some(milliseconds) = command.strip_prefix("wait:") {
+                                    let milliseconds = milliseconds.parse::<u64>().unwrap_or(500);
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(milliseconds))
+                                        .await;
+                                    continue;
+                                }
+                                let command = command.to_string();
+                                let _ = handle.update(cx, |workspace, window, cx| {
+                                    workspace.debug_git_probe(&command, window, cx);
+                                });
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(250))
+                                    .await;
+                            }
+                        })
+                        .detach();
+                    }
+                }
                 // 開発用: NECODER_AGENT_FULLSCREEN_PROBE=1 で AI 全画面（⌘⇧⏎）を駆動する。
                 if std::env::var("NECODER_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
