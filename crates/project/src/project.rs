@@ -3,8 +3,13 @@
 //! ARCHITECTURE §2: M3 は**遅延 read_dir**（展開時に直下を読む）で、
 //! `.git` と gitignore 対象を除外する（ripgrep の `ignore` crate を使用）。
 //! ファイル監視・インクリメンタル更新は後続（M8/性能）で追加する。
+//!
+//! ⌘P の「無視されたファイルは 2 回目に」（[`ignored_files_local`]）は、stablyai/orca@646e9a5 の
+//! `src/shared/quick-open-filter.ts`（ignoredPass）と `docs/site/content/docs/model/quick-open.mdx`
+//! の考え方を参考にした（実装は独立。Orca は rg で自動に足し、necoder は一致なしの時に人が選ぶ）。
 
 pub mod review;
+pub mod file_operations;
 pub mod todos;
 
 use anyhow::{Context as _, Result};
@@ -279,8 +284,58 @@ fn sort_entries(entries: &mut [Entry]) {
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| natural_name_cmp(&a.name, &b.name))
     });
+}
+
+/// 名前の自然順（D16）。数字の並びは数として比べ（`file2` < `file10`・`9` < `99` < `100`）、
+/// 文字は大文字小文字を無視して比べる。数が同じなら先頭の 0 が少ない方を先に、最後は元の綴りで
+/// 決める（読み直すたびに並びが揺れないよう全順序にする）。
+pub fn natural_name_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let (mut left_rest, mut right_rest) = (left, right);
+    while let (Some(left_char), Some(right_char)) =
+        (left_rest.chars().next(), right_rest.chars().next())
+    {
+        if left_char.is_ascii_digit() && right_char.is_ascii_digit() {
+            let left_end = digit_run_end(left_rest);
+            let right_end = digit_run_end(right_rest);
+            let ordering = compare_digit_runs(&left_rest[..left_end], &right_rest[..right_end]);
+            if ordering.is_ne() {
+                return ordering;
+            }
+            left_rest = &left_rest[left_end..];
+            right_rest = &right_rest[right_end..];
+            continue;
+        }
+        let ordering = left_char.to_lowercase().cmp(right_char.to_lowercase());
+        if ordering.is_ne() {
+            return ordering;
+        }
+        left_rest = &left_rest[left_char.len_utf8()..];
+        right_rest = &right_rest[right_char.len_utf8()..];
+    }
+    // 片方が尽きた = 短い方が先。両方尽きたら元の綴りで決める。
+    left_rest
+        .len()
+        .cmp(&right_rest.len())
+        .then_with(|| left.cmp(right))
+}
+
+/// 先頭から続く ASCII 数字の終わり（byte 位置）。
+fn digit_run_end(text: &str) -> usize {
+    text.find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(text.len())
+}
+
+/// 数字の並び同士を数として比べる（桁数に上限なし＝u64 に収まらない並びでも比べられる）。
+fn compare_digit_runs(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_digits = left.trim_start_matches('0');
+    let right_digits = right.trim_start_matches('0');
+    left_digits
+        .len()
+        .cmp(&right_digits.len())
+        .then_with(|| left_digits.cmp(right_digits))
+        .then_with(|| left.len().cmp(&right.len()))
 }
 
 /// ディレクトリ → 直下の一覧。エクスプローラが描画に使うキャッシュの形。
@@ -986,6 +1041,91 @@ pub fn stage_all(dir: &Path) -> Result<()> {
 pub fn stage_all_on(host: &dyn Host, dir: &Path) -> Result<()> {
     let output = run_git(host, dir, ["add", "-A"]).context("git add -A の実行に失敗")?;
     ensure_command_success(&output, "stage に失敗")
+}
+
+/// エクスプローラの「変更を破棄」（D16）の結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    /// HEAD の内容へ戻した（index も作業ツリーも）。
+    Restored,
+    /// git の管理外になった（未追跡・HEAD に無いまま add しただけのファイル）。git では中身を
+    /// 戻す先が無いので、**ファイルを片付けるのは呼び出し側**（ゴミ箱へ入れる＝取り消せる形で）。
+    Untracked,
+}
+
+/// 1 ファイルの変更を破棄して HEAD の状態へ戻す（`git restore --source=HEAD --staged --worktree`）。
+/// HEAD に無いファイル（未追跡・add しただけ）は index から外すだけで [`DiscardOutcome::Untracked`]
+/// を返す。競合中のファイルは破棄しない（どちらの内容を残すかは人が決める）。
+pub fn discard_path_on(host: &dyn Host, dir: &Path, path: &Path) -> Result<DiscardOutcome> {
+    let path_arg = path.to_string_lossy().into_owned();
+    let output = run_git(
+        host,
+        dir,
+        [
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--no-renames",
+            "-z",
+            "--",
+            path_arg.as_str(),
+        ],
+    )
+    .context("git status の実行に失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "変更を読めない: {}",
+        git_fail_message(&output)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(entry) = stdout
+        .split('\0')
+        .find(|entry| entry.len() >= 4 && &entry[2..3] == " ")
+    else {
+        anyhow::bail!("変更が無い: {}", path.display());
+    };
+    let (index, worktree) = (entry.as_bytes()[0], entry.as_bytes()[1]);
+    match classify_status(index, worktree) {
+        StatusKind::Untracked => return Ok(DiscardOutcome::Untracked),
+        StatusKind::Conflicted => {
+            anyhow::bail!("競合中のファイルは破棄しない: {}", path.display())
+        }
+        _ => {}
+    }
+    if index == b'A' {
+        let output = run_git(
+            host,
+            dir,
+            ["rm", "--cached", "--quiet", "--", path_arg.as_str()],
+        )
+        .context("git rm --cached の実行に失敗")?;
+        anyhow::ensure!(
+            output.success(),
+            "index から外せない: {}",
+            git_fail_message(&output)
+        );
+        return Ok(DiscardOutcome::Untracked);
+    }
+    let output = run_git(
+        host,
+        dir,
+        [
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+            path_arg.as_str(),
+        ],
+    )
+    .context("git restore の実行に失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "変更を破棄できない: {}",
+        git_fail_message(&output)
+    );
+    Ok(DiscardOutcome::Restored)
 }
 
 /// index から下ろす（`git restore --staged -- <path>`）。
@@ -1771,8 +1911,55 @@ pub fn all_files_on(host: &dyn Host, root: &Path, limit: usize) -> Vec<(PathBuf,
             (path, relative)
         })
         .collect::<Vec<_>>();
-    files.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    // ツリーと同じ自然順（`item2` < `item10`・D16）。⌘P の空クエリと同点の並びがこれになる。
+    files.sort_by(|a, b| natural_name_cmp(&a.1, &b.1));
     files
+}
+
+/// ⌘P の 2 回目（D19）: [`all_files_on`] が返さなかったファイル（主に gitignore で隠れたもの）を、
+/// **浅いものから順に**（幅優先）最大 `limit` 件集める。`listed` = 1 回目で出したパス（除く）。
+///
+/// `node_modules` や `target` のような巨大な無視フォルダの奥まで同じ重さで辿ると、`.env` や
+/// `build/` 直下のような「たまに開きたいもの」へ届く前に上限を使い切るので、深さ順にする。
+/// `.git` とシンボリックリンクは辿らない（循環を避ける）。local のみ。
+pub fn ignored_files_local(
+    root: &Path,
+    listed: &std::collections::HashSet<PathBuf>,
+    limit: usize,
+) -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    while let Some(directory) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue; // 読めないフォルダ（権限など）は飛ばす
+        };
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            natural_name_cmp(
+                &left.file_name().to_string_lossy(),
+                &right.file_name().to_string_lossy(),
+            )
+        });
+        for entry in entries {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                queue.push_back(path);
+            } else if kind.is_file() && !listed.contains(&path) {
+                let relative = relative_display(path.strip_prefix(root).unwrap_or(&path));
+                found.push((path, relative));
+                if found.len() >= limit {
+                    return found;
+                }
+            }
+        }
+    }
+    found
 }
 
 /// HEAD のファイル内容（テキスト）。無ければ None（新規ファイル等）。M11 diff タブ/hunk 操作用。
@@ -2109,30 +2296,86 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
 
 /// OS のゴミ箱へ入れる（macOS: `/usr/bin/trash`、無ければ Finder 経由）。完全削除はしない。
 pub fn trash_local(path: &Path) -> Result<()> {
-    anyhow::ensure!(path.exists(), "存在しない: {}", path.display());
-    if Path::new("/usr/bin/trash").exists() {
-        let status = std::process::Command::new("/usr/bin/trash")
-            .arg(path)
-            .status()
-            .context("trash コマンドの起動に失敗")?;
-        anyhow::ensure!(status.success(), "trash が失敗: {}", path.display());
-        return Ok(());
-    }
-    // フォールバック: Finder に頼む（AppleScript）。
-    let script = format!(
-        "tell application \"Finder\" to delete POSIX file \"{}\"",
+    move_to_trash_local(path).map(|_location| ())
+}
+
+/// [`trash_local`] と同じくゴミ箱へ入れ、**ゴミ箱の中での場所**を返す（⌘Z で戻すため・H30）。
+///
+/// macOS 15 からの `/usr/bin/trash` は `NSFileManager trashItemAtURL:resultingItemURL:` を呼び、
+/// `-v` を付けると標準出力へ `# Moved "<元>" to "<ゴミ箱の中>"` を書く（名前が重なると
+/// ゴミ箱側で別名になるので、場所は出力から読むしかない）。Finder 経由（それより古い macOS）は
+/// `delete` が返す項目から読む。どちらも読めなければ `None`（ゴミ箱には入ったが戻せない）。
+pub fn move_to_trash_local(path: &Path) -> Result<Option<PathBuf>> {
+    anyhow::ensure!(
+        path.symlink_metadata().is_ok(),
+        "存在しない: {}",
         path.display()
     );
-    let status = std::process::Command::new("/usr/bin/osascript")
-        .args(["-e", &script])
-        .status()
+    if Path::new("/usr/bin/trash").exists() {
+        let output = std::process::Command::new("/usr/bin/trash")
+            .arg("-v")
+            .arg(path)
+            .output()
+            .context("trash コマンドの起動に失敗")?;
+        anyhow::ensure!(output.status.success(), "trash が失敗: {}", path.display());
+        let printed = String::from_utf8_lossy(&output.stdout);
+        return Ok(parse_trash_destination(&printed, path)
+            .filter(|location| location.symlink_metadata().is_ok()));
+    }
+    // フォールバック: Finder に頼む（AppleScript）。戻り値（ゴミ箱の中の項目）のパスを出力させる。
+    // パスの取り出しに失敗しても、ゴミ箱へ入れること自体は成功として扱う（`try` で包む）。
+    let quoted = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            &format!(
+                "tell application \"Finder\" to set trashedItem to delete POSIX file \"{quoted}\""
+            ),
+            "-e",
+            "try",
+            "-e",
+            "return POSIX path of (trashedItem as alias)",
+            "-e",
+            "on error",
+            "-e",
+            "return \"\"",
+            "-e",
+            "end try",
+        ])
+        .output()
         .context("osascript の起動に失敗")?;
     anyhow::ensure!(
-        status.success(),
+        output.status.success(),
         "Finder でのゴミ箱移動が失敗: {}",
         path.display()
     );
-    Ok(())
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let location = printed.trim().trim_end_matches('/');
+    Ok((!location.is_empty())
+        .then(|| PathBuf::from(location))
+        .filter(|location| location.symlink_metadata().is_ok()))
+}
+
+/// `/usr/bin/trash -v` の出力からゴミ箱の中での場所を読む。書式は `# Moved "<元>" to "<先>"`
+/// （引用符はエスケープされない）。元のパスが分かっているので、その後ろを切り出す。
+fn parse_trash_destination(printed: &str, original: &Path) -> Option<PathBuf> {
+    let prefix = format!("# Moved \"{}\" to \"", original.display());
+    printed.lines().find_map(|line| {
+        let destination = match line.strip_prefix(prefix.as_str()) {
+            Some(rest) => rest.strip_suffix('"')?,
+            // 元の綴りが変わって出た場合（正規化など）は最後の `" to "` で切る。
+            None => line
+                .strip_prefix("# Moved \"")?
+                .rsplit_once("\" to \"")?
+                .1
+                .strip_suffix('"')?,
+        };
+        (!destination.is_empty()).then(|| PathBuf::from(destination))
+    })
 }
 
 /// Finder で対象を表示（親フォルダを開いて選択状態にする）。macOS の `open -R`。
@@ -2547,6 +2790,193 @@ mod tests {
             !relatives.iter().any(|r| r.contains("target")),
             "gitignore の target を除外"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn natural_order_compares_numbers_by_value() {
+        let mut names = vec![
+            "file10.rs",
+            "file2.rs",
+            "File1.rs",
+            "100",
+            "99",
+            "9",
+            "a",
+            "a01",
+            "a1",
+            "b",
+        ];
+        names.sort_by(|left, right| natural_name_cmp(left, right));
+        assert_eq!(
+            names,
+            vec![
+                "9",
+                "99",
+                "100",
+                "a",
+                "a1",
+                "a01",
+                "b",
+                "File1.rs",
+                "file2.rs",
+                "file10.rs"
+            ]
+        );
+        // 大文字小文字だけが違う名前も順序が決まる（読み直しで揺れない）。
+        assert_eq!(
+            natural_name_cmp("README", "readme"),
+            std::cmp::Ordering::Less
+        );
+        // u64 に収まらない桁でも比べられる。
+        assert_eq!(
+            natural_name_cmp("v99999999999999999999", "v100000000000000000000"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn tree_lists_folders_first_in_natural_order() {
+        let root = scratch("natural");
+        std::fs::create_dir_all(root.join("dir10")).unwrap();
+        std::fs::create_dir_all(root.join("dir9")).unwrap();
+        for name in ["file10.rs", "file2.rs", "file1.rs"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        let worktree = Worktree::new(&root).unwrap();
+        let names: Vec<String> = worktree
+            .read_root()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["dir9", "dir10", "file1.rs", "file2.rs", "file10.rs"]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trash_output_parser_reads_the_destination() {
+        let original = Path::new("/tmp/a \"quoted\" name.txt");
+        let printed = "# Moved \"/tmp/a \"quoted\" name.txt\" to \"/Users/me/.Trash/a \"quoted\" name 2.txt\"\n";
+        assert_eq!(
+            parse_trash_destination(printed, original),
+            Some(PathBuf::from("/Users/me/.Trash/a \"quoted\" name 2.txt"))
+        );
+        // 元の綴りが違って出ても最後の ` to ` で拾う。
+        assert_eq!(
+            parse_trash_destination(
+                "# Moved \"/private/tmp/b.txt\" to \"/Users/me/.Trash/b.txt\"",
+                Path::new("/tmp/b.txt")
+            ),
+            Some(PathBuf::from("/Users/me/.Trash/b.txt"))
+        );
+        assert_eq!(parse_trash_destination("", original), None);
+    }
+
+    #[test]
+    fn discard_restores_tracked_files_and_hands_back_untracked_ones() {
+        let root = scratch("discard");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        // git が無い環境ではスキップ（CI 等）。
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "tester"]);
+        git(&["config", "core.autocrlf", "false"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        // 変更（staged + unstaged の両方）→ HEAD へ戻る。
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        std::fs::write(root.join("tracked.txt"), "three\n").unwrap();
+        let tracked = root.join("tracked.txt");
+        assert_eq!(
+            discard_path_on(&LocalHost, &root, &tracked).unwrap(),
+            DiscardOutcome::Restored
+        );
+        assert_eq!(std::fs::read_to_string(&tracked).unwrap(), "one\n");
+        assert!(
+            git_status(&root).is_empty(),
+            "index も作業ツリーも HEAD と同じ"
+        );
+
+        // 未追跡 → 片付けは呼び出し側（ファイルはまだある）。
+        let untracked = root.join("new.txt");
+        std::fs::write(&untracked, "x\n").unwrap();
+        assert_eq!(
+            discard_path_on(&LocalHost, &root, &untracked).unwrap(),
+            DiscardOutcome::Untracked
+        );
+        assert!(untracked.exists());
+
+        // add しただけ（HEAD に無い）→ index から外れて未追跡に戻る。
+        git(&["add", "new.txt"]);
+        assert_eq!(
+            discard_path_on(&LocalHost, &root, &untracked).unwrap(),
+            DiscardOutcome::Untracked
+        );
+        let status: std::collections::HashMap<PathBuf, StatusKind> =
+            git_status(&root).into_iter().collect();
+        let canonical = paths::canonicalize(&untracked).unwrap();
+        assert_eq!(status.get(&canonical), Some(&StatusKind::Untracked));
+
+        // 変更の無いファイルは断る。
+        assert!(discard_path_on(&LocalHost, &root, &tracked).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ⌘P の 2 回目: 1 回目（gitignore 準拠）に出なかったファイルだけが、浅い順に出る。
+    #[test]
+    fn ignored_files_appear_only_in_the_second_pass() {
+        let root = scratch("ignored-pass");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("build/deep/deeper")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join(".env"), "").unwrap();
+        std::fs::write(root.join("app.log"), "").unwrap();
+        std::fs::write(root.join("build/deep/deeper/out.js"), "").unwrap();
+        std::fs::write(root.join(".git/HEAD"), "").unwrap();
+        std::fs::write(root.join(".gitignore"), ".env\n*.log\nbuild/\n").unwrap();
+
+        let first = all_files_on(&LocalHost, &root, 1000);
+        let first_relatives: Vec<&str> = first
+            .iter()
+            .map(|(_, relative)| relative.as_str())
+            .collect();
+        assert!(first_relatives.contains(&"src/main.rs"));
+        for ignored in [".env", "app.log", "build/deep/deeper/out.js"] {
+            assert!(
+                !first_relatives.contains(&ignored),
+                "1 回目に無視ファイル {ignored} を出さない"
+            );
+        }
+
+        let listed: std::collections::HashSet<PathBuf> =
+            first.into_iter().map(|(path, _)| path).collect();
+        let second: Vec<String> = ignored_files_local(&root, &listed, 1000)
+            .into_iter()
+            .map(|(_, relative)| relative)
+            .collect();
+        assert_eq!(
+            second,
+            vec![".env", "app.log", "build/deep/deeper/out.js"],
+            "無視ファイルだけ・浅い順（.git は辿らない）"
+        );
+        assert_eq!(ignored_files_local(&root, &listed, 1).len(), 1, "上限");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -97,6 +97,9 @@
 | **CLI から端末へ入力を送る**（`ne terminal send` の許可。既定 off） | `allow_terminal_send` | CLI から端末へ入力を送る | Let the CLI type into terminals |
 | **MCP サーバ**（エージェントに持たせる道具。`session/new` で渡す） | `acp_client::mcp` / `mcp_servers` | MCP サーバ | MCP server |
 | ↳ **発見**（他ツールの設定に居るサーバを一覧に載せる・既定 off） | `mcp::discover` / `McpSource` | 〈出所〉で発見 | found in 〈source〉 |
+| **無視されたファイルも探す**（⌘P の 2 回目。1 回目で何も一致しない時だけ出る行） | `ignored_files_local` / `FINDER_ACTION_SEARCH_IGNORED` / `Picker::set_fallback_action` | 無視されたファイルも探す / 無視 | Also search ignored files / ignored |
+| **フォルダ内を検索**（⌘⇧F の検索を 1 フォルダに絞る。パネルの頭に範囲のチップ） | `SearchPanel::scope` / `open_folder_search` | フォルダ内を検索 / 範囲 | Find in folder / In |
+| **ファイル操作の取り消し**（エクスプローラの ⌘Z。作成・名前の変更・移動・複製・ゴミ箱を 1 手ずつ戻す） | `FileOperation` / `FileOperationHistory` / `UndoFileOperation` | ファイル操作を取り消す | Undo file operation |
 
 > 日本語で「Fleet」を「編隊」と表記したくなったら、UI 文字列のここだけ差し替える（概念名は Fleet で固定）。
 

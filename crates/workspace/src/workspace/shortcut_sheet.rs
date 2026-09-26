@@ -68,6 +68,8 @@ const ACTION_LABELS: &[(&str, &str)] = &[
     ("editor::AddCursorAbove", "key.add_cursor_above"),
     ("editor::AddCursorBelow", "key.add_cursor_below"),
     ("editor::Cancel", "key.cancel"),
+    // ── エクスプローラ ──
+    ("workspace::UndoFileOperation", "key.undo_file_operation"),
     // ── AI チャット ──
     ("agent::SubmitPrompt", "key.submit_prompt"),
     ("agent::CloseActiveThread", "key.close_active_thread"),
@@ -124,6 +126,7 @@ fn section_label(context: &str) -> SharedString {
         "AgentPanel" => Some("key.section_agent"),
         "FleetControl" => Some("key.section_control"),
         keymap_core::TERMINAL_CONTEXT => Some("key.section_terminal"),
+        "Explorer" => Some("key.section_explorer"),
         "" => Some("key.section_global"),
         _ => None,
     };
@@ -348,7 +351,7 @@ mod tests {
         }
     }
 
-    /// セクション見出しは既知 4 つを i18n キーへ、未知はコンテキスト名そのまま。
+    /// セクション見出しは既知 5 つを i18n キーへ、未知はコンテキスト名そのまま。
     #[test]
     fn section_label_maps_known_contexts() {
         // i18n 未初期化でも panic しない（t! はキー欠落時もフォールバックする前提）だが、

@@ -6,7 +6,7 @@ use gpui::{
 };
 use host::Host;
 use search::FileMatch;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use theme_core::Theme;
 use ui::Tooltip;
@@ -28,6 +28,9 @@ pub enum SearchPanelEvent {
 pub struct SearchPanel {
     host: Arc<dyn Host>,
     root: PathBuf,
+    /// 検索をこのフォルダの中だけに絞る（エクスプローラの「フォルダ内を検索」・D18）。
+    /// `None` = プロジェクト全体。結果の見出しは絞っても root からの相対で出す。
+    scope: Option<PathBuf>,
     query: String,
     case_sensitive: bool,
     is_regex: bool,
@@ -56,6 +59,7 @@ impl SearchPanel {
         Self {
             host,
             root,
+            scope: None,
             query: String::new(),
             case_sensitive: false,
             is_regex: false,
@@ -93,6 +97,33 @@ impl SearchPanel {
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    /// クエリを直接セットして検索する（開発プローブ / プログラム操作用）。
+    pub fn set_query(&mut self, query: impl Into<String>, cx: &mut Context<Self>) {
+        self.query = query.into();
+        self.run_search(cx);
+    }
+
+    pub fn scope(&self) -> Option<&Path> {
+        self.scope.as_deref()
+    }
+
+    /// 検索の範囲を 1 フォルダに絞る / 外す（`None`）。クエリがあればその範囲で検索し直す。
+    pub fn set_scope(&mut self, scope: Option<PathBuf>, cx: &mut Context<Self>) {
+        // root そのもの（や root の外）はプロジェクト全体と同じ扱い＝チップを出さない。
+        let scope = scope.filter(|folder| folder != &self.root && folder.starts_with(&self.root));
+        if scope == self.scope {
+            return;
+        }
+        self.scope = scope;
+        if self.query.trim().is_empty() {
+            self.results.clear();
+            self.results_query = None;
+            cx.notify();
+        } else {
+            self.run_search(cx);
+        }
     }
 
     pub fn set_theme(&mut self, theme: Theme, accent: Hsla, cx: &mut Context<Self>) {
@@ -143,7 +174,8 @@ impl SearchPanel {
             }
         };
         let host = self.host.clone();
-        let root = self.root.clone();
+        let scope = self.scope.clone();
+        let search_root = scope.clone().unwrap_or_else(|| self.root.clone());
         let search_id = self.next_search_id;
         self.next_search_id = self.next_search_id.wrapping_add(1).max(1);
         self.running = true;
@@ -154,7 +186,7 @@ impl SearchPanel {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    query.try_search_project_on(host.as_ref(), &root, FILE_LIMIT, MAX_ROWS)
+                    query.try_search_project_on(host.as_ref(), &search_root, FILE_LIMIT, MAX_ROWS)
                 })
                 .await;
             let _ = panel.update(cx, |panel, cx| {
@@ -162,6 +194,7 @@ impl SearchPanel {
                     || panel.query != query_text
                     || panel.is_regex != is_regex
                     || panel.case_sensitive != case_sensitive
+                    || panel.scope != scope
                 {
                     return;
                 }
@@ -231,6 +264,11 @@ impl SearchPanel {
             "up" => self.move_selection(-1, cx),
             "down" => self.move_selection(1, cx),
             "backspace" => {
+                // 空の入力でもう一度 ⌫ = 範囲のチップを外す（入力欄のトークンと同じ所作）。
+                if self.query.is_empty() && self.scope.is_some() {
+                    self.set_scope(None, cx);
+                    return;
+                }
                 self.query.pop();
                 cx.notify();
             }
@@ -266,7 +304,9 @@ impl Render for SearchPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let accent = self.accent;
-        let query_display = if self.query.is_empty() {
+        let query_display = if self.query.is_empty() && self.scope.is_some() {
+            SharedString::from(i18n::t!("searchpanel.placeholder_scoped"))
+        } else if self.query.is_empty() {
             SharedString::from(i18n::t!("searchpanel.placeholder"))
         } else {
             SharedString::from(self.query.clone())
@@ -474,6 +514,51 @@ impl Render for SearchPanel {
                             .border_b_1()
                             .border_color(theme.border)
                             .child(div().flex_none().text_color(theme.fg2).child("⌕"))
+                            // 範囲のチップ（フォルダ内を検索・D18）。× か空の入力での ⌫ で外す。
+                            .when_some(
+                                scope_label(&self.root, self.scope.as_deref()),
+                                |row, label| {
+                                    row.child(
+                                        div()
+                                            .id("search-scope")
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(2.))
+                                            .pl(px(7.))
+                                            .pr(px(2.))
+                                            .rounded(px(5.))
+                                            .bg(theme.bg3)
+                                            .text_size(px(11.))
+                                            .text_color(theme.fg1)
+                                            .child(SharedString::from(i18n::t!(
+                                                "searchpanel.scope",
+                                                "path" => label
+                                            )))
+                                            .child(
+                                                div()
+                                                    .id("search-scope-clear")
+                                                    .px(px(4.))
+                                                    .rounded(px(4.))
+                                                    .text_color(theme.fg2)
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.text_color(theme.fg0))
+                                                    .child("×")
+                                                    .tooltip(Tooltip::text(
+                                                        i18n::t!("searchpanel.scope_clear"),
+                                                        theme.clone(),
+                                                    ))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(|this, _, _window, cx| {
+                                                            cx.stop_propagation();
+                                                            this.set_scope(None, cx);
+                                                        }),
+                                                    ),
+                                            ),
+                                    )
+                                },
+                            )
                             .child(div().flex_1().text_color(query_color).child(query_display))
                             .child(
                                 toggle(
@@ -541,8 +626,29 @@ impl Render for SearchPanel {
     }
 }
 
+/// 範囲のチップに出す文字列（root からの相対・末尾に `/`・区切りは `/` に揃える）。
+fn scope_label(root: &Path, scope: Option<&Path>) -> Option<String> {
+    let scope = scope?;
+    let relative = scope.strip_prefix(root).unwrap_or(scope);
+    let mut label = relative.to_string_lossy().replace('\\', "/");
+    label.push('/');
+    Some(label)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_label_is_relative_to_the_project() {
+        let root = Path::new("/p");
+        assert_eq!(
+            scope_label(root, Some(Path::new("/p/src/ui"))),
+            Some("src/ui/".to_string())
+        );
+        assert_eq!(scope_label(root, None), None);
+    }
+
     #[test]
     fn total_and_flat_indices_follow_file_order() {
         let results = [2usize, 0, 3];

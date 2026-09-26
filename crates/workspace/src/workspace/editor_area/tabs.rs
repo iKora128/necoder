@@ -568,6 +568,7 @@ impl Workspace {
         }
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.slot_mut(active) {
+            slot.explorer.note_opened(&path); // ⌘P の「最近開いた」の先頭へ（D19）
             slot.explorer.selected = Some(path);
             slot.active_file = index;
         }

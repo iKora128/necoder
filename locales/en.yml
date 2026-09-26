@@ -13,6 +13,10 @@ finder:
   projects: Switch project…
   new_file: New file…
   new_dir: New folder…
+  search_ignored: Also search ignored files (.gitignore)
+  searching_ignored: Searching ignored files…
+  ignored_not_found: Not found in ignored files either
+  ignored_detail: ignored
 agent:
   pasted_image: Pasted image
   search_placeholder: Search this conversation
@@ -583,8 +587,31 @@ explorer:
   ctx_duplicate: Duplicate
   ctx_trash: Move to trash
   ctx_copy_path: Copy path
+  ctx_search_folder: Find in folder
+  ctx_stage: Stage
+  ctx_discard: Discard changes…
+  discard_title: "Discard changes to “%{name}”?"
+  discard_body: Restores the last committed version, including staged changes. This can't be undone.
+  discard_body_untracked: This file isn't tracked by git, so it will be moved to the Trash (press ⌘Z in the explorer to bring it back).
+  discard_confirm: Discard
+  discard_cancel: Cancel
+  discard_untracked_remote: Can't clean up untracked files on a remote host (the file was removed from git's index)
+  undo_empty: No file operation to undo
+  undid_create: "Undid creating “%{name}”"
+  undid_move: "Moved “%{name}” back to its original name and place"
+  undid_trash: "Restored “%{name}” from the Trash"
+  undid_many: "Undid %{n} file operations"
+  undo_trash_unknown: "Can't restore “%{name}”: where it went in the Trash is unknown"
+  undo_not_in_trash: "Can't restore “%{name}”: it is no longer in the Trash (emptied, or put back from Finder)"
+  undo_exists: "Can't undo: an item named “%{name}” is already there"
+  undo_missing: "Can't undo: “%{name}” was not found"
+  undo_dirty: "Not undoing: “%{name}” has unsaved changes (save or close it first)"
+  undo_failed: "Couldn't undo: %{error}"
 searchpanel:
   placeholder: Search across project…
+  placeholder_scoped: Search in this folder…
+  scope: "In: %{path}"
+  scope_clear: Clear the folder scope (search the whole project; ⌫ on an empty query also clears it)
   searching: Searching…
   results: "%{n} matches / %{files} files"
   hint_enter: Press Enter to search
@@ -1002,6 +1029,8 @@ key:
   section_agent: AI chat
   section_control: Control
   section_global: Global
+  section_explorer: Explorer
+  undo_file_operation: Undo file operation
   backspace: Delete backward
   delete: Delete forward
   newline: New line

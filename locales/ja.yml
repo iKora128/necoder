@@ -14,6 +14,10 @@ finder:
   projects: プロジェクトを切り替え…
   new_file: 新規ファイル…
   new_dir: 新規フォルダ…
+  search_ignored: 無視されたファイルも探す（.gitignore）
+  searching_ignored: 無視されたファイルを探しています…
+  ignored_not_found: 無視されたファイルにも見つかりません
+  ignored_detail: 無視
 agent:
   pasted_image: 貼り付けた画像
   search_placeholder: この会話を検索
@@ -584,8 +588,31 @@ explorer:
   ctx_duplicate: 複製
   ctx_trash: ゴミ箱に入れる
   ctx_copy_path: パスをコピー
+  ctx_search_folder: フォルダ内を検索
+  ctx_stage: ステージ
+  ctx_discard: 変更を破棄…
+  discard_title: "「%{name}」の変更を破棄しますか？"
+  discard_body: 最後のコミットの内容に戻します。ステージした変更も消えます。この操作は取り消せません。
+  discard_body_untracked: git の管理外のファイルなので、ゴミ箱へ入れます（エクスプローラで ⌘Z を押すと戻せます）。
+  discard_confirm: 破棄する
+  discard_cancel: キャンセル
+  discard_untracked_remote: リモートでは未追跡のファイルを片付けられません（git の管理からは外しました）
+  undo_empty: 取り消せるファイル操作はありません
+  undid_create: "「%{name}」の作成を取り消しました"
+  undid_move: "「%{name}」を元の名前・場所に戻しました"
+  undid_trash: "「%{name}」をゴミ箱から戻しました"
+  undid_many: "%{n} 件のファイル操作を取り消しました"
+  undo_trash_unknown: "「%{name}」はゴミ箱のどこに入ったか分からないため戻せません"
+  undo_not_in_trash: "「%{name}」がゴミ箱に見つからないため戻せません（ゴミ箱を空にしたか、Finder で戻した）"
+  undo_exists: "「%{name}」と同じ名前の項目があるため戻せません"
+  undo_missing: "「%{name}」が見つからないため戻せません"
+  undo_dirty: "「%{name}」に保存していない変更があるため取り消しません（保存するか閉じてから）"
+  undo_failed: "取り消せませんでした: %{error}"
 searchpanel:
   placeholder: プロジェクトを横断検索…
+  placeholder_scoped: このフォルダの中を検索…
+  scope: "範囲: %{path}"
+  scope_clear: 範囲を外す（プロジェクト全体を検索・空欄で ⌫ でも外せる）
   searching: 検索中…
   results: "%{n} 件 / %{files} ファイル"
   hint_enter: Enter で検索
@@ -1003,6 +1030,8 @@ key:
   section_agent: AI チャット
   section_control: 管制
   section_global: グローバル
+  section_explorer: エクスプローラ
+  undo_file_operation: ファイル操作を取り消す
   backspace: 前の文字を削除
   delete: 次の文字を削除
   newline: 改行

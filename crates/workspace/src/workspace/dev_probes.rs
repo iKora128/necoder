@@ -594,6 +594,120 @@ impl Workspace {
         });
     }
 
+    /// 開発用: エクスプローラと検索の所作を offscreen で検証する（`NECODER_EXPLORER_PROBE`・
+    /// `;` 区切りで順に実行・パスはプロジェクト相対）。
+    ///
+    /// `expand:<dir>` = フォルダを開く / `scroll:<n>` = ツリーを n 行目へ（仮想化の確認）/
+    /// `rename:<path>:<新しい名前>` / `newfile:<dir>:<名前>` / `duplicate:<path>` /
+    /// `trash:<path>`（**本物のゴミ箱へ入る**。後に `undo` を続けて戻すこと）/ `undo` = ⌘Z 相当 /
+    /// `menu:<path>` = 右クリックメニュー / `discard:<path>` = 変更の破棄の確認 /
+    /// `search:<dir>:<クエリ>` = フォルダ内を検索 / `open:<path>` / `finder` = ⌘P /
+    /// `finder_query:<語>` / `finder_confirm` = ⌘P の ⏎。
+    #[cfg(debug_assertions)]
+    pub fn debug_explorer_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        let (argument, value) = argument.split_once(':').unwrap_or((argument, ""));
+        let Some(root) = self
+            .active_worktree()
+            .map(|worktree| worktree.root().to_path_buf())
+        else {
+            return;
+        };
+        let target = if argument.is_empty() {
+            root.clone()
+        } else {
+            root.join(argument)
+        };
+        match name {
+            "expand" => {
+                let active = self.project_sessions.active;
+                if let Some(slot) = self.project_sessions.slot_mut(active) {
+                    slot.explorer.expanded.insert(target);
+                }
+                self.refresh_active_explorer(cx);
+            }
+            "scroll" => {
+                let index = argument.parse::<usize>().unwrap_or(0);
+                self.chrome
+                    .explorer_scroll
+                    .scroll_to_item(index, gpui::ScrollStrategy::Top);
+            }
+            "rename" | "newfile" => {
+                let kind = if name == "rename" {
+                    NamingKind::Rename
+                } else {
+                    NamingKind::NewFile
+                };
+                self.start_naming(kind, target, name == "newfile", window, cx);
+                let value = value.to_string();
+                self.explorer.update(cx, |explorer, cx| {
+                    explorer.update_naming(|naming| naming.value = value, cx)
+                });
+                self.confirm_naming(window, cx);
+            }
+            // 右クリックメニューを行の位置に出す（スクロールしていないツリー前提の見た目確認用）。
+            "menu" => {
+                let is_dir = target.is_dir();
+                let row = self
+                    .active_slot()
+                    .and_then(|slot| slot.explorer.rows.iter().position(|row| row.path == target))
+                    .unwrap_or(0);
+                let position = gpui::point(
+                    px(RAIL_WIDTH + 140.),
+                    px(TITLEBAR_HEIGHT + 28. + (row as f32 + 1.) * ROW_HEIGHT),
+                );
+                self.show_context_menu(target, is_dir, position, cx);
+            }
+            "discard" => {
+                let status = self
+                    .repository
+                    .status
+                    .get(&target)
+                    .copied()
+                    .unwrap_or(StatusKind::Modified);
+                self.ask_discard(target, status, cx);
+            }
+            // 確認の「破棄する」を押す（未追跡なら**本物のゴミ箱へ入る**。後に `undo` を続けること）。
+            "confirm_discard" => self.confirm_discard(window, cx),
+            // フォルダ内を検索（`search:<dir>:<クエリ>`・クエリ省略可）。
+            "search" => {
+                self.open_folder_search(target, window, cx);
+                if let (Some(panel), false) = (self.search_panel.clone(), value.is_empty()) {
+                    let query = value.to_string();
+                    panel.update(cx, |panel, cx| panel.set_query(query, cx));
+                }
+            }
+            "open" => self.open_file(target, window, cx),
+            // ⌘P（`finder` → 列挙を待って `finder_query:<語>` → `finder_confirm` = ⏎）。
+            "finder" => self.open_file_finder(&FileFinder, window, cx),
+            "finder_query" | "finder_confirm" => {
+                if let Some(picker) = self.overlays.picker.clone() {
+                    let query = argument.to_string();
+                    picker.update(cx, |picker, cx| {
+                        if name == "finder_query" {
+                            picker.set_query(query, cx);
+                        } else {
+                            picker.confirm_selected(cx);
+                        }
+                    });
+                }
+            }
+            "duplicate" => self.duplicate_entry(target, cx),
+            "trash" => self.trash_entry(target, window, cx),
+            "undo" => {
+                self.focus_explorer(window, cx);
+                self.undo_file_operation(&UndoFileOperation, window, cx);
+            }
+            other => eprintln!("EXPLORER_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
+    }
+
     /// 開発用: Chat モードを offscreen で検証する（`NECODER_CHAT_PROBE`・`;` 区切りで順に実行）。
     ///
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の

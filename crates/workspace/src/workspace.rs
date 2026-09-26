@@ -239,6 +239,8 @@ actions!(
         OpenLocalhostPreview,
         // Web タブの Design Mode（⌘⇧D・要素を選んで composer へ添える）。
         ToggleDesignMode,
+        // エクスプローラのファイル操作を 1 手戻す（⌘Z・Explorer コンテキストだけ・H30）。
+        UndoFileOperation,
     ]
 );
 
@@ -266,6 +268,9 @@ pub(crate) enum PickerMode {
 /// ⌘P の作成アクション行の id（空プロジェクト用）。ファイル添字（最大 50k）と衝突しない番兵値。
 pub(crate) const FINDER_ACTION_NEW_FILE: usize = usize::MAX - 1;
 pub(crate) const FINDER_ACTION_NEW_DIR: usize = usize::MAX;
+/// ⌘P の一致なしの行「無視されたファイルも探す」（2 回目・D19）と、2 回目でも無かった時の行。
+pub(crate) const FINDER_ACTION_SEARCH_IGNORED: usize = usize::MAX - 2;
+pub(crate) const FINDER_ACTION_IGNORED_EMPTY: usize = usize::MAX - 3;
 
 const RAIL_WIDTH: f32 = 46.0;
 const DOCK_WIDTH: f32 = 218.0;
@@ -1288,6 +1293,13 @@ struct ChromeState {
     resize_start_width: f32,
     explorer_width: f32,
     resizing_explorer: bool,
+    /// エクスプローラのツリー（仮想化した `uniform_list`）のスクロール。命名の入力行を
+    /// 見える位置へ寄せるのに使う（見えない行は描かれない＝入力が見えなくなるため）。
+    explorer_scroll: gpui::UniformListScrollHandle,
+    /// エクスプローラのフォーカス（`explorer_view.rs` の root div が `track_focus` で載せる）。
+    /// ここにある間だけ ⌘Z がファイル操作の取り消しになる（keymap の `Explorer` コンテキスト・H30）。
+    /// エディタにフォーカスがある時の ⌘Z は従来どおりエディタの undo。
+    explorer_focus: FocusHandle,
     should_move_window: bool,
     /// レール項目のドラッグ状態（index・押下位置・閾値超えフラグ）。窓の外で離すと
     /// 擬似 tear-off = その位置に新窓（M13。本物の tear-off は gpui 未対応・DECISIONS）。
@@ -2098,6 +2110,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(Self::open_file_finder))
+            .on_action(cx.listener(Self::undo_file_operation))
             .on_action(cx.listener(Self::open_project_switcher))
             .on_action(cx.listener(Self::open_project_search))
             .on_action(cx.listener(Self::open_buffer_search))
@@ -2313,6 +2326,7 @@ impl Render for Workspace {
             .children(self.render_chat_menu(cx))
             .children(self.render_chat_delete_confirm(cx))
             .children(self.render_explorer_context_menu(cx))
+            .children(self.render_explorer_discard_confirm(cx))
             .children(self.render_project_flash(cx)) // キーボード切替の行き先名フラッシュ
             .children(self.render_confetti(cx)) // 最前面（祝いの紙吹雪）
     }
@@ -3915,6 +3929,309 @@ mod tests {
         cx.simulate_keystrokes("ctrl-shift-f");
         assert!(terminal.read_with(cx, |terminal, _| terminal.search_open()));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⌘Z はエクスプローラにフォーカスがある時だけファイル操作を 1 手戻し、エディタにある時は
+    /// 従来どおりエディタの undo（H30）。名前の変更 → 取り消し・作成 → 取り消しを一時ディレクトリで。
+    #[gpui::test]
+    fn explorer_cmd_z_undoes_file_operations_only_with_explorer_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_explorer_undo_keys_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("一時プロジェクト");
+        std::fs::write(project.join("a.txt"), "a\n").expect("a.txt");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        };
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        draw(cx);
+
+        // 名前の変更（インライン命名の確定まで本物の経路）: a.txt → b.txt。
+        let name_it = |workspace: &Entity<Workspace>,
+                       kind: NamingKind,
+                       base: PathBuf,
+                       is_dir: bool,
+                       name: &'static str,
+                       cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.start_naming(kind, base, is_dir, window, cx);
+                workspace.explorer.update(cx, |explorer, cx| {
+                    explorer.update_naming(|naming| naming.value = name.to_string(), cx)
+                });
+                workspace.confirm_naming(window, cx);
+            });
+        };
+        let canonical_root = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_worktree()
+                .map(|worktree| worktree.root().to_path_buf())
+                .expect("プロジェクトが開いている")
+        });
+        name_it(
+            &workspace,
+            NamingKind::Rename,
+            canonical_root.join("a.txt"),
+            false,
+            "b.txt",
+            cx,
+        );
+        draw(cx);
+        assert!(project.join("b.txt").exists() && !project.join("a.txt").exists());
+        cx.simulate_keystrokes("cmd-z");
+        assert!(
+            project.join("a.txt").exists() && !project.join("b.txt").exists(),
+            "エクスプローラにフォーカスがある ⌘Z は名前の変更を戻す"
+        );
+
+        // 新規ファイル → エディタで開く（フォーカスはエディタ）。
+        name_it(
+            &workspace,
+            NamingKind::NewFile,
+            canonical_root.clone(),
+            true,
+            "c.txt",
+            cx,
+        );
+        draw(cx);
+        assert!(project.join("c.txt").exists());
+        cx.simulate_keystrokes("cmd-z");
+        assert!(
+            project.join("c.txt").exists(),
+            "エディタにフォーカスがある ⌘Z はエディタの undo（ファイルは消さない）"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_explorer(window, cx);
+        });
+        draw(cx);
+        cx.simulate_keystrokes("cmd-z");
+        assert!(
+            !project.join("c.txt").exists(),
+            "エクスプローラへ戻ると ⌘Z は作成を取り消す"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        std::fs::remove_dir_all(&root).expect("後片付け");
+    }
+
+    /// エクスプローラの空きを押すとフォーカスがエクスプローラへ移る（⌘Z の宛先・H30）。
+    /// ファイル行を押した時はエディタへ渡し、エクスプローラが取り返さない。
+    #[gpui::test]
+    fn explorer_clicks_take_focus_but_file_rows_hand_it_to_the_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_explorer_focus_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("一時プロジェクト");
+        std::fs::write(project.join("a.txt"), "a\n").expect("a.txt");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        // ツリーの 1 行目（a.txt）= タイトルバー + エクスプローラの見出しの下。
+        let row = point(
+            px(RAIL_WIDTH + 60.),
+            px(TITLEBAR_HEIGHT + 28. + ROW_HEIGHT / 2. + 2.),
+        );
+        let empty = point(px(RAIL_WIDTH + 60.), px(TITLEBAR_HEIGHT + 300.));
+        // (エクスプローラにフォーカス, エディタにフォーカス)
+        let focus_state = |cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                let editor = workspace
+                    .active_editor()
+                    .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window));
+                (workspace.chrome.explorer_focus.is_focused(window), editor)
+            })
+        };
+        cx.simulate_click(empty, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            focus_state(cx),
+            (true, false),
+            "エクスプローラの空きを押すとフォーカスが移る"
+        );
+
+        cx.simulate_click(row, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            focus_state(cx),
+            (false, true),
+            "ファイル行を押すとエディタへ渡る"
+        );
+
+        // 開いているファイルの行（タブへ切り替えるだけ・同期でエディタへ）も同じ。
+        cx.simulate_click(empty, gpui::Modifiers::none());
+        cx.simulate_click(row, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            focus_state(cx),
+            (false, true),
+            "開いているファイルの行でもエディタへ渡る"
+        );
+
+        // Escape: 開いている右クリックメニューを先に閉じ、次でエディタへ戻る。
+        cx.simulate_click(empty, gpui::Modifiers::none());
+        let menu_target = project.join("a.txt");
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.show_context_menu(menu_target, false, empty, cx)
+        });
+        cx.simulate_keystrokes("escape");
+        let menu_open = workspace.read_with(cx, |workspace, cx| {
+            workspace.explorer_context_menu(cx).is_some()
+        });
+        assert!(!menu_open, "Escape はまずメニューを閉じる");
+        assert_eq!(
+            focus_state(cx),
+            (true, false),
+            "フォーカスはエクスプローラのまま"
+        );
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            focus_state(cx),
+            (false, true),
+            "次の Escape でエディタへ戻る"
+        );
+
+        std::fs::remove_dir_all(&root).expect("後片付け");
+    }
+
+    /// ⌘P（D19）: 最近開いたファイルが上に来る。gitignore で隠れたファイルは 1 回目には出ず、
+    /// 一致なしの時だけ出る「無視されたファイルも探す」（2 回目）で、Picker を開いたまま足される。
+    #[gpui::test]
+    fn file_finder_ranks_recent_files_and_finds_ignored_files_on_the_second_pass(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_finder_passes_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join("src")).expect("src");
+        std::fs::create_dir_all(project.join("build")).expect("build");
+        for name in ["src/a.txt", "src/b.txt", "src/zzz.txt"] {
+            std::fs::write(project.join(name), "x\n").expect("ファイル");
+        }
+        std::fs::write(project.join(".gitignore"), ".env\nbuild/\n").expect(".gitignore");
+        std::fs::write(project.join(".env"), "SECRET=1\n").expect(".env");
+        std::fs::write(project.join("build/out.js"), "x\n").expect("build/out.js");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let canonical_root = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_worktree()
+                .map(|worktree| worktree.root().to_path_buf())
+                .expect("プロジェクトが開いている")
+        });
+        // 名前順では最後の zzz.txt を開いておく（最近開いたファイル）。LSP の無い拡張子にして、
+        // 言語サーバの起動（別スレッド）でテストのスケジューラを乱さない。
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file(canonical_root.join("src/zzz.txt"), window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file_finder(&FileFinder, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (picker, first) = workspace.read_with(cx, |workspace, cx| {
+            let picker = workspace.overlays.picker.clone().expect("⌘P が開いている");
+            let first = picker
+                .read(cx)
+                .matched_ids()
+                .first()
+                .and_then(|id| workspace.overlays.picker_files.get(*id).cloned());
+            let listed_ignored = workspace
+                .overlays
+                .picker_files
+                .iter()
+                .any(|path| path.ends_with(".env") || path.ends_with("build/out.js"));
+            assert!(!listed_ignored, "1 回目に無視されたファイルは出ない");
+            (picker, first)
+        });
+        assert_eq!(
+            first,
+            Some(canonical_root.join("src/zzz.txt")),
+            "最近開いたファイルが先頭"
+        );
+
+        picker.update(cx, |picker, cx| picker.set_query(".env", cx));
+        assert!(
+            picker.read_with(cx, |picker, _cx| picker.matched_ids().is_empty()
+                && picker.fallback_visible()),
+            "1 回目で見つからない時だけ「無視されたファイルも探す」が出る"
+        );
+        picker.update(cx, |picker, cx| picker.confirm_selected(cx));
+        cx.run_until_parked();
+        let found = workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace.overlays.picker.is_some(),
+                "2 回目を探しても Picker は開いたまま"
+            );
+            picker
+                .read(cx)
+                .matched_ids()
+                .first()
+                .and_then(|id| workspace.overlays.picker_files.get(*id).cloned())
+        });
+        assert_eq!(found, Some(canonical_root.join(".env")), "2 回目で見つかる");
+
+        std::fs::remove_dir_all(&root).expect("後片付け");
     }
 
     /// F0.5 入口: titlebar の `Editor | Fleet` セグメントが ⌘⇧M と同じ 1 本の道（`ToggleFleet`）で

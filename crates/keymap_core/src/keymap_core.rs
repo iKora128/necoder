@@ -337,6 +337,12 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
     }
   },
   {
+    "context": "Explorer",
+    "bindings": {
+      "cmd-z": "workspace::UndoFileOperation"
+    }
+  },
+  {
     "bindings": {
       "cmd-p": "workspace::FileFinder",
       "cmd-shift-p": "workspace::CommandPalette",
@@ -955,7 +961,7 @@ mod tests {
     #[test]
     fn parses_sections_and_bindings() {
         let sections = parse(DEFAULT_KEYMAP_JSON).expect("既定 keymap がパースできる");
-        assert_eq!(sections.len(), 5);
+        assert_eq!(sections.len(), 6);
         assert_eq!(sections[0].context, "Editor");
         // ⌘S は保存時フォーマットのフックのため workspace 側（M11）。
         assert_eq!(
@@ -983,16 +989,22 @@ mod tests {
             sections[2].bindings.get("enter").map(String::as_str),
             Some("workspace::ControlNext")
         );
-        // 4 番目は全域（context 空）+ Quit
-        assert!(sections[3].context.is_empty());
+        // 4 セクション目はエクスプローラ（⌘Z = ファイル操作の取り消し・H30。エディタの ⌘Z とは別）
+        assert_eq!(sections[3].context, "Explorer");
         assert_eq!(
-            sections[3].bindings.get("cmd-q").map(String::as_str),
+            sections[3].bindings.get("cmd-z").map(String::as_str),
+            Some("workspace::UndoFileOperation")
+        );
+        // 5 セクション目は全域（context 空）+ Quit
+        assert!(sections[4].context.is_empty());
+        assert_eq!(
+            sections[4].bindings.get("cmd-q").map(String::as_str),
             Some("necoder::Quit")
         );
         // 末尾は端末（全域より後ろに置かないと ⌘F などが全域に負ける）
-        assert_eq!(sections[4].context, TERMINAL_CONTEXT);
+        assert_eq!(sections[5].context, TERMINAL_CONTEXT);
         assert_eq!(
-            sections[4].bindings.get("cmd-f").map(String::as_str),
+            sections[5].bindings.get("cmd-f").map(String::as_str),
             Some("terminal::Find")
         );
     }
