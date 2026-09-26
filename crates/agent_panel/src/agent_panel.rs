@@ -177,6 +177,47 @@ enum Entry {
     Checkpoint { id: i64, label: SharedString },
 }
 
+/// message rail（O17）に印を出すのは、ユーザーの発話がこの数以上ある時だけ（少なければ一覧で足りる）。
+const MESSAGE_RAIL_MIN_PROMPTS: usize = 3;
+
+/// message rail の印 1 つ（ユーザーの発話 1 つ）。
+#[derive(Debug, Clone, PartialEq)]
+struct RailMark {
+    /// transcript のエントリの添字（押すとここへ動く）。
+    entry: usize,
+    /// rail の上端からの位置（0..=1・エントリの並びで割る。高さは測らない＝近似）。
+    position: f32,
+    /// いま読んでいる指示（ビューポートの先頭にかかっている・直前の発話）。
+    current: bool,
+}
+
+/// message rail の印（O17）。ユーザーの発話が [`MESSAGE_RAIL_MIN_PROMPTS`] 未満なら空。
+fn message_rail_marks(entries: &[Entry], top_item: usize) -> Vec<RailMark> {
+    let prompts: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches!(entry, Entry::User(_)))
+        .map(|(index, _)| index)
+        .collect();
+    if prompts.len() < MESSAGE_RAIL_MIN_PROMPTS {
+        return Vec::new();
+    }
+    let last = entries.len().saturating_sub(1).max(1) as f32;
+    let current = prompts
+        .iter()
+        .rev()
+        .find(|entry| **entry <= top_item)
+        .copied();
+    prompts
+        .into_iter()
+        .map(|entry| RailMark {
+            entry,
+            position: entry as f32 / last,
+            current: Some(entry) == current,
+        })
+        .collect()
+}
+
 /// 現在ビューポートの先頭より前にある、もっとも近いユーザー発話を返す。
 /// transcript の直下は `Entry` と同じ順なので、返した index をそのまま `ScrollHandle` に渡せる。
 fn previous_user_entry_index(entries: &[Entry], top_item: usize) -> Option<usize> {
@@ -8503,6 +8544,71 @@ PYEOF"#;
         )
     }
 
+    /// message rail（O17）: transcript の右端の細い帯に、ユーザーの発話ごとの印を並べる。印を押すと
+    /// その発話へ飛び、乗せると発話の頭が出る。いま読んでいる指示の印だけスレッド色（選択の印）。
+    /// 位置はエントリの並びで割った近似（高さは測らない）。下の浮かぶボタンの上で止める。
+    fn render_message_rail(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let marks = message_rail_marks(&thread.entries, self.transcript_top_item());
+        if marks.is_empty() {
+            return None;
+        }
+        let theme = self.theme.clone();
+        let color = thread.color;
+        let mut rail = div()
+            .absolute()
+            .top(px(10.))
+            .bottom(px(56.))
+            .right(px(2.))
+            .w(px(12.));
+        for mark in marks {
+            let preview = match thread.entries.get(mark.entry) {
+                Some(Entry::User(text)) => flatten_digest_line(text),
+                _ => SharedString::default(),
+            };
+            let entry = mark.entry;
+            rail = rail.child(
+                div()
+                    .id(("message-rail", entry))
+                    .absolute()
+                    .top(relative(mark.position))
+                    .right(px(0.))
+                    .w(px(12.))
+                    .h(px(7.))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .cursor_pointer()
+                    .group("message-rail-mark")
+                    .child(
+                        div()
+                            .w(px(8.))
+                            .h(px(3.))
+                            .rounded(px(1.))
+                            .bg(if mark.current {
+                                color
+                            } else {
+                                theme.fg2.alpha(0.5)
+                            })
+                            .group_hover("message-rail-mark", |style| style.bg(theme.fg0)),
+                    )
+                    .tooltip(Tooltip::text(preview, theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.transcript_list.scroll_to(ListOffset {
+                                item_ix: entry,
+                                offset_in_item: px(0.),
+                            });
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+        Some(rail.into_any_element())
+    }
+
     /// 「前の指示へ」ボタン。長いツール出力や回答を、ユーザー発話単位で一気に遡る。
     fn render_jump_to_previous_user(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let entries = &self.threads.get(self.active)?.entries;
@@ -11367,6 +11473,7 @@ impl Render for AgentPanel {
                     .flex_col()
                     .min_h_0()
                     .child(self.render_transcript(cx))
+                    .children(self.render_message_rail(cx))
                     .children(self.render_jump_to_previous_user(cx))
                     .children(self.render_jump_to_latest(cx)),
             )
@@ -13059,6 +13166,60 @@ PYEOF"#;
         assert_eq!(previous_user_entry_index(&entries, 2), Some(0));
         assert_eq!(previous_user_entry_index(&entries, 0), None);
         assert_eq!(previous_user_entry_index(&entries, usize::MAX), Some(2));
+    }
+
+    /// message rail（O17）: 発話が 3 つ以上ある時だけ、発話ごとに印。位置はエントリの並びで割り、
+    /// いま読んでいる指示（先頭にかかる直前の発話）だけ current。
+    #[test]
+    fn message_rail_marks_each_prompt() {
+        let short = vec![
+            Entry::User("a".into()),
+            Entry::Agent("b".into()),
+            Entry::User("c".into()),
+        ];
+        assert!(
+            message_rail_marks(&short, 0).is_empty(),
+            "発話 2 つでは出さない"
+        );
+        let entries = vec![
+            Entry::User("first".into()),
+            Entry::Agent("answer".into()),
+            Entry::User("second".into()),
+            Entry::Agent("long answer".into()),
+            Entry::User("third".into()),
+        ];
+        let marks = message_rail_marks(&entries, 3);
+        assert_eq!(
+            marks.iter().map(|mark| mark.entry).collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+        assert_eq!(
+            marks.iter().map(|mark| mark.position).collect::<Vec<_>>(),
+            vec![0.0, 0.5, 1.0]
+        );
+        assert_eq!(
+            marks.iter().map(|mark| mark.current).collect::<Vec<_>>(),
+            vec![false, true, false],
+            "先頭が 2 番目の回答にかかっている＝2 番目の指示を読んでいる"
+        );
+    }
+
+    #[gpui::test]
+    fn the_message_rail_appears_with_enough_prompts(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "message-rail");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            panel.threads[active].entries = vec![
+                Entry::User("a".into()),
+                Entry::Agent("b".into()),
+                Entry::User("c".into()),
+            ];
+            assert!(panel.render_message_rail(cx).is_none());
+            panel.threads[active].entries.push(Entry::User("d".into()));
+            assert!(panel.render_message_rail(cx).is_some());
+        });
+        let _ = std::fs::remove_file(settings_path);
     }
 
     #[gpui::test]

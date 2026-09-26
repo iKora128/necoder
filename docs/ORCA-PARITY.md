@@ -281,7 +281,7 @@
 | O16（一部） | 同上 | なし | repo ごとのレシピ（`.necoder/recipes/*.md` を `/` 補完へ）・エージェント別の新規スレッド（`workspace::NewThreadCodex` 等・パレットと keymap.json）。エージェントの有効 / 無効・権限の既定・起動引数の UI は未 |
 | O14 | 同上 | なし | アカウントのフォルダ・切替（`agent_servers.<id>.env`）・公式 CLI でログイン。mac 実機未確認・Windows は未 |
 | O23（一部） | 同上 | なし | fan-out（1 つの依頼をエージェントごとの Task へ・舞台に並べて比べる）。自動命名ブランチの改名は未 |
-| O17（一部） | 同上 | なし | 質問カードの自由入力（Other 欄に書いて答える・選んだ案に添える。スマホの質問も）・サブエージェントの手順を親の Task の下に畳む・目標の一時停止 / 再開 / 取り消し（Codex の goal の操作）。message rail・ツールのまとめ表示と個別停止は未 |
+| O17（一部） | 同上 | なし | 質問カードの自由入力（Other 欄に書いて答える・選んだ案に添える。スマホの質問も）・サブエージェントの手順を親の Task の下に畳む・目標の一時停止 / 再開 / 取り消し（Codex の goal の操作）・message rail。ツールのまとめ表示と個別停止は未（個別停止は `_session/async_task/stop` があるが、`async_task_*` の更新は JetBrains AIR 拡張 `_meta.jetbrains.air.capabilities` を名乗った時だけ来る。SDK が未知の sessionUpdate をどう扱うかを実機で確かめてから） |
 | O27（一部） | 同上 | なし | 設定の検索（全ページから一致した行を集める・キー / 選択肢の名前でも当たる）・表示言語の切替（その場で）。キー割り当ての GUI・UI ズーム・UI フォント・density・statusbar の項目は未 |
 
 ### 7.1 クラウドでの続き（2026-09-26・`claude/sleepy-hamilton-gesxiq`）
@@ -296,7 +296,7 @@
 - **計画の続き**: O5（手元の Ports）・O21 の一部（外部の worktree・絞り込み・コピー・ピンの保存・休ませる）・O26（エディタの所作・全部）・
   O20 の一部（ブランチ名・起点・`.worktreeinclude`・準備の skip / やり直し・repo ごとの base）・O13 の一部（スリープ抑止・通知の履歴・音量・スマホへの完了 push）・
   O22（リソース・片付け）・O23 の一部（fan-out）・O14（アカウント切替）・O16 の一部（レシピ・エージェント別の新規スレッド）・
-  O17 の一部（質問カードの自由入力・サブエージェントの手順・目標の操作）・O27 の一部（設定の検索・表示言語）。O15・O18 は Mac の worktree に途中があるので触っていない（push されれば取り込める）。
+  O17 の一部（質問カードの自由入力・サブエージェントの手順・目標の操作・message rail）・O27 の一部（設定の検索・表示言語）。O15・O18 は Mac の worktree に途中があるので触っていない（push されれば取り込める）。
 - **確かめたこと**: Linux で `cargo check --workspace --all-targets`（警告 0）と `cargo test`。落ちるのは
   Linux で元から落ちる 2 件（PDF のネイティブビューア・Web タブの surface。どちらも macOS / Windows の
   ネイティブ部品が要る）だけ。**実画面・macOS 実機・SSH 実機は未確認**（隔離 offscreen の撮影は macOS が要る）。
@@ -363,7 +363,7 @@
 | B17 | Keep computer awake | 一部 | O13 |
 | B18 | composer（添付・`/` コマンドと skills・ピル） | 一部 | O2 |
 | B19 | 構造化質問カード | 有 | 済（自由入力も O17 で済・スマホも） |
-| B20 | message rail | 一部 | O17 |
+| B20 | message rail | 一部 | O17（済） |
 | B21 | rewind・/clear・/compact | 一部 | §5 |
 | B22 | inline diff・plan・ツールのバッチ・BG タスク停止 | 一部 | O17 |
 | B23 | 履歴から構造化チャットで再開 | 一部 | O15 |
