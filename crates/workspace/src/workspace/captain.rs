@@ -133,6 +133,7 @@ impl Workspace {
             color,
             SharedString::from(i18n::t!("captain.title")),
             text.clone(),
+            None,
         );
         if let Some(storage) = self.persistence.storage.clone() {
             let payload = serde_json::json!({ "text": text.as_ref() }).to_string();
@@ -197,7 +198,7 @@ impl Workspace {
         let color = slot.color;
         let repository = slot.repository_key().to_string();
         self.chrome.captain_pending.entry(repository).or_default().push(format!("human_send: {title} / {thread}: {text}"));
-        self.push_news(NewsKind::HumanSend, color, title, text.to_string().into());
+        self.push_news(NewsKind::HumanSend, color, title, text.to_string().into(), Some(SpaceId(id.clone())));
         if let Some(storage) = self.persistence.storage.clone() {
             let payload = serde_json::json!({"thread": thread.as_ref(), "text": text}).to_string();
             cx.background_executor().spawn(async move {

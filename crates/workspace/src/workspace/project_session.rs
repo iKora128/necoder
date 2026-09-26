@@ -401,6 +401,7 @@ impl Workspace {
                             title: SharedString::from(record.title.clone()),
                             text,
                             kind,
+                            space: Some(SpaceId(event.task_id.clone())),
                         });
                     }
                     workspace.notifications.news = backfill; // 既に新しい順（id DESC）
@@ -460,9 +461,16 @@ impl Workspace {
         let mut record = slot.task_space.to_record(slot);
         let news_color = slot.color;
         let news_title = slot.task_space.title.clone();
+        let news_space = slot.task_space.id.clone();
         // ニュース = task_events の鏡（P2）。台帳へ書く遷移と同じ場所で 1 行積む。
         let (news_kind, news_text) = Self::news_text_for_phase(phase, digest);
-        self.push_news(news_kind, news_color, news_title, news_text);
+        self.push_news(
+            news_kind,
+            news_color,
+            news_title,
+            news_text,
+            Some(news_space),
+        );
         // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
         self.schedule_control_summary(cx);
         // Dock の要対応バッジ（失敗した Task も数える・O12）。Workspace を読むので update を抜けてから。

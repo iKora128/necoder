@@ -1444,6 +1444,8 @@ pub(crate) struct NewsItem {
     pub title: SharedString,
     pub text: SharedString,
     pub kind: NewsKind,
+    /// どの Task の出来事か（押すとその Task へ・O13）。Captain の采配は None（押すと Captain へ）。
+    pub space: Option<SpaceId>,
 }
 
 /// ニュースのイベント種別（task_events の kind と同じ語彙・Captain の采配も同じログに載る）。
