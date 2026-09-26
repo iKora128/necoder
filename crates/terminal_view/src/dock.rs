@@ -1,18 +1,46 @@
 use crate::{TerminalEvent, TerminalView};
 use gpui::{
-    div, prelude::*, px, App, Context, Entity, EventEmitter, Hsla, IntoElement, MouseButton,
-    PromptButton, PromptLevel, Render, SharedString, StyleRefinement, Window,
+    div, prelude::*, px, App, Context, Entity, EventEmitter, Global, Hsla, IntoElement,
+    MouseButton, PromptButton, PromptLevel, Render, SharedString, StyleRefinement, Window,
 };
 use std::path::PathBuf;
 use theme_core::Theme;
 use ui::Tooltip;
 
 /// 端末を作る場所と shell。ProjectSession が Host から一度だけ解決して渡す。
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TerminalLaunch {
     pub cwd: Option<PathBuf>,
     pub shell: Option<(String, Vec<String>)>,
 }
+
+impl TerminalLaunch {
+    /// 設定で選んだシェルを当てた launch（O25）。当てるのは**手元の端末**（cwd を持つ launch）だけ:
+    /// SSH 先の端末は `ssh -tt …` 自体が launch で cwd を持たないので、そのまま（接続先のシェルに任せる）。
+    /// シェルが空なら何もしない（OS の既定 = mac / Linux は `$SHELL`・Windows は pwsh → powershell）。
+    pub fn with_shell(mut self, shell: Option<&TerminalShell>) -> Self {
+        let Some(shell) = shell else {
+            return self;
+        };
+        let program = shell.program.trim();
+        if program.is_empty() || self.cwd.is_none() {
+            return self;
+        }
+        self.shell = Some((program.to_string(), shell.args.clone()));
+        self
+    }
+}
+
+/// 設定で選んだシェルと引数（O25・`terminal_shell` / `terminal_shell_args`）。workspace が設定から作って
+/// global に置く。新しく開く手元の端末にだけ効く（開いている端末は作り直さない・コマンドを走らせる
+/// 端末は [`TerminalDock::open_command`] の指定のまま）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalShell {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl Global for TerminalShell {}
 
 /// TerminalDock から shell への通知。
 pub enum TerminalDockEvent {
@@ -75,6 +103,13 @@ impl TerminalDock {
         for terminal in self.terminals.iter().chain(self.detached.values()) {
             terminal.update(cx, |terminal, cx| terminal.set_accent(accent, cx));
         }
+    }
+
+    /// シェルを開く端末の launch（設定のシェルを当てる・O25）。
+    fn shell_launch(&self, cx: &App) -> TerminalLaunch {
+        self.launch
+            .clone()
+            .with_shell(cx.try_global::<TerminalShell>())
     }
 
     fn create_terminal(
@@ -155,7 +190,7 @@ impl TerminalDock {
         if let Some(terminal) = self.detached.get(&id) {
             return terminal.clone();
         }
-        let terminal = self.create_terminal(self.launch.clone(), cx);
+        let terminal = self.create_terminal(self.shell_launch(cx), cx);
         self.detached.insert(id, terminal.clone());
         cx.notify();
         terminal
@@ -209,7 +244,7 @@ impl TerminalDock {
 
     pub fn ensure_active(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
         if self.terminals.is_empty() {
-            let terminal = self.create_terminal(self.launch.clone(), cx);
+            let terminal = self.create_terminal(self.shell_launch(cx), cx);
             self.terminals.push(terminal);
             self.active = 0;
         }
@@ -243,7 +278,7 @@ impl TerminalDock {
     }
 
     pub fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let terminal = self.create_terminal(self.launch.clone(), cx);
+        let terminal = self.create_terminal(self.shell_launch(cx), cx);
         self.terminals.push(terminal);
         self.active = self.terminals.len() - 1;
         self.focus_active(window, cx);
@@ -509,5 +544,60 @@ impl Render for TerminalDock {
             .bg(theme.bg1)
             .child(header)
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fish() -> TerminalShell {
+        TerminalShell {
+            program: "/opt/homebrew/bin/fish".to_string(),
+            args: vec!["-l".to_string()],
+        }
+    }
+
+    /// O25: 設定のシェルは手元の端末の既定だけを置き換える（Windows の pwsh 指定も手元）。
+    #[test]
+    fn the_chosen_shell_replaces_only_local_defaults() {
+        let local = TerminalLaunch {
+            cwd: Some(PathBuf::from("/work/necoder")),
+            shell: None,
+        };
+        assert_eq!(
+            local.clone().with_shell(Some(&fish())).shell,
+            Some(("/opt/homebrew/bin/fish".to_string(), vec!["-l".to_string()]))
+        );
+        let windows_default = TerminalLaunch {
+            cwd: Some(PathBuf::from(r"C:\work")),
+            shell: Some(("pwsh".to_string(), Vec::new())),
+        };
+        assert_eq!(
+            windows_default
+                .with_shell(Some(&fish()))
+                .shell
+                .map(|(program, _)| program),
+            Some("/opt/homebrew/bin/fish".to_string())
+        );
+        let remote = TerminalLaunch {
+            cwd: None,
+            shell: Some(("ssh".to_string(), vec!["-tt".to_string()])),
+        };
+        assert_eq!(
+            remote.clone().with_shell(Some(&fish())),
+            remote,
+            "SSH 先は接続先のシェル"
+        );
+        let blank = TerminalShell {
+            program: "  ".to_string(),
+            args: Vec::new(),
+        };
+        assert_eq!(
+            local.clone().with_shell(Some(&blank)),
+            local,
+            "空は OS の既定"
+        );
+        assert_eq!(local.clone().with_shell(None), local);
     }
 }
