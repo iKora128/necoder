@@ -2273,10 +2273,12 @@ PYEOF"#;
             }
             // 前回のエージェント側セッション id。立ち上げ直しで会話を引き継ぐ鍵（無ければ新規）。
             let sessions = storage.load_thread_sessions().unwrap_or_default();
+            let muted = muted_thread_ids(&storage);
             for thread in &mut threads {
                 if let Some((_, session_id)) = sessions.iter().find(|(id, _)| *id == thread.id) {
                     thread.acp_session_id = Some(session_id.clone());
                 }
+                thread.muted = muted.contains(&thread.id);
             }
             self.threads = threads;
             self.active = 0;
@@ -2588,12 +2590,19 @@ PYEOF"#;
     }
 
     /// エージェント別ミュートの切替（P2・herd 行の 🔕）。muted 中はこのスレッドの
-    /// トースト/完了音を出さない（ニュースフィードには載る＝見えるが鳴らない）。
+    /// トースト/完了音/OS 通知を出さない（ニュースフィードには載る＝見えるが鳴らない）。
+    /// DB にも残す（O12・以前は再起動で黙って解除されていた）。
     pub fn toggle_thread_mute(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(thread) = self.threads.get_mut(index) {
-            thread.muted = !thread.muted;
-            cx.notify();
+        let Some(thread) = self.threads.get_mut(index) else {
+            return;
+        };
+        thread.muted = !thread.muted;
+        if let Some(storage) = &self.storage {
+            if let Err(error) = storage.set_thread_muted(&thread.id, thread.muted) {
+                eprintln!("スレッドのミュートを保存できない（再起動で戻る）: {error:#}");
+            }
         }
+        cx.notify();
     }
 
     /// 管制の要対応キュー（P3）向け: 承認待ちカードの素材。
@@ -10676,7 +10685,19 @@ fn thread_from_storage(
         .into_iter()
         .find(|(thread_id, _)| thread_id == id)
         .map(|(_, session_id)| session_id);
+    thread.muted = muted_thread_ids(storage).iter().any(|muted| muted == id);
     thread
+}
+
+/// ミュート中のスレッド id（O12）。読めなければ「全部鳴る」に倒す（黙って通知を消すよりまし）。
+fn muted_thread_ids(storage: &storage::Storage) -> Vec<String> {
+    match storage.load_muted_threads() {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("スレッドのミュートを読めない（全部鳴る扱い）: {error:#}");
+            Vec::new()
+        }
+    }
 }
 
 /// offscreen 検証プローブはモック transcript（markdown/Step 描画）や複数タブ（ACP_PROBE は添字 1 の
@@ -12190,6 +12211,55 @@ PYEOF"#;
             panel.add_thread(cx);
             assert_eq!(panel.threads[panel.active].model.as_ref(), "opus[1m]");
         });
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// スレッドのミュートは再起動をまたいで残る（O12）。以前は DB に置き場が無く、起動のたびに
+    /// 黙って解除されていた（鳴らしたくないスレッドが翌朝また鳴る）。
+    #[gpui::test]
+    fn thread_mute_survives_a_restart(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "mute-restart");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_mute_restart_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        storage
+            .upsert_thread(
+                "muted-1",
+                "うるさいスレッド",
+                0,
+                "",
+                None,
+                Some("Claude Code"),
+                None,
+                0,
+                0,
+            )
+            .expect("スレッド行を書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let index = panel.active;
+            assert!(!panel.threads[index].muted);
+            panel.toggle_thread_mute(index, cx);
+            assert!(panel.threads[index].muted);
+        });
+
+        // 再起動 = 同じ DB を別のパネルが読み直す。
+        let restarted = cx.new(|cx| AgentPanel::new(Theme::dark(), cx));
+        restarted.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let index = panel.active;
+            assert_eq!(panel.threads[index].id, "muted-1");
+            assert!(panel.threads[index].muted, "ミュートが再起動で解除された");
+            assert!(panel.statuses()[index].muted, "herd の 🔕 表示にも載る");
+            // 解除も残る。
+            panel.toggle_thread_mute(index, cx);
+        });
+        assert!(storage.load_muted_threads().expect("読める").is_empty());
         let _ = std::fs::remove_file(settings_path);
         let _ = std::fs::remove_file(db_path);
     }
