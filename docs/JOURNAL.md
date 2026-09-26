@@ -3411,6 +3411,16 @@
   - **gpui はドラッグ中の物の型を外から見られない**（`App::active_drag` は `pub(crate)`・`has_active_drag` だけ）。
     特定の型だけの落とし先は「ドラッグ中なら置く・`drag_over::<T>` / `on_drop::<T>` で型を絞る」にする
     （ほかの型のドラッグでは見えない透明な面になるだけで、下の要素の落とし先も効く）。
+  - **シンボリックリンクは git にはファイル**: `.gitignore` の `node_modules/`（末尾の `/` = フォルダだけ）は、
+    `node_modules` という名前のリンクに当たらない。Task に置いたリンクは `?? node_modules` と出て、
+    `git add -A` で commit される（`task_shared` で実際に確かめた）。無視させるのは共有の `info/exclude`
+    （`git rev-parse --path-format=absolute --git-common-dir` の下・linked worktree からも同じ物）に
+    `/node_modules`。ただし `.gitignore` の `!node_modules` は `info/exclude` より強いので、足した後に
+    `git check-ignore` で確かめ直し、無視されなければリンクを消す。無視されたリンクなら
+    `git worktree remove` は force なしで通り、リンク先の中身は消えない。
+  - **整っていないファイルに足す時の rustfmt**: ファイルごと整えると他人の差分が混ざる。`src` を丸ごと
+    scratch に写して rustfmt をかけ、足した関数・テストの範囲だけを（前後の固有の行を目印に）写し戻す。
+    「Diff in」の数が変える前と同じになれば、足した所は整っている（project.rs は 12 のまま）。
   - relay の Remote control（WebKit）は、カメラの 2 本に加えて本体の `PWA: …` の 17 行目も落ちたり通ったりする。
     `test/fixture.mjs` の transcript と送信の数を chromium と webkit が共有するので、2 番目の webkit では
     前の回の同じ文で `toContainText` が先に通り、数を見る時に送信がまだ届いていない。#30 のコメントに
@@ -3419,4 +3429,8 @@
   `cargo test --workspace` 845 通過・落ちるのは Linux で元から落ちる 2 件だけ。#30 の CI は 243152f で CLA 以外すべて緑。
 - 次: 実機（mac）で作成中の行・ターミナルの文字の大きさ（行と列の測り直し）・複数選択の帯・書体の差し替え
   （エディタのヒットテストがずれないか）・CSV の表（横スクロールと見出しの固定）・Quick Commands の帯・
-  SSH 実機でのアップロード / ダウンロード（大きいフォルダの所要時間）を確かめる。CLA の判断。
+  SSH 実機でのアップロード / ダウンロード（大きいフォルダの所要時間）を確かめる。Ghostty の取り込みを本物の
+  設定（アプリ同梱のテーマの名前）で、`task_shared` を本物の `node_modules`（Finder・ファイルの見張り・
+  Windows は開発者モードの有無）で、サイドバーの ⌘⌫、登録の ProxyJump を実際の踏み台で。CLA の判断。
+  スマホから Task を作る（O38・G18）は、作った Task をその端末に共有する（`device.tasks` に足す）か・
+  準備スクリプトが長い時の応答（IPC の待ち）をどうするかが「限定共有」の設計に関わるので、本人に聞いてから。
