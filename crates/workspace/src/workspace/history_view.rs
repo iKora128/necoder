@@ -805,6 +805,43 @@ impl Workspace {
         }
     }
 
+    /// 開発用（offscreen 検証）: 区分ごとの件数を 1 行で返す。**題は出さない** — 本物のエージェントの
+    /// 一覧（本人の会話）を撮らずに、一覧が取れたかだけを確かめる（`NECODER_HISTORY_PROBE=count`）。
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_history_counts(&self) -> String {
+        let Some(state) = self.overlays.thread_history.as_ref() else {
+            return "closed".to_string();
+        };
+        let agent = match &state.agent_sessions {
+            AgentSessions::Unavailable => "unavailable".to_string(),
+            AgentSessions::Loading => "loading".to_string(),
+            AgentSessions::Unsupported => "unsupported".to_string(),
+            AgentSessions::Failed(error) => format!("failed ({error})"),
+            AgentSessions::Loaded(sessions) => format!(
+                "{} sessions ({} with a title, {} from another worktree)",
+                sessions.len(),
+                sessions
+                    .iter()
+                    .filter(|session| session.title.is_some())
+                    .count(),
+                sessions
+                    .iter()
+                    .filter(|session| session.cwd != state.root)
+                    .count()
+            ),
+        };
+        let matches = match &state.matches {
+            HistoryMatches::Idle => "idle".to_string(),
+            HistoryMatches::Searching => "searching".to_string(),
+            HistoryMatches::Failed(error) => format!("failed ({error})"),
+            HistoryMatches::Loaded(matches) => format!("{} hits", matches.len()),
+        };
+        format!(
+            "threads={} agent={agent} matches={matches}",
+            state.threads.len()
+        )
+    }
+
     /// 開発用（offscreen 検証）: 選択中の行を開く（⏎ と同じ）。
     #[cfg(debug_assertions)]
     pub(crate) fn debug_history_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
