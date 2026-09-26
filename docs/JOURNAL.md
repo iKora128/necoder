@@ -3426,6 +3426,12 @@
     zsh の precmd は、フックごとに `$?` をコマンドの終了コードへ戻してから呼ぶ（別のフックが先に `return 3` しても
     `add-zsh-hook` で足した側に正しい値が届く＝実際の zsh 5.9 で確かめた）。bash は `PS0`（4.4 以降）で C、
     `PROMPT_COMMAND` の先頭で D と A を出す。
+  - **SSH の host は開いた project の外を cwd にできない**（`RemoteHost::run_command` は cwd を根からの相対に
+    直す・書き込みも根の中だけ・metadata は根の中へ正規化してリンクをたどる）。Task の worktree は
+    `<repo>-worktrees/` にあって統合先の外なので、統合先の host で Task の中のコマンドを流すと必ず断られる。
+    `task_shared` だけでなく、`task_sparse` の `sparse-checkout` / `checkout` と準備スクリプトも同じ形で SSH の
+    repo では通っていなかった（レビューで見つけ、`host.host_for_project(target)` に揃えた）。根の外を断る手元の
+    host（`ScopedHost`・テスト）で Task の作成と準備を通すテストを足した。
   - **整っていないファイルに足す時の rustfmt**: ファイルごと整えると他人の差分が混ざる。`src` を丸ごと
     scratch に写して rustfmt をかけ、足した関数・テストの範囲だけを（前後の固有の行を目印に）写し戻す。
     「Diff in」の数が変える前と同じになれば、足した所は整っている（project.rs は 12 のまま）。

@@ -917,9 +917,15 @@ fn add_task_worktree_on(
     if sparse.is_empty() {
         return Ok(());
     }
+    // 新しい worktree の中の git は、その worktree を開き直した host で（SSH の host は開いた project の
+    // 外を cwd にできない）。
+    let worktree_host = host
+        .host_for_project(path)
+        .context("Task worktree を開けない")?;
     let mut set: Vec<&str> = vec!["sparse-checkout", "set", "--cone"];
     set.extend(sparse.iter().map(String::as_str));
-    let configured = run_git(host, path, set).is_ok_and(|output| output.success());
+    let configured =
+        run_git(worktree_host.as_ref(), path, set).is_ok_and(|output| output.success());
     if !configured {
         eprintln!(
             "task_sparse を設定できないので全部を取り出します: {}",
@@ -927,7 +933,7 @@ fn add_task_worktree_on(
         );
     }
     let branch = new_branch.unwrap_or(start);
-    let output = run_git(host, path, ["checkout", "-q", branch])
+    let output = run_git(worktree_host.as_ref(), path, ["checkout", "-q", branch])
         .context("Task worktree の取り出しに失敗")?;
     anyhow::ensure!(
         output.success(),
@@ -4208,6 +4214,201 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// SSH の host と同じく、開いた根の外を cwd にしたコマンド・根の外への書き込み・たどった先が根の外に
+    /// なる metadata を断る手元の host。`ln` を 1 つだけわざと失敗させられる（途中で失敗した時の後始末を見る）。
+    #[cfg(unix)]
+    struct ScopedHost {
+        root: PathBuf,
+        failing_link: Option<&'static str>,
+    }
+
+    #[cfg(unix)]
+    impl ScopedHost {
+        fn inside(&self, path: &Path) -> Result<()> {
+            anyhow::ensure!(
+                path.starts_with(&self.root),
+                "path is outside remote project: {}",
+                path.display()
+            );
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Host for ScopedHost {
+        fn id(&self) -> &str {
+            "scoped"
+        }
+        fn display_name(&self) -> &str {
+            "scoped"
+        }
+        fn is_remote(&self) -> bool {
+            true
+        }
+        fn host_for_project(&self, path: &Path) -> Result<std::sync::Arc<dyn Host>> {
+            Ok(std::sync::Arc::new(ScopedHost {
+                root: path.to_path_buf(),
+                failing_link: self.failing_link,
+            }))
+        }
+        fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
+            LocalHost.canonicalize(path)
+        }
+        fn metadata(&self, path: &Path) -> Result<host::HostMetadata> {
+            // 接続先と同じく、リンクをたどった先で根の内か外かを見る。
+            self.inside(&std::fs::canonicalize(path)?)?;
+            LocalHost.metadata(path)
+        }
+        fn read_dir(&self, path: &Path) -> Result<Vec<host::HostEntry>> {
+            self.inside(path)?;
+            LocalHost.read_dir(path)
+        }
+        fn read_file(&self, path: &Path) -> Result<host::FileContent> {
+            self.inside(path)?;
+            LocalHost.read_file(path)
+        }
+        fn write_file(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+            condition: host::WriteCondition,
+        ) -> Result<host::FileRevision> {
+            self.inside(path)?;
+            LocalHost.write_file(path, bytes, condition)
+        }
+        fn list_files(&self, root: &Path, limit: usize) -> Result<Vec<PathBuf>> {
+            self.inside(root)?;
+            LocalHost.list_files(root, limit)
+        }
+        fn search_project(
+            &self,
+            root: &Path,
+            spec: &host::TextSearchSpec,
+            file_limit: usize,
+        ) -> Result<Vec<host::TextSearchHit>> {
+            self.inside(root)?;
+            LocalHost.search_project(root, spec, file_limit)
+        }
+        fn run_command(&self, spec: &CommandSpec) -> Result<CommandOutput> {
+            self.inside(&spec.cwd)?;
+            if let Some(name) = self.failing_link {
+                if spec.program == "ln" && spec.args.iter().any(|arg| arg.ends_with(name)) {
+                    anyhow::bail!("わざと失敗: ln {name}");
+                }
+            }
+            LocalHost.run_command(spec)
+        }
+        fn spawn_process(&self, spec: &CommandSpec) -> Result<host::HostProcess> {
+            self.inside(&spec.cwd)?;
+            LocalHost.spawn_process(spec)
+        }
+        fn terminal_launch(&self, cwd: &Path) -> Result<Option<host::TerminalLaunch>> {
+            LocalHost.terminal_launch(cwd)
+        }
+    }
+
+    /// O20: SSH の repo でも Task の準備が通る（Task の worktree の中のコマンドは Task の host で・
+    /// `info/exclude` は統合先の host で）。1 つのリンクが途中で失敗しても、置けたリンクは git に無視させて
+    /// から失敗を返す。やり直しは置いたリンクを見つけて（たどらずに）重ねて置かない。
+    #[cfg(unix)]
+    #[test]
+    fn task_preparation_works_through_a_host_scoped_to_the_repository() {
+        let base = scratch("scoped_prepare");
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let root = base.join("repo");
+        for folder in ["node_modules/pkg", "cache", "web", "api", ".necoder"] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        let git_in = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git_in(&root, &["init", "-q", "-b", "main"])
+            .status
+            .success()
+        {
+            return;
+        }
+        // 準備スクリプトの印（setup-ran）も無視させる（git status はリンクだけを見たい）。
+        std::fs::write(
+            root.join(".gitignore"),
+            "node_modules/\ncache/\nsetup-ran\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".necoder/settings.json"),
+            r#"{ "task_shared": ["node_modules", "cache"], "task_sparse": ["web"] }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".necoder/worktree-setup.sh"),
+            "echo ran > \"$NECODER_TASK_ROOT/web/setup-ran\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("web/a.txt"), "1\n").unwrap();
+        std::fs::write(root.join("api/b.txt"), "2\n").unwrap();
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-qm", "first"]);
+        std::fs::write(root.join("node_modules/pkg/index.js"), "1\n").unwrap();
+
+        let host = ScopedHost {
+            root: root.clone(),
+            failing_link: Some("cache"),
+        };
+        let (target, branch, failure) =
+            create_task_with_on(&host, &root, "Scoped", &TaskStart::default()).unwrap();
+        assert!(
+            target.join("web/a.txt").exists(),
+            "sparse も Task の host で"
+        );
+        assert!(!target.join("api").exists());
+        assert!(
+            target.join("web/setup-ran").exists(),
+            "準備スクリプトも流れる"
+        );
+        let failure = failure.expect("cache のリンクは失敗として残る");
+        assert!(failure.contains("わざと失敗"), "{failure}");
+        assert!(target
+            .join("node_modules")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let status = git_in(&target, &["status", "--porcelain"]);
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout),
+            "",
+            "失敗があっても、置けたリンクは git に無視させてある"
+        );
+
+        // やり直し（失敗が消えた後）: node_modules は置き直さず、cache を置く。
+        let host = ScopedHost {
+            root: root.clone(),
+            failing_link: None,
+        };
+        prepare_task_worktree_on(&host, &root, &target, &branch, false).expect("やり直せる");
+        assert!(target
+            .join("cache")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            String::from_utf8_lossy(&git_in(&target, &["status", "--porcelain"]).stdout),
+            ""
+        );
+        assert!(
+            !root.join("node_modules/node_modules").exists(),
+            "リンクの中へ重ねて置かない"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// O20: 準備スクリプトは今回だけ飛ばせる。失敗した準備は直してからやり直せる。
     /// 準備スクリプトは POSIX shell で流す物なので unix だけ（Windows のローカルは
     /// `has_posix_shell` が false で、流さずに「shell が要る」を返す）。
@@ -5004,7 +5205,12 @@ const SHARED_EXCLUDE_HEADER: &str =
 /// リンクは git にはフォルダでなくファイルに見えるので、`node_modules/` のような書き方では無視されず、
 /// そのままだと `git add -A` でリンクが commit される。git が無視しないリンクは、共有の `info/exclude` に
 /// `/<フォルダ>` を足して無視させる。それでも無視されない（`.gitignore` の `!` が勝つ等）リンクは消して
-/// エラーにする＝ git が無視しないリンクは残さない。既にあるリンクは置き直さないので、やり直しても同じ。
+/// エラーにする＝ git が無視しないリンクは残さない。途中でリンクを置けなかった物があっても、置けた物の
+/// この確かめは必ず済ませてからエラーを返す。前の回（やり直す前）に置いたリンクも確かめ直す
+/// （無視させられなければ知らせるだけで、消しはしない）。
+///
+/// Task の中のコマンド・リンクは Task を開き直した host で、`info/exclude`（統合先の `.git` の中）は
+/// 統合先の host で書く（SSH の host は開いた project の外を cwd にも書き先にもできない）。
 pub fn link_shared_folders_on(
     host: &dyn Host,
     main: &Path,
@@ -5016,6 +5222,9 @@ pub fn link_shared_folders_on(
         return Ok(result);
     }
     let target_host = host.host_for_project(target)?;
+    let target_host = target_host.as_ref();
+    let mut failures = Vec::new();
+    let mut earlier = Vec::new();
     for entry in entries {
         let source = main.join(&entry);
         let destination = target.join(&entry);
@@ -5023,14 +5232,30 @@ pub fn link_shared_folders_on(
             result.skipped.push((entry, "統合先にフォルダが無い"));
             continue;
         }
-        if !git_ignores_on(host, main, &entry)? {
-            result.skipped.push((
-                entry,
-                "統合先で git が無視していない（追跡している物は checkout で入る）",
-            ));
-            continue;
+        match git_ignores_on(host, main, &entry) {
+            Ok(true) => {}
+            Ok(false) => {
+                result.skipped.push((
+                    entry,
+                    "統合先で git が無視していない（追跡している物は checkout で入る）",
+                ));
+                continue;
+            }
+            Err(error) => {
+                eprintln!("task_shared: {entry}: {error:#}");
+                result.skipped.push((
+                    entry,
+                    "git が無視しているか分からない（サブモジュールの中など）",
+                ));
+                continue;
+            }
         }
-        if target_host.metadata(&destination).is_ok() {
+        // 置いてあるかはリンクをたどらずに見る（SSH の host の metadata はたどって、Task の外を指す
+        // リンクを「無い」と答える＝やり直しで重ねて置こうとしてしまう）。
+        if let Some(existing) = entry_without_following(target_host, &destination) {
+            if existing.is_symlink {
+                earlier.push(entry.clone());
+            }
             result.skipped.push((entry, "Task に既にある"));
             continue;
         }
@@ -5045,39 +5270,62 @@ pub fn link_shared_folders_on(
                 .push((entry, "Task に親のフォルダが無い（task_sparse の外）"));
             continue;
         }
-        create_folder_link_on(host, &source, &destination)?;
-        result.linked.push(entry);
-    }
-    let mut unignored = Vec::new();
-    for entry in &result.linked {
-        if !git_ignores_on(host, target, entry)? {
-            unignored.push(entry.clone());
+        match create_folder_link_on(target_host, &source, &destination) {
+            Ok(()) => result.linked.push(entry),
+            Err(error) => failures.push(format!("{error:#}")),
         }
     }
-    if unignored.is_empty() {
-        return Ok(result);
-    }
-    let excluded = exclude_locally_on(host, target, &unignored);
-    let mut still_seen = Vec::new();
-    for entry in &unignored {
-        if excluded.is_err() || !git_ignores_on(host, target, entry).unwrap_or(false) {
-            still_seen.push(entry.clone());
+    let seen_by_git = |entry: &String| !git_ignores_on(target_host, target, entry).unwrap_or(false);
+    let unignored: Vec<String> = result
+        .linked
+        .iter()
+        .chain(&earlier)
+        .filter(|entry| seen_by_git(entry))
+        .cloned()
+        .collect();
+    if !unignored.is_empty() {
+        let excluded = exclude_locally_on(host, main, &unignored);
+        let reason = match &excluded {
+            Err(error) => format!("info/exclude に書けない: {error:#}"),
+            Ok(()) => "`.gitignore` の `!` などで無視されない".to_string(),
+        };
+        let (placed_now, from_before): (Vec<String>, Vec<String>) = unignored
+            .into_iter()
+            .filter(|entry| excluded.is_err() || seen_by_git(entry))
+            .partition(|entry| result.linked.contains(entry));
+        for entry in &placed_now {
+            if let Err(error) = remove_folder_link_on(target_host, &target.join(entry)) {
+                failures.push(format!("{error:#}"));
+            }
+        }
+        result.linked.retain(|entry| !placed_now.contains(entry));
+        if !placed_now.is_empty() {
+            failures.push(format!(
+                "task_shared: git が無視しないのでリンクを置きませんでした（commit されないように）: {}（{reason}）",
+                placed_now.join(", ")
+            ));
+        }
+        if !from_before.is_empty() {
+            failures.push(format!(
+                "task_shared: 前に置いたリンクを git が無視していません。commit しないよう、消すか .gitignore に足してください: {}（{reason}）",
+                from_before.join(", ")
+            ));
         }
     }
-    if still_seen.is_empty() {
-        return Ok(result);
+    if failures.is_empty() {
+        Ok(result)
+    } else {
+        Err(anyhow::anyhow!(failures.join("\n")))
     }
-    for entry in &still_seen {
-        remove_folder_link_on(host, &target.join(entry))?;
-    }
-    let reason = match excluded {
-        Err(error) => format!("info/exclude に書けない: {error:#}"),
-        Ok(()) => "`.gitignore` の `!` などで無視されない".to_string(),
-    };
-    anyhow::bail!(
-        "task_shared: git が無視しないのでリンクを置きませんでした（commit されないように）: {}（{reason}）",
-        still_seen.join(", ")
-    )
+}
+
+/// `path` の項目を、リンクをたどらずに親のフォルダの一覧から探す（無ければ `None`）。
+fn entry_without_following(host: &dyn Host, path: &Path) -> Option<host::HostEntry> {
+    let name = path.file_name()?.to_string_lossy();
+    host.read_dir(path.parent()?)
+        .ok()?
+        .into_iter()
+        .find(|entry| entry.name == name)
 }
 
 /// `dir` の git が `entry`（`dir` からの相対パス）を無視しているか（`git check-ignore`）。
@@ -5090,20 +5338,32 @@ fn git_ignores_on(host: &dyn Host, dir: &Path, entry: &str) -> Result<bool> {
     }
 }
 
-/// `dir` のリポジトリの共有の `info/exclude` に `/<entry>` を足す（無い行だけ・見出しは 1 度だけ）。
-/// commit されない、その機械だけの無視（`.gitignore` は変えない）。
-fn exclude_locally_on(host: &dyn Host, dir: &Path, entries: &[String]) -> Result<()> {
-    let output = run_git(
+/// 統合先 `main` のリポジトリの共有の `info/exclude`（linked worktree からも同じ物）に `/<entry>` を
+/// 足す（無い行だけ・見出しは 1 度だけ）。commit されない、その機械だけの無視（`.gitignore` は変えない）。
+/// 書くのは `main` の host（`info/exclude` は統合先の `.git` の中）。
+fn exclude_locally_on(host: &dyn Host, main: &Path, entries: &[String]) -> Result<()> {
+    // `--path-format` は git 2.31 から。古い git は相対（`.git`）で返るので `main` から辿る。
+    let absolute = run_git(
         host,
-        dir,
+        main,
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
+    let output = if absolute.success() {
+        absolute
+    } else {
+        run_git(host, main, ["rev-parse", "--git-common-dir"])?
+    };
     anyhow::ensure!(
         output.success(),
         "git rev-parse に失敗: {}",
         git_fail_message(&output)
     );
     let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let common = if common.is_absolute() {
+        common
+    } else {
+        main.join(common)
+    };
     let exclude = common.join("info").join("exclude");
     let existing = if host.metadata(&exclude).is_ok() {
         Some(host.read_file(&exclude)?)
@@ -5148,8 +5408,10 @@ fn exclude_locally_on(host: &dyn Host, dir: &Path, entries: &[String]) -> Result
 fn create_folder_link_on(host: &dyn Host, source: &Path, destination: &Path) -> Result<()> {
     if host.is_remote() {
         let parent = destination.parent().context("リンクの置き場が無い")?;
+        // `-n`: 置き場に既にフォルダへのリンクがあっても、その中へ置かない（失敗させる）。
         let spec = CommandSpec::new("ln", parent).args([
             "-s".to_string(),
+            "-n".to_string(),
             "--".to_string(),
             source.to_string_lossy().into_owned(),
             destination.to_string_lossy().into_owned(),
@@ -5261,18 +5523,20 @@ pub fn prepare_task_worktree_on(
     }
 }
 
-/// 準備スクリプト（§6.2）を新 worktree を cwd に 1 回流す。無ければ何もしない。
+/// 準備スクリプト（§6.2）を新 worktree を cwd に 1 回流す。無ければ何もしない。新 worktree を開き直した
+/// host で流す（SSH の host は開いた project の外を cwd にできない）。
 pub fn run_task_setup_on(host: &dyn Host, main: &Path, target: &Path, branch: &str) -> Result<()> {
     let script = worktree_setup_script(main);
     if host.metadata(&script).is_err() { return Ok(()); }
-    anyhow::ensure!(host.has_posix_shell(), "worktree-setup.sh には POSIX shell が必要です");
+    let target_host = host.host_for_project(target)?;
+    anyhow::ensure!(target_host.has_posix_shell(), "worktree-setup.sh には POSIX shell が必要です");
     let spec = host::CommandSpec::new("sh", target).args([script.to_string_lossy().into_owned()])
         .envs([
             ("NECODER_MAIN_ROOT", main.to_string_lossy().into_owned()),
             ("NECODER_TASK_ROOT", target.to_string_lossy().into_owned()),
             ("NECODER_TASK_BRANCH", branch.to_string()),
         ]);
-    let output = host.run_command(&spec)?;
+    let output = target_host.run_command(&spec)?;
     anyhow::ensure!(output.success(), "準備スクリプトに失敗しました: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     Ok(())
 }
