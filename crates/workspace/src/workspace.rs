@@ -77,6 +77,7 @@ mod editor_manners;
 mod git_controller;
 mod git_view;
 mod herd_view;
+mod inbox;
 mod keep_awake;
 mod notifications;
 mod overlays;
@@ -199,6 +200,8 @@ actions!(
         OpenInTerminal,
         // necoder の中で動いている開発サーバのポート（開く / 止める・O5）。
         ShowPorts,
+        // 通知の履歴（titlebar のベルと同じ一覧・O13）。
+        ShowInbox,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
         Hide,
         HideOthers,
@@ -1386,6 +1389,8 @@ struct WorkspaceOverlays {
     usage_popover: Option<usage_view::UsagePopoverState>,
     /// Ports（O5・開いている間だけ Some）。
     ports: Option<ports::PortsState>,
+    /// 通知の履歴の一覧（titlebar のベル・O13・開いている間だけ Some）。
+    inbox: Option<inbox::InboxPopoverState>,
     /// 使用量の統計の画面（パレット「使用量: 統計を開く」・O11）。
     usage_stats: Option<usage_view::UsageStatsState>,
     /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
@@ -1415,6 +1420,8 @@ struct NotificationCenter {
     /// 起動時に DB から backfill し、以後は task_events へ書くのと同じ場所で live に積む。
     /// **Captain の采配も同じ形でここへ載る**（監査可能なニュース・FLEET-V2 §5.6）。
     news: Vec<NewsItem>,
+    /// 通知の履歴（ベル・O13）。古いものが先頭・最新 `inbox::INBOX_LIMIT` 件。
+    inbox: Vec<inbox::InboxItem>,
 }
 
 /// ニュース 1 行（mock `fleet-dashboard.html` 下段の書式）: 時刻 + 帰属チップ + **太字名** + イベント文。
@@ -1994,6 +2001,7 @@ impl Workspace {
             || self.overlays.about.is_some()
             || self.overlays.usage_popover.is_some()
             || self.overlays.ports.is_some()
+            || self.overlays.inbox.is_some()
             || self.overlays.usage_stats.is_some()
             || self.search_panel.is_some()
             || self.buffer_search.is_some()
@@ -2212,6 +2220,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_in_zed))
             .on_action(cx.listener(Self::open_in_terminal))
             .on_action(cx.listener(Self::show_ports))
+            .on_action(cx.listener(Self::toggle_inbox))
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
@@ -2382,6 +2391,7 @@ impl Render for Workspace {
             .children(self.render_about_modal(cx))
             .children(self.render_usage_popover(cx))
             .children(self.render_ports(cx))
+            .children(self.render_inbox(cx))
             .children(self.render_usage_stats(cx))
             .children(self.render_new_task_dialog(cx))
             .children(self.render_hunk_menu(cx))

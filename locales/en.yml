@@ -235,6 +235,7 @@ cmd:
   open_in_zed: "External: Open in Zed"
   open_in_terminal: "External: Open folder in Terminal"
   show_ports: "Ports: Open ports (open / stop)"
+  show_inbox: "Notifications: Show history"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -1293,3 +1294,12 @@ ports:
   stop_failed: "Could not stop pid %{pid}: it already exited or is not a process inside necoder"
   hint: Read only when opened and on ↻ (lsof / ps). Only processes inside necoder can be stopped. Ports on SSH hosts are not listed yet
   unsupported: Not available on this OS yet (macOS / Linux)
+inbox:
+  title: Notification history
+  bell_tip: Notification history
+  bell_tip_unread: "Notification history (%{count} unread)"
+  mark_all_read: Mark all read
+  mark_read: Mark as read
+  mark_unread: Mark as unread
+  empty: No notifications yet (finished, failed and waiting agents show up here)
+  note: "Latest %{count} in this window, kept while necoder is running"

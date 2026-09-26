@@ -2980,6 +2980,13 @@ PYEOF"#;
         self.thread_index_by_id(thread_id)
     }
 
+    /// 永続 id のスレッドの色（通知の履歴が行の印に使う・O13）。閉じられていれば None。
+    pub fn thread_color_by_id(&self, thread_id: &str) -> Option<Hsla> {
+        self.thread_index_by_id(thread_id)
+            .and_then(|index| self.threads.get(index))
+            .map(|thread| thread.color)
+    }
+
     /// 今の添字にあるスレッドの永続 id（[`Self::thread_position`] の逆）。宛先を覚えておく側
     /// （変更レビューの送り先メニュー・R07）は添字でなくこちらを持ち、送る直前に引き直す。
     pub fn thread_id(&self, thread_index: usize) -> Option<SharedString> {

@@ -86,6 +86,7 @@
 | **下段ドック**（Fleet 下の可変高タブ面） | `FleetBottomView` / `bottom_height` | 下段 | Bottom pane |
 | **OS の通知**（通知センター。その窓を見ていない時だけ・スレッドごとに 1 件） | `system_notifications` / `post_agent_notification` / 設定 `system_notifications` | OS の通知 | System notifications |
 | **Dock バッジ**（要対応の件数・全窓の合計・macOS） | `dock_badge` | — | — |
+| **通知の履歴**（titlebar のベル。エージェントの出来事を窓ごとに最新 100 件・未読 / 既読・O13） | `inbox` / `InboxItem` / `ShowInbox` | 通知の履歴 / すべて既読 / 未読に戻す | Notification history / Mark all read / Mark as unread |
 | **プレビュータブ**（エクスプローラの 1 回クリックで開く・次の 1 回クリックで置き換わる・名前が斜体・O26） | `EditorTab::preview` / `open_file_preview`（設定 `preview_tabs`） | プレビュータブ | Preview tab |
 | **ピン留め**（タブを左端に留め、まとめて閉じる操作と ⌘W で閉じない・窓セッションに残る・O26） | `EditorTab::pinned` / `TogglePinTab` / 窓セッション `pinned_files` | ピン留め / ピン留めを外す | Pin tab / Unpin tab |
 | **自動保存**（他へ移った時 / 手を止めた時に未保存のタブを書く・外で変わったタブは書かない・O26） | `auto_save`（設定 `auto_save`・`AutoSave`） | 自動保存 / 他へ移った時 / 手を止めた時 | Auto save / On focus change / After a pause |

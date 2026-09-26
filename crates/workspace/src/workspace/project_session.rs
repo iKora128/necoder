@@ -891,6 +891,7 @@ impl Workspace {
                 about: std::env::var_os("NECODER_ABOUT").map(|_| cx.focus_handle()),
                 usage_popover: None,
                 ports: None,
+                inbox: None,
                 usage_stats: None,
                 project_flash: None,
                 project_flash_gen: 0,
@@ -900,6 +901,7 @@ impl Workspace {
                 toast_gen: 0,
                 crash_notice: None,
                 news: Vec::new(),
+                inbox: Vec::new(),
             },
             persistence: WorkspacePersistence {
                 session_writer: None,
