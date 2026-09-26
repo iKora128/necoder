@@ -846,6 +846,7 @@ impl Workspace {
                 rail_menu: None,
                 tab_menu: None,
                 worktree_delete: None,
+                quit_confirm: None,
                 ssh_input: None,
                 askpass: None,
                 ssh_connecting: false,

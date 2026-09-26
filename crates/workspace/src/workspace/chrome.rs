@@ -282,8 +282,12 @@ impl Workspace {
                 ))
                 .child(button("window-close", "\u{2715}").on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, window, _cx| {
-                        // remove_window は OS の should-close フックを通らない＝閉じ印はここで付ける。
+                    cx.listener(|this, _, window, cx| {
+                        // remove_window は OS の should-close フックを通らない＝窓を閉じる時の確認（O4）と
+                        // 閉じ印はここで自分で行う。
+                        if this.guard_window_close(window, cx) {
+                            return;
+                        }
                         this.mark_window_closed();
                         window.remove_window()
                     }),
@@ -2656,8 +2660,11 @@ impl Workspace {
     }
 
     /// 差し替え済みチップの「再起動」: 自プロセスの終了を待って .app を開き直す子を切り離してから、
-    /// 通常の Quit（hot exit 破棄・窓セッション整理）と同じ経路で終了する。
-    pub(crate) fn restart_after_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 通常の Quit（hot exit 破棄・窓セッション整理）と同じ後始末で終了する。
+    ///
+    /// ⌘Q の確認（O4）は通さない: 開き直す子は既に待っているので「隠して動かし続ける」を選ばれると
+    /// 後で勝手に再起動が走る。再起動は押した人が明示的に選んだ終了として扱う。
+    pub(crate) fn restart_after_update(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.updater.status, Some((_, UpdateState::Ready))) {
             return;
         }
@@ -2665,11 +2672,8 @@ impl Workspace {
             self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
             return;
         }
-        // Quit アクションは necoder crate 側の定義（キーマップの `necoder::Quit`）なので名前で組み立てる。
-        match cx.build_action("necoder::Quit", None) {
-            Ok(action) => window.dispatch_action(action, cx),
-            Err(_) => cx.quit(),
-        }
+        // 全窓の後始末をするので、この窓の update を抜けてから行う。
+        cx.defer(quit_now);
     }
 }
 

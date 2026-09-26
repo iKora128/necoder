@@ -348,6 +348,24 @@ worktree_delete:
   skip_next: 次回から確認しない（失うものが無いときだけ省略します）
   cancel: キャンセル
   confirm: 削除する
+quit_confirm:
+  title: まだ動いているものがあります
+  title_window: この窓でまだ動いているものがあります
+  working: "実行中のエージェント %{n}"
+  waiting: "承認・質問を待っているエージェント %{n}"
+  terminals: "前面でプロセスが動いているターミナル %{n}"
+  stops_quit: 終了すると、すべての窓のこれらが止まります。
+  stops_close_window: この窓を閉じると、この窓のこれらが止まります。ほかの窓で動いているものは止まりません。
+  stops_close_last: この窓を閉じると、これらは止まります。
+  hide_explained: 「隠す」は画面から消すだけです。necoder もこれらも動き続け、Dock のアイコンで戻れます。
+  minimize_explained: 「最小化」は窓をしまうだけで、これらは動き続けます。
+  lifetime: 動き続けるのは necoder が起動している間だけです。終了・クラッシュ・更新の再起動では止まります。
+  keep_running_hide: 隠して動かし続ける
+  keep_running_minimize: 最小化して動かし続ける
+  quit: 終了する
+  close: 閉じる
+  cancel: キャンセル
+  setting_hint: この確認は 設定 › 動作とエディタ の「終了・窓を閉じる時の確認」で切れます
 launcher:
   placeholder: 開く、または最近のプロジェクトを選択…
   open_folder: フォルダを開く…
@@ -462,6 +480,10 @@ settings:
   pref_tabs_view: スレッドタブの表示
   tabs_view_bar: 横タブ
   tabs_view_list: 縦リスト
+  pref_confirm_quit: 終了・窓を閉じる時の確認
+  pref_confirm_quit_sub: ⌘Q なら全部の窓、窓を閉じるならその窓で、エージェントや端末が動いていれば「隠して（最小化して）動かし続ける」を選べます
+  confirm_quit_running: 動いている時だけ
+  confirm_quit_never: しない
   appearance_heading: 外観
   appearance_sub: テーマは押した瞬間に適用され、settings.json に保存されます。
   theme_label: テーマ
@@ -597,6 +619,10 @@ pdf:
   unsupported_hint: OS のビューアを使うため macOS / Windows のみ対応します。右クリック →「既定アプリで開く」で開けます
 terminal:
   tab_title: ターミナル %{n}
+  close_busy_title: "ターミナル %{n} でプロセスが動いています"
+  close_busy_detail: このタブを閉じると、このターミナルで動いているプロセスが止まります。ほかのターミナルとエージェントは止まりません。
+  close_busy_confirm: 閉じる
+  close_busy_cancel: キャンセル
   add_tip: ターミナルを追加
   close_dock_tip: 下ドックを閉じる  ⌘J
   git_tip: ソース管理  ⌃⇧G

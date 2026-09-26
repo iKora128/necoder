@@ -347,6 +347,24 @@ worktree_delete:
   skip_next: Don't ask again (skipped only when there is nothing to lose)
   cancel: Cancel
   confirm: Delete
+quit_confirm:
+  title: Work is still running
+  title_window: Work is still running in this window
+  working: "Agents running: %{n}"
+  waiting: "Agents waiting for your approval or answer: %{n}"
+  terminals: "Terminals with a running process: %{n}"
+  stops_quit: Quitting stops all of this, in every window.
+  stops_close_window: Closing this window stops all of this. Work in other windows keeps running.
+  stops_close_last: Closing this window stops all of this.
+  hide_explained: Hide only takes necoder off the screen; all of this keeps running. Click the Dock icon to come back.
+  minimize_explained: Minimize only tucks the window away; all of this keeps running.
+  lifetime: It keeps running only while necoder itself is running. Quitting, a crash, or restarting for an update stops it.
+  keep_running_hide: Hide and keep running
+  keep_running_minimize: Minimize and keep running
+  quit: Quit
+  close: Close
+  cancel: Cancel
+  setting_hint: "Turn this off in Settings › Behavior & editor › Confirm before quitting or closing a window"
 launcher:
   placeholder: Open or choose a recent project…
   open_folder: Open Folder…
@@ -461,6 +479,10 @@ settings:
   pref_tabs_view: Thread tabs
   tabs_view_bar: Bar
   tabs_view_list: List
+  pref_confirm_quit: Confirm before quitting or closing a window
+  pref_confirm_quit_sub: "On ⌘Q (every window) or when closing a window (that window only), offers “Hide (or minimize) and keep running” while agents or terminals are busy"
+  confirm_quit_running: Only while busy
+  confirm_quit_never: Never
   appearance_heading: Appearance
   appearance_sub: Themes apply the moment you click and are saved to settings.json.
   theme_label: Theme
@@ -596,6 +618,10 @@ pdf:
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead
 terminal:
   tab_title: Terminal %{n}
+  close_busy_title: "A process is running in Terminal %{n}"
+  close_busy_detail: Closing this tab stops the process running in this terminal. Other terminals and agents keep running.
+  close_busy_confirm: Close
+  close_busy_cancel: Cancel
   add_tip: New terminal
   close_dock_tip: Close bottom dock  ⌘J
   git_tip: Source control  ⌃⇧G

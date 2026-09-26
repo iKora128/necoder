@@ -238,6 +238,11 @@ pub struct Settings {
     /// **off にしても「失うものがある」ときは必ず確認する** — 未コミットの変更は git にも残らないので、
     /// 「二度と聞くな」の対象は *取り返しがつく* 削除に限る（DECISIONS の該当項）。
     pub confirm_worktree_delete: bool,
+    /// ⌘Q・窓を閉じる時の確認（`"running"` = 止まるものがある時だけ聞く・既定 /
+    /// `"never"` = 聞かない）。エージェントも端末もアプリ本体の子で持ち主は窓なので、終了すると全部、
+    /// 窓を閉じるとその窓の分が一緒に止まる。
+    /// 解釈は [`Settings::quit_confirmation`]（知らない値は既定の側に倒す）。
+    pub confirm_quit: String,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
@@ -295,6 +300,7 @@ impl Default for Settings {
             agent_servers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
+            confirm_quit: "running".to_string(),
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
             agent_idle_stop_minutes: 15,
@@ -312,6 +318,27 @@ impl Default for Settings {
 /// `agent_panel::sound`。ここに置くのは「設定が受け取れる値」の正が settings 側だから。
 pub const SOUND_VOICES: [&str; 3] = ["nyaan", "nya", "mew"];
 
+/// ⌘Q・窓を閉じる時に確認するか（`confirm_quit` の解釈・O4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitConfirmation {
+    /// 動いているもの（実行中・承認待ち/質問待ちのエージェント、前面でプロセスが動く端末）が
+    /// ある時だけ確認する。何も動いていなければ今までどおり即終了する。
+    WhenRunning,
+    /// 確認しない。
+    Never,
+}
+
+impl Settings {
+    /// `confirm_quit` の値。**知らない値は確認する側に倒す**（綴り違いで黙ってエージェントを
+    /// 止める方が、1 回余計に聞かれるより高くつく）。
+    pub fn quit_confirmation(&self) -> QuitConfirmation {
+        match self.confirm_quit.as_str() {
+            "never" => QuitConfirmation::Never,
+            _ => QuitConfirmation::WhenRunning,
+        }
+    }
+}
+
 /// 組み込みの既定設定（最下層。ユーザーが見られる正の既定値）。
 pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "theme": "necoder-dark",
@@ -328,6 +355,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "agent_tabs_view": "bar",
   "default_agent": "Claude Code",
   "confirm_worktree_delete": true,
+  "confirm_quit": "running",
   "agent_servers": {},
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
@@ -709,6 +737,33 @@ mod tests {
         ])
         .expect("マージできる");
         assert!(store.settings().submit_on_enter);
+    }
+
+    #[test]
+    fn quit_confirmation_defaults_to_when_running_and_can_be_turned_off() {
+        assert_eq!(
+            SettingsStore::default().settings().quit_confirmation(),
+            QuitConfirmation::WhenRunning
+        );
+        let never = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{ "confirm_quit": "never" }"#,
+        ])
+        .expect("マージできる");
+        assert_eq!(
+            never.settings().quit_confirmation(),
+            QuitConfirmation::Never
+        );
+        // 綴り違いは黙って「聞かない」にしない。
+        let typo = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{ "confirm_quit": "nevr" }"#,
+        ])
+        .expect("マージできる");
+        assert_eq!(
+            typo.settings().quit_confirmation(),
+            QuitConfirmation::WhenRunning
+        );
     }
 
     #[test]

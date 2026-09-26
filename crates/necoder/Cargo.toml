@@ -41,3 +41,7 @@ serde_json.workspace = true
 # Finder/Dock から届く file:// URL の解釈（on_open_urls → パス化。percent-decode 込み）
 url.workspace = true
 image = { workspace = true, optional = true }
+
+# Dock / AppleScript の「終了」を ⌘Q と同じ確認へ回すフック（quit_hook.rs・O4）。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true

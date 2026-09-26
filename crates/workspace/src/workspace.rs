@@ -71,6 +71,7 @@ mod git_view;
 mod herd_view;
 mod notifications;
 mod overlays;
+mod quit_guard;
 mod rail;
 mod rail_view;
 mod remote_connection;
@@ -78,6 +79,8 @@ mod remote_ssh;
 mod shortcut_sheet;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
+pub(crate) use quit_guard::intercept_window_close;
+pub use quit_guard::{quit_now, request_quit, AppStorage};
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
 mod captain;
@@ -1235,6 +1238,8 @@ struct WorkspaceOverlays {
     tab_menu: Option<TabMenuState>,
     /// worktree 削除の確認ダイアログ（2026-07-27）。何を失うかを git に聞いて見せる。
     worktree_delete: Option<worktree_delete::WorktreeDeleteConfirm>,
+    /// ⌘Q・窓を閉じる時の確認（O4）。止まるもの（⌘Q は全窓・窓閉じはこの窓の分）がある時だけ開く。
+    quit_confirm: Option<quit_guard::QuitConfirmState>,
     ssh_input: Option<(String, FocusHandle)>,
     /// SSH の askpass 入力欄（パスワード / passphrase / host key 確認）。`ssh` が TTY を
     /// 持たない GUI 起動でも訊けるようにするための口（`remote_ssh.rs`）。
@@ -2150,6 +2155,7 @@ impl Render for Workspace {
             .children(self.render_rail_menu(cx))
             .children(self.render_fleet_cell_menu(cx))
             .children(self.render_worktree_delete_dialog(cx))
+            .children(self.render_quit_confirm(cx))
             .children(self.render_branch_menu(cx))
             .children(self.render_tab_menu(cx))
             .children(self.render_chat_menu(cx))
