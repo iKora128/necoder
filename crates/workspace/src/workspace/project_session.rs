@@ -194,10 +194,10 @@ impl Workspace {
         let tests_dock =
             cx.new(|_| TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()));
         let explorer = cx.new(|_| Explorer::new(explorer_view));
-        let git_panel = cx.new(GitPanel::new);
         let accent = slot
             .map(|slot| slot.color)
             .unwrap_or_else(|| project_color(0));
+        let git_panel = Self::new_git_panel(&theme, accent, cx);
         let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
         PanelRegistry::bind_session(
             &agent_panel,
@@ -671,11 +671,11 @@ impl Workspace {
             let tests_dock =
                 cx.new(|_| TerminalDock::new(launch_for(projects.get(index)), theme.clone()));
             let explorer = cx.new(|_| Explorer::new(explorer_view));
-            let git_panel = cx.new(GitPanel::new);
             let accent = projects
                 .get(index)
                 .map(|slot| slot.color)
                 .unwrap_or_else(|| project_color(0));
+            let git_panel = Self::new_git_panel(&theme, accent, cx);
             let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
             PanelRegistry::bind_session(
                 &agent_panel,

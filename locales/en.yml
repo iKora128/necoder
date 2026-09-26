@@ -564,6 +564,17 @@ git:
   idle: idle
   branch_menu_tip: Branch / worktree
   switcher_tip: Switch project / branch  ⌘O
+  commit_failed: Couldn't commit
+  stage_failed: Couldn't stage
+  unstage_failed: Couldn't unstage
+  push_failed: Couldn't push
+  pull_failed: Couldn't pull
+  pr_create_failed: Couldn't open the pull request page
+  pr_open_failed: Couldn't open the pull request or repository
+  ai_message_failed: Couldn't generate a commit message
+  branch_create_failed: Couldn't create the branch
+  worktree_no_parent: "Can't decide where to create the worktree (the project folder has no parent folder)"
+  output_title: "%{command} output"
 dock:
   left: Show/hide left panel (explorer)
   bottom: Show/hide bottom panel (terminal)
@@ -605,6 +616,8 @@ theme:
   picker_placeholder: Select theme
 link:
   open_failed: "Could not open %{target}"
+toast:
+  open_details: Details ›
 difftab:
   proposal_title: "%{title} ⇄ proposal"
   title: "%{name} ⇄ %{base}"

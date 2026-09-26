@@ -1272,9 +1272,8 @@ struct ProjectFlash {
 }
 
 struct NotificationCenter {
-    /// (本文, 色, 世代番号, ジャンプ先)。ジャンプ先 = `Some((session_index, thread_index))` の時、
-    /// クリックでそのプロジェクト＋スレッドへ切り替える（権限待ちトースト用・それ以外は None）。
-    toasts: Vec<(SharedString, Hsla, u32, Option<(usize, usize)>)>,
+    /// 右下のトースト（新しいものが末尾・最大 4 枚）。押した時の行き先は `ToastAction`。
+    toasts: Vec<notifications::Toast>,
     toast_gen: u32,
     /// 前回クラッシュのログパス（起動時に pending マーカーから 1 回だけ拾う・M13）。
     /// Some の間 statusbar に ⚠ チップ → クリックでバグ報告 Issue を開いて消える。

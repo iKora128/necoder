@@ -112,6 +112,7 @@ impl Workspace {
                 .iter()
                 .filter_map(|tab| tab.editor().cloned())
                 .chain(self.split_editor.clone())
+                .chain(std::iter::once(self.git_panel.read(cx).message.clone()))
                 .collect();
             for editor in editors {
                 editor.update(cx, |view, cx| view.set_accent(color, cx));

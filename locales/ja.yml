@@ -565,6 +565,17 @@ git:
   idle: 待機中
   branch_menu_tip: ブランチ / worktree
   switcher_tip: プロジェクト / ブランチを切替  ⌘O
+  commit_failed: コミットできませんでした
+  stage_failed: ステージできませんでした
+  unstage_failed: ステージを解除できませんでした
+  push_failed: push できませんでした
+  pull_failed: pull できませんでした
+  pr_create_failed: PR の作成ページを開けませんでした
+  pr_open_failed: PR / リポジトリを開けませんでした
+  ai_message_failed: コミットメッセージを生成できませんでした
+  branch_create_failed: ブランチを作成できませんでした
+  worktree_no_parent: worktree の作成先を決められません（プロジェクトのフォルダに親フォルダがありません）
+  output_title: "%{command} の出力"
 dock:
   left: 左パネル（エクスプローラ）を表示/隠す
   bottom: 下パネル（ターミナル等）を表示/隠す
@@ -606,6 +617,8 @@ theme:
   picker_placeholder: テーマを選択
 link:
   open_failed: "開けませんでした: %{target}"
+toast:
+  open_details: 全文 ›
 difftab:
   proposal_title: "%{title} ⇄ 提案"
   title: "%{name} ⇄ %{base}"

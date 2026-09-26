@@ -1,5 +1,8 @@
 use crate::workspace::*;
 
+/// ソース管理パネルの入力欄 1 行の高さ（EditorView の行高 23 と同じ）。
+const GIT_INPUT_LINE_HEIGHT: f32 = 23.;
+
 impl Workspace {
     pub(crate) fn render_git_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
@@ -20,7 +23,7 @@ impl Workspace {
                 .bg(bg1)
                 .into_any_element();
         }
-        let (focus, message, branch_name, busy, snapshot) = {
+        let (focus, message_editor, branch_editor, busy, snapshot) = {
             let panel = self.git_panel.read(cx);
             (
                 panel.focus.clone(),
@@ -55,7 +58,7 @@ impl Workspace {
         }
         let branch = self.active_slot().and_then(|slot| slot.branch.clone());
         let changes = &snapshot.changes;
-        let naming = branch_name.is_some();
+        let naming = branch_editor.is_some();
 
         // ── ヘッダ（タイトル + ブランチ + ＋ + ×）──
         let header = div()
@@ -179,45 +182,57 @@ impl Workspace {
                     ),
             );
 
-        // ── 入力行（コミットメッセージ / ブランチ名）──
-        let input_text = match &branch_name {
-            Some(name) => name.clone(),
-            None => message.clone(),
-        };
+        // ── 入力行（コミットメッセージ / ブランチ名）。IME の正しい平坦 EditorView ──
+        // コミットメッセージは内容に合わせて 1〜6 行で伸びる（composer と同じ auto-grow）。
         let placeholder = if naming {
             i18n::t!("git.branch_placeholder")
         } else {
             i18n::t!("git.message_placeholder")
         };
-        let input_body = if input_text.is_empty() {
-            div().text_color(fg2).child(SharedString::from(placeholder))
-        } else {
-            div()
-                .text_color(fg0)
-                .child(SharedString::from(format!("{input_text}▍")))
+        let input_editor = branch_editor
+            .clone()
+            .unwrap_or_else(|| message_editor.clone());
+        let (input_empty, input_height) = {
+            let editor = input_editor.read(cx);
+            let one_line = GIT_INPUT_LINE_HEIGHT;
+            let height = if naming {
+                one_line
+            } else {
+                f32::from(editor.content_height()).clamp(one_line, one_line * 6.)
+            };
+            (editor.buffer().len_bytes() == 0, height)
         };
+        // 空の間だけ placeholder を重ねる（押下は下の EditorView へ通る）。
+        let input_field =
+            div()
+                .relative()
+                .size_full()
+                .child(input_editor)
+                .when(input_empty, |field| {
+                    field.child(
+                        div()
+                            .absolute()
+                            .top(px(3.))
+                            .left(px(2.))
+                            .text_color(fg2)
+                            .child(SharedString::from(placeholder)),
+                    )
+                });
         let input_row = div()
             .id("git-input")
             .m(px(8.))
-            .p(px(8.))
-            .h(px(46.))
+            .px(px(8.))
+            .py(px(6.))
+            .h(px(input_height + 12.))
             .bg(bg2)
             .border_1()
             .border_color(if naming { accent } else { border })
             .rounded(px(6.))
             .text_size(px(12.))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    let focus = this.git_panel.read(cx).focus.clone();
-                    window.focus(&focus, cx);
-                }),
-            )
-            .child(input_body);
+            .child(input_field);
 
         // ── アクション行（commit / push / pull）。ブランチ名モードでは出さない ──
-        let commit_ready = !message.trim().is_empty();
+        let commit_ready = !message_editor.read(cx).plain_text().trim().is_empty();
         let actions = div()
             .flex()
             .items_center()
@@ -362,6 +377,15 @@ impl Workspace {
             .border_color(border)
             .track_focus(&focus)
             .on_key_down(cx.listener(Self::on_git_key_down))
+            // 入力欄の Esc / ⌘⏎ は EditorView がアクションとして親へ流してくる。
+            .on_action(cx.listener(|this, _: &editor_view::Cancel, window, cx| {
+                this.cancel_git_input(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &agent_panel::SubmitPrompt, window, cx| {
+                    this.submit_git_input(window, cx)
+                }),
+            )
             .child(header)
             .child(input_row)
             .when(!naming, |element| element.child(actions))

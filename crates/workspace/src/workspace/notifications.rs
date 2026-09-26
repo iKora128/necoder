@@ -1,5 +1,28 @@
 use crate::workspace::*;
 
+/// 右下のトースト 1 枚（UI-SPEC §8）。
+pub(crate) struct Toast {
+    text: SharedString,
+    color: Hsla,
+    generation: u32,
+    action: Option<ToastAction>,
+}
+
+/// トーストを押した時の行き先。
+pub(crate) enum ToastAction {
+    /// 権限待ちのスレッドへ飛ぶ（#2）。
+    JumpToThread {
+        session_index: usize,
+        thread_index: usize,
+    },
+    /// トーストに収まらない全文（git フックの出力など）を読み取り専用タブで開く。
+    OpenDetails { title: SharedString, text: String },
+}
+
+/// トーストが消えるまで。失敗の知らせは理由を読む時間が要るので長めにする。
+const TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_secs(5);
+const FAILURE_TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_secs(12);
+
 impl Workspace {
     pub(crate) fn on_panel_event(
         &mut self,
@@ -430,28 +453,86 @@ impl Workspace {
         link: Option<(usize, usize)>,
         cx: &mut Context<Self>,
     ) {
+        let action = link.map(|(session_index, thread_index)| ToastAction::JumpToThread {
+            session_index,
+            thread_index,
+        });
+        self.push_toast_entry(text, color, action, TOAST_LIFETIME, cx);
+    }
+
+    /// 失敗の知らせ。`text` は要点（見出し + 理由の先頭）で、`details` が要点に収まらなければ
+    /// 押すと全文を `title` のタブで開ける（フックの出力など・読む時間が要るので長めに出す）。
+    pub(crate) fn push_failure_toast(
+        &mut self,
+        text: SharedString,
+        details: Option<(SharedString, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let color = self.accent();
+        let action = details.map(|(title, text)| ToastAction::OpenDetails { title, text });
+        self.push_toast_entry(text, color, action, FAILURE_TOAST_LIFETIME, cx);
+    }
+
+    fn push_toast_entry(
+        &mut self,
+        text: SharedString,
+        color: Hsla,
+        action: Option<ToastAction>,
+        lifetime: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
         self.notifications.toast_gen = self.notifications.toast_gen.wrapping_add(1);
         let generation = self.notifications.toast_gen;
-        self.notifications
-            .toasts
-            .push((text, color, generation, link));
+        self.notifications.toasts.push(Toast {
+            text,
+            color,
+            generation,
+            action,
+        });
         if self.notifications.toasts.len() > 4 {
             self.notifications.toasts.remove(0);
         }
         cx.notify();
         cx.spawn(async move |workspace, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(5))
-                .await;
+            cx.background_executor().timer(lifetime).await;
             let _ = workspace.update(cx, |workspace, cx| {
                 workspace
                     .notifications
                     .toasts
-                    .retain(|(_, _, gen, _)| *gen != generation);
+                    .retain(|toast| toast.generation != generation);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// テスト用: 出ているトースト（本文, 全文つきか）。
+    #[cfg(test)]
+    pub(crate) fn toast_snapshot(&self) -> Vec<(String, bool)> {
+        self.notifications
+            .toasts
+            .iter()
+            .map(|toast| {
+                (
+                    toast.text.to_string(),
+                    matches!(toast.action, Some(ToastAction::OpenDetails { .. })),
+                )
+            })
+            .collect()
+    }
+
+    /// トーストの「全文」を読み取り専用タブで開く（Editor で読む＝Fleet 中なら Editor へ出る）。
+    fn open_toast_details(
+        &mut self,
+        title: SharedString,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chrome.fleet_mode = false;
+        let mut buffer = Buffer::from_str(&text);
+        buffer.set_read_only(true);
+        self.open_transient_tab(PathBuf::from(title.as_ref()), buffer, window, cx);
     }
 
     /// 通知（トースト等）から権限待ちスレッドへ飛ぶ。編隊/通常で herd 行クリックと同じ挙動にする。
@@ -494,30 +575,36 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .children(self.notifications.toasts.iter().map(
-                    |(text, color, generation, link)| {
-                        let mut toast = div()
-                            .id(("toast", *generation as usize))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .px(px(12.))
-                            .py(px(8.))
-                            .bg(theme.bg2)
-                            .border_1()
-                            .border_color(color.alpha(0.5))
-                            .rounded(px(8.))
-                            .shadow(vec![gpui::BoxShadow::new(
-                                px(0.),
-                                px(6.),
-                                gpui::hsla(0., 0., 0., 0.4),
-                            )
-                            .blur_radius(px(16.))])
-                            .text_size(px(12.))
-                            .text_color(theme.fg0)
-                            .child(text.clone());
+                .children(self.notifications.toasts.iter().map(|entry| {
+                    // 長い本文（失敗の理由など）は左へはみ出さず折り返す。
+                    let mut toast = div()
+                        .id(("toast", entry.generation as usize))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .max_w(px(520.))
+                        .px(px(12.))
+                        .py(px(8.))
+                        .bg(theme.bg2)
+                        .border_1()
+                        .border_color(entry.color.alpha(0.5))
+                        .rounded(px(8.))
+                        .shadow(vec![gpui::BoxShadow::new(
+                            px(0.),
+                            px(6.),
+                            gpui::hsla(0., 0., 0., 0.4),
+                        )
+                        .blur_radius(px(16.))])
+                        .text_size(px(12.))
+                        .text_color(theme.fg0)
+                        .child(div().min_w_0().child(entry.text.clone()));
+                    match &entry.action {
                         // ジャンプ先つき（権限待ち）はクリックで当該タブへ飛べるようにする（#2）。
-                        if let Some((session_index, thread_index)) = *link {
+                        Some(ToastAction::JumpToThread {
+                            session_index,
+                            thread_index,
+                        }) => {
+                            let (session_index, thread_index) = (*session_index, *thread_index);
                             toast = toast.cursor_pointer().on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
@@ -526,9 +613,37 @@ impl Workspace {
                                 }),
                             );
                         }
-                        toast
-                    },
-                ))
+                        // 全文つき（git フックの出力など）は押すと読み取り専用タブで開く。
+                        Some(ToastAction::OpenDetails { title, text }) => {
+                            let (title, text) = (title.clone(), text.clone());
+                            toast = toast
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(SharedString::from(i18n::t!("toast.open_details"))),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(
+                                        move |this, _event: &MouseDownEvent, window, cx| {
+                                            cx.stop_propagation();
+                                            this.open_toast_details(
+                                                title.clone(),
+                                                text.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ),
+                                );
+                        }
+                        None => {}
+                    }
+                    toast
+                }))
                 .into_any_element(),
         )
     }
