@@ -249,8 +249,20 @@ fn load_user_keymap(path: &Path, cx: &mut App) {
     }
 }
 
+/// 既定 keymap を bind する（起動時と、keymap.json を読み直す時）。
+fn bind_default_keymap(cx: &mut App) {
+    match keymap_core::load_bindings(
+        &keymap_core::default_keymap_json(keymap_core::KeymapPlatform::current()),
+        cx,
+    ) {
+        Ok(bindings) => cx.bind_keys(bindings),
+        Err(error) => eprintln!("keymap のロードに失敗: {error:#}"),
+    }
+}
+
 /// ユーザー keymap.json の live reload（保存したら即キーが差し替わる・M10-13）。
-/// gpui の keymap は後から bind したものが勝つので、再読込 = 再 bind でよい。
+/// **読み直す時は束を全部捨ててから既定 → ユーザーの順に張り直す**（O27）。上から bind し直すだけだと、
+/// keymap.json から消した束（と、キー割り当ての画面で「戻す」を押した束）が再起動まで残っていた。
 fn watch_user_keymap(path: PathBuf, cx: &mut App) {
     let Some(parent) = path.parent().map(Path::to_path_buf) else {
         return;
@@ -293,6 +305,8 @@ fn watch_user_keymap(path: PathBuf, cx: &mut App) {
             while receiver.try_recv().is_ok() {}
             let path = path.clone();
             cx.update(|cx| {
+                cx.clear_key_bindings();
+                bind_default_keymap(cx);
                 load_user_keymap(&path, cx);
                 // メニューのキー表記は set_menus 時のスナップショット → 再設定で追従。
                 cx.set_menus(menus::app_menus());
@@ -791,13 +805,7 @@ fn main() {
         settings::follow_locale(cx);
         let theme = resolve_theme(cx);
 
-        match keymap_core::load_bindings(
-            &keymap_core::default_keymap_json(keymap_core::KeymapPlatform::current()),
-            cx,
-        ) {
-            Ok(bindings) => cx.bind_keys(bindings),
-            Err(error) => eprintln!("keymap のロードに失敗: {error:#}"),
-        }
+        bind_default_keymap(cx);
         // ユーザー keymap（~/Library/Application Support/necoder/keymap.json・M10-13）。
         // 既定の**後**に bind ＝ 同じキーはユーザー側が勝つ。ファイル監視で live reload。
         let user_keymap_path = settings_core::user_settings_path()

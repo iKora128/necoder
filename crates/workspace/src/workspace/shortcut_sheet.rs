@@ -5,8 +5,11 @@
 //! 整形、表示名は `COMMAND_REGISTRY`（workspace 系）＋ 下の `ACTION_LABELS`（editor/agent/その他）で
 //! 引く。キーを足すと keymap を触るので**一覧が自動追従**する（二重管理しない）。
 //!
-//! 参照専用（実行はしない）。コマンドパレットが「コマンド起点・実行できる」のに対し、こちらは
-//! 「キー起点・網羅・参照」。UI レイアウトは UI-SPEC §7（カテゴリ fg2 + 名前 + キー右寄せ）。
+//! 実行はしない。コマンドパレットが「コマンド起点・実行できる」のに対し、こちらは「キー起点・網羅」。
+//! UI レイアウトは UI-SPEC §7（カテゴリ fg2 + 名前 + キー右寄せ）。
+//!
+//! 出すのは既定とユーザーの keymap.json を重ねた、いま効いている割り当て。行を押すと割り当てを
+//! 変えられる（キー割り当ての画面・O27・`keymap_editing`）。
 
 use crate::workspace::*;
 
@@ -164,10 +167,16 @@ impl Workspace {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         self.overlays.shortcut_sheet = Some(focus);
+        // 開くたびに keymap.json を読み直す（手で直した分も映す・O27）。
+        self.overlays.keymap_editing = Some(super::keymap_editing::KeymapEditing::load(
+            settings::user_keymap_path(cx),
+        ));
         cx.notify();
     }
 
-    fn close_shortcut_sheet(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_shortcut_sheet(&mut self, cx: &mut Context<Self>) {
+        // 編集の状態ごと落とす（キーを待っていれば、その受け口も外れる）。
+        self.overlays.keymap_editing = None;
         if self.overlays.shortcut_sheet.take().is_some() {
             cx.notify();
         }
@@ -202,8 +211,12 @@ impl Workspace {
         let theme = self.theme.clone();
         let accent = self.accent();
         let platform = keymap_core::KeymapPlatform::current();
-        let sections =
-            keymap_core::parse(&keymap_core::default_keymap_json(platform)).unwrap_or_default();
+        // 既定 + ユーザーの keymap.json（O27・いま効いている割り当て）。
+        let rows = self.keymap_rows();
+        let editing = self.overlays.keymap_editing.as_ref();
+        let capturing = editing.and_then(|editing| editing.capturing.clone());
+        let can_edit =
+            editing.is_some_and(|editing| editing.unreadable.is_none() && editing.path.is_some());
 
         let mut body = div()
             .id("shortcut-sheet-body")
@@ -215,24 +228,20 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(8.));
-        for section in &sections {
-            if section.bindings.is_empty() {
-                continue;
+        let mut contexts: Vec<&str> = Vec::new();
+        for row in &rows {
+            if !contexts.contains(&row.context.as_str()) {
+                contexts.push(row.context.as_str());
             }
+        }
+        for context in contexts {
             // 読みやすさのため行は表示名でソート（keymap は keystroke 順で並ぶため）。
-            // `zed::NoAction`（端末の中で ⌃ キーをシェルへ通すための打ち消し）はショートカットではない。
-            let mut rows: Vec<(SharedString, String)> = section
-                .bindings
+            let mut labeled: Vec<(SharedString, &keymap_core::user_keymap::ActionBinding)> = rows
                 .iter()
-                .filter(|(_, action)| action.as_str() != keymap_core::NO_ACTION)
-                .map(|(key, action)| {
-                    (
-                        label_for_action(action),
-                        keymap_core::pretty_keystroke_for(platform, key),
-                    )
-                })
+                .filter(|row| row.context == context)
+                .map(|row| (label_for_action(&row.action), row))
                 .collect();
-            rows.sort_by(|left, right| left.0.cmp(&right.0));
+            labeled.sort_by(|left, right| left.0.cmp(&right.0));
 
             let mut group = div().flex().flex_col().gap(px(1.)).child(
                 div()
@@ -240,38 +249,180 @@ impl Workspace {
                     .pb(px(3.))
                     .text_size(px(10.5))
                     .text_color(theme.fg2)
-                    .child(section_label(&section.context)),
+                    .child(section_label(context)),
             );
-            for (label, keys) in rows {
-                group = group.child(
+            for (label, row) in labeled {
+                let waiting = capturing.as_ref().is_some_and(|(context, action)| {
+                    *context == row.context && *action == row.action
+                });
+                let keys = if waiting {
                     div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(accent)
+                        .child(SharedString::from(i18n::t!("key.press_keys")))
+                } else {
+                    let text = if row.keys.is_empty() {
+                        "—".to_string()
+                    } else {
+                        row.keys
+                            .iter()
+                            .map(|key| keymap_core::pretty_keystroke_for(platform, key))
+                            .collect::<Vec<_>>()
+                            .join("  ·  ")
+                    };
+                    div()
+                        .flex_none()
+                        .font_family(ui::code_font(cx))
+                        .text_size(px(11.))
+                        .text_color(if row.customized { theme.fg0 } else { theme.fg2 })
+                        .child(SharedString::from(text))
+                };
+                let id = SharedString::from(format!("keymap-row-{}-{}", row.context, row.action));
+                let (context, action) = (row.context.clone(), row.action.clone());
+                let mut line = div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(4.))
+                    .py(px(2.))
+                    .rounded(px(4.))
+                    .when(waiting, |line| line.bg(theme.bg2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(12.))
+                            .text_color(theme.fg1)
+                            .child(label),
+                    );
+                if row.customized && can_edit {
+                    let (reset_context, reset_action) = (context.clone(), action.clone());
+                    line = line.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "keymap-reset-{}-{}",
+                                row.context, row.action
+                            )))
+                            .flex_none()
+                            .px(px(4.))
+                            .text_size(px(11.))
+                            .text_color(theme.fg2)
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(theme.fg0))
+                            .tooltip(ui::Tooltip::text(i18n::t!("key.reset"), theme.clone()))
+                            .child("↺")
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.reset_key_binding(&reset_context, &reset_action, cx);
+                                }),
+                            ),
+                    );
+                }
+                line = line.child(keys);
+                if can_edit {
+                    line = line
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg2))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |this, _, _window, cx| {
+                                this.start_key_capture(context.clone(), action.clone(), cx)
+                            }),
+                        );
+                }
+                group = group.child(line);
+            }
+            body = body.child(group);
+        }
+
+        // 置き換えるかの確認・読めない keymap.json の知らせ（見出しの下の帯）。
+        let banner = editing.and_then(|editing| {
+            if let Some(pending) = &editing.pending {
+                let taken: Vec<String> = pending
+                    .taken
+                    .iter()
+                    .map(|(context, action)| {
+                        format!("{}（{}）", label_for_action(action), section_label(context))
+                    })
+                    .collect();
+                let text = i18n::t!(
+                    "key.conflict",
+                    "keys" => keymap_core::pretty_keystroke_for(platform, &pending.keystroke),
+                    "actions" => taken.join("・")
+                );
+                let button = |id: &'static str, label: String, primary: bool| {
+                    div()
+                        .id(id)
+                        .flex_none()
+                        .px(px(10.))
+                        .py(px(3.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(if primary { accent } else { theme.border })
+                        .text_size(px(11.5))
+                        .text_color(if primary { accent } else { theme.fg1 })
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3))
+                        .child(SharedString::from(label))
+                };
+                return Some(
+                    div()
+                        .mx(px(16.))
+                        .mb(px(8.))
+                        .p(px(10.))
+                        .rounded(px(8.))
+                        .bg(theme.bg2)
                         .flex()
                         .items_center()
-                        .justify_between()
-                        .gap(px(12.))
-                        .py(px(2.))
+                        .gap(px(8.))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
                                 .text_size(px(12.))
-                                .text_color(theme.fg1)
-                                .child(label),
+                                .text_color(theme.fg0)
+                                .child(SharedString::from(text)),
                         )
                         .child(
-                            div()
-                                .flex_none()
-                                .font_family(ui::code_font(cx))
-                                .text_size(px(11.))
-                                .text_color(theme.fg2)
-                                .child(SharedString::from(keys)),
-                        ),
+                            button("keymap-keep", i18n::t!("key.keep"), false).on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _, _window, cx| {
+                                    this.answer_pending_rebind(false, cx)
+                                }),
+                            ),
+                        )
+                        .child(
+                            button("keymap-replace", i18n::t!("key.replace"), true).on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _, _window, cx| {
+                                    this.answer_pending_rebind(true, cx)
+                                }),
+                            ),
+                        )
+                        .into_any_element(),
                 );
             }
-            body = body.child(group);
-        }
+            editing.unreadable.as_ref().map(|error| {
+                div()
+                    .mx(px(16.))
+                    .mb(px(8.))
+                    .p(px(10.))
+                    .rounded(px(8.))
+                    .bg(theme.bg2)
+                    .text_size(px(12.))
+                    .text_color(theme.warn)
+                    .child(SharedString::from(
+                        i18n::t!("key.unreadable", "error" => error),
+                    ))
+                    .into_any_element()
+            })
+        });
 
         let panel = div()
             .w(px(600.))
@@ -301,11 +452,54 @@ impl Workspace {
                     .px(px(16.))
                     .pt(px(14.))
                     .pb(px(10.))
-                    .text_size(px(14.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.fg0)
-                    .child(SharedString::from(i18n::t!("key.sheet_title"))),
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(12.))
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.fg0)
+                                    .child(SharedString::from(i18n::t!("key.sheet_title"))),
+                            )
+                            .when(
+                                editing.is_some_and(|editing| editing.path.is_some()),
+                                |row| {
+                                    row.child(
+                                        div()
+                                            .id("keymap-open-json")
+                                            .flex_none()
+                                            .text_size(px(11.))
+                                            .text_color(theme.fg2)
+                                            .cursor_pointer()
+                                            .hover(|style| style.text_color(theme.fg0))
+                                            .child(SharedString::from(i18n::t!("key.open_keymap")))
+                                            .on_mouse_down(
+                                                gpui::MouseButton::Left,
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.open_user_keymap(window, cx)
+                                                }),
+                                            ),
+                                    )
+                                },
+                            ),
+                    )
+                    .when(can_edit, |header| {
+                        header.child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(i18n::t!("key.sheet_hint"))),
+                        )
+                    }),
             )
+            .children(banner)
             .child(body);
 
         Some(

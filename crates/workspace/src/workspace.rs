@@ -80,6 +80,7 @@ mod git_view;
 mod herd_view;
 mod inbox;
 mod keep_awake;
+mod keymap_editing;
 mod notifications;
 mod overlays;
 mod ports;
@@ -1463,6 +1464,8 @@ struct WorkspaceOverlays {
     pending_project_switch: Option<usize>,
     /// キーボードショートカット一覧オーバーレイ。`Some(focus)`＝開いている（Escape 受けに focus を持つ）。
     shortcut_sheet: Option<FocusHandle>,
+    /// キー割り当ての画面の編集の状態（ショートカット一覧を開いている間・O27）。
+    keymap_editing: Option<keymap_editing::KeymapEditing>,
     /// About モーダル（メニュー「necoder について」/「アップデートを確認…」）。同じく focus = Escape 受け。
     about: Option<FocusHandle>,
     /// 使用量のポップオーバー（statusbar のチップから・O11）。

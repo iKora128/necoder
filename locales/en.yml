@@ -1250,6 +1250,15 @@ search:
 key:
   find_in_transcript: Search this conversation
   sheet_title: Keyboard shortcuts
+  sheet_hint: Click a row, then press the new keys (Esc cancels). ↺ restores the default
+  open_keymap: Open keymap.json
+  press_keys: Press keys… (Esc cancels)
+  reset: Restore default
+  conflict: "%{keys} is also used by %{actions}. Replace it?"
+  replace: Replace
+  keep: Cancel
+  unreadable: "keymap.json can't be read, so bindings can't be changed here (%{error}). Open keymap.json to fix it"
+  write_failed: "Can't write keymap.json: %{path}: %{error}"
   section_editor: Editor
   section_agent: AI chat
   section_control: Control

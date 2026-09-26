@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+pub mod user_keymap;
+
 /// keymap の 1 セクション（1 つのコンテキスト述語に対する束）。
 ///
 /// `Serialize` は非 mac の既定 keymap を mac 版から機械変換して書き戻すために要る（§D4）。
