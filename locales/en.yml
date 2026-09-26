@@ -233,6 +233,7 @@ cmd:
   resolve_conflict_both: "Merge: Resolve the conflict keeping both"
   next_conflict: "Merge: Next conflict"
   abort_merge_or_rebase: "Git: Abort the merge or rebase"
+  show_conflict_side_by_side: "Merge: Show the conflict side by side"
   toggle_git_panel: "View: Source control"
   toggle_todo_board: "View: Todo board"
   toggle_fleet: "View: Fleet mode"
@@ -1001,6 +1002,13 @@ conflict:
   abort_rebase_confirm: Abort rebase
   abort_cancel: Cancel
   aborted: Aborted
+  side_by_side: Side by side
+  view_title: "Conflict %{index} of %{count} (line %{line})"
+  view_base: Base (common ancestor)
+  view_no_base: "The base version isn't in the markers (git config merge.conflictStyle diff3 adds it)"
+  view_empty: (empty)
+  view_more: "… %{count} more lines"
+  view_close: Close
 terminal:
   quick_tip: "Quick commands (quick_commands in settings.json). Pick one to run it in a new terminal"
   tab_title: Terminal %{n}

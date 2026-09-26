@@ -8,6 +8,9 @@
 //!
 //! マージ / リベースの中止（`git merge --abort` / `git rebase --abort`）はパレットから。どちらが進行中かを
 //! 確かめてから、OS のダイアログで確認して流す（ソース管理パネルは O18 で作り直し中なので触らない）。
+//!
+//! 「並べて見る」（帯のボタン・パレット）は、キャレットの衝突の今の側 / 元（diff3 の印にあれば）/ 入ってくる
+//! 側を横に並べた 1 枚を出す。読むだけで、ボタンは帯と同じ解決（1 回の編集）をして次の衝突を見せる。
 
 use crate::workspace::*;
 use gpui::{PromptButton, PromptLevel};
@@ -22,6 +25,8 @@ pub(crate) struct ConflictBlock {
     pub(crate) whole: Range<usize>,
     /// 今の側（`<<<<<<<` の次の行から、`|||||||` か `=======` の前まで）。
     pub(crate) ours: Range<usize>,
+    /// 元（共通の祖先・diff3 の `|||||||` の次の行から `=======` の前まで）。2 つだけの印なら `None`。
+    pub(crate) base: Option<Range<usize>>,
     /// 入ってくる側（`=======` の次の行から `>>>>>>>` の前まで）。
     pub(crate) theirs: Range<usize>,
     /// 印の後ろの名前（`HEAD`・ブランチ名など。無ければ空）。
@@ -64,12 +69,14 @@ pub(crate) fn parse_conflicts(text: &str) -> Vec<ConflictBlock> {
             line: usize,
             label: String,
             ours: Range<usize>,
+            base: usize,
         },
         Theirs {
             start: usize,
             line: usize,
             label: String,
             ours: Range<usize>,
+            base: Option<Range<usize>>,
             body: usize,
         },
     }
@@ -102,6 +109,7 @@ pub(crate) fn parse_conflicts(text: &str) -> Vec<ConflictBlock> {
                         line: first,
                         label,
                         ours: body..line_start,
+                        base: line_end,
                     }
                 } else if marker(line, '=').is_some() {
                     State::Theirs {
@@ -109,6 +117,7 @@ pub(crate) fn parse_conflicts(text: &str) -> Vec<ConflictBlock> {
                         line: first,
                         label,
                         ours: body..line_start,
+                        base: None,
                         body: line_end,
                     }
                 } else if let Some(label) = marker(line, '<') {
@@ -133,6 +142,7 @@ pub(crate) fn parse_conflicts(text: &str) -> Vec<ConflictBlock> {
                 line: first,
                 label,
                 ours,
+                base,
             } => {
                 if marker(line, '=').is_some() {
                     State::Theirs {
@@ -140,6 +150,7 @@ pub(crate) fn parse_conflicts(text: &str) -> Vec<ConflictBlock> {
                         line: first,
                         label,
                         ours,
+                        base: Some(base..line_start),
                         body: line_end,
                     }
                 } else {
@@ -148,6 +159,7 @@ pub(crate) fn parse_conflicts(text: &str) -> Vec<ConflictBlock> {
                         line: first,
                         label,
                         ours,
+                        base,
                     }
                 }
             }
@@ -156,12 +168,14 @@ pub(crate) fn parse_conflicts(text: &str) -> Vec<ConflictBlock> {
                 line: first,
                 label,
                 ours,
+                base,
                 body,
             } => {
                 if let Some(theirs_label) = marker(line, '>') {
                     blocks.push(ConflictBlock {
                         whole: start..line_end,
                         ours,
+                        base,
                         theirs: body..line_start,
                         ours_label: label,
                         theirs_label: theirs_label.to_string(),
@@ -174,6 +188,7 @@ pub(crate) fn parse_conflicts(text: &str) -> Vec<ConflictBlock> {
                         line: first,
                         label,
                         ours,
+                        base,
                         body,
                     }
                 }
@@ -211,6 +226,39 @@ pub(crate) struct ConflictCache {
     pub(crate) version: u64,
     pub(crate) blocks: Rc<[ConflictBlock]>,
 }
+
+/// 「並べて見る」の 1 枚（開いている間だけ）。
+pub(crate) struct ConflictView {
+    focus: FocusHandle,
+    /// 見せている衝突の写し。描画ごとに全文を読まないよう、開いた時・操作の後・バッファの版が
+    /// 変わった時に取り直す。衝突が無くなれば `None`（その時は閉じる）。
+    shown: Option<ShownConflict>,
+}
+
+/// 並べて見せる 1 つの衝突（写し）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShownConflict {
+    /// 何番目か（1 始まり）と全部の数。
+    pub(crate) index: usize,
+    pub(crate) count: usize,
+    /// `<<<<<<<` の行（1 始まり）。
+    pub(crate) line: usize,
+    pub(crate) ours: String,
+    pub(crate) base: Option<String>,
+    pub(crate) theirs: String,
+    pub(crate) ours_label: String,
+    pub(crate) theirs_label: String,
+}
+
+/// 並べた 1 枚のボタン。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConflictViewAct {
+    Resolve(ConflictSide),
+    Next,
+}
+
+/// 1 つの列に出す行の上限（これを超えた分は数だけ出す）。
+const VIEW_MAX_LINES: usize = 400;
 
 /// 進行中の git の操作（中止の対象）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +303,7 @@ impl Workspace {
             version,
             blocks: blocks.into(),
         });
+        self.refresh_conflict_view(cx);
     }
 
     /// アクティブなエディタとその衝突（無い・数え直し前なら `None`）。
@@ -317,6 +366,329 @@ impl Workspace {
         if let Some(start) = target {
             editor.update(cx, |view, cx| view.select_byte_range(start..start, cx));
         }
+    }
+
+    /// 帯の「並べて見る」・パレット「マージ: 衝突を並べて見る」。
+    pub(crate) fn show_conflict_side_by_side(
+        &mut self,
+        _: &ShowConflictSideBySide,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shown) = self.conflict_snapshot(cx) else {
+            let color = self.accent();
+            self.push_toast(i18n::t!("conflict.none").into(), color, cx);
+            return;
+        };
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.chrome.conflict_view = Some(ConflictView {
+            focus,
+            shown: Some(shown),
+        });
+        cx.notify();
+    }
+
+    /// 閉じる（Esc・外側・閉じる・衝突が無くなった時）。フォーカスはエディタへ返す。
+    pub(crate) fn close_conflict_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chrome.conflict_view.take().is_none() {
+            return;
+        }
+        if let Some(editor) = self.active_editor() {
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    /// 並べた 1 枚のボタン: 帯と同じ解決（または次へ）をして、次の衝突を見せる。無くなれば閉じる。
+    pub(crate) fn conflict_view_act(
+        &mut self,
+        act: ConflictViewAct,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match act {
+            ConflictViewAct::Resolve(side) => self.resolve_conflict(side, cx),
+            ConflictViewAct::Next => self.next_conflict(cx),
+        }
+        self.refresh_conflict_view(cx);
+        if self
+            .chrome
+            .conflict_view
+            .as_ref()
+            .is_some_and(|view| view.shown.is_none())
+        {
+            self.close_conflict_view(window, cx);
+        }
+    }
+
+    /// 開いていれば写しを取り直す（キャレットの衝突が替わった・バッファが変わった）。
+    fn refresh_conflict_view(&mut self, cx: &mut Context<Self>) {
+        if self.chrome.conflict_view.is_none() {
+            return;
+        }
+        let shown = self.conflict_snapshot(cx);
+        if let Some(view) = self.chrome.conflict_view.as_mut() {
+            view.shown = shown;
+        }
+        cx.notify();
+    }
+
+    /// キャレットの衝突（無ければ後ろ・先頭）の写し（全文は 1 回だけ読む）。
+    fn conflict_snapshot(&self, cx: &App) -> Option<ShownConflict> {
+        let (editor, blocks) = self.active_conflicts()?;
+        let view = editor.read(cx);
+        let caret = view
+            .buffer()
+            .selections()
+            .first()
+            .map_or(0, |selection| selection.head);
+        let index = conflict_at(&blocks, caret)?;
+        let block = &blocks[index];
+        let text = view.buffer().text();
+        let section = |range: &Range<usize>| text.get(range.clone()).map(str::to_string);
+        Some(ShownConflict {
+            index: index + 1,
+            count: blocks.len(),
+            line: block.line + 1,
+            ours: section(&block.ours)?,
+            base: block.base.as_ref().and_then(section),
+            theirs: section(&block.theirs)?,
+            ours_label: block.ours_label.clone(),
+            theirs_label: block.theirs_label.clone(),
+        })
+    }
+
+    fn on_conflict_view_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key.as_str() == "escape" {
+            self.close_conflict_view(window, cx);
+        }
+    }
+
+    /// 並べた 1 枚（画面の中央・幅 86%・高さ 72%）: 今の側 / 元 / 入ってくる側 の列と、帯と同じボタン。
+    pub(crate) fn render_conflict_view(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let view = self.chrome.conflict_view.as_ref()?;
+        let shown = view.shown.clone()?;
+        let theme = self.theme.clone();
+        let named = |side: String, name: &str| {
+            if name.is_empty() {
+                side
+            } else {
+                format!("{side}（{name}）")
+            }
+        };
+        let column = |id: &'static str, title: String, body: &str| {
+            let lines: Vec<&str> = body.lines().collect();
+            let hidden = lines.len().saturating_sub(VIEW_MAX_LINES);
+            let content = if lines.is_empty() {
+                div()
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("conflict.view_empty")))
+            } else {
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(lines.into_iter().take(VIEW_MAX_LINES).map(|line| {
+                        div()
+                            .min_h(px(17.))
+                            .child(SharedString::from(line.replace('\t', "    ")))
+                    }))
+                    .when(hidden > 0, |list| {
+                        list.child(div().text_color(theme.fg2).child(SharedString::from(
+                            i18n::t!("conflict.view_more", "count" => hidden),
+                        )))
+                    })
+            };
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(6.))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(10.))
+                        .py(px(5.))
+                        .bg(theme.bg1)
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .text_size(px(11.))
+                        .text_color(theme.fg1)
+                        .child(SharedString::from(title)),
+                )
+                .child(
+                    div()
+                        .id(id)
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px(px(10.))
+                        .py(px(6.))
+                        .font_family(ui::code_font(cx))
+                        .text_size(px(12.))
+                        .text_color(theme.fg0)
+                        .child(content),
+                )
+        };
+        let button = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(px(10.))
+                .py(px(4.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.warn.alpha(0.5))
+                .text_size(px(11.5))
+                .text_color(theme.fg0)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.warn.alpha(0.18)))
+                .child(SharedString::from(label))
+        };
+        let act = |act: ConflictViewAct| {
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                this.conflict_view_act(act, window, cx)
+            })
+        };
+        let ours_title = named(i18n::t!("conflict.ours"), &shown.ours_label);
+        let theirs_title = named(i18n::t!("conflict.theirs"), &shown.theirs_label);
+        let mut columns = div().flex_1().min_h_0().flex().gap(px(8.)).child(column(
+            "conflict-view-ours",
+            ours_title.clone(),
+            &shown.ours,
+        ));
+        if let Some(base) = &shown.base {
+            columns = columns.child(column(
+                "conflict-view-base",
+                i18n::t!("conflict.view_base"),
+                base,
+            ));
+        }
+        columns = columns.child(column(
+            "conflict-view-theirs",
+            theirs_title.clone(),
+            &shown.theirs,
+        ));
+        let card = div()
+            .track_focus(&view.focus)
+            .on_key_down(cx.listener(Self::on_conflict_view_key_down))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .w(gpui::relative(0.86))
+            .h(gpui::relative(0.72))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .p(px(14.))
+            .rounded(px(10.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(12.),
+                gpui::hsla(0., 0., 0., 0.5),
+            )
+            .blur_radius(px(28.))])
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(SharedString::from(i18n::t!(
+                        "conflict.view_title",
+                        "index" => shown.index,
+                        "count" => shown.count,
+                        "line" => shown.line
+                    ))),
+            )
+            .child(columns)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(10.5))
+                            .text_color(theme.fg2)
+                            .when(shown.base.is_none(), |hint| {
+                                hint.child(SharedString::from(i18n::t!("conflict.view_no_base")))
+                            }),
+                    )
+                    .child(button("conflict-view-use-ours", ours_title).on_mouse_down(
+                        MouseButton::Left,
+                        act(ConflictViewAct::Resolve(ConflictSide::Ours)),
+                    ))
+                    .child(
+                        button("conflict-view-use-theirs", theirs_title).on_mouse_down(
+                            MouseButton::Left,
+                            act(ConflictViewAct::Resolve(ConflictSide::Theirs)),
+                        ),
+                    )
+                    .child(
+                        button("conflict-view-use-both", i18n::t!("conflict.both")).on_mouse_down(
+                            MouseButton::Left,
+                            act(ConflictViewAct::Resolve(ConflictSide::Both)),
+                        ),
+                    )
+                    .child(
+                        button("conflict-view-next", i18n::t!("conflict.next"))
+                            .on_mouse_down(MouseButton::Left, act(ConflictViewAct::Next)),
+                    )
+                    .child(
+                        div()
+                            .id("conflict-view-close")
+                            .flex_none()
+                            .px(px(10.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(px(11.5))
+                            .text_color(theme.fg1)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                            .child(SharedString::from(i18n::t!("conflict.view_close")))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.close_conflict_view(window, cx)
+                                }),
+                            ),
+                    ),
+            );
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(0., 0., 0., 0.25))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_conflict_view(window, cx)),
+                )
+                .child(card)
+                .into_any_element(),
+        )
     }
 
     /// パレット「Git: マージ / リベースを中止」: 進行中の方を確かめ、確認してから中止する。
@@ -489,6 +861,15 @@ impl Workspace {
                         cx.listener(|this, _, _window, cx| this.next_conflict(cx)),
                     ),
                 )
+                .child(
+                    button("conflict-side-by-side", i18n::t!("conflict.side_by_side"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.show_conflict_side_by_side(&ShowConflictSideBySide, window, cx)
+                            }),
+                        ),
+                )
                 .into_any_element(),
         )
     }
@@ -551,6 +932,94 @@ mod tests {
     use super::*;
 
     const TWO_WAY: &str = "fn a() {}\n<<<<<<< HEAD\nlet x = 1;\n=======\nlet x = 2;\nlet y = 3;\n>>>>>>> feature/x\nfn b() {}\n";
+
+    const THREE_WAY: &str = "<<<<<<< HEAD\nlet x = 1;\n||||||| base\nlet x = 0;\n=======\nlet x = 2;\n>>>>>>> feature/x\n";
+
+    /// diff3 の印（`|||||||`）があれば元（共通の祖先）も拾う。2 つだけの印なら無い。
+    #[test]
+    fn the_base_comes_from_diff3_markers() {
+        let block = &parse_conflicts(THREE_WAY)[0];
+        assert_eq!(&THREE_WAY[block.ours.clone()], "let x = 1;\n");
+        assert_eq!(
+            block.base.clone().map(|base| &THREE_WAY[base]),
+            Some("let x = 0;\n")
+        );
+        assert_eq!(&THREE_WAY[block.theirs.clone()], "let x = 2;\n");
+        assert_eq!(parse_conflicts(TWO_WAY)[0].base, None);
+    }
+
+    /// 並べて見る（O19）: キャレットの衝突の今の側 / 元 / 入ってくる側を出し、ボタンは帯と同じ解決をして
+    /// 次の衝突を見せる。無くなれば閉じる。衝突が無ければ開かずに知らせる。
+    #[gpui::test]
+    fn conflicts_can_be_compared_side_by_side(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_conflicts_view_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        let file = root.join("merge.rs");
+        std::fs::write(&file, format!("{THREE_WAY}{TWO_WAY}")).unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_file_sync(file.clone(), window, cx);
+            let editor = workspace.active_editor().expect("エディタ");
+            workspace.refresh_conflicts(&editor, cx);
+            workspace.show_conflict_side_by_side(&ShowConflictSideBySide, window, cx);
+            let shown = workspace
+                .chrome
+                .conflict_view
+                .as_ref()
+                .and_then(|view| view.shown.clone())
+                .expect("開く");
+            assert_eq!((shown.index, shown.count, shown.line), (1, 2, 1));
+            assert_eq!(shown.ours, "let x = 1;\n");
+            assert_eq!(shown.base.as_deref(), Some("let x = 0;\n"));
+            assert_eq!(shown.theirs, "let x = 2;\n");
+            assert_eq!(shown.theirs_label, "feature/x");
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.conflict_view_act(ConflictViewAct::Resolve(ConflictSide::Theirs), window, cx);
+            let shown = workspace
+                .chrome
+                .conflict_view
+                .as_ref()
+                .and_then(|view| view.shown.clone())
+                .expect("次の衝突を見せる");
+            assert_eq!((shown.index, shown.count), (1, 1));
+            assert_eq!(shown.base, None, "2 つだけの印");
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.conflict_view_act(ConflictViewAct::Resolve(ConflictSide::Ours), window, cx);
+            assert!(workspace.chrome.conflict_view.is_none(), "無くなれば閉じる");
+            let editor = workspace.active_editor().expect("エディタ");
+            assert_eq!(
+                editor.read(cx).plain_text(),
+                "let x = 2;\nfn a() {}\nlet x = 1;\nfn b() {}\n"
+            );
+            workspace.show_conflict_side_by_side(&ShowConflictSideBySide, window, cx);
+            assert!(workspace.chrome.conflict_view.is_none());
+            assert!(workspace
+                .notifications
+                .toasts
+                .iter()
+                .any(|toast| toast.text.as_ref() == i18n::t!("conflict.none")));
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn conflicts_are_found_with_both_sides_and_labels() {

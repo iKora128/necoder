@@ -158,6 +158,8 @@ actions!(
         ResolveConflictBoth,
         NextConflict,
         AbortMergeOrRebase,
+        // キャレットの衝突の今の側 / 元 / 入ってくる側を横に並べて見る（O19 / E05）。
+        ShowConflictSideBySide,
         GoToDefinition,
         TriggerCompletion,
         // hover をキーで出す（マウス dwell と同じポップアップ。⌘K ⌘I = VSCode 互換）。
@@ -1414,6 +1416,8 @@ struct ChromeState {
     floating_terminal: Option<terminal_float::FloatingTerminal>,
     /// アクティブなエディタの衝突（O19・E05・版ごとに数え直す）。
     conflicts: Option<conflicts::ConflictCache>,
+    /// 衝突を並べて見る 1 枚（開いている間だけ・O19）。
+    conflict_view: Option<conflicts::ConflictView>,
     /// 窓を持たない経路（パネルのイベント）で開いた入力欄へ渡すフォーカス（`process_pending_shell_effects`）。
     focus_next_frame: Option<FocusHandle>,
     /// 設定の「選ぶ…」で頼まれた書体のピッカー（設定のキー・窓が要るので後処理で開く）。
@@ -2374,6 +2378,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &NextConflict, _window, cx| this.next_conflict(cx)))
             .on_action(cx.listener(Self::abort_merge_or_rebase))
+            .on_action(cx.listener(Self::show_conflict_side_by_side))
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::trigger_completion))
             .on_action(cx.listener(Self::show_hover_at_caret))
@@ -2605,6 +2610,7 @@ impl Render for Workspace {
             .children(self.render_terminal_rename(cx))
             .children(self.render_statusbar_menu(cx))
             .children(self.render_task_details(cx))
+            .children(self.render_conflict_view(cx))
             .children(self.render_ssh_register(cx))
             .children(self.render_inline_edit(cx))
             .children(self.render_ssh_input(cx))
