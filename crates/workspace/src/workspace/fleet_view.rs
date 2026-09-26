@@ -534,6 +534,7 @@ impl Workspace {
         task: &FanoutTask,
         cx: &mut Context<Self>,
     ) -> Option<SpaceId> {
+        let auto_branch = super::task_creation::auto_branch_plan(task, &branch);
         // worktree を space（レール slot）として開く（switch も走る）。
         self.open_folder_in_rail(host.clone(), target.clone(), Some(branch), cx);
         let index = self
@@ -543,6 +544,11 @@ impl Workspace {
             .position(|slot| slot.worktree.root() == target.as_path())?;
         // その TaskSpace の AgentPanel に新スレッドを起動 → Task セルを足す。
         let space_id = self.project_sessions.projects[index].task_space.id.clone();
+        if let Some(auto_branch) = auto_branch {
+            self.chrome
+                .auto_branches
+                .insert(space_id.clone(), auto_branch);
+        }
         self.chrome.fleet_cells.push(FleetPane::Task {
             space: space_id.clone(),
         });

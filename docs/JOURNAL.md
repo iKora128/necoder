@@ -3313,7 +3313,7 @@
   目次**（`markdown::split_front_matter`・`[toc]`・O29）・**横並びのライブプレビュー**（⌘K V・O29）・
   **スラッシュメニュー**（Markdown の行頭の `/`・補完のポップアップを使い回す・O29）・ターミナルの**配色の取り込み**
   （`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2・O25）・**端末タブの改名**（ダブルクリック・O24）・
-  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）・**SSH の接続テスト**（O37）・端末の **⌘T / ⌘W**（O24）・Task の**詳細**（レールの右クリック「詳細…」・O21 / A12）・エージェントの**使う / 使わない**（`disabled_agents`・O16 / B02）・**権限の既定**（Yolo の一括・`agent_permission_default`・O16 / B07）。
+  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）・**SSH の接続テスト**（O37）・端末の **⌘T / ⌘W**（O24）・Task の**詳細**（レールの右クリック「詳細…」・O21 / A12）・エージェントの**使う / 使わない**（`disabled_agents`・O16 / B02）・**権限の既定**（Yolo の一括・`agent_permission_default`・O16 / B07）・**自動命名ブランチの改名**（`task/task` → 最初のスレッドの名前から `task/<slug>`・O23 / A23）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3366,6 +3366,10 @@
     `exit status: 255` しか言えなかった。
   - locales の値に `: ` を含むなら必ず `"…"` で囲む（`test_ssh: SSH: 接続…` は i18n の解析が落ちる・CI で
     3 本赤になる所だった）。パレットの項目は「領域: 動作」の形なので特に注意。
+  - **Task のブランチの「push 済み」は upstream の有無では決められない**: 起点に `origin/main` のような
+    リモートの追跡ブランチを渡すと、`git worktree add -b` が既定（`branch.autoSetupMerge`）で upstream を
+    付ける。push したかは `branch.<名前>.merge` が自分自身（`refs/heads/<名前>`）か、リモートに同じ名前が
+    あるかで見る。`git branch -m` は追跡の設定ごと運ぶ。
   - **rustfmt は edition 2021 で見る**（crate は 2021・CI に fmt の段は無い）。`--edition 2024` だと style edition
     が変わり、`.shadow(vec![…])` などの折り方が違って、整っているファイルにも差分が出る。crate の根に
     `rustfmt --check` をかけると子のモジュールも見るので、変える前（`git stash`）と後で「Diff in」の数を

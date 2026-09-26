@@ -273,6 +273,9 @@ impl Workspace {
                 cx,
             ),
             agent_panel::PanelEvent::ThreadAutoNamed { name } => {
+                // 自動で名付けたブランチ（`task/task` など）を、この名前から改名する（O23・A23・予約した
+                // Task だけ・1 回だけ）。
+                self.rename_auto_branch(session_index, name.clone(), cx);
                 // AI 命名の引き継ぎ（2026-07-24）: Task 名がプレースホルダ（"Task N"）のままなら
                 // 最初のスレッド名を Task 名にする。手動改名済み（プレースホルダでない）は触らない。
                 if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {

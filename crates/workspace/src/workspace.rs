@@ -1357,6 +1357,8 @@ struct ChromeState {
     statusbar_menu: Option<Point<gpui::Pixels>>,
     /// 詳細を出している project（O21・右クリックの「詳細…」）。
     task_details: Option<usize>,
+    /// 自動で名付けたブランチの改名の予約（O23・A23・Task の SpaceId ごと・この起動の間だけ）。
+    auto_branches: HashMap<SpaceId, task_creation::AutoBranch>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
     graph_view: GraphView,
     /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。
