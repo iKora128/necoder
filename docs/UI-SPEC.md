@@ -177,6 +177,7 @@ Worktree は既存ブランチ・既存 worktree または新しいブランチ�
 
 - 下ドック 既定 240px（上縁ドラッグで 60〜900 可変・ニュース/ターミナルで共有）。タブ（active = bg1。色線なし）+ `＋`。プロンプト = ok 色。パス様文字列はリンク化（クリックで file:line へ）
 - 通知はトースト（右下）。エージェント完了は宛先チップと同じ書式で「●rope設計 完了」
+- タブの × は、前面でシェル以外のプロセスが動いている時だけ OS のダイアログ（`Window::prompt`・mac はシート）で「閉じる（⏎）/ キャンセル（Esc）」を確認する（O4）。判定は PTY の前面プロセスグループ ≠ シェル（`tcgetpgrp`）。調べられない端末（Windows の ConPTY・リモートの `ssh -tt`）は確認しない
 - **エージェント状態（herdr 参照・状態検知は ACP ネイティブ＝ヒューリスティック不要）**: ACP のライフサイクルから `ThreadActivity` を導出する。**Blocked**=`session/request_permission` 待ち（ターンが実際にブロック）/ **Working**=ストリーミング中 / **Done**=直近ターン完了・**未確認**（見るまで残るラッチ・中断= `StopReason` の Refusal/Cancelled は注意表示）/ **Idle**=待機。ambient 表示先は タブ/List・titlebar beacon・statusbar 中央ロールアップ・**レールの静止ドット（他プロジェクトの Blocked/Done・右上。Working は省く）**・⌘O ダッシュボード。ロールアップ優先度 Blocked>Working>Done>Idle。全窓横断の台帳は `RunningRegistry`（worktree root → 状態）
 
 ## 9. キーボード（既定・母語は Zed 互換で確定待ち）

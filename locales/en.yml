@@ -596,6 +596,10 @@ pdf:
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead
 terminal:
   tab_title: Terminal %{n}
+  close_busy_title: "A process is running in Terminal %{n}"
+  close_busy_detail: Closing the terminal stops it too.
+  close_busy_confirm: Close
+  close_busy_cancel: Cancel
   add_tip: New terminal
   close_dock_tip: Close bottom dock  ⌘J
   git_tip: Source control  ⌃⇧G

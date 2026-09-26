@@ -190,11 +190,56 @@ pub struct TerminalView {
     /// ホイールの 1 行未満の端数持ち越し（トラックパッドのピクセル増分を行単位に畳む）。
     scroll_remainder: f32,
     exited: bool,
+    /// 前面でシェル以外のプロセスが動いているかを調べる口（閉じる前の確認・O4）。
+    #[cfg(unix)]
+    foreground: Option<ForegroundProbe>,
     theme: Theme,
     focus_handle: FocusHandle,
     // pump タスク（PTY 出力で起きる）。drop で停止。IO スレッド自体は spawn 後 detach し、
     // Drop の Msg::Shutdown で畳む。
     _pump: Option<gpui::Task<()>>,
+}
+
+/// 端末の前面でシェル以外のプロセス（`npm run dev`・`vim`・`claude` 等）が動いているかを調べる口。
+///
+/// PTY 本体は EventLoop のスレッドへ渡してしまうので、生成の直後に **master の fd を複製**して
+/// 手元に残す（`tcgetpgrp` で前面のプロセスグループを読むだけ＝入出力には触れない）。
+/// シェルは起動時に `setsid` で自分のプロセスグループの長になっている（alacritty の起動手順）ので、
+/// 前面のグループがシェル自身の pid と違えば「ジョブが前面で動いている」。
+#[cfg(unix)]
+struct ForegroundProbe {
+    master: std::fs::File,
+    shell_pid: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl ForegroundProbe {
+    fn new(pty: &tty::Pty) -> Option<Self> {
+        let shell_pid = libc::pid_t::try_from(pty.child().id()).ok()?;
+        match pty.file().try_clone() {
+            Ok(master) => Some(Self { master, shell_pid }),
+            Err(error) => {
+                eprintln!(
+                    "ターミナル: 前面プロセスの確認口を作れない（閉じる時の確認を省く）: {error}"
+                );
+                None
+            }
+        }
+    }
+
+    fn has_foreground_job(&self) -> bool {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: `master` は生きている File の fd。`tcgetpgrp` は端末の前面グループを読むだけ。
+        let group = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
+        foreground_is_busy(group, self.shell_pid)
+    }
+}
+
+/// 前面のプロセスグループ `group` がシェル（`shell_pid`）以外なら「何かが前面で動いている」。
+/// 読めなかった（負）・0・シェル自身は「動いていない」＝確認しない側に倒す。
+#[cfg(unix)]
+fn foreground_is_busy(group: libc::pid_t, shell_pid: libc::pid_t) -> bool {
+    group > 0 && group != shell_pid
 }
 
 impl TerminalView {
@@ -249,7 +294,11 @@ impl TerminalView {
 
         let mut notifier = None;
         let mut pump = None;
-        match tty::new(&options, window_size, 0) {
+        let pty = tty::new(&options, window_size, 0);
+        // PTY は下で EventLoop へ渡る。前面グループを読む口だけは先に手元へ残す。
+        #[cfg(unix)]
+        let foreground = pty.as_ref().ok().and_then(ForegroundProbe::new);
+        match pty {
             Ok(pty) => match EventLoop::new(term.clone(), listener, pty, true, false) {
                 Ok(event_loop) => {
                     notifier = Some(Notifier(event_loop.channel()));
@@ -293,6 +342,8 @@ impl TerminalView {
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited,
+            #[cfg(unix)]
+            foreground,
             theme,
             focus_handle: cx.focus_handle(),
             _pump: pump,
@@ -332,6 +383,8 @@ impl TerminalView {
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited: false,
+            #[cfg(unix)]
+            foreground: None,
             theme,
             focus_handle: cx.focus_handle(),
             _pump: None,
@@ -340,6 +393,26 @@ impl TerminalView {
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    /// 前面でシェル以外のプロセスが動いているか（閉じる前の確認の判定・O4）。
+    ///
+    /// 調べられない端末は `false` ＝確認しない側に倒す: Windows の ConPTY（前面グループの概念が無い）、
+    /// リモート（ローカルの子は `ssh -tt` で、前面は常に ssh 自身）、終了済み・生成に失敗した端末。
+    pub fn has_foreground_process(&self) -> bool {
+        if self.exited {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            self.foreground
+                .as_ref()
+                .is_some_and(ForegroundProbe::has_foreground_job)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     /// テーマ差し替え（テーマセレクタ連動）。
@@ -1468,6 +1541,81 @@ mod tests {
             }
         }
         cells
+    }
+
+    /// 前面のグループがシェル自身なら「動いていない」、別のグループ（ジョブ）なら「動いている」。
+    #[cfg(unix)]
+    #[test]
+    fn a_foreground_job_counts_only_when_it_is_not_the_shell() {
+        assert!(!foreground_is_busy(4242, 4242), "プロンプト待ちのシェル");
+        assert!(foreground_is_busy(4343, 4242), "前面でジョブが動いている");
+        assert!(!foreground_is_busy(-1, 4242), "読めない時は確認しない側");
+        assert!(!foreground_is_busy(0, 4242));
+    }
+
+    /// 実 PTY で: プロンプト待ちのシェルは「動いていない」、前面で `sleep` が走る間は「動いている」。
+    /// `tcgetpgrp` を master 側の複製 fd へ投げて読めること（macOS / Linux）の裏取り。
+    ///
+    /// 出力は本番と同じく EventLoop に読ませる。誰も読まないと、シェルが終わる時に tty の出力待ちで
+    /// 止まり、PTY の後始末（SIGHUP → wait）が返らない。後始末は Shutdown を投げるだけで待たない
+    /// （`tests/pty_smoke.rs` と同じ）。
+    #[cfg(unix)]
+    #[test]
+    fn a_real_pty_reports_a_running_foreground_job() {
+        use std::time::{Duration, Instant};
+
+        let options = tty::Options {
+            // 対話シェル＝ジョブ制御が有効（前面のコマンドは別のプロセスグループで走る）。
+            shell: Some(tty::Shell::new(
+                "/bin/sh".to_string(),
+                vec!["-i".to_string()],
+            )),
+            working_directory: None,
+            drain_on_exit: true,
+            env: HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]),
+            ..Default::default()
+        };
+        let window_size = WindowSize {
+            num_lines: 24,
+            num_cols: 80,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let (events_tx, _events_rx) = unbounded::<AlacEvent>();
+        let listener = Listener(events_tx);
+        let size = TerminalSize {
+            columns: 80,
+            lines: 24,
+        };
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &size,
+            listener.clone(),
+        )));
+        let pty = tty::new(&options, window_size, 0).expect("PTY を作れる");
+        let probe = ForegroundProbe::new(&pty).expect("master を複製できる");
+        let event_loop =
+            EventLoop::new(term, listener, pty, true, false).expect("EventLoop を作れる");
+        let notifier = Notifier(event_loop.channel());
+        event_loop.spawn();
+        let wait_until = |want: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if probe.has_foreground_job() == want {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            false
+        };
+        assert!(wait_until(false), "起動直後のシェルは前面ジョブ無し");
+        notifier.notify(b"sleep 5\n".to_vec());
+        let busy = wait_until(true);
+        // 先に後始末を投げてから判定する（失敗しても PTY を残さない）。
+        if let Err(error) = notifier.0.send(Msg::Shutdown) {
+            eprintln!("EventLoop へ Shutdown を送れない: {error}");
+        }
+        assert!(busy, "sleep が前面で動いている間は true");
     }
 
     #[test]

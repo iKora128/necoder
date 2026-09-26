@@ -597,6 +597,10 @@ pdf:
   unsupported_hint: OS のビューアを使うため macOS / Windows のみ対応します。右クリック →「既定アプリで開く」で開けます
 terminal:
   tab_title: ターミナル %{n}
+  close_busy_title: "ターミナル %{n} でプロセスが動いています"
+  close_busy_detail: 閉じるとこのプロセスも止まります。
+  close_busy_confirm: 閉じる
+  close_busy_cancel: キャンセル
   add_tip: ターミナルを追加
   close_dock_tip: 下ドックを閉じる  ⌘J
   git_tip: ソース管理  ⌃⇧G
