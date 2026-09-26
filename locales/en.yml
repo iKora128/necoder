@@ -6,6 +6,8 @@ app:
 editor:
   table_truncated: "Showing the first %{n} rows as a table (the full text is in the source · ⌘⇧V to switch back)"
   drop_remote: "Files cannot be dropped on a remote project's editor (drop them on a folder in the explorer to upload)"
+  toc: Contents
+  toc_empty: No headings
   empty_hint: Pass a file path as an argument to open it (e.g. necoder README.md)
   blame_uncommitted: Uncommitted
 common:

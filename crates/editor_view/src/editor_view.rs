@@ -298,6 +298,8 @@ pub struct EditorView {
     markdown_scroll: gpui::ScrollHandle,
     /// パース済みブロックのキャッシュ。version 変化時のみ再パース（idle 再描画で再解析しない）。
     markdown_blocks: Vec<markdown::Block>,
+    /// 頭の front matter（あれば表の形で出し、`markdown_blocks` は残りだけ・O29）。
+    markdown_front_matter: Option<markdown::FrontMatter>,
     markdown_blocks_version: u64,
     /// CSV / TSV を表として見ている時の表（O29・版で持ち直す＝描き直しのたびに読み直さない）。
     table: Rc<table_preview::ParsedTable>,
@@ -373,6 +375,7 @@ impl EditorView {
             surface_active: true,
             markdown_scroll: gpui::ScrollHandle::new(),
             markdown_blocks: Vec::new(),
+            markdown_front_matter: None,
             markdown_blocks_version: u64::MAX,
             table: Rc::default(),
             table_version: u64::MAX,
@@ -2433,7 +2436,10 @@ impl Render for EditorView {
         if self.rendered_markdown && self.is_markdown() {
             let version = self.buffer.version();
             if self.markdown_blocks_version != version {
-                self.markdown_blocks = markdown::parse(&self.buffer.text());
+                let text = self.buffer.text();
+                let (front_matter, body) = markdown::split_front_matter(&text);
+                self.markdown_blocks = markdown::parse(body);
+                self.markdown_front_matter = front_matter;
                 self.markdown_blocks_version = version;
             }
             return div()
@@ -2446,6 +2452,7 @@ impl Render for EditorView {
                 .on_action(cx.listener(Self::toggle_rendered_markdown))
                 .child(markdown_preview::render_preview(
                     &self.markdown_blocks,
+                    self.markdown_front_matter.as_ref(),
                     &self.theme,
                     self.font_size,
                     self.fonts.code.clone(),
@@ -3688,6 +3695,67 @@ mod tests {
             assert!(!editor.has_text_preview());
             editor.set_rendered_markdown(true, cx);
             assert!(!editor.rendered_markdown(), ".txt は表にならない");
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn front_matter_is_shown_as_properties_not_as_a_heading(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("necoder_front_matter_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("作れる");
+        let path = dir.join("post.md");
+        let filler: String = (0..80)
+            .map(|index| format!("Paragraph {index}\n\n"))
+            .collect();
+        std::fs::write(
+            &path,
+            format!("---\ntitle: Hello\ntags: [a, b]\n---\n# Body\n\n[toc]\n\n{filler}## Part\n\nText\n"),
+        )
+        .expect("書ける");
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&path).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        editor.update_in(cx, |editor, _window, cx| {
+            editor.set_rendered_markdown(true, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, _window, _cx| {
+            let front_matter = editor.markdown_front_matter.clone().expect("front matter");
+            assert_eq!(
+                front_matter.entries,
+                vec![
+                    ("title".to_string(), "Hello".to_string()),
+                    ("tags".to_string(), "a, b".to_string()),
+                ]
+            );
+            assert!(
+                matches!(
+                    editor.markdown_blocks.first(),
+                    Some(markdown::Block::Heading { level: 1, text, .. }) if text == "Body"
+                ),
+                "閉じの --- で見出しにならない: {:?}",
+                editor.markdown_blocks.first()
+            );
+            // 目次から飛ぶ先はスクロールする要素の直下の子（front matter の表が 0 番）。
+            let part = markdown_preview::toc_entries(&editor.markdown_blocks, 1)
+                .into_iter()
+                .find(|entry| entry.text == "Part")
+                .expect("目次に載る");
+            assert_eq!(editor.markdown_scroll.offset().y, px(0.));
+            editor.markdown_scroll.scroll_to_top_of_item(part.child);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, _window, _cx| {
+            assert!(
+                editor.markdown_scroll.offset().y < px(0.),
+                "見出しまで流れる: {:?}",
+                editor.markdown_scroll.offset()
+            );
         });
         std::fs::remove_dir_all(&dir).ok();
     }
