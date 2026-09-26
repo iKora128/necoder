@@ -1009,6 +1009,61 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// O21・A07: 片付けた Task と同じフォルダに作り直した Task は、前の Task の親を引き継がない（id は
+    /// worktree の場所から決まるので、台帳に親子の行が残っていると関係の無い Task が前の親の下に出る）。
+    #[gpui::test]
+    fn a_task_made_in_a_reused_folder_does_not_inherit_an_old_parent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let Some((base, repo)) = scratch_repository("task_parent_reuse") else {
+            return;
+        };
+        cx.update(|cx| settings::init(Some(base.join("settings.json")), None, cx));
+        let storage = storage::Storage::open(&base.join("necoder.db")).expect("DB を開ける");
+        // 前に同じフォルダ（task/api = `<repo>-worktrees/api`）に居た、子の Task の行。
+        let target = project::task_worktree_dir(&repo)
+            .expect("置き場がある")
+            .join("api");
+        let id = project::stable_worktree_id_on(host::LocalHost::shared().as_ref(), &target);
+        storage
+            .set_task_parent(&id, Some("space-old-parent"))
+            .expect("書ける");
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![repo.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.persistence.storage = Some(storage.clone());
+            workspace.create_prompted_tasks(
+                String::new(),
+                project::TaskStart::default(),
+                vec![task("API", None)],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            let slot = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .find(|slot| slot.branch.as_deref() == Some("task/api"))
+                .expect("task/api の Task ができる");
+            assert_eq!(slot.task_space.id.as_str(), id, "同じフォルダなら同じ id");
+            assert_eq!(slot.task_space.parent, None);
+        });
+        let record = storage
+            .load_task_spaces()
+            .expect("読める")
+            .into_iter()
+            .find(|record| record.id == id)
+            .expect("台帳にある");
+        assert_eq!(record.parent, None, "前の親の行は消える");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// 押した直後から行が出て、worktree ができたら Task に替わる。
     #[gpui::test]
     fn a_new_task_shows_a_row_until_its_worktree_is_ready(cx: &mut gpui::TestAppContext) {

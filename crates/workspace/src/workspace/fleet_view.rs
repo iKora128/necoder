@@ -562,9 +562,10 @@ impl Workspace {
             };
             self.project_sessions.projects[index].task_space.title = title.into();
         }
-        // 別の Task のブランチから切った（O21・A07）。台帳に残すと、サイドバーで親の下に出る。
+        // 別の Task のブランチから切った（O21・A07）。台帳に残すと、サイドバーで親の下に出る。親の無い Task
+        // でも親を書く（同じフォルダに前に居た Task の親子を引き継がない）。
         self.project_sessions.projects[index].task_space.parent = parent;
-        self.persist_task_space(index, cx);
+        self.persist_new_task_space(index, cx);
         self.transition_task_space(index, TaskPhase::Planned, "task_created", None, cx);
         if let Some(error) = failure {
             // 依頼は送らずに控える（「準備をやり直す」/「飛ばして始める」で送る・O20）。
