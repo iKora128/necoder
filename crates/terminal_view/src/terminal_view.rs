@@ -452,6 +452,8 @@ pub struct TerminalView {
     /// 前面でシェル以外のプロセスが動いているかを調べる口（閉じる前の確認・O4）。
     #[cfg(unix)]
     foreground: Option<ForegroundProbe>,
+    /// シェルが出す区切り（OSC 133 / 633）から分かる様子（O25・C20）。PTY の読み取りスレッドが書く。
+    shell_activity: Arc<pty_guard::ShellActivity>,
     theme: Theme,
     focus_handle: FocusHandle,
     // pump タスク（PTY 出力で起きる）。drop で停止。IO スレッド自体は spawn 後 detach し、
@@ -554,6 +556,7 @@ impl TerminalView {
 
         let mut notifier = None;
         let mut pump = None;
+        let shell_activity = Arc::new(pty_guard::ShellActivity::default());
         let pty = tty::new(&options, window_size, 0);
         // PTY は下で EventLoop へ渡る。前面グループを読む口だけは先に手元へ残す。
         #[cfg(unix)]
@@ -563,7 +566,7 @@ impl TerminalView {
             Ok(pty) => match EventLoop::new(
                 term.clone(),
                 listener,
-                pty_guard::GuardedPty::new(pty),
+                pty_guard::GuardedPty::new(pty, shell_activity.clone()),
                 true,
                 false,
             ) {
@@ -628,6 +631,7 @@ impl TerminalView {
             bell_pending: false,
             #[cfg(unix)]
             foreground,
+            shell_activity,
             theme,
             focus_handle: cx.focus_handle(),
             _pump: pump,
@@ -687,6 +691,7 @@ impl TerminalView {
             bell_pending: false,
             #[cfg(unix)]
             foreground: None,
+            shell_activity: Arc::default(),
             theme,
             focus_handle: cx.focus_handle(),
             _pump: None,
@@ -699,11 +704,16 @@ impl TerminalView {
 
     /// 前面でシェル以外のプロセスが動いているか（閉じる前の確認の判定・O4）。
     ///
-    /// 調べられない端末は `false` ＝確認しない側に倒す: Windows の ConPTY（前面グループの概念が無い）、
-    /// リモート（ローカルの子は `ssh -tt` で、前面は常に ssh 自身）、終了済み・生成に失敗した端末。
+    /// シェルが区切り（OSC 133 / 633・O25）を出していれば、コマンドが動いている間（C の後・D の前）は
+    /// 動いている。前面のプロセスを調べられない端末（Windows の ConPTY・SSH 先）でもこれで分かる。
+    /// それ以外で調べられない端末は `false` ＝確認しない側に倒す: Windows の ConPTY（前面グループの概念が
+    /// 無い）、リモート（ローカルの子は `ssh -tt` で、前面は常に ssh 自身）、終了済み・生成に失敗した端末。
     pub fn has_foreground_process(&self) -> bool {
         if self.exited {
             return false;
+        }
+        if self.shell_activity.running() {
+            return true;
         }
         #[cfg(unix)]
         {
@@ -715,6 +725,16 @@ impl TerminalView {
         {
             false
         }
+    }
+
+    /// シェルが区切り（OSC 133 / 633）を出しているか（1 度でも見たか・O25）。
+    pub fn shell_integration(&self) -> bool {
+        self.shell_activity.seen()
+    }
+
+    /// 直前に終わったコマンドの終了コード（シェルの区切りの D に付いていれば・O25）。
+    pub fn last_exit_status(&self) -> Option<i32> {
+        self.shell_activity.last_exit()
     }
 
     /// テーマ差し替え（テーマセレクタ連動）。
@@ -2314,6 +2334,27 @@ fn is_default_background(color: AnsiColor) -> bool {
 mod tests {
     use super::*;
 
+    /// O25・C20: シェルの区切りで「コマンドが動いている」なら、前面のプロセスを調べられない端末
+    /// （ここではテスト用の端末＝確かめる口が無い）でも閉じる前の確認の対象になる。
+    #[gpui::test]
+    fn shell_marks_count_as_a_running_command(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update(cx, |terminal, _cx| {
+            assert!(!terminal.has_foreground_process());
+            assert!(!terminal.shell_integration());
+            terminal
+                .shell_activity
+                .apply(pty_guard::ShellMark::CommandExecuted);
+            assert!(terminal.has_foreground_process(), "C の後は動いている");
+            terminal
+                .shell_activity
+                .apply(pty_guard::ShellMark::CommandFinished(Some(1)));
+            assert!(!terminal.has_foreground_process());
+            assert!(terminal.shell_integration());
+            assert_eq!(terminal.last_exit_status(), Some(1));
+        });
+    }
+
     #[gpui::test]
     fn a_custom_name_wins_over_the_shell_title(cx: &mut gpui::TestAppContext) {
         let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
@@ -2471,6 +2512,76 @@ mod tests {
             eprintln!("EventLoop へ Shutdown を送れない: {error}");
         }
         assert!(busy, "sleep が前面で動いている間は true");
+    }
+
+    /// O25・C20: 実 PTY で、シェルが出した区切り（OSC 133）が読み口（`GuardedPty`）を通って
+    /// `ShellActivity` に届く。C の後は動いている・D で止まって終了コードが残る。打った行のエコーは
+    /// `\033` の文字のままなので区切りにならない。後始末は上と同じく Shutdown を投げるだけ。
+    #[cfg(unix)]
+    #[test]
+    fn shell_marks_from_a_real_pty_reach_the_activity() {
+        use std::time::{Duration, Instant};
+
+        let options = tty::Options {
+            shell: Some(tty::Shell::new(
+                "/bin/sh".to_string(),
+                vec!["-i".to_string()],
+            )),
+            working_directory: None,
+            drain_on_exit: true,
+            env: HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]),
+            ..Default::default()
+        };
+        let window_size = WindowSize {
+            num_lines: 24,
+            num_cols: 80,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let (events_tx, _events_rx) = unbounded::<AlacEvent>();
+        let listener = Listener(events_tx);
+        let size = TerminalSize {
+            columns: 80,
+            lines: 24,
+        };
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &size,
+            listener.clone(),
+        )));
+        let pty = tty::new(&options, window_size, 0).expect("PTY を作れる");
+        let activity = Arc::new(pty_guard::ShellActivity::default());
+        let event_loop = EventLoop::new(
+            term,
+            listener,
+            pty_guard::GuardedPty::new(pty, activity.clone()),
+            true,
+            false,
+        )
+        .expect("EventLoop を作れる");
+        let notifier = Notifier(event_loop.channel());
+        event_loop.spawn();
+        let wait_until = |done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if done() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            false
+        };
+        notifier
+            .notify(b"printf '\\033]133;C\\007'; sleep 2; printf '\\033]133;D;7\\007'\n".to_vec());
+        let started = wait_until(&|| activity.running());
+        let finished =
+            started && wait_until(&|| !activity.running() && activity.last_exit() == Some(7));
+        if let Err(error) = notifier.0.send(Msg::Shutdown) {
+            eprintln!("EventLoop へ Shutdown を送れない: {error}");
+        }
+        assert!(started, "C の後は動いている");
+        assert!(finished, "D で止まり、終了コードが残る");
+        assert!(activity.seen());
     }
 
     #[test]
