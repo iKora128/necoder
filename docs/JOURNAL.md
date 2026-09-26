@@ -3237,3 +3237,14 @@
 - やったこと: `captain.prompt` を `captain.role` / `captain.facts` / `captain.event` に分割。役割 + 現況表（`captain_context`）を Captain スレッドの prompt context に入れ、⌘0 で開いた時・wake の時・人間が Captain に書いた後に差し替える。wake 本文はイベント行 + 溜めたイベントだけ。道具一覧に `fleet create . <title>` を追加。回帰 test `role_prompt_lists_task_creation_in_every_locale`
 - 学び/罠: `PanelEvent::HumanSend` は送信**後**に届く（emit は遅延）ので、その発話の中身は差し替えられない。今のターンは既存の context、HumanSend で次のターン用に現況を更新する形。prompt context はメモリのみ（再起動後は ⌘0 か次の wake まで無い）。規律はプロンプトだけでツール制限は無い（案2 = Captain スレッドの編集系 permission を拒否、は未着手）。prompt context を前置すると slash コマンド（`/clear` `/compact`）の先頭が `/` でなくなり認識されない → `/` 始まりの発話には context を付けない（test `prompt_context_is_not_prepended_to_slash_commands`）
 - 次: 実機で「目標 1 つ → Captain が Task を切る」を確認（F6 の実 e2e）
+
+## 2026-09-26 — worktree横断レビューの記録（実装なし）
+
+- 本人の依頼: ORCAとの差分・UX・Rustの性能/コードをレビューし、全worktreeも確認。その後「気になるところについては docs/ にどんどんと足して」。実装は待つ。
+- [UX・コードレビュー台帳](UX-CODE-REVIEW.md)を新設。15件の懸念にID・優先度・状態・対象版・根拠・影響・改善案・未実施の確認条件を付けた。
+- 初回は全16 worktreeを棚卸し。mainだけの評価を訂正し、別worktreeで実装済みのdiff基準・hooks・Git入力・裏スレッドキュー・Fleet内レビュー等を再実装対象から除外。
+- 重要点: レビュー済み/注記と内容の版、差分の総メモリ予算、非同期保存順序、複数窓のclose、Design Modeの宛先/世代、SSHのlocalhost、Captain承認後の復旧。
+- 初回統合版でproject/review_view/terminal_view/webview_viewのlib test計122件成功、更新後8277d4fで全workspace/all-targetsのcheck成功。実画面・長時間性能・SSH/Windows実機は未検証。
+- main未コミット差分と2c80f83を一時ファイル上で三者比較し、24ファイル重複・11ファイル競合。リポジトリにはマージしていない。
+- 文書化時には統合版6387091、17個目のhistory worktree、Explorer/言語/CLI/Skills/使用量/通知の進展を確認。初回の使用量UI未接続は既に対処されており、台帳で訂正。新しい差分全体は次回レビュー対象とし、以前の検証結果を流用しない。
+- 変更はdocsのみ。元の機能差分調査の冒頭から台帳へリンクし、古い「無」判定を現在の実装状況と混同しないよう注記した。
