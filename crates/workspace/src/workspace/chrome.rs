@@ -67,6 +67,10 @@ impl Workspace {
                 self.chrome.pending_settings_command = Some(command.clone());
                 cx.notify();
             }
+            settings::SettingsViewEvent::PickFont { key } => {
+                self.chrome.pending_font_picker = Some(key);
+                cx.notify();
+            }
             settings::SettingsViewEvent::OnboardingCompleted => {
                 self.chrome.show_settings = false;
                 self.celebrate_confetti(cx);

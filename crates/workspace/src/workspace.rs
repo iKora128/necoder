@@ -309,6 +309,8 @@ pub(crate) enum PickerMode {
     OpenLauncher,
     /// Web タブの URL 入力（ポート番号か localhost の URL だけ・`web_tabs.rs`）。行は入力の確定 1 行だけ。
     PreviewUrl,
+    /// 書体を選ぶ（O27・設定の「選ぶ…」から）。id 0 = 既定に戻す、1.. = `picker_fonts` の添字 + 1。
+    Fonts,
 }
 
 /// ⌘P の作成アクション行の id（空プロジェクト用）。ファイル添字（最大 50k）と衝突しない番兵値。
@@ -1340,8 +1342,10 @@ struct ChromeState {
     task_renaming: Option<TaskRenaming>,
     /// 端末のタブの改名（O24・ダブルクリック）。
     terminal_renaming: Option<terminal_rename::TerminalRenaming>,
-    /// 窓を持たない経路（パネルのイベント）で開いた入力欄へ、次の描画でフォーカスを渡す。
+    /// 窓を持たない経路（パネルのイベント）で開いた入力欄へ渡すフォーカス（`process_pending_shell_effects`）。
     focus_next_frame: Option<FocusHandle>,
+    /// 設定の「選ぶ…」で頼まれた書体のピッカー（設定のキー・窓が要るので後処理で開く）。
+    pending_font_picker: Option<&'static str>,
     /// statusbar の項目の出し入れのメニュー（右クリックした所・O27）。
     statusbar_menu: Option<Point<gpui::Pixels>>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
@@ -1424,6 +1428,9 @@ struct WorkspaceOverlays {
     picker_mode: PickerMode,
     picker_files: Vec<PathBuf>,
     picker_themes: Vec<(SharedString, ThemeSource)>,
+    /// 書体のピッカーの行（入っている書体）と、選んだ書体を書く設定のキー（O27）。
+    picker_fonts: Vec<String>,
+    picker_font_key: &'static str,
     theme_before_preview: Option<Theme>,
     picker_observation: Option<Subscription>,
     color_picker: Option<ColorPickerState>,
@@ -1879,9 +1886,18 @@ impl Workspace {
             || self.pending_close_clean_tabs
             || self.pending_open_git_diff.is_some()
             || self.pending_stage_hunk.is_some()
+            || self.chrome.focus_next_frame.is_some()
+            || self.chrome.pending_font_picker.is_some()
     }
 
     fn process_pending_shell_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 窓を持たない経路（パネルのイベント）で開いた入力欄・閉じた後の戻り先へフォーカスを渡す。
+        if let Some(focus) = self.chrome.focus_next_frame.take() {
+            window.focus(&focus, cx);
+        }
+        if let Some(key) = self.chrome.pending_font_picker.take() {
+            self.open_font_picker(key, window, cx);
+        }
         if self.chrome.pending_agent_full_screen_toggle {
             self.chrome.pending_agent_full_screen_toggle = false;
             self.toggle_agent_full_screen_state(window, cx);
@@ -2143,9 +2159,6 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(focus) = self.chrome.focus_next_frame.take() {
-            window.focus(&focus, cx);
-        }
         self.chrome.stage_width = f32::from(window.viewport_size().width)
             - 70.
             - if self.chrome.show_left {

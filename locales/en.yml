@@ -651,6 +651,15 @@ settings:
   theme_label: Theme
   theme_sub: Also available via the ⌘K ⌘T selector
   open_json: Open settings.json
+  font_ui: UI font
+  font_code: Code font
+  font_terminal: Terminal font
+  font_default: Default (bundled font)
+  font_terminal_default: Default (same as the code font)
+  font_pick: Choose…
+  font_reset: Use default
+  font_picker_placeholder: Search fonts…
+  font_picker_default: Use default
   open_json_sub: The single source of truth; saved edits propagate everywhere within ~1s
   open_json_button: Open
   cli_heading: Command line

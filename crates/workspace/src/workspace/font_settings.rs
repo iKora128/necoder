@@ -34,6 +34,67 @@ fn refresh_font_settings(cx: &mut App) {
     cx.refresh_windows();
 }
 
+impl Workspace {
+    /// 書体のピッカーを開く（O27）。先頭 = 既定に戻す、続けて入っている書体（OS の一覧・名前順）。
+    /// 選んだ書体は `key`（`ui_font_family` / `code_font_family` / `terminal_font_family`）へ書く。
+    pub(crate) fn open_font_picker(
+        &mut self,
+        key: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fonts: Vec<String> = cx
+            .text_system()
+            .all_font_names()
+            .into_iter()
+            .filter(|name| !name.starts_with('.'))
+            .collect();
+        let current = {
+            let settings = settings::get(cx);
+            match key {
+                "ui_font_family" => settings.ui_font_family.clone(),
+                "code_font_family" => settings.code_font_family.clone(),
+                "terminal_font_family" => settings.terminal_font_family.clone(),
+                _ => String::new(),
+            }
+        };
+        let mut items = vec![PickerItem::new(0, i18n::t!("settings.font_picker_default"))];
+        items.extend(fonts.iter().enumerate().map(|(index, name)| {
+            let item = PickerItem::new(index + 1, name.clone());
+            if *name == current {
+                item.with_accent(self.accent())
+            } else {
+                item
+            }
+        }));
+        self.overlays.picker_fonts = fonts;
+        self.overlays.picker_font_key = key;
+        self.open_picker(
+            PickerMode::Fonts,
+            i18n::t!("settings.font_picker_placeholder"),
+            items,
+            window,
+            cx,
+        );
+    }
+
+    /// ピッカーで選んだ書体を設定へ書く（id 0 = 空 = 既定）。書けなければ知らせる。
+    pub(crate) fn commit_font(&mut self, id: usize, cx: &mut Context<Self>) {
+        let key = self.overlays.picker_font_key;
+        if key.is_empty() {
+            return;
+        }
+        let value = match id {
+            0 => String::new(),
+            index => match self.overlays.picker_fonts.get(index - 1) {
+                Some(name) => name.clone(),
+                None => return,
+            },
+        };
+        let result = settings::set_user_value(cx, key, serde_json::Value::String(value));
+        self.report_settings_save(result, cx);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,5 +121,44 @@ mod tests {
                 .as_ref(),
             "JetBrains Mono"
         );
+    }
+
+    #[gpui::test]
+    fn the_font_picker_writes_the_chosen_font(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_font_picker_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        // 設定の「選ぶ…」と同じ入口（窓の要る後処理で開く）。
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.pending_font_picker = Some("code_font_family");
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert!(workspace.overlays.picker.is_some(), "ピッカーが開く");
+            assert!(workspace.overlays.picker_mode == PickerMode::Fonts);
+            assert_eq!(workspace.overlays.picker_font_key, "code_font_family");
+            // 一覧は OS 次第なので、選ぶ書体はここで決める。
+            workspace.overlays.picker_fonts = vec!["Test Mono".to_string()];
+            workspace.commit_font(1, cx);
+            assert_eq!(settings::get(cx).code_font_family, "Test Mono");
+            workspace.commit_font(0, cx);
+            assert_eq!(settings::get(cx).code_font_family, "", "先頭 = 既定に戻す");
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
