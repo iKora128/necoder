@@ -99,6 +99,8 @@ impl AgentPanel {
             "id": q.remote_id, "message": text(&q.message),
             "fields": q.fields.iter().map(|field| json!({
                 "name": field.name, "title": field.label, "multi": field.multi,
+                // 自分で書いて答えられる質問か（Other 欄つき・O17）。
+                "custom": field.custom_answer.is_some(),
                 "choices": field.options.iter().map(|o| json!({"value": o.value, "label": o.title})).collect::<Vec<_>>()
             })).collect::<Vec<_>>()
         }));
@@ -174,17 +176,28 @@ impl AgentPanel {
                     let selections = params["selections"]
                         .as_object()
                         .ok_or_else(|| anyhow::anyhow!("invalid_answers"))?;
-                    anyhow::ensure!(selections.len() == question.fields.len(), "invalid_answers");
+                    // 自分で書いた答え（O17・Other 欄つきの質問だけ）。無ければ空。
+                    let empty = serde_json::Map::new();
+                    let custom = match &params["custom"] {
+                        Value::Null => &empty,
+                        Value::Object(custom) => custom,
+                        _ => anyhow::bail!("invalid_answers"),
+                    };
+                    let known = |name: &String| question.fields.iter().any(|f| &f.name == name);
+                    anyhow::ensure!(
+                        selections.keys().all(known) && custom.keys().all(known),
+                        "invalid_answers"
+                    );
                     let mut answers = Vec::new();
                     for field in &question.fields {
                         // 複数選択は配列、単一選択は文字列で来る。片方しか受けないと、
                         // スマホ側の 1 フィールド分の型違いで質問ごと答えられなくなる。
-                        let raw = selections
-                            .get(&field.name)
-                            .ok_or_else(|| anyhow::anyhow!("answer_required"))?;
-                        let values: Vec<String> = match raw {
-                            Value::String(value) => vec![value.clone()],
-                            Value::Array(values) => values
+                        // 書いて答える質問は選ばなくてよい（無い・空文字・空の配列）。
+                        let values: Vec<String> = match selections.get(&field.name) {
+                            None => Vec::new(),
+                            Some(Value::String(value)) if value.is_empty() => Vec::new(),
+                            Some(Value::String(value)) => vec![value.clone()],
+                            Some(Value::Array(values)) => values
                                 .iter()
                                 .map(|value| {
                                     value
@@ -193,11 +206,10 @@ impl AgentPanel {
                                         .ok_or_else(|| anyhow::anyhow!("invalid_answer"))
                                 })
                                 .collect::<anyhow::Result<Vec<String>>>()?,
-                            _ => anyhow::bail!("invalid_answer"),
+                            Some(_) => anyhow::bail!("invalid_answer"),
                         };
-                        anyhow::ensure!(!values.is_empty(), "answer_required");
                         anyhow::ensure!(
-                            field.multi || values.len() == 1,
+                            field.multi || values.len() <= 1,
                             "invalid_answer" // 単一選択に複数返させない
                         );
                         for value in &values {
@@ -206,7 +218,28 @@ impl AgentPanel {
                                 "invalid_answer"
                             );
                         }
-                        answers.push((field.name.clone(), values));
+                        let written = match custom.get(&field.name) {
+                            None => "",
+                            Some(Value::String(text)) => text.trim(),
+                            Some(_) => anyhow::bail!("invalid_answer"),
+                        };
+                        anyhow::ensure!(
+                            written.is_empty() || field.custom_answer.is_some(),
+                            "invalid_answer" // Other 欄の無い質問に書かせない
+                        );
+                        anyhow::ensure!(written.chars().count() <= 4_000, "invalid_answer");
+                        anyhow::ensure!(
+                            !values.is_empty() || !written.is_empty(),
+                            "answer_required"
+                        );
+                        if !values.is_empty() {
+                            answers.push((field.name.clone(), values));
+                        }
+                        if let Some(custom_name) =
+                            field.custom_answer.as_ref().filter(|_| !written.is_empty())
+                        {
+                            answers.push((custom_name.clone(), vec![written.to_string()]));
+                        }
                     }
                     Some(answers)
                 };

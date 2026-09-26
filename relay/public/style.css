@@ -27,3 +27,4 @@ footer { color: var(--muted); font-size: 11px; border-top: 1px solid var(--borde
 
 #scan-video { width: 100%; max-height: 60dvh; border-radius: 10px; background: #000; object-fit: cover; }
 #pair-manual { margin-top: 14px; } #pair-manual summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.question label input { margin-top: 6px; }
