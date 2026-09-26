@@ -349,19 +349,22 @@ worktree_delete:
   confirm: Delete
 quit_confirm:
   title: Work is still running
+  title_window: Work is still running in this window
   working: "Agents running: %{n}"
   waiting: "Agents waiting for your approval or answer: %{n}"
   terminals: "Terminals with a running process: %{n}"
-  detail_quit_hide: Quitting stops all of this. Hide necoder instead and it keeps running; click the Dock icon to come back.
-  detail_quit_minimize: Quitting stops all of this. Minimize instead and it keeps running.
-  detail_close_hide: Closing this window stops all of this. Hide necoder instead and it keeps running; click the Dock icon to come back.
-  detail_close_minimize: Closing this window stops all of this. Minimize instead and it keeps running.
+  stops_quit: Quitting stops all of this, in every window.
+  stops_close_window: Closing this window stops all of this. Work in other windows keeps running.
+  stops_close_last: Closing this window stops all of this.
+  hide_explained: Hide only takes necoder off the screen; all of this keeps running. Click the Dock icon to come back.
+  minimize_explained: Minimize only tucks the window away; all of this keeps running.
+  lifetime: It keeps running only while necoder itself is running. Quitting, a crash, or restarting for an update stops it.
   keep_running_hide: Hide and keep running
   keep_running_minimize: Minimize and keep running
   quit: Quit
   close: Close
   cancel: Cancel
-  setting_hint: "Turn this off in Settings › Behavior & editor › Confirm before quitting"
+  setting_hint: "Turn this off in Settings › Behavior & editor › Confirm before quitting or closing a window"
 launcher:
   placeholder: Open or choose a recent project…
   open_folder: Open Folder…
@@ -476,8 +479,8 @@ settings:
   pref_tabs_view: Thread tabs
   tabs_view_bar: Bar
   tabs_view_list: List
-  pref_confirm_quit: Confirm before quitting
-  pref_confirm_quit_sub: "On ⌘Q or when closing the last window, offers “Hide and keep running” while agents or terminals are busy"
+  pref_confirm_quit: Confirm before quitting or closing a window
+  pref_confirm_quit_sub: "On ⌘Q (every window) or when closing a window (that window only), offers “Hide (or minimize) and keep running” while agents or terminals are busy"
   confirm_quit_running: Only while busy
   confirm_quit_never: Never
   appearance_heading: Appearance
@@ -616,7 +619,7 @@ pdf:
 terminal:
   tab_title: Terminal %{n}
   close_busy_title: "A process is running in Terminal %{n}"
-  close_busy_detail: Closing the terminal stops it too.
+  close_busy_detail: Closing this tab stops the process running in this terminal. Other terminals and agents keep running.
   close_busy_confirm: Close
   close_busy_cancel: Cancel
   add_tip: New terminal

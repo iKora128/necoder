@@ -63,8 +63,8 @@
 | ↳ worktree を削除（ディスクから消す） | `delete_fleet_cell_worktree` | worktree を削除 | Delete worktree |
 | ↳ 削除の確認（失うものを数えて見せる） | `WorktreeDeleteConfirm` / `WorktreeStakes` | — | — |
 | **下段ドック**（Fleet 下の可変高タブ面） | `FleetBottomView` / `bottom_height` | 下段 | Bottom pane |
-| **終了の確認**（⌘Q・最後の窓を閉じる時。動いているエージェント・ターミナルがある時だけ） | `quit_guard` / `QuitConfirmState`（設定 `confirm_quit`） | 終了時の確認 | Confirm before quitting |
-| ↳ **隠して動かし続ける**（既定。mac はアプリを隠す・他 OS は最小化。プロセスは止めない） | `QuitChoice::KeepRunning` | 隠して動かし続ける / 最小化して動かし続ける | Hide and keep running / Minimize and keep running |
+| **終了の確認**（⌘Q = 全窓・窓を閉じる = その窓。止まるエージェント・ターミナルが動いている時だけ） | `quit_guard` / `QuitConfirmState` / `QuitReason`（設定 `confirm_quit`） | 終了・窓を閉じる時の確認 | Confirm before quitting or closing a window |
+| ↳ **隠して動かし続ける**（既定。mac はアプリを隠す・他 OS は最小化・ほかの窓が残る窓閉じはその窓だけ最小化。プロセスは止めない。**necoder が起動している間だけ**続く＝終了・クラッシュ・更新の再起動では止まる） | `QuitChoice::KeepRunning` / `OutOfSight` | 隠して動かし続ける / 最小化して動かし続ける | Hide and keep running / Minimize and keep running |
 | **AI 全画面**（solo で中央エディタを Agent に差し替える。左/下ドックは各自の ON/OFF） | `agent_full_screen` / `ToggleAgentFullScreen` | AI を全画面 | AI full screen |
 | **「最新へ」ボタン**（transcript を遡り中だけ右下に出る・最下部へ戻す） | `render_jump_to_latest` | 最新へ | Jump to latest |
 | **プレビュー**（`.md` のネイティブ整形表示 / `.html` のOS標準WebView表示。source ⇄ preview・⌘⇧V） | `rendered_markdown` / `rendered_html` / `ToggleRenderedMarkdown` / `markdown_preview` / `webview_view` | プレビュー | Preview |

@@ -193,6 +193,9 @@ pub struct TerminalView {
     /// 前面でシェル以外のプロセスが動いているかを調べる口（閉じる前の確認・O4）。
     #[cfg(unix)]
     foreground: Option<ForegroundProbe>,
+    /// テストで「前面でプロセスが動いている」ことにする（[`Self::set_test_foreground_process`]）。
+    #[cfg(any(test, feature = "test-support"))]
+    test_foreground_process: bool,
     theme: Theme,
     focus_handle: FocusHandle,
     // pump タスク（PTY 出力で起きる）。drop で停止。IO スレッド自体は spawn 後 detach し、
@@ -344,10 +347,20 @@ impl TerminalView {
             exited,
             #[cfg(unix)]
             foreground,
+            #[cfg(any(test, feature = "test-support"))]
+            test_foreground_process: false,
             theme,
             focus_handle: cx.focus_handle(),
             _pump: pump,
         }
+    }
+
+    /// 前面でプロセスが動いていることにする（PTY を起こせない `gpui::test` で、閉じる前の確認・
+    /// ⌘Q の確認の数え方を試す口）。本番の生成経路には入らない。
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn set_test_foreground_process(&mut self, running: bool) {
+        self.test_foreground_process = running;
     }
 
     /// PTY スレッドを起動せず、Dock のライフサイクルを決定論的に検証するための端末。
@@ -385,6 +398,8 @@ impl TerminalView {
             exited: false,
             #[cfg(unix)]
             foreground: None,
+            #[cfg(any(test, feature = "test-support"))]
+            test_foreground_process: false,
             theme,
             focus_handle: cx.focus_handle(),
             _pump: None,
@@ -402,6 +417,10 @@ impl TerminalView {
     pub fn has_foreground_process(&self) -> bool {
         if self.exited {
             return false;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if self.test_foreground_process {
+            return true;
         }
         #[cfg(unix)]
         {
