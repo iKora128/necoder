@@ -2,7 +2,8 @@ use crate::workspace::*;
 
 /// 右下のトースト 1 枚（UI-SPEC §8）。
 pub(crate) struct Toast {
-    text: SharedString,
+    /// 表示する文（1 行目 = 何ができなかったか・以降 = 理由）。他の module のテストが中身を確かめる。
+    pub(crate) text: SharedString,
     color: Hsla,
     generation: u32,
     action: Option<ToastAction>,
