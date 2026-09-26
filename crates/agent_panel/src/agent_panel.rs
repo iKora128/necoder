@@ -2682,6 +2682,12 @@ PYEOF"#;
             self.forget_link_resolutions();
             for thread in &mut self.threads {
                 thread.command_tx = None;
+                // slash コマンドはプロジェクトの設定（コマンド・skill・MCP）で変わる。前の宛先の
+                // 一覧は捨て、新しいセッションの広告で埋め直す（在庫も同じ理由で捨てる）。
+                thread.commands.clear();
+            }
+            for advertisement in self.catalog.values_mut() {
+                advertisement.commands.clear();
             }
             // 宛先が変われば cwd も変わる＝別のセッション。先張りの試行履歴も畳んで張り直す。
             self.prewarmed.clear();
@@ -4989,6 +4995,9 @@ PYEOF"#;
                     thread.acp_session_id = None;
                     thread.available_modes.clear();
                     thread.configs.clear();
+                    // slash コマンドと目標も前の agent の物（新しい agent の在庫か広告で埋まる）。
+                    thread.commands.clear();
+                    thread.goal = None;
                     thread.session_lost = false;
                     thread.session_note = None;
                     agent_changed = Some(thread.id.clone());
