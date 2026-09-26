@@ -2530,7 +2530,7 @@ impl Workspace {
                 )
             })
             // ターミナル切替（診断を見た足でそのままターミナルへ行く動線・本人要望）。
-            // レール / titlebar の下ドックボタン / ⌃` と同じ `toggle_terminal`。開いている間は面を灯す。
+            // レール / titlebar の下ドックボタン / ⌘J と同じ `toggle_terminal`。開いている間は面を灯す。
             .when(show_terminal, |element| {
                 element.child(
                     div()
@@ -2887,6 +2887,34 @@ impl Workspace {
                     workspace.notifications.crash_notice = Some(log_path);
                     cx.notify();
                 });
+            }
+        })
+        .detach();
+    }
+
+    /// 更新の後の最初の起動なら「v… に更新しました · 変更点 ›」（O45・H17）。版の記録は状態フォルダの
+    /// `last_version`（背景で読み書き）。1 つのプロセスで 1 回だけ（最初に開いた窓）。
+    pub(crate) fn check_update_notice(&mut self, cx: &mut Context<Self>) {
+        if cfg!(test) || std::env::var_os("NECODER_SCREENSHOT").is_some() {
+            return;
+        }
+        let current = env!("CARGO_PKG_VERSION");
+        cx.spawn(async move |workspace, cx| {
+            let updated = cx
+                .background_executor()
+                .spawn(async move { crate::updater::take_update_notice(current) })
+                .await;
+            if updated.is_some() {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.push_toast_linking(
+                            i18n::t!("update.just_updated", "version" => current).into(),
+                            crate::updater::release_page_url(current),
+                            i18n::t!("update.whats_new").into(),
+                            cx,
+                        );
+                    })
+                    .ok();
             }
         })
         .detach();

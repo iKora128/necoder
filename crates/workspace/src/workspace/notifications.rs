@@ -22,6 +22,8 @@ pub(crate) enum ToastAction {
     OpenDetails { title: SharedString, text: String },
     /// 手元に置いたもの（ダウンロードしたファイル・O37）を Finder で見せる。
     Reveal { path: PathBuf },
+    /// 押すとページを開く（更新の変更点・O45 / H17）。`label` はトーストの右の文字。
+    OpenUrl { url: String, label: SharedString },
 }
 
 /// トーストが消えるまで。失敗の知らせは理由を読む時間が要るので長めにする。
@@ -602,6 +604,19 @@ impl Workspace {
         self.push_toast_entry(text, color, action, TOAST_LIFETIME, cx);
     }
 
+    /// 押すとページを開くトースト（読む時間が要るので長め）。
+    pub(crate) fn push_toast_linking(
+        &mut self,
+        text: SharedString,
+        url: String,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let color = self.accent();
+        let action = Some(ToastAction::OpenUrl { url, label });
+        self.push_toast_entry(text, color, action, FAILURE_TOAST_LIFETIME, cx);
+    }
+
     fn push_toast_entry(
         &mut self,
         text: SharedString,
@@ -812,6 +827,28 @@ impl Workspace {
                                         move |_this, _event: &MouseDownEvent, _window, cx| {
                                             cx.stop_propagation();
                                             cx.reveal_path(&path);
+                                        },
+                                    ),
+                                );
+                        }
+                        // ページつき（更新の変更点）は押すと既定のブラウザで開く。
+                        Some(ToastAction::OpenUrl { url, label }) => {
+                            let url = url.clone();
+                            toast = toast
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(label.clone()),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(
+                                        move |_this, _event: &MouseDownEvent, _window, cx| {
+                                            cx.stop_propagation();
+                                            cx.open_url(&url);
                                         },
                                     ),
                                 );
