@@ -326,6 +326,17 @@ captain:
   facts: "現況（この repo の Task · id | 名前 | phase | digest）:"
   event: "イベント: [%{event}] %{title}%{digest}"
 fleet:
+  details_kind_task: Task
+  details_kind_integration: 統合先
+  details_state: 種類と状態
+  details_branch: ブランチ
+  details_base: 起点
+  details_path: 場所
+  details_created: 作った
+  details_threads: スレッド
+  details_asked: 最後の依頼
+  details_tokens: トークン
+  details_close: 閉じる
   new_task_worktree: "worktree: %{path}"
   new_task_setup_ready: "準備スクリプト ✓ .necoder/worktree-setup.sh"
   new_task_setup_missing: "準備スクリプトなし"
@@ -500,6 +511,7 @@ rail:
   add_tip: 開く — フォルダ / ファイル / リモート / 最近（⌘O は切替）
   add_prompt: 開く
   menu_new_window: 新しいウィンドウで開く
+  menu_details: 詳細…
   menu_copy_path: パスをコピー
   menu_copy_branch: ブランチ名をコピー
   copied: "コピーしました: %{text}"

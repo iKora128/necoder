@@ -325,6 +325,17 @@ captain:
   facts: "Current state (Tasks in this repository · id | name | phase | digest):"
   event: "Event: [%{event}] %{title}%{digest}"
 fleet:
+  details_kind_task: Task
+  details_kind_integration: Integration
+  details_state: Kind and state
+  details_branch: Branch
+  details_base: Started from
+  details_path: Location
+  details_created: Created
+  details_threads: Threads
+  details_asked: Last request
+  details_tokens: Tokens
+  details_close: Close
   new_task_worktree: "worktree: %{path}"
   new_task_setup_ready: "Setup script ✓ .necoder/worktree-setup.sh"
   new_task_setup_missing: "No setup script"
@@ -499,6 +510,7 @@ rail:
   add_tip: Open — folder / file / remote / recent (⌘O switches)
   add_prompt: Open
   menu_new_window: Open in new window
+  menu_details: Details…
   menu_copy_path: Copy path
   menu_copy_branch: Copy branch name
   copied: "Copied: %{text}"

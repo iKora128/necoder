@@ -67,7 +67,7 @@ fn cleanup_order(rows: &[CleanupRow], by_size: bool) -> Vec<usize> {
 }
 
 /// 状態の短い呼び名（カードの状態チップと同じ語）。
-fn phase_label(phase: TaskPhase) -> String {
+pub(crate) fn phase_label(phase: TaskPhase) -> String {
     let key = match phase {
         TaskPhase::Blocked => "fleet.phase_blocked",
         TaskPhase::Failed | TaskPhase::ChangesRequested => "fleet.phase_failed",

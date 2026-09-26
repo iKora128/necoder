@@ -487,6 +487,20 @@ impl Workspace {
                     }),
                 )
             })
+            // 詳細（O21・A12）: ブランチ・起点・場所・作った時・スレッド・最後の依頼を 1 枚で。
+            .child(
+                make_row(
+                    "rail-details",
+                    "ⓘ",
+                    SharedString::from(i18n::t!("rail.menu_details")),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| this.show_task_details(index, cx)),
+                ),
+            )
             // パス・ブランチ名のコピー（O21・Task を端末や別の道具へ持っていく）。
             .child({
                 let text = slot_root.display().to_string();
