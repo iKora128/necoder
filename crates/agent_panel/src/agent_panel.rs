@@ -26,6 +26,7 @@ use acp_client::{
 };
 mod chat;
 mod idle;
+mod recipes;
 mod remote;
 mod search;
 pub mod sound;
@@ -1805,6 +1806,10 @@ pub struct AgentPanel {
     dest_branch: Option<SharedString>,
     /// ACP エージェントの起動 cwd（アクティブプロジェクトのルート）。無ければ送信できない。
     dest_cwd: Option<PathBuf>,
+    /// 宛先のレシピ（`.necoder/recipes/*.md`・O16）。`/` 補完に `necoder:<名前>` で出す。
+    recipes: Vec<recipes::Recipe>,
+    /// 最後にレシピを読みに行った時（`/` を打つたびに fs を読まない）。
+    recipes_read_at: Option<std::time::Instant>,
     dest_host: Arc<dyn Host>,
     /// 宛先ホストの使用量の鍵の「場所」（手元は空・SSH 先は表示名・R08）。描画は Host を呼ばない規律
     /// なので、宛先が変わった時に控えておく。
@@ -2273,6 +2278,8 @@ PYEOF"#;
             dest_project: "—".into(),
             dest_branch: None,
             dest_cwd: None,
+            recipes: Vec::new(),
+            recipes_read_at: None,
             dest_host: LocalHost::shared(),
             dest_host_label: SharedString::default(),
             composer,
@@ -2806,6 +2813,9 @@ PYEOF"#;
             self.prewarmed.clear();
             self.prewarm_order.clear();
             self.schedule_prewarm(cx);
+            // レシピも宛先ごと（O16）。
+            self.recipes.clear();
+            self.refresh_recipes(cx);
         }
         self.sync_running_registry(cx);
         cx.notify();
@@ -5692,6 +5702,9 @@ PYEOF"#;
         }
         if input == SlashInput::Inactive {
             self.slash.dismissed = false; // 行頭の `/` が消えた＝次に `/` を打てばまた開く
+        } else if self.slash.input == SlashInput::Inactive {
+            // `/` を打ち始めた: レシピを足した直後でも出るよう、古ければ読み直す（O16）。
+            self.refresh_recipes_if_stale(cx);
         }
         self.slash.selected = 0;
         self.slash.input = input;
@@ -5699,18 +5712,25 @@ PYEOF"#;
     }
 
     /// アクティブスレッドの `/` 補完の候補。まだ届いていなければ同じ agent の在庫で代用する
-    /// （Chat は除く＝チャットごとにフォルダが違い、一覧も違いうる）。
-    fn slash_commands(&self) -> &[acp_client::SlashCommand] {
+    /// （Chat は除く＝チャットごとにフォルダが違い、一覧も違いうる）。後ろにレシピ（O16）を足す。
+    fn slash_commands(&self) -> Vec<acp_client::SlashCommand> {
         let Some(thread) = self.threads.get(self.active) else {
-            return &[];
+            return Vec::new();
         };
-        if !thread.commands.is_empty() || self.chat_mode {
-            return &thread.commands;
-        }
-        self.catalog
-            .get(&thread.agent)
-            .map(|advertisement| advertisement.commands.as_slice())
-            .unwrap_or(&[])
+        let agent_commands: &[acp_client::SlashCommand] =
+            if !thread.commands.is_empty() || self.chat_mode {
+                &thread.commands
+            } else {
+                self.catalog
+                    .get(&thread.agent)
+                    .map(|advertisement| advertisement.commands.as_slice())
+                    .unwrap_or(&[])
+            };
+        agent_commands
+            .iter()
+            .cloned()
+            .chain(self.recipe_commands())
+            .collect()
     }
 
     /// いま `/` 補完に出す候補（[`Self::slash_commands`] の添字・並び順）。出さない時は空
@@ -5722,7 +5742,7 @@ PYEOF"#;
         if self.slash.dismissed {
             return Vec::new();
         }
-        slash_matches(self.slash_commands(), query)
+        slash_matches(&self.slash_commands(), query)
     }
 
     /// `/` 補完が開いている間の ↑↓ / Enter・Tab / Esc。composer の Editor アクション（MoveUp /
@@ -5756,7 +5776,10 @@ PYEOF"#;
         else {
             return;
         };
-        let text = slash_insertion(&name);
+        // レシピ（O16）は本文をそのまま入れる（送らない・人が確かめて ⌘⏎）。
+        let text = self
+            .recipe_body(&name)
+            .unwrap_or_else(|| slash_insertion(&name));
         // 1 回の編集で置き換える＝⌘Z で打っていた `/co` に戻せる。
         self.composer
             .update(cx, |composer, cx| composer.replace_all_text(&text, cx));
@@ -14434,6 +14457,59 @@ PYEOF"#;
         assert!(!is_slash_command("/Users/me/a.rs を見て"));
         assert!(!is_slash_command("/"));
         assert!(!is_slash_command("compact"));
+    }
+
+    /// O16: `.necoder/recipes/*.md` は `/` 補完に `necoder:<名前>` で出て、選ぶと本文が入る（送らない）。
+    #[gpui::test]
+    fn recipes_show_up_in_slash_completion_and_insert_their_text(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "recipes");
+        let root =
+            std::env::temp_dir().join(format!("necoder_recipe_panel_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join(".necoder/recipes")).expect("作れる");
+        std::fs::write(
+            root.join(".necoder/recipes/review.md"),
+            "# 変更を読んで指摘\n差分を読み、問題を挙げて。",
+        )
+        .expect("書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_destination(
+                "project".into(),
+                None,
+                LocalHost::shared(),
+                Some(root.clone()),
+                cx,
+            );
+            panel.focus_composer(window, cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _window, cx| {
+            panel.composer.update(cx, |composer, cx| {
+                composer.set_plain_text("/necoder:rev", cx)
+            });
+        });
+        cx.run_until_parked();
+        let items = panel.read_with(cx, |panel, _cx| {
+            panel
+                .slash_popup_items()
+                .into_iter()
+                .map(|index| panel.slash_commands()[index].clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].name, "necoder:review");
+        assert_eq!(items[0].description, "変更を読んで指摘");
+        panel.update_in(cx, |panel, _window, cx| {
+            let index = panel.slash_popup_items()[0];
+            panel.accept_slash_command(index, cx);
+        });
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.composer.read(cx).plain_text()),
+            "差分を読み、問題を挙げて。"
+        );
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_file(settings_path).ok();
     }
 
     /// 実際のキー配送（既定 keymap の Editor 文脈）で: ↑↓ で選び、Enter / Tab で `/name ` を入れる。
