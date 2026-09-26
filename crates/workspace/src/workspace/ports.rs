@@ -290,7 +290,7 @@ impl Workspace {
         let pid = row.port.pid;
         let own_pid = std::process::id();
         cx.spawn(async move |workspace, cx| {
-            let stopped = cx
+            let stopped: Result<(), ()> = cx
                 .background_executor()
                 .spawn(async move {
                     if !still_ours(pid, own_pid) {
