@@ -9,9 +9,31 @@
 //! transcript・Markdown プレビューのリンク = `Workspace::open_url`）。
 //!
 //! 色は識別に集約（UI-SPEC §1.3）: ツールバーは bg1・fg2/fg0 と中立の選択面 bg3 だけで、識別色は使わない。
+//!
+//! **Design Mode**（⌘⇧D・ツールバーの Design）: ページの要素を選び、その HTML・計算済みスタイル・
+//! 切り抜き（PNG）をアクティブなスレッドの composer へ添える（送信はしない）。ピッカーは生成時に
+//! 文書の頭へ入れておき（`webview_view::design`）、Design の間だけ nonce を渡して動かす。ページ →
+//! necoder の IPC は Web タブにだけ付き、Design 中かつ nonce が一致した物だけを受ける。
 
 use crate::workspace::*;
-use webview_view::{localhost, WebViewEvent, WebViewView};
+use webview_view::{design, localhost, WebViewEvent, WebViewView};
+
+/// Design Mode で要素が選ばれた（Workspace がアクティブなスレッドの composer へ添える）。
+pub(crate) enum WebPreviewEvent {
+    ElementPicked {
+        capture: Box<design::ElementCapture>,
+        /// 要素の切り抜き（撮れなかった時は `None` ＝ テキストだけ添える）。
+        png: Option<Vec<u8>>,
+        /// この選択で Design が終わった（Shift+クリックで続ける時は `false`）。
+        finished: bool,
+    },
+}
+
+/// Design 中の状態（Design 中だけ `Some`）。
+struct DesignSession {
+    /// この Design の合言葉。ページからの知らせはこれが一致した物だけ受ける。
+    nonce: String,
+}
 
 /// Web タブの鍵（`EditorTab.path`）。タブ列は path で同一判定・永続化するので、URL（正規形）を
 /// そのまま入れる。ファイルの鍵は絶対パス（`/…` / `C:\…`）なので `http://` で始まる鍵と衝突しない。
@@ -83,17 +105,26 @@ pub(crate) struct WebPreviewView {
     /// OS の WebView。載せられない環境（Linux）では None でフォールバック表示。
     viewer: Option<Entity<WebViewView>>,
     viewport: Viewport,
+    design: Option<DesignSession>,
     theme: Theme,
     focus_handle: FocusHandle,
     _viewer_subscriptions: Vec<Subscription>,
 }
+
+impl EventEmitter<WebPreviewEvent> for WebPreviewView {}
 
 impl WebPreviewView {
     pub(crate) fn new(url: &str, theme: Theme, cx: &mut Context<Self>) -> Self {
         let viewer = webview_view::is_supported().then(|| {
             let viewer_theme = theme.clone();
             let url = url.to_string();
-            cx.new(move |cx| WebViewView::localhost(&url, viewer_theme, cx))
+            cx.new(move |cx| {
+                let mut viewer = WebViewView::localhost(&url, viewer_theme, cx);
+                // Design Mode のピッカーと IPC は WebView の生成時にしか付けられない。普段は何もしない。
+                viewer.add_initialization_script(design::picker_script());
+                viewer.enable_ipc();
+                viewer
+            })
         });
         let mut subscriptions = Vec::new();
         if let Some(viewer) = &viewer {
@@ -105,6 +136,7 @@ impl WebPreviewView {
             url: url.to_string(),
             viewer,
             viewport: Viewport::Full,
+            design: None,
             theme,
             focus_handle: cx.focus_handle(),
             _viewer_subscriptions: subscriptions,
@@ -118,8 +150,156 @@ impl WebPreviewView {
         cx: &mut Context<Self>,
     ) {
         match event {
+            // 読み込み直した文書にはピッカーの状態が無い＝ Design は終わる。
+            WebViewEvent::PageLoad {
+                finished: false, ..
+            } => {
+                self.design = None;
+                cx.notify();
+            }
             WebViewEvent::PageLoad { .. } | WebViewEvent::TitleChanged(_) => cx.notify(),
+            WebViewEvent::Message { sender, body } => self.on_design_message(sender, body, cx),
         }
+    }
+
+    /// テスト用: WebView 無しで Design 中の状態にする（テスト窓はネイティブの WebView を作れない）。
+    #[cfg(test)]
+    pub(crate) fn force_design_for_test(&mut self) {
+        self.design = Some(DesignSession {
+            nonce: design::new_nonce(),
+        });
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn is_designing(&self) -> bool {
+        self.design.is_some()
+    }
+
+    /// Design の開始 / 終了（⌘⇧D・ツールバー）。始められなかった（WebView がまだ無い）時は `false`。
+    pub(crate) fn toggle_design(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.design.is_some() {
+            self.stop_design(cx);
+            return true;
+        }
+        self.start_design(cx)
+    }
+
+    fn start_design(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(viewer) = self.viewer.clone() else {
+            return false;
+        };
+        // 読み込めていない（開発サーバが起動していない等）ページには選ぶ物が無い。
+        if viewer.read(cx).load_failure().is_some() {
+            return false;
+        }
+        let nonce = design::new_nonce();
+        if !viewer
+            .read(cx)
+            .evaluate_script(&design::start_script(&nonce))
+        {
+            return false;
+        }
+        self.design = Some(DesignSession { nonce });
+        // Esc をページの中で受けられるよう、キーを WebView へ渡す。
+        viewer.update(cx, |viewer, _| viewer.set_key_focus(true));
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn stop_design(&mut self, cx: &mut Context<Self>) {
+        if self.design.take().is_none() {
+            return;
+        }
+        if let Some(viewer) = &self.viewer {
+            viewer.read(cx).evaluate_script(design::STOP_SCRIPT);
+        }
+        cx.notify();
+    }
+
+    /// ページからの知らせ。送り手が localhost の文書・Design 中・nonce 一致・形と大きさが決まりどおりの
+    /// 物だけ受ける。
+    fn on_design_message(&mut self, sender: &str, body: &str, cx: &mut Context<Self>) {
+        let nonce = self.design.as_ref().map(|session| session.nonce.as_str());
+        match design::accept_message(nonce, sender, body) {
+            Ok(design::DesignMessage::Cancel) => {
+                // ページの中で Esc。ピッカーは自分で片付けている。
+                self.design = None;
+                cx.notify();
+            }
+            Ok(design::DesignMessage::Pick { multi, capture }) => {
+                self.capture_pick(capture, multi, cx)
+            }
+            Err(rejected) => {
+                // 捨てるだけ（ページが偽の知らせを投げても何も起きない）。理由は開発中だけ出す。
+                if cfg!(debug_assertions) {
+                    eprintln!("design: ページからの知らせを捨てた: {rejected:?}");
+                }
+            }
+        }
+    }
+
+    /// 選ばれた要素を切り抜いてから知らせる。切り抜けなくてもテキストは添える。
+    fn capture_pick(
+        &mut self,
+        capture: Box<design::ElementCapture>,
+        multi: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(viewer) = self.viewer.clone() else {
+            return;
+        };
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        let started = viewer.read(cx).capture_element(
+            &capture.element.rect,
+            capture.page.viewport_width,
+            Box::new(move |result| {
+                // 受け手（この view）が先に消えていれば渡す先が無いだけ。
+                sender.send(result).ok();
+            }),
+        );
+        cx.spawn(async move |this, cx| {
+            let result = match started {
+                Ok(()) => receiver
+                    .await
+                    .unwrap_or_else(|_| Err("the snapshot was dropped".to_string())),
+                Err(error) => Err(error),
+            };
+            this.update(cx, |this, cx| this.finish_pick(capture, multi, result, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn finish_pick(
+        &mut self,
+        capture: Box<design::ElementCapture>,
+        multi: bool,
+        result: Result<Vec<u8>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let png = match result {
+            Ok(png) => Some(png),
+            Err(error) => {
+                eprintln!("design: 要素を切り抜けない: {error}");
+                None
+            }
+        };
+        let continuing = multi && self.design.is_some();
+        if continuing {
+            if let Some(viewer) = &self.viewer {
+                viewer.read(cx).evaluate_script(design::RESUME_SCRIPT);
+            }
+        } else {
+            self.stop_design(cx);
+        }
+        #[cfg(debug_assertions)]
+        debug_dump_capture(&capture, png.as_deref());
+        cx.emit(WebPreviewEvent::ElementPicked {
+            capture,
+            png,
+            finished: !continuing,
+        });
+        cx.notify();
     }
 
     /// タブの鍵にした URL。
@@ -273,6 +453,47 @@ impl WebPreviewView {
         }
     }
 
+    /// 開発用: ピッカーの debug 口（`__necoderDesignDebug`）でホバー / 選択を起こす。
+    /// 実際のクリックと同じ道（切り抜き → composer）を通る。debug ビルドのみ。
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_design(&self, action: &str, selector: &str, cx: &App) {
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        let selector = serde_json::Value::String(selector.to_string()).to_string();
+        let script = match action {
+            "hover" => format!("window.__necoderDesignDebug.hover({selector})"),
+            "pick" => format!("window.__necoderDesignDebug.pick({selector}, false)"),
+            _ => format!("window.__necoderDesignDebug.pick({selector}, true)"),
+        };
+        let label = format!("design {action} {selector}");
+        viewer
+            .read(cx)
+            .evaluate_script_with_callback(&script, move |result| {
+                eprintln!("WEB_PREVIEW_PROBE {label}: {result}");
+            });
+    }
+
+    /// 開発用: 見えている範囲をまるごと撮って PNG に書く（ホバー枠がページの上に出ているかを見る）。
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_snapshot_view(&self, path: PathBuf, cx: &App) {
+        let Some(viewer) = &self.viewer else {
+            return;
+        };
+        let started = viewer
+            .read(cx)
+            .capture_visible(Box::new(move |result| match result {
+                Ok(png) => match std::fs::write(&path, png) {
+                    Ok(()) => eprintln!("WEB_PREVIEW_PROBE snapshot: {}", path.display()),
+                    Err(error) => eprintln!("WEB_PREVIEW_PROBE snapshot: 書けない: {error}"),
+                },
+                Err(error) => eprintln!("WEB_PREVIEW_PROBE snapshot: 撮れない: {error}"),
+            }));
+        if let Err(error) = started {
+            eprintln!("WEB_PREVIEW_PROBE snapshot: 撮り始められない: {error}");
+        }
+    }
+
     /// ツールバーの四角いアイコンボタン（19px・hover で bg2）。
     fn icon_button(
         &self,
@@ -357,6 +578,7 @@ impl WebPreviewView {
             .unwrap_or((false, false, false));
         let current = self.current_url(cx);
         let zoom = self.zoom(cx);
+        let designing = self.design.is_some();
         let mut viewport_chips = vec![self
             .text_chip(
                 "web-viewport-full",
@@ -451,7 +673,7 @@ impl WebPreviewView {
                     }),
                 ),
             )
-            // URL は表示だけ（任意の URL を打つ欄にはしない）。
+            // URL は表示だけ（任意の URL を打つ欄にはしない）。Design 中は操作の案内に替える。
             .child(
                 div()
                     .id("web-url")
@@ -460,8 +682,10 @@ impl WebPreviewView {
                     .ml(px(6.))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_color(theme.fg1)
-                    .child(SharedString::from(if loading {
+                    .text_color(if designing { theme.fg0 } else { theme.fg1 })
+                    .child(SharedString::from(if designing {
+                        i18n::t!("design.hint")
+                    } else if loading {
                         format!("{} …", localhost::display_label(&current))
                     } else {
                         localhost::display_label(&current)
@@ -515,6 +739,47 @@ impl WebPreviewView {
             .children(viewport_chips)
             .child(self.separator())
             .child(
+                div()
+                    .id("web-design")
+                    .debug_selector(|| "web-design".to_string())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.))
+                    .h(px(19.))
+                    .px(px(6.))
+                    .rounded(px(5.))
+                    .text_size(px(10.5))
+                    .cursor_pointer()
+                    .text_color(if designing { theme.fg0 } else { theme.fg1 })
+                    .when(designing, |chip| chip.bg(theme.bg3))
+                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                    .child(
+                        svg()
+                            .path("icons/mouse-pointer-click.svg")
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(if designing { theme.fg0 } else { theme.fg1 }),
+                    )
+                    .child(SharedString::from(i18n::t!("design.toggle")))
+                    .tooltip(Tooltip::text(
+                        format!(
+                            "{}  {}",
+                            i18n::t!("design.toggle_tip"),
+                            keymap_core::keystroke_label("cmd-shift-d")
+                        ),
+                        theme.clone(),
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _, window, cx| {
+                            cx.stop_propagation();
+                            // ⌘⇧D と同じ入口を通す（始められない時の案内もそちらが出す）。
+                            window.dispatch_action(Box::new(ToggleDesignMode), cx);
+                        }),
+                    ),
+            )
+            .child(
                 self.icon_button(
                     "web-devtools",
                     "icons/code-xml.svg",
@@ -545,6 +810,36 @@ impl WebPreviewView {
                 ),
             )
     }
+}
+
+/// 開発用: `NECODER_DESIGN_CAPTURE_DIR=<dir>` を置くと、選んだ要素の切り抜き（PNG）と composer へ入れる
+/// 文章を `element-<n>.png` / `element-<n>.md` に書き出す（WKWebView の中身は offscreen の画像に
+/// 写らないので、切り抜きが正しいかはこれで目で確かめる）。debug ビルドのみ。
+#[cfg(debug_assertions)]
+fn debug_dump_capture(capture: &design::ElementCapture, png: Option<&[u8]>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SERIAL: AtomicUsize = AtomicUsize::new(0);
+    let Some(directory) = std::env::var_os("NECODER_DESIGN_CAPTURE_DIR").map(PathBuf::from) else {
+        return;
+    };
+    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+    let base = directory.join(format!("element-{serial}"));
+    if let Some(png) = png {
+        if let Err(error) = std::fs::write(base.with_extension("png"), png) {
+            eprintln!("DESIGN_CAPTURE: PNG を書けない: {error}");
+        }
+    }
+    if let Err(error) = std::fs::write(
+        base.with_extension("md"),
+        design::format_for_prompt(capture),
+    ) {
+        eprintln!("DESIGN_CAPTURE: 文章を書けない: {error}");
+    }
+    eprintln!(
+        "DESIGN_CAPTURE: {} ({} bytes png)",
+        base.display(),
+        png.map_or(0, <[u8]>::len)
+    );
 }
 
 impl Focusable for WebPreviewView {
@@ -603,6 +898,14 @@ impl Render for WebPreviewView {
         div()
             .key_context("WebPreview")
             .track_focus(&self.focus_handle(cx))
+            // Design 中に GPUI 側（ツールバー等）へキーが来ている時の Esc。ページの中の Esc は
+            // ピッカーが受けて知らせてくる。
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" && this.design.is_some() {
+                    cx.stop_propagation();
+                    this.stop_design(cx);
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()

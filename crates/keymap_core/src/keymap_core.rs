@@ -341,6 +341,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-shift-enter": "workspace::ToggleAgentFullScreen",
       "cmd-shift-m": "workspace::ToggleFleet",
       "cmd-shift-j": "workspace::ToggleChat",
+      "cmd-shift-d": "workspace::ToggleDesignMode",
       "cmd-n": "workspace::NewTask",
       "cmd-shift-1": "workspace::StageOne",
       "cmd-shift-2": "workspace::StageTwo",

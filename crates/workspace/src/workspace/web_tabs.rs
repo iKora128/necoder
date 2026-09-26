@@ -28,6 +28,17 @@ pub(crate) fn resolve_link_path(base: Option<&Path>, destination: &str) -> Optio
     base.map(|base| base.join(path))
 }
 
+/// 添付チップの名前は短く（要素の呼び名は長くなりうる）。
+fn truncate_chip(label: &str) -> String {
+    const MAX_CHARS: usize = 36;
+    if label.chars().count() <= MAX_CHARS {
+        return label.to_string();
+    }
+    let mut cut: String = label.chars().take(MAX_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
 /// `mailto:` / `https:` のような scheme を持つか（Windows のドライブ `C:\` は scheme と見なさない）。
 fn has_scheme(text: &str) -> bool {
     let Some((scheme, _)) = text.split_once(':') else {
@@ -121,11 +132,13 @@ impl Workspace {
         view.update(cx, |view, cx| view.set_evict_minutes(evict_minutes, cx));
         // タイトル・読み込み状態の変化でタブ名を描き直す。
         let observation = cx.observe(&view, |_, _, cx| cx.notify());
+        let events = cx.subscribe_in(&view, window, Self::on_web_preview_event);
         self.tabs.push(EditorTab {
             path: key,
             content: TabContent::Web {
                 view: view.clone(),
                 _observation: observation,
+                _events: events,
             },
             transient: false,
         });
@@ -137,6 +150,90 @@ impl Workspace {
         self.sync_active_slot();
         self.save_state(cx);
         cx.notify();
+    }
+
+    /// Design Mode の開始 / 終了（⌘⇧D・パレット）。アクティブなタブが Web タブでなければ案内を出す。
+    pub(crate) fn toggle_design_mode(
+        &mut self,
+        _: &ToggleDesignMode,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.web().cloned())
+        else {
+            let color = self.accent();
+            self.push_toast(i18n::t!("design.needs_web_tab").into(), color, cx);
+            return;
+        };
+        let toggled = view.update(cx, |view, cx| view.toggle_design(cx));
+        if !toggled {
+            let color = self.accent();
+            self.push_toast(i18n::t!("design.not_ready").into(), color, cx);
+        }
+    }
+
+    /// Design Mode で要素が選ばれた: その Web タブが居る session のアクティブなスレッドの composer へ、
+    /// 切り抜き（画像の添付・チップ名は要素の呼び名）と説明の文章を足す。**送信はしない**。
+    /// 選び終えたら composer へフォーカスを移す（続けて指示を打てる）。
+    pub(crate) fn on_web_preview_event(
+        &mut self,
+        view: &Entity<WebPreviewView>,
+        event: &WebPreviewEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let WebPreviewEvent::ElementPicked {
+            capture,
+            png,
+            finished,
+        } = event;
+        let Some(panel) = self.panel_for_web_view(view) else {
+            return;
+        };
+        let text = webview_view::design::format_for_prompt(capture);
+        let chip = SharedString::from(format!(
+            "◎ {}",
+            truncate_chip(&webview_view::design::element_label(capture))
+        ));
+        let attached = panel.update(cx, |panel, cx| {
+            let attached = png.as_ref().is_some_and(|png| {
+                panel.attach_labeled_image(
+                    &editor_view::PastedImage {
+                        format: gpui::ImageFormat::Png,
+                        bytes: png.clone(),
+                    },
+                    chip,
+                    cx,
+                )
+            });
+            panel.append_to_composer(&text, cx);
+            attached
+        });
+        if !attached {
+            let color = self.accent();
+            self.push_toast(i18n::t!("design.capture_failed").into(), color, cx);
+        }
+        if !self.chat_mode() {
+            self.chrome.show_right = true;
+        }
+        if *finished {
+            self.agent_active = true;
+            panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Web タブが居る session（プロジェクト / Chat）の Agent パネル。
+    fn panel_for_web_view(&self, view: &Entity<WebPreviewView>) -> Option<Entity<AgentPanel>> {
+        self.project_sessions
+            .sessions
+            .iter()
+            .chain(self.project_sessions.chat.iter())
+            .find(|session| session.tabs.iter().any(|tab| tab.web() == Some(view)))
+            .map(|session| session.agent_panel.clone())
     }
 
     /// パレット「プレビュー: localhost を開く…」。入力欄にポート番号か localhost の URL を打つ
@@ -288,6 +385,22 @@ impl Workspace {
                         .debug_evaluate(argument.to_string(), argument, cx);
                 }
             }
+            // Design Mode（`design` = 開始 / 終了・`design-hover:<css>` / `design-pick:<css>` /
+            // `design-pick-multi:<css>` = ページの debug 口で実際のクリックと同じ道を通す・
+            // `snapshot-view:<path>` = 見えている範囲をまるごと撮る）。
+            "design" => self.toggle_design_mode(&ToggleDesignMode, window, cx),
+            "design-hover" | "design-pick" | "design-pick-multi" => {
+                if let Some(web) = active_web {
+                    let action = name.trim_start_matches("design-");
+                    web.read(cx).debug_design(action, argument, cx);
+                }
+            }
+            "snapshot-view" => {
+                if let Some(web) = active_web {
+                    web.read(cx)
+                        .debug_snapshot_view(PathBuf::from(argument), cx);
+                }
+            }
             "menu" => {
                 let index = self.active_tab;
                 self.open_tab_menu(index, point(px(520.), px(76.)), cx);
@@ -306,6 +419,7 @@ impl Workspace {
                         web.url().to_string(),
                         web.current_url(cx),
                         web.tab_label(cx),
+                        web.is_designing(),
                     )
                 });
                 eprintln!(
@@ -462,6 +576,130 @@ mod tests {
             "閉じたら戻る"
         );
         workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
+    }
+
+    /// Design Mode で選んだ要素は、その Web タブが居るプロジェクトのアクティブなスレッドの composer に
+    /// 足される（送らない）。切り抜きが無い時はテキストだけ足して、撮れなかったと知らせる。
+    #[gpui::test]
+    fn picked_elements_land_in_the_composer_of_the_tab_session(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("design", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let capture: webview_view::design::ElementCapture = serde_json::from_value(serde_json::json!({
+            "page": {"url": "http://localhost:5173/", "title": "App", "viewport_width": 800.0,
+                     "viewport_height": 600.0, "device_pixel_ratio": 2.0},
+            "element": {"tag": "button", "selector": "button#start", "path": "main > button#start",
+                        "text": "Start", "nearby_text": [], "html": "<button id=\"start\">Start</button>",
+                        "role": null, "accessible_name": null, "attributes": [],
+                        "rect": {"x": 10.0, "y": 20.0, "width": 80.0, "height": 30.0},
+                        "styles": {}, "components": [], "source": null}
+        }))
+        .expect("形どおり");
+        workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.chrome.show_right = false;
+            workspace.open_url("http://localhost:5173/", cx);
+            workspace.process_pending_shell_effects(window, cx);
+            let view = workspace.tabs[0].web().cloned().expect("Web タブ");
+            view.update(cx, |_view, cx| {
+                cx.emit(WebPreviewEvent::ElementPicked {
+                    capture: Box::new(capture),
+                    png: None,
+                    finished: true,
+                })
+            });
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let text = workspace.agent_panel.read(cx).composer_text(cx);
+            assert!(text.contains("button#start \"Start\""), "{text}");
+            assert!(text.contains("```html"), "{text}");
+            assert!(
+                workspace.chrome.show_right,
+                "composer が見えるよう右のドックを出す"
+            );
+            assert!(
+                workspace
+                    .notifications
+                    .toasts
+                    .iter()
+                    .any(|(message, ..)| message.as_ref() == i18n::t!("design.capture_failed")),
+                "切り抜きが無いことを知らせる"
+            );
+            stop_watchers(workspace);
+        });
+    }
+
+    /// Design 中に GPUI 側へキーが来ている時も Esc で Design を抜ける。Web タブが無い時の ⌘⇧D は案内だけ。
+    #[gpui::test]
+    fn escape_leaves_design_and_design_needs_a_web_tab(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("escape", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.toggle_design_mode(&ToggleDesignMode, window, cx);
+            assert!(
+                workspace
+                    .notifications
+                    .toasts
+                    .iter()
+                    .any(|(message, ..)| message.as_ref() == i18n::t!("design.needs_web_tab")),
+                "Web タブが無ければ案内する"
+            );
+        });
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_url("http://localhost:5173/", cx);
+            workspace.process_pending_shell_effects(window, cx);
+            let view = workspace.tabs[0].web().cloned().expect("Web タブ");
+            view.update(cx, |view, _cx| view.force_design_for_test());
+            let handle = view.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            view
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _cx| view.is_designing()));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            !view.read_with(cx, |view, _cx| view.is_designing()),
+            "Esc で Design を抜ける"
+        );
+        workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
+    }
+
+    /// ツールバーの `Design` は ⌘⇧D と同じ入口（action）を通る。WebView がまだ無い（テスト窓には
+    /// ネイティブの WebView が作られない）時は始めずに案内する。
+    #[gpui::test]
+    fn the_design_chip_goes_through_the_same_action(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("chip", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.open_url("http://localhost:5173/", cx);
+            workspace.process_pending_shell_effects(window, cx);
+        });
+        cx.run_until_parked();
+        let chip = cx
+            .debug_bounds("web-design")
+            .expect("Web タブのツールバーに Design が描かれている");
+        cx.simulate_mouse_down(chip.center(), MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            assert!(
+                workspace
+                    .notifications
+                    .toasts
+                    .iter()
+                    .any(|(message, ..)| message.as_ref() == i18n::t!("design.not_ready")),
+                "WebView が無ければ始めずに案内する"
+            );
+            stop_watchers(workspace);
+        });
     }
 
     /// パレットの入力欄は localhost しか通さない（任意の URL を開く欄にしない）。
