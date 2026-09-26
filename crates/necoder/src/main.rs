@@ -353,6 +353,8 @@ impl gpui::AssetSource for Assets {
             "icons/arrow-right.svg" => icon!("arrow-right.svg"),
             "icons/code-xml.svg" => icon!("code-xml.svg"),
             "icons/external-link.svg" => icon!("external-link.svg"),
+            // Web タブの Design（要素を選んで AI に渡す）。
+            "icons/mouse-pointer-click.svg" => icon!("mouse-pointer-click.svg"),
             // statusbar の診断件数（エラー / 警告）。
             "icons/circle-x.svg" => icon!("circle-x.svg"),
             "icons/triangle-alert.svg" => icon!("triangle-alert.svg"),

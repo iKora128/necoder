@@ -12,6 +12,11 @@ path = "src/webview_view.rs"
 futures.workspace = true
 gpui.workspace = true
 i18n.workspace = true
+# Design Mode: ページからの知らせの検め（serde / regex）と要素の切り抜き（image。Windows は撮った全体から切り抜く）。
+image.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 theme_core.workspace = true
 url.workspace = true
 
@@ -23,13 +28,16 @@ url.workspace = true
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 wry = { version = "=0.56.1", default-features = false, features = ["devtools"] }
 
-# macOS の Web タブ: wry の navigation delegate を包んで移動判定を最上位だけにする（`main_frame.rs`）。
+# macOS の Web タブ: wry の navigation delegate を包んで移動判定を最上位だけにする（`main_frame.rs`）・
+# Design Mode の切り抜き（WKWebView の takeSnapshotWithConfiguration → PNG・`snapshot.rs`）。
 # 版は wry が引いている物に揃える（Cargo.lock の同じ版を共有して二重にビルドしない）。
-# feature は使う物だけ（既定の全部入りはビルドが重い）。
+# feature は使う物だけ（既定の全部入りはビルドが重い）。wry は WKSnapshotConfiguration を有効にしていない。
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 objc2 = "0.6.4"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSObject", "NSString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSBitmapImageRep", "NSImage", "NSImageRep"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError", "NSObject", "NSString"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "block2",
@@ -41,5 +49,13 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "WKNavigationAction",
   "WKNavigationDelegate",
   "WKNavigationResponse",
+  "WKSnapshotConfiguration",
   "WKWebView",
 ] }
+
+# Windows の Design Mode の切り抜き（WebView2 の CapturePreview を PNG で受けて切り抜く・`snapshot.rs`）。
+# 版は wry が引いている物に揃える。
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+windows-core = "0.61"

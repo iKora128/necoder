@@ -19,12 +19,15 @@
 //! 入口は 3 つ: ローカル HTML（[`WebViewView::local_file`]・`file://`）/ エージェントが書いた HTML を
 //! 閉じ込める artifact（[`WebViewView::sandboxed`]・[`sandbox`]）/ 開発サーバを見る Web タブ
 //! （[`WebViewView::localhost`]・[`localhost`]）。移動の線引きと IPC の有無は入口ごとに決まり、
-//! 混ぜない（artifact は IPC 無し・Web タブは最上位が localhost から出ない）。
+//! 混ぜない（artifact は IPC 無し・Web タブは最上位が localhost から出ず、IPC は Design Mode の
+//! 知らせだけ＝受け手が [`design::accept_message`] で検める）。
 
+pub mod design;
 pub mod localhost;
 #[cfg(target_os = "macos")]
 mod main_frame;
 pub mod sandbox;
+pub mod snapshot;
 
 use futures::channel::mpsc;
 use futures::StreamExt as _;
@@ -49,6 +52,11 @@ pub enum WebViewEvent {
     PageLoad { url: String, finished: bool },
     /// 文書のタイトルが変わった（空文字もそのまま届く）。
     TitleChanged(String),
+    /// ページからの IPC（`window.ipc.postMessage`）。**中身は検証していない** —
+    /// 受け手が送り手・状態・nonce・形・大きさを確かめてから使う（[`design::accept_message`]）。
+    /// `sender` は送り手の文書の URL（wry が添える。埋め込まれた iframe から来たらその iframe の URL）。
+    /// IPC を付けた Web タブ（[`WebViewView::enable_ipc`]）だけが出す。
+    Message { sender: String, body: String },
 }
 
 /// wry のコールバック（主スレッド・`'static`）から GPUI の Entity へ渡す中継。
@@ -60,6 +68,7 @@ enum NativeEvent {
     /// 最上位の読み込みの失敗（macOS の navigation delegate だけが積む。WebView2 は自前のエラーページ）。
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     LoadFailed(String),
+    Message { sender: String, body: String },
 }
 
 /// Web タブだけが持つ状態。WebView を持たない OS（Linux）では生成に使う欄が読まれない。
@@ -74,6 +83,10 @@ struct WebState {
     loading: bool,
     /// 最上位の読み込みの失敗（サーバが起動していない等）。この間は WebView を隠して理由を出す。
     failed: Option<String>,
+    /// 文書の頭で毎回走らせるスクリプト（最上位の文書のみ）。生成時にしか渡せないので覚えておく。
+    initialization_scripts: Vec<String>,
+    /// ページ → necoder の IPC を受けるか（生成時にしか付けられない）。
+    ipc: bool,
 }
 
 /// このビルドがネイティブ WebView を提供できるか。
@@ -193,8 +206,28 @@ impl WebViewView {
             title: None,
             loading: false,
             failed: None,
+            initialization_scripts: Vec::new(),
+            ipc: false,
         });
         view
+    }
+
+    /// Web タブの文書の頭で毎回走らせるスクリプトを足す（最上位の文書のみ・Design Mode のピッカー）。
+    /// WebView の生成時にしか渡せないので、表示前（遅延生成の前）に呼ぶ。ファイルのプレビューと
+    /// artifact には入れない（呼んでも無視）。
+    pub fn add_initialization_script(&mut self, script: impl Into<String>) {
+        if let Some(web) = self.web.as_mut() {
+            web.initialization_scripts.push(script.into());
+        }
+    }
+
+    /// Web タブでページ → necoder の IPC を受ける（[`WebViewEvent::Message`]）。生成時にしか付けられない
+    /// ので表示前に呼ぶ。**Web タブだけ**が持つ口で、ファイルのプレビューと artifact には付けない
+    /// （呼んでも無視・artifact の隔離は `sandbox` の注記のとおり IPC 無しのまま）。
+    pub fn enable_ipc(&mut self) {
+        if let Some(web) = self.web.as_mut() {
+            web.ipc = true;
+        }
     }
 
     pub fn is_web(&self) -> bool {
@@ -280,6 +313,76 @@ impl WebViewView {
         }
     }
 
+    /// ページの中でスクリプトを走らせる（結果は捨てる）。WebView がまだ無ければ `false`。
+    pub fn evaluate_script(&self, script: &str) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(webview) = &self.webview {
+            return match webview.evaluate_script(script) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("webview_view: スクリプトを走らせられない: {error}");
+                    false
+                }
+            };
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = script;
+        false
+    }
+
+    /// Design Mode: ビューポート基準の CSS px の矩形（`rect`）を切り抜いて PNG で返す。
+    /// `done` は撮り終えた時に主スレッドで 1 回だけ呼ばれる。WebView がまだ無い・矩形が見えている範囲の
+    /// 外・撮り始められない時は `Err` をすぐ返す（その時 `done` は呼ばれない）。
+    pub fn capture_element(
+        &self,
+        rect: &design::Rect,
+        viewport_css_width: f64,
+        done: snapshot::SnapshotDone,
+    ) -> Result<(), String> {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let (Some(webview), Some(bounds)) = (&self.webview, self.last_bounds) else {
+                return Err("the web view is not shown".to_string());
+            };
+            let view_width = f64::from(f32::from(bounds.size.width));
+            let view_height = f64::from(f32::from(bounds.size.height));
+            let view_rect =
+                snapshot::to_view_rect(rect, viewport_css_width, view_width, view_height)
+                    .ok_or_else(|| "the element is outside the visible area".to_string())?;
+            snapshot::capture(webview, view_rect, view_width, done)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (rect, viewport_css_width, done);
+            Err("web views are not supported here".to_string())
+        }
+    }
+
+    /// 開発用: 見えている範囲をまるごと撮る（Design の検証で、ページの上のホバー枠を見るため）。
+    #[cfg(debug_assertions)]
+    pub fn capture_visible(&self, done: snapshot::SnapshotDone) -> Result<(), String> {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let (Some(webview), Some(bounds)) = (&self.webview, self.last_bounds) else {
+                return Err("the web view is not shown".to_string());
+            };
+            let view_width = f64::from(f32::from(bounds.size.width));
+            let view_height = f64::from(f32::from(bounds.size.height));
+            let whole = snapshot::ViewRect {
+                x: 0.0,
+                y: 0.0,
+                width: view_width,
+                height: view_height,
+            };
+            snapshot::capture(webview, whole, view_width, done)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = done;
+            Err("web views are not supported here".to_string())
+        }
+    }
+
     /// ページの中でスクリプトを走らせ、結果（JSON 文字列）を `callback` へ渡す。
     /// `callback` は主スレッドで呼ばれる。WebView がまだ無ければ `false`（呼ばれない）。
     pub fn evaluate_script_with_callback(
@@ -334,6 +437,9 @@ impl WebViewView {
                     }
                 }
                 self.set_key_focus(false);
+            }
+            NativeEvent::Message { sender, body } => {
+                cx.emit(WebViewEvent::Message { sender, body })
             }
         }
         cx.notify();
@@ -788,14 +894,14 @@ fn sandboxed_builder(builder: WebViewBuilder<'_>, root: PathBuf) -> WebViewBuild
 }
 
 /// Web タブ用の設定を足す: 最上位の文書が localhost から出る移動と新しい窓はキャンセルして既定の
-/// ブラウザへ（[`localhost`]）。読み込みとタイトルは GPUI 側へ中継する。
+/// ブラウザへ（[`localhost`]）。読み込み・タイトル・（付けた時だけ）IPC は GPUI 側へ中継する。
 /// iframe の中の移動はここを通さない（macOS は [`main_frame`]・WebView2 は元から最上位だけ）。
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn localhost_builder<'a>(builder: WebViewBuilder<'a>, web: &WebState) -> WebViewBuilder<'a> {
     // 受け側（view）が先に消えた後の送信は届け先が無いだけ（`.ok()`）。
     let page_events = web.events.clone();
     let title_events = web.events.clone();
-    builder
+    let mut builder = builder
         .with_navigation_handler(|url| match localhost::navigation(&url) {
             localhost::Navigation::Allow => true,
             localhost::Navigation::OpenInBrowser => {
@@ -818,7 +924,22 @@ fn localhost_builder<'a>(builder: WebViewBuilder<'a>, web: &WebState) -> WebView
         })
         .with_document_title_changed_handler(move |title| {
             title_events.unbounded_send(NativeEvent::Title(title)).ok();
-        })
+        });
+    for script in &web.initialization_scripts {
+        builder = builder.with_initialization_script(script.as_str());
+    }
+    // IPC は Web タブにだけ付ける（artifact は `sandboxed_builder` で付けないまま）。中身の検証は受け手。
+    if web.ipc {
+        let message_events = web.events.clone();
+        builder = builder.with_ipc_handler(move |request| {
+            let sender = request.uri().to_string();
+            let body = request.into_body();
+            message_events
+                .unbounded_send(NativeEvent::Message { sender, body })
+                .ok();
+        });
+    }
+    builder
 }
 
 /// 既定の破棄猶予（settings 適用前のフォールバック = settings_core の既定 15 分と同値）。
@@ -886,6 +1007,23 @@ mod tests {
         view.set_key_focus(false);
         assert!(!view.focus_when_ready, "返したら予約も消える");
         assert!(!view.wants_key_focus());
+    }
+
+    /// IPC の送り手は wry が `http::Uri` に通してから渡す。localhost の文書の URL はその形でも
+    /// localhost と判定され（fragment は Uri が落とす）、外部の iframe は外部のまま。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn ipc_senders_keep_their_host_through_the_uri() {
+        for (sender, allowed) in [
+            ("http://127.0.0.1:56525/", true),
+            ("http://localhost:5173/app?x=1#top", true),
+            ("http://[::1]:4000/", true),
+            ("https://ads.example/frame.html", false),
+            ("http://necoder-artifact.localhost/timer.html", false),
+        ] {
+            let uri: wry::http::Uri = sender.parse().expect("wry が組める URL");
+            assert_eq!(localhost::is_allowed(&uri.to_string()), allowed, "{sender}");
+        }
     }
 
     #[test]
