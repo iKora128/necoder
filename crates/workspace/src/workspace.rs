@@ -293,6 +293,8 @@ pub(crate) enum TabContent {
         _input_subscription: Subscription,
         /// hover dwell の購読（LSP hover・M10）。
         _hover_subscription: Subscription,
+        /// 整形プレビュー（Markdown）のリンクの購読（URL は Web タブ / ブラウザ・ファイルはタブで開く）。
+        _link_subscription: Subscription,
     },
     /// 画像タブ（FEATURES §2 の画像プレビュー）。編集・保存・LSP・hot exit の対象外。
     Image(Entity<ImageView>),

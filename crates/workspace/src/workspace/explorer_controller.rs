@@ -1237,6 +1237,7 @@ impl Workspace {
         let observation = cx.observe(&editor, Self::on_editor_changed);
         let input_subscription = cx.subscribe_in(&editor, window, Self::on_editor_typed);
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
+        let link_subscription = cx.subscribe_in(&editor, window, Self::on_preview_link);
         self.tabs.push(EditorTab {
             path: path.clone(),
             content: TabContent::Editor {
@@ -1244,6 +1245,7 @@ impl Workspace {
                 _observation: observation,
                 _input_subscription: input_subscription,
                 _hover_subscription: hover_subscription,
+                _link_subscription: link_subscription,
             },
             transient: false,
         });

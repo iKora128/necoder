@@ -1,11 +1,65 @@
 //! web_tabs — URL を開く入口と Web タブ（`web_preview_view`）の開閉。
 //!
 //! URL を開く経路はここの [`Workspace::open_url`] 1 本に集める: localhost 系（`webview_view::localhost`
-//! の範囲）は Web タブ、それ以外の http(s) は既定のブラウザ。エージェントの transcript のリンクが
-//! ここを通る（端末の URL クリックも統合時にここへ繋ぐ）。
+//! の範囲）は Web タブ、それ以外の http(s) は既定のブラウザ。エージェントの transcript のリンクと
+//! Markdown プレビューのリンクがここを通る（端末の URL クリックも統合時にここへ繋ぐ）。
 
 use crate::workspace::*;
 use webview_view::localhost;
+
+/// Markdown のリンクの行き先をファイルのパスへ（`base` = その `.md` のフォルダ）。
+/// URL（`https:` など scheme 付き）・ページ内アンカー（`#…`）・空は `None`。`?` / `#` 以降は落とし、
+/// `%20` などのエスケープは戻す。
+pub(crate) fn resolve_link_path(base: Option<&Path>, destination: &str) -> Option<PathBuf> {
+    let destination = destination.trim();
+    let without_suffix = destination
+        .split(['#', '?'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if without_suffix.is_empty() || has_scheme(without_suffix) {
+        return None;
+    }
+    let decoded = percent_decode(without_suffix).unwrap_or_else(|| without_suffix.to_string());
+    let path = PathBuf::from(&decoded);
+    if path.is_absolute() {
+        return Some(path);
+    }
+    base.map(|base| base.join(path))
+}
+
+/// `mailto:` / `https:` のような scheme を持つか（Windows のドライブ `C:\` は scheme と見なさない）。
+fn has_scheme(text: &str) -> bool {
+    let Some((scheme, _)) = text.split_once(':') else {
+        return false;
+    };
+    scheme.len() > 1
+        && scheme
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "+-.".contains(character))
+}
+
+/// `%XX` を戻す。不正なエスケープや UTF-8 として読めない結果は `None`（呼び側は原文のまま使う）。
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = text.get(index + 1..index + 3)?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
 
 impl Workspace {
     /// URL を開く（唯一の入口）。localhost 系は Web タブ、それ以外は既定のブラウザ。
@@ -124,6 +178,53 @@ impl Workspace {
                     cx,
                 );
             }
+        }
+    }
+
+    /// Markdown プレビューのリンクを開く。URL は [`Self::open_url`]、ファイルへのリンクはそのファイルを
+    /// 開く（`.md` ならプレビュー表示のまま）。ページ内アンカーと未知の scheme は何もしない。
+    pub(crate) fn on_preview_link(
+        &mut self,
+        editor: &Entity<EditorView>,
+        event: &editor_view::PreviewLinkClicked,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let destination = event.destination.trim();
+        if destination.starts_with("http://") || destination.starts_with("https://") {
+            self.open_url(destination, cx);
+            return;
+        }
+        let (base, local) = {
+            let view = editor.read(cx);
+            (
+                view.buffer()
+                    .path()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf),
+                !view.buffer().host().is_remote(),
+            )
+        };
+        let Some(path) = resolve_link_path(base.as_deref(), destination) else {
+            return;
+        };
+        // ローカルで見つからないリンクは黙って捨てず、開けなかったと言う。
+        if local && !path.is_file() {
+            let color = self.accent();
+            self.push_toast(
+                i18n::t!("link.open_failed", "target" => path.display().to_string()).into(),
+                color,
+                cx,
+            );
+            return;
+        }
+        self.record_nav_position(cx);
+        if lang::language_for_path(&path) == Some(lang::LanguageId::Markdown) {
+            self.open_file_then(path, window, cx, |editor, cx| {
+                editor.set_rendered_markdown(true, cx)
+            });
+        } else {
+            self.open_file(path, window, cx);
         }
     }
 
@@ -381,5 +482,46 @@ mod tests {
             );
             stop_watchers(workspace);
         });
+    }
+
+    #[test]
+    fn markdown_links_resolve_against_the_file_folder() {
+        let base = Path::new("/work/project/docs");
+        assert_eq!(
+            resolve_link_path(Some(base), "guide.md"),
+            Some(PathBuf::from("/work/project/docs/guide.md"))
+        );
+        assert_eq!(
+            resolve_link_path(Some(base), "../README.md#install"),
+            Some(PathBuf::from("/work/project/docs/../README.md"))
+        );
+        assert_eq!(
+            resolve_link_path(Some(base), "my%20notes.md?raw=1"),
+            Some(PathBuf::from("/work/project/docs/my notes.md"))
+        );
+        assert_eq!(
+            resolve_link_path(Some(base), "/etc/hosts"),
+            Some(PathBuf::from("/etc/hosts"))
+        );
+        // 無題バッファ（フォルダが無い）の相対リンクは解決しない。
+        assert_eq!(resolve_link_path(None, "guide.md"), None);
+    }
+
+    #[test]
+    fn urls_and_anchors_are_not_files() {
+        let base = Some(Path::new("/work"));
+        for destination in [
+            "",
+            "#top",
+            "https://example.com/",
+            "mailto:someone@example.com",
+            "javascript:alert(1)",
+            "vscode://open",
+        ] {
+            assert_eq!(resolve_link_path(base, destination), None, "{destination}");
+        }
+        // Windows のドライブは scheme ではない。
+        assert!(!has_scheme("C:\\work\\a.md"));
+        assert!(has_scheme("mailto:someone@example.com"));
     }
 }
