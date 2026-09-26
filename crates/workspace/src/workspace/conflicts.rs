@@ -232,6 +232,8 @@ pub(crate) struct ConflictCache {
 /// 「並べて見る」の 1 枚（開いている間だけ）。
 pub(crate) struct ConflictView {
     focus: FocusHandle,
+    /// 開いた時のエディタ（別のタブへ移ったら閉じる＝その衝突のための 1 枚なので）。
+    editor: gpui::EntityId,
     /// 見せている衝突の写し。描画ごとに全文を読まないよう、開いた時・操作の後・バッファの版が
     /// 変わった時に取り直す。衝突が無くなれば `None`（その時は閉じる）。
     shown: Option<ShownConflict>,
@@ -300,6 +302,14 @@ pub(crate) fn result_for_file(result: &str, crlf: bool) -> String {
     text
 }
 
+/// そのファイルの改行が CRLF か（`<<<<<<<` の行の終わりで見る。git は印の行をファイルの改行で書く。
+/// 衝突の中身には入ってくる側の CRLF の行が混ざりうるので、中身では決めない）。
+pub(crate) fn marker_line_is_crlf(text: &str, block: &ConflictBlock) -> bool {
+    text.get(block.whole.clone())
+        .and_then(|whole| whole.split_once('\n'))
+        .is_some_and(|(marker, _)| marker.ends_with('\r'))
+}
+
 /// 1 つの列に出す行の上限（これを超えた分は数だけ出す）。
 const VIEW_MAX_LINES: usize = 400;
 
@@ -359,12 +369,42 @@ impl Workspace {
 
     /// キャレットのある衝突（無ければ後ろ・先頭）を `side` で解決する（帯のボタン・パレット）。
     pub(crate) fn resolve_conflict(&mut self, side: ConflictSide, cx: &mut Context<Self>) {
-        self.replace_conflict(|text, block| resolution(text, block, side), cx);
+        self.replace_conflict(conflict_at, |text, block| resolution(text, block, side), cx);
     }
 
-    /// キャレットのある衝突（無ければ後ろ・先頭）を、印ごと `make` の文に置き換える（1 回の編集）。
+    /// 並べた 1 枚が見せている衝突を置き換える（キャレットの衝突ではない。欄の中の F8 や ⌃G で
+    /// 本体のキャレットが動いても、見ている物を解決する）。写しと食い違えば何もしない。
+    fn replace_shown_conflict(
+        &mut self,
+        make: impl FnOnce(&str, &ConflictBlock) -> String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shown) = self
+            .chrome
+            .conflict_view
+            .as_ref()
+            .and_then(|view| view.shown.clone())
+        else {
+            return;
+        };
+        self.replace_conflict(
+            |blocks, _caret| {
+                let index = shown.index.checked_sub(1)?;
+                blocks
+                    .get(index)
+                    .filter(|block| block.line + 1 == shown.line)
+                    .map(|_| index)
+            },
+            make,
+            cx,
+        );
+    }
+
+    /// `pick`（衝突の並びとキャレット → 何番目か）で選んだ衝突を、印ごと `make` の文に置き換える
+    /// （1 回の編集）。キャレットは置き換えた所へ。
     fn replace_conflict(
         &mut self,
+        pick: impl FnOnce(&[ConflictBlock], usize) -> Option<usize>,
         make: impl FnOnce(&str, &ConflictBlock) -> String,
         cx: &mut Context<Self>,
     ) {
@@ -380,7 +420,7 @@ impl Workspace {
                 .selections()
                 .first()
                 .map_or(0, |selection| selection.head);
-            let Some(index) = conflict_at(&blocks, caret) else {
+            let Some(index) = pick(&blocks, caret) else {
                 return;
             };
             let block = &blocks[index];
@@ -417,6 +457,26 @@ impl Workspace {
         }
     }
 
+    /// 並べた 1 枚の「次へ」: 見せている衝突の次（末尾を過ぎたら先頭）へキャレットを移す。キャレットより
+    /// 後ろではなく**見せている物の次**（キャレットが最初の衝突より前にあっても、1 回で 2 つ目へ進む）。
+    fn show_next_conflict(&mut self, cx: &mut Context<Self>) {
+        let Some((editor, blocks)) = self.active_conflicts() else {
+            return;
+        };
+        let Some(shown) = self
+            .chrome
+            .conflict_view
+            .as_ref()
+            .and_then(|view| view.shown.as_ref())
+        else {
+            return;
+        };
+        let next = shown.index % blocks.len();
+        if let Some(start) = blocks.get(next).map(|block| block.whole.start) {
+            editor.update(cx, |view, cx| view.select_byte_range(start..start, cx));
+        }
+    }
+
     /// 帯の「並べて見る」・パレット「マージ: 衝突を並べて見る」。
     pub(crate) fn show_conflict_side_by_side(
         &mut self,
@@ -442,14 +502,29 @@ impl Workspace {
             editor.set_plain_text(&seed, cx);
             editor
         });
+        let Some(editor) = self.active_editor().map(|editor| editor.entity_id()) else {
+            return;
+        };
         let focus = cx.focus_handle();
         window.focus(&result.read(cx).focus_handle(cx), cx);
         self.chrome.conflict_view = Some(ConflictView {
             focus,
+            editor,
             shown: Some(shown),
             result,
         });
         cx.notify();
+    }
+
+    /// 開いた時のエディタがもう前に無い（別のタブを開いた・閉じた・プロジェクトを移った）か、見せる
+    /// 衝突が無い 1 枚。描かず、次の描画の前に閉じる（[`Self::process_pending_shell_effects`]）。
+    /// タブを移る経路はいくつもあり（選ぶ・新しく開く・閉じる・プロジェクトの切替）、全部で写しを
+    /// 取り直すとは限らないので、見せる側で確かめる。
+    pub(crate) fn conflict_view_is_stale(&self) -> bool {
+        self.chrome.conflict_view.as_ref().is_some_and(|view| {
+            view.shown.is_none()
+                || self.active_editor().map(|editor| editor.entity_id()) != Some(view.editor)
+        })
     }
 
     /// 閉じる（Esc・外側・閉じる・衝突が無くなった時）。フォーカスはエディタへ返す。
@@ -472,7 +547,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match act {
-            ConflictViewAct::Resolve(side) => self.resolve_conflict(side, cx),
+            ConflictViewAct::Resolve(side) => {
+                self.replace_shown_conflict(|text, block| resolution(text, block, side), cx)
+            }
             ConflictViewAct::ResolveWithResult => {
                 let Some(result) = self
                     .chrome
@@ -482,13 +559,8 @@ impl Workspace {
                 else {
                     return;
                 };
-                self.replace_conflict(
-                    |text, block| {
-                        let crlf = text
-                            .get(block.whole.clone())
-                            .is_some_and(|whole| whole.contains("\r\n"));
-                        result_for_file(&result, crlf)
-                    },
+                self.replace_shown_conflict(
+                    |text, block| result_for_file(&result, marker_line_is_crlf(text, block)),
                     cx,
                 );
             }
@@ -501,27 +573,48 @@ impl Workspace {
                     }
                 }
             }
-            ConflictViewAct::Next => self.next_conflict(cx),
+            ConflictViewAct::Next => self.show_next_conflict(cx),
         }
         self.refresh_conflict_view(cx);
         match self.chrome.conflict_view.as_ref() {
-            Some(view) if view.shown.is_none() => self.close_conflict_view(window, cx),
             // 押した後も打てるように、フォーカスは結果の欄へ戻す（ボタンを押すとカードに移るので）。
             Some(view) => {
                 let focus = view.result.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
-            None => {}
+            // 衝突が無くなって閉じた: 次の描画を待たずにエディタへ。
+            None => {
+                if let Some(focus) = self.chrome.focus_next_frame.take() {
+                    window.focus(&focus, cx);
+                }
+            }
         }
     }
 
     /// 開いていれば写しを取り直す（キャレットの衝突が替わった・バッファが変わった）。見せる衝突が
     /// 替わったら結果の欄を今の側で埋め直す（替わらなければ直しかけの文を残す）。
+    ///
+    /// 別のタブへ移った・衝突が無くなった（外で書き換わった）なら閉じる。ここは窓を持たないので、
+    /// フォーカスは次の描画でエディタへ返す（閉じずに残すと、戻った時に欄を埋め直して直しかけを
+    /// 失い、フォーカスは下のエディタに居て Esc も ⌘⏎ も届かなかった）。
     fn refresh_conflict_view(&mut self, cx: &mut Context<Self>) {
-        if self.chrome.conflict_view.is_none() {
+        let Some(opened_for) = self.chrome.conflict_view.as_ref().map(|view| view.editor) else {
+            return;
+        };
+        let active = self.active_editor();
+        let shown = if active.as_ref().map(|editor| editor.entity_id()) == Some(opened_for) {
+            self.conflict_snapshot(cx)
+        } else {
+            None
+        };
+        if shown.is_none() {
+            self.chrome.conflict_view = None;
+            if let Some(editor) = active {
+                self.chrome.focus_next_frame = Some(editor.read(cx).focus_handle(cx));
+            }
+            cx.notify();
             return;
         }
-        let shown = self.conflict_snapshot(cx);
         if let Some(view) = self.chrome.conflict_view.as_mut() {
             if view.shown != shown {
                 if let Some(shown) = &shown {
@@ -574,6 +667,9 @@ impl Workspace {
     /// 並べた 1 枚（画面の中央・幅 86%・高さ 86%）: 今の側 / 元 / 入ってくる側 の列、その下の結果の欄、
     /// 帯と同じボタン。
     pub(crate) fn render_conflict_view(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.conflict_view_is_stale() {
+            return None;
+        }
         let view = self.chrome.conflict_view.as_ref()?;
         let shown = view.shown.clone()?;
         let theme = self.theme.clone();
@@ -1367,6 +1463,135 @@ mod tests {
                 editor.read(cx).plain_text(),
                 "fn a() {}\r\nlet x = 3;\r\nlet y = 4;\r\nfn b() {}\r\n"
             );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 並べた 1 枚は見せている衝突を解決する（O19・レビュー）: 欄の中の F8 や ⌃G で本体のキャレットが
+    /// 別の衝突へ動いても、見ている物を置き換える。「次へ」は見せている物の次へ進む（キャレットが最初の
+    /// 衝突より前にあっても 1 回で 2 つ目・末尾の次は先頭）。
+    #[gpui::test]
+    fn the_card_resolves_the_conflict_it_shows(cx: &mut gpui::TestAppContext) {
+        let content = format!("head\n{TWO_WAY}{THREE_WAY}");
+        let (workspace, cx, root) = open_conflicted(cx, "shown", &content);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let shown = |workspace: &Workspace| {
+                workspace
+                    .chrome
+                    .conflict_view
+                    .as_ref()
+                    .and_then(|view| view.shown.as_ref())
+                    .map(|shown| (shown.index, shown.count))
+            };
+            assert_eq!(
+                shown(workspace),
+                Some((1, 2)),
+                "キャレットは最初の衝突より前"
+            );
+            workspace.conflict_view_act(ConflictViewAct::Next, window, cx);
+            assert_eq!(shown(workspace), Some((2, 2)), "1 回で 2 つ目へ");
+            workspace.conflict_view_act(ConflictViewAct::Next, window, cx);
+            assert_eq!(shown(workspace), Some((1, 2)), "末尾の次は先頭");
+            // 1 つ目を見せたまま、本体のキャレットだけ 2 つ目の衝突の中へ（F8 / ⌃G と同じ）。
+            let editor = workspace.active_editor().expect("エディタ");
+            let second = content.rfind("<<<<<<<").expect("2 つ目") + 3;
+            editor.update(cx, |editor, cx| {
+                editor.select_byte_range(second..second, cx)
+            });
+            let result = workspace
+                .chrome
+                .conflict_view
+                .as_ref()
+                .map(|view| view.result.clone())
+                .expect("欄");
+            result.update(cx, |editor, cx| editor.set_plain_text("let z = 9;", cx));
+            workspace.conflict_view_act(ConflictViewAct::ResolveWithResult, window, cx);
+            assert_eq!(
+                editor.read(cx).plain_text(),
+                format!("head\nfn a() {{}}\nlet z = 9;\nfn b() {{}}\n{THREE_WAY}"),
+                "見せている 1 つ目を置き換え、2 つ目は残す"
+            );
+            workspace.conflict_view_act(ConflictViewAct::Resolve(ConflictSide::Theirs), window, cx);
+            assert_eq!(
+                editor.read(cx).plain_text(),
+                "head\nfn a() {}\nlet z = 9;\nfn b() {}\nlet x = 2;\n"
+            );
+            assert!(workspace.chrome.conflict_view.is_none(), "無くなれば閉じる");
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 別のタブへ移ると 1 枚は閉じる（O19・レビュー）。戻っても出てこない（残すと、戻った時に欄を
+    /// 埋め直して直しかけを失い、フォーカスは下のエディタに居て Esc も ⌘⏎ も届かなかった）。
+    #[gpui::test]
+    fn the_card_closes_when_the_tab_changes(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx, root) = open_conflicted(cx, "tabs", THREE_WAY);
+        let plain = root.join("plain.rs");
+        std::fs::write(&plain, "fn main() {}\n").unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file_sync(plain.clone(), window, cx);
+            assert!(
+                workspace.render_conflict_view(cx).is_none(),
+                "新しく開いたタブの上には描かない"
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.chrome.conflict_view.is_none(), "次の描画で閉じる");
+            let merge = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.path.ends_with("merge.rs"))
+                .expect("merge.rs のタブ");
+            let plain_tab = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.path.ends_with("plain.rs"))
+                .expect("plain.rs のタブ");
+            workspace.select_tab(merge, window, cx);
+            assert!(
+                workspace.chrome.conflict_view.is_none(),
+                "戻っても出てこない"
+            );
+            workspace.show_conflict_side_by_side(&ShowConflictSideBySide, window, cx);
+            assert!(workspace.chrome.conflict_view.is_some());
+            workspace.select_tab(plain_tab, window, cx);
+            assert!(
+                workspace.chrome.conflict_view.is_none(),
+                "タブを選んで移っても閉じる"
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let editor = workspace.active_editor().expect("エディタ");
+            assert!(editor.read(cx).plain_text().starts_with("fn main"));
+            assert!(
+                editor.read(cx).focus_handle(cx).is_focused(window),
+                "フォーカスは移った先のエディタ"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// LF のファイルで入ってくる側だけ CRLF の行を持つ衝突は、結果を LF で書く（O19・レビュー）。
+    /// 改行は `<<<<<<<` の行で決める（中身の CRLF で決めると、今の側の LF の行まで CRLF になる）。
+    #[gpui::test]
+    fn the_result_follows_the_marker_line_ending(cx: &mut gpui::TestAppContext) {
+        let mixed = "a\n<<<<<<< HEAD\nx\n=======\ny\r\n>>>>>>> b\nz\n";
+        let (workspace, cx, root) = open_conflicted(cx, "mixed", mixed);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let result = workspace
+                .chrome
+                .conflict_view
+                .as_ref()
+                .map(|view| view.result.clone())
+                .expect("欄");
+            result.update(cx, |editor, cx| editor.set_plain_text("p\nq", cx));
+            workspace.conflict_view_act(ConflictViewAct::ResolveWithResult, window, cx);
+            let editor = workspace.active_editor().expect("エディタ");
+            assert_eq!(editor.read(cx).plain_text(), "a\np\nq\nz\n");
         });
         let _ = std::fs::remove_dir_all(&root);
     }
