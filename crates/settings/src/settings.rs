@@ -315,8 +315,80 @@ pub struct SettingsView {
     remote_busy: bool,
     remote_error: Option<SharedString>,
     remote_generation: u64,
+    /// Skills 節の中身（skill 置き場の走査結果と necoder の skill の状態）。`None` = まだ読んでいない。
+    /// 他人の置き場を数十個読むので背景で読み、描画はこのキャッシュだけを見る。
+    skills: Option<SkillsSnapshot>,
+    /// 一覧に含めるプロジェクト（アクティブなローカルのプロジェクトの根）。workspace が開く前に渡す。
+    skills_project: Option<PathBuf>,
+    /// necoder の skill を置いている最中（連打防止・「実行中…」表示）。
+    skills_busy: bool,
+    /// 直近の設置の失敗。行の下に出す。
+    skills_error: Option<SharedString>,
+    skills_generation: u64,
     #[cfg(feature = "remote-preview")]
     remote_preview_only: bool,
+}
+
+/// Skills 節に出すもの（背景で 1 度に読む）。
+#[derive(Clone)]
+struct SkillsSnapshot {
+    /// 表示で `~/…` に縮めるためのホーム。
+    home: PathBuf,
+    skills: Vec<agent_skills::SkillEntry>,
+    /// front matter が壊れていて一覧から外した数。
+    skipped: usize,
+    /// necoder の skill の置き場（`--agent` 省略時と同じ入れ先）ごとの状態。
+    placements: Vec<agent_skills::StubPlacement>,
+}
+
+/// necoder の skill の行に出す操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NecoderSkillAction {
+    /// necoder が書いた古い版がある（「更新があります」+ 更新する）。無い置き場があれば一緒に置く。
+    Update,
+    /// 置いていない置き場がある（入れる）。
+    Install,
+    /// どの置き場も最新（インストール済み）。
+    Installed,
+    /// 出す操作が無い（人が書いた SKILL.md だけ・読めない等。注記だけを出す）。
+    Nothing,
+}
+
+/// 置き場ごとの状態から行の操作を決める（読めなかった置き場は `states` に入れない）。
+fn necoder_skill_action(states: &[agent_skills::StubState]) -> NecoderSkillAction {
+    use agent_skills::StubState;
+    if states.contains(&StubState::Outdated) {
+        NecoderSkillAction::Update
+    } else if states.contains(&StubState::Missing) {
+        NecoderSkillAction::Install
+    } else if !states.is_empty() && states.iter().all(|state| *state == StubState::Current) {
+        NecoderSkillAction::Installed
+    } else {
+        NecoderSkillAction::Nothing
+    }
+}
+
+/// Skills 節の中身を読む（背景スレッドから）。ホームが分からなければ `None`。
+fn load_skills(project: Option<&Path>) -> Option<SkillsSnapshot> {
+    let home = agent_skills::default_home()?;
+    let scan = agent_skills::scan(&agent_skills::skill_roots(&home, project));
+    let placements = match cli_shim::current_binary() {
+        Ok(binary) => agent_skills::user_stub_placements(
+            &home,
+            &agent_skills::default_agents(&home),
+            &agent_skills::stub_skill_md(&binary),
+        ),
+        Err(error) => {
+            eprintln!("necoder の skill の状態を確かめられない: {error:#}");
+            Vec::new()
+        }
+    };
+    Some(SkillsSnapshot {
+        home,
+        skills: scan.skills,
+        skipped: scan.skipped.len(),
+        placements,
+    })
 }
 
 impl SettingsView {
@@ -342,6 +414,11 @@ impl SettingsView {
             remote_busy: false,
             remote_error: None,
             remote_generation: 0,
+            skills: None,
+            skills_project: None,
+            skills_busy: false,
+            skills_error: None,
+            skills_generation: 0,
             #[cfg(feature = "remote-preview")]
             remote_preview_only: false,
         };
@@ -373,6 +450,8 @@ impl SettingsView {
     /// 予約済みの vendor CLI 調査を 1 回だけ走らせる（render から。最新世代だけを反映する）。
     fn probe_availability(&mut self, cx: &mut Context<Self>) {
         self.availability_pending = false;
+        // skill の置き場も「描かれた」を合図に読み直す（開かれていない設定のために fs を歩かない）。
+        self.refresh_skills(cx);
         self.availability_generation = self.availability_generation.wrapping_add(1);
         let generation = self.availability_generation;
         cx.spawn(async move |view, cx| {
@@ -641,6 +720,341 @@ impl SettingsView {
                         .text_color(self.theme.err)
                         .child(error),
                 )
+            })
+    }
+
+    // ── Skills（エージェントの skill 置き場・agent_skills crate）────────────────────
+
+    /// 一覧に含めるプロジェクト（アクティブなローカルのプロジェクトの根・リモートは `None`）。
+    /// workspace が設定を開く直前に渡す。次の読み直しから効く。
+    pub fn set_skills_project(&mut self, project: Option<PathBuf>) {
+        self.skills_project = project;
+    }
+
+    /// Skills 節の中身を背景で読み直す（最新の世代だけを反映する）。
+    fn refresh_skills(&mut self, cx: &mut Context<Self>) {
+        self.skills_generation = self.skills_generation.wrapping_add(1);
+        let generation = self.skills_generation;
+        let project = self.skills_project.clone();
+        cx.spawn(async move |view, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { load_skills(project.as_deref()) })
+                .await;
+            let applied = view.update(cx, |view, cx| {
+                if view.skills_generation == generation {
+                    view.skills = snapshot;
+                    cx.notify();
+                }
+            });
+            if applied.is_err() {
+                // 設定画面ごと閉じた＝反映する先が無い。
+            }
+        })
+        .detach();
+    }
+
+    /// necoder の skill を、無い置き場へ置き、necoder が書いた古い版を更新する。
+    /// 人や別のツールが書いた `SKILL.md`（印が無い）はここからは上書きしない（CLI の `--force` だけ）。
+    fn install_necoder_skill(&mut self, cx: &mut Context<Self>) {
+        if self.skills_busy {
+            return; // 連打防止
+        }
+        let Some(snapshot) = &self.skills else {
+            return;
+        };
+        let targets: Vec<(PathBuf, bool)> = snapshot
+            .placements
+            .iter()
+            .filter_map(|placement| match placement.state {
+                Ok(agent_skills::StubState::Missing) => Some((placement.path.clone(), false)),
+                Ok(agent_skills::StubState::Outdated) => Some((placement.path.clone(), true)),
+                _ => None,
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.skills_busy = true;
+        self.skills_error = None;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let desired = agent_skills::stub_skill_md(&cli_shim::current_binary()?);
+                    for (path, force) in targets {
+                        agent_skills::install_stub(&path, &desired, force)?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+            let applied = view.update(cx, |view, cx| {
+                view.skills_busy = false;
+                if let Err(error) = result {
+                    view.skills_error = Some(SharedString::from(format!("{error:#}")));
+                }
+                view.refresh_skills(cx);
+                cx.notify();
+            });
+            if applied.is_err() {
+                // 設定画面ごと閉じた＝結果を見せる先が無い（ファイルは書き終えている）。
+            }
+        })
+        .detach();
+    }
+
+    /// 一覧の「どのエージェントが読むか」。製品名はそのまま、共通の置き場とプロジェクトは訳す。
+    fn skill_scope_label(scope: agent_skills::SkillScope) -> String {
+        match scope {
+            agent_skills::SkillScope::ClaudeUser => {
+                agent_skills::SkillAgent::ClaudeCode.label().to_string()
+            }
+            agent_skills::SkillScope::CodexUser => {
+                agent_skills::SkillAgent::Codex.label().to_string()
+            }
+            agent_skills::SkillScope::SharedUser => i18n::t!("settings.skills_scope_shared"),
+            agent_skills::SkillScope::ClaudeProject => {
+                i18n::t!("settings.skills_scope_claude_project")
+            }
+            agent_skills::SkillScope::SharedProject => {
+                i18n::t!("settings.skills_scope_shared_project")
+            }
+        }
+    }
+
+    /// 「Skills」セクション（AI エージェントのページの末尾）。上 = necoder の skill の設置 / 更新、
+    /// 下 = 置き場で見つかった skill の一覧（名前・説明・場所・エージェント）。
+    fn skills_section(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let heading = self.section_heading(
+            i18n::t!("settings.skills_heading"),
+            Some(i18n::t!("settings.skills_sub")),
+        );
+        let muted = |text: String| {
+            div()
+                .text_size(px(11.))
+                .text_color(theme.fg2)
+                .child(SharedString::from(text))
+        };
+        let Some(snapshot) = &self.skills else {
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(heading)
+                .child(self.pref_row(
+                    i18n::t!("settings.skills_necoder_label"),
+                    None,
+                    muted(i18n::t!("settings.skills_checking")).into_any_element(),
+                ));
+        };
+        let states: Vec<agent_skills::StubState> = snapshot
+            .placements
+            .iter()
+            .filter_map(|placement| placement.state.clone().ok())
+            .collect();
+        let action = necoder_skill_action(&states);
+        let action_button = |id: &'static str, text: String| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(text))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _window, cx| view.install_necoder_skill(cx)),
+                )
+        };
+        // 状態に色相を使わない（UI-SPEC §1.3）: 「更新があります」は fg1 の文字、入っている印だけ
+        // `ne` コマンドの行と同じ accent-dim のチップ。
+        let control =
+            if self.skills_busy {
+                muted(i18n::t!("settings.skills_busy")).into_any_element()
+            } else if action == NecoderSkillAction::Update {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().text_size(px(11.)).text_color(theme.fg1).child(
+                        SharedString::from(i18n::t!("settings.skills_update_available")),
+                    ))
+                    .child(action_button(
+                        "skills-update",
+                        i18n::t!("settings.skills_update_button"),
+                    ))
+                    .into_any_element()
+            } else if action == NecoderSkillAction::Install {
+                action_button("skills-install", i18n::t!("settings.skills_install_button"))
+                    .into_any_element()
+            } else if action == NecoderSkillAction::Installed {
+                div()
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .bg(accent.alpha(0.16))
+                    .text_size(px(11.))
+                    .text_color(accent)
+                    .child(SharedString::from(i18n::t!(
+                        "settings.skills_installed_chip"
+                    )))
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
+        let placements_sub = snapshot
+            .placements
+            .iter()
+            .map(|placement| {
+                format!(
+                    "{} {}",
+                    placement.agent.label(),
+                    agent_skills::display_path(&placement.path, &snapshot.home)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let mut notes = div().flex().flex_col().gap(px(2.)).px(px(12.));
+        for placement in &snapshot.placements {
+            let path = agent_skills::display_path(&placement.path, &snapshot.home);
+            let note = match &placement.state {
+                Ok(agent_skills::StubState::Foreign) => {
+                    Some(i18n::t!("settings.skills_foreign", "path" => path))
+                }
+                Err(error) => Some(i18n::t!(
+                    "settings.skills_read_error",
+                    "path" => path,
+                    "error" => error
+                )),
+                Ok(_) => None,
+            };
+            if let Some(note) = note {
+                notes = notes.child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(note)),
+                );
+            }
+        }
+        let mut list = div().flex().flex_col().gap(px(6.));
+        if snapshot.skills.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(12.))
+                    .py(px(9.))
+                    .rounded(px(8.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(px(11.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.skills_empty"))),
+            );
+        }
+        for skill in &snapshot.skills {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(8.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.))
+                                    .text_color(theme.fg0)
+                                    .child(SharedString::from(skill.name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.))
+                                    .text_color(theme.fg2)
+                                    .child(SharedString::from(Self::skill_scope_label(
+                                        skill.scope,
+                                    ))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.fg1)
+                            .line_clamp(2)
+                            .text_ellipsis()
+                            .child(SharedString::from(skill.description.clone())),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(10.))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(agent_skills::display_path(
+                                &skill.path,
+                                &snapshot.home,
+                            ))),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(heading)
+            .child(self.pref_row(
+                i18n::t!("settings.skills_necoder_label"),
+                (!placements_sub.is_empty()).then_some(placements_sub),
+                control,
+            ))
+            .child(notes)
+            .when_some(self.skills_error.clone(), |element, error| {
+                element.child(
+                    div()
+                        .px(px(12.))
+                        .text_size(px(10.5))
+                        .text_color(theme.err)
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .px(px(2.))
+                    .pt(px(8.))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!(
+                        "settings.skills_found",
+                        "count" => snapshot.skills.len()
+                    ))),
+            )
+            .child(list)
+            .when(snapshot.skipped > 0, |element| {
+                element.child(muted(i18n::t!(
+                    "settings.skills_skipped",
+                    "count" => snapshot.skipped
+                )))
             })
     }
 
@@ -1355,7 +1769,7 @@ impl SettingsView {
         column
     }
 
-    /// 選ばれているページの中身。1 ページ = 1 セクション（エージェントだけ `ne` コマンドを伴う）。
+    /// 選ばれているページの中身。1 ページ = 1 セクション（エージェントだけ `ne` コマンドと Skills を伴う）。
     fn page_body(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
         match self.page {
             SettingsPage::Agents => div()
@@ -1377,7 +1791,9 @@ impl SettingsView {
                 // Windows は W フェーズまで非対応＝セクションごと出さない。
                 .when(cli_shim::supported(), |element| {
                     element.child(self.cli_section(cx))
-                }),
+                })
+                // エージェントが読む手順書（SKILL.md）。`ne` の次＝「エージェントに necoder を教える」の並び。
+                .child(self.skills_section(cx)),
             SettingsPage::Mcp => self.mcp_section(cx),
             SettingsPage::Appearance => self.appearance_section(settings, cx),
             SettingsPage::Remote => self.remote_section(cx),
@@ -2155,6 +2571,38 @@ mod tests {
             next_captain_value("Claude Code", Some("Claude Code")),
             serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn necoder_skill_row_offers_update_before_install() {
+        use agent_skills::StubState::{Current, Foreign, Missing, Outdated};
+        // 古い版が 1 つでもあれば「更新があります」（無い置き場も同じボタンで置く）。
+        assert_eq!(
+            necoder_skill_action(&[Current, Outdated]),
+            NecoderSkillAction::Update
+        );
+        assert_eq!(
+            necoder_skill_action(&[Outdated, Missing]),
+            NecoderSkillAction::Update
+        );
+        assert_eq!(
+            necoder_skill_action(&[Missing, Current]),
+            NecoderSkillAction::Install
+        );
+        assert_eq!(
+            necoder_skill_action(&[Current, Current]),
+            NecoderSkillAction::Installed
+        );
+        // 人が書いた SKILL.md は設定画面からは上書きしない（注記だけ）。
+        assert_eq!(
+            necoder_skill_action(&[Foreign]),
+            NecoderSkillAction::Nothing
+        );
+        assert_eq!(
+            necoder_skill_action(&[Current, Foreign]),
+            NecoderSkillAction::Nothing
+        );
+        assert_eq!(necoder_skill_action(&[]), NecoderSkillAction::Nothing);
     }
 
     #[test]

@@ -17,6 +17,11 @@ use std::path::{Path, PathBuf};
 /// コマンド名（GLOSSARY: `ne`）。
 pub const COMMAND_NAME: &str = "ne";
 
+/// `ne <これ> …` を `necoder <これ> …` へそのまま渡すサブコマンド（それ以外は `necoder cli …` = 開く）。
+/// シムの `case` と `ne --help`・`necoder skills get` の本文がこの一覧を共有する。
+/// 足した後も、古いシムからは `necoder cli <これ>` で届く（`crates/necoder/src/cli.rs` の `run_open`）。
+pub const PASSTHROUGH_SUBCOMMANDS: &[&str] = &["config", "fleet", "mcp", "remote", "skills"];
+
 /// この OS でシム設置に対応しているか（Windows は W フェーズ・WINDOWS-PORT.md）。
 pub fn supported() -> bool {
     cfg!(unix)
@@ -46,11 +51,12 @@ if [ ! -x "$NECODER_BIN" ]; then
 fi
 # 既存サブコマンドは素通し（`ne fleet status` / `ne config get theme` / `ne mcp`）
 case "$1" in
-    config|fleet|mcp|remote) exec "$NECODER_BIN" "$@" ;;
+    {passthrough}) exec "$NECODER_BIN" "$@" ;;
 esac
 exec "$NECODER_BIN" cli "$@"
 "#,
-        binary = binary.display()
+        binary = binary.display(),
+        passthrough = PASSTHROUGH_SUBCOMMANDS.join("|")
     )
 }
 
@@ -286,7 +292,7 @@ mod tests {
     fn shim_delegates_subcommands_and_cli() {
         let script = shim_script(Path::new("/usr/local/necoder"));
         assert!(script.starts_with("#!/bin/sh"));
-        assert!(script.contains(r#"config|fleet|mcp|remote) exec "$NECODER_BIN" "$@" ;;"#));
+        assert!(script.contains(r#"config|fleet|mcp|remote|skills) exec "$NECODER_BIN" "$@" ;;"#));
         assert!(script.contains(r#"exec "$NECODER_BIN" cli "$@""#));
     }
 }

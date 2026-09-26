@@ -279,6 +279,24 @@ Enter で送信したい場合は、設定 `submit_on_enter` を `true` にす�
 **設定 → MCP サーバ** で、エージェントに持たせる道具（MCP サーバ）を有効化する。
 `~/.codex/config.toml` / `~/.claude.json` / `~/.cursor/mcp.json` にあるサーバは自動で一覧に載る（既定は無効）。
 
+### Skills（エージェントに necoder の使い方を渡す）
+
+Claude Code や Codex は、skill の置き場にある `SKILL.md`（手順書）を読んで動き方を変える。
+necoder の skill を入れておくと、エージェントが `ne fleet …` などの necoder のコマンドを、入っている necoder の版に合わせて使えるようになる。
+
+- **設定（⌘,）→ AI エージェント → Skills** の「necoder の skill」で **入れる**。necoder が前に置いた古い版があると「更新があります」と出るので **更新する**
+- 置くのは入口だけ（`~/.claude/skills/necoder/SKILL.md`・`~/.codex/skills/necoder/SKILL.md`）。使い方の本文は、エージェントが `ne skills get` を実行して、動いている necoder から読む。necoder を更新しても置き直す必要はない
+- 同じ節に、見つかった skill の一覧（名前・説明・場所・どのエージェントが読むか）が出る。front matter が壊れているものは一覧から外し、件数だけを出す
+- 人や別のツールが書いた `necoder/SKILL.md` は、設定画面からは上書きしない
+
+ターミナルからも同じことができる:
+
+| コマンド | 動作 |
+|---|---|
+| `ne skills get [--full]` | エージェント向けの使い方（この版の necoder に合ったもの）を出す。`--full` は全コマンドの詳細つき |
+| `ne skills install [--agent claude\|codex\|all] [--project <dir>] [--force]` | 入口の SKILL.md を置く。`--agent` を省くと `~/.claude` / `~/.codex` があるエージェントへ（どちらも無ければ Claude Code）。`--project` はそのプロジェクトの `.claude/skills`（Codex は `.agents/skills`）へ。中身の違うファイルがあると知らせて止まり（終了コード 1）、`--force` で上書きする |
+| `ne skills list [--project <dir>]` | `~/.claude/skills`・`~/.codex/skills`・`~/.agents/skills` と、プロジェクト（省くと今いるフォルダ）の `.claude/skills`・`.agents/skills` の skill を一覧する |
+
 ---
 
 ## 9. Fleet モード（複数エージェントの並走）

@@ -26,6 +26,8 @@ required-features = ["remote-preview"]
 
 [dependencies]
 acp_client.workspace = true
+# Skills 節（エージェントの skill 置き場の一覧と necoder の skill の設置。CLI と共有）
+agent_skills.workspace = true
 anyhow.workspace = true
 cli_shim.workspace = true
 gpui.workspace = true

@@ -500,6 +500,23 @@ settings:
   cli_busy: 実行中…
   cli_admin_prompt: necoder の ne コマンドを /usr/local/bin にインストールします。
   cli_admin_prompt_remove: necoder の ne コマンドを /usr/local/bin から削除します。
+  skills_heading: Skills
+  skills_sub: エージェント（Claude Code / Codex）が読む手順書（SKILL.md）。necoder の skill を入れると、エージェントが necoder の CLI の使い方をこの版に合わせて読めます。
+  skills_necoder_label: necoder の skill
+  skills_checking: 確認中…
+  skills_busy: 実行中…
+  skills_install_button: 入れる
+  skills_update_button: 更新する
+  skills_update_available: 更新があります
+  skills_installed_chip: インストール済み
+  skills_foreign: "%{path} は necoder が書いたものではないので上書きしません（上書きするなら `ne skills install --force`）"
+  skills_read_error: "%{path} を読めません（%{error}）"
+  skills_found: "見つかった skill（%{count} 件）"
+  skills_empty: skill は見つかりませんでした（~/.claude/skills・~/.codex/skills・~/.agents/skills と、プロジェクトの .claude/skills・.agents/skills を探しました）
+  skills_skipped: "%{count} 件は front matter が読めないので一覧から外しました（理由は `ne skills list` で出ます）"
+  skills_scope_shared: 共通（~/.agents）
+  skills_scope_claude_project: Claude Code・プロジェクト
+  skills_scope_shared_project: 共通・プロジェクト
 explorer:
   main_worktree_undeletable: メインの作業ツリーは削除できません（レールから外すを使ってください）
   up_folder: 上のフォルダへ

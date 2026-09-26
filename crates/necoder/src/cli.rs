@@ -72,19 +72,22 @@ fn run_remote(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `ne` で開く時の引数の書式（`ne --help` と `necoder skills get` の本文が共有する）。
+pub(crate) const OPEN_ARGUMENTS: &str = "[<path>|ssh://user@host/path]...";
+
 /// `necoder cli [<path>|ssh://…]...` — `ne` の本体。
 fn run_open(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("remote") => return run_remote(&args[1..]),
+        // 素通しを足す前に設置したシムは `necoder cli skills …` で来る（cli_shim の一覧を参照）。
+        Some("skills") => return crate::skills::run(&args[1..]),
         Some("-h") | Some("--help") => {
-            println!(
-                "使い方: {} [<path>|ssh://user@host/path]...",
-                cli_shim::COMMAND_NAME
-            );
+            println!("使い方: {} {OPEN_ARGUMENTS}", cli_shim::COMMAND_NAME);
             println!("  引数なし: 実行中の necoder を前面に出す（いなければ前回状態で起動）");
             println!(
-                "  そのほか: {} <config|fleet|mcp> … も素通しで使えます",
-                cli_shim::COMMAND_NAME
+                "  そのほか: {} <{}> … も素通しで使えます",
+                cli_shim::COMMAND_NAME,
+                cli_shim::PASSTHROUGH_SUBCOMMANDS.join("|")
             );
             return Ok(());
         }
