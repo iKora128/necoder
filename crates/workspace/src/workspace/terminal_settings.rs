@@ -33,6 +33,21 @@ pub(crate) fn terminal_shell_from(settings: &settings::Settings) -> terminal_vie
     }
 }
 
+/// 設定からよく使うコマンドを作る（名前かコマンドが空の物は飛ばす）。
+pub(crate) fn quick_commands_from(settings: &settings::Settings) -> terminal_view::QuickCommands {
+    terminal_view::QuickCommands(
+        settings
+            .quick_commands
+            .iter()
+            .filter(|quick| !quick.name.trim().is_empty() && !quick.command.trim().is_empty())
+            .map(|quick| terminal_view::QuickCommand {
+                name: quick.name.trim().to_string(),
+                command: quick.command.trim().to_string(),
+            })
+            .collect(),
+    )
+}
+
 /// 起動時に 1 回だけ繋ぐ（main から呼ぶ）: 今の設定を置き、設定が変わるたびに置き直す。
 pub fn install_terminal_settings(cx: &mut App) {
     refresh_terminal_settings(cx);
@@ -42,12 +57,15 @@ pub fn install_terminal_settings(cx: &mut App) {
 
 /// 設定から作り直す。前と同じなら置かない（ほかの設定の変更で端末を起こさない）。
 fn refresh_terminal_settings(cx: &mut App) {
-    let Some((appearance, shell)) = cx.try_global::<settings::SettingsGlobal>().map(|global| {
-        (
-            terminal_appearance_from(global.settings()),
-            terminal_shell_from(global.settings()),
-        )
-    }) else {
+    let Some((appearance, shell, quick)) =
+        cx.try_global::<settings::SettingsGlobal>().map(|global| {
+            (
+                terminal_appearance_from(global.settings()),
+                terminal_shell_from(global.settings()),
+                quick_commands_from(global.settings()),
+            )
+        })
+    else {
         return;
     };
     if cx.try_global::<terminal_view::TerminalAppearance>() != Some(&appearance) {
@@ -56,11 +74,63 @@ fn refresh_terminal_settings(cx: &mut App) {
     if cx.try_global::<terminal_view::TerminalShell>() != Some(&shell) {
         cx.set_global(shell);
     }
+    if cx.try_global::<terminal_view::QuickCommands>() != Some(&quick) {
+        cx.set_global(quick);
+        // ドックの ▶ は描画のたびに読むので、開いている窓を描き直させる。
+        cx.refresh_windows();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O25: よく使うコマンドは設定から並び（名前かコマンドが空の物は飛ばす）、選ぶと新しい端末を
+    /// 開いてそこへ打つ（Enter まで）。
+    #[gpui::test]
+    fn a_quick_command_runs_in_a_new_terminal(cx: &mut gpui::TestAppContext) {
+        let settings = settings::Settings {
+            quick_commands: vec![
+                settings::QuickCommandSetting {
+                    name: "開発サーバ".to_string(),
+                    command: " npm run dev ".to_string(),
+                },
+                settings::QuickCommandSetting {
+                    name: " ".to_string(),
+                    command: "ignored".to_string(),
+                },
+            ],
+            ..settings::Settings::default()
+        };
+        let quick = quick_commands_from(&settings);
+        assert_eq!(
+            quick.0,
+            vec![terminal_view::QuickCommand {
+                name: "開発サーバ".to_string(),
+                command: "npm run dev".to_string(),
+            }]
+        );
+        cx.update(|cx| cx.set_global(quick));
+        let (dock, cx) = cx.add_window_view(|_, _cx| {
+            let mut dock = terminal_view::TerminalDock::new(
+                terminal_view::TerminalLaunch::default(),
+                Theme::dark(),
+            );
+            dock.use_test_terminals();
+            dock
+        });
+        dock.update_in(cx, |dock, window, cx| {
+            let before = dock.ensure_active(cx);
+            dock.run_quick_command(0, window, cx);
+            let terminal = dock.ensure_active(cx);
+            assert_ne!(terminal, before, "新しい端末で走らせる");
+            assert_eq!(terminal.read(cx).debug_written_input(), b"npm run dev\r");
+            assert!(
+                before.read(cx).debug_written_input().is_empty(),
+                "今の端末には打たない"
+            );
+        });
+    }
 
     #[test]
     fn settings_become_the_terminal_appearance() {

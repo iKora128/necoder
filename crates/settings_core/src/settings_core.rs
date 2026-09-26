@@ -130,6 +130,16 @@ impl AgentServerSetting {
     }
 }
 
+/// よく使うコマンド 1 つ（`quick_commands` の要素・O25）。ターミナルのドックの ▶ に並び、押すと
+/// 新しい端末で走らせる。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct QuickCommandSetting {
+    /// ボタンに出す名前（例 `"開発サーバ"`）。
+    pub name: String,
+    /// 走らせるコマンド（例 `"npm run dev"`）。シェルに打つのと同じ。
+    pub command: String,
+}
+
 /// MCP サーバ 1 件の設定（`mcp_servers.<name>`）。
 ///
 /// ACP は「どの MCP サーバへ繋ぐか」を**クライアント（necoder）が決める**プロトコルで、
@@ -278,6 +288,9 @@ pub struct Settings {
     pub terminal_shell: String,
     /// 上のシェルに渡す引数（例 `["-l"]`）。シェルが空なら使わない。
     pub terminal_shell_args: Vec<String>,
+    /// よく使うコマンド（O25・`[{ "name": "開発サーバ", "command": "npm run dev" }]`）。ターミナルの
+    /// ドックの ▶ に並ぶ。リポジトリの `.necoder/settings.json` にも書ける（書けば上書き）。
+    pub quick_commands: Vec<QuickCommandSetting>,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
@@ -353,6 +366,7 @@ impl Default for Settings {
             terminal_cursor: "block".to_string(),
             terminal_shell: String::new(),
             terminal_shell_args: Vec::new(),
+            quick_commands: Vec::new(),
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
             agent_idle_stop_minutes: 15,
@@ -462,6 +476,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "terminal_cursor": "block",
   "terminal_shell": "",
   "terminal_shell_args": [],
+  "quick_commands": [],
   "agent_servers": {},
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
@@ -1049,6 +1064,7 @@ mod tests {
         assert_eq!(settings.ui_font_family, "", "空 = 同梱の書体");
         assert_eq!(settings.code_font_family, "");
         assert!(settings.terminal_shell_args.is_empty());
+        assert!(settings.quick_commands.is_empty());
         assert_eq!(
             *settings,
             Settings::default(),

@@ -320,6 +320,7 @@ Fleet では Task カードの「**変更**」タブが同じ画面になる。
 - `ne terminal …` で外から一覧・読み取り・待機ができる。文字を送るのは設定で許可した時だけ（[§16](#16-コマンドラインne)）
 - 文字の大きさ・遡れる行数・カーソルの形は 設定 › 動作とエディタ で変えられる（開いているターミナルにもすぐ効く）。フォントは settings.json の `terminal_font_family` に等幅のフォント名を書く
 - 開くシェルを変えたい時は settings.json の `terminal_shell`（と `terminal_shell_args`）に書く（空 = OS の既定）。新しく開くターミナルから効く
+- **よく使うコマンド**: settings.json に `"quick_commands": [{ "name": "開発サーバ", "command": "npm run dev" }]` のように書くと、ターミナルのタブ行に **▶** が出る。押すと並ぶので、選ぶと新しいターミナルを開いてそのコマンドを走らせる。リポジトリの `.necoder/settings.json` にも書ける
 
 ---
 
@@ -680,6 +681,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | `terminal_cursor` | `block` | ターミナルのカーソルの形（`bar` = 縦線 / `underline` = 下線。vim などの指定が優先） |
 | `terminal_shell` | 空 | 手元のターミナルで開くシェル（空 = OS の既定。名前か絶対パス。例 `"fish"`・Windows なら `"bash"`（Git Bash）や `"wsl"`）。新しく開くターミナルから効き、SSH 先は接続先のシェルのまま |
 | `terminal_shell_args` | `[]` | 上のシェルに渡す引数（例 `["-l"]`） |
+| `quick_commands` | `[]` | よく使うコマンド（`[{ "name": "開発サーバ", "command": "npm run dev" }]`）。ターミナルの ▶ から新しいターミナルで走らせる |
 | `reduce_motion` | `false` | スピナー等の動きを止める |
 | `captain_agent` | なし | Fleet の Captain に使うエージェント（設定 → AI エージェントで選べる） |
 

@@ -15,7 +15,9 @@ mod mouse;
 mod pty_guard;
 mod search;
 pub use appearance::{TerminalAppearance, TerminalCursor};
-pub use dock::{TerminalDock, TerminalDockEvent, TerminalLaunch, TerminalShell};
+pub use dock::{
+    QuickCommand, QuickCommands, TerminalDock, TerminalDockEvent, TerminalLaunch, TerminalShell,
+};
 
 /// 端末のアクション。keymap の `Terminal` コンテキストから引く（`keymap_core` の既定の末尾）。
 /// mac は ⌘、Windows / Linux は Ctrl+Shift（⌃ + 文字はシェルへ届ける）。
