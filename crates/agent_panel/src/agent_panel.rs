@@ -2962,6 +2962,14 @@ PYEOF"#;
         self.thread_index_by_id(thread_id)
     }
 
+    /// 今の添字にあるスレッドの永続 id（[`Self::thread_position`] の逆）。宛先を覚えておく側
+    /// （変更レビューの送り先メニュー・R07）は添字でなくこちらを持ち、送る直前に引き直す。
+    pub fn thread_id(&self, thread_index: usize) -> Option<SharedString> {
+        self.threads
+            .get(thread_index)
+            .map(|thread| SharedString::from(thread.id.clone()))
+    }
+
     /// 承認待ちへ**任意スレッド**で応答する（管制のインライン許可/拒否・P3）。
     /// アクティブスレッドの承認カードと同じ一本道（checkpoint は受信時に記録済み）。
     pub fn respond_permission(

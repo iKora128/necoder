@@ -820,7 +820,7 @@ review:
   send_default: Default
   send_empty: No threads to send to
   sent_toast: "Sent %{count} notes to %{thread}"
-  send_failed: Couldn't send (thread not found)
+  send_target_gone: Couldn't send — the chosen thread was closed. Your notes are still unsent; pick another destination
   prompt_header: "Review comments (%{count}) — compared: %{base}..working tree"
   prompt_old_side: "%{location} (removed lines, base-side line numbers)"
 difftab:

@@ -432,6 +432,11 @@ impl ReviewView {
         cx.notify();
     }
 
+    /// 宛先のメニューが開いているか（届かなかった時に開き直したことを外から確かめる）。
+    pub fn send_menu_open(&self) -> bool {
+        self.send_menu.is_some()
+    }
+
     /// 宛先を選んだ: 注記を 1 通のプロンプトにして Workspace へ渡す。
     pub(crate) fn send_to(&mut self, target: SendTarget, cx: &mut Context<Self>) {
         let resend = self.send_menu.take().is_some_and(|menu| menu.resend);
@@ -446,6 +451,7 @@ impl ReviewView {
             target,
             prompt,
             note_ids,
+            resend,
         });
         cx.notify();
     }

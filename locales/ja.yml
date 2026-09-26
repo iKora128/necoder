@@ -821,7 +821,7 @@ review:
   send_default: 既定
   send_empty: 送れるスレッドがありません
   sent_toast: "注記 %{count} 件を %{thread} へ送りました"
-  send_failed: 送れませんでした（スレッドが見つかりません）
+  send_target_gone: 送れませんでした — 選んだスレッドが閉じられています。注記は未送信のままなので、送り先を選び直してください
   prompt_header: "レビューコメント（%{count} 件）— 比較: %{base}..作業ツリー"
   prompt_old_side: "%{location}（削除された行・比較元の行番号）"
 difftab:
