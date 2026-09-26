@@ -58,7 +58,7 @@
 - 密度 compact（既定）: 行高 23 / padding 6 / UI 12.5px / code 13px lh1.55。cozy: 27 / 9 / 13 / 13.5 lh1.7
 - 固定寸法: レール 46・左ドック 218（カラム/アイコン時 462）・右ドック 340・titlebar 38・タブ列 34・パンくず 26・statusbar 26・ターミナル既定 240（60〜900 で可変）・行番号ガター 46（右寄せ）+ git バー 3px
 - 角丸: 窓 10・ピル/ボタン 5–6・カード 8–9・パレット 12
-- フォント: UI = **IBM Plex Sans JP**、コード = **Guguru Sans Code**（Google Sans Code + IBM Plex Sans JP の等幅）。どちらも同梱（SIL OFL・バイナリに埋め込み）。settings.json の `ui_font_family` / `code_font_family` で差し替えられる（O27・空 = 同梱・入っていない書体は OS の代わりの書体で描く）。使う側は名前を直書きせず `ui::ui_font(cx)` / `ui::code_font(cx)` で引く（設定が変わると窓を描き直す）。ターミナルの本文は `terminal_font_family`、空ならコードの書体。太字は 600–700 のみ
+- フォント: UI = **IBM Plex Sans JP**、コード = **Guguru Sans Code**（Google Sans Code + IBM Plex Sans JP の等幅）。どちらも同梱（SIL OFL・バイナリに埋め込み）。settings.json の `ui_font_family` / `code_font_family` で差し替えられる（O27・空 = 同梱・入っていない書体は OS の代わりの書体で描く）。**設定 › 外観 の「UI の書体」「コードの書体」「ターミナルの書体」**の「選ぶ…」で、入っている書体（OS の一覧・名前順・`.` で始まる内部名は除く）を ⌘P と同じピッカーで絞り込んで選べる（先頭 = 既定に戻す・いまの書体は行頭●）。「既定に戻す」は設定がある時だけ。使う側は名前を直書きせず `ui::ui_font(cx)` / `ui::code_font(cx)` で引く（設定が変わると窓を描き直す）。ターミナルの本文は `terminal_font_family`、空ならコードの書体。太字は 600–700 のみ
 
 ## 2. レール（プロジェクトの方向感覚・常設）
 

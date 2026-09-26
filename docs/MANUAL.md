@@ -674,7 +674,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 |---|---|---|
 | `theme` | `necoder-dark` | テーマ名 |
 | `font_size` / `tab_size` | `13` / `4` | 文字サイズ / タブ幅 |
-| `ui_font_family` | 空 | UI の書体（空 = 同梱の IBM Plex Sans JP。入っている書体の名前を書く） |
+| `ui_font_family` | 空 | UI の書体（空 = 同梱の IBM Plex Sans JP。入っている書体の名前を書く。設定 › 外観 の「選ぶ…」でも選べる） |
 | `code_font_family` | 空 | コードの書体（空 = 同梱の Guguru Sans Code。エディタ・差分・パス・ターミナルの既定。等幅の書体を書く） |
 | `density` | compact | 行の密度（compact / cozy）。**未実装**: 値は読むが、まだ画面に反映されない |
 | `soft_wrap` | `false` | 折り返し表示 |

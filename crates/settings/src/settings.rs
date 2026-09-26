@@ -314,6 +314,11 @@ pub enum SettingsViewEvent {
     /// 設定を保存できなかった（settings.json を読めない等）。文は [`save_failure_message`]。
     /// トーストは shell が出す。
     SaveFailed(SharedString),
+    /// 書体を選ぶ（O27）。`key` は `ui_font_family` / `code_font_family` / `terminal_font_family`。
+    /// 入っている書体の一覧と絞り込みは shell のピッカーが担う（窓が要る）。
+    PickFont {
+        key: &'static str,
+    },
 }
 
 /// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
@@ -1771,11 +1776,98 @@ impl SettingsView {
                 false,
                 cx,
             ))
+            // 書体（O27）: 入っている書体から選ぶ。空 = 同梱の既定（ターミナルはコードの書体に揃える）。
+            .child(self.font_row(
+                "ui_font_family",
+                i18n::t!("settings.font_ui"),
+                &settings.ui_font_family,
+                i18n::t!("settings.font_default"),
+                cx,
+            ))
+            .child(self.font_row(
+                "code_font_family",
+                i18n::t!("settings.font_code"),
+                &settings.code_font_family,
+                i18n::t!("settings.font_default"),
+                cx,
+            ))
+            .child(self.font_row(
+                "terminal_font_family",
+                i18n::t!("settings.font_terminal"),
+                &settings.terminal_font_family,
+                i18n::t!("settings.font_terminal_default"),
+                cx,
+            ))
             .child(self.pref_row(
                 i18n::t!("settings.open_json"),
                 Some(i18n::t!("settings.open_json_sub")),
                 open_json,
             ))
+    }
+
+    /// 書体の 1 行（O27）: 副題に今の書体（空なら既定の言い方）、右に「選ぶ…」（shell のピッカー）と
+    /// 「既定に戻す」（設定がある時だけ）。
+    fn font_row(
+        &self,
+        key: &'static str,
+        label: String,
+        current: &str,
+        default_sub: String,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme.clone();
+        let small_button = |id: String, label: String| {
+            div()
+                .id(SharedString::from(id))
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(label))
+        };
+        let current = current.trim().to_string();
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                small_button(format!("font-pick-{key}"), i18n::t!("settings.font_pick"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _window, cx| {
+                            cx.emit(SettingsViewEvent::PickFont { key })
+                        }),
+                    ),
+            )
+            .when(!current.is_empty(), |row| {
+                row.child(
+                    small_button(format!("font-reset-{key}"), i18n::t!("settings.font_reset"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _, _window, cx| {
+                                let result = set_user_value(
+                                    cx,
+                                    key,
+                                    serde_json::Value::String(String::new()),
+                                );
+                                view.report_save(result, cx);
+                                cx.notify();
+                            }),
+                        ),
+                )
+            })
+            .into_any_element();
+        let sub = if current.is_empty() {
+            default_sub
+        } else {
+            current
+        };
+        self.pref_row_with_keywords(&[key, "font"], label, Some(sub), control)
     }
 
     // ── AI エージェント（ページ「AI エージェント」）──────────────────────────
