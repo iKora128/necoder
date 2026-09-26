@@ -477,6 +477,8 @@ necoder の skill を入れておくと、エージェントが `ne fleet …` �
       |  ＋ Task（⌘N）           |  下段: ニュース / ターミナル
 ```
 
+Task をいつも同じブランチから切りたい（`main` ではなく `develop` から等）時は、リポジトリの `.necoder/settings.json` に `"task_base": "origin/develop"` のように書く。＋ Task の「詳細」で起点を空のままにすると、そこから切る（CLI の `ne fleet create` も同じ）。
+
 Task が 6 本以上あると、サイドバーの ⌂ main の下に **絞り込み欄**が出る。名前・ブランチ・頼んだこと・いま何をしているかのどれかに含まれる語で Task を絞れる（空白で区切ると全部の語を含む Task だけ）。
 
 ### 基本の流れ
@@ -637,7 +639,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | 置き場所 | 効く範囲 |
 |---|---|
 | アプリの `settings.json`（macOS: `~/Library/Application Support/necoder/`） | 全体 |
-| プロジェクトの `.necoder/settings.json` | そのプロジェクトだけ（`color` / `icon` など） |
+| プロジェクトの `.necoder/settings.json` | そのプロジェクトだけ（`color` / `icon` / `task_base` など） |
 
 よく使う設定:
 

@@ -3622,6 +3622,33 @@ mod tests {
 
         // 使えない名前は断る。
         assert!(create_task_with_on(&LocalHost, &root, "x", &start("bad..name", "")).is_err());
+
+        // repo ごとの既定の起点（`.necoder/settings.json` の task_base）: 起点を指定しない新しい
+        // ブランチはそこから切る。指定した起点・既にあるブランチはそちらが勝つ。
+        std::fs::create_dir_all(root.join(".necoder")).unwrap();
+        std::fs::write(
+            root.join(".necoder/settings.json"),
+            format!(r#"{{ "task_base": " {first} " }}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            repository_task_base_on(&LocalHost, &root).as_deref(),
+            Some(first.as_str())
+        );
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "From default", &start("", "")).unwrap();
+        assert_eq!(branch, "task/from-default");
+        assert_eq!(head_of(&target), first, "名前も起点も空 = repo の既定から");
+        let (target, _, _) =
+            create_task_with_on(&LocalHost, &root, "x", &start("feature/named", "")).unwrap();
+        assert_eq!(head_of(&target), first, "名前だけ = repo の既定から");
+        let (target, _, _) =
+            create_task_with_on(&LocalHost, &root, "Explicit", &start("", "HEAD")).unwrap();
+        assert_eq!(head_of(&target), head_of(&root), "指定した起点が勝つ");
+        let (target, _, _) = create_named_task_on(&LocalHost, &root, "CLI", false).unwrap();
+        assert_eq!(head_of(&target), first, "ne fleet create も同じ既定");
+        std::fs::write(root.join(".necoder/settings.json"), r#"{ "task_base": "" }"#).unwrap();
+        assert_eq!(repository_task_base_on(&LocalHost, &root), None, "空は無いのと同じ");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -4111,7 +4138,24 @@ ENV
 # pnpm install --prefer-offline
 "#;
 
+/// リポジトリの既定の起点（O20）: 統合先の `.necoder/settings.json` の `task_base`
+/// （例 `"origin/develop"`）。＋ Task・fan-out・`ne fleet create` が起点を指定せずに**新しいブランチを
+/// 切る**時に使う。無い・読めない・空 = 統合先の HEAD。Host 越しに読む（SSH の先の repo でも同じ）。
+pub fn repository_task_base_on(host: &dyn Host, root: &Path) -> Option<String> {
+    let content = host
+        .read_file(&root.join(".necoder").join("settings.json"))
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&content.bytes).ok()?;
+    value
+        .get("task_base")?
+        .as_str()
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .map(str::to_string)
+}
+
 /// worktree を作って準備を一度だけ実行する。準備失敗でも作成済み worktree を返し、台帳に failed を残せる。
+/// 起点はリポジトリの既定（[`repository_task_base_on`]）、無ければ統合先の HEAD。
 pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str, run_setup: bool) -> Result<(PathBuf, String, Option<String>)> {
     let worktrees = task_worktree_dir(root).context("worktree の作成先がありません")?;
     let stem = task_slug(title);
@@ -4124,7 +4168,10 @@ pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str, run_setup
         if !used.contains(&branch) && host.metadata(&target).is_err() { break (branch, target); }
         number += 1;
     };
-    create_task_worktree_on(host, root, &target, &branch)?;
+    match repository_task_base_on(host, root) {
+        Some(base) => create_task_worktree_from_on(host, root, &target, &branch, &base)?,
+        None => create_task_worktree_on(host, root, &target, &branch)?,
+    }
     let failure = prepare_task_worktree_on(host, root, &target, &branch, run_setup).err().map(|error| format!("{error:#}"));
     Ok((target, branch, failure))
 }
@@ -4135,7 +4182,8 @@ pub struct TaskStart {
     /// ブランチ名。空 = 1 行目から `task/<slug>`。**既にあるローカルブランチ名なら、そのブランチの
     /// worktree を作る**（新しいブランチは切らない・起点は使わない）。
     pub branch: Option<String>,
-    /// 新しいブランチを切る起点（ブランチ / タグ / コミット）。空 = 統合先の HEAD。
+    /// 新しいブランチを切る起点（ブランチ / タグ / コミット）。空 = リポジトリの既定
+    /// （[`repository_task_base_on`]）、それも無ければ統合先の HEAD。
     pub base: Option<String>,
     /// 準備スクリプトを今回は流さない（`.worktreeinclude` の持ち込みはする・O20）。
     pub skip_setup: bool,
@@ -4160,6 +4208,13 @@ pub fn create_task_with_on(
         .map(str::trim)
         .filter(|base| !base.is_empty());
     let run_setup = !start.skip_setup;
+    // 起点の指定が無ければリポジトリの既定（O20）。名前も起点も空なら下の create_named_task_on が読む。
+    let repository_base = if base.is_none() && branch.is_some() {
+        repository_task_base_on(host, root)
+    } else {
+        None
+    };
+    let base = base.or(repository_base.as_deref());
     let Some(branch) = branch else {
         if base.is_none() {
             return create_named_task_on(host, root, title, run_setup);

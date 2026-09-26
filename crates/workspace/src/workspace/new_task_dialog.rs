@@ -10,8 +10,10 @@ pub(crate) struct NewTaskDialog {
     details_open: bool,
     /// ブランチ名（空 = `task/<slug>`・既にあるブランチならその worktree）。
     branch_editor: Entity<EditorView>,
-    /// 新しいブランチの起点（空 = 統合先の HEAD）。
+    /// 新しいブランチの起点（空 = リポジトリの既定 → 統合先の HEAD）。
     base_editor: Entity<EditorView>,
+    /// リポジトリの既定の起点（統合先の `.necoder/settings.json` の `task_base`・O20）。開いた時に 1 回読む。
+    default_base: Option<String>,
     /// 統合先の worktree root。無ければ Task を切れない（ダイアログは案内だけ出す）。
     root: Option<PathBuf>,
     /// `.necoder/worktree-setup.sh` があるか（開いた時点・「作る」で true に）。
@@ -52,11 +54,13 @@ impl Workspace {
         let setup_script_present = integration.is_some_and(|worktree| {
             worktree.host().metadata(&project::worktree_setup_script(worktree.root())).is_ok()
         });
+        let default_base = integration.and_then(|worktree| project::repository_task_base_on(worktree.host().as_ref(), worktree.root()));
         self.chrome.new_task = Some(NewTaskDialog {
             editor,
             details_open: false,
             branch_editor,
             base_editor,
+            default_base,
             root,
             setup_script_present,
             skip_setup: false,
@@ -138,7 +142,9 @@ impl Workspace {
         let prompt = dialog.editor.read(cx).plain_text();
         let slug = project::task_slug(&prompt);
         let chosen_branch = dialog.branch_editor.read(cx).plain_text().trim().to_string();
-        let chosen_base = dialog.base_editor.read(cx).plain_text().trim().to_string();
+        let typed_base = dialog.base_editor.read(cx).plain_text().trim().to_string();
+        // 起点欄が空ならリポジトリの既定（O20）。どこから切るかを作る前に見せる。
+        let chosen_base = if typed_base.is_empty() { dialog.default_base.clone().unwrap_or_default() } else { typed_base };
         let folder = if chosen_branch.is_empty() { slug.clone() } else { chosen_branch.replace('/', "-") };
         let worktree = dialog.root.as_deref().and_then(project::task_worktree_dir).map(|dir| dir.join(&folder));
         let branch_label = if chosen_branch.is_empty() { format!("task/{slug}") } else { chosen_branch.clone() };
@@ -186,7 +192,10 @@ impl Workspace {
                 };
                 body = body
                     .child(field(i18n::t!("fleet.new_task_branch_label"), &dialog.branch_editor))
-                    .child(field(i18n::t!("fleet.new_task_base_label"), &dialog.base_editor));
+                    .child(field(match &dialog.default_base {
+                        Some(base) => i18n::t!("fleet.new_task_base_label_default", "base" => base),
+                        None => i18n::t!("fleet.new_task_base_label"),
+                    }, &dialog.base_editor));
                 // 並べて比べる（O23）: 選んだエージェントごとに Task を切る。選ばなければ既定で 1 本。
                 let chip = |id: (&'static str, usize), label: String, selected: bool| {
                     div().id(id).px(px(8.)).h(px(22.)).flex().items_center().rounded(px(5.)).text_size(px(11.)).cursor_pointer()
@@ -265,5 +274,34 @@ impl Workspace {
             // `editor::Cancel` を親へ流すので、ここで受ける。
             .on_action(cx.listener(|this, _: &editor_view::Cancel, window, cx| this.cancel_new_task(window, cx)));
         Some(div().absolute().inset_0().occlude().flex().items_center().justify_center().bg(gpui::rgba(0x00000088)).child(body).into_any_element())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ＋ Task はリポジトリの既定の起点（`.necoder/settings.json` の `task_base`・O20）を開いた時に読む。
+    #[gpui::test]
+    fn the_dialog_reads_the_repository_default_base(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_task_base_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join(".necoder")).expect("作業フォルダを作れる");
+        std::fs::write(project.join(".necoder/settings.json"), r#"{ "task_base": "origin/develop" }"#).expect("書ける");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true,"agent_prewarm":false}"#).expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| Workspace::new(vec![project.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_new_task(window, cx);
+            let dialog = workspace.chrome.new_task.as_ref().expect("開く");
+            assert_eq!(dialog.default_base.as_deref(), Some("origin/develop"));
+        });
+        std::fs::remove_dir_all(&root).ok();
     }
 }

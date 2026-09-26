@@ -5345,6 +5345,7 @@ dependencies = [
  "imara-diff",
  "notify",
  "paths",
+ "serde_json",
 ]
 
 [[package]]
