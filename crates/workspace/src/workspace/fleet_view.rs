@@ -467,12 +467,19 @@ impl Workspace {
         self.add_fleet_cell(FleetPane::Agent { space, panel }, cx);
     }
 
-    pub(super) fn create_prompted_task(
+    /// 1 つの依頼から Task を切る（`plan` が 2 本以上なら fan-out・O23）。worktree は**順に**作る
+    /// （同じリポジトリに `git worktree add` を並べて走らせると ref の lock でぶつかる）。1 本の失敗で
+    /// 残りを止めない。2 本以上なら舞台に並べる（Fleet の中なら横に・外ならトーストで案内）。
+    pub(super) fn create_prompted_tasks(
         &mut self,
         prompt: String,
         start: project::TaskStart,
+        plan: Vec<FanoutTask>,
         cx: &mut Context<Self>,
     ) {
+        if plan.is_empty() {
+            return;
+        }
         // 統合先はサイドバー・Captain と同じ選び方（メインの作業ツリー・O21）。
         let integration_index = self
             .active_slot()
@@ -487,24 +494,39 @@ impl Workspace {
         let host = worktree.host().clone();
         let host_for_add = host.clone();
         cx.spawn(async move |workspace, cx| {
-            let result = cx
+            let (sync, created) = cx
                 .background_executor()
                 .spawn(async move {
                     // 土台（IntegrationSpace の checked-out branch）を先に upstream へ早送りして、
                     // Task が古い base から切られるのを防ぐ（Orca の default branch 自動同期を参考・
                     // 2026-08-30）。オフライン・dirty・diverged では黙って現 HEAD から続行する。
                     let sync = project::sync_current_branch_on(host_for_add.as_ref(), &root);
-                    let (target, branch, failure) = project::create_task_with_on(
-                        host_for_add.as_ref(),
-                        &root,
-                        &prompt,
-                        &start,
-                    )?;
-                    Ok::<_, anyhow::Error>((target, branch, sync, prompt, failure))
+                    let created: Vec<(
+                        FanoutTask,
+                        anyhow::Result<(PathBuf, String, Option<String>)>,
+                    )> = plan
+                        .into_iter()
+                        .map(|task| {
+                            let task_start = project::TaskStart {
+                                branch: task.branch.clone(),
+                                base: start.base.clone(),
+                                skip_setup: start.skip_setup,
+                            };
+                            let result = project::create_task_with_on(
+                                host_for_add.as_ref(),
+                                &root,
+                                &task.slug_source,
+                                &task_start,
+                            );
+                            (task, result)
+                        })
+                        .collect();
+                    (sync, created)
                 })
                 .await;
-            let _ = workspace.update(cx, |workspace, cx| match result {
-                Ok((target, branch, sync, prompt, failure)) => {
+            // Err = 作っている間に窓が閉じた（worktree は残る・次に開いた時に外部の worktree として出る）。
+            workspace
+                .update(cx, |workspace, cx| {
                     // 早送りできた時だけ知らせる（最新から切れた安心情報。スキップは無言＝作成を汚さない）。
                     if let project::BranchSyncOutcome::FastForwarded {
                         branch: base,
@@ -522,73 +544,103 @@ impl Workspace {
                             cx,
                         );
                     }
-                    // worktree を space（レール slot）として開く（switch も走る）。
-                    workspace.open_folder_in_rail(host, target.clone(), Some(branch), cx);
-                    // その TaskSpace の AgentPanel に新スレッドを起動 → Task セルを足す。
-                    if let Some(space) = workspace
-                        .project_sessions
-                        .projects
-                        .iter()
-                        .position(|slot| slot.worktree.root() == target.as_path())
-                    {
-                        let space_id = workspace.project_sessions.projects[space]
-                            .task_space
-                            .id
-                            .clone();
-                        workspace
-                            .chrome
-                            .fleet_cells
-                            .push(FleetPane::Task { space: space_id });
-                        if !prompt.trim().is_empty() {
-                            workspace.project_sessions.projects[space].task_space.title =
-                                prompt.lines().next().unwrap_or("").to_string().into();
+                    let fanout = created.len() > 1;
+                    let mut spaces = Vec::new();
+                    for (task, result) in created {
+                        match result {
+                            Ok((target, branch, failure)) => {
+                                if let Some(space) = workspace.register_created_task(
+                                    &host, target, branch, failure, &prompt, &task, cx,
+                                ) {
+                                    spaces.push(space);
+                                }
+                            }
+                            Err(error) => {
+                                let accent = workspace.accent();
+                                workspace.push_toast(
+                                    SharedString::from(format!("{error:#}")),
+                                    accent,
+                                    cx,
+                                );
+                            }
                         }
-                        workspace.persist_task_space(space, cx);
-                        workspace.transition_task_space(
-                            space,
-                            TaskPhase::Planned,
-                            "task_created",
-                            None,
-                            cx,
-                        );
                     }
-                    if let Some(index) = workspace
-                        .project_sessions
-                        .projects
-                        .iter()
-                        .position(|slot| slot.worktree.root() == target.as_path())
-                    {
-                        if let Some(error) = failure {
-                            // 依頼は送らずに控える（「準備をやり直す」/「飛ばして始める」で送る・O20）。
-                            let space_id = workspace.project_sessions.projects[index]
-                                .task_space
-                                .id
-                                .clone();
-                            workspace
-                                .chrome
-                                .pending_task_prompts
-                                .insert(space_id, prompt.clone());
-                            workspace.transition_task_space(
-                                index,
-                                TaskPhase::Failed,
-                                "setup_failed",
-                                Some(&error),
-                                cx,
-                            );
-                        } else if !prompt.trim().is_empty() {
-                            workspace.ipc_spawn_into(index, None, Some(prompt), cx);
-                        }
+                    if fanout && !spaces.is_empty() {
+                        workspace.show_fanout_on_stage(spaces, cx);
                     }
                     workspace.hint_fleet_mode_once(cx);
                     cx.notify();
-                }
-                Err(error) => {
-                    let accent = workspace.accent();
-                    workspace.push_toast(SharedString::from(format!("{error:#}")), accent, cx);
-                }
-            });
+                })
+                .ok();
         })
         .detach();
+    }
+
+    /// 作れた Task をレールに開き、台帳に載せ、依頼を送る（準備に失敗していれば控える）。
+    /// 返すのはその TaskSpace（舞台に並べる用）。
+    #[allow(clippy::too_many_arguments)]
+    fn register_created_task(
+        &mut self,
+        host: &Arc<dyn host::Host>,
+        target: PathBuf,
+        branch: String,
+        failure: Option<String>,
+        prompt: &str,
+        task: &FanoutTask,
+        cx: &mut Context<Self>,
+    ) -> Option<SpaceId> {
+        // worktree を space（レール slot）として開く（switch も走る）。
+        self.open_folder_in_rail(host.clone(), target.clone(), Some(branch), cx);
+        let index = self
+            .project_sessions
+            .projects
+            .iter()
+            .position(|slot| slot.worktree.root() == target.as_path())?;
+        // その TaskSpace の AgentPanel に新スレッドを起動 → Task セルを足す。
+        let space_id = self.project_sessions.projects[index].task_space.id.clone();
+        self.chrome.fleet_cells.push(FleetPane::Task {
+            space: space_id.clone(),
+        });
+        if !prompt.trim().is_empty() {
+            let first_line = prompt.lines().next().unwrap_or("").to_string();
+            let title = match &task.title_suffix {
+                Some(suffix) => format!("{first_line} · {suffix}"),
+                None => first_line,
+            };
+            self.project_sessions.projects[index].task_space.title = title.into();
+        }
+        self.persist_task_space(index, cx);
+        self.transition_task_space(index, TaskPhase::Planned, "task_created", None, cx);
+        if let Some(error) = failure {
+            // 依頼は送らずに控える（「準備をやり直す」/「飛ばして始める」で送る・O20）。
+            self.chrome
+                .pending_task_prompts
+                .insert(space_id.clone(), prompt.to_string());
+            if let Some(agent) = &task.agent {
+                self.chrome
+                    .pending_task_agents
+                    .insert(space_id.clone(), agent.clone());
+            }
+            self.transition_task_space(index, TaskPhase::Failed, "setup_failed", Some(&error), cx);
+        } else if !prompt.trim().is_empty() {
+            self.ipc_spawn_into(index, task.agent.clone(), Some(prompt.to_string()), cx);
+        }
+        Some(space_id)
+    }
+
+    /// fan-out で切った Task を舞台に並べる（最大 3 枚）。Fleet の外ならトーストで案内する。
+    fn show_fanout_on_stage(&mut self, spaces: Vec<SpaceId>, cx: &mut Context<Self>) {
+        let count = spaces.len();
+        self.chrome.stage_pinned = spaces.into_iter().take(3).collect();
+        self.chrome.stage_columns = self.chrome.stage_pinned.len().max(2);
+        let accent = self.accent();
+        let text = if self.chrome.fleet_mode {
+            i18n::t!("fleet.fanout_created", "count" => count)
+        } else {
+            let key = Self::shortcut_label_for("workspace::ToggleFleet").unwrap_or_default();
+            i18n::t!("fleet.fanout_created_outside", "count" => count, "key" => key)
+        };
+        self.push_toast(SharedString::from(text), accent, cx);
     }
 
     /// 準備に失敗して依頼を控えている Task か（失敗のカードに「準備をやり直す」を出す）。
@@ -697,8 +749,9 @@ impl Workspace {
                 cx,
             );
         }
+        let agent = self.chrome.pending_task_agents.remove(&space_id);
         if !prompt.trim().is_empty() {
-            self.ipc_spawn_into(session_index, None, Some(prompt), cx);
+            self.ipc_spawn_into(session_index, agent, Some(prompt), cx);
         }
         cx.notify();
     }
@@ -2726,9 +2779,195 @@ impl Workspace {
     }
 }
 
+/// fan-out で同時に切る Task の上限（O23）。
+pub(crate) const MAX_FANOUT: usize = 6;
+
+/// 1 つの依頼から切る Task の 1 本分（O23）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FanoutTask {
+    /// ブランチ名（`task/<slug>`）の元にする文。
+    pub(crate) slug_source: String,
+    /// 明示したブランチ名（詳細の「ブランチ」に接尾辞を付けた物・空 = slug から）。
+    pub(crate) branch: Option<String>,
+    /// 話すエージェント（表示名・`None` = 既定のエージェント）。
+    pub(crate) agent: Option<String>,
+    /// Task 名に添える印（「Codex」「Claude Code #2」）。1 本だけなら付けない。
+    pub(crate) title_suffix: Option<String>,
+}
+
+/// 依頼・詳細のブランチ名・選んだエージェント・エージェントごとの本数から、切る Task の並びを決める
+/// （純関数）。エージェントを選んでいなければ既定のエージェントで 1 本（今までと同じ）。1 本だけなら
+/// 名前に印を付けない。本数は [`MAX_FANOUT`] で頭打ち。
+pub(crate) fn plan_fanout(
+    prompt: &str,
+    branch: Option<&str>,
+    agents: &[String],
+    per_agent: usize,
+) -> Vec<FanoutTask> {
+    let per_agent = per_agent.max(1);
+    if agents.is_empty() || (agents.len() == 1 && per_agent == 1) {
+        return vec![FanoutTask {
+            slug_source: prompt.to_string(),
+            branch: branch.map(str::to_string),
+            agent: agents.first().cloned(),
+            title_suffix: None,
+        }];
+    }
+    let first_line = prompt.lines().next().unwrap_or("");
+    let mut plan = Vec::new();
+    for agent in agents {
+        for number in 1..=per_agent {
+            let id = if per_agent > 1 {
+                format!("{}-{number}", project::task_slug(agent))
+            } else {
+                project::task_slug(agent)
+            };
+            plan.push(FanoutTask {
+                slug_source: format!("{first_line} {id}"),
+                branch: branch.map(|branch| format!("{branch}-{id}")),
+                agent: Some(agent.clone()),
+                title_suffix: Some(if per_agent > 1 {
+                    format!("{agent} #{number}")
+                } else {
+                    agent.clone()
+                }),
+            });
+        }
+    }
+    plan.truncate(MAX_FANOUT);
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plain_request_is_one_task_with_the_default_agent() {
+        let plan = plan_fanout("fix login\nmore detail", Some("feature/login"), &[], 1);
+        assert_eq!(
+            plan,
+            vec![FanoutTask {
+                slug_source: "fix login\nmore detail".into(),
+                branch: Some("feature/login".into()),
+                agent: None,
+                title_suffix: None,
+            }]
+        );
+        let one = plan_fanout("fix login", None, &["Codex".to_string()], 1);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].agent.as_deref(), Some("Codex"), "選んだ 1 体で 1 本");
+        assert_eq!(one[0].title_suffix, None, "1 本なら名前に印を付けない");
+    }
+
+    #[test]
+    fn fanout_names_each_task_after_its_agent() {
+        let agents = vec!["Claude Code".to_string(), "Codex".to_string()];
+        let plan = plan_fanout("fix login\ndetail", Some("login"), &agents, 1);
+        assert_eq!(
+            plan.iter()
+                .map(|task| (
+                    task.slug_source.as_str(),
+                    task.branch.as_deref(),
+                    task.agent.as_deref(),
+                    task.title_suffix.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "fix login claude-code",
+                    Some("login-claude-code"),
+                    Some("Claude Code"),
+                    Some("Claude Code")
+                ),
+                (
+                    "fix login codex",
+                    Some("login-codex"),
+                    Some("Codex"),
+                    Some("Codex")
+                ),
+            ]
+        );
+        let twice = plan_fanout("x", None, &agents, 2);
+        assert_eq!(
+            twice
+                .iter()
+                .filter_map(|task| task.title_suffix.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["Claude Code #1", "Claude Code #2", "Codex #1", "Codex #2"]
+        );
+        let many: Vec<String> = acp_client::AGENT_LABELS
+            .iter()
+            .map(|label| label.to_string())
+            .collect();
+        assert_eq!(plan_fanout("x", None, &many, 3).len(), MAX_FANOUT, "頭打ち");
+    }
+
+    /// O23: 1 つの依頼から Task を 2 本切り、舞台に並べる（依頼は空＝エージェントは起こさない）。
+    #[gpui::test]
+    fn fanout_creates_one_task_per_agent_and_puts_them_on_the_stage(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!("necoder_fanout_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).expect("作業フォルダを作れる");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .expect("git を起動できる")
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(repo.join("a.txt"), "1\n").expect("書ける");
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        let repo = paths::canonicalize(&repo).expect("正規化できる");
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![repo.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.fleet_mode = true;
+            let plan = plan_fanout(
+                "",
+                None,
+                &["Claude Code".to_string(), "Codex".to_string()],
+                1,
+            );
+            workspace.create_prompted_tasks(String::new(), project::TaskStart::default(), plan, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            let roots: Vec<PathBuf> = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .map(|slot| slot.worktree.root().to_path_buf())
+                .collect();
+            let worktrees = base.join("repo-worktrees");
+            let worktrees = paths::canonicalize(&worktrees).unwrap_or(worktrees);
+            assert!(
+                roots.contains(&worktrees.join("claude-code"))
+                    && roots.contains(&worktrees.join("codex")),
+                "エージェントごとの worktree: {roots:?}"
+            );
+            assert_eq!(workspace.chrome.stage_pinned.len(), 2, "舞台に並べる");
+            assert_eq!(workspace.chrome.stage_columns, 2);
+        });
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     /// O20: 準備に失敗した Task は依頼を控え、「飛ばして始める」で送って控えを消す。
     #[gpui::test]
