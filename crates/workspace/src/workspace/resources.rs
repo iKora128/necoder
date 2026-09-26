@@ -284,18 +284,32 @@ impl Workspace {
     /// 「使っていないエージェントを止める」: その session の全パネルで、静かで会話を引き継げる
     /// スレッドのエージェントを止める（会話は残る）。止まるのを待ってから読み直す。
     pub(crate) fn stop_quiet_agents_in(&mut self, session_index: usize, cx: &mut Context<Self>) {
+        let stopped = self.stop_quiet_agents_of(session_index, cx);
+        self.report_stopped_agents(stopped, cx);
+    }
+
+    /// その Task の静かなエージェントを止めて、止めた数を返す（知らせない・まとめて止める時に足し合わせる）。
+    pub(crate) fn stop_quiet_agents_of(
+        &mut self,
+        session_index: usize,
+        cx: &mut Context<Self>,
+    ) -> usize {
         let Some(panels) = self
             .project_sessions
             .sessions
             .get(session_index)
             .map(|session| session.fleet_agents.clone())
         else {
-            return;
+            return 0;
         };
-        let stopped: usize = panels
+        panels
             .iter()
             .map(|panel| panel.update(cx, |panel, cx| panel.stop_quiet_agents(cx)))
-            .sum();
+            .sum()
+    }
+
+    /// 止めた数を知らせ、少し待ってからリソースの一覧を読み直す（止まるまで残って見えるので）。
+    pub(crate) fn report_stopped_agents(&mut self, stopped: usize, cx: &mut Context<Self>) {
         let color = self.accent();
         self.push_toast(
             i18n::t!("resources.stopped", "count" => stopped).into(),
