@@ -19,18 +19,26 @@ pub fn install_font_settings(cx: &mut App) {
 }
 
 /// 設定から作り直す。前と同じなら置かない（ほかの設定の変更で全部を描き直させない）。
+/// 行の詰め具合（`density`・O27）も同じ時に置く（どちらも描画のたびに読む見た目の設定）。
 fn refresh_font_settings(cx: &mut App) {
-    let Some(next) = cx
-        .try_global::<settings::SettingsGlobal>()
-        .map(|global| font_families_from(global.settings()))
-    else {
+    let Some((next, density)) = cx.try_global::<settings::SettingsGlobal>().map(|global| {
+        let settings = global.settings();
+        let density = match settings.density {
+            settings::Density::Compact => ui::RowDensity::Compact,
+            settings::Density::Cozy => ui::RowDensity::Cozy,
+        };
+        (font_families_from(settings), density)
+    }) else {
         return;
     };
-    if cx.try_global::<ui::FontFamilies>() == Some(&next) {
+    let fonts_changed = cx.try_global::<ui::FontFamilies>() != Some(&next);
+    let density_changed = cx.try_global::<ui::RowDensity>() != Some(&density);
+    if !fonts_changed && !density_changed {
         return;
     }
     cx.set_global(next);
-    // 書体は描画のたびに読むので、開いている窓を描き直させる。
+    cx.set_global(density);
+    // 書体と行の高さは描画のたびに読むので、開いている窓を描き直させる。
     cx.refresh_windows();
 }
 
@@ -98,6 +106,27 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O27: 行の詰め具合は設定に付いてくる（cozy = 4px 高く・compact に戻せる）。
+    #[gpui::test]
+    fn row_density_follows_the_setting(cx: &mut gpui::TestAppContext) {
+        let path =
+            std::env::temp_dir().join(format!("necoder_density_{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"onboarded":true,"density":"cozy"}"#).unwrap();
+        cx.update(|cx| {
+            settings::init(Some(path.clone()), None, cx);
+            install_font_settings(cx);
+            assert_eq!(ui::row_height(cx, 23.), px(27.));
+            assert_eq!(ui::row_padding(cx, 4.), px(6.));
+        });
+        // 監視は張った effect の終わりから効く（アプリは起動時に張る）。
+        cx.update(|cx| {
+            settings::set_user_value(cx, "density", serde_json::json!("compact")).unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(ui::row_height(cx, 23.), px(23.)));
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn settings_become_the_font_families() {

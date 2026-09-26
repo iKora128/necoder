@@ -88,7 +88,7 @@ impl Workspace {
     /// 範囲でしか描かれないので、行に持たせるとスクロールで入力行が外れた瞬間にフォーカスを失う。
     pub(crate) fn render_naming_row(&self, depth: usize, cx: &App) -> gpui::AnyElement {
         let Some(naming) = self.explorer_naming(cx) else {
-            return div().h(px(ROW_HEIGHT)).into_any_element();
+            return div().h(ui::row_height(cx, ROW_HEIGHT)).into_any_element();
         };
         let theme = self.theme.clone();
         let accent = self.accent();
@@ -101,7 +101,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(px(4.))
-            .h(px(ROW_HEIGHT))
+            .h(ui::row_height(cx, ROW_HEIGHT))
             .pl(px(8. + depth as f32 * INDENT))
             .pr(px(8.))
             .child(
@@ -249,11 +249,11 @@ impl Workspace {
                             slot, *index, row, &theme, color, &selected, git_status, &root, cx,
                         )
                     })
-                    .unwrap_or_else(|| div().h(px(ROW_HEIGHT)).into_any_element()),
+                    .unwrap_or_else(|| div().h(ui::row_height(cx, ROW_HEIGHT)).into_any_element()),
                 Some(explorer::TreeDisplayRow::Naming { depth }) => {
                     self.render_naming_row(*depth, cx)
                 }
-                None => div().h(px(ROW_HEIGHT)).into_any_element(),
+                None => div().h(ui::row_height(cx, ROW_HEIGHT)).into_any_element(),
             })
             .collect()
     }
@@ -312,7 +312,7 @@ impl Workspace {
                 .min_w_full()
                 .items_center()
                 .gap(px(4.))
-                .h(px(ROW_HEIGHT))
+                .h(ui::row_height(cx, ROW_HEIGHT))
                 .pr_2()
                 .pl(px(6.0 + row.depth as f32 * INDENT))
                 .text_size(px(12.5))
@@ -631,7 +631,7 @@ impl Workspace {
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
-                                    .h(px(ROW_HEIGHT))
+                                    .h(ui::row_height(cx, ROW_HEIGHT))
                                     .px(px(7.))
                                     .text_size(px(12.))
                                     .text_color(if on_path { theme.fg0 } else { theme.fg1 })
