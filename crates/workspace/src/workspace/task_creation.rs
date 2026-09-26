@@ -45,6 +45,35 @@ pub(crate) enum CreationStage {
     Failed(SharedString),
 }
 
+/// 自動で名付けたブランチの改名の予約（O23・A23）。依頼の 1 行目に英数字が無いと、ブランチは
+/// `task/task`・`task/task-2`… になり、どれが何の作業か見分けられない。最初のスレッドに名前が
+/// 付いた時に、その名前から `task/<slug>` へ改名する（[`Workspace::rename_auto_branch`]）。
+/// 予約はこの起動の間だけ（再起動したら改名しない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AutoBranch {
+    /// 作った時の名前。改名する時にまだこの名前に居るかを確かめる（人が変えていたら触らない）。
+    pub(crate) branch: String,
+    /// fan-out の印（エージェントの slug）。改名後の名前の後ろに残す（並べた Task を見分ける）。
+    pub(crate) suffix: Option<String>,
+}
+
+/// 改名を予約するか: 名前を指定せず、依頼の 1 行目から slug が作れなかった（既定の `task` に
+/// 落ちた）時だけ。英語の依頼から作った名前（`task/fix-the-parser`）はそのまま使う。
+pub(crate) fn auto_branch_plan(task: &FanoutTask, branch: &str) -> Option<AutoBranch> {
+    if task.branch.is_some() {
+        return None;
+    }
+    // fan-out の slug の元は「1 行目 + 空白 + エージェントの slug」（`plan_fanout`）。
+    let (source, suffix) = match (&task.title_suffix, task.slug_source.rsplit_once(' ')) {
+        (Some(_), Some((source, id))) => (source, Some(id.to_string())),
+        _ => (task.slug_source.as_str(), None),
+    };
+    (project::task_slug(source) == "task").then(|| AutoBranch {
+        branch: branch.to_string(),
+        suffix,
+    })
+}
+
 /// 1 本分の worktree を作った結果（背景から前景へ渡す）。
 struct CreatedWorktree {
     target: PathBuf,
@@ -447,6 +476,92 @@ impl Workspace {
         .detach();
     }
 
+    /// 最初のスレッドに名前が付いた（O23・A23）: 改名を予約した Task なら、その名前から
+    /// `task/<slug>` へ改名する。名前に英数字が無ければ、既定のエージェントの一発生成（スレッドの
+    /// 自動命名と同じ口・`agent_auto_name` が on の時だけ）で英語の句をもらう。背景で行い、できなければ
+    /// 黙って今の名前のまま（worktree のフォルダ名は変えない＝動いているエージェントの場所を動かさない）。
+    pub(crate) fn rename_auto_branch(
+        &mut self,
+        session_index: usize,
+        name: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.project_sessions.projects.get(session_index) else {
+            return;
+        };
+        let space = slot.task_space.id.clone();
+        let Some(auto) = self.chrome.auto_branches.remove(&space) else {
+            return;
+        };
+        let direct = project::task_slug(&name);
+        let template = if direct == "task" {
+            let settings = settings::get(cx);
+            let template = acp_client::AgentKind::by_label(&settings.default_agent)
+                .and_then(|kind| kind.oneshot())
+                .filter(|_| settings.agent_auto_name);
+            let Some(template) = template else {
+                return;
+            };
+            Some(template)
+        } else {
+            None
+        };
+        let host = slot.worktree.host().clone();
+        let root = slot.worktree.root().to_path_buf();
+        let excerpt = format!("{}\n{name}", slot.task_space.title);
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let slug = match template {
+                        Some(template) => project::task_slug(&project::name_branch_on(
+                            host.as_ref(),
+                            &root,
+                            &excerpt,
+                            template,
+                        )?),
+                        None => direct,
+                    };
+                    anyhow::ensure!(slug != "task", "ブランチ名の元を作れない");
+                    let stem = match &auto.suffix {
+                        Some(suffix) => format!("{slug}-{suffix}"),
+                        None => slug,
+                    };
+                    project::rename_task_branch_on(host.as_ref(), &root, &auto.branch, &stem)
+                })
+                .await;
+            // Err = 待っている間に窓が閉じた。
+            workspace
+                .update(cx, |workspace, cx| {
+                    let renamed = match result {
+                        Ok(renamed) => renamed,
+                        Err(error) => {
+                            eprintln!("Task のブランチは今の名前のまま: {error:#}");
+                            return;
+                        }
+                    };
+                    let Some(index) = workspace
+                        .project_sessions
+                        .projects
+                        .iter()
+                        .position(|slot| slot.task_space.id == space)
+                    else {
+                        return;
+                    };
+                    let slot = &mut workspace.project_sessions.projects[index];
+                    slot.branch = Some(renamed.clone());
+                    slot.worktree_branch = Some(renamed);
+                    workspace.persist_task_space(index, cx);
+                    workspace.refresh_git_status_for(index, cx);
+                    workspace.forget_fleet_worktrees();
+                    workspace.refresh_fleet_worktrees(cx);
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
     /// 行の × : 順番待ち・早送り中なら作らずに外す。作っている最中なら、その段が終わった所で捨てる。
     /// 作れなかった行なら閉じる。
     pub(crate) fn cancel_task_creation(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -704,6 +819,100 @@ mod tests {
             .iter()
             .map(|slot| slot.worktree.root().to_path_buf())
             .collect()
+    }
+
+    /// O23（A23）: 改名を予約するのは、名前を指定せず依頼から slug が作れなかった Task だけ。
+    /// fan-out はエージェントの印を後ろに残す。
+    #[test]
+    fn only_generic_auto_named_branches_are_reserved_for_renaming() {
+        assert_eq!(
+            auto_branch_plan(&task("設計を直す", None), "task/task"),
+            Some(AutoBranch {
+                branch: "task/task".to_string(),
+                suffix: None
+            })
+        );
+        assert_eq!(
+            auto_branch_plan(&task("Fix the parser", None), "task/fix-the-parser"),
+            None
+        );
+        assert_eq!(
+            auto_branch_plan(&task("設計", Some("feature/x")), "feature/x"),
+            None
+        );
+        let fanout = FanoutTask {
+            slug_source: "設計を直す codex".to_string(),
+            branch: None,
+            agent: Some("Codex".to_string()),
+            title_suffix: Some("Codex".to_string()),
+        };
+        assert_eq!(
+            auto_branch_plan(&fanout, "task/codex"),
+            Some(AutoBranch {
+                branch: "task/codex".to_string(),
+                suffix: Some("codex".to_string())
+            })
+        );
+        let english = FanoutTask {
+            slug_source: "Fix login codex".to_string(),
+            ..fanout
+        };
+        assert_eq!(auto_branch_plan(&english, "task/fix-login-codex"), None);
+    }
+
+    /// O23（A23）: 予約した Task は、最初のスレッドの名前から `task/<slug>` へ改名する（1 回だけ）。
+    /// 名前に英数字があれば一発生成を呼ばない（テストはエージェントを起こさない）。
+    #[gpui::test]
+    fn a_generic_task_branch_takes_its_name_from_the_first_thread(cx: &mut gpui::TestAppContext) {
+        let Some((base, repo)) = scratch_repository("task_branch_rename") else {
+            return;
+        };
+        cx.update(|cx| settings::init(Some(base.join("settings.json")), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![repo.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.create_prompted_tasks(
+                String::new(),
+                project::TaskStart::default(),
+                vec![task("設計を直す", None)],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let index = workspace.update_in(cx, |workspace, _window, _cx| {
+            let index = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .position(|slot| slot.branch.as_deref() == Some("task/task"))
+                .expect("task/task の Task ができる");
+            assert_eq!(workspace.chrome.auto_branches.len(), 1, "改名を予約する");
+            index
+        });
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.rename_auto_branch(index, "Fix login redirect".into(), cx);
+            assert!(
+                workspace.chrome.auto_branches.is_empty(),
+                "予約は 1 回で使い切る"
+            );
+        });
+        cx.run_until_parked();
+        let root = workspace.update_in(cx, |workspace, _window, _cx| {
+            let slot = &workspace.project_sessions.projects[index];
+            assert_eq!(slot.branch.as_deref(), Some("task/fix-login-redirect"));
+            slot.worktree.root().to_path_buf()
+        });
+        let head = git(&root, &["symbolic-ref", "--short", "HEAD"]);
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "task/fix-login-redirect"
+        );
+        assert!(!branch_exists(&repo, "task/task"));
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// 押した直後から行が出て、worktree ができたら Task に替わる。

@@ -3732,6 +3732,73 @@ mod tests {
         assert_eq!(parse_github_slug("git@github.com:owner"), None);
     }
 
+    /// O23（A23）: 自動で名付けたブランチを改名する。同じ名前があれば番号を付け、人が切り替えた
+    /// worktree と push 済みのブランチは断る。
+    #[test]
+    fn auto_named_task_branches_are_renamed_only_when_safe() {
+        let base = scratch("rename_branch");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&repo, &["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(repo.join("a.txt"), "1\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "first"]);
+        git(&repo, &["branch", "task/fix-login"]);
+        let task = base.join("task");
+        let task_str = task.to_string_lossy().to_string();
+        assert!(git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "task/task", &task_str]
+        )
+        .status
+        .success());
+
+        let renamed = rename_task_branch_on(&LocalHost, &task, "task/task", "fix-login").unwrap();
+        assert_eq!(renamed, "task/fix-login-2", "同じ名前は避ける");
+        let head = git(&task, &["symbolic-ref", "--short", "HEAD"]);
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "task/fix-login-2"
+        );
+        assert!(
+            rename_task_branch_on(&LocalHost, &task, "task/task", "other").is_err(),
+            "もう元の名前に居ない"
+        );
+
+        // 起点を追跡しているだけなら改名する（追跡の設定ごと運ぶ）。
+        git(&task, &["config", "branch.task/fix-login-2.remote", "."]);
+        git(
+            &task,
+            &["config", "branch.task/fix-login-2.merge", "refs/heads/main"],
+        );
+        let renamed =
+            rename_task_branch_on(&LocalHost, &task, "task/fix-login-2", "again").unwrap();
+        assert_eq!(renamed, "task/again");
+        let merge = git(&task, &["config", "--get", "branch.task/again.merge"]);
+        assert_eq!(
+            String::from_utf8_lossy(&merge.stdout).trim(),
+            "refs/heads/main"
+        );
+
+        // 同じ名前で push した（`git push -u` の追跡）なら断る。
+        git(
+            &task,
+            &["config", "branch.task/again.merge", "refs/heads/task/again"],
+        );
+        assert!(rename_task_branch_on(&LocalHost, &task, "task/again", "later").is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn task_slug_is_ascii_first_line_and_never_empty() {
         // 1 行目だけ・小文字 ASCII・区切りは '-' に畳む（FLEET-V2 §4.1）。
@@ -4575,6 +4642,75 @@ pub fn create_task_with_on(
         .err()
         .map(|error| format!("{error:#}"));
     Ok((target, branch.to_string(), failure))
+}
+
+/// 作業の中身から git のブランチ名の元（英語の短い句）を 1 行もらう（O23・A23）。呼ぶ側が
+/// [`task_slug`] で整える。失敗（CLI 未導入・空応答）は `Err`（名前は変えない）。
+pub fn name_branch_on(
+    host: &dyn Host,
+    dir: &Path,
+    excerpt: &str,
+    template: &str,
+) -> Result<String> {
+    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+    let prompt = "入力はエージェントに頼んだ作業の説明です。この作業の git ブランチ名を付けて。\
+        英語の小文字の単語を 2〜5 個ハイフンでつなぐ・記号やスラッシュや引用符は付けない・\
+        ブランチ名だけを1行で出力して。";
+    oneshot_line_on(host, dir, excerpt, template, prompt, 48)
+}
+
+/// 自動で名付けた Task のブランチ（`old`）を `task/<stem>` へ改名する（O23・A23）。同じ名前が
+/// あれば `-2`・`-3`… を付ける。`dir` は Task の worktree。**断る**: その worktree がもう `old` に
+/// 居ない（人が切り替えた・改名した）・`old` を同じ名前で push した（`git push -u` の追跡か、
+/// どこかのリモートに同じ名前がある＝向こうの名前とずれる）。起点（`origin/main` など）を追跡して
+/// いるだけなら push ではないので改名する（git は改名で追跡の設定も運ぶ）。
+/// 返すのは改名した後の名前（空いている名前が `old` 自身ならそのまま）。
+pub fn rename_task_branch_on(host: &dyn Host, dir: &Path, old: &str, stem: &str) -> Result<String> {
+    let head = run_git(host, dir, ["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    anyhow::ensure!(
+        head.success() && String::from_utf8_lossy(&head.stdout).trim() == old,
+        "worktree がもう {old} に居ない"
+    );
+    let merge_key = format!("branch.{old}.merge");
+    let merge = run_git(host, dir, ["config", "--get", merge_key.as_str()])?;
+    let pushed_as_itself = merge.success()
+        && String::from_utf8_lossy(&merge.stdout).trim() == format!("refs/heads/{old}");
+    let remotes = run_git(
+        host,
+        dir,
+        ["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
+    )?;
+    let on_a_remote = String::from_utf8_lossy(&remotes.stdout)
+        .lines()
+        .any(|remote| remote.trim().ends_with(&format!("/{old}")));
+    anyhow::ensure!(
+        !pushed_as_itself && !on_a_remote,
+        "{old} は push 済み（改名すると向こうの名前とずれる）"
+    );
+    let known = git_branches_on(host, dir);
+    let mut candidate = format!("task/{stem}");
+    let mut number = 2;
+    while candidate != old && known.iter().any(|branch| *branch == candidate) {
+        candidate = format!("task/{stem}-{number}");
+        number += 1;
+    }
+    if candidate == old {
+        return Ok(candidate);
+    }
+    let valid = run_git(
+        host,
+        dir,
+        ["check-ref-format", "--branch", candidate.as_str()],
+    )
+    .is_ok_and(|output| output.success());
+    anyhow::ensure!(valid, "ブランチ名に使えない文字があります: {candidate}");
+    let renamed = run_git(host, dir, ["branch", "-m", old, candidate.as_str()])?;
+    anyhow::ensure!(
+        renamed.success(),
+        "ブランチを改名できない: {}",
+        git_fail_message(&renamed)
+    );
+    Ok(candidate)
 }
 
 /// 空いている `task/<slug>`（と worktree の置き場）を探す（[`create_named_task_on`] と同じ決め方）。
