@@ -371,6 +371,8 @@ impl gpui::AssetSource for Assets {
             "icons/bell.svg" => icon!("bell.svg"),
             "icons/bell-off.svg" => icon!("bell-off.svg"),
             "icons/eye.svg" => icon!("eye.svg"),
+            // ピン留めしたタブ（× の代わり・O26）。
+            "icons/pin.svg" => icon!("pin.svg"),
             // エクスプローラの手動更新（ヘッダ右端）・Web タブの再読込。
             "icons/refresh-cw.svg" => icon!("refresh-cw.svg"),
             // Web タブのツールバー（戻る / 進む / DevTools / 既定のブラウザで開く）。
