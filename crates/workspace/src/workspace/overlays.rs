@@ -781,6 +781,19 @@ impl Workspace {
                             }
                         }
                     }
+                    // 「接続を確かめる」で開いた時は、選んだ先を試すだけ（開かない・手入力の行は無視）。
+                    PickerMode::SshHosts if std::mem::take(&mut self.picker_ssh_testing) => {
+                        let uri = match self.picker_ssh_recent.get(id) {
+                            Some(uri) => Some(uri.clone()),
+                            None => self
+                                .picker_ssh_hosts
+                                .get(id - self.picker_ssh_recent.len())
+                                .map(|host| format!("ssh://{}", host.alias)),
+                        };
+                        if let Some(uri) = uri {
+                            self.test_ssh_uri(uri, cx);
+                        }
+                    }
                     PickerMode::SshHosts => {
                         // 前半 id = 最近のリモートプロジェクト（履歴・直接接続・#5）。
                         if let Some(uri) = self.picker_ssh_recent.get(id).cloned() {

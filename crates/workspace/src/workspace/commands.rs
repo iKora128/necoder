@@ -239,6 +239,10 @@ impl CommandRegistry {
                 action_name: "workspace::RemoteSsh",
             },
             CommandEntry {
+                label_key: "cmd.test_ssh",
+                action_name: "workspace::TestSshConnection",
+            },
+            CommandEntry {
                 label_key: "cmd.thread_history",
                 action_name: "workspace::ThreadHistory",
             },

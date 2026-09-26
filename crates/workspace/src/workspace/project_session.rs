@@ -86,6 +86,8 @@ pub struct ProjectSession {
     pub(crate) picker_worktree_rows: Vec<PathBuf>,
     pub(crate) picker_ssh_hosts: Vec<host::SshConfigHost>,
     pub(crate) picker_ssh_recent: Vec<String>,
+    /// SSH のホストピッカーを「接続を確かめる」で開いた（選んでも開かずに試すだけ・O37）。
+    pub(crate) picker_ssh_testing: bool,
     /// スレッド履歴 Picker の行データ (id, name, color_index, created_at_ms, last_input_at_ms)。
     /// 時刻は復元時に Thread へ引き継ぐ（「いつスタート/最終入力」表示・M14）。
     pub(crate) picker_history: Vec<(String, String, i64, i64, Option<i64>)>,
@@ -238,6 +240,7 @@ impl Workspace {
             picker_worktree_rows: Vec::new(),
             picker_ssh_hosts: Vec::new(),
             picker_ssh_recent: Vec::new(),
+            picker_ssh_testing: false,
             picker_history: Vec::new(),
             picker_open_rows: Vec::new(),
             todo_panel,
@@ -765,6 +768,7 @@ impl Workspace {
                 picker_worktree_rows: Vec::new(),
                 picker_ssh_hosts: Vec::new(),
                 picker_ssh_recent: Vec::new(),
+                picker_ssh_testing: false,
                 picker_history: Vec::new(),
                 picker_open_rows: Vec::new(),
                 todo_panel,

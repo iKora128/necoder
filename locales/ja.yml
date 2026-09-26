@@ -247,6 +247,7 @@ cmd:
   next_thread: "AI: 次のスレッド"
   prev_thread: "AI: 前のスレッド"
   remote_ssh: "リモート: SSH ホストに接続"
+  test_ssh: "リモート: SSH の接続を確かめる…"
   thread_history: "AI: スレッド履歴"
   report_bug: "ヘルプ: バグを報告"
   about: "ヘルプ: necoder について"
@@ -1182,6 +1183,8 @@ ssh:
   reconnect_now: 再接続
   connect_now: 接続
   reconnecting: "%{host} へ再接続中…"
+  testing: "%{host} へ試しに接続しています…"
+  test_ok: "%{host} に接続できました（%{ms} ms）"
   connect_failed: "%{host} に接続できません"
   failure_details: SSH の接続ログ
   hint_host_key_unknown: "ホストの指紋を確かめられませんでした。初めてのホストなら、出てくる確認で指紋を確かめて yes と入力してください（ターミナルで一度 ssh %{host} しても同じです）"

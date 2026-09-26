@@ -225,6 +225,8 @@ actions!(
         Zoom,
         // リモート SSH ホストピッカー（~/.ssh/config・M13）。
         RemoteSsh,
+        // SSH の接続を確かめる（O37・ホストを選んで `ssh host true` を 1 回）。
+        TestSshConnection,
         // スレッド履歴（過去スレッド一覧 → 復元・#5）。
         ThreadHistory,
         // code actions（⌘.・M11）と参照検索（⇧F12・M11）。
@@ -2330,6 +2332,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
             .on_action(cx.listener(Self::open_ssh_host_picker))
+            .on_action(cx.listener(Self::open_ssh_test_picker))
             .on_action(cx.listener(Self::open_thread_history))
             .on_action(cx.listener(Self::open_code_actions))
             .on_action(cx.listener(Self::find_references))

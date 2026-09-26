@@ -246,6 +246,7 @@ cmd:
   next_thread: "AI: Next thread"
   prev_thread: "AI: Previous thread"
   remote_ssh: "Remote: Connect to SSH Host"
+  test_ssh: "Remote: Test SSH connection…"
   thread_history: "AI: Thread history"
   report_bug: "Help: Report a Bug"
   about: "Help: About necoder"
@@ -1181,6 +1182,8 @@ ssh:
   reconnect_now: Reconnect
   connect_now: Connect
   reconnecting: "Reconnecting to %{host}…"
+  testing: "Testing the connection to %{host}…"
+  test_ok: "Connected to %{host} (%{ms} ms)"
   connect_failed: "Cannot connect to %{host}"
   failure_details: SSH connection log
   hint_host_key_unknown: "The host key was not confirmed. For a new host, check the fingerprint in the prompt and answer yes (running ssh %{host} once in a terminal does the same)"

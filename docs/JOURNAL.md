@@ -3313,7 +3313,7 @@
   目次**（`markdown::split_front_matter`・`[toc]`・O29）・**横並びのライブプレビュー**（⌘K V・O29）・
   **スラッシュメニュー**（Markdown の行頭の `/`・補完のポップアップを使い回す・O29）・ターミナルの**配色の取り込み**
   （`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2・O25）・**端末タブの改名**（ダブルクリック・O24）・
-  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）。
+  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）・**SSH の接続テスト**（O37）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3364,6 +3364,8 @@
     `output()` が master の終わりまで返らない。理由を読みたい時は `-E <ファイル>` でログへ書かせ、親の終わりを
     待ってから読む（`-E` は追記なので試行の前に消す）。以前は stderr を継いでいたので、失敗のトーストは
     `exit status: 255` しか言えなかった。
+  - locales の値に `: ` を含むなら必ず `"…"` で囲む（`test_ssh: SSH: 接続…` は i18n の解析が落ちる・CI で
+    3 本赤になる所だった）。パレットの項目は「領域: 動作」の形なので特に注意。
   - relay の Remote control（WebKit）は、カメラの 2 本に加えて本体の `PWA: …` の 17 行目も落ちたり通ったりする。
     `test/fixture.mjs` の transcript と送信の数を chromium と webkit が共有するので、2 番目の webkit では
     前の回の同じ文で `toContainText` が先に通り、数を見る時に送信がまだ届いていない。#30 のコメントに
