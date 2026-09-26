@@ -61,6 +61,7 @@
 | **agent**（話す相手の AI） | `AgentKind` / `agent` | エージェント | Agent |
 | ↳ **アカウント**（エージェントの設定の置き場のフォルダ。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` で指す・資格情報は読まない・O14） | `account_env_var` / `accounts_root` / `agent_servers.<id>.env` | アカウント / 既定 / 新しいアカウント | Account / Default / New account |
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
+| ↳ **レシピ**（repo ごとの定型プロンプト。`.necoder/recipes/*.md`・`/` 補完に `/necoder:<名前>`・選ぶと本文が入る・O16） | `recipes` / `Recipe` / `RECIPE_PREFIX` | レシピ | Recipe |
 | ↳ **会話名**（エージェントが付けたスレッドの題名。手動改名が優先） | `AgentEvent::TitleChanged`（ACP `session_info_update.title`）/ 手動の印 `thread_custom_names` | （スレッド名） | (thread name) |
 | ↳ **目標**（`/goal` でエージェントが追う目的。composer の上に 1 行） | `acp_client::AgentGoal` / `AgentEvent::GoalChanged` / `Thread.goal` | 目標 | Goal |
 | ↳ **使用量**（エージェントがターンごとに報告したトークンと推定コスト。台帳に 1 ターン 1 行・O11） | `turn_usage`（storage）/ `AgentEvent::TurnUsage` / `AgentEvent::SessionCost` / `agent_panel::usage::CostMeter` | 使用量 | Usage |
