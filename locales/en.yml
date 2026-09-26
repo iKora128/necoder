@@ -344,6 +344,9 @@ fleet:
   tasks_count: "%{n} Tasks"
   filter_placeholder: Filter Tasks
   filter_none: No Tasks match
+  sort_rail: "Order: rail"
+  sort_recent: "Order: recent"
+  sort_attention: "Order: needs you"
   external_header: "Other worktrees (%{count})"
   external_tip: "Worktrees of this repository that are not Tasks (made by Orca, Claude Code, git worktree add, and so on). Click to collapse"
   external_adopt: Adopt

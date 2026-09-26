@@ -345,6 +345,9 @@ fleet:
   tasks_count: "%{n} Tasks"
   filter_placeholder: Task を絞り込む
   filter_none: 一致する Task はありません
+  sort_rail: "並び: レール"
+  sort_recent: "並び: 最近"
+  sort_attention: "並び: 要対応"
   external_header: "外部の worktree（%{count}）"
   external_tip: このリポジトリの worktree のうち Task になっていないもの（Orca・Claude Code・手で git worktree add したもの等）。押すと畳む
   external_adopt: 取り込む
