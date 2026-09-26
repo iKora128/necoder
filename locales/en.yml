@@ -1110,6 +1110,8 @@ difftab:
   missing: "%{name} is in neither %{base} nor the working tree"
   unreadable: "Can't show a diff: %{name} isn't readable as text"
 update:
+  just_updated: "necoder was updated to v%{version}"
+  whats_new: What's new ›
   available: ⬆ Update to v%{version}
   get: ⬆ Get v%{version}
   installing: ⬇ Updating…

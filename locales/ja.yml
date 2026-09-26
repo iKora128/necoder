@@ -1111,6 +1111,8 @@ difftab:
   missing: "%{name} は %{base} にも作業ツリーにもありません"
   unreadable: "%{name} をテキストとして読めないので diff を出せません"
 update:
+  just_updated: "necoder を v%{version} に更新しました"
+  whats_new: 変更点 ›
   available: ⬆ v%{version} に更新
   get: ⬆ v%{version} を入手
   installing: ⬇ 更新中…
