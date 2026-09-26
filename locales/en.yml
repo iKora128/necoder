@@ -970,13 +970,15 @@ usage:
   duration_hours_only: "%{hours}h"
   duration_days: "%{days}d %{hours}h"
   duration_days_only: "%{days}d"
+  account_ssh: "%{host} (SSH)"
+  account_env: "settings env %{id}"
   chip_tip: "%{agent} usage (last value received). Click for details"
   popover_title: Usage & rate limits
   received: "received %{when}"
   status_warning: Near the limit
   status_rejected: Limit reached
   no_values: No values yet. They appear once an agent reports them
-  note: Values change only when an agent reports them. What you see here is the last value received.
+  note: Values change only when an agent reports them. What you see here is the last value received. The same agent is listed separately per account when the SSH host or its auth settings (agent_servers env) differ.
   codex_note: Codex does not report limits over ACP, so they are read from the Codex CLI (codex app-server) when you open this panel.
   codex_loading: Reading Codex limits…
   codex_failed: "Couldn't read Codex limits: %{error}"
@@ -988,9 +990,9 @@ usage:
   stats_agent: Agent
   stats_turns: Turns
   stats_tokens: Tokens
-  stats_cost: Cost
+  stats_cost: Est. cost
   stats_total: 30-day total
   stats_empty: Nothing recorded yet. Turns are recorded once an agent reports usage.
   stats_loading: Loading…
   stats_failed: "Couldn't read usage: %{error}"
-  stats_note: Tokens and cost are estimates each agent reports per turn (Claude's cost is Claude Code's estimate; Codex reports no cost, and its tokens cover only the last request of each turn). Local logs such as ~/.claude are not read.
+  stats_note: Tokens and estimated cost are what each agent reported per turn. Cost is Claude Code's estimate (USD), not the amount you are billed (your provider's billing page is the source of truth). Unreported values show — (not 0), and totals that only some turns reported are marked ≥. Codex reports no cost, and its tokens cover only the last request of each turn. Local logs such as ~/.claude are not read.

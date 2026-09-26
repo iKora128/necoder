@@ -8,7 +8,9 @@
 //! 同じ Lucide アイコンを添える（色だけに頼らない）。それ以外は中立（fg / bg3）で、識別色は使わない。
 
 use crate::workspace::*;
-use agent_panel::usage::{self, AgentLimits, CodexRead, LimitStatus, UsageLimits, WindowReading};
+use agent_panel::usage::{
+    self, AgentLimits, CodexRead, LimitStatus, UsageAccount, UsageLimits, WindowReading,
+};
 
 /// ポップオーバーの幅。
 const POPOVER_WIDTH: f32 = 440.0;
@@ -40,11 +42,11 @@ enum StatsRows {
 }
 
 impl Workspace {
-    /// statusbar の使用量チップ: いまのスレッドのエージェントの 5 時間枠・週枠（と上限に近い窓）。
-    /// 値が無ければ出さない。
+    /// statusbar の使用量チップ: いまのスレッドの持ち主（エージェント × 実行 host × 認証の環境・R08）の
+    /// 5 時間枠・週枠（と上限に近い窓）。値が無ければ出さない（別の持ち主の値で代用しない）。
     pub(crate) fn render_usage_chip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let agent = self.agent_panel.read(cx).active_agent()?;
-        let limits = cx.try_global::<UsageLimits>()?.agent(&agent)?.clone();
+        let account = self.agent_panel.read(cx).active_usage_account(cx)?;
+        let limits = cx.try_global::<UsageLimits>()?.account(&account)?.clone();
         let now_secs = agent_panel::now_unix_ms() / 1000;
         let headline = limits.headline(now_secs);
         let blocked = limits.blocked(now_secs);
@@ -80,7 +82,7 @@ impl Workspace {
                 })
                 .child(label)
                 .tooltip(Tooltip::text(
-                    i18n::t!("usage.chip_tip", "agent" => agent),
+                    i18n::t!("usage.chip_tip", "agent" => account.label()),
                     theme.clone(),
                 ))
                 .on_mouse_down(
@@ -154,46 +156,50 @@ impl Workspace {
         }
     }
 
-    /// 使用量のポップオーバー: エージェントごとの窓・使用率・リセットまでの時間・受け取った時刻。
+    /// 使用量のポップオーバー: 持ち主（エージェント × 実行 host × 認証の環境）ごとの窓・使用率・
+    /// リセットまでの時間・受け取った時刻。
     pub(crate) fn render_usage_popover(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let state = self.overlays.usage_popover.as_ref()?;
         let theme = self.theme.clone();
         let now_ms = agent_panel::now_unix_ms();
-        let active_agent = self.agent_panel.read(cx).active_agent();
-        let (mut agents, codex_read, codex_installed) = match cx.try_global::<UsageLimits>() {
-            Some(limits) => (
-                limits
-                    .agents()
-                    .map(|(label, limits)| (label.clone(), limits.clone()))
-                    .collect::<Vec<_>>(),
-                limits.codex.clone(),
-                limits.codex_installed == Some(true),
-            ),
-            None => (Vec::new(), CodexRead::Idle, false),
-        };
-        // いまのスレッドのエージェントを先頭に（残りはラベル順のまま）。
-        agents.sort_by_key(|(label, _)| Some(label) != active_agent.as_ref());
-        let codex_label = usage::codex_label();
+        let active_account = self.agent_panel.read(cx).active_usage_account(cx);
+        let (mut accounts, codex_read, codex_account, codex_installed) =
+            match cx.try_global::<UsageLimits>() {
+                Some(limits) => (
+                    limits
+                        .accounts()
+                        .map(|(account, limits)| (account.clone(), limits.clone()))
+                        .collect::<Vec<_>>(),
+                    limits.codex.clone(),
+                    limits.codex_account.clone(),
+                    limits.codex_installed == Some(true),
+                ),
+                None => (Vec::new(), CodexRead::Idle, None, false),
+            };
+        // いまのスレッドの持ち主を先頭に（残りは名前 → host → 認証の環境の順のまま）。
+        accounts.sort_by_key(|(account, _)| Some(account) != active_account.as_ref());
+        // Codex の読み取りの状態は、読みに行った持ち主（手元の Codex × その時の認証の環境）の行に出す。
+        let codex_account = codex_account.unwrap_or_else(|| usage::local_codex_account(cx));
 
         let mut body = div().flex().flex_col().gap(px(12.));
-        for (label, limits) in &agents {
-            let codex = (label.as_ref() == codex_label).then_some(&codex_read);
-            body = body.child(self.render_usage_agent(label, Some(limits), codex, now_ms, cx));
+        for (account, limits) in &accounts {
+            let codex = (codex_installed && account == &codex_account).then_some(&codex_read);
+            body = body.child(self.render_usage_agent(account, Some(limits), codex, now_ms, cx));
         }
         if codex_installed
-            && !agents
+            && !accounts
                 .iter()
-                .any(|(label, _)| label.as_ref() == codex_label)
+                .any(|(account, _)| account == &codex_account)
         {
             body = body.child(self.render_usage_agent(
-                &SharedString::from(codex_label),
+                &codex_account,
                 None,
                 Some(&codex_read),
                 now_ms,
                 cx,
             ));
         }
-        if agents.is_empty() && !codex_installed {
+        if accounts.is_empty() && !codex_installed {
             body = body.child(
                 div()
                     .text_size(px(11.5))
@@ -280,10 +286,10 @@ impl Workspace {
         )
     }
 
-    /// ポップオーバーの 1 エージェント分。`codex` = Codex の読み取りの状態（Codex の時だけ）。
+    /// ポップオーバーの 1 持ち主分。`codex` = Codex の読み取りの状態（読みに行った持ち主の時だけ）。
     fn render_usage_agent(
         &self,
-        label: &SharedString,
+        account: &UsageAccount,
         limits: Option<&AgentLimits>,
         codex: Option<&CodexRead>,
         now_ms: i64,
@@ -308,24 +314,42 @@ impl Workspace {
                 "when" => agent_panel::relative_time_label(limits.received_at_ms)
             ))
         });
+        // 同じエージェントでも SSH の接続先・認証の置き場が違えば別の行（R08）。名前の隣に見分けを添える。
         let header = div()
             .flex()
             .items_center()
             .gap(px(8.))
             .child(
                 div()
+                    .flex_none()
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.fg0)
-                    .child(label.clone()),
+                    .child(account.agent.clone()),
             )
             .when_some(status, |element, (text, color)| {
-                element.child(div().text_size(px(10.5)).text_color(color).child(text))
+                element.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(color)
+                        .child(text),
+                )
             })
-            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(10.5))
+                    .text_color(theme.fg2)
+                    .when_some(account.detail(), |element, detail| element.child(detail)),
+            )
             .when_some(received, |element, received| {
                 element.child(
                     div()
+                        .flex_none()
                         .text_size(px(10.5))
                         .text_color(theme.fg2)
                         .child(received),
@@ -646,7 +670,7 @@ impl Workspace {
         let totals = usage_totals(rows);
         let max_tokens = rows
             .iter()
-            .map(|row| row.total_tokens)
+            .filter_map(|row| row.total_tokens)
             .max()
             .unwrap_or(0)
             .max(1);
@@ -685,9 +709,12 @@ impl Workspace {
                 .then(|| chat_core::date::Date::from_unix_utc(row.day * 86_400).to_string());
             let first_of_day = date.is_some();
             previous_day = Some(row.day);
-            let bar = row.total_tokens as f32 / max_tokens as f32;
+            // 報告の無い日は棒も出さない（0 の棒を描かない）。
+            let bar = row
+                .total_tokens
+                .map(|tokens| tokens as f32 / max_tokens as f32);
             table = table.child(
-                self.render_usage_row(date, row, Some(bar), false)
+                self.render_usage_row(date, row, bar, false)
                     .when(first_of_day && index == 0, |element| element.mt(px(6.)))
                     .when(first_of_day && index > 0, |element| {
                         element
@@ -701,7 +728,8 @@ impl Workspace {
         table
     }
 
-    /// 表の 1 行。`bar` = トークンの棒の長さ（その期間の最大に対する割合・合計の行は無し）。
+    /// 表の 1 行。`bar` = トークンの棒の長さ（その期間の最大に対する割合・合計の行と報告の無い日は無し）。
+    /// 報告の無い値は `—`、一部のターンにしか報告が無い合計は `≥`（[`usage::reported_total_label`]）。
     fn render_usage_row(
         &self,
         date: Option<String>,
@@ -774,8 +802,16 @@ impl Workspace {
                             .w(px(58.))
                             .flex_none()
                             .text_right()
-                            .text_color(text)
-                            .child(SharedString::from(usage::tokens_label(row.total_tokens))),
+                            .text_color(if row.total_tokens.is_some() {
+                                text
+                            } else {
+                                theme.fg2
+                            })
+                            .child(SharedString::from(usage::reported_total_label(
+                                row.total_tokens.map(usage::tokens_label),
+                                row.token_turns,
+                                row.turns,
+                            ))),
                     ),
             )
             .child(
@@ -788,27 +824,33 @@ impl Workspace {
                     } else {
                         theme.fg2
                     })
-                    .child(SharedString::from(
-                        row.cost_usd
-                            .map(usage::usd_label)
-                            .unwrap_or_else(|| "—".to_string()),
-                    )),
+                    .child(SharedString::from(usage::reported_total_label(
+                        row.cost_usd.map(usage::usd_label),
+                        row.cost_turns,
+                        row.turns,
+                    ))),
             )
     }
 }
 
-/// エージェントごとの期間の合計（ターン・トークン・コスト）。コストはどこかの日にあれば合計、無ければ `None`。
+/// エージェントごとの期間の合計（ターン・トークン・推定コスト）。トークンとコストはどこかの日に報告が
+/// あれば合計、無ければ `None`（0 と区別する）。報告のあったターンの数も足す（`≥` の判定に使う）。
 fn usage_totals(rows: &[storage::DailyUsage]) -> Vec<storage::DailyUsage> {
+    fn add<T: std::ops::Add<Output = T>>(left: Option<T>, right: Option<T>) -> Option<T> {
+        match (left, right) {
+            (Some(left), Some(right)) => Some(left + right),
+            (left, right) => left.or(right),
+        }
+    }
     let mut totals: Vec<storage::DailyUsage> = Vec::new();
     for row in rows {
         match totals.iter_mut().find(|total| total.agent == row.agent) {
             Some(total) => {
                 total.turns += row.turns;
-                total.total_tokens += row.total_tokens;
-                total.cost_usd = match (total.cost_usd, row.cost_usd) {
-                    (Some(left), Some(right)) => Some(left + right),
-                    (left, right) => left.or(right),
-                };
+                total.total_tokens = add(total.total_tokens, row.total_tokens);
+                total.token_turns += row.token_turns;
+                total.cost_usd = add(total.cost_usd, row.cost_usd);
+                total.cost_turns += row.cost_turns;
             }
             None => totals.push(storage::DailyUsage {
                 day: 0,
@@ -841,11 +883,12 @@ fn text_chip(id: &'static str, label: String, theme: &Theme) -> Stateful<Div> {
 mod tests {
     use super::*;
 
+    /// 集計 1 行（トークン・コストの報告はどのターンにもあった＝`None` なら 1 つも無かった）。
     fn daily(
         day: i64,
         agent: &str,
         turns: i64,
-        tokens: i64,
+        tokens: Option<i64>,
         cost: Option<f64>,
     ) -> storage::DailyUsage {
         storage::DailyUsage {
@@ -853,7 +896,9 @@ mod tests {
             agent: agent.into(),
             turns,
             total_tokens: tokens,
+            token_turns: if tokens.is_some() { turns } else { 0 },
             cost_usd: cost,
+            cost_turns: if cost.is_some() { turns } else { 0 },
         }
     }
 
@@ -876,7 +921,10 @@ mod tests {
                 thread_id: "thread-1".into(),
                 agent: "Claude Code".into(),
                 ended_at: agent_panel::now_unix_ms(),
-                total_tokens: 1_000,
+                tokens: Some(storage::TurnTokenCounts {
+                    total: 1_000,
+                    ..storage::TurnTokenCounts::default()
+                }),
                 cost_usd: Some(0.5),
                 ..storage::TurnUsageRecord::default()
             })
@@ -917,7 +965,7 @@ mod tests {
             {
                 Some(StatsRows::Loaded(rows)) => {
                     assert_eq!(rows.len(), 1, "{rows:?}");
-                    assert_eq!(rows[0].total_tokens, 1_000);
+                    assert_eq!(rows[0].total_tokens, Some(1_000));
                 }
                 _ => panic!("台帳を読み終えている"),
             }
@@ -935,21 +983,43 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("片付けられる");
     }
 
-    /// 期間の合計はエージェントごと。コストはある日だけ足し、どの日にも無ければ無し（0 と区別する）。
+    /// 期間の合計はエージェントごと。トークンもコストもある日だけ足し、どの日にも無ければ無し
+    /// （0 と区別する）。報告のあったターンの数も足す（一部だけなら表示は `≥`）。
     #[test]
-    fn totals_sum_per_agent_and_keep_unknown_cost_unknown() {
+    fn totals_sum_per_agent_and_keep_unknown_values_unknown() {
         let totals = usage_totals(&[
-            daily(10, "Claude Code", 2, 4_000, Some(0.75)),
-            daily(10, "Codex", 1, 7_000, None),
-            daily(9, "Claude Code", 1, 500, None),
-            daily(8, "Codex", 3, 1_000, None),
+            daily(10, "Claude Code", 2, Some(4_000), Some(0.75)),
+            daily(10, "Codex", 1, Some(7_000), None),
+            daily(9, "Claude Code", 1, None, None),
+            daily(8, "Codex", 3, Some(1_000), None),
+            daily(7, "Gemini", 2, None, None),
         ]);
+        let claude = storage::DailyUsage {
+            token_turns: 2,
+            cost_turns: 2,
+            ..daily(0, "Claude Code", 3, Some(4_000), Some(0.75))
+        };
         assert_eq!(
             totals,
             vec![
-                daily(0, "Claude Code", 3, 4_500, Some(0.75)),
-                daily(0, "Codex", 4, 8_000, None),
+                claude.clone(),
+                daily(0, "Codex", 4, Some(8_000), None),
+                daily(0, "Gemini", 2, None, None),
             ]
+        );
+        assert_eq!(
+            usage::reported_total_label(
+                claude.total_tokens.map(usage::tokens_label),
+                claude.token_turns,
+                claude.turns
+            ),
+            "≥ 4.0k",
+            "報告の無いターンがある合計は下限として出す"
+        );
+        assert_eq!(
+            usage::reported_total_label(None, 0, 2),
+            "—",
+            "報告が 1 つも無ければ 0 ではなく —"
         );
     }
 }
