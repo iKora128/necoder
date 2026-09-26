@@ -1719,6 +1719,14 @@ impl SettingsView {
                 true,
                 cx,
             ))
+            .child(self.toggle_row(
+                "system_notifications",
+                7,
+                i18n::t!("settings.pref_system_notifications"),
+                Some(i18n::t!("settings.pref_system_notifications_sub")),
+                settings.system_notifications,
+                cx,
+            ))
             // ⌘Q・最後の窓を閉じる時の確認（O4）。値は settings.json の `confirm_quit`。
             .child(self.segmented_row_with(
                 "confirm_quit",

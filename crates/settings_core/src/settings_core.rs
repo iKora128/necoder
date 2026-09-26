@@ -195,6 +195,10 @@ pub struct Settings {
     /// 入力待ち（承認・質問で止まった）の通知音。値の取り方は [`Settings::sound_done`] と同じ。
     /// 完了とは違う音（別の声でもいい）を当てて、耳だけで「終わった」と「呼ばれている」を区別する。
     pub sound_waiting: String,
+    /// OS のデスクトップ通知（O12・既定 on）。ターンの完了 / 失敗・承認待ち・質問待ちを、
+    /// **その窓を見ていない時だけ**通知センターへ出す（見ている時は右下のトーストで足りる）。
+    /// ミュートしたスレッドは出さない。押すとそのスレッドへ飛ぶ。
+    pub system_notifications: bool,
     /// 装飾的な動きを静止するアクセシビリティ設定。GPUI の `reduce_motion` へ接続し、
     /// スピナー・fade・マスコットなどの継続アニメーションを静止画として描く。
     pub reduce_motion: bool,
@@ -288,6 +292,7 @@ impl Default for Settings {
             agent_prewarm: true,
             sound_done: "nyaan".to_string(),
             sound_waiting: "nyaan".to_string(),
+            system_notifications: true,
             reduce_motion: false,
             tier2_summaries: true,
             captain_agent: None,
@@ -349,6 +354,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "agent_prewarm": true,
   "sound_done": "nyaan",
   "sound_waiting": "nyaan",
+  "system_notifications": true,
   "reduce_motion": false,
   "tier2_summaries": true,
   "agent_tabs_view": "bar",

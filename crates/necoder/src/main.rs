@@ -751,6 +751,11 @@ fn main() {
             .map(|source| source.root().to_path_buf());
         settings::init(settings_core::user_settings_path(), local_settings_root, cx);
         stage(&startup, "settings_ready");
+        // OS 通知（O12）の身元。Windows の通知は AppUserModelID が無いと出ない（mac は bundle ID
+        // が身元なので何もしない・Linux は表示名だけ使う）。bundle-mac.sh の CFBundleIdentifier と揃える。
+        cx.set_app_identity("dev.necoder.editor", "necoder");
+        // 通知を押した時の行き先と、Dock の要対応バッジの数え直し（O12）。
+        workspace::install_agent_notifications(cx);
         let settings = settings::get(cx);
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);
@@ -1014,6 +1019,26 @@ fn main() {
                             let _ = handle.update(cx, |workspace, _window, cx| {
                                 workspace.debug_set_activities(cx);
                             });
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: NECODER_QUESTION_PROBE=<ms> で <ms> 後に Fleet を開き、スレッドへ質問を届ける
+                // （O12: 質問待ちが要対応・トースト・statusbar に出るかの撮影）。
+                if let Some(delay_ms) = std::env::var("NECODER_QUESTION_PROBE")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(delay_ms))
+                                .await;
+                            if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_question_probe(window, cx);
+                            }) {
+                                eprintln!("question probe: {error:#}");
+                            }
                         })
                         .detach();
                     }

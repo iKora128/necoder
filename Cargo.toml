@@ -84,6 +84,14 @@ turso = "0.7"
 # macOS のアプリ本体への薄い糸（GPUI に API が無いところだけ・MIT）。Dock / AppleScript の「終了」を
 # ⌘Q と同じ確認へ回すフック（O4）。GPUI / wry が既に引いている版を共有してビルドを重複させない。
 objc2 = "0.6"
+# 同上: Dock のアイコンの要対応バッジ（NSApplication.dockTile.badgeLabel・O12）。feature は使う分だけ。
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSApplication",
+  "NSResponder",
+  "NSDockTile",
+] }
 # Windows の名前付きパイプ（制御 IPC・WINDOWS-PORT.md §D2）。Win32 API の生バインディングだけを
 # 使う（MIT OR Apache-2.0）。既に依存ツリーに lock 済みの版を共有してビルドを重複させない。
 # 定数はバージョン間で置き場が動くので control_transport 側でローカル定義し、関数だけ引く。

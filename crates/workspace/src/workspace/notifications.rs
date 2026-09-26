@@ -1,4 +1,12 @@
+use super::system_notifications::AgentAlert;
 use crate::workspace::*;
+
+/// 何を待って止まったか（承認 / 質問）。トーストの文と OS 通知の題が変わるだけで、扱いは同じ（O12）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitingFor {
+    Permission,
+    Question,
+}
 
 impl Workspace {
     pub(crate) fn on_panel_event(
@@ -9,7 +17,7 @@ impl Workspace {
     ) {
         // Chat のパネルはプロジェクトの session ではない（TaskSpace も Captain も無い）。
         if self.chat_panel().as_ref() == Some(&panel) {
-            self.on_chat_panel_event(event, cx);
+            self.on_chat_panel_event(&panel, event, cx);
             return;
         }
         let Some(session_index) = self
@@ -63,9 +71,11 @@ impl Workspace {
             }
             agent_panel::PanelEvent::TurnEnded {
                 thread,
+                thread_id,
                 color,
                 summary,
                 digest,
+                outcome,
                 muted,
             } => {
                 self.project_sessions.sessions[session_index].waiting_thread = None;
@@ -119,6 +129,25 @@ impl Workspace {
                         cx,
                     );
                 }
+                // OS 通知（O12）。Captain の完了は自分で起きて采配した結果なので出さない
+                // （Captain でも失敗・承認待ち・質問待ちは人の手番なので出す）。
+                let captain_done = is_integration_slot
+                    && is_captain_thread_name(thread.as_ref())
+                    && *outcome == agent_panel::TurnOutcome::Completed;
+                if !captain_done {
+                    let place = self.notification_place(session_index);
+                    let detail = digest.clone().unwrap_or_else(|| summary.clone());
+                    self.post_agent_notification(
+                        AgentAlert::from_outcome(*outcome),
+                        &panel,
+                        thread_id,
+                        thread,
+                        &place,
+                        &detail,
+                        *muted,
+                        cx,
+                    );
+                }
                 // Todo ボード: そのスレッドの実行中マーカーを解除し、板を読み直す
                 // （エージェントが todos.md をチェックしたら watch より先に即反映・M12-10）。
                 self.project_sessions.sessions[session_index]
@@ -128,6 +157,7 @@ impl Workspace {
             }
             agent_panel::PanelEvent::TurnFailed {
                 thread,
+                thread_id,
                 color,
                 message,
                 muted,
@@ -164,53 +194,57 @@ impl Workspace {
                         cx,
                     );
                 }
+                let place = self.notification_place(session_index);
+                self.post_agent_notification(
+                    AgentAlert::Failed,
+                    &panel,
+                    thread_id,
+                    thread,
+                    &place,
+                    message,
+                    *muted,
+                    cx,
+                );
             }
             agent_panel::PanelEvent::PermissionWaiting {
                 thread,
+                thread_id,
                 thread_index,
                 color,
                 title,
                 muted,
-            } => {
-                self.project_sessions.sessions[session_index].waiting_thread =
-                    Some((thread.clone(), *color));
-                cx.notify(); // 低頻度の承認待ち時計を root render から開始する（muted でも必要）。
-                self.transition_task_space(
-                    session_index,
-                    TaskPhase::Blocked,
-                    "permission_waiting",
-                    (!title.is_empty()).then(|| title.as_ref()),
-                    cx,
-                );
-                // Captain wake（§5.3・Blocked は 15s 閾値 = すぐ人間が許可したら起こさない）。
-                let blocked_slot = self.project_sessions.projects.get(session_index);
-                if blocked_slot.is_some_and(|slot| !slot.task_space.is_integration()) {
-                    let task_title = blocked_slot
-                        .map(|slot| slot.task_space.title.clone())
-                        .unwrap_or_else(|| thread.clone());
-                    self.wake_captain_for_blocked(
-                        session_index,
-                        task_title,
-                        (!title.is_empty()).then(|| title.clone()),
-                        cx,
-                    );
-                }
-                if !muted {
-                    self.push_toast_linked(
-                        SharedString::from(format!(
-                            "● {thread} — {}",
-                            i18n::t!("agent.waiting_permission")
-                        )),
-                        *color,
-                        (self.project_sessions.sessions[session_index]
-                            .fleet_agents
-                            .len()
-                            == 1)
-                            .then_some((session_index, *thread_index)),
-                        cx,
-                    );
-                }
-            }
+            } => self.on_thread_waiting(
+                WaitingFor::Permission,
+                session_index,
+                &panel,
+                thread,
+                thread_id,
+                *thread_index,
+                *color,
+                title,
+                *muted,
+                cx,
+            ),
+            // 質問（Elicitation）も承認待ちと同じ網に載せる（O12・以前は音だけだった）。
+            agent_panel::PanelEvent::QuestionWaiting {
+                thread,
+                thread_id,
+                thread_index,
+                color,
+                message,
+                muted,
+            } => self.on_thread_waiting(
+                WaitingFor::Question,
+                session_index,
+                &panel,
+                thread,
+                thread_id,
+                *thread_index,
+                *color,
+                message,
+                *muted,
+                cx,
+            ),
             agent_panel::PanelEvent::ThreadAutoNamed { name } => {
                 // AI 命名の引き継ぎ（2026-07-24）: Task 名がプレースホルダ（"Task N"）のままなら
                 // 最初のスレッド名を Task 名にする。手動改名済み（プレースホルダでない）は触らない。
@@ -311,6 +345,88 @@ impl Workspace {
                 cx.notify();
             }
         }
+    }
+
+    /// スレッドが人の手番（承認・質問）で止まった: statusbar の待ち表示・Task を Blocked へ・
+    /// Captain を起こす予約・トースト（押すとそのスレッドへ）・OS 通知。`detail` = 何の許可か / 質問文。
+    #[allow(clippy::too_many_arguments)]
+    fn on_thread_waiting(
+        &mut self,
+        waiting_for: WaitingFor,
+        session_index: usize,
+        panel: &Entity<AgentPanel>,
+        thread: &SharedString,
+        thread_id: &SharedString,
+        thread_index: usize,
+        color: Hsla,
+        detail: &SharedString,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_sessions.sessions[session_index].waiting_thread =
+            Some((thread.clone(), color));
+        cx.notify(); // 低頻度の承認待ち時計を root render から開始する（muted でも必要）。
+        let reason = match waiting_for {
+            WaitingFor::Permission => "permission_waiting",
+            WaitingFor::Question => "question_waiting",
+        };
+        self.transition_task_space(
+            session_index,
+            TaskPhase::Blocked,
+            reason,
+            (!detail.is_empty()).then(|| detail.as_ref()),
+            cx,
+        );
+        // Captain wake（§5.3・Blocked は 15s 閾値 = すぐ人間が答えたら起こさない）。
+        let blocked_slot = self.project_sessions.projects.get(session_index);
+        if blocked_slot.is_some_and(|slot| !slot.task_space.is_integration()) {
+            let task_title = blocked_slot
+                .map(|slot| slot.task_space.title.clone())
+                .unwrap_or_else(|| thread.clone());
+            self.wake_captain_for_blocked(
+                session_index,
+                task_title,
+                (!detail.is_empty()).then(|| detail.clone()),
+                cx,
+            );
+        }
+        if !muted {
+            let waiting = match waiting_for {
+                WaitingFor::Permission => i18n::t!("agent.waiting_permission"),
+                WaitingFor::Question => i18n::t!("agent.waiting_question"),
+            };
+            self.push_toast_linked(
+                SharedString::from(format!("● {thread} — {waiting}")),
+                color,
+                (self.project_sessions.sessions[session_index]
+                    .fleet_agents
+                    .len()
+                    == 1)
+                    .then_some((session_index, thread_index)),
+                cx,
+            );
+        }
+        let alert = match waiting_for {
+            WaitingFor::Permission => AgentAlert::Permission,
+            WaitingFor::Question => AgentAlert::Question,
+        };
+        let place = self.notification_place(session_index);
+        self.post_agent_notification(alert, panel, thread_id, thread, &place, detail, muted, cx);
+    }
+
+    /// OS 通知の本文に出す「どこの」: Task ならその題、それ以外はプロジェクト名。
+    fn notification_place(&self, session_index: usize) -> SharedString {
+        self.project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| {
+                if slot.task_space.is_integration() {
+                    slot.name.clone()
+                } else {
+                    slot.task_space.title.clone()
+                }
+            })
+            .unwrap_or_default()
     }
 
     /// ニュースを積む（管制 P2・新しいものが先頭・上限 100）。

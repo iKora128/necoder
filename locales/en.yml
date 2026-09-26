@@ -30,6 +30,7 @@ agent:
   default_thread_name: Thread %{n}
   open_diff_tab: Open in editor (diff tab)
   waiting_permission: Waiting for permission
+  waiting_question: Waiting for your answer
   todos: Todos
   copy_tip: Copy this entry
   input_expand: "Show all %{n} lines"
@@ -219,6 +220,7 @@ control:
   summary_prompt: The input is the current state of a multi-agent fleet. As the Captain, summarize the situation and the next move in one English sentence. At most 100 characters, one line only, plain text with no quotes and no preamble.
   facts_stats: "Working %{working} · Needs attention %{attention} · Done unread %{done}"
   facts_permission: "Awaiting permission %{elapsed}: %{title}"
+  facts_question: "Awaiting an answer %{elapsed}: %{message}"
   facts_failed: "Failed: %{digest}"
   facts_done_unread: "Done but unread: %{digest}"
   next_badge: "next ⏎"
@@ -231,6 +233,7 @@ control:
   integrate: Integrate
   review: Run radar
   fix_instruct: Instruct fix
+  answer: Open to answer
 news:
   waiting: "waiting for approval — %{title}"
   failed: "failed — %{detail}"
@@ -268,6 +271,7 @@ fleet:
   new_task_setup_create: "Create (template: bring .env, share target)"
   new_task_no_repository: "No integration worktree (main) is open, so a Task cannot be started"
   next_allow: "Allow"
+  next_answer: "Answer"
   phase_working: "Working"
   phase_blocked: "Awaiting approval"
   phase_failed: "Failed"
@@ -347,6 +351,12 @@ worktree_delete:
   skip_next: Don't ask again (skipped only when there is nothing to lose)
   cancel: Cancel
   confirm: Delete
+notify:
+  done: "Done: %{thread}"
+  interrupted: "Stopped: %{thread}"
+  failed: "Failed: %{thread}"
+  permission: "Waiting for approval: %{thread}"
+  question: "Question: %{thread}"
 quit_confirm:
   title: Work is still running
   working: "Agents running: %{n}"
@@ -476,6 +486,8 @@ settings:
   pref_tabs_view: Thread tabs
   tabs_view_bar: Bar
   tabs_view_list: List
+  pref_system_notifications: System notifications
+  pref_system_notifications_sub: Posts to Notification Center when an agent in a window you aren't looking at finishes or stops (click to jump to the thread)
   pref_confirm_quit: Confirm before quitting
   pref_confirm_quit_sub: "On ⌘Q or when closing the last window, offers “Hide and keep running” while agents or terminals are busy"
   confirm_quit_running: Only while busy

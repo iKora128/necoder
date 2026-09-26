@@ -691,9 +691,11 @@ impl AgentPanel {
             });
             cx.emit(PanelEvent::TurnEnded {
                 thread: thread.name.clone(),
+                thread_id: SharedString::from(thread.id.clone()),
                 color: thread.color,
                 summary: SharedString::default(),
                 digest: None,
+                outcome: TurnOutcome::Completed,
                 muted: true,
             });
         }
@@ -789,16 +791,22 @@ impl AgentPanel {
         let Some(thread) = self.threads.get(self.active) else {
             return;
         };
-        let (name, color) = (thread.name.clone(), thread.color);
+        let (name, thread_id, color) = (
+            thread.name.clone(),
+            SharedString::from(thread.id.clone()),
+            thread.color,
+        );
         cx.emit(PanelEvent::FilesTouched {
             files: vec![path],
             color,
         });
         cx.emit(PanelEvent::TurnEnded {
             thread: name,
+            thread_id,
             color,
             summary: SharedString::default(),
             digest: None,
+            outcome: TurnOutcome::Completed,
             muted: true,
         });
         cx.notify();

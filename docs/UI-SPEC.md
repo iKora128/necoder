@@ -178,7 +178,9 @@ Worktree は既存ブランチ・既存 worktree または新しいブランチ�
 
 - 下ドック 既定 240px（上縁ドラッグで 60〜900 可変・ニュース/ターミナルで共有）。タブ（active = bg1。色線なし）+ `＋`。プロンプト = ok 色。パス様文字列はリンク化（クリックで file:line へ）
 - タブの × は、前面でシェル以外のプロセスが動いている時だけ OS のダイアログ（`Window::prompt`・mac はシート）で「閉じる（⏎）/ キャンセル（Esc）」を確認する（O4）。判定は PTY の前面プロセスグループ ≠ シェル（`tcgetpgrp`）。調べられない端末（Windows の ConPTY・リモートの `ssh -tt`）は確認しない
-- 通知はトースト（右下）。エージェント完了は宛先チップと同じ書式で「●rope設計 完了」
+- 通知はトースト（右下）。エージェント完了は宛先チップと同じ書式で「●rope設計 完了」。承認待ちと**質問待ち**（Elicitation・O12）は同じ扱い: トースト（クリックでそのスレッドへ）・statusbar の待ち表示・要対応（質問カード = 質問文 + 待ち時間 +「開いて答える」で没入。選択肢はスレッドのカードで選ぶ）・`◐N`・Task を Blocked へ（質問だけで止まった Task の「次へ」は「答える」）
+- **OS の通知**（O12・GPUI `show_system_notification`）: ターンの完了 / 中断 / 失敗・承認待ち・質問待ちを、**その窓を見ていない時だけ**（`cx.active_window()` がこの窓でない＝別の窓・別のアプリ・隠している）出す。見ている時はトーストで足りる。題 =「完了: スレッド名」等、本文 =「プロジェクト（Task）名 — 最後の発言の末尾 / 何の許可か / 質問文」。tag = スレッドの永続 id（同じスレッドは置き換え＝積まない）。押す = アプリを前へ + `jump_to_thread`（Chat はそのチャットへ）。スレッドのミュート（DB に保存＝再起動で消えない）と設定 `system_notifications` を守る。Captain の完了だけは出さない（自分で起きた采配の結果・失敗/承認/質問は出す）
+- **Dock バッジ**（O12・macOS・objc2-app-kit で `NSApplication.dockTile.badgeLabel`）: 要対応の件数（`◐N` と同じ数え方 = Blocked のスレッド + Failed の Task）を**全窓の合計**で出す。0 は消す。数え直しはスレッドの状態台帳（`RunningRegistry`）の更新と Task の phase 遷移のたび（Chat のスレッドは `◐N` と同じく数えない）
 - タブの × は、前面でシェル以外のプロセスが動いている時だけ OS のダイアログ（`Window::prompt`・mac はシート）で「閉じる（⏎）/ キャンセル（Esc）」を確認する（O4）。判定は PTY の前面プロセスグループ ≠ シェル（`tcgetpgrp`）。調べられない端末（Windows の ConPTY・リモートの `ssh -tt`）は確認しない
 - **エージェント状態（herdr 参照・状態検知は ACP ネイティブ＝ヒューリスティック不要）**: ACP のライフサイクルから `ThreadActivity` を導出する。**Blocked**=`session/request_permission` 待ち（ターンが実際にブロック）/ **Working**=ストリーミング中 / **Done**=直近ターン完了・**未確認**（見るまで残るラッチ・中断= `StopReason` の Refusal/Cancelled は注意表示）/ **Idle**=待機。ambient 表示先は タブ/List・titlebar beacon・statusbar 中央ロールアップ・**レールの静止ドット（他プロジェクトの Blocked/Done・右上。Working は省く）**・⌘O ダッシュボード。ロールアップ優先度 Blocked>Working>Done>Idle。全窓横断の台帳は `RunningRegistry`（worktree root → 状態）
 
