@@ -614,6 +614,10 @@ settings:
   pref_terminal_scrollback_sub: "Lowering it drops the oldest lines. Change the font with terminal_font_family in settings.json"
   terminal_scrollback_lines: "%{n} lines"
   pref_terminal_cursor: Terminal cursor
+  pref_terminal_color_scheme: Terminal colors
+  terminal_color_scheme_default: Default (follows the app theme). Reads Ghostty themes, Windows Terminal schemes (JSON) and iTerm2 .itermcolors
+  terminal_color_scheme_pick: Choose file…
+  terminal_color_scheme_reset: Use default
   pref_terminal_cursor_sub: "A shape set by vim or your shell takes precedence"
   terminal_cursor_block: Block
   terminal_cursor_bar: Bar

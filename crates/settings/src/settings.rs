@@ -2797,6 +2797,7 @@ impl SettingsView {
                 false,
                 cx,
             ))
+            .child(self.terminal_color_scheme_row(settings, cx))
             .child(self.segmented_row_with(
                 "sound_done",
                 i18n::t!("settings.pref_sound_done"),
@@ -3096,6 +3097,113 @@ impl SettingsView {
             )
             .children(rows)
             .when(empty, |group| group.hidden())
+    }
+
+    /// ターミナルの配色ファイル（O25）: 選ぶ… / 既定に戻す。副題は今のファイル名（無ければ既定）。
+    fn terminal_color_scheme_row(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let small_button = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(label))
+        };
+        let current = settings.terminal_color_scheme.trim().to_string();
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                small_button(
+                    "terminal-color-scheme-pick",
+                    i18n::t!("settings.terminal_color_scheme_pick"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _window, cx| view.pick_terminal_color_scheme(cx)),
+                ),
+            )
+            .when(!current.is_empty(), |row| {
+                row.child(
+                    small_button(
+                        "terminal-color-scheme-reset",
+                        i18n::t!("settings.terminal_color_scheme_reset"),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _window, cx| {
+                            let result = set_user_value(
+                                cx,
+                                "terminal_color_scheme",
+                                serde_json::Value::String(String::new()),
+                            );
+                            view.report_save(result, cx);
+                            cx.notify();
+                        }),
+                    ),
+                )
+            })
+            .into_any_element();
+        let sub = if current.is_empty() {
+            i18n::t!("settings.terminal_color_scheme_default")
+        } else {
+            std::path::Path::new(&current)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or(current)
+        };
+        self.pref_row_with_keywords(
+            &[
+                "terminal_color_scheme",
+                "ghostty",
+                "iterm",
+                "windows terminal",
+            ],
+            i18n::t!("settings.pref_terminal_color_scheme"),
+            Some(sub),
+            control,
+        )
+    }
+
+    /// ターミナルの配色ファイルを選ぶ（Ghostty のテーマ・Windows Terminal の JSON・`.itermcolors`）。
+    fn pick_terminal_color_scheme(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(SharedString::from(i18n::t!(
+                "settings.terminal_color_scheme_pick"
+            ))),
+        });
+        cx.spawn(async move |view, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let updated = view.update(cx, |view, cx| {
+                let result = set_user_value(
+                    cx,
+                    "terminal_color_scheme",
+                    serde_json::Value::String(path.display().to_string()),
+                );
+                view.report_save(result, cx);
+                cx.notify();
+            });
+            if let Err(error) = updated {
+                eprintln!("ターミナルの配色を保存できない: {error:#}");
+            }
+        })
+        .detach();
     }
 
     /// チャットの置き場をフォルダ選択ダイアログで決める。既にあるチャットのフォルダは動かさない

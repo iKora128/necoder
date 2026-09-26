@@ -14,7 +14,7 @@ mod keys;
 mod mouse;
 mod pty_guard;
 mod search;
-pub use appearance::{TerminalAppearance, TerminalCursor};
+pub use appearance::{TerminalAppearance, TerminalColors, TerminalCursor};
 pub use dock::{
     QuickCommand, QuickCommands, TerminalDock, TerminalDockEvent, TerminalLaunch, TerminalShell,
 };
@@ -895,11 +895,12 @@ impl TerminalView {
         if let Some(rgb) = overridden {
             return rgb;
         }
+        let colors = &self.appearance.colors;
         let color = match index {
-            0..=255 => indexed_to_hsla(index as u8),
-            257 => self.theme.bg1,
+            0..=255 => indexed_to_hsla(index as u8, colors),
+            257 => background_hsla(&self.theme, colors),
             258 => self.theme.fg1,
-            _ => self.theme.fg0,
+            _ => foreground_hsla(&self.theme, colors),
         };
         let rgba = Rgba::from(color);
         let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
@@ -2131,7 +2132,7 @@ impl Render for TerminalView {
             )
             .relative()
             .size_full()
-            .bg(self.theme.bg1)
+            .bg(background_hsla(&self.theme, &self.appearance.colors))
             // 端末は等幅必須。UI フォント（IBM Plex Sans JP）を継承すると 1 文字ずつ間延びして
             // 崩れるので、コードフォント（既定はエディタと同じ・設定で変えられる・O25）を明示する。
             // 要素は text_style().font() を読むのでコンテナで指定すれば伝播する。
@@ -2189,7 +2190,29 @@ fn rgb_hsla(red: u8, green: u8, blue: u8) -> Hsla {
     .into()
 }
 
-fn named_to_hsla(named: NamedColor, theme: &Theme) -> Hsla {
+/// パレットの 0〜15（取り込んだ配色があればそちら）。
+fn palette_hsla(index: usize, colors: &TerminalColors) -> Hsla {
+    let (red, green, blue) = colors.palette[index].unwrap_or(ANSI16[index]);
+    rgb_hsla(red, green, blue)
+}
+
+/// 既定の文字色（取り込んだ配色があればそちら・無ければテーマ）。
+fn foreground_hsla(theme: &Theme, colors: &TerminalColors) -> Hsla {
+    colors
+        .foreground
+        .map(|(red, green, blue)| rgb_hsla(red, green, blue))
+        .unwrap_or(theme.fg0)
+}
+
+/// 面の色（取り込んだ配色があればそちら・無ければテーマ）。
+pub(crate) fn background_hsla(theme: &Theme, colors: &TerminalColors) -> Hsla {
+    colors
+        .background
+        .map(|(red, green, blue)| rgb_hsla(red, green, blue))
+        .unwrap_or(theme.bg1)
+}
+
+fn named_to_hsla(named: NamedColor, theme: &Theme, colors: &TerminalColors) -> Hsla {
     let index = match named {
         NamedColor::Black => 0,
         NamedColor::Red => 1,
@@ -2207,21 +2230,17 @@ fn named_to_hsla(named: NamedColor, theme: &Theme) -> Hsla {
         NamedColor::BrightMagenta => 13,
         NamedColor::BrightCyan => 14,
         NamedColor::BrightWhite => 15,
-        NamedColor::Foreground => return theme.fg0,
-        NamedColor::Background => return theme.bg1,
+        NamedColor::Foreground => return foreground_hsla(theme, colors),
+        NamedColor::Background => return background_hsla(theme, colors),
         NamedColor::Cursor => return theme.fg0,
-        _ => return theme.fg0,
+        _ => return foreground_hsla(theme, colors),
     };
-    let (red, green, blue) = ANSI16[index];
-    rgb_hsla(red, green, blue)
+    palette_hsla(index, colors)
 }
 
-fn indexed_to_hsla(index: u8) -> Hsla {
+fn indexed_to_hsla(index: u8, colors: &TerminalColors) -> Hsla {
     match index {
-        0..=15 => {
-            let (red, green, blue) = ANSI16[index as usize];
-            rgb_hsla(red, green, blue)
-        }
+        0..=15 => palette_hsla(index as usize, colors),
         16..=231 => {
             // 6×6×6 カラーキューブ（各成分 0 or c*40+55）。
             let value = index - 16;
@@ -2246,11 +2265,11 @@ fn indexed_to_hsla(index: u8) -> Hsla {
     }
 }
 
-fn ansi_to_hsla(color: AnsiColor, theme: &Theme) -> Hsla {
+fn ansi_to_hsla(color: AnsiColor, theme: &Theme, colors: &TerminalColors) -> Hsla {
     match color {
-        AnsiColor::Named(named) => named_to_hsla(named, theme),
+        AnsiColor::Named(named) => named_to_hsla(named, theme, colors),
         AnsiColor::Spec(rgb) => rgb_hsla(rgb.r, rgb.g, rgb.b),
-        AnsiColor::Indexed(index) => indexed_to_hsla(index),
+        AnsiColor::Indexed(index) => indexed_to_hsla(index, colors),
     }
 }
 
@@ -2261,6 +2280,44 @@ fn is_default_background(color: AnsiColor) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_imported_scheme_replaces_the_palette_and_the_surface() {
+        let theme = Theme::dark();
+        let defaults = TerminalColors::default();
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Background), &theme, &defaults),
+            theme.bg1,
+            "既定はアプリのテーマ"
+        );
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Red), &theme, &defaults),
+            rgb_hsla(205, 49, 49)
+        );
+        let mut colors = TerminalColors::default();
+        colors.palette[1] = Some((0xcc, 0x66, 0x66));
+        colors.background = Some((0x1d, 0x1f, 0x21));
+        colors.foreground = Some((0xc5, 0xc8, 0xc6));
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Red), &theme, &colors),
+            rgb_hsla(0xcc, 0x66, 0x66)
+        );
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Indexed(1), &theme, &colors),
+            rgb_hsla(0xcc, 0x66, 0x66),
+            "256 色の 0〜15 も同じ"
+        );
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Green), &theme, &colors),
+            rgb_hsla(13, 188, 121),
+            "書いていない色は既定"
+        );
+        assert_eq!(background_hsla(&theme, &colors), rgb_hsla(0x1d, 0x1f, 0x21));
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Foreground), &theme, &colors),
+            rgb_hsla(0xc5, 0xc8, 0xc6)
+        );
+    }
 
     /// 1 行ぶんの表示セルを組む（列は 0 から連番・全角は WIDE_CHAR_SPACER を挟む）。
     fn row_cells(line: i32, text: &str) -> Vec<RenderCell> {

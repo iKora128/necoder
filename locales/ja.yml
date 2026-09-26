@@ -615,6 +615,10 @@ settings:
   pref_terminal_scrollback_sub: "減らすと古い行から捨てます。フォントは settings.json の terminal_font_family で変えられます"
   terminal_scrollback_lines: "%{n} 行"
   pref_terminal_cursor: ターミナルのカーソル
+  pref_terminal_color_scheme: ターミナルの配色
+  terminal_color_scheme_default: 既定（アプリのテーマに合わせる）。Ghostty のテーマ・Windows Terminal の配色（JSON）・iTerm2 の .itermcolors を読めます
+  terminal_color_scheme_pick: ファイルを選ぶ…
+  terminal_color_scheme_reset: 既定に戻す
   pref_terminal_cursor_sub: "vim などが形を指定した時はそちらが優先されます"
   terminal_cursor_block: ブロック
   terminal_cursor_bar: 縦線

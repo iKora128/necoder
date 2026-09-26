@@ -691,6 +691,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | `terminal_font_family` | 空 | ターミナルのフォント（空 = コードの書体。等幅のフォント名を書く） |
 | `terminal_scrollback` | `10000` | ターミナルで遡れる行数（上限 100000・減らすと古い行から捨てる） |
 | `terminal_cursor` | `block` | ターミナルのカーソルの形（`bar` = 縦線 / `underline` = 下線。vim などの指定が優先） |
+| `terminal_color_scheme` | 空 | ターミナルの配色ファイル（空 = アプリのテーマに合わせる）。Ghostty のテーマ・Windows Terminal の配色（JSON）・iTerm2 の `.itermcolors` の ANSI 16 色と文字 / 背景の色を使う。設定画面の「ターミナルの配色」で選べる |
 | `terminal_shell` | 空 | 手元のターミナルで開くシェル（空 = OS の既定。名前か絶対パス。例 `"fish"`・Windows なら `"bash"`（Git Bash）や `"wsl"`）。新しく開くターミナルから効き、SSH 先は接続先のシェルのまま |
 | `terminal_shell_args` | `[]` | 上のシェルに渡す引数（例 `["-l"]`） |
 | `quick_commands` | `[]` | よく使うコマンド（`[{ "name": "開発サーバ", "command": "npm run dev" }]`）。ターミナルの ▶ から新しいターミナルで走らせる |
