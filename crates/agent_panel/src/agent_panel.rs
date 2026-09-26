@@ -13779,6 +13779,91 @@ PYEOF"#;
         let _ = std::fs::remove_file(settings_path);
     }
 
+    /// スマホ（リモート管制）の質問にも書いて答えられる（O17）: Other 欄つきの質問だけ書け、
+    /// 質問ごとに「選ぶ か 書く」のどちらかが要る。書いた文字は Other 欄の名前で返る。
+    #[gpui::test]
+    fn remote_questions_take_written_answers(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        let path = init_test_settings(cx, "remote-question-custom");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let mut pending = test_question(
+                panel,
+                active,
+                "どうする？",
+                vec![
+                    single_question("question_0", &["A", "B"], Some("question_0_custom")),
+                    single_question("question_1", &["X", "Y"], None),
+                ],
+                respond,
+                cx,
+            );
+            pending.remote_id = "q-remote".into();
+            panel.threads[active].pending_elicitation = Some(pending);
+            let id = panel.threads[active].id.clone();
+            let detail = panel.remote_thread(&id).expect("詳細");
+            assert_eq!(detail["question"]["fields"][0]["custom"], true);
+            assert_eq!(detail["question"]["fields"][1]["custom"], false);
+            let answer = |selections: serde_json::Value, custom: serde_json::Value| {
+                json!({ "thread_id": id, "turn_id": detail["turn_id"], "question_id": "q-remote",
+                    "selections": selections, "custom": custom })
+            };
+            let error = |panel: &mut AgentPanel, params, cx: &mut Context<AgentPanel>| {
+                panel
+                    .remote_command("question_response", &params, cx)
+                    .expect_err("受け付けない")
+                    .to_string()
+            };
+            assert!(error(
+                panel,
+                answer(
+                    json!({"question_0": "A", "question_1": "X"}),
+                    json!({"question_1": "Z"})
+                ),
+                cx
+            )
+            .contains("invalid_answer"));
+            assert!(error(
+                panel,
+                answer(
+                    json!({"question_0": "", "question_1": "X"}),
+                    json!({"question_0": "  "})
+                ),
+                cx
+            )
+            .contains("answer_required"));
+            assert!(
+                error(panel, answer(json!({"question_9": "X"}), json!({})), cx)
+                    .contains("invalid_answers")
+            );
+            assert!(panel.threads[active].pending_elicitation.is_some());
+            panel
+                .remote_command(
+                    "question_response",
+                    &answer(
+                        json!({"question_0": "", "question_1": "Y"}),
+                        json!({"question_0": " 自分の案 "}),
+                    ),
+                    cx,
+                )
+                .expect("書いた答えと選んだ答え");
+            assert!(panel.threads[active].pending_elicitation.is_none());
+        });
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![
+                (
+                    "question_0_custom".to_string(),
+                    vec!["自分の案".to_string()]
+                ),
+                ("question_1".to_string(), vec!["Y".to_string()]),
+            ])
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
     /// 質問カードの自由入力（O17）: 書いた文字は Other 欄の名前で返り、選択と両方あれば両方返る。
     /// 選ばずに書いた答えは Enter で確定し、フォーカスは composer へ戻る（入力欄はカードと消える）。
     /// 空白だけは書いたうちに数えない。
