@@ -12,6 +12,7 @@
 //! 「アクティブな session」を相手にしている既存のコード（タブ・プレビュー・ファイルを開く）は
 //! そのまま Chat でも動く。
 
+use super::system_notifications::AgentAlert;
 use crate::workspace::*;
 use chat_core::date::{Date, Recency};
 
@@ -139,6 +140,7 @@ impl Workspace {
     /// 拾うのは「ファイルを開く」「成果物を見せる」「知らせる」だけ。
     pub(crate) fn on_chat_panel_event(
         &mut self,
+        panel: &Entity<AgentPanel>,
         event: &agent_panel::PanelEvent,
         cx: &mut Context<Self>,
     ) {
@@ -205,10 +207,12 @@ impl Workspace {
             }
             agent_panel::PanelEvent::TurnEnded {
                 thread,
+                thread_id,
                 color,
                 summary,
+                digest,
+                outcome,
                 muted,
-                ..
             } => {
                 // 見えている会話が終わったことは画面で分かる。別のモードに居る時だけ知らせる。
                 if !self.chat_mode() && !muted {
@@ -218,11 +222,23 @@ impl Workspace {
                         cx,
                     );
                 }
+                let detail = digest.clone().unwrap_or_else(|| summary.clone());
+                self.post_agent_notification(
+                    AgentAlert::from_outcome(*outcome),
+                    panel,
+                    thread_id,
+                    thread,
+                    &i18n::t!("titlebar.chat"),
+                    &detail,
+                    *muted,
+                    cx,
+                );
                 self.on_chat_turn_ended(cx);
                 cx.notify();
             }
             agent_panel::PanelEvent::TurnFailed {
                 thread,
+                thread_id,
                 color,
                 message,
                 muted,
@@ -234,9 +250,20 @@ impl Workspace {
                         cx,
                     );
                 }
+                self.post_agent_notification(
+                    AgentAlert::Failed,
+                    panel,
+                    thread_id,
+                    thread,
+                    &i18n::t!("titlebar.chat"),
+                    message,
+                    *muted,
+                    cx,
+                );
             }
             agent_panel::PanelEvent::PermissionWaiting {
                 thread,
+                thread_id,
                 color,
                 title,
                 muted,
@@ -249,6 +276,42 @@ impl Workspace {
                         cx,
                     );
                 }
+                self.post_agent_notification(
+                    AgentAlert::Permission,
+                    panel,
+                    thread_id,
+                    thread,
+                    &i18n::t!("titlebar.chat"),
+                    title,
+                    *muted,
+                    cx,
+                );
+            }
+            agent_panel::PanelEvent::QuestionWaiting {
+                thread,
+                thread_id,
+                color,
+                message,
+                muted,
+                ..
+            } => {
+                if !self.chat_mode() && !muted {
+                    self.push_toast(
+                        SharedString::from(format!("◐ {thread} — {message}")),
+                        *color,
+                        cx,
+                    );
+                }
+                self.post_agent_notification(
+                    AgentAlert::Question,
+                    panel,
+                    thread_id,
+                    thread,
+                    &i18n::t!("titlebar.chat"),
+                    message,
+                    *muted,
+                    cx,
+                );
             }
             _ => {}
         }

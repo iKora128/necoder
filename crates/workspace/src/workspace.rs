@@ -52,6 +52,7 @@ mod control_ipc;
 mod control_transport;
 mod control_view;
 mod dev_probes;
+mod dock_badge;
 mod explorer_controller;
 mod explorer_view;
 mod fleet_stage;
@@ -77,10 +78,12 @@ mod rail_view;
 mod remote_connection;
 mod remote_ssh;
 mod shortcut_sheet;
+mod system_notifications;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
 pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
+pub use system_notifications::install_agent_notifications;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
 mod captain;
@@ -1340,7 +1343,8 @@ pub struct Workspace {
     notifications: NotificationCenter,
     persistence: WorkspacePersistence,
     updater: UpdateController,
-    /// この窓がアクティブか（render で更新）。管制のマスコット等が「動き」を止める判定に使う。
+    /// この窓がアクティブ（OS のキー窓）か。render と窓のアクティブ化の通知で更新する。管制の
+    /// マスコット等が「動き」を止める判定と、OS の通知を出すかの判定（O12）に使う。
     window_active: bool,
     /// 経過秒・承認待ち表示だけの1Hz時計。マスコットの5/10fps時計は子Entityに分離済み。
     visual_tick: u64,
@@ -1361,6 +1365,9 @@ pub struct Workspace {
     /// `projects[i]` が構築時の `sources` の何番目から来たか。開けなかった source は飛ばされるので、
     /// タブ列の復元（`restore_open_file`）はこの写像を通す。1 回使ったら空にする。
     restored_source_map: Vec<usize>,
+    /// この窓のハンドル（render で控える）。Window を持たない場面（パネルのイベント）で
+    /// 「いまこの窓を見ているか」を OS 通知の判断に使う（O12）。
+    window_handle: Option<gpui::AnyWindowHandle>,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -1886,8 +1893,16 @@ impl Render for Workspace {
                 this.focus_session_surface(agent_visible, false, window, cx);
             })
             .detach();
+            // OS のキー窓の状態（隠す・他のアプリへ移る・別の窓へ移るで外れる）を render を待たずに写す。
+            // 隠している間は描画が止まる（display link が止まる）ので、下の render での更新だけでは
+            // 「見ている」が残ってしまい、OS の通知（O12）を出し損ねる（R15）。
+            cx.observe_window_activation(window, |this, window, _cx| {
+                this.window_active = window.is_window_active();
+            })
+            .detach();
         }
         self.window_active = window.is_window_active(); // 承認待ちの脈動など「動き」を止める判定
+        self.window_handle = Some(window.window_handle());
         if self.window_active && self.waiting_thread.is_some() {
             self.ensure_visual_ticker(cx);
         }

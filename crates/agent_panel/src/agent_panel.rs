@@ -643,6 +643,8 @@ struct PendingElicitation {
     selections: std::collections::BTreeMap<String, Vec<String>>,
     /// 回答チャネル。`Some(選択群)`=Accept / `None`=Decline。drop でも Decline。
     respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
+    /// 質問が来た時刻（要対応の並び = 待ちの長い順・O12）。
+    since: std::time::Instant,
 }
 
 struct PendingPermission {
@@ -675,16 +677,21 @@ pub enum PanelEvent {
         color: Hsla,
     },
     /// ターン完了（summary = 触ったファイル数・経過秒 / digest = 最後の発言の末尾・P1）。
+    /// `thread_id` はスレッドの永続 id（OS 通知の置き換えの鍵と、押した時の行き先・O12）。
     TurnEnded {
         thread: SharedString,
+        thread_id: SharedString,
         color: Hsla,
         summary: SharedString,
         digest: Option<SharedString>,
+        /// 終わり方（OS 通知の言い方を分ける・O12）。
+        outcome: TurnOutcome,
         /// エージェント別ミュート中（P2）: workspace はトーストを出さない（ニュースには載せる）。
         muted: bool,
     },
     TurnFailed {
         thread: SharedString,
+        thread_id: SharedString,
         color: Hsla,
         message: SharedString,
         muted: bool,
@@ -693,9 +700,21 @@ pub enum PanelEvent {
     /// `thread_index` = このパネル内でのスレッド添字（右下トーストのクリックで当該タブへ飛ぶのに使う）。
     PermissionWaiting {
         thread: SharedString,
+        thread_id: SharedString,
         thread_index: usize,
         color: Hsla,
         title: SharedString,
+        muted: bool,
+    },
+    /// 選択肢付きの質問（Elicitation）で停止中（O12）。承認待ちと同じ扱いで知らせる
+    /// （以前は音だけで、トースト・statusbar の待ち表示・要対応・バッジのどれにも出なかった）。
+    /// `message` = 質問文。
+    QuestionWaiting {
+        thread: SharedString,
+        thread_id: SharedString,
+        thread_index: usize,
+        color: Hsla,
+        message: SharedString,
         muted: bool,
     },
     /// Tier 2 の ✳ 1 行要約が生成できた（P4）。workspace が task_events へキャッシュし
@@ -742,6 +761,17 @@ pub enum PanelEvent {
     },
     /// チャットの一覧が変わった（Chat モード。workspace の左の列が描き直す）。
     ChatRowsChanged,
+}
+
+/// ターンの終わり方（`PanelEvent::TurnEnded`・O12）。OS 通知の言い方を分ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOutcome {
+    /// 最後まで走り切った。
+    Completed,
+    /// 拒否・キャンセルで止まった。
+    Interrupted,
+    /// エラーで止まった。
+    Failed,
 }
 
 /// エージェントスレッドの状態（herdr の 5 状態を necoder 流にマップ・#）。**色相は状態に使わない**
@@ -871,6 +901,12 @@ pub struct PermissionCard {
     pub waited_secs: u64,
     /// 添付 diff のファイル数（「N files」表示用）。
     pub diff_files: usize,
+}
+
+/// 要対応（O12）が質問待ちカードを組むための素材（`question_card()` が返す）。
+pub struct QuestionCard {
+    pub message: SharedString,
+    pub waited_secs: u64,
 }
 
 /// 1 スレッド = 1 会話。固有色を持ち、UI 全体へ貫通する。
@@ -2273,10 +2309,12 @@ PYEOF"#;
             }
             // 前回のエージェント側セッション id。立ち上げ直しで会話を引き継ぐ鍵（無ければ新規）。
             let sessions = storage.load_thread_sessions().unwrap_or_default();
+            let muted = muted_thread_ids(&storage);
             for thread in &mut threads {
                 if let Some((_, session_id)) = sessions.iter().find(|(id, _)| *id == thread.id) {
                     thread.acp_session_id = Some(session_id.clone());
                 }
+                thread.muted = muted.contains(&thread.id);
             }
             self.threads = threads;
             self.active = 0;
@@ -2588,12 +2626,19 @@ PYEOF"#;
     }
 
     /// エージェント別ミュートの切替（P2・herd 行の 🔕）。muted 中はこのスレッドの
-    /// トースト/完了音を出さない（ニュースフィードには載る＝見えるが鳴らない）。
+    /// トースト/完了音/OS 通知を出さない（ニュースフィードには載る＝見えるが鳴らない）。
+    /// DB にも残す（O12・以前は再起動で黙って解除されていた）。
     pub fn toggle_thread_mute(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(thread) = self.threads.get_mut(index) {
-            thread.muted = !thread.muted;
-            cx.notify();
+        let Some(thread) = self.threads.get_mut(index) else {
+            return;
+        };
+        thread.muted = !thread.muted;
+        if let Some(storage) = &self.storage {
+            if let Err(error) = storage.set_thread_muted(&thread.id, thread.muted) {
+                eprintln!("スレッドのミュートを保存できない（再起動で戻る）: {error:#}");
+            }
         }
+        cx.notify();
     }
 
     /// 管制の要対応キュー（P3）向け: 承認待ちカードの素材。
@@ -2614,6 +2659,30 @@ PYEOF"#;
             waited_secs: pending.since.elapsed().as_secs(),
             diff_files: pending.diffs.len(),
         })
+    }
+
+    /// 要対応（O12）向け: 質問待ちカードの素材（質問文と待ち時間）。答えはスレッドのカードで選ぶ
+    /// （選択肢が複数フィールドにまたがり得るので、要対応のカードには並べない）。
+    pub fn question_card(&self, thread_index: usize) -> Option<QuestionCard> {
+        let thread = self.threads.get(thread_index)?;
+        let pending = thread.pending_elicitation.as_ref()?;
+        Some(QuestionCard {
+            message: pending.message.clone(),
+            waited_secs: pending.since.elapsed().as_secs(),
+        })
+    }
+
+    /// スレッドの永続 id から今の添字を引く（OS 通知を押した時の行き先・O12）。
+    /// 添字はタブを閉じるとずれるので、通知には id を持たせてここで引き直す。
+    pub fn thread_position(&self, thread_id: &str) -> Option<usize> {
+        self.thread_index_by_id(thread_id)
+    }
+
+    /// `thread_position` の逆: 今の添字からスレッドの永続 id を引く。
+    pub fn thread_id_at(&self, index: usize) -> Option<SharedString> {
+        self.threads
+            .get(index)
+            .map(|thread| SharedString::from(thread.id.clone()))
     }
 
     /// 承認待ちへ**任意スレッド**で応答する（管制のインライン許可/拒否・P3）。
@@ -3764,13 +3833,19 @@ PYEOF"#;
             thread
                 .entries
                 .push(Entry::Agent(SharedString::from(message.to_string())));
-            Some((thread.name.clone(), thread.color, thread.muted))
+            Some((
+                thread.name.clone(),
+                SharedString::from(thread.id.clone()),
+                thread.color,
+                thread.muted,
+            ))
         } else {
             None
         };
-        if let Some((thread, color, muted)) = abandoned {
+        if let Some((thread, thread_id, color, muted)) = abandoned {
             cx.emit(PanelEvent::TurnFailed {
                 thread,
+                thread_id,
                 color,
                 message: SharedString::from(message.to_string()),
                 muted,
@@ -4391,6 +4466,33 @@ PYEOF"#;
         }
         self.sync_running_registry(cx);
         cx.notify();
+    }
+
+    /// 開発用: アクティブスレッドへ選択肢付きの質問を 1 つ届ける（O12: 質問待ちの通知・要対応・
+    /// トーストの撮影・workspace のテスト）。実際の `ElicitationRequest` と同じ `on_event` を通す。
+    /// 答えはどこにも返らない。
+    pub fn debug_ask_question(&mut self, cx: &mut Context<Self>) {
+        let (respond, _answers) = mpsc::unbounded();
+        let choice = |title: &str| acp_client::ElicitationChoice {
+            value: title.to_string(),
+            title: title.to_string(),
+            description: None,
+        };
+        let field = acp_client::ElicitationField {
+            name: "question_0".to_string(),
+            label: "方針".to_string(),
+            options: vec![choice("ropey で進める"), choice("sum-tree で進める")],
+            multi: false,
+        };
+        self.on_event(
+            self.active,
+            AgentEvent::ElicitationRequest {
+                message: "バッファはどちらで実装しますか？".to_string(),
+                fields: vec![field],
+                respond,
+            },
+            cx,
+        );
     }
 
     pub fn debug_set_activities(&mut self, cx: &mut Context<Self>) {
@@ -5467,6 +5569,14 @@ PYEOF"#;
                 reason: TurnEnd::Completed
             }
         );
+        // 終わり方（OS 通知の言い方・O12）。`turn_finished` の時だけ意味を持つ。
+        let turn_outcome = match &event {
+            AgentEvent::TurnEnded {
+                reason: TurnEnd::Interrupted,
+            } => TurnOutcome::Interrupted,
+            AgentEvent::Failed(_) => TurnOutcome::Failed,
+            _ => TurnOutcome::Completed,
+        };
         let mut permission_waiting = matches!(event, AgentEvent::PermissionRequest { .. });
         let elicitation_waiting = matches!(event, AgentEvent::ElicitationRequest { .. });
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
@@ -5689,6 +5799,7 @@ PYEOF"#;
                     fields,
                     selections: std::collections::BTreeMap::new(),
                     respond,
+                    since: std::time::Instant::now(),
                 });
             }
             AgentEvent::PermissionRequest {
@@ -5947,9 +6058,11 @@ PYEOF"#;
                 };
                 cx.emit(PanelEvent::TurnEnded {
                     thread: thread.name.clone(),
+                    thread_id: SharedString::from(thread.id.clone()),
                     color: thread.color,
                     summary,
                     digest: thread.digest.clone(),
+                    outcome: turn_outcome,
                     muted: thread.muted,
                 });
             }
@@ -5969,6 +6082,7 @@ PYEOF"#;
             if let Some(thread) = self.threads.get(thread_index) {
                 cx.emit(PanelEvent::PermissionWaiting {
                     thread: thread.name.clone(),
+                    thread_id: SharedString::from(thread.id.clone()),
                     thread_index,
                     color: thread.color,
                     title: thread
@@ -5983,6 +6097,21 @@ PYEOF"#;
         if elicitation_waiting {
             self.sync_running_registry(cx); // Blocked（回答待ち）をレール/フッター/⌘O へ即時反映
             self.ring_waiting(thread_index, cx);
+            // 承認待ちと同じ網に載せる（トースト・statusbar の待ち表示・要対応・バッジ・OS 通知・O12）。
+            if let Some(thread) = self.threads.get(thread_index) {
+                cx.emit(PanelEvent::QuestionWaiting {
+                    thread: thread.name.clone(),
+                    thread_id: SharedString::from(thread.id.clone()),
+                    thread_index,
+                    color: thread.color,
+                    message: thread
+                        .pending_elicitation
+                        .as_ref()
+                        .map(|pending| pending.message.clone())
+                        .unwrap_or_default(),
+                    muted: thread.muted,
+                });
+            }
         }
         if start_token_ticker {
             self.ensure_token_ticker(cx);
@@ -6372,13 +6501,19 @@ PYEOF"#;
                     "message" => message
                 ))));
             thread.running = false;
-            Some((thread.name.clone(), thread.color, thread.muted))
+            Some((
+                thread.name.clone(),
+                SharedString::from(thread.id.clone()),
+                thread.color,
+                thread.muted,
+            ))
         } else {
             None
         };
-        if let Some((thread, color, muted)) = failed {
+        if let Some((thread, thread_id, color, muted)) = failed {
             cx.emit(PanelEvent::TurnFailed {
                 thread,
+                thread_id,
                 color,
                 message: SharedString::from(message.to_string()),
                 muted,
@@ -10676,7 +10811,19 @@ fn thread_from_storage(
         .into_iter()
         .find(|(thread_id, _)| thread_id == id)
         .map(|(_, session_id)| session_id);
+    thread.muted = muted_thread_ids(storage).iter().any(|muted| muted == id);
     thread
+}
+
+/// ミュート中のスレッド id（O12）。読めなければ「全部鳴る」に倒す（黙って通知を消すよりまし）。
+fn muted_thread_ids(storage: &storage::Storage) -> Vec<String> {
+    match storage.load_muted_threads() {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("スレッドのミュートを読めない（全部鳴る扱い）: {error:#}");
+            Vec::new()
+        }
+    }
 }
 
 /// offscreen 検証プローブはモック transcript（markdown/Step 描画）や複数タブ（ACP_PROBE は添字 1 の
@@ -11942,6 +12089,7 @@ PYEOF"#;
                 }],
                 selections: Default::default(),
                 respond,
+                since: std::time::Instant::now(),
             });
             assert!(
                 panel.render_elicitation_card(cx).is_some(),
@@ -11997,6 +12145,7 @@ PYEOF"#;
                 }],
                 selections: Default::default(),
                 respond,
+                since: std::time::Instant::now(),
             });
             panel.choose_elicitation_option("question_0".into(), "B".into(), cx);
             assert!(panel.threads[index].pending_elicitation.is_none());
@@ -12190,6 +12339,55 @@ PYEOF"#;
             panel.add_thread(cx);
             assert_eq!(panel.threads[panel.active].model.as_ref(), "opus[1m]");
         });
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// スレッドのミュートは再起動をまたいで残る（O12）。以前は DB に置き場が無く、起動のたびに
+    /// 黙って解除されていた（鳴らしたくないスレッドが翌朝また鳴る）。
+    #[gpui::test]
+    fn thread_mute_survives_a_restart(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "mute-restart");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_mute_restart_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        storage
+            .upsert_thread(
+                "muted-1",
+                "うるさいスレッド",
+                0,
+                "",
+                None,
+                Some("Claude Code"),
+                None,
+                0,
+                0,
+            )
+            .expect("スレッド行を書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let index = panel.active;
+            assert!(!panel.threads[index].muted);
+            panel.toggle_thread_mute(index, cx);
+            assert!(panel.threads[index].muted);
+        });
+
+        // 再起動 = 同じ DB を別のパネルが読み直す。
+        let restarted = cx.new(|cx| AgentPanel::new(Theme::dark(), cx));
+        restarted.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let index = panel.active;
+            assert_eq!(panel.threads[index].id, "muted-1");
+            assert!(panel.threads[index].muted, "ミュートが再起動で解除された");
+            assert!(panel.statuses()[index].muted, "herd の 🔕 表示にも載る");
+            // 解除も残る。
+            panel.toggle_thread_mute(index, cx);
+        });
+        assert!(storage.load_muted_threads().expect("読める").is_empty());
         let _ = std::fs::remove_file(settings_path);
         let _ = std::fs::remove_file(db_path);
     }
