@@ -6353,6 +6353,7 @@ dependencies = [
  "agent_skills",
  "anyhow",
  "cli_shim",
+ "editor_view",
  "gpui",
  "gpui_platform",
  "i18n",

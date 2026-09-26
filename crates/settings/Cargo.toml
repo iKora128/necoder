@@ -12,6 +12,7 @@ path = "src/settings.rs"
 remote-preview = ["gpui/test-support", "gpui_platform/test-support"]
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 gpui_platform.workspace = true
 
 [[example]]
@@ -30,6 +31,8 @@ acp_client.workspace = true
 agent_skills.workspace = true
 anyhow.workspace = true
 cli_shim.workspace = true
+# 設定の検索欄（O27・IME の正しい 1 行入力）
+editor_view.workspace = true
 gpui.workspace = true
 i18n.workspace = true
 settings_core.workspace = true

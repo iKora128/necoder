@@ -514,6 +514,9 @@ settings:
   mcp_filtered_empty: No MCP servers match this filter.
   prefs_heading: Behavior & editor
   prefs_sub: settings.json is the source of truth; this just edits it.
+  search_placeholder: Search settings
+  search_count: "%{count} results"
+  search_none: No settings match
   pref_submit_on_enter: Submit on Enter
   pref_submit_on_enter_sub: "Off = ⌘Enter to send (IME-safe)"
   pref_soft_wrap: Soft wrap
