@@ -162,6 +162,52 @@ pub enum GoalStatus {
     Other,
 }
 
+/// 目標への操作（O17）。Codex は initialize の `_meta.goal` で操作の入口（`controlMethod`）と使える
+/// 操作（`actions`）を広告する。目標を立てる（set）のは `/goal <目的>` の prompt で足りるので扱わない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalAction {
+    Pause,
+    Resume,
+    Clear,
+}
+
+impl GoalAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            GoalAction::Pause => "pause",
+            GoalAction::Resume => "resume",
+            GoalAction::Clear => "clear",
+        }
+    }
+
+    fn parse(action: &str) -> Option<Self> {
+        match action {
+            "pause" => Some(GoalAction::Pause),
+            "resume" => Some(GoalAction::Resume),
+            "clear" => Some(GoalAction::Clear),
+            _ => None,
+        }
+    }
+}
+
+/// initialize の `_meta.goal` から (操作の入口, 使える操作)。入口は拡張メソッド（`_` で始まる）だけ
+/// 受ける（広告を根拠に標準のメソッドを呼ばない）。使える操作が無ければ None。
+fn goal_controls(meta: Option<&v1::Meta>) -> Option<(String, Vec<GoalAction>)> {
+    let goal = meta?.get("goal")?;
+    let method = goal
+        .get("controlMethod")?
+        .as_str()
+        .filter(|method| method.starts_with('_'))?
+        .to_string();
+    let actions: Vec<GoalAction> = goal
+        .get("actions")?
+        .as_array()?
+        .iter()
+        .filter_map(|action| action.as_str().and_then(GoalAction::parse))
+        .collect();
+    (!actions.is_empty()).then_some((method, actions))
+}
+
 /// エージェントが追っている目標（`/goal <objective>` で立つ・O2）。composer の上に 1 行で出す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentGoal {
@@ -264,6 +310,8 @@ pub enum AgentEvent {
     TitleChanged(Option<String>),
     /// 目標（`/goal`）が変わった（`SessionInfoUpdate._meta.goal`）。`None` = 目標が消えた。
     GoalChanged(Option<AgentGoal>),
+    /// このエージェントが受ける目標への操作（O17・セッションが開いた直後に 1 回）。空 = 操作できない。
+    GoalControls(Vec<GoalAction>),
     /// エージェントが選択肢付きの質問（Elicitation・form）を出した。**選択式フィールドのみ対応**し、
     /// テキスト/数値/真偽を含むフォームは UI へ出さず即 Decline する（下の handler で弾く）。
     /// `respond` に **(name, 選んだ値の並び) の群**を送ると Accept、`None` を送ると Decline。
@@ -340,6 +388,9 @@ pub enum SessionCommand {
     SetMode(String),
     /// 設定オプション（モデル・思考レベル等）を変更する（`session/set_config_option`）。
     SetConfig { config_id: String, value_id: String },
+    /// 目標を一時停止 / 再開 / 取り消す（エージェントが広告した拡張メソッド・O17）。
+    /// ターン中でも待たずに送る（目標が自走させているターンを止めたい時こそ使う）。
+    Goal(GoalAction),
 }
 
 /// ターンループが待つ 3 系統（エージェントからの更新 / UI からのコマンド / prompt 応答）。
@@ -1662,6 +1713,31 @@ pub async fn run_session_on(
                     resumable: can_load,
                 })
                 .ok();
+            // 目標への操作の入口（Codex の `_meta.goal`・O17）。広告が無ければ UI は操作を出さない。
+            let goal_control = goal_controls(initialized.meta.as_ref());
+            event_tx
+                .unbounded_send(AgentEvent::GoalControls(
+                    goal_control
+                        .as_ref()
+                        .map(|(_, actions)| actions.clone())
+                        .unwrap_or_default(),
+                ))
+                .ok();
+            // 目標への操作を送る（応答は待たない・結果は `_meta.goal` の更新で届く）。
+            let session_id_text = session.session_id().to_string();
+            let send_goal_action = |action: GoalAction| {
+                let Some((method, _)) = goal_control.as_ref() else {
+                    return;
+                };
+                let params = serde_json::json!({
+                    "sessionId": session_id_text,
+                    "action": action.as_str(),
+                });
+                match acp::UntypedMessage::new(method, params) {
+                    Ok(message) => connection.send_request(message).detach(),
+                    Err(error) => eprintln!("目標の操作を組めない: {error}"),
+                }
+            };
 
             // エージェントが広告する権限モード一覧 + 現在モードを UI へ（セレクタを実モードで組む）。
             // 希望モードが広告に在れば**ここで**（初回 prompt より前に）set_mode し、UI へは
@@ -1805,6 +1881,10 @@ pub async fn run_session_on(
                     SessionCommand::PromptWithImages { text, images } => (text, images),
                     // ターン外の cancel は畳む対象が無いので黙って捨てる。
                     SessionCommand::Cancel => continue,
+                    SessionCommand::Goal(action) => {
+                        send_goal_action(action);
+                        continue;
+                    }
                     SessionCommand::SetMode(mode_id) => {
                         connection
                             .send_request(v1::SetSessionModeRequest::new(
@@ -1881,6 +1961,11 @@ pub async fn run_session_on(
                             connection
                                 .send_notification(v1::CancelNotification::new(session_id.clone()))
                                 .ok();
+                            continue;
+                        }
+                        // 目標の操作は待たずに送る（目標が自走させているターンを止めたい時こそ使う）。
+                        TurnEvent::Command(Some(SessionCommand::Goal(action))) => {
+                            send_goal_action(action);
                             continue;
                         }
                         // ターン中のモデル変更等は畳んでから処理する（取りこぼさない）。
@@ -4152,6 +4237,9 @@ for line in sys.stdin:
                         }
                         AgentEvent::TitleChanged(title) => eprintln!("[title] {title:?}"),
                         AgentEvent::GoalChanged(goal) => eprintln!("[goal] {goal:?}"),
+                        AgentEvent::GoalControls(actions) => {
+                            eprintln!("[goal controls] {actions:?}")
+                        }
                         AgentEvent::ElicitationRequest {
                             message, fields, ..
                         } => eprintln!("[elicitation] {message} fields={}", fields.len()),
@@ -4188,6 +4276,39 @@ for line in sys.stdin:
         let mut events = Vec::new();
         session_update_events(update, |event| events.push(event));
         events
+    }
+
+    /// 目標への操作の広告（Codex の initialize `_meta.goal`・O17）: 入口は拡張メソッドだけ受け、
+    /// 知らない操作（set など）は捨てる。操作が 1 つも無ければ出さない。
+    #[test]
+    fn goal_controls_come_from_the_initialize_meta() {
+        let meta = |value: serde_json::Value| -> v1::Meta {
+            serde_json::from_value(value).expect("オブジェクト")
+        };
+        let codex = meta(json!({"goal": {
+            "version": 1,
+            "controlMethod": "_session/goal",
+            "actions": ["set", "pause", "resume", "clear"]
+        }}));
+        assert_eq!(
+            goal_controls(Some(&codex)),
+            Some((
+                "_session/goal".to_string(),
+                vec![GoalAction::Pause, GoalAction::Resume, GoalAction::Clear]
+            ))
+        );
+        let standard =
+            meta(json!({"goal": {"controlMethod": "session/prompt", "actions": ["pause"]}}));
+        assert_eq!(
+            goal_controls(Some(&standard)),
+            None,
+            "標準のメソッドは呼ばない"
+        );
+        let only_set =
+            meta(json!({"goal": {"controlMethod": "_session/goal", "actions": ["set"]}}));
+        assert_eq!(goal_controls(Some(&only_set)), None);
+        assert_eq!(goal_controls(None), None);
+        assert_eq!(GoalAction::Pause.as_str(), "pause");
     }
 
     /// サブエージェントの手順（O17）: Claude が `_meta.claudeCode.parentToolUseId` に載せる親の id を

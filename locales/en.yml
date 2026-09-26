@@ -127,6 +127,9 @@ agent:
   slash_footer: "%{count} commands · ↑↓ to choose · Enter / Tab to insert · esc to close"
   goal_label: Goal
   goal_status_active: Active
+  goal_pause: Pause
+  goal_resume: Resume
+  goal_clear: Clear
   goal_status_paused: Paused
   goal_status_blocked: Blocked
   goal_status_complete: Complete
