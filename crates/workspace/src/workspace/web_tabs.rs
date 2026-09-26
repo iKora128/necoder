@@ -221,6 +221,7 @@ impl Workspace {
             },
             transient: false,
             pinned: false,
+            preview: false,
         });
         self.active_tab = self.tabs.len() - 1;
         let handle = view.read(cx).focus_handle(cx);

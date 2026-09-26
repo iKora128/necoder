@@ -8,6 +8,7 @@ mod inline_edit;
 mod language;
 mod overlays;
 mod pins;
+mod preview_tabs;
 mod tabs;
 
 /// 1 ProjectSession の編集面。tab / pane / language / diff / navigation の状態を一括所有する。
@@ -64,6 +65,9 @@ pub struct EditorArea {
     pub(crate) hot_exit_gen: u32,
     pub(crate) hot_exit_versions: HashMap<PathBuf, u64>,
     pub(crate) hot_exit_pending: Option<Vec<(PathBuf, String)>>,
+    /// プレビューで開こうとして読み込み中のファイル（読み終えたらプレビュータブにする・O26）。
+    /// 読み込み中に普通に開き直された（ダブルクリック等）ら消す＝普通のタブで開く。
+    pub(crate) pending_preview_tab: Option<PathBuf>,
 }
 
 impl EditorArea {
@@ -111,6 +115,7 @@ impl EditorArea {
             hot_exit_gen: 0,
             hot_exit_versions: HashMap::new(),
             hot_exit_pending: None,
+            pending_preview_tab: None,
         }
     }
 }

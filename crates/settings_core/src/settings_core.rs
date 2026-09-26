@@ -178,6 +178,10 @@ pub struct Settings {
     /// 止めて 1 秒たった時と他へ移った時・O26）。自動保存ではフォーマットしない（打っている途中の行を
     /// 動かさない）。解釈は [`Settings::auto_save_mode`]（知らない値は保存しない側に倒す）。
     pub auto_save: String,
+    /// プレビュータブ（既定 on・O26）。エクスプローラで 1 回クリックしたファイルは、次に 1 回
+    /// クリックしたファイルで置き換わるタブ（名前が斜体）で開く。編集・ダブルクリック・ピン留めで
+    /// 普通のタブになる。off = 常に普通のタブ（以前の挙動）。
+    pub preview_tabs: bool,
     /// UI ロケール。`None` = OS 追従。
     pub locale: Option<String>,
     /// エージェント composer で **Enter を送信に使うか**。
@@ -298,6 +302,7 @@ impl Default for Settings {
             soft_wrap: false,
             format_on_save: false,
             auto_save: "off".to_string(),
+            preview_tabs: true,
             locale: None,
             submit_on_enter: false,
             agent_auto_name: true,
@@ -403,6 +408,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "font_size": 13.0,
   "tab_size": 4,
   "auto_save": "off",
+  "preview_tabs": true,
   "submit_on_enter": false,
   "agent_auto_name": true,
   "agent_prewarm": true,

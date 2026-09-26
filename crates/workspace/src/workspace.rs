@@ -367,6 +367,9 @@ pub(crate) struct EditorTab {
     /// ピン留め（O26）。ピン留めしたタブは常にタブ列の左端にまとまり、まとめて閉じる操作と ⌘W では
     /// 閉じない。窓セッション（`pinned_files`）に残る（`editor_area/pins.rs`）。
     pinned: bool,
+    /// プレビュータブ（O26）。次にプレビューで開いたファイルがこのタブを置き換える。編集・
+    /// ダブルクリック・ピン留め・普通に開き直すと外れる（`editor_area/preview_tabs.rs`）。
+    preview: bool,
 }
 
 impl EditorTab {

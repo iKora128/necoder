@@ -2115,6 +2115,15 @@ impl SettingsView {
                 settings.format_on_save,
                 cx,
             ))
+            // プレビュータブ（O26）。値は settings.json の `preview_tabs`。
+            .child(self.toggle_row(
+                "preview_tabs",
+                8,
+                i18n::t!("settings.pref_preview_tabs"),
+                Some(i18n::t!("settings.pref_preview_tabs_sub")),
+                settings.preview_tabs,
+                cx,
+            ))
             // 自動保存（O26）。値は settings.json の `auto_save`。
             .child(self.segmented_row_with(
                 "auto_save",

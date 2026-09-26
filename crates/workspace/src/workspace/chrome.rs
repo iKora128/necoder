@@ -636,6 +636,7 @@ impl Workspace {
                 };
                 let dirty = tab.is_dirty(cx);
                 let pinned = tab.pinned;
+                let preview = tab.preview;
                 // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
                 let status = self.repository.status.get(&tab.path).copied();
                 let name_color = status
@@ -683,6 +684,8 @@ impl Workspace {
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_color(name_color)
+                                    // プレビュータブは斜体（次の 1 回クリックで置き換わる・O26）。
+                                    .when(preview, |name| name.italic())
                                     .child(SharedString::from(name)),
                             )
                             .when(!pinned, |row| {
@@ -742,9 +745,13 @@ impl Workspace {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             this.agent_active = false; // エディタ側を触った → ⌘W の宛先をタブへ
                             this.chrome.show_settings = false; // タブを押したら設定ホームは退く
+                            if event.click_count == 2 {
+                                // ダブルクリック = プレビューを普通のタブにする（O26）。
+                                this.keep_preview_tab(index, cx);
+                            }
                             this.select_tab(index, window, cx);
                         }),
                     )
