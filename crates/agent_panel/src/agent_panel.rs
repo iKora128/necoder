@@ -6568,6 +6568,8 @@ PYEOF"#;
                 resumable,
             } => {
                 thread.session_resumable = resumable;
+                // 目標への操作は新しいセッションの広告で決め直す（届かなければ操作なし・O17）。
+                thread.goal_actions.clear();
                 // 起こしたばかりのセッション（先張りを含む）を、別スレッドの見回りが巻き込まないように。
                 thread.last_active_at_ms = now_unix_ms();
                 // 引き継げたか/引き継げなかったかの一言。前回 id が無い新規スレッドは黙って始める。
@@ -15737,6 +15739,22 @@ PYEOF"#;
                 Vec::new(),
                 "広告が無ければ出さない"
             );
+            panel.on_event(
+                active,
+                AgentEvent::GoalControls(vec![Pause, Resume, Clear]),
+                cx,
+            );
+            // 新しいセッションは操作を決め直す（広告が来なければ操作なし）。
+            panel.on_event(
+                active,
+                AgentEvent::SessionStarted {
+                    session_id: "other".into(),
+                    resumed: true,
+                    resumable: true,
+                },
+                cx,
+            );
+            assert!(panel.threads[active].goal_actions.is_empty());
             panel.on_event(
                 active,
                 AgentEvent::GoalControls(vec![Pause, Resume, Clear]),
