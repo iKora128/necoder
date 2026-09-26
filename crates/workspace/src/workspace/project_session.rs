@@ -905,6 +905,7 @@ impl Workspace {
                 pending_font_picker: None,
                 pending_shell_picker: false,
                 statusbar_menu: None,
+                task_details: None,
             },
             overlays: WorkspaceOverlays {
                 picker: None,

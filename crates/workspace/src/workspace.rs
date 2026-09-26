@@ -113,6 +113,7 @@ mod chat_view;
 pub(crate) use captain::is_captain_thread_name;
 mod fleet_sidebar;
 mod task_creation;
+mod task_details;
 mod todo_panel;
 pub(crate) use todo_panel::*;
 mod editor_area;
@@ -1354,6 +1355,8 @@ struct ChromeState {
     pending_shell_picker: bool,
     /// statusbar の項目の出し入れのメニュー（右クリックした所・O27）。
     statusbar_menu: Option<Point<gpui::Pixels>>,
+    /// 詳細を出している project（O21・右クリックの「詳細…」）。
+    task_details: Option<usize>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
     graph_view: GraphView,
     /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。
@@ -2506,6 +2509,7 @@ impl Render for Workspace {
             .children(self.render_rename_input(cx))
             .children(self.render_terminal_rename(cx))
             .children(self.render_statusbar_menu(cx))
+            .children(self.render_task_details(cx))
             .children(self.render_inline_edit(cx))
             .children(self.render_ssh_input(cx))
             .children(self.render_askpass(window, cx))
