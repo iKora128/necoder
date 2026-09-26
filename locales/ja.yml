@@ -600,6 +600,7 @@ terminal:
   add_tip: ターミナルを追加
   close_dock_tip: 下ドックを閉じる  ⌘J
   git_tip: ソース管理  ⌃⇧G
+  search_invalid_regex: 正規表現が不正です
 theme:
   builtin: 組み込み
   user: ユーザー
@@ -850,6 +851,12 @@ key:
   hide_others: 他のアプリを隠す
   activate_project: プロジェクトを切替（レール順）
   quit: necoder を終了
+  section_terminal: ターミナル
+  terminal_copy: 選択をコピー
+  terminal_paste: 貼り付け
+  terminal_select_all: すべて選択
+  terminal_clear: 画面をクリア
+  terminal_find: ターミナル内を検索
 work:
   repositories: リポジトリ / 作業
   open_beside: 隣に開く

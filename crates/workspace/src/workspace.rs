@@ -3654,6 +3654,111 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// 端末のキー配送の検証用: 既定 keymap（`platform` 版）を張り、下ドックの端末 1 枚に
+    /// フォーカスした窓。端末は PTY を起動しない（書いたバイト列を記録する）。
+    fn terminal_key_fixture(
+        cx: &mut gpui::TestAppContext,
+        platform: keymap_core::KeymapPlatform,
+    ) -> (
+        Entity<Workspace>,
+        Entity<terminal_view::TerminalView>,
+        &mut gpui::VisualTestContext,
+        PathBuf,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_terminal_keys_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings =
+                keymap_core::load_bindings(&keymap_core::default_keymap_json(platform), cx)
+                    .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        let terminal = workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.show_bottom = true;
+            let dock = workspace.project_sessions.sessions[0].terminal_dock.clone();
+            let terminal = dock.update(cx, |dock, cx| dock.ensure_active_test(cx));
+            window.focus(&terminal.read(cx).focus_handle(), cx);
+            terminal
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        (workspace, terminal, cx, root)
+    }
+
+    /// 端末にフォーカスがある時の ⌘F は端末内の検索（全域のバッファ内検索に取られない）。
+    /// gpui は context の無い束縛を一番深いコンテキストと同じ深さに置くので、keymap の
+    /// `Terminal` セクションが全域より後ろに無いと負ける（2026-09-26 まで負けていた）。
+    #[gpui::test]
+    fn terminal_keys_win_over_global_bindings(cx: &mut gpui::TestAppContext) {
+        let (workspace, terminal, cx, root) =
+            terminal_key_fixture(cx, keymap_core::KeymapPlatform::MacOs);
+        cx.simulate_keystrokes("cmd-f");
+        assert!(
+            terminal.read_with(cx, |terminal, _| terminal.search_open()),
+            "⌘F で端末内検索が開く"
+        );
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.buffer_search.is_none()),
+            "全域のバッファ内検索に取られない"
+        );
+        // 検索欄に打った文字は PTY へ流れない。Esc で閉じると端末へ戻る。
+        cx.simulate_keystrokes("a b enter escape");
+        assert!(!terminal.read_with(cx, |terminal, _| terminal.search_open()));
+        assert!(terminal.read_with(cx, |terminal, _| terminal.debug_written_input().is_empty()));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.debug_written_input()),
+            b"\r"
+        );
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Windows / Linux では ⌃ + 文字がシェルへ届く（全域の Ctrl+F / Ctrl+W / Ctrl+P / Ctrl+J に
+    /// 取られない）。端末の操作は Ctrl+Shift + 文字。
+    #[gpui::test]
+    fn control_keys_reach_the_shell_with_the_windows_keymap(cx: &mut gpui::TestAppContext) {
+        let (workspace, terminal, cx, root) =
+            terminal_key_fixture(cx, keymap_core::KeymapPlatform::Windows);
+        cx.simulate_keystrokes("ctrl-f ctrl-w ctrl-p ctrl-j ctrl-k");
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.debug_written_input()),
+            [0x06, 0x17, 0x10, 0x0a, 0x0b],
+            "⌃F ⌃W ⌃P ⌃J ⌃K がそのまま届く"
+        );
+        assert!(workspace.read_with(cx, |workspace, _| workspace.buffer_search.is_none()));
+        cx.simulate_keystrokes("ctrl-shift-f");
+        assert!(terminal.read_with(cx, |terminal, _| terminal.search_open()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// F0.5 入口: titlebar の `Editor | Fleet` セグメントが ⌘⇧M と同じ 1 本の道（`ToggleFleet`）で
     /// 面を切り替え、**Editor に居る間も**要対応の件数が数えられる（バッジの素）こと。
     #[gpui::test]

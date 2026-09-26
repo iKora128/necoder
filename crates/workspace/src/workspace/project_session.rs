@@ -189,15 +189,17 @@ impl Workspace {
                 agent_panel.update(cx, |panel, cx| panel.set_storage(storage, cx));
             }
         }
-        let terminal_launch = Self::terminal_launch_for(slot);
-        let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-        let tests_dock =
-            cx.new(|_| TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()));
-        let explorer = cx.new(|_| Explorer::new(explorer_view));
-        let git_panel = cx.new(GitPanel::new);
         let accent = slot
             .map(|slot| slot.color)
             .unwrap_or_else(|| project_color(0));
+        let terminal_launch = Self::terminal_launch_for(slot);
+        let terminal_dock =
+            cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()).with_accent(accent));
+        let tests_dock = cx.new(|_| {
+            TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()).with_accent(accent)
+        });
+        let explorer = cx.new(|_| Explorer::new(explorer_view));
+        let git_panel = cx.new(GitPanel::new);
         let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
         PanelRegistry::bind_session(
             &agent_panel,
@@ -666,16 +668,19 @@ impl Workspace {
                     Self::terminal_launch_for(slot)
                 }
             };
-            let terminal_launch = launch_for(projects.get(index));
-            let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-            let tests_dock =
-                cx.new(|_| TerminalDock::new(launch_for(projects.get(index)), theme.clone()));
-            let explorer = cx.new(|_| Explorer::new(explorer_view));
-            let git_panel = cx.new(GitPanel::new);
             let accent = projects
                 .get(index)
                 .map(|slot| slot.color)
                 .unwrap_or_else(|| project_color(0));
+            let terminal_launch = launch_for(projects.get(index));
+            let terminal_dock =
+                cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()).with_accent(accent));
+            let tests_dock = cx.new(|_| {
+                TerminalDock::new(launch_for(projects.get(index)), theme.clone())
+                    .with_accent(accent)
+            });
+            let explorer = cx.new(|_| Explorer::new(explorer_view));
+            let git_panel = cx.new(GitPanel::new);
             let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
             PanelRegistry::bind_session(
                 &agent_panel,
