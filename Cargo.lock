@@ -8349,8 +8349,13 @@ dependencies = [
 name = "webview_view"
 version = "0.1.20"
 dependencies = [
+ "block2 0.6.2",
+ "futures",
  "gpui",
  "i18n",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
  "theme_core",
  "url",
  "wry",

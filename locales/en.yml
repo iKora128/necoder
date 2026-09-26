@@ -591,6 +591,10 @@ webview:
   failed: Unable to open HTML preview
   unsupported: HTML preview currently supports macOS and Windows
   hidden_by_overlay: Returns when the panel in front closes
+  outside_localhost: Only localhost URLs can be opened
+  web_failed: Unable to open the preview
+  unreachable: "Couldn't connect to %{target}"
+  unreachable_hint: Start the dev server, then press Reload in the toolbar
 pdf:
   unsupported: PDF cannot be shown in a tab in this environment
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead

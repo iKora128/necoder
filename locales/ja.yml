@@ -592,6 +592,10 @@ webview:
   failed: HTML プレビューを開けませんでした
   unsupported: HTML プレビューは現在 macOS / Windows に対応しています
   hidden_by_overlay: 前面の UI を閉じると表示に戻ります
+  outside_localhost: localhost の URL だけ開けます
+  web_failed: プレビューを開けませんでした
+  unreachable: "%{target} に接続できませんでした"
+  unreachable_hint: 開発サーバを起動してから、ツールバーの再読み込みで読み直してください
 pdf:
   unsupported: この環境では PDF をタブに表示できません
   unsupported_hint: OS のビューアを使うため macOS / Windows のみ対応します。右クリック →「既定アプリで開く」で開けます
