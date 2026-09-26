@@ -765,7 +765,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | キーが効かない | レールにフォーカスがあると編集キーは効かない。Esc で作業面に戻る |
 | 不具合を報告したい | **ヘルプ → バグを報告**（issue の下書きが作られる） |
 
-- ログ: `~/Library/Application Support/necoder/logs/`
+- ログ: `~/Library/Application Support/necoder/logs/`（**ヘルプ → ログのフォルダを開く**・パレット「ヘルプ: ログのフォルダを開く」で開ける）
 - クラッシュレポート: `~/Library/Application Support/necoder/crashes/`
 - necoder はテレメトリを送信しない。通信するのは、エージェント・SSH ホスト・リレーなど自分で始めたものと、GitHub Releases への更新確認だけ
 

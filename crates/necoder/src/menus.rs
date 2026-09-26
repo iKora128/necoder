@@ -130,6 +130,7 @@ pub fn app_menus() -> Vec<Menu> {
             // キー表記（⌘K ⌘S）は gpui が keymap から自動で付ける。
             MenuItem::action(t!("menu.shortcut_sheet"), workspace::ShortcutSheet),
             MenuItem::separator(),
+            MenuItem::action(t!("menu.open_logs"), workspace::OpenLogs),
             MenuItem::action(t!("menu.report_bug"), workspace::ReportBug),
         ]),
     ]
