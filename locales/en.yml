@@ -947,6 +947,9 @@ terminal:
   close_busy_confirm: Close
   close_busy_cancel: Cancel
   add_tip: New terminal
+  split_tip: "Split side by side (%{key})"
+  pane_title: "Terminal %{n}"
+  pane_close_tip: Close this terminal
   close_dock_tip: Close bottom dock  ⌘J
   git_tip: Source control  ⌃⇧G
   search_invalid_regex: Invalid regular expression
@@ -1332,6 +1335,7 @@ key:
   terminal_find: Find in terminal
   terminal_new_tab: New terminal tab
   terminal_close_tab: Close terminal tab
+  terminal_split: Split terminal
 work:
   repositories: Repositories / work
   open_beside: Open beside

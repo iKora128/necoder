@@ -948,6 +948,9 @@ terminal:
   close_busy_confirm: 閉じる
   close_busy_cancel: キャンセル
   add_tip: ターミナルを追加
+  split_tip: "横に分割（%{key}）"
+  pane_title: "端末 %{n}"
+  pane_close_tip: この端末を閉じる
   close_dock_tip: 下ドックを閉じる  ⌘J
   git_tip: ソース管理  ⌃⇧G
   search_invalid_regex: 正規表現が不正です
@@ -1333,6 +1336,7 @@ key:
   terminal_find: ターミナル内を検索
   terminal_new_tab: ターミナルのタブを開く
   terminal_close_tab: ターミナルのタブを閉じる
+  terminal_split: ターミナルを横に分割
 work:
   repositories: リポジトリ / 作業
   open_beside: 隣に開く

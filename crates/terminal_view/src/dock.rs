@@ -1,6 +1,6 @@
 use crate::{TerminalEvent, TerminalView};
 use gpui::{
-    div, prelude::*, px, App, Context, Entity, EventEmitter, Global, Hsla, IntoElement,
+    div, prelude::*, px, svg, App, Context, Entity, EventEmitter, Global, Hsla, IntoElement,
     MouseButton, PromptButton, PromptLevel, Render, SharedString, StyleRefinement, Window,
 };
 use std::path::PathBuf;
@@ -71,9 +71,33 @@ pub enum TerminalDockEvent {
     RenameRequested(Entity<TerminalView>),
 }
 
+/// ドックのタブ 1 つ（O24・分割）: 横に並べた端末。1 つなら分割していない。
+struct TerminalTab {
+    panes: Vec<Entity<TerminalView>>,
+    /// タブの中で前にいる端末（打鍵が行く・⌘W が閉じる・CLI の「いまの端末」）。
+    focused: usize,
+}
+
+impl TerminalTab {
+    fn single(terminal: Entity<TerminalView>) -> Self {
+        Self {
+            panes: vec![terminal],
+            focused: 0,
+        }
+    }
+
+    fn focused_pane(&self) -> &Entity<TerminalView> {
+        &self.panes[self.focused.min(self.panes.len() - 1)]
+    }
+}
+
+/// 1 つのタブに横に並べられる端末の数（1 つ 1 つが狭くなりすぎない所まで）。
+pub const MAX_PANES: usize = 4;
+
 /// 1 project に属する端末タブ群。PTY と active index のライフサイクルをまとめて所有する。
+/// タブは横に分割できる（O24・⌘\・VSCode の「ターミナルの分割」と同じ 1 段）。
 pub struct TerminalDock {
-    terminals: Vec<Entity<TerminalView>>,
+    tabs: Vec<TerminalTab>,
     /// Fleet に配置した端末。ドックの表示リストから外しても同じ PTY を保持する。
     detached: std::collections::BTreeMap<u64, Entity<TerminalView>>,
     active: usize,
@@ -91,7 +115,7 @@ pub struct TerminalDock {
 impl TerminalDock {
     pub fn new(launch: TerminalLaunch, theme: Theme) -> Self {
         Self {
-            terminals: Vec::new(),
+            tabs: Vec::new(),
             detached: Default::default(),
             active: 0,
             launch,
@@ -116,7 +140,22 @@ impl TerminalDock {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn debug_tabs(&self) -> (usize, usize) {
-        (self.terminals.len(), self.active)
+        (self.tabs.len(), self.active)
+    }
+
+    /// テスト用: 前にあるタブの端末の数と、その中で前にいる端末の番号。
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn debug_panes(&self) -> (usize, usize) {
+        self.tabs
+            .get(self.active)
+            .map(|tab| (tab.panes.len(), tab.focused))
+            .unwrap_or((0, 0))
+    }
+
+    /// ドックのタブの端末（分割も含めて左から）。
+    fn docked(&self) -> impl Iterator<Item = &Entity<TerminalView>> {
+        self.tabs.iter().flat_map(|tab| tab.panes.iter())
     }
 
     /// 以後作る端末と、今ある端末のプロジェクト色。
@@ -128,7 +167,12 @@ impl TerminalDock {
     /// プロジェクト色が変わった時（レールの色の変更）。今ある端末にも配る。
     pub fn set_accent(&mut self, accent: Hsla, cx: &mut Context<Self>) {
         self.accent = accent;
-        for terminal in self.terminals.iter().chain(self.detached.values()) {
+        let terminals: Vec<Entity<TerminalView>> = self
+            .docked()
+            .chain(self.detached.values())
+            .cloned()
+            .collect();
+        for terminal in terminals {
             terminal.update(cx, |terminal, cx| terminal.set_accent(accent, cx));
         }
     }
@@ -186,19 +230,33 @@ impl TerminalDock {
     }
 
     /// アクティブ端末（未生成なら None）。プロジェクト切替のフォーカス追従が使う読み取り専用アクセサ
-    /// （[`Self::ensure_active`] と違い PTY を起動しない）。
+    /// （[`Self::ensure_active`] と違い PTY を起動しない）。分割したタブなら前にいる端末。
     pub fn active_terminal(&self) -> Option<Entity<TerminalView>> {
-        self.terminals.get(self.active).cloned()
+        self.tabs
+            .get(self.active)
+            .map(|tab| tab.focused_pane().clone())
     }
 
     pub fn session(&self, id: u64) -> Option<Entity<TerminalView>> {
         self.detached.get(&id).cloned()
     }
 
-    /// 下ドックのタブの端末（左から）と、その中のアクティブの位置（CLI の `terminal list`）。
+    /// 下ドックの端末（タブの順・分割は左から）と、その中のアクティブの位置（CLI の `terminal list`）。
     /// 読み取りだけ＝PTY を起動しない。
-    pub fn tab_terminals(&self) -> (&[Entity<TerminalView>], usize) {
-        (&self.terminals, self.active)
+    pub fn tab_terminals(&self) -> (Vec<Entity<TerminalView>>, usize) {
+        let terminals: Vec<Entity<TerminalView>> = self.docked().cloned().collect();
+        let active = self
+            .tabs
+            .iter()
+            .take(self.active)
+            .map(|tab| tab.panes.len())
+            .sum::<usize>()
+            + self
+                .tabs
+                .get(self.active)
+                .map(|tab| tab.focused.min(tab.panes.len() - 1))
+                .unwrap_or(0);
+        (terminals, active)
     }
 
     /// Fleet の Task カードに置いた端末（id 順・CLI の `terminal list`）。
@@ -224,10 +282,18 @@ impl TerminalDock {
         terminal
     }
 
+    /// 前にある端末を Fleet へ持ち出す。分割したタブならその端末だけ（残りはタブに残る）。
     pub fn detach_active(&mut self, id: u64, cx: &mut Context<Self>) -> Entity<TerminalView> {
         self.ensure_active(cx);
-        let terminal = self.terminals.remove(self.active);
-        self.active = self.active.min(self.terminals.len().saturating_sub(1));
+        let tab = &mut self.tabs[self.active];
+        let pane = tab.focused.min(tab.panes.len() - 1);
+        let terminal = tab.panes.remove(pane);
+        if tab.panes.is_empty() {
+            self.tabs.remove(self.active);
+            self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        } else {
+            tab.focused = pane.min(tab.panes.len() - 1);
+        }
         self.detached.insert(id, terminal.clone());
         cx.notify();
         terminal
@@ -235,8 +301,8 @@ impl TerminalDock {
 
     pub fn attach_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(terminal) = self.detached.remove(&id) {
-            self.terminals.push(terminal);
-            self.active = self.terminals.len() - 1;
+            self.tabs.push(TerminalTab::single(terminal));
+            self.active = self.tabs.len() - 1;
             self.focus_active(window, cx);
             cx.notify();
         }
@@ -250,8 +316,7 @@ impl TerminalDock {
     /// 前面でプロセスが動いている端末の数（ドックのタブと Fleet に置いた端末の両方）。
     /// ⌘Q・最後の窓を閉じる時の確認（O4）が数える。
     pub fn busy_terminal_count(&self, cx: &App) -> usize {
-        self.terminals
-            .iter()
+        self.docked()
             .chain(self.detached.values())
             .filter(|terminal| terminal.read(cx).has_foreground_process())
             .count()
@@ -259,32 +324,29 @@ impl TerminalDock {
 
     /// dock 内のいずれかの端末にキーボードフォーカスがあるか（プロジェクト切替のフォーカス追従判定）。
     pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
-        self.terminals
-            .iter()
-            .chain(self.detached.values())
-            .any(|terminal| {
-                terminal
-                    .read(cx)
-                    .focus_handle()
-                    .contains_focused(window, cx)
-            })
+        self.docked().chain(self.detached.values()).any(|terminal| {
+            terminal
+                .read(cx)
+                .focus_handle()
+                .contains_focused(window, cx)
+        })
     }
 
     pub fn ensure_active(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
-        if self.terminals.is_empty() {
+        if self.tabs.is_empty() {
             let terminal = self.create_terminal(self.shell_launch(cx), cx);
-            self.terminals.push(terminal);
+            self.tabs.push(TerminalTab::single(terminal));
             self.active = 0;
         }
-        self.active = self.active.min(self.terminals.len() - 1);
-        self.terminals[self.active].clone()
+        self.active = self.active.min(self.tabs.len() - 1);
+        self.tabs[self.active].focused_pane().clone()
     }
 
     /// PTY を起動せず、実際の terminal tab vector と active index を使うテスト用経路。
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn ensure_active_test(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
-        if self.terminals.is_empty() {
+        if self.tabs.is_empty() {
             let theme = self.theme.clone();
             let accent = self.accent;
             let terminal = cx.new(|cx| {
@@ -293,11 +355,11 @@ impl TerminalDock {
                 terminal
             });
             cx.subscribe(&terminal, Self::on_terminal_event).detach();
-            self.terminals.push(terminal);
+            self.tabs.push(TerminalTab::single(terminal));
             self.active = 0;
         }
-        self.active = self.active.min(self.terminals.len() - 1);
-        self.terminals[self.active].clone()
+        self.active = self.active.min(self.tabs.len() - 1);
+        self.tabs[self.active].focused_pane().clone()
     }
 
     pub fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -307,10 +369,37 @@ impl TerminalDock {
 
     pub fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = self.create_terminal(self.shell_launch(cx), cx);
-        self.terminals.push(terminal);
-        self.active = self.terminals.len() - 1;
+        self.tabs.push(TerminalTab::single(terminal));
+        self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    /// 前にあるタブを横に分割する（O24・C02）: 前にいる端末の右に新しい端末を開き、そこへ打鍵を移す。
+    /// 1 つのタブは [`MAX_PANES`] まで（それ以上は新しいタブにする）。
+    pub fn split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_active(cx);
+        if self.tabs[self.active].panes.len() >= MAX_PANES {
+            self.add(window, cx);
+            return;
+        }
+        let terminal = self.create_terminal(self.shell_launch(cx), cx);
+        let tab = &mut self.tabs[self.active];
+        let position = tab.focused.min(tab.panes.len() - 1) + 1;
+        tab.panes.insert(position, terminal);
+        tab.focused = position;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// 分割したタブの中で押した端末を前にする（打鍵は端末自身が受け取りに行く）。
+    fn set_focused_pane(&mut self, tab: usize, pane: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(tab) {
+            if pane < tab.panes.len() && tab.focused != pane {
+                tab.focused = pane;
+                cx.notify();
+            }
+        }
     }
 
     /// よく使うコマンドを新しい端末で走らせる（O25）。シェルを開いてからコマンドを打つので、終わっても
@@ -327,8 +416,8 @@ impl TerminalDock {
         terminal
             .read(cx)
             .send_input(&format!("{}\n", command.command));
-        self.terminals.push(terminal);
-        self.active = self.terminals.len() - 1;
+        self.tabs.push(TerminalTab::single(terminal));
+        self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -340,26 +429,26 @@ impl TerminalDock {
         cx: &mut Context<Self>,
     ) {
         let terminal = self.create_terminal(launch, cx);
-        self.terminals.push(terminal);
-        self.active = self.terminals.len() - 1;
+        self.tabs.push(TerminalTab::single(terminal));
+        self.active = self.tabs.len() - 1;
         self.focus_active(window, cx);
         cx.notify();
     }
 
     pub fn is_any_focused(&self, window: &Window, cx: &App) -> bool {
-        self.terminals
-            .iter()
+        self.docked()
             .any(|terminal| terminal.read(cx).focus_handle().is_focused(window))
     }
 
     pub fn focus_active_if_present(&self, window: &mut Window, cx: &mut App) {
-        if let Some(terminal) = self.terminals.get(self.active) {
-            window.focus(&terminal.read(cx).focus_handle(), cx);
+        if let Some(tab) = self.tabs.get(self.active) {
+            window.focus(&tab.focused_pane().read(cx).focus_handle(), cx);
         }
     }
 
     pub fn insert_text(&self, text: &str, window: &mut Window, cx: &mut App) {
-        if let Some(terminal) = self.terminals.get(self.active) {
+        if let Some(tab) = self.tabs.get(self.active) {
+            let terminal = tab.focused_pane();
             terminal.read(cx).insert_text(text);
             window.focus(&terminal.read(cx).focus_handle(), cx);
         }
@@ -367,7 +456,12 @@ impl TerminalDock {
 
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme.clone();
-        for terminal in self.terminals.iter().chain(self.detached.values()) {
+        let terminals: Vec<Entity<TerminalView>> = self
+            .docked()
+            .chain(self.detached.values())
+            .cloned()
+            .collect();
+        for terminal in terminals {
             terminal.update(cx, |terminal, cx| terminal.set_theme(theme.clone(), cx));
         }
         cx.notify();
@@ -375,7 +469,7 @@ impl TerminalDock {
 
     /// ProjectSession 作成前の互換経路。session 化後は dock 自体を切り替えるため不要になる。
     pub fn reset_launch(&mut self, launch: TerminalLaunch, cx: &mut Context<Self>) {
-        self.terminals.clear();
+        self.tabs.clear();
         self.detached.clear();
         self.active = 0;
         self.launch = launch;
@@ -387,25 +481,36 @@ impl TerminalDock {
     }
 
     fn switch_to(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index < self.terminals.len() {
+        if index < self.tabs.len() {
             self.active = index;
             self.focus_active(window, cx);
             cx.notify();
         }
     }
 
-    /// タブの ×。前面でプロセスが動いている端末は、閉じる（= SIGHUP で止まる）前に確認する（O4）。
+    /// 閉じる前に、前面でプロセスが動いている端末があれば確かめる（O4・閉じる = SIGHUP で止まる）。
     /// 確認は OS のダイアログ（`Window::prompt`・mac はシート）で、⏎ = 閉じる / Esc = キャンセル。
-    /// 答えを待つ間にタブの並びが変わってもよいよう、閉じる対象は添字でなく Entity で覚える。
-    fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(terminal) = self.terminals.get(index).cloned() else {
-            return;
-        };
-        if !terminal.read(cx).has_foreground_process() {
-            self.close_now(index, window, cx);
+    /// 答えを待つ間に並びが変わってもよいよう、閉じる対象は添字でなく Entity で覚える。
+    fn confirm_then(
+        &mut self,
+        terminals: Vec<Entity<TerminalView>>,
+        tab_number: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        close: fn(&mut Self, &[gpui::EntityId], &mut Window, &mut Context<Self>),
+    ) {
+        let targets: Vec<gpui::EntityId> = terminals
+            .iter()
+            .map(|terminal| terminal.entity_id())
+            .collect();
+        if !terminals
+            .iter()
+            .any(|terminal| terminal.read(cx).has_foreground_process())
+        {
+            close(self, &targets, window, cx);
             return;
         }
-        let message = i18n::t!("terminal.close_busy_title", "n" => index + 1);
+        let message = i18n::t!("terminal.close_busy_title", "n" => tab_number);
         let detail = i18n::t!("terminal.close_busy_detail");
         let answer = window.prompt(
             PromptLevel::Warning,
@@ -417,20 +522,11 @@ impl TerminalDock {
             ],
             cx,
         );
-        let target = terminal.entity_id();
         cx.spawn_in(window, async move |dock, cx| {
             if answer.await != Ok(0) {
                 return;
             }
-            let closed = dock.update_in(cx, |dock, window, cx| {
-                if let Some(index) = dock
-                    .terminals
-                    .iter()
-                    .position(|terminal| terminal.entity_id() == target)
-                {
-                    dock.close_now(index, window, cx);
-                }
-            });
+            let closed = dock.update_in(cx, |dock, window, cx| close(dock, &targets, window, cx));
             if let Err(error) = closed {
                 eprintln!("ターミナルを閉じられない（ドックが既に無い）: {error:#}");
             }
@@ -438,19 +534,70 @@ impl TerminalDock {
         .detach();
     }
 
-    fn close_now(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.terminals.len() {
+    /// タブの ×: タブの端末を全部閉じる（分割も含めて）。
+    fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
             return;
+        };
+        let terminals = tab.panes.clone();
+        self.confirm_then(terminals, index + 1, window, cx, Self::close_terminals_now);
+    }
+
+    /// ⌘W / 分割した端末の ×: その端末だけを閉じる（最後の 1 つならタブごと）。
+    fn close_pane(&mut self, tab: usize, pane: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self
+            .tabs
+            .get(tab)
+            .and_then(|tab| tab.panes.get(pane))
+            .cloned()
+        else {
+            return;
+        };
+        self.confirm_then(
+            vec![terminal],
+            tab + 1,
+            window,
+            cx,
+            Self::close_terminals_now,
+        );
+    }
+
+    /// 端末をドックから外す（分割は残りを詰める・空いたタブは消す）。全部無くなればドックを閉じる。
+    /// 前にあったタブが残ればそのまま、消えたら 1 つ前のタブ（無ければ最初）を前にする。
+    fn close_terminals_now(
+        &mut self,
+        targets: &[gpui::EntityId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let old_active = self.active;
+        let mut kept = Vec::new();
+        for (old_index, mut tab) in std::mem::take(&mut self.tabs).into_iter().enumerate() {
+            let focused = tab.focused_pane().entity_id();
+            tab.panes
+                .retain(|terminal| !targets.contains(&terminal.entity_id()));
+            if tab.panes.is_empty() {
+                continue;
+            }
+            tab.focused = tab
+                .panes
+                .iter()
+                .position(|terminal| terminal.entity_id() == focused)
+                .unwrap_or_else(|| tab.focused.min(tab.panes.len() - 1));
+            kept.push(old_index);
+            self.tabs.push(tab);
         }
-        self.terminals.remove(index);
-        if self.terminals.is_empty() {
+        if self.tabs.is_empty() {
             self.active = 0;
             cx.emit(TerminalDockEvent::Dismissed);
         } else {
-            if index <= self.active && self.active > 0 {
-                self.active -= 1;
-            }
-            self.active = self.active.min(self.terminals.len() - 1);
+            self.active = match kept.iter().position(|index| *index == old_active) {
+                Some(position) => position,
+                None => kept
+                    .iter()
+                    .rposition(|index| *index < old_active)
+                    .unwrap_or(0),
+            };
             self.focus_active(window, cx);
         }
         cx.notify();
@@ -472,8 +619,22 @@ impl Render for TerminalDock {
             .border_t_1()
             .border_b_1()
             .border_color(theme.border);
-        for index in 0..self.terminals.len() {
+        for index in 0..self.tabs.len() {
             let is_active = index == active;
+            // アプリが付けたタイトル（OSC 0 / 2・`✳ Claude Code` など）。無ければ連番。分割したタブは
+            // 並べた端末の名前を ` │ ` でつなぐ。
+            let title = self.tabs[index]
+                .panes
+                .iter()
+                .map(|terminal| {
+                    terminal
+                        .read(cx)
+                        .display_title()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| i18n::t!("terminal.tab_title", "n" => index + 1))
+                })
+                .collect::<Vec<_>>()
+                .join(" │ ");
             header = header.child(
                 div()
                     .id(("term-tab", index))
@@ -490,24 +651,12 @@ impl Render for TerminalDock {
                     .when(is_active, |element| element.bg(theme.bg1))
                     .hover(|style| style.bg(theme.bg1))
                     .child(
-                        // アプリが付けたタイトル（OSC 0 / 2・`✳ Claude Code` など）。無ければ連番。
                         div()
-                            .max_w(px(220.))
+                            .max_w(px(260.))
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .child(
-                                self.terminals[index]
-                                    .read(cx)
-                                    .display_title()
-                                    .map(SharedString::from)
-                                    .unwrap_or_else(|| {
-                                        SharedString::from(i18n::t!(
-                                            "terminal.tab_title",
-                                            "n" => index + 1
-                                        ))
-                                    }),
-                            ),
+                            .child(SharedString::from(title)),
                     )
                     .child(
                         div()
@@ -524,12 +673,14 @@ impl Render for TerminalDock {
                                 }),
                             ),
                     )
-                    // 1 回目で切り替え、2 回目（ダブルクリック）で改名を頼む（O24）。
+                    // 1 回目で切り替え、2 回目（ダブルクリック）で改名を頼む（O24・分割なら前にいる端末）。
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                             if event.click_count >= 2 {
-                                if let Some(terminal) = this.terminals.get(index).cloned() {
+                                if let Some(terminal) =
+                                    this.tabs.get(index).map(|tab| tab.focused_pane().clone())
+                                {
                                     cx.emit(TerminalDockEvent::RenameRequested(terminal));
                                 }
                             } else {
@@ -562,6 +713,41 @@ impl Render for TerminalDock {
                         cx.listener(|this, _, window, cx| this.add(window, cx)),
                     ),
             )
+            // 横に分割（O24・⌘\）。前にあるタブの前にいる端末の右に新しい端末を開く。
+            .when(!self.tabs.is_empty(), |header| {
+                header.child(
+                    div()
+                        .id("term-split")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(28.))
+                        .h_full()
+                        .text_color(theme.fg2)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.fg0).bg(theme.bg1))
+                        .child(
+                            svg()
+                                .path("icons/columns-2.svg")
+                                .size(px(13.))
+                                .text_color(theme.fg2),
+                        )
+                        .tooltip(Tooltip::text(
+                            i18n::t!(
+                                "terminal.split_tip",
+                                "key" => keymap_core::keystroke_label_in(
+                                    keymap_core::TERMINAL_CONTEXT,
+                                    "cmd-\\"
+                                )
+                            ),
+                            theme.clone(),
+                        ))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.split(window, cx)),
+                        ),
+                )
+            })
             // よく使うコマンド（O25）: 設定にある時だけ ▶。押すと下に帯を開く。
             .when(!quick_commands.is_empty(), |header| {
                 let open = self.quick_open;
@@ -607,12 +793,93 @@ impl Render for TerminalDock {
                         cx.listener(|_this, _, _window, cx| cx.emit(TerminalDockEvent::Dismissed)),
                     ),
             );
-        let body = match self.terminals.get(active) {
-            Some(terminal) => div().flex_1().min_h_0().overflow_hidden().child(
-                terminal
+        let body = match self.tabs.get(active) {
+            Some(tab) if tab.panes.len() == 1 => div().flex_1().min_h_0().overflow_hidden().child(
+                tab.panes[0]
                     .clone()
                     .cached(StyleRefinement::default().size_full()),
             ),
+            // 分割（O24）: 横に等分。それぞれに細い見出し（名前・×）を付け、前にいる端末の名前を濃くする。
+            Some(tab) => {
+                let mut row = div().flex_1().min_h_0().flex().flex_row();
+                for (pane, terminal) in tab.panes.iter().enumerate() {
+                    let focused = pane == tab.focused;
+                    let name = terminal
+                        .read(cx)
+                        .display_title()
+                        .map(SharedString::from)
+                        .unwrap_or_else(|| {
+                            SharedString::from(i18n::t!("terminal.pane_title", "n" => pane + 1))
+                        });
+                    row = row.child(
+                        div()
+                            .id(("term-pane", pane))
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .when(pane > 0, |element| {
+                                element.border_l_1().border_color(theme.border)
+                            })
+                            // 押した端末を前にする（打鍵は端末自身がフォーカスを取りに行く）。
+                            .capture_any_mouse_down(cx.listener(move |this, _, _window, cx| {
+                                this.set_focused_pane(active, pane, cx)
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .h(px(20.))
+                                    .px(px(8.))
+                                    .bg(if focused { theme.bg1 } else { theme.bg0 })
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .text_size(px(10.5))
+                                    .text_color(if focused { theme.fg0 } else { theme.fg2 })
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(name),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("term-pane-close", pane))
+                                            .flex_none()
+                                            .text_color(theme.fg2)
+                                            .cursor_pointer()
+                                            .hover(|style| style.text_color(theme.fg0))
+                                            .child("×")
+                                            .tooltip(Tooltip::text(
+                                                i18n::t!("terminal.pane_close_tip"),
+                                                theme.clone(),
+                                            ))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.close_pane(active, pane, window, cx);
+                                                }),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div().flex_1().min_h_0().overflow_hidden().child(
+                                    terminal
+                                        .clone()
+                                        .cached(StyleRefinement::default().size_full()),
+                                ),
+                            ),
+                    );
+                }
+                row
+            }
             None => div().flex_1(),
         };
         // 高さは**置いた側**（workspace の下段ドック / 編隊セル）が決める。ここで固定高を持つと
@@ -675,10 +942,15 @@ impl Render for TerminalDock {
             .on_action(
                 cx.listener(|this, _: &crate::actions::NewTab, window, cx| this.add(window, cx)),
             )
+            // ⌘W は前にいる端末だけを閉じる（分割していなければタブごと）。
             .on_action(
                 cx.listener(|this, _: &crate::actions::CloseTab, window, cx| {
-                    this.close(this.active, window, cx)
+                    let pane = this.tabs.get(this.active).map_or(0, |tab| tab.focused);
+                    this.close_pane(this.active, pane, window, cx)
                 }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::Split, window, cx| this.split(window, cx)),
             )
             .child(header)
             .children(quick_strip)
