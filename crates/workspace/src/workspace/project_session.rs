@@ -896,6 +896,8 @@ impl Workspace {
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: true,
                 task_renaming: None,
+                terminal_renaming: None,
+                focus_next_frame: None,
             },
             overlays: WorkspaceOverlays {
                 picker: None,

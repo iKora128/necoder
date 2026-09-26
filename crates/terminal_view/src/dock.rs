@@ -67,6 +67,8 @@ pub enum TerminalDockEvent {
     /// 端末の URL のクリック（`TerminalEvent::OpenUrl` をそのまま上げる）。
     OpenUrl(String),
     Dismissed,
+    /// タブのダブルクリック（改名・O24）。入力欄は親が出す（このクレートはエディタを知らない）。
+    RenameRequested(Entity<TerminalView>),
 }
 
 /// 1 project に属する端末タブ群。PTY と active index のライフサイクルをまとめて所有する。
@@ -490,7 +492,7 @@ impl Render for TerminalDock {
                             .child(
                                 self.terminals[index]
                                     .read(cx)
-                                    .title()
+                                    .display_title()
                                     .map(SharedString::from)
                                     .unwrap_or_else(|| {
                                         SharedString::from(i18n::t!(
@@ -515,9 +517,18 @@ impl Render for TerminalDock {
                                 }),
                             ),
                     )
+                    // 1 回目で切り替え、2 回目（ダブルクリック）で改名を頼む（O24）。
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| this.switch_to(index, window, cx)),
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                            if event.click_count >= 2 {
+                                if let Some(terminal) = this.terminals.get(index).cloned() {
+                                    cx.emit(TerminalDockEvent::RenameRequested(terminal));
+                                }
+                            } else {
+                                this.switch_to(index, window, cx);
+                            }
+                        }),
                     ),
             );
         }
