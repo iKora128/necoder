@@ -3,8 +3,8 @@
 //! 1. **エージェントの過去の会話を開いて続ける** — 履歴ビュー（workspace）が [`AgentPanel::list_agent_sessions`]
 //!    で一覧し、選ばれた会話を [`AgentPanel::open_agent_session`] が新しいスレッドとして開く。起こした
 //!    セッションは `session/load` で再開し、再生された履歴（`AgentEvent::HistoryReplayed`）を transcript に
-//!    積む（[`entries_from_replay`]）。**prompt は送らない**。開いた時点で DB にスレッドと会話 id を書くので、
-//!    以後は necoder のスレッドとして履歴に出る（一覧からは重複として消える）
+//!    積む（[`entries_from_replay`]）。**prompt は送らない**。開いた時点で DB にスレッドを、load が成功したら
+//!    会話 id を書くので、以後は necoder のスレッドとして履歴に出る（一覧からは重複として消える）
 //! 2. **全文検索の一致へ飛ぶ** — [`AgentPanel::open_thread_at_turn`] が、一致した turn まで読み込んで開く
 //!    （強調と位置合わせは `search.rs` の [`AgentPanel::reveal_transcript_match`]）
 //! 3. **新しいセッションで続ける（handoff）** — 文脈窓が膨らんだ時の逃げ道。今の会話の要点を前置きに
@@ -177,9 +177,9 @@ impl AgentPanel {
         });
         self.reset_transcript_list(true);
         self.refresh_transcript_search(cx);
-        // 先に DB へ載せる（会話 id も）＝以後は necoder のスレッドとして履歴に出る。
+        // スレッドは先に DB へ載せる（以後は necoder のスレッドとして履歴に出る）。会話 id は load が
+        // 成功した時に書く（`SessionStarted`）— 失敗した会話を「necoder の会話」として一覧から隠さない。
         self.persist_thread(index);
-        self.persist_session_id(index);
         // 送信を待たずに起こす＝再生がすぐ transcript に並ぶ（prompt は送らない）。
         match self.session_cwd(index) {
             Some(cwd) => match self.start_session(index, cwd, cx) {
@@ -749,6 +749,88 @@ mod tests {
             // 頼んでいないスレッドに届いた再生は捨てる。
             panel.on_event(index, replay(), cx);
             assert_eq!(panel.threads[index].entries.len(), 4);
+        });
+        std::fs::remove_dir_all(&root).expect("片付けられる");
+    }
+
+    /// エージェントの過去の会話を開く: スレッドはすぐ DB に載るが、会話 id は load が成功してから書く。
+    /// 失敗した会話は「necoder の会話」にならない（履歴のエージェントの一覧に残り、開き直せる）。
+    #[gpui::test]
+    fn an_agent_session_becomes_known_only_after_it_loads(cx: &mut gpui::TestAppContext) {
+        let (panel, cx, root) = panel_with_temp_settings(cx, "agent_session");
+        let storage = storage::Storage::open(&root.join("necoder.db")).expect("DB を開ける");
+        let summary = |id: &str| AgentSessionSummary {
+            session_id: id.into(),
+            cwd: root.clone(),
+            title: Some("README のインストール手順を直す".into()),
+            updated_at_ms: Some(1),
+        };
+        panel.update_in(cx, |panel, _window, cx| {
+            panel.storage = Some(storage.clone());
+            panel.storage_scope = Some("scope".into());
+            // 宛先が無いので起こさない（実エージェントに触れない）。スレッドだけ開く。
+            let failed = panel
+                .open_agent_session("Claude Code", &summary("cli-failed"), cx)
+                .expect("開ける");
+            assert_eq!(
+                panel.threads[failed].name.as_ref(),
+                "README のインストール手順を直す"
+            );
+            assert!(panel.threads[failed].replay_pending);
+            assert_eq!(
+                panel.open_agent_session("Claude Code", &summary("cli-failed"), cx),
+                Some(failed),
+                "同じ会話は開き直さず切り替える"
+            );
+            assert!(storage.load_known_sessions().expect("読める").is_empty());
+            // load に失敗して新しいセッションになった。
+            panel.on_event(
+                failed,
+                AgentEvent::SessionStarted {
+                    session_id: "fresh".into(),
+                    resumed: false,
+                    resumable: true,
+                },
+                cx,
+            );
+            assert_eq!(
+                storage.load_known_sessions().expect("読める"),
+                vec!["fresh".to_string()],
+                "開けなかった会話は隠さない"
+            );
+
+            let loaded = panel
+                .open_agent_session("Claude Code", &summary("cli-loaded"), cx)
+                .expect("開ける");
+            panel.on_event(
+                loaded,
+                AgentEvent::HistoryReplayed {
+                    items: vec![ReplayItem::User("README を直して".into())],
+                    omitted: 0,
+                },
+                cx,
+            );
+            panel.on_event(
+                loaded,
+                AgentEvent::SessionStarted {
+                    session_id: "cli-loaded".into(),
+                    resumed: true,
+                    resumable: true,
+                },
+                cx,
+            );
+            let mut known = storage.load_known_sessions().expect("読める");
+            known.sort();
+            assert_eq!(known, vec!["cli-loaded".to_string(), "fresh".to_string()]);
+            let turns = storage
+                .load_recent_turns(&panel.threads[loaded].id, 10)
+                .expect("読める");
+            assert!(
+                turns
+                    .iter()
+                    .any(|(role, content)| role == "user" && content == "README を直して"),
+                "再生した会話はスレッドの本文として残る: {turns:?}"
+            );
         });
         std::fs::remove_dir_all(&root).expect("片付けられる");
     }

@@ -5983,6 +5983,7 @@ PYEOF"#;
         let elicitation_waiting = matches!(event, AgentEvent::ElicitationRequest { .. });
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
         let mut session_id_changed = false;
+        let resumed_session = matches!(event, AgentEvent::SessionStarted { resumed: true, .. });
         let mut history_replayed = false;
         match event {
             AgentEvent::SessionStarted {
@@ -6519,7 +6520,9 @@ PYEOF"#;
                 }
             }
         }
-        if session_id_changed {
+        // 引き継げた会話も書く: エージェント側の過去の会話を開いた時（O15）は、load が成功して初めて
+        // この id が necoder の会話になる（失敗したら新しい id だけが残り、元の会話は一覧に残る）。
+        if session_id_changed || resumed_session {
             self.persist_session_id(thread_index);
         }
         if history_replayed {
