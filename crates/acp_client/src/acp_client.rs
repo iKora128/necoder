@@ -698,7 +698,13 @@ pub fn cached_agent_auth_states() -> Vec<AgentAuthState> {
 
 /// CLI/config 判定に加え、必要な Agent はプロンプト無しの ACP session を短時間だけ開く。
 /// probe は並列・タイムアウト付きで、終了時に子プロセスを必ず kill/wait する。
-pub async fn refresh_agent_auth_states(cwd: impl Into<PathBuf>) -> Vec<AgentAuthState> {
+///
+/// `disabled`（設定の `disabled_agents`・`AgentKind::id`）のエージェントは子プロセスを起こさず、
+/// ファイルだけの軽い判定のまま返す（使わないと決めたものを確かめに行かない・O16）。
+pub async fn refresh_agent_auth_states(
+    cwd: impl Into<PathBuf>,
+    disabled: &[String],
+) -> Vec<AgentAuthState> {
     let cwd = cwd.into();
     let initial = detect_configured_agent_states();
     let probes = AGENTS
@@ -706,8 +712,9 @@ pub async fn refresh_agent_auth_states(cwd: impl Into<PathBuf>) -> Vec<AgentAuth
         .zip(initial.iter().copied())
         .map(|(agent, state)| {
             let cwd = cwd.clone();
+            let skip = disabled.iter().any(|id| id == agent.id);
             async move {
-                if !agent.cli_installed() {
+                if skip || !agent.cli_installed() {
                     return state;
                 }
                 // status コマンドは最大 2 秒掛かり得るので、この明示 refresh の背景処理にだけ置く。
@@ -4136,7 +4143,7 @@ for line in sys.stdin:
     #[ignore = "ローカルの vendor CLI / 資格情報を調べる"]
     fn live_auth_states() {
         let cwd = std::env::current_dir().expect("cwd");
-        let states = futures::executor::block_on(refresh_agent_auth_states(cwd));
+        let states = futures::executor::block_on(refresh_agent_auth_states(cwd, &[]));
         for (agent, state) in AGENTS.iter().zip(states) {
             println!("{}: {state:?}", agent.label);
         }

@@ -36,6 +36,7 @@ finder:
   ignored_not_found: 無視されたファイルにも見つかりません
   ignored_detail: 無視
 agent:
+  disabled_agent: "%{agent} は使わない設定です（設定 › AI エージェント のスイッチで戻せます）"
   pasted_image: 貼り付けた画像
   search_placeholder: この会話を検索
   search_count: "%{position}/%{entries} · %{total} 件"
@@ -563,6 +564,8 @@ settings:
   agent_available: 利用可能
   agent_configured: 設定あり・未確認
   agent_signed_out: 未ログイン
+  agent_disabled: 使わない（選択肢に出さない）
+  agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
   logged_in: ログイン済み
   login_required: ログインが必要
   login_status_unknown: ログイン状態は CLI で確認

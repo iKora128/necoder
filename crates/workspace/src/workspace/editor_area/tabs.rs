@@ -94,8 +94,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// エージェントを決めて新規スレッド（B28）。
+    /// エージェントを決めて新規スレッド（B28）。使わないと決めたエージェント（O16）なら開かずに知らせる
+    /// （keymap.json に残したキーから来た時）。
     pub(crate) fn new_agent_thread_with(&mut self, agent: &str, cx: &mut Context<Self>) {
+        if !settings::agent_label_enabled(&settings::get(cx), agent) {
+            self.push_toast(
+                SharedString::from(i18n::t!("agent.disabled_agent", "agent" => agent)),
+                self.accent(),
+                cx,
+            );
+            return;
+        }
         if !self.chrome.show_right {
             self.chrome.show_right = true;
         }

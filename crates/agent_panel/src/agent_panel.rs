@@ -5435,11 +5435,15 @@ PYEOF"#;
     /// 広告が届く前は空（＝メニューを開かせない・ピルは不活性）。necoder が候補を捏造しないのが要点で、
     /// 捏造した綴りは広告と一致せず「選んだのに次回は戻る」を生む。Zed も同じで、`configOptions` が
     /// 来るまでモデル UI 自体を出さない（necoder は場所を保つためにピルは残し、押せなくする）。
-    fn selector_choices(&self, selector: Selector) -> Vec<SelectorChoice> {
+    ///
+    /// Agent は認証済みのうち**使う**もの（設定の `disabled_agents` で外したものは出さない・O16）。
+    fn selector_choices(&self, selector: Selector, cx: &App) -> Vec<SelectorChoice> {
         if selector == Selector::Agent {
             let current = self.selector_value(Selector::Agent);
+            let settings = settings::get(cx);
             let mut options: Vec<SelectorChoice> = acp_client::authenticated_agent_labels()
                 .into_iter()
+                .filter(|label| settings::agent_label_enabled(&settings, label))
                 .map(|label| SelectorChoice {
                     value: SharedString::from(label),
                     label: SharedString::from(label),
@@ -5522,9 +5526,9 @@ PYEOF"#;
     /// テスト用の入口。描画側は `render_selector_pill` が選択肢を 1 回だけ作って `label_for` を直接呼ぶ
     /// （毎フレーム 2 度 Vec を作らないため）。規則そのものは `label_for` に一本化してある。
     #[cfg(test)]
-    fn selector_label(&self, selector: Selector) -> SharedString {
+    fn selector_label(&self, selector: Selector, cx: &App) -> SharedString {
         label_for(
-            &self.selector_choices(selector),
+            &self.selector_choices(selector, cx),
             &self.selector_value(selector),
         )
     }
@@ -5762,7 +5766,7 @@ PYEOF"#;
     fn render_selector_pill(&self, selector: Selector, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         // 選択肢は 1 回だけ作り、ラベルと不活性判定の両方をここから導く（描画のたびに 2 度作らない）。
-        let choices = self.selector_choices(selector);
+        let choices = self.selector_choices(selector, cx);
         let current = self.selector_value(selector);
         let value = label_for(&choices, &current);
         let is_open = self.open_menu == Some(selector);
@@ -5837,7 +5841,7 @@ PYEOF"#;
         let theme = self.theme.clone();
         let current = self.selector_value(selector);
         // エージェントが広告した実選択肢だけ。necoder は候補を捏造しない。
-        let options = self.selector_choices(selector);
+        let options = self.selector_choices(selector, cx);
         let align_right = matches!(selector, Selector::Model | Selector::Effort);
         div()
             .absolute()
@@ -14430,10 +14434,10 @@ PYEOF"#;
             assert_eq!(thread.effort.as_ref(), "xhigh");
             // 表示は広告の表示名へ引き直す（保存はしない）。
             assert_eq!(
-                panel.selector_label(Selector::Model).as_ref(),
+                panel.selector_label(Selector::Model, cx).as_ref(),
                 "Opus (1M context)"
             );
-            assert_eq!(panel.selector_label(Selector::Effort).as_ref(), "Xhigh");
+            assert_eq!(panel.selector_label(Selector::Effort, cx).as_ref(), "Xhigh");
 
             let sent: Vec<String> = std::iter::from_fn(|| command_rx.try_recv().ok())
                 .filter_map(|command| match command {
@@ -14529,7 +14533,10 @@ PYEOF"#;
                 "sticky が無ければ DB の記録を採る（広告前でも空にしない）"
             );
             // 広告がまだ無いので表示名には引けない＝value_id をそのまま出す（捏造しない）。
-            assert_eq!(panel.selector_label(Selector::Model).as_ref(), "opus[1m]");
+            assert_eq!(
+                panel.selector_label(Selector::Model, cx).as_ref(),
+                "opus[1m]"
+            );
             // 新規タブも同じ agent なら直前タブの値で開く（開くたびに「—」へ戻らない）。
             panel.add_thread(cx);
             assert_eq!(panel.threads[panel.active].model.as_ref(), "opus[1m]");
@@ -14815,10 +14822,10 @@ PYEOF"#;
                 panel.threads[fresh].configs.is_empty(),
                 "このタブ自身はまだ広告を受け取っていない"
             );
-            assert_eq!(panel.selector_choices(Selector::Model).len(), 2);
-            assert_eq!(panel.selector_choices(Selector::Mode).len(), 1);
+            assert_eq!(panel.selector_choices(Selector::Model, cx).len(), 2);
+            assert_eq!(panel.selector_choices(Selector::Mode, cx).len(), 1);
             assert_eq!(
-                panel.selector_label(Selector::Model).as_ref(),
+                panel.selector_label(Selector::Model, cx).as_ref(),
                 "Opus (1M context)",
                 "在庫から表示名まで引ける"
             );
@@ -14835,7 +14842,7 @@ PYEOF"#;
             assert!(thread.command_tx.is_none(), "前の agent のセッションは畳む");
             assert!(thread.acp_session_id.is_none());
             assert!(
-                panel.selector_choices(Selector::Model).is_empty(),
+                panel.selector_choices(Selector::Model, cx).is_empty(),
                 "Codex の広告はまだ無い＝捏造しない"
             );
 
@@ -14854,18 +14861,44 @@ PYEOF"#;
         let path = init_test_settings(cx, "no-advertisement");
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
-            assert!(panel.selector_choices(Selector::Model).is_empty());
-            assert!(panel.selector_choices(Selector::Effort).is_empty());
-            assert!(panel.selector_choices(Selector::Mode).is_empty());
+            assert!(panel.selector_choices(Selector::Model, cx).is_empty());
+            assert!(panel.selector_choices(Selector::Effort, cx).is_empty());
+            assert!(panel.selector_choices(Selector::Mode, cx).is_empty());
             // 未選択なので記号を出す（古いモデル名を騙って出さない）。
             assert_eq!(
-                panel.selector_label(Selector::Model).as_ref(),
+                panel.selector_label(Selector::Model, cx).as_ref(),
                 SELECTOR_UNSET
             );
             // Agent だけは接続前でも選べる（認証済み一覧から作る）。
-            assert!(!panel.selector_choices(Selector::Agent).is_empty());
+            assert!(!panel.selector_choices(Selector::Agent, cx).is_empty());
             panel.toggle_menu(Selector::Model, cx);
             assert_eq!(panel.open_menu, Some(Selector::Model));
+        });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// O16: 使わないと決めたエージェントはエージェントの選択肢に出さない。いまのスレッドの値だけは
+    /// 消さない（選び直すまで持つ）。ログイン済みかは環境しだいなので、全部を外して確かめる。
+    #[gpui::test]
+    fn disabled_agents_leave_the_agent_choices(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "disabled-agents");
+        let every: Vec<&str> = acp_client::AGENTS.iter().map(|agent| agent.id).collect();
+        cx.update(|cx| {
+            settings::set_user_value(cx, "disabled_agents", serde_json::json!(every))
+                .expect("書ける")
+        });
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let current = panel.selector_value(Selector::Agent);
+            let choices = panel.selector_choices(Selector::Agent, cx);
+            assert_eq!(
+                choices
+                    .iter()
+                    .map(|choice| choice.value.clone())
+                    .collect::<Vec<_>>(),
+                vec![current],
+                "外したものは出さず、いまの値だけ残す"
+            );
         });
         let _ = std::fs::remove_file(path);
     }
@@ -14898,7 +14931,7 @@ PYEOF"#;
             );
             assert_eq!(thread.current_mode_id.as_ref(), "acceptEdits");
             assert_eq!(
-                panel.selector_label(Selector::Mode).as_ref(),
+                panel.selector_label(Selector::Mode, cx).as_ref(),
                 "Accept Edits"
             );
 

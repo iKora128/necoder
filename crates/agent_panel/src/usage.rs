@@ -361,7 +361,9 @@ pub fn refresh_codex_limits(force: bool, cx: &mut App) {
     if std::env::var_os("NECODER_USAGE_PROBE").is_some() {
         return;
     }
-    let codex = acp_client::find_in_path("codex");
+    // 使わないと決めた Codex（O16）は起こさない（未導入と同じ扱い＝使用量の行も出さない）。
+    let codex =
+        acp_client::find_in_path("codex").filter(|_| settings::get(cx).agent_enabled("codex"));
     let now = crate::now_unix_ms();
     let limits = cx.default_global::<UsageLimits>();
     limits.codex_installed = Some(codex.is_some());

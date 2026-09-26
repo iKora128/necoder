@@ -278,7 +278,7 @@
 | O20（一部） | 同上 | #30 | ブランチ名・起点・既にあるブランチ・`.worktreeinclude`・準備の skip（＋ Task の詳細）・準備が失敗した Task の「準備をやり直す」/「準備を飛ばして始める」・repo ごとの base（`task_base`）・作成中の行（段の表示・取り消し・やり直し）・sparse checkout（`task_sparse`・cone）。絵文字名・どこで動かすかは未 |
 | O13（一部） | 同上 | #30 | 作業中はスリープさせない・通知の履歴（ベル）・通知音の大きさ・ニュースのクリック移動・スマホへの完了 push（relay の host）。メニューバー・TCC の案内は未。完了 push は実機 iPhone で未確認 |
 | O22 | 同上 | #30 | リソース（メモリをプロジェクトごと・使っていないエージェントを止める）・片付け（まとめて終了 / 失うものが無い worktree をまとめて削除・worktree の大きさと大きい順）。SSH 先のプロセスのメモリは未 |
-| O16（一部） | 同上 | #30 | repo ごとのレシピ（`.necoder/recipes/*.md` を `/` 補完へ）・エージェント別の新規スレッド（`workspace::NewThreadCodex` 等・パレットと keymap.json）。エージェントの有効 / 無効・権限の既定・起動引数の UI は未 |
+| O16（一部） | 同上 | #30 | repo ごとのレシピ（`.necoder/recipes/*.md` を `/` 補完へ）・エージェント別の新規スレッド（`workspace::NewThreadCodex` 等・パレットと keymap.json）・エージェントの有効 / 無効（設定の各行のスイッチ・選択肢から外しログインの確かめも起こさない）。権限の既定・起動引数の UI は未 |
 | O14 | 同上 | #30 | アカウントのフォルダ・切替（`agent_servers.<id>.env`）・公式 CLI でログイン。mac 実機未確認・Windows は未 |
 | O23（一部） | 同上 | #30 | fan-out（1 つの依頼をエージェントごとの Task へ・舞台に並べて比べる）。自動命名ブランチの改名は未 |
 | O17（一部） | 同上 | #30 | 質問カードの自由入力（Other 欄に書いて答える・選んだ案に添える。スマホの質問も）・サブエージェントの手順を親の Task の下に畳む・目標の一時停止 / 再開 / 取り消し（Codex の goal の操作）・message rail。ツールのまとめ表示と個別停止は未（個別停止は `_session/async_task/stop` があるが、`async_task_*` の更新は JetBrains AIR 拡張 `_meta.jetbrains.air.capabilities` を名乗った時だけ来る。SDK が未知の sessionUpdate をどう扱うかを実機で確かめてから） |
@@ -363,7 +363,7 @@
 | ID | Orca の機能 | 調査の判定 | 行き先 |
 |---|---|---|---|
 | B01 | 35 種以上の CLI エージェント + 任意 CLI | 一部 | §5 |
-| B02 | 検出・自動導入・有効 / 無効 | 一部 | O16 |
+| B02 | 検出・自動導入・有効 / 無効 | 有（#30・設定の各行のスイッチ・`disabled_agents`） | O16 |
 | B03 | 状態の検出と表示 | 有 | 済 |
 | B04 | Agent Dashboard（カンバン・検索・フィルタ・pop-out） | 一部 | O21・§6 |
 | B05 | Agent map | 有 | 済 |

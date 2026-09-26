@@ -24,6 +24,24 @@ pub(crate) const AGENT_THREAD_LABELS: [&str; 7] = [
     "Grok Build",
 ];
 
+/// パレットのエージェント別の新規スレッド（`workspace::NewThreadCodex` など）が指すエージェント。
+/// 並びは [`AGENT_THREAD_LABELS`] と同じ。それ以外の action は `None`。
+pub(crate) fn agent_for_thread_action(action_name: &str) -> Option<&'static str> {
+    const ACTIONS: [&str; 7] = [
+        "workspace::NewThreadClaudeCode",
+        "workspace::NewThreadCodex",
+        "workspace::NewThreadCopilot",
+        "workspace::NewThreadQwenCode",
+        "workspace::NewThreadOpenCode",
+        "workspace::NewThreadKimi",
+        "workspace::NewThreadGrok",
+    ];
+    ACTIONS
+        .iter()
+        .position(|action| *action == action_name)
+        .map(|index| AGENT_THREAD_LABELS[index])
+}
+
 /// 1 ProjectSession の編集面。tab / pane / language / diff / navigation の状態を一括所有する。
 ///
 /// `EditorArea` 自身は長寿命 aggregate とし、実際に描画・入力を持つ各 `EditorView` を Entity として
