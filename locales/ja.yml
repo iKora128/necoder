@@ -261,6 +261,7 @@ cmd:
   thread_history: "AI: スレッド履歴"
   report_bug: "ヘルプ: バグを報告"
   open_logs: "ヘルプ: ログのフォルダを開く"
+  open_manual: "ヘルプ: necoder のマニュアルを開く"
   about: "ヘルプ: necoder について"
   check_updates: "ヘルプ: アップデートを確認"
   open_settings: "表示: 設定を開く"
@@ -1258,6 +1259,7 @@ menu:
   shortcut_sheet: キーボードショートカット
   report_bug: バグを報告…
   open_logs: ログのフォルダを開く
+  open_manual: necoder のマニュアル
 welcome:
   title: necoder — 色による方向感覚
   open_project: プロジェクト / worktree を開く

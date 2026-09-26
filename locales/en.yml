@@ -260,6 +260,7 @@ cmd:
   thread_history: "AI: Thread history"
   report_bug: "Help: Report a Bug"
   open_logs: "Help: Open the logs folder"
+  open_manual: "Help: Open the necoder manual (Japanese)"
   about: "Help: About necoder"
   check_updates: "Help: Check for Updates"
   open_settings: "View: Open Settings"
@@ -1257,6 +1258,7 @@ menu:
   shortcut_sheet: Keyboard Shortcuts
   report_bug: Report a Bug…
   open_logs: Open Logs Folder
+  open_manual: necoder Manual (Japanese)
 welcome:
   title: necoder — orient by color
   open_project: Open a project / worktree

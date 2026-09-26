@@ -291,6 +291,10 @@ impl CommandRegistry {
                 action_name: "workspace::OpenLogs",
             },
             CommandEntry {
+                label_key: "cmd.open_manual",
+                action_name: "workspace::OpenManual",
+            },
+            CommandEntry {
                 label_key: "cmd.about",
                 action_name: "workspace::About",
             },

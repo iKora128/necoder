@@ -200,6 +200,8 @@ actions!(
         ReportBug,
         // ログのフォルダを OS のファイルマネージャで開く（メニュー「ヘルプ」・O27 / H29）。
         OpenLogs,
+        // 使い方の文書（docs/MANUAL.md・GitHub）をブラウザで開く（メニュー「ヘルプ」・O27 / H29）。
+        OpenManual,
         // 設定画面を開く（⌘, / メニュー「設定…」・M13 メニューバー）。
         OpenSettings,
         // user settings.json をエディタタブで開く（設定画面のボタン / パレット。真実のファイルへの直行便）。
@@ -2391,6 +2393,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_shortcut_sheet))
             .on_action(cx.listener(Self::report_bug_action))
             .on_action(cx.listener(Self::open_logs_action))
+            .on_action(cx.listener(Self::open_manual_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::open_settings_json_action))
             .on_action(cx.listener(Self::about_action))
