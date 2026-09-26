@@ -5,6 +5,7 @@
 //! 描画側（editor_view）が theme_core の syn-* にマップする（= この crate は theme を知らない）。
 
 use anyhow::{Context as _, Result};
+use std::borrow::Cow;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
 use std::path::Path;
@@ -207,6 +208,21 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "text.reference",
     "text.emphasis",
     "text.strong",
+    // nvim-treesitter 流のクエリ（Zig・Lua・SQL・CMake など）が使う名前。末尾に足すのは、
+    // 既存の名前どうしの同点（部分一致の長さが同じ）の勝ち順を変えないため。
+    "number",
+    "float",
+    "boolean",
+    "character",
+    "conditional",
+    "repeat",
+    "exception",
+    "include",
+    "storageclass",
+    "method",
+    // `keyword.function` を "function" に、`type.qualifier` を "type" に吸わせない（2 語で一致させる）。
+    "keyword.function",
+    "type.qualifier",
 ];
 
 fn kind_for_name(name: &str) -> Option<HighlightKind> {
@@ -216,23 +232,53 @@ fn kind_for_name(name: &str) -> Option<HighlightKind> {
         "text.uri" | "text.reference" => Some(HighlightKind::Link),
         "text.emphasis" => Some(HighlightKind::Emphasis),
         "text.strong" => Some(HighlightKind::Strong),
+        // nvim 旧来の名前で、中身は `abstract` / `final` / SQL の修飾語などのキーワード。
+        "type.qualifier" => Some(HighlightKind::Keyword),
         _ => None,
     } {
         return Some(kind);
     }
     let base = name.split('.').next().unwrap_or(name);
     Some(match base {
-        "keyword" => HighlightKind::Keyword,
+        "keyword" | "conditional" | "repeat" | "exception" | "include" | "storageclass" => {
+            HighlightKind::Keyword
+        }
         "function" if name.contains("macro") => HighlightKind::Macro,
-        "function" => HighlightKind::Function,
+        "function" | "method" => HighlightKind::Function,
         "type" | "constructor" => HighlightKind::Type,
-        "string" | "escape" => HighlightKind::String,
-        "constant" => HighlightKind::Number,
+        // 文字リテラルは Rust（`char_literal` → `@string`）と同じ文字列色に揃える。
+        "string" | "escape" | "character" => HighlightKind::String,
+        "constant" | "number" | "float" | "boolean" => HighlightKind::Number,
         "comment" => HighlightKind::Comment,
         "attribute" => HighlightKind::Macro,
         "operator" | "punctuation" => HighlightKind::Punctuation,
         _ => return None, // variable / property / label 等は既定色
     })
+}
+
+/// necoder が評価しない条件付きのパターン・キャプチャを無効にする（両エンジン共通）。
+///
+/// - `@spell` / `@nospell` はスペルチェック用の印で色ではない。tree-sitter-highlight は同じノードの
+///   最後のキャプチャを採るため、`(comment) @comment @spell` のままだとコメントが無色になる。
+/// - `#lua-match?` など tree-sitter が評価しない述語（general predicate）は条件が素通りになり、
+///   `((identifier) @type (#lua-match? …))` が全識別子を型色にしてしまう。条件を守れないので外す。
+/// - `(#is-not? local)` などの locals 解析が前提のパターンは、locals クエリを渡さない場合に外す。
+///   Ruby の `((identifier) @function.method (#is-not? local))` が全識別子を関数色にするため。
+fn restrict_to_evaluated_patterns(query: &mut tree_sitter::Query, analyzes_locals: bool) {
+    for capture in ["spell", "nospell"] {
+        query.disable_capture(capture);
+    }
+    for pattern in 0..query.pattern_count() {
+        let unevaluated = !query.general_predicates(pattern).is_empty();
+        let needs_locals = !analyzes_locals
+            && query
+                .property_predicates(pattern)
+                .iter()
+                .any(|(property, _)| property.key.as_ref() == "local");
+        if unevaluated || needs_locals {
+            query.disable_pattern(pattern);
+        }
+    }
 }
 
 /// 1 言語分のハイライタ。クエリのコンパイルは 1 回（`new`）。
@@ -257,19 +303,28 @@ impl Highlighter {
             locals_query,
         )
         .with_context(|| format!("{name} ハイライトクエリのコンパイルに失敗"))?;
+        restrict_to_evaluated_patterns(&mut config.query, !locals_query.is_empty());
         config.configure(HIGHLIGHT_NAMES);
         Ok(Highlighter { config })
     }
 
+    /// [`grammar`] 表の言語のハイライタ。
+    fn for_grammar(language: LanguageId) -> Result<Highlighter> {
+        let grammar = grammar(language).with_context(|| {
+            format!("{} は単一 grammar の言語ではない", language.canonical_id())
+        })?;
+        Self::with_query(
+            grammar.language,
+            language.canonical_id(),
+            &grammar.highlights,
+            grammar.injections,
+            grammar.locals,
+        )
+    }
+
     /// Rust 用ハイライタ。
     pub fn rust() -> Result<Highlighter> {
-        Self::with_query(
-            tree_sitter_rust::LANGUAGE.into(),
-            "rust",
-            tree_sitter_rust::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        )
+        Self::for_grammar(LanguageId::Rust)
     }
 
     /// 拡張子から対応ハイライタを選ぶ（M11 多言語）。クエリのコンパイル失敗は None（無ハイライトで開く）。
@@ -280,111 +335,10 @@ impl Highlighter {
     /// 共通言語 ID からハイライタを作る。Markdown は block/inline の 2 grammar が必要なため、
     /// 通常エディタの [`IncrementalHighlighter`] が担当する。
     pub fn for_language(language: LanguageId) -> Option<Highlighter> {
-        let result = match language {
-            LanguageId::Rust => Highlighter::rust(),
-            LanguageId::JavaScript => Self::with_query(
-                tree_sitter_javascript::LANGUAGE.into(),
-                "javascript",
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-                tree_sitter_javascript::INJECTIONS_QUERY,
-                tree_sitter_javascript::LOCALS_QUERY,
-            ),
-            // TS/TSX は JS のクエリ + TS 差分クエリを連結（tree-sitter-typescript の流儀）。
-            LanguageId::TypeScript => Self::with_query(
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                "typescript",
-                &format!(
-                    "{}\n{}",
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY
-                ),
-                "",
-                tree_sitter_javascript::LOCALS_QUERY,
-            ),
-            LanguageId::Tsx => Self::with_query(
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
-                "tsx",
-                &format!(
-                    "{}\n{}",
-                    tree_sitter_javascript::HIGHLIGHT_QUERY,
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY
-                ),
-                "",
-                tree_sitter_javascript::LOCALS_QUERY,
-            ),
-            LanguageId::Python => Self::with_query(
-                tree_sitter_python::LANGUAGE.into(),
-                "python",
-                tree_sitter_python::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Go => Self::with_query(
-                tree_sitter_go::LANGUAGE.into(),
-                "go",
-                tree_sitter_go::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Json => Self::with_query(
-                tree_sitter_json::LANGUAGE.into(),
-                "json",
-                tree_sitter_json::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Yaml => Self::with_query(
-                tree_sitter_yaml::LANGUAGE.into(),
-                "yaml",
-                tree_sitter_yaml::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Toml => Self::with_query(
-                tree_sitter_toml_ng::LANGUAGE.into(),
-                "toml",
-                tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Html => Self::with_query(
-                tree_sitter_html::LANGUAGE.into(),
-                "html",
-                tree_sitter_html::HIGHLIGHTS_QUERY,
-                tree_sitter_html::INJECTIONS_QUERY,
-                "",
-            ),
-            LanguageId::Css => Self::with_query(
-                tree_sitter_css::LANGUAGE.into(),
-                "css",
-                tree_sitter_css::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Bash => Self::with_query(
-                tree_sitter_bash::LANGUAGE.into(),
-                "bash",
-                tree_sitter_bash::HIGHLIGHT_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::C => Self::with_query(
-                tree_sitter_c::LANGUAGE.into(),
-                "c",
-                tree_sitter_c::HIGHLIGHT_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Cpp => Self::with_query(
-                tree_sitter_cpp::LANGUAGE.into(),
-                "cpp",
-                tree_sitter_cpp::HIGHLIGHT_QUERY,
-                "",
-                "",
-            ),
-            LanguageId::Markdown => return None,
-        };
-        match result {
+        if language == LanguageId::Markdown {
+            return None;
+        }
+        match Self::for_grammar(language) {
             Ok(highlighter) => Some(highlighter),
             Err(error) => {
                 eprintln!(
@@ -583,76 +537,105 @@ mod tests {
     }
 }
 
-/// 単一 grammar の言語 → (言語, highlights クエリ)。Markdown は専用の block/inline 統合へ送る。
-fn language_and_query(language_id: LanguageId) -> Option<(tree_sitter::Language, String)> {
-    let pair: (tree_sitter::Language, String) = match language_id {
-        LanguageId::Rust => (
+/// 単一 grammar の言語の grammar とクエリ。どのクエリも grammar crate に同梱のもの。
+struct Grammar {
+    language: tree_sitter::Language,
+    highlights: Cow<'static, str>,
+    /// tree-sitter-highlight 経路（[`Highlighter`]）だけが使う。増分経路は highlights のみ。
+    injections: &'static str,
+    locals: &'static str,
+}
+
+impl Grammar {
+    fn highlights_only(language: tree_sitter::Language, highlights: &'static str) -> Self {
+        Self {
+            language,
+            highlights: Cow::Borrowed(highlights),
+            injections: "",
+            locals: "",
+        }
+    }
+}
+
+/// 言語 → grammar とクエリ（両エンジン共通の表）。Markdown は block/inline の 2 grammar のため
+/// 持たず、専用の [`MarkdownIncrementalHighlighter`] が担当する。
+fn grammar(language_id: LanguageId) -> Option<Grammar> {
+    Some(match language_id {
+        LanguageId::Rust => Grammar::highlights_only(
             tree_sitter_rust::LANGUAGE.into(),
-            tree_sitter_rust::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_rust::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::JavaScript => (
-            tree_sitter_javascript::LANGUAGE.into(),
-            tree_sitter_javascript::HIGHLIGHT_QUERY.to_string(),
-        ),
-        LanguageId::TypeScript => (
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            format!(
+        LanguageId::JavaScript => Grammar {
+            language: tree_sitter_javascript::LANGUAGE.into(),
+            highlights: Cow::Borrowed(tree_sitter_javascript::HIGHLIGHT_QUERY),
+            injections: tree_sitter_javascript::INJECTIONS_QUERY,
+            locals: tree_sitter_javascript::LOCALS_QUERY,
+        },
+        // TS/TSX は JS のクエリ + TS 差分クエリを連結（tree-sitter-typescript の流儀）。
+        LanguageId::TypeScript => Grammar {
+            language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            highlights: Cow::Owned(format!(
                 "{}\n{}",
                 tree_sitter_javascript::HIGHLIGHT_QUERY,
                 tree_sitter_typescript::HIGHLIGHTS_QUERY
-            ),
-        ),
-        LanguageId::Tsx => (
-            tree_sitter_typescript::LANGUAGE_TSX.into(),
-            format!(
+            )),
+            injections: "",
+            locals: tree_sitter_javascript::LOCALS_QUERY,
+        },
+        LanguageId::Tsx => Grammar {
+            language: tree_sitter_typescript::LANGUAGE_TSX.into(),
+            highlights: Cow::Owned(format!(
                 "{}\n{}",
                 tree_sitter_javascript::HIGHLIGHT_QUERY,
                 tree_sitter_typescript::HIGHLIGHTS_QUERY
-            ),
-        ),
-        LanguageId::Python => (
+            )),
+            injections: "",
+            locals: tree_sitter_javascript::LOCALS_QUERY,
+        },
+        LanguageId::Python => Grammar::highlights_only(
             tree_sitter_python::LANGUAGE.into(),
-            tree_sitter_python::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_python::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Go => (
+        LanguageId::Go => Grammar::highlights_only(
             tree_sitter_go::LANGUAGE.into(),
-            tree_sitter_go::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_go::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Json => (
+        LanguageId::Json => Grammar::highlights_only(
             tree_sitter_json::LANGUAGE.into(),
-            tree_sitter_json::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_json::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Yaml => (
+        LanguageId::Yaml => Grammar::highlights_only(
             tree_sitter_yaml::LANGUAGE.into(),
-            tree_sitter_yaml::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_yaml::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Toml => (
+        LanguageId::Toml => Grammar::highlights_only(
             tree_sitter_toml_ng::LANGUAGE.into(),
-            tree_sitter_toml_ng::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Html => (
-            tree_sitter_html::LANGUAGE.into(),
-            tree_sitter_html::HIGHLIGHTS_QUERY.to_string(),
-        ),
-        LanguageId::Css => (
+        LanguageId::Html => Grammar {
+            language: tree_sitter_html::LANGUAGE.into(),
+            highlights: Cow::Borrowed(tree_sitter_html::HIGHLIGHTS_QUERY),
+            injections: tree_sitter_html::INJECTIONS_QUERY,
+            locals: "",
+        },
+        LanguageId::Css => Grammar::highlights_only(
             tree_sitter_css::LANGUAGE.into(),
-            tree_sitter_css::HIGHLIGHTS_QUERY.to_string(),
+            tree_sitter_css::HIGHLIGHTS_QUERY,
         ),
-        LanguageId::Bash => (
+        LanguageId::Bash => Grammar::highlights_only(
             tree_sitter_bash::LANGUAGE.into(),
-            tree_sitter_bash::HIGHLIGHT_QUERY.to_string(),
+            tree_sitter_bash::HIGHLIGHT_QUERY,
         ),
-        LanguageId::C => (
+        LanguageId::C => Grammar::highlights_only(
             tree_sitter_c::LANGUAGE.into(),
-            tree_sitter_c::HIGHLIGHT_QUERY.to_string(),
+            tree_sitter_c::HIGHLIGHT_QUERY,
         ),
-        LanguageId::Cpp => (
+        LanguageId::Cpp => Grammar::highlights_only(
             tree_sitter_cpp::LANGUAGE.into(),
-            tree_sitter_cpp::HIGHLIGHT_QUERY.to_string(),
+            tree_sitter_cpp::HIGHLIGHT_QUERY,
         ),
         LanguageId::Markdown => return None,
-    };
-    Some(pair)
+    })
 }
 
 struct StandardIncrementalHighlighter {
@@ -664,10 +647,10 @@ struct StandardIncrementalHighlighter {
 
 impl StandardIncrementalHighlighter {
     fn new(language_id: LanguageId) -> Option<Self> {
-        let (language, query_source) = language_and_query(language_id)?;
+        let grammar = grammar(language_id)?;
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&language).ok()?;
-        let query = match tree_sitter::Query::new(&language, &query_source) {
+        parser.set_language(&grammar.language).ok()?;
+        let mut query = match tree_sitter::Query::new(&grammar.language, &grammar.highlights) {
             Ok(query) => query,
             Err(error) => {
                 eprintln!(
@@ -677,6 +660,8 @@ impl StandardIncrementalHighlighter {
                 return None;
             }
         };
+        // 増分経路は locals 解析をしない。
+        restrict_to_evaluated_patterns(&mut query, false);
         let capture_kinds = query
             .capture_names()
             .iter()
@@ -1425,6 +1410,59 @@ mod multilang_tests {
             .iter()
             .any(|span| { span.kind == HighlightKind::String && span.range.contains(&string_at) }));
         assert!(!spans.is_empty());
+    }
+
+    /// `needle` の先頭 byte を覆う span の種別（両エンジン）。無色なら None。
+    fn kinds_at(
+        language: LanguageId,
+        source: &str,
+        needle: &str,
+    ) -> (Option<HighlightKind>, Option<HighlightKind>) {
+        let at = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("{language:?}: {needle:?} がサンプルに無い"));
+        let kind_at = |spans: &[HighlightSpan]| {
+            spans
+                .iter()
+                .find(|span| span.range.start <= at && at < span.range.end)
+                .map(|span| span.kind)
+        };
+        let highlighter = Highlighter::for_language(language)
+            .unwrap_or_else(|| panic!("{language:?} のハイライタが作れない"));
+        let mut incremental = IncrementalHighlighter::for_language(language)
+            .unwrap_or_else(|| panic!("{language:?} の増分ハイライタが作れない"));
+        incremental.reparse_full(source);
+        (
+            kind_at(&highlighter.highlight(source)),
+            kind_at(&incremental.spans(source, 0..source.len())),
+        )
+    }
+
+    /// `(needle, 期待の種別)`。None は無色。
+    type Expectation<'a> = (&'a str, Option<HighlightKind>);
+
+    /// 期待の種別を、チャット等の tree-sitter-highlight 経路とエディタの増分経路の両方で確かめる。
+    fn assert_kinds(language: LanguageId, source: &str, expected: &[Expectation]) {
+        for (needle, kind) in expected {
+            let (highlighted, incremental) = kinds_at(language, source, needle);
+            assert_eq!(highlighted, *kind, "{language:?} {needle:?}（Highlighter）");
+            assert_eq!(incremental, *kind, "{language:?} {needle:?}（増分）");
+        }
+    }
+
+    #[test]
+    fn numbers_and_booleans_use_the_number_kind() {
+        // `@number` / `@boolean` を syn-num に載せる（以前は既存言語でも無色だった）。
+        let cases = [
+            (LanguageId::JavaScript, "const answer = 42;\n", "42"),
+            (LanguageId::Python, "ratio = 3.14\n", "3.14"),
+            (LanguageId::Json, "{\"count\": 7}\n", "7"),
+            (LanguageId::Yaml, "enabled: true\n", "true"),
+            (LanguageId::Toml, "enabled = false\n", "false"),
+        ];
+        for (language, source, needle) in cases {
+            assert_kinds(language, source, &[(needle, Some(HighlightKind::Number))]);
+        }
     }
 }
 
