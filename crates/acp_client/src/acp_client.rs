@@ -310,7 +310,8 @@ pub enum AgentEvent {
     TitleChanged(Option<String>),
     /// 目標（`/goal`）が変わった（`SessionInfoUpdate._meta.goal`）。`None` = 目標が消えた。
     GoalChanged(Option<AgentGoal>),
-    /// このエージェントが受ける目標への操作（O17・セッションが開いた直後に 1 回）。空 = 操作できない。
+    /// このエージェントが受ける目標への操作（O17）。広告したエージェントだけ、セッションが開いた
+    /// 直後（SessionStarted の次）に 1 回。
     GoalControls(Vec<GoalAction>),
     /// エージェントが選択肢付きの質問（Elicitation・form）を出した。**選択式フィールドのみ対応**し、
     /// テキスト/数値/真偽を含むフォームは UI へ出さず即 Decline する（下の handler で弾く）。
@@ -1713,16 +1714,14 @@ pub async fn run_session_on(
                     resumable: can_load,
                 })
                 .ok();
-            // 目標への操作の入口（Codex の `_meta.goal`・O17）。広告が無ければ UI は操作を出さない。
+            // 目標への操作の入口（Codex の `_meta.goal`・O17）。広告した時だけ流す（UI は
+            // SessionStarted で前の操作を消すので、広告が無ければ操作は出ない）。
             let goal_control = goal_controls(initialized.meta.as_ref());
-            event_tx
-                .unbounded_send(AgentEvent::GoalControls(
-                    goal_control
-                        .as_ref()
-                        .map(|(_, actions)| actions.clone())
-                        .unwrap_or_default(),
-                ))
-                .ok();
+            if let Some((_, actions)) = goal_control.as_ref() {
+                event_tx
+                    .unbounded_send(AgentEvent::GoalControls(actions.clone()))
+                    .ok();
+            }
             // 目標への操作を送る（応答は待たない・結果は `_meta.goal` の更新で届く）。
             let session_id_text = session.session_id().to_string();
             let send_goal_action = |action: GoalAction| {
