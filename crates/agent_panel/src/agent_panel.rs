@@ -1084,6 +1084,9 @@ struct Thread {
     /// エージェントが追っている目標（`/goal`・`AgentEvent::GoalChanged`）。composer の上に 1 行で出す。
     /// 保存しない（エージェント側の状態の写し。再開すれば送り直される）。
     goal: Option<acp_client::AgentGoal>,
+    /// このエージェントが受ける目標への操作（一時停止 / 再開 / 取り消す・O17）。セッションが開いた
+    /// 直後に届く。空 = 操作できない（目標の行は見せるだけ）。
+    goal_actions: Vec<acp_client::GoalAction>,
     /// 遷移スナップショット（Tier 1・FLEET-CONTROL-PLAN P1）。**状態遷移時のみ**更新する:
     /// PermissionRequest→許可待ちの内容 / TurnEnded→最終発言の末尾 / Failed→エラー文。
     /// Working 中は保存せず `live_digest()` を流す（生成不要・無料）。
@@ -1181,6 +1184,7 @@ impl Thread {
             name_is_custom: false,
             commands: Vec::new(),
             goal: None,
+            goal_actions: Vec::new(),
             digest: None,
             muted: false,
             tier2: None,
@@ -1378,6 +1382,23 @@ fn prompt_image_mime(path: &Path) -> Option<&'static str> {
         "webp" => Some("image/webp"),
         _ => None,
     }
+}
+
+/// 目標の行に出す操作（O17）: エージェントが受けるもののうち、今の状態に合うもの。
+fn goal_actions_for(
+    status: acp_client::GoalStatus,
+    supported: &[acp_client::GoalAction],
+) -> Vec<acp_client::GoalAction> {
+    use acp_client::{GoalAction, GoalStatus};
+    let fitting = match status {
+        GoalStatus::Active | GoalStatus::Blocked => vec![GoalAction::Pause, GoalAction::Clear],
+        GoalStatus::Paused | GoalStatus::Limited => vec![GoalAction::Resume, GoalAction::Clear],
+        GoalStatus::Complete | GoalStatus::Other => vec![GoalAction::Clear],
+    };
+    fitting
+        .into_iter()
+        .filter(|action| supported.contains(action))
+        .collect()
 }
 
 /// `id` の Step が transcript に居るか（サブエージェントの手順の親を探す・O17）。
@@ -6778,6 +6799,7 @@ PYEOF"#;
                 }
             }
             AgentEvent::GoalChanged(goal) => thread.goal = goal,
+            AgentEvent::GoalControls(actions) => thread.goal_actions = actions,
             AgentEvent::ElicitationRequest {
                 message,
                 fields,
@@ -10185,10 +10207,13 @@ PYEOF"#;
     /// エージェントが追っている目標（`/goal`・O2）を composer の直上に 1 行で常時出す。
     /// Codex / Claude は `SessionInfoUpdate._meta.goal` で目標と状態を送ってくる。面はセッション断
     /// バナーと同じ（bg2・枠・角 7）で、**色は中立**（状態は文字で言う・色相を使わない＝§1.3）。
-    fn render_goal(&self) -> Option<gpui::AnyElement> {
+    /// エージェントが目標への操作を広告していれば（Codex・O17）、状態に合う操作を文字チップで添える:
+    /// 進行中 → 一時停止 / 一時停止中 → 再開 / どちらでも → 取り消す。
+    fn render_goal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
         let goal = thread.goal.as_ref()?;
         let theme = self.theme.clone();
+        let actions = goal_actions_for(goal.status, &thread.goal_actions);
         let status = match goal.status {
             acp_client::GoalStatus::Active => Some(i18n::t!("agent.goal_status_active")),
             acp_client::GoalStatus::Paused => Some(i18n::t!("agent.goal_status_paused")),
@@ -10235,9 +10260,52 @@ PYEOF"#;
                         .text_color(theme.fg2)
                         .child(SharedString::from(status))
                 }))
+                .children(actions.into_iter().map(|action| {
+                    let label = match action {
+                        acp_client::GoalAction::Pause => i18n::t!("agent.goal_pause"),
+                        acp_client::GoalAction::Resume => i18n::t!("agent.goal_resume"),
+                        acp_client::GoalAction::Clear => i18n::t!("agent.goal_clear"),
+                    };
+                    let id = match action {
+                        acp_client::GoalAction::Pause => "goal-pause",
+                        acp_client::GoalAction::Resume => "goal-resume",
+                        acp_client::GoalAction::Clear => "goal-clear",
+                    };
+                    div()
+                        .id(id)
+                        .flex_none()
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(10.5))
+                        .text_color(theme.fg1)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                        .child(SharedString::from(label))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |panel, _, _window, cx| {
+                                cx.stop_propagation();
+                                panel.send_goal_action(action, cx);
+                            }),
+                        )
+                }))
                 .tooltip(Tooltip::text(objective, theme.clone()))
                 .into_any_element(),
         )
+    }
+
+    /// 目標への操作を送る（アクティブスレッド・O17）。結果はエージェントが送り直す目標の状態で映る。
+    fn send_goal_action(&mut self, action: acp_client::GoalAction, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get(self.active) else {
+            return;
+        };
+        if let Some(command_tx) = thread.command_tx.as_ref() {
+            command_tx.unbounded_send(SessionCommand::Goal(action)).ok();
+        }
+        cx.notify();
     }
 
     fn render_queued_prompts(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -11297,7 +11365,7 @@ impl Render for AgentPanel {
             .children(self.render_session_banner(cx))
             .children(self.render_queued_prompts(cx))
             // エージェントの目標（`/goal`）は composer の直上に常時（O2）。
-            .children(self.render_goal())
+            .children(self.render_goal(cx))
             .child(self.render_composer(composer_focused, cx))
             // セレクタのドロップダウンは各ピルの子として描く（render_selector_pill 内）。
             .when(self.context_menu_open, |element| {
@@ -12293,6 +12361,7 @@ fn seed_threads() -> Vec<Thread> {
         name_is_custom: false,
         commands: Vec::new(),
         goal: None,
+        goal_actions: Vec::new(),
         name: "rope設計".into(),
         color: thread_color(0),
         running: false,
@@ -15453,14 +15522,48 @@ PYEOF"#;
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
             let active = panel.active;
-            assert!(panel.render_goal().is_none());
+            assert!(panel.render_goal(cx).is_none());
             let goal = acp_client::AgentGoal {
                 objective: "テストを緑にする".into(),
                 status: acp_client::GoalStatus::Paused,
             };
             panel.on_event(active, AgentEvent::GoalChanged(Some(goal.clone())), cx);
             assert_eq!(panel.threads[active].goal.as_ref(), Some(&goal));
-            assert!(panel.render_goal().is_some(), "composer の上に出る");
+            assert!(panel.render_goal(cx).is_some(), "composer の上に出る");
+
+            // 目標への操作（O17）: 広告された物のうち、状態に合う物だけを出し、押すとエージェントへ送る。
+            use acp_client::GoalAction::{Clear, Pause, Resume};
+            assert_eq!(
+                goal_actions_for(acp_client::GoalStatus::Paused, &[]),
+                Vec::new(),
+                "広告が無ければ出さない"
+            );
+            panel.on_event(
+                active,
+                AgentEvent::GoalControls(vec![Pause, Resume, Clear]),
+                cx,
+            );
+            assert_eq!(
+                goal_actions_for(goal.status, &panel.threads[active].goal_actions),
+                vec![Resume, Clear],
+                "一時停止中は再開と取り消し"
+            );
+            assert_eq!(
+                goal_actions_for(acp_client::GoalStatus::Active, &[Pause, Clear]),
+                vec![Pause, Clear]
+            );
+            assert_eq!(
+                goal_actions_for(acp_client::GoalStatus::Complete, &[Pause, Resume]),
+                Vec::new()
+            );
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.send_goal_action(Resume, cx);
+            assert!(
+                matches!(command_rx.try_recv(), Ok(SessionCommand::Goal(Resume))),
+                "押した操作がエージェントへ流れる"
+            );
+            panel.threads[active].command_tx = None;
 
             let started = |resumed: bool| AgentEvent::SessionStarted {
                 session_id: "sess".into(),

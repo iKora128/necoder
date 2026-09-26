@@ -128,6 +128,9 @@ agent:
   slash_footer: "%{count} 件 · ↑↓ で選ぶ · Enter / Tab で入れる · esc で閉じる"
   goal_label: 目標
   goal_status_active: 進行中
+  goal_pause: 一時停止
+  goal_resume: 再開
+  goal_clear: 取り消す
   goal_status_paused: 一時停止
   goal_status_blocked: 止まっています
   goal_status_complete: 達成
