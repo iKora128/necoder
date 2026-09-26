@@ -20,6 +20,8 @@ mod fleet;
 mod mcp;
 /// macOS ネイティブメニューバー（M13）。
 mod menus;
+/// エージェント向け skill（`necoder skills get|install|list`）。
+mod skills;
 use std::time::Instant;
 use workspace::{ProjectSource, RestoredTabs, WindowPersistence, Workspace};
 
@@ -498,6 +500,9 @@ fn main() {
         return;
     }
     if fleet::run_cli() {
+        return;
+    }
+    if skills::run_cli() {
         return;
     }
     // `ne` シム経由の open / シムの設置・削除（cli.rs）。

@@ -83,8 +83,8 @@ fn handle(request: &Value, root: &Path) -> Option<Value> {
     }
 }
 
-/// 公開ツールの JSON Schema（`tools/list`）。
-fn tool_schemas() -> Value {
+/// 公開ツールの JSON Schema（`tools/list`）。`necoder skills get --full` の道具一覧も同じものを読む。
+pub(crate) fn tool_schemas() -> Value {
     json!([
         {
             "name": "list_files",

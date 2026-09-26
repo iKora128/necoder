@@ -45,6 +45,134 @@ fn record_json(record: &TaskSpaceRecord) -> Value {
     })
 }
 
+/// `necoder fleet` のサブコマンド 1 つ（名前・引数の書式・要旨）。
+///
+/// 引数が足りない時の「使い方」と `necoder skills get` の本文がこの表を共有する
+/// ＝サブコマンドを足したら両方に出る（手で書いた説明が実装とずれない）。
+pub(crate) struct FleetCommand {
+    pub(crate) name: &'static str,
+    /// `name` に続く引数の書式（`<必須>` / `[省略可]` / `...` = 残りの引数を空白で繋いで 1 つにする）。
+    pub(crate) arguments: &'static str,
+    pub(crate) summary: &'static str,
+    /// 起動中の GUI が要る（GUI への IPC で動く）。
+    pub(crate) needs_gui: bool,
+    /// 人間だけが実行する操作（エージェントは実行しない・FLEET-V2 §5.2）。
+    pub(crate) human_only: bool,
+}
+
+/// `necoder fleet` の全サブコマンド（`run_cli` の分岐と同じ並び）。
+pub(crate) const FLEET_COMMANDS: &[FleetCommand] = &[
+    FleetCommand {
+        name: "create",
+        arguments: "[root] [title]",
+        summary: "統合先の HEAD から task/* ブランチと worktree を作り、台帳に登録する（出力の id を以後の引数に使う）",
+        needs_gui: false,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "list",
+        arguments: "[root]",
+        summary: "このリポジトリの Task を一覧する",
+        needs_gui: false,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "status",
+        arguments: "<task-id> <phase> [summary]",
+        summary: "Task の phase を進め、要約を残す（報告）",
+        needs_gui: false,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "wait",
+        arguments: "<task-id> <phase|activity> [timeout-seconds]",
+        summary: "phase（台帳）か activity（GUI の今の動き）が指定の値になるまで待つ（既定 600 秒。activity は要 GUI）",
+        needs_gui: false,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "depend",
+        arguments: "<task-id> <depends-on-id...>",
+        summary: "依存する Task を全部置き換えで宣言する",
+        needs_gui: false,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "wait-deps",
+        arguments: "<task-id> <phase> [timeout-seconds]",
+        summary: "依存がすべて指定の phase になるまで待つ（既定 600 秒）",
+        needs_gui: false,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "review",
+        arguments: "<task-id> [integration-root]",
+        summary: "Conflict Radar（統合先を変えない merge の試算）を走らせ、merge_ready か changes_requested へ進める",
+        needs_gui: false,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "integrate",
+        arguments: "<task-id> [integration-root]",
+        summary: "merge_ready の Task を統合先へ merge する",
+        needs_gui: false,
+        human_only: true,
+    },
+    FleetCommand {
+        name: "spawn-agent",
+        arguments: "<task-id> [agent] [prompt...]",
+        summary: "Task の worktree でエージェントのスレッドを起こし、prompt があれば送る",
+        needs_gui: true,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "send",
+        arguments: "<task-id> <message...>",
+        summary: "Task のアクティブなスレッドへ追撃の prompt を送る",
+        needs_gui: true,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "digest",
+        arguments: "<task-id>",
+        summary: "Task の事実と要約（phase・計画・digest・トークン）。transcript は返さない。GUI が無ければ台帳の分だけ",
+        needs_gui: false,
+        human_only: false,
+    },
+    FleetCommand {
+        name: "events",
+        arguments: "[since-id]",
+        summary: "全 Task の台帳イベントを、since-id より後から古い順に最大 200 件",
+        needs_gui: false,
+        human_only: false,
+    },
+];
+
+/// `fleet wait` が待てる activity（GUI の今の動き。台帳の phase とは別の軸）。
+pub(crate) const ACTIVITIES: &[&str] = &["idle", "working", "blocked", "done", "interrupted"];
+
+/// `necoder fleet <name>` の引数が足りない時のエラー（表の書式で「使い方」を出す）。
+fn usage_error(name: &str) -> anyhow::Error {
+    match FLEET_COMMANDS.iter().find(|command| command.name == name) {
+        Some(command) => anyhow::anyhow!(
+            "使い方: necoder fleet {} {}",
+            command.name,
+            command.arguments
+        ),
+        None => anyhow::anyhow!("{}", fleet_usage()),
+    }
+}
+
+/// 全サブコマンドの「使い方」1 行。
+fn fleet_usage() -> String {
+    let commands = FLEET_COMMANDS
+        .iter()
+        .map(|command| format!("{} {}", command.name, command.arguments))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!("使い方: necoder fleet <{commands}>")
+}
+
 /// CLI/MCP 境界の文字列 → enum。不正値はエラー（有効値の一覧つき）。
 pub(crate) fn parse_phase(value: &str) -> Result<TaskPhase> {
     TaskPhase::from_str(value).with_context(|| {
@@ -324,7 +452,6 @@ pub(crate) fn wait_task(
 /// activity 待ち（P6・`fleet wait` の runtime 対応）: GUI live の rollup activity が一致するまで。
 /// phase（台帳）と別軸の「今なにをしているか」を待てる（例: blocked を待って人を呼ぶ・idle を待って追撃）。
 pub(crate) fn wait_activity(task_id: &str, target: &str, timeout: Duration) -> Result<Value> {
-    const ACTIVITIES: &[&str] = &["idle", "working", "blocked", "done", "interrupted"];
     anyhow::ensure!(
         ACTIVITIES.contains(&target),
         "不正な activity: {target}（有効: {}）",
@@ -457,7 +584,8 @@ fn print_record(record: &TaskSpaceRecord) {
     );
 }
 
-/// `necoder fleet …` を処理したら true。GUI は開かない。
+/// `necoder fleet …` を処理したら true。GUI は開かない。失敗は終了コード 1
+/// （`cli.rs` と同じ。Captain やスクリプトが `&&` と終了コードで成否を判断できるように）。
 pub(crate) fn run_cli() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) != Some("fleet") {
@@ -465,15 +593,24 @@ pub(crate) fn run_cli() -> bool {
     }
     let result = match args.get(1).map(String::as_str) {
         Some("create") => {
-            let root = args.get(2).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+            let root = args
+                .get(2)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
             let title = args.get(3).map(String::as_str).unwrap_or("Task");
             create_task(&root, title).map(|record| print_record(&record))
         }
         Some("list") => {
-            let root = args.get(2).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+            let root = args
+                .get(2)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
             list_tasks(&root).map(|tasks| {
                 let values: Vec<_> = tasks.iter().map(record_json).collect();
-                println!("{}", serde_json::to_string_pretty(&values).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&values).unwrap_or_default()
+                );
             })
         }
         Some("status") => match (args.get(2), args.get(3)) {
@@ -481,53 +618,68 @@ pub(crate) fn run_cli() -> bool {
                 update_task(id, phase, args.get(4).map(String::as_str))
                     .map(|record| print_record(&record))
             }),
-            _ => Err(anyhow::anyhow!("使い方: necoder fleet status <task-id> <phase> [summary]")),
+            _ => Err(usage_error("status")),
         },
         Some("wait") => match (args.get(2), args.get(3)) {
             (Some(id), Some(target)) => {
-                let seconds = args.get(4).and_then(|value| value.parse().ok()).unwrap_or(600);
+                let seconds = args
+                    .get(4)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(600);
                 let timeout = Duration::from_secs(seconds);
                 // phase（台帳）と activity（GUI live）の両対応（P6）。まず phase として解釈。
                 match parse_phase(target) {
                     Ok(phase) => wait_task(id, phase, timeout).map(|record| print_record(&record)),
                     Err(_) => wait_activity(id, target, timeout).map(|digest| {
-                        println!("{}", serde_json::to_string_pretty(&digest).unwrap_or_default())
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&digest).unwrap_or_default()
+                        )
                     }),
                 }
             }
-            _ => Err(anyhow::anyhow!(
-                "使い方: necoder fleet wait <task-id> <phase|activity> [timeout-seconds]"
-            )),
+            _ => Err(usage_error("wait")),
         },
         Some("depend") => match (args.get(2), args.len() > 3) {
-            (Some(id), true) => set_depends(id, &args[3..].to_vec())
-                .map(|record| print_record(&record)),
-            _ => Err(anyhow::anyhow!("使い方: necoder fleet depend <task-id> <depends-on-id...>")),
+            (Some(id), true) => {
+                set_depends(id, &args[3..].to_vec()).map(|record| print_record(&record))
+            }
+            _ => Err(usage_error("depend")),
         },
         Some("wait-deps") => match (args.get(2), args.get(3)) {
             (Some(id), Some(phase)) => parse_phase(phase).and_then(|phase| {
-                let seconds = args.get(4).and_then(|value| value.parse().ok()).unwrap_or(600);
+                let seconds = args
+                    .get(4)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(600);
                 wait_deps(id, phase, Duration::from_secs(seconds)).map(|result| {
-                    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default())
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    )
                 })
             }),
-            _ => Err(anyhow::anyhow!(
-                "使い方: necoder fleet wait-deps <task-id> <phase> [timeout-seconds]"
-            )),
+            _ => Err(usage_error("wait-deps")),
         },
         Some("review") => match args.get(2) {
             Some(id) => {
-                let root = args.get(3).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+                let root = args
+                    .get(3)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."));
                 review_task(id, &root).map(|record| print_record(&record))
             }
-            None => Err(anyhow::anyhow!("使い方: necoder fleet review <task-id> [integration-root]")),
+            None => Err(usage_error("review")),
         },
         Some("integrate") => match args.get(2) {
             Some(id) => {
-                let root = args.get(3).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+                let root = args
+                    .get(3)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."));
                 integrate_task(id, &root).map(|record| print_record(&record))
             }
-            None => Err(anyhow::anyhow!("使い方: necoder fleet integrate <task-id> [integration-root]")),
+            None => Err(usage_error("integrate")),
         },
         // ── ここから GUI ライブ制御（P5・要 GUI 起動） ──
         Some("spawn-agent") => match args.get(2) {
@@ -538,19 +690,27 @@ pub(crate) fn run_cli() -> bool {
                     "spawn_agent",
                     json!({ "task_id": id, "agent": agent, "prompt": prompt }),
                 )
-                .map(|result| println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default()))
+                .map(|result| {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    )
+                })
             }
-            None => Err(anyhow::anyhow!(
-                "使い方: necoder fleet spawn-agent <task-id> [agent] [prompt...]"
-            )),
+            None => Err(usage_error("spawn-agent")),
         },
         Some("send") => match (args.get(2), args.len() > 3) {
             (Some(id), true) => gui_request(
                 "send",
                 json!({ "task_id": id, "message": args[3..].join(" ") }),
             )
-            .map(|result| println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default())),
-            _ => Err(anyhow::anyhow!("使い方: necoder fleet send <task-id> <message...>")),
+            .map(|result| {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                )
+            }),
+            _ => Err(usage_error("send")),
         },
         Some("digest") => match args.get(2) {
             Some(id) => gui_request("digest", json!({ "task_id": id }))
@@ -568,20 +728,31 @@ pub(crate) fn run_cli() -> bool {
                         })
                     })
                 })
-                .map(|result| println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default())),
-            None => Err(anyhow::anyhow!("使い方: necoder fleet digest <task-id>")),
+                .map(|result| {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    )
+                }),
+            None => Err(usage_error("digest")),
         },
         Some("events") => {
-            let since = args.get(2).and_then(|value| value.parse().ok()).unwrap_or(0);
-            events_since(since)
-                .map(|result| println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default()))
+            let since = args
+                .get(2)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            events_since(since).map(|result| {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                )
+            })
         }
-        _ => Err(anyhow::anyhow!(
-            "使い方: necoder fleet <create [root] [title] | list [root] | status <id> <phase> [summary] | wait <id> <phase|activity> [seconds] | wait-deps <id> <phase> [seconds] | depend <id> <on...> | review <id> [root] | integrate <id> [root] | spawn-agent <id> [agent] [prompt...] | send <id> <message...> | digest <id> | events [since-id]>"
-        )),
+        _ => Err(anyhow::anyhow!("{}", fleet_usage())),
     };
     if let Err(error) = result {
         eprintln!("{error:#}");
+        std::process::exit(1);
     }
     true
 }

@@ -4250,6 +4250,7 @@ dependencies = [
 name = "necoder"
 version = "0.1.20"
 dependencies = [
+ "agent_skills",
  "anyhow",
  "cli_shim",
  "editor_view",
