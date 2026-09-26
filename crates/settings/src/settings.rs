@@ -72,6 +72,29 @@ pub fn init(user_path: Option<PathBuf>, project_dir: Option<PathBuf>, cx: &mut A
     spawn_watcher(user_path, project_dir, cx);
 }
 
+/// 表示言語の「OS に合わせる」（O27）。設定画面ではこの値を選ぶと `locale` を消す（`null` = OS 追従）。
+const LOCALE_FOLLOW_OS: &str = "auto";
+
+/// 表示言語（`locale`）の変更をその場で効かせる（O27）。起動時の言語を当てた後に 1 回呼ぶ。
+/// `None` に戻したら OS の言語を読み直す。描画のたびに `t!` で引く文字は窓を描き直せば変わる。
+/// 起動時に作る macOS のメニューバーは次の起動から。
+pub fn follow_locale(cx: &mut App) {
+    let mut applied = get(cx).locale;
+    cx.observe_global::<SettingsGlobal>(move |cx| {
+        let locale = get(cx).locale;
+        if locale == applied {
+            return;
+        }
+        match &locale {
+            Some(code) => i18n::set_locale(code),
+            None => i18n::init_from_os_locale(),
+        }
+        applied = locale;
+        cx.refresh_windows();
+    })
+    .detach();
+}
+
 /// 現在の解決済み設定をクローンで取る。ビューは `cx.observe_global::<SettingsGlobal>` で変化に反応する。
 /// グローバル未設定（init 前）でも安全に既定を返す。
 pub fn get(cx: &App) -> Settings {
@@ -1293,7 +1316,13 @@ impl SettingsView {
     }
 
     fn set_pref_string(&mut self, key: &'static str, value: &'static str, cx: &mut Context<Self>) {
-        let result = set_user_value(cx, key, serde_json::Value::String(value.to_string()));
+        // 表示言語の「OS に合わせる」は値を消す（`locale: null` = OS 追従・O27）。
+        let json = if key == "locale" && value == LOCALE_FOLLOW_OS {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(value.to_string())
+        };
+        let result = set_user_value(cx, key, json);
         self.report_save(result, cx);
         cx.notify();
     }
@@ -1666,6 +1695,20 @@ impl SettingsView {
                 i18n::t!("settings.theme_label"),
                 Some(i18n::t!("settings.theme_sub")),
                 chips.into_any_element(),
+            ))
+            // 表示言語（O27）。言語名はどの言語でも自分の言語で書く（日本語 / English）。
+            .child(self.segmented_row_with(
+                "locale",
+                i18n::t!("settings.locale_label"),
+                Some(i18n::t!("settings.locale_sub")),
+                &[
+                    (LOCALE_FOLLOW_OS, i18n::t!("settings.locale_follow_os")),
+                    ("ja", i18n::t!("settings.locale_ja")),
+                    ("en", i18n::t!("settings.locale_en")),
+                ],
+                settings.locale.as_deref().unwrap_or(LOCALE_FOLLOW_OS),
+                false,
+                cx,
             ))
             .child(self.pref_row(
                 i18n::t!("settings.open_json"),
@@ -3239,6 +3282,38 @@ mod tests {
             assert_eq!(view.page, SettingsPage::Mcp);
             assert!(view.search.read(cx).plain_text().is_empty());
         });
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 表示言語（O27）: 設定を変えるとその場で切り替わり、「OS に合わせる」は値を消す（null）。
+    #[gpui::test]
+    fn the_display_language_follows_the_setting(cx: &mut gpui::TestAppContext) {
+        let before = i18n::locale();
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-locale-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"{ "onboarded": true }"#).expect("seed");
+        cx.update(|cx| {
+            init(Some(path.clone()), None, cx);
+            follow_locale(cx);
+        });
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        view.update(cx, |view, cx| view.set_pref_string("locale", "en", cx));
+        assert_eq!(i18n::locale(), "en");
+        view.update(cx, |view, cx| view.set_pref_string("locale", "ja", cx));
+        assert_eq!(i18n::locale(), "ja", "押した瞬間に切り替わる");
+        view.update(cx, |view, cx| {
+            view.set_pref_string("locale", LOCALE_FOLLOW_OS, cx);
+            assert_eq!(get(cx).locale, None, "OS に合わせる = 値を消す");
+        });
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(!text.contains(LOCALE_FOLLOW_OS), "{text}");
+        i18n::set_locale(&before);
         std::fs::remove_file(&path).ok();
     }
 

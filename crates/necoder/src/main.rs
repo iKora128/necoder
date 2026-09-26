@@ -782,6 +782,8 @@ fn main() {
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);
         }
+        // 設定画面・CLI・手編集で表示言語を変えたら、その場で切り替える（O27）。
+        settings::follow_locale(cx);
         let theme = resolve_theme(cx);
 
         match keymap_core::load_bindings(
