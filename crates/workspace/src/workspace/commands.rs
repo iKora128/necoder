@@ -254,6 +254,30 @@ impl CommandRegistry {
                 label_key: "cmd.usage_stats",
                 action_name: "workspace::UsageStats",
             },
+            CommandEntry {
+                label_key: "cmd.copy_path_line",
+                action_name: "workspace::CopyPathWithLine",
+            },
+            CommandEntry {
+                label_key: "cmd.close_all_tabs",
+                action_name: "workspace::CloseAllTabs",
+            },
+            CommandEntry {
+                label_key: "cmd.open_in_vscode",
+                action_name: "workspace::OpenInVsCode",
+            },
+            CommandEntry {
+                label_key: "cmd.open_in_cursor",
+                action_name: "workspace::OpenInCursor",
+            },
+            CommandEntry {
+                label_key: "cmd.open_in_zed",
+                action_name: "workspace::OpenInZed",
+            },
+            CommandEntry {
+                label_key: "cmd.open_in_terminal",
+                action_name: "workspace::OpenInTerminal",
+            },
         ]
     }
 

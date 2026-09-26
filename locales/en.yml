@@ -227,6 +227,12 @@ cmd:
   shortcut_sheet: "Help: Keyboard shortcuts"
   usage_limits: "Usage: Show rate limits"
   usage_stats: "Usage: Open statistics"
+  copy_path_line: "Edit: Copy path:line"
+  close_all_tabs: "Tabs: Close all (keep unsaved)"
+  open_in_vscode: "External: Open in VS Code"
+  open_in_cursor: "External: Open in Cursor"
+  open_in_zed: "External: Open in Zed"
+  open_in_terminal: "External: Open folder in Terminal"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -681,6 +687,11 @@ dock:
   bottom: Show/hide bottom panel (terminal)
   right: Show/hide right panel (agent)
 tabs:
+  ctx_close_all: Close all (keep unsaved)
+  copied_path_line: "Copied %{path}"
+  kept_unsaved: "Kept %{count} unsaved tabs open"
+  external_remote: Files on an SSH host cannot be opened in local apps
+  external_missing: "%{app} was not found (put its CLI on PATH or install the app)"
   untitled: Untitled
   close_tip: Close  ⌘W
   close_split_tip: Close split  ⌘\\

@@ -228,6 +228,12 @@ cmd:
   shortcut_sheet: "ヘルプ: キーボードショートカット"
   usage_limits: "使用量: レート制限を表示"
   usage_stats: "使用量: 統計を開く"
+  copy_path_line: "編集: パス:行をコピー"
+  close_all_tabs: "タブ: 全部閉じる（未保存は残す）"
+  open_in_vscode: "外部: VS Code で開く"
+  open_in_cursor: "外部: Cursor で開く"
+  open_in_zed: "外部: Zed で開く"
+  open_in_terminal: "外部: ターミナルでフォルダを開く"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -682,6 +688,11 @@ dock:
   bottom: 下パネル（ターミナル等）を表示/隠す
   right: 右パネル（エージェント）を表示/隠す
 tabs:
+  ctx_close_all: 全部閉じる（未保存は残す）
+  copied_path_line: "コピーしました: %{path}"
+  kept_unsaved: "未保存のタブ %{count} 枚は残しました"
+  external_remote: SSH 先のファイルは手元のアプリで開けません
+  external_missing: "%{app} が見つかりません（CLI を PATH に入れるか、アプリを入れてください）"
   untitled: 無題
   close_tip: 閉じる  ⌘W
   close_split_tip: 分割を閉じる  ⌘\\

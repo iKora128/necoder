@@ -1186,6 +1186,21 @@ impl EditorView {
         cx.notify();
     }
 
+    /// 主選択が覆う行（1 始まり・両端を含む）。選択が無ければキャレットの行だけ。複数行の選択が
+    /// 次の行の行頭で終わっている時は、その行を含めない（行を丸ごと選んだ時の見た目どおり）。
+    pub fn primary_line_range(&self) -> (usize, usize) {
+        let selection = self.primary();
+        let snapshot = self.buffer.snapshot();
+        let (low, high) = if selection.anchor <= selection.head {
+            (selection.anchor, selection.head)
+        } else {
+            (selection.head, selection.anchor)
+        };
+        let start = snapshot.byte_to_point(low);
+        let end = snapshot.byte_to_point(high);
+        selection_line_span((start.row, start.column), (end.row, end.column))
+    }
+
     /// statusbar 用の 1 始まりカーソル位置 `(行, 列)`。列は行内の**文字数**（byte ではない）。
     pub fn cursor_display(&self) -> (usize, usize) {
         let head = self.primary().head;
@@ -3489,9 +3504,36 @@ fn utf16_to_byte_in(text: &str, utf16: usize) -> usize {
     byte
 }
 
+/// 選択（行・列は 0 始まり、`start <= end`）が覆う行（1 始まり・両端を含む）。複数行の選択が
+/// 次の行の行頭で終わっている時は、その行を含めない。
+fn selection_line_span(start: (usize, usize), end: (usize, usize)) -> (usize, usize) {
+    let last = if end.0 > start.0 && end.1 == 0 {
+        end.0 - 1
+    } else {
+        end.0
+    };
+    (start.0 + 1, last + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selections_cover_the_lines_they_look_like() {
+        assert_eq!(
+            selection_line_span((4, 2), (4, 2)),
+            (5, 5),
+            "キャレットはその行"
+        );
+        assert_eq!(selection_line_span((4, 0), (6, 3)), (5, 7));
+        assert_eq!(
+            selection_line_span((4, 0), (7, 0)),
+            (5, 7),
+            "次の行の行頭で終わる選択はその行を含めない"
+        );
+        assert_eq!(selection_line_span((4, 3), (4, 9)), (5, 5));
+    }
 
     #[test]
     fn visible_rows_covers_only_the_window() {

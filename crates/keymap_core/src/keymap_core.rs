@@ -352,6 +352,8 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-alt-f": "workspace::BufferReplace",
       "cmd-shift-f": "workspace::ProjectSearch",
       "cmd-shift-t": "workspace::RestoreClosedTab",
+      "cmd-alt-c": "workspace::CopyPathWithLine",
+      "cmd-k cmd-w": "workspace::CloseAllTabs",
       "cmd-k cmd-t": "workspace::ThemeSelector",
       "cmd-k cmd-c": "workspace::ProjectColor",
       "cmd-j": "workspace::ToggleTerminal",
