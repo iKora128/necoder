@@ -196,10 +196,168 @@ impl Workspace {
         panel.update(cx, |panel, cx| panel.debug_ask_question(cx));
     }
 
-    /// 開発用: スレッド履歴 Picker を開く（offscreen 検証・#5）。
+    /// 開発用: スレッド履歴（⌘⇧H・O15）を offscreen で検証する（`NECODER_HISTORY_PROBE`・`;` 区切り）。
+    ///
+    /// `open`（`1` も同じ）= 開く / `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ見本のスレッドを書く /
+    /// `query:<語>` = 入力に語を入れる / `select:<n>` = 選べる行の n 番目を選ぶ / `confirm` = ⏎ /
+    /// `close` = 閉じる / `handoff` = いまのスレッドを「新しいセッションで続ける」/
+    /// `menu` = いまのスレッドの右クリックメニューを開く。
     #[cfg(debug_assertions)]
-    pub fn debug_open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_thread_history(&ThreadHistory, window, cx);
+    pub fn debug_history_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        match name {
+            "open" | "1" => self.open_thread_history(&ThreadHistory, window, cx),
+            "seed" => self.debug_seed_history(),
+            "query" => self.debug_history_query(argument, cx),
+            "select" => match argument.parse::<usize>() {
+                Ok(target) => self.debug_history_select(target, cx),
+                Err(error) => eprintln!("NECODER_HISTORY_PROBE: select の番号が読めない: {error}"),
+            },
+            "confirm" => self.debug_history_confirm(window, cx),
+            "close" => self.close_thread_history(window, cx),
+            "handoff" => {
+                let panel = self.agent_panel.clone();
+                let continued = panel.update(cx, |panel, cx| {
+                    let index = panel.active_thread();
+                    panel.continue_in_new_session(index, cx)
+                });
+                if !continued {
+                    eprintln!("NECODER_HISTORY_PROBE: handoff できない（会話が無い・実行中）");
+                }
+            }
+            "menu" => {
+                let panel = self.agent_panel.clone();
+                let position = point(window.viewport_size().width - px(380.), px(76.));
+                panel.update(cx, |panel, cx| {
+                    let index = panel.active_thread();
+                    panel.debug_open_thread_menu(index, position, cx)
+                });
+            }
+            other => eprintln!("NECODER_HISTORY_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
+    }
+
+    /// 開発用（`NECODER_HISTORY_PROBE=seed`）: いまのプロジェクト・Chat・開いていない Task に見本の会話を
+    /// 書く（全文検索が 3 つの場所を横断することを見せる）。本物の DB を汚さないよう `NECODER_HOME` の時だけ。
+    #[cfg(debug_assertions)]
+    fn debug_seed_history(&self) {
+        if std::env::var_os("NECODER_HOME").is_none() {
+            eprintln!(
+                "NECODER_HISTORY_PROBE=seed: NECODER_HOME が無いので書かない（本物の DB を守る）"
+            );
+            return;
+        }
+        let Some(storage) = self.persistence.storage.as_ref() else {
+            eprintln!("NECODER_HISTORY_PROBE=seed: DB が無い");
+            return;
+        };
+        let Some(scope) = self
+            .active_slot()
+            .map(|slot| slot.task_space.id.as_str().to_string())
+        else {
+            eprintln!("NECODER_HISTORY_PROBE=seed: プロジェクトが無い");
+            return;
+        };
+        let task_scope = "space-probe-rope-index".to_string();
+        let now = agent_panel::now_unix_ms();
+        let task = storage::TaskSpaceRecord {
+            id: task_scope.clone(),
+            repository_id: "probe".into(),
+            root: PathBuf::from("/nonexistent/necoder-probe/rope-index"),
+            branch: Some("task/rope-index".into()),
+            title: "rope index".into(),
+            kind: storage::SpaceKind::Task,
+            phase: storage::TaskPhase::Working,
+            base_oid: None,
+            head_oid: None,
+            result_summary: None,
+            depends_on: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        if let Err(error) = storage.upsert_task_space(&task) {
+            eprintln!("NECODER_HISTORY_PROBE=seed: TaskSpace を書けない: {error:#}");
+        }
+        let threads: [(&str, &str, i64, &str, &[(&str, &str)]); 4] = [
+            (
+                "probe-history-rope",
+                "rope の境界バグ",
+                2,
+                scope.as_str(),
+                &[
+                    ("user", "rope の境界で落ちるバグを直して"),
+                    ("step", "Edit src/rope.rs"),
+                    (
+                        "agent",
+                        "境界値の扱いを直しました。rope の分割で末尾を 1 つ取りこぼしていました。",
+                    ),
+                ],
+            ),
+            (
+                "probe-history-readme",
+                "README の更新",
+                5,
+                scope.as_str(),
+                &[
+                    ("user", "README にインストール手順を足して"),
+                    ("agent", "Homebrew と手動の 2 通りを書きました。"),
+                ],
+            ),
+            (
+                "probe-history-chat",
+                "京都旅行の相談",
+                8,
+                chat_core::STORAGE_SCOPE,
+                &[
+                    ("user", "京都で rope ウェイに乗れる所は？"),
+                    (
+                        "agent",
+                        "叡山ケーブルとロープウェイが比叡山へ続いています。",
+                    ),
+                ],
+            ),
+            (
+                "probe-history-task",
+                "索引の実装",
+                1,
+                task_scope.as_str(),
+                &[
+                    ("user", "Rope に行の索引を足して"),
+                    ("agent", "Rope の行索引を B 木で持つようにしました。"),
+                ],
+            ),
+        ];
+        for (id, name, color, project, turns) in threads {
+            if let Err(error) = storage.upsert_thread(
+                id,
+                name,
+                color,
+                project,
+                None,
+                Some("Claude Code"),
+                None,
+                12_400,
+                200_000,
+            ) {
+                eprintln!("NECODER_HISTORY_PROBE=seed: スレッドを書けない: {error:#}");
+                return;
+            }
+            for (role, content) in turns {
+                if let Err(error) = storage.insert_turn(id, role, content) {
+                    eprintln!("NECODER_HISTORY_PROBE=seed: 発話を書けない: {error:#}");
+                    return;
+                }
+            }
+        }
+        if let Err(error) = storage.archive_thread("probe-history-readme") {
+            eprintln!("NECODER_HISTORY_PROBE=seed: 閉じた印を書けない: {error:#}");
+        }
     }
 
     /// 開発用: プロジェクト切替フラッシュを表示する（`NECODER_FLASH_PROBE` の描画検証）。

@@ -1394,16 +1394,36 @@ fn main() {
                         .detach();
                     }
                 }
-                // 開発用: NECODER_HISTORY_PROBE=1 でスレッド履歴 Picker を開く（2s 後・#5 の描画検証）。
-                if std::env::var("NECODER_HISTORY_PROBE").is_ok_and(|value| value == "1") {
+                // 開発用: NECODER_HISTORY_PROBE="seed;open;query:rope" でスレッド履歴（⌘⇧H・O15）を
+                // 駆動する（2s 後・`;` 区切りで順に実行。`wait:<ms>` はその場で待つ）。`1` = 開くだけ。
+                #[cfg(debug_assertions)]
+                if let Ok(script) = std::env::var("NECODER_HISTORY_PROBE") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {
                         cx.spawn(async move |_workspace, cx| {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_millis(2000))
                                 .await;
-                            let _ = handle.update(cx, |workspace, window, cx| {
-                                workspace.debug_open_history(window, cx);
-                            });
+                            for command in script.split(';').map(str::trim) {
+                                if command.is_empty() {
+                                    continue;
+                                }
+                                if let Some(milliseconds) = command.strip_prefix("wait:") {
+                                    let milliseconds = milliseconds.parse::<u64>().unwrap_or(500);
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(milliseconds))
+                                        .await;
+                                    continue;
+                                }
+                                let command = command.to_string();
+                                if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                    workspace.debug_history_probe(&command, window, cx);
+                                }) {
+                                    eprintln!("NECODER_HISTORY_PROBE: 窓が無い: {error:#}");
+                                }
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(250))
+                                    .await;
+                            }
                         })
                         .detach();
                     }
