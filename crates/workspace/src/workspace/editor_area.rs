@@ -7,6 +7,7 @@ mod hot_exit;
 mod inline_edit;
 mod language;
 mod overlays;
+mod pins;
 mod tabs;
 
 /// 1 ProjectSession の編集面。tab / pane / language / diff / navigation の状態を一括所有する。

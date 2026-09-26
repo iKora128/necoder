@@ -210,6 +210,7 @@ fn restore_window_plan(
                 open_files.push(RestoredTabs {
                     files: saved.open_files,
                     active: saved.active_file,
+                    pinned: saved.pinned_files,
                 });
             }
             Err(error) => eprintln!("前回の Remote SSH 接続を復元できない: {error:#}"),

@@ -92,6 +92,7 @@ impl Workspace {
             path: root.join(REVIEW_TAB_NAME),
             content: TabContent::Review(review),
             transient: true,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();

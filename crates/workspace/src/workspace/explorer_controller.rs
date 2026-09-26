@@ -970,6 +970,7 @@ impl Workspace {
             explorer: ExplorerProject::default(),
             open_files: Vec::new(),
             active_file: 0,
+            pinned_files: Vec::new(),
             icon: identity.icon,
             icon_image: identity.icon_image,
             worktree_branch: branch,
@@ -1485,6 +1486,7 @@ impl Workspace {
             path: path.clone(),
             content,
             transient: false,
+            pinned: false,
         };
         let handle = tab.focus_handle(cx);
         window.focus(&handle, cx);
@@ -1595,6 +1597,7 @@ impl Workspace {
                 _blur_subscription: blur_subscription,
             },
             transient: false,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
 
@@ -1687,6 +1690,7 @@ impl Workspace {
                     open_files: slot.open_files.clone(),
                     active_file: slot.active_file,
                     remote_uri: slot.worktree.host().project_uri(slot.worktree.root()),
+                    pinned_files: slot.pinned_files.clone(),
                 })
                 .collect(),
             active: self.project_sessions.active,

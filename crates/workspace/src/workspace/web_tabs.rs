@@ -220,6 +220,7 @@ impl Workspace {
                 _events: events,
             },
             transient: false,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
         let handle = view.read(cx).focus_handle(cx);
@@ -626,6 +627,7 @@ mod tests {
                     file_b.clone(),
                 ],
                 active: 1,
+                pinned: Vec::new(),
             };
             workspace.restore_open_file(&[restored], window, cx);
             let paths: Vec<PathBuf> = workspace.tabs.iter().map(|tab| tab.path.clone()).collect();

@@ -635,6 +635,7 @@ impl Workspace {
                         .unwrap_or_else(|| i18n::t!("tabs.untitled"))
                 };
                 let dirty = tab.is_dirty(cx);
+                let pinned = tab.pinned;
                 // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
                 let status = self.repository.status.get(&tab.path).copied();
                 let name_color = status
@@ -684,29 +685,60 @@ impl Workspace {
                                     .text_color(name_color)
                                     .child(SharedString::from(name)),
                             )
-                            .child(
-                                div()
-                                    .id(("close-tab", index))
-                                    .flex_none()
-                                    .px(px(3.))
-                                    .rounded(px(4.))
-                                    .text_color(theme.fg2)
-                                    .cursor_pointer()
-                                    .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
-                                    .child("×")
-                                    .tooltip(Tooltip::text(
-                                        i18n::t!("tabs.close_tip"),
-                                        theme.clone(),
-                                    ))
-                                    // × クリックはタブ切替へ伝播させない。
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.close_tab_at(index, window, cx);
-                                        }),
-                                    ),
-                            ),
+                            .when(!pinned, |row| {
+                                row.child(
+                                    div()
+                                        .id(("close-tab", index))
+                                        .flex_none()
+                                        .px(px(3.))
+                                        .rounded(px(4.))
+                                        .text_color(theme.fg2)
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
+                                        .child("×")
+                                        .tooltip(Tooltip::text(
+                                            i18n::t!("tabs.close_tip"),
+                                            theme.clone(),
+                                        ))
+                                        // × クリックはタブ切替へ伝播させない。
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.close_tab_at(index, window, cx);
+                                            }),
+                                        ),
+                                )
+                            })
+                            // ピン留め（O26）: × の代わりにピン。押すと外す。
+                            .when(pinned, |row| {
+                                row.child(
+                                    div()
+                                        .id(("unpin-tab", index))
+                                        .flex_none()
+                                        .p(px(3.))
+                                        .rounded(px(4.))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(theme.bg2))
+                                        .child(
+                                            svg()
+                                                .path("icons/pin.svg")
+                                                .size(px(11.))
+                                                .text_color(theme.fg2),
+                                        )
+                                        .tooltip(Tooltip::text(
+                                            i18n::t!("tabs.unpin_tip"),
+                                            theme.clone(),
+                                        ))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _window, cx| {
+                                                cx.stop_propagation();
+                                                this.toggle_tab_pin(index, cx);
+                                            }),
+                                        ),
+                                )
+                            }),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -935,6 +967,21 @@ impl Workspace {
                 ),
             );
             menu_box = menu_box.child(separator());
+        }
+        // ピン留め / 外す（O26）。一時タブ（diff・変更レビュー）は窓セッションに残らないので出さない。
+        if let Some(tab) = self.tabs.get(index).filter(|tab| !tab.transient) {
+            let label = if tab.pinned {
+                i18n::t!("tabs.ctx_unpin")
+            } else {
+                i18n::t!("tabs.ctx_pin")
+            };
+            menu_box = menu_box.child(item("tab-ctx-pin", label).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.close_tab_menu(cx);
+                    this.toggle_tab_pin(index, cx);
+                }),
+            ));
         }
         menu_box = menu_box.child(
             item("tab-ctx-close", i18n::t!("tabs.ctx_close")).on_mouse_down(

@@ -18,6 +18,8 @@ pub(crate) struct ProjectSlot {
     /// アクティブ session の `EditorArea.tabs` から [`Workspace::sync_active_slot`] で同期する。
     pub(crate) open_files: Vec<PathBuf>,
     pub(crate) active_file: usize,
+    /// ピン留めしたタブのファイル（O26）。`open_files` の先頭側に並ぶ。`sync_active_slot` で同期する。
+    pub(crate) pinned_files: Vec<PathBuf>,
     /// `.necoder/settings.json` の絵文字アイコン（None = 頭文字モノグラム）。
     pub(crate) icon: Option<SharedString>,
     /// 画像アイコン（settings の `icon` 画像パス or 規約 `.necoder/icon.png`）。絵文字より優先。
@@ -592,6 +594,7 @@ impl Workspace {
                         explorer: ExplorerProject::default(),
                         open_files: Vec::new(),
                         active_file: 0,
+                        pinned_files: Vec::new(),
                         icon: identity.icon,
                         icon_image: identity.icon_image,
                         worktree_branch: None,
@@ -1187,6 +1190,7 @@ impl Workspace {
             if let Some(slot) = self.project_sessions.projects.get_mut(index) {
                 slot.open_files = tabs.files.clone();
                 slot.active_file = tabs.active;
+                slot.pinned_files = tabs.pinned.clone();
             }
         }
         self.open_slot_files(window, cx);
@@ -1241,10 +1245,17 @@ impl Workspace {
             .map(|tab| tab.path.clone())
             .collect();
         let active_file = self.active_tab.min(files.len().saturating_sub(1));
+        let pinned: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.pinned && !tab.transient)
+            .map(|tab| tab.path.clone())
+            .collect();
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.open_files = files;
             slot.active_file = active_file;
+            slot.pinned_files = pinned;
         }
     }
 
@@ -1287,6 +1298,7 @@ impl Workspace {
                 _blur_subscription: blur_subscription,
             },
             transient: true,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -1299,8 +1311,14 @@ impl Workspace {
         self.dismiss_buffer_search(cx);
         self.close_hover(cx);
         let rail_had_focus = self.chrome.rail_focus.is_focused(window);
-        let (files, active_file) = match self.active_slot() {
-            Some(slot) => (slot.open_files.clone(), slot.active_file),
+        // ピン留めは開き終えてから戻す（1 枚開くたびに `sync_active_slot` が slot を今のタブ列で
+        // 書き直すので、先に控えておく）。
+        let (files, active_file, pinned) = match self.active_slot() {
+            Some(slot) => (
+                slot.open_files.clone(),
+                slot.active_file,
+                slot.pinned_files.clone(),
+            ),
             None => return,
         };
         let Some(worktree) = self.active_worktree() else {
@@ -1310,7 +1328,7 @@ impl Workspace {
         self.tabs.clear();
         self.active_tab = 0;
         if host.is_remote() {
-            self.open_slot_files_remote(host, files, active_file, window, cx);
+            self.open_slot_files_remote(host, files, active_file, pinned, window, cx);
             return;
         }
         for path in files {
@@ -1323,6 +1341,7 @@ impl Workspace {
         if active_file < self.tabs.len() {
             self.select_tab(active_file, window, cx);
         }
+        self.restore_tab_pins(&pinned);
         self.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
     }
 
@@ -1361,6 +1380,7 @@ impl Workspace {
         host: Arc<dyn Host>,
         files: Vec<PathBuf>,
         active_file: usize,
+        pinned: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1418,6 +1438,7 @@ impl Workspace {
                 if active_file < workspace.tabs.len() {
                     workspace.select_tab(active_file, window, cx);
                 }
+                workspace.restore_tab_pins(&pinned);
                 workspace.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
             });
         })
