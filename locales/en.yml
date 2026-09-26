@@ -382,6 +382,7 @@ quit_confirm:
   detail_quit_minimize: Quitting stops all of this. Minimize instead and it keeps running.
   detail_close_hide: Closing this window stops all of this. Hide necoder instead and it keeps running; click the Dock icon to come back.
   detail_close_minimize: Closing this window stops all of this. Minimize instead and it keeps running.
+  detail_close_window: Closing this window stops what runs in it. Minimize this window instead and it keeps running; your other windows stay as they are.
   keep_running_hide: Hide and keep running
   keep_running_minimize: Minimize and keep running
   quit: Quit

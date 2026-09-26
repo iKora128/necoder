@@ -31,10 +31,10 @@ pub mod snapshot;
 
 use futures::channel::mpsc;
 use futures::StreamExt as _;
-use gpui::{
-    canvas, div, prelude::*, px, App, Bounds, Context, EventEmitter, IntoElement, Pixels, Task,
-    Window,
-};
+use gpui::{canvas, div, prelude::*, px, App, Context, EventEmitter, IntoElement, Task, Window};
+// ネイティブ子ビューを置く OS（mac / Windows）だけが使う。Linux で未使用の警告を出さない。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use gpui::{Bounds, Pixels};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use theme_core::Theme;
@@ -105,6 +105,7 @@ pub fn disable_native_webviews_for_tests() {
     NATIVE_DISABLED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn native_disabled() -> bool {
     NATIVE_DISABLED.load(std::sync::atomic::Ordering::SeqCst)
 }

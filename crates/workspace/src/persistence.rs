@@ -284,8 +284,8 @@ fn lock_mailbox(mailbox: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Op
 
 /// 窓を閉じるときのフックを登録する（窓を開いた直後に呼ぶ）。OS の閉じるボタン / ⌘⇧W が通る経路。
 ///
-/// 1. **最後の窓で、エージェントや端末が動いていれば閉じずに確認を出す**（O4・
-///    `intercept_last_window_close`）。GPUI の should-close は窓に 1 つしか持てないので、
+/// 1. **この窓でエージェントや端末が動いていれば閉じずに確認を出す**（O4・R04・
+///    `intercept_window_close`）。GPUI の should-close は窓に 1 つしか持てないので、
 ///    永続化しない窓（offscreen 撮影）でもこのフック自体は必ず入れる。
 /// 2. 閉じるなら DB の自分の行へ閉じ印を付ける。⌘Q による窓の破棄では付けない（[`mark_quitting`]）。
 ///
@@ -300,7 +300,7 @@ pub fn install_window_close_hook(window: &Window, cx: &App, persistence: &Window
         if is_quitting() {
             return true;
         }
-        if crate::workspace::intercept_last_window_close(window, cx) {
+        if crate::workspace::intercept_window_close(window, cx) {
             return false;
         }
         // ここで Workspace の書き手を触りに行くことはできない（この窓は今まさに update 中で、

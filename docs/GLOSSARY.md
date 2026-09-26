@@ -79,8 +79,8 @@
 | **OS の通知**（通知センター。その窓を見ていない時だけ・スレッドごとに 1 件） | `system_notifications` / `post_agent_notification` / 設定 `system_notifications` | OS の通知 | System notifications |
 | **Dock バッジ**（要対応の件数・全窓の合計・macOS） | `dock_badge` | — | — |
 | **質問待ち**（エージェントが選択肢付きで聞いてきて止まっている。状態は承認待ちと同じ Blocked） | `PanelEvent::QuestionWaiting` / `AttentionKind::Question` | 質問待ち | Waiting for an answer |
-| **終了の確認**（⌘Q・最後の窓を閉じる時。動いているエージェント・ターミナルがある時だけ） | `quit_guard` / `QuitConfirmState`（設定 `confirm_quit`） | 終了時の確認 | Confirm before quitting |
-| ↳ **隠して動かし続ける**（既定。mac はアプリを隠す・他 OS は最小化。プロセスは止めない） | `QuitChoice::KeepRunning` | 隠して動かし続ける / 最小化して動かし続ける | Hide and keep running / Minimize and keep running |
+| **終了の確認**（⌘Q・窓を閉じる時。動いているエージェント・ターミナルがある時だけ。窓を閉じる時はその窓の分だけ数える） | `quit_guard` / `QuitConfirmState`（設定 `confirm_quit`） | 終了時の確認 | Confirm before quitting |
+| ↳ **隠して動かし続ける**（既定。mac はアプリを隠す・他 OS は最小化。ほかの窓が残る時はその窓だけを最小化。プロセスは止めないが、終了・クラッシュを越えては続かない） | `QuitChoice::KeepRunning` | 隠して動かし続ける / 最小化して動かし続ける | Hide and keep running / Minimize and keep running |
 | **AI 全画面**（solo で中央エディタを Agent に差し替える。左/下ドックは各自の ON/OFF） | `agent_full_screen` / `ToggleAgentFullScreen` | AI を全画面 | AI full screen |
 | **「最新へ」ボタン**（transcript を遡り中だけ右下に出る・最下部へ戻す） | `render_jump_to_latest` | 最新へ | Jump to latest |
 | **プレビュー**（`.md` のネイティブ整形表示 / `.html` のOS標準WebView表示。source ⇄ preview・⌘⇧V。開発サーバを見るのは別のタブ＝下の Web タブ） | `rendered_markdown` / `rendered_html` / `ToggleRenderedMarkdown` / `markdown_preview` / `webview_view` | プレビュー | Preview |
