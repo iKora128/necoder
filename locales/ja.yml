@@ -1441,6 +1441,7 @@ key:
   close_active_thread: アクティブスレッドを閉じる
   command_palette: コマンドパレット
   control_next: "管制: 次の要対応へ"
+  cleanup_task: "Task: 選んだ Task を片付ける…"
   minimize: ウィンドウを最小化
   hide: necoder を隠す
   hide_others: 他のアプリを隠す

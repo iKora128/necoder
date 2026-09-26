@@ -417,6 +417,7 @@ Node 系は pnpm のストア共有で同型（`pnpm install --prefer-offline`�
 | ⌘⇧U | 次の要対応へ |
 | ⌘⇧1 / 2 / 3 | 舞台 1 枚 / 2 列 / 3 列 |
 | ⌘⇧G | 系譜の帯を畳む / 展開 |
+| ⌘⌫ / delete（サイドバー） | 選んだ Task（無ければ前面の Task・⌂ は対象外）に印を付けて片付けの画面を開く（O21・A26。消すのは画面で確かめてから。Windows は ⌘⌫ が ctrl-shift-backspace に置き換わるので Delete が本線） |
 | esc（composer） | 実行中ターンの中断（既存） |
 
 ## 8. i18n キー（`fleet.*` / `captain.*`・ja/en 両方必須）

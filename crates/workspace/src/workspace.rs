@@ -238,6 +238,8 @@ actions!(
         ShowResources,
         // 片付け（いまのリポジトリの Task をまとめて終了 / worktree を削除・O22）。
         ShowCleanup,
+        // Fleet サイドバーの ⌘⌫ / Delete: 選んだ Task（無ければ前面の Task）に印を付けて片付けを開く（O21・A26）。
+        CleanupTask,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
         Hide,
         HideOthers,
@@ -2410,6 +2412,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_inbox))
             .on_action(cx.listener(Self::show_resources))
             .on_action(cx.listener(Self::show_cleanup))
+            .on_action(cx.listener(Self::cleanup_task_action))
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
