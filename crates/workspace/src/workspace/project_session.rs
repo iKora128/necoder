@@ -841,6 +841,7 @@ impl Workspace {
                 hide_external_worktrees: false,
                 fleet_filter,
                 fleet_filter_query: String::new(),
+                fleet_sort: Default::default(),
                 adopt_as_task: std::collections::HashSet::new(),
                 pending_task_prompts: HashMap::new(),
                 pending_task_agents: HashMap::new(),

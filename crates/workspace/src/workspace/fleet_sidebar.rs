@@ -26,6 +26,49 @@ struct TaskRow {
     tokens: u32,
     /// レール上の並び（`⌘N` = `ActivateProjectN` と一致させる。行の並び順ではない＝嘘をつかない）。
     rail_shortcut: Option<usize>,
+    /// いちばん最近の依頼の時刻（並べ替え「最近」の鍵・O21）。
+    last_input_at_ms: Option<i64>,
+}
+
+/// Task 行の並べ方（O21）。既定はレールの順。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FleetSort {
+    #[default]
+    Rail,
+    /// いちばん最近頼んだ Task から。
+    Recent,
+    /// 要対応（承認・質問待ち）→ 作業中 → 完了・未確認 → 静か の順。
+    Attention,
+}
+
+impl FleetSort {
+    /// 押すたびに次へ（レール → 最近 → 要対応 → レール）。
+    fn next(self) -> Self {
+        match self {
+            FleetSort::Rail => FleetSort::Recent,
+            FleetSort::Recent => FleetSort::Attention,
+            FleetSort::Attention => FleetSort::Rail,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            FleetSort::Rail => i18n::t!("fleet.sort_rail"),
+            FleetSort::Recent => i18n::t!("fleet.sort_recent"),
+            FleetSort::Attention => i18n::t!("fleet.sort_attention"),
+        }
+    }
+}
+
+/// Task 行を並べ替える（同じ鍵の間はレールの順を保つ）。
+fn sort_task_rows(rows: &mut [TaskRow], sort: FleetSort) {
+    match sort {
+        FleetSort::Rail => {}
+        FleetSort::Recent => {
+            rows.sort_by_key(|row| std::cmp::Reverse(row.last_input_at_ms.unwrap_or(i64::MIN)))
+        }
+        FleetSort::Attention => rows.sort_by_key(|row| std::cmp::Reverse(row.activity.urgency())),
+    }
 }
 
 /// Task がこの数以上ある時に絞り込み欄を出す（少ない時は一覧を見れば足りる・O21）。
@@ -462,13 +505,17 @@ impl Workspace {
                     .sum(),
                 // レールの並び = ⌘1..9（`ActivateProjectN`）。10 本目以降は出さない。
                 rail_shortcut: (index < 9).then_some(index + 1),
+                last_input_at_ms: statuses
+                    .iter()
+                    .filter_map(|(_, _, status)| status.last_input_at_ms)
+                    .max(),
             });
         }
         (integration, rows, integrated_today)
     }
 
     /// Task の絞り込み欄（O21）。`⌕` + 1 行入力（placeholder「Task を絞り込む」）。
-    fn render_fleet_filter(&self, filtering: bool) -> gpui::AnyElement {
+    fn render_fleet_filter(&self, filtering: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         div()
             .mx(px(8.))
@@ -508,6 +555,25 @@ impl Workspace {
                         },
                     ),
             )
+            // 並べ方（O21）: 押すたびに レール → 最近 → 要対応。
+            .child(
+                div()
+                    .id("fleet-sort")
+                    .flex_none()
+                    .text_size(px(10.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg0))
+                    .child(SharedString::from(self.chrome.fleet_sort.label()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.chrome.fleet_sort = this.chrome.fleet_sort.next();
+                            cx.notify();
+                        }),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -520,10 +586,11 @@ impl Workspace {
         let total_tasks = rows.len();
         let filtering = !self.chrome.fleet_filter_query.trim().is_empty();
         let show_filter = filtering || total_tasks >= FLEET_FILTER_MIN_TASKS;
-        let rows: Vec<TaskRow> = rows
+        let mut rows: Vec<TaskRow> = rows
             .into_iter()
             .filter(|row| task_row_matches(row, &self.chrome.fleet_filter_query))
             .collect();
+        sort_task_rows(&mut rows, self.chrome.fleet_sort);
 
         let mut list = div()
             .id("fleet-task-list")
@@ -645,7 +712,7 @@ impl Workspace {
 
         // Task の絞り込み欄（O21）: Task が多い時か、書いてある間だけ。
         if show_filter {
-            list = list.child(self.render_fleet_filter(filtering));
+            list = list.child(self.render_fleet_filter(filtering, cx));
             if filtering && rows.is_empty() {
                 list = list.child(
                     div()
@@ -1292,7 +1359,43 @@ mod tests {
             digest: digest.map(|text| SharedString::from(text.to_string())),
             tokens: 0,
             rail_shortcut: None,
+            last_input_at_ms: None,
         }
+    }
+
+    /// Task の並べ方（O21）: 最近 = 依頼の新しい順（無い物は後ろ）・要対応 = 待ち → 作業中 → 静か。
+    /// 同じ鍵の間はレールの順のまま。
+    #[test]
+    fn task_rows_sort_by_recent_or_attention() {
+        use agent_panel::ThreadActivity;
+        let row = |title: &str, at: Option<i64>, activity: ThreadActivity| {
+            let mut row = task_row(title, "b", None, None);
+            row.last_input_at_ms = at;
+            row.activity = activity;
+            row
+        };
+        let rows = || {
+            vec![
+                row("a", Some(10), ThreadActivity::Idle),
+                row("b", None, ThreadActivity::Blocked),
+                row("c", Some(30), ThreadActivity::Working),
+                row("d", Some(20), ThreadActivity::Blocked),
+            ]
+        };
+        let titles = |rows: &[TaskRow]| {
+            rows.iter()
+                .map(|row| row.title.to_string())
+                .collect::<Vec<_>>()
+        };
+        let mut sorted = rows();
+        sort_task_rows(&mut sorted, FleetSort::Rail);
+        assert_eq!(titles(&sorted), ["a", "b", "c", "d"]);
+        sort_task_rows(&mut sorted, FleetSort::Recent);
+        assert_eq!(titles(&sorted), ["c", "d", "a", "b"]);
+        let mut sorted = rows();
+        sort_task_rows(&mut sorted, FleetSort::Attention);
+        assert_eq!(titles(&sorted), ["b", "d", "c", "a"]);
+        assert_eq!(FleetSort::Attention.next(), FleetSort::Rail);
     }
 
     /// Task の絞り込み（O21）: 名前・ブランチ・頼んだこと・いま何を のどれかに全部の語が要る。
