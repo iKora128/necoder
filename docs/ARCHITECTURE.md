@@ -39,7 +39,7 @@
 | `acp_client` / `agent_panel` | ACP セッション・transcript・composer | crates.io `agent-client-protocol` と necoder 固有 UI の独立実装 | M4 |
 | `lang` | tree-sitter ハイライト・LSP クライアント | 公開 LSP 仕様と tree-sitter crates 上の独立実装 | M7 |
 | `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | `imara-diff` / crates.io `alacritty_terminal` 上の独立実装 | M8 |
-| `webview_view` | ローカル HTML プレビュー | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱） | M14 |
+| `webview_view` | ローカル HTML プレビュー / artifact の隔離表示 / localhost の Web タブ | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱）。Web タブの移動判定を最上位だけに掛けるため、macOS は wry の navigation delegate を包む（`main_frame.rs`・objc2） | M14 |
 | `graph_view` | worktree×commit の DAG・custom Element | Git CLI の出力を使う独立実装 | M14 |
 
 Zed のソースは GPUI API の利用例や設計比較のために閲覧しているため、本プロジェクトを厳密な意味での
@@ -83,8 +83,10 @@ impl Buffer {
   具体型 `EditorTab { path, editor: Entity<EditorView>, _observation }` の `Vec` + `active_tab: usize` で始める
   （ペインは当面「主ペイン = 複数タブ」+「右分割 = 単一比較ビュー」）。多態化（画像/diff/設定 UI を同格に）が
   必要になった時点で `enum PaneItem { Editor(..), Diff(..), .. }` → `trait TabItem` へ育てる（multibuffer 本体は later）。
-  **現在地（2026-09-11）**: `enum TabContent { Editor, Image, Pdf }` の 3 具体型。Image / Pdf は「編集も保存も
+  **現在地（2026-09-26）**: `enum TabContent { Editor, Image, Pdf, Web }` の 4 具体型。Image / Pdf / Web は「編集も保存も
   LSP もしない表示専用タブ」で、trait 化はこの性質を持たない Item（diff / 設定 UI）が要求した時点で再検討する。
+  Web（localhost の開発サーバ・`web_preview_view`）は鍵（`EditorTab.path`）に URL をそのまま入れる — ファイルの鍵は
+  絶対パスなので衝突せず、窓セッションの `open_files` の形も変えずに永続化できる（`web_tab_url` が見分ける）。
   Pdf は自前レンダラを持たず、`webview_view`（HTML プレビュー用のネイティブ子ビュー層）に `file://` を渡して
   OS のビューア（macOS = WKWebView の PDFKit / Windows = WebView2）に描かせる。ネイティブ子ビューは GPUI の
   描画木を外れても OS 側に残るため、`Workspace::sync_native_view_visibility` が毎 render で可視性と
