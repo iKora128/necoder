@@ -278,8 +278,58 @@ fn sort_entries(entries: &mut [Entry]) {
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| natural_name_cmp(&a.name, &b.name))
     });
+}
+
+/// 名前の自然順（D16）。数字の並びは数として比べ（`file2` < `file10`・`9` < `99` < `100`）、
+/// 文字は大文字小文字を無視して比べる。数が同じなら先頭の 0 が少ない方を先に、最後は元の綴りで
+/// 決める（読み直すたびに並びが揺れないよう全順序にする）。
+pub fn natural_name_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let (mut left_rest, mut right_rest) = (left, right);
+    while let (Some(left_char), Some(right_char)) =
+        (left_rest.chars().next(), right_rest.chars().next())
+    {
+        if left_char.is_ascii_digit() && right_char.is_ascii_digit() {
+            let left_end = digit_run_end(left_rest);
+            let right_end = digit_run_end(right_rest);
+            let ordering = compare_digit_runs(&left_rest[..left_end], &right_rest[..right_end]);
+            if ordering.is_ne() {
+                return ordering;
+            }
+            left_rest = &left_rest[left_end..];
+            right_rest = &right_rest[right_end..];
+            continue;
+        }
+        let ordering = left_char.to_lowercase().cmp(right_char.to_lowercase());
+        if ordering.is_ne() {
+            return ordering;
+        }
+        left_rest = &left_rest[left_char.len_utf8()..];
+        right_rest = &right_rest[right_char.len_utf8()..];
+    }
+    // 片方が尽きた = 短い方が先。両方尽きたら元の綴りで決める。
+    left_rest
+        .len()
+        .cmp(&right_rest.len())
+        .then_with(|| left.cmp(right))
+}
+
+/// 先頭から続く ASCII 数字の終わり（byte 位置）。
+fn digit_run_end(text: &str) -> usize {
+    text.find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(text.len())
+}
+
+/// 数字の並び同士を数として比べる（桁数に上限なし＝u64 に収まらない並びでも比べられる）。
+fn compare_digit_runs(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_digits = left.trim_start_matches('0');
+    let right_digits = right.trim_start_matches('0');
+    left_digits
+        .len()
+        .cmp(&right_digits.len())
+        .then_with(|| left_digits.cmp(right_digits))
+        .then_with(|| left.len().cmp(&right.len()))
 }
 
 /// ディレクトリ → 直下の一覧。エクスプローラが描画に使うキャッシュの形。
@@ -2426,6 +2476,70 @@ mod tests {
         assert!(
             !relatives.iter().any(|r| r.contains("target")),
             "gitignore の target を除外"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn natural_order_compares_numbers_by_value() {
+        let mut names = vec![
+            "file10.rs",
+            "file2.rs",
+            "File1.rs",
+            "100",
+            "99",
+            "9",
+            "a",
+            "a01",
+            "a1",
+            "b",
+        ];
+        names.sort_by(|left, right| natural_name_cmp(left, right));
+        assert_eq!(
+            names,
+            vec![
+                "9",
+                "99",
+                "100",
+                "a",
+                "a1",
+                "a01",
+                "b",
+                "File1.rs",
+                "file2.rs",
+                "file10.rs"
+            ]
+        );
+        // 大文字小文字だけが違う名前も順序が決まる（読み直しで揺れない）。
+        assert_eq!(
+            natural_name_cmp("README", "readme"),
+            std::cmp::Ordering::Less
+        );
+        // u64 に収まらない桁でも比べられる。
+        assert_eq!(
+            natural_name_cmp("v99999999999999999999", "v100000000000000000000"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn tree_lists_folders_first_in_natural_order() {
+        let root = scratch("natural");
+        std::fs::create_dir_all(root.join("dir10")).unwrap();
+        std::fs::create_dir_all(root.join("dir9")).unwrap();
+        for name in ["file10.rs", "file2.rs", "file1.rs"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        let worktree = Worktree::new(&root).unwrap();
+        let names: Vec<String> = worktree
+            .read_root()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["dir9", "dir10", "file1.rs", "file2.rs", "file10.rs"]
         );
         let _ = std::fs::remove_dir_all(&root);
     }
