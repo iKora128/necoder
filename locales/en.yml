@@ -644,6 +644,30 @@ review:
   reviewed_tip: Mark as viewed and collapse (click again to unmark)
   renamed_from: "← %{path}"
   no_newline: No newline at end of file
+  add_note_tip: Add a note (or select lines and press c)
+  note_unsent: Unsent
+  note_sent: Sent
+  note_resolved: Resolved
+  note_edit: Edit
+  note_resolve: Resolve
+  note_reopen: Reopen
+  note_delete: Delete
+  note_new: Note
+  note_editing: Edit note
+  draft_hint: "%{save} to save · Esc to cancel"
+  draft_save: Save
+  draft_cancel: Cancel
+  tray_summary: "%{count} notes (%{unsent} unsent)"
+  send: Send
+  resend: Resend unresolved
+  send_to: "Send to (%{count} notes as one message)"
+  send_new_thread: + Send in a new thread
+  send_default: Default
+  send_empty: No threads to send to
+  sent_toast: "Sent %{count} notes to %{thread}"
+  send_failed: Couldn't send (thread not found)
+  prompt_header: "Review comments (%{count}) — compared: %{base}..working tree"
+  prompt_old_side: "%{location} (removed lines, base-side line numbers)"
 difftab:
   proposal_title: "%{title} ⇄ proposal"
 update:

@@ -645,6 +645,30 @@ review:
   reviewed_tip: 見た印を付けて畳む（もう一度押すと外して開く）
   renamed_from: "← %{path}"
   no_newline: 末尾に改行なし
+  add_note_tip: 注記を付ける（行を選んで c でも）
+  note_unsent: 未送信
+  note_sent: 送信済み
+  note_resolved: 解決
+  note_edit: 編集
+  note_resolve: 解決
+  note_reopen: 未解決に戻す
+  note_delete: 削除
+  note_new: 注記
+  note_editing: 注記を直す
+  draft_hint: "%{save} で保存 · Esc で取り消し"
+  draft_save: 保存
+  draft_cancel: 取り消し
+  tray_summary: "注記 %{count} 件（未送信 %{unsent}）"
+  send: 送る
+  resend: 未解決だけ再送
+  send_to: "送り先（%{count} 件を 1 通にまとめて）"
+  send_new_thread: ＋ 新しいスレッドで送る
+  send_default: 既定
+  send_empty: 送れるスレッドがありません
+  sent_toast: "注記 %{count} 件を %{thread} へ送りました"
+  send_failed: 送れませんでした（スレッドが見つかりません）
+  prompt_header: "レビューコメント（%{count} 件）— 比較: %{base}..作業ツリー"
+  prompt_old_side: "%{location}（削除された行・比較元の行番号）"
 difftab:
   proposal_title: "%{title} ⇄ 提案"
 update:
