@@ -33,6 +33,7 @@ pub use rows::{
 };
 pub use syntax::{highlight_text, split_highlights, FileSyntax, HighlightedText};
 
+use annotations::NoteWrite;
 use editor_view::EditorView;
 use gpui::{
     div, list, prelude::*, px, App, Context, Entity, EntityId, EventEmitter, FocusHandle,
@@ -216,6 +217,13 @@ pub struct ReviewView {
     /// 下端のトレイの一覧を開いているか。
     tray_open: bool,
     send_menu: Option<SendMenu>,
+    /// 注記の書き込みを順に流す列（R03・初めて書く時に作る）。書き込みごとに別の背景タスクへ
+    /// 投げると、DB に届く順が入れ替わり、古い本文への巻き戻りや消した注記の復活が起きうる。
+    note_writes: Option<futures::channel::mpsc::UnboundedSender<NoteWrite>>,
+    /// 保存できなかった書き込み（トレイに出して再試行できる。本文はここに残る）。
+    failed_note_writes: Vec<NoteWrite>,
+    /// このビューで消した注記の id（再試行で消した注記を書き戻さない）。
+    deleted_note_ids: HashSet<String>,
 }
 
 impl EventEmitter<ReviewEvent> for ReviewView {}
@@ -258,6 +266,9 @@ impl ReviewView {
             draft: None,
             tray_open: false,
             send_menu: None,
+            note_writes: None,
+            failed_note_writes: Vec::new(),
+            deleted_note_ids: HashSet::new(),
         }
     }
 
@@ -2101,6 +2112,126 @@ mod tests {
             view.delete_note(0, cx);
             assert_eq!(view.note_counts(), (0, 0));
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R03: 編集 → 解決 → 削除を続けて積んでも、DB に届く順は積んだ順（消した注記が復活しない）。
+    /// 背景タスクの実行順はシードごとに変わるので、何通りも回す。
+    #[gpui::test(iterations = 20)]
+    fn note_writes_reach_the_db_in_the_order_they_were_made(cx: &mut gpui::TestAppContext) {
+        // 回ごとに別の DB（同じプロセスで 20 回回る）。
+        static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "necoder_review_note_order_{}_{}",
+            std::process::id(),
+            RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("notes.db")).expect("DB を開ける");
+        let view = cx.new(|cx| ReviewView::new(Theme::dark(), cx));
+        let context = ReviewContext {
+            host: host::LocalHost::shared(),
+            root: dir.clone(),
+            task_base: None,
+            accent: Theme::dark().fg1,
+            storage: Some(storage.clone()),
+            scope: "order".into(),
+        };
+        view.update(cx, |view, cx| {
+            view.set_context(context, cx);
+            let note = ReviewNote {
+                id: "note-1".into(),
+                target: NoteTarget::DiffLines(DiffLinesTarget {
+                    path: "a.rs".into(),
+                    side: NoteSide::New,
+                    start: 5,
+                    end: 5,
+                    base: "abc".into(),
+                    excerpt: Vec::new(),
+                }),
+                body: "最初の本文".into(),
+                state: ReviewNoteState::Unsent,
+                sent_at: None,
+                created_at: 1,
+                updated_at: 1,
+            };
+            view.persist_note(&note, cx);
+            view.notes.push(note);
+            view.notes[0].body = "直した本文".into();
+            view.notes[0].updated_at = 2;
+            let edited = view.notes[0].clone();
+            view.persist_note(&edited, cx);
+            view.toggle_resolved(0, cx);
+            view.delete_note(0, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            storage.load_review_notes("order").unwrap().is_empty(),
+            "消した注記は、前の書き込みが後から届いても復活しない"
+        );
+        assert!(
+            view.read_with(cx, |view, _| view.notes.is_empty()),
+            "読み込みの結果からも復活しない"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.failed_note_write_count()),
+            0
+        );
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R03: 保存できなかった書き込みはトレイに残り、再試行で書き直せる（本文を失わない）。
+    /// 消した注記の失敗した書き込みは、再試行で書き戻さない。
+    #[gpui::test]
+    fn failed_note_writes_can_be_retried(cx: &mut gpui::TestAppContext) {
+        use storage::ReviewNoteRecord;
+        let dir =
+            std::env::temp_dir().join(format!("necoder_review_note_retry_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("notes.db")).expect("DB を開ける");
+        let view = cx.new(|cx| ReviewView::new(Theme::dark(), cx));
+        let record = |id: &str, body: &str| ReviewNoteRecord {
+            id: id.into(),
+            scope: "retry".into(),
+            target_kind: "diff_lines".into(),
+            target: "{}".into(),
+            body: body.into(),
+            state: ReviewNoteState::Unsent,
+            sent_at: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        view.update(cx, |view, cx| {
+            view.set_context(
+                ReviewContext {
+                    host: host::LocalHost::shared(),
+                    root: dir.clone(),
+                    task_base: None,
+                    accent: Theme::dark().fg1,
+                    storage: Some(storage.clone()),
+                    scope: "retry".into(),
+                },
+                cx,
+            );
+            // 2 件の保存が失敗した（DB が一時的に書けなかった）ことにする。
+            view.note_write_failed(NoteWrite::Upsert(record("kept", "残す本文")), cx);
+            view.note_write_failed(NoteWrite::Upsert(record("gone", "消す本文")), cx);
+            assert_eq!(view.failed_note_write_count(), 2);
+            // 片方はその後で消した（ビューの一覧に無い注記の id を消した扱いにする）。
+            view.deleted_note_ids.insert("gone".into());
+            view.failed_note_writes
+                .retain(|write| write.note_id() != "gone");
+            view.retry_note_writes(cx);
+            assert_eq!(view.failed_note_write_count(), 0);
+        });
+        cx.run_until_parked();
+        let saved = storage.load_review_notes("retry").unwrap();
+        assert_eq!(saved.len(), 1, "{saved:?}");
+        assert_eq!(saved[0].body, "残す本文");
+        drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
