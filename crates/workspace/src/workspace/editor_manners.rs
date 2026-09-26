@@ -446,8 +446,10 @@ mod tests {
     fn selected_lines_are_quoted_in_the_thread_input(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!("necoder_quote_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let project = root.join("project");
-        std::fs::create_dir_all(project.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("project/docs")).unwrap();
+        // 最初から正規化した綴りで扱う（macOS の temp_dir は /var → /private/var のリンクで、レールの
+        // ルートは開いた時に正規化される。/var の綴りで開いたファイルはプロジェクト相対にならない）。
+        let project = paths::canonicalize(&root.join("project")).unwrap();
         let plan = project.join("docs/PLAN.md");
         std::fs::write(&plan, "# 計画\n## 手順\n1. 作る\n2. 試す\n").unwrap();
         let settings_path = root.join("settings.json");
