@@ -43,6 +43,9 @@
 | **IntegrationSpace**（保護された統合先） | `SpaceKind::Integration`（P0 で phase から分離） | Integration | Integration |
 | **thread**（Task 内の会話 / AgentRun 1 本） | `Thread` | スレッド | Thread |
 | **agent**（話す相手の AI） | `AgentKind` / `agent` | エージェント | Agent |
+| ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
+| ↳ **会話名**（エージェントが付けたスレッドの題名。手動改名が優先） | `AgentEvent::TitleChanged`（ACP `session_info_update.title`）/ 手動の印 `thread_custom_names` | （スレッド名） | (thread name) |
+| ↳ **目標**（`/goal` でエージェントが追う目的。composer の上に 1 行） | `acp_client::AgentGoal` / `AgentEvent::GoalChanged` / `Thread.goal` | 目標 | Goal |
 | **遷移スナップショット**（状態遷移時の 1 行） | `digest` / `digest_tail` / `Thread.digest` | （文そのもの・ラベル無し） | （no label） |
 | **要対応**（Fleet サイドバー最上段・裁く列。← 管制の要対応キュー） | `AttentionItem` / `attention_queue` | 要対応 | Attention |
 | **統合パイプライン**（TaskPhase 列の帯） | `render_pipeline` | 統合パイプライン | Integration pipeline |

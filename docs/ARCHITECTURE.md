@@ -343,6 +343,9 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   「再接続」チップを出す。**SSH セッションに乗るプロセス（ACP/LSP/PTY）は自動再接続の外**: ssh の子が
   落ちると stdout が EOF になり、そのプロセスは消える。ACP は `acp_client` が EOF（`is_incoming_transport_closed` /
   待機中は `incoming_closed`）を見てセッションを畳み（`AgentEvent::SessionLost`）、次の送信で立ち上げ直す。
+  待機中（ターンとターンの間）も `session/update` を読み、ターン中と同じ `handle_session_message` で捌く
+  （コマンド一覧は `session/new` 直後、会話名はターン終了の数秒後に届く。読まずにいると次の prompt まで
+  UI に出ない・O2）。`session/load` の再生は本文を捨て、状態（コマンド一覧・会話名・目標）だけ流す。
   会話は `session/load`（エージェントが `loadSession` を広告するとき・id は `storage.thread_sessions`）で引き継ぐ。
   LSP/PTY の同種の再 spawn は未着手（ROADMAP M9 残件）。
 - SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。
