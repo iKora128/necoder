@@ -3307,7 +3307,8 @@
   （`MergeConflicts`・O19 / E15）・**UI とコードの書体**（`ui_font_family` / `code_font_family`・直書き 30 か所を
   `ui::ui_font` / `ui::code_font` に・O27）・**CSV / TSV の表**（⌘⇧V・O29）・**Quick Commands**（`quick_commands`・
   ターミナルの ▶・O25）・**sparse checkout**（`task_sparse`・O20）・**リモートのダウンロード / アップロード**
-  （Finder からエクスプローラへ落とす / 右クリック・`project::transfer`・O37 / G09）。
+  （Finder からエクスプローラへ落とす / 右クリック・`project::transfer`・O37 / G09）・**SSH が繋がらない理由の案内**
+  （`host::SshFailure`・パスフレーズの問いに `ssh-add` の案内・O37 / G02 / G04）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3342,6 +3343,14 @@
     偽る wrapper（`workspace::tests::RenderAuditHost`）で手元のフォルダを「接続先」にしてテストできる。
     gpui の保存ダイアログは `cx.simulate_new_path_selection` で答えられる。
   - `Path::join("")` は末尾に区切りを足す（`/a/b/`）。空の相対パス = 根そのものは別に扱う。
+  - **`ssh -M -N -f` の stderr はパイプで読めない**: `-f` で背景に回った master がパイプの書き口を握り続け、
+    `output()` が master の終わりまで返らない。理由を読みたい時は `-E <ファイル>` でログへ書かせ、親の終わりを
+    待ってから読む（`-E` は追記なので試行の前に消す）。以前は stderr を継いでいたので、失敗のトーストは
+    `exit status: 255` しか言えなかった。
+  - relay の Remote control（WebKit）は、カメラの 2 本に加えて本体の `PWA: …` の 17 行目も落ちたり通ったりする。
+    `test/fixture.mjs` の transcript と送信の数を chromium と webkit が共有するので、2 番目の webkit では
+    前の回の同じ文で `toContainText` が先に通り、数を見る時に送信がまだ届いていない。#30 のコメントに
+    本文を project ごとに変えて `expect.poll` で待つ案を書いた（この PR には入れていない）。
 - 検証: Linux の `cargo check --workspace --all-targets`（`-D warnings`）と Windows 向けの同じ check は警告 0。
   `cargo test --workspace` 845 通過・落ちるのは Linux で元から落ちる 2 件だけ。#30 の CI は 243152f で CLA 以外すべて緑。
 - 次: 実機（mac）で作成中の行・ターミナルの文字の大きさ（行と列の測り直し）・複数選択の帯・書体の差し替え

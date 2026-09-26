@@ -1142,9 +1142,21 @@ ssh:
   reconnect_now: 再接続
   connect_now: 接続
   reconnecting: "%{host} へ再接続中…"
+  connect_failed: "%{host} に接続できません"
+  failure_details: SSH の接続ログ
+  hint_host_key_unknown: "ホストの指紋を確かめられませんでした。初めてのホストなら、出てくる確認で指紋を確かめて yes と入力してください（ターミナルで一度 ssh %{host} しても同じです）"
+  hint_host_key_changed: "%{host} の鍵が前と変わっています（作り直した・なりすましの恐れ）。作り直したと分かっている時だけ、ターミナルで ssh-keygen -R %{host} を実行してから開き直してください"
+  hint_authentication: "鍵かパスワードが通りませんでした。鍵を ssh-agent に入れる（macOS は ssh-add --apple-use-keychain ~/.ssh/id_ed25519 でパスフレーズを Keychain に）か、~/.ssh/config の IdentityFile と、サーバの authorized_keys を確かめてください"
+  hint_too_many_keys: "鍵を試しすぎて断られました。~/.ssh/config の Host %{host} に IdentityFile と IdentitiesOnly yes を書いて、使う鍵を 1 つにしてください"
+  hint_unknown_host: "%{host} という名前が見つかりません。綴りと ~/.ssh/config の HostName、VPN を確かめてください"
+  hint_refused: "接続を断られました。サーバで sshd が動いているかと、ポート（~/.ssh/config の Port）を確かめてください"
+  hint_timed_out: "応答がありません。ネットワーク・VPN・ファイアウォールと、ホスト名・ポートを確かめてください"
+  hint_bad_permissions: "~/.ssh の権限が広すぎて OpenSSH が読みません。chmod 700 ~/.ssh と chmod 600 ~/.ssh/config（鍵も 600）にしてください"
+  hint_negotiation: "サーバと暗号の方式が合いません（古い sshd）。~/.ssh/config の Host %{host} に、サーバが示した方式（KexAlgorithms / HostKeyAlgorithms）を足してください"
 askpass:
   hint: Enter で送信・Escape で取り消し（入力内容は保存されません）
   hint_click: 入力欄をクリックしてから入力してください
+  passphrase_tip: "毎回訊かれないようにするには、ターミナルで %{command} を一度実行してください（鍵を ssh-agent に預けます）"
   retry: "入力が拒否されました（%{attempt} 回目）"
   cancelled: 入力が取り消されました
   err_busy: 別の SSH 入力を待っています
