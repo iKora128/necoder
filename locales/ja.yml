@@ -1286,6 +1286,8 @@ ssh:
   register_port_hint: 空なら 22
   register_identity: 鍵のファイル
   register_identity_hint: "空なら ssh の既定（例: ~/.ssh/id_ed25519）"
+  register_proxy_jump: 経由するホスト（ProxyJump）
+  register_proxy_jump_hint: "直接入れない時だけ（例: bastion・admin@gw.example.com:2222）"
   register_cancel: キャンセル
   register_confirm: 登録して確かめる
   register_bad_port: "ポートは 1〜65535 の数です: %{port}"

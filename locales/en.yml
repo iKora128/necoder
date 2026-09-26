@@ -1285,6 +1285,8 @@ ssh:
   register_port_hint: Empty = 22
   register_identity: Key file
   register_identity_hint: "Empty = ssh's default (e.g. ~/.ssh/id_ed25519)"
+  register_proxy_jump: Jump host (ProxyJump)
+  register_proxy_jump_hint: "Only when it is not reachable directly (e.g. bastion, admin@gw.example.com:2222)"
   register_cancel: Cancel
   register_confirm: Add and test
   register_bad_port: "The port must be a number from 1 to 65535: %{port}"
