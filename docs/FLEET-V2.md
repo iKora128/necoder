@@ -318,6 +318,20 @@ EOF
 necoder は `.necoder/task.env` を読み、その Task で起動する ACP プロセスとターミナルの環境に注入する
 （necoder に言語の知識を持たせない。Rust 固有の判断はスクリプト側）。`.necoder/task.env` は `.gitignore` 推奨。
 
+### 6.3 `.worktreeinclude`（O20・2026-09-26）
+
+統合先のルートに `.worktreeinclude`（`.gitignore` と同じ書き方）を置くと、そこに書かれ、**かつ git が無視している**
+追跡外のファイルを、準備スクリプトより前に新しい worktree へ写す（Claude Code・Orca と同じ約束）。`.env` のように
+commit しないが Task でも要る物を、スクリプトを書かずに持ち込むための宣言。
+
+- 一致の判定は git（`git ls-files --others --ignored --exclude-from=.worktreeinclude` と `--exclude-standard` の両方に
+  出るもの）。否定 `!` やディレクトリの書き方も `.gitignore` と同じ（親をディレクトリごと書くと中の否定は効かない）
+- 追跡中のファイルは checkout で入るので対象外。**無視されていない**追跡外（書きかけのソース）は写さない
+- 新しい worktree に既にある物は上書きしない。上限は 500 件・合計 64 MiB（`node_modules` のような大物は準備スクリプトで）。
+  超えた分は写さず標準エラーに残す（Task は失敗にしない）
+- 読み書きは Host 経由（SSH の Task でも同じ。書き込みは新しい worktree を開き直した host で行う）。失敗は準備スクリプトの
+  失敗と同じく Task を `failed` にしてメッセージを残す（準備スクリプトは走らせる）
+
 ### 6.3 ビルドコストの答え（necoder 自身 = Rust・`target/` 12GB）
 
 worktree を切ると `target/` が worktree ごとに別になり、GPUI の依存を全部作り直す（初回 10 分超・12GB × Task 数）。

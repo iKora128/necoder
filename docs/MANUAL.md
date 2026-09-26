@@ -498,6 +498,19 @@ Captain は、目標を Task に分解して起動・レビューまで采配す
 `.necoder/worktree-setup.sh` を置くと、worktree 作成直後に 1 回実行される。`.env` のコピーや依存のインストールに使う。
 ＋ Task ダイアログの「作る」でテンプレートが書き出される。
 
+### `.worktreeinclude`（無視しているファイルを Task へ持ち込む）
+
+リポジトリのルートに `.worktreeinclude` を置き、`.gitignore` と同じ書き方で持ち込みたいファイルを書くと、新しい Task の
+worktree へ写される（準備スクリプトより前）。写るのは **git が無視しているファイルだけ**（`.env`・`secrets/*` など）。
+
+```
+.env
+.env.local
+config/local.json
+```
+
+既にあるファイルは上書きしない。500 件・64 MiB までで、`node_modules` のような大きな物は準備スクリプトで用意する。
+
 ---
 
 ## 10. Chat モード（プロジェクトに紐づかない会話）
