@@ -184,7 +184,7 @@ composer の宛先は `⚑ Captain ／ プロジェクト ⎇ main`。ピルに�
 - 表示行: ブランチ / worktree パス（`<repo の親>/<repo 名>-worktrees/<slug>`・設定 `worktree_dir` で変更可）/
   エージェント・model · effort・承認モードのピル（sticky 規則は 2026-07-27 のまま = `default_*`）/
   準備スクリプトの有無（✓ パス表示 / 無ければ「作る」→ テンプレを `.necoder/worktree-setup.sh` に書いて開く）。
-- 「詳細 ▾」: 既存ブランチから（worktree だけ作る）/ 同じ worktree にスレッドを足す（隔離しない・読むだけの用途向けと明記）。
+- 「詳細 ▾」（O20・実装 2026-09-26）: **ブランチ**（1 行・空 = `task/<slug>`・**既にあるローカルブランチ名なら、そのブランチの worktree を作る**＝新しいブランチは切らない）と**起点**（1 行・空 = 統合先の今の HEAD・ブランチ / タグ / コミット）。上の `⎇` 行は選んだ名前と `（起点 …）` を映す。ブランチ名は `git check-ref-format --branch` で確かめ、使えなければ作らずにトースト。worktree のフォルダはブランチ名の `/` を `-` にした名前。未実装: 同じ worktree にスレッドを足す（隔離しない・読むだけの用途向けと明記）。
 - ⌘⏎ = `git worktree add -b` → 準備スクリプト → ProjectSession → 台帳 `planned` → スレッド起動 → プロンプト送信 →
   `working` → 舞台に出す。GUI も CLI/MCP の `fleet create` + `spawn-agent` も同じ関数を通す。
 - 「複数に分けたいなら Captain に目標を渡す（⌘0）」の案内をヘッダに常時。

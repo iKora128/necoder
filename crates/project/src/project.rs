@@ -3548,6 +3548,82 @@ mod tests {
         assert_eq!(task_slug(""), "task");
     }
 
+    /// O20: ＋ Task の「詳細」— 名前を決める / 起点を決める / 既にあるブランチの worktree を作る。
+    #[test]
+    fn tasks_can_start_from_a_chosen_branch_or_base() {
+        let base = scratch("task_start");
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        let first = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+        std::fs::write(root.join("a.txt"), "2\n").unwrap();
+        git(&["commit", "-qam", "second"]);
+        git(&["branch", "feature/existing"]);
+        let head_of = |dir: &Path| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let start = |branch: &str, base: &str| TaskStart {
+            branch: (!branch.is_empty()).then(|| branch.to_string()),
+            base: (!base.is_empty()).then(|| base.to_string()),
+        };
+
+        // 名前も起点も空 = 従来どおり task/<slug> を HEAD から。
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "Fix the parser", &start("", "")).unwrap();
+        assert_eq!(branch, "task/fix-the-parser");
+        assert_eq!(head_of(&target), head_of(&root));
+
+        // 名前を決め、1 つ前のコミットから切る。
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "x", &start("feature/new", &first)).unwrap();
+        assert_eq!(branch, "feature/new");
+        assert!(target.ends_with("feature-new"));
+        assert_eq!(head_of(&target), first, "起点から切れる");
+
+        // 既にあるブランチ = その worktree を作る（新しいブランチは切らない）。
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "x", &start("feature/existing", "")).unwrap();
+        assert_eq!(branch, "feature/existing");
+        assert_eq!(head_of(&target), head_of(&root));
+        assert_eq!(
+            git_branches_on(&LocalHost, &root)
+                .iter()
+                .filter(|known| known.as_str() == "feature/existing")
+                .count(),
+            1
+        );
+
+        // 起点だけ = 名前は自動。
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "Old base", &start("", &first)).unwrap();
+        assert_eq!(branch, "task/old-base");
+        assert_eq!(head_of(&target), first);
+
+        // 使えない名前は断る。
+        assert!(create_task_with_on(&LocalHost, &root, "x", &start("bad..name", "")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn task_worktrees_sit_beside_the_repository() {
         let dir = task_worktree_dir(Path::new("/work/necoder")).unwrap();
@@ -3912,6 +3988,113 @@ pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str) -> Result
     create_task_worktree_on(host, root, &target, &branch)?;
     let failure = run_task_setup_on(host, root, &target, &branch).err().map(|error| format!("{error:#}"));
     Ok((target, branch, failure))
+}
+
+/// ＋ Task の作り方（O20・ダイアログの「詳細」）。どちらも空なら [`create_named_task_on`] と同じ。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskStart {
+    /// ブランチ名。空 = 1 行目から `task/<slug>`。**既にあるローカルブランチ名なら、そのブランチの
+    /// worktree を作る**（新しいブランチは切らない・起点は使わない）。
+    pub branch: Option<String>,
+    /// 新しいブランチを切る起点（ブランチ / タグ / コミット）。空 = 統合先の HEAD。
+    pub base: Option<String>,
+}
+
+/// [`TaskStart`] に従って Task の worktree を作り、準備スクリプトを流す（O20）。
+/// 返すのは `(worktree, ブランチ, 準備の失敗)`。
+pub fn create_task_with_on(
+    host: &dyn Host,
+    root: &Path,
+    title: &str,
+    start: &TaskStart,
+) -> Result<(PathBuf, String, Option<String>)> {
+    let branch = start
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty());
+    let base = start
+        .base
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| !base.is_empty());
+    let Some(branch) = branch else {
+        if base.is_none() {
+            return create_named_task_on(host, root, title);
+        }
+        // 名前は自動・起点だけ指定。
+        let (target, branch) = free_task_target(host, root, &task_slug(title))?;
+        create_task_worktree_from_on(host, root, &target, &branch, base.unwrap_or("HEAD"))?;
+        let failure = run_task_setup_on(host, root, &target, &branch)
+            .err()
+            .map(|error| format!("{error:#}"));
+        return Ok((target, branch, failure));
+    };
+    let worktrees = task_worktree_dir(root).context("worktree の作成先がありません")?;
+    let folder = branch.replace('/', "-");
+    let mut target = worktrees.join(&folder);
+    let mut number = 2;
+    while host.metadata(&target).is_ok() {
+        target = worktrees.join(format!("{folder}-{number}"));
+        number += 1;
+    }
+    if git_branches_on(host, root).iter().any(|known| known == branch) {
+        // 既にあるブランチ = その worktree を作る（別の worktree で使っていれば git が断る）。
+        add_worktree_on(host, root, &target, branch)?;
+    } else {
+        let valid = run_git(host, root, ["check-ref-format", "--branch", branch])
+            .is_ok_and(|output| output.success());
+        anyhow::ensure!(valid, "ブランチ名に使えない文字があります: {branch}");
+        create_task_worktree_from_on(host, root, &target, branch, base.unwrap_or("HEAD"))?;
+    }
+    let failure = run_task_setup_on(host, root, &target, branch)
+        .err()
+        .map(|error| format!("{error:#}"));
+    Ok((target, branch.to_string(), failure))
+}
+
+/// 空いている `task/<slug>`（と worktree の置き場）を探す（[`create_named_task_on`] と同じ決め方）。
+fn free_task_target(host: &dyn Host, root: &Path, stem: &str) -> Result<(PathBuf, String)> {
+    let worktrees = task_worktree_dir(root).context("worktree の作成先がありません")?;
+    let used = git_branches_on(host, root);
+    let mut number = 1;
+    loop {
+        let suffix = if number == 1 {
+            stem.to_string()
+        } else {
+            format!("{stem}-{number}")
+        };
+        let branch = format!("task/{suffix}");
+        let target = worktrees.join(&suffix);
+        if !used.contains(&branch) && host.metadata(&target).is_err() {
+            return Ok((target, branch));
+        }
+        number += 1;
+    }
+}
+
+/// 起点 `base` から新しいブランチと worktree を作る（`git worktree add -b <branch> <path> <base>`）。
+pub fn create_task_worktree_from_on(
+    host: &dyn Host,
+    dir: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<()> {
+    anyhow::ensure!(!base.starts_with('-'), "起点に使えない名前です: {base}");
+    let path = path.to_string_lossy().into_owned();
+    let output = run_git(
+        host,
+        dir,
+        ["worktree", "add", "-b", branch, path.as_str(), base],
+    )
+    .context("Task worktree の作成に失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "Task worktree の作成に失敗: {}",
+        git_fail_message(&output)
+    );
+    Ok(())
 }
 
 /// 準備スクリプト（§6.2）を新 worktree を cwd に 1 回流す。無ければ何もしない。

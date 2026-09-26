@@ -292,6 +292,10 @@ fleet:
   new_task_setup_ready: "Setup script ✓ .necoder/worktree-setup.sh"
   new_task_setup_missing: "No setup script"
   new_task_setup_create: "Create (template: bring .env, share target)"
+  new_task_details: Details (branch name, starting point)
+  new_task_branch_label: "Branch (empty = task/<first line>; an existing branch name opens a worktree on that branch)"
+  new_task_base_label: "Starting point (empty = the integration HEAD; a branch, tag or commit)"
+  new_task_from_base: "⎇ %{branch} (from %{base})"
   new_task_no_repository: "No integration worktree (main) is open, so a Task cannot be started"
   next_allow: "Allow"
   next_answer: "Answer"
