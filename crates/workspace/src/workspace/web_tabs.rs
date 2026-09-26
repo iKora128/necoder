@@ -79,8 +79,8 @@ pub(crate) enum UrlDestination {
     WebTab,
     /// それ以外の URL = 既定のブラウザ。
     Browser,
-    /// SSH 先で動いているプロジェクトから来た localhost の URL。手元の同じポートは別物なので
-    /// 開かず、SSH 先のものだと知らせる（ポート転送は O5）。
+    /// SSH 先で動いているプロジェクトから来た localhost の URL。手元の同じポートは別物なので、
+    /// そのポートを手元へ転送してから開く（O5・転送できなければ手順を添えて知らせる）。
     RemoteLocalhost { host: String, port: u16 },
 }
 
@@ -118,9 +118,18 @@ fn localhost_port(url: &str) -> u16 {
         .unwrap_or(if https { 443 } else { 80 })
 }
 
+/// 接続先の localhost の URL を、手元へ転送したポートの URL に書き換える（`http://127.0.0.1:5173/app?x`
+/// → `http://localhost:15173/app?x`）。scheme と path 以降はそのまま。
+fn forwarded_url(url: &str, local_port: u16) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("http", url));
+    let path = &rest[rest.find(['/', '?', '#']).unwrap_or(rest.len())..];
+    let path = if path.is_empty() { "/" } else { path };
+    format!("{scheme}://localhost:{local_port}{path}")
+}
+
 impl Workspace {
     /// プロジェクト（session）から出てきた URL を開く（R06）。そのプロジェクトが SSH 先で動いていれば、
-    /// localhost の URL は SSH 先の物なので手元では開かず、ポート転送の手順を添えて知らせる。
+    /// localhost の URL は SSH 先の物なので、そのポートを手元へ転送してから開く（O5）。
     /// それ以外は [`Self::open_url`]。
     pub(crate) fn open_url_from_session(
         &mut self,
@@ -135,20 +144,83 @@ impl Workspace {
             .and_then(|slot| slot.remote_host.clone());
         match url_destination(url, remote_host.as_deref()) {
             UrlDestination::RemoteLocalhost { host, port } => {
-                let details = i18n::t!(
-                    "link.remote_localhost_details",
-                    "url" => url,
-                    "host" => &host,
-                    "port" => port
-                );
-                self.push_failure_toast(
-                    i18n::t!("link.remote_localhost", "url" => url, "host" => &host).into(),
-                    Some((i18n::t!("link.remote_localhost_title").into(), details)),
-                    cx,
-                );
+                self.open_remote_localhost(session_index, url, host, port, cx)
             }
             UrlDestination::WebTab | UrlDestination::Browser => self.open_url(url, cx),
         }
+    }
+
+    /// SSH 先の localhost の URL: そのポートを手元へ転送して（済みならその番号で）、手元の URL を
+    /// Web タブで開く。転送は `ssh -O forward` を待つので背景で。できなければ、手で転送する手順を
+    /// 理由と一緒に知らせる（手元の同じ番号は別物なので、転送せずには開かない）。
+    fn open_remote_localhost(
+        &mut self,
+        session_index: usize,
+        url: &str,
+        label: String,
+        port: u16,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| slot.worktree.host().clone())
+        else {
+            return;
+        };
+        let known = host
+            .forwarded_ports()
+            .into_iter()
+            .find(|(remote, _)| *remote == port);
+        if let Some((_, local)) = known {
+            self.open_url(&forwarded_url(url, local), cx);
+            return;
+        }
+        let url = url.to_string();
+        cx.spawn(async move |workspace, cx| {
+            let forwarded = cx
+                .background_executor()
+                .spawn(async move { host.forward_port(port) })
+                .await;
+            // Err = 待っている間に窓が閉じた。
+            workspace
+                .update(cx, |workspace, cx| match forwarded {
+                    Ok(local) => {
+                        let color = workspace.accent();
+                        workspace.push_toast(
+                            i18n::t!(
+                                "link.remote_forwarded",
+                                "host" => &label,
+                                "port" => port,
+                                "local" => local
+                            )
+                            .into(),
+                            color,
+                            cx,
+                        );
+                        workspace.open_url(&forwarded_url(&url, local), cx);
+                        workspace.refresh_ports(cx);
+                    }
+                    Err(error) => {
+                        let details = i18n::t!(
+                            "link.remote_localhost_details",
+                            "url" => &url,
+                            "host" => &label,
+                            "port" => port,
+                            "reason" => format!("{error:#}")
+                        );
+                        workspace.push_failure_toast(
+                            i18n::t!("link.remote_localhost", "url" => &url, "host" => &label)
+                                .into(),
+                            Some((i18n::t!("link.remote_localhost_title").into(), details)),
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+        })
+        .detach();
     }
 
     /// URL を開く（唯一の入口）。localhost 系は Web タブ、それ以外は既定のブラウザ。
@@ -767,6 +839,23 @@ mod tests {
             );
             stop_watchers(workspace);
         });
+    }
+
+    /// O5: 接続先の localhost の URL を、手元へ転送した番号の URL に書き換える（path 以降は保つ）。
+    #[test]
+    fn remote_urls_are_rewritten_to_the_forwarded_port() {
+        assert_eq!(
+            forwarded_url("http://localhost:5173/app?x=1#top", 15173),
+            "http://localhost:15173/app?x=1#top"
+        );
+        assert_eq!(
+            forwarded_url("http://127.0.0.1:8080", 18080),
+            "http://localhost:18080/"
+        );
+        assert_eq!(
+            forwarded_url("https://[::1]:8443/api", 18443),
+            "https://localhost:18443/api"
+        );
     }
 
     /// R06: SSH 先のプロジェクトから来た localhost の URL は手元で開かない（手元の同じポートは別物）。
