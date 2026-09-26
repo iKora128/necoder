@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+pub mod os_shortcuts;
 pub mod user_keymap;
 
 /// keymap の 1 セクション（1 つのコンテキスト述語に対する束）。

@@ -1310,6 +1310,30 @@ key:
   keep: やめる
   unreadable: "keymap.json を読めないので、ここでは変えられません（%{error}）。keymap.json を開いて直してください"
   write_failed: "keymap.json に書けません: %{path}: %{error}"
+  os_conflict: "OS の「%{feature}」が先に取るので、このキーは necoder まで届かないことがあります（OS の設定で外すか、別のキーに変えてください）"
+  os_bound: "%{keys} は OS の「%{feature}」と同じキーです。OS の設定で外していなければ necoder まで届きません"
+  os:
+    spotlight: Spotlight
+    input_source: 入力ソースの切り替え
+    character_viewer: 絵文字と記号
+    app_switcher: アプリの切り替え
+    window_cycle: ウインドウの切り替え
+    screenshot: スクリーンショット
+    mission_control: Mission Control
+    spaces: 操作スペースの切り替え
+    force_quit: 強制終了
+    lock_screen: 画面のロック
+    dock: Dock の表示 / 非表示
+    secure_attention: Ctrl+Alt+Del の画面
+    task_manager: タスク マネージャー
+    start_menu: スタート メニュー
+    window_menu: ウィンドウのメニュー
+    windows_key: Windows キーの操作
+    terminal_launcher: 端末の起動
+    log_out: ログアウト
+    workspaces: ワークスペースの切り替え
+    run_command: コマンドの実行
+    super_key: Super キーの操作
   section_editor: エディタ
   section_agent: AI チャット
   section_control: 管制

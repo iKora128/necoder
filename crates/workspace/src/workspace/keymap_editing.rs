@@ -198,6 +198,17 @@ impl Workspace {
         self.edit_user_keymap(cx, |user| {
             user_keymap::rebind(user, &default_sections(), context, action, keystroke)
         });
+        // 届いたキーでも、OS の既定のショートカットなら知らせる（OS 側で外してあれば届く・O27 / H26）。
+        let os = keymap_core::os_shortcuts::Os::current();
+        if let Some(name) = keymap_core::os_shortcuts::os_shortcut(os, keystroke) {
+            let text = i18n::t!(
+                "key.os_bound",
+                "keys" => keymap_core::pretty_keystroke_for(os.keymap_platform(), keystroke),
+                "feature" => i18n::t!(&format!("key.os.{name}"))
+            );
+            let color = self.accent();
+            self.push_toast(SharedString::from(text), color, cx);
+        }
     }
 
     /// 行の ↺: 既定に戻す。
@@ -389,6 +400,37 @@ mod tests {
                 .find(|row| row.action == "editor::DuplicateLineDown")
                 .expect("行");
             assert_eq!(row.keys, vec!["ctrl-alt-shift-f9".to_string()], "変えない");
+
+            // OS が先に取るキー（O27・H26）: 割り当てはする（OS 側で外してあれば届く）が、知らせる。
+            let reserved = match keymap_core::os_shortcuts::Os::current() {
+                keymap_core::os_shortcuts::Os::MacOs => "cmd-ctrl-q",
+                keymap_core::os_shortcuts::Os::Windows => "alt-space",
+                keymap_core::os_shortcuts::Os::Linux => "ctrl-alt-t",
+            };
+            workspace.start_key_capture(
+                "Editor".to_string(),
+                "editor::DuplicateLineDown".to_string(),
+                cx,
+            );
+            workspace.capture_keystroke(&keystroke(reserved), cx);
+            let row = workspace
+                .keymap_rows()
+                .into_iter()
+                .find(|row| row.action == "editor::DuplicateLineDown")
+                .expect("行");
+            assert_eq!(row.keys, vec![reserved.to_string()]);
+            let os = keymap_core::os_shortcuts::Os::current();
+            let name = keymap_core::os_shortcuts::os_shortcut(os, reserved).expect("OS のキー");
+            let expected = i18n::t!(
+                "key.os_bound",
+                "keys" => keymap_core::pretty_keystroke_for(os.keymap_platform(), reserved),
+                "feature" => i18n::t!(&format!("key.os.{name}"))
+            );
+            assert!(workspace
+                .notifications
+                .toasts
+                .iter()
+                .any(|toast| toast.text.as_ref() == expected));
 
             // Esc はやめる。↺ で既定に戻す。
             workspace.start_key_capture(
