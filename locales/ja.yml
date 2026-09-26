@@ -1010,6 +1010,12 @@ conflict:
   view_empty: （空）
   view_more: "… 他 %{count} 行"
   view_close: 閉じる
+  view_result: "結果（直してから %{key} で解決）"
+  view_fill_ours: 今の側から
+  view_fill_base: 元から
+  view_fill_theirs: 入ってくる側から
+  view_fill_both: 両方から
+  use_result: 結果で解決
 terminal:
   quick_tip: "よく使うコマンド（settings.json の quick_commands）。押すと並ぶので、選ぶと新しいターミナルで走らせる"
   tab_title: ターミナル %{n}

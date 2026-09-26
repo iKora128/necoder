@@ -10,7 +10,9 @@
 //! 確かめてから、OS のダイアログで確認して流す（ソース管理パネルは O18 で作り直し中なので触らない）。
 //!
 //! 「並べて見る」（帯のボタン・パレット）は、キャレットの衝突の今の側 / 元（diff3 の印にあれば）/ 入ってくる
-//! 側を横に並べた 1 枚を出す。読むだけで、ボタンは帯と同じ解決（1 回の編集）をして次の衝突を見せる。
+//! 側を横に並べた 1 枚を出す。列は読むだけで、ボタンは帯と同じ解決（1 回の編集）をして次の衝突を見せる。
+//! 列の下の結果の欄は普通のエディタで、今の側から始めて直し、「結果で解決」（欄の中の ⌘⏎）でその文に
+//! 置き換える（VS Code の merge editor の結果の欄と同じ考えを、衝突 1 つずつで）。
 
 use crate::workspace::*;
 use gpui::{PromptButton, PromptLevel};
@@ -233,6 +235,8 @@ pub(crate) struct ConflictView {
     /// 見せている衝突の写し。描画ごとに全文を読まないよう、開いた時・操作の後・バッファの版が
     /// 変わった時に取り直す。衝突が無くなれば `None`（その時は閉じる）。
     shown: Option<ShownConflict>,
+    /// 結果の欄。見せる衝突が替わるたびに今の側で埋め直す（替わらなければ直した文を残す）。
+    result: Entity<EditorView>,
 }
 
 /// 並べて見せる 1 つの衝突（写し）。
@@ -254,7 +258,46 @@ pub(crate) struct ShownConflict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConflictViewAct {
     Resolve(ConflictSide),
+    /// 結果の欄の文で解決する（欄の中の ⌘⏎ も）。
+    ResolveWithResult,
+    /// 結果の欄をその文で埋め直す。
+    Fill(ResultSeed),
     Next,
+}
+
+/// 結果の欄を埋める元。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResultSeed {
+    Side(ConflictSide),
+    /// 元（diff3 の印にある時だけ出す）。
+    Base,
+}
+
+/// 結果の欄に入れる文（改行は `\n` に揃える。欄はエディタなので CRLF の `\r` を見せない）。
+pub(crate) fn seed_text(shown: &ShownConflict, seed: ResultSeed) -> String {
+    let text = match seed {
+        ResultSeed::Side(ConflictSide::Ours) => shown.ours.clone(),
+        ResultSeed::Side(ConflictSide::Theirs) => shown.theirs.clone(),
+        ResultSeed::Side(ConflictSide::Both) => format!("{}{}", shown.ours, shown.theirs),
+        ResultSeed::Base => shown.base.clone().unwrap_or_default(),
+    };
+    text.replace("\r\n", "\n")
+}
+
+/// 結果の欄の文を、衝突（印ごと）と置き換える文にする。空なら衝突ごと消す。そうでなければ最後の
+/// 改行を保つ（無ければ足す＝次の行とつながらない）。CRLF のファイルには CRLF で書く。
+pub(crate) fn result_for_file(result: &str, crlf: bool) -> String {
+    if result.is_empty() {
+        return String::new();
+    }
+    let mut text = result.replace("\r\n", "\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if crlf {
+        text = text.replace('\n', "\r\n");
+    }
+    text
 }
 
 /// 1 つの列に出す行の上限（これを超えた分は数だけ出す）。
@@ -316,6 +359,15 @@ impl Workspace {
 
     /// キャレットのある衝突（無ければ後ろ・先頭）を `side` で解決する（帯のボタン・パレット）。
     pub(crate) fn resolve_conflict(&mut self, side: ConflictSide, cx: &mut Context<Self>) {
+        self.replace_conflict(|text, block| resolution(text, block, side), cx);
+    }
+
+    /// キャレットのある衝突（無ければ後ろ・先頭）を、印ごと `make` の文に置き換える（1 回の編集）。
+    fn replace_conflict(
+        &mut self,
+        make: impl FnOnce(&str, &ConflictBlock) -> String,
+        cx: &mut Context<Self>,
+    ) {
         let Some((editor, blocks)) = self.active_conflicts() else {
             let color = self.accent();
             self.push_toast(i18n::t!("conflict.none").into(), color, cx);
@@ -332,10 +384,7 @@ impl Workspace {
                 return;
             };
             let block = &blocks[index];
-            (
-                block.whole.clone(),
-                resolution(&view.buffer().text(), block, side),
-            )
+            (block.whole.clone(), make(&view.buffer().text(), block))
         };
         editor.update(cx, |view, cx| {
             view.replace_ranges(&[range.clone()], &text, cx);
@@ -380,11 +429,25 @@ impl Workspace {
             self.push_toast(i18n::t!("conflict.none").into(), color, cx);
             return;
         };
+        let theme = self.theme.clone();
+        let accent = self.accent();
+        let (font_size, tab_size) = {
+            let current = settings::get(cx);
+            (current.font_size, current.tab_size)
+        };
+        let seed = seed_text(&shown, ResultSeed::Side(ConflictSide::Ours));
+        let result = cx.new(|cx| {
+            let mut editor = EditorView::new(Buffer::new(), theme, accent, cx);
+            editor.set_typography(font_size, tab_size, cx);
+            editor.set_plain_text(&seed, cx);
+            editor
+        });
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
+        window.focus(&result.read(cx).focus_handle(cx), cx);
         self.chrome.conflict_view = Some(ConflictView {
             focus,
             shown: Some(shown),
+            result,
         });
         cx.notify();
     }
@@ -410,27 +473,64 @@ impl Workspace {
     ) {
         match act {
             ConflictViewAct::Resolve(side) => self.resolve_conflict(side, cx),
+            ConflictViewAct::ResolveWithResult => {
+                let Some(result) = self
+                    .chrome
+                    .conflict_view
+                    .as_ref()
+                    .map(|view| view.result.read(cx).plain_text())
+                else {
+                    return;
+                };
+                self.replace_conflict(
+                    |text, block| {
+                        let crlf = text
+                            .get(block.whole.clone())
+                            .is_some_and(|whole| whole.contains("\r\n"));
+                        result_for_file(&result, crlf)
+                    },
+                    cx,
+                );
+            }
+            ConflictViewAct::Fill(seed) => {
+                if let Some(view) = self.chrome.conflict_view.as_ref() {
+                    if let Some(shown) = &view.shown {
+                        let text = seed_text(shown, seed);
+                        view.result
+                            .update(cx, |editor, cx| editor.set_plain_text(&text, cx));
+                    }
+                }
+            }
             ConflictViewAct::Next => self.next_conflict(cx),
         }
         self.refresh_conflict_view(cx);
-        if self
-            .chrome
-            .conflict_view
-            .as_ref()
-            .is_some_and(|view| view.shown.is_none())
-        {
-            self.close_conflict_view(window, cx);
+        match self.chrome.conflict_view.as_ref() {
+            Some(view) if view.shown.is_none() => self.close_conflict_view(window, cx),
+            // 押した後も打てるように、フォーカスは結果の欄へ戻す（ボタンを押すとカードに移るので）。
+            Some(view) => {
+                let focus = view.result.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            None => {}
         }
     }
 
-    /// 開いていれば写しを取り直す（キャレットの衝突が替わった・バッファが変わった）。
+    /// 開いていれば写しを取り直す（キャレットの衝突が替わった・バッファが変わった）。見せる衝突が
+    /// 替わったら結果の欄を今の側で埋め直す（替わらなければ直しかけの文を残す）。
     fn refresh_conflict_view(&mut self, cx: &mut Context<Self>) {
         if self.chrome.conflict_view.is_none() {
             return;
         }
         let shown = self.conflict_snapshot(cx);
         if let Some(view) = self.chrome.conflict_view.as_mut() {
-            view.shown = shown;
+            if view.shown != shown {
+                if let Some(shown) = &shown {
+                    let seed = seed_text(shown, ResultSeed::Side(ConflictSide::Ours));
+                    view.result
+                        .update(cx, |editor, cx| editor.set_plain_text(&seed, cx));
+                }
+                view.shown = shown;
+            }
         }
         cx.notify();
     }
@@ -471,7 +571,8 @@ impl Workspace {
         }
     }
 
-    /// 並べた 1 枚（画面の中央・幅 86%・高さ 72%）: 今の側 / 元 / 入ってくる側 の列と、帯と同じボタン。
+    /// 並べた 1 枚（画面の中央・幅 86%・高さ 86%）: 今の側 / 元 / 入ってくる側 の列、その下の結果の欄、
+    /// 帯と同じボタン。
     pub(crate) fn render_conflict_view(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let view = self.chrome.conflict_view.as_ref()?;
         let shown = view.shown.clone()?;
@@ -579,12 +680,88 @@ impl Workspace {
             theirs_title.clone(),
             &shown.theirs,
         ));
+        let fill = |id: &'static str, label: String, seed: ResultSeed| {
+            div()
+                .id(id)
+                .flex_none()
+                .text_color(theme.fg2)
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.fg0))
+                .child(SharedString::from(label))
+                .on_mouse_down(MouseButton::Left, act(ConflictViewAct::Fill(seed)))
+        };
+        let result = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(6.))
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(10.))
+                    .py(px(5.))
+                    .bg(theme.bg1)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(px(11.))
+                    .child(div().flex_1().min_w_0().text_color(theme.fg1).child(
+                        SharedString::from(i18n::t!(
+                            "conflict.view_result",
+                            "key" => keymap_core::keystroke_label("cmd-enter")
+                        )),
+                    ))
+                    .child(fill(
+                        "conflict-view-fill-ours",
+                        i18n::t!("conflict.view_fill_ours"),
+                        ResultSeed::Side(ConflictSide::Ours),
+                    ))
+                    .when(shown.base.is_some(), |header| {
+                        header.child(fill(
+                            "conflict-view-fill-base",
+                            i18n::t!("conflict.view_fill_base"),
+                            ResultSeed::Base,
+                        ))
+                    })
+                    .child(fill(
+                        "conflict-view-fill-theirs",
+                        i18n::t!("conflict.view_fill_theirs"),
+                        ResultSeed::Side(ConflictSide::Theirs),
+                    ))
+                    .child(fill(
+                        "conflict-view-fill-both",
+                        i18n::t!("conflict.view_fill_both"),
+                        ResultSeed::Side(ConflictSide::Both),
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(view.result.clone()),
+            );
         let card = div()
             .track_focus(&view.focus)
             .on_key_down(cx.listener(Self::on_conflict_view_key_down))
+            // 結果の欄（エディタ）の Esc と ⌘⏎ は、エディタが使わなければアクションのまま上がってくる。
+            .on_action(cx.listener(|this, _: &editor_view::Cancel, window, cx| {
+                this.close_conflict_view(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &agent_panel::SubmitPrompt, window, cx| {
+                    this.conflict_view_act(ConflictViewAct::ResolveWithResult, window, cx)
+                }),
+            )
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .w(gpui::relative(0.86))
-            .h(gpui::relative(0.72))
+            .h(gpui::relative(0.86))
             .flex()
             .flex_col()
             .gap(px(10.))
@@ -615,6 +792,7 @@ impl Workspace {
                     ))),
             )
             .child(columns)
+            .child(result)
             .child(
                 div()
                     .flex()
@@ -629,6 +807,13 @@ impl Workspace {
                             .when(shown.base.is_none(), |hint| {
                                 hint.child(SharedString::from(i18n::t!("conflict.view_no_base")))
                             }),
+                    )
+                    .child(
+                        button("conflict-view-use-result", i18n::t!("conflict.use_result"))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                act(ConflictViewAct::ResolveWithResult),
+                            ),
                     )
                     .child(button("conflict-view-use-ours", ours_title).on_mouse_down(
                         MouseButton::Left,
@@ -1019,6 +1204,199 @@ mod tests {
                 .any(|toast| toast.text.as_ref() == i18n::t!("conflict.none")));
         });
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 衝突の印の入ったファイルを 1 つ開いた窓（既定の keymap つき＝⌘⏎ / Esc を実キーで通す）。
+    fn open_conflicted<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        name: &str,
+        content: &str,
+    ) -> (Entity<Workspace>, &'a mut gpui::VisualTestContext, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_conflicts_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        let file = root.join("merge.rs");
+        std::fs::write(&file, content).unwrap();
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_file_sync(file.clone(), window, cx);
+            let editor = workspace.active_editor().expect("エディタ");
+            workspace.refresh_conflicts(&editor, cx);
+            workspace.show_conflict_side_by_side(&ShowConflictSideBySide, window, cx);
+        });
+        (workspace, cx, root)
+    }
+
+    /// 結果の欄とそのフォーカス（開いている時だけ）。
+    fn result_of(workspace: &Workspace, window: &Window, cx: &App) -> Option<(String, bool)> {
+        let view = workspace.chrome.conflict_view.as_ref()?;
+        let result = view.result.read(cx);
+        Some((
+            result.plain_text(),
+            result.focus_handle(cx).is_focused(window),
+        ))
+    }
+
+    /// 結果の欄（O19）: 今の側で始まり（フォーカスは欄）、元 / 両方で埋め直せ、打って直した文で
+    /// 解決できる（欄の中の ⌘⏎・最後の改行は足す）。解決すると次の衝突の今の側で埋め直す。Esc は欄の
+    /// 中からでも閉じ、空の結果は衝突ごと消す。
+    #[gpui::test]
+    fn a_conflict_is_resolved_with_the_edited_result(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx, root) = open_conflicted(cx, "result", &format!("{THREE_WAY}{TWO_WAY}"));
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(
+                result_of(workspace, window, cx),
+                Some(("let x = 1;\n".to_string(), true)),
+                "今の側で始まり、フォーカスは欄"
+            );
+            workspace.conflict_view_act(ConflictViewAct::Fill(ResultSeed::Base), window, cx);
+            assert_eq!(
+                result_of(workspace, window, cx).map(|(text, _)| text),
+                Some("let x = 0;\n".to_string())
+            );
+            workspace.conflict_view_act(
+                ConflictViewAct::Fill(ResultSeed::Side(ConflictSide::Both)),
+                window,
+                cx,
+            );
+            assert_eq!(
+                result_of(workspace, window, cx),
+                Some(("let x = 1;\nlet x = 2;\n".to_string(), true)),
+                "埋め直した後も欄で打てる"
+            );
+            let result = workspace
+                .chrome
+                .conflict_view
+                .as_ref()
+                .map(|view| view.result.clone())
+                .expect("欄");
+            result.update(cx, |editor, cx| editor.set_plain_text("let x = 3;", cx));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_input(" // 手で");
+        cx.simulate_keystrokes("cmd-enter");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let editor = workspace.active_editor().expect("エディタ");
+            assert_eq!(
+                editor.read(cx).plain_text(),
+                format!("let x = 3; // 手で\n{TWO_WAY}")
+            );
+            let shown = workspace
+                .chrome
+                .conflict_view
+                .as_ref()
+                .and_then(|view| view.shown.clone())
+                .expect("次の衝突を見せる");
+            assert_eq!((shown.index, shown.count), (1, 1));
+            assert_eq!(
+                result_of(workspace, window, cx),
+                Some(("let x = 1;\n".to_string(), true)),
+                "次の衝突の今の側で埋め直す"
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace.chrome.conflict_view.is_none(),
+                "欄の中の Esc で閉じる"
+            );
+            workspace.show_conflict_side_by_side(&ShowConflictSideBySide, window, cx);
+            let result = workspace
+                .chrome
+                .conflict_view
+                .as_ref()
+                .map(|view| view.result.clone())
+                .expect("開き直す");
+            result.update(cx, |editor, cx| editor.set_plain_text("", cx));
+            workspace.conflict_view_act(ConflictViewAct::ResolveWithResult, window, cx);
+            assert!(workspace.chrome.conflict_view.is_none(), "無くなれば閉じる");
+            let editor = workspace.active_editor().expect("エディタ");
+            assert_eq!(
+                editor.read(cx).plain_text(),
+                "let x = 3; // 手で\nfn a() {}\nfn b() {}\n",
+                "空の結果は衝突ごと消す"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// CRLF のファイル: 欄には `\n` で見せ、書く時は CRLF に戻す（1 つのファイルに改行が混ざらない）。
+    #[gpui::test]
+    fn the_result_keeps_crlf_line_endings(cx: &mut gpui::TestAppContext) {
+        let crlf = "fn a() {}\r\n<<<<<<< HEAD\r\nlet x = 1;\r\n=======\r\nlet x = 2;\r\n>>>>>>> b\r\nfn b() {}\r\n";
+        let (workspace, cx, root) = open_conflicted(cx, "crlf", crlf);
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(
+                result_of(workspace, window, cx).map(|(text, _)| text),
+                Some("let x = 1;\n".to_string())
+            );
+            let result = workspace
+                .chrome
+                .conflict_view
+                .as_ref()
+                .map(|view| view.result.clone())
+                .expect("欄");
+            result.update(cx, |editor, cx| {
+                editor.set_plain_text("let x = 3;\nlet y = 4;", cx)
+            });
+            workspace.conflict_view_act(ConflictViewAct::ResolveWithResult, window, cx);
+            let editor = workspace.active_editor().expect("エディタ");
+            assert_eq!(
+                editor.read(cx).plain_text(),
+                "fn a() {}\r\nlet x = 3;\r\nlet y = 4;\r\nfn b() {}\r\n"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 欄に入れる文と、書き戻す文（空は衝突ごと消す・最後の改行は足す・空行 1 つは残す）。
+    #[test]
+    fn the_result_is_seeded_and_written_back() {
+        let shown = ShownConflict {
+            index: 1,
+            count: 1,
+            line: 1,
+            ours: "a\r\nb\r\n".to_string(),
+            base: None,
+            theirs: "c\r\n".to_string(),
+            ours_label: String::new(),
+            theirs_label: String::new(),
+        };
+        assert_eq!(
+            seed_text(&shown, ResultSeed::Side(ConflictSide::Ours)),
+            "a\nb\n"
+        );
+        assert_eq!(
+            seed_text(&shown, ResultSeed::Side(ConflictSide::Both)),
+            "a\nb\nc\n"
+        );
+        assert_eq!(seed_text(&shown, ResultSeed::Base), "");
+        assert_eq!(result_for_file("a\nb", true), "a\r\nb\r\n");
+        assert_eq!(result_for_file("a\r\nb\n", false), "a\nb\n");
+        assert_eq!(result_for_file("", true), "");
+        assert_eq!(result_for_file("\n", false), "\n");
     }
 
     #[test]

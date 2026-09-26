@@ -1009,6 +1009,12 @@ conflict:
   view_empty: (empty)
   view_more: "… %{count} more lines"
   view_close: Close
+  view_result: "Result (edit it, then %{key} to use it)"
+  view_fill_ours: From current
+  view_fill_base: From base
+  view_fill_theirs: From incoming
+  view_fill_both: From both
+  use_result: Use result
 terminal:
   quick_tip: "Quick commands (quick_commands in settings.json). Pick one to run it in a new terminal"
   tab_title: Terminal %{n}
