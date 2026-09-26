@@ -545,6 +545,12 @@ settings:
   tabs_view_list: List
   pref_system_notifications: System notifications
   pref_system_notifications_sub: Posts to Notification Center when an agent in a window you aren't looking at finishes or stops (click to jump to the thread)
+  account_label: "Account:"
+  account_default: Default
+  account_elsewhere: (elsewhere)
+  account_add: + New account
+  account_login: Log in
+  account_hint: Switching takes effect for agents started from now on (running threads keep their account). necoder never reads the credentials; the official CLI handles them
   pref_confirm_quit: Confirm before quitting
   pref_confirm_quit_sub: "On ⌘Q or when closing a window, offers “Hide and keep running” while agents or terminals are busy"
   confirm_quit_running: Only while busy

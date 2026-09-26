@@ -624,6 +624,84 @@ pub fn persist_mcp_enabled(path: &Path, name: &str, enabled: bool) -> Result<()>
     write_settings_object(path, root)
 }
 
+/// `agent_servers.<agent_id>.env.<var>` の 1 点だけを user 設定ファイルへ書く（`None` = 消す・O14 の
+/// アカウント切替）。起動方法（`type` / `command` / `args`）と他の環境変数は触らない。項目が無ければ
+/// `{"type": "registry"}` として作る。消した結果 `registry` で env も空になったら、その項目ごと消す
+/// （`{}` を残さない）。[`persist_agent_config_default`] と同じく user ファイル自身の値だけを読む。
+pub fn persist_agent_server_env(
+    path: &Path,
+    agent_id: &str,
+    var: &str,
+    value: Option<&str>,
+) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    let servers = object_entry(&mut root, "agent_servers");
+    let remove_entry = {
+        let server = object_entry(servers, agent_id);
+        server
+            .entry("type")
+            .or_insert_with(|| Value::String("registry".to_string()));
+        let env = object_entry(server, "env");
+        match value {
+            Some(value) => {
+                env.insert(var.to_string(), Value::String(value.to_string()));
+            }
+            None => {
+                env.remove(var);
+            }
+        }
+        let env_empty = env.is_empty();
+        if env_empty {
+            server.remove("env");
+        }
+        env_empty
+            && server.len() == 1
+            && server.get("type").and_then(Value::as_str) == Some("registry")
+    };
+    if remove_entry {
+        servers.remove(agent_id);
+    }
+    write_settings_object(path, root)
+}
+
+/// アカウント切替（O14）に使う環境変数 = そのエージェントの設定の置き場を変える物。対応していない
+/// エージェントは `None`。資格情報そのものは necoder が読みも写しもしない（置き場を指すだけ）。
+pub fn account_env_var(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        "claude" => Some("CLAUDE_CONFIG_DIR"),
+        "codex" => Some("CODEX_HOME"),
+        _ => None,
+    }
+}
+
+/// necoder が作るアカウントのフォルダの置き場（`<data>/accounts/<agent_id>`）。
+pub fn accounts_root(agent_id: &str) -> Option<PathBuf> {
+    paths::data_dir().map(|dir| dir.join("accounts").join(agent_id))
+}
+
+/// 置き場にあるアカウント（フォルダ名の昇順・隠しフォルダは除く）。置き場が無ければ空。
+pub fn list_accounts(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// 次に作るアカウントの名前（`account-2` から・既定のアカウントを 1 本目と数える）。
+pub fn next_account_name(existing: &[String]) -> String {
+    (2..)
+        .map(|number| format!("account-{number}"))
+        .find(|name| !existing.contains(name))
+        .unwrap_or_else(|| "account".to_string())
+}
+
 /// `overlay` を `base` に深くマージする。オブジェクトは再帰、それ以外は置換。
 fn merge_value(base: &mut Value, overlay: &Value) {
     match (base, overlay) {
@@ -823,6 +901,67 @@ mod tests {
             typo.settings().quit_confirmation(),
             QuitConfirmation::WhenRunning
         );
+    }
+
+    #[test]
+    fn account_env_is_written_without_touching_the_rest() {
+        let path =
+            std::env::temp_dir().join(format!("necoder_agent_env_{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"theme":"x","agent_servers":{"codex":{"type":"custom","command":"codex-acp","env":{"KEEP":"1"}}}}"#,
+        )
+        .expect("書ける");
+        persist_agent_server_env(&path, "claude", "CLAUDE_CONFIG_DIR", Some("/a/work"))
+            .expect("書ける");
+        persist_agent_server_env(&path, "codex", "CODEX_HOME", Some("/a/codex")).expect("書ける");
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            &std::fs::read_to_string(&path).expect("読める"),
+        ])
+        .expect("読める");
+        let servers = &store.settings().agent_servers;
+        assert_eq!(
+            servers["claude"]
+                .env()
+                .get("CLAUDE_CONFIG_DIR")
+                .map(String::as_str),
+            Some("/a/work")
+        );
+        assert!(
+            matches!(servers["codex"], AgentServerSetting::Custom { .. }),
+            "起動方法は変えない"
+        );
+        assert_eq!(
+            servers["codex"].env().get("KEEP").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            servers["codex"].env().get("CODEX_HOME").map(String::as_str),
+            Some("/a/codex")
+        );
+
+        // 既定へ戻す = 消す。registry だけの項目は丸ごと消え、custom は残る。
+        persist_agent_server_env(&path, "claude", "CLAUDE_CONFIG_DIR", None).expect("書ける");
+        persist_agent_server_env(&path, "codex", "CODEX_HOME", None).expect("書ける");
+        let text = std::fs::read_to_string(&path).expect("読める");
+        let value: Value = serde_json::from_str(&text).expect("JSON");
+        assert!(value["agent_servers"].get("claude").is_none(), "{text}");
+        assert_eq!(value["agent_servers"]["codex"]["command"], "codex-acp");
+        assert_eq!(value["theme"], "x");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn account_names_count_from_two() {
+        assert_eq!(next_account_name(&[]), "account-2");
+        assert_eq!(
+            next_account_name(&["account-2".to_string(), "work".to_string()]),
+            "account-3"
+        );
+        assert_eq!(account_env_var("claude"), Some("CLAUDE_CONFIG_DIR"));
+        assert_eq!(account_env_var("codex"), Some("CODEX_HOME"));
+        assert_eq!(account_env_var("opencode"), None);
     }
 
     #[test]
