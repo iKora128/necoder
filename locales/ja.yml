@@ -521,6 +521,8 @@ settings:
   pref_agent_prewarm_sub: 送信を待たずに接続し、モデル一覧をすぐ選べるようにします
   pref_sound_done: 完了音
   pref_sound_waiting: 入力待ちの音
+  pref_sound_volume: 通知音の大きさ（%）
+  pref_sound_volume_sub: 0 で鳴らしません（選んだ声はそのまま）。100 が音源そのまま
   sound_nya: にゃっ
   sound_nyaan: にゃー
   sound_mew: みゃっ

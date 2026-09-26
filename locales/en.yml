@@ -520,6 +520,8 @@ settings:
   pref_agent_prewarm_sub: Connects before you send so the model list is ready to pick
   pref_sound_done: Completion sound
   pref_sound_waiting: Waiting-for-you sound
+  pref_sound_volume: Notification sound volume (%)
+  pref_sound_volume_sub: 0 mutes it (the chosen voice is kept); 100 plays the sound as is
   sound_nya: Meow
   sound_nyaan: Long meow
   sound_mew: Chirp

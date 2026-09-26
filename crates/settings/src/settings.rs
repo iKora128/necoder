@@ -2200,6 +2200,17 @@ impl SettingsView {
                 true,
                 cx,
             ))
+            // 通知音の大きさ（O13）。0 は鳴らさない。
+            .child(self.stepper_row_with_sub(
+                "sound_volume",
+                i18n::t!("settings.pref_sound_volume"),
+                i18n::t!("settings.pref_sound_volume_sub"),
+                settings.sound_volume as f64,
+                0.0,
+                100.0,
+                10.0,
+                cx,
+            ))
             .child(self.toggle_row(
                 "system_notifications",
                 7,

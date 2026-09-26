@@ -1973,7 +1973,12 @@ impl AgentPanel {
     /// ミュート中のスレッドは鳴らさない。
     fn ring_done(&self, thread_index: usize, cx: &App) {
         if self.wants_done_sound(thread_index) {
-            sound::play(sound::Cue::Done, &settings::get(cx).sound_done);
+            let settings = settings::get(cx);
+            sound::play(
+                sound::Cue::Done,
+                &settings.sound_done,
+                settings.sound_volume,
+            );
         }
     }
 
@@ -1994,7 +1999,12 @@ impl AgentPanel {
     /// ミュート中のスレッドは鳴らさない。auto-allow で素通りした要求はブロックしないので対象外。
     fn ring_waiting(&self, thread_index: usize, cx: &App) {
         if self.wants_waiting_sound(thread_index) {
-            sound::play(sound::Cue::Waiting, &settings::get(cx).sound_waiting);
+            let settings = settings::get(cx);
+            sound::play(
+                sound::Cue::Waiting,
+                &settings.sound_waiting,
+                settings.sound_volume,
+            );
         }
     }
 
