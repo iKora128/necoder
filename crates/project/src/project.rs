@@ -940,22 +940,41 @@ fn add_task_worktree_on(
 /// リポジトリの `.necoder/settings.json` の `task_sparse`（O20・A24）: 新しい Task の worktree に取り出す
 /// フォルダ（根からの相対パス・cone）。空・無い・読めない = 全部。`..` を含む物・`-` で始まる物は捨てる。
 pub fn repository_task_sparse_on(host: &dyn Host, root: &Path) -> Vec<String> {
+    repository_folder_list_on(host, root, "task_sparse")
+}
+
+/// リポジトリの `.necoder/settings.json` の `task_shared`（O20・A05）: 新しい Task の worktree に、統合先の
+/// 同じ場所のフォルダへのリンクを置くフォルダ（根からの相対パス）。`node_modules`・`.venv` のように作り直すと
+/// 重く、git が無視している物に使う。読み方は `task_sparse` と同じで、`.git` の中は捨てる。
+pub fn repository_task_shared_on(host: &dyn Host, root: &Path) -> Vec<String> {
+    repository_folder_list_on(host, root, "task_shared")
+        .into_iter()
+        .filter(|entry| entry.split('/').next() != Some(".git"))
+        .collect()
+}
+
+/// `.necoder/settings.json` の `key` にあるフォルダの並び（根からの相対・区切りは `/`）。空・無い・読めない
+/// = 空。`..` を含む物・`-` で始まる物は捨てる。
+fn repository_folder_list_on(host: &dyn Host, root: &Path, key: &str) -> Vec<String> {
     let Ok(content) = host.read_file(&root.join(".necoder").join("settings.json")) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&content.bytes) else {
         return Vec::new();
     };
-    let Some(entries) = value
-        .get("task_sparse")
-        .and_then(serde_json::Value::as_array)
-    else {
+    let Some(entries) = value.get(key).and_then(serde_json::Value::as_array) else {
         return Vec::new();
     };
     entries
         .iter()
         .filter_map(serde_json::Value::as_str)
-        .map(|entry| entry.trim().trim_matches('/').to_string())
+        .map(|entry| {
+            entry
+                .trim()
+                .replace('\\', "/")
+                .trim_matches('/')
+                .to_string()
+        })
         .filter(|entry| {
             !entry.is_empty()
                 && !entry.starts_with('-')
@@ -4086,6 +4105,109 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// O20・A05: `task_shared` のフォルダは、統合先の同じフォルダへのリンクとして新しい Task に置く。
+    /// `node_modules/` の書き方ではリンクは無視されないので `info/exclude` で無視させ、Task の
+    /// `git status` を汚さない。やり直しても同じ。git が無視しないリンクは残さない。worktree を消しても
+    /// 統合先の中身は残る。シンボリックリンクを使うので unix だけ（Windows は権限が要る）。
+    #[cfg(unix)]
+    #[test]
+    fn shared_folders_are_linked_into_new_tasks_and_kept_out_of_git() {
+        let base = scratch("task_shared");
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(root.join("tracked")).unwrap();
+        std::fs::create_dir_all(root.join(".necoder")).unwrap();
+        let git_in = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git_in(&root, &["init", "-q", "-b", "main"])
+            .status
+            .success()
+        {
+            return;
+        }
+        std::fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::write(
+            root.join(".necoder/settings.json"),
+            r#"{ "task_shared": ["node_modules", "tracked", "missing", "../evil", ".git/hooks"] }"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("tracked/a.txt"), "1\n").unwrap();
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-qm", "first"]);
+        std::fs::write(
+            root.join("node_modules/pkg/index.js"),
+            "module.exports = 1;\n",
+        )
+        .unwrap();
+        assert_eq!(
+            repository_task_shared_on(&LocalHost, &root),
+            vec!["node_modules", "tracked", "missing"],
+            "`..` と `.git` の中は読まない"
+        );
+
+        let (target, branch, failure) =
+            create_task_with_on(&LocalHost, &root, "Share deps", &TaskStart::default()).unwrap();
+        assert_eq!(failure, None);
+        let link = target.join("node_modules");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            root.join("node_modules")
+        );
+        assert_eq!(
+            std::fs::read_to_string(link.join("pkg/index.js")).unwrap(),
+            "module.exports = 1;\n",
+            "統合先と同じ中身"
+        );
+        assert!(
+            !target
+                .join("tracked")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "追跡しているフォルダは checkout の物のまま"
+        );
+        assert!(!target.join("missing").exists());
+        let status = git_in(&target, &["status", "--porcelain"]);
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout),
+            "",
+            "リンクは git status に出ない（commit されない）"
+        );
+
+        // やり直し（準備をやり直す）: 置き直さず、info/exclude にも 2 度書かない。
+        prepare_task_worktree_on(&LocalHost, &root, &target, &branch, false).unwrap();
+        let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.matches("/node_modules").count(), 1);
+        assert_eq!(exclude.matches(SHARED_EXCLUDE_HEADER).count(), 1);
+
+        // `.gitignore` の `!` が勝って無視できないなら、リンクを残さずにエラー。
+        std::fs::write(root.join(".gitignore"), "!node_modules\nnode_modules/\n").unwrap();
+        git_in(&root, &["commit", "-qam", "negate"]);
+        let (other, _, failure) =
+            create_task_with_on(&LocalHost, &root, "Negated", &TaskStart::default()).unwrap();
+        assert!(
+            failure.is_some_and(|failure| failure.contains("task_shared")),
+            "失敗として知らせる"
+        );
+        assert!(
+            other.join("node_modules").symlink_metadata().is_err(),
+            "git が無視しないリンクは残さない"
+        );
+
+        // リンクは無視されているので、force なしの削除（片付けと同じ）で消せる。リンク先（統合先の中身）は残る。
+        remove_worktree_on(&LocalHost, &root, &target, false).expect("汚れていない扱い");
+        assert!(root.join("node_modules/pkg/index.js").exists());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// O20: 準備スクリプトは今回だけ飛ばせる。失敗した準備は直してからやり直せる。
     /// 準備スクリプトは POSIX shell で流す物なので unix だけ（Windows のローカルは
     /// `has_posix_shell` が false で、流さずに「shell が要る」を返す）。
@@ -4859,10 +4981,236 @@ fn copy_worktree_includes_within_on(
     Ok(result)
 }
 
-/// 作ったばかりの Task worktree を使える状態にする: `.worktreeinclude` の持ち込み → 準備スクリプト
-/// （スクリプトは持ち込んだファイルを前提にできる・`run_setup = false` なら流さない）。持ち込みに
-/// 失敗しても準備は走らせ、両方の失敗をまとめて返す（台帳の failed に残る）。上限で写さなかった分は
-/// 失敗にしない（標準エラーに残す）。失敗した準備をやり直す時も同じ関数を呼ぶ（既にある物は写さない）。
+/// `task_shared` でリンクを置いた結果。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SharedFolders {
+    /// リンクを置いたフォルダ（根からの相対パス）。
+    pub linked: Vec<String>,
+    /// 置かなかったフォルダと理由（統合先に無い・git が無視していない・Task に既にある・親が無い）。
+    pub skipped: Vec<(String, &'static str)>,
+}
+
+/// `info/exclude` に足す行の見出し（同じ見出しは 2 度書かない）。
+const SHARED_EXCLUDE_HEADER: &str =
+    "# necoder: task_shared で Task に置いたフォルダへのリンク（git にはファイルに見えるのでここで無視する）";
+
+/// `task_shared`（[`repository_task_shared_on`]）のフォルダを、新しい worktree `target` に統合先 `main` の
+/// 同じフォルダへのリンクとして置く（O20・A05。Orca の `sharedDirectories`）。中身は統合先と同じ物で、
+/// Task の中で `npm install` すれば統合先のも変わる。
+///
+/// 置くのは、統合先にフォルダがあり、**統合先で git が無視している**物だけ（追跡しているフォルダは checkout で
+/// 入る）。Task に既にある物・親のフォルダが無い物（sparse の外）は置かない（上書きしない）。
+///
+/// リンクは git にはフォルダでなくファイルに見えるので、`node_modules/` のような書き方では無視されず、
+/// そのままだと `git add -A` でリンクが commit される。git が無視しないリンクは、共有の `info/exclude` に
+/// `/<フォルダ>` を足して無視させる。それでも無視されない（`.gitignore` の `!` が勝つ等）リンクは消して
+/// エラーにする＝ git が無視しないリンクは残さない。既にあるリンクは置き直さないので、やり直しても同じ。
+pub fn link_shared_folders_on(
+    host: &dyn Host,
+    main: &Path,
+    target: &Path,
+) -> Result<SharedFolders> {
+    let entries = repository_task_shared_on(host, main);
+    let mut result = SharedFolders::default();
+    if entries.is_empty() {
+        return Ok(result);
+    }
+    let target_host = host.host_for_project(target)?;
+    for entry in entries {
+        let source = main.join(&entry);
+        let destination = target.join(&entry);
+        if !host.metadata(&source).is_ok_and(|metadata| metadata.is_dir) {
+            result.skipped.push((entry, "統合先にフォルダが無い"));
+            continue;
+        }
+        if !git_ignores_on(host, main, &entry)? {
+            result.skipped.push((
+                entry,
+                "統合先で git が無視していない（追跡している物は checkout で入る）",
+            ));
+            continue;
+        }
+        if target_host.metadata(&destination).is_ok() {
+            result.skipped.push((entry, "Task に既にある"));
+            continue;
+        }
+        let has_parent = destination.parent().is_some_and(|parent| {
+            target_host
+                .metadata(parent)
+                .is_ok_and(|metadata| metadata.is_dir)
+        });
+        if !has_parent {
+            result
+                .skipped
+                .push((entry, "Task に親のフォルダが無い（task_sparse の外）"));
+            continue;
+        }
+        create_folder_link_on(host, &source, &destination)?;
+        result.linked.push(entry);
+    }
+    let mut unignored = Vec::new();
+    for entry in &result.linked {
+        if !git_ignores_on(host, target, entry)? {
+            unignored.push(entry.clone());
+        }
+    }
+    if unignored.is_empty() {
+        return Ok(result);
+    }
+    let excluded = exclude_locally_on(host, target, &unignored);
+    let mut still_seen = Vec::new();
+    for entry in &unignored {
+        if excluded.is_err() || !git_ignores_on(host, target, entry).unwrap_or(false) {
+            still_seen.push(entry.clone());
+        }
+    }
+    if still_seen.is_empty() {
+        return Ok(result);
+    }
+    for entry in &still_seen {
+        remove_folder_link_on(host, &target.join(entry))?;
+    }
+    let reason = match excluded {
+        Err(error) => format!("info/exclude に書けない: {error:#}"),
+        Ok(()) => "`.gitignore` の `!` などで無視されない".to_string(),
+    };
+    anyhow::bail!(
+        "task_shared: git が無視しないのでリンクを置きませんでした（commit されないように）: {}（{reason}）",
+        still_seen.join(", ")
+    )
+}
+
+/// `dir` の git が `entry`（`dir` からの相対パス）を無視しているか（`git check-ignore`）。
+fn git_ignores_on(host: &dyn Host, dir: &Path, entry: &str) -> Result<bool> {
+    let output = run_git(host, dir, ["check-ignore", "-q", "--", entry])?;
+    match output.status_code {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => anyhow::bail!("git check-ignore に失敗: {}", git_fail_message(&output)),
+    }
+}
+
+/// `dir` のリポジトリの共有の `info/exclude` に `/<entry>` を足す（無い行だけ・見出しは 1 度だけ）。
+/// commit されない、その機械だけの無視（`.gitignore` は変えない）。
+fn exclude_locally_on(host: &dyn Host, dir: &Path, entries: &[String]) -> Result<()> {
+    let output = run_git(
+        host,
+        dir,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    anyhow::ensure!(
+        output.success(),
+        "git rev-parse に失敗: {}",
+        git_fail_message(&output)
+    );
+    let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let exclude = common.join("info").join("exclude");
+    let existing = if host.metadata(&exclude).is_ok() {
+        Some(host.read_file(&exclude)?)
+    } else {
+        None
+    };
+    let mut text = existing
+        .as_ref()
+        .map(|content| String::from_utf8_lossy(&content.bytes).into_owned())
+        .unwrap_or_default();
+    let present: std::collections::HashSet<String> =
+        text.lines().map(|line| line.trim().to_string()).collect();
+    let missing: Vec<String> = entries
+        .iter()
+        .map(|entry| format!("/{entry}"))
+        .filter(|line| !present.contains(line))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !present.contains(SHARED_EXCLUDE_HEADER) {
+        text.push_str(SHARED_EXCLUDE_HEADER);
+        text.push('\n');
+    }
+    for line in missing {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    let condition = match existing {
+        Some(content) => host::WriteCondition::Matches(content.revision),
+        None => host::WriteCondition::NotExists,
+    };
+    host.write_file(&exclude, text.as_bytes(), condition)?;
+    Ok(())
+}
+
+/// `destination` に `source`（フォルダ）へのリンクを置く。SSH 先は `ln -s`。Windows のローカルは
+/// シンボリックリンク（開発者モードか管理者の権限が要る。無ければエラーで知らせる）。
+fn create_folder_link_on(host: &dyn Host, source: &Path, destination: &Path) -> Result<()> {
+    if host.is_remote() {
+        let parent = destination.parent().context("リンクの置き場が無い")?;
+        let spec = CommandSpec::new("ln", parent).args([
+            "-s".to_string(),
+            "--".to_string(),
+            source.to_string_lossy().into_owned(),
+            destination.to_string_lossy().into_owned(),
+        ]);
+        let output = host.run_command(&spec)?;
+        anyhow::ensure!(
+            output.success(),
+            "リンクを置けない: {}: {}",
+            destination.display(),
+            git_fail_message(&output)
+        );
+        return Ok(());
+    }
+    let hint = if cfg!(windows) {
+        "（Windows は開発者モードか管理者の権限が要る）"
+    } else {
+        ""
+    };
+    symlink_folder(source, destination)
+        .with_context(|| format!("リンクを置けない{hint}: {}", destination.display()))
+}
+
+#[cfg(windows)]
+fn symlink_folder(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(source, destination)
+}
+
+#[cfg(not(windows))]
+fn symlink_folder(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, destination)
+}
+
+/// [`create_folder_link_on`] で置いたリンクを消す（リンクだけ・リンク先の中身には触れない）。
+fn remove_folder_link_on(host: &dyn Host, link: &Path) -> Result<()> {
+    if host.is_remote() {
+        let parent = link.parent().context("リンクの置き場が無い")?;
+        let spec = CommandSpec::new("rm", parent)
+            .args(["--".to_string(), link.to_string_lossy().into_owned()]);
+        let output = host.run_command(&spec)?;
+        anyhow::ensure!(
+            output.success(),
+            "リンクを消せない: {}: {}",
+            link.display(),
+            git_fail_message(&output)
+        );
+        return Ok(());
+    }
+    // Windows のフォルダへのリンクはフォルダとして消す（どちらも中身はたどらない）。
+    let removed = if cfg!(windows) {
+        std::fs::remove_dir(link)
+    } else {
+        std::fs::remove_file(link)
+    };
+    removed.with_context(|| format!("リンクを消せない: {}", link.display()))
+}
+
+/// 作ったばかりの Task worktree を使える状態にする: `task_shared` のリンク → `.worktreeinclude` の持ち込み →
+/// 準備スクリプト（スクリプトはリンクと持ち込んだファイルを前提にできる・`run_setup = false` なら流さない）。
+/// リンクや持ち込みに失敗しても準備は走らせ、失敗をまとめて返す（台帳の failed に残る）。上限で写さなかった分・
+/// 置かなかったリンクは失敗にしない（標準エラーに残す）。失敗した準備をやり直す時も同じ関数を呼ぶ（既にある
+/// 物は写さない・置き直さない）。
 pub fn prepare_task_worktree_on(
     host: &dyn Host,
     main: &Path,
@@ -4870,6 +5218,16 @@ pub fn prepare_task_worktree_on(
     branch: &str,
     run_setup: bool,
 ) -> Result<()> {
+    // リンクを先に置く（`.worktreeinclude` がリンクの中へ 1 つずつ写さないように）。
+    let shared = link_shared_folders_on(host, main, target);
+    if let Ok(shared) = &shared {
+        for (entry, reason) in &shared.skipped {
+            eprintln!(
+                "task_shared: {entry} は置きませんでした（{reason}）: {}",
+                target.display()
+            );
+        }
+    }
     let includes = copy_worktree_includes_on(host, main, target);
     if let Ok(includes) = &includes {
         if includes.over_limit > 0 {
@@ -4886,15 +5244,20 @@ pub fn prepare_task_worktree_on(
     } else {
         Ok(())
     };
-    match (includes, setup) {
-        (Ok(_), Ok(())) => Ok(()),
-        (Err(error), Ok(())) => {
-            Err(error.context(".worktreeinclude のファイルを持ち込めませんでした"))
-        }
-        (Ok(_), Err(error)) => Err(error),
-        (Err(include_error), Err(setup_error)) => Err(anyhow::anyhow!(
-            ".worktreeinclude のファイルを持ち込めませんでした: {include_error:#}\n{setup_error:#}"
-        )),
+    let failures: Vec<String> = [
+        shared.err().map(|error| format!("{error:#}")),
+        includes
+            .err()
+            .map(|error| format!(".worktreeinclude のファイルを持ち込めませんでした: {error:#}")),
+        setup.err().map(|error| format!("{error:#}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(failures.join("\n")))
     }
 }
 
