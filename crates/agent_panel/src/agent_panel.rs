@@ -25,6 +25,7 @@ use acp_client::{
     PermissionDiff, PermissionKind, PlanItem, PlanStatus, SessionCommand, ToolCallInfo, TurnEnd,
 };
 mod chat;
+mod history;
 mod idle;
 mod recipes;
 mod remote;
@@ -175,6 +176,9 @@ enum Entry {
     Agent(SharedString),
     /// checkpoint（この時点へ戻せる・M12-2）。承認直前の変更前内容が blob に入っている。
     Checkpoint { id: i64, label: SharedString },
+    /// 会話の区切りの知らせ（O15）: 「以前の N 件は省略」（再生した履歴の頭）・「新しいセッションで
+    /// 続けています」。会話の本文ではない＝全文検索・引き継ぎの前置き・digest に入れない。
+    Notice(SharedString),
 }
 
 /// message rail（O17）に印を出すのは、ユーザーの発話がこの数以上ある時だけ（少なければ一覧で足りる）。
@@ -1171,6 +1175,12 @@ struct Thread {
     last_active_at_ms: i64,
     /// ターンのトークンとコストの数え方（O11）。ターンが終わるたびに台帳 `turn_usage` へ書く。
     usage: usage::CostMeter,
+    /// エージェント側の過去の会話を開いたばかりで、`session/load` の再生を待っている（O15）。
+    /// 起動時に `replay_history` を頼み、再生を transcript に積んだら（`SessionStarted` で）下ろす。
+    replay_pending: bool,
+    /// 「新しいセッションで続ける」の前置き（O15）。次の通常の送信（slash コマンドを除く）の頭に
+    /// 1 回だけ付けて、送れたら捨てる。保存しない（再起動したら付かない＝人が言い直せば足りる）。
+    handoff_preamble: Option<String>,
 }
 
 impl Thread {
@@ -1240,6 +1250,8 @@ impl Thread {
             session_resumable: false,
             last_active_at_ms: 0,
             usage: usage::CostMeter::default(),
+            replay_pending: false,
+            handoff_preamble: None,
         }
     }
 
@@ -1791,7 +1803,8 @@ fn entry_plain_text(entry: &Entry) -> String {
         Entry::User(text)
         | Entry::LedgerEvent(text)
         | Entry::Thinking(text)
-        | Entry::Agent(text) => text.to_string(),
+        | Entry::Agent(text)
+        | Entry::Notice(text) => text.to_string(),
         Entry::Step {
             tool, args, result, ..
         } => match result {
@@ -2080,6 +2093,8 @@ pub struct AgentPanel {
     pressed_link: Option<(RegionId, Range<usize>)>,
     /// composer 下部の選択ピルのうち開いているメニュー（None = 閉）。
     open_menu: Option<Selector>,
+    /// スレッドタブ（一覧の行）の右クリックメニュー（O15。None = 閉）。
+    thread_menu: Option<history::ThreadMenu>,
     /// Add context の候補（プロジェクトのファイル相対パス。workspace が渡す）と開閉。
     context_files: Vec<SharedString>,
     context_menu_open: bool,
@@ -2556,6 +2571,7 @@ PYEOF"#;
             hovered_link: None,
             pressed_link: None,
             open_menu: None,
+            thread_menu: None,
             context_files: Vec::new(),
             context_menu_open: false,
             context_query: String::new(),
@@ -2736,33 +2752,10 @@ PYEOF"#;
                 if tokens_limit > 0 {
                     thread.tokens_max = tokens_limit as u32;
                 }
-                let turns = storage.load_recent_turns(&id, 200).unwrap_or_default();
-                thread.entries = turns
-                    .into_iter()
-                    .map(|(role, content)| match role.as_str() {
-                        "user" => Entry::User(content.into()),
-                        "ledger_event" => Entry::LedgerEvent(content.into()),
-                        "thinking" => Entry::Thinking(content.into()),
-                        "step" => Entry::Step {
-                            id: None,
-                            tool: content.into(),
-                            args: SharedString::default(),
-                            result: None,
-                            result_lines: 0,
-                            diffs: Vec::new(),
-                            parent: None,
-                        },
-                        "checkpoint" => {
-                            let (id, label) =
-                                content.split_once('\t').unwrap_or(("0", "checkpoint"));
-                            Entry::Checkpoint {
-                                id: id.parse().unwrap_or(0),
-                                label: label.to_string().into(),
-                            }
-                        }
-                        _ => Entry::Agent(content.into()),
-                    })
-                    .collect();
+                let turns = storage
+                    .load_recent_turns(&id, RESTORED_TURNS)
+                    .unwrap_or_default();
+                thread.entries = turns.into_iter().map(entry_from_turn).collect();
                 thread.persisted_entries = thread.entries.len();
                 threads.push(thread);
             }
@@ -2823,6 +2816,7 @@ PYEOF"#;
                 Entry::Step { tool, .. } => ("step", tool.to_string()),
                 Entry::Agent(text) => ("agent", text.to_string()),
                 Entry::Checkpoint { id, label } => ("checkpoint", format!("{id}\t{label}")),
+                Entry::Notice(text) => ("notice", text.to_string()),
             };
             if let Err(error) = storage.insert_turn(&thread.id, role, &content) {
                 eprintln!("turn の永続化に失敗: {error:#}");
@@ -3489,6 +3483,7 @@ PYEOF"#;
                     }
                     Entry::Agent(text) => ("⏺", text.clone()),
                     Entry::Checkpoint { label, .. } => ("⟲", label.clone()),
+                    Entry::Notice(text) => ("—", text.clone()),
                 };
                 (SharedString::from(bullet), text)
             })
@@ -4178,6 +4173,11 @@ PYEOF"#;
     ) {
         let keystroke = &event.keystroke;
         if keystroke.key == "escape" {
+            // スレッドのメニューが開いていれば、まずそれを閉じる（ターンは止めない）。
+            if self.close_thread_menu(cx) {
+                cx.stop_propagation();
+                return;
+            }
             // 検索バーが開いていれば、まずそれを閉じる（読むのを邪魔している物から順に畳む）。
             if self.transcript_search_open() {
                 self.close_transcript_search(window, cx);
@@ -4672,6 +4672,29 @@ PYEOF"#;
         last_input_at_ms: Option<i64>,
         cx: &mut Context<Self>,
     ) -> Option<usize> {
+        self.open_stored_thread(
+            id,
+            name,
+            color_index,
+            created_at_ms,
+            last_input_at_ms,
+            RESTORED_TURNS,
+            cx,
+        )
+    }
+
+    /// [`Self::open_thread_from_history`] の本体。`turn_limit` = 復元する直近の turn の数。
+    #[allow(clippy::too_many_arguments)]
+    fn open_stored_thread(
+        &mut self,
+        id: &str,
+        name: &str,
+        color_index: usize,
+        created_at_ms: i64,
+        last_input_at_ms: Option<i64>,
+        turn_limit: i64,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
         if let Some(index) = self.threads.iter().position(|thread| thread.id == id) {
             self.switch_thread(index, cx);
             return Some(index);
@@ -4679,7 +4702,7 @@ PYEOF"#;
         let storage = self.storage.clone()?;
         self.save_active_draft(cx);
         self.unarchive(id);
-        let mut thread = thread_from_storage(&storage, id, name, color_index, cx);
+        let mut thread = thread_from_storage(&storage, id, name, color_index, turn_limit, cx);
         thread.created_at_ms = created_at_ms;
         thread.last_input_at_ms = last_input_at_ms;
         self.threads.push(thread);
@@ -6223,6 +6246,16 @@ PYEOF"#;
         {
             context_prefix.push_str(context);
         }
+        // 「新しいセッションで続ける」の前置き（O15）は、次の通常の送信の頭に 1 回だけ付ける
+        // （表示は人の本文のまま）。送れたら捨てる。
+        let handoff = self
+            .threads
+            .get(thread_index)
+            .filter(|_| !is_slash_command)
+            .and_then(|thread| thread.handoff_preamble.clone());
+        if let Some(preamble) = &handoff {
+            context_prefix.insert_str(0, &format!("{preamble}\n\n"));
+        }
         let full_prompt = if context_prefix.is_empty() {
             prompt.clone()
         } else {
@@ -6329,6 +6362,10 @@ PYEOF"#;
                 thread.command_tx = None;
             }
             self.fail_turn(thread_index, &i18n::t!("agent.err_session_lost"), cx);
+        } else if handoff.is_some() {
+            if let Some(thread) = self.threads.get_mut(thread_index) {
+                thread.handoff_preamble = None;
+            }
         }
     }
 
@@ -6422,7 +6459,8 @@ PYEOF"#;
                 resume: thread.acp_session_id.clone(),
                 mcp_servers,
                 preset: acp_client::preset::SessionPreset::default(),
-                replay_history: false,
+                // エージェント側の過去の会話を開いた直後だけ、再生された履歴を受け取る（O15）。
+                replay_history: thread.replay_pending,
             })
             .unwrap_or_default();
         // claude.ai のコネクタを読み込まない設定なら、エージェントのプロセスへそう伝える
@@ -6562,6 +6600,7 @@ PYEOF"#;
         let elicitation_waiting = matches!(event, AgentEvent::ElicitationRequest { .. });
         let mut files_touched: Option<(Vec<std::path::PathBuf>, Hsla)> = None;
         let mut session_id_changed = false;
+        let mut history_replayed = false;
         match event {
             AgentEvent::SessionStarted {
                 session_id,
@@ -6571,6 +6610,8 @@ PYEOF"#;
                 thread.session_resumable = resumable;
                 // 目標への操作は新しいセッションの広告で決め直す（届かなければ操作なし・O17）。
                 thread.goal_actions.clear();
+                // 再生を頼んだ起動はここで終わり（引き継げなかった時も下ろす＝次の起動では頼まない）。
+                thread.replay_pending = false;
                 // 起こしたばかりのセッション（先張りを含む）を、別スレッドの見回りが巻き込まないように。
                 thread.last_active_at_ms = now_unix_ms();
                 // 引き継げたか/引き継げなかったかの一言。前回 id が無い新規スレッドは黙って始める。
@@ -6579,6 +6620,9 @@ PYEOF"#;
                     Some(SharedString::from(i18n::t!("agent.session_resumed")))
                 } else if had_previous {
                     Some(SharedString::from(i18n::t!("agent.session_fresh")))
+                } else if thread.handoff_preamble.is_some() {
+                    // 「新しいセッションで続ける」の一言は、前置きを送る（次のターン）まで残す（O15）。
+                    thread.session_note.take()
                 } else {
                     None
                 };
@@ -6612,8 +6656,25 @@ PYEOF"#;
             }
             // 上で先に畳んでいる（借用の外で処理する必要があるため）。
             AgentEvent::SessionLost => {}
-            // 再生を頼むスレッドはまだ無い（O15 の UI で受ける）。
-            AgentEvent::HistoryReplayed { .. } => {}
+            // エージェント側の過去の会話の再生（O15）。開いた時点の transcript の**前**に積む
+            // （load を待つ間に送った発話があっても順序を崩さない）。積むのは 1 つのスレッドにつき
+            // 1 回だけ — 頼んでいないのに届いた物・2 回目は捨てる（同じ会話を二重に載せない）。
+            // 再生の本文は acp_client が live のイベントとしては流さないので、ここ以外から入らない。
+            AgentEvent::HistoryReplayed { items, omitted } => {
+                if std::mem::take(&mut thread.replay_pending) {
+                    let mut entries = history::entries_from_replay(items, omitted);
+                    entries.append(&mut thread.entries);
+                    thread.entries = entries;
+                    thread.last_prompt = last_prompt_from_entries(&thread.entries);
+                    if let Some(tail) = thread.entries.iter().rev().find_map(|entry| match entry {
+                        Entry::Agent(text) => digest_tail(text),
+                        _ => None,
+                    }) {
+                        thread.digest = Some(tail);
+                    }
+                    history_replayed = true;
+                }
+            }
             AgentEvent::TurnStarted => {
                 // ACP が実際に prompt を送った＝ここから生成中。楽観 UI が取りこぼした場合
                 // （deferred から走った 2 本目など）でもここで確実に running を立て直す。
@@ -7105,6 +7166,21 @@ PYEOF"#;
         }
         if session_id_changed {
             self.persist_session_id(thread_index);
+        }
+        if history_replayed {
+            // 再生した会話は necoder のスレッドの本文として残す（再起動後も DB から読める・全文検索に
+            // 載る）。ターンの途中なら、途切れた本文を残さないよう終わった時の保存に任せる。
+            if self
+                .threads
+                .get(thread_index)
+                .is_some_and(|thread| !thread.running)
+            {
+                self.persist_thread(thread_index);
+            }
+            if thread_index == active {
+                self.reset_transcript_list(true);
+                self.refresh_transcript_search(cx);
+            }
         }
         if let Some((files, color)) = files_touched {
             cx.emit(PanelEvent::FilesTouched { files, color });
@@ -7750,6 +7826,14 @@ PYEOF"#;
                                     this.focus_composer(window, cx); // ⌘W が Agent に効くようフォーカスを寄せる
                                 }),
                             )
+                            // 右クリック = スレッドのメニュー（名前を変更 / 新しいセッションで続ける / 閉じる・O15）。
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_thread_menu(index, event.position, cx);
+                                }),
+                            )
                             .tooltip(Tooltip::text(
                                 i18n::t!("agent.rename_thread_tip"),
                                 theme.clone(),
@@ -8065,6 +8149,13 @@ PYEOF"#;
                         }
                         this.switch_thread(index, cx);
                         this.focus_composer(window, cx);
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.open_thread_menu(index, event.position, cx);
                     }),
                 )
         });
@@ -8912,6 +9003,23 @@ PYEOF"#;
                     "◇ {}\n{text}",
                     i18n::t!("captain.ledger_event")
                 )))
+                .into_any_element(),
+            // 会話の区切り（O15）: 細い罫線に挟んだ一言。色は中立（識別色を使わない＝UI-SPEC §1.3）。
+            Entry::Notice(text) => div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .py(px(2.))
+                .child(div().flex_1().h(px(1.)).bg(theme.border))
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(px(360.))
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .child(text.clone()),
+                )
+                .child(div().flex_1().h(px(1.)).bg(theme.border))
                 .into_any_element(),
             // checkpoint 行（⟲ この時点へ戻す・M12-2）。クリックで blob から全ファイルを書き戻す。
             Entry::Checkpoint { id, label } => {
@@ -11498,6 +11606,8 @@ impl Render for AgentPanel {
             })
             // 狭いタブ行とは独立した入力面を最後に重ね、IME・ボタン・Esc を常に見える状態にする。
             .children(self.render_rename_dialog(cx))
+            // スレッドの右クリックメニュー（窓の座標で最前面に出す・O15）。
+            .children(self.render_thread_menu(cx))
     }
 }
 
@@ -12384,12 +12494,13 @@ fn apply_thread_defaults(thread: &mut Thread, cx: &App) {
     apply_agent_sticky(thread, cx);
 }
 
-/// storage の1 turn 行 (role, content) を [`Entry`] へ（復元・#5。set_storage と同じ対応）。
+/// storage の1 turn 行 (role, content) を [`Entry`] へ（起動時の復元と履歴からの復元・#5）。
 fn entry_from_turn((role, content): (String, String)) -> Entry {
     match role.as_str() {
         "user" => Entry::User(content.into()),
         "ledger_event" => Entry::LedgerEvent(content.into()),
         "thinking" => Entry::Thinking(content.into()),
+        "notice" => Entry::Notice(content.into()),
         "step" => Entry::Step {
             id: None,
             tool: content.into(),
@@ -12420,18 +12531,24 @@ fn last_prompt_from_entries(entries: &[Entry]) -> Option<SharedString> {
     })
 }
 
+/// 復元で transcript に積む turn の数（直近から）。全文検索の一致がこれより前にある時だけ広げる。
+const RESTORED_TURNS: i64 = 200;
+
 fn thread_from_storage(
     storage: &storage::Storage,
     id: &str,
     name: &str,
     color_index: usize,
+    turn_limit: i64,
     cx: &App,
 ) -> Thread {
     let mut thread = Thread::empty(name.to_string(), color_index);
     // 復元スレッドも「前回選んだモデル/思考量」で開く（毎回 fable-5/high に戻らない）。
     apply_thread_defaults(&mut thread, cx);
     thread.id = id.to_string();
-    let turns = storage.load_recent_turns(id, 200).unwrap_or_default();
+    let turns = storage
+        .load_recent_turns(id, turn_limit)
+        .unwrap_or_default();
     thread.entries = turns.into_iter().map(entry_from_turn).collect();
     thread.persisted_entries = thread.entries.len();
     // 「頼んだこと」は復元時に turns の最後の user 発話から引き直す（DB に列を足さない）。
@@ -12526,6 +12643,8 @@ fn seed_threads() -> Vec<Thread> {
         session_resumable: false,
         last_active_at_ms: 0,
         usage: usage::CostMeter::default(),
+        replay_pending: false,
+        handoff_preamble: None,
         entries: vec![
             Entry::User("MVPのバッファ、ropey と Zed の sum-tree どっちに寄せるべき？".into()),
             Entry::Thinking(
