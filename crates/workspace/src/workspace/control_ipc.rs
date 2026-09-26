@@ -124,6 +124,7 @@ fn record_json(record: &storage::TaskSpaceRecord) -> serde_json::Value {
         "head_oid": record.head_oid,
         "result_summary": record.result_summary,
         "depends_on": record.depends_on,
+        "parent": record.parent,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
     })
@@ -659,6 +660,10 @@ impl Workspace {
                         .map(str::to_string),
                     result_summary: None,
                     depends_on: Vec::new(),
+                    parent: params
+                        .get("parent")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
                     created_at: params
                         .get("created_at")
                         .and_then(serde_json::Value::as_i64)

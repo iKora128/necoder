@@ -334,6 +334,9 @@ fleet:
   details_state: Kind and state
   details_branch: Branch
   details_base: Started from
+  details_parent: Parent Task
+  details_parent_closed: (a closed Task)
+  details_children: Child Tasks
   details_path: Location
   details_created: Created
   details_threads: Threads
@@ -436,6 +439,9 @@ fleet:
   selection_cleanup_tip: "Open the cleanup screen with these Tasks selected (it counts what you would lose before deleting)"
   selection_clear_tip: Clear the selection
   cleanup_sleep_sub: "Stop %{count} idle agents to free memory. Conversations stay and resume on your next message"
+  cleanup_sleep_family_sub: "Stop %{count} idle agents, including those of %{children} child Tasks, to free memory. Conversations stay and resume on your next message"
+  cleanup_family: Clean up with child Tasks…
+  cleanup_family_sub: "Open Clean up with this Task and its %{children} child Tasks marked (counts what would be lost first)"
   cleanup_archive: Finish Task
   cleanup_archive_sub: Removes it from fleet and herd. The worktree stays on disk
   cleanup_remove_worktree: Delete worktree
@@ -515,6 +521,7 @@ rail:
   add_prompt: Open
   menu_new_window: Open in new window
   menu_details: Details…
+  menu_new_child_task: New Task from this Task…
   menu_copy_path: Copy path
   menu_copy_branch: Copy branch name
   copied: "Copied: %{text}"

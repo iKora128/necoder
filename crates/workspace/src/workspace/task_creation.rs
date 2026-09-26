@@ -28,6 +28,8 @@ pub(crate) struct TaskCreation {
     pub(crate) prompt: String,
     pub(crate) start: project::TaskStart,
     pub(crate) task: FanoutTask,
+    /// 起点が別の Task のブランチなら、その Task（O21・A07・親子）。作れたら子の台帳に残す。
+    pub(crate) parent: Option<SpaceId>,
 }
 
 /// 作成中の Task がどの段にいるか。
@@ -338,6 +340,10 @@ impl Workspace {
             Some(suffix) => format!("{name} · {suffix}"),
             None => name,
         };
+        let parent = start
+            .base
+            .as_deref()
+            .and_then(|base| self.task_for_branch(repository_key, base));
         self.chrome.task_creations.push(TaskCreation {
             id,
             repository_key: repository_key.to_string(),
@@ -347,8 +353,25 @@ impl Workspace {
             prompt: prompt.to_string(),
             start: start.clone(),
             task,
+            parent,
         });
         id
+    }
+
+    /// 起点のブランチ名が、このリポジトリのどの Task のブランチか（O21・A07・親子）。
+    /// `refs/heads/` 付きでも同じ。統合先・別のリポジトリ・コミットの指定は親にしない。
+    pub(crate) fn task_for_branch(&self, repository_key: &str, base: &str) -> Option<SpaceId> {
+        let base = base.trim();
+        let base = base.strip_prefix("refs/heads/").unwrap_or(base);
+        self.project_sessions
+            .projects
+            .iter()
+            .find(|slot| {
+                slot.repository_key() == repository_key
+                    && !slot.task_space.is_integration()
+                    && slot.branch.as_deref().or(slot.worktree_branch.as_deref()) == Some(base)
+            })
+            .map(|slot| slot.task_space.id.clone())
     }
 
     /// 次の段へ進める。行が無い・取り消されていたら false（作らない / 流さない）。
@@ -418,9 +441,8 @@ impl Workspace {
             .position(|creation| creation.id == id);
         let cancelled =
             position.is_none_or(|position| self.chrome.task_creations[position].cancelled);
-        if let Some(position) = position {
-            self.chrome.task_creations.remove(position);
-        }
+        let parent =
+            position.and_then(|position| self.chrome.task_creations.remove(position).parent);
         cx.notify();
         if cancelled {
             self.discard_created_task(host.clone(), root.to_path_buf(), created, cx);
@@ -434,6 +456,7 @@ impl Workspace {
             failure,
             prompt,
             task,
+            parent,
             cx,
         )
     }
@@ -913,6 +936,76 @@ mod tests {
             "task/fix-login-redirect"
         );
         assert!(!branch_exists(&repo, "task/task"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// O21・A07: 起点に別の Task のブランチを選んで作った Task は、その Task の子として台帳に残る。
+    #[gpui::test]
+    fn a_task_cut_from_another_task_becomes_its_child(cx: &mut gpui::TestAppContext) {
+        let Some((base, repo)) = scratch_repository("task_parent") else {
+            return;
+        };
+        cx.update(|cx| settings::init(Some(base.join("settings.json")), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![repo.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.create_prompted_tasks(
+                String::new(),
+                project::TaskStart::default(),
+                vec![task("API", None)],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let parent = workspace.update_in(cx, |workspace, window, cx| {
+            let parent = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .find(|slot| slot.branch.as_deref() == Some("task/api"))
+                .map(|slot| slot.task_space.id.clone())
+                .expect("task/api の Task ができる");
+            // 統合先から切る（親の Task を選んでいる時でも、作る場所は統合先）。
+            workspace.switch_project(0, window, cx);
+            workspace.create_prompted_tasks(
+                String::new(),
+                project::TaskStart {
+                    base: Some("task/api".to_string()),
+                    ..Default::default()
+                },
+                vec![task("API tests", None)],
+                cx,
+            );
+            assert_eq!(
+                workspace
+                    .chrome
+                    .task_creations
+                    .first()
+                    .and_then(|creation| creation.parent.clone()),
+                Some(parent.clone()),
+                "作る前に親が決まる（やり直しも同じ起点から）"
+            );
+            parent
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            let child = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .find(|slot| slot.branch.as_deref() == Some("task/api-tests"))
+                .expect("task/api-tests の Task ができる");
+            assert_eq!(child.task_space.parent.as_ref(), Some(&parent));
+            assert_eq!(
+                child.task_space.to_record(child).parent.as_deref(),
+                Some(parent.0.as_str()),
+                "台帳に書く"
+            );
+        });
         std::fs::remove_dir_all(&base).ok();
     }
 

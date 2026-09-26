@@ -335,6 +335,9 @@ fleet:
   details_state: 種類と状態
   details_branch: ブランチ
   details_base: 起点
+  details_parent: 親の Task
+  details_parent_closed: （閉じた Task）
+  details_children: 子の Task
   details_path: 場所
   details_created: 作った
   details_threads: スレッド
@@ -437,6 +440,9 @@ fleet:
   selection_cleanup_tip: "片付けの画面を、選んだ Task に印を付けて開く（失うものを数えてから消す）"
   selection_clear_tip: 選択を外す
   cleanup_sleep_sub: "静かなエージェント %{count} 体を止めてメモリを空ける。会話は残り、次に送ると続きから"
+  cleanup_sleep_family_sub: "静かなエージェント %{count} 体を止めてメモリを空ける（子の Task %{children} 本も）。会話は残り、次に送ると続きから"
+  cleanup_family: 子の Task ごと片付ける…
+  cleanup_family_sub: "片付けの画面を、この Task と子の Task %{children} 本に印を付けて開く（失うものを数えてから消す）"
   cleanup_archive: Task を終了
   cleanup_archive_sub: 編隊と herd から消す。worktree はディスクに残る
   cleanup_remove_worktree: worktree を削除
@@ -516,6 +522,7 @@ rail:
   add_prompt: 開く
   menu_new_window: 新しいウィンドウで開く
   menu_details: 詳細…
+  menu_new_child_task: この Task から新しい Task…
   menu_copy_path: パスをコピー
   menu_copy_branch: ブランチ名をコピー
   copied: "コピーしました: %{text}"

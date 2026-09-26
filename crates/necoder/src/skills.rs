@@ -473,7 +473,7 @@ necoder {version} · この本文は {binary} が、この版の実装から出�
 
 ## 出力と失敗
 
-- fleet の結果は整形した JSON（標準出力）。Task の主な項目: `id` `root` `branch` `title` `phase` `result_summary` `depends_on`
+- fleet の結果は整形した JSON（標準出力）。Task の主な項目: `id` `root` `branch` `title` `phase` `result_summary` `depends_on` `parent`（この Task を切った元の Task の id）
 - 失敗すると標準エラーに理由を出し、終了コード 1
 ",
         open = crate::cli::OPEN_ARGUMENTS,

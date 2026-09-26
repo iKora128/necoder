@@ -94,13 +94,47 @@ impl Workspace {
             label: i18n::t!(key),
             value,
         };
-        Some(vec![
+        // 親子（O21・A07）: どの Task から切ったか・この Task から切った Task。無ければ行を出さない。
+        let title_of = |id: &SpaceId| {
+            self.project_sessions
+                .projects
+                .iter()
+                .find(|slot| slot.task_space.id == *id)
+                .map(|slot| slot.task_space.title.to_string())
+        };
+        let parent = space.parent.as_ref().map(|parent| {
+            title_of(parent).unwrap_or_else(|| i18n::t!("fleet.details_parent_closed"))
+        });
+        let children: Vec<String> = self
+            .project_sessions
+            .projects
+            .iter()
+            .filter(|child| {
+                child.task_space.parent.as_ref() == Some(&space.id)
+                    && child.task_space.phase != TaskPhase::Archived
+            })
+            .map(|child| child.task_space.title.to_string())
+            .collect();
+        let family: Vec<DetailRow> = parent
+            .map(|parent| row("fleet.details_parent", parent))
+            .into_iter()
+            .chain((!children.is_empty()).then(|| {
+                row(
+                    "fleet.details_children",
+                    format!("{}（{}）", children.len(), children.join("・")),
+                )
+            }))
+            .collect();
+        let mut rows = vec![
             row(
                 "fleet.details_state",
                 format!("{kind} · {}", super::cleanup::phase_label(space.phase)),
             ),
             row("fleet.details_branch", branch),
             row("fleet.details_base", base),
+        ];
+        rows.extend(family);
+        rows.extend([
             row("fleet.details_path", tilde_path(slot.worktree.root())),
             row(
                 "fleet.details_created",
@@ -116,7 +150,8 @@ impl Workspace {
                     agent_panel::human_tokens(tokens).to_string()
                 },
             ),
-        ])
+        ]);
+        Some(rows)
     }
 
     /// 詳細のダイアログ（中央・幅 420）。外側か「閉じる」で閉じる。

@@ -50,6 +50,7 @@
 | **project**（レールの 1 枠） | `ProjectSlot` / `slot` | プロジェクト | Project |
 | 長寿命 UI 束（1 project 分） | `ProjectSession` | — | — |
 | **TaskSpace**（Fleet の隔離作業単位） | `TaskSpace` / `SpaceId` | Task | Task |
+| ↳ **親の Task / 子の Task**（起点に別の Task のブランチを選んで作った Task は、その Task の子。依存待ち `depends_on` とは別） | `TaskSpace::parent` / `task_parents` / `nest_task_rows` / `task_descendants` | 親の Task / 子の Task | Parent Task / Child Tasks |
 | **IntegrationSpace**（保護された統合先） | `SpaceKind::Integration`（P0 で phase から分離） | Integration | Integration |
 | ↳ 統合先の選び方（同じリポジトリに統合先扱いが複数ある時はメインの作業ツリー） | `integration_slot_for` / `TaskSpace::linked` | — | — |
 | **リソース**（necoder 本体と子プロセスのメモリをプロジェクト / Task ごとに見る画面・使っていないエージェントを止める・O22） | `resources` / `ShowResources` / `AgentPanel::stop_quiet_agents` | リソース / 使っていないエージェントを止める | Resources / Stop idle agents |

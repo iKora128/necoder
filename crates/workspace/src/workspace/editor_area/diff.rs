@@ -510,6 +510,7 @@ mod tests {
             result_summary: None,
             created_at_ms: 0,
             linked: true,
+            parent: None,
         };
         assert_eq!(
             space.diff_base(),

@@ -347,6 +347,7 @@ impl Workspace {
                         slot.task_space.result_summary =
                             record.result_summary.clone().map(SharedString::from);
                         slot.task_space.created_at_ms = record.created_at;
+                        slot.task_space.parent = record.parent.clone().map(SpaceId);
                     } else {
                         missing.push(slot.task_space.to_record(slot));
                     }

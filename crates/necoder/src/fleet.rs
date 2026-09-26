@@ -45,6 +45,7 @@ fn record_json(record: &TaskSpaceRecord) -> Value {
         "head_oid": record.head_oid,
         "result_summary": record.result_summary,
         "depends_on": record.depends_on,
+        "parent": record.parent,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
     })
@@ -270,6 +271,7 @@ pub(crate) fn create_task(root: &Path, title: &str) -> Result<TaskSpaceRecord> {
         head_oid: Some(base_oid),
         result_summary: setup_failure,
         depends_on: Vec::new(),
+        parent: None,
         created_at: now,
         updated_at: now,
     };
@@ -358,6 +360,10 @@ fn record_from_json(value: &Value) -> Result<TaskSpaceRecord> {
                     .collect()
             })
             .unwrap_or_default(),
+        parent: value
+            .get("parent")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         created_at: value.get("created_at").and_then(Value::as_i64).unwrap_or(0),
         updated_at: value.get("updated_at").and_then(Value::as_i64).unwrap_or(0),
     })
@@ -908,6 +914,7 @@ mod tests {
             head_oid: None,
             result_summary: None,
             depends_on: Vec::new(),
+            parent: None,
             created_at: 0,
             updated_at: 0,
         }

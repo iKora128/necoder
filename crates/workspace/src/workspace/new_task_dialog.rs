@@ -80,6 +80,38 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 「この Task から新しい Task…」（O21・A07）: その Task のブランチを起点に入れた ＋ Task を開く
+    /// （詳細を開いて見せる）。作った Task はその Task の子になる。別のプロジェクトならそこへ移ってから。
+    pub(crate) fn open_new_task_from(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(branch) = self
+            .project_sessions
+            .projects
+            .get(index)
+            .filter(|slot| !slot.task_space.is_integration())
+            .and_then(|slot| slot.branch.clone().or_else(|| slot.worktree_branch.clone()))
+        else {
+            return;
+        };
+        if index != self.project_sessions.active || self.chat_mode() {
+            self.switch_project(index, window, cx);
+        }
+        self.chrome.new_task = None;
+        self.open_new_task(window, cx);
+        let Some(dialog) = self.chrome.new_task.as_mut() else {
+            return;
+        };
+        dialog.details_open = true;
+        dialog
+            .base_editor
+            .update(cx, |editor, cx| editor.set_plain_text(&branch, cx));
+        cx.notify();
+    }
+
     /// テスト用: ＋ Task の入力欄にフォーカスがあるか（ダイアログが無ければ false）。
     #[cfg(test)]
     pub(crate) fn new_task_input_focused(&self, window: &Window, cx: &App) -> bool {
@@ -92,6 +124,17 @@ impl Workspace {
     #[cfg(test)]
     pub(crate) fn new_task_input_text(&self, cx: &App) -> Option<String> {
         self.chrome.new_task.as_ref().map(|dialog| dialog.editor.read(cx).plain_text())
+    }
+
+    /// テスト用: ＋ Task の起点欄の中身と、詳細を開いているか（ダイアログが無ければ None）。
+    #[cfg(test)]
+    pub(crate) fn new_task_base(&self, cx: &App) -> Option<(String, bool)> {
+        self.chrome.new_task.as_ref().map(|dialog| {
+            (
+                dialog.base_editor.read(cx).plain_text(),
+                dialog.details_open,
+            )
+        })
     }
 
     fn cancel_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
