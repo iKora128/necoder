@@ -1,6 +1,6 @@
 # ORCA-PARITY — Orca に全部勝つための実装計画（O フェーズ）
 
-作成: 2026-09-26（案）。**本人の承認前**に、本人の指示（「起きたら出来上がっている状態に」）で Wave 1〜2 の一部を夜のうちに PR にした（§7）。
+作成: 2026-09-26（案）。**本人の承認前**に、本人の指示（「起きたら出来上がっている状態に」）で Wave 1〜2 の一部に着手した（§7）。
 根拠は全数調査 [`research/orca-gap-2026-09.md`](./research/orca-gap-2026-09.md)（226 項目）と、その証拠 [`research/orca-gap-2026-09-evidence.md`](./research/orca-gap-2026-09-evidence.md)。
 この文書は「どの順で・どの単位で・どう作るか」を決める。受入条件は、承認後に要約を ROADMAP の M17 として転記する。
 
@@ -20,7 +20,7 @@
   - Wave 2（O5〜O10）: 変更レビュー、行コメント、localhost プレビュー、Design Mode、Ports。
   - Wave 3（O11〜O30）: 通知、使用量、履歴、Git パネル、Task と Fleet、端末の続き、エディタ、設定。
   - Wave 4（O31〜O45）: GitHub、閉じても走る daemon、SSH、スマホ、CLI、Skills、定期実行ほか。
-- 夜のうちに PR にしたのは **O1・O2・O3・O4・O6・O7・O8・O9・O12**（§7）。
+- 着手したのは **O2・O6・O7・O8・O9**（§7）。夜の間に 9 本を並行で走らせたが、全部が利用上限に当たって書き始める前に止まったので、2026-09-26 の昼から 3 本ずつ回している。
 - 重くしない規律（§1.4）を全 PR に課す。常駐する部品を増やさず、ポーリングを入れず、既定は off にする。
 
 ## 1. 進め方（全 PR に共通）
@@ -250,20 +250,23 @@
 
 ## 7. 進捗
 
-夜のうちに作った PR（本人のレビュー待ち）。状態・確かめたこと・確かめられなかったことは、各 PR の本文にある。
+状態・確かめたこと・確かめられなかったことは、各 PR の本文にある。夜の間は利用上限で担当が止まったため、同時に動かすのは 3 本までにしている。
 
 | # | ブランチ | PR | 状態 |
 |---|---|---|---|
 | O0 | `parity/o00-plan` | この文書 | レビュー待ち |
-| O1 | `parity/o01-fixes` | （作成後に記入） | 実装中 |
 | O2 | `parity/o02-slash-commands` | | 実装中 |
-| O3 | `parity/o03-terminal-basics` | | 実装中 |
-| O4 | `parity/o04-quit-guard` | | 実装中 |
 | O6 | `parity/o06-review` | | 実装中 |
 | O7 | `parity/o07-annotations`（O6 の上） | | 実装中 |
 | O8 | `parity/o08-localhost-preview` | | 実装中 |
 | O9 | `parity/o09-design-mode`（O8 の上） | | 実装中 |
-| O12 | `parity/o12-notifications`（O4 の上） | | 実装中 |
+| O1 | `parity/o01-fixes` | | 次に着手 |
+| O3 | `parity/o03-terminal-basics` | | 次に着手 |
+| O4 | `parity/o04-quit-guard` | | 次に着手 |
+| O12 | `parity/o12-notifications`（O4 の上） | | 次に着手 |
+| O28 | `parity/o28-explorer-search` | | 次に着手 |
+| O30 | `parity/o30-languages` | | 次に着手 |
+| O40 / O39 | `parity/o40-skills` → `parity/o39-cli` | | 次に着手 |
 
 ## 付録 A: 調査の全 226 項目の行き先
 
