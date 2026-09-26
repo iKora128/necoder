@@ -85,6 +85,33 @@ impl AgentPanel {
         self.refresh_transcript_search(cx);
     }
 
+    /// 履歴ビューの全文検索の一致へ飛ぶ（O15）: 検索バーを `query` で開き、一致のうち**最後**の
+    /// エントリを見せる（DB の検索が返すのは、そのスレッドで最新の一致）。一致が無ければ開くだけ。
+    pub fn reveal_transcript_match(
+        &mut self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_transcript_search(&FindInTranscript, window, cx);
+        if let Some(search) = &self.transcript_search {
+            search
+                .input
+                .update(cx, |input, cx| input.set_plain_text(query, cx));
+        }
+        self.refresh_transcript_search(cx);
+        let Some(search) = &mut self.transcript_search else {
+            return;
+        };
+        let Some(last) = search.entries.len().checked_sub(1) else {
+            return;
+        };
+        search.current = last;
+        let entry = search.entries[last];
+        self.transcript_list.scroll_to_reveal_item(entry);
+        cx.notify();
+    }
+
     /// 閉じる（Esc・✕）。閉じたら強調も消える。
     pub(crate) fn close_transcript_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.transcript_search.take().is_some() {
