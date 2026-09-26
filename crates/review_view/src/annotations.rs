@@ -16,6 +16,9 @@ use gpui::{
 };
 use storage::ReviewNoteRecord;
 
+/// 位置が変わった注記のカードに出す元の抜粋の行数。
+const LOST_EXCERPT_LINES: usize = 6;
+
 /// 注記の DB への書き込み 1 件（R03）。ビューごとに 1 本の列へ積み、積んだ順に 1 件ずつ流す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NoteWrite {
@@ -44,6 +47,7 @@ impl ReviewView {
         let scope = context.scope.clone();
         self.notes_scope = Some(scope.clone());
         self.notes.clear();
+        self.lost_notes.clear();
         self.draft = None;
         let Some(storage) = context.storage.clone() else {
             return;
@@ -79,6 +83,7 @@ impl ReviewView {
                     }
                     Err(error) => eprintln!("注記を読めない: {error:#}"),
                 }
+                this.reconcile_notes(cx);
                 this.rebuild_rows();
                 cx.notify();
             });
@@ -381,6 +386,109 @@ impl ReviewView {
         cx.notify();
     }
 
+    /// 注記の位置を今の差分に合わせる（R01）。読み直し・全文の到着・注記の読み込みの後に呼ぶ。
+    ///
+    /// 付けた時の抜粋と今の中身が合わない注記は、同じ中身の並びが 1 か所に決まる時だけそこへ移して
+    /// 保存し直す（改名されたファイルは新しい名前へ）。決まらなければ「位置が変わった注記」にする
+    /// （行には付けず、見出しの直後に元の抜粋つきで出す）。まだ読めていない行は確かめない。
+    pub(crate) fn reconcile_notes(&mut self, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff.clone() else {
+            return;
+        };
+        let mut moves: Vec<(usize, String, u32, u32)> = Vec::new();
+        let mut lost = HashSet::new();
+        for (index, note) in self.notes.iter().enumerate() {
+            let NoteTarget::DiffLines(target) = &note.target;
+            let Some(file_index) = diff.files.iter().position(|file| {
+                file.path == target.path || file.old_path.as_deref() == Some(target.path.as_str())
+            }) else {
+                continue; // 差分から消えたファイル（行には出ない。トレイからは見える）
+            };
+            let file = &diff.files[file_index];
+            let syntax = self.syntax.get(file_index).cloned().flatten();
+            let full = syntax.as_ref().and_then(|syntax| match target.side {
+                NoteSide::New => syntax.new.as_ref(),
+                NoteSide::Old => syntax.old.as_ref(),
+            });
+            let expected: Vec<&str> = target
+                .excerpt
+                .iter()
+                .filter(|line| match target.side {
+                    NoteSide::New => line.kind != ExcerptKind::Removed,
+                    NoteSide::Old => line.kind == ExcerptKind::Removed,
+                })
+                .map(|line| line.text.as_str())
+                .collect();
+            let diff_lines: Vec<(u32, &str)> = file
+                .hunks
+                .iter()
+                .flat_map(|hunk| hunk.lines.iter())
+                .filter_map(|line| {
+                    let number = match target.side {
+                        NoteSide::New => line.new_line,
+                        NoteSide::Old => line.old_line,
+                    }?;
+                    Some((number, line.text.as_str()))
+                })
+                .collect();
+            let candidates: Vec<(u32, &str)> = match full {
+                Some(text) => text
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, line)| (offset as u32 + 1, line.as_str()))
+                    .collect(),
+                None => diff_lines.clone(),
+            };
+            let lookup = |number: u32| match full {
+                Some(text) => text.line(number).map(|(line, _)| line),
+                None => diff_lines
+                    .iter()
+                    .find(|(line, _)| *line == number)
+                    .map(|(_, text)| *text),
+            };
+            let renamed = file.path != target.path;
+            match locate(&expected, target.start, target.end, lookup, &candidates) {
+                NotePosition::Unchanged if renamed => {
+                    moves.push((index, file.path.clone(), target.start, target.end))
+                }
+                NotePosition::Unchanged => {}
+                NotePosition::Moved { start, end } => {
+                    moves.push((index, file.path.clone(), start, end))
+                }
+                NotePosition::Lost => {
+                    lost.insert(note.id.clone());
+                }
+            }
+        }
+        let now = now_ms();
+        let mut changed = Vec::new();
+        for (index, path, start, end) in moves {
+            let Some(note) = self.notes.get_mut(index) else {
+                continue;
+            };
+            let NoteTarget::DiffLines(target) = &mut note.target;
+            target.path = path;
+            target.start = start;
+            target.end = end;
+            if target.side == NoteSide::Old {
+                // 古い側の行番号は比較の基準のファイルに対するもの。移した先の基準に揃える。
+                target.base = diff.base_oid.clone();
+            }
+            note.updated_at = now;
+            changed.push(note.clone());
+        }
+        for note in &changed {
+            self.persist_note(note, cx);
+        }
+        self.lost_notes = lost;
+    }
+
+    /// 位置が変わった注記か（R01・カードとテストが使う）。
+    pub fn is_note_lost(&self, id: &str) -> bool {
+        self.lost_notes.contains(id)
+    }
+
     pub(crate) fn persist_note(&mut self, note: &ReviewNote, cx: &mut Context<Self>) {
         let Some(context) = self.context.as_ref() else {
             return;
@@ -499,7 +607,7 @@ impl ReviewView {
             cx.notify();
             return;
         }
-        let prompt = format_prompt(&notes);
+        let prompt = format_prompt_marking_lost(&notes, &self.lost_notes);
         let note_ids = notes.iter().map(|note| note.id.clone()).collect();
         cx.emit(ReviewEvent::SendNotes {
             target,
@@ -601,6 +709,26 @@ impl ReviewView {
             return div().into_any_element();
         };
         let resolved = note.state == ReviewNoteState::Resolved;
+        let lost = self.lost_notes.contains(&note.id);
+        let NoteTarget::DiffLines(target) = &note.target;
+        // 位置が変わった注記（R01）は、何についての注記だったかを元の抜粋で見せる。
+        let excerpt: Vec<String> = if lost {
+            target
+                .excerpt
+                .iter()
+                .take(LOST_EXCERPT_LINES)
+                .map(|line| {
+                    let marker = match line.kind {
+                        ExcerptKind::Added => '+',
+                        ExcerptKind::Removed => '-',
+                        ExcerptKind::Context => ' ',
+                    };
+                    format!("{marker}{}", line.text)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         div()
             .id(("review-note", row))
             .pl(px(NUMBER_COLUMN_WIDTH * 2. + MARKER_COLUMN_WIDTH))
@@ -618,6 +746,32 @@ impl ReviewView {
                     .border_1()
                     .border_color(theme.border)
                     .when(resolved, |card| card.opacity(0.6))
+                    .when(lost, |card| {
+                        card.child(div().text_size(px(10.5)).text_color(theme.warn).child(
+                            SharedString::from(i18n::t!(
+                                "review.note_lost",
+                                "location" => note.target.location()
+                            )),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .px(px(6.))
+                                .py(px(3.))
+                                .rounded(px(4.))
+                                .bg(theme.bg1)
+                                .font_family(CODE_FONT)
+                                .text_size(px(11.))
+                                .text_color(theme.fg2)
+                                .children(excerpt.into_iter().map(|line| {
+                                    div()
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .child(SharedString::from(line))
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .flex()

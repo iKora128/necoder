@@ -798,6 +798,8 @@ review:
   open_file_tip: このファイルをエディタで開く
   reviewed: 見た
   reviewed_tip: 見た印を付けて畳む（もう一度押すと外して開く）
+  reviewed_stale: 見た後に変更あり
+  reviewed_stale_tip: 「見た」を付けた後で、このファイルの差分が変わりました。見直したらもう一度押して印を付ける
   renamed_from: "← %{path}"
   no_newline: 末尾に改行なし
   add_note_tip: 注記を付ける（行を選んで c でも）
@@ -826,6 +828,8 @@ review:
   save_retry: 再試行
   prompt_header: "レビューコメント（%{count} 件）— 比較: %{base}..作業ツリー"
   prompt_old_side: "%{location}（削除された行・比較元の行番号）"
+  prompt_lost: "%{location}（付けた時の場所・今の差分では見つからない）"
+  note_lost: "位置が変わった注記 — 付けた時の場所 %{location} の中身が変わり、同じ中身の場所も決まりません"
 difftab:
   proposal_title: "%{title} ⇄ 提案"
   title: "%{name} ⇄ %{base}"

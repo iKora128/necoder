@@ -33,8 +33,10 @@
 | ↳ **Task タブ**（カードの中の面。← FleetPane / 面） | `TaskTab::{Thread(id),Diff,Terminal(id),Files}` | スレッド / 変更 / ターミナル / ファイル | Thread / Diff / Terminal / Files |
 | **変更レビュー**（worktree の全変更を 1 画面で読む面。Fleet の「変更」タブの中身もこれ・session に 1 枚） | `review_view::ReviewView` / `OpenReview` | 変更レビュー | Review |
 | ↳ **比較の基準**（Task の base / HEAD / ブランチの分岐点 / コミット） | `project::review::ReviewBase` | 比較 | Compare |
-| ↳ **見た**（ファイルに付ける既読の印。付けると畳む） | `reviewed` | 見た | Viewed |
+| ↳ **見た**（ファイルに付ける既読の印。付けると畳む。見た時の基準と差分の指紋に結び付き、変わったら外れる） | `reviewed` / `ReviewedMark` | 見た | Viewed |
+| ↳ ↳ **見た後に変更あり**（見た印を付けた後でファイルの差分が変わった。印は外れて畳みも開く） | `reviewed_stale` | 見た後に変更あり | Changed since viewed |
 | ↳ **注記**（diff の行に付けるコメント。未送信 / 送信済み / 解決。対象は拡張できる = 将来 Design Mode のページ要素も） | `ReviewNote` / `NoteTarget` / storage `review_notes` | 注記 | Note |
+| ↳ ↳ **位置が変わった注記**（付けた行の中身が変わり、同じ中身の場所も 1 か所に決まらない注記。行に付けず見出しの直後に元の抜粋つきで出す） | `NotePosition::Lost` / `lost_notes` | 位置が変わった注記 | Moved note |
 | ↳ **注記トレイ**（変更レビューの下端。件数・一覧・送る） | `render_tray` | 注記 | Notes |
 | ↳ **送る**（注記を 1 通のプロンプトにまとめて宛先のスレッドへ） | `ReviewEvent::SendNotes` / `AgentPanel::send_user_prompt_to` | 送る / 未解決だけ再送 | Send / Resend unresolved |
 | ↳ **ピン**（舞台に並べる Task を選ぶ） | `pinned` | 並べる | Pin |

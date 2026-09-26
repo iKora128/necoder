@@ -21,12 +21,15 @@
 
 mod annotations;
 mod notes;
+mod positions;
 mod rows;
 mod syntax;
 
 pub use notes::{
-    format_prompt, DiffLinesTarget, ExcerptKind, ExcerptLine, NoteSide, NoteTarget, ReviewNote,
+    format_prompt, format_prompt_marking_lost, DiffLinesTarget, ExcerptKind, ExcerptLine, NoteSide,
+    NoteTarget, ReviewNote,
 };
+pub use positions::{locate, NotePosition};
 pub use rows::{
     build_rows, build_tree, expand_gap, file_gaps, Gap, GapExpansion, GapPosition, Notice, Row,
     RowInputs, RowNote, TreeEntry, EXPAND_STEP,
@@ -85,6 +88,44 @@ pub struct ReviewContext {
     pub storage: Option<Storage>,
     /// 注記を束ねる単位（Fleet = Task・Editor = プロジェクト。どちらも TaskSpace の id）。
     pub scope: String,
+}
+
+/// 「見た」印の中身（R01）。見た時の比較の基準と、その時のファイルの差分の指紋。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewedMark {
+    base: String,
+    fingerprint: u64,
+}
+
+/// ファイルの差分の指紋（R01）。見た後で行が変わったかを見分けるためだけに使う（保存しない）。
+/// バイナリ・大きすぎるファイルは中身の行を持たないので、行数と種類の変化しか拾えない。
+fn file_fingerprint(file: &FileDiff) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    file.path.hash(&mut hasher);
+    file.old_path.hash(&mut hasher);
+    file.kind.letter().hash(&mut hasher);
+    (file.binary, file.too_large, file.mode_changed).hash(&mut hasher);
+    (file.additions, file.deletions).hash(&mut hasher);
+    for hunk in &file.hunks {
+        (
+            hunk.old_start,
+            hunk.old_count,
+            hunk.new_start,
+            hunk.new_count,
+        )
+            .hash(&mut hasher);
+        for line in &hunk.lines {
+            let kind: u8 = match line.kind {
+                DiffLineKind::Context => 0,
+                DiffLineKind::Added => 1,
+                DiffLineKind::Removed => 2,
+            };
+            (kind, line.no_newline).hash(&mut hasher);
+            line.text.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 /// 注記を送る宛先（一覧は Workspace が作る。このビューは選ばれたものをそのまま返すだけ）。
@@ -196,8 +237,13 @@ pub struct ReviewView {
     expansions: HashMap<(String, usize), GapExpansion>,
     collapsed_files: HashSet<String>,
     collapsed_dirs: HashSet<String>,
-    /// 「見た」印（パス）。読み直しても残す。
-    reviewed: HashSet<String>,
+    /// 「見た」印（パス → 見た時の比較の基準と差分の指紋）。読み直しても残し、見た後で中身が
+    /// 変わったら外す（R01: 印を「見た時の版」に結び付ける。基準を切り替えただけなら残す）。
+    reviewed: HashMap<String, ReviewedMark>,
+    /// 見た後で中身が変わったファイル（「見た後に変更あり」を出す・見直して印を付けたら消える）。
+    reviewed_stale: HashSet<String>,
+    /// `diff.files` と同じ添字の差分の指紋（読み込みと同じ背景で計算する）。
+    fingerprints: Vec<u64>,
     show_tree: bool,
     /// ファイルツリーで選んだファイル（押した直後はスクロール位置より優先して光らせる）。
     picked_file: Option<usize>,
@@ -210,6 +256,8 @@ pub struct ReviewView {
     notes: Vec<ReviewNote>,
     /// `notes` を読んだ単位（切り替わったら読み直す）。
     notes_scope: Option<String>,
+    /// 位置が変わった注記の id（R01・行に付けず、ファイルの見出しの直後に元の抜粋つきで出す）。
+    lost_notes: HashSet<String>,
     selection: Option<LineSelection>,
     /// ドラッグで範囲を選んでいる最中。
     selecting: bool,
@@ -253,7 +301,9 @@ impl ReviewView {
             expansions: HashMap::new(),
             collapsed_files: HashSet::new(),
             collapsed_dirs: HashSet::new(),
-            reviewed: HashSet::new(),
+            reviewed: HashMap::new(),
+            reviewed_stale: HashSet::new(),
+            fingerprints: Vec::new(),
             show_tree: true,
             picked_file: None,
             outdated: false,
@@ -261,6 +311,7 @@ impl ReviewView {
             generation: 0,
             notes: Vec::new(),
             notes_scope: None,
+            lost_notes: HashSet::new(),
             selection: None,
             selecting: false,
             draft: None,
@@ -302,6 +353,8 @@ impl ReviewView {
             self.expansions.clear();
             self.collapsed_files.clear();
             self.reviewed.clear();
+            self.reviewed_stale.clear();
+            self.fingerprints.clear();
             self.outdated = false;
             self.base_menu = None;
             self.selection = None;
@@ -411,6 +464,10 @@ impl ReviewView {
                 .background_executor()
                 .spawn(async move {
                     project::review::review_diff_on(host.as_ref(), &root, &base, ignore_whitespace)
+                        .map(|diff| {
+                            let fingerprints = diff.files.iter().map(file_fingerprint).collect();
+                            (diff, fingerprints)
+                        })
                 })
                 .await;
             let loaded = this.update(cx, |this, cx| {
@@ -418,9 +475,9 @@ impl ReviewView {
                     return None;
                 }
                 match result {
-                    Ok(diff) => {
+                    Ok((diff, fingerprints)) => {
                         let diff = Arc::new(diff);
-                        this.apply_diff(diff.clone(), cx);
+                        this.apply_diff(diff.clone(), fingerprints, cx);
                         Some(diff)
                     }
                     Err(error) => {
@@ -451,6 +508,8 @@ impl ReviewView {
                             *slot = Some(Arc::new(file_syntax));
                         }
                     }
+                    // 全文が届いた = diff の外の行（開いた畳みの行）も確かめられる。
+                    this.reconcile_notes(cx);
                     this.rebuild_rows();
                     cx.notify();
                     true
@@ -463,12 +522,20 @@ impl ReviewView {
         .detach();
     }
 
-    fn apply_diff(&mut self, diff: Arc<ReviewDiff>, cx: &mut Context<Self>) {
+    fn apply_diff(
+        &mut self,
+        diff: Arc<ReviewDiff>,
+        fingerprints: Vec<u64>,
+        cx: &mut Context<Self>,
+    ) {
         let anchor = self.scroll_anchor();
+        self.refresh_reviewed_marks(&diff, &fingerprints);
+        self.fingerprints = fingerprints;
         self.syntax = vec![None; diff.files.len()];
         self.diff = Some(diff);
         self.load = Load::Ready;
         self.picked_file = None;
+        self.reconcile_notes(cx);
         self.rebuild_rows_at(anchor);
         cx.notify();
     }
@@ -506,7 +573,12 @@ impl ReviewView {
                 RowNote {
                     path: target.path.clone(),
                     side: target.side,
-                    line: target.end,
+                    // 位置が変わった注記（R01）は行に付けない。0 行目は無い = 見出しの直後に出る。
+                    line: if self.lost_notes.contains(&note.id) {
+                        0
+                    } else {
+                        target.end
+                    },
                     note: Some(index),
                 }
             })
@@ -656,23 +728,77 @@ impl ReviewView {
     }
 
     fn toggle_reviewed(&mut self, file: usize, cx: &mut Context<Self>) {
-        let Some(path) = self
-            .diff
-            .as_ref()
-            .and_then(|diff| diff.files.get(file))
-            .map(|file| file.path.clone())
-        else {
+        let Some((path, base)) = self.diff.as_ref().and_then(|diff| {
+            let entry = diff.files.get(file)?;
+            Some((entry.path.clone(), diff.base_oid.clone()))
+        }) else {
+            return;
+        };
+        let Some(fingerprint) = self.fingerprints.get(file).copied() else {
             return;
         };
         // 見た = 畳んでおく（GitHub の Viewed と同じ手触り）。外したら開き直す。
-        if self.reviewed.remove(&path) {
+        if self.is_reviewed(file) {
+            self.reviewed.remove(&path);
             self.collapsed_files.remove(&path);
         } else {
-            self.reviewed.insert(path.clone());
+            self.reviewed
+                .insert(path.clone(), ReviewedMark { base, fingerprint });
+            self.reviewed_stale.remove(&path);
             self.collapsed_files.insert(path);
         }
         self.rebuild_rows();
         cx.notify();
+    }
+
+    /// このファイルを今の中身で「見た」か（見た後で変わっていれば `false`）。
+    pub(crate) fn is_reviewed(&self, file: usize) -> bool {
+        let (Some(diff), Some(fingerprint)) = (self.diff.as_ref(), self.fingerprints.get(file))
+        else {
+            return false;
+        };
+        diff.files.get(file).is_some_and(|entry| {
+            self.reviewed
+                .get(&entry.path)
+                .is_some_and(|mark| mark.base == diff.base_oid && mark.fingerprint == *fingerprint)
+        })
+    }
+
+    /// 見た後で中身が変わったか（「見た後に変更あり」を出す）。
+    pub(crate) fn is_reviewed_stale(&self, file: usize) -> bool {
+        self.diff
+            .as_ref()
+            .and_then(|diff| diff.files.get(file))
+            .is_some_and(|entry| self.reviewed_stale.contains(&entry.path))
+    }
+
+    /// 読み直した差分と「見た」印を突き合わせる（R01）。同じ基準で中身が変わったファイルは印を外し、
+    /// 畳みを開いて「見た後に変更あり」にする。差分から消えたファイルの印は捨てる。基準が違う印は
+    /// 触らない（基準を戻せば復活する）。
+    fn refresh_reviewed_marks(&mut self, diff: &ReviewDiff, fingerprints: &[u64]) {
+        let current: HashMap<&str, u64> = diff
+            .files
+            .iter()
+            .zip(fingerprints)
+            .map(|(file, fingerprint)| (file.path.as_str(), *fingerprint))
+            .collect();
+        let changed: Vec<String> = self
+            .reviewed
+            .iter()
+            .filter(|(path, mark)| {
+                mark.base == diff.base_oid && current.get(path.as_str()) != Some(&mark.fingerprint)
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in changed {
+            self.reviewed.remove(&path);
+            if current.contains_key(path.as_str()) {
+                self.collapsed_files.remove(&path);
+                self.reviewed_stale.insert(path);
+            }
+        }
+        self.reviewed_stale
+            .retain(|path| current.contains_key(path.as_str()));
     }
 
     fn open_file(&mut self, file: usize, cx: &mut Context<Self>) {
@@ -1325,7 +1451,8 @@ impl ReviewView {
                 TreeEntry::File { file, label, depth } => {
                     let entry = &diff.files[file];
                     let selected = current == Some(file);
-                    let reviewed = self.reviewed.contains(&entry.path);
+                    let reviewed = self.is_reviewed(file);
+                    let stale = !reviewed && self.is_reviewed_stale(file);
                     div()
                         .id(("review-tree-file", index))
                         .flex_none()
@@ -1366,9 +1493,11 @@ impl ReviewView {
                             div()
                                 .flex_none()
                                 .text_size(px(10.5))
-                                .text_color(theme.fg2)
+                                .text_color(if stale { theme.warn } else { theme.fg2 })
                                 .child(SharedString::from(if reviewed {
                                     "✓".to_string()
+                                } else if stale {
+                                    format!("↻ {}", counts_label(entry))
                                 } else {
                                     counts_label(entry)
                                 })),
@@ -1506,7 +1635,8 @@ impl ReviewView {
         let theme = self.theme.clone();
         let entry = &diff.files[file];
         let collapsed = self.collapsed_files.contains(&entry.path);
-        let reviewed = self.reviewed.contains(&entry.path);
+        let reviewed = self.is_reviewed(file);
+        let stale = !reviewed && self.is_reviewed_stale(file);
         let (directory, name) = match entry.path.rsplit_once('/') {
             Some((directory, name)) => (format!("{directory}/"), name.to_string()),
             None => (String::new(), entry.path.clone()),
@@ -1601,6 +1731,16 @@ impl ReviewView {
                             .child(SharedString::from(format!("−{}", entry.deletions))),
                     ),
             )
+            // 見た後で中身が変わった（R01）。印は外れて畳みも開いている。見直したら印を付け直す。
+            .when(stale, |header| {
+                header.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.warn)
+                        .child(SharedString::from(i18n::t!("review.reviewed_stale"))),
+                )
+            })
             .child(
                 div()
                     .id(("review-file-reviewed", file))
@@ -1620,7 +1760,11 @@ impl ReviewView {
                     .child(if reviewed { "☑" } else { "☐" })
                     .child(SharedString::from(i18n::t!("review.reviewed")))
                     .tooltip(Tooltip::text(
-                        i18n::t!("review.reviewed_tip"),
+                        if stale {
+                            i18n::t!("review.reviewed_stale_tip")
+                        } else {
+                            i18n::t!("review.reviewed_tip")
+                        },
                         theme.clone(),
                     ))
                     .on_mouse_down(
@@ -2113,6 +2257,77 @@ mod tests {
             assert_eq!(view.note_counts(), (0, 0));
         });
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R01: 「見た」印と注記は、確かめた時の中身に結び付く。
+    /// - 上に行が挿入されたら、注記は同じ中身の行へ移り、「見た」印は外れて「見た後に変更あり」
+    /// - 注記を付けた行の中身が変わったら、無関係な行には付けず「位置が変わった注記」になる
+    #[gpui::test]
+    fn reviewed_marks_and_notes_follow_the_code_they_were_made_on(cx: &mut gpui::TestAppContext) {
+        let Some(dir) = temp_repo("r01") else {
+            return;
+        };
+        i18n::set_locale("ja");
+        let (view, cx) = cx.add_window_view(|_window, cx| ReviewView::new(Theme::dark(), cx));
+        open_review(&view, &dir, cx);
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.select_line("a.rs", NoteSide::New, 5, false, cx));
+            view.open_draft(window, cx);
+            view.set_draft_text("大文字にしない", cx);
+            view.save_draft(window, cx);
+            assert_eq!(view.note_counts(), (1, 1));
+            view.toggle_reviewed(0, cx);
+            assert!(view.is_reviewed(0));
+        });
+
+        // 上に 2 行挿入 → 注記は 7 行目へ移る。見た印は外れる。
+        let changed = std::fs::read_to_string(dir.join("a.rs")).unwrap();
+        std::fs::write(dir.join("a.rs"), format!("top 1\ntop 2\n{changed}")).unwrap();
+        view.update(cx, |view, cx| view.reload(cx));
+        wait_until_loaded(&view, cx);
+        view.read_with(cx, |view, _| {
+            let NoteTarget::DiffLines(target) = &view.notes[0].target;
+            assert_eq!((target.start, target.end), (7, 7), "同じ中身の行へ移る");
+            assert!(!view.is_note_lost(&view.notes[0].id));
+            assert!(!view.is_reviewed(0), "見た後で中身が変わった");
+            assert!(view.is_reviewed_stale(0), "「見た後に変更あり」になる");
+        });
+
+        // 注記を付けた行そのものを書き換える → どこにも付けない（見出しの直後に出す）。
+        let rewritten = std::fs::read_to_string(dir.join("a.rs"))
+            .unwrap()
+            .replace("LINE 5\n", "LINE FIVE\n");
+        std::fs::write(dir.join("a.rs"), rewritten).unwrap();
+        view.update(cx, |view, cx| view.reload(cx));
+        wait_until_loaded(&view, cx);
+        view.read_with(cx, |view, _| {
+            assert!(view.is_note_lost(&view.notes[0].id), "位置が変わった注記");
+            let header = view
+                .rows
+                .iter()
+                .position(|row| matches!(row, Row::FileHeader { file: 0 }))
+                .expect("見出しがある");
+            assert_eq!(
+                view.rows.get(header + 1),
+                Some(&Row::Note { file: 0, note: 0 }),
+                "無関係な行ではなく、見出しの直後に出る"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn wait_until_loaded(view: &Entity<ReviewView>, cx: &mut gpui::VisualTestContext) {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            let ready = view.read_with(cx, |view, _| {
+                view.load == Load::Ready && view.syntax.iter().all(Option::is_some)
+            });
+            if ready {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("変更レビューが読み終わらない");
     }
 
     /// R03: 編集 → 解決 → 削除を続けて積んでも、DB に届く順は積んだ順（消した注記が復活しない）。
