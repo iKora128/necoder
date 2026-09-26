@@ -247,6 +247,10 @@ pub struct TurnSearchHit {
     pub excerpt: String,
     /// 一致した turn の時刻（unix ms）。
     pub created_at: i64,
+    /// スレッドの開始時刻と、人が最後に入力した時刻（unix ms・[`Storage::load_all_threads`] と同じ導出）。
+    /// 一致からスレッドを開く時、復元したスレッドのメタに使う。
+    pub thread_created_at: i64,
+    pub thread_last_input_at: Option<i64>,
 }
 
 /// 全文検索の抜粋: 最初の一致の何文字前から切り出すか。
@@ -860,11 +864,21 @@ impl Storage {
     /// スレッドが最後に使った ACP セッション id を記録する（`session/new` / `session/load` の直後）。
     /// 次にそのスレッドのエージェントを立ち上げ直すとき（SSH 切断後・再起動後）、エージェントが
     /// `loadSession` を広告していればこの id で会話を引き継ぐ（2026-09-08）。
+    ///
+    /// 前の id と違えば、前の id は「このスレッドの過去の会話」として残す（O15・[`Self::load_known_sessions`]）。
     pub fn set_thread_session(&self, thread_id: &str, acp_session: &str) -> Result<()> {
         let (thread_id, acp_session) = (thread_id.to_string(), acp_session.to_string());
         let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT OR IGNORE INTO thread_past_sessions (acp_session, thread_id, retired_at)
+                     SELECT acp_session, thread_id, ?3 FROM thread_sessions
+                     WHERE thread_id = ?1 AND acp_session != ?2",
+                    (thread_id.as_str(), acp_session.as_str(), now),
+                )
+                .await
+                .context("thread_past_sessions への退避に失敗")?;
                 conn.execute(
                     "INSERT INTO thread_sessions (thread_id, acp_session, updated_at)
                      VALUES (?1, ?2, ?3)
@@ -880,10 +894,20 @@ impl Storage {
 
     /// スレッドの ACP セッション id を忘れる（O15「新しいセッションで続ける」）。次にこのスレッドの
     /// エージェントを立ち上げるとき、前の会話を `session/load` せず `session/new` から始める。
+    /// 忘れた id は「このスレッドの過去の会話」として残す（本文は transcript に在る＝履歴ビューで
+    /// エージェントの一覧に重ねて出さない）。
     pub fn clear_thread_session(&self, thread_id: &str) -> Result<()> {
         let thread_id = thread_id.to_string();
+        let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT OR IGNORE INTO thread_past_sessions (acp_session, thread_id, retired_at)
+                     SELECT acp_session, thread_id, ?2 FROM thread_sessions WHERE thread_id = ?1",
+                    (thread_id.as_str(), now),
+                )
+                .await
+                .context("thread_past_sessions への退避に失敗")?;
                 conn.execute(
                     "DELETE FROM thread_sessions WHERE thread_id = ?1",
                     (thread_id.as_str(),),
@@ -895,16 +919,20 @@ impl Storage {
         })
     }
 
-    /// necoder のスレッドが握っている ACP セッション id の全部（O15）。スレッドの行が在るものだけ
-    /// （行の無い id は、開いてすぐ閉じた等で本体が残っていない）。履歴ビューで「エージェントの過去の
-    /// 会話」から necoder に既にある会話を除くのに使う。
+    /// necoder のスレッドが握っている ACP セッション id の全部（O15）。いまの会話と、新しいセッションで
+    /// 続けた・引き継げずに替わった前の会話の両方。スレッドの行が在るものだけ（行の無い id は、開いて
+    /// すぐ閉じた等で本体が残っていない）。履歴ビューで「エージェントの過去の会話」から necoder に
+    /// 既にある会話を除くのに使う。
     pub fn load_known_sessions(&self) -> Result<Vec<String>> {
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
                     .query(
                         "SELECT thread_sessions.acp_session FROM thread_sessions
-                         JOIN threads ON threads.id = thread_sessions.thread_id",
+                         JOIN threads ON threads.id = thread_sessions.thread_id
+                         UNION
+                         SELECT thread_past_sessions.acp_session FROM thread_past_sessions
+                         JOIN threads ON threads.id = thread_past_sessions.thread_id",
                         (),
                     )
                     .await
@@ -1224,7 +1252,10 @@ impl Storage {
                         "SELECT hits.thread_id, threads.name, threads.project, threads.color_index,
                                 threads.archived, turns.id, turns.role,
                                 substr(turns.content, hits.excerpt_start, ?6),
-                                hits.excerpt_start, length(turns.content), turns.created_at
+                                hits.excerpt_start, length(turns.content), turns.created_at,
+                                threads.created_at,
+                                (SELECT MAX(inputs.created_at) FROM turns AS inputs
+                                  WHERE inputs.thread_id = threads.id AND inputs.role = 'user')
                          FROM (SELECT grouped.thread_id, grouped.turn_id,
                                       max(1, instr(lower(matched.content), lower(?5)) - ?7)
                                           AS excerpt_start
@@ -1274,6 +1305,11 @@ impl Storage {
                         role: row.get_value(6)?.as_text().context("role")?.clone(),
                         excerpt: marked,
                         created_at: *row.get_value(10)?.as_integer().context("created_at")?,
+                        thread_created_at: *row
+                            .get_value(11)?
+                            .as_integer()
+                            .context("thread created_at")?,
+                        thread_last_input_at: row.get_value(12)?.as_integer().copied(),
                     });
                 }
                 Ok(result)
@@ -1316,6 +1352,12 @@ impl Storage {
                 )
                 .await
                 .context("thread_sessions の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_past_sessions WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_past_sessions の削除に失敗")?;
                 conn.execute(
                     "DELETE FROM thread_custom_names WHERE thread_id = ?1",
                     (id.as_str(),),
@@ -2367,6 +2409,18 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("thread_sessions 作成に失敗")?;
+    // スレッドの前の会話 id（O15）。「新しいセッションで続ける」・引き継げずに替わった会話の id を
+    // 残す。本文は necoder の transcript に在るので、履歴ビューでエージェントの一覧から除く鍵にする。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_past_sessions (
+            acp_session TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            retired_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("thread_past_sessions 作成に失敗")?;
     // 人が手で付けたスレッド名の印（O2・2026-09-26）。エージェントが送ってくる会話名はこの印の
     // あるスレッドを上書きしない。行が在る＝手動。threads 表を広げない理由は thread_sessions と同じ。
     conn.execute(
@@ -3283,6 +3337,12 @@ mod tests {
             "全スコープ・閉じたものも・大文字小文字は問わない・step は本文ではない"
         );
         assert_eq!(hits[2].thread_name, "ビルドの修正");
+        assert!(hits[2].thread_created_at > 0);
+        assert!(
+            hits[2].thread_last_input_at.is_some(),
+            "人の入力があるスレッド"
+        );
+        assert_eq!(hits[1].thread_last_input_at, None, "人の入力が無いスレッド");
         assert_eq!(hits[2].project, "space:necoder");
         assert_eq!(hits[2].color_index, 3);
         assert_eq!(hits[2].role, "agent");
@@ -3389,13 +3449,26 @@ mod tests {
             vec!["session-a".to_string()],
             "スレッドの行が無い id は数えない"
         );
+        // 引き継げずに替わった前の会話・新しいセッションで続けた前の会話も「既にある会話」。
+        storage.set_thread_session("kept", "session-c").unwrap();
         storage.clear_thread_session("kept").unwrap();
+        let mut known = storage.load_known_sessions().unwrap();
+        known.sort();
+        assert_eq!(
+            known,
+            vec!["session-a".to_string(), "session-c".to_string()],
+            "前の会話 id は残る（一覧に重ねて出さない）"
+        );
+        assert!(
+            storage
+                .load_thread_sessions()
+                .unwrap()
+                .iter()
+                .all(|(thread_id, _)| thread_id != "kept"),
+            "次は新しい会話で始まる"
+        );
+        storage.delete_thread("kept").unwrap();
         assert!(storage.load_known_sessions().unwrap().is_empty());
-        assert!(storage
-            .load_thread_sessions()
-            .unwrap()
-            .iter()
-            .all(|(thread_id, _)| thread_id != "kept"));
         let _ = std::fs::remove_file(&path);
     }
 
