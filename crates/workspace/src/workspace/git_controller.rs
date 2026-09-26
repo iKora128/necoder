@@ -313,15 +313,22 @@ impl Workspace {
         }
     }
 
-    /// パネル自体（入力欄の外）にフォーカスがある時のキー。入力欄の中のキーは EditorView が受ける。
+    /// keymap に束ねられていないキー（入力欄の中からも上がってくる）。Esc はパネル自体に
+    /// フォーカスがある時の取消、⌃⏎ は従来どおりのコミット（⌘⏎ は既定 keymap の
+    /// `agent::SubmitPrompt` で届く。Windows の Ctrl+Enter もそちら）。
     pub(crate) fn on_git_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.key == "escape" {
-            self.cancel_git_input(window, cx);
+        match event.keystroke.key.as_str() {
+            "escape" => self.cancel_git_input(window, cx),
+            "enter" if event.keystroke.modifiers.control => {
+                cx.stop_propagation();
+                self.submit_git_input(window, cx);
+            }
+            _ => {}
         }
     }
 
@@ -942,6 +949,17 @@ mod tests {
                 "fix: 貼り付け",
                 "失敗したらメッセージを消さない"
             );
+        });
+        // ⌃⏎ も従来どおりコミットを試みる（改行は入らない）。
+        cx.simulate_keystrokes("ctrl-enter");
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            assert_eq!(
+                workspace.toast_snapshot().len(),
+                2,
+                "⌃⏎ でもコミットを試みる"
+            );
+            assert_eq!(message(workspace, cx), "fix: 貼り付け", "⌃⏎ で改行が入った");
             for session in workspace.project_sessions.sessions.iter_mut() {
                 session._watch = None;
                 session._watch_pump = None;
