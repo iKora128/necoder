@@ -380,6 +380,8 @@ fleet:
   cleanup_close_sub: Hides it only. The agent keeps running
   cleanup_stop: Stop the agent
   cleanup_stop_sub: Interrupt the running turn (same as esc). The Task stays
+  cleanup_sleep: Put to sleep
+  cleanup_sleep_sub: "Stop %{count} idle agents to free memory. Conversations stay and resume on your next message"
   cleanup_archive: Finish Task
   cleanup_archive_sub: Removes it from fleet and herd. The worktree stays on disk
   cleanup_remove_worktree: Delete worktree

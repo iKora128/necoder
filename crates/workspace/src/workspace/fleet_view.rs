@@ -930,6 +930,8 @@ impl Workspace {
         let running = self
             .fleet_cell_agent(cell)
             .is_some_and(|panel| panel.read(cx).has_running_thread());
+        // 休ませられるエージェント（静かで会話を引き継げる・O21 の手動の休眠）。
+        let sleepable = session_index.map_or(0, |index| self.stoppable_agents_in(index, cx));
         // worktree（linked）でなければ削除段は出さない — main を消させない安全側。
         let is_worktree = session_index
             .and_then(|index| self.project_sessions.projects.get(index))
@@ -1053,6 +1055,27 @@ impl Workspace {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _window, cx| this.stop_fleet_cell_agents(cell, cx)),
+                ),
+            );
+        }
+
+        // 休ませる（O21）: 静かなエージェントを止めてメモリを空ける。会話は残り、次に送ると続きから。
+        if let Some(session_index) = session_index.filter(|_| sleepable > 0) {
+            menu_box = menu_box.child(
+                make_row(
+                    "fleet-menu-sleep",
+                    "☾",
+                    SharedString::from(i18n::t!("fleet.cleanup_sleep")),
+                    SharedString::from(i18n::t!("fleet.cleanup_sleep_sub", "count" => sleepable)),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.close_fleet_cell_menu(cx);
+                        this.stop_quiet_agents_in(session_index, cx);
+                    }),
                 ),
             );
         }
