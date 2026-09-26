@@ -260,6 +260,48 @@ impl Workspace {
         }
     }
 
+    /// 開発用: エクスプローラと検索の所作を offscreen で検証する（`NECODER_EXPLORER_PROBE`・
+    /// `;` 区切りで順に実行・パスはプロジェクト相対）。
+    ///
+    /// `expand:<dir>` = フォルダを開く / `scroll:<n>` = ツリーを n 行目へ（仮想化の確認）。
+    #[cfg(debug_assertions)]
+    pub fn debug_explorer_probe(
+        &mut self,
+        command: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        let Some(root) = self
+            .active_worktree()
+            .map(|worktree| worktree.root().to_path_buf())
+        else {
+            return;
+        };
+        let target = if argument.is_empty() {
+            root.clone()
+        } else {
+            root.join(argument)
+        };
+        match name {
+            "expand" => {
+                let active = self.project_sessions.active;
+                if let Some(slot) = self.project_sessions.slot_mut(active) {
+                    slot.explorer.expanded.insert(target);
+                }
+                self.refresh_active_explorer(cx);
+            }
+            "scroll" => {
+                let index = argument.parse::<usize>().unwrap_or(0);
+                self.chrome
+                    .explorer_scroll
+                    .scroll_to_item(index, gpui::ScrollStrategy::Top);
+            }
+            other => eprintln!("EXPLORER_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
+    }
+
     /// 開発用: Chat モードを offscreen で検証する（`NECODER_CHAT_PROBE`・`;` 区切りで順に実行）。
     ///
     /// `open` = Chat へ / `seed` = 見本の会話と成果物（エージェントを起こさない）/ `history` = 過去の

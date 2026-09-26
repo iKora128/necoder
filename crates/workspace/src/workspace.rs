@@ -1206,6 +1206,9 @@ struct ChromeState {
     resize_start_width: f32,
     explorer_width: f32,
     resizing_explorer: bool,
+    /// エクスプローラのツリー（仮想化した `uniform_list`）のスクロール。命名の入力行を
+    /// 見える位置へ寄せるのに使う（見えない行は描かれない＝入力が見えなくなるため）。
+    explorer_scroll: gpui::UniformListScrollHandle,
     should_move_window: bool,
     /// レール項目のドラッグ状態（index・押下位置・閾値超えフラグ）。窓の外で離すと
     /// 擬似 tear-off = その位置に新窓（M13。本物の tear-off は gpui 未対応・DECISIONS）。

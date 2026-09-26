@@ -64,15 +64,12 @@ impl Workspace {
             )
     }
 
-    /// ツリー表示（縦。従来）。行 = chevron + アイコン + 名前。
-    /// インライン命名の入力行（ツリー内に splice する・M10 ファイル操作）。
-    pub(crate) fn render_naming_row(
-        &self,
-        depth: usize,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    /// インライン命名の入力行（ツリー内に splice する・M10 ファイル操作）。見た目だけを持ち、
+    /// キーの受け口（`naming.focus`）はツリーの外枠が持つ（[`Self::render_tree`]）。行は見えている
+    /// 範囲でしか描かれないので、行に持たせるとスクロールで入力行が外れた瞬間にフォーカスを失う。
+    pub(crate) fn render_naming_row(&self, depth: usize, cx: &App) -> gpui::AnyElement {
         let Some(naming) = self.explorer_naming(cx) else {
-            return div().into_any_element();
+            return div().h(px(ROW_HEIGHT)).into_any_element();
         };
         let theme = self.theme.clone();
         let accent = self.accent();
@@ -81,7 +78,6 @@ impl Workspace {
             _ => " ",
         };
         let display: SharedString = SharedString::from(naming.value.clone());
-        let focus = naming.focus.clone();
         div()
             .flex()
             .items_center()
@@ -89,8 +85,6 @@ impl Workspace {
             .h(px(ROW_HEIGHT))
             .pl(px(8. + depth as f32 * INDENT))
             .pr(px(8.))
-            .track_focus(&focus)
-            .on_key_down(cx.listener(Self::on_naming_key_down))
             .child(
                 div()
                     .flex_none()
@@ -145,62 +139,97 @@ impl Workspace {
             )
     }
 
+    /// ツリー表示（縦）。行 = chevron + アイコン + 名前。
+    ///
+    /// **行は仮想化する**（D25・`uniform_list`）: 見えている範囲の行だけを組み立てるので、
+    /// 何万行のフォルダを開いても 1 フレームの仕事は画面の行数ぶんで済む。行の並び
+    /// （命名の入力行を差し込んだ後）だけを先に数え、中身は描く瞬間に組む。
     pub(crate) fn render_tree(
         &self,
         slot: &ProjectSlot,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let theme = self.theme.clone();
         let color = slot.color;
-        let selected = slot.explorer.selected.clone();
-        let git_status = &self.repository.status;
-        let root = slot.worktree.root().to_path_buf(); // ドラッグ時の @メンション相対パス用
-                                                       // インライン命名（M10）: rename は対象行を入力行に置き換え、New* は親フォルダ行の直後
-                                                       // （親がルートなら先頭）に入力行を挿す。
+        let root = slot.worktree.root().to_path_buf();
+        // インライン命名（M10）: rename は対象行を入力行に置き換え、New* は親フォルダ行の直後
+        // （親がルートなら先頭）に入力行を挿す。
         let naming = self.explorer_naming(cx);
-        let naming_kind = naming.as_ref().map(|naming| naming.kind);
-        let naming_parent = naming.as_ref().map(|naming| naming.parent.clone());
-        let naming_target = naming.as_ref().and_then(|naming| naming.target.clone());
-        let naming_at_root = naming_kind.is_some()
-            && naming_kind != Some(NamingKind::Rename)
-            && naming_parent.as_deref() == Some(root.as_path());
-        let mut elements: Vec<gpui::AnyElement> = Vec::new();
-        if naming_at_root {
-            elements.push(self.render_naming_row(0, cx));
-        }
-        for (index, row) in slot.explorer.rows.iter().enumerate() {
-            if naming_kind == Some(NamingKind::Rename) && naming_target.as_ref() == Some(&row.path)
-            {
-                elements.push(self.render_naming_row(row.depth, cx));
-                continue;
-            }
-            elements.push(self.render_tree_row(
-                slot, index, row, &theme, color, &selected, git_status, &root, cx,
-            ));
-            if naming_kind.is_some()
-                && naming_kind != Some(NamingKind::Rename)
-                && row.is_dir
-                && naming_parent.as_ref() == Some(&row.path)
-            {
-                elements.push(self.render_naming_row(row.depth + 1, cx));
-            }
-        }
+        let display_rows = explorer::tree_display_rows(
+            &slot.explorer.rows,
+            naming.as_ref().map(ExplorerNaming::placement),
+            &root,
+        );
+        let widest_row = explorer::widest_display_row(&slot.explorer.rows, &display_rows);
+        let row_count = display_rows.len();
+        let list = gpui::uniform_list(
+            "explorer-tree",
+            row_count,
+            cx.processor(move |this, range: Range<usize>, _window, cx| {
+                this.render_tree_range(&display_rows, range, cx)
+            }),
+        )
+        // 横スクロール可（VSCode/Zed 方式）。深い階層はインデントで右に押し出されるが、
+        // 行は自然幅（min_w_full）＝切らずに全部並べ、あふれた分は横スクロールで読む。
+        // 幅は見えていない行も含めて最も長くなりそうな行で測る（`widest_display_row`）。
+        .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(widest_row)
+        .track_scroll(&self.chrome.explorer_scroll)
+        .size_full();
         let is_local = !slot.worktree.is_remote();
         div()
-            // 横スクロール可（VSCode/Zed 方式）。深い階層はインデントで右に押し出されるが、
-            // 行は自然幅（min_w_full）＝切らずに全部並べ、あふれた分は横スクロールで読む。
             // min_h_0 は flex_col 親の中で縦スクロールを成立させるため（あふれ許可）。
-            .id("explorer-tree")
+            .id("explorer-tree-area")
             .flex_1()
             .min_h_0()
-            .overflow_scroll()
+            // 命名の入力のキーはここで受ける（入力行がスクロールで描かれなくなっても外れない）。
+            .when_some(naming.map(|naming| naming.focus), |element, focus| {
+                element
+                    .track_focus(&focus)
+                    .on_key_down(cx.listener(Self::on_naming_key_down))
+            })
             // D&D の受け（Finder 風・M10 local のみ）: 行の外（余白）へ落とす = ルート直下へ。
             // 行側のドロップが先に消費する（gpui の on_drop は最内から bubble・消費で停止）。
             .when(is_local, |element| {
                 Self::drop_into(element, root.clone(), color, false, cx)
             })
-            .children(elements)
+            .child(list)
             .into_any_element()
+    }
+
+    /// 仮想化したツリーの見えている範囲の行（`uniform_list` が描く直前に呼ぶ）。
+    /// 返す要素の数は `range` と必ず揃える（ずれると後ろの行が 1 つずつ上へ詰まって見える）。
+    fn render_tree_range(
+        &self,
+        display_rows: &[explorer::TreeDisplayRow],
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(slot) = self.active_slot() else {
+            return range.map(|_| div().into_any_element()).collect();
+        };
+        let theme = self.theme.clone();
+        let color = slot.color;
+        let selected = slot.explorer.selected.clone();
+        let git_status = &self.repository.status;
+        let root = slot.worktree.root().to_path_buf(); // ドラッグ時の @メンション相対パス用
+        range
+            .map(|display_index| match display_rows.get(display_index) {
+                Some(explorer::TreeDisplayRow::Entry(index)) => slot
+                    .explorer
+                    .rows
+                    .get(*index)
+                    .map(|row| {
+                        self.render_tree_row(
+                            slot, *index, row, &theme, color, &selected, git_status, &root, cx,
+                        )
+                    })
+                    .unwrap_or_else(|| div().h(px(ROW_HEIGHT)).into_any_element()),
+                Some(explorer::TreeDisplayRow::Naming { depth }) => {
+                    self.render_naming_row(*depth, cx)
+                }
+                None => div().h(px(ROW_HEIGHT)).into_any_element(),
+            })
+            .collect()
     }
 
     /// ツリーの 1 行（従来 render_tree のクロージャ本体を関数化・M10 ファイル操作で入力行と共存させるため）。

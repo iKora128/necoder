@@ -193,8 +193,33 @@ impl Workspace {
                 cx,
             )
         });
+        self.reveal_naming_row(cx);
         self.hide_context_menu(cx);
         cx.notify();
+    }
+
+    /// 命名の入力行をツリーの見える位置へ寄せる。ツリーは見えている行しか描かないので、
+    /// 画面外のフォルダで「新規ファイル」を選ぶと入力行が描かれないまま打つことになる。
+    fn reveal_naming_row(&mut self, cx: &mut Context<Self>) {
+        let Some(naming) = self.explorer_naming(cx) else {
+            return;
+        };
+        let Some(slot) = self.active_slot() else {
+            return;
+        };
+        let display_rows = explorer::tree_display_rows(
+            &slot.explorer.rows,
+            Some(naming.placement()),
+            slot.worktree.root(),
+        );
+        if let Some(index) = display_rows
+            .iter()
+            .position(|row| matches!(row, explorer::TreeDisplayRow::Naming { .. }))
+        {
+            self.chrome
+                .explorer_scroll
+                .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+        }
     }
 
     /// インライン命名の確定（Enter）。作成/リネームを実行してツリーを更新する。
