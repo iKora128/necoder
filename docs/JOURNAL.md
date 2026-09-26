@@ -3296,3 +3296,36 @@
   - YAML の値に `: ` を含めるなら引用符で囲む（`並び: 作った順` はマップとして読まれる）。`i18n` の `both_locales_parse` が守っている。
 - 検証: `cargo check --workspace --all-targets` 警告 0。`cargo test --workspace --no-fail-fast` 833 通過・落ちるのは Linux で元から落ちる 2 件だけ。実画面・macOS 実機・Codex の目標の操作（実エージェント）は未確認。
 - 次: 実機で目標の行のチップ（Codex で `/goal` → 一時停止 → 再開）・message rail の印の位置・片付けの大きさ（node_modules のある Task で du の時間）を確かめる。
+
+## 2026-09-26（続き 4）— #30 の CI を緑にし、O20 / O21 / O25 を積んだ
+
+- やったこと: push の権限が直り、1 本にまとめて **#30**（base `parity/integration`）を作った。CI の赤を順に
+  直した（下の学び）。その上に、＋ Task の**作成中の行**（段の表示・取り消し・やり直し・O20 / A03）・
+  ターミナルの**文字の大きさ / フォント / 遡れる行数 / カーソル**（設定と設定画面・開いている端末にもすぐ効く・O25）・
+  **シェルと引数**（`terminal_shell`・手元の端末だけ・O25）・Fleet サイドバーの**複数選択**（⌘ / ⇧ クリック →
+  まとめて休ませる・舞台に並べる・片付けへ・O21 / A11）。
+- 学び/罠:
+  - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
+    `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
+    走らせないので、**1 つ直すと次の警告が出てくる**ことがある。
+  - **Windows を手元で確かめる**: `rustup target add x86_64-pc-windows-gnu` + `apt install gcc-mingw-w64-x86-64`
+    で `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu`（`RUSTFLAGS=-D warnings`）が通る。
+    turso の build.rs が素の `windres` を呼ぶので、`x86_64-w64-mingw32-windres` を `windres` の名前で PATH に置く。
+    テストは走らせられない（Wine も要る）ので、Windows だけ落ちるテストは CI で見る。
+  - **macOS の temp_dir は /var → /private/var のリンク**。消した後のフォルダはもう正規化できず元の綴りに戻るので、
+    レール（正規化済み）と比べるテストは作業フォルダを**最初に正規化**しておく。手元では `TMPDIR` をシンボリック
+    リンクにすると同じ失敗を再現できる。
+  - Windows のローカルは `has_posix_shell` が false で準備スクリプト（`worktree-setup.sh`）を流さない。流すテストは unix だけ。
+  - **偽エージェント（python）の起動込みで 10 秒の上限を持つテスト**が、統合してテストが増えると Windows のランナーで
+    上限に届いた（元の PR では通っていた）。上限の無い形（セッションが終わるまで待つ）か、条件がそろえばすぐ抜ける形で
+    長め（60 秒）に取る。
+  - relay の WebKit のカメラのテスト（`カメラが使えなければ…`）は main の v0.1.18〜v0.1.20 でも落ちていて、#30 でも
+    落ちたり通ったりする。押した時点で偽の getUserMedia が本物に戻っている（`stillFake:false`）。差し込みと押下を
+    1 回の `page.evaluate` で続けて行う案を #30 のコメントに書いた（この PR には入れていない）。
+  - CLA: クラウドのコミットの著者は `Claude <noreply@anthropic.com>`（GitHub のアカウントに紐付かない）で、
+    `cla.yml` の allowlist に無いので未署名扱いになる。エージェントは署名しない。本人の判断待ち。
+  - ディスク: `target/debug/deps` を成果物ごとに新しい 2 版だけ残して 5 GB、`incremental/` で 4 GB 空く。
+    途中で空きが 0 になり、コマンドの出力（`/tmp` の同じ枠）まで失われた。
+- 検証: Linux の `cargo check --workspace --all-targets`（`-D warnings`）と Windows 向けの同じ check は警告 0。
+  `cargo test --workspace` 845 通過・落ちるのは Linux で元から落ちる 2 件だけ。#30 の CI は 243152f で CLA 以外すべて緑。
+- 次: 実機（mac）で作成中の行・ターミナルの文字の大きさ（行と列の測り直し）・複数選択の帯を確かめる。CLA の判断。
