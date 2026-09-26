@@ -1312,6 +1312,17 @@ impl Workspace {
         self.tabs.get(self.active_tab).map(|tab| tab.path.clone())
     }
 
+    /// タブ列の `index` 番目を、覚えておくファイルの並び（`open_files`＝一時タブを除く）の中の位置へ直す。
+    /// 一時タブ（端末・diff 等）なら、その後ろで最初のファイルの位置（無ければ並びの長さ）。開き直す時は
+    /// 残した端末のタブの後ろにファイルを積むので、この位置に端末の数を足せば同じタブに戻る（O24）。
+    pub(crate) fn file_position_of_tab(&self, index: usize) -> usize {
+        self.tabs
+            .iter()
+            .take(index)
+            .filter(|tab| !tab.transient)
+            .count()
+    }
+
     /// 現在のタブ列をアクティブ slot へ書き戻す（永続化・切替復元の真実源を同期）。
     pub(crate) fn sync_active_slot(&mut self) {
         // 一時タブ（diff 等）は永続化しない。
@@ -1321,7 +1332,9 @@ impl Workspace {
             .filter(|tab| !tab.transient)
             .map(|tab| tab.path.clone())
             .collect();
-        let active_file = self.active_tab.min(files.len().saturating_sub(1));
+        let active_file = self
+            .file_position_of_tab(self.active_tab)
+            .min(files.len().saturating_sub(1));
         let pinned: Vec<PathBuf> = self
             .tabs
             .iter()

@@ -232,6 +232,69 @@ mod tests {
 
     /// O24: 端末をエディタ領域のタブで開いてファイルのタブと並べる。端末の中の ⌘T / ⌘W / ⌘\ は
     /// 主ペインが受け、下ドックとは止めずに行き来する。タブを開き直しても（ブランチの切り替え）残る。
+    /// O24: 端末のタブが前にあっても、選んでいたファイルのタブがブランチの切り替え（ファイルのタブの開き
+    /// 直し）の後も選ばれる。覚える位置はファイルの並びの中の位置で、端末の数を 2 度足さない。
+    #[gpui::test]
+    fn the_selected_file_is_kept_when_tabs_reopen_behind_terminals(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_terminal_tab_order_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        std::fs::write(&a, "a\n").unwrap();
+        std::fs::write(&b, "b\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace
+                .terminal_dock
+                .update(cx, |dock, _cx| dock.use_test_terminals());
+            workspace.open_file_sync(a.clone(), window, cx);
+            workspace.open_file_sync(b.clone(), window, cx);
+            for terminals in 1..=2 {
+                workspace.new_terminal_tab(&NewTerminalTab, window, cx);
+                // 開き直すと端末のタブが前・ファイルがその後ろ（[端末…, a, b]）。
+                workspace.open_slot_files(window, cx);
+                assert_eq!(workspace.tabs.len(), terminals + 2);
+                let position_of_a = workspace
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.path == a)
+                    .expect("a のタブ");
+                workspace.select_tab(position_of_a, window, cx);
+                assert_eq!(
+                    workspace.active_slot().map(|slot| slot.active_file),
+                    Some(0),
+                    "ファイルの並びの中の位置"
+                );
+                workspace.open_slot_files(window, cx);
+                assert_eq!(
+                    workspace.tabs[workspace.active_tab].path, a,
+                    "端末が {terminals} つあっても a に戻る"
+                );
+                workspace.sync_active_slot();
+                assert_eq!(
+                    workspace.active_slot().map(|slot| slot.active_file),
+                    Some(0)
+                );
+            }
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[gpui::test]
     fn terminals_open_as_editor_tabs_and_move_to_and_from_the_dock(cx: &mut gpui::TestAppContext) {
         let root =
