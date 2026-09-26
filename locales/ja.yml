@@ -390,6 +390,8 @@ titlebar:
 settings:
   pref_agent_idle_stop: 使っていないエージェントを止めるまで（分）
   pref_agent_idle_stop_sub: エージェントは 1 本で数百 MB を握ります。止めても会話は残り、次の送信で引き継ぎます。0 = 止めない
+  pref_allow_terminal_send: CLI から端末へ入力を送る
+  pref_allow_terminal_send_sub: "`ne terminal send` で、エージェントやスクリプトが necoder の端末に文字を打てるようにします。送った文字はその端末でそのまま実行されます（一覧・読み取り・待機は off でも使えます）"
   chat_heading: CHAT
   chat_directory: チャットのフォルダの置き場
   chat_directory_default: 書類フォルダの necoder（既定）

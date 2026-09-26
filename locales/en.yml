@@ -389,6 +389,8 @@ titlebar:
 settings:
   pref_agent_idle_stop: Stop unused agents after (minutes)
   pref_agent_idle_stop_sub: Each agent holds several hundred MB. The conversation is kept and resumes on the next message. 0 = never
+  pref_allow_terminal_send: Let the CLI type into terminals
+  pref_allow_terminal_send_sub: "Lets agents and scripts type into necoder's terminals with `ne terminal send`. What they send runs in that terminal as if you typed it (list, read and wait work even when this is off)"
   chat_heading: CHAT
   chat_directory: Where chat folders are kept
   chat_directory_default: necoder in your Documents folder (default)
