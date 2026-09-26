@@ -144,7 +144,10 @@ impl Workspace {
         // 質問だけで止まっている Task の「次へ」は許可ではなく、質問のスレッドを開いて答える（O12）。
         let question_only =
             phase == TaskPhase::Blocked && self.question_only_thread(index, cx).is_some();
+        // 統合の下見で競合した Task の「次へ」は、エージェントに直させる（O19）。
+        let conflicted = phase == TaskPhase::MergeReady && self.task_conflicts(space).is_some();
         let (phase_key, action_key) = match phase {
+            TaskPhase::MergeReady if conflicted => ("fleet.phase_review", "fleet.next_resolve"),
             TaskPhase::Blocked if question_only => ("fleet.phase_blocked", "fleet.next_answer"),
             TaskPhase::Blocked => ("fleet.phase_blocked", "fleet.next_allow"),
             TaskPhase::Failed | TaskPhase::ChangesRequested => ("fleet.phase_failed", "fleet.next_fix"),
@@ -171,6 +174,7 @@ impl Workspace {
                         cx.stop_propagation();
                         let space = this.project_sessions.projects[index].task_space.id.clone();
                         match phase {
+                            TaskPhase::MergeReady if conflicted => this.ask_task_to_resolve_conflicts(space, cx),
                             TaskPhase::MergeReady => this.integrate_task(space, cx),
                             TaskPhase::Integrated | TaskPhase::Integrating => this.open_fleet_cell_menu(cell, event.position, cx),
                             TaskPhase::Failed | TaskPhase::ChangesRequested => {

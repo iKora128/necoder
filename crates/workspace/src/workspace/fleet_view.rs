@@ -392,6 +392,7 @@ impl Workspace {
                 .await;
             let _ = workspace.update(cx, |workspace, cx| match result {
                 Ok(head_oid) => {
+                    workspace.chrome.task_conflicts.remove(&space);
                     if let Some(slot) = workspace
                         .project_sessions
                         .projects
@@ -422,15 +423,68 @@ impl Workspace {
                         Some(&format!("{error:#}")),
                         cx,
                     );
-                    workspace.push_toast(
-                        SharedString::from(i18n::t!("fleet.toast_integrate_failed", "error" => format!("{error:#}"))),
-                        workspace.accent(),
-                        cx,
-                    );
+                    // 競合なら覚えて、「次へ」を「競合を直させる」にする（O19）。
+                    let text = match error.downcast_ref::<project::MergeConflicts>() {
+                        Some(conflicts) => {
+                            workspace
+                                .chrome
+                                .task_conflicts
+                                .insert(space.clone(), conflicts.paths.clone());
+                            i18n::t!(
+                                "fleet.toast_integrate_conflicts",
+                                "count" => conflicts.paths.len()
+                            )
+                        }
+                        None => i18n::t!("fleet.toast_integrate_failed", "error" => format!("{error:#}")),
+                    };
+                    workspace.push_toast(SharedString::from(text), workspace.accent(), cx);
                 }
             });
         })
         .detach();
+    }
+
+    /// 統合の下見で競合したファイル（O19・覚えている間だけ）。
+    pub(crate) fn task_conflicts(&self, space: &SpaceId) -> Option<&[String]> {
+        self.chrome.task_conflicts.get(space).map(Vec::as_slice)
+    }
+
+    /// 「競合を直させる」（O19）: Task のエージェントに、統合先を自分の worktree へ取り込んで競合を
+    /// 解消し、コミットするよう頼む。いまのスレッドへ人間の発話として送る（作業中なら終わってから流れる）。
+    /// スレッドが無ければ新しく立てる。直った後は、もう一度「統合」を押す（下見からやり直す）。
+    pub(crate) fn ask_task_to_resolve_conflicts(&mut self, space: SpaceId, cx: &mut Context<Self>) {
+        let Some(index) = self.session_index_for_space(&space) else {
+            return;
+        };
+        let Some(paths) = self.chrome.task_conflicts.remove(&space) else {
+            return;
+        };
+        let repository_id = self.project_sessions.projects[index]
+            .task_space
+            .repository_id
+            .clone();
+        let base = self
+            .integration_slot_for(&repository_id)
+            .and_then(|integration| self.project_sessions.projects.get(integration))
+            .and_then(|slot| slot.branch.clone())
+            .unwrap_or_else(|| "main".to_string());
+        let prompt = conflict_prompt(&base, &paths);
+        let panel = self.project_sessions.sessions[index].agent_panel.clone();
+        let sent = panel.update(cx, |panel, cx| {
+            let thread = panel.active_thread();
+            panel.send_user_prompt_to(thread, prompt.clone(), cx)
+        });
+        // 作業中への遷移は、ターンが始まった所で既存の経路（TurnStarted）が付ける。
+        if !sent {
+            self.ipc_spawn_into(index, None, Some(prompt), cx);
+        }
+        let accent = self.accent();
+        self.push_toast(
+            SharedString::from(i18n::t!("fleet.conflicts_sent", "count" => paths.len())),
+            accent,
+            cx,
+        );
+        cx.notify();
     }
 
     pub(crate) fn session_index_for_space(&self, space: &SpaceId) -> Option<usize> {
@@ -2730,6 +2784,13 @@ impl Workspace {
     }
 }
 
+/// 「競合を直させる」でエージェントへ送る依頼（O19）。競合したファイルを並べ、統合先を取り込んで
+/// 両方の変更の意図を保って解消し、コミットするよう頼む（統合は人が押す＝ここでは統合しない）。
+pub(crate) fn conflict_prompt(base: &str, paths: &[String]) -> String {
+    let files: String = paths.iter().map(|path| format!("- {path}\n")).collect();
+    i18n::t!("fleet.conflict_prompt", "base" => base, "files" => files.trim_end())
+}
+
 /// fan-out で同時に切る Task の上限（O23）。
 pub(crate) const MAX_FANOUT: usize = 6;
 
@@ -2888,6 +2949,114 @@ mod tests {
             workspace.open_news_item(0, window, cx);
             assert_eq!(workspace.project_sessions.active, 1, "ニュースの Task へ");
         });
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// O19: 競合を直させる依頼は、競合したファイルを並べ、統合先を取り込むよう頼む（統合はさせない）。
+    #[test]
+    fn the_conflict_prompt_lists_the_files_and_the_base() {
+        let prompt = conflict_prompt("main", &["a.txt".to_string(), "src/lib.rs".to_string()]);
+        assert!(prompt.contains("- a.txt\n- src/lib.rs"), "{prompt}");
+        assert!(prompt.contains("git merge main"), "{prompt}");
+    }
+
+    /// O19: 統合の下見で競合したら、競合したファイルを覚えて「次へ」を「競合を直させる」にする
+    /// （エージェントには送らない＝ここでは覚えるところまで）。統合先は触らない。
+    #[gpui::test]
+    fn a_conflicting_integration_offers_to_have_the_agent_fix_it(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!("necoder_conflict_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(base.join("repo")).expect("作業フォルダを作れる");
+        let base = paths::canonicalize(&base).expect("正規化できる");
+        let repo = base.join("repo");
+        let task = base.join("repo-worktrees").join("conflict");
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "core.autocrlf=false",
+                ])
+                .args(args)
+                .output()
+                .expect("git を起動できる")
+        };
+        if !git(&repo, &["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(repo.join("a.txt"), "base\n").expect("書ける");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "base"]);
+        let added = git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task/conflict",
+                task.to_str().expect("パス"),
+            ],
+        );
+        assert!(added.status.success(), "{added:?}");
+        std::fs::write(task.join("a.txt"), "task\n").expect("書ける");
+        git(&task, &["commit", "-qam", "task"]);
+        std::fs::write(repo.join("a.txt"), "main\n").expect("書ける");
+        git(&repo, &["commit", "-qam", "main"]);
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            Workspace::new(vec![repo.clone(), task.clone()], Theme::dark(), None, cx)
+        });
+        let space = workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            let index = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .position(|slot| slot.worktree.root() == task.as_path())
+                .expect("Task がレールにある");
+            let slot = &mut workspace.project_sessions.projects[index];
+            assert!(
+                !slot.task_space.is_integration(),
+                "task/ の worktree は Task"
+            );
+            slot.task_space.phase = TaskPhase::MergeReady;
+            let space = slot.task_space.id.clone();
+            workspace.integrate_task(space.clone(), cx);
+            space
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            assert_eq!(
+                workspace.task_conflicts(&space),
+                Some(["a.txt".to_string()].as_slice()),
+                "競合したファイルを覚える"
+            );
+            let index = workspace.session_index_for_space(&space).expect("Task");
+            assert_eq!(
+                workspace.project_sessions.projects[index].task_space.phase,
+                TaskPhase::MergeReady,
+                "統合できないまま戻る"
+            );
+        });
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).expect("読める"),
+            "main\n",
+            "統合先は触らない"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 

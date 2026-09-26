@@ -847,6 +847,7 @@ impl Workspace {
                 adopt_as_task: std::collections::HashSet::new(),
                 pending_task_prompts: HashMap::new(),
                 pending_task_agents: HashMap::new(),
+                task_conflicts: HashMap::new(),
                 task_creations: Vec::new(),
                 next_task_creation_id: 0,
                 fleet_cell_menu: None,

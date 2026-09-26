@@ -415,6 +415,10 @@ fleet:
   no_running_agent: 動いているエージェントはありません
   task_archived: Task を終了しました（worktree はディスクに残っています）
   base_synced: "%{branch} を upstream に追従（%{count} コミット早送り）してから Task を作成しました"
+  next_resolve: 競合を直させる
+  toast_integrate_conflicts: "%{count} ファイルが統合先と競合しました。「競合を直させる」で Task のエージェントに頼めます"
+  conflicts_sent: "競合した %{count} ファイルを直すよう Task のエージェントに頼みました。終わったらもう一度「統合」"
+  conflict_prompt: "統合先 `%{base}` に取り込もうとしたら、次のファイルが競合しました:\n%{files}\n\nこの worktree で `git merge %{base}` を実行して競合を解消し（両方の変更の意図を残す）、コミットしてください。テストがあれば通してから、何をどう解消したか短く教えてください。%{base} への取り込み（統合）は人がやるので、しなくてよいです。"
   creating_untitled: "新しい Task"
   creating_waiting: "順番を待っています…"
   creating_sync: "統合先を最新にしています…"
