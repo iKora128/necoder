@@ -560,7 +560,7 @@ impl Workspace {
                     .child(
                         div()
                             .flex_none()
-                            .font_family("Guguru Sans Code")
+                            .font_family(ui::code_font(cx))
                             .text_size(px(11.))
                             .text_color(theme.fg1)
                             .child(SharedString::from(format_memory(group.rss_kb))),

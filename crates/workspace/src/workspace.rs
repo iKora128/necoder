@@ -91,11 +91,13 @@ mod remote_connection;
 mod remote_ssh;
 mod shortcut_sheet;
 mod system_notifications;
+mod font_settings;
 mod terminal_settings;
 mod usage_view;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
 pub use keep_awake::install_keep_awake;
+pub use font_settings::install_font_settings;
 pub use terminal_settings::install_terminal_settings;
 pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
@@ -2391,7 +2393,7 @@ impl Render for Workspace {
             // 窓の角丸(10px・UI-SPEC §1.4)に枠を沿わせる。四角い枠だと隅が窓の丸みでクリップされ細く見える。
             .rounded(px(10.))
             .text_color(theme.fg0)
-            .font_family("IBM Plex Sans JP") // UI = IBM Plex Sans JP（bin で bundle 済み）
+            .font_family(ui::ui_font(cx)) // UI の書体（既定 IBM Plex Sans JP・bin で bundle 済み・設定 `ui_font_family`）
             .text_size(px(12.5))
             .child(self.render_titlebar(cx))
             .child(if self.chat_mode() {

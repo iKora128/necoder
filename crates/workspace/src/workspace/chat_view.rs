@@ -1094,7 +1094,7 @@ impl Workspace {
                 dialog.child(
                     div()
                         .text_size(px(11.))
-                        .font_family("Guguru Sans Code")
+                        .font_family(ui::code_font(cx))
                         .text_color(theme.fg2)
                         .child(SharedString::from(dir.display().to_string())),
                 )
@@ -1209,7 +1209,7 @@ impl Workspace {
             )
             .child(
                 div()
-                    .font_family("Guguru Sans Code")
+                    .font_family(ui::code_font(cx))
                     .text_color(theme.fg2)
                     .child(SharedString::from(label)),
             )

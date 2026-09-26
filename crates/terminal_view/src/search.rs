@@ -342,7 +342,7 @@ impl TerminalView {
                 )
                 .blur_radius(px(18.))])
                 // 端末本体は等幅だが、バーはエディタの ⌘F バーと同じ UI フォント。
-                .font_family("IBM Plex Sans JP")
+                .font_family(ui::ui_font(cx))
                 .cursor(gpui::CursorStyle::Arrow)
                 .track_focus(&focus)
                 .on_key_down(cx.listener(Self::on_search_key_down))

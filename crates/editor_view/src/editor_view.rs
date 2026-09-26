@@ -225,6 +225,9 @@ pub struct EditorView {
     /// ずれる（マウスイベント中の `window.text_style()` は OS 既定の UI フォント＝プロポーショナル。
     /// 日本語 + ASCII 混在の markdown 行で全角 3 文字分ずれていた・2026-09-05）。
     text_font: Option<gpui::Font>,
+    /// 書体（O27・`ui::FontFamilies` の写し）。描くたびに global から取り直し、ヒットテストの
+    /// フォールバックも同じ値を見る。
+    fonts: ui::FontFamilies,
     /// 直近 prepaint が可視表示行ぶん問い合わせたハイライト span（版 + byte 範囲つき）。
     /// ヒットテストが描画と**同じ run 構成**（見出し/太字 = Bold・強調 = Italic）で幅を測るために使う。
     /// Bold/Italic の advance が Regular と違う family に差し替えても x→offset がずれない（2026-09-07）。
@@ -375,6 +378,7 @@ impl EditorView {
             marked_range: None,
             content_origin: None,
             text_font: None,
+            fonts: ui::FontFamilies::default(),
             visible_highlights: VisibleHighlights::default(),
             viewport_height: px(0.),
             gutter_width: px(0.),
@@ -2225,13 +2229,14 @@ impl EditorView {
         snapshot.point_to_byte(BufferPoint::new(row, column))
     }
 
-    /// 本文のフォントファミリ。コード = Guguru Sans Code（等幅）/ composer(plain) = IBM Plex Sans JP。
-    /// render の `font_family` とヒットテストのフォールバックが同じ値を見る。
-    fn font_family(&self) -> &'static str {
+    /// 本文のフォントファミリ。コード = コードの書体（既定 Guguru Sans Code・等幅）/ composer(plain) =
+    /// UI の書体（既定 IBM Plex Sans JP）。どちらも設定で変えられる（O27）。render の `font_family` と
+    /// ヒットテストのフォールバックが同じ値を見る。
+    fn font_family(&self) -> SharedString {
         if self.plain {
-            "IBM Plex Sans JP"
+            self.fonts.ui.clone()
         } else {
-            "Guguru Sans Code"
+            self.fonts.code.clone()
         }
     }
 
@@ -2320,6 +2325,12 @@ impl EventEmitter<PreviewLinkClicked> for EditorView {}
 
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 書体の設定（O27）は描くたびに取り直す（設定が変わった次の描画から効く）。
+        if let Some(fonts) = cx.try_global::<ui::FontFamilies>() {
+            if *fonts != self.fonts {
+                self.fonts = fonts.clone();
+            }
+        }
         // `.html` ネイティブプレビュー: エディタ本体だけを差し替え、タブ/パンくずは GPUI のまま。
         if self.rendered_html {
             if let Some(preview) = self.html_preview.clone() {
@@ -2347,12 +2358,13 @@ impl Render for EditorView {
                 .size_full()
                 .bg(self.theme.bg1)
                 .text_color(self.theme.fg0)
-                .font_family("IBM Plex Sans JP")
+                .font_family(self.fonts.ui.clone())
                 .on_action(cx.listener(Self::toggle_rendered_markdown))
                 .child(markdown_preview::render_preview(
                     &self.markdown_blocks,
                     &self.theme,
                     self.font_size,
+                    self.fonts.code.clone(),
                     &self.markdown_scroll,
                     self.buffer.path().and_then(|path| path.parent()),
                     {
@@ -2375,7 +2387,7 @@ impl Render for EditorView {
             .size_full()
             .when(!self.plain, |element| element.bg(self.theme.bg1))
             .text_color(self.theme.fg0)
-            // コード = Guguru Sans Code（等幅・bin で bundle 済み）/ composer(plain) = IBM Plex Sans JP（UI）
+            // コード / composer(plain) の書体（[`Self::font_family`]・設定で変えられる・O27）
             .font_family(self.font_family())
             .text_size(px(self.font_size))
             .line_height(px(self.line_height_value()))

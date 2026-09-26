@@ -1961,7 +1961,7 @@ impl TerminalView {
                 gpui::hsla(0., 0., 0., 0.4),
             )
             .blur_radius(px(16.))])
-            .font_family("IBM Plex Sans JP")
+            .font_family(ui::ui_font(cx))
             .on_mouse_down_out(cx.listener(|this, _, _window, cx| {
                 this.context_menu = None;
                 cx.notify();

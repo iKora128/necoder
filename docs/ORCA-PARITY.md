@@ -284,7 +284,7 @@
 | O17（一部） | 同上 | #30 | 質問カードの自由入力（Other 欄に書いて答える・選んだ案に添える。スマホの質問も）・サブエージェントの手順を親の Task の下に畳む・目標の一時停止 / 再開 / 取り消し（Codex の goal の操作）・message rail。ツールのまとめ表示と個別停止は未（個別停止は `_session/async_task/stop` があるが、`async_task_*` の更新は JetBrains AIR 拡張 `_meta.jetbrains.air.capabilities` を名乗った時だけ来る。SDK が未知の sessionUpdate をどう扱うかを実機で確かめてから） |
 | O25（一部） | 同上 | #30 | ターミナルの文字の大きさ・フォント・遡れる行数・カーソルの形（設定と設定画面・開いている端末にもその場で効く）・シェルと引数（`terminal_shell`・手元の端末だけ・settings.json）。テーマの取り込み・シェルを選ぶ画面・Quick Commands・OSC 133・TUI の状態推定は未 |
 | O19（一部） | 同上 | #30 | conflict を AI に渡す（統合の下見で競合したら Task の次へが「競合を直させる」・競合したファイルの一覧つきで Task のエージェントに頼む）。3-way の画面・Abort は未 |
-| O27（一部） | 同上 | #30 | 設定の検索（全ページから一致した行を集める・キー / 選択肢の名前でも当たる）・表示言語の切替（その場で）。キー割り当ての GUI・UI ズーム・UI フォント・density・statusbar の項目は未 |
+| O27（一部） | 同上 | #30 | 設定の検索（全ページから一致した行を集める・キー / 選択肢の名前でも当たる）・表示言語の切替（その場で）・UI とコードの書体（`ui_font_family` / `code_font_family`・settings.json・直書きしていた 30 か所を `ui::ui_font` / `ui::code_font` に）。キー割り当ての GUI・UI ズーム・density・statusbar の項目・書体を選ぶ画面は未 |
 
 ### 7.1 クラウドでの続き（2026-09-26・`claude/sleepy-hamilton-gesxiq`）
 

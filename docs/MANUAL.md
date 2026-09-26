@@ -658,6 +658,8 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 |---|---|---|
 | `theme` | `necoder-dark` | テーマ名 |
 | `font_size` / `tab_size` | `13` / `4` | 文字サイズ / タブ幅 |
+| `ui_font_family` | 空 | UI の書体（空 = 同梱の IBM Plex Sans JP。入っている書体の名前を書く） |
+| `code_font_family` | 空 | コードの書体（空 = 同梱の Guguru Sans Code。エディタ・差分・パス・ターミナルの既定。等幅の書体を書く） |
 | `density` | compact | 行の密度（compact / cozy）。**未実装**: 値は読むが、まだ画面に反映されない |
 | `soft_wrap` | `false` | 折り返し表示 |
 | `format_on_save` | `false` | 保存時にフォーマット |
@@ -671,7 +673,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | `confirm_quit` | `running` | ⌘Q・窓を閉じる時、動いているものがあれば確認する（`never` = しない） |
 | `keep_awake` | `working` | エージェントが作業している間はスリープさせない（`off` = しない・mac と Windows） |
 | `terminal_font_size` | `12.5` | ターミナルの文字の大きさ（8〜32） |
-| `terminal_font_family` | 空 | ターミナルのフォント（空 = エディタと同じコードフォント。等幅のフォント名を書く） |
+| `terminal_font_family` | 空 | ターミナルのフォント（空 = コードの書体。等幅のフォント名を書く） |
 | `terminal_scrollback` | `10000` | ターミナルで遡れる行数（上限 100000・減らすと古い行から捨てる） |
 | `terminal_cursor` | `block` | ターミナルのカーソルの形（`bar` = 縦線 / `underline` = 下線。vim などの指定が優先） |
 | `terminal_shell` | 空 | 手元のターミナルで開くシェル（空 = OS の既定。名前か絶対パス。例 `"fish"`・Windows なら `"bash"`（Git Bash）や `"wsl"`）。新しく開くターミナルから効き、SSH 先は接続先のシェルのまま |

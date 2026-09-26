@@ -340,7 +340,8 @@ impl Workspace {
                 .py(px(6.))
                 .border_t_1()
                 .border_color(theme.border)
-                .font_family("Menlo")
+                // 差分はコードの書体（以前は mac にしか無い Menlo を直書きしていた・O27）。
+                .font_family(ui::code_font(cx))
                 .text_size(px(11.))
                 .max_h(px(240.))
                 .overflow_hidden();

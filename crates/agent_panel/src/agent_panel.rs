@@ -8320,7 +8320,7 @@ PYEOF"#;
                     div()
                         .text_size(px(10.5))
                         .text_color(theme.fg2)
-                        .font_family("Guguru Sans Code")
+                        .font_family(ui::code_font(cx))
                         .child(format!("{secs}s")),
                 )
             });
@@ -8374,7 +8374,7 @@ PYEOF"#;
                             .flex_none()
                             .text_size(px(10.5))
                             .text_color(theme.fg2)
-                            .font_family("Guguru Sans Code")
+                            .font_family(ui::code_font(cx))
                             .child(format!("{}/{}", human_tokens(used), human_tokens(max))),
                     )
                     // コンパクト（/compact）ボタン: トークンの真横。文脈が溜まっていて実行中でない時だけ。
@@ -8395,7 +8395,7 @@ PYEOF"#;
                             .border_color(theme.border)
                             .text_size(px(10.5))
                             .text_color(theme.fg1)
-                            .font_family("Guguru Sans Code")
+                            .font_family(ui::code_font(cx))
                             .cursor_pointer()
                             .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
                             .child(SharedString::from(i18n::t!("agent.compact")))
@@ -9157,7 +9157,7 @@ PYEOF"#;
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .font_family("Guguru Sans Code")
+                                        .font_family(ui::code_font(cx))
                                         .text_size(px(11.))
                                         .text_color(theme.fg2)
                                         .child(self.linked_text(args.clone(), cx)),
@@ -9175,7 +9175,7 @@ PYEOF"#;
                             .items_center()
                             .gap(px(4.))
                             .cursor_pointer()
-                            .font_family("Guguru Sans Code")
+                            .font_family(ui::code_font(cx))
                             .text_size(px(11.))
                             .text_color(theme.fg2)
                             .child(div().flex_none().text_size(px(8.)).child(if expanded {
@@ -9209,7 +9209,7 @@ PYEOF"#;
                             column = column.child(
                                 div()
                                     .min_w_0()
-                                    .font_family("Guguru Sans Code")
+                                    .font_family(ui::code_font(cx))
                                     .text_size(px(11.))
                                     .text_color(theme.fg2)
                                     .child(self.push_selectable(
@@ -9227,7 +9227,7 @@ PYEOF"#;
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .font_family("Guguru Sans Code")
+                                    .font_family(ui::code_font(cx))
                                     .text_size(px(11.))
                                     .text_color(theme.fg2)
                                     .child(self.linked_text(args.clone(), cx)),
@@ -9237,7 +9237,7 @@ PYEOF"#;
                 }
                 // Edit 系: before/after 差分を transcript にインライン表示（権限カードと同じ描画を再利用）。
                 for diff in diffs {
-                    body = body.child(render_diff(diff, &theme));
+                    body = body.child(render_diff(diff, &theme, ui::code_font(cx)));
                 }
                 // 書かれたのが単体でプレビューできる物（HTML / Markdown）なら、1 クリックで
                 // プレビュー表示へ。判定は**構造化されたパス**（差分のパス）+ 実在 + 拡張子で、
@@ -9262,7 +9262,7 @@ PYEOF"#;
                         .items_start()
                         .gap(px(4.))
                         .pt(px(3.))
-                        .font_family("Guguru Sans Code")
+                        .font_family(ui::code_font(cx))
                         .text_size(px(11.))
                         .text_color(theme.fg2)
                         .child(div().flex_none().child("⎿"));
@@ -9395,7 +9395,7 @@ PYEOF"#;
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .font_family("Guguru Sans Code")
+                        .font_family(ui::code_font(cx))
                         .child(latest),
                 )
             })
@@ -9507,7 +9507,7 @@ PYEOF"#;
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.bg1)
-                        .font_family("IBM Plex Sans JP")
+                        .font_family(ui::ui_font(cx))
                         .text_size(px(12.5))
                         .text_color(theme.fg2)
                         .cursor_pointer()
@@ -9538,7 +9538,7 @@ PYEOF"#;
                         .border_color(theme.border)
                         .px(px(9.))
                         .py(px(7.))
-                        .font_family("Guguru Sans Code")
+                        .font_family(ui::code_font(cx))
                         .text_size(px(11.5))
                         .text_color(theme.fg0)
                         .child(self.push_selectable(shown_text, highlights, cx))
@@ -10610,7 +10610,7 @@ PYEOF"#;
                         .border_color(theme.border)
                         .px(px(8.))
                         .py(px(6.))
-                        .font_family("Guguru Sans Code")
+                        .font_family(ui::code_font(cx))
                         .text_size(px(11.))
                         .text_color(theme.fg0)
                         .child(SharedString::from(command)),
@@ -10755,7 +10755,7 @@ PYEOF"#;
                 .border_color(theme.border)
                 .px(px(8.))
                 .py(px(6.))
-                .font_family("Guguru Sans Code")
+                .font_family(ui::code_font(cx))
                 .text_size(px(11.))
                 .text_color(theme.fg1);
             for line in raw_input.lines() {
@@ -10766,7 +10766,7 @@ PYEOF"#;
 
         // 編集差分（あれば）を diff レビューとして表示。
         for diff in &pending.diffs {
-            card = card.child(render_diff(diff, &theme));
+            card = card.child(render_diff(diff, &theme, ui::code_font(cx)));
         }
 
         // 許可/拒否ボタン列（選択肢は ACP が広告したもの。添字で応答）。
@@ -12199,7 +12199,7 @@ enum DiffTone {
 }
 
 /// 編集差分 1 件を表示する（ファイルパス + コンパクトな行差分）。mono。
-fn render_diff(diff: &PermissionDiff, theme: &Theme) -> impl IntoElement {
+fn render_diff(diff: &PermissionDiff, theme: &Theme, code_font: SharedString) -> impl IntoElement {
     let lines = compact_line_diff(diff.old_text.as_deref(), &diff.new_text);
     let body = div()
         .flex()
@@ -12215,7 +12215,7 @@ fn render_diff(diff: &PermissionDiff, theme: &Theme) -> impl IntoElement {
                 .py(px(4.))
                 .border_b_1()
                 .border_color(theme.border)
-                .font_family("Guguru Sans Code")
+                .font_family(code_font.clone())
                 .text_size(px(10.5))
                 .text_color(theme.fg1)
                 .child(SharedString::from(diff.path.clone())),
@@ -12225,7 +12225,7 @@ fn render_diff(diff: &PermissionDiff, theme: &Theme) -> impl IntoElement {
         .flex_col()
         .px(px(9.))
         .py(px(5.))
-        .font_family("Guguru Sans Code")
+        .font_family(code_font.clone())
         .text_size(px(11.));
     for (tone, text) in lines {
         let (prefix, tone_color) = match tone {
