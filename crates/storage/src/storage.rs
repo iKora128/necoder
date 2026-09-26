@@ -197,10 +197,22 @@ pub struct TurnSearchHit {
     pub turn_id: i64,
     /// `user` / `agent`。
     pub role: String,
-    pub content: String,
+    /// 一致の周りの抜粋（最初の一致の [`SEARCH_EXCERPT_BEFORE`] 文字前から最大
+    /// [`SEARCH_EXCERPT_CHARS`] 文字）。本文を丸ごとは返さない（長い発話で結果が膨らまない）。
+    /// 前後を切った側には `…` を付ける。
+    pub excerpt: String,
     /// 一致した turn の時刻（unix ms）。
     pub created_at: i64,
 }
+
+/// 全文検索の抜粋: 最初の一致の何文字前から切り出すか。
+pub const SEARCH_EXCERPT_BEFORE: i64 = 80;
+/// 全文検索の抜粋: 1 件で返す最大の文字数（本文を丸ごと返さない＝結果の大きさに上限を置く）。
+pub const SEARCH_EXCERPT_CHARS: i64 = 400;
+/// 全文検索の 1 回で返す件数の上限（呼び手の `limit` もこれで頭打ちにする）。
+pub const SEARCH_MAX_HITS: usize = 200;
+/// 検索語の長さの上限（文字）。これより長い語は頭だけで探す。
+pub const SEARCH_QUERY_MAX_CHARS: usize = 200;
 
 /// Task lifecycle の追記イベント。wait/orchestration は transient な UI state ではなく
 /// このログと `task_spaces.phase` を読む。
@@ -1076,7 +1088,7 @@ impl Storage {
         Ok(self
             .search_thread_turns(Some(scope), false, query, limit)?
             .into_iter()
-            .map(|hit| (hit.thread_id, hit.content))
+            .map(|hit| (hit.thread_id, hit.excerpt))
             .collect())
     }
 
@@ -1088,6 +1100,10 @@ impl Storage {
     ///
     /// 件数と本文量なら `LIKE` で足りる（FTS の表を足すと書き込みのたびに索引を更新する費用が常時
     /// かかる）。一致した turn をスレッドごとに 1 回の走査で集めてから、スレッドのメタを引く。
+    ///
+    /// **上限**: 件数は `limit`（最大 [`SEARCH_MAX_HITS`]）、1 件の大きさは抜粋の
+    /// [`SEARCH_EXCERPT_CHARS`] 文字（本文は SQL の中で切り、丸ごと読み出さない）、検索語は
+    /// [`SEARCH_QUERY_MAX_CHARS`] 文字まで。空の語は何も返さない（全件にならない）。
     pub fn search_thread_turns(
         &self,
         scope: Option<&str>,
@@ -1095,6 +1111,10 @@ impl Storage {
         query: &str,
         limit: usize,
     ) -> Result<Vec<TurnSearchHit>> {
+        let query: String = query.trim().chars().take(SEARCH_QUERY_MAX_CHARS).collect();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
         let scope = scope.map(str::to_string);
         // `LIKE` のワイルドカードを字面として扱う（`100%` で検索して全件が返るのを防ぐ）。
         let pattern = format!(
@@ -1104,18 +1124,25 @@ impl Storage {
                 .replace('%', "\\%")
                 .replace('_', "\\_")
         );
-        let limit = limit as i64;
+        let limit = limit.min(SEARCH_MAX_HITS) as i64;
         self.run(move |conn| {
             futures::executor::block_on(async {
+                // 抜粋の位置: `LIKE` と同じく ASCII だけ大文字小文字を無視して最初の一致を探す
+                // （SQLite の lower() も ASCII だけを畳む）。`substr` / `instr` / `length` は文字単位。
                 let mut rows = conn
                     .query(
                         "SELECT hits.thread_id, threads.name, threads.project, threads.color_index,
-                                threads.archived, turns.id, turns.role, turns.content,
-                                turns.created_at
-                         FROM (SELECT thread_id, MAX(id) AS turn_id FROM turns
-                               WHERE role IN ('user', 'agent')
-                                 AND content LIKE ?1 ESCAPE '\\'
-                               GROUP BY thread_id) AS hits
+                                threads.archived, turns.id, turns.role,
+                                substr(turns.content, hits.excerpt_start, ?6),
+                                hits.excerpt_start, length(turns.content), turns.created_at
+                         FROM (SELECT grouped.thread_id, grouped.turn_id,
+                                      max(1, instr(lower(matched.content), lower(?5)) - ?7)
+                                          AS excerpt_start
+                               FROM (SELECT thread_id, MAX(id) AS turn_id FROM turns
+                                     WHERE role IN ('user', 'agent')
+                                       AND content LIKE ?1 ESCAPE '\\'
+                                     GROUP BY thread_id) AS grouped
+                               JOIN turns AS matched ON matched.id = grouped.turn_id) AS hits
                          JOIN turns ON turns.id = hits.turn_id
                          JOIN threads ON threads.id = hits.thread_id
                          WHERE (?2 IS NULL OR threads.project = ?2)
@@ -1126,12 +1153,27 @@ impl Storage {
                             scope.as_deref(),
                             i64::from(include_archived),
                             limit,
+                            query.as_str(),
+                            SEARCH_EXCERPT_CHARS,
+                            SEARCH_EXCERPT_BEFORE,
                         ),
                     )
                     .await
                     .context("turns の検索に失敗")?;
                 let mut result = Vec::new();
                 while let Some(row) = rows.next().await.context("検索結果の取得に失敗")? {
+                    let excerpt = row.get_value(7)?.as_text().context("excerpt")?.clone();
+                    let start = *row.get_value(8)?.as_integer().context("excerpt start")?;
+                    let total = *row.get_value(9)?.as_integer().context("content length")?;
+                    let shown = excerpt.chars().count() as i64;
+                    let mut marked = String::with_capacity(excerpt.len() + 6);
+                    if start > 1 {
+                        marked.push('…');
+                    }
+                    marked.push_str(&excerpt);
+                    if start - 1 + shown < total {
+                        marked.push('…');
+                    }
                     result.push(TurnSearchHit {
                         thread_id: row.get_value(0)?.as_text().context("thread_id")?.clone(),
                         thread_name: row.get_value(1)?.as_text().context("name")?.clone(),
@@ -1140,8 +1182,8 @@ impl Storage {
                         archived: *row.get_value(4)?.as_integer().context("archived")? != 0,
                         turn_id: *row.get_value(5)?.as_integer().context("turn id")?,
                         role: row.get_value(6)?.as_text().context("role")?.clone(),
-                        content: row.get_value(7)?.as_text().context("content")?.clone(),
-                        created_at: *row.get_value(8)?.as_integer().context("created_at")?,
+                        excerpt: marked,
+                        created_at: *row.get_value(10)?.as_integer().context("created_at")?,
                     });
                 }
                 Ok(result)
@@ -2886,7 +2928,7 @@ mod tests {
         let hits = storage.search_thread_turns(None, true, "rope", 10).unwrap();
         let found: Vec<(&str, &str, bool)> = hits
             .iter()
-            .map(|hit| (hit.thread_id.as_str(), hit.content.as_str(), hit.archived))
+            .map(|hit| (hit.thread_id.as_str(), hit.excerpt.as_str(), hit.archived))
             .collect();
         assert_eq!(
             found,
@@ -2933,6 +2975,58 @@ mod tests {
             1,
             "件数の上限が効く"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 全文検索の上限（O15）: 1 件は一致の周りの抜粋だけ（本文を丸ごと返さない）・件数は頭打ち・
+    /// 空の語は何も返さない。
+    #[test]
+    fn search_thread_turns_returns_bounded_excerpts() {
+        let path = temp_db("search_excerpts");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("long", "長い会話", 0, "p", None, None, None, 0, 0)
+            .unwrap();
+        let long = format!("{}Rope の索引{}", "あ".repeat(2_000), "い".repeat(2_000));
+        storage.insert_turn("long", "agent", &long).unwrap();
+        let hits = storage.search_thread_turns(None, true, "rope", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        let excerpt = &hits[0].excerpt;
+        assert!(
+            excerpt.starts_with('…') && excerpt.ends_with('…'),
+            "{excerpt}"
+        );
+        assert!(excerpt.contains("Rope の索引"), "一致を含む: {excerpt}");
+        assert!(
+            excerpt.chars().count() as i64 <= SEARCH_EXCERPT_CHARS + 2,
+            "抜粋は上限の長さまで: {}",
+            excerpt.chars().count()
+        );
+        assert!(
+            excerpt.find("Rope").expect("一致の位置") > 0,
+            "一致より少し前から切り出す"
+        );
+
+        for number in 0..5 {
+            let id = format!("t{number}");
+            storage
+                .upsert_thread(&id, &id, 0, "p", None, None, None, 0, 0)
+                .unwrap();
+            storage.insert_turn(&id, "user", "rope の話").unwrap();
+        }
+        assert_eq!(
+            storage
+                .search_thread_turns(None, true, "rope", usize::MAX)
+                .unwrap()
+                .len(),
+            6,
+            "大きすぎる limit は上限で頭打ち（ここでは全件）"
+        );
+        assert!(storage
+            .search_thread_turns(None, true, "   ", 10)
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_file(&path);
     }
 
