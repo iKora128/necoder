@@ -49,6 +49,7 @@
 | **レール**（左の色バー） | `rail` | レール | Rail |
 | **project**（レールの 1 枠） | `ProjectSlot` / `slot` | プロジェクト | Project |
 | 長寿命 UI 束（1 project 分） | `ProjectSession` | — | — |
+| **衝突の帯**（git の衝突の印が残ったファイルの上に出る帯。今の側 / 入ってくる側 / 両方・次へ） | `conflicts` / `render_conflict_bar` / `ResolveConflictOurs` 等 / `AbortMergeOrRebase` | 衝突 / 今の側 / 入ってくる側 / 両方 | Conflict / Current / Incoming / Both |
 | **TaskSpace**（Fleet の隔離作業単位） | `TaskSpace` / `SpaceId` | Task | Task |
 | ↳ **親の Task / 子の Task**（起点に別の Task のブランチを選んで作った Task は、その Task の子。依存待ち `depends_on` とは別） | `TaskSpace::parent` / `task_parents` / `nest_task_rows` / `task_descendants` | 親の Task / 子の Task | Parent Task / Child Tasks |
 | **IntegrationSpace**（保護された統合先） | `SpaceKind::Integration`（P0 で phase から分離） | Integration | Integration |

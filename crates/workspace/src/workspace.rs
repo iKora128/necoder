@@ -74,6 +74,7 @@ pub(crate) use web_preview_view::{
 };
 mod about;
 mod cleanup;
+mod conflicts;
 mod editor_manners;
 mod git_controller;
 mod git_view;
@@ -151,6 +152,12 @@ actions!(
         MoveTerminalToEditor,
         // どこからでも呼べる端末（プロジェクトに紐付かない・浮かべる・⌃`・O24 / C13）。
         ToggleFloatingTerminal,
+        // 衝突の解決（キャレットの衝突を今の側 / 入ってくる側 / 両方で・次へ・中止・O19 / E05）。
+        ResolveConflictOurs,
+        ResolveConflictTheirs,
+        ResolveConflictBoth,
+        NextConflict,
+        AbortMergeOrRebase,
         GoToDefinition,
         TriggerCompletion,
         // hover をキーで出す（マウス dwell と同じポップアップ。⌘K ⌘I = VSCode 互換）。
@@ -1401,6 +1408,8 @@ struct ChromeState {
     terminal_renaming: Option<terminal_rename::TerminalRenaming>,
     /// どこからでも呼べる端末（O24・C13）。初めて呼ぶまで無い（シェルを起こさない）。
     floating_terminal: Option<terminal_float::FloatingTerminal>,
+    /// アクティブなエディタの衝突（O19・E05・版ごとに数え直す）。
+    conflicts: Option<conflicts::ConflictCache>,
     /// 窓を持たない経路（パネルのイベント）で開いた入力欄へ渡すフォーカス（`process_pending_shell_effects`）。
     focus_next_frame: Option<FocusHandle>,
     /// 設定の「選ぶ…」で頼まれた書体のピッカー（設定のキー・窓が要るので後処理で開く）。
@@ -2350,6 +2359,17 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_terminal_tab))
             .on_action(cx.listener(Self::move_terminal_to_editor))
             .on_action(cx.listener(Self::toggle_floating_terminal))
+            .on_action(cx.listener(|this, _: &ResolveConflictOurs, _window, cx| {
+                this.resolve_conflict(conflicts::ConflictSide::Ours, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResolveConflictTheirs, _window, cx| {
+                this.resolve_conflict(conflicts::ConflictSide::Theirs, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResolveConflictBoth, _window, cx| {
+                this.resolve_conflict(conflicts::ConflictSide::Both, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NextConflict, _window, cx| this.next_conflict(cx)))
+            .on_action(cx.listener(Self::abort_merge_or_rebase))
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::trigger_completion))
             .on_action(cx.listener(Self::show_hover_at_caret))

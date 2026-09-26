@@ -316,6 +316,8 @@ impl Workspace {
                 }
             }
         }
+        // 衝突の印（O19・E05）: アクティブなエディタの版が変わった時だけ数え直す。
+        self.refresh_conflicts(&editor, cx);
         // blame: キャレット行が変わったら（デバウンス付きで）行末注釈を更新（M11-11）。
         self.schedule_blame(&editor, cx);
         // ⌘F が開いていれば、アクティブエディタの編集にマッチを追従させる
