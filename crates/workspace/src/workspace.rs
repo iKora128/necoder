@@ -70,7 +70,8 @@ mod web_tabs;
 pub(crate) use image_view::ImageView;
 pub(crate) use pdf_view::PdfView;
 pub(crate) use web_preview_view::{
-    web_tab_key, web_tab_url, PickTarget, WebPreviewEvent, WebPreviewView,
+    static_tab_file, static_tab_key, web_tab_key, web_tab_url, PickTarget, WebPreviewEvent,
+    WebPreviewView,
 };
 mod about;
 mod cleanup;
@@ -278,6 +279,8 @@ actions!(
         ToggleDesignMode,
         // エクスプローラのファイル操作を 1 手戻す（⌘Z・Explorer コンテキストだけ・H30）。
         UndoFileOperation,
+        // アクティブな HTML ファイルを内蔵の配信で Web タブに開く（Design Mode が使える）。
+        OpenHtmlInWebTab,
     ]
 );
 
@@ -2262,6 +2265,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_dialog_action))
             .on_action(cx.listener(Self::open_localhost_preview))
             .on_action(cx.listener(Self::toggle_design_mode))
+            .on_action(cx.listener(Self::open_html_in_web_tab))
             // macOS 標準のアプリ/ウィンドウ操作（メニューバー・M13）。cx は App へ deref。
             .on_action(cx.listener(|_, _: &Hide, _window, cx| cx.hide()))
             .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))

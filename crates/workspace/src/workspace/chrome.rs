@@ -1199,11 +1199,53 @@ impl Workspace {
                 };
                 let toggle_editor = editor.clone();
                 let reload_editor = editor.clone();
+                // 内蔵の配信で Web タブに開く（Design Mode が使える）。artifact（閉じ込めた表示）と
+                // Chat には出さない（エージェントの書いた HTML を配信へ載せない）。
+                let web_tab_file = path.clone().filter(|_| {
+                    on && !self.chat_mode() && !editor.read(cx).html_preview_is_sandboxed(cx)
+                });
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap(px(4.))
+                    .when_some(web_tab_file, |element, file| {
+                        element.child(
+                            div()
+                                .id("html-open-web-tab")
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .h(px(19.))
+                                .px(px(7.))
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                                .child(
+                                    svg()
+                                        .path("icons/mouse-pointer-click.svg")
+                                        .size(px(12.))
+                                        .flex_none()
+                                        .text_color(theme.fg2),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .child(i18n::t!("breadcrumb.html_open_web_tab")),
+                                )
+                                .tooltip(Tooltip::text(
+                                    i18n::t!("breadcrumb.html_open_web_tab_tip"),
+                                    theme.clone(),
+                                ))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.open_static_web_tab(file.clone(), window, cx);
+                                    }),
+                                ),
+                        )
+                    })
                     .when(on, |element| {
                         element.child(
                             div()

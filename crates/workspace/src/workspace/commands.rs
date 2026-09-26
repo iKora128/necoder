@@ -187,6 +187,10 @@ impl CommandRegistry {
                 action_name: "workspace::ToggleDesignMode",
             },
             CommandEntry {
+                label_key: "cmd.open_html_in_web_tab",
+                action_name: "workspace::OpenHtmlInWebTab",
+            },
+            CommandEntry {
                 label_key: "cmd.new_thread",
                 action_name: "workspace::NewThread",
             },

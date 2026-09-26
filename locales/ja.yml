@@ -217,6 +217,7 @@ cmd:
   split_right: "表示: 右に分割"
   open_localhost_preview: "プレビュー: localhost を開く…"
   toggle_design_mode: "プレビュー: Design モード（要素を選んで AI に渡す）"
+  open_html_in_web_tab: "プレビュー: HTML を Web タブで開く（Design モードが使える）"
   new_thread: "AI: 新しいスレッド"
   new_thread_claude: "AI: 新しいスレッド（Claude Code）"
   new_thread_codex: "AI: 新しいスレッド（Codex）"
@@ -662,6 +663,7 @@ explorer:
   ctx_open_window: 新規ウィンドウで開く
   ctx_open: 開く
   ctx_open_default: 既定のアプリで開く
+  ctx_open_web_tab: Web タブで開く（Design モード）
   ctx_reveal: Finder で表示
   ctx_new_file: 新規ファイル
   ctx_new_dir: 新規フォルダ
@@ -782,6 +784,8 @@ breadcrumb:
   html_source: ソース
   html_preview_tip: OS 標準 WebView で表示  ⌘⇧V
   html_reload_tip: HTML プレビューを再読み込み
+  html_open_web_tab: Web タブで開く
+  html_open_web_tab_tip: 内蔵の配信で Web タブに開く（Design モードが使える）
 webview:
   outside_sandbox: このファイルは表示できる範囲の外にあります
   failed: HTML プレビューを開けませんでした
@@ -807,6 +811,11 @@ webtab:
   picker_placeholder: "ポート番号か localhost の URL（例: 3000 / localhost:5173/app）"
   picker_action: localhost を開く
   invalid_url: "localhost の URL だけ開けます: %{input}"
+  static_tip: "内蔵の配信: %{path}"
+  static_failed: "内蔵の配信を始められません: %{error}"
+  static_needs_html: 手元の HTML ファイルを開いてから使ってください
+  static_remote: SSH のプロジェクトの HTML は、まだ Web タブで開けません（内蔵の配信は手元のファイルだけ）
+  static_chat: Chat の HTML はエージェントが書いた物として閉じ込めて見せるので、Web タブでは開けません
   ctx_open_browser: 既定のブラウザで開く
   ctx_copy_url: URL をコピー
 design:
@@ -828,7 +837,7 @@ design:
   capture_failed: 要素の切り抜きを撮れませんでした（テキストだけ添えました）
   target_moved: "選んだ要素は添えませんでした — 撮っている間に「%{thread}」から別のスレッドへ移ったため。そのスレッドに戻ってから選び直してください"
   target_gone: 選んだ要素は添えませんでした — 選んだ時のスレッドが閉じられています
-  needs_web_tab: "Design は Web タブ（プレビュー: localhost を開く…）で使えます"
+  needs_web_tab: "Design は Web タブで使えます（プレビュー: localhost を開く… / HTML は「Web タブで開く」）"
   not_ready: ページが表示されてから Design を始めてください
 pdf:
   unsupported: この環境では PDF をタブに表示できません
