@@ -331,6 +331,8 @@ fleet:
   tab_add_thread: "+ Thread"
   tab_add_terminal: "+ Terminal"
   tasks_count: "%{n} Tasks"
+  filter_placeholder: Filter Tasks
+  filter_none: No Tasks match
   external_header: "Other worktrees (%{count})"
   external_tip: "Worktrees of this repository that are not Tasks (made by Orca, Claude Code, git worktree add, and so on). Click to collapse"
   external_adopt: Adopt
@@ -439,6 +441,9 @@ rail:
   add_tip: Open — folder / file / remote / recent (⌘O switches)
   add_prompt: Open
   menu_new_window: Open in new window
+  menu_copy_path: Copy path
+  menu_copy_branch: Copy branch name
+  copied: "Copied: %{text}"
   menu_remove: Remove from rail
   menu_remove_worktree: Remove worktree
   menu_delete_branch: Delete branch + worktree

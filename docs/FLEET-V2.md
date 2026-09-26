@@ -126,6 +126,10 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
      同じ 1 つ（`integration_slot_for`・O21。以前はサイドバーだけ最後の 1 つを選んでいた）。
    - **消えています**（O21）: レールにある Task の worktree が `git worktree list` から消えていたら（necoder の外で
      `git worktree remove` 等）、3 段目の下に `消えています（necoder の外で削除）`（warn）+ `片付け`（レールから外す）。
+   - **絞り込み**（O21・2026-09-26）: Task が 6 本以上ある時（か、語が入っている間）だけ、統合先行と Task 行の間に
+     `⌕ Task を絞り込む`（高さ 26・bg2・枠 1px・角 6）。語を空白で区切り、全部の語が名前・ブランチ・頼んだこと・digest の
+     どれかに含まれる Task だけ残す（大文字小文字は無視）。見出しの `N Tasks` と統合先行の「N 本が分岐中」は絞り込む前の数。
+     0 件なら「一致する Task はありません」（fg2）。
 3.5 **外部の worktree**（O21・Task 行の下・`▾ 外部の worktree（N）` で畳める）: 選んでいるリポジトリの worktree のうち
    Task になっていないもの = レールに無いもの（**Orca・Claude Code・手で `git worktree add` したもの**も git の一覧から拾う）と、
    レールにあるが統合先扱いのもの（メイン以外）。行 = `◌`（中立）+ フォルダ名 + `⎇ branch` + `取り込む`。

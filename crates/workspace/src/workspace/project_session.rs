@@ -787,6 +787,16 @@ impl Workspace {
             workspace.sync_chat_search(cx)
         })
         .detach();
+        // Fleet サイドバーの Task の絞り込み欄（O21）。打つたびに写しを更新して描き直す。
+        let fleet_filter = cx.new(|cx| EditorView::plain(theme.clone(), theme.fg2, true, cx));
+        cx.observe(&fleet_filter, |workspace, filter, cx| {
+            let query = filter.read(cx).plain_text();
+            if workspace.chrome.fleet_filter_query != query {
+                workspace.chrome.fleet_filter_query = query;
+                cx.notify();
+            }
+        })
+        .detach();
         let mut workspace = Workspace {
             project_sessions: ProjectSessions {
                 projects,
@@ -829,6 +839,8 @@ impl Workspace {
                 fleet_grids: HashMap::new(),
                 fleet_worktrees: HashMap::new(),
                 hide_external_worktrees: false,
+                fleet_filter,
+                fleet_filter_query: String::new(),
                 adopt_as_task: std::collections::HashSet::new(),
                 pending_task_prompts: HashMap::new(),
                 pending_task_agents: HashMap::new(),
