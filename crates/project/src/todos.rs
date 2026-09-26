@@ -191,15 +191,18 @@ pub fn daily_plan_on(host: &dyn Host, root: &Path) -> Result<usize> {
     Ok(count)
 }
 
+/// ✨今日の計画（[`draft_daily_plan_on`]）の指示。引用符 / $ / バッククォートを含めない（sh -c の
+/// 二重引用符に素で埋めるため）。「ファイルは開かず」= agentic なファイル探索をさせない（速度と
+/// 出力純度の両方に効く）。
+pub(crate) const DAILY_PLAN_PROMPT: &str = "stdin の素材だけから、今日やるべき開発タスクを3〜5個、\
+    日本語の短い命令文（各60字以内・句点なし）で出力して。1行1タスク。\
+    ファイルやリポジトリは開かない。前置き・注記・番号・チェックボックス記法・\
+    見出し・説明は一切書かず、タスク本文の行だけを出力して。";
+
 /// ✨今日の計画: `claude -p` に「ROADMAP 断片 + git status + 板の未消化」を渡して
 /// 今日やるべき 3〜5 項目の下書きをもらう（ai_commit_message と同型・M12-10）。
 pub fn draft_daily_plan_on(host: &dyn Host, root: &Path) -> Result<Vec<String>> {
-    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
-    // 「ファイルは開かず」= agentic なファイル探索をさせない（速度と出力純度の両方に効く）。
-    let instruction = "stdin の素材だけから、今日やるべき開発タスクを3〜5個、\
-        日本語の短い命令文（各60字以内・句点なし）で出力して。1行1タスク。\
-        ファイルやリポジトリは開かない。前置き・注記・番号・チェックボックス記法・\
-        見出し・説明は一切書かず、タスク本文の行だけを出力して。";
+    let instruction = DAILY_PLAN_PROMPT;
     // ROADMAP 冒頭 + git status + 板の未消化を素材として流す（無いものは無視される）。
     let script = format!(
         "{{ echo '--- git status ---'; git status --short | head -40; \

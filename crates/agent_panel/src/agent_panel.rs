@@ -33,7 +33,10 @@ mod search;
 pub mod sound;
 pub mod usage;
 
-pub use chat::ChatRow;
+pub use chat::{snippet_around, ChatRow};
+pub use history::fresh_agent_sessions;
+// 履歴ビュー（O15）が一覧の会話を扱うための再輸出（workspace は acp_client の型を直接持たない）。
+pub use acp_client::history::{AgentSessionSummary, SessionListing};
 // 管制（P3）が許可ボタンの種類を見分けるための再輸出（workspace は acp_client を直接知らない）。
 pub use acp_client::PermissionKind as AgentPermissionKind;
 
