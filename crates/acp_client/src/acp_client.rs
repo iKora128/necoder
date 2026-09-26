@@ -7,6 +7,7 @@
 //! 実行時検証: `claude-agent-acp` バイナリ + Claude 認証が要る（実環境で live 検証済み）。
 
 pub mod codex_limits;
+pub mod history;
 pub mod mcp;
 pub mod preset;
 pub mod registry;
@@ -276,6 +277,13 @@ pub enum AgentEvent {
     /// 失敗ではないが黙って進めたくない知らせ（MCP サーバを渡せなかった等）。transcript に 1 行
     /// 出すだけで、ターン状態（running / auth_required）には触らない。
     Notice(String),
+    /// `session/load` が再生した履歴（O15）。[`SessionPreferences::replay_history`] の時だけ、load が
+    /// 成功したら [`AgentEvent::SessionStarted`] の直前に 1 回流す。`items` は古い順・最大
+    /// [`history::REPLAY_KEEP`] 件で、`omitted` はそれより前に捨てた項目の数。
+    HistoryReplayed {
+        items: Vec<history::ReplayItem>,
+        omitted: usize,
+    },
     /// セッションが開いた（`session/new` または `session/load` の直後・Modes/Configs より前）。
     /// `session_id` はエージェント側の会話の鍵。UI はスレッドに控えて、次にこのスレッドの
     /// エージェントを立ち上げ直すとき [`SessionPreferences::resume`] に渡す。
@@ -1486,6 +1494,10 @@ pub struct SessionPreferences {
     /// セッションの作り方のプリセット（Chat モード・`docs/CHAT.md` §5）。`session/new` と
     /// `session/load` の**両方**に同じ `_meta` を載せる — 片方だけだと再開した会話から設定が抜ける。
     pub preset: preset::SessionPreset,
+    /// `session/load` が再生する履歴を [`AgentEvent::HistoryReplayed`] として渡す（O15）。
+    /// エージェント側の過去の会話（CLI で作った物など）を necoder で開いた時だけ立てる。普段の再開は
+    /// transcript が DB に在るので、再生は捨てる（二重に載せない）。
+    pub replay_history: bool,
 }
 
 /// **常駐セッション + 逐次ストリーミング**。エージェントを起動して 1 セッションを開き、`prompt_rx` から
@@ -1559,6 +1571,8 @@ pub async fn run_session_on(
             // ＝ transcript に古い会話が二重に載らない。応答と同時に ready だった分も捨て切る。
             // ただし**状態**（コマンド一覧・会話名・目標）は捨てずに流す（[`forward_replayed_state`]）。
             // 再生と同じ窓で届くことがあり、捨てると次の更新まで `/` 補完が空になる。
+            // エージェント側の過去の会話を開いた時（`replay_history`）だけは、再生を transcript の
+            // 項目へ畳んで load の成功後に 1 回で渡す（O15・[`history::ReplayLog`]）。
             // load が失敗したら（id が古い・エージェント側の記録が消えた）新規セッションで続ける。
             // ただし transport が閉じていたら続けても無駄なのでそのまま抜ける。
             // このセッションで使える MCP サーバを ACP の型へ写す。**渡さない限りエージェントからは
@@ -1586,6 +1600,9 @@ pub async fn run_session_on(
             let mut resumed_session = None;
             if let Some(previous) = resume_id {
                 use futures::future::FutureExt as _;
+                let mut replay_log = preferences
+                    .replay_history
+                    .then(|| history::ReplayLog::new(history::REPLAY_KEEP));
                 let mut session = connection
                     .attach_session(v1::NewSessionResponse::new(previous.clone()), Vec::new())?;
                 let load = connection
@@ -1602,9 +1619,10 @@ pub async fn run_session_on(
                     futures::pin_mut!(update);
                     futures::select_biased! {
                         update = update => match update {
-                            // 履歴の再生。本文は捨て、状態だけ流す。
+                            // 履歴の再生。状態は流し、本文は畳む（replay_history の時）か捨てる。
                             Ok(replayed) => {
-                                forward_replayed_state(replayed, &event_tx).await;
+                                forward_replayed_state(replayed, &event_tx, replay_log.as_mut())
+                                    .await;
                                 continue;
                             }
                             Err(error) => break Err(error),
@@ -1613,10 +1631,16 @@ pub async fn run_session_on(
                     }
                 };
                 while let Some(Ok(replayed)) = session.read_update().now_or_never() {
-                    forward_replayed_state(replayed, &event_tx).await;
+                    forward_replayed_state(replayed, &event_tx, replay_log.as_mut()).await;
                 }
                 match loaded {
                     Ok(loaded) => {
+                        if let Some(replay_log) = replay_log.take() {
+                            let (items, omitted) = replay_log.finish();
+                            event_tx
+                                .unbounded_send(AgentEvent::HistoryReplayed { items, omitted })
+                                .ok();
+                        }
                         resumed_session = Some((session, loaded.modes, loaded.config_options));
                     }
                     Err(error) if acp::is_incoming_transport_closed(&error) => return Err(error),
@@ -1990,17 +2014,22 @@ async fn handle_session_message(
 }
 
 /// `session/load` が再生する履歴のうち、**状態**（[`is_session_state_event`]）だけを UI へ流す。
-/// 本文・ツール呼び出しは transcript に二重に載るので捨てる。リクエストは再生中には来ない想定で、
-/// 来ても従来どおり応答しない（再生を捨てていた頃と同じ扱い）。
+/// 本文・ツール呼び出しは transcript に二重に載るので流さない — `replay` があればそこへ畳む
+/// （エージェント側の過去の会話を開いた時・O15）。リクエストは再生中には来ない想定で、来ても
+/// 従来どおり応答しない（再生を捨てていた頃と同じ扱い）。
 async fn forward_replayed_state(
     message: acp::SessionMessage,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    replay: Option<&mut history::ReplayLog>,
 ) {
     let acp::SessionMessage::SessionMessage(dispatch) = message else {
         return;
     };
     let result = acp::util::MatchDispatch::new(dispatch)
         .if_notification(async |notification: v1::SessionNotification| {
+            if let Some(replay) = replay {
+                replay.push(notification.update.clone());
+            }
             session_update_events(notification.update, |event| {
                 if is_session_state_event(&event) {
                     event_tx.unbounded_send(event).ok();
@@ -3261,6 +3290,218 @@ for line in sys.stdin:
             vec!["order=initialize,session/load,session/prompt"],
             "再生された履歴（old history）は流れず、session/new も呼ばれない: {events:?}"
         );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::HistoryReplayed { .. })),
+            "頼まれていない再生は畳んで渡さない: {events:?}"
+        );
+    }
+
+    /// 偽エージェント: `session/load` で CLI の会話らしい履歴（発話・本文・ツール・思考・サブエージェントの
+    /// 内側）を再生してから応答し、そのまま消える（prompt は受けない＝送らないことの確認も兼ねる）。
+    const AGENT_THAT_REPLAYS_A_CONVERSATION: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def update(sid, body):
+    send({"jsonrpc": "2.0", "method": "session/update",
+          "params": {"sessionId": sid, "update": body}})
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": {"loadSession": True}}})
+    elif method == "session/load":
+        sid = params["sessionId"]
+        update(sid, {"sessionUpdate": "user_message_chunk", "messageId": "u1",
+                     "content": {"type": "text", "text": "README を直して"}})
+        update(sid, {"sessionUpdate": "agent_thought_chunk", "messageId": "a1",
+                     "content": {"type": "text", "text": "考え中"}})
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "a1",
+                     "content": {"type": "text", "text": "読みます。"}})
+        update(sid, {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read README.md",
+                     "kind": "read", "status": "pending"})
+        update(sid, {"sessionUpdate": "user_message_chunk",
+                     "_meta": {"claudeCode": {"parentToolUseId": "toolu_9"}},
+                     "content": {"type": "text", "text": "サブエージェントへの指示"}})
+        update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                     "status": "completed"})
+        update(sid, {"sessionUpdate": "agent_message_chunk", "messageId": "a2",
+                     "content": {"type": "text", "text": "直しました。"}})
+        update(sid, {"sessionUpdate": "session_info_update", "title": "README の修正"})
+        send({"jsonrpc": "2.0", "id": rid, "result": {}})
+        sys.exit(0)
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fresh"}})
+    elif method == "session/prompt":
+        sys.exit(3)
+"#;
+
+    /// エージェント側の過去の会話を開く（O15）: `replay_history` なら、load が再生した履歴を
+    /// transcript の項目に畳んで `SessionStarted` の直前に 1 回渡す。状態（会話名）は従来どおり流す。
+    #[test]
+    fn replay_history_hands_the_replayed_conversation_to_the_ui() {
+        let preferences = SessionPreferences {
+            resume: Some("cli-session".into()),
+            replay_history: true,
+            ..SessionPreferences::default()
+        };
+        let Some((outcome, events)) =
+            run_fake_agent_until_session_ends(AGENT_THAT_REPLAYS_A_CONVERSATION, preferences, None)
+        else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        outcome.expect("load の後に消えても正常に畳む");
+        let replayed_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::HistoryReplayed { .. }))
+            .expect("再生を渡す");
+        let started_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::SessionStarted { resumed: true, .. }))
+            .expect("load で引き継いだ");
+        assert!(replayed_at < started_at, "{events:?}");
+        let AgentEvent::HistoryReplayed { items, omitted } = &events[replayed_at] else {
+            unreachable!("上で位置を確かめた");
+        };
+        assert_eq!(*omitted, 0);
+        let described: Vec<String> = items
+            .iter()
+            .map(|item| match item {
+                history::ReplayItem::User(text) => format!("user:{text}"),
+                history::ReplayItem::Agent(text) => format!("agent:{text}"),
+                history::ReplayItem::Tool(info) => format!(
+                    "tool:{}:{:?}",
+                    info.title.as_deref().unwrap_or(""),
+                    info.completed
+                ),
+            })
+            .collect();
+        assert_eq!(
+            described,
+            vec![
+                "user:README を直して",
+                "agent:読みます。",
+                "tool:Read README.md:Some(true)",
+                "agent:直しました。",
+            ]
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::TitleChanged(Some(title)) if title == "README の修正"
+            )),
+            "会話名は状態として流れる: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentEvent::AgentChunk(_) | AgentEvent::ToolStarted(_) | AgentEvent::TurnStarted
+            )),
+            "再生の本文は live のイベントとしては流さない・prompt は送らない: {events:?}"
+        );
+    }
+
+    /// 偽エージェント（`LIST_CAP` を置換して使う）: `session/list` を広告し、cwd の会話を 3 ページで
+    /// 返す（2 ページ目は空＝codex-acp の「ページ内だけの絞り込み」）。`session/new` と prompt は拒む。
+    const AGENT_WITH_SESSION_LIST: &str = r#"
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    rid = msg.get("id")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        caps = {"loadSession": True}
+        if LIST_CAP:
+            caps["sessionCapabilities"] = {"list": {}}
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"protocolVersion": params.get("protocolVersion", 1),
+                         "agentCapabilities": caps}})
+    elif method == "session/list":
+        cwd = params.get("cwd")
+        cursor = params.get("cursor")
+        if cursor is None:
+            result = {"sessions": [{"sessionId": "a", "cwd": cwd, "title": "最初の会話",
+                                    "updatedAt": "2026-09-20T10:00:00.000Z"}],
+                      "nextCursor": "p2"}
+        elif cursor == "p2":
+            result = {"sessions": [], "nextCursor": "p3"}
+        else:
+            result = {"sessions": [{"sessionId": "b", "cwd": cwd,
+                                    "updatedAt": "2026-09-25T10:00:00Z"}]}
+        send({"jsonrpc": "2.0", "id": rid, "result": result})
+    else:
+        send({"jsonrpc": "2.0", "id": rid,
+              "error": {"code": -32601, "message": "unexpected " + str(method)}})
+"#;
+
+    fn list_scenario(list_advertised: bool) -> Option<Result<history::SessionListing>> {
+        let script = AGENT_WITH_SESSION_LIST
+            .replace("LIST_CAP", if list_advertised { "True" } else { "False" });
+        let command = fake_agent_command(&script)?;
+        let cwd = command.cwd.clone();
+        Some(futures::executor::block_on(history::list_sessions_on(
+            LocalHost::shared(),
+            command,
+            cwd,
+            50,
+        )))
+    }
+
+    /// 一覧（O15）: 広告があれば `session/list` を cursor が尽きるまで読む（空のページも越える）。
+    /// `session/new` も prompt も送らない（送ると偽エージェントがエラーを返して失敗になる）。
+    #[test]
+    fn list_sessions_reads_every_page_without_starting_a_session() {
+        let Some(outcome) = list_scenario(true) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        let history::SessionListing::Listed(sessions) = outcome.expect("一覧を読める") else {
+            panic!("広告しているので一覧が返る");
+        };
+        let ids: Vec<&str> = sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        assert_eq!(sessions[0].title.as_deref(), Some("最初の会話"));
+        assert_eq!(sessions[1].title, None);
+        assert_eq!(sessions[1].updated_at_ms, Some(1_790_330_400_000));
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(sessions[0].cwd, cwd, "cwd を渡して絞り込ませる");
+    }
+
+    /// 広告の無いエージェントには `session/list` を送らない（一覧を出せない、と分かる形で返す）。
+    #[test]
+    fn list_sessions_reports_agents_without_the_capability() {
+        let Some(outcome) = list_scenario(false) else {
+            eprintln!("python3 が PATH に無いためスキップ");
+            return;
+        };
+        assert_eq!(
+            outcome.expect("失敗ではない"),
+            history::SessionListing::Unsupported
+        );
     }
 
     /// 広告が無ければ前回 id があっても `session/new`（引き継がず・失敗もしない）。
@@ -3784,6 +4025,7 @@ for line in sys.stdin:
             resume: None,
             mcp_servers: Vec::new(),
             preset: preset::SessionPreset::default(),
+            replay_history: false,
         };
 
         let events = futures::executor::block_on(async move {
@@ -4073,6 +4315,9 @@ for line in sys.stdin:
                         }
                         AgentEvent::Failed(error) => eprintln!("[failed] {error}"),
                         AgentEvent::Notice(message) => eprintln!("[notice] {message}"),
+                        AgentEvent::HistoryReplayed { items, omitted } => {
+                            eprintln!("[history] {} items, {omitted} omitted", items.len())
+                        }
                         AgentEvent::SessionStarted {
                             session_id,
                             resumed,
