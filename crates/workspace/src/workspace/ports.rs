@@ -553,10 +553,10 @@ impl Workspace {
         let Some(local) = row.forwarded else {
             return;
         };
+        // 転送した手元の番号なので、プロジェクト（接続先）の localhost として読み替えない。
         let url = format!("http://localhost:{local}/");
-        let session = row.project.unwrap_or(self.project_sessions.active);
         self.close_ports(window, cx);
-        self.open_url_from_session(session, &url, cx);
+        self.open_url(&url, cx);
     }
 
     fn close_ports(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1373,6 +1373,13 @@ LISTEN 0      128          0.0.0.0:8000      0.0.0.0:*    users:((\"python3\",pi
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();
+        let opened = |workspace: &Workspace, url: &str| {
+            workspace.pending_web_url.as_deref() == Some(url)
+                || workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.path == web_tab_key(url))
+        };
         workspace.update_in(cx, |workspace, _window, cx| {
             assert_eq!(row(workspace).forwarded, Some(15173));
             assert!(workspace
@@ -1380,6 +1387,31 @@ LISTEN 0      128          0.0.0.0:8000      0.0.0.0:*    users:((\"python3\",pi
                 .toasts
                 .iter()
                 .any(|toast| toast.text.contains("15173")));
+            // 接続先のプロジェクトから来た localhost のリンク: 転送済みの番号はそのまま、
+            // まだの番号は転送してから開く。
+            workspace.open_url_from_session(0, "http://localhost:5173/app?x=1", cx);
+            assert!(opened(workspace, "http://localhost:15173/app?x=1"));
+            workspace.pending_web_url = None;
+            workspace.open_url_from_session(0, "http://127.0.0.1:3000/", cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(fake.forwarded_ports().contains(&(3000, 13000)));
+            assert!(opened(workspace, "http://localhost:13000/"));
+            assert!(workspace
+                .notifications
+                .toasts
+                .iter()
+                .any(|toast| toast.text.contains("13000")));
+            // 一覧の「開く」は手元の番号をそのまま開く（接続先の localhost として読み替えない）。
+            workspace.pending_web_url = None;
+            let forwarded_row = row(workspace);
+            workspace.open_forwarded_port(&forwarded_row, window, cx);
+            assert!(opened(workspace, "http://localhost:15173/"));
+            workspace.show_ports(&ShowPorts, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
             workspace.cancel_remote_forward(fake.clone(), 5173, cx);
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
