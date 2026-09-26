@@ -5992,6 +5992,10 @@ PYEOF"#;
                     thread.tokens_shown = thread.tokens_used as f32;
                 }
             }
+            // 使用量（O11）は今は受け取るだけ。
+            AgentEvent::SessionCost { .. }
+            | AgentEvent::RateLimits(_)
+            | AgentEvent::TurnUsage(_) => {}
             AgentEvent::Modes { modes, current } => {
                 thread.available_modes = modes
                     .into_iter()
