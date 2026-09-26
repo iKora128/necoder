@@ -22,6 +22,9 @@ pub(crate) struct NewTaskDialog {
     skip_setup: bool,
     /// 並べて比べるエージェント（表示名・空 = 既定のエージェントで 1 本・O23）。
     fanout_agents: Vec<String>,
+    /// 並べて比べる時に選べるエージェント（ログイン済みのもの・開いた時に 1 回読む）。
+    /// まだ 1 つも分からなければカタログ全部（選べないより、選んで失敗を見せる方がよい）。
+    fanout_choices: Vec<&'static str>,
     /// エージェントごとの本数（1〜3）。
     fanout_count: usize,
     /// 開く直前にフォーカスがあった場所。取り消し（Esc / キャンセル）でそこへ返す。
@@ -55,6 +58,8 @@ impl Workspace {
             worktree.host().metadata(&project::worktree_setup_script(worktree.root())).is_ok()
         });
         let default_base = integration.and_then(|worktree| project::repository_task_base_on(worktree.host().as_ref(), worktree.root()));
+        let mut fanout_choices = acp_client::authenticated_agent_labels();
+        if fanout_choices.is_empty() { fanout_choices = acp_client::AGENT_LABELS.to_vec(); }
         self.chrome.new_task = Some(NewTaskDialog {
             editor,
             details_open: false,
@@ -65,6 +70,7 @@ impl Workspace {
             setup_script_present,
             skip_setup: false,
             fanout_agents: Vec::new(),
+            fanout_choices,
             fanout_count: 1,
             previous_focus,
         });
@@ -205,7 +211,7 @@ impl Workspace {
                         .child(SharedString::from(label))
                 };
                 let mut agents = div().flex().flex_wrap().gap(px(4.));
-                for (index, label) in acp_client::AGENT_LABELS.iter().enumerate() {
+                for (index, label) in dialog.fanout_choices.iter().copied().enumerate() {
                     let selected = dialog.fanout_agents.iter().any(|agent| agent == label);
                     agents = agents.child(chip(("new-task-fanout-agent", index), label.to_string(), selected)
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
@@ -301,6 +307,10 @@ mod tests {
             workspace.open_new_task(window, cx);
             let dialog = workspace.chrome.new_task.as_ref().expect("開く");
             assert_eq!(dialog.default_base.as_deref(), Some("origin/develop"));
+            // 並べて比べるエージェントはログイン済みのもの。1 つも分からなければカタログ全部（空にしない）。
+            let signed_in = acp_client::authenticated_agent_labels();
+            let expected = if signed_in.is_empty() { acp_client::AGENT_LABELS.to_vec() } else { signed_in };
+            assert_eq!(dialog.fanout_choices, expected);
         });
         std::fs::remove_dir_all(&root).ok();
     }
