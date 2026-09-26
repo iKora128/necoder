@@ -696,6 +696,8 @@ impl Workspace {
             "settings" => {
                 self.set_chat_mode(false, window, cx);
                 self.chrome.show_settings = true;
+                // ⌘, と同じ読み直し（Skills 節の一覧にアクティブなプロジェクトを含める）。
+                self.refresh_settings_view(cx);
                 let view = self.chrome.settings_view.clone();
                 view.update(cx, |view, cx| view.debug_select_page(argument, cx));
             }

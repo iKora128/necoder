@@ -90,6 +90,11 @@
 | **ターミナル**（下ドックの統合ターミナル。Task タブの Terminal と同じ実体） | `terminal_view::TerminalView` / `TerminalDock` | ターミナル | Terminal |
 | ↳ **ターミナル内検索**（⌘F・scrollback を含む。エディタの「検索」= バッファ内検索とは別） | `terminal::Find` / `terminal_view::search` | ターミナル内を検索 | Find in terminal |
 | ↳ **ターミナルのリンク**（`path:line` と URL・OSC 8。URL を開く受け口は 1 か所） | `TerminalLink` / `TerminalEvent::OpenUrl` / `open_terminal_url` | （下線のみ） | (underline only) |
+| **Skill**（エージェントが読む手順書 `SKILL.md`。置き場は `~/.claude/skills`・`~/.codex/skills`・`~/.agents/skills` とプロジェクトの `.claude/skills`・`.agents/skills`） | `agent_skills`（走査・設置）/ `necoder skills`（CLI） | skill | Skill |
+| ↳ **necoder の skill**（入口だけの `SKILL.md`。使い方の本文は `ne skills get` が版に合わせて出す） | `agent_skills::stub_skill_md` / `StubState` | necoder の skill | necoder skill |
+| **Task の指し方**（CLI の `<task>`。id / `branch:` / `name:` / `active` = GUI で選択中） | `fleet::TaskSelector` / `select_task` | — | — |
+| **端末ハンドル**（`ne terminal list` が返す端末の名前 `t<番号>`。GUI を再起動すると変わる） | `terminal_handle`（control_ipc） | — | — |
+| **CLI から端末へ入力を送る**（`ne terminal send` の許可。既定 off） | `allow_terminal_send` | CLI から端末へ入力を送る | Let the CLI type into terminals |
 | **MCP サーバ**（エージェントに持たせる道具。`session/new` で渡す） | `acp_client::mcp` / `mcp_servers` | MCP サーバ | MCP server |
 | ↳ **発見**（他ツールの設定に居るサーバを一覧に載せる・既定 off） | `mcp::discover` / `McpSource` | 〈出所〉で発見 | found in 〈source〉 |
 

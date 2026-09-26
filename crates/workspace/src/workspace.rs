@@ -41,7 +41,7 @@ pub(crate) use std::ops::{Deref, DerefMut, Range};
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::rc::Rc;
 pub(crate) use std::sync::Arc;
-pub(crate) use terminal_view::{TerminalDock, TerminalDockEvent, TerminalLaunch};
+pub(crate) use terminal_view::{TerminalDock, TerminalDockEvent, TerminalLaunch, TerminalView};
 pub(crate) use theme_core::{project_color, Theme, ThemeSource};
 pub(crate) use ui::Tooltip;
 pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
@@ -1270,6 +1270,9 @@ struct ChromeState {
     /// `ne` CLI から IPC（control_ipc の `open`）で届いたパス。ハンドラは Window を持たないため
     /// effect cycle 末尾で `open_external_paths`（Finder 由来と同じ入口）に流す。
     pending_external_open: Vec<PathBuf>,
+    /// `ne <path>:<line>[:<column>]` の行へのジャンプ（0 始まりの行・列）。`pending_external_open` で
+    /// ファイルを開いた後に、同じ effect cycle で位置を見せる。
+    pending_external_goto: Vec<(PathBuf, usize, usize)>,
     /// SSH askpass の要求（原文プロンプト・応答の戻り口）。IPC スレッドは Window を持てないので
     /// ここに積み、effect cycle の末尾（`process_pending_shell_effects`）で入力欄を開く。
     pending_askpass: Option<(String, u32, std::sync::mpsc::Sender<serde_json::Value>)>,
@@ -1703,6 +1706,7 @@ impl Workspace {
             || self.chrome.pending_settings_command.is_some()
             || self.chrome.pending_open_settings_json
             || !self.chrome.pending_external_open.is_empty()
+            || !self.chrome.pending_external_goto.is_empty()
             || self.chrome.pending_askpass.is_some()
             || self.chrome.pending_askpass_focus
             || !self.chrome.pending_remote_open.is_empty()
@@ -1733,6 +1737,12 @@ impl Workspace {
         if !self.chrome.pending_external_open.is_empty() {
             let paths = std::mem::take(&mut self.chrome.pending_external_open);
             self.open_external_paths(paths, window, cx);
+        }
+        // 開いた直後のファイルへ（既に開いていればタブを前に出して）その行を見せる。
+        for (path, row, column) in std::mem::take(&mut self.chrome.pending_external_goto) {
+            self.open_file_then(path, window, cx, move |editor, cx| {
+                editor.reveal_position(row, column, cx);
+            });
         }
         // 入力欄は前フレームで描画済み = dispatch tree に居るので、ここで初めて focus が定着する。
         if self.chrome.pending_askpass_focus {

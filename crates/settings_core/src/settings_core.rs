@@ -262,6 +262,11 @@ pub struct Settings {
     /// リモートの MCP サーバへ繋ぎに行く（実測: 初回応答 4.2 秒 → 切ると 1.8 秒・文脈 +6.7k トークン）。
     /// **Chat モードはこの設定に関わらず常に読み込まない**（necoder の MCP 設定で選んだ物だけを渡す原則）。
     pub claude_ai_connectors: bool,
+    /// CLI（`necoder terminal send`）から端末へ文字を送ってよいか（既定 false）。
+    /// 送ると、その端末のシェルやエージェントがそのまま実行する＝エージェントやスクリプトに
+    /// 人の代わりにキーを打たせることになるので、人が設定画面で明示的に許可した時だけ効かせる。
+    /// 一覧・読み取り・待機は許可なしで使える（何も起こさない）。
+    pub allow_terminal_send: bool,
     /// レールのアイコン表示（アクティビティバー）。
     pub rail: RailSettings,
     /// Chat モード（`docs/CHAT.md`）。
@@ -305,6 +310,7 @@ impl Default for Settings {
             html_preview_evict_minutes: 15,
             agent_idle_stop_minutes: 15,
             claude_ai_connectors: true,
+            allow_terminal_send: false,
             rail: RailSettings::default(),
             chat: ChatSettings::default(),
             fleet_hint_seen: false,
@@ -362,6 +368,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "html_preview_evict_minutes": 15,
   "agent_idle_stop_minutes": 15,
   "claude_ai_connectors": true,
+  "allow_terminal_send": false,
   "onboarded": false,
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true },
   "chat": { "directory": "", "instructions": "", "idle_stop_minutes": 10 }

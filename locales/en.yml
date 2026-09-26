@@ -426,6 +426,8 @@ titlebar:
 settings:
   pref_agent_idle_stop: Stop unused agents after (minutes)
   pref_agent_idle_stop_sub: Each agent holds several hundred MB. The conversation is kept and resumes on the next message. 0 = never
+  pref_allow_terminal_send: Let the CLI type into terminals
+  pref_allow_terminal_send_sub: "Lets agents and scripts type into necoder's terminals with `ne terminal send`. What they send runs in that terminal as if you typed it (list, read and wait work even when this is off)"
   chat_heading: CHAT
   chat_directory: Where chat folders are kept
   chat_directory_default: necoder in your Documents folder (default)
@@ -544,6 +546,23 @@ settings:
   cli_admin_prompt_remove: necoder removes the ne command from /usr/local/bin.
   save_unreadable: "Couldn't read %{file}, so nothing was saved (%{reason})"
   save_failed: "Couldn't save the setting (%{reason})"
+  skills_heading: Skills
+  skills_sub: Instructions (SKILL.md) that agents such as Claude Code and Codex read. With the necoder skill, agents learn the necoder CLI for the version you run.
+  skills_necoder_label: necoder skill
+  skills_checking: Checking…
+  skills_busy: Working…
+  skills_install_button: Install
+  skills_update_button: Update
+  skills_update_available: Update available
+  skills_installed_chip: Installed
+  skills_foreign: "%{path} was not written by necoder, so it is left as is (to overwrite, run `ne skills install --force`)"
+  skills_read_error: "Cannot read %{path} (%{error})"
+  skills_found: "Skills found (%{count})"
+  skills_empty: No skills found (looked in ~/.claude/skills, ~/.codex/skills, ~/.agents/skills and the project's .claude/skills and .agents/skills)
+  skills_skipped: "%{count} skipped because their front matter could not be read (run `ne skills list` for the reasons)"
+  skills_scope_shared: Shared (~/.agents)
+  skills_scope_claude_project: Claude Code · project
+  skills_scope_shared_project: Shared · project
 explorer:
   main_worktree_undeletable: The main worktree cannot be deleted (use Remove from rail instead)
   up_folder: Up one folder
@@ -831,6 +850,17 @@ ipc:
   err_unknown_method: "Unknown method: %{name}"
   err_bad_json: "Can't parse JSON: %{detail}"
   err_gui_timeout: GUI response timed out
+  err_no_active_task: No Task is selected in the GUI (Chat is open or no project is open)
+  err_active_is_integration: "The selection in the GUI is the integration space (%{title}), not a Task"
+  err_terminal_required: terminal (a handle or active) is required
+  err_terminal_not_found: "Terminal not found: %{handle} (get the handles again with `ne terminal list`)"
+  err_no_active_terminal: The selected project has no terminal in the bottom dock
+  err_terminal_send_disabled: Sending to terminals is not allowed (turn on "Let the CLI type into terminals" in Settings › Behavior & editor)
+  err_text_required: text is required
+  err_diff_paths_required: left and right (absolute paths of the two files to compare) are required
+  err_not_a_file: "Not a file: %{path}"
+  err_read_file: "Can't read %{path} (%{error})"
+  err_no_project: No project is open
 crash:
   notice: ⚠ Crashed last time — click to report
 menu:

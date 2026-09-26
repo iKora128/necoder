@@ -1892,6 +1892,18 @@ pub fn unified_diff_texts(old_text: &str, new_text: &str, name: &str) -> Option<
     ))
 }
 
+/// 任意テキスト同士の unified diff を、見出し（`---` / `+++` の行）を指定して作る
+/// （`ne --diff <a> <b>` の 2 ファイル比較）。差分なしは None。
+pub fn unified_diff_labeled(
+    old_text: &str,
+    new_text: &str,
+    old_label: &str,
+    new_label: &str,
+) -> Option<String> {
+    let body = unified_diff_body(old_text, new_text)?;
+    Some(format!("--- {old_label}\n+++ {new_label}\n{body}"))
+}
+
 /// 1 hunk 分の unified diff（`git apply --cached` に食わせる形・M11-10 hunk stage）。
 /// パスはリポジトリルート相対で書く。
 pub fn hunk_patch_text(
@@ -2268,6 +2280,24 @@ impl imara_diff::Sink for HunkCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// diff タブの本文は 1 行 = 1 行（UnifiedDiffBuilder は行ごとに改行を足すので、改行つきの行を
+    /// 渡すと全行の後ろに空行が挟まっていた）。承認カードの diff と `ne --diff` が同じ関数を通る。
+    #[test]
+    fn unified_diff_has_one_line_per_diff_line() {
+        let diff = unified_diff_labeled("same\nold\n", "same\nnew\n", "a/left", "b/right")
+            .expect("差分がある");
+        assert_eq!(
+            diff,
+            "--- a/left\n+++ b/right\n@@ -1,2 +1,2 @@\n same\n-old\n+new\n"
+        );
+        // CRLF も同じ形になる（行末の \r を本文へ持ち込まない）。
+        assert_eq!(
+            unified_diff_labeled("same\r\nold\r\n", "same\r\nnew\r\n", "a/left", "b/right"),
+            Some(diff)
+        );
+        assert_eq!(unified_diff_labeled("x\n", "x\n", "a", "b"), None);
+    }
 
     #[test]
     fn status_branch_parses_ahead_behind_dirty() {

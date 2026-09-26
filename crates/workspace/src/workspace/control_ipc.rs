@@ -40,6 +40,61 @@ pub fn control_socket_path() -> Option<PathBuf> {
     paths::runtime_socket()
 }
 
+/// `terminal_read` で返す scrollback の上限（端末の履歴は 10,000 行）。
+const TERMINAL_READ_SCROLLBACK_MAX: u64 = 10_000;
+
+/// `terminal_wait` の 1 要求で待つ上限。応答の待ち上限（`serve_connection` の 30 秒）より短く切り、
+/// 長く待つ時は CLI が要求を繰り返す。
+const TERMINAL_WAIT_MAX: Duration = Duration::from_secs(20);
+
+/// `terminal_wait` が出力の止まり具合を見直す間隔の上限。
+const TERMINAL_WAIT_TICK: Duration = Duration::from_millis(250);
+
+/// CLI から見える端末 1 つ（どのプロジェクトの、どこに置いた端末か）。
+struct ControlTerminal {
+    session_index: usize,
+    terminal: Entity<TerminalView>,
+    /// `"dock"` = 下ドックのタブ / `"task"` = Fleet の Task カードに置いた端末。
+    place: &'static str,
+    /// `active` で指せる端末（選択中のプロジェクトの下ドックのアクティブなタブ）。
+    active: bool,
+}
+
+/// CLI の端末ハンドル（`t<番号>`）。GUI のエンティティ番号なので、GUI が生きている間だけ有効
+/// （再起動や端末を閉じた後は `ne terminal list` で取り直す）。
+fn terminal_handle(terminal: &Entity<TerminalView>) -> String {
+    format!("t{}", terminal.entity_id().as_u64())
+}
+
+/// `open` の `positions`（`ne <path>:<line>[:<column>]`・1 始まり）→ 0 始まりの (パス, 行, 列)。
+/// ファイルが無いものは落とす（開くパスと同じく、無いものは開かない）。
+fn positions_from_params(params: &serde_json::Value) -> Vec<(PathBuf, usize, usize)> {
+    params
+        .get("positions")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| {
+                    let path = PathBuf::from(value.get("path")?.as_str()?);
+                    let line = value.get("line")?.as_u64()?;
+                    let column = value
+                        .get("column")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(1);
+                    path.is_file().then(|| {
+                        (
+                            path,
+                            line.saturating_sub(1) as usize,
+                            column.saturating_sub(1) as usize,
+                        )
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// accept スレッド → UI スレッドへ渡す 1 仕事（I/O 前・生パラメータのまま）。
 pub(crate) struct ControlJob {
     method: String,
@@ -325,6 +380,11 @@ impl Workspace {
                     .unwrap_or_default();
                 let opened = paths.len();
                 self.chrome.pending_external_open.extend(paths);
+                // `ne <path>:<line>[:<column>]`（行・列は 1 始まり）。CLI が `path:line` を分けて送る
+                // （ファイル名に `:12` を含むものと区別するのは、存在を確かめられる CLI 側の責務）。
+                self.chrome
+                    .pending_external_goto
+                    .extend(positions_from_params(&params));
                 // パス 0 件（`ne` 単体）でも前面化はする＝「実行中の necoder を呼び出す」導線。
                 cx.activate(true);
                 cx.notify();
@@ -668,10 +728,309 @@ impl Workspace {
                     ))
                 }, cx);
             }
+            // `necoder fleet … active`: GUI で選択中の Task（Fleet の「選んでいる Task」と同じ = アクティブな枠）。
+            "active_task" => {
+                let response = match self.active_slot() {
+                    Some(slot) if slot.task_space.is_integration() => err(i18n::t!(
+                        "ipc.err_active_is_integration",
+                        "title" => slot.task_space.title.as_ref()
+                    )),
+                    Some(slot) => ok(serde_json::json!({
+                        "task_id": slot.task_space.id.as_str(),
+                        "title": slot.task_space.title.as_ref(),
+                        "branch": slot.branch.clone().or_else(|| slot.worktree_branch.clone()),
+                    })),
+                    None => err(i18n::t!("ipc.err_no_active_task")),
+                };
+                let _ = respond.send(response);
+            }
+            // ── 端末（`necoder terminal …`・下ドックのタブと Task カードに置いた端末）──
+            "terminals" => {
+                let only_task = params.get("task_id").and_then(serde_json::Value::as_str);
+                let terminals: Vec<serde_json::Value> = self
+                    .control_terminals(cx)
+                    .into_iter()
+                    .filter(|entry| {
+                        only_task.is_none_or(|task| {
+                            self.project_sessions.projects[entry.session_index]
+                                .task_space
+                                .id
+                                .as_str()
+                                == task
+                        })
+                    })
+                    .map(|entry| self.terminal_entry_json(&entry, cx))
+                    .collect();
+                let _ = respond.send(ok(serde_json::Value::Array(terminals)));
+            }
+            "terminal_read" => {
+                let response = match self.find_terminal(&params, cx) {
+                    Ok(terminal) => {
+                        let scrollback = params
+                            .get("scrollback")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0)
+                            .min(TERMINAL_READ_SCROLLBACK_MAX)
+                            as usize;
+                        let screen = terminal.read(cx).read_screen(scrollback);
+                        ok(serde_json::json!({
+                            "handle": terminal_handle(&terminal),
+                            "scrollback": screen.scrollback,
+                            "lines": screen.visible,
+                            "cursor": { "line": screen.cursor_line, "column": screen.cursor_column },
+                            "exited": screen.exited,
+                        }))
+                    }
+                    Err(message) => err(message),
+                };
+                let _ = respond.send(response);
+            }
+            "terminal_send" => {
+                // 送った文字はその端末でそのまま実行される＝人が設定で許可した時だけ（既定 off）。
+                if !settings::get(cx).allow_terminal_send {
+                    let _ = respond.send(err(i18n::t!("ipc.err_terminal_send_disabled")));
+                    return;
+                }
+                let terminal = match self.find_terminal(&params, cx) {
+                    Ok(terminal) => terminal,
+                    Err(message) => {
+                        let _ = respond.send(err(message));
+                        return;
+                    }
+                };
+                let enter = params
+                    .get("enter")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let text = params
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if text.is_empty() && !enter {
+                    let _ = respond.send(err(i18n::t!("ipc.err_text_required")));
+                    return;
+                }
+                let input = if enter {
+                    format!("{text}\r")
+                } else {
+                    text.to_string()
+                };
+                terminal.read(cx).send_input(&input);
+                let _ = respond.send(ok(serde_json::json!({
+                    "handle": terminal_handle(&terminal),
+                    "bytes": input.len(),
+                })));
+            }
+            "terminal_wait" => {
+                let terminal = match self.find_terminal(&params, cx) {
+                    Ok(terminal) => terminal,
+                    Err(message) => {
+                        let _ = respond.send(err(message));
+                        return;
+                    }
+                };
+                let idle_target = Duration::from_millis(
+                    params
+                        .get("idle_ms")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(2_000),
+                );
+                // 1 回の要求は応答の待ち上限（serve_connection の 30 秒）より短く切る。
+                // 長く待つ時は CLI が繰り返す（`idle: false` が返る）。
+                let wait_limit = Duration::from_millis(
+                    params
+                        .get("timeout_ms")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(TERMINAL_WAIT_MAX.as_millis() as u64),
+                )
+                .min(TERMINAL_WAIT_MAX);
+                let started = std::time::Instant::now();
+                let handle = terminal_handle(&terminal);
+                cx.spawn(async move |_workspace, cx| loop {
+                    let (idle, exited) = terminal.read_with(cx, |terminal, _| {
+                        (terminal.output_idle(), terminal.has_exited())
+                    });
+                    let reached = idle >= idle_target;
+                    if reached || exited || started.elapsed() >= wait_limit {
+                        let _ = respond.send(ok(serde_json::json!({
+                            "handle": handle,
+                            "idle": reached,
+                            "idle_ms": idle.as_millis() as u64,
+                            "exited": exited,
+                        })));
+                        return;
+                    }
+                    let remaining = idle_target.saturating_sub(idle);
+                    cx.background_executor()
+                        .timer(remaining.clamp(Duration::from_millis(50), TERMINAL_WAIT_TICK))
+                        .await;
+                })
+                .detach();
+            }
+            // `ne --diff <a> <b>`: 2 つのファイルの diff を、既存の diff タブ（読み取り専用の一時タブ）で開く。
+            "open_diff" => self.open_diff_from_control(&params, respond, cx),
             other => {
                 let _ = respond.send(err(i18n::t!("ipc.err_unknown_method", "name" => other)));
             }
         }
+    }
+
+    /// 全プロジェクトの端末（下ドックのタブ + Task カードに置いた端末）。PTY は起動しない。
+    fn control_terminals(&self, cx: &App) -> Vec<ControlTerminal> {
+        let mut terminals = Vec::new();
+        for (session_index, session) in self.project_sessions.sessions.iter().enumerate() {
+            let dock = session.terminal_dock.read(cx);
+            let (tabs, active_tab) = dock.tab_terminals();
+            for (tab_index, terminal) in tabs.iter().enumerate() {
+                terminals.push(ControlTerminal {
+                    session_index,
+                    terminal: terminal.clone(),
+                    place: "dock",
+                    // `active` で指せるのは、選択中のプロジェクトの下ドックのアクティブなタブ。
+                    active: session_index == self.project_sessions.active
+                        && tab_index == active_tab,
+                });
+            }
+            for (_, terminal) in dock.placed_terminals() {
+                terminals.push(ControlTerminal {
+                    session_index,
+                    terminal,
+                    place: "task",
+                    active: false,
+                });
+            }
+        }
+        terminals
+    }
+
+    fn terminal_entry_json(&self, entry: &ControlTerminal, cx: &App) -> serde_json::Value {
+        let slot = &self.project_sessions.projects[entry.session_index];
+        let terminal = entry.terminal.read(cx);
+        serde_json::json!({
+            "handle": terminal_handle(&entry.terminal),
+            "task_id": slot.task_space.id.as_str(),
+            "title": slot.task_space.title.as_ref(),
+            "branch": slot.branch.clone().or_else(|| slot.worktree_branch.clone()),
+            "place": entry.place,
+            "active": entry.active,
+            "exited": terminal.has_exited(),
+            "idle_ms": terminal.output_idle().as_millis() as u64,
+        })
+    }
+
+    /// 要求の `terminal`（`list` のハンドルか `active`）を端末に解決する。
+    fn find_terminal(
+        &self,
+        params: &serde_json::Value,
+        cx: &App,
+    ) -> Result<Entity<TerminalView>, String> {
+        let Some(handle) = params
+            .get("terminal")
+            .and_then(serde_json::Value::as_str)
+            .filter(|handle| !handle.is_empty())
+        else {
+            return Err(i18n::t!("ipc.err_terminal_required"));
+        };
+        let terminals = self.control_terminals(cx);
+        let found = if handle == "active" {
+            terminals.into_iter().find(|entry| entry.active)
+        } else {
+            terminals
+                .into_iter()
+                .find(|entry| terminal_handle(&entry.terminal) == handle)
+        };
+        match found {
+            Some(entry) => Ok(entry.terminal),
+            None if handle == "active" => Err(i18n::t!("ipc.err_no_active_terminal")),
+            None => Err(i18n::t!("ipc.err_terminal_not_found", "handle" => handle)),
+        }
+    }
+
+    /// 2 ファイルの diff を背景で作り、選択中のプロジェクトの diff タブとして開く（次の effect cycle）。
+    fn open_diff_from_control(
+        &mut self,
+        params: &serde_json::Value,
+        respond: std::sync::mpsc::Sender<serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        let path = |key: &str| {
+            params
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        };
+        let (Some(left), Some(right)) = (path("left"), path("right")) else {
+            let _ = respond.send(err(i18n::t!("ipc.err_diff_paths_required")));
+            return;
+        };
+        if self.project_sessions.sessions.is_empty() {
+            let _ = respond.send(err(i18n::t!("ipc.err_no_project")));
+            return;
+        }
+        cx.spawn(async move |workspace, cx| {
+            let read = |path: &Path| -> Result<String, String> {
+                if !path.is_file() {
+                    return Err(i18n::t!("ipc.err_not_a_file", "path" => path.display()));
+                }
+                std::fs::read_to_string(path).map_err(|error| {
+                    i18n::t!("ipc.err_read_file", "path" => path.display(), "error" => error)
+                })
+            };
+            let (left_for_read, right_for_read) = (left.clone(), right.clone());
+            let texts = cx
+                .background_executor()
+                .spawn(
+                    async move { Ok::<_, String>((read(&left_for_read)?, read(&right_for_read)?)) },
+                )
+                .await;
+            let (left_text, right_text) = match texts {
+                Ok(texts) => texts,
+                Err(message) => {
+                    let _ = respond.send(err(message));
+                    return;
+                }
+            };
+            let Some(diff_text) = project::unified_diff_labeled(
+                &left_text,
+                &right_text,
+                &left.display().to_string(),
+                &right.display().to_string(),
+            ) else {
+                let _ = respond.send(ok(
+                    serde_json::json!({ "opened": false, "identical": true }),
+                ));
+                return;
+            };
+            let response = workspace
+                .update(cx, |workspace, cx| {
+                    let file_name = |path: &Path| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    };
+                    let title = left.with_file_name(format!(
+                        "{} ⇄ {}",
+                        file_name(&left),
+                        file_name(&right)
+                    ));
+                    let mut buffer = Buffer::from_str(&diff_text);
+                    buffer.set_read_only(true);
+                    let active = workspace.project_sessions.active;
+                    match workspace.project_sessions.sessions.get_mut(active) {
+                        Some(session) => {
+                            session.pending_transient_tab = Some((title.clone(), buffer));
+                            cx.activate(true);
+                            cx.notify();
+                            ok(serde_json::json!({ "opened": true, "title": title }))
+                        }
+                        None => err(i18n::t!("ipc.err_no_project")),
+                    }
+                })
+                .unwrap_or_else(|_| err(i18n::t!("ipc.err_gui_gone")));
+            let _ = respond.send(response);
+        })
+        .detach();
     }
 
     /// GUI のストレージハンドル（単一ワーカー）で読み書きして応答する（UI スレッドをブロックしない）。
@@ -909,5 +1268,294 @@ mod tests {
     #[test]
     fn ping_to_a_socket_without_a_listener_is_none() {
         assert_eq!(socket_owner_pid(&test_endpoint("nl")), None);
+    }
+
+    // ── CLI の端末・active・diff（`necoder terminal …` / `fleet … active` / `ne --diff`）──
+
+    /// テスト用の一時フォルダ（プロジェクトと設定を置く）。本物の設定には触れない。
+    fn scratch(tag: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("necoder_control_{}_{}", tag, std::process::id()));
+        if directory.exists() {
+            std::fs::remove_dir_all(&directory).expect("前回の残りを消せる");
+        }
+        std::fs::create_dir_all(directory.join("project")).expect("作れる");
+        std::fs::write(directory.join("settings.json"), r#"{"onboarded":true}"#).expect("書ける");
+        directory
+    }
+
+    /// プロジェクト 1 つの窓を開く。下ドックと Task カードの端末は PTY 無しで作る。
+    fn open_workspace<'a>(
+        directory: &Path,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (Entity<Workspace>, &'a mut gpui::VisualTestContext) {
+        let settings_path = directory.join("settings.json");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let project = directory.join("project");
+        cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project], theme_core::Theme::dark(), None, cx)
+        })
+    }
+
+    /// 1 要求を UI スレッドの入口（`handle_control_job`）へ渡し、応答を受け取る（socket は通さない）。
+    fn request(
+        workspace: &Entity<Workspace>,
+        cx: &mut gpui::VisualTestContext,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let (respond, reply) = std::sync::mpsc::channel();
+        workspace.update(cx, |workspace, cx| {
+            workspace.handle_control_job(
+                ControlJob {
+                    method: method.to_string(),
+                    params,
+                    respond,
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        reply.try_recv().expect("応答がある")
+    }
+
+    /// 下ドックのタブ 1 つ + Task カードに置いた端末 1 つを作り、(タブ, カード) を返す。
+    fn add_terminals(
+        workspace: &Entity<Workspace>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> (Entity<TerminalView>, Entity<TerminalView>) {
+        workspace.update(cx, |workspace, cx| {
+            let dock = workspace.project_sessions.sessions[0].terminal_dock.clone();
+            dock.update(cx, |dock, cx| {
+                dock.use_test_terminals();
+                (dock.ensure_active_test(cx), dock.start_session(7, cx))
+            })
+        })
+    }
+
+    #[gpui::test]
+    fn terminals_lists_dock_tabs_and_task_card_terminals(cx: &mut gpui::TestAppContext) {
+        let directory = scratch("list");
+        let (workspace, cx) = open_workspace(&directory, cx);
+        let (tab, card) = add_terminals(&workspace, cx);
+        let task_id = workspace.read_with(cx, |workspace, _| {
+            workspace.project_sessions.projects[0]
+                .task_space
+                .id
+                .0
+                .clone()
+        });
+
+        let response = request(&workspace, cx, "terminals", serde_json::json!({}));
+        assert_eq!(response["ok"], true, "{response}");
+        let terminals = response["result"].as_array().expect("配列");
+        assert_eq!(terminals.len(), 2);
+        assert_eq!(terminals[0]["handle"], terminal_handle(&tab));
+        assert_eq!(terminals[0]["place"], "dock");
+        assert_eq!(terminals[0]["active"], true);
+        assert_eq!(terminals[0]["task_id"], task_id.as_str());
+        assert_eq!(terminals[1]["handle"], terminal_handle(&card));
+        assert_eq!(terminals[1]["place"], "task");
+        assert_eq!(terminals[1]["active"], false);
+        assert!(terminals[0]["idle_ms"].is_u64());
+
+        // Task で絞る（`ne terminal list <task>`）。
+        let filtered = request(
+            &workspace,
+            cx,
+            "terminals",
+            serde_json::json!({ "task_id": task_id }),
+        );
+        assert_eq!(filtered["result"].as_array().map(Vec::len), Some(2));
+        let other = request(
+            &workspace,
+            cx,
+            "terminals",
+            serde_json::json!({ "task_id": "other" }),
+        );
+        assert_eq!(other["result"].as_array().map(Vec::len), Some(0));
+        std::fs::remove_dir_all(&directory).expect("片付けられる");
+    }
+
+    #[gpui::test]
+    fn terminal_read_send_and_wait_round_trip(cx: &mut gpui::TestAppContext) {
+        let directory = scratch("rsw");
+        let (workspace, cx) = open_workspace(&directory, cx);
+        let (tab, card) = add_terminals(&workspace, cx);
+        card.update(cx, |terminal, _| {
+            terminal.feed_output_for_test(b"first\r\nsecond\r\n$ ")
+        });
+        let handle = terminal_handle(&card);
+
+        let read = request(
+            &workspace,
+            cx,
+            "terminal_read",
+            serde_json::json!({ "terminal": handle, "scrollback": 5 }),
+        );
+        assert_eq!(read["ok"], true, "{read}");
+        let lines: Vec<&str> = read["result"]["lines"]
+            .as_array()
+            .expect("配列")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert_eq!(&lines[..3], ["first", "second", "$"]);
+        assert_eq!(read["result"]["cursor"]["line"], 2);
+        // `active` は選択中のプロジェクトの下ドックのタブ。
+        let active = request(
+            &workspace,
+            cx,
+            "terminal_read",
+            serde_json::json!({ "terminal": "active" }),
+        );
+        assert_eq!(active["result"]["handle"], terminal_handle(&tab));
+        let missing = request(
+            &workspace,
+            cx,
+            "terminal_read",
+            serde_json::json!({ "terminal": "t0" }),
+        );
+        assert_eq!(missing["ok"], false);
+
+        // 送信は既定 off（設定で許可するまで何も書かない）。
+        let refused = request(
+            &workspace,
+            cx,
+            "terminal_send",
+            serde_json::json!({ "terminal": handle, "text": "ls", "enter": true }),
+        );
+        assert_eq!(refused["ok"], false);
+        assert!(card.read_with(cx, |terminal, _| terminal
+            .written_input_for_test()
+            .is_empty()));
+        cx.update(|_, cx| {
+            settings::set_user_value(cx, "allow_terminal_send", serde_json::json!(true))
+        })
+        .expect("テスト用の設定を書ける");
+        let sent = request(
+            &workspace,
+            cx,
+            "terminal_send",
+            serde_json::json!({ "terminal": handle, "text": "ls", "enter": true }),
+        );
+        assert_eq!(sent["ok"], true, "{sent}");
+        assert_eq!(sent["result"]["bytes"], 3);
+        assert_eq!(
+            card.read_with(cx, |terminal, _| terminal.written_input_for_test()),
+            b"ls\r".to_vec()
+        );
+
+        // 出力が止まっていれば即答、止まっていなければ期限で idle=false。
+        let idle = request(
+            &workspace,
+            cx,
+            "terminal_wait",
+            serde_json::json!({ "terminal": handle, "idle_ms": 0 }),
+        );
+        assert_eq!(idle["result"]["idle"], true, "{idle}");
+        let busy = request(
+            &workspace,
+            cx,
+            "terminal_wait",
+            serde_json::json!({ "terminal": handle, "idle_ms": 3_600_000, "timeout_ms": 0 }),
+        );
+        assert_eq!(busy["result"]["idle"], false, "{busy}");
+        std::fs::remove_dir_all(&directory).expect("片付けられる");
+    }
+
+    #[gpui::test]
+    fn active_task_names_the_selected_task_but_not_the_integration_space(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = scratch("active");
+        let (workspace, cx) = open_workspace(&directory, cx);
+        // ただのフォルダは統合先扱い＝ active の Task ではない。
+        let refused = request(&workspace, cx, "active_task", serde_json::json!({}));
+        assert_eq!(refused["ok"], false, "{refused}");
+        let task_id = workspace.update(cx, |workspace, _| {
+            let slot = &mut workspace.project_sessions.projects[0];
+            slot.task_space.kind = SpaceKind::Task;
+            slot.task_space.id.0.clone()
+        });
+        let active = request(&workspace, cx, "active_task", serde_json::json!({}));
+        assert_eq!(active["ok"], true, "{active}");
+        assert_eq!(active["result"]["task_id"], task_id.as_str());
+        std::fs::remove_dir_all(&directory).expect("片付けられる");
+    }
+
+    #[gpui::test]
+    fn open_diff_opens_two_files_in_a_diff_tab(cx: &mut gpui::TestAppContext) {
+        let directory = scratch("diff");
+        let left = directory.join("left.txt");
+        let right = directory.join("right.txt");
+        std::fs::write(&left, "same\nold\n").expect("書ける");
+        std::fs::write(&right, "same\nnew\n").expect("書ける");
+        let (workspace, cx) = open_workspace(&directory, cx);
+
+        let opened = request(
+            &workspace,
+            cx,
+            "open_diff",
+            serde_json::json!({ "left": left, "right": right }),
+        );
+        assert_eq!(opened["ok"], true, "{opened}");
+        assert_eq!(opened["result"]["opened"], true);
+        let title = directory.join("left.txt ⇄ right.txt");
+        assert_eq!(opened["result"]["title"], title.display().to_string());
+        // 次の effect cycle で diff タブになる（まだなら pending に積まれている）。
+        let text = workspace.update(cx, |workspace, cx| {
+            let session = &workspace.project_sessions.sessions[workspace.project_sessions.active];
+            if let Some((pending_title, buffer)) = &session.pending_transient_tab {
+                assert_eq!(pending_title, &title);
+                return buffer.text();
+            }
+            let tab = session
+                .tabs
+                .iter()
+                .find(|tab| tab.path == title)
+                .expect("diff タブがある");
+            tab.editor()
+                .expect("diff タブはエディタ")
+                .read(cx)
+                .buffer()
+                .text()
+        });
+        assert!(text.contains("-old"), "{text}");
+        assert!(text.contains("+new"), "{text}");
+
+        let identical = request(
+            &workspace,
+            cx,
+            "open_diff",
+            serde_json::json!({ "left": left, "right": left }),
+        );
+        assert_eq!(identical["result"]["identical"], true, "{identical}");
+        let missing = request(
+            &workspace,
+            cx,
+            "open_diff",
+            serde_json::json!({ "left": left, "right": directory.join("nope.txt") }),
+        );
+        assert_eq!(missing["ok"], false);
+        std::fs::remove_dir_all(&directory).expect("片付けられる");
+    }
+
+    /// `ne <path>:<line>[:<column>]` の位置は 1 始まりで届き、0 始まりに直して積む。無いファイルは落とす。
+    #[test]
+    fn open_positions_become_zero_based_jumps() {
+        let directory = scratch("goto");
+        let file = directory.join("a.rs");
+        std::fs::write(&file, "fn a() {}\n").expect("書ける");
+        let positions = positions_from_params(&serde_json::json!({
+            "positions": [
+                { "path": file, "line": 3, "column": 2 },
+                { "path": file, "line": 1 },
+                { "path": directory.join("missing.rs"), "line": 9 },
+            ]
+        }));
+        assert_eq!(positions, vec![(file.clone(), 2, 1), (file, 0, 0)]);
+        assert!(positions_from_params(&serde_json::json!({})).is_empty());
+        std::fs::remove_dir_all(&directory).expect("片付けられる");
     }
 }
