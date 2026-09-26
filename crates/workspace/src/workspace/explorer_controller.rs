@@ -1032,6 +1032,11 @@ impl Workspace {
         // 全画面のままだと中央が Agent なので、開いたタブが画面に出ない。
         self.chrome.show_settings = false;
         self.exit_agent_full_screen(cx);
+        // Web タブの鍵（URL）は Web タブとして開く（⌘⇧T の復元もファイルと同じこの道を通る）。
+        if let Some(url) = web_tab_url(&path) {
+            self.open_web_tab(url, window, cx);
+            return;
+        }
         // 既に開いていれば重複タブを作らず、そのタブへ切り替える。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
@@ -1067,6 +1072,11 @@ impl Workspace {
     ) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
             self.select_tab(index, window, cx);
+            return;
+        }
+        // 復元するタブ列の中の Web タブ（鍵が URL）。モードは触らずにタブだけ戻す。
+        if let Some(url) = web_tab_url(&path) {
+            self.show_web_tab(url, window, cx);
             return;
         }
         let Some(host) = self.active_host() else {

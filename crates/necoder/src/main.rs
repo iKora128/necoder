@@ -346,8 +346,13 @@ impl gpui::AssetSource for Assets {
             "icons/bell.svg" => icon!("bell.svg"),
             "icons/bell-off.svg" => icon!("bell-off.svg"),
             "icons/eye.svg" => icon!("eye.svg"),
-            // エクスプローラの手動更新（ヘッダ右端）。
+            // エクスプローラの手動更新（ヘッダ右端）・Web タブの再読込。
             "icons/refresh-cw.svg" => icon!("refresh-cw.svg"),
+            // Web タブのツールバー（戻る / 進む / DevTools / 既定のブラウザで開く）。
+            "icons/arrow-left.svg" => icon!("arrow-left.svg"),
+            "icons/arrow-right.svg" => icon!("arrow-right.svg"),
+            "icons/code-xml.svg" => icon!("code-xml.svg"),
+            "icons/external-link.svg" => icon!("external-link.svg"),
             // statusbar の診断件数（エラー / 警告）。
             "icons/circle-x.svg" => icon!("circle-x.svg"),
             "icons/triangle-alert.svg" => icon!("triangle-alert.svg"),
@@ -1024,6 +1029,94 @@ fn main() {
                                 let _ = handle.update(cx, |workspace, window, cx| {
                                     workspace.debug_chat_probe(&command, window, cx);
                                 });
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(250))
+                                    .await;
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: NECODER_WEB_PREVIEW_PROBE="open:http://127.0.0.1:8000/;wait:1500;state" で
+                // Web タブを駆動する（`;` 区切り・改行を含む時は改行区切り＝`eval:` に `;` を書ける。
+                // `wait:<ms>` はその場で待つ）。WKWebView の中身は offscreen 画像に写らないので、
+                // ページ側は `eval:` の結果（標準エラー）で確かめる。
+                #[cfg(debug_assertions)]
+                if let Ok(script) = std::env::var("NECODER_WEB_PREVIEW_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(1800))
+                                .await;
+                            let separator = if script.contains('\n') { '\n' } else { ';' };
+                            for command in script.split(separator).map(str::trim) {
+                                if command.is_empty() {
+                                    continue;
+                                }
+                                if let Some(milliseconds) = command.strip_prefix("wait:") {
+                                    let milliseconds = milliseconds.parse::<u64>().unwrap_or(500);
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(milliseconds))
+                                        .await;
+                                    continue;
+                                }
+                                // `click:<x>,<y>` = 窓の座標（論理 px）でクリックを流す（Markdown プレビューの
+                                // リンクなど、実際の当たり判定まで通したい時）。Workspace を借りたまま流すと
+                                // リスナーが Workspace を借り直して二重貸しになるので、窓だけを借りて流す。
+                                if let Some(coordinates) = command.strip_prefix("click:") {
+                                    let values: Vec<f32> = coordinates
+                                        .split(',')
+                                        .filter_map(|value| value.trim().parse().ok())
+                                        .collect();
+                                    if let [x, y] = values[..] {
+                                        let position = point(px(x), px(y));
+                                        let pressed =
+                                            cx.update_window(handle.into(), |_, window, cx| {
+                                                window.dispatch_event(
+                                                    gpui::PlatformInput::MouseDown(
+                                                        gpui::MouseDownEvent {
+                                                            button: gpui::MouseButton::Left,
+                                                            position,
+                                                            modifiers: gpui::Modifiers::none(),
+                                                            click_count: 1,
+                                                            first_mouse: false,
+                                                        },
+                                                    ),
+                                                    cx,
+                                                );
+                                            });
+                                        // 押してから離すまでに 1 フレーム挟む（押した位置を覚えた要素が、次の
+                                        // 描画で離す側の受け口を張る＝実際の手の操作と同じ順序）。
+                                        cx.background_executor()
+                                            .timer(std::time::Duration::from_millis(150))
+                                            .await;
+                                        let released =
+                                            cx.update_window(handle.into(), |_, window, cx| {
+                                                window.dispatch_event(
+                                                    gpui::PlatformInput::MouseUp(
+                                                        gpui::MouseUpEvent {
+                                                            button: gpui::MouseButton::Left,
+                                                            position,
+                                                            modifiers: gpui::Modifiers::none(),
+                                                            click_count: 1,
+                                                        },
+                                                    ),
+                                                    cx,
+                                                );
+                                            });
+                                        if pressed.is_err() || released.is_err() {
+                                            break; // 窓が閉じた
+                                        }
+                                    }
+                                    continue;
+                                }
+                                let command = command.to_string();
+                                let delivered = handle.update(cx, |workspace, window, cx| {
+                                    workspace.debug_web_preview_probe(&command, window, cx);
+                                });
+                                if delivered.is_err() {
+                                    break; // 窓が閉じた
+                                }
                                 cx.background_executor()
                                     .timer(std::time::Duration::from_millis(250))
                                     .await;

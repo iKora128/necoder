@@ -475,6 +475,10 @@ impl Workspace {
             } else {
                 let handle = tab.focus_handle(cx);
                 window.focus(&handle, cx);
+                // Web タブはキーを WebView へ渡す（HTML プレビューと同じ）。
+                if let Some(web) = tab.web().cloned() {
+                    web.update(cx, |web, cx| web.set_surface_active(true, true, cx));
+                }
             }
         }
         let selected = self.tabs.get(self.active_tab).map(|tab| tab.path.clone());
@@ -531,11 +535,12 @@ impl Workspace {
             self.dismiss_buffer_search(cx);
             self.close_hover(cx);
         }
-        let Some((handle, path, editor)) = self.tabs.get(index).map(|tab| {
+        let Some((handle, path, editor, web)) = self.tabs.get(index).map(|tab| {
             (
                 tab.focus_handle(cx),
                 tab.path.clone(),
                 tab.editor().cloned(),
+                tab.web().cloned(),
             )
         }) else {
             return;
@@ -546,6 +551,10 @@ impl Workspace {
             editor.update(cx, |editor, cx| editor.set_surface_active(true, true, cx));
         } else {
             window.focus(&handle, cx);
+            // Web タブはキーを WebView へ渡す（HTML プレビューと同じ）。
+            if let Some(web) = web {
+                web.update(cx, |web, cx| web.set_surface_active(true, true, cx));
+            }
         }
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.slot_mut(active) {

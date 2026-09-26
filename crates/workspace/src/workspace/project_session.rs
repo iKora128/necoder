@@ -1270,7 +1270,7 @@ impl Workspace {
             return;
         }
         for path in files {
-            if host.metadata(&path).is_ok() {
+            if web_tab_url(&path).is_some() || host.metadata(&path).is_ok() {
                 // 背景読み込みだと完了順でタブ順が崩れるため、local の復元は同期で開く
                 // （ローカル FS の stat/read はマイクロ秒。UI スレッドで払ってよい）。
                 self.open_file_sync(path, window, cx);
@@ -1330,15 +1330,23 @@ impl Workspace {
         let root = self
             .active_worktree()
             .map(|worktree| worktree.root().to_path_buf());
+        /// 背景で読み終えた 1 枚。Web タブ（鍵が URL）は読むものが無いので並びだけ保つ。
+        enum RestoredTab {
+            File(PathBuf, host::FileContent),
+            Web(String),
+        }
         cx.spawn(async move |_workspace, cx| {
-            let loaded: Vec<(PathBuf, host::FileContent)> = cx
+            let loaded: Vec<RestoredTab> = cx
                 .background_executor()
                 .spawn(async move {
                     files
                         .into_iter()
                         .filter_map(|path| {
+                            if let Some(url) = web_tab_url(&path) {
+                                return Some(RestoredTab::Web(url));
+                            }
                             let content = host.read_file(&path).ok()?;
-                            Some((path, content))
+                            Some(RestoredTab::File(path, content))
                         })
                         .collect()
                 })
@@ -1355,8 +1363,13 @@ impl Workspace {
                     return;
                 }
                 let rail_had_focus = workspace.chrome.rail_focus.is_focused(window);
-                for (path, content) in loaded {
-                    workspace.open_loaded_file(path, content, window, cx);
+                for tab in loaded {
+                    match tab {
+                        RestoredTab::File(path, content) => {
+                            workspace.open_loaded_file(path, content, window, cx)
+                        }
+                        RestoredTab::Web(url) => workspace.show_web_tab(url, window, cx),
+                    }
                 }
                 if active_file < workspace.tabs.len() {
                     workspace.select_tab(active_file, window, cx);

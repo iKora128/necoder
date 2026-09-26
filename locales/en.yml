@@ -195,6 +195,7 @@ cmd:
   new_chat: "Chat: New chat"
   toggle_agent_full_screen: "View: AI full screen (hide the editor)"
   split_right: "View: Split right"
+  open_localhost_preview: "Preview: Open localhost…"
   new_thread: "AI: New thread"
   next_tab: "Tabs: Next"
   prev_tab: "Tabs: Previous"
@@ -595,6 +596,24 @@ webview:
   web_failed: Unable to open the preview
   unreachable: "Couldn't connect to %{target}"
   unreachable_hint: Start the dev server, then press Reload in the toolbar
+webtab:
+  back_tip: Back
+  forward_tip: Forward
+  reload_tip: Reload
+  zoom_in_tip: Zoom in
+  zoom_out_tip: Zoom out
+  zoom_reset_tip: Reset to 100%
+  viewport_full: Full
+  viewport_full_tip: Fill the pane width
+  viewport_tip: "Show at %{width}px wide"
+  devtools_tip: Open DevTools (Web Inspector)
+  open_browser_tip: Open in default browser
+  unsupported: Web tabs aren't available here (macOS / Windows only)
+  picker_placeholder: "Port or localhost URL (e.g. 3000 / localhost:5173/app)"
+  picker_action: Open localhost
+  invalid_url: "Only localhost URLs can be opened: %{input}"
+  ctx_open_browser: Open in default browser
+  ctx_copy_url: Copy URL
 pdf:
   unsupported: PDF cannot be shown in a tab in this environment
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead

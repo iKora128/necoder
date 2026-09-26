@@ -603,11 +603,15 @@ impl Workspace {
             .border_color(theme.border)
             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                 let is_active = index == active_tab;
-                let name = tab
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| i18n::t!("tabs.untitled"));
+                // Web タブは鍵が URL なので、ファイル名ではなくページのタイトル（無ければ host:port）。
+                let name = match tab.web() {
+                    Some(web) => web.read(cx).tab_label(cx),
+                    None => tab
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| i18n::t!("tabs.untitled")),
+                };
                 let dirty = tab.is_dirty(cx);
                 // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
                 let status = self.repository.status.get(&tab.path).copied();
@@ -803,10 +807,39 @@ impl Workspace {
             )
             .blur_radius(px(16.))]);
 
-        let is_local = self
-            .active_slot()
-            .map(|slot| slot.remote_host.is_none())
-            .unwrap_or(self.chat_mode());
+        // Web タブ: ファイルの操作の代わりに「既定のブラウザで開く / URL をコピー」。
+        let web = self.tabs.get(index)?.web().cloned();
+        if let Some(web) = &web {
+            let browser_view = web.clone();
+            menu_box = menu_box.child(
+                item("tab-ctx-open-browser", i18n::t!("webtab.ctx_open_browser")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        let url = browser_view.read(cx).current_url(cx);
+                        webview_view::localhost::open_in_browser(&url);
+                        this.close_tab_menu(cx);
+                    }),
+                ),
+            );
+            let copy_view = web.clone();
+            menu_box = menu_box
+                .child(
+                    item("tab-ctx-copy-url", i18n::t!("webtab.ctx_copy_url")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            let url = copy_view.read(cx).current_url(cx);
+                            cx.write_to_clipboard(ClipboardItem::new_string(url));
+                            this.close_tab_menu(cx);
+                        }),
+                    ),
+                )
+                .child(separator());
+        }
+        let is_local = web.is_none()
+            && self
+                .active_slot()
+                .map(|slot| slot.remote_host.is_none())
+                .unwrap_or(self.chat_mode());
         if is_local {
             let reveal_path = path.clone();
             menu_box = menu_box.child(
@@ -839,7 +872,9 @@ impl Workspace {
             menu_box = menu_box.child(separator());
         }
         // Chat の成果物を、戻り先のプロジェクトへ持っていく（`docs/CHAT.md` §3.3）。
-        if let Some((project_name, project_root)) = self.chat_copy_target() {
+        if let Some((project_name, project_root)) =
+            self.chat_copy_target().filter(|_| web.is_none())
+        {
             let source = path.clone();
             menu_box = menu_box
                 .child(
@@ -857,23 +892,27 @@ impl Workspace {
                 )
                 .child(separator());
         }
-        let copy_path = path.clone();
-        menu_box = menu_box.child(
-            item("tab-ctx-copy-path", i18n::t!("explorer.ctx_copy_path")).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| this.copy_tab_path(&copy_path, false, cx)),
-            ),
-        );
-        let relative_path = path.clone();
-        menu_box = menu_box.child(
-            item("tab-ctx-copy-relative", i18n::t!("tabs.ctx_copy_relative")).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.copy_tab_path(&relative_path, true, cx)
-                }),
-            ),
-        );
-        menu_box = menu_box.child(separator());
+        if web.is_none() {
+            let copy_path = path.clone();
+            menu_box = menu_box.child(
+                item("tab-ctx-copy-path", i18n::t!("explorer.ctx_copy_path")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.copy_tab_path(&copy_path, false, cx)
+                    }),
+                ),
+            );
+            let relative_path = path.clone();
+            menu_box = menu_box.child(
+                item("tab-ctx-copy-relative", i18n::t!("tabs.ctx_copy_relative")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.copy_tab_path(&relative_path, true, cx)
+                    }),
+                ),
+            );
+            menu_box = menu_box.child(separator());
+        }
         menu_box = menu_box.child(
             item("tab-ctx-close", i18n::t!("tabs.ctx_close")).on_mouse_down(
                 MouseButton::Left,

@@ -276,21 +276,9 @@ impl Workspace {
                 cx.notify();
             }
             agent_panel::PanelEvent::ChatRowsChanged => {}
+            // transcript の URL: localhost 系は Web タブ、それ以外は既定のブラウザ（`open_url`）。
             agent_panel::PanelEvent::OpenUrlRequest { url } => {
-                if let Err(error) = crate::crash::open_url(url) {
-                    eprintln!("URL を開けない: {error:#}");
-                    let color = self
-                        .project_sessions
-                        .projects
-                        .get(session_index)
-                        .map(|slot| slot.color)
-                        .unwrap_or_else(|| project_color(0));
-                    self.push_toast(
-                        i18n::t!("link.open_failed", "target" => url.as_ref()).into(),
-                        color,
-                        cx,
-                    );
-                }
+                self.open_url(url, cx);
             }
             agent_panel::PanelEvent::FilesTouched { files, color } => {
                 for file in files {

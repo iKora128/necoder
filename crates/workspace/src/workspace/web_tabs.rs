@@ -1,0 +1,385 @@
+//! web_tabs — URL を開く入口と Web タブ（`web_preview_view`）の開閉。
+//!
+//! URL を開く経路はここの [`Workspace::open_url`] 1 本に集める: localhost 系（`webview_view::localhost`
+//! の範囲）は Web タブ、それ以外の http(s) は既定のブラウザ。エージェントの transcript のリンクが
+//! ここを通る（端末の URL クリックも統合時にここへ繋ぐ）。
+
+use crate::workspace::*;
+use webview_view::localhost;
+
+impl Workspace {
+    /// URL を開く（唯一の入口）。localhost 系は Web タブ、それ以外は既定のブラウザ。
+    ///
+    /// Window を取らない形にしてあるので、Window の無いイベント購読（エージェントのパネル・端末）からも
+    /// そのまま呼べる。Web タブを開くのは次の effect cycle（`process_pending_shell_effects`）。
+    pub(crate) fn open_url(&mut self, url: &str, cx: &mut Context<Self>) {
+        if let Some(url) = localhost::normalize(url) {
+            self.pending_web_url = Some(url);
+            cx.notify();
+            return;
+        }
+        if let Err(error) = crate::crash::open_url(url) {
+            eprintln!("URL を開けない: {error:#}");
+            let color = self.accent();
+            self.push_toast(
+                i18n::t!("link.open_failed", "target" => url).into(),
+                color,
+                cx,
+            );
+        }
+    }
+
+    /// Web タブを開く（同じ URL のタブがあればそこへ移る）。対話での入口なので、設定ホーム・
+    /// AI 全画面・Fleet を畳んでエディタ領域を前に出す（Fleet には Web タブを見せる面が無い）。
+    pub(crate) fn open_web_tab(
+        &mut self,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chrome.show_settings = false;
+        self.exit_agent_full_screen(cx);
+        if self.chrome.fleet_mode {
+            self.chrome.fleet_mode = false;
+        }
+        self.agent_active = false;
+        self.show_web_tab(url, window, cx);
+    }
+
+    /// Web タブを出す（あれば切り替え・無ければ末尾に足してアクティブに）。モードは触らない
+    /// （起動時の復元・レール切替のタブ復元もここを通る）。
+    pub(crate) fn show_web_tab(
+        &mut self,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = web_tab_key(&url);
+        if let Some(index) = self.tabs.iter().position(|tab| tab.path == key) {
+            self.select_tab(index, window, cx);
+            return;
+        }
+        self.dismiss_buffer_search(cx);
+        self.close_hover(cx);
+        let theme = self.theme.clone();
+        let view = cx.new(|cx| WebPreviewView::new(&url, theme, cx));
+        let evict_minutes = settings::get(cx).html_preview_evict_minutes;
+        view.update(cx, |view, cx| view.set_evict_minutes(evict_minutes, cx));
+        // タイトル・読み込み状態の変化でタブ名を描き直す。
+        let observation = cx.observe(&view, |_, _, cx| cx.notify());
+        self.tabs.push(EditorTab {
+            path: key,
+            content: TabContent::Web {
+                view: view.clone(),
+                _observation: observation,
+            },
+            transient: false,
+        });
+        self.active_tab = self.tabs.len() - 1;
+        let handle = view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        // WebView は最初の描画で作られ、その時に OS のキーボードフォーカスを受け取る。
+        view.update(cx, |view, cx| view.set_surface_active(true, true, cx));
+        self.sync_active_slot();
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// パレット「プレビュー: localhost を開く…」。入力欄にポート番号か localhost の URL を打つ
+    /// （それ以外は通さない＝任意の URL を開く欄にはしない）。
+    pub(crate) fn open_localhost_preview(
+        &mut self,
+        _: &OpenLocalhostPreview,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_picker(
+            PickerMode::PreviewUrl,
+            i18n::t!("webtab.picker_placeholder"),
+            Vec::new(),
+            window,
+            cx,
+        );
+        if let Some(picker) = self.overlays.picker.clone() {
+            picker.update(cx, |picker, cx| {
+                picker.set_query_action(0, i18n::t!("webtab.picker_action"), cx)
+            });
+        }
+    }
+
+    /// パレットの入力を確定した（`on_picker_event`）。
+    pub(crate) fn confirm_localhost_input(
+        &mut self,
+        input: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match localhost::parse_input(input) {
+            Some(url) => self.open_web_tab(url, window, cx),
+            None => {
+                let color = self.accent();
+                self.push_toast(
+                    i18n::t!("webtab.invalid_url", "input" => input.trim()).into(),
+                    color,
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// 開発用: Web タブを検証する（`NECODER_WEB_PREVIEW_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `open:<url>` = open_url と同じ入口 / `palette:<入力>` = パレットの確定と同じ入口 /
+    /// `picker:<入力>` = 入力欄を開いて文字を入れる（確定しない）/
+    /// `viewport:<full|幅>` / `zoom:<+|-|0>` / `reload` / `eval:<式>` = ページで式を評価して結果を標準エラーへ /
+    /// `menu` = タブの右クリックメニュー / `overlay` = ⌘⇧P（オーバーレイ中は WebView を隠す）/
+    /// `close-overlay` /
+    /// `state` = タブ列と WebView の状態を標準エラーへ。
+    #[cfg(debug_assertions)]
+    pub fn debug_web_preview_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        let active_web = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.web().cloned());
+        match name {
+            "open" => self.open_url(argument, cx),
+            "palette" => self.confirm_localhost_input(argument, window, cx),
+            // 入力欄を開いて文字を入れた状態（確定はしない）を撮る。
+            "picker" => {
+                self.open_localhost_preview(&OpenLocalhostPreview, window, cx);
+                if let Some(picker) = self.overlays.picker.clone() {
+                    picker.update(cx, |picker, cx| picker.set_query(argument, cx));
+                }
+            }
+            "viewport" => {
+                if let Some(web) = active_web {
+                    let viewport = match argument.parse::<u32>() {
+                        Ok(width) => web_preview_view::Viewport::Width(width),
+                        Err(_) => web_preview_view::Viewport::Full,
+                    };
+                    web.update(cx, |web, cx| web.set_viewport(viewport, cx));
+                }
+            }
+            "zoom" => {
+                if let Some(web) = active_web {
+                    let direction = match argument {
+                        "+" => 1,
+                        "-" => -1,
+                        _ => 0,
+                    };
+                    web.update(cx, |web, cx| web.step_zoom(direction, cx));
+                }
+            }
+            "reload" => {
+                if let Some(web) = active_web {
+                    web.update(cx, |web, cx| web.reload(cx));
+                }
+            }
+            "eval" => {
+                if let Some(web) = active_web {
+                    web.read(cx)
+                        .debug_evaluate(argument.to_string(), argument, cx);
+                }
+            }
+            "menu" => {
+                let index = self.active_tab;
+                self.open_tab_menu(index, point(px(520.), px(76.)), cx);
+            }
+            "overlay" => self.open_command_palette(&CommandPalette, window, cx),
+            "close-overlay" => self.close_picker(window, cx),
+            "state" => {
+                let tabs: Vec<String> = self
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.path.to_string_lossy().to_string())
+                    .collect();
+                let web = active_web.map(|web| {
+                    let web = web.read(cx);
+                    (
+                        web.url().to_string(),
+                        web.current_url(cx),
+                        web.tab_label(cx),
+                    )
+                });
+                eprintln!(
+                    "WEB_PREVIEW_PROBE state: tabs={tabs:?} active={} web={web:?} fleet={} open_files={:?}",
+                    self.active_tab,
+                    self.chrome.fleet_mode,
+                    self.active_slot().map(|slot| slot.open_files.clone())
+                );
+            }
+            other => eprintln!("WEB_PREVIEW_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture {
+        root: PathBuf,
+        project: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(tag: &str, cx: &mut gpui::TestAppContext) -> Fixture {
+            let root =
+                std::env::temp_dir().join(format!("necoder_web_tab_{tag}_{}", std::process::id()));
+            let project = root.join("site");
+            if root.exists() {
+                std::fs::remove_dir_all(&root).expect("前回の残りを消せる");
+            }
+            std::fs::create_dir_all(&project).expect("一時フォルダを作れる");
+            // 言語サーバの無い拡張子にする（LSP が別スレッドで動くと決定的なテストにならない）。
+            std::fs::write(project.join("a.txt"), "a\n").expect("書ける");
+            std::fs::write(project.join("b.txt"), "b\n").expect("書ける");
+            let settings_path = root.join("settings.json");
+            std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("書ける");
+            cx.update(|cx| settings::init(Some(settings_path), None, cx));
+            // テスト窓は raw window handle を持たない＝ネイティブ子ビューは作らずに配線だけ通す。
+            ::webview_view::disable_native_webviews_for_tests();
+            Fixture { root, project }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_dir_all(&self.root) {
+                eprintln!("一時フォルダを消せない: {error}");
+            }
+        }
+    }
+
+    fn stop_watchers(workspace: &mut Workspace) {
+        for session in workspace.project_sessions.sessions.iter_mut() {
+            session._watch = None;
+            session._watch_pump = None;
+        }
+    }
+
+    /// Web タブは窓セッションの `open_files` に URL のまま載り、再起動で**同じ位置に**戻ること。
+    /// 範囲外の URL（保存形式に紛れ込んだ物）は Web タブとして開かない。
+    #[gpui::test]
+    fn web_tabs_come_back_after_a_restart_in_their_place(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("restore", cx);
+        let (file_a, file_b) = (fixture.project.join("a.txt"), fixture.project.join("b.txt"));
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            let restored = RestoredTabs {
+                files: vec![
+                    file_a.clone(),
+                    PathBuf::from("http://localhost:5173/"),
+                    PathBuf::from("https://example.com/"),
+                    file_b.clone(),
+                ],
+                active: 1,
+            };
+            workspace.restore_open_file(&[restored], window, cx);
+            let paths: Vec<PathBuf> = workspace.tabs.iter().map(|tab| tab.path.clone()).collect();
+            assert_eq!(
+                paths,
+                vec![
+                    file_a.clone(),
+                    PathBuf::from("http://localhost:5173/"),
+                    file_b.clone()
+                ],
+                "localhost の Web タブは並びを保って戻り、外部の URL は開かない"
+            );
+            assert!(
+                workspace.tabs[1].web().is_some(),
+                "URL の鍵は Web タブになる"
+            );
+            assert_eq!(workspace.active_tab, 1, "アクティブも戻る");
+            assert_eq!(
+                workspace.persisted_state().projects[0].open_files,
+                paths,
+                "保存する時も URL のまま同じ並びで書く（保存形式は変えない）"
+            );
+            stop_watchers(workspace);
+        });
+    }
+
+    /// transcript などから URL を開くと、localhost 系は Web タブになり、同じ URL は重複しない。
+    /// オーバーレイ中は WebView を隠し（キーも GPUI へ返し）、閉じたら戻す。
+    #[gpui::test]
+    fn localhost_urls_open_one_web_tab_that_steps_aside_for_overlays(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = Fixture::new("open", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.open_url("http://127.0.0.1:3000", cx);
+            workspace.process_pending_shell_effects(window, cx);
+            workspace.open_url("http://127.0.0.1:3000/", cx);
+            workspace.process_pending_shell_effects(window, cx);
+            assert_eq!(workspace.tabs.len(), 1, "同じ URL は同じタブへ戻る");
+            let tab = &workspace.tabs[0];
+            assert_eq!(tab.path, PathBuf::from("http://127.0.0.1:3000/"));
+            assert!(
+                workspace.active_editor().is_none(),
+                "Web タブはバッファを持たない"
+            );
+            tab.web().cloned().expect("Web タブが開く")
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, cx| view.is_surface_active(cx)));
+        assert!(
+            view.read_with(cx, |view, cx| view.wants_key_focus(cx)),
+            "開いた Web タブはキーを WebView へ渡す"
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_command_palette(&CommandPalette, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            !view.read_with(cx, |view, cx| view.is_surface_active(cx)),
+            "オーバーレイ中に WebView を残すと、手前に居座ってパレットを隠す"
+        );
+        assert!(!view.read_with(cx, |view, cx| view.wants_key_focus(cx)));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_picker(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            view.read_with(cx, |view, cx| view.is_surface_active(cx)),
+            "閉じたら戻る"
+        );
+        workspace.update_in(cx, |workspace, _window, _cx| stop_watchers(workspace));
+    }
+
+    /// パレットの入力欄は localhost しか通さない（任意の URL を開く欄にしない）。
+    #[gpui::test]
+    fn the_palette_input_only_accepts_localhost(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("palette", cx);
+        let project = fixture.project.clone();
+        let (workspace, cx) = cx
+            .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.confirm_localhost_input("example.com", window, cx);
+            assert!(workspace.tabs.is_empty(), "外部のホストは開かない");
+            workspace.confirm_localhost_input("5173", window, cx);
+            assert_eq!(
+                workspace.tabs.first().map(|tab| tab.path.clone()),
+                Some(PathBuf::from("http://localhost:5173/"))
+            );
+            stop_watchers(workspace);
+        });
+    }
+}

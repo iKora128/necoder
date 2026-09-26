@@ -52,6 +52,8 @@ pub struct EditorArea {
     /// 未保存の編集が無いタブを全部閉じる予約（Chat で見ているチャットが替わった時）。
     pub(crate) pending_close_clean_tabs: bool,
     pub(crate) pending_open_git_diff: Option<PathBuf>,
+    /// Web タブで開く URL（`Workspace::open_url`・Window の無い入口から次の effect cycle へ渡す）。
+    pub(crate) pending_web_url: Option<String>,
     pub(crate) pending_stage_hunk: Option<project::DiffHunk>,
     pub(crate) blame_gen: u32,
     pub(crate) last_blame_target: Option<(PathBuf, usize)>,
@@ -98,6 +100,7 @@ impl EditorArea {
             pending_preview_keeps_focus: false,
             pending_close_clean_tabs: false,
             pending_open_git_diff: None,
+            pending_web_url: None,
             pending_stage_hunk: None,
             blame_gen: 0,
             last_blame_target: None,
