@@ -575,6 +575,11 @@ settings:
   keep_awake_off: しない
   appearance_heading: 外観
   appearance_sub: テーマは押した瞬間に適用され、settings.json に保存されます。
+  locale_label: 表示言語
+  locale_sub: 押した瞬間に切り替わります（macOS のメニューバーは次の起動から）
+  locale_follow_os: OS に合わせる
+  locale_ja: 日本語
+  locale_en: English
   theme_label: テーマ
   theme_sub: ⌘K ⌘T のセレクタでも切り替えられます
   open_json: settings.json を開く

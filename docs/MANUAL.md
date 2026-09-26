@@ -652,7 +652,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | `format_on_save` | `false` | 保存時にフォーマット |
 | `preview_tabs` | `true` | エクスプローラの 1 回クリックでプレビュータブ（次の 1 回クリックで置き換わる）に開く |
 | `auto_save` | `off` | 自動保存（`focus_change` = 他へ移った時 / `after_delay` = 手を止めた時も） |
-| `locale` | OS に従う | UI の言語（日本語 / 英語） |
+| `locale` | OS に従う | UI の言語（日本語 / 英語）。設定 › 外観 の「表示言語」でも変えられ、その場で切り替わる（macOS のメニューバーは次の起動から） |
 | `submit_on_enter` | `false` | Enter で送信するか |
 | `sound_done` / `sound_waiting` | `nyaan` | 完了 / 入力待ちの通知音 |
 | `sound_volume` | `100` | 通知音の大きさ（%・0 で鳴らさない・mac） |

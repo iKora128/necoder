@@ -574,6 +574,11 @@ settings:
   keep_awake_off: "Off"
   appearance_heading: Appearance
   appearance_sub: Themes apply the moment you click and are saved to settings.json.
+  locale_label: Language
+  locale_sub: Switches right away (the macOS menu bar switches on the next launch)
+  locale_follow_os: Match the OS
+  locale_ja: 日本語
+  locale_en: English
   theme_label: Theme
   theme_sub: Also available via the ⌘K ⌘T selector
   open_json: Open settings.json
