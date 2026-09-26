@@ -106,6 +106,10 @@ impl Workspace {
             settings::SettingsViewEvent::SaveFailed(message) => {
                 self.push_failure_toast(message.clone(), None, cx);
             }
+            settings::SettingsViewEvent::Notice(message) => {
+                let color = self.accent();
+                self.push_toast(message.clone(), color, cx);
+            }
         }
     }
 

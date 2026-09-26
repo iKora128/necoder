@@ -26,8 +26,9 @@ mod remote;
 pub use agent_launch::set_agent_server;
 
 pub use settings_core::{
-    persist_agent_config_default, persist_mcp_enabled, persist_user_value, user_settings_path,
-    Density, McpServerSetting, QuickCommandSetting, Settings, SettingsStore, UnreadableSettings,
+    persist_agent_config_default, persist_mcp_enabled, persist_user_value, persist_user_values,
+    user_settings_path, Density, McpServerSetting, QuickCommandSetting, Settings, SettingsStore,
+    UnreadableSettings,
 };
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
@@ -169,6 +170,12 @@ fn write_user_file(
 /// 既存の settings.json を読めない時は書かずに `Err`（[`UnreadableSettings`]）。
 pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
     write_user_file(cx, |path| persist_user_value(path, key, value))
+}
+
+/// 複数のキーを 1 回の書き込み・1 回の再読込で更新する（一緒に変わる物・取り込み等）。
+/// 途中まで書けた状態を残さない（読めなければどれも書かずに `Err`）。
+pub fn set_user_values(cx: &mut App, values: Vec<(&str, serde_json::Value)>) -> anyhow::Result<()> {
+    write_user_file(cx, |path| persist_user_values(path, values))
 }
 
 /// `agent_config_defaults.<agent_id>.<config_id>` の 1 点を更新して**即適用 + 永続化**する（composer ピルの sticky）。
@@ -379,6 +386,8 @@ pub enum SettingsViewEvent {
     },
     /// 手元のターミナルのシェルを選ぶ（O25）。入っているシェルの一覧は shell のピッカーが担う。
     PickShell,
+    /// 済んだことの知らせ（Ghostty の設定を取り込んだ等）。トーストは shell が出す。
+    Notice(SharedString),
 }
 
 /// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
@@ -477,6 +486,9 @@ pub struct SettingsView {
     accounts: Vec<Vec<String>>,
     /// 起動の上書きを編んでいるダイアログ（O16・`agent_launch`）。
     launch_editor: Option<agent_launch::LaunchEditor>,
+    /// Ghostty の設定ファイルがあるか（初回の画面で「Ghostty から取り込む」を出すか・O45 H14）。
+    /// 描画で fs を見ないよう、[`Self::refresh_lists`] で見て持っておく。
+    ghostty_config_present: bool,
     /// ターミナル用 `ne` シム（cli_shim crate）の設置状態。`Some(実体パス)` = 設置済み。
     cli_shim_target: Option<PathBuf>,
     /// `ne` シムの設置/削除を実行中（連打防止・「実行中…」表示）。
@@ -596,6 +608,7 @@ impl SettingsView {
             mcp_filter_enabled_only: false,
             accounts: Vec::new(),
             launch_editor: None,
+            ghostty_config_present: false,
             cli_shim_target: None,
             cli_shim_busy: false,
             cli_shim_error: None,
@@ -672,6 +685,9 @@ impl SettingsView {
                     .unwrap_or_default()
             })
             .collect();
+        self.ghostty_config_present = settings_core::ghostty::config_candidates()
+            .iter()
+            .any(|path| path.is_file());
     }
 
     // ── アカウント切替（O14）─────────────────────────────────────────────────────
@@ -3158,6 +3174,7 @@ impl SettingsView {
             ))
             .child(self.terminal_color_scheme_row(settings, cx))
             .child(self.terminal_shell_row(settings, cx))
+            .child(self.ghostty_import_row(cx))
             .child(self.segmented_row_with(
                 "sound_done",
                 i18n::t!("settings.pref_sound_done"),
@@ -3533,6 +3550,96 @@ impl SettingsView {
         )
     }
 
+    /// Ghostty から取り込む（O45・H14）: Ghostty の設定の書体・大きさ・カーソル・配色をターミナルの設定へ。
+    fn ghostty_import_row(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let control = div()
+            .id("terminal-ghostty-import")
+            .px(px(8.))
+            .py(px(3.))
+            .rounded(px(5.))
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(11.))
+            .text_color(theme.fg1)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+            .child(SharedString::from(i18n::t!("settings.ghostty_import")))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, _window, cx| view.import_ghostty(cx)),
+            )
+            .into_any_element();
+        self.pref_row_with_keywords(
+            &[
+                "ghostty",
+                "import",
+                "terminal_font_family",
+                "terminal_color_scheme",
+            ],
+            i18n::t!("settings.pref_ghostty_import"),
+            Some(i18n::t!("settings.pref_ghostty_import_sub")),
+            control,
+        )
+    }
+
+    /// Ghostty の設定を読んで、見つかった物だけをユーザーの settings.json に書く（O45・H14）。
+    fn import_ghostty(&mut self, cx: &mut Context<Self>) {
+        let imported = settings_core::ghostty::read().map(|(_, imported)| imported);
+        self.apply_ghostty_import(imported, cx);
+    }
+
+    /// 読んだ結果を 1 回で書いて、何を持ってきたかを知らせる（`None` = 設定が無かった）。
+    fn apply_ghostty_import(
+        &mut self,
+        imported: Option<settings_core::ghostty::GhosttyTerminal>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(imported) = imported else {
+            cx.emit(SettingsViewEvent::Notice(
+                i18n::t!("settings.ghostty_not_found").into(),
+            ));
+            return;
+        };
+        let mut values = Vec::new();
+        let mut items = Vec::new();
+        if let Some(family) = imported.font_family {
+            values.push(("terminal_font_family", serde_json::Value::String(family)));
+            items.push(i18n::t!("settings.ghostty_item_font"));
+        }
+        if let Some(size) = imported.font_size {
+            values.push(("terminal_font_size", serde_json::json!(size)));
+            items.push(i18n::t!("settings.ghostty_item_size"));
+        }
+        if let Some(cursor) = imported.cursor {
+            values.push((
+                "terminal_cursor",
+                serde_json::Value::String(cursor.to_string()),
+            ));
+            items.push(i18n::t!("settings.ghostty_item_cursor"));
+        }
+        if let Some(scheme) = imported.color_scheme {
+            values.push((
+                "terminal_color_scheme",
+                serde_json::Value::String(scheme.display().to_string()),
+            ));
+            items.push(i18n::t!("settings.ghostty_item_colors"));
+        }
+        if values.is_empty() {
+            cx.emit(SettingsViewEvent::Notice(
+                i18n::t!("settings.ghostty_nothing").into(),
+            ));
+            return;
+        }
+        match set_user_values(cx, values) {
+            Ok(()) => cx.emit(SettingsViewEvent::Notice(
+                i18n::t!("settings.ghostty_imported", "items" => items.join("・")).into(),
+            )),
+            Err(error) => cx.emit(SettingsViewEvent::SaveFailed(save_failure_message(&error))),
+        }
+        cx.notify();
+    }
+
     /// 手元のターミナルのシェル（O25）: 選ぶ…（shell のピッカー）/ 既定に戻す。副題は今のシェル。
     fn terminal_shell_row(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
         let theme = self.theme.clone();
@@ -3755,6 +3862,10 @@ impl Render for SettingsView {
                     Some(i18n::t!("settings.agents_sub")),
                 ))
                 .child(self.agents_rows(&settings, false, cx))
+                // Ghostty を使っていれば、ターミナルの書体・配色をここで持ってこられる（O45・H14）。
+                .when(self.ghostty_config_present, |body| {
+                    body.child(self.ghostty_import_row(cx))
+                })
                 .child(
                     div()
                         .id("onboarding-start")
@@ -4096,6 +4207,79 @@ mod tests {
             view.reset_agent_launch("codex", cx);
             assert!(get(cx).agent_servers.get("codex").is_none(), "既定に戻す");
         });
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// O45・H14: Ghostty から拾った物だけを 1 回で書いて知らせる。何も無い・設定が無い時は書かずに
+    /// 知らせる。実物の置き場（ホーム・XDG）は読まない（読んだ結果を渡す）。
+    #[gpui::test]
+    fn ghostty_settings_are_imported_in_one_write(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-ghostty-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{ "onboarded": true, "terminal_cursor": "bar", "terminal_scrollback": 20000 }"#,
+        )
+        .expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        let notices = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let record = notices.clone();
+        let _subscription = cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_, event: &SettingsViewEvent, _| {
+                if let SettingsViewEvent::Notice(message) = event {
+                    record.borrow_mut().push(message.to_string());
+                }
+            })
+        });
+        let scheme = std::env::temp_dir().join("necoder-ghostty-theme");
+        view.update(cx, |view, cx| {
+            view.apply_ghostty_import(
+                Some(settings_core::ghostty::GhosttyTerminal {
+                    font_family: Some("Iosevka".to_string()),
+                    font_size: Some(14.0),
+                    cursor: Some("block"),
+                    color_scheme: Some(scheme.clone()),
+                }),
+                cx,
+            );
+            let settings = get(cx);
+            assert_eq!(settings.terminal_font_family, "Iosevka");
+            assert_eq!(settings.terminal_font_size, 14.0);
+            assert_eq!(settings.terminal_cursor, "block", "取り込んだ物で上書き");
+            assert_eq!(settings.terminal_color_scheme, scheme.display().to_string());
+            assert_eq!(
+                settings.terminal_scrollback, 20000,
+                "持ってこない物はそのまま"
+            );
+        });
+        view.update(cx, |view, cx| {
+            view.apply_ghostty_import(Some(settings_core::ghostty::GhosttyTerminal::default()), cx);
+            view.apply_ghostty_import(None, cx);
+            assert_eq!(get(cx).terminal_font_family, "Iosevka", "何も書かない");
+        });
+        let items = [
+            "settings.ghostty_item_font",
+            "settings.ghostty_item_size",
+            "settings.ghostty_item_cursor",
+            "settings.ghostty_item_colors",
+        ]
+        .map(|key| i18n::translate(key))
+        .join("・");
+        assert_eq!(
+            *notices.borrow(),
+            vec![
+                i18n::t!("settings.ghostty_imported", "items" => items),
+                i18n::t!("settings.ghostty_nothing"),
+                i18n::t!("settings.ghostty_not_found"),
+            ]
+        );
         std::fs::remove_file(&path).ok();
     }
 

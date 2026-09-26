@@ -668,6 +668,16 @@ settings:
   terminal_scrollback_lines: "%{n} lines"
   pref_terminal_cursor: Terminal cursor
   pref_terminal_color_scheme: Terminal colors
+  pref_ghostty_import: Import from Ghostty
+  pref_ghostty_import_sub: Use Ghostty's font, size, cursor and colors for the terminal (key bindings and scrollback are left out)
+  ghostty_import: Import
+  ghostty_not_found: No Ghostty config was found (~/.config/ghostty/config and so on)
+  ghostty_nothing: Ghostty's config has nothing to import
+  ghostty_imported: "Imported from Ghostty: %{items}"
+  ghostty_item_font: font
+  ghostty_item_size: size
+  ghostty_item_cursor: cursor
+  ghostty_item_colors: colors
   terminal_color_scheme_default: Default (follows the app theme). Reads Ghostty themes, Windows Terminal schemes (JSON) and iTerm2 .itermcolors
   terminal_color_scheme_pick: Choose file…
   terminal_color_scheme_reset: Use default

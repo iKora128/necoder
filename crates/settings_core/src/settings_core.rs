@@ -4,6 +4,8 @@
 //! project = `.necoder/settings.json`。後ろのレイヤが前を**深く**上書きする（オブジェクトは再帰マージ、
 //! スカラ・配列は置換）。マージ後の JSON を [`Settings`] にデシリアライズする（欠けたキーは型の既定）。
 
+pub mod ghostty;
+
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::Value;
@@ -730,8 +732,15 @@ fn object_entry<'a>(
 /// 他のキー・ユーザーの値は保つ。親ディレクトリが無ければ作る。
 /// 既存ファイルを読めなければ**書かずに** [`UnreadableSettings`] を返す（黙って壊さない）。
 pub fn persist_user_value(path: &Path, key: &str, value: Value) -> Result<()> {
+    persist_user_values(path, vec![(key, value)])
+}
+
+/// 複数のキーを 1 回で書く（一緒に変わる物・取り込み等）。読めなければどれも書かない。
+pub fn persist_user_values(path: &Path, values: Vec<(&str, Value)>) -> Result<()> {
     let mut root = read_settings_object(path)?;
-    root.insert(key.to_string(), value);
+    for (key, value) in values {
+        root.insert(key.to_string(), value);
+    }
     write_settings_object(path, root)
 }
 

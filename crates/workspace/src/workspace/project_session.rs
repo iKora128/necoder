@@ -1074,7 +1074,7 @@ impl Workspace {
         workspace.schedule_agent_registry_refresh(cx); // ACP レジストリの更新（12s 後に背景で）
         workspace.check_crash_notice(cx); // 前回クラッシュの通知（M13・pending マーカーを 1 回だけ消費）
         workspace.check_update_notice(cx); // 更新の後の最初の起動の「変更点」（O45・H17・1 回だけ）
-                                          // 開発用: NECODER_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
+                                           // 開発用: NECODER_UPDATE_PROBE="x.y.z" でチップ描画を直接確認（ネット不要）。
         if let Ok(version) = std::env::var("NECODER_UPDATE_PROBE") {
             if !version.is_empty() {
                 // 経路も実 OS に合わせる（Windows 実機で「クリック → ブラウザ」まで確認できるように）。
