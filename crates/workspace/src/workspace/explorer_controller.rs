@@ -1388,6 +1388,11 @@ impl Workspace {
             self.open_web_tab(url, window, cx);
             return;
         }
+        // 内蔵の配信で開いていた HTML（鍵は `file://`）も Web タブに戻す。
+        if let Some(file) = static_tab_file(&path) {
+            self.open_static_web_tab(file, window, cx);
+            return;
+        }
         self.note_recent_file(&path);
         // 既に開いていれば重複タブを作らず、そのタブへ切り替える。
         if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
@@ -1438,6 +1443,10 @@ impl Workspace {
         // 復元するタブ列の中の Web タブ（鍵が URL）。モードは触らずにタブだけ戻す。
         if let Some(url) = web_tab_url(&path) {
             self.show_web_tab(url, window, cx);
+            return;
+        }
+        if let Some(file) = static_tab_file(&path) {
+            self.show_static_web_tab(file, window, cx);
             return;
         }
         let Some(host) = self.active_host() else {

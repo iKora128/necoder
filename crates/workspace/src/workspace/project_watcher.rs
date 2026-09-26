@@ -134,6 +134,8 @@ impl Workspace {
         else {
             return;
         };
+        // 内蔵の配信で開いている HTML のフォルダが変わったら、その Web タブを読み込み直す。
+        self.reload_static_web_tabs(session_index, &paths, cx);
         let mut tree_changed = false;
         let mut git_changed = false;
         for path in &paths {
@@ -227,8 +229,8 @@ impl Workspace {
                     }
                     // 変更レビューのタブはファイルではない（読み直しは下の mark_review_outdated）。
                     TabContent::Review(_) => {}
-                    // Web タブの鍵は URL なので、ファイルの変更がここへ来ることは無い
-                    // （開発サーバの再読込はサーバ側の HMR が受け持つ）。
+                    // Web タブの鍵は URL（localhost）か `file://`（内蔵の配信）なので、ファイルの変更が
+                    // ここへ来ることは無い（開発サーバは HMR・内蔵の配信は上の `reload_static_web_tabs`）。
                     TabContent::Web { .. } => {}
                 }
                 git_changed = true;

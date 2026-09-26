@@ -216,6 +216,7 @@ cmd:
   split_right: "View: Split right"
   open_localhost_preview: "Preview: Open localhost…"
   toggle_design_mode: "Preview: Design mode (pick elements for the AI)"
+  open_html_in_web_tab: "Preview: Open HTML in a Web tab (for Design mode)"
   new_thread: "AI: New thread"
   new_thread_claude: "AI: New thread (Claude Code)"
   new_thread_codex: "AI: New thread (Codex)"
@@ -661,6 +662,7 @@ explorer:
   ctx_open_window: Open in new window
   ctx_open: Open
   ctx_open_default: Open with default app
+  ctx_open_web_tab: Open in Web tab (Design mode)
   ctx_reveal: Reveal in Finder
   ctx_new_file: New file
   ctx_new_dir: New folder
@@ -781,6 +783,8 @@ breadcrumb:
   html_source: Source
   html_preview_tip: Open in the system WebView  ⌘⇧V
   html_reload_tip: Reload HTML preview
+  html_open_web_tab: Open in Web tab
+  html_open_web_tab_tip: Open in a Web tab through the built-in server (Design mode works there)
 webview:
   outside_sandbox: This file is outside the folder that may be shown
   failed: Unable to open HTML preview
@@ -806,6 +810,11 @@ webtab:
   picker_placeholder: "Port or localhost URL (e.g. 3000 / localhost:5173/app)"
   picker_action: Open localhost
   invalid_url: "Only localhost URLs can be opened: %{input}"
+  static_tip: "Built-in server: %{path}"
+  static_failed: "Couldn't start the built-in server: %{error}"
+  static_needs_html: Open a local HTML file first
+  static_remote: HTML in SSH projects can't be opened in a Web tab yet (the built-in server serves local files only)
+  static_chat: Chat HTML is written by the agent and stays sandboxed, so it can't be opened in a Web tab
   ctx_open_browser: Open in default browser
   ctx_copy_url: Copy URL
 design:
@@ -827,7 +836,7 @@ design:
   capture_failed: Couldn't capture the element (attached the text only)
   target_moved: "The picked element wasn't attached — you switched away from %{thread} while it was being captured. Go back to that thread and pick it again"
   target_gone: The picked element wasn't attached — the thread it was picked for was closed
-  needs_web_tab: "Design works in a Web tab (Preview: Open localhost…)"
+  needs_web_tab: "Design works in a Web tab (Preview: Open localhost… / for HTML, Open in Web tab)"
   not_ready: Start Design once the page is showing
 pdf:
   unsupported: PDF cannot be shown in a tab in this environment

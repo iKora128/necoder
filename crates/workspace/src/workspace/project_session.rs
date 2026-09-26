@@ -1360,7 +1360,10 @@ impl Workspace {
             return;
         }
         for path in files {
-            if web_tab_url(&path).is_some() || host.metadata(&path).is_ok() {
+            if web_tab_url(&path).is_some()
+                || static_tab_file(&path).is_some_and(|file| file.is_file())
+                || host.metadata(&path).is_ok()
+            {
                 // 背景読み込みだと完了順でタブ順が崩れるため、local の復元は同期で開く
                 // （ローカル FS の stat/read はマイクロ秒。UI スレッドで払ってよい）。
                 self.open_file_sync(path, window, cx);
