@@ -599,6 +599,12 @@ terminal:
   add_tip: New terminal
   close_dock_tip: Close bottom dock  ⌘J
   git_tip: Source control  ⌃⇧G
+  search_invalid_regex: Invalid regular expression
+  menu_copy: Copy
+  menu_paste: Paste
+  menu_select_all: Select All
+  menu_clear: Clear
+  menu_find: Find
 theme:
   builtin: Built-in
   user: User
@@ -849,6 +855,12 @@ key:
   hide_others: Hide others
   activate_project: Switch to project (rail order)
   quit: Quit necoder
+  section_terminal: Terminal
+  terminal_copy: Copy selection
+  terminal_paste: Paste
+  terminal_select_all: Select all
+  terminal_clear: Clear
+  terminal_find: Find in terminal
 work:
   repositories: Repositories / work
   open_beside: Open beside

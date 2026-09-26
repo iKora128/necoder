@@ -1032,6 +1032,38 @@ fn main() {
                         .detach();
                     }
                 }
+                // 開発用: NECODER_TERMINAL_PROBE="open;wait:1500;select:1,0-1,30;find:hit" で下ドックの
+                // 端末を駆動する（`;` 区切りで順に実行。`wait:<ms>` はその場で待つ）。端末へ文字を
+                // 出すのは NECODER_TERM_SCRIPT（起動時に sh で実行する文）と組み合わせる。
+                #[cfg(debug_assertions)]
+                if let Ok(script) = std::env::var("NECODER_TERMINAL_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(600))
+                                .await;
+                            for command in script.split(';').map(str::trim) {
+                                if let Some(milliseconds) = command.strip_prefix("wait:") {
+                                    let milliseconds = milliseconds.parse::<u64>().unwrap_or(500);
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(milliseconds))
+                                        .await;
+                                    continue;
+                                }
+                                let command = command.to_string();
+                                if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                    workspace.debug_terminal_probe(&command, window, cx);
+                                }) {
+                                    eprintln!("TERMINAL_PROBE: 窓が無い: {error:#}");
+                                }
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(250))
+                                    .await;
+                            }
+                        })
+                        .detach();
+                    }
+                }
                 // 開発用: NECODER_AGENT_FULLSCREEN_PROBE=1 で AI 全画面（⌘⇧⏎）を駆動する。
                 if std::env::var("NECODER_AGENT_FULLSCREEN_PROBE").is_ok_and(|value| value == "1") {
                     if let Some(handle) = window.window_handle().downcast::<Workspace>() {

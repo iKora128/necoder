@@ -445,6 +445,31 @@ impl Workspace {
             .update(cx, |dock, cx| dock.emit_open_path(path, line, cx));
     }
 
+    /// 開発用: 下ドックの端末を offscreen で駆動する（`NECODER_TERMINAL_PROBE`・`;` 区切り）。
+    /// `open` = 下ドックの端末を開いてフォーカス。それ以外は端末へ渡す
+    /// （[`terminal_view::TerminalView::debug_probe`]: `type:` / `select:` / `find:` など）。
+    #[cfg(debug_assertions)]
+    pub fn debug_terminal_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        if name == "open" {
+            self.chrome.show_bottom = true;
+            self.focus_active_terminal(window, cx);
+        } else {
+            let terminal = self
+                .terminal_dock
+                .update(cx, |dock, cx| dock.ensure_active(cx));
+            terminal.update(cx, |terminal, cx| {
+                terminal.debug_probe(name, argument, window, cx)
+            });
+        }
+        cx.notify();
+    }
+
     /// 開発用: ⌘O スイッチャーを開く（M12-12 のオフスクリーン検証）。
     #[cfg(debug_assertions)]
     pub fn debug_open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {

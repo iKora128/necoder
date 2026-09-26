@@ -76,6 +76,9 @@ image = "0.25"
 base64 = "0.22"
 # M8 統合ターミナル。crates.io の公開 API を使用する。
 alacritty_terminal = "0.26"
+# 端末の PTY を包むのに要る（alacritty_terminal の EventedReadWrite が polling の型を取る）。
+# 依存ツリーに lock 済みの版を共有する。
+polling = "3"
 libc = "0.2"
 # M10 ファイル監視（macOS は FSEvents バックエンド）。remote watch は M13 で Host 経由に
 notify = "8"

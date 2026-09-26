@@ -7112,7 +7112,9 @@ dependencies = [
  "gpui",
  "host",
  "i18n",
+ "keymap_core",
  "libc",
+ "polling",
  "theme_core",
  "ui",
 ]
