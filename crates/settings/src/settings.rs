@@ -79,16 +79,23 @@ const LOCALE_FOLLOW_OS: &str = "auto";
 /// `None` に戻したら OS の言語を読み直す。描画のたびに `t!` で引く文字は窓を描き直せば変わる。
 /// 起動時に作る macOS のメニューバーは次の起動から。
 pub fn follow_locale(cx: &mut App) {
+    follow_locale_with(cx, |locale| match locale {
+        Some(code) => i18n::set_locale(code),
+        None => i18n::init_from_os_locale(),
+    });
+}
+
+/// [`follow_locale`] の本体。言語が変わった時だけ `apply` を呼んで窓を描き直す。
+/// テストは `apply` を差し替える（i18n の言語はプロセス全体で 1 つなので、並んで走る
+/// 他のテストの翻訳を途中で変えないため）。
+fn follow_locale_with(cx: &mut App, apply: impl Fn(Option<&str>) + 'static) {
     let mut applied = get(cx).locale;
     cx.observe_global::<SettingsGlobal>(move |cx| {
         let locale = get(cx).locale;
         if locale == applied {
             return;
         }
-        match &locale {
-            Some(code) => i18n::set_locale(code),
-            None => i18n::init_from_os_locale(),
-        }
+        apply(locale.as_deref());
         applied = locale;
         cx.refresh_windows();
     })
@@ -3288,15 +3295,19 @@ mod tests {
     /// 表示言語（O27）: 設定を変えるとその場で切り替わり、「OS に合わせる」は値を消す（null）。
     #[gpui::test]
     fn the_display_language_follows_the_setting(cx: &mut gpui::TestAppContext) {
-        let before = i18n::locale();
         let path = std::env::temp_dir().join(format!(
             "necoder-settings-locale-{}.json",
             std::process::id()
         ));
         std::fs::write(&path, r#"{ "onboarded": true }"#).expect("seed");
+        // i18n の言語はプロセスで 1 つ。並んで走る他のテストの翻訳を変えないよう、当てる処理を記録に差し替える。
+        let applied = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Option<String>>::new()));
+        let record = applied.clone();
         cx.update(|cx| {
             init(Some(path.clone()), None, cx);
-            follow_locale(cx);
+            follow_locale_with(cx, move |locale| {
+                record.borrow_mut().push(locale.map(str::to_string))
+            });
         });
         let (view, cx) = cx.add_window_view(|_window, cx| {
             let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
@@ -3304,16 +3315,19 @@ mod tests {
             view
         });
         view.update(cx, |view, cx| view.set_pref_string("locale", "en", cx));
-        assert_eq!(i18n::locale(), "en");
         view.update(cx, |view, cx| view.set_pref_string("locale", "ja", cx));
-        assert_eq!(i18n::locale(), "ja", "押した瞬間に切り替わる");
+        view.update(cx, |view, cx| view.set_pref_string("locale", "ja", cx));
         view.update(cx, |view, cx| {
             view.set_pref_string("locale", LOCALE_FOLLOW_OS, cx);
             assert_eq!(get(cx).locale, None, "OS に合わせる = 値を消す");
         });
+        assert_eq!(
+            *applied.borrow(),
+            vec![Some("en".to_string()), Some("ja".to_string()), None],
+            "変わった時だけ・押した瞬間に当てる（同じ値の押し直しでは当て直さない）"
+        );
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(!text.contains(LOCALE_FOLLOW_OS), "{text}");
-        i18n::set_locale(&before);
         std::fs::remove_file(&path).ok();
     }
 

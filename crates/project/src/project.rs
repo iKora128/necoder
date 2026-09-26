@@ -4161,6 +4161,10 @@ ENV
 /// 無ければ（Windows のローカル）ファイルの長さを歩いて足す。読めなければ None。
 /// 読めないフォルダがあって `du` が失敗を返しても、合計が出ていればそれを使う。
 pub fn disk_usage_on(host: &dyn Host, root: &Path) -> Option<u64> {
+    // 無いフォルダは測れない。どの OS でも同じ答えにする（自前で歩く方は無くても 0 を返してしまう）。
+    if !host.metadata(root).is_ok_and(|metadata| metadata.is_dir) {
+        return None;
+    }
     if host.has_posix_shell() {
         let output = host.run_command(&host.shell_script("du -sk .", root)).ok()?;
         let text = String::from_utf8_lossy(&output.stdout);
