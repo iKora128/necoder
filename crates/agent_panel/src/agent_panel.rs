@@ -14887,7 +14887,8 @@ PYEOF"#;
                     "claude": {"type": "registry", "env": {"CLAUDE_CONFIG_DIR": "/tmp/necoder-claude-personal"}}
                 }),
             )
-        });
+        })
+        .expect("テスト用の設定を書ける");
         let (second, personal, _second_commands) = panel.update(cx, |panel, cx| {
             let second = panel.new_thread_index(cx);
             let personal = panel.prospective_usage_account(second, cx);
