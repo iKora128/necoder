@@ -3,6 +3,10 @@
 //! ARCHITECTURE §2: M3 は**遅延 read_dir**（展開時に直下を読む）で、
 //! `.git` と gitignore 対象を除外する（ripgrep の `ignore` crate を使用）。
 //! ファイル監視・インクリメンタル更新は後続（M8/性能）で追加する。
+//!
+//! ⌘P の「無視されたファイルは 2 回目に」（[`ignored_files_local`]）は、stablyai/orca@646e9a5 の
+//! `src/shared/quick-open-filter.ts`（ignoredPass）と `docs/site/content/docs/model/quick-open.mdx`
+//! の考え方を参考にした（実装は独立。Orca は rg で自動に足し、necoder は一致なしの時に人が選ぶ）。
 
 pub mod file_operations;
 pub mod todos;

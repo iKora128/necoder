@@ -1,3 +1,6 @@
+// 出典: ⌘P の「最近開いたファイルを上に・無視されたファイルは 2 回目に」（D19）は、
+// stablyai/orca@646e9a5 の `docs/site/content/docs/model/quick-open.mdx` と
+// `src/shared/quick-open-filter.ts`（ignoredPass）の考え方を参考にした（実装は独立）。
 use crate::workspace::*;
 
 impl Workspace {
