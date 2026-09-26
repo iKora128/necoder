@@ -268,6 +268,11 @@ pub struct Settings {
     /// ターミナルのカーソルの形（`"block"` 既定 / `"bar"` / `"underline"`・O25）。vim やシェルの設定が
     /// 形を指定すればそちらが勝つ（ここはその既定）。知らない値は `"block"`。
     pub terminal_cursor: String,
+    /// 手元のターミナルで開くシェル（空 = OS の既定・mac / Linux は `$SHELL`・Windows は pwsh → powershell・O25）。
+    /// 名前（PATH から探す）か絶対パス。新しく開く端末から効く。SSH 先の端末は接続先のシェルのまま。
+    pub terminal_shell: String,
+    /// 上のシェルに渡す引数（例 `["-l"]`）。シェルが空なら使わない。
+    pub terminal_shell_args: Vec<String>,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
@@ -339,6 +344,8 @@ impl Default for Settings {
             terminal_font_family: String::new(),
             terminal_scrollback: 10_000,
             terminal_cursor: "block".to_string(),
+            terminal_shell: String::new(),
+            terminal_shell_args: Vec::new(),
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
             agent_idle_stop_minutes: 15,
@@ -444,6 +451,8 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "terminal_font_family": "",
   "terminal_scrollback": 10000,
   "terminal_cursor": "block",
+  "terminal_shell": "",
+  "terminal_shell_args": [],
   "agent_servers": {},
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
@@ -1027,6 +1036,8 @@ mod tests {
         assert_eq!(settings.terminal_font_family, "");
         assert_eq!(settings.terminal_scrollback, 10_000);
         assert_eq!(settings.terminal_cursor, "block");
+        assert_eq!(settings.terminal_shell, "", "空 = OS の既定のシェル");
+        assert!(settings.terminal_shell_args.is_empty());
         assert_eq!(
             *settings,
             Settings::default(),

@@ -778,8 +778,8 @@ fn main() {
         workspace::install_agent_notifications(cx);
         // エージェントが作業している間はスリープさせない（O13・設定 `keep_awake`）。
         workspace::install_keep_awake(cx);
-        // ターミナルの文字の大きさ・フォント・scrollback・カーソル（O25・設定 `terminal_*`）。
-        workspace::install_terminal_appearance(cx);
+        // ターミナルの文字の大きさ・フォント・scrollback・カーソル・シェル（O25・設定 `terminal_*`）。
+        workspace::install_terminal_settings(cx);
         let settings = settings::get(cx);
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);
