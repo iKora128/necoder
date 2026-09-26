@@ -383,6 +383,7 @@ quit_confirm:
   detail_quit_minimize: 終了すると、これらは止まります。最小化しておけば裏で動き続けます。
   detail_close_hide: この窓を閉じると、これらは止まります。隠しておけば裏で動き続け、Dock のアイコンで戻れます。
   detail_close_minimize: この窓を閉じると、これらは止まります。最小化しておけば裏で動き続けます。
+  detail_close_window: この窓を閉じると、この窓のこれらは止まります。この窓を最小化しておけば裏で動き続けます（ほかの窓はそのまま）。
   keep_running_hide: 隠して動かし続ける
   keep_running_minimize: 最小化して動かし続ける
   quit: 終了する
