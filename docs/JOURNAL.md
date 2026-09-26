@@ -3426,6 +3426,10 @@
     zsh の precmd は、フックごとに `$?` をコマンドの終了コードへ戻してから呼ぶ（別のフックが先に `return 3` しても
     `add-zsh-hook` で足した側に正しい値が届く＝実際の zsh 5.9 で確かめた）。bash は `PS0`（4.4 以降）で C、
     `PROMPT_COMMAND` の先頭で D と A を出す。
+    **区切りは入れ子のプログラムからも届く**（レビューで見つけた）: 区切りを出さない手元の zsh から `ssh` した先の
+    シェルが出した C は、`exit` で抜けた後も D が来ないまま残り、以後の × と ⌘Q が毎回確かめていた（`cat` した
+    `script` の記録でも同じ）。手元のシェル（unix）は前面のプロセスグループだけで決め、区切りは前面を調べられない
+    端末（Windows の ConPTY・`ssh -tt` の接続先）にだけ使う。
   - **SSH の host は開いた project の外を cwd にできない**（`RemoteHost::run_command` は cwd を根からの相対に
     直す・書き込みも根の中だけ・metadata は根の中へ正規化してリンクをたどる）。Task の worktree は
     `<repo>-worktrees/` にあって統合先の外なので、統合先の host で Task の中のコマンドを流すと必ず断られる。

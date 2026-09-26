@@ -496,6 +496,25 @@ impl ForegroundProbe {
     }
 }
 
+/// PTY の子が `ssh`（接続先の端末＝`ssh -tt …`）か。前面のグループには ssh 自身しか居ないので、
+/// コマンドが動いているかは接続先のシェルの区切り（OSC 133）でしか分からない。
+#[cfg(any(unix, test))]
+fn is_ssh_program(program: &str) -> bool {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let name = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .unwrap_or(name);
+    name == "ssh"
+}
+
+/// 閉じる前に確かめるか（純関数）: 前面のグループを調べられる端末（`probe` が `Some`）はそれだけで
+/// 決める。区切り（OSC 133）は入れ子のプログラム（ssh 先のシェル・`cat` した記録）からも届き、
+/// シェルが前に戻っても C のまま残りうるので、手元のシェルでは使わない。調べられない端末は区切りで。
+fn foreground_busy(probe: Option<bool>, marks_running: bool) -> bool {
+    probe.unwrap_or(marks_running)
+}
+
 /// 前面のプロセスグループ `group` がシェル（`shell_pid`）以外なら「何かが前面で動いている」。
 /// 読めなかった（負）・0・シェル自身は「動いていない」＝確認しない側に倒す。
 #[cfg(unix)]
@@ -540,6 +559,11 @@ impl TerminalView {
         }
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
+        // 接続先の端末（`ssh -tt …`）は前面のグループを見ても ssh 自身しか居ない（区切りで決める）。
+        #[cfg(unix)]
+        let over_ssh = shell
+            .as_ref()
+            .is_some_and(|(program, _)| is_ssh_program(program));
         let options = tty::Options {
             shell: shell.map(|(program, args)| tty::Shell::new(program, args)),
             working_directory: cwd,
@@ -560,7 +584,11 @@ impl TerminalView {
         let pty = tty::new(&options, window_size, 0);
         // PTY は下で EventLoop へ渡る。前面グループを読む口だけは先に手元へ残す。
         #[cfg(unix)]
-        let foreground = pty.as_ref().ok().and_then(ForegroundProbe::new);
+        let foreground = if over_ssh {
+            None
+        } else {
+            pty.as_ref().ok().and_then(ForegroundProbe::new)
+        };
         match pty {
             // kitty keyboard のスタック溢れで PTY スレッドが落ちるのを防ぐ（`pty_guard`）。
             Ok(pty) => match EventLoop::new(
@@ -704,27 +732,22 @@ impl TerminalView {
 
     /// 前面でシェル以外のプロセスが動いているか（閉じる前の確認の判定・O4）。
     ///
-    /// シェルが区切り（OSC 133 / 633・O25）を出していれば、コマンドが動いている間（C の後・D の前）は
-    /// 動いている。前面のプロセスを調べられない端末（Windows の ConPTY・SSH 先）でもこれで分かる。
-    /// それ以外で調べられない端末は `false` ＝確認しない側に倒す: Windows の ConPTY（前面グループの概念が
-    /// 無い）、リモート（ローカルの子は `ssh -tt` で、前面は常に ssh 自身）、終了済み・生成に失敗した端末。
+    /// 手元のシェル（unix）は前面のプロセスグループで決める（[`foreground_busy`]）。前面を調べられない
+    /// 端末（Windows の ConPTY・SSH 先＝ローカルの子は `ssh -tt` で前面は常に ssh 自身）は、シェルが
+    /// 区切り（OSC 133 / 633・O25）を出していれば、コマンドが動いている間（C の後・D の前）は動いている。
+    /// 区切りも無ければ `false` ＝確認しない側に倒す。終了済み・生成に失敗した端末も `false`。
     pub fn has_foreground_process(&self) -> bool {
         if self.exited {
             return false;
         }
-        if self.shell_activity.running() {
-            return true;
-        }
         #[cfg(unix)]
-        {
-            self.foreground
-                .as_ref()
-                .is_some_and(ForegroundProbe::has_foreground_job)
-        }
+        let probe = self
+            .foreground
+            .as_ref()
+            .map(ForegroundProbe::has_foreground_job);
         #[cfg(not(unix))]
-        {
-            false
-        }
+        let probe = None;
+        foreground_busy(probe, self.shell_activity.running())
     }
 
     /// シェルが区切り（OSC 133 / 633）を出しているか（1 度でも見たか・O25）。
@@ -2355,6 +2378,30 @@ mod tests {
         });
     }
 
+    /// 手元のシェルは前面のグループで決める（O25・レビュー）: 入れ子のプログラム（ssh 先のシェル・
+    /// `cat` した記録）の区切りで C のまま残っても、シェルが前にいれば確かめない。前面を調べられない
+    /// 端末（Windows・SSH 先）だけ区切りで決める。
+    #[test]
+    fn a_local_shell_is_judged_by_its_foreground_group() {
+        assert!(
+            !foreground_busy(Some(false), true),
+            "残った C より前面のグループ"
+        );
+        assert!(foreground_busy(Some(true), false));
+        assert!(foreground_busy(None, true), "調べられない端末は区切りで");
+        assert!(!foreground_busy(None, false));
+        for program in [
+            "ssh",
+            "/usr/bin/ssh",
+            r"C:\Windows\System32\OpenSSH\ssh.exe",
+        ] {
+            assert!(is_ssh_program(program), "{program}");
+        }
+        for program in ["zsh", "/bin/bash", "pwsh.exe", "sshd", "/opt/ssh/zsh"] {
+            assert!(!is_ssh_program(program), "{program}");
+        }
+    }
+
     #[gpui::test]
     fn a_custom_name_wins_over_the_shell_title(cx: &mut gpui::TestAppContext) {
         let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
@@ -2514,14 +2561,10 @@ mod tests {
         assert!(busy, "sleep が前面で動いている間は true");
     }
 
-    /// O25・C20: 実 PTY で、シェルが出した区切り（OSC 133）が読み口（`GuardedPty`）を通って
-    /// `ShellActivity` に届く。C の後は動いている・D で止まって終了コードが残る。打った行のエコーは
-    /// `\033` の文字のままなので区切りにならない。後始末は上と同じく Shutdown を投げるだけ。
+    /// 実 PTY で `/bin/sh -i` を起動し、読み口（`GuardedPty`）に区切りの状態をつないだ EventLoop を
+    /// 回す。返すのは入力口・区切りの状態・前面のグループを読む口。後始末は `Msg::Shutdown` を送るだけ。
     #[cfg(unix)]
-    #[test]
-    fn shell_marks_from_a_real_pty_reach_the_activity() {
-        use std::time::{Duration, Instant};
-
+    fn spawn_marked_shell() -> (Notifier, Arc<pty_guard::ShellActivity>, ForegroundProbe) {
         let options = tty::Options {
             shell: Some(tty::Shell::new(
                 "/bin/sh".to_string(),
@@ -2550,6 +2593,7 @@ mod tests {
             listener.clone(),
         )));
         let pty = tty::new(&options, window_size, 0).expect("PTY を作れる");
+        let probe = ForegroundProbe::new(&pty).expect("前面のグループを読む口を作れる");
         let activity = Arc::new(pty_guard::ShellActivity::default());
         let event_loop = EventLoop::new(
             term,
@@ -2561,27 +2605,59 @@ mod tests {
         .expect("EventLoop を作れる");
         let notifier = Notifier(event_loop.channel());
         event_loop.spawn();
-        let wait_until = |done: &dyn Fn() -> bool| {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while Instant::now() < deadline {
-                if done() {
-                    return true;
-                }
-                std::thread::sleep(Duration::from_millis(50));
+        (notifier, activity, probe)
+    }
+
+    /// `done` が真になるまで最大 10 秒待つ（実 PTY の出力待ち）。
+    #[cfg(unix)]
+    fn wait_until(done: impl Fn() -> bool) -> bool {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if done() {
+                return true;
             }
-            false
-        };
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// O25・C20: 実 PTY で、シェルが出した区切り（OSC 133）が読み口（`GuardedPty`）を通って
+    /// `ShellActivity` に届く。C の後は動いている・D で止まって終了コードが残る。打った行のエコーは
+    /// `\033` の文字のままなので区切りにならない。
+    #[cfg(unix)]
+    #[test]
+    fn shell_marks_from_a_real_pty_reach_the_activity() {
+        let (notifier, activity, _probe) = spawn_marked_shell();
         notifier
             .notify(b"printf '\\033]133;C\\007'; sleep 2; printf '\\033]133;D;7\\007'\n".to_vec());
-        let started = wait_until(&|| activity.running());
+        let started = wait_until(|| activity.running());
         let finished =
-            started && wait_until(&|| !activity.running() && activity.last_exit() == Some(7));
+            started && wait_until(|| !activity.running() && activity.last_exit() == Some(7));
         if let Err(error) = notifier.0.send(Msg::Shutdown) {
             eprintln!("EventLoop へ Shutdown を送れない: {error}");
         }
         assert!(started, "C の後は動いている");
         assert!(finished, "D で止まり、終了コードが残る");
         assert!(activity.seen());
+    }
+
+    /// 実 PTY の手元のシェルで区切りの C だけが残っても（入れ子のプログラムが出して D の前に抜けた
+    /// 想定）、前面のグループはシェルなので閉じる前に確かめない（O25・レビュー）。
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_mark_does_not_keep_a_local_shell_busy() {
+        let (notifier, activity, probe) = spawn_marked_shell();
+        notifier.notify(b"printf '\\033]133;C\\007'\n".to_vec());
+        let marked = wait_until(|| activity.running());
+        // printf は終わってシェルが前に戻っている（C だけが残った）。
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let busy = foreground_busy(Some(probe.has_foreground_job()), activity.running());
+        if let Err(error) = notifier.0.send(Msg::Shutdown) {
+            eprintln!("EventLoop へ Shutdown を送れない: {error}");
+        }
+        assert!(marked, "区切りの C が届く");
+        assert!(!busy, "手元のシェルは前面のグループで決める");
     }
 
     #[test]
