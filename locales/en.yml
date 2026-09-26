@@ -571,6 +571,21 @@ settings:
   agent_signed_out: Signed out
   agent_disabled: Off (hidden from choices)
   agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
+  launch_default: Launch as usual (registry version and command)
+  launch_env: "Launch: default + environment (%{names})"
+  launch_custom: "Launch: own command (%{command})"
+  launch_edit: Change…
+  launch_reset: Use default
+  launch_title: "Launching %{agent}"
+  launch_mode_registry: Add environment variables to the default launch
+  launch_mode_custom: Launch with my own command
+  launch_command: Command (absolute path or a name on PATH)
+  launch_args: Arguments (one per line)
+  launch_env_field: Environment variables (one KEY=VALUE per line)
+  launch_note: Applies to agents started from now on. Values stay in settings.json as written, so don't put API keys or other secrets here (use variables that point to a location, like CLAUDE_CONFIG_DIR)
+  launch_command_missing: Enter a command
+  launch_cancel: Cancel
+  launch_save: Save
   logged_in: Logged in
   login_required: Login required
   login_status_unknown: Check login status in the CLI

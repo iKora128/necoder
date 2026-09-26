@@ -20,7 +20,10 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use theme_core::Theme;
+mod agent_launch;
 mod remote;
+
+pub use agent_launch::set_agent_server;
 
 pub use settings_core::{
     persist_agent_config_default, persist_mcp_enabled, persist_user_value, user_settings_path,
@@ -472,6 +475,8 @@ pub struct SettingsView {
     /// エージェントごとのアカウントのフォルダ名（`acp_client::AGENTS` と同じ並び・O14）。
     /// 描画ごとに fs を読まないよう、開き直すたび / 作るたびに [`Self::refresh_lists`] で読む。
     accounts: Vec<Vec<String>>,
+    /// 起動の上書きを編んでいるダイアログ（O16・`agent_launch`）。
+    launch_editor: Option<agent_launch::LaunchEditor>,
     /// ターミナル用 `ne` シム（cli_shim crate）の設置状態。`Some(実体パス)` = 設置済み。
     cli_shim_target: Option<PathBuf>,
     /// `ne` シムの設置/削除を実行中（連打防止・「実行中…」表示）。
@@ -590,6 +595,7 @@ impl SettingsView {
             mcp_filter_source: None,
             mcp_filter_enabled_only: false,
             accounts: Vec::new(),
+            launch_editor: None,
             cli_shim_target: None,
             cli_shim_busy: false,
             cli_shim_error: None,
@@ -2191,6 +2197,10 @@ impl SettingsView {
             {
                 rows = rows.child(self.account_line(index, agent.id, var, settings, cx));
             }
+            // 起動の上書き（O16・環境変数 / 自分のコマンド）。初回の案内には出さない。
+            if enabled && show_captain {
+                rows = rows.child(self.launch_line(index, agent.id, agent.label, settings, cx));
+            }
         }
         rows
     }
@@ -3768,6 +3778,7 @@ impl Render for SettingsView {
         // 設定が増えてもナビに 1 行足すだけで済み、縦に伸び続けない（UI-SPEC §12）。
         div()
             .id("settings-pane")
+            .relative()
             .size_full()
             .flex()
             .bg(theme.bg1)
@@ -3795,6 +3806,7 @@ impl Render for SettingsView {
                         ),
                     ),
             )
+            .children(self.render_launch_editor(cx))
     }
 }
 
@@ -3994,6 +4006,80 @@ mod tests {
             view.availability_pending = false;
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// O16: 起動の上書きを画面から書く（環境変数だけ → 自分のコマンド → 既定に戻す）。
+    #[gpui::test]
+    fn the_launch_override_is_written_from_the_agents_page(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-launch-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"{ "onboarded": true }"#).expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        let set =
+            |view: &mut SettingsView, which: &str, text: &str, cx: &mut Context<SettingsView>| {
+                let editor = view.launch_editor.as_ref().expect("開いている");
+                let field = match which {
+                    "command" => editor.command.clone(),
+                    "args" => editor.args.clone(),
+                    _ => editor.env.clone(),
+                };
+                field.update(cx, |field, cx| field.set_plain_text(text, cx));
+            };
+        view.update_in(cx, |view, window, cx| {
+            view.open_launch_editor("codex", "Codex", window, cx);
+            set(view, "env", "CODEX_HOME=/opt/codex", cx);
+            view.save_launch_editor(cx);
+            assert!(view.launch_editor.is_none(), "書けたら閉じる");
+            assert_eq!(
+                get(cx).agent_servers.get("codex"),
+                Some(&settings_core::AgentServerSetting::Registry {
+                    env: [("CODEX_HOME".to_string(), "/opt/codex".to_string())].into()
+                })
+            );
+
+            view.open_launch_editor("codex", "Codex", window, cx);
+            assert_eq!(
+                view.launch_editor
+                    .as_ref()
+                    .map(|editor| editor.env.read(cx).plain_text()),
+                Some("CODEX_HOME=/opt/codex".to_string()),
+                "今の値を欄に入れて開く"
+            );
+            view.set_launch_custom(true, cx);
+            view.save_launch_editor(cx);
+            assert!(
+                view.launch_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.error.is_some()),
+                "コマンドが空なら書かない"
+            );
+            set(view, "command", "codex-acp", cx);
+            set(view, "args", "--verbose\n\n--color never", cx);
+            view.save_launch_editor(cx);
+            match get(cx).agent_servers.get("codex") {
+                Some(settings_core::AgentServerSetting::Custom { command, args, .. }) => {
+                    assert_eq!(command, "codex-acp");
+                    assert_eq!(
+                        args,
+                        &vec!["--verbose".to_string(), "--color never".to_string()]
+                    );
+                }
+                other => panic!("自分のコマンドになっていない: {other:?}"),
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |view, cx| {
+            view.reset_agent_launch("codex", cx);
+            assert!(get(cx).agent_servers.get("codex").is_none(), "既定に戻す");
+        });
         std::fs::remove_file(&path).ok();
     }
 

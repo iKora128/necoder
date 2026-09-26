@@ -572,6 +572,21 @@ settings:
   agent_signed_out: 未ログイン
   agent_disabled: 使わない（選択肢に出さない）
   agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
+  launch_default: 起動は既定のまま（レジストリの版とコマンド）
+  launch_env: "起動: 既定 + 環境変数（%{names}）"
+  launch_custom: "起動: 自分のコマンド（%{command}）"
+  launch_edit: 変える…
+  launch_reset: 既定に戻す
+  launch_title: "%{agent} の起動"
+  launch_mode_registry: 既定の起動に環境変数を足す
+  launch_mode_custom: 自分のコマンドで起動
+  launch_command: コマンド（絶対パスか PATH にある名前）
+  launch_args: 引数（1 行に 1 つ）
+  launch_env_field: 環境変数（1 行に 1 つ KEY=VALUE）
+  launch_note: 効くのは次に起動するエージェントから。値は settings.json にそのまま残るので、API キーなどの秘密は書かないでください（CLAUDE_CONFIG_DIR のように置き場を指す変数にする）
+  launch_command_missing: コマンドを入れてください
+  launch_cancel: キャンセル
+  launch_save: 保存
   logged_in: ログイン済み
   login_required: ログインが必要
   login_status_unknown: ログイン状態は CLI で確認

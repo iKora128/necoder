@@ -128,6 +128,71 @@ impl AgentServerSetting {
             Self::Custom { env, .. } | Self::Registry { env } => env,
         }
     }
+
+    /// settings.json に書く形（`type` つき・空の `args` / `env` も書く）。
+    pub fn to_json(&self) -> Value {
+        match self {
+            Self::Custom { command, args, env } => serde_json::json!({
+                "type": "custom",
+                "command": command,
+                "args": args,
+                "env": env,
+            }),
+            Self::Registry { env } => serde_json::json!({ "type": "registry", "env": env }),
+        }
+    }
+}
+
+/// 環境変数の欄（1 行に 1 つ `KEY=VALUE`・空行と `#` で始まる行は読まない・O16）を読む。名前は
+/// 英字か `_` で始まり英数字と `_` だけ。値はそのまま（引用符も外さない）。誤りは行番号つきで返す。
+pub fn parse_env_lines(text: &str) -> std::result::Result<BTreeMap<String, String>, String> {
+    let mut env = BTreeMap::new();
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            return Err(format!(
+                "{} 行目: KEY=VALUE の形ではありません: {line}",
+                number + 1
+            ));
+        };
+        let name = name.trim();
+        let valid = name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_');
+        if !valid {
+            return Err(format!(
+                "{} 行目: 変数の名前に使えない文字があります: {name}",
+                number + 1
+            ));
+        }
+        env.insert(name.to_string(), value.trim().to_string());
+    }
+    Ok(env)
+}
+
+/// [`parse_env_lines`] の逆（欄に出す形・名前の順）。
+pub fn env_lines(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 引数の欄（1 行に 1 つ・前後の空白は落とす・空行は読まない）を読む。引用符は付けずに書く
+/// （行がそのまま 1 つの引数）。
+pub fn parse_arg_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// よく使うコマンド 1 つ（`quick_commands` の要素・O25）。ターミナルのドックの ▶ に並び、押すと
@@ -783,6 +848,26 @@ pub fn persist_agent_server_env(
     write_settings_object(path, root)
 }
 
+/// `agent_servers.<agent_id>` を丸ごと書き換える（`None` = 消す＝レジストリと組み込みの既定の起動に
+/// 戻す・O16 の起動の上書きの画面）。**user ファイル自身の値だけ**を読んで書く。
+pub fn persist_agent_server(
+    path: &Path,
+    agent_id: &str,
+    setting: Option<&AgentServerSetting>,
+) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    let servers = object_entry(&mut root, "agent_servers");
+    match setting {
+        Some(setting) => {
+            servers.insert(agent_id.to_string(), setting.to_json());
+        }
+        None => {
+            servers.remove(agent_id);
+        }
+    }
+    write_settings_object(path, root)
+}
+
 /// アカウント切替（O14）に使う環境変数 = そのエージェントの設定の置き場を変える物。対応していない
 /// エージェントは `None`。資格情報そのものは necoder が読みも写しもしない（置き場を指すだけ）。
 pub fn account_env_var(agent_id: &str) -> Option<&'static str> {
@@ -1220,6 +1305,50 @@ mod tests {
     /// 以前は空オブジェクトから作り直して 1 キーだけで上書きしていた（利用者の設定が全部消える）。
     /// 今は**どの書き手も書かずに** `UnreadableSettings` を返し、ファイルは 1 バイトも変わらない。
 
+    /// O16: 起動の上書きの欄は 1 行 1 つ。誤りは行番号つきで断り、書くと読める形になる。
+    #[test]
+    fn launch_override_fields_round_trip() {
+        let env = parse_env_lines("# メモ\nCODEX_HOME = /opt/codex\n\nRUST_LOG=debug=1\n")
+            .expect("読める");
+        assert_eq!(env["CODEX_HOME"], "/opt/codex");
+        assert_eq!(env["RUST_LOG"], "debug=1", "値の中の = はそのまま");
+        assert_eq!(env_lines(&env), "CODEX_HOME=/opt/codex\nRUST_LOG=debug=1");
+        assert!(parse_env_lines("NO_EQUALS")
+            .unwrap_err()
+            .starts_with("1 行目"));
+        assert!(parse_env_lines("ok=1\n9BAD=x")
+            .unwrap_err()
+            .starts_with("2 行目"));
+        assert_eq!(
+            parse_arg_lines("  --acp \n\n--model gpt 5\n"),
+            vec!["--acp".to_string(), "--model gpt 5".to_string()]
+        );
+
+        let dir = std::env::temp_dir().join(format!("necoder-agent-server-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{ "theme": "necoder-light" }"#).expect("seed");
+        let custom = AgentServerSetting::Custom {
+            command: "codex-acp".into(),
+            args: vec!["--verbose".into()],
+            env,
+        };
+        persist_agent_server(&path, "codex", Some(&custom)).expect("書ける");
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            &std::fs::read_to_string(&path).expect("read"),
+        ])
+        .expect("マージできる");
+        assert_eq!(store.settings().agent_servers.get("codex"), Some(&custom));
+        persist_agent_server(&path, "codex", None).expect("消せる");
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("JSON");
+        assert!(written["agent_servers"].get("codex").is_none());
+        assert_eq!(written["theme"], "necoder-light");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// O16: 権限の既定を選ぶと、全エージェントのピルの記憶（mode）だけを消す。1 つだけ忘れることもできる。
     #[test]
     fn permission_default_clears_remembered_modes_only() {
@@ -1281,7 +1410,7 @@ mod tests {
             "[\"theme\"]\n",
         ];
         type Writer = fn(&Path) -> Result<()>;
-        let writers: [(&str, Writer); 6] = [
+        let writers: [(&str, Writer); 7] = [
             ("persist_user_value", |path| {
                 persist_user_value(path, "submit_on_enter", Value::Bool(true))
             }),
@@ -1299,6 +1428,9 @@ mod tests {
             }),
             ("persist_permission_default", |path| {
                 persist_permission_default(path, "bypass")
+            }),
+            ("persist_agent_server", |path| {
+                persist_agent_server(path, "codex", None)
             }),
         ];
         for original in broken {
