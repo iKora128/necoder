@@ -1220,6 +1220,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        std::fs::create_dir_all(&base).unwrap();
+        // 最初から正規化した綴りで扱う。macOS の temp_dir は /var → /private/var のリンクで、
+        // 外で消した後の worktree はもう正規化できず元の綴りのまま比べることになる（レールは正規化済み）。
+        let base = paths::canonicalize(&base).unwrap();
         let main = base.join("repo");
         let external = base.join("orca-made");
         std::fs::create_dir_all(&main).unwrap();
