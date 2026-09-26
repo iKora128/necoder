@@ -910,6 +910,7 @@ tabs:
   ctx_close: タブを閉じる
   ctx_close_others: 他のタブを閉じる
   ctx_close_right: 右側のタブを閉じる
+  split_needs_file: ファイルのタブだけ右に並べられます
   ctx_terminal_rename: 名前を変更…
   ctx_terminal_to_dock: 下ドックへ移す
 image:
