@@ -1627,6 +1627,11 @@ impl Workspace {
             })
             .min_h_0()
             .min_w_0()
+            // Finder から落とす（O29）: Markdown に画像 = リンクを入れる・それ以外 = タブで開く。
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                let position = Some(window.mouse_position());
+                this.drop_paths_on_editor(paths.paths().to_vec(), None, position, window, cx)
+            }))
             .child(self.render_main_tabstrip(cx))
             .child(
                 div()
@@ -1659,12 +1664,18 @@ impl Workspace {
         editor: &Entity<EditorView>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let drop_target = editor.clone();
         div()
             .flex_1()
             .flex()
             .flex_col()
             .min_h_0()
             .min_w_0()
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                let position = Some(window.mouse_position());
+                let target = Some(drop_target.clone());
+                this.drop_paths_on_editor(paths.paths().to_vec(), target, position, window, cx)
+            }))
             .child(self.render_split_tabstrip(editor, cx))
             .child(self.render_breadcrumb(editor, cx))
             .child(
@@ -1830,6 +1841,10 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .gap(px(10.))
+                // タブが無い時も Finder から落としたファイルを開く（O29）。
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                    this.drop_paths_on_editor(paths.paths().to_vec(), None, None, window, cx)
+                }))
                 .child(
                     div()
                         .text_size(px(15.))

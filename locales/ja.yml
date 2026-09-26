@@ -6,6 +6,7 @@ app:
   name: necoder
 editor:
   table_truncated: "先頭の %{n} 行だけを表にしています（全部は本文で・⌘⇧V で戻る）"
+  drop_remote: "リモートのプロジェクトのエディタには落とせません（エクスプローラのフォルダへ落とすとアップロードします）"
   empty_hint: 起動引数でファイルを渡すと開きます（例 necoder README.md）
   blame_uncommitted: 未コミット
 common:

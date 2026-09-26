@@ -555,6 +555,30 @@ impl EditorView {
         self.after_edit(cx);
     }
 
+    /// 外から落とされた文（Markdown の画像のリンク・O29）を入れる。`position`（窓の座標）が本文の
+    /// 高さなら落とした所へ、本文より上（タブ・パンくず）や位置が無い時はキャレット（選択は置き換え）へ。
+    /// キャレットは入れた文の後ろへ動く（⌘Z 1 回で戻る）。
+    pub fn insert_dropped_text(
+        &mut self,
+        position: Option<Point<Pixels>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let over_text = position.filter(|position| {
+            self.content_origin
+                .is_some_and(|origin| position.y >= origin.y)
+        });
+        let range = match over_text {
+            Some(position) => {
+                let offset = self.offset_for_position(position, window);
+                offset..offset
+            }
+            None => self.primary().range(),
+        };
+        self.replace_ranges(&[range], text, cx);
+    }
+
     /// settings の font_size / tab_size を適用する（live 反映・M10-13）。
     pub fn set_typography(&mut self, font_size: f32, tab_size: usize, cx: &mut Context<Self>) {
         let font_size = font_size.clamp(8.0, 32.0);
@@ -3666,6 +3690,33 @@ mod tests {
             assert!(!editor.rendered_markdown(), ".txt は表にならない");
         });
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn dropped_text_lands_on_the_line_under_the_pointer(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_str("first\nsecond\nthird\n"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, window, cx| {
+            let origin = editor.content_origin.expect("描いた後は本文の原点がある");
+            let row_two = gpui::point(origin.x, origin.y + px(editor.line_height_value() * 1.5));
+            editor.insert_dropped_text(Some(row_two), "![a](a.png)", window, cx);
+            assert_eq!(
+                editor.buffer().text(),
+                "first\n![a](a.png)second\nthird\n",
+                "落とした行の頭"
+            );
+            // 本文より上（タブ・パンくず）ならキャレット（入れた文の後ろ）へ。
+            let above = gpui::point(origin.x, origin.y - px(4.));
+            editor.insert_dropped_text(Some(above), "!", window, cx);
+            assert_eq!(editor.buffer().text(), "first\n![a](a.png)!second\nthird\n");
+        });
     }
 
     #[test]
