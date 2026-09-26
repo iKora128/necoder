@@ -173,10 +173,16 @@ impl Workspace {
             keymap_core::KeymapPlatform::current(),
         ))
         .unwrap_or_default();
+        let agent_settings = settings::get(cx);
         let items = COMMAND_REGISTRY
             .entries()
             .iter()
             .enumerate()
+            // 使わないエージェント（O16）の「新しいスレッド（…）」は出さない。
+            .filter(|(_, entry)| {
+                editor_area::agent_for_thread_action(entry.action_name)
+                    .is_none_or(|agent| settings::agent_label_enabled(&agent_settings, agent))
+            })
             .map(|(id, entry)| {
                 let mut item = PickerItem::new(id, i18n::t!(entry.label_key));
                 if let Some(keystrokes) = keymap_core::key_for_action(&sections, entry.action_name)

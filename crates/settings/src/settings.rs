@@ -102,6 +102,27 @@ fn follow_locale_with(cx: &mut App, apply: impl Fn(Option<&str>) + 'static) {
     .detach();
 }
 
+/// 表示名（`AgentKind::label`）のエージェントを使うか（`disabled_agents`・O16）。カタログに無い
+/// 名前は使う扱い（外す根拠が無い）。
+pub fn agent_label_enabled(settings: &Settings, label: &str) -> bool {
+    acp_client::AgentKind::by_label(label).is_none_or(|agent| settings.agent_enabled(agent.id))
+}
+
+/// `agent_id` を使う / 使わないを入れ替えた後の `disabled_agents`（並びは保つ）。
+pub fn toggled_disabled_agents(disabled: &[String], agent_id: &str) -> Vec<String> {
+    if disabled.iter().any(|id| id == agent_id) {
+        disabled
+            .iter()
+            .filter(|id| *id != agent_id)
+            .cloned()
+            .collect()
+    } else {
+        let mut next = disabled.to_vec();
+        next.push(agent_id.to_string());
+        next
+    }
+}
+
 /// 現在の解決済み設定をクローンで取る。ビューは `cx.observe_global::<SettingsGlobal>` で変化に反応する。
 /// グローバル未設定（init 前）でも安全に既定を返す。
 pub fn get(cx: &App) -> Settings {
@@ -311,8 +332,8 @@ pub enum SettingsViewEvent {
         key: &'static str,
         value: String,
     },
-    /// 設定を保存できなかった（settings.json を読めない等）。文は [`save_failure_message`]。
-    /// トーストは shell が出す。
+    /// 設定を保存できなかった（settings.json を読めない等）・変えられなかった（既定のエージェントは
+    /// 外せない等）。文は [`save_failure_message`] か、断った理由。トーストは shell が出す。
     SaveFailed(SharedString),
     /// 書体を選ぶ（O27）。`key` は `ui_font_family` / `code_font_family` / `terminal_font_family`。
     /// 入っている書体の一覧と絞り込みは shell のピッカーが担う（窓が要る）。
@@ -693,13 +714,14 @@ impl SettingsView {
         self.refresh_skills(cx);
         self.availability_generation = self.availability_generation.wrapping_add(1);
         let generation = self.availability_generation;
+        let disabled = get(cx).disabled_agents.clone();
         cx.spawn(async move |view, cx| {
             let agent_states = cx
                 .background_executor()
                 .spawn(async move {
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let auth_states = acp_client::refresh_agent_auth_states(cwd).await;
+                    let auth_states = acp_client::refresh_agent_auth_states(cwd, &disabled).await;
                     let installed = acp_client::AGENTS
                         .iter()
                         .map(acp_client::AgentKind::cli_installed)
@@ -773,6 +795,46 @@ impl SettingsView {
         );
         self.report_save(result, cx);
         cx.notify();
+    }
+
+    /// エージェントを使う / 使わない（O16）。使うに戻したら、その 1 つもログインを確かめ直す
+    /// （使わない間は確かめていない）。
+    fn toggle_agent_enabled(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        let next = toggled_disabled_agents(&get(cx).disabled_agents, agent_id);
+        let enabling = !next.iter().any(|id| id == agent_id);
+        let result = set_user_value(cx, "disabled_agents", serde_json::json!(next));
+        self.report_save(result, cx);
+        if enabling {
+            self.refresh_availability(cx);
+        }
+        cx.notify();
+    }
+
+    /// カードの右端の「使う」スイッチ。既定のエージェントと Captain は外せない（押すと理由を出す）。
+    fn agent_enabled_switch(
+        &self,
+        index: usize,
+        agent_id: &'static str,
+        enabled: bool,
+        locked: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        self.switch(("agent-enabled", index), enabled)
+            .flex_none()
+            .when(locked, |switch| switch.opacity(0.45).cursor_default())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, _, _window, cx| {
+                    if locked {
+                        cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(i18n::t!(
+                            "settings.agent_disable_locked"
+                        ))));
+                    } else {
+                        view.toggle_agent_enabled(agent_id, cx);
+                    }
+                }),
+            )
+            .into_any_element()
     }
 
     /// Captain の任命 / 解任（FLEET-V2 §5.7）。同じエージェントをもう一度押すと解任（`null`）。
@@ -1885,14 +1947,18 @@ impl SettingsView {
         let mut rows = div().flex().flex_col().gap(px(6.));
         for (index, agent) in acp_client::AGENTS.iter().enumerate() {
             let is_default = agent.label == default_agent;
+            // 使わないエージェント（O16）は選べる所から外す。ログインの確かめも起こさない。
+            let enabled = settings.agent_enabled(agent.id);
             let cli_installed = self.cli_installed.get(index).copied().unwrap_or(false);
             let auth_state = self
                 .auth_states
                 .get(index)
                 .copied()
                 .unwrap_or(acp_client::AgentAuthState::SignedOut);
-            let available = auth_state == acp_client::AgentAuthState::Available;
-            let (dot_color, status_text) = if self.checking_agents {
+            let available = enabled && auth_state == acp_client::AgentAuthState::Available;
+            let (dot_color, status_text) = if !enabled {
+                (theme.fg2, i18n::t!("settings.agent_disabled"))
+            } else if self.checking_agents {
                 (theme.fg2, i18n::t!("settings.agent_checking"))
             } else {
                 match (cli_installed, auth_state) {
@@ -2018,7 +2084,12 @@ impl SettingsView {
                     } else {
                         theme.border
                     })
-                    .child(logo)
+                    .child(
+                        div()
+                            .flex_none()
+                            .when(!enabled, |logo| logo.opacity(0.4))
+                            .child(logo),
+                    )
                     // 名前の列だけが縮む（右のボタン群をカードの外へ押し出さない）。長い名前は折り返す。
                     .child(
                         div()
@@ -2044,7 +2115,7 @@ impl SettingsView {
                     )
                     .child(captain_control)
                     .child(default_control)
-                    .child(if self.checking_agents || available {
+                    .child(if !enabled || self.checking_agents || available {
                         div().into_any_element()
                     } else if cli_installed {
                         self.agent_action_button(
@@ -2062,7 +2133,7 @@ impl SettingsView {
                         div().into_any_element()
                     })
                     .when(
-                        !self.checking_agents && !cli_installed && !available,
+                        enabled && !self.checking_agents && !cli_installed && !available,
                         |row| {
                             row.child(self.agent_action_button(
                                 ("agent-install", index),
@@ -2071,11 +2142,18 @@ impl SettingsView {
                                 cx,
                             ))
                         },
-                    ),
+                    )
+                    .child(self.agent_enabled_switch(
+                        index,
+                        agent.id,
+                        enabled,
+                        enabled && (is_default || is_captain),
+                        cx,
+                    )),
             );
             // アカウント切替（O14・Claude Code / Codex）。ログインは POSIX シェルで流すので Windows は未対応。
-            if let Some(var) =
-                settings_core::account_env_var(agent.id).filter(|_| cli_installed && !cfg!(windows))
+            if let Some(var) = settings_core::account_env_var(agent.id)
+                .filter(|_| enabled && cli_installed && !cfg!(windows))
             {
                 rows = rows.child(self.account_line(index, agent.id, var, settings, cx));
             }
@@ -3589,6 +3667,27 @@ fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O16: エージェントの出し入れ（並びを保つ・戻すと消える）と、表示名からの引き当て。
+    #[test]
+    fn agents_are_turned_off_and_on_by_id() {
+        let off = toggled_disabled_agents(&["grok".to_string()], "kimi");
+        assert_eq!(off, vec!["grok".to_string(), "kimi".to_string()]);
+        assert_eq!(
+            toggled_disabled_agents(&off, "grok"),
+            vec!["kimi".to_string()]
+        );
+        let settings = Settings {
+            disabled_agents: off,
+            ..Settings::default()
+        };
+        assert!(!agent_label_enabled(&settings, "Kimi CLI"));
+        assert!(agent_label_enabled(&settings, "Codex"));
+        assert!(
+            agent_label_enabled(&settings, "Someone Else"),
+            "カタログに無い名前は外さない"
+        );
+    }
 
     #[test]
     fn account_login_quotes_the_folder_for_the_shell() {

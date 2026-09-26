@@ -383,5 +383,78 @@ mod command_registry_tests {
         let mut catalog = acp_client::AGENT_LABELS.to_vec();
         catalog.sort_unstable();
         assert_eq!(labels, catalog);
+        // パレットの行から引くエージェントも同じ並び（使わないエージェントの行を隠す・O16）。
+        let from_palette: Vec<&str> = COMMAND_REGISTRY
+            .entries()
+            .iter()
+            .filter_map(|entry| {
+                crate::workspace::editor_area::agent_for_thread_action(entry.action_name)
+            })
+            .collect();
+        assert_eq!(
+            from_palette,
+            crate::workspace::editor_area::AGENT_THREAD_LABELS.to_vec()
+        );
+    }
+
+    /// O16: 使わないエージェントの「新しいスレッド（…）」はパレットに出さず、keymap.json に残した
+    /// キーから来ても開かない（知らせだけ出す）。
+    #[gpui::test]
+    fn disabled_agents_leave_the_palette(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::*;
+        let root =
+            std::env::temp_dir().join(format!("necoder_disabled_agents_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false,"disabled_agents":["kimi"]}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_command_palette(&CommandPalette, window, cx);
+            let shown = workspace
+                .overlays
+                .picker
+                .as_ref()
+                .expect("パレット")
+                .read(cx)
+                .matched_ids();
+            let index_of = |action: &str| {
+                COMMAND_REGISTRY
+                    .entries()
+                    .iter()
+                    .position(|entry| entry.action_name == action)
+                    .expect("登録済み")
+            };
+            assert!(!shown.contains(&index_of("workspace::NewThreadKimi")));
+            assert!(shown.contains(&index_of("workspace::NewThreadCodex")));
+
+            let before = workspace.agent_panel.read(cx).active_thread();
+            workspace.new_agent_thread_with("Kimi CLI", cx);
+            assert_eq!(
+                workspace.agent_panel.read(cx).active_thread(),
+                before,
+                "開かない"
+            );
+            assert!(
+                workspace
+                    .notifications
+                    .toasts
+                    .iter()
+                    .any(|toast| toast.text.contains("Kimi CLI")),
+                "知らせる"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

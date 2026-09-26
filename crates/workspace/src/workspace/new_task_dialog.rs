@@ -60,6 +60,9 @@ impl Workspace {
         let default_base = integration.and_then(|worktree| project::repository_task_base_on(worktree.host().as_ref(), worktree.root()));
         let mut fanout_choices = acp_client::authenticated_agent_labels();
         if fanout_choices.is_empty() { fanout_choices = acp_client::AGENT_LABELS.to_vec(); }
+        // 使わないエージェント（O16）は並べて比べる候補にも出さない。
+        let agent_settings = settings::get(cx);
+        fanout_choices.retain(|label| settings::agent_label_enabled(&agent_settings, label));
         self.chrome.new_task = Some(NewTaskDialog {
             editor,
             details_open: false,

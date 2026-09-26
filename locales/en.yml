@@ -35,6 +35,7 @@ finder:
   ignored_not_found: Not found in ignored files either
   ignored_detail: ignored
 agent:
+  disabled_agent: "%{agent} is turned off (turn it back on under Settings › AI Agents)"
   pasted_image: Pasted image
   search_placeholder: Search this conversation
   search_count: "%{position}/%{entries} · %{total} matches"
@@ -562,6 +563,8 @@ settings:
   agent_available: Available
   agent_configured: Configured · unverified
   agent_signed_out: Signed out
+  agent_disabled: Off (hidden from choices)
+  agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
   logged_in: Logged in
   login_required: Login required
   login_status_unknown: Check login status in the CLI

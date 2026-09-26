@@ -252,6 +252,11 @@ pub struct Settings {
     /// エージェントの起動方法の上書き（necoder の `AgentKind::id` がキー。例 `"codex"`）。
     /// 空＝レジストリと組み込みカタログに従う（通常はこれ）。詳細は [`AgentServerSetting`]。
     pub agent_servers: BTreeMap<String, AgentServerSetting>,
+    /// 使わないエージェント（`AgentKind::id`・例 `["grok", "kimi"]`・O16）。選択肢（composer の
+    /// エージェント・＋ Task の並べて比べる・パレットのエージェント別の新規スレッド）から外し、
+    /// ログインの確かめ（CLI の status・ACP の試しのセッション）でも起こさない。設定 › エージェントの
+    /// スイッチで出し入れする。既定のエージェントと Captain は外せない（画面が止める）。
+    pub disabled_agents: Vec<String>,
     /// スレッドのセッションでエージェントへ渡す MCP サーバ（サーバ名がキー）。詳細は [`McpServerSetting`]。
     /// 空＝他ツールから発見した分だけが一覧に並び、どれも渡さない（有効化は明示だけ）。
     pub mcp_servers: BTreeMap<String, McpServerSetting>,
@@ -362,6 +367,7 @@ impl Default for Settings {
             default_agent: "Claude Code".to_string(),
             agent_config_defaults: BTreeMap::new(),
             agent_servers: BTreeMap::new(),
+            disabled_agents: Vec::new(),
             mcp_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
             confirm_quit: "running".to_string(),
@@ -427,6 +433,11 @@ pub enum AutoSave {
 }
 
 impl Settings {
+    /// エージェント（`AgentKind::id`）を使うか（`disabled_agents` に無ければ使う・O16）。
+    pub fn agent_enabled(&self, agent_id: &str) -> bool {
+        !self.disabled_agents.iter().any(|id| id == agent_id)
+    }
+
     /// `auto_save` の値。**知らない値は保存しない側に倒す**（綴り違いで、頼んでいない書き込みを
     /// ディスクへ始めない）。
     pub fn auto_save_mode(&self) -> AutoSave {
@@ -490,6 +501,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "terminal_shell_args": [],
   "quick_commands": [],
   "agent_servers": {},
+  "disabled_agents": [],
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
   "agent_idle_stop_minutes": 15,
