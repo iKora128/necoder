@@ -725,6 +725,10 @@ impl Workspace {
             }
         }
 
+        // 作成中の Task（O20）: worktree と準備スクリプトが終わるまで。取り消し・やり直しつき。
+        let repository_key = self.fleet_repository_key();
+        list = list.children(self.render_task_creations(repository_key.as_deref(), cx));
+
         // ③ Task 行（3 段固定・§3.2-3）。
         for (seq, row) in rows.iter().enumerate() {
             let project_index = row.project_index;

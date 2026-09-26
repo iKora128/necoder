@@ -406,6 +406,18 @@ fleet:
   no_running_agent: No agent is running
   task_archived: Task finished (the worktree is still on disk)
   base_synced: "Fast-forwarded %{branch} to upstream (%{count} commits) before creating the Task"
+  creating_untitled: "New Task"
+  creating_waiting: "Waiting for the previous Task…"
+  creating_sync: "Updating the base branch…"
+  creating_worktree: "Creating the worktree…"
+  creating_setup: "Running the setup script…"
+  creating_cancelling: "Cancelling… (whatever this step created is removed when it ends)"
+  creating_failed: "Couldn't create it: %{reason}"
+  creating_retry: "Retry"
+  creating_retry_tip: "Create it again with the same request and details"
+  creating_cancel_tip: "Cancel (anything already created is removed)"
+  creating_dismiss_tip: "Dismiss"
+  creating_discard_failed: "Couldn't remove the cancelled Task's worktree (%{path}): %{error}"
 worktree_delete:
   title: Delete this worktree?
   title_branch: Delete the worktree and its branch?
