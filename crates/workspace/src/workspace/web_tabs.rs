@@ -624,7 +624,7 @@ mod tests {
                     .notifications
                     .toasts
                     .iter()
-                    .any(|(message, ..)| message.as_ref() == i18n::t!("design.capture_failed")),
+                    .any(|toast| toast.text.as_ref() == i18n::t!("design.capture_failed")),
                 "切り抜きが無いことを知らせる"
             );
             stop_watchers(workspace);
@@ -646,7 +646,7 @@ mod tests {
                     .notifications
                     .toasts
                     .iter()
-                    .any(|(message, ..)| message.as_ref() == i18n::t!("design.needs_web_tab")),
+                    .any(|toast| toast.text.as_ref() == i18n::t!("design.needs_web_tab")),
                 "Web タブが無ければ案内する"
             );
         });
@@ -695,7 +695,7 @@ mod tests {
                     .notifications
                     .toasts
                     .iter()
-                    .any(|(message, ..)| message.as_ref() == i18n::t!("design.not_ready")),
+                    .any(|toast| toast.text.as_ref() == i18n::t!("design.not_ready")),
                 "WebView が無ければ始めずに案内する"
             );
             stop_watchers(workspace);

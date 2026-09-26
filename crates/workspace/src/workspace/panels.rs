@@ -174,6 +174,11 @@ impl Workspace {
         url: &str,
         cx: &mut Context<Self>,
     ) {
+        // localhost の開発サーバは necoder の Web タブで開く（それ以外は既定のブラウザ・`open_url` と同じ線引き）。
+        if webview_view::localhost::normalize(url).is_some() {
+            self.open_url(url, cx);
+            return;
+        }
         if let Err(error) = crate::crash::open_url(url) {
             eprintln!("URL を開けない: {error:#}");
             let color = self
