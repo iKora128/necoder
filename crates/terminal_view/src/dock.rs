@@ -1,7 +1,7 @@
 use crate::{TerminalEvent, TerminalView};
 use gpui::{
-    div, prelude::*, px, App, Context, Entity, EventEmitter, IntoElement, MouseButton, Render,
-    StyleRefinement, Window,
+    div, prelude::*, px, App, Context, Entity, EventEmitter, Hsla, IntoElement, MouseButton,
+    Render, SharedString, StyleRefinement, Window,
 };
 use std::path::PathBuf;
 use theme_core::Theme;
@@ -16,7 +16,12 @@ pub struct TerminalLaunch {
 
 /// TerminalDock から shell への通知。
 pub enum TerminalDockEvent {
-    OpenPath { path: String, line: u32 },
+    OpenPath {
+        path: String,
+        line: u32,
+    },
+    /// 端末の URL のクリック（`TerminalEvent::OpenUrl` をそのまま上げる）。
+    OpenUrl(String),
     Dismissed,
 }
 
@@ -28,6 +33,8 @@ pub struct TerminalDock {
     active: usize,
     launch: TerminalLaunch,
     theme: Theme,
+    /// プロジェクト色（各端末の検索欄の枠・キャレット）。
+    accent: Hsla,
     /// テストで PTY を起動しない（[`Self::use_test_terminals`]）。本番のビルドには存在しない。
     #[cfg(feature = "test-support")]
     test_terminals: bool,
@@ -40,6 +47,7 @@ impl TerminalDock {
             detached: Default::default(),
             active: 0,
             launch,
+            accent: theme.fg2,
             theme,
             #[cfg(feature = "test-support")]
             test_terminals: false,
@@ -55,20 +63,42 @@ impl TerminalDock {
         self.test_terminals = true;
     }
 
+    /// 以後作る端末と、今ある端末のプロジェクト色。
+    pub fn with_accent(mut self, accent: Hsla) -> Self {
+        self.accent = accent;
+        self
+    }
+
+    /// プロジェクト色が変わった時（レールの色の変更）。今ある端末にも配る。
+    pub fn set_accent(&mut self, accent: Hsla, cx: &mut Context<Self>) {
+        self.accent = accent;
+        for terminal in self.terminals.iter().chain(self.detached.values()) {
+            terminal.update(cx, |terminal, cx| terminal.set_accent(accent, cx));
+        }
+    }
+
     fn create_terminal(
         &self,
         launch: TerminalLaunch,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
         let theme = self.theme.clone();
+        let accent = self.accent;
         #[cfg(feature = "test-support")]
         if self.test_terminals {
-            let terminal = cx.new(|cx| TerminalView::new_test(theme, cx));
+            let terminal = cx.new(|cx| {
+                let mut terminal = TerminalView::new_test(theme, cx);
+                terminal.accent = accent;
+                terminal
+            });
             cx.subscribe(&terminal, Self::on_terminal_event).detach();
             return terminal;
         }
-        let terminal =
-            cx.new(|cx| TerminalView::new_with_shell(launch.cwd, launch.shell, theme, cx));
+        let terminal = cx.new(|cx| {
+            let mut terminal = TerminalView::new_with_shell(launch.cwd, launch.shell, theme, cx);
+            terminal.accent = accent;
+            terminal
+        });
         cx.subscribe(&terminal, Self::on_terminal_event).detach();
         terminal
     }
@@ -86,6 +116,9 @@ impl TerminalDock {
                     line: *line,
                 });
             }
+            TerminalEvent::OpenUrl(url) => cx.emit(TerminalDockEvent::OpenUrl(url.clone())),
+            // タブの名前（アプリのタイトル）を描き直す。
+            TerminalEvent::TitleChanged => cx.notify(),
         }
     }
 
@@ -166,7 +199,12 @@ impl TerminalDock {
     pub fn ensure_active_test(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
         if self.terminals.is_empty() {
             let theme = self.theme.clone();
-            let terminal = cx.new(|cx| TerminalView::new_test(theme, cx));
+            let accent = self.accent;
+            let terminal = cx.new(|cx| {
+                let mut terminal = TerminalView::new_test(theme, cx);
+                terminal.accent = accent;
+                terminal
+            });
             cx.subscribe(&terminal, Self::on_terminal_event).detach();
             self.terminals.push(terminal);
             self.active = 0;
@@ -300,7 +338,26 @@ impl Render for TerminalDock {
                     .text_color(if is_active { theme.fg0 } else { theme.fg2 })
                     .when(is_active, |element| element.bg(theme.bg1))
                     .hover(|style| style.bg(theme.bg1))
-                    .child(i18n::t!("terminal.tab_title", "n" => index + 1))
+                    .child(
+                        // アプリが付けたタイトル（OSC 0 / 2・`✳ Claude Code` など）。無ければ連番。
+                        div()
+                            .max_w(px(220.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(
+                                self.terminals[index]
+                                    .read(cx)
+                                    .title()
+                                    .map(SharedString::from)
+                                    .unwrap_or_else(|| {
+                                        SharedString::from(i18n::t!(
+                                            "terminal.tab_title",
+                                            "n" => index + 1
+                                        ))
+                                    }),
+                            ),
+                    )
                     .child(
                         div()
                             .id(("term-tab-close", index))

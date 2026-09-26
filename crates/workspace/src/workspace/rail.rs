@@ -106,6 +106,12 @@ impl Workspace {
             self.report_settings_save(result, cx);
         }
         self.persist_project_color(project_index);
+        // 端末の検索欄の枠・キャレットも同じ色（そのプロジェクトの端末だけ）。
+        if let Some(session) = self.project_sessions.sessions.get(project_index) {
+            for dock in [session.terminal_dock.clone(), session.tests_dock.clone()] {
+                dock.update(cx, |dock, cx| dock.set_accent(color, cx));
+            }
+        }
         // アクティブなら全ペイン（タブ + 分割）のキャレット等アクセントへ波及。
         // レール/タブは render 時に slot.color を読むので notify で追従する（明示波及が要るのはキャレットだけ）。
         if project_index == self.project_sessions.active {

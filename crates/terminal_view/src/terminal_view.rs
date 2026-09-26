@@ -8,7 +8,32 @@
 //! - 公開 `alacritty_terminal` API と GPUI API を使った necoder 固有の実装。Zed の terminal code は取り込まない。
 
 mod dock;
+mod element;
+mod keys;
+mod mouse;
+mod pty_guard;
+mod search;
 pub use dock::{TerminalDock, TerminalDockEvent, TerminalLaunch};
+
+/// 端末のアクション。keymap の `Terminal` コンテキストから引く（`keymap_core` の既定の末尾）。
+/// mac は ⌘、Windows / Linux は Ctrl+Shift（⌃ + 文字はシェルへ届ける）。
+pub mod actions {
+    gpui::actions!(
+        terminal,
+        [
+            /// 選択をクリップボードへ。
+            Copy,
+            /// クリップボードを貼り付ける（bracketed paste）。
+            Paste,
+            /// scrollback を含めて全部選択。
+            SelectAll,
+            /// 画面と scrollback を消す（いまの行 = プロンプトは残す）。
+            Clear,
+            /// 端末内を検索。
+            Find,
+        ]
+    );
+}
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,31 +46,98 @@ use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::search::Match;
+use alacritty_terminal::term::{ClipboardType, Config, Osc52, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
 
 use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
 
 use gpui::{
-    div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, CursorStyle,
-    DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Rgba, ScrollWheelEvent, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    div, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, CursorStyle,
+    EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba,
+    ScrollWheelEvent, UTF16Selection, Window,
 };
 use std::ops::Range;
 use theme_core::Theme;
 
-/// ターミナル → ホスト（workspace）への通知（M13: file:line リンク）。
+/// ターミナル → ホスト（workspace）への通知。
 pub enum TerminalEvent {
     /// `path:line` リンクのクリック。パスは端末出力のまま（相対は cwd 基準で解決してもらう）。
     OpenPath { path: String, line: u32 },
+    /// URL のクリック（`http(s)://…`・スキーム無しの `localhost:3000` は `http://` を補ったもの・
+    /// OSC 8 のハイパーリンク）。開き方はホストが決める。
+    OpenUrl(String),
+    /// アプリがタイトル（OSC 0 / 2）を変えた。タブの名前を描き直す。
+    TitleChanged,
 }
 
-/// 表示セルから行を再構成してリンクを検出する。戻りは (表示行, セル列範囲, パス, 行番号)。
-fn detect_links(cells: &[RenderCell]) -> Vec<(i32, Range<usize>, String, u32)> {
+/// 端末の中のリンクの行き先。
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum TerminalLinkTarget {
+    Path { path: String, line: u32 },
+    Url(String),
+}
+
+/// 表示中のリンク 1 つ（グリッド行・セル列範囲・行き先）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct TerminalLink {
+    line: i32,
+    columns: Range<usize>,
+    target: TerminalLinkTarget,
+}
+
+impl TerminalLink {
+    fn contains(&self, point: AlacPoint) -> bool {
+        self.line == point.line.0 && self.columns.contains(&point.column.0)
+    }
+}
+
+/// OSC 8 のハイパーリンクのうち開くもの（http / https だけ。他のスキームは押しても何もしない）。
+fn is_openable_uri(uri: &str) -> bool {
+    uri.starts_with("http://") || uri.starts_with("https://")
+}
+
+/// 表示セルからリンクを拾う。OSC 8（アプリが明示したハイパーリンク）が先で、文字から拾う
+/// URL と `path:line` は OSC 8 と重ならない所だけ。
+fn detect_links(cells: &[RenderCell], hyperlinks: &[String]) -> Vec<TerminalLink> {
+    let mut links: Vec<TerminalLink> = Vec::new();
+    for cell in cells {
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let Some(uri) = cell
+            .hyperlink
+            .and_then(|index| hyperlinks.get(index as usize))
+            .filter(|uri| is_openable_uri(uri))
+        else {
+            continue;
+        };
+        let column = cell.point.column.0;
+        let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+            2
+        } else {
+            1
+        };
+        match links.last_mut() {
+            Some(link)
+                if link.line == cell.point.line.0
+                    && link.columns.end == column
+                    && link.target == TerminalLinkTarget::Url(uri.clone()) =>
+            {
+                link.columns.end = column + width;
+            }
+            _ => links.push(TerminalLink {
+                line: cell.point.line.0,
+                columns: column..column + width,
+                target: TerminalLinkTarget::Url(uri.clone()),
+            }),
+        }
+    }
+    let explicit = links.len();
+
     let mut rows: std::collections::BTreeMap<i32, Vec<(usize, char)>> =
         std::collections::BTreeMap::new();
     for cell in cells {
@@ -54,22 +146,25 @@ fn detect_links(cells: &[RenderCell]) -> Vec<(i32, Range<usize>, String, u32)> {
         }
         rows.entry(cell.point.line.0)
             .or_default()
-            .push((cell.point.column.0 as usize, cell.character));
+            .push((cell.point.column.0, cell.character));
     }
-    let mut links = Vec::new();
     for (line, row) in rows {
         let text: String = row.iter().map(|(_, character)| *character).collect();
         // 検出は `ui::links`（agent_panel の transcript と共有）。ターミナルは cargo/grep の
-        // 出力が相手なので**行番号つきだけ**をリンクにする（実在確認をしないぶん厳しくする）。
+        // 出力が相手なので、パスは**行番号つきだけ**をリンクにする（実在確認をしないぶん厳しくする）。
         let offsets: Vec<usize> = text.char_indices().map(|(offset, _)| offset).collect();
         for link in ui::links::find_links(&text) {
-            let ui::links::LinkTarget::Path {
-                path,
-                line: Some(line_number),
-                ..
-            } = link.target
-            else {
-                continue;
+            let target = match link.target {
+                ui::links::LinkTarget::Path {
+                    path,
+                    line: Some(line_number),
+                    ..
+                } => TerminalLinkTarget::Path {
+                    path,
+                    line: line_number,
+                },
+                ui::links::LinkTarget::Url(url) => TerminalLinkTarget::Url(url),
+                ui::links::LinkTarget::Path { line: None, .. } => continue,
             };
             // byte 範囲 → セル列（全角が混ざる行でもずれないよう char 添字を経由する）。
             let Ok(first) = offsets.binary_search(&link.range.start) else {
@@ -84,7 +179,19 @@ fn detect_links(cells: &[RenderCell]) -> Vec<(i32, Range<usize>, String, u32)> {
             else {
                 continue;
             };
-            links.push((line, *start_column..*end_column + 1, path, line_number));
+            let columns = *start_column..*end_column + 1;
+            let overlaps_explicit = links[..explicit].iter().any(|explicit| {
+                explicit.line == line
+                    && explicit.columns.start < columns.end
+                    && columns.start < explicit.columns.end
+            });
+            if !overlaps_explicit {
+                links.push(TerminalLink {
+                    line,
+                    columns,
+                    target,
+                });
+            }
         }
     }
     links
@@ -124,6 +231,44 @@ fn term_probe(stage: &str, detail: impl std::fmt::Display) {
     }
 }
 
+/// OSC 52 の書き込みをクリップボードへ。選択（primary）は Linux にだけある。
+fn store_clipboard(clipboard: ClipboardType, text: String, cx: &mut Context<TerminalView>) {
+    let item = ClipboardItem::new_string(text);
+    match clipboard {
+        ClipboardType::Clipboard => cx.write_to_clipboard(item),
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        ClipboardType::Selection => cx.write_to_primary(item),
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        ClipboardType::Selection => term_probe("osc52", "primary は無いので捨てた"),
+    }
+}
+
+/// タブに出すタイトル: 1 行目だけ・制御文字を落とす・長すぎるものは切る。
+fn sanitize_title(title: &str) -> String {
+    const MAX_CHARACTERS: usize = 80;
+    title
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_CHARACTERS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// 端末の設定。scrollback 1 万行・kitty keyboard を受け付ける・OSC 52 は書き込み（コピー）だけ
+/// 許す（読み出しはクリップボードの中身をアプリへ渡すことになるので既定で拒否）。
+fn terminal_config() -> Config {
+    Config {
+        scrolling_history: 10_000,
+        kitty_keyboard: true,
+        osc52: Osc52::OnlyCopy,
+        ..Config::default()
+    }
+}
+
 /// alacritty の背景スレッド（EventLoop）から GPUI 前景へイベントを渡す橋渡し。
 #[derive(Clone)]
 struct Listener(UnboundedSender<AlacEvent>);
@@ -143,6 +288,10 @@ struct RenderCell {
     fg: AnsiColor,
     bg: AnsiColor,
     flags: Flags,
+    /// 下線の色（SGR 58）。None は文字色。
+    underline_color: Option<AnsiColor>,
+    /// OSC 8 のハイパーリンク（`sync` で集めた URI の一覧の添字）。
+    hyperlink: Option<u32>,
 }
 
 /// term をロックして取り出した表示スナップショット（前景でロック無しに読める）。
@@ -150,11 +299,27 @@ struct RenderCell {
 struct TerminalContent {
     cells: Vec<RenderCell>,
     cursor: Option<AlacPoint>,
+    /// カーソルの形（DECSCUSR）。Hidden は描かない（アプリが隠した）。
+    cursor_shape: CursorShape,
+    /// 表示中のリンク（OSC 8・URL・`path:line`）。描画の下線とクリックの判定に使う。
+    links: Vec<TerminalLink>,
     /// マウス選択の範囲（グリッド座標）。ハイライト描画と ⌘C コピーに使う。
     selection: Option<SelectionRange>,
     /// スクロールバックの表示オフセット（0 = 最下段）。セルはグリッド座標のまま持つので、
     /// 描画時に `line + display_offset` で表示行へ写す。
     display_offset: usize,
+    /// 検索（⌘F）の一致のうち表示範囲にあるもの。
+    search_matches: Vec<Match>,
+    /// 検索でいま見ている一致。
+    current_match: Option<Match>,
+}
+
+/// 描画フレームのグリッドの座標（左上・セルの寸法）。マウスの位置 → セルの変換に使う。
+#[derive(Clone, Copy)]
+struct GridFrame {
+    origin: gpui::Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
 }
 
 /// ドラッグ選択の最新スナップショット（ポインタ位置 + そのフレームの描画座標）。
@@ -173,15 +338,37 @@ pub struct TerminalView {
     notifier: Option<Notifier>,
     content: TerminalContent,
     size: TerminalSize,
-    /// アプリケーションカーソルモード（矢印キーのエスケープが変わる）。
-    app_cursor: bool,
+    /// 端末のモード（APP_CURSOR・kitty keyboard のフラグ・マウス報告など）。sync のたびに写す。
+    mode: TermMode,
+    /// セルの寸法（px）。PTY の WindowSize に載せる（描画のたびに実寸で更新）。
+    cell_pixels: (u16, u16),
     /// OS に変換中の範囲を返すための前編集。PTY には確定するまで送らない。
     marked_text: String,
     marked_selection: Range<usize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     written_input: std::cell::RefCell<Vec<u8>>,
+    /// 端末内検索（⌘F）。閉じていれば None。
+    search: Option<search::TerminalSearch>,
+    /// プロジェクト色（検索欄の枠とキャレット＝エディタの ⌘F バーと同じ位置）。
+    accent: Hsla,
     /// マウス左ボタンを押してドラッグ選択中か（move で範囲を延ばす判定）。
     selecting: bool,
+    /// ポインタが載っているリンク（`content.links` の添字）。下線を濃くし、指の形にする。
+    hovered_link: Option<usize>,
+    /// 右クリックメニューを出している位置（窓の座標）。閉じていれば None。
+    context_menu: Option<gpui::Point<Pixels>>,
+    /// 左ボタンを押したセル（グリッド座標）。離した時に同じセルならクリック＝リンクを開く。
+    mouse_down_cell: Option<AlacPoint>,
+    /// アプリへ押したと報告したボタン（離した時に同じボタンで報告する）。
+    reported_button: Option<mouse::ReportButton>,
+    /// 最後に報告したセル（表示座標）。同じセルの中の移動は報告しない。
+    last_reported_cell: Option<(usize, usize)>,
+    /// 直近の描画フレームのグリッドの座標（ホイールの報告で位置 → セルに使う）。
+    grid_frame: Option<GridFrame>,
+    /// 最後にアプリへ伝えたフォーカス（FOCUS_IN_OUT・同じ状態を二度送らない）。
+    reported_focus: Option<bool>,
+    /// フォーカスと窓のアクティブの出入りの購読（最初の描画で張る）。
+    focus_subscriptions: Vec<gpui::Subscription>,
     /// ドラッグ選択中の最新ポインタ位置とフレーム座標。ビュー外へ引っ張った時の
     /// 自動スクロール tick が選択の引き直しに使う（up で消える）。
     drag_frame: Option<DragFrame>,
@@ -190,6 +377,10 @@ pub struct TerminalView {
     /// ホイールの 1 行未満の端数持ち越し（トラックパッドのピクセル増分を行単位に畳む）。
     scroll_remainder: f32,
     exited: bool,
+    /// アプリが付けたタイトル（OSC 0 / 2）。
+    title: Option<String>,
+    /// ベルが鳴った（次の描画で、窓が後ろにあれば知らせる）。
+    bell_pending: bool,
     theme: Theme,
     focus_handle: FocusHandle,
     // pump タスク（PTY 出力で起きる）。drop で停止。IO スレッド自体は spawn 後 detach し、
@@ -216,11 +407,11 @@ impl TerminalView {
             columns: 80,
             lines: 24,
         };
-        let config = Config {
-            scrolling_history: 10_000,
-            ..Config::default()
-        };
-        let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
+        let term = Arc::new(FairMutex::new(Term::new(
+            terminal_config(),
+            &size,
+            listener.clone(),
+        )));
 
         let mut env = HashMap::new();
         if shell.is_none() {
@@ -250,7 +441,14 @@ impl TerminalView {
         let mut notifier = None;
         let mut pump = None;
         match tty::new(&options, window_size, 0) {
-            Ok(pty) => match EventLoop::new(term.clone(), listener, pty, true, false) {
+            // kitty keyboard のスタック溢れで PTY スレッドが落ちるのを防ぐ（`pty_guard`）。
+            Ok(pty) => match EventLoop::new(
+                term.clone(),
+                listener,
+                pty_guard::GuardedPty::new(pty),
+                true,
+                false,
+            ) {
                 Ok(event_loop) => {
                     notifier = Some(Notifier(event_loop.channel()));
                     // IO スレッドを起動して detach（JoinHandle は保持しない。Drop の Shutdown で畳む）。
@@ -283,16 +481,29 @@ impl TerminalView {
             notifier,
             content: TerminalContent::default(),
             size,
-            app_cursor: false,
+            mode: TermMode::default(),
+            cell_pixels: (8, 16),
             marked_text: String::new(),
             marked_selection: 0..0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             written_input: std::cell::RefCell::new(Vec::new()),
+            search: None,
+            accent: theme.fg2,
             selecting: false,
+            hovered_link: None,
+            context_menu: None,
+            mouse_down_cell: None,
+            reported_button: None,
+            last_reported_cell: None,
+            grid_frame: None,
+            reported_focus: None,
+            focus_subscriptions: Vec::new(),
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited,
+            title: None,
+            bell_pending: false,
             theme,
             focus_handle: cx.focus_handle(),
             _pump: pump,
@@ -312,26 +523,39 @@ impl TerminalView {
             columns: 80,
             lines: 24,
         };
-        let config = Config {
-            scrolling_history: 10_000,
-            ..Config::default()
-        };
-        let term = Arc::new(FairMutex::new(Term::new(config, &size, listener)));
+        let term = Arc::new(FairMutex::new(Term::new(
+            terminal_config(),
+            &size,
+            listener,
+        )));
         Self {
             term,
             notifier: None,
             content: TerminalContent::default(),
             size,
-            app_cursor: false,
+            mode: TermMode::default(),
+            cell_pixels: (8, 16),
             marked_text: String::new(),
             marked_selection: 0..0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             written_input: std::cell::RefCell::new(Vec::new()),
+            search: None,
+            accent: theme.fg2,
             selecting: false,
+            hovered_link: None,
+            context_menu: None,
+            mouse_down_cell: None,
+            reported_button: None,
+            last_reported_cell: None,
+            grid_frame: None,
+            reported_focus: None,
+            focus_subscriptions: Vec::new(),
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited: false,
+            title: None,
+            bell_pending: false,
             theme,
             focus_handle: cx.focus_handle(),
             _pump: None,
@@ -348,17 +572,178 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// プロジェクト色（検索欄の枠・キャレット）。
+    pub fn set_accent(&mut self, accent: Hsla, cx: &mut Context<Self>) {
+        self.accent = accent;
+        cx.notify();
+    }
+
+    /// 端末内検索のバーが開いているか。
+    pub fn search_open(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// テスト用: PTY へ書いたバイト列（PTY を起動しない端末でも記録する）。
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn debug_written_input(&self) -> Vec<u8> {
+        self.written_input.borrow().clone()
+    }
+
+    /// 開発用（offscreen 検証・`NECODER_TERMINAL_PROBE`）: 端末への 1 コマンド。
+    /// `type:<文>` = 文をタイプして ⏎ / `select:<行>,<列>-<行>,<列>` = 表示座標で選択 /
+    /// `find:<語>` = ⌘F を開いて語を入れる / `key:<キー>` = キーを 1 つ打つ（`shift-enter`）/
+    /// `menu:<x>,<y>` = 右クリックメニューを出す。
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn debug_probe(
+        &mut self,
+        name: &str,
+        argument: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match name {
+            "type" => {
+                let mut bytes = argument.as_bytes().to_vec();
+                bytes.push(b'\r');
+                self.write_bytes(bytes);
+            }
+            "select" => {
+                let parse = |point: &str| {
+                    let (row, column) = point.split_once(',')?;
+                    Some((
+                        row.trim().parse::<i32>().ok()?,
+                        column.trim().parse::<usize>().ok()?,
+                    ))
+                };
+                let Some(((start_row, start_column), (end_row, end_column))) = argument
+                    .split_once('-')
+                    .and_then(|(start, end)| Some((parse(start)?, parse(end)?)))
+                else {
+                    eprintln!("TERMINAL_PROBE: select の形が不正: {argument:?}");
+                    return;
+                };
+                let mut term = self.term.lock();
+                let offset = term.grid().display_offset() as i32;
+                let start = AlacPoint::new(Line(start_row - offset), Column(start_column));
+                let end = AlacPoint::new(Line(end_row - offset), Column(end_column));
+                let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+                selection.update(end, Side::Right);
+                term.selection = Some(selection);
+                drop(term);
+                self.sync(cx);
+            }
+            "find" => {
+                self.find(&actions::Find, window, cx);
+                if let Some(search) = self.search.as_mut() {
+                    search.query = argument.to_string();
+                }
+                self.refresh_search(true, cx);
+            }
+            // キーを 1 つ打つ（`shift-enter` など・実際の打鍵と同じ符号化を通す）。
+            "key" => match gpui::Keystroke::parse(argument) {
+                Ok(keystroke) => {
+                    if let Some(bytes) = keys::keystroke_to_bytes(&keystroke, self.mode, false) {
+                        self.write_bytes(bytes);
+                    }
+                }
+                Err(error) => eprintln!("TERMINAL_PROBE: key が不正: {error}"),
+            },
+            // 右クリックメニューを窓の座標 (x, y) に出す。
+            "menu" => {
+                let Some((x, y)) = argument.split_once(',').and_then(|(x, y)| {
+                    Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+                }) else {
+                    eprintln!("TERMINAL_PROBE: menu の形が不正: {argument:?}");
+                    return;
+                };
+                self.context_menu = Some(point(px(x), px(y)));
+                cx.notify();
+            }
+            other => eprintln!("TERMINAL_PROBE: 未知のコマンド {other}"),
+        }
+    }
+
     /// alacritty イベントを処理する（前景・pump から）。Wakeup で再スナップショット。
     fn on_alac_event(&mut self, event: AlacEvent, cx: &mut Context<Self>) {
         match event {
-            AlacEvent::Wakeup => self.sync(cx),
+            AlacEvent::Wakeup => {
+                self.sync(cx);
+                // 検索中は出力が増えた分を数え直す（間引いて）。
+                self.schedule_search_refresh(cx);
+            }
             AlacEvent::Exit => {
                 self.exited = true;
                 cx.notify();
             }
             // アプリがPTYへ書き戻しを要求（端末問い合わせ応答等）。
             AlacEvent::PtyWrite(text) => self.write_bytes(text.into_bytes()),
-            _ => {}
+            // OSC 52 の書き込み（`tmux` / `nvim` / SSH 先のアプリのコピー）。
+            AlacEvent::ClipboardStore(clipboard, text) => store_clipboard(clipboard, text, cx),
+            // OSC 52 の読み出しはクリップボードの中身をアプリへ渡すことになるので応えない
+            // （Config.osc52 = OnlyCopy なので alacritty も普通は出さない）。
+            AlacEvent::ClipboardLoad(..) => term_probe("osc52", "読み出しの要求を断った"),
+            AlacEvent::Title(title) => self.set_title(Some(title), cx),
+            AlacEvent::ResetTitle => self.set_title(None, cx),
+            // ベル: 窓が後ろにある時だけ知らせる（描画の時に窓へ頼む）。
+            AlacEvent::Bell => {
+                self.bell_pending = true;
+                cx.notify();
+            }
+            // OSC 4 / 10 / 11 / 12 の色の問い合わせ（TUI が背景の明暗を見て配色を決める）。
+            AlacEvent::ColorRequest(index, format) => {
+                let rgb = self.color_for_request(index);
+                self.write_bytes(format(rgb).into_bytes());
+            }
+            // `CSI 14 t`（文字領域の px）の問い合わせ。
+            AlacEvent::TextAreaSizeRequest(format) => {
+                let size = self.window_size();
+                self.write_bytes(format(size).into_bytes());
+            }
+            AlacEvent::MouseCursorDirty
+            | AlacEvent::CursorBlinkingChange
+            | AlacEvent::ChildExit(_) => {}
+        }
+    }
+
+    /// アプリが付けたタイトル（OSC 0 / 2）。無ければ None（タブは「ターミナル N」）。
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    fn set_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        let title = title
+            .map(|title| sanitize_title(&title))
+            .filter(|title| !title.is_empty());
+        if self.title != title {
+            self.title = title;
+            cx.emit(TerminalEvent::TitleChanged);
+            cx.notify();
+        }
+    }
+
+    /// 色の問い合わせへの答え。アプリが OSC で上書きした色があればそれ、無ければ描画と同じ色
+    /// （0〜255 = パレット・256 = 文字・257 = 背景・258 = カーソル）。
+    fn color_for_request(&self, index: usize) -> Rgb {
+        let overridden = (index < alacritty_terminal::term::color::COUNT)
+            .then(|| self.term.lock().colors()[index])
+            .flatten();
+        if let Some(rgb) = overridden {
+            return rgb;
+        }
+        let color = match index {
+            0..=255 => indexed_to_hsla(index as u8),
+            257 => self.theme.bg1,
+            258 => self.theme.fg1,
+            _ => self.theme.fg0,
+        };
+        let rgba = Rgba::from(color);
+        let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+        Rgb {
+            r: channel(rgba.r),
+            g: channel(rgba.g),
+            b: channel(rgba.b),
         }
     }
 
@@ -367,29 +752,69 @@ impl TerminalView {
         let term = self.term.lock();
         let content = term.renderable_content();
         let display_offset = content.display_offset;
-        let cells = content
+        let cursor_shape = content.cursor.shape;
+        let mut hyperlinks: Vec<String> = Vec::new();
+        let cells: Vec<RenderCell> = content
             .display_iter
-            .map(|indexed| RenderCell {
-                point: indexed.point,
-                character: indexed.cell.c,
-                fg: indexed.cell.fg,
-                bg: indexed.cell.bg,
-                flags: indexed.cell.flags,
+            .map(|indexed| {
+                // 同じ URI は 1 つにまとめて添字で指す（リンクの区切りの判定にも使う）。
+                let hyperlink = indexed.cell.hyperlink().map(|link| {
+                    let uri = link.uri();
+                    match hyperlinks.iter().rposition(|known| known == uri) {
+                        Some(index) => index as u32,
+                        None => {
+                            hyperlinks.push(uri.to_string());
+                            (hyperlinks.len() - 1) as u32
+                        }
+                    }
+                });
+                RenderCell {
+                    point: indexed.point,
+                    character: indexed.cell.c,
+                    fg: indexed.cell.fg,
+                    bg: indexed.cell.bg,
+                    flags: indexed.cell.flags,
+                    underline_color: indexed.cell.underline_color(),
+                    hyperlink,
+                }
             })
             .collect();
         let cursor = Some(content.cursor.point);
-        self.app_cursor = term.mode().contains(TermMode::APP_CURSOR);
+        self.mode = *term.mode();
         // 選択範囲もスナップショットに含める（前景でロック無しにハイライトを描くため）。
         let selection = term
             .selection
             .as_ref()
             .and_then(|selection| selection.to_range(&term));
+        // 検索の一致は表示範囲だけ探し直す（出力で行が流れても強調の位置がずれない）。
+        let (search_matches, current_match) = match self.search.as_mut() {
+            Some(search) => (
+                search
+                    .regex
+                    .as_mut()
+                    .map(|regex| search::find_visible(&term, regex))
+                    .unwrap_or_default(),
+                search
+                    .current
+                    .and_then(|index| search.matches.get(index).cloned()),
+            ),
+            None => (Vec::new(), None),
+        };
         drop(term);
+        let links = detect_links(&cells, &hyperlinks);
+        // 描き直しでリンクの並びが変わったら、ホバー中の添字は捨てる（次の move で拾い直す）。
+        if links != self.content.links {
+            self.hovered_link = None;
+        }
         self.content = TerminalContent {
             cells,
             cursor,
+            cursor_shape,
+            links,
             selection,
             display_offset,
+            search_matches,
+            current_match,
         };
         term_probe(
             "sync",
@@ -408,7 +833,7 @@ impl TerminalView {
 
     /// PTY へ入力バイトを送る。
     fn write_bytes(&self, bytes: Vec<u8>) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.written_input.borrow_mut().extend_from_slice(&bytes);
         if let Some(notifier) = &self.notifier {
             notifier.notify(bytes);
@@ -424,27 +849,41 @@ impl TerminalView {
         }
     }
 
-    /// 行列サイズが変わったら term と PTY をリサイズする（prepaint から）。
-    fn resize(&mut self, columns: usize, lines: usize) {
+    /// 行列サイズ（とセルの寸法）が変わったら term と PTY をリサイズする（prepaint から）。
+    fn resize(&mut self, columns: usize, lines: usize, cell_width: Pixels, line_height: Pixels) {
         let new_size = TerminalSize {
             columns: columns.max(2),
             lines: lines.max(1),
         };
-        if new_size == self.size {
+        // PTY へ伝えるセルの寸法（px・`CSI 14 t` の応答や画像を出すアプリが使う）。
+        let cell_pixels = (
+            f32::from(cell_width).round().max(1.0) as u16,
+            f32::from(line_height).round().max(1.0) as u16,
+        );
+        if new_size == self.size && cell_pixels == self.cell_pixels {
             return;
         }
+        let size_changed = new_size != self.size;
         self.size = new_size;
-        self.term.lock().resize(new_size);
+        self.cell_pixels = cell_pixels;
+        if size_changed {
+            self.term.lock().resize(new_size);
+        }
         if let Some(notifier) = &self.notifier {
-            let window_size = WindowSize {
-                num_lines: new_size.lines as u16,
-                num_cols: new_size.columns as u16,
-                cell_width: 8,
-                cell_height: 16,
-            };
+            let window_size = self.window_size();
             if let Err(error) = notifier.0.send(Msg::Resize(window_size)) {
                 eprintln!("ターミナル: リサイズ送信に失敗: {error}");
             }
+        }
+    }
+
+    /// PTY へ伝える大きさ（行列 + セルの px）。
+    fn window_size(&self) -> WindowSize {
+        WindowSize {
+            num_lines: self.size.lines as u16,
+            num_cols: self.size.columns as u16,
+            cell_width: self.cell_pixels.0,
+            cell_height: self.cell_pixels.1,
         }
     }
 
@@ -454,24 +893,16 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        let keystroke = &event.keystroke;
-        // ⌘C = 選択コピー / ⌘V = 貼り付け。macOS 系のみ（⌃C は SIGINT のまま）。
-        if keystroke.modifiers.platform && !keystroke.modifiers.control {
-            match keystroke.key.as_str() {
-                "c" => {
-                    self.copy_selection(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                "v" => {
-                    self.paste_from_clipboard(cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                _ => {}
+        // 右クリックメニューはキーを押したら閉じる（Esc は閉じるだけで端末へ送らない）。
+        if self.context_menu.take().is_some() {
+            cx.notify();
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                return;
             }
         }
-        if let Some(bytes) = keystroke_to_bytes(&event.keystroke, self.app_cursor) {
+        // ⌘C / ⌘V / ⌘A / ⌘K / ⌘F は keymap の `Terminal` コンテキスト（actions）が先に受ける。
+        if let Some(bytes) = keys::keystroke_to_bytes(&event.keystroke, self.mode, event.is_held) {
             // タイプしたら最下段へ復帰（スクロールバック閲覧中の入力は現在行に届く＝端末の常識）。
             self.scroll_to_bottom(cx);
             self.write_bytes(bytes);
@@ -495,6 +926,21 @@ impl TerminalView {
         if lines == 0 {
             return;
         }
+        // アプリがマウスの報告を求めていれば、ホイールも報告する（1 行 = 1 回）。
+        if mouse::wants_report(self.mode, event.modifiers) {
+            if let Some(frame) = self.grid_frame {
+                let cell = self.viewport_point(event.position, frame);
+                let button = if lines > 0 {
+                    mouse::ReportButton::WheelUp
+                } else {
+                    mouse::ReportButton::WheelDown
+                };
+                for _ in 0..lines.unsigned_abs() {
+                    self.report_mouse(button, mouse::ReportAction::Press, cell, event.modifiers);
+                }
+            }
+            return;
+        }
         let mut term = self.term.lock();
         let mode = *term.mode();
         if mode.contains(TermMode::ALT_SCREEN) {
@@ -502,7 +948,8 @@ impl TerminalView {
             // 代替画面にスクロールバックは無い。ALTERNATE_SCROLL が立っていれば
             // 上=↑ / 下=↓ を行数ぶん送ってアプリ側（less/vim）にスクロールさせる。
             if mode.contains(TermMode::ALTERNATE_SCROLL) {
-                let code: &[u8] = match (lines > 0, self.app_cursor) {
+                let app_cursor = mode.contains(TermMode::APP_CURSOR);
+                let code: &[u8] = match (lines > 0, app_cursor) {
                     (true, false) => b"\x1b[A",
                     (true, true) => b"\x1bOA",
                     (false, false) => b"\x1b[B",
@@ -536,24 +983,170 @@ impl TerminalView {
         }
     }
 
-    /// クリップボードを PTY へ貼り付ける。bracketed paste モードなら囲み列を付ける
-    /// （zsh 等が貼り付けを 1 塊として扱えるように）。
-    fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
+    /// 文字列を貼り付けとして PTY へ送る（⌘V・ファイルのドロップ・右クリックの貼り付け）。
+    fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
         }
         self.scroll_to_bottom(cx);
-        if self.term.lock().mode().contains(TermMode::BRACKETED_PASTE) {
-            let mut bytes = b"\x1b[200~".to_vec();
-            bytes.extend_from_slice(text.as_bytes());
-            bytes.extend_from_slice(b"\x1b[201~");
-            self.write_bytes(bytes);
-        } else {
-            self.write_bytes(text.into_bytes());
+        let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+        self.write_bytes(paste_bytes(text, bracketed));
+    }
+
+    // ── keymap の `Terminal` コンテキストのアクション ──
+
+    fn copy(&mut self, _: &actions::Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selection(cx);
+    }
+
+    fn paste(&mut self, _: &actions::Paste, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        // 検索欄にフォーカスがある時は語へ入れる（1 行目だけ）。
+        if let Some(search) = self.search.as_mut() {
+            if search.focus.is_focused(window) {
+                search
+                    .query
+                    .push_str(text.lines().next().unwrap_or_default());
+                self.refresh_search(true, cx);
+                return;
+            }
         }
+        self.paste_text(&text, cx);
+    }
+
+    fn select_all(&mut self, _: &actions::SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
+        let mut term = self.term.lock();
+        let start = AlacPoint::new(term.topmost_line(), Column(0));
+        let end = AlacPoint::new(term.bottommost_line(), term.last_column());
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        term.selection = Some(selection);
+        drop(term);
+        self.sync(cx);
+    }
+
+    fn clear(&mut self, _: &actions::Clear, _window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_scrollback(cx);
+    }
+
+    /// ⌘K: scrollback と画面を消し、いまの行（プロンプト）を先頭に残す。代替画面（vim / less /
+    /// TUI のエージェント）は画面をアプリが持っているので触らない。
+    fn clear_scrollback(&mut self, cx: &mut Context<Self>) {
+        let mut term = self.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let screen_lines = term.screen_lines() as i32;
+        let cursor_line = term.grid().cursor.point.line.0.clamp(0, screen_lines - 1);
+        if cursor_line > 0 {
+            // いまの行より上を scrollback へ押し出してから、scrollback ごと捨てる。
+            let region = Line(0)..Line(screen_lines);
+            term.grid_mut()
+                .scroll_up::<AnsiColor>(&region, cursor_line as usize);
+            term.grid_mut().cursor.point.line = Line(0);
+        }
+        term.grid_mut().clear_history();
+        term.selection = None;
+        drop(term);
+        self.sync(cx);
+    }
+
+    /// ⌘F。検索バーを開いて入力欄へ。開いていれば入力欄へフォーカスを戻すだけ。
+    fn find(&mut self, _: &actions::Find, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            let mut search =
+                search::TerminalSearch::new(cx.focus_handle(), self.content.display_offset);
+            // 1 行の選択があれば語の初期値に（エディタの ⌘F と同じ）。
+            if let Some(text) = self.term.lock().selection_to_string() {
+                let text = text.trim_end_matches('\n');
+                if !text.is_empty() && !text.contains('\n') && text.len() <= 200 {
+                    search.query = text.to_string();
+                }
+            }
+            self.search = Some(search);
+            self.refresh_search(true, cx);
+        }
+        if let Some(search) = &self.search {
+            window.focus(&search.focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// 検索バーを閉じる。`restore` = 開いた時の表示位置へ戻す（Esc）。× は今の位置のまま。
+    fn close_search(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.search.take() else {
+            return;
+        };
+        if restore {
+            let mut term = self.term.lock();
+            let current = term.grid().display_offset() as i32;
+            term.scroll_display(Scroll::Delta(search.saved_offset as i32 - current));
+        }
+        self.sync(cx);
+        window.focus(&self.focus_handle, cx);
+    }
+
+    /// 検索を数え直す。`query_changed` = 語かトグルが変わった（正規表現を組み直し、いまの表示に
+    /// 一番近い一致へ移る）。false = 出力が増えただけ（見ている一致の番号を保つ）。
+    fn refresh_search(&mut self, query_changed: bool, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        if query_changed {
+            search.rebuild_regex();
+        }
+        let mut term = self.term.lock();
+        match search.regex.as_mut() {
+            Some(regex) => {
+                let (matches, truncated) = search::find_all(&term, regex);
+                search.matches = matches;
+                search.truncated = truncated;
+            }
+            None => {
+                search.matches.clear();
+                search.truncated = false;
+            }
+        }
+        if query_changed {
+            let display_offset = term.grid().display_offset() as i32;
+            let bottom = Line(term.screen_lines() as i32 - 1 - display_offset);
+            search.current = search::nearest_match(&search.matches, bottom);
+            if let Some(found) = search.current.and_then(|index| search.matches.get(index)) {
+                term.scroll_to_point(*found.start());
+            }
+        } else {
+            let count = search.matches.len();
+            search.current = search
+                .current
+                .filter(|_| count > 0)
+                .map(|index| index.min(count - 1));
+        }
+        drop(term);
+        self.sync(cx);
+    }
+
+    /// 次（`delta` = 1・新しい方）/ 前（-1）の一致へ移り、見える位置までスクロールする。
+    fn step_search(&mut self, delta: isize, cx: &mut Context<Self>) {
+        // 出力で古くなっているかもしれないので、数え直してから動く。
+        self.refresh_search(false, cx);
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        let count = search.matches.len();
+        if count == 0 {
+            return;
+        }
+        let next = match search.current {
+            Some(index) => (index as isize + delta).rem_euclid(count as isize) as usize,
+            None if delta > 0 => 0,
+            None => count - 1,
+        };
+        search.current = Some(next);
+        let point = *search.matches[next].start();
+        self.term.lock().scroll_to_point(point);
+        self.sync(cx);
     }
 
     /// 選択を解除してハイライトを消す（入力時など）。
@@ -567,21 +1160,26 @@ impl TerminalView {
     }
 
     /// ドラッグ選択の開始（左ボタン押下時）。押した位置をアンカーにする。
+    /// ダブルクリックは語（`Semantic`）、トリプルクリックは行（`Lines`）の単位で選ぶ。
     fn begin_selection(
         &mut self,
         position: gpui::Point<Pixels>,
-        origin: gpui::Point<Pixels>,
-        cell_width: Pixels,
-        line_height: Pixels,
+        frame: GridFrame,
+        selection_type: SelectionType,
         cx: &mut Context<Self>,
     ) {
-        let (row, column, side) =
-            viewport_cell(position, origin, cell_width, line_height, self.size);
+        let (row, column, side) = viewport_cell(
+            position,
+            frame.origin,
+            frame.cell_width,
+            frame.line_height,
+            self.size,
+        );
         self.selecting = true;
         let mut term = self.term.lock();
         let offset = term.grid().display_offset() as i32;
         let point = AlacPoint::new(Line(row - offset), Column(column));
-        term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+        term.selection = Some(Selection::new(selection_type, point, side));
         let range = term
             .selection
             .as_ref()
@@ -713,6 +1311,180 @@ impl TerminalView {
         drop(term);
         self.content.selection = range;
         cx.notify();
+    }
+}
+
+impl TerminalView {
+    /// ピクセル位置 → グリッド座標（scrollback の表示位置を反映）。
+    fn grid_point(&self, position: gpui::Point<Pixels>, frame: GridFrame) -> AlacPoint {
+        let (row, column, _) = viewport_cell(
+            position,
+            frame.origin,
+            frame.cell_width,
+            frame.line_height,
+            self.size,
+        );
+        AlacPoint::new(
+            Line(row - self.content.display_offset as i32),
+            Column(column),
+        )
+    }
+
+    /// ピクセル位置 → 表示座標のセル（列, 行。報告用・0 始まり）。
+    fn viewport_point(&self, position: gpui::Point<Pixels>, frame: GridFrame) -> (usize, usize) {
+        let (row, column, _) = viewport_cell(
+            position,
+            frame.origin,
+            frame.cell_width,
+            frame.line_height,
+            self.size,
+        );
+        (column, row.max(0) as usize)
+    }
+
+    /// マウスの報告を 1 つ PTY へ送る。
+    fn report_mouse(
+        &mut self,
+        button: mouse::ReportButton,
+        action: mouse::ReportAction,
+        cell: (usize, usize),
+        modifiers: gpui::Modifiers,
+    ) {
+        self.last_reported_cell = Some(cell);
+        if let Some(bytes) = mouse::encode(button, action, cell.0, cell.1, modifiers, self.mode) {
+            self.write_bytes(bytes);
+        }
+    }
+
+    /// グリッドの上でボタンを押した（`element.rs` の paint が、このフレームの座標で呼ぶ）。
+    /// アプリがマウスの報告を求めていれば報告し（⇧ を押している間は選択）、そうでなければ
+    /// 左は選択を始め、右はメニューを出す。
+    fn on_grid_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        frame: GridFrame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if mouse::wants_report(self.mode, event.modifiers) {
+            if let Some(button) = mouse::ReportButton::from_gpui(event.button) {
+                let cell = self.viewport_point(event.position, frame);
+                self.reported_button = Some(button);
+                self.report_mouse(button, mouse::ReportAction::Press, cell, event.modifiers);
+            }
+            return;
+        }
+        if event.button == MouseButton::Right {
+            window.focus(&self.focus_handle, cx);
+            self.context_menu = Some(event.position);
+            cx.notify();
+            return;
+        }
+        if event.button != MouseButton::Left {
+            return;
+        }
+        self.mouse_down_cell = Some(self.grid_point(event.position, frame));
+        let selection_type = match event.click_count {
+            2 => SelectionType::Semantic,
+            3.. => SelectionType::Lines,
+            _ => SelectionType::Simple,
+        };
+        self.begin_selection(event.position, frame, selection_type, cx);
+    }
+
+    /// ポインタが動いた。左ボタンを押していれば選択を延ばし、そうでなければリンクのホバーを追う
+    /// （変わった時だけ描き直す＝動かしているだけでは再描画しない）。
+    fn on_grid_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        frame: GridFrame,
+        inside: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // アプリへの報告中（押したボタンの移動・1003 なら全ての移動）。同じセルの中は送らない。
+        // ボタンを押していない移動は端末の上にある時だけ（エディタの上を動かしても送らない）。
+        if self.reported_button.is_some()
+            || (inside && mouse::wants_report(self.mode, event.modifiers))
+        {
+            let held = self.reported_button.is_some();
+            if mouse::wants_motion(self.mode, held) {
+                let cell = self.viewport_point(event.position, frame);
+                if self.last_reported_cell != Some(cell) {
+                    let button = self
+                        .reported_button
+                        .unwrap_or(mouse::ReportButton::NoButton);
+                    self.report_mouse(button, mouse::ReportAction::Motion, cell, event.modifiers);
+                }
+            }
+            if held {
+                return;
+            }
+        }
+        if event.pressed_button == Some(MouseButton::Left) {
+            self.update_selection(
+                event.position,
+                frame.origin,
+                frame.cell_width,
+                frame.line_height,
+                cx,
+            );
+            return;
+        }
+        let hovered = if inside {
+            let point = self.grid_point(event.position, frame);
+            self.content
+                .links
+                .iter()
+                .position(|link| link.contains(point))
+        } else {
+            None
+        };
+        if hovered != self.hovered_link {
+            self.hovered_link = hovered;
+            cx.notify();
+        }
+    }
+
+    /// ボタンを離した。動かさずに離した（クリック）ならリンクを開く（path:line と URL で同じ操作感）。
+    fn on_grid_mouse_up(&mut self, event: &MouseUpEvent, frame: GridFrame, cx: &mut Context<Self>) {
+        // 押した時に報告したボタンは、離した時も（⇧ に関わらず）報告して閉じる。
+        if let Some(button) = self.reported_button {
+            if mouse::ReportButton::from_gpui(event.button) == Some(button) {
+                self.reported_button = None;
+                let cell = self.viewport_point(event.position, frame);
+                self.report_mouse(button, mouse::ReportAction::Release, cell, event.modifiers);
+            }
+            return;
+        }
+        if event.button != MouseButton::Left || (!self.selecting && self.mouse_down_cell.is_none())
+        {
+            return;
+        }
+        let up = self.grid_point(event.position, frame);
+        let clicked = self.mouse_down_cell.take().filter(|down| *down == up);
+        let dragged = self
+            .term
+            .lock()
+            .selection
+            .as_ref()
+            .is_some_and(|selection| !selection.is_empty());
+        self.end_selection(cx);
+        if let (Some(point), false) = (clicked, dragged) {
+            self.open_link_at(point, cx);
+        }
+    }
+
+    /// そのセルのリンクを開く（ホストへ通知するだけ。開き方はホストが決める）。
+    fn open_link_at(&mut self, point: AlacPoint, cx: &mut Context<Self>) {
+        let Some(link) = self.content.links.iter().find(|link| link.contains(point)) else {
+            return;
+        };
+        match link.target.clone() {
+            TerminalLinkTarget::Path { path, line } => {
+                cx.emit(TerminalEvent::OpenPath { path, line })
+            }
+            TerminalLinkTarget::Url(url) => cx.emit(TerminalEvent::OpenUrl(url)),
+        }
     }
 }
 
@@ -883,12 +1655,255 @@ impl Focusable for TerminalView {
     }
 }
 
+impl TerminalView {
+    /// フォーカスの出入りをアプリへ伝える（FOCUS_IN_OUT・`CSI I` / `CSI O`）。
+    /// 端末にフォーカスがあり、かつ窓がアクティブな時を「入っている」とする。
+    fn report_focus(&mut self, window: &mut Window) {
+        let focused = self.focus_handle.is_focused(window) && window.is_window_active();
+        if self.reported_focus == Some(focused) {
+            return;
+        }
+        self.reported_focus = Some(focused);
+        if self.term.lock().mode().contains(TermMode::FOCUS_IN_OUT) {
+            let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+            self.write_bytes(bytes.to_vec());
+        }
+    }
+
+    /// フォーカスと窓のアクティブの出入りを購読する（窓が要るので最初の描画で張る）。
+    fn subscribe_focus_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_subscriptions.is_empty() {
+            return;
+        }
+        // 今の状態は伝えずに覚えるだけ（変わった時だけ伝える＝xterm と同じ）。
+        self.reported_focus =
+            Some(self.focus_handle.is_focused(window) && window.is_window_active());
+        let focus_handle = self.focus_handle.clone();
+        self.focus_subscriptions = vec![
+            cx.on_focus(&focus_handle, window, |this, window, _cx| {
+                this.report_focus(window)
+            }),
+            cx.on_blur(&focus_handle, window, |this, window, _cx| {
+                this.report_focus(window)
+            }),
+            cx.observe_window_activation(window, |this, window, _cx| this.report_focus(window)),
+        ];
+    }
+}
+
+impl TerminalView {
+    /// ドロップされたパスを、シェル向けに引用して貼り付けとして入れる（空白区切り・末尾に空白）。
+    fn drop_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut text = paths
+            .iter()
+            .map(|path| quote_path_for_shell(&path.to_string_lossy(), cfg!(windows)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        text.push(' ');
+        self.paste_text(&text, cx);
+        window.focus(&self.focus_handle, cx);
+    }
+
+    /// 右クリックメニュー（開いている時だけ）。見た目はタブ / エクスプローラのメニューと同じ部品に、
+    /// キーを右に添える。コピーは選択が無い時は押せない。
+    fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let position = self.context_menu?;
+        let theme = self.theme.clone();
+        let has_selection = self.content.selection.is_some();
+        let item = |id: &'static str, label: String, key: &str, enabled: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(16.))
+                .px(px(9.))
+                .py(px(5.))
+                .rounded(px(5.))
+                .text_size(px(12.))
+                .text_color(if enabled { theme.fg1 } else { theme.fg2 })
+                .when(enabled, |element| {
+                    element
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                })
+                .child(label)
+                .child(div().text_size(px(11.)).text_color(theme.fg2).child(
+                    keymap_core::keystroke_label_in(keymap_core::TERMINAL_CONTEXT, key),
+                ))
+        };
+        let separator = div().h(px(1.)).bg(theme.border).my(px(3.));
+        let menu = div()
+            .w(px(220.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(8.))
+            .p(px(4.))
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(6.),
+                gpui::hsla(0., 0., 0., 0.4),
+            )
+            .blur_radius(px(16.))])
+            .font_family("IBM Plex Sans JP")
+            .on_mouse_down_out(cx.listener(|this, _, _window, cx| {
+                this.context_menu = None;
+                cx.notify();
+            }))
+            .child(
+                item(
+                    "terminal-menu-copy",
+                    i18n::t!("terminal.menu_copy"),
+                    "cmd-c",
+                    has_selection,
+                )
+                .when(has_selection, |element| {
+                    element.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.context_menu = None;
+                            this.copy_selection(cx);
+                            cx.notify();
+                        }),
+                    )
+                }),
+            )
+            .child(
+                item(
+                    "terminal-menu-paste",
+                    i18n::t!("terminal.menu_paste"),
+                    "cmd-v",
+                    true,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.context_menu = None;
+                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                            this.paste_text(&text, cx);
+                        }
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                item(
+                    "terminal-menu-select-all",
+                    i18n::t!("terminal.menu_select_all"),
+                    "cmd-a",
+                    true,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.context_menu = None;
+                        this.select_all(&actions::SelectAll, window, cx);
+                    }),
+                ),
+            )
+            .child(separator)
+            .child(
+                item(
+                    "terminal-menu-clear",
+                    i18n::t!("terminal.menu_clear"),
+                    "cmd-k",
+                    true,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.context_menu = None;
+                        this.clear_scrollback(cx);
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                item(
+                    "terminal-menu-find",
+                    i18n::t!("terminal.menu_find"),
+                    "cmd-f",
+                    true,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.context_menu = None;
+                        this.find(&actions::Find, window, cx);
+                    }),
+                ),
+            );
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(position)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(menu),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+}
+
+/// シェルに打つためのパスの引用。安全な文字だけならそのまま、それ以外は
+/// unix（sh / zsh / bash）は単引用符（中の `'` は `'\''`）、Windows（pwsh / cmd）は二重引用符。
+fn quote_path_for_shell(path: &str, windows: bool) -> String {
+    let safe = !path.is_empty()
+        && path.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '/' | '.' | '_' | '-' | '+' | '@' | '%' | ':' | ',' | '='
+                )
+                || (windows && character == '\\')
+        });
+    if safe {
+        path.to_string()
+    } else if windows {
+        format!("\"{path}\"")
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
 impl Render for TerminalView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.subscribe_focus_changes(window, cx);
+        // ベル: 窓が後ろにある時だけ知らせる（Dock のアイコンが跳ねる程度）。前にある時は何もしない。
+        if std::mem::take(&mut self.bell_pending)
+            && !window.is_window_active()
+            && self.mode.contains(TermMode::URGENCY_HINTS)
+        {
+            window.request_attention();
+        }
+        let search_bar = self.render_search_bar(window, cx);
+        let context_menu = self.render_context_menu(cx);
         div()
             .key_context("Terminal")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::clear))
+            .on_action(cx.listener(Self::find))
+            // Finder などからのファイル / エクスプローラの行のドロップ: 引用したパスを貼り付ける。
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.drop_paths(paths.paths(), window, cx)
+            }))
+            .on_drop(cx.listener(|this, dragged: &ui::DraggedFile, window, cx| {
+                this.drop_paths(std::slice::from_ref(&dragged.source), window, cx)
+            }))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             // テキストを選択できることを示す I ビーム。
             .cursor(CursorStyle::IBeam)
@@ -900,88 +1915,32 @@ impl Render for TerminalView {
                     cx.notify();
                 }),
             )
+            .relative()
             .size_full()
             .bg(self.theme.bg1)
             // 端末は等幅必須。UI フォント（IBM Plex Sans JP）を継承すると 1 文字ずつ間延びして
             // 崩れるので、エディタと同じコードフォント（等幅）を明示する。要素は text_style().font()
             // を読むのでコンテナで指定すれば伝播する。
             .font_family("Guguru Sans Code")
-            .child(TerminalElement {
+            .child(element::TerminalElement {
                 terminal: cx.entity(),
             })
+            .children(search_bar)
+            .children(context_menu)
     }
 }
 
-// ── キー → PTY バイト（v1 の最小マッピング） ──
-
-/// キーストロークを PTY へ送るバイト列へ。特殊キー + 印字（key_char）を扱う。対象外は `None`。
-fn keystroke_to_bytes(keystroke: &gpui::Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
-    let modifiers = keystroke.modifiers;
-    let key = keystroke.key.as_str();
-
-    // Ctrl + 英字 → 制御バイト（Ctrl-A=0x01 .. Ctrl-Z=0x1a）。Ctrl-C 等。
-    if modifiers.control && !modifiers.platform {
-        if key.len() == 1 {
-            let character = key.as_bytes()[0];
-            if character.is_ascii_alphabetic() {
-                return Some(vec![(character.to_ascii_lowercase() - b'a') + 1]);
-            }
-        }
+/// 貼り付けるバイト列。bracketed paste の時は囲み、囲みを抜け出せないよう ESC を落とす。
+/// 囲みが無い時は改行を CR にそろえる（Enter と同じ＝行ごとに実行される）。
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let mut bytes = b"\x1b[200~".to_vec();
+        bytes.extend_from_slice(text.replace('\x1b', "").as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        bytes
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
     }
-    // ⌘ 系はターミナルに送らない（コピー等は今は素通り）。
-    if modifiers.platform {
-        return None;
-    }
-
-    let bytes: &[u8] = match key {
-        "enter" => b"\r",
-        "backspace" => b"\x7f",
-        "tab" => b"\t",
-        "escape" => b"\x1b",
-        "up" => {
-            if app_cursor {
-                b"\x1bOA"
-            } else {
-                b"\x1b[A"
-            }
-        }
-        "down" => {
-            if app_cursor {
-                b"\x1bOB"
-            } else {
-                b"\x1b[B"
-            }
-        }
-        "right" => {
-            if app_cursor {
-                b"\x1bOC"
-            } else {
-                b"\x1b[C"
-            }
-        }
-        "left" => {
-            if app_cursor {
-                b"\x1bOD"
-            } else {
-                b"\x1b[D"
-            }
-        }
-        "home" => b"\x1b[H",
-        "end" => b"\x1b[F",
-        "delete" => b"\x1b[3~",
-        "pageup" => b"\x1b[5~",
-        "pagedown" => b"\x1b[6~",
-        _ => {
-            // 印字文字（key_char に確定した文字が入る）。
-            if let Some(text) = &keystroke.key_char {
-                if !text.is_empty() && !text.chars().any(char::is_control) {
-                    return Some(text.as_bytes().to_vec());
-                }
-            }
-            return None;
-        }
-    };
-    Some(bytes.to_vec())
 }
 
 // ── ANSI 色 → Hsla（テーマの fg/bg を既定色に流用・16/256 色は標準パレット） ──
@@ -1085,359 +2044,6 @@ fn is_default_background(color: AnsiColor) -> bool {
     matches!(color, AnsiColor::Named(NamedColor::Background))
 }
 
-// ── 描画（custom Element でグリッドを塗る） ──
-
-struct TerminalElement {
-    terminal: Entity<TerminalView>,
-}
-
-struct TerminalPrepaint {
-    cells: Vec<RenderCell>,
-    cursor: Option<AlacPoint>,
-    /// マウス選択の範囲（グリッド座標）。ハイライトの矩形塗りに使う。
-    selection: Option<SelectionRange>,
-    /// スクロールバックの表示オフセット。グリッド座標 → 表示行は `line + display_offset`。
-    display_offset: usize,
-    cell_width: Pixels,
-    line_height: Pixels,
-    origin: gpui::Point<Pixels>,
-    focused: bool,
-    theme: Theme,
-    /// file:line リンク（グリッド行, セル列範囲, パス, 行番号・M13）。
-    links: Vec<(i32, Range<usize>, String, u32)>,
-}
-
-impl IntoElement for TerminalElement {
-    type Element = Self;
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for TerminalElement {
-    type RequestLayoutState = ();
-    type PrepaintState = TerminalPrepaint;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = gpui::relative(1.0).into();
-        style.size.height = gpui::relative(1.0).into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        // 等幅セル幅を 'M' を shape して測る。
-        let font = window.text_style().font();
-        let sample = window.text_system().shape_line(
-            SharedString::from("M"),
-            px(FONT_SIZE),
-            &[TextRun {
-                len: 1,
-                font: font.clone(),
-                color: gpui::black(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        );
-        let cell_width = if sample.width > px(0.) {
-            sample.width
-        } else {
-            px(FONT_SIZE * 0.6)
-        };
-        let line_height = px(LINE_HEIGHT);
-
-        // 行列サイズを算出して term をリサイズ。
-        let columns = (f32::from(bounds.size.width) / f32::from(cell_width))
-            .floor()
-            .max(2.0) as usize;
-        let lines = (f32::from(bounds.size.height) / f32::from(line_height))
-            .floor()
-            .max(1.0) as usize;
-        term_probe(
-            "layout",
-            format_args!(
-                "bounds {}x{} / cell {}x{} → {columns}列 {lines}行",
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height),
-                f32::from(cell_width),
-                f32::from(line_height),
-            ),
-        );
-        let theme = self.terminal.read(cx).theme.clone();
-        let (cells, cursor, selection, display_offset, focused) = {
-            let focused = self.terminal.read(cx).focus_handle.is_focused(window);
-            self.terminal.update(cx, |terminal, _cx| {
-                terminal.resize(columns, lines);
-                (
-                    terminal.content.cells.clone(),
-                    terminal.content.cursor,
-                    terminal.content.selection,
-                    terminal.content.display_offset,
-                    focused,
-                )
-            })
-        };
-
-        let links = detect_links(&cells);
-        TerminalPrepaint {
-            cells,
-            cursor,
-            selection,
-            display_offset,
-            cell_width,
-            line_height,
-            origin: bounds.origin,
-            focused,
-            theme,
-            links,
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let theme = &prepaint.theme;
-        let origin = prepaint.origin;
-        let cell_width = prepaint.cell_width;
-        let line_height = prepaint.line_height;
-        let display_offset = prepaint.display_offset;
-        // グリッド行（スクロールバック閲覧中は負値もある）→ 表示 y 座標。
-        let row_y = |line: i32| origin.y + line_height * ((line + display_offset as i32) as f32);
-        let font = window.text_style().font();
-
-        // 面全体の背景。
-        window.paint_quad(fill(bounds, theme.bg1));
-
-        // ⓪ 選択ハイライト（エディタと同じ選択面色）。背景セルより下に敷く。
-        if let Some(range) = prepaint.selection {
-            for cell in &prepaint.cells {
-                if range.contains(cell.point) {
-                    let position = point(
-                        origin.x + cell_width * (cell.point.column.0 as f32),
-                        row_y(cell.point.line.0),
-                    );
-                    window.paint_quad(fill(
-                        Bounds::new(position, size(cell_width, line_height)),
-                        theme_core::editor_selection(),
-                    ));
-                }
-            }
-        }
-
-        // ① 既定でない背景セルの矩形。
-        for cell in &prepaint.cells {
-            let (mut foreground, mut background) = (cell.fg, cell.bg);
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut foreground, &mut background);
-            }
-            if !is_default_background(background) {
-                let position = point(
-                    origin.x + cell_width * (cell.point.column.0 as f32),
-                    row_y(cell.point.line.0),
-                );
-                window.paint_quad(fill(
-                    Bounds::new(position, size(cell_width, line_height)),
-                    ansi_to_hsla(background, theme),
-                ));
-            }
-        }
-
-        // ② カーソル（focus 時は塗りブロック・非focus は輪郭）。
-        // スクロールバック閲覧中は現在行が下へはみ出すので、面内にある時だけ描く。
-        if let Some(cursor) = prepaint.cursor {
-            let position = point(
-                origin.x + cell_width * (cursor.column.0 as f32),
-                row_y(cursor.line.0),
-            );
-            let inside = position.y + line_height <= bounds.origin.y + bounds.size.height;
-            if inside {
-                let cursor_bounds = Bounds::new(position, size(cell_width, line_height));
-                if prepaint.focused {
-                    window.paint_quad(fill(cursor_bounds, theme.fg1));
-                } else {
-                    window.paint_quad(gpui::outline(
-                        cursor_bounds,
-                        theme.fg2,
-                        gpui::BorderStyle::default(),
-                    ));
-                }
-            }
-        }
-
-        // ③ セル文字（1 セル 1 shape。v1 はバッチ無し）。
-        for cell in &prepaint.cells {
-            if cell.character == ' '
-                || cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::HIDDEN)
-            {
-                continue;
-            }
-            let (mut foreground, mut background) = (cell.fg, cell.bg);
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut foreground, &mut background);
-            }
-            // カーソル下の文字は視認性のため背景色で描く。
-            let on_cursor =
-                prepaint.focused && prepaint.cursor.is_some_and(|cursor| cursor == cell.point);
-            let color = if on_cursor {
-                theme.bg1
-            } else {
-                ansi_to_hsla(foreground, theme)
-            };
-            let mut cell_font = font.clone();
-            if cell.flags.contains(Flags::BOLD) {
-                cell_font.weight = gpui::FontWeight::BOLD;
-            }
-            if cell.flags.contains(Flags::ITALIC) {
-                cell_font.style = gpui::FontStyle::Italic;
-            }
-            // file:line リンク範囲は薄い下線でクリック可能を示す（M13）。
-            let linked = prepaint.links.iter().any(|(line, columns, _, _)| {
-                *line == cell.point.line.0 && columns.contains(&(cell.point.column.0 as usize))
-            });
-            let run = TextRun {
-                len: cell.character.len_utf8(),
-                font: cell_font,
-                color,
-                background_color: None,
-                underline: linked.then(|| UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(theme.fg2),
-                    wavy: false,
-                }),
-                strikethrough: None,
-            };
-            let position = point(
-                origin.x + cell_width * (cell.point.column.0 as f32),
-                row_y(cell.point.line.0),
-            );
-            let shaped = window.text_system().shape_line(
-                SharedString::from(cell.character.to_string()),
-                px(FONT_SIZE),
-                &[run],
-                Some(cell_width),
-            );
-            if let Err(error) = shaped.paint(
-                position,
-                line_height,
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            ) {
-                eprintln!("ターミナル文字描画に失敗: {error}");
-            }
-        }
-
-        // ④ file:line リンクのクリック（M13）。paint 毎に登録＝このフレームの座標で判定。
-        if !prepaint.links.is_empty() {
-            let links = prepaint.links.clone();
-            let terminal = self.terminal.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, cx| {
-                if phase != DispatchPhase::Bubble
-                    || event.button != MouseButton::Left
-                    || !bounds.contains(&event.position)
-                {
-                    return;
-                }
-                let column =
-                    (f32::from(event.position.x - origin.x) / f32::from(cell_width)) as usize;
-                // 表示行 → グリッド行（スクロールバック閲覧中はオフセットぶんずれる）。
-                let row = (f32::from(event.position.y - origin.y) / f32::from(line_height)) as i32
-                    - display_offset as i32;
-                for (line, columns, path, line_number) in &links {
-                    if *line == row && columns.contains(&column) {
-                        let (path, line_number) = (path.clone(), *line_number);
-                        terminal.update(cx, |_, cx| {
-                            cx.emit(TerminalEvent::OpenPath {
-                                path,
-                                line: line_number,
-                            });
-                        });
-                        break;
-                    }
-                }
-            });
-        }
-
-        // ④.5 マウスによるテキスト選択（down=アンカー / move=延長 / up=確定 → ⌘C でコピー）。
-        // 座標は file:line リンクと同じ origin/cell_width/line_height を使う。
-        {
-            let terminal = self.terminal.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, cx| {
-                if phase != DispatchPhase::Bubble
-                    || event.button != MouseButton::Left
-                    || !bounds.contains(&event.position)
-                {
-                    return;
-                }
-                terminal.update(cx, |terminal, cx| {
-                    terminal.begin_selection(event.position, origin, cell_width, line_height, cx);
-                });
-            });
-        }
-        {
-            let terminal = self.terminal.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
-                if phase != DispatchPhase::Bubble || event.pressed_button != Some(MouseButton::Left)
-                {
-                    return;
-                }
-                terminal.update(cx, |terminal, cx| {
-                    terminal.update_selection(event.position, origin, cell_width, line_height, cx);
-                });
-            });
-        }
-        {
-            let terminal = self.terminal.clone();
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
-                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
-                    return;
-                }
-                terminal.update(cx, |terminal, cx| terminal.end_selection(cx));
-            });
-        }
-
-        // ⑤ IME 入力ハンドラ（M13）: 日本語などの確定文字列を PTY へ流せるようにする。
-        window.handle_input(
-            &self.terminal.read(cx).focus_handle,
-            ElementInputHandler::new(bounds, self.terminal.clone()),
-            cx,
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,6 +2060,8 @@ mod tests {
                 fg: AnsiColor::Named(NamedColor::Foreground),
                 bg: AnsiColor::Named(NamedColor::Background),
                 flags: Flags::empty(),
+                underline_color: None,
+                hyperlink: None,
             });
             column += 1;
             if wide {
@@ -1463,6 +2071,8 @@ mod tests {
                     fg: AnsiColor::Named(NamedColor::Foreground),
                     bg: AnsiColor::Named(NamedColor::Background),
                     flags: Flags::WIDE_CHAR_SPACER,
+                    underline_color: None,
+                    hyperlink: None,
                 });
                 column += 1;
             }
@@ -1474,30 +2084,80 @@ mod tests {
     fn detect_links_maps_byte_ranges_to_cell_columns() {
         // cargo/rustc 形式。クリック域は `:col` まで（検出そのものの規則は `ui::links` の test）。
         let cells = row_cells(0, "  --> src/main.rs:10:5");
-        let links = detect_links(&cells);
-        assert_eq!(links.len(), 1);
-        let (line, columns, path, line_number) = &links[0];
-        assert_eq!(*line, 0);
-        assert_eq!(path, "src/main.rs");
-        assert_eq!(*line_number, 10);
-        assert_eq!(*columns, 6..22);
+        let links = detect_links(&cells, &[]);
+        assert_eq!(
+            links,
+            vec![TerminalLink {
+                line: 0,
+                columns: 6..22,
+                target: TerminalLinkTarget::Path {
+                    path: "src/main.rs".into(),
+                    line: 10,
+                },
+            }]
+        );
 
         // 全角が先にある行でも列がずれない（byte 範囲 → char 添字 → 列の変換）。
         let cells = row_cells(1, "エラー lib.rs:42");
-        let links = detect_links(&cells);
+        let links = detect_links(&cells, &[]);
         assert_eq!(links.len(), 1);
-        let (_, columns, path, line_number) = &links[0];
-        assert_eq!(path, "lib.rs");
-        assert_eq!(*line_number, 42);
         // 「エラー」= 3 文字 × 2 列 + 空白 1 列 = 7 列目から。
-        assert_eq!(*columns, 7..16);
+        assert_eq!(links[0].columns, 7..16);
+        assert_eq!(
+            links[0].target,
+            TerminalLinkTarget::Path {
+                path: "lib.rs".into(),
+                line: 42,
+            }
+        );
     }
 
     #[test]
     fn detect_links_ignores_paths_without_line_numbers() {
         // ターミナルは実在確認をしないので、行番号の無いトークンはリンクにしない
         // （`ls` の出力を全部下線にしない）。
-        assert!(detect_links(&row_cells(0, "Cargo.toml  README.md")).is_empty());
+        assert!(detect_links(&row_cells(0, "Cargo.toml  README.md"), &[]).is_empty());
+    }
+
+    #[test]
+    fn urls_become_links_including_local_dev_servers() {
+        let cells = row_cells(0, "ready: http://localhost:5173/ and 127.0.0.1:8080");
+        let links = detect_links(&cells, &[]);
+        let targets: Vec<_> = links.iter().map(|link| link.target.clone()).collect();
+        assert_eq!(
+            targets,
+            vec![
+                TerminalLinkTarget::Url("http://localhost:5173/".into()),
+                TerminalLinkTarget::Url("http://127.0.0.1:8080".into()),
+            ]
+        );
+        assert_eq!(links[0].columns, 7..29);
+    }
+
+    #[test]
+    fn osc8_hyperlinks_win_over_text_detection() {
+        // `docs http://x.test` の全体が OSC 8 で https://example.com を指している。
+        let mut cells = row_cells(0, "see docs http://x.test end");
+        for cell in &mut cells[4..18] {
+            cell.hyperlink = Some(0);
+        }
+        let hyperlinks = vec!["https://example.com/docs".to_string()];
+        let links = detect_links(&cells, &hyperlinks);
+        assert_eq!(
+            links,
+            vec![TerminalLink {
+                line: 0,
+                columns: 4..18,
+                target: TerminalLinkTarget::Url("https://example.com/docs".into()),
+            }],
+            "文字から拾う URL は OSC 8 と重なるので出さない"
+        );
+        // http / https 以外の OSC 8 は開かない（`file:` や独自スキームを勝手に開かない）。
+        let hyperlinks = vec!["vscode://open?x".to_string()];
+        let links = detect_links(&cells, &hyperlinks);
+        assert!(links
+            .iter()
+            .all(|link| link.target == TerminalLinkTarget::Url("http://x.test".into())));
     }
 
     #[test]
@@ -1546,6 +2206,226 @@ mod tests {
 }
 
 #[cfg(test)]
+mod action_tests {
+    use super::*;
+    use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+
+    /// PTY の出力と同じ経路（vte の解析器）で端末へ文字を流す。
+    fn feed(terminal: &TerminalView, text: &str) {
+        let mut parser = Processor::<StdSyncHandler>::new();
+        parser.advance(&mut *terminal.term.lock(), text.as_bytes());
+    }
+
+    fn line_text(terminal: &TerminalView, line: i32) -> String {
+        let term = terminal.term.lock();
+        let columns = term.columns();
+        (0..columns)
+            .map(|column| term.grid()[Line(line)][Column(column)].c)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn dropped_paths_are_quoted_for_the_shell() {
+        assert_eq!(quote_path_for_shell("/tmp/a.txt", false), "/tmp/a.txt");
+        assert_eq!(
+            quote_path_for_shell("/Users/me/Application Support/x", false),
+            "'/Users/me/Application Support/x'"
+        );
+        assert_eq!(
+            quote_path_for_shell("/tmp/it's here", false),
+            "'/tmp/it'\\''s here'"
+        );
+        assert_eq!(quote_path_for_shell("/tmp/$HOME", false), "'/tmp/$HOME'");
+        assert_eq!(
+            quote_path_for_shell(r"C:\Users\me\a.txt", true),
+            r"C:\Users\me\a.txt"
+        );
+        assert_eq!(
+            quote_path_for_shell(r"C:\Program Files\x", true),
+            r#""C:\Program Files\x""#
+        );
+    }
+
+    #[gpui::test]
+    fn dropped_files_are_pasted_as_quoted_paths(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, window, cx| {
+            feed(terminal, "\x1b[?2004h");
+            let paths = [PathBuf::from("/tmp/a b.png"), PathBuf::from("/tmp/c.txt")];
+            terminal.drop_paths(&paths, window, cx);
+            assert_eq!(
+                terminal.debug_written_input(),
+                b"\x1b[200~'/tmp/a b.png' /tmp/c.txt \x1b[201~"
+            );
+        });
+    }
+
+    #[test]
+    fn pasted_text_cannot_escape_bracketed_paste() {
+        assert_eq!(
+            paste_bytes("ls\x1b[201~rm -rf /\n", true),
+            b"\x1b[200~ls[201~rm -rf /\n\x1b[201~"
+        );
+        // 囲みが無い時は改行を CR にそろえる（Enter と同じ）。
+        assert_eq!(paste_bytes("a\r\nb\nc", false), b"a\rb\rc");
+    }
+
+    #[gpui::test]
+    fn clear_keeps_the_prompt_line_and_drops_scrollback(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, window, cx| {
+            let output: String = (0..300).map(|index| format!("out {index}\r\n")).collect();
+            feed(terminal, &format!("{output}$ prompt"));
+            assert!(terminal.term.lock().grid().history_size() > 0);
+            terminal.clear(&actions::Clear, window, cx);
+            let term = terminal.term.lock();
+            assert_eq!(term.grid().history_size(), 0, "scrollback は消える");
+            assert_eq!(term.grid().cursor.point.line, Line(0));
+            drop(term);
+            assert_eq!(line_text(terminal, 0), "$ prompt", "いまの行は先頭に残る");
+            assert_eq!(line_text(terminal, 1), "");
+        });
+    }
+
+    /// アプリがマウスの報告（1000 + SGR 1006）を有効にしたら、押す・離すを報告し、選択はしない。
+    /// ⇧ を押している間は従来どおり選択。
+    #[gpui::test]
+    fn mouse_reports_go_to_the_app_unless_shift_is_held(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, _window, cx| {
+            feed(terminal, "\x1b[?1000h\x1b[?1006h");
+            terminal.sync(cx);
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let frame = terminal
+            .read_with(cx, |terminal, _| terminal.grid_frame)
+            .expect("描画でグリッドの座標が決まる");
+        // 3 列目・2 行目のセルの中央。
+        let position = frame.origin + point(frame.cell_width * 2.5, frame.line_height * 1.5);
+        cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::none());
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.debug_written_input(), b"\x1b[<0;3;2M\x1b[<0;3;2m");
+            assert!(
+                terminal.term.lock().selection.is_none(),
+                "報告中は選択しない"
+            );
+        });
+        let shift = gpui::Modifiers {
+            shift: true,
+            ..gpui::Modifiers::none()
+        };
+        cx.simulate_mouse_down(position, MouseButton::Left, shift);
+        cx.simulate_mouse_move(
+            position + point(frame.cell_width * 3., px(0.)),
+            Some(MouseButton::Left),
+            shift,
+        );
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(
+                terminal.debug_written_input().len(),
+                b"\x1b[<0;3;2M\x1b[<0;3;2m".len(),
+                "⇧ の間は報告しない"
+            );
+            assert!(terminal.term.lock().selection.is_some(), "⇧ の間は選択する");
+        });
+    }
+
+    /// FOCUS_IN_OUT（1004）を有効にしたアプリへ、フォーカスの出入りを `CSI I` / `CSI O` で伝える。
+    #[gpui::test]
+    fn focus_changes_are_reported_when_the_app_asks(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, _window, cx| {
+            feed(terminal, "\x1b[?1004h");
+            terminal.sync(cx);
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        // フォーカスの出入りの通知は次の描画で配られる。
+        terminal.update_in(cx, |terminal, window, cx| {
+            window.focus(&terminal.focus_handle, cx);
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        terminal.update_in(cx, |_terminal, window, _cx| window.blur());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        terminal.read_with(cx, |terminal, _| {
+            assert_eq!(terminal.debug_written_input(), b"\x1b[I\x1b[O");
+        });
+    }
+
+    /// OSC 52 の書き込みはクリップボードへ、読み出しには応えない。タイトルはタブの名前に使う。
+    /// 色の問い合わせには描画と同じ色で答える。
+    #[gpui::test]
+    fn terminal_requests_from_apps(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, _window, cx| {
+            terminal.on_alac_event(
+                AlacEvent::ClipboardStore(ClipboardType::Clipboard, "copied".into()),
+                cx,
+            );
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("copied".to_string())
+            );
+            terminal.on_alac_event(
+                AlacEvent::ClipboardLoad(
+                    ClipboardType::Clipboard,
+                    Arc::new(|text| format!("\x1b]52;c;{text}\x07")),
+                ),
+                cx,
+            );
+            assert!(
+                terminal.debug_written_input().is_empty(),
+                "読み出しには応えない"
+            );
+
+            terminal.on_alac_event(AlacEvent::Title("✳ Claude Code\n\x07x".into()), cx);
+            assert_eq!(terminal.title(), Some("✳ Claude Code"));
+            terminal.on_alac_event(AlacEvent::ResetTitle, cx);
+            assert_eq!(terminal.title(), None);
+
+            // 257 = 背景（dark の bg1 = #1b1e25）。
+            terminal.on_alac_event(
+                AlacEvent::ColorRequest(
+                    257,
+                    Arc::new(|rgb| format!("{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)),
+                ),
+                cx,
+            );
+            assert_eq!(terminal.debug_written_input(), b"1b1e25");
+        });
+    }
+
+    #[gpui::test]
+    fn select_all_covers_the_scrollback(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, window, cx| {
+            let output: String = (0..30).map(|index| format!("row {index}\r\n")).collect();
+            feed(terminal, &output);
+            terminal.select_all(&actions::SelectAll, window, cx);
+            let text = terminal
+                .term
+                .lock()
+                .selection_to_string()
+                .unwrap_or_default();
+            assert!(text.starts_with("row 0\n"));
+            assert!(text.contains("row 29"));
+        });
+    }
+}
+
+#[cfg(test)]
 mod ime_tests {
     use super::*;
 
@@ -1575,7 +2455,13 @@ mod ime_tests {
         terminal.update_in(cx, |terminal, window, cx| {
             terminal.replace_and_mark_text_in_range(None, "猫🐱", Some(1..3), window, cx);
             assert_eq!(terminal.marked_text_range(window, cx), Some(0..3));
-            assert_eq!(terminal.selected_text_range(false, window, cx).unwrap().range, 1..3);
+            assert_eq!(
+                terminal
+                    .selected_text_range(false, window, cx)
+                    .unwrap()
+                    .range,
+                1..3
+            );
             assert_eq!(terminal.text_for_range(1..3, &mut None, window, cx).as_deref(), Some("🐱"));
             terminal.unmark_text(window, cx);
             assert_eq!(terminal.marked_text_range(window, cx), None);
