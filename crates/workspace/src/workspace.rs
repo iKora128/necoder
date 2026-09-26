@@ -1309,6 +1309,9 @@ struct ChromeState {
     pending_task_prompts: HashMap<SpaceId, String>,
     /// 上の依頼を送るエージェント（fan-out で選んだ物・無ければ既定・O23）。
     pending_task_agents: HashMap<SpaceId, String>,
+    /// 統合の下見で競合した Task と、競合したファイル（O19）。Task の「次へ」が「競合を直させる」に
+    /// なる。頼んだら外す（直った後の「統合」でまた下見する）。起動している間だけ。
+    task_conflicts: HashMap<SpaceId, Vec<String>>,
     /// 作成中の Task（worktree・準備スクリプトを流している間の行・O20）。作れなかった物は
     /// やり直すか閉じるまで残る。起動している間だけ。
     task_creations: Vec<task_creation::TaskCreation>,

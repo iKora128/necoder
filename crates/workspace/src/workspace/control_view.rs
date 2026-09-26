@@ -746,6 +746,10 @@ impl Workspace {
                     .id
                     .clone();
                 let space_for_integrate = space.clone();
+                let space_for_resolve = space.clone();
+                // 統合の下見で競合した Task は、統合の前に「競合を直させる」（O19）。
+                let conflicted =
+                    phase == TaskPhase::MergeReady && self.task_conflicts(&space).is_some();
                 card.child(
                     div()
                         .flex()
@@ -780,6 +784,26 @@ impl Workspace {
                     div()
                         .flex()
                         .gap(px(5.))
+                        .when(conflicted, |element| {
+                            element.child(
+                                button(
+                                    ("control-resolve", position),
+                                    SharedString::from(i18n::t!("fleet.next_resolve")),
+                                    true,
+                                    &theme,
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.ask_task_to_resolve_conflicts(
+                                            space_for_resolve.clone(),
+                                            cx,
+                                        );
+                                    }),
+                                ),
+                            )
+                        })
                         .when(phase == TaskPhase::MergeReady, |element| {
                             element.child(
                                 button(

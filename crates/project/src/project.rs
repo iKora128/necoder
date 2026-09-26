@@ -936,8 +936,62 @@ pub fn git_unmerged_count_on(host: &dyn Host, dir: &Path, base: &str) -> Option<
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
+/// 統合の下見で競合した（O19）。[`integrate_branch_on`] がこれを入れたエラーを返し、UI は
+/// `downcast_ref` で見分けて「競合を直させる」（Task のエージェントに頼む）を出す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeConflicts {
+    /// 競合したファイル（リポジトリの根からの相対パス・git の綴り）。
+    pub paths: Vec<String>,
+    /// git の出力（統合の下見の結果・画面とトーストに出す）。
+    pub detail: String,
+}
+
+impl std::fmt::Display for MergeConflicts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "競合のため統合できません: {}", self.detail)
+    }
+}
+
+impl std::error::Error for MergeConflicts {}
+
+/// `branch` を統合先（`integration_dir` の HEAD）へ取り込んだら競合するファイル（O19）。書き込みは
+/// しない（`git merge-tree --write-tree`）。調べられなければ空。
+pub fn merge_conflict_paths_on(
+    host: &dyn Host,
+    integration_dir: &Path,
+    branch: &str,
+) -> Vec<String> {
+    match run_git(
+        host,
+        integration_dir,
+        [
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "HEAD",
+            branch,
+        ],
+    ) {
+        Ok(output) => merge_tree_conflicts(&String::from_utf8_lossy(&output.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// `git merge-tree --write-tree --name-only` の出力から競合したファイルを読む: 1 行目は木の OID、
+/// 続いて空行までが競合したファイル（同じファイルは 1 回だけ）。競合が無ければ OID の 1 行だけ。
+fn merge_tree_conflicts(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// 明示的に merge-ready となった Task を IntegrationSpace へ統合する。
 /// dirty integration / preview conflict は拒否し、merge 自体が失敗した場合も自動 abort して戻す。
+/// 競合した時のエラーは [`MergeConflicts`] を持つ（競合したファイルが分かった時だけ）。
 pub fn integrate_branch_on(
     host: &dyn Host,
     integration_dir: &Path,
@@ -948,11 +1002,18 @@ pub fn integrate_branch_on(
         "IntegrationSpace に未コミット変更があります。統合前に clean にしてください"
     );
     let preview = preview_merge_on(host, integration_dir, branch)?;
-    anyhow::ensure!(
-        preview.clean,
-        "競合のため統合できません: {}",
-        preview.detail
-    );
+    if !preview.clean {
+        let paths = merge_conflict_paths_on(host, integration_dir, branch);
+        anyhow::ensure!(
+            !paths.is_empty(),
+            "競合のため統合できません: {}",
+            preview.detail
+        );
+        return Err(anyhow::Error::new(MergeConflicts {
+            paths,
+            detail: preview.detail,
+        }));
+    }
     let message = format!("Integrate {branch}");
     let output = run_git(
         host,
@@ -3409,6 +3470,76 @@ mod tests {
         remove_worktree(&root, &wt, true).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    /// O19: 統合先と同じ行を変えた Task は下見で止まり、エラーに競合したファイルが載る（統合先は触らない）。
+    #[test]
+    fn conflicting_integration_names_the_conflicted_files() {
+        let root = scratch("task_conflict");
+        let wt = scratch("task_conflict_wt");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .current_dir(dir)
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "core.autocrlf=false",
+                ])
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&root, &["init", "-q"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "base\n").unwrap();
+        std::fs::write(root.join("b.txt"), "base\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        create_task_worktree_on(&LocalHost, &root, &wt, "task/conflict").unwrap();
+        std::fs::write(wt.join("a.txt"), "task\n").unwrap();
+        std::fs::write(wt.join("c.txt"), "new\n").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["commit", "-q", "-m", "task"]);
+        std::fs::write(root.join("a.txt"), "main\n").unwrap();
+        git(&root, &["commit", "-qam", "main"]);
+        let before = git_head_oid_on(&LocalHost, &root).unwrap();
+
+        let error = integrate_branch_on(&LocalHost, &root, "task/conflict").unwrap_err();
+        let conflicts = error
+            .downcast_ref::<MergeConflicts>()
+            .unwrap_or_else(|| panic!("競合として返る: {error:#}"));
+        assert_eq!(
+            conflicts.paths,
+            vec!["a.txt".to_string()],
+            "競合したファイルだけ"
+        );
+        assert!(error.to_string().starts_with("競合のため統合できません"));
+        assert_eq!(
+            git_head_oid_on(&LocalHost, &root).unwrap(),
+            before,
+            "統合先は触らない"
+        );
+        assert!(git_status_on(&LocalHost, &root).is_empty());
+
+        remove_worktree(&root, &wt, true).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn merge_tree_output_lists_each_conflicted_file_once() {
+        let stdout =
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904\na.txt\nsrc/lib.rs\n\nAuto-merging a.txt\n";
+        assert_eq!(merge_tree_conflicts(stdout), vec!["a.txt", "src/lib.rs"]);
+        assert!(merge_tree_conflicts("4b825dc642cb6eb9a060e54bf8d69288fbee4904\n").is_empty());
+        assert!(merge_tree_conflicts("").is_empty());
     }
 
     #[test]

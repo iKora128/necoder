@@ -414,6 +414,10 @@ fleet:
   no_running_agent: No agent is running
   task_archived: Task finished (the worktree is still on disk)
   base_synced: "Fast-forwarded %{branch} to upstream (%{count} commits) before creating the Task"
+  next_resolve: Have the agent fix conflicts
+  toast_integrate_conflicts: "%{count} file(s) conflict with the base. Use “Have the agent fix conflicts” to ask the Task's agent"
+  conflicts_sent: "Asked the Task's agent to resolve %{count} conflicted file(s). Integrate again when it is done"
+  conflict_prompt: "Merging into `%{base}` conflicts in these files:\n%{files}\n\nRun `git merge %{base}` in this worktree, resolve the conflicts (keeping the intent of both sides), and commit. Run the tests if there are any, then briefly tell me what you resolved and how. Don't merge into %{base} yourself: a person does the integration."
   creating_untitled: "New Task"
   creating_waiting: "Waiting for the previous Task…"
   creating_sync: "Updating the base branch…"
