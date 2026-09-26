@@ -178,6 +178,11 @@ pub struct ElicitationField {
     pub options: Vec<ElicitationChoice>,
     /// 複数選択か（true = ACP の array プロパティ。応答は `StringArray` で返す）。
     pub multi: bool,
+    /// この質問に付いた自由入力の Other 欄のプロパティ名（O17）。あれば UI は選択肢の下に
+    /// 入力欄を出し、書いた文字を**この名前**で返す（選択と両方返してよい。どう読むかは
+    /// エージェント側: Claude の AskUserQuestion は、単一選択なら「選ばずに書いた = 答え」
+    /// 「選んで書いた = 選択に添えるメモ」、複数選択なら選択に足す）。
+    pub custom_answer: Option<String>,
 }
 
 /// Elicitation の 1 選択肢（ACP `EnumOption` / `enum` 値の簡約）。
@@ -259,7 +264,8 @@ pub enum AgentEvent {
     /// エージェントが選択肢付きの質問（Elicitation・form）を出した。**選択式フィールドのみ対応**し、
     /// テキスト/数値/真偽を含むフォームは UI へ出さず即 Decline する（下の handler で弾く）。
     /// `respond` に **(name, 選んだ値の並び) の群**を送ると Accept、`None` を送ると Decline。
-    /// 単一選択フィールドは要素 1 つ、複数選択は 0 個以上。drop で Cancel。
+    /// 単一選択フィールドは要素 1 つ、複数選択は 0 個以上。自由入力の答えは
+    /// `(field.custom_answer, [書いた文字])` として同じ群に入れる（O17）。drop で Cancel。
     ElicitationRequest {
         message: String,
         fields: Vec<ElicitationField>,
@@ -2388,17 +2394,26 @@ const CUSTOM_ANSWER_META_KEY: &str = "_askUserQuestionCustomAnswer";
 /// 例外は [`CUSTOM_ANSWER_META_KEY`] 印の Other 欄だけ。Claude Code の AskUserQuestion は
 /// 質問ごとに「選択肢 + Other 欄」の 2 プロパティを送るため、Other 欄を非対応扱いにすると
 /// **質問そのものが Decline されて UI に出ない**（＝エージェントの質問に答えられない）。
-/// 印つき Other 欄は任意入力なので、読み飛ばして選択欄だけ返す方が仕様に忠実。
+/// 印つき Other 欄は独立したフィールドにせず、付属先の選択欄の [`ElicitationField::custom_answer`]
+/// に結び付ける（O17・UI は選択肢の下に入力欄を出す）。付属先が見つからない Other 欄は任意入力
+/// なので読み飛ばす。
 fn simplify_elicitation_form(schema: &v1::ElicitationSchema) -> Option<Vec<ElicitationField>> {
     if schema.properties.is_empty() {
         return None;
     }
     let mut fields = Vec::new();
+    // 付属先の質問（選択欄の名前）→ Other 欄の名前。プロパティは名前順に来るので、選択欄より
+    // 先に Other 欄が来ても結べるよう、最後にまとめて結ぶ。
+    let mut custom_answers = std::collections::BTreeMap::new();
     for (name, property) in &schema.properties {
         let (options, multi, title) = match property {
             v1::ElicitationPropertySchema::String(string_schema) => {
                 if is_custom_answer_field(string_schema) {
-                    continue; // 選択欄に付属する任意の Other 欄 — 出さないだけで非対応にはしない
+                    // 選択欄に付属する任意の Other 欄 — 独立した欄にはせず、非対応にもしない
+                    if let Some(question) = custom_answer_question(name, string_schema) {
+                        custom_answers.insert(question, name.clone());
+                    }
+                    continue;
                 }
                 let options = single_select_options(string_schema)?;
                 (options, false, string_schema.title.clone())
@@ -2417,13 +2432,31 @@ fn simplify_elicitation_form(schema: &v1::ElicitationSchema) -> Option<Vec<Elici
             label: title.unwrap_or_else(|| name.clone()),
             options,
             multi,
+            custom_answer: None,
         });
     }
     // Other 欄だけを読み飛ばした結果 0 件＝選ばせるものが無いフォーム。非対応として Decline に回す。
     if fields.is_empty() {
         return None;
     }
+    for field in &mut fields {
+        field.custom_answer = custom_answers.remove(&field.name);
+    }
     Some(fields)
+}
+
+/// Other 欄がどの質問に付属するか。`_meta` の `questionId` を正とし、無ければ名前の
+/// `<質問>_custom` 形から引く（Claude のブリッジは両方付ける・印だけのブリッジもあり得る）。
+fn custom_answer_question(name: &str, schema: &v1::StringPropertySchema) -> Option<String> {
+    let from_meta = schema
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get(CUSTOM_ANSWER_META_KEY))
+        .and_then(|marker| marker.get("questionId"))
+        .and_then(|question| question.as_str());
+    from_meta
+        .or_else(|| name.strip_suffix("_custom"))
+        .map(str::to_string)
 }
 
 /// 単一選択 string の選択肢（`oneOf` 優先・無ければ `enum`）。どちらも無い自由入力は `None`＝非対応。
@@ -2828,6 +2861,11 @@ mod tests {
         assert_eq!(fields[0].name, "question_0");
         assert_eq!(fields[0].label, "PDF の見せ方");
         assert_eq!(fields[0].options.len(), 2);
+        assert_eq!(
+            fields[0].custom_answer.as_deref(),
+            Some("question_0_custom"),
+            "Other 欄は付属先の質問に結ぶ（O17・自由入力欄を出す）"
+        );
 
         // 印が無いただの自由入力なら従来どおり非対応（返せない入力を勝手に握り潰さない）。
         let unmarked: v1::ElicitationSchema = serde_json::from_value(json!({
@@ -2863,6 +2901,11 @@ mod tests {
         let multi_fields = simplify_elicitation_form(&multi).expect("複数選択も対応");
         assert_eq!(multi_fields.len(), 1);
         assert!(multi_fields[0].multi, "複数選択として印を付ける");
+        assert_eq!(
+            multi_fields[0].custom_answer.as_deref(),
+            Some("question_0_custom"),
+            "questionId が無ければ名前の <質問>_custom 形で結ぶ"
+        );
         assert_eq!(multi_fields[0].label, "入れる機能");
         assert_eq!(multi_fields[0].options.len(), 2);
         assert_eq!(
@@ -2881,6 +2924,10 @@ mod tests {
         let plain = simplify_elicitation_form(&plain_multi).expect("items.enum も対応");
         assert!(plain[0].multi);
         assert_eq!(plain[0].options[2].title, "c");
+        assert!(
+            plain[0].custom_answer.is_none(),
+            "Other 欄の無い質問は入力欄を出さない"
+        );
 
         // Other 欄しか無い＝選ばせるものが無いので非対応。
         let only_custom: v1::ElicitationSchema = serde_json::from_value(json!({
@@ -2894,6 +2941,32 @@ mod tests {
         }))
         .expect("schema をパースできる");
         assert!(simplify_elicitation_form(&only_custom).is_none());
+    }
+
+    /// Other 欄の結び先（O17）: `questionId` を名前より優先し、名前順で選択欄より先に来ても結ぶ。
+    /// 付属先の無い Other 欄は捨てる（任意入力なので、読み飛ばしても答えは作れる）。
+    #[test]
+    fn custom_answer_fields_attach_to_their_question() {
+        use serde_json::json;
+        let schema: v1::ElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "a_note": {
+                    "type": "string",
+                    "_meta": {"_askUserQuestionCustomAnswer": {"questionId": "z_pick"}}
+                },
+                "z_pick": {"type": "string", "enum": ["x", "y"]},
+                "other_custom": {
+                    "type": "string",
+                    "_meta": {"_askUserQuestionCustomAnswer": {"isCustomAnswer": true}}
+                }
+            }
+        }))
+        .expect("schema をパースできる");
+        let fields = simplify_elicitation_form(&schema).expect("選択欄が 1 つある");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "z_pick");
+        assert_eq!(fields[0].custom_answer.as_deref(), Some("a_note"));
     }
 
     /// 回帰テスト: `session/prompt` がエラー応答（例: API のストリーミング切断「Connection

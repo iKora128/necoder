@@ -111,6 +111,8 @@ agent:
   queue_send_now: 中断して今すぐ
   elicitation_submit: これで回答
   elicitation_decline: 答えない
+  elicitation_custom_single: 自分で書く（案を選んだ時はその案に添えるメモになる）
+  elicitation_custom_multi: 自分で書く（選んだ案に足される）
   code_show_more: "… 残り %{n} 行を表示"
   code_collapse: コードを折りたたむ
   code_streaming_more: "… 実行中（%{n} 行）"
