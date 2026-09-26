@@ -1392,7 +1392,10 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         // アプリへの報告中（押したボタンの移動・1003 なら全ての移動）。同じセルの中は送らない。
-        if self.reported_button.is_some() || mouse::wants_report(self.mode, event.modifiers) {
+        // ボタンを押していない移動は端末の上にある時だけ（エディタの上を動かしても送らない）。
+        if self.reported_button.is_some()
+            || (inside && mouse::wants_report(self.mode, event.modifiers))
+        {
             let held = self.reported_button.is_some();
             if mouse::wants_motion(self.mode, held) {
                 let cell = self.viewport_point(event.position, frame);
@@ -1443,7 +1446,8 @@ impl TerminalView {
             }
             return;
         }
-        if event.button != MouseButton::Left {
+        if event.button != MouseButton::Left || (!self.selecting && self.mouse_down_cell.is_none())
+        {
             return;
         }
         let up = self.grid_point(event.position, frame);
