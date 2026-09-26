@@ -3271,3 +3271,16 @@
   - クラウドの枠（ディスク）が build の成果物で埋まった: turso の静的ライブラリ（1 本 350 MB）が機能の組み合わせごとに 5 版ずつ残っていた。成果物ごとに新しい 2 版だけ残して 7 GB 空いた。`incremental/` も消してよい。
 - 次: 実機（mac）で見た目と挙動を確かめる（ベルの件数・ピン・斜体のプレビュータブ・リソースの数字・caffeinate の着地は `pmset -g assertions`）。push の権限。
 
+
+## 2026-09-26（続き 2）— O13 / O14 / O16 / O17 / O20〜O23 / O27 をクラウドで積んだ
+
+- やったこと（`claude/sleepy-hamilton-gesxiq`・項目ごとに 1 コミット）: 準備スクリプトの skip / 失敗した Task の「準備をやり直す」「準備を飛ばして始める」（O20）/ fan-out（1 つの依頼をエージェントごとの Task へ・舞台に並べる・O23）/ アカウント切替（O14）/ ニュースの行から Task へ（O13）/ 片付け（O22）/ repo ごとのレシピ `.necoder/recipes/*.md` を `/` 補完へ（O16）/ **質問カードの自由入力**（Other 欄・PC とスマホ・O17）/ **サブエージェントの手順を親の Task の下に畳む**（O17）/ **設定の検索**（O27）/ **スマホへ完了の push**（relay の host・O13）/ Fleet サイドバーの **Task の絞り込み**・レールの**パス / ブランチ名のコピー**（O21）/ **repo ごとの既定の起点** `task_base`（O20）/ **表示言語をその場で切り替え**（O27）。
+- 学び/罠:
+  - Claude の AskUserQuestion のブリッジ（`@agentclientprotocol/claude-agent-acp` の `elicitation.js`）は、質問ごとに `question_<n>` + `question_<n>_custom` を送り、**何も required にしない**。答えの読み方もブリッジ側が決める: 単一選択は「選ばずに書いた = 答え」「選んで書いた = メモ（`annotations.notes`）」、複数選択は選択に足す。necoder は「Other 欄の名前で書いた文字を返す」だけでよい（`npm pack` で本体を読んで確かめた）。
+  - サブエージェントの手順は、既定の（transcript の拡張を広告しない）クライアントには**ツール呼び出しだけ**が `_meta.claudeCode.parentToolUseId` 付きで来る（本文・思考は来ない）。親の Step が transcript に居ない手順は普通の手順のまま出す（行が消えて見えなくなるのを避ける）。
+  - 入力欄がカードと一緒に消える操作（質問の Enter 確定）は、フォーカスを composer へ戻さないとキーが迷子になる。窓を持たない購読（`cx.subscribe`）からは `cx.active_window()` の `update` で戻せる（効果の flush 中は窓が借りられていない）。
+  - GPUI の `.hidden()`（`display: none`）はレイアウトから外れ、flex の gap も取らない。設定の検索は「当たらない行を hidden にし、当たった数を `Cell` で数えてページごと出し分ける」で、行を組む関数を書き直さずに済んだ。
+  - `git show HEAD:<file> | rustfmt --check` は当てにならない（標準入力だと差があっても通ることがある）。整形の基準はファイルのまま `rustfmt --check <file>` で確かめる。workspace.rs を標準入力で整形したら無関係の行（テスト・`mod` の並び）まで変わったので戻した。
+  - relay の node テストは `npm ci --omit=dev --ignore-scripts` だけで回る（wrangler / sharp を入れない）。`web-push` の `sendNotification` は既定 export のオブジェクトなので、テストで差し替えられる。
+- 検証: `cargo check --workspace --all-targets` 警告 0。`cargo test --workspace --no-fail-fast` 824 通過・落ちるのは Linux で元から落ちる 2 件だけ（PDF のネイティブビューア・Web タブ）。relay の `node --test` 17 本。実画面・macOS 実機・iPhone の push・SSH は未確認。
+- 次: 実機（mac）で見た目を確かめる（質問カードの入力欄・サブエージェントの見出し `NECODER_SUBAGENT_PROBE=collapsed|expanded`・設定の検索・Fleet の絞り込み・表示言語）。iPhone で完了の push が届くか。push の権限。
