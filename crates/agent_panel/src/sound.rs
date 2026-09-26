@@ -43,7 +43,8 @@ const SYSTEM_SOUND: &str = "/System/Library/Sounds/Glass.aiff";
 
 /// 設定値どおりに鳴らす。`choice` は `settings.sound_done` / `sound_waiting`:
 /// 同梱の声（[`SOUND_VOICES`]）/ `"system"`（OS の音）/ `"off"` / 任意のファイルパス。
-pub fn play(cue: Cue, choice: &str) {
+/// `volume_percent` は `settings.sound_volume`（0〜100・0 は鳴らさない）。
+pub fn play(cue: Cue, choice: &str, volume_percent: u64) {
     // 再生手段があるのは今のところ macOS だけ。無い環境では一時ファイルも作らない。
     if !cfg!(target_os = "macos") {
         return;
@@ -52,12 +53,25 @@ pub fn play(cue: Cue, choice: &str) {
     if choice.is_empty() || choice == "off" {
         return;
     }
+    let Some(volume) = afplay_volume(volume_percent) else {
+        return;
+    };
     // 展開（ファイル書き込み）まで含めてスレッドの中でやる＝UI スレッドを I/O で止めない。
     std::thread::spawn(move || {
         if let Some(path) = resolve(cue, &choice) {
-            play_file(&path);
+            play_file(&path, &volume);
         }
     });
+}
+
+/// 設定の % を `afplay -v` の倍率へ（1 = 音源そのまま）。0 % は `None` = 鳴らさない。
+/// 100 % を超える値は 100 % に抑える（音源より大きくはしない＝割れさせない）。
+fn afplay_volume(percent: u64) -> Option<String> {
+    match percent.min(100) {
+        0 => None,
+        100 => Some("1".to_string()),
+        percent => Some(format!("{:.2}", percent as f64 / 100.0)),
+    }
 }
 
 /// 設定値を再生するファイルへ解決する。鳴らさないときは `None`。
@@ -126,11 +140,12 @@ fn materialize(voice: &str, cue: Cue) -> Option<PathBuf> {
 }
 
 /// 子の終了まで待って刈り取る（zombie を残さない）。呼び出し元が短命スレッドの中。
-fn play_file(path: &PathBuf) {
+fn play_file(path: &PathBuf, volume: &str) {
     #[cfg(target_os = "macos")]
     {
         use std::process::{Command, Stdio};
         let result = Command::new("/usr/bin/afplay")
+            .args(["-v", volume])
             .arg(path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -141,12 +156,24 @@ fn play_file(path: &PathBuf) {
         }
     }
     #[cfg(not(target_os = "macos"))]
-    let _unused = path;
+    let _unused = (path, volume);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_maps_to_an_afplay_factor_and_zero_is_silent() {
+        assert_eq!(afplay_volume(0), None);
+        assert_eq!(afplay_volume(100).as_deref(), Some("1"));
+        assert_eq!(afplay_volume(40).as_deref(), Some("0.40"));
+        assert_eq!(
+            afplay_volume(250).as_deref(),
+            Some("1"),
+            "音源より大きくしない"
+        );
+    }
 
     #[test]
     fn off_and_empty_do_not_resolve_to_a_file() {

@@ -88,7 +88,7 @@ impl Workspace {
                     "sound_waiting" => agent_panel::sound::Cue::Waiting,
                     _ => agent_panel::sound::Cue::Done,
                 };
-                agent_panel::sound::play(cue, value);
+                agent_panel::sound::play(cue, value, settings::get(cx).sound_volume);
             }
             settings::SettingsViewEvent::OpenSettingsJson => {
                 // subscription は Window を持たないので effect cycle 末尾へ送る（pending shell effects）。

@@ -610,6 +610,7 @@ emacs 風の ⌃ キーはエディタでは使えない（矢印キーで代用
 | `locale` | OS に従う | UI の言語（日本語 / 英語） |
 | `submit_on_enter` | `false` | Enter で送信するか |
 | `sound_done` / `sound_waiting` | `nyaan` | 完了 / 入力待ちの通知音 |
+| `sound_volume` | `100` | 通知音の大きさ（%・0 で鳴らさない・mac） |
 | `system_notifications` | `true` | 見ていない窓のエージェントの完了・失敗・承認待ち・質問待ちを OS の通知センターにも出す |
 | `confirm_quit` | `running` | ⌘Q・窓を閉じる時、動いているものがあれば確認する（`never` = しない） |
 | `keep_awake` | `working` | エージェントが作業している間はスリープさせない（`off` = しない・mac と Windows） |
