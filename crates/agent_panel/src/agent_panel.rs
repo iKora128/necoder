@@ -641,12 +641,106 @@ struct PendingElicitation {
     /// 選択式フィールド群（acp_client が非対応フォームを弾いた後のもの）。
     fields: Vec<ElicitationField>,
     /// 各フィールドの現在の選択（field.name → 選んだ値の並び）。単一選択は要素 1 つ、複数選択は
-    /// 押すたびに増減する。**全フィールドが 1 つ以上選ばれる**と「これで回答」が有効になる。
+    /// 押すたびに増減する。**全フィールドが答え済み**（選んだ・または自由入力に書いた）になると
+    /// 「これで回答」が有効になる。
     selections: std::collections::BTreeMap<String, Vec<String>>,
+    /// 自由入力欄（O17）: field.name → 入力欄。Other 欄の付いた質問だけ持つ。
+    custom_inputs: std::collections::BTreeMap<String, Entity<EditorView>>,
+    /// 自由入力の写し（field.name → 今の文字）。描画と「答えたか」の判定はこちらを読む。
+    custom_texts: std::collections::BTreeMap<String, String>,
     /// 回答チャネル。`Some(選択群)`=Accept / `None`=Decline。drop でも Decline。
     respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
     /// 質問が来た時刻（要対応の並び = 待ちの長い順・O12）。
     since: std::time::Instant,
+    /// 自由入力欄の購読（写しと Enter での確定）。質問と一緒に消える。
+    _subscriptions: Vec<gpui::Subscription>,
+}
+
+impl PendingElicitation {
+    /// 質問カードの状態を作る。Other 欄の付いた質問には自由入力欄（O17）を用意し、入力の写しと
+    /// Enter での確定を購読する。`thread_id` は購読から質問のスレッドを引き直す鍵（添字はずれる）。
+    fn new(
+        thread_id: &str,
+        message: String,
+        fields: Vec<ElicitationField>,
+        respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
+        theme: &Theme,
+        color: Hsla,
+        cx: &mut Context<AgentPanel>,
+    ) -> Self {
+        let mut custom_inputs = std::collections::BTreeMap::new();
+        let mut subscriptions = Vec::new();
+        for field in fields.iter().filter(|field| field.custom_answer.is_some()) {
+            // Enter で確定（IME の変換確定の Enter では Submit を出さない）。
+            let input = cx.new(|cx| EditorView::plain(theme.clone(), color, true, cx));
+            let (thread, name) = (thread_id.to_string(), field.name.clone());
+            subscriptions.push(cx.observe(&input, move |panel, input, cx| {
+                let text = input.read(cx).plain_text();
+                panel.note_custom_answer(&thread, &name, text, cx);
+            }));
+            let thread = thread_id.to_string();
+            subscriptions.push(cx.subscribe(
+                &input,
+                move |panel, _input, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Submit) {
+                        panel.submit_elicitation_from_input(&thread, cx);
+                    }
+                },
+            ));
+            custom_inputs.insert(field.name.clone(), input);
+        }
+        Self {
+            remote_id: new_thread_id(),
+            message: SharedString::from(message),
+            fields,
+            selections: std::collections::BTreeMap::new(),
+            custom_inputs,
+            custom_texts: std::collections::BTreeMap::new(),
+            respond,
+            since: std::time::Instant::now(),
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// 自由入力の今の文字（前後の空白を除く・書いていなければ空）。
+    fn custom_text(&self, field_name: &str) -> &str {
+        self.custom_texts
+            .get(field_name)
+            .map(|text| text.trim())
+            .unwrap_or("")
+    }
+
+    /// 質問に答えたか: 選んだ、または自由入力に書いた（O17）。
+    fn answered(&self, field: &ElicitationField) -> bool {
+        let picked = self
+            .selections
+            .get(&field.name)
+            .is_some_and(|values| !values.is_empty());
+        picked || (field.custom_answer.is_some() && !self.custom_text(&field.name).is_empty())
+    }
+
+    /// 返す答え。全フィールドが答え済みの時だけ `Some`。選択は選んだ質問だけ、自由入力は書いた
+    /// 質問だけ Other 欄の名前で入れる（両方あれば両方。どう読むかはエージェント側が決める）。
+    fn answers(&self) -> Option<Vec<(String, Vec<String>)>> {
+        if !self.fields.iter().all(|field| self.answered(field)) {
+            return None;
+        }
+        let mut answers = Vec::new();
+        for field in &self.fields {
+            if let Some(values) = self
+                .selections
+                .get(&field.name)
+                .filter(|values| !values.is_empty())
+            {
+                answers.push((field.name.clone(), values.clone()));
+            }
+            let text = self.custom_text(&field.name);
+            if let Some(custom_name) = field.custom_answer.as_ref().filter(|_| !text.is_empty()) {
+                answers.push((custom_name.clone(), vec![text.to_string()]));
+            }
+        }
+        Some(answers)
+    }
 }
 
 struct PendingPermission {
@@ -3099,28 +3193,96 @@ PYEOF"#;
         }
     }
 
-    /// Elicitation を確定送信する（全フィールドが 1 つ以上選択済みの時のみ Accept を返す）。
+    /// Elicitation を確定送信する（アクティブスレッド・全フィールドが答え済みの時のみ Accept を返す）。
     fn submit_elicitation(&mut self, cx: &mut Context<Self>) {
-        if let Some(thread) = self.threads.get_mut(self.active) {
-            let all_selected = thread.pending_elicitation.as_ref().is_some_and(|pending| {
-                pending.fields.iter().all(|field| {
-                    pending
-                        .selections
-                        .get(&field.name)
-                        .is_some_and(|values| !values.is_empty())
-                })
-            });
-            if !all_selected {
-                return; // 未選択のフィールドがある＝まだ確定しない
-            }
-            if let Some(pending) = thread.pending_elicitation.take() {
-                let selections: Vec<(String, Vec<String>)> =
-                    pending.selections.into_iter().collect();
-                pending.respond.unbounded_send(Some(selections)).ok();
-            }
+        self.submit_elicitation_at(self.active, cx);
+    }
+
+    /// `thread_index` の質問を確定送信する。答えていない質問が残っていれば何もせず false。
+    fn submit_elicitation_at(&mut self, thread_index: usize, cx: &mut Context<Self>) -> bool {
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return false;
+        };
+        let Some(answers) = thread
+            .pending_elicitation
+            .as_ref()
+            .and_then(PendingElicitation::answers)
+        else {
+            return false; // 答えていない質問がある＝まだ確定しない
+        };
+        if let Some(pending) = thread.pending_elicitation.take() {
+            pending.respond.unbounded_send(Some(answers)).ok();
         }
         self.sync_running_registry(cx);
         cx.notify();
+        true
+    }
+
+    /// 自由入力欄の文字が変わった（O17）。写しを更新して描き直す（「これで回答」の有効/無効が変わる）。
+    fn note_custom_answer(
+        &mut self,
+        thread_id: &str,
+        field_name: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self
+            .thread_index_by_id(thread_id)
+            .and_then(|index| self.threads[index].pending_elicitation.as_mut())
+        else {
+            return;
+        };
+        if pending.custom_texts.get(field_name) != Some(&text) {
+            pending.custom_texts.insert(field_name.to_string(), text);
+            cx.notify();
+        }
+    }
+
+    /// 自由入力欄の Enter（O17）: その質問を確定する。確定したら入力欄はカードと一緒に消えるので、
+    /// フォーカスを composer へ戻す（迷子にするとキーが届かない）。
+    fn submit_elicitation_from_input(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        let Some(index) = self.thread_index_by_id(thread_id) else {
+            return;
+        };
+        if !self.submit_elicitation_at(index, cx) {
+            return;
+        }
+        let composer = self.composer.read(cx).focus_handle(cx);
+        if let Some(window) = cx.active_window() {
+            // Err = 窓が閉じた。戻す先も無い。
+            window
+                .update(cx, |_, window, cx| window.focus(&composer, cx))
+                .ok();
+        }
+    }
+
+    /// アクティブスレッドの質問カードの自由入力欄にフォーカスがあるか。
+    fn elicitation_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.threads
+            .get(self.active)
+            .and_then(|thread| thread.pending_elicitation.as_ref())
+            .is_some_and(|pending| {
+                pending
+                    .custom_inputs
+                    .values()
+                    .any(|input| input.read(cx).focus_handle(cx).contains_focused(window, cx))
+            })
+    }
+
+    /// カードを押して質問が片付いた時、自由入力欄に居たフォーカスを composer へ戻す。
+    fn refocus_after_elicitation(
+        &self,
+        input_had_focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let resolved = self
+            .threads
+            .get(self.active)
+            .is_none_or(|thread| thread.pending_elicitation.is_none());
+        if input_had_focus && resolved {
+            self.focus_composer(window, cx);
+        }
     }
 
     /// Elicitation に答えない（Decline）。カードを畳み、エージェントには「回答なし」を返す。
@@ -4406,6 +4568,7 @@ PYEOF"#;
                     .focus_handle(cx)
                     .contains_focused(window, cx)
             })
+            || self.elicitation_input_focused(window, cx)
     }
 
     fn save_active_draft(&mut self, cx: &App) {
@@ -4911,6 +5074,7 @@ PYEOF"#;
             label: "方針".to_string(),
             options: vec![choice("ropey で進める"), choice("sum-tree で進める")],
             multi: false,
+            custom_answer: Some("question_0_custom".to_string()),
         };
         self.on_event(
             self.active,
@@ -6506,14 +6670,15 @@ PYEOF"#;
             } => {
                 // 選択肢付き質問。回答するまで composer 上部にカードを出す（承認カードと同じ Blocked）。
                 thread.digest = digest_tail(&message).or(thread.digest.take());
-                thread.pending_elicitation = Some(PendingElicitation {
-                    remote_id: new_thread_id(),
-                    message: SharedString::from(message),
+                thread.pending_elicitation = Some(PendingElicitation::new(
+                    &thread.id,
+                    message,
                     fields,
-                    selections: std::collections::BTreeMap::new(),
                     respond,
-                    since: std::time::Instant::now(),
-                });
+                    &self.theme,
+                    thread.color,
+                    cx,
+                ));
             }
             AgentEvent::PermissionRequest {
                 title,
@@ -9532,8 +9697,9 @@ PYEOF"#;
     /// 承認待ちの権限リクエストのカード（composer の直上）。ツール名・編集差分・許可/拒否ボタン。
     /// ターンをブロックしているので、transcript がスクロールしても常に見える位置に置く。
     /// Elicitation（選択肢付き質問）を composer 上部にカードで出す。質問文 + 各フィールドの
-    /// 選択肢ボタン + フッタ（「これで回答」・常に「答えない」）。
-    /// 単一選択フィールドが 1 つだけの質問は押した瞬間に確定送信するので「これで回答」を出さない。
+    /// 選択肢ボタン + 自由入力欄（Other 欄の付いた質問だけ・O17）+ フッタ（「これで回答」・常に「答えない」）。
+    /// 単一選択フィールドが 1 つだけの質問は押した瞬間に確定送信するので「これで回答」を出さない
+    /// （自由入力に書いた時だけ出す。書いた文字は押した案に添えて送る）。
     /// 複数選択（トグル）を含む質問は、選び終わりがこちらから判らないので必ず確定ボタンを出す。
     /// 空なら None。
     fn render_elicitation_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -9544,14 +9710,14 @@ PYEOF"#;
         let message = pending.message.clone();
         let fields = pending.fields.clone();
         let selections = pending.selections.clone();
-        // ラベルと確定ボタンが要るのは「フィールドが複数」か「トグルで選ぶフィールドが在る」時。
-        let needs_submit = fields.len() > 1 || fields.iter().any(|field| field.multi);
-        let labelled = needs_submit;
-        let all_selected = fields.iter().all(|field| {
-            selections
-                .get(&field.name)
-                .is_some_and(|values| !values.is_empty())
-        });
+        // ラベルが要るのは「フィールドが複数」か「トグルで選ぶフィールドが在る」時。
+        let labelled = fields.len() > 1 || fields.iter().any(|field| field.multi);
+        // 確定ボタンはそれに加えて、自由入力に書いた時（選ばずに書いた答えは押して送る・O17）。
+        let wrote_custom = fields
+            .iter()
+            .any(|field| !pending.custom_text(&field.name).is_empty());
+        let needs_submit = labelled || wrote_custom;
+        let all_selected = pending.answers().is_some();
 
         let mut card = div()
             .id("elicitation-card")
@@ -9609,18 +9775,60 @@ PYEOF"#;
                         .child(SharedString::from(option.title.clone()))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
-                            cx.listener(move |panel, _, _window, cx| {
+                            cx.listener(move |panel, _, window, cx| {
                                 cx.stop_propagation();
+                                let input_had_focus = panel.elicitation_input_focused(window, cx);
                                 panel.choose_elicitation_option(
                                     field_name.clone(),
                                     value.clone(),
                                     cx,
                                 );
+                                panel.refocus_after_elicitation(input_had_focus, window, cx);
                             }),
                         ),
                 );
             }
             group = group.child(options_row);
+            // 自由入力欄（O17）: 選ぶ代わりに書く・選んだ案に添える（複数選択なら足す）。
+            if let Some(input) = pending.custom_inputs.get(&field.name) {
+                let blank = pending
+                    .custom_texts
+                    .get(&field.name)
+                    .is_none_or(|text| text.is_empty());
+                let written = !pending.custom_text(&field.name).is_empty();
+                let placeholder = if field.multi {
+                    i18n::t!("agent.elicitation_custom_multi")
+                } else {
+                    i18n::t!("agent.elicitation_custom_single")
+                };
+                group = group.child(
+                    div()
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(if written { color } else { theme.border })
+                        .bg(theme.bg1)
+                        .text_size(px(11.5))
+                        .child(
+                            div()
+                                .relative()
+                                // 高さを与えないと 1 行ぶんに潰れて文字が出ない（検索欄と同じ）。
+                                .h(px(18.))
+                                .child(input.clone())
+                                .when(blank, |slot| {
+                                    slot.child(
+                                        div()
+                                            .absolute()
+                                            .top(px(0.))
+                                            .left(px(1.))
+                                            .text_color(theme.fg2)
+                                            .child(SharedString::from(placeholder)),
+                                    )
+                                }),
+                        ),
+                );
+            }
             card = card.child(group);
         }
 
@@ -9642,9 +9850,11 @@ PYEOF"#;
                     .child(SharedString::from(i18n::t!("agent.elicitation_submit")))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|panel, _, _window, cx| {
+                        cx.listener(|panel, _, window, cx| {
                             cx.stop_propagation();
+                            let input_had_focus = panel.elicitation_input_focused(window, cx);
                             panel.submit_elicitation(cx);
+                            panel.refocus_after_elicitation(input_had_focus, window, cx);
                         }),
                     ),
             );
@@ -9659,9 +9869,11 @@ PYEOF"#;
                 .child(SharedString::from(i18n::t!("agent.elicitation_decline")))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(|panel, _, _window, cx| {
+                    cx.listener(|panel, _, window, cx| {
                         cx.stop_propagation();
+                        let input_had_focus = panel.elicitation_input_focused(window, cx);
                         panel.decline_elicitation(cx);
+                        panel.refocus_after_elicitation(input_had_focus, window, cx);
                     }),
                 ),
         );
@@ -13224,6 +13436,169 @@ PYEOF"#;
         }
     }
 
+    /// 単一選択の質問 1 つ（`custom` = Other 欄の名前）。
+    fn single_question(name: &str, options: &[&str], custom: Option<&str>) -> ElicitationField {
+        ElicitationField {
+            name: name.to_string(),
+            label: name.to_string(),
+            options: options
+                .iter()
+                .map(|option| elicitation_choice(option))
+                .collect(),
+            multi: false,
+            custom_answer: custom.map(str::to_string),
+        }
+    }
+
+    /// `index` 番のスレッドへ届いた体の質問（実物と同じ組み立て・自由入力欄の購読つき）。
+    fn test_question(
+        panel: &AgentPanel,
+        index: usize,
+        message: &str,
+        fields: Vec<ElicitationField>,
+        respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
+        cx: &mut Context<AgentPanel>,
+    ) -> PendingElicitation {
+        let thread = &panel.threads[index];
+        PendingElicitation::new(
+            &thread.id,
+            message.to_string(),
+            fields,
+            respond,
+            &panel.theme,
+            thread.color,
+            cx,
+        )
+    }
+
+    /// 質問カードの自由入力（O17）: 書いた文字は Other 欄の名前で返り、選択と両方あれば両方返る。
+    /// 選ばずに書いた答えは Enter で確定し、フォーカスは composer へ戻る（入力欄はカードと消える）。
+    /// 空白だけは書いたうちに数えない。
+    #[gpui::test]
+    fn question_cards_take_a_written_answer(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "elicit_custom");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        cx.update(|window, _cx| window.activate_window());
+        let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
+        let ask = |fields: Vec<ElicitationField>,
+                   respond: mpsc::UnboundedSender<Option<Vec<(String, Vec<String>)>>>,
+                   cx: &mut gpui::VisualTestContext| {
+            panel.update(cx, |panel, cx| {
+                let index = panel.active;
+                let pending = test_question(panel, index, "どうする？", fields, respond, cx);
+                panel.threads[index].pending_elicitation = Some(pending);
+            });
+        };
+        let input = |field: &str, cx: &mut gpui::VisualTestContext| {
+            panel.read_with(cx, |panel, _| {
+                panel.threads[panel.active]
+                    .pending_elicitation
+                    .as_ref()
+                    .and_then(|pending| pending.custom_inputs.get(field).cloned())
+                    .expect("Other 欄の付いた質問には入力欄がある")
+            })
+        };
+        let write = |field: &str, text: &str, cx: &mut gpui::VisualTestContext| {
+            let editor = input(field, cx);
+            editor.update(cx, |editor, cx| editor.set_plain_text(text, cx));
+            cx.run_until_parked();
+        };
+
+        // ① 選ばずに書いて Enter = 書いた文字が答え。
+        ask(
+            vec![single_question(
+                "question_0",
+                &["A", "B"],
+                Some("question_0_custom"),
+            )],
+            respond.clone(),
+            cx,
+        );
+        let editor = input("question_0", cx);
+        cx.update(|window, cx| {
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        write("question_0", "   ", cx);
+        panel.update(cx, |panel, cx| {
+            assert!(
+                !panel.submit_elicitation_at(panel.active, cx),
+                "空白だけでは答えたうちに入らない"
+            );
+        });
+        write("question_0", "  C でいく ", cx);
+        editor.update(cx, |_, cx| cx.emit(ComposerEvent::Submit));
+        cx.run_until_parked();
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![(
+                "question_0_custom".to_string(),
+                vec!["C でいく".to_string()]
+            )])
+        );
+        panel.update_in(cx, |panel, window, cx| {
+            assert!(panel.threads[panel.active].pending_elicitation.is_none());
+            assert!(
+                panel.composer.read(cx).focus_handle(cx).is_focused(window),
+                "確定したら composer へ戻る"
+            );
+        });
+
+        // ② 書いてから案を押す = 案が答え・書いた文字は添えて返す（押した瞬間に確定は従来どおり）。
+        ask(
+            vec![single_question(
+                "question_0",
+                &["A", "B"],
+                Some("question_0_custom"),
+            )],
+            respond.clone(),
+            cx,
+        );
+        write("question_0", "急ぎで", cx);
+        panel.update(cx, |panel, cx| {
+            panel.choose_elicitation_option("question_0".into(), "B".into(), cx);
+        });
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![
+                ("question_0".to_string(), vec!["B".to_string()]),
+                ("question_0_custom".to_string(), vec!["急ぎで".to_string()]),
+            ])
+        );
+
+        // ③ 質問が 2 つ: 片方は選び、片方は書くだけでも答えそろう。
+        ask(
+            vec![
+                single_question("question_0", &["A", "B"], Some("question_0_custom")),
+                single_question("question_1", &["X", "Y"], Some("question_1_custom")),
+            ],
+            respond,
+            cx,
+        );
+        panel.update(cx, |panel, cx| {
+            panel.choose_elicitation_option("question_0".into(), "A".into(), cx);
+            assert!(
+                !panel.submit_elicitation_at(panel.active, cx),
+                "2 つ目がまだ"
+            );
+        });
+        write("question_1", "Z にしたい", cx);
+        panel.update(cx, |panel, cx| {
+            assert!(panel.submit_elicitation_at(panel.active, cx));
+        });
+        assert_eq!(
+            answers.try_recv().ok().flatten(),
+            Some(vec![
+                ("question_0".to_string(), vec!["A".to_string()]),
+                (
+                    "question_1_custom".to_string(),
+                    vec!["Z にしたい".to_string()]
+                ),
+            ])
+        );
+        let _ = std::fs::remove_file(settings_path);
+    }
+
     /// 複数選択の質問は **押すたびにトグル**し、確定は「これで回答」でだけ起きること。
     /// 単一選択と同じ「押した瞬間に送る」だと 1 つ目を選んだ時点で答えが確定してしまう。
     #[gpui::test]
@@ -13233,10 +13608,11 @@ PYEOF"#;
         let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
         panel.update(cx, |panel, cx| {
             let index = panel.active;
-            panel.threads[index].pending_elicitation = Some(PendingElicitation {
-                remote_id: "q1".into(),
-                message: "入れる機能は？".into(),
-                fields: vec![ElicitationField {
+            let pending = test_question(
+                panel,
+                index,
+                "入れる機能は？",
+                vec![ElicitationField {
                     name: "question_0".into(),
                     label: "機能".into(),
                     options: vec![
@@ -13245,11 +13621,12 @@ PYEOF"#;
                         elicitation_choice("LSP"),
                     ],
                     multi: true,
+                    custom_answer: None,
                 }],
-                selections: Default::default(),
                 respond,
-                since: std::time::Instant::now(),
-            });
+                cx,
+            );
+            panel.threads[index].pending_elicitation = Some(pending);
             assert!(
                 panel.render_elicitation_card(cx).is_some(),
                 "複数選択の質問もカードで出る（以前は acp_client が弾いて出なかった）"
@@ -13293,19 +13670,15 @@ PYEOF"#;
         let (respond, mut answers) = mpsc::unbounded::<Option<Vec<(String, Vec<String>)>>>();
         panel.update(cx, |panel, cx| {
             let index = panel.active;
-            panel.threads[index].pending_elicitation = Some(PendingElicitation {
-                remote_id: "q2".into(),
-                message: "どちらにする？".into(),
-                fields: vec![ElicitationField {
-                    name: "question_0".into(),
-                    label: "方針".into(),
-                    options: vec![elicitation_choice("A"), elicitation_choice("B")],
-                    multi: false,
-                }],
-                selections: Default::default(),
+            let pending = test_question(
+                panel,
+                index,
+                "どちらにする？",
+                vec![single_question("question_0", &["A", "B"], None)],
                 respond,
-                since: std::time::Instant::now(),
-            });
+                cx,
+            );
+            panel.threads[index].pending_elicitation = Some(pending);
             panel.choose_elicitation_option("question_0".into(), "B".into(), cx);
             assert!(panel.threads[index].pending_elicitation.is_none());
         });
