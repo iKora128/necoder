@@ -108,6 +108,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let index = self.work_switch_target(index);
+        // スレッド履歴は開いた時のプロジェクトの物（O15）。⌘1..9 などで切り替えたら閉じる
+        // （前のプロジェクトのパネルへ開いてしまわない）。
+        if self.overlays.thread_history.take().is_some() {
+            cx.notify();
+        }
         // Chat からプロジェクトを選んだら Chat を抜ける（同じプロジェクトでも「そこへ戻る」）。
         if self.chat_mode() {
             self.set_chat_mode(false, window, cx);
@@ -309,6 +314,7 @@ impl Workspace {
     /// フォーカスを持っているか。持っている間はフォーカス追従で奪わない（overlay の操作を壊さない）。
     fn chrome_owns_focus(&self, window: &Window) -> bool {
         self.overlays.picker.is_some()
+            || self.overlays.thread_history.is_some()
             || self.overlays.color_picker.is_some()
             || self.overlays.ssh_input.is_some()
             || self.overlays.askpass.is_some()

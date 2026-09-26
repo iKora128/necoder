@@ -79,7 +79,7 @@ agent:
   rename_thread_cancel: キャンセル
   rename_thread_confirm: 保存
   history_tip: スレッド履歴
-  history_placeholder: 過去のスレッドを開く…
+  history_placeholder: 過去のスレッドを開く・全スレッドの本文を検索…
   new_thread_tip: 新規スレッド  ⌘⇧A
   full_screen_tip: AI を全画面（エディタを畳む）  ⌘⇧⏎
   view_list: 縦リストで表示
@@ -136,6 +136,38 @@ agent:
   goal_status_complete: 達成
   goal_status_limited: 上限で停止
   more_lines: … （他 %{n} 行）
+  history_section_threads: このプロジェクトのスレッド
+  history_section_agent: "エージェントの過去の会話 — %{agent}"
+  history_section_agent_remote: "エージェントの過去の会話 — %{agent}（%{host}）"
+  history_section_matches: 本文の一致（全スレッド）
+  history_agent_loading: 一覧を読み込んでいます…
+  history_agent_unsupported: "%{agent} は会話の一覧に対応していません"
+  history_agent_failed: "一覧を読めませんでした: %{error}"
+  history_agent_empty: このプロジェクトの会話はありません（necoder で開いた物を除く）
+  history_threads_empty: このプロジェクトのスレッドはありません
+  history_matches_searching: 検索中…
+  history_matches_empty: 一致はありません
+  history_matches_failed: "検索できませんでした: %{error}"
+  history_scope_chat: Chat
+  history_footer: ↑↓ で選ぶ · ⏎ で開く · esc で閉じる
+  history_project_closed: "このウィンドウで開いていないプロジェクトの会話です（%{project}）"
+  history_untitled_session: （題のない会話）
+  history_loading: 過去の会話を読み込んでいます…
+  history_omitted: "以前の %{count} 件は省略しました"
+  thread_menu_rename: 名前を変更
+  thread_menu_continue: 新しいセッションで続ける
+  thread_menu_continue_tip: 今の会話の要点（直近のやり取りと頼んだこと）を前置きにして、同じタブで新しいセッションを始めます。文脈が大きくなった時に。実行中・承認待ちの間は使えません
+  thread_menu_close: 閉じる
+  handoff_note: 新しいセッションで続けます。次の送信に前の会話の抜粋を付けます
+  handoff_divider: ここから新しいセッション
+  handoff_unavailable: 新しいセッションで続けられません（会話がない・実行中・承認待ち）
+  handoff_preamble_intro: "（necoder より: 前のセッションの文脈が大きくなったため、この新しいセッションで続きをお願いします。以下は前の会話の抜粋です。要約ではないので、細部はファイルや git の状態で確かめてください）"
+  handoff_preamble_requests: "## 人が頼んだこと（古い順）"
+  handoff_preamble_recent: "## 直近のやり取り"
+  handoff_preamble_you: "### 人"
+  handoff_preamble_agent: "### エージェント"
+  handoff_preamble_files: "## このスレッドで編集したファイル"
+  handoff_preamble_request_now: "## 今回の依頼"
 hunk:
   stage: この hunk を stage
   revert: この hunk を巻き戻す
@@ -231,6 +263,7 @@ cmd:
   prev_thread: "AI: 前のスレッド"
   remote_ssh: "リモート: SSH ホストに接続"
   thread_history: "AI: スレッド履歴"
+  continue_in_new_session: "AI: 新しいセッションで続ける"
   report_bug: "ヘルプ: バグを報告"
   about: "ヘルプ: necoder について"
   check_updates: "ヘルプ: アップデートを確認"

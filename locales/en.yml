@@ -78,7 +78,7 @@ agent:
   rename_thread_cancel: Cancel
   rename_thread_confirm: Save
   history_tip: Thread history
-  history_placeholder: Open a past thread…
+  history_placeholder: Open a past thread or search every thread's messages…
   new_thread_tip: New thread  ⌘⇧A
   full_screen_tip: AI full screen (hide the editor)  ⌘⇧⏎
   view_list: List view
@@ -135,6 +135,38 @@ agent:
   goal_status_complete: Complete
   goal_status_limited: Limit reached
   more_lines: "… (+%{n} lines)"
+  history_section_threads: Threads in this project
+  history_section_agent: "Agent's past conversations — %{agent}"
+  history_section_agent_remote: "Agent's past conversations — %{agent} (%{host})"
+  history_section_matches: Message matches (all threads)
+  history_agent_loading: Loading the list…
+  history_agent_unsupported: "%{agent} can't list its conversations"
+  history_agent_failed: "Couldn't load the list: %{error}"
+  history_agent_empty: No conversations for this project (besides those opened in necoder)
+  history_threads_empty: No threads in this project
+  history_matches_searching: Searching…
+  history_matches_empty: No matches
+  history_matches_failed: "Couldn't search: %{error}"
+  history_scope_chat: Chat
+  history_footer: ↑↓ to select · ⏎ to open · esc to close
+  history_project_closed: "This conversation belongs to a project not open in this window (%{project})"
+  history_untitled_session: (Untitled conversation)
+  history_loading: Loading the past conversation…
+  history_omitted: "%{count} earlier items omitted"
+  thread_menu_rename: Rename
+  thread_menu_continue: Continue in a new session
+  thread_menu_continue_tip: Start a new session in the same tab, prefixed with the gist of this conversation (the latest exchange and what you asked for). Use it when the context has grown large. Unavailable while running or waiting for approval
+  thread_menu_close: Close
+  handoff_note: Continuing in a new session. Your next message carries excerpts of the previous conversation
+  handoff_divider: New session from here
+  handoff_unavailable: "Can't continue in a new session (no conversation, running, or waiting for approval)"
+  handoff_preamble_intro: "(From necoder — the previous session's context grew large, so please continue in this new session. Below are excerpts from the previous conversation. They are not a summary, so check files and git for details.)"
+  handoff_preamble_requests: "## What the user asked for (oldest first)"
+  handoff_preamble_recent: "## Latest exchange"
+  handoff_preamble_you: "### User"
+  handoff_preamble_agent: "### Agent"
+  handoff_preamble_files: "## Files edited in this thread"
+  handoff_preamble_request_now: "## The new request"
 hunk:
   stage: Stage this hunk
   revert: Revert this hunk
@@ -230,6 +262,7 @@ cmd:
   prev_thread: "AI: Previous thread"
   remote_ssh: "Remote: Connect to SSH Host"
   thread_history: "AI: Thread history"
+  continue_in_new_session: "AI: Continue in a new session"
   report_bug: "Help: Report a Bug"
   about: "Help: About necoder"
   check_updates: "Help: Check for Updates"

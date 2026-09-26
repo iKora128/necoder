@@ -351,6 +351,12 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   （コマンド一覧は `session/new` 直後、会話名はターン終了の数秒後に届く。読まずにいると次の prompt まで
   UI に出ない・O2）。`session/load` の再生は本文を捨て、状態（コマンド一覧・会話名・目標）だけ流す。
   会話は `session/load`（エージェントが `loadSession` を広告するとき・id は `storage.thread_sessions`）で引き継ぐ。
+  例外はエージェント側の過去の会話を開いた時（O15・`SessionPreferences::replay_history`）で、再生を
+  `acp_client::history::ReplayLog` が発話・本文・ツールへ畳み、load 成功後に `AgentEvent::HistoryReplayed` で 1 回だけ
+  渡す（live のイベントとしては流さない＝二重に載らない）。一覧（`session/list`）は `history::list_sessions_on` が
+  **一覧のためだけにエージェントを 1 本**起こして読む（`session/new` も prompt もしない）。どちらも `Host` 越しなので、
+  SSH のプロジェクトではリモートのエージェント（＝リモートのアカウントの会話）に訊く。「新しいセッションで続ける」で
+  忘れた会話 id・引き継げずに替わった id は `storage.thread_past_sessions` に残し、履歴の重複除けに使う。
   LSP/PTY の同種の再 spawn は未着手（ROADMAP M9 残件）。
 - SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。
   GUI 起動の ssh には TTY が無いので、パスワード / passphrase / host key 確認だけは

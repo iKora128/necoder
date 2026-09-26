@@ -226,6 +226,42 @@ pub struct DailyUsage {
     pub cost_usd: Option<f64>,
 }
 
+/// 全文検索の 1 件（[`Storage::search_thread_turns`]・O15）。1 スレッド 1 件＝そのスレッドで一致した
+/// 最新の発話。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnSearchHit {
+    pub thread_id: String,
+    pub thread_name: String,
+    /// スレッドの持ち主（`threads.project`）。TaskSpace の stable id・Chat は `necoder:chat`・
+    /// 旧版の行はプロジェクトの表示名。
+    pub project: String,
+    pub color_index: i64,
+    pub archived: bool,
+    /// 一致した turn の行 id（開くとき、そこまで読み込む目印）。
+    pub turn_id: i64,
+    /// `user` / `agent`。
+    pub role: String,
+    /// 一致の周りの抜粋（最初の一致の [`SEARCH_EXCERPT_BEFORE`] 文字前から最大
+    /// [`SEARCH_EXCERPT_CHARS`] 文字）。本文を丸ごとは返さない（長い発話で結果が膨らまない）。
+    /// 前後を切った側には `…` を付ける。
+    pub excerpt: String,
+    /// 一致した turn の時刻（unix ms）。
+    pub created_at: i64,
+    /// スレッドの開始時刻と、人が最後に入力した時刻（unix ms・[`Storage::load_all_threads`] と同じ導出）。
+    /// 一致からスレッドを開く時、復元したスレッドのメタに使う。
+    pub thread_created_at: i64,
+    pub thread_last_input_at: Option<i64>,
+}
+
+/// 全文検索の抜粋: 最初の一致の何文字前から切り出すか。
+pub const SEARCH_EXCERPT_BEFORE: i64 = 80;
+/// 全文検索の抜粋: 1 件で返す最大の文字数（本文を丸ごと返さない＝結果の大きさに上限を置く）。
+pub const SEARCH_EXCERPT_CHARS: i64 = 400;
+/// 全文検索の 1 回で返す件数の上限（呼び手の `limit` もこれで頭打ちにする）。
+pub const SEARCH_MAX_HITS: usize = 200;
+/// 検索語の長さの上限（文字）。これより長い語は頭だけで探す。
+pub const SEARCH_QUERY_MAX_CHARS: usize = 200;
+
 /// Task lifecycle の追記イベント。wait/orchestration は transient な UI state ではなく
 /// このログと `task_spaces.phase` を読む。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -828,11 +864,21 @@ impl Storage {
     /// スレッドが最後に使った ACP セッション id を記録する（`session/new` / `session/load` の直後）。
     /// 次にそのスレッドのエージェントを立ち上げ直すとき（SSH 切断後・再起動後）、エージェントが
     /// `loadSession` を広告していればこの id で会話を引き継ぐ（2026-09-08）。
+    ///
+    /// 前の id と違えば、前の id は「このスレッドの過去の会話」として残す（O15・[`Self::load_known_sessions`]）。
     pub fn set_thread_session(&self, thread_id: &str, acp_session: &str) -> Result<()> {
         let (thread_id, acp_session) = (thread_id.to_string(), acp_session.to_string());
         let now = unix_ms();
         self.run(move |conn| {
             futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT OR IGNORE INTO thread_past_sessions (acp_session, thread_id, retired_at)
+                     SELECT acp_session, thread_id, ?3 FROM thread_sessions
+                     WHERE thread_id = ?1 AND acp_session != ?2",
+                    (thread_id.as_str(), acp_session.as_str(), now),
+                )
+                .await
+                .context("thread_past_sessions への退避に失敗")?;
                 conn.execute(
                     "INSERT INTO thread_sessions (thread_id, acp_session, updated_at)
                      VALUES (?1, ?2, ?3)
@@ -842,6 +888,64 @@ impl Storage {
                 .await
                 .context("thread_sessions の upsert に失敗")?;
                 Ok(())
+            })
+        })
+    }
+
+    /// スレッドの ACP セッション id を忘れる（O15「新しいセッションで続ける」）。次にこのスレッドの
+    /// エージェントを立ち上げるとき、前の会話を `session/load` せず `session/new` から始める。
+    /// 忘れた id は「このスレッドの過去の会話」として残す（本文は transcript に在る＝履歴ビューで
+    /// エージェントの一覧に重ねて出さない）。
+    pub fn clear_thread_session(&self, thread_id: &str) -> Result<()> {
+        let thread_id = thread_id.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT OR IGNORE INTO thread_past_sessions (acp_session, thread_id, retired_at)
+                     SELECT acp_session, thread_id, ?2 FROM thread_sessions WHERE thread_id = ?1",
+                    (thread_id.as_str(), now),
+                )
+                .await
+                .context("thread_past_sessions への退避に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_sessions WHERE thread_id = ?1",
+                    (thread_id.as_str(),),
+                )
+                .await
+                .context("thread_sessions の削除に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// necoder のスレッドが握っている ACP セッション id の全部（O15）。いまの会話と、新しいセッションで
+    /// 続けた・引き継げずに替わった前の会話の両方。スレッドの行が在るものだけ（行の無い id は、開いて
+    /// すぐ閉じた等で本体が残っていない）。履歴ビューで「エージェントの過去の会話」から necoder に
+    /// 既にある会話を除くのに使う。
+    pub fn load_known_sessions(&self) -> Result<Vec<String>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT thread_sessions.acp_session FROM thread_sessions
+                         JOIN threads ON threads.id = thread_sessions.thread_id
+                         UNION
+                         SELECT thread_past_sessions.acp_session FROM thread_past_sessions
+                         JOIN threads ON threads.id = thread_past_sessions.thread_id",
+                        (),
+                    )
+                    .await
+                    .context("thread_sessions の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("thread_sessions 行の取得に失敗")?
+                {
+                    result.push(row.get_value(0)?.as_text().context("acp_session")?.clone());
+                }
+                Ok(result)
             })
         })
     }
@@ -1089,18 +1193,47 @@ impl Storage {
         })
     }
 
-    /// 本文に `query` を含むスレッド（`project` 列が `scope` のものだけ・新しい順）。
+    /// 本文に `query` を含むスレッド（`project` 列が `scope` のものだけ・閉じたものを除く・新しい順）。
     /// 戻り値: (thread_id, 一致した turn の本文)。1 スレッド 1 件（最新の一致）。
     ///
-    /// Chat の全文検索（`docs/CHAT.md` §4.1）。チャットの件数と本文量なら `LIKE` で足りる
-    /// （FTS の表を足すと書き込みのたびに索引を更新する費用が常時かかる）。
+    /// Chat の全文検索（`docs/CHAT.md` §4.1）。中身は [`Self::search_thread_turns`] をスコープで絞った物。
     pub fn search_turns(
         &self,
         scope: &str,
         query: &str,
         limit: usize,
     ) -> Result<Vec<(String, String)>> {
-        let scope = scope.to_string();
+        Ok(self
+            .search_thread_turns(Some(scope), false, query, limit)?
+            .into_iter()
+            .map(|hit| (hit.thread_id, hit.excerpt))
+            .collect())
+    }
+
+    /// 全スレッドの全文検索（O15）。本文（人の発話とエージェントの本文）に `query` を含むスレッドを、
+    /// 一致した発話の新しい順に返す。1 スレッド 1 件（そのスレッドで最新の一致）。
+    ///
+    /// `scope` = `threads.project` で絞る（`None` = Editor / Fleet / Chat の全部）。
+    /// `include_archived` = 閉じたスレッドも含める（履歴ビューは含める・Chat の一覧は含めない）。
+    ///
+    /// 件数と本文量なら `LIKE` で足りる（FTS の表を足すと書き込みのたびに索引を更新する費用が常時
+    /// かかる）。一致した turn をスレッドごとに 1 回の走査で集めてから、スレッドのメタを引く。
+    ///
+    /// **上限**: 件数は `limit`（最大 [`SEARCH_MAX_HITS`]）、1 件の大きさは抜粋の
+    /// [`SEARCH_EXCERPT_CHARS`] 文字（本文は SQL の中で切り、丸ごと読み出さない）、検索語は
+    /// [`SEARCH_QUERY_MAX_CHARS`] 文字まで。空の語は何も返さない（全件にならない）。
+    pub fn search_thread_turns(
+        &self,
+        scope: Option<&str>,
+        include_archived: bool,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<TurnSearchHit>> {
+        let query: String = query.trim().chars().take(SEARCH_QUERY_MAX_CHARS).collect();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scope = scope.map(str::to_string);
         // `LIKE` のワイルドカードを字面として扱う（`100%` で検索して全件が返るのを防ぐ）。
         let pattern = format!(
             "%{}%",
@@ -1109,33 +1242,100 @@ impl Storage {
                 .replace('%', "\\%")
                 .replace('_', "\\_")
         );
-        let limit = limit as i64;
+        let limit = limit.min(SEARCH_MAX_HITS) as i64;
         self.run(move |conn| {
             futures::executor::block_on(async {
+                // 抜粋の位置: `LIKE` と同じく ASCII だけ大文字小文字を無視して最初の一致を探す
+                // （SQLite の lower() も ASCII だけを畳む）。`substr` / `instr` / `length` は文字単位。
                 let mut rows = conn
                     .query(
-                        "SELECT turns.thread_id, turns.content
-                         FROM turns JOIN threads ON threads.id = turns.thread_id
-                         WHERE threads.project = ?1 AND threads.archived = 0
-                           AND turns.role IN ('user', 'agent')
-                           AND turns.content LIKE ?2 ESCAPE '\\'
-                           AND turns.id = (
-                               SELECT MAX(inner_turns.id) FROM turns AS inner_turns
-                               WHERE inner_turns.thread_id = turns.thread_id
-                                 AND inner_turns.role IN ('user', 'agent')
-                                 AND inner_turns.content LIKE ?2 ESCAPE '\\')
-                         ORDER BY turns.id DESC LIMIT ?3",
-                        (scope.as_str(), pattern.as_str(), limit),
+                        "SELECT hits.thread_id, threads.name, threads.project, threads.color_index,
+                                threads.archived, turns.id, turns.role,
+                                substr(turns.content, hits.excerpt_start, ?6),
+                                hits.excerpt_start, length(turns.content), turns.created_at,
+                                threads.created_at,
+                                (SELECT MAX(inputs.created_at) FROM turns AS inputs
+                                  WHERE inputs.thread_id = threads.id AND inputs.role = 'user')
+                         FROM (SELECT grouped.thread_id, grouped.turn_id,
+                                      max(1, instr(lower(matched.content), lower(?5)) - ?7)
+                                          AS excerpt_start
+                               FROM (SELECT thread_id, MAX(id) AS turn_id FROM turns
+                                     WHERE role IN ('user', 'agent')
+                                       AND content LIKE ?1 ESCAPE '\\'
+                                     GROUP BY thread_id) AS grouped
+                               JOIN turns AS matched ON matched.id = grouped.turn_id) AS hits
+                         JOIN turns ON turns.id = hits.turn_id
+                         JOIN threads ON threads.id = hits.thread_id
+                         WHERE (?2 IS NULL OR threads.project = ?2)
+                           AND (?3 = 1 OR threads.archived = 0)
+                         ORDER BY hits.turn_id DESC LIMIT ?4",
+                        (
+                            pattern.as_str(),
+                            scope.as_deref(),
+                            i64::from(include_archived),
+                            limit,
+                            query.as_str(),
+                            SEARCH_EXCERPT_CHARS,
+                            SEARCH_EXCERPT_BEFORE,
+                        ),
                     )
                     .await
                     .context("turns の検索に失敗")?;
                 let mut result = Vec::new();
                 while let Some(row) = rows.next().await.context("検索結果の取得に失敗")? {
-                    let thread_id = row.get_value(0)?.as_text().context("thread_id")?.clone();
-                    let content = row.get_value(1)?.as_text().context("content")?.clone();
-                    result.push((thread_id, content));
+                    let excerpt = row.get_value(7)?.as_text().context("excerpt")?.clone();
+                    let start = *row.get_value(8)?.as_integer().context("excerpt start")?;
+                    let total = *row.get_value(9)?.as_integer().context("content length")?;
+                    let shown = excerpt.chars().count() as i64;
+                    let mut marked = String::with_capacity(excerpt.len() + 6);
+                    if start > 1 {
+                        marked.push('…');
+                    }
+                    marked.push_str(&excerpt);
+                    if start - 1 + shown < total {
+                        marked.push('…');
+                    }
+                    result.push(TurnSearchHit {
+                        thread_id: row.get_value(0)?.as_text().context("thread_id")?.clone(),
+                        thread_name: row.get_value(1)?.as_text().context("name")?.clone(),
+                        project: row.get_value(2)?.as_text().context("project")?.clone(),
+                        color_index: *row.get_value(3)?.as_integer().context("color")?,
+                        archived: *row.get_value(4)?.as_integer().context("archived")? != 0,
+                        turn_id: *row.get_value(5)?.as_integer().context("turn id")?,
+                        role: row.get_value(6)?.as_text().context("role")?.clone(),
+                        excerpt: marked,
+                        created_at: *row.get_value(10)?.as_integer().context("created_at")?,
+                        thread_created_at: *row
+                            .get_value(11)?
+                            .as_integer()
+                            .context("thread created_at")?,
+                        thread_last_input_at: row.get_value(12)?.as_integer().copied(),
+                    });
                 }
                 Ok(result)
+            })
+        })
+    }
+
+    /// スレッドの turn のうち、行 id が `turn_id` 以上のものの数（O15）。全文検索で一致した発話を開く
+    /// とき、復元する turn の数をそれが入るところまで広げるのに使う（既定の直近 200 件の外にありうる）。
+    pub fn count_turns_since(&self, thread_id: &str, turn_id: i64) -> Result<i64> {
+        let thread_id = thread_id.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT COUNT(*) FROM turns WHERE thread_id = ?1 AND id >= ?2",
+                        (thread_id.as_str(), turn_id),
+                    )
+                    .await
+                    .context("turns の数え上げに失敗")?;
+                let row = rows
+                    .next()
+                    .await
+                    .context("turns の数の取得に失敗")?
+                    .context("COUNT の行が無い")?;
+                Ok(*row.get_value(0)?.as_integer().context("count")?)
             })
         })
     }
@@ -1152,6 +1352,12 @@ impl Storage {
                 )
                 .await
                 .context("thread_sessions の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_past_sessions WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_past_sessions の削除に失敗")?;
                 conn.execute(
                     "DELETE FROM thread_custom_names WHERE thread_id = ?1",
                     (id.as_str(),),
@@ -2203,6 +2409,18 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("thread_sessions 作成に失敗")?;
+    // スレッドの前の会話 id（O15）。「新しいセッションで続ける」・引き継げずに替わった会話の id を
+    // 残す。本文は necoder の transcript に在るので、履歴ビューでエージェントの一覧から除く鍵にする。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_past_sessions (
+            acp_session TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            retired_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("thread_past_sessions 作成に失敗")?;
     // 人が手で付けたスレッド名の印（O2・2026-09-26）。エージェントが送ってくる会話名はこの印の
     // あるスレッドを上書きしない。行が在る＝手動。threads 表を広げない理由は thread_sessions と同じ。
     conn.execute(
@@ -3066,6 +3284,191 @@ mod tests {
                 .is_empty(),
             "閉じたチャットは検索に出ない"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 全スレッドの全文検索（O15）: Editor / Fleet / Chat のスコープを横断し、閉じたスレッドも含め、
+    /// 1 スレッド 1 件（最新の一致）を一致の新しい順に返す。開く位置の手がかり（turn の id）も付く。
+    #[test]
+    fn search_thread_turns_spans_every_scope_and_keeps_archived_threads() {
+        let path = temp_db("search_thread_turns");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        for (id, name, project) in [
+            ("editor", "ビルドの修正", "space:necoder"),
+            ("fleet", "Task 12", "space:task-12"),
+            ("chat", "旅行の相談", "necoder:chat"),
+            ("other", "無関係", "space:necoder"),
+        ] {
+            storage
+                .upsert_thread(id, name, 3, project, None, None, None, 0, 0)
+                .unwrap();
+        }
+        storage
+            .insert_turn("editor", "user", "rope のバグを直して")
+            .unwrap();
+        storage
+            .insert_turn("editor", "step", "Read rope.rs")
+            .unwrap();
+        storage
+            .insert_turn("editor", "agent", "rope の境界を直しました")
+            .unwrap();
+        storage
+            .insert_turn("fleet", "agent", "Rope の索引を足した")
+            .unwrap();
+        storage
+            .insert_turn("chat", "user", "京都で rope ウェイ？")
+            .unwrap();
+        storage.insert_turn("other", "user", "関係ない話").unwrap();
+        storage.archive_thread("fleet").unwrap();
+
+        let hits = storage.search_thread_turns(None, true, "rope", 10).unwrap();
+        let found: Vec<(&str, &str, bool)> = hits
+            .iter()
+            .map(|hit| (hit.thread_id.as_str(), hit.excerpt.as_str(), hit.archived))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("chat", "京都で rope ウェイ？", false),
+                ("fleet", "Rope の索引を足した", true),
+                ("editor", "rope の境界を直しました", false),
+            ],
+            "全スコープ・閉じたものも・大文字小文字は問わない・step は本文ではない"
+        );
+        assert_eq!(hits[2].thread_name, "ビルドの修正");
+        assert!(hits[2].thread_created_at > 0);
+        assert!(
+            hits[2].thread_last_input_at.is_some(),
+            "人の入力があるスレッド"
+        );
+        assert_eq!(hits[1].thread_last_input_at, None, "人の入力が無いスレッド");
+        assert_eq!(hits[2].project, "space:necoder");
+        assert_eq!(hits[2].color_index, 3);
+        assert_eq!(hits[2].role, "agent");
+        // 一致した発話より後ろ（その発話を含む）の数 = 開くときに読み込む最小の turn 数。
+        assert_eq!(
+            storage
+                .count_turns_since("editor", hits[2].turn_id)
+                .unwrap(),
+            1
+        );
+        let first_editor_turn = hits[2].turn_id - 2;
+        assert_eq!(
+            storage
+                .count_turns_since("editor", first_editor_turn)
+                .unwrap(),
+            3
+        );
+
+        let closed_excluded = storage
+            .search_thread_turns(None, false, "rope", 10)
+            .unwrap();
+        assert!(closed_excluded.iter().all(|hit| hit.thread_id != "fleet"));
+        let scoped = storage
+            .search_thread_turns(Some("space:necoder"), true, "rope", 10)
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].thread_id, "editor");
+        assert_eq!(
+            storage
+                .search_thread_turns(None, true, "rope", 1)
+                .unwrap()
+                .len(),
+            1,
+            "件数の上限が効く"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 全文検索の上限（O15）: 1 件は一致の周りの抜粋だけ（本文を丸ごと返さない）・件数は頭打ち・
+    /// 空の語は何も返さない。
+    #[test]
+    fn search_thread_turns_returns_bounded_excerpts() {
+        let path = temp_db("search_excerpts");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("long", "長い会話", 0, "p", None, None, None, 0, 0)
+            .unwrap();
+        let long = format!("{}Rope の索引{}", "あ".repeat(2_000), "い".repeat(2_000));
+        storage.insert_turn("long", "agent", &long).unwrap();
+        let hits = storage.search_thread_turns(None, true, "rope", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        let excerpt = &hits[0].excerpt;
+        assert!(
+            excerpt.starts_with('…') && excerpt.ends_with('…'),
+            "{excerpt}"
+        );
+        assert!(excerpt.contains("Rope の索引"), "一致を含む: {excerpt}");
+        assert!(
+            excerpt.chars().count() as i64 <= SEARCH_EXCERPT_CHARS + 2,
+            "抜粋は上限の長さまで: {}",
+            excerpt.chars().count()
+        );
+        assert!(
+            excerpt.find("Rope").expect("一致の位置") > 0,
+            "一致より少し前から切り出す"
+        );
+
+        for number in 0..5 {
+            let id = format!("t{number}");
+            storage
+                .upsert_thread(&id, &id, 0, "p", None, None, None, 0, 0)
+                .unwrap();
+            storage.insert_turn(&id, "user", "rope の話").unwrap();
+        }
+        assert_eq!(
+            storage
+                .search_thread_turns(None, true, "rope", usize::MAX)
+                .unwrap()
+                .len(),
+            6,
+            "大きすぎる limit は上限で頭打ち（ここでは全件）"
+        );
+        assert!(storage
+            .search_thread_turns(None, true, "   ", 10)
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// necoder が握るセッション id（O15）: スレッドの行があるものだけ。消せば次は新しい会話になる。
+    #[test]
+    fn known_sessions_need_a_thread_row_and_can_be_cleared() {
+        let path = temp_db("known_sessions");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("kept", "kept", 0, "p", None, None, None, 0, 0)
+            .unwrap();
+        storage.set_thread_session("kept", "session-a").unwrap();
+        storage.set_thread_session("orphan", "session-b").unwrap();
+        assert_eq!(
+            storage.load_known_sessions().unwrap(),
+            vec!["session-a".to_string()],
+            "スレッドの行が無い id は数えない"
+        );
+        // 引き継げずに替わった前の会話・新しいセッションで続けた前の会話も「既にある会話」。
+        storage.set_thread_session("kept", "session-c").unwrap();
+        storage.clear_thread_session("kept").unwrap();
+        let mut known = storage.load_known_sessions().unwrap();
+        known.sort();
+        assert_eq!(
+            known,
+            vec!["session-a".to_string(), "session-c".to_string()],
+            "前の会話 id は残る（一覧に重ねて出さない）"
+        );
+        assert!(
+            storage
+                .load_thread_sessions()
+                .unwrap()
+                .iter()
+                .all(|(thread_id, _)| thread_id != "kept"),
+            "次は新しい会話で始まる"
+        );
+        storage.delete_thread("kept").unwrap();
+        assert!(storage.load_known_sessions().unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
     }
 

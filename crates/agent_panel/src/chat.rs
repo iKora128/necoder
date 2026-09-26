@@ -222,7 +222,8 @@ impl AgentPanel {
             let color_index = (0..12)
                 .find(|index| thread_color(*index) == row.color)
                 .unwrap_or(0);
-            let mut thread = thread_from_storage(&storage, id, &row.name, color_index, cx);
+            let mut thread =
+                thread_from_storage(&storage, id, &row.name, color_index, RESTORED_TURNS, cx);
             thread.agent = "Claude Code".into();
             thread.permission_mode = SharedString::from(chat_core::preset::PERMISSION_MODE);
             thread.last_input_at_ms = Some(row.sort_at_ms);
@@ -568,7 +569,8 @@ impl AgentPanel {
                     .find(|row| row.id == id)
                     .map(|row| row.name.to_string())
                     .unwrap_or_default();
-                let entries = thread_from_storage(&storage, id, &name, 0, cx).entries;
+                let entries =
+                    thread_from_storage(&storage, id, &name, 0, RESTORED_TURNS, cx).entries;
                 let markdown = (!entries.is_empty()).then(|| chat_markdown(&name, &entries));
                 (name, markdown)
             }
@@ -599,7 +601,7 @@ fn chat_markdown(name: &str, entries: &[Entry]) -> String {
                 ));
             }
             Entry::Step { tool, .. } => markdown.push_str(&format!("\n> ⏺ {tool}\n")),
-            Entry::Thinking(_) | Entry::Checkpoint { .. } => {}
+            Entry::Thinking(_) | Entry::Checkpoint { .. } | Entry::Notice(_) => {}
         }
     }
     markdown
@@ -903,7 +905,7 @@ fn new_chat_thread(color_index: usize, cx: &App) -> Thread {
 }
 
 /// 一致した語の前後を 1 行に畳んで返す（一覧の行に収まる長さ）。
-fn snippet_around(content: &str, lowercase_query: &str) -> SharedString {
+pub fn snippet_around(content: &str, lowercase_query: &str) -> SharedString {
     let flat: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
     let characters: Vec<char> = flat.chars().collect();
     let lowered: Vec<char> = flat.to_lowercase().chars().collect();
