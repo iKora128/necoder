@@ -205,9 +205,6 @@ pub struct Settings {
     /// 任命は settings.json の明示編集（既定ドリフト禁止の原則・DECISIONS §8）。
     /// 任命すると Blocked(15s)/Done/Failed 遷移で IntegrationSpace の Captain スレッドが 1 ターン起きる。
     pub captain_agent: Option<String>,
-    /// 編隊の目標文（管制ヘッダに常時表示・P3）。プロジェクト設定 `.necoder/settings.json` に
-    /// 書けばリポジトリごとの目標になる（ファイルが真実の原則＝計画の「ledger」は settings で満たす）。
-    pub fleet_goal: Option<String>,
     /// スレッドタブの見せ方（"bar" 横タブ / "list" 縦リスト）。Agent パネルのスイッチャがここへ保存し、
     /// 次の起動でも保つ。設定画面のトグル化は後続（真実はこの値・画面はこれを操作するだけ）。
     pub agent_tabs_view: String,
@@ -287,7 +284,6 @@ impl Default for Settings {
             reduce_motion: false,
             tier2_summaries: true,
             captain_agent: None,
-            fleet_goal: None,
             agent_tabs_view: "bar".to_string(),
             work_tabs_position: "top".to_string(),
             default_agent: "Claude Code".to_string(),

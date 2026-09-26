@@ -1275,8 +1275,8 @@ impl Storage {
         })
     }
 
-    /// トークン台帳（M12-13）: スレッド別の累計と、今日（unix ms で日付一致）の turn 数。
-    /// 台帳の本体は threads.tokens_used（ACP の実測累計）で、ここでは一覧をそのまま返す。
+    /// トークン台帳（M12-13）: 全スレッド（アーカイブ済みも含む）の `(id, 名前, tokens_used)` を
+    /// `tokens_used`（ACP の実測の累計）の多い順に返すだけ。日付での絞り込みや turn 数の集計はしない。
     pub fn token_ledger(&self) -> Result<Vec<(String, String, i64)>> {
         self.run(move |conn| {
             futures::executor::block_on(async {
