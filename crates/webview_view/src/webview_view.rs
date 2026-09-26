@@ -18,7 +18,8 @@
 //!
 //! 入口は 3 つ: ローカル HTML（[`WebViewView::local_file`]・`file://`）/ エージェントが書いた HTML を
 //! 閉じ込める artifact（[`WebViewView::sandboxed`]・[`sandbox`]）/ 開発サーバを見る Web タブ
-//! （[`WebViewView::localhost`]・[`localhost`]）。移動の線引きと IPC の有無は入口ごとに決まり、
+//! （[`WebViewView::localhost`]・[`localhost`]。ただの HTML ファイルも [`static_server`] の内蔵の配信から
+//! 同じ Web タブで見せる）。移動の線引きと IPC の有無は入口ごとに決まり、
 //! 混ぜない（artifact は IPC 無し・Web タブは最上位が localhost から出ず、IPC は Design Mode の
 //! 知らせだけ＝受け手が [`design::accept_message`] で検める）。
 
@@ -28,6 +29,7 @@ pub mod localhost;
 mod main_frame;
 pub mod sandbox;
 pub mod snapshot;
+pub mod static_server;
 
 use futures::channel::mpsc;
 use futures::StreamExt as _;
