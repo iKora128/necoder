@@ -826,6 +826,7 @@ breadcrumb:
   md_preview: Preview
   md_source: Source
   md_preview_tip: Toggle rendered preview  ⌘⇧V
+  md_side_preview_tip: "Show the preview beside the source (updates as you type)  %{key}"
   html_preview: Preview
   html_source: Source
   html_preview_tip: Open in the system WebView  ⌘⇧V
@@ -1217,6 +1218,7 @@ key:
   outdent: Outdent
   toggle_soft_wrap: Toggle soft wrap
   toggle_rendered_markdown: Toggle preview
+  toggle_side_preview: Open preview to the side
   move_left: Move left
   move_right: Move right
   move_up: Move up
