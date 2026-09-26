@@ -157,6 +157,58 @@ struct TerminalContent {
     display_offset: usize,
 }
 
+/// CLI（`necoder terminal read`）向けの画面の写し。行末の空白は落としてある。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalScreen {
+    /// 画面より上の scrollback（古い順）。
+    pub scrollback: Vec<String>,
+    /// 画面に見えている行（上から）。
+    pub visible: Vec<String>,
+    /// カーソルの位置（画面の行・列。0 始まり）。
+    pub cursor_line: usize,
+    pub cursor_column: usize,
+    pub exited: bool,
+}
+
+/// term の grid から画面と scrollback を文字にする。`Line(0..)` は画面の先頭から（ユーザーの
+/// スクロール位置に依らない）、`Line(-n)` は scrollback。全角の後ろの詰め物セルは飛ばす。
+fn screen_of<T>(term: &Term<T>, scrollback: usize, exited: bool) -> TerminalScreen {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let row_text = |line: Line| {
+        let row = &grid[line];
+        let mut text = String::new();
+        for column in 0..columns {
+            let cell = &row[Column(column)];
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            text.push(cell.c);
+            if let Some(zerowidth) = cell.zerowidth() {
+                text.extend(zerowidth.iter());
+            }
+        }
+        text.trim_end().to_string()
+    };
+    let history = scrollback.min(grid.history_size());
+    let cursor = grid.cursor.point;
+    TerminalScreen {
+        scrollback: (1..=history)
+            .rev()
+            .map(|offset| row_text(Line(-(offset as i32))))
+            .collect(),
+        visible: (0..grid.screen_lines())
+            .map(|line| row_text(Line(line as i32)))
+            .collect(),
+        cursor_line: cursor.line.0.max(0) as usize,
+        cursor_column: cursor.column.0,
+        exited,
+    }
+}
+
 /// ドラッグ選択の最新スナップショット（ポインタ位置 + そのフレームの描画座標）。
 #[derive(Clone, Copy)]
 struct DragFrame {
@@ -178,8 +230,10 @@ pub struct TerminalView {
     /// OS に変換中の範囲を返すための前編集。PTY には確定するまで送らない。
     marked_text: String,
     marked_selection: Range<usize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     written_input: std::cell::RefCell<Vec<u8>>,
+    /// 最後に PTY から出力が届いた時刻（CLI の `terminal wait` が「出力が N 秒止まった」を判定する）。
+    last_output: std::time::Instant,
     /// マウス左ボタンを押してドラッグ選択中か（move で範囲を延ばす判定）。
     selecting: bool,
     /// ドラッグ選択中の最新ポインタ位置とフレーム座標。ビュー外へ引っ張った時の
@@ -286,8 +340,9 @@ impl TerminalView {
             app_cursor: false,
             marked_text: String::new(),
             marked_selection: 0..0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             written_input: std::cell::RefCell::new(Vec::new()),
+            last_output: std::time::Instant::now(),
             selecting: false,
             drag_frame: None,
             drag_autoscroll_running: false,
@@ -325,8 +380,9 @@ impl TerminalView {
             app_cursor: false,
             marked_text: String::new(),
             marked_selection: 0..0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             written_input: std::cell::RefCell::new(Vec::new()),
+            last_output: std::time::Instant::now(),
             selecting: false,
             drag_frame: None,
             drag_autoscroll_running: false,
@@ -351,7 +407,10 @@ impl TerminalView {
     /// alacritty イベントを処理する（前景・pump から）。Wakeup で再スナップショット。
     fn on_alac_event(&mut self, event: AlacEvent, cx: &mut Context<Self>) {
         match event {
-            AlacEvent::Wakeup => self.sync(cx),
+            AlacEvent::Wakeup => {
+                self.last_output = std::time::Instant::now();
+                self.sync(cx)
+            }
             AlacEvent::Exit => {
                 self.exited = true;
                 cx.notify();
@@ -408,7 +467,7 @@ impl TerminalView {
 
     /// PTY へ入力バイトを送る。
     fn write_bytes(&self, bytes: Vec<u8>) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.written_input.borrow_mut().extend_from_slice(&bytes);
         if let Some(notifier) = &self.notifier {
             notifier.notify(bytes);
@@ -422,6 +481,49 @@ impl TerminalView {
         if !sanitized.is_empty() {
             self.write_bytes(sanitized.into_bytes());
         }
+    }
+
+    /// CLI（`necoder terminal send`）からの入力をそのまま PTY へ送る。`insert_text` と違い改行も送る
+    /// （`\n` は端末の Enter = `\r` に直す）。許可の判断は呼び手（GUI の設定）がする。
+    pub fn send_input(&self, text: &str) {
+        let bytes = text.replace("\r\n", "\r").replace('\n', "\r").into_bytes();
+        if !bytes.is_empty() {
+            self.write_bytes(bytes);
+        }
+    }
+
+    /// 最後に出力が届いてからの時間（CLI の `terminal wait`）。
+    pub fn output_idle(&self) -> std::time::Duration {
+        self.last_output.elapsed()
+    }
+
+    /// シェルが終わっている（PTY を作れなかった端末を含む）。
+    pub fn has_exited(&self) -> bool {
+        self.exited
+    }
+
+    /// 画面に見えている行と、その上の scrollback（最大 `scrollback` 行）を文字で読む
+    /// （CLI の `terminal read`）。ユーザーがスクロールで遡っていても、読むのは今の画面。
+    pub fn read_screen(&self, scrollback: usize) -> TerminalScreen {
+        screen_of(&self.term.lock(), scrollback, self.exited)
+    }
+
+    /// テストで PTY の出力の代わりにバイト列を流し込む（vte を通すので本物の出力と同じ経路で画面に載る）。
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn feed_output_for_test(&mut self, bytes: &[u8]) {
+        let mut parser = alacritty_terminal::vte::ansi::Processor::<
+            alacritty_terminal::vte::ansi::StdSyncHandler,
+        >::new();
+        parser.advance(&mut *self.term.lock(), bytes);
+        self.last_output = std::time::Instant::now();
+    }
+
+    /// テストで、この端末へ送られた入力を読む。
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn written_input_for_test(&self) -> Vec<u8> {
+        self.written_input.borrow().clone()
     }
 
     /// 行列サイズが変わったら term と PTY をリサイズする（prepaint から）。
@@ -1511,6 +1613,37 @@ mod tests {
         // 下方向（負の増分）も対称に畳まれる。
         let (lines, _) = wheel_lines(0.0, -LINE_HEIGHT * 2.5, LINE_HEIGHT);
         assert_eq!(lines, -2);
+    }
+
+    #[test]
+    fn screen_of_reads_visible_lines_and_recent_scrollback() {
+        let (events_tx, _events_rx) = unbounded::<AlacEvent>();
+        let size = TerminalSize {
+            columns: 20,
+            lines: 3,
+        };
+        let config = Config {
+            scrolling_history: 100,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &size, Listener(events_tx));
+        let mut parser = alacritty_terminal::vte::ansi::Processor::<
+            alacritty_terminal::vte::ansi::StdSyncHandler,
+        >::new();
+        parser.advance(&mut term, "one\r\ntwo\r\n猫 three\r\nfour\r\n$ ".as_bytes());
+        let screen = screen_of(&term, 2, false);
+        // 3 行の画面に最後の 3 行、その上に scrollback が古い順で 2 行（要求した分だけ）。
+        assert_eq!(screen.visible, vec!["猫 three", "four", "$"]);
+        assert_eq!(screen.scrollback, vec!["one", "two"]);
+        assert_eq!((screen.cursor_line, screen.cursor_column), (2, 2));
+        // 履歴より多く求めても、ある分だけ。
+        assert_eq!(screen_of(&term, 50, true).scrollback.len(), 2);
+        // ユーザーが遡って見ていても、読むのは今の画面。
+        term.scroll_display(Scroll::Delta(2));
+        assert_eq!(
+            screen_of(&term, 0, false).visible,
+            vec!["猫 three", "four", "$"]
+        );
     }
 
     #[test]

@@ -99,6 +99,20 @@ impl TerminalDock {
         self.detached.get(&id).cloned()
     }
 
+    /// 下ドックのタブの端末（左から）と、その中のアクティブの位置（CLI の `terminal list`）。
+    /// 読み取りだけ＝PTY を起動しない。
+    pub fn tab_terminals(&self) -> (&[Entity<TerminalView>], usize) {
+        (&self.terminals, self.active)
+    }
+
+    /// Fleet の Task カードに置いた端末（id 順・CLI の `terminal list`）。
+    pub fn placed_terminals(&self) -> Vec<(u64, Entity<TerminalView>)> {
+        self.detached
+            .iter()
+            .map(|(id, terminal)| (*id, terminal.clone()))
+            .collect()
+    }
+
     pub fn detached_sessions(&self) -> Vec<u64> {
         self.detached.keys().copied().collect()
     }
