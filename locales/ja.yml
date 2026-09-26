@@ -520,6 +520,7 @@ explorer:
   ctx_duplicate: 複製
   ctx_trash: ゴミ箱に入れる
   ctx_copy_path: パスをコピー
+  ctx_search_folder: フォルダ内を検索
   ctx_stage: ステージ
   ctx_discard: 変更を破棄…
   discard_title: "「%{name}」の変更を破棄しますか？"
@@ -541,6 +542,9 @@ explorer:
   undo_failed: "取り消せませんでした: %{error}"
 searchpanel:
   placeholder: プロジェクトを横断検索…
+  placeholder_scoped: このフォルダの中を検索…
+  scope: "範囲: %{path}"
+  scope_clear: 範囲を外す（プロジェクト全体を検索・空欄で ⌫ でも外せる）
   searching: 検索中…
   results: "%{n} 件 / %{files} ファイル"
   hint_enter: Enter で検索

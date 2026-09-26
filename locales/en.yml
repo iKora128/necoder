@@ -519,6 +519,7 @@ explorer:
   ctx_duplicate: Duplicate
   ctx_trash: Move to trash
   ctx_copy_path: Copy path
+  ctx_search_folder: Find in folder
   ctx_stage: Stage
   ctx_discard: Discard changes…
   discard_title: "Discard changes to “%{name}”?"
@@ -540,6 +541,9 @@ explorer:
   undo_failed: "Couldn't undo: %{error}"
 searchpanel:
   placeholder: Search across project…
+  placeholder_scoped: Search in this folder…
+  scope: "In: %{path}"
+  scope_clear: Clear the folder scope (search the whole project; ⌫ on an empty query also clears it)
   searching: Searching…
   results: "%{n} matches / %{files} files"
   hint_enter: Press Enter to search

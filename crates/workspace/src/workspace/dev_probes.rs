@@ -266,7 +266,8 @@ impl Workspace {
     /// `expand:<dir>` = フォルダを開く / `scroll:<n>` = ツリーを n 行目へ（仮想化の確認）/
     /// `rename:<path>:<新しい名前>` / `newfile:<dir>:<名前>` / `duplicate:<path>` /
     /// `trash:<path>`（**本物のゴミ箱へ入る**。後に `undo` を続けて戻すこと）/ `undo` = ⌘Z 相当 /
-    /// `menu:<path>` = 右クリックメニュー / `discard:<path>` = 変更の破棄の確認。
+    /// `menu:<path>` = 右クリックメニュー / `discard:<path>` = 変更の破棄の確認 /
+    /// `search:<dir>:<クエリ>` = フォルダ内を検索。
     #[cfg(debug_assertions)]
     pub fn debug_explorer_probe(
         &mut self,
@@ -338,6 +339,14 @@ impl Workspace {
             }
             // 確認の「破棄する」を押す（未追跡なら**本物のゴミ箱へ入る**。後に `undo` を続けること）。
             "confirm_discard" => self.confirm_discard(window, cx),
+            // フォルダ内を検索（`search:<dir>:<クエリ>`・クエリ省略可）。
+            "search" => {
+                self.open_folder_search(target, window, cx);
+                if let (Some(panel), false) = (self.search_panel.clone(), value.is_empty()) {
+                    let query = value.to_string();
+                    panel.update(cx, |panel, cx| panel.set_query(query, cx));
+                }
+            }
             "duplicate" => self.duplicate_entry(target, cx),
             "trash" => self.trash_entry(target, window, cx),
             "undo" => {

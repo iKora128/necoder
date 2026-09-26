@@ -832,6 +832,26 @@ impl Workspace {
         self.install_search_panel(panel, window, cx);
     }
 
+    /// エクスプローラの「フォルダ内を検索」（D18）: ⌘⇧F の検索パネルを、そのフォルダに絞った
+    /// 状態で開く（既に開いていれば範囲だけ差し替える）。範囲はパネルのチップで外せる。
+    pub(crate) fn open_folder_search(
+        &mut self,
+        folder: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_context_menu(cx);
+        if self.search_panel.is_none() {
+            self.open_project_search(&ProjectSearch, window, cx);
+        }
+        let Some(panel) = self.search_panel.clone() else {
+            return;
+        };
+        panel.update(cx, |panel, cx| panel.set_scope(Some(folder), cx));
+        window.focus(&panel.read(cx).focus_handle(), cx);
+        cx.notify();
+    }
+
     // ── ⌘F バッファ内検索/置換（M10） ──
 
     pub(crate) fn open_buffer_search(

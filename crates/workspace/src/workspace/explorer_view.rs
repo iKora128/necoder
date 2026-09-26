@@ -1015,6 +1015,23 @@ impl Workspace {
                     }),
                 ),
             );
+            // フォルダ内を検索（D18）: プロジェクトの中のフォルダだけ（検索は root 配下を走る。
+            // root の外へ辿った「フォルダブラウズ」では出さない）。
+            let in_project = self
+                .active_worktree()
+                .is_some_and(|worktree| path.starts_with(worktree.root()));
+            if in_project {
+                let search_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-search-folder", i18n::t!("explorer.ctx_search_folder"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_folder_search(search_path.clone(), window, cx)
+                            }),
+                        ),
+                );
+            }
         } else {
             let open_path = path.clone();
             menu_box = menu_box.child(
