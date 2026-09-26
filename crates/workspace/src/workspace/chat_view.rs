@@ -922,6 +922,28 @@ impl Workspace {
                 ),
             );
         }
+        // 新しいセッションで続ける（O15）: 長くなったチャットを、要点を前置きにして新しい会話で続ける。
+        let continue_id = id.clone();
+        menu_box = menu_box.child(
+            item("chat-ctx-continue", i18n::t!("agent.thread_menu_continue")).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.close_chat_menu(cx);
+                    let continued = this.chat_panel().is_some_and(|panel| {
+                        panel.update(cx, |panel, cx| {
+                            panel.continue_thread_in_new_session(&continue_id, cx)
+                        })
+                    });
+                    if !continued {
+                        this.push_toast(
+                            SharedString::from(i18n::t!("agent.handoff_unavailable")),
+                            this.theme.fg2,
+                            cx,
+                        );
+                    }
+                }),
+            ),
+        );
         let export_id = id.clone();
         menu_box = menu_box.child(
             item("chat-ctx-export", i18n::t!("chat.export_markdown")).on_mouse_down(

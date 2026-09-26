@@ -126,6 +126,7 @@ agent:
   more_lines: "… (+%{n} lines)"
   history_section_threads: Threads in this project
   history_section_agent: "Agent's past conversations — %{agent}"
+  history_section_agent_remote: "Agent's past conversations — %{agent} (%{host})"
   history_section_matches: Message matches (all threads)
   history_agent_loading: Loading the list…
   history_agent_unsupported: "%{agent} can't list its conversations"
@@ -134,6 +135,7 @@ agent:
   history_threads_empty: No threads in this project
   history_matches_searching: Searching…
   history_matches_empty: No matches
+  history_matches_failed: "Couldn't search: %{error}"
   history_scope_chat: Chat
   history_footer: ↑↓ to select · ⏎ to open · esc to close
   history_project_closed: "This conversation belongs to a project not open in this window (%{project})"

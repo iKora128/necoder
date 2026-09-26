@@ -81,9 +81,6 @@ pub struct ProjectSession {
     pub(crate) picker_worktree_rows: Vec<PathBuf>,
     pub(crate) picker_ssh_hosts: Vec<host::SshConfigHost>,
     pub(crate) picker_ssh_recent: Vec<String>,
-    /// スレッド履歴 Picker の行データ (id, name, color_index, created_at_ms, last_input_at_ms)。
-    /// 時刻は復元時に Thread へ引き継ぐ（「いつスタート/最終入力」表示・M14）。
-    pub(crate) picker_history: Vec<(String, String, i64, i64, Option<i64>)>,
     /// 「＋」統一オープンの行データ（id → 動作）。[`OpenRow`] を参照。
     pub(crate) picker_open_rows: Vec<OpenRow>,
     pub(crate) todo_panel: Entity<TodoPanel>,
@@ -225,7 +222,6 @@ impl Workspace {
             picker_worktree_rows: Vec::new(),
             picker_ssh_hosts: Vec::new(),
             picker_ssh_recent: Vec::new(),
-            picker_history: Vec::new(),
             picker_open_rows: Vec::new(),
             todo_panel,
             pending_open_history: false,
@@ -729,7 +725,6 @@ impl Workspace {
                 picker_worktree_rows: Vec::new(),
                 picker_ssh_hosts: Vec::new(),
                 picker_ssh_recent: Vec::new(),
-                picker_history: Vec::new(),
                 picker_open_rows: Vec::new(),
                 todo_panel,
                 pending_open_history: false,
@@ -856,6 +851,7 @@ impl Workspace {
                 about: std::env::var_os("NECODER_ABOUT").map(|_| cx.focus_handle()),
                 usage_popover: None,
                 usage_stats: None,
+                thread_history: None,
                 project_flash: None,
                 project_flash_gen: 0,
             },

@@ -127,6 +127,7 @@ agent:
   more_lines: … （他 %{n} 行）
   history_section_threads: このプロジェクトのスレッド
   history_section_agent: "エージェントの過去の会話 — %{agent}"
+  history_section_agent_remote: "エージェントの過去の会話 — %{agent}（%{host}）"
   history_section_matches: 本文の一致（全スレッド）
   history_agent_loading: 一覧を読み込んでいます…
   history_agent_unsupported: "%{agent} は会話の一覧に対応していません"
@@ -135,6 +136,7 @@ agent:
   history_threads_empty: このプロジェクトのスレッドはありません
   history_matches_searching: 検索中…
   history_matches_empty: 一致はありません
+  history_matches_failed: "検索できませんでした: %{error}"
   history_scope_chat: Chat
   history_footer: ↑↓ で選ぶ · ⏎ で開く · esc で閉じる
   history_project_closed: "このウィンドウで開いていないプロジェクトの会話です（%{project}）"

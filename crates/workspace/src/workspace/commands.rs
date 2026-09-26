@@ -203,6 +203,10 @@ impl CommandRegistry {
                 action_name: "workspace::ThreadHistory",
             },
             CommandEntry {
+                label_key: "cmd.continue_in_new_session",
+                action_name: "workspace::ContinueInNewSession",
+            },
+            CommandEntry {
                 label_key: "cmd.report_bug",
                 action_name: "workspace::ReportBug",
             },
