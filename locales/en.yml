@@ -669,6 +669,17 @@ ipc:
   err_unknown_method: "Unknown method: %{name}"
   err_bad_json: "Can't parse JSON: %{detail}"
   err_gui_timeout: GUI response timed out
+  err_no_active_task: No Task is selected in the GUI (Chat is open or no project is open)
+  err_active_is_integration: "The selection in the GUI is the integration space (%{title}), not a Task"
+  err_terminal_required: terminal (a handle or active) is required
+  err_terminal_not_found: "Terminal not found: %{handle} (get the handles again with `ne terminal list`)"
+  err_no_active_terminal: The selected project has no terminal in the bottom dock
+  err_terminal_send_disabled: Sending to terminals is not allowed (turn on "Let the CLI type into terminals" in Settings › Behavior & editor)
+  err_text_required: text is required
+  err_diff_paths_required: left and right (absolute paths of the two files to compare) are required
+  err_not_a_file: "Not a file: %{path}"
+  err_read_file: "Can't read %{path} (%{error})"
+  err_no_project: No project is open
 crash:
   notice: ⚠ Crashed last time — click to report
 menu:

@@ -2,13 +2,14 @@
 //! 一覧（`list`）。
 //!
 //! 置き場に置くのは入口だけ（`agent_skills::stub_skill_md`）で、使い方の本文はこの `get` が出す。
-//! 本文のコマンド一覧は `fleet::FLEET_COMMANDS`・`mcp::tool_schemas`・`TaskPhase::ALL`・
-//! `cli_shim::PASSTHROUGH_SUBCOMMANDS` から組み立てる＝コマンドを足せば本文にも出て、
+//! 本文のコマンド一覧は `fleet::FLEET_COMMANDS`・`terminal::TERMINAL_COMMANDS`・`mcp::tool_schemas`・
+//! `TaskPhase::ALL`・`cli_shim::PASSTHROUGH_SUBCOMMANDS` から組み立てる＝コマンドを足せば本文にも出て、
 //! 無いコマンドやフラグは本文に出ない（手で書いた説明が実装とずれない）。
 //! 手法の出典: stablyai/orca@646e9a5 の `docs/site/content/docs/cli/skills.mdx`（MIT。
 //! `orca skills get` が版に合った本文を出す形）。文面は necoder の実装から独立に書いた。
 
 use crate::fleet::{ACTIVITIES, FLEET_COMMANDS};
+use crate::terminal::TERMINAL_COMMANDS;
 use agent_skills::{InstallOutcome, SkillAgent, SkillScan, SkillScope, StubState};
 use anyhow::{Context as _, Result};
 use serde_json::Value;
@@ -424,16 +425,24 @@ necoder {version} · この本文は {binary} が、この版の実装から出�
 - 頼まれない限り `ne config set` で設定を変えない
 - Captain として動いている時は、自分でコードを書かない・ファイルを編集しない（指示と采配だけ）
 
+## Task の指し方（`<task>`）
+
+- id（`ne fleet create` の出力の `id`）か `id:<id>`
+- `branch:<ブランチ>`（`task/` は省ける）・`name:<名前>`（Task の名前と完全一致）
+- `active` = GUI で選択中の Task（要 GUI）
+- 前置きなしは id → ブランチ → 名前の順に探す。ブランチと名前は、今いるフォルダのリポジトリの Task だけから探す。1 つに絞れなければ候補を出して失敗する
+- 統合先（main）は id で指した時だけ選べる
+
 ## よく使う流れ
 
-1. 現況を読む: `ne fleet list .` と `ne fleet digest <task-id>`
-2. Task を切る: `ne fleet create . \"<名前>\"`（出力の JSON の `id` を以後の `<task-id>` に使う）
-3. エージェントを起こす: `ne fleet spawn-agent <task-id> [agent] [prompt...]`（要 GUI）
-4. 待つ: `ne fleet wait <task-id> review_ready`（phase）・`ne fleet wait <task-id> idle`（activity）
-5. レビュー: 統合先（main の worktree）で `ne fleet review <task-id>` → merge_ready なら人間に Integrate を頼む
+1. 現況を読む: `ne fleet list .` と `ne fleet digest <task>`
+2. Task を切る: `ne fleet create . \"<名前>\"`（出力の JSON の `id` か、その名前で以後の `<task>` を指す）
+3. エージェントを起こす: `ne fleet spawn-agent <task> [agent] [prompt...]`（要 GUI）
+4. 待つ: `ne fleet wait <task> review_ready`（phase）・`ne fleet wait <task> idle`（activity）
+5. レビュー: 統合先（main の worktree）で `ne fleet review <task>` → merge_ready なら人間に Integrate を頼む
 
-- 自分の Task の id は、`ne fleet list .` の中で `root` が今の作業フォルダと同じ行の `id`
-- GUI で動いているエージェントの working / blocked / review_ready は necoder が自動で付ける。それ以外を伝える時は `ne fleet status <task-id> <phase> \"<要約>\"`
+- 自分の Task（今いる worktree）はブランチで指せる: `ne fleet status \"branch:$(git branch --show-current)\" review_ready \"<要約>\"`
+- GUI で動いているエージェントの working / blocked / review_ready は necoder が自動で付ける。それ以外を伝える時は `ne fleet status <task> <phase> \"<要約>\"`
 
 ## コマンド
 
@@ -447,8 +456,15 @@ necoder {version} · この本文は {binary} が、この版の実装から出�
     for command in FLEET_COMMANDS {
         out.push_str(&fleet_command_line(command));
     }
+    for command in TERMINAL_COMMANDS {
+        out.push_str(&format!(
+            "- `ne terminal {} {}`（要 GUI） — {}\n",
+            command.name, command.arguments, command.summary
+        ));
+    }
     out.push_str(&format!(
-        "- `ne {open}` — 起動中の necoder でファイル・フォルダを開く（引数なしは前面に出すだけ）
+        "- `ne {open}` — 起動中の necoder でファイル・フォルダを開く（`:<line>` でその行へ。引数なしは前面に出すだけ）
+- `ne {diff}` — 2 つのファイルの diff を、起動中の necoder の diff タブで開く（要 GUI）
 - `ne skills get [--full]` — この本文
 - `ne mcp [root]` — MCP サーバ（stdio。道具は `--full`）
 
@@ -461,6 +477,7 @@ necoder {version} · この本文は {binary} が、この版の実装から出�
 - 失敗すると標準エラーに理由を出し、終了コード 1
 ",
         open = crate::cli::OPEN_ARGUMENTS,
+        diff = crate::cli::DIFF_ARGUMENTS,
     ));
     if !full {
         return out;
@@ -499,6 +516,14 @@ necoder {version} · この本文は {binary} が、この版の実装から出�
 - `digest`: GUI が Task を開いていなければ、台帳の分（phase・result_summary など）だけを返し、`gui` に理由が入る
 - `send`: GUI で Task が開いていなければ失敗する（先に `spawn-agent`）
 - `events`: 返った最後の `id` を覚えておき、次は `ne fleet events <id>` で差分だけ読む
+
+## 端末（`ne terminal …`）
+
+- 対象は、GUI の下ドックのタブの端末と、Fleet の Task カードに置いた端末。`<terminal>` は `ne terminal list` の `handle`（`t<番号>`）か `active`（選択中のプロジェクトの下ドックで前に出ている端末）
+- ハンドルは GUI が動いている間だけ有効。GUI を再起動したり端末を閉じたりしたら `list` で取り直す
+- `read` は今の画面を読む（人がスクロールで遡っていても関係ない）。送る前に読んで、端末が何を待っているかを確かめる
+- `send` は GUI の設定「CLI から端末へ入力を送る」が on の時だけ効く（既定 off）。off の時は失敗するので、人に頼む。`--` の後ろは全部文字として送る
+- `wait` は出力が止まるまで待つ。シェルが終わった端末はすぐ返る（`exited: true`）
 ",
     );
     out.push_str(
@@ -556,7 +581,19 @@ mod tests {
             );
         }
         assert!(short.contains("**Integrate は人間が押す。**"));
-        assert!(short.contains("`ne fleet integrate <task-id> [integration-root]`（人間の操作"));
+        assert!(short.contains("`ne fleet integrate <task> [integration-root]`（人間の操作"));
+        for command in TERMINAL_COMMANDS {
+            assert!(
+                short.contains(&format!(
+                    "ne terminal {} {}",
+                    command.name, command.arguments
+                )),
+                "terminal {} が本文に無い",
+                command.name
+            );
+        }
+        assert!(short.contains(&format!("ne {}", crate::cli::DIFF_ARGUMENTS)));
+        assert!(short.contains("## Task の指し方"));
         assert!(short.contains(&format!("necoder {}", env!("CARGO_PKG_VERSION"))));
         assert!(short.contains(BINARY));
         // 短い版は詳細を持たない。

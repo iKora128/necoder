@@ -11,7 +11,10 @@
 //!   自分自身を**切り離して**起動する（`ne` はすぐ戻る）
 //!
 //! パスの絶対化はここ（cwd を知っている側）でやる。GUI 側は絶対パスしか受けない
-//! （Finder 由来の `open_external_paths` と同じ契約）。
+//! （Finder 由来の `open_external_paths` と同じ契約）。`path:line[:column]` を分けるのもここ
+//! （ファイル名に `:12` を含むものと区別できるのは、存在を確かめられるこちら側だけ）。
+//!
+//! `ne --diff <a> <b>` は 2 つのファイルの diff を、起動中の GUI の diff タブで開く（G22）。
 
 use anyhow::{Context as _, Result};
 use serde_json::json;
@@ -73,7 +76,10 @@ fn run_remote(args: &[String]) -> Result<()> {
 }
 
 /// `ne` で開く時の引数の書式（`ne --help` と `necoder skills get` の本文が共有する）。
-pub(crate) const OPEN_ARGUMENTS: &str = "[<path>|ssh://user@host/path]...";
+pub(crate) const OPEN_ARGUMENTS: &str = "[<path>[:<line>[:<column>]]|ssh://user@host/path]...";
+
+/// `ne --diff` の引数の書式（同上）。
+pub(crate) const DIFF_ARGUMENTS: &str = "--diff <left> <right>";
 
 /// `necoder cli [<path>|ssh://…]...` — `ne` の本体。
 fn run_open(args: &[String]) -> Result<()> {
@@ -81,8 +87,11 @@ fn run_open(args: &[String]) -> Result<()> {
         Some("remote") => return run_remote(&args[1..]),
         // 素通しを足す前に設置したシムは `necoder cli skills …` で来る（cli_shim の一覧を参照）。
         Some("skills") => return crate::skills::run(&args[1..]),
+        Some("terminal") => return crate::terminal::run(&args[1..]),
+        Some("--diff") => return run_diff(&args[1..]),
         Some("-h") | Some("--help") => {
             println!("使い方: {} {OPEN_ARGUMENTS}", cli_shim::COMMAND_NAME);
+            println!("        {} {DIFF_ARGUMENTS}", cli_shim::COMMAND_NAME);
             println!("  引数なし: 実行中の necoder を前面に出す（いなければ前回状態で起動）");
             println!(
                 "  そのほか: {} <{}> … も素通しで使えます",
@@ -98,12 +107,12 @@ fn run_open(args: &[String]) -> Result<()> {
         _ => {}
     }
     let cwd = std::env::current_dir().context("カレントディレクトリが分かりません")?;
-    let (paths, has_remote) = resolve_open_args(args, &cwd);
+    let open = resolve_open_args(args, &cwd);
     // ssh:// は接続処理が新プロセス側にしかないので、IPC 転送せず常に新しいインスタンスで開く。
-    if has_remote {
-        return launch_detached(&paths);
+    if open.has_remote {
+        return launch_detached(&open.paths);
     }
-    if let Some(result) = try_open_in_running_gui(&paths)? {
+    if let Some(result) = try_open_in_running_gui(&open)? {
         let opened = result
             .get("opened")
             .and_then(serde_json::Value::as_u64)
@@ -120,7 +129,29 @@ fn run_open(args: &[String]) -> Result<()> {
         }
         return Ok(());
     }
-    open_via_launch_services(&paths)
+    // GUI が居ない時は行の位置を渡す口が無い（ファイルは開くが、その行へは飛ばない）。
+    open_via_launch_services(&open.paths)
+}
+
+/// `ne --diff <left> <right>` — 2 つのファイルの diff を、起動中の necoder の diff タブで開く。
+fn run_diff(args: &[String]) -> Result<()> {
+    let [left, right] = args else {
+        anyhow::bail!("使い方: {} {DIFF_ARGUMENTS}", cli_shim::COMMAND_NAME);
+    };
+    let cwd = std::env::current_dir().context("カレントディレクトリが分かりません")?;
+    let file = |argument: &String| -> Result<String> {
+        let path = absolute_path(argument, &cwd);
+        anyhow::ensure!(path.is_file(), "ファイルがありません: {}", path.display());
+        Ok(paths::canonicalize_or_keep(&path).display().to_string())
+    };
+    let (left, right) = (file(left)?, file(right)?);
+    let result = crate::fleet::gui_request("open_diff", json!({ "left": left, "right": right }))?;
+    if result.get("identical").and_then(serde_json::Value::as_bool) == Some(true) {
+        println!("差分はありません: {left} と {right}");
+    } else {
+        println!("差分を開きました: {left} ⇄ {right}");
+    }
+    Ok(())
 }
 
 /// IPC 不通時の非 remote フォールバック。.app 内なら **`-n` を付けず「書類を開く」**で
@@ -174,11 +205,11 @@ pub(crate) fn forward_launch_to_running_gui() -> bool {
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    let (paths, has_remote) = resolve_open_args(&args, &cwd);
-    if has_remote {
+    let open = resolve_open_args(&args, &cwd);
+    if open.has_remote {
         return false;
     }
-    match try_open_in_running_gui(&paths) {
+    match try_open_in_running_gui(&open) {
         Ok(Some(_)) => true,
         Ok(None) => false, // GUI 不在 → 通常起動
         // 接続できたのに転送失敗 = GUI は生きている。二重起動（DB ロック破り）よりは
@@ -192,44 +223,108 @@ pub(crate) fn forward_launch_to_running_gui() -> bool {
 
 /// 実行中 GUI がいれば IPC `open` を送り、その応答を返す。いなければ `None`（→ 新規起動へ）。
 /// **接続できたのに open が失敗**したら Err（そのまま二重起動すると DB ロックで壊れるため）。
-fn try_open_in_running_gui(paths: &[String]) -> Result<Option<serde_json::Value>> {
+fn try_open_in_running_gui(open: &OpenArgs) -> Result<Option<serde_json::Value>> {
     let Some(socket_path) = workspace::control_socket_path() else {
         return Ok(None);
     };
     if workspace::ControlStream::connect(&socket_path).is_err() {
         return Ok(None); // GUI 不在（死んだ socket ファイル含む）
     }
-    let result = crate::fleet::gui_request("open", json!({ "paths": paths }))
-        .context("実行中の necoder へ渡せませんでした")?;
+    let positions: Vec<serde_json::Value> = open
+        .positions
+        .iter()
+        .map(|position| {
+            json!({ "path": position.path, "line": position.line, "column": position.column })
+        })
+        .collect();
+    let result = crate::fleet::gui_request(
+        "open",
+        json!({ "paths": open.paths, "positions": positions }),
+    )
+    .context("実行中の necoder へ渡せませんでした")?;
     Ok(Some(result))
+}
+
+/// `ne <path>:<line>[:<column>]` の位置（1 始まり）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenPosition {
+    path: String,
+    line: u32,
+    column: u32,
+}
+
+/// `ne` の引数を解いたもの。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OpenArgs {
+    /// 開くパス（絶対化済み）と ssh:// URI。
+    paths: Vec<String>,
+    /// 行へ飛ぶファイル（`paths` にも入っている）。
+    positions: Vec<OpenPosition>,
+    has_remote: bool,
+}
+
+/// 相対パスは cwd 基準で絶対にする。
+fn absolute_path(argument: &str, cwd: &Path) -> PathBuf {
+    let path = Path::new(argument);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+/// `path:line` / `path:line:column` を分ける（行・列は 1 始まり。0 は 1 とみなす）。
+/// 末尾が数字でなければ `None`（Windows の `C:\…` のドライブ文字も数字でないので分けない）。
+fn split_line_suffix(argument: &str) -> Option<(&str, u32, Option<u32>)> {
+    let (rest, last) = argument.rsplit_once(':')?;
+    let last: u32 = last.parse().ok()?;
+    if let Some((path, line)) = rest.rsplit_once(':') {
+        if let Ok(line) = line.parse::<u32>() {
+            if !path.is_empty() {
+                return Some((path, line.max(1), Some(last.max(1))));
+            }
+        }
+    }
+    (!rest.is_empty()).then_some((rest, last.max(1), None))
 }
 
 /// 引数をパス（絶対化済み）へ解決する。ssh:// URI はそのまま通し、`has_remote` を立てる。
 /// 存在しないパスも**落とさず**通す（GUI 側 / 新プロセスの resolve_projects が警告してスキップ
-/// — 判定を一箇所に保つ）。
-fn resolve_open_args(args: &[String], cwd: &Path) -> (Vec<String>, bool) {
-    let mut has_remote = false;
-    let paths = args
-        .iter()
-        .map(|arg| {
-            if arg.starts_with("ssh://") {
-                has_remote = true;
-                return arg.clone();
+/// — 判定を一箇所に保つ）。ただし、そのままでは無いが `:<line>` を外すと在るファイルは、
+/// そのファイルを開いて行へ飛ぶ（`ne src/main.rs:42`。そのままの名前が在ればそちらを優先）。
+fn resolve_open_args(args: &[String], cwd: &Path) -> OpenArgs {
+    let mut open = OpenArgs::default();
+    for argument in args {
+        if argument.starts_with("ssh://") {
+            open.has_remote = true;
+            open.paths.push(argument.clone());
+            continue;
+        }
+        let absolute = absolute_path(argument, cwd);
+        if !absolute.exists() {
+            if let Some((file, line, column)) = split_line_suffix(argument) {
+                let file = absolute_path(file, cwd);
+                if file.is_file() {
+                    let path = paths::canonicalize_or_keep(&file).display().to_string();
+                    open.positions.push(OpenPosition {
+                        path: path.clone(),
+                        line,
+                        column: column.unwrap_or(1),
+                    });
+                    open.paths.push(path);
+                    continue;
+                }
             }
-            let path = Path::new(arg);
-            let absolute = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                cwd.join(path)
-            };
-            // `..`/シンボリックリンクを畳む（存在しないパスは素の絶対形のまま）
+        }
+        // `..`/シンボリックリンクを畳む（存在しないパスは素の絶対形のまま）
+        open.paths.push(
             std::fs::canonicalize(&absolute)
                 .unwrap_or(absolute)
                 .display()
-                .to_string()
-        })
-        .collect();
-    (paths, has_remote)
+                .to_string(),
+        );
+    }
+    open
 }
 
 /// 新インスタンス起動（ssh:// 用・dev ビルドの汎用フォールバック）。.app 内なら
@@ -341,21 +436,71 @@ mod tests {
     #[test]
     fn resolve_absolutizes_against_cwd() {
         let cwd = Path::new("/work/repo");
-        let (paths, has_remote) = resolve_open_args(
+        let open = resolve_open_args(
             &[
                 ".".into(),
                 "src".into(),
                 "/no-such-necoder-root".into(),
                 "ssh://dev@host/app".into(),
+                "missing.rs:12".into(),
             ],
             cwd,
         );
-        assert!(has_remote);
+        assert!(open.has_remote);
         // すべて存在しないパス＝canonicalize されず素の絶対形のまま（存在すれば実体へ解決される）
-        assert_eq!(paths[0], "/work/repo/.");
-        assert_eq!(paths[1], "/work/repo/src");
-        assert_eq!(paths[2], "/no-such-necoder-root");
-        assert_eq!(paths[3], "ssh://dev@host/app");
+        assert_eq!(open.paths[0], "/work/repo/.");
+        assert_eq!(open.paths[1], "/work/repo/src");
+        assert_eq!(open.paths[2], "/no-such-necoder-root");
+        assert_eq!(open.paths[3], "ssh://dev@host/app");
+        // `:12` を外しても無いファイルは、行へは飛ばずにそのまま渡す（GUI がスキップを知らせる）。
+        assert_eq!(open.paths[4], "/work/repo/missing.rs:12");
+        assert!(open.positions.is_empty());
+    }
+
+    #[test]
+    fn line_suffix_splits_only_trailing_numbers() {
+        assert_eq!(
+            split_line_suffix("src/a.rs:12"),
+            Some(("src/a.rs", 12, None))
+        );
+        assert_eq!(
+            split_line_suffix("src/a.rs:12:5"),
+            Some(("src/a.rs", 12, Some(5)))
+        );
+        // 0 は 1 行目とみなす。
+        assert_eq!(split_line_suffix("a.rs:0"), Some(("a.rs", 1, None)));
+        assert_eq!(split_line_suffix("a.rs"), None);
+        assert_eq!(split_line_suffix("a.rs:main"), None);
+        assert_eq!(split_line_suffix(":12"), None);
+        assert_eq!(split_line_suffix(r"C:\work\a.rs"), None);
+    }
+
+    #[test]
+    fn existing_file_with_line_suffix_becomes_a_position() {
+        let directory =
+            std::env::temp_dir().join(format!("necoder_cli_goto_{}", std::process::id()));
+        if directory.exists() {
+            std::fs::remove_dir_all(&directory).expect("前回の残りを消せる");
+        }
+        std::fs::create_dir_all(&directory).expect("作れる");
+        std::fs::write(directory.join("a.rs"), "fn a() {}\n").expect("書ける");
+        // `:3` まで含めた名前のファイルが本当に在れば、そちらをそのまま開く。
+        std::fs::write(directory.join("b.rs:3"), "odd name\n").expect("書ける");
+        let open = resolve_open_args(&["a.rs:12:5".into(), "b.rs:3".into()], &directory);
+        let file = paths::canonicalize_or_keep(directory.join("a.rs"))
+            .display()
+            .to_string();
+        assert_eq!(
+            open.positions,
+            vec![OpenPosition {
+                path: file.clone(),
+                line: 12,
+                column: 5,
+            }]
+        );
+        assert_eq!(open.paths[0], file);
+        assert!(open.paths[1].ends_with("b.rs:3"));
+        std::fs::remove_dir_all(&directory).expect("片付けられる");
     }
 
     #[test]

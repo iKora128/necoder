@@ -670,6 +670,17 @@ ipc:
   err_unknown_method: "未知の method: %{name}"
   err_bad_json: "JSON が読めない: %{detail}"
   err_gui_timeout: GUI の応答が timeout しました
+  err_no_active_task: GUI で選択中の Task がありません（Chat を開いているか、プロジェクトが開いていません）
+  err_active_is_integration: "GUI で選択中なのは統合先（%{title}）で、Task ではありません"
+  err_terminal_required: terminal（端末のハンドルか active）が必要です
+  err_terminal_not_found: "端末が見つかりません: %{handle}（`ne terminal list` でハンドルを取り直してください）"
+  err_no_active_terminal: 選択中のプロジェクトの下ドックに端末がありません
+  err_terminal_send_disabled: 端末への送信は許可されていません（設定 › 動作とエディタ の「CLI から端末へ入力を送る」を on にしてください）
+  err_text_required: text が必要です
+  err_diff_paths_required: left と right（比べる 2 つのファイルの絶対パス）が必要です
+  err_not_a_file: "ファイルではありません: %{path}"
+  err_read_file: "%{path} を読めません（%{error}）"
+  err_no_project: 開いているプロジェクトがありません
 crash:
   notice: ⚠ 前回終了時にクラッシュ — クリックで報告
 menu:

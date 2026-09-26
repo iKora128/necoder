@@ -22,6 +22,8 @@ mod mcp;
 mod menus;
 /// エージェント向け skill（`necoder skills get|install|list`）。
 mod skills;
+/// 起動中の GUI の端末の一覧・読み取り・送信・待機（`necoder terminal …`）。
+mod terminal;
 use std::time::Instant;
 use workspace::{ProjectSource, RestoredTabs, WindowPersistence, Workspace};
 
@@ -503,6 +505,9 @@ fn main() {
         return;
     }
     if skills::run_cli() {
+        return;
+    }
+    if terminal::run_cli() {
         return;
     }
     // `ne` シム経由の open / シムの設置・削除（cli.rs）。
