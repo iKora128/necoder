@@ -812,34 +812,6 @@ impl Workspace {
                             }
                         }
                     }
-                    PickerMode::ThreadHistory => {
-                        if let Some((thread_id, name, color_index, created_at, last_input_at)) =
-                            self.picker_history.get(id).cloned()
-                        {
-                            let panel = self.agent_panel.clone();
-                            let thread_index = panel.update(cx, |panel, cx| {
-                                panel.open_thread_from_history(
-                                    &thread_id,
-                                    &name,
-                                    color_index as usize,
-                                    created_at,
-                                    last_input_at,
-                                    cx,
-                                )
-                            });
-                            if self.chrome.fleet_mode {
-                                // 編隊モード: 復元した会話をグリッドのセルとして前面へ
-                                // （Agent ドックは編隊では出ないので show_right は触らない・M14）。
-                                if let Some(thread_index) = thread_index {
-                                    let space = self.project_sessions.active;
-                                    self.reveal_agent_in_fleet(space, thread_index, window, cx);
-                                }
-                            } else if !self.chrome.show_right {
-                                self.chrome.show_right = true; // Agent ドックを開く
-                            }
-                            cx.notify();
-                        }
-                    }
                     PickerMode::OpenLauncher => match self.picker_open_rows.get(id).cloned() {
                         Some(OpenRow::OpenFolder) => self.add_project_via_dialog(cx),
                         Some(OpenRow::OpenFile) => self.open_file_from_launcher(cx),
@@ -1455,87 +1427,6 @@ impl Workspace {
 
     // ターミナルの file:line リンク（M13）。相対パスはアクティブプロジェクトの root 基準。
     // subscribe に window が無いので pending_transient_tab と同様「次の render で消化」する。
-
-    /// スレッド履歴を開く（#5）。**アクティブプロジェクトの**スレッド（アーカイブ含む・updated_at
-    /// 降順）を Picker に出す。絞り込みキーは Agent パネルの復元（`set_storage_for_scope`）と同じ
-    /// 「TaskSpace の stable id + 旧版が表示名で保存した行」— 全プロジェクト混在になっていた件の修正
-    /// （2026-08-28。DB は最初から project 列を持っていて、読み側の絞り込みだけが抜けていた）。
-    /// 行頭●= スレッド色・detail = ⎇ branch / トークン累計 / 開始・最終入力の相対時刻。
-    /// 確定で復元してアクティブに（編隊モードでは復元セルとして前面へ・M14）。
-    pub(crate) fn open_thread_history(
-        &mut self,
-        _: &ThreadHistory,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(storage) = self.persistence.storage.clone() else {
-            return;
-        };
-        let Some((scope, legacy)) = self.active_slot().map(|slot| {
-            (
-                slot.task_space.id.as_str().to_string(),
-                slot.name.to_string(),
-            )
-        }) else {
-            return;
-        };
-        let threads = storage.load_all_threads().unwrap_or_default();
-        let mut history = Vec::new();
-        let mut items = Vec::new();
-        for (
-            id,
-            name,
-            color_index,
-            project,
-            branch,
-            tokens_used,
-            archived,
-            created_at,
-            last_input_at,
-        ) in threads
-        {
-            if project != scope && project != legacy {
-                continue;
-            }
-            let mut detail = String::new();
-            if let Some(branch) = &branch {
-                detail.push_str(&format!("  ⎇ {branch}"));
-            }
-            if tokens_used > 0 {
-                detail.push_str(&format!("  Σ {:.1}k", tokens_used as f32 / 1000.0));
-            }
-            // いつスタートして最終いつ入力したか（サクッと見える相対時刻・M14）。
-            detail.push_str(&format!(
-                "  {}",
-                i18n::t!("time.started", "when" => agent_panel::relative_time_label(created_at))
-            ));
-            if let Some(last_input_at) = last_input_at {
-                detail.push_str(&format!(
-                    " · {}",
-                    i18n::t!("time.last_input", "when" => agent_panel::relative_time_label(last_input_at))
-                ));
-            }
-            if archived {
-                detail.push_str(&format!("  {}", i18n::t!("agent.history_archived_mark")));
-            }
-            let mut item = PickerItem::new(history.len(), name.clone())
-                .with_accent(theme_core::thread_color(color_index as usize));
-            let detail = detail.trim_start().to_string();
-            if !detail.is_empty() {
-                item = item.with_detail(detail);
-            }
-            items.push(item);
-            history.push((id, name, color_index, created_at, last_input_at));
-        }
-        self.picker_history = history;
-        self.open_picker(
-            PickerMode::ThreadHistory,
-            i18n::t!("agent.history_placeholder"),
-            items,
-            window,
-            cx,
-        );
-    }
 }
 
 /// ⌘P の並びの加点（D19）。あいまい一致のスコアはおおむね数十〜数百の幅なので、桁を分けて

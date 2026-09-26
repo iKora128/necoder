@@ -78,6 +78,7 @@ mod editor_manners;
 mod git_controller;
 mod git_view;
 mod herd_view;
+mod history_view;
 mod inbox;
 mod keep_awake;
 mod notifications;
@@ -216,8 +217,10 @@ actions!(
         Zoom,
         // リモート SSH ホストピッカー（~/.ssh/config・M13）。
         RemoteSsh,
-        // スレッド履歴（過去スレッド一覧 → 復元・#5）。
+        // スレッド履歴（過去スレッド一覧 → 復元・#5 / エージェントの過去の会話・全文検索・O15）。
         ThreadHistory,
+        // いま見ているスレッドを新しいセッションで続ける（O15・パレット）。
+        ContinueInNewSession,
         // code actions（⌘.・M11）と参照検索（⇧F12・M11）。
         CodeActions,
         FindReferences,
@@ -294,8 +297,6 @@ pub(crate) enum PickerMode {
     Commands,
     /// リモート SSH ホストピッカー（M13）。id は `picker_ssh_hosts` の添字（末尾 id = 手入力）。
     SshHosts,
-    /// スレッド履歴（過去スレッド一覧・#5）。id は `picker_history` の添字。
-    ThreadHistory,
     /// 「＋」統一オープン: 開く系アクション + 最近（local/remote 混在）。id は `picker_open_rows` の添字。
     OpenLauncher,
     /// Web タブの URL 入力（ポート番号か localhost の URL だけ・`web_tabs.rs`）。行は入力の確定 1 行だけ。
@@ -1423,6 +1424,8 @@ struct WorkspaceOverlays {
     cleanup: Option<cleanup::CleanupState>,
     /// 使用量の統計の画面（パレット「使用量: 統計を開く」・O11）。
     usage_stats: Option<usage_view::UsageStatsState>,
+    /// スレッド履歴（⌘⇧H・O15）。このプロジェクトのスレッド・エージェントの過去の会話・全文検索。
+    thread_history: Option<history_view::ThreadHistoryState>,
     /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
     /// 大きくフラッシュ表示する（色でも判るが名前で確定させる・2026-09-01 本人要望）。
     project_flash: Option<ProjectFlash>,
@@ -2037,6 +2040,7 @@ impl Workspace {
             || self.overlays.resources.is_some()
             || self.overlays.cleanup.is_some()
             || self.overlays.usage_stats.is_some()
+            || self.overlays.thread_history.is_some()
             || self.search_panel.is_some()
             || self.buffer_search.is_some()
             || self.completion.is_some()
@@ -2270,6 +2274,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
             .on_action(cx.listener(Self::open_ssh_host_picker))
             .on_action(cx.listener(Self::open_thread_history))
+            .on_action(cx.listener(Self::continue_in_new_session))
             .on_action(cx.listener(Self::open_code_actions))
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::open_diff_tab))
@@ -2452,6 +2457,7 @@ impl Render for Workspace {
             .children(self.render_resources(cx))
             .children(self.render_cleanup(cx))
             .children(self.render_usage_stats(cx))
+            .children(self.render_thread_history(cx))
             .children(self.render_new_task_dialog(cx))
             .children(self.render_hunk_menu(cx))
             .children(self.render_toasts(cx))
