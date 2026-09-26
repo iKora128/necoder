@@ -467,18 +467,17 @@ impl Workspace {
         self.add_fleet_cell(FleetPane::Agent { space, panel }, cx);
     }
 
-    pub(super) fn create_prompted_task(&mut self, prompt: String, cx: &mut Context<Self>) {
-        let active_repository = self
+    pub(super) fn create_prompted_task(
+        &mut self,
+        prompt: String,
+        start: project::TaskStart,
+        cx: &mut Context<Self>,
+    ) {
+        // 統合先はサイドバー・Captain と同じ選び方（メインの作業ツリー・O21）。
+        let integration_index = self
             .active_slot()
-            .map(|slot| slot.task_space.repository_id.clone());
-        let integration_index = active_repository
-            .as_ref()
-            .and_then(|repository_id| {
-                self.project_sessions.projects.iter().position(|slot| {
-                    slot.task_space.repository_id == *repository_id
-                        && slot.task_space.is_integration()
-                })
-            })
+            .map(|slot| slot.repository_key().to_string())
+            .and_then(|key| self.integration_slot_for(&key))
             .unwrap_or(self.project_sessions.active);
         let Some(slot) = self.project_sessions.projects.get(integration_index) else {
             return;
@@ -495,8 +494,12 @@ impl Workspace {
                     // Task が古い base から切られるのを防ぐ（Orca の default branch 自動同期を参考・
                     // 2026-08-30）。オフライン・dirty・diverged では黙って現 HEAD から続行する。
                     let sync = project::sync_current_branch_on(host_for_add.as_ref(), &root);
-                    let (target, branch, failure) =
-                        project::create_named_task_on(host_for_add.as_ref(), &root, &prompt)?;
+                    let (target, branch, failure) = project::create_task_with_on(
+                        host_for_add.as_ref(),
+                        &root,
+                        &prompt,
+                        &start,
+                    )?;
                     Ok::<_, anyhow::Error>((target, branch, sync, prompt, failure))
                 })
                 .await;

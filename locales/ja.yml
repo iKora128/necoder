@@ -293,6 +293,10 @@ fleet:
   new_task_setup_ready: "準備スクリプト ✓ .necoder/worktree-setup.sh"
   new_task_setup_missing: "準備スクリプトなし"
   new_task_setup_create: "作る（.env の持ち込み・target 共有のテンプレ）"
+  new_task_details: 詳細（ブランチ名・起点）
+  new_task_branch_label: "ブランチ（空 = task/<1 行目>。既にあるブランチ名なら、そのブランチの worktree を作る）"
+  new_task_base_label: "起点（空 = 統合先の今の HEAD。ブランチ / タグ / コミット）"
+  new_task_from_base: "⎇ %{branch}（起点 %{base}）"
   new_task_no_repository: "統合先（main の worktree）が開いていないので Task を切れません"
   next_allow: "許可"
   next_answer: "答える"
