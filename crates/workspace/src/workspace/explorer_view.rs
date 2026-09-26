@@ -1062,6 +1062,22 @@ impl Workspace {
                     }),
                 ),
             );
+            // HTML は内蔵の配信で Web タブにも開ける（Design Mode が使える・手元のファイルだけ）。
+            if is_local
+                && !self.chat_mode()
+                && lang::language_for_path(&path) == Some(lang::LanguageId::Html)
+            {
+                let web_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-open-web-tab", i18n::t!("explorer.ctx_open_web_tab")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.hide_context_menu(cx);
+                            this.open_static_web_tab(web_path.clone(), window, cx);
+                        }),
+                    ),
+                );
+            }
         }
         // ── git（D16）: 変更のあるファイルだけ。ステージは remote でも効く（git は host 側で動く）。
         // 破棄は取り消せないので確認を挟む。未追跡・add しただけのファイルは git に戻す先が無く
