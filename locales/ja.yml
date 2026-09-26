@@ -1211,13 +1211,15 @@ usage:
   duration_hours_only: "%{hours} 時間"
   duration_days: "%{days} 日 %{hours} 時間"
   duration_days_only: "%{days} 日"
+  account_ssh: "%{host}（SSH）"
+  account_env: "設定の env %{id}"
   chip_tip: "%{agent} の使用量（最後に受け取った値）。クリックで詳細"
   popover_title: 使用量・レート制限
   received: "受信 %{when}"
   status_warning: 上限が近い
   status_rejected: 上限に達しています
   no_values: まだ値を受け取っていません。エージェントが知らせてきたら出ます
-  note: 値はエージェントが知らせてきた時にだけ変わります。ここに出ているのは最後に受け取った値です。
+  note: 値はエージェントが知らせてきた時にだけ変わります。ここに出ているのは最後に受け取った値です。同じエージェントでも、SSH の接続先や認証の設定（agent_servers の env）が違えば別のアカウントとして分けて出します。
   codex_note: Codex だけは ACP で知らせてこないので、このポップオーバーを開いた時に codex 本体（codex app-server）に訊きます。
   codex_loading: Codex の値を読み込み中…
   codex_failed: "Codex の値を読めませんでした: %{error}"
@@ -1229,9 +1231,9 @@ usage:
   stats_agent: エージェント
   stats_turns: ターン
   stats_tokens: トークン
-  stats_cost: コスト
+  stats_cost: 推定コスト
   stats_total: 30 日の合計
   stats_empty: まだ記録がありません。エージェントが使用量を知らせたターンから記録します。
   stats_loading: 読み込み中…
   stats_failed: "使用量を読めませんでした: %{error}"
-  stats_note: トークンとコストは、エージェントがターンごとに報告した推定値です（Claude のコストは Claude Code の推定。Codex はコストを報告せず、トークンは各ターンの最後の要求の分だけ）。~/.claude などのローカルのログは読みません。
+  stats_note: トークンと推定コストは、エージェントがターンごとに報告した値です。コストは Claude Code が出す推定（USD）で、実際の請求額ではありません（請求の正は各社の請求画面）。報告の無い値は —（0 ではありません）、一部のターンにしか報告が無い合計には ≥ を付けています。Codex はコストを報告せず、トークンは各ターンの最後の要求の分だけです。~/.claude などのローカルのログは読みません。

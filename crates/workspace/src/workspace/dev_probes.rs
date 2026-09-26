@@ -39,6 +39,7 @@ impl Workspace {
     ///
     /// `limits` / `near` / `blocked` = いまのスレッドにレート制限を流す（本番と同じ `on_event`）/
     /// `codex` = Codex の値を置き場へ直接入れる（**codex app-server は起こさない**）/
+    /// `accounts` = 同じ Claude Code の別のアカウント（SSH 先・別の認証の置き場）の値を置く /
     /// `codex-loading` / `codex-failed` = Codex の読み取りの途中 / 失敗の行 /
     /// `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ直近 12 日分の使用量を書く /
     /// `popover` = チップを押したのと同じにポップオーバーを開く（Codex は訊かない）/ `stats` = 統計の画面。
@@ -63,6 +64,8 @@ impl Workspace {
                         .update(cx, |panel, cx| panel.debug_seed_rate_limits(command, cx));
                 }
                 "codex" => agent_panel::usage::debug_seed_codex_limits(cx),
+                // 同じ Claude Code の別のアカウント（SSH の接続先・別の認証の置き場）の値（R08）。
+                "accounts" => agent_panel::usage::debug_seed_other_accounts(cx),
                 "codex-loading" => agent_panel::usage::debug_set_codex_read(
                     agent_panel::usage::CodexRead::Loading,
                     cx,
@@ -116,15 +119,19 @@ impl Workspace {
                     continue; // Codex を使わなかった日
                 }
                 for turn in 0..count {
+                    // 今日の Claude の最後のターンはトークンの報告が無い（表の `≥` の検証・R08）。
+                    let reported = !(day == 0 && agent == "Claude Code" && turn == count - 1);
                     let record = storage::TurnUsageRecord {
                         thread_id: format!("probe-{agent}"),
                         agent: agent.to_string(),
                         ended_at: now - day * 24 * HOUR - turn * HOUR,
-                        input_tokens: tokens as u64 / 4,
-                        output_tokens: tokens as u64 / 4,
-                        cached_read_tokens: tokens as u64 / 2,
-                        cached_write_tokens: 0,
-                        total_tokens: tokens as u64,
+                        tokens: reported.then(|| storage::TurnTokenCounts {
+                            input: tokens as u64 / 4,
+                            output: tokens as u64 / 4,
+                            cached_read: tokens as u64 / 2,
+                            cached_write: 0,
+                            total: tokens as u64,
+                        }),
                         cost_usd: cost.map(|cost| cost / count as f64),
                         session_cost_usd: None,
                     };
