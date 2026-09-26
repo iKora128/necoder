@@ -457,6 +457,8 @@ impl Workspace {
         self.push_news(news_kind, news_color, news_title, news_text);
         // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
         self.schedule_control_summary(cx);
+        // Dock の要対応バッジ（失敗した Task も数える・O12）。Workspace を読むので update を抜けてから。
+        cx.defer(super::dock_badge::refresh_dock_badge);
         if phase == TaskPhase::Integrated {
             self.wake_captain(
                 session_index,
@@ -863,6 +865,7 @@ impl Workspace {
                 rail_menu: None,
                 tab_menu: None,
                 worktree_delete: None,
+                quit_confirm: None,
                 ssh_input: None,
                 askpass: None,
                 ssh_connecting: false,
@@ -897,6 +900,7 @@ impl Workspace {
             focus_recovery_installed: false,
             last_focused: None,
             restored_source_map: source_map,
+            window_handle: None,
         };
         // remote の接続状態を statusbar へ（購読は host ごとに 1 本・I/O 無し）。
         workspace.ensure_connection_pumps(cx);

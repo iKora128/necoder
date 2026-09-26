@@ -888,6 +888,52 @@ impl Storage {
         })
     }
 
+    /// スレッドのミュート（トースト・通知音・OS 通知を出さない）を記録する。ミュートしている
+    /// スレッドだけが行を持つ（解除で行ごと消す）＝既定の「鳴る」は行が無い状態。
+    pub fn set_thread_muted(&self, thread_id: &str, muted: bool) -> Result<()> {
+        let thread_id = thread_id.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                if muted {
+                    conn.execute(
+                        "INSERT INTO thread_mutes (thread_id, updated_at) VALUES (?1, ?2)
+                         ON CONFLICT(thread_id) DO UPDATE SET updated_at = ?2",
+                        (thread_id.as_str(), now),
+                    )
+                    .await
+                    .context("thread_mutes の記録に失敗")?;
+                } else {
+                    conn.execute(
+                        "DELETE FROM thread_mutes WHERE thread_id = ?1",
+                        (thread_id.as_str(),),
+                    )
+                    .await
+                    .context("thread_mutes の解除に失敗")?;
+                }
+                Ok(())
+            })
+        })
+    }
+
+    /// ミュート中のスレッド id の一覧（起動時の復元で一括で読む）。
+    pub fn load_muted_threads(&self) -> Result<Vec<String>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query("SELECT thread_id FROM thread_mutes", ())
+                    .await
+                    .context("thread_mutes の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("thread_mutes 行の取得に失敗")?
+                {
+                    result.push(row.get_value(0)?.as_text().context("thread_id")?.clone());
+                }
+                Ok(result)
+            })
+        })
+    }
+
     /// Chat モードのスレッドの付帯情報を 1 件ぶん書く（`docs/CHAT.md` §2.3 / §3.2）。
     ///
     /// フォルダの場所は**作成後に変えない**（エージェントはセッションを cwd のパス文字列で引く）ので、
@@ -1081,6 +1127,12 @@ impl Storage {
                 )
                 .await
                 .context("thread_custom_names の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_mutes WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_mutes の削除に失敗")?;
                 conn.execute(
                     "DELETE FROM thread_chat_paths WHERE thread_id = ?1",
                     (id.as_str(),),
@@ -2025,6 +2077,17 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("thread_custom_names 作成に失敗")?;
+    // スレッドのミュート（O12）。ミュート中のスレッドだけが行を持つ。threads 表を広げない理由は
+    // thread_sessions と同じ（列を足すと upsert / load の tuple が全部変わる）。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_mutes (
+            thread_id TEXT PRIMARY KEY,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("thread_mutes 作成に失敗")?;
     // Chat モードのスレッドの付帯情報（`docs/CHAT.md`）。threads 表を広げない理由は
     // thread_sessions と同じ。パスは改行を含みうるので 1 行 1 パスの別表にする。
     conn.execute(
@@ -2613,6 +2676,36 @@ mod tests {
     }
 
     /// ACP セッション id はスレッド単位で往復し、上書きでき、スレッド削除で消える（2026-09-08）。
+    #[test]
+    fn thread_mutes_survive_reopening_and_follow_thread_deletion() {
+        let path = temp_db("thread_mutes");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("t1", "設計", 0, "necoder", None, None, None, 0, 0)
+            .unwrap();
+        assert!(storage.load_muted_threads().unwrap().is_empty());
+        storage.set_thread_muted("t1", true).unwrap();
+        storage.set_thread_muted("t1", true).unwrap(); // 二度押しでも 1 行
+        storage.set_thread_muted("t2", true).unwrap();
+        storage.set_thread_muted("t2", false).unwrap(); // 解除は行ごと消す
+        drop(storage);
+
+        // 開き直しても残る（再起動でミュートが消えていた不具合の受入）。
+        let storage = Storage::open(&path).unwrap();
+        assert_eq!(
+            storage.load_muted_threads().unwrap(),
+            vec!["t1".to_string()]
+        );
+        storage.delete_thread("t1").unwrap();
+        assert!(
+            storage.load_muted_threads().unwrap().is_empty(),
+            "スレッド削除でミュートも消える"
+        );
+        drop(storage);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn thread_sessions_round_trip_and_follow_thread_deletion() {
         let path = temp_db("thread_sessions");

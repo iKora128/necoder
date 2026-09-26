@@ -20,6 +20,9 @@ mod fleet;
 mod mcp;
 /// macOS ネイティブメニューバー（M13）。
 mod menus;
+/// macOS: Dock / AppleScript の「終了」を ⌘Q と同じ確認へ回す（O4）。
+#[cfg(target_os = "macos")]
+mod quit_hook;
 use std::time::Instant;
 use workspace::{ProjectSource, RestoredTabs, WindowPersistence, Workspace};
 
@@ -108,48 +111,12 @@ fn resolve_windows(storage: Option<&storage::Storage>) -> Vec<WindowPlan> {
 
     // 引数無し → 前回の窓を全て復元（窓ごとに 1 行。主窓 = 最後に触った窓 = 末尾）
     if !has_explicit_args {
-        if let Some(storage) = storage {
-            let mut plans = Vec::new();
-            let rows = match storage.claim_window_sessions() {
-                Ok(rows) => rows,
-                Err(error) => {
-                    eprintln!("前回の窓セッションを読めない: {error:#}");
-                    Vec::new()
-                }
-            };
-            for (window_id, payload) in rows {
-                let plan = workspace::decode_window_session(&payload).and_then(
-                    |(saved_projects, saved_active)| {
-                        restore_window_plan(saved_projects, saved_active, window_id.clone()).map(
-                            |mut plan| {
-                                plan.layout_payload = Some(payload.clone());
-                                plan
-                            },
-                        )
-                    },
-                );
-                match plan {
-                    Some(plan) => plans.push(plan),
-                    None => {
-                        // 中身が壊れている / 全プロジェクトが開けない → 閉じ扱いにして次回は出さない。
-                        eprintln!("前回の窓を復元できない（閉じ扱い）: {window_id}");
-                        if let Err(error) = storage.mark_window_session_closed(&window_id) {
-                            eprintln!("窓セッションに閉じ印を付けられない: {error:#}");
-                        }
-                    }
-                }
-            }
-            if !plans.is_empty() {
-                return plans;
-            }
+        let plans = storage.map(restored_window_plans).unwrap_or_default();
+        if !plans.is_empty() {
+            return plans;
         }
-    }
-    // 最後の砦: カレントディレクトリ。offscreen QA はここへ直接落とし、ユーザー状態を読まない。
-    if sources.is_empty() && !has_explicit_args {
-        if let Ok(cwd) = std::env::current_dir() {
-            sources.push(ProjectSource::local(cwd));
-            open_files.push(RestoredTabs::default());
-        }
+        // 最後の砦: カレントディレクトリ。offscreen QA はここへ直接落とし、ユーザー状態を読まない。
+        return vec![current_directory_plan()];
     }
     vec![WindowPlan {
         layout_payload: None,
@@ -158,6 +125,59 @@ fn resolve_windows(storage: Option<&storage::Storage>) -> Vec<WindowPlan> {
         active: 0,
         window_id: Some(workspace::new_window_session_id()),
     }]
+}
+
+/// DB の窓セッション（前回生存していた全窓・無ければ最後に閉じた 1 窓）を開く計画にする。
+/// 起動時の無引数と、Dock から開き直す時（窓が 1 つも無い）の共通。
+fn restored_window_plans(storage: &storage::Storage) -> Vec<WindowPlan> {
+    let mut plans = Vec::new();
+    let rows = match storage.claim_window_sessions() {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!("前回の窓セッションを読めない: {error:#}");
+            Vec::new()
+        }
+    };
+    for (window_id, payload) in rows {
+        let plan = workspace::decode_window_session(&payload).and_then(
+            |(saved_projects, saved_active)| {
+                restore_window_plan(saved_projects, saved_active, window_id.clone()).map(
+                    |mut plan| {
+                        plan.layout_payload = Some(payload.clone());
+                        plan
+                    },
+                )
+            },
+        );
+        match plan {
+            Some(plan) => plans.push(plan),
+            None => {
+                // 中身が壊れている / 全プロジェクトが開けない → 閉じ扱いにして次回は出さない。
+                eprintln!("前回の窓を復元できない（閉じ扱い）: {window_id}");
+                if let Err(error) = storage.mark_window_session_closed(&window_id) {
+                    eprintln!("窓セッションに閉じ印を付けられない: {error:#}");
+                }
+            }
+        }
+    }
+    plans
+}
+
+/// カレントディレクトリを開く 1 窓（復元できる窓が無い時の最後の砦）。
+fn current_directory_plan() -> WindowPlan {
+    let mut sources = Vec::new();
+    let mut open_files = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        sources.push(ProjectSource::local(cwd));
+        open_files.push(RestoredTabs::default());
+    }
+    WindowPlan {
+        layout_payload: None,
+        sources,
+        open_files,
+        active: 0,
+        window_id: Some(workspace::new_window_session_id()),
+    }
 }
 
 /// DB の 1 行（窓セッション）を開ける形へ。SSH は接続し、失敗したプロジェクトは飛ばす。
@@ -471,6 +491,143 @@ fn start_control_ipc_for_window(window: &mut gpui::Window, cx: &mut gpui::Contex
     .detach();
 }
 
+/// theme 名を解決（組み込み → 設定フォルダ themes/ のユーザーテーマ → dark）。
+/// 開発用: NECODER_THEME=<名> で設定を上書き（撮影確認・非破壊）。
+fn resolve_theme(cx: &App) -> theme_core::Theme {
+    let themes_dir = settings_core::user_settings_path()
+        .as_deref()
+        .and_then(Path::parent)
+        .map(|dir| dir.join("themes"));
+    let theme_name = std::env::var("NECODER_THEME").unwrap_or_else(|_| settings::get(cx).theme);
+    theme_core::resolve(&theme_name, themes_dir.as_deref())
+}
+
+/// 窓の既定の大きさ 1280×800。スクショ検証で縦長パネル全体を写したいときは
+/// `NECODER_WINDOW_SIZE=1280x1500` で上書きできる（開発補助・env 未指定なら不変）。
+fn default_window_size() -> gpui::Size<gpui::Pixels> {
+    std::env::var("NECODER_WINDOW_SIZE")
+        .ok()
+        .and_then(|spec| {
+            let (width, height) = spec.split_once('x')?;
+            Some(size(
+                px(width.trim().parse().ok()?),
+                px(height.trim().parse().ok()?),
+            ))
+        })
+        .unwrap_or_else(|| size(px(1280.0), px(800.0)))
+}
+
+/// 計画どおりに窓を開く（起動時と、Dock から開き直す時の共通）。2 窓目以降は少しずつずらして重ね、
+/// 末尾（主窓 = 最後に触った窓）を最後に開いて前面にする。開けた主窓を返す。
+fn open_planned_windows(
+    plans: Vec<WindowPlan>,
+    storage: Option<storage::Storage>,
+    theme: theme_core::Theme,
+    cx: &mut App,
+) -> Option<gpui::WindowHandle<Workspace>> {
+    let bounds = Bounds::centered(None, default_window_size(), cx);
+    let mut primary_window = None;
+    for (index, plan) in plans.into_iter().enumerate() {
+        let offset = px(28.0 * index as f32);
+        let plan_bounds = Bounds::new(bounds.origin + point(offset, offset), bounds.size);
+        // Some の外枠は「DB を開く判断は main で完了済み」。storage=None のとき Workspace 側で
+        // 二度目の open をせず、同じ排他ロックエラーを重ねない。
+        let persistence = Some(WindowPersistence {
+            window_id: storage.as_ref().and(plan.window_id.clone()),
+            storage: storage.clone(),
+        });
+        let build_theme = theme.clone();
+        let build_sources = plan.sources;
+        let build_active = plan.active;
+        let opened = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(plan_bounds)),
+                // 自前 titlebar（UI-SPEC §3）を描くため既定のシステム titlebar を隠す。
+                // 信号機は残し、38px の titlebar 内に収まる位置へ寄せる。
+                titlebar: Some(TitlebarOptions {
+                    title: Some("necoder".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(13.0), px(13.0))),
+                }),
+                // custom titlebar で自前ドラッグ（start_window_move）を使うため false。
+                // true のままだと macOS が titlebar を system 所有扱いしてクリック遅延や
+                // ダブルクリック判定の不具合になる（gpui WindowOptions のコメント参照）。
+                is_movable: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                // 窓を閉じる時の関所（最後の窓の確認・O4）と、閉じたら DB の自分の行に閉じ印。
+                if let Some(persistence) = &persistence {
+                    workspace::install_window_close_hook(window, cx, persistence);
+                }
+                cx.new(|cx| {
+                    Workspace::new_sources_with_active(
+                        build_sources,
+                        build_active,
+                        build_theme,
+                        persistence,
+                        cx,
+                    )
+                })
+            },
+        );
+        let handle = match opened {
+            Ok(handle) => handle,
+            Err(error) => {
+                eprintln!("ウィンドウを開けない: {error}");
+                continue;
+            }
+        };
+        if let Err(error) = handle.update(cx, |workspace, window, cx| {
+            workspace.restore_open_file(&plan.open_files, window, cx);
+            if let Some(payload) = &plan.layout_payload {
+                workspace.restore_work_layout(payload, cx);
+            }
+            workspace.check_hot_exit_restore(cx);
+            let focus = workspace.focus_handle(cx);
+            window.focus(&focus, cx);
+            start_control_ipc_for_window(window, cx);
+        }) {
+            eprintln!("初期化に失敗: {error}");
+        }
+        primary_window = Some(handle);
+    }
+    primary_window
+}
+
+/// Dock のアイコンを押した（macOS の reopen。GPUI は**見えている窓が無い時だけ**ここへ来る）。
+/// 窓が 1 つも無ければ前回の窓を開き直し（無引数の起動と同じ復元）、隠れている・最小化している
+/// だけならそれを前に戻す。「隠して動かし続ける」（O4）の戻り道でもある。
+fn reopen_windows(cx: &mut App) {
+    let front = cx
+        .window_stack()
+        .unwrap_or_else(|| cx.windows())
+        .into_iter()
+        .find_map(|window| window.downcast::<Workspace>());
+    if let Some(window) = front {
+        cx.activate(true);
+        if let Err(error) = window.update(cx, |_, window, _| window.activate_window()) {
+            eprintln!("窓を前に戻せない: {error:#}");
+        }
+        return;
+    }
+    let storage = cx
+        .try_global::<workspace::AppStorage>()
+        .and_then(|global| global.0.clone());
+    let mut plans = storage
+        .as_ref()
+        .map(restored_window_plans)
+        .unwrap_or_default();
+    if plans.is_empty() {
+        plans.push(current_directory_plan());
+    }
+    let theme = resolve_theme(cx);
+    if open_planned_windows(plans, storage, theme, cx).is_none() {
+        eprintln!("Dock から窓を開き直せない");
+    }
+    cx.activate(true);
+}
+
 fn main() {
     // `ssh` が askpass として起こした自分自身なら、GUI にも log にも触れずに答えだけ返す
     // （stdout は答え専用。redirect_output_for_gui_launch より**前**でなければならない）。
@@ -537,10 +694,20 @@ fn main() {
     // コールバックは Application 側にしか生えておらず cx も持たないため、run の**前**に登録して
     // チャネル →（run 内の）前景 spawn で窓へ届ける（CFBundleDocumentTypes とセット・M13）。
     let (open_urls_tx, open_urls_rx) = futures::channel::mpsc::unbounded::<Vec<String>>();
+    // macOS の Dock / AppleScript の「終了」は Quit アクションを通らない。⌘Q と同じ確認（O4）へ
+    // 回すフックを、アプリのデリゲートが作られる run の**前**に仕込む。他の OS には同じ経路が
+    // 無いので、送り口は閉じて受け手のループをすぐ終わらせる。
+    let (quit_requests_tx, quit_requests) = futures::channel::mpsc::unbounded::<()>();
+    #[cfg(target_os = "macos")]
+    quit_hook::install(quit_requests_tx);
+    #[cfg(not(target_os = "macos"))]
+    drop(quit_requests_tx);
     let app = application().with_assets(Assets);
     app.on_open_urls(move |urls| {
         let _ = open_urls_tx.unbounded_send(urls);
     });
+    // Dock のアイコン（見えている窓が無い時）: 窓を開き直す / 隠した窓を戻す。
+    app.on_reopen(reopen_windows);
     app.run(move |cx: &mut App| {
         // ここまでに GPUI のプラットフォーム初期化（Windows は DirectX デバイス + DirectWrite）が済んでいる。
         stage(&startup, "app_run_entered");
@@ -591,18 +758,16 @@ fn main() {
             .map(|source| source.root().to_path_buf());
         settings::init(settings_core::user_settings_path(), local_settings_root, cx);
         stage(&startup, "settings_ready");
+        // OS 通知（O12）の身元。Windows の通知は AppUserModelID が無いと出ない（mac は bundle ID
+        // が身元なので何もしない・Linux は表示名だけ使う）。bundle-mac.sh の CFBundleIdentifier と揃える。
+        cx.set_app_identity("dev.necoder.editor", "necoder");
+        // 通知を押した時の行き先と、Dock の要対応バッジの数え直し（O12）。
+        workspace::install_agent_notifications(cx);
         let settings = settings::get(cx);
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);
         }
-        // theme 名を解決（組み込み → 設定フォルダ themes/ のユーザーテーマ → dark）。
-        // 開発用: NECODER_THEME=<名> で設定を上書き（撮影確認・非破壊）。
-        let themes_dir = settings_core::user_settings_path()
-            .as_deref()
-            .and_then(Path::parent)
-            .map(|dir| dir.join("themes"));
-        let theme_name = std::env::var("NECODER_THEME").unwrap_or_else(|_| settings.theme.clone());
-        let theme = theme_core::resolve(&theme_name, themes_dir.as_deref());
+        let theme = resolve_theme(cx);
 
         match keymap_core::load_bindings(
             &keymap_core::default_keymap_json(keymap_core::KeymapPlatform::current()),
@@ -638,117 +803,30 @@ fn main() {
                 None => println!("menu: (未登録)"),
             }
         }
-        // Quit の後始末（hot exit のクリア）は window 生成後に登録する（下方）。
-
-        // 既定 1280×800。スクショ検証で縦長パネル全体を写したいときは
-        // `NECODER_WINDOW_SIZE=1280x1500` で上書きできる（開発補助・env 未指定なら不変）。
-        let window_size = std::env::var("NECODER_WINDOW_SIZE")
-            .ok()
-            .and_then(|spec| {
-                let (width, height) = spec.split_once('x')?;
-                Some(size(
-                    px(width.trim().parse().ok()?),
-                    px(height.trim().parse().ok()?),
-                ))
-            })
-            .unwrap_or_else(|| size(px(1280.0), px(800.0)));
-        let bounds = Bounds::centered(None, window_size, cx);
+        // 窓を経由せずに DB を引く口（窓が 1 つも無い時の ⌘Q・Dock からの開き直し）。
+        cx.set_global(workspace::AppStorage(storage.clone()));
 
         stage(&startup, "before_open_window");
-        // 前回の窓を全て開く。2 窓目以降は少しずつずらして重ねる。末尾（主窓）が最後 = 前面。
-        let mut primary_window = None;
-        for (index, plan) in plans.into_iter().enumerate() {
-            let offset = px(28.0 * index as f32);
-            let plan_bounds = Bounds::new(bounds.origin + point(offset, offset), bounds.size);
-            // Some の外枠は「DB を開く判断は main で完了済み」。storage=None のとき Workspace 側で
-            // 二度目の open をせず、同じ排他ロックエラーを重ねない。
-            let persistence = Some(WindowPersistence {
-                window_id: storage.as_ref().and(plan.window_id.clone()),
-                storage: storage.clone(),
-            });
-            let build_theme = theme.clone();
-            let build_sources = plan.sources;
-            let build_active = plan.active;
-            let opened = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(plan_bounds)),
-                    // 自前 titlebar（UI-SPEC §3）を描くため既定のシステム titlebar を隠す。
-                    // 信号機は残し、38px の titlebar 内に収まる位置へ寄せる。
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("necoder".into()),
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(px(13.0), px(13.0))),
-                    }),
-                    // custom titlebar で自前ドラッグ（start_window_move）を使うため false。
-                    // true のままだと macOS が titlebar を system 所有扱いしてクリック遅延や
-                    // ダブルクリック判定の不具合になる（gpui WindowOptions のコメント参照）。
-                    is_movable: false,
-                    ..Default::default()
-                },
-                move |window, cx| {
-                    // ユーザーが窓を閉じたら DB の自分の行に閉じ印（次回は復元しない）。
-                    if let Some(persistence) = &persistence {
-                        workspace::install_window_close_hook(window, cx, persistence);
-                    }
-                    cx.new(|cx| {
-                        Workspace::new_sources_with_active(
-                            build_sources,
-                            build_active,
-                            build_theme,
-                            persistence,
-                            cx,
-                        )
-                    })
-                },
-            );
-            let handle = match opened {
-                Ok(handle) => handle,
-                Err(error) => {
-                    eprintln!("ウィンドウを開けない: {error}");
-                    continue;
-                }
-            };
-            if let Err(error) = handle.update(cx, |workspace, window, cx| {
-                workspace.restore_open_file(&plan.open_files, window, cx);
-                if let Some(payload) = &plan.layout_payload {
-                    workspace.restore_work_layout(payload, cx);
-                }
-                workspace.check_hot_exit_restore(cx);
-                let focus = workspace.focus_handle(cx);
-                window.focus(&focus, cx);
-                start_control_ipc_for_window(window, cx);
-            }) {
-                eprintln!("初期化に失敗: {error}");
-            }
-            primary_window = Some(handle);
-        }
-        let Some(window) = primary_window else {
+        let Some(window) = open_planned_windows(plans, storage.clone(), theme, cx) else {
             eprintln!("ウィンドウを 1 つも開けない");
             return;
         };
 
-        // 正常終了（⌘Q）= hot exit スナップショットを破棄してから quit（仕様: 正常終了で破棄）。
-        // 窓セッションは今開いている窓を「生存」のまま残し、それ以外の生存行（引数付き起動 → ⌘Q で
-        // 残った過去の窓）は閉じ扱いにする＝次回の復元は「最後に終了したときの窓の集合」。
-        let quit_storage = storage.clone();
-        cx.on_action(move |_: &Quit, cx: &mut App| {
-            workspace::mark_quitting();
-            let mut live_ids = Vec::new();
-            for handle in cx.windows() {
-                if let Some(handle) = handle.downcast::<Workspace>() {
-                    let _ = handle.update(cx, |workspace, _window, _cx| {
-                        workspace.prepare_quit();
-                        live_ids.extend(workspace.window_session_id());
-                    });
-                }
+        // ⌘Q・メニューの「終了」。動いているエージェントや端末があれば確認し、無ければ即終了する
+        // （`workspace::request_quit`）。終了の後始末（hot exit の破棄・窓セッションの整理）は
+        // `workspace::quit_now` が持つ。
+        // 終了はアクションの dispatch 中（前面の窓を update 中）に届くので、その窓を読めるよう
+        // 一度抜けてから判断する（抜けずに数えると前面の窓が数えられない）。
+        cx.on_action(|_: &Quit, cx: &mut App| cx.defer(workspace::request_quit));
+        // macOS の Dock / AppleScript の「終了」も同じ入口へ（main 冒頭で登録したフックから届く）。
+        let mut quit_requests = quit_requests;
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            while quit_requests.next().await.is_some() {
+                cx.update(workspace::request_quit);
             }
-            if let Some(storage) = &quit_storage {
-                if let Err(error) = storage.retain_window_sessions(&live_ids) {
-                    eprintln!("窓セッションの整理に失敗: {error:#}");
-                }
-            }
-            cx.quit();
-        });
+        })
+        .detach();
 
         #[cfg(debug_assertions)]
         {
@@ -951,6 +1029,40 @@ fn main() {
                         })
                         .detach();
                     }
+                }
+                // 開発用: NECODER_QUESTION_PROBE=<ms> で <ms> 後に Fleet を開き、スレッドへ質問を届ける
+                // （O12: 質問待ちが要対応・トースト・statusbar に出るかの撮影）。
+                if let Some(delay_ms) = std::env::var("NECODER_QUESTION_PROBE")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(delay_ms))
+                                .await;
+                            if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_question_probe(window, cx);
+                            }) {
+                                eprintln!("question probe: {error:#}");
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                // 開発用: NECODER_QUIT_PROBE=<ms> で <ms> 後に ⌘Q と同じ入口を叩く（O4 の確認の撮影）。
+                // 動いているものが無ければ本当に終了するので、NECODER_ACTIVITY_PROBE=1 と併用する。
+                if let Some(delay_ms) = std::env::var("NECODER_QUIT_PROBE")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    cx.spawn(async move |_workspace, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(delay_ms))
+                            .await;
+                        cx.update(workspace::request_quit);
+                    })
+                    .detach();
                 }
                 // 開発用: NECODER_CONTROL_PROBE=1 で管制タブの受入シナリオ（5 擬似 TaskSpace・P3）を合成。
                 if std::env::var("NECODER_CONTROL_PROBE").is_ok_and(|value| value == "1") {

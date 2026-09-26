@@ -908,15 +908,17 @@ impl SettingsView {
         current: &str,
         cx: &mut Context<Self>,
     ) -> Div {
-        self.segmented_row_with(key, label, options, current, false, cx)
+        self.segmented_row_with(key, label, None, options, current, false, cx)
     }
 
     /// セグメント行の本体。`preview` を立てると、押したときに保存に加えて
     /// [`SettingsViewEvent::PreviewSound`] を上げる（通知音は聴かないと選べない）。
+    #[allow(clippy::too_many_arguments)]
     fn segmented_row_with(
         &self,
         key: &'static str,
         label: String,
+        sub: Option<String>,
         options: &[(&'static str, String)],
         current: &str,
         preview: bool,
@@ -965,7 +967,7 @@ impl SettingsView {
                     ),
             );
         }
-        self.pref_row(label, None, segments.into_any_element())
+        self.pref_row(label, sub, segments.into_any_element())
     }
 
     /// 「外観」セクション。テーマをチップの列で並べ、クリックで即適用 + settings.json へ保存する。
@@ -1744,6 +1746,7 @@ impl SettingsView {
             .child(self.segmented_row_with(
                 "sound_done",
                 i18n::t!("settings.pref_sound_done"),
+                None,
                 &sound_options(),
                 &settings.sound_done,
                 true,
@@ -1752,9 +1755,31 @@ impl SettingsView {
             .child(self.segmented_row_with(
                 "sound_waiting",
                 i18n::t!("settings.pref_sound_waiting"),
+                None,
                 &sound_options(),
                 &settings.sound_waiting,
                 true,
+                cx,
+            ))
+            .child(self.toggle_row(
+                "system_notifications",
+                7,
+                i18n::t!("settings.pref_system_notifications"),
+                Some(i18n::t!("settings.pref_system_notifications_sub")),
+                settings.system_notifications,
+                cx,
+            ))
+            // ⌘Q・最後の窓を閉じる時の確認（O4）。値は settings.json の `confirm_quit`。
+            .child(self.segmented_row_with(
+                "confirm_quit",
+                i18n::t!("settings.pref_confirm_quit"),
+                Some(i18n::t!("settings.pref_confirm_quit_sub")),
+                &[
+                    ("running", i18n::t!("settings.confirm_quit_running")),
+                    ("never", i18n::t!("settings.confirm_quit_never")),
+                ],
+                &settings.confirm_quit,
+                false,
                 cx,
             ))
             .child(self.segmented_row(

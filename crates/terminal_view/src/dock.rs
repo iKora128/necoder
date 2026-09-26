@@ -1,7 +1,7 @@
 use crate::{TerminalEvent, TerminalView};
 use gpui::{
     div, prelude::*, px, App, Context, Entity, EventEmitter, Hsla, IntoElement, MouseButton,
-    Render, SharedString, StyleRefinement, Window,
+    PromptButton, PromptLevel, Render, SharedString, StyleRefinement, Window,
 };
 use std::path::PathBuf;
 use theme_core::Theme;
@@ -170,6 +170,16 @@ impl TerminalDock {
         cx.notify();
     }
 
+    /// 前面でプロセスが動いている端末の数（ドックのタブと Fleet に置いた端末の両方）。
+    /// ⌘Q・最後の窓を閉じる時の確認（O4）が数える。
+    pub fn busy_terminal_count(&self, cx: &App) -> usize {
+        self.terminals
+            .iter()
+            .chain(self.detached.values())
+            .filter(|terminal| terminal.read(cx).has_foreground_process())
+            .count()
+    }
+
     /// dock 内のいずれかの端末にキーボードフォーカスがあるか（プロジェクト切替のフォーカス追従判定）。
     pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.terminals
@@ -287,7 +297,51 @@ impl TerminalDock {
         }
     }
 
+    /// タブの ×。前面でプロセスが動いている端末は、閉じる（= SIGHUP で止まる）前に確認する（O4）。
+    /// 確認は OS のダイアログ（`Window::prompt`・mac はシート）で、⏎ = 閉じる / Esc = キャンセル。
+    /// 答えを待つ間にタブの並びが変わってもよいよう、閉じる対象は添字でなく Entity で覚える。
     fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminals.get(index).cloned() else {
+            return;
+        };
+        if !terminal.read(cx).has_foreground_process() {
+            self.close_now(index, window, cx);
+            return;
+        }
+        let message = i18n::t!("terminal.close_busy_title", "n" => index + 1);
+        let detail = i18n::t!("terminal.close_busy_detail");
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &[
+                PromptButton::ok(i18n::t!("terminal.close_busy_confirm")),
+                PromptButton::cancel(i18n::t!("terminal.close_busy_cancel")),
+            ],
+            cx,
+        );
+        let target = terminal.entity_id();
+        cx.spawn_in(window, async move |dock, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let closed = dock.update_in(cx, |dock, window, cx| {
+                if let Some(index) = dock
+                    .terminals
+                    .iter()
+                    .position(|terminal| terminal.entity_id() == target)
+                {
+                    dock.close_now(index, window, cx);
+                }
+            });
+            if let Err(error) = closed {
+                eprintln!("ターミナルを閉じられない（ドックが既に無い）: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    fn close_now(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.terminals.len() {
             return;
         }
