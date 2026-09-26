@@ -1,5 +1,99 @@
 use crate::workspace::*;
 
+/// Markdown のスラッシュメニューの 1 項目（O29）。
+pub(crate) struct SlashCommand {
+    /// 絞り込みに使う名前（英字・`/` の後に打つ語）。
+    pub(crate) name: &'static str,
+    /// 右に出す説明の i18n キー。
+    pub(crate) description: &'static str,
+    /// 入れる形。
+    pub(crate) text: &'static str,
+    /// 入れた後のキャレット（`text` の中の byte 位置・`None` = 末尾）。
+    pub(crate) caret: Option<usize>,
+}
+
+/// スラッシュメニューに並べる形（上から出す順）。
+pub(crate) const MARKDOWN_SLASH_COMMANDS: [SlashCommand; 13] = [
+    SlashCommand {
+        name: "h1",
+        description: "editor.slash_h1",
+        text: "# ",
+        caret: None,
+    },
+    SlashCommand {
+        name: "h2",
+        description: "editor.slash_h2",
+        text: "## ",
+        caret: None,
+    },
+    SlashCommand {
+        name: "h3",
+        description: "editor.slash_h3",
+        text: "### ",
+        caret: None,
+    },
+    SlashCommand {
+        name: "bullet",
+        description: "editor.slash_bullet",
+        text: "- ",
+        caret: None,
+    },
+    SlashCommand {
+        name: "numbered",
+        description: "editor.slash_numbered",
+        text: "1. ",
+        caret: None,
+    },
+    SlashCommand {
+        name: "todo",
+        description: "editor.slash_todo",
+        text: "- [ ] ",
+        caret: None,
+    },
+    SlashCommand {
+        name: "quote",
+        description: "editor.slash_quote",
+        text: "> ",
+        caret: None,
+    },
+    SlashCommand {
+        name: "code",
+        description: "editor.slash_code",
+        text: "```\n```",
+        caret: Some(3),
+    },
+    SlashCommand {
+        name: "table",
+        description: "editor.slash_table",
+        text: "|  |  |\n| --- | --- |\n|  |  |",
+        caret: Some(2),
+    },
+    SlashCommand {
+        name: "divider",
+        description: "editor.slash_divider",
+        text: "---\n",
+        caret: None,
+    },
+    SlashCommand {
+        name: "image",
+        description: "editor.slash_image",
+        text: "![]()",
+        caret: Some(4),
+    },
+    SlashCommand {
+        name: "link",
+        description: "editor.slash_link",
+        text: "[]()",
+        caret: Some(1),
+    },
+    SlashCommand {
+        name: "toc",
+        description: "editor.slash_toc",
+        text: "[toc]\n",
+        caret: None,
+    },
+];
+
 impl Workspace {
     pub(crate) fn ensure_lsp(&mut self, cx: &mut Context<Self>) {
         let Some(worktree) = self.active_worktree() else {
@@ -487,6 +581,7 @@ impl Workspace {
             selected: 0,
             position,
             focus,
+            slash: false,
         };
         // 応答時点のプレフィクスで 1 件も残らなければ出さない。
         if state.filtered().is_empty() {
@@ -525,16 +620,55 @@ impl Workspace {
             filtered
                 .get(state.selected)
                 .and_then(|&index| state.items.get(index))
-                .map(|item| item.insert_text.clone())
+                .map(|item| (item.insert_text.clone(), item.caret, state.slash))
         });
         self.completion = None;
         if let Some(editor) = self.active_editor() {
             let handle = editor.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
-            if let Some(text) = insert {
-                editor.update(cx, |view, cx| view.apply_completion(&text, cx));
+            match insert {
+                Some((text, caret, true)) => {
+                    editor.update(cx, |view, cx| view.apply_slash_command(&text, caret, cx))
+                }
+                Some((text, _, false)) => {
+                    editor.update(cx, |view, cx| view.apply_completion(&text, cx))
+                }
+                None => {}
             }
         }
+        cx.notify();
+    }
+
+    /// Markdown の行頭で `/` を打った時のスラッシュメニュー（O29）。補完と同じポップアップに形を並べ、
+    /// 続けて打つ英字で絞り込む（`/co` → code）。確定で `/語` を形に置き換える。
+    pub(crate) fn show_slash_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor() else {
+            return;
+        };
+        let position = editor
+            .read(cx)
+            .caret_window_position()
+            .unwrap_or_else(|| point(px(220.), px(180.)));
+        let items = MARKDOWN_SLASH_COMMANDS
+            .iter()
+            .map(|command| CompletionItem {
+                label: SharedString::new_static(command.name),
+                insert_text: command.text.to_string(),
+                detail: Some(SharedString::from(i18n::t!(command.description))),
+                kind: SharedString::new_static("md"),
+                caret: command.caret,
+            })
+            .collect();
+        let state = CompletionState {
+            items,
+            prefix: String::new(),
+            selected: 0,
+            position,
+            focus: cx.focus_handle(),
+            slash: true,
+        };
+        window.focus(&state.focus, cx);
+        self.completion = Some(state);
         cx.notify();
     }
 
@@ -993,4 +1127,88 @@ impl Workspace {
     // ⌘I: 選択範囲（無ければ現在行）を対象にインライン編集を開く。
     // 選択+指示 → `claude -p` で書き換え → その場 diff → accept/reject（チャットへ行かない最短経路）。
     // ターミナルにフォーカスがあれば同型の「自然言語 → コマンド生成」になる。
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn a_slash_at_the_start_of_a_markdown_line_offers_block_shapes(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_slash_menu_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.md"), "").unwrap();
+        std::fs::write(root.join("main.rs"), "").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_file(root.join("notes.md"), window, cx);
+        });
+        cx.run_until_parked();
+        let type_text = |text: &'static str, cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, _window, cx| {
+                let editor = workspace.active_editor().expect("エディタ");
+                editor.update(cx, |view, cx| view.insert_text(text, cx));
+            });
+            cx.run_until_parked();
+        };
+
+        type_text("/", cx);
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            let state = workspace.completion.as_ref().expect("スラッシュメニュー");
+            assert!(state.slash);
+            assert_eq!(state.filtered().len(), MARKDOWN_SLASH_COMMANDS.len());
+        });
+        // 1 打鍵ずつ（ポップアップは打った 1 文字ずつ絞り込む）。
+        type_text("c", cx);
+        type_text("o", cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let state = workspace
+                .completion
+                .as_ref()
+                .expect("絞り込み中も開いている");
+            let names: Vec<_> = state
+                .filtered()
+                .into_iter()
+                .map(|index| state.items[index].label.to_string())
+                .collect();
+            assert_eq!(names, vec!["code".to_string()]);
+            workspace.confirm_completion(window, cx);
+            let editor = workspace.active_editor().expect("エディタ");
+            let view = editor.read(cx);
+            assert_eq!(
+                view.buffer().text(),
+                "```\n```",
+                "`/co` がコードの囲みになる"
+            );
+            assert_eq!(view.buffer().selections()[0].head, 3, "言語名を打てる所");
+        });
+
+        // 行の途中の `/`（パス・日付）では出さない。Markdown 以外でも出さない。
+        type_text("rust\nsee a", cx);
+        type_text("/", cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.completion.is_none(), "行の途中");
+            workspace.open_file(root.join("main.rs"), window, cx);
+        });
+        cx.run_until_parked();
+        type_text("/", cx);
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            assert!(workspace.completion.is_none(), "Markdown だけ");
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

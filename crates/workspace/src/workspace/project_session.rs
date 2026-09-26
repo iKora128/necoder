@@ -1008,6 +1008,7 @@ impl Workspace {
                 insert_text: label.to_string(),
                 detail: Some(SharedString::from(detail.to_string())),
                 kind: SharedString::from(kind.to_string()),
+                caret: None,
             };
             workspace.completion = Some(CompletionState {
                 items: vec![
@@ -1021,6 +1022,7 @@ impl Workspace {
                 selected: 1,
                 position: point(px(380.), px(210.)),
                 focus: cx.focus_handle(),
+                slash: false,
             });
         }
         // 開発用: NECODER_NAMING=1 でルートへの新規ファイル命名入力を開いた状態で撮る。

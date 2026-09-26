@@ -613,8 +613,8 @@ impl EditorView {
         cx.notify();
     }
 
-    /// このバッファが markdown か（プレビュー可否）。無題・非対応拡張子は false。
-    fn is_markdown(&self) -> bool {
+    /// このバッファが markdown か（プレビュー可否・スラッシュメニュー）。無題・非対応拡張子は false。
+    pub fn is_markdown(&self) -> bool {
         self.buffer
             .path()
             .map(|path| lang::language_for_path(path) == Some(lang::LanguageId::Markdown))
@@ -984,6 +984,37 @@ impl EditorView {
     }
 
     /// カーソル直前の最大 `max_bytes` バイトのテキスト（`::` などのトリガ文字判定用）。
+    /// キャレットの行の、行頭からキャレットまで（Markdown のスラッシュメニューが行頭かを見る・O29）。
+    pub fn line_before_caret(&self) -> String {
+        let head = self.primary().head;
+        let snapshot = self.buffer.snapshot();
+        let row = snapshot.byte_to_point(head).row;
+        let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0));
+        self.buffer.text_range(line_start..head)
+    }
+
+    /// スラッシュメニュー（O29）で選んだ形を入れる: キャレットの前の `/`＋打った語を `text` に置き換え、
+    /// キャレットを `caret`（`text` の中の byte 位置・無ければ末尾）へ置く。`/` が消されていれば語だけ
+    /// 置き換える。1 手（⌘Z 1 回で `/語` に戻る）。
+    pub fn apply_slash_command(
+        &mut self,
+        text: &str,
+        caret: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let head = self.primary().head;
+        let (word_start, _) = self.identifier_prefix_at_caret();
+        let start = if word_start > 0 && self.buffer.text_range(word_start - 1..word_start) == "/" {
+            word_start - 1
+        } else {
+            word_start
+        };
+        self.buffer.edit(&[start..head], text);
+        let cursor = start + caret.unwrap_or(text.len()).min(text.len());
+        self.buffer.set_selections(vec![Selection::cursor(cursor)]);
+        self.after_edit(cx);
+    }
+
     pub fn text_before_caret(&self, max_bytes: usize) -> String {
         let head = self.primary().head;
         self.buffer.text_range(head.saturating_sub(max_bytes)..head)

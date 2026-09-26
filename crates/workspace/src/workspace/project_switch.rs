@@ -57,6 +57,17 @@ impl Workspace {
         }
         // タイプしたら hover は消す。
         self.close_hover(cx);
+        // Markdown の行頭の `/` = スラッシュメニュー（O29・見出し・一覧・コード・表などの形を選んで入れる）。
+        if text == "/" && self.session().completion.is_none() {
+            let starts_line = {
+                let view = editor.read(cx);
+                view.is_markdown() && view.line_before_caret().trim_start() == "/"
+            };
+            if starts_line {
+                self.show_slash_menu(window, cx);
+                return;
+            }
+        }
         let (before, word_start) = {
             let view = editor.read(cx);
             (

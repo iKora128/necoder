@@ -9,6 +9,19 @@ editor:
   drop_remote: "リモートのプロジェクトのエディタには落とせません（エクスプローラのフォルダへ落とすとアップロードします）"
   toc: 目次
   toc_empty: 見出しがありません
+  slash_h1: 見出し 1
+  slash_h2: 見出し 2
+  slash_h3: 見出し 3
+  slash_bullet: 箇条書き
+  slash_numbered: 番号付きの一覧
+  slash_todo: チェックリスト
+  slash_quote: 引用
+  slash_code: コードブロック
+  slash_table: 表
+  slash_divider: 区切り線
+  slash_image: 画像
+  slash_link: リンク
+  slash_toc: 目次
   empty_hint: 起動引数でファイルを渡すと開きます（例 necoder README.md）
   blame_uncommitted: 未コミット
 common:
