@@ -3780,6 +3780,80 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("後片付け");
     }
 
+    /// エクスプローラの空きを押すとフォーカスがエクスプローラへ移る（⌘Z の宛先・H30）。
+    /// ファイル行を押した時はエディタへ渡し、エクスプローラが取り返さない。
+    #[gpui::test]
+    fn explorer_clicks_take_focus_but_file_rows_hand_it_to_the_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_explorer_focus_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("一時プロジェクト");
+        std::fs::write(project.join("a.txt"), "a\n").expect("a.txt");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        // ツリーの 1 行目（a.txt）= タイトルバー + エクスプローラの見出しの下。
+        let row = point(
+            px(RAIL_WIDTH + 60.),
+            px(TITLEBAR_HEIGHT + 28. + ROW_HEIGHT / 2. + 2.),
+        );
+        let empty = point(px(RAIL_WIDTH + 60.), px(TITLEBAR_HEIGHT + 300.));
+        // (エクスプローラにフォーカス, エディタにフォーカス)
+        let focus_state = |cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                let editor = workspace
+                    .active_editor()
+                    .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window));
+                (workspace.chrome.explorer_focus.is_focused(window), editor)
+            })
+        };
+        cx.simulate_click(empty, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            focus_state(cx),
+            (true, false),
+            "エクスプローラの空きを押すとフォーカスが移る"
+        );
+
+        cx.simulate_click(row, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            focus_state(cx),
+            (false, true),
+            "ファイル行を押すとエディタへ渡る"
+        );
+
+        // 開いているファイルの行（タブへ切り替えるだけ・同期でエディタへ）も同じ。
+        cx.simulate_click(empty, gpui::Modifiers::none());
+        cx.simulate_click(row, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            focus_state(cx),
+            (false, true),
+            "開いているファイルの行でもエディタへ渡る"
+        );
+
+        std::fs::remove_dir_all(&root).expect("後片付け");
+    }
+
     /// ⌘P（D19）: 最近開いたファイルが上に来る。gitignore で隠れたファイルは 1 回目には出ず、
     /// 一致なしの時だけ出る「無視されたファイルも探す」（2 回目）で、Picker を開いたまま足される。
     #[gpui::test]

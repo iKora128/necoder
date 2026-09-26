@@ -5,6 +5,7 @@ impl Workspace {
         let theme = self.theme.clone();
         let Some(slot) = self.active_slot() else {
             return div()
+                .id("explorer-dock")
                 .w(px(DOCK_WIDTH))
                 .h_full()
                 .flex_none()
@@ -19,6 +20,7 @@ impl Workspace {
             ExplorerView::Icons => self.render_icons(slot, cx),
         };
         div()
+            .id("explorer-dock")
             // エクスプローラを本物のキーの宛先にする（⌘Z = ファイル操作の取り消し・H30）。
             // keymap の `Explorer` コンテキストはここにフォーカスがある時だけ効くので、
             // エディタの ⌘Z（editor::Undo）とはぶつからない。
@@ -35,13 +37,15 @@ impl Workspace {
             .border_r_1()
             .border_color(theme.border)
             // エクスプローラを触った → ⌘W の宛先はエディタタブ（Agent 判定を下げる）。
-            // 押したらフォーカスもエクスプローラへ（ファイル行はこの後の click でエディタへ移る）。
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.agent_active = false;
-                    this.focus_explorer(window, cx);
-                }),
+                cx.listener(|this, _, _window, _cx| this.agent_active = false),
+            )
+            // クリックしたらフォーカスもエクスプローラへ。押した瞬間ではなく click（離した時）で
+            // 取るのは、行を composer へドラッグした時にフォーカスを奪わないため（ドラッグが成立すると
+            // gpui は click を捨てる）。ファイルを開く click は行の側で止める（フォーカスはエディタへ）。
+            .on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.focus_explorer(window, cx)),
             )
             // 右クリックも同じ（メニューから「ゴミ箱に入れる」→ ⌘Z で戻せるように）。
             .on_mouse_down(
@@ -395,6 +399,8 @@ impl Workspace {
                         this.toggle_dir(path.clone(), cx);
                     } else {
                         this.open_file(path.clone(), window, cx);
+                        // フォーカスはエディタへ（エクスプローラ枠の click で取り返さない）。
+                        cx.stop_propagation();
                     }
                 }))
                 .on_mouse_down(
@@ -502,6 +508,7 @@ impl Workspace {
                             this.enter_dir(path.clone(), cx);
                         } else {
                             this.open_file(path.clone(), window, cx);
+                            cx.stop_propagation(); // フォーカスはエディタへ
                         }
                     }))
                     .on_mouse_down(
@@ -647,6 +654,7 @@ impl Workspace {
                                                 this.enter_dir(path.clone(), cx);
                                             } else {
                                                 this.open_file(path.clone(), window, cx);
+                                                cx.stop_propagation(); // フォーカスはエディタへ
                                             }
                                         },
                                     ))
