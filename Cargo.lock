@@ -4250,6 +4250,7 @@ dependencies = [
  "i18n",
  "image",
  "keymap_core",
+ "objc2 0.6.4",
  "paths",
  "project",
  "search",

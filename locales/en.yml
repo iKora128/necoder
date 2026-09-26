@@ -347,6 +347,21 @@ worktree_delete:
   skip_next: Don't ask again (skipped only when there is nothing to lose)
   cancel: Cancel
   confirm: Delete
+quit_confirm:
+  title: Work is still running
+  working: "Agents running: %{n}"
+  waiting: "Agents waiting for your approval or answer: %{n}"
+  terminals: "Terminals with a running process: %{n}"
+  detail_quit_hide: Quitting stops all of this. Hide necoder instead and it keeps running; click the Dock icon to come back.
+  detail_quit_minimize: Quitting stops all of this. Minimize instead and it keeps running.
+  detail_close_hide: Closing this window stops all of this. Hide necoder instead and it keeps running; click the Dock icon to come back.
+  detail_close_minimize: Closing this window stops all of this. Minimize instead and it keeps running.
+  keep_running_hide: Hide and keep running
+  keep_running_minimize: Minimize and keep running
+  quit: Quit
+  close: Close
+  cancel: Cancel
+  setting_hint: "Turn this off in Settings › Behavior & editor › Confirm before quitting"
 launcher:
   placeholder: Open or choose a recent project…
   open_folder: Open Folder…
@@ -461,6 +476,10 @@ settings:
   pref_tabs_view: Thread tabs
   tabs_view_bar: Bar
   tabs_view_list: List
+  pref_confirm_quit: Confirm before quitting
+  pref_confirm_quit_sub: "On ⌘Q or when closing the last window, offers “Hide and keep running” while agents or terminals are busy"
+  confirm_quit_running: Only while busy
+  confirm_quit_never: Never
   appearance_heading: Appearance
   appearance_sub: Themes apply the moment you click and are saved to settings.json.
   theme_label: Theme
