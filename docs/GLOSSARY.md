@@ -85,6 +85,7 @@
 | **下段ドック**（Fleet 下の可変高タブ面） | `FleetBottomView` / `bottom_height` | 下段 | Bottom pane |
 | **OS の通知**（通知センター。その窓を見ていない時だけ・スレッドごとに 1 件） | `system_notifications` / `post_agent_notification` / 設定 `system_notifications` | OS の通知 | System notifications |
 | **Dock バッジ**（要対応の件数・全窓の合計・macOS） | `dock_badge` | — | — |
+| **作業中はスリープさせない**（作業中のスレッドが全窓で 1 本でもある間だけ、放っておいた時のスリープを止める・O13） | `keep_awake`（設定 `keep_awake`・`KeepAwake`） | 作業中はスリープさせない | Keep awake while agents work |
 | **質問待ち**（エージェントが選択肢付きで聞いてきて止まっている。状態は承認待ちと同じ Blocked） | `PanelEvent::QuestionWaiting` / `AttentionKind::Question` | 質問待ち | Waiting for an answer |
 | **終了の確認**（⌘Q・窓を閉じる時。動いているエージェント・ターミナルがある時だけ。窓を閉じる時はその窓の分だけ数える） | `quit_guard` / `QuitConfirmState`（設定 `confirm_quit`） | 終了時の確認 | Confirm before quitting |
 | ↳ **隠して動かし続ける**（既定。mac はアプリを隠す・他 OS は最小化。ほかの窓が残る時はその窓だけを最小化。プロセスは止めないが、終了・クラッシュを越えては続かない） | `QuitChoice::KeepRunning` | 隠して動かし続ける / 最小化して動かし続ける | Hide and keep running / Minimize and keep running |

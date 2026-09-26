@@ -2198,6 +2198,25 @@ impl SettingsView {
                 false,
                 cx,
             ))
+            // エージェントの作業中はスリープさせない（O13）。値は settings.json の `keep_awake`。
+            // 止める手段を持つ OS（mac の caffeinate / Windows の SetThreadExecutionState）だけに出す。
+            .when(
+                cfg!(any(target_os = "macos", target_os = "windows")),
+                |group| {
+                    group.child(self.segmented_row_with(
+                        "keep_awake",
+                        i18n::t!("settings.pref_keep_awake"),
+                        Some(i18n::t!("settings.pref_keep_awake_sub")),
+                        &[
+                            ("working", i18n::t!("settings.keep_awake_working")),
+                            ("off", i18n::t!("settings.keep_awake_off")),
+                        ],
+                        &settings.keep_awake,
+                        false,
+                        cx,
+                    ))
+                },
+            )
             .child(self.segmented_row(
                 "agent_tabs_view",
                 i18n::t!("settings.pref_tabs_view"),

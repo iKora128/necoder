@@ -243,6 +243,11 @@ pub struct Settings {
     /// `"never"` = 聞かない）。エージェントも端末もアプリ本体の子なので、終了すると一緒に止まる。
     /// 解釈は [`Settings::quit_confirmation`]（知らない値は既定の側に倒す）。
     pub confirm_quit: String,
+    /// エージェントが作業している間、コンピュータを寝かせないか（`"working"` = 作業中の間だけ・既定 /
+    /// `"off"` = 止めない・O13）。止めるのは**放っておいた時のスリープ（idle sleep）だけ**で、画面は
+    /// 普通に消え、自分で選んだスリープとノートの蓋を閉じた時のスリープは止めない。
+    /// 解釈は [`Settings::keep_awake_mode`]（知らない値は止める側に倒す）。
+    pub keep_awake: String,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
@@ -306,6 +311,7 @@ impl Default for Settings {
             mcp_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
             confirm_quit: "running".to_string(),
+            keep_awake: "working".to_string(),
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
             agent_idle_stop_minutes: 15,
@@ -334,7 +340,26 @@ pub enum QuitConfirmation {
     Never,
 }
 
+/// エージェントの作業中にスリープを止めるか（`keep_awake` の解釈・O13）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepAwake {
+    /// 作業中（Working）のスレッドが 1 本でもある間だけ、放っておいた時のスリープを止める。
+    /// 承認待ち・質問待ちは数えない（人の返事を待つ間まで起こし続けない）。
+    WhileWorking,
+    /// 止めない（OS の設定どおりに眠る）。
+    Off,
+}
+
 impl Settings {
+    /// `keep_awake` の値。**知らない値は止める側に倒す**（綴り違いで作業中のターンが寝て途切れる方が、
+    /// 作業の間だけ起きている電力より高くつく）。
+    pub fn keep_awake_mode(&self) -> KeepAwake {
+        match self.keep_awake.as_str() {
+            "off" => KeepAwake::Off,
+            _ => KeepAwake::WhileWorking,
+        }
+    }
+
     /// `confirm_quit` の値。**知らない値は確認する側に倒す**（綴り違いで黙ってエージェントを
     /// 止める方が、1 回余計に聞かれるより高くつく）。
     pub fn quit_confirmation(&self) -> QuitConfirmation {
@@ -363,6 +388,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "default_agent": "Claude Code",
   "confirm_worktree_delete": true,
   "confirm_quit": "running",
+  "keep_awake": "working",
   "agent_servers": {},
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
@@ -760,6 +786,23 @@ mod tests {
             typo.settings().quit_confirmation(),
             QuitConfirmation::WhenRunning
         );
+    }
+
+    #[test]
+    fn keep_awake_defaults_to_while_working_and_can_be_turned_off() {
+        assert_eq!(
+            SettingsStore::default().settings().keep_awake_mode(),
+            KeepAwake::WhileWorking
+        );
+        let off =
+            SettingsStore::from_json_layers(&[DEFAULT_SETTINGS_JSON, r#"{ "keep_awake": "off" }"#])
+                .expect("マージできる");
+        assert_eq!(off.settings().keep_awake_mode(), KeepAwake::Off);
+        // 綴り違いで黙って「止めない」にしない。
+        let typo =
+            SettingsStore::from_json_layers(&[DEFAULT_SETTINGS_JSON, r#"{ "keep_awake": "of" }"#])
+                .expect("マージできる");
+        assert_eq!(typo.settings().keep_awake_mode(), KeepAwake::WhileWorking);
     }
 
     #[test]

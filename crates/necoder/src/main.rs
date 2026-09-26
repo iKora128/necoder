@@ -773,6 +773,8 @@ fn main() {
         cx.set_app_identity("dev.necoder.editor", "necoder");
         // 通知を押した時の行き先と、Dock の要対応バッジの数え直し（O12）。
         workspace::install_agent_notifications(cx);
+        // エージェントが作業している間はスリープさせない（O13・設定 `keep_awake`）。
+        workspace::install_keep_awake(cx);
         let settings = settings::get(cx);
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);

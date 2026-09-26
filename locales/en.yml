@@ -526,9 +526,13 @@ settings:
   pref_system_notifications: System notifications
   pref_system_notifications_sub: Posts to Notification Center when an agent in a window you aren't looking at finishes or stops (click to jump to the thread)
   pref_confirm_quit: Confirm before quitting
-  pref_confirm_quit_sub: "On ⌘Q or when closing the last window, offers “Hide and keep running” while agents or terminals are busy"
+  pref_confirm_quit_sub: "On ⌘Q or when closing a window, offers “Hide and keep running” while agents or terminals are busy"
   confirm_quit_running: Only while busy
   confirm_quit_never: Never
+  pref_keep_awake: Keep awake while agents work
+  pref_keep_awake_sub: "While an agent is working, the computer won't sleep when left alone. The display still turns off, and choosing Sleep or closing a laptop's lid still puts it to sleep"
+  keep_awake_working: While working
+  keep_awake_off: "Off"
   appearance_heading: Appearance
   appearance_sub: Themes apply the moment you click and are saved to settings.json.
   theme_label: Theme

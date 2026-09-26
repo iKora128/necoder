@@ -527,9 +527,13 @@ settings:
   pref_system_notifications: OS の通知
   pref_system_notifications_sub: 見ていない窓のエージェントが終わった・止まった時に通知センターへ出します（押すとそのスレッドへ）
   pref_confirm_quit: 終了時の確認
-  pref_confirm_quit_sub: ⌘Q・最後の窓を閉じる時、エージェントや端末が動いていれば「隠して動かし続ける」を選べます
+  pref_confirm_quit_sub: ⌘Q・窓を閉じる時、エージェントや端末が動いていれば「隠して動かし続ける」を選べます
   confirm_quit_running: 動いている時だけ
   confirm_quit_never: しない
+  pref_keep_awake: 作業中はスリープさせない
+  pref_keep_awake_sub: エージェントが作業している間は、放っておいてもスリープしません。画面は消えます。自分で選んだスリープと、ノートの蓋を閉じた時のスリープは止めません
+  keep_awake_working: 作業中の間
+  keep_awake_off: しない
   appearance_heading: 外観
   appearance_sub: テーマは押した瞬間に適用され、settings.json に保存されます。
   theme_label: テーマ

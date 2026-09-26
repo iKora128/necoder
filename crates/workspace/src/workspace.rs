@@ -88,10 +88,12 @@ mod system_notifications;
 mod usage_view;
 mod worktree_delete;
 mod editor_manners;
+mod keep_awake;
 mod ports;
 pub use control_ipc::control_socket_path;
 pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
+pub use keep_awake::install_keep_awake;
 pub use system_notifications::install_agent_notifications;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
