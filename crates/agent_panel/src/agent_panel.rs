@@ -5277,6 +5277,19 @@ PYEOF"#;
         self.add_thread(cx);
     }
 
+    /// エージェントを決めて新規スレッドを作る（B28・パレット「AI: 新しいスレッド（Codex）」等）。
+    /// 作ってから、エージェント選択と同じ道筋（先張りしたセッションを畳んで張り直す）で差し替える。
+    pub fn new_thread_with_agent(&mut self, agent: &str, cx: &mut Context<Self>) {
+        self.add_thread(cx);
+        let current = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.agent.clone());
+        if current.as_deref() != Some(agent) {
+            self.select_option(Selector::Agent, SharedString::from(agent.to_string()), cx);
+        }
+    }
+
     /// 新規スレッドを作り、その index を返す（編隊グリッドの ＋Agent＝新エージェント起動・M14）。
     /// `add_thread` は末尾に append してそこへ switch するので、新 index = 末尾。
     pub fn new_thread_index(&mut self, cx: &mut Context<Self>) -> usize {
@@ -13846,6 +13859,31 @@ PYEOF"#;
             assert_eq!(panel.reveal_subagent_step(base + 2), base + 2);
         });
         let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// エージェントを決めた新規スレッド（B28）: 新しいタブがそのエージェントで開く（既定と同じなら
+    /// 差し替えない）。先張りで本物のエージェントを起こさないよう prewarm は切る。
+    #[gpui::test]
+    fn a_new_thread_can_start_on_a_chosen_agent(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder_agent_thread_with_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(&path, r#"{"onboarded":true,"agent_prewarm":false}"#).unwrap();
+        cx.update(|cx| settings::init(Some(path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let before = panel.threads.len();
+            panel.new_thread_with_agent("Codex", cx);
+            assert_eq!(panel.threads.len(), before + 1, "新しいタブ");
+            assert_eq!(panel.threads[panel.active].agent.as_ref(), "Codex");
+            let default_agent = panel.threads[panel.active].agent.clone();
+            panel.new_thread_with_agent(default_agent.as_ref(), cx);
+            assert_eq!(panel.threads.len(), before + 2);
+            assert_eq!(panel.threads[panel.active].agent, default_agent);
+        });
+        let _ = std::fs::remove_file(path);
     }
 
     /// スマホ（リモート管制）の質問にも書いて答えられる（O17）: Other 欄つきの質問だけ書け、

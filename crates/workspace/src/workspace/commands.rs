@@ -191,6 +191,34 @@ impl CommandRegistry {
                 action_name: "workspace::NewThread",
             },
             CommandEntry {
+                label_key: "cmd.new_thread_claude",
+                action_name: "workspace::NewThreadClaudeCode",
+            },
+            CommandEntry {
+                label_key: "cmd.new_thread_codex",
+                action_name: "workspace::NewThreadCodex",
+            },
+            CommandEntry {
+                label_key: "cmd.new_thread_copilot",
+                action_name: "workspace::NewThreadCopilot",
+            },
+            CommandEntry {
+                label_key: "cmd.new_thread_qwen",
+                action_name: "workspace::NewThreadQwenCode",
+            },
+            CommandEntry {
+                label_key: "cmd.new_thread_opencode",
+                action_name: "workspace::NewThreadOpenCode",
+            },
+            CommandEntry {
+                label_key: "cmd.new_thread_kimi",
+                action_name: "workspace::NewThreadKimi",
+            },
+            CommandEntry {
+                label_key: "cmd.new_thread_grok",
+                action_name: "workspace::NewThreadGrok",
+            },
+            CommandEntry {
                 label_key: "cmd.next_tab",
                 action_name: "workspace::SelectNextTab",
             },
@@ -320,5 +348,36 @@ mod command_registry_tests {
                 .iter()
                 .all(|other| other.action_name != entry.action_name));
         }
+    }
+
+    /// パレットの行は全部、登録済みの action と訳のあるラベルを指す（名前の打ち間違いで
+    /// 「押しても何も起きない行」を作らない）。
+    #[gpui::test]
+    fn every_palette_command_resolves(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            for entry in CommandRegistry.entries() {
+                assert!(
+                    cx.build_action(entry.action_name, None).is_ok(),
+                    "登録されていない action: {}",
+                    entry.action_name
+                );
+                assert_ne!(
+                    i18n::translate(entry.label_key),
+                    entry.label_key,
+                    "訳の無いラベル: {}",
+                    entry.label_key
+                );
+            }
+        });
+    }
+
+    /// エージェント別の新規スレッド（B28）の行き先は、カタログのエージェントを 1 つずつ全部指す。
+    #[test]
+    fn agent_thread_actions_cover_the_catalog() {
+        let mut labels = crate::workspace::editor_area::AGENT_THREAD_LABELS.to_vec();
+        labels.sort_unstable();
+        let mut catalog = acp_client::AGENT_LABELS.to_vec();
+        catalog.sort_unstable();
+        assert_eq!(labels, catalog);
     }
 }

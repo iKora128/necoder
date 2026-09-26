@@ -238,6 +238,15 @@ actions!(
         CloseTab,
         RestoreClosedTab,
         NewThread,
+        // エージェントを決めて新規スレッド（B28）。並びは editor_area::tabs::AGENT_THREAD_LABELS と同じ。
+        // 既定のキーは無い（keymap.json で好きなキーへ）。
+        NewThreadClaudeCode,
+        NewThreadCodex,
+        NewThreadCopilot,
+        NewThreadQwenCode,
+        NewThreadOpenCode,
+        NewThreadKimi,
+        NewThreadGrok,
         // エディタタブの切替（⌘{ / ⌘} = ⌘⇧[ / ⌘⇧]）。M10 複数タブ。
         SelectNextTab,
         SelectPrevTab,
@@ -2277,6 +2286,27 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::select_next_tab))
             .on_action(cx.listener(Self::select_prev_tab))
             .on_action(cx.listener(Self::new_agent_thread))
+            .on_action(cx.listener(|this, _: &NewThreadClaudeCode, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[0], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadCodex, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[1], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadCopilot, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[2], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadQwenCode, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[3], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadOpenCode, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[4], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadKimi, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[5], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadGrok, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[6], cx)
+            }))
             .on_action(cx.listener(Self::select_next_thread))
             .on_action(cx.listener(Self::select_prev_thread))
             .on_action(cx.listener(Self::new_window))
