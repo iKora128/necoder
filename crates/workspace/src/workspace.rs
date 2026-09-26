@@ -1343,7 +1343,8 @@ pub struct Workspace {
     notifications: NotificationCenter,
     persistence: WorkspacePersistence,
     updater: UpdateController,
-    /// この窓がアクティブか（render で更新）。管制のマスコット等が「動き」を止める判定に使う。
+    /// この窓がアクティブ（OS のキー窓）か。render と窓のアクティブ化の通知で更新する。管制の
+    /// マスコット等が「動き」を止める判定と、OS の通知を出すかの判定（O12）に使う。
     window_active: bool,
     /// 経過秒・承認待ち表示だけの1Hz時計。マスコットの5/10fps時計は子Entityに分離済み。
     visual_tick: u64,
@@ -1890,6 +1891,13 @@ impl Render for Workspace {
                 let agent_visible =
                     this.chrome.agent_full_screen || (this.chrome.show_right && this.agent_active);
                 this.focus_session_surface(agent_visible, false, window, cx);
+            })
+            .detach();
+            // OS のキー窓の状態（隠す・他のアプリへ移る・別の窓へ移るで外れる）を render を待たずに写す。
+            // 隠している間は描画が止まる（display link が止まる）ので、下の render での更新だけでは
+            // 「見ている」が残ってしまい、OS の通知（O12）を出し損ねる（R15）。
+            cx.observe_window_activation(window, |this, window, _cx| {
+                this.window_active = window.is_window_active();
             })
             .detach();
         }

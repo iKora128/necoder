@@ -2678,6 +2678,13 @@ PYEOF"#;
         self.thread_index_by_id(thread_id)
     }
 
+    /// `thread_position` の逆: 今の添字からスレッドの永続 id を引く。
+    pub fn thread_id_at(&self, index: usize) -> Option<SharedString> {
+        self.threads
+            .get(index)
+            .map(|thread| SharedString::from(thread.id.clone()))
+    }
+
     /// 承認待ちへ**任意スレッド**で応答する（管制のインライン許可/拒否・P3）。
     /// アクティブスレッドの承認カードと同じ一本道（checkpoint は受信時に記録済み）。
     pub fn respond_permission(
