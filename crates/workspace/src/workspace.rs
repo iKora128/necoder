@@ -1977,6 +1977,7 @@ impl Workspace {
             || self.pending_open_git_diff.is_some()
             || self.pending_stage_hunk.is_some()
             || self.chrome.focus_next_frame.is_some()
+            || self.conflict_view_is_stale()
             || self.chrome.pending_font_picker.is_some()
             || self.chrome.pending_shell_picker
     }
@@ -1985,6 +1986,10 @@ impl Workspace {
         // 窓を持たない経路（パネルのイベント）で開いた入力欄・閉じた後の戻り先へフォーカスを渡す。
         if let Some(focus) = self.chrome.focus_next_frame.take() {
             window.focus(&focus, cx);
+        }
+        // 衝突を並べて見る 1 枚: 開いた時のタブがもう前に無い・見せる衝突が無いなら閉じる（O19）。
+        if self.conflict_view_is_stale() {
+            self.close_conflict_view(window, cx);
         }
         if let Some(key) = self.chrome.pending_font_picker.take() {
             self.open_font_picker(key, window, cx);
