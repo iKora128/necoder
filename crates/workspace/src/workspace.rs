@@ -83,6 +83,7 @@ mod notifications;
 mod overlays;
 mod ports;
 mod quit_guard;
+mod resources;
 mod rail;
 mod rail_view;
 mod remote_connection;
@@ -202,6 +203,8 @@ actions!(
         ShowPorts,
         // 通知の履歴（titlebar のベルと同じ一覧・O13）。
         ShowInbox,
+        // リソース（necoder と子プロセスのメモリをプロジェクトごとに・O22）。
+        ShowResources,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
         Hide,
         HideOthers,
@@ -1391,6 +1394,8 @@ struct WorkspaceOverlays {
     ports: Option<ports::PortsState>,
     /// 通知の履歴の一覧（titlebar のベル・O13・開いている間だけ Some）。
     inbox: Option<inbox::InboxPopoverState>,
+    /// リソース（メモリとプロセス・O22・開いている間だけ Some）。
+    resources: Option<resources::ResourcesState>,
     /// 使用量の統計の画面（パレット「使用量: 統計を開く」・O11）。
     usage_stats: Option<usage_view::UsageStatsState>,
     /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
@@ -2002,6 +2007,7 @@ impl Workspace {
             || self.overlays.usage_popover.is_some()
             || self.overlays.ports.is_some()
             || self.overlays.inbox.is_some()
+            || self.overlays.resources.is_some()
             || self.overlays.usage_stats.is_some()
             || self.search_panel.is_some()
             || self.buffer_search.is_some()
@@ -2221,6 +2227,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_in_terminal))
             .on_action(cx.listener(Self::show_ports))
             .on_action(cx.listener(Self::toggle_inbox))
+            .on_action(cx.listener(Self::show_resources))
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
@@ -2392,6 +2399,7 @@ impl Render for Workspace {
             .children(self.render_usage_popover(cx))
             .children(self.render_ports(cx))
             .children(self.render_inbox(cx))
+            .children(self.render_resources(cx))
             .children(self.render_usage_stats(cx))
             .children(self.render_new_task_dialog(cx))
             .children(self.render_hunk_menu(cx))
