@@ -287,6 +287,10 @@ pub struct Settings {
     /// Windows Terminal の scheme（JSON）・iTerm2 の `.itermcolors` から ANSI 16 色と文字 / 背景の色を読む。
     /// `~/` はホーム。設定を保存し直すと読み直す。
     pub terminal_color_scheme: String,
+    /// statusbar で出さない項目（O27・右クリックで出し入れ）。`color` / `branch` / `diagnostics` /
+    /// `terminal` / `activity` / `usage` / `cursor` / `encoding` / `language`。知らせ（SSH の接続・
+    /// 承認待ち・クラッシュ・更新）は消せない。
+    pub statusbar_hidden: Vec<String>,
     /// 手元のターミナルで開くシェル（空 = OS の既定・mac / Linux は `$SHELL`・Windows は pwsh → powershell・O25）。
     /// 名前（PATH から探す）か絶対パス。新しく開く端末から効く。SSH 先の端末は接続先のシェルのまま。
     pub terminal_shell: String,
@@ -369,6 +373,7 @@ impl Default for Settings {
             terminal_scrollback: 10_000,
             terminal_cursor: "block".to_string(),
             terminal_color_scheme: String::new(),
+            statusbar_hidden: Vec::new(),
             terminal_shell: String::new(),
             terminal_shell_args: Vec::new(),
             quick_commands: Vec::new(),
@@ -480,6 +485,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "terminal_scrollback": 10000,
   "terminal_cursor": "block",
   "terminal_color_scheme": "",
+  "statusbar_hidden": [],
   "terminal_shell": "",
   "terminal_shell_args": [],
   "quick_commands": [],

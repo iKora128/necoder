@@ -1468,3 +1468,14 @@ cleanup:
   archived: "Task を %{count} 本終了しました"
   deleted: "worktree を %{count} 本消しました（%{kept} 本は失うものが出たので残しました）"
   hint: worktree を消せるのは、未コミットの変更も統合先に無いコミットも無い Task だけです（消す直前にもう一度数えます）。失うものがある Task は ⋯ メニューの削除で 1 本ずつ
+statusbar:
+  menu_title: statusbar に出す項目
+  item_color: プロジェクトの色
+  item_branch: ブランチ
+  item_diagnostics: 診断
+  item_terminal: ターミナル
+  item_activity: エージェントの状況
+  item_usage: 使用量
+  item_cursor: 行:列
+  item_encoding: 文字コード
+  item_language: 言語

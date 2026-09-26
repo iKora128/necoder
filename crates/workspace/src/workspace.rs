@@ -93,6 +93,7 @@ mod remote_transfer;
 mod shortcut_sheet;
 mod system_notifications;
 mod font_settings;
+mod statusbar_items;
 mod terminal_colors;
 mod terminal_rename;
 mod terminal_settings;
@@ -1341,6 +1342,8 @@ struct ChromeState {
     terminal_renaming: Option<terminal_rename::TerminalRenaming>,
     /// 窓を持たない経路（パネルのイベント）で開いた入力欄へ、次の描画でフォーカスを渡す。
     focus_next_frame: Option<FocusHandle>,
+    /// statusbar の項目の出し入れのメニュー（右クリックした所・O27）。
+    statusbar_menu: Option<Point<gpui::Pixels>>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
     graph_view: GraphView,
     /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。
@@ -2475,6 +2478,7 @@ impl Render for Workspace {
             .children(self.render_goto_line(cx))
             .children(self.render_rename_input(cx))
             .children(self.render_terminal_rename(cx))
+            .children(self.render_statusbar_menu(cx))
             .children(self.render_inline_edit(cx))
             .children(self.render_ssh_input(cx))
             .children(self.render_askpass(window, cx))

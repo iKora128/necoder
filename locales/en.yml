@@ -1467,3 +1467,14 @@ cleanup:
   archived: "Finished %{count} Tasks"
   deleted: "Deleted %{count} worktrees (kept %{kept} that had something to lose)"
   hint: Only Tasks with no uncommitted changes and no commits missing from the base can have their worktree deleted here (counted again right before deleting). Delete the others one by one from the ⋯ menu
+statusbar:
+  menu_title: Show in the status bar
+  item_color: Project color
+  item_branch: Branch
+  item_diagnostics: Diagnostics
+  item_terminal: Terminal
+  item_activity: Agent activity
+  item_usage: Usage
+  item_cursor: Line:column
+  item_encoding: Encoding
+  item_language: Language
