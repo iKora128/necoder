@@ -327,7 +327,8 @@ impl Workspace {
         let id = self.chrome.next_task_creation_id;
         let first_line = prompt.lines().next().unwrap_or("").trim();
         let name = if !first_line.is_empty() {
-            first_line.to_string()
+            // `:rocket:` は絵文字に（O20・A08・Task 名と同じ）。
+            ui::emoji::expand_shortcodes(first_line)
         } else if !task.slug_source.trim().is_empty() {
             task.slug_source.trim().to_string()
         } else {
