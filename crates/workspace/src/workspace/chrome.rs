@@ -2470,10 +2470,21 @@ impl Workspace {
     ) {
         self.chrome.show_settings = true;
         self.exit_agent_full_screen(cx); // 全画面のままだと中央が Agent で設定が出ない
-        self.chrome
-            .settings_view
-            .update(cx, |view, cx| view.refresh_availability(cx));
+        self.refresh_settings_view(cx);
         cx.notify();
+    }
+
+    /// 設定を開く時の読み直し。Skills 節の一覧に、いま見ているローカルのプロジェクトの
+    /// `.claude/skills` / `.agents/skills` も含める（リモートと Chat 中はプロジェクトなし）。
+    pub(crate) fn refresh_settings_view(&mut self, cx: &mut Context<Self>) {
+        let project = self
+            .active_slot()
+            .filter(|slot| slot.remote_host.is_none())
+            .map(|slot| slot.worktree.root().to_path_buf());
+        self.chrome.settings_view.update(cx, |view, cx| {
+            view.set_skills_project(project);
+            view.refresh_availability(cx);
+        });
     }
 
     /// コマンドパレット「設定: settings.json を開く」。

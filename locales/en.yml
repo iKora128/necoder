@@ -499,6 +499,23 @@ settings:
   cli_busy: Working…
   cli_admin_prompt: necoder installs the ne command into /usr/local/bin.
   cli_admin_prompt_remove: necoder removes the ne command from /usr/local/bin.
+  skills_heading: Skills
+  skills_sub: Instructions (SKILL.md) that agents such as Claude Code and Codex read. With the necoder skill, agents learn the necoder CLI for the version you run.
+  skills_necoder_label: necoder skill
+  skills_checking: Checking…
+  skills_busy: Working…
+  skills_install_button: Install
+  skills_update_button: Update
+  skills_update_available: Update available
+  skills_installed_chip: Installed
+  skills_foreign: "%{path} was not written by necoder, so it is left as is (to overwrite, run `ne skills install --force`)"
+  skills_read_error: "Cannot read %{path} (%{error})"
+  skills_found: "Skills found (%{count})"
+  skills_empty: No skills found (looked in ~/.claude/skills, ~/.codex/skills, ~/.agents/skills and the project's .claude/skills and .agents/skills)
+  skills_skipped: "%{count} skipped because their front matter could not be read (run `ne skills list` for the reasons)"
+  skills_scope_shared: Shared (~/.agents)
+  skills_scope_claude_project: Claude Code · project
+  skills_scope_shared_project: Shared · project
 explorer:
   main_worktree_undeletable: The main worktree cannot be deleted (use Remove from rail instead)
   up_folder: Up one folder

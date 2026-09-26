@@ -6274,6 +6274,7 @@ name = "settings"
 version = "0.1.20"
 dependencies = [
  "acp_client",
+ "agent_skills",
  "anyhow",
  "cli_shim",
  "gpui",
