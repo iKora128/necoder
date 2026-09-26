@@ -4775,6 +4775,16 @@ mod tests {
             workspace.toggle_stage_pin(space.clone(), cx);
             assert_eq!(workspace.chrome.stage_columns, 2, "ピンで 2 列以上に広がる");
             assert_eq!(workspace.stage_cards().len(), 1, "ピン + 選択中が同じ Task なら 1 枚");
+            // ピンと列数は窓セッションに残り、復元で戻る（O21）。
+            let saved = workspace.persisted_state();
+            assert_eq!(saved.stage_pinned, vec![space.as_str().to_string()]);
+            assert_eq!(saved.stage_columns, 2);
+            let payload = serde_json::to_string(&saved).unwrap();
+            workspace.chrome.stage_pinned.clear();
+            workspace.chrome.stage_columns = 1;
+            workspace.restore_work_layout(&payload, cx);
+            assert_eq!(workspace.chrome.stage_pinned, vec![space.clone()], "再起動後もピンが残る");
+            assert_eq!(workspace.chrome.stage_columns, 2);
             workspace.chrome.stage_columns = 3;
             workspace.chrome.stage_width = 800.;
             assert!(workspace.stage_cards().len() <= 1, "幅が足りなければ列数を落とす");

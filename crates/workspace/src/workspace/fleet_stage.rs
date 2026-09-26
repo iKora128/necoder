@@ -32,6 +32,7 @@ impl Workspace {
                 .cursor_pointer().child(SharedString::from(i18n::t!("fleet.stage_columns", "count" => columns)))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                     this.chrome.stage_columns = columns;
+                    this.save_state(cx);
                     cx.notify();
                 })));
         }
@@ -42,10 +43,15 @@ impl Workspace {
         if let Some(index) = self.chrome.stage_pinned.iter().position(|current| current == &space) {
             self.chrome.stage_pinned.remove(index);
         } else {
+            // もう無い Task のピン（消した・よそで消えた）は枠を取らない。
+            let known: Vec<SpaceId> = self.chrome.stage_pinned.iter().filter(|pinned| self.session_index_for_space(pinned).is_some()).cloned().collect();
+            self.chrome.stage_pinned = known;
             if self.chrome.stage_pinned.len() == 3 { self.chrome.stage_pinned.remove(0); }
             self.chrome.stage_pinned.push(space);
             self.chrome.stage_columns = self.chrome.stage_pinned.len().max(2);
         }
+        // ピンは窓セッションに残す（再起動を越える・O21）。
+        self.save_state(cx);
         cx.notify();
     }
 

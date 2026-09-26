@@ -51,6 +51,12 @@ pub(crate) struct PersistedState {
     pub(crate) left_dock_width: f32,
     #[serde(default)]
     pub(crate) fleet_view: String,
+    /// Fleet の舞台にピンした Task（space id・左から・最大 3・O21）。無ければ書かない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) stage_pinned: Vec<String>,
+    /// 舞台の列数 1..=3（`0` は未保存＝既定）。
+    #[serde(default)]
+    pub(crate) stage_columns: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +372,26 @@ mod tests {
             projects[1].remote_uri.as_deref(),
             Some("ssh://host/tmp/remote")
         );
+    }
+
+    /// Fleet の舞台のピンと列数（O21）は窓セッションに残る。無い時は書かない（古い版の payload と同じ形）。
+    #[test]
+    fn stage_pins_round_trip_through_the_window_session() {
+        let state = PersistedState {
+            stage_pinned: vec!["space-a".to_string(), "space-b".to_string()],
+            stage_columns: 2,
+            ..Default::default()
+        };
+        let payload = encode_window_session(&state).expect("JSON にできる");
+        let restored: PersistedState = serde_json::from_str(&payload).expect("読める");
+        assert_eq!(restored.stage_pinned, state.stage_pinned);
+        assert_eq!(restored.stage_columns, 2);
+        let empty = encode_window_session(&PersistedState::default()).expect("JSON にできる");
+        assert!(!empty.contains("stage_pinned"), "{empty}");
+        let old: PersistedState =
+            serde_json::from_str(r#"{"projects":[],"fleet_mode":true}"#).expect("古い形も読める");
+        assert!(old.stage_pinned.is_empty());
+        assert_eq!(old.stage_columns, 0);
     }
 
     #[test]
