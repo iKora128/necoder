@@ -3432,6 +3432,10 @@
     `task_shared` だけでなく、`task_sparse` の `sparse-checkout` / `checkout` と準備スクリプトも同じ形で SSH の
     repo では通っていなかった（レビューで見つけ、`host.host_for_project(target)` に揃えた）。根の外を断る手元の
     host（`ScopedHost`・テスト）で Task の作成と準備を通すテストを足した。
+  - **Task の id は worktree の場所から決まる**（`stable_worktree_id_on`）。片付けた Task と同じフォルダ
+    （日本語の依頼の `task/task` など）に作り直すと同じ id になり、`task_parents` の古い行が新しい Task に付いて、
+    関係の無い Task が前の親の下に出る（休ませる・子ごと片付けるの対象にも入る）。upsert は親を知らない書き手の
+    ために `Some` の時だけ書くので、作った時だけは `set_task_parent(id, None)` まで書く（`persist_new_task_space`）。
   - **整っていないファイルに足す時の rustfmt**: ファイルごと整えると他人の差分が混ざる。`src` を丸ごと
     scratch に写して rustfmt をかけ、足した関数・テストの範囲だけを（前後の固有の行を目印に）写し戻す。
     「Diff in」の数が変える前と同じになれば、足した所は整っている（project.rs は 12 のまま）。

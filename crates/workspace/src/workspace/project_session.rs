@@ -437,6 +437,29 @@ impl Workspace {
             .detach();
     }
 
+    /// 作ったばかりの Task を台帳に書く。**親は必ず書く（無ければ消す）**（O21・A07）: Task の id は worktree の
+    /// 場所から決まるので、片付けた Task と同じフォルダに作り直すと、前の Task の親子の行が残っていて、
+    /// 関係の無い新しい Task が前の親の下に出る（upsert は親を知らない書き手のために `Some` の時だけ書く）。
+    pub(crate) fn persist_new_task_space(&self, session_index: usize, cx: &mut Context<Self>) {
+        let (Some(storage), Some(slot)) = (
+            self.persistence.storage.clone(),
+            self.project_sessions.projects.get(session_index),
+        ) else {
+            return;
+        };
+        let record = slot.task_space.to_record(slot);
+        cx.background_executor()
+            .spawn(async move {
+                let written = storage
+                    .upsert_task_space(&record)
+                    .and_then(|()| storage.set_task_parent(&record.id, record.parent.as_deref()));
+                if let Err(error) = written {
+                    eprintln!("TaskSpace を永続化できない: {error:#}");
+                }
+            })
+            .detach();
+    }
+
     /// Task lifecycle と event log を同時に進める。Agent runtime の状態とは別軸だが、
     /// permission wait / turn end の確定イベントを lifecycle へ写像する入口はここに集約する。
     /// `digest` = 遷移スナップショット（Tier 1・P1）。task_events の payload に載せて再起動後も残す。
