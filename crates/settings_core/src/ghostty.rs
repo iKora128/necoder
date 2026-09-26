@@ -6,7 +6,8 @@
 //! - 大きさ（`font-size`）
 //! - カーソル（`cursor-style`・`block_hollow` は `block`）
 //! - 配色（`theme = 名前` ならテーマのファイル・`light:A,dark:B` なら暗い方。テーマが無く
-//!   `palette` / `background` / `foreground` を書いていればその設定ファイル自体）
+//!   `palette` / `background` / `foreground` を書いていればその設定ファイル自体）。ターミナルの配色を読む側は
+//!   6 桁の 16 進しか読めないので、それが 1 つも無い物（X11 の色の名前だけ等）は持ってこない
 //!
 //! スクロールバック（Ghostty はバイト数）・キー・窓の設定は意味が違うので持ってこない。
 
@@ -85,7 +86,6 @@ pub fn read() -> Option<(PathBuf, GhosttyTerminal)> {
 /// 設定の中身から拾う（`config` = そのファイルの場所・`theme_directories` = テーマを探す場所）。
 pub fn parse(text: &str, config: &Path, theme_directories: &[PathBuf]) -> GhosttyTerminal {
     let mut imported = GhosttyTerminal::default();
-    let mut has_colors = false;
     let mut theme = None;
     for line in text.lines() {
         let line = line.trim();
@@ -121,7 +121,6 @@ pub fn parse(text: &str, config: &Path, theme_directories: &[PathBuf]) -> Ghostt
                     _ => imported.cursor,
                 };
             }
-            "palette" | "background" | "foreground" => has_colors = true,
             "theme" if !value.is_empty() => theme = Some(value.to_string()),
             _ => {}
         }
@@ -130,8 +129,35 @@ pub fn parse(text: &str, config: &Path, theme_directories: &[PathBuf]) -> Ghostt
     // Ghostty のテーマと設定は同じ書式なので、色を書いた設定ファイル自体を配色として読める。
     imported.color_scheme = theme
         .and_then(|theme| resolve_theme(&theme, theme_directories))
-        .or_else(|| has_colors.then(|| config.to_path_buf()));
+        .filter(|path| std::fs::read_to_string(path).is_ok_and(|text| has_readable_colors(&text)))
+        .or_else(|| has_readable_colors(text).then(|| config.to_path_buf()));
     imported
+}
+
+/// ターミナルの配色を読む側が読める色か: 6 桁の 16 進（`#` は有っても無くても）。
+fn readable_color(value: &str) -> bool {
+    let hex = value.trim().trim_matches('"').trim_start_matches('#');
+    hex.len() == 6 && hex.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+/// 配色の行（`palette = N=#rrggbb`・`background`・`foreground`）に、読める色が 1 つでもあるか。
+fn has_readable_colors(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with('#') {
+            return false;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        match key.trim() {
+            "palette" => value
+                .split_once('=')
+                .is_some_and(|(_, color)| readable_color(color)),
+            "background" | "foreground" => readable_color(value),
+            _ => false,
+        }
+    })
 }
 
 /// `theme` の値をファイルへ（`light:A,dark:B` は暗い方・パスはそのまま）。見つからなければ `None`。
@@ -233,12 +259,29 @@ mod tests {
         let fallback = parse(
             "theme = Nowhere\nbackground = #000000\n",
             &config,
-            &[themes],
+            &[themes.clone()],
         );
         assert_eq!(
             fallback.color_scheme.as_deref(),
             Some(config.as_path()),
             "無ければ設定の色"
+        );
+        // X11 の色の名前だけの設定・テーマは読めないので持ってこない（16 進が 1 つあれば持ってくる）。
+        assert_eq!(
+            parse("background = black\nforeground = white\n", &config, &[]).color_scheme,
+            None
+        );
+        assert_eq!(
+            parse("background = black\npalette = 1=#cc6666\n", &config, &[])
+                .color_scheme
+                .as_deref(),
+            Some(config.as_path())
+        );
+        std::fs::write(themes.join("Named"), "background = black\n").unwrap();
+        assert_eq!(
+            parse("theme = Named\n", &config, &[themes]).color_scheme,
+            None,
+            "名前だけのテーマ"
         );
         assert!(parse("# 空\n", &config, &[]).is_empty());
         let _ = std::fs::remove_dir_all(&directory);
