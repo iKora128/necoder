@@ -226,6 +226,8 @@ cmd:
   theme_selector: "表示: テーマ切り替え"
   project_color: "表示: プロジェクトの色を変更"
   toggle_terminal: "表示: ターミナル"
+  new_terminal_tab: "ターミナル: エディタ領域に新しく開く"
+  move_terminal_to_editor: "ターミナル: エディタ領域へ移す"
   toggle_git_panel: "表示: ソース管理"
   toggle_todo_board: "表示: Todo ボード"
   toggle_fleet: "表示: 編隊モード"
@@ -894,6 +896,8 @@ tabs:
   ctx_close: タブを閉じる
   ctx_close_others: 他のタブを閉じる
   ctx_close_right: 右側のタブを閉じる
+  ctx_terminal_rename: 名前を変更…
+  ctx_terminal_to_dock: 下ドックへ移す
 image:
   load_failed: 画像を表示できません
 breadcrumb:
@@ -967,6 +971,10 @@ terminal:
   close_busy_detail: 閉じるとこのプロセスも止まります。
   close_busy_confirm: 閉じる
   close_busy_cancel: キャンセル
+  close_busy_named_title: "「%{name}」でプロセスが動いています"
+  close_busy_many_title: "%{n} 個のターミナルでプロセスが動いています"
+  tab_needs_project: ターミナルのタブはプロジェクトで開けます（Chat では開けません）
+  tab_split_hint: エディタ領域のターミナルは分割できません。タブを右クリック › 下ドックへ移すと分割できます
   add_tip: ターミナルを追加
   split_tip: "横に分割（%{key}）"
   pane_title: "端末 %{n}"

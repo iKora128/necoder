@@ -454,9 +454,20 @@ impl Workspace {
         self.close_tab_at(self.active_tab, window, cx);
     }
 
-    /// `index` 番目のタブを閉じ、アクティブを隣へ寄せる。閉じたファイルは ⌘⇧T 用に履歴へ積み、
-    /// LSP には didClose を送る。最後の 1 枚を閉じると空状態（分割も畳む）。
+    /// `index` 番目のタブを閉じる。前面でプロセスが動いている端末のタブなら先に確かめる（O24・
+    /// `terminal_tabs`）。
     pub(crate) fn close_tab_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_tabs_asking(vec![index], window, cx);
+    }
+
+    /// `index` 番目のタブを確かめずに閉じ、アクティブを隣へ寄せる。閉じたファイルは ⌘⇧T 用に履歴へ
+    /// 積み、LSP には didClose を送る。端末のタブは端末も終える。最後の 1 枚を閉じると空状態（分割も畳む）。
+    pub(crate) fn close_tab_now(
         &mut self,
         index: usize,
         window: &mut Window,
@@ -477,6 +488,12 @@ impl Workspace {
             if tab.editor().is_some() {
                 self.lsp_did_close(&tab.path);
             }
+        }
+        // 端末のタブ: ドックの id から外す＝このタブが最後の持ち主になり、タブと一緒に落ちて止まる。
+        // 下ドックへ移した端末は先に `detached` から抜けているので止まらない。
+        if let Some((_, session)) = tab.terminal() {
+            self.terminal_dock
+                .update(cx, |dock, cx| dock.terminate_session(session, cx));
         }
         // hot exit: タブを閉じる＝未保存編集の破棄（現仕様）なのでスナップショットも消す。
         if let Some(storage) = self.persistence.storage.clone() {
@@ -538,11 +555,10 @@ impl Workspace {
         if index >= self.tabs.len() {
             return;
         }
-        for target in (0..self.tabs.len()).rev() {
-            if target != index && !self.tabs[target].pinned {
-                self.close_tab_at(target, window, cx);
-            }
-        }
+        let targets: Vec<usize> = (0..self.tabs.len())
+            .filter(|target| *target != index && !self.tabs[*target].pinned)
+            .collect();
+        self.close_tabs_asking(targets, window, cx);
     }
 
     /// `index` より右のタブを全部閉じる（タブメニュー）。ピン留めは残す（O26）。
@@ -555,11 +571,10 @@ impl Workspace {
         if index >= self.tabs.len() {
             return;
         }
-        for target in ((index + 1)..self.tabs.len()).rev() {
-            if !self.tabs[target].pinned {
-                self.close_tab_at(target, window, cx);
-            }
-        }
+        let targets: Vec<usize> = ((index + 1)..self.tabs.len())
+            .filter(|target| !self.tabs[*target].pinned)
+            .collect();
+        self.close_tabs_asking(targets, window, cx);
     }
 
     /// `index` 番目のタブをアクティブにする（タブクリック・⌘{ / ⌘}・重複オープン時）。
@@ -572,18 +587,22 @@ impl Workspace {
             self.dismiss_buffer_search(cx);
             self.close_hover(cx);
         }
-        let Some((handle, path, editor, web)) = self.tabs.get(index).map(|tab| {
+        let Some((handle, path, editor, web, terminal)) = self.tabs.get(index).map(|tab| {
             (
                 tab.focus_handle(cx),
                 tab.path.clone(),
                 tab.editor().cloned(),
                 tab.web().cloned(),
+                tab.is_terminal(),
             )
         }) else {
             return;
         };
         self.active_tab = index;
-        self.reveal_work_file(path.clone(), cx);
+        // 端末のタブはファイルではない（作業面・⌘P の最近・エクスプローラの選択に出さない・O24）。
+        if !terminal {
+            self.reveal_work_file(path.clone(), cx);
+        }
         if let Some(editor) = editor.filter(|editor| editor.read(cx).rendered_html()) {
             editor.update(cx, |editor, cx| editor.set_surface_active(true, true, cx));
         } else {
@@ -595,8 +614,10 @@ impl Workspace {
         }
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.slot_mut(active) {
-            slot.explorer.note_opened(&path); // ⌘P の「最近開いた」の先頭へ（D19）
-            slot.explorer.selected = Some(path);
+            if !terminal {
+                slot.explorer.note_opened(&path); // ⌘P の「最近開いた」の先頭へ（D19）
+                slot.explorer.selected = Some(path);
+            }
             slot.active_file = index;
         }
         self.push_active_diagnostics(cx);

@@ -158,7 +158,8 @@ impl Workspace {
     /// 保存済みのタブを全部閉じる（タブメニュー「全部閉じる」と ⌘K ⌘W の本体）。ピン留めは残す。
     pub(crate) fn close_saved_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut kept = 0;
-        for index in (0..self.tabs.len()).rev() {
+        let mut targets = Vec::new();
+        for index in 0..self.tabs.len() {
             if self.tabs[index].pinned {
                 continue;
             }
@@ -166,8 +167,10 @@ impl Workspace {
                 kept += 1;
                 continue;
             }
-            self.close_tab_at(index, window, cx);
+            targets.push(index);
         }
+        // 前面でプロセスが動いている端末のタブがあれば、まとめて 1 回だけ確かめる（O24）。
+        self.close_tabs_asking(targets, window, cx);
         if kept > 0 {
             let color = self.accent();
             self.push_toast(
