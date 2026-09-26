@@ -68,7 +68,8 @@ mod web_tabs;
 pub(crate) use image_view::ImageView;
 pub(crate) use pdf_view::PdfView;
 pub(crate) use web_preview_view::{
-    web_tab_key, web_tab_url, PickDropReason, WebPreviewEvent, WebPreviewView,
+    static_tab_file, static_tab_key, web_tab_key, web_tab_url, PickDropReason, WebPreviewEvent,
+    WebPreviewView,
 };
 pub(crate) use web_tabs::{DesignTarget, UrlOrigin};
 mod about;
@@ -226,6 +227,8 @@ actions!(
         OpenLocalhostPreview,
         // Web タブの Design Mode（⌘⇧D・要素を選んで composer へ添える）。
         ToggleDesignMode,
+        // アクティブな HTML ファイルを内蔵の配信で Web タブに開く（Design Mode が使える）。
+        OpenHtmlInWebTab,
     ]
 );
 
@@ -2039,6 +2042,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_dialog_action))
             .on_action(cx.listener(Self::open_localhost_preview))
             .on_action(cx.listener(Self::toggle_design_mode))
+            .on_action(cx.listener(Self::open_html_in_web_tab))
             // macOS 標準のアプリ/ウィンドウ操作（メニューバー・M13）。cx は App へ deref。
             .on_action(cx.listener(|_, _: &Hide, _window, cx| cx.hide()))
             .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
