@@ -43,8 +43,8 @@ impl Workspace {
     /// statusbar の使用量チップ: いまのスレッドのエージェントの 5 時間枠・週枠（と上限に近い窓）。
     /// 値が無ければ出さない。
     pub(crate) fn render_usage_chip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let agent = self.agent_panel.read(cx).active_agent()?;
-        let limits = cx.try_global::<UsageLimits>()?.agent(&agent)?.clone();
+        let key = self.agent_panel.read(cx).active_usage_key(cx)?;
+        let limits = cx.try_global::<UsageLimits>()?.get(&key)?.clone();
         let now_secs = agent_panel::now_unix_ms() / 1000;
         let headline = limits.headline(now_secs);
         let blocked = limits.blocked(now_secs);
@@ -80,7 +80,7 @@ impl Workspace {
                 })
                 .child(label)
                 .tooltip(Tooltip::text(
-                    i18n::t!("usage.chip_tip", "agent" => agent),
+                    i18n::t!("usage.chip_tip", "agent" => key.label()),
                     theme.clone(),
                 ))
                 .on_mouse_down(
@@ -159,32 +159,30 @@ impl Workspace {
         let state = self.overlays.usage_popover.as_ref()?;
         let theme = self.theme.clone();
         let now_ms = agent_panel::now_unix_ms();
-        let active_agent = self.agent_panel.read(cx).active_agent();
+        let active_key = self.agent_panel.read(cx).active_usage_key(cx);
         let (mut agents, codex_read, codex_installed) = match cx.try_global::<UsageLimits>() {
             Some(limits) => (
                 limits
                     .agents()
-                    .map(|(label, limits)| (label.clone(), limits.clone()))
+                    .map(|(key, limits)| (key.clone(), limits.clone()))
                     .collect::<Vec<_>>(),
                 limits.codex.clone(),
                 limits.codex_installed == Some(true),
             ),
             None => (Vec::new(), CodexRead::Idle, false),
         };
-        // いまのスレッドのエージェントを先頭に（残りはラベル順のまま）。
-        agents.sort_by_key(|(label, _)| Some(label) != active_agent.as_ref());
+        // いまのスレッドの鍵を先頭に（残りは鍵の順のまま）。同じエージェントでも場所・置き場が違えば
+        // 別の行（R08）。
+        agents.sort_by_key(|(key, _)| Some(key) != active_key.as_ref());
         let codex_label = usage::codex_label();
 
         let mut body = div().flex().flex_col().gap(px(12.));
-        for (label, limits) in &agents {
-            let codex = (label.as_ref() == codex_label).then_some(&codex_read);
-            body = body.child(self.render_usage_agent(label, Some(limits), codex, now_ms, cx));
+        for (key, limits) in &agents {
+            let codex = key.is_local_codex().then_some(&codex_read);
+            body =
+                body.child(self.render_usage_agent(&key.label(), Some(limits), codex, now_ms, cx));
         }
-        if codex_installed
-            && !agents
-                .iter()
-                .any(|(label, _)| label.as_ref() == codex_label)
-        {
+        if codex_installed && !agents.iter().any(|(key, _)| key.is_local_codex()) {
             body = body.child(self.render_usage_agent(
                 &SharedString::from(codex_label),
                 None,

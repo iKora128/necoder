@@ -2837,6 +2837,12 @@ PYEOF"#;
             .map(|thread| thread.agent.clone())
     }
 
+    /// いまのスレッドの使用量の鍵（エージェント + 動かしている場所 + 認証の置き場・R08）。
+    pub fn active_usage_key(&self, cx: &App) -> Option<usage::UsageKey> {
+        self.active_agent()
+            .map(|agent| usage::UsageKey::for_agent(agent, self.dest_host.as_ref(), cx))
+    }
+
     pub fn contains_thread(&self, id: &str) -> bool {
         self.threads.iter().any(|thread| thread.id == id)
     }
@@ -6798,9 +6804,11 @@ PYEOF"#;
             self.catalog.entry(agent).or_default().commands = commands;
         }
         if let Some((agent, limits)) = rate_limits {
+            // 鍵は「エージェント + 動かしている場所 + 認証の置き場」（R08・SSH 先や別の置き場の値と混ぜない）。
+            let key = usage::UsageKey::for_agent(agent, self.dest_host.as_ref(), cx);
             // `default_global` は観測者（全ウィンドウの statusbar）を起こす＝値が変わった時だけ呼ぶ。
             cx.default_global::<usage::UsageLimits>()
-                .record(agent, limits, now_unix_ms());
+                .record(key, limits, now_unix_ms());
         }
         if let Some(agent) = titled_by_agent {
             self.catalog.entry(agent).or_default().sends_titles = true;
