@@ -533,6 +533,16 @@ impl Workspace {
                 "work" => FleetCenterView::Work,
                 _ => FleetCenterView::Graph,
             };
+            // 舞台のピンと列数（O21）。消えた Task のピンは舞台に出る時に読み飛ばされる。
+            self.chrome.stage_pinned = saved
+                .stage_pinned
+                .into_iter()
+                .take(3)
+                .map(SpaceId)
+                .collect();
+            if (1..=3).contains(&saved.stage_columns) {
+                self.chrome.stage_columns = saved.stage_columns;
+            }
             self.ensure_work_layout(cx);
             cx.notify();
         }

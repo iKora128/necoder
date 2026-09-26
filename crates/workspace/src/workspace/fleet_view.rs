@@ -633,6 +633,7 @@ impl Workspace {
         let count = spaces.len();
         self.chrome.stage_pinned = spaces.into_iter().take(3).collect();
         self.chrome.stage_columns = self.chrome.stage_pinned.len().max(2);
+        self.save_state(cx);
         let accent = self.accent();
         let text = if self.chrome.fleet_mode {
             i18n::t!("fleet.fanout_created", "count" => count)

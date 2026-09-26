@@ -1748,6 +1748,13 @@ impl Workspace {
                 FleetCenterView::Graph => "graph",
             }
             .to_string(),
+            stage_pinned: self
+                .chrome
+                .stage_pinned
+                .iter()
+                .map(|space| space.as_str().to_string())
+                .collect(),
+            stage_columns: self.chrome.stage_columns,
         }
     }
 
