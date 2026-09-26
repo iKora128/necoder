@@ -500,6 +500,8 @@ settings:
   cli_busy: 実行中…
   cli_admin_prompt: necoder の ne コマンドを /usr/local/bin にインストールします。
   cli_admin_prompt_remove: necoder の ne コマンドを /usr/local/bin から削除します。
+  save_unreadable: "%{file} を読めないので保存しませんでした（%{reason}）"
+  save_failed: "設定を保存できませんでした（%{reason}）"
 explorer:
   main_worktree_undeletable: メインの作業ツリーは削除できません（レールから外すを使ってください）
   up_folder: 上のフォルダへ
@@ -565,6 +567,17 @@ git:
   idle: 待機中
   branch_menu_tip: ブランチ / worktree
   switcher_tip: プロジェクト / ブランチを切替  ⌘O
+  commit_failed: コミットできませんでした
+  stage_failed: ステージできませんでした
+  unstage_failed: ステージを解除できませんでした
+  push_failed: push できませんでした
+  pull_failed: pull できませんでした
+  pr_create_failed: PR の作成ページを開けませんでした
+  pr_open_failed: PR / リポジトリを開けませんでした
+  ai_message_failed: コミットメッセージを生成できませんでした
+  branch_create_failed: ブランチを作成できませんでした
+  worktree_no_parent: worktree の作成先を決められません（プロジェクトのフォルダに親フォルダがありません）
+  output_title: "%{command} の出力"
 dock:
   left: 左パネル（エクスプローラ）を表示/隠す
   bottom: 下パネル（ターミナル等）を表示/隠す
@@ -606,8 +619,20 @@ theme:
   picker_placeholder: テーマを選択
 link:
   open_failed: "開けませんでした: %{target}"
+toast:
+  open_details: 全文 ›
 difftab:
   proposal_title: "%{title} ⇄ 提案"
+  title: "%{name} ⇄ %{base}"
+  title_deleted: "%{name} ⇄ %{base}（削除）"
+  header_side: "%{path}（%{side}）"
+  side_working_tree: 作業ツリー
+  side_buffer: バッファ
+  new_file: 新規ファイル
+  deleted_file: 削除されたファイル
+  no_changes: "%{name} は %{base} と同じです（差分はありません）"
+  missing: "%{name} は %{base} にも作業ツリーにもありません"
+  unreadable: "%{name} をテキストとして読めないので diff を出せません"
 update:
   available: ⬆ v%{version} に更新
   get: ⬆ v%{version} を入手

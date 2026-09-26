@@ -149,11 +149,12 @@ impl Workspace {
             return;
         };
         if confirm.skip_next {
-            settings::set_user_value(
+            let result = settings::set_user_value(
                 cx,
                 "confirm_worktree_delete",
                 serde_json::Value::Bool(false),
             );
+            self.report_settings_save(result, cx);
         }
         self.delete_slot_worktree_impl(confirm.index, confirm.also_branch, window, cx);
     }

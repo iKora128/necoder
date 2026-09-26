@@ -594,7 +594,8 @@ impl Workspace {
         if tasks < 2 {
             return; // 1 本目は「並走」ではない
         }
-        settings::set_user_value(cx, "fleet_hint_seen", serde_json::Value::Bool(true));
+        let result = settings::set_user_value(cx, "fleet_hint_seen", serde_json::Value::Bool(true));
+        self.report_settings_save(result, cx);
         let key = Self::shortcut_label_for("workspace::ToggleFleet").unwrap_or_default();
         let accent = self.accent();
         self.push_toast(

@@ -22,7 +22,7 @@ mod remote;
 
 pub use settings_core::{
     persist_agent_config_default, persist_mcp_enabled, persist_user_value, user_settings_path,
-    Density, McpServerSetting, Settings, SettingsStore,
+    Density, McpServerSetting, Settings, SettingsStore, UnreadableSettings,
 };
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
@@ -78,20 +78,34 @@ pub fn get(cx: &App) -> Settings {
         .unwrap_or_default()
 }
 
-/// user 設定の 1 キーを更新して**即適用 + 永続化**する（UI トグル・in-proc MCP から）。
-/// 書き込み→再読込で observer が発火し、全ビューへ波及する。poll は待たない。
-pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) {
+/// user 設定ファイルへ 1 点書いて、store を読み直す（observer が発火し全ビューへ波及する）。
+/// 書けなかった時も読み直す＝画面はファイルの実際の値へ戻る。失敗は呼び手へ返し、
+/// 呼び手が [`save_failure_message`] でトーストに出す（settings.json を黙って壊さない・黙って捨てない）。
+fn write_user_file(
+    cx: &mut App,
+    write: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let path = cx
         .try_global::<SettingsGlobal>()
         .and_then(|global| global.user_path.clone());
-    if let Some(path) = path {
-        if let Err(error) = persist_user_value(&path, key, value) {
-            eprintln!("設定の保存に失敗（実行時のみ反映）: {error:#}");
-        }
-    }
+    let result = match path {
+        Some(path) => write(&path),
+        None => Ok(()),
+    };
     if cx.has_global::<SettingsGlobal>() {
         cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
     }
+    if let Err(error) = &result {
+        eprintln!("設定の保存に失敗: {error:#}");
+    }
+    result
+}
+
+/// user 設定の 1 キーを更新して**即適用 + 永続化**する（UI トグル・in-proc MCP から）。
+/// 書き込み→再読込で observer が発火し、全ビューへ波及する。poll は待たない。
+/// 既存の settings.json を読めない時は書かずに `Err`（[`UnreadableSettings`]）。
+pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
+    write_user_file(cx, |path| persist_user_value(path, key, value))
 }
 
 /// `agent_config_defaults.<agent_id>.<config_id>` の 1 点を更新して**即適用 + 永続化**する（composer ピルの sticky）。
@@ -99,49 +113,59 @@ pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) {
 ///
 /// `config_id` / `value_id` は **ACP が広告した綴りそのまま**を渡すこと（表示名を渡してはいけない）。
 /// necoder 側で綴りを作り直すと、次に広告と突き合わせたとき一致せずエージェント既定へ落ちる。
-pub fn set_agent_config_default(cx: &mut App, agent_id: &str, config_id: &str, value_id: &str) {
-    let path = cx
-        .try_global::<SettingsGlobal>()
-        .and_then(|global| global.user_path.clone());
-    if let Some(path) = path {
-        if let Err(error) = persist_agent_config_default(&path, agent_id, config_id, value_id) {
-            eprintln!("エージェント既定の保存に失敗（実行時のみ反映）: {error:#}");
-        }
-    }
-    if cx.has_global::<SettingsGlobal>() {
-        cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
-    }
+pub fn set_agent_config_default(
+    cx: &mut App,
+    agent_id: &str,
+    config_id: &str,
+    value_id: &str,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        persist_agent_config_default(path, agent_id, config_id, value_id)
+    })
 }
 
 /// `<section>.<key>`（`chat.directory` など 1 段の入れ子）を更新して**即適用 + 永続化**する。
 /// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。
-pub fn set_nested_user_value(cx: &mut App, section: &str, key: &str, value: serde_json::Value) {
-    let path = cx
-        .try_global::<SettingsGlobal>()
-        .and_then(|global| global.user_path.clone());
-    if let Some(path) = path {
-        if let Err(error) = settings_core::persist_nested_value(&path, section, key, value) {
-            eprintln!("設定の保存に失敗（実行時のみ反映）: {error:#}");
-        }
-    }
-    if cx.has_global::<SettingsGlobal>() {
-        cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
-    }
+pub fn set_nested_user_value(
+    cx: &mut App,
+    section: &str,
+    key: &str,
+    value: serde_json::Value,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_nested_value(path, section, key, value)
+    })
 }
 
 /// `mcp_servers.<name>.enabled` を更新して**即適用 + 永続化**する（設定画面のトグル）。
 /// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。次に開くセッションから効く。
-pub fn set_mcp_enabled(cx: &mut App, name: &str, enabled: bool) {
-    let path = cx
-        .try_global::<SettingsGlobal>()
-        .and_then(|global| global.user_path.clone());
-    if let Some(path) = path {
-        if let Err(error) = persist_mcp_enabled(&path, name, enabled) {
-            eprintln!("MCP サーバの有効/無効の保存に失敗（実行時のみ反映）: {error:#}");
+pub fn set_mcp_enabled(cx: &mut App, name: &str, enabled: bool) -> anyhow::Result<()> {
+    write_user_file(cx, |path| persist_mcp_enabled(path, name, enabled))
+}
+
+/// 設定を保存できなかった時のトーストの文。settings.json を読めない（手編集の途中で壊れている）
+/// なら「読めないので保存しなかった」＋理由、それ以外（書き込み失敗）は「保存できなかった」＋理由。
+pub fn save_failure_message(error: &anyhow::Error) -> SharedString {
+    match error.downcast_ref::<UnreadableSettings>() {
+        Some(unreadable) => {
+            let file = match unreadable.path.parent().and_then(Path::file_name) {
+                Some(folder) if folder == ".necoder" => ".necoder/settings.json".to_string(),
+                _ => unreadable
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| unreadable.path.display().to_string()),
+            };
+            SharedString::from(i18n::t!(
+                "settings.save_unreadable",
+                "file" => file,
+                "reason" => &unreadable.reason
+            ))
         }
-    }
-    if cx.has_global::<SettingsGlobal>() {
-        cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
+        None => SharedString::from(i18n::t!(
+            "settings.save_failed",
+            "reason" => format!("{error:#}")
+        )),
     }
 }
 
@@ -237,6 +261,9 @@ pub enum SettingsViewEvent {
         key: &'static str,
         value: String,
     },
+    /// 設定を保存できなかった（settings.json を読めない等）。文は [`save_failure_message`]。
+    /// トーストは shell が出す。
+    SaveFailed(SharedString),
 }
 
 /// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
@@ -440,19 +467,28 @@ impl SettingsView {
         .detach();
     }
 
+    /// 設定の保存結果を見る。失敗は shell にトーストを頼む（黙って捨てない）。
+    fn report_save(&mut self, result: anyhow::Result<()>, cx: &mut Context<Self>) {
+        if let Err(error) = result {
+            cx.emit(SettingsViewEvent::SaveFailed(save_failure_message(&error)));
+        }
+    }
+
     fn set_default_agent(&mut self, label: &str, cx: &mut Context<Self>) {
-        set_user_value(
+        let result = set_user_value(
             cx,
             "default_agent",
             serde_json::Value::String(label.to_string()),
         );
+        self.report_save(result, cx);
         cx.notify();
     }
 
     /// Captain の任命 / 解任（FLEET-V2 §5.7）。同じエージェントをもう一度押すと解任（`null`）。
     /// 任命は人の明示操作に限る（既定ドリフト禁止・DECISIONS §8）ので、既定エージェントとは連動させない。
     fn toggle_captain(&mut self, label: &str, current: Option<&str>, cx: &mut Context<Self>) {
-        set_user_value(cx, "captain_agent", next_captain_value(label, current));
+        let result = set_user_value(cx, "captain_agent", next_captain_value(label, current));
+        self.report_save(result, cx);
         cx.notify();
     }
 
@@ -462,7 +498,8 @@ impl SettingsView {
     }
 
     fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
-        set_user_value(cx, "onboarded", serde_json::Value::Bool(true));
+        let result = set_user_value(cx, "onboarded", serde_json::Value::Bool(true));
+        self.report_save(result, cx);
         cx.emit(SettingsViewEvent::OnboardingCompleted);
         cx.notify();
     }
@@ -649,22 +686,26 @@ impl SettingsView {
     // 永続化 + observe_global 波及を担うので、変更は全ビューへ即反映される。
 
     fn set_pref_bool(&mut self, key: &'static str, value: bool, cx: &mut Context<Self>) {
-        set_user_value(cx, key, serde_json::Value::Bool(value));
+        let result = set_user_value(cx, key, serde_json::Value::Bool(value));
+        self.report_save(result, cx);
         cx.notify();
     }
 
     fn set_pref_int(&mut self, key: &'static str, value: i64, cx: &mut Context<Self>) {
-        set_user_value(cx, key, serde_json::json!(value));
+        let result = set_user_value(cx, key, serde_json::json!(value));
+        self.report_save(result, cx);
         cx.notify();
     }
 
     fn set_pref_float(&mut self, key: &'static str, value: f64, cx: &mut Context<Self>) {
-        set_user_value(cx, key, serde_json::json!(value));
+        let result = set_user_value(cx, key, serde_json::json!(value));
+        self.report_save(result, cx);
         cx.notify();
     }
 
     fn set_pref_string(&mut self, key: &'static str, value: &'static str, cx: &mut Context<Self>) {
-        set_user_value(cx, key, serde_json::Value::String(value.to_string()));
+        let result = set_user_value(cx, key, serde_json::Value::String(value.to_string()));
+        self.report_save(result, cx);
         cx.notify();
     }
 
@@ -1389,7 +1430,8 @@ impl SettingsView {
 
     /// 1 件の on/off を保存し、一覧を読み直す（次に開くスレッドのセッションから効く）。
     fn toggle_mcp_server(&mut self, name: String, enabled: bool, cx: &mut Context<Self>) {
-        set_mcp_enabled(cx, &name, enabled);
+        let result = set_mcp_enabled(cx, &name, enabled);
+        self.report_save(result, cx);
         self.mcp_servers = mcp_servers(cx);
         cx.notify();
     }
@@ -1818,13 +1860,14 @@ impl SettingsView {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|_, _, _window, cx| {
-                            set_nested_user_value(
+                        cx.listener(|view, _, _window, cx| {
+                            let result = set_nested_user_value(
                                 cx,
                                 "chat",
                                 "directory",
                                 serde_json::Value::String(String::new()),
                             );
+                            view.report_save(result, cx);
                             cx.notify();
                         }),
                     ),
@@ -1849,13 +1892,14 @@ impl SettingsView {
                 .child(glyph)
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |_, _, _window, cx| {
-                        set_nested_user_value(
+                    cx.listener(move |view, _, _window, cx| {
+                        let result = set_nested_user_value(
                             cx,
                             "chat",
                             "idle_stop_minutes",
                             serde_json::json!(target as i64),
                         );
+                        view.report_save(result, cx);
                         cx.notify();
                     }),
                 )
@@ -1940,13 +1984,14 @@ impl SettingsView {
         cx.spawn(async move |view, cx| {
             if let Ok(Ok(Some(paths))) = receiver.await {
                 if let Some(path) = paths.into_iter().next() {
-                    let _ = view.update(cx, |_, cx| {
-                        set_nested_user_value(
+                    let _ = view.update(cx, |view, cx| {
+                        let result = set_nested_user_value(
                             cx,
                             "chat",
                             "directory",
                             serde_json::Value::String(path.display().to_string()),
                         );
+                        view.report_save(result, cx);
                         cx.notify();
                     });
                 }
@@ -2167,5 +2212,38 @@ mod tests {
         ])
         .expect("マージできる");
         assert_eq!(store.settings().captain_agent, None);
+    }
+
+    /// 読めない settings.json に書き手が触らなかった時の知らせ: どのファイルか + 理由を出す。
+    #[test]
+    fn save_failure_names_the_unreadable_file_and_the_reason() {
+        let dir = std::env::temp_dir().join(format!(
+            "necoder-settings-save-failure-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let broken = "{ \"theme\": \"necoder-light\", }";
+        std::fs::write(&path, broken).expect("seed");
+        let error = persist_user_value(&path, "submit_on_enter", serde_json::Value::Bool(true))
+            .expect_err("壊れたファイルには書かない");
+        let message = save_failure_message(&error);
+        assert!(message.contains("settings.json"), "{message}");
+        assert!(message.contains("trailing comma"), "{message}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), broken);
+
+        // プロジェクトの設定（色の保存先）は `.necoder/settings.json` と分かる名前で出す。
+        let project = dir.join(".necoder").join("settings.json");
+        std::fs::create_dir_all(project.parent().expect("親")).expect("mkdir");
+        std::fs::write(&project, "{ // メモ\n}").expect("seed");
+        let error = persist_user_value(&project, "color", serde_json::json!("#ff0000"))
+            .expect_err("壊れたファイルには書かない");
+        assert!(save_failure_message(&error).contains(".necoder/settings.json"));
+
+        // 読めないのではなく書けなかった時は別の文（理由つき）。
+        let other = anyhow::anyhow!("disk full");
+        assert!(save_failure_message(&other).contains("disk full"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

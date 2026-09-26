@@ -2620,15 +2620,16 @@ impl Element for EditorElement {
                 if view.wrap_map.total_display_rows() != old_rows {
                     cx.emit(ComposerEvent::ContentHeightChanged);
                 }
-                // 幅が広がって折り返し総高が縮むと scroll_top が範囲外に残り、内容が viewport の
-                // 上へ丸ごと抜けて「空に見える／末尾の1行だけ出る」（AI 全画面切替で顕在化・
-                // 2026-08-30）。新しい総高で再クランプする。
-                let total_height =
-                    view.wrap_map.total_display_rows() as f32 * view.line_height_value();
-                let max_scroll = (total_height - f32::from(bounds.size.height)).max(0.0);
-                if f32::from(view.scroll_top) > max_scroll {
-                    view.scroll_top = px(max_scroll);
-                }
+            }
+            // 幅が広がって折り返し総高が縮むと scroll_top が範囲外に残り、内容が viewport の
+            // 上へ丸ごと抜けて「空に見える／末尾の1行だけ出る」（AI 全画面切替で顕在化・
+            // 2026-08-30）。親が欄を伸ばして viewport だけが広がった時（composer やソース管理の
+            // auto-grow に複数行を貼った直後・2026-09-26）も同じなので、折り返しを作り直した
+            // 時に限らず毎回、今の総高と高さで再クランプする。
+            let total_height = view.wrap_map.total_display_rows() as f32 * view.line_height_value();
+            let max_scroll = (total_height - f32::from(bounds.size.height)).max(0.0);
+            if f32::from(view.scroll_top) > max_scroll {
+                view.scroll_top = px(max_scroll);
             }
             if let Some(offset) = view.pending_reveal.take() {
                 let line_height = view.line_height_value();

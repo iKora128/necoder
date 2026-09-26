@@ -95,13 +95,15 @@ impl Workspace {
         if !slot.worktree.is_remote() {
             slot.identity_color = Some(color);
             let settings_path = slot.worktree.root().join(".necoder/settings.json");
-            if let Err(error) = settings_core::persist_user_value(
+            let result = settings_core::persist_user_value(
                 &settings_path,
                 "color",
                 serde_json::Value::String(hex.to_string()),
-            ) {
+            );
+            if let Err(error) = &result {
                 eprintln!(".necoder への色の保存に失敗: {error:#}");
             }
+            self.report_settings_save(result, cx);
         }
         self.persist_project_color(project_index);
         // アクティブなら全ペイン（タブ + 分割）のキャレット等アクセントへ波及。
@@ -112,6 +114,7 @@ impl Workspace {
                 .iter()
                 .filter_map(|tab| tab.editor().cloned())
                 .chain(self.split_editor.clone())
+                .chain(std::iter::once(self.git_panel.read(cx).message.clone()))
                 .collect();
             for editor in editors {
                 editor.update(cx, |view, cx| view.set_accent(color, cx));

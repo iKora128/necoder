@@ -742,6 +742,11 @@ pub enum PanelEvent {
     },
     /// チャットの一覧が変わった（Chat モード。workspace の左の列が描き直す）。
     ChatRowsChanged,
+    /// パネルの操作（Enter 送信の切替・ピルの sticky・タブの見せ方）を settings.json へ保存できなかった
+    /// （手編集の途中で読めない等・書き手はファイルに触っていない）。トーストは workspace が出す。
+    SettingsSaveFailed {
+        message: SharedString,
+    },
 }
 
 /// エージェントスレッドの状態（herdr の 5 状態を necoder 流にマップ・#）。**色相は状態に使わない**
@@ -2132,7 +2137,18 @@ PYEOF"#;
     /// 実際の反映（composer 更新・再描画）は `observe_global` 経由で起きる（UI / CLI / MCP と同じ経路）。
     fn toggle_submit_on_enter(&mut self, cx: &mut Context<Self>) {
         let value = !self.submit_on_enter;
-        settings::set_user_value(cx, "submit_on_enter", serde_json::Value::Bool(value));
+        let result =
+            settings::set_user_value(cx, "submit_on_enter", serde_json::Value::Bool(value));
+        self.report_settings_save(result, cx);
+    }
+
+    /// 設定の保存結果を見る。失敗は workspace にトーストを頼む（黙って捨てない）。
+    fn report_settings_save(&mut self, result: anyhow::Result<()>, cx: &mut Context<Self>) {
+        if let Err(error) = result {
+            cx.emit(PanelEvent::SettingsSaveFailed {
+                message: settings::save_failure_message(&error),
+            });
+        }
     }
 
     /// 宛先チップに出すプロジェクト名・ブランチ・cwd を設定する（プロジェクト切替時に workspace が呼ぶ）。
@@ -4683,7 +4699,8 @@ PYEOF"#;
             .and_then(|thread| acp_client::AgentKind::by_label(thread.agent.as_ref()))
             .map(|kind| kind.id);
         if let (Some(agent_id), Some(config_id)) = (active_agent_id, selector.config_id()) {
-            settings::set_agent_config_default(cx, agent_id, config_id, &value);
+            let result = settings::set_agent_config_default(cx, agent_id, config_id, &value);
+            self.report_settings_save(result, cx);
         }
         if let Some(thread) = self.threads.get_mut(self.active) {
             match selector {
@@ -6635,13 +6652,15 @@ PYEOF"#;
                 } else {
                     "bar"
                 };
-                if let Err(error) = settings_core::persist_user_value(
+                let result = settings_core::persist_user_value(
                     &path,
                     "agent_tabs_view",
                     serde_json::Value::String(value.to_string()),
-                ) {
+                );
+                if let Err(error) = &result {
                     eprintln!("タブ表示モードの保存に失敗: {error:#}");
                 }
+                self.report_settings_save(result, cx);
             }
             cx.notify();
         }
@@ -12328,9 +12347,11 @@ PYEOF"#;
             panel.prewarm_allowed = true;
 
             // 設定で off にできる（idle メモリを優先したい人向け。既定は on）。
-            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(false));
+            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(false))
+                .expect("設定を保存できる");
             assert_eq!(panel.prewarm_target(cx), None);
-            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(true));
+            settings::set_user_value(cx, "agent_prewarm", serde_json::Value::Bool(true))
+                .expect("設定を保存できる");
             assert_eq!(
                 panel.prewarm_target(cx).as_deref(),
                 Some(active_id.as_str())

@@ -256,8 +256,79 @@ impl Workspace {
                     self.chrome.fleet_cells.len()
                 );
             }
+            // Task の変更から diff を開いたのと同じ入口（`TaskSpace::diff_base` を渡す）。
+            // `task-diff:<root 相対パス>@<rev>` の rev は擬似 Task の base を上書きする
+            // （CONTROL_PROBE の擬似 Task は開いた時点の HEAD を base に持つので、コミット済みの
+            // 変更を撮るには Task を切った時点の commit に戻す）。
+            other if other.starts_with("task-diff:") => {
+                let spec = &other["task-diff:".len()..];
+                let (relative, rev) = match spec.split_once('@') {
+                    Some((relative, rev)) => (relative, Some(rev)),
+                    None => (spec, None),
+                };
+                let Some(index) = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .position(|slot| !slot.task_space.is_integration())
+                else {
+                    eprintln!("FLEET_PROBE: Task が無い（NECODER_CONTROL_PROBE=1 と一緒に使う）");
+                    return;
+                };
+                let slot = &mut self.project_sessions.projects[index];
+                if let Some(rev) = rev {
+                    slot.task_space.base_oid = Some(rev.to_string());
+                }
+                let path = slot.worktree.root().join(relative);
+                let base = slot.task_space.diff_base();
+                self.switch_project(index, window, cx);
+                self.open_diff_tab_for(path, None, base, window, cx);
+            }
             other => eprintln!("FLEET_PROBE: 未知のコマンド {other}"),
         }
+    }
+
+    /// 開発用: ソース管理パネルを offscreen で検証する（`NECODER_GIT_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `open` = パネルを開く / `row:<n>` = 変更（unstaged）の n 行目を押したのと同じ入口で diff を開く /
+    /// `type:<文>` = メッセージ欄へ文字を入れる（貼り付けの後半と同じ `insert_text`。本物の
+    /// クリップボードは触らない — ⌘V の経路は gpui テストが受け持つ）/ `commit` = ⌘⏎ と同じ入口 /
+    /// `details` = 最後のトーストの「全文 ›」を押したのと同じ入口。
+    #[cfg(debug_assertions)]
+    pub fn debug_git_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        match name {
+            "open" => {
+                if !self.git_panel_open(cx) {
+                    self.toggle_git_panel(&ToggleGitPanel, window, cx);
+                }
+            }
+            "row" => {
+                let index = argument.parse::<usize>().unwrap_or(0);
+                let path = self
+                    .git_panel
+                    .read(cx)
+                    .snapshot()
+                    .changes
+                    .iter()
+                    .filter(|change| change.unstaged.is_some())
+                    .nth(index)
+                    .map(|change| change.path.clone());
+                match path {
+                    Some(path) => self.request_git_diff(path, cx),
+                    None => eprintln!("GIT_PROBE: 変更の行 {index} が無い"),
+                }
+            }
+            "type" => {
+                self.focus_git_input(window, cx);
+                let editor = self.git_panel.read(cx).message.clone();
+                editor.update(cx, |editor, cx| editor.insert_text(argument, cx));
+            }
+            "commit" => self.submit_git_input(window, cx),
+            "details" => self.debug_open_last_toast_details(window, cx),
+            other => eprintln!("GIT_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
     }
 
     /// 開発用: Chat モードを offscreen で検証する（`NECODER_CHAT_PROBE`・`;` 区切りで順に実行）。
