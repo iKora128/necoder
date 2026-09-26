@@ -3259,3 +3259,15 @@
   - Linux では `opening_a_pdf_gives_a_native_viewer_tab_not_a_text_buffer` と `localhost_urls_open_one_web_tab_that_steps_aside_for_overlays` が元から落ちる（ネイティブの PDF / WebView が無い）。CI の Linux ジョブはビルドだけなので表に出ていなかった。
   - `TaskSpace` の統合先を「最後に見つかった物」で選ぶ所と「最初の物」で選ぶ所が混在していた。`task/` でない linked worktree を ⌘O で開くと、サイドバーの ⌂ だけがその worktree を指し得た（O21 で `integration_slot_for` に一本化・メインの作業ツリーを優先）。
 - 次: GitHub の書き込み権限（push が 403）。macOS 実機・隔離 offscreen での画面確認。O15・O18 の Mac の途中の分を push してもらって取り込む。PR へ切り出す。
+
+## 2026-09-26（続き）— O13 / O20 / O22 / O26 をクラウドで積んだ
+
+- やったこと（`claude/sleepy-hamilton-gesxiq`・項目ごとに 1 コミット）: 作業中はスリープさせない（`keep_awake`・mac は `caffeinate -i -w`・Windows は `SetThreadExecutionState`）/ 自動保存（`auto_save`・他へ移った時・手を止めた時）/ タブのピン留め / プレビュータブ（`preview_tabs`・既定 on）/ `.worktreeinclude` / 通知の履歴（titlebar のベル）/ 通知音の大きさ（`sound_volume`）/ リソース（メモリをプロジェクトごと・使っていないエージェントを止める）。記録は `ORCA-PARITY.md` §7。
+- 学び/罠:
+  - **gpui は窓が非アクティブになると、フォーカス中の要素に blur を送る**（描画時のフォーカスの道筋が「窓が非アクティブなら空」になる）。自動保存で「blur で保存」と「窓を離れたら全部保存」を両方掛けると、同じタブを 2 本同時に書き、後の方が読み込み時の revision で書こうとして「外で変わった」と断られた。`EditorView` の保存を 1 本ずつにし、書き込み中に来た保存は終わってからもう一度書くようにした（⌘S の連打も同じ事故だった）。`#[gpui::test(iterations = 10)]` で、仕組みを外すと落ちることを確かめた。
+  - **テストの窓は前に出ていない**ので、フォーカスの出入り（blur）が起きない。`window.activate_window()` してから試す。
+  - `.gitignore` の約束: ディレクトリごと（`secrets/`）に一致させると、中を否定（`!secrets/skip.json`）で戻せない。`.worktreeinclude` も同じ（戻すなら `secrets/*`）。テストの期待を間違えていた。
+  - アイコンを足したら `main.rs` の Assets の表にも載せる（`every_icon_file_is_registered`）。workspace の crate だけテストして通したため 1 コミット遅れて気づいた。アセットを触ったら `cargo test --workspace`。
+  - クラウドの枠（ディスク）が build の成果物で埋まった: turso の静的ライブラリ（1 本 350 MB）が機能の組み合わせごとに 5 版ずつ残っていた。成果物ごとに新しい 2 版だけ残して 7 GB 空いた。`incremental/` も消してよい。
+- 次: 実機（mac）で見た目と挙動を確かめる（ベルの件数・ピン・斜体のプレビュータブ・リソースの数字・caffeinate の着地は `pmset -g assertions`）。push の権限。
+
