@@ -1478,8 +1478,15 @@ ports:
   open: 開く
   stop: 止める
   stop_failed: "止められませんでした（pid %{pid}）— もう終わっているか、necoder の中のプロセスではありません"
-  hint: 開いた時と ↻ の時だけ読みます（lsof / ps）。止められるのは necoder の中のプロセスだけ。SSH 先のポートはまだ出ません
+  hint: 開いた時と ↻ の時だけ読みます（lsof / ps・接続先は ss / lsof）。止められるのは necoder の中のプロセスだけ。接続先のポートは「転送」で手元の localhost に出します
   unsupported: この OS ではまだ使えません（macOS / Linux）
+  remote_heading: "接続先 · %{host}"
+  remote_empty: 接続先で待ち受けているポートはありません（自分のユーザーのプロセスだけ見えます）
+  remote_other_user: ほかのユーザーのプロセス
+  forward: 転送
+  stop_forward: やめる
+  forwarded: "localhost:%{local} → %{host}:%{remote} に転送しました（「開く」で Web タブ）"
+  forwarded_to: "手元の localhost:%{local} へ転送中"
 inbox:
   title: 通知の履歴
   bell_tip: 通知の履歴

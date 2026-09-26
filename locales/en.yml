@@ -1477,8 +1477,15 @@ ports:
   open: Open
   stop: Stop
   stop_failed: "Could not stop pid %{pid}: it already exited or is not a process inside necoder"
-  hint: Read only when opened and on ↻ (lsof / ps). Only processes inside necoder can be stopped. Ports on SSH hosts are not listed yet
+  hint: Read only when opened and on ↻ (lsof / ps; ss / lsof on remotes). Only processes inside necoder can be stopped. Remote ports appear on this machine's localhost after Forward
   unsupported: Not available on this OS yet (macOS / Linux)
+  remote_heading: "Remote · %{host}"
+  remote_empty: No listening ports on the remote (only your own user's processes are visible)
+  remote_other_user: Another user's process
+  forward: Forward
+  stop_forward: Stop
+  forwarded: "Forwarded localhost:%{local} → %{host}:%{remote} (use Open for a web tab)"
+  forwarded_to: "Forwarded to localhost:%{local} here"
 inbox:
   title: Notification history
   bell_tip: Notification history

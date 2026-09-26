@@ -272,7 +272,7 @@
 | — | `parity/integration` | #21（draft） | 全部を重ねた確認用。ぶつかりを解いた状態でテストが通る |
 | O15 | `parity/o15-session-history`（O11 の上） | | 実装中（Mac の worktree・未 push） |
 | O18 | `parity/o18-git-panel`（O1 の上） | | 実装中（Mac の worktree・未 push） |
-| O5（手元） | `claude/sleepy-hamilton-gesxiq` | #30 | 実装済み・実機未確認（SSH 転送・Windows は未） |
+| O5 | `claude/sleepy-hamilton-gesxiq` | #30 | 手元のポート・接続先のポートの一覧と転送（`-O forward`・再接続で張り直す）。実機未確認（SSH 実機での転送は未確認）・Windows は未 |
 | O21（一部） | 同上 | #30 | 外部の worktree・取り込み・統合先の取り違え・消えた worktree・Task の絞り込み・パス / ブランチ名のコピー・ピンの保存・手動の休眠（⋯「休ませる」）・並べ替え（レール / 最近 / 要対応）・複数選択（⌘ / ⇧ クリック → まとめて休ませる・舞台に並べる・片付けへ）・詳細（右クリックの「詳細…」）。親子は未 |
 | O26 | 同上 | #30 | 済: `path:行`・全部閉じる・外部アプリ・自動保存・プレビュータブ・ピン留め。実機未確認 |
 | O20（一部） | 同上 | #30 | ブランチ名・起点・既にあるブランチ・`.worktreeinclude`・準備の skip（＋ Task の詳細）・準備が失敗した Task の「準備をやり直す」/「準備を飛ばして始める」・repo ごとの base（`task_base`）・作成中の行（段の表示・取り消し・やり直し）・sparse checkout（`task_sparse`・cone）。絵文字名・どこで動かすかは未 |
@@ -530,7 +530,7 @@
 | G05 | SSH 上の worktree とエージェント | 有 | 済 |
 | G06 | 切断を越えて PTY が生きる | 一部 | O35 |
 | G07 | 接続状態の表示と自動再接続 | 一部 | O35 |
-| G08 | ポート転送 | 無 | O5 |
+| G08 | ポート転送 | 有（#30・Ports の接続先の行の「転送」・ControlMaster の `-O forward`・再接続で張り直す） | O5 |
 | G09 | リモートのダウンロード・アップロード | 有（#30・Finder から落とす / 右クリック・上書きしない） | O37 |
 | G10 | VS Code Remote-SSH で開く | 方式差 | 方式差 |
 | G11 | ツールチェインの無い Linux でも動く | 有（優位） | 済 |
