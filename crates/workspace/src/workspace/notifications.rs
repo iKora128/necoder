@@ -6,7 +6,8 @@ pub(crate) struct Toast {
     pub(crate) text: SharedString,
     color: Hsla,
     generation: u32,
-    action: Option<ToastAction>,
+    /// 押した時の行き先（無ければ押せない）。他の module のテストが確かめる。
+    pub(crate) action: Option<ToastAction>,
 }
 
 /// トーストを押した時の行き先。
