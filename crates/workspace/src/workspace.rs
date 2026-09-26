@@ -73,6 +73,7 @@ pub(crate) use web_preview_view::{
     web_tab_key, web_tab_url, PickTarget, WebPreviewEvent, WebPreviewView,
 };
 mod about;
+mod cleanup;
 mod editor_manners;
 mod git_controller;
 mod git_view;
@@ -205,6 +206,8 @@ actions!(
         ShowInbox,
         // リソース（necoder と子プロセスのメモリをプロジェクトごとに・O22）。
         ShowResources,
+        // 片付け（いまのリポジトリの Task をまとめて終了 / worktree を削除・O22）。
+        ShowCleanup,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
         Hide,
         HideOthers,
@@ -1401,6 +1404,8 @@ struct WorkspaceOverlays {
     inbox: Option<inbox::InboxPopoverState>,
     /// リソース（メモリとプロセス・O22・開いている間だけ Some）。
     resources: Option<resources::ResourcesState>,
+    /// 片付け（Task をまとめて終了 / worktree を削除・O22・開いている間だけ Some）。
+    cleanup: Option<cleanup::CleanupState>,
     /// 使用量の統計の画面（パレット「使用量: 統計を開く」・O11）。
     usage_stats: Option<usage_view::UsageStatsState>,
     /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
@@ -2015,6 +2020,7 @@ impl Workspace {
             || self.overlays.ports.is_some()
             || self.overlays.inbox.is_some()
             || self.overlays.resources.is_some()
+            || self.overlays.cleanup.is_some()
             || self.overlays.usage_stats.is_some()
             || self.search_panel.is_some()
             || self.buffer_search.is_some()
@@ -2235,6 +2241,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_ports))
             .on_action(cx.listener(Self::toggle_inbox))
             .on_action(cx.listener(Self::show_resources))
+            .on_action(cx.listener(Self::show_cleanup))
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
@@ -2407,6 +2414,7 @@ impl Render for Workspace {
             .children(self.render_ports(cx))
             .children(self.render_inbox(cx))
             .children(self.render_resources(cx))
+            .children(self.render_cleanup(cx))
             .children(self.render_usage_stats(cx))
             .children(self.render_new_task_dialog(cx))
             .children(self.render_hunk_menu(cx))

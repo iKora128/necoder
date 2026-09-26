@@ -903,6 +903,7 @@ impl Workspace {
                 ports: None,
                 inbox: None,
                 resources: None,
+                cleanup: None,
                 usage_stats: None,
                 project_flash: None,
                 project_flash_gen: 0,

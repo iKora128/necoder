@@ -237,6 +237,7 @@ cmd:
   show_ports: "Ports: Open ports (open / stop)"
   show_inbox: "Notifications: Show history"
   show_resources: "Resources: Memory and processes"
+  show_cleanup: "Tasks: Clean up…"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -1330,3 +1331,19 @@ resources:
   stop_quiet: "Stop idle agents (%{count})"
   stopped: "Stopped %{count} agents (conversations are kept and resume on the next send)"
   hint: Read only when opened or on ↻. Only quiet agents whose conversation can resume are stopped (terminals and dev servers are left alone)
+cleanup:
+  title: Clean up Tasks
+  select_finished: Select integrated and finished
+  counting: Counting…
+  nothing_to_lose: Nothing to lose
+  dirty: "%{n} uncommitted"
+  unmerged: "%{n} unmerged commits"
+  unknown_base: No base to compare with
+  phase_archived: Finished
+  empty: No Tasks in this repository
+  selected: "%{count} selected (%{deletable} can have their worktree deleted)"
+  archive: Finish (keep the worktree)
+  delete: "Delete worktree (%{count}, keep the branch)"
+  archived: "Finished %{count} Tasks"
+  deleted: "Deleted %{count} worktrees (kept %{kept} that had something to lose)"
+  hint: Only Tasks with no uncommitted changes and no commits missing from the base can have their worktree deleted here (counted again right before deleting). Delete the others one by one from the ⋯ menu

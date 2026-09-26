@@ -238,6 +238,7 @@ cmd:
   show_ports: "Ports: 開いているポート（開く / 止める）"
   show_inbox: "通知: 履歴を開く"
   show_resources: "リソース: メモリとプロセス"
+  show_cleanup: "Task: 片付け…"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -1331,3 +1332,19 @@ resources:
   stop_quiet: "使っていないエージェントを止める（%{count}）"
   stopped: "エージェントを %{count} 本止めました（会話は残っています・次に送ると続きから）"
   hint: 読むのは開いた時と ↻ の時だけ。止めるのは静かで会話を引き継げるエージェントだけです（端末・開発サーバは止めません）
+cleanup:
+  title: Task の片付け
+  select_finished: 統合済み・終了済みを選ぶ
+  counting: 数えています…
+  nothing_to_lose: 失うもの無し
+  dirty: "未コミット %{n}"
+  unmerged: "未統合のコミット %{n}"
+  unknown_base: 比較先が分からない
+  phase_archived: 終了済み
+  empty: このリポジトリに Task はありません
+  selected: "選んだ %{count} 本（worktree を消せるのは %{deletable} 本）"
+  archive: 終了する（worktree は残す）
+  delete: "worktree を削除（%{count}・ブランチは残す）"
+  archived: "Task を %{count} 本終了しました"
+  deleted: "worktree を %{count} 本消しました（%{kept} 本は失うものが出たので残しました）"
+  hint: worktree を消せるのは、未コミットの変更も統合先に無いコミットも無い Task だけです（消す直前にもう一度数えます）。失うものがある Task は ⋯ メニューの削除で 1 本ずつ

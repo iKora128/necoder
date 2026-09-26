@@ -82,6 +82,7 @@
 | ↳ **リレー**（room id が一致する 2 本を繋ぐ交換機） | `relay`（`relay/`・DO） | リレー | Relay |
 | ↳ **封**（transport 非依存の暗号化フレーム） | `seal` / `open` / `SealedFrame` | — | — |
 | **片付けメニュー**（Task カードの ⋯・残るものが減る順の段） | `FleetCellMenuState` / `FleetCellAction` | 片付け | Clean up |
+| **片付けの画面**（Task をまとめて終了 / 失うものが無い worktree をまとめて削除・O22） | `cleanup` / `ShowCleanup` / `CleanupState` | Task の片付け | Clean up Tasks |
 | ↳ カードを閉じる（舞台から外すだけ） | `close_fleet_cell` | カードを閉じる | Close card |
 | ↳ Task を終了（台帳を archived に） | `archive_fleet_cell_task` | Task を終了 | Finish Task |
 | ↳ worktree を削除（ディスクから消す） | `delete_fleet_cell_worktree` | worktree を削除 | Delete worktree |

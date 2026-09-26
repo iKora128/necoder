@@ -294,6 +294,10 @@ impl CommandRegistry {
                 label_key: "cmd.show_resources",
                 action_name: "workspace::ShowResources",
             },
+            CommandEntry {
+                label_key: "cmd.show_cleanup",
+                action_name: "workspace::ShowCleanup",
+            },
         ]
     }
 
