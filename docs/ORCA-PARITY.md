@@ -20,7 +20,7 @@
   - Wave 2（O5〜O10）: 変更レビュー、行コメント、localhost プレビュー、Design Mode、Ports。
   - Wave 3（O11〜O30）: 通知、使用量、履歴、Git パネル、Task と Fleet、端末の続き、エディタ、設定。
   - Wave 4（O31〜O45）: GitHub、閉じても走る daemon、SSH、スマホ、CLI、Skills、定期実行ほか。
-- PR にしたのは **O1・O2・O3・O4・O6・O7・O8・O9・O11・O12**（#14〜#24）、実装中は **O28・O30・O40・O39**（§7）。夜の間に 9 本を並行で走らせたが、全部が利用上限に当たって書き始める前に止まったので、2026-09-26 の昼から 3 本ずつ回している。
+- PR にしたのは **O1・O2・O3・O4・O6・O7・O8・O9・O11・O12・O28・O30・O39・O40**（#14〜#28）、実装中は **O15・O18**（§7）。夜の間に 9 本を並行で走らせたが、全部が利用上限に当たって書き始める前に止まったので、2026-09-26 の昼から 3 本ずつ回している。
 - 重くしない規律（§1.4）を全 PR に課す。常駐する部品を増やさず、ポーリングを入れず、既定は off にする。
 
 ## 1. 進め方（全 PR に共通）
@@ -265,10 +265,13 @@
 | O9 | `parity/o09-design-mode`（O8 の上） | #19 | レビュー待ち |
 | O11 | `parity/o11-usage`（O2 の上） | #24 | レビュー待ち |
 | O12 | `parity/o12-notifications`（O4 の上） | #23 | レビュー待ち |
+| O28 | `parity/o28-explorer-search` | #28 | レビュー待ち |
+| O30 | `parity/o30-languages` | #27 | レビュー待ち（バイナリ +11% の判断） |
+| O39 | `parity/o39-cli`（O40 の上） | #26 | レビュー待ち |
+| O40 | `parity/o40-skills` | #25 | レビュー待ち |
 | — | `parity/integration` | #21（draft） | 全部を重ねた確認用。ぶつかりを解いた状態でテストが通る |
-| O28 | `parity/o28-explorer-search` | | 実装中 |
-| O30 | `parity/o30-languages` | | 実装中 |
-| O40 / O39 | `parity/o40-skills` → `parity/o39-cli` | | 実装中 |
+| O15 | `parity/o15-session-history`（O11 の上） | | 実装中 |
+| O18 | `parity/o18-git-panel`（O1 の上） | | 実装中 |
 
 ## 付録 A: 調査の全 226 項目の行き先
 
