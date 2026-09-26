@@ -15,6 +15,12 @@ use crate::workspace::*;
 /// Task 行 1 本分の素材（render 前に所有データへ畳む。`cx` を跨いで借用しない）。
 struct TaskRow {
     project_index: usize,
+    /// この Task（親子の結び付けと選択の鍵）。
+    space: SpaceId,
+    /// この Task を切った元の Task（O21・A07）。
+    parent: Option<SpaceId>,
+    /// 親子の深さ（0 = 上の段・子は 1 つ下げて親の直後に出す）。[`nest_task_rows`] が入れる。
+    depth: usize,
     title: SharedString,
     color: Hsla,
     branch: Option<SharedString>,
@@ -69,6 +75,60 @@ fn sort_task_rows(rows: &mut [TaskRow], sort: FleetSort) {
         }
         FleetSort::Attention => rows.sort_by_key(|row| std::cmp::Reverse(row.activity.urgency())),
     }
+}
+
+/// 親子（O21・A07）: 子の Task を親の直後へ寄せ、深さを付ける。兄弟の間は今の並べ替えのまま。
+/// 親が一覧に居ない（終了した・絞り込みで外れた）子は上の段に出す。輪になった親子は上の段に戻す。
+fn nest_task_rows(rows: Vec<TaskRow>) -> Vec<TaskRow> {
+    let visible: std::collections::HashSet<SpaceId> =
+        rows.iter().map(|row| row.space.clone()).collect();
+    let is_root = |row: &TaskRow| {
+        row.parent
+            .as_ref()
+            .is_none_or(|parent| !visible.contains(parent) || *parent == row.space)
+    };
+    let mut slots: Vec<Option<TaskRow>> = rows.into_iter().map(Some).collect();
+    let mut nested = Vec::with_capacity(slots.len());
+    // 深さ優先で、上の段から順に「自分 → 子（今の並び順）」を積む。
+    fn place(
+        index: usize,
+        depth: usize,
+        slots: &mut Vec<Option<TaskRow>>,
+        nested: &mut Vec<TaskRow>,
+    ) {
+        let Some(mut row) = slots[index].take() else {
+            return;
+        };
+        row.depth = depth;
+        let space = row.space.clone();
+        nested.push(row);
+        let children: Vec<usize> = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| {
+                slot.as_ref()
+                    .is_some_and(|child| child.parent.as_ref() == Some(&space))
+            })
+            .map(|(child, _)| child)
+            .collect();
+        for child in children {
+            place(child, depth + 1, slots, nested);
+        }
+    }
+    let roots: Vec<usize> = slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.as_ref().is_some_and(is_root))
+        .map(|(index, _)| index)
+        .collect();
+    for root in roots {
+        place(root, 0, &mut slots, &mut nested);
+    }
+    // 輪（A の親が B・B の親が A）で残った行は上の段へ。
+    for index in 0..slots.len() {
+        place(index, 0, &mut slots, &mut nested);
+    }
+    nested
 }
 
 /// Task がこの数以上ある時に絞り込み欄を出す（少ない時は一覧を見れば足りる・O21）。
@@ -335,6 +395,48 @@ impl Workspace {
         self.clear_fleet_selection(cx);
     }
 
+    /// その Task の子孫（O21・A07）: 開いていて終了していない Task だけ・近い順。輪になっていても止まる。
+    pub(crate) fn task_descendants(&self, space: &SpaceId) -> Vec<SpaceId> {
+        let mut found: Vec<SpaceId> = Vec::new();
+        let mut frontier = vec![space.clone()];
+        while let Some(current) = frontier.pop() {
+            for slot in &self.project_sessions.projects {
+                let id = &slot.task_space.id;
+                if slot.task_space.parent.as_ref() == Some(&current)
+                    && id != space
+                    && slot.task_space.phase != TaskPhase::Archived
+                    && !found.contains(id)
+                {
+                    found.push(id.clone());
+                    frontier.push(id.clone());
+                }
+            }
+        }
+        found
+    }
+
+    /// 休ませる（⋯ の「休ませる」）: その Task と、子孫の Task の静かなエージェントも止める（O21・A07）。
+    pub(crate) fn rest_task_family(&mut self, session_index: usize, cx: &mut Context<Self>) {
+        let mut sessions = vec![session_index];
+        if let Some(space) = self
+            .project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| slot.task_space.id.clone())
+        {
+            sessions.extend(
+                self.task_descendants(&space)
+                    .iter()
+                    .filter_map(|space| self.session_index_for_space(space)),
+            );
+        }
+        let stopped: usize = sessions
+            .into_iter()
+            .map(|index| self.stop_quiet_agents_of(index, cx))
+            .sum();
+        self.report_stopped_agents(stopped, cx);
+    }
+
     /// まとめて舞台に並べる（先頭の 3 本まで・舞台の枠は 3 枚）。
     pub(crate) fn stage_selected_tasks(&mut self, spaces: &[SpaceId], cx: &mut Context<Self>) {
         let known: Vec<SpaceId> = spaces
@@ -595,6 +697,9 @@ impl Workspace {
                 .max_by_key(|(_, _, status)| status.activity.urgency());
             rows.push(TaskRow {
                 project_index: index,
+                space: slot.task_space.id.clone(),
+                parent: slot.task_space.parent.clone(),
+                depth: 0,
                 title: slot.task_space.title.clone(),
                 color: slot.color,
                 branch,
@@ -804,16 +909,10 @@ impl Workspace {
             .filter(|row| task_row_matches(row, &self.chrome.fleet_filter_query))
             .collect();
         sort_task_rows(&mut rows, self.chrome.fleet_sort);
+        // 子の Task は親の直後に 1 段下げて出す（O21・A07）。
+        let rows = nest_task_rows(rows);
         // 見えている並び（⇧ クリックの範囲）と、その中で選んでいる Task（複数選択・O21）。
-        let order: Rc<[SpaceId]> = rows
-            .iter()
-            .map(|row| {
-                self.project_sessions.projects[row.project_index]
-                    .task_space
-                    .id
-                    .clone()
-            })
-            .collect();
+        let order: Rc<[SpaceId]> = rows.iter().map(|row| row.space.clone()).collect();
         let selected: Rc<[SpaceId]> = self
             .chrome
             .fleet_selection
@@ -993,13 +1092,25 @@ impl Workspace {
                     .gap(px(8.))
                     // 行の詰め具合（O27・`density`）。
                     .min_h(ui::row_height(cx, 54.))
-                    .px(px(8.))
+                    // 子の Task は 1 段ごとに右へ下げる（O21・A07）。
+                    .pl(px(8. + 14. * row.depth as f32))
+                    .pr(px(8.))
                     .py(ui::row_padding(cx, 5.))
                     .rounded(px(6.))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg3))
                     // 選んでいる行は地を 1 段上げる（色相は使わない・選択面の色塗りはしない）。
                     .when(is_selected, |row| row.bg(theme.bg3))
+                    .when(row.depth > 0, |line| {
+                        line.child(
+                            div()
+                                .flex_none()
+                                .mt(px(1.))
+                                .text_size(px(10.))
+                                .text_color(theme.fg2)
+                                .child("↳"),
+                        )
+                    })
                     // 左 2px Task 色バー（帰属＝どの Task か・UI-SPEC §11）。
                     .child(
                         div()
@@ -1610,6 +1721,9 @@ mod tests {
     fn task_row(title: &str, branch: &str, asked: Option<&str>, digest: Option<&str>) -> TaskRow {
         TaskRow {
             project_index: 0,
+            space: SpaceId(format!("space-{title}")),
+            parent: None,
+            depth: 0,
             title: SharedString::from(title.to_string()),
             color: gpui::red(),
             branch: Some(SharedString::from(branch.to_string())),
@@ -1620,6 +1734,42 @@ mod tests {
             rail_shortcut: None,
             last_input_at_ms: None,
         }
+    }
+
+    /// 親子（O21・A07）: 子は親の直後に 1 段下げて並ぶ（兄弟は今の並びのまま）。親が一覧に居ない子と、
+    /// 輪になった親子は上の段に出す。
+    #[test]
+    fn child_tasks_follow_their_parent_one_level_down() {
+        let row = |title: &str, parent: Option<&str>| {
+            let mut row = task_row(title, "b", None, None);
+            row.parent = parent.map(|parent| SpaceId(format!("space-{parent}")));
+            row
+        };
+        let nested = nest_task_rows(vec![
+            row("grandchild", Some("child")),
+            row("api", None),
+            row("orphan", Some("archived")),
+            row("child", Some("api")),
+            row("sibling", Some("api")),
+            row("loop-a", Some("loop-b")),
+            row("loop-b", Some("loop-a")),
+        ]);
+        let shape: Vec<(String, usize)> = nested
+            .iter()
+            .map(|row| (row.title.to_string(), row.depth))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("api".to_string(), 0),
+                ("child".to_string(), 1),
+                ("grandchild".to_string(), 2),
+                ("sibling".to_string(), 1),
+                ("orphan".to_string(), 0),
+                ("loop-a".to_string(), 0),
+                ("loop-b".to_string(), 1),
+            ]
+        );
     }
 
     /// Task の並べ方（O21）: 最近 = 依頼の新しい順（無い物は後ろ）・要対応 = 待ち → 作業中 → 静か。
@@ -1744,6 +1894,120 @@ mod tests {
             workspace.clear_fleet_selection(cx);
             assert!(workspace.chrome.fleet_selection.is_empty());
             assert!(workspace.chrome.fleet_selection_anchor.is_none());
+        });
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// O21・A07: 別の Task のブランチから切った Task は、その Task の子。サイドバーは親の下に 1 段下げて
+    /// 並べ、休ませる・片付けは子ごと、詳細は親と子を出す。「この Task から新しい Task…」は起点に
+    /// 親のブランチを入れて開く。
+    #[gpui::test]
+    fn child_tasks_hang_under_the_task_they_were_cut_from(cx: &mut gpui::TestAppContext) {
+        let base =
+            std::env::temp_dir().join(format!("necoder_fleet_family_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let folders: Vec<PathBuf> = ["main", "api", "api-tests", "docs"]
+            .iter()
+            .map(|name| base.join(name))
+            .collect();
+        for folder in &folders {
+            std::fs::create_dir_all(folder).expect("作れる");
+        }
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(folders.clone(), Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            for slot in &mut workspace.project_sessions.projects {
+                slot.task_space.repository_id = "repo".to_string();
+            }
+            for (index, title) in [(1, "api"), (2, "api tests"), (3, "docs")] {
+                let slot = &mut workspace.project_sessions.projects[index];
+                slot.task_space.kind = SpaceKind::Task;
+                slot.task_space.title = SharedString::from(title);
+                slot.branch = Some(format!("task/{}", title.replace(' ', "-")));
+            }
+            workspace.switch_project(0, window, cx);
+            let ids: Vec<SpaceId> = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .map(|slot| slot.task_space.id.clone())
+                .collect();
+
+            // 起点のブランチ名から親を引く（`refs/heads/` 付きでも・統合先は親にしない）。
+            assert_eq!(
+                workspace.task_for_branch("repo", "task/api"),
+                Some(ids[1].clone())
+            );
+            assert_eq!(
+                workspace.task_for_branch("repo", "refs/heads/task/api"),
+                Some(ids[1].clone())
+            );
+            assert_eq!(workspace.task_for_branch("repo", "main"), None);
+            assert_eq!(workspace.task_for_branch("other", "task/api"), None);
+
+            workspace.project_sessions.projects[2].task_space.parent = Some(ids[1].clone());
+            let (_, rows, _) = workspace.fleet_sidebar_rows(cx);
+            let shape: Vec<(String, usize)> = nest_task_rows(rows)
+                .iter()
+                .map(|row| (row.title.to_string(), row.depth))
+                .collect();
+            assert_eq!(
+                shape,
+                vec![
+                    ("api".to_string(), 0),
+                    ("api tests".to_string(), 1),
+                    ("docs".to_string(), 0),
+                ]
+            );
+            // 描けること（↳ と字下げ）。
+            workspace.render_fleet_sidebar(cx);
+            assert_eq!(workspace.task_descendants(&ids[1]), vec![ids[2].clone()]);
+            assert!(workspace.task_descendants(&ids[3]).is_empty());
+
+            let value_of = |rows: &[super::super::task_details::DetailRow], key: &str| {
+                rows.iter()
+                    .find(|row| row.label == i18n::t!(key))
+                    .map(|row| row.value.clone())
+            };
+            let parent_rows = workspace.task_detail_rows(1, cx).expect("詳細");
+            assert_eq!(
+                value_of(&parent_rows, "fleet.details_children").as_deref(),
+                Some("1（api tests）")
+            );
+            assert_eq!(value_of(&parent_rows, "fleet.details_parent"), None);
+            let child_rows = workspace.task_detail_rows(2, cx).expect("詳細");
+            assert_eq!(
+                value_of(&child_rows, "fleet.details_parent").as_deref(),
+                Some("api")
+            );
+
+            // 片付けは子ごと印を付けて開く（⋯ の「子の Task ごと片付ける…」と同じ入口）。
+            let mut family = vec![ids[1].clone()];
+            family.extend(workspace.task_descendants(&ids[1]));
+            workspace.cleanup_selected_tasks(&family, window, cx);
+            assert_eq!(
+                workspace.cleanup_selection().expect("片付けの画面が開く"),
+                [ids[1].clone(), ids[2].clone()].into_iter().collect()
+            );
+
+            // 「この Task から新しい Task…」: その Task へ移って、起点を入れて詳細を開く。
+            workspace.open_new_task_from(1, window, cx);
+            assert_eq!(workspace.project_sessions.active, 1);
+            assert_eq!(
+                workspace.new_task_base(cx),
+                Some(("task/api".to_string(), true))
+            );
         });
         std::fs::remove_dir_all(&base).ok();
     }

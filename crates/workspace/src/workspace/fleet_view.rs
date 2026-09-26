@@ -532,6 +532,7 @@ impl Workspace {
         failure: Option<String>,
         prompt: &str,
         task: &FanoutTask,
+        parent: Option<SpaceId>,
         cx: &mut Context<Self>,
     ) -> Option<SpaceId> {
         let auto_branch = super::task_creation::auto_branch_plan(task, &branch);
@@ -561,6 +562,8 @@ impl Workspace {
             };
             self.project_sessions.projects[index].task_space.title = title.into();
         }
+        // 別の Task のブランチから切った（O21・A07）。台帳に残すと、サイドバーで親の下に出る。
+        self.project_sessions.projects[index].task_space.parent = parent;
         self.persist_task_space(index, cx);
         self.transition_task_space(index, TaskPhase::Planned, "task_created", None, cx);
         if let Some(error) = failure {
@@ -882,8 +885,22 @@ impl Workspace {
         let running = self
             .fleet_cell_agent(cell)
             .is_some_and(|panel| panel.read(cx).has_running_thread());
-        // 休ませられるエージェント（静かで会話を引き継げる・O21 の手動の休眠）。
-        let sleepable = session_index.map_or(0, |index| self.stoppable_agents_in(index, cx));
+        // 子孫の Task（O21・A07）。休ませる・片付けるは子ごと。
+        let family: Vec<SpaceId> = self
+            .space_of_cell(cell)
+            .map(|space| {
+                let mut family = vec![space.clone()];
+                family.extend(self.task_descendants(&space));
+                family
+            })
+            .unwrap_or_default();
+        let children = family.len().saturating_sub(1);
+        // 休ませられるエージェント（静かで会話を引き継げる・O21 の手動の休眠）。子の Task の分も数える。
+        let sleepable: usize = family
+            .iter()
+            .filter_map(|space| self.session_index_for_space(space))
+            .map(|index| self.stoppable_agents_in(index, cx))
+            .sum();
         // worktree（linked）でなければ削除段は出さない — main を消させない安全側。
         let is_worktree = session_index
             .and_then(|index| self.project_sessions.projects.get(index))
@@ -1013,12 +1030,21 @@ impl Workspace {
 
         // 休ませる（O21）: 静かなエージェントを止めてメモリを空ける。会話は残り、次に送ると続きから。
         if let Some(session_index) = session_index.filter(|_| sleepable > 0) {
+            let subtitle = if children > 0 {
+                i18n::t!(
+                    "fleet.cleanup_sleep_family_sub",
+                    "count" => sleepable,
+                    "children" => children
+                )
+            } else {
+                i18n::t!("fleet.cleanup_sleep_sub", "count" => sleepable)
+            };
             menu_box = menu_box.child(
                 make_row(
                     "fleet-menu-sleep",
                     "☾",
                     SharedString::from(i18n::t!("fleet.cleanup_sleep")),
-                    SharedString::from(i18n::t!("fleet.cleanup_sleep_sub", "count" => sleepable)),
+                    SharedString::from(subtitle),
                     false,
                     false,
                 )
@@ -1026,7 +1052,31 @@ impl Workspace {
                     MouseButton::Left,
                     cx.listener(move |this, _, _window, cx| {
                         this.close_fleet_cell_menu(cx);
-                        this.stop_quiet_agents_in(session_index, cx);
+                        this.rest_task_family(session_index, cx);
+                    }),
+                ),
+            );
+        }
+        // 子の Task ごと片付ける（O21・A07）: 片付けの画面を、この Task と子孫に印を付けて開く。
+        if children > 0 {
+            let marked = family.clone();
+            menu_box = menu_box.child(
+                make_row(
+                    "fleet-menu-cleanup-family",
+                    "↳",
+                    SharedString::from(i18n::t!("fleet.cleanup_family")),
+                    SharedString::from(i18n::t!(
+                        "fleet.cleanup_family_sub",
+                        "children" => children
+                    )),
+                    false,
+                    false,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.close_fleet_cell_menu(cx);
+                        this.cleanup_selected_tasks(&marked, window, cx);
                     }),
                 ),
             );

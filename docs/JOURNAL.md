@@ -3313,7 +3313,7 @@
   目次**（`markdown::split_front_matter`・`[toc]`・O29）・**横並びのライブプレビュー**（⌘K V・O29）・
   **スラッシュメニュー**（Markdown の行頭の `/`・補完のポップアップを使い回す・O29）・ターミナルの**配色の取り込み**
   （`terminal_color_scheme`・Ghostty / Windows Terminal / iTerm2・O25）・**端末タブの改名**（ダブルクリック・O24）・
-  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）・**SSH の接続テスト**（O37）・端末の **⌘T / ⌘W**（O24）・Task の**詳細**（レールの右クリック「詳細…」・O21 / A12）・エージェントの**使う / 使わない**（`disabled_agents`・O16 / B02）・**権限の既定**（Yolo の一括・`agent_permission_default`・O16 / B07）・**自動命名ブランチの改名**（`task/task` → 最初のスレッドの名前から `task/<slug>`・O23 / A23）・**キー割り当ての画面**（⌘K ⌘S で押して変える・O27 / D23）・**接続先のポートの転送**（Ports・`-O forward`・O5 / G08）・**端末の横の分割**（⌘\\・O24 / C02）・**接続先の登録**（~/.ssh/config に足す・O37 / G01）・**エージェントの起動の上書きの画面**（O16 / B07）・**名前の絵文字**（`:rocket:` → 🚀・O20 / A08）・**行の間隔**（`density`・O27）・**エディタ領域のターミナル**（ファイルと同じタブ列・下ドックと止めずに行き来・O24 / C03）・**SSH のプロジェクトの localhost のリンクを転送してから開く**（R06 の続き・O5。Ports の転送済みの行の「開く」が SSH 先の localhost と読み違えて開かなかったのも直した）・**OS のショートカットとぶつかるキーの警告**（⌘K ⌘S の ⚠・O27 / H26）。
+  **statusbar の項目の出し入れ**（右クリック・`statusbar_hidden`・O27）・**書体を選ぶ画面**（設定 › 外観・O27）・**シェルを選ぶ画面**（O25）・**SSH の接続テスト**（O37）・端末の **⌘T / ⌘W**（O24）・Task の**詳細**（レールの右クリック「詳細…」・O21 / A12）・エージェントの**使う / 使わない**（`disabled_agents`・O16 / B02）・**権限の既定**（Yolo の一括・`agent_permission_default`・O16 / B07）・**自動命名ブランチの改名**（`task/task` → 最初のスレッドの名前から `task/<slug>`・O23 / A23）・**キー割り当ての画面**（⌘K ⌘S で押して変える・O27 / D23）・**接続先のポートの転送**（Ports・`-O forward`・O5 / G08）・**端末の横の分割**（⌘\\・O24 / C02）・**接続先の登録**（~/.ssh/config に足す・O37 / G01）・**エージェントの起動の上書きの画面**（O16 / B07）・**名前の絵文字**（`:rocket:` → 🚀・O20 / A08）・**行の間隔**（`density`・O27）・**エディタ領域のターミナル**（ファイルと同じタブ列・下ドックと止めずに行き来・O24 / C03）・**SSH のプロジェクトの localhost のリンクを転送してから開く**（R06 の続き・O5。Ports の転送済みの行の「開く」が SSH 先の localhost と読み違えて開かなかったのも直した）・**OS のショートカットとぶつかるキーの警告**（⌘K ⌘S の ⚠・O27 / H26）・**Task の親子**（別の Task のブランチから切ると子・サイドバーで親の下・休ませる / 片付けは子ごと・`task_parents`・O21 / A07）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3401,6 +3401,10 @@
     スクリーンショット。Linux の Ctrl+Alt+↑↓（複数カーソル・VS Code の Windows と同じ）と Ctrl+Alt+←→
     （スレッド送り）は GNOME のワークスペースの切替。`os_shortcuts` のテストが既定の衝突の一覧を持っていて、
     増えたら落ちる。
+  - **台帳に項目を足す時は「知らない書き手が消さない」形に**: Task の親子は `task_deps` と同じく別テーブル
+    （`task_parents`・無 migration）にし、upsert は `parent` が `Some` の時だけ書く。CLI の `fleet create` や
+    GUI の復元時の補完のように親を知らないまま upsert する経路があるので、`None` で消すと親子が黙って外れる。
+    外すのは `set_task_parent(id, None)` だけ。
   - relay の Remote control（WebKit）は、カメラの 2 本に加えて本体の `PWA: …` の 17 行目も落ちたり通ったりする。
     `test/fixture.mjs` の transcript と送信の数を chromium と webkit が共有するので、2 番目の webkit では
     前の回の同じ文で `toContainText` が先に通り、数を見る時に送信がまだ届いていない。#30 のコメントに

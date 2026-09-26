@@ -354,6 +354,8 @@ impl Workspace {
         let is_worktree = slot.worktree_branch.is_some();
         let slot_root = slot.worktree.root().to_path_buf();
         let branch = slot.branch.clone().or_else(|| slot.worktree_branch.clone());
+        // Task（統合先でない・ブランチがある）なら、そこから子の Task を切れる（O21・A07）。
+        let can_branch_task = !slot.task_space.is_integration() && branch.is_some();
         let (bg2, bg3, border, fg0, fg1, fg2, err) = (
             theme.bg2,
             theme.bg3,
@@ -501,6 +503,26 @@ impl Workspace {
                     cx.listener(move |this, _, _window, cx| this.show_task_details(index, cx)),
                 ),
             )
+            // この Task から新しい Task（O21・A07）: 起点にこの Task のブランチを入れて ＋ Task を開く。
+            // 作った Task はサイドバーでこの Task の下に出る。
+            .when(can_branch_task, |menu| {
+                menu.child(
+                    make_row(
+                        "rail-new-child-task",
+                        "↳",
+                        SharedString::from(i18n::t!("rail.menu_new_child_task")),
+                        false,
+                        false,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.close_rail_menu(cx);
+                            this.open_new_task_from(index, window, cx);
+                        }),
+                    ),
+                )
+            })
             // パス・ブランチ名のコピー（O21・Task を端末や別の道具へ持っていく）。
             .child({
                 let text = slot_root.display().to_string();

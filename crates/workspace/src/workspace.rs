@@ -1106,6 +1106,9 @@ pub struct TaskSpace {
     /// linked worktree か（メインの作業ツリーでない）。統合先の `⌂` はメインの作業ツリーを選ぶ
     /// （O21・同じリポジトリの `task/` でない linked worktree を統合先に取り違えない）。
     pub linked: bool,
+    /// この Task を切った元の Task（O21・A07・親子）。起点に別の Task のブランチを選んで作った時に
+    /// 入る。台帳（`task_parents`）が正で、復元で重ねる。
+    pub parent: Option<SpaceId>,
 }
 
 impl TaskSpace {
@@ -1143,6 +1146,7 @@ impl TaskSpace {
                 .map(|duration| duration.as_millis() as i64)
                 .unwrap_or(0),
             linked: false,
+            parent: None,
         }
     }
 
@@ -1186,6 +1190,7 @@ impl TaskSpace {
                 .map(|duration| duration.as_millis() as i64)
                 .unwrap_or(0),
             linked: project::is_linked_worktree_on(worktree.host().as_ref(), worktree.root()),
+            parent: None,
         }
     }
 
@@ -1202,6 +1207,7 @@ impl TaskSpace {
             head_oid: self.head_oid.clone(),
             result_summary: self.result_summary.as_ref().map(ToString::to_string),
             depends_on: Vec::new(), // 依存の正は台帳（task_deps）。GUI メモリ側は持たない（P6）
+            parent: self.parent.as_ref().map(|parent| parent.0.clone()),
             created_at: self.created_at_ms,
             updated_at: self.created_at_ms,
         }
