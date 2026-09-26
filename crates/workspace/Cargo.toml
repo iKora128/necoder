@@ -13,6 +13,7 @@ host.workspace = true
 editor_core.workspace = true
 editor_view.workspace = true
 explorer.workspace = true
+review_view.workspace = true
 git_ui.workspace = true
 theme_core.workspace = true
 project.workspace = true
@@ -41,6 +42,12 @@ image.workspace = true
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 terminal_view = { workspace = true, features = ["test-support"] }
+
+# Dock のアイコンの要対応バッジ（dock_badge.rs・O12）。GPUI に API が無いので AppKit を直接叩く。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
 
 # 名前付きパイプ（制御 IPC・WINDOWS-PORT.md §D2）。Windows でのみ引く。
 [target.'cfg(windows)'.dependencies]

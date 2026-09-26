@@ -1,3 +1,6 @@
+// 出典: ⌘P の「最近開いたファイルを上に・無視されたファイルは 2 回目に」（D19）は、
+// stablyai/orca@646e9a5 の `docs/site/content/docs/model/quick-open.mdx` と
+// `src/shared/quick-open-filter.ts`（ignoredPass）の考え方を参考にした（実装は独立）。
 use crate::workspace::*;
 
 impl Workspace {
@@ -24,10 +27,27 @@ impl Workspace {
         cx.spawn(async move |_workspace, cx| {
             let files = files_task.await;
             let _ = handle.update(cx, |workspace, window, cx| {
+                // 最近開いたファイルを上へ（D19）。新しい順の添字 → 加点。
+                let recent: HashMap<&Path, usize> = workspace
+                    .active_slot()
+                    .map(|slot| {
+                        slot.explorer
+                            .recent_files()
+                            .iter()
+                            .enumerate()
+                            .map(|(rank, path)| (path.as_path(), rank))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let mut items: Vec<PickerItem> = files
                     .iter()
                     .enumerate()
-                    .map(|(id, (_, relative))| PickerItem::new(id, relative.clone()))
+                    .map(|(id, (path, relative))| {
+                        let boost = recent
+                            .get(path.as_path())
+                            .map_or(0, |rank| finder_recent_boost(*rank));
+                        PickerItem::new(id, relative.clone()).with_boost(boost)
+                    })
                     .collect();
                 // 空プロジェクト（列挙 0 件）では作成アクションを出す — 「⌘P で何も出来ない」を
                 // 避ける。ファイル操作は local のみ（M10・エクスプローラの右クリックと同じ制約）。
@@ -53,7 +73,90 @@ impl Workspace {
                     window,
                     cx,
                 );
+                // 1 回目で見つからない時だけ「無視されたファイルも探す」を出す（2 回目・local のみ）。
+                if is_local {
+                    if let Some(picker) = workspace.overlays.picker.clone() {
+                        picker.update(cx, |picker, cx| {
+                            picker.set_fallback_action(
+                                Some((
+                                    FINDER_ACTION_SEARCH_IGNORED,
+                                    SharedString::from(i18n::t!("finder.search_ignored")),
+                                )),
+                                cx,
+                            )
+                        });
+                    }
+                }
             });
+        })
+        .detach();
+    }
+
+    /// ⌘P の 2 回目（D19）: gitignore で隠れたファイルを背景で集め、今の Picker の後ろに足す
+    /// （加点はマイナス＝1 回目の一致より必ず下）。Picker は開いたまま・クエリもそのまま。
+    fn search_ignored_files(&mut self, cx: &mut Context<Self>) {
+        let Some(picker) = self.overlays.picker.clone() else {
+            return;
+        };
+        let Some(root) = self
+            .active_worktree()
+            .filter(|worktree| !worktree.is_remote())
+            .map(|worktree| worktree.root().to_path_buf())
+        else {
+            return;
+        };
+        let listed: std::collections::HashSet<PathBuf> =
+            self.overlays.picker_files.iter().cloned().collect();
+        picker.update(cx, |picker, cx| {
+            picker.set_fallback_action(
+                Some((
+                    FINDER_ACTION_IGNORED_EMPTY,
+                    SharedString::from(i18n::t!("finder.searching_ignored")),
+                )),
+                cx,
+            )
+        });
+        cx.spawn(async move |workspace, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { project::ignored_files_local(&root, &listed, 50_000) })
+                .await;
+            let updated = workspace.update(cx, |workspace, cx| {
+                // 待つ間に閉じた・別の Picker を開いた場合は捨てる。
+                if workspace.overlays.picker.as_ref() != Some(&picker)
+                    || workspace.overlays.picker_mode != PickerMode::Files
+                {
+                    return;
+                }
+                let start = workspace.overlays.picker_files.len();
+                let detail = SharedString::from(i18n::t!("finder.ignored_detail"));
+                let items = found
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, (_, relative))| {
+                        PickerItem::new(start + offset, relative.clone())
+                            .with_detail(detail.clone())
+                            .with_boost(FINDER_IGNORED_BOOST)
+                    })
+                    .collect();
+                workspace
+                    .overlays
+                    .picker_files
+                    .extend(found.into_iter().map(|(path, _)| path));
+                picker.update(cx, |picker, cx| {
+                    picker.append_items(items, cx);
+                    picker.set_fallback_action(
+                        Some((
+                            FINDER_ACTION_IGNORED_EMPTY,
+                            SharedString::from(i18n::t!("finder.ignored_not_found")),
+                        )),
+                        cx,
+                    );
+                });
+            });
+            if let Err(error) = updated {
+                eprintln!("無視されたファイルの一覧を反映できない: {error:#}");
+            }
         })
         .detach();
     }
@@ -468,10 +571,28 @@ impl Workspace {
                     TabContent::Pdf(view) => {
                         view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
                     }
+                    // session の `review` と同じ Entity（下でまとめて塗り直す）。
+                    TabContent::Review(_) => {}
+                    TabContent::Web { view, .. } => {
+                        view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
+                    }
                 }
+            }
+            if let Some(review) = &session.review {
+                review.update(cx, |review, cx| review.set_theme(theme.clone(), cx));
             }
             if let Some(split) = &session.split_editor {
                 split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
+            }
+            // ソース管理パネルの入力欄（コミットメッセージ / ブランチ名）も EditorView。
+            let git_inputs: Vec<Entity<EditorView>> = {
+                let panel = session.git_panel.read(cx);
+                std::iter::once(panel.message.clone())
+                    .chain(panel.branch_name.clone())
+                    .collect()
+            };
+            for editor in git_inputs {
+                editor.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));
             }
             for panel in &session.fleet_agents {
                 panel.update(cx, |panel, cx| panel.set_theme(theme.clone(), cx));
@@ -518,7 +639,8 @@ impl Workspace {
         self.apply_theme(theme, cx);
         self.overlays.theme_before_preview = None;
         // set_user_value = 永続化 + global 即時 reload（設定画面のテーマチップも同じ描画で追従する）。
-        settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+        let result = settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+        self.report_settings_save(result, cx);
     }
 
     pub(crate) fn open_picker(
@@ -576,8 +698,20 @@ impl Workspace {
             PickerEvent::Confirmed(id) => {
                 let id = *id;
                 let mode = self.overlays.picker_mode;
+                // ⌘P の一致なしの行は Picker を閉じない（2 回目を探して同じ場所に足す）。
+                if mode == PickerMode::Files
+                    && (id == FINDER_ACTION_SEARCH_IGNORED || id == FINDER_ACTION_IGNORED_EMPTY)
+                {
+                    if id == FINDER_ACTION_SEARCH_IGNORED {
+                        self.search_ignored_files(cx);
+                    }
+                    return;
+                }
+                // URL 入力は行ではなく入力欄の中身が答え（閉じる前に読む）。
+                let query = _picker.read(cx).query().to_string();
                 self.close_picker(window, cx);
                 match mode {
+                    PickerMode::PreviewUrl => self.confirm_localhost_input(&query, window, cx),
                     PickerMode::Files => {
                         // 空プロジェクトの作成アクション（番兵 id）: エクスプローラの
                         // インライン命名へ繋ぐ（命名入力が見えるよう左ドックは開く）。
@@ -830,6 +964,26 @@ impl Workspace {
         let return_focus = self.search_return_focus(cx);
         let panel = cx.new(|cx| SearchPanel::new(host, root, theme, accent, return_focus, cx));
         self.install_search_panel(panel, window, cx);
+    }
+
+    /// エクスプローラの「フォルダ内を検索」（D18）: ⌘⇧F の検索パネルを、そのフォルダに絞った
+    /// 状態で開く（既に開いていれば範囲だけ差し替える）。範囲はパネルのチップで外せる。
+    pub(crate) fn open_folder_search(
+        &mut self,
+        folder: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_context_menu(cx);
+        if self.search_panel.is_none() {
+            self.open_project_search(&ProjectSearch, window, cx);
+        }
+        let Some(panel) = self.search_panel.clone() else {
+            return;
+        };
+        panel.update(cx, |panel, cx| panel.set_scope(Some(folder), cx));
+        window.focus(&panel.read(cx).focus_handle(), cx);
+        cx.notify();
     }
 
     // ── ⌘F バッファ内検索/置換（M10） ──
@@ -1382,4 +1536,15 @@ impl Workspace {
             cx,
         );
     }
+}
+
+/// ⌘P の並びの加点（D19）。あいまい一致のスコアはおおむね数十〜数百の幅なので、桁を分けて
+/// 「最近開いたファイルは一致したものの中で必ず上」「無視されたファイル（2 回目）は必ず下」にする。
+const FINDER_RECENT_BOOST: i32 = 10_000;
+const FINDER_IGNORED_BOOST: i32 = -10_000;
+
+/// 最近開いた順位 → 加点。新しいほど少しだけ上（同じくらいの一致なら新しい方）。
+fn finder_recent_boost(rank: usize) -> i32 {
+    let newer = ExplorerProject::RECENT_LIMIT.saturating_sub(rank) as i32;
+    FINDER_RECENT_BOOST + newer * 2
 }

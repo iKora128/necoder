@@ -132,6 +132,14 @@ pub struct PastedImage {
     pub bytes: Vec<u8>,
 }
 
+/// 整形プレビュー（Markdown）のリンクが押された。行き先の解釈（URL を開く・ファイルを開く）は
+/// 親が決める — エディタは Web タブもファイルを開くことも知らない（依存の向き）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewLinkClicked {
+    /// Markdown に書かれたままの行き先（`https://…` / `./guide.md` / `#anchor` など）。
+    pub destination: String,
+}
+
 /// キーボード入力の確定テキスト通知（補完の自動トリガ用・M10）。
 /// **入力ハンドラ経由の確定入力のみ** emit する（IME 変換中・paste・undo・補完適用では出さない）。
 /// workspace がタブ毎に subscribe し、識別子/`.`/`::` で補完を自動トリガする。
@@ -1133,6 +1141,18 @@ impl EditorView {
         self.buffer.text()
     }
 
+    /// 1 行目のテキスト（末尾の改行は含めない）。composer の親が行頭の `/` を読むのに使う
+    /// （変更のたびに全文を複製しない）。
+    pub fn first_line_text(&self) -> String {
+        self.buffer.snapshot().line_text(0)
+    }
+
+    /// IME の変換中（未確定の文字がある）か。composer の親が補完を開くか・Enter を横取りするかを
+    /// 決めるのに使う（変換中の Enter は確定であって、選択や送信ではない）。
+    pub fn has_marked_text(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
     /// テキストを差し替える（composer の下書き流し込み・開発プローブ用）。
     pub fn set_plain_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.buffer = Buffer::from_str(text);
@@ -1140,8 +1160,17 @@ impl EditorView {
             .set_selections(vec![Selection::cursor(text.len())]);
         self.marked_range = None;
         self.highlight_version = self.buffer.version();
+        self.invalidate_wrap_map();
         self.pending_caret_reveal = true; // 末尾キャレットを可視域へ（折り返し時も）
         cx.notify();
+    }
+
+    /// バッファを丸ごと差し替えた後、次の prepaint で折り返し表を必ず作り直させる。
+    /// 新しいバッファの version は 0 から始まるので、前のバッファも version 0（打鍵していない
+    /// composer・差し替え同士）だと表の鍵が一致して古い表が残り、**1 行目しか出ない**。
+    fn invalidate_wrap_map(&mut self) {
+        let lines = self.buffer.snapshot().line_count();
+        self.wrap_map = WrapMap::identity(lines, (u64::MAX, 0, false));
     }
 
     /// テキストを空に戻す（composer 送信後）。
@@ -1149,6 +1178,7 @@ impl EditorView {
         self.buffer = Buffer::new();
         self.marked_range = None;
         self.highlight_version = self.buffer.version();
+        self.invalidate_wrap_map();
         if let Some(highlighter) = self.highlighter.as_mut() {
             highlighter.reparse_full("");
         }
@@ -2248,6 +2278,9 @@ impl EventEmitter<EditorInputEvent> for EditorView {}
 /// hover dwell の通知（workspace が LSP hover 要求に使う）。
 impl EventEmitter<EditorHoverEvent> for EditorView {}
 
+/// 整形プレビューのリンクの通知（workspace が URL / ファイルとして開く）。
+impl EventEmitter<PreviewLinkClicked> for EditorView {}
+
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // `.html` ネイティブプレビュー: エディタ本体だけを差し替え、タブ/パンくずは GPUI のまま。
@@ -2285,6 +2318,17 @@ impl Render for EditorView {
                     self.font_size,
                     &self.markdown_scroll,
                     self.buffer.path().and_then(|path| path.parent()),
+                    {
+                        let editor = cx.entity().downgrade();
+                        std::rc::Rc::new(move |destination, _window, cx| {
+                            // 閉じたタブのプレビューを押すことは無いが、消えていれば何もしない。
+                            if let Some(editor) = editor.upgrade() {
+                                editor.update(cx, |_, cx| {
+                                    cx.emit(PreviewLinkClicked { destination })
+                                });
+                            }
+                        })
+                    },
                 ))
                 .into_any_element();
         }
@@ -2620,15 +2664,16 @@ impl Element for EditorElement {
                 if view.wrap_map.total_display_rows() != old_rows {
                     cx.emit(ComposerEvent::ContentHeightChanged);
                 }
-                // 幅が広がって折り返し総高が縮むと scroll_top が範囲外に残り、内容が viewport の
-                // 上へ丸ごと抜けて「空に見える／末尾の1行だけ出る」（AI 全画面切替で顕在化・
-                // 2026-08-30）。新しい総高で再クランプする。
-                let total_height =
-                    view.wrap_map.total_display_rows() as f32 * view.line_height_value();
-                let max_scroll = (total_height - f32::from(bounds.size.height)).max(0.0);
-                if f32::from(view.scroll_top) > max_scroll {
-                    view.scroll_top = px(max_scroll);
-                }
+            }
+            // 幅が広がって折り返し総高が縮むと scroll_top が範囲外に残り、内容が viewport の
+            // 上へ丸ごと抜けて「空に見える／末尾の1行だけ出る」（AI 全画面切替で顕在化・
+            // 2026-08-30）。親が欄を伸ばして viewport だけが広がった時（composer やソース管理の
+            // auto-grow に複数行を貼った直後・2026-09-26）も同じなので、折り返しを作り直した
+            // 時に限らず毎回、今の総高と高さで再クランプする。
+            let total_height = view.wrap_map.total_display_rows() as f32 * view.line_height_value();
+            let max_scroll = (total_height - f32::from(bounds.size.height)).max(0.0);
+            if f32::from(view.scroll_top) > max_scroll {
+                view.scroll_top = px(max_scroll);
             }
             if let Some(offset) = view.pending_reveal.take() {
                 let line_height = view.line_height_value();
@@ -3244,7 +3289,8 @@ fn build_line_runs(
 }
 
 /// [`lang::HighlightKind`] を theme の syn-* 色にマップする（UI-SPEC §1.1）。
-fn syntax_color(kind: lang::HighlightKind, syntax: &SyntaxColors) -> gpui::Hsla {
+/// 変更レビュー（`review_view`）も同じ写像を使う＝エディタと diff で色が割れない。
+pub fn syntax_color(kind: lang::HighlightKind, syntax: &SyntaxColors) -> gpui::Hsla {
     match kind {
         lang::HighlightKind::Keyword => syntax.keyword,
         lang::HighlightKind::Function => syntax.function,

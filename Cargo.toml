@@ -58,6 +58,22 @@ tree-sitter-css = "0.23"
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
+# O30 の追加言語（どれも tree-sitter-language shim 経由・ABI 14/15・MIT か Apache-2.0）。
+# 合計で release バイナリ +8.8MB。C#・Swift・Kotlin・Scala は 1 言語 3.8〜5.8MB と重いので見送り。
+# SQL は DerekStride 版（crate 名 sequel）、Dockerfile は Containerfile 版。Protobuf / GraphQL は
+# 上流 crate が highlights クエリを公開しないため、クエリを同梱する arborium 版を使う。
+tree-sitter-java = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-php = "0.24"
+tree-sitter-sequel = "0.3"
+tree-sitter-containerfile = "0.9"
+tree-sitter-lua = "0.5"
+tree-sitter-elixir = "0.3"
+tree-sitter-zig = "1.1"
+tree-sitter-make = "1.1"
+tree-sitter-cmake = "0.7"
+arborium-proto = "2.18"
+arborium-graphql = "2.18"
 # Markdown は block/inline の 2 grammar 構成。0.5.1 は LanguageFn 経由で tree-sitter 0.25 と共存する。
 # `parser` feature は tree-sitter 0.24 を直接引くため有効にせず、薄い統合層を lang 側に置く。
 tree-sitter-md = "=0.5.1"
@@ -76,11 +92,25 @@ image = "0.25"
 base64 = "0.22"
 # M8 統合ターミナル。crates.io の公開 API を使用する。
 alacritty_terminal = "0.26"
+# 端末の PTY を包むのに要る（alacritty_terminal の EventedReadWrite が polling の型を取る）。
+# 依存ツリーに lock 済みの版を共有する。
+polling = "3"
 libc = "0.2"
 # M10 ファイル監視（macOS は FSEvents バックエンド）。remote watch は M13 で Host 経由に
 notify = "8"
 # ローカル永続化 DB（hot exit / スレッド / 台帳。DECISIONS 決定ログ 2026-07-16・pure-Rust SQLite）
 turso = "0.7"
+# macOS のアプリ本体への薄い糸（GPUI に API が無いところだけ・MIT）。Dock / AppleScript の「終了」を
+# ⌘Q と同じ確認へ回すフック（O4）。GPUI / wry が既に引いている版を共有してビルドを重複させない。
+objc2 = "0.6"
+# 同上: Dock のアイコンの要対応バッジ（NSApplication.dockTile.badgeLabel・O12）。feature は使う分だけ。
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSApplication",
+  "NSResponder",
+  "NSDockTile",
+] }
 # Windows の名前付きパイプ（制御 IPC・WINDOWS-PORT.md §D2）。Win32 API の生バインディングだけを
 # 使う（MIT OR Apache-2.0）。既に依存ツリーに lock 済みの版を共有してビルドを重複させない。
 # 定数はバージョン間で置き場が動くので control_transport 側でローカル定義し、関数だけ引く。
@@ -100,6 +130,7 @@ windows-sys = { version = "0.61", features = [
 # paths は依存ゼロの最下層（WINDOWS-PORT.md §D1）。設定・DB・ログの置き場を決める唯一の場所。
 paths = { path = "crates/paths" }
 cli_shim = { path = "crates/cli_shim" }
+agent_skills = { path = "crates/agent_skills" }
 theme_core = { path = "crates/theme_core" }
 i18n = { path = "crates/i18n" }
 editor_core = { path = "crates/editor_core" }
@@ -119,6 +150,7 @@ markdown = { path = "crates/markdown" }
 acp_client = { path = "crates/acp_client" }
 chat_core = { path = "crates/chat_core" }
 agent_panel = { path = "crates/agent_panel" }
+review_view = { path = "crates/review_view" }
 ui = { path = "crates/ui" }
 terminal_view = { path = "crates/terminal_view" }
 webview_view = { path = "crates/webview_view" }

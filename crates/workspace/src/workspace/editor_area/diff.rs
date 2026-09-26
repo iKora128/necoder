@@ -1,4 +1,27 @@
 use crate::workspace::*;
+use project::{DiffBase, FileDiff};
+
+/// diff タブを開く前に読んだ「今」の側。
+enum CurrentText {
+    Text(String),
+    /// 作業ツリーから消えている（削除されたファイル）。
+    Missing,
+    /// 在るがテキストとして読めない（バイナリ・読み取り失敗）。
+    Unreadable,
+}
+
+/// 作業ツリーのファイルを読む（背景スレッドで呼ぶ）。
+fn read_current_text(host: &dyn Host, path: &Path) -> CurrentText {
+    if host.metadata(path).is_err() {
+        return CurrentText::Missing;
+    }
+    match host.read_file(path) {
+        Ok(content) => {
+            String::from_utf8(content.bytes).map_or(CurrentText::Unreadable, CurrentText::Text)
+        }
+        Err(_unreadable) => CurrentText::Unreadable,
+    }
+}
 
 impl Workspace {
     pub(crate) fn open_diff_tab(
@@ -17,14 +40,17 @@ impl Workspace {
             };
             (path, view.buffer().text())
         };
-        self.open_diff_tab_for(path, Some(current), window, cx);
+        self.open_diff_tab_for(path, Some(current), DiffBase::Head, window, cx);
     }
 
-    /// 指定ファイルの diff タブを開く（git パネル行から）。`current` が None ならディスクの内容を使う。
+    /// 指定ファイルの diff タブを開く（ソース管理パネルの行・⌘ の diff・Fleet の変更）。
+    /// `current` が None なら作業ツリーの中身と比べる。Fleet の Task は [`TaskSpace::diff_base`]
+    /// （Task を切った時点の commit）を渡す。差分が無い・比べられない時は黙らずトーストで知らせる。
     pub(crate) fn open_diff_tab_for(
         &mut self,
         path: PathBuf,
         current: Option<String>,
+        base: DiffBase,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -32,40 +58,119 @@ impl Workspace {
             return;
         };
         let host = worktree.host().clone();
+        let root = worktree.root().to_path_buf();
+        let from_buffer = current.is_some();
         let Some(handle) = window.window_handle().downcast::<Workspace>() else {
             return;
         };
         cx.spawn(async move |_workspace, cx| {
-            let (diff_text, path) = cx
+            let (diff, path, base) = cx
                 .background_executor()
                 .spawn(async move {
-                    let current = current.or_else(|| {
-                        host.read_file(&path)
-                            .ok()
-                            .and_then(|content| String::from_utf8(content.bytes).ok())
-                    });
-                    let diff = current.as_deref().and_then(|current| {
-                        project::unified_diff_on(host.as_ref(), &path, current)
-                    });
-                    (diff, path)
+                    let current = match current {
+                        Some(text) => CurrentText::Text(text),
+                        None => read_current_text(host.as_ref(), &path),
+                    };
+                    let diff = match &current {
+                        CurrentText::Text(text) => Some(project::diff_file_on(
+                            host.as_ref(),
+                            &path,
+                            &base,
+                            Some(text),
+                        )),
+                        CurrentText::Missing => {
+                            Some(project::diff_file_on(host.as_ref(), &path, &base, None))
+                        }
+                        CurrentText::Unreadable => None,
+                    };
+                    (diff, path, base)
                 })
                 .await;
-            let Some(diff_text) = diff_text else {
-                eprintln!("diff: 差分なし（HEAD と同一） {}", path.display());
-                return;
-            };
             let _ = handle.update(cx, |workspace, window, cx| {
-                let name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let title = path.with_file_name(format!("{name} ⇄ HEAD"));
-                let mut buffer = Buffer::from_str(&diff_text);
-                buffer.set_read_only(true);
-                workspace.open_transient_tab(title, buffer, window, cx);
+                workspace.show_file_diff(path, &root, &base, diff, from_buffer, window, cx);
             });
         })
         .detach();
+    }
+
+    /// 比べた結果を diff タブ（読み取り専用）かトーストにする。題名は `<名前> ⇄ <比較相手>`、
+    /// 削除されたファイルは題名と見出しで「削除」と分かるようにする。
+    #[allow(clippy::too_many_arguments)]
+    fn show_file_diff(
+        &mut self,
+        path: PathBuf,
+        root: &Path,
+        base: &DiffBase,
+        diff: Option<FileDiff>,
+        from_buffer: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let label = base.label();
+        let side = |path: &str, side: String| i18n::t!("difftab.header_side", "path" => path, "side" => side);
+        let notice = match &diff {
+            None => Some(i18n::t!("difftab.unreadable", "name" => &name)),
+            Some(FileDiff::Unchanged) => {
+                Some(i18n::t!("difftab.no_changes", "name" => &name, "base" => &label))
+            }
+            Some(FileDiff::Missing) => {
+                Some(i18n::t!("difftab.missing", "name" => &name, "base" => &label))
+            }
+            Some(_) => None,
+        };
+        if let Some(notice) = notice {
+            let color = self.accent();
+            self.push_toast(SharedString::from(notice), color, cx);
+            return;
+        }
+        let working_side = if from_buffer {
+            i18n::t!("difftab.side_buffer")
+        } else {
+            i18n::t!("difftab.side_working_tree")
+        };
+        let (header, body, title) = match diff {
+            Some(FileDiff::Modified(body)) => (
+                format!(
+                    "--- a/{}\n+++ b/{}\n",
+                    side(&relative, label.clone()),
+                    side(&relative, working_side)
+                ),
+                body,
+                i18n::t!("difftab.title", "name" => &name, "base" => &label),
+            ),
+            Some(FileDiff::Added(body)) => (
+                format!(
+                    "--- /dev/null\n+++ b/{}\n",
+                    side(&relative, i18n::t!("difftab.new_file"))
+                ),
+                body,
+                i18n::t!("difftab.title", "name" => &name, "base" => &label),
+            ),
+            Some(FileDiff::Deleted(body)) => (
+                format!(
+                    "--- a/{}\n+++ {}\n",
+                    side(&relative, label.clone()),
+                    side("/dev/null", i18n::t!("difftab.deleted_file"))
+                ),
+                body,
+                i18n::t!("difftab.title_deleted", "name" => &name, "base" => &label),
+            ),
+            Some(FileDiff::Unchanged | FileDiff::Missing) | None => return,
+        };
+        // diff は Editor のタブで読む（Fleet の中にエディタは持たない＝変更一覧と同じ流儀）。
+        self.chrome.fleet_mode = false;
+        let mut buffer = Buffer::from_str(&format!("{header}{body}"));
+        buffer.set_read_only(true);
+        self.open_transient_tab(path.with_file_name(title), buffer, window, cx);
     }
 
     /// diff タブ内で次/前の hunk ヘッダ（@@ 行）へ移動する（F7/⇧F7）。
@@ -385,4 +490,33 @@ impl Workspace {
     // ── シンボル（⌘⇧O アウトライン / ⌘T ワークスペース・M11） ──
 
     // ⌘⇧O: tree-sitter アウトラインを Picker で（LSP 不要・対応言語のみ）。
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fleet の「変更」は Task を切った時点の commit と比べる（HEAD と比べるとコミット済みの変更が消える）。
+    #[test]
+    fn task_diffs_compare_against_the_task_base() {
+        let mut space = TaskSpace {
+            id: SpaceId("space-test".into()),
+            repository_id: "local:/repo/.git".into(),
+            title: SharedString::from("task"),
+            kind: SpaceKind::Task,
+            phase: TaskPhase::Working,
+            base_oid: Some("0123456789abcdef".into()),
+            head_oid: Some("fedcba9876543210".into()),
+            result_summary: None,
+            created_at_ms: 0,
+        };
+        assert_eq!(
+            space.diff_base(),
+            DiffBase::Commit("0123456789abcdef".into())
+        );
+        assert_eq!(space.diff_base().label(), "0123456");
+        // base を持たない枠（統合先・復元前）は HEAD と比べる。
+        space.base_oid = None;
+        assert_eq!(space.diff_base(), DiffBase::Head);
+    }
 }

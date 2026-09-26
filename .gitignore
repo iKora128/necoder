@@ -2,6 +2,8 @@
 /zed/
 # ACP の queue/steer UX 等の手法参考用（openai/codex・Apache-2.0）。zed/ と同じ参照専用の扱い
 /codex/
+# 競合 ADE の機能比較用（stablyai/orca・MIT）。zed/ と同じ参照専用の扱い
+/orca/
 
 # Rust
 /target/

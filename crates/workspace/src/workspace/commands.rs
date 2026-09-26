@@ -123,6 +123,10 @@ impl CommandRegistry {
                 action_name: "workspace::OpenDiff",
             },
             CommandEntry {
+                label_key: "cmd.open_review",
+                action_name: "workspace::OpenReview",
+            },
+            CommandEntry {
                 label_key: "cmd.next_hunk",
                 action_name: "workspace::NextHunk",
             },
@@ -173,6 +177,14 @@ impl CommandRegistry {
             CommandEntry {
                 label_key: "cmd.split_right",
                 action_name: "workspace::SplitRight",
+            },
+            CommandEntry {
+                label_key: "cmd.open_localhost_preview",
+                action_name: "workspace::OpenLocalhostPreview",
+            },
+            CommandEntry {
+                label_key: "cmd.toggle_design_mode",
+                action_name: "workspace::ToggleDesignMode",
             },
             CommandEntry {
                 label_key: "cmd.new_thread",
@@ -233,6 +245,14 @@ impl CommandRegistry {
             CommandEntry {
                 label_key: "cmd.shortcut_sheet",
                 action_name: "workspace::ShortcutSheet",
+            },
+            CommandEntry {
+                label_key: "cmd.usage_limits",
+                action_name: "workspace::ShowUsageLimits",
+            },
+            CommandEntry {
+                label_key: "cmd.usage_stats",
+                action_name: "workspace::UsageStats",
             },
         ]
     }

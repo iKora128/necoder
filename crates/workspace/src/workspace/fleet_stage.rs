@@ -80,7 +80,7 @@ impl Workspace {
                         if let Some(thread) = thread { panel.update(cx, |panel, cx| panel.focus_thread(thread, cx)); }
                         this.project_sessions.sessions[session_index].agent_panel = panel.clone();
                     }
-                    if matches!(&pane, FleetPane::Diff { .. }) { this.refresh_git_status_for(session_index, cx); }
+                    if matches!(&pane, FleetPane::Diff { .. }) { this.refresh_git_status_for(session_index, cx); this.activate_review(session_index, cx); }
                     this.chrome.stage_tabs.insert(target.clone(), pane.clone());
                     cx.notify();
                 })));
@@ -135,7 +135,11 @@ impl Workspace {
         let Some(index) = self.session_index_for_space(space) else { return div().into_any_element(); };
         let slot = &self.project_sessions.projects[index];
         let phase = slot.task_space.phase;
+        // 質問だけで止まっている Task の「次へ」は許可ではなく、質問のスレッドを開いて答える（O12）。
+        let question_only =
+            phase == TaskPhase::Blocked && self.question_only_thread(index, cx).is_some();
         let (phase_key, action_key) = match phase {
+            TaskPhase::Blocked if question_only => ("fleet.phase_blocked", "fleet.next_answer"),
             TaskPhase::Blocked => ("fleet.phase_blocked", "fleet.next_allow"),
             TaskPhase::Failed | TaskPhase::ChangesRequested => ("fleet.phase_failed", "fleet.next_fix"),
             TaskPhase::ReviewReady => ("fleet.phase_review", "fleet.next_review"),
@@ -176,6 +180,9 @@ impl Workspace {
                                 if let Some((panel, thread, option)) = pending {
                                     panel.update(cx, |panel, cx| panel.respond_permission(thread, option, cx));
                                     this.transition_task_space(index, TaskPhase::Working, "permission_resolved", None, cx);
+                                } else if let Some((panel, thread)) = this.question_only_thread(index, cx) {
+                                    this.project_sessions.sessions[index].agent_panel = panel.clone();
+                                    panel.update(cx, |panel, cx| panel.focus_thread(thread, cx));
                                 }
                             },
                             _ => this.review_task_for_merge(space, cx),

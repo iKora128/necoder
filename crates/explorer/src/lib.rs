@@ -4,6 +4,7 @@ use gpui::{
     div, Context, EventEmitter, FocusHandle, IntoElement, Pixels, Point, Render, SharedString,
     Window,
 };
+use project::file_operations::FileOperationHistory;
 use project::{DirListings, Worktree};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -26,6 +27,15 @@ pub struct ContextMenu {
     pub position: Point<Pixels>,
 }
 
+/// 「変更を破棄」の確認（取り消せない操作なので、押した後に一度聞く・D16）。
+#[derive(Clone)]
+pub struct DiscardConfirm {
+    pub path: PathBuf,
+    /// 押した時点の git 状態。未追跡・add しただけ（git で戻す先が無い）はゴミ箱へ入れる、と
+    /// 本文で言い分ける。
+    pub status: project::StatusKind,
+}
+
 #[derive(Clone)]
 pub struct Naming {
     pub kind: NamingKind,
@@ -35,11 +45,90 @@ pub struct Naming {
     pub focus: FocusHandle,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NamingKind {
     NewFile,
     NewDir,
     Rename,
+}
+
+impl Naming {
+    /// ツリーのどこに入力行を差すか（[`tree_display_rows`] に渡す形）。
+    pub fn placement(&self) -> NamingPlacement<'_> {
+        NamingPlacement {
+            kind: self.kind,
+            parent: &self.parent,
+            target: self.target.as_deref(),
+        }
+    }
+}
+
+/// インライン命名の入力行の置き場所。新規は親フォルダの直後（親がルートなら先頭）、
+/// 名前の変更は対象行の代わりに出る。
+#[derive(Clone, Copy, Debug)]
+pub struct NamingPlacement<'a> {
+    pub kind: NamingKind,
+    pub parent: &'a Path,
+    pub target: Option<&'a Path>,
+}
+
+/// ツリーに実際に並ぶ 1 行（D25: 見えている範囲だけを描くため、並びを先に数える）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeDisplayRow {
+    /// [`ExplorerProject::rows`] の添字。
+    Entry(usize),
+    /// インライン命名の入力行。
+    Naming { depth: usize },
+}
+
+/// ツリーの行の並び（命名の入力行を差し込んだ後）。I/O はしない。
+pub fn tree_display_rows(
+    rows: &[TreeRow],
+    naming: Option<NamingPlacement<'_>>,
+    root: &Path,
+) -> Vec<TreeDisplayRow> {
+    let creating = naming.filter(|naming| naming.kind != NamingKind::Rename);
+    let renaming = naming
+        .filter(|naming| naming.kind == NamingKind::Rename)
+        .and_then(|naming| naming.target);
+    let mut display = Vec::with_capacity(rows.len() + 1);
+    if creating.is_some_and(|naming| naming.parent == root) {
+        display.push(TreeDisplayRow::Naming { depth: 0 });
+    }
+    for (index, row) in rows.iter().enumerate() {
+        if renaming == Some(row.path.as_path()) {
+            display.push(TreeDisplayRow::Naming { depth: row.depth });
+            continue;
+        }
+        display.push(TreeDisplayRow::Entry(index));
+        if row.is_dir && creating.is_some_and(|naming| naming.parent == row.path) {
+            display.push(TreeDisplayRow::Naming {
+                depth: row.depth + 1,
+            });
+        }
+    }
+    display
+}
+
+/// 横スクロールの幅を測らせる行（D25）。仮想化すると見えている行しか描かないので、
+/// 「インデント + 名前の長さ」が最大の行を 1 つ選んで測らせる（インデント 1 段 ≒ 2 文字・
+/// ASCII 以外は 2 文字分に数える）。行が無ければ `None`。
+pub fn widest_display_row(rows: &[TreeRow], display: &[TreeDisplayRow]) -> Option<usize> {
+    display
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, row)| match row {
+            TreeDisplayRow::Entry(index) => rows.get(*index).map_or(0, |row| {
+                row.depth * 2
+                    + row
+                        .name
+                        .chars()
+                        .map(|character| if character.is_ascii() { 1 } else { 2 })
+                        .sum::<usize>()
+            }),
+            TreeDisplayRow::Naming { depth } => depth * 2 + 24,
+        })
+        .map(|(index, _)| index)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -57,6 +146,11 @@ pub struct ExplorerProject {
     pub rows: Vec<TreeRow>,
     pub selected: Option<PathBuf>,
     pub current_dir: Option<PathBuf>,
+    /// このプロジェクトでのファイル操作の取り消し履歴（⌘Z・H30）。メモリだけに持つ。
+    pub history: FileOperationHistory,
+    /// 最近開いたファイル（新しい順・⌘P の並びに使う・D19）。メモリだけに持つ。起動時や
+    /// プロジェクト切替で開き直したタブは「まだ無ければ一番古い位置に」積む（本物の新しい順を崩さない）。
+    recent: Vec<PathBuf>,
     dir_listings: RefCell<DirListings>,
     /// 背景再構築の世代。古い読み取り結果が新しい状態を上書きしないための番号。
     refresh_generation: u64,
@@ -69,6 +163,8 @@ impl Default for ExplorerProject {
             rows: Vec::new(),
             selected: None,
             current_dir: None,
+            history: FileOperationHistory::default(),
+            recent: Vec::new(),
             dir_listings: RefCell::new(HashMap::new()),
             refresh_generation: 0,
         }
@@ -149,6 +245,31 @@ impl ExplorerProject {
         self.refresh_generation == generation
     }
 
+    /// 覚えておく「最近開いたファイル」の数。
+    pub const RECENT_LIMIT: usize = 20;
+
+    /// ファイルを開いた（タブを選んだ）ことを覚える。同じファイルは先頭へ寄せ直す。
+    pub fn note_opened(&mut self, path: &Path) {
+        self.recent.retain(|recent| recent != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(Self::RECENT_LIMIT);
+    }
+
+    /// 開き直したタブ（起動時の復元・プロジェクト切替）を覚える。まだ無ければ一番古い位置に
+    /// 足すだけで、既にある順は動かさない。
+    pub fn note_reopened(&mut self, path: &Path) {
+        if self.recent.len() < Self::RECENT_LIMIT
+            && !self.recent.iter().any(|recent| recent == path)
+        {
+            self.recent.push(path.to_path_buf());
+        }
+    }
+
+    /// 最近開いたファイル（新しい順）。
+    pub fn recent_files(&self) -> &[PathBuf] {
+        &self.recent
+    }
+
     /// Render-safe cache lookup. Missing directories are empty until the controller refreshes.
     pub fn listed_dir(&self, dir: &Path) -> Vec<project::Entry> {
         self.dir_listings
@@ -196,6 +317,7 @@ pub struct Explorer {
     view: ViewMode,
     context_menu: Option<ContextMenu>,
     naming: Option<Naming>,
+    discard_confirm: Option<DiscardConfirm>,
 }
 
 impl Explorer {
@@ -204,7 +326,17 @@ impl Explorer {
             view,
             context_menu: None,
             naming: None,
+            discard_confirm: None,
         }
+    }
+
+    pub fn discard_confirm(&self) -> Option<DiscardConfirm> {
+        self.discard_confirm.clone()
+    }
+
+    pub fn set_discard_confirm(&mut self, confirm: Option<DiscardConfirm>, cx: &mut Context<Self>) {
+        self.discard_confirm = confirm;
+        cx.notify();
     }
 
     pub fn view(&self) -> ViewMode {
@@ -269,6 +401,118 @@ mod tests {
     fn missing_directory_cache_is_render_safe() {
         let project = ExplorerProject::default();
         assert!(project.listed_dir(Path::new("/missing")).is_empty());
+    }
+
+    fn row(path: &str, depth: usize, is_dir: bool) -> TreeRow {
+        TreeRow {
+            path: PathBuf::from(path),
+            name: SharedString::from(
+                Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ),
+            is_dir,
+            depth,
+            is_expanded: is_dir,
+            ignored: false,
+        }
+    }
+
+    #[test]
+    fn recent_files_keep_the_newest_first_without_duplicates() {
+        let mut project = ExplorerProject::default();
+        for name in ["a.rs", "b.rs", "a.rs"] {
+            project.note_opened(Path::new(name));
+        }
+        assert_eq!(
+            project.recent_files(),
+            &[PathBuf::from("a.rs"), PathBuf::from("b.rs")]
+        );
+        for index in 0..ExplorerProject::RECENT_LIMIT + 3 {
+            project.note_opened(&PathBuf::from(format!("{index}.rs")));
+        }
+        assert_eq!(project.recent_files().len(), ExplorerProject::RECENT_LIMIT);
+
+        // 開き直したタブは順を崩さず、無ければ一番古い位置へ。
+        let mut project = ExplorerProject::default();
+        project.note_opened(Path::new("new.rs"));
+        project.note_reopened(Path::new("restored.rs"));
+        project.note_reopened(Path::new("new.rs"));
+        assert_eq!(
+            project.recent_files(),
+            &[PathBuf::from("new.rs"), PathBuf::from("restored.rs")]
+        );
+    }
+
+    #[test]
+    fn display_rows_splice_the_naming_row() {
+        let root = Path::new("/p");
+        let rows = vec![
+            row("/p/src", 0, true),
+            row("/p/src/main.rs", 1, false),
+            row("/p/README.md", 0, false),
+        ];
+        assert_eq!(
+            tree_display_rows(&rows, None, root),
+            vec![
+                TreeDisplayRow::Entry(0),
+                TreeDisplayRow::Entry(1),
+                TreeDisplayRow::Entry(2)
+            ]
+        );
+        // 新規（親 = src）: src 行の直後に 1 段深い入力行。
+        let new_in_src = NamingPlacement {
+            kind: NamingKind::NewFile,
+            parent: Path::new("/p/src"),
+            target: None,
+        };
+        assert_eq!(
+            tree_display_rows(&rows, Some(new_in_src), root),
+            vec![
+                TreeDisplayRow::Entry(0),
+                TreeDisplayRow::Naming { depth: 1 },
+                TreeDisplayRow::Entry(1),
+                TreeDisplayRow::Entry(2)
+            ]
+        );
+        // 新規（親 = ルート）: 先頭。
+        let new_at_root = NamingPlacement {
+            kind: NamingKind::NewDir,
+            parent: root,
+            target: None,
+        };
+        assert_eq!(
+            tree_display_rows(&rows, Some(new_at_root), root).first(),
+            Some(&TreeDisplayRow::Naming { depth: 0 })
+        );
+        // 名前の変更: 対象行の代わり（行数は変わらない）。
+        let rename = NamingPlacement {
+            kind: NamingKind::Rename,
+            parent: Path::new("/p/src"),
+            target: Some(Path::new("/p/src/main.rs")),
+        };
+        assert_eq!(
+            tree_display_rows(&rows, Some(rename), root),
+            vec![
+                TreeDisplayRow::Entry(0),
+                TreeDisplayRow::Naming { depth: 1 },
+                TreeDisplayRow::Entry(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn widest_row_counts_indent_and_wide_characters() {
+        let rows = vec![
+            row("/p/a_long_file_name.rs", 0, false),
+            row("/p/d/e/f/deep.rs", 3, false),
+            row("/p/日本語のファイル名.md", 0, false),
+        ];
+        let display = tree_display_rows(&rows, None, Path::new("/p"));
+        // 19 文字 / 3 段 + 7 文字 = 13 / 全角 9 文字 + 3 = 21 → 日本語の行が最も広い。
+        assert_eq!(widest_display_row(&rows, &display), Some(2));
+        assert_eq!(widest_display_row(&[], &[]), None);
     }
 
     #[test]

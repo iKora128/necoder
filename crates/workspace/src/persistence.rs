@@ -282,23 +282,32 @@ fn lock_mailbox(mailbox: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Op
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 窓を閉じるときに自分の行へ閉じ印を付けるフックを登録する（窓を開いた直後に呼ぶ）。
-/// OS の閉じるボタン / ⌘⇧W が通る経路。⌘Q による窓の破棄では付けない（[`mark_quitting`]）。
-/// 自前 titlebar の × は `remove_window()` 直叩きでここを通らないので、
-/// `Workspace::mark_window_closed` を先に呼ぶ。
+/// 窓を閉じるときのフックを登録する（窓を開いた直後に呼ぶ）。OS の閉じるボタン / ⌘⇧W が通る経路。
+///
+/// 1. **最後の窓で、エージェントや端末が動いていれば閉じずに確認を出す**（O4・
+///    `intercept_last_window_close`）。GPUI の should-close は窓に 1 つしか持てないので、
+///    永続化しない窓（offscreen 撮影）でもこのフック自体は必ず入れる。
+/// 2. 閉じるなら DB の自分の行へ閉じ印を付ける。⌘Q による窓の破棄では付けない（[`mark_quitting`]）。
+///
+/// 自前 titlebar の × は `remove_window()` 直叩きでここを通らないので、同じ関所
+/// （`Workspace::guard_window_close`）と `Workspace::mark_window_closed` を自分で呼ぶ。
 pub fn install_window_close_hook(window: &Window, cx: &App, persistence: &WindowPersistence) {
-    let (Some(storage), Some(window_id)) =
-        (persistence.storage.clone(), persistence.window_id.clone())
-    else {
-        return;
+    let writer = match (persistence.storage.clone(), persistence.window_id.clone()) {
+        (Some(storage), Some(window_id)) => Some(WindowSessionWriter::new(storage, window_id)),
+        _ => None,
     };
-    let writer = WindowSessionWriter::new(storage, window_id);
-    window.on_window_should_close(cx, move |_window, _cx| {
-        if !is_quitting() {
-            // ここで Workspace 側を触りに行くことはできない（この窓は今まさに update 中で、
-            // `WindowHandle::update` は入れ子を Err で弾く）。閉じ印だけを付け、Workspace 側の
-            // 書き手はそのまま生かす＝郵便受けに残っている分は background の書き手が流し切る
-            // （`upsert_window_session` は closed_at を触らないので印は消えない）。
+    window.on_window_should_close(cx, move |window, cx| {
+        if is_quitting() {
+            return true;
+        }
+        if crate::workspace::intercept_last_window_close(window, cx) {
+            return false;
+        }
+        // ここで Workspace の書き手を触りに行くことはできない（この窓は今まさに update 中で、
+        // `WindowHandle::update` は入れ子を Err で弾く）。閉じ印だけを付け、Workspace 側の
+        // 書き手はそのまま生かす＝郵便受けに残っている分は background の書き手が流し切る
+        // （`upsert_window_session` は closed_at を触らないので印は消えない）。
+        if let Some(writer) = &writer {
             writer.close(None);
         }
         true

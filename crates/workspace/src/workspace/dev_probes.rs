@@ -16,6 +16,127 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 開発用: Agent パネルの composer の `/` 補完を開く（`NECODER_SLASH_PROBE`・O2 の offscreen 検証）。
+    /// `fake` = 偽のコマンド一覧を流し込む（`NECODER_SLASH_PROBE_FAKE=1`）。
+    #[cfg(debug_assertions)]
+    pub fn debug_slash_probe(
+        &mut self,
+        text: &str,
+        fake: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
+        }
+        self.agent_panel.update(cx, |panel, cx| {
+            panel.debug_slash_probe(text, fake, window, cx)
+        });
+        cx.notify();
+    }
+
+    /// 開発用: 使用量（O11）を offscreen で確かめる（`NECODER_USAGE_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `limits` / `near` / `blocked` = いまのスレッドにレート制限を流す（本番と同じ `on_event`）/
+    /// `codex` = Codex の値を置き場へ直接入れる（**codex app-server は起こさない**）/
+    /// `codex-loading` / `codex-failed` = Codex の読み取りの途中 / 失敗の行 /
+    /// `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ直近 12 日分の使用量を書く /
+    /// `popover` = チップを押したのと同じにポップオーバーを開く（Codex は訊かない）/ `stats` = 統計の画面。
+    #[cfg(debug_assertions)]
+    pub fn debug_usage_probe(
+        &mut self,
+        commands: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for command in commands
+            .split(';')
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+        {
+            match command {
+                "limits" | "near" | "blocked" => {
+                    if !self.chrome.show_right {
+                        self.chrome.show_right = true;
+                    }
+                    self.agent_panel
+                        .update(cx, |panel, cx| panel.debug_seed_rate_limits(command, cx));
+                }
+                "codex" => agent_panel::usage::debug_seed_codex_limits(cx),
+                "codex-loading" => agent_panel::usage::debug_set_codex_read(
+                    agent_panel::usage::CodexRead::Loading,
+                    cx,
+                ),
+                "codex-failed" => agent_panel::usage::debug_set_codex_read(
+                    agent_panel::usage::CodexRead::Failed(SharedString::from(
+                        "codex account authentication required to read rate limits",
+                    )),
+                    cx,
+                ),
+                "seed" => self.debug_seed_usage_rows(),
+                "popover" => {
+                    let anchor = window.viewport_size().width - px(300.);
+                    self.open_usage_popover(anchor, false, window, cx);
+                }
+                "stats" => self.open_usage_stats(&UsageStats, window, cx),
+                other => eprintln!("NECODER_USAGE_PROBE: 未知のコマンド {other}"),
+            }
+        }
+        cx.notify();
+    }
+
+    /// 開発用: 直近 12 日分の使用量を台帳へ書く（`NECODER_USAGE_PROBE=seed`）。本物の DB を汚さないよう、
+    /// `NECODER_HOME` で隔離している時だけ書く。
+    #[cfg(debug_assertions)]
+    fn debug_seed_usage_rows(&self) {
+        if std::env::var_os("NECODER_HOME").is_none() {
+            eprintln!(
+                "NECODER_USAGE_PROBE=seed: NECODER_HOME が無いので書かない（本物の DB を守る）"
+            );
+            return;
+        }
+        let Some(storage) = self.persistence.storage.as_ref() else {
+            eprintln!("NECODER_USAGE_PROBE=seed: DB が無い");
+            return;
+        };
+        let now = agent_panel::now_unix_ms();
+        const HOUR: i64 = 3_600_000;
+        for day in 0..12_i64 {
+            let turns = [
+                (
+                    "Claude Code",
+                    3 + day % 4,
+                    38_000 + day * 5_300,
+                    Some(0.42 + day as f64 * 0.11),
+                ),
+                ("Codex", (day % 3) + 1, 21_000 + (day % 5) * 9_000, None),
+            ];
+            for (agent, count, tokens, cost) in turns {
+                if agent == "Codex" && day % 4 == 3 {
+                    continue; // Codex を使わなかった日
+                }
+                for turn in 0..count {
+                    let record = storage::TurnUsageRecord {
+                        thread_id: format!("probe-{agent}"),
+                        agent: agent.to_string(),
+                        ended_at: now - day * 24 * HOUR - turn * HOUR,
+                        input_tokens: tokens as u64 / 4,
+                        output_tokens: tokens as u64 / 4,
+                        cached_read_tokens: tokens as u64 / 2,
+                        cached_write_tokens: 0,
+                        total_tokens: tokens as u64,
+                        cost_usd: cost.map(|cost| cost / count as f64),
+                        session_cost_usd: None,
+                    };
+                    if let Err(error) = storage.record_turn_usage(&record) {
+                        eprintln!("NECODER_USAGE_PROBE=seed: 書けない: {error:#}");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     /// 開発用: スレッドに各状態を仕込んで開く（タブ/beacon/フッター/レールの状態表示を offscreen で検証・#）。
     #[cfg(debug_assertions)]
     /// 開発用: 擬似 tear-off を直接駆動（枠外ドロップ相当の座標 → 新窓生成まで・M13）。
@@ -62,6 +183,17 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// 開発用: Fleet を開いて、アクティブなスレッドへ選択肢付きの質問を届ける（O12: 質問待ちが
+    /// 要対応・トースト・statusbar の待ち表示に出るかの撮影。質問は実際の経路を通る）。
+    #[cfg(debug_assertions)]
+    pub fn debug_question_probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.chrome.fleet_mode {
+            self.toggle_fleet_mode(&ToggleFleet, window, cx);
+        }
+        let panel = self.agent_panel.clone();
+        panel.update(cx, |panel, cx| panel.debug_ask_question(cx));
     }
 
     /// 開発用: スレッド履歴 Picker を開く（offscreen 検証・#5）。
@@ -199,6 +331,8 @@ impl Workspace {
     /// 開発用: 編隊の片付け UI を offscreen で検証する（2026-07-27）。
     /// `menu` = セル 0 の ⋯ メニューを開く / `terminal` = 下段をターミナルタブへ /
     /// `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）/ `close-all` = 全セルを × して残数を出す。
+    /// 画面の組み立て（`;` 区切り）: `graph` / `task:<n>`（統合先を除く n 本目の Task・1 始まり）/
+    /// `side:diff`（その Task カードの「変更」タブ = 変更レビュー）。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(
@@ -207,7 +341,49 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `;` 区切りで順に実行する（`graph;task:1;side:diff` のように 1 回の起動で画面を組み立てる）。
+        if command.contains(';') {
+            for part in command.split(';').filter(|part| !part.is_empty()) {
+                self.debug_fleet_probe(part, window, cx);
+            }
+            return;
+        }
+        let (command, argument) = command.split_once(':').unwrap_or((command, ""));
         match command {
+            "task" => {
+                let wanted = argument.parse::<usize>().unwrap_or(1).max(1);
+                let target = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| !slot.task_space.is_integration())
+                    .nth(wanted - 1)
+                    .map(|(index, _)| index);
+                if let Some(index) = target {
+                    self.switch_project(index, window, cx);
+                }
+            }
+            // 選択中の Task カードのタブを切り替える（タブを押したのと同じ入口）。
+            "side" => {
+                let index = self.project_sessions.active;
+                let space = self.project_sessions.projects[index].task_space.id.clone();
+                let pane = match argument {
+                    "diff" => {
+                        self.refresh_git_status_for(index, cx);
+                        self.activate_review(index, cx);
+                        FleetPane::Diff {
+                            space: space.clone(),
+                        }
+                    }
+                    _ => FleetPane::Editor {
+                        space: space.clone(),
+                    },
+                };
+                self.chrome.stage_columns = 1;
+                self.chrome.stage_tabs.insert(space, pane);
+                cx.notify();
+            }
             "menu" => self.open_fleet_cell_menu(0, point(px(760.), px(210.)), cx),
             // セル 0 を拡大してヘッダのタイトルを改名開始（Cell site で入力欄が出る／herd と二重描画しない）。
             "rename" => {
@@ -256,8 +432,280 @@ impl Workspace {
                     self.chrome.fleet_cells.len()
                 );
             }
+            // Task の変更から diff を開いたのと同じ入口（`TaskSpace::diff_base` を渡す）。
+            // `task-diff:<root 相対パス>@<rev>` の rev は擬似 Task の base を上書きする
+            // （CONTROL_PROBE の擬似 Task は開いた時点の HEAD を base に持つので、コミット済みの
+            // 変更を撮るには Task を切った時点の commit に戻す）。
+            other if other.starts_with("task-diff:") => {
+                let spec = &other["task-diff:".len()..];
+                let (relative, rev) = match spec.split_once('@') {
+                    Some((relative, rev)) => (relative, Some(rev)),
+                    None => (spec, None),
+                };
+                let Some(index) = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .position(|slot| !slot.task_space.is_integration())
+                else {
+                    eprintln!("FLEET_PROBE: Task が無い（NECODER_CONTROL_PROBE=1 と一緒に使う）");
+                    return;
+                };
+                let slot = &mut self.project_sessions.projects[index];
+                if let Some(rev) = rev {
+                    slot.task_space.base_oid = Some(rev.to_string());
+                }
+                let path = slot.worktree.root().join(relative);
+                let base = slot.task_space.diff_base();
+                self.switch_project(index, window, cx);
+                self.open_diff_tab_for(path, None, base, window, cx);
+            }
             other => eprintln!("FLEET_PROBE: 未知のコマンド {other}"),
         }
+    }
+
+    /// 開発用: ソース管理パネルを offscreen で検証する（`NECODER_GIT_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `open` = パネルを開く / `row:<n>` = 変更（unstaged）の n 行目を押したのと同じ入口で diff を開く /
+    /// `type:<文>` = メッセージ欄へ文字を入れる（貼り付けの後半と同じ `insert_text`。本物の
+    /// クリップボードは触らない — ⌘V の経路は gpui テストが受け持つ）/ `commit` = ⌘⏎ と同じ入口 /
+    /// `details` = 最後のトーストの「全文 ›」を押したのと同じ入口。
+    #[cfg(debug_assertions)]
+    pub fn debug_git_probe(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        match name {
+            "open" => {
+                if !self.git_panel_open(cx) {
+                    self.toggle_git_panel(&ToggleGitPanel, window, cx);
+                }
+            }
+            "row" => {
+                let index = argument.parse::<usize>().unwrap_or(0);
+                let path = self
+                    .git_panel
+                    .read(cx)
+                    .snapshot()
+                    .changes
+                    .iter()
+                    .filter(|change| change.unstaged.is_some())
+                    .nth(index)
+                    .map(|change| change.path.clone());
+                match path {
+                    Some(path) => self.request_git_diff(path, cx),
+                    None => eprintln!("GIT_PROBE: 変更の行 {index} が無い"),
+                }
+            }
+            "type" => {
+                self.focus_git_input(window, cx);
+                let editor = self.git_panel.read(cx).message.clone();
+                editor.update(cx, |editor, cx| editor.insert_text(argument, cx));
+            }
+            "commit" => self.submit_git_input(window, cx),
+            "details" => self.debug_open_last_toast_details(window, cx),
+            other => eprintln!("GIT_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
+    }
+
+    /// 開発用: 変更レビューを offscreen で検証する（`NECODER_REVIEW_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `open` = パレット「Git: 変更をレビュー」と同じ入口 / `expand` = 最初の畳みを 1 段開く /
+    /// `menu` = 比較の基準のメニューを開く /
+    /// `head` = 基準を HEAD に / `branch:<名前>` / `commit:<rev>` / `ws` = 空白を無視の切替 /
+    /// `state` = 基準とファイル数を出す。対象はアクティブな session の変更レビュー（Fleet でも同じ）。
+    #[cfg(debug_assertions)]
+    pub fn debug_review_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        if name == "open" {
+            self.open_review_tab(&OpenReview, window, cx);
+            return;
+        }
+        let index = self.project_sessions.active;
+        let Some(review) = self.activate_review(index, cx) else {
+            eprintln!("REVIEW_PROBE: 変更レビューが無い session");
+            return;
+        };
+        // 注記: `select:<path>:<新の行>` / `select-old:<path>:<旧の行>` / `extend(-old):<path>:<行>` /
+        // `comment`（入力欄を開く）/ `type:<本文>` / `save` / `tray`（一覧）/ `send`（宛先のメニュー）。
+        let line_argument = || {
+            let (path, line) = argument.rsplit_once(':')?;
+            Some((path.to_string(), line.parse::<u32>().ok()?))
+        };
+        match name {
+            "select" | "select-old" | "extend" | "extend-old" => {
+                let Some((path, line)) = line_argument() else {
+                    eprintln!("REVIEW_PROBE: {command} は <path>:<行> で");
+                    return;
+                };
+                let side = if name.ends_with("-old") {
+                    review_view::NoteSide::Old
+                } else {
+                    review_view::NoteSide::New
+                };
+                let found = review.update(cx, |review, cx| {
+                    review.select_line(&path, side, line, name.starts_with("extend"), cx)
+                });
+                if !found {
+                    eprintln!("REVIEW_PROBE: 行が見つからない {argument}");
+                }
+                return;
+            }
+            "comment" => {
+                review.update(cx, |review, cx| review.open_draft(window, cx));
+                return;
+            }
+            "save" => {
+                review.update(cx, |review, cx| review.save_draft(window, cx));
+                return;
+            }
+            _ => {}
+        }
+        review.update(cx, |review, cx| match name {
+            "type" => review.set_draft_text(argument, cx),
+            "tray" => review.toggle_tray(cx),
+            "send" => review.request_send(false, cx),
+            "expand" => review.expand_first_fold(cx),
+            "menu" => review.toggle_base_menu(cx),
+            "head" => review.select_base(project::review::ReviewBase::Head, cx),
+            "branch" => review.select_base(
+                project::review::ReviewBase::Branch(argument.to_string()),
+                cx,
+            ),
+            "commit" => review.select_base(
+                project::review::ReviewBase::Commit(argument.to_string()),
+                cx,
+            ),
+            "ws" => {
+                let ignore = !review.ignores_whitespace();
+                review.set_ignore_whitespace(ignore, cx);
+            }
+            "state" => println!(
+                "review: base={:?} oid={:?} files={}",
+                review.base(),
+                review.base_oid(),
+                review.file_count()
+            ),
+            other => eprintln!("REVIEW_PROBE: 未知のコマンド {other}"),
+        });
+    }
+
+    /// 開発用: エクスプローラと検索の所作を offscreen で検証する（`NECODER_EXPLORER_PROBE`・
+    /// `;` 区切りで順に実行・パスはプロジェクト相対）。
+    ///
+    /// `expand:<dir>` = フォルダを開く / `scroll:<n>` = ツリーを n 行目へ（仮想化の確認）/
+    /// `rename:<path>:<新しい名前>` / `newfile:<dir>:<名前>` / `duplicate:<path>` /
+    /// `trash:<path>`（**本物のゴミ箱へ入る**。後に `undo` を続けて戻すこと）/ `undo` = ⌘Z 相当 /
+    /// `menu:<path>` = 右クリックメニュー / `discard:<path>` = 変更の破棄の確認 /
+    /// `search:<dir>:<クエリ>` = フォルダ内を検索 / `open:<path>` / `finder` = ⌘P /
+    /// `finder_query:<語>` / `finder_confirm` = ⌘P の ⏎。
+    #[cfg(debug_assertions)]
+    pub fn debug_explorer_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        let (argument, value) = argument.split_once(':').unwrap_or((argument, ""));
+        let Some(root) = self
+            .active_worktree()
+            .map(|worktree| worktree.root().to_path_buf())
+        else {
+            return;
+        };
+        let target = if argument.is_empty() {
+            root.clone()
+        } else {
+            root.join(argument)
+        };
+        match name {
+            "expand" => {
+                let active = self.project_sessions.active;
+                if let Some(slot) = self.project_sessions.slot_mut(active) {
+                    slot.explorer.expanded.insert(target);
+                }
+                self.refresh_active_explorer(cx);
+            }
+            "scroll" => {
+                let index = argument.parse::<usize>().unwrap_or(0);
+                self.chrome
+                    .explorer_scroll
+                    .scroll_to_item(index, gpui::ScrollStrategy::Top);
+            }
+            "rename" | "newfile" => {
+                let kind = if name == "rename" {
+                    NamingKind::Rename
+                } else {
+                    NamingKind::NewFile
+                };
+                self.start_naming(kind, target, name == "newfile", window, cx);
+                let value = value.to_string();
+                self.explorer.update(cx, |explorer, cx| {
+                    explorer.update_naming(|naming| naming.value = value, cx)
+                });
+                self.confirm_naming(window, cx);
+            }
+            // 右クリックメニューを行の位置に出す（スクロールしていないツリー前提の見た目確認用）。
+            "menu" => {
+                let is_dir = target.is_dir();
+                let row = self
+                    .active_slot()
+                    .and_then(|slot| slot.explorer.rows.iter().position(|row| row.path == target))
+                    .unwrap_or(0);
+                let position = gpui::point(
+                    px(RAIL_WIDTH + 140.),
+                    px(TITLEBAR_HEIGHT + 28. + (row as f32 + 1.) * ROW_HEIGHT),
+                );
+                self.show_context_menu(target, is_dir, position, cx);
+            }
+            "discard" => {
+                let status = self
+                    .repository
+                    .status
+                    .get(&target)
+                    .copied()
+                    .unwrap_or(StatusKind::Modified);
+                self.ask_discard(target, status, cx);
+            }
+            // 確認の「破棄する」を押す（未追跡なら**本物のゴミ箱へ入る**。後に `undo` を続けること）。
+            "confirm_discard" => self.confirm_discard(window, cx),
+            // フォルダ内を検索（`search:<dir>:<クエリ>`・クエリ省略可）。
+            "search" => {
+                self.open_folder_search(target, window, cx);
+                if let (Some(panel), false) = (self.search_panel.clone(), value.is_empty()) {
+                    let query = value.to_string();
+                    panel.update(cx, |panel, cx| panel.set_query(query, cx));
+                }
+            }
+            "open" => self.open_file(target, window, cx),
+            // ⌘P（`finder` → 列挙を待って `finder_query:<語>` → `finder_confirm` = ⏎）。
+            "finder" => self.open_file_finder(&FileFinder, window, cx),
+            "finder_query" | "finder_confirm" => {
+                if let Some(picker) = self.overlays.picker.clone() {
+                    let query = argument.to_string();
+                    picker.update(cx, |picker, cx| {
+                        if name == "finder_query" {
+                            picker.set_query(query, cx);
+                        } else {
+                            picker.confirm_selected(cx);
+                        }
+                    });
+                }
+            }
+            "duplicate" => self.duplicate_entry(target, cx),
+            "trash" => self.trash_entry(target, window, cx),
+            "undo" => {
+                self.focus_explorer(window, cx);
+                self.undo_file_operation(&UndoFileOperation, window, cx);
+            }
+            other => eprintln!("EXPLORER_PROBE: 未知のコマンド {other}"),
+        }
+        cx.notify();
     }
 
     /// 開発用: Chat モードを offscreen で検証する（`NECODER_CHAT_PROBE`・`;` 区切りで順に実行）。
@@ -362,6 +810,8 @@ impl Workspace {
             "settings" => {
                 self.set_chat_mode(false, window, cx);
                 self.chrome.show_settings = true;
+                // ⌘, と同じ読み直し（Skills 節の一覧にアクティブなプロジェクトを含める）。
+                self.refresh_settings_view(cx);
                 let view = self.chrome.settings_view.clone();
                 view.update(cx, |view, cx| view.debug_select_page(argument, cx));
             }
@@ -443,6 +893,31 @@ impl Workspace {
         self.toggle_terminal(&ToggleTerminal, window, cx);
         self.terminal_dock
             .update(cx, |dock, cx| dock.emit_open_path(path, line, cx));
+    }
+
+    /// 開発用: 下ドックの端末を offscreen で駆動する（`NECODER_TERMINAL_PROBE`・`;` 区切り）。
+    /// `open` = 下ドックの端末を開いてフォーカス。それ以外は端末へ渡す
+    /// （[`terminal_view::TerminalView::debug_probe`]: `type:` / `select:` / `find:` など）。
+    #[cfg(debug_assertions)]
+    pub fn debug_terminal_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        if name == "open" {
+            self.chrome.show_bottom = true;
+            self.focus_active_terminal(window, cx);
+        } else {
+            let terminal = self
+                .terminal_dock
+                .update(cx, |dock, cx| dock.ensure_active(cx));
+            terminal.update(cx, |terminal, cx| {
+                terminal.debug_probe(name, argument, window, cx)
+            });
+        }
+        cx.notify();
     }
 
     /// 開発用: ⌘O スイッチャーを開く（M12-12 のオフスクリーン検証）。

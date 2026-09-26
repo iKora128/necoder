@@ -34,13 +34,14 @@ pub(crate) use lang::lsp::{
     parse_text_edits, parse_workspace_edit,
 };
 pub(crate) use project::{GraphCommit, ProjectSource, StatusKind, Worktree};
+pub(crate) use review_view::{ReviewContext, ReviewEvent, ReviewView};
 pub(crate) use search_ui::{SearchPanel, SearchPanelEvent};
 pub(crate) use std::collections::HashMap;
 pub(crate) use std::ops::{Deref, DerefMut, Range};
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::rc::Rc;
 pub(crate) use std::sync::Arc;
-pub(crate) use terminal_view::{TerminalDock, TerminalDockEvent, TerminalLaunch};
+pub(crate) use terminal_view::{TerminalDock, TerminalDockEvent, TerminalLaunch, TerminalView};
 pub(crate) use theme_core::{project_color, Theme, ThemeSource};
 pub(crate) use ui::Tooltip;
 pub(crate) use ui::{DraggedFile, Picker, PickerEvent, PickerItem};
@@ -52,6 +53,7 @@ mod control_ipc;
 mod control_transport;
 mod control_view;
 mod dev_probes;
+mod dock_badge;
 mod explorer_controller;
 mod explorer_view;
 mod fleet_stage;
@@ -63,21 +65,30 @@ pub(crate) use work_layout::{WorkLayoutState, WorkPane, WorkSurface};
 mod image_view;
 mod pdf_view;
 mod remote_control;
+mod web_preview_view;
+mod web_tabs;
 pub(crate) use image_view::ImageView;
 pub(crate) use pdf_view::PdfView;
+pub(crate) use web_preview_view::{web_tab_key, web_tab_url, WebPreviewEvent, WebPreviewView};
 mod about;
 mod git_controller;
 mod git_view;
 mod herd_view;
 mod notifications;
 mod overlays;
+mod quit_guard;
 mod rail;
 mod rail_view;
 mod remote_connection;
 mod remote_ssh;
 mod shortcut_sheet;
+mod system_notifications;
+mod usage_view;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
+pub(crate) use quit_guard::intercept_last_window_close;
+pub use quit_guard::{quit_now, request_quit, AppStorage};
+pub use system_notifications::install_agent_notifications;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
 pub use control_transport::{ControlListener, ControlStream};
 mod captain;
@@ -93,6 +104,7 @@ mod project_colors;
 mod project_session;
 mod project_switch;
 mod project_watcher;
+mod review_controller;
 pub(crate) use commands::*;
 pub(crate) use panels::*;
 pub(crate) use project_colors::*;
@@ -161,6 +173,11 @@ actions!(
         OpenDialog,
         // About モーダル（メニュー「necoder について」。アイコン + バージョン + 更新確認）。
         About,
+        // 使用量の統計（日付 × エージェントのトークンとコスト・直近 30 日・O11）。
+        UsageStats,
+        // 使用量のポップオーバー（statusbar のチップと同じ。チップは値が無いと出ないので、
+        // ACP で知らせてこない Codex の入口を兼ねる・O11）。
+        ShowUsageLimits,
         // メニュー「アップデートを確認…」。About モーダルを開いて即確認する。
         CheckForUpdates,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
@@ -178,6 +195,8 @@ actions!(
         FindReferences,
         // diff タブ（HEAD vs バッファ・M11-9）と hunk 移動（F7・M11-9）。
         OpenDiff,
+        // 変更レビュー（worktree の全変更を 1 画面で・パレット「Git: 変更をレビュー」）。
+        OpenReview,
         NextHunk,
         PrevHunk,
         // シンボル（⌘⇧O アウトライン / ⌘T ワークスペース・M11）と診断移動（F8・M11）。
@@ -216,6 +235,12 @@ actions!(
         // Chat モード（`docs/CHAT.md`）。プロジェクトに紐づかない会話の面。
         ToggleChat,
         NewChat,
+        // Web タブ（localhost の開発サーバ）を開く入力欄（パレット「プレビュー: localhost を開く…」）。
+        OpenLocalhostPreview,
+        // Web タブの Design Mode（⌘⇧D・要素を選んで composer へ添える）。
+        ToggleDesignMode,
+        // エクスプローラのファイル操作を 1 手戻す（⌘Z・Explorer コンテキストだけ・H30）。
+        UndoFileOperation,
     ]
 );
 
@@ -236,11 +261,16 @@ pub(crate) enum PickerMode {
     ThreadHistory,
     /// 「＋」統一オープン: 開く系アクション + 最近（local/remote 混在）。id は `picker_open_rows` の添字。
     OpenLauncher,
+    /// Web タブの URL 入力（ポート番号か localhost の URL だけ・`web_tabs.rs`）。行は入力の確定 1 行だけ。
+    PreviewUrl,
 }
 
 /// ⌘P の作成アクション行の id（空プロジェクト用）。ファイル添字（最大 50k）と衝突しない番兵値。
 pub(crate) const FINDER_ACTION_NEW_FILE: usize = usize::MAX - 1;
 pub(crate) const FINDER_ACTION_NEW_DIR: usize = usize::MAX;
+/// ⌘P の一致なしの行「無視されたファイルも探す」（2 回目・D19）と、2 回目でも無かった時の行。
+pub(crate) const FINDER_ACTION_SEARCH_IGNORED: usize = usize::MAX - 2;
+pub(crate) const FINDER_ACTION_IGNORED_EMPTY: usize = usize::MAX - 3;
 
 const RAIL_WIDTH: f32 = 46.0;
 const DOCK_WIDTH: f32 = 218.0;
@@ -275,7 +305,7 @@ pub(crate) enum Dock {
     Bottom,
 }
 
-/// タブの中身（ARCHITECTURE §3 の Pane/Item 多態化。具体型 3 つ: エディタ / 画像 / PDF）。
+/// タブの中身（ARCHITECTURE §3 の Pane/Item 多態化。具体型 5 つ: エディタ / 画像 / PDF / 変更レビュー / Web）。
 /// enum で足す方式 — trait 化は「編集も保存もしない表示専用タブ」以外の Item が要ったときに再考する。
 pub(crate) enum TabContent {
     Editor {
@@ -286,12 +316,25 @@ pub(crate) enum TabContent {
         _input_subscription: Subscription,
         /// hover dwell の購読（LSP hover・M10）。
         _hover_subscription: Subscription,
+        /// 整形プレビュー（Markdown）のリンクの購読（URL は Web タブ / ブラウザ・ファイルはタブで開く）。
+        _link_subscription: Subscription,
     },
     /// 画像タブ（FEATURES §2 の画像プレビュー）。編集・保存・LSP・hot exit の対象外。
     Image(Entity<ImageView>),
     /// PDF タブ。中身は OS のビューア（WKWebView / WebView2）を載せたネイティブ子ビュー。
     /// 画像タブと同じく編集・保存・LSP・hot exit の対象外。
     Pdf(Entity<PdfView>),
+    /// 変更レビュー（session の `ReviewView` を載せる一時タブ・永続化しない）。
+    Review(Entity<ReviewView>),
+    /// Web タブ（localhost の開発サーバ・`web_preview_view`）。鍵は URL（[`web_tab_key`]）。
+    /// 表示専用タブで、編集・保存・LSP・hot exit の対象外。
+    Web {
+        view: Entity<WebPreviewView>,
+        /// タイトル・読み込みの変化でタブ名を描き直す。
+        _observation: Subscription,
+        /// Design Mode で選ばれた要素を composer へ添える。
+        _events: Subscription,
+    },
 }
 
 /// ペインに載る 1 タブ（M10 複数タブ）。`path` はタブの同一判定と永続化のキー。
@@ -308,7 +351,10 @@ impl EditorTab {
     pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.content {
             TabContent::Editor { editor, .. } => Some(editor),
-            TabContent::Image(_) | TabContent::Pdf(_) => None,
+            TabContent::Image(_)
+            | TabContent::Pdf(_)
+            | TabContent::Review(_)
+            | TabContent::Web { .. } => None,
         }
     }
 
@@ -316,7 +362,21 @@ impl EditorTab {
     pub(crate) fn pdf(&self) -> Option<&Entity<PdfView>> {
         match &self.content {
             TabContent::Pdf(view) => Some(view),
-            TabContent::Editor { .. } | TabContent::Image(_) => None,
+            TabContent::Editor { .. }
+            | TabContent::Image(_)
+            | TabContent::Review(_)
+            | TabContent::Web { .. } => None,
+        }
+    }
+
+    /// Web タブならその [`WebPreviewView`]（可視性同期・キーフォーカス・ツールバー操作の口）。
+    pub(crate) fn web(&self) -> Option<&Entity<WebPreviewView>> {
+        match &self.content {
+            TabContent::Web { view, .. } => Some(view),
+            TabContent::Editor { .. }
+            | TabContent::Image(_)
+            | TabContent::Pdf(_)
+            | TabContent::Review(_) => None,
         }
     }
 
@@ -326,7 +386,14 @@ impl EditorTab {
             TabContent::Editor { editor, .. } => editor.read(cx).focus_handle(cx),
             TabContent::Image(view) => view.read(cx).focus_handle(cx),
             TabContent::Pdf(view) => view.read(cx).focus_handle(cx),
+            TabContent::Review(view) => view.read(cx).focus_handle(cx),
+            TabContent::Web { view, .. } => view.read(cx).focus_handle(cx),
         }
+    }
+
+    /// 変更レビューのタブか（タブ名・タブメニューの出し分け）。
+    pub(crate) fn is_review(&self) -> bool {
+        matches!(self.content, TabContent::Review(_))
     }
 
     /// 未保存変更ドット（画像・PDF タブは常に false）。
@@ -348,6 +415,14 @@ impl EditorTab {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
             TabContent::Pdf(view) => view
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+            TabContent::Review(view) => view
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+            TabContent::Web { view, .. } => view
                 .clone()
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
@@ -927,6 +1002,15 @@ impl TaskSpace {
         self.kind == SpaceKind::Integration
     }
 
+    /// この Task の変更を見る時の比較相手。Task を切った時点の commit（`base_oid`）と比べる＝
+    /// エージェントがコミット済みの変更も出る（HEAD と比べると消える）。base を持たない枠
+    /// （統合先・復元前）は HEAD。Fleet の「変更」から diff を開く時はこれを渡す。
+    pub fn diff_base(&self) -> project::DiffBase {
+        self.base_oid
+            .clone()
+            .map_or(project::DiffBase::Head, project::DiffBase::Commit)
+    }
+
     /// 接続せずに組む（起動時の復元用）。`id` は host id と root のハッシュだけで決まる純粋関数
     /// なので、ここで**正しい値**が入る。storage の鍵はこの id なのでスレッド復元もずれない。
     ///
@@ -1191,6 +1275,9 @@ struct ChromeState {
     /// `ne` CLI から IPC（control_ipc の `open`）で届いたパス。ハンドラは Window を持たないため
     /// effect cycle 末尾で `open_external_paths`（Finder 由来と同じ入口）に流す。
     pending_external_open: Vec<PathBuf>,
+    /// `ne <path>:<line>[:<column>]` の行へのジャンプ（0 始まりの行・列）。`pending_external_open` で
+    /// ファイルを開いた後に、同じ effect cycle で位置を見せる。
+    pending_external_goto: Vec<(PathBuf, usize, usize)>,
     /// SSH askpass の要求（原文プロンプト・応答の戻り口）。IPC スレッドは Window を持てないので
     /// ここに積み、effect cycle の末尾（`process_pending_shell_effects`）で入力欄を開く。
     pending_askpass: Option<(String, u32, std::sync::mpsc::Sender<serde_json::Value>)>,
@@ -1206,6 +1293,13 @@ struct ChromeState {
     resize_start_width: f32,
     explorer_width: f32,
     resizing_explorer: bool,
+    /// エクスプローラのツリー（仮想化した `uniform_list`）のスクロール。命名の入力行を
+    /// 見える位置へ寄せるのに使う（見えない行は描かれない＝入力が見えなくなるため）。
+    explorer_scroll: gpui::UniformListScrollHandle,
+    /// エクスプローラのフォーカス（`explorer_view.rs` の root div が `track_focus` で載せる）。
+    /// ここにある間だけ ⌘Z がファイル操作の取り消しになる（keymap の `Explorer` コンテキスト・H30）。
+    /// エディタにフォーカスがある時の ⌘Z は従来どおりエディタの undo。
+    explorer_focus: FocusHandle,
     should_move_window: bool,
     /// レール項目のドラッグ状態（index・押下位置・閾値超えフラグ）。窓の外で離すと
     /// 擬似 tear-off = その位置に新窓（M13。本物の tear-off は gpui 未対応・DECISIONS）。
@@ -1235,6 +1329,8 @@ struct WorkspaceOverlays {
     tab_menu: Option<TabMenuState>,
     /// worktree 削除の確認ダイアログ（2026-07-27）。何を失うかを git に聞いて見せる。
     worktree_delete: Option<worktree_delete::WorktreeDeleteConfirm>,
+    /// ⌘Q・最後の窓を閉じる時の確認（O4）。動いているものがある時だけ開く。
+    quit_confirm: Option<quit_guard::QuitConfirmState>,
     ssh_input: Option<(String, FocusHandle)>,
     /// SSH の askpass 入力欄（パスワード / passphrase / host key 確認）。`ssh` が TTY を
     /// 持たない GUI 起動でも訊けるようにするための口（`remote_ssh.rs`）。
@@ -1246,6 +1342,10 @@ struct WorkspaceOverlays {
     shortcut_sheet: Option<FocusHandle>,
     /// About モーダル（メニュー「necoder について」/「アップデートを確認…」）。同じく focus = Escape 受け。
     about: Option<FocusHandle>,
+    /// 使用量のポップオーバー（statusbar のチップから・O11）。
+    usage_popover: Option<usage_view::UsagePopoverState>,
+    /// 使用量の統計の画面（パレット「使用量: 統計を開く」・O11）。
+    usage_stats: Option<usage_view::UsageStatsState>,
     /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
     /// 大きくフラッシュ表示する（色でも判るが名前で確定させる・2026-09-01 本人要望）。
     project_flash: Option<ProjectFlash>,
@@ -1263,9 +1363,8 @@ struct ProjectFlash {
 }
 
 struct NotificationCenter {
-    /// (本文, 色, 世代番号, ジャンプ先)。ジャンプ先 = `Some((session_index, thread_index))` の時、
-    /// クリックでそのプロジェクト＋スレッドへ切り替える（権限待ちトースト用・それ以外は None）。
-    toasts: Vec<(SharedString, Hsla, u32, Option<(usize, usize)>)>,
+    /// 右下のトースト（新しいものが末尾・最大 4 枚）。押した時の行き先は `ToastAction`。
+    toasts: Vec<notifications::Toast>,
     toast_gen: u32,
     /// 前回クラッシュのログパス（起動時に pending マーカーから 1 回だけ拾う・M13）。
     /// Some の間 statusbar に ⚠ チップ → クリックでバグ報告 Issue を開いて消える。
@@ -1356,6 +1455,9 @@ pub struct Workspace {
     /// `projects[i]` が構築時の `sources` の何番目から来たか。開けなかった source は飛ばされるので、
     /// タブ列の復元（`restore_open_file`）はこの写像を通す。1 回使ったら空にする。
     restored_source_map: Vec<usize>,
+    /// この窓のハンドル（render で控える）。Window を持たない場面（パネルのイベント）で
+    /// 「いまこの窓を見ているか」を OS 通知の判断に使う（O12）。
+    window_handle: Option<gpui::AnyWindowHandle>,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -1474,6 +1576,21 @@ fn file_type_color(name: &str, theme: &Theme) -> Hsla {
         }
         Some(lang::LanguageId::Html | lang::LanguageId::Css) => syntax.keyword,
         Some(lang::LanguageId::C | lang::LanguageId::Cpp) => syntax.type_,
+        // O30 で足したハイライト言語は、専用アイコンを用意するまで従来どおり既定色。
+        Some(
+            lang::LanguageId::Java
+            | lang::LanguageId::Ruby
+            | lang::LanguageId::Php
+            | lang::LanguageId::Sql
+            | lang::LanguageId::Dockerfile
+            | lang::LanguageId::Lua
+            | lang::LanguageId::Elixir
+            | lang::LanguageId::Zig
+            | lang::LanguageId::Make
+            | lang::LanguageId::CMake
+            | lang::LanguageId::Protobuf
+            | lang::LanguageId::GraphQl,
+        ) => theme.fg1,
         None if matches!(
             extension.as_str(),
             "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico"
@@ -1522,6 +1639,21 @@ fn file_icon_path(name: &str, is_dir: bool, is_expanded: bool) -> &'static str {
         Some(lang::LanguageId::Bash) => "icons/file-shell.svg",
         Some(lang::LanguageId::C) => "icons/file-c.svg",
         Some(lang::LanguageId::Cpp) => "icons/file-cpp.svg",
+        Some(lang::LanguageId::Dockerfile) => "icons/file-docker.svg",
+        // O30 で足したハイライト言語は、専用アイコンを用意するまで従来どおり汎用ファイル。
+        Some(
+            lang::LanguageId::Java
+            | lang::LanguageId::Ruby
+            | lang::LanguageId::Php
+            | lang::LanguageId::Sql
+            | lang::LanguageId::Lua
+            | lang::LanguageId::Elixir
+            | lang::LanguageId::Zig
+            | lang::LanguageId::Make
+            | lang::LanguageId::CMake
+            | lang::LanguageId::Protobuf
+            | lang::LanguageId::GraphQl,
+        ) => "icons/file-generic.svg",
         None if matches!(
             extension,
             "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "bmp" | "avif"
@@ -1616,6 +1748,7 @@ impl Workspace {
             || self.chrome.pending_settings_command.is_some()
             || self.chrome.pending_open_settings_json
             || !self.chrome.pending_external_open.is_empty()
+            || !self.chrome.pending_external_goto.is_empty()
             || self.chrome.pending_askpass.is_some()
             || self.chrome.pending_askpass_focus
             || !self.chrome.pending_remote_open.is_empty()
@@ -1624,6 +1757,7 @@ impl Workspace {
             || self.overlays.pending_project_switch.is_some()
             || self.pending_navigation.is_some()
             || self.pending_preview.is_some()
+            || self.pending_web_url.is_some()
             || self.chrome.pending_chat_mode
             || self.pending_close_clean_tabs
             || self.pending_open_git_diff.is_some()
@@ -1645,6 +1779,12 @@ impl Workspace {
         if !self.chrome.pending_external_open.is_empty() {
             let paths = std::mem::take(&mut self.chrome.pending_external_open);
             self.open_external_paths(paths, window, cx);
+        }
+        // 開いた直後のファイルへ（既に開いていればタブを前に出して）その行を見せる。
+        for (path, row, column) in std::mem::take(&mut self.chrome.pending_external_goto) {
+            self.open_file_then(path, window, cx, move |editor, cx| {
+                editor.reveal_position(row, column, cx);
+            });
         }
         // 入力欄は前フレームで描画済み = dispatch tree に居るので、ここで初めて focus が定着する。
         if self.chrome.pending_askpass_focus {
@@ -1715,7 +1855,10 @@ impl Workspace {
             }
         }
         if let Some(path) = self.pending_open_git_diff.take() {
-            self.open_diff_tab_for(path, None, window, cx);
+            self.open_diff_tab_for(path, None, project::DiffBase::Head, window, cx);
+        }
+        if let Some(url) = self.pending_web_url.take() {
+            self.open_web_tab(url, window, cx);
         }
         if let Some(hunk) = self.pending_stage_hunk.take() {
             self.stage_hunk(hunk, cx);
@@ -1724,7 +1867,7 @@ impl Workspace {
 
     /// ネイティブ WebView は GPUI の描画木から外れても OS 子ビューとして残るため、各 render の
     /// レイアウト状態を可視性へ同期する。対象はネイティブ子ビューを載せるタブ（ローカル HTML
-    /// プレビューと PDF タブ）だけで、通常のエディタには触れない。
+    /// プレビュー・PDF タブ・Web タブ）だけで、通常のエディタには触れない。
     fn sync_native_view_visibility(&mut self, window: &Window, cx: &mut Context<Self>) {
         let chat_active = self.project_sessions.chat_active;
         let active_session = self.project_sessions.active;
@@ -1753,6 +1896,10 @@ impl Workspace {
                     editor_surface_visible && session_shown && tab_index == session.active_tab;
                 if let Some(pdf) = tab.pdf().cloned() {
                     pdf.update(cx, |pdf, cx| pdf.set_surface_active(visible, false, cx));
+                    continue;
+                }
+                if let Some(web) = tab.web().cloned() {
+                    web.update(cx, |web, cx| web.set_surface_active(visible, false, cx));
                     continue;
                 }
                 if lang::language_for_path(&tab.path) != Some(lang::LanguageId::Html) {
@@ -1800,6 +1947,8 @@ impl Workspace {
             || self.overlays.askpass.is_some()
             || self.overlays.shortcut_sheet.is_some()
             || self.overlays.about.is_some()
+            || self.overlays.usage_popover.is_some()
+            || self.overlays.usage_stats.is_some()
             || self.search_panel.is_some()
             || self.buffer_search.is_some()
             || self.completion.is_some()
@@ -1829,10 +1978,19 @@ impl Workspace {
         view.read(cx).has_native_viewer().then(|| view.clone())
     }
 
+    /// アクティブタブが Web タブ（ネイティブの WebView 付き）ならその view。
+    pub(crate) fn active_web_view(&self, cx: &App) -> Option<Entity<WebPreviewView>> {
+        let view = self.tabs.get(self.active_tab)?.web()?;
+        view.read(cx).has_native_viewer().then(|| view.clone())
+    }
+
     /// 今 OS のキーボードフォーカスを握りうるネイティブ子ビューの GPUI 側 focus handle。
     fn active_native_view_focus(&self, cx: &App) -> Option<FocusHandle> {
         if let Some(editor) = self.active_html_preview(cx) {
             return Some(editor.read(cx).focus_handle(cx));
+        }
+        if let Some(view) = self.active_web_view(cx) {
+            return Some(view.read(cx).focus_handle(cx));
         }
         self.active_pdf_view(cx)
             .map(|view| view.read(cx).focus_handle(cx))
@@ -1853,6 +2011,9 @@ impl Workspace {
             });
         }
         if let Some(view) = self.active_pdf_view(cx) {
+            view.update(cx, |view, cx| view.set_key_focus(false, cx));
+        }
+        if let Some(view) = self.active_web_view(cx) {
             view.update(cx, |view, cx| view.set_key_focus(false, cx));
         }
     }
@@ -1883,6 +2044,7 @@ impl Render for Workspace {
             .detach();
         }
         self.window_active = window.is_window_active(); // 承認待ちの脈動など「動き」を止める判定
+        self.window_handle = Some(window.window_handle());
         if self.window_active && self.waiting_thread.is_some() {
             self.ensure_visual_ticker(cx);
         }
@@ -1948,6 +2110,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(Self::open_file_finder))
+            .on_action(cx.listener(Self::undo_file_operation))
             .on_action(cx.listener(Self::open_project_switcher))
             .on_action(cx.listener(Self::open_project_search))
             .on_action(cx.listener(Self::open_buffer_search))
@@ -1978,9 +2141,13 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::open_settings_json_action))
             .on_action(cx.listener(Self::about_action))
+            .on_action(cx.listener(Self::open_usage_stats))
+            .on_action(cx.listener(Self::show_usage_limits))
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
+            .on_action(cx.listener(Self::open_localhost_preview))
+            .on_action(cx.listener(Self::toggle_design_mode))
             // macOS 標準のアプリ/ウィンドウ操作（メニューバー・M13）。cx は App へ deref。
             .on_action(cx.listener(|_, _: &Hide, _window, cx| cx.hide()))
             .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
@@ -1992,6 +2159,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_code_actions))
             .on_action(cx.listener(Self::find_references))
             .on_action(cx.listener(Self::open_diff_tab))
+            .on_action(cx.listener(Self::open_review_tab))
             .on_action(cx.listener(|this, _: &NextHunk, _window, cx| this.step_hunk_header(1, cx)))
             .on_action(cx.listener(|this, _: &PrevHunk, _window, cx| this.step_hunk_header(-1, cx)))
             .on_action(cx.listener(Self::open_outline))
@@ -2143,6 +2311,8 @@ impl Render for Workspace {
             .children(self.render_code_actions(cx))
             .children(self.render_shortcut_sheet(cx))
             .children(self.render_about_modal(cx))
+            .children(self.render_usage_popover(cx))
+            .children(self.render_usage_stats(cx))
             .children(self.render_new_task_dialog(cx))
             .children(self.render_hunk_menu(cx))
             .children(self.render_toasts(cx))
@@ -2150,11 +2320,13 @@ impl Render for Workspace {
             .children(self.render_rail_menu(cx))
             .children(self.render_fleet_cell_menu(cx))
             .children(self.render_worktree_delete_dialog(cx))
+            .children(self.render_quit_confirm(cx))
             .children(self.render_branch_menu(cx))
             .children(self.render_tab_menu(cx))
             .children(self.render_chat_menu(cx))
             .children(self.render_chat_delete_confirm(cx))
             .children(self.render_explorer_context_menu(cx))
+            .children(self.render_explorer_discard_confirm(cx))
             .children(self.render_project_flash(cx)) // キーボード切替の行き先名フラッシュ
             .children(self.render_confetti(cx)) // 最前面（祝いの紙吹雪）
     }
@@ -3652,6 +3824,414 @@ mod tests {
             }
         });
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 端末のキー配送の検証用: 既定 keymap（`platform` 版）を張り、下ドックの端末 1 枚に
+    /// フォーカスした窓。端末は PTY を起動しない（書いたバイト列を記録する）。
+    fn terminal_key_fixture(
+        cx: &mut gpui::TestAppContext,
+        platform: keymap_core::KeymapPlatform,
+    ) -> (
+        Entity<Workspace>,
+        Entity<terminal_view::TerminalView>,
+        &mut gpui::VisualTestContext,
+        PathBuf,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_terminal_keys_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings =
+                keymap_core::load_bindings(&keymap_core::default_keymap_json(platform), cx)
+                    .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![root.clone()], Theme::dark(), None, cx));
+        let terminal = workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.show_bottom = true;
+            let dock = workspace.project_sessions.sessions[0].terminal_dock.clone();
+            let terminal = dock.update(cx, |dock, cx| dock.ensure_active_test(cx));
+            window.focus(&terminal.read(cx).focus_handle(), cx);
+            terminal
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        (workspace, terminal, cx, root)
+    }
+
+    /// 端末にフォーカスがある時の ⌘F は端末内の検索（全域のバッファ内検索に取られない）。
+    /// gpui は context の無い束縛を一番深いコンテキストと同じ深さに置くので、keymap の
+    /// `Terminal` セクションが全域より後ろに無いと負ける（2026-09-26 まで負けていた）。
+    #[gpui::test]
+    fn terminal_keys_win_over_global_bindings(cx: &mut gpui::TestAppContext) {
+        let (workspace, terminal, cx, root) =
+            terminal_key_fixture(cx, keymap_core::KeymapPlatform::MacOs);
+        cx.simulate_keystrokes("cmd-f");
+        assert!(
+            terminal.read_with(cx, |terminal, _| terminal.search_open()),
+            "⌘F で端末内検索が開く"
+        );
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.buffer_search.is_none()),
+            "全域のバッファ内検索に取られない"
+        );
+        // 検索欄に打った文字は PTY へ流れない。Esc で閉じると端末へ戻る。
+        cx.simulate_keystrokes("a b enter escape");
+        assert!(!terminal.read_with(cx, |terminal, _| terminal.search_open()));
+        assert!(terminal.read_with(cx, |terminal, _| terminal.debug_written_input().is_empty()));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.debug_written_input()),
+            b"\r"
+        );
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Windows / Linux では ⌃ + 文字がシェルへ届く（全域の Ctrl+F / Ctrl+W / Ctrl+P / Ctrl+J に
+    /// 取られない）。端末の操作は Ctrl+Shift + 文字。
+    #[gpui::test]
+    fn control_keys_reach_the_shell_with_the_windows_keymap(cx: &mut gpui::TestAppContext) {
+        let (workspace, terminal, cx, root) =
+            terminal_key_fixture(cx, keymap_core::KeymapPlatform::Windows);
+        cx.simulate_keystrokes("ctrl-f ctrl-w ctrl-p ctrl-j ctrl-k");
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.debug_written_input()),
+            [0x06, 0x17, 0x10, 0x0a, 0x0b],
+            "⌃F ⌃W ⌃P ⌃J ⌃K がそのまま届く"
+        );
+        assert!(workspace.read_with(cx, |workspace, _| workspace.buffer_search.is_none()));
+        cx.simulate_keystrokes("ctrl-shift-f");
+        assert!(terminal.read_with(cx, |terminal, _| terminal.search_open()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// ⌘Z はエクスプローラにフォーカスがある時だけファイル操作を 1 手戻し、エディタにある時は
+    /// 従来どおりエディタの undo（H30）。名前の変更 → 取り消し・作成 → 取り消しを一時ディレクトリで。
+    #[gpui::test]
+    fn explorer_cmd_z_undoes_file_operations_only_with_explorer_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_explorer_undo_keys_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("一時プロジェクト");
+        std::fs::write(project.join("a.txt"), "a\n").expect("a.txt");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        };
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        draw(cx);
+
+        // 名前の変更（インライン命名の確定まで本物の経路）: a.txt → b.txt。
+        let name_it = |workspace: &Entity<Workspace>,
+                       kind: NamingKind,
+                       base: PathBuf,
+                       is_dir: bool,
+                       name: &'static str,
+                       cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.start_naming(kind, base, is_dir, window, cx);
+                workspace.explorer.update(cx, |explorer, cx| {
+                    explorer.update_naming(|naming| naming.value = name.to_string(), cx)
+                });
+                workspace.confirm_naming(window, cx);
+            });
+        };
+        let canonical_root = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_worktree()
+                .map(|worktree| worktree.root().to_path_buf())
+                .expect("プロジェクトが開いている")
+        });
+        name_it(
+            &workspace,
+            NamingKind::Rename,
+            canonical_root.join("a.txt"),
+            false,
+            "b.txt",
+            cx,
+        );
+        draw(cx);
+        assert!(project.join("b.txt").exists() && !project.join("a.txt").exists());
+        cx.simulate_keystrokes("cmd-z");
+        assert!(
+            project.join("a.txt").exists() && !project.join("b.txt").exists(),
+            "エクスプローラにフォーカスがある ⌘Z は名前の変更を戻す"
+        );
+
+        // 新規ファイル → エディタで開く（フォーカスはエディタ）。
+        name_it(
+            &workspace,
+            NamingKind::NewFile,
+            canonical_root.clone(),
+            true,
+            "c.txt",
+            cx,
+        );
+        draw(cx);
+        assert!(project.join("c.txt").exists());
+        cx.simulate_keystrokes("cmd-z");
+        assert!(
+            project.join("c.txt").exists(),
+            "エディタにフォーカスがある ⌘Z はエディタの undo（ファイルは消さない）"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_explorer(window, cx);
+        });
+        draw(cx);
+        cx.simulate_keystrokes("cmd-z");
+        assert!(
+            !project.join("c.txt").exists(),
+            "エクスプローラへ戻ると ⌘Z は作成を取り消す"
+        );
+
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        std::fs::remove_dir_all(&root).expect("後片付け");
+    }
+
+    /// エクスプローラの空きを押すとフォーカスがエクスプローラへ移る（⌘Z の宛先・H30）。
+    /// ファイル行を押した時はエディタへ渡し、エクスプローラが取り返さない。
+    #[gpui::test]
+    fn explorer_clicks_take_focus_but_file_rows_hand_it_to_the_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_explorer_focus_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("一時プロジェクト");
+        std::fs::write(project.join("a.txt"), "a\n").expect("a.txt");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        // ツリーの 1 行目（a.txt）= タイトルバー + エクスプローラの見出しの下。
+        let row = point(
+            px(RAIL_WIDTH + 60.),
+            px(TITLEBAR_HEIGHT + 28. + ROW_HEIGHT / 2. + 2.),
+        );
+        let empty = point(px(RAIL_WIDTH + 60.), px(TITLEBAR_HEIGHT + 300.));
+        // (エクスプローラにフォーカス, エディタにフォーカス)
+        let focus_state = |cx: &mut gpui::VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                let editor = workspace
+                    .active_editor()
+                    .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window));
+                (workspace.chrome.explorer_focus.is_focused(window), editor)
+            })
+        };
+        cx.simulate_click(empty, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            focus_state(cx),
+            (true, false),
+            "エクスプローラの空きを押すとフォーカスが移る"
+        );
+
+        cx.simulate_click(row, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            focus_state(cx),
+            (false, true),
+            "ファイル行を押すとエディタへ渡る"
+        );
+
+        // 開いているファイルの行（タブへ切り替えるだけ・同期でエディタへ）も同じ。
+        cx.simulate_click(empty, gpui::Modifiers::none());
+        cx.simulate_click(row, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            focus_state(cx),
+            (false, true),
+            "開いているファイルの行でもエディタへ渡る"
+        );
+
+        // Escape: 開いている右クリックメニューを先に閉じ、次でエディタへ戻る。
+        cx.simulate_click(empty, gpui::Modifiers::none());
+        let menu_target = project.join("a.txt");
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.show_context_menu(menu_target, false, empty, cx)
+        });
+        cx.simulate_keystrokes("escape");
+        let menu_open = workspace.read_with(cx, |workspace, cx| {
+            workspace.explorer_context_menu(cx).is_some()
+        });
+        assert!(!menu_open, "Escape はまずメニューを閉じる");
+        assert_eq!(
+            focus_state(cx),
+            (true, false),
+            "フォーカスはエクスプローラのまま"
+        );
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            focus_state(cx),
+            (false, true),
+            "次の Escape でエディタへ戻る"
+        );
+
+        std::fs::remove_dir_all(&root).expect("後片付け");
+    }
+
+    /// ⌘P（D19）: 最近開いたファイルが上に来る。gitignore で隠れたファイルは 1 回目には出ず、
+    /// 一致なしの時だけ出る「無視されたファイルも探す」（2 回目）で、Picker を開いたまま足される。
+    #[gpui::test]
+    fn file_finder_ranks_recent_files_and_finds_ignored_files_on_the_second_pass(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_finder_passes_{}", std::process::id()));
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("前回の一時ディレクトリを消す");
+        }
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join("src")).expect("src");
+        std::fs::create_dir_all(project.join("build")).expect("build");
+        for name in ["src/a.txt", "src/b.txt", "src/zzz.txt"] {
+            std::fs::write(project.join(name), "x\n").expect("ファイル");
+        }
+        std::fs::write(project.join(".gitignore"), ".env\nbuild/\n").expect(".gitignore");
+        std::fs::write(project.join(".env"), "SECRET=1\n").expect(".env");
+        std::fs::write(project.join("build/out.js"), "x\n").expect("build/out.js");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("settings");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        let canonical_root = workspace.read_with(cx, |workspace, _cx| {
+            workspace
+                .active_worktree()
+                .map(|worktree| worktree.root().to_path_buf())
+                .expect("プロジェクトが開いている")
+        });
+        // 名前順では最後の zzz.txt を開いておく（最近開いたファイル）。LSP の無い拡張子にして、
+        // 言語サーバの起動（別スレッド）でテストのスケジューラを乱さない。
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file(canonical_root.join("src/zzz.txt"), window, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_file_finder(&FileFinder, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (picker, first) = workspace.read_with(cx, |workspace, cx| {
+            let picker = workspace.overlays.picker.clone().expect("⌘P が開いている");
+            let first = picker
+                .read(cx)
+                .matched_ids()
+                .first()
+                .and_then(|id| workspace.overlays.picker_files.get(*id).cloned());
+            let listed_ignored = workspace
+                .overlays
+                .picker_files
+                .iter()
+                .any(|path| path.ends_with(".env") || path.ends_with("build/out.js"));
+            assert!(!listed_ignored, "1 回目に無視されたファイルは出ない");
+            (picker, first)
+        });
+        assert_eq!(
+            first,
+            Some(canonical_root.join("src/zzz.txt")),
+            "最近開いたファイルが先頭"
+        );
+
+        picker.update(cx, |picker, cx| picker.set_query(".env", cx));
+        assert!(
+            picker.read_with(cx, |picker, _cx| picker.matched_ids().is_empty()
+                && picker.fallback_visible()),
+            "1 回目で見つからない時だけ「無視されたファイルも探す」が出る"
+        );
+        picker.update(cx, |picker, cx| picker.confirm_selected(cx));
+        cx.run_until_parked();
+        let found = workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace.overlays.picker.is_some(),
+                "2 回目を探しても Picker は開いたまま"
+            );
+            picker
+                .read(cx)
+                .matched_ids()
+                .first()
+                .and_then(|id| workspace.overlays.picker_files.get(*id).cloned())
+        });
+        assert_eq!(found, Some(canonical_root.join(".env")), "2 回目で見つかる");
+
+        std::fs::remove_dir_all(&root).expect("後片付け");
     }
 
     /// F0.5 入口: titlebar の `Editor | Fleet` セグメントが ⌘⇧M と同じ 1 本の道（`ToggleFleet`）で

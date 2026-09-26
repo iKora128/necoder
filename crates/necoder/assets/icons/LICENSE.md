@@ -19,6 +19,8 @@ copyright notice and this permission notice appear in all copies.
 エクスプローラのファイル/フォルダアイコンのうち汎用分（`folder` / `folder-open` /
 `file-generic` / `file-text` / `file-image`）も Lucide。
 
+Web タブのツールバー（`arrow-left` / `arrow-right` / `code-xml` / `external-link` / `mouse-pointer-click`）も Lucide。
+
 ## ブランドロゴ（`brand-*.svg`）
 
 AI エージェント識別用のブランドマーク（`brand-claude` / `brand-copilot` /

@@ -75,7 +75,8 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
 1. **titlebar 左のモード切替**: プロジェクトピルの右隣に `Editor | Fleet` のセグメント（`Workspace::mode`）。
    「今どちらの面にいるか」は「どのプロジェクトか」の隣にあるべき情報。右上のトグルは廃止。
    Fleet 側のセグメントに **要対応の件数バッジ**（`◐ 2`・err 色ボーダー・0 なら出さない）を載せ、Editor で作業中でも
-   裁くべきものがあれば目に入る。
+   裁くべきものがあれば目に入る。数えるのは承認待ち・質問待ちのスレッド + Failed な Task（質問待ちは O12 で追加・
+   macOS では同じ数を全窓の合計で Dock のバッジにも出す）。
 2. **レールに Fleet の入口を置く**（herd サイドバーは Fleet の一部になるので単独表示を廃止・`ToggleHerdSidebar` 削除）。
    *実装時の訂正（2026-09-12・F0.5）*: 「レールの ⚡」は**そもそも存在しなかった**（`rail.herd` 設定だけが孤児で、
    どのアイコンにも結ばれていなかった）。よってアイコンを新設し、設定キーは `rail.fleet` に改名。
@@ -145,7 +146,7 @@ One = サイドバーで選んだ Task を差し替え表示。Two / Three = ピ
   `＋▾` = スレッドを足す / ターミナルを足す / ファイルを開く。**同じ worktree に何本足しても Task は 1 枚のまま**。
   スレッドタブの × は既存 `remove_thread`（archive まで 1 本）。
 - **本体**: スレッド = 既存 `AgentPanel` を **chrome を畳んで**埋め込む（自前のスレッドタブ行は描かない・メタ行 1 行・
-  トークンメーターは畳まない）。変更 = 既存 Diff surface。ターミナル = `TerminalDock.detached` の名札で PTY を持ち回る
+  トークンメーターは畳まない）。変更 = 変更レビュー（UI-SPEC §14・Task の base が既定の比較）。ターミナル = `TerminalDock.detached` の名札で PTY を持ち回る
   （既存）。ファイル = worktree のツリー（クリックで solo のエディタに開く。Fleet 内にエディタは持たない）。
 - **composer**: 宛先チップ `● スレッド名 ／ プロジェクト ⎇ branch` + トークン `used / limit` + 入力枠（Task 色の枠）
   + ピル（Agent / model · effort / 承認モード）。既存そのまま。

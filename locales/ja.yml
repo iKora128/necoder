@@ -14,6 +14,10 @@ finder:
   projects: プロジェクトを切り替え…
   new_file: 新規ファイル…
   new_dir: 新規フォルダ…
+  search_ignored: 無視されたファイルも探す（.gitignore）
+  searching_ignored: 無視されたファイルを探しています…
+  ignored_not_found: 無視されたファイルにも見つかりません
+  ignored_detail: 無視
 agent:
   pasted_image: 貼り付けた画像
   search_placeholder: この会話を検索
@@ -31,6 +35,7 @@ agent:
   default_thread_name: スレッド%{n}
   open_diff_tab: エディタで開く（diff タブ）
   waiting_permission: 承認待ちで停止中
+  waiting_question: 質問に答えてください
   todos: Todos
   copy_tip: このエントリをコピー
   input_expand: "全 %{n} 行を表示"
@@ -117,6 +122,13 @@ agent:
   stop: 停止 esc
   running_hint: esc で中断
   running_thinking: 考えています
+  slash_footer: "%{count} 件 · ↑↓ で選ぶ · Enter / Tab で入れる · esc で閉じる"
+  goal_label: 目標
+  goal_status_active: 進行中
+  goal_status_paused: 一時停止
+  goal_status_blocked: 止まっています
+  goal_status_complete: 達成
+  goal_status_limited: 上限で停止
   more_lines: … （他 %{n} 行）
 hunk:
   stage: この hunk を stage
@@ -184,6 +196,7 @@ cmd:
   trigger_completion: "編集: 補完を出す"
   show_hover: "編集: ホバー情報"
   open_diff: "Git: diff タブを開く"
+  open_review: "Git: 変更をレビュー"
   next_hunk: "Git: 次の変更へ"
   prev_hunk: "Git: 前の変更へ"
   theme_selector: "表示: テーマ切り替え"
@@ -196,6 +209,8 @@ cmd:
   new_chat: "Chat: 新しいチャット"
   toggle_agent_full_screen: "表示: AI を全画面（エディタを畳む）"
   split_right: "表示: 右に分割"
+  open_localhost_preview: "プレビュー: localhost を開く…"
+  toggle_design_mode: "プレビュー: Design モード（要素を選んで AI に渡す）"
   new_thread: "AI: 新しいスレッド"
   next_tab: "タブ: 次へ"
   prev_tab: "タブ: 前へ"
@@ -211,6 +226,8 @@ cmd:
   open_recent: "ファイル: 最近使った項目を開く…"
   open_dialog: "ファイル: フォルダを開く…"
   shortcut_sheet: "ヘルプ: キーボードショートカット"
+  usage_limits: "使用量: レート制限を表示"
+  usage_stats: "使用量: 統計を開く"
 herd:
   empty: 実行中のエージェントはいません
   files_of: "ファイル · %{name} の worktree"
@@ -220,6 +237,7 @@ control:
   summary_prompt: 入力はマルチエージェント編隊の現況です。Captain として状況と次の一手を日本語で1文にまとめて。60文字以内・1行だけ・記号や引用符や前置きなしで出力して。
   facts_stats: "稼働 %{working} · 要対応 %{attention} · 完了未確認 %{done}"
   facts_permission: "承認待ち %{elapsed}: %{title}"
+  facts_question: "質問待ち %{elapsed}: %{message}"
   facts_failed: "失敗: %{digest}"
   facts_done_unread: "完了未確認: %{digest}"
   next_badge: "次 ⏎"
@@ -232,6 +250,7 @@ control:
   integrate: Integrate
   review: Radar 実行
   fix_instruct: 修正を指示
+  answer: 開いて答える
 news:
   waiting: "承認待ち — %{title}"
   failed: "失敗 — %{detail}"
@@ -269,6 +288,7 @@ fleet:
   new_task_setup_create: "作る（.env の持ち込み・target 共有のテンプレ）"
   new_task_no_repository: "統合先（main の worktree）が開いていないので Task を切れません"
   next_allow: "許可"
+  next_answer: "答える"
   phase_working: "稼働中"
   phase_blocked: "承認待ち"
   phase_failed: "失敗"
@@ -348,6 +368,27 @@ worktree_delete:
   skip_next: 次回から確認しない（失うものが無いときだけ省略します）
   cancel: キャンセル
   confirm: 削除する
+notify:
+  done: "完了: %{thread}"
+  interrupted: "中断: %{thread}"
+  failed: "失敗: %{thread}"
+  permission: "承認待ち: %{thread}"
+  question: "質問: %{thread}"
+quit_confirm:
+  title: まだ動いているものがあります
+  working: "実行中のエージェント %{n}"
+  waiting: "承認・質問を待っているエージェント %{n}"
+  terminals: "前面でプロセスが動いているターミナル %{n}"
+  detail_quit_hide: 終了すると、これらは止まります。隠しておけば裏で動き続け、Dock のアイコンで戻れます。
+  detail_quit_minimize: 終了すると、これらは止まります。最小化しておけば裏で動き続けます。
+  detail_close_hide: この窓を閉じると、これらは止まります。隠しておけば裏で動き続け、Dock のアイコンで戻れます。
+  detail_close_minimize: この窓を閉じると、これらは止まります。最小化しておけば裏で動き続けます。
+  keep_running_hide: 隠して動かし続ける
+  keep_running_minimize: 最小化して動かし続ける
+  quit: 終了する
+  close: 閉じる
+  cancel: キャンセル
+  setting_hint: この確認は 設定 › 動作とエディタ の「終了時の確認」で切れます
 launcher:
   placeholder: 開く、または最近のプロジェクトを選択…
   open_folder: フォルダを開く…
@@ -390,6 +431,8 @@ titlebar:
 settings:
   pref_agent_idle_stop: 使っていないエージェントを止めるまで（分）
   pref_agent_idle_stop_sub: エージェントは 1 本で数百 MB を握ります。止めても会話は残り、次の送信で引き継ぎます。0 = 止めない
+  pref_allow_terminal_send: CLI から端末へ入力を送る
+  pref_allow_terminal_send_sub: "`ne terminal send` で、エージェントやスクリプトが necoder の端末に文字を打てるようにします。送った文字はその端末でそのまま実行されます（一覧・読み取り・待機は off でも使えます）"
   chat_heading: CHAT
   chat_directory: チャットのフォルダの置き場
   chat_directory_default: 書類フォルダの necoder（既定）
@@ -462,6 +505,12 @@ settings:
   pref_tabs_view: スレッドタブの表示
   tabs_view_bar: 横タブ
   tabs_view_list: 縦リスト
+  pref_system_notifications: OS の通知
+  pref_system_notifications_sub: 見ていない窓のエージェントが終わった・止まった時に通知センターへ出します（押すとそのスレッドへ）
+  pref_confirm_quit: 終了時の確認
+  pref_confirm_quit_sub: ⌘Q・最後の窓を閉じる時、エージェントや端末が動いていれば「隠して動かし続ける」を選べます
+  confirm_quit_running: 動いている時だけ
+  confirm_quit_never: しない
   appearance_heading: 外観
   appearance_sub: テーマは押した瞬間に適用され、settings.json に保存されます。
   theme_label: テーマ
@@ -500,6 +549,25 @@ settings:
   cli_busy: 実行中…
   cli_admin_prompt: necoder の ne コマンドを /usr/local/bin にインストールします。
   cli_admin_prompt_remove: necoder の ne コマンドを /usr/local/bin から削除します。
+  save_unreadable: "%{file} を読めないので保存しませんでした（%{reason}）"
+  save_failed: "設定を保存できませんでした（%{reason}）"
+  skills_heading: Skills
+  skills_sub: エージェント（Claude Code / Codex）が読む手順書（SKILL.md）。necoder の skill を入れると、エージェントが necoder の CLI の使い方をこの版に合わせて読めます。
+  skills_necoder_label: necoder の skill
+  skills_checking: 確認中…
+  skills_busy: 実行中…
+  skills_install_button: 入れる
+  skills_update_button: 更新する
+  skills_update_available: 更新があります
+  skills_installed_chip: インストール済み
+  skills_foreign: "%{path} は necoder が書いたものではないので上書きしません（上書きするなら `ne skills install --force`）"
+  skills_read_error: "%{path} を読めません（%{error}）"
+  skills_found: "見つかった skill（%{count} 件）"
+  skills_empty: skill は見つかりませんでした（~/.claude/skills・~/.codex/skills・~/.agents/skills と、プロジェクトの .claude/skills・.agents/skills を探しました）
+  skills_skipped: "%{count} 件は front matter が読めないので一覧から外しました（理由は `ne skills list` で出ます）"
+  skills_scope_shared: 共通（~/.agents）
+  skills_scope_claude_project: Claude Code・プロジェクト
+  skills_scope_shared_project: 共通・プロジェクト
 explorer:
   main_worktree_undeletable: メインの作業ツリーは削除できません（レールから外すを使ってください）
   up_folder: 上のフォルダへ
@@ -520,8 +588,31 @@ explorer:
   ctx_duplicate: 複製
   ctx_trash: ゴミ箱に入れる
   ctx_copy_path: パスをコピー
+  ctx_search_folder: フォルダ内を検索
+  ctx_stage: ステージ
+  ctx_discard: 変更を破棄…
+  discard_title: "「%{name}」の変更を破棄しますか？"
+  discard_body: 最後のコミットの内容に戻します。ステージした変更も消えます。この操作は取り消せません。
+  discard_body_untracked: git の管理外のファイルなので、ゴミ箱へ入れます（エクスプローラで ⌘Z を押すと戻せます）。
+  discard_confirm: 破棄する
+  discard_cancel: キャンセル
+  discard_untracked_remote: リモートでは未追跡のファイルを片付けられません（git の管理からは外しました）
+  undo_empty: 取り消せるファイル操作はありません
+  undid_create: "「%{name}」の作成を取り消しました"
+  undid_move: "「%{name}」を元の名前・場所に戻しました"
+  undid_trash: "「%{name}」をゴミ箱から戻しました"
+  undid_many: "%{n} 件のファイル操作を取り消しました"
+  undo_trash_unknown: "「%{name}」はゴミ箱のどこに入ったか分からないため戻せません"
+  undo_not_in_trash: "「%{name}」がゴミ箱に見つからないため戻せません（ゴミ箱を空にしたか、Finder で戻した）"
+  undo_exists: "「%{name}」と同じ名前の項目があるため戻せません"
+  undo_missing: "「%{name}」が見つからないため戻せません"
+  undo_dirty: "「%{name}」に保存していない変更があるため取り消しません（保存するか閉じてから）"
+  undo_failed: "取り消せませんでした: %{error}"
 searchpanel:
   placeholder: プロジェクトを横断検索…
+  placeholder_scoped: このフォルダの中を検索…
+  scope: "範囲: %{path}"
+  scope_clear: 範囲を外す（プロジェクト全体を検索・空欄で ⌫ でも外せる）
   searching: 検索中…
   results: "%{n} 件 / %{files} ファイル"
   hint_enter: Enter で検索
@@ -548,6 +639,8 @@ git:
   changes: 変更
   no_changes: 変更はありません
   stage_all_tip: すべてステージ
+  review_changes: 変更をレビュー
+  review_changes_tip: 全ファイルの変更を 1 画面で読む（比較の基準を選べる）
   stage: ステージ
   unstage: ステージ解除
   history: 履歴
@@ -565,6 +658,17 @@ git:
   idle: 待機中
   branch_menu_tip: ブランチ / worktree
   switcher_tip: プロジェクト / ブランチを切替  ⌘O
+  commit_failed: コミットできませんでした
+  stage_failed: ステージできませんでした
+  unstage_failed: ステージを解除できませんでした
+  push_failed: push できませんでした
+  pull_failed: pull できませんでした
+  pr_create_failed: PR の作成ページを開けませんでした
+  pr_open_failed: PR / リポジトリを開けませんでした
+  ai_message_failed: コミットメッセージを生成できませんでした
+  branch_create_failed: ブランチを作成できませんでした
+  worktree_no_parent: worktree の作成先を決められません（プロジェクトのフォルダに親フォルダがありません）
+  output_title: "%{command} の出力"
 dock:
   left: 左パネル（エクスプローラ）を表示/隠す
   bottom: 下パネル（ターミナル等）を表示/隠す
@@ -592,22 +696,145 @@ webview:
   failed: HTML プレビューを開けませんでした
   unsupported: HTML プレビューは現在 macOS / Windows に対応しています
   hidden_by_overlay: 前面の UI を閉じると表示に戻ります
+  outside_localhost: localhost の URL だけ開けます
+  web_failed: プレビューを開けませんでした
+  unreachable: "%{target} に接続できませんでした"
+  unreachable_hint: 開発サーバを起動してから、ツールバーの再読み込みで読み直してください
+webtab:
+  back_tip: 戻る
+  forward_tip: 進む
+  reload_tip: 再読み込み
+  zoom_in_tip: 拡大
+  zoom_out_tip: 縮小
+  zoom_reset_tip: 100% に戻す
+  viewport_full: 全幅
+  viewport_full_tip: ペインの幅いっぱいに表示
+  viewport_tip: "幅 %{width}px で表示"
+  devtools_tip: DevTools（Web Inspector）を開く
+  open_browser_tip: 既定のブラウザで開く
+  unsupported: この環境では Web タブを表示できません（macOS / Windows のみ）
+  picker_placeholder: "ポート番号か localhost の URL（例: 3000 / localhost:5173/app）"
+  picker_action: localhost を開く
+  invalid_url: "localhost の URL だけ開けます: %{input}"
+  ctx_open_browser: 既定のブラウザで開く
+  ctx_copy_url: URL をコピー
+design:
+  toggle: Design
+  toggle_tip: "Design: ページの要素を選んで AI への入力に添える"
+  hint: 要素をクリックで選ぶ（Shift+クリックで続けて選ぶ・Esc で終わる）
+  prompt_heading: "### 画面の要素: %{label}"
+  prompt_page: ページ
+  prompt_selector: セレクタ
+  prompt_path: 場所
+  prompt_source: ソース
+  prompt_components: コンポーネント
+  prompt_accessibility: アクセシビリティ
+  prompt_bounds: 位置と大きさ
+  prompt_bounds_value: "x=%{x} y=%{y} %{width}×%{height}（ビューポート %{viewport}）"
+  prompt_styles: スタイル
+  prompt_text: テキスト
+  prompt_nearby: 近くのテキスト
+  capture_failed: 要素の切り抜きを撮れませんでした（テキストだけ添えました）
+  needs_web_tab: "Design は Web タブ（プレビュー: localhost を開く…）で使えます"
+  not_ready: ページが表示されてから Design を始めてください
 pdf:
   unsupported: この環境では PDF をタブに表示できません
   unsupported_hint: OS のビューアを使うため macOS / Windows のみ対応します。右クリック →「既定アプリで開く」で開けます
 terminal:
   tab_title: ターミナル %{n}
+  close_busy_title: "ターミナル %{n} でプロセスが動いています"
+  close_busy_detail: 閉じるとこのプロセスも止まります。
+  close_busy_confirm: 閉じる
+  close_busy_cancel: キャンセル
   add_tip: ターミナルを追加
   close_dock_tip: 下ドックを閉じる  ⌘J
   git_tip: ソース管理  ⌃⇧G
+  search_invalid_regex: 正規表現が不正です
+  menu_copy: コピー
+  menu_paste: 貼り付け
+  menu_select_all: すべて選択
+  menu_clear: クリア
+  menu_find: 検索
 theme:
   builtin: 組み込み
   user: ユーザー
   picker_placeholder: テーマを選択
 link:
   open_failed: "開けませんでした: %{target}"
+toast:
+  open_details: 全文 ›
+review:
+  tab_title: 変更レビュー
+  compare: 比較
+  base_task: "Task の base · %{sha}"
+  base_head: HEAD（未コミットの変更）
+  base_branch: "⎇ %{branch} · 分岐点 %{sha}"
+  base_branch_pending: "⎇ %{branch}"
+  base_commit: "コミット %{sha}"
+  menu_task: Task の base（Task を作った時点）
+  menu_head: HEAD — 未コミットの変更だけ
+  menu_branches: ブランチ（分岐点から）
+  menu_commits: コミット
+  menu_loading: 読み込み中…
+  ignore_whitespace: 空白を無視
+  ignore_whitespace_tip: 空白だけの違いを隠す（git diff -w）
+  files: "%{count} ファイル"
+  refresh_tip: 読み直す
+  outdated: 新しい変更があります
+  tree_tip: ファイルツリーを表示 / 隠す
+  loading: 変更を読み込み中…
+  empty: "変更はありません（比較: %{base}）"
+  error_not_repo: git リポジトリではありません
+  error_unknown_base: "比較の基準が見つかりません: %{base}"
+  error_git: "git に失敗しました: %{message}"
+  notice_binary: バイナリファイル — 中身は表示しません
+  notice_too_large: "大きすぎるため表示しません（%{counts}）— 「開く」でエディタへ"
+  notice_mode: 権限（モード）の変更だけ
+  notice_empty: 中身の変更はありません
+  fold: "⋯ %{count} 行"
+  fold_tip: 押すと前後 20 行ずつ開く
+  open_file: 開く
+  open_file_tip: このファイルをエディタで開く
+  reviewed: 見た
+  reviewed_tip: 見た印を付けて畳む（もう一度押すと外して開く）
+  renamed_from: "← %{path}"
+  no_newline: 末尾に改行なし
+  add_note_tip: 注記を付ける（行を選んで c でも）
+  note_unsent: 未送信
+  note_sent: 送信済み
+  note_resolved: 解決
+  note_edit: 編集
+  note_resolve: 解決
+  note_reopen: 未解決に戻す
+  note_delete: 削除
+  note_new: 注記
+  note_editing: 注記を直す
+  draft_hint: "%{save} で保存 · Esc で取り消し"
+  draft_save: 保存
+  draft_cancel: 取り消し
+  tray_summary: "注記 %{count} 件（未送信 %{unsent}）"
+  send: 送る
+  resend: 未解決だけ再送
+  send_to: "送り先（%{count} 件を 1 通にまとめて）"
+  send_new_thread: ＋ 新しいスレッドで送る
+  send_default: 既定
+  send_empty: 送れるスレッドがありません
+  sent_toast: "注記 %{count} 件を %{thread} へ送りました"
+  send_failed: 送れませんでした（スレッドが見つかりません）
+  prompt_header: "レビューコメント（%{count} 件）— 比較: %{base}..作業ツリー"
+  prompt_old_side: "%{location}（削除された行・比較元の行番号）"
 difftab:
   proposal_title: "%{title} ⇄ 提案"
+  title: "%{name} ⇄ %{base}"
+  title_deleted: "%{name} ⇄ %{base}（削除）"
+  header_side: "%{path}（%{side}）"
+  side_working_tree: 作業ツリー
+  side_buffer: バッファ
+  new_file: 新規ファイル
+  deleted_file: 削除されたファイル
+  no_changes: "%{name} は %{base} と同じです（差分はありません）"
+  missing: "%{name} は %{base} にも作業ツリーにもありません"
+  unreadable: "%{name} をテキストとして読めないので diff を出せません"
 update:
   available: ⬆ v%{version} に更新
   get: ⬆ v%{version} を入手
@@ -651,6 +878,17 @@ ipc:
   err_unknown_method: "未知の method: %{name}"
   err_bad_json: "JSON が読めない: %{detail}"
   err_gui_timeout: GUI の応答が timeout しました
+  err_no_active_task: GUI で選択中の Task がありません（Chat を開いているか、プロジェクトが開いていません）
+  err_active_is_integration: "GUI で選択中なのは統合先（%{title}）で、Task ではありません"
+  err_terminal_required: terminal（端末のハンドルか active）が必要です
+  err_terminal_not_found: "端末が見つかりません: %{handle}（`ne terminal list` でハンドルを取り直してください）"
+  err_no_active_terminal: 選択中のプロジェクトの下ドックに端末がありません
+  err_terminal_send_disabled: 端末への送信は許可されていません（設定 › 動作とエディタ の「CLI から端末へ入力を送る」を on にしてください）
+  err_text_required: text が必要です
+  err_diff_paths_required: left と right（比べる 2 つのファイルの絶対パス）が必要です
+  err_not_a_file: "ファイルではありません: %{path}"
+  err_read_file: "%{path} を読めません（%{error}）"
+  err_no_project: 開いているプロジェクトがありません
 crash:
   notice: ⚠ 前回終了時にクラッシュ — クリックで報告
 menu:
@@ -792,6 +1030,8 @@ key:
   section_agent: AI チャット
   section_control: 管制
   section_global: グローバル
+  section_explorer: エクスプローラ
+  undo_file_operation: ファイル操作を取り消す
   backspace: 前の文字を削除
   delete: 次の文字を削除
   newline: 改行
@@ -850,6 +1090,12 @@ key:
   hide_others: 他のアプリを隠す
   activate_project: プロジェクトを切替（レール順）
   quit: necoder を終了
+  section_terminal: ターミナル
+  terminal_copy: 選択をコピー
+  terminal_paste: 貼り付け
+  terminal_select_all: すべて選択
+  terminal_clear: 画面をクリア
+  terminal_find: ターミナル内を検索
 work:
   repositories: リポジトリ / 作業
   open_beside: 隣に開く
@@ -936,3 +1182,53 @@ chat:
   copy_to_project: "プロジェクト「%{project}」へコピー"
   copied_to_project: "コピーしました: %{path}"
   copy_failed: "コピーできませんでした: %{message}"
+usage:
+  window_five_hour: 5 時間枠
+  window_five_hour_short: 5h
+  window_weekly: 週枠
+  window_weekly_short: 週
+  window_opus: Opus の週枠
+  window_opus_short: Opus 週
+  window_sonnet: Sonnet の週枠
+  window_sonnet_short: Sonnet 週
+  window_weekly_extra: 週枠（追加の使用枠を含む）
+  window_weekly_extra_short: 週+追加
+  window_extra: 追加の使用枠
+  window_extra_short: 追加枠
+  window_days: "%{days} 日枠"
+  window_days_short: "%{days}日"
+  window_hours: "%{hours} 時間枠"
+  window_hours_short: "%{hours}h"
+  window_minutes: "%{minutes} 分枠"
+  window_minutes_short: "%{minutes}m"
+  resets_in: "あと %{time}でリセット"
+  reset_done: リセット済み（新しい値はまだ届いていません）
+  duration_minutes: "%{minutes} 分"
+  duration_hours: "%{hours} 時間 %{minutes} 分"
+  duration_hours_only: "%{hours} 時間"
+  duration_days: "%{days} 日 %{hours} 時間"
+  duration_days_only: "%{days} 日"
+  chip_tip: "%{agent} の使用量（最後に受け取った値）。クリックで詳細"
+  popover_title: 使用量・レート制限
+  received: "受信 %{when}"
+  status_warning: 上限が近い
+  status_rejected: 上限に達しています
+  no_values: まだ値を受け取っていません。エージェントが知らせてきたら出ます
+  note: 値はエージェントが知らせてきた時にだけ変わります。ここに出ているのは最後に受け取った値です。
+  codex_note: Codex だけは ACP で知らせてこないので、このポップオーバーを開いた時に codex 本体（codex app-server）に訊きます。
+  codex_loading: Codex の値を読み込み中…
+  codex_failed: "Codex の値を読めませんでした: %{error}"
+  reload: 再読み込み
+  open_stats: 統計を開く
+  stats_title: 使用量の統計
+  stats_subtitle: 直近 30 日 · necoder で記録したターンだけ
+  stats_date: 日付
+  stats_agent: エージェント
+  stats_turns: ターン
+  stats_tokens: トークン
+  stats_cost: コスト
+  stats_total: 30 日の合計
+  stats_empty: まだ記録がありません。エージェントが使用量を知らせたターンから記録します。
+  stats_loading: 読み込み中…
+  stats_failed: "使用量を読めませんでした: %{error}"
+  stats_note: トークンとコストは、エージェントがターンごとに報告した推定値です（Claude のコストは Claude Code の推定。Codex はコストを報告せず、トークンは各ターンの最後の要求の分だけ）。~/.claude などのローカルのログは読みません。

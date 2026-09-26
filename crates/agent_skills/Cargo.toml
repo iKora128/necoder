@@ -1,0 +1,16 @@
+[package]
+name = "agent_skills"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/agent_skills.rs"
+
+# GUI（設定画面の Skills 節）と CLI（`necoder skills …`）が共有する。GPUI に依存しない。
+[dependencies]
+anyhow.workspace = true
+paths.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true

@@ -16,8 +16,10 @@ host.workspace = true
 gpui.workspace = true
 theme_core.workspace = true
 alacritty_terminal.workspace = true
+polling.workspace = true
 futures.workspace = true
 i18n.workspace = true
+keymap_core.workspace = true
 ui.workspace = true
 
 [target.'cfg(unix)'.dependencies]

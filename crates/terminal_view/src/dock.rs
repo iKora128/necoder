@@ -1,7 +1,7 @@
 use crate::{TerminalEvent, TerminalView};
 use gpui::{
-    div, prelude::*, px, App, Context, Entity, EventEmitter, IntoElement, MouseButton, Render,
-    StyleRefinement, Window,
+    div, prelude::*, px, App, Context, Entity, EventEmitter, Hsla, IntoElement, MouseButton,
+    PromptButton, PromptLevel, Render, SharedString, StyleRefinement, Window,
 };
 use std::path::PathBuf;
 use theme_core::Theme;
@@ -16,7 +16,12 @@ pub struct TerminalLaunch {
 
 /// TerminalDock から shell への通知。
 pub enum TerminalDockEvent {
-    OpenPath { path: String, line: u32 },
+    OpenPath {
+        path: String,
+        line: u32,
+    },
+    /// 端末の URL のクリック（`TerminalEvent::OpenUrl` をそのまま上げる）。
+    OpenUrl(String),
     Dismissed,
 }
 
@@ -28,6 +33,8 @@ pub struct TerminalDock {
     active: usize,
     launch: TerminalLaunch,
     theme: Theme,
+    /// プロジェクト色（各端末の検索欄の枠・キャレット）。
+    accent: Hsla,
     /// テストで PTY を起動しない（[`Self::use_test_terminals`]）。本番のビルドには存在しない。
     #[cfg(feature = "test-support")]
     test_terminals: bool,
@@ -40,6 +47,7 @@ impl TerminalDock {
             detached: Default::default(),
             active: 0,
             launch,
+            accent: theme.fg2,
             theme,
             #[cfg(feature = "test-support")]
             test_terminals: false,
@@ -55,20 +63,42 @@ impl TerminalDock {
         self.test_terminals = true;
     }
 
+    /// 以後作る端末と、今ある端末のプロジェクト色。
+    pub fn with_accent(mut self, accent: Hsla) -> Self {
+        self.accent = accent;
+        self
+    }
+
+    /// プロジェクト色が変わった時（レールの色の変更）。今ある端末にも配る。
+    pub fn set_accent(&mut self, accent: Hsla, cx: &mut Context<Self>) {
+        self.accent = accent;
+        for terminal in self.terminals.iter().chain(self.detached.values()) {
+            terminal.update(cx, |terminal, cx| terminal.set_accent(accent, cx));
+        }
+    }
+
     fn create_terminal(
         &self,
         launch: TerminalLaunch,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
         let theme = self.theme.clone();
+        let accent = self.accent;
         #[cfg(feature = "test-support")]
         if self.test_terminals {
-            let terminal = cx.new(|cx| TerminalView::new_test(theme, cx));
+            let terminal = cx.new(|cx| {
+                let mut terminal = TerminalView::new_test(theme, cx);
+                terminal.accent = accent;
+                terminal
+            });
             cx.subscribe(&terminal, Self::on_terminal_event).detach();
             return terminal;
         }
-        let terminal =
-            cx.new(|cx| TerminalView::new_with_shell(launch.cwd, launch.shell, theme, cx));
+        let terminal = cx.new(|cx| {
+            let mut terminal = TerminalView::new_with_shell(launch.cwd, launch.shell, theme, cx);
+            terminal.accent = accent;
+            terminal
+        });
         cx.subscribe(&terminal, Self::on_terminal_event).detach();
         terminal
     }
@@ -86,6 +116,9 @@ impl TerminalDock {
                     line: *line,
                 });
             }
+            TerminalEvent::OpenUrl(url) => cx.emit(TerminalDockEvent::OpenUrl(url.clone())),
+            // タブの名前（アプリのタイトル）を描き直す。
+            TerminalEvent::TitleChanged => cx.notify(),
         }
     }
 
@@ -97,6 +130,20 @@ impl TerminalDock {
 
     pub fn session(&self, id: u64) -> Option<Entity<TerminalView>> {
         self.detached.get(&id).cloned()
+    }
+
+    /// 下ドックのタブの端末（左から）と、その中のアクティブの位置（CLI の `terminal list`）。
+    /// 読み取りだけ＝PTY を起動しない。
+    pub fn tab_terminals(&self) -> (&[Entity<TerminalView>], usize) {
+        (&self.terminals, self.active)
+    }
+
+    /// Fleet の Task カードに置いた端末（id 順・CLI の `terminal list`）。
+    pub fn placed_terminals(&self) -> Vec<(u64, Entity<TerminalView>)> {
+        self.detached
+            .iter()
+            .map(|(id, terminal)| (*id, terminal.clone()))
+            .collect()
     }
 
     pub fn detached_sessions(&self) -> Vec<u64> {
@@ -137,6 +184,16 @@ impl TerminalDock {
         cx.notify();
     }
 
+    /// 前面でプロセスが動いている端末の数（ドックのタブと Fleet に置いた端末の両方）。
+    /// ⌘Q・最後の窓を閉じる時の確認（O4）が数える。
+    pub fn busy_terminal_count(&self, cx: &App) -> usize {
+        self.terminals
+            .iter()
+            .chain(self.detached.values())
+            .filter(|terminal| terminal.read(cx).has_foreground_process())
+            .count()
+    }
+
     /// dock 内のいずれかの端末にキーボードフォーカスがあるか（プロジェクト切替のフォーカス追従判定）。
     pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.terminals
@@ -166,7 +223,12 @@ impl TerminalDock {
     pub fn ensure_active_test(&mut self, cx: &mut Context<Self>) -> Entity<TerminalView> {
         if self.terminals.is_empty() {
             let theme = self.theme.clone();
-            let terminal = cx.new(|cx| TerminalView::new_test(theme, cx));
+            let accent = self.accent;
+            let terminal = cx.new(|cx| {
+                let mut terminal = TerminalView::new_test(theme, cx);
+                terminal.accent = accent;
+                terminal
+            });
             cx.subscribe(&terminal, Self::on_terminal_event).detach();
             self.terminals.push(terminal);
             self.active = 0;
@@ -249,7 +311,51 @@ impl TerminalDock {
         }
     }
 
+    /// タブの ×。前面でプロセスが動いている端末は、閉じる（= SIGHUP で止まる）前に確認する（O4）。
+    /// 確認は OS のダイアログ（`Window::prompt`・mac はシート）で、⏎ = 閉じる / Esc = キャンセル。
+    /// 答えを待つ間にタブの並びが変わってもよいよう、閉じる対象は添字でなく Entity で覚える。
     fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminals.get(index).cloned() else {
+            return;
+        };
+        if !terminal.read(cx).has_foreground_process() {
+            self.close_now(index, window, cx);
+            return;
+        }
+        let message = i18n::t!("terminal.close_busy_title", "n" => index + 1);
+        let detail = i18n::t!("terminal.close_busy_detail");
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &[
+                PromptButton::ok(i18n::t!("terminal.close_busy_confirm")),
+                PromptButton::cancel(i18n::t!("terminal.close_busy_cancel")),
+            ],
+            cx,
+        );
+        let target = terminal.entity_id();
+        cx.spawn_in(window, async move |dock, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let closed = dock.update_in(cx, |dock, window, cx| {
+                if let Some(index) = dock
+                    .terminals
+                    .iter()
+                    .position(|terminal| terminal.entity_id() == target)
+                {
+                    dock.close_now(index, window, cx);
+                }
+            });
+            if let Err(error) = closed {
+                eprintln!("ターミナルを閉じられない（ドックが既に無い）: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    fn close_now(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.terminals.len() {
             return;
         }
@@ -300,7 +406,26 @@ impl Render for TerminalDock {
                     .text_color(if is_active { theme.fg0 } else { theme.fg2 })
                     .when(is_active, |element| element.bg(theme.bg1))
                     .hover(|style| style.bg(theme.bg1))
-                    .child(i18n::t!("terminal.tab_title", "n" => index + 1))
+                    .child(
+                        // アプリが付けたタイトル（OSC 0 / 2・`✳ Claude Code` など）。無ければ連番。
+                        div()
+                            .max_w(px(220.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(
+                                self.terminals[index]
+                                    .read(cx)
+                                    .title()
+                                    .map(SharedString::from)
+                                    .unwrap_or_else(|| {
+                                        SharedString::from(i18n::t!(
+                                            "terminal.tab_title",
+                                            "n" => index + 1
+                                        ))
+                                    }),
+                            ),
+                    )
                     .child(
                         div()
                             .id(("term-tab-close", index))

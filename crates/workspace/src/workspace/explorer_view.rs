@@ -5,6 +5,7 @@ impl Workspace {
         let theme = self.theme.clone();
         let Some(slot) = self.active_slot() else {
             return div()
+                .id("explorer-dock")
                 .w(px(DOCK_WIDTH))
                 .h_full()
                 .flex_none()
@@ -19,6 +20,13 @@ impl Workspace {
             ExplorerView::Icons => self.render_icons(slot, cx),
         };
         div()
+            .id("explorer-dock")
+            // エクスプローラを本物のキーの宛先にする（⌘Z = ファイル操作の取り消し・H30）。
+            // keymap の `Explorer` コンテキストはここにフォーカスがある時だけ効くので、
+            // エディタの ⌘Z（editor::Undo）とはぶつからない。
+            .key_context("Explorer")
+            .track_focus(&self.chrome.explorer_focus)
+            .on_key_down(cx.listener(Self::on_explorer_key_down))
             .w(px(self.chrome.explorer_width))
             .h_full()
             .flex_none()
@@ -32,6 +40,17 @@ impl Workspace {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, _cx| this.agent_active = false),
+            )
+            // クリックしたらフォーカスもエクスプローラへ。押した瞬間ではなく click（離した時）で
+            // 取るのは、行を composer へドラッグした時にフォーカスを奪わないため（ドラッグが成立すると
+            // gpui は click を捨てる）。ファイルを開く click は行の側で止める（フォーカスはエディタへ）。
+            .on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.focus_explorer(window, cx)),
+            )
+            // 右クリックも同じ（メニューから「ゴミ箱に入れる」→ ⌘Z で戻せるように）。
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| this.focus_explorer(window, cx)),
             )
             .child(self.render_explorer_header(slot, cx))
             .child(body)
@@ -64,15 +83,12 @@ impl Workspace {
             )
     }
 
-    /// ツリー表示（縦。従来）。行 = chevron + アイコン + 名前。
-    /// インライン命名の入力行（ツリー内に splice する・M10 ファイル操作）。
-    pub(crate) fn render_naming_row(
-        &self,
-        depth: usize,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    /// インライン命名の入力行（ツリー内に splice する・M10 ファイル操作）。見た目だけを持ち、
+    /// キーの受け口（`naming.focus`）はツリーの外枠が持つ（[`Self::render_tree`]）。行は見えている
+    /// 範囲でしか描かれないので、行に持たせるとスクロールで入力行が外れた瞬間にフォーカスを失う。
+    pub(crate) fn render_naming_row(&self, depth: usize, cx: &App) -> gpui::AnyElement {
         let Some(naming) = self.explorer_naming(cx) else {
-            return div().into_any_element();
+            return div().h(px(ROW_HEIGHT)).into_any_element();
         };
         let theme = self.theme.clone();
         let accent = self.accent();
@@ -81,7 +97,6 @@ impl Workspace {
             _ => " ",
         };
         let display: SharedString = SharedString::from(naming.value.clone());
-        let focus = naming.focus.clone();
         div()
             .flex()
             .items_center()
@@ -89,8 +104,6 @@ impl Workspace {
             .h(px(ROW_HEIGHT))
             .pl(px(8. + depth as f32 * INDENT))
             .pr(px(8.))
-            .track_focus(&focus)
-            .on_key_down(cx.listener(Self::on_naming_key_down))
             .child(
                 div()
                     .flex_none()
@@ -145,62 +158,97 @@ impl Workspace {
             )
     }
 
+    /// ツリー表示（縦）。行 = chevron + アイコン + 名前。
+    ///
+    /// **行は仮想化する**（D25・`uniform_list`）: 見えている範囲の行だけを組み立てるので、
+    /// 何万行のフォルダを開いても 1 フレームの仕事は画面の行数ぶんで済む。行の並び
+    /// （命名の入力行を差し込んだ後）だけを先に数え、中身は描く瞬間に組む。
     pub(crate) fn render_tree(
         &self,
         slot: &ProjectSlot,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let theme = self.theme.clone();
         let color = slot.color;
-        let selected = slot.explorer.selected.clone();
-        let git_status = &self.repository.status;
-        let root = slot.worktree.root().to_path_buf(); // ドラッグ時の @メンション相対パス用
-                                                       // インライン命名（M10）: rename は対象行を入力行に置き換え、New* は親フォルダ行の直後
-                                                       // （親がルートなら先頭）に入力行を挿す。
+        let root = slot.worktree.root().to_path_buf();
+        // インライン命名（M10）: rename は対象行を入力行に置き換え、New* は親フォルダ行の直後
+        // （親がルートなら先頭）に入力行を挿す。
         let naming = self.explorer_naming(cx);
-        let naming_kind = naming.as_ref().map(|naming| naming.kind);
-        let naming_parent = naming.as_ref().map(|naming| naming.parent.clone());
-        let naming_target = naming.as_ref().and_then(|naming| naming.target.clone());
-        let naming_at_root = naming_kind.is_some()
-            && naming_kind != Some(NamingKind::Rename)
-            && naming_parent.as_deref() == Some(root.as_path());
-        let mut elements: Vec<gpui::AnyElement> = Vec::new();
-        if naming_at_root {
-            elements.push(self.render_naming_row(0, cx));
-        }
-        for (index, row) in slot.explorer.rows.iter().enumerate() {
-            if naming_kind == Some(NamingKind::Rename) && naming_target.as_ref() == Some(&row.path)
-            {
-                elements.push(self.render_naming_row(row.depth, cx));
-                continue;
-            }
-            elements.push(self.render_tree_row(
-                slot, index, row, &theme, color, &selected, git_status, &root, cx,
-            ));
-            if naming_kind.is_some()
-                && naming_kind != Some(NamingKind::Rename)
-                && row.is_dir
-                && naming_parent.as_ref() == Some(&row.path)
-            {
-                elements.push(self.render_naming_row(row.depth + 1, cx));
-            }
-        }
+        let display_rows = explorer::tree_display_rows(
+            &slot.explorer.rows,
+            naming.as_ref().map(ExplorerNaming::placement),
+            &root,
+        );
+        let widest_row = explorer::widest_display_row(&slot.explorer.rows, &display_rows);
+        let row_count = display_rows.len();
+        let list = gpui::uniform_list(
+            "explorer-tree",
+            row_count,
+            cx.processor(move |this, range: Range<usize>, _window, cx| {
+                this.render_tree_range(&display_rows, range, cx)
+            }),
+        )
+        // 横スクロール可（VSCode/Zed 方式）。深い階層はインデントで右に押し出されるが、
+        // 行は自然幅（min_w_full）＝切らずに全部並べ、あふれた分は横スクロールで読む。
+        // 幅は見えていない行も含めて最も長くなりそうな行で測る（`widest_display_row`）。
+        .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+        .with_width_from_item(widest_row)
+        .track_scroll(&self.chrome.explorer_scroll)
+        .size_full();
         let is_local = !slot.worktree.is_remote();
         div()
-            // 横スクロール可（VSCode/Zed 方式）。深い階層はインデントで右に押し出されるが、
-            // 行は自然幅（min_w_full）＝切らずに全部並べ、あふれた分は横スクロールで読む。
             // min_h_0 は flex_col 親の中で縦スクロールを成立させるため（あふれ許可）。
-            .id("explorer-tree")
+            .id("explorer-tree-area")
             .flex_1()
             .min_h_0()
-            .overflow_scroll()
+            // 命名の入力のキーはここで受ける（入力行がスクロールで描かれなくなっても外れない）。
+            .when_some(naming.map(|naming| naming.focus), |element, focus| {
+                element
+                    .track_focus(&focus)
+                    .on_key_down(cx.listener(Self::on_naming_key_down))
+            })
             // D&D の受け（Finder 風・M10 local のみ）: 行の外（余白）へ落とす = ルート直下へ。
             // 行側のドロップが先に消費する（gpui の on_drop は最内から bubble・消費で停止）。
             .when(is_local, |element| {
                 Self::drop_into(element, root.clone(), color, false, cx)
             })
-            .children(elements)
+            .child(list)
             .into_any_element()
+    }
+
+    /// 仮想化したツリーの見えている範囲の行（`uniform_list` が描く直前に呼ぶ）。
+    /// 返す要素の数は `range` と必ず揃える（ずれると後ろの行が 1 つずつ上へ詰まって見える）。
+    fn render_tree_range(
+        &self,
+        display_rows: &[explorer::TreeDisplayRow],
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(slot) = self.active_slot() else {
+            return range.map(|_| div().into_any_element()).collect();
+        };
+        let theme = self.theme.clone();
+        let color = slot.color;
+        let selected = slot.explorer.selected.clone();
+        let git_status = &self.repository.status;
+        let root = slot.worktree.root().to_path_buf(); // ドラッグ時の @メンション相対パス用
+        range
+            .map(|display_index| match display_rows.get(display_index) {
+                Some(explorer::TreeDisplayRow::Entry(index)) => slot
+                    .explorer
+                    .rows
+                    .get(*index)
+                    .map(|row| {
+                        self.render_tree_row(
+                            slot, *index, row, &theme, color, &selected, git_status, &root, cx,
+                        )
+                    })
+                    .unwrap_or_else(|| div().h(px(ROW_HEIGHT)).into_any_element()),
+                Some(explorer::TreeDisplayRow::Naming { depth }) => {
+                    self.render_naming_row(*depth, cx)
+                }
+                None => div().h(px(ROW_HEIGHT)).into_any_element(),
+            })
+            .collect()
     }
 
     /// ツリーの 1 行（従来 render_tree のクロージャ本体を関数化・M10 ファイル操作で入力行と共存させるため）。
@@ -351,6 +399,8 @@ impl Workspace {
                         this.toggle_dir(path.clone(), cx);
                     } else {
                         this.open_file(path.clone(), window, cx);
+                        // フォーカスはエディタへ（エクスプローラ枠の click で取り返さない）。
+                        cx.stop_propagation();
                     }
                 }))
                 .on_mouse_down(
@@ -458,6 +508,7 @@ impl Workspace {
                             this.enter_dir(path.clone(), cx);
                         } else {
                             this.open_file(path.clone(), window, cx);
+                            cx.stop_propagation(); // フォーカスはエディタへ
                         }
                     }))
                     .on_mouse_down(
@@ -603,6 +654,7 @@ impl Workspace {
                                                 this.enter_dir(path.clone(), cx);
                                             } else {
                                                 this.open_file(path.clone(), window, cx);
+                                                cx.stop_propagation(); // フォーカスはエディタへ
                                             }
                                         },
                                     ))
@@ -971,6 +1023,23 @@ impl Workspace {
                     }),
                 ),
             );
+            // フォルダ内を検索（D18）: プロジェクトの中のフォルダだけ（検索は root 配下を走る。
+            // root の外へ辿った「フォルダブラウズ」では出さない）。
+            let in_project = self
+                .active_worktree()
+                .is_some_and(|worktree| path.starts_with(worktree.root()));
+            if in_project {
+                let search_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-search-folder", i18n::t!("explorer.ctx_search_folder"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_folder_search(search_path.clone(), window, cx)
+                            }),
+                        ),
+                );
+            }
         } else {
             let open_path = path.clone();
             menu_box = menu_box.child(
@@ -982,6 +1051,42 @@ impl Workspace {
                     }),
                 ),
             );
+        }
+        // ── git（D16）: 変更のあるファイルだけ。ステージは remote でも効く（git は host 側で動く）。
+        // 破棄は取り消せないので確認を挟む。未追跡・add しただけのファイルは git に戻す先が無く
+        // ゴミ箱へ入れる（local のみ）ので、remote では HEAD へ戻せるもの（変更・削除）だけに出す。
+        // 競合中のファイルは破棄を出さない（どちらを残すかは人が決める・ステージ = 解決済みの印）。
+        let change = if is_dir {
+            None
+        } else {
+            self.repository.status.get(&path).copied()
+        };
+        if let Some(status) = change {
+            let stage_path = path.clone();
+            menu_box = menu_box.child(
+                item("ctx-stage", i18n::t!("explorer.ctx_stage")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.stage_from_explorer(stage_path.clone(), cx)
+                    }),
+                ),
+            );
+            let discardable = match status {
+                StatusKind::Conflicted => false,
+                StatusKind::Modified | StatusKind::Deleted => true,
+                StatusKind::Added | StatusKind::Untracked => is_local,
+            };
+            if discardable {
+                let discard_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-discard", i18n::t!("explorer.ctx_discard")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.ask_discard(discard_path.clone(), status, cx)
+                        }),
+                    ),
+                );
+            }
         }
         // ── 既定アプリで開く / Finder で表示（ローカルのみ・シングルクリックで代替できない操作） ──
         if is_local {
@@ -1074,6 +1179,133 @@ impl Workspace {
                     cx.listener(|this, _, _window, cx| this.hide_context_menu(cx)),
                 )
                 .child(menu_box)
+                .into_any_element(),
+        )
+    }
+
+    /// 「変更を破棄」の確認（D16）。取り消せない操作なので押した後に一度だけ聞く。
+    /// 既定の強調は安全側（キャンセル）に置く＝勢いで押しても消えない。
+    pub(crate) fn render_explorer_discard_confirm(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let confirm = self.explorer.read(cx).discard_confirm()?;
+        let theme = self.theme.clone();
+        let name = confirm
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| confirm.path.display().to_string());
+        let relative = self
+            .active_worktree()
+            .and_then(|worktree| confirm.path.strip_prefix(worktree.root()).ok())
+            .map(|relative| relative.display().to_string())
+            .unwrap_or_else(|| confirm.path.display().to_string());
+        let body = match confirm.status {
+            StatusKind::Untracked | StatusKind::Added => {
+                i18n::t!("explorer.discard_body_untracked")
+            }
+            _ => i18n::t!("explorer.discard_body"),
+        };
+        let button = |element_id: &'static str, label: String, primary: bool| {
+            div()
+                .id(element_id)
+                .px(px(12.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(if primary { theme.fg2 } else { theme.border })
+                .when(primary, |element| element.bg(theme.bg3))
+                .text_size(px(12.))
+                .text_color(if primary { theme.fg0 } else { theme.fg1 })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(label)
+        };
+        let dialog = div()
+            .w(px(440.))
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(10.))
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(12.),
+                gpui::hsla(0., 0., 0., 0.5),
+            )
+            .blur_radius(px(32.))])
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(SharedString::from(
+                        i18n::t!("explorer.discard_title", "name" => name),
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.fg1)
+                    .child(SharedString::from(body)),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_family("Guguru Sans Code")
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(relative)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.))
+                    .pt(px(4.))
+                    .child(
+                        button(
+                            "explorer-discard-confirm",
+                            i18n::t!("explorer.discard_confirm"),
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.confirm_discard(window, cx)),
+                        ),
+                    )
+                    .child(
+                        button(
+                            "explorer-discard-cancel",
+                            i18n::t!("explorer.discard_cancel"),
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.cancel_discard(cx)),
+                        ),
+                    ),
+            );
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(140.))
+                .bg(gpui::hsla(0., 0., 0., 0.4))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.cancel_discard(cx)),
+                )
+                .child(dialog)
                 .into_any_element(),
         )
     }

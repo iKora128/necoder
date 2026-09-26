@@ -3,7 +3,13 @@
 //! ARCHITECTURE §2: M3 は**遅延 read_dir**（展開時に直下を読む）で、
 //! `.git` と gitignore 対象を除外する（ripgrep の `ignore` crate を使用）。
 //! ファイル監視・インクリメンタル更新は後続（M8/性能）で追加する。
+//!
+//! ⌘P の「無視されたファイルは 2 回目に」（[`ignored_files_local`]）は、stablyai/orca@646e9a5 の
+//! `src/shared/quick-open-filter.ts`（ignoredPass）と `docs/site/content/docs/model/quick-open.mdx`
+//! の考え方を参考にした（実装は独立。Orca は rg で自動に足し、necoder は一致なしの時に人が選ぶ）。
 
+pub mod review;
+pub mod file_operations;
 pub mod todos;
 
 use anyhow::{Context as _, Result};
@@ -278,8 +284,58 @@ fn sort_entries(entries: &mut [Entry]) {
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| natural_name_cmp(&a.name, &b.name))
     });
+}
+
+/// 名前の自然順（D16）。数字の並びは数として比べ（`file2` < `file10`・`9` < `99` < `100`）、
+/// 文字は大文字小文字を無視して比べる。数が同じなら先頭の 0 が少ない方を先に、最後は元の綴りで
+/// 決める（読み直すたびに並びが揺れないよう全順序にする）。
+pub fn natural_name_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let (mut left_rest, mut right_rest) = (left, right);
+    while let (Some(left_char), Some(right_char)) =
+        (left_rest.chars().next(), right_rest.chars().next())
+    {
+        if left_char.is_ascii_digit() && right_char.is_ascii_digit() {
+            let left_end = digit_run_end(left_rest);
+            let right_end = digit_run_end(right_rest);
+            let ordering = compare_digit_runs(&left_rest[..left_end], &right_rest[..right_end]);
+            if ordering.is_ne() {
+                return ordering;
+            }
+            left_rest = &left_rest[left_end..];
+            right_rest = &right_rest[right_end..];
+            continue;
+        }
+        let ordering = left_char.to_lowercase().cmp(right_char.to_lowercase());
+        if ordering.is_ne() {
+            return ordering;
+        }
+        left_rest = &left_rest[left_char.len_utf8()..];
+        right_rest = &right_rest[right_char.len_utf8()..];
+    }
+    // 片方が尽きた = 短い方が先。両方尽きたら元の綴りで決める。
+    left_rest
+        .len()
+        .cmp(&right_rest.len())
+        .then_with(|| left.cmp(right))
+}
+
+/// 先頭から続く ASCII 数字の終わり（byte 位置）。
+fn digit_run_end(text: &str) -> usize {
+    text.find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(text.len())
+}
+
+/// 数字の並び同士を数として比べる（桁数に上限なし＝u64 に収まらない並びでも比べられる）。
+fn compare_digit_runs(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_digits = left.trim_start_matches('0');
+    let right_digits = right.trim_start_matches('0');
+    left_digits
+        .len()
+        .cmp(&right_digits.len())
+        .then_with(|| left_digits.cmp(right_digits))
+        .then_with(|| left.len().cmp(&right.len()))
 }
 
 /// ディレクトリ → 直下の一覧。エクスプローラが描画に使うキャッシュの形。
@@ -411,25 +467,72 @@ pub enum StatusKind {
     Conflicted,
 }
 
+/// git を呼ぶ経路。**フックを走らせてよいか**をここで分ける（呼び出し側は関数名で選ぶ）。
+///
+/// 未信頼 repo の repo-local `.git/config` 経由のコード実行を封じる（Zed GHSA-fj2r 同型）。
+/// フォルダを開くだけで `git status` が自動実行される（レールの git 色）ため、`core.fsmonitor`
+/// による drive-by RCE が要点。ext:: リモート transport は**どちらの経路でも**封じる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitTrigger {
+    /// necoder が自分で走らせる git（status / diff / log / blame / worktree 作成 / fetch…）。
+    /// 開いただけの repo でも走るので、フック（`core.hooksPath`）も含めて全部封じる。[`run_git`]。
+    Automatic,
+    /// 利用者がボタンで明示したコミット / push。フック（pre-commit / commit-msg / pre-push）は
+    /// その repo の持ち主が置いた検査なので、ターミナルの `git commit` と同じく走らせる。
+    /// [`run_git_user_action`]。
+    UserAction,
+}
+
+/// `git` に渡す引数の全体（`-c` の防御 + subcommand 以降）。git レベルのオプションは
+/// subcommand より前に置く必要があるので先頭へ差す。
+fn git_command_args<I, S>(trigger: GitTrigger, args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut command: Vec<String> = vec!["-c".into(), "core.fsmonitor=false".into()];
+    if trigger == GitTrigger::Automatic {
+        command.extend(["-c".into(), "core.hooksPath=/dev/null".into()]);
+    }
+    command.extend(["-c".into(), "protocol.ext.allow=never".into()]);
+    command.extend(args.into_iter().map(Into::into));
+    command
+}
+
+fn run_git_as<I, S>(
+    host: &dyn Host,
+    dir: &Path,
+    trigger: GitTrigger,
+    args: I,
+    env: &[(&str, &str)],
+) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut spec = CommandSpec::new("git", dir).args(git_command_args(trigger, args));
+    for (key, value) in env {
+        spec.env.insert((*key).to_string(), (*value).to_string());
+    }
+    host.run_command(&spec)
+}
+
+/// necoder が自分で走らせる git（[`GitTrigger::Automatic`]・フックは走らない）。
 fn run_git<I, S>(host: &dyn Host, dir: &Path, args: I) -> Result<CommandOutput>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    // 未信頼 repo の repo-local `.git/config` 経由のコード実行を封じる（Zed GHSA-fj2r 同型）。
-    // フォルダを開くだけで `git status` が自動実行される（レールの git 色）ため、`core.fsmonitor`
-    // による drive-by RCE が要点。hooks / ext:: リモート transport も常時無効化して防御を集約する。
-    // git レベルのオプションは subcommand より前に置く必要があるので先頭へ差す。
-    let mut hardened: Vec<String> = vec![
-        "-c".into(),
-        "core.fsmonitor=false".into(),
-        "-c".into(),
-        "core.hooksPath=/dev/null".into(),
-        "-c".into(),
-        "protocol.ext.allow=never".into(),
-    ];
-    hardened.extend(args.into_iter().map(Into::into));
-    host.run_command(&CommandSpec::new("git", dir).args(hardened))
+    run_git_as(host, dir, GitTrigger::Automatic, args, &[])
+}
+
+/// 利用者が明示したコミット / push（[`GitTrigger::UserAction`]・フックを走らせる）。
+fn run_git_user_action<I, S>(host: &dyn Host, dir: &Path, args: I) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    run_git_as(host, dir, GitTrigger::UserAction, args, &[])
 }
 
 /// [`run_git`] の env 付き版。ネットワークを触る git（fetch 等）で
@@ -444,20 +547,7 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let mut hardened: Vec<String> = vec![
-        "-c".into(),
-        "core.fsmonitor=false".into(),
-        "-c".into(),
-        "core.hooksPath=/dev/null".into(),
-        "-c".into(),
-        "protocol.ext.allow=never".into(),
-    ];
-    hardened.extend(args.into_iter().map(Into::into));
-    let mut spec = CommandSpec::new("git", dir).args(hardened);
-    for (key, value) in env {
-        spec.env.insert((*key).to_string(), (*value).to_string());
-    }
-    host.run_command(&spec)
+    run_git_as(host, dir, GitTrigger::Automatic, args, env)
 }
 
 /// `dir` を含む git リポジトリのルート（`git rev-parse --show-toplevel`）。repo 外なら `None`。
@@ -894,6 +984,43 @@ fn git_fail_message(output: &CommandOutput) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// 失敗した git / gh の出力（[`git_fail_message`]）を運ぶエラー。見出し（「コミットに失敗」等）は
+/// `context` で重ねるので、`{error:#}` は従来どおり「見出し: 出力」になる。
+/// UI は [`failure_output`] で出力だけを取り出し、自分の言葉の見出しに添える
+/// （この crate は i18n を知らない）。フックで止まったコミットでは、ここにフックの出力が入る。
+#[derive(Debug)]
+pub struct CommandFailed {
+    pub output: String,
+}
+
+impl std::fmt::Display for CommandFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.output)
+    }
+}
+
+impl std::error::Error for CommandFailed {}
+
+/// 成功でなければ、出力を [`CommandFailed`] に包んで見出しを重ねたエラーにする。
+fn ensure_command_success(output: &CommandOutput, headline: &str) -> Result<()> {
+    if output.success() {
+        return Ok(());
+    }
+    Err(anyhow::Error::new(CommandFailed {
+        output: git_fail_message(output),
+    })
+    .context(headline.to_string()))
+}
+
+/// エラーの「理由」（UI の見出しに添える部分）。git / gh が失敗したならその出力、
+/// 起動できなかった等ならエラーの連鎖全体（`{error:#}`）。
+pub fn failure_output(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<CommandFailed>() {
+        Some(failed) => failed.output.clone(),
+        None => format!("{error:#}"),
+    }
+}
+
 /// 変更を index に上げる（`git add -- <path>`）。
 pub fn stage_path(dir: &Path, path: &Path) -> Result<()> {
     stage_path_on(&LocalHost, dir, path)
@@ -903,12 +1030,7 @@ pub fn stage_path_on(host: &dyn Host, dir: &Path, path: &Path) -> Result<()> {
     let path = path.to_string_lossy().into_owned();
     let output =
         run_git(host, dir, ["add", "--", path.as_str()]).context("git add の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "stage に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "stage に失敗")
 }
 
 /// 全変更を index に上げる（`git add -A`）。
@@ -918,12 +1040,92 @@ pub fn stage_all(dir: &Path) -> Result<()> {
 
 pub fn stage_all_on(host: &dyn Host, dir: &Path) -> Result<()> {
     let output = run_git(host, dir, ["add", "-A"]).context("git add -A の実行に失敗")?;
+    ensure_command_success(&output, "stage に失敗")
+}
+
+/// エクスプローラの「変更を破棄」（D16）の結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    /// HEAD の内容へ戻した（index も作業ツリーも）。
+    Restored,
+    /// git の管理外になった（未追跡・HEAD に無いまま add しただけのファイル）。git では中身を
+    /// 戻す先が無いので、**ファイルを片付けるのは呼び出し側**（ゴミ箱へ入れる＝取り消せる形で）。
+    Untracked,
+}
+
+/// 1 ファイルの変更を破棄して HEAD の状態へ戻す（`git restore --source=HEAD --staged --worktree`）。
+/// HEAD に無いファイル（未追跡・add しただけ）は index から外すだけで [`DiscardOutcome::Untracked`]
+/// を返す。競合中のファイルは破棄しない（どちらの内容を残すかは人が決める）。
+pub fn discard_path_on(host: &dyn Host, dir: &Path, path: &Path) -> Result<DiscardOutcome> {
+    let path_arg = path.to_string_lossy().into_owned();
+    let output = run_git(
+        host,
+        dir,
+        [
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--no-renames",
+            "-z",
+            "--",
+            path_arg.as_str(),
+        ],
+    )
+    .context("git status の実行に失敗")?;
     anyhow::ensure!(
         output.success(),
-        "stage に失敗: {}",
+        "変更を読めない: {}",
         git_fail_message(&output)
     );
-    Ok(())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(entry) = stdout
+        .split('\0')
+        .find(|entry| entry.len() >= 4 && &entry[2..3] == " ")
+    else {
+        anyhow::bail!("変更が無い: {}", path.display());
+    };
+    let (index, worktree) = (entry.as_bytes()[0], entry.as_bytes()[1]);
+    match classify_status(index, worktree) {
+        StatusKind::Untracked => return Ok(DiscardOutcome::Untracked),
+        StatusKind::Conflicted => {
+            anyhow::bail!("競合中のファイルは破棄しない: {}", path.display())
+        }
+        _ => {}
+    }
+    if index == b'A' {
+        let output = run_git(
+            host,
+            dir,
+            ["rm", "--cached", "--quiet", "--", path_arg.as_str()],
+        )
+        .context("git rm --cached の実行に失敗")?;
+        anyhow::ensure!(
+            output.success(),
+            "index から外せない: {}",
+            git_fail_message(&output)
+        );
+        return Ok(DiscardOutcome::Untracked);
+    }
+    let output = run_git(
+        host,
+        dir,
+        [
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+            path_arg.as_str(),
+        ],
+    )
+    .context("git restore の実行に失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "変更を破棄できない: {}",
+        git_fail_message(&output)
+    );
+    Ok(DiscardOutcome::Restored)
 }
 
 /// index から下ろす（`git restore --staged -- <path>`）。
@@ -935,29 +1137,21 @@ pub fn unstage_path_on(host: &dyn Host, dir: &Path, path: &Path) -> Result<()> {
     let path = path.to_string_lossy().into_owned();
     let output = run_git(host, dir, ["restore", "--staged", "--", path.as_str()])
         .context("git restore --staged の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "unstage に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "unstage に失敗")
 }
 
 /// staged 変更をコミット（`git commit -m <message>`）。message 空・staged 無しは失敗。
+/// 利用者の明示操作なので**フックを走らせる**（pre-commit / commit-msg が止めたらその出力が
+/// [`CommandFailed`] に入る）。
 pub fn commit(dir: &Path, message: &str) -> Result<()> {
     commit_on(&LocalHost, dir, message)
 }
 
 pub fn commit_on(host: &dyn Host, dir: &Path, message: &str) -> Result<()> {
     anyhow::ensure!(!message.trim().is_empty(), "コミットメッセージが空");
-    let output =
-        run_git(host, dir, ["commit", "-m", message]).context("git commit の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "コミットに失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    let output = run_git_user_action(host, dir, ["commit", "-m", message])
+        .context("git commit の実行に失敗")?;
+    ensure_command_success(&output, "コミットに失敗")
 }
 
 /// 新しいブランチを作って切り替え（`git switch -c <name>`）。既存名なら失敗。
@@ -969,12 +1163,7 @@ pub fn create_branch_on(host: &dyn Host, dir: &Path, name: &str) -> Result<()> {
     anyhow::ensure!(!name.trim().is_empty(), "ブランチ名が空");
     let output =
         run_git(host, dir, ["switch", "-c", name]).context("git switch -c の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "ブランチ作成に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "ブランチ作成に失敗")
 }
 
 /// ブランチを削除（`git branch -d`; `force` で `-D`）。現在ブランチは git が拒否する。
@@ -996,12 +1185,13 @@ pub fn delete_branch_on(host: &dyn Host, dir: &Path, name: &str, force: bool) ->
 
 /// 現在ブランチを push（`git push`）。upstream 未設定なら `-u origin <branch>` で再試行
 /// （初回 push の定番動線）。remote が無ければ失敗を返す。
+/// 利用者の明示操作なので**フックを走らせる**（pre-push が止めたらその出力が [`CommandFailed`] に入る）。
 pub fn push(dir: &Path) -> Result<()> {
     push_on(&LocalHost, dir)
 }
 
 pub fn push_on(host: &dyn Host, dir: &Path) -> Result<()> {
-    let output = run_git(host, dir, ["push"]).context("git push の実行に失敗")?;
+    let output = run_git_user_action(host, dir, ["push"]).context("git push の実行に失敗")?;
     if output.success() {
         return Ok(());
     }
@@ -1009,16 +1199,15 @@ pub fn push_on(host: &dyn Host, dir: &Path) -> Result<()> {
     if stderr.contains("has no upstream") || stderr.contains("--set-upstream") {
         let branch = git_current_branch_on(host, dir)
             .context("push: 現在ブランチが取得できない（detached HEAD?）")?;
-        let retry = run_git(
+        let retry = run_git_user_action(
             host,
             dir,
             ["push", "--set-upstream", "origin", branch.as_str()],
         )
         .context("git push --set-upstream の実行に失敗")?;
-        anyhow::ensure!(retry.success(), "push に失敗: {}", git_fail_message(&retry));
-        return Ok(());
+        return ensure_command_success(&retry, "push に失敗");
     }
-    anyhow::bail!("push に失敗: {}", stderr.trim());
+    ensure_command_success(&output, "push に失敗")
 }
 
 /// upstream から pull（`git pull --ff-only`）。fast-forward できなければ失敗（安全側・merge しない）。
@@ -1028,12 +1217,7 @@ pub fn pull(dir: &Path) -> Result<()> {
 
 pub fn pull_on(host: &dyn Host, dir: &Path) -> Result<()> {
     let output = run_git(host, dir, ["pull", "--ff-only"]).context("git pull の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "pull に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "pull に失敗")
 }
 
 // ── GitHub 連携（M8: `gh` CLI 経由。git と同じ host 上で動かす＝remote repo でも同じ動線） ──
@@ -1084,12 +1268,7 @@ pub fn create_pr(dir: &Path) -> Result<()> {
 pub fn create_pr_on(host: &dyn Host, dir: &Path) -> Result<()> {
     let output = run_gh(host, dir, ["pr", "create", "--web"])
         .context("gh pr create の実行に失敗（gh 未導入？）")?;
-    anyhow::ensure!(
-        output.success(),
-        "PR 作成に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "PR 作成に失敗")
 }
 
 /// 現在ブランチの PR をブラウザで開く（無ければリポジトリのトップを開く）。
@@ -1107,12 +1286,7 @@ pub fn open_pr_web_on(host: &dyn Host, dir: &Path) -> Result<()> {
     }
     let output = run_gh(host, dir, ["repo", "view", "--web"])
         .context("gh repo view の実行に失敗（gh 未導入？）")?;
-    anyhow::ensure!(
-        output.success(),
-        "リポジトリを開けません: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "リポジトリを開けません")
 }
 
 // ── AI コミットメッセージ生成（M8: AI-agent-native。Claude Code CLI に diff を渡す） ──
@@ -1138,11 +1312,7 @@ pub fn ai_commit_message_on(host: &dyn Host, dir: &Path) -> Result<String> {
     let output = host
         .run_command(&host.shell_script(script.as_str(), dir))
         .context("コミットメッセージ生成の実行に失敗（claude CLI 未導入？）")?;
-    anyhow::ensure!(
-        output.success(),
-        "生成に失敗: {}",
-        git_fail_message(&output)
-    );
+    ensure_command_success(&output, "生成に失敗")?;
     let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
     anyhow::ensure!(
         !message.is_empty(),
@@ -1661,7 +1831,16 @@ pub struct DiffHunk {
 /// `file`（絶対パス）の HEAD 版テキスト。`HEAD:./<name>`（cwd 相対）で subdir でも正しく引く。
 /// HEAD に無い（新規/未追跡）or repo 外なら `None`。
 fn head_blob_on(host: &dyn Host, dir: &Path, name: &OsStr) -> Option<String> {
-    let spec = format!("HEAD:./{}", name.to_string_lossy());
+    blob_at_on(host, dir, "HEAD", Path::new(name))
+}
+
+/// `rev` 時点の `dir/<relative>` のテキスト（`git show <rev>:./<relative>`・cwd 相対）。
+/// その rev に無い・repo 外・`rev` がオプションに見える（`-` 始まり）なら `None`。
+fn blob_at_on(host: &dyn Host, dir: &Path, rev: &str, relative: &Path) -> Option<String> {
+    if rev.is_empty() || rev.starts_with('-') {
+        return None;
+    }
+    let spec = format!("{rev}:./{}", relative_display(relative));
     let output = run_git(host, dir, ["--no-optional-locks", "show", spec.as_str()]).ok()?;
     output
         .success()
@@ -1732,8 +1911,55 @@ pub fn all_files_on(host: &dyn Host, root: &Path, limit: usize) -> Vec<(PathBuf,
             (path, relative)
         })
         .collect::<Vec<_>>();
-    files.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    // ツリーと同じ自然順（`item2` < `item10`・D16）。⌘P の空クエリと同点の並びがこれになる。
+    files.sort_by(|a, b| natural_name_cmp(&a.1, &b.1));
     files
+}
+
+/// ⌘P の 2 回目（D19）: [`all_files_on`] が返さなかったファイル（主に gitignore で隠れたもの）を、
+/// **浅いものから順に**（幅優先）最大 `limit` 件集める。`listed` = 1 回目で出したパス（除く）。
+///
+/// `node_modules` や `target` のような巨大な無視フォルダの奥まで同じ重さで辿ると、`.env` や
+/// `build/` 直下のような「たまに開きたいもの」へ届く前に上限を使い切るので、深さ順にする。
+/// `.git` とシンボリックリンクは辿らない（循環を避ける）。local のみ。
+pub fn ignored_files_local(
+    root: &Path,
+    listed: &std::collections::HashSet<PathBuf>,
+    limit: usize,
+) -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    while let Some(directory) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue; // 読めないフォルダ（権限など）は飛ばす
+        };
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            natural_name_cmp(
+                &left.file_name().to_string_lossy(),
+                &right.file_name().to_string_lossy(),
+            )
+        });
+        for entry in entries {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                queue.push_back(path);
+            } else if kind.is_file() && !listed.contains(&path) {
+                let relative = relative_display(path.strip_prefix(root).unwrap_or(&path));
+                found.push((path, relative));
+                if found.len() >= limit {
+                    return found;
+                }
+            }
+        }
+    }
+    found
 }
 
 /// HEAD のファイル内容（テキスト）。無ければ None（新規ファイル等）。M11 diff タブ/hunk 操作用。
@@ -1742,41 +1968,84 @@ pub fn head_text_on(host: &dyn Host, file: &Path) -> Option<String> {
     head_blob_on(host, dir, name)
 }
 
-/// HEAD vs 現在テキストの **unified diff 文字列**（M11-9 diff タブ）。差分なしは None。
-pub fn unified_diff_on(host: &dyn Host, file: &Path, current: &str) -> Option<String> {
-    use imara_diff::intern::InternedInput;
-    use imara_diff::sources::lines_with_terminator;
-    use imara_diff::{Algorithm, UnifiedDiffBuilder};
-    let head = head_text_on(host, file).unwrap_or_default();
-    if head == current {
-        return None;
+/// `file`（絶対パス）の `rev` 時点のテキスト（`git show <rev>:<path>` 相当）。その rev に無い・
+/// repo 外・読めないなら `None`。親フォルダごと消えていても、残っている祖先から引く
+/// （削除されたファイルの diff を出すため）。
+pub fn rev_text_on(host: &dyn Host, file: &Path, rev: &str) -> Option<String> {
+    let mut anchor = file.parent()?;
+    while !host.metadata(anchor).is_ok_and(|metadata| metadata.is_dir) {
+        anchor = anchor.parent()?;
     }
-    let head_normalized = normalize_newlines(&head);
-    let current_normalized = normalize_newlines(current);
-    let input = InternedInput::new(
-        lines_with_terminator(head_normalized.as_str()),
-        lines_with_terminator(current_normalized.as_str()),
-    );
-    let body = imara_diff::diff(
-        Algorithm::Histogram,
-        &input,
-        UnifiedDiffBuilder::new(&input),
-    );
-    if body.is_empty() {
-        return None;
-    }
-    let name = file
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    Some(format!(
-        "--- a/{name}（HEAD）\n+++ b/{name}（バッファ）\n{body}"
-    ))
+    let relative = file.strip_prefix(anchor).ok()?;
+    blob_at_on(host, anchor, rev, relative)
 }
 
-/// 任意テキスト同士の unified diff（エージェント承認カードの「エディタで開く」・M12-6）。
-/// 差分なしは None。
-pub fn unified_diff_texts(old_text: &str, new_text: &str, name: &str) -> Option<String> {
+/// diff タブの比較相手（左側）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffBase {
+    /// HEAD（ソース管理パネルの行・開いているファイルの diff）。
+    Head,
+    /// 任意の commit。Fleet の Task は worktree を切った時点の commit（`TaskSpace.base_oid`）と比べる
+    /// ＝エージェントがコミット済みの変更も出る。
+    Commit(String),
+}
+
+impl DiffBase {
+    /// git に渡す rev。
+    pub fn rev(&self) -> &str {
+        match self {
+            DiffBase::Head => "HEAD",
+            DiffBase::Commit(oid) => oid,
+        }
+    }
+
+    /// 見出し・タブ題名に出す比較相手（`HEAD` / 短い SHA）。
+    pub fn label(&self) -> String {
+        match self {
+            DiffBase::Head => "HEAD".to_string(),
+            DiffBase::Commit(oid) => oid.chars().take(7).collect(),
+        }
+    }
+}
+
+/// 1 ファイルを base と作業ツリー（またはバッファ）で比べた結果（diff タブの中身の元）。
+/// 本文は `@@` 行から始まる unified diff。見出し行（`---` / `+++`）は UI が自分の言葉で付ける
+/// （この crate は i18n を知らない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileDiff {
+    /// 両方に在って中身が違う。
+    Modified(String),
+    /// base に無く、今は在る（全行が追加）。
+    Added(String),
+    /// base に在って、作業ツリーから消えた（全行が削除）。
+    Deleted(String),
+    /// base と同じ（改行コードの違いだけも同じ扱い）。
+    Unchanged,
+    /// base にも作業ツリーにも無い。
+    Missing,
+}
+
+/// `file` を `base` 時点と比べる。`current` は今の中身で、`None` は「作業ツリーから消えている」。
+pub fn diff_file_on(
+    host: &dyn Host,
+    file: &Path,
+    base: &DiffBase,
+    current: Option<&str>,
+) -> FileDiff {
+    match (rev_text_on(host, file, base.rev()), current) {
+        (None, None) => FileDiff::Missing,
+        (Some(old), None) => FileDiff::Deleted(unified_diff_body(&old, "").unwrap_or_default()),
+        (None, Some(new)) => FileDiff::Added(unified_diff_body("", new).unwrap_or_default()),
+        (Some(old), Some(new)) => match unified_diff_body(&old, new) {
+            Some(body) => FileDiff::Modified(body),
+            None => FileDiff::Unchanged,
+        },
+    }
+}
+
+/// テキスト同士の unified diff の本文（`@@` hunk 列・見出し行なし）。差分なしは None。
+/// 改行コード（CRLF / LF）の違いだけでは差分にしない。
+pub fn unified_diff_body(old_text: &str, new_text: &str) -> Option<String> {
     use imara_diff::intern::InternedInput;
     use imara_diff::sources::lines_with_terminator;
     use imara_diff::{Algorithm, UnifiedDiffBuilder};
@@ -1794,12 +2063,32 @@ pub fn unified_diff_texts(old_text: &str, new_text: &str, name: &str) -> Option<
         &input,
         UnifiedDiffBuilder::new(&input),
     );
-    if body.is_empty() {
-        return None;
-    }
+    // imara-diff 0.1.8 の `UnifiedDiffBuilder` は各行の後ろに `\n` を足すが、`lines_with_terminator`
+    // の行は改行を含むので、diff タブで 1 行おきに空行が挟まっていた。末尾の改行だけの変更も
+    // 差分として拾いたいので入力は改行込みのまま、出力の二重改行だけを畳む（行は途中に改行を含まない）。
+    let body = body.replace("\n\n", "\n");
+    (!body.is_empty()).then_some(body)
+}
+
+/// 任意テキスト同士の unified diff（エージェント承認カードの「エディタで開く」・M12-6）。
+/// 差分なしは None。
+pub fn unified_diff_texts(old_text: &str, new_text: &str, name: &str) -> Option<String> {
+    let body = unified_diff_body(old_text, new_text)?;
     Some(format!(
         "--- a/{name}（現在）\n+++ b/{name}（提案）\n{body}"
     ))
+}
+
+/// 任意テキスト同士の unified diff を、見出し（`---` / `+++` の行）を指定して作る
+/// （`ne --diff <a> <b>` の 2 ファイル比較）。差分なしは None。
+pub fn unified_diff_labeled(
+    old_text: &str,
+    new_text: &str,
+    old_label: &str,
+    new_label: &str,
+) -> Option<String> {
+    let body = unified_diff_body(old_text, new_text)?;
+    Some(format!("--- {old_label}\n+++ {new_label}\n{body}"))
 }
 
 /// 1 hunk 分の unified diff（`git apply --cached` に食わせる形・M11-10 hunk stage）。
@@ -2007,30 +2296,86 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
 
 /// OS のゴミ箱へ入れる（macOS: `/usr/bin/trash`、無ければ Finder 経由）。完全削除はしない。
 pub fn trash_local(path: &Path) -> Result<()> {
-    anyhow::ensure!(path.exists(), "存在しない: {}", path.display());
-    if Path::new("/usr/bin/trash").exists() {
-        let status = std::process::Command::new("/usr/bin/trash")
-            .arg(path)
-            .status()
-            .context("trash コマンドの起動に失敗")?;
-        anyhow::ensure!(status.success(), "trash が失敗: {}", path.display());
-        return Ok(());
-    }
-    // フォールバック: Finder に頼む（AppleScript）。
-    let script = format!(
-        "tell application \"Finder\" to delete POSIX file \"{}\"",
+    move_to_trash_local(path).map(|_location| ())
+}
+
+/// [`trash_local`] と同じくゴミ箱へ入れ、**ゴミ箱の中での場所**を返す（⌘Z で戻すため・H30）。
+///
+/// macOS 15 からの `/usr/bin/trash` は `NSFileManager trashItemAtURL:resultingItemURL:` を呼び、
+/// `-v` を付けると標準出力へ `# Moved "<元>" to "<ゴミ箱の中>"` を書く（名前が重なると
+/// ゴミ箱側で別名になるので、場所は出力から読むしかない）。Finder 経由（それより古い macOS）は
+/// `delete` が返す項目から読む。どちらも読めなければ `None`（ゴミ箱には入ったが戻せない）。
+pub fn move_to_trash_local(path: &Path) -> Result<Option<PathBuf>> {
+    anyhow::ensure!(
+        path.symlink_metadata().is_ok(),
+        "存在しない: {}",
         path.display()
     );
-    let status = std::process::Command::new("/usr/bin/osascript")
-        .args(["-e", &script])
-        .status()
+    if Path::new("/usr/bin/trash").exists() {
+        let output = std::process::Command::new("/usr/bin/trash")
+            .arg("-v")
+            .arg(path)
+            .output()
+            .context("trash コマンドの起動に失敗")?;
+        anyhow::ensure!(output.status.success(), "trash が失敗: {}", path.display());
+        let printed = String::from_utf8_lossy(&output.stdout);
+        return Ok(parse_trash_destination(&printed, path)
+            .filter(|location| location.symlink_metadata().is_ok()));
+    }
+    // フォールバック: Finder に頼む（AppleScript）。戻り値（ゴミ箱の中の項目）のパスを出力させる。
+    // パスの取り出しに失敗しても、ゴミ箱へ入れること自体は成功として扱う（`try` で包む）。
+    let quoted = path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            &format!(
+                "tell application \"Finder\" to set trashedItem to delete POSIX file \"{quoted}\""
+            ),
+            "-e",
+            "try",
+            "-e",
+            "return POSIX path of (trashedItem as alias)",
+            "-e",
+            "on error",
+            "-e",
+            "return \"\"",
+            "-e",
+            "end try",
+        ])
+        .output()
         .context("osascript の起動に失敗")?;
     anyhow::ensure!(
-        status.success(),
+        output.status.success(),
         "Finder でのゴミ箱移動が失敗: {}",
         path.display()
     );
-    Ok(())
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let location = printed.trim().trim_end_matches('/');
+    Ok((!location.is_empty())
+        .then(|| PathBuf::from(location))
+        .filter(|location| location.symlink_metadata().is_ok()))
+}
+
+/// `/usr/bin/trash -v` の出力からゴミ箱の中での場所を読む。書式は `# Moved "<元>" to "<先>"`
+/// （引用符はエスケープされない）。元のパスが分かっているので、その後ろを切り出す。
+fn parse_trash_destination(printed: &str, original: &Path) -> Option<PathBuf> {
+    let prefix = format!("# Moved \"{}\" to \"", original.display());
+    printed.lines().find_map(|line| {
+        let destination = match line.strip_prefix(prefix.as_str()) {
+            Some(rest) => rest.strip_suffix('"')?,
+            // 元の綴りが変わって出た場合（正規化など）は最後の `" to "` で切る。
+            None => line
+                .strip_prefix("# Moved \"")?
+                .rsplit_once("\" to \"")?
+                .1
+                .strip_suffix('"')?,
+        };
+        (!destination.is_empty()).then(|| PathBuf::from(destination))
+    })
 }
 
 /// Finder で対象を表示（親フォルダを開いて選択状態にする）。macOS の `open -R`。
@@ -2178,6 +2523,24 @@ impl imara_diff::Sink for HunkCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// diff タブの本文は 1 行 = 1 行（UnifiedDiffBuilder は行ごとに改行を足すので、改行つきの行を
+    /// 渡すと全行の後ろに空行が挟まっていた）。承認カードの diff と `ne --diff` が同じ関数を通る。
+    #[test]
+    fn unified_diff_has_one_line_per_diff_line() {
+        let diff = unified_diff_labeled("same\nold\n", "same\nnew\n", "a/left", "b/right")
+            .expect("差分がある");
+        assert_eq!(
+            diff,
+            "--- a/left\n+++ b/right\n@@ -1,2 +1,2 @@\n same\n-old\n+new\n"
+        );
+        // CRLF も同じ形になる（行末の \r を本文へ持ち込まない）。
+        assert_eq!(
+            unified_diff_labeled("same\r\nold\r\n", "same\r\nnew\r\n", "a/left", "b/right"),
+            Some(diff)
+        );
+        assert_eq!(unified_diff_labeled("x\n", "x\n", "a", "b"), None);
+    }
 
     #[test]
     fn status_branch_parses_ahead_behind_dirty() {
@@ -2427,6 +2790,193 @@ mod tests {
             !relatives.iter().any(|r| r.contains("target")),
             "gitignore の target を除外"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn natural_order_compares_numbers_by_value() {
+        let mut names = vec![
+            "file10.rs",
+            "file2.rs",
+            "File1.rs",
+            "100",
+            "99",
+            "9",
+            "a",
+            "a01",
+            "a1",
+            "b",
+        ];
+        names.sort_by(|left, right| natural_name_cmp(left, right));
+        assert_eq!(
+            names,
+            vec![
+                "9",
+                "99",
+                "100",
+                "a",
+                "a1",
+                "a01",
+                "b",
+                "File1.rs",
+                "file2.rs",
+                "file10.rs"
+            ]
+        );
+        // 大文字小文字だけが違う名前も順序が決まる（読み直しで揺れない）。
+        assert_eq!(
+            natural_name_cmp("README", "readme"),
+            std::cmp::Ordering::Less
+        );
+        // u64 に収まらない桁でも比べられる。
+        assert_eq!(
+            natural_name_cmp("v99999999999999999999", "v100000000000000000000"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn tree_lists_folders_first_in_natural_order() {
+        let root = scratch("natural");
+        std::fs::create_dir_all(root.join("dir10")).unwrap();
+        std::fs::create_dir_all(root.join("dir9")).unwrap();
+        for name in ["file10.rs", "file2.rs", "file1.rs"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        let worktree = Worktree::new(&root).unwrap();
+        let names: Vec<String> = worktree
+            .read_root()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["dir9", "dir10", "file1.rs", "file2.rs", "file10.rs"]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trash_output_parser_reads_the_destination() {
+        let original = Path::new("/tmp/a \"quoted\" name.txt");
+        let printed = "# Moved \"/tmp/a \"quoted\" name.txt\" to \"/Users/me/.Trash/a \"quoted\" name 2.txt\"\n";
+        assert_eq!(
+            parse_trash_destination(printed, original),
+            Some(PathBuf::from("/Users/me/.Trash/a \"quoted\" name 2.txt"))
+        );
+        // 元の綴りが違って出ても最後の ` to ` で拾う。
+        assert_eq!(
+            parse_trash_destination(
+                "# Moved \"/private/tmp/b.txt\" to \"/Users/me/.Trash/b.txt\"",
+                Path::new("/tmp/b.txt")
+            ),
+            Some(PathBuf::from("/Users/me/.Trash/b.txt"))
+        );
+        assert_eq!(parse_trash_destination("", original), None);
+    }
+
+    #[test]
+    fn discard_restores_tracked_files_and_hands_back_untracked_ones() {
+        let root = scratch("discard");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        // git が無い環境ではスキップ（CI 等）。
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "tester"]);
+        git(&["config", "core.autocrlf", "false"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        // 変更（staged + unstaged の両方）→ HEAD へ戻る。
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        std::fs::write(root.join("tracked.txt"), "three\n").unwrap();
+        let tracked = root.join("tracked.txt");
+        assert_eq!(
+            discard_path_on(&LocalHost, &root, &tracked).unwrap(),
+            DiscardOutcome::Restored
+        );
+        assert_eq!(std::fs::read_to_string(&tracked).unwrap(), "one\n");
+        assert!(
+            git_status(&root).is_empty(),
+            "index も作業ツリーも HEAD と同じ"
+        );
+
+        // 未追跡 → 片付けは呼び出し側（ファイルはまだある）。
+        let untracked = root.join("new.txt");
+        std::fs::write(&untracked, "x\n").unwrap();
+        assert_eq!(
+            discard_path_on(&LocalHost, &root, &untracked).unwrap(),
+            DiscardOutcome::Untracked
+        );
+        assert!(untracked.exists());
+
+        // add しただけ（HEAD に無い）→ index から外れて未追跡に戻る。
+        git(&["add", "new.txt"]);
+        assert_eq!(
+            discard_path_on(&LocalHost, &root, &untracked).unwrap(),
+            DiscardOutcome::Untracked
+        );
+        let status: std::collections::HashMap<PathBuf, StatusKind> =
+            git_status(&root).into_iter().collect();
+        let canonical = paths::canonicalize(&untracked).unwrap();
+        assert_eq!(status.get(&canonical), Some(&StatusKind::Untracked));
+
+        // 変更の無いファイルは断る。
+        assert!(discard_path_on(&LocalHost, &root, &tracked).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ⌘P の 2 回目: 1 回目（gitignore 準拠）に出なかったファイルだけが、浅い順に出る。
+    #[test]
+    fn ignored_files_appear_only_in_the_second_pass() {
+        let root = scratch("ignored-pass");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("build/deep/deeper")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join(".env"), "").unwrap();
+        std::fs::write(root.join("app.log"), "").unwrap();
+        std::fs::write(root.join("build/deep/deeper/out.js"), "").unwrap();
+        std::fs::write(root.join(".git/HEAD"), "").unwrap();
+        std::fs::write(root.join(".gitignore"), ".env\n*.log\nbuild/\n").unwrap();
+
+        let first = all_files_on(&LocalHost, &root, 1000);
+        let first_relatives: Vec<&str> = first
+            .iter()
+            .map(|(_, relative)| relative.as_str())
+            .collect();
+        assert!(first_relatives.contains(&"src/main.rs"));
+        for ignored in [".env", "app.log", "build/deep/deeper/out.js"] {
+            assert!(
+                !first_relatives.contains(&ignored),
+                "1 回目に無視ファイル {ignored} を出さない"
+            );
+        }
+
+        let listed: std::collections::HashSet<PathBuf> =
+            first.into_iter().map(|(path, _)| path).collect();
+        let second: Vec<String> = ignored_files_local(&root, &listed, 1000)
+            .into_iter()
+            .map(|(_, relative)| relative)
+            .collect();
+        assert_eq!(
+            second,
+            vec![".env", "app.log", "build/deep/deeper/out.js"],
+            "無視ファイルだけ・浅い順（.git は辿らない）"
+        );
+        assert_eq!(ignored_files_local(&root, &listed, 1).len(), 1, "上限");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2983,6 +3533,300 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/work/necoder-worktrees"));
         assert_eq!(worktree_setup_script(Path::new("/work/necoder")), PathBuf::from("/work/necoder/.necoder/worktree-setup.sh"));
         assert!(task_worktree_dir(Path::new("/")).is_none(), "親が無ければ作れない");
+    }
+
+    /// 検査用の一時 repo（git が無い環境では None＝スキップ）。フックは `hooks/` に置く
+    /// （repo-local の `core.hooksPath` で指す＝利用者のグローバル設定に左右されない）。
+    fn hook_repo(tag: &str) -> Option<PathBuf> {
+        let root = scratch(tag);
+        std::fs::create_dir_all(root.join("hooks")).ok()?;
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+        };
+        git(&["init", "-q"])?;
+        for (key, value) in [
+            ("user.email", "t@example.com"),
+            ("user.name", "tester"),
+            ("core.autocrlf", "false"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "hooks"),
+        ] {
+            git(&["config", key, value])?;
+        }
+        Some(root)
+    }
+
+    /// 実行可能なフックを書く（unix のみ・Windows の Git は sh で走らせるが権限の付け方が違う）。
+    #[cfg(unix)]
+    fn write_hook(root: &Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = root.join("hooks").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn commit_count(root: &Path) -> usize {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn unified_diff_body_has_one_line_per_diff_line() {
+        let body = unified_diff_body("a\n\nb\n", "a\n\nc\n").unwrap();
+        assert_eq!(
+            body.lines().collect::<Vec<_>>(),
+            ["@@ -1,3 +1,3 @@", " a", " ", "-b", "+c"]
+        );
+        // 末尾の改行だけの違いも差分として出る（1 行の入れ替え）。
+        let body = unified_diff_body("a\n", "a").unwrap();
+        assert_eq!(
+            body.lines().collect::<Vec<_>>(),
+            ["@@ -1,1 +1,1 @@", "-a", "+a"]
+        );
+        assert_eq!(
+            unified_diff_body("a\r\nb\r\n", "a\nb\n"),
+            None,
+            "改行コードだけは差分にしない"
+        );
+    }
+
+    #[test]
+    fn automatic_git_disables_hooks_but_user_actions_keep_them() {
+        // 自動で走る git（status 等）は hooksPath も封じる。
+        assert_eq!(
+            git_command_args(GitTrigger::Automatic, ["status", "--porcelain"]),
+            [
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "protocol.ext.allow=never",
+                "status",
+                "--porcelain",
+            ]
+        );
+        // 明示のコミット / push はフックを残す。fsmonitor と ext:: は両方の経路で封じる。
+        let user = git_command_args(GitTrigger::UserAction, ["commit", "-m", "x"]);
+        assert!(
+            !user.iter().any(|arg| arg.starts_with("core.hooksPath")),
+            "{user:?}"
+        );
+        assert!(user.contains(&"core.fsmonitor=false".to_string()));
+        assert!(user.contains(&"protocol.ext.allow=never".to_string()));
+        assert_eq!(user[user.len() - 3..], ["commit", "-m", "x"]);
+    }
+
+    #[test]
+    fn failure_output_keeps_the_command_output_apart_from_the_headline() {
+        let output = CommandOutput {
+            status_code: Some(1),
+            stdout: b"ignored".to_vec(),
+            stderr: b"pre-commit: trailing whitespace\n".to_vec(),
+        };
+        let error = ensure_command_success(&output, "コミットに失敗").unwrap_err();
+        assert_eq!(failure_output(&error), "pre-commit: trailing whitespace");
+        // 従来のログ表記（見出し: 出力）は変わらない。
+        assert_eq!(
+            format!("{error:#}"),
+            "コミットに失敗: pre-commit: trailing whitespace"
+        );
+        // git を起動できなかった等は、連鎖全体を理由にする。
+        let spawn = anyhow::anyhow!("No such file or directory").context("git の実行に失敗");
+        assert_eq!(
+            failure_output(&spawn),
+            "git の実行に失敗: No such file or directory"
+        );
+    }
+
+    /// パネルからのコミットはフックを走らせ、止められたらフックの出力を返す。
+    /// 自動で走る git（worktree 作成）はフックを走らせない。
+    #[cfg(unix)]
+    #[test]
+    fn commit_runs_hooks_and_reports_their_output() {
+        let Some(root) = hook_repo("hooks_commit") else {
+            return; // git 無し環境はスキップ
+        };
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "init").unwrap();
+
+        write_hook(
+            &root,
+            "pre-commit",
+            "echo 'pre-commit: 末尾に空白があります' >&2\nexit 1",
+        );
+        std::fs::write(root.join("a.txt"), "two \n").unwrap();
+        stage_all(&root).unwrap();
+        let error = commit(&root, "blocked").unwrap_err();
+        assert!(
+            failure_output(&error).contains("pre-commit: 末尾に空白があります"),
+            "{error:#}"
+        );
+        assert_eq!(commit_count(&root), 1, "フックが止めたらコミットされない");
+
+        write_hook(&root, "pre-commit", "touch pre-commit-ran\nexit 0");
+        write_hook(
+            &root,
+            "commit-msg",
+            "grep -q '^fix' \"$1\" || { echo 'commit-msg: fix で始めてください' >&2; exit 1; }",
+        );
+        let error = commit(&root, "tidy").unwrap_err();
+        assert!(
+            failure_output(&error).contains("commit-msg: fix で始めてください"),
+            "{error:#}"
+        );
+        commit(&root, "fix: trailing space").unwrap();
+        assert!(root.join("pre-commit-ran").exists(), "pre-commit が走った");
+        assert_eq!(commit_count(&root), 2);
+
+        // 自動の git は hooksPath を /dev/null に向けるので post-checkout は走らない。
+        write_hook(&root, "post-checkout", "touch post-checkout-ran");
+        let worktree = scratch("hooks_commit_worktree");
+        create_task_worktree_on(&LocalHost, &root, &worktree, "task/hooks").unwrap();
+        assert!(
+            !root.join("post-checkout-ran").exists()
+                && !worktree.join("post-checkout-ran").exists(),
+            "自動の git でフックが走った"
+        );
+        remove_worktree(&root, &worktree, true).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// パネルからの push は pre-push を走らせ、止められたらその出力を返す。
+    #[cfg(unix)]
+    #[test]
+    fn push_runs_the_pre_push_hook() {
+        let Some(root) = hook_repo("hooks_push") else {
+            return;
+        };
+        let bare = scratch("hooks_push_remote");
+        std::fs::create_dir_all(&bare).unwrap();
+        let bare_init = Command::new("git")
+            .current_dir(&bare)
+            .args(["init", "-q", "--bare"])
+            .output()
+            .unwrap();
+        assert!(bare_init.status.success());
+        Command::new("git")
+            .current_dir(&root)
+            .args(["remote", "add", "origin", &bare.to_string_lossy()])
+            .output()
+            .unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "init").unwrap();
+        push(&root).unwrap(); // upstream 未設定 → set-upstream で通る（フック無し）
+
+        write_hook(
+            &root,
+            "pre-push",
+            "echo 'pre-push: テストが落ちています' >&2\nexit 1",
+        );
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "second").unwrap();
+        let error = push(&root).unwrap_err();
+        assert!(
+            failure_output(&error).contains("pre-push: テストが落ちています"),
+            "{error:#}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    /// Fleet の「変更」から開く diff は Task の base と比べる。エージェントがコミット済みの変更は
+    /// HEAD 比較では消えるが、base 比較なら出る。削除・新規・フォルダごとの削除も区別する。
+    #[test]
+    fn diff_against_a_base_commit_shows_committed_deleted_and_new_files() {
+        let Some(root) = hook_repo("diff_base") else {
+            return;
+        };
+        let host = LocalHost::shared();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("gone.txt"), "bye\n").unwrap();
+        std::fs::write(root.join("sub").join("deep.txt"), "deep\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "base").unwrap();
+        let base = git_head_oid_on(host.as_ref(), &root).unwrap();
+
+        // エージェントのコミット（base より後）＋作業ツリーの削除・新規。
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "agent").unwrap();
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        std::fs::remove_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+
+        let a = root.join("a.txt");
+        let task_base = DiffBase::Commit(base.clone());
+        assert_eq!(
+            diff_file_on(host.as_ref(), &a, &DiffBase::Head, Some("two\n")),
+            FileDiff::Unchanged,
+            "HEAD 比較ではコミット済みの変更が消える（直した不具合の再現）"
+        );
+        match diff_file_on(host.as_ref(), &a, &task_base, Some("two\n")) {
+            FileDiff::Modified(body) => {
+                assert!(body.contains("-one") && body.contains("+two"), "{body}")
+            }
+            other => panic!("base 比較なら中身が出る: {other:?}"),
+        }
+        match diff_file_on(host.as_ref(), &root.join("gone.txt"), &task_base, None) {
+            FileDiff::Deleted(body) => assert!(body.contains("-bye"), "{body}"),
+            other => panic!("削除は削除として出る: {other:?}"),
+        }
+        match diff_file_on(
+            host.as_ref(),
+            &root.join("sub").join("deep.txt"),
+            &task_base,
+            None,
+        ) {
+            FileDiff::Deleted(body) => assert!(body.contains("-deep"), "{body}"),
+            other => panic!("フォルダごと消えても削除として出る: {other:?}"),
+        }
+        match diff_file_on(
+            host.as_ref(),
+            &root.join("new.txt"),
+            &task_base,
+            Some("new\n"),
+        ) {
+            FileDiff::Added(body) => assert!(body.contains("+new"), "{body}"),
+            other => panic!("base に無いファイルは新規: {other:?}"),
+        }
+        assert_eq!(
+            diff_file_on(host.as_ref(), &root.join("never.txt"), &task_base, None),
+            FileDiff::Missing
+        );
+
+        assert_eq!(
+            rev_text_on(host.as_ref(), &a, &base).as_deref(),
+            Some("one\n")
+        );
+        assert_eq!(
+            rev_text_on(host.as_ref(), &root.join("new.txt"), &base),
+            None
+        );
+        assert_eq!(
+            rev_text_on(host.as_ref(), &a, "--output=/tmp/necoder-probe"),
+            None,
+            "オプションに見える rev は git に渡さない"
+        );
+        assert_eq!(task_base.label(), base[..7]);
+        assert_eq!(DiffBase::Head.label(), "HEAD");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

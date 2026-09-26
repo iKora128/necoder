@@ -74,6 +74,9 @@ pub struct ProjectSession {
     pub(crate) search_panel: Option<Entity<SearchPanel>>,
     pub(crate) repository: RepositoryController,
     pub(crate) git_panel: Entity<GitPanel>,
+    /// 変更レビュー（エディタのタブと Fleet の「変更」タブで同じ 1 枚を使う・Chat には無い）。
+    /// 表示するまで git を叩かない（`Workspace::activate_review`）。
+    pub(crate) review: Option<Entity<ReviewView>>,
     pub(crate) terminal_dock: Entity<TerminalDock>,
     /// Fleet の Tests surface 専用。通常 Terminal と同じ Entity を二箇所へ描画しない。
     pub(crate) tests_dock: Entity<TerminalDock>,
@@ -189,16 +192,23 @@ impl Workspace {
                 agent_panel.update(cx, |panel, cx| panel.set_storage(storage, cx));
             }
         }
-        let terminal_launch = Self::terminal_launch_for(slot);
-        let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-        let tests_dock =
-            cx.new(|_| TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()));
-        let explorer = cx.new(|_| Explorer::new(explorer_view));
-        let git_panel = cx.new(GitPanel::new);
         let accent = slot
             .map(|slot| slot.color)
             .unwrap_or_else(|| project_color(0));
+        let terminal_launch = Self::terminal_launch_for(slot);
+        let terminal_dock =
+            cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()).with_accent(accent));
+        let tests_dock = cx.new(|_| {
+            TerminalDock::new(Self::terminal_launch_for(slot), theme.clone()).with_accent(accent)
+        });
+        let explorer = cx.new(|_| Explorer::new(explorer_view));
+        let git_panel = Self::new_git_panel(&theme, accent, cx);
         let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
+        let review = slot.map(|_| {
+            let review = cx.new(|cx| ReviewView::new(theme.clone(), cx));
+            PanelRegistry::bind_review(&review, cx);
+            review
+        });
         PanelRegistry::bind_session(
             &agent_panel,
             &explorer,
@@ -219,6 +229,7 @@ impl Workspace {
                 refresh_generation: 0,
             },
             git_panel,
+            review,
             terminal_dock,
             tests_dock,
             agent_active: false,
@@ -446,6 +457,8 @@ impl Workspace {
         self.push_news(news_kind, news_color, news_title, news_text);
         // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
         self.schedule_control_summary(cx);
+        // Dock の要対応バッジ（失敗した Task も数える・O12）。Workspace を読むので update を抜けてから。
+        cx.defer(super::dock_badge::refresh_dock_badge);
         if phase == TaskPhase::Integrated {
             self.wake_captain(
                 session_index,
@@ -666,16 +679,19 @@ impl Workspace {
                     Self::terminal_launch_for(slot)
                 }
             };
-            let terminal_launch = launch_for(projects.get(index));
-            let terminal_dock = cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()));
-            let tests_dock =
-                cx.new(|_| TerminalDock::new(launch_for(projects.get(index)), theme.clone()));
-            let explorer = cx.new(|_| Explorer::new(explorer_view));
-            let git_panel = cx.new(GitPanel::new);
             let accent = projects
                 .get(index)
                 .map(|slot| slot.color)
                 .unwrap_or_else(|| project_color(0));
+            let terminal_launch = launch_for(projects.get(index));
+            let terminal_dock =
+                cx.new(|_| TerminalDock::new(terminal_launch, theme.clone()).with_accent(accent));
+            let tests_dock = cx.new(|_| {
+                TerminalDock::new(launch_for(projects.get(index)), theme.clone())
+                    .with_accent(accent)
+            });
+            let explorer = cx.new(|_| Explorer::new(explorer_view));
+            let git_panel = Self::new_git_panel(&theme, accent, cx);
             let todo_panel = cx.new(|_| TodoPanel::new(theme.clone(), accent));
             PanelRegistry::bind_session(
                 &agent_panel,
@@ -712,6 +728,8 @@ impl Workspace {
             } else {
                 None
             };
+            let review = cx.new(|cx| ReviewView::new(theme.clone(), cx));
+            PanelRegistry::bind_review(&review, cx);
             sessions.push(ProjectSession {
                 editor_area: EditorArea::new(),
                 fleet_agents: vec![agent_panel.clone()],
@@ -723,6 +741,7 @@ impl Workspace {
                     refresh_generation: 0,
                 },
                 git_panel,
+                review: Some(review),
                 terminal_dock,
                 tests_dock,
                 agent_active: false,
@@ -818,6 +837,7 @@ impl Workspace {
                 pending_settings_command: None,
                 pending_open_settings_json: false,
                 pending_external_open: Vec::new(),
+                pending_external_goto: Vec::new(),
                 pending_askpass: None,
                 pending_askpass_focus: false,
                 pending_remote_open: Vec::new(),
@@ -828,6 +848,8 @@ impl Workspace {
                 resize_start_width: 0.0,
                 explorer_width: DOCK_WIDTH,
                 resizing_explorer: false,
+                explorer_scroll: gpui::UniformListScrollHandle::new(),
+                explorer_focus: cx.focus_handle(),
                 should_move_window: false,
                 rail_drag: None,
                 rail_focus: cx.focus_handle(),
@@ -846,6 +868,7 @@ impl Workspace {
                 rail_menu: None,
                 tab_menu: None,
                 worktree_delete: None,
+                quit_confirm: None,
                 ssh_input: None,
                 askpass: None,
                 ssh_connecting: false,
@@ -854,6 +877,8 @@ impl Workspace {
                 shortcut_sheet: None,
                 // offscreen QA: NECODER_ABOUT=1 で起動時から About モーダルを開く（NECODER_SETTINGS と同型）。
                 about: std::env::var_os("NECODER_ABOUT").map(|_| cx.focus_handle()),
+                usage_popover: None,
+                usage_stats: None,
                 project_flash: None,
                 project_flash_gen: 0,
             },
@@ -880,6 +905,7 @@ impl Workspace {
             focus_recovery_installed: false,
             last_focused: None,
             restored_source_map: source_map,
+            window_handle: None,
         };
         // remote の接続状態を statusbar へ（購読は host ごとに 1 本・I/O 無し）。
         workspace.ensure_connection_pumps(cx);
@@ -1044,6 +1070,9 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+        // 使用量（O11）: エージェントのレート制限が届いたら statusbar とポップオーバーを描き直す（全窓）。
+        cx.observe_global::<agent_panel::usage::UsageLimits>(|_workspace, cx| cx.notify())
+            .detach();
         workspace.hydrate_restored_projects(restored_indexes, cx);
         workspace.ensure_work_layout(cx);
         workspace.save_state(cx); // 起動時点で状態を書く（再起動復元のため）
@@ -1234,6 +1263,7 @@ impl Workspace {
         let observation = cx.observe(&editor, Self::on_editor_changed);
         let input_subscription = cx.subscribe_in(&editor, window, Self::on_editor_typed);
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
+        let link_subscription = cx.subscribe_in(&editor, window, Self::on_preview_link);
         self.tabs.push(EditorTab {
             path: title_path,
             content: TabContent::Editor {
@@ -1241,6 +1271,7 @@ impl Workspace {
                 _observation: observation,
                 _input_subscription: input_subscription,
                 _hover_subscription: hover_subscription,
+                _link_subscription: link_subscription,
             },
             transient: true,
         });
@@ -1270,7 +1301,7 @@ impl Workspace {
             return;
         }
         for path in files {
-            if host.metadata(&path).is_ok() {
+            if web_tab_url(&path).is_some() || host.metadata(&path).is_ok() {
                 // 背景読み込みだと完了順でタブ順が崩れるため、local の復元は同期で開く
                 // （ローカル FS の stat/read はマイクロ秒。UI スレッドで払ってよい）。
                 self.open_file_sync(path, window, cx);
@@ -1330,15 +1361,23 @@ impl Workspace {
         let root = self
             .active_worktree()
             .map(|worktree| worktree.root().to_path_buf());
+        /// 背景で読み終えた 1 枚。Web タブ（鍵が URL）は読むものが無いので並びだけ保つ。
+        enum RestoredTab {
+            File(PathBuf, host::FileContent),
+            Web(String),
+        }
         cx.spawn(async move |_workspace, cx| {
-            let loaded: Vec<(PathBuf, host::FileContent)> = cx
+            let loaded: Vec<RestoredTab> = cx
                 .background_executor()
                 .spawn(async move {
                     files
                         .into_iter()
                         .filter_map(|path| {
+                            if let Some(url) = web_tab_url(&path) {
+                                return Some(RestoredTab::Web(url));
+                            }
                             let content = host.read_file(&path).ok()?;
-                            Some((path, content))
+                            Some(RestoredTab::File(path, content))
                         })
                         .collect()
                 })
@@ -1355,8 +1394,13 @@ impl Workspace {
                     return;
                 }
                 let rail_had_focus = workspace.chrome.rail_focus.is_focused(window);
-                for (path, content) in loaded {
-                    workspace.open_loaded_file(path, content, window, cx);
+                for tab in loaded {
+                    match tab {
+                        RestoredTab::File(path, content) => {
+                            workspace.open_loaded_file(path, content, window, cx)
+                        }
+                        RestoredTab::Web(url) => workspace.show_web_tab(url, window, cx),
+                    }
                 }
                 if active_file < workspace.tabs.len() {
                     workspace.select_tab(active_file, window, cx);

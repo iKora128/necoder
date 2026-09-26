@@ -13,6 +13,10 @@ finder:
   projects: Switch project…
   new_file: New file…
   new_dir: New folder…
+  search_ignored: Also search ignored files (.gitignore)
+  searching_ignored: Searching ignored files…
+  ignored_not_found: Not found in ignored files either
+  ignored_detail: ignored
 agent:
   pasted_image: Pasted image
   search_placeholder: Search this conversation
@@ -30,6 +34,7 @@ agent:
   default_thread_name: Thread %{n}
   open_diff_tab: Open in editor (diff tab)
   waiting_permission: Waiting for permission
+  waiting_question: Waiting for your answer
   todos: Todos
   copy_tip: Copy this entry
   input_expand: "Show all %{n} lines"
@@ -116,6 +121,13 @@ agent:
   stop: Stop esc
   running_hint: esc to interrupt
   running_thinking: Thinking
+  slash_footer: "%{count} commands · ↑↓ to choose · Enter / Tab to insert · esc to close"
+  goal_label: Goal
+  goal_status_active: Active
+  goal_status_paused: Paused
+  goal_status_blocked: Blocked
+  goal_status_complete: Complete
+  goal_status_limited: Limit reached
   more_lines: "… (+%{n} lines)"
 hunk:
   stage: Stage this hunk
@@ -183,6 +195,7 @@ cmd:
   trigger_completion: "Edit: Trigger completion"
   show_hover: "Edit: Show hover"
   open_diff: "Git: Open diff tab"
+  open_review: "Git: Review changes"
   next_hunk: "Git: Next change"
   prev_hunk: "Git: Previous change"
   theme_selector: "View: Switch theme"
@@ -195,6 +208,8 @@ cmd:
   new_chat: "Chat: New chat"
   toggle_agent_full_screen: "View: AI full screen (hide the editor)"
   split_right: "View: Split right"
+  open_localhost_preview: "Preview: Open localhost…"
+  toggle_design_mode: "Preview: Design mode (pick elements for the AI)"
   new_thread: "AI: New thread"
   next_tab: "Tabs: Next"
   prev_tab: "Tabs: Previous"
@@ -210,6 +225,8 @@ cmd:
   open_recent: "File: Open Recent…"
   open_dialog: "File: Open Folder…"
   shortcut_sheet: "Help: Keyboard shortcuts"
+  usage_limits: "Usage: Show rate limits"
+  usage_stats: "Usage: Open statistics"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -219,6 +236,7 @@ control:
   summary_prompt: The input is the current state of a multi-agent fleet. As the Captain, summarize the situation and the next move in one English sentence. At most 100 characters, one line only, plain text with no quotes and no preamble.
   facts_stats: "Working %{working} · Needs attention %{attention} · Done unread %{done}"
   facts_permission: "Awaiting permission %{elapsed}: %{title}"
+  facts_question: "Awaiting an answer %{elapsed}: %{message}"
   facts_failed: "Failed: %{digest}"
   facts_done_unread: "Done but unread: %{digest}"
   next_badge: "next ⏎"
@@ -231,6 +249,7 @@ control:
   integrate: Integrate
   review: Run radar
   fix_instruct: Instruct fix
+  answer: Open to answer
 news:
   waiting: "waiting for approval — %{title}"
   failed: "failed — %{detail}"
@@ -268,6 +287,7 @@ fleet:
   new_task_setup_create: "Create (template: bring .env, share target)"
   new_task_no_repository: "No integration worktree (main) is open, so a Task cannot be started"
   next_allow: "Allow"
+  next_answer: "Answer"
   phase_working: "Working"
   phase_blocked: "Awaiting approval"
   phase_failed: "Failed"
@@ -347,6 +367,27 @@ worktree_delete:
   skip_next: Don't ask again (skipped only when there is nothing to lose)
   cancel: Cancel
   confirm: Delete
+notify:
+  done: "Done: %{thread}"
+  interrupted: "Stopped: %{thread}"
+  failed: "Failed: %{thread}"
+  permission: "Waiting for approval: %{thread}"
+  question: "Question: %{thread}"
+quit_confirm:
+  title: Work is still running
+  working: "Agents running: %{n}"
+  waiting: "Agents waiting for your approval or answer: %{n}"
+  terminals: "Terminals with a running process: %{n}"
+  detail_quit_hide: Quitting stops all of this. Hide necoder instead and it keeps running; click the Dock icon to come back.
+  detail_quit_minimize: Quitting stops all of this. Minimize instead and it keeps running.
+  detail_close_hide: Closing this window stops all of this. Hide necoder instead and it keeps running; click the Dock icon to come back.
+  detail_close_minimize: Closing this window stops all of this. Minimize instead and it keeps running.
+  keep_running_hide: Hide and keep running
+  keep_running_minimize: Minimize and keep running
+  quit: Quit
+  close: Close
+  cancel: Cancel
+  setting_hint: "Turn this off in Settings › Behavior & editor › Confirm before quitting"
 launcher:
   placeholder: Open or choose a recent project…
   open_folder: Open Folder…
@@ -389,6 +430,8 @@ titlebar:
 settings:
   pref_agent_idle_stop: Stop unused agents after (minutes)
   pref_agent_idle_stop_sub: Each agent holds several hundred MB. The conversation is kept and resumes on the next message. 0 = never
+  pref_allow_terminal_send: Let the CLI type into terminals
+  pref_allow_terminal_send_sub: "Lets agents and scripts type into necoder's terminals with `ne terminal send`. What they send runs in that terminal as if you typed it (list, read and wait work even when this is off)"
   chat_heading: CHAT
   chat_directory: Where chat folders are kept
   chat_directory_default: necoder in your Documents folder (default)
@@ -461,6 +504,12 @@ settings:
   pref_tabs_view: Thread tabs
   tabs_view_bar: Bar
   tabs_view_list: List
+  pref_system_notifications: System notifications
+  pref_system_notifications_sub: Posts to Notification Center when an agent in a window you aren't looking at finishes or stops (click to jump to the thread)
+  pref_confirm_quit: Confirm before quitting
+  pref_confirm_quit_sub: "On ⌘Q or when closing the last window, offers “Hide and keep running” while agents or terminals are busy"
+  confirm_quit_running: Only while busy
+  confirm_quit_never: Never
   appearance_heading: Appearance
   appearance_sub: Themes apply the moment you click and are saved to settings.json.
   theme_label: Theme
@@ -499,6 +548,25 @@ settings:
   cli_busy: Working…
   cli_admin_prompt: necoder installs the ne command into /usr/local/bin.
   cli_admin_prompt_remove: necoder removes the ne command from /usr/local/bin.
+  save_unreadable: "Couldn't read %{file}, so nothing was saved (%{reason})"
+  save_failed: "Couldn't save the setting (%{reason})"
+  skills_heading: Skills
+  skills_sub: Instructions (SKILL.md) that agents such as Claude Code and Codex read. With the necoder skill, agents learn the necoder CLI for the version you run.
+  skills_necoder_label: necoder skill
+  skills_checking: Checking…
+  skills_busy: Working…
+  skills_install_button: Install
+  skills_update_button: Update
+  skills_update_available: Update available
+  skills_installed_chip: Installed
+  skills_foreign: "%{path} was not written by necoder, so it is left as is (to overwrite, run `ne skills install --force`)"
+  skills_read_error: "Cannot read %{path} (%{error})"
+  skills_found: "Skills found (%{count})"
+  skills_empty: No skills found (looked in ~/.claude/skills, ~/.codex/skills, ~/.agents/skills and the project's .claude/skills and .agents/skills)
+  skills_skipped: "%{count} skipped because their front matter could not be read (run `ne skills list` for the reasons)"
+  skills_scope_shared: Shared (~/.agents)
+  skills_scope_claude_project: Claude Code · project
+  skills_scope_shared_project: Shared · project
 explorer:
   main_worktree_undeletable: The main worktree cannot be deleted (use Remove from rail instead)
   up_folder: Up one folder
@@ -519,8 +587,31 @@ explorer:
   ctx_duplicate: Duplicate
   ctx_trash: Move to trash
   ctx_copy_path: Copy path
+  ctx_search_folder: Find in folder
+  ctx_stage: Stage
+  ctx_discard: Discard changes…
+  discard_title: "Discard changes to “%{name}”?"
+  discard_body: Restores the last committed version, including staged changes. This can't be undone.
+  discard_body_untracked: This file isn't tracked by git, so it will be moved to the Trash (press ⌘Z in the explorer to bring it back).
+  discard_confirm: Discard
+  discard_cancel: Cancel
+  discard_untracked_remote: Can't clean up untracked files on a remote host (the file was removed from git's index)
+  undo_empty: No file operation to undo
+  undid_create: "Undid creating “%{name}”"
+  undid_move: "Moved “%{name}” back to its original name and place"
+  undid_trash: "Restored “%{name}” from the Trash"
+  undid_many: "Undid %{n} file operations"
+  undo_trash_unknown: "Can't restore “%{name}”: where it went in the Trash is unknown"
+  undo_not_in_trash: "Can't restore “%{name}”: it is no longer in the Trash (emptied, or put back from Finder)"
+  undo_exists: "Can't undo: an item named “%{name}” is already there"
+  undo_missing: "Can't undo: “%{name}” was not found"
+  undo_dirty: "Not undoing: “%{name}” has unsaved changes (save or close it first)"
+  undo_failed: "Couldn't undo: %{error}"
 searchpanel:
   placeholder: Search across project…
+  placeholder_scoped: Search in this folder…
+  scope: "In: %{path}"
+  scope_clear: Clear the folder scope (search the whole project; ⌫ on an empty query also clears it)
   searching: Searching…
   results: "%{n} matches / %{files} files"
   hint_enter: Press Enter to search
@@ -547,6 +638,8 @@ git:
   changes: Changes
   no_changes: No changes
   stage_all_tip: Stage all
+  review_changes: Review changes
+  review_changes_tip: Read every changed file on one screen (choose what to compare against)
   stage: Stage
   unstage: Unstage
   history: History
@@ -564,6 +657,17 @@ git:
   idle: idle
   branch_menu_tip: Branch / worktree
   switcher_tip: Switch project / branch  ⌘O
+  commit_failed: Couldn't commit
+  stage_failed: Couldn't stage
+  unstage_failed: Couldn't unstage
+  push_failed: Couldn't push
+  pull_failed: Couldn't pull
+  pr_create_failed: Couldn't open the pull request page
+  pr_open_failed: Couldn't open the pull request or repository
+  ai_message_failed: Couldn't generate a commit message
+  branch_create_failed: Couldn't create the branch
+  worktree_no_parent: "Can't decide where to create the worktree (the project folder has no parent folder)"
+  output_title: "%{command} output"
 dock:
   left: Show/hide left panel (explorer)
   bottom: Show/hide bottom panel (terminal)
@@ -591,22 +695,145 @@ webview:
   failed: Unable to open HTML preview
   unsupported: HTML preview currently supports macOS and Windows
   hidden_by_overlay: Returns when the panel in front closes
+  outside_localhost: Only localhost URLs can be opened
+  web_failed: Unable to open the preview
+  unreachable: "Couldn't connect to %{target}"
+  unreachable_hint: Start the dev server, then press Reload in the toolbar
+webtab:
+  back_tip: Back
+  forward_tip: Forward
+  reload_tip: Reload
+  zoom_in_tip: Zoom in
+  zoom_out_tip: Zoom out
+  zoom_reset_tip: Reset to 100%
+  viewport_full: Full
+  viewport_full_tip: Fill the pane width
+  viewport_tip: "Show at %{width}px wide"
+  devtools_tip: Open DevTools (Web Inspector)
+  open_browser_tip: Open in default browser
+  unsupported: Web tabs aren't available here (macOS / Windows only)
+  picker_placeholder: "Port or localhost URL (e.g. 3000 / localhost:5173/app)"
+  picker_action: Open localhost
+  invalid_url: "Only localhost URLs can be opened: %{input}"
+  ctx_open_browser: Open in default browser
+  ctx_copy_url: Copy URL
+design:
+  toggle: Design
+  toggle_tip: "Design: pick page elements to attach to the AI prompt"
+  hint: Click an element to pick it (Shift+click to keep picking, Esc to finish)
+  prompt_heading: "### Page element: %{label}"
+  prompt_page: Page
+  prompt_selector: Selector
+  prompt_path: Path
+  prompt_source: Source
+  prompt_components: Components
+  prompt_accessibility: Accessibility
+  prompt_bounds: Position and size
+  prompt_bounds_value: "x=%{x} y=%{y} %{width}×%{height} (viewport %{viewport})"
+  prompt_styles: Styles
+  prompt_text: Text
+  prompt_nearby: Nearby text
+  capture_failed: Couldn't capture the element (attached the text only)
+  needs_web_tab: "Design works in a Web tab (Preview: Open localhost…)"
+  not_ready: Start Design once the page is showing
 pdf:
   unsupported: PDF cannot be shown in a tab in this environment
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead
 terminal:
   tab_title: Terminal %{n}
+  close_busy_title: "A process is running in Terminal %{n}"
+  close_busy_detail: Closing the terminal stops it too.
+  close_busy_confirm: Close
+  close_busy_cancel: Cancel
   add_tip: New terminal
   close_dock_tip: Close bottom dock  ⌘J
   git_tip: Source control  ⌃⇧G
+  search_invalid_regex: Invalid regular expression
+  menu_copy: Copy
+  menu_paste: Paste
+  menu_select_all: Select All
+  menu_clear: Clear
+  menu_find: Find
 theme:
   builtin: Built-in
   user: User
   picker_placeholder: Select theme
 link:
   open_failed: "Could not open %{target}"
+toast:
+  open_details: Details ›
+review:
+  tab_title: Review
+  compare: Compare
+  base_task: "Task base · %{sha}"
+  base_head: HEAD (uncommitted changes)
+  base_branch: "⎇ %{branch} · fork point %{sha}"
+  base_branch_pending: "⎇ %{branch}"
+  base_commit: "Commit %{sha}"
+  menu_task: Task base (when the Task was created)
+  menu_head: HEAD — uncommitted changes only
+  menu_branches: Branches (from the fork point)
+  menu_commits: Commits
+  menu_loading: Loading…
+  ignore_whitespace: Ignore whitespace
+  ignore_whitespace_tip: Hide whitespace-only differences (git diff -w)
+  files: "%{count} files"
+  refresh_tip: Reload
+  outdated: New changes
+  tree_tip: Show / hide the file tree
+  loading: Loading changes…
+  empty: "No changes (compared with %{base})"
+  error_not_repo: Not a git repository
+  error_unknown_base: "Can't find what to compare with: %{base}"
+  error_git: "git failed: %{message}"
+  notice_binary: Binary file — contents not shown
+  notice_too_large: "Too large to show (%{counts}) — use Open to see it in the editor"
+  notice_mode: Mode change only
+  notice_empty: No content changes
+  fold: "⋯ %{count} lines"
+  fold_tip: Click to reveal 20 more lines on each side
+  open_file: Open
+  open_file_tip: Open this file in the editor
+  reviewed: Viewed
+  reviewed_tip: Mark as viewed and collapse (click again to unmark)
+  renamed_from: "← %{path}"
+  no_newline: No newline at end of file
+  add_note_tip: Add a note (or select lines and press c)
+  note_unsent: Unsent
+  note_sent: Sent
+  note_resolved: Resolved
+  note_edit: Edit
+  note_resolve: Resolve
+  note_reopen: Reopen
+  note_delete: Delete
+  note_new: Note
+  note_editing: Edit note
+  draft_hint: "%{save} to save · Esc to cancel"
+  draft_save: Save
+  draft_cancel: Cancel
+  tray_summary: "%{count} notes (%{unsent} unsent)"
+  send: Send
+  resend: Resend unresolved
+  send_to: "Send to (%{count} notes as one message)"
+  send_new_thread: + Send in a new thread
+  send_default: Default
+  send_empty: No threads to send to
+  sent_toast: "Sent %{count} notes to %{thread}"
+  send_failed: Couldn't send (thread not found)
+  prompt_header: "Review comments (%{count}) — compared: %{base}..working tree"
+  prompt_old_side: "%{location} (removed lines, base-side line numbers)"
 difftab:
   proposal_title: "%{title} ⇄ proposal"
+  title: "%{name} ⇄ %{base}"
+  title_deleted: "%{name} ⇄ %{base} (deleted)"
+  header_side: "%{path} (%{side})"
+  side_working_tree: working tree
+  side_buffer: buffer
+  new_file: new file
+  deleted_file: deleted file
+  no_changes: "No changes: %{name} is the same as %{base}"
+  missing: "%{name} is in neither %{base} nor the working tree"
+  unreadable: "Can't show a diff: %{name} isn't readable as text"
 update:
   available: ⬆ Update to v%{version}
   get: ⬆ Get v%{version}
@@ -650,6 +877,17 @@ ipc:
   err_unknown_method: "Unknown method: %{name}"
   err_bad_json: "Can't parse JSON: %{detail}"
   err_gui_timeout: GUI response timed out
+  err_no_active_task: No Task is selected in the GUI (Chat is open or no project is open)
+  err_active_is_integration: "The selection in the GUI is the integration space (%{title}), not a Task"
+  err_terminal_required: terminal (a handle or active) is required
+  err_terminal_not_found: "Terminal not found: %{handle} (get the handles again with `ne terminal list`)"
+  err_no_active_terminal: The selected project has no terminal in the bottom dock
+  err_terminal_send_disabled: Sending to terminals is not allowed (turn on "Let the CLI type into terminals" in Settings › Behavior & editor)
+  err_text_required: text is required
+  err_diff_paths_required: left and right (absolute paths of the two files to compare) are required
+  err_not_a_file: "Not a file: %{path}"
+  err_read_file: "Can't read %{path} (%{error})"
+  err_no_project: No project is open
 crash:
   notice: ⚠ Crashed last time — click to report
 menu:
@@ -791,6 +1029,8 @@ key:
   section_agent: AI chat
   section_control: Control
   section_global: Global
+  section_explorer: Explorer
+  undo_file_operation: Undo file operation
   backspace: Delete backward
   delete: Delete forward
   newline: New line
@@ -849,6 +1089,12 @@ key:
   hide_others: Hide others
   activate_project: Switch to project (rail order)
   quit: Quit necoder
+  section_terminal: Terminal
+  terminal_copy: Copy selection
+  terminal_paste: Paste
+  terminal_select_all: Select all
+  terminal_clear: Clear
+  terminal_find: Find in terminal
 work:
   repositories: Repositories / work
   open_beside: Open beside
@@ -935,3 +1181,53 @@ chat:
   copy_to_project: "Copy to project “%{project}”"
   copied_to_project: "Copied: %{path}"
   copy_failed: "Could not copy: %{message}"
+usage:
+  window_five_hour: 5-hour window
+  window_five_hour_short: 5h
+  window_weekly: Weekly window
+  window_weekly_short: 7d
+  window_opus: Weekly (Opus)
+  window_opus_short: Opus 7d
+  window_sonnet: Weekly (Sonnet)
+  window_sonnet_short: Sonnet 7d
+  window_weekly_extra: Weekly (incl. extra usage)
+  window_weekly_extra_short: 7d+extra
+  window_extra: Extra usage
+  window_extra_short: Extra
+  window_days: "%{days}-day window"
+  window_days_short: "%{days}d"
+  window_hours: "%{hours}-hour window"
+  window_hours_short: "%{hours}h"
+  window_minutes: "%{minutes}-minute window"
+  window_minutes_short: "%{minutes}m"
+  resets_in: "resets in %{time}"
+  reset_done: reset (no new value yet)
+  duration_minutes: "%{minutes}m"
+  duration_hours: "%{hours}h %{minutes}m"
+  duration_hours_only: "%{hours}h"
+  duration_days: "%{days}d %{hours}h"
+  duration_days_only: "%{days}d"
+  chip_tip: "%{agent} usage (last value received). Click for details"
+  popover_title: Usage & rate limits
+  received: "received %{when}"
+  status_warning: Near the limit
+  status_rejected: Limit reached
+  no_values: No values yet. They appear once an agent reports them
+  note: Values change only when an agent reports them. What you see here is the last value received.
+  codex_note: Codex does not report limits over ACP, so they are read from the Codex CLI (codex app-server) when you open this panel.
+  codex_loading: Reading Codex limits…
+  codex_failed: "Couldn't read Codex limits: %{error}"
+  reload: Reload
+  open_stats: Open statistics
+  stats_title: Usage statistics
+  stats_subtitle: Last 30 days · only turns recorded by necoder
+  stats_date: Date
+  stats_agent: Agent
+  stats_turns: Turns
+  stats_tokens: Tokens
+  stats_cost: Cost
+  stats_total: 30-day total
+  stats_empty: Nothing recorded yet. Turns are recorded once an agent reports usage.
+  stats_loading: Loading…
+  stats_failed: "Couldn't read usage: %{error}"
+  stats_note: Tokens and cost are estimates each agent reports per turn (Claude's cost is Claude Code's estimate; Codex reports no cost, and its tokens cover only the last request of each turn). Local logs such as ~/.claude are not read.

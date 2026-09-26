@@ -22,7 +22,7 @@ mod remote;
 
 pub use settings_core::{
     persist_agent_config_default, persist_mcp_enabled, persist_user_value, user_settings_path,
-    Density, McpServerSetting, Settings, SettingsStore,
+    Density, McpServerSetting, Settings, SettingsStore, UnreadableSettings,
 };
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
@@ -78,20 +78,34 @@ pub fn get(cx: &App) -> Settings {
         .unwrap_or_default()
 }
 
-/// user 設定の 1 キーを更新して**即適用 + 永続化**する（UI トグル・in-proc MCP から）。
-/// 書き込み→再読込で observer が発火し、全ビューへ波及する。poll は待たない。
-pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) {
+/// user 設定ファイルへ 1 点書いて、store を読み直す（observer が発火し全ビューへ波及する）。
+/// 書けなかった時も読み直す＝画面はファイルの実際の値へ戻る。失敗は呼び手へ返し、
+/// 呼び手が [`save_failure_message`] でトーストに出す（settings.json を黙って壊さない・黙って捨てない）。
+fn write_user_file(
+    cx: &mut App,
+    write: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let path = cx
         .try_global::<SettingsGlobal>()
         .and_then(|global| global.user_path.clone());
-    if let Some(path) = path {
-        if let Err(error) = persist_user_value(&path, key, value) {
-            eprintln!("設定の保存に失敗（実行時のみ反映）: {error:#}");
-        }
-    }
+    let result = match path {
+        Some(path) => write(&path),
+        None => Ok(()),
+    };
     if cx.has_global::<SettingsGlobal>() {
         cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
     }
+    if let Err(error) = &result {
+        eprintln!("設定の保存に失敗: {error:#}");
+    }
+    result
+}
+
+/// user 設定の 1 キーを更新して**即適用 + 永続化**する（UI トグル・in-proc MCP から）。
+/// 書き込み→再読込で observer が発火し、全ビューへ波及する。poll は待たない。
+/// 既存の settings.json を読めない時は書かずに `Err`（[`UnreadableSettings`]）。
+pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
+    write_user_file(cx, |path| persist_user_value(path, key, value))
 }
 
 /// `agent_config_defaults.<agent_id>.<config_id>` の 1 点を更新して**即適用 + 永続化**する（composer ピルの sticky）。
@@ -99,49 +113,59 @@ pub fn set_user_value(cx: &mut App, key: &str, value: serde_json::Value) {
 ///
 /// `config_id` / `value_id` は **ACP が広告した綴りそのまま**を渡すこと（表示名を渡してはいけない）。
 /// necoder 側で綴りを作り直すと、次に広告と突き合わせたとき一致せずエージェント既定へ落ちる。
-pub fn set_agent_config_default(cx: &mut App, agent_id: &str, config_id: &str, value_id: &str) {
-    let path = cx
-        .try_global::<SettingsGlobal>()
-        .and_then(|global| global.user_path.clone());
-    if let Some(path) = path {
-        if let Err(error) = persist_agent_config_default(&path, agent_id, config_id, value_id) {
-            eprintln!("エージェント既定の保存に失敗（実行時のみ反映）: {error:#}");
-        }
-    }
-    if cx.has_global::<SettingsGlobal>() {
-        cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
-    }
+pub fn set_agent_config_default(
+    cx: &mut App,
+    agent_id: &str,
+    config_id: &str,
+    value_id: &str,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        persist_agent_config_default(path, agent_id, config_id, value_id)
+    })
 }
 
 /// `<section>.<key>`（`chat.directory` など 1 段の入れ子）を更新して**即適用 + 永続化**する。
 /// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。
-pub fn set_nested_user_value(cx: &mut App, section: &str, key: &str, value: serde_json::Value) {
-    let path = cx
-        .try_global::<SettingsGlobal>()
-        .and_then(|global| global.user_path.clone());
-    if let Some(path) = path {
-        if let Err(error) = settings_core::persist_nested_value(&path, section, key, value) {
-            eprintln!("設定の保存に失敗（実行時のみ反映）: {error:#}");
-        }
-    }
-    if cx.has_global::<SettingsGlobal>() {
-        cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
-    }
+pub fn set_nested_user_value(
+    cx: &mut App,
+    section: &str,
+    key: &str,
+    value: serde_json::Value,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_nested_value(path, section, key, value)
+    })
 }
 
 /// `mcp_servers.<name>.enabled` を更新して**即適用 + 永続化**する（設定画面のトグル）。
 /// `set_user_value` と同じ経路（書き込み→reload→observer 発火）。次に開くセッションから効く。
-pub fn set_mcp_enabled(cx: &mut App, name: &str, enabled: bool) {
-    let path = cx
-        .try_global::<SettingsGlobal>()
-        .and_then(|global| global.user_path.clone());
-    if let Some(path) = path {
-        if let Err(error) = persist_mcp_enabled(&path, name, enabled) {
-            eprintln!("MCP サーバの有効/無効の保存に失敗（実行時のみ反映）: {error:#}");
+pub fn set_mcp_enabled(cx: &mut App, name: &str, enabled: bool) -> anyhow::Result<()> {
+    write_user_file(cx, |path| persist_mcp_enabled(path, name, enabled))
+}
+
+/// 設定を保存できなかった時のトーストの文。settings.json を読めない（手編集の途中で壊れている）
+/// なら「読めないので保存しなかった」＋理由、それ以外（書き込み失敗）は「保存できなかった」＋理由。
+pub fn save_failure_message(error: &anyhow::Error) -> SharedString {
+    match error.downcast_ref::<UnreadableSettings>() {
+        Some(unreadable) => {
+            let file = match unreadable.path.parent().and_then(Path::file_name) {
+                Some(folder) if folder == ".necoder" => ".necoder/settings.json".to_string(),
+                _ => unreadable
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| unreadable.path.display().to_string()),
+            };
+            SharedString::from(i18n::t!(
+                "settings.save_unreadable",
+                "file" => file,
+                "reason" => &unreadable.reason
+            ))
         }
-    }
-    if cx.has_global::<SettingsGlobal>() {
-        cx.update_global::<SettingsGlobal, _>(|global, _| global.reload());
+        None => SharedString::from(i18n::t!(
+            "settings.save_failed",
+            "reason" => format!("{error:#}")
+        )),
     }
 }
 
@@ -237,6 +261,9 @@ pub enum SettingsViewEvent {
         key: &'static str,
         value: String,
     },
+    /// 設定を保存できなかった（settings.json を読めない等）。文は [`save_failure_message`]。
+    /// トーストは shell が出す。
+    SaveFailed(SharedString),
 }
 
 /// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
@@ -315,8 +342,80 @@ pub struct SettingsView {
     remote_busy: bool,
     remote_error: Option<SharedString>,
     remote_generation: u64,
+    /// Skills 節の中身（skill 置き場の走査結果と necoder の skill の状態）。`None` = まだ読んでいない。
+    /// 他人の置き場を数十個読むので背景で読み、描画はこのキャッシュだけを見る。
+    skills: Option<SkillsSnapshot>,
+    /// 一覧に含めるプロジェクト（アクティブなローカルのプロジェクトの根）。workspace が開く前に渡す。
+    skills_project: Option<PathBuf>,
+    /// necoder の skill を置いている最中（連打防止・「実行中…」表示）。
+    skills_busy: bool,
+    /// 直近の設置の失敗。行の下に出す。
+    skills_error: Option<SharedString>,
+    skills_generation: u64,
     #[cfg(feature = "remote-preview")]
     remote_preview_only: bool,
+}
+
+/// Skills 節に出すもの（背景で 1 度に読む）。
+#[derive(Clone)]
+struct SkillsSnapshot {
+    /// 表示で `~/…` に縮めるためのホーム。
+    home: PathBuf,
+    skills: Vec<agent_skills::SkillEntry>,
+    /// front matter が壊れていて一覧から外した数。
+    skipped: usize,
+    /// necoder の skill の置き場（`--agent` 省略時と同じ入れ先）ごとの状態。
+    placements: Vec<agent_skills::StubPlacement>,
+}
+
+/// necoder の skill の行に出す操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NecoderSkillAction {
+    /// necoder が書いた古い版がある（「更新があります」+ 更新する）。無い置き場があれば一緒に置く。
+    Update,
+    /// 置いていない置き場がある（入れる）。
+    Install,
+    /// どの置き場も最新（インストール済み）。
+    Installed,
+    /// 出す操作が無い（人が書いた SKILL.md だけ・読めない等。注記だけを出す）。
+    Nothing,
+}
+
+/// 置き場ごとの状態から行の操作を決める（読めなかった置き場は `states` に入れない）。
+fn necoder_skill_action(states: &[agent_skills::StubState]) -> NecoderSkillAction {
+    use agent_skills::StubState;
+    if states.contains(&StubState::Outdated) {
+        NecoderSkillAction::Update
+    } else if states.contains(&StubState::Missing) {
+        NecoderSkillAction::Install
+    } else if !states.is_empty() && states.iter().all(|state| *state == StubState::Current) {
+        NecoderSkillAction::Installed
+    } else {
+        NecoderSkillAction::Nothing
+    }
+}
+
+/// Skills 節の中身を読む（背景スレッドから）。ホームが分からなければ `None`。
+fn load_skills(project: Option<&Path>) -> Option<SkillsSnapshot> {
+    let home = agent_skills::default_home()?;
+    let scan = agent_skills::scan(&agent_skills::skill_roots(&home, project));
+    let placements = match cli_shim::current_binary() {
+        Ok(binary) => agent_skills::user_stub_placements(
+            &home,
+            &agent_skills::default_agents(&home),
+            &agent_skills::stub_skill_md(&binary),
+        ),
+        Err(error) => {
+            eprintln!("necoder の skill の状態を確かめられない: {error:#}");
+            Vec::new()
+        }
+    };
+    Some(SkillsSnapshot {
+        home,
+        skills: scan.skills,
+        skipped: scan.skipped.len(),
+        placements,
+    })
 }
 
 impl SettingsView {
@@ -342,6 +441,11 @@ impl SettingsView {
             remote_busy: false,
             remote_error: None,
             remote_generation: 0,
+            skills: None,
+            skills_project: None,
+            skills_busy: false,
+            skills_error: None,
+            skills_generation: 0,
             #[cfg(feature = "remote-preview")]
             remote_preview_only: false,
         };
@@ -373,6 +477,8 @@ impl SettingsView {
     /// 予約済みの vendor CLI 調査を 1 回だけ走らせる（render から。最新世代だけを反映する）。
     fn probe_availability(&mut self, cx: &mut Context<Self>) {
         self.availability_pending = false;
+        // skill の置き場も「描かれた」を合図に読み直す（開かれていない設定のために fs を歩かない）。
+        self.refresh_skills(cx);
         self.availability_generation = self.availability_generation.wrapping_add(1);
         let generation = self.availability_generation;
         cx.spawn(async move |view, cx| {
@@ -440,19 +546,28 @@ impl SettingsView {
         .detach();
     }
 
+    /// 設定の保存結果を見る。失敗は shell にトーストを頼む（黙って捨てない）。
+    fn report_save(&mut self, result: anyhow::Result<()>, cx: &mut Context<Self>) {
+        if let Err(error) = result {
+            cx.emit(SettingsViewEvent::SaveFailed(save_failure_message(&error)));
+        }
+    }
+
     fn set_default_agent(&mut self, label: &str, cx: &mut Context<Self>) {
-        set_user_value(
+        let result = set_user_value(
             cx,
             "default_agent",
             serde_json::Value::String(label.to_string()),
         );
+        self.report_save(result, cx);
         cx.notify();
     }
 
     /// Captain の任命 / 解任（FLEET-V2 §5.7）。同じエージェントをもう一度押すと解任（`null`）。
     /// 任命は人の明示操作に限る（既定ドリフト禁止・DECISIONS §8）ので、既定エージェントとは連動させない。
     fn toggle_captain(&mut self, label: &str, current: Option<&str>, cx: &mut Context<Self>) {
-        set_user_value(cx, "captain_agent", next_captain_value(label, current));
+        let result = set_user_value(cx, "captain_agent", next_captain_value(label, current));
+        self.report_save(result, cx);
         cx.notify();
     }
 
@@ -462,7 +577,8 @@ impl SettingsView {
     }
 
     fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
-        set_user_value(cx, "onboarded", serde_json::Value::Bool(true));
+        let result = set_user_value(cx, "onboarded", serde_json::Value::Bool(true));
+        self.report_save(result, cx);
         cx.emit(SettingsViewEvent::OnboardingCompleted);
         cx.notify();
     }
@@ -644,27 +760,366 @@ impl SettingsView {
             })
     }
 
+    // ── Skills（エージェントの skill 置き場・agent_skills crate）────────────────────
+
+    /// 一覧に含めるプロジェクト（アクティブなローカルのプロジェクトの根・リモートは `None`）。
+    /// workspace が設定を開く直前に渡す。次の読み直しから効く。
+    pub fn set_skills_project(&mut self, project: Option<PathBuf>) {
+        self.skills_project = project;
+    }
+
+    /// Skills 節の中身を背景で読み直す（最新の世代だけを反映する）。
+    fn refresh_skills(&mut self, cx: &mut Context<Self>) {
+        self.skills_generation = self.skills_generation.wrapping_add(1);
+        let generation = self.skills_generation;
+        let project = self.skills_project.clone();
+        cx.spawn(async move |view, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { load_skills(project.as_deref()) })
+                .await;
+            let applied = view.update(cx, |view, cx| {
+                if view.skills_generation == generation {
+                    view.skills = snapshot;
+                    cx.notify();
+                }
+            });
+            if applied.is_err() {
+                // 設定画面ごと閉じた＝反映する先が無い。
+            }
+        })
+        .detach();
+    }
+
+    /// necoder の skill を、無い置き場へ置き、necoder が書いた古い版を更新する。
+    /// 人や別のツールが書いた `SKILL.md`（印が無い）はここからは上書きしない（CLI の `--force` だけ）。
+    fn install_necoder_skill(&mut self, cx: &mut Context<Self>) {
+        if self.skills_busy {
+            return; // 連打防止
+        }
+        let Some(snapshot) = &self.skills else {
+            return;
+        };
+        let targets: Vec<(PathBuf, bool)> = snapshot
+            .placements
+            .iter()
+            .filter_map(|placement| match placement.state {
+                Ok(agent_skills::StubState::Missing) => Some((placement.path.clone(), false)),
+                Ok(agent_skills::StubState::Outdated) => Some((placement.path.clone(), true)),
+                _ => None,
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.skills_busy = true;
+        self.skills_error = None;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let desired = agent_skills::stub_skill_md(&cli_shim::current_binary()?);
+                    for (path, force) in targets {
+                        agent_skills::install_stub(&path, &desired, force)?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+            let applied = view.update(cx, |view, cx| {
+                view.skills_busy = false;
+                if let Err(error) = result {
+                    view.skills_error = Some(SharedString::from(format!("{error:#}")));
+                }
+                view.refresh_skills(cx);
+                cx.notify();
+            });
+            if applied.is_err() {
+                // 設定画面ごと閉じた＝結果を見せる先が無い（ファイルは書き終えている）。
+            }
+        })
+        .detach();
+    }
+
+    /// 一覧の「どのエージェントが読むか」。製品名はそのまま、共通の置き場とプロジェクトは訳す。
+    fn skill_scope_label(scope: agent_skills::SkillScope) -> String {
+        match scope {
+            agent_skills::SkillScope::ClaudeUser => {
+                agent_skills::SkillAgent::ClaudeCode.label().to_string()
+            }
+            agent_skills::SkillScope::CodexUser => {
+                agent_skills::SkillAgent::Codex.label().to_string()
+            }
+            agent_skills::SkillScope::SharedUser => i18n::t!("settings.skills_scope_shared"),
+            agent_skills::SkillScope::ClaudeProject => {
+                i18n::t!("settings.skills_scope_claude_project")
+            }
+            agent_skills::SkillScope::SharedProject => {
+                i18n::t!("settings.skills_scope_shared_project")
+            }
+        }
+    }
+
+    /// 「Skills」セクション（AI エージェントのページの末尾）。上 = necoder の skill の設置 / 更新、
+    /// 下 = 置き場で見つかった skill の一覧（名前・説明・場所・エージェント）。
+    fn skills_section(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let heading = self.section_heading(
+            i18n::t!("settings.skills_heading"),
+            Some(i18n::t!("settings.skills_sub")),
+        );
+        let muted = |text: String| {
+            div()
+                .text_size(px(11.))
+                .text_color(theme.fg2)
+                .child(SharedString::from(text))
+        };
+        let Some(snapshot) = &self.skills else {
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(heading)
+                .child(self.pref_row(
+                    i18n::t!("settings.skills_necoder_label"),
+                    None,
+                    muted(i18n::t!("settings.skills_checking")).into_any_element(),
+                ));
+        };
+        let states: Vec<agent_skills::StubState> = snapshot
+            .placements
+            .iter()
+            .filter_map(|placement| placement.state.clone().ok())
+            .collect();
+        let action = necoder_skill_action(&states);
+        let action_button = |id: &'static str, text: String| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(text))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _window, cx| view.install_necoder_skill(cx)),
+                )
+        };
+        // 状態に色相を使わない（UI-SPEC §1.3）: 「更新があります」は fg1 の文字、入っている印だけ
+        // `ne` コマンドの行と同じ accent-dim のチップ。
+        let control =
+            if self.skills_busy {
+                muted(i18n::t!("settings.skills_busy")).into_any_element()
+            } else if action == NecoderSkillAction::Update {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().text_size(px(11.)).text_color(theme.fg1).child(
+                        SharedString::from(i18n::t!("settings.skills_update_available")),
+                    ))
+                    .child(action_button(
+                        "skills-update",
+                        i18n::t!("settings.skills_update_button"),
+                    ))
+                    .into_any_element()
+            } else if action == NecoderSkillAction::Install {
+                action_button("skills-install", i18n::t!("settings.skills_install_button"))
+                    .into_any_element()
+            } else if action == NecoderSkillAction::Installed {
+                div()
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .bg(accent.alpha(0.16))
+                    .text_size(px(11.))
+                    .text_color(accent)
+                    .child(SharedString::from(i18n::t!(
+                        "settings.skills_installed_chip"
+                    )))
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
+        let placements_sub = snapshot
+            .placements
+            .iter()
+            .map(|placement| {
+                format!(
+                    "{} {}",
+                    placement.agent.label(),
+                    agent_skills::display_path(&placement.path, &snapshot.home)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let mut notes = div().flex().flex_col().gap(px(2.)).px(px(12.));
+        for placement in &snapshot.placements {
+            let path = agent_skills::display_path(&placement.path, &snapshot.home);
+            let note = match &placement.state {
+                Ok(agent_skills::StubState::Foreign) => {
+                    Some(i18n::t!("settings.skills_foreign", "path" => path))
+                }
+                Err(error) => Some(i18n::t!(
+                    "settings.skills_read_error",
+                    "path" => path,
+                    "error" => error
+                )),
+                Ok(_) => None,
+            };
+            if let Some(note) = note {
+                notes = notes.child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(note)),
+                );
+            }
+        }
+        let mut list = div().flex().flex_col().gap(px(6.));
+        if snapshot.skills.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(12.))
+                    .py(px(9.))
+                    .rounded(px(8.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(px(11.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.skills_empty"))),
+            );
+        }
+        for skill in &snapshot.skills {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(8.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.))
+                                    .text_color(theme.fg0)
+                                    .child(SharedString::from(skill.name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.))
+                                    .text_color(theme.fg2)
+                                    .child(SharedString::from(Self::skill_scope_label(
+                                        skill.scope,
+                                    ))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.fg1)
+                            .line_clamp(2)
+                            .text_ellipsis()
+                            .child(SharedString::from(skill.description.clone())),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(10.))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(agent_skills::display_path(
+                                &skill.path,
+                                &snapshot.home,
+                            ))),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(heading)
+            .child(self.pref_row(
+                i18n::t!("settings.skills_necoder_label"),
+                (!placements_sub.is_empty()).then_some(placements_sub),
+                control,
+            ))
+            .child(notes)
+            .when_some(self.skills_error.clone(), |element, error| {
+                element.child(
+                    div()
+                        .px(px(12.))
+                        .text_size(px(10.5))
+                        .text_color(theme.err)
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .px(px(2.))
+                    .pt(px(8.))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!(
+                        "settings.skills_found",
+                        "count" => snapshot.skills.len()
+                    ))),
+            )
+            .child(list)
+            .when(snapshot.skipped > 0, |element| {
+                element.child(muted(i18n::t!(
+                    "settings.skills_skipped",
+                    "count" => snapshot.skipped
+                )))
+            })
+    }
+
     // ── Preferences（設定の実効化・M13）──────────────────────────────────────────
     // settings.json を唯一の真実に、UI から各値を直接トグル/調整する。set_user_value が
     // 永続化 + observe_global 波及を担うので、変更は全ビューへ即反映される。
 
     fn set_pref_bool(&mut self, key: &'static str, value: bool, cx: &mut Context<Self>) {
-        set_user_value(cx, key, serde_json::Value::Bool(value));
+        let result = set_user_value(cx, key, serde_json::Value::Bool(value));
+        self.report_save(result, cx);
         cx.notify();
     }
 
     fn set_pref_int(&mut self, key: &'static str, value: i64, cx: &mut Context<Self>) {
-        set_user_value(cx, key, serde_json::json!(value));
+        let result = set_user_value(cx, key, serde_json::json!(value));
+        self.report_save(result, cx);
         cx.notify();
     }
 
     fn set_pref_float(&mut self, key: &'static str, value: f64, cx: &mut Context<Self>) {
-        set_user_value(cx, key, serde_json::json!(value));
+        let result = set_user_value(cx, key, serde_json::json!(value));
+        self.report_save(result, cx);
         cx.notify();
     }
 
     fn set_pref_string(&mut self, key: &'static str, value: &'static str, cx: &mut Context<Self>) {
-        set_user_value(cx, key, serde_json::Value::String(value.to_string()));
+        let result = set_user_value(cx, key, serde_json::Value::String(value.to_string()));
+        self.report_save(result, cx);
         cx.notify();
     }
 
@@ -867,15 +1322,17 @@ impl SettingsView {
         current: &str,
         cx: &mut Context<Self>,
     ) -> Div {
-        self.segmented_row_with(key, label, options, current, false, cx)
+        self.segmented_row_with(key, label, None, options, current, false, cx)
     }
 
     /// セグメント行の本体。`preview` を立てると、押したときに保存に加えて
     /// [`SettingsViewEvent::PreviewSound`] を上げる（通知音は聴かないと選べない）。
+    #[allow(clippy::too_many_arguments)]
     fn segmented_row_with(
         &self,
         key: &'static str,
         label: String,
+        sub: Option<String>,
         options: &[(&'static str, String)],
         current: &str,
         preview: bool,
@@ -924,7 +1381,7 @@ impl SettingsView {
                     ),
             );
         }
-        self.pref_row(label, None, segments.into_any_element())
+        self.pref_row(label, sub, segments.into_any_element())
     }
 
     /// 「外観」セクション。テーマをチップの列で並べ、クリックで即適用 + settings.json へ保存する。
@@ -1355,7 +1812,7 @@ impl SettingsView {
         column
     }
 
-    /// 選ばれているページの中身。1 ページ = 1 セクション（エージェントだけ `ne` コマンドを伴う）。
+    /// 選ばれているページの中身。1 ページ = 1 セクション（エージェントだけ `ne` コマンドと Skills を伴う）。
     fn page_body(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
         match self.page {
             SettingsPage::Agents => div()
@@ -1377,7 +1834,9 @@ impl SettingsView {
                 // Windows は W フェーズまで非対応＝セクションごと出さない。
                 .when(cli_shim::supported(), |element| {
                     element.child(self.cli_section(cx))
-                }),
+                })
+                // エージェントが読む手順書（SKILL.md）。`ne` の次＝「エージェントに necoder を教える」の並び。
+                .child(self.skills_section(cx)),
             SettingsPage::Mcp => self.mcp_section(cx),
             SettingsPage::Appearance => self.appearance_section(settings, cx),
             SettingsPage::Remote => self.remote_section(cx),
@@ -1389,7 +1848,8 @@ impl SettingsView {
 
     /// 1 件の on/off を保存し、一覧を読み直す（次に開くスレッドのセッションから効く）。
     fn toggle_mcp_server(&mut self, name: String, enabled: bool, cx: &mut Context<Self>) {
-        set_mcp_enabled(cx, &name, enabled);
+        let result = set_mcp_enabled(cx, &name, enabled);
+        self.report_save(result, cx);
         self.mcp_servers = mcp_servers(cx);
         cx.notify();
     }
@@ -1702,6 +2162,7 @@ impl SettingsView {
             .child(self.segmented_row_with(
                 "sound_done",
                 i18n::t!("settings.pref_sound_done"),
+                None,
                 &sound_options(),
                 &settings.sound_done,
                 true,
@@ -1710,9 +2171,31 @@ impl SettingsView {
             .child(self.segmented_row_with(
                 "sound_waiting",
                 i18n::t!("settings.pref_sound_waiting"),
+                None,
                 &sound_options(),
                 &settings.sound_waiting,
                 true,
+                cx,
+            ))
+            .child(self.toggle_row(
+                "system_notifications",
+                7,
+                i18n::t!("settings.pref_system_notifications"),
+                Some(i18n::t!("settings.pref_system_notifications_sub")),
+                settings.system_notifications,
+                cx,
+            ))
+            // ⌘Q・最後の窓を閉じる時の確認（O4）。値は settings.json の `confirm_quit`。
+            .child(self.segmented_row_with(
+                "confirm_quit",
+                i18n::t!("settings.pref_confirm_quit"),
+                Some(i18n::t!("settings.pref_confirm_quit_sub")),
+                &[
+                    ("running", i18n::t!("settings.confirm_quit_running")),
+                    ("never", i18n::t!("settings.confirm_quit_never")),
+                ],
+                &settings.confirm_quit,
+                false,
                 cx,
             ))
             .child(self.segmented_row(
@@ -1743,6 +2226,16 @@ impl SettingsView {
                 0.0,
                 240.0,
                 5.0,
+                cx,
+            ))
+            // `ne terminal send`（CLI から端末へ打つ）の許可。既定 off（送った文字はそのまま実行される）。
+            // `ne` の節はシムを置けない OS で隠れるが、送信は IPC なので OS を問わずここに置く。
+            .child(self.toggle_row(
+                "allow_terminal_send",
+                7,
+                i18n::t!("settings.pref_allow_terminal_send"),
+                Some(i18n::t!("settings.pref_allow_terminal_send_sub")),
+                settings.allow_terminal_send,
                 cx,
             ))
             .child(self.chat_group(settings, cx))
@@ -1818,13 +2311,14 @@ impl SettingsView {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|_, _, _window, cx| {
-                            set_nested_user_value(
+                        cx.listener(|view, _, _window, cx| {
+                            let result = set_nested_user_value(
                                 cx,
                                 "chat",
                                 "directory",
                                 serde_json::Value::String(String::new()),
                             );
+                            view.report_save(result, cx);
                             cx.notify();
                         }),
                     ),
@@ -1849,13 +2343,14 @@ impl SettingsView {
                 .child(glyph)
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |_, _, _window, cx| {
-                        set_nested_user_value(
+                    cx.listener(move |view, _, _window, cx| {
+                        let result = set_nested_user_value(
                             cx,
                             "chat",
                             "idle_stop_minutes",
                             serde_json::json!(target as i64),
                         );
+                        view.report_save(result, cx);
                         cx.notify();
                     }),
                 )
@@ -1940,13 +2435,14 @@ impl SettingsView {
         cx.spawn(async move |view, cx| {
             if let Ok(Ok(Some(paths))) = receiver.await {
                 if let Some(path) = paths.into_iter().next() {
-                    let _ = view.update(cx, |_, cx| {
-                        set_nested_user_value(
+                    let _ = view.update(cx, |view, cx| {
+                        let result = set_nested_user_value(
                             cx,
                             "chat",
                             "directory",
                             serde_json::Value::String(path.display().to_string()),
                         );
+                        view.report_save(result, cx);
                         cx.notify();
                     });
                 }
@@ -2158,6 +2654,38 @@ mod tests {
     }
 
     #[test]
+    fn necoder_skill_row_offers_update_before_install() {
+        use agent_skills::StubState::{Current, Foreign, Missing, Outdated};
+        // 古い版が 1 つでもあれば「更新があります」（無い置き場も同じボタンで置く）。
+        assert_eq!(
+            necoder_skill_action(&[Current, Outdated]),
+            NecoderSkillAction::Update
+        );
+        assert_eq!(
+            necoder_skill_action(&[Outdated, Missing]),
+            NecoderSkillAction::Update
+        );
+        assert_eq!(
+            necoder_skill_action(&[Missing, Current]),
+            NecoderSkillAction::Install
+        );
+        assert_eq!(
+            necoder_skill_action(&[Current, Current]),
+            NecoderSkillAction::Installed
+        );
+        // 人が書いた SKILL.md は設定画面からは上書きしない（注記だけ）。
+        assert_eq!(
+            necoder_skill_action(&[Foreign]),
+            NecoderSkillAction::Nothing
+        );
+        assert_eq!(
+            necoder_skill_action(&[Current, Foreign]),
+            NecoderSkillAction::Nothing
+        );
+        assert_eq!(necoder_skill_action(&[]), NecoderSkillAction::Nothing);
+    }
+
+    #[test]
     fn dismissed_captain_reads_back_as_unappointed() {
         // 解任は `null` を書く。読み戻すと未任命（None）になること＝ Fleet が「任命する」に戻る。
         let store = settings_core::SettingsStore::from_json_layers(&[
@@ -2167,5 +2695,38 @@ mod tests {
         ])
         .expect("マージできる");
         assert_eq!(store.settings().captain_agent, None);
+    }
+
+    /// 読めない settings.json に書き手が触らなかった時の知らせ: どのファイルか + 理由を出す。
+    #[test]
+    fn save_failure_names_the_unreadable_file_and_the_reason() {
+        let dir = std::env::temp_dir().join(format!(
+            "necoder-settings-save-failure-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let broken = "{ \"theme\": \"necoder-light\", }";
+        std::fs::write(&path, broken).expect("seed");
+        let error = persist_user_value(&path, "submit_on_enter", serde_json::Value::Bool(true))
+            .expect_err("壊れたファイルには書かない");
+        let message = save_failure_message(&error);
+        assert!(message.contains("settings.json"), "{message}");
+        assert!(message.contains("trailing comma"), "{message}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), broken);
+
+        // プロジェクトの設定（色の保存先）は `.necoder/settings.json` と分かる名前で出す。
+        let project = dir.join(".necoder").join("settings.json");
+        std::fs::create_dir_all(project.parent().expect("親")).expect("mkdir");
+        std::fs::write(&project, "{ // メモ\n}").expect("seed");
+        let error = persist_user_value(&project, "color", serde_json::json!("#ff0000"))
+            .expect_err("壊れたファイルには書かない");
+        assert!(save_failure_message(&error).contains(".necoder/settings.json"));
+
+        // 読めないのではなく書けなかった時は別の文（理由つき）。
+        let other = anyhow::anyhow!("disk full");
+        assert!(save_failure_message(&other).contains("disk full"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -195,6 +195,10 @@ pub struct Settings {
     /// 入力待ち（承認・質問で止まった）の通知音。値の取り方は [`Settings::sound_done`] と同じ。
     /// 完了とは違う音（別の声でもいい）を当てて、耳だけで「終わった」と「呼ばれている」を区別する。
     pub sound_waiting: String,
+    /// OS のデスクトップ通知（O12・既定 on）。ターンの完了 / 失敗・承認待ち・質問待ちを、
+    /// **その窓を見ていない時だけ**通知センターへ出す（見ている時は右下のトーストで足りる）。
+    /// ミュートしたスレッドは出さない。押すとそのスレッドへ飛ぶ。
+    pub system_notifications: bool,
     /// 装飾的な動きを静止するアクセシビリティ設定。GPUI の `reduce_motion` へ接続し、
     /// スピナー・fade・マスコットなどの継続アニメーションを静止画として描く。
     pub reduce_motion: bool,
@@ -205,9 +209,6 @@ pub struct Settings {
     /// 任命は settings.json の明示編集（既定ドリフト禁止の原則・DECISIONS §8）。
     /// 任命すると Blocked(15s)/Done/Failed 遷移で IntegrationSpace の Captain スレッドが 1 ターン起きる。
     pub captain_agent: Option<String>,
-    /// 編隊の目標文（管制ヘッダに常時表示・P3）。プロジェクト設定 `.necoder/settings.json` に
-    /// 書けばリポジトリごとの目標になる（ファイルが真実の原則＝計画の「ledger」は settings で満たす）。
-    pub fleet_goal: Option<String>,
     /// スレッドタブの見せ方（"bar" 横タブ / "list" 縦リスト）。Agent パネルのスイッチャがここへ保存し、
     /// 次の起動でも保つ。設定画面のトグル化は後続（真実はこの値・画面はこれを操作するだけ）。
     pub agent_tabs_view: String,
@@ -238,6 +239,10 @@ pub struct Settings {
     /// **off にしても「失うものがある」ときは必ず確認する** — 未コミットの変更は git にも残らないので、
     /// 「二度と聞くな」の対象は *取り返しがつく* 削除に限る（DECISIONS の該当項）。
     pub confirm_worktree_delete: bool,
+    /// ⌘Q・最後の窓を閉じる時の確認（`"running"` = 動いているものがある時だけ聞く・既定 /
+    /// `"never"` = 聞かない）。エージェントも端末もアプリ本体の子なので、終了すると一緒に止まる。
+    /// 解釈は [`Settings::quit_confirmation`]（知らない値は既定の側に倒す）。
+    pub confirm_quit: String,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
@@ -257,6 +262,11 @@ pub struct Settings {
     /// リモートの MCP サーバへ繋ぎに行く（実測: 初回応答 4.2 秒 → 切ると 1.8 秒・文脈 +6.7k トークン）。
     /// **Chat モードはこの設定に関わらず常に読み込まない**（necoder の MCP 設定で選んだ物だけを渡す原則）。
     pub claude_ai_connectors: bool,
+    /// CLI（`necoder terminal send`）から端末へ文字を送ってよいか（既定 false）。
+    /// 送ると、その端末のシェルやエージェントがそのまま実行する＝エージェントやスクリプトに
+    /// 人の代わりにキーを打たせることになるので、人が設定画面で明示的に許可した時だけ効かせる。
+    /// 一覧・読み取り・待機は許可なしで使える（何も起こさない）。
+    pub allow_terminal_send: bool,
     /// レールのアイコン表示（アクティビティバー）。
     pub rail: RailSettings,
     /// Chat モード（`docs/CHAT.md`）。
@@ -284,10 +294,10 @@ impl Default for Settings {
             agent_prewarm: true,
             sound_done: "nyaan".to_string(),
             sound_waiting: "nyaan".to_string(),
+            system_notifications: true,
             reduce_motion: false,
             tier2_summaries: true,
             captain_agent: None,
-            fleet_goal: None,
             agent_tabs_view: "bar".to_string(),
             work_tabs_position: "top".to_string(),
             default_agent: "Claude Code".to_string(),
@@ -295,10 +305,12 @@ impl Default for Settings {
             agent_servers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
+            confirm_quit: "running".to_string(),
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
             agent_idle_stop_minutes: 15,
             claude_ai_connectors: true,
+            allow_terminal_send: false,
             rail: RailSettings::default(),
             chat: ChatSettings::default(),
             fleet_hint_seen: false,
@@ -312,6 +324,27 @@ impl Default for Settings {
 /// `agent_panel::sound`。ここに置くのは「設定が受け取れる値」の正が settings 側だから。
 pub const SOUND_VOICES: [&str; 3] = ["nyaan", "nya", "mew"];
 
+/// ⌘Q・最後の窓を閉じる時に確認するか（`confirm_quit` の解釈・O4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitConfirmation {
+    /// 動いているもの（実行中・承認待ち/質問待ちのエージェント、前面でプロセスが動く端末）が
+    /// ある時だけ確認する。何も動いていなければ今までどおり即終了する。
+    WhenRunning,
+    /// 確認しない。
+    Never,
+}
+
+impl Settings {
+    /// `confirm_quit` の値。**知らない値は確認する側に倒す**（綴り違いで黙ってエージェントを
+    /// 止める方が、1 回余計に聞かれるより高くつく）。
+    pub fn quit_confirmation(&self) -> QuitConfirmation {
+        match self.confirm_quit.as_str() {
+            "never" => QuitConfirmation::Never,
+            _ => QuitConfirmation::WhenRunning,
+        }
+    }
+}
+
 /// 組み込みの既定設定（最下層。ユーザーが見られる正の既定値）。
 pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "theme": "necoder-dark",
@@ -323,16 +356,19 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "agent_prewarm": true,
   "sound_done": "nyaan",
   "sound_waiting": "nyaan",
+  "system_notifications": true,
   "reduce_motion": false,
   "tier2_summaries": true,
   "agent_tabs_view": "bar",
   "default_agent": "Claude Code",
   "confirm_worktree_delete": true,
+  "confirm_quit": "running",
   "agent_servers": {},
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
   "agent_idle_stop_minutes": 15,
   "claude_ai_connectors": true,
+  "allow_terminal_send": false,
   "onboarded": false,
   "rail": { "explorer": true, "search": true, "git": true, "agent": true, "terminal": true, "remote": true },
   "chat": { "directory": "", "instructions": "", "idle_stop_minutes": 10 }
@@ -404,28 +440,88 @@ pub fn user_settings_path() -> Option<PathBuf> {
     paths::settings_file()
 }
 
-/// user 設定ファイルの 1 キーだけを書き換えて保存する（アプリ内トグルの永続化用）。
-/// 既存 JSON を読んで（無ければ空オブジェクト）、`key` を `value` にして pretty で書き戻す。
-/// 他のキー・ユーザーの値は保つ。親ディレクトリが無ければ作る。
-pub fn persist_user_value(path: &Path, key: &str, value: Value) -> Result<()> {
-    let mut root: Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    // 破損・非オブジェクトだった場合も空オブジェクトから作り直す（黙って壊さない）。
-    if !root.is_object() {
-        root = Value::Object(serde_json::Map::new());
+/// 既存の設定ファイルを JSON として読めなかった（手編集の途中の末尾カンマ・コメント・
+/// トップレベルがオブジェクトでない等）。**書き手はこの時ファイルに一切触らない** —
+/// 空オブジェクトから作り直すと、利用者の設定を 1 キーだけ残して全部消してしまう。
+/// UI はこれを見て「読めないので保存しなかった」＋理由を知らせる。
+#[derive(Debug)]
+pub struct UnreadableSettings {
+    pub path: PathBuf,
+    /// 読めなかった理由（JSON パーサの行・桁つきの文など）。
+    pub reason: String,
+}
+
+impl std::fmt::Display for UnreadableSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} を読めないので保存しなかった: {}",
+            self.path.display(),
+            self.reason
+        )
     }
-    if let Value::Object(map) = &mut root {
-        map.insert(key.to_string(), value);
+}
+
+impl std::error::Error for UnreadableSettings {}
+
+/// 書き換える前の設定ファイルを読む。無ければ（中身が空白だけでも）空オブジェクト。
+/// 在るのに JSON オブジェクトとして読めなければ [`UnreadableSettings`]（呼び手は書かずに返す）。
+fn read_settings_object(path: &Path) -> Result<serde_json::Map<String, Value>> {
+    let unreadable = |reason: String| UnreadableSettings {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::Map::new());
+        }
+        Err(error) => return Err(unreadable(error.to_string()).into()),
+    };
+    if text.trim().is_empty() {
+        return Ok(serde_json::Map::new());
     }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Err(unreadable("トップレベルが JSON オブジェクトではない".to_string()).into()),
+        Err(error) => Err(unreadable(error.to_string()).into()),
+    }
+}
+
+/// 設定ファイルを pretty JSON で書く。親ディレクトリが無ければ作る。
+fn write_settings_object(path: &Path, root: serde_json::Map<String, Value>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("設定ディレクトリを作れない: {}", parent.display()))?;
     }
-    let text = serde_json::to_string_pretty(&root).context("設定の JSON 化に失敗")?;
+    let text =
+        serde_json::to_string_pretty(&Value::Object(root)).context("設定の JSON 化に失敗")?;
     std::fs::write(path, text).with_context(|| format!("設定を書けない: {}", path.display()))?;
     Ok(())
+}
+
+/// `root[key]` をオブジェクトとして取り出す（無い・オブジェクトでなければ空オブジェクトに置き換える）。
+fn object_entry<'a>(
+    root: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+) -> &'a mut serde_json::Map<String, Value> {
+    let entry = root
+        .entry(key)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = Value::Object(serde_json::Map::new());
+    }
+    entry.as_object_mut().expect("直前で object を保証")
+}
+
+/// user 設定ファイルの 1 キーだけを書き換えて保存する（アプリ内トグルの永続化用）。
+/// 既存 JSON を読んで（無ければ空オブジェクト）、`key` を `value` にして pretty で書き戻す。
+/// 他のキー・ユーザーの値は保つ。親ディレクトリが無ければ作る。
+/// 既存ファイルを読めなければ**書かずに** [`UnreadableSettings`] を返す（黙って壊さない）。
+pub fn persist_user_value(path: &Path, key: &str, value: Value) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    root.insert(key.to_string(), value);
+    write_settings_object(path, root)
 }
 
 /// `<section>.<key>` の 1 点だけを user 設定ファイルへ書き込む（`chat.directory` のような 1 段の入れ子）。
@@ -433,29 +529,9 @@ pub fn persist_user_value(path: &Path, key: &str, value: Value) -> Result<()> {
 /// **user ファイル自身の値だけ**を読んで更新する（マージ済みの解決値を書き戻すと project 層を焼き込む）。
 /// 同じ section の他のキーは保つ。
 pub fn persist_nested_value(path: &Path, section: &str, key: &str, value: Value) -> Result<()> {
-    let mut root: Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    let map = root.as_object_mut().expect("上で object を保証");
-    let entry = map
-        .entry(section)
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if !entry.is_object() {
-        *entry = Value::Object(serde_json::Map::new());
-    }
-    entry
-        .as_object_mut()
-        .expect("直前で object を保証")
-        .insert(key.to_string(), value);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("設定ディレクトリを作れない: {}", parent.display()))?;
-    }
-    let text = serde_json::to_string_pretty(&root).context("設定の JSON 化に失敗")?;
-    std::fs::write(path, text).with_context(|| format!("設定を書けない: {}", path.display()))?;
-    Ok(())
+    let mut root = read_settings_object(path)?;
+    object_entry(&mut root, section).insert(key.to_string(), value);
+    write_settings_object(path, root)
 }
 
 /// `agent_config_defaults.<agent_id>.<config_id>` の 1 点だけを user 設定ファイルへ書き込む（ピルの sticky 保存用）。
@@ -467,36 +543,11 @@ pub fn persist_agent_config_default(
     config_id: &str,
     value_id: &str,
 ) -> Result<()> {
-    let mut root: Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    let map = root.as_object_mut().expect("上で object を保証");
-    let defaults = map
-        .entry("agent_config_defaults")
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if !defaults.is_object() {
-        *defaults = Value::Object(serde_json::Map::new());
-    }
-    let agents = defaults.as_object_mut().expect("直前で object を保証");
-    let entry = agents
-        .entry(agent_id)
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if !entry.is_object() {
-        *entry = Value::Object(serde_json::Map::new());
-    }
-    entry
-        .as_object_mut()
-        .expect("直前で object を保証")
+    let mut root = read_settings_object(path)?;
+    let defaults = object_entry(&mut root, "agent_config_defaults");
+    object_entry(defaults, agent_id)
         .insert(config_id.to_string(), Value::String(value_id.to_string()));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("設定ディレクトリを作れない: {}", parent.display()))?;
-    }
-    let text = serde_json::to_string_pretty(&root).context("設定の JSON 化に失敗")?;
-    std::fs::write(path, text).with_context(|| format!("設定を書けない: {}", path.display()))?;
-    Ok(())
+    write_settings_object(path, root)
 }
 
 /// `mcp_servers.<name>.enabled` の 1 点だけを user 設定ファイルへ書き込む（設定画面のトグル）。
@@ -504,37 +555,10 @@ pub fn persist_agent_config_default(
 /// （マージ済みの解決値を書き戻すと project 層の定義を user へ焼き込んでしまう）。
 /// 自前定義（`command` / `url` を持つ行）の他フィールドは触らない。
 pub fn persist_mcp_enabled(path: &Path, name: &str, enabled: bool) -> Result<()> {
-    let mut root: Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    let map = root.as_object_mut().expect("上で object を保証");
-    let servers = map
-        .entry("mcp_servers")
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if !servers.is_object() {
-        *servers = Value::Object(serde_json::Map::new());
-    }
-    let entry = servers
-        .as_object_mut()
-        .expect("直前で object を保証")
-        .entry(name)
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if !entry.is_object() {
-        *entry = Value::Object(serde_json::Map::new());
-    }
-    entry
-        .as_object_mut()
-        .expect("直前で object を保証")
-        .insert("enabled".to_string(), Value::Bool(enabled));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("設定ディレクトリを作れない: {}", parent.display()))?;
-    }
-    let text = serde_json::to_string_pretty(&root).context("設定の JSON 化に失敗")?;
-    std::fs::write(path, text).with_context(|| format!("設定を書けない: {}", path.display()))?;
-    Ok(())
+    let mut root = read_settings_object(path)?;
+    let servers = object_entry(&mut root, "mcp_servers");
+    object_entry(servers, name).insert("enabled".to_string(), Value::Bool(enabled));
+    write_settings_object(path, root)
 }
 
 /// `overlay` を `base` に深くマージする。オブジェクトは再帰、それ以外は置換。
@@ -712,6 +736,33 @@ mod tests {
     }
 
     #[test]
+    fn quit_confirmation_defaults_to_when_running_and_can_be_turned_off() {
+        assert_eq!(
+            SettingsStore::default().settings().quit_confirmation(),
+            QuitConfirmation::WhenRunning
+        );
+        let never = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{ "confirm_quit": "never" }"#,
+        ])
+        .expect("マージできる");
+        assert_eq!(
+            never.settings().quit_confirmation(),
+            QuitConfirmation::Never
+        );
+        // 綴り違いは黙って「聞かない」にしない。
+        let typo = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{ "confirm_quit": "nevr" }"#,
+        ])
+        .expect("マージできる");
+        assert_eq!(
+            typo.settings().quit_confirmation(),
+            QuitConfirmation::WhenRunning
+        );
+    }
+
+    #[test]
     fn reduce_motion_defaults_off_and_overrides() {
         assert!(!SettingsStore::default().settings().reduce_motion);
         let store = SettingsStore::from_json_layers(&[
@@ -774,6 +825,65 @@ mod tests {
         assert_eq!(defaults["codex"]["model"], "gpt-5.6-sol");
         assert!(!defaults["codex"].contains_key("effort")); // 書いていない config_id は不在
         assert_eq!(store.settings().theme, "necoder-light"); // 無関係キーは保たれる
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 手編集の途中で壊れている settings.json（末尾カンマ・コメント・配列）に書き手が触ると、
+    /// 以前は空オブジェクトから作り直して 1 キーだけで上書きしていた（利用者の設定が全部消える）。
+    /// 今は**どの書き手も書かずに** `UnreadableSettings` を返し、ファイルは 1 バイトも変わらない。
+    #[test]
+    fn writers_refuse_to_overwrite_an_unreadable_settings_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "necoder-settings-unreadable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("settings.json");
+        let broken = [
+            "{\n  \"theme\": \"necoder-light\",\n  \"font_size\": 15,\n}\n",
+            "{\n  // 手で書いたメモ\n  \"theme\": \"necoder-light\"\n}\n",
+            "[\"theme\"]\n",
+        ];
+        type Writer = fn(&Path) -> Result<()>;
+        let writers: [(&str, Writer); 4] = [
+            ("persist_user_value", |path| {
+                persist_user_value(path, "submit_on_enter", Value::Bool(true))
+            }),
+            ("persist_nested_value", |path| {
+                persist_nested_value(path, "chat", "directory", Value::String("~/Chats".into()))
+            }),
+            ("persist_agent_config_default", |path| {
+                persist_agent_config_default(path, "claude", "model", "opus")
+            }),
+            ("persist_mcp_enabled", |path| {
+                persist_mcp_enabled(path, "tools", true)
+            }),
+        ];
+        for original in broken {
+            for (name, write) in writers {
+                std::fs::write(&path, original).expect("seed");
+                let error = write(&path).expect_err(name);
+                assert!(
+                    error.downcast_ref::<UnreadableSettings>().is_some(),
+                    "{name}: 読めない理由として返す: {error:#}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&path).expect("read"),
+                    original,
+                    "{name}: 読めないファイルを書き換えた"
+                );
+            }
+        }
+
+        // 無い・空白だけのファイルは失うものが無いので、そのまま書く。
+        std::fs::remove_file(&path).expect("rm");
+        persist_user_value(&path, "theme", Value::String("necoder-light".into())).expect("新規");
+        std::fs::write(&path, "  \n").expect("seed");
+        persist_user_value(&path, "tab_size", serde_json::json!(2)).expect("空白だけ");
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("JSON");
+        assert_eq!(written["tab_size"], 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

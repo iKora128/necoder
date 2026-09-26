@@ -1,7 +1,7 @@
 //! storage — ローカル永続化 DB（Turso = SQLite の pure-Rust 再実装・MIT）。
 //!
 //! ARCHITECTURE §7 / DECISIONS 決定ログ 2026-07-16。用途は hot exit / スレッド永続化 /
-//! トークン台帳 / checkpoint メタに**限定**（設定・todos.md は「ファイルが真実」のまま）。
+//! ターンごとの使用量（O11）/ checkpoint メタに**限定**（設定・todos.md は「ファイルが真実」のまま）。
 //! Turso の型はこの crate の外に漏らさない（成熟度問題が出たら rusqlite へ 1 crate 差し替え）。
 //!
 //! **スレッドモデル**: Turso の API は async だが、GPUI に runtime を持ち込まないため
@@ -149,6 +149,81 @@ pub struct ThreadChatRecord {
     pub attachments: Vec<String>,
     /// そのうち、書き込みを「このチャットでは以後許可」にしたもの。
     pub write_grants: Vec<String>,
+}
+
+/// 変更レビューの注記の状態（未送信 / 送信済み / 解決）。文字列は DB の中だけに現れる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReviewNoteState {
+    Unsent,
+    Sent,
+    Resolved,
+}
+
+impl ReviewNoteState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsent => "unsent",
+            Self::Sent => "sent",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    /// 未知の値は未送信として読む（送り損ねて消えるより、もう一度送れる方が安全）。
+    pub fn from_str_lossy(value: &str) -> Self {
+        match value {
+            "sent" => Self::Sent,
+            "resolved" => Self::Resolved,
+            _ => Self::Unsent,
+        }
+    }
+}
+
+/// 変更レビューの注記 1 件（[`Storage::load_review_notes`]）。`scope` は束ねる単位（Fleet = Task・
+/// Editor = プロジェクトの TaskSpace id）。`target` は対象（diff の行・将来はページの要素）の JSON で、
+/// 中身は呼び出し側が決める（storage は解釈しない）。種別だけは `target_kind` に出して絞り込める。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewNoteRecord {
+    pub id: String,
+    pub scope: String,
+    pub target_kind: String,
+    pub target: String,
+    pub body: String,
+    pub state: ReviewNoteState,
+    /// 最後にエージェントへ送った時刻（unix ms）。解決を戻す時に「送信済み」へ戻す手掛かり。
+    pub sent_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// ターン 1 回分の使用量（O11・[`Storage::record_turn_usage`]）。値はエージェントの報告のまま。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TurnUsageRecord {
+    pub thread_id: String,
+    /// 話したエージェントのラベル（`threads.agent` と同じ綴り。例 `Claude Code`）。
+    pub agent: String,
+    /// ターンが終わった時刻（unix ms）。日別の集計の鍵。
+    pub ended_at: i64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_read_tokens: u64,
+    pub cached_write_tokens: u64,
+    pub total_tokens: u64,
+    /// このターンの推定コスト（USD）。エージェントが出さなければ `None`。
+    pub cost_usd: Option<f64>,
+    /// エージェントが報告した会話の累計コスト（USD）。次のターンの差分の基準。
+    pub session_cost_usd: Option<f64>,
+}
+
+/// 日付 × エージェントの集計 1 行（[`Storage::daily_usage`]・Stats 画面）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyUsage {
+    /// ローカル日付の通し日数（1970-01-01 = 0）。
+    pub day: i64,
+    pub agent: String,
+    pub turns: i64,
+    pub total_tokens: i64,
+    /// コストの合計（USD）。その日そのエージェントのターンにコストの報告が 1 つも無ければ `None`。
+    pub cost_usd: Option<f64>,
 }
 
 /// Task lifecycle の追記イベント。wait/orchestration は transient な UI state ではなく
@@ -794,6 +869,102 @@ impl Storage {
         })
     }
 
+    /// スレッド名が**人の手で**付けられたかの印を書く（O2）。`custom = false` で印を外す。
+    /// エージェントが送ってくる会話名（ACP `SessionInfoUpdate.title`）は、印のあるスレッドの名前を
+    /// 上書きしない。印は再起動をまたいで残す（残さないと、再開した会話の名前でタブ名が戻る）。
+    pub fn set_thread_name_custom(&self, thread_id: &str, custom: bool) -> Result<()> {
+        let thread_id = thread_id.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                if custom {
+                    conn.execute(
+                        "INSERT INTO thread_custom_names (thread_id, updated_at) VALUES (?1, ?2)
+                         ON CONFLICT(thread_id) DO UPDATE SET updated_at = ?2",
+                        (thread_id.as_str(), now),
+                    )
+                    .await
+                    .context("thread_custom_names の upsert に失敗")?;
+                } else {
+                    conn.execute(
+                        "DELETE FROM thread_custom_names WHERE thread_id = ?1",
+                        (thread_id.as_str(),),
+                    )
+                    .await
+                    .context("thread_custom_names の削除に失敗")?;
+                }
+                Ok(())
+            })
+        })
+    }
+
+    /// 人の手で名前を付けたスレッドの id 一覧（起動時の復元で一括で読む）。
+    pub fn load_custom_named_threads(&self) -> Result<Vec<String>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query("SELECT thread_id FROM thread_custom_names", ())
+                    .await
+                    .context("thread_custom_names の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .context("thread_custom_names 行の取得に失敗")?
+                {
+                    result.push(row.get_value(0)?.as_text().context("thread_id")?.clone());
+                }
+                Ok(result)
+            })
+        })
+    }
+
+    /// スレッドのミュート（トースト・通知音・OS 通知を出さない）を記録する。ミュートしている
+    /// スレッドだけが行を持つ（解除で行ごと消す）＝既定の「鳴る」は行が無い状態。
+    pub fn set_thread_muted(&self, thread_id: &str, muted: bool) -> Result<()> {
+        let thread_id = thread_id.to_string();
+        let now = unix_ms();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                if muted {
+                    conn.execute(
+                        "INSERT INTO thread_mutes (thread_id, updated_at) VALUES (?1, ?2)
+                         ON CONFLICT(thread_id) DO UPDATE SET updated_at = ?2",
+                        (thread_id.as_str(), now),
+                    )
+                    .await
+                    .context("thread_mutes の記録に失敗")?;
+                } else {
+                    conn.execute(
+                        "DELETE FROM thread_mutes WHERE thread_id = ?1",
+                        (thread_id.as_str(),),
+                    )
+                    .await
+                    .context("thread_mutes の解除に失敗")?;
+                }
+                Ok(())
+            })
+        })
+    }
+
+    /// ミュート中のスレッド id の一覧（起動時の復元で一括で読む）。
+    pub fn load_muted_threads(&self) -> Result<Vec<String>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query("SELECT thread_id FROM thread_mutes", ())
+                    .await
+                    .context("thread_mutes の読み出しに失敗")?;
+                let mut result = Vec::new();
+                while let Some(row) = rows.next().await.context("thread_mutes 行の取得に失敗")?
+                {
+                    result.push(row.get_value(0)?.as_text().context("thread_id")?.clone());
+                }
+                Ok(result)
+            })
+        })
+    }
+
     /// Chat モードのスレッドの付帯情報を 1 件ぶん書く（`docs/CHAT.md` §2.3 / §3.2）。
     ///
     /// フォルダの場所は**作成後に変えない**（エージェントはセッションを cwd のパス文字列で引く）ので、
@@ -981,6 +1152,18 @@ impl Storage {
                 )
                 .await
                 .context("thread_sessions の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_custom_names WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_custom_names の削除に失敗")?;
+                conn.execute(
+                    "DELETE FROM thread_mutes WHERE thread_id = ?1",
+                    (id.as_str(),),
+                )
+                .await
+                .context("thread_mutes の削除に失敗")?;
                 conn.execute(
                     "DELETE FROM thread_chat_paths WHERE thread_id = ?1",
                     (id.as_str(),),
@@ -1275,25 +1458,96 @@ impl Storage {
         })
     }
 
-    /// トークン台帳（M12-13）: スレッド別の累計と、今日（unix ms で日付一致）の turn 数。
-    /// 台帳の本体は threads.tokens_used（ACP の実測累計）で、ここでは一覧をそのまま返す。
-    pub fn token_ledger(&self) -> Result<Vec<(String, String, i64)>> {
+    // ── ターンごとの使用量（O11）。Stats の日別集計と、コスト差分の基準の引き継ぎに使う ──
+
+    /// ターン 1 回分の使用量を 1 行追記する（ターンが終わった時）。
+    pub fn record_turn_usage(&self, record: &TurnUsageRecord) -> Result<()> {
+        let record = record.clone();
+        let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO turn_usage (thread_id, agent, ended_at, input_tokens, output_tokens,
+                        cached_read_tokens, cached_write_tokens, total_tokens, cost_usd, session_cost_usd)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    (
+                        record.thread_id.as_str(),
+                        record.agent.as_str(),
+                        record.ended_at,
+                        count(record.input_tokens),
+                        count(record.output_tokens),
+                        count(record.cached_read_tokens),
+                        count(record.cached_write_tokens),
+                        count(record.total_tokens),
+                        record.cost_usd,
+                        record.session_cost_usd,
+                    ),
+                )
+                .await
+                .context("turn_usage の追記に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// そのスレッドで最後に記録した「会話の累計コスト」（USD）。再起動後に `session/load` で引き継いだ
+    /// 会話は、最初の累計に過去の分を含むので、その差分の基準にする。記録が無ければ `None`。
+    pub fn last_session_cost(&self, thread_id: &str) -> Result<Option<f64>> {
+        let thread_id = thread_id.to_string();
         self.run(move |conn| {
             futures::executor::block_on(async {
                 let mut rows = conn
                     .query(
-                        "SELECT id, name, tokens_used FROM threads ORDER BY tokens_used DESC",
-                        (),
+                        "SELECT session_cost_usd FROM turn_usage
+                         WHERE thread_id = ?1 AND session_cost_usd IS NOT NULL
+                         ORDER BY id DESC LIMIT 1",
+                        (thread_id.as_str(),),
                     )
                     .await
-                    .context("台帳の読み出しに失敗")?;
+                    .context("turn_usage の読み出しに失敗")?;
+                match rows.next().await.context("turn_usage 行の取得に失敗")? {
+                    Some(row) => Ok(row.get_value(0)?.as_real().copied()),
+                    None => Ok(None),
+                }
+            })
+        })
+    }
+
+    /// `since_ms` 以降のターンを、ローカル日付 × エージェントで集計する（新しい日から・同じ日は
+    /// エージェント名順）。`offset_ms` はローカル時刻と UTC の差（日付の境目をローカルの 0 時にする）。
+    pub fn daily_usage(&self, since_ms: i64, offset_ms: i64) -> Result<Vec<DailyUsage>> {
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT (ended_at + ?2) / 86400000 AS day, agent, COUNT(*), SUM(total_tokens),
+                                SUM(cost_usd)
+                         FROM turn_usage WHERE ended_at >= ?1
+                         GROUP BY (ended_at + ?2) / 86400000, agent
+                         ORDER BY day DESC, agent",
+                        (since_ms, offset_ms),
+                    )
+                    .await
+                    .context("日別の使用量の読み出しに失敗")?;
                 let mut result = Vec::new();
-                while let Some(row) = rows.next().await.context("台帳行の取得に失敗")? {
-                    result.push((
-                        row.get_value(0)?.as_text().context("id")?.clone(),
-                        row.get_value(1)?.as_text().context("name")?.clone(),
-                        *row.get_value(2)?.as_integer().context("tokens")?,
-                    ));
+                while let Some(row) = rows.next().await.context("日別の使用量の取得に失敗")?
+                {
+                    result.push(DailyUsage {
+                        day: *row.get_value(0)?.as_integer().context("day")?,
+                        agent: row.get_value(1)?.as_text().context("agent")?.clone(),
+                        turns: *row.get_value(2)?.as_integer().context("turns")?,
+                        total_tokens: row
+                            .get_value(3)?
+                            .as_integer()
+                            .copied()
+                            .unwrap_or_default(),
+                        cost_usd: {
+                            let cost = row.get_value(4)?;
+                            cost.as_real()
+                                .copied()
+                                .or_else(|| cost.as_integer().map(|value| *value as f64))
+                        },
+                    });
                 }
                 Ok(result)
             })
@@ -1535,6 +1789,93 @@ impl Storage {
                     .context("remote_projects の削除に失敗")?;
                 }
                 Ok(())
+            })
+        })
+    }
+
+    // ── 変更レビューの注記（再起動しても残す・束ねる単位ごとに読む） ──
+
+    /// 注記を 1 件書く（同じ id なら上書き）。
+    pub fn upsert_review_note(&self, note: &ReviewNoteRecord) -> Result<()> {
+        let note = note.clone();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO review_notes
+                        (id, scope, target_kind, target, body, state, sent_at, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(id) DO UPDATE SET
+                        scope = ?2, target_kind = ?3, target = ?4, body = ?5, state = ?6,
+                        sent_at = ?7, updated_at = ?9",
+                    (
+                        note.id.as_str(),
+                        note.scope.as_str(),
+                        note.target_kind.as_str(),
+                        note.target.as_str(),
+                        note.body.as_str(),
+                        note.state.as_str(),
+                        note.sent_at,
+                        note.created_at,
+                        note.updated_at,
+                    ),
+                )
+                .await
+                .context("review_notes の書き込みに失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 注記を消す。
+    pub fn delete_review_note(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute("DELETE FROM review_notes WHERE id = ?1", (id.as_str(),))
+                    .await
+                    .context("review_notes の削除に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 束ねる単位の注記を作った順に読む。
+    pub fn load_review_notes(&self, scope: &str) -> Result<Vec<ReviewNoteRecord>> {
+        let scope = scope.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, scope, target_kind, target, body, state, sent_at, created_at,
+                                updated_at
+                         FROM review_notes WHERE scope = ?1 ORDER BY created_at, id",
+                        (scope.as_str(),),
+                    )
+                    .await
+                    .context("review_notes の読み出しに失敗")?;
+                let mut notes = Vec::new();
+                while let Some(row) = rows.next().await.context("review_notes 行の取得に失敗")?
+                {
+                    let text = |index: usize| -> Result<String> {
+                        Ok(row
+                            .get_value(index)?
+                            .as_text()
+                            .context("review_notes の文字列の列")?
+                            .clone())
+                    };
+                    notes.push(ReviewNoteRecord {
+                        id: text(0)?,
+                        scope: text(1)?,
+                        target_kind: text(2)?,
+                        target: text(3)?,
+                        body: text(4)?,
+                        state: ReviewNoteState::from_str_lossy(&text(5)?),
+                        sent_at: row.get_value(6)?.as_integer().copied(),
+                        created_at: row.get_value(7)?.as_integer().copied().unwrap_or(0),
+                        updated_at: row.get_value(8)?.as_integer().copied().unwrap_or(0),
+                    });
+                }
+                Ok(notes)
             })
         })
     }
@@ -1814,6 +2155,39 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("turns index 作成に失敗")?;
+    // ターンごとの使用量（O11）。エージェントがターンの終わりに報告したトークンと、会話の累計コストの
+    // 差分（USD の推定）。`turns` は発話の行（1 ターンに何行も）なので別表にする。`session_cost_usd` は
+    // エージェントが報告した累計そのもので、再起動後に引き継いだ会話の差分の基準になる。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS turn_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            ended_at INTEGER NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            cached_read_tokens INTEGER NOT NULL,
+            cached_write_tokens INTEGER NOT NULL,
+            total_tokens INTEGER NOT NULL,
+            cost_usd REAL,
+            session_cost_usd REAL
+        )",
+        (),
+    )
+    .await
+    .context("turn_usage 作成に失敗")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS turn_usage_ended ON turn_usage (ended_at)",
+        (),
+    )
+    .await
+    .context("turn_usage index 作成に失敗")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS turn_usage_thread ON turn_usage (thread_id, id)",
+        (),
+    )
+    .await
+    .context("turn_usage index 作成に失敗")?;
     // スレッドが最後に使った ACP セッション id（`session/load` で会話を引き継ぐ鍵・2026-09-08）。
     // threads 表を広げず別表にする: 列を足すと upsert/load の tuple が全部変わる上、
     // セッション id は「エージェント側の状態への参照」でスレッドのメタとは寿命が違う。
@@ -1827,6 +2201,28 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("thread_sessions 作成に失敗")?;
+    // 人が手で付けたスレッド名の印（O2・2026-09-26）。エージェントが送ってくる会話名はこの印の
+    // あるスレッドを上書きしない。行が在る＝手動。threads 表を広げない理由は thread_sessions と同じ。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_custom_names (
+            thread_id TEXT PRIMARY KEY,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("thread_custom_names 作成に失敗")?;
+    // スレッドのミュート（O12）。ミュート中のスレッドだけが行を持つ。threads 表を広げない理由は
+    // thread_sessions と同じ（列を足すと upsert / load の tuple が全部変わる）。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_mutes (
+            thread_id TEXT PRIMARY KEY,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("thread_mutes 作成に失敗")?;
     // Chat モードのスレッドの付帯情報（`docs/CHAT.md`）。threads 表を広げない理由は
     // thread_sessions と同じ。パスは改行を含みうるので 1 行 1 パスの別表にする。
     conn.execute(
@@ -1975,6 +2371,29 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("task_deps 作成に失敗")?;
+    // 変更レビューの注記（O7）。対象は JSON 1 列（diff の行・将来はページの要素）で、表を広げずに足せる。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS review_notes (
+            id TEXT PRIMARY KEY,
+            scope TEXT NOT NULL,
+            target_kind TEXT NOT NULL,
+            target TEXT NOT NULL,
+            body TEXT NOT NULL,
+            state TEXT NOT NULL,
+            sent_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("review_notes 作成に失敗")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS review_notes_scope ON review_notes (scope, created_at)",
+        (),
+    )
+    .await
+    .context("review_notes index 作成に失敗")?;
     Ok(())
 }
 
@@ -2079,6 +2498,59 @@ mod tests {
             ]
         );
 
+        drop(storage);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 注記は再起動（DB を開き直す）しても残り、束ねる単位ごとに作った順で読める。
+    #[test]
+    fn review_notes_persist_per_scope() {
+        let path = temp_db("review_notes");
+        let _ = std::fs::remove_file(&path);
+        let note = |id: &str, scope: &str, created_at: i64| ReviewNoteRecord {
+            id: id.to_string(),
+            scope: scope.to_string(),
+            target_kind: "diff_lines".to_string(),
+            target: format!("{{\"path\":\"src/{id}.rs\"}}"),
+            body: format!("本文 {id}"),
+            state: ReviewNoteState::Unsent,
+            sent_at: None,
+            created_at,
+            updated_at: created_at,
+        };
+        {
+            let storage = Storage::open(&path).expect("DB を開ける");
+            storage
+                .upsert_review_note(&note("b", "task-1", 20))
+                .unwrap();
+            storage
+                .upsert_review_note(&note("a", "task-1", 10))
+                .unwrap();
+            storage.upsert_review_note(&note("c", "task-2", 5)).unwrap();
+            let mut sent = note("a", "task-1", 10);
+            sent.state = ReviewNoteState::Sent;
+            sent.sent_at = Some(99);
+            sent.body = "直した本文".to_string();
+            sent.updated_at = 30;
+            storage.upsert_review_note(&sent).unwrap();
+            storage.delete_review_note("b").unwrap();
+        }
+        // 開き直す（= 再起動）。
+        let storage = Storage::open(&path).expect("DB を開き直せる");
+        let notes = storage.load_review_notes("task-1").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, "a");
+        assert_eq!(notes[0].body, "直した本文");
+        assert_eq!(notes[0].state, ReviewNoteState::Sent);
+        assert_eq!(notes[0].sent_at, Some(99));
+        assert_eq!(notes[0].created_at, 10, "作った時刻は上書きで変えない");
+        assert_eq!(notes[0].updated_at, 30);
+        assert_eq!(storage.load_review_notes("task-2").unwrap().len(), 1);
+        assert!(storage.load_review_notes("none").unwrap().is_empty());
+        assert_eq!(
+            ReviewNoteState::from_str_lossy("??"),
+            ReviewNoteState::Unsent
+        );
         drop(storage);
         let _ = std::fs::remove_file(&path);
     }
@@ -2340,6 +2812,36 @@ mod tests {
 
     /// ACP セッション id はスレッド単位で往復し、上書きでき、スレッド削除で消える（2026-09-08）。
     #[test]
+    fn thread_mutes_survive_reopening_and_follow_thread_deletion() {
+        let path = temp_db("thread_mutes");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("t1", "設計", 0, "necoder", None, None, None, 0, 0)
+            .unwrap();
+        assert!(storage.load_muted_threads().unwrap().is_empty());
+        storage.set_thread_muted("t1", true).unwrap();
+        storage.set_thread_muted("t1", true).unwrap(); // 二度押しでも 1 行
+        storage.set_thread_muted("t2", true).unwrap();
+        storage.set_thread_muted("t2", false).unwrap(); // 解除は行ごと消す
+        drop(storage);
+
+        // 開き直しても残る（再起動でミュートが消えていた不具合の受入）。
+        let storage = Storage::open(&path).unwrap();
+        assert_eq!(
+            storage.load_muted_threads().unwrap(),
+            vec!["t1".to_string()]
+        );
+        storage.delete_thread("t1").unwrap();
+        assert!(
+            storage.load_muted_threads().unwrap().is_empty(),
+            "スレッド削除でミュートも消える"
+        );
+        drop(storage);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn thread_sessions_round_trip_and_follow_thread_deletion() {
         let path = temp_db("thread_sessions");
         let _ = std::fs::remove_file(&path);
@@ -2366,6 +2868,35 @@ mod tests {
             storage.load_thread_sessions().unwrap(),
             vec![("t2".to_string(), "sess-other".to_string())],
             "スレッド削除でセッション id も消える"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 手動で付けたスレッド名の印は往復し、外せて、スレッド削除で消える（O2）。
+    #[test]
+    fn custom_thread_names_round_trip_and_follow_thread_deletion() {
+        let path = temp_db("thread_custom_names");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        storage
+            .upsert_thread("t1", "設計の相談", 0, "necoder", None, None, None, 0, 0)
+            .unwrap();
+        assert!(storage.load_custom_named_threads().unwrap().is_empty());
+        storage.set_thread_name_custom("t1", true).unwrap();
+        storage.set_thread_name_custom("t1", true).unwrap();
+        storage.set_thread_name_custom("t2", true).unwrap();
+        let mut custom = storage.load_custom_named_threads().unwrap();
+        custom.sort();
+        assert_eq!(custom, vec!["t1".to_string(), "t2".to_string()]);
+        storage.set_thread_name_custom("t2", false).unwrap();
+        assert_eq!(
+            storage.load_custom_named_threads().unwrap(),
+            vec!["t1".to_string()]
+        );
+        storage.delete_thread("t1").unwrap();
+        assert!(
+            storage.load_custom_named_threads().unwrap().is_empty(),
+            "スレッド削除で印も消える"
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -2606,9 +3137,98 @@ mod tests {
         storage.unarchive_thread("t2").unwrap();
         assert_eq!(storage.load_threads().unwrap().len(), 2);
         storage.archive_thread("t2").unwrap();
-        // 台帳
-        let ledger = storage.token_ledger().unwrap();
-        assert_eq!(ledger[0].2, 2400);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ターンごとの使用量（O11）: ローカル日付 × エージェントで集計する。日付の境目はローカルの 0 時
+    /// （`offset_ms`）、`since_ms` より前は数えない、コストの無いターンだけの日はコスト `None`。
+    #[test]
+    fn turn_usage_is_aggregated_per_local_day_and_agent() {
+        let path = temp_db("turn_usage");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).unwrap();
+        const DAY: i64 = 86_400_000;
+        const HOUR: i64 = 3_600_000;
+        // UTC+9（日本）。UTC の 2026-09-25 16:00 はローカルの 2026-09-26 01:00。
+        let offset = 9 * HOUR;
+        let day_start_utc = 20_722 * DAY; // 2026-09-26 00:00 UTC
+        let record = |thread: &str, agent: &str, ended_at: i64, total: u64, cost: Option<f64>| {
+            TurnUsageRecord {
+                thread_id: thread.into(),
+                agent: agent.into(),
+                ended_at,
+                input_tokens: total / 2,
+                output_tokens: total / 2,
+                total_tokens: total,
+                cost_usd: cost,
+                session_cost_usd: cost,
+                ..TurnUsageRecord::default()
+            }
+        };
+        for row in [
+            // 集計の範囲外（古い）
+            record(
+                "t1",
+                "Claude Code",
+                day_start_utc - 40 * DAY,
+                9_999,
+                Some(9.0),
+            ),
+            // ローカル 2026-09-25
+            record("t1", "Claude Code", day_start_utc - 20 * HOUR, 500, None),
+            // ローカル 2026-09-26（UTC では前日の 16:00 と当日の 02:00）
+            record(
+                "t1",
+                "Claude Code",
+                day_start_utc - 8 * HOUR,
+                1_000,
+                Some(0.25),
+            ),
+            record(
+                "t1",
+                "Claude Code",
+                day_start_utc + 2 * HOUR,
+                3_000,
+                Some(0.5),
+            ),
+            record("t2", "Codex", day_start_utc + 3 * HOUR, 7_000, None),
+        ] {
+            storage.record_turn_usage(&row).unwrap();
+        }
+        let rows = storage
+            .daily_usage(day_start_utc - 30 * DAY, offset)
+            .unwrap();
+        let today = (day_start_utc + offset) / DAY;
+        assert_eq!(
+            rows,
+            vec![
+                DailyUsage {
+                    day: today,
+                    agent: "Claude Code".into(),
+                    turns: 2,
+                    total_tokens: 4_000,
+                    cost_usd: Some(0.75),
+                },
+                DailyUsage {
+                    day: today,
+                    agent: "Codex".into(),
+                    turns: 1,
+                    total_tokens: 7_000,
+                    cost_usd: None,
+                },
+                DailyUsage {
+                    day: today - 1,
+                    agent: "Claude Code".into(),
+                    turns: 1,
+                    total_tokens: 500,
+                    cost_usd: None,
+                },
+            ]
+        );
+        // 会話の累計コストの基準: そのスレッドの最後の既知の値（コストの無い行は飛ばす）。
+        assert_eq!(storage.last_session_cost("t1").unwrap(), Some(0.5));
+        assert_eq!(storage.last_session_cost("t2").unwrap(), None);
+        assert_eq!(storage.last_session_cost("none").unwrap(), None);
         let _ = std::fs::remove_file(&path);
     }
 

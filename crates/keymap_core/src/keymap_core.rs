@@ -117,6 +117,19 @@ pub fn keystroke_label_for(platform: KeymapPlatform, mac_keystroke: &str) -> Str
     }
 }
 
+/// [`keystroke_label`] のセクション指定版。端末（[`TERMINAL_CONTEXT`]）の `cmd-c` は
+/// Windows / Linux で `Ctrl+Shift+C` になる（右クリックメニューのキー併記に使う）。
+pub fn keystroke_label_in(context: &str, mac_keystroke: &str) -> String {
+    match KeymapPlatform::current() {
+        KeymapPlatform::MacOs => pretty_keystroke(mac_keystroke),
+        KeymapPlatform::Windows => {
+            let converted = to_non_mac_keystroke_in(context, mac_keystroke)
+                .unwrap_or_else(|| mac_keystroke.replace("cmd-", "ctrl-"));
+            windows_keystroke(&converted)
+        }
+    }
+}
+
 /// キーストロークをこのプラットフォームの慣例表記へ（WINDOWS-PORT.md §D4）。
 ///
 /// mac は記号（`⌘⇧P`）、Windows / Linux は綴り（`Ctrl+Shift+P`）。パレット・メニューの
@@ -219,6 +232,11 @@ pub fn pretty_keystroke(keystrokes: &str) -> String {
 }
 
 /// 組み込み既定 keymap（macOS の一般的な編集操作ベース）。編集アクションは `editor` 名前空間、終了は `necoder`。
+///
+/// **`Terminal` セクションは必ず末尾**（全域セクションより後）。gpui は context の無い束縛を
+/// 「一番深いコンテキストと同じ深さ」として扱い、同じ深さでは**後から足した束縛が勝つ**。
+/// 端末にフォーカスがある時、端末は一番深いコンテキストなので、全域の ⌘F（バッファ内検索）
+/// より後ろに置かないと端末の ⌘F が負ける（2026-09-26 まで実際に負けていた）。
 pub const DEFAULT_KEYMAP_JSON: &str = r#"[
   {
     "context": "Editor",
@@ -319,6 +337,12 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
     }
   },
   {
+    "context": "Explorer",
+    "bindings": {
+      "cmd-z": "workspace::UndoFileOperation"
+    }
+  },
+  {
     "bindings": {
       "cmd-p": "workspace::FileFinder",
       "cmd-shift-p": "workspace::CommandPalette",
@@ -341,6 +365,7 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-shift-enter": "workspace::ToggleAgentFullScreen",
       "cmd-shift-m": "workspace::ToggleFleet",
       "cmd-shift-j": "workspace::ToggleChat",
+      "cmd-shift-d": "workspace::ToggleDesignMode",
       "cmd-n": "workspace::NewTask",
       "cmd-shift-1": "workspace::StageOne",
       "cmd-shift-2": "workspace::StageTwo",
@@ -372,6 +397,16 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
       "cmd-h": "workspace::Hide",
       "cmd-alt-h": "workspace::HideOthers",
       "cmd-q": "necoder::Quit"
+    }
+  },
+  {
+    "context": "Terminal",
+    "bindings": {
+      "cmd-a": "terminal::SelectAll",
+      "cmd-c": "terminal::Copy",
+      "cmd-f": "terminal::Find",
+      "cmd-k": "terminal::Clear",
+      "cmd-v": "terminal::Paste"
     }
   }
 ]"#;
@@ -462,11 +497,45 @@ const NON_MAC_REPLACEMENTS: &[(&str, &str)] = &[
     ("cmd-shift-g", "ctrl-alt-g"),
 ];
 
+/// 下位の束縛を打ち消す gpui の組み込みアクション（`null` 相当）。キーはそのまま要素へ届く。
+pub const NO_ACTION: &str = "zed::NoAction";
+
 /// 非 mac にだけ足すバインド（mac 側には対応物が無い、その OS の定番）。
 const NON_MAC_ADDITIONS: &[(&str, &str, &str)] = &[
     // Windows の Redo は伝統的に ctrl-y。ctrl-shift-z（機械変換の結果）と併存させる。
     ("Editor", "ctrl-y", "editor::Redo"),
 ];
+
+/// 端末のコンテキスト名（[`DEFAULT_KEYMAP_JSON`] の末尾セクション）。
+pub const TERMINAL_CONTEXT: &str = "Terminal";
+
+/// 1 つのキーストロークを、そのセクション（`context`）の中で非 mac 向けへ変換する。
+///
+/// **端末だけは `cmd-X` → `ctrl-shift-X`**（Windows Terminal / GNOME Terminal の作法）。
+/// 機械変換の `ctrl-X` にすると ⌃C（SIGINT）・⌃V・⌃F・⌃K・⌃A をシェルから奪ってしまう。
+fn to_non_mac_keystroke_in(context: &str, keystroke: &str) -> Option<String> {
+    if context == TERMINAL_CONTEXT {
+        if let Some(key) = keystroke.strip_prefix("cmd-") {
+            return Some(format!("ctrl-shift-{key}"));
+        }
+    }
+    to_non_mac_keystroke(keystroke)
+}
+
+/// 端末がシェル / TUI へ届けたい ⌃ キー（制御文字になるもの）。非 mac の全域の束縛がこれらを
+/// 取っていたら、端末のコンテキストでだけ外す（[`gpui::NoAction`] = `zed::NoAction`）。
+/// ⌃F（1 文字進む）・⌃W（単語削除）・⌃P / ⌃N（履歴）・⌃J（改行）・⌃K（行末まで削除）などが
+/// 端末に届かなかった（全域の ファインダ / タブを閉じる / 端末の開閉 / チョードの前置 に取られていた）。
+fn is_terminal_control_chord(chord: &str) -> bool {
+    let Some(key) = chord.strip_prefix("ctrl-") else {
+        return false;
+    };
+    let mut characters = key.chars();
+    let (Some(character), None) = (characters.next(), characters.next()) else {
+        return false;
+    };
+    character.is_ascii_lowercase() || matches!(character, '[' | '\\' | ']' | '-' | '/')
+}
 
 /// 1 つのキーストロークを非 mac 向けへ変換する。落とす場合は `None`。
 fn to_non_mac_keystroke(keystroke: &str) -> Option<String> {
@@ -497,7 +566,7 @@ pub fn default_keymap_json(platform: KeymapPlatform) -> String {
     for section in &mut sections {
         let mut translated = BTreeMap::new();
         for (keystroke, action) in &section.bindings {
-            if let Some(converted) = to_non_mac_keystroke(keystroke) {
+            if let Some(converted) = to_non_mac_keystroke_in(&section.context, keystroke) {
                 translated.insert(converted, action.clone());
             }
         }
@@ -507,6 +576,31 @@ pub fn default_keymap_json(platform: KeymapPlatform) -> String {
             }
         }
         section.bindings = translated;
+    }
+    // 全域の ⌃ キーのうち制御文字になるものは、端末の中でだけ外してシェルへ届ける。
+    // チョード（`ctrl-k ctrl-s`）は前置の ⌃K で待たされるので、チョードごと外す。
+    let passthrough: Vec<String> = sections
+        .iter()
+        .filter(|section| section.context.is_empty())
+        .flat_map(|section| section.bindings.keys())
+        .filter(|keystrokes| {
+            keystrokes
+                .split_whitespace()
+                .next()
+                .is_some_and(is_terminal_control_chord)
+        })
+        .cloned()
+        .collect();
+    if let Some(terminal) = sections
+        .iter_mut()
+        .find(|section| section.context == TERMINAL_CONTEXT)
+    {
+        for keystrokes in passthrough {
+            terminal
+                .bindings
+                .entry(keystrokes)
+                .or_insert_with(|| NO_ACTION.to_string());
+        }
     }
     serde_json::to_string_pretty(&sections).unwrap_or_else(|_| DEFAULT_KEYMAP_JSON.to_string())
 }
@@ -528,7 +622,7 @@ mod windows_keymap_tests {
         for section in parse(DEFAULT_KEYMAP_JSON).expect("mac の既定 keymap") {
             let mut seen: BTreeMap<String, String> = BTreeMap::new();
             for (keystroke, action) in &section.bindings {
-                let Some(converted) = to_non_mac_keystroke(keystroke) else {
+                let Some(converted) = to_non_mac_keystroke_in(&section.context, keystroke) else {
                     continue;
                 };
                 if let Some(previous) = seen.insert(converted.clone(), keystroke.clone()) {
@@ -694,6 +788,77 @@ mod windows_keymap_tests {
         }
     }
 
+    /// 端末の中では Windows / Linux の作法（Ctrl+Shift+文字）でアプリの操作をし、
+    /// ⌃ + 文字はシェル / TUI へ届ける（全域の ⌃F・⌃W・⌃P・⌃J などに取られない）。
+    #[test]
+    fn terminal_keys_on_windows_use_ctrl_shift_and_leave_control_keys_to_the_shell() {
+        let sections = windows_sections();
+        let terminal = sections
+            .iter()
+            .find(|section| section.context == TERMINAL_CONTEXT)
+            .expect("端末のセクション");
+        for (key, action) in [
+            ("ctrl-shift-c", "terminal::Copy"),
+            ("ctrl-shift-v", "terminal::Paste"),
+            ("ctrl-shift-a", "terminal::SelectAll"),
+            ("ctrl-shift-f", "terminal::Find"),
+            ("ctrl-shift-k", "terminal::Clear"),
+        ] {
+            assert_eq!(
+                terminal.bindings.get(key).map(String::as_str),
+                Some(action),
+                "`{key}`"
+            );
+        }
+        // 全域が ⌃ + 文字を持っていても、端末の中では NoAction で外れてシェルへ届く。
+        for key in [
+            "ctrl-f",
+            "ctrl-w",
+            "ctrl-p",
+            "ctrl-j",
+            "ctrl-n",
+            "ctrl-o",
+            "ctrl-h",
+            "ctrl-i",
+            "ctrl-\\",
+            "ctrl-k ctrl-s",
+            "ctrl-k ctrl-t",
+        ] {
+            assert_eq!(
+                terminal.bindings.get(key).map(String::as_str),
+                Some(NO_ACTION),
+                "`{key}` が端末に届かない"
+            );
+        }
+        // ⌃C / ⌃V はシェルのもの（SIGINT / 文字の挿入）。端末の操作には使わない。
+        assert!(!terminal.bindings.contains_key("ctrl-c"));
+        assert!(!terminal.bindings.contains_key("ctrl-v"));
+        // ⌃⇧P（コマンドパレット）などの ⇧ 付きは全域のまま効く。
+        assert!(!terminal.bindings.contains_key("ctrl-shift-p"));
+        // 端末のセクションは全域より後ろ（gpui は同じ深さなら後の束縛を採る）。
+        let terminal_index = sections
+            .iter()
+            .position(|section| section.context == TERMINAL_CONTEXT);
+        let global_index = sections
+            .iter()
+            .position(|section| section.context.is_empty());
+        assert!(terminal_index > global_index);
+    }
+
+    #[test]
+    fn terminal_labels_follow_the_terminal_conversion() {
+        assert_eq!(
+            to_non_mac_keystroke_in(TERMINAL_CONTEXT, "cmd-c").as_deref(),
+            Some("ctrl-shift-c")
+        );
+        // 端末以外は従来どおり。
+        assert_eq!(
+            to_non_mac_keystroke_in("Editor", "cmd-c").as_deref(),
+            Some("ctrl-c")
+        );
+        assert!(!default_keymap_json(KeymapPlatform::MacOs).contains(NO_ACTION));
+    }
+
     /// macOS 固有の概念は非 mac へ持ち込まない。
     #[test]
     fn macos_only_concepts_are_dropped() {
@@ -796,7 +961,7 @@ mod tests {
     #[test]
     fn parses_sections_and_bindings() {
         let sections = parse(DEFAULT_KEYMAP_JSON).expect("既定 keymap がパースできる");
-        assert_eq!(sections.len(), 4);
+        assert_eq!(sections.len(), 6);
         assert_eq!(sections[0].context, "Editor");
         // ⌘S は保存時フォーマットのフックのため workspace 側（M11）。
         assert_eq!(
@@ -824,11 +989,23 @@ mod tests {
             sections[2].bindings.get("enter").map(String::as_str),
             Some("workspace::ControlNext")
         );
-        // 末尾は全域（context 空）+ Quit
-        assert!(sections[3].context.is_empty());
+        // 4 セクション目はエクスプローラ（⌘Z = ファイル操作の取り消し・H30。エディタの ⌘Z とは別）
+        assert_eq!(sections[3].context, "Explorer");
         assert_eq!(
-            sections[3].bindings.get("cmd-q").map(String::as_str),
+            sections[3].bindings.get("cmd-z").map(String::as_str),
+            Some("workspace::UndoFileOperation")
+        );
+        // 5 セクション目は全域（context 空）+ Quit
+        assert!(sections[4].context.is_empty());
+        assert_eq!(
+            sections[4].bindings.get("cmd-q").map(String::as_str),
             Some("necoder::Quit")
+        );
+        // 末尾は端末（全域より後ろに置かないと ⌘F などが全域に負ける）
+        assert_eq!(sections[5].context, TERMINAL_CONTEXT);
+        assert_eq!(
+            sections[5].bindings.get("cmd-f").map(String::as_str),
+            Some("terminal::Find")
         );
     }
 

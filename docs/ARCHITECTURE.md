@@ -8,7 +8,7 @@
 ```
 [shell]      necoder(bin) ─ 結線・起動・メニュー
 [shell]      workspace ─ レール / chrome / active ProjectSession の合成・event routing
-[view]       editor_view / webview_view / explorer / git_ui / search_ui / agent_panel / terminal_view / settings / graph_view(M14)
+[view]       editor_view / webview_view / explorer / git_ui / review_view / search_ui / agent_panel / terminal_view / settings / graph_view(M14)
 [model]      editor_core / project / acp_client / search / lang / storage
 [foundation] ui(部品+Registry) / theme_core / settings_core / keymap_core / i18n
 [外部]       gpui(git rev固定) / agent-client-protocol(crates.io) / ropey / alacritty_terminal
@@ -39,7 +39,8 @@
 | `acp_client` / `agent_panel` | ACP セッション・transcript・composer | crates.io `agent-client-protocol` と necoder 固有 UI の独立実装 | M4 |
 | `lang` | tree-sitter ハイライト・LSP クライアント | 公開 LSP 仕様と tree-sitter crates 上の独立実装 | M7 |
 | `git_ui` / `terminal_view` | gutter diff / 統合ターミナル | `imara-diff` / crates.io `alacritty_terminal` 上の独立実装 | M8 |
-| `webview_view` | ローカル HTML プレビュー | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱） | M14 |
+| `review_view` | 変更レビュー（worktree の全変更を 1 画面で・可変高リスト・ツリー・畳み）。構造化 diff は `project::review`（git CLI の unified diff を解析）。`editor_view` は構文色の写像だけ借りる（コアは変更レビューを知らない） | GPUI の公開 API・Git CLI 上の独立実装（Orca の機能比較のみ） | parity O6 |
+| `webview_view` | ローカル HTML プレビュー / artifact の隔離表示 / localhost の Web タブ | `wry` の child view API。macOS=WKWebView / Windows=WebView2（エンジン非同梱）。Web タブの移動判定を最上位だけに掛けるため、macOS は wry の navigation delegate を包む（`main_frame.rs`・objc2）。Design モードのピッカー（`design_picker.js`・初期化スクリプト）と IPC は Web タブの WebView にだけ付け、受けた知らせは `design.rs` が送り手・nonce・形・大きさで検め秘密を伏せる。要素の切り抜きは `snapshot.rs`（macOS=`takeSnapshotWithConfiguration` / Windows=`CapturePreview` + 切り抜き） | M14 |
 | `graph_view` | worktree×commit の DAG・custom Element | Git CLI の出力を使う独立実装 | M14 |
 
 Zed のソースは GPUI API の利用例や設計比較のために閲覧しているため、本プロジェクトを厳密な意味での
@@ -83,8 +84,10 @@ impl Buffer {
   具体型 `EditorTab { path, editor: Entity<EditorView>, _observation }` の `Vec` + `active_tab: usize` で始める
   （ペインは当面「主ペイン = 複数タブ」+「右分割 = 単一比較ビュー」）。多態化（画像/diff/設定 UI を同格に）が
   必要になった時点で `enum PaneItem { Editor(..), Diff(..), .. }` → `trait TabItem` へ育てる（multibuffer 本体は later）。
-  **現在地（2026-09-11）**: `enum TabContent { Editor, Image, Pdf }` の 3 具体型。Image / Pdf は「編集も保存も
+  **現在地（2026-09-26）**: `enum TabContent { Editor, Image, Pdf, Web }` の 4 具体型。Image / Pdf / Web は「編集も保存も
   LSP もしない表示専用タブ」で、trait 化はこの性質を持たない Item（diff / 設定 UI）が要求した時点で再検討する。
+  Web（localhost の開発サーバ・`web_preview_view`）は鍵（`EditorTab.path`）に URL をそのまま入れる — ファイルの鍵は
+  絶対パスなので衝突せず、窓セッションの `open_files` の形も変えずに永続化できる（`web_tab_url` が見分ける）。
   Pdf は自前レンダラを持たず、`webview_view`（HTML プレビュー用のネイティブ子ビュー層）に `file://` を渡して
   OS のビューア（macOS = WKWebView の PDFKit / Windows = WebView2）に描かせる。ネイティブ子ビューは GPUI の
   描画木を外れても OS 側に残るため、`Workspace::sync_native_view_visibility` が毎 render で可視性と
@@ -173,9 +176,10 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - **ローカル DB（`~/Library/Application Support/necoder/necoder.db`）**: [Turso](https://github.com/tursodatabase/turso)（SQLite の pure-Rust 再実装・MIT・async ネイティブ）を採用。用途は
   ①**hot exit**（dirty バッファ全文 + path/version/カーソル。WAL で kill -9 耐性）
   ②**スレッド永続化**（threads/turns テーブル。turn 毎 INSERT 追記 = JSON 全書き換えを避ける。ブラウズはページング）
-  ③**トークン台帳**（turns の集計ビューでほぼ無料）
+  ③**使用量**（`turn_usage`・O11・2026-09-26: エージェントがターンの終わりに報告したトークンと、会話の累計コストの差分＝推定 USD を 1 ターン 1 行。Stats の日別集計と、再起動後に引き継いだ会話のコスト差分の基準に使う。旧「トークン台帳」`token_ledger` は `threads.tokens_used`＝文脈窓の使用量を並べるだけで累計ではなかったため削除。レート制限は保存しない＝エージェントが知らせた最後の値をメモリに持つだけ）
   ④**checkpoint のメタデータ**（turn→file→blob hash。blob 本体は content-addressed ファイル or DB — M12 着手時に比較）
 - **隔離**: DB アクセスは薄い `storage` crate に閉じ込める（SQL を UI 層に漏らさない）。Turso はまだ若いので、問題が出たら rusqlite へ 1 crate の差し替えで退避できる面を保つ。書き込みは全て background executor（async API がそのまま「UI スレッドで塞がない」規律に合う）
+- ⑥**変更レビューの注記**（`review_notes`・parity O7）: 1 注記 = 1 行（scope = TaskSpace id / 対象は JSON 1 列 + `target_kind` / 本文 / 状態 unsent・sent・resolved / sent_at）。対象を列に展開しないのは、Design Mode のページ要素など種類が増えても表を変えないため
 - ⑤**窓セッション**（`window_sessions`・2026-09-03）: 1 窓 = 1 行（window_id / payload JSON = プロジェクト列 + 各プロジェクトの開タブ列 + アクティブ / closed_at）。各窓は自分の行だけを `WindowSessionWriter`（background の合流書き・順序保証）で更新し、起動時は生存中の全行を窓として復元（無ければ最後に閉じた 1 行）。ユーザーが窓を閉じたら `closed_at`（⌘Q では付けない）。⌘Q 直前は最新 payload を同期保存して background 書き込みの取りこぼしを防ぐ。旧 `state.json` は**廃止・互換読み込みも無し**
 - **キャッシュ（捨ててよい・真実ではない）**: `external_agents/registry/registry.json` = ACP 公開レジストリの写し（`paths::acp_registry_cache`）。消えても組み込みカタログで動く
 
@@ -343,6 +347,9 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   「再接続」チップを出す。**SSH セッションに乗るプロセス（ACP/LSP/PTY）は自動再接続の外**: ssh の子が
   落ちると stdout が EOF になり、そのプロセスは消える。ACP は `acp_client` が EOF（`is_incoming_transport_closed` /
   待機中は `incoming_closed`）を見てセッションを畳み（`AgentEvent::SessionLost`）、次の送信で立ち上げ直す。
+  待機中（ターンとターンの間）も `session/update` を読み、ターン中と同じ `handle_session_message` で捌く
+  （コマンド一覧は `session/new` 直後、会話名はターン終了の数秒後に届く。読まずにいると次の prompt まで
+  UI に出ない・O2）。`session/load` の再生は本文を捨て、状態（コマンド一覧・会話名・目標）だけ流す。
   会話は `session/load`（エージェントが `loadSession` を広告するとき・id は `storage.thread_sessions`）で引き継ぐ。
   LSP/PTY の同種の再 spawn は未着手（ROADMAP M9 残件）。
 - SSH は system binary + ControlMaster。認証・known_hosts・ProxyJump を再実装しない。

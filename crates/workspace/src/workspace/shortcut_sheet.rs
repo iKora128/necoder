@@ -68,10 +68,18 @@ const ACTION_LABELS: &[(&str, &str)] = &[
     ("editor::AddCursorAbove", "key.add_cursor_above"),
     ("editor::AddCursorBelow", "key.add_cursor_below"),
     ("editor::Cancel", "key.cancel"),
+    // ── エクスプローラ ──
+    ("workspace::UndoFileOperation", "key.undo_file_operation"),
     // ── AI チャット ──
     ("agent::SubmitPrompt", "key.submit_prompt"),
     ("agent::CloseActiveThread", "key.close_active_thread"),
     ("agent::FindInTranscript", "key.find_in_transcript"),
+    // ── ターミナル ──
+    ("terminal::Copy", "key.terminal_copy"),
+    ("terminal::Paste", "key.terminal_paste"),
+    ("terminal::SelectAll", "key.terminal_select_all"),
+    ("terminal::Clear", "key.terminal_clear"),
+    ("terminal::Find", "key.terminal_find"),
     // ── Fleet（FLEET-V2 §7 のキー表と同じ語を使う）──
     ("workspace::NewTask", "fleet.new_task"),
     ("workspace::StageOne", "fleet.stage_one"),
@@ -111,12 +119,14 @@ fn label_for_action(action: &str) -> SharedString {
     SharedString::from(prettify_action(action))
 }
 
-/// keymap のコンテキスト述語 → セクション見出し（i18n）。既知 4 つ以外はコンテキスト名そのまま。
+/// keymap のコンテキスト述語 → セクション見出し（i18n）。既知 5 つ以外はコンテキスト名そのまま。
 fn section_label(context: &str) -> SharedString {
     let key = match context {
         "Editor" => Some("key.section_editor"),
         "AgentPanel" => Some("key.section_agent"),
         "FleetControl" => Some("key.section_control"),
+        keymap_core::TERMINAL_CONTEXT => Some("key.section_terminal"),
+        "Explorer" => Some("key.section_explorer"),
         "" => Some("key.section_global"),
         _ => None,
     };
@@ -207,9 +217,11 @@ impl Workspace {
                 continue;
             }
             // 読みやすさのため行は表示名でソート（keymap は keystroke 順で並ぶため）。
+            // `zed::NoAction`（端末の中で ⌃ キーをシェルへ通すための打ち消し）はショートカットではない。
             let mut rows: Vec<(SharedString, String)> = section
                 .bindings
                 .iter()
+                .filter(|(_, action)| action.as_str() != keymap_core::NO_ACTION)
                 .map(|(key, action)| {
                     (
                         label_for_action(action),
@@ -339,7 +351,7 @@ mod tests {
         }
     }
 
-    /// セクション見出しは既知 4 つを i18n キーへ、未知はコンテキスト名そのまま。
+    /// セクション見出しは既知 5 つを i18n キーへ、未知はコンテキスト名そのまま。
     #[test]
     fn section_label_maps_known_contexts() {
         // i18n 未初期化でも panic しない（t! はキー欠落時もフォールバックする前提）だが、

@@ -76,7 +76,9 @@ impl Workspace {
                     let name = theme.name.to_string();
                     self.apply_theme(theme, cx);
                     // set_user_value = 永続化 + global 即時 reload（チップの選択中表示も同じ描画で更新）。
-                    settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+                    let result =
+                        settings::set_user_value(cx, "theme", serde_json::Value::String(name));
+                    self.report_settings_save(result, cx);
                 }
                 Err(error) => eprintln!("テーマを読めない: {error:#}"),
             },
@@ -93,6 +95,20 @@ impl Workspace {
                 self.chrome.pending_open_settings_json = true;
                 cx.notify();
             }
+            settings::SettingsViewEvent::SaveFailed(message) => {
+                self.push_failure_toast(message.clone(), None, cx);
+            }
+        }
+    }
+
+    /// 設定の保存結果を見る。失敗（settings.json を読めないので書かなかった等）はトーストで知らせる。
+    pub(crate) fn report_settings_save(
+        &mut self,
+        result: anyhow::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = result {
+            self.push_failure_toast(settings::save_failure_message(&error), None, cx);
         }
     }
 
@@ -282,8 +298,12 @@ impl Workspace {
                 ))
                 .child(button("window-close", "\u{2715}").on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, window, _cx| {
-                        // remove_window は OS の should-close フックを通らない＝閉じ印はここで付ける。
+                    cx.listener(|this, _, window, cx| {
+                        // remove_window は OS の should-close フックを通らない＝最後の窓の確認（O4）と
+                        // 閉じ印はここで自分で行う。
+                        if this.guard_window_close(window, cx) {
+                            return;
+                        }
                         this.mark_window_closed();
                         window.remove_window()
                     }),
@@ -603,11 +623,17 @@ impl Workspace {
             .border_color(theme.border)
             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                 let is_active = index == active_tab;
-                let name = tab
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| i18n::t!("tabs.untitled"));
+                // Web タブは鍵が URL なので、ファイル名ではなくページのタイトル（無ければ host:port）。
+                let name = if tab.is_review() {
+                    i18n::t!("review.tab_title")
+                } else if let Some(web) = tab.web() {
+                    web.read(cx).tab_label(cx)
+                } else {
+                    tab.path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| i18n::t!("tabs.untitled"))
+                };
                 let dirty = tab.is_dirty(cx);
                 // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
                 let status = self.repository.status.get(&tab.path).copied();
@@ -727,7 +753,8 @@ impl Workspace {
         position: Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if index >= self.tabs.len() {
+        // 変更レビューのタブはファイルではない（Finder で表示・パスのコピーが意味を持たない）。
+        if self.tabs.get(index).is_none_or(EditorTab::is_review) {
             return;
         }
         self.overlays.tab_menu = Some(TabMenuState { index, position });
@@ -803,10 +830,39 @@ impl Workspace {
             )
             .blur_radius(px(16.))]);
 
-        let is_local = self
-            .active_slot()
-            .map(|slot| slot.remote_host.is_none())
-            .unwrap_or(self.chat_mode());
+        // Web タブ: ファイルの操作の代わりに「既定のブラウザで開く / URL をコピー」。
+        let web = self.tabs.get(index)?.web().cloned();
+        if let Some(web) = &web {
+            let browser_view = web.clone();
+            menu_box = menu_box.child(
+                item("tab-ctx-open-browser", i18n::t!("webtab.ctx_open_browser")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        let url = browser_view.read(cx).current_url(cx);
+                        webview_view::localhost::open_in_browser(&url);
+                        this.close_tab_menu(cx);
+                    }),
+                ),
+            );
+            let copy_view = web.clone();
+            menu_box = menu_box
+                .child(
+                    item("tab-ctx-copy-url", i18n::t!("webtab.ctx_copy_url")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            let url = copy_view.read(cx).current_url(cx);
+                            cx.write_to_clipboard(ClipboardItem::new_string(url));
+                            this.close_tab_menu(cx);
+                        }),
+                    ),
+                )
+                .child(separator());
+        }
+        let is_local = web.is_none()
+            && self
+                .active_slot()
+                .map(|slot| slot.remote_host.is_none())
+                .unwrap_or(self.chat_mode());
         if is_local {
             let reveal_path = path.clone();
             menu_box = menu_box.child(
@@ -839,7 +895,9 @@ impl Workspace {
             menu_box = menu_box.child(separator());
         }
         // Chat の成果物を、戻り先のプロジェクトへ持っていく（`docs/CHAT.md` §3.3）。
-        if let Some((project_name, project_root)) = self.chat_copy_target() {
+        if let Some((project_name, project_root)) =
+            self.chat_copy_target().filter(|_| web.is_none())
+        {
             let source = path.clone();
             menu_box = menu_box
                 .child(
@@ -857,23 +915,27 @@ impl Workspace {
                 )
                 .child(separator());
         }
-        let copy_path = path.clone();
-        menu_box = menu_box.child(
-            item("tab-ctx-copy-path", i18n::t!("explorer.ctx_copy_path")).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| this.copy_tab_path(&copy_path, false, cx)),
-            ),
-        );
-        let relative_path = path.clone();
-        menu_box = menu_box.child(
-            item("tab-ctx-copy-relative", i18n::t!("tabs.ctx_copy_relative")).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.copy_tab_path(&relative_path, true, cx)
-                }),
-            ),
-        );
-        menu_box = menu_box.child(separator());
+        if web.is_none() {
+            let copy_path = path.clone();
+            menu_box = menu_box.child(
+                item("tab-ctx-copy-path", i18n::t!("explorer.ctx_copy_path")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.copy_tab_path(&copy_path, false, cx)
+                    }),
+                ),
+            );
+            let relative_path = path.clone();
+            menu_box = menu_box.child(
+                item("tab-ctx-copy-relative", i18n::t!("tabs.ctx_copy_relative")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.copy_tab_path(&relative_path, true, cx)
+                    }),
+                ),
+            );
+            menu_box = menu_box.child(separator());
+        }
         menu_box = menu_box.child(
             item("tab-ctx-close", i18n::t!("tabs.ctx_close")).on_mouse_down(
                 MouseButton::Left,
@@ -2252,6 +2314,8 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_3()
+            // 使用量（O11）: いまのスレッドのエージェントの「5h 42% · 週 18%」。値が無ければ出さない。
+            .children(self.render_usage_chip(cx))
             // 前回クラッシュの通知チップ（M13）: クリックでログ抜粋つきのバグ報告 Issue を開く。
             // 色は theme.warn（診断 ▲ と同じ警告色 = 識別色は使わない）。
             .when_some(self.notifications.crash_notice.clone(), |element, _log| {
@@ -2470,10 +2534,21 @@ impl Workspace {
     ) {
         self.chrome.show_settings = true;
         self.exit_agent_full_screen(cx); // 全画面のままだと中央が Agent で設定が出ない
-        self.chrome
-            .settings_view
-            .update(cx, |view, cx| view.refresh_availability(cx));
+        self.refresh_settings_view(cx);
         cx.notify();
+    }
+
+    /// 設定を開く時の読み直し。Skills 節の一覧に、いま見ているローカルのプロジェクトの
+    /// `.claude/skills` / `.agents/skills` も含める（リモートと Chat 中はプロジェクトなし）。
+    pub(crate) fn refresh_settings_view(&mut self, cx: &mut Context<Self>) {
+        let project = self
+            .active_slot()
+            .filter(|slot| slot.remote_host.is_none())
+            .map(|slot| slot.worktree.root().to_path_buf());
+        self.chrome.settings_view.update(cx, |view, cx| {
+            view.set_skills_project(project);
+            view.refresh_availability(cx);
+        });
     }
 
     /// コマンドパレット「設定: settings.json を開く」。
@@ -2656,8 +2731,11 @@ impl Workspace {
     }
 
     /// 差し替え済みチップの「再起動」: 自プロセスの終了を待って .app を開き直す子を切り離してから、
-    /// 通常の Quit（hot exit 破棄・窓セッション整理）と同じ経路で終了する。
-    pub(crate) fn restart_after_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 通常の Quit（hot exit 破棄・窓セッション整理）と同じ後始末で終了する。
+    ///
+    /// ⌘Q の確認（O4）は通さない: 開き直す子は既に待っているので「隠して動かし続ける」を選ばれると
+    /// 後で勝手に再起動が走る。再起動は押した人が明示的に選んだ終了として扱う。
+    pub(crate) fn restart_after_update(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.updater.status, Some((_, UpdateState::Ready))) {
             return;
         }
@@ -2665,11 +2743,8 @@ impl Workspace {
             self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx);
             return;
         }
-        // Quit アクションは necoder crate 側の定義（キーマップの `necoder::Quit`）なので名前で組み立てる。
-        match cx.build_action("necoder::Quit", None) {
-            Ok(action) => window.dispatch_action(action, cx),
-            Err(_) => cx.quit(),
-        }
+        // 全窓の後始末をするので、この窓の update を抜けてから行う。
+        cx.defer(quit_now);
     }
 }
 

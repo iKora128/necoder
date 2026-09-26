@@ -95,15 +95,23 @@ impl Workspace {
         if !slot.worktree.is_remote() {
             slot.identity_color = Some(color);
             let settings_path = slot.worktree.root().join(".necoder/settings.json");
-            if let Err(error) = settings_core::persist_user_value(
+            let result = settings_core::persist_user_value(
                 &settings_path,
                 "color",
                 serde_json::Value::String(hex.to_string()),
-            ) {
+            );
+            if let Err(error) = &result {
                 eprintln!(".necoder への色の保存に失敗: {error:#}");
             }
+            self.report_settings_save(result, cx);
         }
         self.persist_project_color(project_index);
+        // 端末の検索欄の枠・キャレットも同じ色（そのプロジェクトの端末だけ）。
+        if let Some(session) = self.project_sessions.sessions.get(project_index) {
+            for dock in [session.terminal_dock.clone(), session.tests_dock.clone()] {
+                dock.update(cx, |dock, cx| dock.set_accent(color, cx));
+            }
+        }
         // アクティブなら全ペイン（タブ + 分割）のキャレット等アクセントへ波及。
         // レール/タブは render 時に slot.color を読むので notify で追従する（明示波及が要るのはキャレットだけ）。
         if project_index == self.project_sessions.active {
@@ -112,6 +120,7 @@ impl Workspace {
                 .iter()
                 .filter_map(|tab| tab.editor().cloned())
                 .chain(self.split_editor.clone())
+                .chain(std::iter::once(self.git_panel.read(cx).message.clone()))
                 .collect();
             for editor in editors {
                 editor.update(cx, |view, cx| view.set_accent(color, cx));
