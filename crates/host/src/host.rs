@@ -2174,6 +2174,24 @@ fn plain_ssh_word(value: &str) -> bool {
             .any(|character| character.is_whitespace() || matches!(character, '"' | '\'' | '#'))
 }
 
+/// ProxyJump の値か（`[user@]host[:port]` か `ssh://[user@]host[:port]` を `,` でつないだもの）。
+/// どの経由先も、ユーザー名とホスト名が空でなく `-` で始まらず（ssh のオプションに化けない）、使うのは
+/// ホスト名・ユーザー名・ポート・IPv6 の角括弧の文字だけ（`;` や `$` などは通さない）。先頭の経由先だけ
+/// 見ていた時は `bastion,-oProxyCommand=…` を通していた（レビューで見つけた）。
+fn proxy_jump_value(value: &str) -> bool {
+    value.split(',').all(|hop| {
+        let hop = hop.strip_prefix("ssh://").unwrap_or(hop);
+        !hop.is_empty()
+            && hop
+                .split('@')
+                .all(|part| !part.is_empty() && !part.starts_with('-'))
+            && hop.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '.' | '-' | '_' | '@' | ':' | '[' | ']' | '%')
+            })
+    })
+}
+
 impl NewSshHost {
     /// 書く前に確かめる（書けない値は理由つきで断る・config を壊さない）。
     pub fn validate(&self) -> Result<()> {
@@ -2208,7 +2226,7 @@ impl NewSshHost {
         }
         if let Some(proxy_jump) = &self.proxy_jump {
             anyhow::ensure!(
-                plain_ssh_word(proxy_jump),
+                proxy_jump_value(proxy_jump),
                 "経由するホストに使えない文字があります: {proxy_jump}"
             );
         }
@@ -5042,8 +5060,33 @@ mod tests {
                 proxy_jump: Some("gw -oProxyCommand=x".into()),
                 ..NewSshHost::default()
             },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "h".into(),
+                proxy_jump: Some("bastion,-oProxyCommand=x".into()),
+                ..NewSshHost::default()
+            },
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        // 経由先は全部を確かめる（2 つ目以降の `-` や `;` も断る）。
+        for bad in [
+            "bastion,-oProxyCommand=x",
+            "bastion;touch x",
+            "bastion,",
+            "admin@-x",
+            "ssh://-oProxyCommand=x",
+            "gw$(id)",
+        ] {
+            assert!(!proxy_jump_value(bad), "{bad}");
+        }
+        for good in [
+            "admin@bastion.example.com:2200,inner",
+            "ssh://me@[2001:db8::1]:2222",
+            "jump_host-1",
+            "none",
+        ] {
+            assert!(proxy_jump_value(good), "{good}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
