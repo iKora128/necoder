@@ -867,6 +867,7 @@ pdf:
   unsupported: PDF cannot be shown in a tab in this environment
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead
 terminal:
+  quick_tip: "Quick commands (quick_commands in settings.json). Pick one to run it in a new terminal"
   tab_title: Terminal %{n}
   close_busy_title: "A process is running in Terminal %{n}"
   close_busy_detail: Closing the terminal stops it too.

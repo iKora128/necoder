@@ -42,6 +42,22 @@ pub struct TerminalShell {
 
 impl Global for TerminalShell {}
 
+/// よく使うコマンド 1 つ（O25・Quick Commands）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuickCommand {
+    /// ボタンに出す名前。
+    pub name: String,
+    /// 新しい端末で走らせるコマンド（シェルに打つのと同じ）。
+    pub command: String,
+}
+
+/// よく使うコマンドの一覧（`quick_commands`）。workspace が設定から作って global に置く。
+/// ドックの ▶ から選ぶと、新しい端末を開いてそこで走らせる（SSH 先のプロジェクトなら SSH 先で）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QuickCommands(pub Vec<QuickCommand>);
+
+impl Global for QuickCommands {}
+
 /// TerminalDock から shell への通知。
 pub enum TerminalDockEvent {
     OpenPath {
@@ -63,6 +79,8 @@ pub struct TerminalDock {
     theme: Theme,
     /// プロジェクト色（各端末の検索欄の枠・キャレット）。
     accent: Hsla,
+    /// よく使うコマンドの帯を開いているか（ドックの ▶・O25）。
+    quick_open: bool,
     /// テストで PTY を起動しない（[`Self::use_test_terminals`]）。本番のビルドには存在しない。
     #[cfg(feature = "test-support")]
     test_terminals: bool,
@@ -75,6 +93,7 @@ impl TerminalDock {
             detached: Default::default(),
             active: 0,
             launch,
+            quick_open: false,
             accent: theme.fg2,
             theme,
             #[cfg(feature = "test-support")]
@@ -285,6 +304,26 @@ impl TerminalDock {
         cx.notify();
     }
 
+    /// よく使うコマンドを新しい端末で走らせる（O25）。シェルを開いてからコマンドを打つので、終わっても
+    /// 端末はシェルに戻って残る（出力を読める・続けて打てる）。
+    pub fn run_quick_command(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(command) = cx
+            .try_global::<QuickCommands>()
+            .and_then(|commands| commands.0.get(index).cloned())
+        else {
+            return;
+        };
+        self.quick_open = false;
+        let terminal = self.create_terminal(self.shell_launch(cx), cx);
+        terminal
+            .read(cx)
+            .send_input(&format!("{}\n", command.command));
+        self.terminals.push(terminal);
+        self.active = self.terminals.len() - 1;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     pub fn open_command(
         &mut self,
         launch: TerminalLaunch,
@@ -482,6 +521,10 @@ impl Render for TerminalDock {
                     ),
             );
         }
+        let quick_commands = cx
+            .try_global::<QuickCommands>()
+            .map(|commands| commands.0.clone())
+            .unwrap_or_default();
         let header = header
             .child(
                 div()
@@ -501,6 +544,33 @@ impl Render for TerminalDock {
                         cx.listener(|this, _, window, cx| this.add(window, cx)),
                     ),
             )
+            // よく使うコマンド（O25）: 設定にある時だけ ▶。押すと下に帯を開く。
+            .when(!quick_commands.is_empty(), |header| {
+                let open = self.quick_open;
+                header.child(
+                    div()
+                        .id("term-quick")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(28.))
+                        .h_full()
+                        .text_size(px(10.))
+                        .text_color(if open { theme.fg0 } else { theme.fg2 })
+                        .when(open, |element| element.bg(theme.bg1))
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.fg0).bg(theme.bg1))
+                        .child("▶")
+                        .tooltip(Tooltip::text(i18n::t!("terminal.quick_tip"), theme.clone()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| {
+                                this.quick_open = !this.quick_open;
+                                cx.notify();
+                            }),
+                        ),
+                )
+            })
             .child(div().flex_1())
             .child(
                 div()
@@ -537,12 +607,53 @@ impl Render for TerminalDock {
         // 隔離された subtree の root で `flex_1()` は効かない（flex 親が居ない）＝高さ 0 に潰れ、
         // 端末のグリッドが 24 セルまで縮んで**中身が真っ黒**に見えた。
         // `size_full()` なら「与えられた領域いっぱい」になるので、置いた側の意図（上記）も保たれる。
+        // よく使うコマンドの帯（▶ で開閉・O25）: 押すと新しい端末で走らせる。
+        let quick_strip = (self.quick_open && !quick_commands.is_empty()).then(|| {
+            let mut strip = div()
+                .id("term-quick-strip")
+                .flex()
+                .flex_none()
+                .flex_wrap()
+                .items_center()
+                .gap(px(5.))
+                .px(px(8.))
+                .py(px(4.))
+                .bg(theme.bg0)
+                .border_b_1()
+                .border_color(theme.border)
+                .text_size(px(11.));
+            for (index, command) in quick_commands.iter().enumerate() {
+                strip = strip.child(
+                    div()
+                        .id(("term-quick-command", index))
+                        .flex_none()
+                        .px(px(7.))
+                        .py(px(1.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_color(theme.fg1)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg1).text_color(theme.fg0))
+                        .child(SharedString::from(format!("▶ {}", command.name)))
+                        .tooltip(Tooltip::text(command.command.clone(), theme.clone()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.run_quick_command(index, window, cx)
+                            }),
+                        ),
+                );
+            }
+            strip
+        });
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(theme.bg1)
             .child(header)
+            .children(quick_strip)
             .child(body)
     }
 }

@@ -24,7 +24,7 @@ mod remote;
 
 pub use settings_core::{
     persist_agent_config_default, persist_mcp_enabled, persist_user_value, user_settings_path,
-    Density, McpServerSetting, Settings, SettingsStore, UnreadableSettings,
+    Density, McpServerSetting, QuickCommandSetting, Settings, SettingsStore, UnreadableSettings,
 };
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
