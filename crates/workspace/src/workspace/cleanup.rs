@@ -10,7 +10,8 @@
 //!   失うものがある Task は ⋯ メニューの削除（損失を見せる確認つき）で 1 本ずつ。
 //!
 //! 削除は 1 本ずつ順に行う（同じリポジトリへ `git worktree remove` を並べると lock でぶつかりうる）。
-//! 数えるのは開いた時と ↻ の時だけ。
+//! 数えるのは開いた時と ↻ の時だけ。失うものを全部数えてから、各 worktree の大きさ（ディスク上）を
+//! 測る（大きいフォルダは時間がかかるので後回し）。「大きい順」で並べ替えられる。
 
 use super::worktree_delete::WorktreeStakes;
 use crate::workspace::*;
@@ -25,6 +26,8 @@ pub(crate) struct CleanupRow {
     created_at_ms: i64,
     /// `None` = 数えている途中。
     stakes: Option<WorktreeStakes>,
+    /// worktree のディスク上の大きさ（バイト）。`None` = 測っている途中・測れない。
+    size: Option<u64>,
 }
 
 /// 片付けの画面の状態（開いている間だけ Some）。
@@ -35,6 +38,32 @@ pub(crate) struct CleanupState {
     selected: HashSet<SpaceId>,
     /// 削除を流している最中（ボタンを止める）。
     busy: bool,
+    /// 大きい順に並べる（既定は作った順）。
+    by_size: bool,
+}
+
+/// 大きさの短い言い方（「1.2 GB」「340 MB」「12 KB」）。
+fn size_label(size: Option<u64>) -> String {
+    let Some(bytes) = size else {
+        return "—".to_string();
+    };
+    let kib = bytes as f64 / 1024.0;
+    if kib < 1024.0 {
+        format!("{} KB", kib.round() as u64)
+    } else if kib < 1024.0 * 1024.0 {
+        format!("{} MB", (kib / 1024.0).round() as u64)
+    } else {
+        format!("{:.1} GB", kib / (1024.0 * 1024.0))
+    }
+}
+
+/// 描く順（行の添字）。大きい順なら大きさの降順（測れていない行は後ろ）、でなければ作った順のまま。
+fn cleanup_order(rows: &[CleanupRow], by_size: bool) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    if by_size {
+        order.sort_by_key(|&index| std::cmp::Reverse(rows[index].size.unwrap_or(0)));
+    }
+    order
 }
 
 /// 状態の短い呼び名（カードの状態チップと同じ語）。
@@ -113,6 +142,7 @@ impl Workspace {
                 phase: slot.task_space.phase,
                 created_at_ms: slot.task_space.created_at_ms,
                 stakes: None,
+                size: None,
             })
             .collect();
         let previous_focus = window.focused(cx);
@@ -124,6 +154,7 @@ impl Workspace {
             rows,
             selected: HashSet::new(),
             busy: false,
+            by_size: false,
         });
         self.count_cleanup_stakes(cx);
         cx.notify();
@@ -136,6 +167,7 @@ impl Workspace {
         };
         for row in &mut state.rows {
             row.stakes = None;
+            row.size = None;
         }
         let spaces: Vec<SpaceId> = state.rows.iter().map(|row| row.space.clone()).collect();
         let jobs: Vec<(SpaceId, Arc<dyn host::Host>, PathBuf, Vec<String>)> = spaces
@@ -153,6 +185,10 @@ impl Workspace {
             .collect();
         cx.notify();
         cx.spawn(async move |workspace, cx| {
+            let sizes: Vec<(SpaceId, Arc<dyn host::Host>, PathBuf)> = jobs
+                .iter()
+                .map(|(space, host, root, _)| (space.clone(), host.clone(), root.clone()))
+                .collect();
             for (space, host, root, bases) in jobs {
                 let stakes = cx
                     .background_executor()
@@ -169,11 +205,39 @@ impl Workspace {
                     true
                 });
                 if !matches!(applied, Ok(true)) {
-                    break;
+                    return;
+                }
+            }
+            // 大きさは失うものを全部数えてから（node_modules 等で時間がかかる）。
+            for (space, host, root) in sizes {
+                let size = cx
+                    .background_executor()
+                    .spawn(async move { project::disk_usage_on(host.as_ref(), &root) })
+                    .await;
+                let applied = workspace.update(cx, |workspace, cx| {
+                    let Some(state) = workspace.overlays.cleanup.as_mut() else {
+                        return false; // 閉じられた
+                    };
+                    if let Some(row) = state.rows.iter_mut().find(|row| row.space == space) {
+                        row.size = size;
+                    }
+                    cx.notify();
+                    true
+                });
+                if !matches!(applied, Ok(true)) {
+                    return;
                 }
             }
         })
         .detach();
+    }
+
+    /// 並べ順を切り替える（作った順 ⇄ 大きい順）。
+    fn toggle_cleanup_order(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.overlays.cleanup.as_mut() {
+            state.by_size = !state.by_size;
+            cx.notify();
+        }
     }
 
     fn close_cleanup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -382,7 +446,11 @@ impl Workspace {
                     .child(SharedString::from(i18n::t!("cleanup.empty"))),
             );
         }
-        for (position, row) in state.rows.iter().enumerate() {
+        for (position, row) in cleanup_order(&state.rows, state.by_size)
+            .into_iter()
+            .map(|index| &state.rows[index])
+            .enumerate()
+        {
             let selected = state.selected.contains(&row.space);
             let (losses, danger) = stakes_label(row.stakes);
             let space = row.space.clone();
@@ -448,6 +516,16 @@ impl Workspace {
                             .text_color(if danger { theme.warn } else { theme.fg2 })
                             .child(SharedString::from(losses)),
                     )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(56.))
+                            .flex()
+                            .justify_end()
+                            .text_size(px(10.5))
+                            .text_color(theme.fg2)
+                            .child(SharedString::from(size_label(row.size))),
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -505,7 +583,7 @@ impl Workspace {
                 }),
             );
         let card = div()
-            .w(px(620.))
+            .w(px(680.))
             .max_h(px(520.))
             .flex()
             .flex_col()
@@ -535,6 +613,24 @@ impl Workspace {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.fg0)
                             .child(SharedString::from(i18n::t!("cleanup.title"))),
+                    )
+                    .child(
+                        button(
+                            "cleanup-order",
+                            if state.by_size {
+                                i18n::t!("cleanup.order_by_size")
+                            } else {
+                                i18n::t!("cleanup.order_by_age")
+                            },
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_cleanup_order(cx);
+                            }),
+                        ),
                     )
                     .child(
                         button(
@@ -757,6 +853,44 @@ mod tests {
                 "選んでいない Task は触らない"
             );
         });
+        // 大きさは背景で測って行に入る（O22）。大きい順に並べ替えられる。
+        std::fs::write(folders[2].join("big.bin"), vec![0u8; 256 * 1024]).expect("書ける");
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.count_cleanup_stakes(cx)
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let state = workspace.overlays.cleanup.as_ref().expect("開いている");
+            let working = workspace.project_sessions.projects[2].task_space.id.clone();
+            let big = state
+                .rows
+                .iter()
+                .find(|row| row.space == working)
+                .and_then(|row| row.size)
+                .expect("測れた");
+            assert!(big >= 256 * 1024, "{big}");
+            assert_eq!(
+                cleanup_order(&state.rows, true)
+                    .first()
+                    .map(|&index| state.rows[index].space.clone()),
+                Some(working),
+                "大きい順なら先頭"
+            );
+            workspace.toggle_cleanup_order(cx);
+            assert!(workspace
+                .overlays
+                .cleanup
+                .as_ref()
+                .is_some_and(|state| state.by_size));
+        });
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn sizes_read_in_the_nearest_unit() {
+        assert_eq!(size_label(None), "—");
+        assert_eq!(size_label(Some(12 * 1024)), "12 KB");
+        assert_eq!(size_label(Some(340 * 1024 * 1024)), "340 MB");
+        assert_eq!(size_label(Some(1_288_490_189)), "1.2 GB");
     }
 }

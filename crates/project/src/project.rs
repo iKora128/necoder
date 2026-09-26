@@ -3548,6 +3548,24 @@ mod tests {
         assert_eq!(task_slug(""), "task");
     }
 
+    /// O22: worktree の大きさ。自前で歩く方はファイルの長さの合計、`du` の方は少なくともそれ以上。
+    #[test]
+    fn worktree_sizes_are_measured() {
+        let base = scratch("disk_usage");
+        std::fs::create_dir_all(base.join("nested/deeper")).unwrap();
+        std::fs::write(base.join("a.bin"), vec![0u8; 64 * 1024]).unwrap();
+        std::fs::write(base.join("nested/deeper/b.bin"), vec![0u8; 32 * 1024]).unwrap();
+        assert_eq!(local_tree_size(&base), 96 * 1024);
+        let measured = disk_usage_on(&LocalHost, &base).expect("測れる");
+        assert!(measured >= 96 * 1024, "{measured}");
+        assert_eq!(
+            disk_usage_on(&LocalHost, &base.join("nowhere")),
+            None,
+            "無いフォルダは測れない"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// O20: ＋ Task の「詳細」— 名前を決める / 起点を決める / 既にあるブランチの worktree を作る。
     #[test]
     fn tasks_can_start_from_a_chosen_branch_or_base() {
@@ -4137,6 +4155,46 @@ ENV
 # 3) 依存の準備（言語ごと・任意）
 # pnpm install --prefer-offline
 "#;
+
+/// Task の worktree のディスク上の大きさ（バイト・O22 の片付けで並べる）。背景で呼ぶ。
+/// POSIX のシェルがあれば `du -sk`（リモートも同じ・ブロック単位なので消した時に空く量に近い）、
+/// 無ければ（Windows のローカル）ファイルの長さを歩いて足す。読めなければ None。
+/// 読めないフォルダがあって `du` が失敗を返しても、合計が出ていればそれを使う。
+pub fn disk_usage_on(host: &dyn Host, root: &Path) -> Option<u64> {
+    if host.has_posix_shell() {
+        let output = host.run_command(&host.shell_script("du -sk .", root)).ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let kib: u64 = text.lines().last()?.split_whitespace().next()?.parse().ok()?;
+        return Some(kib * 1024);
+    }
+    if host.is_remote() {
+        return None;
+    }
+    Some(local_tree_size(root))
+}
+
+/// ローカルのフォルダの中のファイルの長さの合計（シンボリックリンクはたどらない）。
+fn local_tree_size(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // DirEntry の metadata はリンクをたどらない（リンク先を二重に数えない）。
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total += metadata.len();
+            }
+        }
+    }
+    total
+}
 
 /// リポジトリの既定の起点（O20）: 統合先の `.necoder/settings.json` の `task_base`
 /// （例 `"origin/develop"`）。＋ Task・fan-out・`ne fleet create` が起点を指定せずに**新しいブランチを
