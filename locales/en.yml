@@ -227,6 +227,7 @@ cmd:
   toggle_terminal: "View: Terminal"
   new_terminal_tab: "Terminal: New terminal in the editor area"
   move_terminal_to_editor: "Terminal: Move terminal into the editor area"
+  toggle_floating_terminal: "Terminal: Floating terminal (from anywhere)"
   toggle_git_panel: "View: Source control"
   toggle_todo_board: "View: Todo board"
   toggle_fleet: "View: Fleet mode"
@@ -981,6 +982,7 @@ terminal:
   close_busy_many_title: "Processes are running in %{n} terminals"
   tab_needs_project: Terminal tabs open in a project, not in Chat
   tab_split_hint: Terminals in the editor area can't be split. Right-click the tab › Move to the bottom dock to split it
+  float_hide_tip: "Hide (keeps running)  %{key}"
   add_tip: New terminal
   split_tip: "Split side by side (%{key})"
   pane_title: "Terminal %{n}"

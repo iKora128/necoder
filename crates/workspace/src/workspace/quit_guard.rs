@@ -212,6 +212,10 @@ impl Workspace {
                 work.terminals += dock.read(cx).busy_terminal_count(cx);
             }
         }
+        // どこからでも呼べる端末（O24・C13・隠していても動いている）。
+        if let Some(floating) = &self.chrome.floating_terminal {
+            work.terminals += floating.dock.read(cx).busy_terminal_count(cx);
+        }
         work
     }
 

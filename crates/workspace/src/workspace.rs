@@ -97,6 +97,7 @@ mod system_notifications;
 mod font_settings;
 mod statusbar_items;
 mod terminal_colors;
+mod terminal_float;
 mod terminal_rename;
 mod terminal_settings;
 mod terminal_tabs;
@@ -148,6 +149,8 @@ actions!(
         // 端末をエディタ領域のタブで開く / 下ドックの前にいる端末をエディタ領域へ移す（O24）。
         NewTerminalTab,
         MoveTerminalToEditor,
+        // どこからでも呼べる端末（プロジェクトに紐付かない・浮かべる・⌃`・O24 / C13）。
+        ToggleFloatingTerminal,
         GoToDefinition,
         TriggerCompletion,
         // hover をキーで出す（マウス dwell と同じポップアップ。⌘K ⌘I = VSCode 互換）。
@@ -1394,6 +1397,8 @@ struct ChromeState {
     task_renaming: Option<TaskRenaming>,
     /// 端末のタブの改名（O24・ダブルクリック）。
     terminal_renaming: Option<terminal_rename::TerminalRenaming>,
+    /// どこからでも呼べる端末（O24・C13）。初めて呼ぶまで無い（シェルを起こさない）。
+    floating_terminal: Option<terminal_float::FloatingTerminal>,
     /// 窓を持たない経路（パネルのイベント）で開いた入力欄へ渡すフォーカス（`process_pending_shell_effects`）。
     focus_next_frame: Option<FocusHandle>,
     /// 設定の「選ぶ…」で頼まれた書体のピッカー（設定のキー・窓が要るので後処理で開く）。
@@ -2342,6 +2347,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::new_terminal_tab))
             .on_action(cx.listener(Self::move_terminal_to_editor))
+            .on_action(cx.listener(Self::toggle_floating_terminal))
             .on_action(cx.listener(Self::go_to_definition))
             .on_action(cx.listener(Self::trigger_completion))
             .on_action(cx.listener(Self::show_hover_at_caret))
@@ -2557,6 +2563,8 @@ impl Render for Workspace {
             })
             .child(self.render_statusbar(cx))
             // オーバーレイ（最前面）
+            // どこからでも呼べる端末（O24・C13）。パレットやダイアログはこの上に出す。
+            .children(self.render_floating_terminal(cx))
             .when_some(self.overlays.picker.clone(), |this, picker| {
                 this.child(picker)
             })

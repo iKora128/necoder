@@ -228,6 +228,7 @@ cmd:
   toggle_terminal: "表示: ターミナル"
   new_terminal_tab: "ターミナル: エディタ領域に新しく開く"
   move_terminal_to_editor: "ターミナル: エディタ領域へ移す"
+  toggle_floating_terminal: "ターミナル: どこからでも（浮かべる）"
   toggle_git_panel: "表示: ソース管理"
   toggle_todo_board: "表示: Todo ボード"
   toggle_fleet: "表示: 編隊モード"
@@ -982,6 +983,7 @@ terminal:
   close_busy_many_title: "%{n} 個のターミナルでプロセスが動いています"
   tab_needs_project: ターミナルのタブはプロジェクトで開けます（Chat では開けません）
   tab_split_hint: エディタ領域のターミナルは分割できません。タブを右クリック › 下ドックへ移すと分割できます
+  float_hide_tip: "隠す（止めない）  %{key}"
   add_tip: ターミナルを追加
   split_tip: "横に分割（%{key}）"
   pane_title: "端末 %{n}"

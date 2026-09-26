@@ -624,6 +624,14 @@ impl Workspace {
         if let Some(picker) = &self.overlays.picker {
             picker.update(cx, |picker, cx| picker.set_theme(theme.clone(), cx));
         }
+        // どこからでも呼べる端末（O24・C13）はプロジェクトに属さないので、ここで塗り直す。
+        if let Some(floating) = &self.chrome.floating_terminal {
+            let accent = theme.fg2;
+            floating.dock.update(cx, |dock, cx| {
+                dock.set_theme(theme.clone(), cx);
+                dock.set_accent(accent, cx);
+            });
+        }
         cx.notify();
     }
 

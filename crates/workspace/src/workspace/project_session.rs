@@ -902,6 +902,7 @@ impl Workspace {
                 herd_solo_expanded: true,
                 task_renaming: None,
                 terminal_renaming: None,
+                floating_terminal: None,
                 focus_next_frame: None,
                 pending_font_picker: None,
                 pending_shell_picker: false,
