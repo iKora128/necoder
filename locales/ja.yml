@@ -234,6 +234,7 @@ cmd:
   resolve_conflict_both: "マージ: 衝突を両方残して解決"
   next_conflict: "マージ: 次の衝突へ"
   abort_merge_or_rebase: "Git: マージ / リベースを中止"
+  show_conflict_side_by_side: "マージ: 衝突を並べて見る"
   toggle_git_panel: "表示: ソース管理"
   toggle_todo_board: "表示: Todo ボード"
   toggle_fleet: "表示: 編隊モード"
@@ -1002,6 +1003,13 @@ conflict:
   abort_rebase_confirm: リベースを中止
   abort_cancel: キャンセル
   aborted: 中止しました
+  side_by_side: 並べて見る
+  view_title: "衝突 %{index} / %{count}（%{line} 行目）"
+  view_base: 元（共通の祖先）
+  view_no_base: "元の版は印に入っていません（git config merge.conflictStyle diff3 で入ります）"
+  view_empty: （空）
+  view_more: "… 他 %{count} 行"
+  view_close: 閉じる
 terminal:
   quick_tip: "よく使うコマンド（settings.json の quick_commands）。押すと並ぶので、選ぶと新しいターミナルで走らせる"
   tab_title: ターミナル %{n}

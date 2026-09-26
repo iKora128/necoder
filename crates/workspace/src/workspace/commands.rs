@@ -179,6 +179,10 @@ impl CommandRegistry {
                 action_name: "workspace::AbortMergeOrRebase",
             },
             CommandEntry {
+                label_key: "cmd.show_conflict_side_by_side",
+                action_name: "workspace::ShowConflictSideBySide",
+            },
+            CommandEntry {
                 label_key: "cmd.toggle_git_panel",
                 action_name: "workspace::ToggleGitPanel",
             },
