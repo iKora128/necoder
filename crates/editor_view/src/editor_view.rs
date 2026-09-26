@@ -1148,8 +1148,17 @@ impl EditorView {
             .set_selections(vec![Selection::cursor(text.len())]);
         self.marked_range = None;
         self.highlight_version = self.buffer.version();
+        self.invalidate_wrap_map();
         self.pending_caret_reveal = true; // 末尾キャレットを可視域へ（折り返し時も）
         cx.notify();
+    }
+
+    /// バッファを丸ごと差し替えた後、次の prepaint で折り返し表を必ず作り直させる。
+    /// 新しいバッファの version は 0 から始まるので、前のバッファも version 0（打鍵していない
+    /// composer・差し替え同士）だと表の鍵が一致して古い表が残り、**1 行目しか出ない**。
+    fn invalidate_wrap_map(&mut self) {
+        let lines = self.buffer.snapshot().line_count();
+        self.wrap_map = WrapMap::identity(lines, (u64::MAX, 0, false));
     }
 
     /// テキストを空に戻す（composer 送信後）。
@@ -1157,6 +1166,7 @@ impl EditorView {
         self.buffer = Buffer::new();
         self.marked_range = None;
         self.highlight_version = self.buffer.version();
+        self.invalidate_wrap_map();
         if let Some(highlighter) = self.highlighter.as_mut() {
             highlighter.reparse_full("");
         }
