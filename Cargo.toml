@@ -119,6 +119,7 @@ markdown = { path = "crates/markdown" }
 acp_client = { path = "crates/acp_client" }
 chat_core = { path = "crates/chat_core" }
 agent_panel = { path = "crates/agent_panel" }
+review_view = { path = "crates/review_view" }
 ui = { path = "crates/ui" }
 terminal_view = { path = "crates/terminal_view" }
 webview_view = { path = "crates/webview_view" }
