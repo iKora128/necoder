@@ -196,6 +196,7 @@ cmd:
   toggle_agent_full_screen: "View: AI full screen (hide the editor)"
   split_right: "View: Split right"
   open_localhost_preview: "Preview: Open localhost…"
+  toggle_design_mode: "Preview: Design mode (pick elements for the AI)"
   new_thread: "AI: New thread"
   next_tab: "Tabs: Next"
   prev_tab: "Tabs: Previous"
@@ -616,6 +617,29 @@ webtab:
   remote_localhost: "%{target} belongs to the SSH host (%{host}), so it is not opened here. Port forwarding is planned"
   ctx_open_browser: Open in default browser
   ctx_copy_url: Copy URL
+design:
+  toggle: Design
+  toggle_tip: "Design: pick page elements to attach to the AI prompt"
+  hint: Click an element to pick it (Shift+click to keep picking, Esc to finish)
+  prompt_heading: "### Page element: %{label}"
+  prompt_page: Page
+  prompt_selector: Selector
+  prompt_path: Path
+  prompt_source: Source
+  prompt_components: Components
+  prompt_accessibility: Accessibility
+  prompt_bounds: Position and size
+  prompt_bounds_value: "x=%{x} y=%{y} %{width}×%{height} (viewport %{viewport})"
+  prompt_styles: Styles
+  prompt_text: Text
+  prompt_nearby: Nearby text
+  capture_failed: Couldn't capture the element (attached the text only)
+  needs_web_tab: "Design works in a Web tab (Preview: Open localhost…)"
+  not_ready: Start Design once the page is showing
+  dropped_moved: The conversation changed while the element was being captured, so it was not attached. Pick it again
+  no_thread: There is no conversation to attach to. Open a thread and pick again
+  dropped_ended: Design ended, so the element being captured was not attached
+  dropped_reloaded: The page reloaded while the element was being captured, so it was not attached. Pick it again
 pdf:
   unsupported: PDF cannot be shown in a tab in this environment
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead

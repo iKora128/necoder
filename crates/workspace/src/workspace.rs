@@ -67,8 +67,10 @@ mod web_preview_view;
 mod web_tabs;
 pub(crate) use image_view::ImageView;
 pub(crate) use pdf_view::PdfView;
-pub(crate) use web_preview_view::{web_tab_key, web_tab_url, WebPreviewView};
-pub(crate) use web_tabs::UrlOrigin;
+pub(crate) use web_preview_view::{
+    web_tab_key, web_tab_url, PickDropReason, WebPreviewEvent, WebPreviewView,
+};
+pub(crate) use web_tabs::{DesignTarget, UrlOrigin};
 mod about;
 mod git_controller;
 mod git_view;
@@ -222,6 +224,8 @@ actions!(
         NewChat,
         // Web タブ（localhost の開発サーバ）を開く入力欄（パレット「プレビュー: localhost を開く…」）。
         OpenLocalhostPreview,
+        // Web タブの Design Mode（⌘⇧D・要素を選んで composer へ添える）。
+        ToggleDesignMode,
     ]
 );
 
@@ -308,6 +312,8 @@ pub(crate) enum TabContent {
         view: Entity<WebPreviewView>,
         /// タイトル・読み込みの変化でタブ名を描き直す。
         _observation: Subscription,
+        /// Design Mode で選ばれた要素を composer へ添える。
+        _events: Subscription,
     },
 }
 
@@ -2032,6 +2038,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
             .on_action(cx.listener(Self::open_localhost_preview))
+            .on_action(cx.listener(Self::toggle_design_mode))
             // macOS 標準のアプリ/ウィンドウ操作（メニューバー・M13）。cx は App へ deref。
             .on_action(cx.listener(|_, _: &Hide, _window, cx| cx.hide()))
             .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))
