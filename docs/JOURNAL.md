@@ -3248,3 +3248,14 @@
 - main未コミット差分と2c80f83を一時ファイル上で三者比較し、24ファイル重複・11ファイル競合。リポジトリにはマージしていない。
 - 文書化時には統合版6387091、17個目のhistory worktree、Explorer/言語/CLI/Skills/使用量/通知の進展を確認。初回の使用量UI未接続は既に対処されており、台帳で訂正。新しい差分全体は次回レビュー対象とし、以前の検証結果を流用しない。
 - 変更はdocsのみ。元の機能差分調査の冒頭から台帳へリンクし、古い「無」判定を現在の実装状況と混同しないよう注記した。
+
+## 2026-09-26 — クラウドで統合版の上にレビュー修正と O5 / O21 / O26 を積んだ
+
+- やったこと: `parity/integration` + 計画 + UX・コードレビュー台帳を `claude/sleepy-hamilton-gesxiq` に統合し、台帳の R01〜R08・R14 を修正（R11 は一部・R15 は表現）。続けて O5（手元の Ports）・O21 の一部（Fleet サイドバーの外部の worktree・取り込み・統合先の取り違え・消えた worktree）・O26 の一部（`path:行` のコピー・全部閉じる・外部アプリで開く）。記録は `UX-CODE-REVIEW.md` の各項目と `ORCA-PARITY.md` §7.1。
+- 学び/罠:
+  - **非同期の書き込み順は gpui のシードを回すと再現できる**。注記の保存を書き込みごとに別タスクへ投げる旧実装は、`#[gpui::test(iterations = 20)]` の seed 0 で「消した注記が復活」した（R03）。1 本の列に積む実装では全シードで通る。
+  - **描画中に Host を呼ばない規律はテストが守っている**（`local_and_remote_root_render_never_call_host`）。使用量の鍵を作るのに `dest_host.is_remote()` を描画中に呼んでいて捕まった（R08）。宛先が変わった時に控える形へ直した。
+  - git 2.43 の `core.bigFileThreshold` は `git diff` を止めない（大きいファイルもパッチが出る）。レビューのメモリの上限は、事前のサイズ確認（`git ls-tree -l`）とパッチ後のバイト上限で掛けた（R02）。
+  - Linux では `opening_a_pdf_gives_a_native_viewer_tab_not_a_text_buffer` と `localhost_urls_open_one_web_tab_that_steps_aside_for_overlays` が元から落ちる（ネイティブの PDF / WebView が無い）。CI の Linux ジョブはビルドだけなので表に出ていなかった。
+  - `TaskSpace` の統合先を「最後に見つかった物」で選ぶ所と「最初の物」で選ぶ所が混在していた。`task/` でない linked worktree を ⌘O で開くと、サイドバーの ⌂ だけがその worktree を指し得た（O21 で `integration_slot_for` に一本化・メインの作業ツリーを優先）。
+- 次: GitHub の書き込み権限（push が 403）。macOS 実機・隔離 offscreen での画面確認。O15・O18 の Mac の途中の分を push してもらって取り込む。PR へ切り出す。
