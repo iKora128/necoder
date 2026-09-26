@@ -592,7 +592,8 @@ impl TerminalView {
 
     /// 開発用（offscreen 検証・`NECODER_TERMINAL_PROBE`）: 端末への 1 コマンド。
     /// `type:<文>` = 文をタイプして ⏎ / `select:<行>,<列>-<行>,<列>` = 表示座標で選択 /
-    /// `find:<語>` = ⌘F を開いて語を入れる / `menu:<x>,<y>` = 右クリックメニューを出す。
+    /// `find:<語>` = ⌘F を開いて語を入れる / `key:<キー>` = キーを 1 つ打つ（`shift-enter`）/
+    /// `menu:<x>,<y>` = 右クリックメニューを出す。
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn debug_probe(
@@ -640,6 +641,15 @@ impl TerminalView {
                 }
                 self.refresh_search(true, cx);
             }
+            // キーを 1 つ打つ（`shift-enter` など・実際の打鍵と同じ符号化を通す）。
+            "key" => match gpui::Keystroke::parse(argument) {
+                Ok(keystroke) => {
+                    if let Some(bytes) = keys::keystroke_to_bytes(&keystroke, self.mode, false) {
+                        self.write_bytes(bytes);
+                    }
+                }
+                Err(error) => eprintln!("TERMINAL_PROBE: key が不正: {error}"),
+            },
             // 右クリックメニューを窓の座標 (x, y) に出す。
             "menu" => {
                 let Some((x, y)) = argument.split_once(',').and_then(|(x, y)| {
