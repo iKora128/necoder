@@ -649,7 +649,10 @@ mod tests {
                 workspace.guard_window_close(window, cx)
             })
             .unwrap();
-        assert!(blocked, "ほかの窓が開いていても、動いている窓は閉じずに確認");
+        assert!(
+            blocked,
+            "ほかの窓が開いていても、動いている窓は閉じずに確認"
+        );
         let reason = running
             .update(cx, |workspace, _window, _cx| {
                 workspace
