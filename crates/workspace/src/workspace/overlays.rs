@@ -468,7 +468,12 @@ impl Workspace {
                     TabContent::Pdf(view) => {
                         view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
                     }
+                    // session の `review` と同じ Entity（下でまとめて塗り直す）。
+                    TabContent::Review(_) => {}
                 }
+            }
+            if let Some(review) = &session.review {
+                review.update(cx, |review, cx| review.set_theme(theme.clone(), cx));
             }
             if let Some(split) = &session.split_editor {
                 split.update(cx, |editor, cx| editor.set_theme(theme.clone(), cx));

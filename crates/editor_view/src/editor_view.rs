@@ -3257,7 +3257,8 @@ fn build_line_runs(
 }
 
 /// [`lang::HighlightKind`] を theme の syn-* 色にマップする（UI-SPEC §1.1）。
-fn syntax_color(kind: lang::HighlightKind, syntax: &SyntaxColors) -> gpui::Hsla {
+/// 変更レビュー（`review_view`）も同じ写像を使う＝エディタと diff で色が割れない。
+pub fn syntax_color(kind: lang::HighlightKind, syntax: &SyntaxColors) -> gpui::Hsla {
     match kind {
         lang::HighlightKind::Keyword => syntax.keyword,
         lang::HighlightKind::Function => syntax.function,

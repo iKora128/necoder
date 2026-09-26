@@ -297,6 +297,35 @@ impl Workspace {
                 element.child(div().text_size(px(11.)).text_color(fg2).child("…"))
             });
 
+        // ── 変更をレビュー（全ファイルの diff を 1 画面で。パレット「Git: 変更をレビュー」と同じ） ──
+        let review_button = div()
+            .id("git-review")
+            .mx(px(8.))
+            .mb(px(8.))
+            .h(px(26.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(border)
+            .text_size(px(12.))
+            .text_color(fg1)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg3).text_color(fg0))
+            .child("⇄")
+            .child(SharedString::from(i18n::t!("git.review_changes")))
+            .tooltip(Tooltip::text(
+                i18n::t!("git.review_changes_tip"),
+                theme.clone(),
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.open_review_tab(&OpenReview, window, cx)),
+            );
+
         // ── 変更一覧（staged / unstaged）。高さを抑えて下に履歴を置く ──
         let mut body = div()
             .flex_none()
@@ -388,7 +417,9 @@ impl Workspace {
             )
             .child(header)
             .child(input_row)
-            .when(!naming, |element| element.child(actions))
+            .when(!naming, |element| {
+                element.child(actions).child(review_button)
+            })
             .child(body)
             .child(div().h(px(1.)).flex_none().bg(border))
             .child(self.render_git_history(&snapshot.history))

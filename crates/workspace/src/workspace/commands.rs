@@ -123,6 +123,10 @@ impl CommandRegistry {
                 action_name: "workspace::OpenDiff",
             },
             CommandEntry {
+                label_key: "cmd.open_review",
+                action_name: "workspace::OpenReview",
+            },
+            CommandEntry {
                 label_key: "cmd.next_hunk",
                 action_name: "workspace::NextHunk",
             },

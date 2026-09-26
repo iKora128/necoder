@@ -218,6 +218,8 @@ impl Workspace {
     /// 開発用: 編隊の片付け UI を offscreen で検証する（2026-07-27）。
     /// `menu` = セル 0 の ⋯ メニューを開く / `terminal` = 下段をターミナルタブへ /
     /// `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）/ `close-all` = 全セルを × して残数を出す。
+    /// 画面の組み立て（`;` 区切り）: `graph` / `task:<n>`（統合先を除く n 本目の Task・1 始まり）/
+    /// `side:diff`（その Task カードの「変更」タブ = 変更レビュー）。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(
@@ -226,7 +228,49 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `;` 区切りで順に実行する（`graph;task:1;side:diff` のように 1 回の起動で画面を組み立てる）。
+        if command.contains(';') {
+            for part in command.split(';').filter(|part| !part.is_empty()) {
+                self.debug_fleet_probe(part, window, cx);
+            }
+            return;
+        }
+        let (command, argument) = command.split_once(':').unwrap_or((command, ""));
         match command {
+            "task" => {
+                let wanted = argument.parse::<usize>().unwrap_or(1).max(1);
+                let target = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| !slot.task_space.is_integration())
+                    .nth(wanted - 1)
+                    .map(|(index, _)| index);
+                if let Some(index) = target {
+                    self.switch_project(index, window, cx);
+                }
+            }
+            // 選択中の Task カードのタブを切り替える（タブを押したのと同じ入口）。
+            "side" => {
+                let index = self.project_sessions.active;
+                let space = self.project_sessions.projects[index].task_space.id.clone();
+                let pane = match argument {
+                    "diff" => {
+                        self.refresh_git_status_for(index, cx);
+                        self.activate_review(index, cx);
+                        FleetPane::Diff {
+                            space: space.clone(),
+                        }
+                    }
+                    _ => FleetPane::Editor {
+                        space: space.clone(),
+                    },
+                };
+                self.chrome.stage_columns = 1;
+                self.chrome.stage_tabs.insert(space, pane);
+                cx.notify();
+            }
             "menu" => self.open_fleet_cell_menu(0, point(px(760.), px(210.)), cx),
             // セル 0 を拡大してヘッダのタイトルを改名開始（Cell site で入力欄が出る／herd と二重描画しない）。
             "rename" => {
@@ -348,6 +392,93 @@ impl Workspace {
             other => eprintln!("GIT_PROBE: 未知のコマンド {other}"),
         }
         cx.notify();
+    }
+
+    /// 開発用: 変更レビューを offscreen で検証する（`NECODER_REVIEW_PROBE`・`;` 区切りで順に実行）。
+    ///
+    /// `open` = パレット「Git: 変更をレビュー」と同じ入口 / `expand` = 最初の畳みを 1 段開く /
+    /// `menu` = 比較の基準のメニューを開く /
+    /// `head` = 基準を HEAD に / `branch:<名前>` / `commit:<rev>` / `ws` = 空白を無視の切替 /
+    /// `state` = 基準とファイル数を出す。対象はアクティブな session の変更レビュー（Fleet でも同じ）。
+    #[cfg(debug_assertions)]
+    pub fn debug_review_probe(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, argument) = command.split_once(':').unwrap_or((command, ""));
+        if name == "open" {
+            self.open_review_tab(&OpenReview, window, cx);
+            return;
+        }
+        let index = self.project_sessions.active;
+        let Some(review) = self.activate_review(index, cx) else {
+            eprintln!("REVIEW_PROBE: 変更レビューが無い session");
+            return;
+        };
+        // 注記: `select:<path>:<新の行>` / `select-old:<path>:<旧の行>` / `extend(-old):<path>:<行>` /
+        // `comment`（入力欄を開く）/ `type:<本文>` / `save` / `tray`（一覧）/ `send`（宛先のメニュー）。
+        let line_argument = || {
+            let (path, line) = argument.rsplit_once(':')?;
+            Some((path.to_string(), line.parse::<u32>().ok()?))
+        };
+        match name {
+            "select" | "select-old" | "extend" | "extend-old" => {
+                let Some((path, line)) = line_argument() else {
+                    eprintln!("REVIEW_PROBE: {command} は <path>:<行> で");
+                    return;
+                };
+                let side = if name.ends_with("-old") {
+                    review_view::NoteSide::Old
+                } else {
+                    review_view::NoteSide::New
+                };
+                let found = review.update(cx, |review, cx| {
+                    review.select_line(&path, side, line, name.starts_with("extend"), cx)
+                });
+                if !found {
+                    eprintln!("REVIEW_PROBE: 行が見つからない {argument}");
+                }
+                return;
+            }
+            "comment" => {
+                review.update(cx, |review, cx| review.open_draft(window, cx));
+                return;
+            }
+            "save" => {
+                review.update(cx, |review, cx| review.save_draft(window, cx));
+                return;
+            }
+            _ => {}
+        }
+        review.update(cx, |review, cx| match name {
+            "type" => review.set_draft_text(argument, cx),
+            "tray" => review.toggle_tray(cx),
+            "send" => review.request_send(false, cx),
+            "expand" => review.expand_first_fold(cx),
+            "menu" => review.toggle_base_menu(cx),
+            "head" => review.select_base(project::review::ReviewBase::Head, cx),
+            "branch" => review.select_base(
+                project::review::ReviewBase::Branch(argument.to_string()),
+                cx,
+            ),
+            "commit" => review.select_base(
+                project::review::ReviewBase::Commit(argument.to_string()),
+                cx,
+            ),
+            "ws" => {
+                let ignore = !review.ignores_whitespace();
+                review.set_ignore_whitespace(ignore, cx);
+            }
+            "state" => println!(
+                "review: base={:?} oid={:?} files={}",
+                review.base(),
+                review.base_oid(),
+                review.file_count()
+            ),
+            other => eprintln!("REVIEW_PROBE: 未知のコマンド {other}"),
+        });
     }
 
     /// 開発用: Chat モードを offscreen で検証する（`NECODER_CHAT_PROBE`・`;` 区切りで順に実行）。

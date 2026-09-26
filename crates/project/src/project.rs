@@ -4,6 +4,7 @@
 //! `.git` と gitignore 対象を除外する（ripgrep の `ignore` crate を使用）。
 //! ファイル監視・インクリメンタル更新は後続（M8/性能）で追加する。
 
+pub mod review;
 pub mod todos;
 
 use anyhow::{Context as _, Result};

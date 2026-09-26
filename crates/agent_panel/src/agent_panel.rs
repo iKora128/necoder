@@ -5335,13 +5335,19 @@ PYEOF"#;
         self.send_prompt_text(prompt, cx);
     }
 
+    /// アクティブスレッドのキューを流す（スレッド切替時に呼ぶ）。
+    fn flush_queued_prompt(&mut self, cx: &mut Context<Self>) {
+        self.flush_queued_prompt_at(self.active, cx);
+    }
+
     /// キューに積んだ prompt があれば先頭を送る（ターン完了時・スレッド切替時に呼ぶ）。
-    /// **アクティブスレッドが idle の時だけ**流す（`send_prompt_text` は active 宛のため）。
+    /// **そのスレッドが idle の時だけ**流す。送信は指定のスレッド宛てなので表示中のタブは変えない
+    /// （外から積まれた送信待ち＝変更レビューの注記などが、裏のタブでもターン完了で届く）。
     ///
     /// 認証切れで止まっている間は流さない（再ログイン前に送っても同じ失敗を重ねるだけ。
     /// 再接続で直近の指示を送り直した後、そのターン完了で改めてキューが流れる）。
-    fn flush_queued_prompt(&mut self, cx: &mut Context<Self>) {
-        let next = self.threads.get_mut(self.active).and_then(|thread| {
+    fn flush_queued_prompt_at(&mut self, thread_index: usize, cx: &mut Context<Self>) {
+        let next = self.threads.get_mut(thread_index).and_then(|thread| {
             if thread.running || thread.auth_required || thread.queued_prompts.is_empty() {
                 None
             } else {
@@ -5349,7 +5355,7 @@ PYEOF"#;
             }
         });
         if let Some(prompt) = next {
-            self.send_prompt_text(prompt, cx);
+            self.send_prompt_entry(thread_index, prompt, false, cx);
         }
     }
 
@@ -5506,15 +5512,46 @@ PYEOF"#;
     }
 
     pub fn send_ledger_event(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.send_prompt_entry(prompt, true, cx);
+        self.send_prompt_entry(self.active, prompt, true, cx);
     }
 
     pub fn send_prompt_text(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.send_prompt_entry(prompt, false, cx);
+        self.send_prompt_entry(self.active, prompt, false, cx);
     }
 
-    fn send_prompt_entry(&mut self, prompt: String, ledger: bool, cx: &mut Context<Self>) {
-        let thread_index = self.active;
+    /// 表示中のタブを切り替えずに、指定のスレッドへ**人間の発話として**送る（変更レビューの注記など）。
+    /// composer の送信（[`Self::submit`]）と同じく `HumanSend` を出し、transcript には User として残る。
+    /// 生成中（Working / Blocked）ならそのスレッドの送信待ちに積み、ターン完了で流す。
+    /// スレッドが無ければ `false`。
+    pub fn send_user_prompt_to(
+        &mut self,
+        thread_index: usize,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(thread) = self.threads.get_mut(thread_index) else {
+            return false;
+        };
+        cx.emit(PanelEvent::HumanSend {
+            thread: thread.name.clone(),
+            text: prompt.clone(),
+        });
+        if thread.running {
+            thread.queued_prompts.push(prompt);
+            cx.notify();
+            return true;
+        }
+        self.send_prompt_entry(thread_index, prompt, false, cx);
+        true
+    }
+
+    fn send_prompt_entry(
+        &mut self,
+        thread_index: usize,
+        prompt: String,
+        ledger: bool,
+        cx: &mut Context<Self>,
+    ) {
         // slash コマンド（`/clear` `/compact` 等）は**本文 1 ブロックだけ**で送る。エージェントに
         // よってコマンドとして読むブロックが違い（Claude は末尾・Codex は先頭）、添付や画像を
         // 1 つでも足すとどちらかで効かない（`acp_client::prompt_blocks` の説明）。スレッドの
@@ -6439,11 +6476,10 @@ PYEOF"#;
         if turn_started {
             self.sync_running_registry(cx);
         }
-        // ターン完了で、アクティブスレッドに送信待ちがあれば次を自動フラッシュ（キュー→新ターン）。
-        // active 限定なのは `flush_queued_prompt`（＝`send_prompt_text`）が active 宛のため。
-        // 裏スレッドのキューは、そのタブへ切り替えた時に `switch_thread` が流す。
-        if turn_finished && thread_index == active {
-            self.flush_queued_prompt(cx);
+        // ターン完了で、そのスレッドに送信待ちがあれば次を自動フラッシュ（キュー→新ターン）。
+        // 送信はスレッド宛て（表示中のタブを変えない）なので、裏のタブでも完了した時点で流す。
+        if turn_finished {
+            self.flush_queued_prompt_at(thread_index, cx);
         }
         if let Some((agent, configs)) = stocked_configs {
             self.catalog.entry(agent).or_default().configs = configs;
@@ -12259,6 +12295,73 @@ PYEOF"#;
             assert!(thread.running, "running のまま");
             panel.remove_queued_prompt(0, cx);
             assert!(panel.threads[active].queued_prompts.is_empty());
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 外から指定のスレッドへ人間の発話として送る（変更レビューの注記）。表示中のタブを奪わず、
+    /// transcript には User として残る。生成中なら送信待ちに積み、そのスレッドのターン完了で
+    /// （裏のタブのままでも）流れる。
+    #[gpui::test]
+    fn send_user_prompt_to_reaches_a_background_thread_without_switching(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_send_to_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let shown = panel.active;
+            let target = panel.new_thread_index(cx);
+            panel.switch_thread(shown, cx);
+            assert_ne!(shown, target);
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[target].command_tx = Some(command_tx);
+            panel.dest_cwd = Some(std::env::temp_dir());
+
+            assert!(panel.send_user_prompt_to(target, "レビューコメント（1 件）".into(), cx));
+            assert_eq!(panel.active, shown, "表示中のタブを奪わない");
+            assert!(matches!(
+                panel.threads[target].entries.last(),
+                Some(Entry::User(text)) if text.as_ref() == "レビューコメント（1 件）"
+            ));
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "レビューコメント（1 件）"),
+                other => panic!("prompt が送られていない: {other:?}"),
+            }
+
+            // 生成中は送信待ちへ。ターン完了で、裏のタブのまま流れる。
+            assert!(panel.threads[target].running);
+            assert!(panel.send_user_prompt_to(target, "2 通目".into(), cx));
+            assert_eq!(
+                panel.threads[target].queued_prompts,
+                vec!["2 通目".to_string()]
+            );
+            panel.on_event(
+                target,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+            assert!(panel.threads[target].queued_prompts.is_empty());
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "2 通目"),
+                other => panic!("送信待ちが流れていない: {other:?}"),
+            }
+            assert_eq!(panel.active, shown);
+            assert!(
+                !panel.send_user_prompt_to(99, "x".into(), cx),
+                "無いスレッドは false"
+            );
         });
         let _ = std::fs::remove_file(settings_path);
     }

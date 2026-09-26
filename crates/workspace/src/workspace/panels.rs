@@ -24,6 +24,10 @@ impl PanelRegistry {
         cx.subscribe(todo, Workspace::on_todo_panel_event).detach();
     }
 
+    pub(crate) fn bind_review(review: &Entity<ReviewView>, cx: &mut Context<Workspace>) {
+        cx.subscribe(review, Workspace::on_review_event).detach();
+    }
+
     pub(crate) fn bind_search(panel: &Entity<SearchPanel>, cx: &mut Context<Workspace>) {
         cx.subscribe(panel, Workspace::on_search_panel_event)
             .detach();

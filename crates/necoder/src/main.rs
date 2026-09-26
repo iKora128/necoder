@@ -1003,6 +1003,37 @@ fn main() {
                         .detach();
                     }
                 }
+                // 開発用: NECODER_REVIEW_PROBE="open;wait:1500;expand" で変更レビューを駆動する
+                // （`;` 区切りで順に実行。`wait:<ms>` はその場で待つ）。FLEET_PROBE の後に流す。
+                #[cfg(debug_assertions)]
+                if let Ok(script) = std::env::var("NECODER_REVIEW_PROBE") {
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(3200))
+                                .await;
+                            for command in script.split(';').map(str::trim) {
+                                if let Some(milliseconds) = command.strip_prefix("wait:") {
+                                    let milliseconds = milliseconds.parse::<u64>().unwrap_or(500);
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(milliseconds))
+                                        .await;
+                                    continue;
+                                }
+                                let command = command.to_string();
+                                if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                    workspace.debug_review_probe(&command, window, cx);
+                                }) {
+                                    eprintln!("review probe: {error:#}");
+                                }
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(250))
+                                    .await;
+                            }
+                        })
+                        .detach();
+                    }
+                }
                 // 開発用: NECODER_CHAT_PROBE="open;seed;wait:800;state" で Chat モードを駆動する
                 // （`;` 区切りで順に実行。`wait:<ms>` はその場で待つ）。
                 #[cfg(debug_assertions)]

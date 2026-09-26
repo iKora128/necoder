@@ -5763,6 +5763,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "review_view"
+version = "0.1.20"
+dependencies = [
+ "editor_view",
+ "gpui",
+ "host",
+ "i18n",
+ "keymap_core",
+ "lang",
+ "project",
+ "serde",
+ "serde_json",
+ "storage",
+ "theme_core",
+ "ui",
+]
+
+[[package]]
 name = "rgb"
 version = "0.8.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9176,6 +9194,7 @@ dependencies = [
  "libc",
  "paths",
  "project",
+ "review_view",
  "search",
  "search_ui",
  "serde",

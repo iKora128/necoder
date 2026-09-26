@@ -619,11 +619,14 @@ impl Workspace {
             .border_color(theme.border)
             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                 let is_active = index == active_tab;
-                let name = tab
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| i18n::t!("tabs.untitled"));
+                let name = if tab.is_review() {
+                    i18n::t!("review.tab_title")
+                } else {
+                    tab.path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| i18n::t!("tabs.untitled"))
+                };
                 let dirty = tab.is_dirty(cx);
                 // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
                 let status = self.repository.status.get(&tab.path).copied();
@@ -743,7 +746,8 @@ impl Workspace {
         position: Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if index >= self.tabs.len() {
+        // 変更レビューのタブはファイルではない（Finder で表示・パスのコピーが意味を持たない）。
+        if self.tabs.get(index).is_none_or(EditorTab::is_review) {
             return;
         }
         self.overlays.tab_menu = Some(TabMenuState { index, position });
