@@ -669,6 +669,16 @@ settings:
   terminal_scrollback_lines: "%{n} 行"
   pref_terminal_cursor: ターミナルのカーソル
   pref_terminal_color_scheme: ターミナルの配色
+  pref_ghostty_import: Ghostty から取り込む
+  pref_ghostty_import_sub: Ghostty の設定の書体・大きさ・カーソル・配色を、ターミナルの設定にする（キーやスクロールバックは持ってこない）
+  ghostty_import: 取り込む
+  ghostty_not_found: Ghostty の設定（~/.config/ghostty/config など）が見つかりません
+  ghostty_nothing: Ghostty の設定に、取り込める物がありませんでした
+  ghostty_imported: "Ghostty から取り込みました: %{items}"
+  ghostty_item_font: 書体
+  ghostty_item_size: 大きさ
+  ghostty_item_cursor: カーソル
+  ghostty_item_colors: 配色
   terminal_color_scheme_default: 既定（アプリのテーマに合わせる）。Ghostty のテーマ・Windows Terminal の配色（JSON）・iTerm2 の .itermcolors を読めます
   terminal_color_scheme_pick: ファイルを選ぶ…
   terminal_color_scheme_reset: 既定に戻す
