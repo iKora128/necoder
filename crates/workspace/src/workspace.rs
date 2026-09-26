@@ -104,6 +104,7 @@ mod captain;
 mod chat_view;
 pub(crate) use captain::is_captain_thread_name;
 mod fleet_sidebar;
+mod task_creation;
 mod todo_panel;
 pub(crate) use todo_panel::*;
 mod editor_area;
@@ -1301,6 +1302,11 @@ struct ChromeState {
     pending_task_prompts: HashMap<SpaceId, String>,
     /// 上の依頼を送るエージェント（fan-out で選んだ物・無ければ既定・O23）。
     pending_task_agents: HashMap<SpaceId, String>,
+    /// 作成中の Task（worktree・準備スクリプトを流している間の行・O20）。作れなかった物は
+    /// やり直すか閉じるまで残る。起動している間だけ。
+    task_creations: Vec<task_creation::TaskCreation>,
+    /// 上の行の通し番号（最後に振った物）。
+    next_task_creation_id: u64,
     /// 編隊中央のタブ（管制 / グラフ・P3）。
     fleet_center_view: FleetCenterView,
     /// 管制タブのフォーカス（⏎ = キュー先頭へ・keymap context "FleetControl" の足場）。

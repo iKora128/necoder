@@ -407,6 +407,18 @@ fleet:
   no_running_agent: 動いているエージェントはありません
   task_archived: Task を終了しました（worktree はディスクに残っています）
   base_synced: "%{branch} を upstream に追従（%{count} コミット早送り）してから Task を作成しました"
+  creating_untitled: "新しい Task"
+  creating_waiting: "順番を待っています…"
+  creating_sync: "統合先を最新にしています…"
+  creating_worktree: "worktree を作っています…"
+  creating_setup: "準備スクリプトを流しています…"
+  creating_cancelling: "取り消しています…（この段が終わったら作った分を消します）"
+  creating_failed: "作れませんでした: %{reason}"
+  creating_retry: "やり直す"
+  creating_retry_tip: "同じ依頼・同じ詳細でもう一度作る"
+  creating_cancel_tip: "取り消す（作り終えた分は消します）"
+  creating_dismiss_tip: "閉じる"
+  creating_discard_failed: "取り消した Task の worktree を消せませんでした（%{path}）: %{error}"
 worktree_delete:
   title: この worktree を削除しますか？
   title_branch: worktree とブランチを削除しますか？

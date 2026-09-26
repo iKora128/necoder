@@ -467,119 +467,10 @@ impl Workspace {
         self.add_fleet_cell(FleetPane::Agent { space, panel }, cx);
     }
 
-    /// 1 つの依頼から Task を切る（`plan` が 2 本以上なら fan-out・O23）。worktree は**順に**作る
-    /// （同じリポジトリに `git worktree add` を並べて走らせると ref の lock でぶつかる）。1 本の失敗で
-    /// 残りを止めない。2 本以上なら舞台に並べる（Fleet の中なら横に・外ならトーストで案内）。
-    pub(super) fn create_prompted_tasks(
-        &mut self,
-        prompt: String,
-        start: project::TaskStart,
-        plan: Vec<FanoutTask>,
-        cx: &mut Context<Self>,
-    ) {
-        if plan.is_empty() {
-            return;
-        }
-        // 統合先はサイドバー・Captain と同じ選び方（メインの作業ツリー・O21）。
-        let integration_index = self
-            .active_slot()
-            .map(|slot| slot.repository_key().to_string())
-            .and_then(|key| self.integration_slot_for(&key))
-            .unwrap_or(self.project_sessions.active);
-        let Some(slot) = self.project_sessions.projects.get(integration_index) else {
-            return;
-        };
-        let worktree = slot.worktree.clone();
-        let root = worktree.root().to_path_buf();
-        let host = worktree.host().clone();
-        let host_for_add = host.clone();
-        cx.spawn(async move |workspace, cx| {
-            let (sync, created) = cx
-                .background_executor()
-                .spawn(async move {
-                    // 土台（IntegrationSpace の checked-out branch）を先に upstream へ早送りして、
-                    // Task が古い base から切られるのを防ぐ（Orca の default branch 自動同期を参考・
-                    // 2026-08-30）。オフライン・dirty・diverged では黙って現 HEAD から続行する。
-                    let sync = project::sync_current_branch_on(host_for_add.as_ref(), &root);
-                    let created: Vec<(
-                        FanoutTask,
-                        anyhow::Result<(PathBuf, String, Option<String>)>,
-                    )> = plan
-                        .into_iter()
-                        .map(|task| {
-                            let task_start = project::TaskStart {
-                                branch: task.branch.clone(),
-                                base: start.base.clone(),
-                                skip_setup: start.skip_setup,
-                            };
-                            let result = project::create_task_with_on(
-                                host_for_add.as_ref(),
-                                &root,
-                                &task.slug_source,
-                                &task_start,
-                            );
-                            (task, result)
-                        })
-                        .collect();
-                    (sync, created)
-                })
-                .await;
-            // Err = 作っている間に窓が閉じた（worktree は残る・次に開いた時に外部の worktree として出る）。
-            workspace
-                .update(cx, |workspace, cx| {
-                    // 早送りできた時だけ知らせる（最新から切れた安心情報。スキップは無言＝作成を汚さない）。
-                    if let project::BranchSyncOutcome::FastForwarded {
-                        branch: base,
-                        commits,
-                    } = sync
-                    {
-                        let accent = workspace.accent();
-                        workspace.push_toast(
-                            SharedString::from(i18n::t!(
-                                "fleet.base_synced",
-                                "branch" => &base,
-                                "count" => commits
-                            )),
-                            accent,
-                            cx,
-                        );
-                    }
-                    let fanout = created.len() > 1;
-                    let mut spaces = Vec::new();
-                    for (task, result) in created {
-                        match result {
-                            Ok((target, branch, failure)) => {
-                                if let Some(space) = workspace.register_created_task(
-                                    &host, target, branch, failure, &prompt, &task, cx,
-                                ) {
-                                    spaces.push(space);
-                                }
-                            }
-                            Err(error) => {
-                                let accent = workspace.accent();
-                                workspace.push_toast(
-                                    SharedString::from(format!("{error:#}")),
-                                    accent,
-                                    cx,
-                                );
-                            }
-                        }
-                    }
-                    if fanout && !spaces.is_empty() {
-                        workspace.show_fanout_on_stage(spaces, cx);
-                    }
-                    workspace.hint_fleet_mode_once(cx);
-                    cx.notify();
-                })
-                .ok();
-        })
-        .detach();
-    }
-
     /// 作れた Task をレールに開き、台帳に載せ、依頼を送る（準備に失敗していれば控える）。
     /// 返すのはその TaskSpace（舞台に並べる用）。
     #[allow(clippy::too_many_arguments)]
-    fn register_created_task(
+    pub(super) fn register_created_task(
         &mut self,
         host: &Arc<dyn host::Host>,
         target: PathBuf,
@@ -629,7 +520,7 @@ impl Workspace {
     }
 
     /// fan-out で切った Task を舞台に並べる（最大 3 枚）。Fleet の外ならトーストで案内する。
-    fn show_fanout_on_stage(&mut self, spaces: Vec<SpaceId>, cx: &mut Context<Self>) {
+    pub(super) fn show_fanout_on_stage(&mut self, spaces: Vec<SpaceId>, cx: &mut Context<Self>) {
         let count = spaces.len();
         self.chrome.stage_pinned = spaces.into_iter().take(3).collect();
         self.chrome.stage_columns = self.chrome.stage_pinned.len().max(2);
