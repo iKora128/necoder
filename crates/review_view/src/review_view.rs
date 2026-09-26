@@ -2096,6 +2096,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // 本物と同じ名前の action（既定 keymap の Editor 文脈で ⌘⏎ が指す先）。受け手は居ない＝
+    // アプリと同じく打鍵のまま入力欄の親へ上がってくることを確かめるために登録だけする。
+    gpui::actions!(agent, [SubmitPrompt]);
+
+    /// 入力欄のキー: ⌘⏎（非 mac は Ctrl+Enter）で保存・Esc で取り消し。一覧にフォーカスがある時の
+    /// `c` は入力欄を開き、入力欄の中の `c` は文字として入る（一覧のキーが打鍵を奪わない）。
+    #[gpui::test]
+    fn draft_keys_save_cancel_and_do_not_steal_typing(cx: &mut gpui::TestAppContext) {
+        let Some(dir) = temp_repo("keys") else {
+            return;
+        };
+        cx.update(|cx| {
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (view, cx) = cx.add_window_view(|_window, cx| ReviewView::new(Theme::dark(), cx));
+        open_review(&view, &dir, cx);
+        let redraw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        };
+
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.select_line("a.rs", NoteSide::New, 5, false, cx));
+            view.open_draft(window, cx);
+            view.set_draft_text("キーで保存", cx);
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("secondary-enter");
+        assert_eq!(
+            view.read_with(cx, |view, _| view.note_counts()),
+            (1, 1),
+            "⌘⏎ で保存"
+        );
+
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.select_line("a.rs", NoteSide::New, 60, false, cx));
+            view.open_draft(window, cx);
+            view.set_draft_text("捨てる", cx);
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |view, _| {
+            assert!(view.draft.is_none(), "Esc で閉じる");
+            assert_eq!(view.note_counts(), (1, 1), "取り消しは残さない");
+        });
+
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.select_line("a.rs", NoteSide::New, 60, false, cx));
+            window.focus(&view.focus_handle, cx);
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("c");
+        assert!(
+            view.read_with(cx, |view, _| view.draft.is_some()),
+            "一覧で c = 入力欄を開く"
+        );
+        redraw(cx);
+        cx.simulate_keystrokes("c");
+        view.read_with(cx, |view, cx| {
+            let draft = view.draft.as_ref().expect("入力欄は開いたまま");
+            assert_eq!(draft.editor.read(cx).plain_text(), "c", "入力欄の c は文字");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 一時 repo を実際に読み込み、畳みの展開でスクロール位置の行が保たれることを確かめる。
     #[gpui::test]
     fn loads_a_temp_repo_and_expands_folds(cx: &mut gpui::TestAppContext) {
