@@ -8,6 +8,19 @@ editor:
   drop_remote: "Files cannot be dropped on a remote project's editor (drop them on a folder in the explorer to upload)"
   toc: Contents
   toc_empty: No headings
+  slash_h1: Heading 1
+  slash_h2: Heading 2
+  slash_h3: Heading 3
+  slash_bullet: Bulleted list
+  slash_numbered: Numbered list
+  slash_todo: Checklist
+  slash_quote: Quote
+  slash_code: Code block
+  slash_table: Table
+  slash_divider: Divider
+  slash_image: Image
+  slash_link: Link
+  slash_toc: Table of contents
   empty_hint: Pass a file path as an argument to open it (e.g. necoder README.md)
   blame_uncommitted: Uncommitted
 common:

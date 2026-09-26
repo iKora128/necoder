@@ -569,6 +569,9 @@ struct CompletionItem {
     detail: Option<SharedString>,
     /// 種別の短い記号（fn/struct/let 等）。
     kind: SharedString,
+    /// 入れた後のキャレット（`insert_text` の中の byte 位置・`None` = 末尾）。スラッシュメニューの
+    /// 形（コードの囲みの中など）だけが使う。
+    caret: Option<usize>,
 }
 
 /// 補完ポップアップ（オーバーレイ）。エディタのキャレット直下に出す。フォーカスを取り上下/確定/中止を受ける。
@@ -582,6 +585,8 @@ pub(crate) struct CompletionState {
     selected: usize,
     position: Point<gpui::Pixels>,
     focus: FocusHandle,
+    /// Markdown のスラッシュメニュー（O29）: 確定で行頭の `/` ごと置き換える。
+    slash: bool,
 }
 
 impl CompletionState {
@@ -796,6 +801,7 @@ fn parse_completion_items(value: &serde_json::Value) -> Vec<CompletionItem> {
                 insert_text,
                 detail,
                 kind,
+                caret: None,
             })
         })
         .take(60)
@@ -5038,6 +5044,7 @@ mod tests {
             insert_text: label.to_string(),
             detail: None,
             kind: SharedString::from("fn"),
+            caret: None,
         };
         let items = vec![item("push"), item("push_str"), item("Pop"), item("insert")];
         assert_eq!(filter_completion_indices(&items, "pu"), vec![0, 1]);
