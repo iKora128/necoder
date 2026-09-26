@@ -57,6 +57,8 @@ pub enum WebViewEvent {
 enum NativeEvent {
     PageLoad { url: String, finished: bool },
     Title(String),
+    /// 最上位の読み込みの失敗（macOS の navigation delegate だけが積む。WebView2 は自前のエラーページ）。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     LoadFailed(String),
 }
 
