@@ -96,6 +96,7 @@ const ACTION_LABELS: &[(&str, &str)] = &[
     // ── その他（レジストリ未収録の workspace / necoder）──
     ("workspace::CommandPalette", "key.command_palette"),
     ("workspace::ControlNext", "key.control_next"),
+    ("workspace::CleanupTask", "key.cleanup_task"),
     ("workspace::Minimize", "key.minimize"),
     ("workspace::Hide", "key.hide"),
     ("workspace::HideOthers", "key.hide_others"),

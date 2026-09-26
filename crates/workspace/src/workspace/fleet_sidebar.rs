@@ -329,7 +329,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 外で消えた worktree の Task をレールから外す（O21・「片付け」）。
     /// Task 行の ⌘ クリック（O21・Windows / Linux は Ctrl）: 選択に足す / 外す。
     pub(crate) fn toggle_fleet_selection(&mut self, space: SpaceId, cx: &mut Context<Self>) {
         if let Some(position) = self
@@ -478,6 +477,32 @@ impl Workspace {
         self.clear_fleet_selection(cx);
     }
 
+    /// Fleet サイドバーの ⌘⌫ / Delete（O21・A26）: 選んでいる Task（無ければ前面の Task）に印を付けて
+    /// 片付けの画面を開く。消すのは画面で確かめてから（キー 1 つでは消さない）。統合先（⌂）は対象外。
+    pub(crate) fn cleanup_task_action(
+        &mut self,
+        _: &CleanupTask,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chrome.fleet_mode {
+            return;
+        }
+        let spaces = if self.chrome.fleet_selection.is_empty() {
+            let Some(slot) = self
+                .active_slot()
+                .filter(|slot| !slot.task_space.is_integration())
+            else {
+                return;
+            };
+            vec![slot.task_space.id.clone()]
+        } else {
+            self.chrome.fleet_selection.clone()
+        };
+        self.cleanup_selected_tasks(&spaces, window, cx);
+    }
+
+    /// 外で消えた worktree の Task をレールから外す（O21・「片付け」）。
     pub(crate) fn forget_vanished_task(
         &mut self,
         index: usize,
@@ -1807,7 +1832,6 @@ mod tests {
         assert_eq!(FleetSort::Attention.next(), FleetSort::Rail);
     }
 
-    /// Task の絞り込み（O21）: 名前・ブランチ・頼んだこと・いま何を のどれかに全部の語が要る。
     /// O21: ⌘ クリックで Task を選び、⇧ クリックで範囲。まとめて舞台に並べる（3 本まで）・片付けの
     /// 画面へ印を付けて渡す。どれも済んだら選択は外れる。
     #[gpui::test]
@@ -1894,6 +1918,31 @@ mod tests {
             workspace.clear_fleet_selection(cx);
             assert!(workspace.chrome.fleet_selection.is_empty());
             assert!(workspace.chrome.fleet_selection_anchor.is_none());
+
+            // ⌘⌫ / Delete（A26）: 選んでいればその Task、無ければ前面の Task に印。統合先では開かない。
+            workspace.overlays.cleanup = None;
+            workspace.chrome.fleet_mode = true;
+            workspace.cleanup_task_action(&CleanupTask, window, cx);
+            assert!(
+                workspace.cleanup_selection().is_none(),
+                "統合先が前面なら何もしない"
+            );
+            workspace.toggle_fleet_selection(ids[1].clone(), cx);
+            workspace.toggle_fleet_selection(ids[3].clone(), cx);
+            workspace.cleanup_task_action(&CleanupTask, window, cx);
+            assert_eq!(
+                workspace.cleanup_selection().expect("開く"),
+                [ids[1].clone(), ids[3].clone()].into_iter().collect()
+            );
+            assert!(workspace.chrome.fleet_selection.is_empty());
+            workspace.overlays.cleanup = None;
+            workspace.switch_project(2, window, cx);
+            workspace.cleanup_task_action(&CleanupTask, window, cx);
+            assert_eq!(
+                workspace.cleanup_selection().expect("開く"),
+                [ids[2].clone()].into_iter().collect(),
+                "前面の Task"
+            );
         });
         std::fs::remove_dir_all(&base).ok();
     }
@@ -2012,6 +2061,7 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// Task の絞り込み（O21）: 名前・ブランチ・頼んだこと・いま何を のどれかに全部の語が要る。
     #[test]
     fn task_rows_are_filtered_by_every_word() {
         let row = task_row(

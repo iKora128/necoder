@@ -1440,6 +1440,7 @@ key:
   close_active_thread: Close active thread
   command_palette: Command palette
   control_next: "Control: next item"
+  cleanup_task: "Task: Clean up the selected Tasks…"
   minimize: Minimize window
   hide: Hide necoder
   hide_others: Hide others

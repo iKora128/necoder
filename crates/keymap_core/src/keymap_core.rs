@@ -337,7 +337,9 @@ pub const DEFAULT_KEYMAP_JSON: &str = r#"[
   {
     "context": "FleetControl",
     "bindings": {
-      "enter": "workspace::ControlNext"
+      "enter": "workspace::ControlNext",
+      "cmd-backspace": "workspace::CleanupTask",
+      "delete": "workspace::CleanupTask"
     }
   },
   {
