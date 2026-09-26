@@ -200,7 +200,8 @@ impl Workspace {
     ///
     /// `open`（`1` も同じ）= 開く / `seed` = 隔離した DB（`NECODER_HOME` の時だけ）へ見本のスレッドを書く /
     /// `query:<語>` = 入力に語を入れる / `select:<n>` = 選べる行の n 番目を選ぶ / `confirm` = ⏎ /
-    /// `close` = 閉じる / `handoff` = いまのスレッドを「新しいセッションで続ける」/
+    /// `close` = 閉じる / `count` = 区分ごとの件数を stderr へ（題は出さない）/
+    /// `handoff` = いまのスレッドを「新しいセッションで続ける」/
     /// `menu` = いまのスレッドの右クリックメニューを開く。
     #[cfg(debug_assertions)]
     pub fn debug_history_probe(
@@ -220,6 +221,10 @@ impl Workspace {
             },
             "confirm" => self.debug_history_confirm(window, cx),
             "close" => self.close_thread_history(window, cx),
+            "count" => eprintln!(
+                "NECODER_HISTORY_PROBE count: {}",
+                self.debug_history_counts()
+            ),
             "handoff" => {
                 let panel = self.agent_panel.clone();
                 let continued = panel.update(cx, |panel, cx| {
