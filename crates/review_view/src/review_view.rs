@@ -50,7 +50,9 @@ use project::review::{
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use storage::{ReviewNoteState, Storage};
 use theme_core::Theme;
 use ui::Tooltip;
@@ -71,6 +73,8 @@ const LINE_TINT: f32 = 0.12;
 const MENU_COMMITS: usize = 30;
 /// 全文とハイライトを一度に背景で計算するファイル数（届いた分から色が付く）。
 const SYNTAX_CHUNK: usize = 8;
+/// 全文が届くたびの行の並べ直しの間隔（R02・チャンクごとに全行を組み直さない）。
+const ROW_REBUILD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 /// 下端のトレイの帯の高さ。
 const TRAY_HEIGHT: f32 = 34.;
 
@@ -490,14 +494,22 @@ impl ReviewView {
             let Ok(Some(diff)) = loaded else {
                 return;
             };
-            // 全文とハイライトは届いた分から色を付ける（最初の表示を待たせない）。
+            // 全文とハイライトは届いた分から色を付ける（最初の表示を待たせない）。全文はレビュー全体の
+            // 予算の中でだけ持つ（R02）。色は描く時に全文から引くので、行の並べ直し（畳みの行数が
+            // 決まる）は数チャンクに 1 回へまとめ、最後のチャンクで必ず行う。
+            let text_budget = Arc::new(AtomicUsize::new(project::review::MAX_TOTAL_TEXT_BYTES));
+            let mut rebuilt_at: Option<Instant> = None;
             for start in (0..diff.files.len()).step_by(SYNTAX_CHUNK) {
                 let end = (start + SYNTAX_CHUNK).min(diff.files.len());
+                let last_chunk = end == diff.files.len();
                 let chunk_diff = diff.clone();
                 let host = context.host.clone();
+                let budget = text_budget.clone();
                 let syntax = cx
                     .background_executor()
-                    .spawn(async move { load_syntax(host.as_ref(), &chunk_diff, start..end) })
+                    .spawn(
+                        async move { load_syntax(host.as_ref(), &chunk_diff, start..end, &budget) },
+                    )
                     .await;
                 let current = this.update(cx, |this, cx| {
                     if this.generation != generation {
@@ -508,9 +520,14 @@ impl ReviewView {
                             *slot = Some(Arc::new(file_syntax));
                         }
                     }
-                    // 全文が届いた = diff の外の行（開いた畳みの行）も確かめられる。
-                    this.reconcile_notes(cx);
-                    this.rebuild_rows();
+                    let due = last_chunk
+                        || rebuilt_at.is_none_or(|at| at.elapsed() >= ROW_REBUILD_INTERVAL);
+                    if due {
+                        // 全文が届いた = diff の外の行（開いた畳みの行）も確かめられる。
+                        this.reconcile_notes(cx);
+                        this.rebuild_rows();
+                        rebuilt_at = Some(Instant::now());
+                    }
                     cx.notify();
                     true
                 });
@@ -957,12 +974,32 @@ pub fn short_sha(oid: &str) -> String {
 }
 
 /// 背景スレッドで全文を読んでハイライトする（`range` のファイルだけ）。
-fn load_syntax(host: &dyn Host, diff: &ReviewDiff, range: Range<usize>) -> Vec<FileSyntax> {
+/// 全文を読んでハイライトする。`budget` はレビュー全体で全文に使える残りのバイト（R02）で、
+/// 差し引けなかったファイルは全文を持たない（色無し・畳みは開けない。差分の行はそのまま見える）。
+fn load_syntax(
+    host: &dyn Host,
+    diff: &ReviewDiff,
+    range: Range<usize>,
+    budget: &AtomicUsize,
+) -> Vec<FileSyntax> {
     diff.files[range]
         .iter()
         .map(|file| {
+            if budget.load(Ordering::Relaxed) == 0 {
+                return FileSyntax::default();
+            }
             let texts =
                 project::review::review_file_texts_on(host, &diff.repo_root, &diff.base_oid, file);
+            let bytes = texts.old.as_ref().map_or(0, String::len)
+                + texts.new.as_ref().map_or(0, String::len);
+            let reserved = budget
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(bytes)
+                })
+                .is_ok();
+            if !reserved {
+                return FileSyntax::default();
+            }
             FileSyntax {
                 old: texts
                     .old
@@ -2256,6 +2293,30 @@ mod tests {
             view.delete_note(0, cx);
             assert_eq!(view.note_counts(), (0, 0));
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R02: 全文はレビュー全体の予算の中でだけ持つ。尽きたら、そのファイルは色無し（全文を持たない）。
+    #[test]
+    fn full_texts_stay_within_the_review_budget() {
+        let Some(dir) = temp_repo("text_budget") else {
+            return;
+        };
+        let diff = project::review::review_diff_on(
+            host::LocalHost::shared().as_ref(),
+            &dir,
+            &ReviewBase::Head,
+            false,
+        )
+        .expect("差分を読める");
+        let empty = AtomicUsize::new(0);
+        let starved = load_syntax(host::LocalHost::shared().as_ref(), &diff, 0..1, &empty);
+        assert!(starved[0].new.is_none() && starved[0].old.is_none());
+        let plenty = AtomicUsize::new(project::review::MAX_TOTAL_TEXT_BYTES);
+        let loaded = load_syntax(host::LocalHost::shared().as_ref(), &diff, 0..1, &plenty);
+        assert!(loaded[0].new.is_some() && loaded[0].old.is_some());
+        let used = project::review::MAX_TOTAL_TEXT_BYTES - plenty.load(Ordering::Relaxed);
+        assert!(used > 0, "読んだ分だけ予算が減る");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

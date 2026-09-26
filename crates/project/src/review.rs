@@ -26,6 +26,17 @@ pub const MAX_TOTAL_CHANGED_LINES: usize = 60_000;
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 /// 追跡外ファイルの中身を読む上限の件数（超えた分は「大きすぎる」で並べるだけ）。
 pub const MAX_UNTRACKED_FILES: usize = 1_000;
+/// 1 ファイルの差分の行の本文の合計がこれを超えたら、中身を捨てて「大きすぎる」にする（R02）。
+/// 行数の上限だけでは、1 行が数 MB あるファイル（圧縮した JS 等）の 1 行の変更を止められない。
+pub const MAX_FILE_PATCH_BYTES: usize = 512 * 1024;
+/// レビュー全体で持つ差分の行の本文の上限（追跡済み + 追跡外・R02）。超えた分のファイルは「大きすぎる」。
+pub const MAX_TOTAL_PATCH_BYTES: usize = 16 * 1024 * 1024;
+/// パッチを取る前に、旧側か新側の中身がこれより大きいファイルは除く（R02・git の出力を
+/// 丸ごと読む前に止める。ここを抜けても [`MAX_FILE_PATCH_BYTES`] で中身は持たない）。
+pub const MAX_DIFF_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// 全文（ハイライト・畳みの展開用）をレビュー全体で持つ上限（R02）。超えた分のファイルは
+/// 色を付けず、畳みも開けない（差分の行はそのまま見える）。
+pub const MAX_TOTAL_TEXT_BYTES: usize = 24 * 1024 * 1024;
 
 /// 比較の基準（解決前）。UI が選び、[`resolve_review_base_on`] がコミットに解決する。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -491,6 +502,47 @@ pub fn review_diff_on(
     base: &ReviewBase,
     ignore_whitespace: bool,
 ) -> Result<ReviewDiff, ReviewError> {
+    review_diff_with_budgets_on(
+        host,
+        dir,
+        base,
+        ignore_whitespace,
+        &ReviewBudgets::default(),
+    )
+}
+
+/// レビューが持つ中身の上限（R02）。既定は各定数。テストは小さい値で上限の働きを確かめる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewBudgets {
+    /// 変更行（追跡済み + 追跡外）の合計。
+    pub total_lines: usize,
+    /// 1 ファイルの差分の行の本文。
+    pub file_patch_bytes: usize,
+    /// 差分の行の本文の合計（追跡済み + 追跡外）。
+    pub total_patch_bytes: usize,
+    /// パッチを取る前に除くファイルの中身の大きさ。
+    pub diff_file_bytes: u64,
+}
+
+impl Default for ReviewBudgets {
+    fn default() -> Self {
+        Self {
+            total_lines: MAX_TOTAL_CHANGED_LINES,
+            file_patch_bytes: MAX_FILE_PATCH_BYTES,
+            total_patch_bytes: MAX_TOTAL_PATCH_BYTES,
+            diff_file_bytes: MAX_DIFF_FILE_BYTES,
+        }
+    }
+}
+
+/// [`review_diff_on`] の本体（上限を渡せる）。
+pub fn review_diff_with_budgets_on(
+    host: &dyn Host,
+    dir: &Path,
+    base: &ReviewBase,
+    ignore_whitespace: bool,
+    budgets: &ReviewBudgets,
+) -> Result<ReviewDiff, ReviewError> {
     let repo_root = git_repo_root_on(host, dir).ok_or(ReviewError::NotRepository)?;
     let base_oid = resolve_review_base_on(host, &repo_root, base)?;
     let listing = |extra: &str| -> Result<String, ReviewError> {
@@ -514,7 +566,7 @@ pub fn review_diff_on(
     statuses.sort_by(|left, right| tree_order(&left.path, &right.path));
     let mut files = Vec::new();
     let mut exclude = Vec::new();
-    let mut budget = MAX_TOTAL_CHANGED_LINES;
+    let mut budget = budgets.total_lines;
     for status in &statuses {
         let mut file = FileDiff::new(status.path.clone());
         file.kind = status.kind;
@@ -541,6 +593,44 @@ pub fn review_diff_on(
         files.push(file);
     }
 
+    // 中身が大きすぎるファイルは、パッチを取る前に除く（R02）。旧側は `git ls-tree -l` 1 回、
+    // 新側は作業ツリーの大きさ。どちらも読めなければ素通し（取った後の予算で止まる）。
+    let sized: Vec<&FileDiff> = files
+        .iter()
+        .filter(|file| !file.too_large && !file.binary)
+        .collect();
+    if !sized.is_empty() {
+        let old_paths: Vec<String> = sized
+            .iter()
+            .filter(|file| file.kind != FileChangeKind::Added)
+            .map(|file| file.base_path().to_string())
+            .collect();
+        let old_sizes = git_blob_sizes_on(host, &repo_root, &base_oid, &old_paths);
+        let oversized: Vec<String> = sized
+            .iter()
+            .filter(|file| {
+                let old = old_sizes.get(file.base_path()).copied().unwrap_or(0);
+                let new = if file.kind == FileChangeKind::Deleted {
+                    0
+                } else {
+                    host.metadata(&repo_root.join(&file.path))
+                        .map_or(0, |metadata| metadata.len)
+                };
+                old.max(new) > budgets.diff_file_bytes
+            })
+            .map(|file| file.path.clone())
+            .collect();
+        for file in files
+            .iter_mut()
+            .filter(|file| oversized.contains(&file.path))
+        {
+            file.too_large = true;
+            exclude.push(file.path.clone());
+            exclude.extend(file.old_path.clone());
+        }
+    }
+
+    let mut byte_budget = budgets.total_patch_bytes;
     if files.iter().any(|file| !file.too_large && !file.binary) {
         let patch = git_diff_patch_on(
             host,
@@ -565,6 +655,9 @@ pub fn review_diff_on(
                 file.recount();
             }
         }
+        // パッチ全体の文字列はここで手放す。持つ中身は予算の分だけ（R02）。
+        drop(patch);
+        apply_patch_byte_budget(&mut files, budgets.file_patch_bytes, &mut byte_budget);
     }
     if ignore_whitespace {
         // `-w` で空白の差しか無かったファイルは消す（それを隠すためのトグル）。
@@ -584,18 +677,31 @@ pub fn review_diff_on(
         file.too_large = true;
         file
     };
+    // 追跡外も、追跡済みの残りの行数・バイト数の予算の中で読む（R02・以前は全体の予算を減らさず、
+    // 1MB × 1,000 件まで読めた）。予算を超えた分は並べるだけ。
+    let mut line_budget = budget;
     let untracked = git_untracked_files_on(host, &repo_root);
     for (index, path) in untracked.into_iter().enumerate() {
         let absolute = repo_root.join(&path);
+        let size = host.metadata(&absolute).map_or(0, |metadata| metadata.len);
         let oversized = index >= MAX_UNTRACKED_FILES
-            || host
-                .metadata(&absolute)
-                .is_ok_and(|metadata| metadata.len > MAX_TEXT_BYTES as u64);
+            || size > MAX_TEXT_BYTES as u64
+            || size > byte_budget as u64;
         let file = if oversized {
             listed_only(path)
         } else {
             match host.read_file(&absolute) {
-                Ok(content) => untracked_file_diff(&path, &content.bytes),
+                Ok(content) => {
+                    let file = untracked_file_diff(&path, &content.bytes);
+                    let bytes = patch_bytes(&file);
+                    if file.additions > line_budget || bytes > byte_budget {
+                        listed_only(path)
+                    } else {
+                        line_budget -= file.additions;
+                        byte_budget -= bytes;
+                        file
+                    }
+                }
                 Err(_) => listed_only(path),
             }
         };
@@ -607,6 +713,78 @@ pub fn review_diff_on(
         base_oid,
         files,
     })
+}
+
+/// 差分の行の本文の合計（バイト）。レビューが持つ中身の量の目安（R02）。
+pub fn patch_bytes(file: &FileDiff) -> usize {
+    file.hunks
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter())
+        .map(|line| line.text.len())
+        .sum()
+}
+
+/// 解析した差分に、1 ファイル（`per_file`）と全体（`remaining`）のバイトの上限を掛ける（R02・
+/// パス順に積む）。超えたファイルは中身を捨てて「大きすぎる」にする（開けるだけ）。追加・削除の数は
+/// 解析した時のまま残す。
+pub fn apply_patch_byte_budget(files: &mut [FileDiff], per_file: usize, remaining: &mut usize) {
+    for file in files.iter_mut().filter(|file| !file.hunks.is_empty()) {
+        let bytes = patch_bytes(file);
+        if bytes > per_file || bytes > *remaining {
+            file.hunks = Vec::new();
+            file.too_large = true;
+        } else {
+            *remaining -= bytes;
+        }
+    }
+}
+
+/// 基準のツリーでのファイルの大きさ（`git ls-tree -l -z <base> -- <paths>`・R02 の事前確認）。
+/// 読めなかったものは入らない（呼び出し側は 0 とみなす）。
+fn git_blob_sizes_on(
+    host: &dyn Host,
+    repo_root: &Path,
+    base_oid: &str,
+    paths: &[String],
+) -> HashMap<String, u64> {
+    let mut sizes = HashMap::new();
+    if paths.is_empty() || base_oid.is_empty() || base_oid.starts_with('-') {
+        return sizes;
+    }
+    let mut args: Vec<String> = [
+        "-c",
+        "core.quotepath=false",
+        "--no-optional-locks",
+        "ls-tree",
+        "-l",
+        "-z",
+        base_oid,
+        "--",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    args.extend(paths.iter().cloned());
+    let Ok(output) = run_git(host, repo_root, args) else {
+        return sizes;
+    };
+    if !output.success() {
+        return sizes;
+    }
+    // `<mode> SP <type> SP <oid> SP+ <size> TAB <path>`（size は右寄せの空白つき。tree は `-`）。
+    for entry in String::from_utf8_lossy(&output.stdout).split('\0') {
+        let Some((meta, path)) = entry.split_once('\t') else {
+            continue;
+        };
+        if let Some(size) = meta
+            .split_whitespace()
+            .nth(3)
+            .and_then(|size| size.parse::<u64>().ok())
+        {
+            sizes.insert(path.to_string(), size);
+        }
+    }
+    sizes
 }
 
 /// ファイルツリーと同じ並び（各階層でディレクトリが先・名前順）。レビューの縦の並びとツリーを揃える。
@@ -1226,6 +1404,91 @@ mod tests {
             ],
             "ディレクトリが先・同じ階層は名前順"
         );
+    }
+
+    /// R02: 1 行が数 MB あるファイルの 1 行の変更は、パッチの上限で中身を持たない。中身が
+    /// 大きすぎるファイルはパッチを取る前に除く。追跡外も全体の予算の中で読む。
+    #[test]
+    fn review_budgets_bound_what_the_diff_holds() {
+        let root = scratch("review_budgets");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+        };
+        if !git(&["init", "-q", "-b", "main"]).is_ok_and(|output| output.status.success()) {
+            return; // git が無い環境
+        }
+        let long_line = |fill: char, bytes: usize| format!("{}\n", fill.to_string().repeat(bytes));
+        std::fs::write(root.join("bundle.js"), long_line('x', 64 * 1024)).unwrap();
+        std::fs::write(root.join("huge.js"), long_line('x', 300 * 1024)).unwrap();
+        std::fs::write(root.join("small.txt"), "a\n").unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "base"]).unwrap();
+        std::fs::write(root.join("bundle.js"), long_line('y', 64 * 1024)).unwrap();
+        std::fs::write(root.join("huge.js"), long_line('y', 300 * 1024)).unwrap();
+        std::fs::write(root.join("small.txt"), "b\n").unwrap();
+        for index in 0..3 {
+            std::fs::write(root.join(format!("new{index}.txt")), "1\n2\n3\n").unwrap();
+        }
+        let budgets = ReviewBudgets {
+            total_lines: 1_000,
+            // 64KB の 1 行の変更（旧 + 新で 128KB）は上限を超える。
+            file_patch_bytes: 100 * 1024,
+            total_patch_bytes: 1024,
+            // 300KB のファイルはパッチを取る前に除く。
+            diff_file_bytes: 200 * 1024,
+        };
+        let diff = review_diff_with_budgets_on(
+            &host::LocalHost,
+            &root,
+            &ReviewBase::Head,
+            false,
+            &budgets,
+        )
+        .expect("差分を読める");
+        let file = |path: &str| {
+            diff.files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap_or_else(|| panic!("{path} が並ぶ"))
+        };
+        assert!(file("bundle.js").too_large, "1 ファイルのバイト上限");
+        assert!(file("bundle.js").hunks.is_empty(), "中身は持たない");
+        assert!(file("huge.js").too_large, "パッチを取る前に除く");
+        assert!(file("huge.js").hunks.is_empty());
+        assert!(!file("small.txt").too_large, "小さい変更はそのまま");
+        assert_eq!(patch_bytes(file("small.txt")), 2);
+        let held: usize = diff.files.iter().map(patch_bytes).sum();
+        assert!(held <= budgets.total_patch_bytes, "全体の上限: {held}");
+        let untracked: Vec<&FileDiff> = diff
+            .files
+            .iter()
+            .filter(|file| file.kind == FileChangeKind::Untracked)
+            .collect();
+        assert_eq!(untracked.len(), 3, "追跡外は全部並ぶ");
+        assert!(
+            untracked.iter().all(|file| !file.too_large),
+            "予算内なら中身を読む"
+        );
+
+        // 全体の予算が尽きたら、追跡外は並べるだけ。
+        let tight = ReviewBudgets {
+            total_patch_bytes: 4,
+            ..budgets
+        };
+        let diff =
+            review_diff_with_budgets_on(&host::LocalHost, &root, &ReviewBase::Head, false, &tight)
+                .expect("差分を読める");
+        let read = diff
+            .files
+            .iter()
+            .filter(|file| file.kind == FileChangeKind::Untracked && !file.too_large)
+            .count();
+        assert_eq!(read, 0, "予算を超えた追跡外は中身を読まない");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
