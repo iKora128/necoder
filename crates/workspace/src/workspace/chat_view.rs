@@ -173,8 +173,9 @@ impl Workspace {
                 cx.notify();
             }
             // transcript の URL: localhost 系は Chat の右の領域に Web タブ、それ以外は既定のブラウザ。
+            // Chat のエージェントは手元で動く。
             agent_panel::PanelEvent::OpenUrlRequest { url } => {
-                self.open_url(url, cx);
+                self.open_url(url, UrlOrigin::Local, cx);
             }
             agent_panel::PanelEvent::OpenDiffRequest {
                 title,

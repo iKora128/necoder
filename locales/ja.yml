@@ -611,8 +611,10 @@ webtab:
   open_browser_tip: 既定のブラウザで開く
   unsupported: この環境では Web タブを表示できません（macOS / Windows のみ）
   picker_placeholder: "ポート番号か localhost の URL（例: 3000 / localhost:5173/app）"
+  picker_placeholder_remote: "手元のポート番号か localhost の URL（SSH 先のサーバは手元へ転送してから。例: 5173）"
   picker_action: localhost を開く
   invalid_url: "localhost の URL だけ開けます: %{input}"
+  remote_localhost: "%{target} は SSH 先（%{host}）の物なので、手元では開きません。ポート転送は今後の対応です"
   ctx_open_browser: 既定のブラウザで開く
   ctx_copy_url: URL をコピー
 pdf:

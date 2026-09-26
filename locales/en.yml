@@ -610,8 +610,10 @@ webtab:
   open_browser_tip: Open in default browser
   unsupported: Web tabs aren't available here (macOS / Windows only)
   picker_placeholder: "Port or localhost URL (e.g. 3000 / localhost:5173/app)"
+  picker_placeholder_remote: "Port or localhost URL on this machine (forward SSH ports here first; e.g. 5173)"
   picker_action: Open localhost
   invalid_url: "Only localhost URLs can be opened: %{input}"
+  remote_localhost: "%{target} belongs to the SSH host (%{host}), so it is not opened here. Port forwarding is planned"
   ctx_open_browser: Open in default browser
   ctx_copy_url: Copy URL
 pdf:

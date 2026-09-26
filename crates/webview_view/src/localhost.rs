@@ -41,6 +41,33 @@ pub fn normalize(url: &str) -> Option<String> {
     is_allowed_url(&parsed).then(|| parsed.to_string())
 }
 
+/// URL の host が「その URL を出した機械自身」を指すか。ループバック全域（`127.0.0.0/8`・`::1`・
+/// IPv4 射影の `::ffff:127.x`）・未指定アドレス（`0.0.0.0` / `[::]`・ブラウザは手元へ繋ぐ）・`localhost` と
+/// `*.localhost`（ブラウザはループバックへ解決する）。scheme は問わない。
+///
+/// Web タブで開けるか（[`is_allowed`]）より**広い**。SSH 先で出た URL をこれで見分け、手元では開かない
+/// （手元の WebView でもブラウザでも、手元の機械の同じポートを見てしまう）。
+pub fn points_to_origin_machine(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.');
+            domain == "localhost" || domain.ends_with(".localhost")
+        }
+        Some(Host::Ipv4(address)) => address.is_loopback() || address.is_unspecified(),
+        Some(Host::Ipv6(address)) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| mapped.is_loopback() || mapped.is_unspecified())
+        }
+        None => false,
+    }
+}
+
 /// パレットに打たれた文字列を URL にする。受け付けるのは:
 ///
 /// - ポート番号だけ（`3000` / `:3000`）→ `http://localhost:3000/`
@@ -214,6 +241,41 @@ mod tests {
             parse_input(&format!("{}.localhost", crate::sandbox::SCHEME)),
             None
         );
+    }
+
+    /// SSH 先で出た URL のうち「出た機械自身」を指す物。Web タブの許可範囲より広く、ブラウザで開くと
+    /// 手元へ繋がってしまう表記（`0.0.0.0`・`127.0.0.2`・`*.localhost`）も拾う。
+    #[test]
+    fn urls_that_point_back_at_their_own_machine() {
+        for url in [
+            "http://localhost:5173/",
+            "http://LOCALHOST:5173/",
+            "http://localhost.:5173/",
+            "http://app.localhost:3000/",
+            "http://127.0.0.1:8080/",
+            "http://127.0.0.2:3000/",
+            "http://127.1/",
+            "http://0.0.0.0:5173/",
+            "http://[::1]:4000/",
+            "http://[::]:4000/",
+            "http://[::ffff:127.0.0.1]:4000/",
+            "https://localhost:8443/",
+            "ws://localhost:24678/",
+        ] {
+            assert!(points_to_origin_machine(url), "{url}");
+        }
+        for url in [
+            "https://example.com/",
+            "http://localhost.example.com/",
+            "http://192.168.1.5:5173/",
+            "http://10.0.0.2/",
+            "http://localhost@evil.example/",
+            "file:///etc/passwd",
+            "mailto:someone@example.com",
+            "not a url",
+        ] {
+            assert!(!points_to_origin_machine(url), "{url}");
+        }
     }
 
     #[test]

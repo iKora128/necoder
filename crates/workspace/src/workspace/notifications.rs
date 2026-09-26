@@ -277,8 +277,9 @@ impl Workspace {
             }
             agent_panel::PanelEvent::ChatRowsChanged => {}
             // transcript の URL: localhost 系は Web タブ、それ以外は既定のブラウザ（`open_url`）。
+            // エージェントはプロジェクトの Host で動く＝ SSH 先の localhost は手元では開かない。
             agent_panel::PanelEvent::OpenUrlRequest { url } => {
-                self.open_url(url, cx);
+                self.open_url(url, self.url_origin_of_session(session_index), cx);
             }
             agent_panel::PanelEvent::FilesTouched { files, color } => {
                 for file in files {

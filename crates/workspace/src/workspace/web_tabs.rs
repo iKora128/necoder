@@ -3,9 +3,41 @@
 //! URL を開く経路はここの [`Workspace::open_url`] 1 本に集める: localhost 系（`webview_view::localhost`
 //! の範囲）は Web タブ、それ以外の http(s) は既定のブラウザ。エージェントの transcript のリンクと
 //! Markdown プレビューのリンクがここを通る（端末の URL クリックも統合時にここへ繋ぐ）。
+//!
+//! URL は**出どころ**（[`UrlOrigin`]）と一緒に渡す。SSH のプロジェクトではエージェントも端末も
+//! リモートで動くので、そこに出た `localhost:5173` はリモートの localhost — 手元で開くと、手元で
+//! 同じポートを使う別のアプリを見てしまう。ポート転送（計画 O5）が入るまでは開かずに案内する。
 
 use crate::workspace::*;
 use webview_view::localhost;
+
+/// URL が出てきた機械（＝その URL の `localhost` が指す先）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UrlOrigin {
+    /// 手元の機械（ローカルのプロジェクト・Chat・手元のファイル）。
+    Local,
+    /// SSH の接続先。`host_id` は [`host::Host::id`]（接続の識別・再接続を跨いで同じ）、
+    /// `destination` は案内に出す `user@host`（[`host::Host::display_name`]）。
+    Ssh {
+        host_id: SharedString,
+        destination: SharedString,
+    },
+}
+
+impl UrlOrigin {
+    /// その Host の上で動く物（エージェント・端末・ファイル）から出た URL の出どころ。
+    /// 読むのは Host の固定の欄だけ（I/O 無し）。
+    pub(crate) fn of_host(host: &dyn host::Host) -> UrlOrigin {
+        if host.is_remote() {
+            UrlOrigin::Ssh {
+                host_id: SharedString::from(host.id().to_string()),
+                destination: SharedString::from(host.display_name().to_string()),
+            }
+        } else {
+            UrlOrigin::Local
+        }
+    }
+}
 
 /// Markdown のリンクの行き先をファイルのパスへ（`base` = その `.md` のフォルダ）。
 /// URL（`https:` など scheme 付き）・ページ内アンカー（`#…`）・空は `None`。`?` / `#` 以降は落とし、
@@ -62,15 +94,50 @@ fn percent_decode(text: &str) -> Option<String> {
 }
 
 impl Workspace {
+    /// プロジェクトの session（添字）の上で出た URL の出どころ。エージェントも端末もプロジェクトの
+    /// Host で動くので、その Host で決まる。
+    pub(crate) fn url_origin_of_session(&self, session_index: usize) -> UrlOrigin {
+        self.project_sessions
+            .projects
+            .get(session_index)
+            .map(|slot| UrlOrigin::of_host(slot.worktree.host().as_ref()))
+            .unwrap_or(UrlOrigin::Local)
+    }
+
     /// URL を開く（唯一の入口）。localhost 系は Web タブ、それ以外は既定のブラウザ。
+    ///
+    /// `origin` が SSH の接続先で、URL がその機械自身（`localhost`・ループバック・`0.0.0.0` など）を
+    /// 指す時は**開かない**: 手元の Web タブでもブラウザでも手元の機械の同じポートを見てしまうので、
+    /// 理由をトーストで示す（「既定のブラウザで開く」も同じ理由で取り違えるので出さない）。
     ///
     /// Window を取らない形にしてあるので、Window の無いイベント購読（エージェントのパネル・端末）からも
     /// そのまま呼べる。Web タブを開くのは次の effect cycle（`process_pending_shell_effects`）。
-    pub(crate) fn open_url(&mut self, url: &str, cx: &mut Context<Self>) {
-        if let Some(url) = localhost::normalize(url) {
-            self.pending_web_url = Some(url);
-            cx.notify();
-            return;
+    pub(crate) fn open_url(&mut self, url: &str, origin: UrlOrigin, cx: &mut Context<Self>) {
+        match origin {
+            UrlOrigin::Ssh { destination, .. } => {
+                if localhost::points_to_origin_machine(url) {
+                    let color = self.accent();
+                    self.push_toast(
+                        i18n::t!(
+                            "webtab.remote_localhost",
+                            "host" => destination,
+                            "target" => localhost::display_label(url)
+                        )
+                        .into(),
+                        color,
+                        cx,
+                    );
+                    return;
+                }
+                // 公開の URL はどこで開いても同じ所を指す＝既定のブラウザへ（下へ落ちる）。
+            }
+            UrlOrigin::Local => {
+                if let Some(url) = localhost::normalize(url) {
+                    self.pending_web_url = Some(url);
+                    cx.notify();
+                    return;
+                }
+            }
         }
         if let Err(error) = crate::crash::open_url(url) {
             eprintln!("URL を開けない: {error:#}");
@@ -140,20 +207,24 @@ impl Workspace {
     }
 
     /// パレット「プレビュー: localhost を開く…」。入力欄にポート番号か localhost の URL を打つ
-    /// （それ以外は通さない＝任意の URL を開く欄にはしない）。
+    /// （それ以外は通さない＝任意の URL を開く欄にはしない）。開くのは**手元の** localhost —
+    /// SSH のプロジェクトにいる時は、入力欄でそれを言う（SSH 先のサーバは手元へ転送してから）。
     pub(crate) fn open_localhost_preview(
         &mut self,
         _: &OpenLocalhostPreview,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_picker(
-            PickerMode::PreviewUrl,
-            i18n::t!("webtab.picker_placeholder"),
-            Vec::new(),
-            window,
-            cx,
-        );
+        // Chat 中は `active_slot` が無い＝手元扱い。
+        let remote = self
+            .active_slot()
+            .is_some_and(|slot| slot.remote_host.is_some());
+        let placeholder = if remote {
+            i18n::t!("webtab.picker_placeholder_remote")
+        } else {
+            i18n::t!("webtab.picker_placeholder")
+        };
+        self.open_picker(PickerMode::PreviewUrl, placeholder, Vec::new(), window, cx);
         if let Some(picker) = self.overlays.picker.clone() {
             picker.update(cx, |picker, cx| {
                 picker.set_query_action(0, i18n::t!("webtab.picker_action"), cx)
@@ -191,20 +262,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let destination = event.destination.trim();
-        if destination.starts_with("http://") || destination.starts_with("https://") {
-            self.open_url(destination, cx);
-            return;
-        }
-        let (base, local) = {
+        let (base, origin) = {
             let view = editor.read(cx);
             (
                 view.buffer()
                     .path()
                     .and_then(Path::parent)
                     .map(Path::to_path_buf),
-                !view.buffer().host().is_remote(),
+                // SSH 先の Markdown に書かれた localhost は、SSH 先で動かすサーバの物。
+                UrlOrigin::of_host(view.buffer().host().as_ref()),
             )
         };
+        if destination.starts_with("http://") || destination.starts_with("https://") {
+            self.open_url(destination, origin, cx);
+            return;
+        }
+        let local = origin == UrlOrigin::Local;
         let Some(path) = resolve_link_path(base.as_deref(), destination) else {
             return;
         };
@@ -230,7 +303,8 @@ impl Workspace {
 
     /// 開発用: Web タブを検証する（`NECODER_WEB_PREVIEW_PROBE`・`;` 区切りで順に実行）。
     ///
-    /// `open:<url>` = open_url と同じ入口 / `palette:<入力>` = パレットの確定と同じ入口 /
+    /// `open:<url>` = open_url と同じ入口（手元から来た URL）/ `open-ssh:<url>` = SSH 先
+    /// （`probe@devbox`）から来た URL として open_url へ / `palette:<入力>` = パレットの確定と同じ入口 /
     /// `picker:<入力>` = 入力欄を開いて文字を入れる（確定しない）/
     /// `viewport:<full|幅>` / `zoom:<+|-|0>` / `reload` / `eval:<式>` = ページで式を評価して結果を標準エラーへ /
     /// `menu` = タブの右クリックメニュー / `overlay` = ⌘⇧P（オーバーレイ中は WebView を隠す）/
@@ -249,7 +323,15 @@ impl Workspace {
             .get(self.active_tab)
             .and_then(|tab| tab.web().cloned());
         match name {
-            "open" => self.open_url(argument, cx),
+            "open" => self.open_url(argument, UrlOrigin::Local, cx),
+            "open-ssh" => self.open_url(
+                argument,
+                UrlOrigin::Ssh {
+                    host_id: "ssh://probe@devbox".into(),
+                    destination: "probe@devbox".into(),
+                },
+                cx,
+            ),
             "palette" => self.confirm_localhost_input(argument, window, cx),
             // 入力欄を開いて文字を入れた状態（確定はしない）を撮る。
             "picker" => {
@@ -366,6 +448,235 @@ mod tests {
         }
     }
 
+    /// SSH のプロジェクトを装う Host。名乗り（id / 表示名 / is_remote）だけリモートで、中身は手元の
+    /// ファイルへ流す（URL の出どころの判定は名乗りしか見ない）。
+    struct SshLikeHost {
+        inner: Arc<dyn host::Host>,
+    }
+
+    impl SshLikeHost {
+        fn shared() -> Arc<dyn host::Host> {
+            Arc::new(SshLikeHost {
+                inner: host::LocalHost::shared(),
+            })
+        }
+    }
+
+    impl host::Host for SshLikeHost {
+        fn id(&self) -> &str {
+            "ssh://me@devbox"
+        }
+
+        fn display_name(&self) -> &str {
+            "me@devbox"
+        }
+
+        fn is_remote(&self) -> bool {
+            true
+        }
+
+        fn project_uri(&self, path: &Path) -> Option<String> {
+            Some(format!("ssh://me@devbox{}", path.display()))
+        }
+
+        fn host_for_project(&self, path: &Path) -> anyhow::Result<Arc<dyn host::Host>> {
+            self.inner.host_for_project(path)
+        }
+
+        fn canonicalize(&self, path: &Path) -> anyhow::Result<PathBuf> {
+            self.inner.canonicalize(path)
+        }
+
+        fn metadata(&self, path: &Path) -> anyhow::Result<host::HostMetadata> {
+            self.inner.metadata(path)
+        }
+
+        fn read_dir(&self, path: &Path) -> anyhow::Result<Vec<host::HostEntry>> {
+            self.inner.read_dir(path)
+        }
+
+        fn read_file(&self, path: &Path) -> anyhow::Result<host::FileContent> {
+            self.inner.read_file(path)
+        }
+
+        fn write_file(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+            condition: host::WriteCondition,
+        ) -> anyhow::Result<host::FileRevision> {
+            self.inner.write_file(path, bytes, condition)
+        }
+
+        fn list_files(&self, root: &Path, limit: usize) -> anyhow::Result<Vec<PathBuf>> {
+            self.inner.list_files(root, limit)
+        }
+
+        fn search_project(
+            &self,
+            root: &Path,
+            spec: &host::TextSearchSpec,
+            file_limit: usize,
+        ) -> anyhow::Result<Vec<host::TextSearchHit>> {
+            self.inner.search_project(root, spec, file_limit)
+        }
+
+        fn run_command(&self, spec: &host::CommandSpec) -> anyhow::Result<host::CommandOutput> {
+            self.inner.run_command(spec)
+        }
+
+        fn spawn_process(&self, spec: &host::CommandSpec) -> anyhow::Result<host::HostProcess> {
+            self.inner.spawn_process(spec)
+        }
+
+        fn terminal_launch(&self, cwd: &Path) -> anyhow::Result<Option<host::TerminalLaunch>> {
+            self.inner.terminal_launch(cwd)
+        }
+    }
+
+    fn toast_texts(workspace: &Workspace) -> Vec<String> {
+        workspace
+            .notifications
+            .toasts
+            .iter()
+            .map(|(text, ..)| text.to_string())
+            .collect()
+    }
+
+    fn web_tab_count(workspace: &Workspace) -> usize {
+        workspace
+            .project_sessions
+            .sessions
+            .iter()
+            .flat_map(|session| session.tabs.iter())
+            .filter(|tab| tab.web().is_some())
+            .count()
+    }
+
+    /// 台帳 R06: SSH のプロジェクトのエージェントが出した localhost は SSH 先の物。手元の Web タブでも
+    /// ブラウザでも開かず、理由を出す。手元のプロジェクトの同じ URL は Web タブで開く（取り違えない）。
+    /// ブラウザなら手元へ繋がってしまう表記（`0.0.0.0`・`127.0.0.2`）も同じ扱い。
+    #[gpui::test]
+    fn transcript_localhost_from_an_ssh_project_is_not_opened_here(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("ssh_transcript", cx);
+        let remote_root = fixture.root.join("remote");
+        std::fs::create_dir_all(&remote_root).expect("一時フォルダを作れる");
+        let sources = vec![
+            ProjectSource::new(host::LocalHost::shared(), fixture.project.clone()),
+            ProjectSource::new(SshLikeHost::shared(), remote_root),
+        ];
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources(sources, Theme::dark(), None, cx)
+        });
+        let (local_panel, remote_panel) = workspace.update_in(cx, |workspace, _window, _cx| {
+            stop_watchers(workspace);
+            assert_eq!(workspace.url_origin_of_session(0), UrlOrigin::Local);
+            assert_eq!(
+                workspace.url_origin_of_session(1),
+                UrlOrigin::Ssh {
+                    host_id: "ssh://me@devbox".into(),
+                    destination: "me@devbox".into(),
+                }
+            );
+            (
+                workspace.project_sessions.sessions[0].agent_panel.clone(),
+                workspace.project_sessions.sessions[1].agent_panel.clone(),
+            )
+        });
+        for url in [
+            "http://localhost:5173/",
+            "http://0.0.0.0:5173/",
+            "http://127.0.0.2:5173/",
+        ] {
+            remote_panel.update(cx, |_panel, cx| {
+                cx.emit(agent_panel::PanelEvent::OpenUrlRequest { url: url.into() })
+            });
+            cx.run_until_parked();
+        }
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.process_pending_shell_effects(window, cx);
+            assert_eq!(
+                web_tab_count(workspace),
+                0,
+                "SSH 先の localhost は手元で開かない"
+            );
+            let toasts = toast_texts(workspace);
+            assert_eq!(toasts.len(), 3, "{toasts:?}");
+            assert!(
+                toasts[0].contains("me@devbox") && toasts[0].contains("localhost:5173"),
+                "どこの何を開かなかったかを言う: {toasts:?}"
+            );
+            assert!(toasts[1].contains("0.0.0.0:5173"), "{toasts:?}");
+            assert!(toasts[2].contains("127.0.0.2:5173"), "{toasts:?}");
+        });
+        local_panel.update(cx, |_panel, cx| {
+            cx.emit(agent_panel::PanelEvent::OpenUrlRequest {
+                url: "http://localhost:5173/".into(),
+            })
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.process_pending_shell_effects(window, cx);
+            assert_eq!(
+                workspace.tabs.first().map(|tab| tab.path.clone()),
+                Some(PathBuf::from("http://localhost:5173/")),
+                "手元のプロジェクトの localhost は Web タブで開く"
+            );
+            stop_watchers(workspace);
+        });
+    }
+
+    /// 台帳 R06: Markdown のリンクも、そのファイルがある機械で決まる。SSH 先の README に書かれた
+    /// localhost は開かず、手元の README の物は Web タブで開く。
+    #[gpui::test]
+    fn markdown_localhost_links_follow_the_file_host(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new("ssh_markdown", cx);
+        let remote_root = fixture.root.join("remote");
+        std::fs::create_dir_all(&remote_root).expect("一時フォルダを作れる");
+        let readme = "[app](http://localhost:3000/)\n";
+        std::fs::write(remote_root.join("README.md"), readme).expect("書ける");
+        std::fs::write(fixture.project.join("README.md"), readme).expect("書ける");
+        let link = editor_view::PreviewLinkClicked {
+            destination: "http://localhost:3000/".to_string(),
+        };
+        let remote_buffer = Buffer::from_host(SshLikeHost::shared(), remote_root.join("README.md"))
+            .expect("SSH 先を装った README を読める");
+        let local_buffer =
+            Buffer::from_file(fixture.project.join("README.md")).expect("手元の README を読める");
+        let remote_editor =
+            cx.new(|cx| EditorView::new(remote_buffer, Theme::dark(), project_color(0), cx));
+        let local_editor =
+            cx.new(|cx| EditorView::new(local_buffer, Theme::dark(), project_color(0), cx));
+        let sources = vec![ProjectSource::new(
+            host::LocalHost::shared(),
+            fixture.project.clone(),
+        )];
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources(sources, Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            stop_watchers(workspace);
+            workspace.on_preview_link(&remote_editor, &link, window, cx);
+            workspace.process_pending_shell_effects(window, cx);
+            assert_eq!(web_tab_count(workspace), 0);
+            assert!(
+                toast_texts(workspace)
+                    .iter()
+                    .any(|toast| toast.contains("me@devbox") && toast.contains("localhost:3000")),
+                "{:?}",
+                toast_texts(workspace)
+            );
+            workspace.on_preview_link(&local_editor, &link, window, cx);
+            workspace.process_pending_shell_effects(window, cx);
+            assert_eq!(
+                web_tab_count(workspace),
+                1,
+                "手元の Markdown の localhost は開く"
+            );
+            stop_watchers(workspace);
+        });
+    }
+
     /// Web タブは窓セッションの `open_files` に URL のまま載り、再起動で**同じ位置に**戻ること。
     /// 範囲外の URL（保存形式に紛れ込んだ物）は Web タブとして開かない。
     #[gpui::test]
@@ -423,9 +734,9 @@ mod tests {
             .add_window_view(|_window, cx| Workspace::new(vec![project], Theme::dark(), None, cx));
         let view = workspace.update_in(cx, |workspace, window, cx| {
             stop_watchers(workspace);
-            workspace.open_url("http://127.0.0.1:3000", cx);
+            workspace.open_url("http://127.0.0.1:3000", UrlOrigin::Local, cx);
             workspace.process_pending_shell_effects(window, cx);
-            workspace.open_url("http://127.0.0.1:3000/", cx);
+            workspace.open_url("http://127.0.0.1:3000/", UrlOrigin::Local, cx);
             workspace.process_pending_shell_effects(window, cx);
             assert_eq!(workspace.tabs.len(), 1, "同じ URL は同じタブへ戻る");
             let tab = &workspace.tabs[0];
