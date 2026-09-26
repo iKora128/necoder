@@ -272,17 +272,17 @@
 | — | `parity/integration` | #21（draft） | 全部を重ねた確認用。ぶつかりを解いた状態でテストが通る |
 | O15 | `parity/o15-session-history`（O11 の上） | | 実装中（Mac の worktree・未 push） |
 | O18 | `parity/o18-git-panel`（O1 の上） | | 実装中（Mac の worktree・未 push） |
-| O5（手元） | `claude/sleepy-hamilton-gesxiq` | なし | 実装済み・実機未確認（SSH 転送・Windows は未） |
-| O21（一部） | 同上 | なし | 外部の worktree・取り込み・統合先の取り違え・消えた worktree・Task の絞り込み・パス / ブランチ名のコピー・ピンの保存・手動の休眠（⋯「休ませる」）・並べ替え（レール / 最近 / 要対応）。複数選択・詳細・親子は未 |
-| O26 | 同上 | なし | 済: `path:行`・全部閉じる・外部アプリ・自動保存・プレビュータブ・ピン留め。実機未確認 |
-| O20（一部） | 同上 | なし | ブランチ名・起点・既にあるブランチ・`.worktreeinclude`・準備の skip（＋ Task の詳細）・準備が失敗した Task の「準備をやり直す」/「準備を飛ばして始める」・repo ごとの base（`task_base`）。絵文字名・sparse・進捗 / キャンセル・どこで動かすかは未 |
-| O13（一部） | 同上 | なし | 作業中はスリープさせない・通知の履歴（ベル）・通知音の大きさ・ニュースのクリック移動・スマホへの完了 push（relay の host）。メニューバー・TCC の案内は未。完了 push は実機 iPhone で未確認 |
-| O22 | 同上 | なし | リソース（メモリをプロジェクトごと・使っていないエージェントを止める）・片付け（まとめて終了 / 失うものが無い worktree をまとめて削除・worktree の大きさと大きい順）。SSH 先のプロセスのメモリは未 |
-| O16（一部） | 同上 | なし | repo ごとのレシピ（`.necoder/recipes/*.md` を `/` 補完へ）・エージェント別の新規スレッド（`workspace::NewThreadCodex` 等・パレットと keymap.json）。エージェントの有効 / 無効・権限の既定・起動引数の UI は未 |
-| O14 | 同上 | なし | アカウントのフォルダ・切替（`agent_servers.<id>.env`）・公式 CLI でログイン。mac 実機未確認・Windows は未 |
-| O23（一部） | 同上 | なし | fan-out（1 つの依頼をエージェントごとの Task へ・舞台に並べて比べる）。自動命名ブランチの改名は未 |
-| O17（一部） | 同上 | なし | 質問カードの自由入力（Other 欄に書いて答える・選んだ案に添える。スマホの質問も）・サブエージェントの手順を親の Task の下に畳む・目標の一時停止 / 再開 / 取り消し（Codex の goal の操作）・message rail。ツールのまとめ表示と個別停止は未（個別停止は `_session/async_task/stop` があるが、`async_task_*` の更新は JetBrains AIR 拡張 `_meta.jetbrains.air.capabilities` を名乗った時だけ来る。SDK が未知の sessionUpdate をどう扱うかを実機で確かめてから） |
-| O27（一部） | 同上 | なし | 設定の検索（全ページから一致した行を集める・キー / 選択肢の名前でも当たる）・表示言語の切替（その場で）。キー割り当ての GUI・UI ズーム・UI フォント・density・statusbar の項目は未 |
+| O5（手元） | `claude/sleepy-hamilton-gesxiq` | #30 | 実装済み・実機未確認（SSH 転送・Windows は未） |
+| O21（一部） | 同上 | #30 | 外部の worktree・取り込み・統合先の取り違え・消えた worktree・Task の絞り込み・パス / ブランチ名のコピー・ピンの保存・手動の休眠（⋯「休ませる」）・並べ替え（レール / 最近 / 要対応）。複数選択・詳細・親子は未 |
+| O26 | 同上 | #30 | 済: `path:行`・全部閉じる・外部アプリ・自動保存・プレビュータブ・ピン留め。実機未確認 |
+| O20（一部） | 同上 | #30 | ブランチ名・起点・既にあるブランチ・`.worktreeinclude`・準備の skip（＋ Task の詳細）・準備が失敗した Task の「準備をやり直す」/「準備を飛ばして始める」・repo ごとの base（`task_base`）。絵文字名・sparse・進捗 / キャンセル・どこで動かすかは未 |
+| O13（一部） | 同上 | #30 | 作業中はスリープさせない・通知の履歴（ベル）・通知音の大きさ・ニュースのクリック移動・スマホへの完了 push（relay の host）。メニューバー・TCC の案内は未。完了 push は実機 iPhone で未確認 |
+| O22 | 同上 | #30 | リソース（メモリをプロジェクトごと・使っていないエージェントを止める）・片付け（まとめて終了 / 失うものが無い worktree をまとめて削除・worktree の大きさと大きい順）。SSH 先のプロセスのメモリは未 |
+| O16（一部） | 同上 | #30 | repo ごとのレシピ（`.necoder/recipes/*.md` を `/` 補完へ）・エージェント別の新規スレッド（`workspace::NewThreadCodex` 等・パレットと keymap.json）。エージェントの有効 / 無効・権限の既定・起動引数の UI は未 |
+| O14 | 同上 | #30 | アカウントのフォルダ・切替（`agent_servers.<id>.env`）・公式 CLI でログイン。mac 実機未確認・Windows は未 |
+| O23（一部） | 同上 | #30 | fan-out（1 つの依頼をエージェントごとの Task へ・舞台に並べて比べる）。自動命名ブランチの改名は未 |
+| O17（一部） | 同上 | #30 | 質問カードの自由入力（Other 欄に書いて答える・選んだ案に添える。スマホの質問も）・サブエージェントの手順を親の Task の下に畳む・目標の一時停止 / 再開 / 取り消し（Codex の goal の操作）・message rail。ツールのまとめ表示と個別停止は未（個別停止は `_session/async_task/stop` があるが、`async_task_*` の更新は JetBrains AIR 拡張 `_meta.jetbrains.air.capabilities` を名乗った時だけ来る。SDK が未知の sessionUpdate をどう扱うかを実機で確かめてから） |
+| O27（一部） | 同上 | #30 | 設定の検索（全ページから一致した行を集める・キー / 選択肢の名前でも当たる）・表示言語の切替（その場で）。キー割り当ての GUI・UI ズーム・UI フォント・density・statusbar の項目は未 |
 
 ### 7.1 クラウドでの続き（2026-09-26・`claude/sleepy-hamilton-gesxiq`）
 
@@ -300,9 +300,16 @@
 - **確かめたこと**: Linux で `cargo check --workspace --all-targets`（警告 0）と `cargo test`。落ちるのは
   Linux で元から落ちる 2 件（PDF のネイティブビューア・Web タブの surface。どちらも macOS / Windows の
   ネイティブ部品が要る）だけ。**実画面・macOS 実機・SSH 実機は未確認**（隔離 offscreen の撮影は macOS が要る）。
-- **push**: このセッションに GitHub への書き込み権限が無く 403。コミットは git bundle で本人に渡した。
-  PR に分けるなら、台帳の修正は元の PR（O4・O6/O7・O8/O9・O11）のブランチへ、O5・O13・O20・O21・O22・O26 は
-  新しいブランチへ切り出すのが素直（コミットは項目ごとに分けてある）。
+- **push**: 最初は GitHub への書き込み権限が無く 403（git bundle で本人に渡した）。本人が GitHub App を
+  直した後に push し、**#30**（base `parity/integration`・1 本にまとめた）を作った。分けたくなったら、台帳の修正は
+  元の PR（O4・O6/O7・O8/O9・O11）のブランチへ、O5・O13・O20・O21・O22・O26 は新しいブランチへ切り出すのが
+  素直（コミットは項目ごとに分けてある）。
+- **#30 の初回 CI**: この PR の物は 3 つ（Windows だけの型推論 E0282・macOS の temp が `/var`→`/private/var` の
+  リンクで消した worktree のパス比較がずれるテスト・Windows では流せない準備スクリプトのテスト）で、直した。
+  Windows は手元で `x86_64-pc-windows-gnu` 向けの `cargo check --workspace --all-targets`（`-D warnings`）まで
+  確かめられる（mingw と、turso の build.rs が呼ぶ `windres` の別名が要る）。relay の WebKit のカメラの
+  テストは main の v0.1.18〜v0.1.20 でも同じ形で落ちている（この PR の物ではない・提案は #30 のコメント）。
+  CLA は Claude の名前のコミットが allowlist に無いので本人の判断待ち。
 
 ## 付録 A: 調査の全 226 項目の行き先
 
