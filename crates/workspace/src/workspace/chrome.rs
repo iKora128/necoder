@@ -299,7 +299,7 @@ impl Workspace {
                 .child(button("window-close", "\u{2715}").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
-                        // remove_window は OS の should-close フックを通らない＝最後の窓の確認（O4）と
+                        // remove_window は OS の should-close フックを通らない＝窓を閉じる時の確認（O4）と
                         // 閉じ印はここで自分で行う。
                         if this.guard_window_close(window, cx) {
                             return;

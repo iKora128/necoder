@@ -185,7 +185,7 @@ impl TerminalDock {
     }
 
     /// 前面でプロセスが動いている端末の数（ドックのタブと Fleet に置いた端末の両方）。
-    /// ⌘Q・最後の窓を閉じる時の確認（O4）が数える。
+    /// ⌘Q・窓を閉じる時の確認（O4）が数える。
     pub fn busy_terminal_count(&self, cx: &App) -> usize {
         self.terminals
             .iter()

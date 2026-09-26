@@ -560,7 +560,7 @@ fn open_planned_windows(
                 ..Default::default()
             },
             move |window, cx| {
-                // 窓を閉じる時の関所（最後の窓の確認・O4）と、閉じたら DB の自分の行に閉じ印。
+                // 窓を閉じる時の関所（この窓で動いているものの確認・O4）と、閉じたら DB の自分の行に閉じ印。
                 if let Some(persistence) = &persistence {
                     workspace::install_window_close_hook(window, cx, persistence);
                 }
@@ -1073,6 +1073,31 @@ fn main() {
                         cx.update(workspace::request_quit);
                     })
                     .detach();
+                }
+                // 開発用: NECODER_CLOSE_PROBE=<ms>[,other] で <ms> 後に窓閉じの関所を叩く（O4・R04 の撮影）。
+                // `,other` は「ほかの窓が開いている」形の確認を開く。NECODER_ACTIVITY_PROBE=1 と併用する。
+                if let Some(probe) = std::env::var("NECODER_CLOSE_PROBE").ok() {
+                    let (delay, other_windows) = match probe.split_once(',') {
+                        Some((delay, "other")) => (delay.to_string(), true),
+                        _ => (probe.clone(), false),
+                    };
+                    if let (Ok(delay_ms), Some(handle)) = (
+                        delay.parse::<u64>(),
+                        window.window_handle().downcast::<Workspace>(),
+                    ) {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(delay_ms))
+                                .await;
+                            let probed = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_close_window_probe(other_windows, window, cx);
+                            });
+                            if let Err(error) = probed {
+                                eprintln!("NECODER_CLOSE_PROBE: 窓に届かない: {error:#}");
+                            }
+                        })
+                        .detach();
+                    }
                 }
                 // 開発用: NECODER_CONTROL_PROBE=1 で管制タブの受入シナリオ（5 擬似 TaskSpace・P3）を合成。
                 if std::env::var("NECODER_CONTROL_PROBE").is_ok_and(|value| value == "1") {

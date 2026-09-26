@@ -239,8 +239,9 @@ pub struct Settings {
     /// **off にしても「失うものがある」ときは必ず確認する** — 未コミットの変更は git にも残らないので、
     /// 「二度と聞くな」の対象は *取り返しがつく* 削除に限る（DECISIONS の該当項）。
     pub confirm_worktree_delete: bool,
-    /// ⌘Q・最後の窓を閉じる時の確認（`"running"` = 動いているものがある時だけ聞く・既定 /
-    /// `"never"` = 聞かない）。エージェントも端末もアプリ本体の子なので、終了すると一緒に止まる。
+    /// ⌘Q・窓を閉じる時の確認（`"running"` = 止まるものがある時だけ聞く・既定 /
+    /// `"never"` = 聞かない）。エージェントも端末もアプリ本体の子で持ち主は窓なので、終了すると全部、
+    /// 窓を閉じるとその窓の分が一緒に止まる。
     /// 解釈は [`Settings::quit_confirmation`]（知らない値は既定の側に倒す）。
     pub confirm_quit: String,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
@@ -324,7 +325,7 @@ impl Default for Settings {
 /// `agent_panel::sound`。ここに置くのは「設定が受け取れる値」の正が settings 側だから。
 pub const SOUND_VOICES: [&str; 3] = ["nyaan", "nya", "mew"];
 
-/// ⌘Q・最後の窓を閉じる時に確認するか（`confirm_quit` の解釈・O4）。
+/// ⌘Q・窓を閉じる時に確認するか（`confirm_quit` の解釈・O4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuitConfirmation {
     /// 動いているもの（実行中・承認待ち/質問待ちのエージェント、前面でプロセスが動く端末）が

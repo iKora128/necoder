@@ -86,7 +86,7 @@ mod system_notifications;
 mod usage_view;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
-pub(crate) use quit_guard::intercept_last_window_close;
+pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
 pub use system_notifications::install_agent_notifications;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
@@ -1329,7 +1329,7 @@ struct WorkspaceOverlays {
     tab_menu: Option<TabMenuState>,
     /// worktree 削除の確認ダイアログ（2026-07-27）。何を失うかを git に聞いて見せる。
     worktree_delete: Option<worktree_delete::WorktreeDeleteConfirm>,
-    /// ⌘Q・最後の窓を閉じる時の確認（O4）。動いているものがある時だけ開く。
+    /// ⌘Q・窓を閉じる時の確認（O4）。止まるもの（⌘Q は全窓・窓閉じはこの窓の分）がある時だけ開く。
     quit_confirm: Option<quit_guard::QuitConfirmState>,
     ssh_input: Option<(String, FocusHandle)>,
     /// SSH の askpass 入力欄（パスワード / passphrase / host key 確認）。`ssh` が TTY を

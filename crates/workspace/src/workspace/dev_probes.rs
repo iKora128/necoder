@@ -1235,4 +1235,26 @@ impl Workspace {
         }
         self.refresh_buffer_search(true, cx);
     }
+
+    /// 開発用: 窓を閉じる時の確認を開く（O4・R04 の文の撮影）。`other_windows` = ほかの窓が開いている
+    /// 形（撮影は窓 1 つなので、窓の数の代わりに形を指定する）。`false` なら本物の関所を通す。
+    #[cfg(debug_assertions)]
+    pub fn debug_close_window_probe(
+        &mut self,
+        other_windows: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !other_windows {
+            self.guard_window_close(window, cx);
+            return;
+        }
+        let work = self.running_work(cx);
+        self.open_quit_confirm(
+            quit_guard::QuitReason::CloseWindow { last: false },
+            work,
+            window,
+            cx,
+        );
+    }
 }

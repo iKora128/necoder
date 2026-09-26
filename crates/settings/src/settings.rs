@@ -2185,7 +2185,7 @@ impl SettingsView {
                 settings.system_notifications,
                 cx,
             ))
-            // ⌘Q・最後の窓を閉じる時の確認（O4）。値は settings.json の `confirm_quit`。
+            // ⌘Q・窓を閉じる時の確認（O4）。値は settings.json の `confirm_quit`。
             .child(self.segmented_row_with(
                 "confirm_quit",
                 i18n::t!("settings.pref_confirm_quit"),
