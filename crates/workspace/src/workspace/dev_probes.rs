@@ -265,7 +265,8 @@ impl Workspace {
     ///
     /// `expand:<dir>` = フォルダを開く / `scroll:<n>` = ツリーを n 行目へ（仮想化の確認）/
     /// `rename:<path>:<新しい名前>` / `newfile:<dir>:<名前>` / `duplicate:<path>` /
-    /// `trash:<path>`（**本物のゴミ箱へ入る**。後に `undo` を続けて戻すこと）/ `undo` = ⌘Z 相当。
+    /// `trash:<path>`（**本物のゴミ箱へ入る**。後に `undo` を続けて戻すこと）/ `undo` = ⌘Z 相当 /
+    /// `menu:<path>` = 右クリックメニュー / `discard:<path>` = 変更の破棄の確認。
     #[cfg(debug_assertions)]
     pub fn debug_explorer_probe(
         &mut self,
@@ -313,6 +314,30 @@ impl Workspace {
                 });
                 self.confirm_naming(window, cx);
             }
+            // 右クリックメニューを行の位置に出す（スクロールしていないツリー前提の見た目確認用）。
+            "menu" => {
+                let is_dir = target.is_dir();
+                let row = self
+                    .active_slot()
+                    .and_then(|slot| slot.explorer.rows.iter().position(|row| row.path == target))
+                    .unwrap_or(0);
+                let position = gpui::point(
+                    px(RAIL_WIDTH + 140.),
+                    px(TITLEBAR_HEIGHT + 28. + (row as f32 + 1.) * ROW_HEIGHT),
+                );
+                self.show_context_menu(target, is_dir, position, cx);
+            }
+            "discard" => {
+                let status = self
+                    .repository
+                    .status
+                    .get(&target)
+                    .copied()
+                    .unwrap_or(StatusKind::Modified);
+                self.ask_discard(target, status, cx);
+            }
+            // 確認の「破棄する」を押す（未追跡なら**本物のゴミ箱へ入る**。後に `undo` を続けること）。
+            "confirm_discard" => self.confirm_discard(window, cx),
             "duplicate" => self.duplicate_entry(target, cx),
             "trash" => self.trash_entry(target, window, cx),
             "undo" => {

@@ -1027,6 +1027,42 @@ impl Workspace {
                 ),
             );
         }
+        // ── git（D16）: 変更のあるファイルだけ。ステージは remote でも効く（git は host 側で動く）。
+        // 破棄は取り消せないので確認を挟む。未追跡・add しただけのファイルは git に戻す先が無く
+        // ゴミ箱へ入れる（local のみ）ので、remote では HEAD へ戻せるもの（変更・削除）だけに出す。
+        // 競合中のファイルは破棄を出さない（どちらを残すかは人が決める・ステージ = 解決済みの印）。
+        let change = if is_dir {
+            None
+        } else {
+            self.repository.status.get(&path).copied()
+        };
+        if let Some(status) = change {
+            let stage_path = path.clone();
+            menu_box = menu_box.child(
+                item("ctx-stage", i18n::t!("explorer.ctx_stage")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.stage_from_explorer(stage_path.clone(), cx)
+                    }),
+                ),
+            );
+            let discardable = match status {
+                StatusKind::Conflicted => false,
+                StatusKind::Modified | StatusKind::Deleted => true,
+                StatusKind::Added | StatusKind::Untracked => is_local,
+            };
+            if discardable {
+                let discard_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-discard", i18n::t!("explorer.ctx_discard")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.ask_discard(discard_path.clone(), status, cx)
+                        }),
+                    ),
+                );
+            }
+        }
         // ── 既定アプリで開く / Finder で表示（ローカルのみ・シングルクリックで代替できない操作） ──
         if is_local {
             let open_path = path.clone();
@@ -1118,6 +1154,133 @@ impl Workspace {
                     cx.listener(|this, _, _window, cx| this.hide_context_menu(cx)),
                 )
                 .child(menu_box)
+                .into_any_element(),
+        )
+    }
+
+    /// 「変更を破棄」の確認（D16）。取り消せない操作なので押した後に一度だけ聞く。
+    /// 既定の強調は安全側（キャンセル）に置く＝勢いで押しても消えない。
+    pub(crate) fn render_explorer_discard_confirm(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let confirm = self.explorer.read(cx).discard_confirm()?;
+        let theme = self.theme.clone();
+        let name = confirm
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| confirm.path.display().to_string());
+        let relative = self
+            .active_worktree()
+            .and_then(|worktree| confirm.path.strip_prefix(worktree.root()).ok())
+            .map(|relative| relative.display().to_string())
+            .unwrap_or_else(|| confirm.path.display().to_string());
+        let body = match confirm.status {
+            StatusKind::Untracked | StatusKind::Added => {
+                i18n::t!("explorer.discard_body_untracked")
+            }
+            _ => i18n::t!("explorer.discard_body"),
+        };
+        let button = |element_id: &'static str, label: String, primary: bool| {
+            div()
+                .id(element_id)
+                .px(px(12.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(if primary { theme.fg2 } else { theme.border })
+                .when(primary, |element| element.bg(theme.bg3))
+                .text_size(px(12.))
+                .text_color(if primary { theme.fg0 } else { theme.fg1 })
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(label)
+        };
+        let dialog = div()
+            .w(px(440.))
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(10.))
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(12.),
+                gpui::hsla(0., 0., 0., 0.5),
+            )
+            .blur_radius(px(32.))])
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.fg0)
+                    .child(SharedString::from(
+                        i18n::t!("explorer.discard_title", "name" => name),
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.fg1)
+                    .child(SharedString::from(body)),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_family("Guguru Sans Code")
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(relative)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.))
+                    .pt(px(4.))
+                    .child(
+                        button(
+                            "explorer-discard-confirm",
+                            i18n::t!("explorer.discard_confirm"),
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.confirm_discard(window, cx)),
+                        ),
+                    )
+                    .child(
+                        button(
+                            "explorer-discard-cancel",
+                            i18n::t!("explorer.discard_cancel"),
+                            true,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _window, cx| this.cancel_discard(cx)),
+                        ),
+                    ),
+            );
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(140.))
+                .bg(gpui::hsla(0., 0., 0., 0.4))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| this.cancel_discard(cx)),
+                )
+                .child(dialog)
                 .into_any_element(),
         )
     }

@@ -2165,6 +2165,7 @@ impl Render for Workspace {
             .children(self.render_chat_menu(cx))
             .children(self.render_chat_delete_confirm(cx))
             .children(self.render_explorer_context_menu(cx))
+            .children(self.render_explorer_discard_confirm(cx))
             .children(self.render_project_flash(cx)) // キーボード切替の行き先名フラッシュ
             .children(self.render_confetti(cx)) // 最前面（祝いの紙吹雪）
     }

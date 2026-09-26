@@ -27,6 +27,15 @@ pub struct ContextMenu {
     pub position: Point<Pixels>,
 }
 
+/// 「変更を破棄」の確認（取り消せない操作なので、押した後に一度聞く・D16）。
+#[derive(Clone)]
+pub struct DiscardConfirm {
+    pub path: PathBuf,
+    /// 押した時点の git 状態。未追跡・add しただけ（git で戻す先が無い）はゴミ箱へ入れる、と
+    /// 本文で言い分ける。
+    pub status: project::StatusKind,
+}
+
 #[derive(Clone)]
 pub struct Naming {
     pub kind: NamingKind,
@@ -279,6 +288,7 @@ pub struct Explorer {
     view: ViewMode,
     context_menu: Option<ContextMenu>,
     naming: Option<Naming>,
+    discard_confirm: Option<DiscardConfirm>,
 }
 
 impl Explorer {
@@ -287,7 +297,17 @@ impl Explorer {
             view,
             context_menu: None,
             naming: None,
+            discard_confirm: None,
         }
+    }
+
+    pub fn discard_confirm(&self) -> Option<DiscardConfirm> {
+        self.discard_confirm.clone()
+    }
+
+    pub fn set_discard_confirm(&mut self, confirm: Option<DiscardConfirm>, cx: &mut Context<Self>) {
+        self.discard_confirm = confirm;
+        cx.notify();
     }
 
     pub fn view(&self) -> ViewMode {

@@ -520,6 +520,14 @@ explorer:
   ctx_duplicate: 複製
   ctx_trash: ゴミ箱に入れる
   ctx_copy_path: パスをコピー
+  ctx_stage: ステージ
+  ctx_discard: 変更を破棄…
+  discard_title: "「%{name}」の変更を破棄しますか？"
+  discard_body: 最後のコミットの内容に戻します。ステージした変更も消えます。この操作は取り消せません。
+  discard_body_untracked: git の管理外のファイルなので、ゴミ箱へ入れます（エクスプローラで ⌘Z を押すと戻せます）。
+  discard_confirm: 破棄する
+  discard_cancel: キャンセル
+  discard_untracked_remote: リモートでは未追跡のファイルを片付けられません（git の管理からは外しました）
   undo_empty: 取り消せるファイル操作はありません
   undid_create: "「%{name}」の作成を取り消しました"
   undid_move: "「%{name}」を元の名前・場所に戻しました"

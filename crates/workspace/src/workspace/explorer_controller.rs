@@ -603,6 +603,130 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 右クリック「ステージ」（D16）: `git add -- <path>` を背景で。失敗はトーストで出す。
+    pub(crate) fn stage_from_explorer(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.hide_context_menu(cx);
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let host = worktree.host().clone();
+        let root = worktree.root().to_path_buf();
+        cx.spawn(async move |workspace, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { project::stage_path_on(host.as_ref(), &root, &path) })
+                .await;
+            let updated = workspace.update(cx, |workspace, cx| {
+                if let Err(error) = result {
+                    workspace.push_toast(
+                        SharedString::from(format!("{error:#}")),
+                        workspace.accent(),
+                        cx,
+                    );
+                }
+                workspace.refresh_git_status(cx);
+                cx.notify();
+            });
+            if let Err(error) = updated {
+                eprintln!("ステージの後始末ができない: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    /// 右クリック「変更を破棄…」: 取り消せない操作なので、確認を出してから行う。
+    pub(crate) fn ask_discard(
+        &mut self,
+        path: PathBuf,
+        status: StatusKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_context_menu(cx);
+        self.explorer.update(cx, |explorer, cx| {
+            explorer.set_discard_confirm(Some(explorer::DiscardConfirm { path, status }), cx)
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_discard(&mut self, cx: &mut Context<Self>) {
+        self.explorer
+            .update(cx, |explorer, cx| explorer.set_discard_confirm(None, cx));
+        cx.notify();
+    }
+
+    /// 確認の「破棄する」: HEAD の内容へ戻す（`git restore`・背景）。git に戻す先が無いファイル
+    /// （未追跡・add しただけ）はゴミ箱へ入れ、エクスプローラの ⌘Z で戻せる形にしておく。
+    pub(crate) fn confirm_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(confirm) = self.explorer.read(cx).discard_confirm() else {
+            return;
+        };
+        self.cancel_discard(cx);
+        let Some(worktree) = self.active_worktree() else {
+            return;
+        };
+        let host = worktree.host().clone();
+        let root = worktree.root().to_path_buf();
+        let is_local = !worktree.is_remote();
+        let Some(handle) = window.window_handle().downcast::<Workspace>() else {
+            return;
+        };
+        let path = confirm.path;
+        cx.spawn(async move |_workspace, cx| {
+            let git_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { project::discard_path_on(host.as_ref(), &root, &git_path) })
+                .await;
+            let updated = handle.update(cx, |workspace, window, cx| {
+                workspace.finish_discard(path, is_local, result, window, cx)
+            });
+            if let Err(error) = updated {
+                eprintln!("変更の破棄の後始末ができない: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    fn finish_discard(
+        &mut self,
+        path: PathBuf,
+        is_local: bool,
+        result: anyhow::Result<project::DiscardOutcome>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(project::DiscardOutcome::Restored) => {}
+            Ok(project::DiscardOutcome::Untracked) if !is_local => self.push_toast(
+                SharedString::from(i18n::t!("explorer.discard_untracked_remote")),
+                self.accent(),
+                cx,
+            ),
+            // add しただけで作業ツリーに無い（消した後）なら片付けるものが無い。
+            Ok(project::DiscardOutcome::Untracked) if path.symlink_metadata().is_err() => {}
+            Ok(project::DiscardOutcome::Untracked) => {
+                while let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
+                    self.close_tab_at(index, window, cx);
+                }
+                match project::move_to_trash_local(&path) {
+                    Ok(trashed) => self.record_file_operations(vec![FileOperation::Trashed {
+                        original: path.clone(),
+                        trashed,
+                    }]),
+                    Err(error) => {
+                        self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx)
+                    }
+                }
+            }
+            Err(error) => {
+                self.push_toast(SharedString::from(format!("{error:#}")), self.accent(), cx)
+            }
+        }
+        self.refresh_active_explorer(cx);
+        self.refresh_git_status(cx);
+        cx.notify();
+    }
+
     pub(crate) fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
         self.explorer
             .update(cx, |explorer, cx| explorer.hide_context_menu(cx));

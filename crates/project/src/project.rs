@@ -977,6 +977,91 @@ pub fn stage_all_on(host: &dyn Host, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// エクスプローラの「変更を破棄」（D16）の結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    /// HEAD の内容へ戻した（index も作業ツリーも）。
+    Restored,
+    /// git の管理外になった（未追跡・HEAD に無いまま add しただけのファイル）。git では中身を
+    /// 戻す先が無いので、**ファイルを片付けるのは呼び出し側**（ゴミ箱へ入れる＝取り消せる形で）。
+    Untracked,
+}
+
+/// 1 ファイルの変更を破棄して HEAD の状態へ戻す（`git restore --source=HEAD --staged --worktree`）。
+/// HEAD に無いファイル（未追跡・add しただけ）は index から外すだけで [`DiscardOutcome::Untracked`]
+/// を返す。競合中のファイルは破棄しない（どちらの内容を残すかは人が決める）。
+pub fn discard_path_on(host: &dyn Host, dir: &Path, path: &Path) -> Result<DiscardOutcome> {
+    let path_arg = path.to_string_lossy().into_owned();
+    let output = run_git(
+        host,
+        dir,
+        [
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--no-renames",
+            "-z",
+            "--",
+            path_arg.as_str(),
+        ],
+    )
+    .context("git status の実行に失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "変更を読めない: {}",
+        git_fail_message(&output)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(entry) = stdout
+        .split('\0')
+        .find(|entry| entry.len() >= 4 && &entry[2..3] == " ")
+    else {
+        anyhow::bail!("変更が無い: {}", path.display());
+    };
+    let (index, worktree) = (entry.as_bytes()[0], entry.as_bytes()[1]);
+    match classify_status(index, worktree) {
+        StatusKind::Untracked => return Ok(DiscardOutcome::Untracked),
+        StatusKind::Conflicted => {
+            anyhow::bail!("競合中のファイルは破棄しない: {}", path.display())
+        }
+        _ => {}
+    }
+    if index == b'A' {
+        let output = run_git(
+            host,
+            dir,
+            ["rm", "--cached", "--quiet", "--", path_arg.as_str()],
+        )
+        .context("git rm --cached の実行に失敗")?;
+        anyhow::ensure!(
+            output.success(),
+            "index から外せない: {}",
+            git_fail_message(&output)
+        );
+        return Ok(DiscardOutcome::Untracked);
+    }
+    let output = run_git(
+        host,
+        dir,
+        [
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+            path_arg.as_str(),
+        ],
+    )
+    .context("git restore の実行に失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "変更を破棄できない: {}",
+        git_fail_message(&output)
+    );
+    Ok(DiscardOutcome::Restored)
+}
+
 /// index から下ろす（`git restore --staged -- <path>`）。
 pub fn unstage_path(dir: &Path, path: &Path) -> Result<()> {
     unstage_path_on(&LocalHost, dir, path)
@@ -2618,6 +2703,68 @@ mod tests {
             Some(PathBuf::from("/Users/me/.Trash/b.txt"))
         );
         assert_eq!(parse_trash_destination("", original), None);
+    }
+
+    #[test]
+    fn discard_restores_tracked_files_and_hands_back_untracked_ones() {
+        let root = scratch("discard");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        // git が無い環境ではスキップ（CI 等）。
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "tester"]);
+        git(&["config", "core.autocrlf", "false"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        // 変更（staged + unstaged の両方）→ HEAD へ戻る。
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        std::fs::write(root.join("tracked.txt"), "three\n").unwrap();
+        let tracked = root.join("tracked.txt");
+        assert_eq!(
+            discard_path_on(&LocalHost, &root, &tracked).unwrap(),
+            DiscardOutcome::Restored
+        );
+        assert_eq!(std::fs::read_to_string(&tracked).unwrap(), "one\n");
+        assert!(
+            git_status(&root).is_empty(),
+            "index も作業ツリーも HEAD と同じ"
+        );
+
+        // 未追跡 → 片付けは呼び出し側（ファイルはまだある）。
+        let untracked = root.join("new.txt");
+        std::fs::write(&untracked, "x\n").unwrap();
+        assert_eq!(
+            discard_path_on(&LocalHost, &root, &untracked).unwrap(),
+            DiscardOutcome::Untracked
+        );
+        assert!(untracked.exists());
+
+        // add しただけ（HEAD に無い）→ index から外れて未追跡に戻る。
+        git(&["add", "new.txt"]);
+        assert_eq!(
+            discard_path_on(&LocalHost, &root, &untracked).unwrap(),
+            DiscardOutcome::Untracked
+        );
+        let status: std::collections::HashMap<PathBuf, StatusKind> =
+            git_status(&root).into_iter().collect();
+        let canonical = paths::canonicalize(&untracked).unwrap();
+        assert_eq!(status.get(&canonical), Some(&StatusKind::Untracked));
+
+        // 変更の無いファイルは断る。
+        assert!(discard_path_on(&LocalHost, &root, &tracked).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

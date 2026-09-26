@@ -519,6 +519,14 @@ explorer:
   ctx_duplicate: Duplicate
   ctx_trash: Move to trash
   ctx_copy_path: Copy path
+  ctx_stage: Stage
+  ctx_discard: Discard changes…
+  discard_title: "Discard changes to “%{name}”?"
+  discard_body: Restores the last committed version, including staged changes. This can't be undone.
+  discard_body_untracked: This file isn't tracked by git, so it will be moved to the Trash (press ⌘Z in the explorer to bring it back).
+  discard_confirm: Discard
+  discard_cancel: Cancel
+  discard_untracked_remote: Can't clean up untracked files on a remote host (the file was removed from git's index)
   undo_empty: No file operation to undo
   undid_create: "Undid creating “%{name}”"
   undid_move: "Moved “%{name}” back to its original name and place"
