@@ -10,22 +10,34 @@
 //! 独立したビューにした（ARCHITECTURE §1 の依存方向 = コアは機能を知らない）。
 //! Workspace がエディタのタブ・Fleet の Task カードの「変更」タブに載せる。
 //!
+//! 行コメント（注記）: 行にホバーすると左端に ＋、押すか選択行で `c` → その行の下に Markdown の
+//! 入力欄（`EditorView` の平坦モード = IME 安全・⌘⏎ で保存・Esc で取り消し）。⇧クリックかドラッグで
+//! 複数行。注記は storage に残し（再起動しても消えない）、下端のトレイから 1 通のプロンプトに束ねて
+//! 宛先のスレッドへ送る（宛先の一覧と送信は Workspace が持つ＝このビューは AI を知らない）。
+//!
 //! 参考: stablyai/orca@646e9a5 の `docs/site/content/docs/review/diff-viewer.mdx`（比較基準の切替・
-//! ファイルツリー・畳み・空白の扱い）。機能の比較だけで、コードは写していない。
+//! ファイルツリー・畳み・空白の扱い）と `docs/site/content/docs/review/annotate-ai-diff.mdx`
+//! （＋ / `c` で行に注記・まとめて送る・Resolve と未解決の再送）。機能の比較だけで、コードは写していない。
 
+mod annotations;
+mod notes;
 mod rows;
 mod syntax;
 
+pub use notes::{
+    format_prompt, DiffLinesTarget, ExcerptKind, ExcerptLine, NoteSide, NoteTarget, ReviewNote,
+};
 pub use rows::{
     build_rows, build_tree, expand_gap, file_gaps, Gap, GapExpansion, GapPosition, Notice, Row,
-    RowInputs, TreeEntry, EXPAND_STEP,
+    RowInputs, RowNote, TreeEntry, EXPAND_STEP,
 };
 pub use syntax::{highlight_text, split_highlights, FileSyntax, HighlightedText};
 
+use editor_view::EditorView;
 use gpui::{
-    div, list, prelude::*, px, App, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
-    HighlightStyle, Hsla, KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton,
-    SharedString, StyledText, Window,
+    div, list, prelude::*, px, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    FontWeight, HighlightStyle, Hsla, KeyDownEvent, ListAlignment, ListOffset, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, StyledText, Window,
 };
 use host::Host;
 use project::review::{
@@ -35,6 +47,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use storage::{ReviewNoteState, Storage};
 use theme_core::Theme;
 use ui::Tooltip;
 
@@ -54,6 +67,8 @@ const LINE_TINT: f32 = 0.12;
 const MENU_COMMITS: usize = 30;
 /// 全文とハイライトを一度に背景で計算するファイル数（届いた分から色が付く）。
 const SYNTAX_CHUNK: usize = 8;
+/// 下端のトレイの帯の高さ。
+const TRAY_HEIGHT: f32 = 34.;
 
 /// Workspace が渡す「どこを・何と比べるか」。
 #[derive(Clone)]
@@ -65,6 +80,25 @@ pub struct ReviewContext {
     pub task_base: Option<String>,
     /// プロジェクト色（選択の左バー・トグルの薄い面に使う・UI-SPEC §1.3）。
     pub accent: Hsla,
+    /// 注記の保存先（永続化しない窓は `None`＝その窓の間だけ持つ）。
+    pub storage: Option<Storage>,
+    /// 注記を束ねる単位（Fleet = Task・Editor = プロジェクト。どちらも TaskSpace の id）。
+    pub scope: String,
+}
+
+/// 注記を送る宛先（一覧は Workspace が作る。このビューは添字をそのまま返すだけ）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendTarget {
+    /// session のパネルの添字（Workspace が解釈する）。
+    pub panel: usize,
+    /// パネルの中のスレッドの添字。`None` = 新しいスレッドを作って送る。
+    pub thread: Option<usize>,
+    pub label: SharedString,
+    pub detail: SharedString,
+    /// スレッド色（宛先のドット・UI-SPEC §1.3）。
+    pub color: Hsla,
+    /// 既定の宛先（Fleet = Task のスレッド / Editor = アクティブなスレッド）。
+    pub is_default: bool,
 }
 
 /// Workspace へ上げる通知。
@@ -72,6 +106,36 @@ pub struct ReviewContext {
 pub enum ReviewEvent {
     /// ファイルをエディタで開く（`line` は 1 始まり）。
     OpenFile { path: PathBuf, line: Option<u32> },
+    /// 注記の宛先を選ぶメニューを開きたい（宛先の一覧を [`ReviewView::show_send_menu`] で渡す）。
+    /// `resend` = 未解決（送信済みを含む）をもう一度送る。
+    SendMenuRequested { resend: bool },
+    /// 注記を 1 通のプロンプトにまとめて送る。届いたら [`ReviewView::mark_notes_sent`] を呼ぶ。
+    SendNotes {
+        target: SendTarget,
+        prompt: String,
+        note_ids: Vec<String>,
+    },
+}
+
+/// 行の選択（リストの行の添字・同じファイルの中だけ）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineSelection {
+    anchor: usize,
+    head: usize,
+}
+
+/// 書きかけの注記（入力欄は行の下に出る）。
+struct NoteDraft {
+    target: DiffLinesTarget,
+    editor: Entity<EditorView>,
+    /// 既存の注記を直している（その id）。
+    editing: Option<String>,
+}
+
+/// 宛先のメニュー（Workspace が一覧を渡した時だけ開く）。
+struct SendMenu {
+    targets: Vec<SendTarget>,
+    resend: bool,
 }
 
 /// 読み込みの状態。
@@ -103,6 +167,8 @@ enum RowAnchor {
         path: String,
         gap: usize,
     },
+    Note(String),
+    Draft,
 }
 
 pub struct ReviewView {
@@ -133,6 +199,17 @@ pub struct ReviewView {
     base_menu: Option<BaseMenu>,
     /// 読み込みの世代（古い結果を捨てる）。
     generation: u64,
+    /// 注記（作った順）。束ねる単位（`context.scope`）の分だけ。
+    notes: Vec<ReviewNote>,
+    /// `notes` を読んだ単位（切り替わったら読み直す）。
+    notes_scope: Option<String>,
+    selection: Option<LineSelection>,
+    /// ドラッグで範囲を選んでいる最中。
+    selecting: bool,
+    draft: Option<NoteDraft>,
+    /// 下端のトレイの一覧を開いているか。
+    tray_open: bool,
+    send_menu: Option<SendMenu>,
 }
 
 impl EventEmitter<ReviewEvent> for ReviewView {}
@@ -168,6 +245,13 @@ impl ReviewView {
             outdated: false,
             base_menu: None,
             generation: 0,
+            notes: Vec::new(),
+            notes_scope: None,
+            selection: None,
+            selecting: false,
+            draft: None,
+            tray_open: false,
+            send_menu: None,
         }
     }
 
@@ -203,12 +287,16 @@ impl ReviewView {
             self.reviewed.clear();
             self.outdated = false;
             self.base_menu = None;
+            self.selection = None;
+            self.draft = None;
+            self.send_menu = None;
         } else if base_moved && !self.base_chosen && self.base != default_base {
             self.base = default_base;
             if self.load != Load::Idle {
                 self.reload(cx);
             }
         }
+        self.load_notes_if_needed(cx);
         cx.notify();
     }
 
@@ -390,13 +478,51 @@ impl ReviewView {
                     .map(|text| text.lines.len() as u32)
             })
             .collect();
+        let editing = self.draft.as_ref().and_then(|draft| draft.editing.clone());
+        let mut row_notes: Vec<RowNote> = self
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(_, note)| Some(&note.id) != editing.as_ref())
+            .map(|(index, note)| {
+                let NoteTarget::DiffLines(target) = &note.target;
+                RowNote {
+                    path: target.path.clone(),
+                    side: target.side,
+                    line: target.end,
+                    note: Some(index),
+                }
+            })
+            .collect();
+        if let Some(draft) = &self.draft {
+            row_notes.push(RowNote {
+                path: draft.target.path.clone(),
+                side: draft.target.side,
+                line: draft.target.end,
+                note: None,
+            });
+        }
+        // 選択は「どの行か」で持ち越す（行の並びが変わっても同じ行を指す）。
+        let selection = self.selection.and_then(|selection| {
+            Some((
+                self.row_anchor(selection.anchor)?,
+                self.row_anchor(selection.head)?,
+            ))
+        });
         self.rows = build_rows(&RowInputs {
             files: &diff.files,
             new_totals: &totals,
             expansions: &self.expansions,
             collapsed: &self.collapsed_files,
+            notes: &row_notes,
         });
         self.list.reset(self.rows.len());
+        self.selection = selection.and_then(|(anchor, head)| {
+            Some(LineSelection {
+                anchor: self.find_exact_anchor(&anchor)?,
+                head: self.find_exact_anchor(&head)?,
+            })
+        });
         if let Some((anchor, offset)) = anchor {
             if let Some(item_ix) = self.find_anchor(&anchor) {
                 self.list.scroll_to(ListOffset {
@@ -438,19 +564,21 @@ impl ReviewView {
                 path,
                 gap: gap.index,
             },
+            Row::Note { note, .. } => RowAnchor::Note(self.notes.get(*note)?.id.clone()),
+            Row::Draft { .. } => RowAnchor::Draft,
         })
     }
 
+    fn find_exact_anchor(&self, anchor: &RowAnchor) -> Option<usize> {
+        (0..self.rows.len()).find(|index| self.row_anchor(*index).as_ref() == Some(anchor))
+    }
+
     fn find_anchor(&self, anchor: &RowAnchor) -> Option<usize> {
-        let found =
-            (0..self.rows.len()).find(|index| self.row_anchor(*index).as_ref() == Some(anchor));
-        found.or_else(|| {
-            let path = match anchor {
-                RowAnchor::File(path)
-                | RowAnchor::Line { path, .. }
-                | RowAnchor::Fold { path, .. } => path,
-            };
-            self.file_header_row_by_path(path)
+        self.find_exact_anchor(anchor).or_else(|| match anchor {
+            RowAnchor::File(path) | RowAnchor::Line { path, .. } | RowAnchor::Fold { path, .. } => {
+                self.file_header_row_by_path(path)
+            }
+            RowAnchor::Note(_) | RowAnchor::Draft => None,
         })
     }
 
@@ -592,12 +720,33 @@ impl ReviewView {
         .detach();
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key == "escape" && self.base_menu.is_some() {
-            self.base_menu = None;
-            cx.stop_propagation();
-            cx.notify();
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        if keystroke.key == "escape" {
+            if self.send_menu.take().is_some() || self.base_menu.take().is_some() {
+                cx.stop_propagation();
+                cx.notify();
+            } else if self.selection.take().is_some() {
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
         }
+        // 以降は一覧そのものにフォーカスがある時だけ（注記の入力欄の打鍵を奪わない）。
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
+        let modifiers = keystroke.modifiers;
+        if modifiers.platform || modifiers.control || modifiers.alt || modifiers.function {
+            return;
+        }
+        match keystroke.key.as_str() {
+            "up" => self.move_selection(-1, modifiers.shift, cx),
+            "down" => self.move_selection(1, modifiers.shift, cx),
+            "c" if !modifiers.shift => self.open_draft(window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
     }
 
     /// 基準の表示（ツールバーのチップ・空の案内で共用）。
@@ -628,6 +777,26 @@ impl ReviewView {
                 i18n::t!("review.base_branch", "branch" => name, "sha" => resolved)
             }
         }
+    }
+}
+
+/// 1 行の描画に要るもの。
+struct CodeLine<'a> {
+    index: usize,
+    kind: DiffLineKind,
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+    text: &'a str,
+    spans: &'a [(Range<usize>, lang::HighlightKind)],
+    no_newline: bool,
+}
+
+/// 選択の (上, 下)。
+fn ordered(selection: LineSelection) -> (usize, usize) {
+    if selection.anchor <= selection.head {
+        (selection.anchor, selection.head)
+    } else {
+        (selection.head, selection.anchor)
     }
 }
 
@@ -1262,13 +1431,16 @@ impl ReviewView {
                     .map(|(_, spans)| spans.to_vec())
                     .unwrap_or_default();
                 self.render_code_line(
-                    index,
-                    line.kind,
-                    line.old_line,
-                    line.new_line,
-                    &line.text,
-                    &spans,
-                    line.no_newline,
+                    CodeLine {
+                        index,
+                        kind: line.kind,
+                        old_line: line.old_line,
+                        new_line: line.new_line,
+                        text: &line.text,
+                        spans: &spans,
+                        no_newline: line.no_newline,
+                    },
+                    cx,
                 )
             }
             Row::Context {
@@ -1284,13 +1456,16 @@ impl ReviewView {
                     .map(|(text, spans)| (text.to_string(), spans.to_vec()))
                     .unwrap_or_default();
                 self.render_code_line(
-                    index,
-                    DiffLineKind::Context,
-                    Some(old_line),
-                    Some(new_line),
-                    &text,
-                    &spans,
-                    false,
+                    CodeLine {
+                        index,
+                        kind: DiffLineKind::Context,
+                        old_line: Some(old_line),
+                        new_line: Some(new_line),
+                        text: &text,
+                        spans: &spans,
+                        no_newline: false,
+                    },
+                    cx,
                 )
             }
             Row::Fold {
@@ -1300,6 +1475,8 @@ impl ReviewView {
                 expandable,
                 section,
             } => self.render_fold(index, file, gap, hidden, expandable, section, cx),
+            Row::Note { note, .. } => self.render_note(index, note, cx),
+            Row::Draft { .. } => self.render_draft(cx),
         }
     }
 
@@ -1483,23 +1660,18 @@ impl ReviewView {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_code_line(
-        &self,
-        index: usize,
-        kind: DiffLineKind,
-        old_line: Option<u32>,
-        new_line: Option<u32>,
-        text: &str,
-        spans: &[(Range<usize>, lang::HighlightKind)],
-        no_newline: bool,
-    ) -> gpui::AnyElement {
+    fn render_code_line(&self, line: CodeLine, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
-        let (tint, marker, marker_color) = match kind {
+        let index = line.index;
+        let (tint, marker, marker_color) = match line.kind {
             DiffLineKind::Added => (Some(theme.ok.alpha(LINE_TINT)), "+", theme.ok),
             DiffLineKind::Removed => (Some(theme.err.alpha(LINE_TINT)), "−", theme.err),
             DiffLineKind::Context => (None, " ", theme.fg2),
         };
+        let selected = self.selection.is_some_and(|selection| {
+            let (low, high) = ordered(selection);
+            (low..=high).contains(&index)
+        });
         let number = |value: Option<u32>| {
             div()
                 .flex_none()
@@ -1514,35 +1686,115 @@ impl ReviewView {
         };
         div()
             .id(("review-line", index))
+            .group("review-line")
+            .relative()
             .flex()
             .items_start()
             .min_h(px(ROW_MIN_HEIGHT))
             .w_full()
+            // 選択 = 左バー 2px（プロジェクト色・UI-SPEC §1.3 の選択の左バー）。非選択も透明で幅を揃える。
+            .border_l_2()
+            .border_color(if selected {
+                self.accent
+            } else {
+                gpui::transparent_black()
+            })
             .when_some(tint, |row, tint| row.bg(tint))
             .font_family(CODE_FONT)
             .text_size(px(CODE_FONT_SIZE))
             .line_height(px(ROW_MIN_HEIGHT))
-            .child(number(old_line))
-            .child(number(new_line))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(MARKER_COLUMN_WIDTH))
-                    .text_color(marker_color)
-                    .child(marker),
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.select_row(index, event.modifiers.shift, cx);
+                    this.selecting = !event.modifiers.shift;
+                }),
             )
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                let dragging = this.selecting && event.pressed_button == Some(MouseButton::Left);
+                if dragging
+                    && this
+                        .selection
+                        .is_some_and(|selection| selection.head != index)
+                {
+                    this.select_row(index, true, cx);
+                }
+            }))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .pr(px(12.))
+                    .flex()
+                    .items_start()
+                    // 選択の面は追加 / 削除の面の上に重ねる（色相を塗り潰さない）。
+                    .when(selected, |content| content.bg(theme.bg3.alpha(0.7)))
+                    .child(number(line.old_line))
+                    .child(number(line.new_line))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(MARKER_COLUMN_WIDTH))
+                            .text_color(marker_color)
+                            .child(marker),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pr(px(12.))
+                            .text_color(theme.fg0)
+                            .child(styled_code(line.text, line.spans, theme))
+                            .when(line.no_newline, |text| {
+                                text.child(div().text_size(px(10.5)).text_color(theme.fg2).child(
+                                    SharedString::from(format!(
+                                        "⏎̸ {}",
+                                        i18n::t!("review.no_newline")
+                                    )),
+                                ))
+                            }),
+                    ),
+            )
+            .child(
+                // ＋（ホバーで出る・押すとこの行 / 選んでいる範囲に注記を付ける）。
+                div()
+                    .id(("review-line-add", index))
+                    .absolute()
+                    .left(px(2.))
+                    .top(px(2.))
+                    .size(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .bg(theme.bg2)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(px(12.))
+                    .line_height(px(14.))
                     .text_color(theme.fg0)
-                    .child(styled_code(text, spans, theme))
-                    .when(no_newline, |line| {
-                        line.child(div().text_size(px(10.5)).text_color(theme.fg2).child(
-                            SharedString::from(format!("⏎̸ {}", i18n::t!("review.no_newline"))),
-                        ))
-                    }),
+                    .cursor_pointer()
+                    .invisible()
+                    .group_hover("review-line", |style| style.visible())
+                    .hover(|style| style.bg(theme.bg3))
+                    .child("+")
+                    .tooltip(Tooltip::text(
+                        i18n::t!("review.add_note_tip"),
+                        theme.clone(),
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            let inside = this.selection.is_some_and(|selection| {
+                                let (low, high) = ordered(selection);
+                                (low..=high).contains(&index)
+                            });
+                            if event.modifiers.shift || !inside {
+                                this.select_row(index, event.modifiers.shift, cx);
+                            }
+                            this.open_draft(window, cx);
+                        }),
+                    ),
             )
             .into_any_element()
     }
@@ -1629,6 +1881,14 @@ impl Render for ReviewView {
             .flex()
             .flex_col()
             .bg(theme.bg1)
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.selecting = false),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.selecting = false),
+            )
             .child(self.render_toolbar(cx))
             .child(
                 div()
@@ -1644,7 +1904,9 @@ impl Render for ReviewView {
                             .child(self.render_body(cx)),
                     ),
             )
+            .children(self.render_tray(cx))
             .children(self.render_base_menu(cx))
+            .children(self.render_send_menu(cx))
     }
 }
 
@@ -1668,6 +1930,8 @@ mod tests {
             root: PathBuf::from("/tmp"),
             task_base: Some("abc".into()),
             accent: Theme::dark().fg1,
+            storage: None,
+            scope: "test".into(),
         };
         assert_eq!(default_base(&context), ReviewBase::Commit("abc".into()));
         let editor = ReviewContext {
@@ -1675,6 +1939,231 @@ mod tests {
             ..context
         };
         assert_eq!(default_base(&editor), ReviewBase::Head);
+    }
+
+    /// 一時 repo（80 行・5 行目と 60 行目を書き換え）を作る。git が無ければ `None`。
+    fn temp_repo(tag: &str) -> Option<PathBuf> {
+        let dir =
+            std::env::temp_dir().join(format!("necoder_review_view_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+        };
+        if !git(&["init", "-q", "-b", "main"]).is_ok_and(|output| output.status.success()) {
+            return None;
+        }
+        let original: String = (1..=80).map(|line| format!("line {line}\n")).collect();
+        std::fs::write(dir.join("a.rs"), &original).ok()?;
+        git(&["add", "-A"]).ok()?;
+        git(&["commit", "-qm", "base"]).ok()?;
+        let changed = original
+            .replace("line 5\n", "LINE 5\n")
+            .replace("line 60\n", "LINE 60\n");
+        std::fs::write(dir.join("a.rs"), changed).ok()?;
+        Some(dir)
+    }
+
+    fn open_review(view: &Entity<ReviewView>, dir: &Path, cx: &mut gpui::VisualTestContext) {
+        view.update(cx, |view, cx| {
+            view.set_context(
+                ReviewContext {
+                    host: host::LocalHost::shared(),
+                    root: dir.to_path_buf(),
+                    task_base: None,
+                    accent: Theme::dark().fg1,
+                    storage: None,
+                    scope: "test".into(),
+                },
+                cx,
+            );
+            view.activate(cx);
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            let ready = view.read_with(cx, |view, _| {
+                view.load == Load::Ready && view.syntax.iter().all(Option::is_some)
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// 行を選んで注記を書き、保存 → 送る → 送信済み → 解決 → 未解決に戻す、まで。
+    /// 送る先はこのビューは知らない（宛先の一覧を受け取り、選ばれた宛先とプロンプトを上げるだけ）。
+    #[gpui::test]
+    fn notes_are_drafted_saved_sent_and_resolved(cx: &mut gpui::TestAppContext) {
+        let Some(dir) = temp_repo("notes") else {
+            return;
+        };
+        i18n::set_locale("ja");
+        let (view, cx) = cx.add_window_view(|_window, cx| ReviewView::new(Theme::dark(), cx));
+        open_review(&view, &dir, cx);
+        let events: std::rc::Rc<std::cell::RefCell<Vec<ReviewEvent>>> = Default::default();
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &ReviewEvent, _| {
+                sink.borrow_mut().push(event.clone())
+            })
+            .detach()
+        });
+        view.update_in(cx, |view, window, cx| {
+            // 削除行（旧 5）から追加行（新 5）までを選ぶ = 新しい側の 5 行目に付く。
+            assert!(view.select_line("a.rs", NoteSide::Old, 5, false, cx));
+            assert!(view.select_line("a.rs", NoteSide::New, 5, true, cx));
+            view.open_draft(window, cx);
+            let draft = view.draft.as_ref().expect("入力欄が開く");
+            assert_eq!(draft.target.side, NoteSide::New);
+            assert_eq!((draft.target.start, draft.target.end), (5, 5));
+            assert_eq!(
+                draft.target.excerpt.len(),
+                2,
+                "削除行と追加行の両方が抜粋に入る"
+            );
+            view.set_draft_text("  大文字にしない  ", cx);
+            view.save_draft(window, cx);
+            assert!(view.draft.is_none());
+            assert_eq!(view.note_counts(), (1, 1));
+            assert_eq!(view.notes[0].body, "大文字にしない");
+            assert!(view
+                .rows
+                .iter()
+                .any(|row| matches!(row, Row::Note { note: 0, .. })));
+            // 空の本文は残さない。
+            assert!(view.select_line("a.rs", NoteSide::New, 60, false, cx));
+            view.open_draft(window, cx);
+            view.save_draft(window, cx);
+            assert_eq!(view.note_counts(), (1, 1));
+        });
+        view.update(cx, |view, cx| view.request_send(false, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            events.borrow().last(),
+            Some(&ReviewEvent::SendMenuRequested { resend: false })
+        );
+        let target = SendTarget {
+            panel: 0,
+            thread: Some(1),
+            label: "スレッド2".into(),
+            detail: "待機中".into(),
+            color: Theme::dark().fg1,
+            is_default: true,
+        };
+        view.update(cx, |view, cx| {
+            view.show_send_menu(vec![target.clone()], false, cx);
+            view.send_to(target.clone(), cx);
+            assert!(view.send_menu.is_none(), "選んだら閉じる");
+        });
+        cx.run_until_parked();
+        let sent = events.borrow().last().cloned();
+        let Some(ReviewEvent::SendNotes {
+            target: chosen,
+            prompt,
+            note_ids,
+        }) = sent
+        else {
+            panic!("注記が送られていない: {sent:?}");
+        };
+        assert_eq!(chosen, target, "宛先は選んだものがそのまま返る");
+        assert!(prompt.starts_with("レビューコメント（1 件）— 比較: "));
+        assert!(prompt.contains("1. a.rs:5\n```diff\n-line 5\n+LINE 5\n```\n大文字にしない"));
+        view.update(cx, |view, cx| {
+            view.mark_notes_sent(&note_ids, cx);
+            assert_eq!(view.note_counts(), (1, 0));
+            assert_eq!(view.notes[0].state, ReviewNoteState::Sent);
+            // 未送信が無ければ「送る」は何もしない。未解決の再送はできる。
+            let before = view.notes_to_send(false).len();
+            assert_eq!(before, 0);
+            assert_eq!(view.notes_to_send(true).len(), 1);
+            view.toggle_resolved(0, cx);
+            assert_eq!(view.notes[0].state, ReviewNoteState::Resolved);
+            assert!(view.notes_to_send(true).is_empty(), "解決は再送しない");
+            view.toggle_resolved(0, cx);
+            assert_eq!(
+                view.notes[0].state,
+                ReviewNoteState::Sent,
+                "送っていれば送信済みに戻る"
+            );
+            view.delete_note(0, cx);
+            assert_eq!(view.note_counts(), (0, 0));
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 本物と同じ名前の action（既定 keymap の Editor 文脈で ⌘⏎ が指す先）。受け手は居ない＝
+    // アプリと同じく打鍵のまま入力欄の親へ上がってくることを確かめるために登録だけする。
+    gpui::actions!(agent, [SubmitPrompt]);
+
+    /// 入力欄のキー: ⌘⏎（非 mac は Ctrl+Enter）で保存・Esc で取り消し。一覧にフォーカスがある時の
+    /// `c` は入力欄を開き、入力欄の中の `c` は文字として入る（一覧のキーが打鍵を奪わない）。
+    #[gpui::test]
+    fn draft_keys_save_cancel_and_do_not_steal_typing(cx: &mut gpui::TestAppContext) {
+        let Some(dir) = temp_repo("keys") else {
+            return;
+        };
+        cx.update(|cx| {
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (view, cx) = cx.add_window_view(|_window, cx| ReviewView::new(Theme::dark(), cx));
+        open_review(&view, &dir, cx);
+        let redraw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        };
+
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.select_line("a.rs", NoteSide::New, 5, false, cx));
+            view.open_draft(window, cx);
+            view.set_draft_text("キーで保存", cx);
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("secondary-enter");
+        assert_eq!(
+            view.read_with(cx, |view, _| view.note_counts()),
+            (1, 1),
+            "⌘⏎ で保存"
+        );
+
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.select_line("a.rs", NoteSide::New, 60, false, cx));
+            view.open_draft(window, cx);
+            view.set_draft_text("捨てる", cx);
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("escape");
+        view.read_with(cx, |view, _| {
+            assert!(view.draft.is_none(), "Esc で閉じる");
+            assert_eq!(view.note_counts(), (1, 1), "取り消しは残さない");
+        });
+
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.select_line("a.rs", NoteSide::New, 60, false, cx));
+            window.focus(&view.focus_handle, cx);
+        });
+        redraw(cx);
+        cx.simulate_keystrokes("c");
+        assert!(
+            view.read_with(cx, |view, _| view.draft.is_some()),
+            "一覧で c = 入力欄を開く"
+        );
+        redraw(cx);
+        cx.simulate_keystrokes("c");
+        view.read_with(cx, |view, cx| {
+            let draft = view.draft.as_ref().expect("入力欄は開いたまま");
+            assert_eq!(draft.editor.read(cx).plain_text(), "c", "入力欄の c は文字");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 一時 repo を実際に読み込み、畳みの展開でスクロール位置の行が保たれることを確かめる。
@@ -1710,6 +2199,8 @@ mod tests {
                     root: dir.clone(),
                     task_base: None,
                     accent: Theme::dark().fg1,
+                    storage: None,
+                    scope: "test".into(),
                 },
                 cx,
             );

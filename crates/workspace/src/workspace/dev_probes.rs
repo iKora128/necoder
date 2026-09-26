@@ -327,7 +327,45 @@ impl Workspace {
             eprintln!("REVIEW_PROBE: 変更レビューが無い session");
             return;
         };
+        // 注記: `select:<path>:<新の行>` / `select-old:<path>:<旧の行>` / `extend(-old):<path>:<行>` /
+        // `comment`（入力欄を開く）/ `type:<本文>` / `save` / `tray`（一覧）/ `send`（宛先のメニュー）。
+        let line_argument = || {
+            let (path, line) = argument.rsplit_once(':')?;
+            Some((path.to_string(), line.parse::<u32>().ok()?))
+        };
+        match name {
+            "select" | "select-old" | "extend" | "extend-old" => {
+                let Some((path, line)) = line_argument() else {
+                    eprintln!("REVIEW_PROBE: {command} は <path>:<行> で");
+                    return;
+                };
+                let side = if name.ends_with("-old") {
+                    review_view::NoteSide::Old
+                } else {
+                    review_view::NoteSide::New
+                };
+                let found = review.update(cx, |review, cx| {
+                    review.select_line(&path, side, line, name.starts_with("extend"), cx)
+                });
+                if !found {
+                    eprintln!("REVIEW_PROBE: 行が見つからない {argument}");
+                }
+                return;
+            }
+            "comment" => {
+                review.update(cx, |review, cx| review.open_draft(window, cx));
+                return;
+            }
+            "save" => {
+                review.update(cx, |review, cx| review.save_draft(window, cx));
+                return;
+            }
+            _ => {}
+        }
         review.update(cx, |review, cx| match name {
+            "type" => review.set_draft_text(argument, cx),
+            "tray" => review.toggle_tray(cx),
+            "send" => review.request_send(false, cx),
             "expand" => review.expand_first_fold(cx),
             "menu" => review.toggle_base_menu(cx),
             "head" => review.select_base(project::review::ReviewBase::Head, cx),

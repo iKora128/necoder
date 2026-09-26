@@ -4,7 +4,8 @@
 //! 変更の無い領域（先頭・hunk の間・末尾）は「⋯ N 行」に畳み、押すと前後 [`EXPAND_STEP`] 行ずつ開く。
 //! 展開の量はファイルのパスと畳みの番号で覚える（読み直しても開いた所が閉じない）。
 
-use project::review::{FileDiff, ReviewHunk};
+use crate::notes::NoteSide;
+use project::review::{DiffLineKind, FileDiff, ReviewHunk};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// 畳みを 1 回押すと開く行数（上下それぞれ）。
@@ -160,6 +161,26 @@ pub enum Row {
         /// 直後の hunk の見出し（git が拾った関数名など）。
         section: String,
     },
+    /// 行の下に出す注記（`note` = ビューの注記の添字）。
+    Note {
+        file: usize,
+        note: usize,
+    },
+    /// 書きかけの注記の入力欄。
+    Draft {
+        file: usize,
+    },
+}
+
+/// 行の下に差し込む注記（または書きかけの入力欄）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowNote {
+    pub path: String,
+    pub side: NoteSide,
+    /// 付けた範囲の最後の行（この行の下に出す）。
+    pub line: u32,
+    /// ビューの注記の添字。`None` = 書きかけの入力欄。
+    pub note: Option<usize>,
 }
 
 impl Row {
@@ -169,7 +190,9 @@ impl Row {
             | Self::Notice { file, .. }
             | Self::Line { file, .. }
             | Self::Context { file, .. }
-            | Self::Fold { file, .. } => *file,
+            | Self::Fold { file, .. }
+            | Self::Note { file, .. }
+            | Self::Draft { file } => *file,
         }
     }
 }
@@ -183,12 +206,27 @@ pub struct RowInputs<'a> {
     pub expansions: &'a HashMap<(String, usize), GapExpansion>,
     /// 見出しで畳んだファイル（パス）。
     pub collapsed: &'a HashSet<String>,
+    /// 行の下に出す注記と書きかけの入力欄。行が見当たらない注記はファイル見出しの直後に出す。
+    pub notes: &'a [RowNote],
 }
 
 /// 全ファイルの行を並べる。
 pub fn build_rows(inputs: &RowInputs) -> Vec<Row> {
     let mut rows = Vec::new();
+    let mut by_line: HashMap<(&str, NoteSide, u32), Vec<usize>> = HashMap::new();
+    for (index, note) in inputs.notes.iter().enumerate() {
+        by_line
+            .entry((note.path.as_str(), note.side, note.line))
+            .or_default()
+            .push(index);
+    }
+    // 書きかけの入力欄は、同じ行の注記の下に出す。
+    for indices in by_line.values_mut() {
+        indices.sort_by_key(|index| inputs.notes[*index].note.is_none());
+    }
+    let mut placed: HashSet<usize> = HashSet::new();
     for (file_index, file) in inputs.files.iter().enumerate() {
+        let header = rows.len();
         rows.push(Row::FileHeader { file: file_index });
         if inputs.collapsed.contains(&file.path) {
             continue;
@@ -200,6 +238,24 @@ pub fn build_rows(inputs: &RowInputs) -> Vec<Row> {
             });
             continue;
         }
+        let mut attach = |rows: &mut Vec<Row>, side: NoteSide, line: Option<u32>| {
+            let Some(line) = line else {
+                return;
+            };
+            let Some(indices) = by_line.get(&(file.path.as_str(), side, line)) else {
+                return;
+            };
+            for index in indices {
+                placed.insert(*index);
+                rows.push(match inputs.notes[*index].note {
+                    Some(note) => Row::Note {
+                        file: file_index,
+                        note,
+                    },
+                    None => Row::Draft { file: file_index },
+                });
+            }
+        };
         let new_total = inputs.new_totals.get(file_index).copied().flatten();
         let gaps = file_gaps(&file.hunks, new_total);
         let mut gaps = gaps.into_iter().peekable();
@@ -210,21 +266,55 @@ pub fn build_rows(inputs: &RowInputs) -> Vec<Row> {
                     .get(hunk_index)
                     .map(|hunk| hunk.section.clone())
                     .unwrap_or_default();
+                let start = rows.len();
                 push_gap(
                     &mut rows, inputs, file_index, &file.path, gap, new_total, section,
                 );
+                // 開いた文脈行にも注記を付けられる（新しい側の行番号）。
+                let context_lines: Vec<(usize, u32)> = rows[start..]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(offset, row)| match row {
+                        Row::Context { new_line, .. } => Some((start + offset, *new_line)),
+                        _ => None,
+                    })
+                    .collect();
+                for (position, new_line) in context_lines.into_iter().rev() {
+                    let mut extra = Vec::new();
+                    attach(&mut extra, NoteSide::New, Some(new_line));
+                    rows.splice(position + 1..position + 1, extra);
+                }
             }
             let Some(hunk) = file.hunks.get(hunk_index) else {
                 continue;
             };
-            for line_index in 0..hunk.lines.len() {
+            for (line_index, line) in hunk.lines.iter().enumerate() {
                 rows.push(Row::Line {
                     file: file_index,
                     hunk: hunk_index,
                     line: line_index,
                 });
+                match line.kind {
+                    DiffLineKind::Removed => attach(&mut rows, NoteSide::Old, line.old_line),
+                    _ => attach(&mut rows, NoteSide::New, line.new_line),
+                }
             }
         }
+        // 行が見当たらない注記（読み直して行がずれた等）は見出しの直後に出して見失わせない。
+        let orphans: Vec<Row> = inputs
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(index, note)| note.path == file.path && !placed.contains(index))
+            .map(|(_, note)| match note.note {
+                Some(note) => Row::Note {
+                    file: file_index,
+                    note,
+                },
+                None => Row::Draft { file: file_index },
+            })
+            .collect();
+        rows.splice(header + 1..header + 1, orphans);
     }
     rows
 }
@@ -444,6 +534,7 @@ mod tests {
             new_totals: &totals,
             expansions: &expansions,
             collapsed: &collapsed,
+            notes: &[],
         });
         let folds: Vec<u32> = rows
             .iter()
@@ -473,6 +564,7 @@ mod tests {
             new_totals: &totals,
             expansions: &expansions,
             collapsed: &collapsed,
+            notes: &[],
         });
         let context: Vec<(u32, u32)> = rows
             .iter()
@@ -497,6 +589,7 @@ mod tests {
             new_totals: &totals,
             expansions: &expansions,
             collapsed: &collapsed,
+            notes: &[],
         });
         assert!(rows.contains(&Row::Context {
             file: 0,
@@ -547,6 +640,7 @@ mod tests {
             new_totals: &totals,
             expansions: &expansions,
             collapsed: &collapsed,
+            notes: &[],
         });
         assert_eq!(
             rows[..2],
@@ -565,8 +659,82 @@ mod tests {
             new_totals: &totals,
             expansions: &expansions,
             collapsed: &collapsed,
+            notes: &[],
         });
         assert_eq!(rows.last(), Some(&Row::FileHeader { file: 1 }));
+    }
+
+    #[test]
+    fn notes_sit_under_their_line_and_orphans_under_the_header() {
+        let files = vec![two_hunk_file()];
+        let totals = vec![Some(61)];
+        let expansions = HashMap::new();
+        let collapsed = HashSet::new();
+        let note = |side: NoteSide, line: u32, note: Option<usize>| RowNote {
+            path: "a.rs".to_string(),
+            side,
+            line,
+            note,
+        };
+        let notes = vec![
+            // 追加行（新 3 行目）の下に注記と書きかけの欄。
+            note(NoteSide::New, 3, None),
+            note(NoteSide::New, 3, Some(0)),
+            // 削除行（旧 3 行目）の下。
+            note(NoteSide::Old, 3, Some(1)),
+            // 行が見当たらない（畳みの中）→ 見出しの直後。
+            note(NoteSide::New, 20, Some(2)),
+        ];
+        let rows = build_rows(&RowInputs {
+            files: &files,
+            new_totals: &totals,
+            expansions: &expansions,
+            collapsed: &collapsed,
+            notes: &notes,
+        });
+        assert_eq!(rows[0], Row::FileHeader { file: 0 });
+        assert_eq!(rows[1], Row::Note { file: 0, note: 2 }, "見失わない");
+        let position = |target: &Row| rows.iter().position(|row| row == target);
+        let removed = position(&Row::Line {
+            file: 0,
+            hunk: 0,
+            line: 1,
+        })
+        .expect("削除行");
+        assert_eq!(rows[removed + 1], Row::Note { file: 0, note: 1 });
+        let added = position(&Row::Line {
+            file: 0,
+            hunk: 0,
+            line: 2,
+        })
+        .expect("追加行");
+        assert_eq!(rows[added + 1], Row::Note { file: 0, note: 0 });
+        assert_eq!(
+            rows[added + 2],
+            Row::Draft { file: 0 },
+            "書きかけは注記の下"
+        );
+
+        // 畳みを開くと、文脈行の下に出る。
+        let mut expansions = HashMap::new();
+        let between = file_gaps(&files[0].hunks, Some(61))[1];
+        expansions.insert(
+            ("a.rs".to_string(), 1),
+            expand_gap(&between, GapExpansion::default()),
+        );
+        let rows = build_rows(&RowInputs {
+            files: &files,
+            new_totals: &totals,
+            expansions: &expansions,
+            collapsed: &collapsed,
+            notes: &notes,
+        });
+        let context = rows
+            .iter()
+            .position(|row| matches!(row, Row::Context { new_line: 20, .. }))
+            .expect("20 行目");
+        assert_eq!(rows[context + 1], Row::Note { file: 0, note: 2 });
+        assert_ne!(rows[1], Row::Note { file: 0, note: 2 });
     }
 
     #[test]

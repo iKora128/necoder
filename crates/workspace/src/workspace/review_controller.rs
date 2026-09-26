@@ -1,7 +1,11 @@
 //! 変更レビューの結線。session ごとに 1 枚の `ReviewView` を、エディタのタブ（パレット
 //! 「Git: 変更をレビュー」・ソース管理パネルのボタン）と Fleet の Task カードの「変更」タブに載せる。
 //! Editor と Fleet は同時に描かないので、同じ Entity を両方の面で使い回す（開いた畳み・見た印が揃う）。
+//!
+//! 注記（行コメント）の宛先の一覧と送信はここが持つ（ビューは AI を知らない）。送信は
+//! `AgentPanel::send_user_prompt_to` = 人間の発話として・表示中のタブを奪わず・実行中なら送信待ちへ。
 use crate::workspace::*;
+use review_view::SendTarget;
 
 /// 変更レビューのタブを見分けるパス（実在しない名前・タブ名は i18n で別に出す）。
 const REVIEW_TAB_NAME: &str = "⇄ review";
@@ -22,6 +26,9 @@ impl Workspace {
                 .then(|| slot.task_space.base_oid.clone())
                 .flatten(),
             accent: slot.color,
+            storage: self.persistence.storage.clone(),
+            // 注記を束ねる単位: Fleet = Task / Editor = プロジェクト（どちらも TaskSpace の id）。
+            scope: slot.task_space.id.0.clone(),
         };
         let review = self
             .project_sessions
@@ -115,8 +122,111 @@ impl Workspace {
                 self.project_sessions.sessions[session_index].pending_navigation =
                     Some((path.clone(), row, 0));
             }
+            ReviewEvent::SendMenuRequested { resend } => {
+                let targets = self.review_send_targets(session_index, cx);
+                let resend = *resend;
+                review.update(cx, |review, cx| review.show_send_menu(targets, resend, cx));
+            }
+            ReviewEvent::SendNotes {
+                target,
+                prompt,
+                note_ids,
+            } => self.send_review_notes(session_index, &review, target, prompt, note_ids, cx),
         }
         cx.notify();
+    }
+
+    /// 注記の宛先の一覧。既定（Fleet = Task カードの操作先 / Editor = アクティブなスレッド）を先頭に、
+    /// session の全スレッドと「新しいスレッドで送る」を並べる。
+    fn review_send_targets(&self, session_index: usize, cx: &App) -> Vec<SendTarget> {
+        let Some(session) = self.project_sessions.sessions.get(session_index) else {
+            return Vec::new();
+        };
+        let mut targets = Vec::new();
+        for (panel_index, panel) in session.fleet_agents.iter().enumerate() {
+            let current = *panel == session.agent_panel;
+            let panel = panel.read(cx);
+            let active = panel.active_thread();
+            for (thread_index, status) in panel.statuses().into_iter().enumerate() {
+                targets.push(SendTarget {
+                    panel: panel_index,
+                    thread: Some(thread_index),
+                    label: status.name.clone(),
+                    detail: SharedString::from(format!(
+                        "{} · {}",
+                        status.agent,
+                        activity_label(status.activity)
+                    )),
+                    color: status.color,
+                    is_default: current && thread_index == active,
+                });
+            }
+        }
+        targets.sort_by_key(|target| !target.is_default);
+        if let Some(panel) = session
+            .fleet_agents
+            .iter()
+            .position(|panel| *panel == session.agent_panel)
+            .or((!session.fleet_agents.is_empty()).then_some(0))
+        {
+            targets.push(SendTarget {
+                panel,
+                thread: None,
+                label: SharedString::from(i18n::t!("review.send_new_thread")),
+                detail: SharedString::default(),
+                color: self.theme.fg2,
+                is_default: targets.is_empty(),
+            });
+        }
+        targets
+    }
+
+    /// 注記を 1 通のプロンプトにまとめて送る（人間の発話として・表示中のタブを奪わない）。
+    fn send_review_notes(
+        &mut self,
+        session_index: usize,
+        review: &Entity<ReviewView>,
+        target: &SendTarget,
+        prompt: &str,
+        note_ids: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let panel = self
+            .project_sessions
+            .sessions
+            .get(session_index)
+            .and_then(|session| session.fleet_agents.get(target.panel).cloned());
+        let delivered = panel.and_then(|panel| {
+            let thread = match target.thread {
+                Some(thread) => thread,
+                None => panel.update(cx, |panel, cx| panel.new_thread_index(cx)),
+            };
+            let sent = panel.update(cx, |panel, cx| {
+                panel.send_user_prompt_to(thread, prompt.to_string(), cx)
+            });
+            let status = panel.read(cx).statuses().into_iter().nth(thread);
+            sent.then_some(status).flatten()
+        });
+        match delivered {
+            Some(status) => {
+                review.update(cx, |review, cx| review.mark_notes_sent(note_ids, cx));
+                let message = i18n::t!(
+                    "review.sent_toast",
+                    "count" => note_ids.len(),
+                    "thread" => status.name
+                );
+                self.push_toast(message.into(), status.color, cx);
+            }
+            None => {
+                let color = self
+                    .project_sessions
+                    .projects
+                    .get(session_index)
+                    .map(|slot| slot.color)
+                    .unwrap_or_else(|| project_color(0));
+                self.push_toast(i18n::t!("review.send_failed").into(), color, cx);
+            }
+        }
     }
 
     /// 作業ツリーが変わった（ファイル監視）: 開いている変更レビューに「新しい変更があります」を出す。
