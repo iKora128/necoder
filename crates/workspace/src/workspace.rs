@@ -997,6 +997,9 @@ pub struct TaskSpace {
     pub head_oid: Option<String>,
     pub result_summary: Option<SharedString>,
     pub created_at_ms: i64,
+    /// linked worktree か（メインの作業ツリーでない）。統合先の `⌂` はメインの作業ツリーを選ぶ
+    /// （O21・同じリポジトリの `task/` でない linked worktree を統合先に取り違えない）。
+    pub linked: bool,
 }
 
 impl TaskSpace {
@@ -1033,6 +1036,7 @@ impl TaskSpace {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as i64)
                 .unwrap_or(0),
+            linked: false,
         }
     }
 
@@ -1075,6 +1079,7 @@ impl TaskSpace {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as i64)
                 .unwrap_or(0),
+            linked: project::is_linked_worktree_on(worktree.host().as_ref(), worktree.root()),
         }
     }
 
@@ -1234,6 +1239,14 @@ struct ChromeState {
     /// リポジトリを跨いだときに畳んでおく編隊（鍵 = `repository_key`）。戻ってきたら ＋/× の結果ごと
     /// 復元する（切替のたびに並べ直さない・閉じたセルは閉じたまま）。
     fleet_grids: HashMap<String, Vec<FleetPane>>,
+    /// リポジトリの `git worktree list`（鍵 = `repository_key`・O21）。Fleet サイドバーの「外部の
+    /// worktree」と「消えています」の元。Fleet を開いた時・レールを切り替えた時・worktree を作った /
+    /// 消した後・窓が前に出た時に読み直す（ポーリングしない）。`None` = 読んでいる途中。
+    fleet_worktrees: HashMap<String, Option<Vec<project::GitWorktree>>>,
+    /// 「外部の worktree」を畳んでいるか（O21・見出しで切り替え）。
+    hide_external_worktrees: bool,
+    /// 取り込み中の worktree（レールに開いたら Task にする・O21）。
+    adopt_as_task: std::collections::HashSet<PathBuf>,
     /// 編隊中央のタブ（管制 / グラフ・P3）。
     fleet_center_view: FleetCenterView,
     /// 管制タブのフォーカス（⏎ = キュー先頭へ・keymap context "FleetControl" の足場）。
@@ -2045,7 +2058,15 @@ impl Render for Workspace {
             })
             .detach();
         }
+        let was_active = self.window_active;
         self.window_active = window.is_window_active(); // 承認待ちの脈動など「動き」を止める判定
+        // 窓が前に出た = 外で worktree を作った / 消した後かもしれない（O21・ポーリングの代わり）。
+        if self.window_active && !was_active {
+            self.forget_fleet_worktrees();
+        }
+        if self.chrome.fleet_mode {
+            self.ensure_fleet_worktrees(cx);
+        }
         self.window_handle = Some(window.window_handle());
         if self.window_active && self.waiting_thread.is_some() {
             self.ensure_visual_ticker(cx);

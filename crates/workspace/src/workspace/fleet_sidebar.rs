@@ -35,6 +35,191 @@ impl Workspace {
             .map(|slot| slot.repository_key().to_string())
     }
 
+    /// リポジトリの統合先 slot（`⌂`）。同じリポジトリに統合先扱いの slot が複数ある時（`task/` でない
+    /// linked worktree を ⌘O で開いた等）は、**メインの作業ツリー**（linked でない）を選ぶ。無ければ
+    /// 最初の統合先（O21・以前はサイドバーだけ最後の 1 つを選び、＋Task・Captain と食い違った）。
+    pub(crate) fn integration_slot_for(&self, key: &str) -> Option<usize> {
+        let mut first = None;
+        for (index, slot) in self.project_sessions.projects.iter().enumerate() {
+            if slot.repository_key() != key || !slot.task_space.is_integration() {
+                continue;
+            }
+            if !slot.task_space.linked {
+                return Some(index);
+            }
+            first.get_or_insert(index);
+        }
+        first
+    }
+
+    /// 選んでいるリポジトリの worktree 一覧を背景で読み直す（O21・読み終えたら描き直す）。
+    /// 読みに行くのは統合先（無ければ選んでいる slot）の場所から。
+    pub(crate) fn refresh_fleet_worktrees(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.fleet_repository_key() else {
+            return;
+        };
+        if matches!(self.chrome.fleet_worktrees.get(&key), Some(None)) {
+            return; // 読んでいる途中
+        }
+        let Some(slot) = self
+            .integration_slot_for(&key)
+            .or(Some(self.project_sessions.active))
+            .and_then(|index| self.project_sessions.projects.get(index))
+        else {
+            return;
+        };
+        let host = slot.worktree.host().clone();
+        let root = slot.worktree.root().to_path_buf();
+        self.chrome.fleet_worktrees.insert(key.clone(), None);
+        cx.spawn(async move |workspace, cx| {
+            let listed = cx
+                .background_executor()
+                .spawn(async move { project::git_worktrees_on(host.as_ref(), &root) })
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                workspace.chrome.fleet_worktrees.insert(key, Some(listed));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fleet を出している間、選んでいるリポジトリの一覧がまだ無ければ読みに行く（描画から呼ぶ）。
+    pub(crate) fn ensure_fleet_worktrees(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.fleet_repository_key() else {
+            return;
+        };
+        if !self.chrome.fleet_worktrees.contains_key(&key) {
+            self.refresh_fleet_worktrees(cx);
+        }
+    }
+
+    /// worktree の一覧を古い扱いにする（次に Fleet サイドバーを描く時に読み直す）。
+    pub(crate) fn forget_fleet_worktrees(&mut self) {
+        self.chrome
+            .fleet_worktrees
+            .retain(|_, listed| listed.is_none());
+    }
+
+    /// 選んでいるリポジトリの worktree のうち、レールに無いもの（necoder の外で作ったもの = Orca・
+    /// Claude Code・手で `git worktree add` した等）と、レールにあるが Task でないもの（統合先以外）。
+    /// 返すのは `(パス, ブランチ, レールの添字)`。一覧をまだ読んでいなければ空。
+    pub(crate) fn external_worktrees(&self) -> Vec<(PathBuf, Option<String>, Option<usize>)> {
+        let Some(key) = self.fleet_repository_key() else {
+            return Vec::new();
+        };
+        let integration = self.integration_slot_for(&key);
+        let canonical =
+            |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let rail: Vec<(usize, PathBuf)> = self
+            .project_sessions
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.repository_key() == key)
+            .map(|(index, slot)| (index, canonical(slot.worktree.root())))
+            .collect();
+        let mut rows = Vec::new();
+        if let Some(Some(listed)) = self.chrome.fleet_worktrees.get(&key) {
+            for worktree in listed {
+                let path = canonical(&worktree.path);
+                match rail.iter().find(|(_, root)| *root == path) {
+                    None => rows.push((worktree.path.clone(), worktree.branch.clone(), None)),
+                    // レールにあるが Task でも統合先でもない（`task/` でない linked worktree を ⌘O で開いた）。
+                    Some((index, _))
+                        if Some(*index) != integration
+                            && self.project_sessions.projects[*index]
+                                .task_space
+                                .is_integration() =>
+                    {
+                        rows.push((worktree.path.clone(), worktree.branch.clone(), Some(*index)))
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        rows
+    }
+
+    /// レールにある Task のうち、git の一覧から消えた（necoder の外で `git worktree remove` 等された）もの。
+    pub(crate) fn vanished_worktree(&self, index: usize) -> bool {
+        let Some(slot) = self.project_sessions.projects.get(index) else {
+            return false;
+        };
+        let Some(Some(listed)) = self.chrome.fleet_worktrees.get(slot.repository_key()) else {
+            return false;
+        };
+        let canonical =
+            |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let root = canonical(slot.worktree.root());
+        !slot.worktree.is_remote()
+            && !listed
+                .iter()
+                .any(|worktree| canonical(&worktree.path) == root)
+    }
+
+    /// 外部の worktree を取り込む（O21）: レールに開いて Task にする（ブランチ名に関係なく）。
+    /// 既にレールにある（統合先扱いの）ものは、その場で Task にして台帳に残す。
+    pub(crate) fn adopt_worktree(
+        &mut self,
+        path: PathBuf,
+        branch: Option<String>,
+        rail_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(index) = rail_index {
+            self.make_task_space(index, cx);
+            cx.notify();
+            return;
+        }
+        let host = self
+            .fleet_repository_key()
+            .and_then(|key| self.integration_slot_for(&key))
+            .and_then(|index| self.project_sessions.projects.get(index))
+            .map(|slot| slot.worktree.host().clone())
+            .unwrap_or_else(host::LocalHost::shared);
+        self.chrome.adopt_as_task.insert(path.clone());
+        self.open_folder_in_rail(host, path, branch, cx);
+    }
+
+    /// レールの slot を Task にして台帳へ残す（O21・取り込み）。
+    pub(crate) fn make_task_space(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(slot) = self.project_sessions.projects.get_mut(index) else {
+            return;
+        };
+        slot.task_space.kind = SpaceKind::Task;
+        if slot.task_space.base_oid.is_none() {
+            slot.task_space.base_oid = slot.task_space.head_oid.clone();
+        }
+        let record = slot.task_space.to_record(slot);
+        if let Some(storage) = self.persistence.storage.clone() {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(error) = storage.upsert_task_space(&record) {
+                        eprintln!("取り込んだ worktree を台帳に残せない: {error:#}");
+                    }
+                })
+                .detach();
+        }
+        cx.notify();
+    }
+
+    /// 外で消えた worktree の Task をレールから外す（O21・「片付け」）。
+    pub(crate) fn forget_vanished_task(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.project_sessions.projects.get(index) else {
+            return;
+        };
+        let space = slot.task_space.id.clone();
+        self.remove_fleet_cells_for(&space);
+        self.remove_project_slot(index, window, cx);
+        self.forget_fleet_worktrees();
+    }
+
     /// Captain スレッド（IntegrationSpace の pinned thread）へ寄せる。⌘0 / Captain バーのクリック。
     /// Captain カード（舞台の 1 枚）は F6。ここでは「その会話を前面に出す」までを担う。
     pub(crate) fn focus_captain(
@@ -46,12 +231,7 @@ impl Workspace {
         let Some(key) = self.fleet_repository_key() else {
             return;
         };
-        let Some(index) = self
-            .project_sessions
-            .projects
-            .iter()
-            .position(|slot| slot.repository_key() == key && slot.task_space.is_integration())
-        else {
+        let Some(index) = self.integration_slot_for(&key) else {
             return;
         };
         let Some(agent) = settings::get(cx).captain_agent.clone() else {
@@ -75,7 +255,8 @@ impl Workspace {
         });
         self.chrome.fleet_mode = true;
         self.chrome.stage_columns = 1;
-        self.chrome.captain_space = Some(self.project_sessions.projects[index].task_space.id.clone());
+        self.chrome.captain_space =
+            Some(self.project_sessions.projects[index].task_space.id.clone());
         self.chrome.captain_tab = 0;
         self.reveal_agent_in_fleet(index, thread, window, cx);
     }
@@ -205,6 +386,9 @@ impl Workspace {
     ) {
         use agent_panel::ThreadActivity;
         let key = self.fleet_repository_key();
+        let integration_index = key
+            .as_deref()
+            .and_then(|key| self.integration_slot_for(key));
         let mut integration: Option<(usize, SharedString, Hsla, Option<SharedString>)> = None;
         let mut rows: Vec<TaskRow> = Vec::new();
         let mut integrated_today = 0usize;
@@ -218,7 +402,10 @@ impl Workspace {
                 .or_else(|| slot.worktree_branch.clone())
                 .map(SharedString::from);
             if slot.task_space.is_integration() {
-                integration = Some((index, slot.name.clone(), slot.color, branch));
+                // 統合先はメインの作業ツリー（O21）。ほかの統合先扱いの slot は「外部の worktree」に出る。
+                if Some(index) == integration_index {
+                    integration = Some((index, slot.name.clone(), slot.color, branch));
+                }
                 continue;
             }
             if slot.task_space.phase == TaskPhase::Archived {
@@ -500,6 +687,54 @@ impl Workspace {
                                         .text_color(theme.fg2)
                                         .child(digest),
                                 )
+                            })
+                            // necoder の外で worktree が消された（O21）。レールから外す導線を出す。
+                            .when(self.vanished_worktree(project_index), |element| {
+                                element.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.))
+                                        .text_size(px(10.))
+                                        .child(
+                                            div()
+                                                .text_color(theme.warn)
+                                                .child(SharedString::from(i18n::t!(
+                                                    "fleet.worktree_vanished"
+                                                ))),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("fleet-task-forget", seq))
+                                                .px(px(5.))
+                                                .rounded(px(3.))
+                                                .border_1()
+                                                .border_color(theme.border)
+                                                .text_color(theme.fg1)
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(theme.bg2))
+                                                .child(SharedString::from(i18n::t!(
+                                                    "fleet.worktree_forget"
+                                                )))
+                                                .tooltip(Tooltip::text(
+                                                    i18n::t!("fleet.worktree_forget_tip"),
+                                                    theme.clone(),
+                                                ))
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(
+                                                        move |this, _: &MouseDownEvent, window, cx| {
+                                                            cx.stop_propagation();
+                                                            this.forget_vanished_task(
+                                                                project_index,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ),
+                                                ),
+                                        ),
+                                )
                             }),
                     )
                     .child(
@@ -578,6 +813,130 @@ impl Workspace {
                         }),
                     ),
             );
+        }
+
+        // ③' 外部の worktree（O21）: このリポジトリの worktree のうち Task になっていないもの。
+        // necoder の外（Orca・Claude Code・手で `git worktree add`）で作ったものも git の一覧から拾う。
+        let external = self.external_worktrees();
+        if !external.is_empty() {
+            let hidden = self.chrome.hide_external_worktrees;
+            list = list.child(
+                div()
+                    .id("fleet-external-header")
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .px(px(10.))
+                    .pt(px(10.))
+                    .pb(px(3.))
+                    .text_size(px(10.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg1))
+                    .child(if hidden { "▸" } else { "▾" })
+                    .child(SharedString::from(i18n::t!(
+                        "fleet.external_header",
+                        "count" => external.len()
+                    )))
+                    .tooltip(Tooltip::text(i18n::t!("fleet.external_tip"), theme.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                            this.chrome.hide_external_worktrees =
+                                !this.chrome.hide_external_worktrees;
+                            cx.notify();
+                        }),
+                    ),
+            );
+            if !hidden {
+                for (seq, (path, branch, rail_index)) in external.into_iter().enumerate() {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    let detail = branch
+                        .clone()
+                        .map_or_else(|| "(detached)".to_string(), |branch| format!("⎇ {branch}"));
+                    let adopt_path = path.clone();
+                    let adopt_branch = branch.clone();
+                    list = list.child(
+                        div()
+                            .id(("fleet-external-row", seq))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .min_h(px(30.))
+                            .px(px(8.))
+                            .rounded(px(6.))
+                            .hover(|style| style.bg(theme.bg3))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.))
+                                    .text_color(theme.fg2)
+                                    .child("◌"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_size(px(11.5))
+                                            .text_color(theme.fg1)
+                                            .child(SharedString::from(name)),
+                                    )
+                                    .child(
+                                        div()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_size(px(9.5))
+                                            .text_color(theme.fg2)
+                                            .child(SharedString::from(detail)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id(("fleet-external-adopt", seq))
+                                    .flex_none()
+                                    .px(px(6.))
+                                    .h(px(20.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .text_size(px(10.5))
+                                    .text_color(theme.fg1)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                                    .child(SharedString::from(i18n::t!("fleet.external_adopt")))
+                                    .tooltip(Tooltip::text(
+                                        i18n::t!("fleet.external_adopt_tip"),
+                                        theme.clone(),
+                                    ))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            move |this, _: &MouseDownEvent, _window, cx| {
+                                                cx.stop_propagation();
+                                                this.adopt_worktree(
+                                                    adopt_path.clone(),
+                                                    adopt_branch.clone(),
+                                                    rail_index,
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    ),
+                            ),
+                    );
+                }
+            }
         }
 
         let body = if rows.is_empty() && integration.is_none() {
@@ -666,7 +1025,10 @@ impl Workspace {
         div()
             .key_context("FleetControl")
             .track_focus(&self.chrome.control_focus)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.chrome.control_focus, cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| window.focus(&this.chrome.control_focus, cx)),
+            )
             .w(px(self.chrome.explorer_width))
             .h_full()
             .flex_none()
@@ -689,6 +1051,145 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O21: necoder の外で作った worktree（`task/` でないブランチ）も Fleet に出て、取り込めば Task になる。
+    /// 統合先はメインの作業ツリーのまま。外で消された worktree は「消えています」になり、片付けられる。
+    #[gpui::test]
+    fn external_worktrees_show_up_and_can_be_adopted(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!(
+            "necoder_fleet_external_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let main = base.join("repo");
+        let external = base.join("orca-made");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+        };
+        if !git(&main, &["init", "-q", "-b", "main"]).is_ok_and(|output| output.status.success()) {
+            return; // git が無い環境
+        }
+        std::fs::write(main.join("a.txt"), "a\n").unwrap();
+        git(&main, &["add", "-A"]).unwrap();
+        git(&main, &["commit", "-qm", "base"]).unwrap();
+        // necoder の外（Orca / Claude Code / 手）で作った worktree。ブランチは task/ で始まらない。
+        let added = git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/orca",
+                external.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        assert!(added.status.success(), "{added:?}");
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) =
+            cx.add_window_view(|_, cx| Workspace::new(vec![main.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, _window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.refresh_fleet_worktrees(cx);
+        });
+        cx.run_until_parked();
+        let canonical =
+            |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let listed = workspace.read_with(cx, |workspace, _| workspace.external_worktrees());
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(canonical(&listed[0].0), canonical(&external));
+        assert_eq!(listed[0].1.as_deref(), Some("feature/orca"));
+        assert_eq!(listed[0].2, None, "まだレールに無い");
+
+        // 取り込む → レールに開いて Task。統合先はメインの作業ツリーのまま。
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let (path, branch, rail) = listed[0].clone();
+            workspace.adopt_worktree(path, branch, rail, cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let adopted = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .position(|slot| canonical(slot.worktree.root()) == canonical(&external))
+                .expect("レールに開いた");
+            assert_eq!(
+                workspace.project_sessions.projects[adopted].task_space.kind,
+                SpaceKind::Task,
+                "task/ でないブランチでも Task"
+            );
+            assert!(
+                workspace.project_sessions.projects[adopted]
+                    .task_space
+                    .linked
+            );
+            workspace.switch_project(0, window, cx);
+            let key = workspace.fleet_repository_key().expect("リポジトリ");
+            assert_eq!(
+                workspace.integration_slot_for(&key),
+                Some(0),
+                "統合先はメイン"
+            );
+            let (integration, rows, _) = workspace.fleet_sidebar_rows(cx);
+            assert_eq!(integration.map(|(index, ..)| index), Some(0));
+            assert!(rows.iter().any(|row| row.project_index == adopted));
+            workspace.refresh_fleet_worktrees(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace.external_worktrees().is_empty()),
+            "取り込んだ worktree は外部の一覧から消える"
+        );
+
+        // 外で消す → 「消えています」→ 片付け。
+        let removed = git(
+            &main,
+            &["worktree", "remove", "--force", external.to_str().unwrap()],
+        )
+        .unwrap();
+        assert!(removed.status.success(), "{removed:?}");
+        workspace.update_in(cx, |workspace, _window, cx| {
+            workspace.forget_fleet_worktrees();
+            workspace.refresh_fleet_worktrees(cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let adopted = workspace
+                .project_sessions
+                .projects
+                .iter()
+                .position(|slot| canonical(slot.worktree.root()) == canonical(&external))
+                .expect("まだレールにある");
+            assert!(workspace.vanished_worktree(adopted), "外で消えた");
+            assert!(!workspace.vanished_worktree(0), "メインは残っている");
+            workspace.forget_vanished_task(adopted, window, cx);
+            assert_eq!(
+                workspace.project_sessions.projects.len(),
+                1,
+                "片付けでレールから外れる"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// F1 受入: サイドバーは**レールで選んでいる 1 リポジトリの Task だけ**を 3 段で出し、
     /// レールを切り替えたら編隊ごと入れ替わる。統合先は Task 行に混ぜず別行にする。

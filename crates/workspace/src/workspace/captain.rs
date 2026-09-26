@@ -48,7 +48,7 @@ impl Workspace {
             return;
         };
         let Some(repository) = self.project_sessions.projects.get(source).map(|slot| slot.repository_key().to_string()) else { return; };
-        let Some(integration) = self.project_sessions.projects.iter().position(|slot| slot.task_space.is_integration() && slot.repository_key() == repository) else { return; };
+        let Some(integration) = self.integration_slot_for(&repository) else { return; };
         if event != "flush" {
             self.chrome.captain_pending.entry(repository.clone()).or_default().push(format!("{event}: {title} — {}", digest.as_deref().unwrap_or("")));
         }

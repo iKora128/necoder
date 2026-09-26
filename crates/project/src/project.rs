@@ -658,6 +658,27 @@ pub fn git_common_dir_on(host: &dyn Host, dir: &Path) -> Option<PathBuf> {
     })
 }
 
+/// `root` が linked worktree（`git worktree add` で作った作業ツリー）か。メインの作業ツリーは
+/// git dir と共通の git dir が同じ、linked は別（`.git/worktrees/<name>`）。repo 外は `false`。
+pub fn is_linked_worktree_on(host: &dyn Host, root: &Path) -> bool {
+    let Some(common) = git_common_dir_on(host, root) else {
+        return false;
+    };
+    let Ok(output) = run_git(
+        host,
+        root,
+        ["rev-parse", "--path-format=absolute", "--git-dir"],
+    ) else {
+        return false;
+    };
+    if !output.success() {
+        return false;
+    }
+    let git_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let canonical = |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    !git_dir.as_os_str().is_empty() && canonical(&git_dir) != canonical(&common)
+}
+
 /// UI / CLI / MCP が同じ TaskSpace ID を生成するための共有実装。
 pub fn stable_worktree_id_on(host: &dyn Host, root: &Path) -> String {
     let identity = format!("{}\0{}", host.id(), root.display());

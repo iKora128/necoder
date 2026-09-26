@@ -509,6 +509,7 @@ mod tests {
             head_oid: Some("fedcba9876543210".into()),
             result_summary: None,
             created_at_ms: 0,
+            linked: true,
         };
         assert_eq!(
             space.diff_base(),

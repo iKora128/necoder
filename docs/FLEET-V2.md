@@ -121,6 +121,18 @@ UI-SPEC §11・FLEET-CONTROL-PLAN の UI 部分（P3 管制タブ）・GLOSSARY 
      ホバーで `◫`（ピン = 舞台に並べる・F2）と `🗑`。ダブルクリックで改名（既存）。
    - **統合先行**（`⌂ main · 統合先 · 保護`）は Captain の次。2 段目に「N 本が分岐中 · 今日 M 件統合」。クリックで
      舞台に main の Task カード（タブ = ターミナル / ファイル / 変更（= 今日の統合）。スレッドは Captain のみ）。
+     統合先は**メインの作業ツリー**（linked worktree でない slot・`TaskSpace::linked`）。同じリポジトリに統合先扱いの
+     slot が複数ある時（`task/` でない linked worktree を ⌘O で開いた等）もメインを選び、サイドバー・＋Task・Captain で
+     同じ 1 つ（`integration_slot_for`・O21。以前はサイドバーだけ最後の 1 つを選んでいた）。
+   - **消えています**（O21）: レールにある Task の worktree が `git worktree list` から消えていたら（necoder の外で
+     `git worktree remove` 等）、3 段目の下に `消えています（necoder の外で削除）`（warn）+ `片付け`（レールから外す）。
+3.5 **外部の worktree**（O21・Task 行の下・`▾ 外部の worktree（N）` で畳める）: 選んでいるリポジトリの worktree のうち
+   Task になっていないもの = レールに無いもの（**Orca・Claude Code・手で `git worktree add` したもの**も git の一覧から拾う）と、
+   レールにあるが統合先扱いのもの（メイン以外）。行 = `◌`（中立）+ フォルダ名 + `⎇ branch` + `取り込む`。
+   **取り込む** = レールに開いて Task にする（ブランチ名に関係なく・ブランチもファイルもそのまま）。台帳に Task として残し、
+   再起動しても Task のまま（linked worktree に限り、台帳の Task を branch 接頭辞より優先する）。
+   一覧（`git worktree list`）を読むのは、Fleet を出した時・レールの worktree が増えた / 減った時・窓が前に出た時だけ
+   （ポーリングしない・背景で 1 回）。
 4. **＋ Task** ボタン（⌘N）と凡例（形の説明・中立色）。
 
 ### 3.3 系譜の帯
