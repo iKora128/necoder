@@ -151,6 +151,50 @@ pub struct ThreadChatRecord {
     pub write_grants: Vec<String>,
 }
 
+/// 変更レビューの注記の状態（未送信 / 送信済み / 解決）。文字列は DB の中だけに現れる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReviewNoteState {
+    Unsent,
+    Sent,
+    Resolved,
+}
+
+impl ReviewNoteState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsent => "unsent",
+            Self::Sent => "sent",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    /// 未知の値は未送信として読む（送り損ねて消えるより、もう一度送れる方が安全）。
+    pub fn from_str_lossy(value: &str) -> Self {
+        match value {
+            "sent" => Self::Sent,
+            "resolved" => Self::Resolved,
+            _ => Self::Unsent,
+        }
+    }
+}
+
+/// 変更レビューの注記 1 件（[`Storage::load_review_notes`]）。`scope` は束ねる単位（Fleet = Task・
+/// Editor = プロジェクトの TaskSpace id）。`target` は対象（diff の行・将来はページの要素）の JSON で、
+/// 中身は呼び出し側が決める（storage は解釈しない）。種別だけは `target_kind` に出して絞り込める。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewNoteRecord {
+    pub id: String,
+    pub scope: String,
+    pub target_kind: String,
+    pub target: String,
+    pub body: String,
+    pub state: ReviewNoteState,
+    /// 最後にエージェントへ送った時刻（unix ms）。解決を戻す時に「送信済み」へ戻す手掛かり。
+    pub sent_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// Task lifecycle の追記イベント。wait/orchestration は transient な UI state ではなく
 /// このログと `task_spaces.phase` を読む。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1539,6 +1583,93 @@ impl Storage {
         })
     }
 
+    // ── 変更レビューの注記（再起動しても残す・束ねる単位ごとに読む） ──
+
+    /// 注記を 1 件書く（同じ id なら上書き）。
+    pub fn upsert_review_note(&self, note: &ReviewNoteRecord) -> Result<()> {
+        let note = note.clone();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute(
+                    "INSERT INTO review_notes
+                        (id, scope, target_kind, target, body, state, sent_at, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(id) DO UPDATE SET
+                        scope = ?2, target_kind = ?3, target = ?4, body = ?5, state = ?6,
+                        sent_at = ?7, updated_at = ?9",
+                    (
+                        note.id.as_str(),
+                        note.scope.as_str(),
+                        note.target_kind.as_str(),
+                        note.target.as_str(),
+                        note.body.as_str(),
+                        note.state.as_str(),
+                        note.sent_at,
+                        note.created_at,
+                        note.updated_at,
+                    ),
+                )
+                .await
+                .context("review_notes の書き込みに失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 注記を消す。
+    pub fn delete_review_note(&self, id: &str) -> Result<()> {
+        let id = id.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                conn.execute("DELETE FROM review_notes WHERE id = ?1", (id.as_str(),))
+                    .await
+                    .context("review_notes の削除に失敗")?;
+                Ok(())
+            })
+        })
+    }
+
+    /// 束ねる単位の注記を作った順に読む。
+    pub fn load_review_notes(&self, scope: &str) -> Result<Vec<ReviewNoteRecord>> {
+        let scope = scope.to_string();
+        self.run(move |conn| {
+            futures::executor::block_on(async {
+                let mut rows = conn
+                    .query(
+                        "SELECT id, scope, target_kind, target, body, state, sent_at, created_at,
+                                updated_at
+                         FROM review_notes WHERE scope = ?1 ORDER BY created_at, id",
+                        (scope.as_str(),),
+                    )
+                    .await
+                    .context("review_notes の読み出しに失敗")?;
+                let mut notes = Vec::new();
+                while let Some(row) = rows.next().await.context("review_notes 行の取得に失敗")?
+                {
+                    let text = |index: usize| -> Result<String> {
+                        Ok(row
+                            .get_value(index)?
+                            .as_text()
+                            .context("review_notes の文字列の列")?
+                            .clone())
+                    };
+                    notes.push(ReviewNoteRecord {
+                        id: text(0)?,
+                        scope: text(1)?,
+                        target_kind: text(2)?,
+                        target: text(3)?,
+                        body: text(4)?,
+                        state: ReviewNoteState::from_str_lossy(&text(5)?),
+                        sent_at: row.get_value(6)?.as_integer().copied(),
+                        created_at: row.get_value(7)?.as_integer().copied().unwrap_or(0),
+                        updated_at: row.get_value(8)?.as_integer().copied().unwrap_or(0),
+                    });
+                }
+                Ok(notes)
+            })
+        })
+    }
+
     // ── 窓セッション（開プロジェクト列・各プロジェクトの開タブ列。1 窓 = 1 行） ──
     //
     // 旧 `state.json`（全窓共有の 1 ファイル・丸ごと上書き）は「最後に書いた窓が勝つ」ため、
@@ -1975,6 +2106,29 @@ async fn initialize_schema(conn: &turso::Connection) -> Result<()> {
     )
     .await
     .context("task_deps 作成に失敗")?;
+    // 変更レビューの注記（O7）。対象は JSON 1 列（diff の行・将来はページの要素）で、表を広げずに足せる。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS review_notes (
+            id TEXT PRIMARY KEY,
+            scope TEXT NOT NULL,
+            target_kind TEXT NOT NULL,
+            target TEXT NOT NULL,
+            body TEXT NOT NULL,
+            state TEXT NOT NULL,
+            sent_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        (),
+    )
+    .await
+    .context("review_notes 作成に失敗")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS review_notes_scope ON review_notes (scope, created_at)",
+        (),
+    )
+    .await
+    .context("review_notes index 作成に失敗")?;
     Ok(())
 }
 
@@ -2079,6 +2233,59 @@ mod tests {
             ]
         );
 
+        drop(storage);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 注記は再起動（DB を開き直す）しても残り、束ねる単位ごとに作った順で読める。
+    #[test]
+    fn review_notes_persist_per_scope() {
+        let path = temp_db("review_notes");
+        let _ = std::fs::remove_file(&path);
+        let note = |id: &str, scope: &str, created_at: i64| ReviewNoteRecord {
+            id: id.to_string(),
+            scope: scope.to_string(),
+            target_kind: "diff_lines".to_string(),
+            target: format!("{{\"path\":\"src/{id}.rs\"}}"),
+            body: format!("本文 {id}"),
+            state: ReviewNoteState::Unsent,
+            sent_at: None,
+            created_at,
+            updated_at: created_at,
+        };
+        {
+            let storage = Storage::open(&path).expect("DB を開ける");
+            storage
+                .upsert_review_note(&note("b", "task-1", 20))
+                .unwrap();
+            storage
+                .upsert_review_note(&note("a", "task-1", 10))
+                .unwrap();
+            storage.upsert_review_note(&note("c", "task-2", 5)).unwrap();
+            let mut sent = note("a", "task-1", 10);
+            sent.state = ReviewNoteState::Sent;
+            sent.sent_at = Some(99);
+            sent.body = "直した本文".to_string();
+            sent.updated_at = 30;
+            storage.upsert_review_note(&sent).unwrap();
+            storage.delete_review_note("b").unwrap();
+        }
+        // 開き直す（= 再起動）。
+        let storage = Storage::open(&path).expect("DB を開き直せる");
+        let notes = storage.load_review_notes("task-1").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, "a");
+        assert_eq!(notes[0].body, "直した本文");
+        assert_eq!(notes[0].state, ReviewNoteState::Sent);
+        assert_eq!(notes[0].sent_at, Some(99));
+        assert_eq!(notes[0].created_at, 10, "作った時刻は上書きで変えない");
+        assert_eq!(notes[0].updated_at, 30);
+        assert_eq!(storage.load_review_notes("task-2").unwrap().len(), 1);
+        assert!(storage.load_review_notes("none").unwrap().is_empty());
+        assert_eq!(
+            ReviewNoteState::from_str_lossy("??"),
+            ReviewNoteState::Unsent
+        );
         drop(storage);
         let _ = std::fs::remove_file(&path);
     }
