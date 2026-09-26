@@ -2161,6 +2161,16 @@ impl SettingsView {
                 5.0,
                 cx,
             ))
+            // `ne terminal send`（CLI から端末へ打つ）の許可。既定 off（送った文字はそのまま実行される）。
+            // `ne` の節はシムを置けない OS で隠れるが、送信は IPC なので OS を問わずここに置く。
+            .child(self.toggle_row(
+                "allow_terminal_send",
+                7,
+                i18n::t!("settings.pref_allow_terminal_send"),
+                Some(i18n::t!("settings.pref_allow_terminal_send_sub")),
+                settings.allow_terminal_send,
+                cx,
+            ))
             .child(self.chat_group(settings, cx))
     }
 

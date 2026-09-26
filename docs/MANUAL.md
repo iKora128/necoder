@@ -25,6 +25,7 @@ necoder（ねこーだー）の使い方をまとめた利用者向けの手引�
 13. [設定・テーマ・色](#13-設定テーマ色)
 14. [困ったとき](#14-困ったとき)
 15. [キー一覧](#15-キー一覧)
+16. [コマンドライン（`ne`）](#16-コマンドラインne)
 
 ---
 
@@ -53,6 +54,7 @@ CLI をインストールしてログインしておけば、**API キーは不�
 2. ターミナルで `ne .` を実行する
 
 necoder が起動中ならそのウィンドウで開き、起動していなければアプリを起動する。
+`ne src/main.rs:42` で 42 行目へ、`ne --diff a.txt b.txt` で 2 ファイルの差分を開ける（[§16](#16-コマンドラインne)）。
 
 ---
 
@@ -221,6 +223,7 @@ statusbar の診断アイコン（✕ n ⚠ n）をクリックすると診断�
 - `＋` でタブを追加する
 - 出力中の `file:line` はリンクになり、クリックでその行を開く
 - statusbar のターミナルボタンでも開閉できる
+- `ne terminal …` で外から一覧・読み取り・待機ができる。文字を送るのは設定で許可した時だけ（[§16](#16-コマンドラインne)）
 
 ---
 
@@ -537,3 +540,53 @@ emacs 風の ⌃ キーは Windows では使えない（矢印キーで代用）
 | ⌘F | 会話内を検索 |
 | ⌘W | スレッドを閉じる |
 | ⌃Tab / ⌃⇧Tab | 次 / 前のスレッド |
+
+---
+
+## 16. コマンドライン（`ne`）
+
+`ne` は necoder の CLI（入れ方は [§1](#ターミナルから開くne-コマンド)）。`ne fleet …` などは `necoder fleet …` と同じで、
+`ne` が無い環境では necoder の実体（macOS: `/Applications/necoder.app/Contents/MacOS/necoder`）を直接呼ぶ。
+失敗すると理由を標準エラーに出し、終了コード 1 を返す。エージェント向けの全コマンドの説明は `ne skills get --full` が、入っている版の実装から出す。
+
+### 開く
+
+| コマンド | 動作 |
+|---|---|
+| `ne <パス>` | 起動中の necoder で開く（フォルダはレールへ・ファイルはタブへ）。引数なしは前面に出すだけ |
+| `ne <ファイル>:<行>[:<列>]` | そのファイルを開いて行（と列）へ飛ぶ。`:12` を含む名前のファイルが本当にあればそちらを開く。necoder が起動していない時はファイルを開くだけ |
+| `ne --diff <左> <右>` | 2 つのファイルの差分を、読み取り専用の diff タブで開く（necoder の起動が必要） |
+
+### Fleet（`ne fleet …`）
+
+| コマンド | 動作 |
+|---|---|
+| `ne fleet create [root] [名前]` | Task を切る（`task/*` ブランチと worktree を作り、台帳に登録） |
+| `ne fleet list [root]` | このリポジトリの Task の一覧（JSON） |
+| `ne fleet status <task> <phase> [要約]` | phase を進めて要約を残す |
+| `ne fleet wait <task> <phase\|activity> [秒]` | 指定の phase / 動きになるまで待つ |
+| `ne fleet depend <task> <依存...>` / `wait-deps <task> <phase> [秒]` | 依存の宣言と待ち |
+| `ne fleet review <task> [統合先]` | Conflict Radar（統合先を変えない merge の試算） |
+| `ne fleet spawn-agent <task> [agent] [prompt...]` / `send <task> <文...>` | エージェントを起こす / 追撃する（necoder の起動が必要） |
+| `ne fleet digest <task>` / `events [id]` | 今の要約 / 台帳のイベント |
+
+`ne fleet integrate` もあるが、**Integrate は人間が押す操作**（Captain やエージェントには使わせない）。
+
+**`<task>` の指し方**: id のほか、`branch:task/fix-login`（`task/` は省ける）・`name:Fix login`（Task の名前と完全一致）・
+`active`（necoder で選択中の Task）。前置きなしは id → ブランチ → 名前の順に探す。ブランチと名前は今いるフォルダの
+リポジトリの Task だけから探し、1 つに絞れなければ候補を出して止まる。統合先（main）は id でしか選べない。
+
+### 端末（`ne terminal …`）
+
+起動中の necoder の端末（下ドックのタブと、Fleet の Task カードに置いた端末）を外から扱う。
+
+| コマンド | 動作 |
+|---|---|
+| `ne terminal list [task]` | 端末の一覧（ハンドル・どの Task か・下ドックか Task カードか・出力が止まってからの時間） |
+| `ne terminal read <端末> [scrollback の行数]` | 今の画面の文字（と、その上の scrollback）を出す |
+| `ne terminal send <端末> [--enter] <文字...>` | 文字を送る。`--enter` で最後に Enter |
+| `ne terminal wait <端末> [止まる秒数] [期限の秒数]` | 出力が指定の秒数（既定 2）止まるまで待つ（既定 600 秒で失敗） |
+
+- `<端末>` は `list` が返すハンドル（`t` + 番号）か `active`（選択中のプロジェクトの下ドックで前に出ている端末）。ハンドルは necoder を再起動すると変わる
+- **`send` は既定で効かない。** 送った文字はその端末でそのまま実行されるので、**設定 → 動作とエディタ →「CLI から端末へ入力を送る」**を on にした時だけ受け付ける（`ne config set allow_terminal_send true` でも同じ）。一覧・読み取り・待機は off のままでも使える
+

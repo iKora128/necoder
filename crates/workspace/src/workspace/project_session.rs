@@ -818,6 +818,7 @@ impl Workspace {
                 pending_settings_command: None,
                 pending_open_settings_json: false,
                 pending_external_open: Vec::new(),
+                pending_external_goto: Vec::new(),
                 pending_askpass: None,
                 pending_askpass_focus: false,
                 pending_remote_open: Vec::new(),

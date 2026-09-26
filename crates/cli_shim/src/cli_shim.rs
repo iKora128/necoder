@@ -20,7 +20,8 @@ pub const COMMAND_NAME: &str = "ne";
 /// `ne <これ> …` を `necoder <これ> …` へそのまま渡すサブコマンド（それ以外は `necoder cli …` = 開く）。
 /// シムの `case` と `ne --help`・`necoder skills get` の本文がこの一覧を共有する。
 /// 足した後も、古いシムからは `necoder cli <これ>` で届く（`crates/necoder/src/cli.rs` の `run_open`）。
-pub const PASSTHROUGH_SUBCOMMANDS: &[&str] = &["config", "fleet", "mcp", "remote", "skills"];
+pub const PASSTHROUGH_SUBCOMMANDS: &[&str] =
+    &["config", "fleet", "mcp", "remote", "skills", "terminal"];
 
 /// この OS でシム設置に対応しているか（Windows は W フェーズ・WINDOWS-PORT.md）。
 pub fn supported() -> bool {
@@ -292,7 +293,8 @@ mod tests {
     fn shim_delegates_subcommands_and_cli() {
         let script = shim_script(Path::new("/usr/local/necoder"));
         assert!(script.starts_with("#!/bin/sh"));
-        assert!(script.contains(r#"config|fleet|mcp|remote|skills) exec "$NECODER_BIN" "$@" ;;"#));
+        assert!(script
+            .contains(r#"config|fleet|mcp|remote|skills|terminal) exec "$NECODER_BIN" "$@" ;;"#));
         assert!(script.contains(r#"exec "$NECODER_BIN" cli "$@""#));
     }
 }

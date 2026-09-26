@@ -58,11 +58,15 @@ Captain / script の操作面は GUI と同じ ledger と Git safety gate を使
 ```bash
 necoder fleet create [integration-root] [title]
 necoder fleet list [integration-root]
-necoder fleet status <task-id> <phase> [summary]
-necoder fleet wait <task-id> <phase> [timeout-seconds]
-necoder fleet review <task-id> [integration-root]
-necoder fleet integrate <task-id> [integration-root]
+necoder fleet status <task> <phase> [summary]
+necoder fleet wait <task> <phase> [timeout-seconds]
+necoder fleet review <task> [integration-root]
+necoder fleet integrate <task> [integration-root]
 ```
+
+`<task>` は id のほか `branch:<ブランチ>` / `name:<名前>` / `active`（GUI で選択中）で指せる。前置きなしは
+id → ブランチ → 名前の順。ブランチと名前は今いるリポジトリの Task だけから探し、統合先は id でしか選べない
+（`fleet.rs` の `select_task`）。全サブコマンドと使い方は `necoder skills get --full` が実装から出す。
 
 MCP にも `fleet_create_task`, `fleet_list_tasks`, `fleet_update_task`, `fleet_wait_task`,
 `fleet_review_task`, `fleet_integrate_task` を公開する。wait は GUI process の一時 state でなく永続 ledger を
