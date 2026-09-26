@@ -982,6 +982,22 @@ impl Workspace {
                     }),
                 ),
             );
+            // HTML は内蔵の配信で Web タブにも開ける（Design Mode が使える・手元のファイルだけ）。
+            if is_local
+                && !self.chat_mode()
+                && lang::language_for_path(&path) == Some(lang::LanguageId::Html)
+            {
+                let web_path = path.clone();
+                menu_box = menu_box.child(
+                    item("ctx-open-web-tab", i18n::t!("explorer.ctx_open_web_tab")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.hide_context_menu(cx);
+                            this.open_static_web_tab(web_path.clone(), window, cx);
+                        }),
+                    ),
+                );
+            }
         }
         // ── 既定アプリで開く / Finder で表示（ローカルのみ・シングルクリックで代替できない操作） ──
         if is_local {
