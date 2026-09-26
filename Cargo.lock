@@ -9388,6 +9388,7 @@ dependencies = [
  "search_ui",
  "serde",
  "serde_json",
+ "serde_yaml",
  "settings",
  "settings_core",
  "storage",

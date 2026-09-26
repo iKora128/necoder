@@ -1,11 +1,14 @@
 //! ターミナルの配色ファイルを読む（O25・C11）。`terminal_color_scheme`（settings.json）に置いたパスの
 //! ファイルから、ANSI 16 色と文字 / 背景の色を取り出して [`terminal_view::TerminalColors`] にする。
 //!
-//! 読める書式は 3 つで、拡張子ではなく中身で見分ける:
+//! 読める書式は 4 つで、拡張子ではなく中身で見分ける:
 //! - **iTerm2 の `.itermcolors`**（plist の XML）: `Ansi 0 Color` 〜 `Ansi 15 Color`・`Background Color`・
 //!   `Foreground Color`（成分は 0〜1 の実数）
 //! - **Windows Terminal の scheme**（`{` で始まる JSON）: `black` 〜 `brightWhite`（紫は `purple` /
 //!   `magenta`）・`background`・`foreground`。settings.json ごと渡されたら `schemes` の先頭
+//! - **Warp のテーマ**（最上位に `terminal_colors:` のある YAML）: `terminal_colors` の `normal` / `bright`
+//!   の `black` 〜 `white`・`background`・`foreground`。グラデーション（`top` / `bottom`・`left` / `right`）は
+//!   最初の色
 //! - **Ghostty のテーマ**（`key = value`）: `palette = 0=#1d1f21`・`background`・`foreground`
 //!
 //! 読むのは色だけ。カーソルの色は取り込まない（キャレットはプロジェクトの識別色・UI-SPEC）。
@@ -35,6 +38,11 @@ const WINDOWS_TERMINAL_KEYS: [(&str, &str); 16] = [
     ("brightWhite", "brightWhite"),
 ];
 
+/// Warp のテーマの ANSI の名前（`normal` と `bright` の中・番号順）。
+const WARP_NAMES: [&str; 8] = [
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+];
+
 /// 配色ファイルの中身を読む。色が 1 つも読めなければエラー（書式違いに黙って既定へ戻らない）。
 pub(crate) fn parse_color_scheme(text: &str) -> anyhow::Result<TerminalColors> {
     let head = text.trim_start();
@@ -42,11 +50,16 @@ pub(crate) fn parse_color_scheme(text: &str) -> anyhow::Result<TerminalColors> {
         parse_itermcolors(text)
     } else if head.starts_with('{') {
         parse_windows_terminal(text)?
+    } else if text
+        .lines()
+        .any(|line| line.starts_with("terminal_colors:"))
+    {
+        parse_warp(text)?
     } else {
         parse_ghostty(text)
     };
     if colors == TerminalColors::default() {
-        anyhow::bail!("配色が 1 つも読めない（Ghostty / Windows Terminal / iTerm2 の配色ファイルか確かめてください）");
+        anyhow::bail!("配色が 1 つも読めない（Ghostty / Windows Terminal / iTerm2 / Warp の配色ファイルか確かめてください）");
     }
     Ok(colors)
 }
@@ -144,6 +157,35 @@ fn parse_windows_terminal(text: &str) -> anyhow::Result<TerminalColors> {
     colors.background = color("background");
     colors.foreground = color("foreground");
     Ok(colors)
+}
+
+fn parse_warp(text: &str) -> anyhow::Result<TerminalColors> {
+    let theme: serde_yaml::Value = serde_yaml::from_str(text)?;
+    let terminal = theme.get("terminal_colors");
+    let mut colors = TerminalColors::default();
+    for (offset, group) in [(0, "normal"), (8, "bright")] {
+        for (index, name) in WARP_NAMES.iter().enumerate() {
+            colors.palette[offset + index] = terminal
+                .and_then(|terminal| terminal.get(group))
+                .and_then(|group| group.get(name))
+                .and_then(warp_color);
+        }
+    }
+    colors.background = theme.get("background").and_then(warp_color);
+    colors.foreground = theme.get("foreground").and_then(warp_color);
+    Ok(colors)
+}
+
+/// Warp の色（`'#rrggbb'`）。グラデーションは最初の色（`top` か `left`）。
+fn warp_color(value: &serde_yaml::Value) -> Option<Rgb> {
+    match value {
+        serde_yaml::Value::String(text) => hex_color(text),
+        serde_yaml::Value::Mapping(_) => ["top", "left"]
+            .into_iter()
+            .find_map(|key| value.get(key))
+            .and_then(warp_color),
+        _ => None,
+    }
 }
 
 fn parse_itermcolors(text: &str) -> TerminalColors {
@@ -247,8 +289,34 @@ mod tests {
     }
 
     #[test]
+    fn warp_themes_are_read() {
+        let theme = "# Solarized Dark\nname: Solarized Dark\naccent: '#268bd2'\nbackground: '#002b36'\ndetails: darker\nforeground: '#839496'\nterminal_colors:\n  bright:\n    black: '#002b36'\n    magenta: \"#6c71c4\"\n  normal:\n    black: '#073642' # 黒\n    red: '#dc322f'\n    white: '#eee8d5'\n";
+        let colors = parse_color_scheme(theme).unwrap();
+        assert_eq!(colors.palette[0], Some((0x07, 0x36, 0x42)));
+        assert_eq!(colors.palette[1], Some((0xdc, 0x32, 0x2f)));
+        assert_eq!(colors.palette[7], Some((0xee, 0xe8, 0xd5)));
+        assert_eq!(
+            colors.palette[8],
+            Some((0x00, 0x2b, 0x36)),
+            "bright は 8 から"
+        );
+        assert_eq!(colors.palette[13], Some((0x6c, 0x71, 0xc4)));
+        assert_eq!(colors.palette[2], None, "書いていない色は既定");
+        assert_eq!(colors.background, Some((0x00, 0x2b, 0x36)));
+        assert_eq!(colors.foreground, Some((0x83, 0x94, 0x96)));
+        let gradient = "background:\n  top: '#474747'\n  bottom: '#000000'\nterminal_colors:\n  normal:\n    red: '#ff0000'\n";
+        assert_eq!(
+            parse_color_scheme(gradient).unwrap().background,
+            Some((0x47, 0x47, 0x47)),
+            "グラデーションは最初の色"
+        );
+    }
+
+    #[test]
     fn files_without_colors_are_refused() {
         assert!(parse_color_scheme("font-size = 14\n").is_err());
+        assert!(parse_color_scheme("terminal_colors:\n  normal: {}\n").is_err());
+        assert!(parse_color_scheme("terminal_colors:\n  normal: [\n").is_err());
         assert!(parse_color_scheme("{ \"name\": \"x\" }").is_err());
         assert!(parse_color_scheme("{ broken").is_err());
         assert_eq!(load_color_scheme(""), TerminalColors::default());
