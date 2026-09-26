@@ -1762,6 +1762,7 @@ impl Workspace {
                             .map(|editor| self.render_breadcrumb(editor, cx)),
                     )
                     .children(self.render_external_change_bar(cx))
+                    .children(self.render_conflict_bar(cx))
                     .child(
                         div()
                             .flex_1()

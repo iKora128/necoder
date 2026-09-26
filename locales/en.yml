@@ -228,6 +228,11 @@ cmd:
   new_terminal_tab: "Terminal: New terminal in the editor area"
   move_terminal_to_editor: "Terminal: Move terminal into the editor area"
   toggle_floating_terminal: "Terminal: Floating terminal (from anywhere)"
+  resolve_conflict_ours: "Merge: Resolve the conflict with the current side"
+  resolve_conflict_theirs: "Merge: Resolve the conflict with the incoming side"
+  resolve_conflict_both: "Merge: Resolve the conflict keeping both"
+  next_conflict: "Merge: Next conflict"
+  abort_merge_or_rebase: "Git: Abort the merge or rebase"
   toggle_git_panel: "View: Source control"
   toggle_todo_board: "View: Todo board"
   toggle_fleet: "View: Fleet mode"
@@ -968,6 +973,22 @@ design:
 pdf:
   unsupported: PDF cannot be shown in a tab in this environment
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead
+conflict:
+  bar: "⑂ %{count} conflicts (line %{line})"
+  ours: Current
+  theirs: Incoming
+  both: Both
+  next: Next ↓
+  none: This file has no conflict markers (<<<<<<<)
+  nothing_to_abort: No merge or rebase is in progress
+  abort_merge_title: Abort the merge?
+  abort_merge_detail: "This runs git merge --abort. Changes made during the merge, including resolved conflicts, are discarded and the branch goes back to before the merge."
+  abort_merge_confirm: Abort merge
+  abort_rebase_title: Abort the rebase?
+  abort_rebase_detail: "This runs git rebase --abort. Changes made during the rebase are discarded and the branch goes back to where it was."
+  abort_rebase_confirm: Abort rebase
+  abort_cancel: Cancel
+  aborted: Aborted
 terminal:
   quick_tip: "Quick commands (quick_commands in settings.json). Pick one to run it in a new terminal"
   tab_title: Terminal %{n}

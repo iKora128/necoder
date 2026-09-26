@@ -603,6 +603,10 @@ impl Workspace {
         if !terminal {
             self.reveal_work_file(path.clone(), cx);
         }
+        // 移った先のエディタの衝突の印を数える（O19・E05・帯をすぐ出す）。
+        if let Some(editor) = editor.as_ref() {
+            self.refresh_conflicts(editor, cx);
+        }
         if let Some(editor) = editor.filter(|editor| editor.read(cx).rendered_html()) {
             editor.update(cx, |editor, cx| editor.set_surface_active(true, true, cx));
         } else {

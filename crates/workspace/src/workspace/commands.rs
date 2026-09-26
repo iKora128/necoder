@@ -159,6 +159,26 @@ impl CommandRegistry {
                 action_name: "workspace::ToggleFloatingTerminal",
             },
             CommandEntry {
+                label_key: "cmd.resolve_conflict_ours",
+                action_name: "workspace::ResolveConflictOurs",
+            },
+            CommandEntry {
+                label_key: "cmd.resolve_conflict_theirs",
+                action_name: "workspace::ResolveConflictTheirs",
+            },
+            CommandEntry {
+                label_key: "cmd.resolve_conflict_both",
+                action_name: "workspace::ResolveConflictBoth",
+            },
+            CommandEntry {
+                label_key: "cmd.next_conflict",
+                action_name: "workspace::NextConflict",
+            },
+            CommandEntry {
+                label_key: "cmd.abort_merge_or_rebase",
+                action_name: "workspace::AbortMergeOrRebase",
+            },
+            CommandEntry {
                 label_key: "cmd.toggle_git_panel",
                 action_name: "workspace::ToggleGitPanel",
             },
