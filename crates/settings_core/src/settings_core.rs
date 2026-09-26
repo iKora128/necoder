@@ -258,10 +258,15 @@ pub struct Settings {
     /// 普通に消え、自分で選んだスリープとノートの蓋を閉じた時のスリープは止めない。
     /// 解釈は [`Settings::keep_awake_mode`]（知らない値は止める側に倒す）。
     pub keep_awake: String,
+    /// UI の書体（空 = 同梱の IBM Plex Sans JP・O27）。入っていない書体は OS の代わりの書体で描く。
+    pub ui_font_family: String,
+    /// コードの書体（空 = 同梱の Guguru Sans Code・O27）。エディタ・差分・パス、ターミナルの既定。
+    /// 等幅の書体を書く。
+    pub code_font_family: String,
     /// ターミナルの文字の大きさ（pt・既定 12.5 = エディタより少し小さい・O25）。範囲の外は 8〜32 に丸める。
     /// 変えると開いている端末もその場で描き直す（行と列は測り直してシェルへ伝わる）。
     pub terminal_font_size: f32,
-    /// ターミナルのフォント（空 = エディタと同じコードフォント・O25）。等幅のフォントの名前を書く。
+    /// ターミナルのフォント（空 = コードの書体 `code_font_family`・O25）。等幅のフォントの名前を書く。
     pub terminal_font_family: String,
     /// ターミナルで遡れる行数（既定 10,000・上限 100,000・O25）。減らすと古い行から捨てる。
     pub terminal_scrollback: u64,
@@ -340,6 +345,8 @@ impl Default for Settings {
             confirm_worktree_delete: true,
             confirm_quit: "running".to_string(),
             keep_awake: "working".to_string(),
+            ui_font_family: String::new(),
+            code_font_family: String::new(),
             terminal_font_size: 12.5,
             terminal_font_family: String::new(),
             terminal_scrollback: 10_000,
@@ -447,6 +454,8 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "confirm_worktree_delete": true,
   "confirm_quit": "running",
   "keep_awake": "working",
+  "ui_font_family": "",
+  "code_font_family": "",
   "terminal_font_size": 12.5,
   "terminal_font_family": "",
   "terminal_scrollback": 10000,
@@ -1037,6 +1046,8 @@ mod tests {
         assert_eq!(settings.terminal_scrollback, 10_000);
         assert_eq!(settings.terminal_cursor, "block");
         assert_eq!(settings.terminal_shell, "", "空 = OS の既定のシェル");
+        assert_eq!(settings.ui_font_family, "", "空 = 同梱の書体");
+        assert_eq!(settings.code_font_family, "");
         assert!(settings.terminal_shell_args.is_empty());
         assert_eq!(
             *settings,

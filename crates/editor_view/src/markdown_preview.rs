@@ -55,6 +55,7 @@ pub(crate) fn render_preview(
     blocks: &[markdown::Block],
     theme: &Theme,
     font_size: f32,
+    code_font: SharedString,
     scroll: &ScrollHandle,
     base_dir: Option<&Path>,
     on_link: LinkHandler,
@@ -81,12 +82,9 @@ pub(crate) fn render_preview(
                 .text_size(px(prose))
                 .line_height(px(prose * 1.65))
                 .text_color(theme.fg0)
-                .children(
-                    blocks
-                        .iter()
-                        .cloned()
-                        .map(|block| render_block(block, theme, font_size, base_dir, &links)),
-                ),
+                .children(blocks.iter().cloned().map(|block| {
+                    render_block(block, theme, font_size, &code_font, base_dir, &links)
+                })),
         )
         .into_any_element()
 }
@@ -96,6 +94,7 @@ fn render_block(
     block: markdown::Block,
     theme: &Theme,
     font_size: f32,
+    code_font: &SharedString,
     base_dir: Option<&Path>,
     links: &Links,
 ) -> AnyElement {
@@ -127,7 +126,7 @@ fn render_block(
                 .border_color(theme.border)
                 .px(px(11.))
                 .py(px(9.))
-                .font_family("Guguru Sans Code")
+                .font_family(code_font.clone())
                 .text_size(px(font_size))
                 .line_height(px(font_size * 1.5))
                 .text_color(theme.fg0)

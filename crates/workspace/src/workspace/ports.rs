@@ -538,7 +538,7 @@ impl Workspace {
                 div()
                     .flex_none()
                     .w(px(64.))
-                    .font_family("Guguru Sans Code")
+                    .font_family(ui::code_font(cx))
                     .text_size(px(12.))
                     .text_color(theme.fg0)
                     .child(SharedString::from(format!(":{}", row.port.port))),

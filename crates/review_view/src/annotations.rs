@@ -761,7 +761,7 @@ impl ReviewView {
                                 .py(px(3.))
                                 .rounded(px(4.))
                                 .bg(theme.bg1)
-                                .font_family(CODE_FONT)
+                                .font_family(ui::code_font(cx))
                                 .text_size(px(11.))
                                 .text_color(theme.fg2)
                                 .children(excerpt.into_iter().map(|line| {
@@ -787,7 +787,7 @@ impl ReviewView {
                             .child(
                                 div()
                                     .flex_none()
-                                    .font_family(CODE_FONT)
+                                    .font_family(ui::code_font(cx))
                                     .text_size(px(10.5))
                                     .text_color(theme.fg2)
                                     .child(SharedString::from(note.target.location())),
@@ -943,7 +943,7 @@ impl ReviewView {
                             .child(SharedString::from(title))
                             .child(
                                 div()
-                                    .font_family(CODE_FONT)
+                                    .font_family(ui::code_font(cx))
                                     .child(SharedString::from(location)),
                             ),
                     )
@@ -1061,7 +1061,7 @@ impl ReviewView {
                     .child(
                         div()
                             .flex_none()
-                            .font_family(CODE_FONT)
+                            .font_family(ui::code_font(cx))
                             .text_size(px(11.))
                             .text_color(theme.fg1)
                             .child(SharedString::from(note.target.location())),

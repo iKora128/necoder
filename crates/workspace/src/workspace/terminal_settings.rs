@@ -7,13 +7,19 @@
 
 use crate::workspace::*;
 
-/// 設定からターミナルの見た目を作る（範囲の外の値は terminal_view が丸める）。
+/// 設定からターミナルの見た目を作る（範囲の外の値は terminal_view が丸める）。フォントが空なら
+/// コードの書体（`code_font_family`・それも空なら同梱の既定）に揃える。
 pub(crate) fn terminal_appearance_from(
     settings: &settings::Settings,
 ) -> terminal_view::TerminalAppearance {
+    let family = if settings.terminal_font_family.trim().is_empty() {
+        &settings.code_font_family
+    } else {
+        &settings.terminal_font_family
+    };
     terminal_view::TerminalAppearance::new(
         settings.terminal_font_size,
-        &settings.terminal_font_family,
+        family,
         usize::try_from(settings.terminal_scrollback).unwrap_or(usize::MAX),
         &settings.terminal_cursor,
     )

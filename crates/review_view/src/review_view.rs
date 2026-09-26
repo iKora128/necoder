@@ -57,8 +57,6 @@ use storage::{ReviewNoteState, Storage};
 use theme_core::Theme;
 use ui::Tooltip;
 
-/// コードの書体（エディタと同じ等幅）。
-const CODE_FONT: &str = "Guguru Sans Code";
 const CODE_FONT_SIZE: f32 = 12.5;
 const ROW_MIN_HEIGHT: f32 = 20.;
 const NUMBER_COLUMN_WIDTH: f32 = 42.;
@@ -1898,7 +1896,7 @@ impl ReviewView {
                 gpui::transparent_black()
             })
             .when_some(tint, |row, tint| row.bg(tint))
-            .font_family(CODE_FONT)
+            .font_family(ui::code_font(cx))
             .text_size(px(CODE_FONT_SIZE))
             .line_height(px(ROW_MIN_HEIGHT))
             .on_mouse_down(
@@ -2037,7 +2035,7 @@ impl ReviewView {
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .font_family(CODE_FONT)
+                        .font_family(ui::code_font(cx))
                         .child(SharedString::from(section)),
                 )
             })

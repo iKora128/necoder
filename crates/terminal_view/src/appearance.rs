@@ -10,8 +10,9 @@ use gpui::{App, Global, SharedString};
 
 /// 文字の大きさの既定（pt）。エディタより少し小さい。
 pub const DEFAULT_FONT_SIZE: f32 = 12.5;
-/// 既定のフォント（エディタと同じコードフォント・等幅）。
-pub const DEFAULT_FONT_FAMILY: &str = "Guguru Sans Code";
+/// 既定のフォント（同梱のコードの書体・等幅）。workspace はコードの書体の設定をここへ渡すので、
+/// これが効くのは設定が何も無い時だけ。
+pub const DEFAULT_FONT_FAMILY: &str = ui::fonts::DEFAULT_CODE_FONT;
 /// 遡れる行数の既定。
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 /// 文字の大きさの範囲（設定画面の ± と、手で書いた値の丸め）。

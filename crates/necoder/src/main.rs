@@ -780,6 +780,8 @@ fn main() {
         workspace::install_keep_awake(cx);
         // ターミナルの文字の大きさ・フォント・scrollback・カーソル・シェル（O25・設定 `terminal_*`）。
         workspace::install_terminal_settings(cx);
+        // UI とコードの書体（O27・設定 `ui_font_family` / `code_font_family`）。
+        workspace::install_font_settings(cx);
         let settings = settings::get(cx);
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);
