@@ -7,6 +7,8 @@ const UPDATE_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_s
 /// 再確認の要否を見に行く周期。間隔そのものを 1 本のタイマーにしないのは、macOS の sleep 中に
 /// 単調時計が止まり「寝ていた時間」が経過に数えられないため（短く起きて壁時計で判定する）。
 const UPDATE_CHECK_TICK: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// 使い方の文書（メニュー「ヘルプ › necoder のマニュアル」）。
+const MANUAL_URL: &str = "https://github.com/iKora128/necoder/blob/main/docs/MANUAL.md";
 
 /// 更新確認の時期が来たか。
 ///
@@ -2973,6 +2975,17 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// メニュー「ヘルプ › necoder のマニュアル」（O27・H29）: 使い方の文書（`docs/MANUAL.md`・日本語）を
+    /// ブラウザで開く。押すまでネットに出ない。
+    pub(crate) fn open_manual_action(
+        &mut self,
+        _: &OpenManual,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.open_url(MANUAL_URL);
     }
 
     /// new issue URL を組んでブラウザで開く（sw_vers・ログ読みがあるので背景で）。
