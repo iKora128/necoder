@@ -46,6 +46,13 @@
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
 | ↳ **会話名**（エージェントが付けたスレッドの題名。手動改名が優先） | `AgentEvent::TitleChanged`（ACP `session_info_update.title`）/ 手動の印 `thread_custom_names` | （スレッド名） | (thread name) |
 | ↳ **目標**（`/goal` でエージェントが追う目的。composer の上に 1 行） | `acp_client::AgentGoal` / `AgentEvent::GoalChanged` / `Thread.goal` | 目標 | Goal |
+| ↳ **スレッド履歴**（⌘⇧H / 🕘 の画面。3 区分: このプロジェクトのスレッド・エージェントの過去の会話・本文の一致。← スレッド履歴 Picker） | `history_view::ThreadHistoryState`（action `ThreadHistory`） | スレッド履歴 | Thread history |
+| ↳ **エージェントの過去の会話**（エージェントが ACP `session/list` で返す会話。CLI で作った物を含む。necoder が持つ会話・necoder の用事の会話は除く。開くと `session/load` で再開） | `acp_client::history::AgentSessionSummary` / `AgentPanel::open_agent_session` | エージェントの過去の会話 | Agent's past conversations |
+| ↳ **本文の一致**（全スレッドの発言の全文検索の結果。1 スレッド 1 件） | `Storage::search_thread_turns` / `storage::TurnSearchHit` | 本文の一致 | Message matches |
+| ↳ **再生**（`session/load` でエージェントが送り直す過去の会話。開いた時だけ transcript に積む） | `AgentEvent::HistoryReplayed` / `acp_client::history::ReplayLog` | —（「以前の N 件は省略しました」の区切りだけ出る） | — |
+| ↳ **新しいセッションで続ける**（handoff。今の会話の抜粋を前置きに、同じタブで新しいセッションへ。要約はしない） | `AgentPanel::continue_in_new_session` / `Thread.handoff_preamble`（action `ContinueInNewSession`） | 新しいセッションで続ける | Continue in a new session |
+| ↳ **区切り**（transcript の会話ではない一行: 省略・新しいセッション。検索・前置きに入れない） | `Entry::Notice`（DB の role `notice`） | （文そのもの） | （the text itself） |
+| ↳ **前の会話**（新しいセッションで続けた・引き継げずに替わった会話 id。履歴で重ねて出さない鍵） | `thread_past_sessions`（storage） | — | — |
 | ↳ **使用量**（エージェントがターンごとに報告したトークンと推定コスト。台帳に 1 ターン 1 行・O11） | `turn_usage`（storage）/ `AgentEvent::TurnUsage` / `AgentEvent::SessionCost` / `agent_panel::usage::CostMeter` | 使用量 | Usage |
 | ↳ **レート制限**（プランの利用上限の窓と使用率。エージェントが知らせてきた**最後の値**・O11） | `acp_client::usage::RateLimits` / `AgentEvent::RateLimits` / `agent_panel::usage::UsageLimits` | レート制限 | Rate limits |
 | ↳ **窓**（レート制限の期間） | `LimitWindow::{FiveHour, Weekly, Named, Minutes}` | 5 時間枠 / 週枠 / 〈名前〉の週枠 | 5-hour window / Weekly window / Weekly (〈name〉) |
