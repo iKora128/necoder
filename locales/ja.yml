@@ -581,6 +581,15 @@ settings:
   pref_reduce_motion_sub: 点字スピナーや猫などの装飾アニメーションを静止します
   pref_font_size: フォントサイズ
   pref_tab_size: タブ幅
+  pref_terminal_font_size: ターミナルの文字の大きさ
+  pref_terminal_scrollback: ターミナルで遡れる行数
+  pref_terminal_scrollback_sub: "減らすと古い行から捨てます。フォントは settings.json の terminal_font_family で変えられます"
+  terminal_scrollback_lines: "%{n} 行"
+  pref_terminal_cursor: ターミナルのカーソル
+  pref_terminal_cursor_sub: "vim などが形を指定した時はそちらが優先されます"
+  terminal_cursor_block: ブロック
+  terminal_cursor_bar: 縦線
+  terminal_cursor_underline: 下線
   pref_tabs_view: スレッドタブの表示
   tabs_view_bar: 横タブ
   tabs_view_list: 縦リスト

@@ -1522,9 +1522,12 @@ impl SettingsView {
         is_int: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        let dec = (value - step).max(min);
-        let inc = (value + step).min(max);
-        let display = format!("{}", value as i64);
+        let (dec, inc) = stepper_targets(value, min, max, step);
+        let display = if value.fract() == 0.0 {
+            format!("{}", value as i64)
+        } else {
+            format!("{value:.1}")
+        };
         let control = div()
             .flex()
             .items_center()
@@ -1611,6 +1614,57 @@ impl SettingsView {
             );
         }
         // 選択肢の名前でも当てる（「Glass」で通知音の行に着く等）。
+        let keywords: Vec<&str> = std::iter::once(key)
+            .chain(options.iter().map(|(_, display)| display.as_str()))
+            .collect();
+        self.pref_row_with_keywords(&keywords, label, sub, segments.into_any_element())
+    }
+
+    /// 数の選択（`terminal_scrollback` のように値が数の設定・選択中は accent）。見た目はセグメント行と同じ。
+    /// セグメント行は値を文字列で書くので、数の設定はこちらを使う（文字列だと型が合わず読めなくなる）。
+    fn number_choice_row(
+        &self,
+        key: &'static str,
+        label: String,
+        sub: Option<String>,
+        options: &[(i64, String)],
+        current: i64,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let mut segments = div()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .items_center()
+            .gap(px(4.));
+        for (idx, (value, display)) in options.iter().enumerate() {
+            let selected = *value == current;
+            let value = *value;
+            segments = segments.child(
+                div()
+                    .id((key, idx))
+                    .px(px(9.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(11.5))
+                    .when(selected, |element| {
+                        element.bg(accent.alpha(0.16)).text_color(accent)
+                    })
+                    .when(!selected, |element| {
+                        element
+                            .text_color(theme.fg2)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    })
+                    .child(SharedString::from(display.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| view.set_pref_int(key, value, cx)),
+                    ),
+            );
+        }
         let keywords: Vec<&str> = std::iter::once(key)
             .chain(options.iter().map(|(_, display)| display.as_str()))
             .collect();
@@ -2693,6 +2747,56 @@ impl SettingsView {
                 true,
                 cx,
             ))
+            // ターミナルの見た目（O25）。値は settings.json の `terminal_*`（フォントは JSON だけ）。
+            .child(self.stepper_row(
+                "terminal_font_size",
+                i18n::t!("settings.pref_terminal_font_size"),
+                f64::from(settings.terminal_font_size),
+                // 範囲は terminal_view の丸め（8〜32）と同じ。エディタの文字の大きさとも揃える。
+                8.0,
+                32.0,
+                1.0,
+                false,
+                cx,
+            ))
+            .child(self.number_choice_row(
+                "terminal_scrollback",
+                i18n::t!("settings.pref_terminal_scrollback"),
+                Some(i18n::t!("settings.pref_terminal_scrollback_sub")),
+                &[
+                    (
+                        1_000,
+                        i18n::t!("settings.terminal_scrollback_lines", "n" => "1,000"),
+                    ),
+                    (
+                        10_000,
+                        i18n::t!("settings.terminal_scrollback_lines", "n" => "10,000"),
+                    ),
+                    (
+                        50_000,
+                        i18n::t!("settings.terminal_scrollback_lines", "n" => "50,000"),
+                    ),
+                    (
+                        100_000,
+                        i18n::t!("settings.terminal_scrollback_lines", "n" => "100,000"),
+                    ),
+                ],
+                i64::try_from(settings.terminal_scrollback).unwrap_or(i64::MAX),
+                cx,
+            ))
+            .child(self.segmented_row_with(
+                "terminal_cursor",
+                i18n::t!("settings.pref_terminal_cursor"),
+                Some(i18n::t!("settings.pref_terminal_cursor_sub")),
+                &[
+                    ("block", i18n::t!("settings.terminal_cursor_block")),
+                    ("bar", i18n::t!("settings.terminal_cursor_bar")),
+                    ("underline", i18n::t!("settings.terminal_cursor_underline")),
+                ],
+                &settings.terminal_cursor,
+                false,
+                cx,
+            ))
             .child(self.segmented_row_with(
                 "sound_done",
                 i18n::t!("settings.pref_sound_done"),
@@ -3036,6 +3140,14 @@ fn next_captain_value(label: &str, current: Option<&str>) -> serde_json::Value {
     }
 }
 
+/// 数の設定の ± が押した時に書く値（−, +）。刻みの目盛りへ寄せる（12.5 から − で 12・+ で 13。
+/// 目盛りの上の値はそのまま 1 刻み）。範囲の外へは出ない。
+fn stepper_targets(value: f64, min: f64, max: f64, step: f64) -> (f64, f64) {
+    let decrease = (((value - step) / step).ceil() * step).max(min);
+    let increase = (((value + step) / step).floor() * step).min(max);
+    (decrease, increase)
+}
+
 fn sound_options() -> Vec<(&'static str, String)> {
     let mut options: Vec<(&'static str, String)> = settings_core::SOUND_VOICES
         .iter()
@@ -3224,6 +3336,23 @@ mod tests {
             "CODEX_HOME='/tmp/it'\\''s' codex login",
             "単引用符は閉じて逃がしてから開き直す"
         );
+    }
+
+    #[test]
+    fn steppers_snap_to_their_step() {
+        assert_eq!(
+            stepper_targets(12.5, 8.0, 32.0, 1.0),
+            (12.0, 13.0),
+            "半端な値は目盛りへ"
+        );
+        assert_eq!(stepper_targets(13.0, 8.0, 32.0, 1.0), (12.0, 14.0));
+        assert_eq!(
+            stepper_targets(8.0, 8.0, 32.0, 1.0),
+            (8.0, 9.0),
+            "下の端より下へは出ない"
+        );
+        assert_eq!(stepper_targets(32.0, 8.0, 32.0, 1.0), (31.0, 32.0));
+        assert_eq!(stepper_targets(40.0, 0.0, 100.0, 10.0), (30.0, 50.0));
     }
 
     #[test]
