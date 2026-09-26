@@ -617,12 +617,14 @@ impl Workspace {
             }
         }
         let active = self.project_sessions.active;
+        let file_position = self.file_position_of_tab(index);
         if let Some(slot) = self.project_sessions.slot_mut(active) {
             if !terminal {
                 slot.explorer.note_opened(&path); // ⌘P の「最近開いた」の先頭へ（D19）
                 slot.explorer.selected = Some(path);
             }
-            slot.active_file = index;
+            // タブ列の位置ではなく、ファイルの並びの中の位置（端末のタブを数えない・O24）。
+            slot.active_file = file_position;
         }
         self.push_active_diagnostics(cx);
         self.save_state(cx);
