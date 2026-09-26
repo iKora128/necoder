@@ -735,6 +735,8 @@ design:
   prompt_text: Text
   prompt_nearby: Nearby text
   capture_failed: Couldn't capture the element (attached the text only)
+  target_moved: "The picked element wasn't attached — you switched away from %{thread} while it was being captured. Go back to that thread and pick it again"
+  target_gone: The picked element wasn't attached — the thread it was picked for was closed
   needs_web_tab: "Design works in a Web tab (Preview: Open localhost…)"
   not_ready: Start Design once the page is showing
 pdf:

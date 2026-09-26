@@ -18,21 +18,60 @@
 use crate::workspace::*;
 use webview_view::{design, localhost, WebViewEvent, WebViewView};
 
-/// Design Mode で要素が選ばれた（Workspace がアクティブなスレッドの composer へ添える）。
+/// Design Mode の知らせ（Workspace が composer へ添える）。
+///
+/// 宛先は**選んだ瞬間**に決める（R05）: 切り抜きは非同期なので、撮り終わった時点のアクティブな
+/// スレッドへ添えると、その間にスレッドを切り替えた時に別の会話へ入る。選んだ時に `PickStarted` を
+/// 出し、Workspace はその時の宛先を [`WebPreviewView::remember_pick_target`] で控える。撮り終わったら
+/// 選んだ順に `ElementPicked`（控えた宛先つき）か `PickDropped`（読み直した後の古い結果）を出す。
 pub(crate) enum WebPreviewEvent {
+    PickStarted {
+        serial: u64,
+    },
     ElementPicked {
         capture: Box<design::ElementCapture>,
         /// 要素の切り抜き（撮れなかった時は `None` ＝ テキストだけ添える）。
         png: Option<Vec<u8>>,
-        /// この選択で Design が終わった（Shift+クリックで続ける時は `false`）。
+        /// この選択で Design が終わった（Shift+クリックで続ける時・その間に Design を始め直した時は
+        /// `false` ＝ composer へフォーカスを移さない）。
         finished: bool,
+        /// 選んだ時の宛先（控えられなかった時は `None` ＝ どこにも添えない）。
+        target: Option<PickTarget>,
     },
+    PickDropped,
+}
+
+/// 選んだ時の宛先（R05）。パネルが消えていれば添えない。
+#[derive(Clone)]
+pub(crate) struct PickTarget {
+    pub(crate) panel: gpui::WeakEntity<AgentPanel>,
+    /// 選んだ時にアクティブだったスレッドの永続 id。
+    pub(crate) thread_id: SharedString,
 }
 
 /// Design 中の状態（Design 中だけ `Some`）。
 struct DesignSession {
     /// この Design の合言葉。ページからの知らせはこれが一致した物だけ受ける。
     nonce: String,
+    /// 何回目の Design か（R05・古い Design の撮影結果で新しい Design を止めない）。
+    generation: u64,
+}
+
+/// 選んだ瞬間の控え（撮り終わった時に照合する・R05）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PickStart {
+    serial: u64,
+    /// 選んだ時の Design の回（Design 中でなければ最後の回）。
+    generation: u64,
+    /// 選んだ時のページの読み込みの回。
+    navigation: u64,
+}
+
+/// 撮り終わった選択（選んだ順に知らせるまで待つ）。`None` = 捨てた（読み直した後の古い結果）。
+struct ReadyPick {
+    capture: Box<design::ElementCapture>,
+    png: Option<Vec<u8>>,
+    finished: bool,
 }
 
 /// Web タブの鍵（`EditorTab.path`）。タブ列は path で同一判定・永続化するので、URL（正規形）を
@@ -106,6 +145,17 @@ pub(crate) struct WebPreviewView {
     viewer: Option<Entity<WebViewView>>,
     viewport: Viewport,
     design: Option<DesignSession>,
+    /// Design を始めた回数（R05）。
+    design_generation: u64,
+    /// ページを読み込み始めた回数（R05・読み直す前に選んだ要素の結果は捨てる）。
+    navigation: u64,
+    /// 選んだ順の通し番号（次に振る番号）と、次に知らせる番号（R05・撮り終わる順が逆になっても
+    /// 選んだ順に知らせる）。
+    next_pick: u64,
+    next_emit: u64,
+    ready_picks: std::collections::BTreeMap<u64, Option<ReadyPick>>,
+    /// 選んだ時の宛先（Workspace が `PickStarted` を受けて控える）。
+    pick_targets: HashMap<u64, PickTarget>,
     theme: Theme,
     focus_handle: FocusHandle,
     _viewer_subscriptions: Vec<Subscription>,
@@ -137,6 +187,12 @@ impl WebPreviewView {
             viewer,
             viewport: Viewport::Full,
             design: None,
+            design_generation: 0,
+            navigation: 0,
+            next_pick: 0,
+            next_emit: 0,
+            ready_picks: std::collections::BTreeMap::new(),
+            pick_targets: HashMap::new(),
             theme,
             focus_handle: cx.focus_handle(),
             _viewer_subscriptions: subscriptions,
@@ -150,13 +206,11 @@ impl WebPreviewView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            // 読み込み直した文書にはピッカーの状態が無い＝ Design は終わる。
+            // 読み込み直した文書にはピッカーの状態が無い＝ Design は終わる。撮影中の要素は古いページの
+            // 物になるので、撮り終わっても添えない（R05）。
             WebViewEvent::PageLoad {
                 finished: false, ..
-            } => {
-                self.design = None;
-                cx.notify();
-            }
+            } => self.on_page_load_started(cx),
             WebViewEvent::PageLoad { .. } | WebViewEvent::TitleChanged(_) => cx.notify(),
             WebViewEvent::Message { sender, body } => self.on_design_message(sender, body, cx),
         }
@@ -165,9 +219,17 @@ impl WebPreviewView {
     /// テスト用: WebView 無しで Design 中の状態にする（テスト窓はネイティブの WebView を作れない）。
     #[cfg(test)]
     pub(crate) fn force_design_for_test(&mut self) {
+        self.design_generation += 1;
         self.design = Some(DesignSession {
             nonce: design::new_nonce(),
+            generation: self.design_generation,
         });
+    }
+
+    /// テスト用: ページの読み込みが始まった（WebView 無しで読み直しを起こす）。
+    #[cfg(test)]
+    pub(crate) fn begin_navigation_for_test(&mut self, cx: &mut Context<Self>) {
+        self.on_page_load_started(cx);
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -199,7 +261,11 @@ impl WebPreviewView {
         {
             return false;
         }
-        self.design = Some(DesignSession { nonce });
+        self.design_generation += 1;
+        self.design = Some(DesignSession {
+            nonce,
+            generation: self.design_generation,
+        });
         // Esc をページの中で受けられるよう、キーを WebView へ渡す。
         viewer.update(cx, |viewer, _| viewer.set_key_focus(true));
         cx.notify();
@@ -238,6 +304,36 @@ impl WebPreviewView {
         }
     }
 
+    /// 読み込みが始まった: Design は終わり、撮影中の要素は古いページの物になる（R05）。
+    fn on_page_load_started(&mut self, cx: &mut Context<Self>) {
+        self.design = None;
+        self.navigation += 1;
+        cx.notify();
+    }
+
+    /// 要素が選ばれた瞬間: 通し番号と、その時の Design・ページの回を控え、Workspace に宛先を
+    /// 控えてもらう（`PickStarted`・R05）。
+    pub(crate) fn begin_pick(&mut self, cx: &mut Context<Self>) -> PickStart {
+        let start = PickStart {
+            serial: self.next_pick,
+            generation: self
+                .design
+                .as_ref()
+                .map_or(self.design_generation, |session| session.generation),
+            navigation: self.navigation,
+        };
+        self.next_pick += 1;
+        cx.emit(WebPreviewEvent::PickStarted {
+            serial: start.serial,
+        });
+        start
+    }
+
+    /// Workspace が選んだ時の宛先を控える（`PickStarted` の受け手）。
+    pub(crate) fn remember_pick_target(&mut self, serial: u64, target: PickTarget) {
+        self.pick_targets.insert(serial, target);
+    }
+
     /// 選ばれた要素を切り抜いてから知らせる。切り抜けなくてもテキストは添える。
     fn capture_pick(
         &mut self,
@@ -248,6 +344,7 @@ impl WebPreviewView {
         let Some(viewer) = self.viewer.clone() else {
             return;
         };
+        let start = self.begin_pick(cx);
         let (sender, receiver) = futures::channel::oneshot::channel();
         let started = viewer.read(cx).capture_element(
             &capture.element.rect,
@@ -264,19 +361,29 @@ impl WebPreviewView {
                     .unwrap_or_else(|_| Err("the snapshot was dropped".to_string())),
                 Err(error) => Err(error),
             };
-            this.update(cx, |this, cx| this.finish_pick(capture, multi, result, cx))
-                .ok();
+            this.update(cx, |this, cx| {
+                this.finish_pick(start, capture, multi, result, cx)
+            })
+            .ok();
         })
         .detach();
     }
 
-    fn finish_pick(
+    /// 撮り終わった（R05）。選んだ後でページを読み直していれば捨てる。Design を始め直していれば、
+    /// 新しい Design を止めも進めもしない（フォーカスも奪わない）。知らせるのは選んだ順。
+    pub(crate) fn finish_pick(
         &mut self,
+        start: PickStart,
         capture: Box<design::ElementCapture>,
         multi: bool,
         result: Result<Vec<u8>, String>,
         cx: &mut Context<Self>,
     ) {
+        if self.navigation != start.navigation {
+            self.ready_picks.insert(start.serial, None);
+            self.flush_picks(cx);
+            return;
+        }
         let png = match result {
             Ok(png) => Some(png),
             Err(error) => {
@@ -284,21 +391,49 @@ impl WebPreviewView {
                 None
             }
         };
-        let continuing = multi && self.design.is_some();
-        if continuing {
-            if let Some(viewer) = &self.viewer {
-                viewer.read(cx).evaluate_script(design::RESUME_SCRIPT);
+        let same_session = self
+            .design
+            .as_ref()
+            .is_some_and(|session| session.generation == start.generation);
+        let continuing = multi && same_session;
+        if same_session {
+            if continuing {
+                if let Some(viewer) = &self.viewer {
+                    viewer.read(cx).evaluate_script(design::RESUME_SCRIPT);
+                }
+            } else {
+                self.stop_design(cx);
             }
-        } else {
-            self.stop_design(cx);
         }
         #[cfg(debug_assertions)]
         debug_dump_capture(&capture, png.as_deref());
-        cx.emit(WebPreviewEvent::ElementPicked {
-            capture,
-            png,
-            finished: !continuing,
-        });
+        self.ready_picks.insert(
+            start.serial,
+            Some(ReadyPick {
+                capture,
+                png,
+                finished: same_session && !continuing,
+            }),
+        );
+        self.flush_picks(cx);
+    }
+
+    /// 撮り終わった選択を、選んだ順に知らせる（前の番号が撮り終わるまで後の番号は待つ）。
+    fn flush_picks(&mut self, cx: &mut Context<Self>) {
+        while let Some(ready) = self.ready_picks.remove(&self.next_emit) {
+            let serial = self.next_emit;
+            self.next_emit += 1;
+            let target = self.pick_targets.remove(&serial);
+            match ready {
+                Some(pick) => cx.emit(WebPreviewEvent::ElementPicked {
+                    capture: pick.capture,
+                    png: pick.png,
+                    finished: pick.finished,
+                    target,
+                }),
+                None => cx.emit(WebPreviewEvent::PickDropped),
+            }
+        }
         cx.notify();
     }
 
