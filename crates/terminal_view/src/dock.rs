@@ -112,6 +112,13 @@ impl TerminalDock {
         self.test_terminals = true;
     }
 
+    /// テスト用: タブの数と前にあるタブの番号。
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn debug_tabs(&self) -> (usize, usize) {
+        (self.terminals.len(), self.active)
+    }
+
     /// 以後作る端末と、今ある端末のプロジェクト色。
     pub fn with_accent(mut self, accent: Hsla) -> Self {
         self.accent = accent;
@@ -663,6 +670,16 @@ impl Render for TerminalDock {
             .flex()
             .flex_col()
             .bg(theme.bg1)
+            // 端末にフォーカスがある時の ⌘T / ⌘W（Windows / Linux は Ctrl+Shift+T / W）。端末から
+            // 上がってくる action をここで受ける＝裏のエディタのタブを閉じない（O24・C18）。
+            .on_action(
+                cx.listener(|this, _: &crate::actions::NewTab, window, cx| this.add(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::actions::CloseTab, window, cx| {
+                    this.close(this.active, window, cx)
+                }),
+            )
             .child(header)
             .children(quick_strip)
             .child(body)

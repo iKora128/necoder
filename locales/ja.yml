@@ -1302,6 +1302,8 @@ key:
   terminal_select_all: すべて選択
   terminal_clear: 画面をクリア
   terminal_find: ターミナル内を検索
+  terminal_new_tab: ターミナルのタブを開く
+  terminal_close_tab: ターミナルのタブを閉じる
 work:
   repositories: リポジトリ / 作業
   open_beside: 隣に開く
