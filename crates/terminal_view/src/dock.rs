@@ -1,7 +1,7 @@
 use crate::{TerminalEvent, TerminalView};
 use gpui::{
     div, prelude::*, px, App, Context, Entity, EventEmitter, Hsla, IntoElement, MouseButton,
-    Render, StyleRefinement, Window,
+    Render, SharedString, StyleRefinement, Window,
 };
 use std::path::PathBuf;
 use theme_core::Theme;
@@ -117,6 +117,8 @@ impl TerminalDock {
                 });
             }
             TerminalEvent::OpenUrl(url) => cx.emit(TerminalDockEvent::OpenUrl(url.clone())),
+            // タブの名前（アプリのタイトル）を描き直す。
+            TerminalEvent::TitleChanged => cx.notify(),
         }
     }
 
@@ -336,7 +338,26 @@ impl Render for TerminalDock {
                     .text_color(if is_active { theme.fg0 } else { theme.fg2 })
                     .when(is_active, |element| element.bg(theme.bg1))
                     .hover(|style| style.bg(theme.bg1))
-                    .child(i18n::t!("terminal.tab_title", "n" => index + 1))
+                    .child(
+                        // アプリが付けたタイトル（OSC 0 / 2・`✳ Claude Code` など）。無ければ連番。
+                        div()
+                            .max_w(px(220.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(
+                                self.terminals[index]
+                                    .read(cx)
+                                    .title()
+                                    .map(SharedString::from)
+                                    .unwrap_or_else(|| {
+                                        SharedString::from(i18n::t!(
+                                            "terminal.tab_title",
+                                            "n" => index + 1
+                                        ))
+                                    }),
+                            ),
+                    )
                     .child(
                         div()
                             .id(("term-tab-close", index))

@@ -548,12 +548,12 @@ impl Element for TerminalElement {
         // ⑦ マウス（選択・リンク）。判定と状態は TerminalView が持ち、ここはこのフレームの座標を渡すだけ。
         {
             let terminal = self.terminal.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, cx| {
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble || !bounds.contains(&event.position) {
                     return;
                 }
                 terminal.update(cx, |terminal, cx| {
-                    terminal.on_grid_mouse_down(event, frame, cx)
+                    terminal.on_grid_mouse_down(event, frame, window, cx)
                 });
             });
         }

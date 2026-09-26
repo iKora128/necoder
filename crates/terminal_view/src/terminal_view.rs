@@ -47,18 +47,18 @@ use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::Match;
-use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
+use alacritty_terminal::term::{ClipboardType, Config, Osc52, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
 
 use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
 
 use gpui::{
     div, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, CursorStyle,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollWheelEvent,
-    UTF16Selection, Window,
+    EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba,
+    ScrollWheelEvent, UTF16Selection, Window,
 };
 use std::ops::Range;
 use theme_core::Theme;
@@ -70,6 +70,8 @@ pub enum TerminalEvent {
     /// URL のクリック（`http(s)://…`・スキーム無しの `localhost:3000` は `http://` を補ったもの・
     /// OSC 8 のハイパーリンク）。開き方はホストが決める。
     OpenUrl(String),
+    /// アプリがタイトル（OSC 0 / 2）を変えた。タブの名前を描き直す。
+    TitleChanged,
 }
 
 /// 端末の中のリンクの行き先。
@@ -229,6 +231,33 @@ fn term_probe(stage: &str, detail: impl std::fmt::Display) {
     }
 }
 
+/// OSC 52 の書き込みをクリップボードへ。選択（primary）は Linux にだけある。
+fn store_clipboard(clipboard: ClipboardType, text: String, cx: &mut Context<TerminalView>) {
+    let item = ClipboardItem::new_string(text);
+    match clipboard {
+        ClipboardType::Clipboard => cx.write_to_clipboard(item),
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        ClipboardType::Selection => cx.write_to_primary(item),
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        ClipboardType::Selection => term_probe("osc52", "primary は無いので捨てた"),
+    }
+}
+
+/// タブに出すタイトル: 1 行目だけ・制御文字を落とす・長すぎるものは切る。
+fn sanitize_title(title: &str) -> String {
+    const MAX_CHARACTERS: usize = 80;
+    title
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_CHARACTERS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 /// 端末の設定。scrollback 1 万行・kitty keyboard を受け付ける・OSC 52 は書き込み（コピー）だけ
 /// 許す（読み出しはクリップボードの中身をアプリへ渡すことになるので既定で拒否）。
 fn terminal_config() -> Config {
@@ -326,6 +355,8 @@ pub struct TerminalView {
     selecting: bool,
     /// ポインタが載っているリンク（`content.links` の添字）。下線を濃くし、指の形にする。
     hovered_link: Option<usize>,
+    /// 右クリックメニューを出している位置（窓の座標）。閉じていれば None。
+    context_menu: Option<gpui::Point<Pixels>>,
     /// 左ボタンを押したセル（グリッド座標）。離した時に同じセルならクリック＝リンクを開く。
     mouse_down_cell: Option<AlacPoint>,
     /// アプリへ押したと報告したボタン（離した時に同じボタンで報告する）。
@@ -346,6 +377,10 @@ pub struct TerminalView {
     /// ホイールの 1 行未満の端数持ち越し（トラックパッドのピクセル増分を行単位に畳む）。
     scroll_remainder: f32,
     exited: bool,
+    /// アプリが付けたタイトル（OSC 0 / 2）。
+    title: Option<String>,
+    /// ベルが鳴った（次の描画で、窓が後ろにあれば知らせる）。
+    bell_pending: bool,
     theme: Theme,
     focus_handle: FocusHandle,
     // pump タスク（PTY 出力で起きる）。drop で停止。IO スレッド自体は spawn 後 detach し、
@@ -456,6 +491,7 @@ impl TerminalView {
             accent: theme.fg2,
             selecting: false,
             hovered_link: None,
+            context_menu: None,
             mouse_down_cell: None,
             reported_button: None,
             last_reported_cell: None,
@@ -466,6 +502,8 @@ impl TerminalView {
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited,
+            title: None,
+            bell_pending: false,
             theme,
             focus_handle: cx.focus_handle(),
             _pump: pump,
@@ -505,6 +543,7 @@ impl TerminalView {
             accent: theme.fg2,
             selecting: false,
             hovered_link: None,
+            context_menu: None,
             mouse_down_cell: None,
             reported_button: None,
             last_reported_cell: None,
@@ -515,6 +554,8 @@ impl TerminalView {
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited: false,
+            title: None,
+            bell_pending: false,
             theme,
             focus_handle: cx.focus_handle(),
             _pump: None,
@@ -551,7 +592,7 @@ impl TerminalView {
 
     /// 開発用（offscreen 検証・`NECODER_TERMINAL_PROBE`）: 端末への 1 コマンド。
     /// `type:<文>` = 文をタイプして ⏎ / `select:<行>,<列>-<行>,<列>` = 表示座標で選択 /
-    /// `find:<語>` = ⌘F を開いて語を入れる。
+    /// `find:<語>` = ⌘F を開いて語を入れる / `menu:<x>,<y>` = 右クリックメニューを出す。
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn debug_probe(
@@ -599,6 +640,17 @@ impl TerminalView {
                 }
                 self.refresh_search(true, cx);
             }
+            // 右クリックメニューを窓の座標 (x, y) に出す。
+            "menu" => {
+                let Some((x, y)) = argument.split_once(',').and_then(|(x, y)| {
+                    Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+                }) else {
+                    eprintln!("TERMINAL_PROBE: menu の形が不正: {argument:?}");
+                    return;
+                };
+                self.context_menu = Some(point(px(x), px(y)));
+                cx.notify();
+            }
             other => eprintln!("TERMINAL_PROBE: 未知のコマンド {other}"),
         }
     }
@@ -617,7 +669,71 @@ impl TerminalView {
             }
             // アプリがPTYへ書き戻しを要求（端末問い合わせ応答等）。
             AlacEvent::PtyWrite(text) => self.write_bytes(text.into_bytes()),
-            _ => {}
+            // OSC 52 の書き込み（`tmux` / `nvim` / SSH 先のアプリのコピー）。
+            AlacEvent::ClipboardStore(clipboard, text) => store_clipboard(clipboard, text, cx),
+            // OSC 52 の読み出しはクリップボードの中身をアプリへ渡すことになるので応えない
+            // （Config.osc52 = OnlyCopy なので alacritty も普通は出さない）。
+            AlacEvent::ClipboardLoad(..) => term_probe("osc52", "読み出しの要求を断った"),
+            AlacEvent::Title(title) => self.set_title(Some(title), cx),
+            AlacEvent::ResetTitle => self.set_title(None, cx),
+            // ベル: 窓が後ろにある時だけ知らせる（描画の時に窓へ頼む）。
+            AlacEvent::Bell => {
+                self.bell_pending = true;
+                cx.notify();
+            }
+            // OSC 4 / 10 / 11 / 12 の色の問い合わせ（TUI が背景の明暗を見て配色を決める）。
+            AlacEvent::ColorRequest(index, format) => {
+                let rgb = self.color_for_request(index);
+                self.write_bytes(format(rgb).into_bytes());
+            }
+            // `CSI 14 t`（文字領域の px）の問い合わせ。
+            AlacEvent::TextAreaSizeRequest(format) => {
+                let size = self.window_size();
+                self.write_bytes(format(size).into_bytes());
+            }
+            AlacEvent::MouseCursorDirty
+            | AlacEvent::CursorBlinkingChange
+            | AlacEvent::ChildExit(_) => {}
+        }
+    }
+
+    /// アプリが付けたタイトル（OSC 0 / 2）。無ければ None（タブは「ターミナル N」）。
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    fn set_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        let title = title
+            .map(|title| sanitize_title(&title))
+            .filter(|title| !title.is_empty());
+        if self.title != title {
+            self.title = title;
+            cx.emit(TerminalEvent::TitleChanged);
+            cx.notify();
+        }
+    }
+
+    /// 色の問い合わせへの答え。アプリが OSC で上書きした色があればそれ、無ければ描画と同じ色
+    /// （0〜255 = パレット・256 = 文字・257 = 背景・258 = カーソル）。
+    fn color_for_request(&self, index: usize) -> Rgb {
+        let overridden = (index < alacritty_terminal::term::color::COUNT)
+            .then(|| self.term.lock().colors()[index])
+            .flatten();
+        if let Some(rgb) = overridden {
+            return rgb;
+        }
+        let color = match index {
+            0..=255 => indexed_to_hsla(index as u8),
+            257 => self.theme.bg1,
+            258 => self.theme.fg1,
+            _ => self.theme.fg0,
+        };
+        let rgba = Rgba::from(color);
+        let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+        Rgb {
+            r: channel(rgba.r),
+            g: channel(rgba.g),
+            b: channel(rgba.b),
         }
     }
 
@@ -766,6 +882,14 @@ impl TerminalView {
         if !self.marked_text.is_empty() {
             cx.stop_propagation();
             return;
+        }
+        // 右クリックメニューはキーを押したら閉じる（Esc は閉じるだけで端末へ送らない）。
+        if self.context_menu.take().is_some() {
+            cx.notify();
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                return;
+            }
         }
         // ⌘C / ⌘V / ⌘A / ⌘K / ⌘F は keymap の `Terminal` コンテキスト（actions）が先に受ける。
         if let Some(bytes) = keys::keystroke_to_bytes(&event.keystroke, self.mode, event.is_held) {
@@ -1223,11 +1347,13 @@ impl TerminalView {
     }
 
     /// グリッドの上でボタンを押した（`element.rs` の paint が、このフレームの座標で呼ぶ）。
-    /// アプリがマウスの報告を求めていれば報告し（⇧ を押している間は選択）、そうでなければ選択を始める。
+    /// アプリがマウスの報告を求めていれば報告し（⇧ を押している間は選択）、そうでなければ
+    /// 左は選択を始め、右はメニューを出す。
     fn on_grid_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         frame: GridFrame,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if mouse::wants_report(self.mode, event.modifiers) {
@@ -1236,6 +1362,12 @@ impl TerminalView {
                 self.reported_button = Some(button);
                 self.report_mouse(button, mouse::ReportAction::Press, cell, event.modifiers);
             }
+            return;
+        }
+        if event.button == MouseButton::Right {
+            window.focus(&self.focus_handle, cx);
+            self.context_menu = Some(event.position);
+            cx.notify();
             return;
         }
         if event.button != MouseButton::Left {
@@ -1545,10 +1677,203 @@ impl TerminalView {
     }
 }
 
+impl TerminalView {
+    /// ドロップされたパスを、シェル向けに引用して貼り付けとして入れる（空白区切り・末尾に空白）。
+    fn drop_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut text = paths
+            .iter()
+            .map(|path| quote_path_for_shell(&path.to_string_lossy(), cfg!(windows)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        text.push(' ');
+        self.paste_text(&text, cx);
+        window.focus(&self.focus_handle, cx);
+    }
+
+    /// 右クリックメニュー（開いている時だけ）。見た目はタブ / エクスプローラのメニューと同じ部品に、
+    /// キーを右に添える。コピーは選択が無い時は押せない。
+    fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let position = self.context_menu?;
+        let theme = self.theme.clone();
+        let has_selection = self.content.selection.is_some();
+        let item = |id: &'static str, label: String, key: &str, enabled: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(16.))
+                .px(px(9.))
+                .py(px(5.))
+                .rounded(px(5.))
+                .text_size(px(12.))
+                .text_color(if enabled { theme.fg1 } else { theme.fg2 })
+                .when(enabled, |element| {
+                    element
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                })
+                .child(label)
+                .child(div().text_size(px(11.)).text_color(theme.fg2).child(
+                    keymap_core::keystroke_label_in(keymap_core::TERMINAL_CONTEXT, key),
+                ))
+        };
+        let separator = div().h(px(1.)).bg(theme.border).my(px(3.));
+        let menu = div()
+            .w(px(220.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(8.))
+            .p(px(4.))
+            .shadow(vec![gpui::BoxShadow::new(
+                px(0.),
+                px(6.),
+                gpui::hsla(0., 0., 0., 0.4),
+            )
+            .blur_radius(px(16.))])
+            .font_family("IBM Plex Sans JP")
+            .on_mouse_down_out(cx.listener(|this, _, _window, cx| {
+                this.context_menu = None;
+                cx.notify();
+            }))
+            .child(
+                item(
+                    "terminal-menu-copy",
+                    i18n::t!("terminal.menu_copy"),
+                    "cmd-c",
+                    has_selection,
+                )
+                .when(has_selection, |element| {
+                    element.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.context_menu = None;
+                            this.copy_selection(cx);
+                            cx.notify();
+                        }),
+                    )
+                }),
+            )
+            .child(
+                item(
+                    "terminal-menu-paste",
+                    i18n::t!("terminal.menu_paste"),
+                    "cmd-v",
+                    true,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.context_menu = None;
+                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                            this.paste_text(&text, cx);
+                        }
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                item(
+                    "terminal-menu-select-all",
+                    i18n::t!("terminal.menu_select_all"),
+                    "cmd-a",
+                    true,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.context_menu = None;
+                        this.select_all(&actions::SelectAll, window, cx);
+                    }),
+                ),
+            )
+            .child(separator)
+            .child(
+                item(
+                    "terminal-menu-clear",
+                    i18n::t!("terminal.menu_clear"),
+                    "cmd-k",
+                    true,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.context_menu = None;
+                        this.clear_scrollback(cx);
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                item(
+                    "terminal-menu-find",
+                    i18n::t!("terminal.menu_find"),
+                    "cmd-f",
+                    true,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.context_menu = None;
+                        this.find(&actions::Find, window, cx);
+                    }),
+                ),
+            );
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(position)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(menu),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+}
+
+/// シェルに打つためのパスの引用。安全な文字だけならそのまま、それ以外は
+/// unix（sh / zsh / bash）は単引用符（中の `'` は `'\''`）、Windows（pwsh / cmd）は二重引用符。
+fn quote_path_for_shell(path: &str, windows: bool) -> String {
+    let safe = !path.is_empty()
+        && path.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '/' | '.' | '_' | '-' | '+' | '@' | '%' | ':' | ',' | '='
+                )
+                || (windows && character == '\\')
+        });
+    if safe {
+        path.to_string()
+    } else if windows {
+        format!("\"{path}\"")
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.subscribe_focus_changes(window, cx);
+        // ベル: 窓が後ろにある時だけ知らせる（Dock のアイコンが跳ねる程度）。前にある時は何もしない。
+        if std::mem::take(&mut self.bell_pending)
+            && !window.is_window_active()
+            && self.mode.contains(TermMode::URGENCY_HINTS)
+        {
+            window.request_attention();
+        }
         let search_bar = self.render_search_bar(window, cx);
+        let context_menu = self.render_context_menu(cx);
         div()
             .key_context("Terminal")
             .track_focus(&self.focus_handle)
@@ -1558,6 +1883,13 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear))
             .on_action(cx.listener(Self::find))
+            // Finder などからのファイル / エクスプローラの行のドロップ: 引用したパスを貼り付ける。
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.drop_paths(paths.paths(), window, cx)
+            }))
+            .on_drop(cx.listener(|this, dragged: &ui::DraggedFile, window, cx| {
+                this.drop_paths(std::slice::from_ref(&dragged.source), window, cx)
+            }))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             // テキストを選択できることを示す I ビーム。
             .cursor(CursorStyle::IBeam)
@@ -1580,6 +1912,7 @@ impl Render for TerminalView {
                 terminal: cx.entity(),
             })
             .children(search_bar)
+            .children(context_menu)
     }
 }
 
@@ -1880,6 +2213,42 @@ mod action_tests {
     }
 
     #[test]
+    fn dropped_paths_are_quoted_for_the_shell() {
+        assert_eq!(quote_path_for_shell("/tmp/a.txt", false), "/tmp/a.txt");
+        assert_eq!(
+            quote_path_for_shell("/Users/me/Application Support/x", false),
+            "'/Users/me/Application Support/x'"
+        );
+        assert_eq!(
+            quote_path_for_shell("/tmp/it's here", false),
+            "'/tmp/it'\\''s here'"
+        );
+        assert_eq!(quote_path_for_shell("/tmp/$HOME", false), "'/tmp/$HOME'");
+        assert_eq!(
+            quote_path_for_shell(r"C:\Users\me\a.txt", true),
+            r"C:\Users\me\a.txt"
+        );
+        assert_eq!(
+            quote_path_for_shell(r"C:\Program Files\x", true),
+            r#""C:\Program Files\x""#
+        );
+    }
+
+    #[gpui::test]
+    fn dropped_files_are_pasted_as_quoted_paths(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, window, cx| {
+            feed(terminal, "\x1b[?2004h");
+            let paths = [PathBuf::from("/tmp/a b.png"), PathBuf::from("/tmp/c.txt")];
+            terminal.drop_paths(&paths, window, cx);
+            assert_eq!(
+                terminal.debug_written_input(),
+                b"\x1b[200~'/tmp/a b.png' /tmp/c.txt \x1b[201~"
+            );
+        });
+    }
+
+    #[test]
     fn pasted_text_cannot_escape_bracketed_paste() {
         assert_eq!(
             paste_bytes("ls\x1b[201~rm -rf /\n", true),
@@ -1978,6 +2347,49 @@ mod action_tests {
         });
         terminal.read_with(cx, |terminal, _| {
             assert_eq!(terminal.debug_written_input(), b"\x1b[I\x1b[O");
+        });
+    }
+
+    /// OSC 52 の書き込みはクリップボードへ、読み出しには応えない。タイトルはタブの名前に使う。
+    /// 色の問い合わせには描画と同じ色で答える。
+    #[gpui::test]
+    fn terminal_requests_from_apps(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, _window, cx| {
+            terminal.on_alac_event(
+                AlacEvent::ClipboardStore(ClipboardType::Clipboard, "copied".into()),
+                cx,
+            );
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some("copied".to_string())
+            );
+            terminal.on_alac_event(
+                AlacEvent::ClipboardLoad(
+                    ClipboardType::Clipboard,
+                    Arc::new(|text| format!("\x1b]52;c;{text}\x07")),
+                ),
+                cx,
+            );
+            assert!(
+                terminal.debug_written_input().is_empty(),
+                "読み出しには応えない"
+            );
+
+            terminal.on_alac_event(AlacEvent::Title("✳ Claude Code\n\x07x".into()), cx);
+            assert_eq!(terminal.title(), Some("✳ Claude Code"));
+            terminal.on_alac_event(AlacEvent::ResetTitle, cx);
+            assert_eq!(terminal.title(), None);
+
+            // 257 = 背景（dark の bg1 = #1b1e25）。
+            terminal.on_alac_event(
+                AlacEvent::ColorRequest(
+                    257,
+                    Arc::new(|rgb| format!("{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)),
+                ),
+                cx,
+            );
+            assert_eq!(terminal.debug_written_input(), b"1b1e25");
         });
     }
 

@@ -601,6 +601,11 @@ terminal:
   close_dock_tip: 下ドックを閉じる  ⌘J
   git_tip: ソース管理  ⌃⇧G
   search_invalid_regex: 正規表現が不正です
+  menu_copy: コピー
+  menu_paste: 貼り付け
+  menu_select_all: すべて選択
+  menu_clear: クリア
+  menu_find: 検索
 theme:
   builtin: 組み込み
   user: ユーザー

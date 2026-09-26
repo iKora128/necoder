@@ -600,6 +600,11 @@ terminal:
   close_dock_tip: Close bottom dock  ⌘J
   git_tip: Source control  ⌃⇧G
   search_invalid_regex: Invalid regular expression
+  menu_copy: Copy
+  menu_paste: Paste
+  menu_select_all: Select All
+  menu_clear: Clear
+  menu_find: Find
 theme:
   builtin: Built-in
   user: User
