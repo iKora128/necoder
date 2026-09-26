@@ -2241,6 +2241,114 @@ const MASTER_OPTIONS: [&str; 5] = [
     "ExitOnForwardFailure=yes",
 ];
 
+/// OpenSSH が接続に失敗した理由の種類（接続のトーストで案内を出し分ける・文言は GUI 側で i18n）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshFailure {
+    /// 指紋を確かめていないホスト（初めて・確認を断った）。
+    HostKeyUnknown,
+    /// 覚えている指紋と違う（作り直した・なりすましの恐れ）。
+    HostKeyChanged,
+    /// 鍵・パスワードが通らない。
+    Authentication,
+    /// 鍵を試しすぎて切られた（agent に鍵が多い）。
+    TooManyKeys,
+    /// ホスト名が引けない。
+    UnknownHost,
+    /// 接続を断られた（sshd が居ない・ポート違い）。
+    Refused,
+    /// 応答が無い（ネットワーク・VPN・ファイアウォール）。
+    TimedOut,
+    /// `~/.ssh` や鍵の権限が広すぎて OpenSSH が読まない。
+    BadPermissions,
+    /// 鍵交換・暗号の方式が合わない（古い sshd）。
+    Negotiation,
+}
+
+impl SshFailure {
+    /// OpenSSH のログから種類を当てる（知らない書き方なら `None`＝ログをそのまま見せる）。
+    /// 順番が意味を持つ: 指紋の変化は「Host key verification failed」も伴い、権限の広い鍵は
+    /// 続けて「Permission denied」も出すので、より具体的な方を先に見る。
+    pub fn classify(log: &str) -> Option<Self> {
+        let has = |needle: &str| log.contains(needle);
+        if has("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+            Some(Self::HostKeyChanged)
+        } else if has("Bad owner or permissions") || has("UNPROTECTED PRIVATE KEY FILE") {
+            Some(Self::BadPermissions)
+        } else if has("Host key verification failed") || has("host key is known for") {
+            Some(Self::HostKeyUnknown)
+        } else if has("Too many authentication failures") {
+            Some(Self::TooManyKeys)
+        } else if has("Permission denied") {
+            Some(Self::Authentication)
+        } else if has("Could not resolve hostname") {
+            Some(Self::UnknownHost)
+        } else if has("Connection refused") {
+            Some(Self::Refused)
+        } else if has("timed out") {
+            Some(Self::TimedOut)
+        } else if has("Unable to negotiate") {
+            Some(Self::Negotiation)
+        } else {
+            None
+        }
+    }
+}
+
+/// ControlMaster が立たなかった。OpenSSH が理由を書いていればそれと、分かれば種類を持つ
+/// （GUI は `anyhow::Error::downcast_ref` で取り出して案内を出す）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshConnectError {
+    pub failure: Option<SshFailure>,
+    /// OpenSSH が書いた理由（空行と前後の空白を落とした行）。
+    pub reason: String,
+    status: String,
+}
+
+impl SshConnectError {
+    /// ssh の終わり方（`exit status: 255`）と、OpenSSH がログへ書いた文から作る。
+    pub fn new(status: impl Into<String>, log: &str) -> Self {
+        let reason = log
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            failure: SshFailure::classify(&reason),
+            reason,
+            status: status.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SshConnectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "OpenSSH ControlMaster の接続に失敗: {}",
+            self.status
+        )?;
+        if !self.reason.is_empty() {
+            write!(formatter, ": {}", self.reason)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SshConnectError {}
+
+/// master を起こした ssh の終わり方とログから結果を作る。ログは従来どおり stderr にも流す
+/// （「known hosts に足した」などの警告も含めて、以前は stderr にそのまま出ていた）。
+fn master_result(success: bool, status: &str, log: &str) -> Result<()> {
+    if !log.trim().is_empty() {
+        eprint!("{log}");
+    }
+    if success {
+        return Ok(());
+    }
+    Err(anyhow::Error::new(SshConnectError::new(status, log)))
+}
+
 /// Remote terminal の `ne` から接続元 GUI へ戻る、open 専用のローカル gateway。
 ///
 /// GUI の `gui.sock` をそのまま `ssh -R` すると、remote 上の任意プロセスへ fleet/send など
@@ -2446,6 +2554,16 @@ impl SshTransport {
     }
 
     fn start_master(&self) -> Result<()> {
+        // OpenSSH の理由（指紋・鍵・名前・拒否…）は `-E` でこのログへ書かせる。stderr に任せると
+        // 終わり方（exit 255）しか分からず、トーストで案内を出し分けられない。stderr をパイプで
+        // 読む形は、`-f` で背景に回った master がパイプを握り続けて読み終わらないので使わない。
+        // 前の試行の分が混ざらないよう先に消す（`-E` は追記）。control_dir ごと Drop で消える。
+        let log = self.control_dir.join("master.log");
+        if let Err(error) = std::fs::remove_file(&log) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Remote SSH: 前の接続ログを消せない: {error}");
+            }
+        }
         let mut master = ssh_command();
         master
             .args(["-M", "-N", "-f"])
@@ -2458,12 +2576,19 @@ impl SshTransport {
             master.args(["-p", &port.to_string()]);
         }
         let status = master
+            .arg("-E")
+            .arg(&log)
             .arg(self.project.destination())
             .status()
             .context("OpenSSH ControlMaster を起動できない")?;
-        if !status.success() {
-            bail!("OpenSSH ControlMaster の接続に失敗: {status}");
-        }
+        // 何も書かれていなければファイルはできない（= 理由なし）。背景に回った master が後で書く分
+        // （切断の理由など）も同じファイルに残る。
+        let written = std::fs::read(&log).unwrap_or_default();
+        master_result(
+            status.success(),
+            &status.to_string(),
+            &String::from_utf8_lossy(&written),
+        )?;
         // `ne` gateway の reverse forward は master が立ってから足す。master 起動の `-R` に
         // 同居させると、前回の master が異常終了して remote に残った socket で bind が落ち、
         // `ExitOnForwardFailure=yes` が master ごと exit 255 にして**再接続が永久に失敗**する
@@ -4667,6 +4792,100 @@ Host gpu
         );
         assert!(SshProject::parse("ssh://alice:secret@example.com/code").is_err());
         assert!(SshProject::parse("ssh://example.com/code?proxy=bad").is_err());
+    }
+
+    #[test]
+    fn openssh_failures_are_told_apart() {
+        let changed = "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+            @    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n\
+            Host key verification failed.";
+        assert_eq!(
+            SshFailure::classify(changed),
+            Some(SshFailure::HostKeyChanged)
+        );
+        for (log, expected) in [
+            ("Host key verification failed.", SshFailure::HostKeyUnknown),
+            (
+                "No ED25519 host key is known for devbox and you have requested strict checking.",
+                SshFailure::HostKeyUnknown,
+            ),
+            (
+                "user@devbox: Permission denied (publickey,password).",
+                SshFailure::Authentication,
+            ),
+            (
+                "Received disconnect from 10.0.0.2 port 22:2: Too many authentication failures\n\
+                 Permission denied (publickey).",
+                SshFailure::TooManyKeys,
+            ),
+            (
+                "@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @\n\
+                 Permission denied (publickey).",
+                SshFailure::BadPermissions,
+            ),
+            (
+                "Bad owner or permissions on /Users/me/.ssh/config",
+                SshFailure::BadPermissions,
+            ),
+            (
+                "ssh: Could not resolve hostname devbx: nodename nor servname provided, or not known",
+                SshFailure::UnknownHost,
+            ),
+            (
+                "ssh: connect to host devbox port 2222: Connection refused",
+                SshFailure::Refused,
+            ),
+            (
+                "ssh: connect to host 10.0.0.9 port 22: Operation timed out",
+                SshFailure::TimedOut,
+            ),
+            (
+                "Unable to negotiate with 10.0.0.2 port 22: no matching host key type found. Their offer: ssh-rsa",
+                SshFailure::Negotiation,
+            ),
+        ] {
+            assert_eq!(SshFailure::classify(log), Some(expected), "{log}");
+        }
+        assert_eq!(
+            SshFailure::classify("kex_exchange_identification: read: Connection reset"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failed_master_carries_what_openssh_wrote() {
+        assert!(master_result(
+            true,
+            "exit status: 0",
+            "Warning: Permanently added 'devbox'.\n"
+        )
+        .is_ok());
+        let error = master_result(
+            false,
+            "exit status: 255",
+            "\r\nuser@devbox: Permission denied (publickey).\r\n\n",
+        )
+        .expect_err("失敗は理由つき")
+        .context("SSH ControlMaster の確立に失敗");
+        let connect = error
+            .downcast_ref::<SshConnectError>()
+            .expect("文脈を足しても取り出せる");
+        assert_eq!(connect.failure, Some(SshFailure::Authentication));
+        assert_eq!(
+            connect.reason,
+            "user@devbox: Permission denied (publickey)."
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "SSH ControlMaster の確立に失敗: OpenSSH ControlMaster の接続に失敗: exit status: 255: \
+             user@devbox: Permission denied (publickey)."
+        );
+        let silent = master_result(false, "exit status: 255", "").expect_err("理由が無くても失敗");
+        assert_eq!(
+            silent.to_string(),
+            "OpenSSH ControlMaster の接続に失敗: exit status: 255",
+            "書かれていなければ今までと同じ文"
+        );
     }
 
     #[test]

@@ -1141,9 +1141,21 @@ ssh:
   reconnect_now: Reconnect
   connect_now: Connect
   reconnecting: "Reconnecting to %{host}…"
+  connect_failed: "Cannot connect to %{host}"
+  failure_details: SSH connection log
+  hint_host_key_unknown: "The host key was not confirmed. For a new host, check the fingerprint in the prompt and answer yes (running ssh %{host} once in a terminal does the same)"
+  hint_host_key_changed: "The key of %{host} has changed (rebuilt, or someone is impersonating it). Only if you know it was rebuilt, run ssh-keygen -R %{host} in a terminal and open it again"
+  hint_authentication: "The key or password was rejected. Add your key to ssh-agent (on macOS, ssh-add --apple-use-keychain ~/.ssh/id_ed25519 keeps the passphrase in Keychain), or check IdentityFile in ~/.ssh/config and authorized_keys on the server"
+  hint_too_many_keys: "Too many keys were tried. Add IdentityFile and IdentitiesOnly yes to Host %{host} in ~/.ssh/config so only one key is offered"
+  hint_unknown_host: "The name %{host} could not be found. Check the spelling, HostName in ~/.ssh/config, and your VPN"
+  hint_refused: "The connection was refused. Check that sshd is running on the server and the port (Port in ~/.ssh/config)"
+  hint_timed_out: "No response. Check the network, VPN and firewall, and the host name and port"
+  hint_bad_permissions: "OpenSSH ignores ~/.ssh because its permissions are too open. Run chmod 700 ~/.ssh and chmod 600 ~/.ssh/config (and 600 for keys)"
+  hint_negotiation: "The server offers no algorithm in common (an old sshd). Add the algorithms it offered (KexAlgorithms / HostKeyAlgorithms) to Host %{host} in ~/.ssh/config"
 askpass:
   hint: Enter to send, Escape to cancel (nothing is stored)
   hint_click: Click the field to start typing
+  passphrase_tip: "To stop being asked every time, run %{command} once in a terminal (it hands the key to ssh-agent)"
   retry: "Authentication failed (attempt %{attempt})"
   cancelled: Input cancelled
   err_busy: Another SSH prompt is waiting
