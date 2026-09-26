@@ -7113,6 +7113,7 @@ dependencies = [
  "host",
  "i18n",
  "libc",
+ "polling",
  "theme_core",
  "ui",
 ]

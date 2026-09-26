@@ -8,6 +8,8 @@
 //! - 公開 `alacritty_terminal` API と GPUI API を使った necoder 固有の実装。Zed の terminal code は取り込まない。
 
 mod dock;
+mod keys;
+mod pty_guard;
 pub use dock::{TerminalDock, TerminalDockEvent, TerminalLaunch};
 
 use std::collections::HashMap;
@@ -21,7 +23,7 @@ use alacritty_terminal::index::{Column, Line, Point as AlacPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 
@@ -124,6 +126,17 @@ fn term_probe(stage: &str, detail: impl std::fmt::Display) {
     }
 }
 
+/// 端末の設定。scrollback 1 万行・kitty keyboard を受け付ける・OSC 52 は書き込み（コピー）だけ
+/// 許す（読み出しはクリップボードの中身をアプリへ渡すことになるので既定で拒否）。
+fn terminal_config() -> Config {
+    Config {
+        scrolling_history: 10_000,
+        kitty_keyboard: true,
+        osc52: Osc52::OnlyCopy,
+        ..Config::default()
+    }
+}
+
 /// alacritty の背景スレッド（EventLoop）から GPUI 前景へイベントを渡す橋渡し。
 #[derive(Clone)]
 struct Listener(UnboundedSender<AlacEvent>);
@@ -173,8 +186,8 @@ pub struct TerminalView {
     notifier: Option<Notifier>,
     content: TerminalContent,
     size: TerminalSize,
-    /// アプリケーションカーソルモード（矢印キーのエスケープが変わる）。
-    app_cursor: bool,
+    /// 端末のモード（APP_CURSOR・kitty keyboard のフラグ・マウス報告など）。sync のたびに写す。
+    mode: TermMode,
     /// OS に変換中の範囲を返すための前編集。PTY には確定するまで送らない。
     marked_text: String,
     marked_selection: Range<usize>,
@@ -216,11 +229,11 @@ impl TerminalView {
             columns: 80,
             lines: 24,
         };
-        let config = Config {
-            scrolling_history: 10_000,
-            ..Config::default()
-        };
-        let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
+        let term = Arc::new(FairMutex::new(Term::new(
+            terminal_config(),
+            &size,
+            listener.clone(),
+        )));
 
         let mut env = HashMap::new();
         if shell.is_none() {
@@ -250,7 +263,14 @@ impl TerminalView {
         let mut notifier = None;
         let mut pump = None;
         match tty::new(&options, window_size, 0) {
-            Ok(pty) => match EventLoop::new(term.clone(), listener, pty, true, false) {
+            // kitty keyboard のスタック溢れで PTY スレッドが落ちるのを防ぐ（`pty_guard`）。
+            Ok(pty) => match EventLoop::new(
+                term.clone(),
+                listener,
+                pty_guard::GuardedPty::new(pty),
+                true,
+                false,
+            ) {
                 Ok(event_loop) => {
                     notifier = Some(Notifier(event_loop.channel()));
                     // IO スレッドを起動して detach（JoinHandle は保持しない。Drop の Shutdown で畳む）。
@@ -283,7 +303,7 @@ impl TerminalView {
             notifier,
             content: TerminalContent::default(),
             size,
-            app_cursor: false,
+            mode: TermMode::default(),
             marked_text: String::new(),
             marked_selection: 0..0,
             #[cfg(test)]
@@ -312,17 +332,17 @@ impl TerminalView {
             columns: 80,
             lines: 24,
         };
-        let config = Config {
-            scrolling_history: 10_000,
-            ..Config::default()
-        };
-        let term = Arc::new(FairMutex::new(Term::new(config, &size, listener)));
+        let term = Arc::new(FairMutex::new(Term::new(
+            terminal_config(),
+            &size,
+            listener,
+        )));
         Self {
             term,
             notifier: None,
             content: TerminalContent::default(),
             size,
-            app_cursor: false,
+            mode: TermMode::default(),
             marked_text: String::new(),
             marked_selection: 0..0,
             #[cfg(test)]
@@ -378,7 +398,7 @@ impl TerminalView {
             })
             .collect();
         let cursor = Some(content.cursor.point);
-        self.app_cursor = term.mode().contains(TermMode::APP_CURSOR);
+        self.mode = *term.mode();
         // 選択範囲もスナップショットに含める（前景でロック無しにハイライトを描くため）。
         let selection = term
             .selection
@@ -471,7 +491,7 @@ impl TerminalView {
                 _ => {}
             }
         }
-        if let Some(bytes) = keystroke_to_bytes(&event.keystroke, self.app_cursor) {
+        if let Some(bytes) = keys::keystroke_to_bytes(&event.keystroke, self.mode, event.is_held) {
             // タイプしたら最下段へ復帰（スクロールバック閲覧中の入力は現在行に届く＝端末の常識）。
             self.scroll_to_bottom(cx);
             self.write_bytes(bytes);
@@ -502,7 +522,8 @@ impl TerminalView {
             // 代替画面にスクロールバックは無い。ALTERNATE_SCROLL が立っていれば
             // 上=↑ / 下=↓ を行数ぶん送ってアプリ側（less/vim）にスクロールさせる。
             if mode.contains(TermMode::ALTERNATE_SCROLL) {
-                let code: &[u8] = match (lines > 0, self.app_cursor) {
+                let app_cursor = mode.contains(TermMode::APP_CURSOR);
+                let code: &[u8] = match (lines > 0, app_cursor) {
                     (true, false) => b"\x1b[A",
                     (true, true) => b"\x1bOA",
                     (false, false) => b"\x1b[B",
@@ -910,78 +931,6 @@ impl Render for TerminalView {
                 terminal: cx.entity(),
             })
     }
-}
-
-// ── キー → PTY バイト（v1 の最小マッピング） ──
-
-/// キーストロークを PTY へ送るバイト列へ。特殊キー + 印字（key_char）を扱う。対象外は `None`。
-fn keystroke_to_bytes(keystroke: &gpui::Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
-    let modifiers = keystroke.modifiers;
-    let key = keystroke.key.as_str();
-
-    // Ctrl + 英字 → 制御バイト（Ctrl-A=0x01 .. Ctrl-Z=0x1a）。Ctrl-C 等。
-    if modifiers.control && !modifiers.platform {
-        if key.len() == 1 {
-            let character = key.as_bytes()[0];
-            if character.is_ascii_alphabetic() {
-                return Some(vec![(character.to_ascii_lowercase() - b'a') + 1]);
-            }
-        }
-    }
-    // ⌘ 系はターミナルに送らない（コピー等は今は素通り）。
-    if modifiers.platform {
-        return None;
-    }
-
-    let bytes: &[u8] = match key {
-        "enter" => b"\r",
-        "backspace" => b"\x7f",
-        "tab" => b"\t",
-        "escape" => b"\x1b",
-        "up" => {
-            if app_cursor {
-                b"\x1bOA"
-            } else {
-                b"\x1b[A"
-            }
-        }
-        "down" => {
-            if app_cursor {
-                b"\x1bOB"
-            } else {
-                b"\x1b[B"
-            }
-        }
-        "right" => {
-            if app_cursor {
-                b"\x1bOC"
-            } else {
-                b"\x1b[C"
-            }
-        }
-        "left" => {
-            if app_cursor {
-                b"\x1bOD"
-            } else {
-                b"\x1b[D"
-            }
-        }
-        "home" => b"\x1b[H",
-        "end" => b"\x1b[F",
-        "delete" => b"\x1b[3~",
-        "pageup" => b"\x1b[5~",
-        "pagedown" => b"\x1b[6~",
-        _ => {
-            // 印字文字（key_char に確定した文字が入る）。
-            if let Some(text) = &keystroke.key_char {
-                if !text.is_empty() && !text.chars().any(char::is_control) {
-                    return Some(text.as_bytes().to_vec());
-                }
-            }
-            return None;
-        }
-    };
-    Some(bytes.to_vec())
 }
 
 // ── ANSI 色 → Hsla（テーマの fg/bg を既定色に流用・16/256 色は標準パレット） ──
