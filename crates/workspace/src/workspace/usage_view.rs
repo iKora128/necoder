@@ -21,12 +21,16 @@ pub(crate) struct UsagePopoverState {
     /// 左端の x（窓の座標）。開いた時に窓の幅に収まるよう決める。
     left: f32,
     focus: FocusHandle,
+    /// 開く前にフォーカスがあった所（閉じたら返す。返さないとエディタへ戻るのにもう 1 回押す）。
+    previous_focus: Option<FocusHandle>,
 }
 
 /// 統計の画面（パレット「使用量: 統計を開く」）。
 pub(crate) struct UsageStatsState {
     focus: FocusHandle,
     rows: StatsRows,
+    /// 開く前にフォーカスがあった所（閉じたら返す）。
+    previous_focus: Option<FocusHandle>,
 }
 
 enum StatsRows {
@@ -103,9 +107,14 @@ impl Workspace {
         let left = (f32::from(anchor_x) - POPOVER_WIDTH + 64.0)
             .min(viewport - POPOVER_WIDTH - 8.0)
             .max(8.0);
+        let previous_focus = window.focused(cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        self.overlays.usage_popover = Some(UsagePopoverState { left, focus });
+        self.overlays.usage_popover = Some(UsagePopoverState {
+            left,
+            focus,
+            previous_focus,
+        });
         if read_codex {
             usage::refresh_codex_limits(false, cx);
         }
@@ -124,20 +133,24 @@ impl Workspace {
         self.open_usage_popover(anchor, true, window, cx);
     }
 
-    fn close_usage_popover(&mut self, cx: &mut Context<Self>) {
-        if self.overlays.usage_popover.take().is_some() {
-            cx.notify();
+    fn close_usage_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(popover) = self.overlays.usage_popover.take() else {
+            return;
+        };
+        if let Some(previous) = popover.previous_focus {
+            window.focus(&previous, cx);
         }
+        cx.notify();
     }
 
     fn on_usage_popover_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if event.keystroke.key.as_str() == "escape" {
-            self.close_usage_popover(cx);
+            self.close_usage_popover(window, cx);
         }
     }
 
@@ -260,7 +273,7 @@ impl Workspace {
                 // 外側（statusbar のチップを含む）を押すと閉じる。
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| this.close_usage_popover(cx)),
+                    cx.listener(|this, _, window, cx| this.close_usage_popover(window, cx)),
                 )
                 .child(card)
                 .into_any_element(),
@@ -455,13 +468,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ポップオーバーから来た時は、ポップオーバーを開く前の場所へ返す。
+        let previous_focus = match self.overlays.usage_popover.take() {
+            Some(popover) => popover.previous_focus,
+            None => window.focused(cx),
+        };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        self.overlays.usage_popover = None;
         let Some(storage) = self.persistence.storage.clone() else {
             self.overlays.usage_stats = Some(UsageStatsState {
                 focus,
                 rows: StatsRows::Loaded(Vec::new()),
+                previous_focus,
             });
             cx.notify();
             return;
@@ -469,6 +487,7 @@ impl Workspace {
         self.overlays.usage_stats = Some(UsageStatsState {
             focus,
             rows: StatsRows::Loading,
+            previous_focus,
         });
         cx.notify();
         // 日付の境目はローカルの 0 時。今日を含む直近 30 日。
@@ -496,20 +515,24 @@ impl Workspace {
         .detach();
     }
 
-    fn close_usage_stats(&mut self, cx: &mut Context<Self>) {
-        if self.overlays.usage_stats.take().is_some() {
-            cx.notify();
+    fn close_usage_stats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(stats) = self.overlays.usage_stats.take() else {
+            return;
+        };
+        if let Some(previous) = stats.previous_focus {
+            window.focus(&previous, cx);
         }
+        cx.notify();
     }
 
     fn on_usage_stats_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if event.keystroke.key.as_str() == "escape" {
-            self.close_usage_stats(cx);
+            self.close_usage_stats(window, cx);
         }
     }
 
@@ -610,7 +633,7 @@ impl Workspace {
                 // 背景クリックで閉じる。
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _window, cx| this.close_usage_stats(cx)),
+                    cx.listener(|this, _, window, cx| this.close_usage_stats(window, cx)),
                 )
                 .child(panel)
                 .into_any_element(),
@@ -832,6 +855,84 @@ mod tests {
             total_tokens: tokens,
             cost_usd: cost,
         }
+    }
+
+    /// 統計の画面は台帳を背景で読み（開いた直後は「読み込み中」）、閉じたら開く前のフォーカスへ返す。
+    /// ポップオーバーから開いた時も、ポップオーバーを開く前の場所へ返す。
+    #[gpui::test]
+    fn stats_load_in_the_background_and_return_focus_on_close(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "necoder_workspace_usage_stats_{}_{}",
+            std::process::id(),
+            agent_panel::now_unix_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("作業ディレクトリを作れる");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true}"#).expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let storage = storage::Storage::open(&root.join("necoder.db")).expect("DB を開ける");
+        storage
+            .record_turn_usage(&storage::TurnUsageRecord {
+                thread_id: "thread-1".into(),
+                agent: "Claude Code".into(),
+                ended_at: agent_panel::now_unix_ms(),
+                total_tokens: 1_000,
+                cost_usd: Some(0.5),
+                ..storage::TurnUsageRecord::default()
+            })
+            .expect("書ける");
+        let sources = vec![ProjectSource::new(host::LocalHost::shared(), root.clone())];
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new_sources(sources, Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.persistence.storage = Some(storage.clone());
+            let rail = workspace.chrome.rail_focus.clone();
+            window.focus(&rail, cx);
+            // ポップオーバー → 「統計を開く」の順で開く（Codex は訊かない）。
+            workspace.open_usage_popover(px(800.), false, window, cx);
+            workspace.open_usage_stats(&UsageStats, window, cx);
+            assert!(
+                workspace.overlays.usage_popover.is_none(),
+                "統計を開けば閉じる"
+            );
+            assert!(matches!(
+                workspace
+                    .overlays
+                    .usage_stats
+                    .as_ref()
+                    .map(|stats| &stats.rows),
+                Some(StatsRows::Loading)
+            ));
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            match workspace
+                .overlays
+                .usage_stats
+                .as_ref()
+                .map(|stats| &stats.rows)
+            {
+                Some(StatsRows::Loaded(rows)) => {
+                    assert_eq!(rows.len(), 1, "{rows:?}");
+                    assert_eq!(rows[0].total_tokens, 1_000);
+                }
+                _ => panic!("台帳を読み終えている"),
+            }
+            workspace.close_usage_stats(window, cx);
+            assert!(workspace.overlays.usage_stats.is_none());
+            assert!(
+                workspace.chrome.rail_focus.is_focused(window),
+                "ポップオーバーを開く前の場所へフォーカスを返す"
+            );
+            for session in workspace.project_sessions.sessions.iter_mut() {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+        });
+        std::fs::remove_dir_all(&root).expect("片付けられる");
     }
 
     /// 期間の合計はエージェントごと。コストはある日だけ足し、どの日にも無ければ無し（0 と区別する）。
