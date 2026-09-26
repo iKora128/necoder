@@ -2161,6 +2161,8 @@ pub struct NewSshHost {
     pub port: Option<u16>,
     /// `IdentityFile`（`~/` 可）。
     pub identity_file: Option<String>,
+    /// `ProxyJump`（経由するホスト・`名前` か `user@host:port`・`,` で続けて複数）。
+    pub proxy_jump: Option<String>,
 }
 
 /// 1 語の値として config に書けるか（空白・引用符・`#`・先頭の `-` を含まない）。
@@ -2204,6 +2206,12 @@ impl NewSshHost {
                 "鍵のファイルに使えない文字があります: {identity}"
             );
         }
+        if let Some(proxy_jump) = &self.proxy_jump {
+            anyhow::ensure!(
+                plain_ssh_word(proxy_jump),
+                "経由するホストに使えない文字があります: {proxy_jump}"
+            );
+        }
         Ok(())
     }
 
@@ -2218,6 +2226,9 @@ impl NewSshHost {
         }
         if let Some(port) = self.port {
             block.push_str(&format!("  Port {port}\n"));
+        }
+        if let Some(proxy_jump) = &self.proxy_jump {
+            block.push_str(&format!("  ProxyJump {proxy_jump}\n"));
         }
         if let Some(identity) = &self.identity_file {
             if identity.contains(char::is_whitespace) {
@@ -4968,10 +4979,11 @@ mod tests {
             user: Some("me".into()),
             port: Some(2222),
             identity_file: Some("~/.ssh/My Keys/id_ed25519".into()),
+            proxy_jump: Some("admin@bastion.example.com:2200,inner".into()),
         };
         append_ssh_config_host(&path, &host).expect("無ければ作って書く");
         let written = std::fs::read_to_string(&path).expect("読める");
-        assert!(written.contains("Host devbox\n  HostName 192.168.1.20\n  User me\n  Port 2222\n"));
+        assert!(written.contains("Host devbox\n  HostName 192.168.1.20\n  User me\n  Port 2222\n  ProxyJump admin@bastion.example.com:2200,inner\n"));
         assert!(
             written.contains("IdentityFile \"~/.ssh/My Keys/id_ed25519\""),
             "{written}"
@@ -5022,6 +5034,12 @@ mod tests {
                 alias: "ok".into(),
                 hostname: "h".into(),
                 port: Some(0),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "h".into(),
+                proxy_jump: Some("gw -oProxyCommand=x".into()),
                 ..NewSshHost::default()
             },
         ] {

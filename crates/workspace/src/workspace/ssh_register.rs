@@ -1,5 +1,6 @@
 //! 接続先の登録（O37・G01）。SSH のホストピッカーの「＋ 接続先を登録…」とパレットから、名前・ホスト名・
-//! ユーザー・ポート・鍵のファイルを入れて SSH config（`~/.ssh/config`）の末尾に `Host` の塊を足す。
+//! ユーザー・ポート・鍵のファイル・経由するホスト（ProxyJump・G03）を入れて SSH config（`~/.ssh/config`）の
+//! 末尾に `Host` の塊を足す。
 //! 既存の行は触らず、同じ名前は断る（`host::append_ssh_config_host`）。
 //!
 //! necoder は SSH config を正にしている（ProxyJump・鍵・多重化はそのまま効く）ので、登録した接続先は
@@ -8,18 +9,19 @@
 use crate::workspace::*;
 
 /// 入力欄の並び（見出し・例の i18n キー）。値の読み方は [`Workspace::ssh_register_values`]。
-const FIELDS: [(&str, &str); 5] = [
+const FIELDS: [(&str, &str); 6] = [
     ("ssh.register_alias", "ssh.register_alias_hint"),
     ("ssh.register_hostname", "ssh.register_hostname_hint"),
     ("ssh.register_user", "ssh.register_user_hint"),
     ("ssh.register_port", "ssh.register_port_hint"),
     ("ssh.register_identity", "ssh.register_identity_hint"),
+    ("ssh.register_proxy_jump", "ssh.register_proxy_jump_hint"),
 ];
 
 /// 登録のダイアログ。
 pub(crate) struct SshRegistering {
-    /// 名前・ホスト名・ユーザー・ポート・鍵のファイル（[`FIELDS`] の順）。
-    pub(crate) fields: [Entity<EditorView>; 5],
+    /// 名前・ホスト名・ユーザー・ポート・鍵のファイル・経由するホスト（[`FIELDS`] の順）。
+    pub(crate) fields: [Entity<EditorView>; 6],
     /// 足す先（開いた時の `host::ssh_config_path()`・テストは一時フォルダ）。
     pub(crate) config_path: Option<PathBuf>,
     /// 足した後に接続を確かめるか（テストは実の ssh を起こさない）。
@@ -33,7 +35,7 @@ impl Workspace {
     pub(crate) fn open_ssh_register(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let accent = self.accent();
         let theme = self.theme.clone();
-        let fields: [Entity<EditorView>; 5] = std::array::from_fn(|_| {
+        let fields: [Entity<EditorView>; 6] = std::array::from_fn(|_| {
             cx.new(|cx| EditorView::plain(theme.clone(), accent, true, cx))
         });
         for field in &fields {
@@ -67,7 +69,7 @@ impl Workspace {
             .ssh_registering
             .as_ref()
             .ok_or_else(String::new)?;
-        let [alias, hostname, user, port, identity] = registering
+        let [alias, hostname, user, port, identity, proxy_jump] = registering
             .fields
             .each_ref()
             .map(|field| field.read(cx).plain_text().trim().to_string());
@@ -85,6 +87,7 @@ impl Workspace {
             user: optional(user),
             port,
             identity_file: optional(identity),
+            proxy_jump: optional(proxy_jump),
         };
         host.validate().map_err(|error| format!("{error:#}"))?;
         Ok(host)
@@ -364,7 +367,7 @@ mod tests {
             Workspace::new(vec![root.clone()], Theme::dark(), None, cx)
         });
         let config = root.join("ssh/config");
-        let fill = |workspace: &mut Workspace, values: [&str; 5], cx: &mut Context<Workspace>| {
+        let fill = |workspace: &mut Workspace, values: [&str; 6], cx: &mut Context<Workspace>| {
             let registering = workspace
                 .chrome
                 .ssh_registering
@@ -383,7 +386,7 @@ mod tests {
                 session._watch_pump = None;
             }
             workspace.open_ssh_register(window, cx);
-            fill(workspace, ["devbox", "10.0.0.5", "me", "70000", ""], cx);
+            fill(workspace, ["devbox", "10.0.0.5", "me", "70000", "", ""], cx);
             workspace.confirm_ssh_register(cx);
             assert!(
                 workspace
@@ -394,7 +397,11 @@ mod tests {
                 "ポートの誤りは残して知らせる"
             );
             assert!(!config.exists(), "書かない");
-            fill(workspace, ["devbox", "10.0.0.5", "me", "2222", ""], cx);
+            fill(
+                workspace,
+                ["devbox", "10.0.0.5", "me", "2222", "", "bastion"],
+                cx,
+            );
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         workspace.update_in(cx, |workspace, window, cx| {
@@ -409,7 +416,9 @@ mod tests {
         });
         let written = std::fs::read_to_string(&config).expect("足した");
         assert!(
-            written.contains("Host devbox\n  HostName 10.0.0.5\n  User me\n  Port 2222\n"),
+            written.contains(
+                "Host devbox\n  HostName 10.0.0.5\n  User me\n  Port 2222\n  ProxyJump bastion\n"
+            ),
             "{written}"
         );
         let _ = std::fs::remove_dir_all(&root);
