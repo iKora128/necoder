@@ -1,5 +1,6 @@
 //! エディタの所作（O26）: `path:行` のコピー（⌘⌥C）・タブを全部閉じる（⌘K ⌘W）・外部のエディタ /
-//! ターミナルで開く（パレット）。
+//! ターミナルで開く（パレット）。選んだ行をスレッドで引用（⌥⌘K・O29 / D04）＝ `path:行` と抜粋を
+//! Agent パネルの入力欄へ足し、その下に注記を書いてもらう（送るのは人・Design モードと同じ考え）。
 //!
 //! 外部アプリは**手元のプロジェクトだけ**（SSH 先のファイルは手元のアプリで開けない）。VS Code /
 //! Cursor / Zed は PATH の CLI（`code` / `cursor` / `zed`）で行まで渡す。CLI が無い macOS は
@@ -78,6 +79,35 @@ pub(crate) fn path_with_lines(relative: &Path, start: usize, end: usize) -> Stri
     }
 }
 
+/// 引用に載せる行の上限（長い範囲は先頭だけ。場所の行で範囲の全体は分かる）。
+const QUOTE_MAX_LINES: usize = 40;
+
+/// 選んだ行の引用（O29・D04・純関数）: `path:10-14` の行と、抜粋のコードブロック（言語は拡張子から）。
+/// 抜粋に ``` があればフェンスを伸ばす（Markdown のコードブロックを引用しても途中で閉じない）。
+/// `lines` が上限を超えていれば、上限までと `…`。
+pub(crate) fn quote_lines(relative: &Path, start: usize, end: usize, lines: &[String]) -> String {
+    let language = lang::language_for_path(relative)
+        .map(|language| language.canonical_id())
+        .unwrap_or_default();
+    let mut fence = "```".to_string();
+    while lines.iter().any(|line| line.contains(fence.as_str())) {
+        fence.push('`');
+    }
+    let mut quote = format!(
+        "{}\n{fence}{language}\n",
+        path_with_lines(relative, start, end)
+    );
+    for line in lines.iter().take(QUOTE_MAX_LINES) {
+        quote.push_str(line);
+        quote.push('\n');
+    }
+    if lines.len() > QUOTE_MAX_LINES {
+        quote.push_str("…\n");
+    }
+    quote.push_str(&fence);
+    quote
+}
+
 /// OS のターミナルでフォルダを開くコマンド（無い OS は `None`）。
 fn terminal_command(folder: &Path) -> Option<(String, Vec<String>)> {
     let folder = folder.display().to_string();
@@ -142,6 +172,47 @@ impl Workspace {
             color,
             cx,
         );
+    }
+
+    /// ⌥⌘K: 選んだ行（無ければキャレットの行）を `path:行` と抜粋にして、いまの Agent パネルの入力欄の
+    /// 末尾へ足す（O29・D04）。フォーカスはその下の空の行へ（続けて注記を書く）。**送信はしない**。
+    pub(crate) fn quote_selection_in_thread(
+        &mut self,
+        _: &QuoteSelectionInThread,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let quoted = self.active_editor().and_then(|editor| {
+            let editor = editor.read(cx);
+            let path = editor.buffer().path()?.to_path_buf();
+            let (start, end) = editor.primary_line_range();
+            let snapshot = editor.buffer().snapshot();
+            // 上限の次の 1 行まで読めば「まだある」が分かる（長い範囲の全行を複製しない）。
+            let lines: Vec<String> = (start..=end)
+                .take(QUOTE_MAX_LINES + 1)
+                .map(|line| snapshot.line_text(line - 1))
+                .collect();
+            Some((path, start, end, lines))
+        });
+        let Some((path, start, end, lines)) = quoted else {
+            let color = self.accent();
+            self.push_toast(i18n::t!("tabs.quote_no_file").into(), color, cx);
+            return;
+        };
+        let relative = self
+            .active_slot()
+            .and_then(|slot| path.strip_prefix(slot.worktree.root()).ok())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone());
+        let quote = quote_lines(&relative, start, end, &lines);
+        let panel = self.agent_panel.clone();
+        panel.update(cx, |panel, cx| panel.append_quote_to_composer(&quote, cx));
+        if !self.chat_mode() {
+            self.chrome.show_right = true;
+        }
+        self.agent_active = true;
+        panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+        cx.notify();
     }
 
     /// ⌘K ⌘W: タブを全部閉じる。**未保存のタブは残す**（閉じると編集を捨てる仕様なので、まとめて
@@ -328,6 +399,112 @@ mod tests {
             matches!(link.target, ui::links::LinkTarget::Path { ref path, line: Some(10), .. } if path == "src/a.rs")
         });
         assert!(linked, "範囲は先頭の行へのリンクになる");
+    }
+
+    /// 引用は `path:行` と抜粋のコードブロック。抜粋の ``` よりフェンスを長くし、上限を超えた分は `…`。
+    #[test]
+    fn quotes_carry_the_place_and_the_lines() {
+        let lines = |texts: &[&str]| {
+            texts
+                .iter()
+                .map(|text| text.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            quote_lines(
+                Path::new("docs/PLAN.md"),
+                2,
+                3,
+                &lines(&["## 手順", "1. 作る"])
+            ),
+            "docs/PLAN.md:2-3\n```markdown\n## 手順\n1. 作る\n```"
+        );
+        assert_eq!(
+            quote_lines(
+                Path::new("README.md"),
+                5,
+                7,
+                &lines(&["```sh", "make", "```"])
+            ),
+            "README.md:5-7\n````markdown\n```sh\nmake\n```\n````",
+            "コードブロックを引用しても閉じない"
+        );
+        assert_eq!(
+            quote_lines(Path::new("notes"), 1, 1, &lines(&["x"])),
+            "notes:1\n```\nx\n```",
+            "言語が分からなければ付けない"
+        );
+        let long: Vec<String> = (1..=41).map(|line| format!("line {line}")).collect();
+        let quote = quote_lines(Path::new("a.rs"), 1, 90, &long);
+        assert!(quote.starts_with("a.rs:1-90\n```rust\nline 1\n"), "{quote}");
+        assert!(quote.ends_with("line 40\n…\n```"), "{quote}");
+    }
+
+    /// ⌥⌘K（O29・D04）: 選んだ行を場所と抜粋にして Agent パネルの入力欄の末尾へ足し、その下の空の行へ
+    /// フォーカスを移す。送信はしない（2 回目は空行を挟んで続けて足す）。ファイルでなければトースト。
+    #[gpui::test]
+    fn selected_lines_are_quoted_in_the_thread_input(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_quote_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        let plan = project.join("docs/PLAN.md");
+        std::fs::write(&plan, "# 計画\n## 手順\n1. 作る\n2. 試す\n").unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| {
+            settings::init(Some(settings_path), None, cx);
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.chrome.show_right = false;
+            workspace.open_file_sync(plan.clone(), window, cx);
+            let editor = workspace.active_editor().expect("エディタ");
+            // 2〜3 行目を選ぶ（4 行目の行頭まで＝行を丸ごと選んだ形）。
+            let start = "# 計画\n".len();
+            let end = "# 計画\n## 手順\n1. 作る\n".len();
+            editor.update(cx, |editor, cx| {
+                editor.select_byte_range(start..end, cx);
+                let handle = editor.focus_handle(cx);
+                window.focus(&handle, cx);
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("alt-cmd-k");
+        cx.run_until_parked();
+        let first = "docs/PLAN.md:2-3\n```markdown\n## 手順\n1. 作る\n```\n";
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = workspace.agent_panel.read(cx);
+            assert_eq!(panel.composer_text(cx), first);
+            assert!(panel.contains_focus(window, cx), "入力欄へ移る");
+            assert!(workspace.chrome.show_right, "右のパネルを開く");
+            // 2 回目: キャレットだけ（4 行目）。空行を挟んで続けて足す。
+            let editor = workspace.active_editor().expect("エディタ");
+            let caret = "# 計画\n## 手順\n1. 作る\n".len();
+            editor.update(cx, |editor, cx| editor.select_byte_range(caret..caret, cx));
+            workspace.quote_selection_in_thread(&QuoteSelectionInThread, window, cx);
+            assert_eq!(
+                workspace.agent_panel.read(cx).composer_text(cx),
+                format!(
+                    "{}\n\ndocs/PLAN.md:4\n```markdown\n2. 試す\n```\n",
+                    first.trim_end()
+                )
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// ⌘K ⌘W は保存済みのタブだけ閉じ、未保存のタブは残して知らせる。

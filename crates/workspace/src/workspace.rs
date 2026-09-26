@@ -223,6 +223,8 @@ actions!(
         CheckForUpdates,
         // 開いているファイルの `path:行`（範囲なら `path:10-14`）をコピー（⌘⌥C・O26）。
         CopyPathWithLine,
+        // 選んだ行を `path:行` と抜粋にして Agent パネルの入力欄へ足す（⌥⌘K・送信はしない・O29 / D04）。
+        QuoteSelectionInThread,
         // タブを全部閉じる（⌘K ⌘W・未保存のタブは残す・O26）。
         CloseAllTabs,
         // アクティブなタブのピン留めを付ける / 外す（⌘K ⇧⏎・O26）。
@@ -2407,6 +2409,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_usage_stats))
             .on_action(cx.listener(Self::show_usage_limits))
             .on_action(cx.listener(Self::copy_path_with_line))
+            .on_action(cx.listener(Self::quote_selection_in_thread))
             .on_action(cx.listener(Self::close_all_tabs))
             .on_action(cx.listener(Self::toggle_pin_active_tab))
             .on_action(cx.listener(Self::open_in_vs_code))

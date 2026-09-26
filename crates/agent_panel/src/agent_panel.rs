@@ -5749,6 +5749,16 @@ PYEOF"#;
         cx.notify();
     }
 
+    /// composer の末尾へ引用（選んだ行の場所と抜粋・O29）を足し、その下の空の行にキャレットを置く
+    /// （改行を打たずに注記を書き始められる＝Enter 送信の設定で、改行のつもりの Enter で引用だけを
+    /// 送ってしまわない）。**送信はしない**。
+    pub fn append_quote_to_composer(&mut self, quote: &str, cx: &mut Context<Self>) {
+        self.append_to_composer(quote, cx);
+        let text = format!("{}\n", self.composer.read(cx).plain_text());
+        self.composer
+            .update(cx, |composer, cx| composer.set_plain_text(&text, cx));
+    }
+
     /// ドロップされたファイルパスを @メンションに加える（プロジェクト root 配下なら相対、外なら絶対）。
     /// D&D（Finder / エクスプローラ）→ context 参照の受け口。
     fn add_context_path(&mut self, path: &Path, cx: &mut Context<Self>) {

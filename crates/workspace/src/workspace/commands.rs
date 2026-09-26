@@ -339,6 +339,10 @@ impl CommandRegistry {
                 action_name: "workspace::CopyPathWithLine",
             },
             CommandEntry {
+                label_key: "cmd.quote_selection",
+                action_name: "workspace::QuoteSelectionInThread",
+            },
+            CommandEntry {
                 label_key: "cmd.close_all_tabs",
                 action_name: "workspace::CloseAllTabs",
             },
