@@ -9,6 +9,7 @@
 //! プロンプトの形（抜粋のコードフェンス・比較の基準の見出し）は necoder の仕様で独自に組んだ。
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use storage::{ReviewNoteRecord, ReviewNoteState};
 
 /// 1 通のプロンプトに載せる抜粋の上限（行）。長い範囲は先頭だけ見せて本文で補ってもらう。
@@ -155,6 +156,12 @@ impl ReviewNote {
 /// （コメント本文）
 /// ````
 pub fn format_prompt(notes: &[&ReviewNote]) -> String {
+    format_prompt_marking_lost(notes, &HashSet::new())
+}
+
+/// [`format_prompt`] に、位置が変わった注記（R01・`lost` の id）の印を付けたもの。場所の行に
+/// 「付けた時の場所・今の差分では見つからない」を添える（抜粋は付けた時のまま載る）。
+pub fn format_prompt_marking_lost(notes: &[&ReviewNote], lost: &HashSet<String>) -> String {
     let mut notes: Vec<&ReviewNote> = notes.to_vec();
     notes.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
     let mut bases: Vec<String> = Vec::new();
@@ -177,6 +184,11 @@ pub fn format_prompt(notes: &[&ReviewNote]) -> String {
         let location = match target.side {
             NoteSide::New => location,
             NoteSide::Old => i18n::t!("review.prompt_old_side", "location" => location),
+        };
+        let location = if lost.contains(&note.id) {
+            i18n::t!("review.prompt_lost", "location" => location)
+        } else {
+            location
         };
         out.push_str(&format!("{}. {location}\n", index + 1));
         out.push_str(&excerpt_block(target));
@@ -345,6 +357,30 @@ mod tests {
         assert!(
             paths.contains(&("crates/b.rs".to_string(), Some(3))),
             "{paths:?}"
+        );
+    }
+
+    /// R01: 位置が変わった注記は、プロンプトの場所に「今の差分では見つからない」を添える。
+    #[test]
+    fn lost_notes_are_marked_in_the_prompt() {
+        i18n::set_locale("ja");
+        let lost = note(
+            "a",
+            "src/foo.rs",
+            NoteSide::New,
+            (3, 3),
+            &[(ExcerptKind::Added, "x")],
+            "本文",
+        );
+        let ids: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let prompt = format_prompt_marking_lost(&[&lost], &ids);
+        assert!(
+            prompt.contains("1. src/foo.rs:3（付けた時の場所・今の差分では見つからない）"),
+            "{prompt}"
+        );
+        assert!(
+            !format_prompt(&[&lost]).contains("見つからない"),
+            "印は lost の時だけ"
         );
     }
 

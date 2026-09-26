@@ -1,12 +1,46 @@
 use crate::workspace::*;
 
+mod auto_save;
 mod diagnostics;
 mod diff;
+mod file_drop;
 mod hot_exit;
 mod inline_edit;
 mod language;
 mod overlays;
+mod pins;
+mod preview_tabs;
 mod tabs;
+
+/// エージェント別の新規スレッドの行き先（B28）。表示名はカタログ（`acp_client::AGENTS`）と同じで、
+/// 並びは workspace の `NewThreadClaudeCode` … `NewThreadGrok` とパレットの `cmd.new_thread_*` と同じ。
+pub(crate) const AGENT_THREAD_LABELS: [&str; 7] = [
+    "Claude Code",
+    "Codex",
+    "GitHub Copilot",
+    "Qwen Code",
+    "OpenCode",
+    "Kimi CLI",
+    "Grok Build",
+];
+
+/// パレットのエージェント別の新規スレッド（`workspace::NewThreadCodex` など）が指すエージェント。
+/// 並びは [`AGENT_THREAD_LABELS`] と同じ。それ以外の action は `None`。
+pub(crate) fn agent_for_thread_action(action_name: &str) -> Option<&'static str> {
+    const ACTIONS: [&str; 7] = [
+        "workspace::NewThreadClaudeCode",
+        "workspace::NewThreadCodex",
+        "workspace::NewThreadCopilot",
+        "workspace::NewThreadQwenCode",
+        "workspace::NewThreadOpenCode",
+        "workspace::NewThreadKimi",
+        "workspace::NewThreadGrok",
+    ];
+    ACTIONS
+        .iter()
+        .position(|action| *action == action_name)
+        .map(|index| AGENT_THREAD_LABELS[index])
+}
 
 /// 1 ProjectSession の編集面。tab / pane / language / diff / navigation の状態を一括所有する。
 ///
@@ -62,6 +96,9 @@ pub struct EditorArea {
     pub(crate) hot_exit_gen: u32,
     pub(crate) hot_exit_versions: HashMap<PathBuf, u64>,
     pub(crate) hot_exit_pending: Option<Vec<(PathBuf, String)>>,
+    /// プレビューで開こうとして読み込み中のファイル（読み終えたらプレビュータブにする・O26）。
+    /// 読み込み中に普通に開き直された（ダブルクリック等）ら消す＝普通のタブで開く。
+    pub(crate) pending_preview_tab: Option<PathBuf>,
 }
 
 impl EditorArea {
@@ -109,6 +146,7 @@ impl EditorArea {
             hot_exit_gen: 0,
             hot_exit_versions: HashMap::new(),
             hot_exit_pending: None,
+            pending_preview_tab: None,
         }
     }
 }

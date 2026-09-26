@@ -33,23 +33,35 @@
 | ↳ **Task タブ**（カードの中の面。← FleetPane / 面） | `TaskTab::{Thread(id),Diff,Terminal(id),Files}` | スレッド / 変更 / ターミナル / ファイル | Thread / Diff / Terminal / Files |
 | **変更レビュー**（worktree の全変更を 1 画面で読む面。Fleet の「変更」タブの中身もこれ・session に 1 枚） | `review_view::ReviewView` / `OpenReview` | 変更レビュー | Review |
 | ↳ **比較の基準**（Task の base / HEAD / ブランチの分岐点 / コミット） | `project::review::ReviewBase` | 比較 | Compare |
-| ↳ **見た**（ファイルに付ける既読の印。付けると畳む） | `reviewed` | 見た | Viewed |
+| ↳ **見た**（ファイルに付ける既読の印。付けると畳む。見た時の基準と差分の指紋に結び付き、変わったら外れる） | `reviewed` / `ReviewedMark` | 見た | Viewed |
+| ↳ ↳ **見た後に変更あり**（見た印を付けた後でファイルの差分が変わった。印は外れて畳みも開く） | `reviewed_stale` | 見た後に変更あり | Changed since viewed |
 | ↳ **注記**（diff の行に付けるコメント。未送信 / 送信済み / 解決。対象は拡張できる = 将来 Design Mode のページ要素も） | `ReviewNote` / `NoteTarget` / storage `review_notes` | 注記 | Note |
+| ↳ ↳ **位置が変わった注記**（付けた行の中身が変わり、同じ中身の場所も 1 か所に決まらない注記。行に付けず見出しの直後に元の抜粋つきで出す） | `NotePosition::Lost` / `lost_notes` | 位置が変わった注記 | Moved note |
 | ↳ **注記トレイ**（変更レビューの下端。件数・一覧・送る） | `render_tray` | 注記 | Notes |
 | ↳ **送る**（注記を 1 通のプロンプトにまとめて宛先のスレッドへ） | `ReviewEvent::SendNotes` / `AgentPanel::send_user_prompt_to` | 送る / 未解決だけ再送 | Send / Resend unresolved |
 | ↳ **ピン**（舞台に並べる Task を選ぶ） | `pinned` | 並べる | Pin |
 | **系譜の帯**（中央上の薄い系譜・⌄ で 4 表示に展開） | `lineage_strip` | 系譜 | Lineage |
 | **次へ**（phase に応じた唯一の主操作ボタン） | `next_action` | （phase 別の語） | （phase 別） |
 | **＋ Task**（1 プロンプト = 1 worktree のダイアログ） | `new_task_dialog` | ＋ Task | + Task |
+| ↳ **並べて比べる**（fan-out。1 つの依頼を選んだエージェントごとの Task へ・舞台に並べる・O23） | `plan_fanout` / `FanoutTask` / `create_prompted_tasks` | 並べて比べる | Compare side by side |
 | **準備スクリプト**（worktree 作成直後に 1 回） | `worktree_setup`（`.necoder/worktree-setup.sh` / `task.env`） | 準備 | Setup |
+| **`.worktreeinclude`**（無視しているファイルのうち、新しい Task へ写す物の一覧・`.gitignore` と同じ書き方・準備の前） | `copy_worktree_includes_on` / `prepare_task_worktree_on` | （ファイル名のまま） | (file name) |
 | **レール**（左の色バー） | `rail` | レール | Rail |
 | **project**（レールの 1 枠） | `ProjectSlot` / `slot` | プロジェクト | Project |
 | 長寿命 UI 束（1 project 分） | `ProjectSession` | — | — |
 | **TaskSpace**（Fleet の隔離作業単位） | `TaskSpace` / `SpaceId` | Task | Task |
 | **IntegrationSpace**（保護された統合先） | `SpaceKind::Integration`（P0 で phase から分離） | Integration | Integration |
+| ↳ 統合先の選び方（同じリポジトリに統合先扱いが複数ある時はメインの作業ツリー） | `integration_slot_for` / `TaskSpace::linked` | — | — |
+| **リソース**（necoder 本体と子プロセスのメモリをプロジェクト / Task ごとに見る画面・使っていないエージェントを止める・O22） | `resources` / `ShowResources` / `AgentPanel::stop_quiet_agents` | リソース / 使っていないエージェントを止める | Resources / Stop idle agents |
+| **Ports**（necoder の中で待ち受けている開発サーバのポート。開く / 止める） | `ports` / `ShowPorts` | 開いているポート | Open ports |
+| **外部の worktree**（リポジトリの worktree のうち Task でないもの。necoder の外で作ったものも含む） | `external_worktrees` / `fleet_worktrees` | 外部の worktree | Other worktrees |
+| ↳ **取り込む**（外部の worktree をレールに開いて Task にする） | `adopt_worktree` / `make_task_space` | 取り込む | Adopt |
+| ↳ **消えています**（Task の worktree が necoder の外で消された。片付け = レールから外す） | `vanished_worktree` / `forget_vanished_task` | 消えています / 片付け | Gone / Clean up |
 | **thread**（Task 内の会話 / AgentRun 1 本） | `Thread` | スレッド | Thread |
 | **agent**（話す相手の AI） | `AgentKind` / `agent` | エージェント | Agent |
+| ↳ **アカウント**（エージェントの設定の置き場のフォルダ。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` で指す・資格情報は読まない・O14） | `account_env_var` / `accounts_root` / `agent_servers.<id>.env` | アカウント / 既定 / 新しいアカウント | Account / Default / New account |
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
+| ↳ **レシピ**（repo ごとの定型プロンプト。`.necoder/recipes/*.md`・`/` 補完に `/necoder:<名前>`・選ぶと本文が入る・O16） | `recipes` / `Recipe` / `RECIPE_PREFIX` | レシピ | Recipe |
 | ↳ **会話名**（エージェントが付けたスレッドの題名。手動改名が優先） | `AgentEvent::TitleChanged`（ACP `session_info_update.title`）/ 手動の印 `thread_custom_names` | （スレッド名） | (thread name) |
 | ↳ **目標**（`/goal` でエージェントが追う目的。composer の上に 1 行） | `acp_client::AgentGoal` / `AgentEvent::GoalChanged` / `Thread.goal` | 目標 | Goal |
 | ↳ **使用量**（エージェントがターンごとに報告したトークンと推定コスト。台帳に 1 ターン 1 行・O11） | `turn_usage`（storage）/ `AgentEvent::TurnUsage` / `AgentEvent::SessionCost` / `agent_panel::usage::CostMeter` | 使用量 | Usage |
@@ -71,6 +83,7 @@
 | ↳ **リレー**（room id が一致する 2 本を繋ぐ交換機） | `relay`（`relay/`・DO） | リレー | Relay |
 | ↳ **封**（transport 非依存の暗号化フレーム） | `seal` / `open` / `SealedFrame` | — | — |
 | **片付けメニュー**（Task カードの ⋯・残るものが減る順の段） | `FleetCellMenuState` / `FleetCellAction` | 片付け | Clean up |
+| **片付けの画面**（Task をまとめて終了 / 失うものが無い worktree をまとめて削除・O22） | `cleanup` / `ShowCleanup` / `CleanupState` | Task の片付け | Clean up Tasks |
 | ↳ カードを閉じる（舞台から外すだけ） | `close_fleet_cell` | カードを閉じる | Close card |
 | ↳ Task を終了（台帳を archived に） | `archive_fleet_cell_task` | Task を終了 | Finish Task |
 | ↳ worktree を削除（ディスクから消す） | `delete_fleet_cell_worktree` | worktree を削除 | Delete worktree |
@@ -78,9 +91,14 @@
 | **下段ドック**（Fleet 下の可変高タブ面） | `FleetBottomView` / `bottom_height` | 下段 | Bottom pane |
 | **OS の通知**（通知センター。その窓を見ていない時だけ・スレッドごとに 1 件） | `system_notifications` / `post_agent_notification` / 設定 `system_notifications` | OS の通知 | System notifications |
 | **Dock バッジ**（要対応の件数・全窓の合計・macOS） | `dock_badge` | — | — |
+| **通知の履歴**（titlebar のベル。エージェントの出来事を窓ごとに最新 100 件・未読 / 既読・O13） | `inbox` / `InboxItem` / `ShowInbox` | 通知の履歴 / すべて既読 / 未読に戻す | Notification history / Mark all read / Mark as unread |
+| **プレビュータブ**（エクスプローラの 1 回クリックで開く・次の 1 回クリックで置き換わる・名前が斜体・O26） | `EditorTab::preview` / `open_file_preview`（設定 `preview_tabs`） | プレビュータブ | Preview tab |
+| **ピン留め**（タブを左端に留め、まとめて閉じる操作と ⌘W で閉じない・窓セッションに残る・O26） | `EditorTab::pinned` / `TogglePinTab` / 窓セッション `pinned_files` | ピン留め / ピン留めを外す | Pin tab / Unpin tab |
+| **自動保存**（他へ移った時 / 手を止めた時に未保存のタブを書く・外で変わったタブは書かない・O26） | `auto_save`（設定 `auto_save`・`AutoSave`） | 自動保存 / 他へ移った時 / 手を止めた時 | Auto save / On focus change / After a pause |
+| **作業中はスリープさせない**（作業中のスレッドが全窓で 1 本でもある間だけ、放っておいた時のスリープを止める・O13） | `keep_awake`（設定 `keep_awake`・`KeepAwake`） | 作業中はスリープさせない | Keep awake while agents work |
 | **質問待ち**（エージェントが選択肢付きで聞いてきて止まっている。状態は承認待ちと同じ Blocked） | `PanelEvent::QuestionWaiting` / `AttentionKind::Question` | 質問待ち | Waiting for an answer |
-| **終了の確認**（⌘Q・最後の窓を閉じる時。動いているエージェント・ターミナルがある時だけ） | `quit_guard` / `QuitConfirmState`（設定 `confirm_quit`） | 終了時の確認 | Confirm before quitting |
-| ↳ **隠して動かし続ける**（既定。mac はアプリを隠す・他 OS は最小化。プロセスは止めない） | `QuitChoice::KeepRunning` | 隠して動かし続ける / 最小化して動かし続ける | Hide and keep running / Minimize and keep running |
+| **終了の確認**（⌘Q・窓を閉じる時。動いているエージェント・ターミナルがある時だけ。窓を閉じる時はその窓の分だけ数える） | `quit_guard` / `QuitConfirmState`（設定 `confirm_quit`） | 終了時の確認 | Confirm before quitting |
+| ↳ **隠して動かし続ける**（既定。mac はアプリを隠す・他 OS は最小化。ほかの窓が残る時はその窓だけを最小化。プロセスは止めないが、終了・クラッシュを越えては続かない） | `QuitChoice::KeepRunning` | 隠して動かし続ける / 最小化して動かし続ける | Hide and keep running / Minimize and keep running |
 | **AI 全画面**（solo で中央エディタを Agent に差し替える。左/下ドックは各自の ON/OFF） | `agent_full_screen` / `ToggleAgentFullScreen` | AI を全画面 | AI full screen |
 | **「最新へ」ボタン**（transcript を遡り中だけ右下に出る・最下部へ戻す） | `render_jump_to_latest` | 最新へ | Jump to latest |
 | **プレビュー**（`.md` のネイティブ整形表示 / `.html` のOS標準WebView表示。source ⇄ preview・⌘⇧V。開発サーバを見るのは別のタブ＝下の Web タブ） | `rendered_markdown` / `rendered_html` / `ToggleRenderedMarkdown` / `markdown_preview` / `webview_view` | プレビュー | Preview |

@@ -151,14 +151,36 @@ impl AgentPanel {
         let next = (search.current as isize + delta).rem_euclid(count as isize) as usize;
         search.current = next;
         let entry = search.entries[next];
-        self.transcript_list.scroll_to_reveal_item(entry);
+        // サブエージェントの手順は親の中に畳まれている（O17）。親を開いて、親の行へ動く。
+        let item = self.reveal_subagent_step(entry);
+        self.transcript_list.scroll_to_reveal_item(item);
         cx.notify();
     }
 
-    /// いま強調すべきエントリ（濃い方）。
+    /// いま強調すべきエントリ（濃い方）。サブエージェントの手順は、それを描いている親の行で数える。
     fn current_search_entry(&self) -> Option<usize> {
         let search = self.transcript_search.as_ref()?;
-        search.entries.get(search.current).copied()
+        let entry = search.entries.get(search.current).copied()?;
+        let thread = self.threads.get(self.active)?;
+        Some(
+            subagent_ancestry(&thread.entries, entry)
+                .last()
+                .copied()
+                .unwrap_or(entry),
+        )
+    }
+
+    /// `entry` がサブエージェントの手順なら親（入れ子なら上まで全部）を開き、描いている行の添字を返す。
+    pub(crate) fn reveal_subagent_step(&mut self, entry: usize) -> usize {
+        let Some(thread) = self.threads.get(self.active) else {
+            return entry;
+        };
+        let ancestors = subagent_ancestry(&thread.entries, entry);
+        let thread_id = thread.id.clone();
+        for parent in &ancestors {
+            self.expanded_subagents.insert((thread_id.clone(), *parent));
+        }
+        ancestors.last().copied().unwrap_or(entry)
     }
 
     /// transcript の 1 区画ぶんの検索強調。`item` は描画中のエントリの添字。

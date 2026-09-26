@@ -4,6 +4,23 @@
 app:
   name: necoder
 editor:
+  table_truncated: "Showing the first %{n} rows as a table (the full text is in the source · ⌘⇧V to switch back)"
+  drop_remote: "Files cannot be dropped on a remote project's editor (drop them on a folder in the explorer to upload)"
+  toc: Contents
+  toc_empty: No headings
+  slash_h1: Heading 1
+  slash_h2: Heading 2
+  slash_h3: Heading 3
+  slash_bullet: Bulleted list
+  slash_numbered: Numbered list
+  slash_todo: Checklist
+  slash_quote: Quote
+  slash_code: Code block
+  slash_table: Table
+  slash_divider: Divider
+  slash_image: Image
+  slash_link: Link
+  slash_toc: Table of contents
   empty_hint: Pass a file path as an argument to open it (e.g. necoder README.md)
   blame_uncommitted: Uncommitted
 common:
@@ -18,6 +35,7 @@ finder:
   ignored_not_found: Not found in ignored files either
   ignored_detail: ignored
 agent:
+  disabled_agent: "%{agent} is turned off (turn it back on under Settings › AI Agents)"
   pasted_image: Pasted image
   search_placeholder: Search this conversation
   search_count: "%{position}/%{entries} · %{total} matches"
@@ -110,6 +128,9 @@ agent:
   queue_send_now: Interrupt & send
   elicitation_submit: Submit
   elicitation_decline: Decline
+  elicitation_custom_single: Type your own answer (or a note on the option you pick)
+  elicitation_custom_multi: Type your own answer (added to your picks)
+  subagent_steps: "Subagent · %{count} steps"
   code_show_more: "… show %{n} more lines"
   code_collapse: Collapse code
   code_streaming_more: "… streaming (%{n} lines)"
@@ -124,6 +145,9 @@ agent:
   slash_footer: "%{count} commands · ↑↓ to choose · Enter / Tab to insert · esc to close"
   goal_label: Goal
   goal_status_active: Active
+  goal_pause: Pause
+  goal_resume: Resume
+  goal_clear: Clear
   goal_status_paused: Paused
   goal_status_blocked: Blocked
   goal_status_complete: Complete
@@ -211,11 +235,20 @@ cmd:
   open_localhost_preview: "Preview: Open localhost…"
   toggle_design_mode: "Preview: Design mode (pick elements for the AI)"
   new_thread: "AI: New thread"
+  new_thread_claude: "AI: New thread (Claude Code)"
+  new_thread_codex: "AI: New thread (Codex)"
+  new_thread_copilot: "AI: New thread (GitHub Copilot)"
+  new_thread_qwen: "AI: New thread (Qwen Code)"
+  new_thread_opencode: "AI: New thread (OpenCode)"
+  new_thread_kimi: "AI: New thread (Kimi CLI)"
+  new_thread_grok: "AI: New thread (Grok Build)"
   next_tab: "Tabs: Next"
   prev_tab: "Tabs: Previous"
   next_thread: "AI: Next thread"
   prev_thread: "AI: Previous thread"
   remote_ssh: "Remote: Connect to SSH Host"
+  test_ssh: "Remote: Test SSH connection…"
+  register_ssh: "Remote: Add an SSH host…"
   thread_history: "AI: Thread history"
   report_bug: "Help: Report a Bug"
   about: "Help: About necoder"
@@ -227,6 +260,17 @@ cmd:
   shortcut_sheet: "Help: Keyboard shortcuts"
   usage_limits: "Usage: Show rate limits"
   usage_stats: "Usage: Open statistics"
+  copy_path_line: "Edit: Copy path:line"
+  close_all_tabs: "Tabs: Close all (keep unsaved)"
+  toggle_pin_tab: "Tabs: Pin / unpin"
+  open_in_vscode: "External: Open in VS Code"
+  open_in_cursor: "External: Open in Cursor"
+  open_in_zed: "External: Open in Zed"
+  open_in_terminal: "External: Open folder in Terminal"
+  show_ports: "Ports: Open ports (open / stop)"
+  show_inbox: "Notifications: Show history"
+  show_resources: "Resources: Memory and processes"
+  show_cleanup: "Tasks: Clean up…"
 herd:
   empty: No agents running
   files_of: "Files · %{name}'s worktree"
@@ -249,6 +293,8 @@ control:
   integrate: Integrate
   review: Run radar
   fix_instruct: Instruct fix
+  retry_setup: Retry setup
+  skip_setup: Start without setup
   answer: Open to answer
 news:
   waiting: "waiting for approval — %{title}"
@@ -281,10 +327,32 @@ captain:
   facts: "Current state (Tasks in this repository · id | name | phase | digest):"
   event: "Event: [%{event}] %{title}%{digest}"
 fleet:
+  details_kind_task: Task
+  details_kind_integration: Integration
+  details_state: Kind and state
+  details_branch: Branch
+  details_base: Started from
+  details_path: Location
+  details_created: Created
+  details_threads: Threads
+  details_asked: Last request
+  details_tokens: Tokens
+  details_close: Close
   new_task_worktree: "worktree: %{path}"
   new_task_setup_ready: "Setup script ✓ .necoder/worktree-setup.sh"
   new_task_setup_missing: "No setup script"
   new_task_setup_create: "Create (template: bring .env, share target)"
+  new_task_details: Details (branch name, starting point)
+  new_task_branch_label: "Branch (empty = task/<first line>; an existing branch name opens a worktree on that branch)"
+  new_task_base_label: "Starting point (empty = the integration HEAD; a branch, tag or commit)"
+  new_task_base_label_default: "Starting point (empty = this repository's default %{base}; a branch, tag or commit)"
+  new_task_skip_setup: Skip the setup script this time (files in .worktreeinclude are still copied)
+  new_task_fanout: Compare side by side (one Task per chosen agent; none = one Task with the default agent)
+  new_task_fanout_each: Each
+  new_task_fanout_preview: "→ %{count} Tasks: %{names}"
+  fanout_created: "Created %{count} Tasks and put them side by side on the stage"
+  fanout_created_outside: "Created %{count} Tasks. Compare them side by side in Fleet (%{key})"
+  new_task_from_base: "⎇ %{branch} (from %{base})"
   new_task_no_repository: "No integration worktree (main) is open, so a Task cannot be started"
   next_allow: "Allow"
   next_answer: "Answer"
@@ -305,6 +373,18 @@ fleet:
   tab_add_thread: "+ Thread"
   tab_add_terminal: "+ Terminal"
   tasks_count: "%{n} Tasks"
+  filter_placeholder: Filter Tasks
+  filter_none: No Tasks match
+  sort_rail: "Order: rail"
+  sort_recent: "Order: recent"
+  sort_attention: "Order: needs you"
+  external_header: "Other worktrees (%{count})"
+  external_tip: "Worktrees of this repository that are not Tasks (made by Orca, Claude Code, git worktree add, and so on). Click to collapse"
+  external_adopt: Adopt
+  external_adopt_tip: "Open it in the rail as a Task (branch and files stay as they are; it stays a Task after a restart)"
+  worktree_vanished: Gone (deleted outside necoder)
+  worktree_forget: Clean up
+  worktree_forget_tip: "This worktree's folder was deleted outside necoder. Remove it from the rail"
   integration_row: "Integration · protected"
   integration_sub: "%{branched} branched · %{integrated} integrated today"
   asked: "› %{text}"
@@ -344,6 +424,16 @@ fleet:
   cleanup_close_sub: Hides it only. The agent keeps running
   cleanup_stop: Stop the agent
   cleanup_stop_sub: Interrupt the running turn (same as esc). The Task stays
+  cleanup_sleep: Put to sleep
+  selection_count: "%{n} selected"
+  selection_rest_tip: "Stop the quiet agents of the selected Tasks to free memory (conversations stay; the next message resumes them)"
+  selection_stage: Put on the stage
+  selection_stage_tip: "Show them side by side on the stage (the first 3 you selected)"
+  selection_stage_first: "The stage holds 3, so the first 3 of the %{count} selected are shown"
+  selection_cleanup: Clean up…
+  selection_cleanup_tip: "Open the cleanup screen with these Tasks selected (it counts what you would lose before deleting)"
+  selection_clear_tip: Clear the selection
+  cleanup_sleep_sub: "Stop %{count} idle agents to free memory. Conversations stay and resume on your next message"
   cleanup_archive: Finish Task
   cleanup_archive_sub: Removes it from fleet and herd. The worktree stays on disk
   cleanup_remove_worktree: Delete worktree
@@ -355,6 +445,22 @@ fleet:
   no_running_agent: No agent is running
   task_archived: Task finished (the worktree is still on disk)
   base_synced: "Fast-forwarded %{branch} to upstream (%{count} commits) before creating the Task"
+  next_resolve: Have the agent fix conflicts
+  toast_integrate_conflicts: "%{count} file(s) conflict with the base. Use “Have the agent fix conflicts” to ask the Task's agent"
+  conflicts_sent: "Asked the Task's agent to resolve %{count} conflicted file(s). Integrate again when it is done"
+  conflict_prompt: "Merging into `%{base}` conflicts in these files:\n%{files}\n\nRun `git merge %{base}` in this worktree, resolve the conflicts (keeping the intent of both sides), and commit. Run the tests if there are any, then briefly tell me what you resolved and how. Don't merge into %{base} yourself: a person does the integration."
+  creating_untitled: "New Task"
+  creating_waiting: "Waiting for the previous Task…"
+  creating_sync: "Updating the base branch…"
+  creating_worktree: "Creating the worktree…"
+  creating_setup: "Running the setup script…"
+  creating_cancelling: "Cancelling… (whatever this step created is removed when it ends)"
+  creating_failed: "Couldn't create it: %{reason}"
+  creating_retry: "Retry"
+  creating_retry_tip: "Create it again with the same request and details"
+  creating_cancel_tip: "Cancel (anything already created is removed)"
+  creating_dismiss_tip: "Dismiss"
+  creating_discard_failed: "Couldn't remove the cancelled Task's worktree (%{path}): %{error}"
 worktree_delete:
   title: Delete this worktree?
   title_branch: Delete the worktree and its branch?
@@ -382,6 +488,7 @@ quit_confirm:
   detail_quit_minimize: Quitting stops all of this. Minimize instead and it keeps running.
   detail_close_hide: Closing this window stops all of this. Hide necoder instead and it keeps running; click the Dock icon to come back.
   detail_close_minimize: Closing this window stops all of this. Minimize instead and it keeps running.
+  detail_close_window: Closing this window stops what runs in it. Minimize this window instead and it keeps running; your other windows stay as they are.
   keep_running_hide: Hide and keep running
   keep_running_minimize: Minimize and keep running
   quit: Quit
@@ -405,6 +512,10 @@ rail:
   add_tip: Open — folder / file / remote / recent (⌘O switches)
   add_prompt: Open
   menu_new_window: Open in new window
+  menu_details: Details…
+  menu_copy_path: Copy path
+  menu_copy_branch: Copy branch name
+  copied: "Copied: %{text}"
   menu_remove: Remove from rail
   menu_remove_worktree: Remove worktree
   menu_delete_branch: Delete branch + worktree
@@ -446,6 +557,11 @@ settings:
   title: Settings
   agents_heading: AI Agents
   agents_sub: necoder checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
+  permission_default: Default permissions
+  permission_default_sub: The mode new threads start in. Choosing resets the modes remembered from the pill for every agent. "Don't ask" applies only to agents that offer such a mode (such as Claude Code's bypassPermissions). Chat is not affected
+  permission_default_agent: Agent default
+  permission_default_bypass: Don't ask (Yolo)
+  permission_remembered: Modes chosen in the pill (click to forget)
   installed: Installed
   available_npx: Fetch on first use (npx)
   not_installed: Not installed
@@ -453,6 +569,23 @@ settings:
   agent_available: Available
   agent_configured: Configured · unverified
   agent_signed_out: Signed out
+  agent_disabled: Off (hidden from choices)
+  agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
+  launch_default: Launch as usual (registry version and command)
+  launch_env: "Launch: default + environment (%{names})"
+  launch_custom: "Launch: own command (%{command})"
+  launch_edit: Change…
+  launch_reset: Use default
+  launch_title: "Launching %{agent}"
+  launch_mode_registry: Add environment variables to the default launch
+  launch_mode_custom: Launch with my own command
+  launch_command: Command (absolute path or a name on PATH)
+  launch_args: Arguments (one per line)
+  launch_env_field: Environment variables (one KEY=VALUE per line)
+  launch_note: Applies to agents started from now on. Values stay in settings.json as written, so don't put API keys or other secrets here (use variables that point to a location, like CLAUDE_CONFIG_DIR)
+  launch_command_missing: Enter a command
+  launch_cancel: Cancel
+  launch_save: Save
   logged_in: Logged in
   login_required: Login required
   login_status_unknown: Check login status in the CLI
@@ -480,18 +613,30 @@ settings:
   mcp_filtered_empty: No MCP servers match this filter.
   prefs_heading: Behavior & editor
   prefs_sub: settings.json is the source of truth; this just edits it.
+  search_placeholder: Search settings
+  search_count: "%{count} results"
+  search_none: No settings match
   pref_submit_on_enter: Submit on Enter
   pref_submit_on_enter_sub: "Off = ⌘Enter to send (IME-safe)"
   pref_soft_wrap: Soft wrap
   pref_soft_wrap_sub: Can also toggle temporarily with ⌥Z
   pref_format_on_save: Format on save
   pref_format_on_save_sub: Supported languages only; ⌘S formats then saves
+  pref_preview_tabs: Preview tabs
+  pref_preview_tabs_sub: "A file single-clicked in the explorer opens in a tab (italic name) that the next single-clicked file replaces. Editing it or double-clicking keeps it"
+  pref_auto_save: Auto save
+  pref_auto_save_sub: "Saves when you move to another tab, panel or app. “After a pause” also saves when you stop typing for a second (auto save never formats)"
+  auto_save_off: "Off"
+  auto_save_focus_change: On focus change
+  auto_save_after_delay: After a pause
   pref_agent_auto_name: Auto-name threads
   pref_agent_auto_name_sub: AI titles new threads from the first exchange
   pref_agent_prewarm: Connect agents up front
   pref_agent_prewarm_sub: Connects before you send so the model list is ready to pick
   pref_sound_done: Completion sound
   pref_sound_waiting: Waiting-for-you sound
+  pref_sound_volume: Notification sound volume (%)
+  pref_sound_volume_sub: 0 mutes it (the chosen voice is kept); 100 plays the sound as is
   sound_nya: Meow
   sound_nyaan: Long meow
   sound_mew: Chirp
@@ -501,20 +646,67 @@ settings:
   pref_reduce_motion_sub: Freezes decorative animation such as Braille spinners and the mascot
   pref_font_size: Font size
   pref_tab_size: Tab width
+  pref_terminal_font_size: Terminal font size
+  pref_terminal_scrollback: Terminal scrollback
+  pref_terminal_scrollback_sub: "Lowering it drops the oldest lines. Change the font with terminal_font_family in settings.json"
+  terminal_scrollback_lines: "%{n} lines"
+  pref_terminal_cursor: Terminal cursor
+  pref_terminal_color_scheme: Terminal colors
+  terminal_color_scheme_default: Default (follows the app theme). Reads Ghostty themes, Windows Terminal schemes (JSON) and iTerm2 .itermcolors
+  terminal_color_scheme_pick: Choose file…
+  terminal_color_scheme_reset: Use default
+  pref_terminal_shell: Terminal shell
+  terminal_shell_default: Default (the OS shell). Applies to new local terminals
+  terminal_shell_pick: Choose…
+  terminal_shell_reset: Use default
+  shell_picker_placeholder: Search shells…
+  shell_picker_default: Use default (the OS shell)
+  pref_terminal_cursor_sub: "A shape set by vim or your shell takes precedence"
+  terminal_cursor_block: Block
+  terminal_cursor_bar: Bar
+  terminal_cursor_underline: Underline
   pref_tabs_view: Thread tabs
   tabs_view_bar: Bar
   tabs_view_list: List
   pref_system_notifications: System notifications
   pref_system_notifications_sub: Posts to Notification Center when an agent in a window you aren't looking at finishes or stops (click to jump to the thread)
+  account_label: "Account:"
+  account_default: Default
+  account_elsewhere: (elsewhere)
+  account_add: + New account
+  account_login: Log in
+  account_hint: Switching takes effect for agents started from now on (running threads keep their account). necoder never reads the credentials; the official CLI handles them
   pref_confirm_quit: Confirm before quitting
-  pref_confirm_quit_sub: "On ⌘Q or when closing the last window, offers “Hide and keep running” while agents or terminals are busy"
+  pref_confirm_quit_sub: "On ⌘Q or when closing a window, offers “Hide and keep running” while agents or terminals are busy"
   confirm_quit_running: Only while busy
   confirm_quit_never: Never
+  pref_keep_awake: Keep awake while agents work
+  pref_keep_awake_sub: "While an agent is working, the computer won't sleep when left alone. The display still turns off, and choosing Sleep or closing a laptop's lid still puts it to sleep"
+  keep_awake_working: While working
+  keep_awake_off: "Off"
   appearance_heading: Appearance
   appearance_sub: Themes apply the moment you click and are saved to settings.json.
+  locale_label: Language
+  locale_sub: Switches right away (the macOS menu bar switches on the next launch)
+  locale_follow_os: Match the OS
+  locale_ja: 日本語
+  locale_en: English
   theme_label: Theme
   theme_sub: Also available via the ⌘K ⌘T selector
   open_json: Open settings.json
+  font_ui: UI font
+  font_code: Code font
+  font_terminal: Terminal font
+  font_default: Default (bundled font)
+  font_terminal_default: Default (same as the code font)
+  density_label: Row spacing
+  density_sub: Row height in the explorer, pickers, search results and the Fleet's Task list
+  density_compact: Compact
+  density_cozy: Cozy
+  font_pick: Choose…
+  font_reset: Use default
+  font_picker_placeholder: Search fonts…
+  font_picker_default: Use default
   open_json_sub: The single source of truth; saved edits propagate everywhere within ~1s
   open_json_button: Open
   cli_heading: Command line
@@ -587,6 +779,18 @@ explorer:
   ctx_duplicate: Duplicate
   ctx_trash: Move to trash
   ctx_copy_path: Copy path
+  ctx_download: Download…
+  ctx_upload_into: Upload into this folder…
+  ctx_upload_beside: Upload to the same folder…
+  upload_prompt: Upload
+  uploading_one: "Uploading “%{name}”…"
+  uploading_many: "Uploading %{n} items…"
+  uploaded: "Uploaded %{n} files (%{size})"
+  upload_failed: "Could not upload: %{error}"
+  downloading: "Downloading “%{name}”…"
+  downloaded: "Saved to “%{name}” (%{n} files, %{size})"
+  download_failed: "Could not download: %{error}"
+  transfer_skipped: " (skipped %{n} symlinks or special files)"
   ctx_search_folder: Find in folder
   ctx_stage: Stage
   ctx_discard: Discard changes…
@@ -673,6 +877,15 @@ dock:
   bottom: Show/hide bottom panel (terminal)
   right: Show/hide right panel (agent)
 tabs:
+  ctx_close_all: Close all (keep unsaved)
+  ctx_pin: Pin tab
+  ctx_unpin: Unpin tab
+  unpin_tip: Unpin  ⌘K ⇧⏎
+  pinned_kept: "Pinned tabs don't close with ⌘W (click the pin to unpin, or right-click › Close tab)"
+  copied_path_line: "Copied %{path}"
+  kept_unsaved: "Kept %{count} unsaved tabs open"
+  external_remote: Files on an SSH host cannot be opened in local apps
+  external_missing: "%{app} was not found (put its CLI on PATH or install the app)"
   untitled: Untitled
   close_tip: Close  ⌘W
   close_split_tip: Close split  ⌘\\
@@ -686,6 +899,7 @@ breadcrumb:
   md_preview: Preview
   md_source: Source
   md_preview_tip: Toggle rendered preview  ⌘⇧V
+  md_side_preview_tip: "Show the preview beside the source (updates as you type)  %{key}"
   html_preview: Preview
   html_source: Source
   html_preview_tip: Open in the system WebView  ⌘⇧V
@@ -734,18 +948,28 @@ design:
   prompt_text: Text
   prompt_nearby: Nearby text
   capture_failed: Couldn't capture the element (attached the text only)
+  target_moved: "The picked element wasn't attached — you switched away from %{thread} while it was being captured. Go back to that thread and pick it again"
+  target_gone: The picked element wasn't attached — the thread it was picked for was closed
   needs_web_tab: "Design works in a Web tab (Preview: Open localhost…)"
   not_ready: Start Design once the page is showing
 pdf:
   unsupported: PDF cannot be shown in a tab in this environment
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead
 terminal:
+  quick_tip: "Quick commands (quick_commands in settings.json). Pick one to run it in a new terminal"
   tab_title: Terminal %{n}
+  rename_title: Terminal name
+  rename_hint: Leave it empty to go back to the title the shell sets
+  rename_cancel: Cancel
+  rename_confirm: Rename
   close_busy_title: "A process is running in Terminal %{n}"
   close_busy_detail: Closing the terminal stops it too.
   close_busy_confirm: Close
   close_busy_cancel: Cancel
   add_tip: New terminal
+  split_tip: "Split side by side (%{key})"
+  pane_title: "Terminal %{n}"
+  pane_close_tip: Close this terminal
   close_dock_tip: Close bottom dock  ⌘J
   git_tip: Source control  ⌃⇧G
   search_invalid_regex: Invalid regular expression
@@ -760,8 +984,12 @@ theme:
   picker_placeholder: Select theme
 link:
   open_failed: "Could not open %{target}"
+  remote_localhost: "%{url} is a dev server on the SSH host (%{host}). It was not opened here, where the same port is a different server"
+  remote_localhost_title: Viewing an SSH host's localhost here
+  remote_localhost_details: "%{url} is localhost on the SSH host (%{host}). necoder does not forward ports yet.\n\nRun this in a local terminal, then open http://localhost:%{port} here:\n\n    ssh -N -L %{port}:localhost:%{port} %{host}\n\n(If another app already uses that port here, change the first %{port} to a free one.)\n"
 toast:
   open_details: Details ›
+  reveal: Reveal in Finder ›
 review:
   tab_title: Review
   compare: Compare
@@ -796,6 +1024,8 @@ review:
   open_file_tip: Open this file in the editor
   reviewed: Viewed
   reviewed_tip: Mark as viewed and collapse (click again to unmark)
+  reviewed_stale: Changed since viewed
+  reviewed_stale_tip: This file's changes differ from when you marked it viewed. Look again, then mark it viewed
   renamed_from: "← %{path}"
   no_newline: No newline at end of file
   add_note_tip: Add a note (or select lines and press c)
@@ -819,9 +1049,13 @@ review:
   send_default: Default
   send_empty: No threads to send to
   sent_toast: "Sent %{count} notes to %{thread}"
-  send_failed: Couldn't send (thread not found)
+  send_target_gone: Couldn't send — the chosen thread was closed. Your notes are still unsent; pick another destination
+  save_failed: "⚠ %{count} changes not saved"
+  save_retry: Retry
   prompt_header: "Review comments (%{count}) — compared: %{base}..working tree"
   prompt_old_side: "%{location} (removed lines, base-side line numbers)"
+  prompt_lost: "%{location} (where it was written; not found in the current diff)"
+  note_lost: "Moved note — the code at %{location} changed and the same code can't be found in one place"
 difftab:
   proposal_title: "%{title} ⇄ proposal"
   title: "%{name} ⇄ %{base}"
@@ -982,6 +1216,24 @@ ssh:
   browse_hint: "Connected. Right-click a folder → \"Open as project here\" to open it"
   picker_placeholder: Select SSH host (~/.ssh/config)
   manual_entry: Enter URI manually…
+  register_entry: + Add an SSH host…
+  register_title: Add an SSH host
+  register_sub: "Appended to %{path} (existing lines stay as they are; ssh and scp can use it too)"
+  register_alias: Name
+  register_alias_hint: "A short name for ssh <name> (e.g. devbox)"
+  register_hostname: Host or IP
+  register_hostname_hint: "e.g. 192.168.1.20 / build.example.com"
+  register_user: User
+  register_user_hint: Empty = the same user as here
+  register_port: Port
+  register_port_hint: Empty = 22
+  register_identity: Key file
+  register_identity_hint: "Empty = ssh's default (e.g. ~/.ssh/id_ed25519)"
+  register_cancel: Cancel
+  register_confirm: Add and test
+  register_bad_port: "The port must be a number from 1 to 65535: %{port}"
+  register_no_config: Can't find where the SSH config goes (no home folder)
+  registered: "Added %{alias} (%{path}). Testing the connection…"
   restore_failed: "Cannot reach %{project}. It will retry when you use it"
   state_connected: connected
   state_connecting: connecting…
@@ -991,9 +1243,23 @@ ssh:
   reconnect_now: Reconnect
   connect_now: Connect
   reconnecting: "Reconnecting to %{host}…"
+  testing: "Testing the connection to %{host}…"
+  test_ok: "Connected to %{host} (%{ms} ms)"
+  connect_failed: "Cannot connect to %{host}"
+  failure_details: SSH connection log
+  hint_host_key_unknown: "The host key was not confirmed. For a new host, check the fingerprint in the prompt and answer yes (running ssh %{host} once in a terminal does the same)"
+  hint_host_key_changed: "The key of %{host} has changed (rebuilt, or someone is impersonating it). Only if you know it was rebuilt, run ssh-keygen -R %{host} in a terminal and open it again"
+  hint_authentication: "The key or password was rejected. Add your key to ssh-agent (on macOS, ssh-add --apple-use-keychain ~/.ssh/id_ed25519 keeps the passphrase in Keychain), or check IdentityFile in ~/.ssh/config and authorized_keys on the server"
+  hint_too_many_keys: "Too many keys were tried. Add IdentityFile and IdentitiesOnly yes to Host %{host} in ~/.ssh/config so only one key is offered"
+  hint_unknown_host: "The name %{host} could not be found. Check the spelling, HostName in ~/.ssh/config, and your VPN"
+  hint_refused: "The connection was refused. Check that sshd is running on the server and the port (Port in ~/.ssh/config)"
+  hint_timed_out: "No response. Check the network, VPN and firewall, and the host name and port"
+  hint_bad_permissions: "OpenSSH ignores ~/.ssh because its permissions are too open. Run chmod 700 ~/.ssh and chmod 600 ~/.ssh/config (and 600 for keys)"
+  hint_negotiation: "The server offers no algorithm in common (an old sshd). Add the algorithms it offered (KexAlgorithms / HostKeyAlgorithms) to Host %{host} in ~/.ssh/config"
 askpass:
   hint: Enter to send, Escape to cancel (nothing is stored)
   hint_click: Click the field to start typing
+  passphrase_tip: "To stop being asked every time, run %{command} once in a terminal (it hands the key to ssh-agent)"
   retry: "Authentication failed (attempt %{attempt})"
   cancelled: Input cancelled
   err_busy: Another SSH prompt is waiting
@@ -1025,6 +1291,15 @@ search:
 key:
   find_in_transcript: Search this conversation
   sheet_title: Keyboard shortcuts
+  sheet_hint: Click a row, then press the new keys (Esc cancels). ↺ restores the default
+  open_keymap: Open keymap.json
+  press_keys: Press keys… (Esc cancels)
+  reset: Restore default
+  conflict: "%{keys} is also used by %{actions}. Replace it?"
+  replace: Replace
+  keep: Cancel
+  unreadable: "keymap.json can't be read, so bindings can't be changed here (%{error}). Open keymap.json to fix it"
+  write_failed: "Can't write keymap.json: %{path}: %{error}"
   section_editor: Editor
   section_agent: AI chat
   section_control: Control
@@ -1052,6 +1327,7 @@ key:
   outdent: Outdent
   toggle_soft_wrap: Toggle soft wrap
   toggle_rendered_markdown: Toggle preview
+  toggle_side_preview: Open preview to the side
   move_left: Move left
   move_right: Move right
   move_up: Move up
@@ -1095,6 +1371,9 @@ key:
   terminal_select_all: Select all
   terminal_clear: Clear
   terminal_find: Find in terminal
+  terminal_new_tab: New terminal tab
+  terminal_close_tab: Close terminal tab
+  terminal_split: Split terminal
 work:
   repositories: Repositories / work
   open_beside: Open beside
@@ -1231,3 +1510,69 @@ usage:
   stats_loading: Loading…
   stats_failed: "Couldn't read usage: %{error}"
   stats_note: Tokens and cost are estimates each agent reports per turn (Claude's cost is Claude Code's estimate; Codex reports no cost, and its tokens cover only the last request of each turn). Local logs such as ~/.claude are not read.
+ports:
+  title: Open ports
+  loading: Reading…
+  empty: Nothing inside necoder is listening (start a dev server in a terminal or through an agent)
+  others: "Other processes (%{count})"
+  no_project: Not in a project
+  open: Open
+  stop: Stop
+  stop_failed: "Could not stop pid %{pid}: it already exited or is not a process inside necoder"
+  hint: Read only when opened and on ↻ (lsof / ps; ss / lsof on remotes). Only processes inside necoder can be stopped. Remote ports appear on this machine's localhost after Forward
+  unsupported: Not available on this OS yet (macOS / Linux)
+  remote_heading: "Remote · %{host}"
+  remote_empty: No listening ports on the remote (only your own user's processes are visible)
+  remote_other_user: Another user's process
+  forward: Forward
+  stop_forward: Stop
+  forwarded: "Forwarded localhost:%{local} → %{host}:%{remote} (use Open for a web tab)"
+  forwarded_to: "Forwarded to localhost:%{local} here"
+inbox:
+  title: Notification history
+  bell_tip: Notification history
+  bell_tip_unread: "Notification history (%{count} unread)"
+  mark_all_read: Mark all read
+  mark_read: Mark as read
+  mark_unread: Mark as unread
+  empty: No notifications yet (finished, failed and waiting agents show up here)
+  note: "Latest %{count} in this window, kept while necoder is running"
+resources:
+  title: Resources (memory)
+  loading: Reading…
+  unsupported: Not available on this OS yet
+  summary: "necoder %{own} · child processes %{children} (%{count})"
+  outside: Outside any project
+  process: "%{command} (pid %{pid}, %{count} processes)"
+  stop_quiet: "Stop idle agents (%{count})"
+  stopped: "Stopped %{count} agents (conversations are kept and resume on the next send)"
+  hint: Read only when opened or on ↻. Only quiet agents whose conversation can resume are stopped (terminals and dev servers are left alone)
+cleanup:
+  title: Clean up Tasks
+  select_finished: Select integrated and finished
+  order_by_age: "Order: oldest first"
+  order_by_size: "Order: largest first"
+  counting: Counting…
+  nothing_to_lose: Nothing to lose
+  dirty: "%{n} uncommitted"
+  unmerged: "%{n} unmerged commits"
+  unknown_base: No base to compare with
+  phase_archived: Finished
+  empty: No Tasks in this repository
+  selected: "%{count} selected (%{deletable} can have their worktree deleted)"
+  archive: Finish (keep the worktree)
+  delete: "Delete worktree (%{count}, keep the branch)"
+  archived: "Finished %{count} Tasks"
+  deleted: "Deleted %{count} worktrees (kept %{kept} that had something to lose)"
+  hint: Only Tasks with no uncommitted changes and no commits missing from the base can have their worktree deleted here (counted again right before deleting). Delete the others one by one from the ⋯ menu
+statusbar:
+  menu_title: Show in the status bar
+  item_color: Project color
+  item_branch: Branch
+  item_diagnostics: Diagnostics
+  item_terminal: Terminal
+  item_activity: Agent activity
+  item_usage: Usage
+  item_cursor: Line:column
+  item_encoding: Encoding
+  item_language: Language

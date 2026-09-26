@@ -94,6 +94,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// エージェントを決めて新規スレッド（B28）。使わないと決めたエージェント（O16）なら開かずに知らせる
+    /// （keymap.json に残したキーから来た時）。
+    pub(crate) fn new_agent_thread_with(&mut self, agent: &str, cx: &mut Context<Self>) {
+        if !settings::agent_label_enabled(&settings::get(cx), agent) {
+            self.push_toast(
+                SharedString::from(i18n::t!("agent.disabled_agent", "agent" => agent)),
+                self.accent(),
+                cx,
+            );
+            return;
+        }
+        if !self.chrome.show_right {
+            self.chrome.show_right = true;
+        }
+        self.agent_panel
+            .update(cx, |panel, cx| panel.new_thread_with_agent(agent, cx));
+        cx.notify();
+    }
+
     /// 次のタブへ（Chrome 風。⌘⌥→ / ⌃Tab）。⌘W と同じく**最後に触った面で振り分け**:
     /// Agent 面ならスレッドタブ、そうでなければエディタのファイルタブを送る（agent_active）。
     pub(crate) fn select_next_thread(
@@ -422,9 +441,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// アクティブなエディタタブを閉じて隣へ移る（⌘W / タブの ×）。
+    /// アクティブなエディタタブを閉じて隣へ移る（⌘W）。ピン留めしたタブは閉じずに知らせる（O26）。
     pub(crate) fn close_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.is_empty() {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        if tab.pinned {
+            let color = self.accent();
+            self.push_toast(i18n::t!("tabs.pinned_kept").into(), color, cx);
             return;
         }
         self.close_tab_at(self.active_tab, window, cx);
@@ -503,7 +527,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// `index` 番目を残して他を全部閉じる（タブメニュー）。後ろから閉じて添字のズレを避ける。
+    /// `index` 番目を残して他を全部閉じる（タブメニュー）。ピン留めは残す（O26）。後ろから閉じて
+    /// 添字のズレを避ける。
     pub(crate) fn close_other_tabs(
         &mut self,
         index: usize,
@@ -514,13 +539,13 @@ impl Workspace {
             return;
         }
         for target in (0..self.tabs.len()).rev() {
-            if target != index {
+            if target != index && !self.tabs[target].pinned {
                 self.close_tab_at(target, window, cx);
             }
         }
     }
 
-    /// `index` より右のタブを全部閉じる（タブメニュー）。
+    /// `index` より右のタブを全部閉じる（タブメニュー）。ピン留めは残す（O26）。
     pub(crate) fn close_tabs_to_right(
         &mut self,
         index: usize,
@@ -531,7 +556,9 @@ impl Workspace {
             return;
         }
         for target in ((index + 1)..self.tabs.len()).rev() {
-            self.close_tab_at(target, window, cx);
+            if !self.tabs[target].pinned {
+                self.close_tab_at(target, window, cx);
+            }
         }
     }
 
@@ -578,26 +605,14 @@ impl Workspace {
     }
 
     /// タブを `from` から `to` へ移動する（ドラッグ並べ替え。active は同じタブを指し続ける）。
+    /// ピン留めの区切りは越えない（ピン留めはピン留めの中・そうでないタブはその外へ寄せる・O26）。
     pub(crate) fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let count = self.tabs.len();
         if from >= count || to >= count || from == to {
             return;
         }
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
-        // active が指すタブを追従させる（remove→insert のインデックスずれを補正）。
-        self.active_tab = if self.active_tab == from {
-            to
-        } else {
-            let mut active = self.active_tab;
-            if from < active {
-                active -= 1;
-            }
-            if to <= active {
-                active += 1;
-            }
-            active
-        };
+        let to = self.clamp_tab_move(from, to);
+        self.reorder_tab(from, to);
         self.sync_active_slot();
         self.save_state(cx);
         cx.notify();

@@ -1963,6 +1963,7 @@ dependencies = [
  "markdown",
  "project",
  "theme_core",
+ "ui",
  "unicode-width 0.1.14",
  "webview_view",
 ]
@@ -5345,6 +5346,7 @@ dependencies = [
  "imara-diff",
  "notify",
  "paths",
+ "serde_json",
 ]
 
 [[package]]
@@ -5834,6 +5836,7 @@ name = "review_view"
 version = "0.1.20"
 dependencies = [
  "editor_view",
+ "futures",
  "gpui",
  "host",
  "i18n",
@@ -6352,6 +6355,7 @@ dependencies = [
  "agent_skills",
  "anyhow",
  "cli_shim",
+ "editor_view",
  "gpui",
  "gpui_platform",
  "i18n",

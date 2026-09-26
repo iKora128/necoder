@@ -349,6 +349,21 @@ pub trait Host: Send + Sync {
     /// 到達不能が続くと 60 秒までバックオフするので、「復帰したのに次の試行まで待つ」を
     /// ユーザー操作で短絡するための入口。
     fn reconnect(&self) {}
+    /// 接続先の TCP ポート `remote_port` を手元の 127.0.0.1 へ転送する（O5・SSH の ControlMaster の
+    /// `-O forward -L`）。手元の番号は、同じ番号が空いていればそれ、塞がっていれば空いている番号。
+    /// 返すのは手元の番号（すでに転送していればその番号）。再接続したら張り直す。
+    /// 手元のプロジェクトは転送するものが無いので `Err`。**UI スレッドから呼ばない**（ネットワーク）。
+    fn forward_port(&self, _remote_port: u16) -> Result<u16> {
+        bail!("手元のプロジェクトのポートは転送しない")
+    }
+    /// [`Host::forward_port`] の転送をやめる（`-O cancel`）。**UI スレッドから呼ばない**。
+    fn cancel_forward(&self, remote_port: u16) -> Result<()> {
+        bail!("{remote_port} は転送していない")
+    }
+    /// いま張っている転送（接続先の番号, 手元の番号）。ネットワークに触らない。
+    fn forwarded_ports(&self) -> Vec<(u16, u16)> {
+        Vec::new()
+    }
 }
 
 /// remote host の接続状態（statusbar の SSH チップが表示する。M9・2026-09-08）。
@@ -2115,23 +2130,153 @@ pub struct SshConfigHost {
     pub user: Option<String>,
 }
 
+/// SSH config の置き場。通常は `~/.ssh/config`、テストでは transport と同じ `NECODER_SSH_CONFIG`。
+pub fn ssh_config_path() -> Option<PathBuf> {
+    match std::env::var_os("NECODER_SSH_CONFIG") {
+        Some(path) => Some(PathBuf::from(path)),
+        // Windows の OpenSSH も `%USERPROFILE%\.ssh\config` を見る（paths が USERPROFILE を解決する）。
+        None => paths::home_dir().map(|home| home.join(".ssh/config")),
+    }
+}
+
 /// SSH config を読んで接続可能なホスト一覧を返す（読めなければ空）。
-/// 通常は `~/.ssh/config`、テストでは transport と同じ `NECODER_SSH_CONFIG` を使う。
 pub fn ssh_config_hosts() -> Vec<SshConfigHost> {
-    let path = match std::env::var_os("NECODER_SSH_CONFIG") {
-        Some(path) => PathBuf::from(path),
-        None => {
-            // Windows の OpenSSH も `%USERPROFILE%.sshnfig` を見る（paths が USERPROFILE を解決する）。
-            let Some(home) = paths::home_dir() else {
-                return Vec::new();
-            };
-            home.join(".ssh/config")
-        }
+    let Some(path) = ssh_config_path() else {
+        return Vec::new();
     };
     match std::fs::read_to_string(&path) {
         Ok(text) => parse_ssh_config(&text),
         Err(_) => Vec::new(),
     }
+}
+
+/// 接続先の登録（O37・G01）で SSH config に足す 1 つ。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewSshHost {
+    /// `Host` の名前（`ssh <名前>` で使う）。
+    pub alias: String,
+    /// `HostName`（ホスト名か IP）。
+    pub hostname: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    /// `IdentityFile`（`~/` 可）。
+    pub identity_file: Option<String>,
+}
+
+/// 1 語の値として config に書けるか（空白・引用符・`#`・先頭の `-` を含まない）。
+fn plain_ssh_word(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || matches!(character, '"' | '\'' | '#'))
+}
+
+impl NewSshHost {
+    /// 書く前に確かめる（書けない値は理由つきで断る・config を壊さない）。
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            plain_ssh_word(&self.alias)
+                && !self
+                    .alias
+                    .chars()
+                    .any(|character| matches!(character, '*' | '?' | '!' | ',')),
+            "名前には空白や記号（* ? ! , # 引用符）を使えません: {}",
+            self.alias
+        );
+        anyhow::ensure!(
+            plain_ssh_word(&self.hostname),
+            "ホスト名に使えない文字があります: {}",
+            self.hostname
+        );
+        if let Some(user) = &self.user {
+            anyhow::ensure!(
+                plain_ssh_word(user),
+                "ユーザー名に使えない文字があります: {user}"
+            );
+        }
+        anyhow::ensure!(self.port != Some(0), "ポートは 1〜65535");
+        if let Some(identity) = &self.identity_file {
+            anyhow::ensure!(
+                !identity.is_empty()
+                    && !identity.contains(['"', '\n', '\r'])
+                    && !identity.starts_with('-'),
+                "鍵のファイルに使えない文字があります: {identity}"
+            );
+        }
+        Ok(())
+    }
+
+    /// 足す塊（前に空行・necoder が足した印のコメント・末尾に改行）。空白を含む鍵のパスは引用符で囲む。
+    pub fn config_block(&self) -> String {
+        let mut block = format!(
+            "\n# necoder で登録\nHost {}\n  HostName {}\n",
+            self.alias, self.hostname
+        );
+        if let Some(user) = &self.user {
+            block.push_str(&format!("  User {user}\n"));
+        }
+        if let Some(port) = self.port {
+            block.push_str(&format!("  Port {port}\n"));
+        }
+        if let Some(identity) = &self.identity_file {
+            if identity.contains(char::is_whitespace) {
+                block.push_str(&format!("  IdentityFile \"{identity}\"\n"));
+            } else {
+                block.push_str(&format!("  IdentityFile {identity}\n"));
+            }
+        }
+        block
+    }
+}
+
+/// SSH config の末尾に `host` を足す（O37・G01）。**既存の行は触らない**（追記だけ）。同じ名前の
+/// `Host` があれば断る。config が無ければ作る（unix は `~/.ssh` を 0700・config を 0600）。
+pub fn append_ssh_config_host(path: &Path, host: &NewSshHost) -> Result<()> {
+    host.validate()?;
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("{} を読めない", path.display()));
+        }
+    };
+    anyhow::ensure!(
+        !parse_ssh_config(&existing)
+            .iter()
+            .any(|known| known.alias == host.alias),
+        "同じ名前の接続先があります: {}",
+        host.alias
+    );
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("{} を作れない", parent.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("{} を開けない", path.display()))?;
+    let mut text = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&host.config_block());
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("{} に書けない", path.display()))?;
+    Ok(())
 }
 
 /// ssh_config テキストを Host 単位で列挙する（IO 無し = テスト可能）。
@@ -2240,6 +2385,157 @@ const MASTER_OPTIONS: [&str; 5] = [
     "ServerAliveCountMax=3",
     "ExitOnForwardFailure=yes",
 ];
+
+/// OpenSSH が接続に失敗した理由の種類（接続のトーストで案内を出し分ける・文言は GUI 側で i18n）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshFailure {
+    /// 指紋を確かめていないホスト（初めて・確認を断った）。
+    HostKeyUnknown,
+    /// 覚えている指紋と違う（作り直した・なりすましの恐れ）。
+    HostKeyChanged,
+    /// 鍵・パスワードが通らない。
+    Authentication,
+    /// 鍵を試しすぎて切られた（agent に鍵が多い）。
+    TooManyKeys,
+    /// ホスト名が引けない。
+    UnknownHost,
+    /// 接続を断られた（sshd が居ない・ポート違い）。
+    Refused,
+    /// 応答が無い（ネットワーク・VPN・ファイアウォール）。
+    TimedOut,
+    /// `~/.ssh` や鍵の権限が広すぎて OpenSSH が読まない。
+    BadPermissions,
+    /// 鍵交換・暗号の方式が合わない（古い sshd）。
+    Negotiation,
+}
+
+impl SshFailure {
+    /// OpenSSH のログから種類を当てる（知らない書き方なら `None`＝ログをそのまま見せる）。
+    /// 順番が意味を持つ: 指紋の変化は「Host key verification failed」も伴い、権限の広い鍵は
+    /// 続けて「Permission denied」も出すので、より具体的な方を先に見る。
+    pub fn classify(log: &str) -> Option<Self> {
+        let has = |needle: &str| log.contains(needle);
+        if has("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+            Some(Self::HostKeyChanged)
+        } else if has("Bad owner or permissions") || has("UNPROTECTED PRIVATE KEY FILE") {
+            Some(Self::BadPermissions)
+        } else if has("Host key verification failed") || has("host key is known for") {
+            Some(Self::HostKeyUnknown)
+        } else if has("Too many authentication failures") {
+            Some(Self::TooManyKeys)
+        } else if has("Permission denied") {
+            Some(Self::Authentication)
+        } else if has("Could not resolve hostname") {
+            Some(Self::UnknownHost)
+        } else if has("Connection refused") {
+            Some(Self::Refused)
+        } else if has("timed out") {
+            Some(Self::TimedOut)
+        } else if has("Unable to negotiate") {
+            Some(Self::Negotiation)
+        } else {
+            None
+        }
+    }
+}
+
+/// ControlMaster が立たなかった。OpenSSH が理由を書いていればそれと、分かれば種類を持つ
+/// （GUI は `anyhow::Error::downcast_ref` で取り出して案内を出す）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshConnectError {
+    pub failure: Option<SshFailure>,
+    /// OpenSSH が書いた理由（空行と前後の空白を落とした行）。
+    pub reason: String,
+    status: String,
+}
+
+impl SshConnectError {
+    /// ssh の終わり方（`exit status: 255`）と、OpenSSH がログへ書いた文から作る。
+    pub fn new(status: impl Into<String>, log: &str) -> Self {
+        let reason = log
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            failure: SshFailure::classify(&reason),
+            reason,
+            status: status.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SshConnectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "OpenSSH ControlMaster の接続に失敗: {}",
+            self.status
+        )?;
+        if !self.reason.is_empty() {
+            write!(formatter, ": {}", self.reason)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SshConnectError {}
+
+/// master を起こした ssh の終わり方とログから結果を作る。ログは従来どおり stderr にも流す
+/// （「known hosts に足した」などの警告も含めて、以前は stderr にそのまま出ていた）。
+fn master_result(success: bool, status: &str, log: &str) -> Result<()> {
+    if !log.trim().is_empty() {
+        eprint!("{log}");
+    }
+    if success {
+        return Ok(());
+    }
+    Err(anyhow::Error::new(SshConnectError::new(status, log)))
+}
+
+/// 接続を確かめる（O37・G01）。ControlMaster も server の配備もせず、`ssh <destination> true` を
+/// 1 回だけ走らせる（鍵のパスフレーズやホスト鍵の確認は askpass で訊く・10 秒で打ち切る）。
+/// 成功なら掛かった時間、失敗なら理由つきの [`SshConnectError`]（種類は [`SshFailure`]）。
+/// blocking なので背景で呼ぶ。
+pub fn test_ssh_connection(project: &SshProject) -> Result<Duration> {
+    static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+    let log = std::env::temp_dir().join(format!(
+        "necoder-ssh-test-{}-{}.log",
+        std::process::id(),
+        NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+    ));
+    let started = std::time::Instant::now();
+    let mut command = ssh_command();
+    command
+        .args(["-o", "ConnectTimeout=10"])
+        .arg("-E")
+        .arg(&log);
+    if let Some(port) = project.port {
+        command.args(["-p", &port.to_string()]);
+    }
+    let status = command
+        .arg(project.destination())
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("ssh を起動できない")?;
+    let elapsed = started.elapsed();
+    let written = std::fs::read(&log).unwrap_or_default();
+    if let Err(error) = std::fs::remove_file(&log) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("Remote SSH: 接続テストのログを消せない: {error}");
+        }
+    }
+    master_result(
+        status.success(),
+        &status.to_string(),
+        &String::from_utf8_lossy(&written),
+    )?;
+    Ok(elapsed)
+}
 
 /// Remote terminal の `ne` から接続元 GUI へ戻る、open 専用のローカル gateway。
 ///
@@ -2381,6 +2677,8 @@ struct SshTransport {
     control_path: PathBuf,
     #[cfg(unix)]
     remote_cli_forward: Option<RemoteCliForward>,
+    /// 張っているポートの転送（接続先の番号, 手元の番号・O5）。master を張り直したら張り直す。
+    port_forwards: Mutex<Vec<(u16, u16)>>,
 }
 
 impl SshTransport {
@@ -2435,6 +2733,7 @@ impl SshTransport {
             control_path,
             #[cfg(unix)]
             remote_cli_forward,
+            port_forwards: Mutex::new(Vec::new()),
         }))
     }
 
@@ -2446,6 +2745,16 @@ impl SshTransport {
     }
 
     fn start_master(&self) -> Result<()> {
+        // OpenSSH の理由（指紋・鍵・名前・拒否…）は `-E` でこのログへ書かせる。stderr に任せると
+        // 終わり方（exit 255）しか分からず、トーストで案内を出し分けられない。stderr をパイプで
+        // 読む形は、`-f` で背景に回った master がパイプを握り続けて読み終わらないので使わない。
+        // 前の試行の分が混ざらないよう先に消す（`-E` は追記）。control_dir ごと Drop で消える。
+        let log = self.control_dir.join("master.log");
+        if let Err(error) = std::fs::remove_file(&log) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Remote SSH: 前の接続ログを消せない: {error}");
+            }
+        }
         let mut master = ssh_command();
         master
             .args(["-M", "-N", "-f"])
@@ -2458,12 +2767,19 @@ impl SshTransport {
             master.args(["-p", &port.to_string()]);
         }
         let status = master
+            .arg("-E")
+            .arg(&log)
             .arg(self.project.destination())
             .status()
             .context("OpenSSH ControlMaster を起動できない")?;
-        if !status.success() {
-            bail!("OpenSSH ControlMaster の接続に失敗: {status}");
-        }
+        // 何も書かれていなければファイルはできない（= 理由なし）。背景に回った master が後で書く分
+        // （切断の理由など）も同じファイルに残る。
+        let written = std::fs::read(&log).unwrap_or_default();
+        master_result(
+            status.success(),
+            &status.to_string(),
+            &String::from_utf8_lossy(&written),
+        )?;
         // `ne` gateway の reverse forward は master が立ってから足す。master 起動の `-R` に
         // 同居させると、前回の master が異常終了して remote に残った socket で bind が落ち、
         // `ExitOnForwardFailure=yes` が master ごと exit 255 にして**再接続が永久に失敗**する
@@ -2471,7 +2787,96 @@ impl SshTransport {
         // ときだけ standalone session が `-R` 無しの master になって回復していた）。
         #[cfg(unix)]
         self.install_cli_forward();
+        self.reinstall_port_forwards();
         Ok(())
+    }
+
+    /// ポートの転送を 1 つ頼む / やめる（`operation` = `forward` / `cancel`）。手元は 127.0.0.1 だけで待つ
+    /// （同じ LAN の他の機械からは届かない）。
+    fn port_forward_request(&self, operation: &str, local: u16, remote: u16) -> Result<()> {
+        let mut request = ssh_command();
+        request
+            .args(["-S", &self.control_path.to_string_lossy(), "-O", operation])
+            .arg("-L")
+            .arg(format!("127.0.0.1:{local}:127.0.0.1:{remote}"));
+        if let Some(port) = self.project.port {
+            request.args(["-p", &port.to_string()]);
+        }
+        let output = request
+            .arg(self.project.destination())
+            .stdin(Stdio::null())
+            .output()
+            .context("OpenSSH にポートの転送を頼めない")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "ポートの転送に失敗（{operation} {local} → {remote}）: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(())
+    }
+
+    /// `remote` を手元へ転送する（[`Host::forward_port`]）。
+    fn forward_port(&self, remote: u16) -> Result<u16> {
+        assert_off_main_thread("forward_port");
+        let known = self
+            .port_forwards
+            .lock()
+            .map_err(|_| anyhow!("転送の一覧が壊れている"))?
+            .iter()
+            .find(|(forwarded, _)| *forwarded == remote)
+            .map(|(_, local)| *local);
+        if let Some(local) = known {
+            return Ok(local);
+        }
+        self.ensure_master()?;
+        let local = free_local_port(remote)?;
+        self.port_forward_request("forward", local, remote)?;
+        self.port_forwards
+            .lock()
+            .map_err(|_| anyhow!("転送の一覧が壊れている"))?
+            .push((remote, local));
+        Ok(local)
+    }
+
+    /// `remote` の転送をやめる（[`Host::cancel_forward`]）。
+    fn cancel_forward(&self, remote: u16) -> Result<()> {
+        assert_off_main_thread("cancel_forward");
+        let local = {
+            let mut forwards = self
+                .port_forwards
+                .lock()
+                .map_err(|_| anyhow!("転送の一覧が壊れている"))?;
+            let position = forwards
+                .iter()
+                .position(|(forwarded, _)| *forwarded == remote)
+                .ok_or_else(|| anyhow!("{remote} は転送していない"))?;
+            forwards.remove(position).1
+        };
+        self.port_forward_request("cancel", local, remote)
+    }
+
+    fn forwarded_ports(&self) -> Vec<(u16, u16)> {
+        self.port_forwards
+            .lock()
+            .map(|forwards| forwards.clone())
+            .unwrap_or_default()
+    }
+
+    /// master を張り直した後、前の転送を同じ番号で張り直す（sleep 復帰の再接続でも localhost が生きる）。
+    /// 張れなかった物は一覧から外す（手元の番号が他に取られた等）。
+    fn reinstall_port_forwards(&self) {
+        let Ok(mut forwards) = self.port_forwards.lock() else {
+            return;
+        };
+        forwards.retain(|(remote, local)| {
+            match self.port_forward_request("forward", *local, *remote) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("Remote SSH: ポートの転送を張り直せない: {error:#}");
+                    false
+                }
+            }
+        });
     }
 
     /// remote の `ne` が GUI へ戻るための reverse forward を、生きている master へ後付けする。
@@ -2773,6 +3178,16 @@ fn find_local_remote_server() -> Option<PathBuf> {
 ///
 /// GUI から起こす ssh には TTY が無いので、パスワード / passphrase / host key 確認は
 /// `SSH_ASKPASS` 経由で GUI に訊く（[`install_askpass`]）。
+/// 手元で待てるポート（`preferred` が空いていればそれ・塞がっていれば OS が選んだ空き番号）。
+fn free_local_port(preferred: u16) -> Result<u16> {
+    if std::net::TcpListener::bind(("127.0.0.1", preferred)).is_ok() {
+        return Ok(preferred);
+    }
+    let listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).context("手元に空いているポートが無い")?;
+    Ok(listener.local_addr()?.port())
+}
+
 fn ssh_command() -> Command {
     let mut command = Command::new("ssh");
     if let Some(config) = std::env::var_os("NECODER_SSH_CONFIG") {
@@ -3969,6 +4384,27 @@ impl Host for RemoteHost {
         self.client.reconnect_in_background();
     }
 
+    fn forward_port(&self, remote_port: u16) -> Result<u16> {
+        match &self.transport {
+            Some(transport) => transport.forward_port(remote_port),
+            None => bail!("SSH で繋いでいないのでポートを転送できない"),
+        }
+    }
+
+    fn cancel_forward(&self, remote_port: u16) -> Result<()> {
+        match &self.transport {
+            Some(transport) => transport.cancel_forward(remote_port),
+            None => bail!("{remote_port} は転送していない"),
+        }
+    }
+
+    fn forwarded_ports(&self) -> Vec<(u16, u16)> {
+        self.transport
+            .as_ref()
+            .map(|transport| transport.forwarded_ports())
+            .unwrap_or_default()
+    }
+
     fn project_uri(&self, path: &Path) -> Option<String> {
         self.ssh_project
             .as_ref()
@@ -4520,6 +4956,80 @@ mod tests {
         let _removed = std::fs::remove_dir_all(root);
     }
 
+    /// O37（G01）: 接続先の登録は config の末尾に足すだけ。同じ名前・書けない値は断り、元の行は触らない。
+    #[test]
+    fn registering_a_host_appends_a_block() {
+        let dir = std::env::temp_dir().join(format!("necoder-ssh-register-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(".ssh/config");
+        let host = NewSshHost {
+            alias: "devbox".into(),
+            hostname: "192.168.1.20".into(),
+            user: Some("me".into()),
+            port: Some(2222),
+            identity_file: Some("~/.ssh/My Keys/id_ed25519".into()),
+        };
+        append_ssh_config_host(&path, &host).expect("無ければ作って書く");
+        let written = std::fs::read_to_string(&path).expect("読める");
+        assert!(written.contains("Host devbox\n  HostName 192.168.1.20\n  User me\n  Port 2222\n"));
+        assert!(
+            written.contains("IdentityFile \"~/.ssh/My Keys/id_ed25519\""),
+            "{written}"
+        );
+        let hosts = parse_ssh_config(&written);
+        assert_eq!(hosts[0].alias, "devbox");
+        assert_eq!(hosts[0].user.as_deref(), Some("me"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "config は本人だけ");
+        }
+
+        assert!(
+            append_ssh_config_host(&path, &host).is_err(),
+            "同じ名前は断る"
+        );
+        std::fs::write(&path, "Host old\n  HostName old.example.com").unwrap();
+        let other = NewSshHost {
+            alias: "other".into(),
+            hostname: "other.example.com".into(),
+            ..NewSshHost::default()
+        };
+        append_ssh_config_host(&path, &other).expect("足せる");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.starts_with("Host old\n  HostName old.example.com\n\n# necoder"),
+            "元の行は触らず、改行を補って足す: {written}"
+        );
+        for bad in [
+            NewSshHost {
+                alias: "two words".into(),
+                hostname: "h".into(),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "web*".into(),
+                hostname: "h".into(),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "-oProxyCommand=x".into(),
+                ..NewSshHost::default()
+            },
+            NewSshHost {
+                alias: "ok".into(),
+                hostname: "h".into(),
+                port: Some(0),
+                ..NewSshHost::default()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn parses_ssh_config_hosts() {
         let text = "\
@@ -4667,6 +5177,100 @@ Host gpu
         );
         assert!(SshProject::parse("ssh://alice:secret@example.com/code").is_err());
         assert!(SshProject::parse("ssh://example.com/code?proxy=bad").is_err());
+    }
+
+    #[test]
+    fn openssh_failures_are_told_apart() {
+        let changed = "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+            @    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n\
+            Host key verification failed.";
+        assert_eq!(
+            SshFailure::classify(changed),
+            Some(SshFailure::HostKeyChanged)
+        );
+        for (log, expected) in [
+            ("Host key verification failed.", SshFailure::HostKeyUnknown),
+            (
+                "No ED25519 host key is known for devbox and you have requested strict checking.",
+                SshFailure::HostKeyUnknown,
+            ),
+            (
+                "user@devbox: Permission denied (publickey,password).",
+                SshFailure::Authentication,
+            ),
+            (
+                "Received disconnect from 10.0.0.2 port 22:2: Too many authentication failures\n\
+                 Permission denied (publickey).",
+                SshFailure::TooManyKeys,
+            ),
+            (
+                "@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @\n\
+                 Permission denied (publickey).",
+                SshFailure::BadPermissions,
+            ),
+            (
+                "Bad owner or permissions on /Users/me/.ssh/config",
+                SshFailure::BadPermissions,
+            ),
+            (
+                "ssh: Could not resolve hostname devbx: nodename nor servname provided, or not known",
+                SshFailure::UnknownHost,
+            ),
+            (
+                "ssh: connect to host devbox port 2222: Connection refused",
+                SshFailure::Refused,
+            ),
+            (
+                "ssh: connect to host 10.0.0.9 port 22: Operation timed out",
+                SshFailure::TimedOut,
+            ),
+            (
+                "Unable to negotiate with 10.0.0.2 port 22: no matching host key type found. Their offer: ssh-rsa",
+                SshFailure::Negotiation,
+            ),
+        ] {
+            assert_eq!(SshFailure::classify(log), Some(expected), "{log}");
+        }
+        assert_eq!(
+            SshFailure::classify("kex_exchange_identification: read: Connection reset"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failed_master_carries_what_openssh_wrote() {
+        assert!(master_result(
+            true,
+            "exit status: 0",
+            "Warning: Permanently added 'devbox'.\n"
+        )
+        .is_ok());
+        let error = master_result(
+            false,
+            "exit status: 255",
+            "\r\nuser@devbox: Permission denied (publickey).\r\n\n",
+        )
+        .expect_err("失敗は理由つき")
+        .context("SSH ControlMaster の確立に失敗");
+        let connect = error
+            .downcast_ref::<SshConnectError>()
+            .expect("文脈を足しても取り出せる");
+        assert_eq!(connect.failure, Some(SshFailure::Authentication));
+        assert_eq!(
+            connect.reason,
+            "user@devbox: Permission denied (publickey)."
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "SSH ControlMaster の確立に失敗: OpenSSH ControlMaster の接続に失敗: exit status: 255: \
+             user@devbox: Permission denied (publickey)."
+        );
+        let silent = master_result(false, "exit status: 255", "").expect_err("理由が無くても失敗");
+        assert_eq!(
+            silent.to_string(),
+            "OpenSSH ControlMaster の接続に失敗: exit status: 255",
+            "書かれていなければ今までと同じ文"
+        );
     }
 
     #[test]

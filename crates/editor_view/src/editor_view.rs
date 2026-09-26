@@ -11,9 +11,10 @@ use gpui::{
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Style, StyleRefinement,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, UniformListScrollHandle, Window,
 };
 use std::ops::Range;
+use std::rc::Rc;
 use theme_core::{SyntaxColors, Theme};
 
 /// remote の外部変更を背景で調べた結果（[`EditorView::handle_external_change_remote`]）。
@@ -30,6 +31,7 @@ enum ExternalChange {
 
 /// .md の整形プレビュー（rendered 側の Block→GPUI 描画）。source ⇄ rendered は ⌘⇧V。
 mod markdown_preview;
+mod table_preview;
 
 const FONT_SIZE: f32 = 13.0; // code 13px（既定。settings の font_size で上書き・M10-13）
 const LINE_HEIGHT: f32 = 23.0; // compact 行高 23（font_size に比例して伸縮）
@@ -89,6 +91,8 @@ actions!(
         ToggleSoftWrap,
         // ── rendered preview（⌘⇧V・Markdown / HTML） ──
         ToggleRenderedMarkdown,
+        // ── 横並びのプレビュー（⌘K V・Markdown・O29） ──
+        ToggleSidePreview,
         MoveLeft,
         MoveRight,
         MoveUp,
@@ -225,6 +229,9 @@ pub struct EditorView {
     /// ずれる（マウスイベント中の `window.text_style()` は OS 既定の UI フォント＝プロポーショナル。
     /// 日本語 + ASCII 混在の markdown 行で全角 3 文字分ずれていた・2026-09-05）。
     text_font: Option<gpui::Font>,
+    /// 書体（O27・`ui::FontFamilies` の写し）。描くたびに global から取り直し、ヒットテストの
+    /// フォールバックも同じ値を見る。
+    fonts: ui::FontFamilies,
     /// 直近 prepaint が可視表示行ぶん問い合わせたハイライト span（版 + byte 範囲つき）。
     /// ヒットテストが描画と**同じ run 構成**（見出し/太字 = Bold・強調 = Italic）で幅を測るために使う。
     /// Bold/Italic の advance が Regular と違う family に差し替えても x→offset がずれない（2026-09-07）。
@@ -273,11 +280,17 @@ pub struct EditorView {
     agent_mark_color: Option<gpui::Hsla>,
     /// 外部変更が来たが dirty のため自動リロードしなかった（警告バー表示中）。
     external_changed: bool,
+    /// ディスクへの書き込み中（`save_impl` の背景書き込みが終わるまで）。
+    save_in_flight: bool,
+    /// 書き込み中にもう一度保存を頼まれた（終わってから、まだ未保存ならもう一度書く）。
+    save_queued: bool,
     /// soft wrap（折り返し表示・⌥Z / 設定 `soft_wrap`）。plain（composer）では未使用。
     soft_wrap: bool,
     /// `.md` の整形プレビュー（source ⇄ rendered トグル・⌘⇧V）。plain / 非 md では常に false。
     /// true の間 EditorElement を描かず [`markdown_preview`] へ差し替える（キャレット点滅も止める）。
     rendered_markdown: bool,
+    /// ⌘K V: 本文の右に整形プレビューを並べている（Markdown だけ・O29）。
+    side_preview: bool,
     /// ローカル `.html` のネイティブプレビュー。WebView 自体はプレビュー初回描画まで生成しない。
     html_preview: Option<Entity<webview_view::WebViewView>>,
     rendered_html: bool,
@@ -289,7 +302,13 @@ pub struct EditorView {
     markdown_scroll: gpui::ScrollHandle,
     /// パース済みブロックのキャッシュ。version 変化時のみ再パース（idle 再描画で再解析しない）。
     markdown_blocks: Vec<markdown::Block>,
+    /// 頭の front matter（あれば表の形で出し、`markdown_blocks` は残りだけ・O29）。
+    markdown_front_matter: Option<markdown::FrontMatter>,
     markdown_blocks_version: u64,
+    /// CSV / TSV を表として見ている時の表（O29・版で持ち直す＝描き直しのたびに読み直さない）。
+    table: Rc<table_preview::ParsedTable>,
+    table_version: u64,
+    table_scroll: UniformListScrollHandle,
     /// コードのフォントサイズ（settings の `font_size`・live 反映）。行高は 23/13 比で追従。
     font_size: f32,
     /// Tab 幅（settings の `tab_size`・live 反映）。
@@ -350,15 +369,22 @@ impl EditorView {
             line_annotation: None,
             agent_mark_color: None,
             external_changed: false,
+            save_in_flight: false,
+            save_queued: false,
             soft_wrap: false,
             rendered_markdown: false,
+            side_preview: false,
             html_preview,
             rendered_html: false,
             preview_reload_task: None,
             surface_active: true,
             markdown_scroll: gpui::ScrollHandle::new(),
             markdown_blocks: Vec::new(),
+            markdown_front_matter: None,
             markdown_blocks_version: u64::MAX,
+            table: Rc::default(),
+            table_version: u64::MAX,
+            table_scroll: UniformListScrollHandle::new(),
             font_size: FONT_SIZE,
             tab_size: DEFAULT_TAB_SIZE,
             wrap_map: WrapMap::identity(1, (u64::MAX, 0, false)),
@@ -369,6 +395,7 @@ impl EditorView {
             marked_range: None,
             content_origin: None,
             text_font: None,
+            fonts: ui::FontFamilies::default(),
             visible_highlights: VisibleHighlights::default(),
             viewport_height: px(0.),
             gutter_width: px(0.),
@@ -536,6 +563,30 @@ impl EditorView {
         self.after_edit(cx);
     }
 
+    /// 外から落とされた文（Markdown の画像のリンク・O29）を入れる。`position`（窓の座標）が本文の
+    /// 高さなら落とした所へ、本文より上（タブ・パンくず）や位置が無い時はキャレット（選択は置き換え）へ。
+    /// キャレットは入れた文の後ろへ動く（⌘Z 1 回で戻る）。
+    pub fn insert_dropped_text(
+        &mut self,
+        position: Option<Point<Pixels>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let over_text = position.filter(|position| {
+            self.content_origin
+                .is_some_and(|origin| position.y >= origin.y)
+        });
+        let range = match over_text {
+            Some(position) => {
+                let offset = self.offset_for_position(position, window);
+                offset..offset
+            }
+            None => self.primary().range(),
+        };
+        self.replace_ranges(&[range], text, cx);
+    }
+
     /// settings の font_size / tab_size を適用する（live 反映・M10-13）。
     pub fn set_typography(&mut self, font_size: f32, tab_size: usize, cx: &mut Context<Self>) {
         let font_size = font_size.clamp(8.0, 32.0);
@@ -562,26 +613,101 @@ impl EditorView {
         cx.notify();
     }
 
-    /// このバッファが markdown か（プレビュー可否）。無題・非対応拡張子は false。
-    fn is_markdown(&self) -> bool {
+    /// このバッファが markdown か（プレビュー可否・スラッシュメニュー）。無題・非対応拡張子は false。
+    pub fn is_markdown(&self) -> bool {
         self.buffer
             .path()
             .map(|path| lang::language_for_path(path) == Some(lang::LanguageId::Markdown))
             .unwrap_or(false)
     }
 
-    /// ⌘⇧V: source ⇄ rendered preview のトグル（Markdown / ローカル HTML）。
+    /// CSV / TSV か（⌘⇧V で表として見られる・O29）。
+    fn is_table(&self) -> bool {
+        self.buffer
+            .path()
+            .and_then(table_preview::table_delimiter)
+            .is_some()
+    }
+
+    /// 本文 ⇄ 整形表示を切り替えられるか（Markdown の整形プレビュー・CSV / TSV の表）。
+    /// パンくずのトグルを出すかどうかに使う。
+    pub fn has_text_preview(&self) -> bool {
+        self.is_markdown() || self.is_table()
+    }
+
+    /// ⌘⇧V: source ⇄ rendered preview のトグル（Markdown / CSV・TSV の表 / ローカル HTML）。
     fn toggle_rendered_markdown(
         &mut self,
         _: &ToggleRenderedMarkdown,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_markdown() {
+        if self.has_text_preview() {
             self.set_rendered_markdown(!self.rendered_markdown, cx);
         } else if self.html_preview.is_some() {
             self.set_rendered_html(!self.rendered_html, cx);
         }
+    }
+
+    /// ⌘K V: Markdown の本文の右に整形プレビューを並べる / 外す（O29）。
+    fn toggle_side_preview(
+        &mut self,
+        _: &ToggleSidePreview,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_side_preview(!self.side_preview, cx);
+    }
+
+    /// 横並びのプレビューの on/off。Markdown でなければ ON は無視。ON では整形表示だけの状態を
+    /// 解く（本文が見えるように）。
+    pub fn set_side_preview(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && !self.is_markdown() {
+            return;
+        }
+        if on {
+            self.rendered_markdown = false;
+        }
+        if self.side_preview != on {
+            self.side_preview = on;
+            cx.notify();
+        }
+    }
+
+    /// 横並びのプレビュー中か（パンくずのボタンが状態表示に読む）。
+    pub fn side_preview(&self) -> bool {
+        self.side_preview
+    }
+
+    /// Markdown の整形プレビュー（⌘⇧V の全面・⌘K V の右半分で共有）。ブロックは本文の版で持ち直す
+    /// （idle 再描画で読み直さない）。
+    fn markdown_preview_element(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let version = self.buffer.version();
+        if self.markdown_blocks_version != version {
+            let text = self.buffer.text();
+            let (front_matter, body) = markdown::split_front_matter(&text);
+            self.markdown_blocks = markdown::parse(body);
+            self.markdown_front_matter = front_matter;
+            self.markdown_blocks_version = version;
+        }
+        markdown_preview::render_preview(
+            &self.markdown_blocks,
+            self.markdown_front_matter.as_ref(),
+            &self.theme,
+            self.font_size,
+            self.fonts.code.clone(),
+            &self.markdown_scroll,
+            self.buffer.path().and_then(|path| path.parent()),
+            {
+                let editor = cx.entity().downgrade();
+                std::rc::Rc::new(move |destination, _window, cx| {
+                    // 閉じたタブのプレビューを押すことは無いが、消えていれば何もしない。
+                    if let Some(editor) = editor.upgrade() {
+                        editor.update(cx, |_, cx| cx.emit(PreviewLinkClicked { destination }));
+                    }
+                })
+            },
+        )
     }
 
     /// 整形プレビュー中か（クローム側のトグルボタンが状態表示に読む）。
@@ -593,7 +719,7 @@ impl EditorView {
     /// ON では EditorElement を描かない＝点滅の paint 側管理（should_blink）が走らないので、
     /// ここで点滅タスクを明示停止して idle 再描画を止める（点滅停止＝idle CPU 予算を守る）。
     pub fn set_rendered_markdown(&mut self, on: bool, cx: &mut Context<Self>) {
-        if on && !self.is_markdown() {
+        if on && !self.has_text_preview() {
             return;
         }
         if self.rendered_markdown == on {
@@ -858,6 +984,37 @@ impl EditorView {
     }
 
     /// カーソル直前の最大 `max_bytes` バイトのテキスト（`::` などのトリガ文字判定用）。
+    /// キャレットの行の、行頭からキャレットまで（Markdown のスラッシュメニューが行頭かを見る・O29）。
+    pub fn line_before_caret(&self) -> String {
+        let head = self.primary().head;
+        let snapshot = self.buffer.snapshot();
+        let row = snapshot.byte_to_point(head).row;
+        let line_start = snapshot.point_to_byte(BufferPoint::new(row, 0));
+        self.buffer.text_range(line_start..head)
+    }
+
+    /// スラッシュメニュー（O29）で選んだ形を入れる: キャレットの前の `/`＋打った語を `text` に置き換え、
+    /// キャレットを `caret`（`text` の中の byte 位置・無ければ末尾）へ置く。`/` が消されていれば語だけ
+    /// 置き換える。1 手（⌘Z 1 回で `/語` に戻る）。
+    pub fn apply_slash_command(
+        &mut self,
+        text: &str,
+        caret: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let head = self.primary().head;
+        let (word_start, _) = self.identifier_prefix_at_caret();
+        let start = if word_start > 0 && self.buffer.text_range(word_start - 1..word_start) == "/" {
+            word_start - 1
+        } else {
+            word_start
+        };
+        self.buffer.edit(&[start..head], text);
+        let cursor = start + caret.unwrap_or(text.len()).min(text.len());
+        self.buffer.set_selections(vec![Selection::cursor(cursor)]);
+        self.after_edit(cx);
+    }
+
     pub fn text_before_caret(&self, max_bytes: usize) -> String {
         let head = self.primary().head;
         self.buffer.text_range(head.saturating_sub(max_bytes)..head)
@@ -1184,6 +1341,21 @@ impl EditorView {
         }
         self.scroll_top = px(0.);
         cx.notify();
+    }
+
+    /// 主選択が覆う行（1 始まり・両端を含む）。選択が無ければキャレットの行だけ。複数行の選択が
+    /// 次の行の行頭で終わっている時は、その行を含めない（行を丸ごと選んだ時の見た目どおり）。
+    pub fn primary_line_range(&self) -> (usize, usize) {
+        let selection = self.primary();
+        let snapshot = self.buffer.snapshot();
+        let (low, high) = if selection.anchor <= selection.head {
+            (selection.anchor, selection.head)
+        } else {
+            (selection.head, selection.anchor)
+        };
+        let start = snapshot.byte_to_point(low);
+        let end = snapshot.byte_to_point(high);
+        selection_line_span((start.row, start.column), (end.row, end.column))
     }
 
     /// statusbar 用の 1 始まりカーソル位置 `(行, 列)`。列は行内の**文字数**（byte ではない）。
@@ -1725,26 +1897,42 @@ impl EditorView {
     }
 
     fn save_impl(&mut self, cx: &mut Context<Self>) {
+        if self.save_in_flight {
+            // 書き込み中にもう一度頼まれた（⌘S の連打・自動保存と重なった）。同時に 2 本書くと、
+            // 後の方は読み込み時の revision で書こうとして、先の書き込みを「外で変わった」と見て
+            // 断られる。終わってから、まだ未保存ならもう一度書く。
+            self.save_queued = true;
+            return;
+        }
         let Some(pending) = self.buffer.prepare_save() else {
             eprintln!("保存先が未設定（無題バッファ）");
             return;
         };
         let saved_version = pending.version;
+        self.save_in_flight = true;
         cx.spawn(async move |editor, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { pending.write() })
                 .await;
-            let _ = editor.update(cx, |editor, cx| {
-                match result {
-                    Ok(revision) => {
-                        editor.buffer.complete_save(revision, saved_version);
-                        editor.reload_html_preview(cx);
+            // Err = 書いている間にタブが閉じた（書き込み自体は済んでいる）。
+            editor
+                .update(cx, |editor, cx| {
+                    editor.save_in_flight = false;
+                    let queued = std::mem::take(&mut editor.save_queued);
+                    match result {
+                        Ok(revision) => {
+                            editor.buffer.complete_save(revision, saved_version);
+                            editor.reload_html_preview(cx);
+                            if queued && editor.buffer.is_dirty() {
+                                editor.save_impl(cx);
+                            }
+                        }
+                        Err(error) => eprintln!("保存に失敗: {error:#}"),
                     }
-                    Err(error) => eprintln!("保存に失敗: {error:#}"),
-                }
-                cx.notify();
-            });
+                    cx.notify();
+                })
+                .ok();
         })
         .detach();
         cx.notify();
@@ -2188,13 +2376,14 @@ impl EditorView {
         snapshot.point_to_byte(BufferPoint::new(row, column))
     }
 
-    /// 本文のフォントファミリ。コード = Guguru Sans Code（等幅）/ composer(plain) = IBM Plex Sans JP。
-    /// render の `font_family` とヒットテストのフォールバックが同じ値を見る。
-    fn font_family(&self) -> &'static str {
+    /// 本文のフォントファミリ。コード = コードの書体（既定 Guguru Sans Code・等幅）/ composer(plain) =
+    /// UI の書体（既定 IBM Plex Sans JP）。どちらも設定で変えられる（O27）。render の `font_family` と
+    /// ヒットテストのフォールバックが同じ値を見る。
+    fn font_family(&self) -> SharedString {
         if self.plain {
-            "IBM Plex Sans JP"
+            self.fonts.ui.clone()
         } else {
-            "Guguru Sans Code"
+            self.fonts.code.clone()
         }
     }
 
@@ -2283,6 +2472,12 @@ impl EventEmitter<PreviewLinkClicked> for EditorView {}
 
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 書体の設定（O27）は描くたびに取り直す（設定が変わった次の描画から効く）。
+        if let Some(fonts) = cx.try_global::<ui::FontFamilies>() {
+            if *fonts != self.fonts {
+                self.fonts = fonts.clone();
+            }
+        }
         // `.html` ネイティブプレビュー: エディタ本体だけを差し替え、タブ/パンくずは GPUI のまま。
         if self.rendered_html {
             if let Some(preview) = self.html_preview.clone() {
@@ -2296,49 +2491,69 @@ impl Render for EditorView {
                     .into_any_element();
             }
         }
+        // CSV / TSV の表（O29）: 読むだけ。表は版で持ち直す（idle の描き直しで読み直さない）。
+        if self.rendered_markdown && self.is_table() {
+            let version = self.buffer.version();
+            if self.table_version != version {
+                let delimiter = self
+                    .buffer
+                    .path()
+                    .and_then(table_preview::table_delimiter)
+                    .unwrap_or(',');
+                self.table = Rc::new(table_preview::parse_delimited(
+                    &self.buffer.text(),
+                    delimiter,
+                    table_preview::MAX_ROWS,
+                ));
+                self.table_version = version;
+            }
+            let truncated = self.table.truncated.then(|| {
+                SharedString::from(i18n::t!(
+                    "editor.table_truncated",
+                    "n" => table_preview::MAX_ROWS
+                ))
+            });
+            return div()
+                .key_context("Editor")
+                .track_focus(&self.focus_handle(cx))
+                .size_full()
+                .on_action(cx.listener(Self::toggle_rendered_markdown))
+                .child(table_preview::render_table(
+                    self.table.clone(),
+                    &self.theme,
+                    self.fonts.code.clone(),
+                    self.font_size,
+                    &self.table_scroll,
+                    truncated,
+                ))
+                .into_any_element();
+        }
         // `.md` 整形プレビュー（rendered 側）: EditorElement を差し替え、編集ハンドラ/マウスは載せない。
         // ブロックは version キーでキャッシュ（idle 再描画で再パースしない）。
         if self.rendered_markdown && self.is_markdown() {
-            let version = self.buffer.version();
-            if self.markdown_blocks_version != version {
-                self.markdown_blocks = markdown::parse(&self.buffer.text());
-                self.markdown_blocks_version = version;
-            }
+            let preview = self.markdown_preview_element(cx);
             return div()
                 .key_context("Editor")
                 .track_focus(&self.focus_handle(cx))
                 .size_full()
                 .bg(self.theme.bg1)
                 .text_color(self.theme.fg0)
-                .font_family("IBM Plex Sans JP")
+                .font_family(self.fonts.ui.clone())
                 .on_action(cx.listener(Self::toggle_rendered_markdown))
-                .child(markdown_preview::render_preview(
-                    &self.markdown_blocks,
-                    &self.theme,
-                    self.font_size,
-                    &self.markdown_scroll,
-                    self.buffer.path().and_then(|path| path.parent()),
-                    {
-                        let editor = cx.entity().downgrade();
-                        std::rc::Rc::new(move |destination, _window, cx| {
-                            // 閉じたタブのプレビューを押すことは無いが、消えていれば何もしない。
-                            if let Some(editor) = editor.upgrade() {
-                                editor.update(cx, |_, cx| {
-                                    cx.emit(PreviewLinkClicked { destination })
-                                });
-                            }
-                        })
-                    },
-                ))
+                .on_action(cx.listener(Self::toggle_side_preview))
+                .child(preview)
                 .into_any_element();
         }
-        div()
+        // ⌘K V: 本文の右に整形プレビュー（打つたびに追いつく・O29）。
+        let side_preview =
+            (self.side_preview && self.is_markdown()).then(|| self.markdown_preview_element(cx));
+        let source = div()
             .key_context("Editor")
             .track_focus(&self.focus_handle(cx))
             .size_full()
             .when(!self.plain, |element| element.bg(self.theme.bg1))
             .text_color(self.theme.fg0)
-            // コード = Guguru Sans Code（等幅・bin で bundle 済み）/ composer(plain) = IBM Plex Sans JP（UI）
+            // コード / composer(plain) の書体（[`Self::font_family`]・設定で変えられる・O27）
             .font_family(self.font_family())
             .text_size(px(self.font_size))
             .line_height(px(self.line_height_value()))
@@ -2374,6 +2589,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::toggle_soft_wrap))
             .on_action(cx.listener(Self::toggle_rendered_markdown))
+            .on_action(cx.listener(Self::toggle_side_preview))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::move_left))
@@ -2400,8 +2616,26 @@ impl Render for EditorView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .child(EditorElement {
                 editor: cx.entity(),
-            })
-            .into_any_element()
+            });
+        match side_preview {
+            None => source.into_any_element(),
+            Some(preview) => div()
+                .size_full()
+                .flex()
+                .child(div().flex_1().min_w_0().h_full().child(source))
+                .child(div().flex_none().w(px(1.)).h_full().bg(self.theme.border))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .bg(self.theme.bg1)
+                        .text_color(self.theme.fg0)
+                        .font_family(self.fonts.ui.clone())
+                        .child(preview),
+                )
+                .into_any_element(),
+        }
     }
 }
 
@@ -3489,9 +3723,235 @@ fn utf16_to_byte_in(text: &str, utf16: usize) -> usize {
     byte
 }
 
+/// 選択（行・列は 0 始まり、`start <= end`）が覆う行（1 始まり・両端を含む）。複数行の選択が
+/// 次の行の行頭で終わっている時は、その行を含めない。
+fn selection_line_span(start: (usize, usize), end: (usize, usize)) -> (usize, usize) {
+    let last = if end.0 > start.0 && end.1 == 0 {
+        end.0 - 1
+    } else {
+        end.0
+    };
+    (start.0 + 1, last + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O29: `.csv` は ⌘⇧V（`set_rendered_markdown`）で表になって描け、`.txt` はならない。
+    /// 本文を変えると表も読み直す。
+    #[gpui::test]
+    fn csv_files_toggle_into_a_table(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("necoder_table_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("作れる");
+        let csv = dir.join("data.csv");
+        std::fs::write(&csv, "id,name\n1,Alice\n2,\"Bob, Jr.\"\n").expect("書ける");
+        let text = dir.join("notes.txt");
+        std::fs::write(&text, "id,name\n").expect("書ける");
+        let (table_editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&csv).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        table_editor.update_in(cx, |editor, _window, cx| {
+            assert!(editor.has_text_preview());
+            editor.set_rendered_markdown(true, cx);
+            assert!(editor.rendered_markdown());
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        table_editor.update_in(cx, |editor, _window, _cx| {
+            let rows: Vec<Vec<String>> = editor.table.rows.clone();
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[2], vec!["2".to_string(), "Bob, Jr.".to_string()]);
+        });
+        table_editor.update_in(cx, |editor, _window, cx| {
+            editor.set_rendered_markdown(false, cx);
+            editor.replace_all_text("id,name\n1,Alice\n2,\"Bob, Jr.\"\n3,Carol\n", cx);
+            editor.set_rendered_markdown(true, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        table_editor.update_in(cx, |editor, _window, _cx| {
+            assert_eq!(editor.table.rows.len(), 4, "本文の版が変われば読み直す");
+        });
+
+        let (text_editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&text).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        text_editor.update_in(cx, |editor, _window, cx| {
+            assert!(!editor.has_text_preview());
+            editor.set_rendered_markdown(true, cx);
+            assert!(!editor.rendered_markdown(), ".txt は表にならない");
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn front_matter_is_shown_as_properties_not_as_a_heading(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("necoder_front_matter_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("作れる");
+        let path = dir.join("post.md");
+        let filler: String = (0..80)
+            .map(|index| format!("Paragraph {index}\n\n"))
+            .collect();
+        std::fs::write(
+            &path,
+            format!("---\ntitle: Hello\ntags: [a, b]\n---\n# Body\n\n[toc]\n\n{filler}## Part\n\nText\n"),
+        )
+        .expect("書ける");
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&path).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        editor.update_in(cx, |editor, _window, cx| {
+            editor.set_rendered_markdown(true, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, _window, _cx| {
+            let front_matter = editor.markdown_front_matter.clone().expect("front matter");
+            assert_eq!(
+                front_matter.entries,
+                vec![
+                    ("title".to_string(), "Hello".to_string()),
+                    ("tags".to_string(), "a, b".to_string()),
+                ]
+            );
+            assert!(
+                matches!(
+                    editor.markdown_blocks.first(),
+                    Some(markdown::Block::Heading { level: 1, text, .. }) if text == "Body"
+                ),
+                "閉じの --- で見出しにならない: {:?}",
+                editor.markdown_blocks.first()
+            );
+            // 目次から飛ぶ先はスクロールする要素の直下の子（front matter の表が 0 番）。
+            let part = markdown_preview::toc_entries(&editor.markdown_blocks, 1)
+                .into_iter()
+                .find(|entry| entry.text == "Part")
+                .expect("目次に載る");
+            assert_eq!(editor.markdown_scroll.offset().y, px(0.));
+            editor.markdown_scroll.scroll_to_top_of_item(part.child);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, _window, _cx| {
+            assert!(
+                editor.markdown_scroll.offset().y < px(0.),
+                "見出しまで流れる: {:?}",
+                editor.markdown_scroll.offset()
+            );
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn the_side_preview_follows_typing(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("necoder_side_preview_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("作れる");
+        let markdown_path = dir.join("notes.md");
+        std::fs::write(&markdown_path, "# Notes\n").expect("書ける");
+        let text_path = dir.join("notes.txt");
+        std::fs::write(&text_path, "# Notes\n").expect("書ける");
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&markdown_path).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        editor.update_in(cx, |editor, _window, cx| {
+            editor.set_rendered_markdown(true, cx);
+            editor.set_side_preview(true, cx);
+            assert!(editor.side_preview());
+            assert!(!editor.rendered_markdown(), "並べる時は本文を見せる");
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, _window, cx| {
+            assert!(editor.content_origin.is_some(), "左に本文が描かれる");
+            assert_eq!(editor.markdown_blocks.len(), 1, "右にプレビュー");
+            editor.move_to_end(&MoveToEnd, _window, cx);
+            editor.insert_text("\n## Added\n", cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, _window, _cx| {
+            assert!(
+                editor.markdown_blocks.iter().any(|block| matches!(
+                    block,
+                    markdown::Block::Heading { level: 2, text, .. } if text == "Added"
+                )),
+                "打った分が右に出る: {:?}",
+                editor.markdown_blocks
+            );
+        });
+
+        let (text_editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_file(&text_path).expect("読める"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        text_editor.update_in(cx, |editor, _window, cx| {
+            editor.set_side_preview(true, cx);
+            assert!(!editor.side_preview(), ".txt には並べない");
+        });
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn dropped_text_lands_on_the_line_under_the_pointer(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            EditorView::new(
+                Buffer::from_str("first\nsecond\nthird\n"),
+                Theme::dark(),
+                gpui::red(),
+                cx,
+            )
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        editor.update_in(cx, |editor, window, cx| {
+            let origin = editor.content_origin.expect("描いた後は本文の原点がある");
+            let row_two = gpui::point(origin.x, origin.y + px(editor.line_height_value() * 1.5));
+            editor.insert_dropped_text(Some(row_two), "![a](a.png)", window, cx);
+            assert_eq!(
+                editor.buffer().text(),
+                "first\n![a](a.png)second\nthird\n",
+                "落とした行の頭"
+            );
+            // 本文より上（タブ・パンくず）ならキャレット（入れた文の後ろ）へ。
+            let above = gpui::point(origin.x, origin.y - px(4.));
+            editor.insert_dropped_text(Some(above), "!", window, cx);
+            assert_eq!(editor.buffer().text(), "first\n![a](a.png)!second\nthird\n");
+        });
+    }
+
+    #[test]
+    fn selections_cover_the_lines_they_look_like() {
+        assert_eq!(
+            selection_line_span((4, 2), (4, 2)),
+            (5, 5),
+            "キャレットはその行"
+        );
+        assert_eq!(selection_line_span((4, 0), (6, 3)), (5, 7));
+        assert_eq!(
+            selection_line_span((4, 0), (7, 0)),
+            (5, 7),
+            "次の行の行頭で終わる選択はその行を含めない"
+        );
+        assert_eq!(selection_line_span((4, 3), (4, 9)), (5, 5));
+    }
 
     #[test]
     fn visible_rows_covers_only_the_window() {

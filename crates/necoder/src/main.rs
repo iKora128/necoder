@@ -210,6 +210,7 @@ fn restore_window_plan(
                 open_files.push(RestoredTabs {
                     files: saved.open_files,
                     active: saved.active_file,
+                    pinned: saved.pinned_files,
                 });
             }
             Err(error) => eprintln!("前回の Remote SSH 接続を復元できない: {error:#}"),
@@ -248,8 +249,20 @@ fn load_user_keymap(path: &Path, cx: &mut App) {
     }
 }
 
+/// 既定 keymap を bind する（起動時と、keymap.json を読み直す時）。
+fn bind_default_keymap(cx: &mut App) {
+    match keymap_core::load_bindings(
+        &keymap_core::default_keymap_json(keymap_core::KeymapPlatform::current()),
+        cx,
+    ) {
+        Ok(bindings) => cx.bind_keys(bindings),
+        Err(error) => eprintln!("keymap のロードに失敗: {error:#}"),
+    }
+}
+
 /// ユーザー keymap.json の live reload（保存したら即キーが差し替わる・M10-13）。
-/// gpui の keymap は後から bind したものが勝つので、再読込 = 再 bind でよい。
+/// **読み直す時は束を全部捨ててから既定 → ユーザーの順に張り直す**（O27）。上から bind し直すだけだと、
+/// keymap.json から消した束（と、キー割り当ての画面で「戻す」を押した束）が再起動まで残っていた。
 fn watch_user_keymap(path: PathBuf, cx: &mut App) {
     let Some(parent) = path.parent().map(Path::to_path_buf) else {
         return;
@@ -292,6 +305,8 @@ fn watch_user_keymap(path: PathBuf, cx: &mut App) {
             while receiver.try_recv().is_ok() {}
             let path = path.clone();
             cx.update(|cx| {
+                cx.clear_key_bindings();
+                bind_default_keymap(cx);
                 load_user_keymap(&path, cx);
                 // メニューのキー表記は set_menus 時のスナップショット → 再設定で追従。
                 cx.set_menus(menus::app_menus());
@@ -358,6 +373,7 @@ impl gpui::AssetSource for Assets {
             "icons/square-check.svg" => icon!("square-check.svg"),
             "icons/server.svg" => icon!("server.svg"),
             "icons/list.svg" => icon!("list.svg"),
+            "icons/columns-2.svg" => icon!("columns-2.svg"),
             "icons/columns-3.svg" => icon!("columns-3.svg"),
             "icons/layout-grid.svg" => icon!("layout-grid.svg"),
             "icons/message-square.svg" => icon!("message-square.svg"),
@@ -370,6 +386,8 @@ impl gpui::AssetSource for Assets {
             "icons/bell.svg" => icon!("bell.svg"),
             "icons/bell-off.svg" => icon!("bell-off.svg"),
             "icons/eye.svg" => icon!("eye.svg"),
+            // ピン留めしたタブ（× の代わり・O26）。
+            "icons/pin.svg" => icon!("pin.svg"),
             // エクスプローラの手動更新（ヘッダ右端）・Web タブの再読込。
             "icons/refresh-cw.svg" => icon!("refresh-cw.svg"),
             // Web タブのツールバー（戻る / 進む / DevTools / 既定のブラウザで開く）。
@@ -773,19 +791,21 @@ fn main() {
         cx.set_app_identity("dev.necoder.editor", "necoder");
         // 通知を押した時の行き先と、Dock の要対応バッジの数え直し（O12）。
         workspace::install_agent_notifications(cx);
+        // エージェントが作業している間はスリープさせない（O13・設定 `keep_awake`）。
+        workspace::install_keep_awake(cx);
+        // ターミナルの文字の大きさ・フォント・scrollback・カーソル・シェル（O25・設定 `terminal_*`）。
+        workspace::install_terminal_settings(cx);
+        // UI とコードの書体（O27・設定 `ui_font_family` / `code_font_family`）。
+        workspace::install_font_settings(cx);
         let settings = settings::get(cx);
         if let Some(locale) = &settings.locale {
             i18n::set_locale(locale);
         }
+        // 設定画面・CLI・手編集で表示言語を変えたら、その場で切り替える（O27）。
+        settings::follow_locale(cx);
         let theme = resolve_theme(cx);
 
-        match keymap_core::load_bindings(
-            &keymap_core::default_keymap_json(keymap_core::KeymapPlatform::current()),
-            cx,
-        ) {
-            Ok(bindings) => cx.bind_keys(bindings),
-            Err(error) => eprintln!("keymap のロードに失敗: {error:#}"),
-        }
+        bind_default_keymap(cx);
         // ユーザー keymap（~/Library/Application Support/necoder/keymap.json・M10-13）。
         // 既定の**後**に bind ＝ 同じキーはユーザー側が勝つ。ファイル監視で live reload。
         let user_keymap_path = settings_core::user_settings_path()

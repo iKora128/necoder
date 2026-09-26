@@ -92,6 +92,8 @@ impl Workspace {
             path: root.join(REVIEW_TAB_NAME),
             content: TabContent::Review(review),
             transient: true,
+            pinned: false,
+            preview: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -131,26 +133,39 @@ impl Workspace {
                 target,
                 prompt,
                 note_ids,
-            } => self.send_review_notes(session_index, &review, target, prompt, note_ids, cx),
+                resend,
+            } => self.send_review_notes(
+                session_index,
+                &review,
+                target,
+                prompt,
+                note_ids,
+                *resend,
+                cx,
+            ),
         }
         cx.notify();
     }
 
     /// 注記の宛先の一覧。既定（Fleet = Task カードの操作先 / Editor = アクティブなスレッド）を先頭に、
-    /// session の全スレッドと「新しいスレッドで送る」を並べる。
+    /// session の全スレッドと「新しいスレッドで送る」を並べる。宛先はパネルの Entity id と
+    /// スレッドの永続 id で持つ（R07・添字はメニューを開いている間にずれうる）。
     fn review_send_targets(&self, session_index: usize, cx: &App) -> Vec<SendTarget> {
         let Some(session) = self.project_sessions.sessions.get(session_index) else {
             return Vec::new();
         };
         let mut targets = Vec::new();
-        for (panel_index, panel) in session.fleet_agents.iter().enumerate() {
-            let current = *panel == session.agent_panel;
-            let panel = panel.read(cx);
+        for panel_entity in &session.fleet_agents {
+            let current = *panel_entity == session.agent_panel;
+            let panel = panel_entity.read(cx);
             let active = panel.active_thread();
             for (thread_index, status) in panel.statuses().into_iter().enumerate() {
+                let Some(thread_id) = panel.thread_id(thread_index) else {
+                    continue;
+                };
                 targets.push(SendTarget {
-                    panel: panel_index,
-                    thread: Some(thread_index),
+                    panel: panel_entity.entity_id(),
+                    thread: Some(thread_id),
                     label: status.name.clone(),
                     detail: SharedString::from(format!(
                         "{} · {}",
@@ -166,11 +181,11 @@ impl Workspace {
         if let Some(panel) = session
             .fleet_agents
             .iter()
-            .position(|panel| *panel == session.agent_panel)
-            .or((!session.fleet_agents.is_empty()).then_some(0))
+            .find(|panel| **panel == session.agent_panel)
+            .or(session.fleet_agents.first())
         {
             targets.push(SendTarget {
-                panel,
+                panel: panel.entity_id(),
                 thread: None,
                 label: SharedString::from(i18n::t!("review.send_new_thread")),
                 detail: SharedString::default(),
@@ -182,6 +197,10 @@ impl Workspace {
     }
 
     /// 注記を 1 通のプロンプトにまとめて送る（人間の発話として・表示中のタブを奪わない）。
+    ///
+    /// 宛先は id で引き直す（R07）。パネルかスレッドがもう無ければ送らず、注記は未送信のまま
+    /// 残して宛先のメニューを開き直す（届いていないものを「送信済み」にしない）。
+    #[allow(clippy::too_many_arguments)]
     fn send_review_notes(
         &mut self,
         session_index: usize,
@@ -189,16 +208,23 @@ impl Workspace {
         target: &SendTarget,
         prompt: &str,
         note_ids: &[String],
+        resend: bool,
         cx: &mut Context<Self>,
     ) {
         let panel = self
             .project_sessions
             .sessions
             .get(session_index)
-            .and_then(|session| session.fleet_agents.get(target.panel).cloned());
+            .and_then(|session| {
+                session
+                    .fleet_agents
+                    .iter()
+                    .find(|panel| panel.entity_id() == target.panel)
+                    .cloned()
+            });
         let delivered = panel.and_then(|panel| {
-            let thread = match target.thread {
-                Some(thread) => thread,
+            let thread = match &target.thread {
+                Some(thread_id) => panel.read(cx).thread_position(thread_id)?,
                 None => panel.update(cx, |panel, cx| panel.new_thread_index(cx)),
             };
             let sent = panel.update(cx, |panel, cx| {
@@ -224,7 +250,10 @@ impl Workspace {
                     .get(session_index)
                     .map(|slot| slot.color)
                     .unwrap_or_else(|| project_color(0));
-                self.push_toast(i18n::t!("review.send_failed").into(), color, cx);
+                self.push_toast(i18n::t!("review.send_target_gone").into(), color, cx);
+                // 選び直せるように、今の宛先で開き直す（注記は未送信のまま）。
+                let targets = self.review_send_targets(session_index, cx);
+                review.update(cx, |review, cx| review.show_send_menu(targets, resend, cx));
             }
         }
     }
@@ -239,5 +268,82 @@ impl Workspace {
         if let Some(review) = review {
             review.update(cx, |review, cx| review.mark_outdated(cx));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R07: 宛先はスレッドの永続 id で持つ。メニューを開いた後で前のスレッドが閉じられて添字が
+    /// ずれても、選んだスレッドへ届く。選んだスレッド自体が閉じられたら送らず、注記を未送信の
+    /// まま宛先のメニューを開き直す。
+    #[gpui::test]
+    fn review_notes_follow_the_chosen_thread_not_its_index(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_review_send_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| {
+            Workspace::new(vec![project.clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, _window, cx| {
+            let panel = workspace.project_sessions.sessions[0].agent_panel.clone();
+            // 5 本にして、添字 4 を実行中にする（`debug_set_activities` は index % 4 == 0 を
+            // Working にする）。実行中への送信は送信待ちに積まれるだけで、エージェントを起こさない。
+            panel.update(cx, |panel, cx| {
+                while panel.statuses().len() < 5 {
+                    panel.new_thread_index(cx);
+                }
+                panel.debug_set_activities(cx);
+            });
+            let chosen_name = panel.read(cx).statuses()[4].name.clone();
+            let chosen = workspace
+                .review_send_targets(0, cx)
+                .into_iter()
+                .find(|target| target.label == chosen_name)
+                .expect("5 本目の宛先がある");
+            let review = workspace.project_sessions.sessions[0]
+                .review
+                .clone()
+                .expect("session には変更レビューがある");
+
+            // メニューを開いた後で前のスレッドを閉じる → 選んだスレッドの添字は 4 → 3 にずれる。
+            panel.update(cx, |panel, cx| panel.close_thread(1, cx));
+            workspace.send_review_notes(0, &review, &chosen, "注記", &[], false, cx);
+            let toast = workspace
+                .notifications
+                .toasts
+                .last()
+                .map(|toast| toast.text.to_string())
+                .unwrap_or_default();
+            assert!(
+                toast.contains(chosen_name.as_ref()),
+                "選んだスレッドへ届く: {toast}"
+            );
+            assert!(!review.read(cx).send_menu_open());
+
+            // 選んだスレッドそのものを閉じると、送らずにメニューを開き直す（選び直せる）。
+            let thread_id = chosen.thread.clone().expect("既存スレッドの宛先");
+            let index = panel
+                .read(cx)
+                .thread_position(&thread_id)
+                .expect("まだ開いている");
+            panel.update(cx, |panel, cx| panel.close_thread(index, cx));
+            workspace.send_review_notes(0, &review, &chosen, "注記", &[], false, cx);
+            assert!(
+                review.read(cx).send_menu_open(),
+                "届かなかったら宛先のメニューを開き直す"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

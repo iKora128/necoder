@@ -14,4 +14,6 @@ anyhow.workspace = true
 ignore.workspace = true
 imara-diff.workspace = true
 host.workspace = true
+# `.necoder/settings.json` の `task_base`（repo ごとの Task の起点・O20）を読む
+serde_json.workspace = true
 notify.workspace = true

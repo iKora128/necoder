@@ -69,24 +69,43 @@ mod web_preview_view;
 mod web_tabs;
 pub(crate) use image_view::ImageView;
 pub(crate) use pdf_view::PdfView;
-pub(crate) use web_preview_view::{web_tab_key, web_tab_url, WebPreviewEvent, WebPreviewView};
+pub(crate) use web_preview_view::{
+    web_tab_key, web_tab_url, PickTarget, WebPreviewEvent, WebPreviewView,
+};
 mod about;
+mod cleanup;
+mod editor_manners;
 mod git_controller;
 mod git_view;
 mod herd_view;
+mod inbox;
+mod keep_awake;
+mod keymap_editing;
 mod notifications;
 mod overlays;
+mod ports;
 mod quit_guard;
+mod resources;
 mod rail;
 mod rail_view;
 mod remote_connection;
 mod remote_ssh;
+mod remote_transfer;
 mod shortcut_sheet;
+mod ssh_register;
 mod system_notifications;
+mod font_settings;
+mod statusbar_items;
+mod terminal_colors;
+mod terminal_rename;
+mod terminal_settings;
 mod usage_view;
 mod worktree_delete;
 pub use control_ipc::control_socket_path;
-pub(crate) use quit_guard::intercept_last_window_close;
+pub use keep_awake::install_keep_awake;
+pub use font_settings::install_font_settings;
+pub use terminal_settings::install_terminal_settings;
+pub(crate) use quit_guard::intercept_window_close;
 pub use quit_guard::{quit_now, request_quit, AppStorage};
 pub use system_notifications::install_agent_notifications;
 // 制御 IPC の足回り（unix socket / 名前付きパイプ）。CLI 側（necoder の fleet.rs）も使う。
@@ -95,6 +114,8 @@ mod captain;
 mod chat_view;
 pub(crate) use captain::is_captain_thread_name;
 mod fleet_sidebar;
+mod task_creation;
+mod task_details;
 mod todo_panel;
 pub(crate) use todo_panel::*;
 mod editor_area;
@@ -180,6 +201,25 @@ actions!(
         ShowUsageLimits,
         // メニュー「アップデートを確認…」。About モーダルを開いて即確認する。
         CheckForUpdates,
+        // 開いているファイルの `path:行`（範囲なら `path:10-14`）をコピー（⌘⌥C・O26）。
+        CopyPathWithLine,
+        // タブを全部閉じる（⌘K ⌘W・未保存のタブは残す・O26）。
+        CloseAllTabs,
+        // アクティブなタブのピン留めを付ける / 外す（⌘K ⇧⏎・O26）。
+        TogglePinTab,
+        // 開いているファイルを外部のエディタ / ターミナルで開く（パレット・O26）。
+        OpenInVsCode,
+        OpenInCursor,
+        OpenInZed,
+        OpenInTerminal,
+        // necoder の中で動いている開発サーバのポート（開く / 止める・O5）。
+        ShowPorts,
+        // 通知の履歴（titlebar のベルと同じ一覧・O13）。
+        ShowInbox,
+        // リソース（necoder と子プロセスのメモリをプロジェクトごとに・O22）。
+        ShowResources,
+        // 片付け（いまのリポジトリの Task をまとめて終了 / worktree を削除・O22）。
+        ShowCleanup,
         // macOS 標準のアプリ/ウィンドウ操作（メニューバー用・M13。handlers は workspace root）。
         Hide,
         HideOthers,
@@ -188,6 +228,10 @@ actions!(
         Zoom,
         // リモート SSH ホストピッカー（~/.ssh/config・M13）。
         RemoteSsh,
+        // SSH の接続を確かめる（O37・ホストを選んで `ssh host true` を 1 回）。
+        TestSshConnection,
+        // 接続先を ~/.ssh/config に登録する（O37・G01）。
+        RegisterSshHost,
         // スレッド履歴（過去スレッド一覧 → 復元・#5）。
         ThreadHistory,
         // code actions（⌘.・M11）と参照検索（⇧F12・M11）。
@@ -210,6 +254,15 @@ actions!(
         CloseTab,
         RestoreClosedTab,
         NewThread,
+        // エージェントを決めて新規スレッド（B28）。並びは editor_area::tabs::AGENT_THREAD_LABELS と同じ。
+        // 既定のキーは無い（keymap.json で好きなキーへ）。
+        NewThreadClaudeCode,
+        NewThreadCodex,
+        NewThreadCopilot,
+        NewThreadQwenCode,
+        NewThreadOpenCode,
+        NewThreadKimi,
+        NewThreadGrok,
         // エディタタブの切替（⌘{ / ⌘} = ⌘⇧[ / ⌘⇧]）。M10 複数タブ。
         SelectNextTab,
         SelectPrevTab,
@@ -263,6 +316,10 @@ pub(crate) enum PickerMode {
     OpenLauncher,
     /// Web タブの URL 入力（ポート番号か localhost の URL だけ・`web_tabs.rs`）。行は入力の確定 1 行だけ。
     PreviewUrl,
+    /// 書体を選ぶ（O27・設定の「選ぶ…」から）。id 0 = 既定に戻す、1.. = `picker_fonts` の添字 + 1。
+    Fonts,
+    /// 手元のターミナルのシェルを選ぶ（O25）。id 0 = 既定に戻す、1.. = `picker_shells` の添字 + 1。
+    Shells,
 }
 
 /// ⌘P の作成アクション行の id（空プロジェクト用）。ファイル添字（最大 50k）と衝突しない番兵値。
@@ -318,6 +375,8 @@ pub(crate) enum TabContent {
         _hover_subscription: Subscription,
         /// 整形プレビュー（Markdown）のリンクの購読（URL は Web タブ / ブラウザ・ファイルはタブで開く）。
         _link_subscription: Subscription,
+        /// フォーカスが外れた時の自動保存の購読（O26・設定 `auto_save`）。
+        _blur_subscription: Subscription,
     },
     /// 画像タブ（FEATURES §2 の画像プレビュー）。編集・保存・LSP・hot exit の対象外。
     Image(Entity<ImageView>),
@@ -343,6 +402,12 @@ pub(crate) struct EditorTab {
     content: TabContent,
     /// 一時タブ（diff タブ等・M11-9）。永続化・⌘⇧T 復元・LSP から除外する。
     transient: bool,
+    /// ピン留め（O26）。ピン留めしたタブは常にタブ列の左端にまとまり、まとめて閉じる操作と ⌘W では
+    /// 閉じない。窓セッション（`pinned_files`）に残る（`editor_area/pins.rs`）。
+    pinned: bool,
+    /// プレビュータブ（O26）。次にプレビューで開いたファイルがこのタブを置き換える。編集・
+    /// ダブルクリック・ピン留め・普通に開き直すと外れる（`editor_area/preview_tabs.rs`）。
+    preview: bool,
 }
 
 impl EditorTab {
@@ -518,6 +583,9 @@ struct CompletionItem {
     detail: Option<SharedString>,
     /// 種別の短い記号（fn/struct/let 等）。
     kind: SharedString,
+    /// 入れた後のキャレット（`insert_text` の中の byte 位置・`None` = 末尾）。スラッシュメニューの
+    /// 形（コードの囲みの中など）だけが使う。
+    caret: Option<usize>,
 }
 
 /// 補完ポップアップ（オーバーレイ）。エディタのキャレット直下に出す。フォーカスを取り上下/確定/中止を受ける。
@@ -531,6 +599,8 @@ pub(crate) struct CompletionState {
     selected: usize,
     position: Point<gpui::Pixels>,
     focus: FocusHandle,
+    /// Markdown のスラッシュメニュー（O29）: 確定で行頭の `/` ごと置き換える。
+    slash: bool,
 }
 
 impl CompletionState {
@@ -745,6 +815,7 @@ fn parse_completion_items(value: &serde_json::Value) -> Vec<CompletionItem> {
                 insert_text,
                 detail,
                 kind,
+                caret: None,
             })
         })
         .take(60)
@@ -995,6 +1066,9 @@ pub struct TaskSpace {
     pub head_oid: Option<String>,
     pub result_summary: Option<SharedString>,
     pub created_at_ms: i64,
+    /// linked worktree か（メインの作業ツリーでない）。統合先の `⌂` はメインの作業ツリーを選ぶ
+    /// （O21・同じリポジトリの `task/` でない linked worktree を統合先に取り違えない）。
+    pub linked: bool,
 }
 
 impl TaskSpace {
@@ -1031,6 +1105,7 @@ impl TaskSpace {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as i64)
                 .unwrap_or(0),
+            linked: false,
         }
     }
 
@@ -1073,6 +1148,7 @@ impl TaskSpace {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as i64)
                 .unwrap_or(0),
+            linked: project::is_linked_worktree_on(worktree.host().as_ref(), worktree.root()),
         }
     }
 
@@ -1232,6 +1308,38 @@ struct ChromeState {
     /// リポジトリを跨いだときに畳んでおく編隊（鍵 = `repository_key`）。戻ってきたら ＋/× の結果ごと
     /// 復元する（切替のたびに並べ直さない・閉じたセルは閉じたまま）。
     fleet_grids: HashMap<String, Vec<FleetPane>>,
+    /// リポジトリの `git worktree list`（鍵 = `repository_key`・O21）。Fleet サイドバーの「外部の
+    /// worktree」と「消えています」の元。Fleet を開いた時・レールを切り替えた時・worktree を作った /
+    /// 消した後・窓が前に出た時に読み直す（ポーリングしない）。`None` = 読んでいる途中。
+    fleet_worktrees: HashMap<String, Option<Vec<project::GitWorktree>>>,
+    /// 「外部の worktree」を畳んでいるか（O21・見出しで切り替え）。
+    hide_external_worktrees: bool,
+    /// Fleet サイドバーの Task の絞り込み欄（O21・Task が多い時か、書いてある間だけ出す）。
+    fleet_filter: Entity<EditorView>,
+    /// 絞り込みの語の写し（空白だけ = 絞り込まない）。
+    fleet_filter_query: String,
+    /// Fleet サイドバーの Task の並べ方（O21・既定はレールの順）。
+    fleet_sort: fleet_sidebar::FleetSort,
+    /// Fleet サイドバーで ⌘ / ⇧ クリックで選んでいる Task（O21・押した順）。まとめて休ませる・
+    /// 舞台に並べる・片付けへ渡す。普通のクリックで外れる。
+    fleet_selection: Vec<SpaceId>,
+    /// ⇧ クリックの範囲の起点（最後に ⌘ / ⇧ で押した Task）。
+    fleet_selection_anchor: Option<SpaceId>,
+    /// 取り込み中の worktree（レールに開いたら Task にする・O21）。
+    adopt_as_task: std::collections::HashSet<PathBuf>,
+    /// 準備に失敗して送れていない ＋ Task の依頼（O20）。「準備をやり直す」/「準備を飛ばして始める」で
+    /// 送る。起動している間だけ（再起動したら Task の名前から書き直す）。
+    pending_task_prompts: HashMap<SpaceId, String>,
+    /// 上の依頼を送るエージェント（fan-out で選んだ物・無ければ既定・O23）。
+    pending_task_agents: HashMap<SpaceId, String>,
+    /// 統合の下見で競合した Task と、競合したファイル（O19）。Task の「次へ」が「競合を直させる」に
+    /// なる。頼んだら外す（直った後の「統合」でまた下見する）。起動している間だけ。
+    task_conflicts: HashMap<SpaceId, Vec<String>>,
+    /// 作成中の Task（worktree・準備スクリプトを流している間の行・O20）。作れなかった物は
+    /// やり直すか閉じるまで残る。起動している間だけ。
+    task_creations: Vec<task_creation::TaskCreation>,
+    /// 上の行の通し番号（最後に振った物）。
+    next_task_creation_id: u64,
     /// 編隊中央のタブ（管制 / グラフ・P3）。
     fleet_center_view: FleetCenterView,
     /// 管制タブのフォーカス（⏎ = キュー先頭へ・keymap context "FleetControl" の足場）。
@@ -1241,6 +1349,22 @@ struct ChromeState {
     herd_solo_expanded: bool,
     /// Task の表示名をダブルクリックで改名中（herd 見出し / セルヘッダ）。スレッドタブの改名と同型。
     task_renaming: Option<TaskRenaming>,
+    /// 端末のタブの改名（O24・ダブルクリック）。
+    terminal_renaming: Option<terminal_rename::TerminalRenaming>,
+    /// 窓を持たない経路（パネルのイベント）で開いた入力欄へ渡すフォーカス（`process_pending_shell_effects`）。
+    focus_next_frame: Option<FocusHandle>,
+    /// 設定の「選ぶ…」で頼まれた書体のピッカー（設定のキー・窓が要るので後処理で開く）。
+    pending_font_picker: Option<&'static str>,
+    /// 設定の「選ぶ…」で頼まれたシェルのピッカー（窓が要るので後処理で開く・O25）。
+    pending_shell_picker: bool,
+    /// statusbar の項目の出し入れのメニュー（右クリックした所・O27）。
+    statusbar_menu: Option<Point<gpui::Pixels>>,
+    /// 詳細を出している project（O21・右クリックの「詳細…」）。
+    task_details: Option<usize>,
+    /// 接続先の登録のダイアログ（O37・G01）。
+    ssh_registering: Option<ssh_register::SshRegistering>,
+    /// 自動で名付けたブランチの改名の予約（O23・A23・Task の SpaceId ごと・この起動の間だけ）。
+    auto_branches: HashMap<SpaceId, task_creation::AutoBranch>,
     /// 系譜グラフの表示（扇形/リバー/ツリー/カード・M14 #4）。
     graph_view: GraphView,
     /// 系譜グラフを畳んでいるか（⌄・ヘッダのみ表示）。
@@ -1321,6 +1445,11 @@ struct WorkspaceOverlays {
     picker_mode: PickerMode,
     picker_files: Vec<PathBuf>,
     picker_themes: Vec<(SharedString, ThemeSource)>,
+    /// 書体のピッカーの行（入っている書体）と、選んだ書体を書く設定のキー（O27）。
+    picker_fonts: Vec<String>,
+    picker_font_key: &'static str,
+    /// シェルのピッカーの行（入っているシェル・O25）。
+    picker_shells: Vec<String>,
     theme_before_preview: Option<Theme>,
     picker_observation: Option<Subscription>,
     color_picker: Option<ColorPickerState>,
@@ -1340,10 +1469,20 @@ struct WorkspaceOverlays {
     pending_project_switch: Option<usize>,
     /// キーボードショートカット一覧オーバーレイ。`Some(focus)`＝開いている（Escape 受けに focus を持つ）。
     shortcut_sheet: Option<FocusHandle>,
+    /// キー割り当ての画面の編集の状態（ショートカット一覧を開いている間・O27）。
+    keymap_editing: Option<keymap_editing::KeymapEditing>,
     /// About モーダル（メニュー「necoder について」/「アップデートを確認…」）。同じく focus = Escape 受け。
     about: Option<FocusHandle>,
     /// 使用量のポップオーバー（statusbar のチップから・O11）。
     usage_popover: Option<usage_view::UsagePopoverState>,
+    /// Ports（O5・開いている間だけ Some）。
+    ports: Option<ports::PortsState>,
+    /// 通知の履歴の一覧（titlebar のベル・O13・開いている間だけ Some）。
+    inbox: Option<inbox::InboxPopoverState>,
+    /// リソース（メモリとプロセス・O22・開いている間だけ Some）。
+    resources: Option<resources::ResourcesState>,
+    /// 片付け（Task をまとめて終了 / worktree を削除・O22・開いている間だけ Some）。
+    cleanup: Option<cleanup::CleanupState>,
     /// 使用量の統計の画面（パレット「使用量: 統計を開く」・O11）。
     usage_stats: Option<usage_view::UsageStatsState>,
     /// キーボードでのプロジェクト切替（⌃⌘↑↓ / ⌘1..9）の瞬間だけ、中央に行き先の名前を
@@ -1373,6 +1512,8 @@ struct NotificationCenter {
     /// 起動時に DB から backfill し、以後は task_events へ書くのと同じ場所で live に積む。
     /// **Captain の采配も同じ形でここへ載る**（監査可能なニュース・FLEET-V2 §5.6）。
     news: Vec<NewsItem>,
+    /// 通知の履歴（ベル・O13）。古いものが先頭・最新 `inbox::INBOX_LIMIT` 件。
+    inbox: Vec<inbox::InboxItem>,
 }
 
 /// ニュース 1 行（mock `fleet-dashboard.html` 下段の書式）: 時刻 + 帰属チップ + **太字名** + イベント文。
@@ -1385,6 +1526,8 @@ pub(crate) struct NewsItem {
     pub title: SharedString,
     pub text: SharedString,
     pub kind: NewsKind,
+    /// どの Task の出来事か（押すとその Task へ・O13）。Captain の采配は None（押すと Captain へ）。
+    pub space: Option<SpaceId>,
 }
 
 /// ニュースのイベント種別（task_events の kind と同じ語彙・Captain の采配も同じログに載る）。
@@ -1458,6 +1601,8 @@ pub struct Workspace {
     /// この窓のハンドル（render で控える）。Window を持たない場面（パネルのイベント）で
     /// 「いまこの窓を見ているか」を OS 通知の判断に使う（O12）。
     window_handle: Option<gpui::AnyWindowHandle>,
+    /// 手を止めた時の自動保存の予約の世代（最後の編集の予約だけが保存する・O26）。
+    auto_save_generation: u64,
 }
 
 /// プロジェクト色ピッカーの状態（識別用の厳選スウォッチ + 任意 hex 入力）。
@@ -1762,9 +1907,23 @@ impl Workspace {
             || self.pending_close_clean_tabs
             || self.pending_open_git_diff.is_some()
             || self.pending_stage_hunk.is_some()
+            || self.chrome.focus_next_frame.is_some()
+            || self.chrome.pending_font_picker.is_some()
+            || self.chrome.pending_shell_picker
     }
 
     fn process_pending_shell_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 窓を持たない経路（パネルのイベント）で開いた入力欄・閉じた後の戻り先へフォーカスを渡す。
+        if let Some(focus) = self.chrome.focus_next_frame.take() {
+            window.focus(&focus, cx);
+        }
+        if let Some(key) = self.chrome.pending_font_picker.take() {
+            self.open_font_picker(key, window, cx);
+        }
+        if self.chrome.pending_shell_picker {
+            self.chrome.pending_shell_picker = false;
+            self.open_shell_picker(window, cx);
+        }
         if self.chrome.pending_agent_full_screen_toggle {
             self.chrome.pending_agent_full_screen_toggle = false;
             self.toggle_agent_full_screen_state(window, cx);
@@ -1828,9 +1987,10 @@ impl Workspace {
             self.set_chat_mode(true, window, cx);
         }
         if std::mem::take(&mut self.pending_close_clean_tabs) {
-            // Chat: 見ているチャットが替わった。前のチャットの成果物を閉じる（未保存の編集は残す）。
+            // Chat: 見ているチャットが替わった。前のチャットの成果物を閉じる（未保存の編集と
+            // ピン留めは残す）。
             for index in (0..self.tabs.len()).rev() {
-                if !self.tabs[index].is_dirty(cx) {
+                if !self.tabs[index].is_dirty(cx) && !self.tabs[index].pinned {
                     self.close_tab_at(index, window, cx);
                 }
             }
@@ -1948,6 +2108,10 @@ impl Workspace {
             || self.overlays.shortcut_sheet.is_some()
             || self.overlays.about.is_some()
             || self.overlays.usage_popover.is_some()
+            || self.overlays.ports.is_some()
+            || self.overlays.inbox.is_some()
+            || self.overlays.resources.is_some()
+            || self.overlays.cleanup.is_some()
             || self.overlays.usage_stats.is_some()
             || self.search_panel.is_some()
             || self.buffer_search.is_some()
@@ -2030,6 +2194,13 @@ impl Render for Workspace {
             };
         if !self.focus_recovery_installed {
             self.focus_recovery_installed = true;
+            // 窓を離れた（別の窓・別のアプリ）= 他へ移った時の自動保存（O26）。
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.auto_save_window_left(cx);
+                }
+            })
+            .detach();
             cx.on_focus_lost(window, |this, window, cx| {
                 if let Some(handle) = window.focus_lost_restore_target(cx) {
                     window.focus(&handle, cx);
@@ -2043,7 +2214,15 @@ impl Render for Workspace {
             })
             .detach();
         }
+        let was_active = self.window_active;
         self.window_active = window.is_window_active(); // 承認待ちの脈動など「動き」を止める判定
+        if self.window_active && !was_active {
+            // 窓が前に出た = 外で worktree を作った / 消した後かもしれない（O21・ポーリングの代わり）。
+            self.forget_fleet_worktrees();
+        }
+        if self.chrome.fleet_mode {
+            self.ensure_fleet_worktrees(cx);
+        }
         self.window_handle = Some(window.window_handle());
         if self.window_active && self.waiting_thread.is_some() {
             self.ensure_visual_ticker(cx);
@@ -2143,6 +2322,17 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::about_action))
             .on_action(cx.listener(Self::open_usage_stats))
             .on_action(cx.listener(Self::show_usage_limits))
+            .on_action(cx.listener(Self::copy_path_with_line))
+            .on_action(cx.listener(Self::close_all_tabs))
+            .on_action(cx.listener(Self::toggle_pin_active_tab))
+            .on_action(cx.listener(Self::open_in_vs_code))
+            .on_action(cx.listener(Self::open_in_cursor))
+            .on_action(cx.listener(Self::open_in_zed))
+            .on_action(cx.listener(Self::open_in_terminal))
+            .on_action(cx.listener(Self::show_ports))
+            .on_action(cx.listener(Self::toggle_inbox))
+            .on_action(cx.listener(Self::show_resources))
+            .on_action(cx.listener(Self::show_cleanup))
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
@@ -2155,6 +2345,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
             .on_action(cx.listener(Self::open_ssh_host_picker))
+            .on_action(cx.listener(Self::open_ssh_test_picker))
+            .on_action(cx.listener(|this, _: &RegisterSshHost, window, cx| {
+                this.open_ssh_register(window, cx)
+            }))
             .on_action(cx.listener(Self::open_thread_history))
             .on_action(cx.listener(Self::open_code_actions))
             .on_action(cx.listener(Self::find_references))
@@ -2174,6 +2368,27 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::select_next_tab))
             .on_action(cx.listener(Self::select_prev_tab))
             .on_action(cx.listener(Self::new_agent_thread))
+            .on_action(cx.listener(|this, _: &NewThreadClaudeCode, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[0], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadCodex, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[1], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadCopilot, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[2], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadQwenCode, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[3], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadOpenCode, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[4], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadKimi, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[5], cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewThreadGrok, _, cx| {
+                this.new_agent_thread_with(editor_area::AGENT_THREAD_LABELS[6], cx)
+            }))
             .on_action(cx.listener(Self::select_next_thread))
             .on_action(cx.listener(Self::select_prev_thread))
             .on_action(cx.listener(Self::new_window))
@@ -2240,7 +2455,7 @@ impl Render for Workspace {
             // 窓の角丸(10px・UI-SPEC §1.4)に枠を沿わせる。四角い枠だと隅が窓の丸みでクリップされ細く見える。
             .rounded(px(10.))
             .text_color(theme.fg0)
-            .font_family("IBM Plex Sans JP") // UI = IBM Plex Sans JP（bin で bundle 済み）
+            .font_family(ui::ui_font(cx)) // UI の書体（既定 IBM Plex Sans JP・bin で bundle 済み・設定 `ui_font_family`）
             .text_size(px(12.5))
             .child(self.render_titlebar(cx))
             .child(if self.chat_mode() {
@@ -2305,6 +2520,10 @@ impl Render for Workspace {
             .children(self.render_hover(cx))
             .children(self.render_goto_line(cx))
             .children(self.render_rename_input(cx))
+            .children(self.render_terminal_rename(cx))
+            .children(self.render_statusbar_menu(cx))
+            .children(self.render_task_details(cx))
+            .children(self.render_ssh_register(cx))
             .children(self.render_inline_edit(cx))
             .children(self.render_ssh_input(cx))
             .children(self.render_askpass(window, cx))
@@ -2312,6 +2531,10 @@ impl Render for Workspace {
             .children(self.render_shortcut_sheet(cx))
             .children(self.render_about_modal(cx))
             .children(self.render_usage_popover(cx))
+            .children(self.render_ports(cx))
+            .children(self.render_inbox(cx))
+            .children(self.render_resources(cx))
+            .children(self.render_cleanup(cx))
             .children(self.render_usage_stats(cx))
             .children(self.render_new_task_dialog(cx))
             .children(self.render_hunk_menu(cx))
@@ -2339,7 +2562,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Render 中の Host trait 呼び出しを local / remote の両方で検出する wrapper。
-    struct RenderAuditHost {
+    /// 手元のファイルを「接続先」として見せる用途で、ほかの module のテストも使う。
+    pub(super) struct RenderAuditHost {
         inner: Arc<dyn Host>,
         remote: bool,
         armed: AtomicBool,
@@ -2347,7 +2571,7 @@ mod tests {
     }
 
     impl RenderAuditHost {
-        fn new(remote: bool) -> Self {
+        pub(super) fn new(remote: bool) -> Self {
             Self {
                 inner: host::LocalHost::shared(),
                 remote,
@@ -3324,10 +3548,12 @@ mod tests {
                     RestoredTabs {
                         files: vec![a1.clone(), a2.clone(), a3.clone()],
                         active: 0,
+                        pinned: Vec::new(),
                     },
                     RestoredTabs {
                         files: vec![b1.clone(), b2.clone()],
                         active: 0,
+                        pinned: Vec::new(),
                     },
                 ],
                 window,
@@ -3405,6 +3631,7 @@ mod tests {
                 &[RestoredTabs {
                     files: files.clone(),
                     active: 0,
+                    pinned: Vec::new(),
                 }],
                 window,
                 cx,
@@ -3470,6 +3697,7 @@ mod tests {
                 &[RestoredTabs {
                     files: vec![a1.clone(), a2.clone(), a3.clone()],
                     active: 0,
+                    pinned: Vec::new(),
                 }],
                 window,
                 cx,
@@ -4664,6 +4892,16 @@ mod tests {
             workspace.toggle_stage_pin(space.clone(), cx);
             assert_eq!(workspace.chrome.stage_columns, 2, "ピンで 2 列以上に広がる");
             assert_eq!(workspace.stage_cards().len(), 1, "ピン + 選択中が同じ Task なら 1 枚");
+            // ピンと列数は窓セッションに残り、復元で戻る（O21）。
+            let saved = workspace.persisted_state();
+            assert_eq!(saved.stage_pinned, vec![space.as_str().to_string()]);
+            assert_eq!(saved.stage_columns, 2);
+            let payload = serde_json::to_string(&saved).unwrap();
+            workspace.chrome.stage_pinned.clear();
+            workspace.chrome.stage_columns = 1;
+            workspace.restore_work_layout(&payload, cx);
+            assert_eq!(workspace.chrome.stage_pinned, vec![space.clone()], "再起動後もピンが残る");
+            assert_eq!(workspace.chrome.stage_columns, 2);
             workspace.chrome.stage_columns = 3;
             workspace.chrome.stage_width = 800.;
             assert!(workspace.stage_cards().len() <= 1, "幅が足りなければ列数を落とす");
@@ -4865,6 +5103,7 @@ mod tests {
             insert_text: label.to_string(),
             detail: None,
             kind: SharedString::from("fn"),
+            caret: None,
         };
         let items = vec![item("push"), item("push_str"), item("Pop"), item("insert")];
         assert_eq!(filter_completion_indices(&items, "pu"), vec![0, 1]);

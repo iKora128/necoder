@@ -7,13 +7,18 @@
 //! - 通常キーは `on_key_down`、IME は `EntityInputHandler`。前編集は保持し、確定文字だけ PTY へ送る。
 //! - 公開 `alacritty_terminal` API と GPUI API を使った necoder 固有の実装。Zed の terminal code は取り込まない。
 
+mod appearance;
 mod dock;
 mod element;
 mod keys;
 mod mouse;
 mod pty_guard;
 mod search;
-pub use dock::{TerminalDock, TerminalDockEvent, TerminalLaunch};
+pub use appearance::{TerminalAppearance, TerminalColors, TerminalCursor};
+pub use dock::{
+    QuickCommand, QuickCommands, TerminalDock, TerminalDockEvent, TerminalLaunch, TerminalShell,
+    MAX_PANES,
+};
 
 /// 端末のアクション。keymap の `Terminal` コンテキストから引く（`keymap_core` の既定の末尾）。
 /// mac は ⌘、Windows / Linux は Ctrl+Shift（⌃ + 文字はシェルへ届ける）。
@@ -31,6 +36,12 @@ pub mod actions {
             Clear,
             /// 端末内を検索。
             Find,
+            /// ドックに新しい端末のタブを開く（O24・C18）。
+            NewTab,
+            /// いまの端末を閉じる（分割していなければタブごと・前面で動いていれば確かめる・O24・C18）。
+            CloseTab,
+            /// いまのタブを横に分割して新しい端末を開く（O24・C02）。
+            Split,
         ]
     );
 }
@@ -197,10 +208,6 @@ fn detect_links(cells: &[RenderCell], hyperlinks: &[String]) -> Vec<TerminalLink
     links
 }
 
-/// ターミナルのセル寸法。フォントメトリクスと矛盾しないよう prepaint で決める。
-const FONT_SIZE: f32 = 12.5;
-const LINE_HEIGHT: f32 = 17.0;
-
 /// 行列サイズ（alacritty の [`Dimensions`] を満たす）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct TerminalSize {
@@ -258,11 +265,13 @@ fn sanitize_title(title: &str) -> String {
         .to_string()
 }
 
-/// 端末の設定。scrollback 1 万行・kitty keyboard を受け付ける・OSC 52 は書き込み（コピー）だけ
-/// 許す（読み出しはクリップボードの中身をアプリへ渡すことになるので既定で拒否）。
-fn terminal_config() -> Config {
+/// 端末の設定。scrollback とカーソルの既定は見た目の設定（O25・既定 1 万行・ブロック）から。
+/// kitty keyboard を受け付ける・OSC 52 は書き込み（コピー）だけ許す（読み出しはクリップボードの
+/// 中身をアプリへ渡すことになるので既定で拒否）。
+fn terminal_config(appearance: &TerminalAppearance) -> Config {
     Config {
-        scrolling_history: 10_000,
+        scrolling_history: appearance.scrollback,
+        default_cursor_style: appearance.cursor_style(),
         kitty_keyboard: true,
         osc52: Osc52::OnlyCopy,
         ..Config::default()
@@ -423,6 +432,9 @@ pub struct TerminalView {
     reported_focus: Option<bool>,
     /// フォーカスと窓のアクティブの出入りの購読（最初の描画で張る）。
     focus_subscriptions: Vec<gpui::Subscription>,
+    /// 見た目の設定（O25・文字の大きさ・フォント・scrollback・カーソル）。global が変わったら入れ直す。
+    appearance: TerminalAppearance,
+    _appearance_observer: gpui::Subscription,
     /// ドラッグ選択中の最新ポインタ位置とフレーム座標。ビュー外へ引っ張った時の
     /// 自動スクロール tick が選択の引き直しに使う（up で消える）。
     drag_frame: Option<DragFrame>,
@@ -433,6 +445,8 @@ pub struct TerminalView {
     exited: bool,
     /// アプリが付けたタイトル（OSC 0 / 2）。
     title: Option<String>,
+    /// 人が付けた名前（タブのダブルクリック・O24）。あればアプリのタイトルより先に出す。
+    custom_title: Option<String>,
     /// ベルが鳴った（次の描画で、窓が後ろにあれば知らせる）。
     bell_pending: bool,
     /// 前面でシェル以外のプロセスが動いているかを調べる口（閉じる前の確認・O4）。
@@ -506,8 +520,9 @@ impl TerminalView {
             columns: 80,
             lines: 24,
         };
+        let appearance = TerminalAppearance::current(cx);
         let term = Arc::new(FairMutex::new(Term::new(
-            terminal_config(),
+            terminal_config(&appearance),
             &size,
             listener.clone(),
         )));
@@ -602,11 +617,14 @@ impl TerminalView {
             grid_frame: None,
             reported_focus: None,
             focus_subscriptions: Vec::new(),
+            appearance,
+            _appearance_observer: cx.observe_global::<TerminalAppearance>(Self::apply_appearance),
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited,
             title: None,
+            custom_title: None,
             bell_pending: false,
             #[cfg(unix)]
             foreground,
@@ -629,8 +647,9 @@ impl TerminalView {
             columns: 80,
             lines: 24,
         };
+        let appearance = TerminalAppearance::current(cx);
         let term = Arc::new(FairMutex::new(Term::new(
-            terminal_config(),
+            terminal_config(&appearance),
             &size,
             listener,
         )));
@@ -657,11 +676,14 @@ impl TerminalView {
             grid_frame: None,
             reported_focus: None,
             focus_subscriptions: Vec::new(),
+            appearance,
+            _appearance_observer: cx.observe_global::<TerminalAppearance>(Self::apply_appearance),
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
             exited: false,
             title: None,
+            custom_title: None,
             bell_pending: false,
             #[cfg(unix)]
             foreground: None,
@@ -705,6 +727,28 @@ impl TerminalView {
     pub fn set_accent(&mut self, accent: Hsla, cx: &mut Context<Self>) {
         self.accent = accent;
         cx.notify();
+    }
+
+    /// 見た目の設定が変わった（O25）: 文字の大きさとフォントは次の描画から（行列は prepaint で
+    /// 測り直して PTY へ伝わる）。scrollback とカーソルの既定は term に入れ直す（遡れる行を減らした
+    /// 時は古い方から捨てる）。
+    fn apply_appearance(&mut self, cx: &mut Context<Self>) {
+        let next = TerminalAppearance::current(cx);
+        if next == self.appearance {
+            return;
+        }
+        if next.scrollback != self.appearance.scrollback || next.cursor != self.appearance.cursor {
+            self.term.lock().set_options(terminal_config(&next));
+        }
+        self.appearance = next;
+        cx.notify();
+    }
+
+    /// いまの見た目（テスト用）。
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn debug_appearance(&self) -> &TerminalAppearance {
+        &self.appearance
     }
 
     /// 端末内検索のバーが開いているか。
@@ -842,6 +886,28 @@ impl TerminalView {
         self.title.as_deref()
     }
 
+    /// 人が付けた名前（無ければ `None`）。
+    pub fn custom_title(&self) -> Option<&str> {
+        self.custom_title.as_deref()
+    }
+
+    /// タブに出す名前: 人が付けた名前 → アプリのタイトル（OSC 0 / 2）の順。
+    pub fn display_title(&self) -> Option<&str> {
+        self.custom_title.as_deref().or(self.title.as_deref())
+    }
+
+    /// 人が付けた名前を置く（空・空白だけ = 外して、アプリのタイトルに戻す・O24）。
+    pub fn set_custom_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        let title = title
+            .map(|title| sanitize_title(&title))
+            .filter(|title| !title.is_empty());
+        if self.custom_title != title {
+            self.custom_title = title;
+            cx.emit(TerminalEvent::TitleChanged);
+            cx.notify();
+        }
+    }
+
     fn set_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
         let title = title
             .map(|title| sanitize_title(&title))
@@ -862,11 +928,12 @@ impl TerminalView {
         if let Some(rgb) = overridden {
             return rgb;
         }
+        let colors = &self.appearance.colors;
         let color = match index {
-            0..=255 => indexed_to_hsla(index as u8),
-            257 => self.theme.bg1,
+            0..=255 => indexed_to_hsla(index as u8, colors),
+            257 => background_hsla(&self.theme, colors),
             258 => self.theme.fg1,
-            _ => self.theme.fg0,
+            _ => foreground_hsla(&self.theme, colors),
         };
         let rgba = Rgba::from(color);
         let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
@@ -1093,8 +1160,9 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let delta_y = f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y);
-        let (lines, remainder) = wheel_lines(self.scroll_remainder, delta_y, LINE_HEIGHT);
+        let line_height = self.appearance.line_height();
+        let delta_y = f32::from(event.delta.pixel_delta(px(line_height)).y);
+        let (lines, remainder) = wheel_lines(self.scroll_remainder, delta_y, line_height);
         self.scroll_remainder = remainder;
         if lines == 0 {
             return;
@@ -1792,15 +1860,22 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // IME 候補ウィンドウの位置 = カーソルセルの位置（セル幅は概算で十分）。
+        // IME 候補ウィンドウの位置 = カーソルセルの位置。描いたフレームがあればその実寸、
+        // まだなら文字の大きさからの概算。
         let cursor = self.content.cursor?;
-        let cell_width = px(FONT_SIZE * 0.6);
+        let (cell_width, line_height) = match self.grid_frame {
+            Some(frame) => (frame.cell_width, frame.line_height),
+            None => (
+                px(self.appearance.font_size * 0.6),
+                px(self.appearance.line_height()),
+            ),
+        };
         let origin = element_bounds.origin
             + point(
                 cell_width * (cursor.column.0 as f32),
-                px(LINE_HEIGHT) * (cursor.line.0 as f32),
+                line_height * (cursor.line.0 as f32),
             );
-        Some(Bounds::new(origin, size(cell_width, px(LINE_HEIGHT))))
+        Some(Bounds::new(origin, size(cell_width, line_height)))
     }
 
     fn character_index_for_point(
@@ -1922,7 +1997,7 @@ impl TerminalView {
                 gpui::hsla(0., 0., 0., 0.4),
             )
             .blur_radius(px(16.))])
-            .font_family("IBM Plex Sans JP")
+            .font_family(ui::ui_font(cx))
             .on_mouse_down_out(cx.listener(|this, _, _window, cx| {
                 this.context_menu = None;
                 cx.notify();
@@ -2090,11 +2165,11 @@ impl Render for TerminalView {
             )
             .relative()
             .size_full()
-            .bg(self.theme.bg1)
+            .bg(background_hsla(&self.theme, &self.appearance.colors))
             // 端末は等幅必須。UI フォント（IBM Plex Sans JP）を継承すると 1 文字ずつ間延びして
-            // 崩れるので、エディタと同じコードフォント（等幅）を明示する。要素は text_style().font()
-            // を読むのでコンテナで指定すれば伝播する。
-            .font_family("Guguru Sans Code")
+            // 崩れるので、コードフォント（既定はエディタと同じ・設定で変えられる・O25）を明示する。
+            // 要素は text_style().font() を読むのでコンテナで指定すれば伝播する。
+            .font_family(self.appearance.font_family.clone())
             .child(element::TerminalElement {
                 terminal: cx.entity(),
             })
@@ -2148,7 +2223,29 @@ fn rgb_hsla(red: u8, green: u8, blue: u8) -> Hsla {
     .into()
 }
 
-fn named_to_hsla(named: NamedColor, theme: &Theme) -> Hsla {
+/// パレットの 0〜15（取り込んだ配色があればそちら）。
+fn palette_hsla(index: usize, colors: &TerminalColors) -> Hsla {
+    let (red, green, blue) = colors.palette[index].unwrap_or(ANSI16[index]);
+    rgb_hsla(red, green, blue)
+}
+
+/// 既定の文字色（取り込んだ配色があればそちら・無ければテーマ）。
+fn foreground_hsla(theme: &Theme, colors: &TerminalColors) -> Hsla {
+    colors
+        .foreground
+        .map(|(red, green, blue)| rgb_hsla(red, green, blue))
+        .unwrap_or(theme.fg0)
+}
+
+/// 面の色（取り込んだ配色があればそちら・無ければテーマ）。
+pub(crate) fn background_hsla(theme: &Theme, colors: &TerminalColors) -> Hsla {
+    colors
+        .background
+        .map(|(red, green, blue)| rgb_hsla(red, green, blue))
+        .unwrap_or(theme.bg1)
+}
+
+fn named_to_hsla(named: NamedColor, theme: &Theme, colors: &TerminalColors) -> Hsla {
     let index = match named {
         NamedColor::Black => 0,
         NamedColor::Red => 1,
@@ -2166,21 +2263,17 @@ fn named_to_hsla(named: NamedColor, theme: &Theme) -> Hsla {
         NamedColor::BrightMagenta => 13,
         NamedColor::BrightCyan => 14,
         NamedColor::BrightWhite => 15,
-        NamedColor::Foreground => return theme.fg0,
-        NamedColor::Background => return theme.bg1,
+        NamedColor::Foreground => return foreground_hsla(theme, colors),
+        NamedColor::Background => return background_hsla(theme, colors),
         NamedColor::Cursor => return theme.fg0,
-        _ => return theme.fg0,
+        _ => return foreground_hsla(theme, colors),
     };
-    let (red, green, blue) = ANSI16[index];
-    rgb_hsla(red, green, blue)
+    palette_hsla(index, colors)
 }
 
-fn indexed_to_hsla(index: u8) -> Hsla {
+fn indexed_to_hsla(index: u8, colors: &TerminalColors) -> Hsla {
     match index {
-        0..=15 => {
-            let (red, green, blue) = ANSI16[index as usize];
-            rgb_hsla(red, green, blue)
-        }
+        0..=15 => palette_hsla(index as usize, colors),
         16..=231 => {
             // 6×6×6 カラーキューブ（各成分 0 or c*40+55）。
             let value = index - 16;
@@ -2205,11 +2298,11 @@ fn indexed_to_hsla(index: u8) -> Hsla {
     }
 }
 
-fn ansi_to_hsla(color: AnsiColor, theme: &Theme) -> Hsla {
+fn ansi_to_hsla(color: AnsiColor, theme: &Theme, colors: &TerminalColors) -> Hsla {
     match color {
-        AnsiColor::Named(named) => named_to_hsla(named, theme),
+        AnsiColor::Named(named) => named_to_hsla(named, theme, colors),
         AnsiColor::Spec(rgb) => rgb_hsla(rgb.r, rgb.g, rgb.b),
-        AnsiColor::Indexed(index) => indexed_to_hsla(index),
+        AnsiColor::Indexed(index) => indexed_to_hsla(index, colors),
     }
 }
 
@@ -2220,6 +2313,58 @@ fn is_default_background(color: AnsiColor) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn a_custom_name_wins_over_the_shell_title(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_title(Some("vim".to_string()), cx);
+            assert_eq!(terminal.display_title(), Some("vim"));
+            terminal.set_custom_title(Some("editor".to_string()), cx);
+            assert_eq!(terminal.display_title(), Some("editor"));
+            assert_eq!(terminal.title(), Some("vim"), "シェルのタイトルは残る");
+            terminal.set_custom_title(Some("   ".to_string()), cx);
+            assert_eq!(terminal.display_title(), Some("vim"), "空は外す");
+        });
+    }
+
+    #[test]
+    fn an_imported_scheme_replaces_the_palette_and_the_surface() {
+        let theme = Theme::dark();
+        let defaults = TerminalColors::default();
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Background), &theme, &defaults),
+            theme.bg1,
+            "既定はアプリのテーマ"
+        );
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Red), &theme, &defaults),
+            rgb_hsla(205, 49, 49)
+        );
+        let mut colors = TerminalColors::default();
+        colors.palette[1] = Some((0xcc, 0x66, 0x66));
+        colors.background = Some((0x1d, 0x1f, 0x21));
+        colors.foreground = Some((0xc5, 0xc8, 0xc6));
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Red), &theme, &colors),
+            rgb_hsla(0xcc, 0x66, 0x66)
+        );
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Indexed(1), &theme, &colors),
+            rgb_hsla(0xcc, 0x66, 0x66),
+            "256 色の 0〜15 も同じ"
+        );
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Green), &theme, &colors),
+            rgb_hsla(13, 188, 121),
+            "書いていない色は既定"
+        );
+        assert_eq!(background_hsla(&theme, &colors), rgb_hsla(0x1d, 0x1f, 0x21));
+        assert_eq!(
+            ansi_to_hsla(AnsiColor::Named(NamedColor::Foreground), &theme, &colors),
+            rgb_hsla(0xc5, 0xc8, 0xc6)
+        );
+    }
 
     /// 1 行ぶんの表示セルを組む（列は 0 から連番・全角は WIDE_CHAR_SPACER を挟む）。
     fn row_cells(line: i32, text: &str) -> Vec<RenderCell> {
@@ -2411,13 +2556,14 @@ mod tests {
     #[test]
     fn wheel_lines_accumulates_fractions() {
         // 1 行未満は持ち越し、合計が 1 行に達した時だけ行が進む（トラックパッドの細かい増分）。
-        let (lines, carry) = wheel_lines(0.0, LINE_HEIGHT * 0.6, LINE_HEIGHT);
+        let line_height = TerminalAppearance::default().line_height();
+        let (lines, carry) = wheel_lines(0.0, line_height * 0.6, line_height);
         assert_eq!(lines, 0);
-        let (lines, carry) = wheel_lines(carry, LINE_HEIGHT * 0.6, LINE_HEIGHT);
+        let (lines, carry) = wheel_lines(carry, line_height * 0.6, line_height);
         assert_eq!(lines, 1);
         assert!(carry.abs() < 1.0);
         // 下方向（負の増分）も対称に畳まれる。
-        let (lines, _) = wheel_lines(0.0, -LINE_HEIGHT * 2.5, LINE_HEIGHT);
+        let (lines, _) = wheel_lines(0.0, -line_height * 2.5, line_height);
         assert_eq!(lines, -2);
     }
 
@@ -2525,6 +2671,46 @@ mod action_tests {
             quote_path_for_shell(r"C:\Program Files\x", true),
             r#""C:\Program Files\x""#
         );
+    }
+
+    /// O25: 見た目の設定を変えると、開いている端末がその場で従う（scrollback を減らせば古い行を
+    /// 捨て、カーソルの既定が替わる。アプリが DECSCUSR で指定した形はそちらが勝つ）。
+    #[gpui::test]
+    fn open_terminals_follow_the_appearance_setting(cx: &mut gpui::TestAppContext) {
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::new_test(Theme::dark(), cx));
+        terminal.update_in(cx, |terminal, _window, _cx| {
+            assert_eq!(terminal.debug_appearance(), &TerminalAppearance::default());
+            let output: String = (0..300).map(|index| format!("out {index}\r\n")).collect();
+            feed(terminal, &output);
+            assert!(terminal.term.lock().grid().history_size() > 100);
+            assert_eq!(
+                terminal.term.lock().cursor_style().shape,
+                CursorShape::Block
+            );
+        });
+        cx.update(|_window, cx| {
+            cx.set_global(TerminalAppearance::new(16.0, "Menlo", 100, "bar"));
+        });
+        cx.run_until_parked();
+        terminal.update_in(cx, |terminal, _window, _cx| {
+            let appearance = terminal.debug_appearance();
+            assert_eq!(appearance.font_size, 16.0);
+            assert_eq!(appearance.font_family.as_ref(), "Menlo");
+            let term = terminal.term.lock();
+            assert!(
+                term.grid().history_size() <= 100,
+                "減らした分は古い方から捨てる"
+            );
+            assert_eq!(term.cursor_style().shape, CursorShape::Beam);
+        });
+        terminal.update_in(cx, |terminal, _window, _cx| {
+            // アプリの指定（DECSCUSR 4 = 下線）は既定より勝つ。
+            feed(terminal, "\x1b[4 q");
+            assert_eq!(
+                terminal.term.lock().cursor_style().shape,
+                CursorShape::Underline
+            );
+        });
     }
 
     #[gpui::test]

@@ -11,18 +11,23 @@
 //! 監視は poll（mtime 差分）。真の event-driven（FSEvents/notify）へは後で差し替え可能だが、
 //! 2 回の stat / 1.2s は事実上 0% で再描画も起こさない（変化時のみ）。
 
+use editor_view::EditorView;
 use gpui::{
-    div, prelude::*, px, svg, App, BorrowAppContext, Context, Div, EventEmitter, FontWeight,
-    Global, Hsla, IntoElement, MouseButton, Render, SharedString, Stateful, Window,
+    div, prelude::*, px, svg, App, BorrowAppContext, Context, Div, Entity, EventEmitter,
+    FontWeight, Global, Hsla, IntoElement, MouseButton, Render, SharedString, Stateful, Window,
 };
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use theme_core::Theme;
+mod agent_launch;
 mod remote;
+
+pub use agent_launch::set_agent_server;
 
 pub use settings_core::{
     persist_agent_config_default, persist_mcp_enabled, persist_user_value, user_settings_path,
-    Density, McpServerSetting, Settings, SettingsStore, UnreadableSettings,
+    Density, McpServerSetting, QuickCommandSetting, Settings, SettingsStore, UnreadableSettings,
 };
 
 /// poll 間隔。手編集・CLI の反映がこの遅延内に起きる（in-proc は即時なので影響しない）。
@@ -68,6 +73,64 @@ pub fn init(user_path: Option<PathBuf>, project_dir: Option<PathBuf>, cx: &mut A
     cx.observe_global::<SettingsGlobal>(apply_reduce_motion)
         .detach();
     spawn_watcher(user_path, project_dir, cx);
+}
+
+/// 表示言語の「OS に合わせる」（O27）。設定画面ではこの値を選ぶと `locale` を消す（`null` = OS 追従）。
+const LOCALE_FOLLOW_OS: &str = "auto";
+
+/// 表示言語（`locale`）の変更をその場で効かせる（O27）。起動時の言語を当てた後に 1 回呼ぶ。
+/// `None` に戻したら OS の言語を読み直す。描画のたびに `t!` で引く文字は窓を描き直せば変わる。
+/// 起動時に作る macOS のメニューバーは次の起動から。
+pub fn follow_locale(cx: &mut App) {
+    follow_locale_with(cx, |locale| match locale {
+        Some(code) => i18n::set_locale(code),
+        None => i18n::init_from_os_locale(),
+    });
+}
+
+/// [`follow_locale`] の本体。言語が変わった時だけ `apply` を呼んで窓を描き直す。
+/// テストは `apply` を差し替える（i18n の言語はプロセス全体で 1 つなので、並んで走る
+/// 他のテストの翻訳を途中で変えないため）。
+fn follow_locale_with(cx: &mut App, apply: impl Fn(Option<&str>) + 'static) {
+    let mut applied = get(cx).locale;
+    cx.observe_global::<SettingsGlobal>(move |cx| {
+        let locale = get(cx).locale;
+        if locale == applied {
+            return;
+        }
+        apply(locale.as_deref());
+        applied = locale;
+        cx.refresh_windows();
+    })
+    .detach();
+}
+
+/// ユーザーの keymap.json（user の settings.json と同じフォルダ）。キー割り当ての画面（O27）が読み書き
+/// する。設定を初期化していなければ `None`（テストは一時フォルダの settings.json の隣になる）。
+pub fn user_keymap_path(cx: &App) -> Option<PathBuf> {
+    let global = cx.try_global::<SettingsGlobal>()?;
+    Some(global.user_path.as_ref()?.parent()?.join("keymap.json"))
+}
+
+/// 表示名（`AgentKind::label`）のエージェントを使うか（`disabled_agents`・O16）。カタログに無い
+/// 名前は使う扱い（外す根拠が無い）。
+pub fn agent_label_enabled(settings: &Settings, label: &str) -> bool {
+    acp_client::AgentKind::by_label(label).is_none_or(|agent| settings.agent_enabled(agent.id))
+}
+
+/// `agent_id` を使う / 使わないを入れ替えた後の `disabled_agents`（並びは保つ）。
+pub fn toggled_disabled_agents(disabled: &[String], agent_id: &str) -> Vec<String> {
+    if disabled.iter().any(|id| id == agent_id) {
+        disabled
+            .iter()
+            .filter(|id| *id != agent_id)
+            .cloned()
+            .collect()
+    } else {
+        let mut next = disabled.to_vec();
+        next.push(agent_id.to_string());
+        next
+    }
 }
 
 /// 現在の解決済み設定をクローンで取る。ビューは `cx.observe_global::<SettingsGlobal>` で変化に反応する。
@@ -122,6 +185,51 @@ pub fn set_agent_config_default(
     write_user_file(cx, |path| {
         persist_agent_config_default(path, agent_id, config_id, value_id)
     })
+}
+
+/// ピルの記憶（`agent_config_defaults.<agent_id>.<config_id>`）を 1 つ忘れる（**即適用 + 永続化**・O16）。
+/// 次の新しいスレッドは、権限の既定（`agent_permission_default`）かエージェントの既定から始まる。
+pub fn forget_agent_config_default(
+    cx: &mut App,
+    agent_id: &str,
+    config_id: &str,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::forget_agent_config_default(path, agent_id, config_id)
+    })
+}
+
+/// 権限モードの既定（`"default"` / `"bypass"`）を選ぶ。全エージェントのピルの記憶（mode）も消して
+/// 一括で揃える（**即適用 + 永続化**・O16）。
+pub fn set_permission_default(cx: &mut App, value: &str) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_permission_default(path, value)
+    })
+}
+
+/// 権限の既定が「聞かずに進める」（Yolo・O16）か。ストリームのイベントごとに読むので、設定全体を
+/// 写さずに見る。
+pub fn bypass_permissions_by_default(cx: &App) -> bool {
+    cx.try_global::<SettingsGlobal>()
+        .is_some_and(|global| global.settings().agent_permission_default == "bypass")
+}
+
+/// `agent_servers.<agent_id>.env.<var>` を更新して**即適用 + 永続化**する（`None` = 消す・O14）。
+pub fn set_agent_server_env(
+    cx: &mut App,
+    agent_id: &str,
+    var: &str,
+    value: Option<&str>,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_agent_server_env(path, agent_id, var, value)
+    })
+}
+
+/// アカウントのフォルダを指してログインを流すコマンド（POSIX シェル向け・パスは単引用符で囲む）。
+pub(crate) fn account_login_command(var: &str, directory: &Path, login: &str) -> String {
+    let quoted = directory.to_string_lossy().replace('\'', "'\\''");
+    format!("{var}='{quoted}' {login}")
 }
 
 /// `<section>.<key>`（`chat.directory` など 1 段の入れ子）を更新して**即適用 + 永続化**する。
@@ -261,9 +369,16 @@ pub enum SettingsViewEvent {
         key: &'static str,
         value: String,
     },
-    /// 設定を保存できなかった（settings.json を読めない等）。文は [`save_failure_message`]。
-    /// トーストは shell が出す。
+    /// 設定を保存できなかった（settings.json を読めない等）・変えられなかった（既定のエージェントは
+    /// 外せない等）。文は [`save_failure_message`] か、断った理由。トーストは shell が出す。
     SaveFailed(SharedString),
+    /// 書体を選ぶ（O27）。`key` は `ui_font_family` / `code_font_family` / `terminal_font_family`。
+    /// 入っている書体の一覧と絞り込みは shell のピッカーが担う（窓が要る）。
+    PickFont {
+        key: &'static str,
+    },
+    /// 手元のターミナルのシェルを選ぶ（O25）。入っているシェルの一覧は shell のピッカーが担う。
+    PickShell,
 }
 
 /// 設定ホームのページ（＝左ナビの 1 行。定義順がそのまま並び順・UI-SPEC §12）。
@@ -299,6 +414,31 @@ impl SettingsPage {
             SettingsPage::Preferences => "settings.prefs_heading",
         }
     }
+
+    /// ページ本文の副題のキー（検索でページごと当てる時に見出しと一緒に読む・O27）。
+    fn sub_key(self) -> &'static str {
+        match self {
+            SettingsPage::Agents => "settings.agents_sub",
+            SettingsPage::Mcp => "settings.mcp_sub",
+            SettingsPage::Appearance => "settings.appearance_sub",
+            SettingsPage::Remote => "settings.remote_sub",
+            SettingsPage::Preferences => "settings.prefs_sub",
+        }
+    }
+
+    /// 検索で行ごとに当てるページか。行（ラベル + 副題 + コントロール）の積み重ねでできている
+    /// ページだけ。一覧・QR・カードでできているページは、ページ名と副題で当てて「開く」だけ出す。
+    fn searches_rows(self) -> bool {
+        matches!(self, SettingsPage::Appearance | SettingsPage::Preferences)
+    }
+}
+
+/// 設定の検索（O27）: 語を空白で区切り、**全部の語**がどれかの `haystacks` に含まれれば一致。
+/// 大文字小文字は無視する（`Auto save` でも `auto` でも当たる）。
+fn search_matches(query: &str, haystacks: &[&str]) -> bool {
+    let haystack = haystacks.join("\n").to_lowercase();
+    let mut words = query.split_whitespace().peekable();
+    words.peek().is_some() && words.all(|word| haystack.contains(&word.to_lowercase()))
 }
 
 /// テーマ保存ディレクトリ（user settings.json と同じ設定フォルダの `themes/`）。
@@ -332,6 +472,11 @@ pub struct SettingsView {
     mcp_filter_source: Option<acp_client::mcp::McpSource>,
     /// MCP ページの絞り込み: 有効なものだけ表示する。
     mcp_filter_enabled_only: bool,
+    /// エージェントごとのアカウントのフォルダ名（`acp_client::AGENTS` と同じ並び・O14）。
+    /// 描画ごとに fs を読まないよう、開き直すたび / 作るたびに [`Self::refresh_lists`] で読む。
+    accounts: Vec<Vec<String>>,
+    /// 起動の上書きを編んでいるダイアログ（O16・`agent_launch`）。
+    launch_editor: Option<agent_launch::LaunchEditor>,
     /// ターミナル用 `ne` シム（cli_shim crate）の設置状態。`Some(実体パス)` = 設置済み。
     cli_shim_target: Option<PathBuf>,
     /// `ne` シムの設置/削除を実行中（連打防止・「実行中…」表示）。
@@ -352,6 +497,13 @@ pub struct SettingsView {
     /// 直近の設置の失敗。行の下に出す。
     skills_error: Option<SharedString>,
     skills_generation: u64,
+    /// 設定の検索欄（O27）。打つと右の面が全ページの一致した行になる。
+    search: Entity<EditorView>,
+    /// 検索語の写し（空白だけ = 検索していない＝普段のページ表示）。
+    search_query: String,
+    /// 検索中の描画で一致した行を数える。ページごとに 0 へ戻し、0 件のページは出さない。
+    search_hits: Cell<usize>,
+    _search_subscription: gpui::Subscription,
     #[cfg(feature = "remote-preview")]
     remote_preview_only: bool,
 }
@@ -420,6 +572,14 @@ fn load_skills(project: Option<&Path>) -> Option<SkillsSnapshot> {
 
 impl SettingsView {
     pub fn new(theme: Theme, accent: Hsla, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| EditorView::plain(theme.clone(), accent, true, cx));
+        let search_subscription = cx.observe(&search, |view, search, cx| {
+            let query = search.read(cx).plain_text();
+            if view.search_query != query {
+                view.search_query = query;
+                cx.notify();
+            }
+        });
         let mut view = Self {
             theme,
             accent,
@@ -434,6 +594,8 @@ impl SettingsView {
             mcp_servers: Vec::new(),
             mcp_filter_source: None,
             mcp_filter_enabled_only: false,
+            accounts: Vec::new(),
+            launch_editor: None,
             cli_shim_target: None,
             cli_shim_busy: false,
             cli_shim_error: None,
@@ -446,11 +608,51 @@ impl SettingsView {
             skills_busy: false,
             skills_error: None,
             skills_generation: 0,
+            search,
+            search_query: String::new(),
+            search_hits: Cell::new(0),
+            _search_subscription: search_subscription,
             #[cfg(feature = "remote-preview")]
             remote_preview_only: false,
         };
         view.refresh_availability(cx);
         view
+    }
+
+    /// 検索しているか（検索語が空白以外を含む）。
+    fn searching(&self) -> bool {
+        !self.search_query.trim().is_empty()
+    }
+
+    /// 検索中なら、この行が検索語に当たるかを見て、当たれば数える。検索していなければ常に出す。
+    /// `keywords` はラベル・副題に加えて当てる語（settings.json のキー・選択肢の名前）。
+    fn search_admits(&self, keywords: &[&str], label: &str, sub: Option<&str>) -> bool {
+        if !self.searching() {
+            return true;
+        }
+        let mut haystacks = vec![label, sub.unwrap_or("")];
+        haystacks.extend_from_slice(keywords);
+        let admitted = search_matches(&self.search_query, &haystacks);
+        if admitted {
+            self.search_hits.set(self.search_hits.get() + 1);
+        }
+        admitted
+    }
+
+    /// 検索を消す（✕・ページを選んだ時）。
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |search, cx| search.set_plain_text("", cx));
+        self.search_query.clear();
+        cx.notify();
+    }
+
+    /// 検索結果やナビからページを開く。検索中なら検索を消してそのページへ。
+    fn open_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        if self.searching() {
+            self.clear_search(cx);
+        }
+        self.select_page(page, cx);
     }
 
     pub fn set_visuals(&mut self, theme: Theme, accent: Hsla) {
@@ -462,6 +664,77 @@ impl SettingsView {
     fn refresh_lists(&mut self, cx: &mut Context<Self>) {
         self.themes = theme_core::available_themes(themes_dir().as_deref());
         self.mcp_servers = mcp_servers(cx);
+        self.accounts = acp_client::AGENTS
+            .iter()
+            .map(|agent| {
+                settings_core::accounts_root(agent.id)
+                    .map(|root| settings_core::list_accounts(&root))
+                    .unwrap_or_default()
+            })
+            .collect();
+    }
+
+    // ── アカウント切替（O14）─────────────────────────────────────────────────────
+
+    /// このエージェントで使うアカウントを選ぶ（`None` = 既定のアカウント＝環境変数を消す）。
+    /// 効くのは次に起動するエージェントから（動いているスレッドは今のアカウントのまま）。
+    fn use_account(
+        &mut self,
+        agent_id: &'static str,
+        account: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(var) = settings_core::account_env_var(agent_id) else {
+            return;
+        };
+        let directory = account
+            .and_then(|name| settings_core::accounts_root(agent_id).map(|root| root.join(name)));
+        let value = directory
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let result = set_agent_server_env(cx, agent_id, var, value.as_deref());
+        self.report_save(result, cx);
+        cx.notify();
+    }
+
+    /// ＋ 新しいアカウント: 置き場に空のフォルダを作って選び、公式 CLI のログインをターミナルで流す。
+    fn add_account(&mut self, agent_index: usize, cx: &mut Context<Self>) {
+        let Some(agent) = acp_client::AGENTS.get(agent_index) else {
+            return;
+        };
+        let Some(root) = settings_core::accounts_root(agent.id) else {
+            return;
+        };
+        let existing = self.accounts.get(agent_index).cloned().unwrap_or_default();
+        let name = settings_core::next_account_name(&existing);
+        let directory = root.join(&name);
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(format!(
+                "{}: {error}",
+                directory.display()
+            ))));
+            return;
+        }
+        self.refresh_lists(cx);
+        self.use_account(agent.id, Some(name), cx);
+        self.login_account(agent_index, &directory, cx);
+    }
+
+    /// 選んだアカウントのフォルダで公式 CLI のログインを流す（ターミナル・資格情報は CLI が自分で扱う）。
+    fn login_account(&mut self, agent_index: usize, directory: &Path, cx: &mut Context<Self>) {
+        let Some(agent) = acp_client::AGENTS.get(agent_index) else {
+            return;
+        };
+        let (Some(var), Some(login)) = (
+            settings_core::account_env_var(agent.id),
+            agent.login_command(),
+        ) else {
+            return;
+        };
+        self.watch_agent_progress(agent_index, cx);
+        cx.emit(SettingsViewEvent::RunCommand(account_login_command(
+            var, directory, login,
+        )));
     }
 
     /// 設定ホームを開く / 開き直す時に呼ぶ。一覧はここで即座に読み直し（`themes/` に JSON を足した
@@ -481,13 +754,14 @@ impl SettingsView {
         self.refresh_skills(cx);
         self.availability_generation = self.availability_generation.wrapping_add(1);
         let generation = self.availability_generation;
+        let disabled = get(cx).disabled_agents.clone();
         cx.spawn(async move |view, cx| {
             let agent_states = cx
                 .background_executor()
                 .spawn(async move {
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    let auth_states = acp_client::refresh_agent_auth_states(cwd).await;
+                    let auth_states = acp_client::refresh_agent_auth_states(cwd, &disabled).await;
                     let installed = acp_client::AGENTS
                         .iter()
                         .map(acp_client::AgentKind::cli_installed)
@@ -561,6 +835,46 @@ impl SettingsView {
         );
         self.report_save(result, cx);
         cx.notify();
+    }
+
+    /// エージェントを使う / 使わない（O16）。使うに戻したら、その 1 つもログインを確かめ直す
+    /// （使わない間は確かめていない）。
+    fn toggle_agent_enabled(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        let next = toggled_disabled_agents(&get(cx).disabled_agents, agent_id);
+        let enabling = !next.iter().any(|id| id == agent_id);
+        let result = set_user_value(cx, "disabled_agents", serde_json::json!(next));
+        self.report_save(result, cx);
+        if enabling {
+            self.refresh_availability(cx);
+        }
+        cx.notify();
+    }
+
+    /// カードの右端の「使う」スイッチ。既定のエージェントと Captain は外せない（押すと理由を出す）。
+    fn agent_enabled_switch(
+        &self,
+        index: usize,
+        agent_id: &'static str,
+        enabled: bool,
+        locked: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        self.switch(("agent-enabled", index), enabled)
+            .flex_none()
+            .when(locked, |switch| switch.opacity(0.45).cursor_default())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, _, _window, cx| {
+                    if locked {
+                        cx.emit(SettingsViewEvent::SaveFailed(SharedString::from(i18n::t!(
+                            "settings.agent_disable_locked"
+                        ))));
+                    } else {
+                        view.toggle_agent_enabled(agent_id, cx);
+                    }
+                }),
+            )
+            .into_any_element()
     }
 
     /// Captain の任命 / 解任（FLEET-V2 §5.7）。同じエージェントをもう一度押すと解任（`null`）。
@@ -1118,7 +1432,13 @@ impl SettingsView {
     }
 
     fn set_pref_string(&mut self, key: &'static str, value: &'static str, cx: &mut Context<Self>) {
-        let result = set_user_value(cx, key, serde_json::Value::String(value.to_string()));
+        // 表示言語の「OS に合わせる」は値を消す（`locale: null` = OS 追従・O27）。
+        let json = if key == "locale" && value == LOCALE_FOLLOW_OS {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(value.to_string())
+        };
+        let result = set_user_value(cx, key, json);
         self.report_save(result, cx);
         cx.notify();
     }
@@ -1147,6 +1467,21 @@ impl SettingsView {
     /// 縮まずに右のコントロールを押し出し、**トグルが幅 0 に潰れて押せなくなる**
     /// （2026-09-10 の offscreen 目視で発見）。コントロール側も潰されないよう縮小を止める。
     fn pref_row(&self, label: String, sub: Option<String>, control: gpui::AnyElement) -> Div {
+        self.pref_row_with_keywords(&[], label, sub, control)
+    }
+
+    /// 設定行の本体。検索中（O27）は当たらない行を**レイアウトから外す**（`display: none` は
+    /// 列の gap も取らない）。`keywords` は検索でラベル・副題に加えて当てる語。
+    fn pref_row_with_keywords(
+        &self,
+        keywords: &[&str],
+        label: String,
+        sub: Option<String>,
+        control: gpui::AnyElement,
+    ) -> Div {
+        if !self.search_admits(keywords, &label, sub.as_deref()) {
+            return div().hidden();
+        }
         let theme = self.theme.clone();
         div()
             .flex()
@@ -1191,6 +1526,9 @@ impl SettingsView {
     /// （テーマが 7 種に増えて発生・2026-09-13）。上下に分ければ、コントロールは
     /// 行いっぱいを使って `flex_wrap` で素直に折り返せる。
     fn pref_stack(&self, label: String, sub: Option<String>, control: gpui::AnyElement) -> Div {
+        if !self.search_admits(&[], &label, sub.as_deref()) {
+            return div().hidden();
+        }
         let theme = self.theme.clone();
         div()
             .flex()
@@ -1242,7 +1580,7 @@ impl SettingsView {
                 cx.listener(move |view, _, _window, cx| view.set_pref_bool(key, !value, cx)),
             )
             .into_any_element();
-        self.pref_row(label, sub, control)
+        self.pref_row_with_keywords(&[key], label, sub, control)
     }
 
     fn stepper_button(
@@ -1293,9 +1631,12 @@ impl SettingsView {
         is_int: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        let dec = (value - step).max(min);
-        let inc = (value + step).min(max);
-        let display = format!("{}", value as i64);
+        let (dec, inc) = stepper_targets(value, min, max, step);
+        let display = if value.fract() == 0.0 {
+            format!("{}", value as i64)
+        } else {
+            format!("{value:.1}")
+        };
         let control = div()
             .flex()
             .items_center()
@@ -1310,7 +1651,7 @@ impl SettingsView {
             )
             .child(self.stepper_button(key, (key, 1), "+", inc, is_int, cx))
             .into_any_element();
-        self.pref_row(label, None, control)
+        self.pref_row_with_keywords(&[key], label, None, control)
     }
 
     /// セグメント選択（複数値からひとつ・選択中は accent）。
@@ -1381,7 +1722,62 @@ impl SettingsView {
                     ),
             );
         }
-        self.pref_row(label, sub, segments.into_any_element())
+        // 選択肢の名前でも当てる（「Glass」で通知音の行に着く等）。
+        let keywords: Vec<&str> = std::iter::once(key)
+            .chain(options.iter().map(|(_, display)| display.as_str()))
+            .collect();
+        self.pref_row_with_keywords(&keywords, label, sub, segments.into_any_element())
+    }
+
+    /// 数の選択（`terminal_scrollback` のように値が数の設定・選択中は accent）。見た目はセグメント行と同じ。
+    /// セグメント行は値を文字列で書くので、数の設定はこちらを使う（文字列だと型が合わず読めなくなる）。
+    fn number_choice_row(
+        &self,
+        key: &'static str,
+        label: String,
+        sub: Option<String>,
+        options: &[(i64, String)],
+        current: i64,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme.clone();
+        let accent = self.accent;
+        let mut segments = div()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .items_center()
+            .gap(px(4.));
+        for (idx, (value, display)) in options.iter().enumerate() {
+            let selected = *value == current;
+            let value = *value;
+            segments = segments.child(
+                div()
+                    .id((key, idx))
+                    .px(px(9.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(11.5))
+                    .when(selected, |element| {
+                        element.bg(accent.alpha(0.16)).text_color(accent)
+                    })
+                    .when(!selected, |element| {
+                        element
+                            .text_color(theme.fg2)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                    })
+                    .child(SharedString::from(display.clone()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| view.set_pref_int(key, value, cx)),
+                    ),
+            );
+        }
+        let keywords: Vec<&str> = std::iter::once(key)
+            .chain(options.iter().map(|(_, display)| display.as_str()))
+            .collect();
+        self.pref_row_with_keywords(&keywords, label, sub, segments.into_any_element())
     }
 
     /// 「外観」セクション。テーマをチップの列で並べ、クリックで即適用 + settings.json へ保存する。
@@ -1460,7 +1856,9 @@ impl SettingsView {
                             .text_size(px(11.5))
                             .text_color(theme.fg2)
                             .child(SharedString::from(i18n::t!("settings.appearance_sub"))),
-                    ),
+                    )
+                    // 検索中は結果の面がページ名を出すので、ページの見出しは外す（O27）。
+                    .when(self.searching(), |heading| heading.hidden()),
             )
             // チップは数がテーマの数だけ増える＝右列に収まらない。上下 2 段の器を使う。
             .child(self.pref_stack(
@@ -1468,11 +1866,128 @@ impl SettingsView {
                 Some(i18n::t!("settings.theme_sub")),
                 chips.into_any_element(),
             ))
+            // 表示言語（O27）。言語名はどの言語でも自分の言語で書く（日本語 / English）。
+            .child(self.segmented_row_with(
+                "locale",
+                i18n::t!("settings.locale_label"),
+                Some(i18n::t!("settings.locale_sub")),
+                &[
+                    (LOCALE_FOLLOW_OS, i18n::t!("settings.locale_follow_os")),
+                    ("ja", i18n::t!("settings.locale_ja")),
+                    ("en", i18n::t!("settings.locale_en")),
+                ],
+                settings.locale.as_deref().unwrap_or(LOCALE_FOLLOW_OS),
+                false,
+                cx,
+            ))
+            // 書体（O27）: 入っている書体から選ぶ。空 = 同梱の既定（ターミナルはコードの書体に揃える）。
+            .child(self.font_row(
+                "ui_font_family",
+                i18n::t!("settings.font_ui"),
+                &settings.ui_font_family,
+                i18n::t!("settings.font_default"),
+                cx,
+            ))
+            .child(self.font_row(
+                "code_font_family",
+                i18n::t!("settings.font_code"),
+                &settings.code_font_family,
+                i18n::t!("settings.font_default"),
+                cx,
+            ))
+            .child(self.font_row(
+                "terminal_font_family",
+                i18n::t!("settings.font_terminal"),
+                &settings.terminal_font_family,
+                i18n::t!("settings.font_terminal_default"),
+                cx,
+            ))
+            // 行の詰め具合（O27）: エクスプローラ・ピッカー・検索の結果・Fleet の Task の行の高さ。
+            .child(self.segmented_row_with(
+                "density",
+                i18n::t!("settings.density_label"),
+                Some(i18n::t!("settings.density_sub")),
+                &[
+                    ("compact", i18n::t!("settings.density_compact")),
+                    ("cozy", i18n::t!("settings.density_cozy")),
+                ],
+                match settings.density {
+                    Density::Compact => "compact",
+                    Density::Cozy => "cozy",
+                },
+                false,
+                cx,
+            ))
             .child(self.pref_row(
                 i18n::t!("settings.open_json"),
                 Some(i18n::t!("settings.open_json_sub")),
                 open_json,
             ))
+    }
+
+    /// 書体の 1 行（O27）: 副題に今の書体（空なら既定の言い方）、右に「選ぶ…」（shell のピッカー）と
+    /// 「既定に戻す」（設定がある時だけ）。
+    fn font_row(
+        &self,
+        key: &'static str,
+        label: String,
+        current: &str,
+        default_sub: String,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme.clone();
+        let small_button = |id: String, label: String| {
+            div()
+                .id(SharedString::from(id))
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(label))
+        };
+        let current = current.trim().to_string();
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                small_button(format!("font-pick-{key}"), i18n::t!("settings.font_pick"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, _, _window, cx| {
+                            cx.emit(SettingsViewEvent::PickFont { key })
+                        }),
+                    ),
+            )
+            .when(!current.is_empty(), |row| {
+                row.child(
+                    small_button(format!("font-reset-{key}"), i18n::t!("settings.font_reset"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _, _window, cx| {
+                                let result = set_user_value(
+                                    cx,
+                                    key,
+                                    serde_json::Value::String(String::new()),
+                                );
+                                view.report_save(result, cx);
+                                cx.notify();
+                            }),
+                        ),
+                )
+            })
+            .into_any_element();
+        let sub = if current.is_empty() {
+            default_sub
+        } else {
+            current
+        };
+        self.pref_row_with_keywords(&[key, "font"], label, Some(sub), control)
     }
 
     // ── AI エージェント（ページ「AI エージェント」）──────────────────────────
@@ -1488,14 +2003,18 @@ impl SettingsView {
         let mut rows = div().flex().flex_col().gap(px(6.));
         for (index, agent) in acp_client::AGENTS.iter().enumerate() {
             let is_default = agent.label == default_agent;
+            // 使わないエージェント（O16）は選べる所から外す。ログインの確かめも起こさない。
+            let enabled = settings.agent_enabled(agent.id);
             let cli_installed = self.cli_installed.get(index).copied().unwrap_or(false);
             let auth_state = self
                 .auth_states
                 .get(index)
                 .copied()
                 .unwrap_or(acp_client::AgentAuthState::SignedOut);
-            let available = auth_state == acp_client::AgentAuthState::Available;
-            let (dot_color, status_text) = if self.checking_agents {
+            let available = enabled && auth_state == acp_client::AgentAuthState::Available;
+            let (dot_color, status_text) = if !enabled {
+                (theme.fg2, i18n::t!("settings.agent_disabled"))
+            } else if self.checking_agents {
                 (theme.fg2, i18n::t!("settings.agent_checking"))
             } else {
                 match (cli_installed, auth_state) {
@@ -1621,7 +2140,12 @@ impl SettingsView {
                     } else {
                         theme.border
                     })
-                    .child(logo)
+                    .child(
+                        div()
+                            .flex_none()
+                            .when(!enabled, |logo| logo.opacity(0.4))
+                            .child(logo),
+                    )
                     // 名前の列だけが縮む（右のボタン群をカードの外へ押し出さない）。長い名前は折り返す。
                     .child(
                         div()
@@ -1647,7 +2171,7 @@ impl SettingsView {
                     )
                     .child(captain_control)
                     .child(default_control)
-                    .child(if self.checking_agents || available {
+                    .child(if !enabled || self.checking_agents || available {
                         div().into_any_element()
                     } else if cli_installed {
                         self.agent_action_button(
@@ -1665,7 +2189,7 @@ impl SettingsView {
                         div().into_any_element()
                     })
                     .when(
-                        !self.checking_agents && !cli_installed && !available,
+                        enabled && !self.checking_agents && !cli_installed && !available,
                         |row| {
                             row.child(self.agent_action_button(
                                 ("agent-install", index),
@@ -1674,10 +2198,280 @@ impl SettingsView {
                                 cx,
                             ))
                         },
+                    )
+                    .child(self.agent_enabled_switch(
+                        index,
+                        agent.id,
+                        enabled,
+                        enabled && (is_default || is_captain),
+                        cx,
+                    )),
+            );
+            // アカウント切替（O14・Claude Code / Codex）。ログインは POSIX シェルで流すので Windows は未対応。
+            if let Some(var) = settings_core::account_env_var(agent.id)
+                .filter(|_| enabled && cli_installed && !cfg!(windows))
+            {
+                rows = rows.child(self.account_line(index, agent.id, var, settings, cx));
+            }
+            // 起動の上書き（O16・環境変数 / 自分のコマンド）。初回の案内には出さない。
+            if enabled && show_captain {
+                rows = rows.child(self.launch_line(index, agent.id, agent.label, settings, cx));
+            }
+        }
+        rows
+    }
+
+    /// 権限モードの既定（O16）: 「エージェントの既定」/「聞かずに進める（Yolo）」の 2 択と、ピルで選んで
+    /// 覚えているモードの一覧（押すと忘れる）。選ぶと覚えているモードを全部消して一括で揃える。
+    fn permission_default_rows(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let bypass = settings.agent_permission_default == "bypass";
+        let chip = |id: &'static str, label: String, chosen: bool| {
+            div()
+                .id(id)
+                .flex_none()
+                .whitespace_nowrap()
+                .px(px(8.))
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .text_size(px(11.))
+                .cursor_pointer()
+                .when(chosen, |chip| chip.bg(theme.bg3).text_color(theme.fg0))
+                .when(!chosen, |chip| {
+                    chip.border_1()
+                        .border_color(theme.border)
+                        .text_color(theme.fg1)
+                        .hover(|style| style.text_color(theme.fg0))
+                })
+                .child(SharedString::from(label))
+        };
+        let choices = div()
+            .flex()
+            .gap(px(4.))
+            .child(
+                chip(
+                    "permission-default-agent",
+                    i18n::t!("settings.permission_default_agent"),
+                    !bypass,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _window, cx| {
+                        view.choose_permission_default("default", cx)
+                    }),
+                ),
+            )
+            .child(
+                chip(
+                    "permission-default-bypass",
+                    i18n::t!("settings.permission_default_bypass"),
+                    bypass,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _window, cx| {
+                        view.choose_permission_default("bypass", cx)
+                    }),
+                ),
+            );
+        let mut rows = div().flex().flex_col().gap(px(6.)).child(self.pref_row(
+            i18n::t!("settings.permission_default"),
+            Some(i18n::t!("settings.permission_default_sub")),
+            choices.into_any_element(),
+        ));
+        let remembered: Vec<(usize, &'static str, &'static str, String)> = acp_client::AGENTS
+            .iter()
+            .enumerate()
+            .filter_map(|(index, agent)| {
+                let mode = settings
+                    .agent_config_defaults
+                    .get(agent.id)?
+                    .get("mode")
+                    .filter(|mode| !mode.is_empty())?;
+                Some((index, agent.id, agent.label, mode.clone()))
+            })
+            .collect();
+        if !remembered.is_empty() {
+            let mut line =
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(4.))
+                    .pl(px(12.))
+                    .child(div().text_size(px(10.5)).text_color(theme.fg2).child(
+                        SharedString::from(i18n::t!("settings.permission_remembered")),
+                    ));
+            for (index, agent_id, label, mode) in remembered {
+                line = line.child(
+                    div()
+                        .id(("permission-forget", index))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .px(px(8.))
+                        .h(px(20.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(11.))
+                        .text_color(theme.fg1)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                        .child(SharedString::from(format!("{label} · {mode}")))
+                        .child(div().text_color(theme.fg2).child("✕"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _, _window, cx| {
+                                view.forget_remembered_mode(agent_id, cx)
+                            }),
+                        ),
+                );
+            }
+            rows = rows.child(line);
+        }
+        rows
+    }
+
+    fn choose_permission_default(&mut self, value: &str, cx: &mut Context<Self>) {
+        let result = set_permission_default(cx, value);
+        self.report_save(result, cx);
+        cx.notify();
+    }
+
+    fn forget_remembered_mode(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        let result = forget_agent_config_default(cx, agent_id, "mode");
+        self.report_save(result, cx);
+        cx.notify();
+    }
+
+    /// 1 エージェント分のアカウントの行: 既定 / 作ったアカウント / ＋ 新しいアカウント / ログイン。
+    /// 選ぶと `agent_servers.<id>.env.<var>` を書く（資格情報は読まない・置き場を指すだけ）。
+    fn account_line(
+        &self,
+        index: usize,
+        agent_id: &'static str,
+        var: &'static str,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = self.theme.clone();
+        let current = settings
+            .agent_servers
+            .get(agent_id)
+            .and_then(|server| server.env().get(var))
+            .cloned();
+        let root = settings_core::accounts_root(agent_id);
+        let accounts = self.accounts.get(index).cloned().unwrap_or_default();
+        let selected = current.as_deref().and_then(|path| {
+            let root = root.as_ref()?;
+            let name = Path::new(path)
+                .strip_prefix(root)
+                .ok()?
+                .to_str()?
+                .to_string();
+            accounts.contains(&name).then_some(name)
+        });
+        let chip = |id: (&'static str, usize), label: String, chosen: bool| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .h(px(20.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .text_size(px(11.))
+                .cursor_pointer()
+                .when(chosen, |chip| chip.bg(theme.bg3).text_color(theme.fg0))
+                .when(!chosen, |chip| {
+                    chip.border_1()
+                        .border_color(theme.border)
+                        .text_color(theme.fg1)
+                        .hover(|style| style.text_color(theme.fg0))
+                })
+                .child(SharedString::from(label))
+        };
+        let mut line = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.))
+            .pl(px(48.))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.fg2)
+                    .child(SharedString::from(i18n::t!("settings.account_label"))),
+            )
+            .child(
+                chip(
+                    ("account-default", index),
+                    i18n::t!("settings.account_default"),
+                    current.is_none(),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| view.use_account(agent_id, None, cx)),
+                ),
+            );
+        for (position, name) in accounts.iter().enumerate() {
+            let chosen = selected.as_deref() == Some(name.as_str());
+            let account = name.clone();
+            line = line.child(
+                chip(("account", index * 100 + position), name.clone(), chosen).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| {
+                        view.use_account(agent_id, Some(account.clone()), cx)
+                    }),
+                ),
+            );
+        }
+        // settings.json で necoder の置き場の外を指している（手で書いた）: 選ばれていることだけ見せる。
+        if current.is_some() && selected.is_none() {
+            line = line.child(chip(
+                ("account-elsewhere", index),
+                i18n::t!("settings.account_elsewhere"),
+                true,
+            ));
+        }
+        line = line.child(
+            chip(
+                ("account-add", index),
+                i18n::t!("settings.account_add"),
+                false,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |view, _, _window, cx| view.add_account(index, cx)),
+            ),
+        );
+        if let Some(path) = current.clone() {
+            line = line.child(
+                div()
+                    .id(("account-login", index))
+                    .px(px(6.))
+                    .text_size(px(11.))
+                    .text_color(theme.fg2)
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(theme.fg0))
+                    .child(SharedString::from(i18n::t!("settings.account_login")))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _, _window, cx| {
+                            view.login_account(index, Path::new(&path), cx)
+                        }),
                     ),
             );
         }
-        rows
+        line.child(
+            div()
+                .w_full()
+                .text_size(px(10.))
+                .text_color(theme.fg2)
+                .child(SharedString::from(i18n::t!("settings.account_hint"))),
+        )
     }
 
     // ── ページの器（左ナビ + ページ面）──────────────────────────────────────────
@@ -1755,10 +2549,12 @@ impl SettingsView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.fg0)
                     .child(SharedString::from(i18n::t!("settings.title"))),
-            );
+            )
+            .child(self.search_box(cx));
+        let searching = self.searching();
         for (index, page) in SettingsPage::ALL.iter().enumerate() {
             let page = *page;
-            let selected = self.page == page;
+            let selected = !searching && self.page == page;
             // MCP だけは「有効/全体」を添える＝開かなくても状態が見える。
             let badge = (page == SettingsPage::Mcp && !self.mcp_servers.is_empty())
                 .then(|| format!("{enabled}/{}", self.mcp_servers.len()));
@@ -1805,16 +2601,70 @@ impl SettingsView {
                     })
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |view, _, _window, cx| view.select_page(page, cx)),
+                        cx.listener(move |view, _, _window, cx| view.open_page(page, cx)),
                     ),
             );
         }
         column
     }
 
+    /// ナビの頭の検索欄（O27）。打つと右が全ページの一致した設定になる。✕ で消す。
+    fn search_box(&self, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let blank = self.search_query.is_empty();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .mb(px(8.))
+            .h(px(28.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .bg(theme.bg2)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(12.))
+            .child(div().flex_none().text_color(theme.fg2).child("⌕"))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    // 高さを与えないと 1 行ぶんに潰れて文字が出ない（transcript の検索欄と同じ）。
+                    .h(px(18.))
+                    .child(self.search.clone())
+                    .when(blank, |field| {
+                        field.child(
+                            div()
+                                .absolute()
+                                .top(px(0.))
+                                .left(px(1.))
+                                .text_color(theme.fg2)
+                                .child(SharedString::from(i18n::t!("settings.search_placeholder"))),
+                        )
+                    }),
+            )
+            .when(!blank, |row| {
+                row.child(
+                    div()
+                        .id("settings-search-clear")
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(theme.fg2)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.fg0))
+                        .child("✕")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _, _window, cx| view.clear_search(cx)),
+                        ),
+                )
+            })
+    }
+
     /// 選ばれているページの中身。1 ページ = 1 セクション（エージェントだけ `ne` コマンドと Skills を伴う）。
-    fn page_body(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
-        match self.page {
+    fn page_body(&self, page: SettingsPage, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        match page {
             SettingsPage::Agents => div()
                 .flex()
                 .flex_col()
@@ -1828,7 +2678,8 @@ impl SettingsView {
                             i18n::t!("settings.agents_heading"),
                             Some(i18n::t!("settings.agents_sub")),
                         ))
-                        .child(self.agents_rows(settings, true, cx)),
+                        .child(self.agents_rows(settings, true, cx))
+                        .child(self.permission_default_rows(settings, cx)),
                 )
                 // 導入系（エージェント CLI）の直後に `ne` コマンドを並べる。
                 // Windows は W フェーズまで非対応＝セクションごと出さない。
@@ -1842,6 +2693,78 @@ impl SettingsView {
             SettingsPage::Remote => self.remote_section(cx),
             SettingsPage::Preferences => self.preferences_section(settings, cx),
         }
+    }
+
+    /// 検索結果の組（O27）: ナビの順に、当たったページとその中身（行で当てるページ）と当たった数。
+    /// 行で当てるページは実物の行をそのまま出す（その場で切り替えられる）。当たらなかった行は
+    /// レイアウトから外れている。ほかのページはページ名と副題で当て、中身は出さない。
+    fn search_sections(
+        &self,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> Vec<(SettingsPage, Option<Div>, usize)> {
+        let mut sections = Vec::new();
+        for page in SettingsPage::ALL {
+            if page.searches_rows() {
+                self.search_hits.set(0);
+                let body = self.page_body(page, settings, cx);
+                let hits = self.search_hits.get();
+                if hits > 0 {
+                    sections.push((page, Some(body), hits));
+                }
+            } else {
+                let heading = i18n::t!(page.heading_key());
+                let sub = i18n::t!(page.sub_key());
+                if search_matches(&self.search_query, &[&heading, &sub]) {
+                    sections.push((page, None, 1));
+                }
+            }
+        }
+        sections
+    }
+
+    /// 検索中の右の面: 件数 → ページごとに「ページ名 ›」（押すとそのページを開く）+ 当たった行。
+    fn search_results(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let sections = self.search_sections(settings, cx);
+        let total: usize = sections.iter().map(|(_, _, hits)| hits).sum();
+        let mut results = div().flex().flex_col().gap(px(18.)).child(
+            div()
+                .text_size(px(11.5))
+                .text_color(theme.fg2)
+                .child(SharedString::from(if total == 0 {
+                    i18n::t!("settings.search_none")
+                } else {
+                    i18n::t!("settings.search_count", "count" => total)
+                })),
+        );
+        for (index, (page, body, _)) in sections.into_iter().enumerate() {
+            let link = div()
+                .id(("settings-search-page", index))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.fg0))
+                .child(SharedString::from(i18n::t!(page.heading_key())))
+                .child(div().text_color(theme.fg2).child("›"))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _, _window, cx| view.open_page(page, cx)),
+                );
+            results = results.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(link)
+                    .children(body),
+            );
+        }
+        results
     }
 
     // ── MCP サーバ（ACP セッションへ渡す道具）────────────────────────────────────
@@ -2089,7 +3012,8 @@ impl SettingsView {
                             .text_size(px(11.5))
                             .text_color(theme.fg2)
                             .child(SharedString::from(i18n::t!("settings.prefs_sub"))),
-                    ),
+                    )
+                    .when(self.searching(), |heading| heading.hidden()),
             )
             .child(self.toggle_row(
                 "submit_on_enter",
@@ -2113,6 +3037,29 @@ impl SettingsView {
                 i18n::t!("settings.pref_format_on_save"),
                 Some(i18n::t!("settings.pref_format_on_save_sub")),
                 settings.format_on_save,
+                cx,
+            ))
+            // プレビュータブ（O26）。値は settings.json の `preview_tabs`。
+            .child(self.toggle_row(
+                "preview_tabs",
+                8,
+                i18n::t!("settings.pref_preview_tabs"),
+                Some(i18n::t!("settings.pref_preview_tabs_sub")),
+                settings.preview_tabs,
+                cx,
+            ))
+            // 自動保存（O26）。値は settings.json の `auto_save`。
+            .child(self.segmented_row_with(
+                "auto_save",
+                i18n::t!("settings.pref_auto_save"),
+                Some(i18n::t!("settings.pref_auto_save_sub")),
+                &[
+                    ("off", i18n::t!("settings.auto_save_off")),
+                    ("focus_change", i18n::t!("settings.auto_save_focus_change")),
+                    ("after_delay", i18n::t!("settings.auto_save_after_delay")),
+                ],
+                &settings.auto_save,
+                false,
                 cx,
             ))
             .child(self.toggle_row(
@@ -2159,6 +3106,58 @@ impl SettingsView {
                 true,
                 cx,
             ))
+            // ターミナルの見た目（O25）。値は settings.json の `terminal_*`（フォントは JSON だけ）。
+            .child(self.stepper_row(
+                "terminal_font_size",
+                i18n::t!("settings.pref_terminal_font_size"),
+                f64::from(settings.terminal_font_size),
+                // 範囲は terminal_view の丸め（8〜32）と同じ。エディタの文字の大きさとも揃える。
+                8.0,
+                32.0,
+                1.0,
+                false,
+                cx,
+            ))
+            .child(self.number_choice_row(
+                "terminal_scrollback",
+                i18n::t!("settings.pref_terminal_scrollback"),
+                Some(i18n::t!("settings.pref_terminal_scrollback_sub")),
+                &[
+                    (
+                        1_000,
+                        i18n::t!("settings.terminal_scrollback_lines", "n" => "1,000"),
+                    ),
+                    (
+                        10_000,
+                        i18n::t!("settings.terminal_scrollback_lines", "n" => "10,000"),
+                    ),
+                    (
+                        50_000,
+                        i18n::t!("settings.terminal_scrollback_lines", "n" => "50,000"),
+                    ),
+                    (
+                        100_000,
+                        i18n::t!("settings.terminal_scrollback_lines", "n" => "100,000"),
+                    ),
+                ],
+                i64::try_from(settings.terminal_scrollback).unwrap_or(i64::MAX),
+                cx,
+            ))
+            .child(self.segmented_row_with(
+                "terminal_cursor",
+                i18n::t!("settings.pref_terminal_cursor"),
+                Some(i18n::t!("settings.pref_terminal_cursor_sub")),
+                &[
+                    ("block", i18n::t!("settings.terminal_cursor_block")),
+                    ("bar", i18n::t!("settings.terminal_cursor_bar")),
+                    ("underline", i18n::t!("settings.terminal_cursor_underline")),
+                ],
+                &settings.terminal_cursor,
+                false,
+                cx,
+            ))
+            .child(self.terminal_color_scheme_row(settings, cx))
+            .child(self.terminal_shell_row(settings, cx))
             .child(self.segmented_row_with(
                 "sound_done",
                 i18n::t!("settings.pref_sound_done"),
@@ -2175,6 +3174,17 @@ impl SettingsView {
                 &sound_options(),
                 &settings.sound_waiting,
                 true,
+                cx,
+            ))
+            // 通知音の大きさ（O13）。0 は鳴らさない。
+            .child(self.stepper_row_with_sub(
+                "sound_volume",
+                i18n::t!("settings.pref_sound_volume"),
+                i18n::t!("settings.pref_sound_volume_sub"),
+                settings.sound_volume as f64,
+                0.0,
+                100.0,
+                10.0,
                 cx,
             ))
             .child(self.toggle_row(
@@ -2198,6 +3208,25 @@ impl SettingsView {
                 false,
                 cx,
             ))
+            // エージェントの作業中はスリープさせない（O13）。値は settings.json の `keep_awake`。
+            // 止める手段を持つ OS（mac の caffeinate / Windows の SetThreadExecutionState）だけに出す。
+            .when(
+                cfg!(any(target_os = "macos", target_os = "windows")),
+                |group| {
+                    group.child(self.segmented_row_with(
+                        "keep_awake",
+                        i18n::t!("settings.pref_keep_awake"),
+                        Some(i18n::t!("settings.pref_keep_awake_sub")),
+                        &[
+                            ("working", i18n::t!("settings.keep_awake_working")),
+                            ("off", i18n::t!("settings.keep_awake_off")),
+                        ],
+                        &settings.keep_awake,
+                        false,
+                        cx,
+                    ))
+                },
+            )
             .child(self.segmented_row(
                 "agent_tabs_view",
                 i18n::t!("settings.pref_tabs_view"),
@@ -2268,7 +3297,7 @@ impl SettingsView {
             )
             .child(self.stepper_button(key, (key, 1), "+", (value + step).min(max), true, cx))
             .into_any_element();
-        self.pref_row(label, Some(sub), control)
+        self.pref_row_with_keywords(&[key], label, Some(sub), control)
     }
 
     /// Chat モードの設定（`docs/CHAT.md` §2.2 / §4.1）: 置き場・自動停止・カスタム指示。
@@ -2389,6 +3418,30 @@ impl SettingsView {
             cx.listener(|_, _, _window, cx| cx.emit(SettingsViewEvent::OpenSettingsJson)),
         )
         .into_any_element();
+        // 行を先に組む（検索中は当たった数が分かる）。1 行も当たらなければ組ごと外す（O27）。
+        let hits_before = self.search_hits.get();
+        let rows = [
+            self.pref_row(
+                i18n::t!("settings.chat_directory"),
+                Some(if directory.is_empty() {
+                    i18n::t!("settings.chat_directory_default")
+                } else {
+                    directory.clone()
+                }),
+                directory_control,
+            ),
+            self.pref_row(
+                i18n::t!("settings.chat_idle_stop"),
+                Some(i18n::t!("settings.chat_idle_stop_sub")),
+                idle_control,
+            ),
+            self.pref_row(
+                i18n::t!("settings.chat_instructions"),
+                Some(instructions_sub),
+                instructions_control,
+            ),
+        ];
+        let empty = self.searching() && self.search_hits.get() == hits_before;
         div()
             .flex()
             .flex_col()
@@ -2402,25 +3455,181 @@ impl SettingsView {
                     .text_color(theme.fg2)
                     .child(SharedString::from(i18n::t!("settings.chat_heading"))),
             )
-            .child(self.pref_row(
-                i18n::t!("settings.chat_directory"),
-                Some(if directory.is_empty() {
-                    i18n::t!("settings.chat_directory_default")
-                } else {
-                    directory.clone()
-                }),
-                directory_control,
-            ))
-            .child(self.pref_row(
-                i18n::t!("settings.chat_idle_stop"),
-                Some(i18n::t!("settings.chat_idle_stop_sub")),
-                idle_control,
-            ))
-            .child(self.pref_row(
-                i18n::t!("settings.chat_instructions"),
-                Some(instructions_sub),
-                instructions_control,
-            ))
+            .children(rows)
+            .when(empty, |group| group.hidden())
+    }
+
+    /// ターミナルの配色ファイル（O25）: 選ぶ… / 既定に戻す。副題は今のファイル名（無ければ既定）。
+    fn terminal_color_scheme_row(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let small_button = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(label))
+        };
+        let current = settings.terminal_color_scheme.trim().to_string();
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                small_button(
+                    "terminal-color-scheme-pick",
+                    i18n::t!("settings.terminal_color_scheme_pick"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _window, cx| view.pick_terminal_color_scheme(cx)),
+                ),
+            )
+            .when(!current.is_empty(), |row| {
+                row.child(
+                    small_button(
+                        "terminal-color-scheme-reset",
+                        i18n::t!("settings.terminal_color_scheme_reset"),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _window, cx| {
+                            let result = set_user_value(
+                                cx,
+                                "terminal_color_scheme",
+                                serde_json::Value::String(String::new()),
+                            );
+                            view.report_save(result, cx);
+                            cx.notify();
+                        }),
+                    ),
+                )
+            })
+            .into_any_element();
+        let sub = if current.is_empty() {
+            i18n::t!("settings.terminal_color_scheme_default")
+        } else {
+            std::path::Path::new(&current)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or(current)
+        };
+        self.pref_row_with_keywords(
+            &[
+                "terminal_color_scheme",
+                "ghostty",
+                "iterm",
+                "windows terminal",
+            ],
+            i18n::t!("settings.pref_terminal_color_scheme"),
+            Some(sub),
+            control,
+        )
+    }
+
+    /// 手元のターミナルのシェル（O25）: 選ぶ…（shell のピッカー）/ 既定に戻す。副題は今のシェル。
+    fn terminal_shell_row(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let small_button = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(3.))
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.fg1)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                .child(SharedString::from(label))
+        };
+        let current = settings.terminal_shell.trim().to_string();
+        let control = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                small_button(
+                    "terminal-shell-pick",
+                    i18n::t!("settings.terminal_shell_pick"),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _window, cx| cx.emit(SettingsViewEvent::PickShell)),
+                ),
+            )
+            .when(!current.is_empty(), |row| {
+                row.child(
+                    small_button(
+                        "terminal-shell-reset",
+                        i18n::t!("settings.terminal_shell_reset"),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _window, cx| {
+                            let result = set_user_value(
+                                cx,
+                                "terminal_shell",
+                                serde_json::Value::String(String::new()),
+                            );
+                            view.report_save(result, cx);
+                            cx.notify();
+                        }),
+                    ),
+                )
+            })
+            .into_any_element();
+        let sub = if current.is_empty() {
+            i18n::t!("settings.terminal_shell_default")
+        } else {
+            current
+        };
+        self.pref_row_with_keywords(
+            &["terminal_shell", "shell", "zsh", "bash", "fish", "pwsh"],
+            i18n::t!("settings.pref_terminal_shell"),
+            Some(sub),
+            control,
+        )
+    }
+
+    /// ターミナルの配色ファイルを選ぶ（Ghostty のテーマ・Windows Terminal の JSON・`.itermcolors`）。
+    fn pick_terminal_color_scheme(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(SharedString::from(i18n::t!(
+                "settings.terminal_color_scheme_pick"
+            ))),
+        });
+        cx.spawn(async move |view, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let updated = view.update(cx, |view, cx| {
+                let result = set_user_value(
+                    cx,
+                    "terminal_color_scheme",
+                    serde_json::Value::String(path.display().to_string()),
+                );
+                view.report_save(result, cx);
+                cx.notify();
+            });
+            if let Err(error) = updated {
+                eprintln!("ターミナルの配色を保存できない: {error:#}");
+            }
+        })
+        .detach();
     }
 
     /// チャットの置き場をフォルダ選択ダイアログで決める。既にあるチャットのフォルダは動かさない
@@ -2463,6 +3672,14 @@ fn next_captain_value(label: &str, current: Option<&str>) -> serde_json::Value {
     } else {
         serde_json::Value::String(label.to_string())
     }
+}
+
+/// 数の設定の ± が押した時に書く値（−, +）。刻みの目盛りへ寄せる（12.5 から − で 12・+ で 13。
+/// 目盛りの上の値はそのまま 1 刻み）。範囲の外へは出ない。
+fn stepper_targets(value: f64, min: f64, max: f64, step: f64) -> (f64, f64) {
+    let decrease = (((value - step) / step).ceil() * step).max(min);
+    let increase = (((value + step) / step).floor() * step).min(max);
+    (decrease, increase)
 }
 
 fn sound_options() -> Vec<(&'static str, String)> {
@@ -2577,6 +3794,7 @@ impl Render for SettingsView {
         // 設定が増えてもナビに 1 行足すだけで済み、縦に伸び続けない（UI-SPEC §12）。
         div()
             .id("settings-pane")
+            .relative()
             .size_full()
             .flex()
             .bg(theme.bg1)
@@ -2596,10 +3814,15 @@ impl Render for SettingsView {
                                 .gap(px(14.))
                                 .w_full()
                                 .max_w(px(680.))
-                                .child(self.page_body(&settings, cx)),
+                                .child(if self.searching() {
+                                    self.search_results(&settings, cx)
+                                } else {
+                                    self.page_body(self.page, &settings, cx)
+                                }),
                         ),
                     ),
             )
+            .children(self.render_launch_editor(cx))
     }
 }
 
@@ -2633,6 +3856,287 @@ fn agent_brand(id: &str) -> (Option<&'static str>, &'static str, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O16: エージェントの出し入れ（並びを保つ・戻すと消える）と、表示名からの引き当て。
+    #[test]
+    fn agents_are_turned_off_and_on_by_id() {
+        let off = toggled_disabled_agents(&["grok".to_string()], "kimi");
+        assert_eq!(off, vec!["grok".to_string(), "kimi".to_string()]);
+        assert_eq!(
+            toggled_disabled_agents(&off, "grok"),
+            vec!["kimi".to_string()]
+        );
+        let settings = Settings {
+            disabled_agents: off,
+            ..Settings::default()
+        };
+        assert!(!agent_label_enabled(&settings, "Kimi CLI"));
+        assert!(agent_label_enabled(&settings, "Codex"));
+        assert!(
+            agent_label_enabled(&settings, "Someone Else"),
+            "カタログに無い名前は外さない"
+        );
+    }
+
+    #[test]
+    fn account_login_quotes_the_folder_for_the_shell() {
+        assert_eq!(
+            account_login_command(
+                "CLAUDE_CONFIG_DIR",
+                Path::new("/Users/me/Library/Application Support/necoder/accounts/claude/account-2"),
+                "claude auth login"
+            ),
+            "CLAUDE_CONFIG_DIR='/Users/me/Library/Application Support/necoder/accounts/claude/account-2' claude auth login"
+        );
+        assert_eq!(
+            account_login_command("CODEX_HOME", Path::new("/tmp/it's"), "codex login"),
+            "CODEX_HOME='/tmp/it'\\''s' codex login",
+            "単引用符は閉じて逃がしてから開き直す"
+        );
+    }
+
+    #[test]
+    fn steppers_snap_to_their_step() {
+        assert_eq!(
+            stepper_targets(12.5, 8.0, 32.0, 1.0),
+            (12.0, 13.0),
+            "半端な値は目盛りへ"
+        );
+        assert_eq!(stepper_targets(13.0, 8.0, 32.0, 1.0), (12.0, 14.0));
+        assert_eq!(
+            stepper_targets(8.0, 8.0, 32.0, 1.0),
+            (8.0, 9.0),
+            "下の端より下へは出ない"
+        );
+        assert_eq!(stepper_targets(32.0, 8.0, 32.0, 1.0), (31.0, 32.0));
+        assert_eq!(stepper_targets(40.0, 0.0, 100.0, 10.0), (30.0, 50.0));
+    }
+
+    #[test]
+    fn search_needs_every_word_somewhere() {
+        let haystacks = ["自動保存", "編集を止めてから保存する", "auto_save"];
+        assert!(search_matches("保存", &haystacks));
+        assert!(search_matches("AUTO", &haystacks), "大文字小文字は無視");
+        assert!(
+            search_matches("自動 止めて", &haystacks),
+            "語はどの欄に在ってもよい"
+        );
+        assert!(
+            !search_matches("自動 フォント", &haystacks),
+            "全部の語が要る"
+        );
+        assert!(!search_matches("   ", &haystacks), "空白だけは検索ではない");
+    }
+
+    /// 設定の検索（O27）: 行で当てるページは当たった行だけ数え、当たらないページは出さない。
+    /// ほかのページはページ名で当てる。ページを開くと検索は消える。
+    #[gpui::test]
+    fn search_lists_matching_settings_across_pages(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-search-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"{ "onboarded": true }"#).expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            // 描画で実 CLI を調べに行かない。
+            view.availability_pending = false;
+            view
+        });
+        let search = |query: &str, cx: &mut gpui::VisualTestContext| {
+            view.update(cx, |view, cx| {
+                view.search
+                    .update(cx, |search, cx| search.set_plain_text(query, cx))
+            });
+            cx.run_until_parked();
+            view.update(cx, |view, cx| {
+                let settings = get(cx);
+                view.search_sections(&settings, cx)
+                    .into_iter()
+                    .map(|(page, _, hits)| (page, hits))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            search("preview_tabs", cx),
+            vec![(SettingsPage::Preferences, 1)],
+            "settings.json のキーでも当たる・当たらないページは出さない"
+        );
+        assert_eq!(search("tab_size preview", cx), Vec::new(), "全部の語が要る");
+        assert!(
+            search("MCP", cx).contains(&(SettingsPage::Mcp, 1)),
+            "行を持たないページはページ名で当てる"
+        );
+        view.update(cx, |view, cx| {
+            assert!(view.searching());
+            view.open_page(SettingsPage::Mcp, cx);
+            assert!(!view.searching(), "ページを開くと検索は消える");
+            assert_eq!(view.page, SettingsPage::Mcp);
+            assert!(view.search.read(cx).plain_text().is_empty());
+        });
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// O16: エージェントのページで、使う / 使わないと権限の既定を変え、覚えているモードを忘れる。
+    /// どの状態でも描ける（レイアウトで落ちない）。
+    #[gpui::test]
+    fn the_agents_page_turns_agents_off_and_sets_the_permission_default(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-agents-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{ "onboarded": true,
+                "agent_config_defaults": { "claude": { "mode": "plan" }, "qwen": { "mode": "yolo" } } }"#,
+        )
+        .expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |view, cx| {
+            view.toggle_agent_enabled("kimi", cx);
+            assert_eq!(get(cx).disabled_agents, vec!["kimi".to_string()]);
+            view.forget_remembered_mode("qwen", cx);
+            assert!(!get(cx).agent_config_defaults.contains_key("qwen"));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |view, cx| {
+            view.availability_pending = false;
+            view.choose_permission_default("bypass", cx);
+            let settings = get(cx);
+            assert_eq!(settings.agent_permission_default, "bypass");
+            assert!(
+                settings.agent_config_defaults.is_empty(),
+                "選ぶと覚えているモードを全部消す"
+            );
+            view.toggle_agent_enabled("kimi", cx);
+            assert!(get(cx).disabled_agents.is_empty(), "戻せる");
+            view.availability_pending = false;
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// O16: 起動の上書きを画面から書く（環境変数だけ → 自分のコマンド → 既定に戻す）。
+    #[gpui::test]
+    fn the_launch_override_is_written_from_the_agents_page(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-launch-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"{ "onboarded": true }"#).expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        let set =
+            |view: &mut SettingsView, which: &str, text: &str, cx: &mut Context<SettingsView>| {
+                let editor = view.launch_editor.as_ref().expect("開いている");
+                let field = match which {
+                    "command" => editor.command.clone(),
+                    "args" => editor.args.clone(),
+                    _ => editor.env.clone(),
+                };
+                field.update(cx, |field, cx| field.set_plain_text(text, cx));
+            };
+        view.update_in(cx, |view, window, cx| {
+            view.open_launch_editor("codex", "Codex", window, cx);
+            set(view, "env", "CODEX_HOME=/opt/codex", cx);
+            view.save_launch_editor(cx);
+            assert!(view.launch_editor.is_none(), "書けたら閉じる");
+            assert_eq!(
+                get(cx).agent_servers.get("codex"),
+                Some(&settings_core::AgentServerSetting::Registry {
+                    env: [("CODEX_HOME".to_string(), "/opt/codex".to_string())].into()
+                })
+            );
+
+            view.open_launch_editor("codex", "Codex", window, cx);
+            assert_eq!(
+                view.launch_editor
+                    .as_ref()
+                    .map(|editor| editor.env.read(cx).plain_text()),
+                Some("CODEX_HOME=/opt/codex".to_string()),
+                "今の値を欄に入れて開く"
+            );
+            view.set_launch_custom(true, cx);
+            view.save_launch_editor(cx);
+            assert!(
+                view.launch_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.error.is_some()),
+                "コマンドが空なら書かない"
+            );
+            set(view, "command", "codex-acp", cx);
+            set(view, "args", "--verbose\n\n--color never", cx);
+            view.save_launch_editor(cx);
+            match get(cx).agent_servers.get("codex") {
+                Some(settings_core::AgentServerSetting::Custom { command, args, .. }) => {
+                    assert_eq!(command, "codex-acp");
+                    assert_eq!(
+                        args,
+                        &vec!["--verbose".to_string(), "--color never".to_string()]
+                    );
+                }
+                other => panic!("自分のコマンドになっていない: {other:?}"),
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |view, cx| {
+            view.reset_agent_launch("codex", cx);
+            assert!(get(cx).agent_servers.get("codex").is_none(), "既定に戻す");
+        });
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 表示言語（O27）: 設定を変えるとその場で切り替わり、「OS に合わせる」は値を消す（null）。
+    #[gpui::test]
+    fn the_display_language_follows_the_setting(cx: &mut gpui::TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-locale-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"{ "onboarded": true }"#).expect("seed");
+        // i18n の言語はプロセスで 1 つ。並んで走る他のテストの翻訳を変えないよう、当てる処理を記録に差し替える。
+        let applied = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Option<String>>::new()));
+        let record = applied.clone();
+        cx.update(|cx| {
+            init(Some(path.clone()), None, cx);
+            follow_locale_with(cx, move |locale| {
+                record.borrow_mut().push(locale.map(str::to_string))
+            });
+        });
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        view.update(cx, |view, cx| view.set_pref_string("locale", "en", cx));
+        view.update(cx, |view, cx| view.set_pref_string("locale", "ja", cx));
+        view.update(cx, |view, cx| view.set_pref_string("locale", "ja", cx));
+        view.update(cx, |view, cx| {
+            view.set_pref_string("locale", LOCALE_FOLLOW_OS, cx);
+            assert_eq!(get(cx).locale, None, "OS に合わせる = 値を消す");
+        });
+        assert_eq!(
+            *applied.borrow(),
+            vec![Some("en".to_string()), Some("ja".to_string()), None],
+            "変わった時だけ・押した瞬間に当てる（同じ値の押し直しでは当て直さない）"
+        );
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(!text.contains(LOCALE_FOLLOW_OS), "{text}");
+        std::fs::remove_file(&path).ok();
+    }
 
     #[test]
     fn captain_button_appoints_switches_and_dismisses() {

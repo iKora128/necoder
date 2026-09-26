@@ -24,6 +24,9 @@ pub(crate) struct PersistedProject {
     pub(crate) active_file: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) remote_uri: Option<String>,
+    /// ピン留めしたタブ（O26）。古い版は知らない欄として読み飛ばす。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pinned_files: Vec<PathBuf>,
 }
 
 /// 窓 1 つ分の payload（`window_sessions.payload` の JSON）。
@@ -48,6 +51,12 @@ pub(crate) struct PersistedState {
     pub(crate) left_dock_width: f32,
     #[serde(default)]
     pub(crate) fleet_view: String,
+    /// Fleet の舞台にピンした Task（space id・左から・最大 3・O21）。無ければ書かない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) stage_pinned: Vec<String>,
+    /// 舞台の列数 1..=3（`0` は未保存＝既定）。
+    #[serde(default)]
+    pub(crate) stage_columns: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -56,12 +65,15 @@ pub struct SavedProject {
     pub open_files: Vec<PathBuf>,
     pub active_file: usize,
     pub remote_uri: Option<String>,
+    pub pinned_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct RestoredTabs {
     pub files: Vec<PathBuf>,
     pub active: usize,
+    /// `files` のうちピン留めしていたもの（O26）。
+    pub pinned: Vec<PathBuf>,
 }
 
 impl RestoredTabs {
@@ -69,6 +81,7 @@ impl RestoredTabs {
         Self {
             files: vec![file],
             active: 0,
+            pinned: Vec::new(),
         }
     }
 }
@@ -125,6 +138,7 @@ pub fn decode_window_session(payload: &str) -> Option<(Vec<SavedProject>, usize)
             open_files: project.open_files,
             active_file: project.active_file,
             remote_uri: project.remote_uri,
+            pinned_files: project.pinned_files,
         })
         .collect();
     Some((projects, state.active))
@@ -284,8 +298,8 @@ fn lock_mailbox(mailbox: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Op
 
 /// 窓を閉じるときのフックを登録する（窓を開いた直後に呼ぶ）。OS の閉じるボタン / ⌘⇧W が通る経路。
 ///
-/// 1. **最後の窓で、エージェントや端末が動いていれば閉じずに確認を出す**（O4・
-///    `intercept_last_window_close`）。GPUI の should-close は窓に 1 つしか持てないので、
+/// 1. **この窓でエージェントや端末が動いていれば閉じずに確認を出す**（O4・R04・
+///    `intercept_window_close`）。GPUI の should-close は窓に 1 つしか持てないので、
 ///    永続化しない窓（offscreen 撮影）でもこのフック自体は必ず入れる。
 /// 2. 閉じるなら DB の自分の行へ閉じ印を付ける。⌘Q による窓の破棄では付けない（[`mark_quitting`]）。
 ///
@@ -300,7 +314,7 @@ pub fn install_window_close_hook(window: &Window, cx: &App, persistence: &Window
         if is_quitting() {
             return true;
         }
-        if crate::workspace::intercept_last_window_close(window, cx) {
+        if crate::workspace::intercept_window_close(window, cx) {
             return false;
         }
         // ここで Workspace の書き手を触りに行くことはできない（この窓は今まさに update 中で、
@@ -330,12 +344,14 @@ mod tests {
                     ],
                     active_file: 1,
                     remote_uri: None,
+                    pinned_files: vec![PathBuf::from("/tmp/one/a.rs")],
                 },
                 PersistedProject {
                     root: PathBuf::from("/tmp/remote"),
                     open_files: Vec::new(),
                     active_file: 0,
                     remote_uri: Some("ssh://host/tmp/remote".to_string()),
+                    pinned_files: Vec::new(),
                 },
             ],
             active: 1,
@@ -347,10 +363,35 @@ mod tests {
         assert_eq!(projects.len(), 2);
         assert_eq!(projects[0].open_files, state.projects[0].open_files);
         assert_eq!(projects[0].active_file, 1);
+        assert_eq!(projects[0].pinned_files, state.projects[0].pinned_files);
+        assert!(
+            !payload.contains("\"pinned_files\":[]"),
+            "ピン留めが無い時は書かない（古い版の payload と同じ形）"
+        );
         assert_eq!(
             projects[1].remote_uri.as_deref(),
             Some("ssh://host/tmp/remote")
         );
+    }
+
+    /// Fleet の舞台のピンと列数（O21）は窓セッションに残る。無い時は書かない（古い版の payload と同じ形）。
+    #[test]
+    fn stage_pins_round_trip_through_the_window_session() {
+        let state = PersistedState {
+            stage_pinned: vec!["space-a".to_string(), "space-b".to_string()],
+            stage_columns: 2,
+            ..Default::default()
+        };
+        let payload = encode_window_session(&state).expect("JSON にできる");
+        let restored: PersistedState = serde_json::from_str(&payload).expect("読める");
+        assert_eq!(restored.stage_pinned, state.stage_pinned);
+        assert_eq!(restored.stage_columns, 2);
+        let empty = encode_window_session(&PersistedState::default()).expect("JSON にできる");
+        assert!(!empty.contains("stage_pinned"), "{empty}");
+        let old: PersistedState =
+            serde_json::from_str(r#"{"projects":[],"fleet_mode":true}"#).expect("古い形も読める");
+        assert!(old.stage_pinned.is_empty());
+        assert_eq!(old.stage_columns, 0);
     }
 
     #[test]

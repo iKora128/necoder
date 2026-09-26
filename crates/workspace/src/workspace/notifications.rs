@@ -20,6 +20,8 @@ pub(crate) enum ToastAction {
     },
     /// トーストに収まらない全文（git フックの出力など）を読み取り専用タブで開く。
     OpenDetails { title: SharedString, text: String },
+    /// 手元に置いたもの（ダウンロードしたファイル・O37）を Finder で見せる。
+    Reveal { path: PathBuf },
 }
 
 /// トーストが消えるまで。失敗の知らせは理由を読む時間が要るので長めにする。
@@ -271,6 +273,9 @@ impl Workspace {
                 cx,
             ),
             agent_panel::PanelEvent::ThreadAutoNamed { name } => {
+                // 自動で名付けたブランチ（`task/task` など）を、この名前から改名する（O23・A23・予約した
+                // Task だけ・1 回だけ）。
+                self.rename_auto_branch(session_index, name.clone(), cx);
                 // AI 命名の引き継ぎ（2026-07-24）: Task 名がプレースホルダ（"Task N"）のままなら
                 // 最初のスレッド名を Task 名にする。手動改名済み（プレースホルダでない）は触らない。
                 if let Some(slot) = self.project_sessions.projects.get_mut(session_index) {
@@ -339,8 +344,9 @@ impl Workspace {
                 self.push_failure_toast(message.clone(), None, cx);
             }
             // transcript の URL: localhost 系は Web タブ、それ以外は既定のブラウザ（`open_url`）。
+            // SSH 先のプロジェクトのエージェントが出した localhost は SSH 先の物（R06）。
             agent_panel::PanelEvent::OpenUrlRequest { url } => {
-                self.open_url(url, cx);
+                self.open_url_from_session(session_index, url, cx);
             }
             agent_panel::PanelEvent::FilesTouched { files, color } => {
                 for file in files {
@@ -453,6 +459,7 @@ impl Workspace {
         color: Hsla,
         title: SharedString,
         text: SharedString,
+        space: Option<SpaceId>,
     ) {
         let at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -466,6 +473,7 @@ impl Workspace {
                 title,
                 text,
                 kind,
+                space,
             },
         );
         self.notifications.news.truncate(100);
@@ -582,6 +590,18 @@ impl Workspace {
         self.push_toast_entry(text, color, action, FAILURE_TOAST_LIFETIME, cx);
     }
 
+    /// 手元に置いたもの（`path`）の知らせ。押すと Finder で見せる。
+    pub(crate) fn push_toast_revealing(
+        &mut self,
+        text: SharedString,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let color = self.accent();
+        let action = Some(ToastAction::Reveal { path });
+        self.push_toast_entry(text, color, action, TOAST_LIFETIME, cx);
+    }
+
     fn push_toast_entry(
         &mut self,
         text: SharedString,
@@ -615,8 +635,9 @@ impl Workspace {
         .detach();
     }
 
-    /// テスト用: 出ているトースト（本文, 全文つきか）。
-    #[cfg(test)]
+    /// テスト用: 出ているトースト（本文, 全文つきか）。使うのは git のフックを走らせるテスト
+    /// （`#[cfg(unix)]`）だけなので同じ条件で置く（Windows の `-D warnings` で未使用にならない）。
+    #[cfg(all(test, unix))]
     pub(crate) fn toast_snapshot(&self) -> Vec<(String, bool)> {
         self.notifications
             .toasts
@@ -769,6 +790,28 @@ impl Workspace {
                                                 window,
                                                 cx,
                                             );
+                                        },
+                                    ),
+                                );
+                        }
+                        // 手元に置いたもの（ダウンロード）は押すと Finder で見せる。
+                        Some(ToastAction::Reveal { path }) => {
+                            let path = path.clone();
+                            toast = toast
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(SharedString::from(i18n::t!("toast.reveal"))),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(
+                                        move |_this, _event: &MouseDownEvent, _window, cx| {
+                                            cx.stop_propagation();
+                                            cx.reveal_path(&path);
                                         },
                                     ),
                                 );

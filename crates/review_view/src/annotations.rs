@@ -9,10 +9,31 @@
 //! 行に注記・まとめて送る・Resolve と未解決の再送）。機能の比較だけで、コードは写していない。
 
 use crate::*;
+use futures::StreamExt as _;
 use gpui::{
     div, prelude::*, px, Context, FontWeight, KeyDownEvent, ListOffset, MouseButton, SharedString,
     Window,
 };
+use storage::ReviewNoteRecord;
+
+/// 位置が変わった注記のカードに出す元の抜粋の行数。
+const LOST_EXCERPT_LINES: usize = 6;
+
+/// 注記の DB への書き込み 1 件（R03）。ビューごとに 1 本の列へ積み、積んだ順に 1 件ずつ流す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NoteWrite {
+    Upsert(ReviewNoteRecord),
+    Delete(String),
+}
+
+impl NoteWrite {
+    pub(crate) fn note_id(&self) -> &str {
+        match self {
+            Self::Upsert(record) => &record.id,
+            Self::Delete(id) => id,
+        }
+    }
+}
 
 impl ReviewView {
     /// 束ねる単位が変わったら注記を読み直す（背景で読み、届いたら行へ差し込む）。
@@ -26,6 +47,7 @@ impl ReviewView {
         let scope = context.scope.clone();
         self.notes_scope = Some(scope.clone());
         self.notes.clear();
+        self.lost_notes.clear();
         self.draft = None;
         let Some(storage) = context.storage.clone() else {
             return;
@@ -43,8 +65,11 @@ impl ReviewView {
                 match loaded {
                     Ok(records) => {
                         for record in records {
-                            // 読み終える前に作った注記は既に居る（二重に積まない）。
-                            if this.notes.iter().any(|note| note.id == record.id) {
+                            // 読み終える前に作った注記は既に居る（二重に積まない）。読み終える前に
+                            // 消した注記は、古い読み込み結果から復活させない（R03）。
+                            if this.notes.iter().any(|note| note.id == record.id)
+                                || this.deleted_note_ids.contains(&record.id)
+                            {
                                 continue;
                             }
                             match ReviewNote::from_record(&record) {
@@ -58,6 +83,7 @@ impl ReviewView {
                     }
                     Err(error) => eprintln!("注記を読めない: {error:#}"),
                 }
+                this.reconcile_notes(cx);
                 this.rebuild_rows();
                 cx.notify();
             });
@@ -264,8 +290,8 @@ impl ReviewView {
                         note.state = ReviewNoteState::Unsent;
                         note.updated_at = now;
                     }
-                    if let Some(note) = self.notes.iter().find(|note| note.id == id) {
-                        self.persist_note(note, cx);
+                    if let Some(note) = self.notes.iter().find(|note| note.id == id).cloned() {
+                        self.persist_note(&note, cx);
                     }
                 }
                 None => {
@@ -329,20 +355,11 @@ impl ReviewView {
             return;
         }
         let note = self.notes.remove(index);
-        if let Some(storage) = self
-            .context
-            .as_ref()
-            .and_then(|context| context.storage.clone())
-        {
-            let id = note.id;
-            cx.background_executor()
-                .spawn(async move {
-                    if let Err(error) = storage.delete_review_note(&id) {
-                        eprintln!("注記を消せない: {error:#}");
-                    }
-                })
-                .detach();
-        }
+        self.deleted_note_ids.insert(note.id.clone());
+        // 消した注記の書き込みが失敗の列に残っていたら捨てる（再試行で復活させない）。
+        self.failed_note_writes
+            .retain(|write| write.note_id() != note.id);
+        self.write_note(NoteWrite::Delete(note.id), cx);
         self.rebuild_rows();
         cx.notify();
     }
@@ -369,11 +386,111 @@ impl ReviewView {
         cx.notify();
     }
 
-    pub(crate) fn persist_note(&self, note: &ReviewNote, cx: &mut Context<Self>) {
-        let Some(context) = self.context.as_ref() else {
+    /// 注記の位置を今の差分に合わせる（R01）。読み直し・全文の到着・注記の読み込みの後に呼ぶ。
+    ///
+    /// 付けた時の抜粋と今の中身が合わない注記は、同じ中身の並びが 1 か所に決まる時だけそこへ移して
+    /// 保存し直す（改名されたファイルは新しい名前へ）。決まらなければ「位置が変わった注記」にする
+    /// （行には付けず、見出しの直後に元の抜粋つきで出す）。まだ読めていない行は確かめない。
+    pub(crate) fn reconcile_notes(&mut self, cx: &mut Context<Self>) {
+        let Some(diff) = self.diff.clone() else {
             return;
         };
-        let Some(storage) = context.storage.clone() else {
+        let mut moves: Vec<(usize, String, u32, u32)> = Vec::new();
+        let mut lost = HashSet::new();
+        for (index, note) in self.notes.iter().enumerate() {
+            let NoteTarget::DiffLines(target) = &note.target;
+            let Some(file_index) = diff.files.iter().position(|file| {
+                file.path == target.path || file.old_path.as_deref() == Some(target.path.as_str())
+            }) else {
+                continue; // 差分から消えたファイル（行には出ない。トレイからは見える）
+            };
+            let file = &diff.files[file_index];
+            let syntax = self.syntax.get(file_index).cloned().flatten();
+            let full = syntax.as_ref().and_then(|syntax| match target.side {
+                NoteSide::New => syntax.new.as_ref(),
+                NoteSide::Old => syntax.old.as_ref(),
+            });
+            let expected: Vec<&str> = target
+                .excerpt
+                .iter()
+                .filter(|line| match target.side {
+                    NoteSide::New => line.kind != ExcerptKind::Removed,
+                    NoteSide::Old => line.kind == ExcerptKind::Removed,
+                })
+                .map(|line| line.text.as_str())
+                .collect();
+            let diff_lines: Vec<(u32, &str)> = file
+                .hunks
+                .iter()
+                .flat_map(|hunk| hunk.lines.iter())
+                .filter_map(|line| {
+                    let number = match target.side {
+                        NoteSide::New => line.new_line,
+                        NoteSide::Old => line.old_line,
+                    }?;
+                    Some((number, line.text.as_str()))
+                })
+                .collect();
+            let candidates: Vec<(u32, &str)> = match full {
+                Some(text) => text
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, line)| (offset as u32 + 1, line.as_str()))
+                    .collect(),
+                None => diff_lines.clone(),
+            };
+            let lookup = |number: u32| match full {
+                Some(text) => text.line(number).map(|(line, _)| line),
+                None => diff_lines
+                    .iter()
+                    .find(|(line, _)| *line == number)
+                    .map(|(_, text)| *text),
+            };
+            let renamed = file.path != target.path;
+            match locate(&expected, target.start, target.end, lookup, &candidates) {
+                NotePosition::Unchanged if renamed => {
+                    moves.push((index, file.path.clone(), target.start, target.end))
+                }
+                NotePosition::Unchanged => {}
+                NotePosition::Moved { start, end } => {
+                    moves.push((index, file.path.clone(), start, end))
+                }
+                NotePosition::Lost => {
+                    lost.insert(note.id.clone());
+                }
+            }
+        }
+        let now = now_ms();
+        let mut changed = Vec::new();
+        for (index, path, start, end) in moves {
+            let Some(note) = self.notes.get_mut(index) else {
+                continue;
+            };
+            let NoteTarget::DiffLines(target) = &mut note.target;
+            target.path = path;
+            target.start = start;
+            target.end = end;
+            if target.side == NoteSide::Old {
+                // 古い側の行番号は比較の基準のファイルに対するもの。移した先の基準に揃える。
+                target.base = diff.base_oid.clone();
+            }
+            note.updated_at = now;
+            changed.push(note.clone());
+        }
+        for note in &changed {
+            self.persist_note(note, cx);
+        }
+        self.lost_notes = lost;
+    }
+
+    /// 位置が変わった注記か（R01・カードとテストが使う）。
+    pub fn is_note_lost(&self, id: &str) -> bool {
+        self.lost_notes.contains(id)
+    }
+
+    pub(crate) fn persist_note(&mut self, note: &ReviewNote, cx: &mut Context<Self>) {
+        let Some(context) = self.context.as_ref() else {
             return;
         };
         let record = match note.to_record(&context.scope) {
@@ -383,13 +500,58 @@ impl ReviewView {
                 return;
             }
         };
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(error) = storage.upsert_review_note(&record) {
-                    eprintln!("注記を保存できない: {error:#}");
-                }
-            })
-            .detach();
+        self.write_note(NoteWrite::Upsert(record), cx);
+    }
+
+    /// 注記の書き込みを列に積む（R03）。列はビューに 1 本で、積んだ順に 1 件ずつ DB へ流す
+    /// （前の書き込みが終わってから次を投げる）。保存先が無い窓（撮影用など）では何もしない。
+    pub(crate) fn write_note(&mut self, write: NoteWrite, cx: &mut Context<Self>) {
+        let Some(storage) = self
+            .context
+            .as_ref()
+            .and_then(|context| context.storage.clone())
+        else {
+            return;
+        };
+        let sender = match &self.note_writes {
+            Some(sender) if !sender.is_closed() => sender.clone(),
+            _ => {
+                let sender = spawn_note_writer(storage, cx);
+                self.note_writes = Some(sender.clone());
+                sender
+            }
+        };
+        if let Err(error) = sender.unbounded_send(write) {
+            // 列の受け手が居ない（あり得ないはずの経路）。失われないよう失敗として残す。
+            eprintln!("注記の書き込みを積めない: {error}");
+            self.failed_note_writes.push(error.into_inner());
+            cx.notify();
+        }
+    }
+
+    /// 書き込みが失敗した（列から戻ってくる）。消した注記の分は捨て、残りはトレイから再試行できる。
+    pub(crate) fn note_write_failed(&mut self, write: NoteWrite, cx: &mut Context<Self>) {
+        if matches!(&write, NoteWrite::Upsert(record) if self.deleted_note_ids.contains(&record.id))
+        {
+            return;
+        }
+        self.failed_note_writes.push(write);
+        cx.notify();
+    }
+
+    /// 保存できなかった書き込みの件数（トレイの ⚠ と再試行ボタン）。
+    pub fn failed_note_write_count(&self) -> usize {
+        self.failed_note_writes.len()
+    }
+
+    /// 保存できなかった書き込みを、失敗した順にもう一度積む。古い版が後から届いても DB 側で
+    /// 捨てる（`upsert_review_note` は `updated_at` が古い書き込みを無視する）ので、巻き戻らない。
+    pub fn retry_note_writes(&mut self, cx: &mut Context<Self>) {
+        let failed = std::mem::take(&mut self.failed_note_writes);
+        for write in failed {
+            self.write_note(write, cx);
+        }
+        cx.notify();
     }
 
     /// トレイの一覧を開く / 閉じる。
@@ -432,6 +594,11 @@ impl ReviewView {
         cx.notify();
     }
 
+    /// 宛先のメニューが開いているか（届かなかった時に開き直したことを外から確かめる）。
+    pub fn send_menu_open(&self) -> bool {
+        self.send_menu.is_some()
+    }
+
     /// 宛先を選んだ: 注記を 1 通のプロンプトにして Workspace へ渡す。
     pub(crate) fn send_to(&mut self, target: SendTarget, cx: &mut Context<Self>) {
         let resend = self.send_menu.take().is_some_and(|menu| menu.resend);
@@ -440,12 +607,13 @@ impl ReviewView {
             cx.notify();
             return;
         }
-        let prompt = format_prompt(&notes);
+        let prompt = format_prompt_marking_lost(&notes, &self.lost_notes);
         let note_ids = notes.iter().map(|note| note.id.clone()).collect();
         cx.emit(ReviewEvent::SendNotes {
             target,
             prompt,
             note_ids,
+            resend,
         });
         cx.notify();
     }
@@ -541,6 +709,26 @@ impl ReviewView {
             return div().into_any_element();
         };
         let resolved = note.state == ReviewNoteState::Resolved;
+        let lost = self.lost_notes.contains(&note.id);
+        let NoteTarget::DiffLines(target) = &note.target;
+        // 位置が変わった注記（R01）は、何についての注記だったかを元の抜粋で見せる。
+        let excerpt: Vec<String> = if lost {
+            target
+                .excerpt
+                .iter()
+                .take(LOST_EXCERPT_LINES)
+                .map(|line| {
+                    let marker = match line.kind {
+                        ExcerptKind::Added => '+',
+                        ExcerptKind::Removed => '-',
+                        ExcerptKind::Context => ' ',
+                    };
+                    format!("{marker}{}", line.text)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         div()
             .id(("review-note", row))
             .pl(px(NUMBER_COLUMN_WIDTH * 2. + MARKER_COLUMN_WIDTH))
@@ -558,6 +746,32 @@ impl ReviewView {
                     .border_1()
                     .border_color(theme.border)
                     .when(resolved, |card| card.opacity(0.6))
+                    .when(lost, |card| {
+                        card.child(div().text_size(px(10.5)).text_color(theme.warn).child(
+                            SharedString::from(i18n::t!(
+                                "review.note_lost",
+                                "location" => note.target.location()
+                            )),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .px(px(6.))
+                                .py(px(3.))
+                                .rounded(px(4.))
+                                .bg(theme.bg1)
+                                .font_family(ui::code_font(cx))
+                                .text_size(px(11.))
+                                .text_color(theme.fg2)
+                                .children(excerpt.into_iter().map(|line| {
+                                    div()
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .child(SharedString::from(line))
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
@@ -573,7 +787,7 @@ impl ReviewView {
                             .child(
                                 div()
                                     .flex_none()
-                                    .font_family(CODE_FONT)
+                                    .font_family(ui::code_font(cx))
                                     .text_size(px(10.5))
                                     .text_color(theme.fg2)
                                     .child(SharedString::from(note.target.location())),
@@ -729,7 +943,7 @@ impl ReviewView {
                             .child(SharedString::from(title))
                             .child(
                                 div()
-                                    .font_family(CODE_FONT)
+                                    .font_family(ui::code_font(cx))
                                     .child(SharedString::from(location)),
                             ),
                     )
@@ -786,7 +1000,9 @@ impl ReviewView {
 
     /// 下端のトレイ（注記の件数・一覧・送る）。注記が 1 件も無ければ出さない。
     pub(crate) fn render_tray(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.notes.is_empty() {
+        let unsaved = self.failed_note_writes.len();
+        // 注記が 0 件でも、保存できていない削除が残っていればトレイは出す（再試行の場所）。
+        if self.notes.is_empty() && unsaved == 0 {
             return None;
         }
         let theme = self.theme.clone();
@@ -845,7 +1061,7 @@ impl ReviewView {
                     .child(
                         div()
                             .flex_none()
-                            .font_family(CODE_FONT)
+                            .font_family(ui::code_font(cx))
                             .text_size(px(11.))
                             .text_color(theme.fg1)
                             .child(SharedString::from(note.target.location())),
@@ -905,6 +1121,29 @@ impl ReviewView {
                                 ),
                         )
                         .child(div().flex_1())
+                        // 保存できなかった変更（R03）。本文はメモリに残っているので、再試行で書き直せる。
+                        .when(unsaved > 0, |bar| {
+                            bar.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.5))
+                                    .text_color(theme.err)
+                                    .child(SharedString::from(i18n::t!(
+                                        "review.save_failed",
+                                        "count" => unsaved
+                                    ))),
+                            )
+                            .child(
+                                button("review-save-retry", i18n::t!("review.save_retry"), true)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.retry_note_writes(cx)
+                                        }),
+                                    ),
+                            )
+                        })
                         .when(resendable, |bar| {
                             bar.child(
                                 button("review-resend", i18n::t!("review.resend"), true)
@@ -1055,6 +1294,41 @@ impl ReviewView {
                 .into_any_element(),
         )
     }
+}
+
+/// 注記の書き込み列を立てる（R03）。受け手はビューの寿命に縛られない背景の 1 本で、
+/// 送り手（ビュー）が居なくなっても積まれた分は流し切ってから終わる。
+fn spawn_note_writer(
+    storage: Storage,
+    cx: &mut Context<ReviewView>,
+) -> futures::channel::mpsc::UnboundedSender<NoteWrite> {
+    let (sender, mut receiver) = futures::channel::mpsc::unbounded::<NoteWrite>();
+    cx.spawn(async move |this, cx| {
+        while let Some(write) = receiver.next().await {
+            let storage = storage.clone();
+            let attempted = write.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match &attempted {
+                        NoteWrite::Upsert(record) => storage.upsert_review_note(record),
+                        NoteWrite::Delete(id) => storage.delete_review_note(id),
+                    }
+                })
+                .await;
+            if let Err(error) = result {
+                eprintln!("注記を保存できない（{}）: {error:#}", write.note_id());
+                if this
+                    .update(cx, |this, cx| this.note_write_failed(write, cx))
+                    .is_err()
+                {
+                    eprintln!("注記の保存の失敗を伝える先が無い（窓が閉じた）");
+                }
+            }
+        }
+    })
+    .detach();
+    sender
 }
 
 pub(crate) fn now_ms() -> i64 {

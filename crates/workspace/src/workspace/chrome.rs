@@ -67,6 +67,14 @@ impl Workspace {
                 self.chrome.pending_settings_command = Some(command.clone());
                 cx.notify();
             }
+            settings::SettingsViewEvent::PickShell => {
+                self.chrome.pending_shell_picker = true;
+                cx.notify();
+            }
+            settings::SettingsViewEvent::PickFont { key } => {
+                self.chrome.pending_font_picker = Some(key);
+                cx.notify();
+            }
             settings::SettingsViewEvent::OnboardingCompleted => {
                 self.chrome.show_settings = false;
                 self.celebrate_confetti(cx);
@@ -88,7 +96,7 @@ impl Workspace {
                     "sound_waiting" => agent_panel::sound::Cue::Waiting,
                     _ => agent_panel::sound::Cue::Done,
                 };
-                agent_panel::sound::play(cue, value);
+                agent_panel::sound::play(cue, value, settings::get(cx).sound_volume);
             }
             settings::SettingsViewEvent::OpenSettingsJson => {
                 // subscription は Window を持たないので effect cycle 末尾へ送る（pending shell effects）。
@@ -205,6 +213,8 @@ impl Workspace {
             .child(div().flex_1().h_full()) // 空き＝ドラッグ領域（titlebar 全体で処理）
             // 実行中スレッドの beacon（窓上部から常に見える＝方向感覚の核・UI-SPEC §3）
             .child(self.render_beacons(cx))
+            // 通知の履歴（ベル・O13）。未読があれば件数。
+            .child(self.render_inbox_bell(cx))
             // リモート SSH で開く（M13・GUI 導線。~/.ssh/config のエイリアス/鍵/ProxyJump がそのまま効く）
             .child(
                 self.rail_icon(
@@ -299,7 +309,7 @@ impl Workspace {
                 .child(button("window-close", "\u{2715}").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
-                        // remove_window は OS の should-close フックを通らない＝最後の窓の確認（O4）と
+                        // remove_window は OS の should-close フックを通らない＝実行中の窓の確認（O4・R04）と
                         // 閉じ印はここで自分で行う。
                         if this.guard_window_close(window, cx) {
                             return;
@@ -635,6 +645,8 @@ impl Workspace {
                         .unwrap_or_else(|| i18n::t!("tabs.untitled"))
                 };
                 let dirty = tab.is_dirty(cx);
+                let pinned = tab.pinned;
+                let preview = tab.preview;
                 // タブ名も git 状態で色付け（ツリーと同じ色貫通）。
                 let status = self.repository.status.get(&tab.path).copied();
                 let name_color = status
@@ -682,37 +694,74 @@ impl Workspace {
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_color(name_color)
+                                    // プレビュータブは斜体（次の 1 回クリックで置き換わる・O26）。
+                                    .when(preview, |name| name.italic())
                                     .child(SharedString::from(name)),
                             )
-                            .child(
-                                div()
-                                    .id(("close-tab", index))
-                                    .flex_none()
-                                    .px(px(3.))
-                                    .rounded(px(4.))
-                                    .text_color(theme.fg2)
-                                    .cursor_pointer()
-                                    .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
-                                    .child("×")
-                                    .tooltip(Tooltip::text(
-                                        i18n::t!("tabs.close_tip"),
-                                        theme.clone(),
-                                    ))
-                                    // × クリックはタブ切替へ伝播させない。
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.close_tab_at(index, window, cx);
-                                        }),
-                                    ),
-                            ),
+                            .when(!pinned, |row| {
+                                row.child(
+                                    div()
+                                        .id(("close-tab", index))
+                                        .flex_none()
+                                        .px(px(3.))
+                                        .rounded(px(4.))
+                                        .text_color(theme.fg2)
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(theme.fg0).bg(theme.bg2))
+                                        .child("×")
+                                        .tooltip(Tooltip::text(
+                                            i18n::t!("tabs.close_tip"),
+                                            theme.clone(),
+                                        ))
+                                        // × クリックはタブ切替へ伝播させない。
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.close_tab_at(index, window, cx);
+                                            }),
+                                        ),
+                                )
+                            })
+                            // ピン留め（O26）: × の代わりにピン。押すと外す。
+                            .when(pinned, |row| {
+                                row.child(
+                                    div()
+                                        .id(("unpin-tab", index))
+                                        .flex_none()
+                                        .p(px(3.))
+                                        .rounded(px(4.))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(theme.bg2))
+                                        .child(
+                                            svg()
+                                                .path("icons/pin.svg")
+                                                .size(px(11.))
+                                                .text_color(theme.fg2),
+                                        )
+                                        .tooltip(Tooltip::text(
+                                            i18n::t!("tabs.unpin_tip"),
+                                            theme.clone(),
+                                        ))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, _, _window, cx| {
+                                                cx.stop_propagation();
+                                                this.toggle_tab_pin(index, cx);
+                                            }),
+                                        ),
+                                )
+                            }),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             this.agent_active = false; // エディタ側を触った → ⌘W の宛先をタブへ
                             this.chrome.show_settings = false; // タブを押したら設定ホームは退く
+                            if event.click_count == 2 {
+                                // ダブルクリック = プレビューを普通のタブにする（O26）。
+                                this.keep_preview_tab(index, cx);
+                            }
                             this.select_tab(index, window, cx);
                         }),
                     )
@@ -936,6 +985,21 @@ impl Workspace {
             );
             menu_box = menu_box.child(separator());
         }
+        // ピン留め / 外す（O26）。一時タブ（diff・変更レビュー）は窓セッションに残らないので出さない。
+        if let Some(tab) = self.tabs.get(index).filter(|tab| !tab.transient) {
+            let label = if tab.pinned {
+                i18n::t!("tabs.ctx_unpin")
+            } else {
+                i18n::t!("tabs.ctx_pin")
+            };
+            menu_box = menu_box.child(item("tab-ctx-pin", label).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.close_tab_menu(cx);
+                    this.toggle_tab_pin(index, cx);
+                }),
+            ));
+        }
         menu_box = menu_box.child(
             item("tab-ctx-close", i18n::t!("tabs.ctx_close")).on_mouse_down(
                 MouseButton::Left,
@@ -967,6 +1031,16 @@ impl Workspace {
                 ),
             );
         }
+        // 全部閉じる（未保存のタブは残す・⌘K ⌘W と同じ・O26）。
+        menu_box = menu_box.child(
+            item("tab-ctx-close-all", i18n::t!("tabs.ctx_close_all")).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_tab_menu(cx);
+                    this.close_saved_tabs(window, cx);
+                }),
+            ),
+        );
 
         // 透明バックドロップ（外側クリックで閉じる）。
         Some(
@@ -1072,41 +1146,82 @@ impl Workspace {
             .active_slot()
             .map(|slot| slot.worktree.root().to_path_buf());
         let crumbs = breadcrumb_text(root.as_deref(), path.as_deref());
-        // Markdown / HTML なら右端にプレビュートグル（⌘⇧V の discoverability）。
-        let markdown_toggle = path
+        // Markdown・CSV / TSV（表・O29）なら右端にプレビュートグル（⌘⇧V の discoverability）。
+        let previewable = editor.read(cx).has_text_preview();
+        let markdown_toggle = path.as_deref().filter(|_| previewable).map(|_| {
+            let on = editor.read(cx).rendered_markdown();
+            let label = if on {
+                i18n::t!("breadcrumb.md_source")
+            } else {
+                i18n::t!("breadcrumb.md_preview")
+            };
+            let editor = editor.clone();
+            div()
+                .id("md-preview-toggle")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(5.))
+                .h(px(19.))
+                .px(px(7.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
+                .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
+                // GPUI の SVG は親の text_color を継承しないため、必ず直接色を渡す。
+                .child(
+                    svg()
+                        .path("icons/eye.svg")
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(if on { theme.fg0 } else { theme.fg2 }),
+                )
+                .child(div().text_size(px(10.5)).child(label))
+                .tooltip(Tooltip::text(
+                    i18n::t!("breadcrumb.md_preview_tip"),
+                    theme.clone(),
+                ))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_this, _, _window, cx| {
+                        cx.stop_propagation();
+                        editor.update(cx, |editor, cx| {
+                            let next = !editor.rendered_markdown();
+                            editor.set_rendered_markdown(next, cx);
+                        });
+                    }),
+                )
+        });
+        // ⌘K V: 本文の右に整形プレビューを並べる（Markdown だけ・O29）。
+        let side_toggle = path
             .as_deref()
             .filter(|path| lang::language_for_path(path) == Some(lang::LanguageId::Markdown))
             .map(|_| {
-                let on = editor.read(cx).rendered_markdown();
-                let label = if on {
-                    i18n::t!("breadcrumb.md_source")
-                } else {
-                    i18n::t!("breadcrumb.md_preview")
-                };
+                let on = editor.read(cx).side_preview();
                 let editor = editor.clone();
                 div()
-                    .id("md-preview-toggle")
+                    .id("md-side-preview-toggle")
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(5.))
-                    .h(px(19.))
-                    .px(px(7.))
+                    .justify_center()
+                    .size(px(19.))
                     .rounded(px(5.))
                     .cursor_pointer()
-                    .when(on, |element| element.bg(theme.bg2).text_color(theme.fg0))
-                    .hover(|style| style.bg(theme.bg2).text_color(theme.fg0))
-                    // GPUI の SVG は親の text_color を継承しないため、必ず直接色を渡す。
+                    .when(on, |element| element.bg(theme.bg2))
+                    .hover(|style| style.bg(theme.bg2))
                     .child(
                         svg()
-                            .path("icons/eye.svg")
+                            .path("icons/columns-2.svg")
                             .size(px(12.))
                             .flex_none()
                             .text_color(if on { theme.fg0 } else { theme.fg2 }),
                     )
-                    .child(div().text_size(px(10.5)).child(label))
                     .tooltip(Tooltip::text(
-                        i18n::t!("breadcrumb.md_preview_tip"),
+                        i18n::t!(
+                            "breadcrumb.md_side_preview_tip",
+                            "key" => keymap_core::keystroke_label_in("Editor", "cmd-k v")
+                        ),
                         theme.clone(),
                     ))
                     .on_mouse_down(
@@ -1114,8 +1229,8 @@ impl Workspace {
                         cx.listener(move |_this, _, _window, cx| {
                             cx.stop_propagation();
                             editor.update(cx, |editor, cx| {
-                                let next = !editor.rendered_markdown();
-                                editor.set_rendered_markdown(next, cx);
+                                let next = !editor.side_preview();
+                                editor.set_side_preview(next, cx);
                             });
                         }),
                     )
@@ -1224,6 +1339,7 @@ impl Workspace {
                     .child(SharedString::from(crumbs)),
             )
             .children(markdown_toggle)
+            .children(side_toggle)
             .children(html_toggle)
     }
 
@@ -1563,6 +1679,11 @@ impl Workspace {
             })
             .min_h_0()
             .min_w_0()
+            // Finder から落とす（O29）: Markdown に画像 = リンクを入れる・それ以外 = タブで開く。
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                let position = Some(window.mouse_position());
+                this.drop_paths_on_editor(paths.paths().to_vec(), None, position, window, cx)
+            }))
             .child(self.render_main_tabstrip(cx))
             .child(
                 div()
@@ -1595,12 +1716,18 @@ impl Workspace {
         editor: &Entity<EditorView>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let drop_target = editor.clone();
         div()
             .flex_1()
             .flex()
             .flex_col()
             .min_h_0()
             .min_w_0()
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                let position = Some(window.mouse_position());
+                let target = Some(drop_target.clone());
+                this.drop_paths_on_editor(paths.paths().to_vec(), target, position, window, cx)
+            }))
             .child(self.render_split_tabstrip(editor, cx))
             .child(self.render_breadcrumb(editor, cx))
             .child(
@@ -1766,6 +1893,10 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .gap(px(10.))
+                // タブが無い時も Finder から落としたファイルを開く（O29）。
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                    this.drop_paths_on_editor(paths.paths().to_vec(), None, None, window, cx)
+                }))
                 .child(
                     div()
                         .text_size(px(15.))
@@ -2080,32 +2211,59 @@ impl Workspace {
         };
         // 承認待ち signal は1Hz時計だけで反転。マスコットの5/10fps時計とは共有しない。
         let attention_bright = self.visual_tick % 2 == 0;
+        // 右クリックで出し入れできる項目（O27・settings.json の `statusbar_hidden`）。知らせは常に出す。
+        let hidden = settings::get(cx).statusbar_hidden.clone();
+        let shows = |id: &str| statusbar_items::statusbar_shows(&hidden, id);
+        let (show_color, show_branch, show_diagnostics, show_terminal) = (
+            shows("color"),
+            shows("branch"),
+            shows("diagnostics"),
+            shows("terminal"),
+        );
+        let (show_activity, show_usage, show_cursor, show_encoding, show_language) = (
+            shows("activity"),
+            shows("usage"),
+            shows("cursor"),
+            shows("encoding"),
+            shows("language"),
+        );
+        let branch = branch.filter(|_| show_branch);
+        let cursor = cursor.filter(|_| show_cursor);
+        let language = language.filter(|_| show_language);
         let left = div()
             .flex()
             .items_center()
             .gap_3()
             // プロジェクト色スウォッチ（footer から色変更・M13）。常に「今の窓の色」が見え、クリックで色ピッカー（⌘K⌘C と同経路）。
-            .child(
-                div()
-                    .id("statusbar-project-color")
-                    .size(px(11.))
-                    .rounded_full()
-                    .bg(self.accent())
-                    .border_1()
-                    .border_color(theme.border)
-                    .cursor_pointer()
-                    .hover(|style| style.border_color(theme.fg2))
-                    .tooltip(Tooltip::text(i18n::t!("cmd.project_color"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            // クリック位置の真上にピッカーを出す（footer から開くので左上へ飛ばさない）。
-                            let anchor = gpui::point(event.position.x, event.position.y - px(176.));
-                            this.open_color_picker(this.project_sessions.active, anchor, window, cx)
-                        }),
-                    ),
-            )
+            .when(show_color, |element| {
+                element.child(
+                    div()
+                        .id("statusbar-project-color")
+                        .size(px(11.))
+                        .rounded_full()
+                        .bg(self.accent())
+                        .border_1()
+                        .border_color(theme.border)
+                        .cursor_pointer()
+                        .hover(|style| style.border_color(theme.fg2))
+                        .tooltip(Tooltip::text(i18n::t!("cmd.project_color"), theme.clone()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                // クリック位置の真上にピッカーを出す（footer から開くので左上へ飛ばさない）。
+                                let anchor =
+                                    gpui::point(event.position.x, event.position.y - px(176.));
+                                this.open_color_picker(
+                                    this.project_sessions.active,
+                                    anchor,
+                                    window,
+                                    cx,
+                                )
+                            }),
+                        ),
+                )
+            })
             .when_some(remote_host, |element, remote_host| {
                 // SSH チップ = 接続状態の表示（2026-09-08）。「SSH」の色が状態: 接続済み=ok・
                 // 接続中=warn・切断=err・未接続（遅延接続でまだ触っていない）=fg2。接続済み以外は
@@ -2230,92 +2388,96 @@ impl Workspace {
                         ),
                 )
             })
-            .child(
-                div()
-                    .id("statusbar-diagnostics")
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg2))
-                    .rounded(px(4.))
-                    .px(px(4.))
-                    // 診断件数。記号は文字グリフではなく Lucide の circle-x / triangle-alert（フォント差で崩れない）。
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(3.))
-                            .text_color(error_color)
-                            .child(
-                                svg()
-                                    .path("icons/circle-x.svg")
-                                    .size(px(12.))
-                                    .flex_none()
-                                    .text_color(error_color),
-                            )
-                            .child(format!("{errors}")),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(3.))
-                            .text_color(warning_color)
-                            .child(
-                                svg()
-                                    .path("icons/triangle-alert.svg")
-                                    .size(px(12.))
-                                    .flex_none()
-                                    .text_color(warning_color),
-                            )
-                            .child(format!("{warnings}")),
-                    )
-                    // クリックで診断一覧（ファイル別・M11）。
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.open_diagnostics_panel(&DiagnosticsPanel, window, cx)
-                        }),
-                    ),
-            )
+            .when(show_diagnostics, |element| {
+                element.child(
+                    div()
+                        .id("statusbar-diagnostics")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg2))
+                        .rounded(px(4.))
+                        .px(px(4.))
+                        // 診断件数。記号は文字グリフではなく Lucide の circle-x / triangle-alert（フォント差で崩れない）。
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(3.))
+                                .text_color(error_color)
+                                .child(
+                                    svg()
+                                        .path("icons/circle-x.svg")
+                                        .size(px(12.))
+                                        .flex_none()
+                                        .text_color(error_color),
+                                )
+                                .child(format!("{errors}")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(3.))
+                                .text_color(warning_color)
+                                .child(
+                                    svg()
+                                        .path("icons/triangle-alert.svg")
+                                        .size(px(12.))
+                                        .flex_none()
+                                        .text_color(warning_color),
+                                )
+                                .child(format!("{warnings}")),
+                        )
+                        // クリックで診断一覧（ファイル別・M11）。
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.open_diagnostics_panel(&DiagnosticsPanel, window, cx)
+                            }),
+                        ),
+                )
+            })
             // ターミナル切替（診断を見た足でそのままターミナルへ行く動線・本人要望）。
             // レール / titlebar の下ドックボタン / ⌃` と同じ `toggle_terminal`。開いている間は面を灯す。
-            .child(
-                div()
-                    .id("statusbar-terminal")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(20.))
-                    .px(px(5.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .text_color(if terminal_open { theme.fg0 } else { theme.fg2 })
-                    .when(terminal_open, |element| element.bg(theme.bg3))
-                    .hover(|style| style.bg(theme.bg3))
-                    .child(
-                        svg()
-                            .path("icons/square-terminal.svg")
-                            .size(px(13.))
-                            .flex_none()
-                            .text_color(if terminal_open { theme.fg0 } else { theme.fg2 }),
-                    )
-                    .tooltip(Tooltip::text(i18n::t!("rail.terminal"), theme.clone()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.toggle_terminal(&ToggleTerminal, window, cx)
-                        }),
-                    ),
-            );
+            .when(show_terminal, |element| {
+                element.child(
+                    div()
+                        .id("statusbar-terminal")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(20.))
+                        .px(px(5.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .text_color(if terminal_open { theme.fg0 } else { theme.fg2 })
+                        .when(terminal_open, |element| element.bg(theme.bg3))
+                        .hover(|style| style.bg(theme.bg3))
+                        .child(
+                            svg()
+                                .path("icons/square-terminal.svg")
+                                .size(px(13.))
+                                .flex_none()
+                                .text_color(if terminal_open { theme.fg0 } else { theme.fg2 }),
+                        )
+                        .tooltip(Tooltip::text(i18n::t!("rail.terminal"), theme.clone()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.toggle_terminal(&ToggleTerminal, window, cx)
+                            }),
+                        ),
+                )
+            });
 
         let right = div()
             .flex()
             .items_center()
             .gap_3()
             // 使用量（O11）: いまのスレッドのエージェントの「5h 42% · 週 18%」。値が無ければ出さない。
-            .children(self.render_usage_chip(cx))
+            .children(show_usage.then(|| self.render_usage_chip(cx)).flatten())
             // 前回クラッシュの通知チップ（M13）: クリックでログ抜粋つきのバグ報告 Issue を開く。
             // 色は theme.warn（診断 ▲ と同じ警告色 = 識別色は使わない）。
             .when_some(self.notifications.crash_notice.clone(), |element, _log| {
@@ -2413,7 +2575,9 @@ impl Workspace {
             .when_some(cursor, |element, cursor| {
                 element.child(SharedString::from(cursor))
             })
-            .child(SharedString::from("UTF-8"))
+            .when(show_encoding, |element| {
+                element.child(SharedString::from("UTF-8"))
+            })
             .when_some(language, |element, language| element.child(language));
 
         div()
@@ -2427,12 +2591,24 @@ impl Workspace {
             .border_color(theme.border)
             .text_size(px(11.))
             .text_color(theme.fg1)
+            // 右クリック = 項目の出し入れ（O27）。
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.show_statusbar_menu(event.position, cx)
+                }),
+            )
             .child(if self.chat_mode() {
                 self.render_chat_status(cx).into_any_element()
             } else {
                 left.into_any_element()
             })
-            .child(self.render_activity_rollup(cx)) // 中央＝状態の常設ロールアップ（herdr 本来の形）
+            // 中央＝状態の常設ロールアップ（herdr 本来の形）。隠した時も左右を両端へ分ける空きは残す。
+            .child(if show_activity {
+                self.render_activity_rollup(cx)
+            } else {
+                div().flex_1().into_any_element()
+            })
             .child(right)
     }
 

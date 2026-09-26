@@ -18,6 +18,8 @@ pub(crate) struct ProjectSlot {
     /// アクティブ session の `EditorArea.tabs` から [`Workspace::sync_active_slot`] で同期する。
     pub(crate) open_files: Vec<PathBuf>,
     pub(crate) active_file: usize,
+    /// ピン留めしたタブのファイル（O26）。`open_files` の先頭側に並ぶ。`sync_active_slot` で同期する。
+    pub(crate) pinned_files: Vec<PathBuf>,
     /// `.necoder/settings.json` の絵文字アイコン（None = 頭文字モノグラム）。
     pub(crate) icon: Option<SharedString>,
     /// 画像アイコン（settings の `icon` 画像パス or 規約 `.necoder/icon.png`）。絵文字より優先。
@@ -84,6 +86,8 @@ pub struct ProjectSession {
     pub(crate) picker_worktree_rows: Vec<PathBuf>,
     pub(crate) picker_ssh_hosts: Vec<host::SshConfigHost>,
     pub(crate) picker_ssh_recent: Vec<String>,
+    /// SSH のホストピッカーを「接続を確かめる」で開いた（選んでも開かずに試すだけ・O37）。
+    pub(crate) picker_ssh_testing: bool,
     /// スレッド履歴 Picker の行データ (id, name, color_index, created_at_ms, last_input_at_ms)。
     /// 時刻は復元時に Thread へ引き継ぐ（「いつスタート/最終入力」表示・M14）。
     pub(crate) picker_history: Vec<(String, String, i64, i64, Option<i64>)>,
@@ -236,6 +240,7 @@ impl Workspace {
             picker_worktree_rows: Vec::new(),
             picker_ssh_hosts: Vec::new(),
             picker_ssh_recent: Vec::new(),
+            picker_ssh_testing: false,
             picker_history: Vec::new(),
             picker_open_rows: Vec::new(),
             todo_panel,
@@ -328,6 +333,12 @@ impl Workspace {
                 for slot in &mut workspace.project_sessions.projects {
                     if let Some(record) = by_id.get(slot.task_space.id.as_str()) {
                         // lifecycle は台帳が正・kind は worktree の現実（branch 接頭辞）が正。
+                        // ただし Fleet で取り込んだ linked worktree（`task/` でないブランチ）は台帳の
+                        // Task を正にする（O21・再起動で統合先扱いへ戻さない）。メインの作業ツリーは
+                        // Task にしない。
+                        if record.kind == SpaceKind::Task && slot.task_space.linked {
+                            slot.task_space.kind = SpaceKind::Task;
+                        }
                         slot.task_space.repository_id = record.repository_id.clone();
                         slot.task_space.title = SharedString::from(record.title.clone());
                         slot.task_space.phase = record.phase;
@@ -393,6 +404,7 @@ impl Workspace {
                             title: SharedString::from(record.title.clone()),
                             text,
                             kind,
+                            space: Some(SpaceId(event.task_id.clone())),
                         });
                     }
                     workspace.notifications.news = backfill; // 既に新しい順（id DESC）
@@ -452,9 +464,16 @@ impl Workspace {
         let mut record = slot.task_space.to_record(slot);
         let news_color = slot.color;
         let news_title = slot.task_space.title.clone();
+        let news_space = slot.task_space.id.clone();
         // ニュース = task_events の鏡（P2）。台帳へ書く遷移と同じ場所で 1 行積む。
         let (news_kind, news_text) = Self::news_text_for_phase(phase, digest);
-        self.push_news(news_kind, news_color, news_title, news_text);
+        self.push_news(
+            news_kind,
+            news_color,
+            news_title,
+            news_text,
+            Some(news_space),
+        );
         // 監督バーの ✳ 総括はキューに影響する遷移からデバウンス生成（P4）。
         self.schedule_control_summary(cx);
         // Dock の要対応バッジ（失敗した Task も数える・O12）。Workspace を読むので update を抜けてから。
@@ -586,6 +605,7 @@ impl Workspace {
                         explorer: ExplorerProject::default(),
                         open_files: Vec::new(),
                         active_file: 0,
+                        pinned_files: Vec::new(),
                         icon: identity.icon,
                         icon_image: identity.icon_image,
                         worktree_branch: None,
@@ -748,6 +768,7 @@ impl Workspace {
                 picker_worktree_rows: Vec::new(),
                 picker_ssh_hosts: Vec::new(),
                 picker_ssh_recent: Vec::new(),
+                picker_ssh_testing: false,
                 picker_history: Vec::new(),
                 picker_open_rows: Vec::new(),
                 todo_panel,
@@ -768,6 +789,16 @@ impl Workspace {
         let chat_search = cx.new(|cx| EditorView::plain(theme.clone(), theme.fg2, true, cx));
         cx.observe(&chat_search, |workspace, _, cx| {
             workspace.sync_chat_search(cx)
+        })
+        .detach();
+        // Fleet サイドバーの Task の絞り込み欄（O21）。打つたびに写しを更新して描き直す。
+        let fleet_filter = cx.new(|cx| EditorView::plain(theme.clone(), theme.fg2, true, cx));
+        cx.observe(&fleet_filter, |workspace, filter, cx| {
+            let query = filter.read(cx).plain_text();
+            if workspace.chrome.fleet_filter_query != query {
+                workspace.chrome.fleet_filter_query = query;
+                cx.notify();
+            }
         })
         .detach();
         let mut workspace = Workspace {
@@ -810,6 +841,19 @@ impl Workspace {
                 stage_tabs: HashMap::new(),
                 fleet_repository: None,
                 fleet_grids: HashMap::new(),
+                fleet_worktrees: HashMap::new(),
+                hide_external_worktrees: false,
+                fleet_filter,
+                fleet_filter_query: String::new(),
+                fleet_sort: Default::default(),
+                fleet_selection: Vec::new(),
+                fleet_selection_anchor: None,
+                adopt_as_task: std::collections::HashSet::new(),
+                pending_task_prompts: HashMap::new(),
+                pending_task_agents: HashMap::new(),
+                task_conflicts: HashMap::new(),
+                task_creations: Vec::new(),
+                next_task_creation_id: 0,
                 fleet_cell_menu: None,
                 fleet_bottom_view: FleetBottomView::News,
                 agent_full_screen: std::env::var_os("NECODER_AGENT_FULLSCREEN").is_some(),
@@ -856,12 +900,23 @@ impl Workspace {
                 control_focus: cx.focus_handle(),
                 herd_solo_expanded: true,
                 task_renaming: None,
+                terminal_renaming: None,
+                focus_next_frame: None,
+                pending_font_picker: None,
+                pending_shell_picker: false,
+                statusbar_menu: None,
+                task_details: None,
+                ssh_registering: None,
+                auto_branches: HashMap::new(),
             },
             overlays: WorkspaceOverlays {
                 picker: None,
                 picker_mode: PickerMode::Files,
                 picker_files: Vec::new(),
                 picker_themes: Vec::new(),
+                picker_fonts: Vec::new(),
+                picker_font_key: "",
+                picker_shells: Vec::new(),
                 theme_before_preview: None,
                 picker_observation: None,
                 color_picker: None,
@@ -875,9 +930,14 @@ impl Workspace {
                 add_project_dialog_open: false,
                 pending_project_switch: None,
                 shortcut_sheet: None,
+                keymap_editing: None,
                 // offscreen QA: NECODER_ABOUT=1 で起動時から About モーダルを開く（NECODER_SETTINGS と同型）。
                 about: std::env::var_os("NECODER_ABOUT").map(|_| cx.focus_handle()),
                 usage_popover: None,
+                ports: None,
+                inbox: None,
+                resources: None,
+                cleanup: None,
                 usage_stats: None,
                 project_flash: None,
                 project_flash_gen: 0,
@@ -887,6 +947,7 @@ impl Workspace {
                 toast_gen: 0,
                 crash_notice: None,
                 news: Vec::new(),
+                inbox: Vec::new(),
             },
             persistence: WorkspacePersistence {
                 session_writer: None,
@@ -902,6 +963,7 @@ impl Workspace {
             connection_pumps: std::collections::HashMap::new(),
             control_summary: None,
             control_summary_gen: 0,
+            auto_save_generation: 0,
             focus_recovery_installed: false,
             last_focused: None,
             restored_source_map: source_map,
@@ -962,6 +1024,7 @@ impl Workspace {
                 insert_text: label.to_string(),
                 detail: Some(SharedString::from(detail.to_string())),
                 kind: SharedString::from(kind.to_string()),
+                caret: None,
             };
             workspace.completion = Some(CompletionState {
                 items: vec![
@@ -975,6 +1038,7 @@ impl Workspace {
                 selected: 1,
                 position: point(px(380.), px(210.)),
                 focus: cx.focus_handle(),
+                slash: false,
             });
         }
         // 開発用: NECODER_NAMING=1 でルートへの新規ファイル命名入力を開いた状態で撮る。
@@ -1176,6 +1240,7 @@ impl Workspace {
             if let Some(slot) = self.project_sessions.projects.get_mut(index) {
                 slot.open_files = tabs.files.clone();
                 slot.active_file = tabs.active;
+                slot.pinned_files = tabs.pinned.clone();
             }
         }
         self.open_slot_files(window, cx);
@@ -1230,10 +1295,17 @@ impl Workspace {
             .map(|tab| tab.path.clone())
             .collect();
         let active_file = self.active_tab.min(files.len().saturating_sub(1));
+        let pinned: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.pinned && !tab.transient)
+            .map(|tab| tab.path.clone())
+            .collect();
         let active = self.project_sessions.active;
         if let Some(slot) = self.project_sessions.slot_mut(active) {
             slot.open_files = files;
             slot.active_file = active_file;
+            slot.pinned_files = pinned;
         }
     }
 
@@ -1264,6 +1336,7 @@ impl Workspace {
         let input_subscription = cx.subscribe_in(&editor, window, Self::on_editor_typed);
         let hover_subscription = cx.subscribe_in(&editor, window, Self::on_editor_hover);
         let link_subscription = cx.subscribe_in(&editor, window, Self::on_preview_link);
+        let blur_subscription = self.auto_save_on_blur(&editor, window, cx);
         self.tabs.push(EditorTab {
             path: title_path,
             content: TabContent::Editor {
@@ -1272,8 +1345,11 @@ impl Workspace {
                 _input_subscription: input_subscription,
                 _hover_subscription: hover_subscription,
                 _link_subscription: link_subscription,
+                _blur_subscription: blur_subscription,
             },
             transient: true,
+            pinned: false,
+            preview: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -1286,8 +1362,14 @@ impl Workspace {
         self.dismiss_buffer_search(cx);
         self.close_hover(cx);
         let rail_had_focus = self.chrome.rail_focus.is_focused(window);
-        let (files, active_file) = match self.active_slot() {
-            Some(slot) => (slot.open_files.clone(), slot.active_file),
+        // ピン留めは開き終えてから戻す（1 枚開くたびに `sync_active_slot` が slot を今のタブ列で
+        // 書き直すので、先に控えておく）。
+        let (files, active_file, pinned) = match self.active_slot() {
+            Some(slot) => (
+                slot.open_files.clone(),
+                slot.active_file,
+                slot.pinned_files.clone(),
+            ),
             None => return,
         };
         let Some(worktree) = self.active_worktree() else {
@@ -1297,7 +1379,7 @@ impl Workspace {
         self.tabs.clear();
         self.active_tab = 0;
         if host.is_remote() {
-            self.open_slot_files_remote(host, files, active_file, window, cx);
+            self.open_slot_files_remote(host, files, active_file, pinned, window, cx);
             return;
         }
         for path in files {
@@ -1310,6 +1392,7 @@ impl Workspace {
         if active_file < self.tabs.len() {
             self.select_tab(active_file, window, cx);
         }
+        self.restore_tab_pins(&pinned);
         self.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
     }
 
@@ -1348,6 +1431,7 @@ impl Workspace {
         host: Arc<dyn Host>,
         files: Vec<PathBuf>,
         active_file: usize,
+        pinned: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1405,6 +1489,7 @@ impl Workspace {
                 if active_file < workspace.tabs.len() {
                     workspace.select_tab(active_file, window, cx);
                 }
+                workspace.restore_tab_pins(&pinned);
                 workspace.restore_rail_focus_after_tabs(rail_had_focus, window, cx);
             });
         })

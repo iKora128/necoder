@@ -22,8 +22,8 @@ use gpui::{
 use theme_core::Theme;
 
 use crate::{
-    ansi_to_hsla, is_default_background, term_probe, GridFrame, RenderCell, TerminalLink,
-    TerminalView, FONT_SIZE, LINE_HEIGHT,
+    ansi_to_hsla, background_hsla, is_default_background, term_probe, GridFrame, RenderCell,
+    TerminalColors, TerminalLink, TerminalView,
 };
 
 /// 薄い（DIM）文字の不透明度。
@@ -47,12 +47,16 @@ pub(crate) struct TerminalPrepaint {
     strikethrough_offset: Pixels,
     focused: bool,
     theme: Theme,
+    /// 取り込んだ配色（O25・無ければ既定）。
+    colors: TerminalColors,
     links: Vec<TerminalLink>,
     hovered_link: Option<usize>,
     /// 検索の一致（表示範囲）と、いま見ている一致。
     search_matches: Vec<Match>,
     current_match: Option<Match>,
     columns: usize,
+    /// 文字の大きさ（見た目の設定・O25）。セルごとの shape に使う。
+    font_size: Pixels,
     hitbox: Hitbox,
 }
 
@@ -204,11 +208,13 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        // 等幅セル幅を 'M' を shape して測る。
+        // 文字の大きさと行の高さは見た目の設定から（O25）。等幅セル幅は 'M' を shape して測る。
+        let appearance = self.terminal.read(cx).appearance.clone();
+        let font_size = px(appearance.font_size);
         let font = window.text_style().font();
         let sample = window.text_system().shape_line(
             SharedString::from("M"),
-            px(FONT_SIZE),
+            font_size,
             &[TextRun {
                 len: 1,
                 font: font.clone(),
@@ -222,15 +228,15 @@ impl Element for TerminalElement {
         let cell_width = if sample.width > px(0.) {
             sample.width
         } else {
-            px(FONT_SIZE * 0.6)
+            font_size * 0.6
         };
-        let line_height = px(LINE_HEIGHT);
+        let line_height = px(appearance.line_height());
         // 下線はベースラインの少し下（GPUI の文字の下線と同じ辺り）・二重下線が収まる高さまで。
         // 取り消し線は x 高さの真ん中。
         let font_id = window.text_system().resolve_font(&font);
-        let ascent = window.text_system().ascent(font_id, px(FONT_SIZE));
-        let descent = px(f32::from(window.text_system().descent(font_id, px(FONT_SIZE))).abs());
-        let x_height = window.text_system().x_height(font_id, px(FONT_SIZE));
+        let ascent = window.text_system().ascent(font_id, font_size);
+        let descent = px(f32::from(window.text_system().descent(font_id, font_size)).abs());
+        let x_height = window.text_system().x_height(font_id, font_size);
         let baseline = (line_height - ascent - descent) / 2. + ascent;
         let underline_offset = (baseline + descent * 0.5).min(line_height - px(3.));
         let strikethrough_offset = baseline - x_height / 2.;
@@ -274,11 +280,13 @@ impl Element for TerminalElement {
                 strikethrough_offset,
                 focused,
                 theme: terminal.theme.clone(),
+                colors: appearance.colors.clone(),
                 links: content.links.clone(),
                 hovered_link: terminal.hovered_link,
                 search_matches: content.search_matches.clone(),
                 current_match: content.current_match.clone(),
                 columns,
+                font_size,
                 hitbox,
             }
         })
@@ -318,7 +326,9 @@ impl Element for TerminalElement {
         let font = window.text_style().font();
 
         // 面全体の背景。
-        window.paint_quad(fill(bounds, theme.bg1));
+        let colors = &prepaint.colors;
+        let surface = background_hsla(theme, colors);
+        window.paint_quad(fill(bounds, surface));
 
         // ① 既定でない背景セルの矩形。
         for cell in &prepaint.cells {
@@ -329,7 +339,7 @@ impl Element for TerminalElement {
             if !is_default_background(background) {
                 window.paint_quad(fill(
                     Bounds::new(cell_origin(cell.point), size(cell_width, line_height)),
-                    ansi_to_hsla(background, theme),
+                    ansi_to_hsla(background, theme, colors),
                 ));
             }
         }
@@ -445,13 +455,13 @@ impl Element for TerminalElement {
             } else {
                 cell.fg
             };
-            let mut color = ansi_to_hsla(foreground, theme);
+            let mut color = ansi_to_hsla(foreground, theme, colors);
             if cell.flags.contains(Flags::DIM) {
                 color = color.opacity(DIM_OPACITY);
             }
             // 塗りのカーソルの下の文字は視認性のため面の色で描く。
             if filled_cursor == Some(cell.point) {
-                color = theme.bg1;
+                color = surface;
             }
             let position = cell_origin(cell.point);
             if cell.character != ' ' {
@@ -472,7 +482,7 @@ impl Element for TerminalElement {
                 };
                 let shaped = window.text_system().shape_line(
                     SharedString::from(cell.character.to_string()),
-                    px(FONT_SIZE),
+                    prepaint.font_size,
                     &[run],
                     Some(cell_width),
                 );
@@ -491,7 +501,7 @@ impl Element for TerminalElement {
             if let Some(kind) = underline_kind(cell.flags) {
                 let underline_color = cell
                     .underline_color
-                    .map(|underline| ansi_to_hsla(underline, theme))
+                    .map(|underline| ansi_to_hsla(underline, theme, colors))
                     .map(|underline| {
                         if cell.flags.contains(Flags::DIM) {
                             underline.opacity(DIM_OPACITY)

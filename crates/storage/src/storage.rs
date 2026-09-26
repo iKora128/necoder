@@ -1795,7 +1795,8 @@ impl Storage {
 
     // ── 変更レビューの注記（再起動しても残す・束ねる単位ごとに読む） ──
 
-    /// 注記を 1 件書く（同じ id なら上書き）。
+    /// 注記を 1 件書く（同じ id なら上書き）。**`updated_at` が今の行より古い書き込みは捨てる**
+    /// （R03: 書き込みが逆順で届いても、新しい本文・状態を古いもので巻き戻さない）。
     pub fn upsert_review_note(&self, note: &ReviewNoteRecord) -> Result<()> {
         let note = note.clone();
         self.run(move |conn| {
@@ -1806,7 +1807,8 @@ impl Storage {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                      ON CONFLICT(id) DO UPDATE SET
                         scope = ?2, target_kind = ?3, target = ?4, body = ?5, state = ?6,
-                        sent_at = ?7, updated_at = ?9",
+                        sent_at = ?7, updated_at = ?9
+                     WHERE review_notes.updated_at <= ?9",
                     (
                         note.id.as_str(),
                         note.scope.as_str(),
@@ -2550,6 +2552,47 @@ mod tests {
         assert_eq!(
             ReviewNoteState::from_str_lossy("??"),
             ReviewNoteState::Unsent
+        );
+        drop(storage);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// R03: 更新が逆順で届いても、新しい `updated_at` の本文・状態が残る。
+    #[test]
+    fn review_note_updates_never_go_back_in_time() {
+        let path = temp_db("review_notes_order");
+        let _ = std::fs::remove_file(&path);
+        let storage = Storage::open(&path).expect("DB を開ける");
+        let version = |body: &str, state: ReviewNoteState, updated_at: i64| ReviewNoteRecord {
+            id: "a".to_string(),
+            scope: "task-1".to_string(),
+            target_kind: "diff_lines".to_string(),
+            target: "{}".to_string(),
+            body: body.to_string(),
+            state,
+            sent_at: None,
+            created_at: 1,
+            updated_at,
+        };
+        storage
+            .upsert_review_note(&version("新しい本文", ReviewNoteState::Resolved, 30))
+            .unwrap();
+        // 先に書いたはずの古い版が後から届く。
+        storage
+            .upsert_review_note(&version("古い本文", ReviewNoteState::Unsent, 20))
+            .unwrap();
+        let notes = storage.load_review_notes("task-1").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].body, "新しい本文");
+        assert_eq!(notes[0].state, ReviewNoteState::Resolved);
+        assert_eq!(notes[0].updated_at, 30);
+        // 同じ時刻の書き直しは通す（同じ ms の連続編集を落とさない）。
+        storage
+            .upsert_review_note(&version("同じ時刻の本文", ReviewNoteState::Resolved, 30))
+            .unwrap();
+        assert_eq!(
+            storage.load_review_notes("task-1").unwrap()[0].body,
+            "同じ時刻の本文"
         );
         drop(storage);
         let _ = std::fs::remove_file(&path);

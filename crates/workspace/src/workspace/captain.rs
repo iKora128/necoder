@@ -48,7 +48,7 @@ impl Workspace {
             return;
         };
         let Some(repository) = self.project_sessions.projects.get(source).map(|slot| slot.repository_key().to_string()) else { return; };
-        let Some(integration) = self.project_sessions.projects.iter().position(|slot| slot.task_space.is_integration() && slot.repository_key() == repository) else { return; };
+        let Some(integration) = self.integration_slot_for(&repository) else { return; };
         if event != "flush" {
             self.chrome.captain_pending.entry(repository.clone()).or_default().push(format!("{event}: {title} — {}", digest.as_deref().unwrap_or("")));
         }
@@ -133,6 +133,7 @@ impl Workspace {
             color,
             SharedString::from(i18n::t!("captain.title")),
             text.clone(),
+            None,
         );
         if let Some(storage) = self.persistence.storage.clone() {
             let payload = serde_json::json!({ "text": text.as_ref() }).to_string();
@@ -197,7 +198,7 @@ impl Workspace {
         let color = slot.color;
         let repository = slot.repository_key().to_string();
         self.chrome.captain_pending.entry(repository).or_default().push(format!("human_send: {title} / {thread}: {text}"));
-        self.push_news(NewsKind::HumanSend, color, title, text.to_string().into());
+        self.push_news(NewsKind::HumanSend, color, title, text.to_string().into(), Some(SpaceId(id.clone())));
         if let Some(storage) = self.persistence.storage.clone() {
             let payload = serde_json::json!({"thread": thread.as_ref(), "text": text}).to_string();
             cx.background_executor().spawn(async move {

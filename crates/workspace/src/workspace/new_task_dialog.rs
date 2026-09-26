@@ -6,10 +6,27 @@ use crate::workspace::*;
 /// 開いている ＋ Task ダイアログ。統合先（main の worktree）を基準に表示・作成する。
 pub(crate) struct NewTaskDialog {
     editor: Entity<EditorView>,
+    /// 「詳細 ▾」を開いているか（O20）。
+    details_open: bool,
+    /// ブランチ名（空 = `task/<slug>`・既にあるブランチならその worktree）。
+    branch_editor: Entity<EditorView>,
+    /// 新しいブランチの起点（空 = リポジトリの既定 → 統合先の HEAD）。
+    base_editor: Entity<EditorView>,
+    /// リポジトリの既定の起点（統合先の `.necoder/settings.json` の `task_base`・O20）。開いた時に 1 回読む。
+    default_base: Option<String>,
     /// 統合先の worktree root。無ければ Task を切れない（ダイアログは案内だけ出す）。
     root: Option<PathBuf>,
     /// `.necoder/worktree-setup.sh` があるか（開いた時点・「作る」で true に）。
     setup_script_present: bool,
+    /// 準備スクリプトを今回は流さない（詳細のチェック・O20）。`.worktreeinclude` は写す。
+    skip_setup: bool,
+    /// 並べて比べるエージェント（表示名・空 = 既定のエージェントで 1 本・O23）。
+    fanout_agents: Vec<String>,
+    /// 並べて比べる時に選べるエージェント（ログイン済みのもの・開いた時に 1 回読む）。
+    /// まだ 1 つも分からなければカタログ全部（選べないより、選んで失敗を見せる方がよい）。
+    fanout_choices: Vec<&'static str>,
+    /// エージェントごとの本数（1〜3）。
+    fanout_count: usize,
     /// 開く直前にフォーカスがあった場所。取り消し（Esc / キャンセル）でそこへ返す。
     previous_focus: Option<FocusHandle>,
 }
@@ -18,16 +35,21 @@ impl Workspace {
     /// アクティブなリポジトリの統合先 slot（`⌂ main`）。
     fn integration_index_for_active_repository(&self) -> Option<usize> {
         let key = self.active_repository_key()?;
-        self.project_sessions.projects.iter().position(|slot| slot.task_space.is_integration() && slot.repository_key() == key)
+        self.integration_slot_for(&key)
     }
 
     pub(super) fn open_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.chrome.new_task.is_some() { return; }
         let editor = cx.new(|cx| EditorView::plain(self.theme.clone(), self.accent(), false, cx));
-        cx.subscribe(&editor, |this, _, event, cx| {
-            if matches!(event, ComposerEvent::Submit) { this.submit_new_task(cx); }
-            cx.notify();
-        }).detach();
+        // 詳細の 2 欄は 1 行（⏎ で作る）。
+        let branch_editor = cx.new(|cx| EditorView::plain(self.theme.clone(), self.accent(), true, cx));
+        let base_editor = cx.new(|cx| EditorView::plain(self.theme.clone(), self.accent(), true, cx));
+        for input in [&editor, &branch_editor, &base_editor] {
+            cx.subscribe(input, |this, _, event, cx| {
+                if matches!(event, ComposerEvent::Submit) { this.submit_new_task(cx); }
+                cx.notify();
+            }).detach();
+        }
         let previous_focus = window.focused(cx);
         window.focus(&editor.read(cx).focus_handle(cx), cx);
         let integration = self.integration_index_for_active_repository().map(|index| &self.project_sessions.projects[index].worktree);
@@ -35,7 +57,26 @@ impl Workspace {
         let setup_script_present = integration.is_some_and(|worktree| {
             worktree.host().metadata(&project::worktree_setup_script(worktree.root())).is_ok()
         });
-        self.chrome.new_task = Some(NewTaskDialog { editor, root, setup_script_present, previous_focus });
+        let default_base = integration.and_then(|worktree| project::repository_task_base_on(worktree.host().as_ref(), worktree.root()));
+        let mut fanout_choices = acp_client::authenticated_agent_labels();
+        if fanout_choices.is_empty() { fanout_choices = acp_client::AGENT_LABELS.to_vec(); }
+        // 使わないエージェント（O16）は並べて比べる候補にも出さない。
+        let agent_settings = settings::get(cx);
+        fanout_choices.retain(|label| settings::agent_label_enabled(&agent_settings, label));
+        self.chrome.new_task = Some(NewTaskDialog {
+            editor,
+            details_open: false,
+            branch_editor,
+            base_editor,
+            default_base,
+            root,
+            setup_script_present,
+            skip_setup: false,
+            fanout_agents: Vec::new(),
+            fanout_choices,
+            fanout_count: 1,
+            previous_focus,
+        });
         cx.notify();
     }
 
@@ -66,8 +107,18 @@ impl Workspace {
         if dialog.root.is_none() { return; }
         let prompt = dialog.editor.read(cx).plain_text();
         if prompt.trim().is_empty() { return; }
+        let field = |input: &Entity<EditorView>| {
+            let text = input.read(cx).plain_text().trim().to_string();
+            (!text.is_empty()).then_some(text)
+        };
+        let start = project::TaskStart {
+            branch: field(&dialog.branch_editor),
+            base: field(&dialog.base_editor),
+            skip_setup: dialog.skip_setup,
+        };
+        let plan = super::fleet_view::plan_fanout(&prompt, start.branch.as_deref(), &dialog.fanout_agents, dialog.fanout_count);
         self.chrome.new_task = None;
-        self.create_prompted_task(prompt, cx);
+        self.create_prompted_tasks(prompt, start, plan, cx);
         cx.notify();
     }
 
@@ -99,7 +150,18 @@ impl Workspace {
         let dialog = self.chrome.new_task.as_ref()?;
         let prompt = dialog.editor.read(cx).plain_text();
         let slug = project::task_slug(&prompt);
-        let worktree = dialog.root.as_deref().and_then(project::task_worktree_dir).map(|dir| dir.join(&slug));
+        let chosen_branch = dialog.branch_editor.read(cx).plain_text().trim().to_string();
+        let typed_base = dialog.base_editor.read(cx).plain_text().trim().to_string();
+        // 起点欄が空ならリポジトリの既定（O20）。どこから切るかを作る前に見せる。
+        let chosen_base = if typed_base.is_empty() { dialog.default_base.clone().unwrap_or_default() } else { typed_base };
+        let folder = if chosen_branch.is_empty() { slug.clone() } else { chosen_branch.replace('/', "-") };
+        let worktree = dialog.root.as_deref().and_then(project::task_worktree_dir).map(|dir| dir.join(&folder));
+        let branch_label = if chosen_branch.is_empty() { format!("task/{slug}") } else { chosen_branch.clone() };
+        let branch_line = if chosen_base.is_empty() {
+            format!("⎇ {branch_label}")
+        } else {
+            i18n::t!("fleet.new_task_from_base", "branch" => &branch_label, "base" => &chosen_base)
+        };
         let mut body = div().id("new-task-dialog").debug_selector(|| "new-task-dialog".to_string()).w(px(600.)).max_w_full().p(px(20.)).flex().flex_col().gap(px(12.)).rounded(px(10.)).bg(self.theme.bg0).border_1().border_color(self.theme.border)
             .child(div().text_size(px(16.)).text_color(self.theme.fg0).child(i18n::t!("fleet.new_task")))
             .child(div().text_size(px(11.)).text_color(self.theme.fg2).child(i18n::t!("fleet.new_task_hint")))
@@ -109,7 +171,7 @@ impl Workspace {
         } else {
             let setup_key = if dialog.setup_script_present { "fleet.new_task_setup_ready" } else { "fleet.new_task_setup_missing" };
             body = body
-                .child(div().text_size(px(11.)).text_color(self.theme.fg1).child(SharedString::from(format!("⎇ task/{slug}"))))
+                .child(div().text_size(px(11.)).text_color(self.theme.fg1).child(SharedString::from(branch_line)))
                 .child(div().text_size(px(11.)).text_color(self.theme.fg2).overflow_hidden().whitespace_nowrap()
                     .child(SharedString::from(i18n::t!("fleet.new_task_worktree", "path" => worktree.as_deref().map(|path| path.display().to_string()).unwrap_or_default()))))
                 .child(div().flex().items_center().gap(px(10.)).text_size(px(11.))
@@ -117,6 +179,95 @@ impl Workspace {
                     .when(!dialog.setup_script_present, |row| row.child(
                         div().id("new-task-setup-create").cursor_pointer().text_color(self.accent()).child(i18n::t!("fleet.new_task_setup_create"))
                             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.create_setup_script(window, cx) })))));
+            // 詳細 ▾（O20）: ブランチ名と起点。空のままなら従来どおり（task/<slug> を統合先の HEAD から）。
+            let open = dialog.details_open;
+            body = body.child(
+                div().id("new-task-details").cursor_pointer().text_size(px(11.)).text_color(self.theme.fg2)
+                    .hover(|style| style.text_color(self.theme.fg1))
+                    .child(SharedString::from(format!("{} {}", if open { "▾" } else { "▸" }, i18n::t!("fleet.new_task_details"))))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(dialog) = this.chrome.new_task.as_mut() { dialog.details_open = !dialog.details_open; }
+                        cx.notify();
+                    })),
+            );
+            if open {
+                let field = |label: String, input: &Entity<EditorView>| {
+                    div().flex().flex_col().gap(px(3.))
+                        .child(div().text_size(px(10.5)).text_color(self.theme.fg2).child(SharedString::from(label)))
+                        // 押した欄にフォーカスを残す（ダイアログ全体の「主入力へ戻す」まで泡立たせない）。
+                        .child(div().h(px(26.)).border_1().border_color(self.theme.border).child(input.clone())
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+                };
+                body = body
+                    .child(field(i18n::t!("fleet.new_task_branch_label"), &dialog.branch_editor))
+                    .child(field(match &dialog.default_base {
+                        Some(base) => i18n::t!("fleet.new_task_base_label_default", "base" => base),
+                        None => i18n::t!("fleet.new_task_base_label"),
+                    }, &dialog.base_editor));
+                // 並べて比べる（O23）: 選んだエージェントごとに Task を切る。選ばなければ既定で 1 本。
+                let chip = |id: (&'static str, usize), label: String, selected: bool| {
+                    div().id(id).px(px(8.)).h(px(22.)).flex().items_center().rounded(px(5.)).text_size(px(11.)).cursor_pointer()
+                        .when(selected, |chip| chip.bg(self.theme.bg3).text_color(self.theme.fg0))
+                        .when(!selected, |chip| chip.border_1().border_color(self.theme.border).text_color(self.theme.fg1)
+                            .hover(|style| style.text_color(self.theme.fg0)))
+                        .child(SharedString::from(label))
+                };
+                let mut agents = div().flex().flex_wrap().gap(px(4.));
+                for (index, label) in dialog.fanout_choices.iter().copied().enumerate() {
+                    let selected = dialog.fanout_agents.iter().any(|agent| agent == label);
+                    agents = agents.child(chip(("new-task-fanout-agent", index), label.to_string(), selected)
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(dialog) = this.chrome.new_task.as_mut() {
+                                if let Some(position) = dialog.fanout_agents.iter().position(|agent| agent == label) {
+                                    dialog.fanout_agents.remove(position);
+                                } else {
+                                    dialog.fanout_agents.push(label.to_string());
+                                }
+                            }
+                            cx.notify();
+                        })));
+                }
+                let mut counts = div().flex().items_center().gap(px(4.))
+                    .child(div().text_size(px(10.5)).text_color(self.theme.fg2).child(SharedString::from(i18n::t!("fleet.new_task_fanout_each"))));
+                for count in 1..=3usize {
+                    counts = counts.child(chip(("new-task-fanout-count", count), count.to_string(), dialog.fanout_count == count)
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(dialog) = this.chrome.new_task.as_mut() { dialog.fanout_count = count; }
+                            cx.notify();
+                        })));
+                }
+                let plan = super::fleet_view::plan_fanout(&prompt, None, &dialog.fanout_agents, dialog.fanout_count);
+                body = body.child(div().flex().flex_col().gap(px(5.))
+                    .child(div().text_size(px(10.5)).text_color(self.theme.fg2).child(SharedString::from(i18n::t!("fleet.new_task_fanout"))))
+                    .child(agents)
+                    .child(counts)
+                    .when(plan.len() > 1, |column| column.child(
+                        div().text_size(px(11.)).text_color(self.theme.fg1).child(SharedString::from(i18n::t!(
+                            "fleet.new_task_fanout_preview",
+                            "count" => plan.len(),
+                            "names" => plan.iter().filter_map(|task| task.title_suffix.clone()).collect::<Vec<_>>().join(" · ")
+                        ))))));
+                // 準備スクリプトを今回は流さない（O20・スクリプトがある時だけ）。
+                if dialog.setup_script_present {
+                    let skip = dialog.skip_setup;
+                    body = body.child(
+                        div().id("new-task-skip-setup").flex().items_center().gap(px(6.)).cursor_pointer()
+                            .text_size(px(11.)).text_color(if skip { self.theme.fg0 } else { self.theme.fg1 })
+                            .child(div().size(px(12.)).rounded(px(3.)).border_1().border_color(self.theme.fg2)
+                                .flex().items_center().justify_center().text_size(px(9.))
+                                .when(skip, |box_| box_.child("✓")))
+                            .child(SharedString::from(i18n::t!("fleet.new_task_skip_setup")))
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(dialog) = this.chrome.new_task.as_mut() { dialog.skip_setup = !dialog.skip_setup; }
+                                cx.notify();
+                            })),
+                    );
+                }
+            }
         }
         body = body.child(div().flex().justify_end().gap(px(10.))
             .child(div().id("new-task-cancel").cursor_pointer().text_color(self.theme.fg2).child(i18n::t!("fleet.new_task_cancel"))
@@ -132,5 +283,38 @@ impl Workspace {
             // `editor::Cancel` を親へ流すので、ここで受ける。
             .on_action(cx.listener(|this, _: &editor_view::Cancel, window, cx| this.cancel_new_task(window, cx)));
         Some(div().absolute().inset_0().occlude().flex().items_center().justify_center().bg(gpui::rgba(0x00000088)).child(body).into_any_element())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ＋ Task はリポジトリの既定の起点（`.necoder/settings.json` の `task_base`・O20）を開いた時に読む。
+    #[gpui::test]
+    fn the_dialog_reads_the_repository_default_base(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("necoder_task_base_{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let project = root.join("project");
+        std::fs::create_dir_all(project.join(".necoder")).expect("作業フォルダを作れる");
+        std::fs::write(project.join(".necoder/settings.json"), r#"{ "task_base": "origin/develop" }"#).expect("書ける");
+        let settings_path = root.join("settings.json");
+        std::fs::write(&settings_path, r#"{"onboarded":true,"agent_prewarm":false}"#).expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_window, cx| Workspace::new(vec![project.clone()], Theme::dark(), None, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.open_new_task(window, cx);
+            let dialog = workspace.chrome.new_task.as_ref().expect("開く");
+            assert_eq!(dialog.default_base.as_deref(), Some("origin/develop"));
+            // 並べて比べるエージェントはログイン済みのもの。1 つも分からなければカタログ全部（空にしない）。
+            let signed_in = acp_client::authenticated_agent_labels();
+            let expected = if signed_in.is_empty() { acp_client::AGENT_LABELS.to_vec() } else { signed_in };
+            assert_eq!(dialog.fanout_choices, expected);
+        });
+        std::fs::remove_dir_all(&root).ok();
     }
 }

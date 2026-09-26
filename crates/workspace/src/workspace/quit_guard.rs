@@ -56,6 +56,9 @@ pub(crate) enum QuitReason {
     Quit,
     /// 最後の窓を閉じる（窓が閉じれば中のエージェントと端末も止まる）。
     CloseLastWindow,
+    /// ほかの窓が残る状態で、動いているものがある窓を閉じる（R04）。止まるのはこの窓の分だけで、
+    /// 「動かし続ける」はアプリ全体を隠さず、この窓だけを最小化する。
+    CloseWindow,
 }
 
 /// 確認ダイアログの状態（開いている間だけ Some）。`focus` は ⏎ / Esc の受け口。
@@ -142,11 +145,13 @@ pub fn quit_now(cx: &mut App) {
     cx.quit();
 }
 
-/// OS 経由の窓閉じ（赤いボタン・Windows の × 等）の関所。この窓が最後の workspace 窓で、
-/// 動いているものがあれば閉じずに確認を出して `true`（＝閉じるのを止めた）を返す。
+/// OS 経由の窓閉じ（赤いボタン・Windows の × 等）の関所。**この窓で**動いているものがあれば
+/// 閉じずに確認を出して `true`（＝閉じるのを止めた）を返す。ほかの窓が開いているかどうかは
+/// 確認の文面を変えるだけで、聞くかどうかには関わらない（R04: 別の窓があるだけで素通しすると、
+/// 実行中の窓を確認なしで閉じられた）。
 ///
 /// `on_window_should_close` の中（この窓を update 中・Workspace 自体は未借用）から呼ぶ。
-pub(crate) fn intercept_last_window_close(window: &mut Window, cx: &mut App) -> bool {
+pub(crate) fn intercept_window_close(window: &mut Window, cx: &mut App) -> bool {
     let Some(Some(workspace)) = window.root::<Workspace>() else {
         return false;
     };
@@ -210,8 +215,9 @@ impl Workspace {
         work
     }
 
-    /// 窓を閉じる前の関所（OS 経由・自前 titlebar の × の共通）。最後の窓で動いているものがあれば
-    /// 確認を出して `true` を返す（呼び出し側は閉じない）。
+    /// 窓を閉じる前の関所（OS 経由・自前 titlebar の × の共通）。**この窓で**動いているものがあれば
+    /// 確認を出して `true` を返す（呼び出し側は閉じない）。数えるのはこの窓の分だけなので、
+    /// 何も動いていない窓は、ほかの窓で何が動いていても確認なしで閉じる。
     pub(crate) fn guard_window_close(
         &mut self,
         window: &mut Window,
@@ -220,19 +226,21 @@ impl Workspace {
         if is_quitting() {
             return false;
         }
+        let work = self.running_work(cx);
+        if !quit_needs_confirmation(settings::get(cx).quit_confirmation(), work) {
+            return false;
+        }
         let this_window = window.window_handle();
         let other_windows = cx
             .windows()
             .into_iter()
             .any(|other| other != this_window && other.downcast::<Workspace>().is_some());
-        if other_windows {
-            return false;
-        }
-        let work = self.running_work(cx);
-        if !quit_needs_confirmation(settings::get(cx).quit_confirmation(), work) {
-            return false;
-        }
-        self.open_quit_confirm(QuitReason::CloseLastWindow, work, window, cx);
+        let reason = if other_windows {
+            QuitReason::CloseWindow
+        } else {
+            QuitReason::CloseLastWindow
+        };
+        self.open_quit_confirm(reason, work, window, cx);
         true
     }
 
@@ -260,10 +268,12 @@ impl Workspace {
         cx.notify();
         match (choice, state.reason) {
             (QuitChoice::Cancel, _) => {}
+            // ほかの窓は見えたままなので、アプリごと隠さずこの窓だけを最小化する。
+            (QuitChoice::KeepRunning, QuitReason::CloseWindow) => window.minimize_window(),
             // 全窓に触るので、この窓の update を抜けてから行う。
             (QuitChoice::KeepRunning, _) => cx.defer(keep_running_out_of_sight),
             (QuitChoice::Stop, QuitReason::Quit) => cx.defer(quit_now),
-            (QuitChoice::Stop, QuitReason::CloseLastWindow) => {
+            (QuitChoice::Stop, QuitReason::CloseLastWindow | QuitReason::CloseWindow) => {
                 self.mark_window_closed();
                 window.remove_window();
             }
@@ -323,15 +333,17 @@ impl Workspace {
             (QuitReason::CloseLastWindow, false) => {
                 i18n::t!("quit_confirm.detail_close_minimize")
             }
+            (QuitReason::CloseWindow, _) => i18n::t!("quit_confirm.detail_close_window"),
         };
-        let keep_label = if mac {
+        // この窓だけを閉じる時は、どの OS でも「この窓を最小化」（アプリは隠さない）。
+        let keep_label = if mac && state.reason != QuitReason::CloseWindow {
             i18n::t!("quit_confirm.keep_running_hide")
         } else {
             i18n::t!("quit_confirm.keep_running_minimize")
         };
         let stop_label = match state.reason {
             QuitReason::Quit => i18n::t!("quit_confirm.quit"),
-            QuitReason::CloseLastWindow => i18n::t!("quit_confirm.close"),
+            QuitReason::CloseLastWindow | QuitReason::CloseWindow => i18n::t!("quit_confirm.close"),
         };
 
         // 既定のボタンだけ面を持たせる（色相は使わない・§1.3）。止める側は worktree 削除と同じ err。
@@ -584,6 +596,76 @@ mod tests {
                 .as_ref()
                 .map(|state| state.reason)),
             Some(QuitReason::CloseLastWindow)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R04: ほかの窓が開いていても、動いている窓を閉じる時は確認する（文面は「この窓」）。
+    /// 何も動いていない窓は、ほかの窓で何が動いていても確認なしで閉じる。
+    #[gpui::test]
+    fn closing_a_running_window_is_guarded_even_with_other_windows_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("necoder_quit_guard_multi_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let projects = [root.join("a"), root.join("b")];
+        for project in &projects {
+            std::fs::create_dir_all(project).unwrap();
+        }
+        let settings_path = root.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .unwrap();
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let running = cx.add_window(|_window, cx| {
+            Workspace::new(vec![projects[0].clone()], Theme::dark(), None, cx)
+        });
+        let idle = cx.add_window(|_window, cx| {
+            Workspace::new(vec![projects[1].clone()], Theme::dark(), None, cx)
+        });
+        cx.run_until_parked();
+        running
+            .update(cx, |workspace, _window, cx| {
+                let panel = workspace.project_sessions.sessions[0].agent_panel.clone();
+                panel.update(cx, |panel, cx| panel.debug_set_activities(cx));
+            })
+            .unwrap();
+
+        let blocked = idle
+            .update(cx, |workspace, window, cx| {
+                workspace.guard_window_close(window, cx)
+            })
+            .unwrap();
+        assert!(
+            !blocked,
+            "何も動いていない窓は、ほかの窓が動いていても確認なしで閉じる"
+        );
+
+        let blocked = running
+            .update(cx, |workspace, window, cx| {
+                workspace.guard_window_close(window, cx)
+            })
+            .unwrap();
+        assert!(
+            blocked,
+            "ほかの窓が開いていても、動いている窓は閉じずに確認"
+        );
+        let reason = running
+            .update(cx, |workspace, _window, _cx| {
+                workspace
+                    .overlays
+                    .quit_confirm
+                    .as_ref()
+                    .map(|state| state.reason)
+            })
+            .unwrap();
+        assert_eq!(
+            reason,
+            Some(QuitReason::CloseWindow),
+            "止まるのはこの窓の分だけ"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -31,10 +31,10 @@ pub mod snapshot;
 
 use futures::channel::mpsc;
 use futures::StreamExt as _;
-use gpui::{
-    canvas, div, prelude::*, px, App, Bounds, Context, EventEmitter, IntoElement, Pixels, Task,
-    Window,
-};
+use gpui::{canvas, div, prelude::*, px, App, Context, EventEmitter, IntoElement, Task, Window};
+// ネイティブ子ビューを置く OS（mac / Windows）だけが使う。Linux で未使用の警告を出さない。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use gpui::{Bounds, Pixels};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use theme_core::Theme;
@@ -63,12 +63,18 @@ pub enum WebViewEvent {
 /// WebView を持たない OS（Linux）では積む側が居ない。
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 enum NativeEvent {
-    PageLoad { url: String, finished: bool },
+    PageLoad {
+        url: String,
+        finished: bool,
+    },
     Title(String),
     /// 最上位の読み込みの失敗（macOS の navigation delegate だけが積む。WebView2 は自前のエラーページ）。
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     LoadFailed(String),
-    Message { sender: String, body: String },
+    Message {
+        sender: String,
+        body: String,
+    },
 }
 
 /// Web タブだけが持つ状態。WebView を持たない OS（Linux）では生成に使う欄が読まれない。
@@ -105,6 +111,7 @@ pub fn disable_native_webviews_for_tests() {
     NATIVE_DISABLED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn native_disabled() -> bool {
     NATIVE_DISABLED.load(std::sync::atomic::Ordering::SeqCst)
 }

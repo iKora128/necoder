@@ -11,6 +11,7 @@
 pub mod review;
 pub mod file_operations;
 pub mod todos;
+pub mod transfer;
 
 use anyhow::{Context as _, Result};
 use host::{CommandOutput, CommandSpec, Host, LocalHost};
@@ -658,6 +659,27 @@ pub fn git_common_dir_on(host: &dyn Host, dir: &Path) -> Option<PathBuf> {
     })
 }
 
+/// `root` が linked worktree（`git worktree add` で作った作業ツリー）か。メインの作業ツリーは
+/// git dir と共通の git dir が同じ、linked は別（`.git/worktrees/<name>`）。repo 外は `false`。
+pub fn is_linked_worktree_on(host: &dyn Host, root: &Path) -> bool {
+    let Some(common) = git_common_dir_on(host, root) else {
+        return false;
+    };
+    let Ok(output) = run_git(
+        host,
+        root,
+        ["rev-parse", "--path-format=absolute", "--git-dir"],
+    ) else {
+        return false;
+    };
+    if !output.success() {
+        return false;
+    }
+    let git_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let canonical = |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    !git_dir.as_os_str().is_empty() && canonical(&git_dir) != canonical(&common)
+}
+
 /// UI / CLI / MCP が同じ TaskSpace ID を生成するための共有実装。
 pub fn stable_worktree_id_on(host: &dyn Host, root: &Path) -> String {
     let identity = format!("{}\0{}", host.id(), root.display());
@@ -862,19 +884,84 @@ pub fn create_task_worktree_on(
     path: &Path,
     branch: &str,
 ) -> Result<()> {
-    let path = path.to_string_lossy().into_owned();
-    let output = run_git(
-        host,
-        dir,
-        ["worktree", "add", "-b", branch, path.as_str(), "HEAD"],
-    )
-    .context("Task worktree の作成に失敗")?;
+    add_task_worktree_on(host, dir, path, Some(branch), "HEAD")
+}
+
+/// Task の worktree を切り出す。`new_branch` が Some なら `start` から新しいブランチを切り、None なら
+/// 既にあるブランチ `start` の worktree を作る。リポジトリに `task_sparse`（[`repository_task_sparse_on`]）が
+/// あれば、そのフォルダ（と根のファイル）だけを取り出す sparse checkout（cone）にする（O20・A24）。
+/// sparse の設定に失敗したら全部を取り出して続ける（空の worktree を残さない）。
+fn add_task_worktree_on(
+    host: &dyn Host,
+    dir: &Path,
+    path: &Path,
+    new_branch: Option<&str>,
+    start: &str,
+) -> Result<()> {
+    let sparse = repository_task_sparse_on(host, dir);
+    let path_text = path.to_string_lossy().into_owned();
+    let mut args: Vec<&str> = vec!["worktree", "add"];
+    if !sparse.is_empty() {
+        args.push("--no-checkout");
+    }
+    if let Some(branch) = new_branch {
+        args.extend(["-b", branch]);
+    }
+    args.extend([path_text.as_str(), start]);
+    let output = run_git(host, dir, args).context("Task worktree の作成に失敗")?;
     anyhow::ensure!(
         output.success(),
         "Task worktree の作成に失敗: {}",
         git_fail_message(&output)
     );
+    if sparse.is_empty() {
+        return Ok(());
+    }
+    let mut set: Vec<&str> = vec!["sparse-checkout", "set", "--cone"];
+    set.extend(sparse.iter().map(String::as_str));
+    let configured = run_git(host, path, set).is_ok_and(|output| output.success());
+    if !configured {
+        eprintln!(
+            "task_sparse を設定できないので全部を取り出します: {}",
+            path.display()
+        );
+    }
+    let branch = new_branch.unwrap_or(start);
+    let output = run_git(host, path, ["checkout", "-q", branch])
+        .context("Task worktree の取り出しに失敗")?;
+    anyhow::ensure!(
+        output.success(),
+        "Task worktree の取り出しに失敗: {}",
+        git_fail_message(&output)
+    );
     Ok(())
+}
+
+/// リポジトリの `.necoder/settings.json` の `task_sparse`（O20・A24）: 新しい Task の worktree に取り出す
+/// フォルダ（根からの相対パス・cone）。空・無い・読めない = 全部。`..` を含む物・`-` で始まる物は捨てる。
+pub fn repository_task_sparse_on(host: &dyn Host, root: &Path) -> Vec<String> {
+    let Ok(content) = host.read_file(&root.join(".necoder").join("settings.json")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&content.bytes) else {
+        return Vec::new();
+    };
+    let Some(entries) = value
+        .get("task_sparse")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(|entry| entry.trim().trim_matches('/').to_string())
+        .filter(|entry| {
+            !entry.is_empty()
+                && !entry.starts_with('-')
+                && !entry.split('/').any(|part| part == "..")
+        })
+        .collect()
 }
 
 /// IntegrationSpace から見た Task branch の merge 可否。`git merge-tree` なので index / worktree を
@@ -915,8 +1002,62 @@ pub fn git_unmerged_count_on(host: &dyn Host, dir: &Path, base: &str) -> Option<
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
+/// 統合の下見で競合した（O19）。[`integrate_branch_on`] がこれを入れたエラーを返し、UI は
+/// `downcast_ref` で見分けて「競合を直させる」（Task のエージェントに頼む）を出す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeConflicts {
+    /// 競合したファイル（リポジトリの根からの相対パス・git の綴り）。
+    pub paths: Vec<String>,
+    /// git の出力（統合の下見の結果・画面とトーストに出す）。
+    pub detail: String,
+}
+
+impl std::fmt::Display for MergeConflicts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "競合のため統合できません: {}", self.detail)
+    }
+}
+
+impl std::error::Error for MergeConflicts {}
+
+/// `branch` を統合先（`integration_dir` の HEAD）へ取り込んだら競合するファイル（O19）。書き込みは
+/// しない（`git merge-tree --write-tree`）。調べられなければ空。
+pub fn merge_conflict_paths_on(
+    host: &dyn Host,
+    integration_dir: &Path,
+    branch: &str,
+) -> Vec<String> {
+    match run_git(
+        host,
+        integration_dir,
+        [
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "HEAD",
+            branch,
+        ],
+    ) {
+        Ok(output) => merge_tree_conflicts(&String::from_utf8_lossy(&output.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// `git merge-tree --write-tree --name-only` の出力から競合したファイルを読む: 1 行目は木の OID、
+/// 続いて空行までが競合したファイル（同じファイルは 1 回だけ）。競合が無ければ OID の 1 行だけ。
+fn merge_tree_conflicts(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// 明示的に merge-ready となった Task を IntegrationSpace へ統合する。
 /// dirty integration / preview conflict は拒否し、merge 自体が失敗した場合も自動 abort して戻す。
+/// 競合した時のエラーは [`MergeConflicts`] を持つ（競合したファイルが分かった時だけ）。
 pub fn integrate_branch_on(
     host: &dyn Host,
     integration_dir: &Path,
@@ -927,11 +1068,18 @@ pub fn integrate_branch_on(
         "IntegrationSpace に未コミット変更があります。統合前に clean にしてください"
     );
     let preview = preview_merge_on(host, integration_dir, branch)?;
-    anyhow::ensure!(
-        preview.clean,
-        "競合のため統合できません: {}",
-        preview.detail
-    );
+    if !preview.clean {
+        let paths = merge_conflict_paths_on(host, integration_dir, branch);
+        anyhow::ensure!(
+            !paths.is_empty(),
+            "競合のため統合できません: {}",
+            preview.detail
+        );
+        return Err(anyhow::Error::new(MergeConflicts {
+            paths,
+            detail: preview.detail,
+        }));
+    }
     let message = format!("Integrate {branch}");
     let output = run_git(
         host,
@@ -3390,6 +3538,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&wt);
     }
 
+    /// O19: 統合先と同じ行を変えた Task は下見で止まり、エラーに競合したファイルが載る（統合先は触らない）。
+    #[test]
+    fn conflicting_integration_names_the_conflicted_files() {
+        let root = scratch("task_conflict");
+        let wt = scratch("task_conflict_wt");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .current_dir(dir)
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "core.autocrlf=false",
+                ])
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&root, &["init", "-q"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "base\n").unwrap();
+        std::fs::write(root.join("b.txt"), "base\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        create_task_worktree_on(&LocalHost, &root, &wt, "task/conflict").unwrap();
+        std::fs::write(wt.join("a.txt"), "task\n").unwrap();
+        std::fs::write(wt.join("c.txt"), "new\n").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["commit", "-q", "-m", "task"]);
+        std::fs::write(root.join("a.txt"), "main\n").unwrap();
+        git(&root, &["commit", "-qam", "main"]);
+        let before = git_head_oid_on(&LocalHost, &root).unwrap();
+
+        let error = integrate_branch_on(&LocalHost, &root, "task/conflict").unwrap_err();
+        let conflicts = error
+            .downcast_ref::<MergeConflicts>()
+            .unwrap_or_else(|| panic!("競合として返る: {error:#}"));
+        assert_eq!(
+            conflicts.paths,
+            vec!["a.txt".to_string()],
+            "競合したファイルだけ"
+        );
+        assert!(error.to_string().starts_with("競合のため統合できません"));
+        assert_eq!(
+            git_head_oid_on(&LocalHost, &root).unwrap(),
+            before,
+            "統合先は触らない"
+        );
+        assert!(git_status_on(&LocalHost, &root).is_empty());
+
+        remove_worktree(&root, &wt, true).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn merge_tree_output_lists_each_conflicted_file_once() {
+        let stdout =
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904\na.txt\nsrc/lib.rs\n\nAuto-merging a.txt\n";
+        assert_eq!(merge_tree_conflicts(stdout), vec!["a.txt", "src/lib.rs"]);
+        assert!(merge_tree_conflicts("4b825dc642cb6eb9a060e54bf8d69288fbee4904\n").is_empty());
+        assert!(merge_tree_conflicts("").is_empty());
+    }
+
     #[test]
     fn push_sets_upstream_to_local_bare_remote() {
         let root = scratch("gitpush");
@@ -3514,6 +3732,73 @@ mod tests {
         assert_eq!(parse_github_slug("git@github.com:owner"), None);
     }
 
+    /// O23（A23）: 自動で名付けたブランチを改名する。同じ名前があれば番号を付け、人が切り替えた
+    /// worktree と push 済みのブランチは断る。
+    #[test]
+    fn auto_named_task_branches_are_renamed_only_when_safe() {
+        let base = scratch("rename_branch");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&repo, &["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(repo.join("a.txt"), "1\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "first"]);
+        git(&repo, &["branch", "task/fix-login"]);
+        let task = base.join("task");
+        let task_str = task.to_string_lossy().to_string();
+        assert!(git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "task/task", &task_str]
+        )
+        .status
+        .success());
+
+        let renamed = rename_task_branch_on(&LocalHost, &task, "task/task", "fix-login").unwrap();
+        assert_eq!(renamed, "task/fix-login-2", "同じ名前は避ける");
+        let head = git(&task, &["symbolic-ref", "--short", "HEAD"]);
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "task/fix-login-2"
+        );
+        assert!(
+            rename_task_branch_on(&LocalHost, &task, "task/task", "other").is_err(),
+            "もう元の名前に居ない"
+        );
+
+        // 起点を追跡しているだけなら改名する（追跡の設定ごと運ぶ）。
+        git(&task, &["config", "branch.task/fix-login-2.remote", "."]);
+        git(
+            &task,
+            &["config", "branch.task/fix-login-2.merge", "refs/heads/main"],
+        );
+        let renamed =
+            rename_task_branch_on(&LocalHost, &task, "task/fix-login-2", "again").unwrap();
+        assert_eq!(renamed, "task/again");
+        let merge = git(&task, &["config", "--get", "branch.task/again.merge"]);
+        assert_eq!(
+            String::from_utf8_lossy(&merge.stdout).trim(),
+            "refs/heads/main"
+        );
+
+        // 同じ名前で push した（`git push -u` の追跡）なら断る。
+        git(
+            &task,
+            &["config", "branch.task/again.merge", "refs/heads/task/again"],
+        );
+        assert!(rename_task_branch_on(&LocalHost, &task, "task/again", "later").is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn task_slug_is_ascii_first_line_and_never_empty() {
         // 1 行目だけ・小文字 ASCII・区切りは '-' に畳む（FLEET-V2 §4.1）。
@@ -3525,6 +3810,332 @@ mod tests {
         // ASCII が 1 文字も無ければ既定名（branch 名が空にならない）。
         assert_eq!(task_slug("設計"), "task");
         assert_eq!(task_slug(""), "task");
+    }
+
+    /// O22: worktree の大きさ。自前で歩く方はファイルの長さの合計、`du` の方は少なくともそれ以上。
+    #[test]
+    fn worktree_sizes_are_measured() {
+        let base = scratch("disk_usage");
+        std::fs::create_dir_all(base.join("nested/deeper")).unwrap();
+        std::fs::write(base.join("a.bin"), vec![0u8; 64 * 1024]).unwrap();
+        std::fs::write(base.join("nested/deeper/b.bin"), vec![0u8; 32 * 1024]).unwrap();
+        assert_eq!(local_tree_size(&base), 96 * 1024);
+        let measured = disk_usage_on(&LocalHost, &base).expect("測れる");
+        assert!(measured >= 96 * 1024, "{measured}");
+        assert_eq!(
+            disk_usage_on(&LocalHost, &base.join("nowhere")),
+            None,
+            "無いフォルダは測れない"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// O20: ＋ Task の「詳細」— 名前を決める / 起点を決める / 既にあるブランチの worktree を作る。
+    #[test]
+    fn tasks_can_start_from_a_chosen_branch_or_base() {
+        let base = scratch("task_start");
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        let first = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+        std::fs::write(root.join("a.txt"), "2\n").unwrap();
+        git(&["commit", "-qam", "second"]);
+        git(&["branch", "feature/existing"]);
+        let head_of = |dir: &Path| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let start = |branch: &str, base: &str| TaskStart {
+            branch: (!branch.is_empty()).then(|| branch.to_string()),
+            base: (!base.is_empty()).then(|| base.to_string()),
+            skip_setup: false,
+        };
+
+        // 名前も起点も空 = 従来どおり task/<slug> を HEAD から。
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "Fix the parser", &start("", "")).unwrap();
+        assert_eq!(branch, "task/fix-the-parser");
+        assert_eq!(head_of(&target), head_of(&root));
+
+        // 名前を決め、1 つ前のコミットから切る。
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "x", &start("feature/new", &first)).unwrap();
+        assert_eq!(branch, "feature/new");
+        assert!(target.ends_with("feature-new"));
+        assert_eq!(head_of(&target), first, "起点から切れる");
+
+        // 既にあるブランチ = その worktree を作る（新しいブランチは切らない）。
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "x", &start("feature/existing", "")).unwrap();
+        assert_eq!(branch, "feature/existing");
+        assert_eq!(head_of(&target), head_of(&root));
+        assert_eq!(
+            git_branches_on(&LocalHost, &root)
+                .iter()
+                .filter(|known| known.as_str() == "feature/existing")
+                .count(),
+            1
+        );
+
+        // 起点だけ = 名前は自動。
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "Old base", &start("", &first)).unwrap();
+        assert_eq!(branch, "task/old-base");
+        assert_eq!(head_of(&target), first);
+
+        // 使えない名前は断る。
+        assert!(create_task_with_on(&LocalHost, &root, "x", &start("bad..name", "")).is_err());
+
+        // repo ごとの既定の起点（`.necoder/settings.json` の task_base）: 起点を指定しない新しい
+        // ブランチはそこから切る。指定した起点・既にあるブランチはそちらが勝つ。
+        std::fs::create_dir_all(root.join(".necoder")).unwrap();
+        std::fs::write(
+            root.join(".necoder/settings.json"),
+            format!(r#"{{ "task_base": " {first} " }}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            repository_task_base_on(&LocalHost, &root).as_deref(),
+            Some(first.as_str())
+        );
+        let (target, branch, _) =
+            create_task_with_on(&LocalHost, &root, "From default", &start("", "")).unwrap();
+        assert_eq!(branch, "task/from-default");
+        assert_eq!(head_of(&target), first, "名前も起点も空 = repo の既定から");
+        let (target, _, _) =
+            create_task_with_on(&LocalHost, &root, "x", &start("feature/named", "")).unwrap();
+        assert_eq!(head_of(&target), first, "名前だけ = repo の既定から");
+        let (target, _, _) =
+            create_task_with_on(&LocalHost, &root, "Explicit", &start("", "HEAD")).unwrap();
+        assert_eq!(head_of(&target), head_of(&root), "指定した起点が勝つ");
+        let (target, _, _) = create_named_task_on(&LocalHost, &root, "CLI", false).unwrap();
+        assert_eq!(head_of(&target), first, "ne fleet create も同じ既定");
+        std::fs::write(root.join(".necoder/settings.json"), r#"{ "task_base": "" }"#).unwrap();
+        assert_eq!(repository_task_base_on(&LocalHost, &root), None, "空は無いのと同じ");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// O20 / A24: リポジトリの `task_sparse` があれば、新しい Task はそのフォルダ（と根のファイル）だけを
+    /// 取り出す。統合先はそのまま。既にあるブランチの worktree も同じ。変な書き方は捨てる。
+    #[test]
+    fn task_worktrees_follow_the_repository_sparse_list() {
+        let base = scratch("task_sparse");
+        let root = base.join("repo");
+        for dir in ["web/src", "api/src", "docs", ".necoder"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join("web/src/a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("api/src/b.txt"), "b\n").unwrap();
+        std::fs::write(root.join("docs/c.md"), "c\n").unwrap();
+        std::fs::write(root.join("README.md"), "r\n").unwrap();
+        std::fs::write(
+            root.join(".necoder/settings.json"),
+            r#"{ "task_sparse": ["web", "/docs/", "../evil", "-x", " "] }"#,
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        assert_eq!(
+            repository_task_sparse_on(&LocalHost, &root),
+            vec!["web".to_string(), "docs".to_string()],
+            "前後の / は落とし、.. と - で始まる物と空は捨てる"
+        );
+
+        let (target, _, failure) =
+            create_task_with_on(&LocalHost, &root, "Sparse", &TaskStart::default()).unwrap();
+        assert_eq!(failure, None);
+        assert!(target.join("web/src/a.txt").exists());
+        assert!(target.join("docs/c.md").exists());
+        assert!(target.join("README.md").exists(), "根のファイルは取り出す");
+        assert!(!target.join("api").exists(), "書いていないフォルダは取り出さない");
+        assert!(root.join("api/src/b.txt").exists(), "統合先はそのまま");
+        let status = std::process::Command::new("git")
+            .current_dir(&target)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(status.stdout.is_empty(), "取り出した後は clean");
+
+        git(&["branch", "feature/old"]);
+        let existing = TaskStart {
+            branch: Some("feature/old".to_string()),
+            ..TaskStart::default()
+        };
+        let (target, _, _) = create_task_with_on(&LocalHost, &root, "x", &existing).unwrap();
+        assert!(target.join("web/src/a.txt").exists());
+        assert!(!target.join("api").exists(), "既にあるブランチも同じ");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// O20: `.worktreeinclude` に書かれ、かつ git が無視しているファイルだけを新しい Task へ持ち込む。
+    #[test]
+    fn worktree_include_brings_ignored_files_into_new_tasks() {
+        let base = scratch("worktree_include");
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join("secrets")).unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join(".gitignore"), ".env\nsecrets/\nbuild/\n*.log\n").unwrap();
+        std::fs::write(
+            root.join(".worktreeinclude"),
+            // `.gitignore` と同じ約束: 否定で戻すなら親はディレクトリごとでなく `secrets/*` と書く。
+            "# Task へ持ち込む\n.env\nsecrets/*\nnotes.txt\n!secrets/skip.json\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("a.txt"), "1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        std::fs::write(root.join(".env"), "TOKEN=local\n").unwrap();
+        std::fs::write(root.join("secrets/key.json"), "{}\n").unwrap();
+        std::fs::write(root.join("secrets/skip.json"), "{}\n").unwrap();
+        std::fs::write(root.join("build/out.bin"), "bin").unwrap();
+        std::fs::write(root.join("debug.log"), "log").unwrap();
+        // 無視されていない追跡外（書きかけ）は、`.worktreeinclude` に書いてあっても持ち込まない。
+        std::fs::write(root.join("notes.txt"), "draft").unwrap();
+
+        let (target, _branch, failure) =
+            create_task_with_on(&LocalHost, &root, "Use env", &TaskStart::default()).unwrap();
+        assert_eq!(failure, None);
+        assert_eq!(
+            std::fs::read_to_string(target.join(".env")).unwrap(),
+            "TOKEN=local\n"
+        );
+        assert!(target.join("secrets/key.json").exists());
+        assert!(
+            !target.join("secrets/skip.json").exists(),
+            "否定（!）も効く"
+        );
+        assert!(
+            !target.join("build/out.bin").exists(),
+            "書いていない物は写さない"
+        );
+        assert!(!target.join("debug.log").exists());
+        assert!(
+            !target.join("notes.txt").exists(),
+            "無視されていない物は写さない"
+        );
+
+        // 既にある物は上書きしない・上限を超えた分は数えて写さない。
+        let second = base.join("second");
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join(".env"), "TOKEN=mine\n").unwrap();
+        let result =
+            copy_worktree_includes_within_on(&LocalHost, &root, &second, 1, u64::MAX).unwrap();
+        assert_eq!(result.already_there, 1);
+        assert_eq!(result.copied, vec![PathBuf::from("secrets/key.json")]);
+        assert_eq!(result.over_limit, 0);
+        assert_eq!(
+            std::fs::read_to_string(second.join(".env")).unwrap(),
+            "TOKEN=mine\n"
+        );
+        let third = base.join("third");
+        std::fs::create_dir_all(&third).unwrap();
+        let result =
+            copy_worktree_includes_within_on(&LocalHost, &root, &third, 1, u64::MAX).unwrap();
+        assert_eq!(result.copied.len(), 1);
+        assert_eq!(result.over_limit, 1, "件数の上限");
+
+        // `.worktreeinclude` が無ければ何もしない。
+        std::fs::remove_file(root.join(".worktreeinclude")).unwrap();
+        let fourth = base.join("fourth");
+        std::fs::create_dir_all(&fourth).unwrap();
+        assert_eq!(
+            copy_worktree_includes_on(&LocalHost, &root, &fourth).unwrap(),
+            WorktreeIncludes::default()
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// O20: 準備スクリプトは今回だけ飛ばせる。失敗した準備は直してからやり直せる。
+    /// 準備スクリプトは POSIX shell で流す物なので unix だけ（Windows のローカルは
+    /// `has_posix_shell` が false で、流さずに「shell が要る」を返す）。
+    #[cfg(unix)]
+    #[test]
+    fn setup_can_be_skipped_and_retried() {
+        let base = scratch("setup_retry");
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join(".necoder")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "-b", "main"]).status.success() {
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        let script = worktree_setup_script(&root);
+        std::fs::write(&script, "touch \"$NECODER_TASK_ROOT/prepared\"\n").unwrap();
+
+        let skip = TaskStart {
+            skip_setup: true,
+            ..TaskStart::default()
+        };
+        let (target, _, failure) = create_task_with_on(&LocalHost, &root, "Quick", &skip).unwrap();
+        assert_eq!(failure, None);
+        assert!(!target.join("prepared").exists(), "飛ばした");
+
+        let (target, branch, failure) =
+            create_task_with_on(&LocalHost, &root, "Normal", &TaskStart::default()).unwrap();
+        assert_eq!(failure, None);
+        assert!(target.join("prepared").exists(), "既定は流す");
+
+        std::fs::write(&script, "echo broken >&2\nexit 3\n").unwrap();
+        let (target, branch_failed, failure) =
+            create_task_with_on(&LocalHost, &root, "Broken", &TaskStart::default()).unwrap();
+        let failure = failure.expect("準備の失敗を返す");
+        assert!(failure.contains("broken"), "{failure}");
+        // 直してからやり直す。
+        std::fs::write(&script, "touch \"$NECODER_TASK_ROOT/prepared\"\n").unwrap();
+        prepare_task_worktree_on(&LocalHost, &root, &target, &branch_failed, true).unwrap();
+        assert!(target.join("prepared").exists());
+        assert!(!branch.is_empty());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -3570,6 +4181,8 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    // 使うのはフックを走らせるテスト（`#[cfg(unix)]`）だけ。Windows の `-D warnings` で未使用にしない。
+    #[cfg(unix)]
     fn commit_count(root: &Path) -> usize {
         let output = Command::new("git")
             .current_dir(root)
@@ -3875,8 +4488,69 @@ ENV
 # pnpm install --prefer-offline
 "#;
 
+/// Task の worktree のディスク上の大きさ（バイト・O22 の片付けで並べる）。背景で呼ぶ。
+/// POSIX のシェルがあれば `du -sk`（リモートも同じ・ブロック単位なので消した時に空く量に近い）、
+/// 無ければ（Windows のローカル）ファイルの長さを歩いて足す。読めなければ None。
+/// 読めないフォルダがあって `du` が失敗を返しても、合計が出ていればそれを使う。
+pub fn disk_usage_on(host: &dyn Host, root: &Path) -> Option<u64> {
+    // 無いフォルダは測れない。どの OS でも同じ答えにする（自前で歩く方は無くても 0 を返してしまう）。
+    if !host.metadata(root).is_ok_and(|metadata| metadata.is_dir) {
+        return None;
+    }
+    if host.has_posix_shell() {
+        let output = host.run_command(&host.shell_script("du -sk .", root)).ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let kib: u64 = text.lines().last()?.split_whitespace().next()?.parse().ok()?;
+        return Some(kib * 1024);
+    }
+    if host.is_remote() {
+        return None;
+    }
+    Some(local_tree_size(root))
+}
+
+/// ローカルのフォルダの中のファイルの長さの合計（シンボリックリンクはたどらない）。
+fn local_tree_size(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // DirEntry の metadata はリンクをたどらない（リンク先を二重に数えない）。
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total += metadata.len();
+            }
+        }
+    }
+    total
+}
+
+/// リポジトリの既定の起点（O20）: 統合先の `.necoder/settings.json` の `task_base`
+/// （例 `"origin/develop"`）。＋ Task・fan-out・`ne fleet create` が起点を指定せずに**新しいブランチを
+/// 切る**時に使う。無い・読めない・空 = 統合先の HEAD。Host 越しに読む（SSH の先の repo でも同じ）。
+pub fn repository_task_base_on(host: &dyn Host, root: &Path) -> Option<String> {
+    let content = host
+        .read_file(&root.join(".necoder").join("settings.json"))
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&content.bytes).ok()?;
+    value
+        .get("task_base")?
+        .as_str()
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .map(str::to_string)
+}
+
 /// worktree を作って準備を一度だけ実行する。準備失敗でも作成済み worktree を返し、台帳に failed を残せる。
-pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str) -> Result<(PathBuf, String, Option<String>)> {
+/// 起点はリポジトリの既定（[`repository_task_base_on`]）、無ければ統合先の HEAD。
+pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str, run_setup: bool) -> Result<(PathBuf, String, Option<String>)> {
     let worktrees = task_worktree_dir(root).context("worktree の作成先がありません")?;
     let stem = task_slug(title);
     let used = git_branches_on(host, root);
@@ -3888,9 +4562,340 @@ pub fn create_named_task_on(host: &dyn Host, root: &Path, title: &str) -> Result
         if !used.contains(&branch) && host.metadata(&target).is_err() { break (branch, target); }
         number += 1;
     };
-    create_task_worktree_on(host, root, &target, &branch)?;
-    let failure = run_task_setup_on(host, root, &target, &branch).err().map(|error| format!("{error:#}"));
+    match repository_task_base_on(host, root) {
+        Some(base) => create_task_worktree_from_on(host, root, &target, &branch, &base)?,
+        None => create_task_worktree_on(host, root, &target, &branch)?,
+    }
+    let failure = prepare_task_worktree_on(host, root, &target, &branch, run_setup).err().map(|error| format!("{error:#}"));
     Ok((target, branch, failure))
+}
+
+/// ＋ Task の作り方（O20・ダイアログの「詳細」）。どちらも空なら [`create_named_task_on`] と同じ。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskStart {
+    /// ブランチ名。空 = 1 行目から `task/<slug>`。**既にあるローカルブランチ名なら、そのブランチの
+    /// worktree を作る**（新しいブランチは切らない・起点は使わない）。
+    pub branch: Option<String>,
+    /// 新しいブランチを切る起点（ブランチ / タグ / コミット）。空 = リポジトリの既定
+    /// （[`repository_task_base_on`]）、それも無ければ統合先の HEAD。
+    pub base: Option<String>,
+    /// 準備スクリプトを今回は流さない（`.worktreeinclude` の持ち込みはする・O20）。
+    pub skip_setup: bool,
+}
+
+/// [`TaskStart`] に従って Task の worktree を作り、準備スクリプトを流す（O20）。
+/// 返すのは `(worktree, ブランチ, 準備の失敗)`。
+pub fn create_task_with_on(
+    host: &dyn Host,
+    root: &Path,
+    title: &str,
+    start: &TaskStart,
+) -> Result<(PathBuf, String, Option<String>)> {
+    let branch = start
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty());
+    let base = start
+        .base
+        .as_deref()
+        .map(str::trim)
+        .filter(|base| !base.is_empty());
+    let run_setup = !start.skip_setup;
+    // 起点の指定が無ければリポジトリの既定（O20）。名前も起点も空なら下の create_named_task_on が読む。
+    let repository_base = if base.is_none() && branch.is_some() {
+        repository_task_base_on(host, root)
+    } else {
+        None
+    };
+    let base = base.or(repository_base.as_deref());
+    let Some(branch) = branch else {
+        if base.is_none() {
+            return create_named_task_on(host, root, title, run_setup);
+        }
+        // 名前は自動・起点だけ指定。
+        let (target, branch) = free_task_target(host, root, &task_slug(title))?;
+        create_task_worktree_from_on(host, root, &target, &branch, base.unwrap_or("HEAD"))?;
+        let failure = prepare_task_worktree_on(host, root, &target, &branch, run_setup)
+            .err()
+            .map(|error| format!("{error:#}"));
+        return Ok((target, branch, failure));
+    };
+    let worktrees = task_worktree_dir(root).context("worktree の作成先がありません")?;
+    let folder = branch.replace('/', "-");
+    let mut target = worktrees.join(&folder);
+    let mut number = 2;
+    while host.metadata(&target).is_ok() {
+        target = worktrees.join(format!("{folder}-{number}"));
+        number += 1;
+    }
+    if git_branches_on(host, root).iter().any(|known| known == branch) {
+        // 既にあるブランチ = その worktree を作る（別の worktree で使っていれば git が断る）。
+        add_task_worktree_on(host, root, &target, None, branch)?;
+    } else {
+        let valid = run_git(host, root, ["check-ref-format", "--branch", branch])
+            .is_ok_and(|output| output.success());
+        anyhow::ensure!(valid, "ブランチ名に使えない文字があります: {branch}");
+        create_task_worktree_from_on(host, root, &target, branch, base.unwrap_or("HEAD"))?;
+    }
+    let failure = prepare_task_worktree_on(host, root, &target, branch, run_setup)
+        .err()
+        .map(|error| format!("{error:#}"));
+    Ok((target, branch.to_string(), failure))
+}
+
+/// 作業の中身から git のブランチ名の元（英語の短い句）を 1 行もらう（O23・A23）。呼ぶ側が
+/// [`task_slug`] で整える。失敗（CLI 未導入・空応答）は `Err`（名前は変えない）。
+pub fn name_branch_on(
+    host: &dyn Host,
+    dir: &Path,
+    excerpt: &str,
+    template: &str,
+) -> Result<String> {
+    // 引用符 / $ / バッククォートを含めない（sh -c の二重引用符に素で埋めるため）。
+    let prompt = "入力はエージェントに頼んだ作業の説明です。この作業の git ブランチ名を付けて。\
+        英語の小文字の単語を 2〜5 個ハイフンでつなぐ・記号やスラッシュや引用符は付けない・\
+        ブランチ名だけを1行で出力して。";
+    oneshot_line_on(host, dir, excerpt, template, prompt, 48)
+}
+
+/// 自動で名付けた Task のブランチ（`old`）を `task/<stem>` へ改名する（O23・A23）。同じ名前が
+/// あれば `-2`・`-3`… を付ける。`dir` は Task の worktree。**断る**: その worktree がもう `old` に
+/// 居ない（人が切り替えた・改名した）・`old` を同じ名前で push した（`git push -u` の追跡か、
+/// どこかのリモートに同じ名前がある＝向こうの名前とずれる）。起点（`origin/main` など）を追跡して
+/// いるだけなら push ではないので改名する（git は改名で追跡の設定も運ぶ）。
+/// 返すのは改名した後の名前（空いている名前が `old` 自身ならそのまま）。
+pub fn rename_task_branch_on(host: &dyn Host, dir: &Path, old: &str, stem: &str) -> Result<String> {
+    let head = run_git(host, dir, ["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    anyhow::ensure!(
+        head.success() && String::from_utf8_lossy(&head.stdout).trim() == old,
+        "worktree がもう {old} に居ない"
+    );
+    let merge_key = format!("branch.{old}.merge");
+    let merge = run_git(host, dir, ["config", "--get", merge_key.as_str()])?;
+    let pushed_as_itself = merge.success()
+        && String::from_utf8_lossy(&merge.stdout).trim() == format!("refs/heads/{old}");
+    let remotes = run_git(
+        host,
+        dir,
+        ["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
+    )?;
+    let on_a_remote = String::from_utf8_lossy(&remotes.stdout)
+        .lines()
+        .any(|remote| remote.trim().ends_with(&format!("/{old}")));
+    anyhow::ensure!(
+        !pushed_as_itself && !on_a_remote,
+        "{old} は push 済み（改名すると向こうの名前とずれる）"
+    );
+    let known = git_branches_on(host, dir);
+    let mut candidate = format!("task/{stem}");
+    let mut number = 2;
+    while candidate != old && known.iter().any(|branch| *branch == candidate) {
+        candidate = format!("task/{stem}-{number}");
+        number += 1;
+    }
+    if candidate == old {
+        return Ok(candidate);
+    }
+    let valid = run_git(
+        host,
+        dir,
+        ["check-ref-format", "--branch", candidate.as_str()],
+    )
+    .is_ok_and(|output| output.success());
+    anyhow::ensure!(valid, "ブランチ名に使えない文字があります: {candidate}");
+    let renamed = run_git(host, dir, ["branch", "-m", old, candidate.as_str()])?;
+    anyhow::ensure!(
+        renamed.success(),
+        "ブランチを改名できない: {}",
+        git_fail_message(&renamed)
+    );
+    Ok(candidate)
+}
+
+/// 空いている `task/<slug>`（と worktree の置き場）を探す（[`create_named_task_on`] と同じ決め方）。
+fn free_task_target(host: &dyn Host, root: &Path, stem: &str) -> Result<(PathBuf, String)> {
+    let worktrees = task_worktree_dir(root).context("worktree の作成先がありません")?;
+    let used = git_branches_on(host, root);
+    let mut number = 1;
+    loop {
+        let suffix = if number == 1 {
+            stem.to_string()
+        } else {
+            format!("{stem}-{number}")
+        };
+        let branch = format!("task/{suffix}");
+        let target = worktrees.join(&suffix);
+        if !used.contains(&branch) && host.metadata(&target).is_err() {
+            return Ok((target, branch));
+        }
+        number += 1;
+    }
+}
+
+/// 起点 `base` から新しいブランチと worktree を作る（`git worktree add -b <branch> <path> <base>`）。
+pub fn create_task_worktree_from_on(
+    host: &dyn Host,
+    dir: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<()> {
+    anyhow::ensure!(!base.starts_with('-'), "起点に使えない名前です: {base}");
+    add_task_worktree_on(host, dir, path, Some(branch), base)
+}
+
+/// `.worktreeinclude`（統合先のルート・`.gitignore` と同じ書き方）の置き場所（O20・A05）。
+pub fn worktree_include_file(root: &Path) -> PathBuf {
+    root.join(".worktreeinclude")
+}
+
+/// `.worktreeinclude` で持ち込む量の上限（件数・合計バイト）。`node_modules` のような大物を
+/// 1 ファイルずつ写さない（それは準備スクリプトの `pnpm install` や symlink の仕事）。
+pub const WORKTREE_INCLUDE_MAX_FILES: usize = 500;
+pub const WORKTREE_INCLUDE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `.worktreeinclude` で持ち込んだ結果。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorktreeIncludes {
+    /// 写したファイル（統合先からの相対パス）。
+    pub copied: Vec<PathBuf>,
+    /// 新しい worktree に既にあったので写さなかった数（上書きしない）。
+    pub already_there: usize,
+    /// 上限を超えたので写さなかった数。
+    pub over_limit: usize,
+}
+
+/// `.worktreeinclude` に書かれ、**かつ git が無視している**追跡外のファイルを、統合先 `main` から
+/// 新しい worktree `target` へ写す（Claude Code・Orca と同じ約束。`.env` のように commit しない
+/// 物を Task へ持ち込む）。追跡中のファイルは checkout で既に入り、無視されていない追跡外の
+/// ファイル（書きかけのソース）は持ち込まない。`.worktreeinclude` が無ければ何もしない。
+///
+/// 一致の判定は git 自身（`git ls-files --others --ignored`）に任せる＝否定（`!`）やディレクトリの
+/// 書き方も `.gitignore` とまったく同じに効く。書き込みは `target` を開き直した host で行う
+/// （SSH の host は project の外へ書けない）。
+pub fn copy_worktree_includes_on(
+    host: &dyn Host,
+    main: &Path,
+    target: &Path,
+) -> Result<WorktreeIncludes> {
+    copy_worktree_includes_within_on(
+        host,
+        main,
+        target,
+        WORKTREE_INCLUDE_MAX_FILES,
+        WORKTREE_INCLUDE_MAX_BYTES,
+    )
+}
+
+fn copy_worktree_includes_within_on(
+    host: &dyn Host,
+    main: &Path,
+    target: &Path,
+    max_files: usize,
+    max_bytes: u64,
+) -> Result<WorktreeIncludes> {
+    let include = worktree_include_file(main);
+    if host.metadata(&include).is_err() {
+        return Ok(WorktreeIncludes::default());
+    }
+    let list = |extra: &str| -> Result<Vec<PathBuf>> {
+        let output = run_git(
+            host,
+            main,
+            ["ls-files", "-z", "--others", "--ignored", extra],
+        )?;
+        anyhow::ensure!(
+            output.success(),
+            "git ls-files に失敗: {}",
+            git_fail_message(&output)
+        );
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).into_owned()))
+            .collect())
+    };
+    let wanted = list(&format!("--exclude-from={}", include.to_string_lossy()))?;
+    if wanted.is_empty() {
+        return Ok(WorktreeIncludes::default());
+    }
+    let ignored: std::collections::HashSet<PathBuf> =
+        list("--exclude-standard")?.into_iter().collect();
+    let mut files: Vec<PathBuf> = wanted
+        .into_iter()
+        .filter(|relative| ignored.contains(relative))
+        .collect();
+    files.sort();
+    let target_host = host.host_for_project(target)?;
+    let mut result = WorktreeIncludes::default();
+    let mut total = 0u64;
+    for relative in files {
+        let source = main.join(&relative);
+        let destination = target.join(&relative);
+        if target_host.metadata(&destination).is_ok() {
+            result.already_there += 1;
+            continue;
+        }
+        let size = host.metadata(&source).map(|metadata| metadata.len)?;
+        if result.copied.len() >= max_files || total + size > max_bytes {
+            result.over_limit += 1;
+            continue;
+        }
+        let content = host
+            .read_file(&source)
+            .with_context(|| format!("読めない: {}", source.display()))?;
+        target_host
+            .write_file(
+                &destination,
+                &content.bytes,
+                host::WriteCondition::NotExists,
+            )
+            .with_context(|| format!("書けない: {}", destination.display()))?;
+        total += size;
+        result.copied.push(relative);
+    }
+    Ok(result)
+}
+
+/// 作ったばかりの Task worktree を使える状態にする: `.worktreeinclude` の持ち込み → 準備スクリプト
+/// （スクリプトは持ち込んだファイルを前提にできる・`run_setup = false` なら流さない）。持ち込みに
+/// 失敗しても準備は走らせ、両方の失敗をまとめて返す（台帳の failed に残る）。上限で写さなかった分は
+/// 失敗にしない（標準エラーに残す）。失敗した準備をやり直す時も同じ関数を呼ぶ（既にある物は写さない）。
+pub fn prepare_task_worktree_on(
+    host: &dyn Host,
+    main: &Path,
+    target: &Path,
+    branch: &str,
+    run_setup: bool,
+) -> Result<()> {
+    let includes = copy_worktree_includes_on(host, main, target);
+    if let Ok(includes) = &includes {
+        if includes.over_limit > 0 {
+            eprintln!(
+                ".worktreeinclude: 上限（{WORKTREE_INCLUDE_MAX_FILES} 件・{} MiB）を超えた {} 件は写していません: {}",
+                WORKTREE_INCLUDE_MAX_BYTES / (1024 * 1024),
+                includes.over_limit,
+                target.display()
+            );
+        }
+    }
+    let setup = if run_setup {
+        run_task_setup_on(host, main, target, branch)
+    } else {
+        Ok(())
+    };
+    match (includes, setup) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => {
+            Err(error.context(".worktreeinclude のファイルを持ち込めませんでした"))
+        }
+        (Ok(_), Err(error)) => Err(error),
+        (Err(include_error), Err(setup_error)) => Err(anyhow::anyhow!(
+            ".worktreeinclude のファイルを持ち込めませんでした: {include_error:#}\n{setup_error:#}"
+        )),
+    }
 }
 
 /// 準備スクリプト（§6.2）を新 worktree を cwd に 1 回流す。無ければ何もしない。

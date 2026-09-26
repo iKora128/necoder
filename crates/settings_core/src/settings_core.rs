@@ -128,6 +128,81 @@ impl AgentServerSetting {
             Self::Custom { env, .. } | Self::Registry { env } => env,
         }
     }
+
+    /// settings.json に書く形（`type` つき・空の `args` / `env` も書く）。
+    pub fn to_json(&self) -> Value {
+        match self {
+            Self::Custom { command, args, env } => serde_json::json!({
+                "type": "custom",
+                "command": command,
+                "args": args,
+                "env": env,
+            }),
+            Self::Registry { env } => serde_json::json!({ "type": "registry", "env": env }),
+        }
+    }
+}
+
+/// 環境変数の欄（1 行に 1 つ `KEY=VALUE`・空行と `#` で始まる行は読まない・O16）を読む。名前は
+/// 英字か `_` で始まり英数字と `_` だけ。値はそのまま（引用符も外さない）。誤りは行番号つきで返す。
+pub fn parse_env_lines(text: &str) -> std::result::Result<BTreeMap<String, String>, String> {
+    let mut env = BTreeMap::new();
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            return Err(format!(
+                "{} 行目: KEY=VALUE の形ではありません: {line}",
+                number + 1
+            ));
+        };
+        let name = name.trim();
+        let valid = name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_');
+        if !valid {
+            return Err(format!(
+                "{} 行目: 変数の名前に使えない文字があります: {name}",
+                number + 1
+            ));
+        }
+        env.insert(name.to_string(), value.trim().to_string());
+    }
+    Ok(env)
+}
+
+/// [`parse_env_lines`] の逆（欄に出す形・名前の順）。
+pub fn env_lines(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 引数の欄（1 行に 1 つ・前後の空白は落とす・空行は読まない）を読む。引用符は付けずに書く
+/// （行がそのまま 1 つの引数）。
+pub fn parse_arg_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// よく使うコマンド 1 つ（`quick_commands` の要素・O25）。ターミナルのドックの ▶ に並び、押すと
+/// 新しい端末で走らせる。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct QuickCommandSetting {
+    /// ボタンに出す名前（例 `"開発サーバ"`）。
+    pub name: String,
+    /// 走らせるコマンド（例 `"npm run dev"`）。シェルに打つのと同じ。
+    pub command: String,
 }
 
 /// MCP サーバ 1 件の設定（`mcp_servers.<name>`）。
@@ -174,6 +249,14 @@ pub struct Settings {
     pub soft_wrap: bool,
     /// 保存時に LSP フォーマットをかける（対応言語のみ・M11）。
     pub format_on_save: bool,
+    /// 自動保存（`"off"` = ⌘S だけ・既定 / `"focus_change"` = 他へ移った時 / `"after_delay"` = 手を
+    /// 止めて 1 秒たった時と他へ移った時・O26）。自動保存ではフォーマットしない（打っている途中の行を
+    /// 動かさない）。解釈は [`Settings::auto_save_mode`]（知らない値は保存しない側に倒す）。
+    pub auto_save: String,
+    /// プレビュータブ（既定 on・O26）。エクスプローラで 1 回クリックしたファイルは、次に 1 回
+    /// クリックしたファイルで置き換わるタブ（名前が斜体）で開く。編集・ダブルクリック・ピン留めで
+    /// 普通のタブになる。off = 常に普通のタブ（以前の挙動）。
+    pub preview_tabs: bool,
     /// UI ロケール。`None` = OS 追従。
     pub locale: Option<String>,
     /// エージェント composer で **Enter を送信に使うか**。
@@ -195,6 +278,8 @@ pub struct Settings {
     /// 入力待ち（承認・質問で止まった）の通知音。値の取り方は [`Settings::sound_done`] と同じ。
     /// 完了とは違う音（別の声でもいい）を当てて、耳だけで「終わった」と「呼ばれている」を区別する。
     pub sound_waiting: String,
+    /// 通知音の大きさ（0〜100 %・既定 100 = 音源そのまま・O13）。0 は鳴らさない（声は選んだまま）。
+    pub sound_volume: u64,
     /// OS のデスクトップ通知（O12・既定 on）。ターンの完了 / 失敗・承認待ち・質問待ちを、
     /// **その窓を見ていない時だけ**通知センターへ出す（見ている時は右下のトーストで足りる）。
     /// ミュートしたスレッドは出さない。押すとそのスレッドへ飛ぶ。
@@ -232,6 +317,17 @@ pub struct Settings {
     /// エージェントの起動方法の上書き（necoder の `AgentKind::id` がキー。例 `"codex"`）。
     /// 空＝レジストリと組み込みカタログに従う（通常はこれ）。詳細は [`AgentServerSetting`]。
     pub agent_servers: BTreeMap<String, AgentServerSetting>,
+    /// 新しいスレッドの権限モードの既定（O16）。`"default"`（既定）= エージェントの既定のモード（毎回
+    /// 聞く側）/ `"bypass"` = 聞かずに進める（Yolo）: エージェントが広告するモードのうち「聞かない」もの
+    /// （Claude Code の `bypassPermissions` など）で始める。持たないエージェントは既定のまま。
+    /// ピルで選んだモード（`agent_config_defaults.<id>.mode`）があればそちらが勝つ。設定画面で選ぶと
+    /// その記憶を全部消す（全エージェントを一括で揃える）。Chat のスレッドには効かない。
+    pub agent_permission_default: String,
+    /// 使わないエージェント（`AgentKind::id`・例 `["grok", "kimi"]`・O16）。選択肢（composer の
+    /// エージェント・＋ Task の並べて比べる・パレットのエージェント別の新規スレッド）から外し、
+    /// ログインの確かめ（CLI の status・ACP の試しのセッション）でも起こさない。設定 › エージェントの
+    /// スイッチで出し入れする。既定のエージェントと Captain は外せない（画面が止める）。
+    pub disabled_agents: Vec<String>,
     /// スレッドのセッションでエージェントへ渡す MCP サーバ（サーバ名がキー）。詳細は [`McpServerSetting`]。
     /// 空＝他ツールから発見した分だけが一覧に並び、どれも渡さない（有効化は明示だけ）。
     pub mcp_servers: BTreeMap<String, McpServerSetting>,
@@ -243,6 +339,42 @@ pub struct Settings {
     /// `"never"` = 聞かない）。エージェントも端末もアプリ本体の子なので、終了すると一緒に止まる。
     /// 解釈は [`Settings::quit_confirmation`]（知らない値は既定の側に倒す）。
     pub confirm_quit: String,
+    /// エージェントが作業している間、コンピュータを寝かせないか（`"working"` = 作業中の間だけ・既定 /
+    /// `"off"` = 止めない・O13）。止めるのは**放っておいた時のスリープ（idle sleep）だけ**で、画面は
+    /// 普通に消え、自分で選んだスリープとノートの蓋を閉じた時のスリープは止めない。
+    /// 解釈は [`Settings::keep_awake_mode`]（知らない値は止める側に倒す）。
+    pub keep_awake: String,
+    /// UI の書体（空 = 同梱の IBM Plex Sans JP・O27）。入っていない書体は OS の代わりの書体で描く。
+    pub ui_font_family: String,
+    /// コードの書体（空 = 同梱の Guguru Sans Code・O27）。エディタ・差分・パス、ターミナルの既定。
+    /// 等幅の書体を書く。
+    pub code_font_family: String,
+    /// ターミナルの文字の大きさ（pt・既定 12.5 = エディタより少し小さい・O25）。範囲の外は 8〜32 に丸める。
+    /// 変えると開いている端末もその場で描き直す（行と列は測り直してシェルへ伝わる）。
+    pub terminal_font_size: f32,
+    /// ターミナルのフォント（空 = コードの書体 `code_font_family`・O25）。等幅のフォントの名前を書く。
+    pub terminal_font_family: String,
+    /// ターミナルで遡れる行数（既定 10,000・上限 100,000・O25）。減らすと古い行から捨てる。
+    pub terminal_scrollback: u64,
+    /// ターミナルのカーソルの形（`"block"` 既定 / `"bar"` / `"underline"`・O25）。vim やシェルの設定が
+    /// 形を指定すればそちらが勝つ（ここはその既定）。知らない値は `"block"`。
+    pub terminal_cursor: String,
+    /// ターミナルの配色ファイル（空 = 既定・アプリのテーマに合わせる・O25）。Ghostty のテーマ・
+    /// Windows Terminal の scheme（JSON）・iTerm2 の `.itermcolors` から ANSI 16 色と文字 / 背景の色を読む。
+    /// `~/` はホーム。設定を保存し直すと読み直す。
+    pub terminal_color_scheme: String,
+    /// statusbar で出さない項目（O27・右クリックで出し入れ）。`color` / `branch` / `diagnostics` /
+    /// `terminal` / `activity` / `usage` / `cursor` / `encoding` / `language`。知らせ（SSH の接続・
+    /// 承認待ち・クラッシュ・更新）は消せない。
+    pub statusbar_hidden: Vec<String>,
+    /// 手元のターミナルで開くシェル（空 = OS の既定・mac / Linux は `$SHELL`・Windows は pwsh → powershell・O25）。
+    /// 名前（PATH から探す）か絶対パス。新しく開く端末から効く。SSH 先の端末は接続先のシェルのまま。
+    pub terminal_shell: String,
+    /// 上のシェルに渡す引数（例 `["-l"]`）。シェルが空なら使わない。
+    pub terminal_shell_args: Vec<String>,
+    /// よく使うコマンド（O25・`[{ "name": "開発サーバ", "command": "npm run dev" }]`）。ターミナルの
+    /// ドックの ▶ に並ぶ。リポジトリの `.necoder/settings.json` にも書ける（書けば上書き）。
+    pub quick_commands: Vec<QuickCommandSetting>,
     /// 旧 Fleet の互換設定。TaskSpace-first 以降は既定操作が常に `+ Task` なので挙動には使わない。
     /// 既存 settings.json を壊さず読めるよう schema field だけ保持する。
     pub fleet_agent_worktree: bool,
@@ -288,12 +420,15 @@ impl Default for Settings {
             tab_size: 4,
             soft_wrap: false,
             format_on_save: false,
+            auto_save: "off".to_string(),
+            preview_tabs: true,
             locale: None,
             submit_on_enter: false,
             agent_auto_name: true,
             agent_prewarm: true,
             sound_done: "nyaan".to_string(),
             sound_waiting: "nyaan".to_string(),
+            sound_volume: 100,
             system_notifications: true,
             reduce_motion: false,
             tier2_summaries: true,
@@ -303,9 +438,23 @@ impl Default for Settings {
             default_agent: "Claude Code".to_string(),
             agent_config_defaults: BTreeMap::new(),
             agent_servers: BTreeMap::new(),
+            agent_permission_default: "default".to_string(),
+            disabled_agents: Vec::new(),
             mcp_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
             confirm_quit: "running".to_string(),
+            keep_awake: "working".to_string(),
+            ui_font_family: String::new(),
+            code_font_family: String::new(),
+            terminal_font_size: 12.5,
+            terminal_font_family: String::new(),
+            terminal_scrollback: 10_000,
+            terminal_cursor: "block".to_string(),
+            terminal_color_scheme: String::new(),
+            statusbar_hidden: Vec::new(),
+            terminal_shell: String::new(),
+            terminal_shell_args: Vec::new(),
+            quick_commands: Vec::new(),
             fleet_agent_worktree: false,
             html_preview_evict_minutes: 15,
             agent_idle_stop_minutes: 15,
@@ -334,7 +483,52 @@ pub enum QuitConfirmation {
     Never,
 }
 
+/// エージェントの作業中にスリープを止めるか（`keep_awake` の解釈・O13）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepAwake {
+    /// 作業中（Working）のスレッドが 1 本でもある間だけ、放っておいた時のスリープを止める。
+    /// 承認待ち・質問待ちは数えない（人の返事を待つ間まで起こし続けない）。
+    WhileWorking,
+    /// 止めない（OS の設定どおりに眠る）。
+    Off,
+}
+
+/// 自動保存の仕方（`auto_save` の解釈・O26）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoSave {
+    /// しない（⌘S だけ）。
+    Off,
+    /// 他へ移った時（エディタからフォーカスが外れた・窓を離れた）に保存する。
+    OnFocusChange,
+    /// 手を止めて少したった時と、他へ移った時に保存する。
+    AfterDelay,
+}
+
 impl Settings {
+    /// エージェント（`AgentKind::id`）を使うか（`disabled_agents` に無ければ使う・O16）。
+    pub fn agent_enabled(&self, agent_id: &str) -> bool {
+        !self.disabled_agents.iter().any(|id| id == agent_id)
+    }
+
+    /// `auto_save` の値。**知らない値は保存しない側に倒す**（綴り違いで、頼んでいない書き込みを
+    /// ディスクへ始めない）。
+    pub fn auto_save_mode(&self) -> AutoSave {
+        match self.auto_save.as_str() {
+            "focus_change" => AutoSave::OnFocusChange,
+            "after_delay" => AutoSave::AfterDelay,
+            _ => AutoSave::Off,
+        }
+    }
+
+    /// `keep_awake` の値。**知らない値は止める側に倒す**（綴り違いで作業中のターンが寝て途切れる方が、
+    /// 作業の間だけ起きている電力より高くつく）。
+    pub fn keep_awake_mode(&self) -> KeepAwake {
+        match self.keep_awake.as_str() {
+            "off" => KeepAwake::Off,
+            _ => KeepAwake::WhileWorking,
+        }
+    }
+
     /// `confirm_quit` の値。**知らない値は確認する側に倒す**（綴り違いで黙ってエージェントを
     /// 止める方が、1 回余計に聞かれるより高くつく）。
     pub fn quit_confirmation(&self) -> QuitConfirmation {
@@ -351,11 +545,14 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "density": "compact",
   "font_size": 13.0,
   "tab_size": 4,
+  "auto_save": "off",
+  "preview_tabs": true,
   "submit_on_enter": false,
   "agent_auto_name": true,
   "agent_prewarm": true,
   "sound_done": "nyaan",
   "sound_waiting": "nyaan",
+  "sound_volume": 100,
   "system_notifications": true,
   "reduce_motion": false,
   "tier2_summaries": true,
@@ -363,7 +560,21 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "default_agent": "Claude Code",
   "confirm_worktree_delete": true,
   "confirm_quit": "running",
+  "keep_awake": "working",
+  "ui_font_family": "",
+  "code_font_family": "",
+  "terminal_font_size": 12.5,
+  "terminal_font_family": "",
+  "terminal_scrollback": 10000,
+  "terminal_cursor": "block",
+  "terminal_color_scheme": "",
+  "statusbar_hidden": [],
+  "terminal_shell": "",
+  "terminal_shell_args": [],
+  "quick_commands": [],
   "agent_servers": {},
+  "agent_permission_default": "default",
+  "disabled_agents": [],
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
   "agent_idle_stop_minutes": 15,
@@ -559,6 +770,140 @@ pub fn persist_mcp_enabled(path: &Path, name: &str, enabled: bool) -> Result<()>
     let servers = object_entry(&mut root, "mcp_servers");
     object_entry(servers, name).insert("enabled".to_string(), Value::Bool(enabled));
     write_settings_object(path, root)
+}
+
+/// `agent_config_defaults.<agent_id>.<config_id>` の 1 点を user 設定ファイルから消す（ピルの記憶を
+/// 忘れる・O16）。消した結果その agent の記憶が空になれば agent ごと消す（`{}` を残さない）。
+pub fn forget_agent_config_default(path: &Path, agent_id: &str, config_id: &str) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    let defaults = object_entry(&mut root, "agent_config_defaults");
+    let now_empty = match defaults.get_mut(agent_id).and_then(Value::as_object_mut) {
+        Some(agent) => {
+            agent.remove(config_id);
+            agent.is_empty()
+        }
+        None => false,
+    };
+    if now_empty {
+        defaults.remove(agent_id);
+    }
+    write_settings_object(path, root)
+}
+
+/// 権限モードの既定（`agent_permission_default`）を書き、全エージェントのピルの記憶（`mode`）を消す
+/// （一括で揃える・O16）。モデルや思考量の記憶は触らない。1 回の書き込みで済ませる。
+pub fn persist_permission_default(path: &Path, value: &str) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    root.insert(
+        "agent_permission_default".to_string(),
+        Value::String(value.to_string()),
+    );
+    let defaults = object_entry(&mut root, "agent_config_defaults");
+    for agent in defaults.values_mut() {
+        if let Some(agent) = agent.as_object_mut() {
+            agent.remove("mode");
+        }
+    }
+    defaults.retain(|_, agent| agent.as_object().is_none_or(|agent| !agent.is_empty()));
+    write_settings_object(path, root)
+}
+
+/// `agent_servers.<agent_id>.env.<var>` の 1 点だけを user 設定ファイルへ書く（`None` = 消す・O14 の
+/// アカウント切替）。起動方法（`type` / `command` / `args`）と他の環境変数は触らない。項目が無ければ
+/// `{"type": "registry"}` として作る。消した結果 `registry` で env も空になったら、その項目ごと消す
+/// （`{}` を残さない）。[`persist_agent_config_default`] と同じく user ファイル自身の値だけを読む。
+pub fn persist_agent_server_env(
+    path: &Path,
+    agent_id: &str,
+    var: &str,
+    value: Option<&str>,
+) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    let servers = object_entry(&mut root, "agent_servers");
+    let remove_entry = {
+        let server = object_entry(servers, agent_id);
+        server
+            .entry("type")
+            .or_insert_with(|| Value::String("registry".to_string()));
+        let env = object_entry(server, "env");
+        match value {
+            Some(value) => {
+                env.insert(var.to_string(), Value::String(value.to_string()));
+            }
+            None => {
+                env.remove(var);
+            }
+        }
+        let env_empty = env.is_empty();
+        if env_empty {
+            server.remove("env");
+        }
+        env_empty
+            && server.len() == 1
+            && server.get("type").and_then(Value::as_str) == Some("registry")
+    };
+    if remove_entry {
+        servers.remove(agent_id);
+    }
+    write_settings_object(path, root)
+}
+
+/// `agent_servers.<agent_id>` を丸ごと書き換える（`None` = 消す＝レジストリと組み込みの既定の起動に
+/// 戻す・O16 の起動の上書きの画面）。**user ファイル自身の値だけ**を読んで書く。
+pub fn persist_agent_server(
+    path: &Path,
+    agent_id: &str,
+    setting: Option<&AgentServerSetting>,
+) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    let servers = object_entry(&mut root, "agent_servers");
+    match setting {
+        Some(setting) => {
+            servers.insert(agent_id.to_string(), setting.to_json());
+        }
+        None => {
+            servers.remove(agent_id);
+        }
+    }
+    write_settings_object(path, root)
+}
+
+/// アカウント切替（O14）に使う環境変数 = そのエージェントの設定の置き場を変える物。対応していない
+/// エージェントは `None`。資格情報そのものは necoder が読みも写しもしない（置き場を指すだけ）。
+pub fn account_env_var(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        "claude" => Some("CLAUDE_CONFIG_DIR"),
+        "codex" => Some("CODEX_HOME"),
+        _ => None,
+    }
+}
+
+/// necoder が作るアカウントのフォルダの置き場（`<data>/accounts/<agent_id>`）。
+pub fn accounts_root(agent_id: &str) -> Option<PathBuf> {
+    paths::data_dir().map(|dir| dir.join("accounts").join(agent_id))
+}
+
+/// 置き場にあるアカウント（フォルダ名の昇順・隠しフォルダは除く）。置き場が無ければ空。
+pub fn list_accounts(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// 次に作るアカウントの名前（`account-2` から・既定のアカウントを 1 本目と数える）。
+pub fn next_account_name(existing: &[String]) -> String {
+    (2..)
+        .map(|number| format!("account-{number}"))
+        .find(|name| !existing.contains(name))
+        .unwrap_or_else(|| "account".to_string())
 }
 
 /// `overlay` を `base` に深くマージする。オブジェクトは再帰、それ以外は置換。
@@ -763,6 +1108,134 @@ mod tests {
     }
 
     #[test]
+    fn account_env_is_written_without_touching_the_rest() {
+        let path =
+            std::env::temp_dir().join(format!("necoder_agent_env_{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"theme":"x","agent_servers":{"codex":{"type":"custom","command":"codex-acp","env":{"KEEP":"1"}}}}"#,
+        )
+        .expect("書ける");
+        persist_agent_server_env(&path, "claude", "CLAUDE_CONFIG_DIR", Some("/a/work"))
+            .expect("書ける");
+        persist_agent_server_env(&path, "codex", "CODEX_HOME", Some("/a/codex")).expect("書ける");
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            &std::fs::read_to_string(&path).expect("読める"),
+        ])
+        .expect("読める");
+        let servers = &store.settings().agent_servers;
+        assert_eq!(
+            servers["claude"]
+                .env()
+                .get("CLAUDE_CONFIG_DIR")
+                .map(String::as_str),
+            Some("/a/work")
+        );
+        assert!(
+            matches!(servers["codex"], AgentServerSetting::Custom { .. }),
+            "起動方法は変えない"
+        );
+        assert_eq!(
+            servers["codex"].env().get("KEEP").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            servers["codex"].env().get("CODEX_HOME").map(String::as_str),
+            Some("/a/codex")
+        );
+
+        // 既定へ戻す = 消す。registry だけの項目は丸ごと消え、custom は残る。
+        persist_agent_server_env(&path, "claude", "CLAUDE_CONFIG_DIR", None).expect("書ける");
+        persist_agent_server_env(&path, "codex", "CODEX_HOME", None).expect("書ける");
+        let text = std::fs::read_to_string(&path).expect("読める");
+        let value: Value = serde_json::from_str(&text).expect("JSON");
+        assert!(value["agent_servers"].get("claude").is_none(), "{text}");
+        assert_eq!(value["agent_servers"]["codex"]["command"], "codex-acp");
+        assert_eq!(value["theme"], "x");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn account_names_count_from_two() {
+        assert_eq!(next_account_name(&[]), "account-2");
+        assert_eq!(
+            next_account_name(&["account-2".to_string(), "work".to_string()]),
+            "account-3"
+        );
+        assert_eq!(account_env_var("claude"), Some("CLAUDE_CONFIG_DIR"));
+        assert_eq!(account_env_var("codex"), Some("CODEX_HOME"));
+        assert_eq!(account_env_var("opencode"), None);
+    }
+
+    #[test]
+    fn auto_save_defaults_off_and_unknown_values_do_not_save() {
+        assert_eq!(
+            SettingsStore::default().settings().auto_save_mode(),
+            AutoSave::Off
+        );
+        for (value, expected) in [
+            ("focus_change", AutoSave::OnFocusChange),
+            ("after_delay", AutoSave::AfterDelay),
+            ("off", AutoSave::Off),
+            ("afterDelay", AutoSave::Off),
+        ] {
+            let layer = format!(r#"{{ "auto_save": "{value}" }}"#);
+            let store = SettingsStore::from_json_layers(&[DEFAULT_SETTINGS_JSON, &layer])
+                .expect("マージできる");
+            assert_eq!(store.settings().auto_save_mode(), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn keep_awake_defaults_to_while_working_and_can_be_turned_off() {
+        assert_eq!(
+            SettingsStore::default().settings().keep_awake_mode(),
+            KeepAwake::WhileWorking
+        );
+        let off =
+            SettingsStore::from_json_layers(&[DEFAULT_SETTINGS_JSON, r#"{ "keep_awake": "off" }"#])
+                .expect("マージできる");
+        assert_eq!(off.settings().keep_awake_mode(), KeepAwake::Off);
+        // 綴り違いで黙って「止めない」にしない。
+        let typo =
+            SettingsStore::from_json_layers(&[DEFAULT_SETTINGS_JSON, r#"{ "keep_awake": "of" }"#])
+                .expect("マージできる");
+        assert_eq!(typo.settings().keep_awake_mode(), KeepAwake::WhileWorking);
+    }
+
+    /// O25: ターミナルの見た目は既定で設定を持つ前と同じ（12.5pt・1 万行・ブロック）。書けば上書き。
+    #[test]
+    fn terminal_appearance_defaults_to_the_old_look_and_overrides() {
+        let defaults = SettingsStore::default();
+        let settings = defaults.settings();
+        assert_eq!(settings.terminal_font_size, 12.5);
+        assert_eq!(settings.terminal_font_family, "");
+        assert_eq!(settings.terminal_scrollback, 10_000);
+        assert_eq!(settings.terminal_cursor, "block");
+        assert_eq!(settings.terminal_shell, "", "空 = OS の既定のシェル");
+        assert_eq!(settings.ui_font_family, "", "空 = 同梱の書体");
+        assert_eq!(settings.code_font_family, "");
+        assert!(settings.terminal_shell_args.is_empty());
+        assert!(settings.quick_commands.is_empty());
+        assert_eq!(
+            *settings,
+            Settings::default(),
+            "既定の JSON と型の既定が同じ"
+        );
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            r#"{ "terminal_font_size": 15, "terminal_font_family": "Menlo", "terminal_scrollback": 50000, "terminal_cursor": "bar" }"#,
+        ])
+        .expect("マージできる");
+        let settings = store.settings();
+        assert_eq!(settings.terminal_font_size, 15.0, "整数で書いても読める");
+        assert_eq!(settings.terminal_font_family, "Menlo");
+        assert_eq!(settings.terminal_scrollback, 50_000);
+        assert_eq!(settings.terminal_cursor, "bar");
+    }
+
+    #[test]
     fn reduce_motion_defaults_off_and_overrides() {
         assert!(!SettingsStore::default().settings().reduce_motion);
         let store = SettingsStore::from_json_layers(&[
@@ -831,6 +1304,97 @@ mod tests {
     /// 手編集の途中で壊れている settings.json（末尾カンマ・コメント・配列）に書き手が触ると、
     /// 以前は空オブジェクトから作り直して 1 キーだけで上書きしていた（利用者の設定が全部消える）。
     /// 今は**どの書き手も書かずに** `UnreadableSettings` を返し、ファイルは 1 バイトも変わらない。
+
+    /// O16: 起動の上書きの欄は 1 行 1 つ。誤りは行番号つきで断り、書くと読める形になる。
+    #[test]
+    fn launch_override_fields_round_trip() {
+        let env = parse_env_lines("# メモ\nCODEX_HOME = /opt/codex\n\nRUST_LOG=debug=1\n")
+            .expect("読める");
+        assert_eq!(env["CODEX_HOME"], "/opt/codex");
+        assert_eq!(env["RUST_LOG"], "debug=1", "値の中の = はそのまま");
+        assert_eq!(env_lines(&env), "CODEX_HOME=/opt/codex\nRUST_LOG=debug=1");
+        assert!(parse_env_lines("NO_EQUALS")
+            .unwrap_err()
+            .starts_with("1 行目"));
+        assert!(parse_env_lines("ok=1\n9BAD=x")
+            .unwrap_err()
+            .starts_with("2 行目"));
+        assert_eq!(
+            parse_arg_lines("  --acp \n\n--model gpt 5\n"),
+            vec!["--acp".to_string(), "--model gpt 5".to_string()]
+        );
+
+        let dir = std::env::temp_dir().join(format!("necoder-agent-server-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{ "theme": "necoder-light" }"#).expect("seed");
+        let custom = AgentServerSetting::Custom {
+            command: "codex-acp".into(),
+            args: vec!["--verbose".into()],
+            env,
+        };
+        persist_agent_server(&path, "codex", Some(&custom)).expect("書ける");
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            &std::fs::read_to_string(&path).expect("read"),
+        ])
+        .expect("マージできる");
+        assert_eq!(store.settings().agent_servers.get("codex"), Some(&custom));
+        persist_agent_server(&path, "codex", None).expect("消せる");
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("JSON");
+        assert!(written["agent_servers"].get("codex").is_none());
+        assert_eq!(written["theme"], "necoder-light");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// O16: 権限の既定を選ぶと、全エージェントのピルの記憶（mode）だけを消す。1 つだけ忘れることもできる。
+    #[test]
+    fn permission_default_clears_remembered_modes_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "necoder-permission-default-test-{}",
+            std::process::id()
+        ));
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            &path,
+            r#"{ "agent_config_defaults": {
+                "claude": { "mode": "plan", "model": "opus" },
+                "qwen": { "mode": "yolo" } } }"#,
+        )
+        .expect("seed");
+
+        persist_permission_default(&path, "bypass").expect("書ける");
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            &std::fs::read_to_string(&path).expect("read"),
+        ])
+        .expect("マージできる");
+        let settings = store.settings();
+        assert_eq!(settings.agent_permission_default, "bypass");
+        let defaults = &settings.agent_config_defaults;
+        assert_eq!(
+            defaults["claude"].get("model").map(String::as_str),
+            Some("opus"),
+            "モデルの記憶は残す"
+        );
+        assert!(defaults["claude"].get("mode").is_none());
+        assert!(!defaults.contains_key("qwen"), "空になった agent は消す");
+
+        persist_agent_config_default(&path, "claude", "mode", "plan").expect("書ける");
+        forget_agent_config_default(&path, "claude", "model").expect("書ける");
+        forget_agent_config_default(&path, "claude", "mode").expect("書ける");
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("JSON");
+        assert!(
+            written["agent_config_defaults"].get("claude").is_none(),
+            "{written}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn writers_refuse_to_overwrite_an_unreadable_settings_file() {
         let dir = std::env::temp_dir().join(format!(
@@ -846,7 +1410,7 @@ mod tests {
             "[\"theme\"]\n",
         ];
         type Writer = fn(&Path) -> Result<()>;
-        let writers: [(&str, Writer); 4] = [
+        let writers: [(&str, Writer); 7] = [
             ("persist_user_value", |path| {
                 persist_user_value(path, "submit_on_enter", Value::Bool(true))
             }),
@@ -858,6 +1422,15 @@ mod tests {
             }),
             ("persist_mcp_enabled", |path| {
                 persist_mcp_enabled(path, "tools", true)
+            }),
+            ("forget_agent_config_default", |path| {
+                forget_agent_config_default(path, "claude", "mode")
+            }),
+            ("persist_permission_default", |path| {
+                persist_permission_default(path, "bypass")
+            }),
+            ("persist_agent_server", |path| {
+                persist_agent_server(path, "codex", None)
             }),
         ];
         for original in broken {

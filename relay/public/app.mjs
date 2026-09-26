@@ -241,9 +241,16 @@ function renderDetail() {
     card.append(buttons); $('permission').append(card);
   }
   const oldQuestion = $('question').firstElementChild;
-  const selections = oldQuestion instanceof HTMLFormElement && oldQuestion.dataset.id === detail.question?.id ? questionSelections(oldQuestion, detail.question) : {};
+  const sameQuestion = oldQuestion instanceof HTMLFormElement && oldQuestion.dataset.id === detail.question?.id;
+  const selections = sameQuestion ? questionSelections(oldQuestion, detail.question) : {};
+  // 書きかけの答えと、書いていた欄のフォーカスも描き直しを越えて残す。
+  const customs = sameQuestion ? questionCustom(oldQuestion, detail.question) : {};
+  const typing = sameQuestion && document.activeElement?.form === oldQuestion ? document.activeElement.name : null;
   $('question').replaceChildren();
-  if (detail.question) renderQuestion(detail.question, selections);
+  if (detail.question) {
+    renderQuestion(detail.question, selections, customs);
+    if (typing) $('question').querySelector(`[name="${CSS.escape(typing)}"]`)?.focus();
+  }
   else if (detail.question_pending) $('question').append(node('p', t('questionLocal'), 'question'));
   controls();
 }
@@ -257,13 +264,24 @@ function questionSelections(form, question) {
   }
   return selections;
 }
-function renderQuestion(question, selections = {}) {
+// 自分で書いた答え（Other 欄つきの質問だけ・空は入れない）。ホスト側で Other 欄の名前に直して返す。
+function questionCustom(form, question) {
+  const data = new FormData(form);
+  const custom = {};
+  for (const field of question?.fields ?? []) {
+    const text = field.custom ? String(data.get(`custom:${field.name}`) ?? '').trim() : '';
+    if (text) custom[field.name] = text;
+  }
+  return custom;
+}
+function renderQuestion(question, selections = {}, customs = {}) {
   const form = node('form', undefined, 'question');
   form.dataset.id = question.id;
   form.append(node('h3', t('question')), node('pre', question.message));
   for (const field of question.fields) {
     const label = node('label', field.title || field.name);
-    const select = node('select'); select.name = field.name; select.required = true;
+    // 書いて答えられる質問は選ばなくてよい（選ぶ か 書く は送る時に確かめる）。
+    const select = node('select'); select.name = field.name; select.required = !field.custom;
     const chosen = selections[field.name];
     if (field.multi) {
       // multiple では空欄の選択肢が「選べてしまう」ので置かない（required が最低 1 件を担保）。
@@ -280,13 +298,26 @@ function renderQuestion(question, selections = {}) {
       for (const choice of field.choices) { const option = node('option', choice.label); option.value = choice.value; select.append(option); }
       select.value = (Array.isArray(chosen) ? chosen[0] : chosen) || '';
     }
-    label.append(select); form.append(label);
+    label.append(select);
+    if (field.custom) {
+      const input = node('input'); input.type = 'text'; input.name = `custom:${field.name}`; input.maxLength = 4000;
+      input.placeholder = t(field.multi ? 'customMulti' : 'customSingle');
+      input.value = customs[field.name] ?? '';
+      label.append(input);
+    }
+    form.append(label);
   }
   const submit = node('button', t('answer')); submit.type = 'submit'; submit.dataset.mutation = 'true';
   const decline = node('button', t('decline')); decline.type = 'button'; decline.dataset.mutation = 'true';
   decline.onclick = () => mutate('question_response', { question_id: question.id, selections: null }).catch(showError);
   form.append(submit, decline);
-  form.onsubmit = event => { event.preventDefault(); mutate('question_response', { question_id: question.id, selections: questionSelections(form, question) }).catch(showError); };
+  form.onsubmit = event => {
+    event.preventDefault();
+    const selections = questionSelections(form, question), custom = questionCustom(form, question);
+    const picked = value => Array.isArray(value) ? value.length > 0 : !!value;
+    if (!question.fields.every(field => picked(selections[field.name]) || custom[field.name])) { notice(t('answerRequired')); return; }
+    mutate('question_response', { question_id: question.id, selections, custom }).catch(showError);
+  };
   $('question').append(form);
 }
 function showError(error) {
