@@ -273,6 +273,7 @@ cmd:
   usage_limits: "使用量: レート制限を表示"
   usage_stats: "使用量: 統計を開く"
   copy_path_line: "編集: パス:行をコピー"
+  quote_selection: "エディタ: 選んだ行をスレッドで引用"
   close_all_tabs: "タブ: 全部閉じる（未保存は残す）"
   toggle_pin_tab: "タブ: ピン留め / 外す"
   open_in_vscode: "外部: VS Code で開く"
@@ -912,6 +913,7 @@ tabs:
   unpin_tip: ピン留めを外す  ⌘K ⇧⏎
   pinned_kept: ピン留めしたタブは ⌘W で閉じません（ピンを押して外すか、右クリック › タブを閉じる）
   copied_path_line: "コピーしました: %{path}"
+  quote_no_file: 引用できるのは開いているファイルの行です（無題のタブは引用できません）
   kept_unsaved: "未保存のタブ %{count} 枚は残しました"
   external_remote: SSH 先のファイルは手元のアプリで開けません
   external_missing: "%{app} が見つかりません（CLI を PATH に入れるか、アプリを入れてください）"
