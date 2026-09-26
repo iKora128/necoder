@@ -306,6 +306,13 @@ fleet:
   tab_add_thread: "＋ 会話"
   tab_add_terminal: "＋ 端末"
   tasks_count: "%{n} Tasks"
+  external_header: "外部の worktree（%{count}）"
+  external_tip: このリポジトリの worktree のうち Task になっていないもの（Orca・Claude Code・手で git worktree add したもの等）。押すと畳む
+  external_adopt: 取り込む
+  external_adopt_tip: レールに開いて Task にする（ブランチもファイルもそのまま・再起動しても Task のまま）
+  worktree_vanished: 消えています（necoder の外で削除）
+  worktree_forget: 片付け
+  worktree_forget_tip: この worktree のフォルダは necoder の外で消されました。レールから外します
   integration_row: "統合先 · 保護"
   integration_sub: "%{branched} 本が分岐中 · 今日 %{integrated} 件統合"
   asked: "› %{text}"

@@ -328,6 +328,12 @@ impl Workspace {
                 for slot in &mut workspace.project_sessions.projects {
                     if let Some(record) = by_id.get(slot.task_space.id.as_str()) {
                         // lifecycle は台帳が正・kind は worktree の現実（branch 接頭辞）が正。
+                        // ただし Fleet で取り込んだ linked worktree（`task/` でないブランチ）は台帳の
+                        // Task を正にする（O21・再起動で統合先扱いへ戻さない）。メインの作業ツリーは
+                        // Task にしない。
+                        if record.kind == SpaceKind::Task && slot.task_space.linked {
+                            slot.task_space.kind = SpaceKind::Task;
+                        }
                         slot.task_space.repository_id = record.repository_id.clone();
                         slot.task_space.title = SharedString::from(record.title.clone());
                         slot.task_space.phase = record.phase;
@@ -810,6 +816,9 @@ impl Workspace {
                 stage_tabs: HashMap::new(),
                 fleet_repository: None,
                 fleet_grids: HashMap::new(),
+                fleet_worktrees: HashMap::new(),
+                hide_external_worktrees: false,
+                adopt_as_task: std::collections::HashSet::new(),
                 fleet_cell_menu: None,
                 fleet_bottom_view: FleetBottomView::News,
                 agent_full_screen: std::env::var_os("NECODER_AGENT_FULLSCREEN").is_some(),

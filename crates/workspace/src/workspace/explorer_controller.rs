@@ -907,10 +907,27 @@ impl Workspace {
     fn add_worktree_to_rail(
         &mut self,
         worktree: Worktree,
-        task_space_preview: TaskSpace,
+        mut task_space_preview: TaskSpace,
         branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        // Fleet の「取り込む」で開いた worktree は、ブランチ名に関係なく Task にする（O21）。
+        let canonical =
+            |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let root = canonical(worktree.root());
+        let adopted = self
+            .chrome
+            .adopt_as_task
+            .iter()
+            .find(|path| canonical(path) == root)
+            .cloned();
+        if let Some(path) = &adopted {
+            self.chrome.adopt_as_task.remove(path);
+            task_space_preview.kind = SpaceKind::Task;
+            if task_space_preview.base_oid.is_none() {
+                task_space_preview.base_oid = task_space_preview.head_oid.clone();
+            }
+        }
         // リモートの `.necoder` はリモート側にあるので読まない（同名のローカルパスを拾わない）。
         let identity = if worktree.is_remote() {
             ProjectIdentity::default()
@@ -978,6 +995,13 @@ impl Workspace {
         }
         // 決めた色を DB へ焼く（次に開くときも同じ色・並び順に依存しない）。
         self.persist_project_color(index);
+        if adopted.is_some() {
+            // 台帳に Task として残す（再起動してもブランチ名の判定で統合先へ戻らない）。
+            self.make_task_space(index, cx);
+        }
+        // レールの worktree が増えた = Fleet の worktree 一覧を読み直す（O21・作った直後の worktree を
+        // 「消えています」と見間違えない）。
+        self.forget_fleet_worktrees();
         self.update_agent_destination_for(index, cx);
         if is_remote {
             self.refresh_explorer_for(index, cx);
@@ -1036,6 +1060,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.overlays.rail_menu = None;
+        // レールの worktree が減った = Fleet の worktree 一覧を読み直す（O21）。
+        self.forget_fleet_worktrees();
         if self.project_sessions.projects.len() <= 1 {
             self.push_toast(
                 SharedString::from(i18n::t!("rail.cannot_remove_last")),

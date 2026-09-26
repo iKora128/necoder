@@ -18,7 +18,7 @@ impl Workspace {
     /// アクティブなリポジトリの統合先 slot（`⌂ main`）。
     fn integration_index_for_active_repository(&self) -> Option<usize> {
         let key = self.active_repository_key()?;
-        self.project_sessions.projects.iter().position(|slot| slot.task_space.is_integration() && slot.repository_key() == key)
+        self.integration_slot_for(&key)
     }
 
     pub(super) fn open_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {

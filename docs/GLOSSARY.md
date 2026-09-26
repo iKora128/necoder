@@ -49,6 +49,10 @@
 | 長寿命 UI 束（1 project 分） | `ProjectSession` | — | — |
 | **TaskSpace**（Fleet の隔離作業単位） | `TaskSpace` / `SpaceId` | Task | Task |
 | **IntegrationSpace**（保護された統合先） | `SpaceKind::Integration`（P0 で phase から分離） | Integration | Integration |
+| ↳ 統合先の選び方（同じリポジトリに統合先扱いが複数ある時はメインの作業ツリー） | `integration_slot_for` / `TaskSpace::linked` | — | — |
+| **外部の worktree**（リポジトリの worktree のうち Task でないもの。necoder の外で作ったものも含む） | `external_worktrees` / `fleet_worktrees` | 外部の worktree | Other worktrees |
+| ↳ **取り込む**（外部の worktree をレールに開いて Task にする） | `adopt_worktree` / `make_task_space` | 取り込む | Adopt |
+| ↳ **消えています**（Task の worktree が necoder の外で消された。片付け = レールから外す） | `vanished_worktree` / `forget_vanished_task` | 消えています / 片付け | Gone / Clean up |
 | **thread**（Task 内の会話 / AgentRun 1 本） | `Thread` | スレッド | Thread |
 | **agent**（話す相手の AI） | `AgentKind` / `agent` | エージェント | Agent |
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |

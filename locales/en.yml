@@ -305,6 +305,13 @@ fleet:
   tab_add_thread: "+ Thread"
   tab_add_terminal: "+ Terminal"
   tasks_count: "%{n} Tasks"
+  external_header: "Other worktrees (%{count})"
+  external_tip: "Worktrees of this repository that are not Tasks (made by Orca, Claude Code, git worktree add, and so on). Click to collapse"
+  external_adopt: Adopt
+  external_adopt_tip: "Open it in the rail as a Task (branch and files stay as they are; it stays a Task after a restart)"
+  worktree_vanished: Gone (deleted outside necoder)
+  worktree_forget: Clean up
+  worktree_forget_tip: "This worktree's folder was deleted outside necoder. Remove it from the rail"
   integration_row: "Integration · protected"
   integration_sub: "%{branched} branched · %{integrated} integrated today"
   asked: "› %{text}"
