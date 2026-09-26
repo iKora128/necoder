@@ -299,7 +299,9 @@ impl Render for TodoPanel {
                             }
                         }),
                     )
-                    .child(editor)
+                    // EditorView は親の大きさで描くので、1 行分の高さを親が決める（無いと高さ 0 に潰れて
+                    // 線のように見え、打った文字も見えない。issue #29）。会話の検索欄と同じ 18px。
+                    .child(div().h(px(18.)).child(editor))
             }))
             .child(list)
     }
