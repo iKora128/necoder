@@ -4341,7 +4341,8 @@ PYEOF"#;
                 thread.name = SharedString::from(name.to_string());
                 thread.name_is_custom = true; // 以後 AI 自動命名で上書きしない
             }
-            self.persist_thread(index);
+            // 名前（メタ）だけ保存する。生成中に改名しても、途中の本文を DB に書かない。
+            self.persist_thread_meta(index);
             self.persist_custom_name(index);
         }
         cx.notify();
@@ -5902,8 +5903,12 @@ PYEOF"#;
             }
             AgentEvent::AgentChunk(text) => {
                 stream_updated = true;
+                // 連結するのは**まだ保存していない**末尾だけ。ターン終了で保存した本文に、待機中に
+                // 届いた増分（エージェントが自分で続けたターン・背景タスクの報告）を足すと、その分は
+                // DB に二度と書かれない。新しいエントリにすれば次の保存で残る。
+                let tail_is_live = thread.entries.len() > thread.persisted_entries;
                 match thread.entries.last_mut() {
-                    Some(Entry::Agent(existing)) => {
+                    Some(Entry::Agent(existing)) if tail_is_live => {
                         let mut combined = existing.to_string();
                         combined.push_str(&text);
                         *existing = combined.into();
@@ -5917,8 +5922,9 @@ PYEOF"#;
             }
             AgentEvent::ThoughtChunk(text) => {
                 stream_updated = true;
+                let tail_is_live = thread.entries.len() > thread.persisted_entries;
                 match thread.entries.last_mut() {
-                    Some(Entry::Thinking(existing)) => {
+                    Some(Entry::Thinking(existing)) if tail_is_live => {
                         let mut combined = existing.to_string();
                         combined.push_str(&text);
                         *existing = combined.into();
@@ -13998,5 +14004,56 @@ PYEOF"#;
             assert!(panel.threads[active].goal.is_none(), "null で消える");
         });
         let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 回帰テスト（O2 で待機中も更新を読むようにした副作用の手当て）: ターン終了で保存した本文に、
+    /// 待機中に届いた増分を連結しない。連結すると増分は DB に二度と書かれない。新しいエントリに
+    /// して、次の保存で残す。ターン中の増分はこれまでどおり 1 つのエントリへ連結する。
+    #[gpui::test]
+    fn chunks_after_a_saved_turn_start_a_new_entry(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "idle-chunks");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_idle_chunks_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let thread_id = panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let active = panel.active;
+            panel.on_event(active, AgentEvent::TurnStarted, cx);
+            panel.on_event(active, AgentEvent::AgentChunk("最初の答え".into()), cx);
+            panel.on_event(active, AgentEvent::AgentChunk("の続き".into()), cx);
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+            // 待機中に届いた本文（エージェントが自分で続けた・背景タスクの報告）。
+            panel.on_event(active, AgentEvent::AgentChunk("待機中の報告".into()), cx);
+            let texts: Vec<String> = panel.threads[active]
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Agent(text) => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts, vec!["最初の答えの続き", "待機中の報告"]);
+            panel.persist_thread(active);
+            panel.threads[active].id.clone()
+        });
+        let saved: Vec<String> = storage
+            .load_recent_turns(&thread_id, 10)
+            .expect("turns を読める")
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect();
+        assert_eq!(saved, vec!["最初の答えの続き", "待機中の報告"]);
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
     }
 }
