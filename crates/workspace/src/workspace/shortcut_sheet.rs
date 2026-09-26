@@ -212,6 +212,7 @@ impl Workspace {
         let theme = self.theme.clone();
         let accent = self.accent();
         let platform = keymap_core::KeymapPlatform::current();
+        let os = keymap_core::os_shortcuts::Os::current();
         // 既定 + ユーザーの keymap.json（O27・いま効いている割り当て）。
         let rows = self.keymap_rows();
         let editing = self.overlays.keymap_editing.as_ref();
@@ -323,6 +324,29 @@ impl Workspace {
                                     this.reset_key_binding(&reset_context, &reset_action, cx);
                                 }),
                             ),
+                    );
+                }
+                // OS が先に取るキー（O27・H26）: ⚠ とツールチップで知らせる（届かないことがある）。
+                let os_conflict = row
+                    .keys
+                    .iter()
+                    .find_map(|keys| keymap_core::os_shortcuts::os_shortcut(os, keys));
+                if let Some(name) = os_conflict {
+                    let feature = i18n::t!(&format!("key.os.{name}"));
+                    line = line.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "keymap-os-{}-{}",
+                                row.context, row.action
+                            )))
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(theme.warn)
+                            .child("⚠")
+                            .tooltip(ui::Tooltip::text(
+                                i18n::t!("key.os_conflict", "feature" => feature),
+                                theme.clone(),
+                            )),
                     );
                 }
                 line = line.child(keys);
@@ -527,6 +551,19 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OS が先に取るキーの名前（O27・H26）は、どれも両方の言語で引ける（⚠ のツールチップ・トースト）。
+    #[test]
+    fn every_os_shortcut_has_a_name_in_both_languages() {
+        for name in keymap_core::os_shortcuts::names() {
+            for locale in ["ja", "en"] {
+                assert!(
+                    i18n::translate_in(locale, &format!("key.os.{name}")).is_some(),
+                    "{locale}: key.os.{name}"
+                );
+            }
+        }
+    }
 
     /// 既定 keymap の**全 bound アクション**が、レジストリ or 補助表でラベルを持つ（fallback に落ちない）。
     /// キーを足したのにラベルを追補し忘れると、この test が落ちて一覧に生アクション名が出るのを防ぐ。

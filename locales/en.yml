@@ -1309,6 +1309,30 @@ key:
   keep: Cancel
   unreadable: "keymap.json can't be read, so bindings can't be changed here (%{error}). Open keymap.json to fix it"
   write_failed: "Can't write keymap.json: %{path}: %{error}"
+  os_conflict: "The OS uses this key for %{feature}, so it may never reach necoder (turn that off in the OS settings or pick another key)"
+  os_bound: "%{keys} is also the OS shortcut for %{feature}. Unless that is turned off in the OS settings, it will not reach necoder"
+  os:
+    spotlight: Spotlight
+    input_source: switching input sources
+    character_viewer: Emoji & Symbols
+    app_switcher: the app switcher
+    window_cycle: switching windows
+    screenshot: screenshots
+    mission_control: Mission Control
+    spaces: switching Spaces
+    force_quit: Force Quit
+    lock_screen: locking the screen
+    dock: showing and hiding the Dock
+    secure_attention: the Ctrl+Alt+Del screen
+    task_manager: Task Manager
+    start_menu: the Start menu
+    window_menu: the window menu
+    windows_key: Windows key shortcuts
+    terminal_launcher: opening a terminal
+    log_out: logging out
+    workspaces: switching workspaces
+    run_command: running a command
+    super_key: Super key shortcuts
   section_editor: Editor
   section_agent: AI chat
   section_control: Control
