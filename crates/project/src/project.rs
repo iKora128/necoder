@@ -411,25 +411,72 @@ pub enum StatusKind {
     Conflicted,
 }
 
+/// git を呼ぶ経路。**フックを走らせてよいか**をここで分ける（呼び出し側は関数名で選ぶ）。
+///
+/// 未信頼 repo の repo-local `.git/config` 経由のコード実行を封じる（Zed GHSA-fj2r 同型）。
+/// フォルダを開くだけで `git status` が自動実行される（レールの git 色）ため、`core.fsmonitor`
+/// による drive-by RCE が要点。ext:: リモート transport は**どちらの経路でも**封じる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitTrigger {
+    /// necoder が自分で走らせる git（status / diff / log / blame / worktree 作成 / fetch…）。
+    /// 開いただけの repo でも走るので、フック（`core.hooksPath`）も含めて全部封じる。[`run_git`]。
+    Automatic,
+    /// 利用者がボタンで明示したコミット / push。フック（pre-commit / commit-msg / pre-push）は
+    /// その repo の持ち主が置いた検査なので、ターミナルの `git commit` と同じく走らせる。
+    /// [`run_git_user_action`]。
+    UserAction,
+}
+
+/// `git` に渡す引数の全体（`-c` の防御 + subcommand 以降）。git レベルのオプションは
+/// subcommand より前に置く必要があるので先頭へ差す。
+fn git_command_args<I, S>(trigger: GitTrigger, args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut command: Vec<String> = vec!["-c".into(), "core.fsmonitor=false".into()];
+    if trigger == GitTrigger::Automatic {
+        command.extend(["-c".into(), "core.hooksPath=/dev/null".into()]);
+    }
+    command.extend(["-c".into(), "protocol.ext.allow=never".into()]);
+    command.extend(args.into_iter().map(Into::into));
+    command
+}
+
+fn run_git_as<I, S>(
+    host: &dyn Host,
+    dir: &Path,
+    trigger: GitTrigger,
+    args: I,
+    env: &[(&str, &str)],
+) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut spec = CommandSpec::new("git", dir).args(git_command_args(trigger, args));
+    for (key, value) in env {
+        spec.env.insert((*key).to_string(), (*value).to_string());
+    }
+    host.run_command(&spec)
+}
+
+/// necoder が自分で走らせる git（[`GitTrigger::Automatic`]・フックは走らない）。
 fn run_git<I, S>(host: &dyn Host, dir: &Path, args: I) -> Result<CommandOutput>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    // 未信頼 repo の repo-local `.git/config` 経由のコード実行を封じる（Zed GHSA-fj2r 同型）。
-    // フォルダを開くだけで `git status` が自動実行される（レールの git 色）ため、`core.fsmonitor`
-    // による drive-by RCE が要点。hooks / ext:: リモート transport も常時無効化して防御を集約する。
-    // git レベルのオプションは subcommand より前に置く必要があるので先頭へ差す。
-    let mut hardened: Vec<String> = vec![
-        "-c".into(),
-        "core.fsmonitor=false".into(),
-        "-c".into(),
-        "core.hooksPath=/dev/null".into(),
-        "-c".into(),
-        "protocol.ext.allow=never".into(),
-    ];
-    hardened.extend(args.into_iter().map(Into::into));
-    host.run_command(&CommandSpec::new("git", dir).args(hardened))
+    run_git_as(host, dir, GitTrigger::Automatic, args, &[])
+}
+
+/// 利用者が明示したコミット / push（[`GitTrigger::UserAction`]・フックを走らせる）。
+fn run_git_user_action<I, S>(host: &dyn Host, dir: &Path, args: I) -> Result<CommandOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    run_git_as(host, dir, GitTrigger::UserAction, args, &[])
 }
 
 /// [`run_git`] の env 付き版。ネットワークを触る git（fetch 等）で
@@ -444,20 +491,7 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let mut hardened: Vec<String> = vec![
-        "-c".into(),
-        "core.fsmonitor=false".into(),
-        "-c".into(),
-        "core.hooksPath=/dev/null".into(),
-        "-c".into(),
-        "protocol.ext.allow=never".into(),
-    ];
-    hardened.extend(args.into_iter().map(Into::into));
-    let mut spec = CommandSpec::new("git", dir).args(hardened);
-    for (key, value) in env {
-        spec.env.insert((*key).to_string(), (*value).to_string());
-    }
-    host.run_command(&spec)
+    run_git_as(host, dir, GitTrigger::Automatic, args, env)
 }
 
 /// `dir` を含む git リポジトリのルート（`git rev-parse --show-toplevel`）。repo 外なら `None`。
@@ -894,6 +928,43 @@ fn git_fail_message(output: &CommandOutput) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// 失敗した git / gh の出力（[`git_fail_message`]）を運ぶエラー。見出し（「コミットに失敗」等）は
+/// `context` で重ねるので、`{error:#}` は従来どおり「見出し: 出力」になる。
+/// UI は [`failure_output`] で出力だけを取り出し、自分の言葉の見出しに添える
+/// （この crate は i18n を知らない）。フックで止まったコミットでは、ここにフックの出力が入る。
+#[derive(Debug)]
+pub struct CommandFailed {
+    pub output: String,
+}
+
+impl std::fmt::Display for CommandFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.output)
+    }
+}
+
+impl std::error::Error for CommandFailed {}
+
+/// 成功でなければ、出力を [`CommandFailed`] に包んで見出しを重ねたエラーにする。
+fn ensure_command_success(output: &CommandOutput, headline: &str) -> Result<()> {
+    if output.success() {
+        return Ok(());
+    }
+    Err(anyhow::Error::new(CommandFailed {
+        output: git_fail_message(output),
+    })
+    .context(headline.to_string()))
+}
+
+/// エラーの「理由」（UI の見出しに添える部分）。git / gh が失敗したならその出力、
+/// 起動できなかった等ならエラーの連鎖全体（`{error:#}`）。
+pub fn failure_output(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<CommandFailed>() {
+        Some(failed) => failed.output.clone(),
+        None => format!("{error:#}"),
+    }
+}
+
 /// 変更を index に上げる（`git add -- <path>`）。
 pub fn stage_path(dir: &Path, path: &Path) -> Result<()> {
     stage_path_on(&LocalHost, dir, path)
@@ -903,12 +974,7 @@ pub fn stage_path_on(host: &dyn Host, dir: &Path, path: &Path) -> Result<()> {
     let path = path.to_string_lossy().into_owned();
     let output =
         run_git(host, dir, ["add", "--", path.as_str()]).context("git add の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "stage に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "stage に失敗")
 }
 
 /// 全変更を index に上げる（`git add -A`）。
@@ -918,12 +984,7 @@ pub fn stage_all(dir: &Path) -> Result<()> {
 
 pub fn stage_all_on(host: &dyn Host, dir: &Path) -> Result<()> {
     let output = run_git(host, dir, ["add", "-A"]).context("git add -A の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "stage に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "stage に失敗")
 }
 
 /// index から下ろす（`git restore --staged -- <path>`）。
@@ -935,29 +996,21 @@ pub fn unstage_path_on(host: &dyn Host, dir: &Path, path: &Path) -> Result<()> {
     let path = path.to_string_lossy().into_owned();
     let output = run_git(host, dir, ["restore", "--staged", "--", path.as_str()])
         .context("git restore --staged の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "unstage に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "unstage に失敗")
 }
 
 /// staged 変更をコミット（`git commit -m <message>`）。message 空・staged 無しは失敗。
+/// 利用者の明示操作なので**フックを走らせる**（pre-commit / commit-msg が止めたらその出力が
+/// [`CommandFailed`] に入る）。
 pub fn commit(dir: &Path, message: &str) -> Result<()> {
     commit_on(&LocalHost, dir, message)
 }
 
 pub fn commit_on(host: &dyn Host, dir: &Path, message: &str) -> Result<()> {
     anyhow::ensure!(!message.trim().is_empty(), "コミットメッセージが空");
-    let output =
-        run_git(host, dir, ["commit", "-m", message]).context("git commit の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "コミットに失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    let output = run_git_user_action(host, dir, ["commit", "-m", message])
+        .context("git commit の実行に失敗")?;
+    ensure_command_success(&output, "コミットに失敗")
 }
 
 /// 新しいブランチを作って切り替え（`git switch -c <name>`）。既存名なら失敗。
@@ -969,12 +1022,7 @@ pub fn create_branch_on(host: &dyn Host, dir: &Path, name: &str) -> Result<()> {
     anyhow::ensure!(!name.trim().is_empty(), "ブランチ名が空");
     let output =
         run_git(host, dir, ["switch", "-c", name]).context("git switch -c の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "ブランチ作成に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "ブランチ作成に失敗")
 }
 
 /// ブランチを削除（`git branch -d`; `force` で `-D`）。現在ブランチは git が拒否する。
@@ -996,12 +1044,13 @@ pub fn delete_branch_on(host: &dyn Host, dir: &Path, name: &str, force: bool) ->
 
 /// 現在ブランチを push（`git push`）。upstream 未設定なら `-u origin <branch>` で再試行
 /// （初回 push の定番動線）。remote が無ければ失敗を返す。
+/// 利用者の明示操作なので**フックを走らせる**（pre-push が止めたらその出力が [`CommandFailed`] に入る）。
 pub fn push(dir: &Path) -> Result<()> {
     push_on(&LocalHost, dir)
 }
 
 pub fn push_on(host: &dyn Host, dir: &Path) -> Result<()> {
-    let output = run_git(host, dir, ["push"]).context("git push の実行に失敗")?;
+    let output = run_git_user_action(host, dir, ["push"]).context("git push の実行に失敗")?;
     if output.success() {
         return Ok(());
     }
@@ -1009,16 +1058,15 @@ pub fn push_on(host: &dyn Host, dir: &Path) -> Result<()> {
     if stderr.contains("has no upstream") || stderr.contains("--set-upstream") {
         let branch = git_current_branch_on(host, dir)
             .context("push: 現在ブランチが取得できない（detached HEAD?）")?;
-        let retry = run_git(
+        let retry = run_git_user_action(
             host,
             dir,
             ["push", "--set-upstream", "origin", branch.as_str()],
         )
         .context("git push --set-upstream の実行に失敗")?;
-        anyhow::ensure!(retry.success(), "push に失敗: {}", git_fail_message(&retry));
-        return Ok(());
+        return ensure_command_success(&retry, "push に失敗");
     }
-    anyhow::bail!("push に失敗: {}", stderr.trim());
+    ensure_command_success(&output, "push に失敗")
 }
 
 /// upstream から pull（`git pull --ff-only`）。fast-forward できなければ失敗（安全側・merge しない）。
@@ -1028,12 +1076,7 @@ pub fn pull(dir: &Path) -> Result<()> {
 
 pub fn pull_on(host: &dyn Host, dir: &Path) -> Result<()> {
     let output = run_git(host, dir, ["pull", "--ff-only"]).context("git pull の実行に失敗")?;
-    anyhow::ensure!(
-        output.success(),
-        "pull に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "pull に失敗")
 }
 
 // ── GitHub 連携（M8: `gh` CLI 経由。git と同じ host 上で動かす＝remote repo でも同じ動線） ──
@@ -1084,12 +1127,7 @@ pub fn create_pr(dir: &Path) -> Result<()> {
 pub fn create_pr_on(host: &dyn Host, dir: &Path) -> Result<()> {
     let output = run_gh(host, dir, ["pr", "create", "--web"])
         .context("gh pr create の実行に失敗（gh 未導入？）")?;
-    anyhow::ensure!(
-        output.success(),
-        "PR 作成に失敗: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "PR 作成に失敗")
 }
 
 /// 現在ブランチの PR をブラウザで開く（無ければリポジトリのトップを開く）。
@@ -1107,12 +1145,7 @@ pub fn open_pr_web_on(host: &dyn Host, dir: &Path) -> Result<()> {
     }
     let output = run_gh(host, dir, ["repo", "view", "--web"])
         .context("gh repo view の実行に失敗（gh 未導入？）")?;
-    anyhow::ensure!(
-        output.success(),
-        "リポジトリを開けません: {}",
-        git_fail_message(&output)
-    );
-    Ok(())
+    ensure_command_success(&output, "リポジトリを開けません")
 }
 
 // ── AI コミットメッセージ生成（M8: AI-agent-native。Claude Code CLI に diff を渡す） ──
@@ -1138,11 +1171,7 @@ pub fn ai_commit_message_on(host: &dyn Host, dir: &Path) -> Result<String> {
     let output = host
         .run_command(&host.shell_script(script.as_str(), dir))
         .context("コミットメッセージ生成の実行に失敗（claude CLI 未導入？）")?;
-    anyhow::ensure!(
-        output.success(),
-        "生成に失敗: {}",
-        git_fail_message(&output)
-    );
+    ensure_command_success(&output, "生成に失敗")?;
     let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
     anyhow::ensure!(
         !message.is_empty(),
@@ -2983,6 +3012,198 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/work/necoder-worktrees"));
         assert_eq!(worktree_setup_script(Path::new("/work/necoder")), PathBuf::from("/work/necoder/.necoder/worktree-setup.sh"));
         assert!(task_worktree_dir(Path::new("/")).is_none(), "親が無ければ作れない");
+    }
+
+    /// 検査用の一時 repo（git が無い環境では None＝スキップ）。フックは `hooks/` に置く
+    /// （repo-local の `core.hooksPath` で指す＝利用者のグローバル設定に左右されない）。
+    fn hook_repo(tag: &str) -> Option<PathBuf> {
+        let root = scratch(tag);
+        std::fs::create_dir_all(root.join("hooks")).ok()?;
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+        };
+        git(&["init", "-q"])?;
+        for (key, value) in [
+            ("user.email", "t@example.com"),
+            ("user.name", "tester"),
+            ("core.autocrlf", "false"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "hooks"),
+        ] {
+            git(&["config", key, value])?;
+        }
+        Some(root)
+    }
+
+    /// 実行可能なフックを書く（unix のみ・Windows の Git は sh で走らせるが権限の付け方が違う）。
+    #[cfg(unix)]
+    fn write_hook(root: &Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = root.join("hooks").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn commit_count(root: &Path) -> usize {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn automatic_git_disables_hooks_but_user_actions_keep_them() {
+        // 自動で走る git（status 等）は hooksPath も封じる。
+        assert_eq!(
+            git_command_args(GitTrigger::Automatic, ["status", "--porcelain"]),
+            [
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "protocol.ext.allow=never",
+                "status",
+                "--porcelain",
+            ]
+        );
+        // 明示のコミット / push はフックを残す。fsmonitor と ext:: は両方の経路で封じる。
+        let user = git_command_args(GitTrigger::UserAction, ["commit", "-m", "x"]);
+        assert!(
+            !user.iter().any(|arg| arg.starts_with("core.hooksPath")),
+            "{user:?}"
+        );
+        assert!(user.contains(&"core.fsmonitor=false".to_string()));
+        assert!(user.contains(&"protocol.ext.allow=never".to_string()));
+        assert_eq!(user[user.len() - 3..], ["commit", "-m", "x"]);
+    }
+
+    #[test]
+    fn failure_output_keeps_the_command_output_apart_from_the_headline() {
+        let output = CommandOutput {
+            status_code: Some(1),
+            stdout: b"ignored".to_vec(),
+            stderr: b"pre-commit: trailing whitespace\n".to_vec(),
+        };
+        let error = ensure_command_success(&output, "コミットに失敗").unwrap_err();
+        assert_eq!(failure_output(&error), "pre-commit: trailing whitespace");
+        // 従来のログ表記（見出し: 出力）は変わらない。
+        assert_eq!(
+            format!("{error:#}"),
+            "コミットに失敗: pre-commit: trailing whitespace"
+        );
+        // git を起動できなかった等は、連鎖全体を理由にする。
+        let spawn = anyhow::anyhow!("No such file or directory").context("git の実行に失敗");
+        assert_eq!(
+            failure_output(&spawn),
+            "git の実行に失敗: No such file or directory"
+        );
+    }
+
+    /// パネルからのコミットはフックを走らせ、止められたらフックの出力を返す。
+    /// 自動で走る git（worktree 作成）はフックを走らせない。
+    #[cfg(unix)]
+    #[test]
+    fn commit_runs_hooks_and_reports_their_output() {
+        let Some(root) = hook_repo("hooks_commit") else {
+            return; // git 無し環境はスキップ
+        };
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "init").unwrap();
+
+        write_hook(
+            &root,
+            "pre-commit",
+            "echo 'pre-commit: 末尾に空白があります' >&2\nexit 1",
+        );
+        std::fs::write(root.join("a.txt"), "two \n").unwrap();
+        stage_all(&root).unwrap();
+        let error = commit(&root, "blocked").unwrap_err();
+        assert!(
+            failure_output(&error).contains("pre-commit: 末尾に空白があります"),
+            "{error:#}"
+        );
+        assert_eq!(commit_count(&root), 1, "フックが止めたらコミットされない");
+
+        write_hook(&root, "pre-commit", "touch pre-commit-ran\nexit 0");
+        write_hook(
+            &root,
+            "commit-msg",
+            "grep -q '^fix' \"$1\" || { echo 'commit-msg: fix で始めてください' >&2; exit 1; }",
+        );
+        let error = commit(&root, "tidy").unwrap_err();
+        assert!(
+            failure_output(&error).contains("commit-msg: fix で始めてください"),
+            "{error:#}"
+        );
+        commit(&root, "fix: trailing space").unwrap();
+        assert!(root.join("pre-commit-ran").exists(), "pre-commit が走った");
+        assert_eq!(commit_count(&root), 2);
+
+        // 自動の git は hooksPath を /dev/null に向けるので post-checkout は走らない。
+        write_hook(&root, "post-checkout", "touch post-checkout-ran");
+        let worktree = scratch("hooks_commit_worktree");
+        create_task_worktree_on(&LocalHost, &root, &worktree, "task/hooks").unwrap();
+        assert!(
+            !root.join("post-checkout-ran").exists()
+                && !worktree.join("post-checkout-ran").exists(),
+            "自動の git でフックが走った"
+        );
+        remove_worktree(&root, &worktree, true).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// パネルからの push は pre-push を走らせ、止められたらその出力を返す。
+    #[cfg(unix)]
+    #[test]
+    fn push_runs_the_pre_push_hook() {
+        let Some(root) = hook_repo("hooks_push") else {
+            return;
+        };
+        let bare = scratch("hooks_push_remote");
+        std::fs::create_dir_all(&bare).unwrap();
+        let bare_init = Command::new("git")
+            .current_dir(&bare)
+            .args(["init", "-q", "--bare"])
+            .output()
+            .unwrap();
+        assert!(bare_init.status.success());
+        Command::new("git")
+            .current_dir(&root)
+            .args(["remote", "add", "origin", &bare.to_string_lossy()])
+            .output()
+            .unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "init").unwrap();
+        push(&root).unwrap(); // upstream 未設定 → set-upstream で通る（フック無し）
+
+        write_hook(
+            &root,
+            "pre-push",
+            "echo 'pre-push: テストが落ちています' >&2\nexit 1",
+        );
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        stage_all(&root).unwrap();
+        commit(&root, "second").unwrap();
+        let error = push(&root).unwrap_err();
+        assert!(
+            failure_output(&error).contains("pre-push: テストが落ちています"),
+            "{error:#}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 }
 
