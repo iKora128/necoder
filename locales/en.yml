@@ -680,7 +680,7 @@ settings:
   ghostty_item_size: size
   ghostty_item_cursor: cursor
   ghostty_item_colors: colors
-  terminal_color_scheme_default: Default (follows the app theme). Reads Ghostty themes, Windows Terminal schemes (JSON) and iTerm2 .itermcolors
+  terminal_color_scheme_default: Default (follows the app theme). Reads Ghostty themes, Windows Terminal schemes (JSON), iTerm2 .itermcolors and Warp themes (YAML)
   terminal_color_scheme_pick: Choose file…
   terminal_color_scheme_reset: Use default
   pref_terminal_shell: Terminal shell
