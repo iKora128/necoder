@@ -470,6 +470,9 @@ impl Workspace {
                     }
                     // session の `review` と同じ Entity（下でまとめて塗り直す）。
                     TabContent::Review(_) => {}
+                    TabContent::Web { view, .. } => {
+                        view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
+                    }
                 }
             }
             if let Some(review) = &session.review {
@@ -592,8 +595,11 @@ impl Workspace {
             PickerEvent::Confirmed(id) => {
                 let id = *id;
                 let mode = self.overlays.picker_mode;
+                // URL 入力は行ではなく入力欄の中身が答え（閉じる前に読む）。
+                let query = _picker.read(cx).query().to_string();
                 self.close_picker(window, cx);
                 match mode {
+                    PickerMode::PreviewUrl => self.confirm_localhost_input(&query, window, cx),
                     PickerMode::Files => {
                         // 空プロジェクトの作成アクション（番兵 id）: エクスプローラの
                         // インライン命名へ繋ぐ（命名入力が見えるよう左ドックは開く）。

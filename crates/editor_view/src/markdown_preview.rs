@@ -9,13 +9,33 @@
 //! 足さない。色が付くのは syn-* トークン（コードブロック）・インラインコード/リンクのみ。
 
 use gpui::{
-    div, img, prelude::*, px, relative, AnyElement, FontStyle, FontWeight, HighlightStyle,
-    ImageSource, ObjectFit, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
-    UnderlineStyle,
+    div, img, prelude::*, px, relative, AnyElement, App, FontStyle, FontWeight, HighlightStyle,
+    ImageSource, InteractiveText, ObjectFit, ScrollHandle, SharedString, StrikethroughStyle,
+    StyledText, UnderlineStyle, Window,
 };
+use std::cell::Cell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use theme_core::Theme;
+
+/// リンクが押された時の受け口（行き先は Markdown に書かれたまま）。解釈（URL・ファイル）は
+/// エディタの親が決める — このクレートは Web タブもファイルを開くことも知らない。
+pub(crate) type LinkHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
+
+/// 1 回の描画でリンクを持つテキストに振る要素 id（`InteractiveText` は id で状態を持つ）。
+struct Links {
+    on_click: LinkHandler,
+    next_id: Cell<usize>,
+}
+
+impl Links {
+    fn next_id(&self) -> usize {
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        id
+    }
+}
 
 /// 見出しレベル→文字サイズ（閲覧用に chat より大きめ・階層は size と weight だけで示す）。
 fn heading_size(level: u8) -> f32 {
@@ -37,7 +57,12 @@ pub(crate) fn render_preview(
     font_size: f32,
     scroll: &ScrollHandle,
     base_dir: Option<&Path>,
+    on_link: LinkHandler,
 ) -> AnyElement {
+    let links = Links {
+        on_click: on_link,
+        next_id: Cell::new(0),
+    };
     let prose = font_size + 1.0; // 本文は code より僅かに大きく（読み物として）
     div()
         .id("markdown-preview")
@@ -60,7 +85,7 @@ pub(crate) fn render_preview(
                     blocks
                         .iter()
                         .cloned()
-                        .map(|block| render_block(block, theme, font_size, base_dir)),
+                        .map(|block| render_block(block, theme, font_size, base_dir, &links)),
                 ),
         )
         .into_any_element()
@@ -72,6 +97,7 @@ fn render_block(
     theme: &Theme,
     font_size: f32,
     base_dir: Option<&Path>,
+    links: &Links,
 ) -> AnyElement {
     match block {
         markdown::Block::Heading { level, text, spans } => div()
@@ -83,10 +109,10 @@ fn render_block(
                 FontWeight::SEMIBOLD
             })
             .text_color(theme.fg0)
-            .child(styled_text(text, md_highlights(theme, &spans)))
+            .child(linked_text(text, &spans, theme, links))
             .into_any_element(),
         markdown::Block::Paragraph { text, spans } => div()
-            .child(styled_text(text, md_highlights(theme, &spans)))
+            .child(linked_text(text, &spans, theme, links))
             .into_any_element(),
         markdown::Block::Code { lang, text } => {
             let language = lang.as_deref().and_then(lang::LanguageId::from_name);
@@ -129,7 +155,7 @@ fn render_block(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(styled_text(text, md_highlights(theme, &spans))),
+                        .child(linked_text(text, &spans, theme, links)),
                 )
                 .into_any_element()
         }
@@ -143,7 +169,7 @@ fn render_block(
             alignments,
             head,
             rows,
-        } => render_table(alignments, head, rows, theme, font_size),
+        } => render_table(alignments, head, rows, theme, font_size, links),
     }
 }
 
@@ -156,6 +182,7 @@ fn render_table(
     rows: Vec<Vec<markdown::TableCell>>,
     theme: &Theme,
     font_size: f32,
+    links: &Links,
 ) -> AnyElement {
     let layout = markdown::table_columns(&head, &rows);
     let columns = layout.len();
@@ -189,7 +216,7 @@ fn render_table(
                     Some(markdown::TableAlign::Right) => element.text_right(),
                     _ => element,
                 };
-                element.child(styled_text(cell.text, md_highlights(theme, &cell.spans)))
+                element.child(linked_text(cell.text, &cell.spans, theme, links))
             }))
     };
     div()
@@ -340,10 +367,45 @@ fn code_highlights(
 /// これを怠ると `with_highlights` の前提（ソート済み非重複）が崩れ layout_line が split_at で abort する。
 /// レンジ端点は [`markdown::parse`] が文字境界を保証済み（unit test）＝ snap 不要。
 fn styled_text(text: String, highlights: Vec<(Range<usize>, HighlightStyle)>) -> AnyElement {
+    build_styled_text(text, highlights).into_any_element()
+}
+
+fn build_styled_text(text: String, highlights: Vec<(Range<usize>, HighlightStyle)>) -> StyledText {
     let highlights = gpui::combine_highlights(highlights, std::iter::empty()).collect::<Vec<_>>();
     let mut styled = StyledText::new(SharedString::from(text));
     if !highlights.is_empty() {
         styled = styled.with_highlights(highlights);
     }
-    styled.into_any_element()
+    styled
+}
+
+/// 本文のテキスト。リンク（`[text](dest)`）を含む時だけ押せる形（[`InteractiveText`]・指カーソル）にし、
+/// 押された行き先を親へ渡す。リンクが無ければ従来どおりの装飾付きテキスト。
+fn linked_text(text: String, spans: &[markdown::Span], theme: &Theme, links: &Links) -> AnyElement {
+    let targets: Vec<(Range<usize>, String)> = spans
+        .iter()
+        .filter_map(|span| match &span.kind {
+            markdown::SpanKind::Link { destination } if !span.range.is_empty() => {
+                Some((span.range.clone(), destination.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let styled = build_styled_text(text, md_highlights(theme, spans));
+    if targets.is_empty() {
+        return styled.into_any_element();
+    }
+    let ranges = targets.iter().map(|(range, _)| range.clone()).collect();
+    let destinations: Vec<String> = targets
+        .into_iter()
+        .map(|(_, destination)| destination)
+        .collect();
+    let on_click = links.on_click.clone();
+    InteractiveText::new(("markdown-link", links.next_id()), styled)
+        .on_click(ranges, move |index, window, cx| {
+            if let Some(destination) = destinations.get(index) {
+                on_click(destination.clone(), window, cx);
+            }
+        })
+        .into_any_element()
 }

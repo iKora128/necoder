@@ -227,6 +227,9 @@ impl Workspace {
                     }
                     // 変更レビューのタブはファイルではない（読み直しは下の mark_review_outdated）。
                     TabContent::Review(_) => {}
+                    // Web タブの鍵は URL なので、ファイルの変更がここへ来ることは無い
+                    // （開発サーバの再読込はサーバ側の HMR が受け持つ）。
+                    TabContent::Web { .. } => {}
                 }
                 git_changed = true;
                 continue;
@@ -290,7 +293,7 @@ impl Workspace {
                 view.set_html_preview_evict_minutes(current.html_preview_evict_minutes, cx);
             });
         }
-        // PDF タブのネイティブビューアも同じ回収弁（非表示 WebView の破棄猶予）を共有する。
+        // PDF タブ・Web タブのネイティブビューアも同じ回収弁（非表示 WebView の破棄猶予）を共有する。
         let pdf_views: Vec<Entity<PdfView>> = self
             .project_sessions
             .sessions
@@ -299,6 +302,18 @@ impl Workspace {
             .flat_map(|session| session.tabs.iter().filter_map(|tab| tab.pdf().cloned()))
             .collect();
         for view in pdf_views {
+            view.update(cx, |view, cx| {
+                view.set_evict_minutes(current.html_preview_evict_minutes, cx)
+            });
+        }
+        let web_views: Vec<Entity<WebPreviewView>> = self
+            .project_sessions
+            .sessions
+            .iter()
+            .chain(self.project_sessions.chat.iter())
+            .flat_map(|session| session.tabs.iter().filter_map(|tab| tab.web().cloned()))
+            .collect();
+        for view in web_views {
             view.update(cx, |view, cx| {
                 view.set_evict_minutes(current.html_preview_evict_minutes, cx)
             });

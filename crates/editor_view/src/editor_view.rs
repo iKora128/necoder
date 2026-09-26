@@ -132,6 +132,14 @@ pub struct PastedImage {
     pub bytes: Vec<u8>,
 }
 
+/// 整形プレビュー（Markdown）のリンクが押された。行き先の解釈（URL を開く・ファイルを開く）は
+/// 親が決める — エディタは Web タブもファイルを開くことも知らない（依存の向き）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewLinkClicked {
+    /// Markdown に書かれたままの行き先（`https://…` / `./guide.md` / `#anchor` など）。
+    pub destination: String,
+}
+
 /// キーボード入力の確定テキスト通知（補完の自動トリガ用・M10）。
 /// **入力ハンドラ経由の確定入力のみ** emit する（IME 変換中・paste・undo・補完適用では出さない）。
 /// workspace がタブ毎に subscribe し、識別子/`.`/`::` で補完を自動トリガする。
@@ -1152,8 +1160,17 @@ impl EditorView {
             .set_selections(vec![Selection::cursor(text.len())]);
         self.marked_range = None;
         self.highlight_version = self.buffer.version();
+        self.invalidate_wrap_map();
         self.pending_caret_reveal = true; // 末尾キャレットを可視域へ（折り返し時も）
         cx.notify();
+    }
+
+    /// バッファを丸ごと差し替えた後、次の prepaint で折り返し表を必ず作り直させる。
+    /// 新しいバッファの version は 0 から始まるので、前のバッファも version 0（打鍵していない
+    /// composer・差し替え同士）だと表の鍵が一致して古い表が残り、**1 行目しか出ない**。
+    fn invalidate_wrap_map(&mut self) {
+        let lines = self.buffer.snapshot().line_count();
+        self.wrap_map = WrapMap::identity(lines, (u64::MAX, 0, false));
     }
 
     /// テキストを空に戻す（composer 送信後）。
@@ -1161,6 +1178,7 @@ impl EditorView {
         self.buffer = Buffer::new();
         self.marked_range = None;
         self.highlight_version = self.buffer.version();
+        self.invalidate_wrap_map();
         if let Some(highlighter) = self.highlighter.as_mut() {
             highlighter.reparse_full("");
         }
@@ -2260,6 +2278,9 @@ impl EventEmitter<EditorInputEvent> for EditorView {}
 /// hover dwell の通知（workspace が LSP hover 要求に使う）。
 impl EventEmitter<EditorHoverEvent> for EditorView {}
 
+/// 整形プレビューのリンクの通知（workspace が URL / ファイルとして開く）。
+impl EventEmitter<PreviewLinkClicked> for EditorView {}
+
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // `.html` ネイティブプレビュー: エディタ本体だけを差し替え、タブ/パンくずは GPUI のまま。
@@ -2297,6 +2318,17 @@ impl Render for EditorView {
                     self.font_size,
                     &self.markdown_scroll,
                     self.buffer.path().and_then(|path| path.parent()),
+                    {
+                        let editor = cx.entity().downgrade();
+                        std::rc::Rc::new(move |destination, _window, cx| {
+                            // 閉じたタブのプレビューを押すことは無いが、消えていれば何もしない。
+                            if let Some(editor) = editor.upgrade() {
+                                editor.update(cx, |_, cx| {
+                                    cx.emit(PreviewLinkClicked { destination })
+                                });
+                            }
+                        })
+                    },
                 ))
                 .into_any_element();
         }

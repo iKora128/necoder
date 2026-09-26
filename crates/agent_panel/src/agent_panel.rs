@@ -1835,6 +1835,9 @@ pub struct AgentPanel {
     /// ＋context の fuzzy 絞り込みクエリ（M12-7・Picker 化）。
     context_query: String,
     context_focus: Option<FocusHandle>,
+    /// 添付チップに出す名前の上書き（添付のパス → 名前）。Design Mode の要素の切り抜きに
+    /// 「◎ button#start」のような名前を付ける。無ければ `context_chip_label` の名前。
+    context_labels: HashMap<SharedString, SharedString>,
     /// Enter 送信の現在値（送信ヒント表示 + トグルの状態。composer にも反映する）。
     submit_on_enter: bool,
     /// トークン表示のカウントアップ補間タスクが稼働中か（多重起動防止。追いついたら false に戻す＝idle 0%）。
@@ -1995,7 +1998,8 @@ impl AgentPanel {
         cx.subscribe(
             &composer,
             |panel, _composer, image: &editor_view::PastedImage, cx| {
-                panel.attach_pasted_image(image, cx)
+                // 添付になったパスは貼り付けでは使わない（保存できなかった時の報告は中で出す）。
+                panel.attach_pasted_image(image, cx);
             },
         )
         .detach();
@@ -2251,6 +2255,7 @@ PYEOF"#;
             context_menu_open: false,
             context_query: String::new(),
             context_focus: None,
+            context_labels: HashMap::new(),
             submit_on_enter,
             token_ticker: false,
             celebrating: false,
@@ -5092,7 +5097,8 @@ PYEOF"#;
     fn remove_context(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(thread) = self.threads.get_mut(self.active) {
             if index < thread.context.len() {
-                thread.context.remove(index);
+                let removed = thread.context.remove(index);
+                self.context_labels.remove(&removed);
             }
         }
         self.persist_chat_state(self.active);
@@ -5101,25 +5107,86 @@ PYEOF"#;
 
     /// composer に貼り付けられた画像（スクリーンショットなど）を添付にする。実体はキャッシュへ置く —
     /// ユーザーの成果物ではないので、チャットのフォルダにもプロジェクトにも置かない。
-    fn attach_pasted_image(&mut self, image: &editor_view::PastedImage, cx: &mut Context<Self>) {
+    /// アクティブなスレッドの添付に積み、送信時に ACP の image ブロックで送る（送信経路は従来どおり）。
+    /// 戻り値は添付になったパス（送れない形式・保存できなかった時は `None`）。
+    pub fn attach_pasted_image(
+        &mut self,
+        image: &editor_view::PastedImage,
+        cx: &mut Context<Self>,
+    ) -> Option<SharedString> {
+        let directory = paths::cache_dir().map(|cache| cache.join("chat-paste"))?;
+        self.attach_image_in(image, &directory, cx)
+    }
+
+    /// 画像を `directory` に書いて添付にする（[`Self::attach_pasted_image`] の本体・テストは一時フォルダ）。
+    fn attach_image_in(
+        &mut self,
+        image: &editor_view::PastedImage,
+        directory: &Path,
+        cx: &mut Context<Self>,
+    ) -> Option<SharedString> {
         let extension = match image.format {
             gpui::ImageFormat::Png => "png",
             gpui::ImageFormat::Jpeg => "jpg",
             gpui::ImageFormat::Webp => "webp",
             gpui::ImageFormat::Gif => "gif",
             // SVG・BMP・TIFF は image ブロックで送れる形式ではない。
-            _ => return,
-        };
-        let Some(directory) = paths::cache_dir().map(|cache| cache.join("chat-paste")) else {
-            return;
+            _ => return None,
         };
         let path = directory.join(format!("paste-{}.{extension}", new_thread_id()));
         let written =
-            std::fs::create_dir_all(&directory).and_then(|()| std::fs::write(&path, &image.bytes));
+            std::fs::create_dir_all(directory).and_then(|()| std::fs::write(&path, &image.bytes));
         match written {
-            Ok(()) => self.add_context(SharedString::from(path.display().to_string()), cx),
-            Err(error) => eprintln!("貼り付けた画像を保存できない: {error}"),
+            Ok(()) => {
+                let path = SharedString::from(path.display().to_string());
+                self.add_context(path.clone(), cx);
+                Some(path)
+            }
+            Err(error) => {
+                eprintln!("貼り付けた画像を保存できない: {error}");
+                None
+            }
         }
+    }
+
+    /// 画像を添付にして、添付チップに `label` を出す（Design Mode の要素の切り抜き）。
+    /// 添付にできなかったら `false`。
+    pub fn attach_labeled_image(
+        &mut self,
+        image: &editor_view::PastedImage,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(path) = self.attach_pasted_image(image, cx) else {
+            return false;
+        };
+        self.context_labels.insert(path, label);
+        cx.notify();
+        true
+    }
+
+    /// composer の本文（送信前の下書き）。
+    pub fn composer_text(&self, cx: &App) -> String {
+        self.composer.read(cx).plain_text()
+    }
+
+    /// composer の本文の末尾へ文章を足す（Design Mode の要素の説明など）。**送信はしない** —
+    /// 人が確かめて送る。本文が既にあれば空行を挟み、何度でも足せる（複数の要素を 1 通で送れる）。
+    pub fn append_to_composer(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = text.trim_end();
+        if text.is_empty() {
+            return;
+        }
+        let current = self.composer.read(cx).plain_text();
+        let current = current.trim_end();
+        let next = if current.is_empty() {
+            text.to_string()
+        } else {
+            format!("{current}\n\n{text}")
+        };
+        self.composer
+            .update(cx, |composer, cx| composer.set_plain_text(&next, cx));
+        cx.notify();
     }
 
     /// ドロップされたファイルパスを @メンションに加える（プロジェクト root 配下なら相対、外なら絶対）。
@@ -10144,6 +10211,11 @@ PYEOF"#;
                                     ),
                             )
                             .children(context.into_iter().enumerate().map(|(index, path)| {
+                                let label = self
+                                    .context_labels
+                                    .get(&path)
+                                    .cloned()
+                                    .unwrap_or_else(|| context_chip_label(&path));
                                 // チップは**短く読める名前**にして、全体はツールチップで見せる
                                 // （貼り付けた画像のキャッシュのパスをそのまま出すと長い上に読めない）。
                                 let theme_for_tip = theme.clone();
@@ -10158,7 +10230,7 @@ PYEOF"#;
                                     .bg(theme.bg3)
                                     .text_size(px(10.5))
                                     .text_color(theme.fg1)
-                                    .child(context_chip_label(&path))
+                                    .child(label)
                                     .tooltip(Tooltip::text(path.to_string(), theme_for_tip))
                                     .child(
                                         div()
@@ -11626,6 +11698,92 @@ mod tests {
             context_chip_label("/var/cache/necoder/chat-paste/paste-123-4.png"),
             i18n::translate("agent.pasted_image").as_str()
         );
+    }
+
+    /// Design Mode の要素は composer の本文に足していくだけで、送らない（人が確かめて送る）。
+    /// 複数の要素を足しても 1 通の下書きにまとまる。
+    #[gpui::test]
+    fn design_elements_are_appended_to_the_composer_without_sending(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "design_append");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel
+                .composer
+                .update(cx, |composer, cx| composer.set_plain_text("このボタンを直して", cx));
+            panel.append_to_composer("### 画面の要素: button#start\n- ページ: http://localhost:5173/", cx);
+            panel.append_to_composer("### 画面の要素: h1\n", cx);
+            assert_eq!(
+                panel.composer_text(cx),
+                "このボタンを直して\n\n### 画面の要素: button#start\n- ページ: http://localhost:5173/\n\n### 画面の要素: h1"
+            );
+            let thread = &panel.threads[panel.active];
+            assert!(thread.entries.is_empty(), "送信していない");
+            assert!(!thread.running);
+        });
+        if let Err(error) = std::fs::remove_file(settings_path) {
+            eprintln!("一時設定を消せない: {error}");
+        }
+    }
+
+    /// composer の本文を丸ごと差し替えたら（下書きの復元・Design の要素）、次の描画で全部の行が出る。
+    /// 差し替え前も後も buffer の version は 0 から始まるので、折り返し表を作り直さないと 1 行目しか出ない。
+    #[gpui::test]
+    fn replaced_composer_text_shows_every_line(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "composer_lines");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        cx.run_until_parked();
+        let one_line = panel.read_with(cx, |panel, cx| panel.composer.read(cx).content_height());
+        panel.update(cx, |panel, cx| panel.append_to_composer("一\n二\n三", cx));
+        cx.run_until_parked();
+        let three_lines = panel.read_with(cx, |panel, cx| panel.composer.read(cx).content_height());
+        assert!(
+            f32::from(three_lines) >= f32::from(one_line) * 2.5,
+            "3 行が出ていない: {three_lines:?}（1 行 = {one_line:?}）"
+        );
+        if let Err(error) = std::fs::remove_file(settings_path) {
+            eprintln!("一時設定を消せない: {error}");
+        }
+    }
+
+    /// Design Mode の切り抜きは画像の添付になり、チップには要素の呼び名が出る。外したら名前も消える。
+    #[gpui::test]
+    fn labeled_images_show_their_label_on_the_chip(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "design_chip");
+        let directory = std::env::temp_dir().join(format!(
+            "necoder_design_chip_{}_{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let path = panel
+                .attach_image_in(
+                    &editor_view::PastedImage {
+                        format: gpui::ImageFormat::Png,
+                        bytes: vec![1, 2, 3],
+                    },
+                    &directory,
+                    cx,
+                )
+                .expect("添付になる");
+            panel
+                .context_labels
+                .insert(path.clone(), SharedString::from("◎ button#start"));
+            let thread = &panel.threads[panel.active];
+            assert_eq!(thread.context, vec![path.clone()]);
+            assert_eq!(std::fs::read(path.as_ref()).ok(), Some(vec![1, 2, 3]));
+            panel.remove_context(0, cx);
+            assert!(
+                !panel.context_labels.contains_key(&path),
+                "外したら名前も消える"
+            );
+        });
+        if let Err(error) = std::fs::remove_dir_all(&directory) {
+            eprintln!("一時フォルダを消せない: {error}");
+        }
+        if let Err(error) = std::fs::remove_file(settings_path) {
+            eprintln!("一時設定を消せない: {error}");
+        }
     }
 
     /// 復元した会話でも「頼んだこと」は**最後の**人間の発話（FLEET-V2 §3.2-3 / P1 残の回収）。

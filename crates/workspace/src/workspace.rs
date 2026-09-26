@@ -64,8 +64,11 @@ pub(crate) use work_layout::{WorkLayoutState, WorkPane, WorkSurface};
 mod image_view;
 mod pdf_view;
 mod remote_control;
+mod web_preview_view;
+mod web_tabs;
 pub(crate) use image_view::ImageView;
 pub(crate) use pdf_view::PdfView;
+pub(crate) use web_preview_view::{web_tab_key, web_tab_url, WebPreviewEvent, WebPreviewView};
 mod about;
 mod git_controller;
 mod git_view;
@@ -220,6 +223,10 @@ actions!(
         // Chat モード（`docs/CHAT.md`）。プロジェクトに紐づかない会話の面。
         ToggleChat,
         NewChat,
+        // Web タブ（localhost の開発サーバ）を開く入力欄（パレット「プレビュー: localhost を開く…」）。
+        OpenLocalhostPreview,
+        // Web タブの Design Mode（⌘⇧D・要素を選んで composer へ添える）。
+        ToggleDesignMode,
     ]
 );
 
@@ -240,6 +247,8 @@ pub(crate) enum PickerMode {
     ThreadHistory,
     /// 「＋」統一オープン: 開く系アクション + 最近（local/remote 混在）。id は `picker_open_rows` の添字。
     OpenLauncher,
+    /// Web タブの URL 入力（ポート番号か localhost の URL だけ・`web_tabs.rs`）。行は入力の確定 1 行だけ。
+    PreviewUrl,
 }
 
 /// ⌘P の作成アクション行の id（空プロジェクト用）。ファイル添字（最大 50k）と衝突しない番兵値。
@@ -279,7 +288,7 @@ pub(crate) enum Dock {
     Bottom,
 }
 
-/// タブの中身（ARCHITECTURE §3 の Pane/Item 多態化。具体型 4 つ: エディタ / 画像 / PDF / 変更レビュー）。
+/// タブの中身（ARCHITECTURE §3 の Pane/Item 多態化。具体型 5 つ: エディタ / 画像 / PDF / 変更レビュー / Web）。
 /// enum で足す方式 — trait 化は「編集も保存もしない表示専用タブ」以外の Item が要ったときに再考する。
 pub(crate) enum TabContent {
     Editor {
@@ -290,6 +299,8 @@ pub(crate) enum TabContent {
         _input_subscription: Subscription,
         /// hover dwell の購読（LSP hover・M10）。
         _hover_subscription: Subscription,
+        /// 整形プレビュー（Markdown）のリンクの購読（URL は Web タブ / ブラウザ・ファイルはタブで開く）。
+        _link_subscription: Subscription,
     },
     /// 画像タブ（FEATURES §2 の画像プレビュー）。編集・保存・LSP・hot exit の対象外。
     Image(Entity<ImageView>),
@@ -298,6 +309,15 @@ pub(crate) enum TabContent {
     Pdf(Entity<PdfView>),
     /// 変更レビュー（session の `ReviewView` を載せる一時タブ・永続化しない）。
     Review(Entity<ReviewView>),
+    /// Web タブ（localhost の開発サーバ・`web_preview_view`）。鍵は URL（[`web_tab_key`]）。
+    /// 表示専用タブで、編集・保存・LSP・hot exit の対象外。
+    Web {
+        view: Entity<WebPreviewView>,
+        /// タイトル・読み込みの変化でタブ名を描き直す。
+        _observation: Subscription,
+        /// Design Mode で選ばれた要素を composer へ添える。
+        _events: Subscription,
+    },
 }
 
 /// ペインに載る 1 タブ（M10 複数タブ）。`path` はタブの同一判定と永続化のキー。
@@ -314,7 +334,10 @@ impl EditorTab {
     pub(crate) fn editor(&self) -> Option<&Entity<EditorView>> {
         match &self.content {
             TabContent::Editor { editor, .. } => Some(editor),
-            TabContent::Image(_) | TabContent::Pdf(_) | TabContent::Review(_) => None,
+            TabContent::Image(_)
+            | TabContent::Pdf(_)
+            | TabContent::Review(_)
+            | TabContent::Web { .. } => None,
         }
     }
 
@@ -322,7 +345,21 @@ impl EditorTab {
     pub(crate) fn pdf(&self) -> Option<&Entity<PdfView>> {
         match &self.content {
             TabContent::Pdf(view) => Some(view),
-            TabContent::Editor { .. } | TabContent::Image(_) | TabContent::Review(_) => None,
+            TabContent::Editor { .. }
+            | TabContent::Image(_)
+            | TabContent::Review(_)
+            | TabContent::Web { .. } => None,
+        }
+    }
+
+    /// Web タブならその [`WebPreviewView`]（可視性同期・キーフォーカス・ツールバー操作の口）。
+    pub(crate) fn web(&self) -> Option<&Entity<WebPreviewView>> {
+        match &self.content {
+            TabContent::Web { view, .. } => Some(view),
+            TabContent::Editor { .. }
+            | TabContent::Image(_)
+            | TabContent::Pdf(_)
+            | TabContent::Review(_) => None,
         }
     }
 
@@ -333,6 +370,7 @@ impl EditorTab {
             TabContent::Image(view) => view.read(cx).focus_handle(cx),
             TabContent::Pdf(view) => view.read(cx).focus_handle(cx),
             TabContent::Review(view) => view.read(cx).focus_handle(cx),
+            TabContent::Web { view, .. } => view.read(cx).focus_handle(cx),
         }
     }
 
@@ -364,6 +402,10 @@ impl EditorTab {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
             TabContent::Review(view) => view
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+            TabContent::Web { view, .. } => view
                 .clone()
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
@@ -1648,6 +1690,7 @@ impl Workspace {
             || self.overlays.pending_project_switch.is_some()
             || self.pending_navigation.is_some()
             || self.pending_preview.is_some()
+            || self.pending_web_url.is_some()
             || self.chrome.pending_chat_mode
             || self.pending_close_clean_tabs
             || self.pending_open_git_diff.is_some()
@@ -1741,6 +1784,9 @@ impl Workspace {
         if let Some(path) = self.pending_open_git_diff.take() {
             self.open_diff_tab_for(path, None, project::DiffBase::Head, window, cx);
         }
+        if let Some(url) = self.pending_web_url.take() {
+            self.open_web_tab(url, window, cx);
+        }
         if let Some(hunk) = self.pending_stage_hunk.take() {
             self.stage_hunk(hunk, cx);
         }
@@ -1748,7 +1794,7 @@ impl Workspace {
 
     /// ネイティブ WebView は GPUI の描画木から外れても OS 子ビューとして残るため、各 render の
     /// レイアウト状態を可視性へ同期する。対象はネイティブ子ビューを載せるタブ（ローカル HTML
-    /// プレビューと PDF タブ）だけで、通常のエディタには触れない。
+    /// プレビュー・PDF タブ・Web タブ）だけで、通常のエディタには触れない。
     fn sync_native_view_visibility(&mut self, window: &Window, cx: &mut Context<Self>) {
         let chat_active = self.project_sessions.chat_active;
         let active_session = self.project_sessions.active;
@@ -1777,6 +1823,10 @@ impl Workspace {
                     editor_surface_visible && session_shown && tab_index == session.active_tab;
                 if let Some(pdf) = tab.pdf().cloned() {
                     pdf.update(cx, |pdf, cx| pdf.set_surface_active(visible, false, cx));
+                    continue;
+                }
+                if let Some(web) = tab.web().cloned() {
+                    web.update(cx, |web, cx| web.set_surface_active(visible, false, cx));
                     continue;
                 }
                 if lang::language_for_path(&tab.path) != Some(lang::LanguageId::Html) {
@@ -1853,10 +1903,19 @@ impl Workspace {
         view.read(cx).has_native_viewer().then(|| view.clone())
     }
 
+    /// アクティブタブが Web タブ（ネイティブの WebView 付き）ならその view。
+    pub(crate) fn active_web_view(&self, cx: &App) -> Option<Entity<WebPreviewView>> {
+        let view = self.tabs.get(self.active_tab)?.web()?;
+        view.read(cx).has_native_viewer().then(|| view.clone())
+    }
+
     /// 今 OS のキーボードフォーカスを握りうるネイティブ子ビューの GPUI 側 focus handle。
     fn active_native_view_focus(&self, cx: &App) -> Option<FocusHandle> {
         if let Some(editor) = self.active_html_preview(cx) {
             return Some(editor.read(cx).focus_handle(cx));
+        }
+        if let Some(view) = self.active_web_view(cx) {
+            return Some(view.read(cx).focus_handle(cx));
         }
         self.active_pdf_view(cx)
             .map(|view| view.read(cx).focus_handle(cx))
@@ -1877,6 +1936,9 @@ impl Workspace {
             });
         }
         if let Some(view) = self.active_pdf_view(cx) {
+            view.update(cx, |view, cx| view.set_key_focus(false, cx));
+        }
+        if let Some(view) = self.active_web_view(cx) {
             view.update(cx, |view, cx| view.set_key_focus(false, cx));
         }
     }
@@ -2005,6 +2067,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::check_for_updates_action))
             .on_action(cx.listener(Self::open_recent_action))
             .on_action(cx.listener(Self::open_dialog_action))
+            .on_action(cx.listener(Self::open_localhost_preview))
+            .on_action(cx.listener(Self::toggle_design_mode))
             // macOS 標準のアプリ/ウィンドウ操作（メニューバー・M13）。cx は App へ deref。
             .on_action(cx.listener(|_, _: &Hide, _window, cx| cx.hide()))
             .on_action(cx.listener(|_, _: &HideOthers, _window, cx| cx.hide_other_apps()))

@@ -74,7 +74,9 @@
 | **下段ドック**（Fleet 下の可変高タブ面） | `FleetBottomView` / `bottom_height` | 下段 | Bottom pane |
 | **AI 全画面**（solo で中央エディタを Agent に差し替える。左/下ドックは各自の ON/OFF） | `agent_full_screen` / `ToggleAgentFullScreen` | AI を全画面 | AI full screen |
 | **「最新へ」ボタン**（transcript を遡り中だけ右下に出る・最下部へ戻す） | `render_jump_to_latest` | 最新へ | Jump to latest |
-| **プレビュー**（`.md` のネイティブ整形表示 / `.html` のOS標準WebView表示。source ⇄ preview・⌘⇧V） | `rendered_markdown` / `rendered_html` / `ToggleRenderedMarkdown` / `markdown_preview` / `webview_view` | プレビュー | Preview |
+| **プレビュー**（`.md` のネイティブ整形表示 / `.html` のOS標準WebView表示。source ⇄ preview・⌘⇧V。開発サーバを見るのは別のタブ＝下の Web タブ） | `rendered_markdown` / `rendered_html` / `ToggleRenderedMarkdown` / `markdown_preview` / `webview_view` | プレビュー | Preview |
+| ↳ **Web タブ**（localhost の開発サーバを見るタブ。読み込めるのはループバックの http(s) だけ・汎用ブラウザではない。鍵は URL。入口はパレット「プレビュー: localhost を開く…」と transcript / Markdown のリンク） | `TabContent::Web` / `WebPreviewView` / `webview_view::localhost` / `Workspace::open_url` | Web タブ | Web tab |
+| ↳ **Design モード**（Web タブのページの要素を選び、切り抜きと説明を composer へ「要素のチップ」として添える。送信はしない。⌘⇧D） | `ToggleDesignMode` / `webview_view::design` / `ElementCapture` / `WebPreviewEvent::ElementPicked` | Design モード / 要素のチップ | Design Mode / element chip |
 | **ne コマンド**（ターミナルから開く CLI・`code`/`cursor` 相当） | `cli_shim`（シム生成）/ `necoder cli`（実体） | ne コマンド | ne command |
 | **ターミナル**（下ドックの統合ターミナル。Task タブの Terminal と同じ実体） | `terminal_view::TerminalView` / `TerminalDock` | ターミナル | Terminal |
 | ↳ **ターミナル内検索**（⌘F・scrollback を含む。エディタの「検索」= バッファ内検索とは別） | `terminal::Find` / `terminal_view::search` | ターミナル内を検索 | Find in terminal |

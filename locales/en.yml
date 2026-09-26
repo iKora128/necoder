@@ -203,6 +203,8 @@ cmd:
   new_chat: "Chat: New chat"
   toggle_agent_full_screen: "View: AI full screen (hide the editor)"
   split_right: "View: Split right"
+  open_localhost_preview: "Preview: Open localhost…"
+  toggle_design_mode: "Preview: Design mode (pick elements for the AI)"
   new_thread: "AI: New thread"
   next_tab: "Tabs: Next"
   prev_tab: "Tabs: Previous"
@@ -614,6 +616,47 @@ webview:
   failed: Unable to open HTML preview
   unsupported: HTML preview currently supports macOS and Windows
   hidden_by_overlay: Returns when the panel in front closes
+  outside_localhost: Only localhost URLs can be opened
+  web_failed: Unable to open the preview
+  unreachable: "Couldn't connect to %{target}"
+  unreachable_hint: Start the dev server, then press Reload in the toolbar
+webtab:
+  back_tip: Back
+  forward_tip: Forward
+  reload_tip: Reload
+  zoom_in_tip: Zoom in
+  zoom_out_tip: Zoom out
+  zoom_reset_tip: Reset to 100%
+  viewport_full: Full
+  viewport_full_tip: Fill the pane width
+  viewport_tip: "Show at %{width}px wide"
+  devtools_tip: Open DevTools (Web Inspector)
+  open_browser_tip: Open in default browser
+  unsupported: Web tabs aren't available here (macOS / Windows only)
+  picker_placeholder: "Port or localhost URL (e.g. 3000 / localhost:5173/app)"
+  picker_action: Open localhost
+  invalid_url: "Only localhost URLs can be opened: %{input}"
+  ctx_open_browser: Open in default browser
+  ctx_copy_url: Copy URL
+design:
+  toggle: Design
+  toggle_tip: "Design: pick page elements to attach to the AI prompt"
+  hint: Click an element to pick it (Shift+click to keep picking, Esc to finish)
+  prompt_heading: "### Page element: %{label}"
+  prompt_page: Page
+  prompt_selector: Selector
+  prompt_path: Path
+  prompt_source: Source
+  prompt_components: Components
+  prompt_accessibility: Accessibility
+  prompt_bounds: Position and size
+  prompt_bounds_value: "x=%{x} y=%{y} %{width}×%{height} (viewport %{viewport})"
+  prompt_styles: Styles
+  prompt_text: Text
+  prompt_nearby: Nearby text
+  capture_failed: Couldn't capture the element (attached the text only)
+  needs_web_tab: "Design works in a Web tab (Preview: Open localhost…)"
+  not_ready: Start Design once the page is showing
 pdf:
   unsupported: PDF cannot be shown in a tab in this environment
   unsupported_hint: It uses the OS viewer, so only macOS and Windows are supported. Right-click and choose "Open with default app" instead

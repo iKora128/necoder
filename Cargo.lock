@@ -8370,10 +8370,24 @@ dependencies = [
 name = "webview_view"
 version = "0.1.20"
 dependencies = [
+ "block2 0.6.2",
+ "futures",
  "gpui",
  "i18n",
+ "image",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
+ "regex",
+ "serde",
+ "serde_json",
  "theme_core",
  "url",
+ "webview2-com",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
  "wry",
 ]
 

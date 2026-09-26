@@ -142,7 +142,6 @@ impl Workspace {
         event: &agent_panel::PanelEvent,
         cx: &mut Context<Self>,
     ) {
-        let neutral = self.theme.fg2;
         match event {
             agent_panel::PanelEvent::ChatRowsChanged => {
                 self.chrome.chat_accent = self
@@ -173,15 +172,9 @@ impl Workspace {
                 }
                 cx.notify();
             }
+            // transcript の URL: localhost 系は Chat の右の領域に Web タブ、それ以外は既定のブラウザ。
             agent_panel::PanelEvent::OpenUrlRequest { url } => {
-                if let Err(error) = crate::crash::open_url(url) {
-                    eprintln!("URL を開けない: {error:#}");
-                    self.push_toast(
-                        i18n::t!("link.open_failed", "target" => url.as_ref()).into(),
-                        neutral,
-                        cx,
-                    );
-                }
+                self.open_url(url, cx);
             }
             agent_panel::PanelEvent::OpenDiffRequest {
                 title,
