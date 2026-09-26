@@ -3308,7 +3308,8 @@
   `ui::ui_font` / `ui::code_font` に・O27）・**CSV / TSV の表**（⌘⇧V・O29）・**Quick Commands**（`quick_commands`・
   ターミナルの ▶・O25）・**sparse checkout**（`task_sparse`・O20）・**リモートのダウンロード / アップロード**
   （Finder からエクスプローラへ落とす / 右クリック・`project::transfer`・O37 / G09）・**SSH が繋がらない理由の案内**
-  （`host::SshFailure`・パスフレーズの問いに `ssh-add` の案内・O37 / G02 / G04）。
+  （`host::SshFailure`・パスフレーズの問いに `ssh-add` の案内・O37 / G02 / G04）・**エディタへのドロップ**
+  （Markdown に画像 = 隣へコピーして落とした所に `![]()`・ほかはタブで開く・O29）。
 - 学び/罠:
   - **Windows の型推論**: `cfg(unix)` の枝だけが `Ok(())` を返す非同期ブロックは、Windows では `Err(())` しか無く
     `Result<_, ()>` の `_` が決まらない（E0282）。型を書く。型のエラーがあると rustc は lint（dead_code 等）を
@@ -3343,6 +3344,9 @@
     偽る wrapper（`workspace::tests::RenderAuditHost`）で手元のフォルダを「接続先」にしてテストできる。
     gpui の保存ダイアログは `cx.simulate_new_path_selection` で答えられる。
   - `Path::join("")` は末尾に区切りを足す（`/a/b/`）。空の相対パス = 根そのものは別に扱う。
+  - gpui の `on_drop` の listener は落とした位置を受け取らない。位置が要る時は `window.mouse_position()` を
+    読む（落とした瞬間のポインタ）。エディタの行へ入れるのは `EditorView::insert_dropped_text`（描画と同じ
+    ヒットテスト・本文より上ならキャレット）。
   - **`ssh -M -N -f` の stderr はパイプで読めない**: `-f` で背景に回った master がパイプの書き口を握り続け、
     `output()` が master の終わりまで返らない。理由を読みたい時は `-E <ファイル>` でログへ書かせ、親の終わりを
     待ってから読む（`-E` は追記なので試行の前に消す）。以前は stderr を継いでいたので、失敗のトーストは

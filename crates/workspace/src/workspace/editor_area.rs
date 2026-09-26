@@ -3,6 +3,7 @@ use crate::workspace::*;
 mod auto_save;
 mod diagnostics;
 mod diff;
+mod file_drop;
 mod hot_exit;
 mod inline_edit;
 mod language;
