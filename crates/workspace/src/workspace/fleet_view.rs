@@ -2697,7 +2697,31 @@ impl Workspace {
     /// ニュース常設（管制 P2・mock `fleet-dashboard.html` 下段の書式）。ソースは task_events の鏡
     /// （`NotificationCenter.news`・起動時 backfill + 遷移時 live 追記）。行 = 時刻 + 帰属チップ
     /// （スレッド/Task 色・Captain は丸）+ **太字名** + イベント文。新しいものが上。
-    fn render_newsfeed(&self, _cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// ニュースの行を押した: その Task へ（Captain の采配なら Captain へ・O13）。Task が消えていれば何もしない。
+    pub(crate) fn open_news_item(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self.notifications.news.get(index) else {
+            return;
+        };
+        match item.space.clone() {
+            Some(space) => {
+                if let Some(session_index) = self.session_index_for_space(&space) {
+                    self.chrome.captain_space = None;
+                    self.switch_project(session_index, window, cx);
+                }
+            }
+            None if item.kind == NewsKind::Captain => {
+                self.focus_captain(&FocusCaptain, window, cx);
+            }
+            None => {}
+        }
+    }
+
+    fn render_newsfeed(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme.clone();
         let mut list = div()
             .id("fleet-news")
@@ -2728,6 +2752,7 @@ impl Workspace {
                         chip.rounded(px(2.))
                     }
                 });
+            let clickable = item.space.is_some() || item.kind == NewsKind::Captain;
             list = list.child(
                 div()
                     .id(("news-row", index))
@@ -2738,6 +2763,17 @@ impl Workspace {
                     .py(px(2.))
                     .text_size(px(10.5))
                     .text_color(theme.fg1)
+                    // 押すとその Task（Captain の采配なら Captain）へ（O13）。
+                    .when(clickable, |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(theme.bg2))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    this.open_news_item(index, window, cx)
+                                }),
+                            )
+                    })
                     .child(
                         div()
                             .flex_none()
@@ -2901,6 +2937,43 @@ mod tests {
             .map(|label| label.to_string())
             .collect();
         assert_eq!(plan_fanout("x", None, &many, 3).len(), MAX_FANOUT, "頭打ち");
+    }
+
+    /// O13: ニュースの行は、その Task へ飛べる（台帳の鏡として積む時に Task を覚える）。
+    #[gpui::test]
+    fn a_news_line_jumps_to_its_task(cx: &mut gpui::TestAppContext) {
+        let base = std::env::temp_dir().join(format!("necoder_news_jump_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let first = base.join("main");
+        let second = base.join("task");
+        std::fs::create_dir_all(&first).expect("作れる");
+        std::fs::create_dir_all(&second).expect("作れる");
+        let settings_path = base.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_prewarm":false}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path), None, cx));
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            Workspace::new(vec![first.clone(), second.clone()], Theme::dark(), None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            for session in &mut workspace.project_sessions.sessions {
+                session._watch = None;
+                session._watch_pump = None;
+            }
+            workspace.project_sessions.projects[1].task_space.kind = SpaceKind::Task;
+            workspace.transition_task_space(1, TaskPhase::ReviewReady, "test", Some("直した"), cx);
+            let space = workspace.project_sessions.projects[1].task_space.id.clone();
+            assert_eq!(workspace.notifications.news[0].space.as_ref(), Some(&space));
+
+            workspace.switch_project(0, window, cx);
+            assert_eq!(workspace.project_sessions.active, 0);
+            workspace.open_news_item(0, window, cx);
+            assert_eq!(workspace.project_sessions.active, 1, "ニュースの Task へ");
+        });
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// O23: 1 つの依頼から Task を 2 本切り、舞台に並べる（依頼は空＝エージェントは起こさない）。

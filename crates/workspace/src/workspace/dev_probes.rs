@@ -179,7 +179,7 @@ impl Workspace {
                     .get(index % statuses.len().max(1))
                     .map(|status| (status.color, status.name.clone()))
                     .unwrap_or((self.theme.fg2, SharedString::from("Task")));
-                self.push_news(kind, color, title, text);
+                self.push_news(kind, color, title, text, None);
             }
         }
         cx.notify();
@@ -292,6 +292,7 @@ impl Workspace {
                     news_color,
                     SharedString::from(title.to_string()),
                     text,
+                    None,
                 );
             }
         }

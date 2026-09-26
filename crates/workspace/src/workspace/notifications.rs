@@ -454,6 +454,7 @@ impl Workspace {
         color: Hsla,
         title: SharedString,
         text: SharedString,
+        space: Option<SpaceId>,
     ) {
         let at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -467,6 +468,7 @@ impl Workspace {
                 title,
                 text,
                 kind,
+                space,
             },
         );
         self.notifications.news.truncate(100);
