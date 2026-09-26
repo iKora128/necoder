@@ -1095,6 +1095,30 @@ fn main() {
                         .detach();
                     }
                 }
+                // 開発用: NECODER_SLASH_PROBE="/co" で Agent パネルの composer に入力して `/` 補完を
+                // 開く（2s 後・O2 の描画検証）。NECODER_SLASH_PROBE_FAKE=1 で偽のコマンド一覧を使う
+                // （無ければ先張りしたセッションが送ってくる本物の一覧・送信はしない）。
+                #[cfg(debug_assertions)]
+                if let Ok(text) = std::env::var("NECODER_SLASH_PROBE") {
+                    let fake = std::env::var("NECODER_SLASH_PROBE_FAKE").is_ok_and(|v| v == "1");
+                    let delay_ms = std::env::var("NECODER_SLASH_PROBE_DELAY_MS")
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or(2000);
+                    if let Some(handle) = window.window_handle().downcast::<Workspace>() {
+                        cx.spawn(async move |_workspace, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(delay_ms))
+                                .await;
+                            if let Err(error) = handle.update(cx, |workspace, window, cx| {
+                                workspace.debug_slash_probe(&text, fake, window, cx);
+                            }) {
+                                eprintln!("NECODER_SLASH_PROBE: 窓が無い: {error:#}");
+                            }
+                        })
+                        .detach();
+                    }
+                }
                 // 開発用: NECODER_FINDER_PROBE=1 で ⌘P ファイルファインダを開く（2s 後・
                 // 空プロジェクトの作成アクション検証）。NECODER_FINDER_CONFIRM=1 で先頭候補の確定まで通す。
                 if std::env::var("NECODER_FINDER_PROBE").is_ok_and(|v| v == "1") {

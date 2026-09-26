@@ -816,6 +816,12 @@ impl RunningRegistry {
 struct AgentAdvertisement {
     configs: Vec<ConfigOption>,
     modes: Vec<(SharedString, SharedString)>,
+    /// slash コマンド一覧（O2）。セッションがまだ開いていないタブの `/` 補完に使う。
+    /// 同じパネルのスレッドは宛先（cwd）も同じなので、同じ agent なら一覧もほぼ同じ。
+    commands: Vec<acp_client::SlashCommand>,
+    /// この agent は会話名を自分で送ってくる（一度でも `TitleChanged` を受け取った）。
+    /// 立っていれば necoder 自前の命名（`claude -p` 等）を走らせない（O2）。
+    sends_titles: bool,
 }
 
 /// セッション先張り（prewarm）を実行するまでの待ち時間。タブを続けて切り替えた時に、
@@ -928,7 +934,15 @@ struct Thread {
     /// transcript 上部の常設チェックリストに出す。空 = 非表示。
     plan: Vec<PlanItem>,
     /// ユーザーが手動でタブ名を変更したか（true なら AI 自動命名で上書きしない・#4/#6）。
+    /// エージェントが送ってくる会話名（`AgentEvent::TitleChanged`）もこれが立っていれば当てない。
+    /// 手動改名（改名モーダル・名前で固定するスレッド）の分は DB にも印を残す（再起動後も守る）。
     name_is_custom: bool,
+    /// エージェントが使える slash コマンド（`AgentEvent::Commands` の最新の全量・O2）。
+    /// composer の `/` 補完の候補。まだ届いていなければ空（同じ agent の在庫で代用する）。
+    commands: Vec<acp_client::SlashCommand>,
+    /// エージェントが追っている目標（`/goal`・`AgentEvent::GoalChanged`）。composer の上に 1 行で出す。
+    /// 保存しない（エージェント側の状態の写し。再開すれば送り直される）。
+    goal: Option<acp_client::AgentGoal>,
     /// 遷移スナップショット（Tier 1・FLEET-CONTROL-PLAN P1）。**状態遷移時のみ**更新する:
     /// PermissionRequest→許可待ちの内容 / TurnEnded→最終発言の末尾 / Failed→エラー文。
     /// Working 中は保存せず `live_digest()` を流す（生成不要・無料）。
@@ -1022,6 +1036,8 @@ impl Thread {
             touched_files: Vec::new(),
             plan: Vec::new(),
             name_is_custom: false,
+            commands: Vec::new(),
+            goal: None,
             digest: None,
             muted: false,
             tier2: None,
@@ -1578,6 +1594,121 @@ fn is_placeholder_name(name: &str) -> bool {
     })
 }
 
+/// エージェントが付けた会話名（`AgentEvent::TitleChanged`）をタブに載せる形へ。空白・改行は 1 つの
+/// 空白に畳み、長すぎれば末尾を `…` で切る。空なら `None`（名前として使わない）。
+/// Claude は題名を生成できない時に最初の依頼文をそのまま（最大 256 文字）名前にして送ってくる。
+fn agent_title_for_tab(title: &str) -> Option<SharedString> {
+    const MAX_CHARS: usize = 80;
+    let flat = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    if flat.chars().count() <= MAX_CHARS {
+        return Some(flat.into());
+    }
+    let mut cut: String = flat.chars().take(MAX_CHARS - 1).collect();
+    cut.push('…');
+    Some(cut.into())
+}
+
+/// エージェント自身の命名を待つ時間（O2）。Claude は最初のターンの終了後に小さなモデルで題名を
+/// 作って送ってくる（数秒）。その間に necoder 自前の命名（`claude -p` 等）を走らせると、課金が
+/// 二重になり名前も 2 回変わる。待っても来なければ自前で付ける。
+const AGENT_TITLE_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// prompt がエージェントの slash コマンドか（`/name` で始まり、name に `/` を含まない）。
+/// `/Users/me/a.rs を見て` のようにパスで始まる依頼は slash ではない（添付・context を付けて送る）。
+fn is_slash_command(prompt: &str) -> bool {
+    let Some(rest) = prompt.strip_prefix('/') else {
+        return false;
+    };
+    let name = rest.split_whitespace().next().unwrap_or("");
+    !name.is_empty() && !name.contains('/')
+}
+
+/// composer の `/` 補完の局面（O2）。composer の本文が変わるたびに [`slash_input`] で読み直す。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum SlashInput {
+    /// 補完の対象外（行頭が `/` でない・複数行・IME 変換中）。
+    #[default]
+    Inactive,
+    /// コマンド名を打っている途中（`/` の後ろ・空白の前）。値は絞り込み語。
+    Query(String),
+    /// `/name ` まで打って引数がまだ空。値はコマンド名（引数のヒントを出す）。
+    AwaitingArgs(String),
+}
+
+/// composer の `/` 補完の状態。候補そのものは描画のたびにスレッドの一覧から絞る（持たない）。
+#[derive(Default)]
+struct SlashCompletion {
+    input: SlashInput,
+    /// 選んでいる候補（絞り込み後の並びの添字）。絞り込み語が変わると先頭へ戻す。
+    selected: usize,
+    /// Esc で閉じた。行頭の `/` が消えるまで開き直さない。
+    dismissed: bool,
+}
+
+/// `/` 補完が開いている間に先取りするキー（composer の Editor アクションから写す）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlashKey {
+    Up,
+    Down,
+    /// Enter / Tab: 選んでいる候補を入れる。
+    Accept,
+    /// Esc: 閉じる。
+    Dismiss,
+}
+
+/// `/` 補完に出す候補の最大行数（超えた分は選択に合わせて窓をずらす）。
+const SLASH_POPUP_ROWS: usize = 8;
+
+/// composer の 1 行目から `/` 補完の局面を読む。`single_line` = 本文が 1 行だけ、
+/// `composing` = IME 変換中（変換中は開かない＝Enter を奪わない）。
+fn slash_input(first_line: &str, single_line: bool, composing: bool) -> SlashInput {
+    if composing || !single_line {
+        return SlashInput::Inactive;
+    }
+    let Some(rest) = first_line.strip_prefix('/') else {
+        return SlashInput::Inactive;
+    };
+    match rest.find(char::is_whitespace) {
+        None => SlashInput::Query(rest.to_string()),
+        Some(end) => {
+            let (name, args) = rest.split_at(end);
+            if !name.is_empty() && args.trim().is_empty() {
+                SlashInput::AwaitingArgs(name.to_string())
+            } else {
+                SlashInput::Inactive
+            }
+        }
+    }
+}
+
+/// `/` 補完の候補を絞って並べる（`commands` の添字を返す）。名前へのあいまい一致
+/// （`ui::fuzzy_score`＝⌘P と同じ採点）の高い順、同点はエージェントが広告した順。
+fn slash_matches(commands: &[acp_client::SlashCommand], query: &str) -> Vec<usize> {
+    let mut scored: Vec<(usize, i32)> = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, command)| {
+            ui::fuzzy_score(query, &command.name).map(|score| (index, score))
+        })
+        .collect();
+    // 安定ソート＝同点は元の並びのまま。
+    scored.sort_by(|left, right| right.1.cmp(&left.1));
+    scored.into_iter().map(|(index, _)| index).collect()
+}
+
+/// 候補を選んだ時に composer へ入れる文字列。引数を続けて打てるよう末尾に空白を付ける。
+/// Codex の skill（`$name`）は本文中の `$name` で呼ぶので `/` を付けない。
+fn slash_insertion(name: &str) -> String {
+    if name.starts_with('$') {
+        format!("{name} ")
+    } else {
+        format!("/{name} ")
+    }
+}
+
 /// 現在時刻（unix ms）。スレッドの開始/最終入力時刻の記録に使う。
 pub fn now_unix_ms() -> i64 {
     std::time::SystemTime::now()
@@ -1763,6 +1894,11 @@ pub struct AgentPanel {
     transcript_search: Option<search::TranscriptSearch>,
     /// `▣ プレビュー` チップを出してよいか（パス → 実在）の控え。描画のたびに stat しない。
     preview_exists: RefCell<HashMap<String, bool>>,
+    /// 自前の命名（[`Self::maybe_auto_name`]）を待っている/走らせているスレッド id。
+    /// ターンが続けて終わっても同じスレッドに命名の子プロセスを重ねない。
+    auto_naming: std::collections::HashSet<String>,
+    /// composer の `/` 補完（O2）。composer の変化を observe して局面を読み直す。
+    slash: SlashCompletion,
 }
 
 impl gpui::EventEmitter<PanelEvent> for AgentPanel {}
@@ -1841,6 +1977,13 @@ impl AgentPanel {
             ComposerEvent::Submit => panel.submit(cx),
             // 折り返し行数が変わった（入力・パネル幅変更）→ auto-grow の高さを再計算する。
             ComposerEvent::ContentHeightChanged => cx.notify(),
+        })
+        .detach();
+        // 本文・IME の状態が変わるたびに `/` 補完の局面を読み直す（O2）。打鍵・Backspace・貼り付け・
+        // undo・タブ切替の下書き差し替えのどれでも composer は notify するので、ここ 1 箇所で拾える。
+        // 点滅の notify でも呼ばれるが、局面が変わらなければ何もしない（再描画を増やさない）。
+        cx.observe(&composer, |panel, _composer, cx| {
+            panel.refresh_slash_state(cx)
         })
         .detach();
         // 画像の貼り付け（スクリーンショット）→ 添付にして、次の 1 通に image ブロックで添える。
@@ -1967,6 +2110,28 @@ impl AgentPanel {
                         panel.on_event(active, AgentEvent::Plan(items), cx);
                     })
                     .ok();
+            })
+            .detach();
+        }
+        // 開発用: NECODER_GOAL_PROBE=1 で目標（`/goal`）を直接注入する（O2 の composer 上の 1 行の
+        // 描画検証。実エージェント無しで offscreen に写す）。
+        #[cfg(debug_assertions)]
+        if std::env::var("NECODER_GOAL_PROBE").is_ok_and(|value| value == "1") {
+            cx.spawn(async move |panel, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(400))
+                    .await;
+                if let Err(error) = panel.update(cx, |panel, cx| {
+                    let active = panel.active;
+                    let goal = acp_client::AgentGoal {
+                        objective: "cargo test --workspace を全部緑にして、落ちたテストの原因を 1 つずつ直す"
+                            .into(),
+                        status: acp_client::GoalStatus::Active,
+                    };
+                    panel.on_event(active, AgentEvent::GoalChanged(Some(goal)), cx);
+                }) {
+                    eprintln!("NECODER_GOAL_PROBE: パネルが無い: {error:#}");
+                }
             })
             .detach();
         }
@@ -2108,6 +2273,8 @@ PYEOF"#;
             chat_artifacts: Vec::new(),
             transcript_search: None,
             preview_exists: RefCell::new(HashMap::new()),
+            auto_naming: std::collections::HashSet::new(),
+            slash: SlashCompletion::default(),
         }
     }
 
@@ -2273,10 +2440,13 @@ PYEOF"#;
             }
             // 前回のエージェント側セッション id。立ち上げ直しで会話を引き継ぐ鍵（無ければ新規）。
             let sessions = storage.load_thread_sessions().unwrap_or_default();
+            // 人が付けた名前の印（エージェントの会話名で上書きしない・O2）。
+            let custom_names = storage.load_custom_named_threads().unwrap_or_default();
             for thread in &mut threads {
                 if let Some((_, session_id)) = sessions.iter().find(|(id, _)| *id == thread.id) {
                     thread.acp_session_id = Some(session_id.clone());
                 }
+                thread.name_is_custom = custom_names.contains(&thread.id);
             }
             self.threads = threads;
             self.active = 0;
@@ -2312,11 +2482,6 @@ PYEOF"#;
         let Some(storage) = self.storage.clone() else {
             return;
         };
-        let project = self
-            .storage_scope
-            .clone()
-            .unwrap_or_else(|| self.dest_project.to_string());
-        let branch = self.dest_branch.clone();
         let Some(thread) = self.threads.get_mut(thread_index) else {
             return;
         };
@@ -2335,6 +2500,23 @@ PYEOF"#;
             }
         }
         thread.persisted_entries = thread.entries.len();
+        self.persist_thread_meta(thread_index);
+    }
+
+    /// スレッドのメタ（名前・色・宛先・agent・モデル・トークン累計）だけを upsert する。本文は書かない
+    /// （ターンの途中に呼んでも、生成中の途切れた本文を DB に残さない）。
+    fn persist_thread_meta(&self, thread_index: usize) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let project = self
+            .storage_scope
+            .clone()
+            .unwrap_or_else(|| self.dest_project.to_string());
+        let branch = self.dest_branch.clone();
+        let Some(thread) = self.threads.get(thread_index) else {
+            return;
+        };
         // 色 index は巡回パレットの逆引き（見つからなければ 0）。
         let color = thread.color;
         let color_index = (0..12).find(|i| thread_color(*i) == color).unwrap_or(0) as i64;
@@ -2355,6 +2537,10 @@ PYEOF"#;
 
     /// 最初のターン後、まだ既定名なら会話の冒頭から AI にタイトルを付けてもらう（#6・非同期）。
     /// 手動改名済み or 既に命名済み（＝プレースホルダでない）スレッドは対象外。失敗は静かに既定名のまま。
+    ///
+    /// **エージェントが自分で会話名を送ってくるなら任せる**（O2）: 一度でも `TitleChanged` を送って
+    /// きた agent は即やめ、まだ分からない agent は [`AGENT_TITLE_GRACE`] だけ待ってから、その間に
+    /// 名前が付かなかった時だけ自前の命名（子プロセス）を走らせる。
     fn maybe_auto_name(&mut self, thread_index: usize, cx: &mut Context<Self>) {
         if !settings::get(cx).agent_auto_name {
             return;
@@ -2362,7 +2548,7 @@ PYEOF"#;
         let Some(thread) = self.threads.get(thread_index) else {
             return;
         };
-        if thread.name_is_custom || !is_placeholder_name(&thread.name) {
+        if !self.needs_own_auto_name(thread) || self.auto_naming.contains(&thread.id) {
             return;
         }
         // 会話の冒頭（最初の user 発言 + 最初の agent 応答の先頭）を excerpt に。
@@ -2393,18 +2579,38 @@ PYEOF"#;
             return;
         };
         let thread_id = thread.id.clone();
+        self.auto_naming.insert(thread_id.clone());
         cx.spawn(async move |panel, cx| {
+            // エージェント自身の命名を少し待つ。その間に名前が付いた・人が改名した・この agent が
+            // 名前を送ってくると分かった、のどれかなら自前の命名はしない（子プロセスを立てない）。
+            cx.background_executor().timer(AGENT_TITLE_GRACE).await;
+            let still_needed = panel
+                .update(cx, |panel, _cx| {
+                    let needed = panel
+                        .thread_index_by_id(&thread_id)
+                        .and_then(|index| panel.threads.get(index))
+                        .is_some_and(|thread| panel.needs_own_auto_name(thread));
+                    if !needed {
+                        panel.auto_naming.remove(&thread_id);
+                    }
+                    needed
+                })
+                .unwrap_or(false);
+            if !still_needed {
+                return;
+            }
             let generated = cx
                 .background_executor()
                 .spawn(
                     async move { project::name_thread_on(host.as_ref(), &cwd, &excerpt, oneshot) },
                 )
                 .await;
-            let Ok(name) = generated else {
-                return; // claude 未導入等 → 既定名のまま（静かに諦める）
-            };
             panel
                 .update(cx, |panel, cx| {
+                    panel.auto_naming.remove(&thread_id);
+                    let Ok(name) = generated else {
+                        return; // claude 未導入等 → 既定名のまま（静かに諦める）
+                    };
                     if let Some(index) = panel.thread_index_by_id(&thread_id) {
                         let thread = &mut panel.threads[index];
                         // 生成待ちの間にユーザーが手動改名していたら尊重する。
@@ -2412,7 +2618,8 @@ PYEOF"#;
                             let name = SharedString::from(name);
                             thread.name = name.clone();
                             cx.emit(PanelEvent::ThreadAutoNamed { name });
-                            panel.persist_thread(index);
+                            // メタだけ（生成が長引けば次のターンが走っている＝本文は書かない）。
+                            panel.persist_thread_meta(index);
                             panel.refresh_chat_rows(cx);
                             cx.notify();
                         }
@@ -2421,6 +2628,16 @@ PYEOF"#;
                 .ok();
         })
         .detach();
+    }
+
+    /// necoder 自前の命名（`claude -p` 等）が要るスレッドか: 人が名前を付けていない・まだ既定名・
+    /// その agent が会話名を自分で送ってこない（O2）。
+    fn needs_own_auto_name(&self, thread: &Thread) -> bool {
+        let agent_names_itself = self
+            .catalog
+            .get(&thread.agent)
+            .is_some_and(|advertisement| advertisement.sends_titles);
+        !thread.name_is_custom && is_placeholder_name(&thread.name) && !agent_names_itself
     }
 
     /// このパスを触ったスレッドの色（色リンク・M12-4）。複数スレッドなら最後に触った方。
@@ -2465,6 +2682,12 @@ PYEOF"#;
             self.forget_link_resolutions();
             for thread in &mut self.threads {
                 thread.command_tx = None;
+                // slash コマンドはプロジェクトの設定（コマンド・skill・MCP）で変わる。前の宛先の
+                // 一覧は捨て、新しいセッションの広告で埋め直す（在庫も同じ理由で捨てる）。
+                thread.commands.clear();
+            }
+            for advertisement in self.catalog.values_mut() {
+                advertisement.commands.clear();
             }
             // 宛先が変われば cwd も変わる＝別のセッション。先張りの試行履歴も畳んで張り直す。
             self.prewarmed.clear();
@@ -4118,9 +4341,24 @@ PYEOF"#;
                 thread.name = SharedString::from(name.to_string());
                 thread.name_is_custom = true; // 以後 AI 自動命名で上書きしない
             }
-            self.persist_thread(index);
+            // 名前（メタ）だけ保存する。生成中に改名しても、途中の本文を DB に書かない。
+            self.persist_thread_meta(index);
+            self.persist_custom_name(index);
         }
         cx.notify();
+    }
+
+    /// 「人が名前を付けた」印を DB に残す（再起動後もエージェントの会話名で上書きしない・O2）。
+    fn persist_custom_name(&self, thread_index: usize) {
+        let (Some(storage), Some(thread)) = (self.storage.as_ref(), self.threads.get(thread_index))
+        else {
+            return;
+        };
+        if let Err(error) = storage.set_thread_name_custom(&thread.id, true) {
+            eprintln!(
+                "スレッド名の手動の印を保存できない（再起動後に会話名で上書きされうる）: {error:#}"
+            );
+        }
     }
 
     /// 改名を取り消す（Esc / 別タブへ切替）。入力内容は破棄する。
@@ -4265,6 +4503,53 @@ PYEOF"#;
                 .child(card)
                 .into_any_element(),
         )
+    }
+
+    /// 開発用: composer の `/` 補完を開いた状態にする（`NECODER_SLASH_PROBE`・O2 の offscreen 検証）。
+    /// `text` を composer に入れてフォーカスする。`fake` なら偽のコマンド一覧を先に流し込む
+    /// （実エージェント無しで描画を確かめる。偽でなければ先張りしたセッションの本物の一覧を使う）。
+    #[cfg(debug_assertions)]
+    pub fn debug_slash_probe(
+        &mut self,
+        text: &str,
+        fake: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if fake {
+            let command =
+                |name: &str, description: &str, hint: Option<&str>| acp_client::SlashCommand {
+                    name: name.to_string(),
+                    description: description.to_string(),
+                    hint: hint.map(str::to_string),
+                };
+            let commands = vec![
+                command(
+                    "compact",
+                    "Clear conversation history but keep a summary in context",
+                    Some("<optional custom summarization instructions>"),
+                ),
+                command("context", "Visualize current context usage", None),
+                command("cost", "Show the total cost and duration", None),
+                command(
+                    "review",
+                    "Review a pull request",
+                    Some("optional review instructions"),
+                ),
+                command(
+                    "mcp:github:pr",
+                    "Create a pull request from the current branch (MCP)",
+                    Some("title"),
+                ),
+                command("init", "Initialize a new CLAUDE.md file", None),
+            ];
+            let active = self.active;
+            self.on_event(active, AgentEvent::Commands(commands), cx);
+        }
+        self.composer
+            .update(cx, |composer, cx| composer.set_plain_text(text, cx));
+        self.focus_composer(window, cx);
+        cx.notify();
     }
 
     /// 開発用: フォーカス無しで改名モーダルを開く（offscreen スクショ検証・#4）。
@@ -4493,6 +4778,15 @@ PYEOF"#;
                 || aliases.iter().any(|alias| alias == thread.name.as_ref())
         }) {
             self.switch_thread(index, cx);
+            // 名前で引き当てるスレッドの名前は動かしてはいけない（エージェントの会話名で変わると
+            // 次から見つからない）。印の無い行（印を残す前の DB から復元した等）には付け直す。
+            let newly_marked = self
+                .threads
+                .get_mut(index)
+                .is_some_and(|thread| !std::mem::replace(&mut thread.name_is_custom, true));
+            if newly_marked {
+                self.persist_custom_name(index);
+            }
             return index;
         }
         let index = self.acquire_thread(Some(agent.to_string()), cx);
@@ -4500,6 +4794,7 @@ PYEOF"#;
             thread.name = SharedString::from(name.to_string());
             thread.name_is_custom = true;
         }
+        self.persist_custom_name(index);
         index
     }
 
@@ -4701,6 +4996,9 @@ PYEOF"#;
                     thread.acp_session_id = None;
                     thread.available_modes.clear();
                     thread.configs.clear();
+                    // slash コマンドと目標も前の agent の物（新しい agent の在庫か広告で埋まる）。
+                    thread.commands.clear();
+                    thread.goal = None;
                     thread.session_lost = false;
                     thread.session_note = None;
                     agent_changed = Some(thread.id.clone());
@@ -5079,6 +5377,88 @@ PYEOF"#;
         }
     }
 
+    /// composer の本文から `/` 補完の局面を読み直す（composer の notify ごと・O2）。
+    fn refresh_slash_state(&mut self, cx: &mut Context<Self>) {
+        let composer = self.composer.read(cx);
+        let first_line = composer.first_line_text();
+        let single_line = composer.buffer().len_bytes() == first_line.len();
+        let input = slash_input(&first_line, single_line, composer.has_marked_text());
+        if input == self.slash.input {
+            return;
+        }
+        if input == SlashInput::Inactive {
+            self.slash.dismissed = false; // 行頭の `/` が消えた＝次に `/` を打てばまた開く
+        }
+        self.slash.selected = 0;
+        self.slash.input = input;
+        cx.notify();
+    }
+
+    /// アクティブスレッドの `/` 補完の候補。まだ届いていなければ同じ agent の在庫で代用する
+    /// （Chat は除く＝チャットごとにフォルダが違い、一覧も違いうる）。
+    fn slash_commands(&self) -> &[acp_client::SlashCommand] {
+        let Some(thread) = self.threads.get(self.active) else {
+            return &[];
+        };
+        if !thread.commands.is_empty() || self.chat_mode {
+            return &thread.commands;
+        }
+        self.catalog
+            .get(&thread.agent)
+            .map(|advertisement| advertisement.commands.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// いま `/` 補完に出す候補（[`Self::slash_commands`] の添字・並び順）。出さない時は空
+    /// （コマンド名を打っていない・Esc で閉じた・1 件も当たらない）。
+    fn slash_popup_items(&self) -> Vec<usize> {
+        let SlashInput::Query(query) = &self.slash.input else {
+            return Vec::new();
+        };
+        if self.slash.dismissed {
+            return Vec::new();
+        }
+        slash_matches(self.slash_commands(), query)
+    }
+
+    /// `/` 補完が開いている間の ↑↓ / Enter・Tab / Esc。composer の Editor アクション（MoveUp /
+    /// MoveDown / Newline / TabIndent / Cancel）を capture で先取りする。開いていない時・IME 変換中は
+    /// 何もしない＝アクションはそのまま composer へ流れる（変換確定の Enter を奪わない）。
+    fn on_slash_key(&mut self, key: SlashKey, cx: &mut Context<Self>) {
+        if self.composer.read(cx).has_marked_text() {
+            return;
+        }
+        let items = self.slash_popup_items();
+        if items.is_empty() {
+            return;
+        }
+        cx.stop_propagation();
+        let selected = self.slash.selected.min(items.len() - 1);
+        match key {
+            SlashKey::Up => self.slash.selected = (selected + items.len() - 1) % items.len(),
+            SlashKey::Down => self.slash.selected = (selected + 1) % items.len(),
+            SlashKey::Accept => self.accept_slash_command(items[selected], cx),
+            SlashKey::Dismiss => self.slash.dismissed = true,
+        }
+        cx.notify();
+    }
+
+    /// 候補を composer へ入れる（`/name ` に置き換え・キャレットは末尾＝引数を続けて打てる）。
+    fn accept_slash_command(&mut self, command_index: usize, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .slash_commands()
+            .get(command_index)
+            .map(|command| command.name.clone())
+        else {
+            return;
+        };
+        let text = slash_insertion(&name);
+        // 1 回の編集で置き換える＝⌘Z で打っていた `/co` に戻せる。
+        self.composer
+            .update(cx, |composer, cx| composer.replace_all_text(&text, cx));
+        self.slash.selected = 0;
+    }
+
     /// 文脈の圧縮（`/compact`）をエージェントへ依頼する（Claude Code の slash コマンドを turn として送る）。
     /// 実行中は無視（ターンの最中には送らない）。トークンメーター横のボタンから呼ぶ。
     fn compact_context(&mut self, cx: &mut Context<Self>) {
@@ -5097,7 +5477,9 @@ PYEOF"#;
     /// 開発時の自動プローブ（`NECODER_ACP_PROBE`）からも使う。
     /// 名前でスレッドの位置を引く（作らない・アクティブ化しない）。
     pub fn thread_index_named(&self, name: &str) -> Option<usize> {
-        self.threads.iter().position(|thread| thread.name.as_ref() == name)
+        self.threads
+            .iter()
+            .position(|thread| thread.name.as_ref() == name)
     }
 
     pub fn set_prompt_context(&mut self, thread: usize, context: String) {
@@ -5116,17 +5498,25 @@ PYEOF"#;
 
     fn send_prompt_entry(&mut self, prompt: String, ledger: bool, cx: &mut Context<Self>) {
         let thread_index = self.active;
+        // slash コマンド（`/clear` `/compact` 等）は**本文 1 ブロックだけ**で送る。エージェントに
+        // よってコマンドとして読むブロックが違い（Claude は末尾・Codex は先頭）、添付や画像を
+        // 1 つでも足すとどちらかで効かない（`acp_client::prompt_blocks` の説明）。スレッドの
+        // context（Captain の役割・現況表）・`@path` の添付・画像は付けない。添付は外さずに残す＝
+        // 次の通常の送信に付く（毎ターン送る設計はそのまま）。
+        let is_slash_command = is_slash_command(&prompt);
         // 添付のうち**画像**は中身を ACP の image ブロックで送る（貼り付けたスクリーンショット・
         // ドロップした画像）。読めなかった物・大きすぎる物はパスの添付として残す。
         let (images, image_paths) = self
             .threads
             .get(thread_index)
+            .filter(|_| !is_slash_command)
             .map(|thread| load_prompt_images(&thread.context, self.dest_cwd.as_deref()))
             .unwrap_or_default();
         // それ以外の添付は prompt 先頭へ `@path` として付ける（表示は素の prompt のまま）。
         let mut context_prefix: String = self
             .threads
             .get(thread_index)
+            .filter(|_| !is_slash_command)
             .map(|thread| {
                 thread
                     .context
@@ -5136,9 +5526,6 @@ PYEOF"#;
                     .collect()
             })
             .unwrap_or_default();
-        // slash コマンド（`/clear` `/compact` 等）は先頭が `/` でないとエージェントが認識しない。
-        // スレッドの context（Captain の役割・現況表）は付けずにそのまま送る。
-        let is_slash_command = prompt.starts_with('/');
         if let Some(context) = self
             .threads
             .get(thread_index)
@@ -5445,6 +5832,10 @@ PYEOF"#;
         // `thread` の借用が残っている間は self を触れないので、末尾でまとめて反映する。
         let mut stocked_configs: Option<(SharedString, Vec<ConfigOption>)> = None;
         let mut stocked_modes: Option<(SharedString, Vec<(SharedString, SharedString)>)> = None;
+        let mut stocked_commands: Option<(SharedString, Vec<acp_client::SlashCommand>)> = None;
+        // 会話名を送ってきた agent（在庫に「自分で名付ける」と控える）と、付け替えた名前。
+        let mut titled_by_agent: Option<SharedString> = None;
+        let mut agent_renamed: Option<SharedString> = None;
         let mut ensure_reveal = false; // アクティブが Agent/Thinking をストリーム → タイプライタ稼働
         let mut reveal_reset = false; // 新しいストリームエントリ開始 → 先頭から打つ
         let mut stream_updated = false;
@@ -5492,6 +5883,11 @@ PYEOF"#;
                 session_id_changed = thread.acp_session_id.as_deref() != Some(session_id.as_str());
                 thread.acp_session_id = Some(session_id);
                 thread.session_lost = false;
+                // 目標はエージェント側の会話の状態。新しい会話では消え、引き継いだ会話ならエージェントが
+                // 送り直す（届くまでは前の表示を残す）。
+                if !resumed {
+                    thread.goal = None;
+                }
             }
             // 上で先に畳んでいる（借用の外で処理する必要があるため）。
             AgentEvent::SessionLost => {}
@@ -5507,8 +5903,12 @@ PYEOF"#;
             }
             AgentEvent::AgentChunk(text) => {
                 stream_updated = true;
+                // 連結するのは**まだ保存していない**末尾だけ。ターン終了で保存した本文に、待機中に
+                // 届いた増分（エージェントが自分で続けたターン・背景タスクの報告）を足すと、その分は
+                // DB に二度と書かれない。新しいエントリにすれば次の保存で残る。
+                let tail_is_live = thread.entries.len() > thread.persisted_entries;
                 match thread.entries.last_mut() {
-                    Some(Entry::Agent(existing)) => {
+                    Some(Entry::Agent(existing)) if tail_is_live => {
                         let mut combined = existing.to_string();
                         combined.push_str(&text);
                         *existing = combined.into();
@@ -5522,8 +5922,9 @@ PYEOF"#;
             }
             AgentEvent::ThoughtChunk(text) => {
                 stream_updated = true;
+                let tail_is_live = thread.entries.len() > thread.persisted_entries;
                 match thread.entries.last_mut() {
-                    Some(Entry::Thinking(existing)) => {
+                    Some(Entry::Thinking(existing)) if tail_is_live => {
                         let mut combined = existing.to_string();
                         combined.push_str(&text);
                         *existing = combined.into();
@@ -5676,6 +6077,29 @@ PYEOF"#;
                 // プランは毎回全量で届く（ACP 仕様）ので**置換**。常設チェックリストが追従する。
                 thread.plan = items;
             }
+            AgentEvent::Commands(commands) => {
+                // slash コマンドの一覧も毎回全量で届く＝置き換える（O2）。在庫にも控えて、
+                // まだセッションの無い同じ agent のタブの `/` 補完に使う。
+                thread.commands = commands;
+                stocked_commands = Some((thread.agent.clone(), thread.commands.clone()));
+            }
+            AgentEvent::TitleChanged(title) => {
+                // エージェントが会話名を付けた（Claude はターン終了の数秒後・Codex は /rename 等）。
+                // この agent には以後、自前の命名（`claude -p` 等の子プロセス）を走らせない。
+                titled_by_agent = Some(thread.agent.clone());
+                // 人が付けた名前（改名モーダル・固定スレッド）は上書きしない。自動命名を切って
+                // いる人の名前も動かさない（エージェントの命名も「自動命名」のうち）。
+                // null（名前を消した）は何もしない＝今の名前を保つ。既定名へ戻すと付いていた
+                // 名前が消え、自前の命名で付け直すのは余計な課金になるため。
+                let auto_name = settings::get(cx).agent_auto_name;
+                if let Some(title) = title.as_deref().and_then(agent_title_for_tab) {
+                    if auto_name && !thread.name_is_custom && thread.name != title {
+                        thread.name = title.clone();
+                        agent_renamed = Some(title);
+                    }
+                }
+            }
+            AgentEvent::GoalChanged(goal) => thread.goal = goal,
             AgentEvent::ElicitationRequest {
                 message,
                 fields,
@@ -6009,6 +6433,21 @@ PYEOF"#;
         }
         if let Some((agent, modes)) = stocked_modes {
             self.catalog.entry(agent).or_default().modes = modes;
+        }
+        if let Some((agent, commands)) = stocked_commands {
+            self.catalog.entry(agent).or_default().commands = commands;
+        }
+        if let Some(agent) = titled_by_agent {
+            self.catalog.entry(agent).or_default().sends_titles = true;
+        }
+        if let Some(name) = agent_renamed {
+            // 自動命名と同じ出口（Task 名の引き継ぎ・一覧の更新）。保存はメタだけ — ターンの途中に
+            // 届くこともあり（Codex は最初のターンの終わり際に仮の名前を送る）、本文まで書くと
+            // 生成中の途切れた本文が DB に残る。
+            cx.emit(PanelEvent::ThreadAutoNamed { name });
+            self.persist_thread_meta(thread_index);
+            self.refresh_chat_rows(cx);
+            self.sync_running_registry(cx);
         }
         cx.notify();
     }
@@ -8870,6 +9309,64 @@ PYEOF"#;
         )
     }
 
+    /// エージェントが追っている目標（`/goal`・O2）を composer の直上に 1 行で常時出す。
+    /// Codex / Claude は `SessionInfoUpdate._meta.goal` で目標と状態を送ってくる。面はセッション断
+    /// バナーと同じ（bg2・枠・角 7）で、**色は中立**（状態は文字で言う・色相を使わない＝§1.3）。
+    fn render_goal(&self) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let goal = thread.goal.as_ref()?;
+        let theme = self.theme.clone();
+        let status = match goal.status {
+            acp_client::GoalStatus::Active => Some(i18n::t!("agent.goal_status_active")),
+            acp_client::GoalStatus::Paused => Some(i18n::t!("agent.goal_status_paused")),
+            acp_client::GoalStatus::Blocked => Some(i18n::t!("agent.goal_status_blocked")),
+            acp_client::GoalStatus::Complete => Some(i18n::t!("agent.goal_status_complete")),
+            acp_client::GoalStatus::Limited => Some(i18n::t!("agent.goal_status_limited")),
+            acp_client::GoalStatus::Other => None,
+        };
+        let objective = SharedString::from(goal.objective.clone());
+        Some(
+            div()
+                .id("agent-goal")
+                .mx(px(12.))
+                .mb(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(7.))
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(theme.border)
+                .px(px(9.))
+                .py(px(5.))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!("agent.goal_label"))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme.fg1)
+                        .child(objective.clone()),
+                )
+                .children(status.map(|status| {
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(status))
+                }))
+                .tooltip(Tooltip::text(objective, theme.clone()))
+                .into_any_element(),
+        )
+    }
+
     fn render_queued_prompts(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
         if thread.queued_prompts.is_empty() {
@@ -9277,7 +9774,176 @@ PYEOF"#;
         cx.notify();
     }
 
-    fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// composer の `/` 補完（O2）。composer の真上に重ねる。面は ＋context・選択ピルのメニューと
+    /// 同じ（bg2・枠 1px・角 8・影）で、**色は中立**（選択中の行は bg3・識別色は使わない＝§1.3）。
+    /// コマンド名を打っている間は候補（名前・引数ヒント・説明）を、`/name ` まで入って引数がまだ
+    /// 空の間はそのコマンドの引数ヒントだけを 1 行出す。
+    fn render_slash_popup(
+        &self,
+        composer_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !composer_focused {
+            return None;
+        }
+        let theme = self.theme.clone();
+        let commands = self.slash_commands();
+        let display_name = |name: &str| -> SharedString {
+            if name.starts_with('$') {
+                SharedString::from(name.to_string())
+            } else {
+                SharedString::from(format!("/{name}"))
+            }
+        };
+        let card = || {
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(8.))
+                .p(px(4.))
+                .shadow(vec![gpui::BoxShadow::new(
+                    px(0.),
+                    px(6.),
+                    gpui::hsla(0., 0., 0., 0.4),
+                )
+                .blur_radius(px(16.))])
+                // 下の transcript へクリック・ホイールを通さない。
+                .occlude()
+        };
+        let body = match &self.slash.input {
+            SlashInput::Query(_) => {
+                let items = self.slash_popup_items();
+                if items.is_empty() {
+                    return None;
+                }
+                let selected = self.slash.selected.min(items.len() - 1);
+                // 選んでいる行が必ず見えるように、最大行数の窓をずらす。
+                let start = selected.saturating_sub(SLASH_POPUP_ROWS - 1);
+                let rows = items
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(SLASH_POPUP_ROWS)
+                    .filter_map(|(position, &command_index)| {
+                        let command = commands.get(command_index)?;
+                        let is_selected = position == selected;
+                        Some(
+                            div()
+                                .id(("slash-command", position))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .px(px(9.))
+                                .py(px(4.))
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .when(is_selected, |row| row.bg(theme.bg3))
+                                .hover(|style| style.bg(theme.bg3))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(12.))
+                                        .text_color(if is_selected { theme.fg0 } else { theme.fg1 })
+                                        .child(display_name(&command.name)),
+                                )
+                                // 引数ヒントは斜体で説明と見分ける（どちらも fg2・色は足さない）。
+                                .children(command.hint.clone().map(|hint| {
+                                    div()
+                                        .flex_none()
+                                        .max_w(px(200.))
+                                        .truncate()
+                                        .italic()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(hint)
+                                }))
+                                // 説明は残りの幅で 1 行に切る（flex 行で縮ませる本文は flex_1 + min_w_0）。
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(11.))
+                                        .text_color(theme.fg2)
+                                        .child(command.description.clone()),
+                                )
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        this.accept_slash_command(command_index, cx);
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                card().children(rows).child(
+                    div()
+                        .mt(px(2.))
+                        .px(px(9.))
+                        .pt(px(4.))
+                        .pb(px(2.))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_size(px(10.))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!(
+                            "agent.slash_footer",
+                            "count" => items.len()
+                        ))),
+                )
+            }
+            SlashInput::AwaitingArgs(name) => {
+                let hint = commands
+                    .iter()
+                    .find(|command| command.name == *name)
+                    .and_then(|command| command.hint.clone())?;
+                card().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(9.))
+                        .py(px(4.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .text_color(theme.fg1)
+                                .child(display_name(name)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .italic()
+                                .text_size(px(11.))
+                                .text_color(theme.fg2)
+                                .child(hint),
+                        ),
+                )
+            }
+            SlashInput::Inactive => return None,
+        };
+        Some(
+            div()
+                .absolute()
+                .left(px(12.))
+                .right(px(12.))
+                // composer の上端に付ける（composer は自動で伸びるので px で決めない）。4px 浮かせる。
+                .bottom(relative(1.))
+                .pb(px(4.))
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    fn render_composer(&self, composer_focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let color = self.active_color();
         let drop_glow = color.alpha(0.14); // ファイル D&D 中のハイライト
@@ -9311,6 +9977,7 @@ PYEOF"#;
 
         div()
             .id("composer-drop")
+            .relative() // `/` 補完を composer の真上へ重ねる基準
             .flex_none()
             .w_full()
             .min_w_0()
@@ -9330,6 +9997,7 @@ PYEOF"#;
             .on_drop(cx.listener(|this, dragged: &DraggedFile, _window, cx| {
                 this.add_context(dragged.path.clone(), cx);
             }))
+            .children(self.render_slash_popup(composer_focused, cx))
             .child(
                 div()
                     .flex()
@@ -9476,6 +10144,28 @@ PYEOF"#;
                                     .clamp(base, COMPOSER_INPUT_MAX)
                             }))
                             .overflow_hidden()
+                            // `/` 補完が開いている間だけ ↑↓ / Enter・Tab / Esc を先取りする（O2）。
+                            // composer の Editor アクションより先に capture で受け、閉じている時・
+                            // IME 変換中は何もせず composer へ流す。
+                            .capture_action(cx.listener(|this, _: &editor_view::MoveUp, _, cx| {
+                                this.on_slash_key(SlashKey::Up, cx)
+                            }))
+                            .capture_action(cx.listener(
+                                |this, _: &editor_view::MoveDown, _, cx| {
+                                    this.on_slash_key(SlashKey::Down, cx)
+                                },
+                            ))
+                            .capture_action(cx.listener(|this, _: &editor_view::Newline, _, cx| {
+                                this.on_slash_key(SlashKey::Accept, cx)
+                            }))
+                            .capture_action(cx.listener(
+                                |this, _: &editor_view::TabIndent, _, cx| {
+                                    this.on_slash_key(SlashKey::Accept, cx)
+                                },
+                            ))
+                            .capture_action(cx.listener(|this, _: &editor_view::Cancel, _, cx| {
+                                this.on_slash_key(SlashKey::Dismiss, cx)
+                            }))
                             .child(self.composer.clone()),
                     )
                     // Zed 風の下部コントロール列: エージェント / 権限モード / モデル / effort
@@ -9655,6 +10345,8 @@ impl Render for AgentPanel {
         if self.transcript_top_item_pending() {
             cx.on_next_frame(window, |_, _, cx| cx.notify());
         }
+        // `/` 補完は composer にフォーカスがある時だけ出す（キーの先取りも composer 経由だけ）。
+        let composer_focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let caret_blink_enabled = !self.active_thread_running();
         self.composer.update(cx, |composer, cx| {
             composer.set_caret_blink_enabled(caret_blink_enabled, cx);
@@ -9726,7 +10418,9 @@ impl Render for AgentPanel {
             // セッション断のバナー（再開ボタン）/ 再開の一言。
             .children(self.render_session_banner(cx))
             .children(self.render_queued_prompts(cx))
-            .child(self.render_composer(cx))
+            // エージェントの目標（`/goal`）は composer の直上に常時（O2）。
+            .children(self.render_goal())
+            .child(self.render_composer(composer_focused, cx))
             // セレクタのドロップダウンは各ピルの子として描く（render_selector_pill 内）。
             .when(self.context_menu_open, |element| {
                 element.child(self.render_context_menu(cx))
@@ -10676,6 +11370,12 @@ fn thread_from_storage(
         .into_iter()
         .find(|(thread_id, _)| thread_id == id)
         .map(|(_, session_id)| session_id);
+    // 人が付けた名前は、履歴から開き直してもエージェントの会話名で上書きしない（O2）。
+    thread.name_is_custom = storage
+        .load_custom_named_threads()
+        .unwrap_or_default()
+        .iter()
+        .any(|thread_id| thread_id == id);
     thread
 }
 
@@ -10700,6 +11400,8 @@ fn seed_threads() -> Vec<Thread> {
         touched_files: Vec::new(),
         plan: Vec::new(),
         name_is_custom: false,
+        commands: Vec::new(),
+        goal: None,
         name: "rope設計".into(),
         color: thread_color(0),
         running: false,
@@ -12907,5 +13609,451 @@ PYEOF"#;
         assert_eq!(preview.chars().count(), 65);
         assert!(preview.starts_with('…'));
         assert_eq!(thought_live_preview("").as_ref(), "");
+    }
+
+    // ── O2: エージェントの会話名 ──
+
+    /// エージェントの会話名は既定名のスレッドに当たり、以後その agent には自前の命名を走らせない。
+    /// 人が改名したスレッドは上書きしない。null（名前を消した）は今の名前を保つ。
+    #[gpui::test]
+    fn agent_title_names_the_thread_unless_a_human_renamed_it(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "agent_title");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let index = panel.active;
+            assert!(is_placeholder_name(&panel.threads[index].name));
+            assert!(panel.needs_own_auto_name(&panel.threads[index]));
+
+            panel.on_event(
+                index,
+                AgentEvent::TitleChanged(Some("ログイン\n修正".into())),
+                cx,
+            );
+            assert_eq!(panel.threads[index].name.as_ref(), "ログイン 修正");
+            assert!(
+                !panel.needs_own_auto_name(&panel.threads[index]),
+                "名前が付いた＝自前の命名は要らない"
+            );
+            // 同じ agent の別スレッド（まだ既定名）でも、この agent は自分で名付けると分かった。
+            panel.add_thread(cx);
+            let fresh = panel.active;
+            assert!(is_placeholder_name(&panel.threads[fresh].name));
+            assert!(
+                !panel.needs_own_auto_name(&panel.threads[fresh]),
+                "会話名を送ってくる agent には claude -p を走らせない"
+            );
+
+            // null は今の名前を保つ。
+            panel.on_event(index, AgentEvent::TitleChanged(None), cx);
+            assert_eq!(panel.threads[index].name.as_ref(), "ログイン 修正");
+
+            // 人が改名したら、その後に届いた会話名では上書きしない。
+            let theme = panel.theme.clone();
+            let color = panel.threads[index].color;
+            let editor = cx.new(|cx| {
+                let mut editor = EditorView::plain(theme, color, true, cx);
+                editor.set_plain_text("自分で付けた名前", cx);
+                editor
+            });
+            panel.renaming = Some((index, editor));
+            panel.confirm_rename(cx);
+            panel.on_event(
+                index,
+                AgentEvent::TitleChanged(Some("エージェントの名前".into())),
+                cx,
+            );
+            assert_eq!(panel.threads[index].name.as_ref(), "自分で付けた名前");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 手動改名の印は DB に残り、再起動（パネルの作り直し + 復元）後も会話名で上書きされない。
+    /// 印の無いスレッドは復元後も会話名を受け取る。
+    #[gpui::test]
+    fn a_human_rename_survives_restart(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "agent_title_restart");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_title_restart_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        for (id, name) in [("renamed-1", "手で付けた名前"), ("auto-1", "設計の相談")] {
+            storage
+                .upsert_thread(id, name, 0, "", None, Some("Claude Code"), None, 0, 0)
+                .expect("スレッド行を書ける");
+        }
+        storage
+            .set_thread_name_custom("renamed-1", true)
+            .expect("印を書ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let renamed = panel
+                .thread_index_by_id("renamed-1")
+                .expect("手動改名のスレッドが復元される");
+            let auto = panel
+                .thread_index_by_id("auto-1")
+                .expect("もう 1 本も復元される");
+            assert!(panel.threads[renamed].name_is_custom);
+            assert!(!panel.threads[auto].name_is_custom);
+            for index in [renamed, auto] {
+                panel.on_event(index, AgentEvent::TitleChanged(Some("会話名".into())), cx);
+            }
+            assert_eq!(panel.threads[renamed].name.as_ref(), "手で付けた名前");
+            assert_eq!(panel.threads[auto].name.as_ref(), "会話名");
+        });
+        let names: Vec<(String, String)> = storage
+            .load_threads()
+            .expect("一覧を読める")
+            .into_iter()
+            .map(|row| (row.0, row.1))
+            .collect();
+        assert!(
+            names.contains(&("auto-1".to_string(), "会話名".to_string())),
+            "会話名は保存される: {names:?}"
+        );
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    // ── O2: composer の `/` 補完 ──
+
+    fn slash(name: &str, description: &str, hint: Option<&str>) -> acp_client::SlashCommand {
+        acp_client::SlashCommand {
+            name: name.into(),
+            description: description.into(),
+            hint: hint.map(str::to_string),
+        }
+    }
+
+    /// 行頭の `/` の後ろ・空白の前だけが絞り込み語。`/name ` まで入れば引数待ち。
+    /// 複数行・IME 変換中・行頭でない `/` は対象外。
+    #[test]
+    fn slash_input_reads_the_leading_command_word() {
+        assert_eq!(
+            slash_input("/", true, false),
+            SlashInput::Query(String::new())
+        );
+        assert_eq!(
+            slash_input("/co", true, false),
+            SlashInput::Query("co".into())
+        );
+        assert_eq!(
+            slash_input("/review ", true, false),
+            SlashInput::AwaitingArgs("review".into())
+        );
+        assert_eq!(
+            slash_input("/review 認証", true, false),
+            SlashInput::Inactive
+        );
+        assert_eq!(
+            slash_input("/co", false, false),
+            SlashInput::Inactive,
+            "複数行"
+        );
+        assert_eq!(
+            slash_input("/こ", true, true),
+            SlashInput::Inactive,
+            "IME 変換中"
+        );
+        assert_eq!(slash_input("see /co", true, false), SlashInput::Inactive);
+        assert_eq!(slash_input("", true, false), SlashInput::Inactive);
+    }
+
+    /// あいまい一致（⌘P と同じ採点）の高い順、同点はエージェントの並び。当たらない物は出さない。
+    #[test]
+    fn slash_matches_rank_by_fuzzy_score_then_agent_order() {
+        let commands = vec![
+            slash("review-commit", "Review a commit", Some("commit sha")),
+            slash("compact", "Compact", None),
+            slash("mcp:github:pr", "Open a PR", None),
+            slash("context", "Context usage", None),
+        ];
+        let names = |query: &str| -> Vec<&str> {
+            slash_matches(&commands, query)
+                .into_iter()
+                .map(|index| commands[index].name.as_str())
+                .collect()
+        };
+        assert_eq!(names("co"), vec!["compact", "context", "review-commit"]);
+        assert_eq!(names("pr"), vec!["mcp:github:pr"]);
+        assert_eq!(
+            names(""),
+            vec!["review-commit", "compact", "mcp:github:pr", "context"],
+            "空の絞り込み語は広告された順のまま全部"
+        );
+        assert!(names("zz").is_empty());
+        assert_eq!(slash_insertion("compact"), "/compact ");
+        assert_eq!(
+            slash_insertion("$lint-fix"),
+            "$lint-fix ",
+            "Codex の skill は $ で呼ぶ"
+        );
+    }
+
+    #[test]
+    fn a_leading_path_is_not_a_slash_command() {
+        assert!(is_slash_command("/compact"));
+        assert!(is_slash_command("/review 認証まわり"));
+        assert!(is_slash_command("/mcp:github:pr 12"));
+        assert!(!is_slash_command("/Users/me/a.rs を見て"));
+        assert!(!is_slash_command("/"));
+        assert!(!is_slash_command("compact"));
+    }
+
+    /// 実際のキー配送（既定 keymap の Editor 文脈）で: ↑↓ で選び、Enter / Tab で `/name ` を入れる。
+    /// Esc は補完だけを閉じ、走行中のターンは止めない（閉じた後の Esc は従来どおり中断）。
+    /// IME 変換中は開かない。
+    #[gpui::test]
+    fn slash_popup_keys_choose_and_insert_a_command(cx: &mut gpui::TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        let settings_path = init_test_settings(cx, "slash-keys");
+        cx.update(|cx| {
+            let bindings = keymap_core::load_bindings(keymap_core::DEFAULT_KEYMAP_JSON, cx)
+                .expect("既定 keymap がロードできる");
+            cx.bind_keys(bindings);
+        });
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let set_text = |cx: &mut gpui::VisualTestContext, text: &'static str| {
+            panel.update_in(cx, |panel, _window, cx| {
+                panel
+                    .composer
+                    .update(cx, |composer, cx| composer.set_plain_text(text, cx));
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        let composer_text = |cx: &mut gpui::VisualTestContext| {
+            panel.read_with(cx, |panel, cx| panel.composer.read(cx).plain_text())
+        };
+        panel.update_in(cx, |panel, window, cx| {
+            let active = panel.active;
+            panel.on_event(
+                active,
+                AgentEvent::Commands(vec![
+                    slash("compact", "Compact", None),
+                    slash("context", "Context usage", None),
+                    slash("cost", "Cost", None),
+                    slash("review", "Review", Some("instructions")),
+                ]),
+                cx,
+            );
+            panel.focus_composer(window, cx);
+        });
+        set_text(cx, "/co");
+        let names = |cx: &mut gpui::VisualTestContext| -> Vec<String> {
+            panel.read_with(cx, |panel, _cx| {
+                panel
+                    .slash_popup_items()
+                    .into_iter()
+                    .map(|index| panel.slash_commands()[index].name.clone())
+                    .collect()
+            })
+        };
+        assert_eq!(names(cx), vec!["compact", "context", "cost"]);
+
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("up up");
+        assert_eq!(
+            panel.read_with(cx, |panel, _cx| panel.slash.selected),
+            2,
+            "先頭で ↑ は末尾へ回る"
+        );
+        cx.simulate_keystrokes("down down enter");
+        assert_eq!(
+            composer_text(cx),
+            "/context ",
+            "Enter は改行ではなく候補を入れる"
+        );
+        assert!(names(cx).is_empty(), "入れたら閉じる");
+
+        set_text(cx, "/rev");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(composer_text(cx), "/review ");
+        assert_eq!(
+            panel.read_with(cx, |panel, _cx| panel.slash.input.clone()),
+            SlashInput::AwaitingArgs("review".into()),
+            "引数ヒントを出す局面"
+        );
+
+        // Esc は補完だけを閉じる（ターンは止めない）。閉じた後の Esc は従来どおり中断。
+        set_text(cx, "/c");
+        panel.update(cx, |panel, _cx| {
+            let active = panel.active;
+            panel.threads[active].running = true;
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(names(cx).is_empty(), "Esc で閉じる");
+        assert!(
+            panel.read_with(cx, |panel, _cx| panel.threads[panel.active].running),
+            "補完を閉じる Esc でターンを止めない"
+        );
+        cx.simulate_keystrokes("o");
+        assert!(names(cx).is_empty(), "行頭の `/` が消えるまで開き直さない");
+        cx.simulate_keystrokes("escape");
+        assert!(
+            !panel.read_with(cx, |panel, _cx| panel.threads[panel.active].running),
+            "補完が閉じていれば Esc は中断"
+        );
+
+        // IME 変換中は開かない（Enter は変換の確定＝奪わない）。
+        set_text(cx, "");
+        panel.update_in(cx, |panel, window, cx| {
+            panel.composer.update(cx, |composer, cx| {
+                composer.replace_and_mark_text_in_range(None, "/こ", None, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _cx| panel.slash.input.clone()),
+            SlashInput::Inactive
+        );
+        assert!(names(cx).is_empty());
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// slash コマンドは本文 1 ブロックだけで送る: `@path` の添付も画像も付けない（Claude は末尾、
+    /// Codex は先頭のブロックをコマンドとして読む）。添付は外さずに残り、次の通常の送信に付く。
+    #[gpui::test]
+    fn a_slash_command_is_sent_alone_and_keeps_the_attachments(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "slash-send");
+        let root = std::env::temp_dir().join(format!(
+            "necoder_slash_send_{}_{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("一時ディレクトリを作れる");
+        std::fs::write(root.join("shot.png"), [0x89, b'P', b'N', b'G']).expect("画像を置ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.dest_cwd = Some(root.clone());
+            panel.set_prompt_context(active, "ROLE\n".to_string());
+            panel.threads[active].context = vec!["src/lib.rs".into(), "shot.png".into()];
+
+            panel.send_prompt_text("/compact".to_string(), cx);
+            panel.threads[active].running = false;
+            match command_rx.try_recv() {
+                Ok(SessionCommand::Prompt(text)) => assert_eq!(text, "/compact"),
+                other => panic!("slash は本文だけの Prompt で送る: {other:?}"),
+            }
+            assert_eq!(
+                panel.threads[active].context,
+                vec![
+                    SharedString::from("src/lib.rs"),
+                    SharedString::from("shot.png")
+                ],
+                "添付は外さない（画像も次の通常の送信まで残す）"
+            );
+
+            // パスで始まる依頼は slash ではない＝添付・画像・context を付けて送る。
+            panel.send_prompt_text("/Users/me/a.rs を見て".to_string(), cx);
+            panel.threads[active].running = false;
+            match command_rx.try_recv() {
+                Ok(SessionCommand::PromptWithImages { text, images }) => {
+                    assert_eq!(text, "@src/lib.rs\nROLE\n\n/Users/me/a.rs を見て");
+                    assert_eq!(images.len(), 1);
+                }
+                other => panic!("普通の依頼は添付つき: {other:?}"),
+            }
+            assert_eq!(
+                panel.threads[active].context,
+                vec![SharedString::from("src/lib.rs")],
+                "画像は送った 1 通で外れる"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 目標（`/goal`）は届いた物をそのまま出し、null で消える。新しい会話では消え、引き継いだ
+    /// 会話ではエージェントが送り直すまで残す。
+    #[gpui::test]
+    fn the_goal_follows_the_agent_and_resets_with_a_fresh_session(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "agent-goal");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            assert!(panel.render_goal().is_none());
+            let goal = acp_client::AgentGoal {
+                objective: "テストを緑にする".into(),
+                status: acp_client::GoalStatus::Paused,
+            };
+            panel.on_event(active, AgentEvent::GoalChanged(Some(goal.clone())), cx);
+            assert_eq!(panel.threads[active].goal.as_ref(), Some(&goal));
+            assert!(panel.render_goal().is_some(), "composer の上に出る");
+
+            let started = |resumed: bool| AgentEvent::SessionStarted {
+                session_id: "sess".into(),
+                resumed,
+                resumable: true,
+            };
+            panel.on_event(active, started(true), cx);
+            assert!(
+                panel.threads[active].goal.is_some(),
+                "引き継いだ会話では残す"
+            );
+            panel.on_event(active, started(false), cx);
+            assert!(panel.threads[active].goal.is_none(), "新しい会話では消す");
+
+            panel.on_event(active, AgentEvent::GoalChanged(Some(goal)), cx);
+            panel.on_event(active, AgentEvent::GoalChanged(None), cx);
+            assert!(panel.threads[active].goal.is_none(), "null で消える");
+        });
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 回帰テスト（O2 で待機中も更新を読むようにした副作用の手当て）: ターン終了で保存した本文に、
+    /// 待機中に届いた増分を連結しない。連結すると増分は DB に二度と書かれない。新しいエントリに
+    /// して、次の保存で残す。ターン中の増分はこれまでどおり 1 つのエントリへ連結する。
+    #[gpui::test]
+    fn chunks_after_a_saved_turn_start_a_new_entry(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "idle-chunks");
+        let db_path = std::env::temp_dir().join(format!(
+            "necoder_agent_idle_chunks_{}_{}.db",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let storage = storage::Storage::open(&db_path).expect("DB を開ける");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let thread_id = panel.update(cx, |panel, cx| {
+            panel.set_storage(storage.clone(), cx);
+            let active = panel.active;
+            panel.on_event(active, AgentEvent::TurnStarted, cx);
+            panel.on_event(active, AgentEvent::AgentChunk("最初の答え".into()), cx);
+            panel.on_event(active, AgentEvent::AgentChunk("の続き".into()), cx);
+            panel.on_event(
+                active,
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                cx,
+            );
+            // 待機中に届いた本文（エージェントが自分で続けた・背景タスクの報告）。
+            panel.on_event(active, AgentEvent::AgentChunk("待機中の報告".into()), cx);
+            let texts: Vec<String> = panel.threads[active]
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Agent(text) => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts, vec!["最初の答えの続き", "待機中の報告"]);
+            panel.persist_thread(active);
+            panel.threads[active].id.clone()
+        });
+        let saved: Vec<String> = storage
+            .load_recent_turns(&thread_id, 10)
+            .expect("turns を読める")
+            .into_iter()
+            .map(|(_, content)| content)
+            .collect();
+        assert_eq!(saved, vec!["最初の答えの続き", "待機中の報告"]);
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(db_path);
     }
 }

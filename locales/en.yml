@@ -116,6 +116,13 @@ agent:
   stop: Stop esc
   running_hint: esc to interrupt
   running_thinking: Thinking
+  slash_footer: "%{count} commands · ↑↓ to choose · Enter / Tab to insert · esc to close"
+  goal_label: Goal
+  goal_status_active: Active
+  goal_status_paused: Paused
+  goal_status_blocked: Blocked
+  goal_status_complete: Complete
+  goal_status_limited: Limit reached
   more_lines: "… (+%{n} lines)"
 hunk:
   stage: Stage this hunk
