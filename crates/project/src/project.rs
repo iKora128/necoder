@@ -1875,6 +1875,10 @@ pub fn unified_diff_body(old_text: &str, new_text: &str) -> Option<String> {
         &input,
         UnifiedDiffBuilder::new(&input),
     );
+    // imara-diff 0.1.8 の `UnifiedDiffBuilder` は各行の後ろに `\n` を足すが、`lines_with_terminator`
+    // の行は改行を含むので、diff タブで 1 行おきに空行が挟まっていた。末尾の改行だけの変更も
+    // 差分として拾いたいので入力は改行込みのまま、出力の二重改行だけを畳む（行は途中に改行を含まない）。
+    let body = body.replace("\n\n", "\n");
     (!body.is_empty()).then_some(body)
 }
 
@@ -3115,6 +3119,26 @@ mod tests {
             .trim()
             .parse()
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn unified_diff_body_has_one_line_per_diff_line() {
+        let body = unified_diff_body("a\n\nb\n", "a\n\nc\n").unwrap();
+        assert_eq!(
+            body.lines().collect::<Vec<_>>(),
+            ["@@ -1,3 +1,3 @@", " a", " ", "-b", "+c"]
+        );
+        // 末尾の改行だけの違いも差分として出る（1 行の入れ替え）。
+        let body = unified_diff_body("a\n", "a").unwrap();
+        assert_eq!(
+            body.lines().collect::<Vec<_>>(),
+            ["@@ -1,1 +1,1 @@", "-a", "+a"]
+        );
+        assert_eq!(
+            unified_diff_body("a\r\nb\r\n", "a\nb\n"),
+            None,
+            "改行コードだけは差分にしない"
+        );
     }
 
     #[test]
