@@ -108,6 +108,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let index = self.work_switch_target(index);
+        // スレッド履歴は開いた時のプロジェクトの物（O15）。⌘1..9 などで切り替えたら閉じる
+        // （前のプロジェクトのパネルへ開いてしまわない）。
+        if self.overlays.thread_history.take().is_some() {
+            cx.notify();
+        }
         // Chat からプロジェクトを選んだら Chat を抜ける（同じプロジェクトでも「そこへ戻る」）。
         if self.chat_mode() {
             self.set_chat_mode(false, window, cx);
