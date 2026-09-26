@@ -3284,3 +3284,15 @@
   - relay の node テストは `npm ci --omit=dev --ignore-scripts` だけで回る（wrangler / sharp を入れない）。`web-push` の `sendNotification` は既定 export のオブジェクトなので、テストで差し替えられる。
 - 検証: `cargo check --workspace --all-targets` 警告 0。`cargo test --workspace --no-fail-fast` 824 通過・落ちるのは Linux で元から落ちる 2 件だけ（PDF のネイティブビューア・Web タブ）。relay の `node --test` 17 本。実画面・macOS 実機・iPhone の push・SSH は未確認。
 - 次: 実機（mac）で見た目を確かめる（質問カードの入力欄・サブエージェントの見出し `NECODER_SUBAGENT_PROBE=collapsed|expanded`・設定の検索・Fleet の絞り込み・表示言語）。iPhone で完了の push が届くか。push の権限。
+
+## 2026-09-26（続き 3）— O16 / O17 / O21 / O22 / O23 をクラウドで積んだ
+
+- やったこと（項目ごとに 1 コミット）: 舞台のピンと列数を窓セッションに残す（O21）/ Task の ⋯ に「休ませる」（静かなエージェントを止める・O21）/ fan-out のエージェントをログイン済みに絞る（O23）/ 片付けに worktree の大きさと「大きい順」（`project::disk_usage_on`・O22）/ **目標の一時停止・再開・取り消し**（Codex が initialize の `_meta.goal` で広告する `_session/goal`・O17）/ **エージェント別の新規スレッド**（`workspace::NewThreadCodex` 等・パレットと keymap.json・O16 / B28）/ **message rail**（transcript の右端に発話ごとの印・O17 / B20）。
+- 学び/罠:
+  - **偽エージェントのテストは事象の並びを見ている**（`SessionStarted` の次は `TurnStarted`）。目標の操作を広告しないエージェントにも空の `GoalControls` を流したら 2 本落ちた。acp_client を触ったら**絞らずに** `cargo test -p acp_client` を回す（絞ったテストだけ回して 1 コミット遅れて気づいた）。直し方は「広告した時だけ流し、UI は SessionStarted で前の操作を消す」。
+  - Claude / Codex のブリッジは、背景のタスクを止める `_session/async_task/stop` を共通で持つ。ただし `async_task_spawned` などの更新は **JetBrains AIR の拡張**（`_meta.jetbrains.air.capabilities: ["asyncTasks"]`）を名乗ったクライアントにだけ来る。ACP SDK が未知の sessionUpdate をどう扱うか（捨てる / 失敗する）を実機で確かめないまま名乗ると会話ごと壊しうるので、個別停止は見送った。
+  - パレットの行は action 名の文字列で引く（`cx.build_action(name, None)`）。打ち間違いは「押しても何も起きない行」になるので、全部の行が登録済みの action と訳のあるラベルを指すテストを足した（既存の行も全部通った）。
+  - 引数つきの action（`#[derive(Action)]`）は `schemars::JsonSchema` が要る（`no_json` だと keymap から引数を渡せない）。依存を増やさず、エージェントごとの引数なし action を 7 つ並べた。
+  - YAML の値に `: ` を含めるなら引用符で囲む（`並び: 作った順` はマップとして読まれる）。`i18n` の `both_locales_parse` が守っている。
+- 検証: `cargo check --workspace --all-targets` 警告 0。`cargo test --workspace --no-fail-fast` 833 通過・落ちるのは Linux で元から落ちる 2 件だけ。実画面・macOS 実機・Codex の目標の操作（実エージェント）は未確認。
+- 次: 実機で目標の行のチップ（Codex で `/goal` → 一時停止 → 再開）・message rail の印の位置・片付けの大きさ（node_modules のある Task で du の時間）を確かめる。
