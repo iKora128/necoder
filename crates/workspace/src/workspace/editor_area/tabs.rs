@@ -375,6 +375,16 @@ impl Workspace {
             )),
             _ => shell,
         };
+        // 開発用（debug のみ）: NECODER_TERM_SCRIPT="<sh の文>" で起動時にその文を実行してから
+        // rc を読まない zsh へ（下線・色・リンクなど端末の描画を offscreen で撮るためのフック）。
+        #[cfg(debug_assertions)]
+        let shell = match std::env::var("NECODER_TERM_SCRIPT") {
+            Ok(script) if !script.is_empty() && shell.is_none() => Some((
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), format!("{script}; exec zsh -f")],
+            )),
+            _ => shell,
+        };
         TerminalLaunch { cwd, shell }
     }
 

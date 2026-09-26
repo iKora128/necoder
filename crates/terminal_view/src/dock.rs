@@ -16,7 +16,12 @@ pub struct TerminalLaunch {
 
 /// TerminalDock から shell への通知。
 pub enum TerminalDockEvent {
-    OpenPath { path: String, line: u32 },
+    OpenPath {
+        path: String,
+        line: u32,
+    },
+    /// 端末の URL のクリック（`TerminalEvent::OpenUrl` をそのまま上げる）。
+    OpenUrl(String),
     Dismissed,
 }
 
@@ -111,6 +116,7 @@ impl TerminalDock {
                     line: *line,
                 });
             }
+            TerminalEvent::OpenUrl(url) => cx.emit(TerminalDockEvent::OpenUrl(url.clone())),
         }
     }
 

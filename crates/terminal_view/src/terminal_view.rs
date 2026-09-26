@@ -8,6 +8,7 @@
 //! - 公開 `alacritty_terminal` API と GPUI API を使った necoder 固有の実装。Zed の terminal code は取り込まない。
 
 mod dock;
+mod element;
 mod keys;
 mod pty_guard;
 mod search;
@@ -47,29 +48,93 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::Match;
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
 use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
 
 use gpui::{
-    div, fill, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, CursorStyle,
-    DispatchPhase, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, InspectorElementId, IntoElement,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Rgba, ScrollWheelEvent, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    div, point, prelude::*, px, size, App, Bounds, ClipboardItem, Context, CursorStyle,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba, ScrollWheelEvent,
+    UTF16Selection, Window,
 };
 use std::ops::Range;
 use theme_core::Theme;
 
-/// ターミナル → ホスト（workspace）への通知（M13: file:line リンク）。
+/// ターミナル → ホスト（workspace）への通知。
 pub enum TerminalEvent {
     /// `path:line` リンクのクリック。パスは端末出力のまま（相対は cwd 基準で解決してもらう）。
     OpenPath { path: String, line: u32 },
+    /// URL のクリック（`http(s)://…`・スキーム無しの `localhost:3000` は `http://` を補ったもの・
+    /// OSC 8 のハイパーリンク）。開き方はホストが決める。
+    OpenUrl(String),
 }
 
-/// 表示セルから行を再構成してリンクを検出する。戻りは (表示行, セル列範囲, パス, 行番号)。
-fn detect_links(cells: &[RenderCell]) -> Vec<(i32, Range<usize>, String, u32)> {
+/// 端末の中のリンクの行き先。
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum TerminalLinkTarget {
+    Path { path: String, line: u32 },
+    Url(String),
+}
+
+/// 表示中のリンク 1 つ（グリッド行・セル列範囲・行き先）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct TerminalLink {
+    line: i32,
+    columns: Range<usize>,
+    target: TerminalLinkTarget,
+}
+
+impl TerminalLink {
+    fn contains(&self, point: AlacPoint) -> bool {
+        self.line == point.line.0 && self.columns.contains(&point.column.0)
+    }
+}
+
+/// OSC 8 のハイパーリンクのうち開くもの（http / https だけ。他のスキームは押しても何もしない）。
+fn is_openable_uri(uri: &str) -> bool {
+    uri.starts_with("http://") || uri.starts_with("https://")
+}
+
+/// 表示セルからリンクを拾う。OSC 8（アプリが明示したハイパーリンク）が先で、文字から拾う
+/// URL と `path:line` は OSC 8 と重ならない所だけ。
+fn detect_links(cells: &[RenderCell], hyperlinks: &[String]) -> Vec<TerminalLink> {
+    let mut links: Vec<TerminalLink> = Vec::new();
+    for cell in cells {
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+        let Some(uri) = cell
+            .hyperlink
+            .and_then(|index| hyperlinks.get(index as usize))
+            .filter(|uri| is_openable_uri(uri))
+        else {
+            continue;
+        };
+        let column = cell.point.column.0;
+        let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+            2
+        } else {
+            1
+        };
+        match links.last_mut() {
+            Some(link)
+                if link.line == cell.point.line.0
+                    && link.columns.end == column
+                    && link.target == TerminalLinkTarget::Url(uri.clone()) =>
+            {
+                link.columns.end = column + width;
+            }
+            _ => links.push(TerminalLink {
+                line: cell.point.line.0,
+                columns: column..column + width,
+                target: TerminalLinkTarget::Url(uri.clone()),
+            }),
+        }
+    }
+    let explicit = links.len();
+
     let mut rows: std::collections::BTreeMap<i32, Vec<(usize, char)>> =
         std::collections::BTreeMap::new();
     for cell in cells {
@@ -78,22 +143,25 @@ fn detect_links(cells: &[RenderCell]) -> Vec<(i32, Range<usize>, String, u32)> {
         }
         rows.entry(cell.point.line.0)
             .or_default()
-            .push((cell.point.column.0 as usize, cell.character));
+            .push((cell.point.column.0, cell.character));
     }
-    let mut links = Vec::new();
     for (line, row) in rows {
         let text: String = row.iter().map(|(_, character)| *character).collect();
         // 検出は `ui::links`（agent_panel の transcript と共有）。ターミナルは cargo/grep の
-        // 出力が相手なので**行番号つきだけ**をリンクにする（実在確認をしないぶん厳しくする）。
+        // 出力が相手なので、パスは**行番号つきだけ**をリンクにする（実在確認をしないぶん厳しくする）。
         let offsets: Vec<usize> = text.char_indices().map(|(offset, _)| offset).collect();
         for link in ui::links::find_links(&text) {
-            let ui::links::LinkTarget::Path {
-                path,
-                line: Some(line_number),
-                ..
-            } = link.target
-            else {
-                continue;
+            let target = match link.target {
+                ui::links::LinkTarget::Path {
+                    path,
+                    line: Some(line_number),
+                    ..
+                } => TerminalLinkTarget::Path {
+                    path,
+                    line: line_number,
+                },
+                ui::links::LinkTarget::Url(url) => TerminalLinkTarget::Url(url),
+                ui::links::LinkTarget::Path { line: None, .. } => continue,
             };
             // byte 範囲 → セル列（全角が混ざる行でもずれないよう char 添字を経由する）。
             let Ok(first) = offsets.binary_search(&link.range.start) else {
@@ -108,7 +176,19 @@ fn detect_links(cells: &[RenderCell]) -> Vec<(i32, Range<usize>, String, u32)> {
             else {
                 continue;
             };
-            links.push((line, *start_column..*end_column + 1, path, line_number));
+            let columns = *start_column..*end_column + 1;
+            let overlaps_explicit = links[..explicit].iter().any(|explicit| {
+                explicit.line == line
+                    && explicit.columns.start < columns.end
+                    && columns.start < explicit.columns.end
+            });
+            if !overlaps_explicit {
+                links.push(TerminalLink {
+                    line,
+                    columns,
+                    target,
+                });
+            }
         }
     }
     links
@@ -178,6 +258,10 @@ struct RenderCell {
     fg: AnsiColor,
     bg: AnsiColor,
     flags: Flags,
+    /// 下線の色（SGR 58）。None は文字色。
+    underline_color: Option<AnsiColor>,
+    /// OSC 8 のハイパーリンク（`sync` で集めた URI の一覧の添字）。
+    hyperlink: Option<u32>,
 }
 
 /// term をロックして取り出した表示スナップショット（前景でロック無しに読める）。
@@ -185,6 +269,10 @@ struct RenderCell {
 struct TerminalContent {
     cells: Vec<RenderCell>,
     cursor: Option<AlacPoint>,
+    /// カーソルの形（DECSCUSR）。Hidden は描かない（アプリが隠した）。
+    cursor_shape: CursorShape,
+    /// 表示中のリンク（OSC 8・URL・`path:line`）。描画の下線とクリックの判定に使う。
+    links: Vec<TerminalLink>,
     /// マウス選択の範囲（グリッド座標）。ハイライト描画と ⌘C コピーに使う。
     selection: Option<SelectionRange>,
     /// スクロールバックの表示オフセット（0 = 最下段）。セルはグリッド座標のまま持つので、
@@ -194,6 +282,14 @@ struct TerminalContent {
     search_matches: Vec<Match>,
     /// 検索でいま見ている一致。
     current_match: Option<Match>,
+}
+
+/// 描画フレームのグリッドの座標（左上・セルの寸法）。マウスの位置 → セルの変換に使う。
+#[derive(Clone, Copy)]
+struct GridFrame {
+    origin: gpui::Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
 }
 
 /// ドラッグ選択の最新スナップショット（ポインタ位置 + そのフレームの描画座標）。
@@ -214,6 +310,8 @@ pub struct TerminalView {
     size: TerminalSize,
     /// 端末のモード（APP_CURSOR・kitty keyboard のフラグ・マウス報告など）。sync のたびに写す。
     mode: TermMode,
+    /// セルの寸法（px）。PTY の WindowSize に載せる（描画のたびに実寸で更新）。
+    cell_pixels: (u16, u16),
     /// OS に変換中の範囲を返すための前編集。PTY には確定するまで送らない。
     marked_text: String,
     marked_selection: Range<usize>,
@@ -225,6 +323,10 @@ pub struct TerminalView {
     accent: Hsla,
     /// マウス左ボタンを押してドラッグ選択中か（move で範囲を延ばす判定）。
     selecting: bool,
+    /// ポインタが載っているリンク（`content.links` の添字）。下線を濃くし、指の形にする。
+    hovered_link: Option<usize>,
+    /// 左ボタンを押したセル（グリッド座標）。離した時に同じセルならクリック＝リンクを開く。
+    mouse_down_cell: Option<AlacPoint>,
     /// ドラッグ選択中の最新ポインタ位置とフレーム座標。ビュー外へ引っ張った時の
     /// 自動スクロール tick が選択の引き直しに使う（up で消える）。
     drag_frame: Option<DragFrame>,
@@ -334,6 +436,7 @@ impl TerminalView {
             content: TerminalContent::default(),
             size,
             mode: TermMode::default(),
+            cell_pixels: (8, 16),
             marked_text: String::new(),
             marked_selection: 0..0,
             #[cfg(any(test, feature = "test-support"))]
@@ -341,6 +444,8 @@ impl TerminalView {
             search: None,
             accent: theme.fg2,
             selecting: false,
+            hovered_link: None,
+            mouse_down_cell: None,
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
@@ -375,6 +480,7 @@ impl TerminalView {
             content: TerminalContent::default(),
             size,
             mode: TermMode::default(),
+            cell_pixels: (8, 16),
             marked_text: String::new(),
             marked_selection: 0..0,
             #[cfg(any(test, feature = "test-support"))]
@@ -382,6 +488,8 @@ impl TerminalView {
             search: None,
             accent: theme.fg2,
             selecting: false,
+            hovered_link: None,
+            mouse_down_cell: None,
             drag_frame: None,
             drag_autoscroll_running: false,
             scroll_remainder: 0.0,
@@ -420,6 +528,60 @@ impl TerminalView {
         self.written_input.borrow().clone()
     }
 
+    /// 開発用（offscreen 検証・`NECODER_TERMINAL_PROBE`）: 端末への 1 コマンド。
+    /// `type:<文>` = 文をタイプして ⏎ / `select:<行>,<列>-<行>,<列>` = 表示座標で選択 /
+    /// `find:<語>` = ⌘F を開いて語を入れる。
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn debug_probe(
+        &mut self,
+        name: &str,
+        argument: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match name {
+            "type" => {
+                let mut bytes = argument.as_bytes().to_vec();
+                bytes.push(b'\r');
+                self.write_bytes(bytes);
+            }
+            "select" => {
+                let parse = |point: &str| {
+                    let (row, column) = point.split_once(',')?;
+                    Some((
+                        row.trim().parse::<i32>().ok()?,
+                        column.trim().parse::<usize>().ok()?,
+                    ))
+                };
+                let Some(((start_row, start_column), (end_row, end_column))) = argument
+                    .split_once('-')
+                    .and_then(|(start, end)| Some((parse(start)?, parse(end)?)))
+                else {
+                    eprintln!("TERMINAL_PROBE: select の形が不正: {argument:?}");
+                    return;
+                };
+                let mut term = self.term.lock();
+                let offset = term.grid().display_offset() as i32;
+                let start = AlacPoint::new(Line(start_row - offset), Column(start_column));
+                let end = AlacPoint::new(Line(end_row - offset), Column(end_column));
+                let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+                selection.update(end, Side::Right);
+                term.selection = Some(selection);
+                drop(term);
+                self.sync(cx);
+            }
+            "find" => {
+                self.find(&actions::Find, window, cx);
+                if let Some(search) = self.search.as_mut() {
+                    search.query = argument.to_string();
+                }
+                self.refresh_search(true, cx);
+            }
+            other => eprintln!("TERMINAL_PROBE: 未知のコマンド {other}"),
+        }
+    }
+
     /// alacritty イベントを処理する（前景・pump から）。Wakeup で再スナップショット。
     fn on_alac_event(&mut self, event: AlacEvent, cx: &mut Context<Self>) {
         match event {
@@ -443,14 +605,31 @@ impl TerminalView {
         let term = self.term.lock();
         let content = term.renderable_content();
         let display_offset = content.display_offset;
-        let cells = content
+        let cursor_shape = content.cursor.shape;
+        let mut hyperlinks: Vec<String> = Vec::new();
+        let cells: Vec<RenderCell> = content
             .display_iter
-            .map(|indexed| RenderCell {
-                point: indexed.point,
-                character: indexed.cell.c,
-                fg: indexed.cell.fg,
-                bg: indexed.cell.bg,
-                flags: indexed.cell.flags,
+            .map(|indexed| {
+                // 同じ URI は 1 つにまとめて添字で指す（リンクの区切りの判定にも使う）。
+                let hyperlink = indexed.cell.hyperlink().map(|link| {
+                    let uri = link.uri();
+                    match hyperlinks.iter().rposition(|known| known == uri) {
+                        Some(index) => index as u32,
+                        None => {
+                            hyperlinks.push(uri.to_string());
+                            (hyperlinks.len() - 1) as u32
+                        }
+                    }
+                });
+                RenderCell {
+                    point: indexed.point,
+                    character: indexed.cell.c,
+                    fg: indexed.cell.fg,
+                    bg: indexed.cell.bg,
+                    flags: indexed.cell.flags,
+                    underline_color: indexed.cell.underline_color(),
+                    hyperlink,
+                }
             })
             .collect();
         let cursor = Some(content.cursor.point);
@@ -475,9 +654,16 @@ impl TerminalView {
             None => (Vec::new(), None),
         };
         drop(term);
+        let links = detect_links(&cells, &hyperlinks);
+        // 描き直しでリンクの並びが変わったら、ホバー中の添字は捨てる（次の move で拾い直す）。
+        if links != self.content.links {
+            self.hovered_link = None;
+        }
         self.content = TerminalContent {
             cells,
             cursor,
+            cursor_shape,
+            links,
             selection,
             display_offset,
             search_matches,
@@ -516,27 +702,41 @@ impl TerminalView {
         }
     }
 
-    /// 行列サイズが変わったら term と PTY をリサイズする（prepaint から）。
-    fn resize(&mut self, columns: usize, lines: usize) {
+    /// 行列サイズ（とセルの寸法）が変わったら term と PTY をリサイズする（prepaint から）。
+    fn resize(&mut self, columns: usize, lines: usize, cell_width: Pixels, line_height: Pixels) {
         let new_size = TerminalSize {
             columns: columns.max(2),
             lines: lines.max(1),
         };
-        if new_size == self.size {
+        // PTY へ伝えるセルの寸法（px・`CSI 14 t` の応答や画像を出すアプリが使う）。
+        let cell_pixels = (
+            f32::from(cell_width).round().max(1.0) as u16,
+            f32::from(line_height).round().max(1.0) as u16,
+        );
+        if new_size == self.size && cell_pixels == self.cell_pixels {
             return;
         }
+        let size_changed = new_size != self.size;
         self.size = new_size;
-        self.term.lock().resize(new_size);
+        self.cell_pixels = cell_pixels;
+        if size_changed {
+            self.term.lock().resize(new_size);
+        }
         if let Some(notifier) = &self.notifier {
-            let window_size = WindowSize {
-                num_lines: new_size.lines as u16,
-                num_cols: new_size.columns as u16,
-                cell_width: 8,
-                cell_height: 16,
-            };
+            let window_size = self.window_size();
             if let Err(error) = notifier.0.send(Msg::Resize(window_size)) {
                 eprintln!("ターミナル: リサイズ送信に失敗: {error}");
             }
+        }
+    }
+
+    /// PTY へ伝える大きさ（行列 + セルの px）。
+    fn window_size(&self) -> WindowSize {
+        WindowSize {
+            num_lines: self.size.lines as u16,
+            num_cols: self.size.columns as u16,
+            cell_width: self.cell_pixels.0,
+            cell_height: self.cell_pixels.1,
         }
     }
 
@@ -790,21 +990,26 @@ impl TerminalView {
     }
 
     /// ドラッグ選択の開始（左ボタン押下時）。押した位置をアンカーにする。
+    /// ダブルクリックは語（`Semantic`）、トリプルクリックは行（`Lines`）の単位で選ぶ。
     fn begin_selection(
         &mut self,
         position: gpui::Point<Pixels>,
-        origin: gpui::Point<Pixels>,
-        cell_width: Pixels,
-        line_height: Pixels,
+        frame: GridFrame,
+        selection_type: SelectionType,
         cx: &mut Context<Self>,
     ) {
-        let (row, column, side) =
-            viewport_cell(position, origin, cell_width, line_height, self.size);
+        let (row, column, side) = viewport_cell(
+            position,
+            frame.origin,
+            frame.cell_width,
+            frame.line_height,
+            self.size,
+        );
         self.selecting = true;
         let mut term = self.term.lock();
         let offset = term.grid().display_offset() as i32;
         let point = AlacPoint::new(Line(row - offset), Column(column));
-        term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+        term.selection = Some(Selection::new(selection_type, point, side));
         let range = term
             .selection
             .as_ref()
@@ -936,6 +1141,108 @@ impl TerminalView {
         drop(term);
         self.content.selection = range;
         cx.notify();
+    }
+}
+
+impl TerminalView {
+    /// ピクセル位置 → グリッド座標（scrollback の表示位置を反映）。
+    fn grid_point(&self, position: gpui::Point<Pixels>, frame: GridFrame) -> AlacPoint {
+        let (row, column, _) = viewport_cell(
+            position,
+            frame.origin,
+            frame.cell_width,
+            frame.line_height,
+            self.size,
+        );
+        AlacPoint::new(
+            Line(row - self.content.display_offset as i32),
+            Column(column),
+        )
+    }
+
+    /// グリッドの上でボタンを押した（`element.rs` の paint が、このフレームの座標で呼ぶ）。
+    fn on_grid_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        frame: GridFrame,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        self.mouse_down_cell = Some(self.grid_point(event.position, frame));
+        let selection_type = match event.click_count {
+            2 => SelectionType::Semantic,
+            3.. => SelectionType::Lines,
+            _ => SelectionType::Simple,
+        };
+        self.begin_selection(event.position, frame, selection_type, cx);
+    }
+
+    /// ポインタが動いた。左ボタンを押していれば選択を延ばし、そうでなければリンクのホバーを追う
+    /// （変わった時だけ描き直す＝動かしているだけでは再描画しない）。
+    fn on_grid_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        frame: GridFrame,
+        inside: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button == Some(MouseButton::Left) {
+            self.update_selection(
+                event.position,
+                frame.origin,
+                frame.cell_width,
+                frame.line_height,
+                cx,
+            );
+            return;
+        }
+        let hovered = if inside {
+            let point = self.grid_point(event.position, frame);
+            self.content
+                .links
+                .iter()
+                .position(|link| link.contains(point))
+        } else {
+            None
+        };
+        if hovered != self.hovered_link {
+            self.hovered_link = hovered;
+            cx.notify();
+        }
+    }
+
+    /// ボタンを離した。動かさずに離した（クリック）ならリンクを開く（path:line と URL で同じ操作感）。
+    fn on_grid_mouse_up(&mut self, event: &MouseUpEvent, frame: GridFrame, cx: &mut Context<Self>) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        let up = self.grid_point(event.position, frame);
+        let clicked = self.mouse_down_cell.take().filter(|down| *down == up);
+        let dragged = self
+            .term
+            .lock()
+            .selection
+            .as_ref()
+            .is_some_and(|selection| !selection.is_empty());
+        self.end_selection(cx);
+        if let (Some(point), false) = (clicked, dragged) {
+            self.open_link_at(point, cx);
+        }
+    }
+
+    /// そのセルのリンクを開く（ホストへ通知するだけ。開き方はホストが決める）。
+    fn open_link_at(&mut self, point: AlacPoint, cx: &mut Context<Self>) {
+        let Some(link) = self.content.links.iter().find(|link| link.contains(point)) else {
+            return;
+        };
+        match link.target.clone() {
+            TerminalLinkTarget::Path { path, line } => {
+                cx.emit(TerminalEvent::OpenPath { path, line })
+            }
+            TerminalLinkTarget::Url(url) => cx.emit(TerminalEvent::OpenUrl(url)),
+        }
     }
 }
 
@@ -1136,7 +1443,7 @@ impl Render for TerminalView {
             // 崩れるので、エディタと同じコードフォント（等幅）を明示する。要素は text_style().font()
             // を読むのでコンテナで指定すれば伝播する。
             .font_family("Guguru Sans Code")
-            .child(TerminalElement {
+            .child(element::TerminalElement {
                 terminal: cx.entity(),
             })
             .children(search_bar)
@@ -1257,404 +1564,6 @@ fn is_default_background(color: AnsiColor) -> bool {
     matches!(color, AnsiColor::Named(NamedColor::Background))
 }
 
-// ── 描画（custom Element でグリッドを塗る） ──
-
-struct TerminalElement {
-    terminal: Entity<TerminalView>,
-}
-
-struct TerminalPrepaint {
-    cells: Vec<RenderCell>,
-    cursor: Option<AlacPoint>,
-    /// マウス選択の範囲（グリッド座標）。ハイライトの矩形塗りに使う。
-    selection: Option<SelectionRange>,
-    /// スクロールバックの表示オフセット。グリッド座標 → 表示行は `line + display_offset`。
-    display_offset: usize,
-    cell_width: Pixels,
-    line_height: Pixels,
-    origin: gpui::Point<Pixels>,
-    focused: bool,
-    theme: Theme,
-    /// file:line リンク（グリッド行, セル列範囲, パス, 行番号・M13）。
-    links: Vec<(i32, Range<usize>, String, u32)>,
-    /// 検索の一致（表示範囲）と、いま見ている一致。
-    search_matches: Vec<Match>,
-    current_match: Option<Match>,
-    columns: usize,
-}
-
-impl IntoElement for TerminalElement {
-    type Element = Self;
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for TerminalElement {
-    type RequestLayoutState = ();
-    type PrepaintState = TerminalPrepaint;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = gpui::relative(1.0).into();
-        style.size.height = gpui::relative(1.0).into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        // 等幅セル幅を 'M' を shape して測る。
-        let font = window.text_style().font();
-        let sample = window.text_system().shape_line(
-            SharedString::from("M"),
-            px(FONT_SIZE),
-            &[TextRun {
-                len: 1,
-                font: font.clone(),
-                color: gpui::black(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        );
-        let cell_width = if sample.width > px(0.) {
-            sample.width
-        } else {
-            px(FONT_SIZE * 0.6)
-        };
-        let line_height = px(LINE_HEIGHT);
-
-        // 行列サイズを算出して term をリサイズ。
-        let columns = (f32::from(bounds.size.width) / f32::from(cell_width))
-            .floor()
-            .max(2.0) as usize;
-        let lines = (f32::from(bounds.size.height) / f32::from(line_height))
-            .floor()
-            .max(1.0) as usize;
-        term_probe(
-            "layout",
-            format_args!(
-                "bounds {}x{} / cell {}x{} → {columns}列 {lines}行",
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height),
-                f32::from(cell_width),
-                f32::from(line_height),
-            ),
-        );
-        let theme = self.terminal.read(cx).theme.clone();
-        let focused = self.terminal.read(cx).focus_handle.is_focused(window);
-        let (cells, cursor, selection, display_offset, search_matches, current_match) =
-            self.terminal.update(cx, |terminal, _cx| {
-                terminal.resize(columns, lines);
-                (
-                    terminal.content.cells.clone(),
-                    terminal.content.cursor,
-                    terminal.content.selection,
-                    terminal.content.display_offset,
-                    terminal.content.search_matches.clone(),
-                    terminal.content.current_match.clone(),
-                )
-            });
-
-        let links = detect_links(&cells);
-        TerminalPrepaint {
-            cells,
-            cursor,
-            selection,
-            display_offset,
-            cell_width,
-            line_height,
-            origin: bounds.origin,
-            focused,
-            theme,
-            links,
-            search_matches,
-            current_match,
-            columns,
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let theme = &prepaint.theme;
-        let origin = prepaint.origin;
-        let cell_width = prepaint.cell_width;
-        let line_height = prepaint.line_height;
-        let display_offset = prepaint.display_offset;
-        // グリッド行（スクロールバック閲覧中は負値もある）→ 表示 y 座標。
-        let row_y = |line: i32| origin.y + line_height * ((line + display_offset as i32) as f32);
-        let font = window.text_style().font();
-
-        // 面全体の背景。
-        window.paint_quad(fill(bounds, theme.bg1));
-
-        // ⓪ 選択ハイライト（エディタと同じ選択面色）。背景セルより下に敷く。
-        if let Some(range) = prepaint.selection {
-            for cell in &prepaint.cells {
-                if range.contains(cell.point) {
-                    let position = point(
-                        origin.x + cell_width * (cell.point.column.0 as f32),
-                        row_y(cell.point.line.0),
-                    );
-                    window.paint_quad(fill(
-                        Bounds::new(position, size(cell_width, line_height)),
-                        theme_core::editor_selection(),
-                    ));
-                }
-            }
-        }
-
-        // ① 既定でない背景セルの矩形。
-        for cell in &prepaint.cells {
-            let (mut foreground, mut background) = (cell.fg, cell.bg);
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut foreground, &mut background);
-            }
-            if !is_default_background(background) {
-                let position = point(
-                    origin.x + cell_width * (cell.point.column.0 as f32),
-                    row_y(cell.point.line.0),
-                );
-                window.paint_quad(fill(
-                    Bounds::new(position, size(cell_width, line_height)),
-                    ansi_to_hsla(background, theme),
-                ));
-            }
-        }
-
-        // ①.5 検索の一致（エディタの ⌘F と同じ warn の薄塗り）。いま見ている一致は選択面の色を重ねる。
-        let lines_visible = (f32::from(bounds.size.height) / f32::from(line_height)).ceil() as i32;
-        let paint_match = |found: &Match, color: Hsla, window: &mut Window| {
-            let (start, end) = (*found.start(), *found.end());
-            for line in start.line.0..=end.line.0 {
-                let row = line + display_offset as i32;
-                if row < 0 || row >= lines_visible {
-                    continue;
-                }
-                let first = if line == start.line.0 {
-                    start.column.0
-                } else {
-                    0
-                };
-                let last = if line == end.line.0 {
-                    end.column.0
-                } else {
-                    prepaint.columns.saturating_sub(1)
-                };
-                if last < first {
-                    continue;
-                }
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(origin.x + cell_width * (first as f32), row_y(line)),
-                        size(cell_width * ((last - first + 1) as f32), line_height),
-                    ),
-                    color,
-                ));
-            }
-        };
-        for found in &prepaint.search_matches {
-            paint_match(found, theme.warn.alpha(0.16), window);
-        }
-        if let Some(found) = &prepaint.current_match {
-            paint_match(found, theme_core::editor_selection(), window);
-        }
-
-        // ② カーソル（focus 時は塗りブロック・非focus は輪郭）。
-        // スクロールバック閲覧中は現在行が下へはみ出すので、面内にある時だけ描く。
-        if let Some(cursor) = prepaint.cursor {
-            let position = point(
-                origin.x + cell_width * (cursor.column.0 as f32),
-                row_y(cursor.line.0),
-            );
-            let inside = position.y + line_height <= bounds.origin.y + bounds.size.height;
-            if inside {
-                let cursor_bounds = Bounds::new(position, size(cell_width, line_height));
-                if prepaint.focused {
-                    window.paint_quad(fill(cursor_bounds, theme.fg1));
-                } else {
-                    window.paint_quad(gpui::outline(
-                        cursor_bounds,
-                        theme.fg2,
-                        gpui::BorderStyle::default(),
-                    ));
-                }
-            }
-        }
-
-        // ③ セル文字（1 セル 1 shape。v1 はバッチ無し）。
-        for cell in &prepaint.cells {
-            if cell.character == ' '
-                || cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::HIDDEN)
-            {
-                continue;
-            }
-            let (mut foreground, mut background) = (cell.fg, cell.bg);
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut foreground, &mut background);
-            }
-            // カーソル下の文字は視認性のため背景色で描く。
-            let on_cursor =
-                prepaint.focused && prepaint.cursor.is_some_and(|cursor| cursor == cell.point);
-            let color = if on_cursor {
-                theme.bg1
-            } else {
-                ansi_to_hsla(foreground, theme)
-            };
-            let mut cell_font = font.clone();
-            if cell.flags.contains(Flags::BOLD) {
-                cell_font.weight = gpui::FontWeight::BOLD;
-            }
-            if cell.flags.contains(Flags::ITALIC) {
-                cell_font.style = gpui::FontStyle::Italic;
-            }
-            // file:line リンク範囲は薄い下線でクリック可能を示す（M13）。
-            let linked = prepaint.links.iter().any(|(line, columns, _, _)| {
-                *line == cell.point.line.0 && columns.contains(&(cell.point.column.0 as usize))
-            });
-            let run = TextRun {
-                len: cell.character.len_utf8(),
-                font: cell_font,
-                color,
-                background_color: None,
-                underline: linked.then(|| UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(theme.fg2),
-                    wavy: false,
-                }),
-                strikethrough: None,
-            };
-            let position = point(
-                origin.x + cell_width * (cell.point.column.0 as f32),
-                row_y(cell.point.line.0),
-            );
-            let shaped = window.text_system().shape_line(
-                SharedString::from(cell.character.to_string()),
-                px(FONT_SIZE),
-                &[run],
-                Some(cell_width),
-            );
-            if let Err(error) = shaped.paint(
-                position,
-                line_height,
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            ) {
-                eprintln!("ターミナル文字描画に失敗: {error}");
-            }
-        }
-
-        // ④ file:line リンクのクリック（M13）。paint 毎に登録＝このフレームの座標で判定。
-        if !prepaint.links.is_empty() {
-            let links = prepaint.links.clone();
-            let terminal = self.terminal.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, cx| {
-                if phase != DispatchPhase::Bubble
-                    || event.button != MouseButton::Left
-                    || !bounds.contains(&event.position)
-                {
-                    return;
-                }
-                let column =
-                    (f32::from(event.position.x - origin.x) / f32::from(cell_width)) as usize;
-                // 表示行 → グリッド行（スクロールバック閲覧中はオフセットぶんずれる）。
-                let row = (f32::from(event.position.y - origin.y) / f32::from(line_height)) as i32
-                    - display_offset as i32;
-                for (line, columns, path, line_number) in &links {
-                    if *line == row && columns.contains(&column) {
-                        let (path, line_number) = (path.clone(), *line_number);
-                        terminal.update(cx, |_, cx| {
-                            cx.emit(TerminalEvent::OpenPath {
-                                path,
-                                line: line_number,
-                            });
-                        });
-                        break;
-                    }
-                }
-            });
-        }
-
-        // ④.5 マウスによるテキスト選択（down=アンカー / move=延長 / up=確定 → ⌘C でコピー）。
-        // 座標は file:line リンクと同じ origin/cell_width/line_height を使う。
-        {
-            let terminal = self.terminal.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, cx| {
-                if phase != DispatchPhase::Bubble
-                    || event.button != MouseButton::Left
-                    || !bounds.contains(&event.position)
-                {
-                    return;
-                }
-                terminal.update(cx, |terminal, cx| {
-                    terminal.begin_selection(event.position, origin, cell_width, line_height, cx);
-                });
-            });
-        }
-        {
-            let terminal = self.terminal.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
-                if phase != DispatchPhase::Bubble || event.pressed_button != Some(MouseButton::Left)
-                {
-                    return;
-                }
-                terminal.update(cx, |terminal, cx| {
-                    terminal.update_selection(event.position, origin, cell_width, line_height, cx);
-                });
-            });
-        }
-        {
-            let terminal = self.terminal.clone();
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
-                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
-                    return;
-                }
-                terminal.update(cx, |terminal, cx| terminal.end_selection(cx));
-            });
-        }
-
-        // ⑤ IME 入力ハンドラ（M13）: 日本語などの確定文字列を PTY へ流せるようにする。
-        window.handle_input(
-            &self.terminal.read(cx).focus_handle,
-            ElementInputHandler::new(bounds, self.terminal.clone()),
-            cx,
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1671,6 +1580,8 @@ mod tests {
                 fg: AnsiColor::Named(NamedColor::Foreground),
                 bg: AnsiColor::Named(NamedColor::Background),
                 flags: Flags::empty(),
+                underline_color: None,
+                hyperlink: None,
             });
             column += 1;
             if wide {
@@ -1680,6 +1591,8 @@ mod tests {
                     fg: AnsiColor::Named(NamedColor::Foreground),
                     bg: AnsiColor::Named(NamedColor::Background),
                     flags: Flags::WIDE_CHAR_SPACER,
+                    underline_color: None,
+                    hyperlink: None,
                 });
                 column += 1;
             }
@@ -1691,30 +1604,80 @@ mod tests {
     fn detect_links_maps_byte_ranges_to_cell_columns() {
         // cargo/rustc 形式。クリック域は `:col` まで（検出そのものの規則は `ui::links` の test）。
         let cells = row_cells(0, "  --> src/main.rs:10:5");
-        let links = detect_links(&cells);
-        assert_eq!(links.len(), 1);
-        let (line, columns, path, line_number) = &links[0];
-        assert_eq!(*line, 0);
-        assert_eq!(path, "src/main.rs");
-        assert_eq!(*line_number, 10);
-        assert_eq!(*columns, 6..22);
+        let links = detect_links(&cells, &[]);
+        assert_eq!(
+            links,
+            vec![TerminalLink {
+                line: 0,
+                columns: 6..22,
+                target: TerminalLinkTarget::Path {
+                    path: "src/main.rs".into(),
+                    line: 10,
+                },
+            }]
+        );
 
         // 全角が先にある行でも列がずれない（byte 範囲 → char 添字 → 列の変換）。
         let cells = row_cells(1, "エラー lib.rs:42");
-        let links = detect_links(&cells);
+        let links = detect_links(&cells, &[]);
         assert_eq!(links.len(), 1);
-        let (_, columns, path, line_number) = &links[0];
-        assert_eq!(path, "lib.rs");
-        assert_eq!(*line_number, 42);
         // 「エラー」= 3 文字 × 2 列 + 空白 1 列 = 7 列目から。
-        assert_eq!(*columns, 7..16);
+        assert_eq!(links[0].columns, 7..16);
+        assert_eq!(
+            links[0].target,
+            TerminalLinkTarget::Path {
+                path: "lib.rs".into(),
+                line: 42,
+            }
+        );
     }
 
     #[test]
     fn detect_links_ignores_paths_without_line_numbers() {
         // ターミナルは実在確認をしないので、行番号の無いトークンはリンクにしない
         // （`ls` の出力を全部下線にしない）。
-        assert!(detect_links(&row_cells(0, "Cargo.toml  README.md")).is_empty());
+        assert!(detect_links(&row_cells(0, "Cargo.toml  README.md"), &[]).is_empty());
+    }
+
+    #[test]
+    fn urls_become_links_including_local_dev_servers() {
+        let cells = row_cells(0, "ready: http://localhost:5173/ and 127.0.0.1:8080");
+        let links = detect_links(&cells, &[]);
+        let targets: Vec<_> = links.iter().map(|link| link.target.clone()).collect();
+        assert_eq!(
+            targets,
+            vec![
+                TerminalLinkTarget::Url("http://localhost:5173/".into()),
+                TerminalLinkTarget::Url("http://127.0.0.1:8080".into()),
+            ]
+        );
+        assert_eq!(links[0].columns, 7..29);
+    }
+
+    #[test]
+    fn osc8_hyperlinks_win_over_text_detection() {
+        // `docs http://x.test` の全体が OSC 8 で https://example.com を指している。
+        let mut cells = row_cells(0, "see docs http://x.test end");
+        for cell in &mut cells[4..18] {
+            cell.hyperlink = Some(0);
+        }
+        let hyperlinks = vec!["https://example.com/docs".to_string()];
+        let links = detect_links(&cells, &hyperlinks);
+        assert_eq!(
+            links,
+            vec![TerminalLink {
+                line: 0,
+                columns: 4..18,
+                target: TerminalLinkTarget::Url("https://example.com/docs".into()),
+            }],
+            "文字から拾う URL は OSC 8 と重なるので出さない"
+        );
+        // http / https 以外の OSC 8 は開かない（`file:` や独自スキームを勝手に開かない）。
+        let hyperlinks = vec!["vscode://open?x".to_string()];
+        let links = detect_links(&cells, &hyperlinks);
+        assert!(links
+            .iter()
+            .all(|link| link.target == TerminalLinkTarget::Url("http://x.test".into())));
     }
 
     #[test]

@@ -152,11 +152,37 @@ impl Workspace {
                 self.project_sessions.sessions[session_index].pending_navigation =
                     Some((resolved, line.saturating_sub(1) as usize, 0));
             }
+            TerminalDockEvent::OpenUrl(url) => self.open_terminal_url(session_index, url, cx),
             TerminalDockEvent::Dismissed if session_index == self.project_sessions.active => {
                 self.chrome.show_bottom = false
             }
             TerminalDockEvent::Dismissed => {}
         }
         cx.notify();
+    }
+
+    /// 端末のリンク（URL・スキーム無しの `localhost:3000`・OSC 8）を開く**唯一の受け口**。
+    /// 今はシステムの既定ブラウザで開く（localhost を necoder 内のプレビューで開く変更は
+    /// ここを差し替える）。開けなければトーストで知らせる。
+    pub(crate) fn open_terminal_url(
+        &mut self,
+        session_index: usize,
+        url: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = crate::crash::open_url(url) {
+            eprintln!("URL を開けない: {error:#}");
+            let color = self
+                .project_sessions
+                .projects
+                .get(session_index)
+                .map(|slot| slot.color)
+                .unwrap_or_else(|| project_color(0));
+            self.push_toast(
+                i18n::t!("link.open_failed", "target" => url).into(),
+                color,
+                cx,
+            );
+        }
     }
 }
