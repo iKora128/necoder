@@ -5597,7 +5597,7 @@ PYEOF"#;
                     // `set_mode` はターン中 deferred（acp_client）で今のターンには効かないため、
                     // ここで畳まないと「bypass にしたのに止まったまま」になる。checkpoint は
                     // リクエスト受信時に記録済み＝手動 Allow と同じ一本道。
-                    if value.to_lowercase().contains("bypass") {
+                    if is_bypass_mode(&value) {
                         if let Some(pending) = thread.pending_permission.take() {
                             let choice = pending
                                 .options
@@ -6415,11 +6415,20 @@ PYEOF"#;
         // 1 つも見えない** — Codex CLI 等に登録しただけでは necoder のスレッドからは使えない。
         // 設定画面が並べているのと同じ解決結果を渡す（画面と実際が食い違わない）。
         let mcp_servers = settings::mcp_servers(cx);
+        let bypass_by_default = settings::bypass_permissions_by_default(cx);
         let preferences = self
             .threads
             .get(thread_index)
             .map(|thread| acp_client::SessionPreferences {
-                mode: Some(thread.permission_mode.to_string()).filter(|mode| !mode.is_empty()),
+                // 希望の無いスレッドは、権限の既定（O16）が「聞かずに進める」なら、この agent の在庫に
+                // ある「聞かない」モードで始める（在庫が無い初回は広告を受けた時に合わせる）。
+                mode: Some(thread.permission_mode.to_string())
+                    .filter(|mode| !mode.is_empty())
+                    .or_else(|| {
+                        let wanted = bypass_by_default && thread.chat.is_none();
+                        let stock = self.catalog.get(&thread.agent).filter(|_| wanted)?;
+                        bypass_mode_among(&stock.modes).map(|mode| mode.to_string())
+                    }),
                 model: Some(thread.model.to_string()).filter(|model| !model.is_empty()),
                 effort: Some(thread.effort.to_string()).filter(|effort| !effort.is_empty()),
                 // 前回のセッション id。エージェントが loadSession を広告していれば会話を引き継ぐ。
@@ -6758,6 +6767,16 @@ PYEOF"#;
                     .collect();
                 stocked_modes = Some((thread.agent.clone(), thread.available_modes.clone()));
                 let advertised_current = SharedString::from(current);
+                // 権限の既定が「聞かずに進める」（O16）なら、希望の無いスレッドは広告の中の「聞かない」
+                // モードで始める（無ければエージェントの既定のまま）。Chat は裁定を necoder が持つので対象外。
+                if thread.permission_mode.is_empty()
+                    && thread.chat.is_none()
+                    && settings::bypass_permissions_by_default(cx)
+                {
+                    if let Some(bypass) = bypass_mode_among(&thread.available_modes) {
+                        thread.permission_mode = bypass;
+                    }
+                }
                 // スレッドが望む mode_id（sticky / 前タブ引き継ぎ）を正とし、広告に**その id が在るときだけ**
                 // 合わせに行く。無ければ黙って広告 current を採る。照合は id の完全一致だけ＝
                 // 表示名の綴り違いで外れる余地が無い（Zed の apply_default_config_options と同じ規律）。
@@ -6912,7 +6931,7 @@ PYEOF"#;
                 // `set_mode` 反映にはレースがあり（初回ターン・ターン中切替は次ターンまで既定
                 // モードのまま＝JOURNAL 2026-08-28）、その窓で届いた許可リクエストでユーザーを
                 // 止めない。応答はスナップショット完了後＝checkpoint の一本道は env 自動と共通。
-                let bypass_mode = thread.permission_mode.to_lowercase().contains("bypass");
+                let bypass_mode = is_bypass_mode(&thread.permission_mode);
                 let mut auto_allow =
                     bypass_mode || std::env::var_os("NECODER_AUTO_ALLOW").is_some();
                 let mut auto_choice = options
@@ -12348,6 +12367,23 @@ fn agent_server_override(agent_id: &str, cx: &App) -> Option<acp_client::AgentOv
     })
 }
 
+/// 「聞かずに進める」権限モードの id か（O16）。Claude Code の `bypassPermissions`（と同じく bypass を
+/// 名に持つもの）、Qwen Code の `yolo`、Codex の `full-access`。この id のスレッドは、エージェントが
+/// それでも許可を聞いてきたら UI でも自動で許可する（モード切替のレースの窓で止めない）。
+fn is_bypass_mode(mode_id: &str) -> bool {
+    let lowered = mode_id.to_lowercase();
+    lowered.contains("bypass") || lowered == "yolo" || lowered == "full-access"
+}
+
+/// 広告されたモードのうち「聞かずに進める」もの（広告の順で最初の 1 つ）。無ければ `None`。
+fn bypass_mode_among(modes: &[(SharedString, SharedString)]) -> Option<SharedString> {
+    modes
+        .iter()
+        .map(|(id, _)| id)
+        .find(|id| is_bypass_mode(id))
+        .cloned()
+}
+
 /// その agent で最後に選んだ value_id を 1 つ引く（`agent_config_defaults[agent_id][config_id]`）。
 /// 未選択なら空。**別 vendor の綴りへフォールバックしない** — 当てずっぽうの綴りは広告と一致せず、
 /// 一致しない値は結局エージェント既定に落ちるので、嘘の候補を挟むだけ無駄で紛らわしい。
@@ -14963,6 +14999,88 @@ PYEOF"#;
                 "提供されないモードは広告 current へフォールバック"
             );
         });
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// O16: 権限の既定が「聞かずに進める」なら、ピルの記憶の無いスレッドは広告の中の「聞かない」
+    /// モードで始める（エージェントへも合わせに行く）。記憶があればそちらが勝ち、「聞かない」モードを
+    /// 持たないエージェントはエージェントの既定のまま。
+    #[gpui::test]
+    fn bypass_by_default_starts_in_the_advertised_bypass_mode(cx: &mut gpui::TestAppContext) {
+        let path = init_test_settings(cx, "bypass-default");
+        cx.update(|cx| settings::set_permission_default(cx, "bypass").expect("書ける"));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let claude_modes = || {
+            vec![
+                ("default".to_string(), "Always Ask".to_string()),
+                ("acceptEdits".to_string(), "Accept Edits".to_string()),
+                (
+                    "bypassPermissions".to_string(),
+                    "Bypass Permissions".to_string(),
+                ),
+            ]
+        };
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            assert!(
+                panel.threads[active].permission_mode.is_empty(),
+                "ピルの記憶は無い"
+            );
+            let (command_tx, mut command_rx) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[active].command_tx = Some(command_tx);
+            panel.on_event(
+                active,
+                AgentEvent::Modes {
+                    modes: claude_modes(),
+                    current: "default".to_string(),
+                },
+                cx,
+            );
+            assert_eq!(
+                panel.threads[active].permission_mode.as_ref(),
+                "bypassPermissions"
+            );
+            match command_rx.try_recv() {
+                Ok(SessionCommand::SetMode(mode)) => assert_eq!(mode, "bypassPermissions"),
+                other => panic!("モードを合わせに行っていない: {other:?}"),
+            }
+
+            // ピルで選んだモード（記憶）が勝つ。
+            panel.add_thread(cx);
+            let remembered = panel.active;
+            panel.threads[remembered].permission_mode = "acceptEdits".into();
+            panel.on_event(
+                remembered,
+                AgentEvent::Modes {
+                    modes: claude_modes(),
+                    current: "default".to_string(),
+                },
+                cx,
+            );
+            assert_eq!(
+                panel.threads[remembered].permission_mode.as_ref(),
+                "acceptEdits"
+            );
+
+            // 「聞かない」モードを持たないエージェントは既定のまま。
+            panel.add_thread(cx);
+            let plain = panel.active;
+            panel.threads[plain].permission_mode = SharedString::default();
+            panel.on_event(
+                plain,
+                AgentEvent::Modes {
+                    modes: vec![
+                        ("build".to_string(), "Build".to_string()),
+                        ("plan".to_string(), "Plan".to_string()),
+                    ],
+                    current: "build".to_string(),
+                },
+                cx,
+            );
+            assert_eq!(panel.threads[plain].permission_mode.as_ref(), "build");
+        });
+        assert!(is_bypass_mode("yolo") && is_bypass_mode("full-access"));
+        assert!(!is_bypass_mode("auto-edit") && !is_bypass_mode("default"));
         let _ = std::fs::remove_file(path);
     }
 

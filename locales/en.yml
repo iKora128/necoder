@@ -556,6 +556,11 @@ settings:
   title: Settings
   agents_heading: AI Agents
   agents_sub: necoder checks local CLIs and ACP, and only available agents can be selected. Credentials are never stored.
+  permission_default: Default permissions
+  permission_default_sub: The mode new threads start in. Choosing resets the modes remembered from the pill for every agent. "Don't ask" applies only to agents that offer such a mode (such as Claude Code's bypassPermissions). Chat is not affected
+  permission_default_agent: Agent default
+  permission_default_bypass: Don't ask (Yolo)
+  permission_remembered: Modes chosen in the pill (click to forget)
   installed: Installed
   available_npx: Fetch on first use (npx)
   not_installed: Not installed

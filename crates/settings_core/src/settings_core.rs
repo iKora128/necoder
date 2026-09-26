@@ -252,6 +252,12 @@ pub struct Settings {
     /// エージェントの起動方法の上書き（necoder の `AgentKind::id` がキー。例 `"codex"`）。
     /// 空＝レジストリと組み込みカタログに従う（通常はこれ）。詳細は [`AgentServerSetting`]。
     pub agent_servers: BTreeMap<String, AgentServerSetting>,
+    /// 新しいスレッドの権限モードの既定（O16）。`"default"`（既定）= エージェントの既定のモード（毎回
+    /// 聞く側）/ `"bypass"` = 聞かずに進める（Yolo）: エージェントが広告するモードのうち「聞かない」もの
+    /// （Claude Code の `bypassPermissions` など）で始める。持たないエージェントは既定のまま。
+    /// ピルで選んだモード（`agent_config_defaults.<id>.mode`）があればそちらが勝つ。設定画面で選ぶと
+    /// その記憶を全部消す（全エージェントを一括で揃える）。Chat のスレッドには効かない。
+    pub agent_permission_default: String,
     /// 使わないエージェント（`AgentKind::id`・例 `["grok", "kimi"]`・O16）。選択肢（composer の
     /// エージェント・＋ Task の並べて比べる・パレットのエージェント別の新規スレッド）から外し、
     /// ログインの確かめ（CLI の status・ACP の試しのセッション）でも起こさない。設定 › エージェントの
@@ -367,6 +373,7 @@ impl Default for Settings {
             default_agent: "Claude Code".to_string(),
             agent_config_defaults: BTreeMap::new(),
             agent_servers: BTreeMap::new(),
+            agent_permission_default: "default".to_string(),
             disabled_agents: Vec::new(),
             mcp_servers: BTreeMap::new(),
             confirm_worktree_delete: true,
@@ -501,6 +508,7 @@ pub const DEFAULT_SETTINGS_JSON: &str = r#"{
   "terminal_shell_args": [],
   "quick_commands": [],
   "agent_servers": {},
+  "agent_permission_default": "default",
   "disabled_agents": [],
   "mcp_servers": {},
   "html_preview_evict_minutes": 15,
@@ -696,6 +704,42 @@ pub fn persist_mcp_enabled(path: &Path, name: &str, enabled: bool) -> Result<()>
     let mut root = read_settings_object(path)?;
     let servers = object_entry(&mut root, "mcp_servers");
     object_entry(servers, name).insert("enabled".to_string(), Value::Bool(enabled));
+    write_settings_object(path, root)
+}
+
+/// `agent_config_defaults.<agent_id>.<config_id>` の 1 点を user 設定ファイルから消す（ピルの記憶を
+/// 忘れる・O16）。消した結果その agent の記憶が空になれば agent ごと消す（`{}` を残さない）。
+pub fn forget_agent_config_default(path: &Path, agent_id: &str, config_id: &str) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    let defaults = object_entry(&mut root, "agent_config_defaults");
+    let now_empty = match defaults.get_mut(agent_id).and_then(Value::as_object_mut) {
+        Some(agent) => {
+            agent.remove(config_id);
+            agent.is_empty()
+        }
+        None => false,
+    };
+    if now_empty {
+        defaults.remove(agent_id);
+    }
+    write_settings_object(path, root)
+}
+
+/// 権限モードの既定（`agent_permission_default`）を書き、全エージェントのピルの記憶（`mode`）を消す
+/// （一括で揃える・O16）。モデルや思考量の記憶は触らない。1 回の書き込みで済ませる。
+pub fn persist_permission_default(path: &Path, value: &str) -> Result<()> {
+    let mut root = read_settings_object(path)?;
+    root.insert(
+        "agent_permission_default".to_string(),
+        Value::String(value.to_string()),
+    );
+    let defaults = object_entry(&mut root, "agent_config_defaults");
+    for agent in defaults.values_mut() {
+        if let Some(agent) = agent.as_object_mut() {
+            agent.remove("mode");
+        }
+    }
+    defaults.retain(|_, agent| agent.as_object().is_none_or(|agent| !agent.is_empty()));
     write_settings_object(path, root)
 }
 
@@ -1175,6 +1219,53 @@ mod tests {
     /// 手編集の途中で壊れている settings.json（末尾カンマ・コメント・配列）に書き手が触ると、
     /// 以前は空オブジェクトから作り直して 1 キーだけで上書きしていた（利用者の設定が全部消える）。
     /// 今は**どの書き手も書かずに** `UnreadableSettings` を返し、ファイルは 1 バイトも変わらない。
+
+    /// O16: 権限の既定を選ぶと、全エージェントのピルの記憶（mode）だけを消す。1 つだけ忘れることもできる。
+    #[test]
+    fn permission_default_clears_remembered_modes_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "necoder-permission-default-test-{}",
+            std::process::id()
+        ));
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            &path,
+            r#"{ "agent_config_defaults": {
+                "claude": { "mode": "plan", "model": "opus" },
+                "qwen": { "mode": "yolo" } } }"#,
+        )
+        .expect("seed");
+
+        persist_permission_default(&path, "bypass").expect("書ける");
+        let store = SettingsStore::from_json_layers(&[
+            DEFAULT_SETTINGS_JSON,
+            &std::fs::read_to_string(&path).expect("read"),
+        ])
+        .expect("マージできる");
+        let settings = store.settings();
+        assert_eq!(settings.agent_permission_default, "bypass");
+        let defaults = &settings.agent_config_defaults;
+        assert_eq!(
+            defaults["claude"].get("model").map(String::as_str),
+            Some("opus"),
+            "モデルの記憶は残す"
+        );
+        assert!(defaults["claude"].get("mode").is_none());
+        assert!(!defaults.contains_key("qwen"), "空になった agent は消す");
+
+        persist_agent_config_default(&path, "claude", "mode", "plan").expect("書ける");
+        forget_agent_config_default(&path, "claude", "model").expect("書ける");
+        forget_agent_config_default(&path, "claude", "mode").expect("書ける");
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("JSON");
+        assert!(
+            written["agent_config_defaults"].get("claude").is_none(),
+            "{written}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn writers_refuse_to_overwrite_an_unreadable_settings_file() {
         let dir = std::env::temp_dir().join(format!(
@@ -1190,7 +1281,7 @@ mod tests {
             "[\"theme\"]\n",
         ];
         type Writer = fn(&Path) -> Result<()>;
-        let writers: [(&str, Writer); 4] = [
+        let writers: [(&str, Writer); 6] = [
             ("persist_user_value", |path| {
                 persist_user_value(path, "submit_on_enter", Value::Bool(true))
             }),
@@ -1202,6 +1293,12 @@ mod tests {
             }),
             ("persist_mcp_enabled", |path| {
                 persist_mcp_enabled(path, "tools", true)
+            }),
+            ("forget_agent_config_default", |path| {
+                forget_agent_config_default(path, "claude", "mode")
+            }),
+            ("persist_permission_default", |path| {
+                persist_permission_default(path, "bypass")
             }),
         ];
         for original in broken {

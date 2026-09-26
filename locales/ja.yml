@@ -557,6 +557,11 @@ settings:
   title: 設定
   agents_heading: AI エージェント
   agents_sub: ローカル CLI と ACP を確認し、利用可能なものだけ選択できます。認証情報を necoder は保存しません。
+  permission_default: 権限の既定
+  permission_default_sub: 新しいスレッドを始めるモード。選ぶとピルで選んだモードの記憶を全エージェントで消して揃える。「聞かずに進める」はそのモードを持つエージェントだけに効く（Claude Code の bypassPermissions など）。Chat には効かない
+  permission_default_agent: エージェントの既定
+  permission_default_bypass: 聞かずに進める（Yolo）
+  permission_remembered: ピルで選んだモード（押すと忘れる）
   installed: 導入済み
   available_npx: 初回に取得（npx）
   not_installed: 未導入
