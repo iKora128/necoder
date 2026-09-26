@@ -2255,10 +2255,13 @@ mod action_tests {
             feed(terminal, "\x1b[?2004h");
             let paths = [PathBuf::from("/tmp/a b.png"), PathBuf::from("/tmp/c.txt")];
             terminal.drop_paths(&paths, window, cx);
-            assert_eq!(
-                terminal.debug_written_input(),
+            // 引用の仕方はシェルに合わせる（unix の sh は '…'・Windows の PowerShell / cmd は "…"）。
+            let expected: &[u8] = if cfg!(windows) {
+                b"\x1b[200~\"/tmp/a b.png\" /tmp/c.txt \x1b[201~"
+            } else {
                 b"\x1b[200~'/tmp/a b.png' /tmp/c.txt \x1b[201~"
-            );
+            };
+            assert_eq!(terminal.debug_written_input(), expected);
         });
     }
 
