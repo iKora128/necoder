@@ -166,6 +166,10 @@ enum Entry {
         result_lines: usize,
         /// ファイル編集の before/after（Edit 系。空なら差分表示なし）。
         diffs: Vec<PermissionDiff>,
+        /// サブエージェントの手順なら、親（Task / Agent ツール）の Step の `id`（O17）。
+        /// transcript には親の下に畳んで出す（それ自体の行は描かない）。親が transcript に居る時だけ
+        /// 付ける（居なければ普通の手順として出す）。復元した Step は id が無いので付かない。
+        parent: Option<SharedString>,
     },
     /// エージェントの本文（結論など）。
     Agent(SharedString),
@@ -1376,6 +1380,48 @@ fn prompt_image_mime(path: &Path) -> Option<&'static str> {
     }
 }
 
+/// `id` の Step が transcript に居るか（サブエージェントの手順の親を探す・O17）。
+fn has_step(entries: &[Entry], id: &str) -> bool {
+    entries
+        .iter()
+        .rev()
+        .any(|entry| matches!(entry, Entry::Step { id: Some(step), .. } if step.as_ref() == id))
+}
+
+/// `parent_index` の Step（`parent_id`）の直下に居るサブエージェントの手順の添字（届いた順）。
+fn subagent_step_indices(entries: &[Entry], parent_index: usize, parent_id: &str) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .skip(parent_index + 1)
+        .filter(|(_, entry)| {
+            matches!(entry, Entry::Step { parent: Some(parent), .. } if parent.as_ref() == parent_id)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// サブエージェントの手順 `entry` の親の添字を近い順に（入れ子なら親の親も）。普通の手順・
+/// 親が見つからない時は空。最後の要素が transcript の行として描かれている Step。
+fn subagent_ancestry(entries: &[Entry], entry: usize) -> Vec<usize> {
+    let mut ancestors = Vec::new();
+    let mut current = entry;
+    while let Some(Entry::Step {
+        parent: Some(parent),
+        ..
+    }) = entries.get(current)
+    {
+        let Some(parent_index) = entries[..current].iter().rposition(
+            |candidate| matches!(candidate, Entry::Step { id: Some(id), .. } if id == parent),
+        ) else {
+            break;
+        };
+        ancestors.push(parent_index);
+        current = parent_index;
+    }
+    ancestors
+}
+
 /// `ToolCallInfo`（開始）から Step エントリを組む。args=主なパス / result=出力 / diffs=差分。
 fn build_step_entry(info: ToolCallInfo) -> Entry {
     let mut tool = info.title.unwrap_or_default();
@@ -1393,6 +1439,7 @@ fn build_step_entry(info: ToolCallInfo) -> Entry {
         result: capped.map(|(text, _)| SharedString::from(text)),
         result_lines,
         diffs: info.diffs,
+        parent: info.parent.map(SharedString::from),
     }
 }
 
@@ -2006,6 +2053,8 @@ pub struct AgentPanel {
     /// 展開したツール引数（⏺ の引数行）。既定は折り畳み＝長い/複数行コマンドで transcript が
     /// 流れないように（`expanded_steps` と同じ `(thread.id, entry index)` 鍵）。
     expanded_args: std::collections::HashSet<(String, usize)>,
+    /// 開いたサブエージェントの手順（親の Step・O17）。既定は畳む＝親の行に「N 手順・最新の手順」だけ。
+    expanded_subagents: std::collections::HashSet<(String, usize)>,
     /// 展開したユーザー入力（長い User エントリ）。既定は折り畳み（[`user_entry_foldable`]）。
     /// 同じく `(thread.id, entry index)` 鍵で Entry 自体は軽量に保つ。
     expanded_inputs: std::collections::HashSet<(String, usize)>,
@@ -2334,9 +2383,48 @@ PYEOF"#;
                     diffs: Vec::new(),
                     output: None,
                     completed: Some(true),
+                    parent: None,
                 }));
                 if mode == "expanded" {
                     expanded_args.insert((thread.id.clone(), entry_index));
+                }
+            }
+        }
+        // 開発用: サブエージェントの手順（O17）を実経路と同じ組み立てで積み、親の下の畳みを撮る。
+        // `NECODER_SUBAGENT_PROBE=collapsed|expanded`。
+        let mut expanded_subagents = std::collections::HashSet::new();
+        if let Ok(mode) = std::env::var("NECODER_SUBAGENT_PROBE") {
+            if let Some(thread) = threads.first_mut() {
+                let step = |id: &str, title: &str, output: Option<&str>, parent: Option<&str>| {
+                    build_step_entry(ToolCallInfo {
+                        id: id.to_string(),
+                        title: Some(title.to_string()),
+                        kind: None,
+                        locations: Vec::new(),
+                        diffs: Vec::new(),
+                        output: output.map(str::to_string),
+                        completed: Some(true),
+                        parent: parent.map(str::to_string),
+                    })
+                };
+                let parent_index = thread.entries.len();
+                thread.entries.push(step(
+                    "subagent-probe",
+                    "Task バッファの実装を調べる",
+                    Some("ropey の Rope と sum-tree の差を 3 点にまとめた"),
+                    None,
+                ));
+                for (id, title) in [
+                    ("subagent-probe-1", "Read crates/editor_core/src/buffer.rs"),
+                    ("subagent-probe-2", "Grep \"impl Buffer\" crates/"),
+                    ("subagent-probe-3", "Bash cargo test -p editor_core"),
+                ] {
+                    thread
+                        .entries
+                        .push(step(id, title, None, Some("subagent-probe")));
+                }
+                if mode == "expanded" {
+                    expanded_subagents.insert((thread.id.clone(), parent_index));
                 }
             }
         }
@@ -2422,6 +2510,7 @@ PYEOF"#;
             expanded_code: std::collections::HashSet::new(),
             expanded_args,
             expanded_inputs: std::collections::HashSet::new(),
+            expanded_subagents,
             window_active: true,
             composer_height: COMPOSER_INPUT_DEFAULT,
             resizing_composer: false,
@@ -2599,6 +2688,7 @@ PYEOF"#;
                             result: None,
                             result_lines: 0,
                             diffs: Vec::new(),
+                            parent: None,
                         },
                         "checkpoint" => {
                             let (id, label) =
@@ -4976,6 +5066,7 @@ PYEOF"#;
                     result: None,
                     result_lines: 0,
                     diffs: Vec::new(),
+                    parent: None,
                 });
                 thread.plan = vec![
                     PlanItem {
@@ -5104,6 +5195,7 @@ PYEOF"#;
                         result: None,
                         result_lines: 0,
                         diffs: Vec::new(),
+                        parent: None,
                     });
                     thread.plan = vec![
                         PlanItem {
@@ -6487,8 +6579,27 @@ PYEOF"#;
                 }
                 ensure_reveal = animate_visible_stream;
             }
-            AgentEvent::ToolStarted(info) => thread.entries.push(build_step_entry(info)),
+            AgentEvent::ToolStarted(mut info) => {
+                // サブエージェントの手順は親の下に畳む。親が transcript に居ない（先に届いた等）なら
+                // 普通の手順として出す（行が消えて見えなくなるのを避ける）。
+                if info
+                    .parent
+                    .as_deref()
+                    .is_some_and(|parent| !has_step(&thread.entries, parent))
+                {
+                    info.parent = None;
+                }
+                thread.entries.push(build_step_entry(info));
+            }
             AgentEvent::ToolUpdated(info) => {
+                // 更新で初めて親が分かった手順も親の下へ（親が transcript に居る時だけ）。
+                let known_parent = info
+                    .parent
+                    .as_deref()
+                    .filter(|parent| {
+                        *parent != info.id.as_str() && has_step(&thread.entries, parent)
+                    })
+                    .map(SharedString::from);
                 // 同 ID の直近 Step に、後追いの出力・差分・パスを反映する（Bash 出力や完了差分）。
                 for entry in thread.entries.iter_mut().rev() {
                     if let Entry::Step {
@@ -6498,9 +6609,13 @@ PYEOF"#;
                         result,
                         result_lines,
                         diffs,
+                        parent,
                     } = entry
                     {
                         if id.as_ref() == info.id.as_str() {
+                            if parent.is_none() {
+                                *parent = known_parent.clone();
+                            }
                             if let Some(title) = &info.title {
                                 if !title.is_empty() {
                                     if let Some(compact) = compact_shell_heredoc(title) {
@@ -8520,6 +8635,16 @@ PYEOF"#;
             && thread.running
             && matches!(thread.entries[index], Entry::Agent(_) | Entry::Thinking(_));
         let entry = &thread.entries[index];
+        // サブエージェントの手順は親の Step の中に畳んで描く（O17）。自分の行は高さ 0。
+        if matches!(
+            entry,
+            Entry::Step {
+                parent: Some(_),
+                ..
+            }
+        ) {
+            return div().into_any_element();
+        }
         let rendered_entry = self.render_entry(index, entry, color, live_stream, cx);
         // 長い入力だけ「畳む/開く」を出す（他のエントリ種別はそれぞれ自前のヘッダで畳める）。
         let foldable_input = match entry {
@@ -8833,6 +8958,7 @@ PYEOF"#;
                     .into_any_element()
             }
             Entry::Step {
+                id,
                 tool,
                 args,
                 result,
@@ -9048,6 +9174,10 @@ PYEOF"#;
                     }
                     body = body.child(row);
                 }
+                // Task / Agent ツール: 走らせたサブエージェントの手順をこの下に畳む（O17）。
+                if let Some(step_id) = id {
+                    body = body.children(self.render_subagent_steps(index, step_id, color, cx));
+                }
                 div()
                     .flex()
                     .gap(px(8.))
@@ -9075,6 +9205,81 @@ PYEOF"#;
                     .into_any_element()
             }
         }
+    }
+
+    /// 親の Step（`index`・`step_id`）の下に畳むサブエージェントの手順（O17）。手順が無ければ None。
+    /// 畳んでいる間は「▸ サブエージェント · N 手順  最新の手順」の 1 行（動いている間の進み具合）。
+    /// 開くと手順を細い縦線の内側に届いた順で並べる（手順の中の結果・差分の畳みはそれぞれの行の物）。
+    fn render_subagent_steps(
+        &self,
+        index: usize,
+        step_id: &SharedString,
+        color: Hsla,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let children = subagent_step_indices(&thread.entries, index, step_id);
+        let latest = match thread.entries.get(*children.last()?)? {
+            Entry::Step { tool, .. } => flatten_digest_line(tool),
+            _ => SharedString::default(),
+        };
+        let theme = &self.theme;
+        let expanded = self.is_subagent_expanded(index);
+        let header = div()
+            .id(("subagent-steps", index))
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .pt(px(2.))
+            .cursor_pointer()
+            .text_size(px(11.))
+            .text_color(theme.fg2)
+            .hover(|style| style.text_color(theme.fg0))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(8.))
+                    .child(if expanded { "▾" } else { "▸" }),
+            )
+            .child(div().flex_none().child(SharedString::from(i18n::t!(
+                "agent.subagent_steps",
+                "count" => children.len()
+            ))))
+            .when(!expanded, |row| {
+                row.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .font_family("Guguru Sans Code")
+                        .child(latest),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    cx.stop_propagation();
+                    this.toggle_subagent_steps(index, cx);
+                }),
+            );
+        let mut section = div().flex().flex_col().gap(px(6.)).child(header);
+        if expanded {
+            let mut steps = div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .pl(px(10.))
+                .border_l_1()
+                .border_color(theme.border);
+            for child in children {
+                if let Some(entry) = thread.entries.get(child) {
+                    steps = steps.child(self.render_entry(child, entry, color, false, cx));
+                }
+            }
+            section = section.child(steps);
+        }
+        Some(section.into_any_element())
     }
 
     /// markdown の 1 ブロック（本文 + インライン装飾）を、リンク検出つきで積む。
@@ -9501,6 +9706,29 @@ PYEOF"#;
         let key = (id, index);
         if !self.expanded_steps.remove(&key) {
             self.expanded_steps.insert(key);
+        }
+        cx.notify();
+    }
+
+    fn is_subagent_expanded(&self, index: usize) -> bool {
+        self.threads.get(self.active).is_some_and(|thread| {
+            self.expanded_subagents
+                .contains(&(thread.id.clone(), index))
+        })
+    }
+
+    /// サブエージェントの手順（親の Step の下）の折り畳み/展開をトグルする（O17）。
+    fn toggle_subagent_steps(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .threads
+            .get(self.active)
+            .map(|thread| thread.id.clone())
+        else {
+            return;
+        };
+        let key = (id, index);
+        if !self.expanded_subagents.remove(&key) {
+            self.expanded_subagents.insert(key);
         }
         cx.notify();
     }
@@ -11976,6 +12204,7 @@ fn entry_from_turn((role, content): (String, String)) -> Entry {
             result: None,
             result_lines: 0,
             diffs: Vec::new(),
+            parent: None,
         },
         "checkpoint" => {
             let (id, label) = content.split_once('\t').unwrap_or(("0", "checkpoint"));
@@ -12117,6 +12346,7 @@ fn seed_threads() -> Vec<Thread> {
                 result: Some("1,842 行 — SumTree<Chunk> / anchor / clock::Global を確認".into()),
                 result_lines: 1,
                 diffs: Vec::new(),
+                parent: None,
             },
             Entry::Step {
                 id: None,
@@ -12125,6 +12355,7 @@ fn seed_threads() -> Vec<Thread> {
                 result: Some("☒ text crate の設計を調査\n☐ Buffer trait の切り方を決める".into()),
                 result_lines: 2,
                 diffs: Vec::new(),
+                parent: None,
             },
             Entry::Agent(
                 r#"## 結論: MVP は **ropey**
@@ -13469,6 +13700,83 @@ PYEOF"#;
             thread.color,
             cx,
         )
+    }
+
+    /// サブエージェントの手順（O17）: 親の Task の下に畳む。親が居ない手順は普通の手順のまま、
+    /// 更新で親が分かった手順も親の下へ。⌘F が畳んだ手順に当たったら親を開いて親の行へ動く。
+    #[gpui::test]
+    fn subagent_steps_fold_under_their_parent(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "subagent_steps");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let tool = |id: &str, title: &str, parent: Option<&str>| ToolCallInfo {
+            id: id.to_string(),
+            title: (!title.is_empty()).then(|| title.to_string()),
+            kind: None,
+            locations: Vec::new(),
+            diffs: Vec::new(),
+            output: None,
+            completed: None,
+            parent: parent.map(str::to_string),
+        };
+        let base = panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            let base = panel.threads[active].entries.len();
+            for event in [
+                AgentEvent::ToolStarted(tool("task", "Task 調べて", None)),
+                AgentEvent::ToolStarted(tool("read", "Read src/lib.rs", Some("task"))),
+                AgentEvent::ToolStarted(tool("main", "Edit main.rs", None)),
+                AgentEvent::ToolStarted(tool("grep", "Grep needle", Some("task"))),
+                AgentEvent::ToolStarted(tool("orphan", "Read orphan.rs", Some("gone"))),
+                AgentEvent::ToolStarted(tool("late", "Bash ls", None)),
+                AgentEvent::ToolUpdated(tool("late", "", Some("task"))),
+            ] {
+                panel.on_event(active, event, cx);
+            }
+            let entries = &panel.threads[active].entries;
+            let parents: Vec<Option<&str>> = entries[base..]
+                .iter()
+                .map(|entry| match entry {
+                    Entry::Step { parent, .. } => parent.as_deref(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                parents,
+                [None, Some("task"), None, Some("task"), None, Some("task")],
+                "親の居ない手順（gone）は普通の手順・更新で分かった親は付く"
+            );
+            assert_eq!(
+                subagent_step_indices(entries, base, "task"),
+                vec![base + 1, base + 3, base + 5]
+            );
+            let color = panel.active_color();
+            assert!(panel
+                .render_subagent_steps(base, &"task".into(), color, cx)
+                .is_some());
+            assert!(
+                panel
+                    .render_subagent_steps(base + 2, &"main".into(), color, cx)
+                    .is_none(),
+                "子の無い手順には出さない"
+            );
+            assert!(!panel.is_subagent_expanded(base), "既定は畳む");
+            base
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.debug_find_in_transcript("needle", window, cx);
+            panel.step_transcript_match(1, cx);
+            assert!(
+                panel.is_subagent_expanded(base),
+                "畳んだ手順に当たったら親を開く"
+            );
+            assert_eq!(
+                panel.reveal_subagent_step(base + 3),
+                base,
+                "描いている行は親"
+            );
+            assert_eq!(panel.reveal_subagent_step(base + 2), base + 2);
+        });
+        let _ = std::fs::remove_file(settings_path);
     }
 
     /// 質問カードの自由入力（O17）: 書いた文字は Other 欄の名前で返り、選択と両方あれば両方返る。

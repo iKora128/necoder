@@ -113,6 +113,9 @@ pub struct ToolCallInfo {
     pub output: Option<String>,
     /// 完了したか（Some(true)=成功 / Some(false)=失敗 / None=進行中・不明）。
     pub completed: Option<bool>,
+    /// サブエージェントの手順なら、それを走らせている親のツール呼び出しの相関 ID（O17）。
+    /// Claude は `_meta.claudeCode.parentToolUseId` に載せる（Task / Agent ツールの id）。
+    pub parent: Option<String>,
 }
 
 /// プラン 1 項目の状態（ACP `PlanEntryStatus` の写し）。
@@ -2050,6 +2053,7 @@ fn session_update_events(update: v1::SessionUpdate, mut emit: impl FnMut(AgentEv
             diffs: tool_diffs(&tool_call.content),
             output: tool_output(&tool_call.content),
             completed: tool_completed(tool_call.status),
+            parent: subagent_parent(tool_call.meta.as_ref()),
         })),
         v1::SessionUpdate::ToolCallUpdate(update) => {
             let content = update.fields.content.as_deref().unwrap_or(&[]);
@@ -2066,6 +2070,7 @@ fn session_update_events(update: v1::SessionUpdate, mut emit: impl FnMut(AgentEv
                 diffs: tool_diffs(content),
                 output: tool_output(content),
                 completed: update.fields.status.and_then(tool_completed),
+                parent: subagent_parent(update.meta.as_ref()),
             }));
         }
         v1::SessionUpdate::UsageUpdate(update) => {
@@ -2517,6 +2522,16 @@ fn is_custom_answer_field(schema: &v1::StringPropertySchema) -> bool {
         .meta
         .as_ref()
         .is_some_and(|meta| meta.contains_key(CUSTOM_ANSWER_META_KEY))
+}
+
+/// サブエージェントの手順の親（O17）: `_meta.claudeCode.parentToolUseId`。空文字は無いものとする。
+fn subagent_parent(meta: Option<&v1::Meta>) -> Option<String> {
+    meta?
+        .get("claudeCode")?
+        .get("parentToolUseId")?
+        .as_str()
+        .filter(|parent| !parent.is_empty())
+        .map(str::to_string)
 }
 
 /// `session/request_elicitation`（選択肢付き質問）を UI へ橋渡しして応答する。form かつ全フィールドが
@@ -4173,6 +4188,50 @@ for line in sys.stdin:
         let mut events = Vec::new();
         session_update_events(update, |event| events.push(event));
         events
+    }
+
+    /// サブエージェントの手順（O17）: Claude が `_meta.claudeCode.parentToolUseId` に載せる親の id を
+    /// 開始にも更新にも写す。印の無い手順・空の id は親なし。
+    #[test]
+    fn subagent_steps_carry_their_parent_tool_call() {
+        let child: v1::ToolCall = serde_json::from_value(json!({
+            "toolCallId": "toolu_child",
+            "title": "Read src/lib.rs",
+            "kind": "read",
+            "_meta": {"claudeCode": {"parentToolUseId": "toolu_task", "toolName": "Read"}}
+        }))
+        .expect("ToolCall をパースできる");
+        let events = mapped(v1::SessionUpdate::ToolCall(child));
+        let [AgentEvent::ToolStarted(started)] = events.as_slice() else {
+            panic!("ToolStarted 1 つ: {events:?}");
+        };
+        assert_eq!(started.parent.as_deref(), Some("toolu_task"));
+
+        let update: v1::ToolCallUpdate = serde_json::from_value(json!({
+            "toolCallId": "toolu_child",
+            "status": "completed",
+            "_meta": {"claudeCode": {"parentToolUseId": "toolu_task"}}
+        }))
+        .expect("ToolCallUpdate をパースできる");
+        let events = mapped(v1::SessionUpdate::ToolCallUpdate(update));
+        let [AgentEvent::ToolUpdated(updated)] = events.as_slice() else {
+            panic!("ToolUpdated 1 つ: {events:?}");
+        };
+        assert_eq!(updated.parent.as_deref(), Some("toolu_task"));
+
+        for meta in [json!({}), json!({"claudeCode": {"parentToolUseId": ""}})] {
+            let top: v1::ToolCall = serde_json::from_value(json!({
+                "toolCallId": "toolu_top",
+                "title": "Task",
+                "_meta": meta
+            }))
+            .expect("ToolCall をパースできる");
+            let events = mapped(v1::SessionUpdate::ToolCall(top));
+            let [AgentEvent::ToolStarted(started)] = events.as_slice() else {
+                panic!("ToolStarted 1 つ: {events:?}");
+            };
+            assert!(started.parent.is_none(), "親の印が無ければ普通の手順");
+        }
     }
 
     /// `AvailableCommandsUpdate` は一覧まるごと（ヒント付き・ヒント無し）で `Commands` になる。
