@@ -2113,6 +2113,28 @@ impl AgentPanel {
             })
             .detach();
         }
+        // 開発用: NECODER_GOAL_PROBE=1 で目標（`/goal`）を直接注入する（O2 の composer 上の 1 行の
+        // 描画検証。実エージェント無しで offscreen に写す）。
+        #[cfg(debug_assertions)]
+        if std::env::var("NECODER_GOAL_PROBE").is_ok_and(|value| value == "1") {
+            cx.spawn(async move |panel, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(400))
+                    .await;
+                if let Err(error) = panel.update(cx, |panel, cx| {
+                    let active = panel.active;
+                    let goal = acp_client::AgentGoal {
+                        objective: "cargo test --workspace を全部緑にして、落ちたテストの原因を 1 つずつ直す"
+                            .into(),
+                        status: acp_client::GoalStatus::Active,
+                    };
+                    panel.on_event(active, AgentEvent::GoalChanged(Some(goal)), cx);
+                }) {
+                    eprintln!("NECODER_GOAL_PROBE: パネルが無い: {error:#}");
+                }
+            })
+            .detach();
+        }
         // 通常起動は空スレッド 1 本から始める（デモ transcript を新プロジェクトごとに種付けしない）。
         // offscreen 検証プローブはモック内容・複数タブが前提なので、その時だけ M4 由来の種を使う。
         // 既定エージェント + 前回のモデル/思考量を適用して「そのまま開く」を実現。
@@ -5851,6 +5873,11 @@ PYEOF"#;
                 session_id_changed = thread.acp_session_id.as_deref() != Some(session_id.as_str());
                 thread.acp_session_id = Some(session_id);
                 thread.session_lost = false;
+                // 目標はエージェント側の会話の状態。新しい会話では消え、引き継いだ会話ならエージェントが
+                // 送り直す（届くまでは前の表示を残す）。
+                if !resumed {
+                    thread.goal = None;
+                }
             }
             // 上で先に畳んでいる（借用の外で処理する必要があるため）。
             AgentEvent::SessionLost => {}
@@ -9267,6 +9294,64 @@ PYEOF"#;
         )
     }
 
+    /// エージェントが追っている目標（`/goal`・O2）を composer の直上に 1 行で常時出す。
+    /// Codex / Claude は `SessionInfoUpdate._meta.goal` で目標と状態を送ってくる。面はセッション断
+    /// バナーと同じ（bg2・枠・角 7）で、**色は中立**（状態は文字で言う・色相を使わない＝§1.3）。
+    fn render_goal(&self) -> Option<gpui::AnyElement> {
+        let thread = self.threads.get(self.active)?;
+        let goal = thread.goal.as_ref()?;
+        let theme = self.theme.clone();
+        let status = match goal.status {
+            acp_client::GoalStatus::Active => Some(i18n::t!("agent.goal_status_active")),
+            acp_client::GoalStatus::Paused => Some(i18n::t!("agent.goal_status_paused")),
+            acp_client::GoalStatus::Blocked => Some(i18n::t!("agent.goal_status_blocked")),
+            acp_client::GoalStatus::Complete => Some(i18n::t!("agent.goal_status_complete")),
+            acp_client::GoalStatus::Limited => Some(i18n::t!("agent.goal_status_limited")),
+            acp_client::GoalStatus::Other => None,
+        };
+        let objective = SharedString::from(goal.objective.clone());
+        Some(
+            div()
+                .id("agent-goal")
+                .mx(px(12.))
+                .mb(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(7.))
+                .bg(theme.bg2)
+                .border_1()
+                .border_color(theme.border)
+                .px(px(9.))
+                .py(px(5.))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(i18n::t!("agent.goal_label"))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme.fg1)
+                        .child(objective.clone()),
+                )
+                .children(status.map(|status| {
+                    div()
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(theme.fg2)
+                        .child(SharedString::from(status))
+                }))
+                .tooltip(Tooltip::text(objective, theme.clone()))
+                .into_any_element(),
+        )
+    }
+
     fn render_queued_prompts(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let thread = self.threads.get(self.active)?;
         if thread.queued_prompts.is_empty() {
@@ -10318,6 +10403,8 @@ impl Render for AgentPanel {
             // セッション断のバナー（再開ボタン）/ 再開の一言。
             .children(self.render_session_banner(cx))
             .children(self.render_queued_prompts(cx))
+            // エージェントの目標（`/goal`）は composer の直上に常時（O2）。
+            .children(self.render_goal())
             .child(self.render_composer(composer_focused, cx))
             // セレクタのドロップダウンは各ピルの子として描く（render_selector_pill 内）。
             .when(self.context_menu_open, |element| {
@@ -13864,6 +13951,43 @@ PYEOF"#;
             );
         });
         let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 目標（`/goal`）は届いた物をそのまま出し、null で消える。新しい会話では消え、引き継いだ
+    /// 会話ではエージェントが送り直すまで残す。
+    #[gpui::test]
+    fn the_goal_follows_the_agent_and_resets_with_a_fresh_session(cx: &mut gpui::TestAppContext) {
+        let settings_path = init_test_settings(cx, "agent-goal");
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            assert!(panel.render_goal().is_none());
+            let goal = acp_client::AgentGoal {
+                objective: "テストを緑にする".into(),
+                status: acp_client::GoalStatus::Paused,
+            };
+            panel.on_event(active, AgentEvent::GoalChanged(Some(goal.clone())), cx);
+            assert_eq!(panel.threads[active].goal.as_ref(), Some(&goal));
+            assert!(panel.render_goal().is_some(), "composer の上に出る");
+
+            let started = |resumed: bool| AgentEvent::SessionStarted {
+                session_id: "sess".into(),
+                resumed,
+                resumable: true,
+            };
+            panel.on_event(active, started(true), cx);
+            assert!(
+                panel.threads[active].goal.is_some(),
+                "引き継いだ会話では残す"
+            );
+            panel.on_event(active, started(false), cx);
+            assert!(panel.threads[active].goal.is_none(), "新しい会話では消す");
+
+            panel.on_event(active, AgentEvent::GoalChanged(Some(goal)), cx);
+            panel.on_event(active, AgentEvent::GoalChanged(None), cx);
+            assert!(panel.threads[active].goal.is_none(), "null で消える");
+        });
         let _ = std::fs::remove_file(settings_path);
     }
 }
