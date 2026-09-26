@@ -6422,6 +6422,7 @@ PYEOF"#;
                 resume: thread.acp_session_id.clone(),
                 mcp_servers,
                 preset: acp_client::preset::SessionPreset::default(),
+                replay_history: false,
             })
             .unwrap_or_default();
         // claude.ai のコネクタを読み込まない設定なら、エージェントのプロセスへそう伝える
@@ -6611,6 +6612,8 @@ PYEOF"#;
             }
             // 上で先に畳んでいる（借用の外で処理する必要があるため）。
             AgentEvent::SessionLost => {}
+            // 再生を頼むスレッドはまだ無い（O15 の UI で受ける）。
+            AgentEvent::HistoryReplayed { .. } => {}
             AgentEvent::TurnStarted => {
                 // ACP が実際に prompt を送った＝ここから生成中。楽観 UI が取りこぼした場合
                 // （deferred から走った 2 本目など）でもここで確実に running を立て直す。
