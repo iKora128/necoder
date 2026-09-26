@@ -177,6 +177,33 @@ pub fn set_agent_config_default(
     })
 }
 
+/// ピルの記憶（`agent_config_defaults.<agent_id>.<config_id>`）を 1 つ忘れる（**即適用 + 永続化**・O16）。
+/// 次の新しいスレッドは、権限の既定（`agent_permission_default`）かエージェントの既定から始まる。
+pub fn forget_agent_config_default(
+    cx: &mut App,
+    agent_id: &str,
+    config_id: &str,
+) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::forget_agent_config_default(path, agent_id, config_id)
+    })
+}
+
+/// 権限モードの既定（`"default"` / `"bypass"`）を選ぶ。全エージェントのピルの記憶（mode）も消して
+/// 一括で揃える（**即適用 + 永続化**・O16）。
+pub fn set_permission_default(cx: &mut App, value: &str) -> anyhow::Result<()> {
+    write_user_file(cx, |path| {
+        settings_core::persist_permission_default(path, value)
+    })
+}
+
+/// 権限の既定が「聞かずに進める」（Yolo・O16）か。ストリームのイベントごとに読むので、設定全体を
+/// 写さずに見る。
+pub fn bypass_permissions_by_default(cx: &App) -> bool {
+    cx.try_global::<SettingsGlobal>()
+        .is_some_and(|global| global.settings().agent_permission_default == "bypass")
+}
+
 /// `agent_servers.<agent_id>.env.<var>` を更新して**即適用 + 永続化**する（`None` = 消す・O14）。
 pub fn set_agent_server_env(
     cx: &mut App,
@@ -2161,6 +2188,132 @@ impl SettingsView {
         rows
     }
 
+    /// 権限モードの既定（O16）: 「エージェントの既定」/「聞かずに進める（Yolo）」の 2 択と、ピルで選んで
+    /// 覚えているモードの一覧（押すと忘れる）。選ぶと覚えているモードを全部消して一括で揃える。
+    fn permission_default_rows(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let theme = self.theme.clone();
+        let bypass = settings.agent_permission_default == "bypass";
+        let chip = |id: &'static str, label: String, chosen: bool| {
+            div()
+                .id(id)
+                .flex_none()
+                .whitespace_nowrap()
+                .px(px(8.))
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .text_size(px(11.))
+                .cursor_pointer()
+                .when(chosen, |chip| chip.bg(theme.bg3).text_color(theme.fg0))
+                .when(!chosen, |chip| {
+                    chip.border_1()
+                        .border_color(theme.border)
+                        .text_color(theme.fg1)
+                        .hover(|style| style.text_color(theme.fg0))
+                })
+                .child(SharedString::from(label))
+        };
+        let choices = div()
+            .flex()
+            .gap(px(4.))
+            .child(
+                chip(
+                    "permission-default-agent",
+                    i18n::t!("settings.permission_default_agent"),
+                    !bypass,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _window, cx| {
+                        view.choose_permission_default("default", cx)
+                    }),
+                ),
+            )
+            .child(
+                chip(
+                    "permission-default-bypass",
+                    i18n::t!("settings.permission_default_bypass"),
+                    bypass,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _, _window, cx| {
+                        view.choose_permission_default("bypass", cx)
+                    }),
+                ),
+            );
+        let mut rows = div().flex().flex_col().gap(px(6.)).child(self.pref_row(
+            i18n::t!("settings.permission_default"),
+            Some(i18n::t!("settings.permission_default_sub")),
+            choices.into_any_element(),
+        ));
+        let remembered: Vec<(usize, &'static str, &'static str, String)> = acp_client::AGENTS
+            .iter()
+            .enumerate()
+            .filter_map(|(index, agent)| {
+                let mode = settings
+                    .agent_config_defaults
+                    .get(agent.id)?
+                    .get("mode")
+                    .filter(|mode| !mode.is_empty())?;
+                Some((index, agent.id, agent.label, mode.clone()))
+            })
+            .collect();
+        if !remembered.is_empty() {
+            let mut line =
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(4.))
+                    .pl(px(12.))
+                    .child(div().text_size(px(10.5)).text_color(theme.fg2).child(
+                        SharedString::from(i18n::t!("settings.permission_remembered")),
+                    ));
+            for (index, agent_id, label, mode) in remembered {
+                line = line.child(
+                    div()
+                        .id(("permission-forget", index))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .px(px(8.))
+                        .h(px(20.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(11.))
+                        .text_color(theme.fg1)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg3).text_color(theme.fg0))
+                        .child(SharedString::from(format!("{label} · {mode}")))
+                        .child(div().text_color(theme.fg2).child("✕"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _, _window, cx| {
+                                view.forget_remembered_mode(agent_id, cx)
+                            }),
+                        ),
+                );
+            }
+            rows = rows.child(line);
+        }
+        rows
+    }
+
+    fn choose_permission_default(&mut self, value: &str, cx: &mut Context<Self>) {
+        let result = set_permission_default(cx, value);
+        self.report_save(result, cx);
+        cx.notify();
+    }
+
+    fn forget_remembered_mode(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        let result = forget_agent_config_default(cx, agent_id, "mode");
+        self.report_save(result, cx);
+        cx.notify();
+    }
+
     /// 1 エージェント分のアカウントの行: 既定 / 作ったアカウント / ＋ 新しいアカウント / ログイン。
     /// 選ぶと `agent_servers.<id>.env.<var>` を書く（資格情報は読まない・置き場を指すだけ）。
     fn account_line(
@@ -2492,7 +2645,8 @@ impl SettingsView {
                             i18n::t!("settings.agents_heading"),
                             Some(i18n::t!("settings.agents_sub")),
                         ))
-                        .child(self.agents_rows(settings, true, cx)),
+                        .child(self.agents_rows(settings, true, cx))
+                        .child(self.permission_default_rows(settings, cx)),
                 )
                 // 導入系（エージェント CLI）の直後に `ne` コマンドを並べる。
                 // Windows は W フェーズまで非対応＝セクションごと出さない。
@@ -3786,6 +3940,53 @@ mod tests {
             assert_eq!(view.page, SettingsPage::Mcp);
             assert!(view.search.read(cx).plain_text().is_empty());
         });
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// O16: エージェントのページで、使う / 使わないと権限の既定を変え、覚えているモードを忘れる。
+    /// どの状態でも描ける（レイアウトで落ちない）。
+    #[gpui::test]
+    fn the_agents_page_turns_agents_off_and_sets_the_permission_default(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let path = std::env::temp_dir().join(format!(
+            "necoder-settings-agents-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{ "onboarded": true,
+                "agent_config_defaults": { "claude": { "mode": "plan" }, "qwen": { "mode": "yolo" } } }"#,
+        )
+        .expect("seed");
+        cx.update(|cx| init(Some(path.clone()), None, cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            let mut view = SettingsView::new(Theme::dark(), gpui::red(), cx);
+            view.availability_pending = false;
+            view
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |view, cx| {
+            view.toggle_agent_enabled("kimi", cx);
+            assert_eq!(get(cx).disabled_agents, vec!["kimi".to_string()]);
+            view.forget_remembered_mode("qwen", cx);
+            assert!(!get(cx).agent_config_defaults.contains_key("qwen"));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |view, cx| {
+            view.availability_pending = false;
+            view.choose_permission_default("bypass", cx);
+            let settings = get(cx);
+            assert_eq!(settings.agent_permission_default, "bypass");
+            assert!(
+                settings.agent_config_defaults.is_empty(),
+                "選ぶと覚えているモードを全部消す"
+            );
+            view.toggle_agent_enabled("kimi", cx);
+            assert!(get(cx).disabled_agents.is_empty(), "戻せる");
+            view.availability_pending = false;
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         std::fs::remove_file(&path).ok();
     }
 
