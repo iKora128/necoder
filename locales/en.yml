@@ -217,6 +217,7 @@ cmd:
   open_recent: "File: Open Recent…"
   open_dialog: "File: Open Folder…"
   shortcut_sheet: "Help: Keyboard shortcuts"
+  usage_limits: "Usage: Show rate limits"
   usage_stats: "Usage: Open statistics"
 herd:
   empty: No agents running
@@ -966,14 +967,16 @@ usage:
   reset_done: reset (no new value yet)
   duration_minutes: "%{minutes}m"
   duration_hours: "%{hours}h %{minutes}m"
+  duration_hours_only: "%{hours}h"
   duration_days: "%{days}d %{hours}h"
+  duration_days_only: "%{days}d"
   chip_tip: "%{agent} usage (last value received). Click for details"
   popover_title: Usage & rate limits
   received: "received %{when}"
   status_warning: Near the limit
   status_rejected: Limit reached
   no_values: No values yet. They appear once an agent reports them
-  note: Values change only when an agent reports them (the last value received). necoder never asks for your plan limits on its own.
+  note: Values change only when an agent reports them. What you see here is the last value received.
   codex_note: Codex does not report limits over ACP, so they are read from the Codex CLI (codex app-server) when you open this panel.
   codex_loading: Reading Codex limits…
   codex_failed: "Couldn't read Codex limits: %{error}"

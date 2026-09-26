@@ -262,6 +262,11 @@ pub fn codex_label() -> &'static str {
 /// `settings.json` の `agent_servers.codex.env`（`CODEX_HOME` など）はエージェントと同じものを渡す
 /// （同じアカウントを見る）。
 pub fn refresh_codex_limits(force: bool, cx: &mut App) {
+    // 表示の検証（`NECODER_USAGE_PROBE`）では本物の codex を起こさない（本人のアカウントで外へ出る）。
+    #[cfg(debug_assertions)]
+    if std::env::var_os("NECODER_USAGE_PROBE").is_some() {
+        return;
+    }
     let codex = acp_client::find_in_path("codex");
     let now = crate::now_unix_ms();
     let limits = cx.default_global::<UsageLimits>();
@@ -303,6 +308,44 @@ pub fn refresh_codex_limits(force: bool, cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// 開発用: Codex の値を置き場へ直接入れる（`NECODER_USAGE_PROBE`・O11 の offscreen 検証）。
+/// **codex app-server は起こさない**。受け取った時刻は 3 分前にする（「受信 N 分前」を写すため）。
+#[cfg(debug_assertions)]
+pub fn debug_seed_codex_limits(cx: &mut App) {
+    use acp_client::usage::WindowUsage;
+    let now_ms = crate::now_unix_ms();
+    let now_secs = now_ms / 1000;
+    let limits = cx.default_global::<UsageLimits>();
+    limits.codex_installed = Some(true);
+    limits.record(
+        SharedString::from(codex_label()),
+        RateLimits {
+            status: None,
+            windows: vec![
+                WindowUsage {
+                    window: LimitWindow::FiveHour,
+                    used_percent: Some(12.0),
+                    resets_at: Some(now_secs + 3 * 3_600 + 40 * 60),
+                },
+                WindowUsage {
+                    window: LimitWindow::Weekly,
+                    used_percent: Some(30.0),
+                    resets_at: Some(now_secs + 6 * 86_400),
+                },
+            ],
+        },
+        now_ms - 3 * 60_000,
+    );
+}
+
+/// 開発用: Codex の読み取りの状態だけを置く（`NECODER_USAGE_PROBE`・読み込み中 / 失敗の行の描画検証）。
+#[cfg(debug_assertions)]
+pub fn debug_set_codex_read(read: CodexRead, cx: &mut App) {
+    let limits = cx.default_global::<UsageLimits>();
+    limits.codex_installed = Some(true);
+    limits.codex = read;
 }
 
 // ── 表示 ──
@@ -394,16 +437,18 @@ pub fn resets_in_label(resets_at: i64, now_secs: i64) -> SharedString {
     }
     // 分は切り上げ（「あと 0 分」と出さない）。
     let minutes = (remaining + 59) / 60;
+    // 端数が 0 の単位は言わない（「6 日 0 時間」にしない）。
+    let (days, hours) = (minutes / (24 * 60), minutes % (24 * 60) / 60);
     let time = if minutes < 60 {
         i18n::t!("usage.duration_minutes", "minutes" => minutes)
+    } else if minutes < 24 * 60 && minutes % 60 == 0 {
+        i18n::t!("usage.duration_hours_only", "hours" => minutes / 60)
     } else if minutes < 24 * 60 {
         i18n::t!("usage.duration_hours", "hours" => minutes / 60, "minutes" => minutes % 60)
+    } else if hours == 0 {
+        i18n::t!("usage.duration_days_only", "days" => days)
     } else {
-        i18n::t!(
-            "usage.duration_days",
-            "days" => minutes / (24 * 60),
-            "hours" => minutes % (24 * 60) / 60
-        )
+        i18n::t!("usage.duration_days", "days" => days, "hours" => hours)
     };
     SharedString::from(i18n::t!("usage.resets_in", "time" => time))
 }
@@ -645,6 +690,15 @@ mod tests {
         assert_eq!(
             resets_in_label(1_000 + 4 * 86_400 + 3 * 3_600, 1_000).as_ref(),
             "resets in 4d 3h"
+        );
+        assert_eq!(
+            resets_in_label(1_000 + 6 * 86_400 + 30, 1_000).as_ref(),
+            "resets in 6d",
+            "0 時間は言わない"
+        );
+        assert_eq!(
+            resets_in_label(1_000 + 3 * 3_600, 1_000).as_ref(),
+            "resets in 3h"
         );
         assert_eq!(
             resets_in_label(900, 1_000).as_ref(),

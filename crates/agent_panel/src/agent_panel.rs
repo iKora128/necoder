@@ -4545,6 +4545,42 @@ PYEOF"#;
         )
     }
 
+    /// 開発用: いまのスレッドにレート制限の知らせを流す（`NECODER_USAGE_PROBE`・O11 の offscreen 検証）。
+    /// 本番と同じ `on_event` を通す（置き場への反映・statusbar の再描画まで）。`near` = 上限に近い値 /
+    /// `blocked` = 上限に達して止められた値 / それ以外 = ふだんの値。
+    #[cfg(debug_assertions)]
+    pub fn debug_seed_rate_limits(&mut self, variant: &str, cx: &mut Context<Self>) {
+        use acp_client::usage::{LimitStatus, LimitWindow, RateLimits, WindowUsage};
+        let now_secs = now_unix_ms() / 1000;
+        let (status, five_hour, weekly, opus) = match variant {
+            "near" => (LimitStatus::Warning, 86.0, 41.0, 83.0),
+            "blocked" => (LimitStatus::Rejected, 100.0, 64.0, 70.0),
+            _ => (LimitStatus::Allowed, 42.0, 18.0, 12.0),
+        };
+        let window = |window: LimitWindow, percent: f64, seconds: i64| WindowUsage {
+            window,
+            used_percent: Some(percent),
+            resets_at: Some(now_secs + seconds),
+        };
+        let active = self.active;
+        self.on_event(
+            active,
+            AgentEvent::RateLimits(RateLimits {
+                status: Some(status),
+                windows: vec![
+                    window(LimitWindow::FiveHour, five_hour, 2 * 3_600 + 13 * 60),
+                    window(LimitWindow::Weekly, weekly, 4 * 86_400 + 3 * 3_600),
+                    window(
+                        LimitWindow::Named("seven_day_opus".into()),
+                        opus,
+                        4 * 86_400 + 3 * 3_600,
+                    ),
+                ],
+            }),
+            cx,
+        );
+    }
+
     /// 開発用: composer の `/` 補完を開いた状態にする（`NECODER_SLASH_PROBE`・O2 の offscreen 検証）。
     /// `text` を composer に入れてフォーカスする。`fake` なら偽のコマンド一覧を先に流し込む
     /// （実エージェント無しで描画を確かめる。偽でなければ先張りしたセッションの本物の一覧を使う）。

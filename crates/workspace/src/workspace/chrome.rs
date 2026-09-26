@@ -2252,6 +2252,8 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_3()
+            // 使用量（O11）: いまのスレッドのエージェントの「5h 42% · 週 18%」。値が無ければ出さない。
+            .children(self.render_usage_chip(cx))
             // 前回クラッシュの通知チップ（M13）: クリックでログ抜粋つきのバグ報告 Issue を開く。
             // 色は theme.warn（診断 ▲ と同じ警告色 = 識別色は使わない）。
             .when_some(self.notifications.crash_notice.clone(), |element, _log| {

@@ -218,6 +218,7 @@ cmd:
   open_recent: "ファイル: 最近使った項目を開く…"
   open_dialog: "ファイル: フォルダを開く…"
   shortcut_sheet: "ヘルプ: キーボードショートカット"
+  usage_limits: "使用量: レート制限を表示"
   usage_stats: "使用量: 統計を開く"
 herd:
   empty: 実行中のエージェントはいません
@@ -967,14 +968,16 @@ usage:
   reset_done: リセット済み（新しい値はまだ届いていません）
   duration_minutes: "%{minutes} 分"
   duration_hours: "%{hours} 時間 %{minutes} 分"
+  duration_hours_only: "%{hours} 時間"
   duration_days: "%{days} 日 %{hours} 時間"
+  duration_days_only: "%{days} 日"
   chip_tip: "%{agent} の使用量（最後に受け取った値）。クリックで詳細"
   popover_title: 使用量・レート制限
   received: "受信 %{when}"
   status_warning: 上限が近い
   status_rejected: 上限に達しています
   no_values: まだ値を受け取っていません。エージェントが知らせてきたら出ます
-  note: 値はエージェントが知らせてきた時にだけ変わります（最後に受け取った値）。necoder から利用上限を問い合わせることはしません。
+  note: 値はエージェントが知らせてきた時にだけ変わります。ここに出ているのは最後に受け取った値です。
   codex_note: Codex だけは ACP で知らせてこないので、このポップオーバーを開いた時に codex 本体（codex app-server）に訊きます。
   codex_loading: Codex の値を読み込み中…
   codex_failed: "Codex の値を読めませんでした: %{error}"
