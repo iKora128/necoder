@@ -646,7 +646,8 @@ mod tests {
         }
     }
 
-    /// 手元のファイルを「落とした」ことにする（ネットワークへは行かない）。
+    /// 手元のファイルを「落とした」ことにする（ネットワークへは行かない）。使うテストは unix だけ。
+    #[cfg(unix)]
     fn copy_from(source: PathBuf) -> impl Fn(&str, &Path) -> Result<(), DeployError> {
         move |_url, destination| {
             std::fs::copy(&source, destination)
@@ -655,7 +656,8 @@ mod tests {
         }
     }
 
-    /// `tar -czf` で書庫を作る（`files` は置き場の中の相対パスと中身）。
+    /// `tar -czf` で書庫を作る（`files` は置き場の中の相対パスと中身）。使うテストは unix だけ。
+    #[cfg(unix)]
     fn tar_gz(scratch: &Scratch, files: &[(&str, &str)]) -> PathBuf {
         let content = scratch.0.join("content");
         for (relative, text) in files {
