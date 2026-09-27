@@ -96,6 +96,13 @@ pub(crate) const MARKDOWN_SLASH_COMMANDS: [SlashCommand; 13] = [
 
 impl Workspace {
     pub(crate) fn ensure_lsp(&mut self, cx: &mut Context<Self>) {
+        // テストでは本物の言語サーバを起動しない（DB・ファイル監視と同じ扱い）。手元に rust-analyzer
+        // などがあると `.rs` を開いたテストで実プロセスが立ち、その読み取りスレッドが gpui のテスト
+        // スケジューラを起こして「Your test is not deterministic」でテストバイナリごと落ちる。
+        // CI の runner には言語サーバが無いので CI では出ず、手元の `cargo test` だけで落ちていた。
+        if cfg!(test) {
+            return;
+        }
         let Some(worktree) = self.active_worktree() else {
             return;
         };
