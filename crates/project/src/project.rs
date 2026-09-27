@@ -678,6 +678,9 @@ pub fn git_common_dir_on(host: &dyn Host, dir: &Path) -> Option<PathBuf> {
 
 /// `root` が linked worktree（`git worktree add` で作った作業ツリー）か。メインの作業ツリーは
 /// git dir と共通の git dir が同じ、linked は別（`.git/worktrees/<name>`）。repo 外は `false`。
+/// 両方とも git が `--path-format=absolute` で解決した値なのでそのまま比べられる。手元だけは
+/// シンボリックリンクの差（macOS の `/var` → `/private/var` など）を正規化して比べる（リモートの
+/// パスを手元で正規化しない）。
 pub fn is_linked_worktree_on(host: &dyn Host, root: &Path) -> bool {
     let Some(common) = git_common_dir_on(host, root) else {
         return false;
@@ -693,8 +696,14 @@ pub fn is_linked_worktree_on(host: &dyn Host, root: &Path) -> bool {
         return false;
     }
     let git_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if git_dir.as_os_str().is_empty() || git_dir == common {
+        return false;
+    }
+    if host.is_remote() {
+        return true;
+    }
     let canonical = |path: &Path| paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    !git_dir.as_os_str().is_empty() && canonical(&git_dir) != canonical(&common)
+    canonical(&git_dir) != canonical(&common)
 }
 
 /// UI / CLI / MCP が同じ TaskSpace ID を生成するための共有実装。
@@ -2932,6 +2941,43 @@ mod tests {
             std::env::temp_dir().join(format!("necoder_project_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// 本体チェックアウトは `task/*` に居ても linked worktree ではない（レールから消さない判定の土台）。
+    #[test]
+    fn linked_worktree_is_distinguished_from_main_checkout() {
+        let base = scratch("linked-worktree");
+        let main = base.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git 実行")
+        };
+        if !git(&main, &["init", "-q", "-b", "main"]).status.success() {
+            return; // git 無し環境はスキップ
+        }
+        git(&main, &["config", "user.email", "t@example.com"]);
+        git(&main, &["config", "user.name", "tester"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&main, &["switch", "-q", "-c", "task/in-main"]);
+        let linked = base.join("linked");
+        let linked_arg = linked.to_string_lossy().to_string();
+        git(
+            &main,
+            &["worktree", "add", "-q", "-b", "task/linked", &linked_arg],
+        );
+
+        assert!(!is_linked_worktree_on(&LocalHost, &main));
+        assert!(is_linked_worktree_on(&LocalHost, &linked));
+        assert!(
+            !is_linked_worktree_on(&LocalHost, &base),
+            "repo 外は false"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

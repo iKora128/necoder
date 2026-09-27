@@ -1177,8 +1177,16 @@ impl TaskSpace {
     fn for_worktree(worktree: &Worktree, branch: Option<&str>) -> Self {
         let repository_id = project::repository_id_on(worktree.host().as_ref(), worktree.root());
         let head = project::git_head_oid_on(worktree.host().as_ref(), worktree.root());
+        // `task/*` の自動判定は linked worktree に限る。本体チェックアウトでエージェントが一時的に
+        // `task/*` を checkout しただけで Task 扱い＝レールから消え、＋ で開き直しても隠れた枠へ
+        // 切り替わるだけになっていた（2026-09-26 ユーザー報告）。
+        // linked か は統合先の選び方（`linked`）にも使うので 1 回だけ聞く。
+        let host = worktree.host();
+        let linked = project::is_linked_worktree_on(host.as_ref(), worktree.root());
         let detected_branch = branch.map(str::to_string).or_else(|| {
-            project::git_current_branch_on(worktree.host().as_ref(), worktree.root())
+            linked
+                .then(|| project::git_current_branch_on(host.as_ref(), worktree.root()))
+                .flatten()
                 .filter(|branch| branch.starts_with("task/"))
         });
         let is_task = detected_branch.is_some();
@@ -1213,7 +1221,7 @@ impl TaskSpace {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as i64)
                 .unwrap_or(0),
-            linked: project::is_linked_worktree_on(worktree.host().as_ref(), worktree.root()),
+            linked,
             parent: None,
         }
     }
