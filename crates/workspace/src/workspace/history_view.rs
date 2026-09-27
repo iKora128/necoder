@@ -782,8 +782,8 @@ impl Workspace {
         self.history_slot_for(project)
     }
 
-    /// 開発用（offscreen 検証）: 履歴ビューの入力に語を入れる。
-    #[cfg(debug_assertions)]
+    /// 開発用（offscreen 検証）: 履歴ビューの入力に語を入れる。テストからも使う。
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn debug_history_query(&mut self, query: &str, cx: &mut Context<Self>) {
         if let Some(state) = self.overlays.thread_history.as_ref() {
             state
@@ -792,8 +792,8 @@ impl Workspace {
         }
     }
 
-    /// 開発用（offscreen 検証）: 選択を `n` 番目（選べる行の中で）へ動かす。
-    #[cfg(debug_assertions)]
+    /// 開発用（offscreen 検証）: 選択を `n` 番目（選べる行の中で）へ動かす。テストからも使う。
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn debug_history_select(&mut self, target: usize, cx: &mut Context<Self>) {
         if let Some(state) = self.overlays.thread_history.as_mut() {
             let positions = selectable_positions(&state.rows());

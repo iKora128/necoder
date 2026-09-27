@@ -68,8 +68,8 @@ impl AgentPanel {
         cx.notify();
     }
 
-    /// 開発用（offscreen 検証）: 検索バーを開いて語を入れる。
-    #[cfg(debug_assertions)]
+    /// 開発用（offscreen 検証）: 検索バーを開いて語を入れる。テストからも使う（release のテストでも組めるように）。
+    #[cfg(any(test, debug_assertions))]
     pub fn debug_find_in_transcript(
         &mut self,
         query: &str,
