@@ -175,7 +175,7 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - **ファイルが真実（DB に入れない）**: settings.json（user/project）・`.necoder/todos.md`（M12 Todo ボード — ファイルであること自体が要件）・keymap.json・テーマ JSON。git が真実のもの（status/diff/blame）も入れない。検索索引も持たない（regex 走査が正 — DECISIONS §8）
 - **ローカル DB（`~/Library/Application Support/necoder/necoder.db`）**: [Turso](https://github.com/tursodatabase/turso)（SQLite の pure-Rust 再実装・MIT・async ネイティブ）を採用。用途は
   ①**hot exit**（dirty バッファ全文 + path/version/カーソル。WAL で kill -9 耐性）
-  ②**スレッド永続化**（threads/turns テーブル。turn 毎 INSERT 追記 = JSON 全書き換えを避ける。ブラウズはページング）
+  ②**スレッド永続化**（threads/turns テーブル。turn 毎 INSERT 追記 = JSON 全書き換えを避ける。ブラウズはページング）。追記の例外は composer の `!` で走らせたシェルの行（role `shell`・JSON 1 つ・#37）: 待機中なら走り出した時点で追記し、終わったら同じ行を `update_turn` で書き換える（途中で終了した行は復元で「中断」と読める）
   ③**使用量**（`turn_usage`・O11・2026-09-26: エージェントがターンの終わりに報告したトークンと、会話の累計コストの差分＝推定 USD を 1 ターン 1 行。Stats の日別集計と、再起動後に引き継いだ会話のコスト差分の基準に使う。旧「トークン台帳」`token_ledger` は `threads.tokens_used`＝文脈窓の使用量を並べるだけで累計ではなかったため削除。レート制限は保存しない＝エージェントが知らせた最後の値をメモリに持つだけ）
   ④**checkpoint のメタデータ**（turn→file→blob hash。blob 本体は content-addressed ファイル or DB — M12 着手時に比較）
 - **隔離**: DB アクセスは薄い `storage` crate に閉じ込める（SQL を UI 層に漏らさない）。Turso はまだ若いので、問題が出たら rusqlite へ 1 crate の差し替えで退避できる面を保つ。書き込みは全て background executor（async API がそのまま「UI スレッドで塞がない」規律に合う）
@@ -370,6 +370,13 @@ workspace/view -> project model -> Host trait <- LocalHost / SshHost
   `Host::run_command_cancellable(spec, cancel)`（2026-09-27・R02）: local は子の出力を待つ間に印を見て、
   立ったら子を止める。remote は 1 往復の途中で止める口が無いので、既定の実装が最後まで走らせてから結果を
   捨てる（呼ぶ側は次の区切りで止まる。stream/cancel の protocol 化と一緒に直す）。
+- 人が打ったシェルコマンド（エージェントパネルの `!`・#37）は `Host::run_user_command(spec, cancel, output_limit)`
+  （2026-09-27）: `run_command_cancellable` と違い**副作用のある command 用**で、止めるのは人の操作だけ。出力は
+  stream ごとに頭と尻を上限まで持ち、間は読み捨てる（子は止めない）。local は子を自分のプロセスグループで起こし、
+  止める時はグループごと SIGTERM → 2 秒で SIGKILL。`pre_exec` で**シグナルのマスクと無視を既定へ戻す** —
+  背景の executor のスレッド（macOS は GCD）は非同期のシグナルをブロックしていて、std の `Command` はマスクを
+  子へ継ぐ（戻さないと子に SIGTERM が届かず、止めるたびに SIGKILL の猶予を待つ）。remote は既定の実装
+  （1 往復で最後まで走らせて丸める・`can_stop_user_command` = false＝呼ぶ側は待たずに「中断」として畳む）。
 - local implementation を先に `Host` へ移し、既存機能の回帰 test 後に SSH implementation を挿す。
 - security/performance/reliability の受入条件は
   [`research/remote-ssh-2026.md`](./research/remote-ssh-2026.md) を正とする。

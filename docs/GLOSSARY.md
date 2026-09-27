@@ -65,6 +65,8 @@
 | ↳ **アカウント**（エージェントの設定の置き場のフォルダ。`CLAUDE_CONFIG_DIR` / `CODEX_HOME` で指す・資格情報は読まない・O14） | `account_env_var` / `accounts_root` / `agent_servers.<id>.env` | アカウント / 既定 / 新しいアカウント | Account / Default / New account |
 | ↳ **slash コマンド**（エージェントが広告する `/name` の命令。composer の行頭 `/` で補完・O2） | `acp_client::SlashCommand` / `AgentEvent::Commands` / `Thread.commands` | コマンド | Command |
 | ↳ **レシピ**（repo ごとの定型プロンプト。`.necoder/recipes/*.md`・`/` 補完に `/necoder:<名前>`・選ぶと本文が入る・O16） | `recipes` / `Recipe` / `RECIPE_PREFIX` | レシピ | Recipe |
+| ↳ **シェルモード**（composer の 1 文字目の `!`。人が打ったコマンドをスレッドの作業ディレクトリで走らせ、エージェントには送らない。結果は次の送信に添える。**composer からの人の送信だけ**が解釈する・#37） | `agent_panel::shell`（`shell_command_input` / `ShellRun`）/ `Entry::Shell`（DB の role `shell`）/ `Host::run_user_command` | シェルで実行 | Run in the shell |
+| ↳ ↳ **シェルの結果**（`!` の行の出力・終了コード。次の通常の送信に `<bash-input>` 等で添える予定の物は composer のチップ。添えたら渡し済み） | `ShellRun::pending` / `pending_shell_attachment` | シェルの結果 | shell output |
 | ↳ **会話名**（エージェントが付けたスレッドの題名。手動改名が優先） | `AgentEvent::TitleChanged`（ACP `session_info_update.title`）/ 手動の印 `thread_custom_names` | （スレッド名） | (thread name) |
 | ↳ **目標**（`/goal` でエージェントが追う目的。composer の上に 1 行） | `acp_client::AgentGoal` / `AgentEvent::GoalChanged` / `Thread.goal` | 目標 | Goal |
 | ↳ **スレッド履歴**（⌘⇧H / 🕘 の画面。3 区分: このプロジェクトのスレッド・エージェントの過去の会話・本文の一致。← スレッド履歴 Picker） | `history_view::ThreadHistoryState`（action `ThreadHistory`） | スレッド履歴 | Thread history |
