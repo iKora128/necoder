@@ -1329,24 +1329,26 @@ mod tests {
     }
 
     /// 貼り付けた画像はキャッシュへ置いて添付にする（チャットのフォルダにもプロジェクトにも置かない）。
+    /// 置き場はフィクスチャの一時フォルダ（`attach_pasted_image` のままだと本物のキャッシュに書く）。
     #[gpui::test]
     fn a_pasted_image_becomes_an_attachment(cx: &mut gpui::TestAppContext) {
         let fixture = Fixture::new(cx, "paste");
+        let directory = fixture.root.join("chat-paste");
         let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new_chat(Theme::dark(), cx));
         panel.update(cx, |panel, cx| {
-            panel.attach_pasted_image(
+            panel.attach_image_in(
                 &editor_view::PastedImage {
                     format: gpui::ImageFormat::Png,
                     bytes: vec![1, 2, 3],
                 },
+                &directory,
                 cx,
             );
             let thread = &panel.threads[panel.active];
             assert_eq!(thread.context.len(), 1);
             let path = PathBuf::from(thread.context[0].as_ref());
-            assert!(path.to_string_lossy().contains("chat-paste"), "{path:?}");
+            assert!(path.starts_with(&directory), "{path:?}");
             assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3]);
-            let _ = std::fs::remove_file(path);
         });
         drop(fixture);
     }

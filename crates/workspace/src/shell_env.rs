@@ -73,18 +73,24 @@ pub fn inherit_login_shell_path() -> Option<String> {
         // 反映するのはこのスレッドだけ（背景スレッドは書き出すだけ）＝ set_var の競合を作らない。
         Some(path) => {
             std::env::set_var("PATH", &path);
-            std::thread::spawn(|| {
-                if let Some(fresh) = load_from_login_shell() {
-                    write_cache(&fresh);
-                }
-            });
+            // 書き出し先は読んだのと同じ所（取り直している間に環境が変わっても、よそへ書かない）。
+            // テストでは本物のログインシェル（rc ファイル）を走らせず、本物のキャッシュにも触れない。
+            if let Some(cache) = cache_path().filter(|_| !cfg!(test)) {
+                std::thread::spawn(move || {
+                    if let Some(fresh) = load_from_login_shell() {
+                        write_cache_to(&cache, &fresh);
+                    }
+                });
+            }
             Some(path)
         }
         // 初回（インストール直後）だけ同期で取る。ここで取らないと最初の ACP 起動が落ちる。
         None => {
             let path = load_from_login_shell()?;
             std::env::set_var("PATH", &path);
-            write_cache(&path);
+            if let Some(cache) = cache_path() {
+                write_cache_to(&cache, &path);
+            }
             Some(path)
         }
     }
@@ -133,10 +139,7 @@ fn read_cache() -> Option<String> {
 }
 
 #[cfg(unix)]
-fn write_cache(path: &str) {
-    let Some(cache) = cache_path() else {
-        return;
-    };
+fn write_cache_to(cache: &std::path::Path, path: &str) {
     if let Some(parent) = cache.parent() {
         if std::fs::create_dir_all(parent).is_err() {
             return;

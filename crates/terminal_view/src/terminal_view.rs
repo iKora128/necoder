@@ -2558,7 +2558,11 @@ mod tests {
             )),
             working_directory: None,
             drain_on_exit: true,
-            env: HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]),
+            // 対話シェルは終わる時に履歴を $HISTFILE（既定は本物の ~/.bash_history）へ書くので捨てる。
+            env: HashMap::from([
+                ("TERM".to_string(), "xterm-256color".to_string()),
+                ("HISTFILE".to_string(), "/dev/null".to_string()),
+            ]),
             ..Default::default()
         };
         let window_size = WindowSize {
@@ -2615,7 +2619,11 @@ mod tests {
             )),
             working_directory: None,
             drain_on_exit: true,
-            env: HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]),
+            // 対話シェルは終わる時に履歴を $HISTFILE（既定は本物の ~/.bash_history）へ書くので捨てる。
+            env: HashMap::from([
+                ("TERM".to_string(), "xterm-256color".to_string()),
+                ("HISTFILE".to_string(), "/dev/null".to_string()),
+            ]),
             ..Default::default()
         };
         let window_size = WindowSize {
