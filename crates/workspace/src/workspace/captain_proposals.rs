@@ -135,6 +135,13 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// 裁きを DB に残せなかった時、分解案のカードを戻すか（R09）。DB の失敗なら戻す（何も切っていないので
+/// 押し直せる）。別の窓が先に裁いた・DB に無い案（[`storage::ProposalNotPending`]）は戻さない（押し直しても
+/// 裁けないカードを残さない）。
+fn card_survives_failed_resolve(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<storage::ProposalNotPending>().is_none()
+}
+
 /// 承認した行を担当への最初の指示にする。**1 行目は題名**（＋ Task と同じく 1 行目から Task 名とブランチ名を作る）。
 pub(crate) fn delegation_prompt(task: &ProposedTask) -> String {
     let mut prompt = i18n::t!(
@@ -329,6 +336,10 @@ impl Workspace {
                         workspace.request_captain_wake(&repository, cx);
                     }
                     Err(error) => {
+                        // 裁きを残せなかった（DB の失敗）: カードを印ごと戻す（R09・押し直せる。何も切っていない）。
+                        if card_survives_failed_resolve(&error) {
+                            workspace.add_captain_proposal(proposal, cx);
+                        }
                         let accent = workspace.accent();
                         workspace.push_toast(
                             SharedString::from(i18n::t!("captain.proposal_err_resolve", "detail" => format!("{error:#}"))),
@@ -578,6 +589,21 @@ pub(crate) const CAPTAIN_TASK_EVENT: &str = "captain_task";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R09: DB の失敗ならカードを戻し、もう裁けない案（先に裁かれた・DB に無い）は戻さない。
+    #[test]
+    fn only_a_database_failure_brings_the_card_back() {
+        assert!(card_survives_failed_resolve(&anyhow::anyhow!("database is locked")));
+        let resolved = anyhow::Error::new(storage::ProposalNotPending {
+            id: "proposal-1".into(),
+            missing: false,
+        });
+        assert!(!card_survives_failed_resolve(&resolved));
+        assert!(!card_survives_failed_resolve(
+            &resolved.context("分解案の裁きの追記に失敗")
+        ));
+    }
+
 
     fn arguments(value: serde_json::Value) -> Result<(Vec<ProposedTask>, Option<String>), String> {
         validate_proposed_tasks(&value)

@@ -324,6 +324,27 @@ impl ProposalStatus {
     }
 }
 
+/// 分解案をもう裁けない（別の窓が先に裁いた・DB に無い）。DB そのものの失敗と分けるための型
+/// （画面は、DB の失敗ならカードを戻して押し直せるようにし、これならカードを戻さない・R09）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalNotPending {
+    pub id: String,
+    /// DB に行が無い（`false` = 行はあるが、もう裁かれている）。
+    pub missing: bool,
+}
+
+impl std::fmt::Display for ProposalNotPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.missing {
+            write!(formatter, "分解案が見つからない: {}", self.id)
+        } else {
+            write!(formatter, "分解案はもう裁かれている: {}", self.id)
+        }
+    }
+}
+
+impl std::error::Error for ProposalNotPending {}
+
 /// Captain の分解案（FLEET-V2 §5.5）。承認されるまで worktree は作らない。
 /// `tasks` は JSON の文字列のまま持つ（行の形は workspace が決める＝storage は中身を知らない）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1137,10 +1158,20 @@ impl Storage {
                         match rows.next().await.context("captain_proposals 行の取得に失敗")? {
                             Some(row) => row.get_value(0)?.as_text().map(String::as_str)
                                 == Some(ProposalStatus::Pending.as_str()),
-                            None => anyhow::bail!("分解案が見つからない: {id}"),
+                            None => {
+                                return Err(anyhow::Error::new(ProposalNotPending {
+                                    id: id.clone(),
+                                    missing: true,
+                                }))
+                            }
                         }
                     };
-                    anyhow::ensure!(pending, "分解案はもう裁かれている: {id}");
+                    if !pending {
+                        return Err(anyhow::Error::new(ProposalNotPending {
+                            id: id.clone(),
+                            missing: false,
+                        }));
+                    }
                     conn.execute(
                         "UPDATE captain_proposals SET status = ?2, outcome = ?3, resolved_at = ?4
                          WHERE id = ?1",
@@ -4461,9 +4492,22 @@ mod tests {
             .unwrap();
         assert!(resolved > human);
         assert!(storage.load_pending_captain_proposals().unwrap().is_empty());
-        assert!(storage
+        let twice = storage
             .resolve_captain_proposal("proposal-1", ProposalStatus::Rejected, "{}")
-            .is_err());
+            .expect_err("二度は裁けない");
+        assert_eq!(
+            twice.downcast_ref::<ProposalNotPending>(),
+            Some(&ProposalNotPending {
+                id: "proposal-1".into(),
+                missing: false
+            }),
+            "DB の失敗と見分けられる（画面はカードを戻さない）"
+        );
+        assert!(storage
+            .resolve_captain_proposal("proposal-none", ProposalStatus::Approved, "{}")
+            .expect_err("無い案は裁けない")
+            .downcast_ref::<ProposalNotPending>()
+            .is_some_and(|error| error.missing));
         assert!(storage
             .resolve_captain_proposal("proposal-1", ProposalStatus::Pending, "{}")
             .is_err());
