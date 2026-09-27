@@ -668,6 +668,7 @@ settings:
   agent_disabled: 使わない（選択肢に出さない）
   agent_disable_locked: "外せません: 既定のエージェント・Captain は使うままにします。先に別のエージェントを既定にしてください"
   agent_remove: 外す
+  agent_remove_binary_failed: "%{agent} の落とした binary を消せませんでした: %{reason}"
   custom_command_ready: "自分のコマンドで起動（%{command}）"
   custom_command_missing: "コマンドが見つかりません（%{command}）・PATH にある名前か絶対パスを書いてください"
   custom_registry_npx: "レジストリ %{version} · npx（初回に取得）"

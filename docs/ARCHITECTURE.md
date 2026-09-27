@@ -249,6 +249,10 @@ event enum は将来共通 Dock API へ adapter を移すための契約で、�
 - **いつ落とすか**: 最初の起動（送信）の時に**背景で**（`Agent::needs_deploy` → `Agent::deploy_command`）。UI
   スレッドの解決では落とさない。先張りはしない（見ただけのタブで黙って落とさない）。落としている間は
   transcript に 1 行。新しい版を**落とせなかった**時だけ手元の一番新しい別の版で起こし、そう知らせる
+- **外す**（設定の「外す」・2026-09-27）: `external_agents/binary/<id>` の中の **necoder が置いた物だけ**を消す
+  （`deploy::remove_deployed`: 完了の印のある `<version>/<os>-<arch>` と途中の `.staging-*` / `.download-*`。
+  `<id>` 自体が symlink なら何もしない・中の symlink はリンクだけ消えて先は触らない・知らないファイルは残す）。
+  消す直前に settings.json（user と project の層）を読み直し、同じ id がまだ書かれていれば消さない
 - 同じアプリの中で同時に初回が起きても落とすのは 1 回（プロセスの中の lock）。別のプロセスが先に同じ版を
   置いたら、その完成品を使う
 

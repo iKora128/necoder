@@ -667,6 +667,7 @@ settings:
   agent_disabled: Off (hidden from choices)
   agent_disable_locked: "Can't turn off: the default agent and the Captain stay on. Make another agent the default first"
   agent_remove: Remove
+  agent_remove_binary_failed: "Couldn't delete the binary downloaded for %{agent}: %{reason}"
   custom_command_ready: "Starts with your command (%{command})"
   custom_command_missing: "Command not found (%{command}). Write a name on the PATH or an absolute path"
   custom_registry_npx: "Registry %{version} · npx (fetched on first start)"

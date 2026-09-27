@@ -202,6 +202,55 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// 外したエージェントが落とした binary（`external_agents/binary/<id>`・H2-b）を背景で消す。
+    /// **消す直前に settings.json（user と project の層）を読み直し**、同じ id がまだどこかに書かれて
+    /// いれば消さない（書き直した・プロジェクトの設定で足している）。消すのは necoder が置いた物だけ
+    /// （[`acp_client::deploy::remove_deployed`]・置き場の外や symlink の先は触らない）。消せなかった時は
+    /// 知らせる（次に同じ版を足せば、置いてある物をそのまま使うだけ）。
+    fn remove_agent_binaries(&mut self, agent_id: &str, cx: &mut Context<Self>) {
+        let Some(root) = self.agent_binary_root.clone() else {
+            return;
+        };
+        let Some((user_path, project_dir)) = cx
+            .try_global::<SettingsGlobal>()
+            .map(|global| (global.user_path.clone(), global.project_dir.clone()))
+        else {
+            return;
+        };
+        let agent_id = agent_id.to_string();
+        cx.spawn(async move |view, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    let still_listed =
+                        SettingsStore::load(user_path.as_deref(), project_dir.as_deref())
+                            .settings()
+                            .agent_servers
+                            .contains_key(&agent_id);
+                    if still_listed {
+                        return Ok(None);
+                    }
+                    acp_client::deploy::remove_deployed(&root, &agent_id)
+                        .map(Some)
+                        .map_err(|error| (agent_id, error))
+                })
+                .await;
+            if let Err((agent_id, error)) = outcome {
+                let notified = view.update(cx, |_view, cx| {
+                    cx.emit(SettingsViewEvent::Notice(SharedString::from(i18n::t!(
+                        "settings.agent_remove_binary_failed",
+                        "agent" => agent_id,
+                        "reason" => error.to_string()
+                    ))));
+                });
+                if let Err(error) = notified {
+                    eprintln!("binary を消せなかった知らせを出せない: {error:#}");
+                }
+            }
+        })
+        .detach();
+    }
+
     /// 足したエージェントの「外す」: `agent_servers.<id>` を消す（一覧から消える）。既定のエージェントと
     /// Captain は外せない（使う / 使わないのスイッチと同じ理由・先に別のエージェントを既定にする）。
     pub(crate) fn remove_custom_agent(
@@ -217,7 +266,11 @@ impl SettingsView {
             return;
         }
         let result = set_agent_server(cx, agent_id, None);
+        let removed = result.is_ok();
         self.report_save(result, cx);
+        if removed {
+            self.remove_agent_binaries(agent_id, cx);
+        }
         cx.notify();
     }
 

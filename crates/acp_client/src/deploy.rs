@@ -123,8 +123,9 @@ impl BinaryTarget<'_> {
         self.deploy_with(root, download_with_curl)
     }
 
-    /// [`Self::deploy`] の本体（落とし方を渡せる・テストは手元のファイルを写す）。
-    pub(crate) fn deploy_with(
+    /// [`Self::deploy`] の本体（落とし方を渡せる・テストは手元のファイルを写す）。URL が https で
+    /// あること・sha256 の照合・展開の確かめは同じく行う。
+    pub fn deploy_with(
         &self,
         root: &Path,
         fetch: impl Fn(&str, &Path) -> Result<(), DeployError>,
@@ -246,6 +247,81 @@ impl BinaryTarget<'_> {
         read_marker(directory)
             .ok_or_else(|| DeployError::CommandMissing(self.distribution.cmd.clone()))
     }
+}
+
+/// 外したエージェントの落とした物を消す（設定の「外す」・`<root>/<id>` の中の **necoder が置いた物だけ**）。
+/// 消した版（プラットフォームのフォルダ）の数を返す。
+///
+/// - `<root>/<id>` が symlink なら何も消さない（necoder は置き場に symlink を作らない＝人が置いた物・
+///   その先は置き場の外）
+/// - 版は、完了の印（`.necoder-deployed.json`）がある `<version>/<os>-<arch>` のフォルダだけを消す。
+///   印の無いフォルダ・知らないファイル・symlink は残す
+/// - 途中の物（`.staging-*` / `.download-*`）は necoder の物なので消す
+/// - 消す時は symlink を辿らない（`remove_dir_all` は中の symlink をリンクとして消し、先は触らない）
+/// - 空になった版のフォルダと `<id>` のフォルダは消す（何か残れば残す）
+///
+/// 同じ id がまだ使われていないか（設定に書き直した等）は呼び手が確かめてから呼ぶ。
+pub fn remove_deployed(root: &Path, id: &str) -> Result<usize, DeployError> {
+    let agent_root = root.join(safe_component(id)?);
+    let metadata = match std::fs::symlink_metadata(&agent_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(io_error("置き場を読めない")(error)),
+    };
+    if !metadata.is_dir() {
+        // symlink か、フォルダでない物（人が置いた物）。necoder の物ではないので触らない。
+        eprintln!(
+            "{} は necoder が置いたフォルダではないので消さない",
+            agent_root.display()
+        );
+        return Ok(0);
+    }
+    let mut removed = 0;
+    let entries = std::fs::read_dir(&agent_root).map_err(io_error("置き場を読めない"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if name.starts_with(".staging-") || name.starts_with(".download-") {
+            let result = if kind.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                // 途中で落とした書庫（ファイル）。symlink ならリンクだけ消える。
+                std::fs::remove_file(&path)
+            };
+            result.map_err(io_error("途中の物を消せない"))?;
+            continue;
+        }
+        if !kind.is_dir() {
+            continue; // 知らないファイル・symlink は残す
+        }
+        let platforms = std::fs::read_dir(&path).map_err(io_error("版のフォルダを読めない"))?;
+        for platform in platforms.flatten() {
+            let is_ours = platform.file_type().is_ok_and(|kind| kind.is_dir())
+                && std::fs::symlink_metadata(platform.path().join(MARKER))
+                    .is_ok_and(|marker| marker.is_file());
+            if is_ours {
+                std::fs::remove_dir_all(platform.path()).map_err(io_error("版を消せない"))?;
+                removed += 1;
+            }
+        }
+        remove_if_empty(&path)?;
+    }
+    remove_if_empty(&agent_root)?;
+    Ok(removed)
+}
+
+/// 空のフォルダなら消す（何か残っていれば残す）。
+fn remove_if_empty(directory: &Path) -> Result<(), DeployError> {
+    let empty = std::fs::read_dir(directory)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false);
+    if empty {
+        std::fs::remove_dir(directory).map_err(io_error("空のフォルダを消せない"))?;
+    }
+    Ok(())
 }
 
 /// 同じエージェント・同じプラットフォームで置いてある版のうち、`except` 以外で一番新しい物
@@ -888,6 +964,98 @@ mod tests {
             Err(DeployError::CommandMissing("./agent".to_string()))
         );
         assert_eq!(target.installed(&root), None, "何も置かない");
+    }
+
+    /// 外す: necoder が置いた版（印のあるフォルダ）と途中の物だけを消し、空になったフォルダも消す。
+    /// 書庫の中の symlink の先（置き場の外）・人が置いたファイル・印の無いフォルダは消さない。
+    #[cfg(unix)]
+    #[test]
+    fn removing_an_agent_deletes_only_what_necoder_placed() {
+        let scratch = Scratch::new("remove");
+        let root = scratch.0.join("binary");
+        let outside = scratch.0.join("outside");
+        std::fs::create_dir_all(&outside).expect("作れる");
+        std::fs::write(outside.join("keep.txt"), "keep").expect("書ける");
+        // 書庫の中に置き場の外を指す symlink がある版（展開はそのまま置く）。
+        let content = scratch.0.join("content");
+        std::fs::create_dir_all(&content).expect("作れる");
+        std::fs::write(content.join("agent"), "#!/bin/sh\n").expect("書ける");
+        std::os::unix::fs::symlink(&outside, content.join("linked")).expect("symlink を作れる");
+        let archive = scratch.0.join("agent.tar.gz");
+        let status = Command::new(tar_program())
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&content)
+            .arg(".")
+            .status()
+            .expect("tar を起こせる");
+        assert!(status.success());
+        for version in ["1.0.0", "1.1.0"] {
+            let binary = distribution("https://example.invalid/agent.tar.gz", "./agent", None);
+            BinaryTarget {
+                id: "amp-acp",
+                version,
+                platform: "darwin-aarch64",
+                distribution: &binary,
+            }
+            .deploy_with(&root, copy_from(archive.clone()))
+            .expect("置ける");
+        }
+        let agent_root = root.join("amp-acp");
+        assert!(agent_root.join("1.1.0/darwin-aarch64/linked").is_symlink());
+        // 途中で落ちた物・人が置いたファイル・印の無いフォルダ。
+        std::fs::create_dir_all(agent_root.join(".staging-1-2")).expect("作れる");
+        std::fs::write(agent_root.join(".download-1-2"), "partial").expect("書ける");
+        std::fs::write(agent_root.join("notes.txt"), "mine").expect("書ける");
+        std::fs::create_dir_all(agent_root.join("2.0.0/linux-x86_64")).expect("作れる");
+        std::fs::write(agent_root.join("2.0.0/linux-x86_64/tool"), "mine").expect("書ける");
+
+        assert_eq!(remove_deployed(&root, "amp-acp"), Ok(2), "印のある 2 版");
+        assert!(!agent_root.join("1.0.0").exists());
+        assert!(!agent_root.join("1.1.0").exists());
+        assert!(!agent_root.join(".staging-1-2").exists());
+        assert!(!agent_root.join(".download-1-2").exists());
+        assert!(
+            outside.join("keep.txt").exists(),
+            "symlink の先（置き場の外）は消さない"
+        );
+        assert!(agent_root.join("notes.txt").exists(), "人が置いた物は残す");
+        assert!(agent_root.join("2.0.0/linux-x86_64/tool").exists());
+
+        // 人の物を片付ければ、次は id のフォルダごと消える。
+        std::fs::remove_file(agent_root.join("notes.txt")).expect("消せる");
+        std::fs::remove_dir_all(agent_root.join("2.0.0")).expect("消せる");
+        assert_eq!(remove_deployed(&root, "amp-acp"), Ok(0));
+        assert!(!agent_root.exists(), "空になったら id のフォルダも消す");
+        assert_eq!(
+            remove_deployed(&root, "amp-acp"),
+            Ok(0),
+            "無ければ何もしない"
+        );
+    }
+
+    /// 外す: id のフォルダが symlink なら、その先（置き場の外）は消さない。id に置き場の外を指す名前は
+    /// 通さない。
+    #[cfg(unix)]
+    #[test]
+    fn removing_never_reaches_outside_the_place() {
+        let scratch = Scratch::new("remove-outside");
+        let root = scratch.0.join("binary");
+        let outside = scratch.0.join("outside");
+        std::fs::create_dir_all(outside.join("1.0.0/darwin-aarch64")).expect("作れる");
+        std::fs::write(outside.join("1.0.0/darwin-aarch64").join(MARKER), "{}").expect("書ける");
+        std::fs::create_dir_all(&root).expect("作れる");
+        std::os::unix::fs::symlink(&outside, root.join("linked-agent")).expect("symlink を作れる");
+        assert_eq!(remove_deployed(&root, "linked-agent"), Ok(0));
+        assert!(
+            outside.join("1.0.0/darwin-aarch64").join(MARKER).exists(),
+            "symlink の先は触らない"
+        );
+        for bad in ["..", "../outside", "a/b", ""] {
+            assert!(remove_deployed(&root, bad).is_err(), "{bad:?}");
+        }
+        assert!(outside.exists());
     }
 
     /// 検証の値が無い物は照合せずに置き、そのことを印に残す。書庫でない実行ファイルは `cmd` の名前で置く。
