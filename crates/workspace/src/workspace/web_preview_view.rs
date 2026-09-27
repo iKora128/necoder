@@ -503,12 +503,15 @@ impl WebPreviewView {
         cx.notify();
     }
 
-    /// 開いた時の URL。
+    /// 開いた時の URL（debug のプローブ `WEB_PREVIEW_PROBE=state` とテストが読む）。
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn url(&self) -> &str {
         &self.url
     }
 
-    /// 内蔵の配信で開いた HTML ファイル（localhost の開発サーバなら `None`）。
+    /// 内蔵の配信で開いた HTML ファイル（localhost の開発サーバなら `None`。debug のプローブと
+    /// テストが読む）。
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn static_file(&self) -> Option<&Path> {
         self.source.as_ref().map(|source| source.file.as_path())
     }

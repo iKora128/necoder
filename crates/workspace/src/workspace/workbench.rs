@@ -1,6 +1,10 @@
 //! リポジトリの机。列は worktree、ペインは表示、セッションは既存 ProjectSession に残す。
 use crate::workspace::*;
 
+/// 作業ペインへの操作。`CloseTab` 以外は、入口だった旧 Fleet グリッドを外した（`6d67b59`）後は
+/// debug のプローブ（`Workspace::debug_workbench_probe`）だけが作る（機能は保持）。release では
+/// 作られないので dead_code を黙らせる（debug で使われなくなれば警告が戻る）。
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum WorkAction {
     Terminal,

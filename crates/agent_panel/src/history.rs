@@ -183,10 +183,11 @@ impl AgentPanel {
         // 送信を待たずに起こす＝再生がすぐ transcript に並ぶ（prompt は送らない）。
         match self.session_cwd(index) {
             Some(cwd) => match self.start_session(index, cwd, cx) {
-                Some((command_tx, serial)) => {
+                Some((command_tx, serial, usage_key)) => {
                     if let Some(thread) = self.threads.get_mut(index) {
                         thread.command_tx = Some(command_tx);
                         thread.session_serial = serial;
+                        thread.usage_key = Some(usage_key);
                         thread.session_lost = false;
                     }
                 }
@@ -300,10 +301,11 @@ impl AgentPanel {
         // 送信を待たずに新しいセッションを起こす（ピルとトークンの表示が新しい会話に揃う）。
         // エージェントが無ければ黙る（送信すれば同じ経路でエラーが出る）。
         if let Some(cwd) = self.session_cwd(index) {
-            if let Some((command_tx, serial)) = self.start_session(index, cwd, cx) {
+            if let Some((command_tx, serial, usage_key)) = self.start_session(index, cwd, cx) {
                 if let Some(thread) = self.threads.get_mut(index) {
                     thread.command_tx = Some(command_tx);
                     thread.session_serial = serial;
+                    thread.usage_key = Some(usage_key);
                 }
             }
         }
