@@ -349,9 +349,9 @@ impl UsageKey {
         Self::with_override(agent, host, agent_override.as_ref())
     }
 
-    /// 設定の上書き（`agent_servers.<id>`）から作る（[`Self::for_agent`] の本体）。見るのは env だけ
-    /// （置き場のパスと、認証に関わる env の指紋）。
-    fn with_override(
+    /// 設定の上書き（`agent_servers.<id>`）から作る（[`Self::for_agent`] の本体。セッションを立てる時は
+    /// 起動に渡すのと同じ上書きからこれで作る）。見るのは env だけ（置き場のパスと、認証に関わる env の指紋）。
+    pub(crate) fn with_override(
         agent: SharedString,
         host: SharedString,
         agent_override: Option<&acp_client::AgentOverride>,
@@ -454,6 +454,50 @@ impl UsageLimits {
     pub fn agents(&self) -> impl Iterator<Item = (&UsageKey, &AgentLimits)> {
         self.agents.iter()
     }
+
+    /// Codex を `key`（手元の Codex × codex へ渡す env）で読みに行くかを決め、行くなら読み込み中にする
+    /// （[`refresh_codex_limits`] の前半）。同じ鍵なら、読んでいる間と、`force` でなければ直近
+    /// [`CODEX_REFRESH_INTERVAL_MS`] 以内は読まない。認証の環境を変えた後（鍵が違う）は、前の鍵の
+    /// 読み取りの間隔を待たない（別のアカウントを読む）。
+    fn begin_codex_read(&mut self, key: &UsageKey, force: bool, now_ms: i64) -> bool {
+        let same_key = self.codex_key.as_ref() == Some(key);
+        if same_key
+            && (self.codex == CodexRead::Loading
+                || (!force && now_ms - self.codex_attempted_at_ms < CODEX_REFRESH_INTERVAL_MS))
+        {
+            return false;
+        }
+        self.codex = CodexRead::Loading;
+        self.codex_key = Some(key.clone());
+        self.codex_attempted_at_ms = now_ms;
+        true
+    }
+
+    /// Codex の読み取りが終わった（[`refresh_codex_limits`] の後半）。値は読みに行った鍵へ重ねる。
+    /// 読んでいる間に認証の環境を変えて別の鍵で読み直していたら、状態（読み込み中 / 失敗）はそちらの
+    /// 物なので、この古い読み取りの結果では上書きしない。
+    fn finish_codex_read(
+        &mut self,
+        key: UsageKey,
+        result: anyhow::Result<RateLimits>,
+        now_ms: i64,
+    ) {
+        let current = self.codex_key.as_ref() == Some(&key);
+        match result {
+            Ok(snapshot) => {
+                self.record(key, snapshot, now_ms);
+                if current {
+                    self.codex = CodexRead::Idle;
+                }
+            }
+            Err(error) => {
+                eprintln!("Codex の利用上限を読めない: {error:#}");
+                if current {
+                    self.codex = CodexRead::Failed(SharedString::from(format!("{error:#}")));
+                }
+            }
+        }
+    }
 }
 
 /// Codex のラベル（`AgentKind` の表示名。スレッドの `agent` と同じ綴り）。
@@ -504,17 +548,9 @@ pub fn refresh_codex_limits(force: bool, cx: &mut App) {
     let Some(codex) = codex else {
         return;
     };
-    // 認証の環境を変えた後は、前の鍵の読み取りの間隔を待たない（別のアカウントを読む）。
-    let same_key = limits.codex_key.as_ref() == Some(&key);
-    if same_key
-        && (limits.codex == CodexRead::Loading
-            || (!force && now - limits.codex_attempted_at_ms < CODEX_REFRESH_INTERVAL_MS))
-    {
+    if !limits.begin_codex_read(&key, force, now) {
         return;
     }
-    limits.codex = CodexRead::Loading;
-    limits.codex_key = Some(key.clone());
-    limits.codex_attempted_at_ms = now;
     let env = agent_override
         .map(|agent_override| agent_override.env)
         .unwrap_or_default();
@@ -524,23 +560,8 @@ pub fn refresh_codex_limits(force: bool, cx: &mut App) {
     cx.spawn(async move |cx| {
         let result = read.await;
         cx.update(|cx| {
-            let limits = cx.default_global::<UsageLimits>();
-            // 読んでいる間に認証の環境を変えて読み直した: 古い読み取りの結果で新しい状態を上書きしない。
-            let current = limits.codex_key.as_ref() == Some(&key);
-            match result {
-                Ok(snapshot) => {
-                    limits.record(key, snapshot, crate::now_unix_ms());
-                    if current {
-                        limits.codex = CodexRead::Idle;
-                    }
-                }
-                Err(error) => {
-                    eprintln!("Codex の利用上限を読めない: {error:#}");
-                    if current {
-                        limits.codex = CodexRead::Failed(SharedString::from(format!("{error:#}")));
-                    }
-                }
-            }
+            cx.default_global::<UsageLimits>()
+                .finish_codex_read(key, result, crate::now_unix_ms());
         });
     })
     .detach();
@@ -991,6 +1012,88 @@ mod tests {
             only.label()
         );
         assert!(!format!("{only:?} {}", only.label()).contains(secret));
+    }
+
+    /// R08: Codex の読み取りは読みに行った鍵へ重ねる。認証の環境を変えた直後に読み直した時、変える前に
+    /// 始めた古い読み取りが後から終わっても、新しい鍵の状態（読み込み中 / 失敗 /「再読み込み」の行）を
+    /// 上書きしない。
+    #[test]
+    fn a_stale_codex_read_does_not_overwrite_the_new_key() {
+        let codex_key = |pairs: &[(&str, &str)]| {
+            UsageKey::with_override(
+                SharedString::from("Codex"),
+                SharedString::default(),
+                Some(&with_env(pairs)),
+            )
+        };
+        let work = codex_key(&[("CODEX_HOME", "/tmp/codex-work")]);
+        let keyed = codex_key(&[("OPENAI_API_KEY", "sk-second")]);
+        let at = |percent: f64| RateLimits {
+            status: None,
+            windows: vec![window(LimitWindow::FiveHour, Some(percent), Some(9_000))],
+        };
+        let percent = |limits: &UsageLimits, key: &UsageKey| {
+            limits
+                .get(key)
+                .and_then(|limits| limits.windows.first())
+                .and_then(|reading| reading.used_percent)
+        };
+
+        // 古い環境の読み取りの途中で env を変え、新しい環境で読み直す（間隔を待たない）。
+        let mut limits = UsageLimits::default();
+        assert!(limits.begin_codex_read(&work, false, 1_000));
+        assert!(
+            !limits.begin_codex_read(&work, false, 2_000),
+            "同じ鍵は読んでいる間は重ねない"
+        );
+        assert!(
+            limits.begin_codex_read(&keyed, false, 3_000),
+            "env を変えた直後は前の読み取りを待たずに新しい鍵を読む"
+        );
+        assert_eq!(limits.codex_key.as_ref(), Some(&keyed));
+
+        // 古い読み取りが後から成功: 値は古い鍵へ。状態は新しい鍵の読み込み中のまま。
+        limits.finish_codex_read(work.clone(), Ok(at(40.0)), 4_000);
+        assert_eq!(limits.codex, CodexRead::Loading);
+        assert_eq!(limits.codex_key.as_ref(), Some(&keyed));
+        assert_eq!(percent(&limits, &work), Some(40.0));
+        assert_eq!(
+            percent(&limits, &keyed),
+            None,
+            "古い値を新しい鍵の値にしない"
+        );
+
+        // 新しい読み取りが終われば、値は新しい鍵へ・状態は戻る。
+        limits.finish_codex_read(keyed.clone(), Ok(at(10.0)), 5_000);
+        assert_eq!(limits.codex, CodexRead::Idle);
+        assert_eq!(percent(&limits, &keyed), Some(10.0));
+        assert_eq!(percent(&limits, &work), Some(40.0));
+        assert!(
+            !limits.begin_codex_read(&keyed, false, 6_000),
+            "同じ鍵は 60 秒以内に読み直さない"
+        );
+        assert!(
+            limits.begin_codex_read(&keyed, true, 6_000),
+            "「再読み込み」は待たない"
+        );
+
+        // 古い読み取りが後から失敗しても、新しい鍵の行に失敗を出さない。今の鍵の失敗は出す。
+        let mut limits = UsageLimits::default();
+        assert!(limits.begin_codex_read(&work, false, 1_000));
+        assert!(limits.begin_codex_read(&keyed, false, 2_000));
+        limits.finish_codex_read(work.clone(), Err(anyhow::anyhow!("stale failure")), 3_000);
+        assert_eq!(limits.codex, CodexRead::Loading);
+        assert!(limits.get(&work).is_none(), "失敗は値を残さない");
+        limits.finish_codex_read(
+            keyed.clone(),
+            Err(anyhow::anyhow!("authentication required")),
+            4_000,
+        );
+        assert_eq!(
+            limits.codex,
+            CodexRead::Failed(SharedString::from("authentication required"))
+        );
+        assert_eq!(limits.codex_key.as_ref(), Some(&keyed));
     }
 
     /// 指紋に入れる env の範囲（[`CREDENTIAL_WORDS`]）: 資格情報・接続先・アカウントの範囲・提供元の

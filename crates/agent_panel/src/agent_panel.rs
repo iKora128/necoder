@@ -1178,6 +1178,11 @@ struct Thread {
     last_active_at_ms: i64,
     /// ターンのトークンとコストの数え方（O11）。ターンが終わるたびに台帳 `turn_usage` へ書く。
     usage: usage::CostMeter,
+    /// 今のセッションの使用量の鍵（R08）。セッションを立てた時の宛先と設定（`agent_servers.<id>.env`）で
+    /// 決め、そのセッションのレート制限の知らせはここへ重ねる。後で設定を変えても、動いている
+    /// セッションは前の鍵のまま（アカウントの切り替えは次に立てるセッションから効く・O14）。
+    /// セッションを 1 度も立てていなければ `None`。
+    usage_key: Option<usage::UsageKey>,
     /// エージェント側の過去の会話を開いたばかりで、`session/load` の再生を待っている（O15）。
     /// 起動時に `replay_history` を頼み、再生を transcript に積んだら（`SessionStarted` で）下ろす。
     replay_pending: bool,
@@ -1253,6 +1258,7 @@ impl Thread {
             session_resumable: false,
             last_active_at_ms: 0,
             usage: usage::CostMeter::default(),
+            usage_key: None,
             replay_pending: false,
             handoff_preamble: None,
         }
@@ -3114,11 +3120,27 @@ PYEOF"#;
             .map(|thread| thread.agent.clone())
     }
 
-    /// いまのスレッドの使用量の鍵（エージェント + 動かしている場所 + 認証の置き場・R08）。
-    /// 描画から呼ぶので Host は呼ばない（場所は宛先を受け取った時に控えた値）。
+    /// いまのスレッドの使用量の鍵（エージェント + 動かしている場所 + 認証の環境・R08。statusbar の
+    /// チップとポップオーバーの並び）。セッションが動いていれば立てた時にスレッドへ持たせた鍵、
+    /// 無ければ今の宛先と設定で立てた時に付く鍵。描画から呼ぶので Host は呼ばない（場所は宛先を
+    /// 受け取った時に控えた値）。
     pub fn active_usage_key(&self, cx: &App) -> Option<usage::UsageKey> {
-        self.active_agent()
-            .map(|agent| usage::UsageKey::for_agent(agent, self.dest_host_label.clone(), cx))
+        let thread = self.threads.get(self.active)?;
+        Some(match (&thread.command_tx, &thread.usage_key) {
+            (Some(_), Some(key)) => key.clone(),
+            _ => self.prospective_usage_key(self.active, cx),
+        })
+    }
+
+    /// 今の宛先（場所）と設定（`agent_servers.<id>.env`）でこのスレッドのセッションを立てた時に付く
+    /// 鍵（[`Self::start_session`] と同じ作り方）。Host は呼ばない。
+    fn prospective_usage_key(&self, thread_index: usize, cx: &App) -> usage::UsageKey {
+        let agent = self
+            .threads
+            .get(thread_index)
+            .map(|thread| thread.agent.clone())
+            .unwrap_or_else(|| SharedString::from("Claude Code"));
+        usage::UsageKey::for_agent(agent, self.dest_host_label.clone(), cx)
     }
 
     pub fn contains_thread(&self, id: &str) -> bool {
@@ -4333,10 +4355,11 @@ PYEOF"#;
             return;
         }
         match self.start_session(thread_index, cwd, cx) {
-            Some((command_tx, serial)) => {
+            Some((command_tx, serial, usage_key)) => {
                 if let Some(thread) = self.threads.get_mut(thread_index) {
                     thread.command_tx = Some(command_tx);
                     thread.session_serial = serial;
+                    thread.usage_key = Some(usage_key);
                     thread.session_lost = false;
                     thread.session_note =
                         Some(SharedString::from(i18n::t!("agent.session_resuming")));
@@ -4408,12 +4431,13 @@ PYEOF"#;
         if !self.prewarmed.insert(thread_id.to_string()) {
             return;
         }
-        let Some((command_tx, serial)) = self.start_session(index, cwd, cx) else {
+        let Some((command_tx, serial, usage_key)) = self.start_session(index, cwd, cx) else {
             return; // エージェントが導入されていない。ここでは黙る
         };
         if let Some(thread) = self.threads.get_mut(index) {
             thread.command_tx = Some(command_tx);
             thread.session_serial = serial;
+            thread.usage_key = Some(usage_key);
             thread.session_lost = false;
             thread.session_used = false;
         }
@@ -6348,10 +6372,11 @@ PYEOF"#;
             .is_some_and(|thread| thread.command_tx.is_some());
         if !has_session {
             match self.start_session(thread_index, cwd, cx) {
-                Some((command_tx, serial)) => {
+                Some((command_tx, serial, usage_key)) => {
                     if let Some(thread) = self.threads.get_mut(thread_index) {
                         thread.command_tx = Some(command_tx);
                         thread.session_serial = serial;
+                        thread.usage_key = Some(usage_key);
                         thread.session_lost = false;
                     }
                 }
@@ -6411,14 +6436,15 @@ PYEOF"#;
     }
 
     /// スレッド用の常駐 ACP セッションを起動する。バックグラウンドで `run_session` を回し、
-    /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドルを返す。
+    /// フォアグラウンドで受信イベントを [`Self::on_event`] に適用する。送信ハンドル・通し番号・
+    /// 使用量の鍵（起動した宛先と env で決まる・R08）を返す。呼び手は鍵をスレッドに持たせる。
     /// claude-agent-acp が見つからなければ `None`。
     fn start_session(
         &self,
         thread_index: usize,
         cwd: PathBuf,
         cx: &mut Context<Self>,
-    ) -> Option<(mpsc::UnboundedSender<SessionCommand>, u64)> {
+    ) -> Option<(mpsc::UnboundedSender<SessionCommand>, u64, usage::UsageKey)> {
         // セッションの通し番号。ポンプ終了の後始末（`session_ended`）が「今のセッション」の
         // ものかを照合する。畳んだ直後に立て直した新セッションを、古いポンプが巻き込まないため。
         static SESSION_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -6443,6 +6469,13 @@ PYEOF"#;
         // 起動方法は **設定 → 公開レジストリ → 組み込みカタログ** の順で決める。
         // レジストリはキャッシュを読むだけ（ここは UI thread・ネットワークへは行かない）。
         let agent_override = agent_server_override(kind.id, cx);
+        // このセッションの使用量の鍵は、起動に渡すのと同じ宛先と env から今決める（R08。後で設定を
+        // 変えても、このセッションの知らせは立てた時の鍵へ重ねる）。
+        let usage_key = usage::UsageKey::with_override(
+            agent_label.clone(),
+            self.dest_host_label.clone(),
+            agent_override.as_ref(),
+        );
         let registry = acp_client::registry::load_cached();
         // local はここで解決する（PATH 探索だけ・一瞬）。remote は `command -v` を SSH 越しに
         // 流す＝往復なので、下の背景タスクの中で解決する（UI スレッドで再接続を待たない）。
@@ -6573,7 +6606,7 @@ PYEOF"#;
         })
         .detach();
 
-        Some((command_tx, serial))
+        Some((command_tx, serial, usage_key))
     }
 
     /// `run_session` の [`AgentEvent`] を transcript へ逐次反映する（ストリーミングの心臓部）。
@@ -6591,8 +6624,10 @@ PYEOF"#;
         let mut stocked_configs: Option<(SharedString, Vec<ConfigOption>)> = None;
         let mut stocked_modes: Option<(SharedString, Vec<(SharedString, SharedString)>)> = None;
         let mut stocked_commands: Option<(SharedString, Vec<acp_client::SlashCommand>)> = None;
-        // レート制限の知らせ（O11）。agent ごとの全体の置き場（Global）へ末尾で重ねる。
-        let mut rate_limits: Option<(SharedString, acp_client::usage::RateLimits)> = None;
+        // レート制限の知らせ（O11）。鍵ごとの全体の置き場（Global）へ末尾で重ねる。鍵はスレッドが持つ
+        // 「セッションを立てた時の鍵」（R08）。`None` = セッションを立てていない（今の宛先と設定で決める）。
+        let mut rate_limits: Option<(Option<usage::UsageKey>, acp_client::usage::RateLimits)> =
+            None;
         // 会話名を送ってきた agent（在庫に「自分で名付ける」と控える）と、付け替えた名前。
         let mut titled_by_agent: Option<SharedString> = None;
         let mut agent_renamed: Option<SharedString> = None;
@@ -6836,9 +6871,10 @@ PYEOF"#;
                     thread.usage.observe_total(amount);
                 }
             }
-            // レート制限（O11）はアカウント単位＝エージェントごとに 1 つを共有する（末尾で反映）。
+            // レート制限（O11）はアカウント単位＝鍵が同じなら 1 つを共有する（末尾で反映）。鍵は
+            // このセッションを立てた時の宛先と env（R08）。
             AgentEvent::RateLimits(limits) => {
-                rate_limits = Some((thread.agent.clone(), limits));
+                rate_limits = Some((thread.usage_key.clone(), limits));
             }
             // ターンに使ったトークン（O11）。TurnEnded でコストと一緒に台帳へ書く。
             AgentEvent::TurnUsage(tokens) => thread.usage.observe_tokens(tokens),
@@ -7335,9 +7371,11 @@ PYEOF"#;
         if let Some((agent, commands)) = stocked_commands {
             self.catalog.entry(agent).or_default().commands = commands;
         }
-        if let Some((agent, limits)) = rate_limits {
-            // 鍵は「エージェント + 動かしている場所 + 認証の置き場」（R08・SSH 先や別の置き場の値と混ぜない）。
-            let key = usage::UsageKey::for_agent(agent, self.dest_host_label.clone(), cx);
+        if let Some((key, limits)) = rate_limits {
+            // 鍵は「エージェント + 動かしている場所 + 認証の環境」（R08・SSH 先や別の環境の値と混ぜない）。
+            // セッションを立てた時の鍵を使う（今の設定から作り直すと、切り替える前から動いている
+            // セッションの値が新しい鍵に入ってしまう）。
+            let key = key.unwrap_or_else(|| self.prospective_usage_key(thread_index, cx));
             // `default_global` は観測者（全ウィンドウの statusbar）を起こす＝値が変わった時だけ呼ぶ。
             cx.default_global::<usage::UsageLimits>()
                 .record(key, limits, now_unix_ms());
@@ -12703,6 +12741,7 @@ fn seed_threads() -> Vec<Thread> {
         session_resumable: false,
         last_active_at_ms: 0,
         usage: usage::CostMeter::default(),
+        usage_key: None,
         replay_pending: false,
         handoff_preamble: None,
         entries: vec![
@@ -16310,5 +16349,132 @@ PYEOF"#;
         );
         let _ = std::fs::remove_file(settings_path);
         let _ = std::fs::remove_file(db_path);
+    }
+
+    /// R08: 同じ Claude Code でも、認証の環境（設定 `agent_servers.claude.env`）を変えた前後で立てた
+    /// 2 本のセッションの知らせは別々の鍵へ重なり、混ざらない。動いているセッションは後で設定を変えても
+    /// 立てた時の鍵のまま。statusbar のチップ（`active_usage_key`）はいまのスレッドの鍵に従う。
+    /// プロセスは起こさない（鍵は本番の `start_session` と同じく、立てる時の宛先と設定から作る）。
+    #[gpui::test]
+    fn rate_limits_of_two_auth_environments_do_not_mix(cx: &mut gpui::TestAppContext) {
+        use acp_client::usage::{LimitStatus, LimitWindow, RateLimits, WindowUsage};
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_usage_keys_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_auto_name":false,"tier2_summaries":false,"sound_done":"off","agent_prewarm":false,
+                "agent_servers":{"claude":{"type":"registry","env":{"CLAUDE_CODE_OAUTH_TOKEN":"token-work"}}}}"#,
+        )
+        .expect("設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let now_secs = now_unix_ms() / 1000;
+        let limits_at = |percent: f64| {
+            AgentEvent::RateLimits(RateLimits {
+                status: Some(LimitStatus::Allowed),
+                windows: vec![WindowUsage {
+                    window: LimitWindow::FiveHour,
+                    used_percent: Some(percent),
+                    resets_at: Some(now_secs + 3_600),
+                }],
+            })
+        };
+        // セッションを立てたのと同じにする: 送信路と、立てる時の宛先と設定で決まる鍵をスレッドに持たせる。
+        let attach = |panel: &mut AgentPanel,
+                      index: usize,
+                      cx: &mut Context<AgentPanel>|
+         -> (usage::UsageKey, mpsc::UnboundedReceiver<SessionCommand>) {
+            let key = panel.prospective_usage_key(index, cx);
+            let (command_tx, commands) = mpsc::unbounded::<SessionCommand>();
+            panel.threads[index].command_tx = Some(command_tx);
+            panel.threads[index].usage_key = Some(key.clone());
+            (key, commands)
+        };
+
+        // 1 本目: 仕事用のトークンでセッションを立てる。
+        let (first, work, _first_commands) = panel.update(cx, |panel, cx| {
+            let first = panel.active;
+            let (work, commands) = attach(panel, first, cx);
+            (first, work, commands)
+        });
+        // 設定の env を個人用のトークンへ変えてから、2 本目のセッションを立てる。
+        cx.update(|_window, cx| {
+            settings::set_user_value(
+                cx,
+                "agent_servers",
+                serde_json::json!({
+                    "claude": {"type": "registry", "env": {"CLAUDE_CODE_OAUTH_TOKEN": "token-personal"}}
+                }),
+            )
+            .expect("設定を書き換えられる");
+        });
+        let (second, personal, _second_commands) = panel.update(cx, |panel, cx| {
+            let second = panel.new_thread_index(cx);
+            let (personal, commands) = attach(panel, second, cx);
+            (second, personal, commands)
+        });
+        assert_ne!(work, personal, "認証の環境が違えば別の鍵");
+        assert_eq!(
+            work.profile.as_ref(),
+            "",
+            "置き場のパスではなく env の指紋で分かれる"
+        );
+
+        panel.update(cx, |panel, cx| {
+            // 設定は個人用に変わった後でも、1 本目のセッションの知らせは仕事用の鍵へ。
+            panel.on_event(first, limits_at(20.0), cx);
+            panel.on_event(second, limits_at(70.0), cx);
+            let limits = cx
+                .try_global::<usage::UsageLimits>()
+                .expect("レート制限の置き場がある");
+            assert_eq!(
+                limits.get(&work).map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 20.0)])
+            );
+            assert_eq!(
+                limits
+                    .get(&personal)
+                    .map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 70.0)])
+            );
+            assert!(
+                limits.agent("Claude Code").is_none(),
+                "既定の環境の鍵には何も重ねない"
+            );
+            assert_eq!(limits.agents().count(), 2);
+
+            // チップはいまのスレッドの鍵を見る。
+            assert_eq!(panel.active, second);
+            assert_eq!(panel.active_usage_key(cx), Some(personal.clone()));
+            panel.focus_thread(first, cx);
+            assert_eq!(
+                panel.active_usage_key(cx),
+                Some(work.clone()),
+                "前の設定で立てたセッションのスレッドは、前の鍵の値を出す"
+            );
+            // セッションが畳まれたスレッドは、今の設定で立て直した時の鍵を見る（前の鍵の値を今の値として
+            // 見せない）。
+            panel.threads[first].command_tx = None;
+            assert_eq!(panel.active_usage_key(cx), Some(personal.clone()));
+            // 畳んだ後に遅れて届いた前のセッションの知らせも、そのセッションの鍵へ。
+            panel.on_event(first, limits_at(25.0), cx);
+            let limits = cx
+                .try_global::<usage::UsageLimits>()
+                .expect("レート制限の置き場がある");
+            assert_eq!(
+                limits.get(&work).map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 25.0)])
+            );
+            assert_eq!(
+                limits
+                    .get(&personal)
+                    .map(|limits| limits.headline(now_secs)),
+                Some(vec![(LimitWindow::FiveHour, 70.0)])
+            );
+        });
+        let _ = std::fs::remove_file(settings_path);
     }
 }
