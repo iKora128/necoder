@@ -112,6 +112,8 @@ agent:
   permission_files: "%{title} (%{n} files)"
   done: Done %{elapsed}
   done_touched: Done %{elapsed} · touched %{n} files
+  turn_failed: Failed %{elapsed}
+  turn_interrupted: Stopped %{elapsed}
   close_thread_tip: Close thread  ⌘W
   rename_thread_tip: Rename (double-click)
   rename_thread_title: Rename thread

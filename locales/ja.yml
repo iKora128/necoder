@@ -113,6 +113,8 @@ agent:
   permission_files: "%{title}（%{n} ファイル）"
   done: 完了 %{elapsed}
   done_touched: 完了 %{elapsed}・触ったファイル %{n}
+  turn_failed: 失敗 %{elapsed}
+  turn_interrupted: 中断 %{elapsed}
   close_thread_tip: スレッドを閉じる  ⌘W
   rename_thread_tip: 名前を変更（ダブルクリック）
   rename_thread_title: スレッド名を変更

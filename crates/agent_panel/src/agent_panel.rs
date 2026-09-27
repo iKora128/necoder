@@ -7493,12 +7493,21 @@ PYEOF"#;
                     .turn_started_at
                     .map(|at| format!("{:.0}s", at.elapsed().as_secs_f32()))
                     .unwrap_or_default();
-                let summary = if thread.touched_files.is_empty() {
-                    SharedString::from(i18n::t!("agent.done", "elapsed" => elapsed))
-                } else {
-                    SharedString::from(
+                // 窓の中のトーストの文。終わり方で言い分ける（起動に失敗したのに「完了」と出していた。
+                // OS 通知の方は元から `AgentAlert::from_outcome` で分けている）。
+                let summary = match turn_outcome {
+                    TurnOutcome::Failed => {
+                        SharedString::from(i18n::t!("agent.turn_failed", "elapsed" => elapsed))
+                    }
+                    TurnOutcome::Interrupted => {
+                        SharedString::from(i18n::t!("agent.turn_interrupted", "elapsed" => elapsed))
+                    }
+                    TurnOutcome::Completed if thread.touched_files.is_empty() => {
+                        SharedString::from(i18n::t!("agent.done", "elapsed" => elapsed))
+                    }
+                    TurnOutcome::Completed => SharedString::from(
                         i18n::t!("agent.done_touched", "elapsed" => elapsed, "n" => thread.touched_files.len()),
-                    )
+                    ),
                 };
                 cx.emit(PanelEvent::TurnEnded {
                     thread: thread.name.clone(),
@@ -16092,6 +16101,66 @@ PYEOF"#;
         });
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(settings_path);
+    }
+
+    /// 窓の中のトースト（`PanelEvent::TurnEnded` の summary）は終わり方で言い分ける。起動に失敗した
+    /// スレッドにも「完了」と出していた（#38 の追加エージェントで目立った）。
+    #[gpui::test]
+    fn the_turn_toast_says_how_the_turn_ended(cx: &mut gpui::TestAppContext) {
+        let settings_path = std::env::temp_dir().join(format!(
+            "necoder_agent_turn_toast_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        // 終わった後に AI で名前・要約を付けに行かない（テストで本物のエージェントを起こさない）。
+        std::fs::write(
+            &settings_path,
+            r#"{"onboarded":true,"agent_auto_name":false,"tier2_summaries":false}"#,
+        )
+        .expect("テスト用の設定を書ける");
+        cx.update(|cx| settings::init(Some(settings_path.clone()), None, cx));
+        let (panel, cx) = cx.add_window_view(|_window, cx| AgentPanel::new(Theme::dark(), cx));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let recorder = seen.clone();
+        cx.update(|_window, cx| {
+            cx.subscribe(&panel, move |_panel, event: &PanelEvent, _cx| {
+                if let PanelEvent::TurnEnded {
+                    summary, outcome, ..
+                } = event
+                {
+                    recorder.borrow_mut().push((*outcome, summary.to_string()));
+                }
+            })
+            .detach();
+        });
+        panel.update(cx, |panel, cx| {
+            let active = panel.active;
+            for ending in [
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Completed,
+                },
+                AgentEvent::TurnEnded {
+                    reason: TurnEnd::Interrupted,
+                },
+                AgentEvent::Failed("agent exited right after starting".into()),
+            ] {
+                panel.on_event(active, AgentEvent::TurnStarted, cx);
+                panel.on_event(active, ending, cx);
+            }
+        });
+        cx.run_until_parked();
+        let head = |key: &str| i18n::t!(key, "elapsed" => "").trim().to_string();
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(seen[0].0, TurnOutcome::Completed);
+        assert!(seen[0].1.starts_with(&head("agent.done")), "{seen:?}");
+        assert_eq!(seen[1].0, TurnOutcome::Interrupted);
+        assert!(seen[1].1.starts_with(&head("agent.turn_interrupted")), "{seen:?}");
+        assert_eq!(seen[2].0, TurnOutcome::Failed);
+        assert!(seen[2].1.starts_with(&head("agent.turn_failed")), "{seen:?}");
+        if let Err(error) = std::fs::remove_file(settings_path) {
+            eprintln!("テスト用の設定を消せない: {error}");
+        }
     }
 
     /// クリック → イベント。行/桁は**1 始まりのまま**上へ渡す（0 始まりへの変換は workspace）。
