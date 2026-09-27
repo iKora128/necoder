@@ -4305,7 +4305,9 @@ mod tests {
                 session._watch_pump = None;
             }
         });
-        let _ = std::fs::remove_dir_all(root);
+        if let Err(error) = std::fs::remove_dir_all(&root) {
+            eprintln!("一時ディレクトリを消せない（{}）: {error}", root.display());
+        }
     }
 
     /// Windows / Linux では ⌃ + 文字がシェルへ届く（全域の Ctrl+F / Ctrl+W / Ctrl+P / Ctrl+J に
