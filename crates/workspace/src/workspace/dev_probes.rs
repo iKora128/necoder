@@ -540,7 +540,8 @@ impl Workspace {
     /// `menu` = セル 0 の ⋯ メニューを開く / `terminal` = 下段をターミナルタブへ /
     /// `tall` = 下段を高さ 320px（ドラッグ結果と同じ状態）/ `close-all` = 全セルを × して残数を出す。
     /// 画面の組み立て（`;` 区切り）: `graph` / `formation` / `task:<n>`（統合先を除く n 本目の Task・1 始まり）/
-    /// `side:<diff|terminal|files>`（その Task カードのサイドペイン。diff = 変更レビュー）/ `columns:<n>` / `pin` / `captain`。
+    /// `side:<diff|terminal|files>`（その Task カードのサイドペイン。diff = 変更レビュー）/ `columns:<n>` / `pin` / `captain` /
+    /// `filter:<語>` / `select:<n>`（O21）/ `creating`（O20 の作成中の行）/ `compare:<n>`（O23）。
     /// **実クリックの代わりに同じ入口を叩く**ので、経路（open → 実行）まで機械検証できる。
     #[cfg(debug_assertions)]
     pub fn debug_fleet_probe(
@@ -673,6 +674,52 @@ impl Workspace {
             }
             // レールの「AI スレッド一覧」を押す（左カラムの herd ⇄ エクスプローラ）。
             "threads" => self.toggle_herd_sidebar(cx),
+            // Fleet サイドバーの絞り込み欄に語を入れる（O21・欄は Task が 6 本以上か語がある時だけ出る）。
+            "filter" => {
+                let query = argument.to_string();
+                self.chrome
+                    .fleet_filter
+                    .update(cx, |filter, cx| filter.set_plain_text(&query, cx));
+            }
+            // n 本目の Task（統合先を除く・1 始まり）を複数選択に足す（⌘ クリックと同じ・O21）。
+            // `select:1;select:3` で選択の帯が出る。
+            "select" => {
+                let wanted = argument.parse::<usize>().unwrap_or(1).max(1);
+                let space = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .filter(|slot| !slot.task_space.is_integration())
+                    .nth(wanted - 1)
+                    .map(|slot| slot.task_space.id.clone());
+                if let Some(space) = space {
+                    self.toggle_fleet_selection(space, cx);
+                }
+            }
+            // ＋ Task の作成中の行を段ごとに仕込む（O20・worktree は作らない）。
+            "creating" => self.debug_seed_task_creations(cx),
+            // 並べて比べる（O23）: 先頭から n 本（2〜3）の Task を舞台に並べ、各カードの「変更」を開く
+            // （fan-out が作り終えた時と同じ `show_fanout_on_stage`）。
+            "compare" => {
+                let count = argument.parse::<usize>().unwrap_or(2).clamp(2, 3);
+                let targets: Vec<(usize, SpaceId)> = self
+                    .project_sessions
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, slot)| !slot.task_space.is_integration())
+                    .take(count)
+                    .map(|(index, slot)| (index, slot.task_space.id.clone()))
+                    .collect();
+                self.seed_fleet_cells(cx);
+                self.show_fanout_on_stage(
+                    targets.iter().map(|(_, space)| space.clone()).collect(),
+                    cx,
+                );
+                for (index, space) in targets {
+                    self.set_stage_side(index, Some(FleetPane::Diff { space }), cx);
+                }
+            }
             "menu" => self.open_fleet_cell_menu(0, point(px(760.), px(210.)), cx),
             // セル 0 を拡大してヘッダのタイトルを改名開始（Cell site で入力欄が出る／herd と二重描画しない）。
             "rename" => {

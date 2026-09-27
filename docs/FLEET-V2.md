@@ -651,6 +651,9 @@ NECODER_HOME=$ISO/home NECODER_GUI_SOCK=$ISO/gui.sock NECODER_DOCUMENTS_DIR=$ISO
 | `origin` | 1 本目の Task に `⚑` 帰属を付ける（分解案の承認で作られた Task の行の見た目） |
 | `editor` / `threads` | Fleet から Editor へ戻る（titlebar の `Editor` と同じ道）/ レールの AI スレッド一覧を押す（`graph;editor` で「戻った直後の左カラム」を撮れる） |
 | `columns:<n>` / `pin` | 舞台の列数 / 選択中の Task をピン |
+| `filter:<語>` / `select:<n>` | サイドバーの絞り込み欄に語を入れる / n 本目の Task を複数選択に足す（O21・`select:1;select:3` で帯が出る） |
+| `creating` | ＋ Task の作成中の行を段ごとに仕込む（O20・worktree は作らない） |
+| `compare:<n>` | 先頭から n 本（2〜3）の Task を舞台に並べ、各カードの「変更」を開く（O23 の並べて比べる） |
 | `menu` / `rename` / `maximize` / `terminal` / `tall` / `close-all` | 従来の片付け UI・下段の検証 |
 
 ## 11. 今回確定した判断（DECISIONS に転記済み）

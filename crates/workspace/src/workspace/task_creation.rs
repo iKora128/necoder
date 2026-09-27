@@ -653,6 +653,46 @@ impl Workspace {
         );
     }
 
+    /// 開発用（`NECODER_FLEET_PROBE=creating`）: 作成中の行を段ごとに仕込む（worktree は作らない・
+    /// O20 の見た目の検証）。選んでいるリポジトリに出す。
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_seed_task_creations(&mut self, cx: &mut Context<Self>) {
+        let Some(repository_key) = self
+            .active_slot()
+            .map(|slot| slot.repository_key().to_string())
+        else {
+            return;
+        };
+        let rows = [
+            ("ログイン画面の文言を直す", CreationStage::Worktree),
+            ("依存を上げる", CreationStage::Setup),
+            ("API のテストを足す · Codex", CreationStage::Waiting),
+            (
+                "README を整える",
+                CreationStage::Failed(SharedString::from(
+                    "fatal: 'task/readme' is already checked out",
+                )),
+            ),
+        ];
+        for (title, stage) in rows {
+            let task = FanoutTask {
+                slug_source: title.to_string(),
+                branch: None,
+                agent: None,
+                title_suffix: None,
+                captain_proposal: None,
+            };
+            self.begin_task_creation(
+                &repository_key,
+                title,
+                &project::TaskStart::default(),
+                task,
+                stage,
+            );
+        }
+        cx.notify();
+    }
+
     /// 選んでいるリポジトリの作成中の行（Task 行の前に出す）。
     pub(super) fn render_task_creations(
         &self,
