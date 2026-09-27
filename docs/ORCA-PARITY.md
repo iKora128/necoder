@@ -362,6 +362,8 @@ Task タブ行（変更・ターミナルが会話と同じ行に横並び）に
     `Agent::resolve_command_on` の 1 本（ARCHITECTURE §7.1）
   - 設定の null: captain 側の「null はキーごと外す」を parity 側の `persist_user_values` に入れた（Captain の解任・表示言語の「OS に合わせる」）
   - `clear_thread_session`: 両方が同じ名前で足していた。parity 側（前の会話を `thread_past_sessions` に退かせる）を採り、Captain の会話の交代も同じ関数
+  - 統合先の選び方: ブリッジ（⚑ タブ・任命の面・既定の編隊図）と編隊図の入口、Captain の住まい、分解案のカードと数を、O21 の
+    `integration_slot_for`（メインの作業ツリー）に揃えた
 - **落とした物**: 旧 workbench（`workbench.rs` の release の dead_code の cfg と、そこに入っていたピンの復元は上のとおり移した）、`work.*` の i18n キー、
   captain 側の `create_task_in`（parity 側の作成の流れに置き換えた）。parity の機能で載せ直せなかった物は無い。
 - **見つけて直した物**: captain 側の Captain のテスト 2 本が、失敗したターンの後の ✳ 要約（一発生成）で本物の `claude -p` を起こしていた
