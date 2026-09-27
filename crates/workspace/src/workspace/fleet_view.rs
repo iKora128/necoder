@@ -2531,9 +2531,7 @@ impl Workspace {
         let body = session_index
             .map(|session_index| {
                 let appointing = self.chrome.captain_appointing
-                    && self.project_sessions.projects[session_index]
-                        .task_space
-                        .is_integration()
+                    && self.is_bridge(session_index)
                     && settings::get(cx).captain_agent.is_none();
                 let conversation = if appointing {
                     self.render_captain_appoint(cx)

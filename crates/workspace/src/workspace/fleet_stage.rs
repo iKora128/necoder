@@ -88,7 +88,7 @@ impl Workspace {
             Some(pane) => (!matches!(pane, FleetPane::Agent { .. } | FleetPane::Task { .. })).then(|| pane.clone()),
             // ブリッジ（統合先のカード）は、まだ何も選んでいなければ編隊図を開いておく — Fleet の家に入ったら編隊が見える。
             None => self.session_index_for_space(space)
-                .filter(|index| self.project_sessions.projects[*index].task_space.is_integration())
+                .filter(|index| self.is_bridge(*index))
                 .map(|_| FleetPane::Formation { space: space.clone() }),
         }
     }
@@ -96,7 +96,7 @@ impl Workspace {
     /// ブリッジの編隊図を開く / 閉じる（系譜ヘッダの ⚑ 編隊・⌘⇧G）。ブリッジに居なければまずそこへ行く。
     pub(crate) fn toggle_formation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.fleet_repository_key() else { return; };
-        let Some(index) = self.project_sessions.projects.iter().position(|slot| slot.repository_key() == key && slot.task_space.is_integration()) else { return; };
+        let Some(index) = self.integration_slot_for(&key) else { return; };
         let space = self.project_sessions.projects[index].task_space.id.clone();
         let on_bridge = self.project_sessions.active == index;
         let open = matches!(self.stage_side(&space), Some(FleetPane::Formation { .. }));
@@ -107,6 +107,14 @@ impl Workspace {
         self.seed_fleet_cells(cx);
         self.switch_project(index, window, cx);
         self.set_stage_side(index, Some(FleetPane::Formation { space }), cx);
+    }
+
+    /// ブリッジ（Captain の住む統合先のカード）か。統合先扱いの slot が同じリポジトリに複数あっても、メインの
+    /// 作業ツリーの 1 枚だけ（サイドバー・＋ Task・Captain と同じ `integration_slot_for`・O21）。
+    pub(super) fn is_bridge(&self, session_index: usize) -> bool {
+        self.project_sessions.projects.get(session_index).is_some_and(|slot| {
+            self.integration_slot_for(slot.repository_key()) == Some(session_index)
+        })
     }
 
     /// カードの会話ペインに出す panel。サイドペインを開いても操作先（`agent_panel`）のまま動かさない。
@@ -216,7 +224,7 @@ impl Workspace {
         let thread_total: usize = session.fleet_agents.iter().map(|panel| panel.read(cx).statuses().len()).sum();
         // ブリッジ（統合先）: Captain は「main に住むスレッド」なので、スレッドタブの先頭に ⚑ で座らせる。
         // 未任命なら同じ位置が任命の入口になる（押すと会話ペインに任命の面が出る）。
-        let bridge = self.project_sessions.projects[session_index].task_space.is_integration();
+        let bridge = self.is_bridge(session_index);
         let captain_agent = settings::get(cx).captain_agent.clone();
         let appointing = bridge && self.chrome.captain_appointing && captain_agent.is_none();
         if bridge {
