@@ -118,14 +118,6 @@ pub fn runtime_socket() -> Option<PathBuf> {
     runtime_socket_on(Platform::current(), &real_var)
 }
 
-/// ユーザーの**書類フォルダ**（Chat モードの成果物の親・`docs/CHAT.md` §2.2）。
-///
-/// - macOS: `~/Documents`（Finder の表示名が「書類」。実パスは英語のまま）
-/// - Linux: `user-dirs.dirs` の `XDG_DOCUMENTS_DIR`（日本語環境では `~/ドキュメント`）。無ければ `~/Documents`
-/// - Windows: **呼び手が Known Folder（`FOLDERID_Documents`）を引いて渡す**。OneDrive のバックアップが
-///   on だと実体は `OneDrive\ドキュメント` へリダイレクトされていて、`%USERPROFILE%\Documents` の
-///   決め打ちは外れる。この crate は依存ゼロなので Win32 を呼べない — 渡されなかった時だけ決め打ちに倒す
-///
 /// 検証用の「necoder Dev.app」（`scripts/bundle-mac.sh release dev`・Info.plist の LSEnvironment が
 /// `NECODER_DEV_BUNDLE` を付ける）として動いているか。Dev 版は状態を `NECODER_HOME` に分けて常用の
 /// necoder と並べて動かすので、常用と共有している物には触れない: 自分自身のアップデート（実行中の
@@ -135,6 +127,14 @@ pub fn is_dev_bundle() -> bool {
     real_var("NECODER_DEV_BUNDLE").is_some()
 }
 
+/// ユーザーの**書類フォルダ**（Chat モードの成果物の親・`docs/CHAT.md` §2.2）。
+///
+/// - macOS: `~/Documents`（Finder の表示名が「書類」。実パスは英語のまま）
+/// - Linux: `user-dirs.dirs` の `XDG_DOCUMENTS_DIR`（日本語環境では `~/ドキュメント`）。無ければ `~/Documents`
+/// - Windows: **呼び手が Known Folder（`FOLDERID_Documents`）を引いて渡す**。OneDrive のバックアップが
+///   on だと実体は `OneDrive\ドキュメント` へリダイレクトされていて、`%USERPROFILE%\Documents` の
+///   決め打ちは外れる。この crate は依存ゼロなので Win32 を呼べない — 渡されなかった時だけ決め打ちに倒す
+///
 /// `NECODER_DOCUMENTS_DIR` で差し替え可（テストと隔離実行用）。`NECODER_HOME` には巻き込まない。
 pub fn documents_dir(windows_known_folder: Option<PathBuf>) -> Option<PathBuf> {
     documents_dir_on(
